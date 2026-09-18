@@ -1852,8 +1852,13 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 g->defined = 1;
                 g->used = 1;
                 /* Aggregates arrive pre-flattened in s->inits; a scalar's
-                 * value is a single leaf at offset 0. */
-                struct initelem one;
+                 * value is a single leaf at offset 0. Every field is set:
+                 * lower_static_bytes treats a nonzero bit_width as a
+                 * BITFIELD, so a stale one on the stack wrote a plain
+                 * scalar's value as garbage bits at a garbage offset —
+                 * kernel/net/udp/udp.c's `static uint16_t eph = 49152`
+                 * came out 0, and only whatever the stack held decided. */
+                struct initelem one = { 0, NULL, NULL, 0, 0 };
                 struct initelem *iv = s->inits;
                 int in = s->ninits;
                 if (!in && s->expr) {
