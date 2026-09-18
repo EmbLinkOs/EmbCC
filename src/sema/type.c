@@ -9,7 +9,7 @@
 /* [kind][is_unsigned] — TY_PTR/TY_ARRAY/TY_STRUCT handled separately.
  * Designated initializers so this table survives struct type growing.
  * _Bool is unsigned in both slots (it holds only 0 or 1). */
-static struct type bases[8][2] = {
+static struct type bases[9][2] = {
     { { .kind = TY_VOID }, { .kind = TY_VOID } },
     { { .kind = TY_BOOL, .is_unsigned = 1 },
       { .kind = TY_BOOL, .is_unsigned = 1 } },
@@ -19,6 +19,9 @@ static struct type bases[8][2] = {
     { { .kind = TY_LONG }, { .kind = TY_LONG, .is_unsigned = 1 } },
     { { .kind = TY_FLOAT }, { .kind = TY_FLOAT } },   /* never unsigned */
     { { .kind = TY_DOUBLE }, { .kind = TY_DOUBLE } },
+    /* long double: x87 80-bit extended in 16 bytes (x86-64), IEEE binary128
+     * (aarch64) — 16 bytes, 16-aligned, on both */
+    { { .kind = TY_LDOUBLE }, { .kind = TY_LDOUBLE } },
 };
 
 struct type *ty_plain_char(void)
@@ -199,6 +202,7 @@ int ty_size(const struct type *t)
     case TY_LONG: return 8;
     case TY_FLOAT: return 4;
     case TY_DOUBLE: return 8;
+    case TY_LDOUBLE: return 16;
     case TY_PTR: return 8;
     case TY_ARRAY: return t->count * ty_size(t->pointee);
     case TY_STRUCT: return t->size; /* 0 while incomplete */
@@ -253,7 +257,8 @@ int ty_is_integer(const struct type *t)
 
 int ty_is_float(const struct type *t)
 {
-    return t->kind == TY_FLOAT || t->kind == TY_DOUBLE;
+    return t->kind == TY_FLOAT || t->kind == TY_DOUBLE ||
+           t->kind == TY_LDOUBLE;
 }
 
 int ty_is_arith(const struct type *t)
@@ -317,8 +322,38 @@ static void classify_fields(const struct type *t, int off,
                 ty_is_float(t) ? CLASS_SSE : CLASS_INTEGER);
 }
 
+/* Does t contain a long double anywhere? */
+static int has_ldouble(const struct type *t)
+{
+    if (t->kind == TY_LDOUBLE) return 1;
+    if (t->kind == TY_ARRAY) return has_ldouble(t->pointee);
+    if (t->kind == TY_STRUCT)
+        for (int i = 0; i < t->nmembers; i++)
+            if (has_ldouble(t->members[i].ty)) return 1;
+    return 0;
+}
+
+static int only_ldouble(const struct type *t)
+{
+    if (t->kind == TY_LDOUBLE) return 1;
+    if (t->kind == TY_ARRAY) return t->count > 0 && only_ldouble(t->pointee);
+    if (t->kind != TY_STRUCT || t->nmembers == 0) return 0;
+    for (int i = 0; i < t->nmembers; i++)
+        if (!only_ldouble(t->members[i].ty)) return 0;
+    return 1;
+}
+
+int ty_x87_struct(const struct type *t)
+{
+    return t->kind == TY_STRUCT && ty_size(t) == 16 && only_ldouble(t);
+}
+
 int ty_classify(const struct type *t, enum arg_class *classes)
 {
+    /* long double is X87 class; as an argument that means MEMORY, and a
+     * struct holding one is MEMORY too (SysV 3.2.3). */
+    if (has_ldouble(t))
+        return 0;
     if (t->kind != TY_STRUCT) {
         classes[0] = ty_is_float(t) ? CLASS_SSE : CLASS_INTEGER;
         return 1;
@@ -372,6 +407,7 @@ const char *ty_name(const struct type *t)
     case TY_LONG: base = t->is_unsigned ? "unsigned long" : "long"; break;
     case TY_FLOAT: base = "float"; break;
     case TY_DOUBLE: base = "double"; break;
+    case TY_LDOUBLE: base = "long double"; break;
     case TY_STRUCT:
         snprintf(structbuf, sizeof structbuf, "%s %s",
                  t->is_union ? "union" : "struct",

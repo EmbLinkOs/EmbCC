@@ -12,6 +12,7 @@
 #include "../asm/asm_arm64.h"
 #include "../driver/util.h"
 #include "../target/target.h"
+#include "ldfloat.h"
 #include "type.h"
 
 struct vardef {
@@ -152,8 +153,10 @@ static struct type *default_arg_promote(struct type *t)
  * long's signedness. */
 static struct type *arith_common(struct type *a, struct type *b)
 {
-    /* Floating types outrank every integer, and double outranks float
-     * — the usual arithmetic conversions, floating half first. */
+    /* Floating types outrank every integer, and long double > double >
+     * float — the usual arithmetic conversions, floating half first. */
+    if (a->kind == TY_LDOUBLE || b->kind == TY_LDOUBLE)
+        return ty_base(TY_LDOUBLE, 0);
     if (a->kind == TY_DOUBLE || b->kind == TY_DOUBLE)
         return ty_base(TY_DOUBLE, 0);
     if (a->kind == TY_FLOAT || b->kind == TY_FLOAT)
@@ -1050,12 +1053,19 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             int is_inff = strcmp(bn, "inff") == 0 || strcmp(bn, "huge_valf") == 0;
             int is_nan = strcmp(bn, "nan") == 0;
             int is_nanf = strcmp(bn, "nanf") == 0;
-            if (is_inf || is_inff || is_nan || is_nanf) {
+            int is_infl = strcmp(bn, "infl") == 0 || strcmp(bn, "huge_vall") == 0;
+            int is_nanl = strcmp(bn, "nanl") == 0;
+            if (is_inf || is_inff || is_nan || is_nanf || is_infl || is_nanl) {
                 for (int i = 0; i < e->nargs; i++)
                     check_expr(u, f, sc, e->args[i]);
                 e->kind = EXPR_FNUM;
-                e->fnum = (is_nan || is_nanf) ? ieee_nan() : ieee_inf();
+                e->fnum = (is_nan || is_nanf || is_nanl) ? ieee_nan()
+                                                         : ieee_inf();
                 e->ty = ty_base((is_inff || is_nanf) ? TY_FLOAT : TY_DOUBLE, 0);
+                if (is_infl || is_nanl) {
+                    e->ty = ty_base(TY_LDOUBLE, 0);
+                    e->ldv = ldf_from_double(e->fnum);   /* inf/nan exactly */
+                }
                 break;
             }
             /* __builtin_return_address(N) / __builtin_frame_address(N): the
@@ -1282,9 +1292,27 @@ static int const_fold(const struct expr *e, long *out)
  * float/double storage (`double g = 1.0/3.0;`). Integer leaves promote to
  * double; a cast to an integer type truncates (C semantics), a cast to float
  * rounds to single precision. Returns 0 (not constant) if it can't reduce. */
+static struct ldf *const_fold_ld(const struct expr *e);
+
 static int const_fold_f(const struct expr *e, double *out)
 {
     double a, b; long iv;
+    /* a long double subexpression folds exactly, then narrows ONCE (going
+     * through a host double first would round twice) */
+    if (e->ty && e->ty->kind == TY_LDOUBLE) {
+        struct ldf *x = const_fold_ld(e);
+        if (!x) return 0;
+        *out = ldf_to_double(x);
+        return 1;
+    }
+    if (e->kind == EXPR_CAST && ty_is_float(e->ty) && e->rhs->ty &&
+        e->rhs->ty->kind == TY_LDOUBLE) {
+        struct ldf *x = const_fold_ld(e->rhs);
+        if (!x) return 0;
+        *out = ldf_to_double(ldf_round(x, e->ty->kind == TY_FLOAT ? LDF_FLOAT
+                                                                  : LDF_DOUBLE));
+        return 1;
+    }
     switch (e->kind) {
     case EXPR_FNUM:
         *out = e->fnum;
@@ -1319,6 +1347,51 @@ static int const_fold_f(const struct expr *e, double *out)
         }
     default:
         return 0;
+    }
+}
+
+/* Fold a constant expression of type long double exactly, in the target's
+ * format (sema/ldfloat.h): each operation rounds as the target's would, and
+ * a double or float operand widens exactly from ITS OWN folded value.
+ * NULL if it is not constant. */
+static struct ldf *const_fold_ld(const struct expr *e)
+{
+    enum ldf_fmt fmt = ldf_target_fmt();
+    struct ldf *a, *b;
+    double d;
+    long iv;
+    switch (e->kind) {
+    case EXPR_FNUM:
+        if (e->ldv) return e->ldv;
+        return ldf_from_double(e->ty && e->ty->kind == TY_FLOAT
+                                   ? (double)(float)e->fnum : e->fnum);
+    case EXPR_NUM:
+        return ldf_round(ldf_from_int(e->num, e->ty && e->ty->is_unsigned), fmt);
+    case EXPR_CAST: {
+        const struct type *from = e->rhs->ty;
+        if (from && from->kind == TY_LDOUBLE)
+            return const_fold_ld(e->rhs);
+        if (from && ty_is_float(from)) {
+            if (!const_fold_f(e->rhs, &d)) return NULL;
+            if (from->kind == TY_FLOAT) d = (double)(float)d;
+            return ldf_from_double(d);
+        }
+        if (!const_fold(e->rhs, &iv)) return NULL;
+        return ldf_round(ldf_from_int(iv, from && from->is_unsigned), fmt);
+    }
+    case EXPR_NEG:
+        a = const_fold_ld(e->rhs);
+        return a ? ldf_neg(a) : NULL;
+    case EXPR_BINOP:
+        if (e->op != B_ADD && e->op != B_SUB && e->op != B_MUL && e->op != B_DIV)
+            return NULL;
+        a = const_fold_ld(e->lhs);
+        b = a ? const_fold_ld(e->rhs) : NULL;
+        if (!b) return NULL;
+        return ldf_binop(e->op == B_ADD ? '+' : e->op == B_SUB ? '-'
+                         : e->op == B_MUL ? '*' : '/', a, b, fmt);
+    default:
+        return NULL;
     }
 }
 
@@ -1597,6 +1670,18 @@ static void lower_static_bytes(struct unit *u, int line, int size,
             continue;
         }
         int sz = ty_size(v[k].ty);
+        /* A long double slot: its exact value in the target's format */
+        if (v[k].ty->kind == TY_LDOUBLE) {
+            struct ldf *x = const_fold_ld(v[k].e);
+            if (!x)
+                diag_fatal(u->file, line,
+                           "a static long double initializer must be a "
+                           "constant expression");
+            unsigned char lb[16];
+            ldf_encode(x, ldf_target_fmt(), lb);
+            memcpy(bytes + v[k].off, lb, 16);
+            continue;
+        }
         /* A float/double slot: fold to the value, store its IEEE-754 bit
          * pattern (4 bytes for float, 8 for double), little-endian. */
         if (ty_is_float(v[k].ty)) {

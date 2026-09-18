@@ -90,7 +90,8 @@ if [ "$TARGET" = aarch64-elf ]; then
               tests/golden/optimizer.sh tests/golden/regalloc-O2.sh
               tests/golden/include-next.sh tests/golden/sysv-abi.sh
               tests/golden/cross-varargs.sh tests/golden/debug-line.sh
-              tests/golden/debug-locals.sh tests/golden/debug-live.sh"
+              tests/golden/debug-locals.sh tests/golden/debug-live.sh
+              tests/golden/ldouble-abi.sh"
 else
     sh_tests="tests/exec/*.sh tests/compile/*.sh tests/golden/*.sh"
 fi

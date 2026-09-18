@@ -8,6 +8,12 @@
 /* Calls to functions with no definition in this unit cannot be
  * resolved here — each becomes a relocation the driver hands to the
  * ELF writer (R_X86_64_PLT32 against the callee's UNDEF symbol). */
+/* long double: which vregs hold a 16-byte value (a long double local, the
+ * result of any op with w == 16, a MOV of one) — NULL if none. Both
+ * backends give those a 16-byte slot and never a register. */
+struct ir_func;
+char *cg_wide_vregs(struct ir_func *fn);
+
 struct extcall {
     int patch_off;        /* offset of the rel32 field in .text */
     struct func *callee;  /* canonical, !has_defn */

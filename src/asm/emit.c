@@ -86,6 +86,24 @@ static void rex_rb(struct code *c, int w64, int reg, int base)
         code_byte(c, rex);
 }
 
+/* An x87 memory instruction: `opcode /ext` against [base+disp] — fld/fstp
+ * of a tword (DB /5, /7), qword (DD /0, /3) or dword (D9 /0, /3), fild
+ * qword (DF /5), fistp qword (DF /7), fnstcw/fldcw (D9 /7, /5). */
+void x86_x87_mem(struct code *c, int opcode, int ext, int base, int disp)
+{
+    rex_rb(c, 0, 0, base);
+    code_byte(c, opcode);
+    modrm_base(c, ext, base, disp);
+}
+
+/* A two-byte instruction with no operand encoding to do (faddp st1,
+ * fchs, fucomip, ...). */
+void x86_op2(struct code *c, int b1, int b2)
+{
+    code_byte(c, b1);
+    code_byte(c, b2);
+}
+
 void x86_load_reg_mem(struct code *c, int dst, int base, int disp,
                       int size)
 {

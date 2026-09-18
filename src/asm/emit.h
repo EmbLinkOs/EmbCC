@@ -106,6 +106,8 @@ void x86_mov_al_imm(struct code *c, int v); /* varargs: xmm count in al */
 #define REG_RBP 5
 #define REG_RSI 6
 #define REG_RDI 7
+void x86_x87_mem(struct code *c, int opcode, int ext, int base, int disp);
+void x86_op2(struct code *c, int b1, int b2);
 void x86_load_reg_mem(struct code *c, int dst, int base, int disp, int size);
 void x86_store_mem_reg(struct code *c, int base, int disp, int src, int size);
 void x86_movs_load_base(struct code *c, int xmm, int base, int disp, int w);

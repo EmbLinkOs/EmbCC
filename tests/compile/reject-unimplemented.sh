@@ -340,3 +340,8 @@ check vla-static \
 check vla-initialized \
     'int f(int n) { int a[n] = { 1 }; return a[0]; }' \
     "variable length array 'a' cannot be initialized"
+# x86-64 returns a struct that is exactly one long double in st0 (X87 class)
+check x87-struct-return \
+    'struct one { long double v; };
+struct one mk(long double v) { struct one r = { v }; return r; }' \
+    "a lone long double, which x86-64 returns in st0"

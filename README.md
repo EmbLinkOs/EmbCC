@@ -189,10 +189,11 @@ oversight.
 
 ## What's next
 
-- **The C language gaps both targets share:** `_Complex` (refused), and
-  `long double` (80-bit on x86-64, 128-bit IEEE quad on aarch64), which today
-  is quietly compiled as `double` — an ABI mismatch with gcc-built code, not a
-  refusal. Variable-length arrays are done on both targets.
+- **The last C language gap both targets share:** `_Complex` (refused).
+  Variable-length arrays and `long double` are done on both targets —
+  `long double` as x87 80-bit extended on x86-64 and IEEE binary128 on
+  aarch64 (through libgcc, as gcc does), agreeing with gcc across the call
+  boundary and bit for bit in constants.
 - **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
   the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1
   program to exit 42. The manifest and a host reference walker already exist;

@@ -456,6 +456,8 @@ static void fldst(struct code *c, int vt, int rn, long off, int w, int load)
 {
     unsigned long sz = (w == 8) ? 3UL : 2UL;
     unsigned long base = 0x3D000000UL | (sz << 30) | (load ? 0x400000UL : 0);
+    if (w == 16)       /* q: size 00 with opc<1> set (a long double) */
+        base = load ? 0x3DC00000UL : 0x3D800000UL;
     if (off >= 0 && off % w == 0 && off / w <= 0xfff) {
         a64_word(c, base | ((unsigned long)(off / w) << 10) |
                     ((unsigned long)rn << 5) | (unsigned long)vt);

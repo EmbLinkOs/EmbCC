@@ -7,6 +7,7 @@
 
 #include "../asm/asm_arm64.h"
 #include "../driver/util.h"
+#include "../sema/ldfloat.h"
 #include "../sema/sema.h"
 #include "../sema/type.h"
 #include "../target/target.h"
@@ -46,7 +47,14 @@ static struct ir_ins *emit(struct ir_func *fn)
 static int new_temp(struct ir_func *fn) { return fn->nvregs++; }
 static int new_label(struct ir_func *fn) { return fn->nlabels++; }
 
-static int ty_w(const struct type *t) { return ty_wide(t) ? 8 : 4; }
+/* A value's width class: 4 or 8, and 16 for a long double — the only value
+ * wider than a register. Its temps get 16-byte slots, and every op that
+ * produces one says w = 16 (codegen sizes the slot from that). */
+static int ty_w(const struct type *t)
+{
+    if (t->kind == TY_LDOUBLE) return 16;
+    return ty_wide(t) ? 8 : 4;
+}
 
 static void emit_label(struct ir_func *fn, int label)
 {
@@ -106,8 +114,12 @@ static void emit_brnz(struct ir_func *fn, int v, int w, int label)
 /* A floating constant is just its BIT PATTERN moved into the slot: a
  * float temp's slot holds raw bits, so no xmm and no constant pool are
  * involved. Same reason loads and stores need no float path. */
+static int emit_ldconst(struct ir_func *fn, const struct ldf *v);
+
 static int emit_fconst(struct ir_func *fn, double d, int w)
 {
+    if (w == 16)                 /* long double: exact from the double */
+        return emit_ldconst(fn, ldf_from_double(d));
     long bits = 0;
     if (w == 8) {
         double v = d;
@@ -402,6 +414,18 @@ static int gen_va_arg(struct ir_func *fn, struct expr *e)
     int a_ova = emit_bin(fn, IR_ADD, ap, emit_const(fn, 8, 8), 8, 1);
     int a_rsa = emit_bin(fn, IR_ADD, ap, emit_const(fn, 16, 8), 8, 1);
 
+    /* long double is X87 class, which SysV passes in memory — always the
+     * overflow area, at a 16-aligned slot of 16 bytes. */
+    if (rt->kind == TY_LDOUBLE) {
+        int ova = emit_load(fn, a_ova, ptr);
+        int al = emit_bin(fn, IR_AND,
+                          emit_bin(fn, IR_ADD, ova, emit_const(fn, 15, 8), 8, 1),
+                          emit_const(fn, -16, 8), 8, 1);
+        emit_store(fn, a_ova,
+                   emit_bin(fn, IR_ADD, al, emit_const(fn, 16, 8), 8, 1), ptr);
+        return emit_load(fn, al, rt);
+    }
+
     /* SSE class (float/double): the SysV register save area lays the eight xmm
      * regs AFTER the six GP regs, so fp_offset (at ap+4) runs 48..176 in strides
      * of 16 (each xmm slot is 16 bytes, of which we read the low 8 = a double).
@@ -496,11 +520,20 @@ static int gen_va_arg_aapcs(struct ir_func *fn, struct expr *e)
 
     emit_label(fn, l_stack);
     int stk = emit_load(fn, ap, ptr);
+    int ssz = 8;
+    if (rt->kind == TY_LDOUBLE) {   /* a 16-aligned, 16-byte stack slot */
+        stk = emit_bin(fn, IR_AND,
+                       emit_bin(fn, IR_ADD, stk, emit_const(fn, 15, 8), 8, 1),
+                       emit_const(fn, -16, 8), 8, 1);
+        ssz = 16;
+    }
     emit_mov(fn, addr, stk);
-    emit_store(fn, ap, emit_bin(fn, IR_ADD, stk, emit_const(fn, 8, 8), 8, 1),
+    emit_store(fn, ap, emit_bin(fn, IR_ADD, stk, emit_const(fn, ssz, 8), 8, 1),
                ptr);
     emit_label(fn, l_done);
 
+    if (rt->kind == TY_LDOUBLE)     /* a whole v register's slot */
+        return emit_load(fn, addr, rt);
     if (flt) {
         int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));
         if (rt->kind == TY_FLOAT) {
@@ -614,6 +647,20 @@ static int intern_str(const char *bytes, int len)
     return ir_intern_string(cur_unit, bytes, len);
 }
 
+/* A long double constant: 16 bytes in the target's format (x87 extended or
+ * binary128), too wide for IR_CONST's 64-bit immediate — so it lives in
+ * .rodata like a string and is loaded from there. */
+static int emit_ldconst(struct ir_func *fn, const struct ldf *v)
+{
+    char *b = xmalloc(16);
+    ldf_encode(v, ldf_target_fmt(), (unsigned char *)b);
+    struct ir_ins *i = emit(fn);
+    i->op = IR_STRADDR;
+    i->label = intern_str(b, 16);
+    i->dst = new_temp(fn);
+    return emit_load(fn, i->dst, ty_base(TY_LDOUBLE, 0));
+}
+
 /* !x and conditions want "is zero" — comparison against a zero of the
  * operand's width. */
 static int emit_isz(struct ir_func *fn, int v, int w)
@@ -692,12 +739,15 @@ static int emit_f2i(struct ir_func *fn, int a, int srcw, int dstw)
  * avoids a double rounding. */
 static int gen_u64_to_float(struct ir_func *fn, int v, int tsize)
 {
+    /* In long double the halves and the sum are all exact (64-bit or wider
+     * significand), so compute there directly. */
+    int cw = tsize == 16 ? 16 : 8;
     int hi = emit_bin(fn, IR_SHR, v, emit_const(fn, 32, 4), 8, 0);      /* v >> 32 */
     int lo = emit_bin(fn, IR_AND, v, emit_const(fn, 0xffffffffL, 8), 8, 1);
-    int hd = emit_i2f(fn, hi, 8, 8);
-    int ld = emit_i2f(fn, lo, 8, 8);
-    int hs = emit_fbin(fn, IR_MUL, hd, emit_fconst(fn, 4294967296.0, 8), 8);
-    int res = emit_fbin(fn, IR_ADD, hs, ld, 8);
+    int hd = emit_i2f(fn, hi, 8, cw);
+    int ld = emit_i2f(fn, lo, 8, cw);
+    int hs = emit_fbin(fn, IR_MUL, hd, emit_fconst(fn, 4294967296.0, cw), cw);
+    int res = emit_fbin(fn, IR_ADD, hs, ld, cw);
     if (tsize == 4) {   /* narrow the exact double to float: one rounding */
         struct ir_ins *nf = emit(fn);
         nf->op = IR_F2F; nf->a = res; nf->size = 8; nf->w = 4;
@@ -1135,6 +1185,8 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
     case EXPR_NUM:
         return emit_const(fn, e->num, ty_w(e->ty));
     case EXPR_FNUM:
+        if (e->ty->kind == TY_LDOUBLE)
+            return emit_ldconst(fn, e->ldv ? e->ldv : ldf_from_double(e->fnum));
         return emit_fconst(fn, e->fnum, ty_size(e->ty));
     case EXPR_LABELADDR: {   /* &&label -> a void* to the label's code location */
         struct ir_ins *i = emit(fn);
@@ -1262,6 +1314,17 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
     case EXPR_NEG:
     case EXPR_BNOT: {
         int v = gen_expr(fn, e->rhs);
+        if (e->kind == EXPR_NEG && e->ty->kind == TY_LDOUBLE) {
+            /* the sign bit of a 16-byte value: a float IR_NEG (fchs, or
+             * flipping bit 127) — exact for -0.0 and NaN like the XOR below */
+            struct ir_ins *i = emit(fn);
+            i->op = IR_NEG;
+            i->a = v;
+            i->w = 16;
+            i->flt = 1;
+            i->dst = new_temp(fn);
+            return i->dst;
+        }
         if (e->kind == EXPR_NEG && ty_is_float(e->ty)) {
             /* -x on a float flips the sign BIT: exact for -0.0 and for
              * NaN, which 0.0-x is not, and it needs no new instruction
@@ -1677,7 +1740,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             }
             if (ar->nclass == 0 || ireg + ni > 6 || freg + nf > 8) {
                 ar->on_stack = 1;
-                stk = (stk + 7) & ~7;
+                /* a slot is aligned to the argument's own alignment, at
+                 * least 8 — 16 for a long double (SysV 3.2.3) */
+                stk = ty_align(at) > 8 ? (stk + 15) & ~15 : (stk + 7) & ~7;
                 ar->stk_off = stk;
                 stk += (ar->size + 7) & ~7;
             } else {
@@ -1688,6 +1753,12 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         if (stk > fn->outgoing_bytes)
             fn->outgoing_bytes = stk;
 
+        if (e->ty->kind == TY_STRUCT && target_get() != TARGET_AARCH64 &&
+            ty_x87_struct(e->ty))
+            diag_fatal(fn->src->file, e->line,
+                       "returning %s (a lone long double, which x86-64 "
+                       "returns in st0) is not supported yet",
+                       ty_name(e->ty));
         if (e->ty->kind == TY_STRUCT) {
             i->retsize = ty_size(e->ty);
             i->rety = e->ty;
@@ -3238,6 +3309,11 @@ static void gen_func(struct ir_func *fn, struct func *f)
     }
     g_nlabels_used = 0;                 /* labels are per-function */
     g_nvla = 0;
+    if (f->ret_ty->kind == TY_STRUCT && target_get() != TARGET_AARCH64 &&
+        ty_x87_struct(f->ret_ty))
+        diag_fatal(f->file, f->line,
+                   "returning %s (a lone long double, which x86-64 returns "
+                   "in st0) is not supported yet", ty_name(f->ret_ty));
     if (f->has_vm_params)               /* `int a[n][m]`: its row size */
         for (int i = 0; i < f->nparams; i++)
             vla_eval(fn, f->param_tys[i]);

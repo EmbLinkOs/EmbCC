@@ -5,6 +5,7 @@
 
 #include "../driver/util.h"
 #include "../lex/lex.h"
+#include "../sema/ldfloat.h"
 #include "../sema/type.h"
 
 /* Tags (struct/union/enum) live in their own namespace; typedef names
@@ -593,8 +594,11 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             (nfloat && ndouble))
             diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                        "invalid type specifier combination");
-        /* 'long double' is accepted AS double — there is no 80-bit
-         * type here, and saying so beats pretending. */
+        if (nlong > 1 || (nlong && nfloat))
+            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                       "invalid type specifier combination");
+        if (nlong)
+            return ty_base(TY_LDOUBLE, 0);
         return ty_base(nfloat ? TY_FLOAT : TY_DOUBLE, 0);
     }
     if (nvoid) {
@@ -1093,6 +1097,13 @@ static struct expr *parse_primary(struct parser *ps)
         e = new_expr(EXPR_FNUM, t->line, t->col);
         e->fnum = t->fnum;
         e->ty = ty_base(t->fnum_is_float ? TY_FLOAT : TY_DOUBLE, 0);
+        if (t->fnum_is_ld) {
+            e->ty = ty_base(TY_LDOUBLE, 0);
+            e->ldv = ldf_from_text(t->text, ldf_target_fmt());
+            if (!e->ldv)
+                diag_fatal(ps->lx.file, t->line,
+                           "malformed floating constant '%sL'", t->text);
+        }
         advance(ps);
         return e;
     case TOK_STR: {

@@ -222,6 +222,78 @@ static const int LEAF_POOL[NLEAF] = { 8, 9, 10, 11, 3 /*rbx*/, 12, 13, 14, 15 };
 
 /* Does a register need callee-save preservation (rbx, r12..r15)? r8..r11 are
  * caller-saved — free to clobber, so no prologue slot. */
+/* ---- long double: 16-byte values and the x87 unit ----
+ *
+ * A long double is x87 80-bit extended, stored in 16 bytes. Its temps are
+ * the only values wider than a register: each gets a 16-byte slot of its
+ * own (never the 8-byte coalesced pool, never a register), is moved as two
+ * eightbytes, and is computed on the x87 stack — loaded, operated on, and
+ * stored straight back, so the stack is empty between IR instructions and
+ * at every call. g_wide marks the vregs that hold one: a long double local,
+ * the dst of any op that produces one (w == 16), and a MOV of such a value
+ * (to a fixpoint, since a ?: joins through MOVs). */
+static char *g_wide;
+
+static int wide_def(const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_LOAD: case IR_LDVAR:
+        return i->size == 16;
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_NEG:
+    case IR_CALL:
+        return i->flt && i->w == 16;
+    case IR_I2F: case IR_F2F:
+        return i->w == 16;
+    default:
+        return 0;
+    }
+}
+
+char *cg_wide_vregs(struct ir_func *fn)
+{
+    int nv = fn->nvregs ? fn->nvregs : 1;
+    char *w = xcalloc((size_t)nv, 1);
+    int any = 0;
+    for (int v = 0; v < fn->src->nvars; v++)
+        if (fn->src->var_tys[v] && fn->src->var_tys[v]->kind == TY_LDOUBLE)
+            w[v] = any = 1;
+    for (int n = 0; n < fn->nins; n++)
+        if (wide_def(&fn->ins[n]) && fn->ins[n].dst >= 0)
+            w[fn->ins[n].dst] = any = 1;
+    for (int changed = any; changed; ) {
+        changed = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_MOV && i->a >= 0 && w[i->a] && !w[i->dst])
+                w[i->dst] = changed = 1;
+        }
+    }
+    if (!any) { free(w); return NULL; }
+    return w;
+}
+
+/* Is this instruction a 16-byte (long double) one, lowered by gen_x87? */
+static int x87_ins(const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_LOAD: case IR_LDVAR: case IR_STORE: case IR_STVAR:
+        return i->size == 16;
+    case IR_MOV:
+        return g_wide && i->a >= 0 && g_wide[i->a];
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_NEG:
+    case IR_CMP:
+        return i->flt && i->w == 16;
+    case IR_I2F:
+        return i->w == 16;
+    case IR_F2I:
+        return i->size == 16;
+    case IR_F2F:
+        return i->size == 16 || i->w == 16;
+    default:
+        return 0;
+    }
+}
+
 static int is_callee_saved(int reg)
 {
     return reg == 3 || (reg >= 12 && reg <= 15);
@@ -454,6 +526,11 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
                       (sz == 1 || sz == 2 || sz == 4 || sz == 8);
         }
     }
+
+    /* a long double lives in its 16-byte slot, never a register */
+    for (int v = 0; v < nvr; v++)
+        if (g_wide && g_wide[v])
+            elig[v] = 0;
 
     for (int i = 0; i < nins; i++) {
         struct ir_ins *in = &fn->ins[i];
@@ -890,6 +967,12 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         disp[t] = -(temp_base + (tslot[t - f->nvars] + 1) * 8);
     running = temp_base + npool * 8;
     free(tslot);
+    /* a long double temp: its own 16-aligned 16-byte slot, outside the pool */
+    for (int t = f->nvars; t < fn->nvregs; t++)
+        if (g_wide && g_wide[t]) {
+            running = (running + 16 + 15) & ~15;
+            disp[t] = -running;
+        }
     /* struct-return temporaries sit above the outgoing area */
     running += fn->scratch_bytes;
     *scratch_base_out = -running;
@@ -1247,6 +1330,123 @@ static void emit_reg_parallel_move(struct code *text, int *dest, int *src,
     }
 }
 
+/* Copy 16 bytes [sbase+soff] -> [dbase+doff] through rax (neither base may
+ * be rax). */
+static void copy16(struct code *text, int dbase, int doff, int sbase, int soff)
+{
+    for (int q = 0; q < 16; q += 8) {
+        x86_load_reg_mem(text, REG_RAX, sbase, soff + q, 8);
+        x86_store_mem_reg(text, dbase, doff + q, REG_RAX, 8);
+    }
+}
+
+/* The address held by vreg v, in a register other than rax: its own if
+ * register-resident, else loaded into rcx. */
+static int addr_reg(struct code *text, const int *sd, int v)
+{
+    if (in_reg(v))
+        return g_loc[v];
+    x86_load_slot(text, sd[v], 8, 0, 8);
+    x86_mov_reg_reg(text, REG_RCX, REG_RAX);
+    return REG_RCX;
+}
+
+#define FLD_T(d)  x86_x87_mem(text, 0xDB, 5, REG_RBP, (d))   /* fld tword  */
+#define FSTP_T(d) x86_x87_mem(text, 0xDB, 7, REG_RBP, (d))   /* fstp tword */
+
+/* One long double instruction (x87_ins): every value is in a 16-byte slot;
+ * the x87 stack is used within the instruction and left empty. */
+static void gen_x87(struct code *text, const int *sd, struct ir_ins *i)
+{
+    cg_reset();                           /* rax/rcx are scratch below */
+    switch (i->op) {
+    case IR_LOAD:
+        copy16(text, REG_RBP, sd[i->dst], addr_reg(text, sd, i->a), 0);
+        break;
+    case IR_STORE:
+        copy16(text, addr_reg(text, sd, i->a), 0, REG_RBP, sd[i->b]);
+        break;
+    case IR_LDVAR: case IR_STVAR: case IR_MOV:
+        copy16(text, REG_RBP, sd[i->dst], REG_RBP, sd[i->a]);
+        break;
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+        /* st1 = a, st0 = b; the popping form leaves st1 OP st0 = a OP b */
+        FLD_T(sd[i->a]);
+        FLD_T(sd[i->b]);
+        x86_op2(text, 0xDE, i->op == IR_ADD ? 0xC1 : i->op == IR_SUB ? 0xE9
+                            : i->op == IR_MUL ? 0xC9 : 0xF9);
+        FSTP_T(sd[i->dst]);
+        break;
+    case IR_NEG:
+        FLD_T(sd[i->a]);
+        x86_op2(text, 0xD9, 0xE0);        /* fchs */
+        FSTP_T(sd[i->dst]);
+        break;
+    case IR_CMP: {
+        /* fucomip sets ZF/PF/CF exactly as ucomisd does, so the flag
+         * reading below is the float compare's own: <,<= swap the operands
+         * and test above/above-equal, which also makes NaN false. */
+        int swap = i->pred == B_LT || i->pred == B_LE;
+        FLD_T(sd[swap ? i->a : i->b]);    /* st1 = the right-hand side */
+        FLD_T(sd[swap ? i->b : i->a]);    /* st0 = the left-hand side  */
+        x86_op2(text, 0xDF, 0xE9);        /* fucomip st0, st1 (pops) */
+        x86_op2(text, 0xDD, 0xD8);        /* fstp st0 */
+        if (i->pred == B_EQ || i->pred == B_NE)
+            x86_set_float_eq(text, i->pred == B_NE);
+        else
+            x86_setcc_eax(text, cc_for(i->pred == B_LT ? B_GT :
+                                       i->pred == B_LE ? B_GE : i->pred, 0));
+        cg_store(text, sd, i->dst, 4);
+        break;
+    }
+    case IR_I2F:
+        /* the integer, sign-extended to 64 bits, through a stack slot:
+         * fild takes memory only */
+        cg_load(text, sd, i->a, i->size, 1, 8);
+        cg_reset();
+        x86_alu_reg_imm(text, '-', REG_RSP, 16, 8);
+        x86_store_mem_reg(text, REG_RSP, 0, REG_RAX, 8);
+        x86_x87_mem(text, 0xDF, 5, REG_RSP, 0);        /* fild qword [rsp] */
+        x86_alu_reg_imm(text, '+', REG_RSP, 16, 8);
+        FSTP_T(sd[i->dst]);
+        break;
+    case IR_F2I:
+        /* truncate toward zero: fistp rounds by the control word, so set
+         * its rounding field to chop for the one store (fisttp would need
+         * SSE3, which an x86-64 need not have) */
+        FLD_T(sd[i->a]);
+        x86_alu_reg_imm(text, '-', REG_RSP, 16, 8);
+        x86_x87_mem(text, 0xD9, 7, REG_RSP, 0);        /* fnstcw [rsp] */
+        x86_op2(text, 0x0F, 0xB7);                     /* movzx eax, word [rsp] */
+        x86_op2(text, 0x04, 0x24);
+        x86_alu_reg_imm(text, '|', REG_RAX, 0x0C00, 4);
+        x86_op2(text, 0x66, 0x89);                     /* mov [rsp+2], ax */
+        x86_op2(text, 0x44, 0x24);
+        code_byte(text, 0x02);
+        x86_x87_mem(text, 0xD9, 5, REG_RSP, 2);        /* fldcw [rsp+2] */
+        x86_x87_mem(text, 0xDF, 7, REG_RSP, 8);        /* fistp qword [rsp+8] */
+        x86_x87_mem(text, 0xD9, 5, REG_RSP, 0);        /* fldcw [rsp] */
+        x86_load_reg_mem(text, REG_RAX, REG_RSP, 8, 8);
+        x86_alu_reg_imm(text, '+', REG_RSP, 16, 8);
+        cg_store(text, sd, i->dst, i->w);
+        break;
+    case IR_F2F:
+        if (i->w == 16) {                 /* float/double -> long double */
+            x86_x87_mem(text, i->size == 4 ? 0xD9 : 0xDD, 0, REG_RBP, sd[i->a]);
+            FSTP_T(sd[i->dst]);
+        } else {                          /* long double -> float/double */
+            FLD_T(sd[i->a]);
+            x86_x87_mem(text, i->w == 4 ? 0xD9 : 0xDD, 3, REG_RBP, sd[i->dst]);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+#undef FLD_T
+#undef FSTP_T
+
 static void gen_func(struct ir_func *fn, struct code *text,
                      struct sites *st)
 {
@@ -1271,6 +1471,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * register). Restored at the single exit so other functions are unaffected. */
     int saved_regalloc = g_regalloc, saved_regcache = g_regcache;
     if (g_has_cgoto) { g_regalloc = 0; g_regcache = 0; }
+    g_wide = cg_wide_vregs(fn);
 
     /* -O2: allocate eligible vregs to callee-saved registers first, so the
      * frame can reserve a save slot for each register the allocator uses.
@@ -1363,6 +1564,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
             struct type *pt = f->param_tys[i];
             enum arg_class cls[2];
             int n = ty_classify(pt, cls);
+            if (pt->kind == TY_LDOUBLE) {
+                /* X87 class: always on the caller's stack, 16-aligned */
+                incoming = (incoming + 15) & ~15;
+                for (int q = 0; q < 16; q += 8) {
+                    x86_load_reg_mem(text, REG_RAX, REG_RBP, incoming + q, 8);
+                    x86_store_slot(text, sd[i] + q, 8);
+                }
+                incoming += 16;
+                continue;
+            }
             if (pt->kind != TY_STRUCT) {
                 /* Register file exhausted -> the argument arrived on the
                  * caller's stack at [rbp+incoming] (mirrors the caller's
@@ -1394,6 +1605,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * free at prologue time (params reach their allocated registers
                  * only in the parallel move that runs after this loop). */
                 int sz = ty_size(pt);
+                if (ty_align(pt) > 8)       /* a 16-aligned stack slot */
+                    incoming = (incoming + 15) & ~15;
                 x86_lea_reg_slot(text, 11 /*r11*/, sd[i]);
                 for (int off = 0; off < sz; off += 8) {
                     int chunk = sz - off >= 8 ? 8 : sz - off;
@@ -1485,6 +1698,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * math, an int<->float conversion) has no non-SSE lowering — refuse
          * it rather than emit a #UD. The kernel reaches this never (it has no
          * float math); if a caller does, the diagnostic names why. */
+        /* long double: the x87 unit, which -mno-sse leaves available */
+        if (x87_ins(i)) {
+            gen_x87(text, sd, i);
+            continue;
+        }
         if (g_no_sse && (i->flt || i->op == IR_I2F || i->op == IR_F2I ||
                          i->op == IR_F2F))
             diag_fatal(fn->src->file, i->line,
@@ -1561,7 +1779,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 (i->imm_b ? 1 : in_reg(i->b))) {
                 struct ir_ins *nx = &fn->ins[n + 1];
                 int base = g_loc[i->a], index = i->imm_b ? 0 : g_loc[i->b];
-                if (nx->op == IR_LOAD && nx->a == i->dst) {
+                /* a 16-byte (long double) access is gen_x87's, never fused */
+                if (x87_ins(nx)) {
+                    /* fall through to materialise the address */
+                } else if (nx->op == IR_LOAD && nx->a == i->dst) {
                     if (i->imm_b)
                         x86_load_basedisp_rax(text, base, (int)i->imm,
                                               nx->size, nx->sign, nx->w);
@@ -1571,8 +1792,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     cg_store(text, sd, nx->dst, nx->w);
                     n++;                           /* consume the fused load */
                     break;
-                }
-                if (nx->op == IR_STORE && nx->a == i->dst) {
+                } else if (nx->op == IR_STORE && nx->a == i->dst) {
                     /* value -> rax (rax never aliases base/index), then store
                      * through the folded address. */
                     cg_load(text, sd, nx->b, 8, 0, 8);
@@ -2143,6 +2363,15 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 struct ir_arg *a = &i->argv[k];
                 if (!a->on_stack)
                     continue;
+                if (!a->is_struct && a->size == 16) {
+                    /* long double: its 16 bytes, from its own slot */
+                    for (int q = 0; q < 16; q += 8) {
+                        x86_load_slot(text, sd[a->vreg] + q, 8, 0, 8);
+                        x86_store_mem_reg(text, REG_RSP, a->stk_off + q,
+                                          REG_RAX, 8);
+                    }
+                    continue;
+                }
                 if (!a->is_struct) {
                     /* a scalar that ran out of registers: its slot
                      * already holds the value, extended to 8 bytes (or it is
@@ -2284,7 +2513,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 cg_store(text, sd, i->dst, 8);
                 break;
             }
-            if (i->flt)
+            if (i->flt && i->w == 16)      /* long double comes back in st0 */
+                x86_x87_mem(text, 0xDB, 7, REG_RBP, sd[i->dst]);
+            else if (i->flt)
                 x86_movs_store(text, 0, sd[i->dst], i->w);   /* stays reset */
             else
                 cg_store(text, sd, i->dst, i->w);
@@ -2432,6 +2663,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                                              REG_RCX, q * 8, 8);
                     }
                 }
+            } else if (i->a >= 0 && i->flt && i->w == 16) {
+                x86_x87_mem(text, 0xDB, 5, REG_RBP, sd[i->a]);   /* -> st0 */
             } else if (i->a >= 0 && i->flt) {
                 x86_movs_load(text, 0, sd[i->a], i->w);
             } else if (i->a >= 0) {
@@ -2504,6 +2737,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
     free(loc);
     free(usecnt);
     g_loc = NULL;
+    free(g_wide);
+    g_wide = NULL;
     g_regalloc = saved_regalloc;      /* restore (a cgoto function forced them off) */
     g_regcache = saved_regcache;
 

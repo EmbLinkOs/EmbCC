@@ -12,6 +12,8 @@
 
 #include "../sema/type.h"
 
+struct ldf;   /* sema/ldfloat.h: an exact long double constant */
+
 /* MAX_PARAMS (the declaration/call arity cap) is defined in type.h, which
  * this header includes, so struct type's ptypes[] and the AST arrays here
  * stay the same size. */
@@ -45,6 +47,8 @@ struct expr {
                              * decayed pointer (sizeof needs it) */
     long num;             /* EXPR_NUM; EXPR_STR: byte length incl NUL */
     double fnum;          /* EXPR_FNUM */
+    struct ldf *ldv;      /* EXPR_FNUM of type long double: its exact value
+                           * (sema/ldfloat.h); NULL means (long double)fnum */
     const char *name;     /* EXPR_VAR, EXPR_CALL, EXPR_INCDEC target;
                            * EXPR_STR: the bytes */
     int var_index;        /* EXPR_VAR/EXPR_INCDEC: slot; set by sema */

@@ -24,7 +24,7 @@
 struct expr;
 
 enum ty_kind { TY_VOID, TY_BOOL, TY_CHAR, TY_SHORT, TY_INT, TY_LONG,
-               TY_FLOAT, TY_DOUBLE, TY_PTR,
+               TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, TY_PTR,
                TY_ARRAY, TY_STRUCT, TY_FUNC };
 
 struct member {
@@ -90,6 +90,10 @@ struct type *ty_wchar(void);
 struct type *ty_volatile(struct type *t);
 struct type *ty_ptr(struct type *pointee);
 struct type *ty_array(struct type *elem, int count);
+/* SysV x86-64: a struct that is exactly one long double (X87 + X87UP) —
+ * returned in st0, where every other struct EmbCC returns goes through a
+ * hidden pointer or rax/rdx/xmm. EmbCC refuses to return one on x86-64. */
+int ty_x87_struct(const struct type *t);
 /* A variable-length array of elem, `len` elements (a VLA). */
 struct type *ty_vla(struct type *elem, struct expr *len);
 /* t is an array whose size is only known at run time. */

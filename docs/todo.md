@@ -672,11 +672,14 @@ The suite is now **102/102**. Since that pass the C surface also gained C11
 `int (*p)[N]`, GNU `typeof`, wide/prefixed string and character literals, and
 GNU computed `goto`.
 
-**What is still genuinely missing:** **`_Complex`** (refused loudly) and
-**`long double` as its own type** — which, correcting this list's earlier
-claim, was never refused: it is compiled as `double`, so `sizeof(long double)`
-is 8 against the ABI's 16 on both targets. **VLAs** landed on 2026-09-18 (both
-targets; tests/exec/vla.c). The two initializer seams that were once refused loudly
+**What is still genuinely missing:** **`_Complex`** (refused loudly).
+**VLAs** landed on 2026-09-18 (both targets; tests/exec/vla.c), and so did
+**`long double`** — which, correcting this list's earlier claim, had never
+been refused: it was compiled as `double` (sizeof 8 against the ABI's 16).
+It is now x87 extended on x86-64 and binary128 on aarch64, with exact
+constants (sema/ldfloat.c) and gcc-compatible calls (tests/golden/
+ldouble-abi.sh). Found on the way and fixed: a float `++`/`--` added 1 to the
+bit pattern, and a float condition tested bits, so `-0.0` was true. The two initializer seams that were once refused loudly
 are now implemented too: braced initialization of **bitfields** (static/local/
 designated) and **file-scope compound literals** (direct value, nested, and
 `&(T){...}` via an anonymous global). The remaining Tier-3 entries are

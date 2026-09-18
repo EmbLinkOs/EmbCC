@@ -414,12 +414,13 @@ void lex_next(struct lexer *lx)
             t->kind = TOK_FNUM;
             t->fnum = d;
             t->fnum_is_float = 0;
+            t->fnum_is_ld = 0;
             if (*fend == 'f' || *fend == 'F') {
                 t->fnum_is_float = 1;
                 fend++;
             } else if (*fend == 'l' || *fend == 'L') {
-                /* long double is not a distinct type here; it is
-                 * double, and saying so beats pretending otherwise. */
+                t->fnum_is_ld = 1;
+                t->text = xstrndup(lx->p, (size_t)(fend - lx->p));
                 fend++;
             }
             if (isalnum((unsigned char)*fend) || *fend == '.')

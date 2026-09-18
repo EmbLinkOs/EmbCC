@@ -43,6 +43,10 @@ static int g_no_fp;
 static int g_fb = A64_SP;
 #define FB g_fb
 
+/* long double (binary128): the vregs holding one (codegen.h
+ * cg_wide_vregs) — each gets a 16-aligned 16-byte slot. */
+static char *g_a64_wide;
+
 /* ---- site accumulation ---------------------------------------------- */
 
 struct a64_callsite {
@@ -83,7 +87,8 @@ static int hfa_walk(const struct type *t, int *esz)
 {
     switch (t->kind) {
     case TY_FLOAT:
-    case TY_DOUBLE: {
+    case TY_DOUBLE:
+    case TY_LDOUBLE: {
         int sz = ty_size(t);
         if (*esz && *esz != sz)
             return -1;
@@ -180,6 +185,8 @@ static void a64_place(const struct type *t, struct a64_cursor *cu,
     if (ty_is_float(t)) {                               /* C.1 / C.5 */
         if (cu->nsrn < 8) {
             p->where = AP_V; p->reg = cu->nsrn++; p->nreg = 1; p->esz = p->size;
+        } else if (p->size == 16) {
+            to_stack(cu, p, 16, 16);                    /* a long double */
         } else {
             to_stack(cu, p, 8, 8);
         }
@@ -305,6 +312,12 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
 
     running = (running + 7) & ~7L;
     for (int t = f->nvars; t < fn->nvregs; t++) {
+        if (g_a64_wide && g_a64_wide[t]) {
+            running = (running + 15) & ~15L;
+            disp[t] = running;
+            running += 16;
+            continue;
+        }
         disp[t] = running;
         running += 8;
     }
@@ -417,12 +430,146 @@ struct a64_fix { int at; int label; enum a64_fixkind kind; };
 
 /* ---- one function ---------------------------------------------------- */
 
+/* ---- long double: IEEE binary128 through libgcc ----
+ *
+ * AArch64 has no quad-precision arithmetic, so (like gcc) every operation
+ * is a call to libgcc's soft-float routines, with values passed and
+ * returned in q registers. A call mid-instruction is safe in this backend:
+ * nothing lives in a register across IR instructions (every value is in its
+ * slot), x30 was saved by the prologue, and the frame base (sp or x19)
+ * is preserved by the callee. Moves are plain 16-byte copies. */
+
+/* One undefined symbol per helper, shared by every call site in the unit. */
+static struct func *a64_helper(const char *name)
+{
+    static struct func *made[32];
+    static int nmade;
+    for (int k = 0; k < nmade; k++)
+        if (strcmp(made[k]->name, name) == 0)
+            return made[k];
+    if (nmade == (int)(sizeof made / sizeof made[0]))
+        diag_fatal(NULL, 0, "internal: too many libgcc helpers");
+    struct func *h = xcalloc(1, sizeof *h);
+    h->name = name;
+    made[nmade++] = h;
+    return h;
+}
+
+static void call_helper(struct code *t, struct a64_sites *st, const char *name)
+{
+    struct extcall ec;
+    ec.patch_off = a64_bl(t);
+    ec.callee = a64_helper(name);
+    PUSH(st->ext, st->next, st->capext, ec);
+}
+
+static int a64_ld_ins(const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_LOAD: case IR_LDVAR: case IR_STORE: case IR_STVAR:
+        return i->size == 16;
+    case IR_MOV:
+        return g_a64_wide && i->a >= 0 && g_a64_wide[i->a];
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_NEG:
+    case IR_CMP:
+        return i->flt && i->w == 16;
+    case IR_I2F:
+        return i->w == 16;
+    case IR_F2I:
+        return i->size == 16;
+    case IR_F2F:
+        return i->size == 16 || i->w == 16;
+    default:
+        return 0;
+    }
+}
+
+static void gen_a64_ld(struct code *t, const long *sd, struct ir_ins *i,
+                       struct a64_sites *st)
+{
+    switch (i->op) {
+    case IR_LOAD:
+        ld_slot(t, sd, i->a, A64_TMP, 8, 0, 8);          /* the address */
+        addr_of(t, A64_ADDR, FB, sd[i->dst]);
+        emit_copy(t, A64_ADDR, A64_TMP, 16);
+        break;
+    case IR_STORE:
+        ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
+        addr_of(t, A64_TMP, FB, sd[i->b]);
+        emit_copy(t, A64_ADDR, A64_TMP, 16);
+        break;
+    case IR_LDVAR: case IR_STVAR: case IR_MOV:
+        addr_of(t, A64_ADDR, FB, sd[i->dst]);
+        addr_of(t, A64_TMP, FB, sd[i->a]);
+        emit_copy(t, A64_ADDR, A64_TMP, 16);
+        break;
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+        a64_fldr(t, 0, FB, sd[i->a], 16);
+        a64_fldr(t, 1, FB, sd[i->b], 16);
+        call_helper(t, st, i->op == IR_ADD ? "__addtf3" : i->op == IR_SUB
+                               ? "__subtf3" : i->op == IR_MUL ? "__multf3"
+                               : "__divtf3");
+        a64_fstr(t, 0, FB, sd[i->dst], 16);
+        break;
+    case IR_NEG:              /* flip bit 127: exact for -0.0 and NaN */
+        ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
+        st_slot(t, sd, i->dst, A64_ACC, 8);
+        a64_ldr(t, A64_ACC, FB, sd[i->a] + 8, 8, 0, 8);
+        a64_mov_imm(t, A64_TMP, (long)(1UL << 63), 8);
+        a64_alu_reg(t, '^', A64_ACC, A64_ACC, A64_TMP, 8);
+        a64_str(t, A64_ACC, FB, sd[i->dst] + 8, 8);
+        break;
+    case IR_CMP: {
+        /* each helper's int result stands in the same relation to 0 as a
+         * to b (and makes an unordered pair false): __eqtf2 == 0,
+         * __netf2 != 0, __lttf2 < 0, __letf2 <= 0, __gttf2 > 0,
+         * __getf2 >= 0 */
+        const char *h = i->pred == B_EQ ? "__eqtf2" : i->pred == B_NE
+                        ? "__netf2" : i->pred == B_LT ? "__lttf2"
+                        : i->pred == B_LE ? "__letf2" : i->pred == B_GT
+                        ? "__gttf2" : "__getf2";
+        a64_fldr(t, 0, FB, sd[i->a], 16);
+        a64_fldr(t, 1, FB, sd[i->b], 16);
+        call_helper(t, st, h);
+        a64_cmp_reg(t, 0, A64_ZR, 4);
+        a64_cset(t, A64_ACC, cond_for(i->pred, 1));
+        st_slot(t, sd, i->dst, A64_ACC, 8);
+        break;
+    }
+    case IR_I2F:              /* any integer, sign-extended to 64 bits */
+        ld_slot(t, sd, i->a, 0, i->size, 1, 8);
+        call_helper(t, st, "__floatditf");
+        a64_fstr(t, 0, FB, sd[i->dst], 16);
+        break;
+    case IR_F2I:              /* truncates toward zero, to 64 bits */
+        a64_fldr(t, 0, FB, sd[i->a], 16);
+        call_helper(t, st, "__fixtfdi");
+        st_slot(t, sd, i->dst, 0, 8);
+        break;
+    case IR_F2F:
+        if (i->w == 16) {     /* float/double -> long double: exact */
+            a64_fldr(t, 0, FB, sd[i->a], i->size);
+            call_helper(t, st, i->size == 4 ? "__extendsftf2"
+                                            : "__extenddftf2");
+            a64_fstr(t, 0, FB, sd[i->dst], 16);
+        } else {              /* long double -> float/double: rounds */
+            a64_fldr(t, 0, FB, sd[i->a], 16);
+            call_helper(t, st, i->w == 4 ? "__trunctfsf2" : "__trunctfdf2");
+            a64_fstr(t, 0, FB, sd[i->dst], i->w);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                      int want_debug)
 {
     struct func *f = fn->src;
 
     struct a64_frame fr;
+    g_a64_wide = cg_wide_vregs(fn);
     long *sd = layout_frame(fn, &fr);
 
     /* -g: each source variable's slot relative to the DWARF frame base,
@@ -487,7 +634,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                         a64_str(t, pl.reg + q, FB, sd[p] + q * 8, 8);
                 else
                     a64_str(t, pl.reg, FB, sd[p], pl.size > 8 ? 8 : pl.size);
-            } else if (pl.is_struct) {
+            } else if (pl.is_struct || pl.size == 16) {  /* or a long double */
                 addr_of(t, A64_ADDR, FB, sd[p]);
                 addr_of(t, A64_TMP, A64_FP, 16 + pl.stk_off);
                 emit_copy(t, A64_ADDR, A64_TMP, pl.size);
@@ -539,6 +686,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             diag_fatal(f->file, i->line ? i->line : f->line,
                        "floating point used under -mgeneral-regs-only "
                        "(in '%s')", f->name);
+
+        if (a64_ld_ins(i)) {          /* long double: 16 bytes, libgcc */
+            gen_a64_ld(t, sd, i, st);
+            continue;
+        }
 
         switch (i->op) {
         case IR_CONST:
@@ -829,6 +981,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                     addr_of(t, A64_ADDR, A64_SP, pl[k].stk_off);
                     ld_slot(t, sd, v, A64_SCR, 8, 0, 8);
                     emit_copy(t, A64_ADDR, A64_SCR, pl[k].size);
+                } else if (pl[k].size == 16) {   /* a long double's bytes */
+                    addr_of(t, A64_ADDR, A64_SP, pl[k].stk_off);
+                    addr_of(t, A64_TMP, FB, sd[v]);
+                    emit_copy(t, A64_ADDR, A64_TMP, 16);
                 } else {
                     ld_slot(t, sd, v, A64_ACC, 8, 0, 8);
                     a64_str(t, A64_ACC, A64_SP, pl[k].stk_off, 8);
@@ -1136,6 +1292,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         a64_epilogue(t, fr.size);
     }
     g_fb = A64_SP;
+    free(g_a64_wide);
+    g_a64_wide = NULL;
 
     for (int k = 0; k < nret; k++)
         a64_patch_b26(t, retfix[k], epi);

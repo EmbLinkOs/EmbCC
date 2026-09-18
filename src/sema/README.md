@@ -3,7 +3,8 @@
 Types, declarations, checking, diagnostics — ../../docs/ARCHITECTURE.md §2.
 
 **The type system** lives in `type.h`/`type.c`: void, the integer types with
-their unsigned variants, `_Bool`, `float`/`double`, pointers, arrays, functions,
+their unsigned variants, `_Bool`, `float`/`double`/`long double`, pointers,
+arrays (including C99 variable-length ones), functions,
 and the tagged types (struct/union/enum) with SysV layout — member offsets,
 size, alignment, bitfield packing, and `__attribute__((aligned(N)))`. LP64.
 
@@ -19,6 +20,13 @@ constant-expression evaluation for initializers, enum and case values,
 `_Static_assert` and `_Generic` resolution, all-paths-return, and
 volatile-qualification tracked through to the IR so the optimizer preserves
 every MMIO access.
+
+**`long double` constants** are computed in `ldfloat.c`: exactly, with an
+arbitrary-precision integer, then rounded once per operation into the
+TARGET's format — x87 80-bit extended on x86-64, IEEE binary128 on aarch64 —
+which the host cannot represent (on arm64 macOS its own `long double` is a
+double). Literals, static initializers and folded expressions come out bit
+for bit as gcc's.
 
 Diagnostics carry the column of the offending node, which is what gives semantic
 errors a caret and not just a line number.

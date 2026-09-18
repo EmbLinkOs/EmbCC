@@ -153,6 +153,9 @@ struct token {
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
     double fnum;   /* TOK_FNUM */
     int fnum_is_float; /* TOK_FNUM: an 'f' suffix -> float, else double */
+    int fnum_is_ld;    /* TOK_FNUM: an 'l' suffix -> long double; `text`
+                        * then holds the digits (no suffix), which the
+                        * exact conversion needs — a double would lose them */
     char *text;    /* TOK_IDENT; TOK_STR: the bytes (may contain NULs) */
 };
 

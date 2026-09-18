@@ -18,6 +18,7 @@ SRCS := \
 	src/parse/parse.c \
 	src/sema/sema.c \
 	src/sema/type.c \
+	src/sema/ldfloat.c \
 	src/ir/irgen.c \
 	src/as/as.c \
 	src/opt/opt.c \
