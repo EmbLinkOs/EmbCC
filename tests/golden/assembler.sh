@@ -8,9 +8,13 @@
 # assembler can be checked against on the host. This exercises the encoder
 # and directives on a fixture that mirrors the kernel corpus (sections,
 # global/extern, local-label scoping, jump relaxation, db/dw/dd/dq, resb,
-# a movabs+ABS64 relocation, a call+PC32 relocation, and incbin) and
-# compares the link-relevant object content: code bytes, the symbol table,
-# and the relocations. Skips honestly when nasm is not on this host.
+# a movabs+ABS64 relocation, a call+PC32 relocation, incbin, and the forms
+# syscall_entry.asm and kentry.asm need: macros that expand macros, gs:
+# segment operands, push [mem], shift by an immediate, two-operand imul,
+# a `~` immediate, `o64 sysret`, and [rel sym] loads and stores with their
+# PC32 relocations) and compares the link-relevant object content: code
+# bytes, the symbol table, and the relocations. Skips honestly when nasm is
+# not on this host.
 set -u
 echo "TEST-MARKER assembler"
 . "$(dirname "$0")/../lib.sh"
@@ -60,6 +64,31 @@ _start:
     add eax, 1
 .done:
     ret
+
+; the syscall_entry.asm / kentry.asm forms
+%macro PUSH_PAIR 2
+    push qword %1
+    push qword %2
+%endmacro
+%macro FRAME 1
+    PUSH_PAIR 0, %1             ; a macro expanding a macro
+%endmacro
+extern __stack_chk_guard
+global entry_forms
+entry_forms:
+    FRAME 48
+    mov [gs:0], rsp             ; segment override, absolute disp32 (SIB 0x25)
+    mov rsp, [gs:8]
+    push qword [gs:0]           ; FF /6
+    rdtsc
+    shl rdx, 32                 ; C1 /4 ib
+    shr rax, 1                  ; D1 /5
+    sar rcx, 3
+    imul rax, rcx               ; 0F AF /r
+    and rax, ~0xFF              ; a `~` immediate
+    mov [rel __stack_chk_guard], rax    ; RIP-relative store, PC32 to an extern
+    mov rbx, [rel table]                ; RIP-relative load of a defined symbol
+    o64 sysret                  ; REX.W 0F 07
 EOF
 sed "s#OUTDIR#$out#" "$out/fix.asm" > "$out/fix.real.asm"
 

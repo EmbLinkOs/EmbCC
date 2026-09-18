@@ -114,12 +114,24 @@ static int regnum(const char *s, int len, int *w) {
 }
 static long parse_int(const char *s) {
     while (*s==' ') s++;
+    /* nasm's unary operators on a constant: `and rax, ~0xFF` */
+    if (*s=='~') return ~parse_int(s+1);
     int neg = 0; if (*s=='-'){neg=1;s++;} else if (*s=='+') s++;
-    long v = strtol(s, NULL, 0); return neg ? -v : v;
+    long v = (long)strtoul(s, NULL, 0); return neg ? -v : v;
 }
 
 enum { OP_REG, OP_IMM, OP_MEM, OP_LABEL };
-struct oper { int kind, reg, w, base, memlabel; long imm; char label[128]; };
+struct oper { int kind, reg, w, base, memlabel; long imm; char label[128];
+              int seg;   /* OP_MEM: 0, or the 0x64 (fs) / 0x65 (gs) prefix */ };
+
+/* A memory operand with no base register — `[gs:8]`, the per-CPU slot the
+ * syscall entry reads. Its low bits say "base 5, no REX.B" so every REX
+ * computation stays right; modmem sees the flag and emits the absolute form
+ * (64-bit mode's `mod=00 rm=101` is RIP-relative, so it needs a SIB). */
+#define NOBASE 0x105
+/* `[rel sym]`: RIP-relative, mod=00 rm=101 and a PC-relative disp32 against
+ * the symbol in oper.label. Low bits likewise read "base 5, no REX.B". */
+#define RIPREL 0x205
 
 static int parse_oper(struct as *a, int ln, char *t, struct oper *o) {
     memset(o, 0, sizeof *o);
@@ -136,6 +148,25 @@ static int parse_oper(struct as *a, int ln, char *t, struct oper *o) {
         char in[128]; strncpy(in, t+1, sizeof in-1); in[sizeof in-1]=0;
         char *e = strchr(in, ']'); if (e) *e=0;
         char *p = in; while (*p==' ') p++;
+        /* RIP-relative: [rel sym] */
+        if (!strncmp(p,"rel",3) && (p[3]==' '||p[3]=='\t')) {
+            p += 3; while (*p==' '||*p=='\t') p++;
+            o->base = RIPREL;
+            strncpy(o->label, p, sizeof o->label - 1);
+            char *q = o->label + strlen(o->label);
+            while (q > o->label && (q[-1]==' '||q[-1]=='\t')) *--q = 0;
+            return 0;
+        }
+        /* a segment override: [gs:8], [fs:rax+16] */
+        if ((p[0]=='g'||p[0]=='f') && p[1]=='s' && p[2]==':') {
+            o->seg = p[0]=='g' ? 0x65 : 0x64;
+            p += 3; while (*p==' ') p++;
+            if (*p=='-' || *p=='+' || isdigit((unsigned char)*p)) {
+                o->base = NOBASE;
+                o->imm = parse_int(p);
+                return 0;
+            }
+        }
         char reg[32]={0}; int i=0;
         while (*p && *p!='+' && *p!='-' && *p!=' ' && i<31) reg[i++]=*p++;
         int w; o->base = regnum(reg,(int)strlen(reg),&w);
@@ -146,7 +177,7 @@ static int parse_oper(struct as *a, int ln, char *t, struct oper *o) {
     }
     int w, r = regnum(t,(int)strlen(t),&w);
     if (r>=0){ o->kind=OP_REG; o->reg=r; o->w=w; return 0; }
-    if (t[0]=='-'||t[0]=='+'||isdigit((unsigned char)t[0])){ o->kind=OP_IMM; o->imm=parse_int(t); return 0; }
+    if (t[0]=='-'||t[0]=='+'||t[0]=='~'||isdigit((unsigned char)t[0])){ o->kind=OP_IMM; o->imm=parse_int(t); return 0; }
     o->kind=OP_LABEL; strncpy(o->label,t,sizeof o->label-1); return 0;
 }
 
@@ -158,6 +189,12 @@ static void rex(struct item *it,int w,int r,int x,int base){
 }
 static void modrr(struct item *it,int reg,int rm){ eb(it,0xc0|((reg&7)<<3)|(rm&7)); }
 static void modmem(struct item *it,int reg,int base,long d){
+    if (base == NOBASE) {                    /* [disp32]: SIB, no base, no index */
+        eb(it,(0<<6)|((reg&7)<<3)|4);
+        eb(it,0x25);
+        for (int i=0;i<4;i++) eb(it,(unsigned)((d>>(8*i))&0xff));
+        return;
+    }
     int bb=base&7, sib=(bb==4), force=(bb==5);
     int mod=(d==0&&!force)?0:(d>=-128&&d<=127)?1:2;
     eb(it,(mod<<6)|((reg&7)<<3)|(sib?4:bb));
@@ -179,6 +216,9 @@ static void fixup(struct item *it,const char *sym,int kind,long add,int bytes){
 /* Encode one instruction into a fresh item. ops[] are already parsed. */
 static void encode(struct as *a,int ln,const char *m,struct oper *ops,int no){
     struct item *it = new_item(a);
+    /* a segment override is a prefix, ahead of REX and the opcode */
+    for (int k = 0; k < no; k++)
+        if (ops[k].kind == OP_MEM && ops[k].seg) { eb(it, (unsigned)ops[k].seg); break; }
     /* zero-operand */
     struct { const char *m; unsigned char b[3]; int n; } Z[] = {
         {"cli",{0xfa},1},{"hlt",{0xf4},1},{"ret",{0xc3},1},{"nop",{0x90},1},
@@ -188,6 +228,7 @@ static void encode(struct as *a,int ln,const char *m,struct oper *ops,int no){
         {"pushfq",{0x9c},1},{"popfq",{0x9d},1},
         {"rdmsr",{0x0f,0x32},2},{"wrmsr",{0x0f,0x30},2},{"syscall",{0x0f,0x05},2},
         {"cpuid",{0x0f,0xa2},2},{"swapgs",{0x0f,0x01,0xf8},3},
+        {"rdtsc",{0x0f,0x31},2},{"sysret",{0x0f,0x07},2},
     };
     for (unsigned i=0;i<sizeof Z/sizeof Z[0];i++)
         if (!strcmp(m,Z[i].m)) { for(int k=0;k<Z[i].n;k++) eb(it,Z[i].b[k]); return; }
@@ -197,7 +238,32 @@ static void encode(struct as *a,int ln,const char *m,struct oper *ops,int no){
         else if (no==1 && ops[0].kind==OP_IMM){
             if (ops[0].imm>=-128 && ops[0].imm<=127){ eb(it,0x6a); imm8(it,ops[0].imm); }
             else { eb(it,0x68); imm4(it,ops[0].imm); }
+        } else if (no==1 && ops[0].kind==OP_MEM){
+            /* push qword [mem]: FF /6 (64-bit by default, no REX.W) */
+            rex(it,0,0,0,ops[0].base); eb(it,0xff); modmem(it,6,ops[0].base,ops[0].imm);
         } else aerr(a,ln,"bad push",NULL);
+        return;
+    }
+    /* `o64 sysret`: nasm's spelling of the 64-bit sysret (REX.W 0F 07) */
+    if (!strcmp(m,"o64") && no==1 && ops[0].kind==OP_LABEL &&
+        !strcmp(ops[0].label,"sysret")) {
+        eb(it,0x48); eb(it,0x0f); eb(it,0x07);
+        return;
+    }
+    /* imul r, r/m (two-operand): 0F AF /r, reg = destination */
+    if (!strcmp(m,"imul") && no==2 && ops[0].kind==OP_REG && ops[1].kind==OP_REG) {
+        rex(it,ops[0].w==8,ops[0].reg,0,ops[1].reg);
+        eb(it,0x0f); eb(it,0xaf); modrr(it,ops[0].reg,ops[1].reg);
+        return;
+    }
+    /* shl / shr / sar reg, imm: the group-2 shift, C1 /4 /5 /7 ib — or D1,
+     * the shift-by-one form nasm picks for a count of 1 */
+    if ((!strcmp(m,"shl")||!strcmp(m,"sal")||!strcmp(m,"shr")||!strcmp(m,"sar"))
+        && no==2 && ops[0].kind==OP_REG && ops[1].kind==OP_IMM) {
+        int ext = m[2]=='r' ? (m[1]=='a' ? 7 : 5) : 4;
+        rex(it,ops[0].w==8,0,0,ops[0].reg);
+        if (ops[1].imm==1) { eb(it,0xd1); modrr(it,ext,ops[0].reg); }
+        else { eb(it,0xc1); modrr(it,ext,ops[0].reg); imm8(it,ops[1].imm); }
         return;
     }
     if (!strcmp(m,"pop") && no==1 && ops[0].kind==OP_REG){
@@ -207,6 +273,14 @@ static void encode(struct as *a,int ln,const char *m,struct oper *ops,int no){
         struct oper *d=&ops[0], *s=&ops[1];
         if (d->kind==OP_REG && s->kind==OP_REG){
             rex(it,d->w==8,s->reg,0,d->reg); eb(it,0x89); modrr(it,s->reg,d->reg);
+        } else if (d->kind==OP_REG && s->kind==OP_MEM && s->base==RIPREL){
+            char mg[128]; mangle(a,s->label,mg,sizeof mg);
+            rex(it,d->w==8,d->reg,0,0); eb(it,0x8b); eb(it,((d->reg&7)<<3)|5);
+            fixup(it,mg,FIX_REL32,-4,4);
+        } else if (d->kind==OP_MEM && d->base==RIPREL && s->kind==OP_REG){
+            char mg[128]; mangle(a,d->label,mg,sizeof mg);
+            rex(it,s->w==8,s->reg,0,0); eb(it,0x89); eb(it,((s->reg&7)<<3)|5);
+            fixup(it,mg,FIX_REL32,-4,4);
         } else if (d->kind==OP_REG && s->kind==OP_MEM){
             rex(it,d->w==8,d->reg,0,s->base); eb(it,0x8b); modmem(it,d->reg,s->base,s->imm);
         } else if (d->kind==OP_MEM && s->kind==OP_REG){
@@ -439,10 +513,61 @@ static void strip_comment(char *s){
     int n=(int)strlen(s); while(n>0 && (s[n-1]=='\n'||s[n-1]=='\r'||s[n-1]==' '||s[n-1]=='\t')) s[--n]=0;
 }
 
+/* One output line, or — when its first token names a macro — that macro's
+ * body with the arguments substituted, each body line fed back through here.
+ * The rescan is what nasm does and what a body invoking ANOTHER macro needs:
+ * the kernel's IPI_STUB calls PUSH_GPRS, which was being emitted as an
+ * instruction named push_gprs. Depth-limited, so a macro that invokes itself
+ * is an error rather than a hang. */
+struct pp { char **lines; int nl, cap; struct macro *macs; int nmac; };
+
+static void pp_push(struct pp *p, const char *t)
+{
+    if (p->nl == p->cap) {
+        p->cap = p->cap ? p->cap * 2 : 256;
+        p->lines = xrealloc(p->lines, (size_t)p->cap * sizeof(char *));
+    }
+    p->lines[p->nl++] = xstrdup(t);
+}
+
+static void pp_line(struct pp *p, const char *t, int depth)
+{
+    char first[64]; int fi = 0;
+    while (t[fi] && t[fi] != ' ' && t[fi] != '\t' && fi < 63) { first[fi] = t[fi]; fi++; }
+    first[fi] = 0;
+    struct macro *mm = NULL;
+    for (int i = 0; i < p->nmac; i++)
+        if (!strcmp(p->macs[i].name, first)) mm = &p->macs[i];
+    if (!mm) {
+        pp_push(p, t);
+        return;
+    }
+    if (depth > 32) {
+        fprintf(stderr, "embas: macro '%s' nests more than 32 deep "
+                        "(does it invoke itself?)\n", first);
+        exit(1);
+    }
+    char *args[9] = { 0 }; int na = 0;
+    char *acopy = xstrdup(t + fi), *asave = acopy, *at;
+    while ((at = split(&asave, ',')) && na < 9) {
+        while (*at == ' ' || *at == '\t') at++;
+        char *e = at + strlen(at); while (e > at && (e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
+        args[na++] = xstrdup(at);
+    }
+    for (int b = 0; b < mm->nbody; b++) {
+        char ex[512];
+        subst(mm->body[b], args, na, ex, sizeof ex);
+        char *u = ex; while (*u == ' ' || *u == '\t') u++;
+        pp_line(p, u, depth + 1);
+    }
+    for (int i = 0; i < na; i++) free(args[i]);
+    free(acopy);
+}
+
 /* Expand the source file into a flat line list (macros inlined). */
 static char **preprocess(struct as *a, const char *text, int *nout){
-    char **lines=NULL; int nl=0, cap=0;
-    struct macro *macs=NULL; int nmac=0, cmac=0;
+    struct pp p = { NULL, 0, 0, NULL, 0 };
+    int cmac=0;
     struct macro *defining=NULL;
     char *copy=xstrdup(text), *save=copy, *ln;
     while ((ln=split(&save,'\n'))){
@@ -452,8 +577,8 @@ static char **preprocess(struct as *a, const char *text, int *nout){
         if (!*t) continue;
         if (!strncmp(t,"%macro",6)){
             char nm[64]; int na=0; sscanf(t+6," %63s %d",nm,&na);
-            if (nmac==cmac){ cmac=cmac?cmac*2:8; macs=xrealloc(macs,(size_t)cmac*sizeof*macs); }
-            defining=&macs[nmac++]; defining->name=xstrdup(nm); defining->nargs=na;
+            if (p.nmac==cmac){ cmac=cmac?cmac*2:8; p.macs=xrealloc(p.macs,(size_t)cmac*sizeof*p.macs); }
+            defining=&p.macs[p.nmac++]; defining->name=xstrdup(nm); defining->nargs=na;
             defining->body=NULL; defining->nbody=0; continue;
         }
         if (!strncmp(t,"%endmacro",9)){ defining=NULL; continue; }
@@ -461,31 +586,10 @@ static char **preprocess(struct as *a, const char *text, int *nout){
             defining->body=xrealloc(defining->body,(size_t)(defining->nbody+1)*sizeof(char*));
             defining->body[defining->nbody++]=xstrdup(t); continue;
         }
-        /* macro invocation? first token matches a macro name */
-        char first[64]; int fi=0; while(t[fi]&&t[fi]!=' '&&t[fi]!='\t'&&fi<63){first[fi]=t[fi];fi++;} first[fi]=0;
-        struct macro *mm=NULL;
-        for (int i=0;i<nmac;i++) if(!strcmp(macs[i].name,first)) mm=&macs[i];
-        if (mm){
-            char *args[9]={0}; int na=0;
-            char *asave=t+fi, *at;
-            while ((at=split(&asave,',')) && na<9){
-                while(*at==' '||*at=='\t') at++;
-                char*e=at+strlen(at); while(e>at&&(e[-1]==' '||e[-1]=='\t'))*--e=0;
-                args[na++]=xstrdup(at);
-            }
-            for (int b=0;b<mm->nbody;b++){
-                char ex[512]; subst(mm->body[b],args,na,ex,sizeof ex);
-                if (nl==cap){ cap=cap?cap*2:256; lines=xrealloc(lines,(size_t)cap*sizeof(char*)); }
-                lines[nl++]=xstrdup(ex);
-            }
-            for (int i=0;i<na;i++) free(args[i]);
-            continue;
-        }
-        if (nl==cap){ cap=cap?cap*2:256; lines=xrealloc(lines,(size_t)cap*sizeof(char*)); }
-        lines[nl++]=xstrdup(t);
+        pp_line(&p, t, 0);
     }
     free(copy);
-    *nout=nl; (void)a; return lines;
+    *nout=p.nl; (void)a; return p.lines;
 }
 
 /* ---------- placement (with jump relaxation) ---------- */

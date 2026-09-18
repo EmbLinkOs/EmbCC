@@ -24,9 +24,15 @@ shared writer (`../elf/write.c`).
 - **Directives:** `section`/`segment`, `global`/`extern`, `align`,
   `db`/`dw`/`dd`/`dq`, `resb`/`resw`/`resd`/`resq` (`.bss` reserve), `incbin`
   (embed a raw file — the AP-trampoline blob), `%macro`/`%endmacro` with
-  `%1..%N` (the `isr0..255` stub).
-- **Relocations:** `R_X86_64_PC32` (call/jump to an extern, addend −4) and
-  `R_X86_64_64` (`mov reg, label` → movabs). A reference to a symbol **defined**
+  `%1..%N` (the `isr0..255` stub), and macros that expand other macros
+  (depth-limited).
+- **Operands beyond reg/imm/[base+disp]:** `[gs:disp]`/`[fs:…]` segment
+  overrides (the per-CPU area in `syscall_entry.asm`), `[rel sym]`
+  RIP-relative loads and stores, and `~` in immediates. Instruction forms the
+  kernel corpus needs beyond the basics: `push qword [mem]`, shifts by an
+  immediate, two-operand `imul`, `rdtsc`, and `o64 sysret`.
+- **Relocations:** `R_X86_64_PC32` (call/jump to an extern, or a `[rel sym]`
+  operand, addend −4) and `R_X86_64_64` (`mov reg, label` → movabs). A reference to a symbol **defined**
   in this object goes against its **section symbol + addend**, as nasm does.
 - **Output format:** `-f bin` (flat binary, for the 16/32-bit boot stages and AP
   trampoline) is **not** implemented — it reports an error rather than
