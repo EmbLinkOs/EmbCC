@@ -1146,7 +1146,13 @@ static void cg_ext_into(struct code *text, const int *sd, int dst, int a,
         else if (size == 4 && sign && w == 8)
             x86_movsxd_rr(text, dst, R);
         else
-            x86_mov_rr_w(text, dst, R, size == 8 ? 8 : w);
+            /* size 4 unsigned widening to 8 is a 32-BIT move: that is the
+             * instruction that zeroes the upper half. A 64-bit move copied
+             * whatever the register held there — and it can hold the rest
+             * of a wider value, since a truncating store into a local that
+             * shares the source's register emits no move at all — so
+             * `(unsigned long)(unsigned int)x` came back as x at -O2. */
+            x86_mov_rr_w(text, dst, R, size == 8 ? 8 : 4);
     } else {
         x86_load_reg_basedisp(text, dst, REG_RBP, sd[a], size, sign, w);
     }
