@@ -142,7 +142,9 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret);
  * dropped) anywhere else — a silently-ignored section is a table the
  * linker script's bracket symbols never find. */
 struct attrs { int packed; int aligned; int weak; int noreturn;
-               const char *section; };
+               const char *section;
+               int sret; /* embcc_sret on a parameter (type.h sret_first) */
+};
 
 /* Match `name`, `__name`, or `__name__` against a base attribute name. */
 static int attr_is(const char *n, const char *base)
@@ -189,6 +191,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 if (attr_is(name, "packed")) out->packed = 1;
                 else if (attr_is(name, "weak")) out->weak = 1;
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;
+                else if (attr_is(name, "embcc_sret")) out->sret = 1;
                 else if (attr_is(name, "aligned"))
                     out->aligned = arg > 0 ? (int)arg : 16;
                 else if (attr_is(name, "section")) {
@@ -309,13 +312,29 @@ static struct type *parse_type_name(struct parser *ps, struct type *base)
 }
 
 /* The '(params)' of a function TYPE (as in a function pointer). */
+/* Attributes before a parameter's type. Only embcc_sret means anything
+ * there — the C++ front-end's mark for the ABI's indirect-result pointer —
+ * and only on the first parameter. */
+static int param_sret_attr(struct parser *ps, int index)
+{
+    if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
+        return 0;
+    struct token *at = cur(ps);
+    struct attrs a = { 0, 0, 0, 0, NULL, 0 };
+    parse_attributes(ps, &a);
+    if (a.sret && index != 0)
+        diag_at(ps->lx.file, at->line, at->col,
+                "embcc_sret marks the first parameter only");
+    return a.sret;
+}
+
 static struct type *parse_fn_params(struct parser *ps, struct type *ret)
 {
     expect(ps, TOK_LPAREN, "'('");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 1;   /* prototype scope: `int a[n]`, `int a[*]` */
     struct type *pt[MAX_PARAMS];
-    int n = 0, varargs = 0;
+    int n = 0, varargs = 0, sret = 0;
 
     if (cur(ps)->kind == TOK_KW_VOID) {
         struct lexer save = ps->lx;
@@ -330,6 +349,8 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
                 advance(ps);
                 break;
             }
+            if (param_sret_attr(ps, n))
+                sret = 1;
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
                 diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
@@ -355,7 +376,9 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
     }
     expect(ps, TOK_RPAREN, "')'");
     ps->vla_ok = saved_vla_ok;
-    return ty_func(ret, pt, n, varargs);
+    struct type *ft = ty_func(ret, pt, n, varargs);
+    ft->sret_first = sret;
+    return ft;
 }
 
 static struct type *parse_struct_body(struct parser *ps, struct type *t,
@@ -371,7 +394,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
      * closing brace (parse_struct_body). Leading ones are collected here and
      * applied to the body exactly as trailing ones are. Between the tag and
      * the '{' is NOT a place gcc accepts one, so neither does EmbCC. */
-    struct attrs lead = { 0, 0, 0, 0, NULL };
+    struct attrs lead = { 0, 0, 0, 0, NULL, 0 };
     parse_attributes(ps, &lead);
     const char *tag = NULL;
     if (cur(ps)->kind == TOK_IDENT) {
@@ -647,7 +670,7 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * they are refused rather than silently dropped. */
         if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             struct token *at_tok = cur(ps);
-            struct attrs a = { 0, 0, 0, 0, NULL };
+            struct attrs a = { 0, 0, 0, 0, NULL, 0 };
             parse_attributes(ps, &a);
             if (a.packed || a.aligned || a.weak || a.noreturn)
                 diag_at(ps->lx.file, at_tok->line, at_tok->col,
@@ -972,7 +995,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                 cap = cap ? cap * 2 : 8;
                 ms = xrealloc(ms, (size_t)cap * sizeof *ms);
             }
-            struct attrs mat = { 0, 0, 0, 0, NULL };
+            struct attrs mat = { 0, 0, 0, 0, NULL, 0 };
             parse_attributes(ps, &mat);  /* T buf[N] __attribute__((aligned(N))) */
             ms[n].name = mname;
             ms[n].ty = mty;
@@ -1960,7 +1983,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * on a local declarator; aligned(N) raises the stack slot's
              * alignment (codegen rounds the frame offset). */
             {
-                struct attrs lat = { 0, 0, 0, 0, NULL };
+                struct attrs lat = { 0, 0, 0, 0, NULL, 0 };
                 parse_attributes(ps, &lat);
                 if (lat.section)
                     diag_fatal(ps->lx.file, s->line,
@@ -2281,7 +2304,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
 
     int is_static = 0, is_extern = 0;
-    struct attrs at = { 0, 0, 0, 0, NULL };
+    struct attrs at = { 0, 0, 0, 0, NULL, 0 };
     ps->seq = seq;
 
     /* A file-scope `__asm__("...")` block (crt0's _start stub). Basic asm
@@ -2445,6 +2468,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                 advance(ps);
                 break;
             }
+            if (param_sret_attr(ps, f->nparams))
+                f->sret_first = 1;
             if (cur(ps)->kind == TOK_IDENT)
                 reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
             struct type *spec = parse_type_spec(ps, 0);
@@ -2515,6 +2540,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                     g->params[i] = NULL;  /* unnamed prototype parameters */
                 }
                 g->is_varargs = fty->is_varargs;
+                g->sret_first = fty->sret_first;
                 **ftail = g;
                 *ftail = &g->next;
             } else {

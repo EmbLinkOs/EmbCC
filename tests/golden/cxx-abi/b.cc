@@ -66,6 +66,32 @@ int nested(Account::Entry *e, Account::Entry &f)
 }
 long pod_sum(Pod p) { return p.a + p.b + p.c; }
 
+Buf make_buf(int n) { return Buf(n); }
+int via(const Pt *p, int (Pt::*f)(int) const, int Pt::*d)
+{
+    return (p->*f)(p->*d) + p->*member_of(1);
+}
+int consume(Buf b, int k)
+{
+    b += k;                    // the callee's own copy: the caller's stays
+    return (int)b;
+}
+int b_checks()
+{
+    int base = Buf::live;
+    Buf x(2);                  // {1, 2}
+    Buf y = twice(x);          // embcc: {1, 2, 1, 2}
+    int ok = 0;
+    ok += y.size() == 4;
+    ok += y.sum() == 6;
+    ok += (x + y).size() == 6;
+    ok += consume(y, 1) == 10;
+    ok += y == twice(x);
+    ok += Buf::live == base + 2;
+    ok += (int)(y += 1) == 10;
+    return ok;
+}
+
 }
 }
 

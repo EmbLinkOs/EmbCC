@@ -259,6 +259,8 @@ struct func {
     int is_weak;          /* __attribute__((weak)) */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
     int is_varargs;       /* declared with a trailing ", ..." */
+    int sret_first;       /* param 0 is the indirect-result pointer
+                           * (embcc_sret; type.h) */
     struct type *ret_ty;
     int nparams;
     const char *params[MAX_PARAMS]; /* names; NULL in unnamed prototypes */

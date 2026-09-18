@@ -74,6 +74,11 @@ struct type {
     struct type *ptypes[MAX_PARAMS];
     int nptypes;
     int is_varargs;
+    int sret_first;         /* the first parameter is the ABI's indirect-
+                             * result pointer (__attribute__((embcc_sret)),
+                             * which C++ lowering writes): aarch64 passes it
+                             * in x8, not x0 — x86-64 already takes it
+                             * first, in rdi */
 };
 
 /* Base types are interned singletons — pointer equality works for

@@ -34,7 +34,40 @@ private:
     const char *owner;
 };
 
+// Not trivially copyable: passed as a reference to the caller's copy, and
+// returned through the slot the caller passes (rdi / x8), before `this`.
+class Buf {
+public:
+    explicit Buf(int n);
+    Buf(const Buf &);
+    ~Buf();
+    int size() const;
+    int sum() const;
+    Buf operator+(const Buf &) const;
+    Buf &operator+=(int);
+    operator int() const;               // mangled cv...: `operator int`
+    bool operator==(const Buf &) const;
+    static int live;
+private:
+    int n;
+    int *data;
+};
+
+Buf twice(const Buf &);                 // side A defines, side B calls
+
+struct Pt {
+    int x, y;
+    int sum() const { return x + y; }
+    int mul(int k) const { return (x + y) * k; }
+};
+
 namespace detail {
+int via(const Pt *, int (Pt::*)(int) const, int Pt::*);   // g++ side
+int Pt::*member_of(int which);                              // embcc side
+int (Pt::*method())() const;                                // embcc side
+Buf make_buf(int n);                    // side B defines these
+int consume(Buf b, int k);
+int b_checks();
 int mix(int, long, unsigned, char, signed char, unsigned char);
 int mix(short, unsigned short, long long, unsigned long long, bool);
 double fl(float, double, long double);

@@ -131,6 +131,8 @@ struct ir_ins {
     int label;               /* IR_LABEL/IR_JMP/IR_BRZ */
     struct func *callee;     /* IR_CALL (direct), IR_FADDR */
     int indirect;            /* IR_CALL through a function pointer */
+    int sret_first;          /* IR_CALL: argument 0 is the indirect-result
+                              * pointer (type.h sret_first) */
     int call_varargs;        /* al = 0 needed at the call */
     struct global *glob;     /* IR_GADDR */
     /* IR_CALL arguments. SysV splits the argument REGISTERS by class —

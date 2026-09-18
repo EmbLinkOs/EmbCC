@@ -17,6 +17,57 @@ void Account::deposit(int n) { total += n; }
 int Account::balance() const { return total; }
 int Account::opened() { return open_count; }
 
+int Buf::live = 0;
+Buf::Buf(int k) : n(k), data(new int[k])
+{
+    for (int i = 0; i < k; i++)
+        data[i] = i + 1;
+    live++;
+}
+Buf::Buf(const Buf &o) : n(o.n), data(new int[o.n])
+{
+    for (int i = 0; i < n; i++)
+        data[i] = o.data[i];
+    live++;
+}
+Buf::~Buf()
+{
+    delete[] data;
+    live--;
+}
+int Buf::size() const { return n; }
+int Buf::sum() const
+{
+    int s = 0;
+    for (int i = 0; i < n; i++)
+        s += data[i];
+    return s;
+}
+Buf Buf::operator+(const Buf &o) const
+{
+    Buf r(n + o.n);
+    for (int i = 0; i < n; i++)
+        r.data[i] = data[i];
+    for (int i = 0; i < o.n; i++)
+        r.data[n + i] = o.data[i];
+    return r;
+}
+Buf &Buf::operator+=(int k)
+{
+    for (int i = 0; i < n; i++)
+        data[i] += k;
+    return *this;
+}
+Buf::operator int() const { return sum(); }
+bool Buf::operator==(const Buf &o) const { return sum() == o.sum(); }
+
+Buf twice(const Buf &b) { return b + b; }
+
+namespace detail {
+int Pt::*member_of(int which) { return which ? &Pt::y : &Pt::x; }
+int (Pt::*method())() const { return &Pt::sum; }
+}
+
 int counter = 40;
 const char *tag = "side-a";
 
@@ -75,6 +126,21 @@ int main()
     CHECK("class by value", pod_sum(make_pod(10)) == 10 + 20 + 11);
     CHECK("std::", std::std_name(41) == 42);
     CHECK("global namespace", global_fn(&p, &q) == 5);
+    {
+        Buf b = make_buf(3);                       // g++ fills our slot
+        CHECK("class returned through the slot", b.size() == 3 && b.sum() == 6);
+        CHECK("class passed by reference to a copy", consume(b, 10) == 36 &&
+                                                     b.sum() == 6);
+        Buf c = b + make_buf(2);                   // member with a slot
+        CHECK("operator+ returning a class", c.size() == 5 && (int)c == 9);
+        c += 1;
+        CHECK("operator+= and operator int", (int)c == 14);
+        CHECK("g++ calling embcc's slot functions", b_checks() == 7);
+    }
+    CHECK("every Buf destroyed", Buf::live == 0);
+    Pt pt = { 3, 4 };
+    CHECK("member pointers to and from g++",
+          via(&pt, &Pt::mul, &Pt::y) == 7 * 4 + 4 && (pt.*method())() == 7);
     CHECK("g++ built Accounts with embcc's constructors", deep_call_b() == 41);
     CHECK("... and destroyed them", Account::opened() == 0);
     printf("%s\n", fails ? "FAILED" : "all ok");

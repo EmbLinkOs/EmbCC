@@ -1558,6 +1558,8 @@ int gen_expr(struct ir_func *fn, struct expr *e)
         i->a = fptemp;
         i->call_varargs = e->callee ? e->callee->is_varargs
                                     : e->lhs->ty->pointee->is_varargs;
+        i->sret_first = e->callee ? e->callee->sret_first
+                                  : e->lhs->ty->pointee->sret_first;
         i->nargs = e->nargs;
 
         /* Classify every argument here, where the types still exist;

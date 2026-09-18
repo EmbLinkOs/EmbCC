@@ -897,6 +897,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 fd->used = 1;
                 e->ty = ty_ptr(ty_func(fd->ret_ty, fd->param_tys,
                                        fd->nparams, fd->is_varargs));
+                e->ty->pointee->sret_first = fd->sret_first;
             } else {
                 const char *sug = suggest_name(u, sc, e->name);
                 diag_error_at(u->file, e->line, e->col,
@@ -1700,6 +1701,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             callee->used = 1;
             ft = ty_func(callee->ret_ty, callee->param_tys,
                          callee->nparams, callee->is_varargs);
+            ft->sret_first = callee->sret_first;
         } else {
             check_expr(u, f, sc, e->lhs);
             if (e->lhs->ty->kind != TY_PTR ||
@@ -3089,6 +3091,7 @@ static void merge_decls(struct unit *u)
                 canon->params[i] = f->params[i]; /* definition names win */
         }
         canon->is_weak |= f->is_weak;  /* weak on any declaration is weak */
+        canon->sret_first |= f->sret_first;
         canon->is_noreturn |= f->is_noreturn;  /* noreturn on any wins */
         f->absorbed = 1;
     }

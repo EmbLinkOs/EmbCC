@@ -255,12 +255,16 @@ static const char *type_key(struct cty *t)
         return t->n >= 0 ? cx_fmt("A%ld_%s", t->n, type_key(t->to))
                          : cx_fmt("A_%s", type_key(t->to));
     case CT_FUNC: {
-        char *k = cx_fmt("F%s", type_key(t->to));
+        char *k = cx_fmt("%s%sF%s", (t->fq & CQ_VOLATILE) ? "V" : "",
+                         (t->fq & CQ_CONST) ? "K" : "", type_key(t->to));
         for (int i = 0; i < t->np; i++)
             k = cx_fmt("%s%s", k, type_key(t->params[i]));
-        return cx_fmt("%s%s%sE", k, t->np == 0 && !t->variadic ? "v" : "",
-                      t->variadic ? "z" : "");
+        return cx_fmt("%s%s%s%sE", k, t->np == 0 && !t->variadic ? "v" : "",
+                      t->variadic ? "z" : "",
+                      t->refq == 1 ? "R" : t->refq == 2 ? "O" : "");
     }
+    case CT_MPTR:
+        return cx_fmt("M%s%s", type_key(ct_class(t->cls)), type_key(t->to));
     case CT_CLASS:
         return type_name_key(t->cls->owner,
                              t->cls->name ? t->cls->name : "._anon");
@@ -295,7 +299,8 @@ static void mangle_type(struct mbuf *m, struct cty *t)
         return;
     }
     switch (t->k) {
-    case CT_PTR: case CT_LREF: case CT_RREF: case CT_ARRAY: case CT_FUNC: {
+    case CT_PTR: case CT_LREF: case CT_RREF: case CT_ARRAY: case CT_FUNC:
+    case CT_MPTR: {
         const char *key = type_key(t);
         int i = sub_find(m, key);
         if (i >= 0) {
@@ -315,7 +320,16 @@ static void mangle_type(struct mbuf *m, struct cty *t)
             mangle_type(m, t->to);
             break;
         }
+        case CT_MPTR:
+            put(m, "M");
+            mangle_type(m, ct_class(t->cls));
+            mangle_type(m, t->to);
+            break;
         default:
+            /* a member function's cv and ref-qualifier are inside its
+             * function type: one candidate, KFvvE */
+            if (t->fq & CQ_VOLATILE) put(m, "V");
+            if (t->fq & CQ_CONST) put(m, "K");
             put(m, "F");
             mangle_type(m, t->to);
             if (t->np == 0 && !t->variadic)
@@ -324,6 +338,8 @@ static void mangle_type(struct mbuf *m, struct cty *t)
                 mangle_type(m, t->params[i2]);
             if (t->variadic)
                 put(m, "z");
+            if (t->refq)
+                put(m, t->refq == 1 ? "R" : "O");
             put(m, "E");
         }
         sub_add(m, key);
@@ -392,6 +408,11 @@ static void put_unqualified(struct mbuf *m, struct cfunc *f)
     if (f->is_dtor) {
         put(m, f->ctor_variant == 2 ? "D2" : f->ctor_variant == 0 ? "D0"
                                                                  : "D1");
+        return;
+    }
+    if (f->is_conv) {
+        put(m, "cv");               /* operator T: cv <type> */
+        mangle_type(m, f->type->to);
         return;
     }
     const char *oc = operator_code(f->name);

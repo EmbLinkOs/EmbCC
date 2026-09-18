@@ -41,7 +41,7 @@ took target-specific work, or that a reader might doubt.
 | Variadic functions, `va_arg` (incl. `double`, `long double`), `va_copy` | ✓ | ✓ |
 | `_Atomic`, `__atomic_*`, `__sync_*` | ✓ `lock`-prefixed | ✓ `ldxr`/`stxr` + barriers |
 | Statement expressions, `typeof`, computed `goto`, `__real__`/`__imag__`, imaginary constants | ✓ | ✓ |
-| Attributes: `packed`, `aligned`, `weak`, `noreturn`, `section` (file-scope variables) | ✓ | ✓ |
+| Attributes: `packed`, `aligned`, `weak`, `noreturn`, `section` (file-scope variables); `embcc_sret` on a first parameter (the ABI's indirect-result pointer — what C++ lowering writes) | ✓ | ✓ (`x8`) |
 | Builtins: bit family, `expect`, `frame_address`/`return_address`, `constant_p`, `unreachable`, ... | ✓ | ✓ |
 | Extended inline asm | ✓ AT&T, the x86 kernel's vocabulary; constraints `a b c d S D r m i x +` | ✓ GNU A64, the ARM kernel's 67 templates; constraints `r =r +r i`, register variables |
 | File-scope `__asm__` | ✓ (crt0's vocabulary) | ✗ |
@@ -59,8 +59,10 @@ targets, so EmbCC's C++ objects link with g++'s and with libstdc++.
 | **CX1** `bool`, `nullptr`, references, namespaces (nested, reopened, inline, unnamed, aliases, `using`), `extern "C"`, overloading, default arguments, enums (scoped, fixed underlying type), the named casts, `auto`/`decltype` for variables | ✓ | ✓ |
 | **CX1** classes: members, `this`, static and const members, constructors (delegating, mem-initializers, default member initializers), destructors on every scope exit, temporaries' lifetimes, `new`/`delete` and `new[]`/`delete[]` (array cookies) | ✓ | ✓ |
 | **CX1** namespace-scope objects (`.init_array`, `__cxa_atexit`), function-local statics (`__cxa_guard_*`) | ✓ | ✓ |
-| Itanium mangling (nested names, `St`, substitutions); EmbCC objects linking with g++ objects both ways | ✓ | ✓ |
-| CX2..CX9 — operators, copy and move, inheritance, templates, exceptions, lambdas, C++20, libstdc++ compiled by EmbCC, C++ on the OS | ✗ refused, naming the milestone | ✗ |
+| **CX2** operator overloading, argument-dependent lookup, conversion functions and converting constructors, copy and move (implicit memberwise, implicit move on return, NRVO), pointers to members, class `operator new`/`delete` | ✓ | ✓ |
+| A class that is not trivially copyable, by value: argument by reference to the caller's temporary; result through the return slot | ✓ slot first, in `rdi` | ✓ slot in `x8` (`embcc_sret`) |
+| Itanium mangling (nested names, `St`, substitutions, member pointers, conversion functions); EmbCC objects linking with g++ objects both ways | ✓ | ✓ |
+| CX3..CX9 — inheritance and virtual functions, templates, exceptions, lambdas, C++20, libstdc++ compiled by EmbCC, C++ on the OS | ✗ refused, naming the milestone | ✗ |
 
     embcc -c prog.cc -o prog.o          # .cc .cpp .cxx .C .c++, or -x c++
     embcc --emit-c prog.cc              # the C it lowers to
@@ -112,7 +114,7 @@ that call each other in both directions: `tests/golden/sysv-abi.sh`,
 | suite | x86_64 | aarch64 |
 |---|---|---|
 | `tests/exec/*.c` — compiled, RUN, and agreeing with gcc (`agrees-with-gcc`) | 81 + 3 x86-only | 81 |
-| `tests/cxx/*.cc` — C++ compiled, RUN, and agreeing with g++ (`cxx-agrees-with-gxx`); an EmbCC half linked with a g++ half (`cxx-abi`) | 4 | 4 |
+| `tests/cxx/*.cc` — C++ compiled, RUN, and agreeing with g++ (`cxx-agrees-with-gxx`); an EmbCC half linked with a g++ half (`cxx-abi`) | 8 | 8 |
 | `tests/golden/*.sh` — gcc cross-ABI, gdb, predef, optimizer | 14 | 14 |
 | `tests/golden/<arch>/` — machine-specific referees | 25 (embas vs nasm, embld, embdbg, EMBX, self-host, kernel) | 2 (encoder vs objdump, inline asm vs `aarch64-elf-as`) |
 | `tests/compile/` — refusals | ✓ | — |

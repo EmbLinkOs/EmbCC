@@ -112,6 +112,20 @@ struct cty *ct_enum(struct cenum *e)
     return t;
 }
 
+struct cty *ct_mptr(struct cclass *c, struct cty *member)
+{
+    struct cty *t = xcalloc(1, sizeof *t);
+    t->k = CT_MPTR;
+    t->cls = c;
+    t->to = member;
+    return t;
+}
+
+int ct_is_pmf(const struct cty *t)
+{
+    return t->k == CT_MPTR && t->to->k == CT_FUNC;
+}
+
 struct cty *ct_size_t(void) { return ct_basic(CT_ULONG); }
 struct cty *ct_ptrdiff_t(void) { return ct_basic(CT_LONG); }
 
@@ -143,6 +157,8 @@ static int same(const struct cty *a, const struct cty *b, int quals)
         return a->cls == b->cls;
     case CT_ENUM:
         return a->en == b->en;
+    case CT_MPTR:
+        return a->cls == b->cls && same(a->to, b->to, 1);
     default:
         return 1;
     }
@@ -171,7 +187,8 @@ int ct_is_arith(const struct cty *t)
 
 int ct_is_scalar(const struct cty *t)
 {
-    return ct_is_arith(t) || t->k == CT_PTR || t->k == CT_NULLPTR;
+    return ct_is_arith(t) || t->k == CT_PTR || t->k == CT_NULLPTR ||
+           t->k == CT_MPTR;
 }
 
 int ct_is_ref(const struct cty *t)
@@ -226,6 +243,7 @@ long ct_size(const struct cty *t)
     case CT_CLASS: return t->cls->size;
     case CT_ENUM: return ct_size(t->en->underlying);
     case CT_FUNC: return 1;
+    case CT_MPTR: return t->to->k == CT_FUNC ? 16 : 8;
     case CT_AUTO: return 0;
     }
     return 0;
@@ -238,6 +256,7 @@ long ct_align(const struct cty *t)
     case CT_CLASS: return t->cls->align;
     case CT_ENUM: return ct_align(t->en->underlying);
     case CT_FUNC: case CT_VOID: return 1;
+    case CT_MPTR: return 8;
     default: return ct_size(t);
     }
 }
@@ -377,6 +396,11 @@ static void name_into(char *buf, size_t cap, const struct cty *t)
     case CT_CLASS:
         snprintf(buf, cap, "%s%s", cv, t->cls->name ? t->cls->name
                                                    : "<anonymous>");
+        return;
+    case CT_MPTR:
+        name_into(inner, sizeof inner, t->to);
+        snprintf(buf, cap, "%s %s::*", inner, t->cls->name ? t->cls->name
+                                                           : "<anonymous>");
         return;
     case CT_ENUM:
         snprintf(buf, cap, "%s%s", cv, t->en->name ? t->en->name

@@ -225,6 +225,24 @@ static void a64_place(const struct type *t, struct a64_cursor *cu,
     to_stack(cu, p, p->is_struct ? p->size : 8, ty_align(t));
 }
 
+/* Argument k of a call or function whose argument 0 may be the indirect-
+ * result pointer (sret_first: the C++ return slot of a class that is not
+ * trivially copyable), which AAPCS64 passes in x8 whatever the result's
+ * size — taking none of x0..x7. */
+static void a64_place_arg(const struct type *t, int k, int sret_first,
+                          struct a64_cursor *cu, struct a64_argplan *p)
+{
+    if (sret_first && k == 0) {
+        memset(p, 0, sizeof *p);
+        p->size = 8;
+        p->where = AP_X;
+        p->reg = 8;
+        p->nreg = 1;
+        return;
+    }
+    a64_place(t, cu, p);
+}
+
 /* ---- frame layout ---------------------------------------------------- */
 
 /* Byte offsets from sp after the prologue, low to high: the outgoing
@@ -256,7 +274,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
         struct a64_cursor cu = { 0, 0, 0, 0 };
         struct a64_argplan pl;
         for (int k = 0; k < i->nargs; k++)
-            a64_place(i->argv[k].ty, &cu, &pl);
+            a64_place_arg(i->argv[k].ty, k, i->sret_first, &cu, &pl);
         if (cu.nsaa > outgoing) outgoing = cu.nsaa;
         if (cu.byref_bytes > byref) byref = cu.byref_bytes;
     }
@@ -614,7 +632,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         for (int p = 0; p < f->nparams; p++) {
             struct type *pt = f->param_tys[p];
             struct a64_argplan pl;
-            a64_place(pt, &cu, &pl);
+            a64_place_arg(pt, p, f->sret_first, &cu, &pl);
             if (pl.where == AP_V) {
                 for (int q = 0; q < pl.nreg; q++)
                     a64_fstr(t, pl.reg + q, FB, sd[p] + q * pl.esz, pl.esz);
@@ -955,7 +973,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             struct a64_argplan pl[MAX_PARAMS];
             struct a64_cursor cu = { 0, 0, 0, 0 };
             for (int k = 0; k < i->nargs; k++)
-                a64_place(i->argv[k].ty, &cu, &pl[k]);
+                a64_place_arg(i->argv[k].ty, k, i->sret_first, &cu, &pl[k]);
 
             /* 1. The copies B.3 passes by reference: the callee may write
              * its parameter, so it gets a copy, never the caller's object.
@@ -1098,7 +1116,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             struct a64_cursor cu = { 0, 0, 0, 0 };
             struct a64_argplan pl;
             for (int p = 0; p < f->nparams; p++)
-                a64_place(f->param_tys[p], &cu, &pl);
+                a64_place_arg(f->param_tys[p], p, f->sret_first, &cu, &pl);
             long tag = fr.va_tag;
             addr_of(t, A64_ACC, A64_FP, 16 + ((cu.nsaa + 7) & ~7L));
             a64_str(t, A64_ACC, FB, tag + 0, 8);

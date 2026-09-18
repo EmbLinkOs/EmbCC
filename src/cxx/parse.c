@@ -714,6 +714,15 @@ static int nested_follows(int mode)
     if (k == TOK_STAR || k == TOK_AMP || k == TOK_ANDAND || k == TOK_CARET ||
         k == TOK_KW_ATTRIBUTE)
         return 1;
+    if (k == TOK_IDENT || k == TOK_COLONCOLON) {
+        /* (C::*name) */
+        int save = cx_pos;
+        cx_advance();
+        struct qname q = peek_qname();
+        cx_pos = save;
+        if (!q.bad && q.scope && q.fin > 0 && cx_kind_at(1 + q.fin) == TOK_STAR)
+            return 1;
+    }
     if (k == TOK_LPAREN)
         return 1;
     if (k == TOK_RPAREN || k == TOK_ELLIPSIS)
@@ -796,11 +805,22 @@ static struct cty *ptr_ops(struct cty *t, int mode)
             continue;
         }
         if (cx_kind() == TOK_IDENT || cx_kind() == TOK_COLONCOLON) {
+            /* C::* : a pointer to a member of C */
             struct qname q = peek_qname();
             if (!q.bad && q.scope && q.fin > 0 &&
-                cx_kind_at(q.fin) == TOK_STAR)
-                cx_error(cx_cur(), "pointers to members are not supported "
-                                   "yet (CX2)");
+                cx_kind_at(q.fin) == TOK_STAR) {
+                if (q.scope->k != SC_CLASS)
+                    cx_error(cx_cur(), "'::*' names a member of a class");
+                if (ct_is_ref(t) || t->k == CT_VOID)
+                    cx_error(cx_cur(), "pointer to member of type %s",
+                             ct_name(t));
+                cx_pos += q.fin + 1;
+                t = ct_mptr(q.scope->cls, t);
+                unsigned cq = parse_cv();
+                if (cq)
+                    t = ct_qual(t, cq);
+                continue;
+            }
         }
         return t;
     }
@@ -1042,7 +1062,12 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     f->file = d->at ? d->at->file : NULL;
     f->is_ctor = d->kind == DN_CTOR;
     f->is_dtor = d->kind == DN_DTOR;
+    f->is_conv = d->kind == DN_CONV;
     f->is_static = ds->storage == SK_STATIC;
+    /* a class's operator new/delete are static members (11.12) */
+    if (cls && (strncmp(d->name, "operator new", 12) == 0 ||
+                strncmp(d->name, "operator delete", 15) == 0))
+        f->is_static = 1;
     f->is_inline = ds->is_inline || ds->is_constexpr;
     f->is_constexpr = ds->is_constexpr;
     f->is_explicit = ds->is_explicit;
@@ -1183,6 +1208,7 @@ static struct cvar *new_local(const char *name, struct cty *t,
 
 static struct cstmt *parse_stmt(void);
 static struct cstmt *parse_block_body(struct cscope *s);
+static void mark_nrvo(struct cfunc *f);
 
 /* How many local statics named `name` function fn declared before: the
  * discriminator that tells them apart in their mangled names. */
@@ -1300,6 +1326,7 @@ static void define_function(struct cfunc *f, struct cty *ft)
     f->body = parse_block_body(bs);
     scope_pop();
     scope_pop();
+    mark_nrvo(f);
     cx_curfn = savefn;
     cx_curblk = saveblk;
 }
@@ -1920,8 +1947,7 @@ static void parse_member(struct cclass *c, int *access)
             if ((d.kind == DN_CTOR || d.kind == DN_DTOR) && ds.type)
                 cx_error(d.at, "a constructor or destructor has no type");
             if (d.kind == DN_CONV)
-                cx_error(d.at, "conversion functions are not supported yet "
-                               "(CX2)");
+                t->to = d.conv_type;
             struct cscope *target = c->scope;
             if (ds.is_friend)
                 target = d.qual ? d.qual : enclosing_ns(c->scope);
@@ -2344,8 +2370,7 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                              d.name, d.qual->name ? d.qual->name : "::");
             }
             if (d.kind == DN_CONV)
-                cx_error(d.at, "conversion functions are not supported yet "
-                               "(CX2)");
+                t->to = d.conv_type;
             struct cfunc *f = declare_function(&ds, &d, t, target);
             if (!toplevel && !d.qual && target != here) {
                 /* a block-scope function declaration: visible here */
@@ -2575,6 +2600,67 @@ static struct cexpr *parse_condition(struct cstmt **decl)
     return expr_parse();
 }
 
+/* `return x;` naming a local object (or by-value parameter) of the
+ * function's class return type: a candidate for the named return value
+ * optimization, and moved from rather than copied (11.9.6, 7.5.4.2). */
+static struct cvar *returned_local(struct cexpr *e, struct cty *rt)
+{
+    if (e->k != E_VAR || rt->k != CT_CLASS)
+        return NULL;
+    struct cvar *v = e->var;
+    if (!v->is_local || v->is_static || ct_is_ref(v->type) ||
+        v->fn != cx_curfn || !ct_same_unqual(v->type, rt) ||
+        (v->type->q & CQ_VOLATILE))
+        return NULL;
+    return v;
+}
+
+/* The local, as an xvalue — if its class has a constructor that takes
+ * one (else it is copied, as before C++11). */
+static struct cexpr *implicit_move(struct cexpr *e, struct cty *rt)
+{
+    struct cexpr *x = ex_new(E_CAST, e->t, VC_XVALUE);
+    x->a = xmalloc(sizeof *x->a);
+    x->a[0] = e;
+    x->na = 1;
+    x->lvcast = 1;
+    if (resolve_ex(rt->cls->ctors, NULL, &x, 1, NULL, NULL, 0))
+        return x;
+    return e;
+}
+
+/* Every return of f returns the same local by name: that local is built
+ * in the caller's return slot (NRVO), when the class goes through one. */
+static void collect_returns(struct cstmt *s, struct cvar **v, int *ok,
+                            int *n)
+{
+    for (; s; s = s->next) {
+        if (s->k == S_RETURN) {
+            (*n)++;
+            if (!s->ret_var || (*v && *v != s->ret_var))
+                *ok = 0;
+            *v = s->ret_var;
+        }
+        collect_returns(s->body, v, ok, n);
+        collect_returns(s->els, v, ok, n);
+        if (s->k == S_IF || s->k == S_WHILE || s->k == S_FOR ||
+            s->k == S_SWITCH)
+            collect_returns(s->init, v, ok, n);
+    }
+}
+
+static void mark_nrvo(struct cfunc *f)
+{
+    struct cty *rt = f->type->to;
+    if (!class_indirect(rt) || !f->body)
+        return;
+    struct cvar *v = NULL;
+    int ok = 1, n = 0;
+    collect_returns(f->body->body, &v, &ok, &n);
+    if (ok && n && v && !v->is_param)
+        v->nrvo = 1;
+}
+
 static struct cstmt *parse_stmt(void)
 {
     const struct ctok *at = cx_cur();
@@ -2769,6 +2855,12 @@ static struct cstmt *parse_stmt(void)
             } else if (ct_is_ref(rt)) {
                 s->e = bind_ref(e, rt, "return");
             } else {
+                struct cvar *v = form == INIT_COPY ? returned_local(e, rt)
+                                                   : NULL;
+                if (v) {
+                    s->ret_var = v;
+                    e = implicit_move(e, rt);
+                }
                 s->e = init_object(rt, form, &e, 1, at);
             }
         } else if (rt->k != CT_VOID && !cx_curfn->is_ctor &&

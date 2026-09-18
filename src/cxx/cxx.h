@@ -59,6 +59,8 @@ enum cty_kind {
     CT_FLOAT, CT_DOUBLE, CT_LDOUBLE,
     CT_NULLPTR, CT_VALIST,
     CT_PTR, CT_LREF, CT_RREF, CT_ARRAY, CT_FUNC, CT_CLASS, CT_ENUM,
+    CT_MPTR,                  /* a pointer to a member of `cls`, of type `to`
+                               * (a CT_FUNC for a member function) */
     CT_AUTO                   /* `auto`, until its initializer deduces it */
 };
 
@@ -95,6 +97,8 @@ struct cty *ct_array(struct cty *elem, long n);
 struct cty *ct_func(struct cty *ret, struct cty **params, int np, int variadic);
 struct cty *ct_class(struct cclass *c);
 struct cty *ct_enum(struct cenum *e);
+struct cty *ct_mptr(struct cclass *c, struct cty *member);
+int ct_is_pmf(const struct cty *t);          /* a pointer to member function */
 struct cty *ct_size_t(void);                 /* unsigned long */
 struct cty *ct_ptrdiff_t(void);              /* long */
 
@@ -156,6 +160,8 @@ struct cvar {
                                * is the pointer to store) */
     struct cexpr *ctor;       /* an object's initialization (construct,
                                * aggregate list), emitted into the variable */
+    int nrvo;                 /* the named return value: built in the
+                               * caller's return slot (emit.c) */
     int has_const;            /* a const integral with a constant value */
     long const_val;
     int used;
@@ -237,6 +243,10 @@ struct cfunc {
     int is_explicit, is_virtual, is_constexpr;
     int is_deleted, is_defaulted;
     int is_implicit;          /* declared by the compiler */
+    int special;              /* an implicit one's kind: SP_* */
+    int trivial;              /* ... and it runs no code (a C struct copy,
+                               * nothing at all) */
+    int is_conv;              /* a conversion function: operator T() */
     int is_builtin;           /* implicitly declared (operator new, ...) */
     int c_linkage;
     int weak;                 /* __attribute__((weak)) */
@@ -269,6 +279,11 @@ struct cfunc {
 
 extern struct cfunc *cx_funcs;       /* all functions, declaration order */
 void func_register(struct cfunc *f); /* append to cx_funcs */
+
+enum {
+    SP_NONE, SP_DEFAULT, SP_COPY, SP_MOVE, SP_COPY_ASSIGN, SP_MOVE_ASSIGN,
+    SP_DTOR
+};
 
 /* ---- classes ---- */
 
@@ -306,7 +321,9 @@ struct cclass {
     struct cfunc *copy_assign;    /* user-declared operator=(const T&) */
     int user_copy_ctor, user_move_ctor, user_copy_assign, user_move_assign;
     int user_dtor;
+    int user_ctors;           /* any constructor the user declared */
     int has_default_ctor;     /* some constructor takes no arguments */
+    int trivial_assign;       /* copy/move assignment is a struct copy */
     /* what copying, destroying and default-constructing entail */
     int trivial_dtor;         /* no code to destroy */
     int trivial_copy;         /* copy/move construction is memcpy */
@@ -351,7 +368,10 @@ enum cexpr_kind {
     E_TEMP,       /* a[0] (a prvalue) materialized: a temporary */
     E_NEW, E_DELETE,
     E_STMTEXPR,   /* GNU ({ ... }) */
-    E_VAARG       /* __builtin_va_arg(a[0], t) */
+    E_VAARG,      /* __builtin_va_arg(a[0], t) */
+    E_MEMPTR,     /* &C::m: field (its offset) or fn */
+    E_PMEM,       /* a[0].*a[1]: the data member a pointer to member names */
+    E_PMCALL      /* (a[0]->*a[1])(a[2]...): a[0] the object's address */
 };
 
 enum { VC_PRVALUE, VC_LVALUE, VC_XVALUE };
@@ -385,6 +405,10 @@ struct cexpr {
     long cookie;              /* E_NEW/E_DELETE[]: array cookie bytes */
     int is_array;             /* E_NEW/E_DELETE: [] form */
     int zero;                 /* E_CONSTRUCT: zero-initialize first */
+    int adl;                  /* E_OVL: an unqualified name — argument-
+                               * dependent lookup adds candidates */
+    int memptr;               /* E_OVL: written &C::f — to become a pointer
+                               * to member function */
     struct cfunc *dtor;       /* E_DELETE: the destructor to run first */
     int line;
     const char *file;
@@ -396,6 +420,14 @@ struct cexpr *ex_cast(struct cexpr *e, struct cty *t);
 struct cexpr *ex_addr(struct cexpr *e);    /* &e (e a glvalue) */
 struct cexpr *ex_deref(struct cexpr *p);   /* *p */
 struct cexpr *ex_this(void);               /* `this` in a member function */
+struct cexpr *ex_materialize(struct cexpr *e);   /* a prvalue's temporary */
+struct cexpr *ex_member(struct cexpr *obj, struct cfield *fl);
+/* `l op r` (op a TOK_ assignment operator), overloaded or built-in. */
+struct cexpr *expr_assign(int op, struct cexpr *l, struct cexpr *r);
+/* A class that is passed and returned through memory (Itanium: not
+ * trivially copyable or destructible): by reference to a temporary, into
+ * a return slot. */
+int class_indirect(const struct cty *t);
 /* The arguments of a call to fn converted to its parameters (defaults
  * filled in); *out gets np (or more, for `...`) expressions. */
 int convert_args(struct cfunc *fn, struct cexpr **args, int na,
@@ -480,6 +512,8 @@ struct cstmt {
     const char *label;        /* GOTO/LABEL */
     long cval, cval2;         /* CASE (cval2: a GNU range's end) */
     int is_range;
+    struct cvar *ret_var;     /* RETURN: the local object it returns by name
+                               * (a named-return-value candidate) */
     const char *asm_text;     /* ASM: the statement, verbatim */
     int line;
     const char *file;
@@ -544,10 +578,11 @@ struct meminit_raw {
  * written mem-initializers, else default member initializers, else
  * default-initialization. */
 void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n);
+/* Give an implicit, non-trivial special member its definition (once). */
+void define_implicit(struct cfunc *f);
 /* Set up a delayed default member initializer (parse.c calls back). */
 void field_parse_default(struct cclass *c, struct cfield *fl);
 /* The implicitly-defined special members' bodies, built on use. */
-void class_define_implicit(struct cfunc *f);
 
 /* ---- mangling ---- */
 

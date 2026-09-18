@@ -62,6 +62,22 @@ libstdc++ and libsupc++ (the harness: `tests/harness/<arch>/link.sh --cxx`).
   global under its Itanium name, so every unit shares one.
 - Only what is used is emitted: inline functions, implicit special members
   and internal variables through a worklist.
+- Every special member the standard declares implicitly exists as a real
+  candidate in overload resolution; a trivial one lowers to nothing or a
+  struct copy, a non-trivial one gets a memberwise definition on first use.
+- A class that is not trivially copyable (a non-trivial copy/move
+  constructor or destructor) crosses calls the Itanium way: an argument is
+  the address of a temporary the caller builds and destroys after the
+  full-expression; a result is built by the callee in a slot the caller
+  passes first — before `this` — which C cannot say for aarch64, where the
+  slot travels in x8 whatever the size: EmbCC's C has
+  `__attribute__((embcc_sret))` on a first parameter for it (x86-64 needs
+  nothing: the slot is the first argument, returned in rax). A local
+  returned by name from every return is built in that slot (NRVO), as g++
+  does, so copies happen exactly where g++'s do.
+- Pointers to members are Itanium's: a data member's is its offset (null
+  -1), a member function's `{ptr, adj}` (`struct __cx_pmf`), a call
+  through one dispatching on an odd ptr as a virtual one will.
 
 ## Status
 
@@ -73,17 +89,32 @@ pointers, arrays, enums, a nested class, a class by value, `std::`, and
 g++ constructing EmbCC's class). The OS's cxxdemo checks 1–3, 5 and 6 pass
 on both targets (4 needs templates, CX4).
 
+**CX2 done** (September 2026): operator overloading (members and
+non-members; `[]`, `()`, `->`, `++`/`--` in both forms, compound
+assignment, operators on enums), argument-dependent lookup for operators
+and calls, conversion functions (including `explicit operator bool` in
+conditions) and converting constructors, copy and move — user-written and
+implicit memberwise, with implicit move on `return local;` and NRVO —
+classes that are not trivially copyable passed and returned by value,
+pointers to members, and class-specific `operator new`/`delete`.
+tests/cxx `operators`, `copymove` (every copy, move and destruction
+logged: the same as g++'s), `memptr`, `alloc` agree with g++ on both
+targets, and cxx-abi now passes a non-trivially-copyable class by value
+and returns it through the slot both ways across the EmbCC/g++ boundary
+(x8 on aarch64), with operators, a conversion function and member
+pointers.
+
 Already there ahead of their milestones: `enum class` and fixed underlying
 types, `auto` and `decltype` for variables, `if`/`switch` with an
 initializer, `static_assert`, delegating constructors, default member
 initializers.
 
-Refused until later, each naming its milestone: operator overloading,
-conversion functions, non-trivial copies and classes with them passed or
-returned by value (CX2); base classes, virtual functions, `typeid`,
-`dynamic_cast` (CX3); templates (CX4); exceptions (CX5); lambdas,
-range-`for`, `initializer_list`, deduced return types (CX6); designated
-initializers, `<=>`, coroutines (CX7). Access control is parsed but not yet
-enforced; anonymous struct/union members are not supported yet.
+Refused until later, each naming its milestone: base classes, virtual
+functions, `typeid`, `dynamic_cast` (CX3); templates (CX4); exceptions
+(CX5); lambdas, range-`for`, `initializer_list`, deduced return types
+(CX6); designated initializers, `<=>` and C++20's rewritten comparisons,
+coroutines (CX7). Access control is parsed but not yet enforced;
+anonymous struct/union members, and copying arrays of non-trivially
+copyable objects, are not supported yet.
 
-Next: CX2.
+Next: CX3.

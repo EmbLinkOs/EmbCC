@@ -85,76 +85,185 @@ static void layout(struct cclass *c)
     c->align = align;
 }
 
-static int is_copy_ctor(struct cfunc *f, struct cclass *c, int rvalue)
+/* The special member f is, by its signature: a copy or move constructor
+ * or assignment of c (0 if neither). */
+static int copy_kind(struct cfunc *f, struct cclass *c)
 {
     struct cty *ft = f->type;
     if (ft->np < 1 || (ft->np > 1 && (!f->defargs || !f->defargs[1])))
         return 0;
     struct cty *p = ft->params[0];
-    if (p->k != (rvalue ? CT_RREF : CT_LREF))
+    struct cty *pb = ct_strip_ref(p);
+    if (pb->k != CT_CLASS || pb->cls != c)
         return 0;
-    return p->to->k == CT_CLASS && p->to->cls == c;
+    int move = p->k == CT_RREF;
+    if (f->is_ctor)
+        return move ? SP_MOVE : p->k == CT_LREF ? SP_COPY : 0;
+    return move ? SP_MOVE_ASSIGN : SP_COPY_ASSIGN;
+}
+
+int class_indirect(const struct cty *t)
+{
+    return t->k == CT_CLASS && t->cls->complete && !t->cls->trivial_for_calls;
+}
+
+static struct cfunc *assign_set(struct cclass *c)
+{
+    struct csym *y = scope_find_here(c->scope, "operator=");
+    return y && y->k == CS_FUNC ? y->fns : NULL;
+}
+
+/* Declare one of the special members the standard declares implicitly
+ * (11.4.5-11.4.7); it is defined only if it is used and runs code. */
+static struct cfunc *declare_implicit(struct cclass *c, int sp, int trivial,
+                                      int deleted)
+{
+    struct cfunc *f = xcalloc(1, sizeof *f);
+    const char *cn = c->name ? c->name : "__cx_anon";
+    struct cty *self = ct_class(c);
+    struct cty *param = NULL;
+    struct cty *ret = ct_basic(CT_VOID);
+    switch (sp) {
+    case SP_COPY: case SP_COPY_ASSIGN:
+        param = ct_ref(ct_qual(self, CQ_CONST), 0);
+        break;
+    case SP_MOVE: case SP_MOVE_ASSIGN:
+        param = ct_ref(self, 1);
+        break;
+    default:
+        break;
+    }
+    if (sp == SP_COPY_ASSIGN || sp == SP_MOVE_ASSIGN)
+        ret = ct_ref(self, 0);
+    f->type = ct_func(ret, &param, param ? 1 : 0, 0);
+    f->name = sp == SP_DTOR ? cx_fmt("~%s", cn)
+              : sp == SP_COPY_ASSIGN || sp == SP_MOVE_ASSIGN ? "operator="
+              : cn;
+    f->owner = c->scope;
+    f->cls = c;
+    f->is_ctor = sp == SP_DEFAULT || sp == SP_COPY || sp == SP_MOVE;
+    f->is_dtor = sp == SP_DTOR;
+    f->is_implicit = 1;
+    f->is_inline = 1;
+    f->special = sp;
+    f->trivial = trivial;
+    f->is_deleted = deleted;
+    f->access = CA_PUBLIC;
+    f->body_tok = f->mi_tok = -1;
+    func_register(f);
+    struct cfunc **set;
+    if (f->is_ctor) {
+        set = &c->ctors;
+    } else if (f->is_dtor) {
+        c->dtor = f;
+        return f;
+    } else {
+        struct csym *y = scope_find_here(c->scope, "operator=");
+        if (!y || y->k != CS_FUNC)
+            y = scope_add(c->scope, CS_FUNC, "operator=");
+        set = &y->fns;
+    }
+    while (*set)
+        set = &(*set)->next;
+    *set = f;
+    return f;
 }
 
 void class_complete(struct cclass *c)
 {
     layout(c);
     c->complete = 1;
-    int user_ctor = 0, private_field = 0;
+    int private_field = 0;
+    c->user_ctors = c->ctors != NULL;
+    struct cfunc *ucopy = NULL, *umove = NULL, *ucopy_as = NULL,
+                 *umove_as = NULL;
     for (struct cfunc *f = c->ctors; f; f = f->next) {
-        user_ctor = 1;
-        if (is_copy_ctor(f, c, 0) && !f->is_defaulted)
-            c->user_copy_ctor = 1;
-        if (is_copy_ctor(f, c, 1) && !f->is_defaulted)
-            c->user_move_ctor = 1;
+        int k = copy_kind(f, c);
+        if (k == SP_COPY) ucopy = f;
+        if (k == SP_MOVE) umove = f;
         if (f->type->np == 0 || (f->defargs && f->defargs[0]))
             c->has_default_ctor = 1;
     }
-    struct csym *as = scope_find_here(c->scope, "operator=");
-    if (as && as->k == CS_FUNC)
-        for (struct cfunc *f = as->fns; f; f = f->next) {
-            if (f->type->np != 1)
-                continue;
-            struct cty *p = f->type->params[0];
-            struct cty *pb = ct_strip_ref(p);
-            if (pb->k != CT_CLASS || pb->cls != c)
-                continue;
-            if (p->k == CT_RREF)
-                c->user_move_assign = 1;
-            else
-                c->user_copy_assign = 1;
-            c->copy_assign = f;
-        }
-    int user_dtor = c->dtor && !c->dtor->is_defaulted;
-    c->user_dtor = c->dtor != NULL;
-    int tdtor = !user_dtor, tcopy = !c->user_copy_ctor && !c->user_move_ctor;
-    int tdefault = 1;
+    for (struct cfunc *f = assign_set(c); f; f = f->next) {
+        int k = copy_kind(f, c);
+        if (k == SP_COPY_ASSIGN) ucopy_as = f;
+        if (k == SP_MOVE_ASSIGN) umove_as = f;
+    }
+    struct cfunc *udtor = c->dtor;
+    c->user_copy_ctor = ucopy && !ucopy->is_defaulted;
+    c->user_move_ctor = umove && !umove->is_defaulted;
+    c->user_copy_assign = ucopy_as && !ucopy_as->is_defaulted;
+    c->user_move_assign = umove_as && !umove_as->is_defaulted;
+    c->user_dtor = udtor != NULL;
+    if (ucopy_as || umove_as)
+        c->copy_assign = ucopy_as ? ucopy_as : umove_as;
+
+    /* what the members make of copying, destroying, building, assigning */
+    int mdtor = 1, mcopy = 1, mdefault = 1, massign = 1;
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];
         if (fl->access != CA_PUBLIC)
             private_field = 1;
         if (fl->dflt_tok >= 0)
-            tdefault = 0;
+            mdefault = 0;
         struct cty *e = base_elem(fl->type);
         if (e->k != CT_CLASS)
             continue;
         struct cclass *m = e->cls;
-        tdtor &= m->trivial_dtor;
-        tcopy &= m->trivial_copy;
-        tdefault &= m->trivial_default;
+        mdtor &= m->trivial_dtor;
+        mcopy &= m->trivial_copy;
+        mdefault &= m->trivial_default;
+        massign &= m->trivial_assign;
     }
+    c->trivial_dtor = mdtor && !(udtor && !udtor->is_defaulted);
+    c->trivial_copy = mcopy && !c->user_copy_ctor && !c->user_move_ctor;
+    c->trivial_assign = massign && !c->user_copy_assign &&
+                        !c->user_move_assign;
     /* a user-provided default constructor runs code however empty */
+    int udefault = 0;
     for (struct cfunc *f = c->ctors; f; f = f->next)
         if ((f->type->np == 0 || (f->defargs && f->defargs[0])) &&
             !f->is_defaulted)
-            tdefault = 0;
-    c->trivial_dtor = tdtor;
-    c->trivial_copy = tcopy;
-    c->trivial_default = tdefault && !user_ctor;
-    c->trivial_for_calls = tcopy && tdtor;
-    c->aggregate = !user_ctor && !private_field;
-    if (!user_ctor)
+            udefault = 1;
+    c->trivial_default = mdefault && !udefault &&
+                         (!c->user_ctors || c->has_default_ctor);
+    c->trivial_for_calls = c->trivial_copy && c->trivial_dtor;
+    c->aggregate = !c->user_ctors && !private_field;
+    if (!c->user_ctors)
         c->has_default_ctor = 1;
+
+    /* the user's `= default`s: trivial or defined memberwise */
+    for (struct cfunc *f = c->ctors; f; f = f->next)
+        if (f->is_defaulted) {
+            f->special = f->type->np == 0 ? SP_DEFAULT : copy_kind(f, c);
+            f->trivial = f->special == SP_DEFAULT ? mdefault
+                         : c->trivial_copy;
+        }
+    for (struct cfunc *f = assign_set(c); f; f = f->next)
+        if (f->is_defaulted) {
+            f->special = copy_kind(f, c);
+            f->trivial = c->trivial_assign;
+        }
+    if (udtor && udtor->is_defaulted) {
+        udtor->special = SP_DTOR;
+        udtor->trivial = c->trivial_dtor;
+    }
+
+    /* the implicit declarations (11.4.5.2, 11.4.5.3, 11.4.6, 11.4.7) */
+    int any_user_copy = ucopy || umove || ucopy_as || umove_as;
+    if (!c->user_ctors)
+        declare_implicit(c, SP_DEFAULT, c->trivial_default, 0);
+    if (!ucopy)
+        declare_implicit(c, SP_COPY, c->trivial_copy, umove || umove_as);
+    if (!any_user_copy && !udtor)
+        declare_implicit(c, SP_MOVE, c->trivial_copy, 0);
+    if (!ucopy_as)
+        declare_implicit(c, SP_COPY_ASSIGN, c->trivial_assign,
+                         umove || umove_as);
+    if (!any_user_copy && !udtor)
+        declare_implicit(c, SP_MOVE_ASSIGN, c->trivial_assign, 0);
+    if (!udtor)
+        declare_implicit(c, SP_DTOR, c->trivial_dtor, 0);
 }
 
 /* The this parameter of a member function of c. */
@@ -167,64 +276,157 @@ static struct cvar *this_param(struct cclass *c, unsigned cv)
     return tv;
 }
 
-/* A special member the compiler defines: an empty body, the member
- * initialization or destruction added around it (emit.c). */
-static struct cfunc *make_special(struct cclass *c, int dtor)
+/* The member of the parameter `other` a copy or move reads: moved from
+ * (an xvalue) by a move. */
+static struct cexpr *source_member(struct cexpr *other, struct cfield *fl,
+                                   int move)
 {
-    if (!c->name)
-        cx_error(cx_cur(), "an unnamed class needs a constructor or "
-                           "destructor: not supported yet");
-    struct cfunc *f = xcalloc(1, sizeof *f);
-    f->name = dtor ? cx_fmt("~%s", c->name) : c->name;
-    f->type = ct_func(ct_basic(CT_VOID), NULL, 0, 0);
-    f->owner = c->scope;
-    f->cls = c;
-    f->is_ctor = !dtor;
-    f->is_dtor = dtor;
-    f->is_implicit = 1;
-    f->is_inline = 1;
-    f->defined = 1;
-    f->body_tok = f->mi_tok = -1;
-    f->this_var = this_param(c, 0);
-    f->body = st_new(S_BLOCK);
-    f->params = xcalloc(1, sizeof *f->params);
-    func_register(f);
-    if (!dtor)
-        ctor_meminit(f, NULL, 0);
-    return f;
+    struct cexpr *m = ex_member(other, fl);
+    if (move && !ct_is_ref(fl->type)) {
+        struct cexpr *x = ex_new(E_CAST, m->t, VC_XVALUE);
+        x->a = xmalloc(sizeof *x->a);
+        x->a[0] = m;
+        x->na = 1;
+        x->lvcast = 1;
+        return x;
+    }
+    return m;
 }
 
-/* A `= default` special member, defined when first used. */
+/* A member array copied as a whole: its bytes, when its elements are
+ * trivially copyable. */
+static struct cexpr *array_copy(struct cfield *fl, struct cexpr *src)
+{
+    struct cty *e = base_elem(fl->type);
+    if (e->k == CT_CLASS && !e->cls->trivial_copy)
+        cx_error(cx_cur(), "copying an array of '%s' is not supported yet",
+                 e->cls->name ? e->cls->name : "class");
+    struct cexpr *r = ex_new(E_CONSTRUCT, fl->type, VC_PRVALUE);
+    r->a = xmalloc(sizeof *r->a);
+    r->a[0] = src;
+    r->na = 1;
+    return r;
+}
+
+void define_implicit(struct cfunc *f)
+{
+    if (f->defined)
+        return;
+    struct cclass *c = f->cls;
+    f->defined = 1;
+    f->is_inline = 1;
+    f->body = st_new(S_BLOCK);
+    f->this_var = this_param(c, 0);
+    int np = f->type->np;
+    f->params = xcalloc((size_t)(np ? np : 1), sizeof *f->params);
+    struct cexpr *other = NULL;
+    if (np) {
+        struct cvar *o = xcalloc(1, sizeof *o);
+        o->name = o->cname = "__cx_other";
+        o->type = f->type->params[0];
+        o->is_local = o->is_param = 1;
+        o->fn = f;
+        f->params[0] = o;
+        other = ex_new(E_VAR, ct_strip_ref(o->type), VC_LVALUE);
+        other->var = o;
+    }
+    struct cfunc *savefn = cx_curfn;
+    cx_curfn = f;
+    int move = f->special == SP_MOVE || f->special == SP_MOVE_ASSIGN;
+    switch (f->special) {
+    case SP_DEFAULT:
+        ctor_meminit(f, NULL, 0);
+        break;
+    case SP_COPY: case SP_MOVE:
+        f->meminit = xcalloc((size_t)(c->nfields ? c->nfields : 1),
+                             sizeof *f->meminit);
+        for (int i = 0; i < c->nfields; i++) {
+            struct cfield *fl = c->fields[i];
+            if (!fl->name)
+                continue;
+            struct cexpr *m = source_member(other, fl, move);
+            if (ct_is_ref(fl->type))
+                f->meminit[i] = bind_ref(m, fl->type, "a copy");
+            else if (fl->type->k == CT_ARRAY)
+                f->meminit[i] = array_copy(fl, m);
+            else
+                f->meminit[i] = init_object(fl->type, INIT_DIRECT, &m, 1,
+                                            NULL);
+        }
+        break;
+    case SP_COPY_ASSIGN: case SP_MOVE_ASSIGN: {
+        struct cstmt **tail = &f->body->body;
+        struct cexpr *self = ex_deref(ex_this());
+        for (int i = 0; i < c->nfields; i++) {
+            struct cfield *fl = c->fields[i];
+            if (!fl->name)
+                continue;
+            if (ct_is_ref(fl->type))
+                cx_error(cx_cur(), "'%s' has a reference member: its copy "
+                                   "assignment is deleted", c->name);
+            struct cexpr *m = source_member(other, fl, move);
+            struct cstmt *st = st_new(S_EXPR);
+            if (fl->type->k == CT_ARRAY) {
+                struct cexpr *dst = ex_member(self, fl);
+                struct cexpr *cp = ex_new(E_BUILTIN,
+                                          ct_ptr(ct_basic(CT_VOID)),
+                                          VC_PRVALUE);
+                cp->name = "__builtin_memcpy";
+                cp->a = xmalloc(3 * sizeof *cp->a);
+                cp->a[0] = ex_addr(dst);
+                cp->a[1] = ex_addr(m);
+                cp->a[2] = ex_int(ct_size(fl->type), ct_size_t());
+                cp->na = 3;
+                struct cty *el = base_elem(fl->type);
+                if (el->k == CT_CLASS && !el->cls->trivial_assign)
+                    cx_error(cx_cur(), "assigning an array of objects is "
+                                       "not supported yet");
+                st->e = cp;
+            } else {
+                st->e = expr_assign(TOK_ASSIGN, ex_member(self, fl), m);
+            }
+            *tail = st;
+            tail = &st->next;
+        }
+        struct cstmt *r = st_new(S_RETURN);
+        r->e = bind_ref(self, f->type->to, "return");
+        *tail = r;
+        break;
+    }
+    default:
+        break;                  /* a destructor: emit.c destroys members */
+    }
+    cx_curfn = savefn;
+}
+
+/* A user's `= default`, defined when first used. */
 static void define_defaulted(struct cfunc *f)
 {
     if (f->defined)
         return;
-    f->defined = 1;
-    f->is_inline = 1;
-    f->body = st_new(S_BLOCK);
-    f->this_var = this_param(f->cls, 0);
-    f->params = xcalloc((size_t)(f->type->np ? f->type->np : 1),
-                        sizeof *f->params);
-    if (f->is_ctor) {
-        if (f->type->np != 0)
-            cx_error(cx_cur(), "a defaulted copy or move constructor of '%s' "
-                               "is not supported yet (CX2)", f->cls->name);
-        ctor_meminit(f, NULL, 0);
-    }
+    if (!f->special)
+        cx_error(cx_cur(), "'%s' cannot be defaulted", f->name);
+    define_implicit(f);
 }
 
 struct cfunc *class_dtor(struct cclass *c)
 {
     if (c->trivial_dtor)
         return NULL;
-    if (!c->dtor)
-        c->dtor = make_special(c, 1);
-    else if (c->dtor->is_defaulted)
-        define_defaulted(c->dtor);
-    if (c->dtor->is_deleted)
+    struct cfunc *d = c->dtor;
+    if (d->is_implicit)
+        define_implicit(d);
+    else if (d->is_defaulted)
+        define_defaulted(d);
+    if (d->is_deleted)
         cx_error(cx_cur(), "the destructor of '%s' is deleted", c->name);
-    c->dtor->used = 1;
-    return c->dtor;
+    d->used = 1;
+    return d;
+}
+
+static int runs_no_code(struct cfunc *f)
+{
+    return (f->is_implicit || f->is_defaulted) && f->trivial;
 }
 
 static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
@@ -232,14 +434,28 @@ static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
                                const struct ctok *at)
 {
     if (f->is_deleted)
-        cx_error(at, "use of deleted constructor of '%s'", c->name);
-    if (f->is_defaulted)
-        define_defaulted(f);
-    struct cexpr **conv;
-    int n = convert_args(f, args, na, at, &conv);
+        cx_error(at, "use of deleted %s constructor of '%s'",
+                 f->special == SP_COPY ? "copy" : f->special == SP_MOVE
+                 ? "move" : "a", c->name ? c->name : "class");
     struct cexpr *e = ex_new(E_CONSTRUCT, ct_class(c), VC_PRVALUE);
     e->line = at->t.line;
     e->file = at->file;
+    if (runs_no_code(f)) {
+        /* a trivial default constructor does nothing; a trivial copy or
+         * move is the object's bytes */
+        if (f->special != SP_DEFAULT) {
+            e->a = xmalloc(sizeof *e->a);
+            e->a[0] = args[0];
+            e->na = 1;
+        }
+        return e;
+    }
+    if (f->is_implicit)
+        define_implicit(f);
+    else if (f->is_defaulted)
+        define_defaulted(f);
+    struct cexpr **conv;
+    int n = convert_args(f, args, na, at, &conv);
     e->fn = f;
     e->a = conv;
     e->na = n;
@@ -250,29 +466,17 @@ static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
 static struct cexpr *default_construct(struct cclass *c, int value,
                                        const struct ctok *at)
 {
-    if (c->ctors) {
-        struct cfunc *f = resolve(c->ctors, NULL, NULL, 0, NULL, NULL);
-        if (!f)
-            cx_error(at, "'%s' has no default constructor", c->name);
-        struct cexpr *e = ctor_call(c, f, NULL, 0, at);
-        /* value-init zeroes first where the constructor is not the
-         * user's own */
-        if (value && f->is_defaulted)
-            e->zero = 1;
-        return e;
-    }
-    if (!value && c->trivial_default)
+    struct cfunc *f = resolve(c->ctors, NULL, NULL, 0, NULL, NULL);
+    if (!f)
+        cx_error(at, "'%s' has no default constructor",
+                 c->name ? c->name : "class");
+    if (!value && runs_no_code(f))
         return NULL;
-    struct cexpr *e = ex_new(E_CONSTRUCT, ct_class(c), VC_PRVALUE);
-    e->line = at->t.line;
-    e->file = at->file;
-    e->zero = value;
-    if (!c->trivial_default) {
-        if (!c->implicit_ctor)
-            c->implicit_ctor = make_special(c, 0);
-        e->fn = c->implicit_ctor;
-        e->fn->used = 1;
-    }
+    struct cexpr *e = ctor_call(c, f, NULL, 0, at);
+    /* value-initialization zeroes first where the constructor is not
+     * the user's own */
+    if (value && (f->is_implicit || f->is_defaulted))
+        e->zero = 1;
     return e;
 }
 
@@ -282,21 +486,10 @@ static struct cexpr *copy_from(struct cclass *c, struct cexpr *e,
 {
     if (e->vc == VC_PRVALUE)
         return e;                 /* guaranteed copy elision */
-    if (c->user_copy_ctor || c->user_move_ctor) {
-        struct cfunc *f = resolve_ex(c->ctors, NULL, &e, 1, at, c->name,
-                                     allow_explicit ? 0 : RS_NO_EXPLICIT);
-        return ctor_call(c, f, &e, 1, at);
-    }
-    if (!c->trivial_copy)
-        cx_error(at, "copying a '%s' needs its implicit copy constructor, "
-                     "which is not supported yet (CX2)", c->name);
-    struct cexpr *r = ex_new(E_CONSTRUCT, ct_class(c), VC_PRVALUE);
-    r->line = e->line;
-    r->file = e->file;
-    r->a = xmalloc(sizeof *r->a);
-    r->a[0] = e;
-    r->na = 1;
-    return r;
+    struct cfunc *f = resolve_ex(c->ctors, NULL, &e, 1, at,
+                                 c->name ? c->name : "class",
+                                 allow_explicit ? 0 : RS_NO_EXPLICIT);
+    return ctor_call(c, f, &e, 1, at);
 }
 
 static int same_class(const struct cexpr *e, const struct cclass *c)
@@ -321,17 +514,15 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
             return construct(c, INIT_COPY_LIST, args, na, at);
         if (same_class(e, c))
             return copy_from(c, e, 0, at);
-        if (!c->ctors)
-            cx_error(at, "cannot convert '%s' to '%s'", ct_name(e->t),
-                     c->name);
-        struct cfunc *f = resolve_ex(c->ctors, NULL, &e, 1, at, c->name,
+        struct cfunc *f = resolve_ex(c->ctors, NULL, &e, 1, at,
+                                     c->name ? c->name : "class",
                                      RS_NO_USER | RS_NO_EXPLICIT);
         return ctor_call(c, f, &e, 1, at);
     }
     case INIT_DIRECT: {
         if (na == 1 && same_class(args[0], c))
             return copy_from(c, args[0], 1, at);
-        if (!c->ctors) {
+        if (!c->user_ctors) {
             if (c->aggregate) {
                 /* C++20: an aggregate from a parenthesized list */
                 struct cexpr l;
@@ -344,7 +535,8 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
             cx_error(at, "no constructor of '%s' takes these arguments",
                      c->name);
         }
-        struct cfunc *f = resolve(c->ctors, NULL, args, na, at, c->name);
+        struct cfunc *f = resolve(c->ctors, NULL, args, na, at,
+                                  c->name ? c->name : "class");
         return ctor_call(c, f, args, na, at);
     }
     case INIT_LIST: case INIT_COPY_LIST: {
@@ -358,7 +550,8 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
             return default_construct(c, 1, at);
         if (l->na == 1 && same_class(l->a[0], c))
             return copy_from(c, l->a[0], form == INIT_LIST, at);
-        struct cfunc *f = resolve(c->ctors, NULL, l->a, l->na, at, c->name);
+        struct cfunc *f = resolve(c->ctors, NULL, l->a, l->na, at,
+                                  c->name ? c->name : "class");
         if (f->is_explicit && form == INIT_COPY_LIST)
             cx_error(at, "copy-list-initialization of '%s' chose an "
                          "explicit constructor", c->name);

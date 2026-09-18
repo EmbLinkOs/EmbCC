@@ -162,6 +162,8 @@ static const char *basic_c(enum cty_kind k)
     }
 }
 
+static int need_pmf;            /* the unit uses struct __cx_pmf */
+
 /* t declaring `inner` (a name, or "" for an abstract type), in C. */
 static char *cdecl(struct cty *t, const char *inner)
 {
@@ -179,14 +181,25 @@ static char *cdecl(struct cty *t, const char *inner)
         return cdecl(t->to, t->n >= 0 ? cx_fmt("%s[%ld]", inner, t->n)
                                       : cx_fmt("%s[]", inner));
     case CT_FUNC: {
+        /* the ABI's C: a class not trivially copyable is passed as a
+         * pointer, and returned through the indirect-result pointer */
         struct sb p = { 0, 0, 0 };
-        for (int i = 0; i < t->np; i++)
-            sb_printf(&p, "%s%s", i ? ", " : "", cdecl(t->params[i], ""));
+        int sret = class_indirect(t->to), any = sret;
+        if (sret)
+            sb_printf(&p, "__attribute__((embcc_sret)) %s",
+                      cdecl(ct_ptr(t->to), ""));
+        for (int i = 0; i < t->np; i++) {
+            struct cty *pt = t->params[i];
+            sb_printf(&p, "%s%s", any ? ", " : "",
+                      cdecl(class_indirect(pt) ? ct_ptr(pt) : pt, ""));
+            any = 1;
+        }
         if (t->variadic)
-            sb_put(&p, t->np ? ", ..." : "...");
-        if (!t->np && !t->variadic)
+            sb_put(&p, any ? ", ..." : "...");
+        if (!any && !t->variadic)
             sb_put(&p, "void");
-        return cdecl(t->to, cx_fmt("%s(%s)", inner, sb_str(&p)));
+        return cdecl(sret ? ct_ptr(t->to) : t->to,
+                     cx_fmt("%s(%s)", inner, sb_str(&p)));
     }
     case CT_CLASS:
         return cx_fmt("%s%s %s%s%s", vol, t->cls->is_union ? "union"
@@ -194,6 +207,14 @@ static char *cdecl(struct cty *t, const char *inner)
                       t->cls->cname, sp, inner);
     case CT_ENUM:
         return cdecl(ct_qual(t->en->underlying, t->q), inner);
+    case CT_MPTR:
+        /* Itanium: a data member's offset (null -1), or a member
+         * function's { ptr, adj } */
+        if (ct_is_pmf(t)) {
+            need_pmf = 1;
+            return cx_fmt("%sstruct __cx_pmf%s%s", vol, sp, inner);
+        }
+        return cx_fmt("%slong%s%s", vol, sp, inner);
     default:
         return cx_fmt("%s%s%s%s", vol, basic_c(t->k), sp, inner);
     }
@@ -232,6 +253,42 @@ static void need_var(struct cvar *v)
 {
     if (!v->is_local || v->is_static)
         v->refd = 1;
+}
+
+/* A variable whose C object is a pointer to the C++ one: a reference, a
+ * class parameter passed by reference to the caller's temporary, the
+ * named return value living in the caller's return slot. */
+static int var_is_ptr(const struct cvar *v)
+{
+    if (ct_is_ref(v->type) || v->nrvo)
+        return 1;
+    return v->is_param && class_indirect(v->type);
+}
+
+/* The called function's type (a call's value category may have been
+ * rewritten by an lvalue-to-rvalue conversion; its declared result
+ * decides how C sees it). */
+static struct cty *call_ftype(const struct cexpr *e)
+{
+    if (e->k == E_CALL)
+        return e->fn->type;
+    if (e->k == E_PMCALL)
+        return e->a[1]->t->to;      /* through a pointer to member */
+    return e->a[0]->t->to;          /* E_ICALL: through a pointer */
+}
+
+/* The call returns a reference: C gets a pointer. */
+static int call_ref(const struct cexpr *e)
+{
+    return ct_is_ref(call_ftype(e)->to);
+}
+
+/* A call whose class result the callee builds in a slot the caller
+ * passes (the Itanium return of a class not trivially copyable). */
+static int call_sret(const struct cexpr *e)
+{
+    return (e->k == E_CALL || e->k == E_ICALL || e->k == E_PMCALL) &&
+           class_indirect(call_ftype(e)->to);
 }
 
 /* ---- literals ---- */
@@ -479,11 +536,22 @@ static char *args_text(struct cexpr **a, int n, int from)
     return b.p ? b.p : "";
 }
 
-static char *call_text(struct cexpr *e)
+static char *pmcall_text(struct cexpr *e, const char *dest);
+
+/* The call, its result slot first when it has one (dest: an lvalue). */
+static char *call_text(struct cexpr *e, const char *dest)
 {
+    if (e->k == E_PMCALL)
+        return pmcall_text(e, dest);
+    const char *slot = dest ? cx_fmt("&(%s)%s", dest,
+                                     e->na > (e->k == E_ICALL) ? ", " : "")
+                            : "";
+    if (e->k == E_ICALL)
+        return cx_fmt("(%s)(%s%s)", ev(e->a[0]), slot,
+                      args_text(e->a, e->na, 1));
     need_fn(e->fn);
-    char *t = cx_fmt("%s(%s)", fn_name(e->fn, 1), args_text(e->a, e->na, 0));
-    return t;
+    return cx_fmt("%s(%s%s)", fn_name(e->fn, 1), slot,
+                  args_text(e->a, e->na, 0));
 }
 
 static const char *binop_text(int op)
@@ -512,6 +580,32 @@ static char *member_text(struct cexpr *e)
     if (ct_is_ref(e->field->type))
         return cx_fmt("(*%s)", t);
     return t;
+}
+
+/* (obj->*pmf)(args): adjust `this` by adj; an odd ptr is 1 + a vtable
+ * offset (a virtual function), else the function itself. */
+static char *pmcall_text(struct cexpr *e, const char *dest)
+{
+    struct cty *pmt = e->a[1]->t, *ft = pmt->to;
+    struct cty **ps = xmalloc((size_t)(ft->np + 1) * sizeof *ps);
+    ps[0] = ct_ptr(ct_class(pmt->cls));
+    for (int i = 0; i < ft->np; i++)
+        ps[i + 1] = ft->params[i];
+    struct cty *cft = ct_func(ft->to, ps, ft->np + 1, ft->variadic);
+    int u = cx_uid();
+    struct sb b = { 0, 0, 0 };
+    need_pmf = 1;
+    sb_printf(&b, "({ struct __cx_pmf __cx_m%d = %s; char *__cx_o%d = "
+                  "(char *)%s + __cx_m%d.adj; ", u, ev(e->a[1]), u,
+              ev(e->a[0]), u);
+    sb_printf(&b, "((%s)(((long)__cx_m%d.ptr & 1) ? *(void **)(*(char **)"
+                  "__cx_o%d + (long)__cx_m%d.ptr - 1) : __cx_m%d.ptr))(",
+              ctype(ct_ptr(cft)), u, u, u, u);
+    if (dest)
+        sb_printf(&b, "&(%s), ", dest);
+    sb_printf(&b, "(%s)__cx_o%d%s%s); })", ctype(ps[0]), u,
+              e->na > 2 ? ", " : "", args_text(e->a, e->na, 2));
+    return b.p;
 }
 
 static char *new_text(struct cexpr *e)
@@ -625,18 +719,23 @@ static char *ev(struct cexpr *e)
     case E_OVL:
         cx_error(NULL, "internal: an unresolved overload set reached C");
         return NULL;
-    case E_CALL: {
-        char *t = call_text(e);
-        if (e->vc != VC_PRVALUE)
+    case E_CALL: case E_ICALL: case E_PMCALL: {
+        if (call_sret(e))
+            return materialize(e->t, e);
+        char *t = call_text(e, NULL);
+        if (call_ref(e))
             return cx_fmt("(*%s)", t);
         return t;
     }
-    case E_ICALL: {
-        char *t = cx_fmt("(%s)(%s)", ev(e->a[0]), args_text(e->a, e->na, 1));
-        if (e->vc != VC_PRVALUE)
-            return cx_fmt("(*%s)", t);
-        return t;
-    }
+    case E_MEMPTR:
+        if (e->field)
+            return cx_fmt("%ldL", e->field->off);
+        need_fn(e->fn);
+        need_pmf = 1;
+        return cx_fmt("((struct __cx_pmf){ (void *)%s, 0 })",
+                      fn_name(e->fn, 1));
+    case E_PMEM:
+        return elv(e);
     case E_BUILTIN: {
         struct sb b = { 0, 0, 0 };
         int va = strncmp(e->name, "__builtin_va_", 13) == 0;
@@ -655,6 +754,15 @@ static char *ev(struct cexpr *e)
             char *r = ev(e->a[1]);
             fx->cond--;
             return cx_fmt("(%s %s %s)", l, binop_text(e->op), r);
+        }
+        if (ct_is_pmf(e->a[0]->t)) {
+            /* equal: the same ptr, and — unless null — the same adj */
+            int u = cx_uid();
+            return cx_fmt("({ struct __cx_pmf __cx_a%d = %s, __cx_b%d = %s; "
+                          "%s(__cx_a%d.ptr == __cx_b%d.ptr && (!__cx_a%d.ptr "
+                          "|| __cx_a%d.adj == __cx_b%d.adj)); })", u,
+                          ev(e->a[0]), u, ev(e->a[1]),
+                          e->op == TOK_NEQ ? "!" : "", u, u, u, u, u);
         }
         return cx_fmt("(%s %s %s)", ev(e->a[0]), binop_text(e->op),
                       ev(e->a[1]));
@@ -683,6 +791,17 @@ static char *ev(struct cexpr *e)
             return elv(e);
         if (e->t->k == CT_VOID)
             return cx_fmt("((void)%s)", ev(e->a[0]));
+        if (e->t->k == CT_MPTR) {
+            if (e->a[0]->t->k == CT_MPTR)
+                return ev(e->a[0]);
+            (void)ev(e->a[0]);                /* a null constant */
+            need_pmf |= ct_is_pmf(e->t);
+            return ct_is_pmf(e->t) ? "((struct __cx_pmf){ 0, 0 })" : "(-1L)";
+        }
+        if (e->t->k == CT_BOOL && e->a[0]->t->k == CT_MPTR)
+            return ct_is_pmf(e->a[0]->t)
+                   ? cx_fmt("((%s).ptr != 0)", ev(e->a[0]))
+                   : cx_fmt("(%s != -1L)", ev(e->a[0]));
         return cx_fmt("((%s)%s)", ctype(e->t), ev(e->a[0]));
     case E_ADDR:
         return eaddr(e->a[0]);
@@ -715,7 +834,7 @@ static char *elv(struct cexpr *e)
     switch (e->k) {
     case E_VAR:
         need_var(e->var);
-        if (ct_is_ref(e->var->type))
+        if (var_is_ptr(e->var))
             return cx_fmt("(*%s)", e->var->cname);
         return (char *)e->var->cname;
     case E_DEREF:
@@ -726,10 +845,13 @@ static char *elv(struct cexpr *e)
         return materialize(e->t, e->a[0]);
     case E_STR:
         return str_lit(e);
-    case E_CALL: case E_ICALL:
-        if (e->vc == VC_PRVALUE)
+    case E_CALL: case E_ICALL: case E_PMCALL:
+        if (!call_ref(e))
             return materialize(e->t, e);
         return ev(e);
+    case E_PMEM:
+        return cx_fmt("(*(%s)((char *)%s + %s))", ctype(ct_ptr(e->t)),
+                      eaddr(e->a[0]), ev(e->a[1]));
     case E_CAST:
         if (e->lvcast) {
             if (ct_same_unqual(e->t, e->a[0]->t))
@@ -776,7 +898,7 @@ static char *eaddr(struct cexpr *e)
     switch (e->k) {
     case E_VAR:
         need_var(e->var);
-        if (ct_is_ref(e->var->type))
+        if (var_is_ptr(e->var))
             return (char *)e->var->cname;
         return cx_fmt("(&%s)", e->var->cname);
     case E_DEREF:
@@ -789,14 +911,13 @@ static char *eaddr(struct cexpr *e)
                                    : cx_fmt("(%s).%s", elv(o), f);
         }
         break;
-    case E_CALL: case E_ICALL:
-        if (e->vc != VC_PRVALUE) {
-            if (e->k == E_CALL)
-                return call_text(e);
-            return cx_fmt("(%s)(%s)", ev(e->a[0]),
-                          args_text(e->a, e->na, 1));
-        }
+    case E_CALL: case E_ICALL: case E_PMCALL:
+        if (call_ref(e))
+            return call_text(e, NULL);
         break;
+    case E_PMEM:
+        return cx_fmt("((%s)((char *)%s + %s))", ctype(ct_ptr(e->t)),
+                      eaddr(e->a[0]), ev(e->a[1]));
     case E_CAST:
         if (e->lvcast)
             return cx_fmt("((%s)%s)", ctype(ct_ptr(e->t)), eaddr(e->a[0]));
@@ -825,7 +946,18 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
         return;
     }
     switch (init->k) {
+    case E_CALL: case E_ICALL: case E_PMCALL:
+        if (call_sret(init)) {
+            sb_printf(b, "%s; ", call_text(init, dest));
+            return;
+        }
+        break;
     case E_CONSTRUCT:
+        if (init->t->k == CT_ARRAY && !init->fn && init->na == 1) {
+            sb_printf(b, "__builtin_memcpy(&(%s), %s, %ldUL); ", dest,
+                      eaddr(init->a[0]), ct_size(init->t));
+            return;
+        }
         if (init->t->k == CT_ARRAY) {
             long n = 1;
             struct cty *el = init->t;
@@ -962,9 +1094,13 @@ static int c_const(struct cexpr *e)
         return e->t->k == CT_PTR && addr_const(e);
     case E_ADDR:
         return addr_const(e->a[0]) || e->a[0]->k == E_FUNC;
+    case E_MEMPTR:
+        return 1;
     case E_CAST:
         if (e->lvcast)
             return 0;
+        if (e->t->k == CT_MPTR)
+            return e->a[0]->k != E_CALL && c_const(e->a[0]);
         if (e->t->k == CT_PTR || e->t->k == CT_BOOL)
             return c_const(e->a[0]) &&
                    (e->a[0]->t->k == CT_PTR || e->a[0]->k == E_NULLPTR ||
@@ -998,6 +1134,12 @@ static char *cinit_text(struct cty *t, struct cexpr *e)
         return (t->k == CT_CLASS || t->k == CT_ARRAY) ? "{0}" : "0";
     if (e->k == E_CONSTRUCT)
         return "{0}";
+    if (e->k == E_MEMPTR && e->fn) {
+        need_fn(e->fn);
+        return cx_fmt("{ (void *)%s, 0 }", fn_name(e->fn, 1));
+    }
+    if (e->k == E_CAST && ct_is_pmf(e->t) && e->a[0]->t->k != CT_MPTR)
+        return "{ 0, 0 }";
     if (e->k == E_INITLIST) {
         struct sb b = { 0, 0, 0 };
         sb_put(&b, "{ ");
@@ -1188,6 +1330,14 @@ static void emit_decl(struct sb *b, struct cstmt *s)
         }
         sb_printf(b, "%s%s = %s;\n", cdecl(t, v->cname), al,
                   p ? full_value(p) : "0");
+        return;
+    }
+    if (v->nrvo) {
+        /* the named return value: built in the caller's slot, never
+         * destroyed here */
+        v->cname = "__cx_sret";
+        if (v->ctor)
+            stmt_init(b, "(*__cx_sret)", t, v->ctor);
         return;
     }
     if (t->k == CT_CLASS || t->k == CT_ARRAY) {
@@ -1384,6 +1534,15 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
                                       : "return; }\n");
             return;
         }
+        if (class_indirect(rt)) {
+            /* into the caller's slot; the named return value is there */
+            sb_put(b, "{ ");
+            if (!s->ret_var || !s->ret_var->nrvo)
+                stmt_init(b, "(*__cx_sret)", ct_unqual(rt), s->e);
+            run_cleans(b, 0);
+            sb_put(b, "return __cx_sret; }\n");
+            return;
+        }
         if (!ncleans) {
             if (rt->k == CT_CLASS && s->e->k != E_CALL) {
                 sb_printf(b, "{ %s; ", cdecl(ct_unqual(rt), "__cx_ret"));
@@ -1434,9 +1593,17 @@ static char *func_header(struct cfunc *f, const char *name, int named)
 {
     struct sb p = { 0, 0, 0 };
     int any = 0;
+    int sret = class_indirect(f->type->to);
+    if (sret) {
+        /* the return slot comes first, before `this` (Itanium; x8 on
+         * aarch64 through embcc_sret) */
+        sb_printf(&p, "__attribute__((embcc_sret)) %s",
+                  cdecl(ct_ptr(f->type->to), named ? "__cx_sret" : ""));
+        any = 1;
+    }
     if (f->cls && !f->is_static) {
-        sb_printf(&p, "%s", cdecl(ct_ptr(ct_class(f->cls)),
-                                  named ? "this" : ""));
+        sb_printf(&p, "%s%s", any ? ", " : "",
+                  cdecl(ct_ptr(ct_class(f->cls)), named ? "this" : ""));
         any = 1;
     }
     struct cty *ft = f->type;
@@ -1445,14 +1612,17 @@ static char *func_header(struct cfunc *f, const char *name, int named)
         if (named)
             pn = f->params && f->params[i] ? f->params[i]->cname
                                            : cx_fmt("__cx_p%d", i);
-        sb_printf(&p, "%s%s", any ? ", " : "", cdecl(ft->params[i], pn));
+        struct cty *pt = ft->params[i];
+        sb_printf(&p, "%s%s", any ? ", " : "",
+                  cdecl(class_indirect(pt) ? ct_ptr(pt) : pt, pn));
         any = 1;
     }
     if (ft->variadic)
         sb_put(&p, any ? ", ..." : "...");
     else if (!any)
         sb_put(&p, "void");
-    return cdecl(ft->to, cx_fmt("%s(%s)", name, sb_str(&p)));
+    return cdecl(sret ? ct_ptr(ft->to) : ft->to,
+                 cx_fmt("%s(%s)", name, sb_str(&p)));
 }
 
 static const char *fn_storage(struct cfunc *f)
@@ -1632,6 +1802,7 @@ char *cx_emit_unit(void)
     memset(&out_init, 0, sizeof out_init);
     nwork = 0;
     need_atexit = need_guard = 0;
+    need_pmf = 0;
     ntemps = 0;
     struct fx top, *save;
     fx_begin(&top, &save);
@@ -1699,6 +1870,13 @@ char *cx_emit_unit(void)
         if (f->declared)
             emit_prototype(f);
     sb_put(&out, sb_str(&out_decls));
+    if (need_pmf) {
+        /* whatever above names it is written first */
+        struct sb pre = { 0, 0, 0 };
+        sb_put(&pre, "struct __cx_pmf { void *ptr; long adj; };\n");
+        sb_put(&pre, sb_str(&out));
+        out = pre;
+    }
     /* every referenced variable declared before any definition uses it */
     for (int i = 0; i < cx_ngvars; i++) {
         struct cvar *v = cx_gvars[i];
