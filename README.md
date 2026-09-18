@@ -8,8 +8,8 @@ desktop** with no gcc, no nasm and no `ld` anywhere in the loop.
 
 **EmbCC now emits for two machines.** EmbLinkOS became two architectures when
 its aarch64 campaign closed (`myos/docs/ARM64.md`), and `--target=aarch64-elf`
-answers it: one binary, two backends, chosen at run time (D-011). **60 of the
-68 executable tests compile for aarch64 and RUN on it** under
+answers it: one binary, two backends, chosen at run time (D-011). **61 of the
+69 executable tests compile for aarch64 and RUN on it** under
 `qemu-system-aarch64`. The eight that do not are refused loudly, not
 miscompiled — see "Where aarch64 stands" below.
 
@@ -35,11 +35,21 @@ The decision record below still governs.
 it was written on, where the host *was* the target: a test compiled with
 `embcc`, linked with the host `cc`, and ran. On the Apple Silicon development
 machine that is no longer true — x86-64 ELF objects neither link nor run there
-— so `make test` reports **20/103**, and the 83 that fail all fail at
+— so `make test` reports **20/104**, and the 84 that fail all fail at
 `ld: unknown file type`, not at anything EmbCC emitted. `make test-arm64` is
-**60/68** and is currently the only suite on that machine that actually
+**61/69** and is currently the only suite on that machine that actually
 executes compiled code; restoring the x86-64 half needs the same
 QEMU treatment (see "What's next").
+
+Two of the golden tests that DO pass there are worth reading closely.
+`self-host.sh` is real on both hosts: EmbCC compiles all of its own sources,
+twice, byte-identically, and EmbLD links them into a fully resolved
+`embcc-stage1.elf`. `embbuild-kernel.sh` is opt-in everywhere
+(`EMBCC_KM1=1`) and otherwise passes by skipping — its PASS is not evidence.
+What stands in for the missing x86-64 exec half is
+[tools/x86-identity.sh](tools/x86-identity.sh): it builds embcc at a baseline
+revision and requires today's x86-64 objects to be byte-identical to it, over
+the whole exec corpus at every optimization level and every x86 kernel source.
 
 ## Where it stands next to TCC
 
@@ -174,9 +184,9 @@ oversight.
 - **The x86-64 exec suite, restored on a non-Linux host.** The aarch64 harness
   (`tests/harness/`) shows the shape: a bare-metal image under
   `qemu-system-x86_64` with `isa-debug-exit` where aarch64 uses semihosting.
-  Until then the x86-64 backend's regression cover on this machine is the
-  golden tests — `self-host.sh` and `embbuild-kernel.sh` above all, which do
-  compare real generated code.
+  Until then the x86-64 backend's regression cover on this machine is
+  `tools/x86-identity.sh` (byte identity against a baseline — 646 compiles
+  across the corpus and the kernel) and `self-host.sh`, not a run.
 - **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
   the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1
   program to exit 42. The manifest and a host reference walker already exist;
