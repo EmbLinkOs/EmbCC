@@ -11,6 +11,13 @@
 
 void lex_init(struct lexer *lx, const char *file, const char *src)
 {
+    lex_init_mode(lx, file, src, 0);
+}
+
+void lex_init_mode(struct lexer *lx, const char *file, const char *src,
+                   int cxx)
+{
+    lx->cxx = cxx;
     lx->file = file;
     lx->src = src;
     lx->p = src;
@@ -53,6 +60,42 @@ static void skip_space_and_comments(struct lexer *lx)
         return;
     }
 }
+
+/* C++'s additional keywords (lexer.cxx). `restrict` and `typeof` are not
+ * among them; the GNU `__restrict`/`__typeof__` spellings still are. */
+static const struct {
+    const char *word;
+    enum tok_kind kind;
+} cxx_keywords[] = {
+    { "class", TOK_CX_CLASS }, { "namespace", TOK_CX_NAMESPACE },
+    { "using", TOK_CX_USING }, { "template", TOK_CX_TEMPLATE },
+    { "typename", TOK_CX_TYPENAME }, { "public", TOK_CX_PUBLIC },
+    { "private", TOK_CX_PRIVATE }, { "protected", TOK_CX_PROTECTED },
+    { "virtual", TOK_CX_VIRTUAL }, { "friend", TOK_CX_FRIEND },
+    { "operator", TOK_CX_OPERATOR }, { "new", TOK_CX_NEW },
+    { "delete", TOK_CX_DELETE }, { "this", TOK_CX_THIS },
+    { "true", TOK_CX_TRUE }, { "false", TOK_CX_FALSE },
+    { "nullptr", TOK_CX_NULLPTR }, { "bool", TOK_CX_BOOL },
+    { "explicit", TOK_CX_EXPLICIT }, { "mutable", TOK_CX_MUTABLE },
+    { "constexpr", TOK_CX_CONSTEXPR }, { "consteval", TOK_CX_CONSTEVAL },
+    { "constinit", TOK_CX_CONSTINIT }, { "decltype", TOK_CX_DECLTYPE },
+    { "__decltype", TOK_CX_DECLTYPE }, { "auto", TOK_CX_AUTO },
+    { "noexcept", TOK_CX_NOEXCEPT }, { "throw", TOK_CX_THROW },
+    { "try", TOK_CX_TRY }, { "catch", TOK_CX_CATCH },
+    { "typeid", TOK_CX_TYPEID }, { "static_cast", TOK_CX_STATIC_CAST },
+    { "dynamic_cast", TOK_CX_DYNAMIC_CAST },
+    { "const_cast", TOK_CX_CONST_CAST },
+    { "reinterpret_cast", TOK_CX_REINTERPRET_CAST },
+    { "wchar_t", TOK_CX_WCHAR_T }, { "char8_t", TOK_CX_CHAR8_T },
+    { "char16_t", TOK_CX_CHAR16_T }, { "char32_t", TOK_CX_CHAR32_T },
+    { "concept", TOK_CX_CONCEPT }, { "requires", TOK_CX_REQUIRES },
+    { "co_await", TOK_CX_CO_AWAIT }, { "co_yield", TOK_CX_CO_YIELD },
+    { "co_return", TOK_CX_CO_RETURN }, { "export", TOK_CX_EXPORT },
+    { "thread_local", TOK_CX_THREAD_LOCAL }, { "register", TOK_CX_REGISTER },
+    { "static_assert", TOK_KW_STATIC_ASSERT }, { "alignof", TOK_KW_ALIGNOF },
+    { "alignas", TOK_KW_ALIGNAS }, { "__restrict", TOK_KW_RESTRICT },
+    { "__restrict__", TOK_KW_RESTRICT },
+};
 
 static const struct {
     const char *word;
@@ -376,7 +419,8 @@ void lex_next(struct lexer *lx)
         }
         if (adv) {
             lx->p += adv;
-            pfx = adv == 1 ? q[0] : 0;                 /* u8 is plain char */
+            /* u8 is plain char in C; C++20 makes it char8_t, marked '8' */
+            pfx = adv == 1 ? q[0] : lx->cxx ? '8' : 0;
             if (*lx->p == '"') {
                 t->str_width = w;
                 t->str_prefix = (char)pfx;
@@ -456,9 +500,13 @@ void lex_next(struct lexer *lx)
                   (lx->p[1] == 'x' || lx->p[1] == 'X');
         unsigned long v = strtoul(lx->p, &end, 0);
         int has_u = 0, has_l = 0;
+        t->num_llong = 0;
+        t->char_lit = 0;
         while (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L') {
             if (*end == 'u' || *end == 'U')
                 has_u = 1;
+            else if (has_l)
+                t->num_llong = 1;     /* LL: long long (C++ keeps it apart) */
             else
                 has_l = 1;
             end++;
@@ -496,7 +544,20 @@ void lex_next(struct lexer *lx)
         while (isalnum((unsigned char)*lx->p) || *lx->p == '_')
             lx->p++;
         size_t n = (size_t)(lx->p - start);
+        if (lx->cxx)
+            for (size_t i = 0; i < sizeof cxx_keywords / sizeof cxx_keywords[0];
+                 i++)
+                if (strlen(cxx_keywords[i].word) == n &&
+                    memcmp(cxx_keywords[i].word, start, n) == 0) {
+                    t->kind = cxx_keywords[i].kind;
+                    t->text = xstrndup(start, n);
+                    lx->p = start + n;
+                    return;
+                }
         for (size_t i = 0; i < sizeof keywords / sizeof keywords[0]; i++) {
+            if (lx->cxx && (strcmp(keywords[i].word, "restrict") == 0 ||
+                            strcmp(keywords[i].word, "typeof") == 0))
+                continue;        /* identifiers in C++ */
             if (strlen(keywords[i].word) == n &&
                 memcmp(keywords[i].word, start, n) == 0) {
                 t->kind = keywords[i].kind;
@@ -521,7 +582,10 @@ void lex_next(struct lexer *lx)
     case ';': t->kind = TOK_SEMI; break;
     case '~': t->kind = TOK_TILDE; break;
     case '?': t->kind = TOK_QUESTION; break;
-    case ':': t->kind = TOK_COLON; break;
+    case ':':
+        if (lx->cxx && lx->p[1] == ':') { t->kind = TOK_COLONCOLON; lx->p++; }
+        else t->kind = TOK_COLON;
+        break;
     case '+':
         if (lx->p[1] == '+') { t->kind = TOK_PLUSPLUS; lx->p++; }
         else if (lx->p[1] == '=') { t->kind = TOK_PLUSEQ; lx->p++; }
@@ -530,6 +594,9 @@ void lex_next(struct lexer *lx)
     case '-':
         if (lx->p[1] == '-') { t->kind = TOK_MINUSMINUS; lx->p++; }
         else if (lx->p[1] == '=') { t->kind = TOK_MINUSEQ; lx->p++; }
+        else if (lx->cxx && lx->p[1] == '>' && lx->p[2] == '*') {
+            t->kind = TOK_ARROWSTAR; lx->p += 2;
+        }
         else if (lx->p[1] == '>') { t->kind = TOK_ARROW; lx->p++; }
         else t->kind = TOK_MINUS;
         break;
@@ -574,6 +641,9 @@ void lex_next(struct lexer *lx)
         } else if (lx->p[1] == '<') {
             t->kind = TOK_SHL;
             lx->p++;
+        } else if (lx->cxx && lx->p[1] == '=' && lx->p[2] == '>') {
+            t->kind = TOK_SPACESHIP;
+            lx->p += 2;
         } else if (lx->p[1] == '=') {
             t->kind = TOK_LE;
             lx->p++;
@@ -648,7 +718,10 @@ void lex_next(struct lexer *lx)
         t->kind = TOK_NUM; /* a character constant is an int (or wide) value */
         t->num = lit_char_value(c, pfx, &uns, lx->file, lx->line);
         t->num_long = 0;
+        t->num_llong = 0;
         t->num_uns = uns;
+        t->char_lit = 1;
+        t->str_prefix = (char)pfx;
         break;
     }
     case '"': {
@@ -684,6 +757,9 @@ void lex_next(struct lexer *lx)
         if (lx->p[1] == '.' && lx->p[2] == '.') {
             t->kind = TOK_ELLIPSIS;
             lx->p += 2;
+        } else if (lx->cxx && lx->p[1] == '*') {
+            t->kind = TOK_DOTSTAR;
+            lx->p++;
         } else {
             t->kind = TOK_DOT;
         }
@@ -798,6 +874,16 @@ const char *tok_describe(const struct token *t)
     case TOK_MINUSMINUS: return "'--'";
     case TOK_QUESTION: return "'?'";
     case TOK_COLON: return "':'";
+    case TOK_COLONCOLON: return "'::'";
+    case TOK_DOTSTAR: return "'.*'";
+    case TOK_ARROWSTAR: return "'->*'";
+    case TOK_SPACESHIP: return "'<=>'";
+    default:
+        break;
+    }
+    if (t->kind >= TOK_CX_CLASS && t->text) {     /* a C++ keyword */
+        snprintf(buf, sizeof buf, "'%s'", t->text);
+        return buf;
     }
     return "?";
 }

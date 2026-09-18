@@ -1141,7 +1141,8 @@ char *cpp_process(const char *path, const char *src,
     define_macro(&boot, "__inline__");
     defining_builtins = 0;
     define_macro(&boot, "__STDC__ 1");
-    define_macro(&boot, "__STDC_VERSION__ 199901L");
+    if (!predef_is_cxx())      /* C++ has __cplusplus instead */
+        define_macro(&boot, "__STDC_VERSION__ 199901L");
     define_macro(&boot, "__STDC_HOSTED__ 1");
 
     struct tbuf out = { 0, 0, 0 };

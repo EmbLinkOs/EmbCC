@@ -47,6 +47,24 @@ took target-specific work, or that a reader might doubt.
 | File-scope `__asm__` | ✓ (crt0's vocabulary) | ✗ |
 | Preprocessor (full, incl. `#include_next`), newlib headers | ✓ | ✓ |
 
+## C++
+
+In progress toward C++20 with libstdc++ (D-013, [CXX.md](CXX.md)), the same
+on both targets: `src/cxx` lowers C++ to C for the pipeline above. Names,
+class layout and calls follow the Itanium C++ ABI, as g++ does on both
+targets, so EmbCC's C++ objects link with g++'s and with libstdc++.
+
+| | x86_64 | aarch64 |
+|---|---|---|
+| **CX1** `bool`, `nullptr`, references, namespaces (nested, reopened, inline, unnamed, aliases, `using`), `extern "C"`, overloading, default arguments, enums (scoped, fixed underlying type), the named casts, `auto`/`decltype` for variables | ✓ | ✓ |
+| **CX1** classes: members, `this`, static and const members, constructors (delegating, mem-initializers, default member initializers), destructors on every scope exit, temporaries' lifetimes, `new`/`delete` and `new[]`/`delete[]` (array cookies) | ✓ | ✓ |
+| **CX1** namespace-scope objects (`.init_array`, `__cxa_atexit`), function-local statics (`__cxa_guard_*`) | ✓ | ✓ |
+| Itanium mangling (nested names, `St`, substitutions); EmbCC objects linking with g++ objects both ways | ✓ | ✓ |
+| CX2..CX9 — operators, copy and move, inheritance, templates, exceptions, lambdas, C++20, libstdc++ compiled by EmbCC, C++ on the OS | ✗ refused, naming the milestone | ✗ |
+
+    embcc -c prog.cc -o prog.o          # .cc .cpp .cxx .C .c++, or -x c++
+    embcc --emit-c prog.cc              # the C it lowers to
+
 ## Code generation
 
 | | x86_64 | aarch64 |
@@ -94,6 +112,7 @@ that call each other in both directions: `tests/golden/sysv-abi.sh`,
 | suite | x86_64 | aarch64 |
 |---|---|---|
 | `tests/exec/*.c` — compiled, RUN, and agreeing with gcc (`agrees-with-gcc`) | 81 + 3 x86-only | 81 |
+| `tests/cxx/*.cc` — C++ compiled, RUN, and agreeing with g++ (`cxx-agrees-with-gxx`); an EmbCC half linked with a g++ half (`cxx-abi`) | 4 | 4 |
 | `tests/golden/*.sh` — gcc cross-ABI, gdb, predef, optimizer | 14 | 14 |
 | `tests/golden/<arch>/` — machine-specific referees | 25 (embas vs nasm, embld, embdbg, EMBX, self-host, kernel) | 2 (encoder vs objdump, inline asm vs `aarch64-elf-as`) |
 | `tests/compile/` — refusals | ✓ | — |
@@ -110,5 +129,6 @@ A construct outside what EmbCC supports fails with a diagnostic naming it
 - `va_arg` of a struct or a complex (passing one through `...` works).
 - `section("name")` on a function or a local.
 - A static complex initializer that multiplies or divides two complex values.
-- C++, `__thread`/TLS, position-independent output — out of scope for now
+- C++ past the milestones done (below): each refusal names its milestone.
+- `__thread`/TLS, position-independent output — out of scope for now
   (ARCHITECTURE §8, D-008).

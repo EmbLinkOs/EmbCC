@@ -1,0 +1,92 @@
+// Side B of cxx-abi.sh (compiled by the reference g++).
+#include "abi.h"
+#include <stdarg.h>
+
+namespace abi {
+namespace detail {
+
+int mix(short a, unsigned short b, long long c, unsigned long long d, bool e)
+{
+    return a + b + (int)c + (int)d + e;
+}
+double fl(float a, double b, long double c) { return a + b + (double)c; }
+int str(const char *a, char *b, const char *const *c)
+{
+    int n = 0;
+    while (a[n]) n++;
+    int m = 0;
+    while (b[m]) m++;
+    int k = 0;
+    for (int i = 0; i < 2; i++)
+        for (const char *s = c[i]; *s; s++)
+            k++;
+    return n + m + k;
+}
+int refs(int &a, const int &b, int &&c, Pod &d, const Pod &e)
+{
+    int r = a + b + c + d.a + e.a;
+    a += 10;
+    return r;
+}
+int ptrs(int *a, int **b, const int *c, int *const *d, void *e, const void *f)
+{
+    return (a == *b) + (c == (const int *)e) + (*d == (const int *)f) +
+           (**b == 11) + (*c == 2) + 1;
+}
+int same(Pod *a, Pod *b, Pod &c, const Pod *d) { return a->a + b->a + c.a + d->a; }
+int fn(int (*f)(int), void (*g)(), int (*h)(Pod &, Pod &))
+{
+    Pod x = { 1, 0, 0 }, y = { 4, 0, 0 };
+    g();
+    return f(3) + 1 + h(x, y);
+}
+int arr(int (*a)[4], int (&b)[3])
+{
+    return (*a)[0] + (*a)[1] + (*a)[2] + (*a)[3] + b[0] + b[1] + b[2];
+}
+int en(Color a, Small b, Color *c) { return a + (int)b + (*c == Blue ? 2 : 0); }
+int nul(decltype(nullptr)) { return 42; }
+int chars(wchar_t a, char16_t b, char32_t c, char8_t d) { return a + b + c + d; }
+int var(int n, ...)
+{
+    va_list ap;
+    va_start(ap, n);
+    int s = 0;
+    for (int i = 0; i < n; i++)
+        s += va_arg(ap, int);
+    va_end(ap);
+    return s;
+}
+int nested(Account::Entry *e, Account::Entry &f)
+{
+    int s = 0;
+    for (; e; e = e->next)
+        s += e->amount;
+    return s + f.amount;
+}
+long pod_sum(Pod p) { return p.a + p.b + p.c; }
+
+}
+}
+
+namespace std {
+int std_name(int x) { return x + 1; }
+}
+
+int global_fn(abi::Pod *a, abi::Pod *b) { return a->a + b->a; }
+
+// B builds and uses the class side A defines
+static int use_account()
+{
+    abi::Account acct("bob", 30);
+    acct.deposit(10);
+    abi::Account anon(1);
+    return acct.balance() + anon.balance() + abi::Account::opened() * 0 +
+           (abi::Account::open_count == 2) + (c_fn(1) == 3) +
+           (abi::tag[0] == 's') - 3 + (abi::deep_call() - 42);
+}
+static int b_result = use_account();
+
+namespace abi {
+int deep_call_b() { return b_result; }
+}

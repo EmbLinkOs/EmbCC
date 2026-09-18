@@ -21,6 +21,15 @@ SRCS := \
 	src/lex/lex.c \
 	src/cpp/cpp.c \
 	src/parse/parse.c \
+	src/cxx/cxx.c \
+	src/cxx/tok.c \
+	src/cxx/type.c \
+	src/cxx/scope.c \
+	src/cxx/parse.c \
+	src/cxx/expr.c \
+	src/cxx/class.c \
+	src/cxx/mangle.c \
+	src/cxx/emit.c \
 	src/sema/sema.c \
 	src/sema/type.c \
 	src/sema/ldfloat.c \
@@ -37,11 +46,13 @@ SRCS := \
 	src/arch/x86_64/topasm.c \
 	src/arch/x86_64/as.c \
 	src/arch/x86_64/predef.c \
+	src/arch/x86_64/predef_cxx.c \
 	src/arch/aarch64/irgen.c \
 	src/arch/aarch64/codegen.c \
 	src/arch/aarch64/emit.c \
 	src/arch/aarch64/asm.c \
-	src/arch/aarch64/predef.c
+	src/arch/aarch64/predef.c \
+	src/arch/aarch64/predef_cxx.c
 
 OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
 

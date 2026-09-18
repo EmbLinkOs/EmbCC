@@ -16,6 +16,13 @@ X86_NEWLIB=${EMBCC_X86_NEWLIB:-$(_hp_first "$HOME/cross/newlib-c99/x86_64-elf" \
 AARCH64_NEWLIB=${EMBCC_AARCH64_NEWLIB:-$(_hp_first "$HOME/cross/newlib-aarch64-c99/aarch64-elf" \
                                                    /home/motsou/cross/newlib-aarch64-c99/aarch64-elf)}
 
+# The reference C++ toolchains (tools/build-ref-gxx.sh): g++ and a libstdc++
+# built for each target over its newlib. EmbCC-compiled C++ links their
+# libstdc++/libsupc++ until EmbCC compiles those itself (D-013), and their g++
+# referees EmbCC's C++ the way the cross gcc referees its C.
+X86_REF_GXX=${EMBCC_X86_REF_GXX:-$HOME/cross/gcc-cxx-x86_64-elf}
+AARCH64_REF_GXX=${EMBCC_AARCH64_REF_GXX:-$HOME/cross/gcc-cxx-aarch64-elf}
+
 # GNU binutils that understand x86-64 ELF: the host's own on Linux, the cross
 # ones on a Mac (whose `objdump` is LLVM's and prints differently).
 _hp_tool() { for c in "$@"; do command -v "$c" >/dev/null 2>&1 && { command -v "$c"; return; }; done; echo "$1"; }

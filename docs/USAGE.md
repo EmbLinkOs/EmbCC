@@ -188,7 +188,10 @@ Refused loudly rather than faked, per THE RULE:
   values** — literals, casts, `+`, `-` and scaling by a real fold; `*` and `/`
   of two complex values are left to run time, which is where Annex G's
   special cases (libgcc) apply.
-- **C++, `__thread`/TLS, PIE/PIC output** — out of scope by decision
+- **C++ beyond what docs/CXX.md marks done** — each refusal names the
+  milestone that brings the construct (e.g. "templates are not supported yet
+  (CX4)").
+- **`__thread`/TLS, PIE/PIC output** — out of scope by decision
   (ARCHITECTURE §8, DECISIONS D-008).
 
 Run `embcc`, `embas` or `embld` with no arguments for the current usage line.

@@ -13,6 +13,7 @@
 #include "../arch/x86_64/topasm.h"
 #include "../arch/backend.h"
 #include "../cpp/cpp.h"
+#include "../cxx/translate.h"
 #include "../debug/dwarf.h"
 #include "../arch/predef.h"
 #include "../arch/x86_64/as.h"
@@ -38,17 +39,22 @@ static void print_version(void)
     printf("Targets (--target=): x86_64-elf (default; System V AMD64, "
            "x87 long double) and aarch64-elf (AAPCS64, binary128 long "
            "double through libgcc).\n");
+    printf("C++ (.cc/.cpp/.cxx/.C, or -x c++): in progress toward C++20 "
+           "with libstdc++ (docs/CXX.md) — namespaces, overloading, "
+           "references, classes with constructors and destructors, "
+           "new/delete, lowered through C to either target.\n");
     printf("Also: the preprocessor (-E), -O0..-O2, -g (DWARF), embas "
            "(NASM-syntax .asm, x86-64) and embld (the linker, x86-64 ELF "
-           "and EMBX). Not yet: C++, __thread, PIE, embld for aarch64 — "
+           "and EMBX). Not yet: __thread, PIE, embld for aarch64 — "
            "see docs/COMPATIBILITY.md.\n");
 }
 
 static void print_usage(FILE *out)
 {
     fprintf(out,
-            "usage: embcc [-E] -c FILE.c|FILE.asm [-o FILE.o]\n"
-            "             [--target=x86_64-elf|aarch64-elf]\n"
+            "usage: embcc [-E] -c FILE.c|FILE.cc|FILE.asm [-o FILE.o]\n"
+            "             [--target=x86_64-elf|aarch64-elf] [-x c|c++]\n"
+            "             [-std=...] [--emit-c]\n"
             "             [-I DIR]... [-isystem DIR]... [-g] [-O0|-O1|-O2]\n"
             "             [-mno-sse] [-mno-red-zone] [-mcmodel=kernel] ...\n"
             "       embcc --version | --dump-predef"
@@ -96,11 +102,14 @@ static char *read_file(const char *path)
     return buf;
 }
 
+/* The input with its suffix (.c, .cc, .cpp ...) swapped for .o. */
 static const char *default_output(const char *in)
 {
-    size_t n = strlen(in);
-    char *out = xstrndup(in, n);
-    out[n - 1] = 'o'; /* caller verified the .c suffix */
+    const char *dot = strrchr(in, '.');
+    size_t n = dot ? (size_t)(dot - in) : strlen(in);
+    char *out = xmalloc(n + 3);
+    memcpy(out, in, n);
+    memcpy(out + n, ".o", 3);
     return out;
 }
 
@@ -134,14 +143,36 @@ static int opt_level;
  * unchanged. */
 static int no_sse;
 
+/* The source is C++ (-x c++, or a C++ suffix): it is lowered to C first. */
+static int lang_cxx;
+
+/* --emit-c: print the C a C++ unit lowers to, instead of compiling it. */
+static int emit_c_only;
+
 static int compile(const char *in, const char *out, int pp_only)
 {
     char *src = read_file(in);
     diag_register_source(in, src);   /* so diagnostics can show its lines */
+    predef_set_cxx(lang_cxx);
     char *pp = cpp_process(in, src, incdirs, nincdirs);
     if (pp_only) {
         fputs(pp, stdout);
         return 0;
+    }
+    if (lang_cxx) {
+        pp = cxx_translate(in, pp);
+        if (emit_c_only) {
+            if (out) {
+                FILE *f = fopen(out, "w");
+                if (!f)
+                    diag_fatal(out, 0, "cannot write the file");
+                fputs(pp, f);
+                fclose(f);
+            } else {
+                fputs(pp, stdout);
+            }
+            return 0;
+        }
     }
     struct unit *u = parse_unit(in, pp);
     sema_check(u);
@@ -554,6 +585,20 @@ static int has_c_suffix(const char *s)
     return n > 2 && strcmp(s + n - 2, ".c") == 0;
 }
 
+/* g++'s C++ suffixes. */
+static int has_cxx_suffix(const char *s)
+{
+    static const char *const sfx[] = { ".cc", ".cpp", ".cxx", ".C", ".c++",
+                                       ".cp", ".CPP", ".ii" };
+    size_t n = strlen(s);
+    for (size_t i = 0; i < sizeof sfx / sizeof sfx[0]; i++) {
+        size_t k = strlen(sfx[i]);
+        if (n > k && strcmp(s + n - k, sfx[i]) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 static int has_asm_suffix(const char *s)
 {
     size_t n = strlen(s);
@@ -574,6 +619,7 @@ int main(int argc, char **argv)
 {
     const char *input = NULL, *output = NULL;
     int compile_mode = 0, pp_only = 0;
+    int lang = -1;                  /* -x: 0 C, 1 C++; -1 by suffix */
 
     if (argc < 2) {
         print_usage(stderr);
@@ -619,6 +665,25 @@ int main(int argc, char **argv)
             /* already applied in the pre-scan above */
         } else if (strcmp(argv[i], "-c") == 0) {
             compile_mode = 1;
+        } else if (strncmp(argv[i], "-x", 2) == 0) {
+            const char *l = argv[i][2] ? argv[i] + 2
+                                       : (i + 1 < argc ? argv[++i] : "");
+            if (strcmp(l, "c++") == 0 || strcmp(l, "c++-cpp-output") == 0)
+                lang = 1;
+            else if (strcmp(l, "c") == 0 || strcmp(l, "cpp-output") == 0)
+                lang = 0;
+            else if (strcmp(l, "none") == 0)
+                lang = -1;
+            else {
+                fprintf(stderr, "embcc: error: unknown language '%s' for "
+                                "-x (c or c++)\n", l);
+                return 1;
+            }
+        } else if (strncmp(argv[i], "-std=", 5) == 0) {
+            /* accepted: EmbCC speaks one dialect per language — C11 with
+             * GNU extensions, and C++ working toward C++20 */
+        } else if (strcmp(argv[i], "--emit-c") == 0) {
+            emit_c_only = 1;
         } else if (strcmp(argv[i], "-E") == 0) {
             pp_only = 1;
         } else if (strcmp(argv[i], "-g") == 0) {
@@ -679,7 +744,9 @@ int main(int argc, char **argv)
                 return 1;
             }
             output = argv[++i];
-        } else if (has_c_suffix(argv[i]) || has_asm_suffix(argv[i])) {
+        } else if (has_c_suffix(argv[i]) || has_asm_suffix(argv[i]) ||
+                   has_cxx_suffix(argv[i]) ||
+                   (lang >= 0 && argv[i][0] != '-')) {
             if (input) {
                 fprintf(stderr, "embcc: error: more than one input file "
                                 "(M1: one file at a time)\n");
@@ -698,6 +765,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "embcc: error: no input file\n");
         return 1;
     }
+    lang_cxx = lang >= 0 ? lang : has_cxx_suffix(input);
 
     /* EmbCC's own freestanding headers (stddef, stdarg, stdbool, float)
      * ship beside the binary, so <stdarg.h> resolves with no -I — exactly
@@ -726,6 +794,14 @@ int main(int argc, char **argv)
     }
     if (pp_only)
         return compile(input, NULL, 1);
+    if (emit_c_only) {
+        if (!lang_cxx) {
+            fprintf(stderr, "embcc: error: --emit-c lowers C++; '%s' is C\n",
+                    input);
+            return 1;
+        }
+        return compile(input, output, 0);
+    }
     if (!compile_mode) {
         fprintf(stderr,
                 "embcc: error: cannot link '%s': the integrated linker is "

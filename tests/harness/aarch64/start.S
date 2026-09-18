@@ -87,11 +87,5 @@ _start:
 
     /* 4. argc = 0, argv = NULL: the tests take no arguments, and newlib's
      * startup does not require them. */
-    mov     x0, #0
-    mov     x1, #0
-    bl      main
-
-    /* A test that falls off the end of main exits with main's value, the
-     * same rule the host-linked suite relied on. */
-    bl      _exit
+    bl      __harness_main          /* ../crt.c: constructors, main, exit */
 4:  b       4b

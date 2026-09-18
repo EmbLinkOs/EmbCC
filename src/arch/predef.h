@@ -28,6 +28,15 @@ extern const struct predef_macro predef_macros_x86_64[];
 extern const int predef_macro_count_x86_64;
 extern const struct predef_macro predef_macros_aarch64[];
 extern const int predef_macro_count_aarch64;
+extern const struct predef_macro predef_macros_cxx_x86_64[];
+extern const int predef_macro_count_cxx_x86_64;
+extern const struct predef_macro predef_macros_cxx_aarch64[];
+extern const int predef_macro_count_cxx_aarch64;
+
+/* The language being compiled: 0 C, 1 C++ (its own table — __cplusplus and
+ * friends). Set by the driver before preprocessing. */
+void predef_set_cxx(int cxx);
+int predef_is_cxx(void);
 
 /* The table for the target selected by --target=. Every consumer goes
  * through this rather than naming a table, so adding a third machine

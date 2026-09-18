@@ -241,6 +241,15 @@ void diag_note_at(const char *file, int line, int col, const char *fmt, ...)
     va_end(ap);
 }
 
+void diag_warn_at(const char *file, int line, int col, const char *fmt, ...)
+{
+    va_list ap;
+    fprintf(stderr, "embcc: ");
+    va_start(ap, fmt);
+    diag_render(file, line, col, "\033[1;35m", "warning", fmt, ap);
+    va_end(ap);
+}
+
 void diag_fatal(const char *file, int line, const char *fmt, ...)
 {
     va_list ap;

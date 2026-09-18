@@ -7,6 +7,10 @@
 
 #include <stddef.h>   /* size_t, NULL */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void   *memcpy(void *dst, const void *src, size_t n);
 void   *memmove(void *dst, const void *src, size_t n);
 void   *memset(void *s, int c, size_t n);
@@ -24,4 +28,7 @@ char   *strchr(const char *s, int c);
 char   *strrchr(const char *s, int c);
 char   *strstr(const char *hay, const char *needle);
 
+#ifdef __cplusplus
+}
+#endif
 #endif

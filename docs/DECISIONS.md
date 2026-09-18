@@ -492,3 +492,57 @@ and `-O2`, and the whole ARM kernel) found 293 of 293 identical.
 D-011's reopen condition — the layout makes that sharing a later, visible
 step (a `src/arch/` file both use) rather than a precondition.
 
+## D-013 — C++: **C++20 and libstdc++, on both architectures, lowered through C**
+
+**Decided (2026-09-18).** D-008's "C, then C++" becomes concrete. The
+target is **C++20** with **libstdc++** as the standard library — GNU's, the
+one EmbLinkOS already runs through a ported g++ — on **x86-64 and aarch64**
+alike, with the **Itanium C++ ABI** on both (what g++ uses, so EmbCC objects
+link with g++-built C++ and with libstdc++ itself). It must work over newlib
+first and over emlibc after, and it must eventually run on the OS: C++
+compiled on EmbLinkOS is the capability TCC can never deliver (myos
+PORTS.md).
+
+**Architecture: a C++ front-end that lowers to C** — the shape EDG's
+C-generating back end proved can carry full ISO C++, and cfront before it.
+`src/cxx/` parses C++ with semantic analysis interleaved (C++ cannot be
+parsed without knowing which names are types and templates), and emits C:
+classes become structs laid out by the Itanium rules, member functions
+mangled free functions with an explicit `this`, references pointers,
+constructors/destructors/cleanups explicit calls on every scope exit, virtual
+calls vtable loads, templates instantiated by replaying their tokens with the
+parameters bound. That C goes through the existing pipeline — C sema, IR,
+optimizer, both backends, DWARF (through `#` line markers, so diagnostics and
+debug info point into the `.cc`). One front-end, both machines, from the
+first line.
+
+What plain C cannot say becomes a small internal extension of EmbCC's own C
+(we own both sides): the aarch64 `x8` result pointer for classes returned in
+memory, and — for exceptions — calls with landing pads and the unwind tables
+(`.eh_frame` CFI, the LSDA) the Itanium personality routine reads.
+
+**Library strategy.** libstdc++ is not rewritten; EmbCC grows until it
+compiles it. Until then, EmbCC-compiled C++ links against a g++-built
+libstdc++ (tools/build-ref-gxx.sh builds the reference g++ and a hosted
+libstdc++ against the harness's newlib, per target) — which is also how the
+ABI is proven: every C++ test is built by EmbCC and by the reference g++ and
+must agree, and cross-ABI tests link halves from each. The runtime pieces that
+touch the OS (operator new, `__cxa_atexit`, guards, the unwinder) come from
+libsupc++/libgcc first and are owned later where emlibc needs it.
+
+**Milestones** (docs/CXX.md): CX1 C++ as a better C (namespaces, classes,
+ctors/dtors, overloading and mangling, new/delete, static initialization);
+CX2 operators, conversions, copy/move; CX3 inheritance, virtual functions,
+RTTI; CX4 templates; CX5 exceptions; CX6 the modern core (auto, lambdas,
+constexpr, range-for, ...); CX7 C++20 (concepts, `<=>`, consteval,
+coroutines); CX8 libstdc++ compiled by EmbCC; CX9 C++ on the OS, over emlibc.
+Each is proven by running programs on both targets under QEMU, agreeing with
+g++.
+
+**Rejected:** extending the C parser in place (its parse-then-check shape
+cannot resolve C++'s type/expression ambiguities, and C must stay
+byte-identical while C++ grows); writing our own standard library (a
+complete one is a multi-year authoring project, and conformance would be ours
+alone to prove); libc++ (not binary-compatible with the g++-built C++ already
+on the OS).
+

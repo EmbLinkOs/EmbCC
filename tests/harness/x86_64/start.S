@@ -90,11 +90,7 @@ long_mode:
     rep stosb
 
     and     $-16, %rsp
-    xor     %edi, %edi                 /* argc = 0, argv = NULL */
-    xor     %esi, %esi
-    call    main
-    mov     %eax, %edi                 /* falling off main exits with its value */
-    call    _exit
+    call    __harness_main             /* ../crt.c: constructors, main, exit */
 2:  hlt
     jmp     2b
 

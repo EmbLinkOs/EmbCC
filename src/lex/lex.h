@@ -105,7 +105,25 @@ enum tok_kind {
     TOK_PLUSPLUS,
     TOK_MINUSMINUS,
     TOK_QUESTION,
-    TOK_COLON
+    TOK_COLON,
+    /* C++ only (struct lexer.cxx): punctuators and keywords. In C these
+     * spellings are identifiers or never reach the lexer, so C is untouched. */
+    TOK_COLONCOLON,   /* :: */
+    TOK_DOTSTAR,      /* .* */
+    TOK_ARROWSTAR,    /* ->* */
+    TOK_SPACESHIP,    /* <=> */
+    TOK_CX_CLASS, TOK_CX_NAMESPACE, TOK_CX_USING, TOK_CX_TEMPLATE,
+    TOK_CX_TYPENAME, TOK_CX_PUBLIC, TOK_CX_PRIVATE, TOK_CX_PROTECTED,
+    TOK_CX_VIRTUAL, TOK_CX_FRIEND, TOK_CX_OPERATOR, TOK_CX_NEW,
+    TOK_CX_DELETE, TOK_CX_THIS, TOK_CX_TRUE, TOK_CX_FALSE, TOK_CX_NULLPTR,
+    TOK_CX_BOOL, TOK_CX_EXPLICIT, TOK_CX_MUTABLE, TOK_CX_CONSTEXPR,
+    TOK_CX_CONSTEVAL, TOK_CX_CONSTINIT, TOK_CX_DECLTYPE, TOK_CX_AUTO,
+    TOK_CX_NOEXCEPT, TOK_CX_THROW, TOK_CX_TRY, TOK_CX_CATCH, TOK_CX_TYPEID,
+    TOK_CX_STATIC_CAST, TOK_CX_DYNAMIC_CAST, TOK_CX_CONST_CAST,
+    TOK_CX_REINTERPRET_CAST, TOK_CX_WCHAR_T, TOK_CX_CHAR8_T,
+    TOK_CX_CHAR16_T, TOK_CX_CHAR32_T, TOK_CX_CONCEPT, TOK_CX_REQUIRES,
+    TOK_CX_CO_AWAIT, TOK_CX_CO_YIELD, TOK_CX_CO_RETURN, TOK_CX_EXPORT,
+    TOK_CX_THREAD_LOCAL, TOK_CX_REGISTER
 };
 
 /* One decoded element of a string or character literal.
@@ -148,11 +166,16 @@ struct token {
     int col;       /* 1-based column of the token's first character */
     long num;      /* TOK_NUM; TOK_STR: element count INCLUDING the NUL */
     int str_width; /* TOK_STR: bytes per element — 1 char, 2 char16, 4 wchar/32 */
-    char str_prefix; /* TOK_STR: 'L', 'U', 'u', or 0 — L"" and U"" share a
+    char str_prefix; /* TOK_STR: 'L', 'U', 'u', '8' (u8 in C++: char8_t),
+                      * or 0 — L"" and U"" share a
                       * width but not a type (wchar_t vs char32_t) */
     struct litch *lit; /* TOK_STR: the decoded elements, for concatenation */
     int nlit;
     int num_long;  /* TOK_NUM: type is long (L suffix or magnitude) */
+    int num_llong; /* TOK_NUM: an LL suffix (long long — the same width as
+                    * long, but a distinct type to C++'s overloading) */
+    int char_lit;  /* TOK_NUM from a character constant; str_prefix holds its
+                    * encoding prefix (C++ types 'a' as char, not int) */
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
     double fnum;   /* TOK_FNUM */
     int fnum_is_float; /* TOK_FNUM: an 'f' suffix -> float, else double */
@@ -165,6 +188,7 @@ struct token {
 };
 
 struct lexer {
+    int cxx;          /* C++ mode: its keywords and punctuators (src/cxx) */
     const char *file;
     const char *src;
     const char *p;
@@ -174,6 +198,9 @@ struct lexer {
 };
 
 void lex_init(struct lexer *lx, const char *file, const char *src);
+/* lex_init, choosing C (cxx 0) or C++ (cxx 1) keywords and punctuators. */
+void lex_init_mode(struct lexer *lx, const char *file, const char *src,
+                   int cxx);
 void lex_next(struct lexer *lx);
 
 /* Human-readable name of a token, for diagnostics. */

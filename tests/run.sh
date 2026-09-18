@@ -173,6 +173,57 @@ for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
     fi
 done
 
+# C++ (docs/CXX.md): each tests/cxx program compiled by embcc over the
+# target's newlib, linked with the reference libstdc++ (tools/build-ref-gxx.sh)
+# and run on the QEMU harness — never the host, whose C++ runtime is not the
+# one EmbLinkOS uses.
+. tools/hostpaths.sh
+if [ "$TARGET" = aarch64-elf ]; then
+    cxx_newlib=$AARCH64_NEWLIB ref_gxx=$AARCH64_REF_GXX
+else
+    cxx_newlib=$X86_NEWLIB ref_gxx=$X86_REF_GXX
+fi
+for cc in tests/cxx/*.cc; do
+    [ -e "$cc" ] || continue
+    name=$(basename "$cc" .cc)
+    if [ ! -f "$ref_gxx/$TARGET/lib/libstdc++.a" ]; then
+        echo "SKIP $cc (no reference libstdc++ at $ref_gxx: tools/build-ref-gxx.sh $TARGET)"
+        skip=$((skip + 1))
+        continue
+    fi
+    expect=$(sed -n 's|.*// expect-exit: *\([0-9][0-9]*\).*|\1|p' "$cc" | head -1)
+    if [ -z "$expect" ]; then
+        bad "$cc" "no '// expect-exit: N' line — cannot assert anything" ""
+        continue
+    fi
+    out_dir="tests/cxx/out/${TARGET%-elf}"
+    mkdir -p "$out_dir"
+    obj="$out_dir/$name.o"
+    exe="$out_dir/$name"
+    rm -f "$obj" "$exe"
+    if ! msg=$("$EMBCC" --target="$TARGET" -I"$cxx_newlib/include" -c "$cc" \
+                   -o "$obj" 2>&1); then
+        bad "$cc" "embcc failed" "$msg"
+        continue
+    fi
+    harness=tests/harness/${TARGET%-elf}
+    if ! msg=$(EMBCC_REF_GXX=$ref_gxx "$harness/link.sh" --cxx -o "$exe" "$obj" 2>&1); then
+        bad "$cc" "${TARGET%-elf} link failed" "$msg"
+        continue
+    fi
+    "$harness/run.sh" "$exe" >/dev/null 2>&1
+    got=$?
+    case $got in
+        124) bad "$cc" "timed out after ${QEMU_TIMEOUT}s under QEMU" ""; continue ;;
+        125) bad "$cc" "the guest crashed or reset before exiting" ""; continue ;;
+    esac
+    if [ "$got" -eq "$expect" ]; then
+        ok "$cc (exit $got)"
+    else
+        bad "$cc" "exit $got, expected $expect" ""
+    fi
+done
+
 total=$((pass + fail))
 if [ $total -eq 0 ]; then
     # Zero tests is a failure, not a green run: an empty suite proves nothing.

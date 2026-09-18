@@ -176,8 +176,12 @@ info** (`-g` emits DWARF-4 line/frame/locals, and EmbDBG reads it back), and the
 **kernel's freestanding mode** (`-mno-sse`, `-mcmodel=kernel` and friends — EmbCC
 compiles the whole EmbLinkOS kernel, which boots to the desktop).
 
-**Still out of scope, and refused loudly rather than faked:** C++ (the intended
-second language, D-008, but a different project in size), TLS/`__thread`,
+**C++**, the intended second language (D-008), is now under way (D-013,
+`docs/CXX.md`): `src/cxx` lowers C++ to C for the pipeline above, milestone
+by milestone toward C++20 with libstdc++, and refuses what a later milestone
+brings by naming it.
+
+**Still out of scope, and refused loudly rather than faked:** TLS/`__thread`,
 PIE/PIC output, and targets beyond x86-64 and aarch64. The C language
 itself has no remaining gap on either target (VLAs, `long double` and
 `_Complex` closed in September 2026); the few refused seams are listed in

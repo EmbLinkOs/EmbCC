@@ -38,4 +38,7 @@ void diag_error_at(const char *file, int line, int col, const char *fmt, ...);
  * expansion site. Does not exit. */
 void diag_note_at(const char *file, int line, int col, const char *fmt, ...);
 
+/* A "warning:" at a location. Does not exit. */
+void diag_warn_at(const char *file, int line, int col, const char *fmt, ...);
+
 #endif
