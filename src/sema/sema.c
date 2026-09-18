@@ -1046,17 +1046,63 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 break;
             }
             /* the value IS the first argument; the hint is discarded */
-            else if (strcmp(bn, "expect") == 0) {
-                if (e->nargs < 1)
+            else if (strcmp(bn, "expect") == 0 ||
+                     strcmp(bn, "expect_with_probability") == 0 ||
+                     strcmp(bn, "assume_aligned") == 0) {
+                /* hints: the value is the first argument, unchanged */
+                if (e->nargs < 2)
                     diag_at(u->file, e->line, e->col,
-                               "__builtin_expect takes two arguments");
+                               "%s takes at least two arguments", e->lhs->name);
                 for (int i = 0; i < e->nargs; i++)
                     check_expr(u, f, sc, e->args[i]);
                 *e = *e->args[0];
                 break;
             }
-            /* control never reaches here -> a trap (ud2) */
-            else if (strcmp(bn, "unreachable") == 0) {
+            /* __builtin_constant_p: is the argument a compile-time constant?
+             * Answered here, and the argument is never evaluated. */
+            else if (strcmp(bn, "constant_p") == 0) {
+                long cv;
+                if (e->nargs != 1)
+                    diag_at(u->file, e->line, e->col,
+                            "__builtin_constant_p takes one argument");
+                check_expr(u, f, sc, e->args[0]);
+                int line = e->line, col = e->col;
+                int k = const_fold(e->args[0], &cv);
+                memset(e, 0, sizeof *e);
+                e->kind = EXPR_NUM;
+                e->line = line;
+                e->col = col;
+                e->num = k;
+                e->ty = ty_base(TY_INT, 0);
+                break;
+            }
+            /* __builtin_prefetch: a hint with no effect here, but the address
+             * is still evaluated for its side effects. */
+            else if (strcmp(bn, "prefetch") == 0) {
+                if (e->nargs < 1)
+                    diag_at(u->file, e->line, e->col,
+                            "__builtin_prefetch takes an address");
+                for (int i = 0; i < e->nargs; i++)
+                    check_expr(u, f, sc, e->args[i]);
+                e->name = e->lhs->name;
+                e->ty = ty_base(TY_VOID, 0);
+                break;
+            }
+            /* The bit family: ctz clz popcount ffs parity clrsb, each with l
+             * and ll forms taking long / long long. Lowered in irgen from
+             * ordinary integer ops, on both targets alike. */
+            else if (builtin_bitop(bn, NULL) != 0) {
+                if (e->nargs != 1)
+                    diag_at(u->file, e->line, e->col, "%s takes one argument",
+                            e->lhs->name);
+                check_expr(u, f, sc, e->args[0]);
+                need_integer(u, e->args[0], e->lhs->name);
+                e->name = e->lhs->name;
+                e->ty = ty_base(TY_INT, 0);
+                break;
+            }
+            /* control never reaches here -> a trap (ud2 / udf) */
+            else if (strcmp(bn, "unreachable") == 0 || strcmp(bn, "trap") == 0) {
                 e->name = e->lhs->name;
                 e->ty = ty_base(TY_VOID, 0);
                 break;
@@ -1581,6 +1627,25 @@ static int asm_reg_by_name(const char *n)
         if (strcmp(n, reg_names[i].name) == 0)
             return reg_names[i].reg;
     return -1;
+}
+
+int builtin_bitop(const char *bn, int *width)
+{
+    static const char *const ops[] = { "ctz", "clz", "popcount", "ffs",
+                                       "parity", "clrsb" };
+    for (unsigned i = 0; i < sizeof ops / sizeof ops[0]; i++) {
+        size_t n = strlen(ops[i]);
+        if (strncmp(bn, ops[i], n) != 0)
+            continue;
+        const char *sfx = bn + n;
+        int w = !*sfx ? 4 : (strcmp(sfx, "l") == 0 || strcmp(sfx, "ll") == 0) ? 8 : 0;
+        if (!w)
+            continue;
+        if (width)
+            *width = w;
+        return (int)i + 1;
+    }
+    return 0;
 }
 
 enum atomic_kind atomic_builtin(const char *name, int *op)

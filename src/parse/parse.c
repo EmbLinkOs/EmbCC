@@ -729,6 +729,11 @@ static int size_fold(const struct expr *e, long *out)
          * constant expressions in gcc — `_Static_assert` uses them, and it
          * is evaluated here, before sema folds the call (sema.c
          * check_atomic_call answers the same way). */
+        if (e->lhs && e->lhs->kind == EXPR_VAR && e->nargs == 1 &&
+            strcmp(e->lhs->name, "__builtin_constant_p") == 0) {
+            *out = size_fold(e->args[0], &a);   /* sema answers the same */
+            return 1;
+        }
         if (e->lhs && e->lhs->kind == EXPR_VAR && e->nargs == 2 &&
             (strcmp(e->lhs->name, "__atomic_always_lock_free") == 0 ||
              strcmp(e->lhs->name, "__atomic_is_lock_free") == 0) &&

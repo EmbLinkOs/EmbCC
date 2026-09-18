@@ -906,6 +906,96 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
     }
 }
 
+/* ---- the GCC bit builtins ------------------------------------------------
+ *
+ * Built from ordinary integer ops rather than a target instruction: x86-64's
+ * popcnt is not baseline, a freestanding kernel links no libgcc to call
+ * __popcountdi2 in, and one lowering for both targets is one lowering to get
+ * right. Every form reduces to a population count:
+ *   popcount  the SWAR sequence (pairs, nibbles, bytes, then a multiply)
+ *   ctz(x)    popcount((x & -x) - 1)     — the bits below the lowest set one
+ *   clz(x)    bits - popcount(x smeared right)
+ *   ffs(x)    (x != 0) * (ctz(x) + 1)    — 0 for 0, as C's ffs defines it
+ *   parity    popcount & 1
+ *   clrsb(x)  clz(x ^ (x >> (bits-1))) - 1, the shift arithmetic
+ * ctz and clz of 0 are undefined in gcc; these give the bit width.
+ */
+static int bk(struct ir_func *fn, unsigned long v, int w)
+{
+    return emit_const(fn, (long)v, w);
+}
+
+static int bpopcount(struct ir_func *fn, int x, int w)
+{
+    unsigned long m1 = w == 8 ? 0x5555555555555555UL : 0x55555555UL;
+    unsigned long m2 = w == 8 ? 0x3333333333333333UL : 0x33333333UL;
+    unsigned long m4 = w == 8 ? 0x0F0F0F0F0F0F0F0FUL : 0x0F0F0F0FUL;
+    unsigned long h1 = w == 8 ? 0x0101010101010101UL : 0x01010101UL;
+    int t = emit_bin(fn, IR_AND, emit_bin(fn, IR_SHR, x, bk(fn, 1, w), w, 0),
+                     bk(fn, m1, w), w, 0);
+    x = emit_bin(fn, IR_SUB, x, t, w, 0);
+    t = emit_bin(fn, IR_AND, emit_bin(fn, IR_SHR, x, bk(fn, 2, w), w, 0),
+                 bk(fn, m2, w), w, 0);
+    x = emit_bin(fn, IR_ADD, emit_bin(fn, IR_AND, x, bk(fn, m2, w), w, 0), t,
+                 w, 0);
+    x = emit_bin(fn, IR_AND,
+                 emit_bin(fn, IR_ADD, x,
+                          emit_bin(fn, IR_SHR, x, bk(fn, 4, w), w, 0), w, 0),
+                 bk(fn, m4, w), w, 0);
+    x = emit_bin(fn, IR_MUL, x, bk(fn, h1, w), w, 0);
+    return emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)(w * 8 - 8), w), w, 0);
+}
+
+static int bctz(struct ir_func *fn, int x, int w)
+{
+    struct ir_ins *n = emit(fn);
+    n->op = IR_NEG;
+    n->a = x;
+    n->w = w;
+    n->dst = new_temp(fn);
+    int low = emit_bin(fn, IR_AND, x, n->dst, w, 0);           /* x & -x */
+    return bpopcount(fn, emit_bin(fn, IR_SUB, low, bk(fn, 1, w), w, 0), w);
+}
+
+static int bclz(struct ir_func *fn, int x, int w)
+{
+    for (int sh = 1; sh < w * 8; sh <<= 1)
+        x = emit_bin(fn, IR_OR, x, emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)sh, w),
+                                             w, 0), w, 0);
+    return emit_bin(fn, IR_SUB, bk(fn, (unsigned long)(w * 8), w),
+                    bpopcount(fn, x, w), w, 0);
+}
+
+static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int w)
+{
+    /* the operand as the unsigned int / unsigned long the builtin takes (ffs
+     * and clrsb take a signed one, which is the same bits) */
+    const struct type *ut = ty_base(w == 8 ? TY_LONG : TY_INT, 1);
+    int x = gen_convert(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, ut);
+    int r;
+    switch (kind) {
+    case 1: r = bctz(fn, x, w); break;
+    case 2: r = bclz(fn, x, w); break;
+    case 3: r = bpopcount(fn, x, w); break;
+    case 4: {
+        int nz = emit_cmp(fn, B_NE, x, bk(fn, 0, w), w, 0);
+        nz = gen_convert(fn, nz, ty_base(TY_INT, 0), ut);
+        r = emit_bin(fn, IR_MUL,
+                     emit_bin(fn, IR_ADD, bctz(fn, x, w), bk(fn, 1, w), w, 0),
+                     nz, w, 0);
+        break;
+    }
+    case 5: r = emit_bin(fn, IR_AND, bpopcount(fn, x, w), bk(fn, 1, w), w, 0); break;
+    default: {
+        int sign = emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)(w * 8 - 1), w), w, 1);
+        r = emit_bin(fn, IR_SUB, bclz(fn, emit_bin(fn, IR_XOR, x, sign, w, 0), w),
+                     bk(fn, 1, w), w, 0);
+        break;
+    }
+    }
+    return gen_convert(fn, r, ut, ty_base(TY_INT, 0));    /* the result is int */
+}
+
 static int gen_expr(struct ir_func *fn, struct expr *e)
 {
     switch (e->kind) {
@@ -1310,7 +1400,18 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             emit(fn)->op = IR_FENCE;
             return -1;
         }
-        if (e->name && strcmp(e->name, "__builtin_unreachable") == 0) {
+        if (e->name && strcmp(e->name, "__builtin_prefetch") == 0) {
+            for (int k = 0; k < e->nargs; k++)
+                gen_expr(fn, e->args[k]);          /* for side effects only */
+            return -1;
+        }
+        if (e->name && strncmp(e->name, "__builtin_", 10) == 0) {
+            int bw, bk = builtin_bitop(e->name + 10, &bw);
+            if (bk)
+                return gen_bitop(fn, e, bk, bw);
+        }
+        if (e->name && (strcmp(e->name, "__builtin_unreachable") == 0 ||
+                        strcmp(e->name, "__builtin_trap") == 0)) {
             emit(fn)->op = IR_UD2;
             return -1;
         }
