@@ -7,19 +7,40 @@
 # the build (and eventual self-hosting) does not depend on the cross
 # toolchain.
 #
-# usage: gen-predef.sh [x86_64|aarch64]     (default: both)
+# usage: gen-predef.sh [x86_64|aarch64]              regenerate (default: both)
+#        gen-predef.sh --reference x86_64|aarch64    print the filtered table
+#                                                    (what tests/golden/predef.sh
+#                                                    compares --dump-predef with)
 #
-# Excluded families, each for THE RULE (claim only what is present):
+# Excluded, each for THE RULE (claim only what is present):
 #   __GNUC*__, __VERSION__   EmbCC is not gcc; defining these would switch
 #                            real headers onto gcc-only extension paths.
 #   __STDC*__                owned by the compiler proper, not the target;
 #                            cpp defines them itself (see predef.h).
+#   __BITINT_MAXWIDTH__      gcc 14+ advertises C23 _BitInt with it; EmbCC
+#                            has no _BitInt, so a header testing it must not
+#                            be told otherwise.
 set -eu
+
+EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__)'
+
+refgcc() {
+    gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
+    eval "echo \${$gccvar:-$1-elf-gcc}"
+}
+
+reference() {
+    "$(refgcc "$1")" -dM -E - </dev/null | LC_ALL=C sort | grep -v -E "$EXCLUDE"
+}
+
+if [ "${1:-}" = --reference ]; then
+    reference "${2:?usage: gen-predef.sh --reference x86_64|aarch64}"
+    exit 0
+fi
 
 gen() {
     arch=$1
-    gccvar=$(echo "EMBCC_REF_GCC_$arch" | tr '[:lower:]' '[:upper:]')
-    eval "GCC=\${$gccvar:-$arch-elf-gcc}"
+    GCC=$(refgcc "$arch")
     OUT="$(dirname "$0")/../src/cpp/predef_$arch.c"
 
     command -v "$GCC" >/dev/null 2>&1 || {
@@ -35,9 +56,7 @@ gen() {
         echo "#include \"predef.h\""
         echo
         echo "const struct predef_macro predef_macros_$arch[] = {"
-        "$GCC" -dM -E - </dev/null \
-            | LC_ALL=C sort \
-            | grep -v -E '^#define (__GNUC|__VERSION__|__STDC)' \
+        reference "$arch" \
             | sed -e 's/^#define \([^ ]*\) \(.*\)$/\1\x01\2/' \
             | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
             | sed -e 's/^\(.*\)\x01\(.*\)$/    { "\1", "\2" },/'

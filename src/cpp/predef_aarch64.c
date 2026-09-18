@@ -53,7 +53,6 @@ const struct predef_macro predef_macros_aarch64[] = {
     { "__BFLT16_MIN__", "1.17549435082228750796873653722224568e-38BF16" },
     { "__BFLT16_NORM_MAX__", "3.38953138925153547590470800371487867e+38BF16" },
     { "__BIGGEST_ALIGNMENT__", "16" },
-    { "__BITINT_MAXWIDTH__", "65535" },
     { "__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__" },
     { "__CHAR16_TYPE__", "short unsigned int" },
     { "__CHAR32_TYPE__", "unsigned int" },

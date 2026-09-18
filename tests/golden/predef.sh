@@ -6,33 +6,41 @@
 # hard-#error under TCC.
 set -u
 echo "TEST-MARKER predef"
+. "$(dirname "$0")/../lib.sh"
 
-out=$("$EMBCC" --dump-predef) || { echo "--dump-predef exited nonzero"; exit 1; }
-
-GCC="${EMBCC_REF_GCC:-x86_64-elf-gcc}"
-command -v "$GCC" >/dev/null 2>&1 || GCC=/usr/local/cross/bin/x86_64-elf-gcc
-
-if command -v "$GCC" >/dev/null 2>&1; then
-    ref=$("$GCC" -dM -E - </dev/null | LC_ALL=C sort \
-          | grep -v -E '^#define (__GNUC|__VERSION__|__STDC)')
-    if [ "$out" != "$ref" ]; then
-        echo "table disagrees with $GCC -dM -E:"
-        printf '%s\n' "$out" > "${TMPDIR:-/tmp}/predef.embcc.$$"
-        printf '%s\n' "$ref" | diff -u - "${TMPDIR:-/tmp}/predef.embcc.$$"
-        rm -f "${TMPDIR:-/tmp}/predef.embcc.$$"
-        exit 1
-    fi
-    echo "matches $GCC -dM -E ($(printf '%s\n' "$out" | wc -l) macros)"
-else
-    echo "reference gcc not found; checking the known-fatal macros only"
-    for m in __INT64_TYPE__ __INTPTR_TYPE__ __SIZE_TYPE__ __PTRDIFF_TYPE__ \
-             __CHAR_BIT__ __SIZEOF_POINTER__ __SIZEOF_LONG__ __LP64__ \
-             __x86_64__ __ELF__; do
-        echo "$out" | grep -q "^#define $m " || {
-            echo "missing $m (this is the TCC-patch-0002 class of break)"
+# Each target's table must equal its reference compiler's, filtered by the
+# ONE exclusion list in tools/gen-predef.sh (asked for directly, not restated
+# here, so the test and the generator cannot drift apart).
+checked=0
+for arch in x86_64 aarch64; do
+    out=$("$EMBCC" --target=$arch-elf --dump-predef) || {
+        echo "--target=$arch-elf --dump-predef exited nonzero"; exit 1; }
+    gcc=$(sh tools/gen-predef.sh --reference "$arch" 2>/dev/null >/dev/null && echo yes)
+    if [ "$gcc" = yes ]; then
+        ref=$(sh tools/gen-predef.sh --reference "$arch")
+        if [ "$out" != "$ref" ]; then
+            echo "$arch table disagrees with its reference gcc:"
+            printf '%s\n' "$out" > "${TMPDIR:-/tmp}/predef.embcc.$$"
+            printf '%s\n' "$ref" | diff -u - "${TMPDIR:-/tmp}/predef.embcc.$$"
+            rm -f "${TMPDIR:-/tmp}/predef.embcc.$$"
             exit 1
-        }
-    done
-    n=$(printf '%s\n' "$out" | wc -l)
-    [ "$n" -ge 300 ] || { echo "only $n macros — table looks truncated"; exit 1; }
-fi
+        fi
+        echo "$arch matches its reference gcc -dM -E ($(printf '%s\n' "$out" | wc -l | tr -d ' ') macros)"
+        checked=$((checked + 1))
+    else
+        # No reference compiler: check the macros whose absence made newlib's
+        # headers hard-#error under TCC (patch 0002), plus the arch's own.
+        [ "$arch" = x86_64 ] && own=__x86_64__ || own=__aarch64__
+        for m in __INT64_TYPE__ __INTPTR_TYPE__ __SIZE_TYPE__ __PTRDIFF_TYPE__ \
+                 __CHAR_BIT__ __SIZEOF_POINTER__ __SIZEOF_LONG__ __LP64__ \
+                 __ELF__ $own; do
+            echo "$out" | grep -q "^#define $m " || {
+                echo "$arch: missing $m (the TCC-patch-0002 class of break)"
+                exit 1
+            }
+        done
+        n=$(printf '%s\n' "$out" | wc -l)
+        [ "$n" -ge 300 ] || { echo "$arch: only $n macros — table looks truncated"; exit 1; }
+        echo "$arch: no reference gcc; the known-fatal macros are present"
+    fi
+done
