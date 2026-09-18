@@ -132,6 +132,63 @@ static int at_type_start(struct parser *ps)
 }
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret);
+/* The GNU attributes EmbCC honors; everything else is parsed and dropped. */
+struct attrs { int packed; int aligned; int weak; int noreturn; };
+
+/* Match `name`, `__name`, or `__name__` against a base attribute name. */
+static int attr_is(const char *n, const char *base)
+{
+    if (strcmp(n, base) == 0)
+        return 1;
+    size_t bl = strlen(base);
+    return strncmp(n, "__", 2) == 0 &&
+           strncmp(n + 2, base, bl) == 0 &&
+           strcmp(n + 2 + bl, "__") == 0;
+}
+
+/* Consume a run of `__attribute__((...))`. packed / aligned(N) (struct
+ * layout) and weak (symbol binding) are recorded in `out`; every other
+ * attribute is skipped along with its balanced parenthesized arguments.
+ * Callers pass out=NULL where no attribute is meaningful (member/param). */
+static void parse_attributes(struct parser *ps, struct attrs *out)
+{
+    while (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+        advance(ps);
+        expect(ps, TOK_LPAREN, "'(' after __attribute__");
+        expect(ps, TOK_LPAREN, "a second '(' after __attribute__");
+        while (cur(ps)->kind != TOK_RPAREN && cur(ps)->kind != TOK_EOF) {
+            const char *name = cur(ps)->kind == TOK_IDENT ? cur(ps)->text
+                                                          : NULL;
+            advance(ps);
+            long arg = -1;
+            if (cur(ps)->kind == TOK_LPAREN) {
+                advance(ps);
+                if (cur(ps)->kind == TOK_NUM)
+                    arg = cur(ps)->num;
+                int depth = 1;
+                while (depth > 0 && cur(ps)->kind != TOK_EOF) {
+                    if (cur(ps)->kind == TOK_LPAREN) depth++;
+                    else if (cur(ps)->kind == TOK_RPAREN) depth--;
+                    advance(ps);
+                }
+            }
+            if (name && out) {
+                if (attr_is(name, "packed")) out->packed = 1;
+                else if (attr_is(name, "weak")) out->weak = 1;
+                else if (attr_is(name, "noreturn")) out->noreturn = 1;
+                else if (attr_is(name, "aligned"))
+                    out->aligned = arg > 0 ? (int)arg : 16;
+            }
+            if (cur(ps)->kind == TOK_COMMA)
+                advance(ps);
+            else
+                break;
+        }
+        expect(ps, TOK_RPAREN, "')'");
+        expect(ps, TOK_RPAREN, "a second ')' to close __attribute__");
+    }
+}
+
 static struct type *parse_stars(struct parser *ps, struct type *t);
 static struct expr *parse_cond(struct parser *ps);
 static int size_fold(const struct expr *e, long *out);
@@ -273,18 +330,30 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
     return ty_func(ret, pt, n, varargs);
 }
 
-static struct type *parse_struct_body(struct parser *ps, struct type *t);
+static struct type *parse_struct_body(struct parser *ps, struct type *t,
+                                      const struct attrs *lead);
 static void parse_enum_body(struct parser *ps);
 
 /* struct/union/enum specifier, after the keyword was consumed. */
 static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                                  int allow_body, int line)
 {
+    /* GNU C allows attributes right after the keyword —
+     * `struct __attribute__((packed)) { ... } x;` — as well as after the
+     * closing brace (parse_struct_body). Leading ones are collected here and
+     * applied to the body exactly as trailing ones are. Between the tag and
+     * the '{' is NOT a place gcc accepts one, so neither does EmbCC. */
+    struct attrs lead = { 0, 0, 0, 0 };
+    parse_attributes(ps, &lead);
     const char *tag = NULL;
     if (cur(ps)->kind == TOK_IDENT) {
         tag = cur(ps)->text;
         advance(ps);
     }
+    if (kind == TAG_ENUM && (lead.packed || lead.aligned))
+        diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                "a packed or aligned enum is not supported (EmbCC's enums "
+                "are always int-sized)");
 
     if (cur(ps)->kind == TOK_LBRACE) {
         if (!allow_body)
@@ -320,7 +389,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
             parse_enum_body(ps);
             return ty_base(TY_INT, 0);
         }
-        return parse_struct_body(ps, t);
+        return parse_struct_body(ps, t, &lead);
     }
 
     if (!tag)
@@ -522,6 +591,26 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
 {
     for (;;) {
         skip_quals(ps); /* char * const p, const char *p, ... */
+        /* GCC also lets an attribute sit where a qualifier can:
+         * `typedef uint64_t __attribute__((may_alias)) word_t;`,
+         * `int * __attribute__((unused)) p`. The ones EmbCC ignores everywhere
+         * are ignored here too (may_alias is a no-op: the optimizer has no
+         * type-based alias analysis). The ones it HONOURS elsewhere change
+         * layout or linkage, and this position has nowhere to carry them, so
+         * they are refused rather than silently dropped. */
+        if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+            struct token *at_tok = cur(ps);
+            struct attrs a = { 0, 0, 0, 0 };
+            parse_attributes(ps, &a);
+            if (a.packed || a.aligned || a.weak || a.noreturn)
+                diag_at(ps->lx.file, at_tok->line, at_tok->col,
+                        "__attribute__((%s)) is not supported in this position "
+                        "(after a declarator it is; on a struct or union, put "
+                        "it right after the keyword or after the closing '}')",
+                        a.packed ? "packed" : a.aligned ? "aligned"
+                        : a.weak ? "weak" : "noreturn");
+            continue;
+        }
         if (cur(ps)->kind != TOK_STAR)
             return t;
         t = ty_ptr(t);
@@ -706,64 +795,8 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
     return t;
 }
 
-/* The GNU attributes EmbCC honors; everything else is parsed and dropped. */
-struct attrs { int packed; int aligned; int weak; int noreturn; };
-
-/* Match `name`, `__name`, or `__name__` against a base attribute name. */
-static int attr_is(const char *n, const char *base)
-{
-    if (strcmp(n, base) == 0)
-        return 1;
-    size_t bl = strlen(base);
-    return strncmp(n, "__", 2) == 0 &&
-           strncmp(n + 2, base, bl) == 0 &&
-           strcmp(n + 2 + bl, "__") == 0;
-}
-
-/* Consume a run of `__attribute__((...))`. packed / aligned(N) (struct
- * layout) and weak (symbol binding) are recorded in `out`; every other
- * attribute is skipped along with its balanced parenthesized arguments.
- * Callers pass out=NULL where no attribute is meaningful (member/param). */
-static void parse_attributes(struct parser *ps, struct attrs *out)
-{
-    while (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
-        advance(ps);
-        expect(ps, TOK_LPAREN, "'(' after __attribute__");
-        expect(ps, TOK_LPAREN, "a second '(' after __attribute__");
-        while (cur(ps)->kind != TOK_RPAREN && cur(ps)->kind != TOK_EOF) {
-            const char *name = cur(ps)->kind == TOK_IDENT ? cur(ps)->text
-                                                          : NULL;
-            advance(ps);
-            long arg = -1;
-            if (cur(ps)->kind == TOK_LPAREN) {
-                advance(ps);
-                if (cur(ps)->kind == TOK_NUM)
-                    arg = cur(ps)->num;
-                int depth = 1;
-                while (depth > 0 && cur(ps)->kind != TOK_EOF) {
-                    if (cur(ps)->kind == TOK_LPAREN) depth++;
-                    else if (cur(ps)->kind == TOK_RPAREN) depth--;
-                    advance(ps);
-                }
-            }
-            if (name && out) {
-                if (attr_is(name, "packed")) out->packed = 1;
-                else if (attr_is(name, "weak")) out->weak = 1;
-                else if (attr_is(name, "noreturn")) out->noreturn = 1;
-                else if (attr_is(name, "aligned"))
-                    out->aligned = arg > 0 ? (int)arg : 16;
-            }
-            if (cur(ps)->kind == TOK_COMMA)
-                advance(ps);
-            else
-                break;
-        }
-        expect(ps, TOK_RPAREN, "')'");
-        expect(ps, TOK_RPAREN, "a second ')' to close __attribute__");
-    }
-}
-
-static struct type *parse_struct_body(struct parser *ps, struct type *t)
+static struct type *parse_struct_body(struct parser *ps, struct type *t,
+                                      const struct attrs *lead)
 {
     expect(ps, TOK_LBRACE, "'{'");
     struct member *ms = NULL;
@@ -860,7 +893,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t)
         expect(ps, TOK_SEMI, "';'");
     }
     advance(ps); /* '}' */
-    struct attrs at = { 0, 0, 0, 0 };
+    struct attrs at = *lead;     /* struct __attribute__((packed)) {...} */
     parse_attributes(ps, &at);   /* struct {...} __attribute__((packed)) */
     if (n == 0)
         diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
@@ -1755,6 +1788,13 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * types real code uses here; a same-named tag in two scopes is the
          * documented limitation, not a miscompile. */
         struct type *base = parse_type_spec(ps, 1);
+        /* A declaration with no declarator: `enum { BAND = 64 };` or
+         * `struct tag { ... };` inside a function declares only the tag or
+         * the enumerators, which parse_type_spec has already registered. */
+        if (cur(ps)->kind == TOK_SEMI) {
+            advance(ps);
+            return new_stmt(STMT_BLOCK, t->line, t->col);   /* does nothing */
+        }
         struct stmt *head = NULL, **dtail = &head;
         for (;;) {
             s = new_stmt(STMT_DECL, t->line, t->col);
