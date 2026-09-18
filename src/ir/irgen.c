@@ -653,6 +653,20 @@ static int emit_tobool(struct ir_func *fn, int v, const struct type *from)
     return i->dst;
 }
 
+/* A value about to be TESTED (a condition, !, && or ||): a floating one is
+ * compared with 0.0 as a float — -0.0 is false, which its bit pattern is
+ * not, and a long double is too wide to test as bits at all. Returns the
+ * temp to branch on, and its width in *w. */
+static int truth(struct ir_func *fn, int v, const struct type *t, int *w)
+{
+    if (ty_is_float(t)) {
+        *w = 4;
+        return emit_tobool(fn, v, t);
+    }
+    *w = ty_w(t);
+    return v;
+}
+
 /* An I2F/F2I instruction, spelled out because unsigned-64 conversions build
  * several by hand. `a` is the source vreg. */
 static int emit_i2f(struct ir_func *fn, int a, int srcw, int dstw)
@@ -1238,8 +1252,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         return e->is_post ? old : sum;
     }
     case EXPR_NOT: {
-        int v = gen_expr(fn, e->rhs);
-        return emit_isz(fn, v, ty_w(e->rhs->ty));
+        int w;
+        int v = truth(fn, gen_expr(fn, e->rhs), e->rhs->ty, &w);
+        return emit_isz(fn, v, w);
     }
     case EXPR_NEG:
     case EXPR_BNOT: {
@@ -1313,12 +1328,13 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             int dst = new_temp(fn);
             int l_short = new_label(fn);
             int l_end = new_label(fn);
-            int a = gen_expr(fn, e->lhs);
-            int aw = ty_w(lt);
+            int aw;
+            int a = truth(fn, gen_expr(fn, e->lhs), lt, &aw);
             if (e->op == B_LAND) {
                 emit_brz(fn, a, aw, l_short);
-                int b = gen_expr(fn, e->rhs);
-                int nz = emit_isz(fn, b, ty_w(rt));
+                int bw;
+                int b = truth(fn, gen_expr(fn, e->rhs), rt, &bw);
+                int nz = emit_isz(fn, b, bw);
                 int one = emit_isz(fn, nz, 4); /* !!b */
                 struct ir_ins *m = emit(fn);
                 m->op = IR_MOV;
@@ -1341,8 +1357,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
                 o->dst = dst;
                 emit_jmp(fn, l_end);
                 emit_label(fn, l_rhs);
-                int b = gen_expr(fn, e->rhs);
-                int nz = emit_isz(fn, b, ty_w(rt));
+                int bw;
+                int b = truth(fn, gen_expr(fn, e->rhs), rt, &bw);
+                int nz = emit_isz(fn, b, bw);
                 int one = emit_isz(fn, nz, 4); /* !!b */
                 struct ir_ins *m = emit(fn);
                 m->op = IR_MOV;
@@ -1500,8 +1517,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         int dst = new_temp(fn);
         int l_else = new_label(fn);
         int l_end = new_label(fn);
-        int c = gen_expr(fn, e->args[0]);
-        emit_brz(fn, c, ty_w(e->args[0]->ty), l_else);
+        int cw;
+        int c = truth(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, &cw);
+        emit_brz(fn, c, cw, l_else);
         int a = gen_expr(fn, e->lhs);
         struct ir_ins *m1 = emit(fn);
         m1->op = IR_MOV;
@@ -2962,8 +2980,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
         }
         case STMT_IF: {
             int l_else = new_label(fn);
-            int c = gen_expr(fn, s->cond);
-            emit_brz(fn, c, ty_w(s->cond->ty), l_else);
+            int cw;
+            int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+            emit_brz(fn, c, cw, l_else);
             gen_stmt(fn, s->thn, loop);
             if (s->els) {
                 int l_end = new_label(fn);
@@ -2987,8 +3006,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             emit_label(fn, l_top);
             gen_stmt(fn, s->body, &lc);
             emit_label(fn, lc.cont);
-            int c = gen_expr(fn, s->cond);
-            emit_brnz(fn, c, ty_w(s->cond->ty), l_top);
+            int cw;
+            int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+            emit_brnz(fn, c, cw, l_top);
             emit_label(fn, lc.brk);
             break;
         }
@@ -3045,8 +3065,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             lc.brk = new_label(fn);
             lc.brk_vla = lc.cont_vla = g_nvla;
             emit_label(fn, lc.cont);
-            int c = gen_expr(fn, s->cond);
-            emit_brz(fn, c, ty_w(s->cond->ty), lc.brk);
+            int cw;
+            int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+            emit_brz(fn, c, cw, lc.brk);
             gen_stmt(fn, s->body, &lc);
             emit_jmp(fn, lc.cont);
             emit_label(fn, lc.brk);
@@ -3069,8 +3090,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 gen_expr(fn, s->init);
             emit_label(fn, l_cond);
             if (s->cond) { /* NULL = forever, left by break */
-                int c = gen_expr(fn, s->cond);
-                emit_brz(fn, c, ty_w(s->cond->ty), lc.brk);
+                int cw;
+                int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+                emit_brz(fn, c, cw, lc.brk);
             }
             gen_stmt(fn, s->body, &lc);
             emit_label(fn, lc.cont);
