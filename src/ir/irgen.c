@@ -1937,13 +1937,15 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
         } else if (mlen == 5 && strncmp(m, "cpuid", 5) == 0) {
             code[n++] = 0x0f;
             code[n++] = 0xa2;
-        } else if (mlen == 6 && strncmp(m, "rdrand", 6) == 0) {
+        } else if (mlen == 6 && (strncmp(m, "rdrand", 6) == 0 ||
+                                 strncmp(m, "rdseed", 6) == 0)) {
+            /* rdrand is 0F C7 /6, rdseed the same opcode with /7 */
             if (reg < 0)
-                diag_fatal(file, line, "asm 'rdrand' wants %%N: \"%s\"", tmpl);
+                diag_fatal(file, line, "asm '%.6s' wants %%N: \"%s\"", m, tmpl);
             code[n++] = (unsigned char)(0x48 | (reg >= 8 ? 1 : 0)); /* REX.W(.B) */
             code[n++] = 0x0f;
             code[n++] = 0xc7;
-            code[n++] = (unsigned char)(0xf0 | (reg & 7));          /* /6 */
+            code[n++] = (unsigned char)((m[2] == 's' ? 0xf8 : 0xf0) | (reg & 7));
         } else if (mlen == 4 && strncmp(m, "setc", 4) == 0) {
             if (reg < 0)
                 diag_fatal(file, line, "asm 'setc' wants %%N: \"%s\"", tmpl);
@@ -1994,6 +1996,12 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
         }
         /* ---- fixed-form instructions (no encoded operands) ---- */
         else if (mlen == 3 && strncmp(m, "cli", 3) == 0) { code[n++] = 0xfa; }
+        /* SMAP: stac / clac set and clear EFLAGS.AC around user accesses */
+        else if (mlen == 4 && strncmp(m, "stac", 4) == 0) {
+            code[n++] = 0x0f; code[n++] = 0x01; code[n++] = 0xcb;
+        } else if (mlen == 4 && strncmp(m, "clac", 4) == 0) {
+            code[n++] = 0x0f; code[n++] = 0x01; code[n++] = 0xca;
+        }
         else if (mlen == 3 && strncmp(m, "sti", 3) == 0) { code[n++] = 0xfb; }
         else if (mlen == 3 && strncmp(m, "hlt", 3) == 0) { code[n++] = 0xf4; }
         else if (mlen == 3 && strncmp(m, "nop", 3) == 0) { code[n++] = 0x90; }
@@ -2779,6 +2787,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             for (int i = 0; i < a->nout; i++) {
                 ia->out[i].temp = gen_addr(fn, a->out[i].expr);
                 ia->out[i].size = ty_size(a->out[i].expr->ty);
+                /* "+": the register must START with the lvalue's value */
+                ia->out[i].inout = strchr(a->out[i].constraint, '+') != NULL;
             }
             struct ir_ins *ins = emit(fn);
             ins->op = IR_ASM;

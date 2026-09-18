@@ -16,6 +16,11 @@ cat > "$src" <<'EOF'
 typedef unsigned long u64; typedef unsigned int u32;
 typedef unsigned short u16; typedef unsigned char u8;
 void f_cli(void){ __asm__ volatile("cli"); }
+void f_smap(void){ __asm__ volatile("stac" ::: "cc", "memory");
+                   __asm__ volatile("clac" ::: "cc", "memory"); }
+u64  f_rdseed(void){ u64 v; unsigned char ok;
+                     __asm__ volatile("rdseed %0; setc %1" : "=r"(v), "=qm"(ok) :: "cc");
+                     return ok ? v : 0; }
 void f_sti(void){ __asm__ volatile("sti; hlt"); }
 void f_pause(void){ __asm__ volatile("pause"); }
 void f_fence(void){ __asm__ volatile("mfence"); __asm__ volatile("lfence");
@@ -88,7 +93,7 @@ if printf '%s\n' "$dis" | grep -q '(bad)'; then
 fi
 
 # every expected mnemonic must be present, exactly as the reference decodes it
-for want in cli sti hlt pause mfence lfence sfence wbinvd rdtsc rdmsr wrmsr \
+for want in cli stac clac rdseed sti hlt pause mfence lfence sfence wbinvd rdtsc rdmsr wrmsr \
             pushf 'mov +%rax,%cr0' 'mov +%cr2,%rax' 'out +%al' 'in +.*%al' \
             invlpg lidt lgdt str ltr movdqa iretq 'mov +\$0x1,%rax' \
             lretq 'lea +0x3\(%rip\)' 'mov +\$0x10,%ax' 'mov +%eax,%ds' \

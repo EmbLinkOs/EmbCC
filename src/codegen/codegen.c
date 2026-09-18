@@ -2270,6 +2270,38 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * address so the result register survives the store. */
             cg_reset();   /* the template may clobber any register */
             struct ir_asm *ia = i->asm_ir;
+            /* A "+" output is read AND written: its register must hold the
+             * lvalue's current value when the template starts. Without this
+             * `asm("addq $1,%0" : "+r"(x))` computed on whatever the register
+             * held — the output's own address, as it happened. Loaded before
+             * the inputs, through a scratch no operand uses. */
+            {
+                int busy[16] = { 0 };
+                for (int k = 0; k < ia->nin; k++)
+                    if (ia->in[k].reg < 16) busy[ia->in[k].reg] = 1;
+                for (int k = 0; k < ia->nout; k++)
+                    if (ia->out[k].reg < 16) busy[ia->out[k].reg] = 1;
+                static const int pre_pool[] = { REG_RCX, REG_RDX, REG_RSI,
+                                                REG_RDI, 8, 9, 10, 11, REG_RAX };
+                int pre = -1;
+                for (unsigned p = 0; p < sizeof pre_pool / sizeof pre_pool[0]; p++)
+                    if (!busy[pre_pool[p]]) { pre = pre_pool[p]; break; }
+                for (int k = 0; k < ia->nout; k++) {
+                    if (!ia->out[k].inout)
+                        continue;
+                    if (pre < 0)
+                        diag_fatal(f->file, i->line ? i->line : f->line,
+                                   "no scratch register for a \"+\" asm "
+                                   "operand in '%s'", f->name);
+                    x86_load_reg_mem(text, pre, REG_RBP, sd[ia->out[k].temp], 8);
+                    if (ia->out[k].reg >= 16)
+                        x86_movs_load_base(text, ia->out[k].reg - 16, pre, 0,
+                                           ia->out[k].size);
+                    else
+                        x86_load_reg_mem(text, ia->out[k].reg, pre, 0,
+                                         ia->out[k].size);
+                }
+            }
             /* Inputs carry their VALUE: a GPR ('r'/fixed) operand loads from its
              * slot into the register; an xmm ('x', reg 16..23) uses movss/movsd
              * into the xmm register instead. */
