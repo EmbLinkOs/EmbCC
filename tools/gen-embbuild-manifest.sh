@@ -96,7 +96,7 @@ for src in $SRCS; do
 done
 
 # The link: crt0 + syscalls + every object + libc, exactly the self-host line
-# (tests/golden/self-host.sh), through EmbLD.
+# (tests/golden/x86_64/self-host.sh), through EmbLD.
 printf 'name: embcc.elf\n'
 printf 'kind: link\n'
 printf 'inputs: %s/crt0.o %s/syscalls.o%s %s/libc.a\n' "$ABI" "$ABI" "$objs" "$ABI"

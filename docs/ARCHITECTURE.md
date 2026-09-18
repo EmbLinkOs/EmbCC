@@ -61,8 +61,8 @@ difficulty:
   CFG, the dominator tree (Cooper-Harvey-Kennedy) and dominance frontiers,
   inserts phis, renames, and destructs SSA back to copies. The IR stays the
   honest linear form it started as; SSA is a lens the optimizer puts on it.
-- **`src/codegen`** carries register allocation (Chaitin-Briggs), stack-slot
-  coalescing and a residency cache.
+- **`src/arch/x86_64/codegen.c`** carries register allocation
+  (Chaitin-Briggs), stack-slot coalescing and a residency cache.
 
 The single-assignment temporaries are still what make the *local* passes sound
 with no analysis at all — that property is why the cheap passes came first.
@@ -128,28 +128,39 @@ facts above are each covered by a golden test rather than a comment.
 src/
   driver/     argv, flags, orchestration
   lex/        tokens
-  cpp/        preprocessor (+ the predefined macro table, §5)
+  cpp/        preprocessor
   parse/      AST
-  sema/       types + checking + diagnostics
-  ir/         the intermediate form
-  codegen/    x86-64 lowering + register allocation
-  asm/        instruction encoding
-  as/         EmbAS — standalone NASM/Intel assembler
+  sema/       types + checking + diagnostics (+ exact long double constants)
+  ir/         the intermediate form, and its target-neutral generation
   opt/        IR-level optimizer (local + global passes, SSA on demand)
   debug/      DWARF-4 emission for -g
+  elf/        shared ELF structures and the object writer
   embx/       the EMBX container, byte-exact
-  link/       EmbLD — ELF reading/writing, relocation, archives, EMBX output
-  elf/        shared ELF structures used by asm, as + link
+  link/       EmbLD — ELF reading, relocation, archives, EMBX output (x86-64)
+  arch/       everything that depends on the machine (D-012):
+    target.c    --target= and relocation kinds
+    backend.h   the contract each backend implements
+    code.c      the machine-code buffer
+    predef.c    which predefined-macro table (§5)
+    x86_64/     codegen (SysV, x87, register allocation), encoder, va_arg and
+                inline asm, file-scope asm, EmbAS, predefined macros
+    aarch64/    codegen (AAPCS64, libgcc binary128), encoder, va_arg and
+                inline asm, the inline-asm assembler, predefined macros
 tests/
-  exec/       programs compiled and RUN (the ones that count)
+  exec/       programs compiled and RUN on every target (exec/<arch>/: one only)
   compile/    programs that must compile (or must fail, with which diagnostic)
-  golden/     output compared against gcc/TCC for agreed cases
+  golden/     checks against gcc, gdb, nasm, objdump for every target
+              (golden/<arch>/: machine-specific)
+  harness/    the QEMU bare-metal harness per architecture
 ```
+
+What each architecture supports is tabulated in
+[COMPATIBILITY.md](COMPATIBILITY.md).
 
 **Self-hosting constrains the source itself.** EmbCC compiles EmbCC, so its own
 code stays within the C subset it implements — no dependency on anything it
 cannot parse. Practically: plain C99, no sprawling third-party headers. This is
-no longer a periodic honest check but a hard gate: `tests/golden/self-host.sh`
+no longer a periodic honest check but a hard gate: `tests/golden/x86_64/self-host.sh`
 and the on-OS `test embcc self` oracle fail the moment a source drifts outside
 the subset.
 
@@ -160,7 +171,7 @@ passes, debug info (DWARF), C++, TLS/`__thread`, PIE/PIC output, cross-targets
 other than x86-64, and the kernel's freestanding mode (DECISIONS D-007).
 
 *Since the early milestones closed, three of these were done deliberately:*
-**optimization passes** (`-O1`/`-O2` — §3, `src/opt`/`src/codegen`), **debug
+**optimization passes** (`-O1`/`-O2` — §3, `src/opt`/`src/arch`), **debug
 info** (`-g` emits DWARF-4 line/frame/locals, and EmbDBG reads it back), and the
 **kernel's freestanding mode** (`-mno-sse`, `-mcmodel=kernel` and friends — EmbCC
 compiles the whole EmbLinkOS kernel, which boots to the desktop).

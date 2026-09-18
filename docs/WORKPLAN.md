@@ -104,7 +104,7 @@ self-hosting. It did not change stream A's order.
 |---|---|---|
 | `embread` | EMBX dumper + verifier | **done** — `tools/embread/`, EMBX spec §9 |
 | `EmbLD` | the integrated linker; emits ELF ET_EXEC and EMBX | **done** — `src/link` + `tools/embld/`; links EmbCC and the kernel, on host and OS |
-| `EmbAS` | standalone NASM/Intel assembler | **done** — `src/as` + `tools/embas/`; byte-identical to nasm on all 6 kernel `.asm` (A1) |
+| `EmbAS` | standalone NASM/Intel assembler | **done** — `src/arch/x86_64/as.c` + `tools/embas/`; byte-identical to nasm on all 6 kernel `.asm` (A1) |
 | `emlibc` | the OS's own non-POSIX libc | **EmbCC compiles it**, fdlibm floating point included, and it self-hosts on the OS (D-009) |
 | `EmbDBG` | debugger | **v0 done** — `embcc -g` emits DWARF-4 line/frame/locals and `tools/embdbg` reads it back (symbolize, inspect, disassemble, TUI), no gdb needed. `docs/EMBDBG_Requirements.md` tracks what is past v0. |
 
@@ -142,7 +142,7 @@ was a ready-made test case. All of them now pass:
 EmbLinkOS kernel ran it: `[syscall] exit code=0x2A` — exit 42, no
 cross-ld anywhere. Proven on the host first (structure vs cross-ld from
 identical inputs — the data segment byte-for-byte the same; D-005), then
-on the OS. `tests/golden/embld-b1.sh` keeps the host half green;
+on the OS. `tests/golden/x86_64/embld-b1.sh` keeps the host half green;
 `embld-link.sh` covers the linker's mechanics.
 
 **B2 — DONE (2026-07-24).** Output-section grouping (input sections

@@ -4,9 +4,10 @@
 *itself* (the self-hosting fixed point holds), and the EmbLinkOS **kernel** —
 89 C translation units through `embcc`, 6 hand-written `.asm` through `embas`,
 linked by `embld` — built and **booted to the home desktop** with no gcc, no
-nasm and no `ld` anywhere in the loop. The kernel has kept growing since: it is
-165 C units today, and 4 of them use constructs EmbCC does not yet compile
-(see "What's next").
+nasm and no `ld` anywhere in the loop. The kernel has kept growing since —
+165 C units and 6 `.asm` today — and the whole of it still builds from its
+EmbBuild manifest with EmbCC alone and boots
+(`tests/golden/x86_64/embbuild-kernel.sh`).
 
 **EmbCC now emits for two machines.** EmbLinkOS became two architectures when
 its aarch64 campaign closed (`myos/docs/ARM64.md`), and `--target=aarch64-elf`
@@ -15,8 +16,9 @@ test corpus compiles for aarch64 and RUNS on it under `qemu-system-aarch64`,
 agreeing with gcc's build of every program, and **all 131 C files in the
 EmbLinkOS ARM kernel build compile** — see "Where aarch64 stands" below.
 
-`embcc -c` compiles C to genuine x86_64-elf relocatable objects, cross-checked
-against gcc on every test: the integer and floating types, pointers (incl.
+`embcc -c` compiles C11 to genuine relocatable objects for either machine,
+cross-checked against gcc on every test: the integer and floating types
+(`long double` and `_Complex` included), VLAs, pointers (incl.
 function pointers), arrays, structs/unions/enums, bitfields, globals, the full
 operator and statement set, C11 (`_Alignof`/`_Alignas`/`_Atomic`/`_Generic`/
 `_Static_assert`), and the GNU extensions the kernel needs — statement
@@ -109,11 +111,12 @@ Both are legitimate; EmbCC is the second, entered with eyes open. See
 | Doc | What it is |
 |---|---|
 | [docs/VISION.md](docs/VISION.md) | Why a native compiler; the ownership thesis; the own-the-stack vs host-the-world tension |
-| [docs/VISION_LONGTERM.md](docs/VISION_LONGTERM.md) | The horizon past the named milestones: C++, deeper analysis, compiler services — gated by D-006. Optimization and diagnostics have since landed off this list; see `src/opt`, `src/codegen`, `src/driver/util.c` |
+| [docs/VISION_LONGTERM.md](docs/VISION_LONGTERM.md) | The horizon past the named milestones: C++, deeper analysis, compiler services — gated by D-006. Optimization and diagnostics have since landed off this list; see `src/opt`, `src/arch`, `src/driver/util.c` |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Decisions already made, each with its rationale (ADR-style) |
 | [docs/TARGET_ABI.md](docs/TARGET_ABI.md) | **The grounding doc.** The exact EmbLinkOS contract EmbCC must emit — syscalls, crt0, and the precise ELF the in-kernel loader accepts |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Intended compiler structure and phases |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Milestones M0–M4, each with a concrete acceptance test, and what is open past them |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | **What works on which architecture** — types, language, ABI, tools, EmbLinkOS status and test coverage, x86-64 against aarch64 |
 | [docs/USAGE.md](docs/USAGE.md) | The `embcc`/`embas`/`embld`/`embdbg` CLI reference |
 | [tests/harness/](tests/harness/) | The aarch64 proving ground: a bare-metal QEMU `virt` image with an ARM-semihosting syscall floor, so compiled code is RUN on the architecture it was compiled for |
 | [docs/todo.md](docs/todo.md) | The evidence-backed completeness audit: what C we do not yet compile, ranked by a real corpus |
@@ -133,11 +136,20 @@ structure, then [docs/TARGET_ABI.md](docs/TARGET_ABI.md), which is the grounding
 doc: the exact contract the OS enforces, and the expensive facts that cost a
 debugging session each.
 
+The source is laid out by phase, with the machine confined to one place:
+`src/lex`, `cpp`, `parse`, `sema`, `ir`, `opt`, `debug`, `elf`, `driver` never
+name a target; everything that does is under `src/arch/` — shared pieces at
+its top, then [`src/arch/x86_64/`](src/arch/x86_64/README.md) and
+[`src/arch/aarch64/`](src/arch/aarch64/README.md), each with its backend,
+encoder, share of IR generation (`va_arg`, inline asm) and predefined macros
+([src/arch/README.md](src/arch/README.md)). The tests follow suit:
+`tests/golden/` runs for both targets, `tests/golden/<arch>/` for one.
+
 To build and run it:
 
 ```sh
 make && make embdbg     # embdbg is not in `all`, and the golden tests need it
-make test               # x86-64: needs a Linux x86-64 host to run the exec half
+make test               # x86-64: compiles AND runs, natively or under qemu-system-x86_64
 make test-arm64         # aarch64: compiles AND runs, under qemu-system-aarch64
 ```
 
@@ -152,7 +164,9 @@ Then [docs/USAGE.md](docs/USAGE.md) for the CLI.
 
 ## Where aarch64 stands
 
-Working, and proven by running it: the integer and floating types, pointers,
+The feature-by-feature comparison with x86-64 is
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). In short, working and proven
+by running it: the integer and floating types, pointers,
 arrays, structs and unions by value (AAPCS64 — including the composite-return
 rules and the hidden `x8` pointer), the full operator and statement set,
 globals, string literals, computed `goto`, calls both direct and through
@@ -161,7 +175,7 @@ produces real `EM_AARCH64` ET_REL objects with `R_AARCH64_CALL26` /
 `ADR_PREL_PG_HI21` / `ADD_ABS_LO12_NC` / `ABS64` relocations that
 `aarch64-elf-ld` links against stock newlib.
 
-The inline-asm assembler (`src/asm/asm_arm64.c`) covers exactly the
+The inline-asm assembler (`src/arch/aarch64/asm.c`) covers exactly the
 vocabulary the ARM kernel uses, measured rather than guessed — 67 distinct
 templates collected by preprocessing every C file the aarch64 kernel build
 compiles: `mrs`/`msr` over 41 named system registers plus the generic
@@ -181,6 +195,10 @@ gcc calling EmbCC, and a `va_list` handed across the line in both directions.
 `-g` works on aarch64 as on x86-64 — DWARF lines, and variable locations off
 x29 — and a real gdb debugs the program running in QEMU on both targets
 (`tests/golden/debug-live.sh`).
+
+VLAs, `long double` (IEEE binary128 through libgcc, as gcc does) and
+`_Complex` work here as on x86-64, each checked against gcc across the call
+boundary.
 
 The backend is also naive where the x86 one is not: no slot coalescing, no
 residency cache, no register allocator, so frames are wider and the code is

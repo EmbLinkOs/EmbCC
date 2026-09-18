@@ -84,16 +84,15 @@ bad()  { echo "FAIL $1 ($2)"; [ -n "$3" ] && printf '%s\n' "$3" | sed 's/^/     
 # The .sh tests drive the x86-64 toolchain (embld, embas, the golden
 # disassemblies). Under --target=aarch64-elf only the ones that are about
 # aarch64 run; the rest would be asserting the wrong machine.
+# tests/golden/*.sh run for every target (they compile with --target=$TARGET);
+# tests/golden/<arch>/ holds what is about one machine only — the x86-64
+# toolchain (embas, embld, embdbg, the kernel build) or the aarch64 encoder
+# and inline-asm referees. The refusal tests drive the default target.
+arch_dir=tests/golden/${TARGET%-elf}
 if [ "$TARGET" = aarch64-elf ]; then
-    sh_tests="tests/golden/arm64-encoding.sh tests/golden/arm64-asm.sh
-              tests/golden/agrees-with-gcc.sh tests/golden/predef.sh
-              tests/golden/optimizer.sh tests/golden/regalloc-O2.sh
-              tests/golden/include-next.sh tests/golden/sysv-abi.sh
-              tests/golden/cross-varargs.sh tests/golden/debug-line.sh
-              tests/golden/debug-locals.sh tests/golden/debug-live.sh
-              tests/golden/ldouble-abi.sh tests/golden/complex-abi.sh"
+    sh_tests="tests/golden/*.sh $arch_dir/*.sh"
 else
-    sh_tests="tests/exec/*.sh tests/compile/*.sh tests/golden/*.sh"
+    sh_tests="tests/exec/*.sh tests/compile/*.sh tests/golden/*.sh $arch_dir/*.sh"
 fi
 
 [ "$EXEC_ONLY" = 1 ] && sh_tests=""
@@ -118,7 +117,8 @@ for t in $sh_tests; do
     fi
 done
 
-for c in tests/exec/*.c; do
+# tests/exec/*.c run on every target; tests/exec/<arch>/*.c on that one only
+for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
     [ -e "$c" ] || continue
     name=$(basename "$c" .c)
     # `// target: TRIPLE` pins a test to one machine: an x86-64 inline-asm

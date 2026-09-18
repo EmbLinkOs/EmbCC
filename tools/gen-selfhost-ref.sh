@@ -9,12 +9,14 @@ NEWLIB_INC=${NEWLIB_INC:-$X86_NEWLIB/include}
 OS_BUILD=${OS_BUILD:-$MYOS_BUILD}
 LIBC=${LIBC:-$X86_NEWLIB/lib/libc.a}
 INCS="-I include -I $NEWLIB_INC"
-SRCS="src/driver/main.c src/driver/util.c src/lex/lex.c src/parse/parse.c
-      src/sema/sema.c src/sema/type.c src/ir/irgen.c src/as/as.c src/opt/opt.c src/codegen/codegen.c src/debug/dwarf.c
-      src/asm/emit.c src/asm/topasm.c src/cpp/predef.c src/cpp/cpp.c src/elf/write.c"
+# The Makefile's SRCS, not a hand-kept list (which went stale when the tree
+# grew src/arch/); objects are named by path, since src/arch/x86_64/codegen.c
+# and src/arch/aarch64/codegen.c share a basename.
+SRCS=$(make -pn 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
+[ -n "$SRCS" ] || { echo "gen-selfhost-ref: cannot read SRCS from the Makefile" >&2; exit 1; }
 rm -rf ref; mkdir -p ref
 for f in $SRCS; do
-    ./embcc -c "$f" $INCS -o "ref/$(basename "$f" .c).o"
+    ./embcc -c "$f" $INCS -o "ref/$(echo "${f#src/}" | tr / _ | sed 's/\.c$//').o"
 done
 echo "wrote $(ls ref/*.o | wc -l) reference objects"
 ./embld -o "$OS_BUILD/embcc.elf" "$OS_BUILD/crt0.o" "$OS_BUILD/syscalls.o" \

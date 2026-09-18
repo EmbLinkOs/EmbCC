@@ -15,7 +15,7 @@ desktop behaviourally identical to the gcc build).
 
 **Since M3 — the axes the milestones did not name:**
 
-- **The toolchain owns the whole kernel build.** **EmbAS** (`src/as`, `embas`)
+- **The toolchain owns the whole kernel build.** **EmbAS** (`src/arch/x86_64/as.c`, `embas`)
   assembles the kernel's hand-written NASM/Intel `.asm` **byte-identically to
   nasm** — code, symbols and relocations — and EmbLD's linker-defined end
   symbols and higher-half LMA (`p_paddr`) removed the last need for a linker
@@ -40,7 +40,7 @@ desktop behaviourally identical to the gcc build).
 
 - **The fixed point still holds, now over sixteen sources.** The optimizer
   (`src/opt/opt.c`), the DWARF emitter (`src/debug/dwarf.c`) and the assembler
-  (`src/as/as.c`) each joined the compiler, so the self-host source set grew
+  (`src/arch/x86_64/as.c`) each joined the compiler, so the self-host source set grew
   12 → 16; `test embcc self` is **16/16 byte-identical on the OS**.
 - **EmbLD runs on the OS, and closes the loop *with the link*.** Cross-built into
   an EmbLinkOS binary (`embld.elf`), it makes `test embcc selfhost` have the OS
@@ -75,7 +75,7 @@ link, in the on-OS layout of SELFHOST_ONOS.md, with every unit's header closure
 not discipline). `tools/embbuild-run.sh` is a host reference EmbBuild — the same
 typed-manifest walk the OS's EmbBuild does, path-mapped onto the host tree — and
 it drives `embcc` + `embld` from that manifest to a resolved ET_EXEC `embcc.elf`
-(`tests/golden/embbuild.sh`, the two-implementation-oracle host half of BUILD.md
+(`tests/golden/x86_64/embbuild.sh`, the two-implementation-oracle host half of BUILD.md
 §10). What remains for M4 proper is OS-side: ship the source + `build.ebm` to
 `/data/src/embcc/`, run the OS's `embbuild` on it, and confirm the on-OS-built
 EmbCC compiles the M1 program → exit 42.
@@ -85,7 +85,7 @@ prize — the OS rebuilding its own **kernel** — was blocked on G1 (an on-OS
 assembler) and G2 (`kernel_end`), which are EmbAS and EmbLD's L1, both done. So
 it is now pure orchestration: `tools/gen-kernel-manifest.sh` generates a 96-target
 manifest (89 embcc C compiles + 6 embcc `.asm` assembles + one embld link, no
-gcc/nasm/ld), and `tests/golden/embbuild-kernel.sh` (opt-in, `EMBCC_KM1=1`) walks
+gcc/nasm/ld), and `tests/golden/x86_64/embbuild-kernel.sh` (opt-in, `EMBCC_KM1=1`) walks
 it to a higher-half `kernel.elf` that **boots** in qemu — 193 lines of serial,
 zero faults, userspace reached. KM2/KM3 (the bootable image, and the derived
 `KERNEL_LOAD_SECTORS` — BUILD.md §12.3 G3, EmbBuild's first computed-value step)
@@ -117,7 +117,7 @@ EmbCC now compiles **all twelve of its own source files**, and EmbLD
 links them against the real crt0/syscalls/newlib into a well-formed
 EmbLinkOS `ET_EXEC` (`embcc-stage1.elf`, ~704 KB) with every symbol
 resolved — the compiler and the linker are both ours, end to end, for
-EmbCC itself (tests/golden/self-host.sh). Codegen is deterministic (every
+EmbCC itself (tests/golden/x86_64/self-host.sh). Codegen is deterministic (every
 object byte-identical across runs — the property the fixed point rests
 on). Closing the language for self-hosting took, in test-covered
 increments: adjacent string concatenation, a variable in scope within its
@@ -151,7 +151,7 @@ was demonstrably EmbCC's code the kernel ran. That is the same
 cross-check EmbBuild and TCC were each held to (ROADMAP M2). On the host, a
 gcc-built harness drives the EmbCC-compiled SDK through a full
 serialize/deserialize round trip and its output matches gcc's exactly
-(tests/golden/emblinkos-sdk.sh).
+(tests/golden/x86_64/emblinkos-sdk.sh).
 
 **M1 COMPLETE — confirmed on the OS 2026-07-20.** The
 exit-42 object compiled by `embcc -c`, linked against the real crt0/newlib,
@@ -275,7 +275,7 @@ cross-check EmbBuild and TCC were each held to.
 
 **DONE — 2026-07-24, all three stages, the fixed point closed on the OS:**
 1. The gcc-built `embcc` compiles all twelve sources; EmbLD links them into
-   a resolved EmbLinkOS `ET_EXEC` (tests/golden/self-host.sh). Codegen is
+   a resolved EmbLinkOS `ET_EXEC` (tests/golden/x86_64/self-host.sh). Codegen is
    deterministic — objects byte-identical across runs.
 2 & 3. That `embcc.elf`, staged to EmbLinkOS, ran under the kernel `test
    embcc self` oracle and recompiled all twelve sources ON THE OS: **12/12
@@ -311,7 +311,7 @@ These are candidates, not commitments, and each needs a stated reason
 
 - **Codegen quality** — *substantially done, and open-ended*: `src/opt` runs
   local and global passes including SSA mem2reg, inlining, SCCP and global CSE;
-  `src/codegen` carries Chaitin-Briggs register allocation. `-O2` `.text` is at
+  `src/arch/x86_64/codegen.c` carries Chaitin-Briggs register allocation. `-O2` `.text` is at
   1.63× gcc `-O0`, down from 2.81×. It rides through the self-host fixed point
   (16/16) because `-O0` output is byte-identical by construction. The remaining
   headroom is real but no longer blocking anything.

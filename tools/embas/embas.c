@@ -1,9 +1,9 @@
-/* embas — the standalone assembler CLI (A1). See src/as/as.h.
+/* embas — the standalone assembler CLI (A1). See src/arch/x86_64/as.h.
  * usage: embas [-f elf64|bin] [-o OUT] INPUT.asm  */
 #include <stdio.h>
 #include <string.h>
 
-#include "../../src/as/as.h"
+#include "../../src/arch/x86_64/as.h"
 
 int main(int argc, char **argv)
 {

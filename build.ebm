@@ -7,7 +7,7 @@ project: embcc
 
 name: driver_main.o
 kind: compile
-inputs: /data/src/embcc/driver/main.c /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/asm/emit.h /data/src/embcc/asm/topasm.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /data/src/embcc/codegen/codegen.h /data/src/embcc/ir/ir.h /data/src/embcc/target/target.h /data/src/embcc/cpp/cpp.h /data/src/embcc/debug/dwarf.h /data/src/embcc/cpp/predef.h /data/src/embcc/as/as.h /data/src/embcc/elf/write.h /data/src/embcc/elf/elf.h /data/src/embcc/opt/opt.h /data/src/embcc/parse/parse.h /data/src/embcc/sema/sema.h /data/src/embcc/driver/util.h 
+inputs: /data/src/embcc/driver/main.c /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/arch/x86_64/emit.h /data/src/embcc/arch/code.h /data/src/embcc/arch/x86_64/topasm.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /data/src/embcc/arch/backend.h /data/src/embcc/ir/ir.h /data/src/embcc/arch/target.h /data/src/embcc/cpp/cpp.h /data/src/embcc/debug/dwarf.h /data/src/embcc/arch/predef.h /data/src/embcc/arch/x86_64/as.h /data/src/embcc/elf/write.h /data/src/embcc/elf/elf.h /data/src/embcc/opt/opt.h /data/src/embcc/parse/parse.h /data/src/embcc/sema/sema.h /data/src/embcc/driver/util.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/driver/main.c -o /data/build/out/embcc/driver_main.o
 output: /data/build/out/embcc/driver_main.o
 
@@ -19,9 +19,15 @@ output: /data/build/out/embcc/driver_util.o
 
 name: lex_lex.o
 kind: compile
-inputs: /data/src/embcc/lex/lex.c /data/src/embcc/lex/lex.h /system/abi/include/ctype.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/_locale.h /system/abi/include/limits.h /system/abi/include/sys/syslimits.h /system/abi/include/stdio.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/target/target.h 
+inputs: /data/src/embcc/lex/lex.c /data/src/embcc/lex/lex.h /system/abi/include/ctype.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/_locale.h /system/abi/include/limits.h /system/abi/include/sys/syslimits.h /system/abi/include/stdio.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/arch/target.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/lex/lex.c -o /data/build/out/embcc/lex_lex.o
 output: /data/build/out/embcc/lex_lex.o
+
+name: cpp_cpp.o
+kind: compile
+inputs: /data/src/embcc/cpp/cpp.c /data/src/embcc/cpp/cpp.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/lex/lex.h /data/src/embcc/arch/predef.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/cpp/cpp.c -o /data/build/out/embcc/cpp_cpp.o
+output: /data/build/out/embcc/cpp_cpp.o
 
 name: parse_parse.o
 kind: compile
@@ -31,33 +37,27 @@ output: /data/build/out/embcc/parse_parse.o
 
 name: sema_sema.o
 kind: compile
-inputs: /data/src/embcc/sema/sema.c /data/src/embcc/sema/sema.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/asm/asm_arm64.h /data/src/embcc/asm/emit.h /data/src/embcc/driver/util.h /data/src/embcc/target/target.h /data/src/embcc/sema/ldfloat.h 
+inputs: /data/src/embcc/sema/sema.c /data/src/embcc/sema/sema.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/arch/aarch64/asm.h /data/src/embcc/arch/code.h /data/src/embcc/driver/util.h /data/src/embcc/arch/target.h /data/src/embcc/sema/ldfloat.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/sema/sema.c -o /data/build/out/embcc/sema_sema.o
 output: /data/build/out/embcc/sema_sema.o
 
 name: sema_type.o
 kind: compile
-inputs: /data/src/embcc/sema/type.c /data/src/embcc/sema/type.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/target/target.h 
+inputs: /data/src/embcc/sema/type.c /data/src/embcc/sema/type.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/arch/target.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/sema/type.c -o /data/build/out/embcc/sema_type.o
 output: /data/build/out/embcc/sema_type.o
 
 name: sema_ldfloat.o
 kind: compile
-inputs: /data/src/embcc/sema/ldfloat.c /data/src/embcc/sema/ldfloat.h /data/apps/embcc/include/string.h /data/apps/embcc/include/stddef.h /data/src/embcc/driver/util.h /data/src/embcc/target/target.h 
+inputs: /data/src/embcc/sema/ldfloat.c /data/src/embcc/sema/ldfloat.h /data/apps/embcc/include/string.h /data/apps/embcc/include/stddef.h /data/src/embcc/driver/util.h /data/src/embcc/arch/target.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/sema/ldfloat.c -o /data/build/out/embcc/sema_ldfloat.o
 output: /data/build/out/embcc/sema_ldfloat.o
 
 name: ir_irgen.o
 kind: compile
-inputs: /data/src/embcc/ir/irgen.c /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /system/abi/include/ctype.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/_locale.h /system/abi/include/stdio.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/asm/asm_arm64.h /data/src/embcc/asm/emit.h /data/src/embcc/driver/util.h /data/src/embcc/sema/ldfloat.h /data/src/embcc/sema/sema.h /data/src/embcc/target/target.h 
+inputs: /data/src/embcc/ir/irgen.c /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /data/src/embcc/ir/irgen_int.h /system/abi/include/ctype.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/_locale.h /system/abi/include/stdio.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/arch/aarch64/asm.h /data/src/embcc/arch/code.h /data/src/embcc/driver/util.h /data/src/embcc/sema/ldfloat.h /data/src/embcc/sema/sema.h /data/src/embcc/arch/target.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/ir/irgen.c -o /data/build/out/embcc/ir_irgen.o
 output: /data/build/out/embcc/ir_irgen.o
-
-name: as_as.o
-kind: compile
-inputs: /data/src/embcc/as/as.c /data/src/embcc/as/as.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /system/abi/include/ctype.h /system/abi/include/sys/_locale.h /data/src/embcc/driver/util.h /data/src/embcc/elf/write.h /data/src/embcc/elf/elf.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/as/as.c -o /data/build/out/embcc/as_as.o
-output: /data/build/out/embcc/as_as.o
 
 name: opt_opt.o
 kind: compile
@@ -65,77 +65,11 @@ inputs: /data/src/embcc/opt/opt.c /data/src/embcc/opt/opt.h /data/src/embcc/ir/i
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/opt/opt.c -o /data/build/out/embcc/opt_opt.o
 output: /data/build/out/embcc/opt_opt.o
 
-name: codegen_codegen.o
-kind: compile
-inputs: /data/src/embcc/codegen/codegen.c /data/src/embcc/codegen/codegen.h /data/src/embcc/asm/emit.h /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /data/src/embcc/target/target.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/src/embcc/driver/util.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/codegen/codegen.c -o /data/build/out/embcc/codegen_codegen.o
-output: /data/build/out/embcc/codegen_codegen.o
-
-name: codegen_codegen_arm64.o
-kind: compile
-inputs: /data/src/embcc/codegen/codegen_arm64.c /data/src/embcc/codegen/codegen.h /data/src/embcc/asm/emit.h /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /data/src/embcc/target/target.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/asm/emit_arm64.h /data/src/embcc/driver/util.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/codegen/codegen_arm64.c -o /data/build/out/embcc/codegen_codegen_arm64.o
-output: /data/build/out/embcc/codegen_codegen_arm64.o
-
 name: debug_dwarf.o
 kind: compile
-inputs: /data/src/embcc/debug/dwarf.c /data/src/embcc/debug/dwarf.h /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /system/abi/include/stdlib.h /system/abi/include/machine/ieeefp.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/sys/features.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/reent.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/target/target.h 
+inputs: /data/src/embcc/debug/dwarf.c /data/src/embcc/debug/dwarf.h /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /system/abi/include/stdlib.h /system/abi/include/machine/ieeefp.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/sys/features.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/reent.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/arch/target.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/debug/dwarf.c -o /data/build/out/embcc/debug_dwarf.o
 output: /data/build/out/embcc/debug_dwarf.o
-
-name: asm_emit.o
-kind: compile
-inputs: /data/src/embcc/asm/emit.c /data/src/embcc/asm/emit.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/src/embcc/driver/util.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/asm/emit.c -o /data/build/out/embcc/asm_emit.o
-output: /data/build/out/embcc/asm_emit.o
-
-name: asm_emit_arm64.o
-kind: compile
-inputs: /data/src/embcc/asm/emit_arm64.c /data/src/embcc/asm/emit_arm64.h /data/src/embcc/asm/emit.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/asm/emit_arm64.c -o /data/build/out/embcc/asm_emit_arm64.o
-output: /data/build/out/embcc/asm_emit_arm64.o
-
-name: asm_asm_arm64.o
-kind: compile
-inputs: /data/src/embcc/asm/asm_arm64.c /data/src/embcc/asm/asm_arm64.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /data/src/embcc/asm/emit.h /system/abi/include/ctype.h /system/abi/include/sys/_locale.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/asm/emit_arm64.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/asm/asm_arm64.c -o /data/build/out/embcc/asm_asm_arm64.o
-output: /data/build/out/embcc/asm_asm_arm64.o
-
-name: asm_topasm.o
-kind: compile
-inputs: /data/src/embcc/asm/topasm.c /data/src/embcc/asm/topasm.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /system/abi/include/stdlib.h /system/abi/include/machine/ieeefp.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/sys/features.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/reent.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/asm/topasm.c -o /data/build/out/embcc/asm_topasm.o
-output: /data/build/out/embcc/asm_topasm.o
-
-name: cpp_predef_x86_64.o
-kind: compile
-inputs: /data/src/embcc/cpp/predef_x86_64.c /data/src/embcc/cpp/predef.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/cpp/predef_x86_64.c -o /data/build/out/embcc/cpp_predef_x86_64.o
-output: /data/build/out/embcc/cpp_predef_x86_64.o
-
-name: cpp_predef_aarch64.o
-kind: compile
-inputs: /data/src/embcc/cpp/predef_aarch64.c /data/src/embcc/cpp/predef.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/cpp/predef_aarch64.c -o /data/build/out/embcc/cpp_predef_aarch64.o
-output: /data/build/out/embcc/cpp_predef_aarch64.o
-
-name: cpp_predef_select.o
-kind: compile
-inputs: /data/src/embcc/cpp/predef_select.c /data/src/embcc/cpp/predef.h /data/src/embcc/target/target.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/cpp/predef_select.c -o /data/build/out/embcc/cpp_predef_select.o
-output: /data/build/out/embcc/cpp_predef_select.o
-
-name: cpp_cpp.o
-kind: compile
-inputs: /data/src/embcc/cpp/cpp.c /data/src/embcc/cpp/cpp.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/lex/lex.h /data/src/embcc/cpp/predef.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/cpp/cpp.c -o /data/build/out/embcc/cpp_cpp.o
-output: /data/build/out/embcc/cpp_cpp.o
-
-name: target_target.o
-kind: compile
-inputs: /data/src/embcc/target/target.c /data/src/embcc/target/target.h /data/apps/embcc/include/string.h /data/apps/embcc/include/stddef.h /data/src/embcc/elf/elf.h 
-args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/target/target.c -o /data/build/out/embcc/target_target.o
-output: /data/build/out/embcc/target_target.o
 
 name: elf_write.o
 kind: compile
@@ -143,8 +77,92 @@ inputs: /data/src/embcc/elf/write.c /data/src/embcc/elf/write.h /data/src/embcc/
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/elf/write.c -o /data/build/out/embcc/elf_write.o
 output: /data/build/out/embcc/elf_write.o
 
+name: arch_target.o
+kind: compile
+inputs: /data/src/embcc/arch/target.c /data/src/embcc/arch/target.h /data/apps/embcc/include/string.h /data/apps/embcc/include/stddef.h /data/src/embcc/elf/elf.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/target.c -o /data/build/out/embcc/arch_target.o
+output: /data/build/out/embcc/arch_target.o
+
+name: arch_code.o
+kind: compile
+inputs: /data/src/embcc/arch/code.c /data/src/embcc/arch/code.h /data/src/embcc/driver/util.h /data/apps/embcc/include/stddef.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/code.c -o /data/build/out/embcc/arch_code.o
+output: /data/build/out/embcc/arch_code.o
+
+name: arch_predef.o
+kind: compile
+inputs: /data/src/embcc/arch/predef.c /data/src/embcc/arch/predef.h /data/src/embcc/arch/target.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/predef.c -o /data/build/out/embcc/arch_predef.o
+output: /data/build/out/embcc/arch_predef.o
+
+name: arch_x86_64_irgen.o
+kind: compile
+inputs: /data/src/embcc/arch/x86_64/irgen.c /data/src/embcc/ir/irgen_int.h /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /system/abi/include/ctype.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/_locale.h /system/abi/include/stdio.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/sema/sema.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/x86_64/irgen.c -o /data/build/out/embcc/arch_x86_64_irgen.o
+output: /data/build/out/embcc/arch_x86_64_irgen.o
+
+name: arch_x86_64_codegen.o
+kind: compile
+inputs: /data/src/embcc/arch/x86_64/codegen.c /data/src/embcc/arch/backend.h /data/src/embcc/arch/code.h /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /data/src/embcc/arch/target.h /data/src/embcc/arch/x86_64/emit.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/src/embcc/driver/util.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/x86_64/codegen.c -o /data/build/out/embcc/arch_x86_64_codegen.o
+output: /data/build/out/embcc/arch_x86_64_codegen.o
+
+name: arch_x86_64_emit.o
+kind: compile
+inputs: /data/src/embcc/arch/x86_64/emit.c /data/src/embcc/arch/x86_64/emit.h /data/src/embcc/arch/code.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/src/embcc/driver/util.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/x86_64/emit.c -o /data/build/out/embcc/arch_x86_64_emit.o
+output: /data/build/out/embcc/arch_x86_64_emit.o
+
+name: arch_x86_64_topasm.o
+kind: compile
+inputs: /data/src/embcc/arch/x86_64/topasm.c /data/src/embcc/arch/x86_64/topasm.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /system/abi/include/stdlib.h /system/abi/include/machine/ieeefp.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/sys/features.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/reent.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/x86_64/topasm.c -o /data/build/out/embcc/arch_x86_64_topasm.o
+output: /data/build/out/embcc/arch_x86_64_topasm.o
+
+name: arch_x86_64_as.o
+kind: compile
+inputs: /data/src/embcc/arch/x86_64/as.c /data/src/embcc/arch/x86_64/as.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /system/abi/include/ctype.h /system/abi/include/sys/_locale.h /data/src/embcc/driver/util.h /data/src/embcc/elf/write.h /data/src/embcc/elf/elf.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/x86_64/as.c -o /data/build/out/embcc/arch_x86_64_as.o
+output: /data/build/out/embcc/arch_x86_64_as.o
+
+name: arch_x86_64_predef.o
+kind: compile
+inputs: /data/src/embcc/arch/x86_64/predef.c /data/src/embcc/arch/predef.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/x86_64/predef.c -o /data/build/out/embcc/arch_x86_64_predef.o
+output: /data/build/out/embcc/arch_x86_64_predef.o
+
+name: arch_aarch64_irgen.o
+kind: compile
+inputs: /data/src/embcc/arch/aarch64/irgen.c /data/src/embcc/ir/irgen_int.h /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /system/abi/include/ctype.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/_locale.h /system/abi/include/stdio.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/driver/util.h /data/src/embcc/sema/sema.h /data/src/embcc/arch/aarch64/asm.h /data/src/embcc/arch/code.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/aarch64/irgen.c -o /data/build/out/embcc/arch_aarch64_irgen.o
+output: /data/build/out/embcc/arch_aarch64_irgen.o
+
+name: arch_aarch64_codegen.o
+kind: compile
+inputs: /data/src/embcc/arch/aarch64/codegen.c /data/src/embcc/arch/backend.h /data/src/embcc/arch/code.h /data/src/embcc/ir/ir.h /data/src/embcc/parse/ast.h /data/src/embcc/sema/type.h /data/src/embcc/arch/target.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/arch/aarch64/emit.h /data/src/embcc/driver/util.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/aarch64/codegen.c -o /data/build/out/embcc/arch_aarch64_codegen.o
+output: /data/build/out/embcc/arch_aarch64_codegen.o
+
+name: arch_aarch64_emit.o
+kind: compile
+inputs: /data/src/embcc/arch/aarch64/emit.c /data/src/embcc/arch/aarch64/emit.h /data/src/embcc/arch/code.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/aarch64/emit.c -o /data/build/out/embcc/arch_aarch64_emit.o
+output: /data/build/out/embcc/arch_aarch64_emit.o
+
+name: arch_aarch64_asm.o
+kind: compile
+inputs: /data/src/embcc/arch/aarch64/asm.c /data/src/embcc/arch/aarch64/asm.h /system/abi/include/stdio.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/stdarg.h /system/abi/include/sys/reent.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /system/abi/include/sys/stdio.h /data/src/embcc/arch/code.h /system/abi/include/ctype.h /system/abi/include/sys/_locale.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/arch/aarch64/emit.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/aarch64/asm.c -o /data/build/out/embcc/arch_aarch64_asm.o
+output: /data/build/out/embcc/arch_aarch64_asm.o
+
+name: arch_aarch64_predef.o
+kind: compile
+inputs: /data/src/embcc/arch/aarch64/predef.c /data/src/embcc/arch/predef.h 
+args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/aarch64/predef.c -o /data/build/out/embcc/arch_aarch64_predef.o
+output: /data/build/out/embcc/arch_aarch64_predef.o
+
 name: embcc.elf
 kind: link
-inputs: /system/abi/crt0.o /system/abi/syscalls.o /data/build/out/embcc/driver_main.o /data/build/out/embcc/driver_util.o /data/build/out/embcc/lex_lex.o /data/build/out/embcc/parse_parse.o /data/build/out/embcc/sema_sema.o /data/build/out/embcc/sema_type.o /data/build/out/embcc/sema_ldfloat.o /data/build/out/embcc/ir_irgen.o /data/build/out/embcc/as_as.o /data/build/out/embcc/opt_opt.o /data/build/out/embcc/codegen_codegen.o /data/build/out/embcc/codegen_codegen_arm64.o /data/build/out/embcc/debug_dwarf.o /data/build/out/embcc/asm_emit.o /data/build/out/embcc/asm_emit_arm64.o /data/build/out/embcc/asm_asm_arm64.o /data/build/out/embcc/asm_topasm.o /data/build/out/embcc/cpp_predef_x86_64.o /data/build/out/embcc/cpp_predef_aarch64.o /data/build/out/embcc/cpp_predef_select.o /data/build/out/embcc/cpp_cpp.o /data/build/out/embcc/target_target.o /data/build/out/embcc/elf_write.o /system/abi/libc.a
-args: /data/apps/embld/embld.elf -o /data/build/out/embcc/embcc.elf /system/abi/crt0.o /system/abi/syscalls.o /data/build/out/embcc/driver_main.o /data/build/out/embcc/driver_util.o /data/build/out/embcc/lex_lex.o /data/build/out/embcc/parse_parse.o /data/build/out/embcc/sema_sema.o /data/build/out/embcc/sema_type.o /data/build/out/embcc/sema_ldfloat.o /data/build/out/embcc/ir_irgen.o /data/build/out/embcc/as_as.o /data/build/out/embcc/opt_opt.o /data/build/out/embcc/codegen_codegen.o /data/build/out/embcc/codegen_codegen_arm64.o /data/build/out/embcc/debug_dwarf.o /data/build/out/embcc/asm_emit.o /data/build/out/embcc/asm_emit_arm64.o /data/build/out/embcc/asm_asm_arm64.o /data/build/out/embcc/asm_topasm.o /data/build/out/embcc/cpp_predef_x86_64.o /data/build/out/embcc/cpp_predef_aarch64.o /data/build/out/embcc/cpp_predef_select.o /data/build/out/embcc/cpp_cpp.o /data/build/out/embcc/target_target.o /data/build/out/embcc/elf_write.o /system/abi/libc.a
+inputs: /system/abi/crt0.o /system/abi/syscalls.o /data/build/out/embcc/driver_main.o /data/build/out/embcc/driver_util.o /data/build/out/embcc/lex_lex.o /data/build/out/embcc/cpp_cpp.o /data/build/out/embcc/parse_parse.o /data/build/out/embcc/sema_sema.o /data/build/out/embcc/sema_type.o /data/build/out/embcc/sema_ldfloat.o /data/build/out/embcc/ir_irgen.o /data/build/out/embcc/opt_opt.o /data/build/out/embcc/debug_dwarf.o /data/build/out/embcc/elf_write.o /data/build/out/embcc/arch_target.o /data/build/out/embcc/arch_code.o /data/build/out/embcc/arch_predef.o /data/build/out/embcc/arch_x86_64_irgen.o /data/build/out/embcc/arch_x86_64_codegen.o /data/build/out/embcc/arch_x86_64_emit.o /data/build/out/embcc/arch_x86_64_topasm.o /data/build/out/embcc/arch_x86_64_as.o /data/build/out/embcc/arch_x86_64_predef.o /data/build/out/embcc/arch_aarch64_irgen.o /data/build/out/embcc/arch_aarch64_codegen.o /data/build/out/embcc/arch_aarch64_emit.o /data/build/out/embcc/arch_aarch64_asm.o /data/build/out/embcc/arch_aarch64_predef.o /system/abi/libc.a
+args: /data/apps/embld/embld.elf -o /data/build/out/embcc/embcc.elf /system/abi/crt0.o /system/abi/syscalls.o /data/build/out/embcc/driver_main.o /data/build/out/embcc/driver_util.o /data/build/out/embcc/lex_lex.o /data/build/out/embcc/cpp_cpp.o /data/build/out/embcc/parse_parse.o /data/build/out/embcc/sema_sema.o /data/build/out/embcc/sema_type.o /data/build/out/embcc/sema_ldfloat.o /data/build/out/embcc/ir_irgen.o /data/build/out/embcc/opt_opt.o /data/build/out/embcc/debug_dwarf.o /data/build/out/embcc/elf_write.o /data/build/out/embcc/arch_target.o /data/build/out/embcc/arch_code.o /data/build/out/embcc/arch_predef.o /data/build/out/embcc/arch_x86_64_irgen.o /data/build/out/embcc/arch_x86_64_codegen.o /data/build/out/embcc/arch_x86_64_emit.o /data/build/out/embcc/arch_x86_64_topasm.o /data/build/out/embcc/arch_x86_64_as.o /data/build/out/embcc/arch_x86_64_predef.o /data/build/out/embcc/arch_aarch64_irgen.o /data/build/out/embcc/arch_aarch64_codegen.o /data/build/out/embcc/arch_aarch64_emit.o /data/build/out/embcc/arch_aarch64_asm.o /data/build/out/embcc/arch_aarch64_predef.o /system/abi/libc.a
 output: /data/build/out/embcc/embcc.elf

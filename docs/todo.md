@@ -39,7 +39,7 @@ encoding byte-verified against objdump: fixed-form (`cli`/`sti`/`hlt`/`nop`/
 `invlpg (%N)`, `movdqa` ↔ `%%xmm0`). Constraint grammar already covered
 `"=r"`/`"r"`/`"=a"`/`"a"`/`"=m"`/`"m"`/`"N"`/`"x"`, `"memory"`/`"cc"` clobbers,
 `%N` refs, and `volatile`. Small parse helpers read the operand forms; unknown
-mnemonics still refuse loudly. Golden test: tests/golden/inline-asm-kernel.sh.
+mnemonics still refuse loudly. Golden test: tests/golden/x86_64/inline-asm-kernel.sh.
 
 ### One-offs — ALL DONE
 The ten distinct remaining gaps, each closed and gcc-verified:
@@ -215,7 +215,7 @@ a read-only mention is excluded too — always sound). So no allocatable operand
 can land in a register the asm destroys. Verified on the REAL kernel: both
 `iretq` trampolines in process.c now load argc/argv/envp into rdi/rsi/rdx via
 r9/r10/r11 and push operands from rax/rcx/rbx/r8 — none template-written;
-gcc-refereed exec test `tests/exec/asm-clobber.c` (clobber-list AND
+gcc-refereed exec test `tests/exec/x86_64/asm-clobber.c` (clobber-list AND
 template-written paths) passes. Suite 88/88, self-host holds, kernel 89/89.
 Alongside, K11 got a refinement: a local whose *type* is over-aligned (a struct
 with an aligned member) now also gets its stack slot rounded to the type's
@@ -264,8 +264,8 @@ the self-compiled kernel and userspace / the desktop.
 `movq disp(%base), %dst` and the store reverse `movq %src, disp(%base)` (incl.
 rbp/rsp/r12/r13 SIB / forced-disp bases), plus the ALU ops add/sub/and/or/xor/
 cmp in `%src,%dst` and `$imm,%dst` (imm8/imm32, 64- and 32-bit) forms. Every
-encoding byte-compared to gas; gcc-refereed exec test `tests/exec/asm-mem-alu.c`
-+ extended `tests/golden/inline-asm-kernel.sh`. Remaining known gap, NOT on the
+encoding byte-compared to gas; gcc-refereed exec test `tests/exec/x86_64/asm-mem-alu.c`
++ extended `tests/golden/x86_64/inline-asm-kernel.sh`. Remaining known gap, NOT on the
 boot path: a `+r` read-write operand's read side isn't wired — sema accepts `+`
 but treats it as output-only, so the initial value isn't loaded. The kernel
 uses no `+` constraints; deferred.)*
@@ -499,7 +499,7 @@ those two myos docs; only the EmbCC/EmbLD/assembler work is tracked here.*
 The last external tool in the kernel build was **nasm**: the 6 kernel `.asm`
 are NASM syntax, and the K1 inline-asm assembler is AT&T/operand-resolved, so it
 could not read them. Rather than port nasm, EmbCC grew its own assembler
-front-end — `src/as/as.c`, reachable two ways:
+front-end — `src/arch/x86_64/as.c`, reachable two ways:
 
 - **`embas -f elf64 foo.asm -o foo.o`** — the standalone tool (`tools/embas/`).
 - **`embcc -c foo.asm -o foo.o`** — the driver dispatches a `.asm` input to the
@@ -523,7 +523,7 @@ residual differences are the linker-invisible internal layout of the ELF
 container (the `.strtab` string order and the section-header-table placement,
 both in the shared writer used by `embcc` too); a real link of an
 `embas` object produces byte-identical relocated `.text` to the nasm object.
-Covered by `tests/golden/assembler.sh` (skips honestly without nasm). `as.c` is
+Covered by `tests/golden/x86_64/assembler.sh` (skips honestly without nasm). `as.c` is
 in the self-host source set — the fixed point holds at **16 sources**.
 
 **Out of scope (deliberately):** `-f bin` flat-binary mode for the boot stages

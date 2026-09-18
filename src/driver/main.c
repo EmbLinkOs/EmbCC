@@ -9,19 +9,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../asm/emit.h"
-#include "../asm/topasm.h"
-#include "../codegen/codegen.h"
+#include "../arch/x86_64/emit.h"
+#include "../arch/x86_64/topasm.h"
+#include "../arch/backend.h"
 #include "../cpp/cpp.h"
 #include "../debug/dwarf.h"
-#include "../cpp/predef.h"
-#include "../as/as.h"
+#include "../arch/predef.h"
+#include "../arch/x86_64/as.h"
 #include "../elf/write.h"
 #include "../ir/ir.h"
 #include "../opt/opt.h"
 #include "../parse/parse.h"
 #include "../sema/sema.h"
-#include "../target/target.h"
+#include "../arch/target.h"
 #include "util.h"
 
 #define EMBCC_VERSION "1.0.0-m2.complete"
@@ -31,15 +31,17 @@ static void print_version(void)
     /* Honest: names what exists and what does not. */
     printf("EmbCC %s — C compiler for EmbLinkOS, target %s\n",
            EMBCC_VERSION, target_triple(target_get()));
-    printf("C subset: the integer types, pointers incl. function "
-           "pointers, arrays, structs/unions/enums, typedef, ?:, the "
-           "comma operator, string literals, globals, sizeof, casts, "
-           "full control flow and operators, floating point, structs "
-           "by value (SysV); compile with -c — #include <stdio.h> works "
-           "against real newlib headers.\n");
-    printf("Preprocessor: #include (-I), #define incl. variadic/#/##, "
-           "conditionals, the target's predefined set; -E to see it. "
-           "No linker yet (M3) — link with the existing toolchain.\n");
+    printf("Language: C11 on both targets — VLAs, _Complex, long double, "
+           "_Atomic and the atomic builtins, _Generic — plus the GNU "
+           "extensions EmbLinkOS uses (statement expressions, typeof, "
+           "computed goto, attributes, extended inline asm).\n");
+    printf("Targets (--target=): x86_64-elf (default; System V AMD64, "
+           "x87 long double) and aarch64-elf (AAPCS64, binary128 long "
+           "double through libgcc).\n");
+    printf("Also: the preprocessor (-E), -O0..-O2, -g (DWARF), embas "
+           "(NASM-syntax .asm, x86-64) and embld (the linker, x86-64 ELF "
+           "and EMBX). Not yet: C++, __thread, PIE, embld for aarch64 — "
+           "see docs/COMPATIBILITY.md.\n");
 }
 
 static void print_usage(FILE *out)

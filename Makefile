@@ -11,30 +11,37 @@ CC      ?= cc
 CFLAGS  ?= -std=c99 -Wall -Wextra -Werror -g
 BUILD   := build
 
+# The target-neutral compiler, then src/arch: what every target shares
+# (selection, the backend contract, the code buffer), then one directory per
+# architecture — everything x86-64-only under x86_64/, aarch64-only under
+# aarch64/ (src/arch/README.md; docs/COMPATIBILITY.md for what each supports).
 SRCS := \
 	src/driver/main.c \
 	src/driver/util.c \
 	src/lex/lex.c \
+	src/cpp/cpp.c \
 	src/parse/parse.c \
 	src/sema/sema.c \
 	src/sema/type.c \
 	src/sema/ldfloat.c \
 	src/ir/irgen.c \
-	src/as/as.c \
 	src/opt/opt.c \
-	src/codegen/codegen.c \
-	src/codegen/codegen_arm64.c \
 	src/debug/dwarf.c \
-	src/asm/emit.c \
-	src/asm/emit_arm64.c \
-	src/asm/asm_arm64.c \
-	src/asm/topasm.c \
-	src/cpp/predef_x86_64.c \
-	src/cpp/predef_aarch64.c \
-	src/cpp/predef_select.c \
-	src/cpp/cpp.c \
-	src/target/target.c \
-	src/elf/write.c
+	src/elf/write.c \
+	src/arch/target.c \
+	src/arch/code.c \
+	src/arch/predef.c \
+	src/arch/x86_64/irgen.c \
+	src/arch/x86_64/codegen.c \
+	src/arch/x86_64/emit.c \
+	src/arch/x86_64/topasm.c \
+	src/arch/x86_64/as.c \
+	src/arch/x86_64/predef.c \
+	src/arch/aarch64/irgen.c \
+	src/arch/aarch64/codegen.c \
+	src/arch/aarch64/emit.c \
+	src/arch/aarch64/asm.c \
+	src/arch/aarch64/predef.c
 
 OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
 
@@ -46,10 +53,10 @@ embcc: $(OBJS)
 # embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
 # the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)
 # the compiler uses produces, so the toolchain owns the whole build (drops nasm).
-embas: tools/embas/embas.c src/as/as.c src/as/as.h src/elf/write.c \
-       src/elf/elf.h src/driver/util.c
-	$(CC) $(CFLAGS) -o $@ tools/embas/embas.c src/as/as.c src/elf/write.c \
-	    src/driver/util.c
+embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
+       src/elf/write.c src/elf/elf.h src/driver/util.c
+	$(CC) $(CFLAGS) -o $@ tools/embas/embas.c src/arch/x86_64/as.c \
+	    src/elf/write.c src/driver/util.c
 
 # embld — the integrated linker (ARCHITECTURE §6, WORKPLAN stream B), as
 # a standalone tool for host development. The link library also gets
@@ -83,7 +90,7 @@ $(BUILD)/%.o: src/%.c
 
 # The tree is small; every object depending on every header is honest
 # enough and cannot go stale (CONTRIBUTING lie #1).
-$(OBJS): $(wildcard src/*/*.h)
+$(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 
 test: embcc embread embld embdbg
 	tests/run.sh

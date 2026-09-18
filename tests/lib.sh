@@ -7,8 +7,15 @@
 # passed while proving nothing. Every lookup here tries this host's layout
 # first and the original Linux one second, and each can be set outright.
 
-# The repository root, whatever the caller's working directory.
-EMBCC_ROOT=${EMBCC_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+# The repository root, whatever the caller's working directory — found by
+# walking up from the test, since tests live at tests/golden/ and one level
+# deeper in tests/golden/<arch>/.
+if [ -z "${EMBCC_ROOT:-}" ]; then
+    EMBCC_ROOT=$(cd "$(dirname "$0")" && pwd)
+    while [ "$EMBCC_ROOT" != / ] && [ ! -f "$EMBCC_ROOT/tools/hostpaths.sh" ]; do
+        EMBCC_ROOT=$(dirname "$EMBCC_ROOT")
+    done
+fi
 
 
 . "$EMBCC_ROOT/tools/hostpaths.sh"

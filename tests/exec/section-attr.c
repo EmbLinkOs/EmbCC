@@ -3,7 +3,7 @@
  * them between the section's bracket symbols — GNU ld's __start_NAME /
  * __stop_NAME here; the EmbLinkOS kernel's .embk_exports table is the same
  * shape under its linker script's names (embld's side of that is
- * tests/golden/embld-sections.sh). The relocations inside an entry (a
+ * tests/golden/x86_64/embld-sections.sh). The relocations inside an entry (a
  * string, a function, a global) must land in the named section, not .data.
  * Order-independent on purpose: gcc may reorder top-level definitions.
  */

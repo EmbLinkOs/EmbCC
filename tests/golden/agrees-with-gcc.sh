@@ -11,7 +11,8 @@ echo "TEST-MARKER agrees-with-gcc"
 out_dir="tests/golden/out/agrees-$ARCH"
 mkdir -p "$out_dir"
 
-for c in tests/exec/*.c; do
+for c in tests/exec/*.c tests/exec/$ARCH/*.c; do
+    [ -e "$c" ] || continue
     name=$(basename "$c" .c)
     pinned_elsewhere "$c" && { echo "$name: pinned to another target, skipped"; continue; }
     rm -f "$out_dir/$name".*

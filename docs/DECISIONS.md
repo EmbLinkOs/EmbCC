@@ -457,3 +457,38 @@ allocator written twice is the signal that the shared layer is in the wrong
 place, and the answer then is to lift the machine-independent half out of
 `codegen.c`, deriving the shared shape from two WORKING backends rather than
 inventing it from one (the discipline `myos` ARM64.md §2.3 used for the HAL).
+
+## D-012 — Each architecture in its own directory
+
+**Decided (2026-09-18).** Everything that depends on the target machine lives
+under `src/arch/`: the shared pieces at its top (`target.c` for selection and
+relocation kinds, `backend.h` for the contract a backend implements,
+`code.c` for the machine-code buffer, `predef.c` for choosing the macro
+table), then one directory per architecture — `x86_64/` and `aarch64/` — each
+holding its backend (`codegen.c`), encoder (`emit.c`), its share of IR
+generation (`irgen.c`: `va_arg` and extended asm), and its predefined macros;
+x86-64 also its file-scope asm and EmbAS, aarch64 its inline-asm assembler.
+The rest of `src/` never names a machine. The tests follow the same rule:
+`tests/golden/` and `tests/exec/` run for every target, `tests/golden/<arch>/`
+and `tests/exec/<arch>/` for one. What each target supports is one document,
+docs/COMPATIBILITY.md.
+
+**Why.** Two machines had grown into the tree by accretion — `codegen.c` next
+to `codegen_arm64.c`, `emit.c` next to `emit_arm64.c`, both targets' `va_arg`
+and inline asm inside `irgen.c` — so "what does aarch64 have?" was a grep,
+and adding a third target would have meant finding every such seam again. Now
+a target is a directory with a known set of files, and its gaps are a table.
+
+**How it was done, and what proves it.** Pure moves (`git mv`, so history
+follows) plus one split: the target-specific parts of `irgen.c` moved to
+`src/arch/<arch>/irgen.c`, reaching irgen's helpers through the internal
+header `src/ir/irgen_int.h`, and the byte buffer both encoders used moved out
+of the x86 encoder into `src/arch/code.c`. No generated code changed:
+`tools/x86-identity.sh` found all 748 x86-64 compiles byte-identical to the
+previous tree, and the same comparison for aarch64 (every exec test at `-O0`
+and `-O2`, and the whole ARM kernel) found 293 of 293 identical.
+
+**Not done, on purpose:** the backends still share no code generation, per
+D-011's reopen condition — the layout makes that sharing a later, visible
+step (a `src/arch/` file both use) rather than a precondition.
+

@@ -20,7 +20,7 @@ symbol carries the source *basename*, not the path as given. So
 `src/sema/type.c` on the host and `/data/src/embcc/sema/type.c` on the OS
 produce the same object, provided the headers resolve to identical bytes
 in the same order. Codegen is otherwise deterministic (proven by
-tests/golden/self-host.sh compiling each unit twice and diffing).
+tests/golden/x86_64/self-host.sh compiling each unit twice and diffing).
 
 The include order must match the host self-host build exactly: EmbCC's own
 freestanding headers first (so `<stdarg.h>` is EmbCC's `char*` va_list, not

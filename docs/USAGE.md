@@ -73,7 +73,7 @@ The result is a real `EM_AARCH64` ET_REL object that `aarch64-elf-ld` links
 against stock newlib. `embld` does not read or write aarch64 objects yet, and
 `embas` assembles x86-64 NASM syntax only — so an aarch64 link goes through
 binutils for now. Extended inline asm works, with the vocabulary the ARM
-kernel uses (`src/asm/asm_arm64.h`) and the constraints `r`, `=r`, `+r` and `i`
+kernel uses (`src/arch/aarch64/asm.h`) and the constraints `r`, `=r`, `+r` and `i`
 plus `register … __asm__("x0")` variables; a template outside it is refused
 with the offending statement named. `-g` describes aarch64 frames too (x29
 is the frame base), so gdb debugs an aarch64 program in QEMU the same way as

@@ -7,7 +7,7 @@ Shared ELF structures used by asm, as, and link — ../../docs/ARCHITECTURE.md �
   itself.
 - **write.c** — the relocatable-object writer: sections, symbols (gABI
   local-then-global ordering enforced), and `.rela.*`. Shared by the compiler
-  (`../asm`) and the standalone assembler (`../as`), which is why EmbAS output
+  (`../arch/x86_64/emit.c`, `../arch/aarch64/emit.c`) and the standalone assembler (`../arch/x86_64/as.c`), which is why EmbAS output
   can be byte-identical to nasm's.
 
 Relocations emitted include `R_X86_64_PLT32` (TARGET_ABI §4a: it is what gcc

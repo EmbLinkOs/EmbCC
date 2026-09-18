@@ -12,7 +12,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
-#include "../target/target.h"
+#include "../arch/target.h"
 
 /* ---- arbitrary-precision unsigned integers ---- */
 

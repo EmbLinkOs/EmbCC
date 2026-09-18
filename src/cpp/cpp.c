@@ -6,7 +6,7 @@
 
 #include "../driver/util.h"
 #include "../lex/lex.h"
-#include "predef.h"
+#include "../arch/predef.h"
 
 #define MAX_MACRO_PARAMS 16
 #define MAX_INCLUDE_DEPTH 50

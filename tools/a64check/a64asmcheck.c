@@ -1,4 +1,4 @@
-/* Drives src/asm/asm_arm64.c for tests/golden/arm64-asm.sh.
+/* Drives src/arch/aarch64/asm.c for tests/golden/arm64-asm.sh.
  *
  *   a64asmcheck --vocabulary        print one line per vocabulary entry
  *   a64asmcheck < lines > bytes      assemble each line, emit the raw words
@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../src/asm/asm_arm64.h"
+#include "../../src/arch/aarch64/asm.h"
 
 int main(int argc, char **argv)
 {

@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
-#include "../target/target.h"
+#include "../arch/target.h"
 
 /* --- DWARF constants (only the handful this emitter uses) --- */
 #define DW_TAG_compile_unit     0x11

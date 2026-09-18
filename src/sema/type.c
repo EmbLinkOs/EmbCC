@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
-#include "../target/target.h"
+#include "../arch/target.h"
 
 /* [kind][is_unsigned] — TY_PTR/TY_ARRAY/TY_STRUCT handled separately.
  * Designated initializers so this table survives struct type growing.

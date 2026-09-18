@@ -9,9 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../asm/asm_arm64.h"
+#include "../arch/aarch64/asm.h"
 #include "../driver/util.h"
-#include "../target/target.h"
+#include "../arch/target.h"
 #include "ldfloat.h"
 #include "type.h"
 

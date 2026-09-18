@@ -7,7 +7,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
-#include "../target/target.h"
+#include "../arch/target.h"
 
 void lex_init(struct lexer *lx, const char *file, const char *src)
 {

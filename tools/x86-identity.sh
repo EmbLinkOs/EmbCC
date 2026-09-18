@@ -13,7 +13,7 @@
 #
 #   usage: tools/x86-identity.sh [BASELINE_REV]      (default: HEAD)
 #
-# Inputs: every tests/exec/*.c at -O0/-O1/-O2 and with -g, plus, when an
+# Inputs: every tests/exec/*.c (and tests/exec/x86_64/*.c) at -O0/-O1/-O2 and with -g, plus, when an
 # EmbLinkOS tree is found ($EMBCC_MYOS, default ~/EmbLinkOs), every x86 kernel
 # C file at -O0 and -O2 with the kernel's own flags. A file both compilers
 # refuse is counted, not failed: that is a gap, not a regression.
@@ -59,7 +59,8 @@ compare() {   # compare NAME FLAGS... SRC
     else echo "  DIFFERS  $name: object bytes"; differ=$((differ + 1)); fi
 }
 
-for c in tests/exec/*.c; do
+for c in tests/exec/*.c tests/exec/x86_64/*.c; do
+    [ -e "$c" ] || continue
     for fl in "-O0" "-O1" "-O2" "-O0 -g" "-O2 -g"; do
         # $fl is split on purpose: it carries one or two flags.
         # shellcheck disable=SC2086

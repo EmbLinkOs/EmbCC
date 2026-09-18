@@ -24,7 +24,7 @@ may be a subprocess (ARCHITECTURE §1).
 
 ## Generators and harness
 
-- **gen-predef.sh** — regenerates `src/cpp/predef.c` from the reference gcc
+- **gen-predef.sh** — regenerates `src/arch/<arch>/predef.c` from the reference gcc
   (ARCHITECTURE §5). The only way that table may change.
 - **gen-selfhost-ref.sh** — builds the reference objects for the self-hosting
   fixed point (the 16 sources) and relinks stage1. See `docs/SELFHOST_ONOS.md`.

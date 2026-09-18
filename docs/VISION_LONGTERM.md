@@ -30,7 +30,7 @@ and the build system.
 * Produce well-optimized native executables — *after* correct ones
   (ARCHITECTURE §3: correct-and-slow first; codegen quality is the first honest
   post-M4 reason to prefer EmbCC over TCC). **Underway** — `src/opt` runs SSA
-  mem2reg, inlining, SCCP and global CSE; `src/codegen` does Chaitin-Briggs
+  mem2reg, inlining, SCCP and global CSE; `src/arch/x86_64/codegen.c` does Chaitin-Briggs
   register allocation. `-O2` `.text` is at 1.63× gcc `-O0`, down from 2.81×.
 * Become self-hosting by compiling EmbCC with EmbCC (ROADMAP M3). **Done** —
   the fixed point closed on the OS 2026-07-24 and holds over 16 sources.
@@ -72,7 +72,7 @@ EmbCC is designed specifically for EmbLinkOS and understands its architecture.
   extended-asm assembler grew the kernel's full hardware vocabulary, every
   encoding byte-verified against objdump, and D-007 was revised accordingly. The
   template vocabulary is no longer `int $imm`.)* **File-scope asm
-  followed:** a two-pass mini-assembler (src/asm/topasm.c) handles crt0's
+  followed:** a two-pass mini-assembler (src/arch/x86_64/topasm.c) handles crt0's
   `_start` stub vocabulary — `.global`/`.globl`, labels (named + numeric-
   local), `and $imm,%reg`, `call sym` (PLT32), `jmp local-label`, `ret` —
   emitting a global `_start` symbol and a relocation to the C entry it
@@ -133,7 +133,7 @@ source layout (ARCHITECTURE §7), not a future refactor:
 * Optimizer (`src/opt`, over EmbIR — landed: folding, strength reduction,
   value numbering/CSE, copy propagation, DCE; register allocation and
   stack-slot coalescing live in codegen)
-* Code generator (`src/codegen`, `src/asm`)
+* Code generator (`src/arch/<arch>/`)
 * Linker (`src/link`)
 
 The modular architecture lets future tools reuse the frontend without

@@ -1,4 +1,4 @@
-/* Emits one instruction per line through src/asm/emit_arm64.c and writes the
+/* Emits one instruction per line through src/arch/aarch64/emit.c and writes the
  * raw words to stdout, alongside the mnemonic EACH ONE IS SUPPOSED TO BE on
  * stderr. tests/golden/arm64-encoding.sh disassembles the bytes with
  * aarch64-elf-objdump and diffs the two.
@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../src/asm/emit_arm64.h"
+#include "../../src/arch/aarch64/emit.h"
 
 static struct code C;
 static FILE *want;
