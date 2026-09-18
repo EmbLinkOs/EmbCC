@@ -126,6 +126,38 @@ int ct_is_pmf(const struct cty *t)
     return t->k == CT_MPTR && t->to->k == CT_FUNC;
 }
 
+struct cty *ct_tparam(int index, const char *name)
+{
+    struct cty *t = xcalloc(1, sizeof *t);
+    t->k = CT_TPARAM;
+    t->n = index;
+    t->tpname = name;
+    return t;
+}
+
+int ct_dependent(const struct cty *t)
+{
+    if (!t)
+        return 0;
+    switch (t->k) {
+    case CT_TPARAM: case CT_TID: case CT_DEP:
+        return 1;
+    case CT_PTR: case CT_LREF: case CT_RREF: case CT_ARRAY:
+        return t->n == -2 || t->n == -3 || ct_dependent(t->to);
+    case CT_MPTR:
+        return ct_dependent(t->to);
+    case CT_FUNC:
+        if (ct_dependent(t->to))
+            return 1;
+        for (int i = 0; i < t->np; i++)
+            if (ct_dependent(t->params[i]))
+                return 1;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 struct cty *ct_size_t(void) { return ct_basic(CT_ULONG); }
 struct cty *ct_ptrdiff_t(void) { return ct_basic(CT_LONG); }
 
@@ -159,8 +191,43 @@ static int same(const struct cty *a, const struct cty *b, int quals)
         return a->en == b->en;
     case CT_MPTR:
         return a->cls == b->cls && same(a->to, b->to, 1);
+    case CT_TPARAM:
+        return a->n == b->n;
+    case CT_TID:
+        if (a->tmpl != b->tmpl || a->ntargs != b->ntargs)
+            return 0;
+        for (int i = 0; i < a->ntargs; i++)
+            if (!targ_same(&a->targs[i], &b->targs[i]))
+                return 0;
+        return 1;
+    case CT_DEP:
+        return 0;                 /* two unknown types: never known alike */
     default:
         return 1;
+    }
+}
+
+/* Two template arguments are the same argument. */
+int targ_same(const struct ctarg *a, const struct ctarg *b)
+{
+    if (a->kind != b->kind || a->is_pack != b->is_pack)
+        return 0;
+    if (a->is_pack) {
+        if (a->nelems != b->nelems)
+            return 0;
+        for (int i = 0; i < a->nelems; i++)
+            if (!targ_same(&a->elems[i], &b->elems[i]))
+                return 0;
+        return 1;
+    }
+    switch (a->kind) {
+    case TP_TYPE: return ct_same(a->type, b->type);
+    case TP_VALUE:
+        if (a->mexpr || b->mexpr)
+            return a->mexpr && b->mexpr &&
+                   strcmp(mexpr_key(a->mexpr), mexpr_key(b->mexpr)) == 0;
+        return a->value == b->value;
+    default: return a->tmpl == b->tmpl;
     }
 }
 
@@ -206,7 +273,9 @@ int ct_is_complete(const struct cty *t)
     switch (t->k) {
     case CT_VOID: return 0;
     case CT_ARRAY: return t->n >= 0 && ct_is_complete(t->to);
-    case CT_CLASS: return t->cls->complete;
+    case CT_CLASS:
+        class_ensure(t->cls);
+        return t->cls->complete;
     case CT_ENUM: return t->en->complete || t->en->fixed;
     default: return 1;
     }
@@ -227,6 +296,8 @@ int ct_is_signed(const struct cty *t)
 
 long ct_size(const struct cty *t)
 {
+    if (t->k == CT_CLASS)
+        class_ensure(t->cls);
     switch (t->k) {
     case CT_VOID: return 1;          /* GNU: sizeof(void) for arithmetic */
     case CT_BOOL: case CT_CHAR: case CT_SCHAR: case CT_UCHAR: case CT_CHAR8:
@@ -244,13 +315,15 @@ long ct_size(const struct cty *t)
     case CT_ENUM: return ct_size(t->en->underlying);
     case CT_FUNC: return 1;
     case CT_MPTR: return t->to->k == CT_FUNC ? 16 : 8;
-    case CT_AUTO: return 0;
+    case CT_AUTO: case CT_TPARAM: case CT_TID: case CT_DEP: return 0;
     }
     return 0;
 }
 
 long ct_align(const struct cty *t)
 {
+    if (t->k == CT_CLASS)
+        class_ensure(t->cls);
     switch (t->k) {
     case CT_ARRAY: return ct_align(t->to);
     case CT_CLASS: return t->cls->align;
@@ -401,6 +474,15 @@ static void name_into(char *buf, size_t cap, const struct cty *t)
         name_into(inner, sizeof inner, t->to);
         snprintf(buf, cap, "%s %s::*", inner, t->cls->name ? t->cls->name
                                                            : "<anonymous>");
+        return;
+    case CT_TPARAM:
+        snprintf(buf, cap, "%s%s", cv, t->tpname ? t->tpname : "T");
+        return;
+    case CT_TID:
+        snprintf(buf, cap, "%s%s<...>", cv, t->tmpl->name);
+        return;
+    case CT_DEP:
+        snprintf(buf, cap, "%s<dependent type>", cv);
         return;
     case CT_ENUM:
         snprintf(buf, cap, "%s%s", cv, t->en->name ? t->en->name

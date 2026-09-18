@@ -132,6 +132,7 @@ int class_lookup_ambiguous;
 
 struct csym *class_member(struct cclass *c, const char *name)
 {
+    class_ensure(c);
     struct csym *y = scope_find_here(c->scope, name);
     if (y)
         return y;

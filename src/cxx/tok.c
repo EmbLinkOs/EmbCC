@@ -5,6 +5,7 @@
  * lexed up front, with the file each token came from (line markers). */
 #include "cxx.h"
 
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,8 @@
 struct ctok *cx_toks;
 int cx_ntoks;
 int cx_pos;
+int cx_half_gt;
+void *cx_sfinae;
 
 void cx_tokenize(const char *file, const char *src)
 {
@@ -40,8 +43,21 @@ void cx_tokenize(const char *file, const char *src)
 
 void cx_advance(void)
 {
+    cx_half_gt = 0;
     if (cx_pos < cx_ntoks - 1)
         cx_pos++;
+}
+
+void cx_close_angle(void)
+{
+    if (cx_toks[cx_pos].t.kind == TOK_SHR && !cx_half_gt) {
+        cx_half_gt = 1;             /* the second `>` closes the outer */
+        return;
+    }
+    if (cx_kind() != TOK_GT)
+        cx_error(cx_cur(), "expected '>' to close the template arguments "
+                           "before %s", tok_describe(&cx_cur()->t));
+    cx_advance();
 }
 
 int cx_accept(enum tok_kind k)
@@ -70,6 +86,7 @@ int cx_is_ident(const char *name)
  * included. */
 void cx_skip_balanced(void)
 {
+    cx_half_gt = 0;
     int depth = 0;
     const struct ctok *open = cx_cur();
     do {
@@ -107,6 +124,8 @@ void cx_warn(const struct ctok *at, const char *fmt, ...)
 
 void cx_error(const struct ctok *at, const char *fmt, ...)
 {
+    if (cx_sfinae)                  /* a substitution failure, not an error */
+        longjmp(*(jmp_buf *)cx_sfinae, 1);
     char msg[512];
     va_list ap;
     va_start(ap, fmt);

@@ -156,4 +156,22 @@ is parsed but not yet enforced; anonymous struct/union members, bit-fields
 in a class with bases or virtual functions, and copying arrays of
 non-trivially copyable objects are not supported yet.
 
-Next: CX4 (templates), then CX3b.
+**CX4 in progress**: class, function, member, alias and variable
+templates by token replay (src/cxx/template.c) — a template's tokens are
+kept and each instance parses them again with the parameters bound, so an
+instance is ordinary C++ to the rest of the front-end; a function
+template's declaration is also read once as a pattern (CT_TPARAM, CT_TID,
+CT_DEP) for deduction and mangling. Class instances are defined when
+first needed complete, their members when first used (or from their
+out-of-class definitions); deduction through T, T*, const T&, T&&
+(forwarding), T(&)[N] and A<T> (and its bases); explicit arguments;
+explicit and partial specializations; partial ordering of function
+templates; non-templates preferred on ties; SFINAE (a substitution error
+unwinds to the attempt and drops the candidate); explicit instantiation
+and `extern template`. A dependent expression in a pattern is read into
+its Itanium mangling (`IXsr6is_ptrIT_E5valueE`), types inside it joining
+the substitution table — so tests/cxx/templates' every symbol is named
+exactly as g++ names it. Not yet: parameter packs and fold expressions,
+the ordering of partial specializations beyond the first match.
+
+Next: the rest of CX4 (packs), then CX3b.

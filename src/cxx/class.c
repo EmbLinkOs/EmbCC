@@ -827,6 +827,7 @@ struct cfunc *class_dtor(struct cclass *c)
         define_defaulted(d);
     if (d->is_deleted)
         cx_error(cx_cur(), "the destructor of '%s' is deleted", c->name);
+    func_ensure_body(d);
     d->used = 1;
     return d;
 }
@@ -861,6 +862,7 @@ static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
         define_implicit(f);
     else if (f->is_defaulted)
         define_defaulted(f);
+    func_ensure_body(f);
     struct cexpr **conv;
     int n = convert_args(f, args, na, at, &conv);
     e->fn = f;
@@ -908,6 +910,7 @@ static int same_class(const struct cexpr *e, const struct cclass *c)
 struct cexpr *construct(struct cclass *c, enum init_form form,
                         struct cexpr **args, int na, const struct ctok *at)
 {
+    class_ensure(c);
     if (!c->complete)
         cx_error(at, "'%s' is incomplete here", c->name ? c->name : "class");
     if (!building_base && c->dynamic && class_abstract(c))

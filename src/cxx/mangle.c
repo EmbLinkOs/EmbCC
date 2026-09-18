@@ -118,76 +118,173 @@ static const char *scope_ident(struct cscope *s)
     return s->name;
 }
 
-/* Writes the prefix components for the scopes, each cumulative prefix a
- * substitution candidate: the longest one already seen as an S-reference,
- * then the remaining components. std:: is `St`, not itself a candidate. */
-static void put_prefix(struct mbuf *m, struct cscope **chain, int n)
+static void mangle_type(struct mbuf *m, struct cty *t);
+static const char *type_key(struct cty *t);
+static const char *targs_key(struct ctarg *a, int n);
+static void put_targs(struct mbuf *m, struct ctarg *a, int n);
+
+/* A nested name as steps: each a source name, or the template arguments
+ * following the name before it. Every step's cumulative spelling is a
+ * substitution candidate (the template-prefix, then with its arguments),
+ * keyed without substitutions so a repeat is found however it was first
+ * written. */
+struct step {
+    const char *key;
+    const char *name;         /* a source name, or NULL: arguments */
+    struct ctarg *args;
+    int nargs;
+};
+
+static int add_step(struct step *st, int n, const char *prev,
+                    const char *name, struct ctarg *args, int nargs,
+                    int is_template)
 {
-    int i = 0;
-    if (n > 0 && is_std(chain[0])) {
-        put(m, "St");
-        i = 1;                  /* St itself is not a candidate */
+    const char *k = cx_fmt("%s%zu%s", prev, strlen(name), name);
+    st[n].key = k;
+    st[n].name = name;
+    st[n].args = NULL;
+    st[n].nargs = 0;
+    n++;
+    if (is_template) {
+        st[n].key = cx_fmt("%sI%sE", k, targs_key(args, nargs));
+        st[n].name = NULL;
+        st[n].args = args;
+        st[n].nargs = nargs;
+        n++;
     }
-    /* emit greedily: longest prefix already substituted, then the rest */
-    int best = -1, bestj = i - 1;
-    char *acc = xstrndup("", 0);
-    size_t acclen = 0;
-    char *prefixes[64];
-    for (int j = i; j < n; j++) {
-        char comp[256];
-        snprintf(comp, sizeof comp, "%zu%s", strlen(scope_ident(chain[j])),
-                 scope_ident(chain[j]));
-        size_t cl = strlen(comp);
-        char *na = xmalloc(acclen + cl + 1);
-        memcpy(na, acc, acclen);
-        memcpy(na + acclen, comp, cl + 1);
-        acc = na;
-        acclen += cl;
-        prefixes[j] = acc;
-        int s = sub_find(m, is_std(chain[0]) && i == 1
-                            ? cx_fmt("St%s", acc) : acc);
-        if (s >= 0) {
-            best = s;
-            bestj = j;
+    return n;
+}
+
+/* The steps naming scope s (namespaces and classes, outermost first); *std
+ * is set when the outermost is ::std (written St, itself no candidate). */
+static int scope_steps(struct cscope *s, struct step *st, int *std)
+{
+    struct cscope *chain[64];
+    int n = scope_chain(s, chain, 64), k = 0, i = 0;
+    const char *prev = "";
+    *std = n > 0 && is_std(chain[0]);
+    if (*std) {
+        prev = "St";
+        i = 1;
+    }
+    for (; i < n && k < 120; i++) {
+        struct cscope *c = chain[i];
+        struct cclass *cls = c->k == SC_CLASS ? c->cls : NULL;
+        k = add_step(st, k, prev, scope_ident(c),
+                     cls ? cls->targs : NULL, cls ? cls->ntargs : 0,
+                     cls && cls->tmpl);
+        prev = st[k - 1].key;
+    }
+    return k;
+}
+
+/* Writes steps [0, n): the longest prefix already a candidate as its
+ * S-reference, then the rest, each added. The last `nocand` steps are not
+ * candidates (a function's own name). */
+static void put_steps(struct mbuf *m, struct step *st, int n, int nocand)
+{
+    int from = 0;
+    for (int j = n - 1 - nocand; j >= 0; j--) {
+        int i = sub_find(m, st[j].key);
+        if (i >= 0) {
+            put_sub(m, i);
+            from = j + 1;
+            break;
         }
     }
-    if (best >= 0)
-        put_sub(m, best);
-    for (int j = bestj + 1; j < n; j++) {
-        put_source(m, scope_ident(chain[j]));
-        sub_add(m, is_std(chain[0]) && i == 1 ? cx_fmt("St%s", prefixes[j])
-                                              : prefixes[j]);
+    for (int j = from; j < n; j++) {
+        if (st[j].name)
+            put_source(m, st[j].name);
+        else
+            put_targs(m, st[j].args, st[j].nargs);
+        if (j < n - nocand)
+            sub_add(m, st[j].key);
     }
 }
 
-static void mangle_type(struct mbuf *m, struct cty *t);
-static const char *type_name_key(struct cscope *owner, const char *name);
-
-/* A class or enum name: `3Foo` at global scope, `St3Foo` in std, or
- * `N3foo3FooE` — or its substitution when it was seen already. */
-static void put_type_name(struct mbuf *m, struct cscope *owner,
-                          const char *name)
+/* A name made of scope steps plus the entity's own: `3Foo`, `St3Foo`,
+ * `1AIiE`, `N3foo3BarE`, `N2ns3BoxIlE2InE` — or one substitution. */
+static void put_name(struct mbuf *m, struct step *st, int n, int std,
+                     int nocand)
 {
-    struct cscope *chain[64];
-    int n = scope_chain(owner, chain, 64);
-    const char *key = type_name_key(owner, name);
-    int i = sub_find(m, key);
-    if (i >= 0) {
-        put_sub(m, i);
+    int last_name = n - 1;
+    while (last_name > 0 && !st[last_name].name)
+        last_name--;
+    int nested = last_name > 0;             /* more than one component */
+    if (!nocand) {
+        int i = sub_find(m, st[n - 1].key);
+        if (i >= 0) {
+            put_sub(m, i);
+            return;
+        }
+    }
+    if (!nested) {
+        if (std)
+            put(m, "St");
+        put_steps(m, st, n, nocand);
         return;
     }
-    if (n == 0) {
-        put_source(m, name);
-    } else if (n == 1 && is_std(chain[0])) {
-        put(m, "St");               /* ::std::Foo is St3Foo, not nested */
-        put_source(m, name);
-    } else {
-        put(m, "N");
-        put_prefix(m, chain, n);
-        put_source(m, name);
-        put(m, "E");
-    }
-    sub_add(m, key);
+    put(m, "N");
+    if (std)
+        put(m, "St");
+    put_steps(m, st, n, nocand);
+    put(m, "E");
+}
+
+static int class_steps(struct cclass *c, struct step *st, int *std)
+{
+    int n = scope_steps(c->owner, st, std);
+    const char *prev = n ? st[n - 1].key : *std ? "St" : "";
+    return add_step(st, n, prev, c->name ? c->name : "._anon", c->targs,
+                    c->ntargs, c->tmpl != NULL);
+}
+
+static const char *type_name_key(struct cscope *owner, const char *name)
+{
+    struct step st[128];
+    int std;
+    int n = scope_steps(owner, st, &std);
+    const char *prev = n ? st[n - 1].key : std ? "St" : "";
+    n = add_step(st, n, prev, name, NULL, 0, 0);
+    return st[n - 1].key;
+}
+
+/* A class or enum name — or its substitution when it was seen already. */
+static void put_class_name(struct mbuf *m, struct cclass *c)
+{
+    struct step st[128];
+    int std;
+    int n = class_steps(c, st, &std);
+    put_name(m, st, n, std, 0);
+}
+
+static void put_enum_name(struct mbuf *m, struct cenum *en)
+{
+    struct step st[128];
+    int std;
+    int n = scope_steps(en->owner, st, &std);
+    const char *prev = n ? st[n - 1].key : std ? "St" : "";
+    n = add_step(st, n, prev, en->name ? en->name : "._anon", NULL, 0, 0);
+    put_name(m, st, n, std, 0);
+}
+
+/* A template's name (a template template argument, a CT_TID's). */
+static void put_template_name(struct mbuf *m, struct ctemplate *t)
+{
+    struct step st[128];
+    int std;
+    int n = scope_steps(t->scope, st, &std);
+    const char *prev = n ? st[n - 1].key : std ? "St" : "";
+    n = add_step(st, n, prev, t->name, NULL, 0, 0);
+    put_name(m, st, n, std, 0);
+}
+
+static const char *class_key(struct cclass *c)
+{
+    struct step st[128];
+    int std;
+    int n = class_steps(c, st, &std);
+    return st[n - 1].key;
 }
 
 static const char *builtin_code(enum cty_kind k)
@@ -218,24 +315,6 @@ static const char *builtin_code(enum cty_kind k)
     }
 }
 
-/* A class or enum's key in the substitution table: its components, as the
- * prefixes naming its enclosing scopes are keyed (so the prefix `abi::X::`
- * of a nested name and the type abi::X are one candidate). */
-static const char *type_name_key(struct cscope *owner, const char *name)
-{
-    struct cscope *chain[64];
-    int n = scope_chain(owner, chain, 64);
-    char full[1024];
-    size_t fl = 0;
-    int stdp = n > 0 && is_std(chain[0]);
-    for (int j = stdp ? 1 : 0; j < n; j++)
-        fl += (size_t)snprintf(full + fl, sizeof full - fl, "%zu%s",
-                               strlen(scope_ident(chain[j])),
-                               scope_ident(chain[j]));
-    snprintf(full + fl, sizeof full - fl, "%zu%s", strlen(name), name);
-    return stdp ? cx_fmt("St%s", full) : cx_strdup(full);
-}
-
 /* t's key in the substitution table: an encoding with no substitutions in
  * it, so a repeat is recognized however its first occurrence was written
  * (its own parts may have been abbreviated there). */
@@ -252,6 +331,8 @@ static const char *type_key(struct cty *t)
     case CT_LREF: return cx_fmt("R%s", type_key(t->to));
     case CT_RREF: return cx_fmt("O%s", type_key(t->to));
     case CT_ARRAY:
+        if (t->n == -2)
+            return cx_fmt("AT%d__%s", t->bparam, type_key(t->to));
         return t->n >= 0 ? cx_fmt("A%ld_%s", t->n, type_key(t->to))
                          : cx_fmt("A_%s", type_key(t->to));
     case CT_FUNC: {
@@ -266,11 +347,26 @@ static const char *type_key(struct cty *t)
     case CT_MPTR:
         return cx_fmt("M%s%s", type_key(ct_class(t->cls)), type_key(t->to));
     case CT_CLASS:
-        return type_name_key(t->cls->owner,
-                             t->cls->name ? t->cls->name : "._anon");
+        return class_key(t->cls);
     case CT_ENUM:
         return type_name_key(t->en->owner,
                              t->en->name ? t->en->name : "._anon");
+    case CT_TPARAM:
+        return cx_fmt("T%ld_", t->n);
+    case CT_TID: {
+        struct step st[128];
+        int std;
+        int n = scope_steps(t->tmpl->scope, st, &std);
+        const char *prev = n ? st[n - 1].key : std ? "St" : "";
+        n = add_step(st, n, prev, t->tmpl->name, t->targs, t->ntargs, 1);
+        return st[n - 1].key;
+    }
+    case CT_DEP: {
+        char *k = cx_fmt("N%s", t->to ? type_key(t->to) : "?");
+        for (int i = 0; i < t->ndnames; i++)
+            k = cx_fmt("%s%zu%s", k, strlen(t->dnames[i]), t->dnames[i]);
+        return cx_fmt("%sE", k);
+    }
     default:
         return "?";
     }
@@ -314,6 +410,14 @@ static void mangle_type(struct mbuf *m, struct cty *t)
         case CT_RREF: put(m, "O"); mangle_type(m, t->to); break;
         case CT_ARRAY: {
             char n[32];
+            if (t->n == -2) {
+                /* T (&)[N]: the bound is the template parameter */
+                put(m, "A");
+                mangle_type(m, ct_tparam(t->bparam, NULL));
+                put(m, "_");
+                mangle_type(m, t->to);
+                break;
+            }
             if (t->n >= 0) snprintf(n, sizeof n, "A%ld_", t->n);
             else snprintf(n, sizeof n, "A_");
             put(m, n);
@@ -346,12 +450,49 @@ static void mangle_type(struct mbuf *m, struct cty *t)
         return;
     }
     case CT_CLASS:
-        put_type_name(m, t->cls->owner,
-                      t->cls->name ? t->cls->name : "._anon");
+        put_class_name(m, t->cls);
         return;
     case CT_ENUM:
-        put_type_name(m, t->en->owner, t->en->name ? t->en->name : "._anon");
+        put_enum_name(m, t->en);
         return;
+    case CT_TPARAM: {
+        /* T_, T0_, T1_ ...: a template parameter, itself a candidate */
+        const char *key = type_key(t);
+        int i = sub_find(m, key);
+        if (i >= 0) {
+            put_sub(m, i);
+            return;
+        }
+        put(m, t->n == 0 ? "T_" : cx_fmt("T%ld_", t->n - 1));
+        sub_add(m, key);
+        return;
+    }
+    case CT_TID: {
+        struct step st[128];
+        int std;
+        int n = scope_steps(t->tmpl->scope, st, &std);
+        const char *prev = n ? st[n - 1].key : std ? "St" : "";
+        n = add_step(st, n, prev, t->tmpl->name, t->targs, t->ntargs, 1);
+        put_name(m, st, n, std, 0);
+        return;
+    }
+    case CT_DEP: {
+        /* typename T::a::b: N T_ 1a 1b E */
+        const char *key = type_key(t);
+        int i = sub_find(m, key);
+        if (i >= 0) {
+            put_sub(m, i);
+            return;
+        }
+        put(m, "N");
+        if (t->to)
+            mangle_type(m, t->to);
+        for (int k = 0; k < t->ndnames; k++)
+            put_source(m, t->dnames[k]);
+        put(m, "E");
+        sub_add(m, key);
+        return;
+    }
     case CT_VALIST:
         /* g++'s own spelling: x86-64's va_list is __va_list_tag[1], which a
          * parameter decays to a pointer; aarch64's is struct std::__va_list */
@@ -371,6 +512,132 @@ static void mangle_type(struct mbuf *m, struct cty *t)
     default:
         put(m, "?");
     }
+}
+
+/* ---- template arguments ---- */
+
+/* Types referenced from expression manglings (\1 index \1). */
+static struct cty **mtypes;
+static int nmtypes, capmtypes;
+
+int mangle_type_ref(struct cty *t)
+{
+    if (nmtypes == capmtypes) {
+        capmtypes = capmtypes ? capmtypes * 2 : 64;
+        mtypes = xrealloc(mtypes, (size_t)capmtypes * sizeof *mtypes);
+    }
+    mtypes[nmtypes] = t;
+    return nmtypes++;
+}
+
+/* An expression's mangling with its types written into m (keys: into a
+ * substitution-free key). */
+static void put_mexpr(struct mbuf *m, const char *x)
+{
+    while (*x) {
+        if (*x == 1) {
+            int i = 0;
+            for (x++; *x != 1; x++)
+                i = i * 10 + (*x - '0');
+            x++;
+            mangle_type(m, mtypes[i]);
+            continue;
+        }
+        char c[2] = { *x++, 0 };
+        put(m, c);
+    }
+}
+
+const char *mexpr_key(const char *x)
+{
+    char *k = "";
+    while (*x) {
+        if (*x == 1) {
+            int i = 0;
+            for (x++; *x != 1; x++)
+                i = i * 10 + (*x - '0');
+            x++;
+            k = cx_fmt("%s%s", k, type_key(mtypes[i]));
+            continue;
+        }
+        k = cx_fmt("%s%c", k, *x++);
+    }
+    return k;
+}
+
+static const char *value_code(struct cty *t)
+{
+    const char *b = t ? builtin_code(ct_unqual(t)->k) : NULL;
+    return b ? b : "i";
+}
+
+static const char *targs_key(struct ctarg *a, int n)
+{
+    char *k = "";
+    for (int i = 0; i < n; i++) {
+        struct ctarg *x = &a[i];
+        if (x->is_pack)
+            k = cx_fmt("%sJ%sE", k, targs_key(x->elems, x->nelems));
+        else if (x->kind == TP_TYPE)
+            k = cx_fmt("%s%s", k, type_key(x->type));
+        else if (x->kind == TP_VALUE && x->mexpr)
+            k = cx_fmt("%sX%sE", k, mexpr_key(x->mexpr));
+        else if (x->kind == TP_VALUE)
+            k = x->vtype && x->vtype->k == CT_TPARAM
+                ? cx_fmt("%sT%ld_", k, x->vtype->n)
+                : cx_fmt("%sL%s%s%ldE", k, value_code(x->vtype),
+                         x->value < 0 ? "n" : "",
+                         x->value < 0 ? -x->value : x->value);
+        else
+            k = cx_fmt("%s@%s", k, x->tmpl ? x->tmpl->name : "?");
+    }
+    return k;
+}
+
+static void put_targ(struct mbuf *m, struct ctarg *x)
+{
+    if (x->is_pack) {
+        put(m, "J");
+        for (int i = 0; i < x->nelems; i++)
+            put_targ(m, &x->elems[i]);
+        put(m, "E");
+        return;
+    }
+    if (x->kind == TP_TYPE) {
+        mangle_type(m, x->type);
+        return;
+    }
+    if (x->kind == TP_TEMPLATE) {
+        put_template_name(m, x->tmpl);
+        return;
+    }
+    if (x->mexpr) {
+        put(m, "X");
+        put_mexpr(m, x->mexpr);
+        put(m, "E");
+        return;
+    }
+    if (x->vtype && x->vtype->k == CT_TPARAM) {
+        mangle_type(m, x->vtype);
+        return;
+    }
+    if (x->vtype && x->vtype->k == CT_ENUM) {
+        put(m, "L");
+        mangle_type(m, x->vtype);
+        put(m, cx_fmt("%s%ldE", x->value < 0 ? "n" : "",
+                      x->value < 0 ? -x->value : x->value));
+        return;
+    }
+    put(m, cx_fmt("L%s%s%ldE", value_code(x->vtype), x->value < 0 ? "n" : "",
+                  x->value < 0 ? -x->value : x->value));
+}
+
+static void put_targs(struct mbuf *m, struct ctarg *a, int n)
+{
+    put(m, "I");
+    for (int i = 0; i < n; i++)
+        put_targ(m, &a[i]);
+    put(m, "E");
 }
 
 static const char *operator_code(const char *name)
@@ -427,31 +694,91 @@ const char *mangle_func(struct cfunc *f)
 {
     if (f->c_linkage)
         return f->name;
-    if (strcmp(f->name, "main") == 0 && f->owner == cx_global)
+    if (strcmp(f->name, "main") == 0 && f->owner == cx_global && !f->cls)
         return "main";
     struct mbuf m;
     memset(&m, 0, sizeof m);
     put(&m, "_Z");
-    struct cscope *chain[64];
-    int n = scope_chain(f->owner, chain, 64);
-    if (n == 0) {
-        put_unqualified(&m, f);
-    } else if (n == 1 && is_std(chain[0]) && !f->cls) {
-        put(&m, "St");
-        put_unqualified(&m, f);
-    } else {
+    struct step st[128];
+    int std;
+    int n = scope_steps(f->owner, st, &std);
+    int nested = n > 0 && !(n == 0 && std);
+    const char *prev = n ? st[n - 1].key : std ? "St" : "";
+    /* the final name: a source name, or an operator/special name, which
+     * is never a candidate itself; a template's name is (its prefix) */
+    struct mbuf u;
+    memset(&u, 0, sizeof u);
+    put_unqualified(&u, f);
+    int tmpl = f->spec_of != NULL;
+    /* steps: the scopes, then the name as written (a raw step), then the
+     * template arguments */
+    st[n].key = cx_fmt("%s%s", prev, u.p);
+    st[n].name = NULL;
+    st[n].args = NULL;
+    st[n].nargs = 0;
+    int name_step = n++;
+    if (tmpl) {
+        st[n].key = cx_fmt("%sI%sE", st[name_step].key,
+                           targs_key(f->targs, f->ntargs));
+        st[n].name = NULL;
+        st[n].args = f->targs;
+        st[n].nargs = f->ntargs;
+        n++;
+    }
+    /* writing: the same as put_name, but the name step is raw text and
+     * only a template's name (not a plain function's) is a candidate */
+    int from = 0;
+    for (int j2 = n - 1 - (tmpl ? 1 : 1); j2 >= 0; j2--) {
+        if (j2 == name_step && !tmpl)
+            continue;
+        int i2 = sub_find(&m, st[j2].key);
+        if (i2 >= 0) {
+            from = j2 + 1;
+            break;
+        }
+    }
+    nested = name_step > 0;
+    if (nested || (std && name_step > 0)) {
         put(&m, "N");
         if (f->type->fq & CQ_VOLATILE) put(&m, "V");
         if (f->type->fq & CQ_CONST) put(&m, "K");
-        put_prefix(&m, chain, n);
-        put_unqualified(&m, f);
-        put(&m, "E");
+        if (f->type->refq) put(&m, f->type->refq == 1 ? "R" : "O");
     }
-    struct cty *ft = f->type;
+    if (std)
+        put(&m, "St");
+    if (from > 0)
+        put_sub(&m, sub_find(&m, st[from - 1].key));
+    for (int j2 = from; j2 < n; j2++) {
+        if (j2 == name_step)
+            put(&m, u.p);
+        else if (st[j2].name)
+            put_source(&m, st[j2].name);
+        else
+            put_targs(&m, st[j2].args, st[j2].nargs);
+        if (j2 < name_step || (j2 == name_step && tmpl))
+            sub_add(&m, st[j2].key);
+    }
+    if (nested || (std && name_step > 0))
+        put(&m, "E");
+    /* the signature: a specialization's as its template declares it,
+     * return type first (in terms of T_, T0_ ...) */
+    struct cty *ft = tmpl ? f->spec_of->pattern->type : f->type;
+    if (tmpl && !f->is_ctor && !f->is_dtor && !f->is_conv)
+        mangle_type(&m, ft->to);
     if (ft->np == 0 && !ft->variadic)
         put(&m, "v");
-    for (int i = 0; i < ft->np; i++)
-        mangle_type(&m, ft->params[i]);
+    for (int i = 0; i < ft->np; i++) {
+        struct cty *pt = ft->params[i];
+        if (pt->pack_expansion) {
+            put(&m, "Dp");                  /* Ts... */
+            struct cty *e = xmalloc(sizeof *e);
+            *e = *pt;
+            e->pack_expansion = 0;
+            mangle_type(&m, e);
+            continue;
+        }
+        mangle_type(&m, pt);
+    }
     if (ft->variadic)
         put(&m, "z");
     return m.p;
@@ -461,22 +788,27 @@ const char *mangle_var(struct cvar *v, struct cscope *owner)
 {
     if (v->c_linkage)
         return v->name;
-    struct cscope *chain[64];
-    int n = scope_chain(owner, chain, 64);
-    if (n == 0)
+    struct step st[128];
+    int std;
+    int n = scope_steps(owner, st, &std);
+    if (n == 0 && !std && !v->targs)
         return v->name;          /* a global-namespace variable: unmangled */
     struct mbuf m;
     memset(&m, 0, sizeof m);
     put(&m, "_Z");
-    if (n == 1 && is_std(chain[0])) {
+    const char *prev = n ? st[n - 1].key : std ? "St" : "";
+    n = add_step(st, n, prev, v->name, v->targs, v->ntargs, v->targs != NULL);
+    int last_name = n - 1;
+    while (last_name > 0 && !st[last_name].name)
+        last_name--;
+    if (last_name > 0)
+        put(&m, "N");
+    if (std)
         put(&m, "St");
-        put_source(&m, v->name);
-        return m.p;
-    }
-    put(&m, "N");
-    put_prefix(&m, chain, n);
-    put_source(&m, v->name);
-    put(&m, "E");
+    /* the variable's own name is no candidate; its template's name is */
+    put_steps(&m, st, n, v->targs ? 1 : 1);
+    if (last_name > 0)
+        put(&m, "E");
     return m.p;
 }
 
@@ -511,7 +843,6 @@ const char *mangle_class_name(struct cclass *c)
 {
     struct mbuf m;
     memset(&m, 0, sizeof m);
-    put_type_name(&m, c->owner,
-                  c->name ? c->name : "._anon");
+    put_class_name(&m, c);
     return m.p;
 }

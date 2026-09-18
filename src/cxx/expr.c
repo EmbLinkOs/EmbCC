@@ -7,6 +7,7 @@
  * arguments, returns and new-expressions all share. */
 #include "cxx.h"
 
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,6 +60,8 @@ static struct cexpr *ex2(enum cexpr_kind k, struct cty *t, int vc,
 
 static void ex_error(const struct cexpr *e, const char *fmt, ...)
 {
+    if (cx_sfinae)                  /* a substitution failure, not an error */
+        longjmp(*(jmp_buf *)cx_sfinae, 1);
     char msg[512];
     va_list ap;
     va_start(ap, fmt);
@@ -274,6 +277,7 @@ static int path_count(struct cclass *d, struct cclass *b)
 {
     if (d == b)
         return 1;
+    class_ensure(d);
     int n = 0;
     for (int i = 0; i < d->nbases; i++)
         n += path_count(d->bases[i].cls, b);
@@ -650,8 +654,15 @@ static int cand_better(const struct cand *a, const struct cand *b)
     }
     if (better)
         return 1;
-    /* equal conversions: a non-template beats a template (CX4), and
-     * nothing else separates them here */
+    /* equal conversions: a non-template beats a template's
+     * specialization (12.2.4.3) */
+    if (!a->f->spec_of && b->f->spec_of)
+        return 1;
+    /* two templates' specializations: the more specialized template */
+    if (a->f->spec_of && b->f->spec_of && a->f->spec_of != b->f->spec_of &&
+        more_specialized(a->f->spec_of, b->f->spec_of,
+                         a->has_obj && b->has_obj ? a->n - 1 : a->n - 1))
+        return 1;
     return 0;
 }
 
@@ -691,6 +702,44 @@ static struct ics object_ics(struct cexpr *obj, struct cfunc *f)
 
 static int resolve_ambiguous;
 
+/* A call's explicit template arguments (f<int>(x)), for the template
+ * candidates of the next resolution. */
+static struct ctarg *cur_targs;
+static int cur_ntargs, cur_has_targs;
+
+/* The candidates with each function template replaced by its
+ * specialization for these arguments — or dropped, when deduction or
+ * substitution fails (13.10.3). */
+static int instantiate_candidates(struct cfunc **fs, int nf,
+                                  struct cexpr *obj, struct cexpr **args,
+                                  int na, int opform, struct cfunc ***out)
+{
+    struct cfunc **r = xmalloc((size_t)(nf ? nf : 1) * sizeof *r);
+    int n = 0;
+    (void)obj;
+    for (int k = 0; k < nf; k++) {
+        struct cfunc *f = fs[k];
+        if (!f->tmpl) {
+            if (!cur_has_targs)
+                r[n++] = f;
+            continue;
+        }
+        int member = f->cls && !f->is_static && !f->is_ctor;
+        struct cexpr **xa = opform && member ? args + 1 : args;
+        int nx = opform && member ? na - 1 : na;
+        struct ctarg *targs;
+        int nt;
+        if (!deduce_call(f->tmpl, cur_targs, cur_ntargs, xa, nx, &targs,
+                         &nt))
+            continue;
+        struct cfunc *spec = func_instance(f->tmpl, targs, nt);
+        if (spec)
+            r[n++] = spec;
+    }
+    *out = r;
+    return n;
+}
+
 /* The best of the candidates fs[0..nf) for the arguments. In call form,
  * obj (a pointer, or NULL) is the object member candidates are called
  * on; in operator form (opform) args[0] is the left operand, a member
@@ -701,6 +750,14 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
                              const struct ctok *at, const char *what,
                              int flags)
 {
+    int templ = 0;
+    for (int k = 0; k < nf; k++)
+        templ |= fs[k]->tmpl != NULL;
+    if (templ || cur_has_targs) {
+        const char *w = what ? what : nf ? fs[0]->name : "?";
+        nf = instantiate_candidates(fs, nf, obj, args, na, opform, &fs);
+        what = w;
+    }
     struct cand *cs = xcalloc((size_t)(nf ? nf : 1), sizeof *cs);
     int nv = 0;
     resolve_ambiguous = 0;
@@ -1199,6 +1256,7 @@ struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
                  ct_name(ret));
     if ((fn->is_implicit || fn->is_defaulted) && !fn->defined)
         define_implicit(fn);
+    func_ensure_body(fn);
     struct cexpr **conv;
     int n = convert_args(fn, args, na, at, &conv);
     struct cexpr *e = call_result(ret);
@@ -2249,7 +2307,7 @@ static int paren_type_id(void)
             continue;
         }
         if ((k == TOK_IDENT || k == TOK_COLONCOLON) && peek_type_name(&n)) {
-            cx_pos += n;
+            cx_skip_peek(n);
             continue;
         }
         break;
@@ -2515,6 +2573,8 @@ static int call_args(struct cexpr ***out)
 {
     struct cexpr **args = NULL;
     int na = 0, cap = 0;
+    int saved = cx_in_targs;
+    cx_in_targs = 0;
     cx_expect(TOK_LPAREN, "'('");
     while (cx_kind() != TOK_RPAREN) {
         if (na == cap) {
@@ -2527,6 +2587,7 @@ static int call_args(struct cexpr ***out)
             break;
     }
     cx_expect(TOK_RPAREN, "')' to close the arguments");
+    cx_in_targs = saved;
     *out = args;
     return na;
 }
@@ -2637,16 +2698,53 @@ static struct cexpr *member_of(struct cexpr *obj, struct cfield *fl)
     return e;
 }
 
+/* The first function template in an overload set, if any. */
+static struct ctemplate *set_template(struct cfunc *set)
+{
+    for (struct cfunc *f = set; f; f = f->next)
+        if (f->tmpl)
+            return f->tmpl;
+    return NULL;
+}
+
+/* After a function template's name: `<args>` makes them explicit. */
+static void explicit_targs(struct cexpr *e)
+{
+    struct ctemplate *t = e->fn ? set_template(e->fn) : NULL;
+    if (!t || cx_kind() != TOK_LT)
+        return;
+    e->ntargs = parse_template_args(t, &e->targs);
+    e->has_targs = 1;
+}
+
 /* An unqualified or qualified name, looked up (after the name was read). */
 static struct cexpr *name_expr(struct csym *y, const char *name,
                                const struct ctok *at)
 {
     switch (y->k) {
+    case CS_TEMPLATE: {
+        if (y->tmpl->kind != TK_VAR || cx_kind() != TOK_LT)
+            cx_error(at, "template '%s' used without its arguments", name);
+        struct ctarg *args;
+        int n = parse_template_args(y->tmpl, &args);
+        struct cvar *v = var_instance(y->tmpl, args, n, at);
+        struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
+        e->var = v;
+        e->line = at->t.line;
+        e->file = at->file;
+        v->used = 1;
+        return e;
+    }
+    case CS_PACK:
+        cx_error(at, "parameter pack '%s' must be expanded with '...'", name);
+        return NULL;
     case CS_VAR: {
         struct cvar *v = y->var;
         if (v->is_local && !v->is_static && v->fn != cx_curfn &&
             !(v->fn == NULL))
             cx_error(at, "'%s' is a local of another function", name);
+        if (v->is_member_static && !v->defined)
+            member_var_from_outdef(v);
         struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
         e->var = v;
         e->line = at->t.line;
@@ -2671,6 +2769,7 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         if (y->scope->k == SC_CLASS && cx_curfn && cx_curfn->this_var &&
             class_derives(cx_curfn->cls, y->scope->cls, NULL))
             e->obj = ex_this();
+        explicit_targs(e);
         return e;
     }
     case CS_ENUMERATOR: {
@@ -2794,7 +2893,12 @@ static struct cexpr *parse_primary(void)
             return e;
         }
         cx_advance();
-        e = expr_parse();
+        {
+            int saved = cx_in_targs;
+            cx_in_targs = 0;
+            e = expr_parse();
+            cx_in_targs = saved;
+        }
         cx_expect(TOK_RPAREN, "')'");
         e->paren = 1;
         return e;
@@ -2850,7 +2954,7 @@ static struct cexpr *parse_primary(void)
         int n;
         struct cty *t = peek_type_name(&n);
         if (t && (cx_kind_at(n) == TOK_LPAREN || cx_kind_at(n) == TOK_LBRACE)) {
-            cx_pos += n;
+            cx_skip_peek(n);
             return functional_cast(t, at);
         }
         struct qname q = peek_qname();
@@ -2923,8 +3027,14 @@ static struct cexpr *call(struct cexpr *f, struct cexpr **args, int na,
             adl(&fs, name, args, na);
         if (!fs.n)
             cx_error(at, "'%s' was not declared in this scope", name);
+        cur_targs = f->targs;
+        cur_ntargs = f->ntargs;
+        cur_has_targs = f->has_targs;
         struct cfunc *fn = best_of(fs.f, fs.n, f->obj, args, na, 0, at, name,
                                    0);
+        cur_has_targs = 0;
+        cur_ntargs = 0;
+        cur_targs = NULL;
         struct cexpr *r = make_call(fn, fn->cls && !fn->is_static ? f->obj
                                                                   : NULL,
                                     args, na, at);
@@ -3005,12 +3115,12 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
         cx_error(at, "request for a member of non-class type '%s'",
                  ct_name(obj->t));
     struct cclass *c = obj->t->cls;
+    class_ensure(c);
     if (!c->complete && !c->defining)
         cx_error(at, "member access into incomplete '%s'", ct_name(obj->t));
     if (obj->vc == VC_PRVALUE)
         obj = materialize(obj);
-    if (cx_kind() == TOK_CX_TEMPLATE)
-        cx_error(cx_cur(), "'.template' is not supported yet (CX4)");
+    cx_accept(TOK_CX_TEMPLATE);          /* x.template f<T>() */
     if (cx_kind() == TOK_TILDE) {
         /* an explicit destructor call: p->~T() */
         cx_advance();
@@ -3056,6 +3166,8 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
     case CS_FIELD:
         return member_of(to_base(obj, y->scope->cls, 0), y->field);
     case CS_VAR: {
+        if (y->var->is_member_static && !y->var->defined)
+            member_var_from_outdef(y->var);
         struct cexpr *e = ex_new(E_VAR, ct_strip_ref(y->var->type),
                                  VC_LVALUE);
         e->var = y->var;
@@ -3068,6 +3180,7 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
         e->name = name;
         e->obj = ex_addr(obj);
         e->nonvirt = qualified;
+        explicit_targs(e);
         return e;
     }
     case CS_ENUMERATOR:
@@ -3292,6 +3405,8 @@ static struct cexpr *parse_cast(void)
 
 static int binprec(enum tok_kind k)
 {
+    if (cx_in_targs > 0 && (k == TOK_GT || k == TOK_SHR))
+        return 0;                 /* it closes the template arguments */
     switch (k) {
     case TOK_OROR: return 1;
     case TOK_ANDAND: return 2;

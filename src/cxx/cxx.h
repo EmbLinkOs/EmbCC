@@ -37,8 +37,15 @@ static inline struct ctok *cx_peek(int k)
     int i = cx_pos + k;
     return &cx_toks[i < cx_ntoks ? i : cx_ntoks - 1];
 }
-static inline enum tok_kind cx_kind(void) { return cx_toks[cx_pos].t.kind; }
-static inline enum tok_kind cx_kind_at(int k) { return cx_peek(k)->t.kind; }
+extern int cx_half_gt;         /* a `>>` whose first `>` was consumed */
+static inline enum tok_kind cx_kind(void)
+{
+    return cx_half_gt ? TOK_GT : cx_toks[cx_pos].t.kind;
+}
+static inline enum tok_kind cx_kind_at(int k)
+{
+    return k == 0 ? cx_kind() : cx_peek(k)->t.kind;
+}
 void cx_advance(void);
 int cx_accept(enum tok_kind k);
 void cx_expect(enum tok_kind k, const char *what);
@@ -61,6 +68,12 @@ enum cty_kind {
     CT_PTR, CT_LREF, CT_RREF, CT_ARRAY, CT_FUNC, CT_CLASS, CT_ENUM,
     CT_MPTR,                  /* a pointer to a member of `cls`, of type `to`
                                * (a CT_FUNC for a member function) */
+    CT_TPARAM,                /* a template's type parameter (n: its index),
+                               * in a pattern being read for deduction */
+    CT_TID,                   /* a template-id with dependent arguments:
+                               * tmpl<targs> (a pattern) */
+    CT_DEP,                   /* some other dependent type: `typename
+                               * to::names` (to may be NULL: unknown) */
     CT_AUTO                   /* `auto`, until its initializer deduces it */
 };
 
@@ -68,6 +81,8 @@ enum { CQ_CONST = 1, CQ_VOLATILE = 2 };
 
 struct cclass;
 struct cenum;
+struct ctemplate;
+struct ctarg;
 
 struct cty {
     enum cty_kind k;
@@ -86,6 +101,19 @@ struct cty {
     struct cty **pdecl;
     const char **pnames;
     struct cexpr **defargs;
+    int *defarg_toks;         /* FUNC in a template pattern: default
+                               * arguments as tokens, parsed per use */
+    /* CT_TPARAM: its name; CT_TID: the template and its arguments; CT_DEP:
+     * the nested names after `to` */
+    const char *tpname;
+    struct ctemplate *tmpl;
+    struct ctarg *targs;
+    int ntargs;
+    const char **dnames;
+    int ndnames;
+    int pack_expansion;       /* CT_TPARAM etc.: `T...` in a pattern */
+    int bparam;               /* ARRAY in a pattern with n -2: the value
+                               * parameter its bound is */
 };
 
 struct cty *ct_basic(enum cty_kind k);
@@ -103,6 +131,7 @@ struct cty *ct_size_t(void);                 /* unsigned long */
 struct cty *ct_ptrdiff_t(void);              /* long */
 
 int ct_same(const struct cty *a, const struct cty *b);          /* incl. quals */
+int targ_same(const struct ctarg *a, const struct ctarg *b);
 int ct_same_unqual(const struct cty *a, const struct cty *b);
 int ct_is_integer(const struct cty *t);     /* incl. bool, chars, enums */
 int ct_is_arith(const struct cty *t);
@@ -124,10 +153,13 @@ const char *ct_name(const struct cty *t);   /* for diagnostics */
 
 enum csym_kind {
     CS_VAR, CS_FUNC, CS_TYPEDEF, CS_CLASS, CS_ENUM, CS_ENUMERATOR,
-    CS_NAMESPACE, CS_FIELD
+    CS_NAMESPACE, CS_FIELD,
+    CS_TEMPLATE,              /* a class, alias or variable template */
+    CS_PACK                   /* a bound parameter pack (template.c) */
 };
 
-enum cscope_kind { SC_NAMESPACE, SC_CLASS, SC_ENUM, SC_BLOCK, SC_PARAMS };
+enum cscope_kind { SC_NAMESPACE, SC_CLASS, SC_ENUM, SC_BLOCK, SC_PARAMS,
+                   SC_TEMPLATE /* a template's parameters, bound or not */ };
 
 struct cscope;
 struct cfunc;
@@ -167,6 +199,10 @@ struct cvar {
     int used;
     int emitted;
     int refd, declared;       /* emit.c's bookkeeping */
+    int is_tparam;            /* a value template parameter in a pattern */
+    int tparam_index;
+    struct ctarg *targs;      /* a variable template's instance: its args */
+    int ntargs;
     int disc;                 /* a local static's number among its
                                * function's same-named ones */
     int line;
@@ -183,6 +219,10 @@ struct csym {
     struct cfunc *fns;        /* FUNC: the overload set (cfunc.next) */
     struct cscope *ns;        /* NAMESPACE: its scope */
     struct cfield *field;     /* FIELD: a non-static data member */
+    struct ctemplate *tmpl;   /* TEMPLATE */
+    struct ctarg *pack;       /* PACK: its elements */
+    int npack;
+    struct cvar **pvars;      /* PACK of function parameters: the variables */
     long value;               /* ENUMERATOR */
     int access;               /* in a class: CA_* */
     struct csym *next;        /* in the scope's list */
@@ -226,6 +266,150 @@ struct csym *lookup_in(struct cscope *in, const char *name);
 struct cscope *enclosing_ns(struct cscope *s);
 struct cclass *enclosing_class(struct cscope *s);
 
+/* ---- templates (template.c) ---- */
+
+enum { TP_TYPE, TP_VALUE, TP_TEMPLATE };
+
+/* A template parameter. */
+struct ctparam {
+    int kind;                 /* TP_* */
+    const char *name;
+    int pack;                 /* a parameter pack: ...name */
+    struct cty *vtype;        /* TP_VALUE: its type (a pattern) */
+    int vtype_tok;            /* ... as tokens, for a dependent one */
+    int def_tok;              /* its default argument's tokens, or -1 */
+};
+
+/* A template argument (or a pack of them). */
+struct ctarg {
+    int kind;                 /* TP_* */
+    struct cty *type;         /* TP_TYPE */
+    long value;               /* TP_VALUE: an integral value */
+    struct cty *vtype;        /* TP_VALUE: its type */
+    struct ctemplate *tmpl;   /* TP_TEMPLATE */
+    int is_pack;
+    struct ctarg *elems;      /* a pack's elements */
+    int nelems;
+    const char *mexpr;        /* TP_VALUE in a pattern, dependent: its
+                               * Itanium expression encoding (in X...E) */
+};
+
+enum { TK_CLASS, TK_FUNC, TK_ALIAS, TK_VAR };
+
+/* A partial specialization of a class template: its own parameters, the
+ * argument patterns it matches, and its definition's tokens. */
+struct cpartial {
+    struct ctparam *params;
+    int nparams;
+    struct ctarg *pattern;
+    int npattern;
+    int head_end;             /* the definition: at `:` or `{` */
+    enum tok_kind key;
+    struct cpartial *next;
+};
+
+/* An out-of-class definition of a class template's member:
+ * template<class T> R A<T>::f(...) { ... } */
+struct coutdef {
+    struct ctparam *params;
+    int nparams;
+    int tok;                  /* the declaration after template<...> */
+    const char *member;       /* its (last) name, for the search */
+    struct coutdef *next;
+};
+
+struct cinst {
+    struct ctarg *args;
+    int nargs;
+    struct cclass *cls;       /* a class template's instance */
+    struct cfunc *fn;         /* a function template's specialization (NULL
+                               * with failed set: substitution failed) */
+    int failed;
+    struct cvar *var;         /* a variable template's */
+    struct cty *type;         /* an alias template's */
+    struct cinst *next;
+};
+
+struct ctemplate {
+    int kind;                 /* TK_* */
+    const char *name;
+    struct cscope *scope;     /* where declared: the context names in its
+                               * definition are looked up in */
+    struct ctparam *params;
+    int nparams;
+    int decl_tok;             /* the declaration, after template<...> */
+    int head_end;             /* TK_CLASS: the definition, at `:` or `{`
+                               * (-1: declared only, so far) */
+    enum tok_kind key;        /* TK_CLASS: class, struct or union */
+    struct cfunc *pattern;    /* TK_FUNC: the declaration, its types
+                               * patterns (for deduction and mangling) */
+    struct cclass *member_of; /* a member template: of this class */
+    struct cinst *insts;
+    struct cpartial *partials;
+    struct coutdef *outdefs;
+    int is_extern;            /* `extern template class`: instantiated
+                               * elsewhere */
+    int has_body;             /* TK_FUNC: its declaration is a definition */
+};
+
+/* Class template instance: the class for these arguments (made, not yet
+ * defined: class_ensure defines it when needed). */
+struct cclass *class_instance(struct ctemplate *t, struct ctarg *args,
+                              int nargs, const struct ctok *at);
+/* A class that must be complete here: define it if it is an instance. */
+void class_ensure(struct cclass *c);
+/* The specialization of function template t for args (deduced or given),
+ * its declaration instantiated; NULL when substitution fails (SFINAE). */
+struct cfunc *func_instance(struct ctemplate *t, struct ctarg *args,
+                            int nargs);
+/* Is function template a more specialized than b (for n arguments)? */
+int more_specialized(struct ctemplate *a, struct ctemplate *b, int n);
+/* Deduce t's arguments from a call's (explicit ones first): 1 on success. */
+int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
+                struct cexpr **args, int na, struct ctarg **out, int *nout);
+/* A function whose body is tokens not yet parsed (a member of a class
+ * template's instance, a function template's specialization): parse it. */
+void func_ensure_body(struct cfunc *f);
+/* A class template instance's member defined out of its class: define it
+ * from that definition (1 if one was found). */
+int member_from_outdef(struct cfunc *f);
+void member_var_from_outdef(struct cvar *v);
+/* `< args >` after the name of template t (at `<`). */
+int parse_template_args(struct ctemplate *t, struct ctarg **out);
+/* template<...> declaration, at `template` (ctx: in class c, or NULL). */
+void parse_template_decl(struct cclass *c, int access);
+/* parse.c's side of instantiation: define class c from the tokens at pos
+ * (its bases and body) in the parameter scope ps; replay a function
+ * template's declaration; parse a lazy body; define a variable
+ * template's instance. */
+void class_define_from(struct cclass *c, int pos, enum tok_kind key,
+                       struct cscope *ps);
+struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps);
+void func_define_from(struct cfunc *f);
+struct cvar *var_define_from(struct ctemplate *t, struct ctarg *args,
+                             struct cscope *ps);
+struct cscope *tparam_scope(struct ctparam *ps, int np, struct ctarg *args,
+                            int na, struct cscope *parent);
+struct cty *ct_tparam(int index, const char *name);
+/* Does the type mention a template parameter (a pattern)? */
+int ct_dependent(const struct cty *t);
+/* An alias or variable template's instance. */
+struct cty *alias_instance(struct ctemplate *t, struct ctarg *args, int n,
+                           const struct ctok *at);
+struct cvar *var_instance(struct ctemplate *t, struct ctarg *args, int n,
+                          const struct ctok *at);
+/* Parser state that an instantiation, run in the middle of parsing
+ * something else, saves and restores. */
+struct parse_state;
+struct parse_state *parse_save(void);
+void parse_restore(struct parse_state *st);
+extern int cx_pattern;         /* reading a pattern: dependent types allowed */
+extern int cx_in_targs;        /* inside < > of template arguments */
+/* SFINAE: while set, an error unwinds to it instead of ending the run. */
+extern void *cx_sfinae;
+/* Close a template argument list: `>`, or half of `>>`. */
+void cx_close_angle(void);
+
 /* ---- functions ---- */
 
 struct cfunc {
@@ -248,6 +432,15 @@ struct cfunc {
     int trivial;              /* ... and it runs no code (a C struct copy,
                                * nothing at all) */
     int is_conv;              /* a conversion function: operator T() */
+    struct ctemplate *tmpl;   /* a function template (not callable itself:
+                               * its specializations are) */
+    struct ctemplate *spec_of;/* a specialization of this template */
+    struct ctarg *targs;      /* ... for these arguments */
+    int ntargs;
+    int lazy;                 /* its body is tokens, parsed when used */
+    int explicit_inst;        /* explicitly instantiated here */
+    int extern_inst;          /* `extern template`: defined elsewhere */
+    struct cscope *inst_scope;/* the bound parameters to parse it in */
     int is_pure;              /* `= 0` */
     int vslot;                /* a virtual function's slot in the vtable of
                                * vclass (-1: not virtual) */
@@ -355,6 +548,13 @@ struct cclass {
     struct cfunc *key;        /* the key function: the vtable's home unit
                                * is the one defining it (NULL: every unit
                                * that needs the vtable emits it, weak) */
+    struct ctemplate *tmpl;   /* an instance of this class template */
+    struct ctarg *targs;      /* ... for these arguments */
+    int ntargs;
+    int inst_pending;         /* instance not yet defined (class_ensure) */
+    int extern_inst;          /* `extern template class`: its members are
+                               * another unit's */
+    struct cpartial *inst_partial;   /* defined by this partial spec */
     int vtable_used;          /* emit.c: the vtable (and RTTI) is needed */
     int vtable_done, rtti_used, rtti_done;
     long align_attr;          /* __attribute__((aligned)) / alignas */
@@ -467,6 +667,9 @@ struct cexpr {
     int nonvirt;              /* E_CALL: qualified (C::f()), no virtual call */
     int baseobj;              /* E_CONSTRUCT, E_CALL of a destructor: the
                                * base-object variant (C2, D2) */
+    struct ctarg *targs;      /* E_OVL: explicit template arguments */
+    int ntargs;
+    int has_targs;
     struct cfunc *dtor;       /* E_DELETE: the destructor to run first */
     int line;
     const char *file;
@@ -612,10 +815,15 @@ struct qname {
     struct cscope *scope;
     int fin;
     int bad;                  /* a qualifier names no namespace or class */
+    struct cty *dep;          /* in a pattern: a dependent qualifier (the
+                               * names after it are unknown until
+                               * instantiation) */
 };
 struct qname peek_qname(void);
-/* A (qualified) type name at the cursor: its type and token count. */
+/* A (qualified) type name at the cursor: its type and token count —
+ * skipped with cx_skip_peek, which also keeps half of a closing `>>`. */
 struct cty *peek_type_name(int *ntok);
+void cx_skip_peek(int n);
 /* After `operator`: "operator+" etc., or a conversion function's type. */
 const char *parse_operator_name(struct cty **conv);
 int at_type_start(void);                   /* a type can begin here */
@@ -668,6 +876,10 @@ const char *mangle_var(struct cvar *v, struct cscope *owner);
 const char *mangle_local_static(struct cvar *v, struct cfunc *fn, int disc);
 const char *mangle_class_name(struct cclass *c);   /* the nested-name form */
 const char *mangle_type_alone(struct cty *t);
+/* A type referenced from an expression's mangling, and such a mangling's
+ * substitution-free key (mangle.c). */
+int mangle_type_ref(struct cty *t);
+const char *mexpr_key(const char *x);
 
 /* ---- emission ---- */
 

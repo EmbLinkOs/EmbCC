@@ -184,6 +184,22 @@ static void parse_asm_label(struct attrs *a)
 
 /* ---- names ---- */
 
+static void skip_template_args(void);
+static struct cty *dep_member(struct cty *base, const char *name);
+static int targ_dependent(const struct ctarg *a);
+/* `typename` was just read: a dependent qualified name is a type */
+static int dependent_type_ok;
+/* peek_type_name's cursor state after the name: a template-id ending in
+ * half of a `>>` leaves the other half (cx_skip_peek applies it) */
+static int peek_half;
+
+void cx_skip_peek(int n)
+{
+    cx_pos += n;
+    cx_half_gt = peek_half;
+    peek_half = 0;
+}
+
 /* The scope a namespace, class or enum name opens. */
 static struct cscope *sym_scope(struct csym *y)
 {
@@ -193,8 +209,10 @@ static struct cscope *sym_scope(struct csym *y)
     case CS_NAMESPACE:
         return y->ns;
     case CS_CLASS: case CS_TYPEDEF: case CS_ENUM:
-        if (y->type->k == CT_CLASS)
+        if (y->type->k == CT_CLASS) {
+            class_ensure(y->type->cls);     /* its members are needed */
             return y->type->cls->scope;
+        }
         if (y->type->k == CT_ENUM)
             return y->type->en->scope;
         return NULL;
@@ -203,31 +221,132 @@ static struct cscope *sym_scope(struct csym *y)
     }
 }
 
+/* A template-id at the cursor (`name <`, name a class or alias template):
+ * its type, the cursor moved past `>`; NULL (cursor unmoved) if it is not
+ * one. In a pattern, dependent arguments make a CT_TID. */
+/* A name that means a template before `<`: a template's, or an
+ * instance's injected-class-name (13.8.2). */
+static struct ctemplate *as_template(struct csym *y)
+{
+    if (!y)
+        return NULL;
+    if (y->k == CS_TEMPLATE)
+        return y->tmpl;
+    if ((y->k == CS_CLASS || y->k == CS_TYPEDEF) && y->type->k == CT_CLASS &&
+        y->type->cls->tmpl && y->scope->k == SC_CLASS &&
+        y->scope->cls == y->type->cls)
+        return y->type->cls->tmpl;
+    return NULL;
+}
+
+static struct cty *template_id_type(struct csym *y)
+{
+    struct ctemplate *t = as_template(y);
+    if (!t || cx_kind_at(1) != TOK_LT)
+        return NULL;
+    if (t->kind != TK_CLASS && t->kind != TK_ALIAS)
+        return NULL;
+    const struct ctok *at = cx_cur();
+    cx_advance();
+    struct ctarg *args;
+    int n = parse_template_args(t, &args);
+    int dep = 0;
+    for (int i = 0; i < n; i++)
+        dep |= targ_dependent(&args[i]);
+    if (dep || t->nparams < 0) {
+        struct cty *d = xcalloc(1, sizeof *d);
+        d->k = t->kind == TK_CLASS ? CT_TID : CT_DEP;
+        d->tmpl = t;
+        d->targs = args;
+        d->ntargs = n;
+        return d;
+    }
+    if (t->kind == TK_ALIAS)
+        return alias_instance(t, args, n, at);
+    return ct_class(class_instance(t, args, n, at));
+}
+
 struct qname peek_qname(void)
 {
-    struct qname q = { NULL, 0, 0 };
-    int i = 0;
-    if (cx_kind_at(0) == TOK_COLONCOLON) {
+    struct qname q = { NULL, 0, 0, NULL };
+    int save = cx_pos, save_half = cx_half_gt;
+    if (cx_kind() == TOK_COLONCOLON) {
         q.scope = cx_global;
-        i = 1;
+        cx_advance();
     }
-    while (cx_kind_at(i) == TOK_IDENT && cx_kind_at(i + 1) == TOK_COLONCOLON) {
-        const char *n = tok_text(i);
+    for (;;) {
+        if (cx_kind() == TOK_CX_TEMPLATE && cx_kind_at(1) == TOK_IDENT)
+            cx_advance();                   /* T::template X<...>:: */
+        if (cx_kind() != TOK_IDENT)
+            break;
+        const char *n = cx_cur()->t.text;
+        if (q.dep) {
+            /* after a dependent qualifier: names known only later */
+            if (cx_kind_at(1) == TOK_LT && cx_in_targs >= 0) {
+                int p0 = cx_pos;
+                cx_advance();
+                skip_template_args();
+                if (cx_kind() != TOK_COLONCOLON) {
+                    cx_pos = p0;
+                    break;
+                }
+                cx_advance();
+                continue;
+            }
+            if (cx_kind_at(1) != TOK_COLONCOLON)
+                break;
+            q.dep = dep_member(q.dep, n);
+            cx_advance();
+            cx_advance();
+            continue;
+        }
         struct csym *y = q.scope ? lookup_in(q.scope, n) : lookup(cx_scope, n);
-        struct cscope *s = sym_scope(y);
-        if (!s) {
+        if (cx_kind_at(1) == TOK_LT) {
+            if (!as_template(y))
+                break;
+            int p0 = cx_pos;
+            struct cty *t = template_id_type(y);
+            if (!t || cx_kind() != TOK_COLONCOLON) {
+                cx_pos = p0;
+                cx_half_gt = 0;
+                break;
+            }
+            cx_advance();
+            if (t->k == CT_CLASS) {
+                class_ensure(t->cls);
+                q.scope = t->cls->scope;
+            } else {
+                q.dep = t;              /* a dependent template-id */
+                q.scope = NULL;
+            }
+            continue;
+        }
+        if (cx_kind_at(1) != TOK_COLONCOLON)
+            break;
+        struct cscope *sc = sym_scope(y);
+        if (!sc && y && (y->k == CS_TYPEDEF || y->k == CS_CLASS) &&
+            ct_dependent(y->type)) {
+            q.dep = y->type;            /* T:: in a pattern */
+            q.scope = NULL;
+            cx_advance();
+            cx_advance();
+            continue;
+        }
+        if (!sc) {
             y = q.scope ? scope_find_tag(q.scope, n) : lookup_tag(cx_scope, n);
-            s = sym_scope(y);
+            sc = sym_scope(y);
         }
-        if (!s) {
+        if (!sc) {
             q.bad = 1;
-            q.fin = i;
-            return q;
+            break;
         }
-        q.scope = s;
-        i += 2;
+        q.scope = sc;
+        cx_advance();
+        cx_advance();
     }
-    q.fin = i;
+    q.fin = cx_pos - save;
+    cx_pos = save;
+    cx_half_gt = save_half;
     return q;
 }
 
@@ -248,15 +367,46 @@ struct cty *peek_type_name(int *ntok)
         *ntok = 1;
         return ct_basic(CT_VALIST);
     }
-    if (cx_kind() != TOK_IDENT && cx_kind() != TOK_COLONCOLON)
+    if (cx_kind() != TOK_IDENT && cx_kind() != TOK_COLONCOLON &&
+        cx_kind() != TOK_CX_TEMPLATE)
         return NULL;
     struct qname q = peek_qname();
-    if (q.bad || cx_kind_at(q.fin) != TOK_IDENT)
+    if (q.bad)
         return NULL;
+    int at_template = cx_kind_at(q.fin) == TOK_CX_TEMPLATE;
+    if (cx_kind_at(q.fin + at_template) != TOK_IDENT)
+        return NULL;
+    if (q.dep) {
+        /* typename T::type (a pattern): known only at instantiation */
+        if (!dependent_type_ok && !cx_pattern)
+            return NULL;
+        int save = cx_pos;
+        cx_pos += q.fin + at_template;
+        struct cty *d = dep_member(q.dep, cx_cur()->t.text);
+        cx_advance();
+        if (cx_kind() == TOK_LT)
+            skip_template_args();
+        *ntok = cx_pos - save;
+        peek_half = cx_half_gt;
+        cx_pos = save;
+        cx_half_gt = 0;
+        return d;
+    }
     struct csym *y = find_final(q.scope, tok_text(q.fin));
+    if (as_template(y) && cx_kind_at(q.fin + 1) == TOK_LT) {
+        int save = cx_pos, save_half = cx_half_gt;
+        cx_pos += q.fin;
+        struct cty *t = template_id_type(y);
+        *ntok = cx_pos - save;
+        peek_half = cx_half_gt;
+        cx_pos = save;
+        cx_half_gt = save_half;
+        return t;
+    }
     if (!is_type_sym(y))
         return NULL;
     *ntok = q.fin + 1;
+    peek_half = 0;
     return y->type;
 }
 
@@ -326,6 +476,8 @@ struct dspec {
 
 static struct cty *parse_class_spec(struct dspec *ds);
 static struct cty *parse_enum_spec(struct dspec *ds);
+static struct cty *parse_class_body(struct cclass *c, enum tok_kind kw,
+                                    struct attrs *a, const struct ctok *at);
 
 static unsigned parse_cv(void)
 {
@@ -370,6 +522,7 @@ static void parse_dspec(struct dspec *ds)
     int n_special = 0;
     unsigned cv = 0;
     struct cty *named = NULL;
+    int after_typename = 0;
     for (;;) {
         enum tok_kind k = cx_kind();
         int builtin = n_void + n_bool + n_char + n_short + n_int + n_long +
@@ -471,6 +624,8 @@ static void parse_dspec(struct dspec *ds)
         }
         case TOK_CX_TYPENAME:
             cx_advance();
+            after_typename = 1;
+            dependent_type_ok = 1;
             continue;
         case TOK_IDENT: case TOK_COLONCOLON: {
             if (named || builtin)
@@ -481,7 +636,7 @@ static void parse_dspec(struct dspec *ds)
             struct cty *t = peek_type_name(&n);
             if (!t)
                 break;
-            cx_pos += n;
+            cx_skip_peek(n);
             named = t;
             continue;
         }
@@ -491,6 +646,10 @@ static void parse_dspec(struct dspec *ds)
         break;
     }
 
+    dependent_type_ok = 0;
+    if (after_typename && !named)
+        cx_error(cx_cur(), "'typename' before %s, which names no type",
+                 tok_describe(&cx_cur()->t));
     struct cty *t = named;
     if (named && (n_void || n_bool || n_char || n_short || n_int || n_long ||
                   n_signed || n_unsigned || n_float || n_double || n_special))
@@ -558,6 +717,9 @@ enum { DN_NONE, DN_IDENT, DN_OPERATOR, DN_CONV, DN_DTOR, DN_CTOR };
 struct declarator {
     int kind;
     const char *name;
+    struct ctarg *targs;      /* f<int> (an explicit specialization) */
+    int ntargs;
+    int has_targs;
     struct cscope *qual;      /* A::f: the scope named, or NULL */
     struct cscope *saved;     /* the scope to return to after a qualified
                                * declarator (its rest reads in `qual`) */
@@ -672,6 +834,18 @@ static void parse_declarator_id(struct declarator *d, int mode)
                           : !q.scope && cx_scope->k == SC_CLASS
                           ? cx_scope->cls : NULL;
         cx_advance();
+        if (cx_kind() == TOK_LT) {
+            /* f<args>: a function template's specialization named */
+            struct csym *y = find_final(q.scope, d->name);
+            struct ctemplate *ft = NULL;
+            if (y && y->k == CS_FUNC)
+                for (struct cfunc *g = y->fns; g && !ft; g = g->next)
+                    ft = g->tmpl;
+            if (ft) {
+                d->ntargs = parse_template_args(ft, &d->targs);
+                d->has_targs = 1;
+            }
+        }
         if (c && c->name && strcmp(d->name, c->name) == 0 &&
             cx_kind() == TOK_LPAREN)
             d->kind = DN_CTOR;
@@ -740,6 +914,38 @@ static int nested_follows(int mode)
 
 static struct cty *parse_params(void);
 
+/* In a pattern, an array bound that mentions a template parameter: skipped
+ * to its `]`, *bparam the value parameter when the bound is one alone.
+ * 0 (nothing consumed) when it is an ordinary constant. */
+static int pattern_bound(int *bparam)
+{
+    int dep = 0;
+    for (int i = cx_pos; i < cx_ntoks && cx_toks[i].t.kind != TOK_RBRACKET;
+         i++) {
+        if (cx_toks[i].t.kind != TOK_IDENT)
+            continue;
+        struct csym *y = lookup(cx_scope, cx_toks[i].t.text);
+        if (y && ((y->k == CS_VAR && y->var->is_tparam) ||
+                  ((y->k == CS_TYPEDEF || y->k == CS_CLASS) &&
+                   ct_dependent(y->type)) || y->k == CS_PACK))
+            dep = 1;
+    }
+    if (!dep)
+        return 0;
+    struct csym *y = cx_kind() == TOK_IDENT
+                     ? lookup(cx_scope, cx_cur()->t.text) : NULL;
+    if (y && y->k == CS_VAR && y->var->is_tparam &&
+        cx_kind_at(1) == TOK_RBRACKET)
+        *bparam = y->var->tparam_index;
+    while (cx_kind() != TOK_RBRACKET && cx_kind() != TOK_EOF) {
+        if (cx_kind() == TOK_LPAREN || cx_kind() == TOK_LBRACKET)
+            cx_skip_balanced();
+        else
+            cx_advance();
+    }
+    return 1;
+}
+
 static struct cty *parse_suffixes(struct cty *t, struct declarator *d,
                                   int mode, int after_id)
 {
@@ -747,21 +953,28 @@ static struct cty *parse_suffixes(struct cty *t, struct declarator *d,
         const struct ctok *at = cx_cur();
         cx_advance();
         long n = -1;
+        int bparam = -1;
         if (cx_kind() != TOK_RBRACKET) {
             if (mode & DK_NEW) {
                 /* new T[n]: n is any expression; the caller reads it */
                 cx_pos--;
                 return t;
             }
-            n = expr_parse_const("an array bound");
-            if (n < 0)
-                cx_error(at, "array bound is negative");
+            if (cx_pattern && pattern_bound(&bparam)) {
+                n = bparam >= 0 ? -2 : -3;      /* [N], or unknown */
+            } else {
+                n = expr_parse_const("an array bound");
+                if (n < 0)
+                    cx_error(at, "array bound is negative");
+            }
         }
         cx_expect(TOK_RBRACKET, "']'");
         struct cty *inner = parse_suffixes(t, d, mode, 0);
         if (inner->k == CT_FUNC || ct_is_ref(inner) || inner->k == CT_VOID)
             cx_error(at, "array of %s", ct_name(inner));
-        return ct_array(inner, n);
+        struct cty *at_ = ct_array(inner, n);
+        at_->bparam = bparam;
+        return at_;
     }
     if (cx_kind() == TOK_LPAREN && !(mode & DK_NEW) &&
         (!after_id || !(mode & DK_INIT) || params_follow())) {
@@ -1602,6 +1815,15 @@ static void add_field(struct cclass *c, struct cfield *fl)
 
 static void parse_member(struct cclass *c, int *access);
 
+/* Is c a class template's instance, or a class inside one? */
+static int in_instance(struct cclass *c)
+{
+    for (struct cscope *s = c->scope; s; s = s->parent)
+        if (s->k == SC_CLASS && s->cls->tmpl)
+            return 1;
+    return 0;
+}
+
 /* Where an elaborated `struct X` that names nothing yet declares X: the
  * nearest enclosing namespace or block (not a class or parameter scope). */
 static struct cscope *elaborated_home(void)
@@ -1636,11 +1858,12 @@ static void parse_bases(struct cclass *c)
             if (!t)
                 cx_error(at, "expected a base class name before %s",
                          tok_describe(&cx_cur()->t));
-            cx_pos += n;
+            cx_skip_peek(n);
         }
         if (t->k != CT_CLASS)
             cx_error(at, "base '%s' is not a class", ct_name(t));
         struct cclass *b = t->cls;
+        class_ensure(b);
         if (!b->complete)
             cx_error(at, "base class '%s' is incomplete", ct_name(t));
         if (b == c)
@@ -1731,19 +1954,28 @@ static struct cty *parse_class_spec(struct dspec *ds)
     }
     if (c->complete)
         cx_error(at, "redefinition of '%s'", name);
+    ds->cls_defined = c;
+    return parse_class_body(c, kw, &a, at);
+}
+
+/* A class's definition from its base clause (or `{`) through `}` and its
+ * trailing attributes: members, then layout, then — once the outermost
+ * class being defined is complete — the member bodies that waited. */
+static struct cty *parse_class_body(struct cclass *c, enum tok_kind kw,
+                                    struct attrs *a, const struct ctok *at)
+{
     c->is_union = kw == TOK_KW_UNION;
     c->is_struct = kw != TOK_CX_CLASS;
-    c->packed = a.packed;
-    c->align_attr = a.aligned;
+    c->packed = a->packed;
+    c->align_attr = a->aligned;
     if (cx_accept(TOK_COLON))
         parse_bases(c);
-    ds->cls_defined = c;
     struct cscope *save = cx_scope;
     cx_scope = c->scope;
     c->defining = 1;
-    /* the injected-class-name */
-    if (name) {
-        struct csym *inj = scope_add(c->scope, CS_CLASS, name);
+    /* the injected-class-name (an instance's names the instance) */
+    if (c->name) {
+        struct csym *inj = scope_add(c->scope, CS_CLASS, c->name);
         inj->type = ct_class(c);
     }
     class_depth++;
@@ -1751,7 +1983,7 @@ static struct cty *parse_class_spec(struct dspec *ds)
     int access = c->is_struct ? CA_PUBLIC : CA_PRIVATE;
     while (cx_kind() != TOK_RBRACE) {
         if (cx_kind() == TOK_EOF)
-            cx_error(at, "unterminated class '%s'", name ? name : "");
+            cx_error(at, "unterminated class '%s'", c->name ? c->name : "");
         parse_member(c, &access);
     }
     cx_advance();
@@ -1961,7 +2193,7 @@ static void parse_member(struct cclass *c, int *access)
         parse_static_assert();
         return;
     case TOK_CX_TEMPLATE:
-        cx_error(at, "member templates are not supported yet (CX4)");
+        parse_template_decl(c, *access);
         return;
     default:
         break;
@@ -2027,7 +2259,12 @@ static void parse_member(struct cclass *c, int *access)
                     f->pnames = t->pnames;
                 f->def_scope = c->scope;
                 skip_body(f);
-                add_pending(f, NULL, NULL);
+                /* in a template's instance, a member's body is read only
+                 * if it is used (13.9.2) */
+                if (in_instance(c))
+                    f->lazy = 1;
+                else
+                    add_pending(f, NULL, NULL);
                 cx_accept(TOK_SEMI);
                 return;
             }
@@ -2222,6 +2459,9 @@ static void parse_using(void)
 }
 
 static void parse_declaration(int toplevel, struct cstmt **out);
+static void parse_explicit_instantiation(int is_extern);
+static void skip_declaration(void);
+static struct cfunc *outdef_want;
 
 static void parse_namespace(void)
 {
@@ -2364,12 +2604,20 @@ static void parse_declaration(int toplevel, struct cstmt **out)
             parse_linkage_spec();
             return;
         }
+        if (cx_kind_at(1) == TOK_CX_TEMPLATE) {
+            cx_advance();
+            cx_advance();
+            parse_explicit_instantiation(1);
+            return;
+        }
         break;
     case TOK_KW_STATIC_ASSERT:
         parse_static_assert();
         return;
     case TOK_CX_TEMPLATE:
-        cx_error(at, "templates are not supported yet (CX4)");
+        if (!toplevel)
+            cx_error(at, "a template cannot be declared in a block");
+        parse_template_decl(enclosing_class(cx_scope), CA_PUBLIC);
         return;
     case TOK_CX_EXPORT:
         cx_error(at, "modules are not supported");
@@ -2444,6 +2692,14 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                 struct csym *y = func_sym(here, d.name, d.at);
                 if (!y->fns)
                     y->fns = f;
+            }
+            if (outdef_want && f != outdef_want &&
+                (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON)) {
+                /* replaying one member's definition: not this one */
+                skip_declaration();
+                if (d.saved)
+                    cx_scope = d.saved;
+                return;
             }
             if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON ||
                 cx_kind() == TOK_CX_TRY) {
@@ -2987,6 +3243,1398 @@ static struct cstmt *parse_stmt(void)
         return first;
     }
     return expr_stmt();
+}
+
+/* ---- templates ---- */
+
+struct parse_state {
+    int pos, half, extern_c, pattern, in_targs, class_depth;
+    int npend, cappend, dependent_ok;
+    struct pending *pend;
+    struct cscope *scope;
+    struct cfunc *curfn;
+    struct cstmt *curblk;
+};
+
+struct parse_state *parse_save(void)
+{
+    struct parse_state *st = xmalloc(sizeof *st);
+    st->pos = cx_pos;
+    st->half = cx_half_gt;
+    st->extern_c = cx_extern_c;
+    st->pattern = cx_pattern;
+    st->in_targs = cx_in_targs;
+    st->class_depth = class_depth;
+    st->npend = npend;
+    st->cappend = cappend;
+    st->pend = pend;
+    st->dependent_ok = dependent_type_ok;
+    st->scope = cx_scope;
+    st->curfn = cx_curfn;
+    st->curblk = cx_curblk;
+    return st;
+}
+
+void parse_restore(struct parse_state *st)
+{
+    cx_pos = st->pos;
+    cx_half_gt = st->half;
+    cx_extern_c = st->extern_c;
+    cx_pattern = st->pattern;
+    cx_in_targs = st->in_targs;
+    class_depth = st->class_depth;
+    npend = st->npend;
+    cappend = st->cappend;
+    pend = st->pend;
+    dependent_type_ok = st->dependent_ok;
+    cx_scope = st->scope;
+    cx_curfn = st->curfn;
+    cx_curblk = st->curblk;
+}
+
+/* At `<`: past its matching `>` — half of a closing `>>` counts. */
+static void skip_template_args(void)
+{
+    const struct ctok *at = cx_cur();
+    int depth = 0;
+    do {
+        switch (cx_kind()) {
+        case TOK_LT:
+            depth++;
+            cx_advance();
+            break;
+        case TOK_GT:
+            depth--;
+            cx_advance();
+            break;
+        case TOK_SHR:
+            if (depth >= 2) {
+                depth -= 2;
+                cx_advance();
+            } else {
+                cx_close_angle();
+                depth--;
+            }
+            break;
+        case TOK_LPAREN: case TOK_LBRACKET: case TOK_LBRACE:
+            cx_skip_balanced();
+            break;
+        case TOK_EOF: case TOK_SEMI: case TOK_RBRACE:
+            cx_error(at, "unterminated template argument list");
+            break;
+        default:
+            cx_advance();
+        }
+    } while (depth > 0);
+}
+
+static struct cty *dep_member(struct cty *base, const char *name)
+{
+    struct cty *d = xcalloc(1, sizeof *d);
+    d->k = CT_DEP;
+    int n = base && base->k == CT_DEP ? base->ndnames : 0;
+    d->to = base && base->k == CT_DEP ? base->to : base;
+    d->dnames = xmalloc((size_t)(n + 1) * sizeof *d->dnames);
+    for (int i = 0; i < n; i++)
+        d->dnames[i] = base->dnames[i];
+    d->dnames[n] = name;
+    d->ndnames = n + 1;
+    return d;
+}
+
+static int targ_dependent(const struct ctarg *a)
+{
+    if (a->is_pack) {
+        for (int i = 0; i < a->nelems; i++)
+            if (targ_dependent(&a->elems[i]))
+                return 1;
+        return 0;
+    }
+    switch (a->kind) {
+    case TP_TYPE:
+        return ct_dependent(a->type);
+    case TP_VALUE:
+        return a->vtype && (a->vtype->k == CT_TPARAM ||
+                            a->vtype->k == CT_DEP);
+    default:
+        return a->tmpl && a->tmpl->nparams < 0;
+    }
+}
+
+/* Past one template argument (a default's tokens): to its `,` or `>`. */
+static void skip_targ(void)
+{
+    int depth = 0;
+    for (;;) {
+        enum tok_kind k = cx_kind();
+        if (depth == 0 && (k == TOK_COMMA || k == TOK_GT || k == TOK_SHR))
+            return;
+        if (k == TOK_EOF || k == TOK_SEMI)
+            cx_error(cx_cur(), "unterminated template argument");
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
+            cx_skip_balanced();
+            continue;
+        }
+        if (k == TOK_LT)
+            depth++;
+        else if (k == TOK_GT)
+            depth--;
+        else if (k == TOK_SHR)
+            depth -= 2;
+        cx_advance();
+    }
+}
+
+/* Does the template argument at the cursor (to its `,` or `>`) mention a
+ * template parameter? */
+static int targ_mentions_param(void)
+{
+    int depth = 0;
+    for (int i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (depth == 0 && (k == TOK_COMMA || k == TOK_GT || k == TOK_SHR ||
+                           k == TOK_SEMI))
+            return 0;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE ||
+            k == TOK_LT)
+            depth++;
+        else if (k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE ||
+                 k == TOK_GT)
+            depth--;
+        else if (k == TOK_SHR)
+            depth -= 2;
+        if (depth < 0)
+            return 0;
+        if (k != TOK_IDENT)
+            continue;
+        struct csym *y = lookup(cx_scope, cx_toks[i].t.text);
+        if (y && ((y->k == CS_VAR && y->var->is_tparam) ||
+                  ((y->k == CS_TYPEDEF || y->k == CS_CLASS) &&
+                   ct_dependent(y->type)) || y->k == CS_PACK ||
+                  (y->k == CS_TEMPLATE && y->tmpl->nparams < 0)))
+            return 1;
+    }
+    return 0;
+}
+
+/* ---- dependent expressions (Itanium 5.1.6) ----
+ * A pattern's value that mentions template parameters cannot be
+ * evaluated; it is read into its mangling, which is also how two such
+ * are told apart. Types inside are read as patterns and spelled without
+ * substitutions. */
+
+static const char *dep_expr_unary(void);
+static const char *dep_expr_bin(int prec);
+
+/* A type inside an expression's mangling: a reference (\1 index \1)
+ * mangle.c resolves with its substitution table — the type's parts are
+ * candidates like any others. */
+static const char *type_ref(struct cty *t)
+{
+    return cx_fmt("\1%d\1", mangle_type_ref(t));
+}
+
+static const char *dep_type_mangle(void)
+{
+    return type_ref(parse_type_id());
+}
+
+static const char *dep_binop(enum tok_kind k, int *prec)
+{
+    switch (k) {
+    case TOK_OROR: *prec = 1; return "oo";
+    case TOK_ANDAND: *prec = 2; return "aa";
+    case TOK_PIPE: *prec = 3; return "or";
+    case TOK_CARET: *prec = 4; return "eo";
+    case TOK_AMP: *prec = 5; return "an";
+    case TOK_EQEQ: *prec = 6; return "eq";
+    case TOK_NEQ: *prec = 6; return "ne";
+    case TOK_LT: *prec = 7; return "lt";
+    case TOK_GT: *prec = cx_in_targs > 0 ? 0 : 7; return "gt";
+    case TOK_LE: *prec = 7; return "le";
+    case TOK_GE: *prec = 7; return "ge";
+    case TOK_SHL: *prec = 9; return "ls";
+    case TOK_SHR: *prec = cx_in_targs > 0 ? 0 : 9; return "rs";
+    case TOK_PLUS: *prec = 10; return "pl";
+    case TOK_MINUS: *prec = 10; return "mi";
+    case TOK_STAR: *prec = 11; return "ml";
+    case TOK_SLASH: *prec = 11; return "dv";
+    case TOK_PERCENT: *prec = 11; return "rm";
+    default: *prec = 0; return NULL;
+    }
+}
+
+static const char *dep_expr_cond(void)
+{
+    const char *c = dep_expr_bin(1);
+    if (!cx_accept(TOK_QUESTION))
+        return c;
+    int saved = cx_in_targs;
+    cx_in_targs = 0;
+    const char *a = dep_expr_bin(1);
+    cx_in_targs = saved;
+    cx_expect(TOK_COLON, "':'");
+    const char *b = dep_expr_cond();
+    return cx_fmt("qu%s%s%s", c, a, b);
+}
+
+static const char *dep_expr_bin(int minprec)
+{
+    const char *l = dep_expr_unary();
+    for (;;) {
+        int p;
+        const char *op = dep_binop(cx_kind(), &p);
+        if (!op || !p || p < minprec)
+            return l;
+        cx_advance();
+        const char *r = dep_expr_bin(p + 1);
+        l = cx_fmt("%s%s%s", op, l, r);
+    }
+}
+
+/* A name in an expression: a template parameter (T_), a member of a
+ * dependent type (sr <type> <name>), or a plain name. */
+static const char *dep_expr_name(void)
+{
+    const struct ctok *at = cx_cur();
+    struct qname q = peek_qname();
+    if (q.dep || (q.scope && q.scope->k == SC_CLASS)) {
+        /* X<T>::value: sr and the qualifying type */
+        struct cty *qt = q.dep;
+        if (!qt && q.scope->k == SC_CLASS)
+            qt = ct_class(q.scope->cls);
+        cx_pos += q.fin;
+        cx_half_gt = 0;
+        if (cx_kind() != TOK_IDENT)
+            cx_error(at, "expected a name after '::'");
+        const char *n = cx_cur()->t.text;
+        cx_advance();
+        const char *r = cx_fmt("sr%s%zu%s", type_ref(qt), strlen(n), n);
+        if (cx_kind() == TOK_LT) {
+            int p0 = cx_pos;
+            skip_template_args();
+            r = cx_fmt("%sI_%dE", r, p0);     /* template args: vendor */
+        }
+        return r;
+    }
+    cx_pos += q.fin;
+    if (cx_kind() != TOK_IDENT)
+        cx_error(at, "expected an expression in a template argument");
+    const char *n = cx_cur()->t.text;
+    struct csym *y = lookup(cx_scope, n);
+    cx_advance();
+    if (y && y->k == CS_VAR && y->var->is_tparam)
+        return type_ref(ct_tparam(y->var->tparam_index, n));
+    if (y && y->k == CS_ENUMERATOR)
+        return cx_fmt("L%s%ldE", "i", y->value);
+    return cx_fmt("%zu%s", strlen(n), n);
+}
+
+static const char *dep_expr_postfix(const char *e)
+{
+    for (;;) {
+        if (cx_kind() == TOK_LPAREN) {
+            int saved = cx_in_targs;
+            cx_in_targs = 0;
+            cx_advance();
+            char *r = cx_fmt("cl%s", e);
+            while (cx_kind() != TOK_RPAREN) {
+                r = cx_fmt("%s%s", r, dep_expr_cond());
+                if (!cx_accept(TOK_COMMA))
+                    break;
+            }
+            cx_expect(TOK_RPAREN, "')'");
+            cx_in_targs = saved;
+            e = cx_fmt("%sE", r);
+            continue;
+        }
+        if ((cx_kind() == TOK_DOT || cx_kind() == TOK_ARROW) &&
+            cx_kind_at(1) == TOK_IDENT) {
+            const char *op = cx_kind() == TOK_DOT ? "dt" : "pt";
+            cx_advance();
+            const char *n = cx_cur()->t.text;
+            cx_advance();
+            e = cx_fmt("%s%s%zu%s", op, e, strlen(n), n);
+            continue;
+        }
+        return e;
+    }
+}
+
+static const char *dep_expr_unary(void)
+{
+    enum tok_kind k = cx_kind();
+    const char *op = k == TOK_BANG ? "nt" : k == TOK_MINUS ? "ng"
+                   : k == TOK_PLUS ? "ps" : k == TOK_TILDE ? "co"
+                   : k == TOK_AMP ? "ad" : k == TOK_STAR ? "de" : NULL;
+    if (op) {
+        cx_advance();
+        return cx_fmt("%s%s", op, dep_expr_unary());
+    }
+    if (k == TOK_KW_SIZEOF || k == TOK_KW_ALIGNOF) {
+        cx_advance();
+        const char *ty = k == TOK_KW_SIZEOF ? "st" : "at";
+        const char *ex = k == TOK_KW_SIZEOF ? "sz" : "az";
+        if (cx_accept(TOK_ELLIPSIS)) {
+            cx_expect(TOK_LPAREN, "'('");
+            const char *r = cx_fmt("sZ%s", dep_expr_name());
+            cx_expect(TOK_RPAREN, "')'");
+            return r;
+        }
+        if (cx_kind() == TOK_LPAREN) {
+            cx_advance();
+            int saved = cx_in_targs;
+            cx_in_targs = 0;
+            const char *r = at_type_start()
+                            ? cx_fmt("%s%s", ty, dep_type_mangle())
+                            : cx_fmt("%s%s", ex, dep_expr_cond());
+            cx_in_targs = saved;
+            cx_expect(TOK_RPAREN, "')'");
+            return r;
+        }
+        return cx_fmt("%s%s", ex, dep_expr_unary());
+    }
+    if (k == TOK_CX_NOEXCEPT) {
+        cx_advance();
+        cx_expect(TOK_LPAREN, "'('");
+        int saved = cx_in_targs;
+        cx_in_targs = 0;
+        const char *r = cx_fmt("nx%s", dep_expr_cond());
+        cx_in_targs = saved;
+        cx_expect(TOK_RPAREN, "')'");
+        return r;
+    }
+    if (k == TOK_CX_STATIC_CAST || k == TOK_CX_CONST_CAST ||
+        k == TOK_CX_REINTERPRET_CAST) {
+        const char *op2 = k == TOK_CX_STATIC_CAST ? "sc"
+                          : k == TOK_CX_CONST_CAST ? "cc" : "rc";
+        cx_advance();
+        cx_expect(TOK_LT, "'<'");
+        int saved = cx_in_targs;
+        cx_in_targs = 1;
+        const char *ty = dep_type_mangle();
+        cx_in_targs = saved;
+        cx_close_angle();
+        cx_expect(TOK_LPAREN, "'('");
+        cx_in_targs = 0;
+        const char *r = cx_fmt("%s%s%s", op2, ty, dep_expr_cond());
+        cx_in_targs = saved;
+        cx_expect(TOK_RPAREN, "')'");
+        return dep_expr_postfix(r);
+    }
+    if (k == TOK_NUM) {
+        long v = cx_cur()->t.num;
+        const char *code = cx_cur()->t.char_lit ? "c"
+                           : cx_cur()->t.num_long
+                           ? (cx_cur()->t.num_uns ? "m" : "l")
+                           : cx_cur()->t.num_uns ? "j" : "i";
+        cx_advance();
+        return cx_fmt("L%s%s%ldE", code, v < 0 ? "n" : "", v < 0 ? -v : v);
+    }
+    if (k == TOK_CX_TRUE || k == TOK_CX_FALSE) {
+        cx_advance();
+        return k == TOK_CX_TRUE ? "Lb1E" : "Lb0E";
+    }
+    if (k == TOK_CX_NULLPTR) {
+        cx_advance();
+        return "LDnE";
+    }
+    if (k == TOK_LPAREN) {
+        cx_advance();
+        int saved = cx_in_targs;
+        cx_in_targs = 0;
+        const char *r;
+        if (at_type_start()) {
+            /* (T)e */
+            const char *ty = dep_type_mangle();
+            cx_expect(TOK_RPAREN, "')'");
+            cx_in_targs = saved;
+            return cx_fmt("cv%s%s", ty, dep_expr_unary());
+        }
+        r = dep_expr_cond();
+        cx_in_targs = saved;
+        cx_expect(TOK_RPAREN, "')'");
+        return dep_expr_postfix(r);
+    }
+    int n;
+    if (peek_type_name(&n) &&
+        (cx_kind_at(n) == TOK_LPAREN || cx_kind_at(n) == TOK_LBRACE)) {
+        /* T(args), T{}: a functional cast */
+        const char *ty = dep_type_mangle();
+        int brace = cx_kind() == TOK_LBRACE;
+        cx_advance();
+        int saved = cx_in_targs;
+        cx_in_targs = 0;
+        char *r = cx_fmt("%s%s", brace ? "tl" : "cv", ty);
+        int any = 0;
+        while (cx_kind() != (brace ? TOK_RBRACE : TOK_RPAREN)) {
+            r = cx_fmt("%s%s%s", r, !brace && !any ? "_" : "",
+                       dep_expr_cond());
+            any = 1;
+            if (!cx_accept(TOK_COMMA))
+                break;
+        }
+        cx_expect(brace ? TOK_RBRACE : TOK_RPAREN, "')'");
+        cx_in_targs = saved;
+        return dep_expr_postfix(cx_fmt("%s%s", r, brace || any ? "E"
+                                                              : "_E"));
+    }
+    return dep_expr_postfix(dep_expr_name());
+}
+
+int parse_template_args(struct ctemplate *t, struct ctarg **out)
+{
+    cx_expect(TOK_LT, "'<'");
+    int saved = cx_in_targs;
+    cx_in_targs = 1;
+    int n = 0, cap = 4;
+    struct ctarg *a = xcalloc((size_t)cap, sizeof *a);
+    while (cx_kind() != TOK_GT && !(cx_kind() == TOK_SHR)) {
+        if (n == cap) {
+            cap *= 2;
+            a = xrealloc(a, (size_t)cap * sizeof *a);
+        }
+        struct ctarg *r = &a[n];
+        memset(r, 0, sizeof *r);
+        struct ctparam *p = t && t->nparams > 0
+                            ? &t->params[n < t->nparams ? n : t->nparams - 1]
+                            : NULL;
+        if (p && n >= t->nparams && !p->pack)
+            p = NULL;
+        int kind = p ? p->kind : at_type_start() ? TP_TYPE : TP_VALUE;
+        const struct ctok *at = cx_cur();
+        r->kind = kind;
+        if (kind == TP_TYPE) {
+            if (!at_type_start())
+                cx_error(at, "expected a type as template argument %d of "
+                             "'%s'", n + 1, t ? t->name : "?");
+            r->type = parse_type_id();
+        } else if (kind == TP_TEMPLATE) {
+            struct qname q = peek_qname();
+            cx_pos += q.fin;
+            struct csym *y = cx_kind() == TOK_IDENT
+                             ? find_final(q.scope, cx_cur()->t.text) : NULL;
+            if (!y || y->k != CS_TEMPLATE)
+                cx_error(at, "expected a template as template argument");
+            r->tmpl = y->tmpl;
+            cx_advance();
+        } else if (cx_pattern && targ_mentions_param()) {
+            /* a value in a pattern: a parameter, or an expression of
+             * them — kept as its mangling (which also tells two apart) */
+            struct csym *y = cx_kind() == TOK_IDENT
+                             ? lookup(cx_scope, cx_cur()->t.text) : NULL;
+            if (y && y->k == CS_VAR && y->var->is_tparam &&
+                (cx_kind_at(1) == TOK_COMMA || cx_kind_at(1) == TOK_GT ||
+                 cx_kind_at(1) == TOK_SHR || cx_kind_at(1) == TOK_ELLIPSIS)) {
+                r->vtype = ct_tparam(y->var->tparam_index, y->name);
+                cx_advance();
+            } else {
+                struct cty *d = xcalloc(1, sizeof *d);
+                d->k = CT_DEP;
+                r->vtype = d;
+                r->mexpr = dep_expr_cond();
+            }
+        } else {
+            struct cexpr *e = expr_parse_cond();
+            long v;
+            if (!ct_is_integer(e->t) || !expr_const(e, &v))
+                cx_error(at, "template argument %d of '%s' is not an "
+                             "integral constant", n + 1, t ? t->name : "?");
+            r->vtype = ct_unqual(e->t);
+            if (p && p->vtype && !ct_dependent(p->vtype) &&
+                ct_is_integer(p->vtype)) {
+                r->vtype = ct_unqual(p->vtype);
+                v = r->vtype->k == CT_BOOL ? v != 0 : v;
+            }
+            r->value = v;
+        }
+        if (cx_kind() == TOK_ELLIPSIS)
+            cx_error(cx_cur(), "pack expansions are not supported yet (CX4)");
+        n++;
+        if (!cx_accept(TOK_COMMA))
+            break;
+    }
+    cx_in_targs = saved;
+    cx_close_angle();
+    *out = a;
+    return n;
+}
+
+/* template < parameters > — at the first parameter, past the `>`. Each
+ * is declared in cx_scope (an SC_TEMPLATE scope) as a pattern placeholder:
+ * a type parameter a CT_TPARAM, a value parameter a variable marked
+ * is_tparam, a template template parameter a template of no known
+ * parameters. */
+static int parse_tparams(struct ctparam **out)
+{
+    int n = 0, cap = 4;
+    struct ctparam *ps = xcalloc((size_t)cap, sizeof *ps);
+    int saved = cx_in_targs;
+    cx_in_targs = 1;
+    cx_pattern++;
+    while (cx_kind() != TOK_GT) {
+        if (n == cap) {
+            cap *= 2;
+            ps = xrealloc(ps, (size_t)cap * sizeof *ps);
+        }
+        struct ctparam *p = &ps[n];
+        memset(p, 0, sizeof *p);
+        p->def_tok = p->vtype_tok = -1;
+        const struct ctok *at = cx_cur();
+        enum tok_kind k1 = cx_kind_at(1);
+        if ((cx_kind() == TOK_CX_TYPENAME || cx_kind() == TOK_CX_CLASS) &&
+            (k1 == TOK_IDENT || k1 == TOK_ELLIPSIS || k1 == TOK_COMMA ||
+             k1 == TOK_GT || k1 == TOK_ASSIGN) &&
+            !(k1 == TOK_IDENT && (cx_kind_at(2) == TOK_COLONCOLON ||
+                                  cx_kind_at(2) == TOK_STAR))) {
+            p->kind = TP_TYPE;
+            cx_advance();
+            if (cx_accept(TOK_ELLIPSIS))
+                p->pack = 1;
+            if (cx_kind() == TOK_IDENT) {
+                p->name = cx_cur()->t.text;
+                cx_advance();
+            }
+            if (cx_accept(TOK_ASSIGN)) {
+                p->def_tok = cx_pos;
+                skip_targ();
+            }
+            struct csym *y = scope_add(cx_scope, CS_TYPEDEF,
+                                       p->name ? p->name : "");
+            y->type = ct_tparam(n, p->name);
+            y->type->pack_expansion = p->pack;
+        } else if (cx_kind() == TOK_CX_TEMPLATE) {
+            p->kind = TP_TEMPLATE;
+            cx_advance();
+            if (cx_kind() != TOK_LT)
+                cx_error(at, "expected '<' after 'template'");
+            skip_template_args();
+            if (cx_kind() != TOK_CX_CLASS && cx_kind() != TOK_CX_TYPENAME)
+                cx_error(cx_cur(), "expected 'class' in a template template "
+                                   "parameter");
+            cx_advance();
+            if (cx_accept(TOK_ELLIPSIS))
+                p->pack = 1;
+            if (cx_kind() == TOK_IDENT) {
+                p->name = cx_cur()->t.text;
+                cx_advance();
+            }
+            if (cx_accept(TOK_ASSIGN)) {
+                p->def_tok = cx_pos;
+                skip_targ();
+            }
+            struct ctemplate *ph = xcalloc(1, sizeof *ph);
+            ph->kind = TK_CLASS;
+            ph->name = p->name ? p->name : "";
+            ph->nparams = -1;               /* a placeholder: dependent */
+            ph->head_end = -1;
+            struct csym *y = scope_add(cx_scope, CS_TEMPLATE, ph->name);
+            y->tmpl = ph;
+        } else {
+            /* a value parameter: a parameter declaration */
+            p->kind = TP_VALUE;
+            p->vtype_tok = cx_pos;
+            struct dspec ds;
+            parse_dspec(&ds);
+            if (!ds.type)
+                cx_error(at, "expected a template parameter before %s",
+                         tok_describe(&cx_cur()->t));
+            if (cx_accept(TOK_ELLIPSIS))
+                p->pack = 1;
+            struct declarator d;
+            memset(&d, 0, sizeof d);
+            p->vtype = parse_declarator(ds.type, &d, DK_NAMED | DK_ABSTRACT);
+            if (d.saved)
+                cx_scope = d.saved;
+            p->name = d.name;
+            if (cx_accept(TOK_ASSIGN)) {
+                p->def_tok = cx_pos;
+                skip_targ();
+            }
+            struct cvar *v = xcalloc(1, sizeof *v);
+            v->name = v->cname = p->name ? p->name : "";
+            v->type = p->vtype;
+            v->is_tparam = 1;
+            v->tparam_index = n;
+            struct csym *y = scope_add(cx_scope, CS_VAR, v->name);
+            y->var = v;
+        }
+        n++;
+        if (!cx_accept(TOK_COMMA))
+            break;
+    }
+    cx_pattern--;
+    cx_in_targs = saved;
+    cx_close_angle();
+    *out = ps;
+    return n;
+}
+
+/* Past a declaration whose tokens were recorded: to its `;`, or the end of
+ * a function body (and a constructor's mem-initializers before it). */
+static void skip_declaration(void)
+{
+    int depth = 0;
+    for (;;) {
+        enum tok_kind k = cx_kind();
+        if (k == TOK_EOF)
+            cx_error(cx_cur(), "unterminated template declaration");
+        if (k == TOK_LPAREN || k == TOK_LBRACKET) {
+            cx_skip_balanced();
+            continue;
+        }
+        if (k == TOK_LBRACE) {
+            cx_skip_balanced();
+            /* a body ends a function definition; an initializer does not */
+            if (depth == 0 && cx_kind() != TOK_SEMI &&
+                cx_kind() != TOK_COMMA)
+                return;
+            continue;
+        }
+        if (k == TOK_LT)
+            depth++;
+        else if (k == TOK_GT && depth > 0)
+            depth--;
+        cx_advance();
+        if (k == TOK_SEMI)
+            return;
+    }
+}
+
+/* Past a class template's definition: its head's bases, its body, `;`. */
+static void skip_class_def(void)
+{
+    while (cx_kind() != TOK_LBRACE) {
+        if (cx_kind() == TOK_EOF || cx_kind() == TOK_SEMI)
+            cx_error(cx_cur(), "expected a class body");
+        if (cx_kind() == TOK_LPAREN)
+            cx_skip_balanced();
+        else
+            cx_advance();
+    }
+    cx_skip_balanced();
+    parse_attrs(NULL);
+    cx_expect(TOK_SEMI, "';' after a class template");
+}
+
+static struct ctemplate *template_new(int kind, const char *name,
+                                      struct cscope *home,
+                                      struct ctparam *ps, int np)
+{
+    struct ctemplate *t = xcalloc(1, sizeof *t);
+    t->kind = kind;
+    t->name = name;
+    t->scope = home;
+    t->params = ps;
+    t->nparams = np;
+    t->head_end = -1;
+    return t;
+}
+
+/* The class template `A` of `A<...>::` — the qualifier of an out-of-class
+ * member definition — found by scanning the declaration: the last
+ * template-id before its declarator's parameters or initializer. */
+static struct ctemplate *outdef_target(const char **member)
+{
+    struct ctemplate *found = NULL;
+    int save = cx_pos;
+    int depth = 0;
+    for (int i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (depth == 0 && (k == TOK_LPAREN || k == TOK_ASSIGN ||
+                           k == TOK_SEMI || k == TOK_LBRACE))
+            break;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET)
+            depth++;
+        else if (k == TOK_RPAREN || k == TOK_RBRACKET)
+            depth--;
+        if (depth || k != TOK_IDENT || cx_toks[i + 1].t.kind != TOK_LT)
+            continue;
+        struct csym *y = lookup(cx_scope, cx_toks[i].t.text);
+        if (!y || y->k != CS_TEMPLATE || y->tmpl->kind != TK_CLASS)
+            continue;
+        cx_pos = i + 1;
+        skip_template_args();
+        if (cx_kind() == TOK_COLONCOLON) {
+            /* the member's own name: the last component — a declarator
+             * only if its parameters or initializer follow (not a type,
+             * as in `typename A<T>::type f()`) */
+            int j = cx_pos + 1;
+            const char *m = NULL;
+            int after = -1;
+            for (;;) {
+                if (cx_toks[j].t.kind == TOK_TILDE) {
+                    m = cx_fmt("~%s", cx_toks[j + 1].t.text);
+                    after = j + 2;
+                    break;
+                }
+                if (cx_toks[j].t.kind == TOK_CX_OPERATOR) {
+                    m = "operator";
+                    after = -2;
+                    break;
+                }
+                if (cx_toks[j].t.kind != TOK_IDENT)
+                    break;
+                m = cx_toks[j].t.text;
+                if (cx_toks[j + 1].t.kind == TOK_COLONCOLON) {
+                    j += 2;
+                } else {
+                    after = j + 1;
+                    break;
+                }
+            }
+            enum tok_kind ak = after >= 0 ? cx_toks[after].t.kind : TOK_EOF;
+            if (after == -2 || ak == TOK_LPAREN || ak == TOK_ASSIGN ||
+                ak == TOK_SEMI || ak == TOK_LBRACE || ak == TOK_LBRACKET) {
+                found = y->tmpl;
+                *member = m;
+            }
+        }
+        i = cx_pos - 1;
+        cx_half_gt = 0;
+    }
+    cx_pos = save;
+    return found;
+}
+
+static void parse_explicit_instantiation(int is_extern);
+static void parse_explicit_specialization(struct cclass *cls, int access);
+static struct cfunc *specialization_named(struct declarator *d,
+                                          struct cty *ft,
+                                          const struct ctok *at);
+void parse_template_decl(struct cclass *cls, int access)
+{
+    const struct ctok *at = cx_cur();
+    cx_advance();                                   /* template */
+    if (cx_kind() != TOK_LT) {
+        parse_explicit_instantiation(0);
+        return;
+    }
+    cx_advance();
+    if (cx_kind() == TOK_GT) {
+        cx_advance();
+        parse_explicit_specialization(cls, access);
+        return;
+    }
+    struct cscope *home = cx_scope;
+    scope_push(SC_TEMPLATE, NULL);
+    struct ctparam *ps;
+    int np = parse_tparams(&ps);
+    int decl = cx_pos;
+    if (cx_kind() == TOK_CX_REQUIRES)
+        cx_error(cx_cur(), "requires-clauses are not supported yet (CX7)");
+    if (cx_kind() == TOK_CX_TEMPLATE) {
+        /* template<class T> template<class U> R A<T>::f(U): a member
+         * template of a class template, defined outside it */
+        const char *member = NULL;
+        int inner = cx_pos;
+        cx_advance();
+        cx_expect(TOK_LT, "'<'");
+        skip_template_args();
+        struct ctemplate *t = outdef_target(&member);
+        if (!t)
+            cx_error(at, "expected a member of a class template");
+        struct coutdef *o = xcalloc(1, sizeof *o);
+        o->params = ps;
+        o->nparams = np;
+        o->tok = inner;
+        o->member = member;
+        o->next = t->outdefs;
+        t->outdefs = o;
+        skip_declaration();
+        cx_scope = home;
+        return;
+    }
+    if (cx_kind() == TOK_CX_USING) {
+        /* template<...> using X = type; */
+        cx_advance();
+        if (cx_kind() != TOK_IDENT)
+            cx_error(cx_cur(), "expected an alias template's name");
+        const char *name = cx_cur()->t.text;
+        cx_advance();
+        parse_attrs(NULL);
+        cx_expect(TOK_ASSIGN, "'=' in an alias template");
+        struct ctemplate *t = template_new(TK_ALIAS, name, home, ps, np);
+        t->decl_tok = cx_pos;
+        skip_declaration();
+        struct csym *y = scope_add(home, CS_TEMPLATE, name);
+        y->tmpl = t;
+        cx_scope = home;
+        return;
+    }
+    if (cx_kind() == TOK_CX_CONCEPT)
+        cx_error(cx_cur(), "concepts are not supported yet (CX7)");
+    enum tok_kind k = cx_kind();
+    if ((k == TOK_KW_STRUCT || k == TOK_CX_CLASS || k == TOK_KW_UNION) &&
+        cx_kind_at(1) == TOK_IDENT &&
+        (cx_kind_at(2) == TOK_LBRACE || cx_kind_at(2) == TOK_COLON ||
+         cx_kind_at(2) == TOK_SEMI || cx_kind_at(2) == TOK_LT ||
+         (cx_kind_at(2) == TOK_IDENT &&
+          strcmp(cx_peek(2)->t.text, "final") == 0))) {
+        cx_advance();
+        const char *name = cx_cur()->t.text;
+        cx_advance();
+        struct csym *y = scope_find_here(home, name);
+        if (y && y->k != CS_TEMPLATE)
+            cx_error(at, "'%s' redeclared as a template", name);
+        if (cx_kind() == TOK_LT) {
+            /* a partial specialization: A<pattern> */
+            if (!y)
+                cx_error(at, "partial specialization of undeclared '%s'",
+                         name);
+            struct cpartial *p = xcalloc(1, sizeof *p);
+            p->params = ps;
+            p->nparams = np;
+            cx_pattern++;
+            p->npattern = parse_template_args(y->tmpl, &p->pattern);
+            cx_pattern--;
+            if (cx_kind() == TOK_IDENT &&
+                strcmp(cx_cur()->t.text, "final") == 0)
+                cx_advance();
+            p->head_end = cx_pos;
+            p->key = k;
+            skip_class_def();
+            struct cpartial **tail = &y->tmpl->partials;
+            while (*tail)
+                tail = &(*tail)->next;
+            *tail = p;
+            cx_scope = home;
+            return;
+        }
+        struct ctemplate *t = y ? y->tmpl
+                                : template_new(TK_CLASS, name, home, ps, np);
+        if (!y) {
+            y = scope_add(home, CS_TEMPLATE, name);
+            y->tmpl = t;
+            t->member_of = cls;
+        }
+        t->key = k;
+        if (cx_kind() == TOK_IDENT && strcmp(cx_cur()->t.text, "final") == 0)
+            cx_advance();
+        if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON) {
+            if (t->head_end >= 0)
+                cx_error(at, "redefinition of class template '%s'", name);
+            t->params = ps;               /* the definition's names */
+            t->nparams = np;
+            t->head_end = cx_pos;
+            skip_class_def();
+        } else {
+            cx_expect(TOK_SEMI, "';'");
+        }
+        cx_scope = home;
+        return;
+    }
+    const char *member = NULL;
+    struct ctemplate *owner = outdef_target(&member);
+    if (owner) {
+        struct coutdef *o = xcalloc(1, sizeof *o);
+        o->params = ps;
+        o->nparams = np;
+        o->tok = decl;
+        o->member = member;
+        o->next = owner->outdefs;
+        owner->outdefs = o;
+        skip_declaration();
+        cx_scope = home;
+        return;
+    }
+    /* a function or variable template: read as a pattern */
+    cx_pattern++;
+    struct dspec ds;
+    parse_dspec(&ds);
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    struct cty *base = ds.type ? ds.type : ct_basic(CT_VOID);
+    struct cty *t = parse_declarator(base, &d, DK_NAMED);
+    parse_asm_label(&d.a);
+    parse_attrs(&d.a);
+    cx_pattern--;
+    if (d.saved)
+        cx_scope = d.saved;
+    if (!d.name)
+        cx_error(at, "expected a template's name");
+    if (t->k == CT_FUNC) {
+        if (d.kind == DN_CONV)
+            t->to = d.conv_type;
+        struct ctemplate *tm = template_new(TK_FUNC, d.name, home, ps, np);
+        tm->decl_tok = decl;
+        tm->member_of = cls;
+        struct cfunc *f = xcalloc(1, sizeof *f);
+        f->name = d.name;
+        f->type = t;
+        f->tmpl = tm;
+        f->owner = home;
+        f->cls = ds.is_friend ? NULL : cls;
+        f->is_ctor = d.kind == DN_CTOR;
+        f->is_conv = d.kind == DN_CONV;
+        f->is_static = ds.storage == SK_STATIC;
+        f->is_explicit = ds.is_explicit;
+        f->access = access;
+        f->vslot = -1;
+        f->body_tok = f->mi_tok = -1;
+        f->line = d.at ? d.at->t.line : 0;
+        f->file = d.at ? d.at->file : NULL;
+        tm->pattern = f;
+        /* a redeclaration (the definition after a declaration): keep one
+         * pattern, the one with the body */
+        struct cfunc **set;
+        if (f->is_ctor) {
+            set = &cls->ctors;
+        } else {
+            struct cscope *target = ds.is_friend ? enclosing_ns(home) : home;
+            struct csym *y = func_sym(target, d.name, d.at);
+            set = &y->fns;
+            f->owner = target;
+            tm->scope = target == home ? home : target;
+        }
+        int has_body = cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON ||
+                       cx_kind() == TOK_ASSIGN;
+        tm->has_body = has_body;
+        /* a declaration then its definition are one template; two
+         * definitions of one signature are two (enable_if overloads
+         * differ only where a pattern cannot compare them) */
+        for (struct cfunc *g = *set; g; g = g->next)
+            if (g->tmpl && g->tmpl->nparams == np &&
+                same_signature(g->type, t) &&
+                (!has_body || !g->tmpl->has_body)) {
+                if (has_body) {
+                    g->tmpl->decl_tok = decl;
+                    g->tmpl->params = ps;
+                    g->tmpl->has_body = 1;
+                    g->type = t;
+                }
+                cx_scope = home;
+                if (has_body)
+                    skip_declaration();
+                else
+                    cx_expect(TOK_SEMI, "';'");
+                return;
+            }
+        while (*set)
+            set = &(*set)->next;
+        *set = f;
+        if (cx_kind() == TOK_SEMI)
+            cx_advance();
+        else
+            skip_declaration();
+        cx_scope = home;
+        return;
+    }
+    /* a variable template: template<class T> constexpr T pi = T(3.14); */
+    struct ctemplate *tm = template_new(TK_VAR, d.name, home, ps, np);
+    tm->decl_tok = decl;
+    tm->member_of = cls;
+    struct csym *y = scope_add(home, CS_TEMPLATE, d.name);
+    y->tmpl = tm;
+    skip_declaration();
+    cx_scope = home;
+}
+
+/* template class A<int>; / template void f<int>(int); (and with extern:
+ * instantiated elsewhere) */
+static void parse_explicit_instantiation(int is_extern)
+{
+    const struct ctok *at = cx_cur();
+    if (cx_kind() == TOK_KW_STRUCT || cx_kind() == TOK_CX_CLASS ||
+        cx_kind() == TOK_KW_UNION) {
+        cx_advance();
+        int n;
+        struct cty *t = peek_type_name(&n);
+        if (!t || t->k != CT_CLASS || !t->cls->tmpl)
+            cx_error(at, "expected a class template's specialization");
+        cx_skip_peek(n);
+        cx_expect(TOK_SEMI, "';'");
+        struct cclass *c = t->cls;
+        if (is_extern) {
+            c->tmpl->is_extern = 1;
+            c->extern_inst = 1;
+            return;
+        }
+        class_ensure(c);
+        /* every member it has a definition of is instantiated */
+        for (struct cfunc *f = cx_funcs; f; f = f->all_next)
+            if (f->cls == c && (f->lazy || f->body_tok >= 0) &&
+                !f->defined) {
+                func_ensure_body(f);
+                f->explicit_inst = 1;
+            }
+        return;
+    }
+    /* a function: its declaration names the specialization */
+    struct dspec ds;
+    parse_dspec(&ds);
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    struct cty *ft = parse_declarator(ds.type ? ds.type : ct_basic(CT_VOID),
+                                      &d, DK_NAMED);
+    if (d.saved)
+        cx_scope = d.saved;
+    cx_expect(TOK_SEMI, "';'");
+    if (ft->k != CT_FUNC)
+        cx_error(at, "explicit instantiation of a variable template is not "
+                     "supported yet");
+    struct cfunc *spec = specialization_named(&d, ft, at);
+    if (!is_extern) {
+        func_ensure_body(spec);
+        spec->explicit_inst = 1;
+    } else {
+        spec->extern_inst = 1;
+    }
+}
+
+/* The specialization a declarator names: f<args> or f deduced from the
+ * declared parameter types (13.10.3.7). */
+static struct cfunc *specialization_named(struct declarator *d,
+                                          struct cty *ft,
+                                          const struct ctok *at)
+{
+    struct cscope *where = d->qual ? d->qual : cx_scope;
+    struct csym *y = d->qual ? lookup_in(where, d->name)
+                             : lookup(where, d->name);
+    struct cfunc *set = y && y->k == CS_FUNC ? y->fns : NULL;
+    if (d->kind == DN_CTOR && d->qual && d->qual->k == SC_CLASS)
+        set = d->qual->cls->ctors;
+    for (struct cfunc *g = set; g; g = g->next) {
+        if (!g->tmpl)
+            continue;
+        struct ctemplate *t = g->tmpl;
+        struct ctarg *args;
+        int nargs;
+        if (d->has_targs) {
+            if (!deduce_call(t, d->targs, d->ntargs, NULL, 0, &args,
+                             &nargs))
+                continue;
+        } else {
+            /* deduce from the declared types: fake arguments of them */
+            struct cexpr **fa = xmalloc((size_t)(ft->np ? ft->np : 1) *
+                                        sizeof *fa);
+            for (int i = 0; i < ft->np; i++) {
+                struct cty *pt = ft->params[i];
+                fa[i] = ex_new(E_VAR, ct_strip_ref(pt),
+                               pt->k == CT_RREF ? VC_XVALUE : VC_LVALUE);
+            }
+            if (!deduce_call(t, NULL, 0, fa, ft->np, &args, &nargs))
+                continue;
+        }
+        struct cfunc *spec = func_instance(t, args, nargs);
+        if (spec && same_signature(spec->type, ft))
+            return spec;
+    }
+    cx_error(at, "'%s' matches no template's specialization", d->name);
+    return NULL;
+}
+
+/* template<> ... : a specialization written out */
+static void parse_explicit_specialization(struct cclass *cls, int access)
+{
+    const struct ctok *at = cx_cur();
+    enum tok_kind k = cx_kind();
+    if ((k == TOK_KW_STRUCT || k == TOK_CX_CLASS || k == TOK_KW_UNION) &&
+        cx_kind_at(1) == TOK_IDENT && cx_kind_at(2) == TOK_LT) {
+        cx_advance();
+        struct csym *y = lookup(cx_scope, cx_cur()->t.text);
+        if (!y || y->k != CS_TEMPLATE || y->tmpl->kind != TK_CLASS)
+            cx_error(at, "'%s' is not a class template", cx_cur()->t.text);
+        cx_advance();
+        struct ctarg *args;
+        int n = parse_template_args(y->tmpl, &args);
+        struct cclass *c = class_instance(y->tmpl, args, n, at);
+        if (cx_kind() == TOK_SEMI) {           /* declared: not the primary */
+            c->inst_pending = 0;
+            cx_advance();
+            return;
+        }
+        if (c->complete || !c->inst_pending)
+            cx_error(at, "'%s' is specialized after its instantiation",
+                     y->tmpl->name);
+        c->inst_pending = 0;
+        c->scope->parent = cx_scope;
+        struct attrs a;
+        memset(&a, 0, sizeof a);
+        if (cx_kind() == TOK_IDENT && strcmp(cx_cur()->t.text, "final") == 0)
+            cx_advance();
+        parse_class_body(c, k, &a, at);
+        cx_expect(TOK_SEMI, "';' after a class specialization");
+        return;
+    }
+    (void)cls;
+    (void)access;
+    /* a function (or a member of a specialization): its declarator names
+     * which */
+    struct dspec ds;
+    parse_dspec(&ds);
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    struct cty *ft = parse_declarator(ds.type ? ds.type : ct_basic(CT_VOID),
+                                      &d, DK_NAMED);
+    parse_asm_label(&d.a);
+    parse_attrs(&d.a);
+    struct cscope *after = d.saved;
+    if (ft->k != CT_FUNC) {
+        /* template<> int A<int>::count = 3; — a member of an instance */
+        if (after)
+            cx_scope = after;
+        cx_error(at, "explicit specialization of a variable is not "
+                     "supported yet");
+    }
+    if (d.qual && d.qual->k == SC_CLASS && !d.has_targs) {
+        /* a member of a class template's instance: an ordinary member */
+        struct cfunc *f = NULL;
+        struct csym *y = d.kind == DN_CTOR ? NULL
+                         : scope_find_here(d.qual, d.name);
+        struct cfunc *set = d.kind == DN_CTOR ? d.qual->cls->ctors
+                            : d.kind == DN_DTOR ? d.qual->cls->dtor
+                            : y && y->k == CS_FUNC ? y->fns : NULL;
+        for (struct cfunc *g = set; g; g = g->next)
+            if (!g->tmpl && same_signature(g->type, ft))
+                f = g;
+        if (f) {
+            f->lazy = 0;
+            f->def_scope = cx_scope;
+            if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON)
+                define_function(f, ft);
+            else
+                cx_expect(TOK_SEMI, "';'");
+            if (after)
+                cx_scope = after;
+            return;
+        }
+    }
+    struct cfunc *spec = specialization_named(&d, ft, at);
+    if (spec->defined)
+        cx_error(at, "'%s' is specialized after its instantiation", d.name);
+    spec->lazy = 0;
+    spec->pnames = ft->pnames;
+    spec->type = ft;
+    if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON) {
+        spec->def_scope = cx_scope;
+        define_function(spec, ft);
+    } else {
+        cx_expect(TOK_SEMI, "';'");
+        spec->body_tok = -1;
+    }
+    if (after)
+        cx_scope = after;
+}
+
+void class_define_from(struct cclass *c, int pos, enum tok_kind key,
+                       struct cscope *ps)
+{
+    struct parse_state *st = parse_save();
+    cx_scope = ps;
+    cx_pos = pos;
+    cx_half_gt = 0;
+    cx_curfn = NULL;
+    cx_curblk = NULL;
+    cx_extern_c = 0;
+    cx_pattern = 0;
+    cx_in_targs = 0;
+    class_depth = 0;
+    pend = NULL;
+    npend = cappend = 0;
+    c->scope->parent = ps;
+    struct attrs a;
+    memset(&a, 0, sizeof a);
+    parse_class_body(c, key, &a, cx_cur());
+    parse_restore(st);
+}
+
+/* The declaration of a function template's specialization: its tokens
+ * read with the parameters bound (ps), a function not entered in any
+ * scope — overload resolution holds it — whose body is read when used. */
+struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
+{
+    cx_scope = ps;
+    cx_pos = t->decl_tok;
+    cx_half_gt = 0;
+    cx_pattern = 0;
+    cx_in_targs = 0;
+    cx_curfn = NULL;
+    cx_curblk = NULL;
+    struct dspec ds;
+    parse_dspec(&ds);
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    struct cty *ft = parse_declarator(ds.type ? ds.type : ct_basic(CT_VOID),
+                                      &d, DK_NAMED);
+    parse_asm_label(&d.a);
+    parse_attrs(&d.a);
+    if (ft->k != CT_FUNC)
+        cx_error(cx_cur(), "a function template declares no function");
+    if (d.kind == DN_CONV)
+        ft->to = d.conv_type;
+    struct cfunc *pat = t->pattern;
+    struct cfunc *f = xcalloc(1, sizeof *f);
+    f->name = pat->name;
+    f->type = ft;
+    f->pnames = ft->pnames;
+    f->owner = pat->owner;
+    f->cls = pat->cls;
+    f->is_ctor = pat->is_ctor;
+    f->is_conv = pat->is_conv;
+    f->is_static = pat->is_static || ds.storage == SK_STATIC;
+    f->is_explicit = pat->is_explicit || ds.is_explicit;
+    f->is_inline = 1;
+    f->is_constexpr = ds.is_constexpr;
+    f->access = pat->access;
+    f->vslot = -1;
+    f->line = pat->line;
+    f->file = pat->file;
+    f->body_tok = f->mi_tok = -1;
+    if (ft->defargs) {
+        f->defargs = xcalloc((size_t)(ft->np ? ft->np : 1),
+                             sizeof *f->defargs);
+        for (int i = 0; i < ft->np; i++)
+            f->defargs[i] = ft->defargs[i];
+    }
+    if (cx_accept(TOK_ASSIGN)) {
+        if (cx_accept(TOK_CX_DELETE))
+            f->is_deleted = 1;
+        else if (cx_accept(TOK_KW_DEFAULT))
+            f->is_defaulted = 1;
+    } else if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON) {
+        skip_body(f);
+        f->lazy = 1;
+        f->def_scope = cx_scope;
+    }
+    func_register(f);
+    return f;
+}
+
+/* The body of a function whose tokens were kept (lazy): read now. A
+ * member of a class template's instance with no body in the class has
+ * it in an out-of-class definition (template<class T> R A<T>::f()). */
+
+void func_define_from(struct cfunc *f)
+{
+    struct parse_state *st = parse_save();
+    cx_half_gt = 0;
+    cx_pattern = 0;
+    cx_in_targs = 0;
+    cx_extern_c = 0;
+    if (f->body_tok >= 0) {
+        cx_scope = f->def_scope;
+        cx_pos = f->mi_tok >= 0 ? f->mi_tok : f->body_tok;
+        define_function(f, f->type);
+        parse_restore(st);
+        return;
+    }
+    parse_restore(st);
+}
+
+/* A class template instance's member that has no definition yet: its
+ * out-of-class definition, if the template has one, replayed with the
+ * instance's arguments (the qualified declarator then finds the member). */
+int member_from_outdef(struct cfunc *f)
+{
+    struct cclass *c = f->cls;
+    struct cclass *inst = c;
+    while (inst && !inst->tmpl) {
+        struct cclass *up = inst->owner && inst->owner->k == SC_CLASS
+                            ? inst->owner->cls : NULL;
+        if (!up && inst->scope->parent &&
+            inst->scope->parent->k == SC_CLASS)
+            up = inst->scope->parent->cls;
+        inst = up;
+    }
+    if (!inst || inst->extern_inst)
+        return 0;
+    struct ctemplate *t = inst->tmpl;
+    const char *want = f->is_conv ? "operator" : f->name;
+    if (f->name && strncmp(f->name, "operator", 8) == 0)
+        want = "operator";
+    for (struct coutdef *o = t->outdefs; o && !f->defined; o = o->next) {
+        if (!o->member || strcmp(o->member, want) != 0)
+            continue;
+        struct parse_state *st = parse_save();
+        struct ctarg *args = inst->targs;
+        int na = inst->ntargs;
+        if (inst->inst_partial)
+            continue;            /* members of partial specs: in-class */
+        cx_scope = tparam_scope(o->params, o->nparams, args, na, t->scope);
+        cx_pos = o->tok;
+        cx_half_gt = 0;
+        cx_pattern = 0;
+        cx_in_targs = 0;
+        cx_curfn = NULL;
+        cx_curblk = NULL;
+        cx_extern_c = 0;
+        if (cx_kind() == TOK_CX_TEMPLATE) {
+            /* a member template: its own parameters are not bound here */
+            parse_restore(st);
+            continue;
+        }
+        outdef_want = f;
+        parse_declaration(1, NULL);
+        outdef_want = NULL;
+        parse_restore(st);
+    }
+    return f->defined;
+}
+
+/* A class template instance's static data member used: its definition
+ * out of the class, replayed with the instance's arguments. */
+void member_var_from_outdef(struct cvar *v)
+{
+    if (v->defined || !v->owner || v->owner->k != SC_CLASS)
+        return;
+    struct cclass *inst = v->owner->cls;
+    while (inst && !inst->tmpl)
+        inst = inst->owner && inst->owner->k == SC_CLASS ? inst->owner->cls
+                                                         : NULL;
+    if (!inst || inst->extern_inst || inst->inst_partial)
+        return;
+    struct ctemplate *t = inst->tmpl;
+    for (struct coutdef *o = t->outdefs; o && !v->defined; o = o->next) {
+        if (!o->member || strcmp(o->member, v->name) != 0)
+            continue;
+        struct parse_state *st = parse_save();
+        cx_scope = tparam_scope(o->params, o->nparams, inst->targs,
+                                inst->ntargs, t->scope);
+        cx_pos = o->tok;
+        cx_half_gt = 0;
+        cx_pattern = 0;
+        cx_in_targs = 0;
+        cx_curfn = NULL;
+        cx_curblk = NULL;
+        cx_extern_c = 0;
+        parse_declaration(1, NULL);
+        parse_restore(st);
+    }
+}
+
+struct cvar *var_define_from(struct ctemplate *t, struct ctarg *args,
+                             struct cscope *ps)
+{
+    struct parse_state *st = parse_save();
+    cx_scope = ps;
+    cx_pos = t->decl_tok;
+    cx_half_gt = 0;
+    cx_pattern = 0;
+    cx_in_targs = 0;
+    cx_curfn = NULL;
+    cx_curblk = NULL;
+    struct dspec ds;
+    parse_dspec(&ds);
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    struct cty *ty = parse_declarator(ds.type, &d, DK_NAMED);
+    struct cvar *v = xcalloc(1, sizeof *v);
+    v->name = t->name;
+    v->type = ds.is_constexpr ? ct_qual(ty, CQ_CONST) : ty;
+    v->owner = t->scope;
+    v->is_inline = 1;
+    v->is_constexpr = ds.is_constexpr;
+    v->defined = 1;
+    v->line = d.at ? d.at->t.line : 0;
+    v->file = d.at ? d.at->file : NULL;
+    v->targs = args;
+    v->ntargs = t->nparams;
+    v->cname = mangle_var(v, t->scope);
+    init_variable(v, d.at ? d.at : cx_cur());
+    gvar_register(v);
+    parse_restore(st);
+    return v;
 }
 
 /* ---- the unit ---- */
