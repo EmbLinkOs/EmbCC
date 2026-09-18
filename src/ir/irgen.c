@@ -1226,7 +1226,10 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             save->dst = old = new_temp(fn);
         }
         int sum;
-        if (vla_step)   /* ++p over rows of a run-time size */
+        if (ty_is_float(t))   /* x++ adds 1.0 — not 1 to the bit pattern */
+            sum = emit_fbin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
+                            emit_fconst(fn, 1.0, ty_size(t)), ty_size(t));
+        else if (vla_step)   /* ++p over rows of a run-time size */
             sum = emit_bin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
                            type_size_val(fn, t->pointee), w, 1);
         else
