@@ -320,6 +320,8 @@ static int emit_cmp(struct ir_func *fn, enum binop pred, int a, int b,
 
 static int gen_expr(struct ir_func *fn, struct expr *e);
 static int gen_complit(struct ir_func *fn, struct expr *e);
+static int gen_convert(struct ir_func *fn, int v, const struct type *from,
+                       const struct type *to);
 struct loopctx;
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop);
@@ -397,6 +399,58 @@ static int gen_va_arg(struct ir_func *fn, struct expr *e)
                                    8, 1), ptr);
 
     emit_label(fn, l_done);
+    return emit_load(fn, addr, rt);
+}
+
+/* va_arg for AAPCS64. The record va_start fills (codegen_arm64.c
+ * IR_VA_START): __stack at +0, __gr_top +8, __vr_top +16, __gr_offs +24,
+ * __vr_offs +28. gcc's sequence, exactly: if the offset is already >= 0 the
+ * register save area is spent; otherwise advance it by one slot (8 for x,
+ * 16 for v) and, if that carried it past 0, the argument did not fit either;
+ * else the value is at top + the OLD offset. The stack path reads __stack
+ * and advances it by 8. A variadic float arrives promoted to double. */
+static int gen_va_arg_aapcs(struct ir_func *fn, struct expr *e)
+{
+    struct type *rt = e->ty;
+    int flt = ty_is_float(rt);
+    struct type *s32 = ty_base(TY_INT, 0);
+    struct type *ptr = ty_base(TY_LONG, 1);
+    int ap = gen_expr(fn, e->lhs);
+
+    int a_offs = emit_bin(fn, IR_ADD, ap, emit_const(fn, flt ? 28 : 24, 8), 8, 1);
+    int a_top = emit_bin(fn, IR_ADD, ap, emit_const(fn, flt ? 16 : 8, 8), 8, 1);
+    int addr = new_temp(fn);
+    int l_stack = new_label(fn), l_done = new_label(fn);
+
+    int offs = emit_load(fn, a_offs, s32);
+    emit_brnz(fn, emit_cmp(fn, B_GE, offs, emit_const(fn, 0, 4), 4, 1), 4,
+              l_stack);                                  /* already spent */
+    int next = emit_bin(fn, IR_ADD, offs, emit_const(fn, flt ? 16 : 8, 4), 4, 1);
+    emit_store(fn, a_offs, next, s32);
+    emit_brnz(fn, emit_cmp(fn, B_GT, next, emit_const(fn, 0, 4), 4, 1), 4,
+              l_stack);                                  /* did not fit */
+    int top = emit_load(fn, a_top, ptr);
+    int off64 = gen_convert(fn, offs, s32, ty_base(TY_LONG, 0));
+    emit_mov(fn, addr, emit_bin(fn, IR_ADD, top, off64, 8, 1));
+    emit_jmp(fn, l_done);
+
+    emit_label(fn, l_stack);
+    int stk = emit_load(fn, ap, ptr);
+    emit_mov(fn, addr, stk);
+    emit_store(fn, ap, emit_bin(fn, IR_ADD, stk, emit_const(fn, 8, 8), 8, 1),
+               ptr);
+    emit_label(fn, l_done);
+
+    if (flt) {
+        int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));
+        if (rt->kind == TY_FLOAT) {
+            struct ir_ins *cv = emit(fn);
+            cv->op = IR_F2F; cv->a = v; cv->size = 8; cv->w = 4;
+            cv->dst = new_temp(fn);
+            return cv->dst;
+        }
+        return v;
+    }
     return emit_load(fn, addr, rt);
 }
 
@@ -1167,7 +1221,8 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
     case EXPR_STMTEXPR:
         return gen_stmtexpr(fn, e);
     case EXPR_VA_ARG:
-        return gen_va_arg(fn, e);
+        return target_get() == TARGET_AARCH64 ? gen_va_arg_aapcs(fn, e)
+                                              : gen_va_arg(fn, e);
     case EXPR_BINOP: {
         struct type *lt = e->lhs->ty, *rt = e->rhs->ty;
 
@@ -1470,6 +1525,7 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             struct type *at = e->args[k]->ty;
             struct ir_arg *ar = &i->argv[k];
             ar->vreg = args[k];
+            ar->ty = at;
             ar->is_struct = at->kind == TY_STRUCT;
             ar->size = ty_size(at);
             ar->nclass = ty_classify(at, ar->cls);
@@ -1502,6 +1558,7 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
 
         if (e->ty->kind == TY_STRUCT) {
             i->retsize = ty_size(e->ty);
+            i->rety = e->ty;
             i->retnclass = ty_classify(e->ty, i->retcls);
             fn->scratch_bytes = (fn->scratch_bytes + 7) & ~7;
             i->scratch = fn->scratch_bytes;

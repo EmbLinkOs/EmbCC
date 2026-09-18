@@ -5,17 +5,15 @@
 89 C translation units through `embcc`, 6 hand-written `.asm` through `embas`,
 linked by `embld` — built and **booted to the home desktop** with no gcc, no
 nasm and no `ld` anywhere in the loop. The kernel has kept growing since: it is
-165 C units today, and 12 of them use constructs EmbCC does not yet compile —
-chiefly GCC's `__atomic_*` builtins (see "What's next").
+165 C units today, and 4 of them use constructs EmbCC does not yet compile
+(see "What's next").
 
 **EmbCC now emits for two machines.** EmbLinkOS became two architectures when
 its aarch64 campaign closed (`myos/docs/ARM64.md`), and `--target=aarch64-elf`
-answers it: one binary, two backends, chosen at run time (D-011). **63 of the
-68 executable tests compile for aarch64 and RUN on it** under
-`qemu-system-aarch64` (two more are x86-64 inline-asm programs, pinned to that
-target). The five that do not are refused loudly, not miscompiled, and **120
-of the 131 C files in the EmbLinkOS ARM kernel build compile** — see "Where
-aarch64 stands" below.
+answers it: one binary, two backends, chosen at run time (D-011). The whole
+test corpus compiles for aarch64 and RUNS on it under `qemu-system-aarch64`,
+agreeing with gcc's build of every program, and **all 131 C files in the
+EmbLinkOS ARM kernel build compile** — see "Where aarch64 stands" below.
 
 `embcc -c` compiles C to genuine x86_64-elf relocatable objects, cross-checked
 against gcc on every test: the integer and floating types, pointers (incl.
@@ -35,25 +33,21 @@ assembles NASM/Intel source byte-identically to nasm.
 
 The decision record below still governs.
 
-**On test counts, honestly.** `make test` was 102/102 on the Linux x86-64 host
-it was written on, where the host *was* the target: a test compiled with
-`embcc`, linked with the host `cc`, and ran. On the Apple Silicon development
-machine that is no longer true — x86-64 ELF objects neither link nor run there
-— so `make test` reports **21/106**, and the 85 that fail all fail at
-`ld: unknown file type`, not at anything EmbCC emitted. `make test-arm64` is
-**63/68** and is currently the only suite on that machine that actually
-executes compiled code; restoring the x86-64 half needs the same
-QEMU treatment (see "What's next").
+**On test counts.** Both suites RUN what EmbCC compiles, on the architecture
+it was compiled for: aarch64 on `qemu-system-aarch64 -M virt`, and x86-64
+either natively (on a Linux x86-64 host) or as a Multiboot image on
+`qemu-system-x86_64` (anywhere else) — see [tests/harness/](tests/harness/).
+`make test` and `make test-arm64` both pass in full on the Apple Silicon
+development machine. A test that cannot run on a host says SKIP and why; it is
+never counted as a pass (that is how 23 golden tests "passed" here for a while
+while proving nothing — and how a stale build manifest went unnoticed).
 
-Two of the golden tests that DO pass there are worth reading closely.
-`self-host.sh` is real on both hosts: EmbCC compiles all of its own sources,
-twice, byte-identically, and EmbLD links them into a fully resolved
-`embcc-stage1.elf`. `embbuild-kernel.sh` is opt-in everywhere
-(`EMBCC_KM1=1`) and otherwise passes by skipping — its PASS is not evidence.
-What stands in for the missing x86-64 exec half is
-[tools/x86-identity.sh](tools/x86-identity.sh): it builds embcc at a baseline
-revision and requires today's x86-64 objects to be byte-identical to it, over
-the whole exec corpus at every optimization level and every x86 kernel source.
+The differential tests are the ones that carry the weight: every exec program
+built by EmbCC and by the target's gcc and run, with exit codes and output
+compared (`agrees-with-gcc`, and again at `-O1` and `-O2`), and the cross-ABI
+tests that link an EmbCC half with a gcc half. `tools/x86-identity.sh`
+additionally requires x86-64 objects to be byte-identical to a baseline
+revision, so a change to shared code proves what it did to the x86 backend.
 
 ## Where it stands next to TCC
 
@@ -177,20 +171,15 @@ hints, `tlbi`, `hvc`/`smc`/`brk`, `ldr`/`str` (including `q` registers) and
 PSCI call — register variables `x0`–`x3`, a `"+r"` operand, `hvc #0` — runs
 under QEMU and returns what gcc's build returns.
 
-**The ARM kernel: 120 of 131 C files compile.** The 11 that do not:
+**The ARM kernel: all 131 C files compile.** The atomics (`ldxr`/`stxr`
+retry loops between barriers), `va_start`/`va_arg` over AAPCS64's register
+save areas, Homogeneous Floating-point Aggregates in `v` registers, and
+composites over 16 bytes passed by reference (stage B.3) are all in, each
+checked against gcc's own code by the cross-ABI tests — EmbCC calling gcc,
+gcc calling EmbCC, and a `va_list` handed across the line in both directions.
 
-| Gap | Files | Whose |
-|---|---|---|
-| GCC `__atomic_*` builtins (`__atomic_add_fetch`, `__atomic_signal_fence`, …) | 7 | The front end — the SAME 7 are why the x86 kernel no longer fully builds either; the shared kernel code moved from `__sync_*` to `__atomic_*` |
-| `__builtin_return_address` | 1 | The front end, both targets |
-| `typedef __attribute__((…)) …` and one declaration form in `syscalls.c` | 2 | The parser, both targets |
-| `va_start` (`kprintf`) | 1 | aarch64: AAPCS64's `va_list` is a five-field struct over a register save area, not SysV's `__va_list_tag`. Calling a variadic function works; defining one does not |
-
-Also refused on aarch64, each with a diagnostic naming what is missing (THE
-RULE): the `__sync_*` atomics (they need `ldxr`/`stxr` retry loops), HFA struct
-arguments (a struct of floats travels in up to four `v` registers by a rule
-irgen's SysV classification cannot express), and `-g` (the DWARF emitter
-describes `rbp`-relative frame offsets; aarch64 slots are `sp`-relative).
+Refused on aarch64 with a diagnostic (THE RULE): `-g`, whose DWARF describes
+`rbp`-relative frame offsets where aarch64 slots are `sp`-relative.
 
 The backend is also naive where the x86 one is not: no slot coalescing, no
 residency cache, no register allocator, so frames are wider and the code is
@@ -199,21 +188,15 @@ oversight.
 
 ## What's next
 
-- **GCC's `__atomic_*` builtins** — now the largest single gap on BOTH
-  kernels, since the shared code moved to them. Then `__builtin_return_address`,
-  the two parser gaps, and aarch64 `va_start`; with those the ARM kernel's C
-  compiles in full.
-- **`"+"` asm operands on x86-64.** They are never loaded with the lvalue's
-  current value before the asm: `asm("addq $1,%0" : "+r"(x))` computes on
-  `&x`, not `x`. Nothing in the x86 kernel uses one today, so it is latent;
-  the aarch64 path gets it right (`ir_asm_op.inout`), and the fix belongs with
-  a host that can RUN x86 code to prove it.
-- **The x86-64 exec suite, restored on a non-Linux host.** The aarch64 harness
-  (`tests/harness/`) shows the shape: a bare-metal image under
-  `qemu-system-x86_64` with `isa-debug-exit` where aarch64 uses semihosting.
-  Until then the x86-64 backend's regression cover on this machine is
-  `tools/x86-identity.sh` (byte identity against a baseline — 651 compiles
-  across the corpus and the kernel) and `self-host.sh`, not a run.
+- **The C language gaps both targets share:** variable-length arrays,
+  `_Complex`, and `long double` (80-bit on x86-64, 128-bit IEEE quad on
+  aarch64). Each is refused loudly today rather than miscompiled.
+- **The last four x86 kernel files:** `rdseed` and `stac` in the inline-asm
+  assembler, a `selftest.h` the build generates, and `"+"` asm operands, which
+  the x86 path never loads with the lvalue's current value before the asm
+  (`asm("addq $1,%0" : "+r"(x))` computes on `&x`). Nothing in the x86 kernel
+  uses one today; the aarch64 path gets it right.
+- **`-g` for aarch64.**
 - **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
   the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1
   program to exit 42. The manifest and a host reference walker already exist;

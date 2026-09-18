@@ -141,12 +141,19 @@ struct ir_ins {
         enum arg_class cls[2];
         int on_stack;        /* no registers left (or MEMORY class) */
         int stk_off;         /* offset in the outgoing area */
+        const struct type *ty; /* the argument's type: AAPCS64 decides an
+                                * aggregate's placement from its MEMBERS
+                                * (a Homogeneous Floating-point Aggregate
+                                * travels in v registers), which the SysV
+                                * classes above cannot express */
     } argv[MAX_PARAMS];
     int nargs;
     /* IR_CALL returning a struct: its size, classification, and the
      * caller-side scratch the result lands in. nclass 0 means MEMORY,
      * i.e. the hidden-pointer (sret) convention. */
     int retsize;
+    const struct type *rety; /* IR_CALL returning a struct: its type (AAPCS64
+                              * returns an HFA in v0..v3) */
     int retnclass;
     enum arg_class retcls[2];
     int scratch;             /* frame offset of the returned struct */

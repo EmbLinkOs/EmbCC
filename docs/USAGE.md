@@ -76,7 +76,7 @@ binutils for now. Extended inline asm works, with the vocabulary the ARM
 kernel uses (`src/asm/asm_arm64.h`) and the constraints `r`, `=r`, `+r` and `i`
 plus `register … __asm__("x0")` variables; a template outside it is refused
 with the offending statement named. What the aarch64 backend refuses
-(`va_start`, atomics, HFA arguments, `-g`) it refuses with a diagnostic naming
+(`-g`) it refuses with a diagnostic naming
 the gap; the README's "Where aarch64 stands" section says why each is real
 work.
 

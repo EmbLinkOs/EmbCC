@@ -28,6 +28,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "../asm/emit_arm64.h"
 #include "../driver/util.h"
@@ -66,145 +67,212 @@ struct a64_sites {
 
 /* ---- AAPCS64 argument placement -------------------------------------- */
 
-/* Where one outgoing argument goes. */
+/* AAPCS64 §5.9.5: a Homogeneous Floating-point Aggregate is a struct, union
+ * or array whose members are, recursively, all the same floating type — one
+ * to four of them, with no padding. It travels in v registers, one member per
+ * register, which no SysV class can describe. Returns the member count (0:
+ * not an HFA) and the member size in *esz (4 float, 8 double). */
+static int hfa_walk(const struct type *t, int *esz)
+{
+    switch (t->kind) {
+    case TY_FLOAT:
+    case TY_DOUBLE: {
+        int sz = ty_size(t);
+        if (*esz && *esz != sz)
+            return -1;
+        *esz = sz;
+        return 1;
+    }
+    case TY_ARRAY: {
+        if (t->count <= 0)
+            return -1;
+        int n = hfa_walk(t->pointee, esz);
+        return n < 0 ? -1 : n * t->count;
+    }
+    case TY_STRUCT: {
+        int n = 0;
+        for (int m = 0; m < t->nmembers; m++) {
+            const struct member *mb = &t->members[m];
+            if (mb->is_bitfield)
+                return -1;
+            int k = hfa_walk(mb->ty, esz);
+            if (k < 0)
+                return -1;
+            if (t->is_union) { if (k > n) n = k; }   /* the widest member */
+            else n += k;
+        }
+        return n;
+    }
+    default:
+        return -1;
+    }
+}
+
+static int a64_hfa(const struct type *t, int *esz)
+{
+    if (!t || t->kind != TY_STRUCT)
+        return 0;
+    *esz = 0;
+    int n = hfa_walk(t, esz);
+    if (n < 1 || n > 4 || ty_size(t) != n * *esz)
+        return 0;
+    return n;
+}
+
+/* A composite larger than 16 bytes that is not an HFA is passed as a POINTER
+ * to a copy the caller makes (stage B.3), and returned through x8. */
+static int a64_byref(const struct type *t)
+{
+    int esz;
+    return t && t->kind == TY_STRUCT && ty_size(t) > 16 && !a64_hfa(t, &esz);
+}
+
+/* Where one argument goes. The same classifier places a call's arguments and
+ * a function's parameters, so the two sides cannot disagree. */
+enum a64_where { AP_X, AP_V, AP_STACK };
 struct a64_argplan {
-    int in_reg;             /* 1: registers x[reg]..x[reg+nreg-1] */
-    int is_flt;             /* ... or v[reg], counted separately (NSRN) */
-    int reg, nreg;
-    long stk_off;           /* byte offset in the outgoing area otherwise */
-    int size;               /* bytes; for a struct, the whole aggregate */
+    enum a64_where where;
+    int reg, nreg;          /* AP_X / AP_V: first register, count */
+    int esz;                /* AP_V: bytes per register (a scalar, or an HFA
+                             * member: 4 in s, 8 in d) */
+    int byref;              /* B.3: `where` places a pointer to a copy */
+    int is_struct;          /* the value is an aggregate (by its address) */
+    long stk_off;           /* AP_STACK: offset in the argument area */
+    long copy_off;          /* byref, caller side: the copy's offset in the
+                             * frame's byref area */
+    int size;               /* the value's size (the aggregate's, if byref) */
 };
 
-/* AAPCS64 §6.4.2 stage C, integer side only.
- *
- * A scalar takes one register; a composite of 16 bytes or fewer takes as
- * many consecutive registers as it has eightbytes; anything larger, or
- * anything that no longer fits, is copied to the stack. Rule C.11 matters:
- * once ANY argument has gone to the stack the register file is declared
- * exhausted, so later small arguments do not back-fill the gap.
- *
- * Returns the size of the outgoing stack area the call needs.
- */
-static long plan_call_args(struct ir_ins *i, struct a64_argplan *pl,
-                           struct func *fn_for_diag)
+/* The registers and the stack walked so far (AAPCS64's NGRN, NSRN, NSAA). */
+struct a64_cursor {
+    int ngrn, nsrn;
+    long nsaa;
+    long byref_bytes;       /* caller side: copy space this call needs */
+};
+
+static void to_stack(struct a64_cursor *cu, struct a64_argplan *p, long size,
+                     int align)
 {
-    int ngrn = 0, nsrn = 0;
-    long nsaa = 0;
+    long al = align > 8 ? 16 : 8;
+    cu->nsaa = (cu->nsaa + al - 1) & ~(al - 1);
+    p->where = AP_STACK;
+    p->stk_off = cu->nsaa;
+    cu->nsaa += (size + 7) & ~7L;           /* every stack slot is >= 8 */
+}
 
-    for (int k = 0; k < i->nargs; k++) {
-        struct ir_arg *a = &i->argv[k];
-        int size = a->size > 0 ? a->size : 8;
-        pl[k].is_flt = 0;
+/* AAPCS64 §6.8.2 stages B and C, for the types EmbCC has. No back-filling:
+ * once a register file is declared spent (C.3 for v registers, C.11 for x
+ * registers), later small arguments go to the stack too. */
+static void a64_place(const struct type *t, struct a64_cursor *cu,
+                      struct a64_argplan *p)
+{
+    memset(p, 0, sizeof *p);
+    p->size = ty_size(t);
+    p->is_struct = t->kind == TY_STRUCT;
 
-        /* A struct of floats is an AAPCS64 Homogeneous Floating-point
-         * Aggregate, passed in up to four v registers by a rule with no
-         * SysV counterpart. irgen's classification cannot express it, so
-         * refuse rather than guess. */
-        if (a->is_struct)
-            for (int q = 0; q < a->nclass; q++)
-                if (a->cls[q] == CLASS_SSE)
-                    diag_fatal(fn_for_diag->file, fn_for_diag->line,
-                               "passing a struct containing floating-point "
-                               "members is not supported for aarch64 yet: it "
-                               "is an AAPCS64 HFA (in a call from '%s')",
-                               fn_for_diag->name);
-
-        /* Scalar floats walk v0..v7 on their own counter (NSRN), exactly as
-         * integers walk x0..x7 on NGRN. */
-        if (!a->is_struct && a->cls[0] == CLASS_SSE) {
-            if (nsrn < 8) {
-                pl[k].in_reg = 1;
-                pl[k].is_flt = 1;
-                pl[k].reg = nsrn++;
-                pl[k].nreg = 1;
-                pl[k].size = size;
-                continue;
-            }
-            nsaa = (nsaa + 7) & ~7L;
-            pl[k].in_reg = 0;
-            pl[k].stk_off = nsaa;
-            pl[k].size = size;
-            pl[k].nreg = 0;
-            pl[k].reg = 0;
-            nsaa += 8;
-            continue;
+    if (ty_is_float(t)) {                               /* C.1 / C.5 */
+        if (cu->nsrn < 8) {
+            p->where = AP_V; p->reg = cu->nsrn++; p->nreg = 1; p->esz = p->size;
+        } else {
+            to_stack(cu, p, 8, 8);
         }
-
-        int nslot = a->is_struct ? (size + 7) / 8 : 1;
-        int fits = a->is_struct ? (size <= 16 && ngrn + nslot <= 8)
-                                : (ngrn < 8);
-        if (fits) {
-            pl[k].in_reg = 1;
-            pl[k].reg = ngrn;
-            pl[k].nreg = nslot;
-            pl[k].size = size;
-            ngrn += nslot;
-            continue;
-        }
-        /* C.11: the register file is spent for every argument after this. */
-        ngrn = 8;
-        pl[k].in_reg = 0;
-        /* Each stack argument is 8-byte aligned. A composite whose own
-         * alignment is 16 should align to 16; ir_arg does not carry the
-         * type's alignment, so that case (a struct with a 16-byte-aligned
-         * member passed by value) is not yet handled. */
-        nsaa = (nsaa + 7) & ~7L;
-        pl[k].stk_off = nsaa;
-        pl[k].size = size;
-        pl[k].nreg = 0;
-        pl[k].reg = 0;
-        nsaa += (size + 7) & ~7;
+        return;
     }
-    return nsaa;
+    int esz, n = a64_hfa(t, &esz);
+    if (n) {                                            /* C.2 - C.4 */
+        if (cu->nsrn + n <= 8) {
+            p->where = AP_V; p->reg = cu->nsrn; p->nreg = n; p->esz = esz;
+            cu->nsrn += n;
+        } else {
+            cu->nsrn = 8;
+            to_stack(cu, p, p->size, ty_align(t));
+        }
+        return;
+    }
+    if (a64_byref(t)) {                                 /* B.3: a pointer */
+        p->byref = 1;
+        cu->byref_bytes = (cu->byref_bytes + 15) & ~15L;
+        p->copy_off = cu->byref_bytes;
+        cu->byref_bytes += p->size;
+        if (cu->ngrn < 8) {
+            p->where = AP_X; p->reg = cu->ngrn++; p->nreg = 1;
+        } else {
+            to_stack(cu, p, 8, 8);
+        }
+        return;
+    }
+    int nslot = p->is_struct ? (p->size + 7) / 8 : 1;   /* C.9 / C.10 */
+    if (cu->ngrn + nslot <= 8) {
+        p->where = AP_X; p->reg = cu->ngrn; p->nreg = nslot;
+        cu->ngrn += nslot;
+        return;
+    }
+    cu->ngrn = 8;                                       /* C.11 */
+    to_stack(cu, p, p->is_struct ? p->size : 8, ty_align(t));
 }
 
 /* ---- frame layout ---------------------------------------------------- */
 
-/* Slot displacements, all non-negative byte offsets from sp after the
- * prologue. Low to high: the outgoing argument area, the struct-return
- * scratch, the hidden return pointer, the variables, then the temporaries.
- * Returns the per-vreg table (caller frees).
- */
-static long *layout_frame(struct ir_func *fn, int *frame_out,
-                          long *outgoing_out, long *scratch_base_out,
-                          long *sret_slot_out)
+/* Byte offsets from sp after the prologue, low to high: the outgoing
+ * argument area; the byref copy area (reused by each call); the
+ * struct-return scratch; the hidden return pointer; for a variadic function
+ * its register save areas and va_list record; the variables; the
+ * temporaries. */
+struct a64_frame {
+    int size;               /* 16-aligned */
+    long outgoing, byref, scratch;
+    long sret;              /* -1, or the slot that keeps x8 */
+    long gr_save, vr_save, va_tag;   /* -1 unless variadic (vr_save also -1
+                                      * under -mgeneral-regs-only) */
+};
+
+static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
 {
     struct func *f = fn->src;
     long *disp = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *disp);
 
-    /* The outgoing area must hold the widest stack-argument list of any
-     * call in the function, measured with AAPCS64 rather than taken from
-     * irgen's SysV-derived outgoing_bytes. */
-    long outgoing = 0;
+    /* The widest stack-argument list and byref-copy need of any call,
+     * measured with AAPCS64 — irgen's outgoing_bytes is SysV's. */
+    long outgoing = 0, byref = 0;
     for (int n = 0; n < fn->nins; n++) {
-        if (fn->ins[n].op != IR_CALL)
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_CALL)
             continue;
-        struct a64_argplan pl[MAX_PARAMS];
-        long need = plan_call_args(&fn->ins[n], pl, f);
-        if (need > outgoing)
-            outgoing = need;
+        struct a64_cursor cu = { 0, 0, 0, 0 };
+        struct a64_argplan pl;
+        for (int k = 0; k < i->nargs; k++)
+            a64_place(i->argv[k].ty, &cu, &pl);
+        if (cu.nsaa > outgoing) outgoing = cu.nsaa;
+        if (cu.byref_bytes > byref) byref = cu.byref_bytes;
     }
-    outgoing = (outgoing + 15) & ~15L;
+    long running = (outgoing + 15) & ~15L;
+    fr->outgoing = running;
+    fr->byref = running;
+    running += (byref + 15) & ~15L;
 
-    long running = outgoing;
-    *outgoing_out = outgoing;
-
-    *scratch_base_out = running;
+    fr->scratch = running;
     running += fn->scratch_bytes;
 
-    /* A function returning a composite larger than 16 bytes is handed the
-     * caller's buffer in x8; it must survive to the return, so it gets a
-     * slot rather than staying in a caller-saved register. */
-    *sret_slot_out = -1;
-    if (f->ret_ty->kind == TY_STRUCT && ty_size(f->ret_ty) > 16) {
+    fr->sret = -1;
+    if (a64_byref(f->ret_ty)) {
         running = (running + 7) & ~7L;
-        *sret_slot_out = running;
+        fr->sret = running;
         running += 8;
     }
 
-    /* Variables, each at its own size and alignment. Unlike the x86
-     * backend these are not coalesced by scope yet, so frames are wider
-     * than they need to be. */
+    fr->gr_save = fr->vr_save = fr->va_tag = -1;
+    if (f->is_varargs) {
+        running = (running + 15) & ~15L;
+        fr->gr_save = running;              /* x0..x7 */
+        running += 64;
+        if (!g_no_fp) {
+            fr->vr_save = running;          /* q0..q7, 16-aligned */
+            running += 128;
+        }
+        fr->va_tag = running;               /* the 32-byte va_list record */
+        running += 32;
+    }
+
     for (int v = 0; v < f->nvars; v++) {
         int al = f->var_aligns ? f->var_aligns[v] : 0;
         int tal = ty_align(f->var_tys[v]);
@@ -220,14 +288,13 @@ static long *layout_frame(struct ir_func *fn, int *frame_out,
         running += (ty_size(f->var_tys[v]) + 7) & ~7;
     }
 
-    /* Temporaries: eight bytes each, one slot apiece. */
     running = (running + 7) & ~7L;
     for (int t = f->nvars; t < fn->nvregs; t++) {
         disp[t] = running;
         running += 8;
     }
 
-    *frame_out = (int)((running + 15) & ~15L);
+    fr->size = (int)((running + 15) & ~15L);
     return disp;
 }
 
@@ -345,63 +412,63 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                    "-g is not supported for aarch64 yet: DWARF locations "
                    "would describe x86 frame offsets");
 
-    int frame;
-    long outgoing, scratch_base, sret_slot;
-    long *sd = layout_frame(fn, &frame, &outgoing, &scratch_base, &sret_slot);
+    struct a64_frame fr;
+    long *sd = layout_frame(fn, &fr);
 
     align16(t);
     f->code_off = t->len;
 
-    a64_prologue(t, frame);
+    a64_prologue(t, fr.size);
 
-    /* Incoming parameters: AAPCS64 places them the same way plan_call_args
-     * places outgoing ones, so the two must agree exactly. Arguments that
-     * arrived on the caller's stack sit above the frame we just built:
-     * x29 points at the saved x29/x30 pair, so the caller's area begins at
-     * x29+16. */
+    /* A variadic function saves every argument register first, raw, before
+     * anything can disturb them: va_arg walks these areas later. Under
+     * -mgeneral-regs-only (the kernel) the q registers are never touched —
+     * gcc makes the same choice, and __vr_offs then says "none". */
+    if (f->is_varargs) {
+        for (int r = 0; r < 8; r++)
+            a64_str(t, r, A64_SP, fr.gr_save + r * 8, 8);
+        if (fr.vr_save >= 0)
+            for (int r = 0; r < 8; r++)
+                a64_str_q(t, r, A64_SP, fr.vr_save + r * 16);
+    }
+
+    /* Incoming parameters, placed by the same a64_place a call uses.
+     * Arguments on the caller's stack sit above this frame: x29 points at
+     * the saved x29/x30 pair, so the caller's area begins at x29+16. */
     {
-        int ngrn = 0, nsrn = 0;
-        long incoming = 16;
-        if (sret_slot >= 0)
-            a64_str(t, A64_SRET, A64_SP, sret_slot, 8);
+        struct a64_cursor cu = { 0, 0, 0, 0 };
+        if (fr.sret >= 0)
+            a64_str(t, A64_SRET, A64_SP, fr.sret, 8);
         for (int p = 0; p < f->nparams; p++) {
             struct type *pt = f->param_tys[p];
-            int size = ty_size(pt);
-            if (ty_is_float(pt)) {
-                if (nsrn < 8) {
-                    a64_fstr(t, nsrn++, A64_SP, sd[p], size);
-                } else {
-                    /* Arrived on the caller's stack; the bits move through
-                     * an integer register, which is all a copy needs. */
-                    a64_ldr(t, A64_ACC, A64_FP, incoming, 8, 0, 8);
-                    st_slot(t, sd, p, A64_ACC, size);
-                    incoming += 8;
+            struct a64_argplan pl;
+            a64_place(pt, &cu, &pl);
+            if (pl.where == AP_V) {
+                for (int q = 0; q < pl.nreg; q++)
+                    a64_fstr(t, pl.reg + q, A64_SP, sd[p] + q * pl.esz, pl.esz);
+            } else if (pl.byref) {
+                /* A pointer to the caller's copy: take our own, so the
+                 * parameter's address is an ordinary local. */
+                int src = pl.reg;
+                if (pl.where == AP_STACK) {
+                    a64_ldr(t, A64_TMP, A64_FP, 16 + pl.stk_off, 8, 0, 8);
+                    src = A64_TMP;
                 }
-                continue;
-            }
-            if (pt->kind == TY_STRUCT) {
-                int nslot = (size + 7) / 8;
-                if (size <= 16 && ngrn + nslot <= 8) {
-                    for (int q = 0; q < nslot; q++)
-                        a64_str(t, ngrn + q, A64_SP, sd[p] + q * 8, 8);
-                    ngrn += nslot;
-                } else {
-                    ngrn = 8;
-                    /* Copy it out of the caller's frame so its address is
-                     * an ordinary local. */
-                    addr_of(t, A64_ADDR, A64_SP, sd[p]);
-                    addr_of(t, A64_TMP, A64_FP, incoming);
-                    emit_copy(t, A64_ADDR, A64_TMP, size);
-                    incoming += (size + 7) & ~7;
-                }
-                continue;
-            }
-            if (ngrn < 8) {
-                a64_str(t, ngrn++, A64_SP, sd[p], size > 8 ? 8 : size);
+                addr_of(t, A64_ADDR, A64_SP, sd[p]);
+                emit_copy(t, A64_ADDR, src, pl.size);
+            } else if (pl.where == AP_X) {
+                if (pl.is_struct)
+                    for (int q = 0; q < pl.nreg; q++)
+                        a64_str(t, pl.reg + q, A64_SP, sd[p] + q * 8, 8);
+                else
+                    a64_str(t, pl.reg, A64_SP, sd[p], pl.size > 8 ? 8 : pl.size);
+            } else if (pl.is_struct) {
+                addr_of(t, A64_ADDR, A64_SP, sd[p]);
+                addr_of(t, A64_TMP, A64_FP, 16 + pl.stk_off);
+                emit_copy(t, A64_ADDR, A64_TMP, pl.size);
             } else {
-                a64_ldr(t, A64_ACC, A64_FP, incoming, 8, 0, 8);
-                st_slot(t, sd, p, A64_ACC, size > 8 ? 8 : size);
-                incoming += 8;
+                a64_ldr(t, A64_ACC, A64_FP, 16 + pl.stk_off, 8, 0, 8);
+                st_slot(t, sd, p, A64_ACC, pl.size > 8 ? 8 : pl.size);
             }
         }
     }
@@ -655,8 +722,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         case IR_RET: {
             if (i->a >= 0) {
                 struct type *rt = f->ret_ty;
+                int esz, nh = a64_hfa(rt, &esz);
                 if (i->flt) {
                     a64_fldr(t, 0, A64_SP, sd[i->a], i->w);
+                } else if (nh) {
+                    /* an HFA comes back one member per v register */
+                    ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
+                    for (int q = 0; q < nh; q++)
+                        a64_fldr(t, q, A64_ADDR, q * esz, esz);
                 } else if (rt->kind == TY_STRUCT) {
                     int size = ty_size(rt);
                     /* The value's ADDRESS is in the operand slot. Small
@@ -667,9 +740,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                         for (int q = 0; q * 8 < size; q++)
                             a64_ldr(t, q, A64_ADDR, q * 8, 8, 0, 8);
                     } else {
-                        a64_ldr(t, A64_SCR, A64_SP, sret_slot, 8, 0, 8);
+                        a64_ldr(t, A64_SCR, A64_SP, fr.sret, 8, 0, 8);
                         emit_copy(t, A64_SCR, A64_ADDR, size);
-                        a64_ldr(t, 0, A64_SP, sret_slot, 8, 0, 8);
+                        a64_ldr(t, 0, A64_SP, fr.sret, 8, 0, 8);
                     }
                 } else {
                     ld_slot(t, sd, i->a, 0, 8, 0, 8);
@@ -683,47 +756,69 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
         case IR_CALL: {
             struct a64_argplan pl[MAX_PARAMS];
-            plan_call_args(i, pl, f);
+            struct a64_cursor cu = { 0, 0, 0, 0 };
+            for (int k = 0; k < i->nargs; k++)
+                a64_place(i->argv[k].ty, &cu, &pl[k]);
 
-            /* Stack arguments first: placing them uses the scratch
-             * registers, which must not run over an argument register that
-             * has already been loaded. */
+            /* 1. The copies B.3 passes by reference: the callee may write
+             * its parameter, so it gets a copy, never the caller's object.
+             * Destination first — addr_of may borrow A64_SCR, which would
+             * clobber a source address already parked there. */
             for (int k = 0; k < i->nargs; k++) {
-                if (pl[k].in_reg)
+                if (!pl[k].byref)
                     continue;
-                struct ir_arg *a = &i->argv[k];
-                if (a->is_struct) {
-                    /* Destination FIRST: addr_of falls back to A64_SCR for
-                     * an offset the add immediate cannot hold, which would
-                     * clobber the source address if that were already in it. */
+                addr_of(t, A64_ADDR, A64_SP, fr.byref + pl[k].copy_off);
+                ld_slot(t, sd, i->argv[k].vreg, A64_SCR, 8, 0, 8);
+                emit_copy(t, A64_ADDR, A64_SCR, pl[k].size);
+            }
+            /* 2. Stack arguments, which use the scratch registers, before
+             * any argument register is loaded. */
+            for (int k = 0; k < i->nargs; k++) {
+                if (pl[k].where != AP_STACK)
+                    continue;
+                int v = i->argv[k].vreg;
+                if (pl[k].byref) {
+                    addr_of(t, A64_ACC, A64_SP, fr.byref + pl[k].copy_off);
+                    a64_str(t, A64_ACC, A64_SP, pl[k].stk_off, 8);
+                } else if (pl[k].is_struct) {
                     addr_of(t, A64_ADDR, A64_SP, pl[k].stk_off);
-                    ld_slot(t, sd, a->vreg, A64_SCR, 8, 0, 8);
+                    ld_slot(t, sd, v, A64_SCR, 8, 0, 8);
                     emit_copy(t, A64_ADDR, A64_SCR, pl[k].size);
                 } else {
-                    ld_slot(t, sd, a->vreg, A64_ACC, 8, 0, 8);
+                    ld_slot(t, sd, v, A64_ACC, 8, 0, 8);
                     a64_str(t, A64_ACC, A64_SP, pl[k].stk_off, 8);
                 }
             }
-            /* Then the register arguments, in order. Each writes only its
-             * own x register, so no shuffle is needed. */
+            /* 3. Register arguments, in order; each writes only its own
+             * register, so no shuffle is needed. */
             for (int k = 0; k < i->nargs; k++) {
-                if (!pl[k].in_reg)
-                    continue;
-                struct ir_arg *a = &i->argv[k];
-                if (pl[k].is_flt) {
-                    a64_fldr(t, pl[k].reg, A64_SP, sd[a->vreg], pl[k].size);
-                } else if (a->is_struct) {
-                    ld_slot(t, sd, a->vreg, A64_ADDR, 8, 0, 8);
-                    for (int q = 0; q < pl[k].nreg; q++)
-                        a64_ldr(t, pl[k].reg + q, A64_ADDR, q * 8, 8, 0, 8);
-                } else {
-                    ld_slot(t, sd, a->vreg, pl[k].reg, 8, 0, 8);
+                int v = i->argv[k].vreg;
+                if (pl[k].where == AP_V) {
+                    if (pl[k].is_struct) {
+                        ld_slot(t, sd, v, A64_ADDR, 8, 0, 8);
+                        for (int q = 0; q < pl[k].nreg; q++)
+                            a64_fldr(t, pl[k].reg + q, A64_ADDR,
+                                     q * pl[k].esz, pl[k].esz);
+                    } else {
+                        a64_fldr(t, pl[k].reg, A64_SP, sd[v], pl[k].esz);
+                    }
+                } else if (pl[k].where == AP_X) {
+                    if (pl[k].byref) {
+                        addr_of(t, pl[k].reg, A64_SP, fr.byref + pl[k].copy_off);
+                    } else if (pl[k].is_struct) {
+                        ld_slot(t, sd, v, A64_ADDR, 8, 0, 8);
+                        for (int q = 0; q < pl[k].nreg; q++)
+                            a64_ldr(t, pl[k].reg + q, A64_ADDR, q * 8, 8, 0, 8);
+                    } else {
+                        ld_slot(t, sd, v, pl[k].reg, 8, 0, 8);
+                    }
                 }
             }
-            /* A composite return larger than 16 bytes: hand the callee the
-             * caller-side scratch in x8. */
-            if (i->retsize > 16)
-                addr_of(t, A64_SRET, A64_SP, scratch_base + i->scratch);
+            /* A large composite return: the callee writes it to our scratch
+             * through x8. */
+            int resz, resn = i->retsize ? a64_hfa(i->rety, &resz) : 0;
+            if (i->retsize && a64_byref(i->rety))
+                addr_of(t, A64_SRET, A64_SP, fr.scratch + i->scratch);
 
             if (i->indirect) {
                 ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
@@ -743,17 +838,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             if (i->dst < 0)
                 break;
             if (i->retsize) {
-                /* Small composites arrive in x0/x1 and are unpacked into
-                 * the scratch; a large one the callee already wrote there.
-                 * Either way dst receives the scratch's ADDRESS, which is
-                 * the contract irgen and the x86 backend share. */
-                if (i->retsize <= 16) {
-                    addr_of(t, A64_ADDR, A64_SP, scratch_base + i->scratch);
+                /* dst receives the scratch's ADDRESS — the contract irgen
+                 * and the x86 backend share. An HFA arrives in v0.., a small
+                 * composite in x0/x1; a large one is already there. */
+                addr_of(t, A64_ADDR, A64_SP, fr.scratch + i->scratch);
+                if (resn) {
+                    for (int q = 0; q < resn; q++)
+                        a64_fstr(t, q, A64_ADDR, q * resz, resz);
+                } else if (!a64_byref(i->rety)) {
                     for (int q = 0; q * 8 < i->retsize; q++)
                         a64_str(t, q, A64_ADDR, q * 8, 8);
                 }
-                addr_of(t, A64_ACC, A64_SP, scratch_base + i->scratch);
-                st_slot(t, sd, i->dst, A64_ACC, 8);
+                st_slot(t, sd, i->dst, A64_ADDR, 8);
             } else if (i->flt) {
                 a64_fstr(t, 0, A64_SP, sd[i->dst], i->w);
             } else {
@@ -785,12 +881,44 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             a64_fcvt(t, A64_FACC, A64_FACC, i->size, i->w);
             a64_fstr(t, A64_FACC, A64_SP, sd[i->dst], i->w);
             break;
-        case IR_VA_START:
-            diag_fatal(f->file, i->line ? i->line : f->line,
-                       "va_start is not supported for aarch64 yet: the "
-                       "AAPCS64 register save area is not built (in '%s')",
-                       f->name);
+        case IR_VA_START: {
+            /* AAPCS64's va_list record, 32 bytes:
+             *   +0  __stack    the next variadic argument on the stack
+             *   +8  __gr_top   the end of the saved x0..x7
+             *   +16 __vr_top   the end of the saved q0..q7
+             *   +24 __gr_offs  (int) -(x registers still unread) * 8
+             *   +28 __vr_offs  (int) -(v registers still unread) * 16
+             * The named parameters decide the starting point; walking them
+             * with a64_place gives exactly the registers and stack they
+             * took. `va_list` itself is a char * pointing at this record —
+             * gcc's aarch64 va_list is a struct larger than 16 bytes, which
+             * B.3 passes as a POINTER, so vfprintf and friends take ours
+             * unchanged. */
+            struct a64_cursor cu = { 0, 0, 0, 0 };
+            struct a64_argplan pl;
+            for (int p = 0; p < f->nparams; p++)
+                a64_place(f->param_tys[p], &cu, &pl);
+            long tag = fr.va_tag;
+            addr_of(t, A64_ACC, A64_FP, 16 + ((cu.nsaa + 7) & ~7L));
+            a64_str(t, A64_ACC, A64_SP, tag + 0, 8);
+            addr_of(t, A64_ACC, A64_SP, fr.gr_save + 64);
+            a64_str(t, A64_ACC, A64_SP, tag + 8, 8);
+            if (fr.vr_save >= 0)
+                addr_of(t, A64_ACC, A64_SP, fr.vr_save + 128);
+            else
+                a64_mov_imm(t, A64_ACC, 0, 8);
+            a64_str(t, A64_ACC, A64_SP, tag + 16, 8);
+            a64_mov_imm(t, A64_ACC, -(8 - (cu.ngrn < 8 ? cu.ngrn : 8)) * 8, 4);
+            a64_str(t, A64_ACC, A64_SP, tag + 24, 4);
+            a64_mov_imm(t, A64_ACC, fr.vr_save >= 0
+                        ? -(8 - (cu.nsrn < 8 ? cu.nsrn : 8)) * 16 : 0, 4);
+            a64_str(t, A64_ACC, A64_SP, tag + 28, 4);
+            /* *ap = &record  (i->a holds the address of the va_list) */
+            ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
+            addr_of(t, A64_ACC, A64_SP, tag);
+            a64_str(t, A64_ACC, A64_ADDR, 0, 8);
             break;
+        }
         case IR_ASM: {
             /* Extended asm, assembled in irgen (gen_asm_arm64). Every value
              * lives in a stack slot, so nothing is live in a register across
@@ -933,7 +1061,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
     /* The single epilogue every `return` branches to. */
     int epi = t->len;
-    a64_epilogue(t, frame);
+    a64_epilogue(t, fr.size);
 
     for (int k = 0; k < nret; k++)
         a64_patch_b26(t, retfix[k], epi);

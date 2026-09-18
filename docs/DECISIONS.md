@@ -393,6 +393,9 @@ inline asm landed (`src/asm/asm_arm64.c`), sized to the vocabulary the ARM
 kernel was MEASURED to use rather than to a general assembler; the ARM
 kernel's C went from 60 to 120 of 131 files compiling, and what remains is
 front-end work both targets share (`__atomic_*` above all) plus `va_start`.
+**2026-09-18, later:** the atomics, `va_start` / `va_arg`, HFA arguments and
+the corrected large-composite rule landed; **all 131 C files of the ARM
+kernel compile**, and `make test-arm64` passes in full.
 
 EmbLinkOS is two architectures now. `myos/docs/ARM64.md` closed its A0–A9
 campaign: the whole shared kernel links and runs on aarch64 under QEMU `virt`,
@@ -419,12 +422,22 @@ had to know which machine it was writing for at every relocation site.
 
 **The AAPCS64 argument classification is recomputed in the backend, not read
 from the IR.** irgen fills `ir_arg` with the *SysV* classification, and the two
-ABIs disagree — eight integer argument registers against six, composites by
-value on the stack rather than by MEMORY class, no back-filling once an
-argument has gone to the stack. Reusing the SysV numbers would have been a
-silent miscompile of every call with more than six arguments. Recomputing is
-cheap; the IR keeps carrying the SysV fields for the x86 backend, and the
-aarch64 backend ignores them.
+ABIs disagree — eight integer argument registers against six; a composite
+larger than 16 bytes passed as a POINTER to a copy the caller makes (stage
+B.3) rather than SysV's by-value MEMORY class; a struct of one to four
+same-typed floats (a Homogeneous Floating-point Aggregate) in consecutive v
+registers, whatever its size; no back-filling once a register file is spent.
+Reusing the SysV numbers would have been a silent miscompile of every call
+with more than six arguments. The IR keeps carrying the SysV fields for the
+x86 backend and now also each argument's TYPE (`ir_arg.ty`), from which one
+classifier, `a64_place`, places a call's arguments and a function's
+parameters alike — so the two sides cannot disagree.
+
+*(Corrected 2026-09-18: this paragraph first said large composites went "by
+value on the stack", and the backend did exactly that — consistent with
+itself, wrong against gcc, and invisible to every test in which EmbCC called
+EmbCC. The cross-ABI test against gcc, blocked until HFAs existed, is what
+settles it; it and tests/golden/cross-varargs.sh now pass on both targets.)*
 
 **The naive backend was rebuilt, not shared.** `codegen_arm64.c` starts where
 `codegen.c` started: every vreg in a stack slot, every operation through one
@@ -434,11 +447,10 @@ first" applies to a second backend as much as it did to the first. What the
 two DO share is the IR, the optimizer, the ELF writer and the driver — which
 is the split that matters.
 
-**What is refused loudly rather than emitted wrong** (THE RULE): `va_start`
-(the AAPCS64 register save area and its five-field `va_list` are not built),
-the atomics (`ldxr`/`stxr` pairs), HFA struct arguments, and `-g`. Each fails
-with a diagnostic naming what is missing. (Inline asm was on this list at
-decision time; see the status note above.)
+**What is refused loudly rather than emitted wrong** (THE RULE): `-g`, whose
+DWARF describes x86 frame offsets. (Inline asm, `va_start`, the atomics and
+HFA arguments were on this list at decision time and have since landed; see
+the status notes above.)
 
 **Reopen if:** the two backends start duplicating real algorithms — a register
 allocator written twice is the signal that the shared layer is in the wrong

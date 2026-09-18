@@ -88,7 +88,8 @@ if [ "$TARGET" = aarch64-elf ]; then
     sh_tests="tests/golden/arm64-encoding.sh tests/golden/arm64-asm.sh
               tests/golden/agrees-with-gcc.sh tests/golden/predef.sh
               tests/golden/optimizer.sh tests/golden/regalloc-O2.sh
-              tests/golden/include-next.sh tests/golden/sysv-abi.sh"
+              tests/golden/include-next.sh tests/golden/sysv-abi.sh
+              tests/golden/cross-varargs.sh"
 else
     sh_tests="tests/exec/*.sh tests/compile/*.sh tests/golden/*.sh"
 fi

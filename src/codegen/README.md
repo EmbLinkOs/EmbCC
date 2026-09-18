@@ -76,9 +76,12 @@ Two things differ from the x86 backend by necessity rather than by stage:
 - **Argument placement is recomputed to AAPCS64**, ignoring `ir_arg`'s
   `on_stack`/`stk_off`, which irgen fills in with the SysV classification.
   Eight integer argument registers rather than six, floats on their own NSRN
-  counter, composites of 16 bytes or fewer in consecutive `x` registers and
-  anything larger by value on the stack, and no back-filling once an argument
-  has gone to the stack (AAPCS64 rule C.11). The outgoing area is sized from
+  counter, a Homogeneous Floating-point Aggregate (one to four same-typed
+  floats) one member per `v` register, other composites of 16 bytes or fewer in
+  consecutive `x` registers, anything larger passed as a pointer to a copy the
+  caller makes (stage B.3), and no back-filling once a register file is spent
+  (C.3, C.11). One classifier, `a64_place`, serves calls and the prologue
+  alike. The outgoing area is sized from
   those rules too, not from `fn->outgoing_bytes`.
 
 Inline asm arrives assembled (irgen's `gen_asm_arm64`, over
@@ -88,5 +91,10 @@ constraint chose, pre-loads each `"+"` output with the lvalue's current value
 and stores the outputs through their addresses. Operand registers never
 include `x12`, which a far stack slot borrows, or anything callee-saved.
 
-Refused loudly rather than emitted wrong: `va_start`, the atomics, HFA struct
-arguments, and `-g`. See the README for why each is real work.
+Variadic functions save `x0`–`x7` and `q0`–`q7` in the prologue (not the `q`
+registers under `-mgeneral-regs-only`) and `va_start` fills AAPCS64's 32-byte
+record; `va_list` stays a `char *` pointing at it, which B.3 makes
+ABI-compatible with gcc's struct `va_list`. The atomics are `ldxr`/`stxr`
+retry loops between full barriers.
+
+Refused loudly rather than emitted wrong: `-g`.
