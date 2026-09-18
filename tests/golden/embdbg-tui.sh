@@ -6,6 +6,7 @@
 # scriptable. (The interactive path is smoke-tested under a pty separately.)
 set -u
 echo "TEST-MARKER embdbg-tui"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/embdbg-tui
 rm -rf "$out"; mkdir -p "$out"
 EMBDBG="$(dirname "$EMBCC")/embdbg"

@@ -8,6 +8,7 @@
 # option and hint — generated from the tables so none can escape the check.
 set -eu
 echo "TEST-MARKER arm64-asm"
+. "$(dirname "$0")/../lib.sh"
 
 cd "$(dirname "$0")/../.."
 AS="${EMBCC_AARCH64_AS:-aarch64-elf-as}"

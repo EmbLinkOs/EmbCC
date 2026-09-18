@@ -11,6 +11,12 @@
 # M1 program with real crt0/newlib) is a separate on-OS step.
 set -u
 echo "TEST-MARKER embld-link"
+. "$(dirname "$0")/../lib.sh"
+# These programs exit through the LINUX syscall ABI (syscall 60), with no libc
+# and no harness, so only a Linux x86-64 host can run them.
+[ "$(uname -s)-$(uname -m)" = Linux-x86_64 ] || {
+    echo "skipped: needs a Linux x86-64 host (the programs exit via Linux syscall 60)"
+    exit 0; }
 
 EMBLD=./embld
 EMBCC=${EMBCC:-./embcc}

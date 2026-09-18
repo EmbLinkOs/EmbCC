@@ -7,6 +7,7 @@
 # name the obvious instructions.
 set -u
 echo "TEST-MARKER embdbg-disasm"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/embdbg-disasm
 rm -rf "$out"; mkdir -p "$out"
 EMBDBG="$(dirname "$EMBCC")/embdbg"

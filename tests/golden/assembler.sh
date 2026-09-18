@@ -13,6 +13,7 @@
 # and the relocations. Skips honestly when nasm is not on this host.
 set -u
 echo "TEST-MARKER assembler"
+. "$(dirname "$0")/../lib.sh"
 
 EMBCC=${EMBCC:-./embcc}
 [ -x ./embas ] || { echo "embas not built"; exit 1; }

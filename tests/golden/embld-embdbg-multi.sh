@@ -6,6 +6,7 @@
 # each object appears with ITS file's source and ITS own types.
 set -u
 echo "TEST-MARKER embld-embdbg-multi"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/embld-embdbg-multi
 rm -rf "$out"; mkdir -p "$out"
 EMBLD="$(dirname "$EMBCC")/embld"

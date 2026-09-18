@@ -6,6 +6,7 @@
 # which needs no live process or kernel support.
 set -u
 echo "TEST-MARKER embdbg-symbolize"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/embdbg-symbolize
 rm -rf "$out"; mkdir -p "$out"
 EMBDBG="$(dirname "$EMBCC")/embdbg"

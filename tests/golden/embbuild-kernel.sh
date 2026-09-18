@@ -14,13 +14,14 @@
 # Skips honestly when myos / nasm / qemu are not on this host.
 set -eu
 echo "TEST-MARKER embbuild-kernel"
+. "$(dirname "$0")/../lib.sh"
 
 # Opt-in: an 89-unit kernel build plus a qemu boot is ~35s — too heavy for every
 # `make test`. Run it deliberately with EMBCC_KM1=1 (CI and the dev suite skip).
 [ "${EMBCC_KM1:-}" = 1 ] || { echo "skipped: kernel-manifest boot is opt-in (set EMBCC_KM1=1)"; exit 0; }
 
-MYOS=${MYOS:-/home/motsou/myos}
 HOST=$(cd "$(dirname "$0")/../.." && pwd)
+. "$HOST/tools/hostpaths.sh"
 [ -d "$MYOS/kernel" ] || { echo "skipped: no myos kernel tree at $MYOS"; exit 0; }
 command -v nasm >/dev/null 2>&1 || { echo "skipped: nasm absent (boot stages)"; exit 0; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "skipped: qemu absent"; exit 0; }
@@ -77,12 +78,12 @@ K="$STAGE/kernel.elf"
 [ -f "$K" ] || { echo "manifest produced no kernel.elf"; exit 1; }
 readelf -h "$K" | grep -q 'EXEC (Executable file)' || { echo "kernel.elf not ET_EXEC"; exit 1; }
 readelf -lW "$K" | grep -q '0xffffffff80100000 0x0000000000100000' || { echo "kernel LMA wrong"; exit 1; }
-echo "kernel.elf: ET_EXEC, higher-half vaddr with physical LMA 0x100000 ($(stat -c%s "$K") bytes)"
+echo "kernel.elf: ET_EXEC, higher-half vaddr with physical LMA 0x100000 ($(wc -c < "$K" | tr -d " ") bytes)"
 
 # 4. Boot it (flat boot stages via nasm; sector counts sized to this kernel).
-ksz=$(stat -c%s "$K"); ksect=$(( (ksz + 511) / 512 ))
+ksz=$(wc -c < "$K" | tr -d " "); ksect=$(( (ksz + 511) / 512 ))
 nasm -f bin -D KERNEL_LOAD_SECTORS=$ksect "$MYOS/boot/stage2/stage2.asm" -o "$STAGE/stage2.bin"
-s2s=$(( ($(stat -c%s "$STAGE/stage2.bin") + 511) / 512 ))
+s2s=$(( ($(wc -c < "$STAGE/stage2.bin" | tr -d " ") + 511) / 512 ))
 nasm -f bin -D STAGE2_LOAD_SECTORS=$s2s "$MYOS/boot/stage1/boot.asm" -o "$STAGE/stage1.bin"
 cat "$STAGE/stage1.bin" "$STAGE/stage2.bin" "$K" > "$STAGE/kernel.img"
 truncate -s 8M "$STAGE/kernel.img"

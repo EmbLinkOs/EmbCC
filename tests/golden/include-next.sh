@@ -5,6 +5,7 @@
 # an exotic feature here — it is on the path to compiling the userland.
 set -u
 echo "TEST-MARKER include-next"
+. "$(dirname "$0")/../lib.sh"
 
 out_dir="tests/golden/out/incnext"
 rm -rf "$out_dir"
@@ -27,12 +28,12 @@ cat > "$out_dir/prog.c" << 'EOF'
 int main(void) { return THING_BASE + THING_EXTRA; }
 EOF
 
-"$EMBCC" -c "$out_dir/prog.c" -o "$out_dir/prog.o" \
+"$EMBCC" --target="$TARGET" -c "$out_dir/prog.c" -o "$out_dir/prog.o" \
     -I "$out_dir/first" -I "$out_dir/second" || {
     echo "compile failed"; exit 1; }
-cc -no-pie -o "$out_dir/prog" "$out_dir/prog.o" || {
+t_link "$out_dir/prog" "$out_dir/prog.o" || {
     echo "link failed"; exit 1; }
-"$out_dir/prog"
+t_run "$out_dir/prog" >/dev/null
 got=$?
 [ "$got" -eq 42 ] || { echo "exit $got, expected 42 (wrapper+system)"; exit 1; }
 echo "wrapper reached the system header via #include_next"

@@ -11,6 +11,7 @@
 #     plus store/reload traffic, compiles to a strictly smaller object.
 set -u
 echo "TEST-MARKER optimizer"
+. "$(dirname "$0")/../lib.sh"
 
 EMBCC=${EMBCC:-./embcc}
 out=tests/golden/out/optimizer
@@ -30,7 +31,7 @@ echo "-O0 is byte-identical to unoptimized output"
 # 3. -O1 optimizes: fold (2+3), identity (x*1, a+0), and the dead temps they
 #    leave must shrink the object.
 "$EMBCC" -c -O1 "$prog" -o "$out/o1.o"  || { echo "compile -O1 failed"; exit 1; }
-s0=$(stat -c%s "$out/o0.o"); s1=$(stat -c%s "$out/o1.o")
+s0=$(wc -c < "$out/o0.o" | tr -d " "); s1=$(wc -c < "$out/o1.o" | tr -d " ")
 [ "$s1" -lt "$s0" ] || { echo "-O1 did not shrink the object ($s0 -> $s1)"; exit 1; }
 echo "-O1 folds/eliminates: object $s0 -> $s1 bytes"
 
@@ -41,10 +42,12 @@ for c in tests/exec/*.c; do
     exp=$(sed -n 's|.*// expect-exit: *\([0-9][0-9]*\).*|\1|p' "$c" | head -1)
     [ -z "$exp" ] && continue
     name=$(basename "$c" .c)
+    pinned_elsewhere "$c" && continue
     o="$out/$name.o"; e="$out/$name"
-    "$EMBCC" -c -O1 "$c" -o "$o" || { echo "-O1 failed to compile $c"; exit 1; }
-    cc -no-pie -o "$e" "$o"      || { echo "host link failed for $c"; exit 1; }
-    "$e" >/dev/null 2>&1; got=$?
+    "$EMBCC" --target="$TARGET" -c -O1 "$c" -o "$o" || {
+        echo "-O1 failed to compile $c"; exit 1; }
+    t_link "$e" "$o" || { echo "link failed for $c"; exit 1; }
+    t_run "$e" >/dev/null 2>&1; got=$?
     [ "$got" -eq "$exp" ] || { echo "-O1 $name: got $got, want $exp"; exit 1; }
     n=$((n + 1))
 done

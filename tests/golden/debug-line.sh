@@ -7,6 +7,7 @@
 # too, alongside determinism.
 set -u
 echo "TEST-MARKER debug-line"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/debug-line
 rm -rf "$out"; mkdir -p "$out"
 

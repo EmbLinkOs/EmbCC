@@ -6,6 +6,7 @@
 # absent -- exactly how emlibc decouples an optional stdio flush from stdlib.
 set -u
 echo "TEST-MARKER weak-undef"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/weak-undef
 rm -rf "$out"; mkdir -p "$out"
 

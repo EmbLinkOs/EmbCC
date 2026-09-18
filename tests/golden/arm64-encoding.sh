@@ -8,6 +8,7 @@
 # displacement of every branch as well as the opcode of every instruction.
 set -eu
 echo "TEST-MARKER arm64-encoding"
+. "$(dirname "$0")/../lib.sh"
 
 cd "$(dirname "$0")/../.."
 OBJDUMP="${EMBCC_AARCH64_OBJDUMP:-aarch64-elf-objdump}"

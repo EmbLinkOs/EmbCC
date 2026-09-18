@@ -13,25 +13,15 @@
 # Skips honestly when the OS runtime / newlib are not on this machine.
 set -u
 echo "TEST-MARKER self-host"
+. "$(dirname "$0")/../lib.sh"
 
 EMBCC=${EMBCC:-./embcc}
 EMBLD=./embld
 
-# The runtime lives in different places on the two dev hosts (the original
-# Linux box kept it under /home/motsou, the Mac keeps it under $HOME). Each
-# path can be set outright; otherwise the first candidate that exists wins.
-# A hard-coded single path made this test SKIP on the Mac -- and a skipped
-# self-host test is how a renamed source file went unnoticed.
-first() { for c in "$@"; do [ -e "$c" ] && { echo "$c"; return; }; done; echo "$1"; }
-NEWLIB=${EMBCC_X86_NEWLIB:-$(first "$HOME/cross/newlib-c99/x86_64-elf" \
-                                   /home/motsou/cross/newlib-c99/x86_64-elf)}
-MYOS_BUILD=${EMBCC_MYOS_BUILD:-$(first "$HOME/EmbLinkOs/build" \
-                                       /home/motsou/myos/build)}
-NEWLIB_INC=$NEWLIB/include
+NEWLIB_INC=$X86_NEWLIB/include   # host layout: tools/hostpaths.sh via tests/lib.sh
 CRT0=$MYOS_BUILD/crt0.o
 SYSCALLS=$MYOS_BUILD/syscalls.o
-LIBC=$NEWLIB/lib/libc.a
-READELF=${READELF:-$(command -v readelf || command -v x86_64-elf-readelf || echo readelf)}
+LIBC=$X86_NEWLIB/lib/libc.a
 
 for f in "$NEWLIB_INC/stdio.h" "$CRT0" "$SYSCALLS" "$LIBC"; do
     [ -e "$f" ] || { echo "skipped: $f not present on this host"; exit 0; }
@@ -75,9 +65,9 @@ sz=$(wc -c < "$out/embcc-stage1.elf" | tr -d " ")
 echo "EmbLD linked embcc-stage1.elf ($sz bytes)"
 
 # 4. Structural acceptance: what the EmbLinkOS loader binds.
-"$READELF" -h "$out/embcc-stage1.elf" | grep -q "EXEC (Executable file)" || {
+readelf -h "$out/embcc-stage1.elf" | grep -q "EXEC (Executable file)" || {
     echo "stage1 is not ET_EXEC"; exit 1; }
-und=$("$READELF" -sW "$out/embcc-stage1.elf" 2>/dev/null \
+und=$(readelf -sW "$out/embcc-stage1.elf" 2>/dev/null \
       | awk '$7=="UND" && $8!="" {print $8}' | grep -v '^$')
 [ -z "$und" ] || { echo "stage1 has unresolved symbols:"; echo "$und"; exit 1; }
 echo "stage1 is ET_EXEC with every symbol resolved"

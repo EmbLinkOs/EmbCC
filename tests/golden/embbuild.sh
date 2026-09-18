@@ -13,14 +13,15 @@
 # stage1. Skips honestly when the OS runtime / newlib are not on this host.
 set -eu
 echo "TEST-MARKER embbuild"
+. "$(dirname "$0")/../lib.sh"
 
 EMBCC=${EMBCC:-./embcc}
 [ -x ./embld ] || { echo "embld not built"; exit 1; }
 
-NEWLIB_INC=${NEWLIB_INC:-/home/motsou/cross/newlib-c99/x86_64-elf/include}
-CRT0=${CRT0:-/home/motsou/myos/build/crt0.o}
-SYSCALLS=${SYSCALLS:-/home/motsou/myos/build/syscalls.o}
-LIBC=${LIBC:-/home/motsou/cross/newlib-c99/x86_64-elf/lib/libc.a}
+NEWLIB_INC=${NEWLIB_INC:-$X86_NEWLIB/include}
+CRT0=${CRT0:-$MYOS_BUILD/crt0.o}
+SYSCALLS=${SYSCALLS:-$MYOS_BUILD/syscalls.o}
+LIBC=${LIBC:-$X86_NEWLIB/lib/libc.a}
 for f in "$NEWLIB_INC/stdio.h" "$CRT0" "$SYSCALLS" "$LIBC"; do
     [ -e "$f" ] || { echo "skipped: $f not present on this host"; exit 0; }
 done

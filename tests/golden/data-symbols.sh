@@ -6,6 +6,7 @@
 # way ld resolves gcc's).
 set -u
 echo "TEST-MARKER data-symbols"
+. "$(dirname "$0")/../lib.sh"
 
 out_dir="tests/golden/out"
 mkdir -p "$out_dir"

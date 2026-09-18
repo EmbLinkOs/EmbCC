@@ -6,11 +6,22 @@
 # swallowed and a hung guest hangs the whole suite. Backgrounding and
 # killing is the only reliable form.
 #
+# The watchdog must not keep the CALLER's stdout open: a caller that captures
+# the guest's output with $(...) waits for every holder of that pipe to close
+# it, and an orphaned `sleep` would make every run take the full timeout. So
+# the watchdog's own stdio is /dev/null, and stopping it stops its sleep.
+#
 # usage: qrun.sh <seconds> <command> [args...]   -> the guest's exit status
 timeout=$1; shift
 "$@" & qpid=$!
-( sleep "$timeout"; kill -9 "$qpid" 2>/dev/null ) & wpid=$!
+(
+    trap 'kill "$s" 2>/dev/null; exit 0' TERM
+    sleep "$timeout" & s=$!
+    wait "$s"
+    kill -9 "$qpid" 2>/dev/null
+) </dev/null >/dev/null 2>&1 &
+wpid=$!
 wait "$qpid" 2>/dev/null; status=$?
-kill -9 "$wpid" 2>/dev/null
+kill "$wpid" 2>/dev/null
 wait "$wpid" 2>/dev/null
 exit $status

@@ -5,6 +5,7 @@
 # and the intra-unit call actually lands on the callee.
 set -u
 echo "TEST-MARKER symtab"
+. "$(dirname "$0")/../lib.sh"
 
 out_dir="tests/golden/out"
 mkdir -p "$out_dir"

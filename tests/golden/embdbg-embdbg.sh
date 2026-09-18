@@ -8,6 +8,7 @@
 # header and every section, and byte-for-byte determinism.
 set -u
 echo "TEST-MARKER embdbg-embdbg"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/embdbg-embdbg
 rm -rf "$out"; mkdir -p "$out"
 EMBDBG="$(dirname "$EMBCC")/embdbg"

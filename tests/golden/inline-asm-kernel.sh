@@ -5,6 +5,7 @@
 # the reference decoder, must reproduce each mnemonic and flag nothing (bad).
 set -u
 echo "TEST-MARKER inline-asm-kernel"
+. "$(dirname "$0")/../lib.sh"
 
 EMBCC=${EMBCC:-./embcc}
 out=tests/golden/out/inline-asm-kernel

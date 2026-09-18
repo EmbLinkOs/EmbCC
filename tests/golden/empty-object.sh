@@ -5,6 +5,7 @@
 # must both accept the file, per "prove on the host" (DECISIONS D-005).
 set -u
 echo "TEST-MARKER empty-object"
+. "$(dirname "$0")/../lib.sh"
 
 out_dir="tests/golden/out"
 mkdir -p "$out_dir"

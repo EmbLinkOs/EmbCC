@@ -7,6 +7,7 @@
 # scope at the crash, and the instructions around RIP with the fault marked.
 set -u
 echo "TEST-MARKER embdbg-crash"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/embdbg-crash
 rm -rf "$out"; mkdir -p "$out"
 EMBDBG="$(dirname "$EMBCC")/embdbg"

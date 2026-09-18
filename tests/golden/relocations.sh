@@ -6,6 +6,7 @@
 # A declared-but-unused external must leave NO trace.
 set -u
 echo "TEST-MARKER relocations"
+. "$(dirname "$0")/../lib.sh"
 
 out_dir="tests/golden/out"
 mkdir -p "$out_dir"

@@ -5,6 +5,7 @@
 # that is NOT deferred; this is the caret core of it.
 set -eu
 echo "TEST-MARKER diagnostics"
+. "$(dirname "$0")/../lib.sh"
 
 EMBCC=${EMBCC:-./embcc}
 out=tests/golden/out/diagnostics

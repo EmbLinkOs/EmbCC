@@ -14,12 +14,13 @@
 # Skips honestly when the OS tree / newlib are not on this machine.
 set -u
 echo "TEST-MARKER embld-b1"
+. "$(dirname "$0")/../lib.sh"
 
 EMBLD=./embld
 EMBCC=${EMBCC:-./embcc}
-CRT0=/home/motsou/myos/build/crt0.o
-SYSCALLS=/home/motsou/myos/build/syscalls.o
-LIBC=/home/motsou/cross/newlib-c99/x86_64-elf/lib/libc.a
+CRT0=$MYOS_BUILD/crt0.o
+SYSCALLS=$MYOS_BUILD/syscalls.o
+LIBC=$X86_NEWLIB/lib/libc.a
 LD=/usr/local/cross/bin/x86_64-elf-ld
 
 for f in "$CRT0" "$SYSCALLS" "$LIBC"; do
@@ -39,7 +40,7 @@ printf 'static int twice(int x){ return x + x; }\nint main(void){ return twice(2
 "$EMBLD" -o "$out/m1.elf" "$CRT0" "$SYSCALLS" "$out/m1.o" "$LIBC" || {
     echo "embld failed to link the M1 program against the real runtime"
     exit 1; }
-echo "linked m1.elf against crt0 + syscalls + libc.a ($(stat -c%s "$out/m1.elf") bytes)"
+echo "linked m1.elf against crt0 + syscalls + libc.a ($(wc -c < "$out/m1.elf" | tr -d " ") bytes)"
 
 # structural acceptance — what the in-kernel loader actually binds
 readelf -h "$out/m1.elf" | grep -q "EXEC (Executable file)" || {

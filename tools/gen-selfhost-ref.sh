@@ -4,9 +4,10 @@
 # The references are the gcc-built embcc's output for EmbCC's own sources;
 # STT_FILE is the basename, so they match what the OS embcc produces.
 set -eu
-NEWLIB_INC=${NEWLIB_INC:-/home/motsou/cross/newlib-c99/x86_64-elf/include}
-OS_BUILD=${OS_BUILD:-/home/motsou/myos/build}
-LIBC=${LIBC:-/home/motsou/cross/newlib-c99/x86_64-elf/lib/libc.a}
+. "$(dirname "$0")/hostpaths.sh"
+NEWLIB_INC=${NEWLIB_INC:-$X86_NEWLIB/include}
+OS_BUILD=${OS_BUILD:-$MYOS_BUILD}
+LIBC=${LIBC:-$X86_NEWLIB/lib/libc.a}
 INCS="-I include -I $NEWLIB_INC"
 SRCS="src/driver/main.c src/driver/util.c src/lex/lex.c src/parse/parse.c
       src/sema/sema.c src/sema/type.c src/ir/irgen.c src/as/as.c src/opt/opt.c src/codegen/codegen.c src/debug/dwarf.c
@@ -18,4 +19,4 @@ done
 echo "wrote $(ls ref/*.o | wc -l) reference objects"
 ./embld -o "$OS_BUILD/embcc.elf" "$OS_BUILD/crt0.o" "$OS_BUILD/syscalls.o" \
     ref/*.o "$LIBC"
-echo "relinked stage1 -> $OS_BUILD/embcc.elf ($(stat -c%s "$OS_BUILD/embcc.elf") bytes)"
+echo "relinked stage1 -> $OS_BUILD/embcc.elf ($(wc -c < "$OS_BUILD/embcc.elf" | tr -d " ") bytes)"

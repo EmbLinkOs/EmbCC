@@ -21,7 +21,8 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-NEWLIB_INC=${NEWLIB_INC:-/home/motsou/cross/newlib-c99/x86_64-elf/include}
+. "$(dirname "$0")/hostpaths.sh"
+NEWLIB_INC=${NEWLIB_INC:-$X86_NEWLIB/include}
 
 # On-OS roots.
 SRCROOT=/data/src/embcc
@@ -31,11 +32,10 @@ OUTDIR=/data/build/out/embcc
 ABI=/system/abi
 
 # EmbCC's own translation units — the self-host source set (tests/golden/
-# self-host.sh). Kept in step with the Makefile's SRCS.
-SRCS="src/driver/main.c src/driver/util.c src/lex/lex.c src/parse/parse.c
-      src/sema/sema.c src/sema/type.c src/ir/irgen.c src/as/as.c src/opt/opt.c
-      src/codegen/codegen.c src/debug/dwarf.c src/asm/emit.c src/asm/topasm.c
-      src/cpp/predef.c src/cpp/cpp.c src/elf/write.c"
+# self-host.sh). Taken from the Makefile's SRCS, not restated: a hand-kept
+# copy went stale the moment the aarch64 backend added sources.
+SRCS=$(make -pn 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
+[ -n "$SRCS" ] || { echo "gen-embbuild-manifest: cannot read SRCS from the Makefile" >&2; exit 1; }
 
 # Map a host path to its on-OS path.
 mappath() {

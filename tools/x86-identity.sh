@@ -38,14 +38,22 @@ make -C "$work" -s embcc \
 BASE=$work/embcc
 NEW=$root/embcc
 
-same=0; differ=0; refused=0
+same=0; differ=0; refused=0; gained=0
 compare() {   # compare NAME FLAGS... SRC
     name=$1; shift
     "$BASE" "$@" -o "$work/base/a.o" >/dev/null 2>&1 && rb=0 || rb=$?
     "$NEW"  "$@" -o "$work/base/b.o" >/dev/null 2>&1 && rn=0 || rn=$?
     if [ "$rb" -ne 0 ] && [ "$rn" -ne 0 ]; then refused=$((refused + 1)); return; fi
-    if [ "$rb" -ne "$rn" ]; then
-        echo "  DIFFERS  $name: baseline exit $rb, now exit $rn"; differ=$((differ + 1)); return
+    # Refused before, compiles now: a gap closed. There is no baseline object
+    # to compare against, so it is counted apart — and the exec tests, not
+    # this tool, are what prove the new output right.
+    if [ "$rb" -ne 0 ]; then
+        echo "  GAINED   $name: the baseline refused it, now it compiles"
+        gained=$((gained + 1)); return
+    fi
+    if [ "$rn" -ne 0 ]; then
+        echo "  DIFFERS  $name: the baseline compiled it, now it is REFUSED"
+        differ=$((differ + 1)); return
     fi
     if cmp -s "$work/base/a.o" "$work/base/b.o"; then same=$((same + 1))
     else echo "  DIFFERS  $name: object bytes"; differ=$((differ + 1)); fi
@@ -77,5 +85,5 @@ else
     echo "x86-identity: no EmbLinkOS tree at $MYOS -- kernel inputs skipped"
 fi
 
-echo "x86-identity vs $rev: $same identical, $differ different, $refused refused by both"
+echo "x86-identity vs $rev: $same identical, $differ different, $gained newly compiling, $refused refused by both"
 [ "$differ" -eq 0 ]

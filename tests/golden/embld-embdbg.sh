@@ -6,6 +6,7 @@
 # tool uses (compiled in with -DEMBDBG_NO_MAIN — one implementation).
 set -u
 echo "TEST-MARKER embld-embdbg"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/embld-embdbg
 rm -rf "$out"; mkdir -p "$out"
 EMBLD="$(dirname "$EMBCC")/embld"

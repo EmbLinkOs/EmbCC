@@ -4,6 +4,7 @@
 # linker) — the version must never claim more than the milestone holds.
 set -u
 echo "TEST-MARKER version"
+. "$(dirname "$0")/../lib.sh"
 
 out=$("$EMBCC" --version) || { echo "--version exited nonzero"; exit 1; }
 echo "$out"

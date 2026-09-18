@@ -14,9 +14,10 @@
 # Skips honestly when the OS tree is not on this machine.
 set -u
 echo "TEST-MARKER emblinkos-sdk"
+. "$(dirname "$0")/../lib.sh"
 
-OS=/home/motsou/myos
-NEWLIB=/home/motsou/cross/newlib-c99/x86_64-elf/include
+OS=$MYOS
+NEWLIB=$NEWLIB_INC
 [ -d "$OS/shell/sval" ] || { echo "skipped: the EmbLinkOS tree is not here"; exit 0; }
 [ -d "$NEWLIB" ] || NEWLIB=/usr/local/cross/x86_64-elf/include
 [ -d "$NEWLIB" ] || { echo "skipped: no newlib headers"; exit 0; }
@@ -38,8 +39,10 @@ echo "compiled: value.c wire.c sval.c tally.c"
 # the OS's own Makefile links it (crt0 + syscalls + newlib).
 if [ -f "$OS/build/crt0.o" ] && [ -f "$OS/build/syscalls.o" ] && \
    command -v x86_64-elf-gcc >/dev/null 2>&1; then
+    # -L user/lib: newlib.ld INCLUDEs newlib-body.ld, found on the library
+    # path — exactly how the OS Makefile's NEWLIB_LDFLAGS link it.
     x86_64-elf-gcc -nostartfiles -static -T "$OS/user/lib/newlib.ld" \
-        -L/home/motsou/cross/newlib-c99/x86_64-elf/lib \
+        -L"$OS/user/lib" -L"$X86_NEWLIB/lib" \
         "$OS/build/crt0.o" "$OS/build/syscalls.o" \
         "$out/tally.o" "$out/sval.o" "$out/value.o" "$out/wire.o" \
         -lc -lgcc -o "$out/tally.elf" 2>"$out/link.err" || {
@@ -47,20 +50,20 @@ if [ -f "$OS/build/crt0.o" ] && [ -f "$OS/build/syscalls.o" ] && \
         exit 1; }
     readelf -h "$out/tally.elf" | grep -q "EXEC" || {
         echo "tally.elf is not an executable"; exit 1; }
-    echo "linked: tally.elf for EmbLinkOS ($(stat -c%s "$out/tally.elf") bytes)"
+    echo "linked: tally.elf for EmbLinkOS ($(wc -c < "$out/tally.elf" | tr -d ' ') bytes)"
 fi
 
 # The functional half: run the SDK, and demand it match gcc's build.
-cc -std=c99 -I"$OS/shell" -c tests/golden/sdk/harness.c -o "$out/h.o" || {
+x86_gcc_c tests/golden/sdk/harness.c -std=c99 -I"$OS/shell" -o "$out/h.o" || {
     echo "harness failed to build"; exit 1; }
-cc -no-pie -o "$out/emb" "$out/h.o" "$out/value.o" "$out/wire.o" || {
+x86_link "$out/emb" "$out/h.o" "$out/value.o" "$out/wire.o" || {
     echo "harness failed to link against embcc objects"; exit 1; }
-emb_out=$("$out/emb"); emb_rc=$?
+emb_out=$(x86_run "$out/emb"); emb_rc=$?
 
-cc -std=c99 -I"$OS/shell" -c "$OS/shell/value/value.c" -o "$out/gv.o"
-cc -std=c99 -I"$OS/shell" -c "$OS/shell/wire/wire.c" -o "$out/gw.o"
-cc -no-pie -o "$out/gcc" "$out/h.o" "$out/gv.o" "$out/gw.o"
-gcc_out=$("$out/gcc"); gcc_rc=$?
+x86_gcc_c "$OS/shell/value/value.c" -std=c99 -I"$OS/shell" -o "$out/gv.o"
+x86_gcc_c "$OS/shell/wire/wire.c" -std=c99 -I"$OS/shell" -o "$out/gw.o"
+x86_link "$out/gcc" "$out/h.o" "$out/gv.o" "$out/gw.o"
+gcc_out=$(x86_run "$out/gcc"); gcc_rc=$?
 
 if [ "$emb_rc" -ne "$gcc_rc" ] || [ "$emb_out" != "$gcc_out" ]; then
     echo "EmbCC's build behaves differently from gcc's:"

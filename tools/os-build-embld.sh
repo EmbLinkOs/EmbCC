@@ -67,4 +67,4 @@ echo "$CROSS-gcc -nostartfiles -static -T newlib.ld crt0.o syscalls.o <objs> -lc
 
 # Independent shape check with a tool that has no stake in EmbCC being right.
 "$CROSS-readelf" -h "$ELF" | grep -E "Type:|Machine:|Entry point"
-echo "staged -> $ELF ($(stat -c%s "$ELF") bytes)"
+echo "staged -> $ELF ($(wc -c < "$ELF" | tr -d " ") bytes)"

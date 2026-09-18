@@ -1,7 +1,10 @@
 #!/bin/sh
 # Test runner (ARCHITECTURE.md §7).
 #
-#   usage: tests/run.sh [--target=x86_64-elf|aarch64-elf]
+#   usage: tests/run.sh [--target=x86_64-elf|aarch64-elf] [--exec-only]
+#
+# --exec-only skips the .sh tests and runs just the compiled-and-RUN corpus —
+# the quick loop while working on codegen.
 #
 # Two kinds of test:
 #   *.sh under tests/{exec,compile,golden}/ — run with $EMBCC set; passes
@@ -13,30 +16,45 @@
 #     that count: they assert the machine ran what we emitted. Artifacts
 #     are rebuilt from scratch every run (lie #1: the stale binary).
 #
-# How "RUN" happens depends on the target, and neither route is the host:
+# How "RUN" happens depends on the target and the host:
 #
-#   x86_64-elf   linked with the host cc and executed directly. This only
-#                works where the host IS the target — a Linux x86-64 box.
+#   x86_64-elf   on a Linux x86-64 host, linked with the host cc and executed
+#                directly — there the host IS the target. Anywhere else,
+#                linked into a Multiboot image against the cross newlib and
+#                booted under qemu-system-x86_64, with the debug console
+#                carrying stdout and an exit marker back out
+#                (tests/harness/x86_64/). EMBCC_X86_RUNNER=host|qemu forces
+#                one or the other.
 #   aarch64-elf  linked into a bare-metal image against the cross newlib
 #                and executed under qemu-system-aarch64 -M virt, with ARM
 #                semihosting carrying stdout and the exit status back out
 #                (tests/harness/aarch64/).
 #
-# The aarch64 route is the honest one on a machine that is neither: it
-# runs the code on the architecture it was compiled for, on the same
-# QEMU virt machine EmbLinkOS itself targets.
+# Either way the code runs on the architecture it was compiled for; nothing
+# here is a cross-check against a model of what it would have done.
 set -u
 
 TARGET=x86_64-elf
+EXEC_ONLY=0
 for a in "$@"; do
     case "$a" in
         --target=*) TARGET=${a#--target=} ;;
+        --exec-only) EXEC_ONLY=1 ;;
         *) echo "run.sh: unknown argument '$a'" >&2; exit 1 ;;
     esac
 done
 
-QEMU=${EMBCC_QEMU_AARCH64:-qemu-system-aarch64}
 QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-20}
+export EMBCC_QEMU_TIMEOUT=$QEMU_TIMEOUT
+export EMBCC_TARGET=$TARGET      # the golden tests read it through tests/lib.sh
+
+if [ -z "${EMBCC_X86_RUNNER:-}" ]; then
+    if [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ]; then
+        EMBCC_X86_RUNNER=host
+    else
+        EMBCC_X86_RUNNER=qemu
+    fi
+fi
 
 cd "$(dirname "$0")/.."
 EMBCC="$PWD/embcc"
@@ -67,17 +85,28 @@ bad()  { echo "FAIL $1 ($2)"; [ -n "$3" ] && printf '%s\n' "$3" | sed 's/^/     
 # disassemblies). Under --target=aarch64-elf only the ones that are about
 # aarch64 run; the rest would be asserting the wrong machine.
 if [ "$TARGET" = aarch64-elf ]; then
-    sh_tests="tests/golden/arm64-encoding.sh"
+    sh_tests="tests/golden/arm64-encoding.sh tests/golden/arm64-asm.sh
+              tests/golden/agrees-with-gcc.sh tests/golden/predef.sh
+              tests/golden/optimizer.sh tests/golden/regalloc-O2.sh
+              tests/golden/include-next.sh tests/golden/sysv-abi.sh"
 else
     sh_tests="tests/exec/*.sh tests/compile/*.sh tests/golden/*.sh"
 fi
+
+[ "$EXEC_ONLY" = 1 ] && sh_tests=""
 
 for t in $sh_tests; do
     [ -e "$t" ] || continue
     name=$(basename "$t" .sh)
     out=$(sh "$t" 2>&1)
     status=$?
-    if [ $status -eq 0 ] && printf '%s\n' "$out" | grep -q "TEST-MARKER $name"; then
+    if [ $status -eq 0 ] && printf '%s\n' "$out" | grep -q "TEST-MARKER $name" &&
+       printf '%s\n' "$out" | grep -q '^skipped:'; then
+        # A test that could not run here proves nothing, so it is not counted
+        # as a pass — on a host missing its prerequisites it says why.
+        echo "SKIP $t ($(printf '%s\n' "$out" | grep -m1 '^skipped:' | cut -c10-))"
+        skip=$((skip + 1))
+    elif [ $status -eq 0 ] && printf '%s\n' "$out" | grep -q "TEST-MARKER $name"; then
         ok "$t"
     elif [ $status -eq 0 ]; then
         bad "$t" "exit 0 but marker 'TEST-MARKER $name' missing — did it run?" "$out"
@@ -112,25 +141,27 @@ for c in tests/exec/*.c; do
         bad "$c" "embcc failed" "$msg"
         continue
     fi
-    if [ "$TARGET" = aarch64-elf ]; then
-        if ! msg=$(tests/harness/aarch64/link.sh "$obj" "$exe" 2>&1); then
-            bad "$c" "aarch64 link failed" "$msg"
-            continue
-        fi
-        tests/harness/qrun.sh "$QEMU_TIMEOUT" "$QEMU" -M virt -cpu cortex-a72 \
-            -semihosting -nographic -kernel "$exe" >/dev/null 2>&1
-        got=$?
-        if [ "$got" -eq 137 ]; then
-            bad "$c" "timed out after ${QEMU_TIMEOUT}s under $QEMU" ""
-            continue
-        fi
-    else
+    # Where the code runs: on this host when it IS the target, else on the
+    # target's QEMU harness (tests/harness/<arch>/{link,run}.sh).
+    if [ "$TARGET" = x86_64-elf ] && [ "$EMBCC_X86_RUNNER" = host ]; then
         if ! msg=$(cc -no-pie -o "$exe" "$obj" 2>&1); then
             bad "$c" "host link failed" "$msg"
             continue
         fi
         "$exe" >/dev/null 2>&1 # golden/agrees-with-gcc.sh diffs the output
         got=$?
+    else
+        harness=tests/harness/${TARGET%-elf}
+        if ! msg=$("$harness/link.sh" -o "$exe" "$obj" 2>&1); then
+            bad "$c" "${TARGET%-elf} link failed" "$msg"
+            continue
+        fi
+        "$harness/run.sh" "$exe" >/dev/null 2>&1
+        got=$?
+        case $got in
+            124) bad "$c" "timed out after ${QEMU_TIMEOUT}s under QEMU" ""; continue ;;
+            125) bad "$c" "the guest crashed or reset before exiting" ""; continue ;;
+        esac
     fi
     if [ "$got" -eq "$expect" ]; then
         ok "$c (exit $got)"
@@ -147,7 +178,7 @@ if [ $total -eq 0 ]; then
 fi
 echo "-----"
 if [ "$skip" -gt 0 ]; then
-    echo "$pass/$total passed ($skip skipped: pinned to another target)"
+    echo "$pass/$total passed ($skip skipped: see SKIP lines)"
 else
     echo "$pass/$total passed"
 fi

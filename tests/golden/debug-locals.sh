@@ -7,6 +7,7 @@
 # stack slot codegen stores into — so a live debugger reads the right value.
 set -u
 echo "TEST-MARKER debug-locals"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/debug-locals
 rm -rf "$out"; mkdir -p "$out"
 

@@ -4,6 +4,7 @@
 # "where am I?". Still kernel-free: it is all in the debug info EmbCC emits.
 set -u
 echo "TEST-MARKER embdbg-inspect"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/embdbg-inspect
 rm -rf "$out"; mkdir -p "$out"
 EMBDBG="$(dirname "$EMBCC")/embdbg"

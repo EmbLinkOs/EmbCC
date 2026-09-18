@@ -11,7 +11,7 @@
 #   usage: MYOS=/path/to/myos tools/gen-kernel-manifest.sh > kernel.build.ebm
 set -eu
 
-MYOS=${MYOS:-/home/motsou/myos}
+. "$(dirname "$0")/hostpaths.sh"
 [ -d "$MYOS/kernel" ] || { echo "gen-kernel-manifest: no kernel at $MYOS/kernel" >&2; exit 1; }
 
 # On-OS roots.

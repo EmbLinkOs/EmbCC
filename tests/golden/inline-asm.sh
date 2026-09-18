@@ -6,6 +6,7 @@
 # per-constraint register loads. The running proof is on the OS.
 set -u
 echo "TEST-MARKER inline-asm"
+. "$(dirname "$0")/../lib.sh"
 out=tests/golden/out/inline-asm
 rm -rf "$out"; mkdir -p "$out"
 

@@ -12,6 +12,7 @@
 # not-an-EMBX case always runs, because it needs no fixture.
 set -u
 echo "TEST-MARKER embx-embread"
+. "$(dirname "$0")/../lib.sh"
 
 EMBREAD=./embread
 [ -x "$EMBREAD" ] || { echo "embread not built"; exit 1; }
@@ -28,7 +29,7 @@ fi
     echo "wrong diagnostic for a non-EMBX file"; exit 1; }
 echo "non-EMBX file: refused with EMAGIC"
 
-IMG=/home/motsou/myos/build/capchild.embx
+IMG=$MYOS_BUILD/capchild.embx
 if [ ! -f "$IMG" ]; then
     echo "skipped the real-image half: $IMG not present on this host"
     exit 0
