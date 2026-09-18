@@ -1367,6 +1367,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             return v; /* evaluated for its effect; the value is dropped */
         return gen_convert(fn, v, e->rhs->ty, e->ty);
     }
+    case EXPR_REAL:
+    case EXPR_IMAG:
+        break; /* sema lowered them to the parts; unreachable */
     case EXPR_SIZEOF:
         /* only a VLA's survives sema: read its size slot, computing it
          * first for a type name (sizeof(int[n])) */
@@ -1710,10 +1713,12 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
          * function's frame reserves the widest such area. */
         int stk = 0;
         int ireg = 0, freg = 0;
-        /* a hidden return pointer consumes rdi before anything else */
+        /* a hidden return pointer consumes rdi before anything else —
+         * unless the struct comes back in x87 registers instead */
         if (e->ty->kind == TY_STRUCT) {
             enum arg_class rc[2];
-            if (ty_classify(e->ty, rc) == 0)
+            if (ty_classify(e->ty, rc) == 0 &&
+                (target_get() == TARGET_AARCH64 || !ty_x87_ret(e->ty)))
                 ireg = 1;
         }
         for (int k = 0; k < e->nargs; k++) {
@@ -1753,13 +1758,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         if (stk > fn->outgoing_bytes)
             fn->outgoing_bytes = stk;
 
-        if (e->ty->kind == TY_STRUCT && target_get() != TARGET_AARCH64 &&
-            ty_x87_struct(e->ty))
-            diag_fatal(fn->src->file, e->line,
-                       "returning %s (a lone long double, which x86-64 "
-                       "returns in st0) is not supported yet",
-                       ty_name(e->ty));
         if (e->ty->kind == TY_STRUCT) {
+            i->ret_x87 = target_get() == TARGET_AARCH64 ? 0
+                                                        : ty_x87_ret(e->ty);
             i->retsize = ty_size(e->ty);
             i->rety = e->ty;
             i->retnclass = ty_classify(e->ty, i->retcls);
@@ -3309,11 +3310,6 @@ static void gen_func(struct ir_func *fn, struct func *f)
     }
     g_nlabels_used = 0;                 /* labels are per-function */
     g_nvla = 0;
-    if (f->ret_ty->kind == TY_STRUCT && target_get() != TARGET_AARCH64 &&
-        ty_x87_struct(f->ret_ty))
-        diag_fatal(f->file, f->line,
-                   "returning %s (a lone long double, which x86-64 returns "
-                   "in st0) is not supported yet", ty_name(f->ret_ty));
     if (f->has_vm_params)               /* `int a[n][m]`: its row size */
         for (int i = 0; i < f->nparams; i++)
             vla_eval(fn, f->param_tys[i]);

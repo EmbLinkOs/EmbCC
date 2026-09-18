@@ -96,6 +96,7 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_STRUCT || k == TOK_KW_UNION || k == TOK_KW_ENUM ||
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
+           k == TOK_KW_COMPLEX ||
            k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC;
 }
 
@@ -551,11 +552,12 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     }
     /* base specifiers in any order: unsigned long int, long unsigned... */
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
-    int nfloat = 0, ndouble = 0, nbool = 0;
+    int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0;
     int any = 0;
     for (;;) {
         enum tok_kind k = cur(ps)->kind;
         if (k == TOK_KW_FLOAT) nfloat++;
+        else if (k == TOK_KW_COMPLEX) ncomplex++;
         else if (k == TOK_KW_BOOL) nbool++;
         else if (k == TOK_KW_DOUBLE) ndouble++;
         else if (k == TOK_KW_UNSIGNED) uns = 1;
@@ -588,6 +590,18 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                        "_Bool cannot combine with other specifiers");
         return ty_base(TY_BOOL, 0);
+    }
+    if (ncomplex) {
+        /* `T _Complex` for a floating T; a bare _Complex means double, as
+         * in gcc. The GNU integer complex types are not supported. */
+        if (ncomplex > 1 || uns != -1 || nchar || nshort || nint || nvoid ||
+            nbool || (nfloat && ndouble) || nlong > 1 || (nlong && nfloat))
+            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                       "invalid _Complex type (only float, double and long "
+                       "double _Complex are supported)");
+        struct type *el = ty_base(nfloat ? TY_FLOAT
+                                  : nlong ? TY_LDOUBLE : TY_DOUBLE, 0);
+        return ty_complex(el);
     }
     if (nfloat || ndouble) {
         if (uns != -1 || nchar || nshort || nint || nvoid ||
@@ -1097,8 +1111,15 @@ static struct expr *parse_primary(struct parser *ps)
         e = new_expr(EXPR_FNUM, t->line, t->col);
         e->fnum = t->fnum;
         e->ty = ty_base(t->fnum_is_float ? TY_FLOAT : TY_DOUBLE, 0);
+        if (t->fnum_is_imag) {
+            e->imag = 1;
+            e->ty = ty_complex(ty_base(t->fnum_is_float ? TY_FLOAT
+                                       : t->fnum_is_ld ? TY_LDOUBLE
+                                                       : TY_DOUBLE, 0));
+        }
         if (t->fnum_is_ld) {
-            e->ty = ty_base(TY_LDOUBLE, 0);
+            if (!t->fnum_is_imag)
+                e->ty = ty_base(TY_LDOUBLE, 0);
             e->ldv = ldf_from_text(t->text, ldf_target_fmt());
             if (!e->ldv)
                 diag_fatal(ps->lx.file, t->line,
@@ -1366,6 +1387,17 @@ static struct expr *parse_unary(struct parser *ps)
         advance(ps);
         return incdec(ps, parse_unary(ps), line, 0, delta);
     }
+    case TOK_KW_REAL:
+    case TOK_KW_IMAG: {
+        /* GNU __real__ x / __imag__ x: a complex's parts (lvalues when x is
+         * one); of a real x, x itself and 0 */
+        int line = t->line;
+        int imag = t->kind == TOK_KW_IMAG;
+        advance(ps);
+        e = new_expr(imag ? EXPR_IMAG : EXPR_REAL, line, 0);
+        e->rhs = parse_unary(ps);
+        return e;
+    }
     case TOK_KW_SIZEOF: {
         int line = t->line;
         advance(ps);
@@ -1546,7 +1578,8 @@ static struct expr *parse_expr(struct parser *ps)
     if (k != TOK_ASSIGN && comp < 0)
         return e;
     if (e->kind != EXPR_VAR && e->kind != EXPR_DEREF &&
-        e->kind != EXPR_MEMBER)
+        e->kind != EXPR_MEMBER && e->kind != EXPR_REAL &&
+        e->kind != EXPR_IMAG)
         diag_fatal(ps->lx.file, line,
                    "assignment target must be a variable, *pointer, or "
                    "member");
@@ -2128,6 +2161,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
     case TOK_AMP:
     case TOK_PLUSPLUS:
     case TOK_MINUSMINUS:
+    case TOK_KW_REAL:   /* __real__ z = ...; */
+    case TOK_KW_IMAG:
         /* expression statement: assignment, call, or ++/-- */
         if (t->kind == TOK_IDENT)
             reject_reserved(ps, t->text, t->line, t->col);

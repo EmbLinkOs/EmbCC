@@ -205,9 +205,15 @@ static void need_arith(struct unit *u, struct expr *e, const char *what)
  * refuses instead of quietly producing the wrong number (THE RULE).
  * Every other combination is exact: narrower integers are converted
  * through their 64-bit form. */
+static struct expr *cx_cast(struct expr *x, struct type *to);
+
 static struct expr *convert_assign(struct unit *u, struct expr *rhs,
                                    struct type *to, const char *ctx)
 {
+    if ((ty_is_complex(to) &&
+         (ty_is_arith(rhs->ty) || ty_is_complex(rhs->ty))) ||
+        (ty_is_complex(rhs->ty) && (ty_is_arith(to) || to->kind == TY_BOOL)))
+        return cx_cast(rhs, to);
     if (to->kind == TY_STRUCT || rhs->ty->kind == TY_STRUCT) {
         if (!ty_equal(to, rhs->ty))
             diag_at(u->file, rhs->line, rhs->col, "%s: cannot convert %s to %s",
@@ -356,6 +362,406 @@ static const char *suggest_name(struct unit *u, struct scope *sc,
 
 /* ---- expression checking ---- */
 
+/* ---- _Complex: lowered to its parts ----
+ *
+ * A `T _Complex` is laid out, passed and returned as struct { T re, im; }
+ * (type.c ty_complex) — its ABI on both targets — so storage, copies, calls
+ * and returns need nothing new. Its ARITHMETIC is lowered here, into
+ * ordinary float operations on the two parts: a complex operand used more
+ * than once is evaluated once into a hidden temp, the result is built in a
+ * fresh hidden slot and is that slot's value. Multiplication and division
+ * of two complex values call libgcc (__mulsc3/__muldc3/..., __divsc3/...),
+ * as gcc does, for C99 Annex G's infinities and NaNs; a real operand is
+ * combined part by part (Annex G again, and what gcc does).
+ *
+ * Inside a static initializer nothing is lowered — there is no frame to put
+ * a temp in — only typed; lower_static_bytes folds it (cx_fold). */
+
+static int const_fold_f(const struct expr *e, double *out);
+static struct ldf *const_fold_ld(const struct expr *e);
+static struct scope *g_cx_sc;   /* the function being checked (check_func) */
+
+static int cx_lowering(void)
+{
+    return g_cx_sc && !g_in_static_init;
+}
+
+static struct expr *cx_node(enum expr_kind k, int line, struct type *ty)
+{
+    struct expr *e = xcalloc(1, sizeof *e);
+    e->kind = k;
+    e->line = line;
+    e->ty = ty;
+    e->desig_index = e->desig_index_hi = -1;
+    return e;
+}
+
+static struct expr *cx_var(int idx, int line)
+{
+    struct expr *v = cx_node(EXPR_VAR, line, g_cx_sc->vars[idx].ty);
+    v->name = g_cx_sc->vars[idx].name;
+    v->var_index = idx;
+    return v;
+}
+
+static struct expr *cx_assign(struct expr *lhs, struct expr *rhs)
+{
+    struct expr *a = cx_node(EXPR_ASSIGN, lhs->line, lhs->ty);
+    a->lhs = lhs;
+    a->rhs = rhs;
+    return a;
+}
+
+static struct expr *cx_comma(struct expr *first, struct expr *then)
+{
+    if (!first) return then;
+    struct expr *c = cx_node(EXPR_COMMA, then->line, then->ty);
+    c->lhs = first;
+    c->rhs = then;
+    return c;
+}
+
+static struct expr *cx_bin(enum binop op, struct expr *a, struct expr *b,
+                           struct type *ty)
+{
+    int cmp = op == B_EQ || op == B_NE || op == B_LAND || op == B_LOR;
+    struct expr *e = cx_node(EXPR_BINOP, a->line,
+                             cmp ? ty_base(TY_INT, 0) : ty);
+    e->op = op;
+    e->lhs = op == B_LAND || op == B_LOR ? a : mk_cast(a, ty);
+    e->rhs = op == B_LAND || op == B_LOR ? b : mk_cast(b, ty);
+    return e;
+}
+
+static struct expr *cx_neg(struct expr *a)
+{
+    struct expr *e = cx_node(EXPR_NEG, a->line, a->ty);
+    e->rhs = a;
+    return e;
+}
+
+static struct expr *cx_zero(struct type *t, int line)
+{
+    struct expr *z = cx_node(EXPR_FNUM, line, t);
+    z->fnum = 0.0;
+    return z;
+}
+
+/* part 0 (real) or 1 (imaginary) of a complex LVALUE-like expression */
+static struct expr *cx_part(struct expr *base, int imag)
+{
+    struct type *ct = base->ty;
+    struct expr *m = cx_node(EXPR_MEMBER, base->line, ct->celem);
+    m->lhs = base;
+    m->name = ct->members[imag].name;
+    m->memb = &ct->members[imag];
+    return m;
+}
+
+/* x, made safe to read more than once: a plain variable as it is,
+ * anything else evaluated once into a temp (the assignment in *pre) */
+static struct expr *cx_stable(struct expr *x, struct expr **pre)
+{
+    *pre = NULL;
+    if ((x->kind == EXPR_VAR && !x->fref) || x->kind == EXPR_FNUM ||
+        x->kind == EXPR_NUM)
+        return x;
+    int t = scope_add(g_cx_sc, "<complex>", x->ty, NULL);
+    *pre = cx_assign(cx_var(t, x->line), x);
+    return cx_var(t, x->line);
+}
+
+/* A complex value of type ct built from its parts, in a fresh slot. */
+static struct expr *cx_make(struct type *ct, struct expr *re,
+                            struct expr *im, int line)
+{
+    int t = scope_add(g_cx_sc, "<complex>", ct, NULL);
+    struct expr *a1 = cx_assign(cx_part(cx_var(t, line), 0),
+                                mk_cast(re, ct->celem));
+    struct expr *a2 = cx_assign(cx_part(cx_var(t, line), 1),
+                                mk_cast(im, ct->celem));
+    return cx_comma(a1, cx_comma(a2, cx_var(t, line)));
+}
+
+/* An operand's parts, converted to T: *re always, *im NULL for a real one.
+ * The side effects that must run first are returned. */
+static struct expr *cx_parts(struct expr *x, struct type *T,
+                             struct expr **re, struct expr **im)
+{
+    struct expr *pre;
+    if (ty_is_complex(x->ty)) {
+        struct expr *s = cx_stable(x, &pre);
+        *re = mk_cast(cx_part(s, 0), T);
+        *im = mk_cast(cx_part(s, 1), T);
+    } else {
+        struct expr *s = cx_stable(mk_cast(x, T), &pre);
+        *re = s;
+        *im = NULL;
+    }
+    return pre;
+}
+
+/* The libgcc routine for a complex * or / in element type T. */
+static struct func *cx_helper(int div, struct type *T)
+{
+    static struct func *made[8];
+    const char *name;
+    int k = (T->kind == TY_FLOAT ? 0 : T->kind == TY_DOUBLE ? 1 : 2) * 2 + div;
+    if (T->kind == TY_LDOUBLE && target_get() == TARGET_AARCH64)
+        k = 6 + div;
+    static const char *const names[8] = {
+        "__mulsc3", "__divsc3", "__muldc3", "__divdc3",
+        "__mulxc3", "__divxc3", "__multc3", "__divtc3" };
+    name = names[k];
+    if (made[k]) return made[k];
+    struct func *h = xcalloc(1, sizeof *h);
+    h->name = name;
+    h->ret_ty = ty_complex(T);
+    h->nparams = 4;
+    for (int i = 0; i < 4; i++)
+        h->param_tys[i] = T;
+    h->declared = 1;
+    h->used = 1;
+    made[k] = h;
+    return h;
+}
+
+static struct expr *cx_call(int div, struct type *T, struct expr *a,
+                            struct expr *b, struct expr *c, struct expr *d)
+{
+    struct func *h = cx_helper(div, T);
+    struct expr *call = cx_node(EXPR_CALL, a->line, h->ret_ty);
+    call->callee = h;
+    call->args[0] = mk_cast(a, T);
+    call->args[1] = mk_cast(b, T);
+    call->args[2] = mk_cast(c, T);
+    call->args[3] = mk_cast(d, T);
+    call->nargs = 4;
+    return call;
+}
+
+/* The element type two operands (real or complex) combine in. */
+static struct type *cx_common(struct type *a, struct type *b)
+{
+    return arith_common(ty_is_complex(a) ? a->celem : a,
+                        ty_is_complex(b) ? b->celem : b);
+}
+
+/* x != 0 for a complex x: either part nonzero (an int). */
+static struct expr *cx_truth(struct expr *x)
+{
+    struct expr *re, *im;
+    struct expr *pre = cx_parts(x, x->ty->celem, &re, &im);
+    struct type *T = x->ty->celem;
+    return cx_comma(pre, cx_bin(B_LOR, cx_bin(B_NE, re, cx_zero(T, x->line), T),
+                                cx_bin(B_NE, im, cx_zero(T, x->line), T), T));
+}
+
+/* x converted to `to`, when either side is complex (C99 6.3.1.7): a real
+ * becomes (x, 0); a complex loses its imaginary part going to a real type,
+ * and to _Bool is "either part nonzero". */
+static struct expr *cx_cast(struct expr *x, struct type *to)
+{
+    if (ty_equal(x->ty, to)) return x;
+    if (!cx_lowering()) {                    /* static: fold later */
+        struct expr *c = cx_node(EXPR_CAST, x->line, to);
+        c->cast_ty = to;
+        c->rhs = x;
+        return c;
+    }
+    if (ty_is_complex(to)) {
+        struct expr *re, *im;
+        struct expr *pre = cx_parts(x, to->celem, &re, &im);
+        return cx_comma(pre, cx_make(to, re, im ? im : cx_zero(to->celem, x->line),
+                                     x->line));
+    }
+    if (to->kind == TY_BOOL)
+        return cx_truth(x);
+    if (to->kind == TY_VOID) {
+        struct expr *c = cx_node(EXPR_CAST, x->line, to);
+        c->cast_ty = to;
+        c->rhs = x;
+        return c;
+    }
+    struct expr *re, *im;
+    struct expr *pre = cx_parts(x, x->ty->celem, &re, &im);
+    return cx_comma(pre, mk_cast(re, to));
+}
+
+/* e (a BINOP with at least one complex operand, both checked) lowered in
+ * place. */
+static void cx_binop(struct unit *u, struct expr *e)
+{
+    struct type *lt = e->lhs->ty, *rt = e->rhs->ty;
+    if (!ty_is_arith(lt) && !ty_is_complex(lt))
+        diag_at(u->file, e->line, e->col, "invalid operand %s to a complex "
+                "operation", ty_name(lt));
+    if (!ty_is_arith(rt) && !ty_is_complex(rt))
+        diag_at(u->file, e->line, e->col, "invalid operand %s to a complex "
+                "operation", ty_name(rt));
+    if (e->op == B_LAND || e->op == B_LOR) {
+        if (!cx_lowering()) { e->ty = ty_base(TY_INT, 0); return; }
+        if (ty_is_complex(lt)) e->lhs = cx_truth(e->lhs);
+        if (ty_is_complex(rt)) e->rhs = cx_truth(e->rhs);
+        e->ty = ty_base(TY_INT, 0);
+        return;
+    }
+    if (e->op != B_ADD && e->op != B_SUB && e->op != B_MUL &&
+        e->op != B_DIV && e->op != B_EQ && e->op != B_NE)
+        diag_at(u->file, e->line, e->col,
+                "a complex value only takes + - * / == and !=");
+    struct type *T = cx_common(lt, rt), *CT = ty_complex(T);
+    int eq = e->op == B_EQ || e->op == B_NE;
+    if (!cx_lowering()) { e->ty = eq ? ty_base(TY_INT, 0) : CT; return; }
+
+    struct expr *ar, *ai, *br, *bi;
+    struct expr *pa = cx_parts(e->lhs, T, &ar, &ai);
+    struct expr *pb = cx_parts(e->rhs, T, &br, &bi);
+    int line = e->line;
+    struct expr *res;
+    switch (e->op) {
+    case B_ADD: case B_SUB: {
+        struct expr *im;
+        if (ai && bi) im = cx_bin(e->op, ai, bi, T);
+        else if (ai) im = ai;
+        else im = e->op == B_ADD ? bi : cx_neg(bi);
+        res = cx_make(CT, cx_bin(e->op, ar, br, T), im, line);
+        break;
+    }
+    case B_MUL:
+        if (ai && bi)
+            res = cx_call(0, T, ar, ai, br, bi);
+        else if (ai)
+            res = cx_make(CT, cx_bin(B_MUL, ar, br, T), cx_bin(B_MUL, ai, br, T),
+                          line);
+        else
+            res = cx_make(CT, cx_bin(B_MUL, ar, br, T), cx_bin(B_MUL, ar, bi, T),
+                          line);
+        break;
+    case B_DIV:
+        if (bi)
+            res = cx_call(1, T, ar, ai ? ai : cx_zero(T, line), br, bi);
+        else
+            res = cx_make(CT, cx_bin(B_DIV, ar, br, T), cx_bin(B_DIV, ai, br, T),
+                          line);
+        break;
+    default: {  /* == / != : both parts equal (a real's imaginary part is 0) */
+        struct expr *i1 = ai ? ai : cx_zero(T, line);
+        struct expr *i2 = bi ? bi : cx_zero(T, line);
+        res = e->op == B_EQ
+              ? cx_bin(B_LAND, cx_bin(B_EQ, ar, br, T), cx_bin(B_EQ, i1, i2, T), T)
+              : cx_bin(B_LOR, cx_bin(B_NE, ar, br, T), cx_bin(B_NE, i1, i2, T), T);
+        break;
+    }
+    }
+    *e = *cx_comma(pa, cx_comma(pb, res));
+}
+
+/* `lhs op= rhs` or `++`/`--` where the target or the operand is complex:
+ * lhs = lhs op rhs, the lvalue's address taken once. Returns the lowered
+ * expression. `post` gives x++'s value (the old one). */
+static struct expr *cx_update(struct unit *u, struct expr *lhs, enum binop op,
+                              struct expr *rhs, int post)
+{
+    struct expr *pre = NULL, *target = lhs;
+    if (!(lhs->kind == EXPR_VAR && !lhs->fref)) {
+        /* p = &lhs; then *p twice */
+        struct type *pt = ty_ptr(lhs->ty);
+        struct expr *addr = cx_node(EXPR_ADDR, lhs->line, pt);
+        addr->rhs = lhs;
+        int t = scope_add(g_cx_sc, "<complex>", pt, NULL);
+        pre = cx_assign(cx_var(t, lhs->line), addr);
+        target = cx_node(EXPR_DEREF, lhs->line, lhs->ty);
+        target->rhs = cx_var(t, lhs->line);
+    }
+    struct expr *old = NULL;
+    if (post) {
+        int t = scope_add(g_cx_sc, "<complex>", lhs->ty, NULL);
+        pre = cx_comma(pre, cx_assign(cx_var(t, lhs->line), target));
+        old = cx_var(t, lhs->line);
+    }
+    struct expr *val = cx_node(EXPR_BINOP, lhs->line, NULL);
+    val->op = op;
+    val->lhs = target;
+    val->rhs = rhs;
+    cx_binop(u, val);
+    struct expr *as = cx_assign(target, cx_cast(val, lhs->ty));
+    return cx_comma(pre, old ? cx_comma(as, old) : as);
+}
+
+/* Fold a static complex (or real) constant: its parts, in fmt. Only what a
+ * static initializer reasonably holds — literals, casts, + and -, negation,
+ * and scaling by a real; a complex * or / is left to run time (refused). */
+static int cx_fold_real(const struct expr *e, enum ldf_fmt fmt, struct ldf **out);
+static int cx_fold(const struct expr *e, enum ldf_fmt fmt, struct ldf **re,
+                   struct ldf **im)
+{
+    if (!ty_is_complex(e->ty)) {
+        *im = ldf_from_int(0, 0);
+        return cx_fold_real(e, fmt, re);
+    }
+    struct ldf *ar, *ai, *br, *bi;
+    switch (e->kind) {
+    case EXPR_FNUM:                          /* an imaginary constant */
+        *re = ldf_from_int(0, 0);
+        *im = ldf_round(e->ldv ? e->ldv : ldf_from_double(
+                  e->ty->celem->kind == TY_FLOAT ? (double)(float)e->fnum
+                                                 : e->fnum), fmt);
+        return 1;
+    case EXPR_CAST:
+        if (!cx_fold(e->rhs, fmt, &ar, &ai)) return 0;
+        *re = ldf_round(ar, fmt);
+        *im = ldf_round(ai, fmt);
+        return 1;
+    case EXPR_NEG:
+        if (!cx_fold(e->rhs, fmt, &ar, &ai)) return 0;
+        *re = ldf_neg(ar);
+        *im = ldf_neg(ai);
+        return 1;
+    case EXPR_BINOP: {
+        int lc = ty_is_complex(e->lhs->ty), rc = ty_is_complex(e->rhs->ty);
+        if (!cx_fold(e->lhs, fmt, &ar, &ai) || !cx_fold(e->rhs, fmt, &br, &bi))
+            return 0;
+        if (e->op == B_ADD || e->op == B_SUB) {
+            int o = e->op == B_ADD ? '+' : '-';
+            *re = ldf_binop(o, ar, br, fmt);
+            *im = lc && rc ? ldf_binop(o, ai, bi, fmt)
+                 : lc ? ai : (o == '+' ? bi : ldf_neg(bi));
+            return 1;
+        }
+        if (e->op == B_MUL && !(lc && rc)) {
+            *re = ldf_binop('*', ar, br, fmt);
+            *im = ldf_binop('*', lc ? ai : ar, lc ? br : bi, fmt);
+            return 1;
+        }
+        return 0;
+    }
+    default:
+        return 0;
+    }
+}
+
+static int cx_fold_real(const struct expr *e, enum ldf_fmt fmt, struct ldf **out)
+{
+    double d;
+    long iv;
+    if (e->ty->kind == TY_LDOUBLE) {
+        struct ldf *x = const_fold_ld(e);
+        if (!x) return 0;
+        *out = ldf_round(x, fmt);
+        return 1;
+    }
+    if (ty_is_float(e->ty)) {
+        if (!const_fold_f(e, &d)) return 0;
+        if (e->ty->kind == TY_FLOAT) d = (double)(float)d;
+        *out = ldf_round(ldf_from_double(d), fmt);
+        return 1;
+    }
+    if (!const_fold(e, &iv)) return 0;
+    *out = ldf_round(ldf_from_int(iv, e->ty->is_unsigned), fmt);
+    return 1;
+}
+
 /* Get a variably modified type ready for irgen: type-check every VLA
  * length in it (innermost first — `int a[n][m]`'s row size needs m before
  * the whole needs n) and give each VLA node the hidden slot its byte size
@@ -387,8 +793,43 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     switch (e->kind) {
     case EXPR_NUM:
     case EXPR_FNUM:
-        /* type assigned by the parser from the literal's shape */
+        /* type assigned by the parser from the literal's shape; an
+         * imaginary constant is the complex 0 + v*i */
+        if (e->kind == EXPR_FNUM && e->imag && cx_lowering()) {
+            struct expr *v = cx_node(EXPR_FNUM, e->line, e->ty->celem);
+            v->fnum = e->fnum;
+            v->ldv = e->ldv;
+            *e = *cx_make(e->ty, cx_zero(e->ty->celem, e->line), v, e->line);
+        }
         break;
+    case EXPR_REAL:
+    case EXPR_IMAG: {
+        /* __real__ x / __imag__ x: a complex's part (an lvalue when x is);
+         * of a real x, x and 0 */
+        int im = e->kind == EXPR_IMAG;
+        check_expr(u, f, sc, e->rhs);
+        struct expr *x = e->rhs;
+        if (!ty_is_complex(x->ty)) {
+            need_arith(u, x, im ? "__imag__" : "__real__");
+            if (!im) { *e = *x; break; }
+            struct expr *z = cx_node(EXPR_NUM, e->line, x->ty);
+            if (ty_is_float(x->ty)) z->kind = EXPR_FNUM;
+            *e = *cx_comma(x, z);       /* x still runs, for its effects */
+            break;
+        }
+        if (!cx_lowering()) {
+            e->ty = x->ty->celem;
+            break;
+        }
+        if (is_lvalue(x)) {
+            *e = *cx_part(x, im);
+        } else {
+            struct expr *pre;
+            struct expr *s2 = cx_stable(x, &pre);
+            *e = *cx_comma(pre, cx_part(s2, im));
+        }
+        break;
+    }
     case EXPR_STR: {
         /* char[N] (or wchar_t/char16_t/char32_t[N] for a wide literal),
          * decaying to a pointer like any array (sizeof sees the array through
@@ -484,7 +925,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->lhs->fref)
             diag_at(u->file, e->line, e->col, "cannot assign to a function");
         check_expr(u, f, sc, e->rhs);
-        if (e->lhs->ty->kind == TY_STRUCT) {
+        if (ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) {
+            e->rhs = convert_assign(u, e->rhs, e->lhs->ty, "assignment");
+        } else if (e->lhs->ty->kind == TY_STRUCT) {
             if (!ty_equal(e->lhs->ty, e->rhs->ty))
                 diag_at(u->file, e->line, e->col,
                            "cannot assign %s to %s",
@@ -500,6 +943,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (!is_lvalue(e->lhs) || e->lhs->undecayed || e->lhs->fref)
             diag_at(u->file, e->line, e->col, "++/-- needs an lvalue");
         e->ty = e->lhs->ty;
+        if (ty_is_complex(e->ty) && cx_lowering()) {   /* z += 1 */
+            struct expr *one = cx_node(EXPR_NUM, e->line, ty_base(TY_INT, 0));
+            one->num = 1;
+            *e = *cx_update(u, e->lhs, e->delta > 0 ? B_ADD : B_SUB, one,
+                            e->is_post);
+            break;
+        }
         if (e->ty->kind == TY_PTR) {
             if (e->ty->pointee->kind == TY_VOID ||
                 e->ty->pointee->kind == TY_FUNC)
@@ -514,17 +964,35 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_NOT:
         check_expr(u, f, sc, e->rhs);
-        need_scalar(u, e->rhs, "'!'");
+        if (ty_is_complex(e->rhs->ty) && cx_lowering())
+            e->rhs = cx_truth(e->rhs);
+        else
+            need_scalar(u, e->rhs, "'!'");
         e->ty = ty_base(TY_INT, 0);
         break;
     case EXPR_NEG:
         check_expr(u, f, sc, e->rhs);
+        if (ty_is_complex(e->rhs->ty)) {
+            if (!cx_lowering()) { e->ty = e->rhs->ty; break; }
+            struct expr *re, *im;
+            struct expr *pre = cx_parts(e->rhs, e->rhs->ty->celem, &re, &im);
+            *e = *cx_comma(pre, cx_make(e->rhs->ty, cx_neg(re), cx_neg(im),
+                                        e->line));
+            break;
+        }
         need_arith(u, e->rhs, "unary '-'");
         e->ty = promote(e->rhs->ty);
         e->rhs = mk_cast(e->rhs, e->ty);
         break;
     case EXPR_BNOT:
         check_expr(u, f, sc, e->rhs);
+        if (ty_is_complex(e->rhs->ty)) {   /* GNU: ~z is the conjugate */
+            if (!cx_lowering()) { e->ty = e->rhs->ty; break; }
+            struct expr *re, *im;
+            struct expr *pre = cx_parts(e->rhs, e->rhs->ty->celem, &re, &im);
+            *e = *cx_comma(pre, cx_make(e->rhs->ty, re, cx_neg(im), e->line));
+            break;
+        }
         need_integer(u, e->rhs, "'~'");
         e->ty = promote(e->rhs->ty);
         e->rhs = mk_cast(e->rhs, e->ty);
@@ -685,6 +1153,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_CAST:
         check_expr(u, f, sc, e->rhs);
+        if (ty_is_complex(e->cast_ty) || ty_is_complex(e->rhs->ty)) {
+            if (!ty_is_complex(e->rhs->ty) && !ty_is_arith(e->rhs->ty))
+                diag_at(u->file, e->line, e->col, "cannot cast %s to %s",
+                        ty_name(e->rhs->ty), ty_name(e->cast_ty));
+            if (e->cast_ty->kind == TY_VOID) { e->ty = e->cast_ty; break; }
+            *e = *cx_cast(e->rhs, e->cast_ty);
+            break;
+        }
         if (e->cast_ty->kind == TY_VOID) {
             /* (void)x — evaluate and discard, the standard way to say
              * "yes, I meant to ignore this" */
@@ -709,11 +1185,20 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         break;
     case EXPR_COND: {
         check_expr(u, f, sc, e->args[0]);
-        need_scalar(u, e->args[0], "'?:'");
+        if (ty_is_complex(e->args[0]->ty) && cx_lowering())
+            e->args[0] = cx_truth(e->args[0]);
+        else
+            need_scalar(u, e->args[0], "'?:'");
         check_expr(u, f, sc, e->lhs);
         check_expr(u, f, sc, e->rhs);
         struct type *a = e->lhs->ty, *b = e->rhs->ty;
-        if (ty_is_arith(a) && ty_is_arith(b)) {
+        if ((ty_is_complex(a) || ty_is_complex(b)) &&
+            (ty_is_complex(a) || ty_is_arith(a)) &&
+            (ty_is_complex(b) || ty_is_arith(b))) {
+            e->ty = ty_complex(cx_common(a, b));
+            e->lhs = cx_cast(e->lhs, e->ty);
+            e->rhs = cx_cast(e->rhs, e->ty);
+        } else if (ty_is_arith(a) && ty_is_arith(b)) {
             e->ty = arith_common(a, b);
             e->lhs = mk_cast(e->lhs, e->ty);
             e->rhs = mk_cast(e->rhs, e->ty);
@@ -758,6 +1243,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (!is_lvalue(e->lhs) || e->lhs->undecayed || e->lhs->fref)
             diag_at(u->file, e->line, e->col,
                        "compound assignment needs an lvalue");
+        if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
+            cx_lowering()) {
+            *e = *cx_update(u, e->lhs, e->op, e->rhs, 0);
+            break;
+        }
         if (e->lhs->ty->kind == TY_PTR) {
             if (e->op != B_ADD && e->op != B_SUB)
                 diag_at(u->file, e->line, e->col,
@@ -898,6 +1388,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         check_expr(u, f, sc, e->lhs);
         check_expr(u, f, sc, e->rhs);
         struct type *lt = e->lhs->ty, *rt = e->rhs->ty;
+        if (ty_is_complex(lt) || ty_is_complex(rt)) {
+            cx_binop(u, e);
+            break;
+        }
 
         switch (e->op) {
         case B_LAND:
@@ -1484,6 +1978,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
         }
         check_expr(u, f, sc, init);
         if (ty->kind != TY_STRUCT)
+            if (!ty_is_complex(init->ty))
             need_scalar(u, init, "an initializer");
         init_push(out, off, ty,
                   convert_assign(u, init, ty, "initialization"));
@@ -1670,6 +2165,26 @@ static void lower_static_bytes(struct unit *u, int line, int size,
             continue;
         }
         int sz = ty_size(v[k].ty);
+        /* A complex slot: both parts folded in its element's format */
+        if (ty_is_complex(v[k].ty)) {
+            struct type *el = v[k].ty->celem;
+            enum ldf_fmt fmt = el->kind == TY_FLOAT ? LDF_FLOAT
+                             : el->kind == TY_DOUBLE ? LDF_DOUBLE
+                             : ldf_target_fmt();
+            struct ldf *re, *im;
+            if (!cx_fold(v[k].e, fmt, &re, &im))
+                diag_fatal(u->file, line,
+                           "a static complex initializer must be a constant "
+                           "that EmbCC folds: literals, casts, + and -, and "
+                           "scaling by a real");
+            int esz = ty_size(el);
+            unsigned char pb[16];
+            ldf_encode(re, fmt, pb);
+            memcpy(bytes + v[k].off, pb, (size_t)esz);
+            ldf_encode(im, fmt, pb);
+            memcpy(bytes + v[k].off + esz, pb, (size_t)esz);
+            continue;
+        }
         /* A long double slot: its exact value in the target's format */
         if (v[k].ty->kind == TY_LDOUBLE) {
             struct ldf *x = const_fold_ld(v[k].e);
@@ -2099,7 +2614,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
         case STMT_DO:
             check_stmt(u, f, sc, s->body, 1, in_switch, 0);
             check_expr(u, f, sc, s->cond);
-            need_scalar(u, s->cond, "'do'/'while'");
+            if (ty_is_complex(s->cond->ty) && cx_lowering())
+                s->cond = cx_truth(s->cond);
+            else
+                need_scalar(u, s->cond, "'do'/'while'");
             break;
         case STMT_DECL:
             if (s->is_extern) {
@@ -2195,6 +2713,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 s->dty->kind != TY_STRUCT) {
                 check_expr(u, f, sc, s->expr);
                 if (s->dty->kind != TY_STRUCT)
+                    if (!ty_is_complex(s->expr->ty))
                     need_scalar(u, s->expr, "an initializer");
                 s->expr = convert_assign(u, s->expr, s->dty,
                                          "initialization");
@@ -2276,7 +2795,8 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                                f->name, ty_name(f->ret_ty));
                 check_expr(u, f, sc, s->expr);
                 if (s->expr->ty->kind != TY_STRUCT)
-                    need_scalar(u, s->expr, "'return'");
+                    if (!ty_is_complex(s->expr->ty))
+                        need_scalar(u, s->expr, "'return'");
                 s->expr = convert_assign(u, s->expr, f->ret_ty, "return");
             }
             break;
@@ -2302,14 +2822,20 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
         }
         case STMT_IF:
             check_expr(u, f, sc, s->cond);
-            need_scalar(u, s->cond, "'if'");
+            if (ty_is_complex(s->cond->ty) && cx_lowering())
+                s->cond = cx_truth(s->cond);
+            else
+                need_scalar(u, s->cond, "'if'");
             check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
             if (s->els)
                 check_stmt(u, f, sc, s->els, in_loop, in_switch, 0);
             break;
         case STMT_WHILE:
             check_expr(u, f, sc, s->cond);
-            need_scalar(u, s->cond, "'while'");
+            if (ty_is_complex(s->cond->ty) && cx_lowering())
+                s->cond = cx_truth(s->cond);
+            else
+                need_scalar(u, s->cond, "'while'");
             check_stmt(u, f, sc, s->body, 1, in_switch, 0);
             break;
         case STMT_FOR: {
@@ -2323,6 +2849,9 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 check_expr(u, f, sc, s->init);
             if (s->cond) { /* NULL = forever, left by 'break' */
                 check_expr(u, f, sc, s->cond);
+                if (ty_is_complex(s->cond->ty) && cx_lowering())
+                s->cond = cx_truth(s->cond);
+            else
                 need_scalar(u, s->cond, "'for'");
             }
             if (s->step)
@@ -2475,6 +3004,7 @@ static int list_returns(struct stmt *s)
 static void check_func(struct unit *u, struct func *f)
 {
     struct scope sc = { 0, 0, 0, 0 };
+    g_cx_sc = &sc;       /* complex lowering adds its temps here */
 
     for (int i = 0; i < f->nparams; i++) {
         if (scope_find(&sc, f->params[i]) >= 0)
@@ -2512,6 +3042,7 @@ static void check_func(struct unit *u, struct func *f)
         f->var_aligns[i] = sc.vars[i].g ? 0 : sc.vars[i].user_align;
     }
     free(sc.vars);
+    g_cx_sc = NULL;
 }
 
 /* Merge every later declaration of a name into its first (canonical)

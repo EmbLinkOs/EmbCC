@@ -161,6 +161,9 @@ struct ir_ins {
                               * returns an HFA in v0..v3) */
     int retnclass;
     enum arg_class retcls[2];
+    int ret_x87;             /* x86-64: the struct comes back in x87 registers
+                              * (type.h ty_x87_ret): 1 one long double in st0,
+                              * 2 a long double _Complex in st0/st1 */
     int scratch;             /* frame offset of the returned struct */
     struct ir_asm *asm_ir;   /* IR_ASM */
 };

@@ -48,6 +48,7 @@
 #define DW_LANG_C99           0x000c
 /* DW_ATE base-type encodings */
 #define DW_ATE_boolean        0x02
+#define DW_ATE_complex_float  0x03
 #define DW_ATE_float          0x04
 #define DW_ATE_signed         0x05
 #define DW_ATE_signed_char    0x06
@@ -319,11 +320,13 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
     int e = type_lookup(m, t);
     if (e >= 0) return e;
 
-    if (ty_is_integer(t) || ty_is_float(t)) {
+    if (ty_is_integer(t) || ty_is_float(t) || ty_is_complex(t)) {
+        /* a complex is a base type to DWARF (DW_ATE_complex_float), which
+         * is what makes a debugger print it as re + im i */
         int off = b->len;
         db_uleb(b, AB_BASE);
-        db_str(b, ty_name(t));           /* "int", "unsigned char", ... */
-        db_u8(b, base_encoding(t));
+        db_str(b, ty_name(t));           /* "int", "double _Complex", ... */
+        db_u8(b, ty_is_complex(t) ? DW_ATE_complex_float : base_encoding(t));
         db_u8(b, ty_size(t));
         type_record(m, t, off);
         return off;

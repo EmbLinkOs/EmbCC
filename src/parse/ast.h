@@ -23,7 +23,8 @@ enum expr_kind { EXPR_NUM, EXPR_FNUM, EXPR_STR, EXPR_VAR, EXPR_BINOP, EXPR_CALL,
                  EXPR_DEREF, EXPR_ADDR, EXPR_CAST, EXPR_SIZEOF, EXPR_ALIGNOF,
                  EXPR_MEMBER, EXPR_COND, EXPR_COMMA,
                  EXPR_COMPOUND, EXPR_INITLIST, EXPR_VA_ARG, EXPR_COMPLIT,
-                 EXPR_GENERIC, EXPR_STMTEXPR, EXPR_LABELADDR };
+                 EXPR_GENERIC, EXPR_STMTEXPR, EXPR_LABELADDR,
+                 EXPR_REAL, EXPR_IMAG };   /* GNU __real__ / __imag__ (rhs) */
 
 struct stmt;   /* a statement expression `({ ... })` carries a block */
 
@@ -47,6 +48,8 @@ struct expr {
                              * decayed pointer (sizeof needs it) */
     long num;             /* EXPR_NUM; EXPR_STR: byte length incl NUL */
     double fnum;          /* EXPR_FNUM */
+    int imag;             /* EXPR_FNUM: a GNU imaginary constant — its type
+                           * is complex and its value 0 + fnum*i */
     struct ldf *ldv;      /* EXPR_FNUM of type long double: its exact value
                            * (sema/ldfloat.h); NULL means (long double)fnum */
     const char *name;     /* EXPR_VAR, EXPR_CALL, EXPR_INCDEC target;

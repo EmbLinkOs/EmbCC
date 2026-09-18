@@ -914,7 +914,8 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
      * pointer in rdi; it must survive until the return, so it gets a
      * slot of its own. */
     *sret_slot_out = 0;
-    if (f->ret_ty->kind == TY_STRUCT && ty_classify(f->ret_ty, rcls) == 0) {
+    if (f->ret_ty->kind == TY_STRUCT && ty_classify(f->ret_ty, rcls) == 0 &&
+        !ty_x87_ret(f->ret_ty)) {
         running += 8;
         *sret_slot_out = -running;
     }
@@ -1555,7 +1556,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
         int ireg = 0, freg = 0;
         enum arg_class rcls[2];
         int ret_mem = f->ret_ty->kind == TY_STRUCT &&
-                      ty_classify(f->ret_ty, rcls) == 0;
+                      ty_classify(f->ret_ty, rcls) == 0 &&
+                      !ty_x87_ret(f->ret_ty);
         if (ret_mem) {
             x86_store_arg(text, ireg++, sret_slot);
         }
@@ -2401,7 +2403,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             }
             /* A struct returned in MEMORY takes rdi as a hidden pointer
              * to the caller's scratch, before any real argument. */
-            if (i->retsize && i->retnclass == 0) {
+            if (i->retsize && i->retnclass == 0 && !i->ret_x87) {
                 x86_lea_reg_slot(text, REG_RDI,
                                  scratch_base + i->scratch);
                 ireg++;
@@ -2494,8 +2496,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
             if (i->retsize) {
                 /* The value of a struct call is the ADDRESS it landed
                  * at: the scratch we reserved. A MEMORY return already
-                 * wrote there; a register return is unpacked into it. */
-                if (i->retnclass > 0) {
+                 * wrote there; a register return is unpacked into it. An
+                 * x87 one pops st0 (the long double, or the real part)
+                 * and then st1 (the imaginary part). */
+                if (i->ret_x87) {
+                    x86_x87_mem(text, 0xDB, 7, REG_RBP,
+                                scratch_base + i->scratch);
+                    if (i->ret_x87 == 2)
+                        x86_x87_mem(text, 0xDB, 7, REG_RBP,
+                                    scratch_base + i->scratch + 16);
+                } else if (i->retnclass > 0) {
                     x86_lea_reg_slot(text, REG_RCX,
                                      scratch_base + i->scratch);
                     int ir = 0, fr = 0;
@@ -2629,7 +2639,14 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 int sz = ty_size(f->ret_ty);
                 x86_load_slot(text, sd[i->a], 8, 0, 8);
                 x86_mov_reg_reg(text, REG_RDX, REG_RAX); /* the value */
-                if (rn == 0) {
+                int x87 = ty_x87_ret(f->ret_ty);
+                if (x87) {
+                    /* X87: st0; COMPLEX_X87: real in st0, imaginary in st1
+                     * — so the imaginary part is pushed first */
+                    if (x87 == 2)
+                        x86_x87_mem(text, 0xDB, 5, REG_RDX, 16);
+                    x86_x87_mem(text, 0xDB, 5, REG_RDX, 0);
+                } else if (rn == 0) {
                     /* MEMORY: copy into the caller's buffer and hand
                      * the pointer back in rax, as the ABI requires. */
                     x86_load_slot(text, sret_slot, 8, 0, 8);

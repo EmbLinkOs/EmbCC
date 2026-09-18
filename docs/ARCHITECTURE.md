@@ -167,6 +167,7 @@ compiles the whole EmbLinkOS kernel, which boots to the desktop).
 
 **Still out of scope, and refused loudly rather than faked:** C++ (the intended
 second language, D-008, but a different project in size), TLS/`__thread`,
-PIE/PIC output, and cross-targets other than x86-64. The remaining C-language
-gap — `_Complex` — is tracked in `todo.md` against
-a real corpus.
+PIE/PIC output, and targets beyond x86-64 and aarch64. The C language
+itself has no remaining gap on either target (VLAs, `long double` and
+`_Complex` closed in September 2026); the few refused seams are listed in
+`USAGE.md`.

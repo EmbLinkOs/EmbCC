@@ -61,6 +61,11 @@ struct type {
     const char *tag;        /* NULL for anonymous */
     int is_union;
     int complete;           /* body seen; size/align/members valid */
+    int is_complex;         /* a C99 `T _Complex`: laid out, passed and
+                             * returned as struct { T __real__, __imag__; }
+                             * — which is exactly its ABI on both targets —
+                             * but an ARITHMETIC type, lowered by sema */
+    struct type *celem;     /* is_complex: T */
     struct member *members;
     int nmembers;
     int size, align;        /* SysV layout, computed when completed */
@@ -94,6 +99,14 @@ struct type *ty_array(struct type *elem, int count);
  * returned in st0, where every other struct EmbCC returns goes through a
  * hidden pointer or rax/rdx/xmm. EmbCC refuses to return one on x86-64. */
 int ty_x87_struct(const struct type *t);
+/* `elem _Complex` (elem float, double or long double): one interned node
+ * per elem, so type identity is type equality. */
+struct type *ty_complex(struct type *elem);
+int ty_is_complex(const struct type *t);
+/* SysV x86-64: how a struct comes back in x87 registers — 1 for exactly
+ * one long double (X87, in st0), 2 for a long double _Complex (COMPLEX_X87,
+ * real in st0 and imaginary in st1), 0 otherwise. */
+int ty_x87_ret(const struct type *t);
 /* A variable-length array of elem, `len` elements (a VLA). */
 struct type *ty_vla(struct type *elem, struct expr *len);
 /* t is an array whose size is only known at run time. */

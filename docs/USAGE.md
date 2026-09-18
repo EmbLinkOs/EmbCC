@@ -180,8 +180,14 @@ Refused loudly rather than faked, per THE RULE:
   links with the cross `ld`.
 - **`section("name")` on a function or a local** — honored on file-scope
   variables only; elsewhere it is an error rather than a silent `.text`.
-- **`_Complex`** — the remaining C gap, ranked
-  against a real corpus in [todo.md](todo.md).
+- **GNU integer `_Complex`** (`_Complex int`, `2i`) — the C99 floating
+  complex types are supported; the integer ones are a GNU extension.
+- **`va_arg` of a struct or a complex** — passing one through `...` works;
+  reading it back with `va_arg` is refused.
+- **A static complex initializer that multiplies or divides two complex
+  values** — literals, casts, `+`, `-` and scaling by a real fold; `*` and `/`
+  of two complex values are left to run time, which is where Annex G's
+  special cases (libgcc) apply.
 - **C++, `__thread`/TLS, PIE/PIC output** — out of scope by decision
   (ARCHITECTURE §8, DECISIONS D-008).
 

@@ -23,6 +23,9 @@ enum tok_kind {
     TOK_KW_FLOAT,
     TOK_KW_DOUBLE,
     TOK_KW_BOOL,
+    TOK_KW_COMPLEX,   /* _Complex, __complex__ */
+    TOK_KW_REAL,      /* __real__ (GNU) */
+    TOK_KW_IMAG,      /* __imag__ (GNU) */
     TOK_KW_STATIC_ASSERT,
     TOK_KW_GENERIC,
     TOK_KW_ALIGNOF,
@@ -153,6 +156,8 @@ struct token {
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
     double fnum;   /* TOK_FNUM */
     int fnum_is_float; /* TOK_FNUM: an 'f' suffix -> float, else double */
+    int fnum_is_imag;  /* TOK_FNUM: a GNU imaginary constant (an i/j
+                        * suffix, before or after f/l): 0 + this*i */
     int fnum_is_ld;    /* TOK_FNUM: an 'l' suffix -> long double; `text`
                         * then holds the digits (no suffix), which the
                         * exact conversion needs — a double would lose them */

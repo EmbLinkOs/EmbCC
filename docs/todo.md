@@ -672,7 +672,12 @@ The suite is now **102/102**. Since that pass the C surface also gained C11
 `int (*p)[N]`, GNU `typeof`, wide/prefixed string and character literals, and
 GNU computed `goto`.
 
-**What is still genuinely missing:** **`_Complex`** (refused loudly).
+**What is still genuinely missing:** nothing in the C language itself.
+**`_Complex`** landed on 2026-09-18 — float, double and long double, lowered
+to their parts in sema, `*` and `/` through libgcc as gcc does, the struct
+ABI both targets use for it (plus x86-64's st0/st1 return for long double
+_Complex), newlib's `<complex.h>` (tests/exec/complex.c,
+tests/golden/complex-abi.sh).
 **VLAs** landed on 2026-09-18 (both targets; tests/exec/vla.c), and so did
 **`long double`** — which, correcting this list's earlier claim, had never
 been refused: it was compiled as `double` (sizeof 8 against the ABI's 16).

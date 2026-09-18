@@ -65,6 +65,13 @@ static const struct {
     { "float", TOK_KW_FLOAT },
     { "double", TOK_KW_DOUBLE },
     { "_Bool", TOK_KW_BOOL },
+    { "_Complex", TOK_KW_COMPLEX },
+    { "__complex__", TOK_KW_COMPLEX },
+    { "__complex", TOK_KW_COMPLEX },
+    { "__real__", TOK_KW_REAL },
+    { "__real", TOK_KW_REAL },
+    { "__imag__", TOK_KW_IMAG },
+    { "__imag", TOK_KW_IMAG },
     { "_Static_assert", TOK_KW_STATIC_ASSERT },
     { "_Generic", TOK_KW_GENERIC },
     { "_Alignof", TOK_KW_ALIGNOF },
@@ -415,12 +422,24 @@ void lex_next(struct lexer *lx)
             t->fnum = d;
             t->fnum_is_float = 0;
             t->fnum_is_ld = 0;
-            if (*fend == 'f' || *fend == 'F') {
-                t->fnum_is_float = 1;
-                fend++;
-            } else if (*fend == 'l' || *fend == 'L') {
-                t->fnum_is_ld = 1;
-                t->text = xstrndup(lx->p, (size_t)(fend - lx->p));
+            t->fnum_is_imag = 0;
+            char *numend = fend;
+            /* suffixes: at most one of f/l, and a GNU imaginary i/j on
+             * either side of it (1.0fi, 1.0if, 2.5i) */
+            for (;;) {
+                if ((*fend == 'i' || *fend == 'I' || *fend == 'j' ||
+                     *fend == 'J') && !t->fnum_is_imag) {
+                    t->fnum_is_imag = 1;
+                } else if ((*fend == 'f' || *fend == 'F') &&
+                           !t->fnum_is_float && !t->fnum_is_ld) {
+                    t->fnum_is_float = 1;
+                } else if ((*fend == 'l' || *fend == 'L') &&
+                           !t->fnum_is_float && !t->fnum_is_ld) {
+                    t->fnum_is_ld = 1;
+                    t->text = xstrndup(lx->p, (size_t)(numend - lx->p));
+                } else {
+                    break;
+                }
                 fend++;
             }
             if (isalnum((unsigned char)*fend) || *fend == '.')
@@ -444,6 +463,10 @@ void lex_next(struct lexer *lx)
                 has_l = 1;
             end++;
         }
+        if (*end == 'i' || *end == 'I' || *end == 'j' || *end == 'J')
+            diag_fatal(lx->file, lx->line,
+                       "an integer imaginary constant (GNU _Complex int) is "
+                       "not supported — write it as a floating one (2.0i)");
         if (isalnum((unsigned char)*end) || *end == '_' || *end == '.')
             diag_fatal(lx->file, lx->line,
                        "malformed integer constant");
@@ -693,6 +716,9 @@ const char *tok_describe(const struct token *t)
     case TOK_KW_FLOAT: return "'float'";
     case TOK_KW_DOUBLE: return "'double'";
     case TOK_KW_BOOL: return "'_Bool'";
+    case TOK_KW_COMPLEX: return "'_Complex'";
+    case TOK_KW_REAL: return "'__real__'";
+    case TOK_KW_IMAG: return "'__imag__'";
     case TOK_KW_STATIC_ASSERT: return "'_Static_assert'";
     case TOK_KW_GENERIC: return "'_Generic'";
     case TOK_KW_ALIGNOF: return "'_Alignof'";

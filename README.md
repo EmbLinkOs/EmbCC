@@ -189,11 +189,13 @@ oversight.
 
 ## What's next
 
-- **The last C language gap both targets share:** `_Complex` (refused).
-  Variable-length arrays and `long double` are done on both targets —
-  `long double` as x87 80-bit extended on x86-64 and IEEE binary128 on
-  aarch64 (through libgcc, as gcc does), agreeing with gcc across the call
-  boundary and bit for bit in constants.
+- **C itself is covered on both targets.** The last gaps closed in
+  September 2026: variable-length arrays, `long double` (x87 80-bit extended
+  on x86-64, IEEE binary128 through libgcc on aarch64, constants bit for bit
+  as gcc's) and `_Complex` (float, double and long double, gcc-compatible
+  across the call boundary, newlib's `<complex.h>` included). What remains
+  refused is listed in `docs/USAGE.md` — GNU extensions like integer
+  `_Complex`, and a few seams such as `va_arg` of a struct.
 - **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
   the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1
   program to exit 42. The manifest and a host reference walker already exist;

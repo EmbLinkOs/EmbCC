@@ -21,6 +21,13 @@ constant-expression evaluation for initializers, enum and case values,
 volatile-qualification tracked through to the IR so the optimizer preserves
 every MMIO access.
 
+**`_Complex`** is a type laid out, passed and returned as `struct { T re,
+im; }` (its ABI on both targets), and its arithmetic is lowered here into
+ordinary float operations on the parts: operands evaluated once into hidden
+temps, results built in a fresh slot, `*` and `/` of two complex values
+calling libgcc's `__mulXc3`/`__divXc3` for C99 Annex G, a real operand
+combined part by part. Static initializers are folded exactly instead.
+
 **`long double` constants** are computed in `ldfloat.c`: exactly, with an
 arbitrary-precision integer, then rounded once per operation into the
 TARGET's format — x87 80-bit extended on x86-64, IEEE binary128 on aarch64 —

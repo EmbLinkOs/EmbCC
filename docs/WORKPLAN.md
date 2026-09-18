@@ -239,8 +239,8 @@ construction so the fixed point survives optimizer work.
 
 The plan's structure still holds, so the streams keep their boundaries:
 
-- **A (core)** — the remaining C gap: `_Complex` (refused). VLAs and
-  `long double` are done. Past that, codegen
+- **A (core)** — the C language is complete on both targets (VLAs,
+  `long double` and `_Complex` closed in September 2026). Past that, codegen
   quality is open-ended; `-O2` `.text` is at 1.63× gcc `-O0` and the headroom
   is real.
 - **B (linker/format)** — the capability table declared *in source* rather than

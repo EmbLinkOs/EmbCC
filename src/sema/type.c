@@ -348,6 +348,37 @@ int ty_x87_struct(const struct type *t)
     return t->kind == TY_STRUCT && ty_size(t) == 16 && only_ldouble(t);
 }
 
+int ty_x87_ret(const struct type *t)
+{
+    if (ty_x87_struct(t)) return 1;
+    if (t->kind == TY_STRUCT && t->is_complex && t->celem->kind == TY_LDOUBLE)
+        return 2;
+    return 0;
+}
+
+struct type *ty_complex(struct type *elem)
+{
+    static struct type *made[3];
+    int k = elem->kind == TY_FLOAT ? 0 : elem->kind == TY_DOUBLE ? 1 : 2;
+    if (made[k]) return made[k];
+    struct type *t = ty_struct(NULL, 0);
+    struct member *ms = xcalloc(2, sizeof *ms);
+    ms[0].name = "__real__";
+    ms[0].ty = elem;
+    ms[1].name = "__imag__";
+    ms[1].ty = elem;
+    ty_struct_layout(t, ms, 2, 0, 0);
+    t->is_complex = 1;
+    t->celem = elem;
+    made[k] = t;
+    return t;
+}
+
+int ty_is_complex(const struct type *t)
+{
+    return t && t->kind == TY_STRUCT && t->is_complex;
+}
+
 int ty_classify(const struct type *t, enum arg_class *classes)
 {
     /* long double is X87 class; as an argument that means MEMORY, and a
@@ -409,6 +440,13 @@ const char *ty_name(const struct type *t)
     case TY_DOUBLE: base = "double"; break;
     case TY_LDOUBLE: base = "long double"; break;
     case TY_STRUCT:
+        if (t->is_complex) {
+            snprintf(structbuf, sizeof structbuf, "%s _Complex",
+                     t->celem->kind == TY_FLOAT ? "float"
+                     : t->celem->kind == TY_DOUBLE ? "double" : "long double");
+            base = structbuf;
+            break;
+        }
         snprintf(structbuf, sizeof structbuf, "%s %s",
                  t->is_union ? "union" : "struct",
                  t->tag ? t->tag : "<anonymous>");
