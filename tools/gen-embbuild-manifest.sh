@@ -37,14 +37,29 @@ ABI=/system/abi
 SRCS=$(make -pn 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
 [ -n "$SRCS" ] || { echo "gen-embbuild-manifest: cannot read SRCS from the Makefile" >&2; exit 1; }
 
-# Map a host path to its on-OS path.
+# Map a host path to its on-OS path — or to nothing. A path under none of the
+# three roots is a HOST artifact of the dependency scan (macOS clang adds its
+# SDK's SDKSettings.json to every closure) and does not exist on the OS, so it
+# must not become a manifest input.
 mappath() {
     case "$1" in
         include/*)        echo "$INCEMB/${1#include/}" ;;
         src/*)            echo "$SRCROOT/${1#src/}" ;;
         "$NEWLIB_INC"/*)  echo "$INCABI/${1#"$NEWLIB_INC"/}" ;;
-        *)                echo "$1" ;;
+        *)                : ;;
     esac
+}
+
+# Resolve `dir/../` segments. Portable on purpose: `realpath --relative-to`
+# is GNU-only, and without it the Mac kept `codegen/../asm/emit.h` forms.
+normpath() {
+    p=$1
+    while :; do
+        q=$(printf '%s' "$p" | sed -e 's|/\./|/|g' -e 's|[^/][^/]*/\.\./||')
+        [ "$q" = "$p" ] && break
+        p=$q
+    done
+    printf '%s' "$p"
 }
 
 printf '# /data/src/embcc/build.ebm -- EmbBuild builds EmbCC, on the OS (ROADMAP M4).\n'
@@ -65,11 +80,8 @@ for src in $SRCS; do
            | sed 's/^[^:]*://; s/\\//g')
     for d in $deps; do
         [ "$d" = "$src" ] && continue
-        case "$d" in
-            /*) : ;;                                    # absolute (newlib): as-is
-            *)  d=$(realpath --relative-to="$PWD" "$d" 2>/dev/null || echo "$d") ;;
-        esac
-        inputs="$inputs $(mappath "$d")"
+        m=$(mappath "$(normpath "$d")")
+        [ -n "$m" ] && inputs="$inputs $m"
     done
 
     # A header pulled through several paths appears once (order preserved).
