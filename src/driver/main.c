@@ -189,34 +189,81 @@ static int compile(const char *in, const char *out, int pp_only)
                      opt_level >= 2);
 
     /* Lay out the defined globals: initialized -> .data, zero -> .bss,
-     * each aligned to its (element) size. */
+     * each aligned to its (element) size. A section("name") global goes to
+     * its named section instead, in declaration order, zero-filled when it
+     * has no initializer — PROGBITS like gcc's, NOBITS only for a .bss*
+     * name. With no const tracking a named section is writable unless its
+     * name says .rodata/.text; gcc would make a const-only one read-only,
+     * which changes its segment and nothing the program can observe. */
+    struct named { const char *name; int len, align, nobits, flags, ndx;
+                   char *buf; } named[64];
+    int nnamed = 0;
     int data_len = 0, bss_len = 0;
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->defined)
             continue;
         int align = ty_align(g->ty);
         g->in_bss = !g->has_init;
+        g->named = 0;
         int *len = g->in_bss ? &bss_len : &data_len;
+        if (g->section) {
+            int k = 0;
+            while (k < nnamed && strcmp(named[k].name, g->section) != 0)
+                k++;
+            if (k == nnamed) {
+                if (nnamed == 64)
+                    diag_fatal(in, 0, "more than 64 named sections");
+                const char *n = g->section;
+                named[k].name = n;
+                named[k].len = 0;
+                named[k].align = 1;
+                named[k].nobits = strncmp(n, ".bss", 4) == 0 &&
+                                  (n[4] == 0 || n[4] == '.');
+                named[k].flags = SHF_ALLOC;
+                if (strncmp(n, ".text", 5) == 0)
+                    named[k].flags |= SHF_EXECINSTR;
+                else if (strncmp(n, ".rodata", 7) != 0)
+                    named[k].flags |= SHF_WRITE;
+                named[k].buf = NULL;
+                nnamed++;
+            }
+            if (named[k].nobits && g->has_init)
+                diag_fatal(g->file, g->line,
+                           "'%s' has an initializer but is placed in "
+                           "NOBITS section '%s'", g->name, g->section);
+            g->named = k + 1;
+            g->in_bss = named[k].nobits;
+            len = &named[k].len;
+            if (align > named[k].align)
+                named[k].align = align;
+        }
         *len = (*len + align - 1) & ~(align - 1);
         g->off = *len;
         *len += ty_size(g->ty);
     }
+    for (int k = 0; k < nnamed; k++)
+        if (!named[k].nobits && named[k].len)
+            named[k].buf = xcalloc(1, (size_t)named[k].len);
     char *data = NULL;
-    if (data_len) {
+    if (data_len)
         data = xcalloc(1, (size_t)data_len);
+    if (data_len || nnamed) {
         for (struct global *g = u->globals; g; g = g->next) {
             if (g->absorbed || !g->defined || g->in_bss)
                 continue;
+            char *img = g->named ? named[g->named - 1].buf : data;
+            if (!img)
+                continue;                   /* a zero-length section */
             if (g->init_bytes) {
                 int n = g->init_len;
                 if (n > ty_size(g->ty))
                     n = ty_size(g->ty);
-                memcpy(data + g->off, g->init_bytes, (size_t)n);
+                memcpy(img + g->off, g->init_bytes, (size_t)n);
                 continue;
             }
             unsigned long v = (unsigned long)g->init;
             for (int b = 0; b < ty_size(g->ty); b++)
-                data[g->off + b] = (char)((v >> (8 * b)) & 0xff);
+                img[g->off + b] = (char)((v >> (8 * b)) & 0xff);
         }
     }
 
@@ -284,6 +331,11 @@ static int compile(const char *in, const char *out, int pp_only)
         bss_ndx = elfw_add_section(w, ".bss", SHT_NOBITS,
                                    SHF_ALLOC | SHF_WRITE, NULL,
                                    (Elf64_Xword)bss_len, 8);
+    for (int k = 0; k < nnamed; k++)
+        named[k].ndx = elfw_add_section(
+            w, named[k].name, named[k].nobits ? SHT_NOBITS : SHT_PROGBITS,
+            (Elf64_Xword)named[k].flags, named[k].buf,
+            (Elf64_Xword)named[k].len, (Elf64_Xword)named[k].align);
     /* -g: the three DWARF sections (non-alloc, so no load cost; stripped
      * from a shipped image without touching the code). Their indices feed
      * the relocation-target lookup below. */
@@ -330,7 +382,8 @@ static int compile(const char *in, const char *out, int pp_only)
                 w, g->name, (Elf64_Addr)g->off,
                 (Elf64_Xword)ty_size(g->ty),
                 ELF64_ST_INFO(STB_LOCAL, STT_OBJECT),
-                (Elf64_Half)(g->in_bss ? bss_ndx : data_ndx));
+                (Elf64_Half)(g->named ? named[g->named - 1].ndx
+                             : g->in_bss ? bss_ndx : data_ndx));
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && !f->is_static)
             f->sym_ndx = elfw_add_symbol(
@@ -344,7 +397,8 @@ static int compile(const char *in, const char *out, int pp_only)
                 w, g->name, (Elf64_Addr)g->off,
                 (Elf64_Xword)ty_size(g->ty),
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL, STT_OBJECT),
-                (Elf64_Half)(g->in_bss ? bss_ndx : data_ndx));
+                (Elf64_Half)(g->named ? named[g->named - 1].ndx
+                             : g->in_bss ? bss_ndx : data_ndx));
     /* File-scope asm's .global labels (_start): global functions at their
      * .text offset. Local labels stay internal — the assembler already
      * resolved jumps to them into rel32s. */
@@ -449,7 +503,7 @@ static int compile(const char *in, const char *out, int pp_only)
                 sym = rodata_sym;
                 add = g->relocs[i].str_off + g->relocs[i].addend;
             }
-            elfw_add_rela(w, data_ndx,
+            elfw_add_rela(w, g->named ? named[g->named - 1].ndx : data_ndx,
                           (Elf64_Addr)(g->off + g->relocs[i].off),
                           sym, target_reloc_type(ta, RK_ABS64), add);
         }

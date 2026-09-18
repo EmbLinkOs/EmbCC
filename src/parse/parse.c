@@ -132,8 +132,12 @@ static int at_type_start(struct parser *ps)
 }
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret);
-/* The GNU attributes EmbCC honors; everything else is parsed and dropped. */
-struct attrs { int packed; int aligned; int weak; int noreturn; };
+/* The GNU attributes EmbCC honors; everything else is parsed and dropped.
+ * section("name") is honored on file-scope variables and refused (never
+ * dropped) anywhere else — a silently-ignored section is a table the
+ * linker script's bracket symbols never find. */
+struct attrs { int packed; int aligned; int weak; int noreturn;
+               const char *section; };
 
 /* Match `name`, `__name`, or `__name__` against a base attribute name. */
 static int attr_is(const char *n, const char *base)
@@ -161,10 +165,14 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                                                           : NULL;
             advance(ps);
             long arg = -1;
+            const char *sarg = NULL;
+            int aline = cur(ps)->line;
             if (cur(ps)->kind == TOK_LPAREN) {
                 advance(ps);
                 if (cur(ps)->kind == TOK_NUM)
                     arg = cur(ps)->num;
+                else if (cur(ps)->kind == TOK_STR)
+                    sarg = cur(ps)->text;
                 int depth = 1;
                 while (depth > 0 && cur(ps)->kind != TOK_EOF) {
                     if (cur(ps)->kind == TOK_LPAREN) depth++;
@@ -178,6 +186,17 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;
                 else if (attr_is(name, "aligned"))
                     out->aligned = arg > 0 ? (int)arg : 16;
+                else if (attr_is(name, "section")) {
+                    if (!sarg || !*sarg)
+                        diag_fatal(ps->lx.file, aline,
+                                   "section attribute needs a section "
+                                   "name string");
+                    out->section = sarg;
+                }
+            } else if (name && attr_is(name, "section")) {
+                diag_fatal(ps->lx.file, aline,
+                           "section attribute is only supported on "
+                           "file-scope variables");
             }
             if (cur(ps)->kind == TOK_COMMA)
                 advance(ps);
@@ -343,7 +362,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
      * closing brace (parse_struct_body). Leading ones are collected here and
      * applied to the body exactly as trailing ones are. Between the tag and
      * the '{' is NOT a place gcc accepts one, so neither does EmbCC. */
-    struct attrs lead = { 0, 0, 0, 0 };
+    struct attrs lead = { 0, 0, 0, 0, NULL };
     parse_attributes(ps, &lead);
     const char *tag = NULL;
     if (cur(ps)->kind == TOK_IDENT) {
@@ -603,7 +622,7 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * they are refused rather than silently dropped. */
         if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             struct token *at_tok = cur(ps);
-            struct attrs a = { 0, 0, 0, 0 };
+            struct attrs a = { 0, 0, 0, 0, NULL };
             parse_attributes(ps, &a);
             if (a.packed || a.aligned || a.weak || a.noreturn)
                 diag_at(ps->lx.file, at_tok->line, at_tok->col,
@@ -893,7 +912,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                 cap = cap ? cap * 2 : 8;
                 ms = xrealloc(ms, (size_t)cap * sizeof *ms);
             }
-            struct attrs mat = { 0, 0, 0, 0 };
+            struct attrs mat = { 0, 0, 0, 0, NULL };
             parse_attributes(ps, &mat);  /* T buf[N] __attribute__((aligned(N))) */
             ms[n].name = mname;
             ms[n].ty = mty;
@@ -1854,8 +1873,13 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * on a local declarator; aligned(N) raises the stack slot's
              * alignment (codegen rounds the frame offset). */
             {
-                struct attrs lat = { 0, 0, 0, 0 };
+                struct attrs lat = { 0, 0, 0, 0, NULL };
                 parse_attributes(ps, &lat);
+                if (lat.section)
+                    diag_fatal(ps->lx.file, s->line,
+                               "section attribute on block-scope '%s' is "
+                               "not supported — declare it at file scope",
+                               dname);
                 s->user_align = lat.aligned > ps->alignas_out
                                 ? lat.aligned : ps->alignas_out;
                 ps->alignas_out = 0;
@@ -2168,7 +2192,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
 
     int is_static = 0, is_extern = 0;
-    struct attrs at = { 0, 0, 0, 0 };
+    struct attrs at = { 0, 0, 0, 0, NULL };
     ps->seq = seq;
 
     /* A file-scope `__asm__("...")` block (crt0's _start stub). Basic asm
@@ -2283,6 +2307,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                                             is_static, is_extern);
             parse_attributes(ps, &at); /* trailing: T x[] __attribute__((weak)) */
             g->is_weak = at.weak;
+            g->section = at.section;
             g->seq = seq;
             g->def_seq = seq;
             **gtail = g;
@@ -2361,6 +2386,10 @@ static void parse_top(struct parser *ps, struct unit *u,
     /* trailing attributes: void f(void) __attribute__((noreturn/weak)) */
     parse_attributes(ps, &at);
     f->is_weak = at.weak;
+    if (at.section)
+        diag_fatal(ps->lx.file, line,
+                   "section attribute on function '%s' is not supported — "
+                   "every function is emitted into .text", name);
 
     if (cur(ps)->kind == TOK_SEMI) {
         advance(ps); /* prototype */
@@ -2405,6 +2434,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                                                 is_static, is_extern);
                 parse_attributes(ps, &at);
                 g->is_weak = at.weak;
+                g->section = at.section;
                 g->seq = seq;
                 g->def_seq = seq;
                 **gtail = g;

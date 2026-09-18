@@ -2458,6 +2458,17 @@ static void merge_globals(struct unit *u)
         }
         canon->defined |= !g->is_extern;
         canon->is_weak |= g->is_weak;
+        if (g->section) {
+            if (canon->section && strcmp(canon->section, g->section) != 0) {
+                diag_error_at(g->file, g->line, 0,
+                              "'%s' placed in section '%s' after section "
+                              "'%s'", g->name, g->section, canon->section);
+                diag_note_at(canon->file, canon->line, 0,
+                             "previous declaration of '%s' here", g->name);
+                exit(1);
+            }
+            canon->section = g->section;
+        }
         g->absorbed = 1;
     }
 }

@@ -220,6 +220,7 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    const char *section;  /* __attribute__((section("name"))), or NULL */
     int has_init;
     long init;            /* constant initializer value (scalar) */
     struct expr *init_expr; /* aggregate/relocatable initializer, lowered
@@ -234,6 +235,7 @@ struct global {
     int absorbed;         /* sema: merged into an earlier node */
     int used;
     int in_bss;           /* driver: zero-valued -> .bss, else .data */
+    int named;            /* driver: 1 + index into the named sections, or 0 */
     int off;              /* driver: offset inside its section */
     int sym_ndx;          /* driver: symbol index */
 };
