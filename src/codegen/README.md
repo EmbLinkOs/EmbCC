@@ -97,4 +97,8 @@ record; `va_list` stays a `char *` pointing at it, which B.3 makes
 ABI-compatible with gcc's struct `va_list`. The atomics are `ldxr`/`stxr`
 retry loops between full barriers.
 
-Refused loudly rather than emitted wrong: `-g`.
+`-g` works as on x86-64: line rows are recorded per IR instruction, and each
+variable's DWARF location is its slot relative to x29 (the frame base; the
+prologue leaves sp, and x19 in a VLA function, exactly the frame size below
+it). A function with a VLA addresses its frame through x19, because the VLA
+moves sp.

@@ -106,6 +106,7 @@ typedef struct {
  * EmbCC emits are named: a `bl`'s 26-bit branch, the adrp/add pair that
  * materialises a symbol's address, and an absolute 64-bit data slot. */
 #define R_AARCH64_ABS64              257
+#define R_AARCH64_ABS32              258
 #define R_AARCH64_ADR_PREL_PG_HI21   275
 #define R_AARCH64_ADD_ABS_LO12_NC    277
 #define R_AARCH64_CALL26             283

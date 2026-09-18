@@ -75,10 +75,9 @@ against stock newlib. `embld` does not read or write aarch64 objects yet, and
 binutils for now. Extended inline asm works, with the vocabulary the ARM
 kernel uses (`src/asm/asm_arm64.h`) and the constraints `r`, `=r`, `+r` and `i`
 plus `register … __asm__("x0")` variables; a template outside it is refused
-with the offending statement named. What the aarch64 backend refuses
-(`-g`) it refuses with a diagnostic naming
-the gap; the README's "Where aarch64 stands" section says why each is real
-work.
+with the offending statement named. `-g` describes aarch64 frames too (x29
+is the frame base), so gdb debugs an aarch64 program in QEMU the same way as
+an x86-64 one — `tests/golden/debug-live.sh` does exactly that on both.
 
 To run what it produced, `make test-arm64` links each test into a bare-metal
 image and executes it under `qemu-system-aarch64 -M virt` — see

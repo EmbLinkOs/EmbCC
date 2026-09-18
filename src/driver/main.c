@@ -534,7 +534,8 @@ static int compile(const char *in, const char *out, int pp_only)
                     : r->target == DWTGT_ABBREV ? dwsym[DWSEC_ABBREV]
                     :                             dwsym[DWSEC_LINE];
             elfw_add_rela(w, dwsec_ndx[r->in_sec], (Elf64_Addr)r->off, sym,
-                          r->width == 8 ? R_X86_64_64 : R_X86_64_32,
+                          target_reloc_type(ta, r->width == 8 ? RK_ABS64
+                                                              : RK_ABS32),
                           r->addend);
         }
         dwarf_free(&dw);

@@ -42,4 +42,6 @@ $LD -n -z max-page-size=0x1000 -T "$here/link.ld" -o "$out.64" \
 # QEMU's Multiboot loader accepts ELF32 only. Every address is below 4 GiB,
 # so re-labelling the linked image is exact; the 64-bit code is just bytes.
 $OBJCOPY -I elf64-x86-64 -O elf32-i386 "$out.64" "$out"
-rm -f "$out.64"
+# EMBCC_HARNESS_KEEP64=1 keeps the 64-bit image beside it: the one a debugger
+# loads for symbols and DWARF (tests/golden/debug-live.sh).
+[ "${EMBCC_HARNESS_KEEP64:-}" = 1 ] || rm -f "$out.64"

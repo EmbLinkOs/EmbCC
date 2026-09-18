@@ -8,7 +8,7 @@
 set -u
 echo "TEST-MARKER debug-line"
 . "$(dirname "$0")/../lib.sh"
-out=tests/golden/out/debug-line
+out=tests/golden/out/debug-line-$ARCH
 rm -rf "$out"; mkdir -p "$out"
 
 cat > "$out/dbg.c" <<'CEOF'
@@ -27,7 +27,7 @@ CEOF
 fail=0
 
 # 1. -g emits the three DWARF sections.
-"$EMBCC" -g -c "$out/dbg.c" -o "$out/dbg.o" || { echo "embcc -g failed"; exit 1; }
+"$EMBCC" --target="$TARGET" -g -c "$out/dbg.c" -o "$out/dbg.o" || { echo "embcc -g failed"; exit 1; }
 sec=$(readelf -SW "$out/dbg.o" 2>/dev/null)
 for s in .debug_abbrev .debug_info .debug_line; do
     echo "$sec" | grep -q "$s" || { echo "MISSING section: $s"; fail=1; }
@@ -57,13 +57,13 @@ fi
 [ "$fail" -eq 0 ] && echo "debug-line: DWARF line info correct" || exit 1
 
 # 4. -g output is deterministic (no timestamps / host paths baked in).
-"$EMBCC" -g -c "$out/dbg.c" -o "$out/dbg2.o"
+"$EMBCC" --target="$TARGET" -g -c "$out/dbg.c" -o "$out/dbg2.o"
 cmp -s "$out/dbg.o" "$out/dbg2.o" || { echo "NONDETERMINISTIC -g output"; exit 1; }
 echo "debug-line: -g output is byte-identical across runs"
 
 # 5. Without -g, NO debug sections — default output is untouched, which is
 #    what keeps the self-host fixed point.
-"$EMBCC" -c "$out/dbg.c" -o "$out/nog.o"
+"$EMBCC" --target="$TARGET" -c "$out/dbg.c" -o "$out/nog.o"
 if readelf -SW "$out/nog.o" 2>/dev/null | grep -q '\.debug'; then
     echo "BUG: debug sections emitted without -g"; exit 1
 fi

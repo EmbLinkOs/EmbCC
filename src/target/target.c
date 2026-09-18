@@ -49,6 +49,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_ADR_HI21: return R_AARCH64_ADR_PREL_PG_HI21;
         case RK_ADD_LO12: return R_AARCH64_ADD_ABS_LO12_NC;
         case RK_ABS64:    return R_AARCH64_ABS64;
+        case RK_ABS32:    return R_AARCH64_ABS32;
         default:          return -1;
         }
     }
@@ -59,6 +60,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
     case RK_CALL:     return R_X86_64_PLT32;
     case RK_PCREL32:  return R_X86_64_PC32;
     case RK_ABS64:    return R_X86_64_64;
+    case RK_ABS32:    return R_X86_64_32;
     default:          return -1;
     }
 }

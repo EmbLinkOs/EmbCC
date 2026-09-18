@@ -20,9 +20,8 @@
  *    against 6, composites by value on the stack rather than by MEMORY
  *    class), and honouring the wrong one is a silent miscompile.
  *
- * Anything not yet lowered fails loudly (THE RULE): floating point, the
- * atomics, va_start, inline asm, computed goto and -g. None of them is
- * miscompiled quietly.
+ * Anything not lowered fails loudly (THE RULE): an IR op this file has no
+ * case for is a diag_fatal naming it, never a quiet miscompile.
  */
 #include "codegen.h"
 
@@ -423,13 +422,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 {
     struct func *f = fn->src;
 
-    if (want_debug)
-        diag_fatal(f->file, f->line,
-                   "-g is not supported for aarch64 yet: DWARF locations "
-                   "would describe x86 frame offsets");
-
     struct a64_frame fr;
     long *sd = layout_frame(fn, &fr);
+
+    /* -g: each source variable's slot relative to the DWARF frame base,
+     * x29. The prologue leaves sp (and x19, which pins it in a function
+     * with a VLA) exactly fr.size below x29, and slots are sp-relative. */
+    if (want_debug) {
+        int nv = f->nvars ? f->nvars : 1;
+        fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
+        for (int v = 0; v < f->nvars; v++)
+            fn->var_off[v] = (int)(sd[v] - fr.size);
+    }
 
     align16(t);
     f->code_off = t->len;
@@ -506,6 +510,26 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+
+        /* -g: a line-table row wherever the source line changes, exactly
+         * as the x86 backend records them (t->len is where this
+         * instruction's code starts). */
+        if (want_debug && i->line) {
+            struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
+                                              : (struct ir_line *)0;
+            if (last && last->off == t->len) {
+                last->line = i->line;
+            } else if (!last || last->line != i->line) {
+                if (fn->nlines == fn->linecap) {
+                    fn->linecap = fn->linecap ? fn->linecap * 2 : 8;
+                    fn->lines = xrealloc(fn->lines, (size_t)fn->linecap *
+                                                        sizeof *fn->lines);
+                }
+                fn->lines[fn->nlines].off = t->len;
+                fn->lines[fn->nlines].line = i->line;
+                fn->nlines++;
+            }
+        }
 
         /* -mgeneral-regs-only (the kernel's mode) means the FP registers
          * may not be touched at all: on aarch64 they trap until

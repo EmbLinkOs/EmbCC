@@ -178,8 +178,9 @@ composites over 16 bytes passed by reference (stage B.3) are all in, each
 checked against gcc's own code by the cross-ABI tests — EmbCC calling gcc,
 gcc calling EmbCC, and a `va_list` handed across the line in both directions.
 
-Refused on aarch64 with a diagnostic (THE RULE): `-g`, whose DWARF describes
-`rbp`-relative frame offsets where aarch64 slots are `sp`-relative.
+`-g` works on aarch64 as on x86-64 — DWARF lines, and variable locations off
+x29 — and a real gdb debugs the program running in QEMU on both targets
+(`tests/golden/debug-live.sh`).
 
 The backend is also naive where the x86 one is not: no slot coalescing, no
 residency cache, no register allocator, so frames are wider and the code is
@@ -192,7 +193,6 @@ oversight.
   `long double` (80-bit on x86-64, 128-bit IEEE quad on aarch64), which today
   is quietly compiled as `double` — an ABI mismatch with gcc-built code, not a
   refusal. Variable-length arrays are done on both targets.
-- **`-g` for aarch64.**
 - **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
   the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1
   program to exit 42. The manifest and a host reference walker already exist;
