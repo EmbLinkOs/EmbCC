@@ -69,7 +69,19 @@ enum ir_op {
     IR_ASM,   /* extended asm: load inputs to fixed registers, assemble the
                * template, store outputs. Detail in ir_ins.asm_ir */
     IR_LABELADDR, /* dst = &&label  (GNU label address; id in `label`) */
-    IR_IGOTO  /* goto *a  (GNU computed goto: jump to the address in temp a) */
+    IR_IGOTO, /* goto *a  (GNU computed goto: jump to the address in temp a) */
+    IR_ARMW,  /* dst = *(temp a); *(temp a) = dst OP b   (atomic; size, w).
+               * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b).
+               * Add and subtract stay IR_XADD, which x86 does in one
+               * locked instruction; these need a compare-and-swap loop. */
+    IR_CAS,   /* dst = *(temp a); if dst == b then *(temp a) = c
+               * (atomic compare-and-swap by VALUE; size, w). The result is
+               * the value seen, whether or not the swap happened — the
+               * __sync_*_compare_and_swap shape, where IR_CMPXCHG is the
+               * __atomic one (expected passed by address, a bool back). */
+    IR_FRAMEADDR /* dst = this function's frame pointer (rbp / x29), which
+                  * on both targets points at [saved fp][return address] —
+                  * the base of __builtin_frame_address/_return_address */
 };
 
 /* One resolved asm operand: an input carries the temp holding its VALUE, an

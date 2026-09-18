@@ -13,4 +13,23 @@ void sema_check(struct unit *u);
  * statements carry the case markers. */
 struct stmt *switch_stmts(struct stmt *body);
 
+/* The GCC atomic builtins — the __atomic_* family and the older __sync_*
+ * one. Classified in ONE place so sema (which types a call) and irgen (which
+ * lowers it) cannot disagree about what a name means. */
+enum atomic_kind {
+    AK_NONE,
+    AK_LOAD_N, AK_STORE_N, AK_EXCHANGE_N, AK_CMPXCHG_N,
+    AK_LOAD, AK_STORE, AK_EXCHANGE, AK_CMPXCHG,  /* values passed by pointer */
+    AK_FETCH_OP,      /* read-modify-write, the OLD value back */
+    AK_OP_FETCH,      /* read-modify-write, the NEW value back */
+    AK_TEST_AND_SET, AK_CLEAR,
+    AK_THREAD_FENCE, AK_SIGNAL_FENCE,
+    AK_LOCK_FREE,     /* folded to a constant in sema */
+    AK_SYNC_BOOL_CAS, AK_SYNC_VAL_CAS, AK_SYNC_LOCK_TAS, AK_SYNC_LOCK_RELEASE
+};
+
+/* The kind of the builtin `name`, or AK_NONE. For the read-modify-write
+ * kinds *op receives '+', '-', '&', '|', '^', or 'n' (nand). */
+enum atomic_kind atomic_builtin(const char *name, int *op);
+
 #endif

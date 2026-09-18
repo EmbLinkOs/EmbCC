@@ -705,6 +705,207 @@ static int gen_convert(struct ir_func *fn, int v, const struct type *from,
     return v;
 }
 
+/* ---- GCC atomic builtins -------------------------------------------------
+ *
+ * One lowering for both targets, with the ordering differences made
+ * explicit. Every builtin is treated as seq_cst whatever its memory-order
+ * argument says — always correct, since a stronger order is always allowed —
+ * and the order arguments are not evaluated (they are constants in practice).
+ *
+ * x86-64 is TSO: an aligned load or store is already atomic and acquire /
+ * release, a locked read-modify-write is a full barrier, and only a seq_cst
+ * store needs a trailing mfence. aarch64 orders nothing by default, so it
+ * uses the fence-based mapping: a barrier after an atomic load (acquire),
+ * before and after an atomic store (release, then seq_cst), and codegen
+ * brackets each exclusive-access loop with barriers of its own.
+ */
+
+static int atomic_arm(void) { return target_get() == TARGET_AARCH64; }
+
+/* The machine exchange leaves a narrow result zero-extended; re-extend it as
+ * its type says — a signed char object holding -1 must read back as -1 — and
+ * for an OP_fetch result also truncate it to the object's width. */
+static int atomic_result(struct ir_func *fn, int v, const struct type *t)
+{
+    if (ty_size(t) >= 4)
+        return v;
+    struct ir_ins *x = emit(fn);
+    x->op = IR_EXT;
+    x->a = v;
+    x->size = ty_size(t);
+    x->sign = ty_signed_int(t);
+    x->w = ty_w(t);
+    x->dst = new_temp(fn);
+    return x->dst;
+}
+
+/* An atomic access is never merged with another or removed: vol says so to
+ * the optimizer (and changes nothing codegen emits). */
+static int atomic_load(struct ir_func *fn, int addr, const struct type *t)
+{
+    int v = emit_load(fn, addr, t);
+    fn->ins[fn->nins - 1].vol = 1;
+    if (atomic_arm())
+        emit(fn)->op = IR_FENCE;          /* acquire */
+    return v;
+}
+
+static void atomic_store(struct ir_func *fn, int addr, int val,
+                         const struct type *t)
+{
+    if (atomic_arm())
+        emit(fn)->op = IR_FENCE;          /* release */
+    emit_store(fn, addr, val, t);
+    fn->ins[fn->nins - 1].vol = 1;
+    emit(fn)->op = IR_FENCE;              /* seq_cst: published before what follows */
+}
+
+static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
+                      int val, const struct type *t)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = op;
+    i->a = addr;
+    i->b = val;
+    i->imm = opc;
+    i->size = ty_size(t);
+    i->w = ty_w(t);
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+/* The value argument, converted to the atomic object's type first — so
+ * __atomic_fetch_add(&some_long, -1, ...) adds -1, not 4294967295. */
+static int atomic_value(struct ir_func *fn, struct expr *arg,
+                        const struct type *t)
+{
+    return gen_convert(fn, gen_expr(fn, arg), arg->ty, t);
+}
+
+static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
+                      int op)
+{
+    if (ak == AK_THREAD_FENCE || ak == AK_SIGNAL_FENCE) {
+        /* A signal fence need only stop the compiler; a real barrier is
+         * stronger and so also correct. */
+        emit(fn)->op = IR_FENCE;
+        return -1;
+    }
+    const struct type *obj = e->args[0]->ty->pointee;
+    if (ak == AK_TEST_AND_SET || ak == AK_CLEAR)
+        obj = ty_base(TY_CHAR, 1);                    /* one byte, as gcc does */
+    int w = ty_w(obj), sign = ty_signed_int(obj);
+    int addr = gen_expr(fn, e->args[0]);
+
+    switch (ak) {
+    case AK_LOAD_N:
+        return atomic_load(fn, addr, obj);
+    case AK_STORE_N:
+        atomic_store(fn, addr, atomic_value(fn, e->args[1], obj), obj);
+        return -1;
+    case AK_SYNC_LOCK_RELEASE: case AK_CLEAR:
+        atomic_store(fn, addr, emit_const(fn, 0, w), obj);
+        return -1;
+    case AK_EXCHANGE_N: case AK_SYNC_LOCK_TAS: {
+        int val = atomic_value(fn, e->args[1], obj);
+        return atomic_result(fn, atomic_rmw(fn, IR_XCHG, 0, addr, val, obj),
+                             obj);
+    }
+    case AK_TEST_AND_SET: {
+        int old = atomic_rmw(fn, IR_XCHG, 0, addr, emit_const(fn, 1, 4), obj);
+        return emit_cmp(fn, B_NE, old, emit_const(fn, 0, 4), 4, 0);
+    }
+    case AK_FETCH_OP: case AK_OP_FETCH: {
+        int val = atomic_value(fn, e->args[1], obj);
+        int old;
+        if (op == '+' || op == '-') {
+            /* x86 has lock xadd for these; subtraction adds the negation */
+            int addend = op == '-'
+                ? emit_bin(fn, IR_SUB, emit_const(fn, 0, w), val, w, 1)
+                : val;
+            old = atomic_rmw(fn, IR_XADD, 0, addr, addend, obj);
+        } else {
+            old = atomic_rmw(fn, IR_ARMW, op, addr, val, obj);
+        }
+        if (ak == AK_FETCH_OP)
+            return atomic_result(fn, old, obj);
+        /* OP_fetch: the new value is the old one with the operation applied
+         * again — the same computation the atomic did, just not atomically,
+         * which is fine: it only rebuilds what was stored. */
+        int nv;
+        switch (op) {
+        case '+': nv = emit_bin(fn, IR_ADD, old, val, w, sign); break;
+        case '-': nv = emit_bin(fn, IR_SUB, old, val, w, sign); break;
+        case '&': nv = emit_bin(fn, IR_AND, old, val, w, sign); break;
+        case '|': nv = emit_bin(fn, IR_OR, old, val, w, sign); break;
+        case '^': nv = emit_bin(fn, IR_XOR, old, val, w, sign); break;
+        default: {                                   /* nand: ~(old & val) */
+            int a = emit_bin(fn, IR_AND, old, val, w, sign);
+            struct ir_ins *n = emit(fn);
+            n->op = IR_BNOT;
+            n->a = a;
+            n->w = w;
+            n->dst = new_temp(fn);
+            nv = n->dst;
+            break;
+        }
+        }
+        return atomic_result(fn, nv, obj);
+    }
+    case AK_CMPXCHG_N: case AK_CMPXCHG: {
+        int exp = gen_expr(fn, e->args[1]);          /* &expected */
+        int des = ak == AK_CMPXCHG_N
+            ? atomic_value(fn, e->args[2], obj)
+            : emit_load(fn, gen_expr(fn, e->args[2]), obj);  /* by pointer */
+        struct ir_ins *i = emit(fn);
+        i->op = IR_CMPXCHG;
+        i->a = addr;
+        i->b = exp;
+        i->c = des;
+        i->size = ty_size(obj);
+        i->w = w;
+        i->dst = new_temp(fn);
+        return i->dst;
+    }
+    case AK_LOAD: {                                   /* *ret = atomic *p */
+        int ret = gen_expr(fn, e->args[1]);
+        emit_store(fn, ret, atomic_load(fn, addr, obj), obj);
+        return -1;
+    }
+    case AK_STORE: {                                  /* atomic *p = *val */
+        int vp = gen_expr(fn, e->args[1]);
+        atomic_store(fn, addr, emit_load(fn, vp, obj), obj);
+        return -1;
+    }
+    case AK_EXCHANGE: {                               /* *ret = xchg(p, *val) */
+        int vp = gen_expr(fn, e->args[1]);
+        int rp = gen_expr(fn, e->args[2]);
+        int old = atomic_rmw(fn, IR_XCHG, 0, addr, emit_load(fn, vp, obj), obj);
+        emit_store(fn, rp, old, obj);
+        return -1;
+    }
+    case AK_SYNC_VAL_CAS: case AK_SYNC_BOOL_CAS: {
+        int expv = atomic_value(fn, e->args[1], obj);
+        int newv = atomic_value(fn, e->args[2], obj);
+        struct ir_ins *i = emit(fn);
+        i->op = IR_CAS;
+        i->a = addr;
+        i->b = expv;
+        i->c = newv;
+        i->size = ty_size(obj);
+        i->w = w;
+        i->dst = new_temp(fn);
+        int old = atomic_result(fn, i->dst, obj);
+        if (ak == AK_SYNC_VAL_CAS)
+            return old;
+        return emit_cmp(fn, B_EQ, old, expv, w, sign);
+    }
+    default:
+        diag_fatal(fn->src->file, e->line, "internal: atomic kind %d", (int)ak);
+        return -1;
+    }
+}
+
 static int gen_expr(struct ir_func *fn, struct expr *e)
 {
     switch (e->kind) {
@@ -1113,60 +1314,29 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             emit(fn)->op = IR_UD2;
             return -1;
         }
-        if (e->name && strcmp(e->name, "__atomic_load_n") == 0) {
-            int addr = gen_expr(fn, e->args[0]);
-            return emit_load(fn, addr, e->ty);   /* aligned load is atomic */
+        if (e->name) {
+            int aop;
+            enum atomic_kind ak = atomic_builtin(e->name, &aop);
+            if (ak != AK_NONE)
+                return gen_atomic(fn, e, ak, aop);
         }
-        if (e->name && strcmp(e->name, "__atomic_store_n") == 0) {
-            int addr = gen_expr(fn, e->args[0]);
-            int val = gen_expr(fn, e->args[1]);
-            emit_store(fn, addr, val, e->args[0]->ty->pointee);
-            emit(fn)->op = IR_FENCE;             /* seq_cst: publish the store */
-            return -1;
-        }
-        if (e->name && strcmp(e->name, "__atomic_exchange_n") == 0) {
-            int addr = gen_expr(fn, e->args[0]);
-            int val = gen_expr(fn, e->args[1]);
-            struct ir_ins *i = emit(fn);
-            i->op = IR_XCHG;
-            i->a = addr;
-            i->b = val;
-            i->size = ty_size(e->ty);
-            i->w = ty_w(e->ty);
-            i->dst = new_temp(fn);
-            return i->dst;
-        }
-        if (e->name && (strcmp(e->name, "__atomic_fetch_add") == 0 ||
-                        strcmp(e->name, "__atomic_fetch_sub") == 0)) {
-            int w = ty_w(e->ty);
-            int addr = gen_expr(fn, e->args[0]);
-            int val = gen_expr(fn, e->args[1]);
-            if (strcmp(e->name, "__atomic_fetch_sub") == 0)  /* add of -val */
-                val = emit_bin(fn, IR_SUB, emit_const(fn, 0, w), val, w, 1);
-            struct ir_ins *i = emit(fn);
-            i->op = IR_XADD;
-            i->a = addr;
-            i->b = val;
-            i->size = ty_size(e->ty);
-            i->w = w;
-            i->dst = new_temp(fn);
-            return i->dst;
-        }
-        if (e->name && strcmp(e->name, "__atomic_compare_exchange_n") == 0) {
-            /* evaluate the operands BEFORE emitting the instruction that
-             * consumes them (emit() reserves the slot in stream order) */
-            int obj = gen_expr(fn, e->args[0]);   /* the object pointer */
-            int exp = gen_expr(fn, e->args[1]);   /* &expected */
-            int des = gen_expr(fn, e->args[2]);   /* desired value */
-            struct ir_ins *i = emit(fn);
-            i->op = IR_CMPXCHG;
-            i->a = obj;
-            i->b = exp;
-            i->c = des;
-            i->size = ty_size(e->args[0]->ty->pointee);
-            i->w = ty_w(e->args[0]->ty->pointee);
-            i->dst = new_temp(fn);
-            return i->dst;
+        if (e->name && (strcmp(e->name, "__builtin_return_address") == 0 ||
+                        strcmp(e->name, "__builtin_frame_address") == 0)) {
+            /* Walk e->num saved frame pointers up the chain, then either
+             * stop (the frame address) or read the return address beside
+             * it — [fp] is the caller's fp and [fp+8] the return address,
+             * on both targets. */
+            struct ir_ins *fa = emit(fn);
+            fa->op = IR_FRAMEADDR;
+            fa->w = 8;
+            fa->dst = new_temp(fn);
+            int fp = fa->dst;
+            for (long k = 0; k < e->num; k++)
+                fp = emit_load(fn, fp, e->ty);
+            if (strcmp(e->name, "__builtin_frame_address") == 0)
+                return fp;
+            int at = emit_bin(fn, IR_ADD, fp, emit_const(fn, 8, 8), 8, 0);
+            return emit_load(fn, at, e->ty);
         }
         int args[MAX_PARAMS];
         int fptemp = -1;

@@ -128,6 +128,14 @@ int main(void)
     a64_br(&C, 12);                     expect("br\tx12");
     a64_ret(&C);                        expect("ret");
     a64_dmb_ish(&C);                    expect("dmb\tish");
+    a64_ldxr(&C, 9, 11, 8);             expect("ldxr\tx9, [x11]");
+    a64_ldxr(&C, 9, 11, 4);             expect("ldxr\tw9, [x11]");
+    a64_ldxr(&C, 9, 11, 2);             expect("ldxrh\tw9, [x11]");
+    a64_ldxr(&C, 9, 11, 1);             expect("ldxrb\tw9, [x11]");
+    a64_stxr(&C, 12, 13, 11, 8);        expect("stxr\tw12, x13, [x11]");
+    a64_stxr(&C, 12, 13, 11, 4);        expect("stxr\tw12, w13, [x11]");
+    a64_stxr(&C, 12, 13, 11, 2);        expect("stxrh\tw12, w13, [x11]");
+    a64_stxr(&C, 12, 13, 11, 1);        expect("stxrb\tw12, w13, [x11]");
 
     a64_fldr(&C, 16, 31, 16, 8);        expect("ldr\td16, [sp, #16]");
     a64_fldr(&C, 16, 10, 8, 4);         expect("ldr\ts16, [x10, #8]");

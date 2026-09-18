@@ -255,6 +255,10 @@ static int is_lvalue(const struct expr *e)
 }
 
 static int const_fold(const struct expr *e, long *out);
+struct scope;
+static void check_atomic_call(struct unit *u, struct func *f,
+                              struct scope *sc, struct expr *e,
+                              enum atomic_kind ak);
 
 /* A growing (offset, type, value) list of flattened initializer leaves —
  * defined here so both check_expr (compound literals) and check_stmt
@@ -1001,6 +1005,26 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base((is_inff || is_nanf) ? TY_FLOAT : TY_DOUBLE, 0);
                 break;
             }
+            /* __builtin_return_address(N) / __builtin_frame_address(N): the
+             * frame chain, which EmbCC always keeps (both targets lay a frame
+             * out as [saved frame pointer][return address]). N must be a
+             * constant, as gcc requires; the result is void *. */
+            if (strcmp(bn, "return_address") == 0 ||
+                strcmp(bn, "frame_address") == 0) {
+                long lvl;
+                if (e->nargs != 1)
+                    diag_at(u->file, e->line, e->col, "%s takes one argument",
+                            e->lhs->name);
+                check_expr(u, f, sc, e->args[0]);
+                if (!const_fold(e->args[0], &lvl) || lvl < 0)
+                    diag_at(u->file, e->line, e->col,
+                            "%s needs a non-negative constant level",
+                            e->lhs->name);
+                e->name = e->lhs->name;
+                e->num = lvl;
+                e->ty = ty_ptr(ty_base(TY_VOID, 0));
+                break;
+            }
             /* __builtin_memcpy/memmove/memset are the libc functions under a
              * reserved name -- rename and let the ordinary call path resolve
              * them (the program must declare/provide them). */
@@ -1045,31 +1069,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             e->ty = ty_base(TY_VOID, 0);
             break;
         }
-        /* __atomic_load_n / store_n / exchange_n. The first argument is a
-         * pointer; x86 makes an aligned scalar load/store atomic on its own,
-         * exchange is a locked xchg, and a store gets a trailing fence for
-         * seq_cst. The memory-order argument is checked and then ignored. */
-        if (e->lhs->kind == EXPR_VAR && e->lhs->name &&
-            (strcmp(e->lhs->name, "__atomic_load_n") == 0 ||
-             strcmp(e->lhs->name, "__atomic_store_n") == 0 ||
-             strcmp(e->lhs->name, "__atomic_exchange_n") == 0 ||
-             strcmp(e->lhs->name, "__atomic_fetch_add") == 0 ||
-             strcmp(e->lhs->name, "__atomic_fetch_sub") == 0 ||
-             strcmp(e->lhs->name, "__atomic_compare_exchange_n") == 0)) {
-            for (int i = 0; i < e->nargs; i++)
-                check_expr(u, f, sc, e->args[i]);
-            if (e->nargs < 1 || e->args[0]->ty->kind != TY_PTR)
-                diag_at(u->file, e->line, e->col,
-                           "%s needs a pointer first argument", e->lhs->name);
-            e->name = e->lhs->name;
-            if (strcmp(e->lhs->name, "__atomic_store_n") == 0)
-                e->ty = ty_base(TY_VOID, 0);
-            else if (strcmp(e->lhs->name,
-                            "__atomic_compare_exchange_n") == 0)
-                e->ty = ty_base(TY_BOOL, 0);       /* did the swap happen? */
-            else
-                e->ty = e->args[0]->ty->pointee;
-            break;
+        /* The GCC atomic builtins, typed here and lowered in irgen. */
+        if (e->lhs->kind == EXPR_VAR && e->lhs->name) {
+            int aop;
+            enum atomic_kind ak = atomic_builtin(e->lhs->name, &aop);
+            if (ak != AK_NONE) {
+                check_atomic_call(u, f, sc, e, ak);
+                break;
+            }
         }
         /* Direct when the callee is a name that is not a variable in
          * scope and names a function; otherwise a call through a
@@ -1574,6 +1581,156 @@ static int asm_reg_by_name(const char *n)
         if (strcmp(n, reg_names[i].name) == 0)
             return reg_names[i].reg;
     return -1;
+}
+
+enum atomic_kind atomic_builtin(const char *name, int *op)
+{
+    static const struct { const char *name; enum atomic_kind kind; } fixed[] = {
+        { "__atomic_load_n",             AK_LOAD_N },
+        { "__atomic_store_n",            AK_STORE_N },
+        { "__atomic_exchange_n",         AK_EXCHANGE_N },
+        { "__atomic_compare_exchange_n", AK_CMPXCHG_N },
+        { "__atomic_load",               AK_LOAD },
+        { "__atomic_store",              AK_STORE },
+        { "__atomic_exchange",           AK_EXCHANGE },
+        { "__atomic_compare_exchange",   AK_CMPXCHG },
+        { "__atomic_test_and_set",       AK_TEST_AND_SET },
+        { "__atomic_clear",              AK_CLEAR },
+        { "__atomic_thread_fence",       AK_THREAD_FENCE },
+        { "__atomic_signal_fence",       AK_SIGNAL_FENCE },
+        { "__atomic_always_lock_free",   AK_LOCK_FREE },
+        { "__atomic_is_lock_free",       AK_LOCK_FREE },
+        { "__sync_bool_compare_and_swap", AK_SYNC_BOOL_CAS },
+        { "__sync_val_compare_and_swap",  AK_SYNC_VAL_CAS },
+        { "__sync_lock_test_and_set",     AK_SYNC_LOCK_TAS },
+        { "__sync_lock_release",          AK_SYNC_LOCK_RELEASE },
+    };
+    static const struct { const char *name; int op; } ops[] = {
+        { "add", '+' }, { "sub", '-' }, { "and", '&' },
+        { "or", '|' },  { "xor", '^' }, { "nand", 'n' },
+    };
+    *op = 0;
+    for (unsigned i = 0; i < sizeof fixed / sizeof fixed[0]; i++)
+        if (strcmp(name, fixed[i].name) == 0)
+            return fixed[i].kind;
+    /* __atomic_fetch_OP / __atomic_OP_fetch / __sync_fetch_and_OP /
+     * __sync_OP_and_fetch */
+    for (unsigned i = 0; i < sizeof ops / sizeof ops[0]; i++) {
+        char buf[48];
+        *op = ops[i].op;
+        snprintf(buf, sizeof buf, "__atomic_fetch_%s", ops[i].name);
+        if (strcmp(name, buf) == 0) return AK_FETCH_OP;
+        snprintf(buf, sizeof buf, "__atomic_%s_fetch", ops[i].name);
+        if (strcmp(name, buf) == 0) return AK_OP_FETCH;
+        snprintf(buf, sizeof buf, "__sync_fetch_and_%s", ops[i].name);
+        if (strcmp(name, buf) == 0) return AK_FETCH_OP;
+        snprintf(buf, sizeof buf, "__sync_%s_and_fetch", ops[i].name);
+        if (strcmp(name, buf) == 0) return AK_OP_FETCH;
+    }
+    *op = 0;
+    return AK_NONE;
+}
+
+/* The object an atomic builtin works on must be one the machines can move
+ * in one access: an integer or a pointer of 1, 2, 4 or 8 bytes. */
+static void need_atomic_object(struct unit *u, struct expr *e, struct type *t)
+{
+    int sz = ty_size(t);
+    if (!(ty_is_integer(t) || t->kind == TY_PTR) ||
+        (sz != 1 && sz != 2 && sz != 4 && sz != 8))
+        diag_at(u->file, e->line, e->col,
+                "%s works on an integer or pointer of 1, 2, 4 or 8 bytes, "
+                "not %s", e->lhs->name, ty_name(t));
+}
+
+/* Types a call to an atomic builtin (see atomic_builtin). */
+static void check_atomic_call(struct unit *u, struct func *f,
+                              struct scope *sc, struct expr *e,
+                              enum atomic_kind ak)
+{
+    static const signed char nargs[] = {
+        [AK_LOAD_N] = 2, [AK_STORE_N] = 3, [AK_EXCHANGE_N] = 3,
+        [AK_CMPXCHG_N] = 6, [AK_LOAD] = 3, [AK_STORE] = 3,
+        [AK_EXCHANGE] = 4, [AK_CMPXCHG] = 6, [AK_FETCH_OP] = 3,
+        [AK_OP_FETCH] = 3, [AK_TEST_AND_SET] = 2, [AK_CLEAR] = 2,
+        [AK_THREAD_FENCE] = 1, [AK_SIGNAL_FENCE] = 1, [AK_LOCK_FREE] = 2,
+        [AK_SYNC_BOOL_CAS] = 3, [AK_SYNC_VAL_CAS] = 3, [AK_SYNC_LOCK_TAS] = 2,
+        [AK_SYNC_LOCK_RELEASE] = 1,
+    };
+    const char *name = e->lhs->name;
+    for (int i = 0; i < e->nargs; i++)
+        check_expr(u, f, sc, e->args[i]);
+    /* The __sync forms are variadic in gcc (a trailing list of variables to
+     * protect, ignored); the __atomic ones fix their count. The fetch/op
+     * forms share one entry, so the family decides. */
+    int want = nargs[ak];
+    if (ak == AK_FETCH_OP || ak == AK_OP_FETCH)
+        want = strncmp(name, "__sync_", 7) == 0 ? 2 : 3;
+    int is_sync = strncmp(name, "__sync_", 7) == 0;
+    if (e->nargs < want || (!is_sync && e->nargs != want))
+        diag_at(u->file, e->line, e->col, "%s takes %d arguments, not %d",
+                name, want, e->nargs);
+    e->name = name;
+
+    if (ak == AK_THREAD_FENCE || ak == AK_SIGNAL_FENCE) {
+        e->ty = ty_base(TY_VOID, 0);
+        return;
+    }
+    if (ak == AK_LOCK_FREE) {
+        /* Every 1/2/4/8-byte object is lock-free on both targets; fold to a
+         * constant so `_Static_assert(__atomic_always_lock_free(...))` works. */
+        long n;
+        if (!const_fold(e->args[0], &n))
+            diag_at(u->file, e->line, e->col,
+                    "%s needs a constant size", name);
+        struct expr *c = e;
+        int line = c->line, col = c->col;
+        memset(c, 0, sizeof *c);
+        c->kind = EXPR_NUM;
+        c->line = line;
+        c->col = col;
+        c->num = (n == 1 || n == 2 || n == 4 || n == 8);
+        c->ty = ty_base(TY_BOOL, 0);
+        return;
+    }
+
+    if (e->args[0]->ty->kind != TY_PTR)
+        diag_at(u->file, e->line, e->col,
+                "%s needs a pointer first argument", name);
+    struct type *obj = e->args[0]->ty->pointee;
+
+    /* test_and_set / clear work on one byte, whatever the pointer says. */
+    if (ak == AK_TEST_AND_SET) { e->ty = ty_base(TY_BOOL, 0); return; }
+    if (ak == AK_CLEAR)        { e->ty = ty_base(TY_VOID, 0); return; }
+
+    need_atomic_object(u, e, obj);
+    /* The generic forms pass values by pointer; each must point at an
+     * object the same size as the atomic one. */
+    if (ak == AK_LOAD || ak == AK_STORE || ak == AK_EXCHANGE ||
+        ak == AK_CMPXCHG || ak == AK_CMPXCHG_N) {
+        int last = ak == AK_EXCHANGE ? 2 : ak == AK_LOAD || ak == AK_STORE ? 1 : 2;
+        for (int k = 1; k <= last; k++) {
+            if (ak == AK_CMPXCHG_N && k == 2)
+                break;                           /* desired is a value */
+            struct type *pt = e->args[k]->ty;
+            if (pt->kind != TY_PTR || ty_size(pt->pointee) != ty_size(obj))
+                diag_at(u->file, e->line, e->col,
+                        "argument %d of %s must point to a %d-byte object",
+                        k + 1, name, ty_size(obj));
+        }
+    }
+    switch (ak) {
+    case AK_STORE_N: case AK_LOAD: case AK_STORE: case AK_EXCHANGE:
+    case AK_SYNC_LOCK_RELEASE:
+        e->ty = ty_base(TY_VOID, 0);
+        break;
+    case AK_CMPXCHG_N: case AK_CMPXCHG: case AK_SYNC_BOOL_CAS:
+        e->ty = ty_base(TY_BOOL, 0);
+        break;
+    default:
+        e->ty = obj;                              /* the value itself */
+        break;
+    }
 }
 
 /* Map a fixed-register constraint letter to its register (0-15), else -1. */

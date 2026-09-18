@@ -724,6 +724,19 @@ static int size_fold(const struct expr *e, long *out)
     }
     case EXPR_CAST:
         return size_fold(e->rhs, out);
+    case EXPR_CALL:
+        /* __atomic_always_lock_free / __atomic_is_lock_free are integer
+         * constant expressions in gcc — `_Static_assert` uses them, and it
+         * is evaluated here, before sema folds the call (sema.c
+         * check_atomic_call answers the same way). */
+        if (e->lhs && e->lhs->kind == EXPR_VAR && e->nargs == 2 &&
+            (strcmp(e->lhs->name, "__atomic_always_lock_free") == 0 ||
+             strcmp(e->lhs->name, "__atomic_is_lock_free") == 0) &&
+            size_fold(e->args[0], &a)) {
+            *out = a == 1 || a == 2 || a == 4 || a == 8;
+            return 1;
+        }
+        return 0;
     case EXPR_NEG:
         if (!size_fold(e->rhs, &a)) return 0;
         *out = -a;

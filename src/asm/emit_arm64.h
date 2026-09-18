@@ -27,6 +27,8 @@ enum {
     A64_TMP   = 10,   /* the second operand: the x86 backend's rcx */
     A64_ADDR  = 11,   /* address scratch */
     A64_SCR   = 12,   /* a second scratch (big offsets, indirect targets) */
+    A64_T13   = 13,   /* the atomics' extra registers: the value to store, */
+    A64_T14   = 14,   /* and __atomic_compare_exchange's &expected */
     A64_SRET  = 8,    /* AAPCS64 indirect result location register */
     A64_FP    = 29,
     A64_LR    = 30,
@@ -165,6 +167,13 @@ void a64_exception(struct code *c, int kind, int imm);
 /* 128-bit SIMD&FP load/store, [rn, #off] with off a multiple of 16. */
 void a64_ldr_q(struct code *c, int qt, int rn, long off);
 void a64_str_q(struct code *c, int qt, int rn, long off);
+
+/* ---- exclusive access (the atomics' retry loop) ---------------------- */
+/* ldxr{b,h,,} rt, [rn] — size 1/2/4/8; a narrow value is zero-extended. */
+void a64_ldxr(struct code *c, int rt, int rn, int size);
+/* stxr{b,h,,} ws, rt, [rn] — ws receives 0 on success, 1 if the exclusive
+ * monitor was lost and the store did not happen. */
+void a64_stxr(struct code *c, int ws, int rt, int rn, int size);
 
 /* ---- misc ----------------------------------------------------------- */
 void a64_dmb_ish(struct code *c);   /* __sync_synchronize */

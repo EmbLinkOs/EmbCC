@@ -632,3 +632,27 @@ void a64_str_q(struct code *c, int qt, int rn, long off)
 {
     ldst_q(c, 0x3D800000UL, qt, rn, off);
 }
+
+/* ---- exclusive access ------------------------------------------------ */
+
+static unsigned long excl_size(int size)
+{
+    switch (size) {
+    case 1: return 0; case 2: return 1; case 4: return 2; case 8: return 3;
+    }
+    bad("exclusive access size", size);
+    return 0;
+}
+
+void a64_ldxr(struct code *c, int rt, int rn, int size)
+{
+    a64_word(c, (excl_size(size) << 30) | 0x085F7C00UL |
+                ((unsigned long)rn << 5) | (unsigned long)rt);
+}
+
+void a64_stxr(struct code *c, int ws, int rt, int rn, int size)
+{
+    a64_word(c, (excl_size(size) << 30) | 0x08007C00UL |
+                ((unsigned long)ws << 16) | ((unsigned long)rn << 5) |
+                (unsigned long)rt);
+}

@@ -239,6 +239,7 @@ static int ins_def(const struct ir_ins *in)
     case IR_STRADDR: case IR_GADDR: case IR_FADDR: case IR_LOAD: case IR_EXT:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_BSWAP: case IR_SHL:
     case IR_SHR: case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
+    case IR_ARMW: case IR_CAS: case IR_FRAMEADDR:
     case IR_STVAR:            /* the local written */
     case IR_CALL:             /* always stores a (possibly-unused) result temp */
     case IR_LABELADDR:        /* dst = &&label */
@@ -299,9 +300,9 @@ static unsigned long *compute_live_intervals(struct ir_func *fn, int *first,
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
         case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
-        case IR_XCHG: case IR_XADD:
+        case IR_XCHG: case IR_XADD: case IR_ARMW:
             USE(s->a); USE(s->b); break;
-        case IR_CMPXCHG:
+        case IR_CMPXCHG: case IR_CAS:
             USE(s->a); USE(s->b); USE(s->c); break;
         case IR_STVAR: case IR_VA_START:
             USE(s->a); break;
@@ -462,10 +463,12 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
         /* IR_STORE's address is register-aware now (codegen stores to [reg]),
          * so it is NOT opaque — only its raw value path was. */
         case IR_VA_START:  OPAQUE(in->a); break;
-        case IR_XCHG: case IR_XADD:
+        case IR_XCHG: case IR_XADD: case IR_ARMW:
             OPAQUE(in->a); OPAQUE(in->b); break;          /* raw addr/val slots */
-        case IR_CMPXCHG:
+        case IR_CMPXCHG: case IR_CAS:
             OPAQUE(in->a); OPAQUE(in->b); OPAQUE(in->c); break;
+        case IR_FRAMEADDR:
+            OPAQUE(in->dst); break;                        /* a raw-slot result */
         case IR_MEMCPY: case IR_MEMZERO:
             /* addresses are register-aware (used directly as the copy/zero base);
              * only the operands are addresses, so nothing here is opaque now. */
@@ -970,9 +973,9 @@ static void count_vreg_uses(struct ir_func *fn, int *cnt)
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
         case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
-        case IR_XCHG: case IR_XADD:
+        case IR_XCHG: case IR_XADD: case IR_ARMW:
             UZ(s->a); UZ(s->b); break;
-        case IR_CMPXCHG:
+        case IR_CMPXCHG: case IR_CAS:
             UZ(s->a); UZ(s->b); UZ(s->c); break;
         case IR_CALL:
             if (s->indirect) UZ(s->a);
@@ -1961,6 +1964,50 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_store_mem_reg(text, REG_RSI, 0, REG_RAX, i->size);/* *exp=seen */
             x86_setcc_eax(text, 0x94);                   /* setz: dst = matched */
             cg_store(text, sd, i->dst, 4);
+            break;
+        case IR_ARMW: {
+            /* and / or / xor / nand: x86 has no locked fetch-and-OP that
+             * returns the old value, so this is the compare-and-swap loop gcc
+             * emits. rax is the value last seen, rdx the value to install;
+             * lock cmpxchg installs rdx only if memory still holds rax, and
+             * otherwise reloads rax with what it does hold, so the loop
+             * recomputes from the fresh value. */
+            cg_reset();
+            int w = i->size == 8 ? 8 : 4;
+            int op = (int)i->imm;
+            x86_mov_rcx_slot(text, sd[i->a]);             /* address -> rcx */
+            x86_load_slot(text, sd[i->b], i->size, 0, w); /* operand -> rax.. */
+            x86_mov_reg_reg(text, REG_RSI, REG_RAX);      /* ..-> rsi */
+            x86_load_reg_mem(text, REG_RAX, REG_RCX, 0, i->size); /* current */
+            int loop = text->len;
+            x86_mov_reg_reg(text, REG_RDX, REG_RAX);
+            x86_alu_rr(text, op == 'n' ? '&' : op, REG_RDX, REG_RSI, w);
+            if (op == 'n')
+                x86_not_reg(text, REG_RDX, w);
+            x86_lock_cmpxchg_rcx(text, i->size);          /* ZF: installed */
+            int back = x86_jnz_rel32(text);
+            code_patch32(text, back, (unsigned long)(long)(loop - (back + 4)));
+            cg_store(text, sd, i->dst, i->w);             /* rax = the old value */
+            break;
+        }
+        case IR_CAS:
+            /* By value: rax = expected, rdx = desired. After lock cmpxchg rax
+             * holds the value that was in memory whether or not the swap
+             * happened (on success it already was that value). */
+            cg_reset();
+            x86_load_slot(text, sd[i->c], i->size, 0,
+                          i->size == 8 ? 8 : 4);          /* desired -> rax.. */
+            x86_mov_reg_reg(text, REG_RDX, REG_RAX);      /* ..-> rdx */
+            x86_mov_rcx_slot(text, sd[i->a]);             /* address -> rcx */
+            x86_load_slot(text, sd[i->b], i->size, 0,
+                          i->size == 8 ? 8 : 4);          /* expected -> rax */
+            x86_lock_cmpxchg_rcx(text, i->size);
+            cg_store(text, sd, i->dst, i->w);
+            break;
+        case IR_FRAMEADDR:
+            cg_reset();
+            x86_mov_reg_reg(text, REG_RAX, REG_RBP);
+            cg_store(text, sd, i->dst, 8);
             break;
         case IR_MEMCPY: {
             /* a struct copy: 8 bytes at a time, then the tail. A register-held

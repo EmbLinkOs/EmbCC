@@ -830,10 +830,83 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             }
             break;
         }
-        case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
-            diag_fatal(f->file, i->line ? i->line : f->line,
-                       "atomic operations are not supported for aarch64 "
-                       "yet: they need ldxr/stxr pairs (in '%s')", f->name);
+        case IR_XCHG: case IR_XADD: case IR_ARMW: {
+            /* A read-modify-write is an exclusive-access retry loop: load
+             * exclusive, compute, store exclusive, and go again if another
+             * observer touched the location in between (stxr's status is
+             * nonzero). Bracketed by full barriers: the fence-based seq_cst
+             * mapping, the same one irgen's atomic loads and stores use, so
+             * the two never mix with the acquire/release-flavoured one. */
+            int w = i->size == 8 ? 8 : 4;
+            ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);          /* address */
+            ld_slot(t, sd, i->b, A64_TMP, 8, 0, 8);           /* operand */
+            a64_dmb_ish(t);
+            int loop = t->len;
+            a64_ldxr(t, A64_ACC, A64_ADDR, i->size);          /* old value */
+            int nv = A64_TMP;                                  /* XCHG stores b */
+            if (i->op == IR_XADD) {
+                a64_alu_reg(t, '+', A64_T13, A64_ACC, A64_TMP, w);
+                nv = A64_T13;
+            } else if (i->op == IR_ARMW) {
+                int op = (int)i->imm;
+                a64_alu_reg(t, op == 'n' ? '&' : op, A64_T13, A64_ACC, A64_TMP, w);
+                if (op == 'n')
+                    a64_mvn(t, A64_T13, A64_T13, w);
+                nv = A64_T13;
+            }
+            a64_stxr(t, A64_SCR, nv, A64_ADDR, i->size);
+            a64_patch_b19(t, a64_cbz(t, A64_SCR, 1, 4), loop);  /* lost it: retry */
+            a64_dmb_ish(t);
+            st_slot(t, sd, i->dst, A64_ACC, 8);
+            break;
+        }
+        case IR_CAS: {
+            /* By value: the result is the value seen, swapped or not. */
+            int w = i->size == 8 ? 8 : 4;
+            ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
+            ld_slot(t, sd, i->b, A64_TMP, i->size, 0, w);     /* expected */
+            ld_slot(t, sd, i->c, A64_T13, 8, 0, 8);           /* desired */
+            a64_dmb_ish(t);
+            int loop = t->len;
+            a64_ldxr(t, A64_ACC, A64_ADDR, i->size);
+            a64_cmp_reg(t, A64_ACC, A64_TMP, w);
+            int miss = a64_bcond(t, A64_NE);
+            a64_stxr(t, A64_SCR, A64_T13, A64_ADDR, i->size);
+            a64_patch_b19(t, a64_cbz(t, A64_SCR, 1, 4), loop);
+            a64_patch_b19(t, miss, t->len);
+            a64_dmb_ish(t);
+            st_slot(t, sd, i->dst, A64_ACC, 8);
+            break;
+        }
+        case IR_CMPXCHG: {
+            /* __atomic_compare_exchange: expected is passed by ADDRESS; on a
+             * miss the value seen is written back through it, and the result
+             * is whether the swap happened. */
+            int w = i->size == 8 ? 8 : 4;
+            ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);          /* object */
+            ld_slot(t, sd, i->b, A64_T14, 8, 0, 8);           /* &expected */
+            ld_slot(t, sd, i->c, A64_T13, 8, 0, 8);           /* desired */
+            a64_ldr(t, A64_TMP, A64_T14, 0, i->size, 0, w);   /* expected */
+            a64_dmb_ish(t);
+            int loop = t->len;
+            a64_ldxr(t, A64_ACC, A64_ADDR, i->size);
+            a64_cmp_reg(t, A64_ACC, A64_TMP, w);
+            int miss = a64_bcond(t, A64_NE);
+            a64_stxr(t, A64_SCR, A64_T13, A64_ADDR, i->size);
+            a64_patch_b19(t, a64_cbz(t, A64_SCR, 1, 4), loop);
+            a64_mov_imm(t, A64_ACC, 1, 4);                    /* swapped */
+            int done = a64_b(t);
+            a64_patch_b19(t, miss, t->len);
+            a64_str(t, A64_ACC, A64_T14, 0, i->size);         /* *expected = seen */
+            a64_mov_imm(t, A64_ACC, 0, 4);
+            a64_patch_b26(t, done, t->len);
+            a64_dmb_ish(t);
+            st_slot(t, sd, i->dst, A64_ACC, 8);
+            break;
+        }
+        case IR_FRAMEADDR:
+            a64_mov_reg(t, A64_ACC, A64_FP, 8);
+            st_slot(t, sd, i->dst, A64_ACC, 8);
             break;
         case IR_LABELADDR: {
             /* &&label. adr gives the label's RUN-TIME address directly,
