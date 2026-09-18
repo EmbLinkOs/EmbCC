@@ -79,6 +79,15 @@ struct insec {
  * of the bracket symbols. */
 struct osec_bound { Elf64_Addr start, end; };
 
+/* A section name none of the fixed groups claims (.embk_exports, a
+ * `section("my_table")` array) is an orphan, and each distinct orphan
+ * name is a group of its own, numbered from OSEC_COUNT: its inputs land
+ * contiguously, the way `KEEP(*(.embk_exports))` places them, and its
+ * bounds become bracket symbols (define_orphan_brackets). Read-only
+ * orphans follow .rodata; writable ones follow .data. */
+#define MAX_ORPHANS 64
+struct orphan { const char *name; int writable; };
+
 struct symbol {
     const char *name;
     struct object *obj;        /* defining object, or NULL if undefined */
@@ -120,6 +129,8 @@ struct linker {
     Elf64_Addr base;
     const char *entry;
     Elf64_Addr lma_offset;     /* L2: p_paddr = p_vaddr - this (0 = paddr==vaddr) */
+    struct orphan orphans[MAX_ORPHANS];
+    int norphan;
 };
 
 static void die(const char *fmt, ...)
@@ -229,10 +240,25 @@ static int classify_osec(const char *name, int writable, int is_bss)
             (name[n] == 0 || name[n] == '.'))
             return map[i].osec;
     }
-    /* an unrecognized allocated section: place by its flags */
-    if (is_bss)
-        return OSEC_BSS;
-    return writable ? OSEC_DATA : OSEC_RODATA;
+    /* an unrecognized allocated section: NOBITS joins .bss; anything else
+     * is an orphan group (orphan_osec) */
+    (void)writable;
+    return is_bss ? OSEC_BSS : -1;
+}
+
+/* The group number of the orphan section `name`, registering it on first
+ * sight. First-seen order is layout order, as with any input. */
+static int orphan_osec(struct linker *l, const char *name, int writable)
+{
+    for (int i = 0; i < l->norphan; i++)
+        if (strcmp(l->orphans[i].name, name) == 0)
+            return OSEC_COUNT + i;
+    if (l->norphan == MAX_ORPHANS)
+        die("more than %d distinct orphan sections (at '%s')",
+            MAX_ORPHANS, name);
+    l->orphans[l->norphan].name = name;
+    l->orphans[l->norphan].writable = writable;
+    return OSEC_COUNT + l->norphan++;
 }
 
 /* Collect the object's SHF_ALLOC sections into the global insec list and
@@ -260,12 +286,16 @@ static void collect_sections(struct linker *l, struct object *o)
         s->data = s->is_bss ? NULL : o->buf + sh->sh_offset;
         s->osec = classify_osec(s->name, sh->sh_flags & SHF_WRITE,
                                 s->is_bss);
+        if (s->osec < 0)
+            s->osec = orphan_osec(l, s->name, !!(sh->sh_flags & SHF_WRITE));
         /* text segment: executable OR read-only allocatable (.rodata);
          * data segment: writable and the constructor arrays. W^X by
          * construction — the constructor arrays are read-only data that
          * the ABI keeps in the writable segment (they hold relocated
          * pointers), never executable. */
-        s->seg = (s->osec == OSEC_TEXT || s->osec == OSEC_RODATA)
+        s->seg = (s->osec == OSEC_TEXT || s->osec == OSEC_RODATA ||
+                  (s->osec >= OSEC_COUNT &&
+                   !l->orphans[s->osec - OSEC_COUNT].writable))
                      ? SEG_TEXT : SEG_DATA;
         o->sec_out[i] = l->nsec;
         l->nsec++;
@@ -502,6 +532,14 @@ static Elf64_Addr align_up(Elf64_Addr v, Elf64_Xword a)
 static void place_osec(struct linker *l, int os, Elf64_Addr *va,
                        struct osec_bound *b)
 {
+    /* the group starts where its first member does — the padding before
+     * that member is not part of the group, or a bracket-walked table
+     * would begin with it */
+    for (int i = 0; i < l->nsec; i++)
+        if (l->insecs[i].osec == os) {
+            *va = align_up(*va, l->insecs[i].align);
+            break;
+        }
     b[os].start = *va;
     for (int i = 0; i < l->nsec; i++) {
         struct insec *s = &l->insecs[i];
@@ -527,6 +565,9 @@ static void layout(struct linker *l, struct osec_bound *b,
     *text_start = va;
     place_osec(l, OSEC_TEXT, &va, b);
     place_osec(l, OSEC_RODATA, &va, b);
+    for (int i = 0; i < l->norphan; i++)
+        if (!l->orphans[i].writable)
+            place_osec(l, OSEC_COUNT + i, &va, b);
     *text_size = va - *text_start;
 
     va = align_up(va, PAGE);           /* W^X boundary */
@@ -536,6 +577,9 @@ static void layout(struct linker *l, struct osec_bound *b,
     place_osec(l, OSEC_CTORS, &va, b);
     place_osec(l, OSEC_DTORS, &va, b);
     place_osec(l, OSEC_DATA, &va, b);
+    for (int i = 0; i < l->norphan; i++)
+        if (l->orphans[i].writable)
+            place_osec(l, OSEC_COUNT + i, &va, b);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
     b[OSEC_BSS].start = va;
@@ -601,6 +645,43 @@ static void define_brackets(struct linker *l, const struct osec_bound *b)
     define_linker_symbol(l, "__ctors_end", b[OSEC_CTORS].end);
     define_linker_symbol(l, "__dtors_start", b[OSEC_DTORS].start);
     define_linker_symbol(l, "__dtors_end", b[OSEC_DTORS].end);
+}
+
+static int is_c_ident(const char *s)
+{
+    if (!*s || (*s >= '0' && *s <= '9'))
+        return 0;
+    for (; *s; s++)
+        if (!(*s == '_' || (*s >= 'a' && *s <= 'z') ||
+              (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9')))
+            return 0;
+    return 1;
+}
+
+/* Each orphan group's bounds, under both spellings a program reaches for:
+ * GNU ld's __start_NAME/__stop_NAME when NAME is a C identifier, and for a
+ * dotted .NAME the __NAME_start/__NAME_end the fixed groups above use
+ * (.init_array -> __init_array_start) — which is what the EmbLinkOS kernel
+ * scripts spell by hand for .embk_exports. */
+static void define_orphan_brackets(struct linker *l,
+                                   const struct osec_bound *b)
+{
+    for (int i = 0; i < l->norphan; i++) {
+        const char *n = l->orphans[i].name;
+        const struct osec_bound *ob = &b[OSEC_COUNT + i];
+        char sym[256];
+        if (is_c_ident(n) && strlen(n) < 200) {
+            snprintf(sym, sizeof sym, "__start_%s", n);
+            define_linker_symbol(l, sym, ob->start);
+            snprintf(sym, sizeof sym, "__stop_%s", n);
+            define_linker_symbol(l, sym, ob->end);
+        } else if (n[0] == '.' && is_c_ident(n + 1) && strlen(n) < 200) {
+            snprintf(sym, sizeof sym, "__%s_start", n + 1);
+            define_linker_symbol(l, sym, ob->start);
+            snprintf(sym, sizeof sym, "__%s_end", n + 1);
+            define_linker_symbol(l, sym, ob->end);
+        }
+    }
 }
 
 /* L1: end-of-image symbols. A linker script's `kernel_end = .;` past .bss — the
@@ -995,12 +1076,13 @@ int embld_link(const char **inputs, int ninputs, const char *out,
 
     Elf64_Addr text_start, data_start;
     Elf64_Xword text_size, data_filesz, data_memsz;
-    struct osec_bound bounds[OSEC_COUNT];
+    struct osec_bound bounds[OSEC_COUNT + MAX_ORPHANS];
     memset(bounds, 0, sizeof bounds);
     layout(&l, bounds, &text_start, &text_size, &data_start, &data_filesz,
            &data_memsz);
     finalize_symbols(&l);
     define_brackets(&l, bounds);
+    define_orphan_brackets(&l, bounds);
     define_end_symbols(&l, data_start + data_memsz);   /* L1: kernel_end/_end */
 
     struct symbol *e = sym_find(&l, l.entry);

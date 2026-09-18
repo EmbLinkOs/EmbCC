@@ -104,7 +104,10 @@ usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [--lma-offset N] INPUT.o|INPUT.a 
 otherwise undefined, so no linker script is needed: `kernel_end`, `_end`, `end`,
 `__bss_end`, `__kernel_end` (the vaddr past the last `.bss` byte), and the
 `__init_array_start`/`_end`, `__fini_array_*`, `__ctors_*`, `__dtors_*` bracket
-family. A real definition always wins.
+family. Each other named section (an *orphan*, e.g. a `section(".embk_exports")`
+table) is laid out contiguously and bracketed too: `__embk_exports_start`/`_end`
+for a dotted name, `__start_mytab`/`__stop_mytab` for a C-identifier one. A real
+definition always wins.
 
 ### Examples
 
@@ -174,6 +177,10 @@ Refused loudly rather than faked, per THE RULE:
 - **`embld -T SCRIPT.ld`** — full linker scripts. Not needed so far: the
   end-of-image and bracket symbols above are auto-provided, which is what let
   the kernel link without one.
+- **`embld` for aarch64** — it links x86-64 objects only; the aarch64 kernel
+  links with the cross `ld`.
+- **`section("name")` on a function or a local** — honored on file-scope
+  variables only; elsewhere it is an error rather than a silent `.text`.
 - **VLAs, `_Complex`, 80-bit `long double`** — the remaining C gaps, ranked
   against a real corpus in [todo.md](todo.md).
 - **C++, `__thread`/TLS, PIE/PIC output** — out of scope by decision
