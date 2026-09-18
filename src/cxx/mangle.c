@@ -498,6 +498,15 @@ const char *mangle_local_static(struct cvar *v, struct cfunc *fn, int disc)
                   disc - 1);
 }
 
+/* A type on its own (a typeinfo symbol's tail: _ZTI + this). */
+const char *mangle_type_alone(struct cty *t)
+{
+    struct mbuf m;
+    memset(&m, 0, sizeof m);
+    mangle_type(&m, t);
+    return m.p;
+}
+
 const char *mangle_class_name(struct cclass *c)
 {
     struct mbuf m;

@@ -61,7 +61,43 @@ struct Pt {
     int mul(int k) const { return (x + y) * k; }
 };
 
+// A hierarchy split across the two compilers: Shape's key function
+// (~Shape) is embcc's, so its vtable and typeinfo are; Circle's is g++'s;
+// Both inherits from two dynamic bases (a secondary vtable, thunks).
+struct Shape {
+    virtual ~Shape();
+    virtual int area() const = 0;
+    virtual const char *name() const;
+    int id = 1;
+};
+struct Circle : Shape {
+    int r;
+    explicit Circle(int rr) : r(rr) {}
+    ~Circle() override;
+    int area() const override;
+    const char *name() const override;
+};
+struct Tagged {
+    virtual ~Tagged();
+    virtual long tag() const;
+    long t = 100;
+};
+struct Both : Shape, Tagged {
+    int area() const override;
+    long tag() const override;
+};
+struct NonPodBase { int x = 1; char c = 2; };
+struct TailUser : NonPodBase { char d = 3; };      // d in NonPodBase's padding
+struct EmptyBase {};
+struct EboUser : EmptyBase { int v; };
+
 namespace detail {
+Shape *make_circle(int r);                          // g++ builds
+int shape_area(const Shape &);                      // g++ calls virtuals
+long tagged_tag(const Tagged *);
+Circle *as_circle(Shape *);                         // g++'s dynamic_cast
+const char *type_name(const Shape &);
+long layout_code();                                 // g++'s offsets/sizes
 int via(const Pt *, int (Pt::*)(int) const, int Pt::*);   // g++ side
 int Pt::*member_of(int which);                              // embcc side
 int (Pt::*method())() const;                                // embcc side

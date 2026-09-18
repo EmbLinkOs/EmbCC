@@ -1,6 +1,7 @@
 // Side B of cxx-abi.sh (compiled by the reference g++).
 #include "abi.h"
 #include <stdarg.h>
+#include <typeinfo>
 
 namespace abi {
 namespace detail {
@@ -67,6 +68,19 @@ int nested(Account::Entry *e, Account::Entry &f)
 long pod_sum(Pod p) { return p.a + p.b + p.c; }
 
 Buf make_buf(int n) { return Buf(n); }
+
+Shape *make_circle(int r) { return new Circle(r); }
+int shape_area(const Shape &s) { return s.area(); }
+long tagged_tag(const Tagged *t) { return t->tag(); }
+Circle *as_circle(Shape *s) { return dynamic_cast<Circle *>(s); }
+const char *type_name(const Shape &s) { return typeid(s).name(); }
+long layout_code()
+{
+    TailUser tu;
+    return (long)((char *)&tu.d - (char *)&tu) * 1000000 +
+           (long)sizeof(TailUser) * 10000 + (long)sizeof(EboUser) * 100 +
+           (long)sizeof(Both);
+}
 int via(const Pt *p, int (Pt::*f)(int) const, int Pt::*d)
 {
     return (p->*f)(p->*d) + p->*member_of(1);
@@ -100,6 +114,10 @@ int std_name(int x) { return x + 1; }
 }
 
 int global_fn(abi::Pod *a, abi::Pod *b) { return a->a + b->a; }
+
+abi::Circle::~Circle() {}                           // Circle's key function
+int abi::Circle::area() const { return r * r * 3; }
+const char *abi::Circle::name() const { return "circle"; }
 
 // B builds and uses the class side A defines
 static int use_account()

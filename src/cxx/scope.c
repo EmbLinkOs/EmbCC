@@ -125,10 +125,41 @@ static struct csym *find_with_usings(struct cscope *s, const char *name,
     return NULL;
 }
 
+/* A class's member `name`: its own, else what its bases have (6.5.2) —
+ * the same member found through two bases is one result; two different
+ * ones are ambiguous, reported where the name is used. */
+int class_lookup_ambiguous;
+
+struct csym *class_member(struct cclass *c, const char *name)
+{
+    struct csym *y = scope_find_here(c->scope, name);
+    if (y)
+        return y;
+    struct csym *found = NULL;
+    for (int i = 0; i < c->nbases; i++) {
+        struct csym *z = class_member(c->bases[i].cls, name);
+        if (!z || z == found)
+            continue;
+        if (found && !(z->k == CS_CLASS && found->k == CS_CLASS &&
+                       z->type->cls == found->type->cls))
+            class_lookup_ambiguous = 1;
+        if (!found)
+            found = z;
+    }
+    return found;
+}
+
+static struct csym *find_in(struct cscope *s, const char *name)
+{
+    if (s->k == SC_CLASS)
+        return class_member(s->cls, name);
+    return find_with_usings(s, name, 0, 0);
+}
+
 struct csym *lookup(struct cscope *from, const char *name)
 {
     for (struct cscope *s = from; s; s = s->parent) {
-        struct csym *y = find_with_usings(s, name, 0, 0);
+        struct csym *y = find_in(s, name);
         if (y)
             return y;
     }
@@ -147,7 +178,7 @@ struct csym *lookup_tag(struct cscope *from, const char *name)
 
 struct csym *lookup_in(struct cscope *in, const char *name)
 {
-    return find_with_usings(in, name, 0, 0);
+    return find_in(in, name);
 }
 
 struct cscope *enclosing_ns(struct cscope *s)

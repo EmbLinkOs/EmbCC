@@ -78,6 +78,22 @@ libstdc++ and libsupc++ (the harness: `tests/harness/<arch>/link.sh --cxx`).
 - Pointers to members are Itanium's: a data member's is its offset (null
   -1), a member function's `{ptr, adj}` (`struct __cx_pmf`), a call
   through one dispatching on an odd ptr as a virtual one will.
+- A class with bases or virtual functions is laid out by Itanium's
+  algorithm (class.c): the vptr, a primary base sharing it, empty bases at
+  offset 0 unless a same-typed subobject is there, a non-POD base's tail
+  padding reused. C cannot say that with nested structs, so such a class is
+  a packed C struct with every offset spelled out (a base as its bytes),
+  and a base is reached by a pointer shifted by its offset (`E_BASE`); a
+  trivial copy of a class whose tail padding a derived class may use
+  copies its data size only.
+- Virtual functions: a vtable group per dynamic class — the primary vtable
+  extending its primary base's, one secondary per other dynamic base,
+  `this`-adjusting thunks (`_ZThn16_...`) where a secondary's overrider
+  lives elsewhere — emitted where the key function is defined, else weak
+  in every unit needing it; constructors and destructors store the vptrs;
+  a virtual destructor has its deleting D0; typeinfo objects are
+  libsupc++'s classes' (`__si_`/`__vmi_class_type_info`), and typeid and
+  dynamic_cast use them and `__dynamic_cast`.
 
 ## Status
 
@@ -109,12 +125,35 @@ types, `auto` and `decltype` for variables, `if`/`switch` with an
 initializer, `static_assert`, delegating constructors, default member
 initializers.
 
-Refused until later, each naming its milestone: base classes, virtual
-functions, `typeid`, `dynamic_cast` (CX3); templates (CX4); exceptions
-(CX5); lambdas, range-`for`, `initializer_list`, deduced return types
-(CX6); designated initializers, `<=>` and C++20's rewritten comparisons,
-coroutines (CX7). Access control is parsed but not yet enforced;
-anonymous struct/union members, and copying arrays of non-trivially
-copyable objects, are not supported yet.
+**CX3 done, but for virtual bases** (September 2026): single and multiple
+inheritance with g++'s layouts, virtual functions (overriding with and
+without `virtual`, `override`/`final`, pure virtuals and abstract
+classes, virtual destructors and deleting destructors, thunks), `typeid`
+and `dynamic_cast` (down, across, to `void *`, failing, of references).
+tests/cxx `inherit` and `rtti` agree with g++ on both targets, and
+cxx-abi splits one hierarchy across the two compilers — each calling the
+other's virtual functions, g++'s dynamic_cast reading EmbCC's typeinfo,
+deleting through a thunk to EmbCC's D0, layouts compared number for
+number.
 
-Next: CX3.
+Virtual base classes are the one CX3 piece left, as **CX3b**: vbase
+offsets, vcall offsets and virtual thunks, VTTs and construction vtables
+(`_ZTT`, `_ZTC`), the base-object constructors that take a VTT — g++'s
+exact output for a diamond is recorded and is the target. libstdc++'s
+stream classes use virtual bases, but through explicit instantiations
+compiled into libstdc++ itself; templates (CX4) come first.
+
+Already there ahead of their milestones: `enum class` and fixed underlying
+types, `auto` and `decltype` for variables, `if`/`switch` with an
+initializer, `static_assert`, delegating constructors, default member
+initializers.
+
+Refused until later, each naming its milestone: virtual base classes
+(CX3b); templates (CX4); exceptions (CX5); lambdas, range-`for`,
+`initializer_list`, deduced return types (CX6); designated initializers,
+`<=>` and C++20's rewritten comparisons, coroutines (CX7). Access control
+is parsed but not yet enforced; anonymous struct/union members, bit-fields
+in a class with bases or virtual functions, and copying arrays of
+non-trivially copyable objects are not supported yet.
+
+Next: CX4 (templates), then CX3b.

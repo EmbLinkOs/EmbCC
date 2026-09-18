@@ -264,8 +264,89 @@ struct ics {
     int is_ref;               /* a reference binding */
     int binds_rvref;          /* ... of an rvalue reference to an rvalue */
     unsigned ref_cv;          /* ... to this cv-qualified type */
+    struct cclass *base_to;   /* a derived-to-base conversion, to this */
     struct cfunc *user;       /* the user-defined conversion */
 };
+
+/* ---- bases ---- */
+
+static int path_count(struct cclass *d, struct cclass *b)
+{
+    if (d == b)
+        return 1;
+    int n = 0;
+    for (int i = 0; i < d->nbases; i++)
+        n += path_count(d->bases[i].cls, b);
+    return n;
+}
+
+/* The offset of the (first) b subobject in d, or -1. */
+static long base_offset(struct cclass *d, struct cclass *b)
+{
+    if (d == b)
+        return 0;
+    for (int i = 0; i < d->nbases; i++) {
+        long o = base_offset(d->bases[i].cls, b);
+        if (o >= 0)
+            return d->bases[i].off + o;
+    }
+    return -1;
+}
+
+int class_derives(struct cclass *d, struct cclass *b, int *ambiguous)
+{
+    int n = path_count(d, b);
+    if (ambiguous)
+        *ambiguous = n > 1;
+    return n > 0;
+}
+
+/* d is a proper, unambiguous base-of relation away from b. */
+static int is_proper_base(struct cclass *d, struct cclass *b)
+{
+    return d != b && path_count(d, b) == 1;
+}
+
+static struct cexpr *shift_object(struct cexpr *e, struct cclass *to,
+                                  long off, int ptr)
+{
+    unsigned q = ptr ? e->t->to->q : e->t->q;
+    struct cty *bt = ct_qual(ct_class(to), q);
+    struct cexpr *r = ex_new(E_BASE, ptr ? ct_ptr(bt) : bt,
+                             ptr ? VC_PRVALUE : e->vc);
+    r->a = xmalloc(sizeof *r->a);
+    r->a[0] = e;
+    r->na = 1;
+    r->ival = off;
+    r->is_array = ptr;
+    r->line = e->line;
+    r->file = e->file;
+    return r;
+}
+
+struct cexpr *to_base(struct cexpr *e, struct cclass *b, int ptr)
+{
+    struct cclass *d = ptr ? e->t->to->cls : e->t->cls;
+    if (d == b)
+        return e;
+    int n = path_count(d, b);
+    if (n == 0)
+        ex_error(e, "'%s' is not a base of '%s'", b->name, d->name);
+    if (n > 1)
+        ex_error(e, "'%s' is an ambiguous base of '%s'", b->name, d->name);
+    return shift_object(e, b, base_offset(d, b), ptr);
+}
+
+/* The object (or pointer) of base class b converted to its derived d:
+ * static_cast's downcast. */
+static struct cexpr *to_derived(struct cexpr *e, struct cclass *d, int ptr)
+{
+    struct cclass *b = ptr ? e->t->to->cls : e->t->cls;
+    if (!is_proper_base(d, b))
+        ex_error(e, "'%s' is not an unambiguous base of '%s'", b->name,
+                 d->name);
+    return shift_object(e, d, -base_offset(d, b), ptr);
+}
 
 static struct ics ics_of(struct cexpr *e, struct cty *to);
 
@@ -377,6 +458,11 @@ static struct ics std_conv(struct cexpr *e, struct cty *to)
             r.rank = R_CONV;
             return r;
         }
+        if (pf->k == CT_CLASS && pt->k == CT_CLASS &&
+            is_proper_base(pf->cls, pt->cls)) {
+            r.rank = R_CONV;
+            r.base_to = pt->cls;
+        }
         return r;
     }
     if (tu->k == CT_NULLPTR && is_null_const(e)) {
@@ -404,6 +490,13 @@ static struct ics ref_ics(struct cexpr *e, struct cty *rt)
         return r;
     }
     int related = ct_same_unqual(e->t, T);
+    int derived = !related && e->t->k == CT_CLASS && T->k == CT_CLASS &&
+                  is_proper_base(e->t->cls, T->cls);
+    if (derived) {
+        /* binding to a base: a derived-to-base Conversion (12.2.4.2) */
+        related = 1;
+        r.base_to = T->cls;
+    }
     int compat = related && (T->q & e->t->q) == e->t->q;
     int lv = e->vc == VC_LVALUE && !is_bitfield(e);
     r.is_ref = 1;
@@ -412,18 +505,19 @@ static struct ics ref_ics(struct cexpr *e, struct cty *rt)
      * temporary is made — the binding is not viable (9.4.4) */
     if (related && !compat && !is_bitfield(e))
         return r;
+    int ok_rank = derived ? R_CONV : R_EXACT;
     if (compat && !is_bitfield(e)) {
         if (!rv && lv) {
-            r.rank = R_EXACT;
+            r.rank = ok_rank;
             return r;
         }
         if (rv && !lv) {
-            r.rank = R_EXACT;
+            r.rank = ok_rank;
             r.binds_rvref = 1;
             return r;
         }
         if (!rv && cref && !lv) {
-            r.rank = R_EXACT;
+            r.rank = ok_rank;
             return r;
         }
         if (rv && lv)
@@ -458,6 +552,12 @@ static struct ics ics_of(struct cexpr *e, struct cty *to)
         if (e->k != E_INITLIST && e->t && e->t->k == CT_CLASS &&
             e->t->cls == to->cls) {
             r.rank = R_EXACT;
+            return r;
+        }
+        if (e->k != E_INITLIST && e->t && e->t->k == CT_CLASS &&
+            is_proper_base(e->t->cls, to->cls)) {
+            r.rank = R_CONV;              /* slicing to a base */
+            r.base_to = to->cls;
             return r;
         }
         if (e->k == E_INITLIST) {
@@ -504,6 +604,13 @@ static int ics_cmp(const struct ics *a, const struct ics *b)
         return 0;
     if (a->ptr_bool != b->ptr_bool)
         return a->ptr_bool ? -1 : 1;
+    if (a->base_to && b->base_to && a->base_to != b->base_to) {
+        /* to a base that derives from the other's: the nearer is better */
+        if (is_proper_base(a->base_to, b->base_to))
+            return 1;
+        if (is_proper_base(b->base_to, a->base_to))
+            return -1;
+    }
     if (a->is_ref && b->is_ref) {
         if (a->binds_rvref != b->binds_rvref)
             return a->binds_rvref ? 1 : -1;
@@ -573,7 +680,7 @@ static struct ics object_ics(struct cexpr *obj, struct cfunc *f)
         lv.vc = VC_LVALUE;
     struct cty *self = ct_ref(ct_qual(ct_class(f->cls), ft->fq),
                               ft->refq == 2);
-    if (obj->t->k != CT_CLASS || obj->t->cls != f->cls) {
+    if (obj->t->k != CT_CLASS || !class_derives(obj->t->cls, f->cls, NULL)) {
         struct ics bad;
         memset(&bad, 0, sizeof bad);
         bad.rank = R_BAD;
@@ -931,6 +1038,11 @@ struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx)
     struct cty *tu = ct_unqual(t);
     if (ct_same(e->t, tu))
         return e;
+    if (s.base_to && e->t->k == CT_PTR) {
+        e = to_base(e, s.base_to, 1);
+        if (ct_same(e->t, tu))
+            return e;
+    }
     return ex_cast(e, tu);
 }
 
@@ -967,6 +1079,9 @@ struct cexpr *bind_ref(struct cexpr *e, struct cty *rt, const char *ctx)
         struct cexpr *f = convert(e, ct_ptr(T), ctx);
         return f;
     }
+    if (e->t->k == CT_CLASS && T->k == CT_CLASS &&
+        is_proper_base(e->t->cls, T->cls) && e->vc != VC_PRVALUE)
+        e = to_base(e, T->cls, 0);
     int related = ct_same_unqual(e->t, T);
     int compat = related && (T->q & e->t->q) == e->t->q;
     if (related && !compat && !is_bitfield(e))
@@ -1089,6 +1204,9 @@ struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
     struct cexpr *e = call_result(ret);
     e->fn = fn;
     int member = fn->cls && !fn->is_static && !fn->is_ctor;
+    if (member && obj && obj->t->to->k == CT_CLASS &&
+        obj->t->to->cls != fn->cls)
+        obj = to_base(obj, fn->cls, 1);
     if (member) {
         if (!obj)
             cx_error(at, "calling member function '%s' without an object",
@@ -1124,6 +1242,12 @@ static struct cexpr *call_alloc_op(const char *name, struct cty *t,
         }
     }
     return call_global_op(name, args, na, at);
+}
+
+struct cexpr *call_delete_op(struct cclass *c, struct cexpr **args)
+{
+    return call_alloc_op("operator delete", ct_class(c), 0, args, 2,
+                         cx_cur());
 }
 
 struct cexpr *call_global_op(const char *name, struct cexpr **args, int na,
@@ -1513,6 +1637,16 @@ static void pointer_pair(struct cexpr **l, struct cexpr **r)
     }
     if (ct_same_unqual(a->to, b->to))
         return;
+    if (a->to->k == CT_CLASS && b->to->k == CT_CLASS) {
+        if (is_proper_base(a->to->cls, b->to->cls)) {
+            *l = to_base(*l, b->to->cls, 1);
+            return;
+        }
+        if (is_proper_base(b->to->cls, a->to->cls)) {
+            *r = to_base(*r, a->to->cls, 1);
+            return;
+        }
+    }
     if (a->to->k == CT_VOID) {
         *r = ex_cast(*r, a);
         return;
@@ -1923,6 +2057,17 @@ static struct cexpr *cast_to(struct cty *t, struct cexpr *e, int kind,
             r->vc = vc;
             return r;
         }
+        if ((kind == CAST_STATIC || kind == CAST_C) &&
+            e->t->k == CT_CLASS && T->k == CT_CLASS && e->t->cls != T->cls) {
+            struct cexpr *r;
+            if (is_proper_base(e->t->cls, T->cls))
+                r = to_base(e, T->cls, 0);
+            else
+                r = to_derived(e, T->cls, 0);
+            r->t = ct_qual(ct_class(T->cls), T->q);
+            r->vc = vc;
+            return r;
+        }
         /* a glvalue reinterpreted as a T (static_cast<T&&>(x) is
          * std::move) */
         struct cexpr *r = ex1(E_CAST, T, vc, e);
@@ -1944,6 +2089,18 @@ static struct cexpr *cast_to(struct cty *t, struct cexpr *e, int kind,
         return e;
     if (kind == CAST_CONST && !(f->k == CT_PTR && tu->k == CT_PTR))
         cx_error(at, "const_cast to a non-pointer type");
+    if ((kind == CAST_STATIC || kind == CAST_C) && f->k == CT_PTR &&
+        tu->k == CT_PTR && f->to->k == CT_CLASS && tu->to->k == CT_CLASS &&
+        f->to->cls != tu->to->cls) {
+        struct cclass *fc = f->to->cls, *tc = tu->to->cls;
+        struct cexpr *r = NULL;
+        if (is_proper_base(fc, tc))
+            r = to_base(e, tc, 1);
+        else if (is_proper_base(tc, fc))
+            r = to_derived(e, tc, 1);
+        if (r)
+            return ct_same(r->t, tu) ? r : ex_cast(r, tu);
+    }
     if (kind == CAST_STATIC) {
         /* the reverse of standard conversions, and enum <-> integer */
         int ok = (ct_is_arith(f) && ct_is_arith(tu)) ||
@@ -1960,6 +2117,65 @@ static struct cexpr *cast_to(struct cty *t, struct cexpr *e, int kind,
     if (kind == CAST_REINTERPRET && ct_is_arith(f) && ct_is_arith(tu))
         cx_error(at, "reinterpret_cast between arithmetic types");
     return ex_cast(e, tu);
+}
+
+/* std::type_info, which typeid's result is (from <typeinfo>). */
+static struct cty *type_info_type(const struct ctok *at)
+{
+    struct csym *std = lookup_in(cx_global, "std");
+    struct csym *y = std && std->k == CS_NAMESPACE
+                     ? lookup_in(std->ns, "type_info") : NULL;
+    if (!y || y->k != CS_CLASS)
+        cx_error(at, "typeid needs std::type_info: #include <typeinfo>");
+    return y->type;
+}
+
+/* dynamic_cast<T>(e) (7.6.1.7): to a base, a static conversion; else the
+ * run-time check libsupc++'s __dynamic_cast makes. */
+static struct cexpr *dynamic_cast_to(struct cty *t, struct cexpr *e,
+                                     const struct ctok *at)
+{
+    int ref = ct_is_ref(t);
+    struct cty *tt = ref ? t->to : ct_unqual(t)->k == CT_PTR ? t->to : NULL;
+    if (!tt || (tt->k != CT_CLASS && !(tt->k == CT_VOID && !ref)))
+        cx_error(at, "dynamic_cast to '%s': a pointer or reference to a "
+                     "class", ct_name(t));
+    struct cexpr *p;
+    if (ref) {
+        if (e->t->k != CT_CLASS || e->vc == VC_PRVALUE)
+            cx_error(at, "dynamic_cast to a reference needs a class glvalue");
+        p = ex_addr(e);
+    } else {
+        p = rvalue(e);
+        if (p->t->k != CT_PTR || p->t->to->k != CT_CLASS)
+            cx_error(at, "dynamic_cast of a non-pointer-to-class");
+    }
+    struct cclass *src = p->t->to->cls;
+    if (tt->k == CT_CLASS && class_derives(src, tt->cls, NULL)) {
+        struct cexpr *b = to_base(p, tt->cls, 1);
+        return ref ? ex_deref(b) : b;
+    }
+    if (!src->dynamic)
+        cx_error(at, "dynamic_cast from non-polymorphic '%s'", src->name);
+    struct cexpr *d = ex_new(E_DYNCAST, ct_ptr(ct_qual(tt, p->t->to->q)),
+                             VC_PRVALUE);
+    d->a = xmalloc(sizeof *d->a);
+    d->a[0] = p;
+    d->na = 1;
+    d->alloc_t = p->t->to;
+    d->is_array = tt->k == CT_VOID;
+    d->zero = ref;
+    /* the hint: src is a unique public base of the target at this offset
+     * (-1: unknown, -2: not a base at all) */
+    d->ival = -1;
+    if (tt->k == CT_CLASS) {
+        int amb;
+        if (class_derives(tt->cls, src, &amb) && !amb)
+            d->ival = base_offset(tt->cls, src);
+        else if (!class_derives(tt->cls, src, NULL))
+            d->ival = -2;
+    }
+    return ref ? ex_deref(d) : d;
 }
 
 /* T(args) or T{args}: a functional cast, or constructing a T. */
@@ -2440,9 +2656,10 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
     }
     case CS_FIELD: {
         struct cclass *c = y->scope->cls;
-        if (!cx_curfn || !cx_curfn->this_var || cx_curfn->cls != c)
+        if (!cx_curfn || !cx_curfn->this_var ||
+            !class_derives(cx_curfn->cls, c, NULL))
             cx_error(at, "member '%s' used without an object", name);
-        return member_of(ex_deref(ex_this()), y->field);
+        return member_of(to_base(ex_deref(ex_this()), c, 0), y->field);
     }
     case CS_FUNC: {
         struct cexpr *e = ex_new(E_OVL, y->fns->type, VC_LVALUE);
@@ -2452,7 +2669,7 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         e->file = at->file;
         e->adl = y->scope->k == SC_NAMESPACE;
         if (y->scope->k == SC_CLASS && cx_curfn && cx_curfn->this_var &&
-            cx_curfn->cls == y->scope->cls)
+            class_derives(cx_curfn->cls, y->scope->cls, NULL))
             e->obj = ex_this();
         return e;
     }
@@ -2584,8 +2801,6 @@ static struct cexpr *parse_primary(void)
     case TOK_CX_STATIC_CAST: case TOK_CX_REINTERPRET_CAST:
     case TOK_CX_CONST_CAST: case TOK_CX_DYNAMIC_CAST: {
         enum tok_kind k = cx_kind();
-        if (k == TOK_CX_DYNAMIC_CAST)
-            cx_error(at, "dynamic_cast is not supported yet (CX3)");
         cx_advance();
         cx_expect(TOK_LT, "'<' after the cast");
         struct cty *t = parse_type_id();
@@ -2593,13 +2808,35 @@ static struct cexpr *parse_primary(void)
         cx_expect(TOK_LPAREN, "'('");
         struct cexpr *x = expr_parse();
         cx_expect(TOK_RPAREN, "')'");
+        if (k == TOK_CX_DYNAMIC_CAST)
+            return dynamic_cast_to(t, x, at);
         return cast_to(t, x, k == TOK_CX_STATIC_CAST ? CAST_STATIC
                              : k == TOK_CX_CONST_CAST ? CAST_CONST
                              : CAST_REINTERPRET, at);
     }
-    case TOK_CX_TYPEID:
-        cx_error(at, "typeid is not supported yet (CX3)");
-        return NULL;
+    case TOK_CX_TYPEID: {
+        cx_advance();
+        if (cx_kind() != TOK_LPAREN)
+            cx_error(cx_cur(), "expected '(' after typeid");
+        int is_type = paren_type_id();
+        cx_advance();
+        struct cty *ti = type_info_type(at);
+        struct cexpr *e = ex_new(E_TYPEID, ct_qual(ti, CQ_CONST), VC_LVALUE);
+        if (is_type) {
+            e->alloc_t = ct_unqual(ct_strip_ref(parse_type_id()));
+        } else {
+            struct cexpr *x = expr_parse();
+            struct cty *xt = ct_unqual(x->t);
+            if (xt->k == CT_CLASS && xt->cls->dynamic && x->vc != VC_PRVALUE) {
+                e->a = xmalloc(sizeof *e->a);
+                e->a[0] = x;              /* its dynamic type, at run time */
+                e->na = 1;
+            }
+            e->alloc_t = xt;
+        }
+        cx_expect(TOK_RPAREN, "')'");
+        return e;
+    }
     case TOK_CX_THROW:
         cx_error(at, "exceptions are not supported yet (CX5)");
         return NULL;
@@ -2635,8 +2872,16 @@ static struct cexpr *parse_primary(void)
             cx_error(cx_cur(), "expected a name");
             return NULL;
         }
+        class_lookup_ambiguous = 0;
         struct csym *y = q.scope ? lookup_in(q.scope, name)
                                  : lookup(cx_scope, name);
+        if (class_lookup_ambiguous)
+            cx_error(at, "'%s' is found in more than one base class", name);
+        if (y && q.scope && y->k == CS_FUNC) {
+            struct cexpr *o = name_expr(y, name, at);
+            o->nonvirt = 1;           /* C::f() calls C's f, not an override */
+            return o;
+        }
         if (!y) {
             if (!q.scope && strncmp(name, "__builtin_", 10) == 0)
                 return parse_builtin(name, at);
@@ -2680,8 +2925,11 @@ static struct cexpr *call(struct cexpr *f, struct cexpr **args, int na,
             cx_error(at, "'%s' was not declared in this scope", name);
         struct cfunc *fn = best_of(fs.f, fs.n, f->obj, args, na, 0, at, name,
                                    0);
-        return make_call(fn, fn->cls && !fn->is_static ? f->obj : NULL, args,
-                         na, at);
+        struct cexpr *r = make_call(fn, fn->cls && !fn->is_static ? f->obj
+                                                                  : NULL,
+                                    args, na, at);
+        r->nonvirt = f->nonvirt;
+        return r;
     }
     if (f->k == E_PMEM && f->t->k == CT_FUNC) {
         /* (obj.*pmf)(args) */
@@ -2777,8 +3025,16 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
         return make_call(d, ex_addr(obj), NULL, 0, at);
     }
     struct qname q = peek_qname();
-    if (q.fin > 0)
-        cx_error(at, "qualified member access is not supported yet (CX3)");
+    struct cclass *in = c;              /* x.B::m looks in B */
+    int qualified = q.fin > 0;
+    if (qualified) {
+        if (q.bad || !q.scope || q.scope->k != SC_CLASS ||
+            !class_derives(c, q.scope->cls, NULL))
+            cx_error(at, "'%s' names no base of '%s'", tok_describe(&at->t),
+                     ct_name(obj->t));
+        in = q.scope->cls;
+        cx_pos += q.fin;
+    }
     const char *name;
     if (cx_kind() == TOK_CX_OPERATOR) {
         struct cty *conv = NULL;
@@ -2789,12 +3045,16 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
         name = cx_cur()->t.text;
         cx_advance();
     }
-    struct csym *y = scope_find_here(c->scope, name);
+    class_lookup_ambiguous = 0;
+    struct csym *y = class_member(in, name);
     if (!y)
         cx_error(at, "'%s' has no member named '%s'", ct_name(obj->t), name);
+    if (class_lookup_ambiguous)
+        cx_error(at, "member '%s' is found in more than one base of '%s'",
+                 name, ct_name(obj->t));
     switch (y->k) {
     case CS_FIELD:
-        return member_of(obj, y->field);
+        return member_of(to_base(obj, y->scope->cls, 0), y->field);
     case CS_VAR: {
         struct cexpr *e = ex_new(E_VAR, ct_strip_ref(y->var->type),
                                  VC_LVALUE);
@@ -2807,6 +3067,7 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
         e->fn = y->fns;
         e->name = name;
         e->obj = ex_addr(obj);
+        e->nonvirt = qualified;
         return e;
     }
     case CS_ENUMERATOR:

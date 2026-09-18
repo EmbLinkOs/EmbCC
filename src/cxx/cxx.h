@@ -232,6 +232,7 @@ struct cfunc {
     const char *name;         /* unqualified; "operator+" etc. for operators */
     const char *cname;        /* C identifier: mangled, or the name for C */
     const char *cname2;       /* a constructor's or destructor's C2/D2 */
+    const char *cname0;       /* a virtual destructor's deleting D0 */
     struct cty *type;         /* CT_FUNC (params and return) */
     const char **pnames;      /* parameter names (np of them) */
     struct cexpr **defargs;   /* default arguments, per parameter (or NULL) */
@@ -247,6 +248,12 @@ struct cfunc {
     int trivial;              /* ... and it runs no code (a C struct copy,
                                * nothing at all) */
     int is_conv;              /* a conversion function: operator T() */
+    int is_pure;              /* `= 0` */
+    int vslot;                /* a virtual function's slot in the vtable of
+                               * vclass (-1: not virtual) */
+    struct cclass *vclass;    /* the class whose primary vtable has it */
+    struct cexpr **baseinit;  /* a constructor's initialization of each
+                               * direct base (class.c), or NULL */
     int is_builtin;           /* implicitly declared (operator new, ...) */
     int c_linkage;
     int weak;                 /* __attribute__((weak)) */
@@ -300,6 +307,24 @@ struct cfield {
     struct cclass *anon;      /* an anonymous union/struct member */
 };
 
+/* A base-specifier: the base, and where its subobject sits. */
+struct cbase {
+    struct cclass *cls;
+    int is_virtual;
+    int access;
+    long off;                 /* offset in the object (a non-virtual base's;
+                               * a virtual base's is in the complete object
+                               * only: vbases) */
+};
+
+/* A slot of a vtable: the final overrider it calls, and how to get there
+ * from the vptr's class (a this-adjusting thunk when non-zero). */
+struct vslot {
+    struct cfunc *f;          /* the function (NULL: __cxa_pure_virtual) */
+    int deleting;             /* a virtual destructor's second slot (D0) */
+    long adjust;              /* bytes to subtract from `this` (a thunk) */
+};
+
 struct cclass {
     const char *name;
     const char *cname;        /* the C struct tag */
@@ -308,7 +333,30 @@ struct cclass {
     struct cscope *owner;     /* enclosing scope */
     struct cfield **fields;
     int nfields, capfields;
+    struct cbase *bases;      /* direct bases, in declaration order */
+    int nbases;
+    struct cbase *vbases;     /* every virtual base, at its offset in a
+                               * complete object */
+    int nvbases;
     long size, align;
+    long nvsize, nvalign;     /* the object without its virtual bases (what
+                               * a base subobject occupies, and later
+                               * subobjects may use its tail padding) */
+    long dsize;               /* data size: without tail padding */
+    int empty;                /* no data, no vptr, empty bases only */
+    int pod_layout;           /* POD for the purpose of layout: no tail
+                               * padding reuse */
+    int explicit_layout;      /* emit.c spells its offsets out (bases, a
+                               * vptr): a packed C struct */
+    int dynamic;              /* has a vptr at offset 0 */
+    struct cclass *primary;   /* the primary base: shares the vptr */
+    struct vslot *vtab;       /* the primary vtable's function slots */
+    int nvtab;
+    struct cfunc *key;        /* the key function: the vtable's home unit
+                               * is the one defining it (NULL: every unit
+                               * that needs the vtable emits it, weak) */
+    int vtable_used;          /* emit.c: the vtable (and RTTI) is needed */
+    int vtable_done, rtti_used, rtti_done;
     long align_attr;          /* __attribute__((aligned)) / alignas */
     int packed;
     int complete;
@@ -370,6 +418,13 @@ enum cexpr_kind {
     E_STMTEXPR,   /* GNU ({ ... }) */
     E_VAARG,      /* __builtin_va_arg(a[0], t) */
     E_MEMPTR,     /* &C::m: field (its offset) or fn */
+    E_BASE,       /* a[0] as its base subobject t: ival bytes in (a pointer
+                   * when is_array is set: null stays null) */
+    E_TYPEID,     /* typeid: of alloc_t, or of the polymorphic a[0]'s
+                   * dynamic type */
+    E_DYNCAST,    /* dynamic_cast of pointer a[0] (to its class alloc_t) to
+                   * t: ival the offset hint; is_array: to void *; zero: a
+                   * reference (failure calls __cxa_bad_cast) */
     E_PMEM,       /* a[0].*a[1]: the data member a pointer to member names */
     E_PMCALL      /* (a[0]->*a[1])(a[2]...): a[0] the object's address */
 };
@@ -409,6 +464,9 @@ struct cexpr {
                                * dependent lookup adds candidates */
     int memptr;               /* E_OVL: written &C::f — to become a pointer
                                * to member function */
+    int nonvirt;              /* E_CALL: qualified (C::f()), no virtual call */
+    int baseobj;              /* E_CONSTRUCT, E_CALL of a destructor: the
+                               * base-object variant (C2, D2) */
     struct cfunc *dtor;       /* E_DELETE: the destructor to run first */
     int line;
     const char *file;
@@ -462,9 +520,28 @@ enum {
 struct cfunc *resolve_ex(struct cfunc *set, struct cexpr *obj,
                          struct cexpr **args, int na, const struct ctok *at,
                          const char *what, int flags);
+/* The path from class d down to base b: 1 if b is d or a base of it,
+ * with *ambiguous set when there are two such subobjects. */
+int class_derives(struct cclass *d, struct cclass *b, int *ambiguous);
+/* e (a glvalue of class type, or a pointer to one when ptr) converted to
+ * its base class b. */
+struct cexpr *to_base(struct cexpr *e, struct cclass *b, int ptr);
+/* The member `name` of class c, its bases searched when c has none;
+ * class_lookup_ambiguous is set when two bases have different ones. */
+struct csym *class_member(struct cclass *c, const char *name);
+extern int class_lookup_ambiguous;
+/* The vtable group of a dynamic class (class.c): the primary vtable, then
+ * one per secondary dynamic base subobject. */
+int class_vtables(struct cclass *c, long **offs, struct vslot ***slots,
+                  int **counts);
+int class_abstract(struct cclass *c);   /* a slot's final overrider is pure */
+
 /* Aggregate initialization of t from a braced list. */
 struct cexpr *init_aggregate(struct cty *t, struct cexpr *list,
                              const struct ctok *at);
+/* The operator delete (the class's own, else the global one) a deleting
+ * destructor of c calls, for args {pointer, size}. */
+struct cexpr *call_delete_op(struct cclass *c, struct cexpr **args);
 /* The call to the operator (new, delete, ...) `name` in the global scope. */
 struct cexpr *call_global_op(const char *name, struct cexpr **args, int na,
                              const struct ctok *at);
@@ -590,6 +667,7 @@ const char *mangle_func(struct cfunc *f);
 const char *mangle_var(struct cvar *v, struct cscope *owner);
 const char *mangle_local_static(struct cvar *v, struct cfunc *fn, int disc);
 const char *mangle_class_name(struct cclass *c);   /* the nested-name form */
+const char *mangle_type_alone(struct cty *t);
 
 /* ---- emission ---- */
 

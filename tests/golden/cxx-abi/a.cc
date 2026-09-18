@@ -2,6 +2,7 @@
 // the functions; calls everything side B (g++) defines.
 #include "abi.h"
 #include <stdio.h>
+#include <string.h>
 
 namespace abi {
 
@@ -62,6 +63,13 @@ Buf::operator int() const { return sum(); }
 bool Buf::operator==(const Buf &o) const { return sum() == o.sum(); }
 
 Buf twice(const Buf &b) { return b + b; }
+
+Shape::~Shape() {}                                   // the key function
+const char *Shape::name() const { return "shape"; }
+Tagged::~Tagged() {}
+long Tagged::tag() const { return t; }
+int Both::area() const { return 7; }
+long Both::tag() const { return t + 1; }
 
 namespace detail {
 int Pt::*member_of(int which) { return which ? &Pt::y : &Pt::x; }
@@ -138,6 +146,29 @@ int main()
         CHECK("g++ calling embcc's slot functions", b_checks() == 7);
     }
     CHECK("every Buf destroyed", Buf::live == 0);
+    {
+        Shape *c = make_circle(3);                   // g++'s vtable
+        CHECK("calling g++'s virtuals", c->area() == 27 &&
+              strcmp(c->name(), "circle") == 0 && c->id == 1);
+        Both b;
+        CHECK("g++ calling embcc's virtuals", shape_area(b) == 7 &&
+              tagged_tag(&b) == 101);
+        CHECK("dynamic_cast by g++ on embcc's typeinfo",
+              as_circle(c) == static_cast<Circle *>(c) &&
+              as_circle(&b) == nullptr);
+        CHECK("typeinfo names agree",
+              strcmp(type_name(b), "N3abi4BothE") == 0 &&
+              strcmp(type_name(*c), "N3abi6CircleE") == 0);
+        delete c;                                    // g++'s D0
+        Tagged *tp = new Both;
+        delete tp;                                   // embcc's thunk to D0
+        TailUser tu;
+        EboUser eu;
+        long mine = (long)((char *)&tu.d - (char *)&tu) * 1000000 +
+                    (long)sizeof(TailUser) * 10000 + (long)sizeof(EboUser) * 100 +
+                    (long)sizeof(Both);
+        CHECK("layouts agree", layout_code() == mine && sizeof(eu) == 4);
+    }
     Pt pt = { 3, 4 };
     CHECK("member pointers to and from g++",
           via(&pt, &Pt::mul, &Pt::y) == 7 * 4 + 4 && (pt.*method())() == 7);

@@ -34,9 +34,93 @@ static struct cty *base_elem(struct cty *t)
     return t;
 }
 
+/* ---- layout (Itanium 2.4) ---- */
+
+/* The empty subobjects placed so far in the class being laid out: two of
+ * the same type may not share an address. */
+struct esub {
+    struct cclass *c;
+    long off;
+};
+static struct esub *esubs;
+static int nesubs, capesubs;
+
+static void esub_add(struct cclass *c, long off)
+{
+    if (!c->empty)
+        return;
+    if (nesubs == capesubs) {
+        capesubs = capesubs ? capesubs * 2 : 16;
+        esubs = xrealloc(esubs, (size_t)capesubs * sizeof *esubs);
+    }
+    esubs[nesubs].c = c;
+    esubs[nesubs].off = off;
+    nesubs++;
+    for (int i = 0; i < c->nbases; i++)
+        esub_add(c->bases[i].cls, off + c->bases[i].off);
+}
+
+static int esub_conflict(struct cclass *c, long off)
+{
+    if (!c->empty)
+        return 0;
+    for (int i = 0; i < nesubs; i++)
+        if (esubs[i].c == c && esubs[i].off == off)
+            return 1;
+    for (int i = 0; i < c->nbases; i++)
+        if (esub_conflict(c->bases[i].cls, off + c->bases[i].off))
+            return 1;
+    return 0;
+}
+
+/* What a base subobject of c occupies: a POD's whole size (its tail
+ * padding is never reused), else its data. */
+static long base_dsize(const struct cclass *c)
+{
+    return c->pod_layout ? c->size : c->nvsize;
+}
+
 static void layout(struct cclass *c)
 {
     long bits = 0, align = 1, size = 0;
+    nesubs = 0;
+    c->primary = NULL;
+    for (int i = 0; i < c->nbases && !c->primary; i++)
+        if (c->bases[i].cls->dynamic && !c->bases[i].is_virtual)
+            c->primary = c->bases[i].cls;
+    if (c->dynamic && !c->primary) {
+        bits = 64;                           /* the vptr */
+        size = align = 8;
+    }
+    /* the primary base first, at 0; then the other bases in order */
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < c->nbases; i++) {
+            struct cbase *b = &c->bases[i];
+            struct cclass *bc = b->cls;
+            if ((pass == 0) != (bc == c->primary))
+                continue;
+            long ba = bc->nvalign;
+            if (bc->empty) {
+                long off = 0;
+                if (esub_conflict(bc, off)) {
+                    off = (bits + 7) / 8;
+                    while (esub_conflict(bc, off))
+                        off += ba;
+                }
+                b->off = off;
+                esub_add(bc, off);
+                if (off + bc->size > size)
+                    size = off + bc->size;
+            } else {
+                long off = ((bits + 7) / 8 + ba - 1) / ba * ba;
+                b->off = off;
+                bits = (off + base_dsize(bc)) * 8;
+                if (off + bc->size > size)
+                    size = off + bc->size;
+            }
+            if (ba > align)
+                align = ba;
+        }
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];
         struct cty *t = fl->type;
@@ -57,11 +141,11 @@ static void layout(struct cclass *c)
         if (fl->bitwidth >= 0) {
             long w = fl->bitwidth, unit = fs * 8;
             if (w == 0) {
-                bits = round_up(bits, fa * 8);
+                bits = (bits + fa * 8 - 1) / (fa * 8) * (fa * 8);
                 continue;
             }
             if (!c->packed && bits / unit != (bits + w - 1) / unit)
-                bits = round_up(bits, unit);
+                bits = (bits + unit - 1) / unit * unit;
             fl->off = bits / 8 / fa * fa;
             bits += w;
             if (fl->name && fa > align)
@@ -69,20 +153,253 @@ static void layout(struct cclass *c)
             continue;
         }
         long off = round_up((bits + 7) / 8, fa);
+        struct cty *e = base_elem(t);
+        if (e->k == CT_CLASS && e->cls->empty && t->k == CT_CLASS)
+            while (esub_conflict(e->cls, off))
+                off += fa;
         fl->off = off;
+        if (e->k == CT_CLASS && t->k == CT_CLASS)
+            esub_add(e->cls, off);
         bits = (off + fs) * 8;
         if (fa > align)
             align = fa;
     }
-    if (!c->is_union)
-        size = (bits + 7) / 8;
+    long dsize = (bits + 7) / 8;
+    if (!c->is_union && dsize > size)
+        size = dsize;
     if (c->align_attr > align)
         align = c->align_attr;
+    c->dsize = c->is_union ? size : dsize;
+    c->nvsize = c->dsize;
+    c->nvalign = align;
     size = round_up(size, align);
     if (size == 0)
         size = 1;                     /* an empty class is one byte */
     c->size = size;
     c->align = align;
+}
+
+/* ---- virtual functions ---- */
+
+static int same_params(struct cty *a, struct cty *b)
+{
+    if (a->np != b->np || a->variadic != b->variadic || a->fq != b->fq ||
+        a->refq != b->refq)
+        return 0;
+    for (int i = 0; i < a->np; i++)
+        if (!ct_same_unqual(a->params[i], b->params[i]))
+            return 0;
+    return 1;
+}
+
+/* Does f (a member function of a derived class) override g? */
+static int overrides(struct cfunc *f, struct cfunc *g)
+{
+    if (!g->is_virtual)
+        return 0;
+    if (f->is_dtor || g->is_dtor)
+        return f->is_dtor && g->is_dtor;
+    if (f->is_ctor || f->is_static || strcmp(f->name, g->name) != 0)
+        return 0;
+    return same_params(f->type, g->type);
+}
+
+/* A virtual function of c or of any of its bases that f overrides. */
+static struct cfunc *overridden(struct cclass *c, struct cfunc *f)
+{
+    for (int i = 0; i < c->nbases; i++) {
+        struct cclass *b = c->bases[i].cls;
+        if (b->dtor && overrides(f, b->dtor))
+            return b->dtor;
+        for (struct csym *y = b->scope->syms; y; y = y->next)
+            if (y->k == CS_FUNC)
+                for (struct cfunc *g = y->fns; g; g = g->next)
+                    if (overrides(f, g))
+                        return g;
+        struct cfunc *g = overridden(b, f);
+        if (g)
+            return g;
+    }
+    return NULL;
+}
+
+/* c's member functions in declaration order (the vtable's order). */
+static int member_functions(struct cclass *c, struct cfunc ***out)
+{
+    int n = 0, cap = 16;
+    struct cfunc **v = xmalloc((size_t)cap * sizeof *v);
+    for (struct cfunc *f = cx_funcs; f; f = f->all_next) {
+        if (f->cls != c || f->is_ctor || f->is_static)
+            continue;
+        if (n == cap) {
+            cap *= 2;
+            v = xrealloc(v, (size_t)cap * sizeof *v);
+        }
+        v[n++] = f;
+    }
+    *out = v;
+    return n;
+}
+
+/* Virtual by `virtual`, or by overriding a base's virtual function. */
+static int mark_virtuals(struct cclass *c)
+{
+    struct cfunc **fs;
+    int n = member_functions(c, &fs), any = 0;
+    for (int i = 0; i < n; i++) {
+        if (!fs[i]->is_virtual && overridden(c, fs[i]))
+            fs[i]->is_virtual = 1;
+        any |= fs[i]->is_virtual;
+    }
+    return any;
+}
+
+/* A vtable of c's group: for the subobject at `off` (0: the primary). */
+struct ventry {
+    long off;
+    struct vslot *slots;
+    int n;
+};
+
+/* A slot's `adjust` here is the offset, in c, of the subobject whose type
+ * is the function's class — the thunk subtracts off - adjust. */
+static struct ventry *vgroup_of(struct cclass *c, int *n);
+
+static void push_slot(struct vslot **v, int *n, int *cap, struct cfunc *f,
+                      int deleting, long impl)
+{
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *v = xrealloc(*v, (size_t)*cap * sizeof **v);
+    }
+    (*v)[*n].f = f;
+    (*v)[*n].deleting = deleting;
+    (*v)[*n].adjust = impl;
+    (*n)++;
+}
+
+/* c's own overrider of g, if it declares one. */
+static struct cfunc *own_overrider(struct cclass *c, struct cfunc *g)
+{
+    struct cfunc **fs;
+    int n = member_functions(c, &fs);
+    for (int i = 0; i < n; i++)
+        if (fs[i]->is_virtual && fs[i] != g && overrides(fs[i], g))
+            return fs[i];
+    return NULL;
+}
+
+static void build_vtables(struct cclass *c)
+{
+    struct vslot *v = NULL;
+    int n = 0, cap = 0;
+    if (c->primary) {
+        for (int i = 0; i < c->primary->nvtab; i++) {
+            struct vslot s = c->primary->vtab[i];
+            struct cfunc *o = s.f ? own_overrider(c, s.f) : NULL;
+            push_slot(&v, &n, &cap, o ? o : s.f, s.deleting,
+                      o ? 0 : s.adjust);
+        }
+    }
+    struct cfunc **fs;
+    int nf = member_functions(c, &fs);
+    for (int i = 0; i < nf; i++) {
+        struct cfunc *f = fs[i];
+        if (!f->is_virtual)
+            continue;
+        int k;
+        for (k = 0; k < n; k++)
+            if (v[k].f == f)
+                break;
+        if (k < n) {
+            f->vslot = k;
+            f->vclass = c;
+            continue;
+        }
+        f->vslot = n;
+        f->vclass = c;
+        push_slot(&v, &n, &cap, f, 0, 0);
+        if (f->is_dtor)
+            push_slot(&v, &n, &cap, f, 1, 0);
+    }
+    c->vtab = v;
+    c->nvtab = n;
+    /* the key function: the first virtual one neither pure nor inline */
+    c->key = NULL;
+    for (int i = 0; i < nf && !c->key; i++)
+        if (fs[i]->is_virtual && !fs[i]->is_pure && !fs[i]->is_inline &&
+            !fs[i]->is_implicit && !fs[i]->is_defaulted)
+            c->key = fs[i];
+}
+
+static struct ventry *vgroup_of(struct cclass *c, int *n)
+{
+    int cap = 4;
+    struct ventry *g = xmalloc((size_t)cap * sizeof *g);
+    *n = 0;
+    if (!c->dynamic)
+        return g;
+    g[0].off = 0;
+    g[0].slots = c->vtab;
+    g[0].n = c->nvtab;
+    *n = 1;
+    for (int i = 0; i < c->nbases; i++) {
+        struct cbase *b = &c->bases[i];
+        if (!b->cls->dynamic)
+            continue;
+        int bn;
+        struct ventry *bg = vgroup_of(b->cls, &bn);
+        for (int k = 0; k < bn; k++) {
+            if (b->cls == c->primary && k == 0)
+                continue;                  /* shared with c's primary */
+            struct ventry e;
+            e.off = b->off + bg[k].off;
+            e.n = bg[k].n;
+            e.slots = xmalloc((size_t)(e.n ? e.n : 1) * sizeof *e.slots);
+            for (int s = 0; s < e.n; s++) {
+                struct vslot sl = bg[k].slots[s];
+                struct cfunc *o = sl.f ? own_overrider(c, sl.f) : NULL;
+                e.slots[s].f = o ? o : sl.f;
+                e.slots[s].deleting = sl.deleting;
+                e.slots[s].adjust = o ? 0 : b->off + sl.adjust;
+            }
+            if (*n == cap) {
+                cap *= 2;
+                g = xrealloc(g, (size_t)cap * sizeof *g);
+            }
+            g[(*n)++] = e;
+        }
+    }
+    return g;
+}
+
+/* The vtable group of c (emit.c): the primary, then the secondaries. */
+int class_vtables(struct cclass *c, long **offs, struct vslot ***slots,
+                  int **counts)
+{
+    int n;
+    struct ventry *g = vgroup_of(c, &n);
+    *offs = xmalloc((size_t)(n ? n : 1) * sizeof **offs);
+    *slots = xmalloc((size_t)(n ? n : 1) * sizeof **slots);
+    *counts = xmalloc((size_t)(n ? n : 1) * sizeof **counts);
+    for (int i = 0; i < n; i++) {
+        (*offs)[i] = g[i].off;
+        (*slots)[i] = g[i].slots;
+        (*counts)[i] = g[i].n;
+    }
+    return n;
+}
+
+/* An object of c cannot be made while a slot's final overrider is pure. */
+int class_abstract(struct cclass *c)
+{
+    int n;
+    struct ventry *g = vgroup_of(c, &n);
+    for (int i = 0; i < n; i++)
+        for (int s = 0; s < g[i].n; s++)
+            if (g[i].slots[s].f && g[i].slots[s].f->is_pure)
+                return 1;
+    return 0;
 }
 
 /* The special member f is, by its signature: a copy or move constructor
@@ -145,6 +462,7 @@ static struct cfunc *declare_implicit(struct cclass *c, int sp, int trivial,
     f->is_dtor = sp == SP_DTOR;
     f->is_implicit = 1;
     f->is_inline = 1;
+    f->vslot = -1;
     f->special = sp;
     f->trivial = trivial;
     f->is_deleted = deleted;
@@ -171,8 +489,26 @@ static struct cfunc *declare_implicit(struct cclass *c, int sp, int trivial,
 
 void class_complete(struct cclass *c)
 {
+    int virt = mark_virtuals(c);
+    c->dynamic = virt;
+    for (int i = 0; i < c->nbases; i++)
+        c->dynamic |= c->bases[i].cls->dynamic;
     layout(c);
     c->complete = 1;
+    c->explicit_layout = c->nbases > 0 || c->dynamic;
+    int named = 0;
+    for (int i = 0; i < c->nfields; i++)
+        named |= c->fields[i]->name != NULL ||
+                 c->fields[i]->bitwidth != 0;
+    c->empty = !c->dynamic && !named;
+    for (int i = 0; i < c->nbases; i++)
+        c->empty &= c->bases[i].cls->empty;
+    if (c->explicit_layout)
+        for (int i = 0; i < c->nfields; i++)
+            if (c->fields[i]->bitwidth >= 0)
+                cx_error(cx_cur(), "bit-fields in a class with bases or "
+                                   "virtual functions are not supported "
+                                   "yet");
     int private_field = 0;
     c->user_ctors = c->ctors != NULL;
     struct cfunc *ucopy = NULL, *umove = NULL, *ucopy_as = NULL,
@@ -199,13 +535,15 @@ void class_complete(struct cclass *c)
         c->copy_assign = ucopy_as ? ucopy_as : umove_as;
 
     /* what the members make of copying, destroying, building, assigning */
-    int mdtor = 1, mcopy = 1, mdefault = 1, massign = 1;
+    int mdtor = 1, mcopy = 1, mdefault = 1, massign = 1, mpod = 1;
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];
         if (fl->access != CA_PUBLIC)
             private_field = 1;
         if (fl->dflt_tok >= 0)
-            mdefault = 0;
+            mdefault = mpod = 0;
+        if (ct_is_ref(fl->type))
+            mpod = 0;
         struct cty *e = base_elem(fl->type);
         if (e->k != CT_CLASS)
             continue;
@@ -214,8 +552,23 @@ void class_complete(struct cclass *c)
         mcopy &= m->trivial_copy;
         mdefault &= m->trivial_default;
         massign &= m->trivial_assign;
+        mpod &= m->pod_layout;
     }
-    c->trivial_dtor = mdtor && !(udtor && !udtor->is_defaulted);
+    int vdtor = udtor && udtor->is_virtual;
+    for (int i = 0; i < c->nbases; i++) {
+        struct cclass *b = c->bases[i].cls;
+        mdtor &= b->trivial_dtor;
+        mcopy &= b->trivial_copy;
+        mdefault &= b->trivial_default;
+        massign &= b->trivial_assign;
+        if (b->dtor && b->dtor->is_virtual)
+            vdtor = 1;
+    }
+    /* a class with virtual functions copies and builds its vptr: never
+     * trivially (its destructor still may be) */
+    if (c->dynamic)
+        mcopy = mdefault = massign = 0;
+    c->trivial_dtor = mdtor && !vdtor && !(udtor && !udtor->is_defaulted);
     c->trivial_copy = mcopy && !c->user_copy_ctor && !c->user_move_ctor;
     c->trivial_assign = massign && !c->user_copy_assign &&
                         !c->user_move_assign;
@@ -228,7 +581,18 @@ void class_complete(struct cclass *c)
     c->trivial_default = mdefault && !udefault &&
                          (!c->user_ctors || c->has_default_ctor);
     c->trivial_for_calls = c->trivial_copy && c->trivial_dtor;
-    c->aggregate = !c->user_ctors && !private_field;
+    int plain_bases = 1;
+    for (int i = 0; i < c->nbases; i++)
+        plain_bases &= !c->bases[i].is_virtual &&
+                       c->bases[i].access == CA_PUBLIC;
+    c->aggregate = !c->user_ctors && !private_field && !c->dynamic &&
+                   plain_bases;
+    /* POD for the purpose of layout: C++03's POD (Itanium 2.2) */
+    c->pod_layout = !c->user_ctors && !private_field && !c->nbases &&
+                    !c->dynamic && mpod && !ucopy_as && !umove_as &&
+                    !udtor;
+    if (c->pod_layout)
+        c->nvsize = c->dsize = c->size;
     if (!c->user_ctors)
         c->has_default_ctor = 1;
 
@@ -262,9 +626,16 @@ void class_complete(struct cclass *c)
                          umove || umove_as);
     if (!any_user_copy && !udtor)
         declare_implicit(c, SP_MOVE_ASSIGN, c->trivial_assign, 0);
-    if (!udtor)
-        declare_implicit(c, SP_DTOR, c->trivial_dtor, 0);
+    if (!udtor) {
+        struct cfunc *d = declare_implicit(c, SP_DTOR, c->trivial_dtor, 0);
+        d->is_virtual = vdtor;            /* overriding a virtual one */
+    }
+    if (c->dynamic)
+        build_vtables(c);
 }
+
+static int building_base;       /* constructing a base subobject, which
+                                 * an abstract class may be */
 
 /* The this parameter of a member function of c. */
 static struct cvar *this_param(struct cclass *c, unsigned cv)
@@ -338,6 +709,26 @@ void define_implicit(struct cfunc *f)
         ctor_meminit(f, NULL, 0);
         break;
     case SP_COPY: case SP_MOVE:
+        f->baseinit = xcalloc((size_t)(c->nbases ? c->nbases : 1),
+                              sizeof *f->baseinit);
+        building_base = 1;
+        for (int b = 0; b < c->nbases; b++) {
+            struct cexpr *src = to_base(other, c->bases[b].cls, 0);
+            if (move) {
+                struct cexpr *x = ex_new(E_CAST, src->t, VC_XVALUE);
+                x->a = xmalloc(sizeof *x->a);
+                x->a[0] = src;
+                x->na = 1;
+                x->lvcast = 1;
+                src = x;
+            }
+            struct cexpr *e = init_object(ct_class(c->bases[b].cls),
+                                          INIT_DIRECT, &src, 1, NULL);
+            if (e && e->k == E_CONSTRUCT)
+                e->baseobj = 1;
+            f->baseinit[b] = e;
+        }
+        building_base = 0;
         f->meminit = xcalloc((size_t)(c->nfields ? c->nfields : 1),
                              sizeof *f->meminit);
         for (int i = 0; i < c->nfields; i++) {
@@ -357,6 +748,22 @@ void define_implicit(struct cfunc *f)
     case SP_COPY_ASSIGN: case SP_MOVE_ASSIGN: {
         struct cstmt **tail = &f->body->body;
         struct cexpr *self = ex_deref(ex_this());
+        for (int b = 0; b < c->nbases; b++) {
+            struct cclass *bc = c->bases[b].cls;
+            struct cexpr *src = to_base(other, bc, 0);
+            if (move) {
+                struct cexpr *x = ex_new(E_CAST, src->t, VC_XVALUE);
+                x->a = xmalloc(sizeof *x->a);
+                x->a[0] = src;
+                x->na = 1;
+                x->lvcast = 1;
+                src = x;
+            }
+            struct cstmt *st = st_new(S_EXPR);
+            st->e = expr_assign(TOK_ASSIGN, to_base(self, bc, 0), src);
+            *tail = st;
+            tail = &st->next;
+        }
         for (int i = 0; i < c->nfields; i++) {
             struct cfield *fl = c->fields[i];
             if (!fl->name)
@@ -503,6 +910,8 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
 {
     if (!c->complete)
         cx_error(at, "'%s' is incomplete here", c->name ? c->name : "class");
+    if (!building_base && c->dynamic && class_abstract(c))
+        cx_error(at, "an object of abstract class '%s'", c->name);
     switch (form) {
     case INIT_DEFAULT:
         return default_construct(c, 0, at);
@@ -577,10 +986,24 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
     }
     struct meminit_raw **by = xcalloc((size_t)(c->nfields ? c->nfields : 1),
                                       sizeof *by);
+    struct meminit_raw **bby = xcalloc((size_t)(c->nbases ? c->nbases : 1),
+                                       sizeof *bby);
     for (int i = 0; i < n; i++) {
         if (c->name && strcmp(mi[i].name, c->name) == 0)
             cx_error(mi[i].at, "a delegating constructor initializes "
                                "nothing else");
+        int b;
+        for (b = 0; b < c->nbases; b++)
+            if (c->bases[b].cls->name &&
+                strcmp(c->bases[b].cls->name, mi[i].name) == 0)
+                break;
+        if (b < c->nbases) {
+            if (bby[b])
+                cx_error(mi[i].at, "base '%s' is initialized twice",
+                         mi[i].name);
+            bby[b] = &mi[i];
+            continue;
+        }
         int k = 0;
         while (k < c->nfields && !(c->fields[k]->name &&
                                    strcmp(c->fields[k]->name,
@@ -593,6 +1016,27 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
             cx_error(mi[i].at, "'%s' is initialized twice", mi[i].name);
         by[k] = &mi[i];
     }
+    /* the bases, in declaration order: as written, else by default */
+    f->baseinit = xcalloc((size_t)(c->nbases ? c->nbases : 1),
+                          sizeof *f->baseinit);
+    building_base = 1;
+    for (int b = 0; b < c->nbases; b++) {
+        struct cclass *bc = c->bases[b].cls;
+        struct meminit_raw *r = bby[b];
+        struct cexpr *e;
+        if (!r)
+            e = construct(bc, INIT_DEFAULT, NULL, 0, at);
+        else if (r->braced)
+            e = construct(bc, INIT_LIST, r->args, 1, r->at);
+        else if (r->na == 0)
+            e = construct(bc, INIT_VALUE, NULL, 0, r->at);
+        else
+            e = construct(bc, INIT_DIRECT, r->args, r->na, r->at);
+        if (e && e->k == E_CONSTRUCT)
+            e->baseobj = 1;
+        f->baseinit[b] = e;
+    }
+    building_base = 0;
     f->meminit = xcalloc((size_t)(c->nfields ? c->nfields : 1),
                          sizeof *f->meminit);
     for (int i = 0; i < c->nfields; i++) {

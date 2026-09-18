@@ -110,9 +110,19 @@ static const char *fn_name(struct cfunc *f, int variant)
         if (!f->cname) {
             f->cname = cx_fmt("__cx_lf%d", cx_uid());
             f->cname2 = cx_fmt("%s_base", f->cname);
+            f->cname0 = cx_fmt("%s_del", f->cname);
         }
-        return variant == 2 && (f->is_ctor || f->is_dtor) ? f->cname2
-                                                          : f->cname;
+        if (f->is_ctor || f->is_dtor)
+            return variant == 2 ? f->cname2 : variant == 0 ? f->cname0
+                                                           : f->cname;
+        return f->cname;
+    }
+    if (f->is_dtor && variant == 0) {
+        if (!f->cname0) {
+            f->ctor_variant = 0;
+            f->cname0 = mangle_func(f);
+        }
+        return f->cname0;
     }
     if (f->is_ctor || f->is_dtor) {
         if (variant == 2) {
@@ -131,6 +141,25 @@ static const char *fn_name(struct cfunc *f, int variant)
     if (!f->cname)
         f->cname = mangle_func(f);
     return f->cname;
+}
+
+/* ---- RTTI and vtable names ---- */
+
+static int class_internal(const struct cclass *c)
+{
+    if (c->local || c->anon)
+        return 1;
+    for (struct cscope *s = c->owner; s; s = s->parent)
+        if (s->k == SC_NAMESPACE && s->anon)
+            return 1;
+    return 0;
+}
+
+static const char *class_sym(struct cclass *c, const char *prefix)
+{
+    if (c->local || c->anon)
+        return cx_fmt("__cx_%s%s", prefix + 2, c->cname);
+    return cx_fmt("%s%s", prefix, mangle_class_name(c));
 }
 
 /* ---- C types ---- */
@@ -228,6 +257,8 @@ static const char *ctype(struct cty *t)
 /* ---- emission state ---- */
 
 static struct sb out_types, out_decls, out_vars, out_code, out_init;
+static struct sb out_rtti;      /* typeinfo objects */
+static struct sb out_vtables;
 static struct cfunc **work;
 static int nwork, capwork;
 static struct cfunc *cur_fn;
@@ -235,6 +266,9 @@ static int need_atexit, need_guard;
 
 static void need_fn(struct cfunc *f)
 {
+    /* an implicit or defaulted member a vtable (or a call) reaches */
+    if ((f->is_implicit || f->is_defaulted) && !f->defined && !f->is_deleted)
+        define_implicit(f);
     if (!f->declared) {
         f->declared = 1;
         f->used = 1;
@@ -246,6 +280,18 @@ static void need_fn(struct cfunc *f)
             work = xrealloc(work, (size_t)capwork * sizeof *work);
         }
         work[nwork++] = f;
+    }
+}
+
+static int any_vtable;
+static int need_dyncast;
+static const char *typeinfo_sym(struct cty *t);
+
+static void need_vtable(struct cclass *c)
+{
+    if (c->dynamic && !c->vtable_used) {
+        c->vtable_used = 1;
+        any_vtable = 1;
     }
 }
 
@@ -549,8 +595,26 @@ static char *call_text(struct cexpr *e, const char *dest)
     if (e->k == E_ICALL)
         return cx_fmt("(%s)(%s%s)", ev(e->a[0]), slot,
                       args_text(e->a, e->na, 1));
-    need_fn(e->fn);
-    return cx_fmt("%s(%s%s)", fn_name(e->fn, 1), slot,
+    struct cfunc *f = e->fn;
+    if (f->is_virtual && f->cls && !f->is_static && !e->nonvirt &&
+        f->vslot >= 0) {
+        /* through the object's vptr: slot vslot of its class's vtable (a
+         * destructor's D1; its deleting D0 is the next) */
+        struct cty **ps = xmalloc((size_t)(f->type->np + 1) * sizeof *ps);
+        ps[0] = ct_ptr(ct_class(f->cls));
+        for (int i = 0; i < f->type->np; i++)
+            ps[i + 1] = f->type->params[i];
+        struct cty *cft = ct_func(f->type->to, ps, f->type->np + 1,
+                                  f->type->variadic);
+        int u = cx_uid();
+        need_vtable(f->cls);
+        return cx_fmt("({ %s = %s; ((%s)((*(void ***)__cx_v%d)[%d]))(%s"
+                      "__cx_v%d%s%s); })", cdecl(ps[0], cx_fmt("__cx_v%d", u)),
+                      ev(e->a[0]), ctype(ct_ptr(cft)), u, f->vslot, slot, u,
+                      e->na > 1 ? ", " : "", args_text(e->a, e->na, 1));
+    }
+    need_fn(f);
+    return cx_fmt("%s(%s%s)", fn_name(f, e->baseobj ? 2 : 1), slot,
                   args_text(e->a, e->na, 0));
 }
 
@@ -663,6 +727,15 @@ static char *delete_text(struct cexpr *e)
     int sized = e->fn->type->np == 2;
     struct sb b = { 0, 0, 0 };
     sb_printf(&b, "({ %s = %s; if (%s) { ", cdecl(pt, p), ev(e->a[0]), p);
+    if (!e->is_array && e->dtor && e->dtor->is_virtual) {
+        /* the deleting destructor of the object's own class: D0, the
+         * slot after D1 — it frees with the right size */
+        need_vtable(e->dtor->cls);
+        sb_printf(&b, "((void (*)(%s))((*(void ***)%s)[%d]))(%s); ",
+                  ctype(pt), p, e->dtor->vslot + 1, p);
+        sb_put(&b, "} (void)0; })");
+        return b.p;
+    }
     if (!e->is_array) {
         if (e->dtor) {
             need_fn(e->dtor);
@@ -734,7 +807,37 @@ static char *ev(struct cexpr *e)
         need_pmf = 1;
         return cx_fmt("((struct __cx_pmf){ (void *)%s, 0 })",
                       fn_name(e->fn, 1));
-    case E_PMEM:
+    case E_PMEM: case E_TYPEID:
+        return elv(e);
+    case E_DYNCAST: {
+        int u = cx_uid();
+        need_dyncast = 1;
+        if (e->is_array)        /* to void *: the object's start */
+            return cx_fmt("({ char *__cx_p%d = (char *)%s; __cx_p%d ? (void *)"
+                          "(__cx_p%d + ((long *)*(void ***)__cx_p%d)[-2]) : "
+                          "(void *)0; })", u, ev(e->a[0]), u, u, u);
+        return cx_fmt("({ void *__cx_p%d = (void *)%s; __cx_p%d = __cx_p%d ? "
+                      "__dynamic_cast(__cx_p%d, %s, %s, %ldL) : (void *)0; "
+                      "%s(%s)__cx_p%d; })", u, ev(e->a[0]), u, u, u,
+                      typeinfo_sym(ct_class(e->alloc_t->cls)),
+                      typeinfo_sym(e->t->to), e->ival,
+                      e->zero ? cx_fmt("if (!__cx_p%d) __cxa_bad_cast(); ", u)
+                              : "", ctype(e->t), u);
+    }
+    case E_BASE:
+        if (e->is_array) {
+            /* a pointer: null stays null */
+            struct cexpr *o = e->a[0];
+            if (!e->ival)
+                return cx_fmt("((%s)%s)", ctype(e->t), ev(o));
+            if (o->k == E_THIS || o->k == E_ADDR)
+                return cx_fmt("((%s)((char *)%s + %ldL))", ctype(e->t),
+                              ev(o), e->ival);
+            int u = cx_uid();
+            return cx_fmt("({ char *__cx_b%d = (char *)%s; (%s)(__cx_b%d ? "
+                          "__cx_b%d + %ldL : 0); })", u, ev(o), ctype(e->t),
+                          u, u, e->ival);
+        }
         return elv(e);
     case E_BUILTIN: {
         struct sb b = { 0, 0, 0 };
@@ -768,6 +871,17 @@ static char *ev(struct cexpr *e)
                       ev(e->a[1]));
     }
     case E_ASSIGN:
+        if (e->op == TOK_ASSIGN && e->t->k == CT_CLASS &&
+            (e->a[0]->k == E_BASE || e->t->cls->dsize < e->t->cls->size)) {
+            /* a trivial assignment writes the data, never tail padding a
+             * derived class may be using */
+            int u = cx_uid();
+            struct cty *pt = ct_ptr(ct_unqual(e->t));
+            return cx_fmt("(*({ %s = %s; __builtin_memcpy(__cx_d%d, %s, "
+                          "%ldUL); __cx_d%d; }))",
+                          cdecl(pt, cx_fmt("__cx_d%d", u)), eaddr(e->a[0]),
+                          u, eaddr(e->a[1]), e->t->cls->dsize, u);
+        }
         if (e->op == TOK_ASSIGN)
             return cx_fmt("(%s = %s)", elv(e->a[0]), ev(e->a[1]));
         return cx_fmt("(%s %s= %s)", elv(e->a[0]), binop_text(e->op),
@@ -852,6 +966,17 @@ static char *elv(struct cexpr *e)
     case E_PMEM:
         return cx_fmt("(*(%s)((char *)%s + %s))", ctype(ct_ptr(e->t)),
                       eaddr(e->a[0]), ev(e->a[1]));
+    case E_BASE:
+        if (!e->is_array)
+            return cx_fmt("(*(%s)((char *)%s + %ldL))", ctype(ct_ptr(e->t)),
+                          eaddr(e->a[0]), e->ival);
+        break;
+    case E_TYPEID:
+        if (e->na)              /* the vtable's slot -1 */
+            return cx_fmt("(*(%s)((*(void ***)%s)[-1]))",
+                          ctype(ct_ptr(e->t)), eaddr(e->a[0]));
+        return cx_fmt("(*(%s)%s)", ctype(ct_ptr(e->t)),
+                      typeinfo_sym(e->alloc_t));
     case E_CAST:
         if (e->lvcast) {
             if (ct_same_unqual(e->t, e->a[0]->t))
@@ -918,6 +1043,11 @@ static char *eaddr(struct cexpr *e)
     case E_PMEM:
         return cx_fmt("((%s)((char *)%s + %s))", ctype(ct_ptr(e->t)),
                       eaddr(e->a[0]), ev(e->a[1]));
+    case E_BASE:
+        if (!e->is_array)
+            return cx_fmt("((%s)((char *)%s + %ldL))", ctype(ct_ptr(e->t)),
+                          eaddr(e->a[0]), e->ival);
+        break;
     case E_CAST:
         if (e->lvcast)
             return cx_fmt("((%s)%s)", ctype(ct_ptr(e->t)), eaddr(e->a[0]));
@@ -974,15 +1104,30 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
                       ctype(ct_ptr(el)), dest, u, u, n, u, sb_str(&s));
             return;
         }
-        if (init->zero)
-            sb_printf(b, "__builtin_memset(&(%s), 0, sizeof(%s)); ", dest,
-                      dest);
-        if (init->fn) {
-            need_fn(init->fn);
-            sb_printf(b, "%s(&(%s)%s%s); ", fn_name(init->fn, 1), dest,
-                      init->na ? ", " : "", args_text(init->a, init->na, 0));
-        } else if (init->na == 1) {
-            sb_printf(b, "%s = %s; ", dest, ev(init->a[0]));
+        {
+            /* a base subobject, or a class whose tail padding a derived
+             * class may use: only its data is written */
+            struct cclass *ic = init->t->cls;
+            long bytes = init->baseobj || ic->dsize < ic->size ? ic->dsize
+                                                               : 0;
+            if (init->zero && bytes)
+                sb_printf(b, "__builtin_memset(&(%s), 0, %ldUL); ", dest,
+                          bytes);
+            else if (init->zero)
+                sb_printf(b, "__builtin_memset(&(%s), 0, sizeof(%s)); ",
+                          dest, dest);
+            if (init->fn) {
+                need_fn(init->fn);
+                sb_printf(b, "%s(&(%s)%s%s); ",
+                          fn_name(init->fn, init->baseobj ? 2 : 1), dest,
+                          init->na ? ", " : "",
+                          args_text(init->a, init->na, 0));
+            } else if (init->na == 1 && bytes) {
+                sb_printf(b, "__builtin_memcpy(&(%s), %s, %ldUL); ", dest,
+                          eaddr(init->a[0]), bytes);
+            } else if (init->na == 1) {
+                sb_printf(b, "%s = %s; ", dest, ev(init->a[0]));
+            }
         }
         return;
     case E_INITLIST: {
@@ -1636,17 +1781,62 @@ static const char *fn_storage(struct cfunc *f)
 
 static void emit_prototype(struct cfunc *f)
 {
-    const char *st = fn_storage(f);
+    /* weak goes on definitions only: a weak declaration would let a
+     * missing body link as address 0 */
+    const char *st = fn_internal(f) ? "static " : "";
     const char *sec = "";
     if (f->is_ctor || f->is_dtor) {
         sb_printf(&out_decls, "%s%s%s;\n", st, sec,
                   func_header(f, fn_name(f, 1), 0));
         sb_printf(&out_decls, "%s%s%s;\n", st, sec,
                   func_header(f, fn_name(f, 2), 0));
+        if (f->is_dtor && f->is_virtual)
+            sb_printf(&out_decls, "%s%s%s;\n", st, sec,
+                      func_header(f, fn_name(f, 0), 0));
         return;
     }
     sb_printf(&out_decls, "%s%s%s;\n", st, sec,
               func_header(f, fn_name(f, 1), 0));
+}
+
+/* The i-th direct base subobject of *this, as a C lvalue. */
+static char *base_lvalue(struct cclass *c, int i)
+{
+    struct cbase *b = &c->bases[i];
+    return cx_fmt("(*(%s)((char *)this + %ldL))",
+                  ctype(ct_ptr(ct_class(b->cls))), b->off);
+}
+
+/* The vtable group's address points (Itanium 2.5.3): each vtable is
+ * offset-to-top, typeinfo, then its slots, and the vptr points past the
+ * two. */
+static int vtable_points(struct cclass *c, long **offs, int **points,
+                         struct vslot ***slots, int **counts)
+{
+    int n = class_vtables(c, offs, slots, counts);
+    *points = xmalloc((size_t)(n ? n : 1) * sizeof **points);
+    int at = 0;
+    for (int i = 0; i < n; i++) {
+        (*points)[i] = at + 2;
+        at += 2 + (*counts)[i];
+    }
+    return n;
+}
+
+/* Point every vptr of the object at c's vtables: after the bases are
+ * built (they set their own), before members and the body. */
+static void store_vptrs(struct sb *b, struct cclass *c)
+{
+    if (!c->dynamic)
+        return;
+    need_vtable(c);
+    long *offs;
+    int *points, *counts;
+    struct vslot **slots;
+    int n = vtable_points(c, &offs, &points, &slots, &counts);
+    for (int i = 0; i < n; i++)
+        sb_printf(b, "*(void ***)((char *)this + %ldL) = (void **)%s + %d;\n",
+                  offs[i], class_sym(c, "_ZTV"), points[i]);
 }
 
 static void emit_function(struct cfunc *f)
@@ -1671,6 +1861,13 @@ static void emit_function(struct cfunc *f)
     sb_printf(&b, "%s%s%s\n{\n", st, sec, func_header(f, name, 1));
     struct cclass *c = f->cls;
     if (f->is_ctor) {
+        if (!f->delegate && f->baseinit)
+            for (int i = 0; i < c->nbases; i++)
+                if (f->baseinit[i])
+                    stmt_init(&b, base_lvalue(c, i), ct_class(c->bases[i].cls),
+                              f->baseinit[i]);
+        if (!f->delegate)
+            store_vptrs(&b, c);
         if (f->delegate) {
             stmt_init(&b, "(*this)", ct_class(c), f->delegate);
         } else if (f->meminit) {
@@ -1683,6 +1880,8 @@ static void emit_function(struct cfunc *f)
             }
         }
     }
+    if (f->is_dtor)
+        store_vptrs(&b, c);   /* virtual calls in it reach this class */
     if (f->body)
         emit_block_items(&b, f->body->body);
     run_cleans(&b, 0);
@@ -1698,6 +1897,13 @@ static void emit_function(struct cfunc *f)
             if (d)
                 sb_printf(&b, "%s\n", d);
         }
+        for (int i = c->nbases - 1; i >= 0; i--) {
+            struct cfunc *bd = class_dtor(c->bases[i].cls);
+            if (!bd)
+                continue;
+            need_fn(bd);
+            sb_printf(&b, "%s(&%s);\n", fn_name(bd, 2), base_lvalue(c, i));
+        }
     }
     if (!f->cls && !f->c_linkage && f->owner == cx_global &&
         strcmp(f->name, "main") == 0)
@@ -1712,6 +1918,20 @@ static void emit_function(struct cfunc *f)
                       ? f->params[i]->cname : cx_fmt("__cx_p%d", i));
         sb_printf(&b, "%s%s%s\n{\n%s(%s);\n}\n", st, sec,
                   func_header(f, fn_name(f, 1), 1), name, sb_str(&args));
+        if (f->is_dtor && f->is_virtual) {
+            /* the deleting destructor: destroy, then free with the
+             * class's size */
+            struct cexpr *vp = ex_new(E_NULLPTR, ct_ptr(ct_basic(CT_VOID)),
+                                      VC_PRVALUE);
+            struct cexpr *sz = ex_int(c->size, ct_size_t());
+            struct cexpr *oa[2] = { vp, sz };
+            struct cexpr *call = call_delete_op(c, oa);
+            need_fn(call->fn);
+            sb_printf(&b, "%s%s\n{\n%s(this);\n%s(this%s);\n}\n", st,
+                      func_header(f, fn_name(f, 0), 1), fn_name(f, 1),
+                      fn_name(call->fn, 1), call->fn->type->np == 2
+                      ? cx_fmt(", %ldUL", c->size) : "");
+        }
     }
     sb_put(&out_code, sb_str(&b));
     cur_fn = NULL;
@@ -1791,6 +2011,251 @@ static int gvar_needed(struct cvar *v)
     return 1;
 }
 
+/* ---- classes with bases or a vptr ---- */
+
+struct item {
+    long off, size;
+    char *decl;
+};
+
+static int item_cmp(const void *a, const void *b)
+{
+    const struct item *x = a, *y = b;
+    return x->off < y->off ? -1 : x->off > y->off;
+}
+
+/* The Itanium layout, spelled out: the vptr, each base's bytes, the
+ * fields, at the offsets class.c chose — packed, with explicit padding,
+ * so C puts nothing anywhere else. */
+static void emit_explicit_struct(struct sb *out, struct cclass *c)
+{
+    struct item *it = xmalloc((size_t)(c->nfields + c->nbases + 2) *
+                              sizeof *it);
+    int n = 0;
+    if (c->dynamic && !c->primary)
+        it[n++] = (struct item){ 0, 8, "void *__cx_vptr" };
+    for (int i = 0; i < c->nbases; i++) {
+        struct cclass *b = c->bases[i].cls;
+        if (b->empty)
+            continue;
+        it[n++] = (struct item){ c->bases[i].off, b->nvsize,
+                                 cx_fmt("char __cx_base%d[%ld]", i,
+                                        b->nvsize) };
+    }
+    for (int i = 0; i < c->nfields; i++) {
+        struct cfield *fl = c->fields[i];
+        long sz = ct_is_ref(fl->type) ? 8 : ct_size(fl->type);
+        it[n++] = (struct item){ fl->off, sz, cdecl(fl->type,
+                                                    field_cname(fl)) };
+    }
+    qsort(it, (size_t)n, sizeof *it, item_cmp);
+    sb_printf(out, "struct %s {\n", c->cname);
+    long at = 0;
+    int pad = 0;
+    for (int i = 0; i < n; i++) {
+        if (it[i].off < at)
+            cx_error(NULL, "internal: overlapping layout in '%s'", c->name);
+        if (it[i].off > at)
+            sb_printf(out, "    char __cx_pad%d[%ld];\n", pad++,
+                      it[i].off - at);
+        sb_printf(out, "    %s;\n", it[i].decl);
+        at = it[i].off + it[i].size;
+    }
+    if (c->size > at)
+        sb_printf(out, "    char __cx_pad%d[%ld];\n", pad++, c->size - at);
+    sb_printf(out, "} __attribute__((packed, aligned(%ld)));\n", c->align);
+}
+
+/* ---- vtables and RTTI (Itanium 2.5, 2.9.5) ---- */
+
+static struct sb out_rtti_decl;
+
+/* Where c's vtable and typeinfo live: 0 another unit (the one defining
+ * its key function), 1 here and weak (no key function), 2 here. */
+static int rtti_home(struct cclass *c)
+{
+    if (class_internal(c))
+        return 1;
+    if (!c->dynamic || !c->key)
+        return 1;
+    return c->key->defined ? 2 : 0;
+}
+
+static const char *rtti_storage(struct cclass *c)
+{
+    if (class_internal(c))
+        return "static ";
+    return rtti_home(c) == 1 ? "__attribute__((weak)) " : "";
+}
+
+static void need_rtti(struct cclass *c);
+
+/* The typeinfo object of t: a class's (emitted by this unit or another),
+ * or a fundamental type's — libsupc++ has those, and their pointers'. */
+static const char *typeinfo_sym(struct cty *t)
+{
+    t = ct_unqual(t);
+    if (t->k == CT_CLASS) {
+        need_rtti(t->cls);
+        return class_sym(t->cls, "_ZTI");
+    }
+    struct cty *b = t->k == CT_PTR ? ct_unqual(t->to) : t;
+    if (b->k > CT_NULLPTR || (t->k == CT_PTR && ct_is_ref(t->to)))
+        cx_error(NULL, "typeid of '%s' is not supported yet", ct_name(t));
+    const char *sym = cx_fmt("_ZTI%s", mangle_type_alone(t));
+    sb_printf(&out_rtti_decl, "extern void *%s[];\n", sym);
+    return sym;
+}
+
+static void need_rtti(struct cclass *c)
+{
+    if (c->rtti_used)
+        return;
+    c->rtti_used = 1;
+    for (int i = 0; i < c->nbases; i++)
+        need_rtti(c->bases[i].cls);
+}
+
+static int count_subobjects(struct cclass *c, struct cclass *of)
+{
+    int n = c == of;
+    for (int i = 0; i < c->nbases; i++)
+        n += count_subobjects(c->bases[i].cls, of);
+    return n;
+}
+
+static int repeats_a_base(struct cclass *top, struct cclass *c)
+{
+    for (int i = 0; i < c->nbases; i++)
+        if (count_subobjects(top, c->bases[i].cls) > 1 ||
+            repeats_a_base(top, c->bases[i].cls))
+            return 1;
+    return 0;
+}
+
+/* c's typeinfo object: a __class_type_info (no bases), a
+ * __si_class_type_info (one public non-virtual base at offset 0), else a
+ * __vmi_class_type_info with each base's offset and flags. */
+static void emit_rtti(struct cclass *c)
+{
+    c->rtti_done = 1;
+    const char *ti = class_sym(c, "_ZTI"), *ts = class_sym(c, "_ZTS");
+    int home = rtti_home(c);
+    int si = c->nbases == 1 && !c->bases[0].is_virtual &&
+             c->bases[0].access == CA_PUBLIC && c->bases[0].off == 0;
+    const char *kind = c->nbases == 0 ? "17__class_type_info"
+                       : si ? "20__si_class_type_info"
+                       : "21__vmi_class_type_info";
+    int words = c->nbases == 0 ? 2 : si ? 3 : 3 + 2 * c->nbases;
+    if (home == 0) {
+        sb_printf(&out_rtti_decl, "extern void *%s[];\n", ti);
+        return;
+    }
+    const char *st = rtti_storage(c);
+    if (!class_internal(c))
+        sb_printf(&out_rtti_decl, "extern void *%s[%d];\n", ti, words);
+    else
+        sb_printf(&out_rtti_decl, "static void *%s[%d];\n", ti, words);
+    sb_printf(&out_rtti_decl, "extern void *_ZTVN10__cxxabiv1%sE[];\n", kind);
+    const char *mangled = class_internal(c) ? cx_fmt("*%s", c->cname)
+                                            : mangle_class_name(c);
+    sb_printf(&out_rtti, "%schar %s[] = \"%s\";\n", st, ts, mangled);
+    sb_printf(&out_rtti, "%svoid *%s[%d] = { (void *)((char *)"
+                         "_ZTVN10__cxxabiv1%sE + 16), (void *)%s", st, ti,
+              words, kind, ts);
+    if (si) {
+        sb_printf(&out_rtti, ", (void *)%s", class_sym(c->bases[0].cls,
+                                                       "_ZTI"));
+    } else if (c->nbases) {
+        long flags = repeats_a_base(c, c) ? 1 : 0;
+        sb_printf(&out_rtti, ", (void *)%ldL",
+                  flags | ((long)c->nbases << 32));
+        for (int i = 0; i < c->nbases; i++) {
+            struct cbase *b = &c->bases[i];
+            long of = (b->off << 8) | (b->access == CA_PUBLIC ? 2 : 0) |
+                      (b->is_virtual ? 1 : 0);
+            sb_printf(&out_rtti, ", (void *)%s, (void *)%ldL",
+                      class_sym(b->cls, "_ZTI"), of);
+        }
+    }
+    sb_put(&out_rtti, " };\n");
+}
+
+static struct sb out_thunks;
+
+/* A this-adjusting thunk for slot f reached `delta` bytes into the
+ * object: `this -= delta`, then f (Itanium's _ZThn<delta>_). */
+static const char *thunk_for(struct cfunc *f, int deleting, long delta,
+                             struct cclass *c)
+{
+    const char *target = fn_name(f, f->is_dtor ? (deleting ? 0 : 1) : 1);
+    const char *name = class_internal(c) || !strncmp(target, "__cx", 4)
+                       ? cx_fmt("%s_thunk%ld", target, delta)
+                       : cx_fmt("_ZThn%ld_%s", delta, target + 2);
+    struct sb args = { 0, 0, 0 };
+    int sret = class_indirect(f->type->to);
+    if (sret)
+        sb_put(&args, "__cx_sret, ");
+    sb_printf(&args, "(%s)((char *)this - %ldL)",
+              ctype(ct_ptr(ct_class(f->cls))), delta);
+    for (int i = 0; i < f->type->np; i++)
+        sb_printf(&args, ", %s", cx_fmt("__cx_p%d", i));
+    struct cfunc tmp = *f;
+    tmp.params = NULL;                 /* the thunk's own parameter names */
+    const char *st = class_internal(c) ? "static " : "__attribute__((weak)) ";
+    sb_printf(&out_decls, "%s%s;\n", class_internal(c) ? "static " : "",
+              func_header(&tmp, name, 0));
+    sb_printf(&out_thunks, "%s%s\n{\n%s%s(%s);\n}\n", st,
+              func_header(&tmp, name, 1),
+              f->type->to->k == CT_VOID && !sret ? "" : "return ", target,
+              sb_str(&args));
+    return name;
+}
+
+static int any_pure;
+
+static void emit_vtable(struct cclass *c)
+{
+    c->vtable_done = 1;
+    need_rtti(c);
+    const char *tv = class_sym(c, "_ZTV");
+    int home = rtti_home(c);
+    long *offs;
+    int *points, *counts;
+    struct vslot **slots;
+    int n = vtable_points(c, &offs, &points, &slots, &counts);
+    int total = 0;
+    for (int i = 0; i < n; i++)
+        total += 2 + counts[i];
+    if (home == 0) {
+        sb_printf(&out_rtti_decl, "extern void *%s[];\n", tv);
+        return;
+    }
+    struct sb b = { 0, 0, 0 };
+    sb_printf(&b, "%svoid *%s[%d] = {", rtti_storage(c), tv, total);
+    for (int i = 0; i < n; i++) {
+        sb_printf(&b, "%s (void *)%ldL, (void *)%s", i ? "," : "", -offs[i],
+                  class_sym(c, "_ZTI"));
+        for (int k = 0; k < counts[i]; k++) {
+            struct vslot *sl = &slots[i][k];
+            const char *fn;
+            if (!sl->f || sl->f->is_pure) {
+                fn = "__cxa_pure_virtual";
+                any_pure = 1;
+            } else {
+                need_fn(sl->f);
+                long delta = offs[i] - sl->adjust;
+                fn = delta ? thunk_for(sl->f, sl->deleting, delta, c)
+                           : fn_name(sl->f, sl->f->is_dtor
+                                            ? (sl->deleting ? 0 : 1) : 1);
+            }
+            sb_printf(&b, ", (void *)%s", fn);
+        }
+    }
+    sb_put(&b, " };\n");
+    sb_put(&out_vtables, sb_str(&b));
+}
+
 /* ---- the unit ---- */
 
 char *cx_emit_unit(void)
@@ -1803,6 +2268,11 @@ char *cx_emit_unit(void)
     nwork = 0;
     need_atexit = need_guard = 0;
     need_pmf = 0;
+    any_vtable = any_pure = need_dyncast = 0;
+    memset(&out_rtti, 0, sizeof out_rtti);
+    memset(&out_rtti_decl, 0, sizeof out_rtti_decl);
+    memset(&out_vtables, 0, sizeof out_vtables);
+    memset(&out_thunks, 0, sizeof out_thunks);
     ntemps = 0;
     struct fx top, *save;
     fx_begin(&top, &save);
@@ -1810,6 +2280,10 @@ char *cx_emit_unit(void)
     for (struct cfunc *f = cx_funcs; f; f = f->all_next)
         if (f->defined && !f->is_inline && !f->is_implicit)
             need_fn(f);
+    /* a vtable homed here is emitted whether or not this unit uses it */
+    for (int i = 0; i < cx_nclasses; i++)
+        if (cx_classes[i]->dynamic && rtti_home(cx_classes[i]) == 2)
+            need_vtable(cx_classes[i]);
     int progress = 1;
     int wi = 0;
     while (progress) {
@@ -1818,6 +2292,13 @@ char *cx_emit_unit(void)
             emit_function(work[wi++]);
             progress = 1;
         }
+        for (int i = 0; any_vtable && i < cx_nclasses; i++) {
+            struct cclass *c = cx_classes[i];
+            if (c->vtable_used && !c->vtable_done) {
+                emit_vtable(c);
+                progress = 1;
+            }
+        }
         for (int i = 0; i < cx_ngvars; i++) {
             if (gvar_needed(cx_gvars[i])) {
                 emit_gvar(cx_gvars[i]);
@@ -1825,6 +2306,9 @@ char *cx_emit_unit(void)
             }
         }
     }
+    for (int i = 0; i < cx_nclasses; i++)
+        if (cx_classes[i]->rtti_used && !cx_classes[i]->rtti_done)
+            emit_rtti(cx_classes[i]);
     fx_end(save);
 
     struct sb out = { 0, 0, 0 };
@@ -1835,6 +2319,10 @@ char *cx_emit_unit(void)
                   cx_classes[i]->cname);
     for (int i = 0; i < cx_nclasses; i++) {
         struct cclass *c = cx_classes[i];
+        if (c->explicit_layout) {
+            emit_explicit_struct(&out, c);
+            continue;
+        }
         sb_printf(&out, "%s %s {\n", c->is_union ? "union" : "struct",
                   c->cname);
         int any = 0;
@@ -1869,7 +2357,15 @@ char *cx_emit_unit(void)
     for (struct cfunc *f = cx_funcs; f; f = f->all_next)
         if (f->declared)
             emit_prototype(f);
+    if (any_pure)
+        sb_put(&out, "void __cxa_pure_virtual(void);\n");
+    if (need_dyncast)
+        sb_put(&out, "void *__dynamic_cast(void *, void *, void *, long);\n"
+                     "void __cxa_bad_cast(void);\n");
     sb_put(&out, sb_str(&out_decls));
+    sb_put(&out, sb_str(&out_rtti_decl));
+    sb_put(&out, sb_str(&out_rtti));
+    sb_put(&out, sb_str(&out_vtables));
     if (need_pmf) {
         /* whatever above names it is written first */
         struct sb pre = { 0, 0, 0 };
@@ -1885,6 +2381,7 @@ char *cx_emit_unit(void)
     }
     sb_put(&out, sb_str(&out_vars));
     sb_put(&out, sb_str(&out_code));
+    sb_put(&out, sb_str(&out_thunks));
     if (out_init.len) {
         sb_printf(&out, "static void __cx_global_init(void)\n{\n%s}\n",
                   sb_str(&out_init));

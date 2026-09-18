@@ -61,8 +61,9 @@ targets, so EmbCC's C++ objects link with g++'s and with libstdc++.
 | **CX1** namespace-scope objects (`.init_array`, `__cxa_atexit`), function-local statics (`__cxa_guard_*`) | ✓ | ✓ |
 | **CX2** operator overloading, argument-dependent lookup, conversion functions and converting constructors, copy and move (implicit memberwise, implicit move on return, NRVO), pointers to members, class `operator new`/`delete` | ✓ | ✓ |
 | A class that is not trivially copyable, by value: argument by reference to the caller's temporary; result through the return slot | ✓ slot first, in `rdi` | ✓ slot in `x8` (`embcc_sret`) |
-| Itanium mangling (nested names, `St`, substitutions, member pointers, conversion functions); EmbCC objects linking with g++ objects both ways | ✓ | ✓ |
-| CX3..CX9 — inheritance and virtual functions, templates, exceptions, lambdas, C++20, libstdc++ compiled by EmbCC, C++ on the OS | ✗ refused, naming the milestone | ✗ |
+| **CX3** single and multiple inheritance with g++'s layouts (empty bases, tail padding reuse), virtual functions and destructors, pure virtuals, thunks, vtables and typeinfo by the key-function rule, `typeid`, `dynamic_cast` | ✓ | ✓ |
+| Itanium mangling (nested names, `St`, substitutions, member pointers, conversion functions, thunks, typeinfo); EmbCC objects linking with g++ objects both ways — including one class hierarchy split across the two compilers | ✓ | ✓ |
+| Virtual base classes (CX3b); CX4..CX9 — templates, exceptions, lambdas, C++20, libstdc++ compiled by EmbCC, C++ on the OS | ✗ refused, naming the milestone | ✗ |
 
     embcc -c prog.cc -o prog.o          # .cc .cpp .cxx .C .c++, or -x c++
     embcc --emit-c prog.cc              # the C it lowers to
@@ -114,7 +115,7 @@ that call each other in both directions: `tests/golden/sysv-abi.sh`,
 | suite | x86_64 | aarch64 |
 |---|---|---|
 | `tests/exec/*.c` — compiled, RUN, and agreeing with gcc (`agrees-with-gcc`) | 81 + 3 x86-only | 81 |
-| `tests/cxx/*.cc` — C++ compiled, RUN, and agreeing with g++ (`cxx-agrees-with-gxx`); an EmbCC half linked with a g++ half (`cxx-abi`) | 8 | 8 |
+| `tests/cxx/*.cc` — C++ compiled, RUN, and agreeing with g++ (`cxx-agrees-with-gxx`); an EmbCC half linked with a g++ half (`cxx-abi`) | 11 | 11 |
 | `tests/golden/*.sh` — gcc cross-ABI, gdb, predef, optimizer | 14 | 14 |
 | `tests/golden/<arch>/` — machine-specific referees | 25 (embas vs nasm, embld, embdbg, EMBX, self-host, kernel) | 2 (encoder vs objdump, inline asm vs `aarch64-elf-as`) |
 | `tests/compile/` — refusals | ✓ | — |

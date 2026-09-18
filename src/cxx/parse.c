@@ -944,6 +944,14 @@ static struct cty *parse_params(void)
             parse_attrs(NULL);
             continue;
         }
+        /* virt-specifiers: checked by overriding, not needed to emit */
+        if (cx_kind() == TOK_IDENT && (strcmp(cx_cur()->t.text, "override")
+                                       == 0 ||
+                                       strcmp(cx_cur()->t.text, "final")
+                                       == 0)) {
+            cx_advance();
+            continue;
+        }
         break;
     }
     return ft;
@@ -1081,8 +1089,9 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     f->mi_tok = -1;
     f->pnames = ft->pnames;
     merge_defaults(f, ft);
-    if (f->is_virtual)
-        cx_error(d->at, "virtual functions are not supported yet (CX3)");
+    f->vslot = -1;
+    if (f->is_virtual && !cls)
+        cx_error(d->at, "only a member function can be virtual");
     /* internal linkage: an unnamed namespace, or static at namespace scope */
     for (struct cscope *s = target; s; s = s->parent)
         if (s->k == SC_NAMESPACE && s->anon)
@@ -1603,6 +1612,61 @@ static struct cscope *elaborated_home(void)
     return s;
 }
 
+/* base-specifier-list: [virtual] [access] [virtual] class-name, ... */
+static void parse_bases(struct cclass *c)
+{
+    int cap = 0;
+    do {
+        const struct ctok *at = cx_cur();
+        parse_attrs(NULL);
+        int virt = 0, access = c->is_struct ? CA_PUBLIC : CA_PRIVATE;
+        for (;;) {
+            if (cx_accept(TOK_CX_VIRTUAL)) virt = 1;
+            else if (cx_accept(TOK_CX_PUBLIC)) access = CA_PUBLIC;
+            else if (cx_accept(TOK_CX_PROTECTED)) access = CA_PROTECTED;
+            else if (cx_accept(TOK_CX_PRIVATE)) access = CA_PRIVATE;
+            else break;
+        }
+        struct cty *t;
+        int n;
+        if (cx_kind() == TOK_CX_DECLTYPE) {
+            t = parse_decltype();
+        } else {
+            t = peek_type_name(&n);
+            if (!t)
+                cx_error(at, "expected a base class name before %s",
+                         tok_describe(&cx_cur()->t));
+            cx_pos += n;
+        }
+        if (t->k != CT_CLASS)
+            cx_error(at, "base '%s' is not a class", ct_name(t));
+        struct cclass *b = t->cls;
+        if (!b->complete)
+            cx_error(at, "base class '%s' is incomplete", ct_name(t));
+        if (b == c)
+            cx_error(at, "a class cannot be its own base");
+        if (b->is_union || c->is_union)
+            cx_error(at, "a union cannot be a base or have bases");
+        for (int i = 0; i < c->nbases; i++)
+            if (c->bases[i].cls == b)
+                cx_error(at, "'%s' is a direct base twice", b->name);
+        if (virt)
+            cx_error(at, "virtual base classes are not supported yet "
+                         "(CX3b: vbase and vcall offsets, VTTs)");
+        if (cx_accept(TOK_ELLIPSIS))
+            cx_error(at, "pack expansions are not supported yet (CX4)");
+        if (c->nbases == cap) {
+            cap = cap ? cap * 2 : 4;
+            c->bases = xrealloc(c->bases, (size_t)cap * sizeof *c->bases);
+        }
+        struct cbase *cb = &c->bases[c->nbases++];
+        memset(cb, 0, sizeof *cb);
+        cb->cls = b;
+        cb->is_virtual = virt;
+        cb->access = access;
+    } while (cx_accept(TOK_COMMA));
+}
+
 static struct cty *parse_class_spec(struct dspec *ds)
 {
     const struct ctok *at = cx_cur();
@@ -1671,8 +1735,8 @@ static struct cty *parse_class_spec(struct dspec *ds)
     c->is_struct = kw != TOK_CX_CLASS;
     c->packed = a.packed;
     c->align_attr = a.aligned;
-    if (cx_kind() == TOK_COLON)
-        cx_error(cx_cur(), "base classes are not supported yet (CX3)");
+    if (cx_accept(TOK_COLON))
+        parse_bases(c);
     ds->cls_defined = c;
     struct cscope *save = cx_scope;
     cx_scope = c->scope;
@@ -1973,8 +2037,11 @@ static void parse_member(struct cclass *c, int *access)
                 } else if (cx_accept(TOK_CX_DELETE)) {
                     f->is_deleted = 1;
                 } else if (cx_kind() == TOK_NUM && cx_cur()->t.num == 0) {
-                    cx_error(cx_cur(), "pure virtual functions are not "
-                                       "supported yet (CX3)");
+                    if (!f->is_virtual)
+                        cx_error(cx_cur(), "only a virtual function can be "
+                                           "pure");
+                    f->is_pure = 1;
+                    cx_advance();
                 } else {
                     cx_error(cx_cur(), "expected 'default', 'delete' or 0");
                 }
