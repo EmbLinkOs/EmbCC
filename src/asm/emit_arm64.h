@@ -144,6 +144,28 @@ void a64_cvt_f2i(struct code *c, int rd, int vn, int sign, int iw, int fw);
 /* float <-> double. */
 void a64_fcvt(struct code *c, int vd, int vn, int from_w, int to_w);
 
+/* ---- system instructions (inline asm) ------------------------------- */
+/* A system register is named by five fields; `enc` packs them the way the
+ * instruction does, (op0<<14)|(op1<<11)|(CRn<<7)|(CRm<<3)|op2, so it drops
+ * into bits 19..5 of MRS/MSR unchanged. */
+#define A64_SYSREG(op0, op1, crn, crm, op2) \
+    (((op0) << 14) | ((op1) << 11) | ((crn) << 7) | ((crm) << 3) | (op2))
+void a64_mrs(struct code *c, int rt, int sysreg);
+void a64_msr(struct code *c, int sysreg, int rt);
+/* MSR <pstatefield>, #imm — daifset is (op1 3, op2 6), daifclr (3, 7). */
+void a64_msr_pstate(struct code *c, int op1, int op2, int imm);
+void a64_hint(struct code *c, int imm);            /* nop yield wfe wfi sev */
+/* kind: 'd' dsb, 'm' dmb, 'i' isb; crm is the option (15 = sy). */
+void a64_barrier(struct code *c, int kind, int crm);
+/* SYS #op1, Cn, Cm, #op2, Xt — the encoding behind tlbi/dc/ic. rt = 31
+ * for the forms that take no register. */
+void a64_sys(struct code *c, int op1, int crn, int crm, int op2, int rt);
+/* kind: 's' svc, 'h' hvc, 'm' smc, 'b' brk */
+void a64_exception(struct code *c, int kind, int imm);
+/* 128-bit SIMD&FP load/store, [rn, #off] with off a multiple of 16. */
+void a64_ldr_q(struct code *c, int qt, int rn, long off);
+void a64_str_q(struct code *c, int qt, int rn, long off);
+
 /* ---- misc ----------------------------------------------------------- */
 void a64_dmb_ish(struct code *c);   /* __sync_synchronize */
 void a64_udf(struct code *c);       /* __builtin_unreachable */

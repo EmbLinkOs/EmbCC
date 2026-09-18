@@ -74,11 +74,14 @@ enum ir_op {
 
 /* One resolved asm operand: an input carries the temp holding its VALUE, an
  * output the temp holding its lvalue ADDRESS; reg is the fixed register
- * (0-15) the constraint pins it to. */
+ * (0-15 on x86-64, 0-30 on aarch64) the constraint pins it to. */
 struct ir_asm_op {
     int temp;
     int reg;
     int size;
+    int inout;   /* a "+" output: the register must hold the lvalue's
+                  * CURRENT value when the asm starts, not just receive its
+                  * new one. Set on aarch64; the x86 path leaves it 0. */
 };
 
 struct ir_asm {

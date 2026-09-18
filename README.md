@@ -1,17 +1,21 @@
 # EmbCC — a native C compiler for EmbLinkOS
 
-**Status: the toolchain is real and builds the OS.** EmbCC compiles *itself*
-(the self-hosting fixed point holds over all 16 sources), and the entire
-EmbLinkOS **kernel** — 89 C translation units through `embcc`, 6 hand-written
-`.asm` through `embas`, linked by `embld` — builds and **boots to the home
-desktop** with no gcc, no nasm and no `ld` anywhere in the loop.
+**Status: the toolchain is real and has built the OS.** EmbCC compiles
+*itself* (the self-hosting fixed point holds), and the EmbLinkOS **kernel** —
+89 C translation units through `embcc`, 6 hand-written `.asm` through `embas`,
+linked by `embld` — built and **booted to the home desktop** with no gcc, no
+nasm and no `ld` anywhere in the loop. The kernel has kept growing since: it is
+165 C units today, and 12 of them use constructs EmbCC does not yet compile —
+chiefly GCC's `__atomic_*` builtins (see "What's next").
 
 **EmbCC now emits for two machines.** EmbLinkOS became two architectures when
 its aarch64 campaign closed (`myos/docs/ARM64.md`), and `--target=aarch64-elf`
-answers it: one binary, two backends, chosen at run time (D-011). **61 of the
-69 executable tests compile for aarch64 and RUN on it** under
-`qemu-system-aarch64`. The eight that do not are refused loudly, not
-miscompiled — see "Where aarch64 stands" below.
+answers it: one binary, two backends, chosen at run time (D-011). **63 of the
+68 executable tests compile for aarch64 and RUN on it** under
+`qemu-system-aarch64` (two more are x86-64 inline-asm programs, pinned to that
+target). The five that do not are refused loudly, not miscompiled, and **120
+of the 131 C files in the EmbLinkOS ARM kernel build compile** — see "Where
+aarch64 stands" below.
 
 `embcc -c` compiles C to genuine x86_64-elf relocatable objects, cross-checked
 against gcc on every test: the integer and floating types, pointers (incl.
@@ -35,9 +39,9 @@ The decision record below still governs.
 it was written on, where the host *was* the target: a test compiled with
 `embcc`, linked with the host `cc`, and ran. On the Apple Silicon development
 machine that is no longer true — x86-64 ELF objects neither link nor run there
-— so `make test` reports **20/104**, and the 84 that fail all fail at
+— so `make test` reports **21/106**, and the 85 that fail all fail at
 `ld: unknown file type`, not at anything EmbCC emitted. `make test-arm64` is
-**61/69** and is currently the only suite on that machine that actually
+**63/68** and is currently the only suite on that machine that actually
 executes compiled code; restoring the x86-64 half needs the same
 QEMU treatment (see "What's next").
 
@@ -157,20 +161,36 @@ Then [docs/USAGE.md](docs/USAGE.md) for the CLI.
 Working, and proven by running it: the integer and floating types, pointers,
 arrays, structs and unions by value (AAPCS64 — including the composite-return
 rules and the hidden `x8` pointer), the full operator and statement set,
-globals, string literals, computed `goto`, and calls both direct and through
-function pointers. `--target=aarch64-elf` produces real `EM_AARCH64` ET_REL
-objects with `R_AARCH64_CALL26` / `ADR_PREL_PG_HI21` / `ADD_ABS_LO12_NC` /
-`ABS64` relocations that `aarch64-elf-ld` links against stock newlib.
+globals, string literals, computed `goto`, calls both direct and through
+function pointers, and **extended inline asm**. `--target=aarch64-elf`
+produces real `EM_AARCH64` ET_REL objects with `R_AARCH64_CALL26` /
+`ADR_PREL_PG_HI21` / `ADD_ABS_LO12_NC` / `ABS64` relocations that
+`aarch64-elf-ld` links against stock newlib.
 
-Refused loudly, each with a diagnostic naming what is missing (THE RULE):
+The inline-asm assembler (`src/asm/asm_arm64.c`) covers exactly the
+vocabulary the ARM kernel uses, measured rather than guessed — 67 distinct
+templates collected by preprocessing every C file the aarch64 kernel build
+compiles: `mrs`/`msr` over 41 named system registers plus the generic
+`S<op0>_<op1>_C<n>_C<m>_<op2>` form, `msr daifset/daifclr`, the barriers and
+hints, `tlbi`, `hvc`/`smc`/`brk`, `ldr`/`str` (including `q` registers) and
+`.inst`. Every encoding is refereed against `aarch64-elf-as`; the kernel's own
+PSCI call — register variables `x0`–`x3`, a `"+r"` operand, `hvc #0` — runs
+under QEMU and returns what gcc's build returns.
 
-| Gap | Why it is not a small fix |
-|---|---|
-| Inline asm | EmbCC's assembler (`src/as`) is x86-64 NASM syntax. aarch64 needs its own, and the kernel's inline asm is the single biggest thing standing between this backend and compiling the ARM kernel. |
-| `va_start` | AAPCS64's `va_list` is a five-field struct over a register save area, not SysV's `__va_list_tag`. Calling a variadic function (`printf`) already works — defining one does not. |
-| Atomics | `__sync_*` lower to `ldxr`/`stxr` retry loops rather than a single locked instruction. |
-| HFA struct arguments | A struct of floats is passed in up to four `v` registers by a rule with no SysV counterpart, so irgen's classification cannot express it. |
-| `-g` | The DWARF emitter describes `rbp`-relative frame offsets; aarch64 slots are `sp`-relative. |
+**The ARM kernel: 120 of 131 C files compile.** The 11 that do not:
+
+| Gap | Files | Whose |
+|---|---|---|
+| GCC `__atomic_*` builtins (`__atomic_add_fetch`, `__atomic_signal_fence`, …) | 7 | The front end — the SAME 7 are why the x86 kernel no longer fully builds either; the shared kernel code moved from `__sync_*` to `__atomic_*` |
+| `__builtin_return_address` | 1 | The front end, both targets |
+| `typedef __attribute__((…)) …` and one declaration form in `syscalls.c` | 2 | The parser, both targets |
+| `va_start` (`kprintf`) | 1 | aarch64: AAPCS64's `va_list` is a five-field struct over a register save area, not SysV's `__va_list_tag`. Calling a variadic function works; defining one does not |
+
+Also refused on aarch64, each with a diagnostic naming what is missing (THE
+RULE): the `__sync_*` atomics (they need `ldxr`/`stxr` retry loops), HFA struct
+arguments (a struct of floats travels in up to four `v` registers by a rule
+irgen's SysV classification cannot express), and `-g` (the DWARF emitter
+describes `rbp`-relative frame offsets; aarch64 slots are `sp`-relative).
 
 The backend is also naive where the x86 one is not: no slot coalescing, no
 residency cache, no register allocator, so frames are wider and the code is
@@ -179,13 +199,20 @@ oversight.
 
 ## What's next
 
-- **An aarch64 assembler**, and with it inline asm — the gate on compiling the
-  EmbLinkOS ARM kernel, which uses it throughout.
+- **GCC's `__atomic_*` builtins** — now the largest single gap on BOTH
+  kernels, since the shared code moved to them. Then `__builtin_return_address`,
+  the two parser gaps, and aarch64 `va_start`; with those the ARM kernel's C
+  compiles in full.
+- **`"+"` asm operands on x86-64.** They are never loaded with the lvalue's
+  current value before the asm: `asm("addq $1,%0" : "+r"(x))` computes on
+  `&x`, not `x`. Nothing in the x86 kernel uses one today, so it is latent;
+  the aarch64 path gets it right (`ir_asm_op.inout`), and the fix belongs with
+  a host that can RUN x86 code to prove it.
 - **The x86-64 exec suite, restored on a non-Linux host.** The aarch64 harness
   (`tests/harness/`) shows the shape: a bare-metal image under
   `qemu-system-x86_64` with `isa-debug-exit` where aarch64 uses semihosting.
   Until then the x86-64 backend's regression cover on this machine is
-  `tools/x86-identity.sh` (byte identity against a baseline — 646 compiles
+  `tools/x86-identity.sh` (byte identity against a baseline — 651 compiles
   across the corpus and the kernel) and `self-host.sh`, not a run.
 - **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
   the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1

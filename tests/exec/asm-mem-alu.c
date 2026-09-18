@@ -6,6 +6,7 @@
  *
  * (Uses only `=r`/`r` operands — EmbCC does not yet wire the read side of a
  * `+r` read-write operand, a separate gap the kernel does not hit.) */
+// target: x86_64-elf   (AT&T x86-64 asm; not an aarch64 program)
 // expect-exit: 42
 
 /* load + store through a base register with a displacement */

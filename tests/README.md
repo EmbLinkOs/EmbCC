@@ -12,6 +12,11 @@
 
       tests/run.sh                        # x86_64-elf (default)
       tests/run.sh --target=aarch64-elf   # or: make test-arm64
+
+  A test that is only a program for one machine — x86-64 AT&T inline asm,
+  say — carries `// target: x86_64-elf` and is reported as SKIP elsewhere,
+  so the other target's count reflects real gaps rather than tests that
+  could never apply to it.
 - **compile/** — programs that must compile, or must FAIL with a specific
   diagnostic. Failure cases matter as much as successes: THE RULE says an
   unsupported feature must fail loudly, never be silently miscompiled.

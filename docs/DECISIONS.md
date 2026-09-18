@@ -388,7 +388,11 @@ debugger, D-007) lands and dictates a shape.
 ## D-011 — A second architecture: **aarch64**, as a peer backend, not a fork
 
 **Decided:** 2026-09-10. **Status:** landed for the C EmbLinkOS userland
-compiles; the kernel's needs (inline asm, atomics) are open.
+compiles; the kernel's needs (inline asm, atomics) are open. **2026-09-18:**
+inline asm landed (`src/asm/asm_arm64.c`), sized to the vocabulary the ARM
+kernel was MEASURED to use rather than to a general assembler; the ARM
+kernel's C went from 60 to 120 of 131 files compiling, and what remains is
+front-end work both targets share (`__atomic_*` above all) plus `va_start`.
 
 EmbLinkOS is two architectures now. `myos/docs/ARM64.md` closed its A0–A9
 campaign: the whole shared kernel links and runs on aarch64 under QEMU `virt`,
@@ -430,11 +434,11 @@ first" applies to a second backend as much as it did to the first. What the
 two DO share is the IR, the optimizer, the ELF writer and the driver — which
 is the split that matters.
 
-**What is refused loudly rather than emitted wrong** (THE RULE): inline asm
-(EmbCC's assembler is x86-64 NASM syntax; an aarch64 assembler is its own
-piece of work), `va_start` (the AAPCS64 register save area and its five-field
-`va_list` are not built), the atomics (`ldxr`/`stxr` pairs), HFA struct
-arguments, and `-g`. Each fails with a diagnostic naming what is missing.
+**What is refused loudly rather than emitted wrong** (THE RULE): `va_start`
+(the AAPCS64 register save area and its five-field `va_list` are not built),
+the atomics (`ldxr`/`stxr` pairs), HFA struct arguments, and `-g`. Each fails
+with a diagnostic naming what is missing. (Inline asm was on this list at
+decision time; see the status note above.)
 
 **Reopen if:** the two backends start duplicating real algorithms — a register
 allocator written twice is the signal that the shared layer is in the wrong

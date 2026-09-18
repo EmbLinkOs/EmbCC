@@ -21,12 +21,22 @@ static double my_fabs(double x)
     return v.d;
 }
 
-/* hardware sqrt via an SSE inline-asm operand */
+/* hardware sqrt via an SSE inline-asm operand. The "x" constraint and
+ * sqrtsd exist only on x86-64 (aarch64's FP-register constraint is "w", which
+ * EmbCC's aarch64 asm does not take), so there Newton's method stands in and
+ * the REST of this file still exercises the front end on both targets. */
 static double hw_sqrt(double x)
 {
+#if defined(__x86_64__)
     double r;
     __asm__("sqrtsd %1,%0" : "=x"(r) : "x"(x));
     return r;
+#else
+    double r = x > 1.0 ? x : 1.0;
+    for (int i = 0; i < 64; i++)
+        r = 0.5 * (r + x / r);
+    return r;
+#endif
 }
 
 /* goto: a retry loop and a forward jump */

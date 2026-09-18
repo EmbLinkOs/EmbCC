@@ -36,3 +36,18 @@ has already earned its place: it caught a signed 4-byte load being encoded
 into an unallocated word (there is no "load signed word into a W register" on
 AArch64 — a 32-bit load already delivers every bit), which objdump prints as
 `.inst 0x… ; undefined` and the CPU traps on.
+
+## asm_arm64.c
+
+The aarch64 inline-asm assembler — the counterpart of irgen's x86
+`asm_assemble`, in its own file rather than inside irgen. irgen substitutes the
+operands (`%0`, `%w0`, `%x0`, `%[name]`) and hands it plain GNU text; it
+returns bytes or a message naming the statement it could not assemble.
+
+It is sized to a measurement, not an ambition: the vocabulary is what the
+EmbLinkOS ARM kernel's inline asm actually contains — 67 distinct templates,
+collected by preprocessing every C file the aarch64 kernel build compiles —
+and nothing past it. `tests/golden/arm64-asm.sh` feeds those templates, plus
+one line per entry of the assembler's own tables (every system register,
+`tlbi` operation, barrier option and hint, generated so none can go
+unchecked), to both this and `aarch64-elf-as`, and requires identical bytes.

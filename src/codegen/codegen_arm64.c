@@ -791,12 +791,45 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                        "AAPCS64 register save area is not built (in '%s')",
                        f->name);
             break;
-        case IR_ASM:
-            diag_fatal(f->file, i->line ? i->line : f->line,
-                       "inline asm is not supported for aarch64 yet: "
-                       "EmbCC's assembler is x86-64 NASM syntax (in '%s')",
-                       f->name);
+        case IR_ASM: {
+            /* Extended asm, assembled in irgen (gen_asm_arm64). Every value
+             * lives in a stack slot, so nothing is live in a register across
+             * the asm and clobbers need no saving: load the inputs into the
+             * registers their constraints chose, splice the bytes, store the
+             * outputs back through their lvalue addresses. */
+            struct ir_asm *ia = i->asm_ir;
+            int used[32] = { 0 };
+            for (int k = 0; k < ia->nin; k++) used[ia->in[k].reg] = 1;
+            for (int k = 0; k < ia->nout; k++) used[ia->out[k].reg] = 1;
+            /* The address scratch: no operand's register, and never x12,
+             * which a far slot access borrows internally. */
+            static const int scr_pool[] = { 9, 10, 11, 13, 14, 15,
+                                             0, 1, 2, 3, 4, 5, 6, 7, 8 };
+            int scr = -1;
+            for (unsigned k = 0; k < sizeof scr_pool / sizeof scr_pool[0]; k++)
+                if (!used[scr_pool[k]]) { scr = scr_pool[k]; break; }
+            if (scr < 0 && (ia->nout > 0))
+                diag_fatal(f->file, i->line ? i->line : f->line,
+                           "no scratch register left around an asm in '%s'",
+                           f->name);
+            /* A "+" output starts with the lvalue's current value. */
+            for (int k = 0; k < ia->nout; k++) {
+                if (!ia->out[k].inout)
+                    continue;
+                ld_slot(t, sd, ia->out[k].temp, scr, 8, 0, 8);
+                a64_ldr(t, ia->out[k].reg, scr, 0, ia->out[k].size, 0,
+                        ia->out[k].size > 4 ? 8 : 4);
+            }
+            for (int k = 0; k < ia->nin; k++)
+                ld_slot(t, sd, ia->in[k].temp, ia->in[k].reg, 8, 0, 8);
+            for (int k = 0; k < ia->codelen; k++)
+                code_byte(t, ia->code[k]);
+            for (int k = 0; k < ia->nout; k++) {
+                ld_slot(t, sd, ia->out[k].temp, scr, 8, 0, 8);
+                a64_str(t, ia->out[k].reg, scr, 0, ia->out[k].size);
+            }
             break;
+        }
         case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
             diag_fatal(f->file, i->line ? i->line : f->line,
                        "atomic operations are not supported for aarch64 "

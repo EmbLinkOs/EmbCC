@@ -26,6 +26,7 @@ SRCS := \
 	src/debug/dwarf.c \
 	src/asm/emit.c \
 	src/asm/emit_arm64.c \
+	src/asm/asm_arm64.c \
 	src/asm/topasm.c \
 	src/cpp/predef_x86_64.c \
 	src/cpp/predef_aarch64.c \

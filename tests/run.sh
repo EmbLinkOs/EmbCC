@@ -58,6 +58,7 @@ fi
 
 pass=0
 fail=0
+skip=0
 
 ok()   { echo "PASS $1"; pass=$((pass + 1)); }
 bad()  { echo "FAIL $1 ($2)"; [ -n "$3" ] && printf '%s\n' "$3" | sed 's/^/     | /'; fail=$((fail + 1)); }
@@ -88,6 +89,15 @@ done
 for c in tests/exec/*.c; do
     [ -e "$c" ] || continue
     name=$(basename "$c" .c)
+    # `// target: TRIPLE` pins a test to one machine: an x86-64 inline-asm
+    # test is not a program for aarch64 at all, so it is skipped there rather
+    # than counted as a gap it is not.
+    only=$(sed -n 's|.*// target: *\([a-z0-9_-]*\).*|\1|p' "$c" | head -1)
+    if [ -n "$only" ] && [ "$only" != "$TARGET" ]; then
+        echo "SKIP $c (target: $only)"
+        skip=$((skip + 1))
+        continue
+    fi
     expect=$(sed -n 's|.*// expect-exit: *\([0-9][0-9]*\).*|\1|p' "$c" | head -1)
     if [ -z "$expect" ]; then
         bad "$c" "no '// expect-exit: N' line — cannot assert anything" ""
@@ -136,5 +146,9 @@ if [ $total -eq 0 ]; then
     exit 1
 fi
 echo "-----"
-echo "$pass/$total passed"
+if [ "$skip" -gt 0 ]; then
+    echo "$pass/$total passed ($skip skipped: pinned to another target)"
+else
+    echo "$pass/$total passed"
+fi
 [ $fail -eq 0 ]

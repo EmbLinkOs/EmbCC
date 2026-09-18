@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../asm/asm_arm64.h"
 #include "../driver/util.h"
+#include "../target/target.h"
 #include "type.h"
 
 struct vardef {
@@ -1585,6 +1587,48 @@ static int asm_fixed_letter(char c)
  * sentinel -2 for an allocatable class (r/q/g/m/R) that irgen assigns from a
  * free register. Output constraints carry a leading '=' or '+'; '&' is
  * accepted and ignored. */
+/* aarch64 operand resolution. The letters mean different things there, and
+ * x86's fixed-register letters (a/b/c/d/S/D) mean nothing at all, so this is
+ * a separate function rather than a branch through the x86 one:
+ *   - a `register T v __asm__("x0")` variable binds its register;
+ *   - 'i'/'n' (without 'r') on a constant folds to a literal immediate;
+ *   - 'r' / 'g' is allocatable (-2), assigned in irgen;
+ *   - anything else is ASM_REG_INVALID, refused by irgen if emitted. */
+static int asm_resolve_reg_arm64(struct unit *u, struct stmt *s,
+                                 struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = a64asm_gpr(rn, (int)strlen(rn));
+        /* x12 is the codegen's address scratch and x16..x18 are the
+         * intra-procedure-call and platform registers; x19 and up are
+         * callee-saved, which a register variable would have to preserve
+         * and EmbCC does not yet save around asm. */
+        if (r < 0 || r == 12 || r >= 16)
+            diag_at(u->file, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "aarch64 asm (use x0..x11 or x13..x15)", rn);
+        return r;
+    }
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g') has_r = 1;
+        if (*p == 'i' || *p == 'n') has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;     /* a non-constant "i": gcc refuses too */
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -1595,6 +1639,8 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
                    "(got \"%s\")", op->constraint);
     while (*c == '=' || *c == '+' || *c == '&')
         c++;
+    if (target_get() == TARGET_AARCH64)
+        return asm_resolve_reg_arm64(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)

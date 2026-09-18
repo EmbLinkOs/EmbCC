@@ -6,6 +6,7 @@
  * wrong register here is a silent miscompile, so it must match gcc exactly.
  *
  * Checked against gcc via the golden agrees-with-gcc harness. */
+// target: x86_64-elf   (AT&T x86-64 asm; not an aarch64 program)
 // expect-exit: 42
 
 /* CLOBBER-LIST path: if %1 (a) were placed in rdx, `movq %2,%%rdx` (b -> rdx)

@@ -72,9 +72,13 @@ embcc --target=aarch64-elf --dump-predef | grep __aarch64__
 The result is a real `EM_AARCH64` ET_REL object that `aarch64-elf-ld` links
 against stock newlib. `embld` does not read or write aarch64 objects yet, and
 `embas` assembles x86-64 NASM syntax only — so an aarch64 link goes through
-binutils for now. What the aarch64 backend refuses (inline asm, `va_start`,
-atomics, HFA arguments, `-g`) it refuses with a diagnostic naming the gap; the
-README's "Where aarch64 stands" table says why each is real work.
+binutils for now. Extended inline asm works, with the vocabulary the ARM
+kernel uses (`src/asm/asm_arm64.h`) and the constraints `r`, `=r`, `+r` and `i`
+plus `register … __asm__("x0")` variables; a template outside it is refused
+with the offending statement named. What the aarch64 backend refuses
+(`va_start`, atomics, HFA arguments, `-g`) it refuses with a diagnostic naming
+the gap; the README's "Where aarch64 stands" section says why each is real
+work.
 
 To run what it produced, `make test-arm64` links each test into a bare-metal
 image and executes it under `qemu-system-aarch64 -M virt` — see

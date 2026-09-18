@@ -135,7 +135,19 @@ struct asm_operand {
     const char *constraint;
     struct expr *expr;
     int reg;              /* the fixed register (0-15), resolved by sema */
+    /* aarch64: an 'i'/'n' operand whose value sema folded to a constant. It
+     * is substituted into the template as a literal — `.inst %0` needs the
+     * WORD, not a register holding it. reg is ASM_REG_IMM then. */
+    int is_imm;
+    long imm;
 };
+
+/* asm_operand.reg sentinels beyond -2 (allocatable) and -3 (an xmm). */
+#define ASM_REG_IMM     (-4)  /* aarch64: a folded immediate (is_imm) */
+#define ASM_REG_INVALID (-5)  /* the constraint means nothing on this target;
+                               * irgen refuses it only if the asm is actually
+                               * generated — gcc accepts x86 constraints inside
+                               * an unused static inline, and so must we */
 
 /* An extended-asm statement (VISION_LONGTERM: first-class fixed-register
  * constraints, so the syscall header's gcc branch compiles). The template

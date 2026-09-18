@@ -563,3 +563,72 @@ void a64_cvt_f2i(struct code *c, int rd, int vn, int sign, int iw, int fw)
      * which is the rounding C's float-to-integer conversion requires). */
     fcvt_int(c, 3, sign ? 0UL : 1UL, rd, vn, iw, fw);
 }
+
+/* ---- system instructions (inline asm) ------------------------------- */
+
+void a64_mrs(struct code *c, int rt, int sysreg)
+{
+    a64_word(c, 0xD5200000UL | ((unsigned long)sysreg << 5) |
+                (unsigned long)rt);
+}
+
+void a64_msr(struct code *c, int sysreg, int rt)
+{
+    a64_word(c, 0xD5000000UL | ((unsigned long)sysreg << 5) |
+                (unsigned long)rt);
+}
+
+void a64_msr_pstate(struct code *c, int op1, int op2, int imm)
+{
+    if (imm < 0 || imm > 15)
+        bad("msr pstate immediate", imm);
+    a64_word(c, 0xD500401FUL | ((unsigned long)op1 << 16) |
+                ((unsigned long)imm << 8) | ((unsigned long)op2 << 5));
+}
+
+void a64_hint(struct code *c, int imm)
+{
+    a64_word(c, 0xD503201FUL | ((unsigned long)imm << 5));
+}
+
+void a64_barrier(struct code *c, int kind, int crm)
+{
+    unsigned long base = kind == 'd' ? 0xD503309FUL
+                       : kind == 'm' ? 0xD50330BFUL : 0xD50330DFUL;
+    a64_word(c, base | ((unsigned long)crm << 8));
+}
+
+void a64_sys(struct code *c, int op1, int crn, int crm, int op2, int rt)
+{
+    a64_word(c, 0xD5080000UL | ((unsigned long)op1 << 16) |
+                ((unsigned long)crn << 12) | ((unsigned long)crm << 8) |
+                ((unsigned long)op2 << 5) | (unsigned long)rt);
+}
+
+void a64_exception(struct code *c, int kind, int imm)
+{
+    unsigned long base = kind == 's' ? 0xD4000001UL
+                       : kind == 'h' ? 0xD4000002UL
+                       : kind == 'm' ? 0xD4000003UL : 0xD4200000UL;
+    if (imm < 0 || imm > 0xffff)
+        bad("exception immediate", imm);
+    a64_word(c, base | ((unsigned long)imm << 5));
+}
+
+static void ldst_q(struct code *c, unsigned long base, int qt, int rn, long off)
+{
+    if (off < 0 || off % 16 != 0 || off / 16 > 0xfff)
+        bad("q-register offset", off);
+    a64_word(c, base | ((unsigned long)(off / 16) << 10) |
+                ((unsigned long)rn << 5) | (unsigned long)qt);
+}
+
+void a64_ldr_q(struct code *c, int qt, int rn, long off)
+{
+    ldst_q(c, 0x3DC00000UL, qt, rn, off);
+}
+
+void a64_str_q(struct code *c, int qt, int rn, long off)
+{
+    ldst_q(c, 0x3D800000UL, qt, rn, off);
+}

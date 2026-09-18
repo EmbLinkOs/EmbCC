@@ -81,5 +81,12 @@ Two things differ from the x86 backend by necessity rather than by stage:
   has gone to the stack (AAPCS64 rule C.11). The outgoing area is sized from
   those rules too, not from `fn->outgoing_bytes`.
 
-Refused loudly rather than emitted wrong: inline asm, `va_start`, the atomics,
-HFA struct arguments, and `-g`. See the README table for why each is real work.
+Inline asm arrives assembled (irgen's `gen_asm_arm64`, over
+`../asm/asm_arm64.c`): the backend loads each input into the register its
+constraint chose, pre-loads each `"+"` output with the lvalue's current value
+(`ir_asm_op.inout` — the x86 path does not, see the README), splices the bytes
+and stores the outputs through their addresses. Operand registers never
+include `x12`, which a far stack slot borrows, or anything callee-saved.
+
+Refused loudly rather than emitted wrong: `va_start`, the atomics, HFA struct
+arguments, and `-g`. See the README for why each is real work.
