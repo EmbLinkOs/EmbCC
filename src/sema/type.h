@@ -21,6 +21,8 @@
  * type overflows ptypes[]. */
 #define MAX_PARAMS 32
 
+struct expr;
+
 enum ty_kind { TY_VOID, TY_BOOL, TY_CHAR, TY_SHORT, TY_INT, TY_LONG,
                TY_FLOAT, TY_DOUBLE, TY_PTR,
                TY_ARRAY, TY_STRUCT, TY_FUNC };
@@ -47,6 +49,14 @@ struct type {
                              * this); NULL on an original. */
     struct type *pointee;   /* TY_PTR: target; TY_ARRAY: element */
     int count;              /* TY_ARRAY: element count */
+    /* TY_ARRAY of variable length (C99 VLA, or a fixed count of VLA
+     * elements): count is 0 and the element count is vla_len's run-time
+     * value. vla_size is the hidden local (sema) holding sizeof this
+     * type in bytes, stored when its declaration is reached (irgen
+     * vla_eval). ty_size() is 0 for one; a run-time size is read from
+     * the slot. One node per declarator — never interned or shared. */
+    struct expr *vla_len;
+    int vla_size;
     /* TY_STRUCT (unions too — one type kind, is_union flag): */
     const char *tag;        /* NULL for anonymous */
     int is_union;
@@ -80,6 +90,13 @@ struct type *ty_wchar(void);
 struct type *ty_volatile(struct type *t);
 struct type *ty_ptr(struct type *pointee);
 struct type *ty_array(struct type *elem, int count);
+/* A variable-length array of elem, `len` elements (a VLA). */
+struct type *ty_vla(struct type *elem, struct expr *len);
+/* t is an array whose size is only known at run time. */
+int ty_is_vla(const struct type *t);
+/* t is variably modified: a VLA, or a pointer/array/function return
+ * reaching one (C99 6.7.5p3) — `int (*p)[n]` is VM but not a VLA. */
+int ty_is_vm(const struct type *t);
 
 /* A new, incomplete struct/union type (one node per tag — completed in
  * place by ty_struct_layout once its body is parsed). */

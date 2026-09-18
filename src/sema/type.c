@@ -64,6 +64,30 @@ struct type *ty_array(struct type *elem, int count)
     return t;
 }
 
+struct type *ty_vla(struct type *elem, struct expr *len)
+{
+    struct type *t = ty_array(elem, 0);
+    t->vla_len = len;
+    t->vla_size = -1;
+    return t;
+}
+
+int ty_is_vla(const struct type *t)
+{
+    return t && t->kind == TY_ARRAY && t->vla_len != NULL;
+}
+
+int ty_is_vm(const struct type *t)
+{
+    for (; t; t = t->pointee) {
+        if (ty_is_vla(t))
+            return 1;
+        if (t->kind != TY_PTR && t->kind != TY_ARRAY)
+            return 0;
+    }
+    return 0;
+}
+
 struct type *ty_func(struct type *ret, struct type **ptypes, int n,
                      int is_varargs)
 {
@@ -199,8 +223,9 @@ int ty_equal(const struct type *a, const struct type *b)
         return 0;
     if (a->kind == TY_PTR)
         return ty_equal(a->pointee, b->pointee);
-    if (a->kind == TY_ARRAY)
-        return a->count == b->count && ty_equal(a->pointee, b->pointee);
+    if (a->kind == TY_ARRAY)   /* a VLA is compatible with any length */
+        return (a->count == b->count || a->vla_len || b->vla_len) &&
+               ty_equal(a->pointee, b->pointee);
     if (a->kind == TY_STRUCT) {
         /* one node per tag: identity is equality — but a volatile copy points at
          * its original via `canon`, so compare canonical nodes. */
@@ -332,7 +357,7 @@ const char *ty_name(const struct type *t)
             stars++;
         } else {
             if (ndims < 4)
-                dims[ndims] = t->count;
+                dims[ndims] = t->vla_len ? -1 : t->count;   /* -1: [*] */
             ndims++;
         }
         t = t->pointee;
@@ -365,7 +390,8 @@ const char *ty_name(const struct type *t)
             buf[n++] = '*';
     }
     for (int i = 0; i < ndims && i < 4 && n < (int)bufsz - 16; i++)
-        n += snprintf(buf + n, bufsz - (size_t)n, "[%d]", dims[i]);
+        n += dims[i] < 0 ? snprintf(buf + n, bufsz - (size_t)n, "[*]")
+                         : snprintf(buf + n, bufsz - (size_t)n, "[%d]", dims[i]);
     buf[n] = 0;
     return buf;
 }

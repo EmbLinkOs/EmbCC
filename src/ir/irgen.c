@@ -326,6 +326,66 @@ struct loopctx;
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop);
 static int gen_stmtexpr(struct ir_func *fn, struct expr *e);
+static int gen_expr(struct ir_func *fn, struct expr *e);
+
+/* ---- variable length arrays ---- */
+
+/* sizeof t as a value: a VLA's from its size slot, anything else a constant */
+static int type_size_val(struct ir_func *fn, const struct type *t)
+{
+    if (ty_is_vla(t))
+        return emit_ldvar(fn, t->vla_size, ty_base(TY_LONG, 1));
+    return emit_const(fn, ty_size(t), 8);
+}
+
+/* Compute the byte size of every VLA in a variably modified type, innermost
+ * first, into its slot — where the declaration (or type name) is reached, so
+ * a declaration in a loop re-reads its lengths each time round. */
+static void vla_eval(struct ir_func *fn, struct type *t)
+{
+    if (!t || (t->kind != TY_PTR && t->kind != TY_ARRAY))
+        return;
+    vla_eval(fn, t->pointee);
+    if (!ty_is_vla(t))
+        return;
+    int n = gen_expr(fn, t->vla_len);
+    int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), 8, 1);
+    emit_stvar(fn, t->vla_size, sz, ty_base(TY_LONG, 1));
+}
+
+/* The VLA declarations whose scope encloses the statement being generated,
+ * outermost first: the slot the stack pointer was saved in just before each
+ * one's allocation, and the statements after it (its scope, for goto). */
+struct vla_scope { int sp_slot; struct stmt *decl; };
+static struct vla_scope g_vla[64];
+static int g_nvla;
+
+/* Leaving the scopes [depth, g_nvla): restore the stack pointer saved before
+ * the outermost of them, which releases all of them. Emits nothing when
+ * none is open. The textual scopes stay open — the caller pops them. */
+static void vla_release(struct ir_func *fn, int depth)
+{
+    if (g_nvla <= depth)
+        return;
+    int sp = emit_ldvar(fn, g_vla[depth].sp_slot, ty_base(TY_LONG, 1));
+    struct ir_ins *i = emit(fn);   /* operands first: emit() appends */
+    i->op = IR_SPRESTORE;
+    i->a = sp;
+}
+
+/* Is label `name` defined anywhere in statement list s (nested included)? */
+static int stmts_define_label(const struct stmt *s, const char *name)
+{
+    for (; s; s = s->next) {
+        if (s->kind == STMT_LABEL && strcmp(s->name, name) == 0)
+            return 1;
+        if (stmts_define_label(s->body, name) ||
+            stmts_define_label(s->thn, name) ||
+            stmts_define_label(s->els, name))
+            return 1;
+    }
+    return 0;
+}
 
 /* va_arg(ap, T) for an INTEGER-class T (SysV). ap's value is a pointer to
  * a __va_list_tag { gp_offset u32, fp_offset u32, overflow_arg_area ptr,
@@ -463,6 +523,11 @@ static int gen_addr(struct ir_func *fn, struct expr *e)
     case EXPR_VAR:
         if (e->gref)
             return emit_gaddr(fn, e->gref);
+        if (ty_is_vla(e->undecayed ? e->undecayed : e->ty))
+            /* a VLA's slot holds the address of its storage */
+            return emit_ldvar(fn, e->var_index,
+                              ty_ptr(e->undecayed ? e->undecayed->pointee
+                                                  : e->ty->pointee));
         {
             struct ir_ins *i = emit(fn);
             i->op = IR_ADDR;
@@ -1131,6 +1196,7 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
     case EXPR_INCDEC: {
         struct type *t = e->ty;
         int scale = t->kind == TY_PTR ? ty_size(t->pointee) : 1;
+        int vla_step = t->kind == TY_PTR && ty_is_vla(t->pointee);
         int w = ty_w(t);
         int local = e->lhs->kind == EXPR_VAR && !e->lhs->gref;
         int is_bf = expr_is_bitfield(e->lhs);
@@ -1145,8 +1211,13 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             save->a = cur;
             save->dst = old = new_temp(fn);
         }
-        int d = emit_const(fn, (long)e->delta * scale, w);
-        int sum = emit_bin(fn, IR_ADD, cur, d, w, 1);
+        int sum;
+        if (vla_step)   /* ++p over rows of a run-time size */
+            sum = emit_bin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
+                           type_size_val(fn, t->pointee), w, 1);
+        else
+            sum = emit_bin(fn, IR_ADD, cur,
+                           emit_const(fn, (long)e->delta * scale, w), w, 1);
         if (ty_size(t) <= 2 && !is_bf) {
             /* ++c on a char must wrap like a char, in the value too */
             struct ir_ins *i = emit(fn);
@@ -1216,6 +1287,14 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         return gen_convert(fn, v, e->rhs->ty, e->ty);
     }
     case EXPR_SIZEOF:
+        /* only a VLA's survives sema: read its size slot, computing it
+         * first for a type name (sizeof(int[n])) */
+        if (e->cast_ty) {
+            vla_eval(fn, e->cast_ty);
+            return type_size_val(fn, e->cast_ty);
+        }
+        return type_size_val(fn, e->rhs->undecayed ? e->rhs->undecayed
+                                                   : e->rhs->ty);
     case EXPR_ALIGNOF:
         break; /* folded to EXPR_NUM by sema; unreachable */
     case EXPR_STMTEXPR:
@@ -1284,6 +1363,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
                 int a = gen_expr(fn, e->lhs);
                 int b = gen_expr(fn, e->rhs);
                 int diff = emit_bin(fn, IR_SUB, a, b, 8, 1);
+                if (ty_is_vla(lt->pointee))
+                    return emit_bin(fn, IR_DIV, diff,
+                                    type_size_val(fn, lt->pointee), 8, 1);
                 int size = ty_size(lt->pointee);
                 if (size <= 1)
                     return diff;
@@ -1301,8 +1383,12 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
                     p = idx;
                     idx = t;
                 }
-                int size = ty_size((lp ? lt : rt)->pointee);
-                if (size > 1) {
+                struct type *pt = (lp ? lt : rt)->pointee;
+                int size = ty_size(pt);
+                if (ty_is_vla(pt))
+                    idx = emit_bin(fn, IR_MUL, idx, type_size_val(fn, pt),
+                                   8, 1);
+                else if (size > 1) {
                     int c = emit_const(fn, size, 8);
                     idx = emit_bin(fn, IR_MUL, idx, c, 8, 1);
                 }
@@ -1378,7 +1464,10 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         int res;
         if (lt->kind == TY_PTR) {
             int esz = ty_size(lt->pointee);
-            if (esz > 1) {
+            if (ty_is_vla(lt->pointee))
+                rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
+                              8, 1);
+            else if (esz > 1) {
                 int k = emit_const(fn, esz, 8);
                 rv = emit_bin(fn, IR_MUL, rv, k, 8, 1);
             }
@@ -2658,6 +2747,8 @@ static void gen_asm_arm64(struct ir_func *fn, struct stmt *s)
  * rejected break/continue outside any loop. */
 struct loopctx {
     int brk, cont;
+    int brk_vla, cont_vla;   /* g_nvla at each target: the VLA scopes a
+                              * break/continue leaves are those above it */
 };
 
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
@@ -2668,9 +2759,11 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             g_cur_line = s->line;   /* -g: rows key off statement lines */
         switch (s->kind) {
         case STMT_BREAK:
+            vla_release(fn, loop->brk_vla);
             emit_jmp(fn, loop->brk);
             break;
         case STMT_CONTINUE:
+            vla_release(fn, loop->cont_vla);
             emit_jmp(fn, loop->cont);
             break;
         case STMT_LABEL: {
@@ -2690,6 +2783,13 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 i->op = IR_IGOTO;
                 i->a = v;
             } else {
+                /* leaving the scope of every VLA whose remaining statements
+                 * do not define the label: release from the outermost */
+                for (int k = 0; k < g_nvla; k++)
+                    if (!stmts_define_label(g_vla[k].decl->next, s->name)) {
+                        vla_release(fn, k);
+                        break;
+                    }
                 emit_jmp(fn, g_labels[label_idx(fn, s->name, s->line)].label);
             }
             break;
@@ -2698,6 +2798,32 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 break; /* block-scope extern: a declaration, emits no code */
             if (s->sglob)
                 break; /* a static local IS its global; no code here */
+            if (ty_is_vm(s->dty))
+                vla_eval(fn, s->dty);
+            if (ty_is_vla(s->dty)) {
+                /* save sp, carve the array off the stack, keep its address
+                 * in the variable's slot */
+                struct type *ul = ty_base(TY_LONG, 1);
+                struct ir_ins *sv = emit(fn);
+                sv->op = IR_SPSAVE;
+                sv->dst = new_temp(fn);
+                emit_stvar(fn, s->vla_sp, sv->dst, ul);
+                int size = type_size_val(fn, s->dty);
+                struct ir_ins *al = emit(fn);
+                al->op = IR_ALLOCA;
+                al->a = size;
+                al->dst = new_temp(fn);
+                emit_stvar(fn, s->var_index, al->dst, ty_ptr(s->dty->pointee));
+                fn->has_alloca = 1;
+                if (g_nvla == (int)(sizeof g_vla / sizeof g_vla[0]))
+                    diag_fatal(fn->src->file, s->line,
+                               "more than %d nested variable length arrays",
+                               (int)(sizeof g_vla / sizeof g_vla[0]));
+                g_vla[g_nvla].sp_slot = s->vla_sp;
+                g_vla[g_nvla].decl = s;
+                g_nvla++;
+                break;
+            }
             if (s->ninits) {
                 /* C zero-fills whatever the initializer does not
                  * mention, so clear the object first and then place
@@ -2857,6 +2983,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             int l_top = new_label(fn);
             lc.cont = new_label(fn);
             lc.brk = new_label(fn);
+            lc.brk_vla = lc.cont_vla = g_nvla;
             emit_label(fn, l_top);
             gen_stmt(fn, s->body, &lc);
             emit_label(fn, lc.cont);
@@ -2878,6 +3005,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             /* continue inside a switch belongs to the enclosing LOOP;
              * sema has already refused it when there is none. */
             lc.cont = loop ? loop->cont : -1;
+            lc.brk_vla = g_nvla;
+            lc.cont_vla = loop ? loop->cont_vla : 0;
 
             int v = gen_expr(fn, s->cond);
             int w = ty_w(s->cond->ty);
@@ -2914,6 +3043,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             struct loopctx lc;
             lc.cont = new_label(fn); /* while: continue re-tests */
             lc.brk = new_label(fn);
+            lc.brk_vla = lc.cont_vla = g_nvla;
             emit_label(fn, lc.cont);
             int c = gen_expr(fn, s->cond);
             emit_brz(fn, c, ty_w(s->cond->ty), lc.brk);
@@ -2928,8 +3058,13 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             struct loopctx lc;
             lc.cont = new_label(fn);
             lc.brk = new_label(fn);
+            int for_vla = g_nvla;
+            lc.brk_vla = lc.cont_vla = g_nvla;
             if (s->initdecl)
                 gen_stmt(fn, s->initdecl, &lc);
+            /* a VLA in the init-declaration lives across iterations: a
+             * break/continue does not release it; leaving the loop does */
+            lc.brk_vla = lc.cont_vla = g_nvla;
             if (s->init)
                 gen_expr(fn, s->init);
             emit_label(fn, l_cond);
@@ -2943,6 +3078,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 gen_expr(fn, s->step);
             emit_jmp(fn, l_cond);
             emit_label(fn, lc.brk);
+            vla_release(fn, for_vla);
+            g_nvla = for_vla;
             break;
         }
         case STMT_BLOCK: {
@@ -2951,7 +3088,10 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
              * disjoint sibling blocks get disjoint ranges and may share a slot
              * (codegen). Static/extern decls have no frame slot — skip them. */
             int lo = fn->nins;
+            int depth = g_nvla;
             gen_stmt(fn, s->body, loop);
+            vla_release(fn, depth);   /* the block's VLAs end with it */
+            g_nvla = depth;
             int hi = fn->nins;
             for (struct stmt *c = s->body; c; c = c->next)
                 if (c->kind == STMT_DECL && !c->is_extern && !c->sglob &&
@@ -2971,7 +3111,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
  * rejected by sema, so a dummy loop context suffices for the prefix. */
 static int gen_stmtexpr(struct ir_func *fn, struct expr *e)
 {
-    static const struct loopctx none = { -1, -1 };
+    static const struct loopctx none = { -1, -1, 0, 0 };
     struct stmt *body = e->body->body;   /* the block's statement list */
     struct stmt *last = NULL, *prev = NULL;
     for (struct stmt *s = body; s; s = s->next) {
@@ -2979,16 +3119,20 @@ static int gen_stmtexpr(struct ir_func *fn, struct expr *e)
             prev = s;
         last = s;
     }
+    int depth = g_nvla;
     if (last && last != body) {          /* emit all but the last statement */
         prev->next = NULL;
         gen_stmt(fn, body, &none);
         prev->next = last;
     }
+    int v = -1;
     if (last && last->kind == STMT_EXPR && last->expr)
-        return gen_expr(fn, last->expr); /* the block's value */
-    if (last)
+        v = gen_expr(fn, last->expr);    /* the block's value */
+    else if (last)
         gen_stmt(fn, last, &none);       /* a non-value last statement */
-    return -1;
+    vla_release(fn, depth);              /* its VLAs end with it */
+    g_nvla = depth;
+    return v;
 }
 
 /* -g: record one source variable. Skips the unnamed (prototype params never
@@ -3068,6 +3212,10 @@ static void gen_func(struct ir_func *fn, struct func *f)
         }
     }
     g_nlabels_used = 0;                 /* labels are per-function */
+    g_nvla = 0;
+    if (f->has_vm_params)               /* `int a[n][m]`: its row size */
+        for (int i = 0; i < f->nparams; i++)
+            vla_eval(fn, f->param_tys[i]);
     gen_stmt(fn, f->body, NULL);
     for (int i = 0; i < f->nvars; i++)  /* clamp the un-narrowed default */
         if (fn->var_scope_hi[i] == 0x7fffffff)

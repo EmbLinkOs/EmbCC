@@ -185,6 +185,9 @@ struct stmt {
     const char *asm_reg;  /* STMT_DECL: a register-asm binding, `register T
                            * x __asm__("r10")` — NULL for an ordinary local */
     int user_align;       /* STMT_DECL: __attribute__((aligned(N))); 0 = none */
+    int vla_sp;           /* STMT_DECL of a VLA (ty_is_vla(dty)): the hidden
+                           * slot the stack pointer is saved in just before
+                           * the allocation; restoring it releases the VLA */
     struct asm_stmt *asm_s; /* STMT_ASM */
     struct expr *expr;    /* RETURN/EXPR value; DECL initializer (or NULL) */
     struct expr *cond;    /* IF/WHILE/FOR */
@@ -265,6 +268,9 @@ struct func {
     struct func *next;    /* unit list, source order */
 
     int nvars;            /* params + locals; set by sema */
+    int has_vm_params;    /* sema: a parameter's type is variably modified
+                           * (`int a[n][m]` -> int (*)[m]); irgen computes
+                           * those sizes at entry */
     int declared;         /* sema: declaration has been reached */
     int absorbed;         /* sema: merged into an earlier node — skip */
     int used;             /* sema: at least one call resolves here */

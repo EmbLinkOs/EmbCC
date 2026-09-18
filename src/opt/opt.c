@@ -27,6 +27,7 @@ static int writes_temp(enum ir_op op)
     case IR_FADDR: case IR_LOAD: case IR_EXT: case IR_BSWAP:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_CALL: case IR_XCHG:
     case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_FRAMEADDR:
+    case IR_ALLOCA: case IR_SPSAVE:
         return 1;
     default:
         return 0;
@@ -71,6 +72,7 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
     case IR_I2F: case IR_F2I: case IR_F2F:
     case IR_EXT: case IR_BSWAP: case IR_LDVAR: case IR_ADDR: case IR_LOAD:
     case IR_MEMZERO: case IR_VA_START: case IR_STVAR:
+    case IR_ALLOCA: case IR_SPRESTORE:
         cb(&i->a, ctx);
         break;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
@@ -1608,7 +1610,10 @@ static int inlinable(struct ir_func *cf)
             return 0;
     for (int i = 0; i < cf->nins; i++) {
         const struct ir_ins *in = &cf->ins[i];
-        if (in->op == IR_ASM || in->op == IR_VA_START || in->flt)
+        /* a VLA's allocation is released by the callee's own epilogue;
+         * inlined into a loop it would never be */
+        if (in->op == IR_ASM || in->op == IR_VA_START || in->flt ||
+            in->op == IR_ALLOCA)
             return 0;
         /* Computed goto: a label address / indirect jump can't be inlined —
          * the callee's label ids would need remapping into the caller, and the

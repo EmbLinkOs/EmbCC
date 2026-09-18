@@ -672,9 +672,11 @@ The suite is now **102/102**. Since that pass the C surface also gained C11
 `int (*p)[N]`, GNU `typeof`, wide/prefixed string and character literals, and
 GNU computed `goto`.
 
-**What is still genuinely missing**, each refused loudly rather than
-miscompiled: **VLAs**, **`_Complex`**, and **80-bit `long double`**. Those are
-the remaining C-language gaps. The two initializer seams that were once refused loudly
+**What is still genuinely missing:** **`_Complex`** (refused loudly) and
+**`long double` as its own type** — which, correcting this list's earlier
+claim, was never refused: it is compiled as `double`, so `sizeof(long double)`
+is 8 against the ABI's 16 on both targets. **VLAs** landed on 2026-09-18 (both
+targets; tests/exec/vla.c). The two initializer seams that were once refused loudly
 are now implemented too: braced initialization of **bitfields** (static/local/
 designated) and **file-scope compound literals** (direct value, nested, and
 `&(T){...}` via an anonymous global). The remaining Tier-3 entries are

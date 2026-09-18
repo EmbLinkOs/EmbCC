@@ -240,6 +240,7 @@ static int ins_def(const struct ir_ins *in)
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_BSWAP: case IR_SHL:
     case IR_SHR: case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
     case IR_ARMW: case IR_CAS: case IR_FRAMEADDR:
+    case IR_ALLOCA: case IR_SPSAVE:
     case IR_STVAR:            /* the local written */
     case IR_CALL:             /* always stores a (possibly-unused) result temp */
     case IR_LABELADDR:        /* dst = &&label */
@@ -305,6 +306,7 @@ static unsigned long *compute_live_intervals(struct ir_func *fn, int *first,
         case IR_CMPXCHG: case IR_CAS:
             USE(s->a); USE(s->b); USE(s->c); break;
         case IR_STVAR: case IR_VA_START:
+        case IR_ALLOCA: case IR_SPRESTORE:
             USE(s->a); break;
         case IR_RET: case IR_BRZ: case IR_BRNZ:
             USE(s->a); break;
@@ -969,6 +971,7 @@ static void count_vreg_uses(struct ir_func *fn, int *cnt)
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
         case IR_ADDR: case IR_STVAR: case IR_VA_START:
         case IR_RET: case IR_BRZ: case IR_BRNZ:
+        case IR_ALLOCA: case IR_SPRESTORE:
             UZ(s->a); break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
@@ -2014,6 +2017,33 @@ static void gen_func(struct ir_func *fn, struct code *text,
             cg_reset();
             x86_mov_reg_reg(text, REG_RAX, REG_RBP);
             cg_store(text, sd, i->dst, 8);
+            break;
+        case IR_ALLOCA: {
+            /* rsp -= round16(size + pad); the block starts above the
+             * outgoing area (which moves down with rsp), at a 16-aligned
+             * address: pad lifts an 8-mod-16 outgoing size to 16 without
+             * reaching into the locals above the old outgoing area. */
+            int og = fn->outgoing_bytes;
+            int pad = ((og + 15) & ~15) - og;
+            cg_load(text, sd, i->a, 8, 0, 8);
+            cg_reset();
+            x86_alu_reg_imm(text, '+', REG_RAX, 15 + pad, 8);
+            x86_alu_reg_imm(text, '&', REG_RAX, -16, 8);
+            x86_alu_rr(text, '-', REG_RSP, REG_RAX, 8);
+            x86_mov_reg_reg(text, REG_RAX, REG_RSP);
+            if (og + pad)
+                x86_alu_reg_imm(text, '+', REG_RAX, og + pad, 8);
+            cg_store(text, sd, i->dst, 8);
+            break;
+        }
+        case IR_SPSAVE:
+            cg_reset();
+            x86_mov_reg_reg(text, REG_RAX, REG_RSP);
+            cg_store(text, sd, i->dst, 8);
+            break;
+        case IR_SPRESTORE:
+            cg_load(text, sd, i->a, 8, 0, 8);
+            x86_mov_reg_reg(text, REG_RSP, REG_RAX);
             break;
         case IR_MEMCPY: {
             /* a struct copy: 8 bytes at a time, then the tail. A register-held

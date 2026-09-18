@@ -188,14 +188,10 @@ oversight.
 
 ## What's next
 
-- **The C language gaps both targets share:** variable-length arrays,
-  `_Complex`, and `long double` (80-bit on x86-64, 128-bit IEEE quad on
-  aarch64). Each is refused loudly today rather than miscompiled.
-- **The last four x86 kernel files:** `rdseed` and `stac` in the inline-asm
-  assembler, a `selftest.h` the build generates, and `"+"` asm operands, which
-  the x86 path never loads with the lvalue's current value before the asm
-  (`asm("addq $1,%0" : "+r"(x))` computes on `&x`). Nothing in the x86 kernel
-  uses one today; the aarch64 path gets it right.
+- **The C language gaps both targets share:** `_Complex` (refused), and
+  `long double` (80-bit on x86-64, 128-bit IEEE quad on aarch64), which today
+  is quietly compiled as `double` — an ABI mismatch with gcc-built code, not a
+  refusal. Variable-length arrays are done on both targets.
 - **`-g` for aarch64.**
 - **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
   the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1
@@ -204,8 +200,5 @@ oversight.
   last named milestone.
 - **The kernel, through EmbBuild on the OS** — the same step for the bigger
   prize; the two blockers (an on-OS assembler, `kernel_end`) are closed.
-- **The C gaps that remain** — VLA, `_Complex`, 80-bit `long double`. Each is
-  refused loudly today rather than miscompiled; `docs/todo.md` ranks them
-  against a real corpus.
 - **Past that, only if earned** (D-006): C++ as the second language (D-008),
   `__thread`/TLS, and dynamic-linking output. Candidates, not commitments.

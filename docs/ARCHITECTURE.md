@@ -168,5 +168,5 @@ compiles the whole EmbLinkOS kernel, which boots to the desktop).
 **Still out of scope, and refused loudly rather than faked:** C++ (the intended
 second language, D-008, but a different project in size), TLS/`__thread`,
 PIE/PIC output, and cross-targets other than x86-64. The remaining C-language
-gaps — VLA, `_Complex`, 80-bit `long double` — are tracked in `todo.md` against
+gaps — `_Complex`, and `long double` as its own type — are tracked in `todo.md` against
 a real corpus.

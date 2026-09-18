@@ -181,7 +181,8 @@ Refused loudly rather than faked, per THE RULE:
   links with the cross `ld`.
 - **`section("name")` on a function or a local** — honored on file-scope
   variables only; elsewhere it is an error rather than a silent `.text`.
-- **VLAs, `_Complex`, 80-bit `long double`** — the remaining C gaps, ranked
+- **`_Complex`, and `long double` as its own type** (it is compiled as
+  `double` today) — the remaining C gaps, ranked
   against a real corpus in [todo.md](todo.md).
 - **C++, `__thread`/TLS, PIE/PIC output** — out of scope by decision
   (ARCHITECTURE §8, DECISIONS D-008).

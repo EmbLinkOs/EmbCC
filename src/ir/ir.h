@@ -79,9 +79,14 @@ enum ir_op {
                * the value seen, whether or not the swap happened — the
                * __sync_*_compare_and_swap shape, where IR_CMPXCHG is the
                * __atomic one (expected passed by address, a bool back). */
-    IR_FRAMEADDR /* dst = this function's frame pointer (rbp / x29), which
-                  * on both targets points at [saved fp][return address] —
-                  * the base of __builtin_frame_address/_return_address */
+    IR_FRAMEADDR, /* dst = this function's frame pointer (rbp / x29), which
+                   * on both targets points at [saved fp][return address] —
+                   * the base of __builtin_frame_address/_return_address */
+    IR_ALLOCA,    /* dst = a fresh 16-aligned block of `a` bytes on the
+                   * stack, above the outgoing-argument area (a VLA) */
+    IR_SPSAVE,    /* dst = the stack pointer */
+    IR_SPRESTORE  /* stack pointer = a (releases every IR_ALLOCA since the
+                   * IR_SPSAVE that produced a) */
 };
 
 /* One resolved asm operand: an input carries the temp holding its VALUE, an
@@ -179,6 +184,9 @@ struct ir_func {
     int nlabels;
     int scratch_bytes;       /* struct-return temporaries */
     int outgoing_bytes;      /* widest stack-argument area of any call */
+    int has_alloca;          /* an IR_ALLOCA moves the stack pointer at run
+                              * time, so the frame must not be addressed
+                              * from it (aarch64 then uses x19) */
     struct ir_ins *ins;
     int nins, cap;
     struct ir_line *lines;   /* -g: (offset, line) rows in .text order */

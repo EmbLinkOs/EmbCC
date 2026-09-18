@@ -35,6 +35,9 @@ struct parser {
     int alignas_out;      /* alignment from a `_Alignas(...)` on the current
                            * declaration specifiers; read + reset where the
                            * declaration applies its alignment (like `aligned`) */
+    int vla_ok;           /* inside a function (its parameters or body) and
+                           * not in a struct body: a non-constant array size
+                           * makes a VLA rather than an error */
 };
 
 static struct token *cur(struct parser *ps) { return &ps->lx.tok; }
@@ -213,6 +216,7 @@ static struct expr *parse_cond(struct parser *ps);
 static int size_fold(const struct expr *e, long *out);
 static struct type *ce_type(const struct expr *e);
 static struct type *parse_array_dims(struct parser *ps, struct type *t);
+static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
 static void parse_static_assert(struct parser *ps);
 static struct expr *parse_initializer(struct parser *ps);
@@ -306,6 +310,8 @@ static struct type *parse_type_name(struct parser *ps, struct type *base)
 static struct type *parse_fn_params(struct parser *ps, struct type *ret)
 {
     expect(ps, TOK_LPAREN, "'('");
+    int saved_vla_ok = ps->vla_ok;
+    ps->vla_ok = 1;   /* prototype scope: `int a[n]`, `int a[*]` */
     struct type *pt[MAX_PARAMS];
     int n = 0, varargs = 0;
 
@@ -346,6 +352,7 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
         }
     }
     expect(ps, TOK_RPAREN, "')'");
+    ps->vla_ok = saved_vla_ok;
     return ty_func(ret, pt, n, varargs);
 }
 
@@ -807,31 +814,64 @@ static int size_fold(const struct expr *e, long *out)
 static struct type *parse_array_dims(struct parser *ps, struct type *t)
 {
     int dims[4];
+    struct expr *dexpr[4];   /* each dimension's expression (NULL for []) */
+    int dvar[4];             /* 1 = not a constant: a VLA dimension */
     int ndims = 0;
     while (cur(ps)->kind == TOK_LBRACKET) {
         advance(ps);
         int dim = 0; /* [] : legal for params (adjusts to a pointer);
                         elsewhere caught as an incomplete type */
-        if (cur(ps)->kind != TOK_RBRACKET) {
+        struct expr *de = NULL;
+        int var = 0;
+        if (cur(ps)->kind == TOK_STAR && ps->vla_ok) {
+            /* `[*]`: a VLA of unspecified size, prototype scope only (C99
+             * 6.7.5.2p4). Only its adjusted pointer type survives. */
+            struct lexer save = ps->lx;
+            advance(ps);
+            if (cur(ps)->kind == TOK_RBRACKET) {
+                de = new_expr(EXPR_NUM, cur(ps)->line, 0);
+                de->num = 1;
+                var = 1;
+            } else {
+                ps->lx = save;
+            }
+        }
+        if (!de && cur(ps)->kind != TOK_RBRACKET) {
             int dline = cur(ps)->line;
-            struct expr *de = parse_cond(ps);
+            de = parse_cond(ps);
             long dv;
-            if (!size_fold(de, &dv))
-                diag_fatal(ps->lx.file, dline,
-                           "array size must be a constant expression");
-            if (dv < 0)
-                diag_fatal(ps->lx.file, dline,
-                           "array size cannot be negative");
-            dim = (int)dv; /* 0 is the extern/flexible form */
+            if (!size_fold(de, &dv)) {
+                if (!ps->vla_ok)
+                    diag_fatal(ps->lx.file, dline,
+                               "array size must be a constant expression "
+                               "here (a variable length array can only be "
+                               "a local variable or a parameter)");
+                var = 1;
+            } else {
+                if (dv < 0)
+                    diag_fatal(ps->lx.file, dline,
+                               "array size cannot be negative");
+                dim = (int)dv; /* 0 is the extern/flexible form */
+            }
         }
         if (ndims >= 4)
             diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                        "more than 4 array dimensions");
-        dims[ndims++] = dim;
+        dims[ndims] = dim;
+        dexpr[ndims] = de;
+        dvar[ndims] = var;
+        ndims++;
         expect(ps, TOK_RBRACKET, "']'");
     }
-    for (int i = ndims - 1; i >= 0; i--)
-        t = ty_array(t, dims[i]);
+    /* Innermost first. Once any dimension is variable, every dimension
+     * outside it is too — `int a[3][n]` is 3 rows of a run-time size — so
+     * each becomes a VLA node (with its constant as the length). */
+    for (int i = ndims - 1; i >= 0; i--) {
+        if (dvar[i] || (ty_is_vla(t) && dexpr[i]))
+            t = ty_vla(t, dexpr[i]);
+        else
+            t = ty_array(t, dims[i]);
+    }
     return t;
 }
 
@@ -839,6 +879,8 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                                       const struct attrs *lead)
 {
     expect(ps, TOK_LBRACE, "'{'");
+    int saved_vla_ok = ps->vla_ok;
+    ps->vla_ok = 0;   /* a member cannot be variably modified (6.7.2.1p9) */
     struct member *ms = NULL;
     int n = 0, cap = 0;
 
@@ -933,6 +975,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
         expect(ps, TOK_SEMI, "';'");
     }
     advance(ps); /* '}' */
+    ps->vla_ok = saved_vla_ok;
     struct attrs at = *lead;     /* struct __attribute__((packed)) {...} */
     parse_attributes(ps, &at);   /* struct {...} __attribute__((packed)) */
     if (n == 0)
@@ -1909,7 +1952,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * takes its size from the literal */
             /* an omitted array size is filled in by sema from the
              * initializer, so only an UNINITIALIZED one is incomplete */
-            if (ty_size(s->dty) == 0 && !s->expr)
+            if (ty_size(s->dty) == 0 && !s->expr && !ty_is_vla(s->dty))
                 diag_fatal(ps->lx.file, s->line,
                            "'%s' has incomplete type %s", s->name,
                            ty_name(s->dty));
@@ -2332,6 +2375,8 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->line = line;
     f->seq = seq;
     advance(ps); /* '(' */
+    int saved_vla_ok = ps->vla_ok;
+    ps->vla_ok = 1;   /* parameters and body: VLAs allowed */
 
     if (cur(ps)->kind == TOK_KW_VOID) {
         /* "(void)" means no parameters; "(void *x)" is a parameter */
@@ -2442,6 +2487,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             }
         }
         expect(ps, TOK_SEMI, "';'");
+        ps->vla_ok = saved_vla_ok;
         (void)u;
         return;
     } else {
@@ -2458,6 +2504,7 @@ static void parse_top(struct parser *ps, struct unit *u,
         f->body = blk->body;
         f->defined = 1;
     }
+    ps->vla_ok = saved_vla_ok;
     **ftail = f;
     *ftail = &f->next;
 }
@@ -2475,6 +2522,7 @@ struct unit *parse_unit(const char *file, const char *src)
     ps.econst_tail = &u->econsts;
     ps.seq = 0;
     ps.alignas_out = 0;
+    ps.vla_ok = 0;            /* file scope */
     lex_init(&ps.lx, file, src);
     struct func **ftail = &u->funcs;
     struct global **gtail = &u->globals;

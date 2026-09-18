@@ -353,6 +353,31 @@ static const char *suggest_name(struct unit *u, struct scope *sc,
 
 /* ---- expression checking ---- */
 
+/* Get a variably modified type ready for irgen: type-check every VLA
+ * length in it (innermost first — `int a[n][m]`'s row size needs m before
+ * the whole needs n) and give each VLA node the hidden slot its byte size
+ * lives in. A node shared by two declarations (a block-scope typedef) is
+ * prepared once. */
+static void check_expr(struct unit *u, struct func *f, struct scope *sc,
+                       struct expr *e);
+
+static void vla_prepare(struct unit *u, struct func *f, struct scope *sc,
+                        struct type *t)
+{
+    if (!t || (t->kind != TY_PTR && t->kind != TY_ARRAY))
+        return;
+    vla_prepare(u, f, sc, t->pointee);
+    if (!ty_is_vla(t) || t->vla_size >= 0)
+        return;
+    check_expr(u, f, sc, t->vla_len);
+    if (!ty_is_integer(t->vla_len->ty))
+        diag_at(u->file, t->vla_len->line, t->vla_len->col,
+                "size of array has non-integer type %s",
+                ty_name(t->vla_len->ty));
+    t->vla_len = mk_cast(t->vla_len, ty_base(TY_LONG, 0));
+    t->vla_size = scope_add(sc, "<vla size>", ty_base(TY_LONG, 1), NULL);
+}
+
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
 {
@@ -799,6 +824,26 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_SIZEOF: {
         long size;
+        /* sizeof a VLA is a run-time value: irgen reads its size slot (for
+         * a type name, after computing it). Stays EXPR_SIZEOF. The operand
+         * EXPRESSION is not evaluated even so — C evaluates it only when
+         * its own type is a VLA, which EmbCC does not do (yet). */
+        if (e->cast_ty && ty_is_vm(e->cast_ty)) {
+            vla_prepare(u, f, sc, e->cast_ty);
+            if (ty_is_vla(e->cast_ty)) {
+                e->ty = ty_base(TY_LONG, 1);
+                break;
+            }
+        }
+        if (!e->cast_ty) {
+            check_expr(u, f, sc, e->rhs);
+            struct type *rt = e->rhs->undecayed ? e->rhs->undecayed
+                                                : e->rhs->ty;
+            if (ty_is_vla(rt)) {
+                e->ty = ty_base(TY_LONG, 1);
+                break;
+            }
+        }
         if (e->cast_ty) {
             if (e->cast_ty->kind == TY_VOID)
                 diag_at(u->file, e->line, e->col, "sizeof(void)");
@@ -807,7 +852,6 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                            ty_name(e->cast_ty));
             size = ty_size(e->cast_ty);
         } else {
-            check_expr(u, f, sc, e->rhs);
             if (e->rhs->ty->kind == TY_VOID)
                 diag_at(u->file, e->line, e->col, "sizeof a void expression");
             /* sizeof is the one context where an array does NOT decay */
@@ -828,7 +872,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             check_expr(u, f, sc, e->rhs);
             t = e->rhs->undecayed ? e->rhs->undecayed : e->rhs->ty;
         }
-        if (t->kind == TY_VOID || ty_size(t) == 0)
+        if (t->kind == TY_VOID || (ty_size(t) == 0 && !ty_is_vla(t)))
             diag_at(u->file, e->line, e->col, "_Alignof of incomplete %s",
                     ty_name(t));
         e->kind = EXPR_NUM;                 /* folds to a size_t constant */
@@ -2010,6 +2054,22 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 }
                 break;
             }
+            if (ty_is_vm(s->dty)) {
+                if (s->is_static)
+                    diag_at(u->file, s->line, s->col,
+                            "static '%s' cannot have a variably modified "
+                            "type (%s)", s->name, ty_name(s->dty));
+                if (ty_is_vla(s->dty) && s->expr)
+                    diag_at(u->file, s->line, s->col,
+                            "variable length array '%s' cannot be "
+                            "initialized", s->name);
+                /* sizes first: the lengths are evaluated where the
+                 * declaration is reached, before the name is in scope */
+                vla_prepare(u, f, sc, s->dty);
+                if (ty_is_vla(s->dty))
+                    s->vla_sp = scope_add(sc, "<vla sp>",
+                                          ty_base(TY_LONG, 1), NULL);
+            }
             if (s->expr && s->dty->kind == TY_ARRAY &&
                 s->expr->kind == EXPR_STR) {
                 /* char a[] = "..." (or a wide array from L""/u""/U"") : the
@@ -2338,6 +2398,13 @@ static void check_func(struct unit *u, struct func *f)
                        f->params[i], f->name);
         scope_add(&sc, f->params[i], f->param_tys[i], NULL);
     }
+    /* `int a[n][m]` arrives as int (*)[m]: its row size is computed at
+     * entry from the parameters before it */
+    for (int i = 0; i < f->nparams; i++)
+        if (ty_is_vm(f->param_tys[i])) {
+            vla_prepare(u, f, &sc, f->param_tys[i]);
+            f->has_vm_params = 1;
+        }
 
     check_stmt(u, f, &sc, f->body, 0, 0, 0);
 
@@ -2354,6 +2421,9 @@ static void check_func(struct unit *u, struct func *f)
          * storage — give it a pointer's worth and never address it */
         f->var_tys[i] = sc.vars[i].g ? ty_base(TY_LONG, 0)
                                      : sc.vars[i].ty;
+        /* a VLA's slot holds the pointer to its run-time storage */
+        if (ty_is_vla(f->var_tys[i]))
+            f->var_tys[i] = ty_ptr(f->var_tys[i]->pointee);
         f->var_aligns[i] = sc.vars[i].g ? 0 : sc.vars[i].user_align;
     }
     free(sc.vars);
