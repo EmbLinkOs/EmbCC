@@ -1441,6 +1441,28 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         }
         if (e->name && strcmp(e->name, "__builtin_va_end") == 0)
             return -1;
+        /* va_copy(dst, src): copy the tag src points at into this call's
+         * hidden slot, then point dst at the copy — so each list advances
+         * independently, as C99 7.15.1.2 requires. */
+        if (e->name && strcmp(e->name, "__builtin_va_copy") == 0) {
+            struct ir_ins *ad = emit(fn);
+            ad->op = IR_ADDR;
+            ad->a = e->var_index;
+            ad->dst = new_temp(fn);
+            int tag = ad->dst;
+            int src = gen_expr(fn, e->args[1]);
+            struct ir_ins *c = emit(fn);
+            c->op = IR_MEMCPY;
+            c->a = tag;
+            c->b = src;
+            c->size = target_get() == TARGET_AARCH64 ? 32 : 24;
+            struct expr *d = e->args[0];
+            if (d->kind == EXPR_VAR && !d->gref)
+                emit_stvar(fn, d->var_index, tag, d->ty);
+            else
+                emit_store(fn, gen_addr(fn, d), tag, d->ty);
+            return -1;
+        }
         if (e->name && strncmp(e->name, "__builtin_bswap", 15) == 0) {
             int v = gen_expr(fn, e->args[0]);
             struct ir_ins *i = emit(fn);

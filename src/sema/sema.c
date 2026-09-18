@@ -960,14 +960,19 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_CALL: {
         /* The stdarg builtins are not real functions: va_start needs the
-         * ADDRESS of its va_list (irgen takes it), and neither is
-         * declared anywhere. Type-check the operands, mark the enclosing
-         * function variadic, and hand back void. va_end is a no-op. */
+         * ADDRESS of its va_list (irgen takes it), and none is declared
+         * anywhere. Type-check the operands, mark the enclosing function
+         * variadic, and hand back void. va_end is a no-op. va_copy gets a
+         * hidden 32-byte slot: a va_list is a pointer to the va_start-built
+         * tag, which va_arg advances in place, so a copy needs a tag of its
+         * own for the destination to point at. */
         if (e->lhs->kind == EXPR_VAR && e->lhs->name &&
             (strcmp(e->lhs->name, "__builtin_va_start") == 0 ||
+             strcmp(e->lhs->name, "__builtin_va_copy") == 0 ||
              strcmp(e->lhs->name, "__builtin_va_end") == 0)) {
             int is_start = strcmp(e->lhs->name, "__builtin_va_start") == 0;
-            int want = is_start ? 2 : 1;
+            int is_copy = strcmp(e->lhs->name, "__builtin_va_copy") == 0;
+            int want = is_start || is_copy ? 2 : 1;
             if (e->nargs != want)
                 diag_at(u->file, e->line, e->col,
                            "%s takes %d argument%s", e->lhs->name, want,
@@ -982,6 +987,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 diag_at(u->file, e->line, e->col,
                            "va_start in '%s', which is not variadic",
                            f->name);
+            if (is_copy)   /* SysV's tag is 24 bytes, AAPCS64's 32 */
+                e->var_index = scope_add(sc, "<va_copy tag>",
+                                         ty_array(ty_base(TY_LONG, 0), 4),
+                                         NULL);
             e->name = e->lhs->name;   /* irgen dispatches on it */
             e->ty = ty_base(TY_VOID, 0);
             break;
