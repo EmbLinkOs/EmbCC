@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
+#include "../target/target.h"
 
 /* [kind][is_unsigned] — TY_PTR/TY_ARRAY/TY_STRUCT handled separately.
  * Designated initializers so this table survives struct type growing.
@@ -19,6 +20,16 @@ static struct type bases[8][2] = {
     { { .kind = TY_FLOAT }, { .kind = TY_FLOAT } },   /* never unsigned */
     { { .kind = TY_DOUBLE }, { .kind = TY_DOUBLE } },
 };
+
+struct type *ty_plain_char(void)
+{
+    return ty_base(TY_CHAR, target_get() == TARGET_AARCH64);
+}
+
+struct type *ty_wchar(void)
+{
+    return ty_base(TY_INT, target_get() == TARGET_AARCH64);
+}
 
 struct type *ty_base(enum ty_kind kind, int is_unsigned)
 {

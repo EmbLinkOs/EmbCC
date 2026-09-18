@@ -54,6 +54,7 @@ struct expr {
                            * decays to pointer-to-function (sema) */
     int str_index;        /* EXPR_STR: unit string table slot (irgen) */
     int str_width;        /* EXPR_STR: bytes/element (1 char, 2 char16, 4 wide) */
+    char str_prefix;      /* EXPR_STR: 'L' wchar_t, 'U' char32_t, 'u' char16_t */
     enum binop op;        /* EXPR_BINOP */
     struct expr *lhs, *rhs; /* BINOP + ASSIGN(lhs=target);
                              * NOT/NEG/BNOT/DEREF/ADDR/CAST use rhs only */

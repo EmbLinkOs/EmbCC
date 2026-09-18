@@ -105,12 +105,50 @@ enum tok_kind {
     TOK_COLON
 };
 
+/* One decoded element of a string or character literal.
+ *
+ * A CHARACTER (raw = 0) is a code point — from the source text, decoded from
+ * UTF-8, or from a \u / \U escape — and is ENCODED at the literal's final
+ * width: UTF-8 for a narrow literal, UTF-16 for u"", UTF-32 for L"" / U"".
+ * A RAW unit (raw = 1) comes from a \x or octal escape, or from a source byte
+ * that is not valid UTF-8, and is placed as one code-unit VALUE, unencoded —
+ * which is what makes "\xC3\xA9" two bytes but L"\xE9" one element. Adjacent
+ * literals are concatenated as these, then encoded once, because the final
+ * width is not known until the last one is seen ("a" L"b" is wide). */
+struct litch {
+    unsigned long v;
+    int raw;
+};
+
+/* Decodes one element at *p — a source character or a backslash escape (with
+ * *p just past the backslash if esc) — and advances *p past it. */
+struct litch lit_decode(const char **p, int esc, const char *file, int line);
+
+/* Encodes n elements at `width` bytes per unit (1, 2 or 4), little-endian,
+ * followed by a NUL unit. Returns a malloc'd buffer of *nunits * width bytes,
+ * *nunits counting the NUL. An escape too wide for the unit is truncated with
+ * a warning, as gcc does. */
+char *lit_encode(const struct litch *lc, int n, int width, long *nunits,
+                 const char *file, int line);
+
+/* The value C gives a character constant holding the one element c, under
+ * encoding prefix pfx (0, 'L', 'u', 'U'). A plain constant is the byte read
+ * as the target's plain char, so '\xFF' is -1 on x86-64 and 255 on aarch64,
+ * exactly as gcc gives it. *uns is set when the constant's type is unsigned
+ * (char32_t, and wchar_t where the target makes it so). */
+long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
+                    int line);
+
 struct token {
     enum tok_kind kind;
     int line;
     int col;       /* 1-based column of the token's first character */
     long num;      /* TOK_NUM; TOK_STR: element count INCLUDING the NUL */
     int str_width; /* TOK_STR: bytes per element — 1 char, 2 char16, 4 wchar/32 */
+    char str_prefix; /* TOK_STR: 'L', 'U', 'u', or 0 — L"" and U"" share a
+                      * width but not a type (wchar_t vs char32_t) */
+    struct litch *lit; /* TOK_STR: the decoded elements, for concatenation */
+    int nlit;
     int num_long;  /* TOK_NUM: type is long (L suffix or magnitude) */
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
     double fnum;   /* TOK_FNUM */

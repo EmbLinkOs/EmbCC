@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
+#include "../target/target.h"
 
 void lex_init(struct lexer *lx, const char *file, const char *src)
 {
@@ -117,51 +118,215 @@ static int hex_val(int c)
     return -1;
 }
 
-/* Consume one backslash escape. On entry lx->p is at the character AFTER the
- * '\'; on return it is past the escape. Returns the byte value (0..255).
- * The full C set: simple escapes, GNU '\e', hex '\xH...', and octal '\NNN'. */
-static int scan_escape(struct lexer *lx)
+/* ---- literal elements ------------------------------------------------ */
+
+static int hex_digits(const char **p, int want, unsigned long *out)
 {
-    int c = (unsigned char)*lx->p;
-    switch (c) {
-    case 'n': lx->p++; return '\n';
-    case 't': lx->p++; return '\t';
-    case 'r': lx->p++; return '\r';
-    case 'a': lx->p++; return '\a';
-    case 'b': lx->p++; return '\b';
-    case 'f': lx->p++; return '\f';
-    case 'v': lx->p++; return '\v';
-    case 'e': lx->p++; return 27;      /* GNU extension: ESC */
-    case '\\': lx->p++; return '\\';
-    case '\'': lx->p++; return '\'';
-    case '"': lx->p++; return '"';
-    case '?': lx->p++; return '?';
+    unsigned long v = 0;
+    for (int i = 0; i < want; i++) {
+        int d = hex_val((unsigned char)**p);
+        if (d < 0)
+            return 0;
+        v = v * 16 + (unsigned long)d;
+        (*p)++;
+    }
+    *out = v;
+    return 1;
+}
+
+/* The escape after a backslash (*p just past it). */
+static struct litch decode_escape(const char **p, const char *file, int line)
+{
+    struct litch c = { 0, 1 };
+    int ch = (unsigned char)**p;
+    switch (ch) {
+    case 'n': (*p)++; c.v = '\n'; return c;
+    case 't': (*p)++; c.v = '\t'; return c;
+    case 'r': (*p)++; c.v = '\r'; return c;
+    case 'a': (*p)++; c.v = '\a'; return c;
+    case 'b': (*p)++; c.v = '\b'; return c;
+    case 'f': (*p)++; c.v = '\f'; return c;
+    case 'v': (*p)++; c.v = '\v'; return c;
+    case 'e': (*p)++; c.v = 27; return c;      /* GNU extension: ESC */
+    case '\\': (*p)++; c.v = '\\'; return c;
+    case '\'': (*p)++; c.v = '\''; return c;
+    case '"': (*p)++; c.v = '"'; return c;
+    case '?': (*p)++; c.v = '?'; return c;
     case 'x': {
-        lx->p++;
-        if (hex_val((unsigned char)*lx->p) < 0)
-            diag_fatal(lx->file, lx->line, "\\x used with no following "
-                       "hex digits");
-        int v = 0, d;
-        while ((d = hex_val((unsigned char)*lx->p)) >= 0) {
-            v = v * 16 + d;
-            lx->p++;
+        (*p)++;
+        if (hex_val((unsigned char)**p) < 0)
+            diag_fatal(file, line, "\\x used with no following hex digits");
+        /* Every digit belongs to the escape, however many: the VALUE is
+         * kept whole here and narrowed (with gcc's warning) only once the
+         * literal's unit width is known. */
+        unsigned long v = 0;
+        int d, big = 0;
+        while ((d = hex_val((unsigned char)**p)) >= 0) {
+            if (v >> 60)
+                big = 1;
+            v = v * 16 + (unsigned long)d;
+            (*p)++;
         }
-        return v & 0xff;
+        c.v = big ? ~0UL : v;
+        return c;
+    }
+    case 'u':
+    case 'U': {
+        /* A universal character name: exactly 4 or 8 hex digits naming a
+         * code point, which is ENCODED at the literal's width. */
+        int want = ch == 'u' ? 4 : 8;
+        (*p)++;
+        unsigned long v;
+        if (!hex_digits(p, want, &v))
+            diag_fatal(file, line, "\\%c needs %d hex digits", ch, want);
+        if (v >= 0xD800 && v <= 0xDFFF)
+            diag_fatal(file, line, "\\%c%0*lX is not a valid universal character "
+                       "(a UTF-16 surrogate)", ch, want, v);
+        if (v > 0x10FFFF)
+            diag_fatal(file, line, "\\%c%0*lX is outside the UCS codespace",
+                       ch, want, v);
+        c.v = v;
+        c.raw = 0;
+        return c;
     }
     default:
-        if (c >= '0' && c <= '7') {     /* octal, at most three digits */
-            int v = 0, i = 0;
-            while (i < 3 && *lx->p >= '0' && *lx->p <= '7') {
-                v = v * 8 + (*lx->p - '0');
-                lx->p++;
-                i++;
+        if (ch >= '0' && ch <= '7') {     /* octal, at most three digits */
+            unsigned long v = 0;
+            for (int i = 0; i < 3 && **p >= '0' && **p <= '7'; i++) {
+                v = v * 8 + (unsigned long)(**p - '0');
+                (*p)++;
             }
-            return v & 0xff;
+            c.v = v;
+            return c;
         }
-        diag_fatal(lx->file, lx->line,
-                   "unknown escape '\\%c' in a literal", c);
-        return 0;
+        diag_fatal(file, line, "unknown escape '\\%c' in a literal", ch);
+        return c;
     }
+}
+
+/* A source character: a code point decoded from UTF-8, or — for a byte that
+ * does not start a valid UTF-8 sequence — that byte, raw. */
+static struct litch decode_source(const char **p)
+{
+    const unsigned char *s = (const unsigned char *)*p;
+    struct litch c = { s[0], 0 };
+    int len = s[0] < 0x80 ? 1 : (s[0] & 0xE0) == 0xC0 ? 2
+            : (s[0] & 0xF0) == 0xE0 ? 3 : (s[0] & 0xF8) == 0xF0 ? 4 : 0;
+    if (len == 1) {
+        (*p)++;
+        return c;
+    }
+    if (len > 1) {
+        unsigned long v = s[0] & (0x7FU >> len);
+        int i;
+        for (i = 1; i < len && (s[i] & 0xC0) == 0x80; i++)
+            v = (v << 6) | (s[i] & 0x3F);
+        static const unsigned long min[] = { 0, 0, 0x80, 0x800, 0x10000 };
+        if (i == len && v >= min[len] && v <= 0x10FFFF &&
+            !(v >= 0xD800 && v <= 0xDFFF)) {
+            *p += len;
+            c.v = v;
+            return c;
+        }
+    }
+    (*p)++;                     /* not UTF-8: keep the byte itself */
+    c.raw = 1;
+    return c;
+}
+
+struct litch lit_decode(const char **p, int esc, const char *file, int line)
+{
+    return esc ? decode_escape(p, file, line) : decode_source(p);
+}
+
+char *lit_encode(const struct litch *lc, int n, int width, long *nunits,
+                 const char *file, int line)
+{
+    /* Worst case: four UTF-8 bytes, or two UTF-16 units, per element. */
+    unsigned char *out = xcalloc((size_t)(4 * n + 1), (size_t)width);
+    long u = 0;
+    unsigned long max = width == 4 ? 0xFFFFFFFFUL
+                      : width == 2 ? 0xFFFFUL : 0xFFUL;
+#define PUT(val)                                                            \
+    do {                                                                    \
+        unsigned long pv_ = (val);                                          \
+        for (int b_ = 0; b_ < width; b_++)                                  \
+            out[(size_t)u * (size_t)width + (size_t)b_] =                   \
+                (unsigned char)(pv_ >> (8 * b_));                           \
+        u++;                                                                \
+    } while (0)
+    for (int i = 0; i < n; i++) {
+        unsigned long v = lc[i].v;
+        if (lc[i].raw) {
+            if (v > max)
+                fprintf(stderr, "embcc: %s:%d: warning: escape sequence out "
+                        "of range for a %d-byte element; truncated, as gcc "
+                        "does\n", file, line, width);
+            PUT(v & max);
+        } else if (width == 1) {
+            if (v < 0x80) {
+                PUT(v);
+            } else if (v < 0x800) {
+                PUT(0xC0 | (v >> 6)); PUT(0x80 | (v & 0x3F));
+            } else if (v < 0x10000) {
+                PUT(0xE0 | (v >> 12)); PUT(0x80 | ((v >> 6) & 0x3F));
+                PUT(0x80 | (v & 0x3F));
+            } else {
+                PUT(0xF0 | (v >> 18)); PUT(0x80 | ((v >> 12) & 0x3F));
+                PUT(0x80 | ((v >> 6) & 0x3F)); PUT(0x80 | (v & 0x3F));
+            }
+        } else if (width == 2 && v > 0xFFFF) {
+            v -= 0x10000;                         /* a surrogate pair */
+            PUT(0xD800 | (v >> 10));
+            PUT(0xDC00 | (v & 0x3FF));
+        } else {
+            PUT(v);
+        }
+    }
+    PUT(0);
+#undef PUT
+    *nunits = u;
+    return (char *)out;
+}
+
+long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
+                    int line)
+{
+    *uns = 0;
+    if (pfx == 0) {
+        /* One byte, read as the target's plain char. A character that is
+         * more than one byte in UTF-8 would be gcc's multi-character constant,
+         * whose value is implementation-defined; refused rather than guessed. */
+        if (!c.raw && c.v > 0x7F)
+            diag_fatal(file, line, "character U+%04lX does not fit in one "
+                       "byte; write it as a wide constant (L'...')", c.v);
+        if (c.v > 0xFF)
+            fprintf(stderr, "embcc: %s:%d: warning: escape sequence out of "
+                    "range for a character constant; truncated, as gcc "
+                    "does\n", file, line);
+        unsigned long b = c.v & 0xFF;
+        if (target_get() == TARGET_AARCH64)
+            return (long)b;                        /* char is unsigned */
+        return b > 0x7F ? (long)b - 0x100 : (long)b;
+    }
+    if (pfx == 'u') {
+        if (!c.raw && c.v > 0xFFFF)
+            diag_fatal(file, line, "U+%04lX needs two UTF-16 code units and "
+                       "cannot be one u'' constant", c.v);
+        if (c.v > 0xFFFF)
+            fprintf(stderr, "embcc: %s:%d: warning: escape sequence out of "
+                    "range for char16_t; truncated, as gcc does\n", file, line);
+        return (long)(c.v & 0xFFFF);          /* char16_t promotes to int */
+    }
+    if (c.v > 0xFFFFFFFFUL)
+        fprintf(stderr, "embcc: %s:%d: warning: escape sequence out of range "
+                "for a 32-bit character; truncated, as gcc does\n", file, line);
+    unsigned long v = c.v & 0xFFFFFFFFUL;
+    if (pfx == 'U' || target_get() == TARGET_AARCH64) {
+        *uns = 1;                    /* char32_t, or aarch64's unsigned wchar_t */
+        return (long)v;
+    }
+    return v > 0x7FFFFFFFUL ? (long)v - 0x100000000L : (long)v;  /* int wchar_t */
 }
 
 void lex_next(struct lexer *lx)
@@ -174,11 +339,17 @@ void lex_next(struct lexer *lx)
     t->text = NULL;
     t->num = 0;
     t->str_width = 1;
+    t->str_prefix = 0;
+
+    t->lit = NULL;
+    t->nlit = 0;
 
     if (!*lx->p) {
         t->kind = TOK_EOF;
         return;
     }
+
+    int pfx = 0;   /* a literal's encoding prefix: 0, 'L', 'u' or 'U' */
 
     /* An encoding prefix on a string or char literal: L"" u8"" u"" U"" and
      * L'' u'' U''. Consume it and remember the element width; the '"' / '\''
@@ -188,6 +359,7 @@ void lex_next(struct lexer *lx)
     {
         const char *q = lx->p;
         int w = 0, adv = 0;
+        pfx = 0;
         if ((q[0] == 'L' || q[0] == 'U') && (q[1] == '"' || q[1] == '\'')) {
             w = 4; adv = 1;
         } else if (q[0] == 'u' && q[1] == '8' && q[2] == '"') {
@@ -197,8 +369,11 @@ void lex_next(struct lexer *lx)
         }
         if (adv) {
             lx->p += adv;
-            if (*lx->p == '"')
-                t->str_width = w;   /* a char constant ignores width (int value) */
+            pfx = adv == 1 ? q[0] : 0;                 /* u8 is plain char */
+            if (*lx->p == '"') {
+                t->str_width = w;
+                t->str_prefix = (char)pfx;
+            }
         }
     }
 
@@ -428,55 +603,57 @@ void lex_next(struct lexer *lx)
     }
     case '\'': {
         lx->p++;
-        long v;
-        if (*lx->p == '\\') {
-            lx->p++;
-            v = scan_escape(lx);
-        } else if (*lx->p && *lx->p != '\'' && *lx->p != '\n') {
-            v = (unsigned char)*lx->p;
-            lx->p++;
+        struct litch c;
+        const char *q = lx->p;
+        if (*q == '\\') {
+            q++;
+            c = lit_decode(&q, 1, lx->file, lx->line);
+        } else if (*q && *q != '\'' && *q != '\n') {
+            c = lit_decode(&q, 0, lx->file, lx->line);
         } else {
             diag_fatal(lx->file, lx->line, "empty character constant");
             return;
         }
+        lx->p = q;
         if (*lx->p != '\'')
-            diag_fatal(lx->file, lx->line,
-                       "unterminated character constant");
-        t->kind = TOK_NUM; /* a char constant has type int in C */
-        t->num = v;
+            diag_fatal(lx->file, lx->line, *lx->p && *lx->p != '\n'
+                       ? "a character constant holds one character "
+                         "(multi-character constants are not supported)"
+                       : "unterminated character constant");
+        int uns;
+        t->kind = TOK_NUM; /* a character constant is an int (or wide) value */
+        t->num = lit_char_value(c, pfx, &uns, lx->file, lx->line);
         t->num_long = 0;
-        t->num_uns = 0;
+        t->num_uns = uns;
         break;
     }
     case '"': {
         lx->p++;
-        /* Worst case the literal shrinks (escapes), never grows. */
-        size_t cap = 0;
-        const char *scan = lx->p;
-        while (*scan && *scan != '"') {
-            if (*scan == '\\' && scan[1])
-                scan++;
-            scan++;
-            cap++;
-        }
-        char *bytes = xmalloc(cap + 1);
-        size_t n = 0;
-        while (*lx->p && *lx->p != '"' && *lx->p != '\n') {
-            char ch;
-            if (*lx->p == '\\') {
-                lx->p++;
-                ch = (char)scan_escape(lx);
-            } else {
-                ch = *lx->p++;
+        /* Decode the body into elements; encode at this literal's own width.
+         * The parser re-encodes when adjacent literals concatenate. */
+        size_t cap = 16;
+        int n = 0;
+        struct litch *lc = xmalloc(cap * sizeof *lc);
+        const char *q = lx->p;
+        while (*q && *q != '"' && *q != '\n') {
+            if ((size_t)n == cap) {
+                cap *= 2;
+                lc = xrealloc(lc, cap * sizeof *lc);
             }
-            bytes[n++] = ch;
+            if (*q == '\\') {
+                q++;
+                lc[n++] = lit_decode(&q, 1, lx->file, lx->line);
+            } else {
+                lc[n++] = lit_decode(&q, 0, lx->file, lx->line);
+            }
         }
+        lx->p = q;
         if (*lx->p != '"')
             diag_fatal(lx->file, lx->line, "unterminated string literal");
-        bytes[n] = 0;
         t->kind = TOK_STR;
-        t->text = bytes;
-        t->num = (long)n + 1; /* the NUL is part of the object */
+        t->lit = lc;
+        t->nlit = n;
+        t->text = lit_encode(lc, n, t->str_width, &t->num, lx->file, lx->line);
         break;
     }
     case '.':

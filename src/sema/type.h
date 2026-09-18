@@ -64,6 +64,16 @@ struct type {
 /* Base types are interned singletons — pointer equality works for
  * them; ty_equal() works for everything. */
 struct type *ty_base(enum ty_kind kind, int is_unsigned);
+/* The types whose signedness the TARGET decides, each matching what that
+ * target's predefined macros already tell the headers:
+ *   plain `char` — signed on x86-64, UNSIGNED on aarch64 (AAPCS64;
+ *                  __CHAR_UNSIGNED__ is defined there);
+ *   wchar_t      — int on x86-64 ELF, unsigned int on aarch64
+ *                  (__WCHAR_TYPE__).
+ * EmbCC does not model plain char as a third type distinct from signed and
+ * unsigned char: it IS one of the two, chosen per target. */
+struct type *ty_plain_char(void);
+struct type *ty_wchar(void);
 /* A copy of `t` marked `volatile` (or t itself if already). Base types are
  * interned singletons, so this returns a fresh non-interned node — safe because
  * nothing compares types by pointer identity (ty_equal compares fields). */

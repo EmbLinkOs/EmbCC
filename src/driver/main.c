@@ -231,18 +231,11 @@ static int compile(const char *in, const char *out, int pp_only)
         for (int i = 0; i < g->nrelocs; i++) {
             if (!g->relocs[i].str)   /* a &global reloc needs no .rodata */
                 continue;
+            /* Already encoded at its real width: str_len elements of
+             * str_width bytes (lit_encode). */
             int w = g->relocs[i].str_width ? g->relocs[i].str_width : 1;
-            const char *bytes = g->relocs[i].str;
-            int len = g->relocs[i].str_len;
-            if (w > 1) {             /* expand a wide literal to its real width */
-                int n = len;
-                char *wide = xcalloc((size_t)n, (size_t)w);
-                for (int k = 0; k < n; k++)
-                    wide[(size_t)k * w] = bytes[k];
-                bytes = wide;
-                len = n * w;
-            }
-            int si = ir_intern_string(iu, bytes, len);
+            int si = ir_intern_string(iu, g->relocs[i].str,
+                                      g->relocs[i].str_len * w);
             g->relocs[i].str_off = iu->strs[si].off;
         }
     }

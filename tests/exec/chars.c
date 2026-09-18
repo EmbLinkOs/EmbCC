@@ -12,7 +12,9 @@ int main(void) {
     char n = 300;              /* (char)300 = 44 */
     unsigned char u = 255;
     u = u + 1;                 /* wraps to 0 */
-    char m = -2;               /* sign-extends on load */
+    signed char m = -2;        /* sign-extends on load (plain char would
+                                * not on aarch64, where it is unsigned —
+                                * tests/exec/char-signedness.c covers that) */
 
     char *pc = &c;
     *pc = 'Z';                 /* byte store through pointer */

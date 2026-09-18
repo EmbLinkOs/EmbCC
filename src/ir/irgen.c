@@ -720,19 +720,10 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         return i->dst;
     }
     case EXPR_STR: {
+        /* The literal arrives encoded at its real width (lit_encode): num
+         * elements of str_width bytes each, NUL included. */
         int w = e->str_width ? e->str_width : 1;
-        if (w == 1) {
-            e->str_index = intern_str(e->name, (int)e->num);
-        } else {
-            /* Expand each source byte to a `w`-byte element, little-endian and
-             * zero-extended, so the .rodata holds a real wide string. */
-            int n = (int)e->num;
-            char *wide = xmalloc((size_t)n * (size_t)w);
-            memset(wide, 0, (size_t)n * (size_t)w);
-            for (int k = 0; k < n; k++)
-                wide[(size_t)k * w] = e->name[k];
-            e->str_index = intern_str(wide, n * w);
-        }
+        e->str_index = intern_str(e->name, (int)e->num * w);
         struct ir_ins *i = emit(fn);
         i->op = IR_STRADDR;
         i->label = e->str_index;

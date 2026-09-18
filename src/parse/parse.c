@@ -514,7 +514,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
          * (as some headers write it) resolves. */
         if (strcmp(cur(ps)->text, "__builtin_va_list") == 0) {
             advance(ps);
-            return ty_ptr(ty_base(TY_CHAR, 0));
+            return ty_ptr(ty_plain_char());
         }
         struct type *td = find_typedef(ps, cur(ps)->text);
         if (!td)
@@ -584,6 +584,9 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     enum ty_kind kind = nchar ? TY_CHAR :
                         nshort ? TY_SHORT :
                         nlong ? TY_LONG : TY_INT;
+    /* `char` with no signed/unsigned is the target's plain char. */
+    if (kind == TY_CHAR && uns == -1)
+        return ty_plain_char();
     return ty_base(kind, uns == 1);
 }
 
@@ -1014,26 +1017,37 @@ static struct expr *parse_primary(struct parser *ps)
         return e;
     case TOK_STR: {
         /* Adjacent string literals concatenate (C translation phase 6):
-         * "foo" "bar" is one literal "foobar". num counts the NUL, so
-         * each join drops the running string's terminator and appends
-         * the next literal's bytes (including its NUL). */
+         * "foo" "bar" is one literal "foobar". The DECODED elements are
+         * joined and encoded once, because the result's width is the widest
+         * prefix among the pieces — "a" L"b" is a wide literal, so the "a"
+         * must be re-encoded as UTF-32, not copied as a byte. */
         e = new_expr(EXPR_STR, t->line, t->col);
-        e->str_width = t->str_width;
-        size_t len = (size_t)t->num;
-        char *bytes = xmalloc(len);
-        memcpy(bytes, t->text, len);
-        advance(ps);
+        int line0 = t->line;   /* t is the current-token slot: it moves on */
+        int width = t->str_width, prefix = t->str_prefix;
+        size_t n = 0, cap = 0;
+        struct litch *lc = NULL;
         while (cur(ps)->kind == TOK_STR) {
-            size_t add = (size_t)cur(ps)->num;
-            char *nb = xmalloc(len - 1 + add);
-            memcpy(nb, bytes, len - 1);
-            memcpy(nb + len - 1, cur(ps)->text, add);
-            bytes = nb;
-            len = len - 1 + add;
+            struct token *st = cur(ps);
+            if (st->str_prefix) {
+                if (prefix && prefix != st->str_prefix)
+                    diag_at(ps->lx.file, st->line, st->col,
+                            "concatenating %c\"\" and %c\"\" literals is not "
+                            "supported", prefix, st->str_prefix);
+                prefix = st->str_prefix;
+                width = st->str_width;
+            }
+            if (n + (size_t)st->nlit > cap) {
+                cap = (n + (size_t)st->nlit) * 2 + 8;
+                lc = xrealloc(lc, cap * sizeof *lc);
+            }
+            memcpy(lc + n, st->lit, (size_t)st->nlit * sizeof *lc);
+            n += (size_t)st->nlit;
             advance(ps);
         }
-        e->name = bytes;
-        e->num = (long)len;
+        e->str_width = width;
+        e->str_prefix = (char)prefix;
+        e->name = lit_encode(lc, (int)n, width, &e->num, ps->lx.file, line0);
+        free(lc);
         return e;
     }
     case TOK_LPAREN:

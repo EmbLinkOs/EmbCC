@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
+#include "../lex/lex.h"
 #include "predef.h"
 
 #define MAX_MACRO_PARAMS 16
@@ -451,26 +452,31 @@ static long eval_primary(struct evalp *e)
         e->p++;
         return eval_primary(e);
     }
+    /* A character constant, optionally L/u/U-prefixed: decoded and valued
+     * by the SAME functions the lexer uses (lex.c), so #if agrees with the
+     * code it guards — including '\xFF' being -1 where char is signed. */
+    int cpfx = 0;
+    if ((*e->p == 'L' || *e->p == 'u' || *e->p == 'U') && e->p[1] == '\'') {
+        cpfx = *e->p;
+        e->p++;
+    }
     if (*e->p == '\'') {
         const char *q = e->p + 1;
-        long v;
+        struct litch c;
         if (*q == '\\') {
             q++;
-            switch (*q) {
-            case 'n': v = '\n'; break;
-            case 't': v = '\t'; break;
-            case 'r': v = '\r'; break;
-            case '0': v = 0; break;
-            default: v = (unsigned char)*q; break;
-            }
-            q++;
+            c = lit_decode(&q, 1, e->s->file, e->s->line);
+        } else if (*q && *q != '\'' && *q != '\n') {
+            c = lit_decode(&q, 0, e->s->file, e->s->line);
         } else {
-            v = (unsigned char)*q++;
+            cerr(e->s, "bad character constant in #if", NULL);
+            return 0;
         }
         if (*q != '\'')
             cerr(e->s, "bad character constant in #if", NULL);
         e->p = q + 1;
-        return v;
+        int uns;
+        return lit_char_value(c, cpfx, &uns, e->s->file, e->s->line);
     }
     if (*e->p >= '0' && *e->p <= '9') {
         char *end;

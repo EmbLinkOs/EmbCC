@@ -361,9 +361,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* char[N] (or wchar_t/char16_t/char32_t[N] for a wide literal),
          * decaying to a pointer like any array (sizeof sees the array through
          * `undecayed`). e->num is the element count including the NUL. */
-        struct type *elem = e->str_width == 4 ? ty_base(TY_INT, 0)
-                          : e->str_width == 2 ? ty_base(TY_SHORT, 1)
-                          : ty_base(TY_CHAR, 0);
+        struct type *elem = e->str_width == 4
+                              ? (e->str_prefix == 'U' ? ty_base(TY_INT, 1)  /* char32_t */
+                                                      : ty_wchar())
+                          : e->str_width == 2 ? ty_base(TY_SHORT, 1)        /* char16_t */
+                          : ty_plain_char();
         e->undecayed = ty_array(elem, (int)e->num);
         e->ty = ty_ptr(elem);
         break;
@@ -1286,7 +1288,13 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                     struct expr *ch = xcalloc(1, sizeof *ch);
                     ch->kind = EXPR_NUM;
                     ch->line = init->line;
-                    ch->num = (unsigned char)init->name[i];
+                    /* element i: esz little-endian bytes (lit_encode) */
+                    unsigned long uv = 0;
+                    for (int b = 0; b < esz; b++)
+                        uv |= (unsigned long)(unsigned char)
+                              init->name[(size_t)i * (size_t)esz + (size_t)b]
+                              << (8 * b);
+                    ch->num = (long)uv;
                     ch->ty = ty->pointee;
                     init_push(out, off + i * esz, ty->pointee, ch);
                 }
