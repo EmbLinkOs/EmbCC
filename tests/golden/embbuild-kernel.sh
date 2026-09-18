@@ -1,7 +1,7 @@
 #!/bin/sh
 # KM1, the host half: the EmbLinkOS kernel built ENTIRELY from an EmbBuild
-# manifest — 89 embcc C compiles + 6 embcc .asm assembles + one embld link, no
-# gcc/nasm/ld — and the result BOOTS. myos docs/BUILD.md §12 scopes "EmbBuild
+# manifest — an embcc compile per KERNEL_SRC unit (165 today) + 6 embcc .asm
+# assembles + one embld link, no gcc/nasm/ld — and the result BOOTS. myos docs/BUILD.md §12 scopes "EmbBuild
 # rebuilds the kernel"; its blockers G1 (on-OS assembler) and G2 (kernel_end)
 # are EmbAS and EmbLD's L1, both done, so this is now pure orchestration: G5,
 # the generated manifest (tools/gen-kernel-manifest.sh), walked to a kernel.elf.
@@ -16,7 +16,7 @@ set -eu
 echo "TEST-MARKER embbuild-kernel"
 . "$(dirname "$0")/../lib.sh"
 
-# Opt-in: an 89-unit kernel build plus a qemu boot is ~35s — too heavy for every
+# Opt-in: a 165-unit kernel build plus a qemu boot is ~65s — too heavy for every
 # `make test`. Run it deliberately with EMBCC_KM1=1 (CI and the dev suite skip).
 [ "${EMBCC_KM1:-}" = 1 ] || { echo "skipped: kernel-manifest boot is opt-in (set EMBCC_KM1=1)"; exit 0; }
 
@@ -46,8 +46,7 @@ maphost() {
         /data/apps/embld/embld.elf) p="$HOST/embld" ;;
         /data/apps/embcc/include)   p="$HOST/include" ;;
         /data/apps/embcc/include/*) p="$HOST/include/${p#/data/apps/embcc/include/}" ;;
-        /data/src/kernel)           p="$MYOS/kernel" ;;
-        /data/src/kernel/*)         p="$MYOS/kernel/${p#/data/src/kernel/}" ;;
+        /data/src/*)                p="$MYOS/${p#/data/src/}" ;;
         /data/build/out/kernel/*)   p="$STAGE/${p#/data/build/out/kernel/}" ;;
     esac
     echo "$pre$p"
@@ -86,8 +85,13 @@ nasm -f bin -D KERNEL_LOAD_SECTORS=$ksect "$MYOS/boot/stage2/stage2.asm" -o "$ST
 s2s=$(( ($(wc -c < "$STAGE/stage2.bin" | tr -d " ") + 511) / 512 ))
 nasm -f bin -D STAGE2_LOAD_SECTORS=$s2s "$MYOS/boot/stage1/boot.asm" -o "$STAGE/stage1.bin"
 cat "$STAGE/stage1.bin" "$STAGE/stage2.bin" "$K" > "$STAGE/kernel.img"
-truncate -s 8M "$STAGE/kernel.img"
-timeout 20 qemu-system-x86_64 -drive file="$STAGE/kernel.img",format=raw,index=0,media=disk \
+# Pad the disk image to 8 MiB (portably: macOS has no `truncate`).
+isz=$(wc -c < "$STAGE/kernel.img" | tr -d " ")
+[ "$isz" -lt 8388608 ] && dd if=/dev/zero of="$STAGE/kernel.img" bs=1 count=0 \
+    seek=8388608 2>/dev/null
+# qrun.sh, not `timeout`: macOS has no coreutils timeout.
+"$HOST/tests/harness/qrun.sh" 20 qemu-system-x86_64 \
+    -drive file="$STAGE/kernel.img",format=raw,index=0,media=disk \
     -serial stdio -display none -no-reboot -no-shutdown -m 512M -smp 1 -accel tcg \
     > "$STAGE/boot.log" 2>&1 || true
 
