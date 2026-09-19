@@ -248,11 +248,51 @@ void emit_mov(struct ir_func *fn, int dst, int src)
  * field to the top of the value class then back down — arithmetic for a
  * signed field so its sign bit fills — the classic two-shift extraction,
  * immune to neighbouring fields packed into the same unit. */
+/* a 32-bit value class zero-extended to 64 */
+static int zext64(struct ir_func *fn, int v)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = IR_EXT;
+    i->a = v;
+    i->size = 4;
+    i->sign = 0;
+    i->w = 8;
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+/* A packed struct's field across its unit (m->bf_bytes): its bytes read
+ * one at a time, as a 64-bit value with byte k at bits 8k. */
+static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
+{
+    struct type *u8 = ty_base(TY_CHAR, 1);
+    int raw = emit_const(fn, 0, 8);
+    for (int k = 0; k < m->bf_bytes && k < 8; k++) {
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+                  : addr;
+        int b = zext64(fn, emit_load(fn, a, u8));
+        if (k)
+            b = emit_bin(fn, IR_SHL, b, emit_const(fn, 8 * k, 4), 8, 0);
+        raw = emit_bin(fn, IR_OR, raw, b, 8, 0);
+    }
+    return raw;
+}
+
 static int bf_load(struct ir_func *fn, int addr, const struct member *m)
 {
     const struct type *bt = m->ty;
     int w = ty_wide(bt) ? 8 : 4;          /* value-class width, bytes */
     int vb = w * 8;
+    if (m->bf_bytes) {
+        /* the bytes, then the same two shifts in 64 bits */
+        int v = bf_bytes_load(fn, addr, m);
+        int lsh = 64 - m->bit_off - m->bit_width;
+        if (lsh)
+            v = emit_bin(fn, IR_SHL, v, emit_const(fn, lsh, 4), 8, 0);
+        v = emit_bin(fn, IR_SHR, v, emit_const(fn, 64 - m->bit_width, 4), 8,
+                     ty_signed_int(bt));
+        return v;                 /* (a 32-bit class reads the low half) */
+    }
     /* load the raw storage unit UNSIGNED, so no stray sign extension */
     int v = emit_load(fn, addr, ty_base(bt->kind, 1));
     int lsh = vb - m->bit_off - m->bit_width;
@@ -273,6 +313,32 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
 {
     const struct type *bt = m->ty;
     int w = ty_wide(bt) ? 8 : 4;
+    if (m->bf_bytes) {
+        /* merge in 64 bits, then write each byte back */
+        unsigned long fmask = m->bit_width >= 64
+                            ? ~0UL : (((unsigned long)1 << m->bit_width) - 1);
+        unsigned long placed = fmask << m->bit_off;
+        int old = bf_bytes_load(fn, addr, m);
+        int v64 = w == 8 ? val : zext64(fn, val);
+        int cleared = emit_bin(fn, IR_AND, old,
+                               emit_const(fn, (long)~placed, 8), 8, 0);
+        int low = emit_bin(fn, IR_AND, v64, emit_const(fn, (long)fmask, 8),
+                           8, 0);
+        if (m->bit_off)
+            low = emit_bin(fn, IR_SHL, low, emit_const(fn, m->bit_off, 4), 8,
+                           0);
+        int merged = emit_bin(fn, IR_OR, cleared, low, 8, 0);
+        struct type *u8 = ty_base(TY_CHAR, 1);
+        for (int k = 0; k < m->bf_bytes && k < 8; k++) {
+            int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+                      : addr;
+            int b = k ? emit_bin(fn, IR_SHR, merged,
+                                 emit_const(fn, 8 * k, 4), 8, 0)
+                      : merged;
+            emit_store(fn, a, b, u8);
+        }
+        return bf_load(fn, addr, m);
+    }
     struct type *ut = ty_base(bt->kind, 1);
     unsigned long fmask = m->bit_width >= 64
                         ? ~0UL : (((unsigned long)1 << m->bit_width) - 1);
@@ -298,8 +364,10 @@ static void store_init_leaf(struct ir_func *fn, int at,
 {
     if (ie->bit_width) {
         struct member m;
+        memset(&m, 0, sizeof m);
         m.name = NULL; m.ty = ie->ty; m.off = 0;
         m.is_bitfield = 1; m.bit_off = ie->bit_off; m.bit_width = ie->bit_width;
+        m.bf_bytes = ie->bf_bytes;
         bf_store(fn, at, &m, v);
     } else if (ie->ty->kind == TY_STRUCT) {
         struct ir_ins *mm = emit(fn);

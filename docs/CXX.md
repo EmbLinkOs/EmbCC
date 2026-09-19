@@ -777,8 +777,18 @@ std::source_location, <numbers>. What it took:
   as (or inside) a default argument, the caller's place
 tests/cxx/cxx20misc5.cc (g++ agrees on both targets).
 
+Bit-fields in a class with bases or virtual functions (written as a
+packed C struct with explicit offsets): each run of them a run of C
+bit-fields at the bit the Itanium layout chose, unnamed ones filling the
+gaps — the bytes g++'s build has (tests/cxx/bitfields2.cc prints them).
+For that, EmbCC's C reads and writes a packed struct's bit-field that
+crosses its type's storage unit whole (byte by byte, as gcc does; it kept
+only the unit's part), tests/exec/packed-bitfields.c. Also in EmbCC's C:
+`__builtin_va_list` declares a variable in a function too
+(std::to_string(double)'s).
+
 Next: `consteval` as more than `constexpr` (a format string is checked at
-run time for now), bit-fields in classes with non-empty bases.
+run time for now).
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their

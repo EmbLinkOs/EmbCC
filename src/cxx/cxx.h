@@ -676,6 +676,7 @@ struct cfield {
     struct cty *type;
     long off;
     int bitwidth;             /* a bit-field's width, or -1 */
+    long bitpos;              /* ... its first bit, from the class's start */
     int access;
     int is_mutable;
     struct cexpr *dflt;       /* default member initializer */

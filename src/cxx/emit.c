@@ -3333,6 +3333,34 @@ static void emit_explicit_struct(struct sb *out, struct cclass *c)
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];
         long sz = ct_is_ref(fl->type) ? 8 : ct_size(fl->type);
+        if (fl->bitwidth >= 0) {
+            /* a run of bit-fields: C bit-fields in the packed struct,
+             * unnamed ones filling the gaps to where the layout put each */
+            int j = i;
+            while (j + 1 < c->nfields && c->fields[j + 1]->bitwidth >= 0)
+                j++;
+            long first = -1, at_bit = 0;
+            struct sb d = { 0, 0, 0 };
+            for (int k = i; k <= j; k++) {
+                struct cfield *bf = c->fields[k];
+                if (!bf->name || bf->bitwidth == 0)
+                    continue;
+                if (first < 0)
+                    at_bit = first = bf->bitpos / 8 * 8;
+                for (long gap = bf->bitpos - at_bit; gap > 0; gap -= 32)
+                    sb_printf(&d, "unsigned int : %ld; ", gap > 32 ? 32 : gap);
+                sb_printf(&d, "%s : %d; ", cdecl(bf->type, field_cname(bf)),
+                          bf->bitwidth);
+                at_bit = bf->bitpos + bf->bitwidth;
+            }
+            if (first >= 0) {
+                d.p[d.len - 2] = 0;       /* (the item's `;` ends it) */
+                it[n++] = (struct item){ first / 8, (at_bit - first + 7) / 8,
+                                         d.p };
+            }
+            i = j;
+            continue;
+        }
         if (field_omitted(c, fl)) {
             /* overlapping: its data only (none, when empty) */
             struct cclass *fc = fl->type->cls;

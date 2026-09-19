@@ -129,6 +129,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
 
     for (int i = 0; i < n; i++) {
         struct member *m = &members[i];
+        m->bf_bytes = 0;          /* (members may come uncleared) */
         int ma = packed ? 1 : ty_align(m->ty);
         /* An explicit __attribute__((aligned(N))) on the member raises its
          * alignment (and, through `align` below, the struct's) — it overrides
@@ -157,6 +158,12 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
                     bitpos = (bitpos + unit - 1) / unit * unit;
                 m->off = (bitpos / unit) * ty_size(m->ty);
                 m->bit_off = bitpos - m->off * 8;
+                if (m->bit_off + m->bit_width > unit) {
+                    /* (packed: across its unit — bytes from its first) */
+                    m->off = bitpos / 8;
+                    m->bit_off = bitpos % 8;
+                    m->bf_bytes = (m->bit_off + m->bit_width + 7) / 8;
+                }
                 bitpos += m->bit_width;
             }
         } else {

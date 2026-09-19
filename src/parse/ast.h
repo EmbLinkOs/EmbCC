@@ -115,6 +115,7 @@ struct initelem {
     struct expr *e;
     int bit_off;
     int bit_width;
+    int bf_bytes;       /* a packed field across its unit: bytes it spans */
 };
 
 /* A relocation inside a static object's byte image: a pointer-typed slot

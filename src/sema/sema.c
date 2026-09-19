@@ -1943,17 +1943,20 @@ static void init_push(struct initbuf *b, int off, struct type *ty,
     b->v[b->n].e = e;
     b->v[b->n].bit_off = 0;
     b->v[b->n].bit_width = 0;
+    b->v[b->n].bf_bytes = 0;
     b->n++;
 }
 
 /* A bitfield leaf: same as init_push but recording where in the storage
  * unit at `off` the value lands, so the lowerings mask and merge it. */
 static void init_push_bf(struct initbuf *b, int off, struct type *ty,
-                         struct expr *e, int bit_off, int bit_width)
+                         struct expr *e, int bit_off, int bit_width,
+                         int bf_bytes)
 {
     init_push(b, off, ty, e);
     b->v[b->n - 1].bit_off = bit_off;
     b->v[b->n - 1].bit_width = bit_width;
+    b->v[b->n - 1].bf_bytes = bf_bytes;
 }
 
 static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
@@ -2077,7 +2080,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                 struct expr *cv = convert_assign(u, el, m->ty,
                                                  "initialization");
                 init_push_bf(out, off + m->off, m->ty, cv,
-                             m->bit_off, m->bit_width);
+                             m->bit_off, m->bit_width, m->bf_bytes);
                 mi++;
                 continue;
             }
@@ -2255,7 +2258,8 @@ static void lower_static_bytes(struct unit *u, int line, int size,
             unsigned long mask = v[k].bit_width >= 64
                                ? ~0UL : (((unsigned long)1 << v[k].bit_width) - 1);
             unsigned long field = ((unsigned long)cv & mask) << v[k].bit_off;
-            for (int b = 0; b < sz; b++)
+            int nb = v[k].bf_bytes ? v[k].bf_bytes : sz;
+            for (int b = 0; b < nb && b < 8; b++)
                 bytes[v[k].off + b] |= (char)(field >> (8 * b));
             continue;
         }
@@ -2781,7 +2785,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                  * scalar's value as garbage bits at a garbage offset —
                  * kernel/net/udp/udp.c's `static uint16_t eph = 49152`
                  * came out 0, and only whatever the stack held decided. */
-                struct initelem one = { 0, NULL, NULL, 0, 0 };
+                struct initelem one = { 0, NULL, NULL, 0, 0, 0 };
                 struct initelem *iv = s->inits;
                 int in = s->ninits;
                 if (!in && s->expr) {

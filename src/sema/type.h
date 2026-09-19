@@ -34,6 +34,10 @@ struct member {
     int is_bitfield;
     int bit_off;          /* bitfield: bit position within the storage unit */
     int bit_width;        /* bitfield: width in bits (0 = zero-width separator) */
+    int bf_bytes;         /* bitfield of a packed struct crossing its type's
+                           * storage unit: off/bit_off are its first byte and
+                           * bit there, and it is read and written a byte at a
+                           * time over this many bytes (0: a unit access) */
     int user_align;       /* __attribute__((aligned(N))) on the member; 0 = none */
 };
 

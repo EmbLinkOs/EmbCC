@@ -287,11 +287,13 @@ static void layout(struct cclass *c)
             long w = fl->bitwidth, unit = fs * 8;
             if (w == 0) {
                 bits = (bits + fa * 8 - 1) / (fa * 8) * (fa * 8);
+                fl->bitpos = bits;
                 continue;
             }
             if (!c->packed && bits / unit != (bits + w - 1) / unit)
                 bits = (bits + unit - 1) / unit * unit;
             fl->off = bits / 8 / fa * fa;
+            fl->bitpos = bits;
             bits += w;
             if (fl->name && fa > align)
                 align = fa;
@@ -757,12 +759,6 @@ void class_complete(struct cclass *c)
     c->empty = !c->dynamic && !named;
     for (int i = 0; i < c->nbases; i++)
         c->empty &= c->bases[i].cls->empty;
-    if (c->explicit_layout)
-        for (int i = 0; i < c->nfields; i++)
-            if (c->fields[i]->bitwidth >= 0)
-                cx_error(cx_cur(), "bit-fields in a class with bases or "
-                                   "virtual functions are not supported "
-                                   "yet");
     int private_field = 0;
     c->user_ctors = c->ctors != NULL;
     /* inherited constructors (using B::B) make no aggregate, but leave the

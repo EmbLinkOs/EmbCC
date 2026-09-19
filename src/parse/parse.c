@@ -136,7 +136,8 @@ static int at_type_start(struct parser *ps)
     if (tok_is_type_start(cur(ps)->kind))
         return 1;
     return cur(ps)->kind == TOK_IDENT &&
-           find_typedef(ps, cur(ps)->text) != NULL;
+           (find_typedef(ps, cur(ps)->text) != NULL ||
+            strcmp(cur(ps)->text, "__builtin_va_list") == 0);
 }
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret);
