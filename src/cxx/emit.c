@@ -95,6 +95,8 @@ static const char *field_cname(const struct cfield *fl)
 
 static int fn_internal(const struct cfunc *f)
 {
+    if (f->local_inst)
+        return 1;
     if (f->cls)
         return f->cls->local || f->cls->anon;
     return f->is_static;
@@ -106,7 +108,7 @@ static const char *fn_name(struct cfunc *f, int variant)
         return f->asm_name;
     if (f->c_linkage)
         return f->name;
-    if (f->cls && (f->cls->local || f->cls->anon)) {
+    if (f->local_inst || (f->cls && (f->cls->local || f->cls->anon))) {
         if (!f->cname) {
             f->cname = cx_fmt("__cx_lf%d", cx_uid());
             f->cname2 = cx_fmt("%s_base", f->cname);
@@ -257,6 +259,7 @@ static const char *ctype(struct cty *t)
 /* ---- emission state ---- */
 
 static struct sb out_types, out_decls, out_vars, out_code, out_init;
+static struct sb out_rettypes;       /* typedefs of functions' return types */
 static struct sb out_rtti;      /* typeinfo objects */
 static struct sb out_vtables;
 static struct cfunc **work;
@@ -2060,6 +2063,14 @@ static char *func_header(struct cfunc *f, const char *name, int named)
         sb_put(&p, any ? ", ..." : "...");
     else if (!any)
         sb_put(&p, "void");
+    struct cty *rt = sret ? ct_ptr(ft->to) : ft->to;
+    if (rt->k == CT_PTR && (rt->to->k == CT_FUNC || rt->to->k == CT_ARRAY)) {
+        /* C's parser takes a function returning a pointer to a function
+         * (or an array) through a typedef */
+        const char *td = cx_fmt("__cx_rt%d", cx_uid());
+        sb_printf(&out_rettypes, "typedef %s;\n", cdecl(rt, td));
+        return cx_fmt("%s %s(%s)", td, name, sb_str(&p));
+    }
     return cdecl(sret ? ct_ptr(ft->to) : ft->to,
                  cx_fmt("%s(%s)", name, sb_str(&p)));
 }
@@ -2804,6 +2815,7 @@ char *cx_emit_unit(void)
     memset(&out_vars, 0, sizeof out_vars);
     memset(&out_code, 0, sizeof out_code);
     memset(&out_init, 0, sizeof out_init);
+    memset(&out_rettypes, 0, sizeof out_rettypes);
     nwork = 0;
     need_atexit = need_guard = 0;
     need_pmf = 0;
@@ -2940,6 +2952,7 @@ char *cx_emit_unit(void)
     if (need_dyncast)
         sb_put(&out, "void *__dynamic_cast(void *, void *, void *, long);\n"
                      "void __cxa_bad_cast(void);\n");
+    sb_put(&out, sb_str(&out_rettypes));
     sb_put(&out, sb_str(&out_decls));
     sb_put(&out, sb_str(&out_rtti_decl));
     sb_put(&out, sb_str(&out_rtti));

@@ -502,3 +502,44 @@ const char *ct_name(const struct cty *t)
     name_into(b, 256, t);
     return b;
 }
+
+int ct_has_auto(const struct cty *t)
+{
+    while (t && (t->k == CT_LREF || t->k == CT_RREF || t->k == CT_PTR))
+        t = t->to;
+    return t && t->k == CT_AUTO;
+}
+
+/* Does t involve a class with no linkage — local, unnamed, or an
+ * instance for such a class? Then so has what is made from it. */
+int ct_is_local(const struct cty *t)
+{
+    while (t && (t->k == CT_PTR || t->k == CT_LREF || t->k == CT_RREF ||
+                 t->k == CT_ARRAY || t->k == CT_MPTR)) {
+        if (t->k == CT_MPTR && t->cls && (t->cls->local || t->cls->anon))
+            return 1;
+        t = t->to;
+    }
+    if (!t)
+        return 0;
+    if (t->k == CT_FUNC) {
+        if (ct_is_local(t->to))
+            return 1;
+        for (int i = 0; i < t->np; i++)
+            if (ct_is_local(t->params[i]))
+                return 1;
+        return 0;
+    }
+    return t->k == CT_CLASS && (t->cls->local || t->cls->anon);
+}
+
+int targs_local(const struct ctarg *a, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (a[i].is_pack && targs_local(a[i].elems, a[i].nelems))
+            return 1;
+        if (a[i].kind == TP_TYPE && a[i].type && ct_is_local(a[i].type))
+            return 1;
+    }
+    return 0;
+}

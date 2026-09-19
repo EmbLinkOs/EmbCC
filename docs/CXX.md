@@ -286,4 +286,33 @@ cannot throw (noexcept ones, destructors; their prototypes say
 of whose guarded calls can throw has no pads at all and is optimized as
 any other.
 
-Next: CX6.
+**CX6 in progress.** Part 1: range-`for` (arrays, `begin()`/`end()`
+members or found by ADL, a temporary range kept alive for the loop),
+deduced return types (`auto`, `auto &`, `const auto &`; a body read on the
+first call when its type is needed — a member used before its class's
+delayed bodies are read, a template's instance), and lambdas. A lambda is
+a class of its own (a local class: internal names, as are the instances of
+templates over it) whose members are its captures — explicit, init-captures
+and the ones a capture-default makes as the body names them — and whose
+`operator()` the body defines; `this` is a member too (`__cx_this`), so
+the enclosing object's members are reached through it. A lambda inside a
+lambda that names the enclosing one's capture captures it again (by copy
+or by reference to that member). A lambda capturing nothing converts to a
+pointer to function (a static `__cx_invoke` calling `operator()` on an
+empty closure). Generic lambdas: each `auto` parameter is an invented
+template parameter (`__cx_autoN`, which the tokens are rewritten to once,
+so `auto...` is an ordinary pack), `operator()` a member template replayed
+per call; since its body is read only then, after the closure is complete,
+what a capture-default captures is decided before from the body's tokens
+(a local its names find where the lambda is; `this` if it or a member is
+named) — possibly more than the standard's odr-use rule would, never less.
+tests/cxx `lambdas` and `rangefor` agree with g++ on both targets.
+
+Found on the way: a template instance over a local class had a name with
+linkage (`6._anon`); a function returning a pointer to function
+(`int (*f(int))(int)`) is written through a typedef, which EmbCC's C needs;
+a braced list already given its type recursed forever in conversions.
+
+Not yet (CX6): `initializer_list`, structured bindings, `if constexpr`,
+`constexpr` evaluation, `decltype(auto)`, user-defined literals; a
+generic lambda's conversion to a pointer to function; capturing `*this`.

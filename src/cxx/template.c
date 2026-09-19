@@ -858,6 +858,11 @@ struct cclass *class_instance(struct ctemplate *t, struct ctarg *args,
     c->ntargs = t->nparams;
     c->is_struct = t->key != TOK_CX_CLASS;
     c->is_union = t->key == TOK_KW_UNION;
+    if (targs_local(a, t->nparams)) {
+        /* for a class with no linkage: none either */
+        c->local = 1;
+        c->cname = cx_fmt("__cx_%s_%d", t->name, cx_uid());
+    }
     if (!c->local)
         c->cname = cx_fmt("_C%s", mangle_class_name(c));
     c->inst_pending = 1;
@@ -981,10 +986,30 @@ struct cfunc *func_instance(struct ctemplate *t, struct ctarg *args,
     parse_restore(st);
     f->spec_of = t;
     f->targs = in->args;
+    f->local_inst = targs_local(in->args, nargs);
     f->ntargs = nargs;
     f->inst_scope = ps;
     in->fn = f;
     return f;
+}
+
+/* f's deduced return type, needed (a call): read its body now if it has
+ * not been — a delayed in-class body, an instance's. */
+void func_deduce_return(struct cfunc *f, const struct ctok *at)
+{
+    if (!ct_has_auto(f->type->to))
+        return;
+    if (!f->defined && !f->deducing) {
+        f->deducing = 1;
+        if (!f->lazy && f->body_tok >= 0 && f->def_scope)
+            func_define_from(f);
+        else
+            func_ensure_body(f);
+        f->deducing = 0;
+    }
+    if (ct_has_auto(f->type->to))
+        cx_error(at, "'%s' is used before its return type is deduced",
+                 f->name);
 }
 
 void func_ensure_body(struct cfunc *f)

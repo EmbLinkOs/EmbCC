@@ -151,6 +151,10 @@ struct cty *ct_promote(struct cty *t);      /* integral promotion */
 struct cty *ct_arith_common(struct cty *a, struct cty *b);
 struct cty *ct_decay(struct cty *t);        /* array -> ptr, func -> ptr */
 struct cty *ct_strip_ref(struct cty *t);
+int ct_has_auto(const struct cty *t);       /* auto, auto&, auto *... */
+struct ctarg;
+int ct_is_local(const struct cty *t);        /* a class with no linkage */
+int targs_local(const struct ctarg *a, int n);
 const char *ct_name(const struct cty *t);   /* for diagnostics */
 
 /* ---- symbols and scopes ---- */
@@ -370,6 +374,8 @@ struct ctemplate {
                                * placeholder (nparams -1): its index + 1 */
     int tt_pack;              /* ... whose own parameter this (+ 1) is a
                                * pack */
+    struct clambda *lambda;   /* a generic lambda's operator(): the lambda
+                               * (its declaration is the lambda's) */
 };
 
 /* Class template instance: the class for these arguments (made, not yet
@@ -390,6 +396,7 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
 /* A function whose body is tokens not yet parsed (a member of a class
  * template's instance, a function template's specialization): parse it. */
 void func_ensure_body(struct cfunc *f);
+void func_deduce_return(struct cfunc *f, const struct ctok *at);
 /* A class template instance's member defined out of its class: define it
  * from that definition (1 if one was found). */
 int member_from_outdef(struct cfunc *f);
@@ -507,6 +514,10 @@ struct cfunc {
     struct cexpr *delegate;
     int body_tok, body_end;   /* a delayed in-class body: token range */
     int mi_tok;               /* ... and its mem-initializer list (or -1) */
+    int deducing;             /* its body is being read for its return type */
+    struct clambda *lambda;   /* a lambda's operator(): the lambda */
+    int local_inst;           /* an instance for a class with no linkage:
+                               * internal, named as a local class's are */
     struct cstmt *fn_try;     /* a function-try-block: its handlers (S_TRY;
                                * its body is the function's) */
     struct cscope *def_scope; /* where a delayed body is parsed */
@@ -564,6 +575,7 @@ struct vslot {
 struct cclass {
     const char *name;
     const char *cname;        /* the C struct tag */
+    struct clambda *closure;  /* a lambda's closure type: the lambda */
     int is_union, is_struct;  /* is_struct: declared `struct` (default public) */
     struct cscope *scope;     /* member scope */
     struct cscope *owner;     /* enclosing scope */
@@ -763,6 +775,17 @@ int expr_const(struct cexpr *e, long *out); /* integer constant expression */
 struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx);
 struct cexpr *convert_bool(struct cexpr *e, const char *ctx);
 struct cexpr *rvalue(struct cexpr *e);     /* lvalue-to-rvalue, decay */
+/* Expressions built rather than parsed (lowerings), with the semantics
+ * and overload resolution of the operators they stand for. */
+struct cexpr *expr_var(struct cvar *v);
+struct cexpr *expr_parse_name_value(struct csym *y, const char *name,
+                                    const struct ctok *at);
+struct cexpr *expr_binary(int op, struct cexpr *l, struct cexpr *r);
+struct cexpr *expr_preinc(struct cexpr *e);
+struct cexpr *expr_deref(struct cexpr *e);
+struct cexpr *expr_call_named(struct cexpr *obj, const char *name,
+                              struct cexpr **args, int na,
+                              const struct ctok *at);
 /* A reference of type `rt` (a CT_LREF/CT_RREF) bound to e: returns the
  * pointer-valued expression to store (e's address, or a temp's). */
 struct cexpr *bind_ref(struct cexpr *e, struct cty *rt, const char *ctx);
@@ -933,6 +956,48 @@ struct cstmt {
 };
 
 struct cstmt *st_new(enum cstmt_kind k);
+
+/* ---- lambdas (parse.c) ---- */
+
+/* A capture: the entity (a variable, or `this` when var is NULL and
+ * is_this), how, the closure's member for it, and its value where the
+ * lambda is made. */
+struct ccapture {
+    const char *name;
+    struct cvar *var;
+    struct cfield *of;        /* or an enclosing lambda's member (one not
+                               * standing for a variable: an init-capture) */
+    int is_this;
+    int byref;
+    struct cfield *field;
+    struct cexpr *value;
+};
+
+struct clambda {
+    struct cclass *cls;        /* the closure type */
+    struct cfunc *call;        /* its operator() (a generic lambda's: the
+                                * member template's pattern) */
+    struct cfunc *outer;       /* the function the lambda is in (or NULL) */
+    struct clambda *parent;    /* the lambda that function is, if one */
+    int dflt;                  /* capture-default: 0, '=' or '&' */
+    struct ccapture *caps;
+    int ncaps, capcaps;
+    int closed;                /* the closure is complete: no captures
+                                * can be added */
+    const struct ctok *at;
+};
+
+struct cexpr *parse_lambda(void);
+/* In a lambda's body: variable v of an enclosing function, captured —
+ * the closure member standing for it; NULL if not in a lambda. */
+struct cexpr *lambda_capture(struct cvar *v, const struct ctok *at);
+/* ... or member fl of enclosing lambda L's closure (a name that finds
+ * it): L's capture, captured again (NULL if fl is not one). */
+struct cexpr *lambda_capture_member(struct clambda *L, struct cfield *fl,
+                                    const struct ctok *at);
+/* In a lambda's body: the enclosing object's `this`, captured (NULL if
+ * not in a lambda). */
+struct cexpr *lambda_this(const struct ctok *at);
 
 /* ---- the parser ---- */
 

@@ -338,6 +338,7 @@ static const char *builtin_code(enum cty_kind k)
     case CT_DOUBLE: return "d";
     case CT_LDOUBLE: return "e";
     case CT_NULLPTR: return "Dn";
+    case CT_AUTO: return "Da";         /* a deduced type as declared */
     default: return NULL;
     }
 }

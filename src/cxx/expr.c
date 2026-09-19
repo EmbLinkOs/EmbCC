@@ -450,9 +450,7 @@ static struct ics std_conv(struct cexpr *e, struct cty *to)
     memset(&r, 0, sizeof r);
     r.rank = R_BAD;
     struct cty *tu = ct_unqual(to);
-    if (e->k == E_INITLIST) {
-        if (e->t)
-            return std_conv(e, to);
+    if (e->k == E_INITLIST && !e->t) {   /* (a typed one: its type's) */
         if (e->na == 0) {
             r.rank = R_EXACT;
             return r;
@@ -638,18 +636,18 @@ static struct ics ics_of(struct cexpr *e, struct cty *to)
     memset(&r, 0, sizeof r);
     r.rank = R_BAD;
     if (to->k == CT_CLASS) {
-        if (e->k != E_INITLIST && e->t && e->t->k == CT_CLASS &&
+        if (!(e->k == E_INITLIST && !e->t) && e->t && e->t->k == CT_CLASS &&
             e->t->cls == to->cls) {
             r.rank = R_EXACT;
             return r;
         }
-        if (e->k != E_INITLIST && e->t && e->t->k == CT_CLASS &&
+        if (!(e->k == E_INITLIST && !e->t) && e->t && e->t->k == CT_CLASS &&
             is_proper_base(e->t->cls, to->cls)) {
             r.rank = R_CONV;              /* slicing to a base */
             r.base_to = to->cls;
             return r;
         }
-        if (e->k == E_INITLIST) {
+        if (e->k == E_INITLIST && !e->t) {
             if (to->cls->aggregate || e->na == 0) {
                 r.rank = R_USER;
                 return r;
@@ -671,7 +669,7 @@ static struct ics ics_of(struct cexpr *e, struct cty *to)
         }
         return r;
     }
-    if (e->t && e->t->k == CT_CLASS && e->k != E_INITLIST) {
+    if (e->t && e->t->k == CT_CLASS && !(e->k == E_INITLIST && !e->t)) {
         struct ics second;
         struct cfunc *f = conv_function(e, to, 0, &second);
         if (f) {
@@ -1341,6 +1339,7 @@ struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
 {
     if (fn->is_deleted)
         cx_error(at, "use of deleted function '%s'", fn->name);
+    func_deduce_return(fn, at);
     struct cty *ret = fn->type->to;
     if (ret->k == CT_CLASS && !ct_is_complete(ret))
         cx_error(at, "calling '%s', which returns incomplete '%s'", fn->name,
@@ -2865,8 +2864,12 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
     case CS_VAR: {
         struct cvar *v = y->var;
         if (v->is_local && !v->is_static && v->fn != cx_curfn &&
-            !(v->fn == NULL))
+            !(v->fn == NULL)) {
+            struct cexpr *c = lambda_capture(v, at);   /* a lambda's */
+            if (c)
+                return c;
             cx_error(at, "'%s' is a local of another function", name);
+        }
         if (v->is_member_static && !v->defined)
             member_var_from_outdef(v);
         struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
@@ -2878,10 +2881,18 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
     }
     case CS_FIELD: {
         struct cclass *c = y->scope->cls;
-        if (!cx_curfn || !cx_curfn->this_var ||
-            !class_derives(cx_curfn->cls, c, NULL))
+        if (cx_curfn && cx_curfn->this_var &&
+            class_derives(cx_curfn->cls, c, NULL))
+            return member_of(to_base(ex_deref(ex_this()), c, 0), y->field);
+        if (c->closure) {             /* an enclosing lambda's capture */
+            struct cexpr *e = lambda_capture_member(c->closure, y->field, at);
+            if (e)
+                return e;
+        }
+        struct cexpr *t = lambda_this(at);     /* the enclosing object's */
+        if (!t || !class_derives(t->t->to->cls, c, NULL))
             cx_error(at, "member '%s' used without an object", name);
-        return member_of(to_base(ex_deref(ex_this()), c, 0), y->field);
+        return member_of(to_base(ex_deref(t), c, 0), y->field);
     }
     case CS_FUNC: {
         struct cexpr *e = ex_new(E_OVL, y->fns->type, VC_LVALUE);
@@ -2891,8 +2902,15 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         e->file = at->file;
         e->adl = y->scope->k == SC_NAMESPACE;
         if (y->scope->k == SC_CLASS && cx_curfn && cx_curfn->this_var &&
-            class_derives(cx_curfn->cls, y->scope->cls, NULL))
+            class_derives(cx_curfn->cls, y->scope->cls, NULL)) {
             e->obj = ex_this();
+        } else if (y->scope->k == SC_CLASS && cx_curfn && cx_curfn->lambda &&
+                   !y->fns->is_static) {
+            /* the enclosing class's member function, in a lambda */
+            struct cexpr *t = lambda_this(at);
+            if (t && class_derives(t->t->to->cls, y->scope->cls, NULL))
+                e->obj = t;
+        }
         explicit_targs(e);
         return e;
     }
@@ -2909,6 +2927,13 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         cx_error(at, "type '%s' used as a value", name);
         return NULL;
     }
+}
+
+/* The value a name found by lookup stands for here. */
+struct cexpr *expr_parse_name_value(struct csym *y, const char *name,
+                                    const struct ctok *at)
+{
+    return name_expr(y, name, at);
 }
 
 static struct cexpr *parse_string(void)
@@ -3138,9 +3163,12 @@ static struct cexpr *parse_primary(void)
         e = ex_new(E_NULLPTR, ct_basic(CT_NULLPTR), VC_PRVALUE);
         cx_advance();
         return e;
-    case TOK_CX_THIS:
+    case TOK_CX_THIS: {
         cx_advance();
-        return ex_this();
+        struct cexpr *t = cx_curfn && cx_curfn->lambda ? lambda_this(at)
+                                                       : NULL;
+        return t ? t : ex_this();
+    }
     case TOK_LPAREN:
         {
             int ell = fold_at();
@@ -3215,8 +3243,7 @@ static struct cexpr *parse_primary(void)
     case TOK_CX_THROW:
         return parse_throw();
     case TOK_LBRACKET:
-        cx_error(at, "lambdas are not supported yet (CX6)");
-        return NULL;
+        return parse_lambda();
     case TOK_CX_REQUIRES:
         cx_error(at, "requires-expressions are not supported yet (CX7)");
         return NULL;
@@ -3362,6 +3389,65 @@ static struct cexpr *call(struct cexpr *f, struct cexpr **args, int na,
     memcpy(e->a + 1, conv, (size_t)n * sizeof *conv);
     e->na = n + 1;
     return e;
+}
+
+/* ---- building expressions (for lowerings: range-based for, ...) ---- */
+
+struct cexpr *expr_var(struct cvar *v)
+{
+    struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
+    e->var = v;
+    v->used = 1;
+    return e;
+}
+
+struct cexpr *expr_binary(int op, struct cexpr *l, struct cexpr *r)
+{
+    return binary(op, l, r);
+}
+
+struct cexpr *expr_preinc(struct cexpr *e)
+{
+    return incdec(e, 1, 0);
+}
+
+struct cexpr *expr_deref(struct cexpr *e)
+{
+    return deref(e);
+}
+
+/* obj.name(args) — or, obj NULL, name(args) found by unqualified and
+ * argument-dependent lookup. */
+struct cexpr *expr_call_named(struct cexpr *obj, const char *name,
+                              struct cexpr **args, int na,
+                              const struct ctok *at)
+{
+    struct cexpr *f;
+    if (obj) {
+        struct cclass *c = obj->t->cls;
+        class_ensure(c);
+        struct csym *y = class_member(c, name);
+        if (!y || y->k != CS_FUNC)
+            cx_error(at, "'%s' has no member function '%s'", ct_name(obj->t),
+                     name);
+        if (obj->vc == VC_PRVALUE)
+            obj = materialize(obj);
+        f = ex_new(E_OVL, y->fns->type, VC_LVALUE);
+        f->fn = y->fns;
+        f->name = name;
+        f->obj = ex_addr(obj);
+    } else {
+        struct csym *y = lookup(cx_scope, name);
+        f = ex_new(E_OVL, ct_basic(CT_VOID), VC_LVALUE);
+        f->name = name;
+        f->adl = 1;
+        if (y && y->k == CS_FUNC) {
+            f->fn = y->fns;
+            f->t = y->fns->type;
+            f->adl = y->scope->k == SC_NAMESPACE;
+        }
+    }
+    return call(f, args, na, at);
 }
 
 static struct cexpr *member_access(struct cexpr *obj, int arrow,

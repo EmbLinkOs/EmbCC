@@ -1406,8 +1406,6 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
         y = func_sym(target, d->name, d->at);
         set = &y->fns;
     }
-    if (ft->to->k == CT_AUTO)
-        cx_error(d->at, "a deduced return type is not supported yet (CX6)");
     for (struct cfunc *f = *set; f; f = f->next) {
         if (!same_signature(f->type, ft) &&
             !(f->c_linkage && cx_extern_c))
@@ -1532,8 +1530,8 @@ static void run_pending(void)
         if (pend[i].fl)
             field_parse_default(pend[i].c, pend[i].fl);
     for (int i = 0; i < npend; i++) {
-        if (!pend[i].f)
-            continue;
+        if (!pend[i].f || pend[i].f->defined)
+            continue;               /* (read early: its return type) */
         struct cfunc *f = pend[i].f;
         int save = cx_pos;
         struct cscope *ss = cx_scope;
@@ -1683,6 +1681,8 @@ static void parse_meminit(struct meminit_raw *r)
 /* Parse a function's definition at the cursor (at `{` or a constructor's
  * `:`), with parameter types from ft (the definition's declarator). */
 static struct cstmt *parse_handlers(const struct ctok *at);
+static void parse_range_for(struct cstmt *s, const struct ctok *at,
+                            int colon);
 
 static void define_function(struct cfunc *f, struct cty *ft)
 {
@@ -1783,6 +1783,8 @@ static void define_function(struct cfunc *f, struct cty *ft)
         /* a function-try-block's handlers, the parameters in scope */
         f->fn_try = parse_handlers(at);
     }
+    if (ct_has_auto(f->type->to))          /* no return with a value */
+        f->type->to = ct_basic(CT_VOID);
     scope_pop();
     mark_nrvo(f);
     cx_curfn = savefn;
@@ -1886,12 +1888,24 @@ static int is_const_integral(struct cty *t)
 
 /* Initialize v (whose type may still be `auto`) from the initializer at
  * the cursor. */
+static void init_variable_with(struct cvar *v, enum init_form form,
+                               struct cexpr **args, int na,
+                               const struct ctok *at);
+
 static void init_variable(struct cvar *v, const struct ctok *at)
 {
     enum init_form form;
     struct cexpr **args;
     int na;
     parse_init_args(&form, &args, &na);
+    init_variable_with(v, form, args, na, at);
+}
+
+/* v initialized as `form` from args (its `auto` deduced from them). */
+static void init_variable_with(struct cvar *v, enum init_form form,
+                               struct cexpr **args, int na,
+                               const struct ctok *at)
+{
     struct cty *t = v->type;
     if (t->k == CT_AUTO || (ct_is_ref(t) && t->to->k == CT_AUTO) ||
         (t->k == CT_PTR && t->to->k == CT_AUTO)) {
@@ -3097,6 +3111,115 @@ static struct cstmt *parse_block_body(struct cscope *s)
     return b;
 }
 
+/* A local's declaration statement, the variable made already. */
+static struct cstmt *decl_of(struct cvar *v, const struct ctok *at)
+{
+    struct cstmt *s = st_new(S_DECL);
+    s->line = at->t.line;
+    s->file = at->file;
+    s->var = v;
+    s->blk = cx_curblk;
+    struct cty *e = v->type;
+    while (e->k == CT_ARRAY)
+        e = e->to;
+    if (e->k == CT_CLASS)
+        s->dtor = class_dtor(e->cls) != NULL;
+    return s;
+}
+
+/* for (decl : range) body, at the declaration (the `(` read), colon the
+ * `:`'s position — as the standard defines it (8.6.5):
+ *     { auto &&__range = range;
+ *       auto __begin = begin-expr, __end = end-expr;
+ *       for (; __begin != __end; ++__begin) { decl = *__begin; body } }
+ * begin-expr being __range for an array, __range.begin() for a class
+ * with begin or end members, else begin(__range) by argument-dependent
+ * lookup (and end alike). s is the S_FOR. */
+static void parse_range_for(struct cstmt *s, const struct ctok *at,
+                            int colon)
+{
+    int decl_pos = cx_pos;
+    int u = cx_uid();
+    cx_pos = colon + 1;
+    if (cx_kind() == TOK_LBRACE)
+        cx_error(at, "a braced list as the range (std::initializer_list) "
+                     "is not supported yet (CX6)");
+    struct cexpr *re = expr_parse();
+    cx_expect(TOK_RPAREN, "')' after the range");
+    int body_pos = cx_pos;
+
+    struct cty *rt = ct_ref(re->t, re->vc != VC_LVALUE);
+    struct cvar *r = new_local(cx_fmt("__for_range%d", u), rt, at);
+    r->init = bind_ref(re, rt, "a range-based for");
+    struct cty *ct = ct_unqual(re->t);
+    struct cexpr *b0, *e0;
+    if (ct->k == CT_ARRAY) {
+        if (ct->n < 0)
+            cx_error(at, "a range-based for over an array of unknown size");
+        b0 = rvalue(expr_var(r));
+        e0 = expr_binary(TOK_PLUS, rvalue(expr_var(r)),
+                         ex_int(ct->n, ct_basic(CT_LONG)));
+    } else if (ct->k == CT_CLASS) {
+        class_ensure(ct->cls);
+        if (class_member(ct->cls, "begin") || class_member(ct->cls, "end")) {
+            b0 = expr_call_named(expr_var(r), "begin", NULL, 0, at);
+            e0 = expr_call_named(expr_var(r), "end", NULL, 0, at);
+        } else {
+            struct cexpr *a = expr_var(r);
+            b0 = expr_call_named(NULL, "begin", &a, 1, at);
+            a = expr_var(r);
+            e0 = expr_call_named(NULL, "end", &a, 1, at);
+        }
+    } else {
+        cx_error(at, "a range-based for over '%s', which has no begin/end",
+                 ct_name(re->t));
+        return;
+    }
+    struct cvar *bv = new_local(cx_fmt("__for_begin%d", u),
+                                ct_unqual(ct_decay(ct_strip_ref(b0->t))), at);
+    init_variable_with(bv, INIT_COPY, &b0, 1, at);
+    struct cvar *ev = new_local(cx_fmt("__for_end%d", u),
+                                ct_unqual(ct_decay(ct_strip_ref(e0->t))), at);
+    init_variable_with(ev, INIT_COPY, &e0, 1, at);
+    struct cstmt *d1 = decl_of(r, at), *d2 = decl_of(bv, at),
+                 *d3 = decl_of(ev, at);
+    d1->more = d2;
+    d2->more = d3;
+    s->init = d1;
+    s->e = convert_bool(expr_binary(TOK_NEQ, expr_var(bv), expr_var(ev)),
+                        "a range-based for");
+    s->e2 = expr_preinc(expr_var(bv));
+
+    /* the body: the declaration, from *__begin, then the statement */
+    struct cstmt *blk = st_new(S_BLOCK);
+    struct cstmt *saveblk = cx_curblk;
+    blk->blk = cx_curblk;
+    cx_curblk = blk;
+    scope_push(SC_BLOCK, NULL);
+    cx_pos = decl_pos;
+    struct dspec ds;
+    parse_dspec(&ds);
+    if (!ds.type)
+        cx_error(cx_cur(), "expected a declaration in a range-based for");
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    struct cty *t = parse_declarator(ds.type, &d, DK_NAMED);
+    if (cx_kind() != TOK_COLON)
+        cx_error(cx_cur(), "expected ':' in a range-based for");
+    struct cvar *v = new_local(d.name, t, d.at);
+    struct csym *y = scope_add(cx_scope, CS_VAR, d.name);
+    y->var = v;
+    struct cexpr *de = expr_deref(expr_var(bv));
+    init_variable_with(v, INIT_COPY, &de, 1, d.at);
+    struct cstmt *dv = decl_of(v, d.at);
+    cx_pos = body_pos;
+    dv->next = parse_stmt();
+    blk->body = dv;
+    scope_pop();
+    cx_curblk = saveblk;
+    s->body = blk;
+}
+
 /* A catch clause's parameter: a local of its handler, initialized from
  * the caught object — referring to it, copying it, or (a pointer) taking
  * the value __cxa_begin_catch adjusted. */
@@ -3453,8 +3576,9 @@ static struct cstmt *parse_stmt(void)
                 } else if (depth == 0 && k == TOK_SEMI) {
                     break;
                 } else if (depth == 0 && k == TOK_COLON) {
-                    cx_error(at, "range-based for is not supported yet "
-                                 "(CX6)");
+                    parse_range_for(s, at, i);
+                    scope_pop();
+                    return s;
                 }
             }
             parse_declaration(0, &s->init);
@@ -3525,6 +3649,8 @@ static struct cstmt *parse_stmt(void)
         s = st_new(S_RETURN);
         cx_advance();
         struct cty *rt = cx_curfn->type->to;
+        if (cx_kind() == TOK_SEMI && ct_has_auto(rt))
+            rt = cx_curfn->type->to = ct_basic(CT_VOID);  /* deduced */
         if (cx_kind() != TOK_SEMI) {
             struct cexpr *e;
             enum init_form form = INIT_COPY;
@@ -3533,6 +3659,12 @@ static struct cstmt *parse_stmt(void)
                 form = INIT_COPY_LIST;
             } else {
                 e = expr_parse();
+            }
+            if (ct_has_auto(rt)) {
+                /* the return type deduced, as an `auto` variable's */
+                rt = e->t->k == CT_VOID && rt->k == CT_AUTO
+                     ? ct_basic(CT_VOID) : deduce_auto(rt, form, &e, 1, at);
+                cx_curfn->type->to = rt;
             }
             if (rt->k == CT_VOID) {
                 if (form != INIT_COPY || e->t->k != CT_VOID)
@@ -4893,6 +5025,8 @@ void class_define_from(struct cclass *c, int pos, enum tok_kind key,
 /* The declaration of a function template's specialization: its tokens
  * read with the parameters bound (ps), a function not entered in any
  * scope — overload resolution holds it — whose body is read when used. */
+static struct cfunc *lambda_call_replay(struct ctemplate *t);
+
 struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
 {
     cx_scope = ps;
@@ -4902,6 +5036,8 @@ struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
     cx_in_targs = 0;
     cx_curfn = NULL;
     cx_curblk = NULL;
+    if (t->lambda)
+        return lambda_call_replay(t);
     struct dspec ds;
     parse_dspec(&ds);
     struct declarator d;
@@ -5141,4 +5277,691 @@ void cx_parse_unit(void)
     declare_builtin_ops();
     while (cx_kind() != TOK_EOF)
         parse_declaration(1, NULL);
+}
+
+/* ---- lambdas ---- */
+
+static struct ccapture *new_capture(struct clambda *L)
+{
+    if (L->ncaps == L->capcaps) {
+        L->capcaps = L->capcaps ? L->capcaps * 2 : 4;
+        L->caps = xrealloc(L->caps, (size_t)L->capcaps * sizeof *L->caps);
+    }
+    struct ccapture *c = &L->caps[L->ncaps++];
+    memset(c, 0, sizeof *c);
+    return c;
+}
+
+/* The closure's member for capture c, of type t: added, and found by
+ * name in the body (a member of the closure). */
+static void capture_field(struct clambda *L, struct ccapture *c,
+                          struct cty *t, const char *name)
+{
+    struct cfield *fl = xcalloc(1, sizeof *fl);
+    fl->name = name;
+    fl->type = t;
+    fl->bitwidth = -1;
+    fl->dflt_tok = -1;
+    fl->access = CA_PUBLIC;
+    add_field(L->cls, fl);
+    c->field = fl;
+    if (name) {
+        struct csym *y = scope_add(L->cls->scope, CS_FIELD, name);
+        y->field = fl;
+    }
+}
+
+/* L's operator() being read: the function being defined, or the one
+ * around it whose lambda L is (an enclosing lambda's, a lambda in its
+ * body being made) — for a generic lambda, the instance being read. */
+static struct cfunc *lambda_op(struct clambda *L)
+{
+    for (struct cfunc *f = cx_curfn; f; f = f->lambda ? f->lambda->outer
+                                                       : NULL)
+        if (f->lambda == L)
+            return f;
+    return L->call;
+}
+
+/* capture c's member, as an expression in L's operator() */
+static struct cexpr *capture_use(struct clambda *L, struct ccapture *c)
+{
+    struct cexpr *self = ex_new(E_THIS, lambda_op(L)->this_var->type,
+                                VC_PRVALUE);
+    return ex_member(ex_deref(self), c->field);
+}
+
+static struct cexpr *capture_var_in(struct clambda *L, struct cvar *v,
+                                    const struct ctok *at);
+
+/* v's value where L is made: the enclosing function's own local, or its
+ * own capture of it (an enclosing lambda). */
+static struct cexpr *value_outside(struct clambda *L, struct cvar *v,
+                                   const struct ctok *at)
+{
+    if (!L->outer || v->fn == L->outer || !L->parent)
+        return expr_var(v);
+    return capture_var_in(L->parent, v, at);
+}
+
+/* L's capture of v: found, or made (implicitly, by the capture-default) */
+static struct ccapture *var_capture(struct clambda *L, struct cvar *v,
+                                    const struct ctok *at)
+{
+    for (int i = 0; i < L->ncaps; i++)
+        if (L->caps[i].var == v)
+            return &L->caps[i];
+    if (!L->dflt) {
+        cx_error(at, "'%s' is not captured by the lambda", v->name);
+        return NULL;
+    }
+    if (L->closed)
+        cx_error(at, "'%s' is captured too late (the closure is complete)",
+                 v->name);
+    int byref = L->dflt == '&';
+    struct ccapture *c = new_capture(L);
+    c->name = v->name;
+    c->var = v;
+    c->byref = byref;
+    c->value = value_outside(L, v, at);
+    /* as the name is where L is made: an enclosing lambda's copy is
+     * const there (its operator() is) */
+    struct cty *t = ct_strip_ref(c->value->t);
+    capture_field(L, c, byref ? ct_ref(t, 0) : ct_unqual(t), v->name);
+    return c;
+}
+
+static struct cexpr *capture_var_in(struct clambda *L, struct cvar *v,
+                                    const struct ctok *at)
+{
+    return capture_use(L, var_capture(L, v, at));
+}
+
+/* L's capture of member fl of enclosing lambda Lk's closure (an
+ * init-capture's, or an explicit capture's of Lk's own capture): found,
+ * or made by the capture-default */
+static struct ccapture *member_capture(struct clambda *L, struct clambda *Lk,
+                                       struct cfield *fl,
+                                       const struct ctok *at)
+{
+    for (int i = 0; i < L->ncaps; i++)
+        if (L->caps[i].of == fl || L->caps[i].field == fl)
+            return &L->caps[i];
+    if (!L->dflt) {
+        cx_error(at, "'%s' is not captured by the lambda", fl->name);
+        return NULL;
+    }
+    if (L->closed)
+        cx_error(at, "'%s' is captured too late (the closure is complete)",
+                 fl->name);
+    if (!L->parent)
+        cx_error(at, "'%s' is not in an enclosing lambda", fl->name);
+    struct cexpr *value;
+    if (L->parent == Lk) {
+        struct ccapture *k = NULL;
+        for (int i = 0; i < Lk->ncaps; i++)
+            if (Lk->caps[i].field == fl)
+                k = &Lk->caps[i];
+        value = capture_use(Lk, k);
+    } else {
+        value = capture_use(L->parent, member_capture(L->parent, Lk, fl, at));
+    }
+    int byref = L->dflt == '&';
+    struct ccapture *c = new_capture(L);
+    c->name = fl->name;
+    c->of = fl;
+    c->byref = byref;
+    c->value = value;
+    struct cty *t = ct_strip_ref(value->t);
+    capture_field(L, c, byref ? ct_ref(t, 0) : ct_unqual(t), fl->name);
+    return c;
+}
+
+/* member fl of enclosing lambda Lk's closure, seen by the lambda being
+ * read or made (L): what it captured, captured by L */
+static struct ccapture *enclosing_capture(struct clambda *L, struct clambda *Lk,
+                                          struct cfield *fl,
+                                          const struct ctok *at)
+{
+    for (int i = 0; i < Lk->ncaps; i++)
+        if (Lk->caps[i].field == fl) {
+            if (Lk->caps[i].var)
+                return var_capture(L, Lk->caps[i].var, at);
+            if (Lk->caps[i].is_this)
+                return NULL;
+            return member_capture(L, Lk, fl, at);
+        }
+    return NULL;
+}
+
+struct cexpr *lambda_capture_member(struct clambda *Lk, struct cfield *fl,
+                                    const struct ctok *at)
+{
+    if (!cx_curfn || !cx_curfn->lambda || cx_curfn->lambda == Lk)
+        return NULL;
+    struct clambda *L = cx_curfn->lambda;
+    struct clambda *up = L->parent;
+    while (up && up != Lk)
+        up = up->parent;
+    if (!up)
+        return NULL;
+    struct ccapture *c = enclosing_capture(L, Lk, fl, at);
+    return c ? capture_use(L, c) : NULL;
+}
+
+struct cexpr *lambda_capture(struct cvar *v, const struct ctok *at)
+{
+    if (!cx_curfn || !cx_curfn->lambda)
+        return NULL;
+    return capture_var_in(cx_curfn->lambda, v, at);
+}
+
+static struct cexpr *this_in(struct clambda *L, const struct ctok *at);
+
+/* the enclosing object's `this` where L is made */
+static struct cexpr *this_outside(struct clambda *L, const struct ctok *at)
+{
+    if (L->outer && L->outer->lambda)
+        return this_in(L->outer->lambda, at);
+    if (!L->outer || !L->outer->this_var)
+        return NULL;
+    return ex_new(E_THIS, L->outer->this_var->type, VC_PRVALUE);
+}
+
+/* L's capture of `this`: found, or made (the capture-default); NULL if
+ * there is no `this` to capture */
+static struct ccapture *this_capture(struct clambda *L, const struct ctok *at)
+{
+    for (int i = 0; i < L->ncaps; i++)
+        if (L->caps[i].is_this)
+            return &L->caps[i];
+    if (!L->dflt)
+        cx_error(at, "'this' is not captured by the lambda");
+    struct cexpr *v = this_outside(L, at);
+    if (!v)
+        return NULL;
+    if (L->closed)
+        cx_error(at, "'this' is captured too late (the closure is "
+                     "complete)");
+    struct ccapture *c = new_capture(L);
+    c->is_this = 1;
+    c->value = v;
+    capture_field(L, c, v->t, "__cx_this");
+    return c;
+}
+
+static struct cexpr *this_in(struct clambda *L, const struct ctok *at)
+{
+    struct ccapture *c = this_capture(L, at);
+    return c ? rvalue(capture_use(L, c)) : NULL;
+}
+
+struct cexpr *lambda_this(const struct ctok *at)
+{
+    if (!cx_curfn || !cx_curfn->lambda)
+        return NULL;
+    return this_in(cx_curfn->lambda, at);
+}
+
+/* Can L capture `this` (quietly: without errors)? */
+static int this_reachable(struct clambda *L)
+{
+    if (!L->outer)
+        return 0;
+    struct clambda *P = L->outer->lambda;
+    if (!P)
+        return L->outer->this_var != NULL;
+    for (int i = 0; i < P->ncaps; i++)
+        if (P->caps[i].is_this)
+            return 1;
+    return P->dflt && !P->closed && this_reachable(P);
+}
+
+/* A generic lambda's body is read only when its operator() is
+ * instantiated — after the closure is complete — so what a
+ * capture-default captures is decided before, from the body's tokens:
+ * each enclosing function's local its names find (where the lambda is),
+ * and `this` if it is named or a member is. (A name the body declares
+ * again can capture what it hides — harmless: a copy, or a reference,
+ * never used.) */
+static void foresee_captures(struct clambda *L, int body)
+{
+    int want_this = 0;
+    int end = body;
+    int depth = 0;
+    do {
+        enum tok_kind k = cx_toks[end].t.kind;
+        if (k == TOK_LBRACE || k == TOK_LPAREN || k == TOK_LBRACKET)
+            depth++;
+        else if (k == TOK_RBRACE || k == TOK_RPAREN || k == TOK_RBRACKET)
+            depth--;
+        else if (k == TOK_EOF)
+            break;
+        end++;
+    } while (depth > 0);
+    for (int i = body + 1; i < end; i++) {
+        const struct ctok *tk = &cx_toks[i];
+        if (tk->t.kind == TOK_CX_THIS) {
+            want_this = 1;
+            continue;
+        }
+        if (tk->t.kind != TOK_IDENT)
+            continue;
+        enum tok_kind before = cx_toks[i - 1].t.kind;
+        if (before == TOK_DOT || before == TOK_ARROW ||
+            before == TOK_COLONCOLON || cx_toks[i + 1].t.kind == TOK_COLONCOLON)
+            continue;
+        struct csym *y = lookup(cx_scope, tk->t.text);
+        if (!y)
+            continue;
+        if (y->k == CS_FIELD && y->scope->cls->closure) {
+            enclosing_capture(L, y->scope->cls->closure, y->field, tk);
+            continue;
+        }
+        if (y->k == CS_FIELD ||
+            (y->k == CS_FUNC && y->scope->k == SC_CLASS &&
+             !y->fns->is_static)) {
+            want_this = 1;
+            continue;
+        }
+        if (y->k != CS_VAR)
+            continue;
+        struct cvar *v = y->var;
+        if (!v->is_local || v->is_static || !v->fn)
+            continue;
+        int named = 0;           /* an init-capture of that name */
+        for (int j = 0; j < L->ncaps; j++)
+            if (!L->caps[j].var && L->caps[j].name &&
+                strcmp(L->caps[j].name, v->name) == 0)
+                named = 1;
+        if (!named)
+            var_capture(L, v, tk);
+    }
+    if (want_this && this_reachable(L))
+        this_capture(L, cx_cur());
+}
+
+/* A generic lambda's `auto` parameters (the one at lparen): each an
+ * invented template type parameter, which the tokens then name
+ * (__cx_autoN) — rewritten once, so a lambda read again (in each of a
+ * template's instances) finds them so named. Their number; *out: the
+ * template's parameters (auto... a pack). */
+static int invent_auto_params(int lparen, struct ctparam **out)
+{
+    int n = 0, cap = 0;
+    struct ctparam *ps = NULL;
+    int depth = 0, in_default = 0, first = 0;   /* first: this param's */
+    for (int i = lparen + 1; i < cx_ntoks; i++) {
+        struct ctok *tk = &cx_toks[i];
+        enum tok_kind k = tk->t.kind;
+        if (k == TOK_EOF)
+            break;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
+            depth++;
+            continue;
+        }
+        if (k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE) {
+            if (depth-- == 0)
+                break;
+            continue;
+        }
+        if (depth)
+            continue;
+        if (k == TOK_COMMA) {
+            in_default = 0;
+            first = n;
+        } else if (k == TOK_ASSIGN) {
+            in_default = 1;
+        } else if (k == TOK_ELLIPSIS && !in_default) {
+            for (int j = first; j < n; j++)
+                ps[j].pack = 1;
+        } else if (!in_default &&
+                   (k == TOK_CX_AUTO ||
+                    (k == TOK_IDENT &&
+                     strncmp(tk->t.text, "__cx_auto", 9) == 0))) {
+            if (n == cap) {
+                cap = cap ? cap * 2 : 4;
+                ps = xrealloc(ps, (size_t)cap * sizeof *ps);
+            }
+            memset(&ps[n], 0, sizeof ps[n]);
+            ps[n].kind = TP_TYPE;
+            ps[n].name = cx_fmt("__cx_auto%d", n);
+            ps[n].def_tok = -1;
+            ps[n].vtype_tok = -1;
+            tk->t.kind = TOK_IDENT;
+            tk->t.text = (char *)ps[n].name;
+            n++;
+        }
+    }
+    *out = ps;
+    return n;
+}
+
+/* After a lambda's parameters: its specifiers (mutable, constexpr,
+ * attributes) and trailing return type (auto if none), into ft. */
+static void lambda_declarator_rest(struct cty *ft)
+{
+    int is_mutable = 0;
+    for (;;) {
+        if (cx_kind() == TOK_CX_MUTABLE) {
+            is_mutable = 1;
+            cx_advance();
+        } else if (cx_kind() == TOK_CX_CONSTEXPR ||
+                   cx_kind() == TOK_CX_CONSTEVAL) {
+            cx_advance();
+        } else if (cx_kind() == TOK_KW_ATTRIBUTE ||
+                   (cx_kind() == TOK_LBRACKET &&
+                    cx_kind_at(1) == TOK_LBRACKET)) {
+            parse_attrs(NULL);
+        } else {
+            break;
+        }
+    }
+    struct cty *ret = ct_basic(CT_AUTO);
+    if (cx_accept(TOK_ARROW))
+        ret = parse_type_id();
+    ft->to = ret;
+    ft->fq = is_mutable ? 0 : CQ_CONST;
+}
+
+/* A generic lambda's operator() instance: its declaration (at the
+ * parameters) read with the invented parameters bound, the body kept for
+ * when it is used. */
+static struct cfunc *lambda_call_replay(struct ctemplate *t)
+{
+    struct cty *ft = parse_params();
+    lambda_declarator_rest(ft);
+    struct cfunc *pat = t->pattern;
+    struct cfunc *f = xcalloc(1, sizeof *f);
+    f->name = pat->name;
+    f->type = ft;
+    f->pnames = ft->pnames;
+    f->owner = pat->owner;
+    f->cls = pat->cls;
+    f->is_inline = 1;
+    f->access = pat->access;
+    f->vslot = -1;
+    f->line = pat->line;
+    f->file = pat->file;
+    f->lambda = t->lambda;
+    f->body_tok = f->mi_tok = -1;
+    if (ft->defargs) {
+        f->defargs = xcalloc((size_t)(ft->np ? ft->np : 1),
+                             sizeof *f->defargs);
+        for (int i = 0; i < ft->np; i++)
+            f->defargs[i] = ft->defargs[i];
+    }
+    skip_body(f);
+    f->lazy = 1;
+    f->def_scope = cx_scope;
+    func_register(f);
+    return f;
+}
+
+/* A function made here rather than read: f's parameters (as its type's
+ * names say, or invented) and body. */
+static void synth_define(struct cfunc *f, struct cstmt *body)
+{
+    struct cfunc *savefn = cx_curfn;
+    cx_curfn = f;
+    f->defined = 1;
+    int np = f->type->np;
+    f->params = xcalloc((size_t)(np ? np : 1), sizeof *f->params);
+    for (int i = 0; i < np; i++) {
+        struct cvar *v = new_local(cx_fmt("__cx_arg%d", i),
+                                   f->type->params[i], NULL);
+        v->is_param = 1;
+        f->params[i] = v;
+    }
+    if (f->cls && !f->is_static) {
+        struct cvar *tv = new_local("this", NULL, NULL);
+        tv->cname = "this";
+        tv->type = ct_ptr(ct_qual(ct_class(f->cls), f->type->fq));
+        tv->is_param = 1;
+        f->this_var = tv;
+    }
+    f->body = body ? body : st_new(S_BLOCK);
+    cx_curfn = savefn;
+}
+
+/* A lambda that captures nothing converts to a pointer to a function:
+ * a static member calling operator() on an (empty) closure, whose address
+ * a conversion function gives. */
+static void lambda_to_pointer(struct clambda *L, const struct ctok *at)
+{
+    struct cclass *c = L->cls;
+    struct cfunc *call = L->call;
+    struct cty *ft = ct_func(call->type->to, call->type->params,
+                             call->type->np, call->type->variadic);
+    struct dspec ds;
+    memset(&ds, 0, sizeof ds);
+    ds.storage = SK_STATIC;
+    ds.is_inline = 1;
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    d.kind = DN_IDENT;
+    d.name = "__cx_invoke";
+    d.at = at;
+    struct cfunc *inv = declare_function(&ds, &d, ft, c->scope);
+    synth_define(inv, NULL);
+    struct cfunc *savefn = cx_curfn;
+    cx_curfn = inv;
+    struct cexpr **args = xcalloc((size_t)(ft->np ? ft->np : 1),
+                                  sizeof *args);
+    for (int i = 0; i < ft->np; i++)
+        args[i] = expr_var(inv->params[i]);
+    struct cexpr *none = ex_new(E_INITLIST, NULL, VC_PRVALUE);
+    struct cexpr *obj = ex_materialize(init_aggregate(ct_class(c), none, at));
+    struct cexpr *r = make_call(call, ex_addr(obj), args, ft->np, at);
+    struct cstmt *st;
+    if (ft->to->k == CT_VOID) {
+        st = st_new(S_EXPR);
+        st->e = r;
+    } else {
+        st = st_new(S_RETURN);
+        st->e = ct_is_ref(ft->to) ? bind_ref(r, ft->to, "return")
+                                  : init_object(ft->to, INIT_COPY, &r, 1, at);
+    }
+    inv->body->body = st;
+    cx_curfn = savefn;
+
+    struct cty *fpt = ct_ptr(ft);
+    struct cty *cft = ct_func(fpt, NULL, 0, 0);
+    cft->fq = CQ_CONST;
+    memset(&ds, 0, sizeof ds);
+    ds.is_inline = 1;
+    memset(&d, 0, sizeof d);
+    d.kind = DN_CONV;
+    d.conv_type = fpt;
+    d.name = cx_fmt("operator %s", ct_name(fpt));
+    d.at = at;
+    struct cfunc *cv = declare_function(&ds, &d, cft, c->scope);
+    synth_define(cv, NULL);
+    struct cstmt *ret = st_new(S_RETURN);
+    struct cexpr *addr = ex_new(E_FUNC, fpt, VC_PRVALUE);
+    addr->fn = inv;
+    ret->e = addr;
+    cv->body->body = ret;
+}
+
+/* [captures](params) specifiers -> ret { body }: a closure object — of
+ * a class of its own whose operator() the body defines and whose members
+ * are the captures (8.1.5). */
+struct cexpr *parse_lambda(void)
+{
+    const struct ctok *at = cx_cur();
+    struct clambda *L = xcalloc(1, sizeof *L);
+    L->at = at;
+    L->outer = cx_curfn;
+    L->parent = cx_curfn ? cx_curfn->lambda : NULL;
+    struct cclass *c = L->cls = class_new(NULL, cx_scope);
+    c->closure = L;
+    c->is_struct = 1;
+    c->defining = 1;
+    class_register(c);
+    /* the captures */
+    cx_expect(TOK_LBRACKET, "'['");
+    while (cx_kind() != TOK_RBRACKET) {
+        const struct ctok *cat = cx_cur();
+        if (cx_kind() == TOK_ASSIGN && (cx_kind_at(1) == TOK_COMMA ||
+                                        cx_kind_at(1) == TOK_RBRACKET)) {
+            L->dflt = '=';
+            cx_advance();
+        } else if (cx_kind() == TOK_AMP && (cx_kind_at(1) == TOK_COMMA ||
+                                            cx_kind_at(1) == TOK_RBRACKET)) {
+            L->dflt = '&';
+            cx_advance();
+        } else if (cx_kind() == TOK_CX_THIS) {
+            cx_advance();
+            struct cexpr *v = this_outside(L, cat);
+            if (!v)
+                cx_error(cat, "'this' captured outside a member function");
+            struct ccapture *k = new_capture(L);
+            k->is_this = 1;
+            k->value = v;
+            capture_field(L, k, v->t, "__cx_this");
+        } else if (cx_kind() == TOK_STAR && cx_kind_at(1) == TOK_CX_THIS) {
+            cx_error(cat, "capturing *this is not supported yet");
+        } else {
+            int byref = cx_accept(TOK_AMP);
+            if (cx_kind() != TOK_IDENT)
+                cx_error(cx_cur(), "expected a capture");
+            const char *name = cx_cur()->t.text;
+            cx_advance();
+            struct ccapture *k = new_capture(L);
+            k->name = name;
+            k->byref = byref;
+            if (cx_kind() == TOK_ASSIGN || cx_kind() == TOK_LBRACE ||
+                cx_kind() == TOK_LPAREN) {
+                /* an init-capture: a new variable, of the initializer's
+                 * type (or a reference to it) */
+                struct cexpr *e;
+                if (cx_accept(TOK_ASSIGN)) {
+                    e = expr_parse_assign();
+                } else if (cx_kind() == TOK_LBRACE) {
+                    e = parse_braced_list();
+                    if (e->na != 1)
+                        cx_error(cat, "an init-capture takes one value");
+                    e = e->a[0];
+                } else {
+                    cx_advance();
+                    e = expr_parse_assign();
+                    cx_expect(TOK_RPAREN, "')'");
+                }
+                k->value = e;
+                capture_field(L, k, byref ? ct_ref(ct_strip_ref(e->t), 0)
+                                          : ct_unqual(ct_decay(e->t)),
+                              name);
+            } else {
+                struct csym *y = lookup(cx_scope, name);
+                if (!y || (y->k != CS_VAR && y->k != CS_FIELD))
+                    cx_error(cat, "'%s' is not a variable to capture", name);
+                /* its value here: the variable, or an enclosing lambda's
+                 * capture of it */
+                k->value = expr_parse_name_value(y, name, cat);
+                k->var = y->k == CS_VAR ? y->var : NULL;
+                struct cty *t = k->value->t;
+                capture_field(L, k, byref ? ct_ref(ct_strip_ref(t), 0)
+                                          : ct_unqual(t), name);
+            }
+        }
+        if (!cx_accept(TOK_COMMA))
+            break;
+    }
+    cx_expect(TOK_RBRACKET, "']' to close the captures");
+    /* the declarator: (params), specifiers, -> ret */
+    struct cty *ft;
+    struct ctparam *tps = NULL;
+    int lparen = cx_kind() == TOK_LPAREN ? cx_pos : -1;
+    int ntps = lparen >= 0 ? invent_auto_params(lparen, &tps) : 0;
+    if (ntps) {
+        /* generic: operator() is a member template, whose pattern the
+         * declarator is read as */
+        scope_push(SC_TEMPLATE, NULL);
+        for (int i = 0; i < ntps; i++) {
+            struct csym *y = scope_add(cx_scope, CS_TYPEDEF, tps[i].name);
+            y->type = ct_tparam(i, tps[i].name);
+            y->pack_param = tps[i].pack;
+        }
+        cx_pattern++;
+        ft = parse_params();
+        lambda_declarator_rest(ft);
+        cx_pattern--;
+        scope_pop();
+    } else if (lparen >= 0) {
+        ft = parse_params();
+        lambda_declarator_rest(ft);
+    } else {
+        ft = ct_func(NULL, NULL, 0, 0);
+        ft->pdecl = NULL;
+        lambda_declarator_rest(ft);
+    }
+    if (cx_kind() != TOK_LBRACE)
+        cx_error(cx_cur(), "expected a lambda's body");
+    if (ntps) {
+        struct ctemplate *tm = template_new(TK_FUNC, "operator()", c->scope,
+                                            tps, ntps);
+        tm->decl_tok = lparen;
+        tm->member_of = c;
+        tm->has_body = 1;
+        tm->lambda = L;
+        struct cfunc *f = xcalloc(1, sizeof *f);
+        f->name = "operator()";
+        f->type = ft;
+        f->tmpl = tm;
+        f->owner = c->scope;
+        f->cls = c;
+        f->access = CA_PUBLIC;
+        f->vslot = -1;
+        f->body_tok = f->mi_tok = -1;
+        f->line = at->t.line;
+        f->file = at->file;
+        f->lambda = L;
+        tm->pattern = f;
+        L->call = f;
+        struct csym *y = func_sym(c->scope, "operator()", at);
+        struct cfunc **set = &y->fns;
+        while (*set)
+            set = &(*set)->next;
+        *set = f;
+        if (L->dflt)
+            foresee_captures(L, cx_pos);
+        cx_skip_balanced();
+        c->defining = 0;
+        class_complete(c);
+        L->closed = 1;
+    } else {
+        /* operator(), defined by the body, read now in the closure's
+         * scope (which sits in the enclosing one) */
+        struct dspec ds;
+        memset(&ds, 0, sizeof ds);
+        ds.is_inline = 1;
+        struct declarator d;
+        memset(&d, 0, sizeof d);
+        d.kind = DN_OPERATOR;
+        d.name = "operator()";
+        d.at = at;
+        struct cfunc *f = declare_function(&ds, &d, ft, c->scope);
+        f->lambda = L;
+        L->call = f;
+        struct cscope *saved = cx_scope;
+        cx_scope = c->scope;
+        f->def_scope = cx_scope;
+        define_function(f, ft);
+        cx_scope = saved;
+        c->defining = 0;
+        class_complete(c);
+        L->closed = 1;
+    }
+    if (!L->ncaps && !L->dflt && !ntps)
+        lambda_to_pointer(L, at);
+    /* the closure object: each member from its capture's value */
+    struct cexpr *list = ex_new(E_INITLIST, NULL, VC_PRVALUE);
+    list->na = c->nfields;
+    list->a = xcalloc((size_t)(c->nfields ? c->nfields : 1), sizeof *list->a);
+    for (int i = 0; i < L->ncaps; i++)
+        for (int k = 0; k < c->nfields; k++)
+            if (c->fields[k] == L->caps[i].field)
+                list->a[k] = L->caps[i].value;
+    return init_aggregate(ct_class(c), list, at);
 }
