@@ -18,4 +18,10 @@
 char *cpp_process(const char *path, const char *src,
                   const char **incdirs, int nincdirs);
 
+/* A C++ unit: what __has_builtin answers (the C++ front-end's builtins,
+ * type traits included), and whether exceptions are on (__cpp_exceptions,
+ * __EXCEPTIONS). Set before cpp_process; C units leave them alone, and
+ * C's preprocessing does not change. */
+void cpp_set_cxx(int (*has_builtin)(const char *name), int exceptions);
+
 #endif

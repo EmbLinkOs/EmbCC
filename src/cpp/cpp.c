@@ -563,6 +563,170 @@ EVAL_LEVEL(eval_or_, eval_and, {
 
 static long eval_or(struct evalp *e) { return eval_or_(e); }
 
+static char *read_file_or_null(const char *path, long *len);
+static int (*cxx_has_builtin)(const char *name);
+static int cxx_exceptions;
+
+void cpp_set_cxx(int (*has_builtin)(const char *name), int exceptions)
+{
+    cxx_has_builtin = has_builtin;
+    cxx_exceptions = exceptions;
+}
+
+/* C++'s (and GNU's) feature-test operators, which a #if may use, and
+ * which `defined` / #ifdef count as defined. */
+static int has_operator(const char *p, size_t n)
+{
+    static const char *const ops[] = {
+        "__has_include", "__has_include_next", "__has_builtin",
+        "__has_attribute", "__has_cpp_attribute", "__has_feature",
+        "__has_extension",
+    };
+    if (!predef_is_cxx())
+        return 0;
+    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++)
+        if (strlen(ops[i]) == n && !memcmp(ops[i], p, n))
+            return 1;
+    return 0;
+}
+
+/* The name inside an attribute test, its __x__ spelling reduced to x
+ * (and a gnu:: or __gnu__:: scope dropped). */
+static void attr_name(const char *p, size_t n, char *out, size_t cap)
+{
+    if (n > 5 && !memcmp(p, "gnu::", 5))
+        p += 5, n -= 5;
+    else if (n > 9 && !memcmp(p, "__gnu__::", 9))
+        p += 9, n -= 9;
+    if (n > 4 && !memcmp(p, "__", 2) && !memcmp(p + n - 2, "__", 2))
+        p += 2, n -= 4;
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, p, n);
+    out[n] = 0;
+}
+
+static int gnu_attribute(const char *a)
+{
+    /* those the C++ front-end honours or can safely ignore */
+    static const char *const ok[] = {
+        "aligned", "packed", "section", "weak", "used", "noreturn",
+        "unused", "deprecated", "always_inline", "noinline", "const",
+        "pure", "nothrow", "warn_unused_result", "format", "format_arg",
+        "nonnull", "returns_nonnull", "malloc", "cold", "hot",
+        "artificial", "gnu_inline", "alloc_size", "alloc_align",
+        "abi_tag", "visibility", "externally_visible", "leaf", "flatten",
+        "may_alias", "sentinel", "unavailable", "access", "noipa",
+        "no_sanitize", "no_sanitize_address", "nodiscard", "maybe_unused",
+        "fallthrough", "likely", "unlikely",
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++)
+        if (!strcmp(ok[i], a))
+            return 1;
+    return 0;
+}
+
+static long cpp_attribute(const char *a)
+{
+    static const struct { const char *name; long v; } std[] = {
+        { "nodiscard", 201907 }, { "maybe_unused", 201603 },
+        { "deprecated", 201309 }, { "fallthrough", 201910 },
+        { "likely", 201803 }, { "unlikely", 201803 },
+        { "noreturn", 200809 },
+    };
+    for (size_t i = 0; i < sizeof std / sizeof std[0]; i++)
+        if (!strcmp(std[i].name, a))
+            return std[i].v;
+    return 0;
+}
+
+static int include_exists(struct src *s, const char *fname, int angle,
+                          int is_next)
+{
+    char path[512];
+    long len;
+    char *text = NULL;
+    if (!angle && !is_next) {
+        const char *slash = strrchr(s->file, '/');
+        if (slash)
+            snprintf(path, sizeof path, "%.*s/%s", (int)(slash - s->file),
+                     s->file, fname);
+        else
+            snprintf(path, sizeof path, "%s", fname);
+        text = read_file_or_null(path, &len);
+    }
+    for (int i = is_next ? s->incdir_idx + 1 : 0;
+         !text && i < s->cpp->nincdirs; i++) {
+        snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], fname);
+        text = read_file_or_null(path, &len);
+    }
+    int found = text != NULL;
+    free(text);
+    return found;
+}
+
+/* At a feature-test operator's name (n chars at p): its value, the
+ * cursor moved past its parenthesized operand. */
+static long eval_has(struct src *s, const char *p, size_t n,
+                     const char **pp)
+{
+    const char *q = p + n;
+    while (*q == ' ' || *q == '\t')
+        q++;
+    if (*q != '(')
+        cerr(s, "expected '(' after a feature-test operator", NULL);
+    q++;
+    while (*q == ' ' || *q == '\t')
+        q++;
+    long v = 0;
+    if (n >= 13 && !memcmp(p, "__has_include", 13)) {
+        int angle = *q == '<';
+        if (!angle && *q != '"')
+            cerr(s, "__has_include needs a header name", NULL);
+        char close = angle ? '>' : '"';
+        const char *b = ++q;
+        while (*q && *q != close)
+            q++;
+        if (!*q)
+            cerr(s, "malformed __has_include", NULL);
+        char fname[256];
+        size_t fl = (size_t)(q - b) < sizeof fname - 1 ? (size_t)(q - b)
+                                                       : sizeof fname - 1;
+        memcpy(fname, b, fl);
+        fname[fl] = 0;
+        q++;
+        v = include_exists(s, fname, angle, n == 18);
+    } else {
+        const char *b = q;
+        while (is_idc(*q) || *q == ':')
+            q++;
+        size_t an = (size_t)(q - b);
+        char name[128];
+        if (n == 13 && !memcmp(p, "__has_builtin", 13)) {
+            if (an >= sizeof name)
+                an = sizeof name - 1;
+            memcpy(name, b, an);
+            name[an] = 0;
+            v = cxx_has_builtin ? cxx_has_builtin(name) : 0;
+        } else if (n == 15 && !memcmp(p, "__has_attribute", 15)) {
+            attr_name(b, an, name, sizeof name);
+            v = gnu_attribute(name);
+        } else if (n == 19 && !memcmp(p, "__has_cpp_attribute", 19)) {
+            int gnu = (an > 5 && !memcmp(b, "gnu::", 5)) ||
+                      (an > 9 && !memcmp(b, "__gnu__::", 9));
+            attr_name(b, an, name, sizeof name);
+            v = gnu ? gnu_attribute(name) : cpp_attribute(name);
+        }
+        /* __has_feature / __has_extension: clang's, 0 */
+    }
+    while (*q == ' ' || *q == '\t')
+        q++;
+    if (*q != ')')
+        cerr(s, "expected ')' after a feature-test operand", NULL);
+    *pp = q + 1;
+    return v;
+}
+
 /* Evaluates a #if line: replace defined(X)/defined X first, then
  * macro-expand, then parse the arithmetic. */
 static long eval_if(struct src *s, const char *line)
@@ -595,7 +759,8 @@ static long eval_if(struct src *s, const char *line)
                     idn++;
                 int have = find_macro(s->cpp, q, idn) != NULL ||
                            (idn == 8 && (!memcmp(q, "__FILE__", 8) ||
-                                         !memcmp(q, "__LINE__", 8)));
+                                         !memcmp(q, "__LINE__", 8))) ||
+                           has_operator(q, idn);
                 q += idn;
                 if (paren) {
                     while (*q == ' ' || *q == '\t')
@@ -608,6 +773,12 @@ static long eval_if(struct src *s, const char *line)
                 p = q;
                 continue;
             }
+            if (has_operator(p, n) && !find_macro(s->cpp, p, n)) {
+                char num[32];
+                snprintf(num, sizeof num, "%ldL", eval_has(s, p, n, &p));
+                tb_putn(&pre, num, strlen(num));
+                continue;
+            }
             tb_putn(&pre, p, n);
             p += n;
             continue;
@@ -618,6 +789,35 @@ static long eval_if(struct src *s, const char *line)
     struct tbuf ex = { 0, 0, 0 };
     expand_text(s, pre.p ? pre.p : "", &ex);
     free(pre.p);
+    if (predef_is_cxx() && ex.p) {
+        /* operators a macro's expansion produced
+         * (libstdc++'s _GLIBCXX_HAS_BUILTIN(B) is __has_builtin(B)) */
+        struct tbuf ex2 = { 0, 0, 0 };
+        const char *q = ex.p;
+        while (*q) {
+            if (*q == '\'' || *q == '"') {
+                q += copy_literal(q, &ex2);
+                continue;
+            }
+            if (is_id0(*q)) {
+                size_t n = 0;
+                while (is_idc(q[n]))
+                    n++;
+                if (has_operator(q, n)) {
+                    char num[32];
+                    snprintf(num, sizeof num, "%ldL", eval_has(s, q, n, &q));
+                    tb_putn(&ex2, num, strlen(num));
+                    continue;
+                }
+                tb_putn(&ex2, q, n);
+                q += n;
+                continue;
+            }
+            tb_putc(&ex2, *q++);
+        }
+        free(ex.p);
+        ex = ex2;
+    }
 
     struct evalp e;
     e.s = s;
@@ -964,7 +1164,8 @@ static void process_file(struct cpp *cpp, const char *path,
                         idn++;
                     if (!idn)
                         cerr(&s, "#ifdef needs a name", NULL);
-                    have = find_macro(cpp, arg, idn) != NULL;
+                    have = find_macro(cpp, arg, idn) != NULL ||
+                           has_operator(arg, idn);
                     if (DIR("ifndef"))
                         have = !have;
                 }
@@ -1144,6 +1345,54 @@ char *cpp_process(const char *path, const char *src,
     if (!predef_is_cxx())      /* C++ has __cplusplus instead */
         define_macro(&boot, "__STDC_VERSION__ 199901L");
     define_macro(&boot, "__STDC_HOSTED__ 1");
+    if (predef_is_cxx()) {
+        /* the C++ features EmbCC implements (docs/CXX.md), at the
+         * values g++ gives the standard they come from; those it does
+         * not yet (concepts, <=>, coroutines, designated initializers,
+         * CTAD, consteval, aligned new, ...) are left undefined, so
+         * libstdc++ takes its paths without them */
+        static const char *const feats[] = {
+            "__GNUG__ 16",
+            "__GXX_RTTI 1", "__cpp_rtti 199711L",
+            "__cpp_aggregate_nsdmi 201304L",
+            "__cpp_aggregate_paren_init 201902L",
+            "__cpp_alias_templates 200704L", "__cpp_attributes 200809L",
+            "__cpp_binary_literals 201304L",
+            "__cpp_capture_star_this 201603L", "__cpp_char8_t 202207L",
+            "__cpp_conditional_explicit 201806L",
+            "__cpp_constexpr 201603L", "__cpp_decltype 200707L",
+            "__cpp_decltype_auto 201304L",
+            "__cpp_delegating_constructors 200604L",
+            "__cpp_enumerator_attributes 201411L",
+            "__cpp_fold_expressions 201603L",
+            "__cpp_generic_lambdas 201304L",
+            "__cpp_guaranteed_copy_elision 201606L",
+            "__cpp_hex_float 201603L", "__cpp_if_constexpr 201606L",
+            "__cpp_init_captures 201304L",
+            "__cpp_initializer_lists 200806L",
+            "__cpp_inline_variables 201606L", "__cpp_lambdas 200907L",
+            "__cpp_namespace_attributes 201411L",
+            "__cpp_nested_namespace_definitions 201411L",
+            "__cpp_nsdmi 200809L", "__cpp_range_based_for 201603L",
+            "__cpp_ref_qualifiers 200710L",
+            "__cpp_return_type_deduction 201304L",
+            "__cpp_rvalue_references 200610L",
+            "__cpp_static_assert 201411L",
+            "__cpp_structured_bindings 201606L",
+            "__cpp_threadsafe_static_init 200806L",
+            "__cpp_unicode_characters 200704L",
+            "__cpp_unicode_literals 200710L",
+            "__cpp_user_defined_literals 200809L",
+            "__cpp_variable_templates 201304L",
+            "__cpp_variadic_templates 200704L",
+        };
+        for (size_t i = 0; i < sizeof feats / sizeof feats[0]; i++)
+            define_macro(&boot, feats[i]);
+        if (cxx_exceptions) {
+            define_macro(&boot, "__EXCEPTIONS 1");
+            define_macro(&boot, "__cpp_exceptions 199711L");
+        }
+    }
 
     struct tbuf out = { 0, 0, 0 };
     process_file(&cpp, path, src, &out, -1);

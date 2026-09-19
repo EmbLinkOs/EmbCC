@@ -164,6 +164,8 @@ static int compile(const char *in, const char *out, int pp_only)
     char *src = read_file(in);
     diag_register_source(in, src);   /* so diagnostics can show its lines */
     predef_set_cxx(lang_cxx);
+    if (lang_cxx)
+        cpp_set_cxx(cxx_has_builtin, want_exceptions);
     char *pp = cpp_process(in, src, incdirs, nincdirs);
     if (pp_only) {
         fputs(pp, stdout);

@@ -37,8 +37,12 @@ reference() {
 # macro that CLAIMS a feature EmbCC's C++ does not implement yet — the __cpp_*
 # feature tests, exceptions, RTTI, constexpr asm. libstdc++ switches on these,
 # so claiming one early would compile code the front-end cannot. A pattern
-# leaves this list when its feature lands (docs/CXX.md).
-EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_ASM__)'
+# leaves this list when its feature lands (docs/CXX.md). The implemented
+# ones cpp defines itself (cpp_process), as exceptions depend on
+# -fno-exceptions. Also excluded: the types EmbCC's C++ has not got —
+# __int128 (and libstdc++'s __GLIBCXX_TYPE_INT_N_0 naming it), __float128,
+# __float80 and the extended floating types (_Float16/32/64/128, __bf16).
+EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_ASM__|__GLIBCXX_|__SIZEOF_INT128__|__SIZEOF_FLOAT128__|__SIZEOF_FLOAT80__|__BFLT16_|__FLT16_|__FLT32_|__FLT32X_|__FLT64_|__FLT64X_|__FLT128_|__STDCPP_BFLOAT16|__STDCPP_FLOAT)'
 
 refgxx() {
     echo "$(refgcc "$1" | sed 's/gcc$/g++/')"

@@ -346,6 +346,18 @@ literal's suffix, and reads digit separators (`1'000`) and binary literals
 (`0b101`, C too); `[*this]`. tests/cxx `constexpr`, `bindings`,
 `initlist`, `udl` agree with g++ on both targets.
 
+**CX8 started** (libstdc++'s headers, compiled by EmbCC). The
+preprocessor answers C++'s feature tests — `__has_builtin` (the C++
+front-end says which builtins and trait intrinsics it has; also when a
+macro's expansion produced it, as `_GLIBCXX_HAS_BUILTIN` does),
+`__has_include(_next)`, `__has_attribute`, `__has_cpp_attribute`, each
+"defined" to `#ifdef` — and defines the `__cpp_*` macros of the features
+implemented (`__cpp_exceptions`/`__EXCEPTIONS` unless -fno-exceptions,
+`__cpp_rtti`, `__GNUG__`); C units see none of it. The C++ predefined
+table no longer claims `__int128`, `__float128`, `__float80` or the
+extended floating types (tools/gen-predef.sh), which libstdc++ would
+otherwise use. tests/cxx `features`.
+
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their
 values are known to the interpreter, not yet written as static data);

@@ -10,4 +10,8 @@ char *cxx_translate(const char *file, const char *src);
  * of cleanups (the default is on, as g++'s). */
 void cxx_set_exceptions(int on);
 
+/* What the preprocessor's __has_builtin answers in a C++ unit: the
+ * builtin functions and type-trait intrinsics the front-end implements. */
+int cxx_has_builtin(const char *name);
+
 #endif

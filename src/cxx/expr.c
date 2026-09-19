@@ -2728,6 +2728,25 @@ static struct cexpr *parse_delete(const struct ctok *at, int global)
 
 /* ---- builtins ---- */
 
+static struct cty *builtin_type(const char *n);
+int trait_known(const char *name);
+
+int cxx_has_builtin(const char *name)
+{
+    if (strncmp(name, "__builtin_", 10) == 0) {
+        static const char *const special[] = {
+            "offsetof", "is_constant_evaluated", "addressof", "launder",
+            "expect", "constant_p", "va_arg",
+        };
+        const char *n = name + 10;
+        for (size_t i = 0; i < sizeof special / sizeof special[0]; i++)
+            if (strcmp(n, special[i]) == 0)
+                return 1;
+        return builtin_type(n) != NULL;
+    }
+    return trait_known(name);
+}
+
 static struct cty *builtin_type(const char *n)
 {
     static const char *const ints[] = {
@@ -4111,4 +4130,12 @@ long expr_parse_const(const char *what)
     if (!ct_is_integer(e->t) || !expr_const(e, &v))
         cx_error(at, "%s is not an integral constant expression", what);
     return v;
+}
+
+/* ---- type-trait intrinsics ---- */
+
+int trait_known(const char *name)
+{
+    (void)name;
+    return 0;
 }
