@@ -1108,6 +1108,16 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
             return construct(c, INIT_COPY_LIST, args, na, at);
         if (same_class(e, c))
             return copy_from(c, e, 0, at);
+        if (e->t && e->t->k == CT_CLASS && !class_derives(e->t->cls, c, NULL) &&
+            !resolve_ex(c->ctors, NULL, &e, 1, NULL, NULL,
+                        RS_NO_USER | RS_NO_EXPLICIT)) {
+            /* no constructor takes it: the source's conversion function
+             * (13.3.1.5), its result the object (or copied from) */
+            struct cexpr *cv = class_conversion(e, c);
+            if (cv)
+                return cv->vc == VC_PRVALUE && cv->t->k == CT_CLASS &&
+                       cv->t->cls == c ? cv : copy_from(c, cv, 0, at);
+        }
         struct cfunc *f = resolve_ex(c->ctors, NULL, &e, 1, at,
                                      c->name ? c->name : "class",
                                      RS_NO_USER | RS_NO_EXPLICIT);

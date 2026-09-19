@@ -1361,6 +1361,11 @@ char *cpp_process(const char *path, const char *src,
             "__cpp_capture_star_this 201603L", "__cpp_char8_t 202207L",
             "__cpp_conditional_explicit 201806L",
             "__cpp_constexpr 201603L", "__cpp_decltype 200707L",
+            /* constexpr destructors, and std::construct_at (which C++20
+             * libstdc++ uses unconditionally); new in a constant
+             * evaluation makes it not constant, as anything the
+             * interpreter cannot do */
+            "__cpp_constexpr_dynamic_alloc 201907L",
             "__cpp_decltype_auto 201304L",
             "__cpp_delegating_constructors 200604L",
             "__cpp_enumerator_attributes 201411L",
@@ -1388,6 +1393,10 @@ char *cpp_process(const char *path, const char *src,
         };
         for (size_t i = 0; i < sizeof feats / sizeof feats[0]; i++)
             define_macro(&boot, feats[i]);
+        /* newlib declares vprintf and friends with __VALIST, `char *`
+         * unless the compiler is GNU: C++ gives them the va_list type
+         * libstdc++ passes them (include/stdarg.h) */
+        define_macro(&boot, "__VALIST __builtin_va_list");
         if (cxx_exceptions) {
             define_macro(&boot, "__EXCEPTIONS 1");
             define_macro(&boot, "__cpp_exceptions 199711L");

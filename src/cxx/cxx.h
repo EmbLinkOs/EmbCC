@@ -257,6 +257,10 @@ struct csym {
     struct cfunc *fns;        /* FUNC: the overload set (cfunc.next) */
     struct cscope *ns;        /* NAMESPACE: its scope */
     struct cfield *field;     /* FIELD: a non-static data member */
+    struct cfield **fpath;    /* FIELD of an anonymous union or struct
+                               * member: those members, outermost first,
+                               * the way to it */
+    int nfpath;
     struct ctemplate *tmpl;   /* TEMPLATE */
     struct ctarg *pack;       /* PACK: its elements */
     int npack;
@@ -355,6 +359,7 @@ struct cpartial {
     struct cpartial *next;
     int is_final;             /* its definition says `final` */
     int req_start, req_end;   /* its requires-clause (0: none) */
+    int pat_tok;              /* the pattern's `<` (to substitute it) */
 };
 
 /* An out-of-class definition of a class template's member:
@@ -364,8 +369,15 @@ struct coutdef {
     int nparams;
     int tok;                  /* the declaration after template<...> */
     const char *member;       /* its (last) name, for the search */
+    int class_body;           /* a member class's definition: at its `{`
+                               * or `:` (0: a function's or variable's) */
+    enum tok_kind key;        /* ... class, struct or union */
     struct coutdef *next;
 };
+/* A class template instance's member class declared, not defined, in the
+ * class: defined from the template's out-of-class definition of it
+ * (template<class T> class A<T>::B { ... };), if there is one. */
+void member_class_from_outdef(struct cclass *c);
 
 struct cinst {
     struct ctarg *args;
@@ -484,6 +496,8 @@ void cx_inst_reset(int mark);
 void cx_inst_notes(void);
 void parse_restore(struct parse_state *st);
 extern int cx_pattern;         /* reading a pattern: dependent types allowed */
+extern int cx_unevaluated;     /* inside decltype, sizeof, noexcept or a
+                                * requires-expression: calls need no body */
 extern int cx_exceptions;      /* exceptions on (the default; -fno-exceptions) */
 extern int cx_in_targs;        /* inside < > of template arguments */
 /* SFINAE: while set, an error unwinds to it instead of ending the run. */
@@ -817,6 +831,9 @@ struct cexpr *expr_parse_cond(void);       /* a conditional-expression */
 long expr_parse_const(const char *what);   /* an integral constant */
 int expr_const(struct cexpr *e, long *out); /* integer constant expression */
 int cx_expr_nothrow(struct cexpr *e);   /* can it not throw? (noexcept) */
+/* e (of another class) made a c by one of its conversion functions: the
+ * call (NULL if it has none that fits) */
+struct cexpr *class_conversion(struct cexpr *e, struct cclass *c);
 /* An expression of the binary operators binding tighter than minprec
  * (3: none of && and ||, as a constraint's operand). */
 struct cexpr *expr_parse_binary(int minprec);

@@ -351,6 +351,7 @@ struct cexpr *parse_requires_expr(void)
         }
     }
     cx_expect(TOK_LBRACE, "'{' in a requires-expression");
+    cx_unevaluated++;
     int all = 1;
     while (cx_kind() != TOK_RBRACE) {
         if (cx_kind() == TOK_EOF)
@@ -362,6 +363,7 @@ struct cexpr *parse_requires_expr(void)
         all = requirement();
     }
     cx_advance();
+    cx_unevaluated--;
     scope_pop();
     return ex_int(all, ct_basic(CT_BOOL));
 }

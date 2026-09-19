@@ -410,6 +410,43 @@ functions, and the floating classifications (`__builtin_isnan`,
 knowing neither; stddef.h's `max_align_t` for C++. tests/cxx
 `headerforms`.
 
+Then `<vector>`, `<string>`, `<map>`, `<set>`, `<deque>`, `<array>`,
+`<sstream>`, `<numeric>` and `<iostream>` compile too. On the way:
+anonymous unions and structs in classes (their members named through
+them, `offsetof` too) — basic_string's buffer; member classes of a class
+template defined outside it (`class A<T>::B { }`); out-of-class member
+templates of a class (constructors too: they were being registered as
+functions) and their template parameters kept visible inside the class's
+scope; out-of-class definitions of static members initialized in the
+class; `>>` inside a skipped declaration (a namespace's `}` was being
+swallowed); explicit specializations of variable templates and partial
+ones; defaults of a class template's forward declaration; friend class
+templates and template-ids in elaborated specifiers; constructor templates
+beside the injected-class-name; a partial specialization matched through
+`void_t<typename T::x>` — deduced, then its pattern substituted and
+compared (the dependent part a non-deduced context till then); default
+template arguments as substitution failures in deduction (`typename =
+_RequireInputIter<It>`); packs deduced from a function type's parameters
+and reconciled with a function parameter pack; unevaluated operands
+(decltype, sizeof, noexcept, requires) no longer instantiate function
+bodies (std::declval's body is an error); pack expansions in new's
+arguments; pseudo-destructor calls; `static_assert` on a class with
+`operator bool`; value-initialized pointers are null pointers; copy-
+initialization from another class through its conversion function;
+`if (wchar_t('0') == L'0')` and `(less<T>()(a, b) || ...)` no longer
+declarations or casts; `typename X<T>::type = v` a value template
+parameter; `X<T>::template f<U>()` a call; statement attributes
+(`[[likely]]`); the same user conversion ranked by its second part
+(`operator[](const K&)` vs `(K&&)`); the GNU `__atomic_*`/`__sync_*` and
+`__builtin_*_overflow` builtins; `__cpp_constexpr_dynamic_alloc` (C++20
+libstdc++ declares `std::construct_at` only with it); in C++ units
+`va_list` is `__builtin_va_list` and newlib's `__VALIST` follows, so
+`vsnprintf` matches libstdc++'s calls. tests/cxx `headerforms2`.
+
+Next: a program using std::map (a `tuple` constructor overload is
+ambiguous), then running what EmbCC compiles against g++'s libstdc++.a;
+out-of-class members of partial specializations are still skipped.
+
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their
 values are known to the interpreter, not yet written as static data);

@@ -752,6 +752,48 @@ static char *fp_class_text(struct cexpr *e)
     return cx_fmt("({ %s = %s; (int)%s; })", decl, ev(x), r);
 }
 
+/* __builtin_{add,sub,mul}_overflow(a, b, r), which EmbCC's C lacks: a
+ * result 64 bits wide computed wrapping, then the tests that tell
+ * overflow; a narrower one computed exactly in 64 bits and checked
+ * against its range. */
+static char *overflow_text(struct cexpr *e)
+{
+    char op = e->name[10];                    /* a, s or m */
+    struct cty *rt = ct_unqual(e->a[2]->t->to);
+    int u = cx_uid();
+    int uns = !ct_is_signed(rt);
+    long sz = ct_size(rt);
+    const char *pty = ctype(ct_ptr(rt));
+    char *a = cx_fmt("__cx_oa%d", u), *b = cx_fmt("__cx_ob%d", u),
+         *r = cx_fmt("__cx_or%d", u);
+    const char *sym = op == 'a' ? "+" : op == 's' ? "-" : "*";
+    if (sz < 8) {
+        /* exact in long, then does it fit */
+        return cx_fmt("({ long %s = (long)(%s), %s = (long)(%s); "
+                      "long %s = %s %s %s; %s __cx_op%d = %s; "
+                      "*__cx_op%d = (%s)%s; (_Bool)(%s != (long)(%s)%s); })",
+                      a, ev(e->a[0]), b, ev(e->a[1]), r, a, sym, b, pty, u,
+                      ev(e->a[2]), u, ctype(rt), r, r, ctype(rt), r);
+    }
+    const char *w = uns ? "unsigned long" : "long";
+    char *test;
+    if (uns)
+        test = op == 'a' ? cx_fmt("%s < %s", r, a)
+               : op == 's' ? cx_fmt("%s < %s", a, b)
+               : cx_fmt("%s != 0 && %s / %s != %s", a, r, a, b);
+    else
+        test = op == 'a' ? cx_fmt("((%s ^ %s) & (%s ^ %s)) < 0", a, r, b, r)
+               : op == 's' ? cx_fmt("((%s ^ %s) & (%s ^ %s)) < 0", a, b, a,
+                                    r)
+               : cx_fmt("%s != 0 && ((%s == -1 && %s == (-9223372036854775807L "
+                        "- 1)) || %s / %s != %s)", b, b, a, r, b, a);
+    return cx_fmt("({ %s %s = (%s)(%s), %s = (%s)(%s); %s %s = (%s)((unsigned "
+                  "long)%s %s (unsigned long)%s); %s __cx_op%d = %s; "
+                  "*__cx_op%d = (%s)%s; (_Bool)(%s); })",
+                  w, a, w, ev(e->a[0]), b, w, ev(e->a[1]), w, r, w, a, sym, b,
+                  pty, u, ev(e->a[2]), u, ctype(rt), r, test);
+}
+
 /* The call, its result slot first when it has one (dest: an lvalue). */
 static char *call_text(struct cexpr *e, const char *dest)
 {
@@ -1077,6 +1119,10 @@ static char *ev(struct cexpr *e)
             if (fp)
                 return fp;
         }
+        if (!strcmp(e->name, "__builtin_add_overflow") ||
+            !strcmp(e->name, "__builtin_sub_overflow") ||
+            !strcmp(e->name, "__builtin_mul_overflow"))
+            return overflow_text(e);
         struct sb b = { 0, 0, 0 };
         int va = strncmp(e->name, "__builtin_va_", 13) == 0;
         for (int i = 0; i < e->na; i++)
@@ -2992,13 +3038,17 @@ char *cx_emit_unit(void)
      * wants them declared */
     const char *parts[] = { sb_str(&out_code), sb_str(&out_vars),
                             sb_str(&out_init), sb_str(&out_thunks) };
-    int use_set = 0, use_cpy = 0;
+    int use_set = 0, use_cpy = 0, use_move = 0;
     for (int i = 0; i < 4; i++) {
         use_set |= parts[i] && strstr(parts[i], "__builtin_memset(") != NULL;
         use_cpy |= parts[i] && strstr(parts[i], "__builtin_memcpy(") != NULL;
+        use_move |= parts[i] &&
+                    strstr(parts[i], "__builtin_memmove(") != NULL;
     }
     if (use_set)
         sb_put(&out, "void *memset(void *, int, unsigned long);\n");
+    if (use_move)
+        sb_put(&out, "void *memmove(void *, const void *, unsigned long);\n");
     if (eh_used) {
         /* the C++ ABI's exception functions — called through casts, so a
          * declaration of the program's own (<cxxabi.h>) serves as well */

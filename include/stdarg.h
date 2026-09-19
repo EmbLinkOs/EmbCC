@@ -14,8 +14,16 @@
  * lists advance independently. */
 #ifndef _STDARG_H
 #define _STDARG_H
+#ifdef __cplusplus
+/* C++: va_list is a type of its own, as g++'s (it takes part in
+ * overloading and mangling; libstdc++ names __builtin_va_list), still
+ * `char *` underneath in the C the C++ becomes */
+typedef __builtin_va_list va_list;
+typedef __builtin_va_list __gnuc_va_list;
+#else
 typedef char *va_list;
 typedef char *__gnuc_va_list;
+#endif
 #define va_start(ap, last) __builtin_va_start((ap), (last))
 #define va_arg(ap, type)   __builtin_va_arg((ap), type)
 #define va_end(ap)         __builtin_va_end((ap))

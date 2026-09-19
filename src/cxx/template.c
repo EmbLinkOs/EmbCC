@@ -25,6 +25,7 @@
 #include "../driver/util.h"
 
 int cx_pattern;
+int cx_unevaluated;
 int cx_in_targs;
 
 /* ---- packs ---- */
@@ -511,6 +512,9 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
 /* Matching a partial specialization (or ordering two): the argument must
  * BE the pattern with the parameters substituted — not convert to it. */
 static int deduce_exact;
+/* ... a dependent part of the pattern was skipped: the match is known
+ * only once the pattern is substituted */
+static int deduce_deferred;
 
 /* Is A (a class) or one of its bases an instance of template tm? */
 static struct cclass *instance_base(struct cclass *c, struct ctemplate *tm)
@@ -679,18 +683,46 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
             return 0;
         }
         return deduce(P->to, A->to, out, set, np);
-    case CT_FUNC:
-        if (A->k != CT_FUNC || A->np != P->np)
+    case CT_FUNC: {
+        int pexp = P->np && P->params[P->np - 1]->pack_expansion;
+        if (A->k != CT_FUNC || (!pexp && A->np != P->np) ||
+            (pexp && A->np < P->np - 1))
             return 0;
         if (deduce_exact && (A->variadic != P->variadic || A->fq != P->fq ||
                              A->refq != P->refq))
             return 0;
         if (!deduce(P->to, A->to, out, set, np))
             return 0;
+        if (pexp) {
+            /* R(A, B, Ts...): Ts from the parameters after the others */
+            struct ctarg *pa = xcalloc((size_t)P->np, sizeof *pa);
+            struct ctarg *aa = xcalloc((size_t)(A->np ? A->np : 1),
+                                       sizeof *aa);
+            for (int i = 0; i < P->np; i++) {
+                pa[i].kind = TP_TYPE;
+                pa[i].type = P->params[i];
+            }
+            struct ctarg *pat = xcalloc(1, sizeof *pat);
+            pat->kind = TP_TYPE;
+            pat->type = xmalloc(sizeof *pat->type);
+            *pat->type = *P->params[P->np - 1];
+            pat->type->pack_expansion = 0;
+            pa[P->np - 1].type = NULL;
+            pa[P->np - 1].expansion = 1;
+            pa[P->np - 1].is_pack = 1;
+            pa[P->np - 1].elems = pat;
+            pa[P->np - 1].nelems = 1;
+            for (int i = 0; i < A->np; i++) {
+                aa[i].kind = TP_TYPE;
+                aa[i].type = A->params[i];
+            }
+            return deduce_seq(pa, P->np, aa, A->np, out, set, np);
+        }
         for (int i = 0; i < P->np; i++)
             if (!deduce(P->params[i], A->params[i], out, set, np))
                 return 0;
         return 1;
+    }
     case CT_MPTR:
         if (A->k != CT_MPTR)
             return 0;
@@ -741,7 +773,13 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
     }
     default:
         /* non-deduced: checked by conversion later — or, matching a
-         * partial specialization, the same type */
+         * partial specialization, the same type; a dependent one
+         * (typename T::x, an alias of T) once the rest is deduced, by
+         * substituting it (deduce_deferred) */
+        if (deduce_exact && P->k == CT_DEP) {
+            deduce_deferred = 1;
+            return 1;
+        }
         return deduce_exact ? ct_same(P, A) : 1;
     }
 }
@@ -805,6 +843,10 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
         set[i] = 3;
     }
     struct cty *ft = t->pattern->type;
+    /* packs a function parameter pack builds, and how far one deduced
+     * earlier (from another parameter) has been matched */
+    int *built = xcalloc((size_t)(np ? np : 1), sizeof *built);
+    int *used = xcalloc((size_t)(np ? np : 1), sizeof *used);
     for (int i = 0; i < na; i++) {
         struct cty *P;
         int ppack = -1;
@@ -871,6 +913,15 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
                 if (s1[j] != 1)
                     continue;
                 struct ctarg *pk = &out[j];
+                if (set[j] == 1 && !built[j] && pk->is_pack) {
+                    /* deduced before: this argument must agree */
+                    if (used[j] >= pk->nelems ||
+                        !args_same(&pk->elems[used[j]], 1, &o1[j], 1))
+                        return 0;
+                    used[j]++;
+                    continue;
+                }
+                built[j] = 1;
                 if (!set[j]) {
                     memset(pk, 0, sizeof *pk);
                     pk->kind = o1[j].kind;
@@ -916,9 +967,21 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
         }
         if (t->params[i].def_tok < 0)
             return 0;
-        int saved_sfinae_ok = 1;
-        (void)saved_sfinae_ok;
+        /* a default that cannot be substituted: deduction fails (the
+         * candidate is dropped), no error — as std::_RequireInputIter
+         * counts on (13.10.3.1) */
+        jmp_buf jb;
+        void *saved = cx_sfinae;
+        struct parse_state *st = parse_save();
+        if (setjmp(jb)) {
+            parse_restore(st);
+            cx_sfinae = saved;
+            return 0;
+        }
+        cx_sfinae = &jb;
         out[i] = default_arg(t, t->params, np, i, out, t->scope, cx_cur());
+        cx_sfinae = saved;
+        parse_restore(st);
         set[i] = 1;
     }
     *outp = out;
@@ -961,10 +1024,43 @@ struct cclass *class_instance(struct ctemplate *t, struct ctarg *args,
     return c;
 }
 
+/* Partial specialization p's pattern with its parameters bound: the
+ * arguments a? (Read again from its tokens; a substitution failure is no
+ * match.) */
+static int pattern_substitutes(struct cpartial *p, struct ctarg *bound,
+                               struct ctarg *a, int na, struct ctemplate *t)
+{
+    jmp_buf jb;
+    void *saved = cx_sfinae;
+    struct parse_state *st = parse_save();
+    if (setjmp(jb)) {
+        parse_restore(st);
+        cx_sfinae = saved;
+        return 0;
+    }
+    cx_sfinae = &jb;
+    cx_scope = tparam_scope(p->params, p->nparams, bound, p->nparams,
+                            t->scope);
+    cx_pos = p->pat_tok;
+    cx_half_gt = 0;
+    cx_pattern = 0;
+    cx_in_targs = 0;
+    struct ctarg *sub;
+    int ns = parse_template_args(t, &sub);
+    cx_sfinae = saved;
+    parse_restore(st);
+    struct ctarg *full = fit_args(t, t->params, t->nparams, sub, ns,
+                                  t->scope, cx_cur());
+    int nf = t->nparams, nb = na;
+    struct ctarg *ff = flatten(full, &nf);
+    struct ctarg *af = flatten(a, &nb);
+    return args_same(ff, nf, af, nb);
+}
+
 /* Does partial specialization p's pattern match arguments a (np of p's
- * parameters bound into out)? */
+ * parameters bound into out)? t: its template (NULL when ordering). */
 static int partial_matches(struct cpartial *p, struct ctarg *a, int na,
-                           struct ctarg **bound)
+                           struct ctarg **bound, struct ctemplate *t)
 {
     int np = p->nparams;
     struct ctarg *out = xcalloc((size_t)(np ? np : 1), sizeof *out);
@@ -972,13 +1068,18 @@ static int partial_matches(struct cpartial *p, struct ctarg *a, int na,
     int nP = p->npattern;
     struct ctarg *pf = flatten(p->pattern, &nP);
     struct ctarg *af = flatten(a, &na);
-    int saved = deduce_exact;
+    int saved = deduce_exact, saved_def = deduce_deferred;
     deduce_exact = 1;
+    deduce_deferred = 0;
     int ok = deduce_seq(pf, nP, af, na, out, set, np);
+    int deferred = deduce_deferred;
     deduce_exact = saved;
+    deduce_deferred = saved_def;
     for (int i = 0; ok && i < np; i++)
         ok = set[i] || p->params[i].pack;
     *bound = out;
+    if (ok && deferred && p->pat_tok > 0 && t)
+        ok = pattern_substitutes(p, out, a, na, t);
     return ok;
 }
 
@@ -987,7 +1088,7 @@ static int partial_matches(struct cpartial *p, struct ctarg *a, int na,
 static int partial_at_least(struct cpartial *a, struct cpartial *b)
 {
     struct ctarg *bound;
-    return partial_matches(b, a->pattern, a->npattern, &bound);
+    return partial_matches(b, a->pattern, a->npattern, &bound, NULL);
 }
 
 /* Are partial specialization p's constraints satisfied, its parameters
@@ -1028,7 +1129,7 @@ static struct cpartial *match_partial(struct ctemplate *t, struct ctarg *a,
     struct ctarg *mb[64];
     int n = 0;
     for (struct cpartial *p = t->partials; p && n < 64; p = p->next)
-        if (partial_matches(p, a, t->nparams, &mb[n]) &&
+        if (partial_matches(p, a, t->nparams, &mb[n], t) &&
             partial_constraints(p, mb[n], t))
             m[n++] = p;
     if (n == 0)
@@ -1095,8 +1196,12 @@ void cx_inst_notes(void)
 
 void class_ensure(struct cclass *c)
 {
-    if (!c->inst_pending)
+    if (!c->inst_pending) {
+        if (!c->complete && !c->defining && c->name && c->owner &&
+            c->owner->k == SC_CLASS)
+            member_class_from_outdef(c);
         return;
+    }
     struct ctemplate *t = c->tmpl;
     struct ctarg *bound = NULL;
     struct cpartial *p = match_partial(t, c->targs, &bound);
