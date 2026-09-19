@@ -38,6 +38,7 @@ SRCS := \
 	src/ir/irgen.c \
 	src/opt/opt.c \
 	src/debug/dwarf.c \
+	src/debug/eh.c \
 	src/elf/write.c \
 	src/arch/target.c \
 	src/arch/code.c \

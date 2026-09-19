@@ -46,7 +46,9 @@ enum reloc_kind {
     RK_ADR_HI21,  /* aarch64: adrp's 21-bit page-relative field */
     RK_ADD_LO12,  /* aarch64: the paired add's 12-bit in-page field */
     RK_ABS64,     /* an absolute 64-bit pointer slot in .data */
-    RK_ABS32      /* an absolute 32-bit field (DWARF section offsets) */
+    RK_ABS32,     /* an absolute 32-bit field (DWARF section offsets) */
+    RK_DATA_PREL32 /* a 32-bit field holding target - its own address
+                   * (unwind tables' pointers) */
 };
 
 /* The ELF relocation type for this kind on this target, or -1 if the kind

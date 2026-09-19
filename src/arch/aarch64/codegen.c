@@ -604,8 +604,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     f->code_off = t->len;
 
     a64_prologue(t, fr.size);
+    /* for the unwind tables: stp x29, x30 ends at +4, mov x29, sp at +8 */
+    f->cfi_push = 4;
+    f->cfi_frame = 8;
+    f->cfi_nsaved = 0;
     if (fn->has_alloca) {
         a64_str(t, A64_FBREG, A64_SP, fr.fb_save, 8);
+        f->cfi_nsaved = 1;
+        f->cfi_reg[0] = 19;
+        f->cfi_off[0] = fr.fb_save - fr.size - 16;  /* the CFA is x29+16 */
+        f->cfi_saved_at = t->len - f->code_off;
         a64_add_imm(t, A64_FBREG, A64_SP, 0, 8);     /* mov x19, sp */
         g_fb = A64_FBREG;
     }

@@ -1519,10 +1519,22 @@ static void gen_func(struct ir_func *fn, struct code *text,
     f->code_off = text->len;
 
     x86_prologue(text, frame);
+    /* for the unwind tables: push rbp ends at +1, mov rbp,rsp at +4 */
+    f->cfi_push = 1;
+    f->cfi_frame = 4;
     /* -O2: preserve the callee-saved registers the allocator uses (this
      * function is responsible for them across its own body and its callers). */
     for (int k = 0; k < nsave; k++)
         x86_store_mem_reg(text, REG_RBP, save_base + k * 8, used_callee[k], 8);
+    f->cfi_nsaved = nsave;
+    for (int k = 0; k < nsave; k++) {
+        /* DWARF numbers the registers rax rdx rcx rbx rsi rdi rbp rsp */
+        static const int dw[8] = { 0, 2, 1, 3, 7, 6, 4, 5 };
+        f->cfi_reg[k] = used_callee[k] < 8 ? dw[used_callee[k]]
+                                           : used_callee[k];
+        f->cfi_off[k] = save_base + k * 8 - 16;     /* the CFA is rbp+16 */
+    }
+    f->cfi_saved_at = text->len - f->code_off;
     /* Variadic: spill the whole argument register file into the save area
      * FIRST, before the parameter pass below uses rcx/rax as scratch and
      * so clobbers the vararg registers. Storing a register does not alter

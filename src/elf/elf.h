@@ -107,6 +107,7 @@ typedef struct {
  * materialises a symbol's address, and an absolute 64-bit data slot. */
 #define R_AARCH64_ABS64              257
 #define R_AARCH64_ABS32              258
+#define R_AARCH64_PREL32             261
 #define R_AARCH64_ADR_PREL_PG_HI21   275
 #define R_AARCH64_ADD_ABS_LO12_NC    277
 #define R_AARCH64_CALL26             283
@@ -152,6 +153,7 @@ typedef struct {
 #define SHT_STRTAB    3
 #define SHT_RELA      4
 #define SHT_NOBITS    8
+#define SHT_X86_64_UNWIND 0x70000001   /* x86-64 psABI: .eh_frame's type */
 
 /* sh_flags */
 #define SHF_WRITE     0x1

@@ -15,6 +15,7 @@
 #include "../cpp/cpp.h"
 #include "../cxx/translate.h"
 #include "../debug/dwarf.h"
+#include "../debug/eh.h"
 #include "../arch/predef.h"
 #include "../arch/x86_64/as.h"
 #include "../elf/write.h"
@@ -145,6 +146,12 @@ static int no_sse;
 
 /* The source is C++ (-x c++, or a C++ suffix): it is lowered to C first. */
 static int lang_cxx;
+
+/* Unwind tables (.eh_frame), so a C++ exception can unwind through the
+ * unit's functions: always for C++; for C on -funwind-tables,
+ * -fasynchronous-unwind-tables or -fexceptions (-1: not asked either
+ * way), off by default so C output stays as it was. */
+static int want_unwind = -1;
 
 /* --emit-c: print the C a C++ unit lowers to, instead of compiling it. */
 static int emit_c_only;
@@ -345,6 +352,11 @@ static int compile(const char *in, const char *out, int pp_only)
     struct dwarf_out dw = { { 0 }, { 0 }, 0, 0, 0 };
     if (want_debug)
         dwarf_emit(iu, in, &dw);
+    struct eh_out eh;
+    memset(&eh, 0, sizeof eh);
+    int unwind = want_unwind > 0 || (want_unwind < 0 && lang_cxx);
+    if (unwind)
+        eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
     struct elfw *w = elfw_new(target_elf_machine(target_get()));
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
@@ -380,6 +392,14 @@ static int compile(const char *in, const char *out, int pp_only)
             dwsec_ndx[s] = elfw_add_section(w, dwsec_name[s], SHT_PROGBITS, 0,
                                             dw.sec[s], (Elf64_Xword)dw.seclen[s],
                                             1);
+    /* the unwind tables (x86-64 gives .eh_frame its own section type) */
+    int eh_ndx = 0;
+    if (unwind)
+        eh_ndx = elfw_add_section(w, ".eh_frame",
+                                  ta == TARGET_AARCH64 ? SHT_PROGBITS
+                                                       : SHT_X86_64_UNWIND,
+                                  SHF_ALLOC, eh.frame,
+                                  (Elf64_Xword)eh.framelen, 8);
     elfw_add_symbol(w, path_basename(in), 0, 0,
                     ELF64_ST_INFO(STB_LOCAL, STT_FILE), SHN_ABS);
     int text_sym = elfw_add_symbol(w, "", 0, 0,
@@ -574,6 +594,14 @@ static int compile(const char *in, const char *out, int pp_only)
         dwarf_free(&dw);
     }
 
+    /* the unwind tables' pointers: PC-relative, into .text */
+    for (int i = 0; i < eh.nrelocs; i++)
+        elfw_add_rela(w, eh_ndx, (Elf64_Addr)eh.relocs[i].off, text_sym,
+                      target_reloc_type(ta, RK_DATA_PREL32),
+                      target_reloc_addend(ta, RK_DATA_PREL32,
+                                          eh.relocs[i].addend));
+    eh_free(&eh);
+
     int rc = elfw_write(w, out);
     elfw_free(w);
     return rc == 0 ? 0 : 1;
@@ -688,6 +716,14 @@ int main(int argc, char **argv)
             pp_only = 1;
         } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
+        } else if (strcmp(argv[i], "-funwind-tables") == 0 ||
+                   strcmp(argv[i], "-fasynchronous-unwind-tables") == 0 ||
+                   strcmp(argv[i], "-fexceptions") == 0) {
+            want_unwind = 1;
+        } else if (strcmp(argv[i], "-fno-unwind-tables") == 0 ||
+                   strcmp(argv[i], "-fno-asynchronous-unwind-tables") == 0 ||
+                   strcmp(argv[i], "-fno-exceptions") == 0) {
+            want_unwind = 0;
         } else if (strncmp(argv[i], "-O", 2) == 0) {
             /* -O / -O1 / -O2 / -O3 enable the optimizer (one level for now);
              * -O0 turns it off. Anything else after -O is an error. */

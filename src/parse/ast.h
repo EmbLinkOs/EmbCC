@@ -285,6 +285,13 @@ struct func {
     int used;             /* sema: at least one call resolves here */
     /* codegen bookkeeping: position inside .text (defined funcs only) */
     int code_off, code_len;
+    /* ... and what its prologue did, for the unwind tables (debug/eh.c):
+     * where (offsets into its code) the frame record was pushed and the
+     * frame register set, and the callee-saved registers it stores in its
+     * frame (DWARF numbers; slots relative to the CFA) */
+    int cfi_push, cfi_frame, cfi_saved_at, cfi_nsaved;
+    int cfi_reg[8];
+    long cfi_off[8];
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
 };
 
