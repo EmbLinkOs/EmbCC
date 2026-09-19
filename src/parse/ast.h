@@ -277,6 +277,8 @@ struct func {
     int is_static;
     int is_weak;          /* __attribute__((weak)) */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
+    int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
+                           * (a call of it needs no landing pad) */
     int is_varargs;       /* declared with a trailing ", ..." */
     int sret_first;       /* param 0 is the indirect-result pointer
                            * (embcc_sret; type.h) */

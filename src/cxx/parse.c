@@ -1497,8 +1497,7 @@ static void define_function(struct cfunc *f, struct cty *ft);
 static void skip_body(struct cfunc *f)
 {
     f->mi_tok = -1;
-    if (cx_kind() == TOK_CX_TRY)
-        cx_error(cx_cur(), "function-try-blocks are not supported yet (CX5)");
+    int fn_try = cx_accept(TOK_CX_TRY);    /* define_function sees it */
     if (cx_kind() == TOK_COLON) {
         f->mi_tok = cx_pos;
         cx_advance();
@@ -1519,6 +1518,10 @@ static void skip_body(struct cfunc *f)
         cx_error(cx_cur(), "expected a function body");
     f->body_tok = cx_pos;
     cx_skip_balanced();
+    while (fn_try && cx_accept(TOK_CX_CATCH)) {  /* the handlers */
+        cx_skip_balanced();
+        cx_skip_balanced();
+    }
     f->body_end = cx_pos;
 }
 
@@ -1679,8 +1682,15 @@ static void parse_meminit(struct meminit_raw *r)
 
 /* Parse a function's definition at the cursor (at `{` or a constructor's
  * `:`), with parameter types from ft (the definition's declarator). */
+static struct cstmt *parse_handlers(const struct ctok *at);
+
 static void define_function(struct cfunc *f, struct cty *ft)
 {
+    /* a function-try-block: `try` here, or just before a delayed body */
+    int fn_try = cx_accept(TOK_CX_TRY) ||
+                 (cx_pos > 0 && cx_toks[cx_pos - 1].t.kind == TOK_CX_TRY);
+    if (fn_try && !cx_exceptions)
+        cx_error(cx_cur(), "'try' with exceptions disabled (-fno-exceptions)");
     const struct ctok *at = cx_cur();
     if (f->defined)
         cx_error(at, "redefinition of '%s'", f->name);
@@ -1769,6 +1779,10 @@ static void define_function(struct cfunc *f, struct cty *ft)
     struct cscope *bs = scope_push(SC_BLOCK, NULL);
     f->body = parse_block_body(bs);
     scope_pop();
+    if (fn_try) {
+        /* a function-try-block's handlers, the parameters in scope */
+        f->fn_try = parse_handlers(at);
+    }
     scope_pop();
     mark_nrvo(f);
     cx_curfn = savefn;
@@ -2964,9 +2978,6 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                 if (!toplevel)
                     cx_error(cx_cur(), "a function definition is not "
                                        "allowed here");
-                if (cx_kind() == TOK_CX_TRY)
-                    cx_error(cx_cur(), "function-try-blocks are not "
-                                       "supported yet (CX5)");
                 f->def_scope = cx_scope;
                 define_function(f, t);
                 if (d.saved)
@@ -3122,11 +3133,19 @@ static struct cstmt *parse_try(const struct ctok *at)
     if (!cx_exceptions)
         cx_error(at, "'try' with exceptions disabled (-fno-exceptions)");
     cx_advance();
+    struct cstmt *body = parse_compound();
+    struct cstmt *s = parse_handlers(at);
+    s->body = body;
+    return s;
+}
+
+/* catch (T x) { } ...: a try's handlers (S_TRY, no body yet). */
+static struct cstmt *parse_handlers(const struct ctok *at)
+{
     struct cstmt *s = st_new(S_TRY);
     s->line = at->t.line;
     s->file = at->file;
     s->blk = cx_curblk;
-    s->body = parse_compound();
     int cap = 0;
     while (cx_kind() == TOK_CX_CATCH) {
         const struct ctok *hat = cx_cur();

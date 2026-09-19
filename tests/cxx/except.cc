@@ -3,7 +3,9 @@
 // order, catch (...); rethrow; try inside a handler; destructors of the
 // frames unwound, of temporaries, of a partly constructed object's
 // members (not of the object); new's storage freed when the constructor
-// throws; returning from try blocks and handlers.
+// throws; returning from try blocks and handlers; arrays destroyed element
+// by element; a local static retried after its initializer throws;
+// function-try-blocks; the noexcept operator.
 // expect-exit: 42
 #include <stdio.h>
 #include <string.h>
@@ -69,6 +71,29 @@ static int value_in_try(int k)
     try { if (k) throw k; return 5; } catch (int v) { return v * 2; }
 }
 
+static int built;
+struct E5 {
+    int id;
+    E5() : id(built++) { if (id == 3) throw id; char b[3] = { 'c', (char)('0' + id), 0 }; T(b); }
+    ~E5() { char b[3] = { 'd', (char)('0' + id), 0 }; T(b); }
+};
+static int tries;
+static int init_once() { if (tries++ == 0) throw 99; return 5; }
+static int get_static() { static int v = init_once(); return v; }
+
+struct M { int v; M(int x) : v(x) { if (x < 0) throw x; T("m"); } ~M() { T("~m"); } };
+struct W {
+    M a, b;
+    W(int x) try : a(1), b(x) { T("W"); } catch (int) { T("h"); }
+};
+static int ftry(int k) try { if (k) throw k; return 1; } catch (int e) { return e * 10; }
+
+struct NA { NA() {} NA(const NA &) {} NA(NA &&) noexcept {} ~NA() {} };
+struct NB { NA a; int x; };
+static void nothrow_fn() noexcept {}
+static void may_throw_fn() {}
+template <class U> U &&declval() noexcept;
+
 int main()
 {
     int got = 0;
@@ -92,6 +117,22 @@ int main()
     check("rethrow", rethrow_it() == 10);
     check("try inside a handler", in_handler() == 21);
     check("returning from try and handler", value_in_try(0) == 5 && value_in_try(4) == 8);
+    trail[0] = 0;
+    try { E5 arr[5]; (void)arr; } catch (int v) { check("an array's built elements destroyed", v == 3 && strcmp(trail, "c0c1c2d2d1d0") == 0); }
+    trail[0] = 0;
+    built = 0;
+    try { E5 *p = new E5[5]; (void)p; } catch (int v) { check("... and new[]'s", v == 3 && strcmp(trail, "c0c1c2d2d1d0") == 0); }
+    int first = 0;
+    try { get_static(); } catch (int v) { first = v; }
+    check("a local static retried after a throw", first == 99 && get_static() == 5 && tries == 2);
+    trail[0] = 0;
+    try { W w(-5); } catch (int e) { check("a constructor's function-try-block rethrows", e == -5 && strcmp(trail, "m~mh") == 0); }
+    check("a function's function-try-block", ftry(0) == 1 && ftry(4) == 40);
+    check("the noexcept operator",
+          noexcept(nothrow_fn()) && !noexcept(may_throw_fn()) && noexcept(1 + 2) &&
+          !noexcept(throw 1) && !noexcept(NA(declval<const NA &>())) &&
+          noexcept(NA(declval<NA &&>())) && !noexcept(NB(declval<const NB &>())) &&
+          noexcept(NB(declval<NB &&>())) && !noexcept(new int));
     printf("%s\n", fails ? "FAILED" : "all ok");
     return fails ? 1 : 42;
 }

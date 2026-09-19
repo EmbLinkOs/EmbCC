@@ -3132,6 +3132,7 @@ static void merge_decls(struct unit *u)
         canon->is_weak |= f->is_weak;  /* weak on any declaration is weak */
         canon->sret_first |= f->sret_first;
         canon->is_noreturn |= f->is_noreturn;  /* noreturn on any wins */
+        canon->is_nothrow |= f->is_nothrow;
         f->absorbed = 1;
     }
 }

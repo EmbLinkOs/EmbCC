@@ -487,6 +487,8 @@ static char *ev(struct cexpr *e);
 static char *elv(struct cexpr *e);
 static char *eaddr(struct cexpr *e);
 static const char *vtt_arg(struct cfunc *f, int baseobj);
+static char *elem_init(const char *arr, int u, struct cty *el,
+                       struct cexpr *init);
 static void einit(struct sb *b, const char *dest, struct cty *t,
                   struct cexpr *init);
 
@@ -846,12 +848,10 @@ static char *new_text(struct cexpr *e)
                   e->cookie - 8, n);
     sb_printf(&b, "%s = (%s)(%s + %ldUL); ", cdecl(pt, p), ctype(pt), m,
               e->cookie);
-    if (e->init) {
-        struct sb s = { 0, 0, 0 };
-        einit(&s, cx_fmt("%s[__cx_i%d]", p, u), el, e->init);
+    if (e->init)
         sb_printf(&b, "for (unsigned long __cx_i%d = 0; __cx_i%d < %s; "
-                      "__cx_i%d++) { %s} ", u, u, n, u, sb_str(&s));
-    }
+                      "__cx_i%d++) { %s} ", u, u, n, u,
+                  elem_init(p, u, el, e->init));
     sb_printf(&b, "%s; })", p);
     return b.p;
 }
@@ -1248,6 +1248,23 @@ static char *eaddr(struct cexpr *e)
 
 /* Initialize the object named by the C lvalue `dest` (of type t) from
  * init, as statements. A reference's dest is its pointer. */
+/* The body of a loop building element __cx_i<u> of array `arr` (a
+ * pointer to its first element) from init: if a constructor throws, the
+ * elements already built are destroyed, last first. */
+static char *elem_init(const char *arr, int u, struct cty *el,
+                       struct cexpr *init)
+{
+    struct sb s = { 0, 0, 0 };
+    char *undo = eh_on ? destroy_text(cx_fmt("&%s[__cx_i%d]", arr, u), el)
+                       : NULL;
+    int lp = undo ? eh_open(&s) : -1;
+    einit(&s, cx_fmt("%s[__cx_i%d]", arr, u), el, init);
+    if (lp >= 0)
+        eh_close(&s, lp, cx_fmt("while (__cx_i%d > 0) { __cx_i%d--; %s }",
+                                u, u, undo));
+    return s.p ? s.p : "";
+}
+
 static void einit(struct sb *b, const char *dest, struct cty *t,
                   struct cexpr *init)
 {
@@ -1278,12 +1295,11 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
                 el = el->to;
             }
             int u = cx_uid();
-            struct sb s = { 0, 0, 0 };
-            einit(&s, cx_fmt("__cx_a%d[__cx_i%d]", u, u), el, init->init);
+            char *body = elem_init(cx_fmt("__cx_a%d", u), u, el, init->init);
             sb_printf(b, "{ %s = (%s)&(%s); for (unsigned long __cx_i%d = 0; "
                          "__cx_i%d < %ldUL; __cx_i%d++) { %s} } ",
                       cdecl(ct_ptr(el), cx_fmt("__cx_a%d", u)),
-                      ctype(ct_ptr(el)), dest, u, u, n, u, sb_str(&s));
+                      ctype(ct_ptr(el)), dest, u, u, n, u, body);
             return;
         }
         {
@@ -1621,8 +1637,12 @@ static void emit_local_static(struct sb *b, struct cstmt *s)
     need_guard = 1;
     sb_printf(b, "if (*(volatile char *)&%s == 0 && __cxa_guard_acquire(&%s)) "
                  "{\n", guard, guard);
+    /* an initializer that throws leaves it to be tried again */
+    int lp = dyn && eh_on ? eh_open(b) : -1;
     if (dyn)
         stmt_init(b, v->cname, t, ini);
+    if (lp >= 0)
+        eh_close(b, lp, cx_fmt("__cxa_guard_abort(&%s);", guard));
     if (dtor) {
         struct cfunc *d = class_dtor((t->k == CT_ARRAY ? t->to : t)->cls);
         if (t->k == CT_CLASS && d) {
@@ -1769,10 +1789,22 @@ static const char *catch_ti(struct cty *t)
  * handler by the selector — the type table index of the one the
  * personality routine matched — or hands on. A handler is a block that
  * begins the catch and whose cleanup ends it (on every way out). */
+static void emit_handlers(struct sb *b, struct cstmt *s, int lp,
+                          int rethrow);
+
 static void emit_try(struct sb *b, struct cstmt *s)
 {
     int lp = eh_open(b);
     emit_stmt(b, s->body);
+    emit_handlers(b, s, lp, 0);
+}
+
+/* Close a try's region lp with its landing pad: the handlers (each
+ * rethrowing at its end when `rethrow`: a constructor's or destructor's
+ * function-try-block), else hand on. */
+static void emit_handlers(struct sb *b, struct cstmt *s, int lp,
+                          int rethrow)
+{
     neh_lp--;
     sb_put(b, "} __builtin_eh_landing (__cx_exc, __cx_sel");
     for (int i = 0; i < s->nhandlers; i++)
@@ -1787,6 +1819,9 @@ static void emit_try(struct sb *b, struct cstmt *s)
         int mark = ncleans;
         push_clean(b, "((void (*)(void))__cxa_end_catch)();", h->body, 0);
         emit_block_items(b, h->body->body);
+        if (rethrow)
+            sb_put(b, "((void (*)(void))__cxa_rethrow)(); "
+                      "__builtin_unreachable();\n");
         close_cleans(b, mark);
         sb_put(b, "}\n");
     }
@@ -2043,7 +2078,9 @@ static void emit_prototype(struct cfunc *f)
     /* weak goes on definitions only: a weak declaration would let a
      * missing body link as address 0 */
     const char *st = fn_internal(f) ? "static " : "";
-    const char *sec = "";
+    /* one that cannot throw: its calls need no landing pads */
+    const char *sec = eh_on && func_nothrow(f) ? "__attribute__((nothrow)) "
+                                               : "";
     if (f->is_ctor || f->is_dtor) {
         sb_printf(&out_decls, "%s%s%s;\n", st, sec,
                   func_header(f, fn_name(f, 1), 0));
@@ -2159,6 +2196,11 @@ static void emit_function(struct cfunc *f)
     int nothrow_lp = -1;
     if (eh_on && (f->type->nothrow || f->is_dtor))
         nothrow_lp = eh_open(&b);
+    /* a function-try-block: the whole function (a constructor's bases and
+     * members too) in the try's region */
+    int try_lp = -1;
+    if (eh_on && f->fn_try)
+        try_lp = eh_open(&b);
     if (f->is_ctor) {
         if (!f->delegate && vtt && f->vbaseinit) {
             /* only the most derived class builds the virtual bases, in
@@ -2276,6 +2318,8 @@ static void emit_function(struct cfunc *f)
             sb_put(&b, "}\n");
         }
     }
+    if (try_lp >= 0)
+        emit_handlers(&b, f->fn_try, try_lp, special);
     /* flowing off the end of a non-void function is undefined — and a
      * body ending in a throw does not (to C's eye) return */
     if (!special && f->type->to->k != CT_VOID &&
@@ -2852,7 +2896,8 @@ char *cx_emit_unit(void)
                      "int __cxa_atexit(void (*)(void *), void *, void *);\n");
     if (need_guard)
         sb_put(&out, "int __cxa_guard_acquire(long long *);\n"
-                     "void __cxa_guard_release(long long *);\n");
+                     "void __cxa_guard_release(long long *);\n"
+                     "void __cxa_guard_abort(long long *);\n");
     /* __builtin_memset/memcpy are the libc functions to the C side, which
      * wants them declared */
     const char *parts[] = { sb_str(&out_code), sb_str(&out_vars),

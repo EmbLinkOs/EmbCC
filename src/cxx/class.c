@@ -516,6 +516,77 @@ static int copy_kind(struct cfunc *f, struct cclass *c)
     return move ? SP_MOVE_ASSIGN : SP_COPY_ASSIGN;
 }
 
+/* Can calling f throw? Not when it is noexcept, a destructor (implicitly
+ * noexcept), or an implicit (or defaulted) special member all of whose
+ * parts' own cannot (15.4, [except.spec]). */
+static int parts_nothrow(struct cclass *c, int sp, int depth);
+static struct cfunc *assign_set(struct cclass *c);
+
+static int special_nothrow(struct cclass *c, int sp, int depth)
+{
+    if (!c || depth > 32)
+        return 0;
+    class_ensure(c);
+    if (sp == SP_DEFAULT ? c->trivial_default
+        : sp == SP_COPY || sp == SP_MOVE ? c->trivial_copy
+        : c->trivial_assign)
+        return 1;
+    struct cfunc *set = sp == SP_COPY_ASSIGN || sp == SP_MOVE_ASSIGN
+                        ? assign_set(c) : c->ctors;
+    struct cfunc *found = NULL, *copy = NULL;
+    for (struct cfunc *f = set; f; f = f->next) {
+        int k = sp == SP_DEFAULT
+                ? (f->type->np == 0 || (f->defargs && f->defargs[0])
+                   ? SP_DEFAULT : 0)
+                : copy_kind(f, c);
+        if (k == sp)
+            found = f;
+        if (k == SP_COPY || k == SP_COPY_ASSIGN)
+            copy = f;
+    }
+    if (!found && (sp == SP_MOVE || sp == SP_MOVE_ASSIGN))
+        found = copy;                 /* no move: the copy is used */
+    if (!found)
+        return sp == SP_DEFAULT && !c->user_ctors;
+    if (found->type->nothrow)
+        return 1;
+    if (found->is_implicit || found->is_defaulted)
+        return found->trivial || parts_nothrow(c, sp, depth + 1);
+    return 0;
+}
+
+static int parts_nothrow(struct cclass *c, int sp, int depth)
+{
+    for (int i = 0; i < c->nbases; i++)
+        if (!special_nothrow(c->bases[i].cls, sp, depth))
+            return 0;
+    for (int i = 0; i < c->nvbases; i++)
+        if (!special_nothrow(c->vbases[i].cls, sp, depth))
+            return 0;
+    for (int i = 0; i < c->nfields; i++) {
+        struct cty *t = base_elem(c->fields[i]->type);
+        if (t->k == CT_CLASS && !ct_is_ref(c->fields[i]->type) &&
+            !special_nothrow(t->cls, sp, depth))
+            return 0;
+    }
+    return 1;
+}
+
+int func_nothrow(struct cfunc *f)
+{
+    if (!f)
+        return 0;
+    if (f->type->nothrow || f->is_dtor)
+        return 1;
+    if (f->cls && (f->is_implicit || f->is_defaulted)) {
+        int sp = f->special ? f->special : copy_kind(f, f->cls);
+        if (!sp && f->is_ctor && f->type->np == 0)
+            sp = SP_DEFAULT;
+        return f->trivial || (sp && parts_nothrow(f->cls, sp, 0));
+    }
+    return 0;
+}
+
 int class_indirect(const struct cty *t)
 {
     if (t->k != CT_CLASS)

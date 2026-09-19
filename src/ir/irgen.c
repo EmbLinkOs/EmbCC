@@ -1711,13 +1711,24 @@ void ir_add_csite(struct ir_func *fn, int start, int end, int region)
     fn->ncsites++;
 }
 
-/* Each call's innermost region (regions are numbered outermost first). */
+/* Each call's innermost region (regions are numbered outermost first) —
+ * a call that can throw: not of a nothrow function. When no call in any
+ * region can, the function has no landing pads after all (the pads'
+ * code is unreachable), and is compiled as any other. */
 static void mark_eh_calls(struct ir_func *fn)
 {
+    int any = 0;
     for (int r = 0; r < fn->neh; r++)
-        for (int n = fn->eh[r].lo; n < fn->eh[r].hi; n++)
-            if (fn->ins[n].op == IR_CALL)
-                fn->ins[n].eh_region = r + 1;
+        for (int n = fn->eh[r].lo; n < fn->eh[r].hi; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_CALL ||
+                (!i->indirect && i->callee && i->callee->is_nothrow))
+                continue;
+            i->eh_region = r + 1;
+            any = 1;
+        }
+    if (!any)
+        fn->neh = 0;
 }
 
 static void gen_stmt(struct ir_func *fn, struct stmt *s,

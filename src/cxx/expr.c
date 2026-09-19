@@ -17,6 +17,42 @@
 
 static struct cexpr *parse_throw(void);
 
+/* Can evaluating e throw ([except.spec]: a potentially-throwing
+ * expression)? A throw, a call of a function not known not to, new, a
+ * dynamic_cast to a reference, typeid of a polymorphic glvalue. */
+static int expr_nothrow(struct cexpr *e)
+{
+    if (!e)
+        return 1;
+    switch (e->k) {
+    case E_THROW: case E_ICALL: case E_PMCALL: case E_STMTEXPR:
+        return 0;
+    case E_CALL: case E_CONSTRUCT:
+        if (e->fn && !func_nothrow(e->fn))
+            return 0;
+        break;
+    case E_NEW:
+        if (!func_nothrow(e->fn) || !expr_nothrow(e->init) ||
+            !expr_nothrow(e->count))
+            return 0;
+        break;
+    case E_DYNCAST:
+        if (e->zero)
+            return 0;
+        break;
+    case E_TYPEID:
+        if (e->na)
+            return 0;
+        break;
+    default:
+        break;
+    }
+    for (int i = 0; i < e->na; i++)
+        if (e->a && !expr_nothrow(e->a[i]))
+            return 0;
+    return expr_nothrow(e->obj);
+}
+
 struct cexpr *ex_new(enum cexpr_kind k, struct cty *t, int vc)
 {
     struct cexpr *e = xcalloc(1, sizeof *e);
@@ -3604,11 +3640,12 @@ static struct cexpr *parse_unary(void)
         }
         break;
     case TOK_CX_NOEXCEPT: {
+        /* noexcept(e): e (not evaluated) can throw nothing */
         cx_advance();
         cx_expect(TOK_LPAREN, "'(' after noexcept");
-        expr_parse();
+        struct cexpr *e = expr_parse();
         cx_expect(TOK_RPAREN, "')'");
-        return ex_int(0, ct_basic(CT_BOOL));
+        return ex_int(expr_nothrow(e), ct_basic(CT_BOOL));
     }
     case TOK_KW_REAL: case TOK_KW_IMAG:
         cx_error(at, "__real__/__imag__ are not supported in C++ yet");

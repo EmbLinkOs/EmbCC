@@ -507,6 +507,8 @@ struct cfunc {
     struct cexpr *delegate;
     int body_tok, body_end;   /* a delayed in-class body: token range */
     int mi_tok;               /* ... and its mem-initializer list (or -1) */
+    struct cstmt *fn_try;     /* a function-try-block: its handlers (S_TRY;
+                               * its body is the function's) */
     struct cscope *def_scope; /* where a delayed body is parsed */
     int line;
     const char *file;
@@ -857,6 +859,7 @@ int class_rtti_flags(struct cclass *c);
 int class_base_path(struct cclass *c, struct cclass *b, struct cclass **vb,
                     long *off);
 int class_abstract(struct cclass *c);   /* a slot's final overrider is pure */
+int func_nothrow(struct cfunc *f);      /* a call of f cannot throw */
 
 /* Aggregate initialization of t from a braced list. */
 struct cexpr *init_aggregate(struct cty *t, struct cexpr *list,

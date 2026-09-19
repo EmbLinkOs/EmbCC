@@ -239,8 +239,8 @@ xs...)...)`); function parameter packs named in a dependent signature
 Not yet with virtual bases: covariant return types that need a thunk to
 adjust the result.
 
-**CX5 in progress** (September 2026): exceptions, interchangeable with
-g++'s, built in three layers.
+**CX5 done** (September 2026): exceptions, interchangeable with g++'s,
+built in three layers.
 
 1. *Unwind tables* (debug/eh.c): the code generators record what each
    prologue did and every function gets a CIE/FDE in `.eh_frame` — always
@@ -269,11 +269,21 @@ way across the compilers (EmbCC's exception type caught by g++'s code,
 g++'s by EmbCC's, destructors of both sides' frames run);
 tests/golden/cxx-noexcept.sh ends in std::terminate as it must.
 
-Not yet: function-try-blocks; the `noexcept` operator (always false, which
-is safe: move_if_noexcept then copies); partial destruction of arrays of
-objects and of `new T[n]`; a guarded local static whose initializer throws
-(`__cxa_guard_abort`); and optimization — a function with a landing pad is
-compiled in the plain memory model (the optimizer and register allocation
-do not yet model the edges into pads).
+Also: function-try-blocks (a constructor's or destructor's handler
+rethrows at its end, after the bases and members are destroyed), the
+`noexcept` operator (a call is potentially throwing unless its function is
+noexcept, a destructor, or an implicit special member whose parts'
+counterparts are not — so `move_if_noexcept` chooses as g++'s does),
+arrays of objects and `new T[n]` destroyed element by element when one
+throws, and a local static retried after its initializer throws
+(`__cxa_guard_abort`).
 
-Next: the rest of CX5, then CX6.
+Optimization: a function whose landing pads guard a call that can throw is
+compiled in the plain memory model — the optimizer and register allocation
+do not yet model the edges from calls into pads. Calls of functions that
+cannot throw (noexcept ones, destructors; their prototypes say
+`__attribute__((nothrow))` to EmbCC's C) need no pad, and a function none
+of whose guarded calls can throw has no pads at all and is optimized as
+any other.
+
+Next: CX6.
