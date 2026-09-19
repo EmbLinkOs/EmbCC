@@ -1353,7 +1353,7 @@ char *cpp_process(const char *path, const char *src,
     if (predef_is_cxx()) {
         /* the C++ features EmbCC implements (docs/CXX.md), at the
          * values g++ gives the standard they come from; those it does
-         * not yet (concepts, <=>, coroutines, designated initializers,
+         * not yet (concepts, coroutines, designated initializers,
          * CTAD, consteval, aligned new, ...) are left undefined, so
          * libstdc++ takes its paths without them */
         static const char *const feats[] = {
@@ -1365,6 +1365,7 @@ char *cpp_process(const char *path, const char *src,
             "__cpp_alias_templates 200704L", "__cpp_attributes 200809L",
             "__cpp_binary_literals 201304L",
             "__cpp_capture_star_this 201603L", "__cpp_char8_t 202207L",
+            "__cpp_concepts 201907L",
             "__cpp_conditional_explicit 201806L",
             "__cpp_constexpr 201603L", "__cpp_decltype 200707L",
             /* constexpr destructors, and std::construct_at (which C++20
@@ -1379,6 +1380,7 @@ char *cpp_process(const char *path, const char *src,
             "__cpp_generic_lambdas 201304L",
             "__cpp_guaranteed_copy_elision 201606L",
             "__cpp_hex_float 201603L", "__cpp_if_constexpr 201606L",
+            "__cpp_impl_three_way_comparison 201907L",
             "__cpp_init_captures 201304L",
             "__cpp_initializer_lists 200806L",
             "__cpp_inline_variables 201606L", "__cpp_lambdas 200907L",

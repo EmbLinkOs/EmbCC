@@ -400,7 +400,9 @@ static void need_body(struct cfunc *f)
     if (f->is_deleted || f->is_builtin)
         no();
     if (!f->defined) {
-        if (f->is_implicit || f->is_defaulted)
+        if (f->is_defaulted && !f->special && is_defaultable_cmp(f))
+            define_defaulted_cmp(f);
+        else if (f->is_implicit || f->is_defaulted)
             define_implicit(f);
         else
             func_ensure_body(f);
@@ -605,6 +607,11 @@ static void init_at(struct cptr at, struct cty *t, struct cexpr *init)
             no();
         long whole = ct_size(lt);
         zero_bytes(at, whole);
+        if (init->binit)
+            for (int i = 0; i < lt->cls->nbases; i++)
+                if (init->binit[i])
+                    init_at(at_off(at, lt->cls->bases[i].off),
+                            ct_class(lt->cls->bases[i].cls), init->binit[i]);
         for (int i = 0; i < init->na; i++) {
             if (!init->a[i])
                 continue;
@@ -1145,7 +1152,29 @@ static struct cptr lv(struct cexpr *e)
 }
 
 /* the value of e (a class or array's: the object) */
+static struct cval ev_(struct cexpr *e);
+
+/* (nesting bounded: a runaway evaluation is simply not a constant) */
 static struct cval ev(struct cexpr *e)
+{
+    static int nest;
+    if (nest > 4000)
+        no();
+    nest++;
+    jmp_buf jb, *saved = fail_to;
+    if (setjmp(jb)) {
+        nest--;
+        fail_to = saved;
+        no();
+    }
+    fail_to = &jb;
+    struct cval v = ev_(e);
+    fail_to = saved;
+    nest--;
+    return v;
+}
+
+static struct cval ev_(struct cexpr *e)
 {
     step();
     switch (e->k) {
@@ -1268,6 +1297,20 @@ static struct cval ev(struct cexpr *e)
         struct cval a = ev(e->a[0]);
         struct cval b = ev(e->a[1]);
         return arith(e->op, a, b, e->a[0]->t, e->a[1]->t, e->t);
+    }
+    case E_CMP3: {
+        struct cval a = ev(e->a[0]);
+        struct cval b = ev(e->a[1]);
+        struct cty *ot = e->a[0]->t, *bt = ct_basic(CT_BOOL);
+        long v = truth(arith(TOK_LT, a, b, ot, ot, bt)) ? -1
+                 : truth(arith(TOK_GT, a, b, ot, ot, bt)) ? 1
+                 : !e->ival || truth(arith(TOK_EQEQ, a, b, ot, ot, bt)) ? 0
+                 : -128;
+        struct cptr p;
+        memset(&p, 0, sizeof p);
+        p.blk = new_blk(ct_size(e->t));
+        p.blk->b[0] = (unsigned char)(signed char)v;
+        return v_obj(p);
     }
     case E_ASSIGN: {
         struct cptr at;

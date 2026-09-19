@@ -1423,9 +1423,14 @@ void class_ensure(struct cclass *c)
             member_class_from_outdef(c);
         return;
     }
+    if (c->inst_pending == 2)
+        return;             /* choosing its partial specialization: its
+                             * constraints asked for it (incomplete) */
     struct ctemplate *t = c->tmpl;
     struct ctarg *bound = NULL;
+    c->inst_pending = 2;
     struct cpartial *p = match_partial(t, c->targs, &bound);
+    c->inst_pending = 1;
     if (!p && t->head_end < 0)
         return;                        /* declared, not (yet) defined */
     c->inst_pending = 0;
@@ -1493,6 +1498,8 @@ void func_deduce_return(struct cfunc *f, const struct ctok *at)
 {
     if (!ct_has_auto(f->type->to))
         return;
+    if (!f->defined && f->is_defaulted && is_defaultable_cmp(f))
+        define_defaulted_cmp(f);           /* auto operator<=> = default */
     if (!f->defined && !f->deducing) {
         f->deducing = 1;
         if (!f->lazy && f->body_tok >= 0 && f->def_scope)
@@ -1510,6 +1517,10 @@ void func_ensure_body(struct cfunc *f)
 {
     if (f->defined || f->is_deleted || f->tmpl)
         return;
+    if (f->is_defaulted && !f->special && is_defaultable_cmp(f)) {
+        define_defaulted_cmp(f);
+        return;
+    }
     if (!f->lazy) {
         /* a member of an instance, defined outside its class */
         if (f->cls && !f->is_implicit && !f->is_defaulted &&

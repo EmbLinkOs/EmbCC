@@ -8,6 +8,7 @@
 #include "cxx.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../arch/target.h"
@@ -31,8 +32,25 @@ static void put(struct mbuf *m, const char *s)
     m->len += n;
 }
 
+/* An unnamed class's or enum's name (its number in its scope, from 1),
+ * written Ut_, Ut0_, Ut1_, ... (5.1.6's <unnamed-type-name>) */
+static const char *unnamed(int no)
+{
+    return cx_fmt("\3%d", no);
+}
+
 static void put_source(struct mbuf *m, const char *id)
 {
+    if (id[0] == '\3') {
+        int no = atoi(id + 1);
+        char u[24];
+        if (no <= 1)
+            snprintf(u, sizeof u, "Ut_");
+        else
+            snprintf(u, sizeof u, "Ut%d_", no - 2);
+        put(m, u);
+        return;
+    }
     char b[16];
     snprintf(b, sizeof b, "%zu", strlen(id));
     put(m, b);
@@ -115,6 +133,8 @@ static const char *scope_ident(struct cscope *s)
 {
     if (s->k == SC_NAMESPACE && s->anon)
         return "_GLOBAL__N_1";
+    if (s->k == SC_CLASS && !s->name && s->cls)
+        return unnamed(s->cls->unnamed_no);
     return s->name;
 }
 
@@ -356,7 +376,8 @@ static int class_steps(struct cclass *c, struct step *st, int *std)
         }
     }
     const char *prev = n ? st[n - 1].key : *std ? "St" : "";
-    return add_step(st, n, prev, c->name ? c->name : "._anon", c->targs,
+    return add_step(st, n, prev, c->name ? c->name : unnamed(c->unnamed_no),
+                    c->targs,
                     c->ntargs, c->tmpl != NULL);
 }
 
@@ -385,7 +406,8 @@ static void put_enum_name(struct mbuf *m, struct cenum *en)
     int std;
     int n = scope_steps(en->owner, st, &std);
     const char *prev = n ? st[n - 1].key : std ? "St" : "";
-    n = add_step(st, n, prev, en->name ? en->name : "._anon", NULL, 0, 0);
+    n = add_step(st, n, prev, en->name ? en->name : unnamed(en->unnamed_no),
+                 NULL, 0, 0);
     put_name(m, st, n, std, 0);
 }
 
@@ -473,8 +495,8 @@ static const char *type_key(struct cty *t)
     case CT_CLASS:
         return class_key(t->cls);
     case CT_ENUM:
-        return type_name_key(t->en->owner,
-                             t->en->name ? t->en->name : "._anon");
+        return type_name_key(t->en->owner, t->en->name ? t->en->name
+                                           : unnamed(t->en->unnamed_no));
     case CT_TPARAM:
         return cx_fmt("T%ld_", t->n);
     case CT_TID: {

@@ -998,6 +998,10 @@ static void define_defaulted(struct cfunc *f)
 {
     if (f->defined)
         return;
+    if (!f->special && is_defaultable_cmp(f)) {
+        define_defaulted_cmp(f);
+        return;
+    }
     if (!f->special)
         cx_error(cx_cur(), "'%s' cannot be defaulted", f->name);
     define_implicit(f);

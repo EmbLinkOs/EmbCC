@@ -1154,6 +1154,21 @@ static char *ev(struct cexpr *e)
         return cx_fmt("(%s %s %s)", ev(e->a[0]), binop_text(e->op),
                       ev(e->a[1]));
     }
+    case E_CMP3: {
+        /* each operand once; the category object's one byte (_M_value:
+         * less -1, equivalent 0, greater 1, unordered -128) */
+        int u = cx_uid();
+        struct cty *ot = e->a[0]->t;
+        char *l = ev(e->a[0]), *r = ev(e->a[1]);
+        return cx_fmt("({ %s = %s; %s = %s; %s; *(signed char *)&__cx_c%d "
+                      "= __cx_l%d < __cx_r%d ? -1 : __cx_l%d > __cx_r%d ? 1 "
+                      ": %s; __cx_c%d; })",
+                      cdecl(ot, cx_fmt("__cx_l%d", u)), l,
+                      cdecl(ot, cx_fmt("__cx_r%d", u)), r,
+                      cdecl(e->t, cx_fmt("__cx_c%d", u)), u, u, u, u, u,
+                      e->ival ? cx_fmt("__cx_l%d == __cx_r%d ? 0 : -128", u,
+                                       u) : "0", u);
+    }
     case E_ASSIGN:
         if (e->op == TOK_ASSIGN && e->t->k == CT_CLASS &&
             (e->a[0]->k == E_BASE || e->t->cls->dsize < e->t->cls->size)) {
@@ -1465,9 +1480,26 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
                 zero = 1;
         if (lt->k == CT_CLASS && lt->cls->is_union)
             zero = 1;
+        if (init->binit)
+            for (int i = 0; i < lt->cls->nbases; i++)
+                if (!init->binit[i])
+                    zero = 1;
         if (zero)
             sb_printf(b, "__builtin_memset(&(%s), 0, sizeof(%s)); ", dest,
                       dest);
+        if (init->binit) {
+            /* an aggregate's bases: each subobject where the layout put
+             * it */
+            for (int i = 0; i < lt->cls->nbases; i++) {
+                struct cbase *cb = &lt->cls->bases[i];
+                if (!init->binit[i])
+                    continue;
+                struct cty *bt = ct_class(cb->cls);
+                einit(b, cx_fmt("(*(%s)((char *)&(%s) + %ld))",
+                                ctype(ct_ptr(bt)), dest, cb->off),
+                      bt, init->binit[i]);
+            }
+        }
         for (int i = 0; i < init->na; i++) {
             if (!init->a[i])
                 continue;
@@ -1588,6 +1620,8 @@ static int c_const(struct cexpr *e)
         return ct_is_arith(e->a[0]->t) && ct_is_arith(e->a[1]->t) &&
                c_const(e->a[0]) && c_const(e->a[1]);
     case E_INITLIST:
+        if (e->binit)
+            return 0;         /* (bases: written member by member) */
         for (int i = 0; i < e->na; i++)
             if (!c_const(e->a[i]))
                 return 0;
@@ -1789,7 +1823,7 @@ static int c_list_ok(struct cexpr *e)
     if (!e)
         return 1;
     if (e->k == E_INITLIST) {
-        if (e->t->k == CT_CLASS && e->t->cls->is_union)
+        if (e->t->k == CT_CLASS && (e->t->cls->is_union || e->binit))
             return 0;
         for (int i = 0; i < e->na; i++)
             if (!c_list_ok(e->a[i]))

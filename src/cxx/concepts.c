@@ -139,16 +139,35 @@ static int eval_atom(int end)
     return ok && v;
 }
 
+/* Is the parenthesized group [open, close] a fold-expression (a `...`
+ * directly inside)? */
+static int is_fold(int open, int close)
+{
+    int depth = 0;
+    for (int i = open + 1; i < close; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE)
+            depth++;
+        else if (k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE)
+            depth--;
+        else if (!depth && k == TOK_ELLIPSIS)
+            return 1;
+    }
+    return 0;
+}
+
 static int eval_primary(int end)
 {
     if (cx_kind() == TOK_LPAREN) {
         /* ( constraint ): its && and || count too — unless the
-         * parentheses are part of a larger expression */
+         * parentheses are part of a larger expression, or a fold (one
+         * atomic constraint, 13.5.2.5) */
         int open = cx_pos;
         cx_skip_balanced();
         int close = cx_pos - 1;
-        if (cx_pos >= end || cx_kind() == TOK_ANDAND ||
-            cx_kind() == TOK_OROR) {
+        if (!is_fold(open, close) &&
+            (cx_pos >= end || cx_kind() == TOK_ANDAND ||
+             cx_kind() == TOK_OROR)) {
             cx_pos = open + 1;
             int v = eval_or(close);
             if (cx_pos == close) {

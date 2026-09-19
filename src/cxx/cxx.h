@@ -288,6 +288,7 @@ struct cscope {
     int nusings;
     int anon;                 /* an unnamed namespace */
     int is_inline;            /* an inline namespace */
+    int nunnamed;             /* unnamed classes and enums declared here */
 };
 
 extern struct cscope *cx_global;   /* the global namespace */
@@ -423,6 +424,7 @@ struct ctemplate {
     int req_start, req_end;   /* its requires-clause's tokens (0: none);
                                * TK_CONCEPT: the constraint, decl_tok on */
     int builtin;              /* the compiler's own: BT_* */
+    struct cguide *guides;    /* TK_CLASS: its deduction guides */
     struct cscope *pscope;    /* TK_ALIAS: its parameters (as patterns) */
     struct cty *alias_pat;    /* ... its type in terms of them (deduction
                                * sees through it), once read */
@@ -431,6 +433,19 @@ struct ctemplate {
 /* An alias template's type with its own parameters unsubstituted (NULL
  * when it cannot be read so) */
 struct cty *alias_pattern(struct ctemplate *t);
+/* A deduction guide (13.7.2.3): `template<params> C(P...) -> C<A...>;`,
+ * kept as its tokens (at the name) with its template parameters (none
+ * for a guide that is not a template), read when C's arguments are
+ * deduced from an initializer. */
+struct cguide {
+    struct ctparam *params;
+    int nparams;
+    int tok;                  /* the guide's name */
+    int is_explicit;
+    struct cscope *scope;     /* where it was declared (its parameters') */
+    struct cguide *next;
+};
+
 /* Builtin templates: __make_integer_seq<TT, T, N> is TT<T, 0, ..., N-1>
  * (Clang's; libstdc++ asks __has_builtin and builds its index sequences
  * with it — the classes, and so the ABI, are the same as g++'s). */
@@ -471,6 +486,9 @@ void class_define_from(struct cclass *c, int pos, enum tok_kind key,
                        struct cscope *ps);
 struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps);
 void func_define_from(struct cfunc *f);
+/* A defaulted comparison operator: is f one, and its definition */
+int is_defaultable_cmp(struct cfunc *f);
+void define_defaulted_cmp(struct cfunc *f);
 struct cvar *var_define_from(struct ctemplate *t, int pos, struct ctarg *args,
                              struct cscope *ps);
 struct cscope *tparam_scope(struct ctparam *ps, int np, struct ctarg *args,
@@ -700,6 +718,8 @@ struct cclass {
     int defining;             /* its body is being parsed */
     int local;                /* declared inside a function */
     int anon;                 /* no name */
+    int unnamed_no;           /* ... its number in its scope (from 1: the
+                               * ABI's Ut_, Ut0_, ...) */
     struct cfunc *ctors;      /* the constructors (overload set) */
     struct cfunc *implicit_ctor;  /* the implicit default constructor */
     struct cfunc *dtor;       /* declared, or the implicit one once needed */
@@ -726,6 +746,7 @@ struct cenum {
     int scoped;
     int fixed;                /* an underlying type was written */
     int complete;
+    int unnamed_no;           /* no name: its number in its scope */
 };
 
 /* ---- expressions ---- */
@@ -740,6 +761,9 @@ enum cexpr_kind {
     E_BUILTIN,    /* a __builtin_ function passed to C: name, a */
     E_UNARY,      /* op: '-', '+', '~', '!' */
     E_BINARY,     /* op: a binop (arith, compare, logical, shifts) */
+    E_CMP3,       /* the built-in a[0] <=> a[1] (operands converted to one
+                   * type): t the comparison category (std::strong_ordering,
+                   * or std::partial_ordering with ival 1: may be unordered) */
     E_ASSIGN,     /* op: '=' or the compound operator's binop */
     E_INCDEC,     /* ival: +1/-1, post */
     E_COND, E_COMMA,
@@ -786,6 +810,9 @@ struct cexpr {
     int post;                 /* E_INCDEC */
     int lvcast;               /* E_CAST: to a reference type */
     int is_null_const;        /* an integer literal 0 (a null pointer) */
+    struct cexpr **binit;     /* E_INITLIST of an aggregate with bases: each
+                               * base subobject's initialization (a[] its
+                               * members') */
     int paren;                /* written in parentheses (decltype) */
     double fval;              /* E_FLT */
     const char *text;         /* E_FLT: the spelling; E_STR: the bytes */
@@ -823,6 +850,7 @@ struct cexpr {
 
 struct cexpr *ex_new(enum cexpr_kind k, struct cty *t, int vc);
 struct cexpr *ex_int(long v, struct cty *t);
+struct cexpr *ex_literal_zero(void);        /* 0, a null pointer constant */
 struct cexpr *ex_cast(struct cexpr *e, struct cty *t);
 struct cexpr *ex_addr(struct cexpr *e);    /* &e (e a glvalue) */
 struct cexpr *ex_deref(struct cexpr *p);   /* *p */
@@ -843,6 +871,10 @@ struct cexpr *expr_parse(void);            /* a full expression (with ,) */
 struct cexpr *expr_parse_assign(void);     /* an assignment-expression */
 struct cexpr *expr_parse_cond(void);       /* a conditional-expression */
 long expr_parse_const(const char *what);   /* an integral constant */
+long expr_parse_const_as(const char *what, int as_bool);
+/* overload resolution's "standard conversions only" state, swapped out
+ * by nested work (a class or body instantiated meanwhile) */
+int expr_swap_no_user_conv(int v);
 int expr_const(struct cexpr *e, long *out); /* integer constant expression */
 int cx_expr_nothrow(struct cexpr *e);   /* can it not throw? (noexcept) */
 /* e (of another class) made a c by one of its conversion functions: the

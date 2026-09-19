@@ -183,8 +183,8 @@ initializer, `static_assert`, delegating constructors, default member
 initializers.
 
 Refused until later, each naming its milestone: lambdas, range-`for`,
-`initializer_list`, deduced return types (CX6); designated initializers, `<=>` and C++20's
-rewritten comparisons, `auto` parameters, coroutines (CX7). Access control
+`initializer_list`, deduced return types (CX6); designated initializers,
+coroutines (CX7). Access control
 is parsed but not yet enforced; anonymous struct/union members, bit-fields
 in a class with bases or virtual functions, and copying arrays of
 non-trivially copyable objects are not supported yet.
@@ -501,12 +501,50 @@ or to arrays, `void (*signal(int, void (*)(int)))(int)` — declared and
 defined; the declarator reader is now general (a parenthesized declarator
 read after the suffixes that bind tighter). tests/exec `nested-decl`.
 
-Next: `<=>` (three-way comparison, which `<chrono>`'s calendar types use
-unconditionally), `<iomanip>`/`<locale>`/`<regex>` (explicit
-specializations of static data members), `<any>`, `<list>`, `<random>`,
-`<complex>`, `<string_view>`, `<charconv>`/`<format>`,
-`<memory_resource>`; out-of-class members of partial specializations are
-still skipped.
+**CX7 started**: three-way comparison, and `__cpp_concepts` (201907L) and
+`__cpp_impl_three_way_comparison` (201907L) defined — so libstdc++'s
+concept-based parts are on: `<concepts>`, `<ranges>`, `<compare>`, and
+the library's own `operator<=>` for its containers, strings, pairs and
+tuples. The built-in `<=>` (E_CMP3: each operand once; integers, enums
+and pointers give `std::strong_ordering`, floating types
+`std::partial_ordering`, unordered with a NaN — the category object's
+byte, as `<compare>` lays it out; constant-evaluated too); the rewritten
+candidates when no operator is written for a comparison: `x @ y` as `(x
+<=> y) @ 0` or `0 @ (y <=> x)`, `x != y` as `!(x == y)`, `x == y`
+reversed (a synthesized 0 is a null pointer constant, as `<compare>`'s
+`__literal_zero` wants); defaulted `==` and `<=>` (bases then members;
+an `auto` `<=>` returns the weakest member category) and defaulted
+relational operators (through `<=>`); `operator<=>` declared as a friend
+specialization. On the way, for the library: a static `operator()`
+(C++23, which g++ and libstdc++ use in C++20); hidden friend function
+templates (their declarations read in their class, an instance's
+arguments bound); a trailing requires-clause sees the function's
+parameters; a parenthesized fold in a constraint is one atomic constraint;
+C++20 template lambdas (`[]<class T>(T x)`, `[]<int... I>(...)`, mixed
+with `auto` parameters); aggregate initialization of classes with bases
+(C++17: the bases first); implicit conversions through constructor
+templates (`int` to `__max_size_type`), without a second user conversion
+for the copy constructor's argument; conversion functions inherited from
+bases, and explicit ones in direct-initialization (`unsigned{day}`);
+`explicit(cond)` with a class constant, and decided per specialization in
+a member template; conversion functions to different types distinct;
+scoped enumerators visible in their own list; `E{}`/`E{n}` for enums;
+class instantiation re-entered while choosing its partial specialization
+(its constraints named it) no longer defines it twice; unnamed classes and
+enums mangled `Ut_`, `Ut0_`, ... as g++ does (they were `._anon`, not an
+identifier); a definition of a friend-declared function template reads
+its names where it is defined; defaulted comparisons are defined, not
+given an empty body; the constant evaluator bounds its nesting. Deduction
+guides are recorded (class template argument deduction itself: next).
+tests/cxx `spaceship`; tests/libstdcxx/compare.cc (vector, string, pair
+and tuple `<=>`, a defaulted `<=>` over a string member, `std::sort`
+through the rewritten `<`) matches g++'s build on both targets.
+
+Next: class template argument deduction (the guides are kept),
+designated initializers (`<chrono>`), `<iomanip>`/`<locale>`/`<regex>`
+(explicit specializations of static data members), `<any>`, `<list>`,
+`<random>`, `<complex>`, `<string_view>`, `<memory_resource>`;
+out-of-class members of partial specializations are still skipped.
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their
