@@ -23,7 +23,7 @@ targets, and must agree; cross-ABI tests link an EmbCC half with a g++ half.
 | **CX1** | C++ as a better C: `bool`, `nullptr`, references, namespaces, `extern "C"`, overloading and Itanium mangling, default arguments, classes (members, methods, access, `this`), constructors and destructors (run on every scope exit), `new`/`delete`, static members, global constructors/destructors, function-local statics (guards) | tests/cxx, both targets, agreeing with g++; linking with libsupc++ |
 | **CX2** | operator overloading, conversions (converting constructors, conversion operators, `explicit`), copy and move (implicit special members, rvalue references), temporaries and their lifetimes, classes by value in the ABI | cross-ABI tests with g++ |
 | **CX3** | inheritance (single, multiple, virtual), virtual functions and vtables, pure virtuals, RTTI (`typeid`, `dynamic_cast`) | g++ calling EmbCC virtuals and back |
-| **CX4** | templates: class, function, alias and variable templates; deduction; explicit and partial specialization; SFINAE; variadics and fold expressions | |
+| **CX4** | templates: class, function, alias and variable templates; deduction; explicit and partial specialization; SFINAE; variadics and fold expressions | every template symbol named as g++ names it |
 | **CX5** | exceptions: `throw`/`try`/`catch`, unwind tables, the Itanium personality routine, `noexcept` | exceptions crossing EmbCC/g++ frames |
 | **CX6** | the modern core: `auto`, `decltype`, lambdas, `constexpr` evaluation, range-`for`, `initializer_list`, `enum class`, structured bindings, `if constexpr` | |
 | **CX7** | C++20: concepts and `requires`, `<=>`, `consteval`/`constinit`, designated initializers, coroutines | |
@@ -149,29 +149,58 @@ initializer, `static_assert`, delegating constructors, default member
 initializers.
 
 Refused until later, each naming its milestone: virtual base classes
-(CX3b); templates (CX4); exceptions (CX5); lambdas, range-`for`,
-`initializer_list`, deduced return types (CX6); designated initializers,
-`<=>` and C++20's rewritten comparisons, coroutines (CX7). Access control
+(CX3b); exceptions (CX5); lambdas, range-`for`, `initializer_list`,
+deduced return types (CX6); designated initializers, `<=>` and C++20's
+rewritten comparisons, `auto` parameters, coroutines (CX7). Access control
 is parsed but not yet enforced; anonymous struct/union members, bit-fields
 in a class with bases or virtual functions, and copying arrays of
 non-trivially copyable objects are not supported yet.
 
-**CX4 in progress**: class, function, member, alias and variable
-templates by token replay (src/cxx/template.c) — a template's tokens are
-kept and each instance parses them again with the parameters bound, so an
-instance is ordinary C++ to the rest of the front-end; a function
-template's declaration is also read once as a pattern (CT_TPARAM, CT_TID,
-CT_DEP) for deduction and mangling. Class instances are defined when
-first needed complete, their members when first used (or from their
-out-of-class definitions); deduction through T, T*, const T&, T&&
-(forwarding), T(&)[N] and A<T> (and its bases); explicit arguments;
-explicit and partial specializations; partial ordering of function
-templates; non-templates preferred on ties; SFINAE (a substitution error
-unwinds to the attempt and drops the candidate); explicit instantiation
-and `extern template`. A dependent expression in a pattern is read into
-its Itanium mangling (`IXsr6is_ptrIT_E5valueE`), types inside it joining
-the substitution table — so tests/cxx/templates' every symbol is named
-exactly as g++ names it. Not yet: parameter packs and fold expressions,
-the ordering of partial specializations beyond the first match.
+**CX4 done**: class, function, member, alias and variable templates by
+token replay (src/cxx/template.c) — a template's tokens are kept and each
+instance parses them again with the parameters bound, so an instance is
+ordinary C++ to the rest of the front-end; a function template's
+declaration is also read once as a pattern (CT_TPARAM, CT_TID, CT_DEP) for
+deduction and mangling. Class instances are defined when first needed
+complete, their members when first used (or from their out-of-class
+definitions); deduction through T, T*, const T&, T&& (forwarding),
+T(&)[N], A<T> (and its bases) and TT<T> (template template parameters);
+explicit arguments; explicit and partial specializations — matched
+exactly, the most specialized of several chosen (13.7.6.2); partial
+ordering of function templates; non-templates preferred on ties; SFINAE
+(a substitution error unwinds to the attempt and drops the candidate);
+explicit instantiation and `extern template`. A dependent expression in a
+pattern is read into its Itanium mangling (`IXsr6is_ptrIT_E5valueE`), types
+inside it joining the substitution table and parameters used as operands
+not (`XT_E`, `sZT_`).
 
-Next: the rest of CX4 (packs), then CX3b.
+Variadic templates: a bound pack is a CS_PACK symbol — a template
+parameter pack's arguments, or a function parameter pack's parameters —
+and an expansion re-reads its pattern once per element with a stack
+(`pack_push`) making lookup of the pack's name find the current element;
+so `f(g<Ts>(args)...)`, `{sizeof(Ts)...}`, `tuple<Ts...>`, `Ts... args`,
+`: Bases(args)...`, `struct M : Bases...` are all the ordinary parser
+reading ordinary C++ N times. The innermost `...` expands every pack in its
+pattern; `sizeof...` counts one. In a pattern, `Ts...` stays one argument
+(`expansion`) that deduces a pack element by element — from a call's
+trailing arguments, from `tuple<T, Rest...>` against `tuple<int, char>`
+(classes' own packs flattened), from `seq<Is...>` values. Fold expressions
+in all four forms, empty `&&`/`||`/`,` folds giving `true`/`false`/`void()`.
+Mangled as g++ does: `DpT_` parameter packs (a substitution candidate as a
+whole), `J...E` argument packs, `XspT_E` value-pack expansions.
+
+Found on the way: `T x(A(5))` was parsed as a function declaration (a
+parameter list is now tried and, failing, it is an initializer);
+mem-initializers named bases by name, which two instances of one template
+share (`tuple<Rest...>(r...)` inside `tuple<T, Rest...>`) — a mem-initializer
+naming a type now resolves to the class; a call returning a not yet
+instantiated class, `delete` of one and operator lookup on one instantiate
+it first; `&"literal"` (binding `const char(&)[N]`) is written as a cast
+the C side accepts.
+
+Not yet: `decltype(...)::` as a qualifier; a nested expansion of a pack an
+enclosing expansion is iterating, within one list element (`f(g(xs,
+xs...)...)`); function parameter packs named in a dependent signature
+(`sZfp_`).
+
+Next: CX3b (virtual bases), then CX5 (exceptions).

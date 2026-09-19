@@ -162,6 +162,17 @@ struct csym *lookup(struct cscope *from, const char *name)
     for (struct cscope *s = from; s; s = s->parent) {
         struct csym *y = find_in(s, name);
         if (y)
+            return y->k == CS_PACK ? pack_current(y) : y;
+    }
+    return NULL;
+}
+
+/* A name as declared: a pack stays a pack (sizeof..., expansions). */
+struct csym *lookup_raw(struct cscope *from, const char *name)
+{
+    for (struct cscope *s = from; s; s = s->parent) {
+        struct csym *y = find_in(s, name);
+        if (y)
             return y;
     }
     return NULL;

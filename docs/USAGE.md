@@ -189,8 +189,8 @@ Refused loudly rather than faked, per THE RULE:
   of two complex values are left to run time, which is where Annex G's
   special cases (libgcc) apply.
 - **C++ beyond what docs/CXX.md marks done** — each refusal names the
-  milestone that brings the construct (e.g. "templates are not supported yet
-  (CX4)").
+  milestone that brings the construct (e.g. "exceptions are not supported
+  yet (CX5)").
 - **`__thread`/TLS, PIE/PIC output** — out of scope by decision
   (ARCHITECTURE §8, DECISIONS D-008).
 

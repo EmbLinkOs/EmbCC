@@ -18,6 +18,7 @@
 #include "cxx.h"
 
 #include <setjmp.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -25,6 +26,278 @@
 
 int cx_pattern;
 int cx_in_targs;
+
+/* ---- packs ---- */
+
+struct pexp {
+    struct csym *pack;
+    int index;
+    struct csym *elem;        /* the element as a symbol, made on demand */
+};
+static struct pexp pexps[64];
+static int npexps;
+
+void pack_push(struct csym *pack, int index)
+{
+    if (npexps == 64)
+        cx_error(cx_cur(), "pack expansions nested too deeply");
+    pexps[npexps].pack = pack;
+    pexps[npexps].index = index;
+    pexps[npexps].elem = NULL;
+    npexps++;
+}
+
+void pack_pop(int n)
+{
+    npexps -= n;
+}
+
+int pack_mark(void)
+{
+    return npexps;
+}
+
+void pack_reset(int mark)
+{
+    npexps = mark;
+}
+
+int pack_length(struct csym *y)
+{
+    return y->npack;
+}
+
+struct csym *pack_current(struct csym *y)
+{
+    if (!y || y->k != CS_PACK)
+        return y;
+    for (int i = npexps - 1; i >= 0; i--) {
+        struct pexp *e = &pexps[i];
+        if (e->pack != y)
+            continue;
+        if (e->elem)
+            return e->elem;
+        struct csym *el = xcalloc(1, sizeof *el);
+        el->name = y->name;
+        el->scope = y->scope;
+        if (y->pvars) {
+            el->k = CS_VAR;
+            el->var = y->pvars[e->index];
+        } else {
+            struct ctarg *a = &y->pack[e->index];
+            if (a->kind == TP_TYPE) {
+                el->k = CS_TYPEDEF;
+                el->type = a->type;
+            } else if (a->kind == TP_VALUE) {
+                el->k = CS_ENUMERATOR;
+                el->type = a->vtype ? a->vtype : ct_basic(CT_INT);
+                el->value = a->value;
+            } else {
+                el->k = CS_TEMPLATE;
+                el->tmpl = a->tmpl;
+            }
+        }
+        e->elem = el;
+        return el;
+    }
+    return y;
+}
+
+int packs_in(int from, int to, struct csym **packs, int max);
+
+/* Does the `<` at token i open template arguments? After a template's
+ * name, a qualified name (`std::forward<`), `template` or a cast. */
+static int opens_targs(int i)
+{
+    if (i == 0)
+        return 0;
+    const struct ctok *p = &cx_toks[i - 1];
+    switch (p->t.kind) {
+    case TOK_CX_STATIC_CAST: case TOK_CX_DYNAMIC_CAST:
+    case TOK_CX_CONST_CAST: case TOK_CX_REINTERPRET_CAST:
+        return 1;
+    case TOK_IDENT:
+        break;
+    default:
+        return 0;
+    }
+    if (i >= 2 && (cx_toks[i - 2].t.kind == TOK_COLONCOLON ||
+                   cx_toks[i - 2].t.kind == TOK_CX_TEMPLATE))
+        return 1;
+    struct csym *y = lookup_raw(cx_scope, p->t.text);
+    if (!y)
+        return 0;
+    if (y->k == CS_TEMPLATE || (y->k == CS_PACK && y->value == TP_TEMPLATE))
+        return 1;
+    return (y->k == CS_CLASS || y->k == CS_TYPEDEF) && y->type &&
+           y->type->k == CT_CLASS && y->type->cls->tmpl;
+}
+
+/* At the start of a list element (a template argument if `angles`, else
+ * an expression or initializer): if it is a pattern ending in `...`, the
+ * packs it names (up to max) and the `...`'s position. 0: not an
+ * expansion; -1: `...` naming no bound pack (in a pattern, kept). */
+int expansion_at(int angles, struct csym **packs, int max, int *ellipsis)
+{
+    char stk[256];                /* ( [ { < as opened */
+    int sp = 0, np = 0;
+    int i;
+    for (i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_EOF)
+            return 0;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
+            if (sp < 256)
+                stk[sp] = (char)k;
+            sp++;
+            continue;
+        }
+        if (k == TOK_LT && ((angles && sp == 0) || opens_targs(i))) {
+            if (sp < 256)
+                stk[sp] = '<';
+            sp++;
+            continue;
+        }
+        if (k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE) {
+            if (sp == 0)
+                break;
+            while (sp > 0 && sp <= 256 && stk[sp - 1] == '<')
+                sp--;             /* a `<` that was a comparison after all */
+            if (sp == 0)
+                break;
+            sp--;
+            continue;
+        }
+        if (k == TOK_GT || k == TOK_SHR) {
+            int n = k == TOK_SHR ? 2 : 1, popped = 0;
+            while (n > 0 && sp > 0 && sp <= 256 && stk[sp - 1] == '<') {
+                sp--;
+                n--;
+                popped = 1;
+            }
+            if (n > 0 && sp == 0 && angles) {
+                if (popped)
+                    return 0;     /* `X<Ts...>>`: the element ends in `>` */
+                break;            /* the list's own closer */
+            }
+            continue;
+        }
+        if (sp == 0 && (k == TOK_COMMA || k == TOK_SEMI))
+            break;
+    }
+    if (i == cx_pos || cx_toks[i - 1].t.kind != TOK_ELLIPSIS)
+        return 0;
+    *ellipsis = i - 1;
+    np = packs_in(cx_pos, i - 1, packs, max);
+    return np ? np : -1;
+}
+
+static int is_closer(enum tok_kind k)
+{
+    return k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE;
+}
+
+/* The bound packs a pattern (tokens from..to-1) expands, up to max; how
+ * many. Names inside a nested expansion are that one's (the innermost
+ * `...` expands every pack in its pattern, 13.7.4), and sizeof...(X)
+ * names X without expanding it. */
+int packs_in(int from, int to, struct csym **packs, int max)
+{
+    enum { MAXD = 128 };
+    char kind[MAXD];
+    int open[MAXD], elem[MAXD];
+    int sp = 0, np = 0, fold = -1;
+    char *skip = xcalloc((size_t)(to - from + 1), 1);
+    for (int j = from; j < to; j++) {
+        enum tok_kind k = cx_toks[j].t.kind;
+        if (fold >= 0)
+            skip[j - from] = 1;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE ||
+            (k == TOK_LT && opens_targs(j))) {
+            if (sp < MAXD) {
+                kind[sp] = k == TOK_LT ? '<' : (char)k;
+                open[sp] = j;
+                elem[sp] = j + 1;
+            }
+            sp++;
+            continue;
+        }
+        if (is_closer(k)) {
+            while (sp > 0 && sp <= MAXD && kind[sp - 1] == '<')
+                sp--;
+            if (sp > 0)
+                sp--;
+            if (fold >= sp)
+                fold = -1;
+            continue;
+        }
+        if ((k == TOK_GT || k == TOK_SHR) && sp > 0 && sp <= MAXD &&
+            kind[sp - 1] == '<') {
+            sp--;
+            if (k == TOK_SHR && sp > 0 && sp <= MAXD && kind[sp - 1] == '<')
+                sp--;
+            continue;
+        }
+        if (k == TOK_COMMA && sp > 0 && sp <= MAXD) {
+            elem[sp - 1] = j + 1;
+            continue;
+        }
+        if (k != TOK_ELLIPSIS)
+            continue;
+        if (j > from && cx_toks[j - 1].t.kind == TOK_KW_SIZEOF) {
+            /* sizeof...( X ) */
+            int e = j + 1;
+            if (e < to && cx_toks[e].t.kind == TOK_LPAREN)
+                for (; e < to && cx_toks[e].t.kind != TOK_RPAREN; e++)
+                    skip[e - from] = 1;
+            continue;
+        }
+        if (sp == 0 || sp > MAXD)
+            continue;
+        enum tok_kind next = j + 1 < cx_ntoks ? cx_toks[j + 1].t.kind
+                                              : TOK_EOF;
+        int list_end = next == TOK_COMMA || is_closer(next) ||
+                       (kind[sp - 1] == '<' &&
+                        (next == TOK_GT || next == TOK_SHR));
+        int start = list_end ? elem[sp - 1] : open[sp - 1];
+        for (int e = start; e <= j; e++)
+            if (e >= from)
+                skip[e - from] = 1;
+        if (!list_end)
+            fold = sp - 1;        /* a fold: its parentheses are its own */
+    }
+    for (int j = from; j < to; j++) {
+        if (skip[j - from] || cx_toks[j].t.kind != TOK_IDENT)
+            continue;
+        if (j > from && (cx_toks[j - 1].t.kind == TOK_DOT ||
+                         cx_toks[j - 1].t.kind == TOK_ARROW ||
+                         cx_toks[j - 1].t.kind == TOK_COLONCOLON))
+            continue;             /* a member's name */
+        struct csym *y = lookup_raw(cx_scope, cx_toks[j].t.text);
+        if (!y || y->k != CS_PACK)
+            continue;
+        int have = 0;
+        for (int k = 0; k < np; k++)
+            have |= packs[k] == y;
+        if (!have && np < max)
+            packs[np++] = y;
+    }
+    free(skip);
+    return np;
+}
+
+/* The common length of the packs an expansion names. */
+int expansion_length(struct csym **packs, int n)
+{
+    int len = pack_length(packs[0]);
+    for (int k = 1; k < n; k++)
+        if (pack_length(packs[k]) != len)
+            cx_error(cx_cur(), "packs '%s' and '%s' expanded together have "
+                               "different lengths (%d and %d)",
+                     packs[0]->name, packs[k]->name, len,
+                     pack_length(packs[k]));
+    return len;
+}
 
 /* ---- arguments ---- */
 
@@ -140,7 +413,8 @@ static struct ctarg *fit_args(struct ctemplate *t, struct ctparam *ps,
         if (p->pack) {
             r[i].kind = p->kind;
             r[i].is_pack = 1;
-            if (k < na && args[k].is_pack && na - k == 1) {
+            if (k < na && args[k].is_pack && !args[k].expansion &&
+                na - k == 1) {
                 r[i] = args[k++];
                 continue;
             }
@@ -171,6 +445,10 @@ static struct ctarg *fit_args(struct ctemplate *t, struct ctparam *ps,
 static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
                   int *set, int np);
 
+/* Matching a partial specialization (or ordering two): the argument must
+ * BE the pattern with the parameters substituted — not convert to it. */
+static int deduce_exact;
+
 /* Is A (a class) or one of its bases an instance of template tm? */
 static struct cclass *instance_base(struct cclass *c, struct ctemplate *tm)
 {
@@ -186,17 +464,81 @@ static struct cclass *instance_base(struct cclass *c, struct ctemplate *tm)
 }
 
 static int deduce_arg(struct ctarg *P, struct ctarg *A, struct ctarg *out,
+                      int *set, int np);
+
+/* Arguments with a trailing pack (not an expansion) spread out. */
+static struct ctarg *flatten(struct ctarg *a, int *n)
+{
+    int k = *n;
+    if (!k || !a[k - 1].is_pack || a[k - 1].expansion)
+        return a;
+    struct ctarg *last = &a[k - 1];
+    struct ctarg *r = xcalloc((size_t)(k + last->nelems), sizeof *r);
+    memcpy(r, a, (size_t)(k - 1) * sizeof *r);
+    memcpy(r + k - 1, last->elems, (size_t)last->nelems * sizeof *r);
+    *n = k - 1 + last->nelems;
+    return r;
+}
+
+/* Argument patterns against arguments, in order; an expansion (`Ts...`)
+ * takes all the rest, each deducing one element of the packs its pattern
+ * names (13.10.3.6 p9). */
+static int deduce_seq(struct ctarg *P, int nP, struct ctarg *A, int nA,
+                      struct ctarg *out, int *set, int np)
+{
+    int k = 0;
+    for (int i = 0; i < nP; i++) {
+        if (!P[i].expansion) {
+            if (k >= nA || !deduce_arg(&P[i], &A[k++], out, set, np))
+                return 0;
+            continue;
+        }
+        if (i != nP - 1)
+            continue;                 /* not last: a non-deduced context */
+        struct ctarg *pat = &P[i].elems[0];
+        struct ctarg *o1 = xcalloc((size_t)(np ? np : 1), sizeof *o1);
+        int *s1 = xcalloc((size_t)(np ? np : 1), sizeof *s1);
+        int *mark = xcalloc((size_t)(np ? np : 1), sizeof *mark);
+        for (; k < nA; k++) {
+            memset(o1, 0, (size_t)np * sizeof *o1);
+            memset(s1, 0, (size_t)np * sizeof *s1);
+            /* against another pattern's expansion: pattern to pattern */
+            struct ctarg *a = A[k].expansion ? &A[k].elems[0] : &A[k];
+            if (!deduce_arg(pat, a, o1, s1, np))
+                return 0;
+            for (int j = 0; j < np; j++) {
+                if (!s1[j])
+                    continue;
+                struct ctarg *pk = &out[j];
+                if (!mark[j]) {
+                    memset(pk, 0, sizeof *pk);
+                    pk->kind = o1[j].kind;
+                    pk->is_pack = 1;
+                    mark[j] = 1;
+                }
+                pk->elems = xrealloc(pk->elems, (size_t)(pk->nelems + 1) *
+                                                sizeof *pk->elems);
+                pk->elems[pk->nelems++] = o1[j];
+                set[j] = 1;
+            }
+        }
+        return 1;
+    }
+    return k == nA;
+}
+
+static int deduce_arg(struct ctarg *P, struct ctarg *A, struct ctarg *out,
                       int *set, int np)
 {
+    if (P->expansion)
+        return A->is_pack ? deduce_seq(P, 1, A->elems, A->nelems, out, set,
+                                       np)
+                          : deduce_seq(P, 1, A, 1, out, set, np);
     if (P->is_pack || A->is_pack) {
-        if (!P->is_pack || !A->is_pack || P->nelems != A->nelems)
-            return P->is_pack && P->nelems == 1 &&
-                   P->elems[0].kind == TP_TYPE &&
-                   P->elems[0].type->k == CT_TPARAM ? 1 : 0;
-        for (int i = 0; i < P->nelems; i++)
-            if (!deduce_arg(&P->elems[i], &A->elems[i], out, set, np))
-                return 0;
-        return 1;
+        if (!P->is_pack || !A->is_pack)
+            return 0;
+        return deduce_seq(P->elems, P->nelems, A->elems, A->nelems, out, set,
+                          np);
     }
     if (P->kind == TP_TYPE && A->kind == TP_TYPE)
         return deduce(P->type, A->type, out, set, np);
@@ -211,6 +553,9 @@ static int deduce_arg(struct ctarg *P, struct ctarg *A, struct ctarg *out,
                 return 1;
             }
         }
+        if (P->mexpr || A->mexpr ||
+            (A->vtype && A->vtype->k == CT_TPARAM))
+            return 0;             /* dependent: not known to be equal */
         return P->value == A->value;
     }
     if (P->kind == TP_TEMPLATE && A->kind == TP_TEMPLATE)
@@ -218,19 +563,33 @@ static int deduce_arg(struct ctarg *P, struct ctarg *A, struct ctarg *out,
     return 0;
 }
 
+static struct cty *strip_elem_cv(struct cty *a, unsigned q)
+{
+    if (a->k != CT_ARRAY)
+        return ct_qual(ct_unqual(a), a->q & ~q);
+    return ct_array(strip_elem_cv(a->to, q), a->n);
+}
+
 /* Deduce the template parameters P mentions from the argument type A
  * (13.10.3.6): out[i] for parameter i, set[i] once known. */
 static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
                   int *set, int np)
 {
+    if (deduce_exact && P->k != CT_TPARAM && P->q != A->q)
+        return 0;
     switch (P->k) {
     case CT_TPARAM: {
         int i = (int)P->n;
+        if (deduce_exact && (P->q & ~A->q) && A->k != CT_ARRAY)
+            return 0;             /* const T does not match int */
         if (i >= np || set[i] >= 2)
             return 1;             /* given explicitly: the argument converts */
         /* const T against const int: T is int; against int, T is int
          * too (the parameter may be more qualified, 13.10.3.2) */
         struct cty *v = ct_qual(ct_unqual(A), A->q & ~P->q);
+        if (A->k == CT_ARRAY && P->q)
+            v = strip_elem_cv(A, P->q);     /* an array's cv is its
+                                             * elements' */
         if (set[i])
             return out[i].kind == TP_TYPE && ct_same(out[i].type, v);
         out[i].kind = TP_TYPE;
@@ -260,6 +619,9 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
     case CT_FUNC:
         if (A->k != CT_FUNC || A->np != P->np)
             return 0;
+        if (deduce_exact && (A->variadic != P->variadic || A->fq != P->fq ||
+                             A->refq != P->refq))
+            return 0;
         if (!deduce(P->to, A->to, out, set, np))
             return 0;
         for (int i = 0; i < P->np; i++)
@@ -267,22 +629,49 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
                 return 0;
         return 1;
     case CT_MPTR:
-        if (A->k != CT_MPTR)
+        if (A->k != CT_MPTR || (deduce_exact && A->cls != P->cls))
             return 0;
         return deduce(P->to, A->to, out, set, np);
     case CT_TID: {
+        if (A->k == CT_TID && A->tmpl == P->tmpl && !P->tmpl->tparam) {
+            /* pattern against pattern (ordering) */
+            int na = A->ntargs, nP = P->ntargs;
+            struct ctarg *af = flatten(A->targs, &na);
+            struct ctarg *pf = flatten(P->targs, &nP);
+            return deduce_seq(pf, nP, af, na, out, set, np);
+        }
         if (A->k != CT_CLASS)
             return 0;
-        struct cclass *c = instance_base(A->cls, P->tmpl);
+        struct cclass *c;
+        if (P->tmpl->tparam && P->tmpl->tparam <= np) {
+            /* TT<...>: TT is A's template */
+            int i = P->tmpl->tparam - 1;
+            c = A->cls;
+            if (!c->tmpl)
+                return 0;
+            if (set[i] && !(out[i].kind == TP_TEMPLATE &&
+                            out[i].tmpl == c->tmpl))
+                return 0;
+            if (!set[i]) {
+                out[i].kind = TP_TEMPLATE;
+                out[i].tmpl = c->tmpl;
+                set[i] = 1;
+            }
+        } else {
+            c = instance_base(A->cls, P->tmpl);
+        }
         if (!c)
             return 0;
-        for (int i = 0; i < P->ntargs && i < c->ntargs; i++)
-            if (!deduce_arg(&P->targs[i], &c->targs[i], out, set, np))
-                return 0;
-        return 1;
+        /* the class's arguments against the pattern's as written */
+        int na = c->ntargs, nP = P->ntargs;
+        struct ctarg *flat = flatten(c->targs, &na);
+        struct ctarg *pf = flatten(P->targs, &nP);
+        return deduce_seq(pf, nP, flat, na, out, set, np);
     }
     default:
-        return 1;              /* non-deduced: checked by conversion later */
+        /* non-deduced: checked by conversion later — or, matching a
+         * partial specialization, the same type */
+        return deduce_exact ? ct_same(P, A) : 1;
     }
 }
 
@@ -372,20 +761,11 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
         struct cty *A = e->k == E_OVL ? e->fn->type : e->t;
         if (ppack >= 0) {
             /* a function parameter pack: each argument deduces one
-             * element of the template parameter pack it names */
-            struct cty *base = P;
-            while (base->k == CT_LREF || base->k == CT_RREF ||
-                   base->k == CT_PTR)
-                base = base->to;
-            if (base->k != CT_TPARAM || base->n >= np)
-                continue;
-            int ti = (int)base->n;
-            if (set[ti] == 2)
-                continue;                    /* given explicitly */
-            struct ctarg one[1];
-            int s1[1] = { 0 };
-            memset(one, 0, sizeof one);
-            struct cty *Pe = P;
+             * element of the template parameter packs its pattern names
+             * (a pack given explicitly keeps its elements) */
+            struct cty *Pe = xmalloc(sizeof *Pe);
+            *Pe = *P;
+            Pe->pack_expansion = 0;
             if (ct_is_ref(Pe)) {
                 if (Pe->k == CT_RREF && Pe->to->k == CT_TPARAM &&
                     !Pe->to->q && e->vc == VC_LVALUE)
@@ -393,20 +773,28 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
                 Pe = Pe->to;
             } else {
                 A = ct_unqual(ct_decay(A));
+                Pe = ct_unqual(Pe);
             }
-            struct cty *Pl = xmalloc(sizeof *Pl);
-            *Pl = *Pe;
-            if (Pl->k == CT_TPARAM)
-                Pl->n = 0;
-            if (!deduce(Pl, A, one, s1, 1))
+            struct ctarg *o1 = xcalloc((size_t)(np ? np : 1), sizeof *o1);
+            int *s1 = xcalloc((size_t)(np ? np : 1), sizeof *s1);
+            for (int j = 0; j < np; j++)
+                s1[j] = set[j] >= 2 ? 3 : 0;
+            if (!deduce(Pe, A, o1, s1, np))
                 return 0;
-            struct ctarg *pk = &out[ti];
-            pk->kind = TP_TYPE;
-            pk->is_pack = 1;
-            pk->elems = xrealloc(pk->elems, (size_t)(pk->nelems + 1) *
-                                            sizeof *pk->elems);
-            pk->elems[pk->nelems++] = one[0];
-            set[ti] = 1;
+            for (int j = 0; j < np; j++) {
+                if (s1[j] != 1)
+                    continue;
+                struct ctarg *pk = &out[j];
+                if (!set[j]) {
+                    memset(pk, 0, sizeof *pk);
+                    pk->kind = o1[j].kind;
+                    pk->is_pack = 1;
+                }
+                pk->elems = xrealloc(pk->elems, (size_t)(pk->nelems + 1) *
+                                                sizeof *pk->elems);
+                pk->elems[pk->nelems++] = o1[j];
+                set[j] = 1;
+            }
             continue;
         }
         if (ct_is_ref(P)) {
@@ -482,25 +870,60 @@ struct cclass *class_instance(struct ctemplate *t, struct ctarg *args,
     return c;
 }
 
-/* The partial specialization whose pattern the arguments match (the
- * first; a more specialized one declared later is not yet preferred). */
+/* Does partial specialization p's pattern match arguments a (np of p's
+ * parameters bound into out)? */
+static int partial_matches(struct cpartial *p, struct ctarg *a, int na,
+                           struct ctarg **bound)
+{
+    int np = p->nparams;
+    struct ctarg *out = xcalloc((size_t)(np ? np : 1), sizeof *out);
+    int *set = xcalloc((size_t)(np ? np : 1), sizeof *set);
+    int nP = p->npattern;
+    struct ctarg *pf = flatten(p->pattern, &nP);
+    struct ctarg *af = flatten(a, &na);
+    int saved = deduce_exact;
+    deduce_exact = 1;
+    int ok = deduce_seq(pf, nP, af, na, out, set, np);
+    deduce_exact = saved;
+    for (int i = 0; ok && i < np; i++)
+        ok = set[i] || p->params[i].pack;
+    *bound = out;
+    return ok;
+}
+
+/* Is partial a at least as specialized as b: does b's pattern match a's
+ * (a's parameters standing as unique types, 13.7.6.3)? */
+static int partial_at_least(struct cpartial *a, struct cpartial *b)
+{
+    struct ctarg *bound;
+    return partial_matches(b, a->pattern, a->npattern, &bound);
+}
+
+/* The partial specialization whose pattern the arguments match — of
+ * several, the one more specialized than each other (13.7.6.2). */
 static struct cpartial *match_partial(struct ctemplate *t, struct ctarg *a,
                                       struct ctarg **bound)
 {
-    for (struct cpartial *p = t->partials; p; p = p->next) {
-        int np = p->nparams;
-        struct ctarg *out = xcalloc((size_t)(np ? np : 1), sizeof *out);
-        int *set = xcalloc((size_t)(np ? np : 1), sizeof *set);
-        int ok = p->npattern == t->nparams;
-        for (int i = 0; ok && i < p->npattern; i++)
-            ok = deduce_arg(&p->pattern[i], &a[i], out, set, np);
-        for (int i = 0; ok && i < np; i++)
-            ok = set[i] || p->params[i].pack;
-        if (ok) {
-            *bound = out;
-            return p;
+    struct cpartial *m[64];
+    struct ctarg *mb[64];
+    int n = 0;
+    for (struct cpartial *p = t->partials; p && n < 64; p = p->next)
+        if (partial_matches(p, a, t->nparams, &mb[n]))
+            m[n++] = p;
+    if (n == 0)
+        return NULL;
+    for (int i = 0; i < n; i++) {
+        int best = 1;
+        for (int j = 0; best && j < n; j++)
+            best = i == j || (partial_at_least(m[i], m[j]) &&
+                              !partial_at_least(m[j], m[i]));
+        if (best) {
+            *bound = mb[i];
+            return m[i];
         }
     }
+    cx_error(cx_cur(), "ambiguous partial specializations of '%s' match "
+                       "these arguments", t->name);
     return NULL;
 }
 

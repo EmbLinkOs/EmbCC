@@ -421,7 +421,10 @@ static int copy_kind(struct cfunc *f, struct cclass *c)
 
 int class_indirect(const struct cty *t)
 {
-    return t->k == CT_CLASS && t->cls->complete && !t->cls->trivial_for_calls;
+    if (t->k != CT_CLASS)
+        return 0;
+    class_ensure(t->cls);
+    return t->cls->complete && !t->cls->trivial_for_calls;
 }
 
 static struct cfunc *assign_set(struct cclass *c)
@@ -977,7 +980,8 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
 {
     struct cclass *c = f->cls;
     const struct ctok *at = cx_cur();
-    if (n == 1 && c->name && strcmp(mi[0].name, c->name) == 0) {
+    if (n == 1 && (mi[0].cls ? mi[0].cls == c
+                             : c->name && strcmp(mi[0].name, c->name) == 0)) {
         /* a delegating constructor */
         f->delegate = mi[0].braced
                       ? construct(c, INIT_LIST, mi[0].args, 1, mi[0].at)
@@ -992,14 +996,19 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
     struct meminit_raw **bby = xcalloc((size_t)(c->nbases ? c->nbases : 1),
                                        sizeof *bby);
     for (int i = 0; i < n; i++) {
-        if (c->name && strcmp(mi[i].name, c->name) == 0)
+        if (mi[i].cls ? mi[i].cls == c
+                      : c->name && strcmp(mi[i].name, c->name) == 0)
             cx_error(mi[i].at, "a delegating constructor initializes "
                                "nothing else");
         int b;
         for (b = 0; b < c->nbases; b++)
-            if (c->bases[b].cls->name &&
-                strcmp(c->bases[b].cls->name, mi[i].name) == 0)
+            if (mi[i].cls ? c->bases[b].cls == mi[i].cls
+                          : c->bases[b].cls->name &&
+                            strcmp(c->bases[b].cls->name, mi[i].name) == 0)
                 break;
+        if (mi[i].cls && b == c->nbases)
+            cx_error(mi[i].at, "'%s' is not a direct base of '%s'",
+                     mi[i].name, c->name ? c->name : "class");
         if (b < c->nbases) {
             if (bby[b])
                 cx_error(mi[i].at, "base '%s' is initialized twice",

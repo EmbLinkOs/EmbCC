@@ -1251,7 +1251,7 @@ struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
     if (fn->is_deleted)
         cx_error(at, "use of deleted function '%s'", fn->name);
     struct cty *ret = fn->type->to;
-    if (ret->k == CT_CLASS && !ret->cls->complete)
+    if (ret->k == CT_CLASS && !ct_is_complete(ret))
         cx_error(at, "calling '%s', which returns incomplete '%s'", fn->name,
                  ct_name(ret));
     if ((fn->is_implicit || fn->is_defaulted) && !fn->defined)
@@ -1287,7 +1287,7 @@ static struct cexpr *call_alloc_op(const char *name, struct cty *t,
                                    int global, struct cexpr **args, int na,
                                    const struct ctok *at)
 {
-    if (!global && t->k == CT_CLASS && t->cls->complete) {
+    if (!global && t->k == CT_CLASS && ct_is_complete(t)) {
         struct csym *y = scope_find_here(t->cls->scope, name);
         if (y && y->k == CS_FUNC) {
             struct cfunc *f = resolve(y->fns, NULL, args, na, NULL, name);
@@ -1508,6 +1508,37 @@ struct cexpr *init_object(struct cty *t, enum init_form form,
     return NULL;
 }
 
+/* An element of an expression list — an argument, an initializer: the
+ * expressions it gives appended to v[*n] (capacity *cap). A pattern ending
+ * in `...` gives one per element of the packs it names. */
+static void list_element(struct cexpr ***v, int *n, int *cap)
+{
+    struct csym *packs[8];
+    int ell;
+    int ex = expansion_at(0, packs, 8, &ell);
+    if (ex < 0)
+        cx_error(&cx_toks[ell], "'...' expands no parameter pack");
+    int reps = ex > 0 ? expansion_length(packs, ex) : 1;
+    int start = cx_pos;
+    for (int e = 0; e < reps; e++) {
+        cx_pos = start;
+        for (int k = 0; k < ex; k++)
+            pack_push(packs[k], e);
+        if (*n == *cap) {
+            *cap = *cap ? *cap * 2 : 8;
+            *v = xrealloc(*v, (size_t)*cap * sizeof **v);
+        }
+        (*v)[(*n)++] = cx_kind() == TOK_LBRACE ? parse_braced_list()
+                                               : expr_parse_assign();
+        if (ex > 0)
+            pack_pop(ex);
+    }
+    if (ex > 0) {
+        cx_pos = ell;
+        cx_expect(TOK_ELLIPSIS, "'...'");
+    }
+}
+
 struct cexpr *parse_braced_list(void)
 {
     struct cexpr *L = ex_new(E_INITLIST, NULL, VC_PRVALUE);
@@ -1517,13 +1548,7 @@ struct cexpr *parse_braced_list(void)
         if (cx_kind() == TOK_DOT && cx_kind_at(1) == TOK_IDENT)
             cx_error(cx_cur(), "designated initializers are not supported "
                                "yet (CX7)");
-        struct cexpr *e = cx_kind() == TOK_LBRACE ? parse_braced_list()
-                                                  : expr_parse_assign();
-        if (L->na == cap) {
-            cap = cap ? cap * 2 : 8;
-            L->a = xrealloc(L->a, (size_t)cap * sizeof *L->a);
-        }
-        L->a[L->na++] = e;
+        list_element(&L->a, &L->na, &cap);
         if (!cx_accept(TOK_COMMA))
             break;
     }
@@ -1599,7 +1624,7 @@ static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
     struct fnset fs = { NULL, 0, 0 };
     struct cexpr *l = args[0];
     if (l->t && l->t->k == CT_CLASS) {
-        if (!l->t->cls->complete)
+        if (!ct_is_complete(l->t))
             ex_error(l, "'%s' on incomplete '%s'", name, ct_name(l->t));
         struct csym *y = scope_find_here(l->t->cls->scope, name);
         if (y && y->k == CS_FUNC)
@@ -1641,7 +1666,7 @@ static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
  * conversion function to a scalar — if it has exactly one. */
 static struct cexpr *class_to_builtin(struct cexpr *e)
 {
-    if (!e->t || e->t->k != CT_CLASS || !e->t->cls->complete)
+    if (!e->t || e->t->k != CT_CLASS || !ct_is_complete(e->t))
         return e;
     struct cfunc *only = NULL;
     int n = 0;
@@ -2250,12 +2275,7 @@ static struct cexpr *functional_cast(struct cty *t, const struct ctok *at)
     struct cexpr **args = NULL;
     int na = 0, cap = 0;
     while (cx_kind() != TOK_RPAREN) {
-        if (na == cap) {
-            cap = cap ? cap * 2 : 4;
-            args = xrealloc(args, (size_t)cap * sizeof *args);
-        }
-        args[na++] = cx_kind() == TOK_LBRACE ? parse_braced_list()
-                                             : expr_parse_assign();
+        list_element(&args, &na, &cap);
         if (!cx_accept(TOK_COMMA))
             break;
     }
@@ -2483,7 +2503,7 @@ static struct cexpr *parse_delete(const struct ctok *at, int global)
     e->alloc_t = t;
     e->is_array = arr;
     if (t->k == CT_CLASS) {
-        if (!t->cls->complete)
+        if (!ct_is_complete(t))
             cx_error(at, "delete of a pointer to incomplete '%s'",
                      ct_name(t));
         e->dtor = class_dtor(t->cls);
@@ -2568,21 +2588,29 @@ static struct cty *builtin_type(const char *n)
     return NULL;
 }
 
+static int call_args_rest(struct cexpr ***out);
+
 /* ( arguments ): the count, and the arguments in *out. */
 static int call_args(struct cexpr ***out)
+{
+    cx_expect(TOK_LPAREN, "'('");
+    return call_args_rest(out);
+}
+
+/* After `(`: arguments to the `)`. */
+int expr_call_args_rest(struct cexpr ***out)
+{
+    return call_args_rest(out);
+}
+
+static int call_args_rest(struct cexpr ***out)
 {
     struct cexpr **args = NULL;
     int na = 0, cap = 0;
     int saved = cx_in_targs;
     cx_in_targs = 0;
-    cx_expect(TOK_LPAREN, "'('");
     while (cx_kind() != TOK_RPAREN) {
-        if (na == cap) {
-            cap = cap ? cap * 2 : 4;
-            args = xrealloc(args, (size_t)cap * sizeof *args);
-        }
-        args[na++] = cx_kind() == TOK_LBRACE ? parse_braced_list()
-                                             : expr_parse_assign();
+        list_element(&args, &na, &cap);
         if (!cx_accept(TOK_COMMA))
             break;
     }
@@ -2828,6 +2856,148 @@ static struct cexpr *parse_string(void)
 
 static struct cexpr *parse_postfix(struct cexpr *e);
 
+static int is_assign_op(enum tok_kind k);
+
+static int fold_op(enum tok_kind k)
+{
+    switch (k) {
+    case TOK_PLUS: case TOK_MINUS: case TOK_STAR: case TOK_SLASH:
+    case TOK_PERCENT: case TOK_CARET: case TOK_AMP: case TOK_PIPE:
+    case TOK_SHL: case TOK_SHR: case TOK_EQEQ: case TOK_NEQ: case TOK_LT:
+    case TOK_GT: case TOK_LE: case TOK_GE: case TOK_ANDAND: case TOK_OROR:
+    case TOK_COMMA:
+        return 1;
+    default:
+        return is_assign_op(k);
+    }
+}
+
+/* At `(`: a fold expression's `...` (13.7.4 / 7.5.6), else -1. */
+static int fold_at(void)
+{
+    int depth = 0;
+    for (int i = cx_pos + 1; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_EOF)
+            return -1;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
+            depth++;
+            continue;
+        }
+        if (k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE) {
+            if (depth-- == 0)
+                return -1;
+            continue;
+        }
+        if (depth || k != TOK_ELLIPSIS)
+            continue;
+        enum tok_kind prev = cx_toks[i - 1].t.kind;
+        enum tok_kind next = cx_toks[i + 1].t.kind;
+        if (i == cx_pos + 1 && fold_op(next))
+            return i;
+        if (fold_op(prev) && (next == TOK_RPAREN || next == prev))
+            return i;
+    }
+    return -1;
+}
+
+static struct cexpr *fold_apply(enum tok_kind op, struct cexpr *l,
+                                struct cexpr *r)
+{
+    if (op == TOK_COMMA)
+        return comma(l, r);
+    if (is_assign_op(op))
+        return assign(op, l, r);
+    return binary(op, l, r);
+}
+
+/* One operand of a fold, tokens from..to: a cast-expression. */
+static struct cexpr *fold_operand(int from, int to)
+{
+    cx_pos = from;
+    struct cexpr *e = parse_cast();
+    if (cx_pos != to)
+        cx_error(cx_cur(), "a fold expression's operand must be a "
+                           "cast-expression (parenthesize it)");
+    return e;
+}
+
+/* ( ... op E ), ( E op ... ), ( I op ... op E ), ( E op ... op I ): E
+ * once per element of the packs it names, joined by op to the left or
+ * right, around I if given. */
+static struct cexpr *parse_fold(int ell)
+{
+    const struct ctok *at = cx_cur();
+    int open = cx_pos, close = cx_pos;
+    cx_skip_balanced();
+    close = cx_pos - 1;
+    enum tok_kind op;
+    int left, e_from, e_to, i_from = -1, i_to = -1;
+    struct csym *packs[8];
+    if (ell == open + 1) {
+        op = cx_toks[ell + 1].t.kind;
+        left = 1;
+        e_from = ell + 2;
+        e_to = close;
+    } else {
+        op = cx_toks[ell - 1].t.kind;
+        if (cx_toks[ell + 1].t.kind == TOK_RPAREN) {
+            left = 0;
+            e_from = open + 1;
+            e_to = ell - 1;
+        } else if (packs_in(open + 1, ell - 1, packs, 8) > 0) {
+            left = 0;
+            e_from = open + 1;
+            e_to = ell - 1;
+            i_from = ell + 2;
+            i_to = close;
+        } else {
+            left = 1;
+            i_from = open + 1;
+            i_to = ell - 1;
+            e_from = ell + 2;
+            e_to = close;
+        }
+    }
+    int ex = packs_in(e_from, e_to, packs, 8);
+    if (ex <= 0)
+        cx_error(at, "a fold expression's operand names no parameter pack");
+    int len = expansion_length(packs, ex);
+    struct cexpr **el = xcalloc((size_t)(len + 1), sizeof *el);
+    for (int e = 0; e < len; e++) {
+        for (int k = 0; k < ex; k++)
+            pack_push(packs[k], e);
+        el[e] = fold_operand(e_from, e_to);
+        pack_pop(ex);
+    }
+    struct cexpr *acc = i_from >= 0 ? fold_operand(i_from, i_to) : NULL;
+    cx_pos = close + 1;
+    if (len == 0 && !acc) {
+        /* an empty unary fold: its operator's identity */
+        if (op == TOK_ANDAND || op == TOK_OROR)
+            return ex_int(op == TOK_ANDAND, ct_basic(CT_BOOL));
+        if (op == TOK_COMMA)
+            return ex_cast(ex_int(0, ct_basic(CT_INT)),
+                           ct_basic(CT_VOID));
+        cx_error(at, "a unary fold over '%s' of an empty pack",
+                 tok_describe(&cx_toks[ell - 1].t));
+    }
+    if (left) {
+        int i = 0;
+        if (!acc)
+            acc = el[i++];
+        for (; i < len; i++)
+            acc = fold_apply(op, acc, el[i]);
+    } else {
+        int i = len - 1;
+        if (!acc)
+            acc = el[i--];
+        for (; i >= 0; i--)
+            acc = fold_apply(op, el[i], acc);
+    }
+    return acc;
+}
+
 static struct cexpr *parse_primary(void)
 {
     const struct ctok *at = cx_cur();
@@ -2876,6 +3046,11 @@ static struct cexpr *parse_primary(void)
         cx_advance();
         return ex_this();
     case TOK_LPAREN:
+        {
+            int ell = fold_at();
+            if (ell >= 0)
+                return parse_fold(ell);
+        }
         if (cx_kind_at(1) == TOK_LBRACE) {
             /* GNU statement expression */
             cx_advance();
@@ -3327,8 +3502,19 @@ static struct cexpr *parse_unary(void)
         return unary(k, parse_cast());
     case TOK_KW_SIZEOF: case TOK_KW_ALIGNOF: {
         cx_advance();
-        if (cx_kind() == TOK_ELLIPSIS)
-            cx_error(at, "sizeof... is not supported yet (CX4)");
+        if (k == TOK_KW_SIZEOF && cx_accept(TOK_ELLIPSIS)) {
+            /* sizeof...(pack): its length */
+            cx_expect(TOK_LPAREN, "'(' after 'sizeof...'");
+            const struct ctok *nt = cx_cur();
+            if (cx_kind() != TOK_IDENT)
+                cx_error(nt, "expected a parameter pack's name");
+            struct csym *y = lookup_raw(cx_scope, nt->t.text);
+            if (!y || y->k != CS_PACK)
+                cx_error(nt, "'%s' is not a parameter pack", nt->t.text);
+            cx_advance();
+            cx_expect(TOK_RPAREN, "')'");
+            return ex_int(pack_length(y), ct_size_t());
+        }
         struct cty *t;
         if (cx_kind() == TOK_LPAREN && paren_type_id()) {
             cx_advance();

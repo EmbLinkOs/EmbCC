@@ -103,6 +103,9 @@ struct cty {
     struct cexpr **defargs;
     int *defarg_toks;         /* FUNC in a template pattern: default
                                * arguments as tokens, parsed per use */
+    struct cpgroup *pgroups;  /* FUNC in an instance: the parameters
+                               * expanded function parameter packs gave */
+    int npgroups;
     /* CT_TPARAM: its name; CT_TID: the template and its arguments; CT_DEP:
      * the nested names after `to` */
     const char *tpname;
@@ -209,6 +212,12 @@ struct cvar {
     const char *file;
 };
 
+/* A function parameter pack as expanded: parameters first..first+n-1. */
+struct cpgroup {
+    const char *name;
+    int first, n;
+};
+
 struct csym {
     enum csym_kind k;
     const char *name;
@@ -223,6 +232,7 @@ struct csym {
     struct ctarg *pack;       /* PACK: its elements */
     int npack;
     struct cvar **pvars;      /* PACK of function parameters: the variables */
+    int pack_param;           /* in a pattern: a template parameter pack */
     long value;               /* ENUMERATOR */
     int access;               /* in a class: CA_* */
     struct csym *next;        /* in the scope's list */
@@ -259,6 +269,9 @@ struct csym *scope_find_here(struct cscope *s, const char *name);
 struct csym *scope_find_tag(struct cscope *s, const char *name);
 /* Unqualified lookup from `from` outward (through using-directives). */
 struct csym *lookup(struct cscope *from, const char *name);
+/* ... a parameter pack staying one (lookup gives the element being
+ * expanded) */
+struct csym *lookup_raw(struct cscope *from, const char *name);
 /* ... only classes and enums (an elaborated type specifier) */
 struct csym *lookup_tag(struct cscope *from, const char *name);
 /* Qualified lookup: name as a member of namespace or class scope `in`. */
@@ -292,6 +305,8 @@ struct ctarg {
     int nelems;
     const char *mexpr;        /* TP_VALUE in a pattern, dependent: its
                                * Itanium expression encoding (in X...E) */
+    int expansion;            /* in a pattern: `pattern...`, elems[0] the
+                               * pattern (it deduces a pack) */
 };
 
 enum { TK_CLASS, TK_FUNC, TK_ALIAS, TK_VAR };
@@ -350,6 +365,10 @@ struct ctemplate {
     int is_extern;            /* `extern template class`: instantiated
                                * elsewhere */
     int has_body;             /* TK_FUNC: its declaration is a definition */
+    int tparam;               /* a template template parameter's
+                               * placeholder (nparams -1): its index + 1 */
+    int tt_pack;              /* ... whose own parameter this (+ 1) is a
+                               * pack */
 };
 
 /* Class template instance: the class for these arguments (made, not yet
@@ -393,6 +412,20 @@ struct cscope *tparam_scope(struct ctparam *ps, int np, struct ctarg *args,
 struct cty *ct_tparam(int index, const char *name);
 /* Does the type mention a template parameter (a pattern)? */
 int ct_dependent(const struct cty *t);
+/* Parameter packs (template.c): while an expansion's pattern is read for
+ * element i, looking up a pack it expands finds that element. */
+void pack_push(struct csym *pack, int index);
+void pack_pop(int n);
+struct csym *pack_current(struct csym *y);   /* the element, or y itself */
+int pack_length(struct csym *y);
+/* The expansion at the cursor, if the element up to its `,` or closer ends
+ * in `...` (angles: `<` `>` nest, in template arguments): the packs its
+ * pattern names (at most max) and where the `...` is. */
+int expansion_at(int angles, struct csym **packs, int max, int *ellipsis);
+int expansion_length(struct csym **packs, int n);
+int packs_in(int from, int to, struct csym **packs, int max);
+int pack_mark(void);                    /* the expansion stack's depth */
+void pack_reset(int mark);
 /* An alias or variable template's instance. */
 struct cty *alias_instance(struct ctemplate *t, struct ctarg *args, int n,
                            const struct ctok *at);
@@ -766,6 +799,7 @@ struct cexpr *init_object(struct cty *t, enum init_form form,
                           struct cexpr **args, int na, const struct ctok *at);
 /* A braced list as written (E_INITLIST with t NULL). */
 struct cexpr *parse_braced_list(void);
+int expr_call_args_rest(struct cexpr ***out);   /* after `(` */
 
 /* ---- statements ---- */
 
@@ -854,6 +888,8 @@ struct cfunc *class_dtor(struct cclass *c);
 /* A constructor's mem-initializer as written: `name(args)` / `name{args}`. */
 struct meminit_raw {
     const char *name;
+    struct cclass *cls;       /* named by a type: a base, or the class
+                               * itself (delegating) */
     struct cexpr **args;
     int na;
     int braced;

@@ -119,6 +119,33 @@ static const char *scope_ident(struct cscope *s)
 }
 
 static void mangle_type(struct mbuf *m, struct cty *t);
+/* A template-id's arguments as written, those for a trailing parameter
+ * pack gathered into one (J ... E), as an instance's are. */
+static struct ctarg *tid_args(struct cty *t, int *n)
+{
+    struct ctemplate *tm = t->tmpl;
+    int pi = -1;
+    for (int i = 0; i < tm->nparams; i++)
+        if (tm->params[i].pack)
+            pi = i;
+    if (pi >= 0 && pi != tm->nparams - 1)
+        return t->targs;
+    if (tm->tparam && tm->tt_pack)
+        pi = tm->tt_pack - 1;
+    if (pi < 0 || *n < pi)
+        return t->targs;
+    if (*n == pi + 1 && t->targs[pi].is_pack && !t->targs[pi].expansion)
+        return t->targs;
+    struct ctarg *r = xcalloc((size_t)(pi + 1), sizeof *r);
+    memcpy(r, t->targs, (size_t)pi * sizeof *r);
+    r[pi].kind = tm->params ? tm->params[pi].kind : t->targs[pi].kind;
+    r[pi].is_pack = 1;
+    r[pi].elems = t->targs + pi;
+    r[pi].nelems = *n - pi;
+    *n = pi + 1;
+    return r;
+}
+
 static const char *type_key(struct cty *t);
 static const char *targs_key(struct ctarg *a, int n);
 static void put_targs(struct mbuf *m, struct ctarg *a, int n);
@@ -355,10 +382,13 @@ static const char *type_key(struct cty *t)
         return cx_fmt("T%ld_", t->n);
     case CT_TID: {
         struct step st[128];
-        int std;
+        int std, na = t->ntargs;
+        struct ctarg *a = tid_args(t, &na);
+        if (t->tmpl->tparam)
+            return cx_fmt("T%d_I%sE", t->tmpl->tparam - 1, targs_key(a, na));
         int n = scope_steps(t->tmpl->scope, st, &std);
         const char *prev = n ? st[n - 1].key : std ? "St" : "";
-        n = add_step(st, n, prev, t->tmpl->name, t->targs, t->ntargs, 1);
+        n = add_step(st, n, prev, t->tmpl->name, a, na, 1);
         return st[n - 1].key;
     }
     case CT_DEP: {
@@ -469,10 +499,25 @@ static void mangle_type(struct mbuf *m, struct cty *t)
     }
     case CT_TID: {
         struct step st[128];
-        int std;
+        int std, na = t->ntargs;
+        struct ctarg *a = tid_args(t, &na);
+        if (t->tmpl->tparam) {
+            /* TT<args>: T_ I ... E, both candidates */
+            const char *key = type_key(t);
+            int i = sub_find(m, key);
+            if (i >= 0) {
+                put_sub(m, i);
+                return;
+            }
+            struct cty *tp = ct_tparam(t->tmpl->tparam - 1, t->tmpl->name);
+            mangle_type(m, tp);
+            put_targs(m, a, na);
+            sub_add(m, key);
+            return;
+        }
         int n = scope_steps(t->tmpl->scope, st, &std);
         const char *prev = n ? st[n - 1].key : std ? "St" : "";
-        n = add_step(st, n, prev, t->tmpl->name, t->targs, t->ntargs, 1);
+        n = add_step(st, n, prev, t->tmpl->name, a, na, 1);
         put_name(m, st, n, std, 0);
         return;
     }
@@ -543,6 +588,14 @@ static void put_mexpr(struct mbuf *m, const char *x)
             mangle_type(m, mtypes[i]);
             continue;
         }
+        if (*x == 2) {                      /* a parameter, as an operand */
+            int i = 0;
+            for (x++; *x != 2; x++)
+                i = i * 10 + (*x - '0');
+            x++;
+            put(m, i == 0 ? "T_" : cx_fmt("T%d_", i - 1));
+            continue;
+        }
         char c[2] = { *x++, 0 };
         put(m, c);
     }
@@ -558,6 +611,14 @@ const char *mexpr_key(const char *x)
                 i = i * 10 + (*x - '0');
             x++;
             k = cx_fmt("%s%s", k, type_key(mtypes[i]));
+            continue;
+        }
+        if (*x == 2) {
+            int i = 0;
+            for (x++; *x != 2; x++)
+                i = i * 10 + (*x - '0');
+            x++;
+            k = cx_fmt("%sT%d_", k, i);
             continue;
         }
         k = cx_fmt("%s%c", k, *x++);
@@ -576,7 +637,13 @@ static const char *targs_key(struct ctarg *a, int n)
     char *k = "";
     for (int i = 0; i < n; i++) {
         struct ctarg *x = &a[i];
-        if (x->is_pack)
+        if (x->expansion && x->elems[0].kind == TP_VALUE)
+            k = cx_fmt("%sXsp%sE", k, x->elems[0].mexpr
+                                      ? mexpr_key(x->elems[0].mexpr)
+                                      : type_key(x->elems[0].vtype));
+        else if (x->expansion)
+            k = cx_fmt("%sDp%s", k, targs_key(x->elems, 1));
+        else if (x->is_pack)
             k = cx_fmt("%sJ%sE", k, targs_key(x->elems, x->nelems));
         else if (x->kind == TP_TYPE)
             k = cx_fmt("%s%s", k, type_key(x->type));
@@ -584,7 +651,7 @@ static const char *targs_key(struct ctarg *a, int n)
             k = cx_fmt("%sX%sE", k, mexpr_key(x->mexpr));
         else if (x->kind == TP_VALUE)
             k = x->vtype && x->vtype->k == CT_TPARAM
-                ? cx_fmt("%sT%ld_", k, x->vtype->n)
+                ? cx_fmt("%sXT%ld_E", k, x->vtype->n)
                 : cx_fmt("%sL%s%s%ldE", k, value_code(x->vtype),
                          x->value < 0 ? "n" : "",
                          x->value < 0 ? -x->value : x->value);
@@ -594,8 +661,44 @@ static const char *targs_key(struct ctarg *a, int n)
     return k;
 }
 
+/* A value template parameter in an expression: T_, T0_ ... (no
+ * substitution candidate there). */
+static void put_param_expr(struct mbuf *m, struct cty *t)
+{
+    put(m, t->n == 0 ? "T_" : cx_fmt("T%ld_", t->n - 1));
+}
+
+/* Dp <type>: a pack expansion `T...` of a type (a substitution
+ * candidate as a whole). */
+static void mangle_dp(struct mbuf *m, struct cty *t)
+{
+    const char *key = cx_fmt("Dp%s", type_key(t));
+    int i = sub_find(m, key);
+    if (i >= 0) {
+        put_sub(m, i);
+        return;
+    }
+    put(m, "Dp");
+    mangle_type(m, t);
+    sub_add(m, key);
+}
+
 static void put_targ(struct mbuf *m, struct ctarg *x)
 {
+    if (x->expansion) {
+        struct ctarg *p = &x->elems[0];
+        if (p->kind == TP_VALUE) {
+            put(m, "Xsp");                  /* Is... : an expression */
+            if (p->mexpr)
+                put_mexpr(m, p->mexpr);
+            else
+                put_param_expr(m, p->vtype);
+            put(m, "E");
+        } else {
+            mangle_dp(m, p->type);          /* Ts... */
+        }
+        return;
+    }
     if (x->is_pack) {
         put(m, "J");
         for (int i = 0; i < x->nelems; i++)
@@ -618,7 +721,9 @@ static void put_targ(struct mbuf *m, struct ctarg *x)
         return;
     }
     if (x->vtype && x->vtype->k == CT_TPARAM) {
-        mangle_type(m, x->vtype);
+        put(m, "X");                        /* the parameter, an expression */
+        put_param_expr(m, x->vtype);
+        put(m, "E");
         return;
     }
     if (x->vtype && x->vtype->k == CT_ENUM) {
@@ -770,11 +875,10 @@ const char *mangle_func(struct cfunc *f)
     for (int i = 0; i < ft->np; i++) {
         struct cty *pt = ft->params[i];
         if (pt->pack_expansion) {
-            put(&m, "Dp");                  /* Ts... */
             struct cty *e = xmalloc(sizeof *e);
             *e = *pt;
             e->pack_expansion = 0;
-            mangle_type(&m, e);
+            mangle_dp(&m, e);               /* Ts... */
             continue;
         }
         mangle_type(&m, pt);

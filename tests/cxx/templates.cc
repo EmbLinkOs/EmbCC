@@ -3,8 +3,9 @@
 // the class, static members, nested classes; function templates with
 // deduction (T, T*, const T&, T&&, T(&)[N], A<T>) and explicit arguments,
 // preferred less than an equally good non-template; explicit and partial
-// specializations; member templates; alias and variable templates;
-// dependent names; recursion; CRTP; SFINAE.
+// specializations, matched exactly and the most specialized chosen; member
+// templates; alias and variable templates; dependent names; recursion;
+// CRTP; SFINAE.
 // expect-exit: 42
 #include <stdio.h>
 #include <string.h>
@@ -71,6 +72,15 @@ template <> struct Name<int> { static const char *get() { return "int"; } };
 template <class T> struct Name<T *> { static const char *get() { return "pointer"; } };
 template <class T> struct Name<Pair<T>> { static const char *get() { return "pair"; } };
 
+template <class A, class B> struct Which { static const int v = 0; };
+template <class T> struct Which<int, T> { static const int v = 1; };
+template <class T> struct Which<T, T> { static const int v = 2; };
+template <class T> struct Which<T *, int> { static const int v = 3; };
+template <class T> struct Which<T *, T *> { static const int v = 4; };
+template <class T> struct Cv { static const int v = 0; };
+template <class T> struct Cv<const T> { static const int v = 1; };
+template <class T> struct Cv<T *const> { static const int v = 2; };
+
 template <class T> int weight(T) { return 1; }
 template <> int weight<char>(char) { return 100; }
 
@@ -131,6 +141,13 @@ int main()
     check("partial specialization", strcmp(Name<int *>::get(), "pointer") == 0 &&
                                     strcmp(Name<Pair<long>>::get(), "pair") == 0 &&
                                     strcmp(Name<char>::get(), "other") == 0);
+    check("partial specializations match exactly",
+          Which<long, char>::v == 0 && Which<int, char>::v == 1 &&
+          Which<char, char>::v == 2 && Which<char *, int>::v == 3 &&
+          Cv<int>::v == 0 && Cv<int *>::v == 0);
+    check("the most specialized partial specialization",
+          Which<char *, char *>::v == 4 && Which<int *, int *>::v == 4 &&
+          Cv<const int>::v == 1 && Cv<int *const>::v == 2);
     check("function specialization", weight('a') == 100 && weight(1) == 1);
 
     PairOf<short> ps = { 1, 2 };

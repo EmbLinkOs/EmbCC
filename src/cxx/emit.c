@@ -1052,6 +1052,10 @@ static char *eaddr(struct cexpr *e)
         if (e->lvcast)
             return cx_fmt("((%s)%s)", ctype(ct_ptr(e->t)), eaddr(e->a[0]));
         break;
+    case E_STR:
+        /* a string literal is an lvalue array: its address, converted
+         * (the C side takes no `&"..."`) */
+        return cx_fmt("((%s)%s)", ctype(ct_ptr(e->t)), str_lit(e));
     case E_TEMP: {
         char *lv = materialize(e->t, e->a[0]);
         /* (*({ ...; &t; })) -> ({ ...; &t; }) */
@@ -2354,6 +2358,19 @@ char *cx_emit_unit(void)
     if (need_guard)
         sb_put(&out, "int __cxa_guard_acquire(long long *);\n"
                      "void __cxa_guard_release(long long *);\n");
+    /* __builtin_memset/memcpy are the libc functions to the C side, which
+     * wants them declared */
+    const char *parts[] = { sb_str(&out_code), sb_str(&out_vars),
+                            sb_str(&out_init), sb_str(&out_thunks) };
+    int use_set = 0, use_cpy = 0;
+    for (int i = 0; i < 4; i++) {
+        use_set |= parts[i] && strstr(parts[i], "__builtin_memset(") != NULL;
+        use_cpy |= parts[i] && strstr(parts[i], "__builtin_memcpy(") != NULL;
+    }
+    if (use_set)
+        sb_put(&out, "void *memset(void *, int, unsigned long);\n");
+    if (use_cpy)
+        sb_put(&out, "void *memcpy(void *, const void *, unsigned long);\n");
     for (struct cfunc *f = cx_funcs; f; f = f->all_next)
         if (f->declared)
             emit_prototype(f);

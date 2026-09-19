@@ -9,6 +9,7 @@
  * complete — they may use members declared after them. */
 #include "cxx.h"
 
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -726,7 +727,12 @@ struct declarator {
     struct cty *conv_type;    /* DN_CONV */
     const struct ctok *at;
     struct attrs a;
+    int pack;                 /* `...` before the name: a parameter pack */
 };
+
+/* parse_declarator may take a `...` before the name (a parameter pack's
+ * declarator: parse_params decided it is one) */
+static int decl_pack_ok;
 
 static const char *op_spelling(enum tok_kind k)
 {
@@ -868,6 +874,8 @@ static void parse_declarator_id(struct declarator *d, int mode)
 
 /* At `(` after a name: parameters follow (a function declarator), rather
  * than an initializer. `T x();` declares a function (the standard's rule). */
+static struct cty *parse_params(void);
+
 static int params_follow(void)
 {
     enum tok_kind k = cx_kind_at(1);
@@ -877,7 +885,23 @@ static int params_follow(void)
     cx_advance();
     int r = at_type_start();
     cx_pos = save;
-    return r;
+    if (!r)
+        return 0;
+    /* a type first: parameters, if they parse as such — `T x(A(5))`
+     * initializes x with a temporary (9.3.3's disambiguation) */
+    struct parse_state *st = parse_save();
+    jmp_buf jb;
+    void *saved = cx_sfinae;
+    if (setjmp(jb)) {
+        cx_sfinae = saved;
+        parse_restore(st);
+        return 0;
+    }
+    cx_sfinae = &jb;
+    parse_params();
+    cx_sfinae = saved;
+    parse_restore(st);
+    return 1;
 }
 
 /* At `(` before any name: a nested declarator `(*p)` rather than a
@@ -1044,6 +1068,11 @@ static struct cty *parse_declarator(struct cty *t, struct declarator *d,
 {
     parse_attrs(&d->a);
     t = ptr_ops(t, mode);
+    if (decl_pack_ok && cx_kind() == TOK_ELLIPSIS) {
+        cx_advance();
+        d->pack = 1;
+        decl_pack_ok = 0;
+    }
     if (cx_kind() == TOK_LPAREN && !(mode & DK_NEW) && nested_follows(mode)) {
         int open = cx_pos;
         cx_skip_balanced();
@@ -1064,8 +1093,100 @@ static struct cty *parse_declarator(struct cty *t, struct declarator *d,
     return parse_suffixes(t, d, mode, d->name != NULL);
 }
 
+/* At a parameter declaration: is it a pack, a `...` at its top level
+ * after a type naming a pack (`Ts... args`, `const Ts&...`)? -1: no (a
+ * bare or C-style `...` is not); else how many bound packs it names (0 in
+ * a pattern). *end: where the declaration ends. */
+static int param_expansion(struct csym **packs, int max, int *end)
+{
+    int sp = 0, ell = -1, i;
+    for (i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_EOF)
+            return -1;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE ||
+            k == TOK_LT) {
+            sp++;
+            continue;
+        }
+        if (k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE) {
+            if (sp == 0)
+                break;
+            sp--;
+            continue;
+        }
+        if (k == TOK_GT || k == TOK_SHR) {
+            sp -= k == TOK_SHR && sp >= 2 ? 2 : sp > 0 ? 1 : 0;
+            continue;
+        }
+        if (sp == 0 && (k == TOK_COMMA || k == TOK_ASSIGN || k == TOK_SEMI))
+            break;
+        if (sp == 0 && k == TOK_ELLIPSIS && ell < 0)
+            ell = i;
+    }
+    *end = i;
+    if (ell <= cx_pos)
+        return -1;
+    int np = 0, pattern = 0;
+    for (int j = cx_pos; j < ell; j++) {
+        if (cx_toks[j].t.kind != TOK_IDENT)
+            continue;
+        struct csym *y = lookup_raw(cx_scope, cx_toks[j].t.text);
+        if (!y)
+            continue;
+        if (y->pack_param)
+            pattern = 1;
+        if (y->k != CS_PACK || pack_current(y) != y)
+            continue;
+        int have = 0;
+        for (int k = 0; k < np; k++)
+            have |= packs[k] == y;
+        if (!have && np < max)
+            packs[np++] = y;
+    }
+    return np ? np : pattern ? 0 : -1;
+}
+
+/* One parameter's type and name, `...` taken if it is a pack. */
+static struct cty *parse_param(struct declarator *d, int pack)
+{
+    struct dspec ds;
+    const struct ctok *at = cx_cur();
+    parse_dspec(&ds);
+    if (!ds.type)
+        cx_error(at, "expected a parameter type before %s",
+                 tok_describe(&cx_cur()->t));
+    memset(d, 0, sizeof *d);
+    decl_pack_ok = pack;
+    struct cty *t = parse_declarator(ds.type, d, DK_NAMED | DK_ABSTRACT);
+    decl_pack_ok = 0;
+    if (d->saved)
+        cx_scope = d->saved;
+    if (pack && !d->pack)
+        cx_error(at, "expected '...' in a parameter pack's declarator");
+    if (t->k == CT_AUTO)
+        cx_error(at, "an 'auto' parameter (an abbreviated "
+                     "template, C++20) is not supported yet (CX7)");
+    if (t->k == CT_VOID)
+        cx_error(at, "a parameter of type void");
+    if (t->k == CT_ARRAY)
+        return ct_qual(ct_ptr(t->to), t->q);
+    if (t->k == CT_FUNC)
+        return ct_ptr(t);
+    return t;
+}
+
+static struct cty *pack_marked(struct cty *t)
+{
+    struct cty *c = xmalloc(sizeof *c);
+    *c = *t;
+    c->pack_expansion = 1;
+    return c;
+}
+
 /* ( parameter-declaration-clause ) cv ref noexcept: a function type with
- * no return type yet. */
+ * no return type yet. A function parameter pack is one parameter in a
+ * pattern (its type marked), its elements' parameters in an instance. */
 static struct cty *parse_params(void)
 {
     cx_expect(TOK_LPAREN, "'('");
@@ -1074,6 +1195,9 @@ static struct cty *parse_params(void)
     struct cty **pdecl = xmalloc((size_t)cap * sizeof *pdecl);
     const char **names = xmalloc((size_t)cap * sizeof *names);
     struct cexpr **defs = xmalloc((size_t)cap * sizeof *defs);
+    struct cpgroup *groups = NULL;
+    int ngroups = 0;
+    int saved_ok = decl_pack_ok;
     if (cx_kind() == TOK_KW_VOID && cx_kind_at(1) == TOK_RPAREN) {
         cx_advance();
     } else {
@@ -1082,45 +1206,59 @@ static struct cty *parse_params(void)
                 variadic = 1;
                 break;
             }
-            struct dspec ds;
-            const struct ctok *at = cx_cur();
-            parse_dspec(&ds);
-            if (!ds.type)
-                cx_error(at, "expected a parameter type before %s",
-                         tok_describe(&cx_cur()->t));
+            struct csym *packs[8];
+            int end;
+            int ex = param_expansion(packs, 8, &end);
+            int reps = ex > 0 ? expansion_length(packs, ex) : 1;
+            int start = cx_pos, first = np;
             struct declarator d;
             memset(&d, 0, sizeof d);
-            struct cty *t = parse_declarator(ds.type, &d,
-                                             DK_NAMED | DK_ABSTRACT);
-            if (d.saved)
-                cx_scope = d.saved;
-            if (t->k == CT_AUTO)
-                cx_error(at, "an 'auto' parameter (an abbreviated "
-                             "template) is not supported yet (CX4)");
-            if (t->k == CT_VOID)
-                cx_error(at, "a parameter of type void");
-            struct cty *adj = t;
-            if (t->k == CT_ARRAY)
-                adj = ct_qual(ct_ptr(t->to), t->q);
-            else if (t->k == CT_FUNC)
-                adj = ct_ptr(t);
-            if (np == cap) {
-                cap *= 2;
-                params = xrealloc(params, (size_t)cap * sizeof *params);
-                pdecl = xrealloc(pdecl, (size_t)cap * sizeof *pdecl);
-                names = xrealloc(names, (size_t)cap * sizeof *names);
-                defs = xrealloc(defs, (size_t)cap * sizeof *defs);
+            for (int e = 0; e < reps; e++) {
+                cx_pos = start;
+                for (int k = 0; k < ex; k++)
+                    pack_push(packs[k], e);
+                struct cty *adj = parse_param(&d, ex >= 0);
+                if (ex > 0)
+                    pack_pop(ex);
+                if (np + 1 >= cap) {
+                    cap *= 2;
+                    params = xrealloc(params, (size_t)cap * sizeof *params);
+                    pdecl = xrealloc(pdecl, (size_t)cap * sizeof *pdecl);
+                    names = xrealloc(names, (size_t)cap * sizeof *names);
+                    defs = xrealloc(defs, (size_t)cap * sizeof *defs);
+                }
+                defs[np] = NULL;
+                params[np] = ct_unqual(adj);
+                pdecl[np] = adj;
+                if (ex == 0) {
+                    params[np] = pack_marked(params[np]);
+                    pdecl[np] = pack_marked(adj);
+                }
+                names[np] = d.name;
+                np++;
             }
-            defs[np] = NULL;
-            if (cx_accept(TOK_ASSIGN)) {
-                defs[np] = cx_kind() == TOK_LBRACE ? parse_braced_list()
-                                                   : expr_parse_assign();
+            if (ex > 0) {
+                if (reps == 0)
+                    cx_pos = end;
+                groups = xrealloc(groups, (size_t)(ngroups + 1) *
+                                          sizeof *groups);
+                groups[ngroups].name = d.name;
+                groups[ngroups].first = first;
+                groups[ngroups].n = reps;
+                ngroups++;
+                if (reps == 0 && !d.name) {
+                    /* the name, from the tokens: an empty pack's */
+                    for (int j = start; j < end; j++)
+                        if (cx_toks[j].t.kind == TOK_ELLIPSIS &&
+                            cx_toks[j + 1].t.kind == TOK_IDENT)
+                            groups[ngroups - 1].name = cx_toks[j + 1].t.text;
+                }
+            }
+            if (ex < 0 && cx_accept(TOK_ASSIGN)) {
+                defs[np - 1] = cx_kind() == TOK_LBRACE ? parse_braced_list()
+                                                       : expr_parse_assign();
                 anydef = 1;
             }
-            params[np] = ct_unqual(adj);
-            pdecl[np] = adj;
-            names[np] = d.name;
-            np++;
             if (cx_accept(TOK_COMMA))
                 continue;
             if (cx_accept(TOK_ELLIPSIS))
@@ -1128,10 +1266,13 @@ static struct cty *parse_params(void)
             break;
         }
     }
+    decl_pack_ok = saved_ok;
     cx_expect(TOK_RPAREN, "')' to close the parameters");
     struct cty *ft = ct_func(NULL, params, np, variadic);
     ft->pdecl = pdecl;
     ft->pnames = names;
+    ft->pgroups = groups;
+    ft->npgroups = ngroups;
     ft->defargs = anydef ? defs : NULL;
     ft->fq = parse_cv();
     if (cx_kind() == TOK_AMP) {
@@ -1452,6 +1593,81 @@ static int static_disc(struct cfunc *fn, const char *name)
     return n;
 }
 
+/* At a mem-initializer: if it is `pattern...`, the packs the pattern
+ * names and the `...`'s position; 0 if not (-1: names none). */
+static int meminit_expansion(struct csym **packs, int max, int *ell)
+{
+    int i = cx_pos, ang = 0;
+    for (; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_EOF)
+            return 0;
+        if (k == TOK_LT)
+            ang++;
+        else if (k == TOK_GT)
+            ang--;
+        else if (k == TOK_SHR)
+            ang -= 2;
+        else if (k == TOK_LPAREN || k == TOK_LBRACE || k == TOK_LBRACKET) {
+            if (ang <= 0 && k != TOK_LBRACKET)
+                break;
+            int save = cx_pos;
+            cx_pos = i;
+            cx_skip_balanced();
+            i = cx_pos - 1;
+            cx_pos = save;
+        }
+    }
+    int save = cx_pos;
+    cx_pos = i;
+    cx_skip_balanced();
+    int after = cx_pos;
+    cx_pos = save;
+    if (cx_toks[after].t.kind != TOK_ELLIPSIS)
+        return 0;
+    *ell = after;
+    int np = packs_in(cx_pos, after, packs, max);
+    return np ? np : -1;
+}
+
+/* One mem-initializer: a member's name, or a type (a base, or the class
+ * itself), then ( arguments ) or { list }. */
+static void parse_meminit(struct meminit_raw *r)
+{
+    const struct ctok *mat = cx_cur();
+    memset(r, 0, sizeof *r);
+    r->at = mat;
+    struct qname q = peek_qname();
+    if (q.bad || cx_kind_at(q.fin) != TOK_IDENT)
+        cx_error(mat, "expected a member name in a mem-initializer");
+    struct csym *y = find_final(q.scope, cx_toks[cx_pos + q.fin].t.text);
+    int is_type = y && (y->k == CS_CLASS || y->k == CS_TYPEDEF ||
+                        (y->k == CS_TEMPLATE &&
+                         cx_kind_at(q.fin + 1) == TOK_LT));
+    if (is_type) {
+        struct dspec ds;
+        r->name = cx_toks[cx_pos + q.fin].t.text;
+        parse_dspec(&ds);
+        if (!ds.type || ds.type->k != CT_CLASS)
+            cx_error(mat, "a mem-initializer's type is not a class");
+        r->cls = ds.type->cls;
+        r->name = r->cls->name ? r->cls->name : r->name;
+    } else {
+        cx_pos += q.fin;
+        r->name = cx_cur()->t.text;
+        cx_advance();
+    }
+    r->braced = cx_kind() == TOK_LBRACE;
+    if (r->braced) {
+        r->args = xmalloc(sizeof *r->args);
+        r->args[0] = parse_braced_list();
+        r->na = 1;
+        return;
+    }
+    cx_expect(TOK_LPAREN, "'(' in a mem-initializer");
+    r->na = expr_call_args_rest(&r->args);
+}
+
 /* Parse a function's definition at the cursor (at `{` or a constructor's
  * `:`), with parameter types from ft (the definition's declarator). */
 static void define_function(struct cfunc *f, struct cty *ft)
@@ -1477,10 +1693,27 @@ static void define_function(struct cfunc *f, struct cty *ft)
         struct cvar *v = new_local(n, pt, at);
         v->is_param = 1;
         f->params[i] = v;
-        if (n) {
+        int in_pack = 0;
+        for (int g = 0; g < ft->npgroups; g++)
+            in_pack |= i >= ft->pgroups[g].first &&
+                       i < ft->pgroups[g].first + ft->pgroups[g].n;
+        if (in_pack && n)
+            v->cname = cx_fmt("%s__%d", n, cx_uid());
+        else if (n) {
             struct csym *y = scope_add(ps, CS_VAR, n);
             y->var = v;
         }
+    }
+    /* a function parameter pack: its name stands for its parameters */
+    for (int g = 0; g < ft->npgroups; g++) {
+        struct cpgroup *pg = &ft->pgroups[g];
+        if (!pg->name)
+            continue;
+        struct csym *y = scope_add(ps, CS_PACK, pg->name);
+        y->npack = pg->n;
+        y->pvars = xcalloc((size_t)(pg->n ? pg->n : 1), sizeof *y->pvars);
+        for (int k = 0; k < pg->n; k++)
+            y->pvars[k] = f->params[pg->first + k];
     }
     if (f->cls && !f->is_static) {
         struct cvar *tv = new_local("this", NULL, at);
@@ -1496,46 +1729,26 @@ static void define_function(struct cfunc *f, struct cty *ft)
             cx_error(at, "only a constructor has mem-initializers");
         cx_advance();
         for (;;) {
-            const struct ctok *mat = cx_cur();
-            /* the name: a member, or the class itself (delegating) */
-            struct qname q = peek_qname();
-            if (q.bad || cx_kind_at(q.fin) != TOK_IDENT)
-                cx_error(mat, "expected a member name in a mem-initializer");
-            cx_pos += q.fin;
-            const char *name = cx_cur()->t.text;
-            cx_advance();
-            if (nmi == capmi) {
-                capmi = capmi ? capmi * 2 : 8;
-                mi = xrealloc(mi, (size_t)capmi * sizeof *mi);
-            }
-            struct meminit_raw *r = &mi[nmi++];
-            r->name = name;
-            r->at = mat;
-            r->braced = cx_kind() == TOK_LBRACE;
-            r->args = NULL;
-            r->na = 0;
-            if (r->braced) {
-                r->args = xmalloc(sizeof *r->args);
-                r->args[0] = parse_braced_list();
-                r->na = 1;
-            } else {
-                cx_expect(TOK_LPAREN, "'(' in a mem-initializer");
-                int cap = 4;
-                r->args = xmalloc((size_t)cap * sizeof *r->args);
-                while (cx_kind() != TOK_RPAREN) {
-                    if (r->na == cap) {
-                        cap *= 2;
-                        r->args = xrealloc(r->args,
-                                           (size_t)cap * sizeof *r->args);
-                    }
-                    r->args[r->na++] = cx_kind() == TOK_LBRACE
-                                       ? parse_braced_list()
-                                       : expr_parse_assign();
-                    if (!cx_accept(TOK_COMMA))
-                        break;
+            /* `Bases(b)...`: one per element of the packs named */
+            struct csym *packs[8];
+            int ell = -1;
+            int ex = meminit_expansion(packs, 8, &ell);
+            int reps = ex > 0 ? expansion_length(packs, ex) : 1;
+            int start = cx_pos;
+            for (int e = 0; e < reps; e++) {
+                cx_pos = start;
+                for (int k = 0; k < ex; k++)
+                    pack_push(packs[k], e);
+                if (nmi == capmi) {
+                    capmi = capmi ? capmi * 2 : 8;
+                    mi = xrealloc(mi, (size_t)capmi * sizeof *mi);
                 }
-                cx_expect(TOK_RPAREN, "')'");
+                parse_meminit(&mi[nmi++]);
+                if (ex > 0)
+                    pack_pop(ex);
             }
+            if (ex > 0)
+                cx_pos = ell + 1;
             if (!cx_accept(TOK_COMMA))
                 break;
         }
@@ -1834,6 +2047,9 @@ static struct cscope *elaborated_home(void)
     return s;
 }
 
+static void add_base(struct cclass *c, const struct ctok *at, int virt,
+                     int access, int *cap);
+
 /* base-specifier-list: [virtual] [access] [virtual] class-name, ... */
 static void parse_bases(struct cclass *c)
 {
@@ -1849,6 +2065,44 @@ static void parse_bases(struct cclass *c)
             else if (cx_accept(TOK_CX_PRIVATE)) access = CA_PRIVATE;
             else break;
         }
+        /* `Bases...`: a base per element of the packs named */
+        int i = cx_pos, depth = 0;
+        for (; i < cx_ntoks; i++) {
+            enum tok_kind k = cx_toks[i].t.kind;
+            if (k == TOK_EOF || (depth == 0 && (k == TOK_COMMA ||
+                                                k == TOK_LBRACE)))
+                break;
+            if (k == TOK_LT || k == TOK_LPAREN || k == TOK_LBRACKET)
+                depth++;
+            else if (k == TOK_GT || k == TOK_RPAREN || k == TOK_RBRACKET)
+                depth--;
+            else if (k == TOK_SHR)
+                depth -= 2;
+        }
+        if (i > cx_pos && cx_toks[i - 1].t.kind == TOK_ELLIPSIS) {
+            struct csym *packs[8];
+            int ex = packs_in(cx_pos, i - 1, packs, 8);
+            if (ex <= 0)
+                cx_error(at, "'...' expands no parameter pack");
+            int reps = expansion_length(packs, ex), start = cx_pos;
+            for (int e = 0; e < reps; e++) {
+                cx_pos = start;
+                for (int k = 0; k < ex; k++)
+                    pack_push(packs[k], e);
+                add_base(c, at, virt, access, &cap);
+                pack_pop(ex);
+            }
+            cx_pos = i;
+            continue;
+        }
+        add_base(c, at, virt, access, &cap);
+    } while (cx_accept(TOK_COMMA));
+}
+
+static void add_base(struct cclass *c, const struct ctok *at, int virt,
+                     int access, int *cap)
+{
+    {
         struct cty *t;
         int n;
         if (cx_kind() == TOK_CX_DECLTYPE) {
@@ -1876,18 +2130,16 @@ static void parse_bases(struct cclass *c)
         if (virt)
             cx_error(at, "virtual base classes are not supported yet "
                          "(CX3b: vbase and vcall offsets, VTTs)");
-        if (cx_accept(TOK_ELLIPSIS))
-            cx_error(at, "pack expansions are not supported yet (CX4)");
-        if (c->nbases == cap) {
-            cap = cap ? cap * 2 : 4;
-            c->bases = xrealloc(c->bases, (size_t)cap * sizeof *c->bases);
+        if (c->nbases == *cap) {
+            *cap = *cap ? *cap * 2 : 4;
+            c->bases = xrealloc(c->bases, (size_t)*cap * sizeof *c->bases);
         }
         struct cbase *cb = &c->bases[c->nbases++];
         memset(cb, 0, sizeof *cb);
         cb->cls = b;
         cb->is_virtual = virt;
         cb->access = access;
-    } while (cx_accept(TOK_COMMA));
+    }
 }
 
 static struct cty *parse_class_spec(struct dspec *ds)
@@ -3249,7 +3501,7 @@ static struct cstmt *parse_stmt(void)
 
 struct parse_state {
     int pos, half, extern_c, pattern, in_targs, class_depth;
-    int npend, cappend, dependent_ok;
+    int npend, cappend, dependent_ok, packs;
     struct pending *pend;
     struct cscope *scope;
     struct cfunc *curfn;
@@ -3269,6 +3521,7 @@ struct parse_state *parse_save(void)
     st->cappend = cappend;
     st->pend = pend;
     st->dependent_ok = dependent_type_ok;
+    st->packs = pack_mark();
     st->scope = cx_scope;
     st->curfn = cx_curfn;
     st->curblk = cx_curblk;
@@ -3287,6 +3540,7 @@ void parse_restore(struct parse_state *st)
     cappend = st->cappend;
     pend = st->pend;
     dependent_type_ok = st->dependent_ok;
+    pack_reset(st->packs);
     cx_scope = st->scope;
     cx_curfn = st->curfn;
     cx_curblk = st->curblk;
@@ -3434,6 +3688,13 @@ static const char *type_ref(struct cty *t)
     return cx_fmt("\1%d\1", mangle_type_ref(t));
 }
 
+/* A template parameter named in an expression: T_ (no substitution
+ * candidate there, unlike the parameter as a type). */
+static const char *param_ref(int index)
+{
+    return cx_fmt("\2%d\2", index);
+}
+
 static const char *dep_type_mangle(void)
 {
     return type_ref(parse_type_id());
@@ -3524,7 +3785,7 @@ static const char *dep_expr_name(void)
     struct csym *y = lookup(cx_scope, n);
     cx_advance();
     if (y && y->k == CS_VAR && y->var->is_tparam)
-        return type_ref(ct_tparam(y->var->tparam_index, n));
+        return param_ref(y->var->tparam_index);
     if (y && y->k == CS_ENUMERATOR)
         return cx_fmt("L%s%ldE", "i", y->value);
     return cx_fmt("%zu%s", strlen(n), n);
@@ -3576,8 +3837,20 @@ static const char *dep_expr_unary(void)
         const char *ty = k == TOK_KW_SIZEOF ? "st" : "at";
         const char *ex = k == TOK_KW_SIZEOF ? "sz" : "az";
         if (cx_accept(TOK_ELLIPSIS)) {
+            /* sizeof...(pack): sZ and the parameter */
             cx_expect(TOK_LPAREN, "'('");
-            const char *r = cx_fmt("sZ%s", dep_expr_name());
+            struct csym *y = cx_kind() == TOK_IDENT
+                             ? lookup(cx_scope, cx_cur()->t.text) : NULL;
+            const char *r;
+            if (y && y->k == CS_TYPEDEF && y->type->k == CT_TPARAM) {
+                r = cx_fmt("sZ%s", param_ref((int)y->type->n));
+                cx_advance();
+            } else if (y && y->k == CS_TEMPLATE && y->tmpl->tparam) {
+                r = cx_fmt("sZ%s", param_ref(y->tmpl->tparam - 1));
+                cx_advance();
+            } else {
+                r = cx_fmt("sZ%s", dep_expr_name());
+            }
             cx_expect(TOK_RPAREN, "')'");
             return r;
         }
@@ -3682,6 +3955,60 @@ static const char *dep_expr_unary(void)
     return dep_expr_postfix(dep_expr_name());
 }
 
+/* One template argument, for parameter p (NULL: its kind is guessed). */
+static void parse_one_targ(struct ctemplate *t, struct ctparam *p, int n,
+                           struct ctarg *r)
+{
+    memset(r, 0, sizeof *r);
+    int kind = p ? p->kind : at_type_start() ? TP_TYPE : TP_VALUE;
+    const struct ctok *at = cx_cur();
+    r->kind = kind;
+    if (kind == TP_TYPE) {
+        if (!at_type_start())
+            cx_error(at, "expected a type as template argument %d of '%s'",
+                     n + 1, t ? t->name : "?");
+        r->type = parse_type_id();
+    } else if (kind == TP_TEMPLATE) {
+        struct qname q = peek_qname();
+        cx_pos += q.fin;
+        struct csym *y = cx_kind() == TOK_IDENT
+                         ? find_final(q.scope, cx_cur()->t.text) : NULL;
+        if (!y || y->k != CS_TEMPLATE)
+            cx_error(at, "expected a template as template argument");
+        r->tmpl = y->tmpl;
+        cx_advance();
+    } else if (cx_pattern && targ_mentions_param()) {
+        /* a value in a pattern: a parameter, or an expression of them —
+         * kept as its mangling (which also tells two apart) */
+        struct csym *y = cx_kind() == TOK_IDENT
+                         ? lookup(cx_scope, cx_cur()->t.text) : NULL;
+        if (y && y->k == CS_VAR && y->var->is_tparam &&
+            (cx_kind_at(1) == TOK_COMMA || cx_kind_at(1) == TOK_GT ||
+             cx_kind_at(1) == TOK_SHR || cx_kind_at(1) == TOK_ELLIPSIS)) {
+            r->vtype = ct_tparam(y->var->tparam_index, y->name);
+            cx_advance();
+        } else {
+            struct cty *d = xcalloc(1, sizeof *d);
+            d->k = CT_DEP;
+            r->vtype = d;
+            r->mexpr = dep_expr_cond();
+        }
+    } else {
+        struct cexpr *e = expr_parse_cond();
+        long v;
+        if (!ct_is_integer(e->t) || !expr_const(e, &v))
+            cx_error(at, "template argument %d of '%s' is not an integral "
+                         "constant", n + 1, t ? t->name : "?");
+        r->vtype = ct_unqual(e->t);
+        if (p && p->vtype && !ct_dependent(p->vtype) &&
+            ct_is_integer(p->vtype)) {
+            r->vtype = ct_unqual(p->vtype);
+            v = r->vtype->k == CT_BOOL ? v != 0 : v;
+        }
+        r->value = v;
+    }
+}
+
 int parse_template_args(struct ctemplate *t, struct ctarg **out)
 {
     cx_expect(TOK_LT, "'<'");
@@ -3690,66 +4017,61 @@ int parse_template_args(struct ctemplate *t, struct ctarg **out)
     int n = 0, cap = 4;
     struct ctarg *a = xcalloc((size_t)cap, sizeof *a);
     while (cx_kind() != TOK_GT && !(cx_kind() == TOK_SHR)) {
-        if (n == cap) {
-            cap *= 2;
-            a = xrealloc(a, (size_t)cap * sizeof *a);
-        }
-        struct ctarg *r = &a[n];
-        memset(r, 0, sizeof *r);
         struct ctparam *p = t && t->nparams > 0
                             ? &t->params[n < t->nparams ? n : t->nparams - 1]
                             : NULL;
         if (p && n >= t->nparams && !p->pack)
             p = NULL;
-        int kind = p ? p->kind : at_type_start() ? TP_TYPE : TP_VALUE;
-        const struct ctok *at = cx_cur();
-        r->kind = kind;
-        if (kind == TP_TYPE) {
-            if (!at_type_start())
-                cx_error(at, "expected a type as template argument %d of "
-                             "'%s'", n + 1, t ? t->name : "?");
-            r->type = parse_type_id();
-        } else if (kind == TP_TEMPLATE) {
-            struct qname q = peek_qname();
-            cx_pos += q.fin;
-            struct csym *y = cx_kind() == TOK_IDENT
-                             ? find_final(q.scope, cx_cur()->t.text) : NULL;
-            if (!y || y->k != CS_TEMPLATE)
-                cx_error(at, "expected a template as template argument");
-            r->tmpl = y->tmpl;
-            cx_advance();
-        } else if (cx_pattern && targ_mentions_param()) {
-            /* a value in a pattern: a parameter, or an expression of
-             * them — kept as its mangling (which also tells two apart) */
-            struct csym *y = cx_kind() == TOK_IDENT
-                             ? lookup(cx_scope, cx_cur()->t.text) : NULL;
-            if (y && y->k == CS_VAR && y->var->is_tparam &&
-                (cx_kind_at(1) == TOK_COMMA || cx_kind_at(1) == TOK_GT ||
-                 cx_kind_at(1) == TOK_SHR || cx_kind_at(1) == TOK_ELLIPSIS)) {
-                r->vtype = ct_tparam(y->var->tparam_index, y->name);
-                cx_advance();
-            } else {
-                struct cty *d = xcalloc(1, sizeof *d);
-                d->k = CT_DEP;
-                r->vtype = d;
-                r->mexpr = dep_expr_cond();
+        struct csym *packs[8];
+        int ell;
+        int ex = expansion_at(1, packs, 8, &ell);
+        if (ex > 0) {
+            /* Ts...: the pattern once per element */
+            int len = expansion_length(packs, ex);
+            int start = cx_pos;
+            for (int e = 0; e < len; e++) {
+                if (n + 1 >= cap) {
+                    cap *= 2;
+                    a = xrealloc(a, (size_t)cap * sizeof *a);
+                }
+                cx_pos = start;
+                cx_half_gt = 0;
+                for (int k = 0; k < ex; k++)
+                    pack_push(packs[k], e);
+                struct ctparam *pe = t && t->nparams > 0
+                                     ? &t->params[n < t->nparams ? n
+                                                  : t->nparams - 1] : NULL;
+                if (pe && n >= t->nparams && !pe->pack)
+                    pe = NULL;
+                parse_one_targ(t, pe, n, &a[n]);
+                n++;
+                pack_pop(ex);
             }
-        } else {
-            struct cexpr *e = expr_parse_cond();
-            long v;
-            if (!ct_is_integer(e->t) || !expr_const(e, &v))
-                cx_error(at, "template argument %d of '%s' is not an "
-                             "integral constant", n + 1, t ? t->name : "?");
-            r->vtype = ct_unqual(e->t);
-            if (p && p->vtype && !ct_dependent(p->vtype) &&
-                ct_is_integer(p->vtype)) {
-                r->vtype = ct_unqual(p->vtype);
-                v = r->vtype->k == CT_BOOL ? v != 0 : v;
-            }
-            r->value = v;
+            cx_pos = ell + 1;
+            cx_half_gt = 0;
+            if (!cx_accept(TOK_COMMA))
+                break;
+            continue;
         }
-        if (cx_kind() == TOK_ELLIPSIS)
-            cx_error(cx_cur(), "pack expansions are not supported yet (CX4)");
+        if (n + 1 >= cap) {
+            cap *= 2;
+            a = xrealloc(a, (size_t)cap * sizeof *a);
+        }
+        parse_one_targ(t, p, n, &a[n]);
+        if (cx_kind() == TOK_ELLIPSIS) {
+            /* in a pattern: an expansion kept to deduce a pack from */
+            if (!cx_pattern)
+                cx_error(cx_cur(), "'...' expands no parameter pack");
+            cx_advance();
+            struct ctarg *pat = xmalloc(sizeof *pat);
+            *pat = a[n];
+            memset(&a[n], 0, sizeof a[n]);
+            a[n].kind = pat->kind;
+            a[n].is_pack = 1;
+            a[n].expansion = 1;
+            a[n].elems = pat;
+            a[n].nelems = 1;
+        }
         n++;
         if (!cx_accept(TOK_COMMA))
             break;
@@ -3802,12 +4124,27 @@ static int parse_tparams(struct ctparam **out)
             struct csym *y = scope_add(cx_scope, CS_TYPEDEF,
                                        p->name ? p->name : "");
             y->type = ct_tparam(n, p->name);
-            y->type->pack_expansion = p->pack;
+            y->pack_param = p->pack;
         } else if (cx_kind() == TOK_CX_TEMPLATE) {
             p->kind = TP_TEMPLATE;
             cx_advance();
             if (cx_kind() != TOK_LT)
                 cx_error(at, "expected '<' after 'template'");
+            /* its own parameters: which (if any) is a pack */
+            int tt_pack = 0, tt_n = 1, depth = 0;
+            for (int i = cx_pos + 1; i < cx_ntoks; i++) {
+                enum tok_kind k = cx_toks[i].t.kind;
+                if (k == TOK_EOF || (depth == 0 && k == TOK_GT))
+                    break;
+                if (k == TOK_LT || k == TOK_LPAREN)
+                    depth++;
+                else if (k == TOK_GT || k == TOK_RPAREN)
+                    depth--;
+                else if (depth == 0 && k == TOK_COMMA)
+                    tt_n++;
+                else if (depth == 0 && k == TOK_ELLIPSIS)
+                    tt_pack = tt_n;
+            }
             skip_template_args();
             if (cx_kind() != TOK_CX_CLASS && cx_kind() != TOK_CX_TYPENAME)
                 cx_error(cx_cur(), "expected 'class' in a template template "
@@ -3828,8 +4165,11 @@ static int parse_tparams(struct ctparam **out)
             ph->name = p->name ? p->name : "";
             ph->nparams = -1;               /* a placeholder: dependent */
             ph->head_end = -1;
+            ph->tparam = n + 1;
+            ph->tt_pack = tt_pack;
             struct csym *y = scope_add(cx_scope, CS_TEMPLATE, ph->name);
             y->tmpl = ph;
+            y->pack_param = p->pack;
         } else {
             /* a value parameter: a parameter declaration */
             p->kind = TP_VALUE;
@@ -3858,6 +4198,7 @@ static int parse_tparams(struct ctparam **out)
             v->tparam_index = n;
             struct csym *y = scope_add(cx_scope, CS_VAR, v->name);
             y->var = v;
+            y->pack_param = p->pack;
         }
         n++;
         if (!cx_accept(TOK_COMMA))
