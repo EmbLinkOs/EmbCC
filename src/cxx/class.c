@@ -75,6 +75,14 @@ static int esub_conflict(struct cclass *c, long off)
     return 0;
 }
 
+int field_omitted(const struct cclass *c, const struct cfield *fl)
+{
+    if (!c->explicit_layout || !fl->nua || fl->type->k != CT_CLASS)
+        return 0;
+    struct cclass *fc = fl->type->cls;
+    return fc->empty || fc->dsize < fc->size;
+}
+
 /* A class whose non-virtual part is just a vptr (Itanium 2.2). */
 static int nearly_empty(const struct cclass *c)
 {
@@ -289,12 +297,40 @@ static void layout(struct cclass *c)
                 align = fa;
             continue;
         }
+        if (fl->nua && t->k == CT_CLASS && t->cls->empty) {
+            /* [[no_unique_address]] of an empty class: as an empty base —
+             * at 0, unless a subobject of its type is there (II.3) */
+            long off = 0;
+            if (esub_conflict(t->cls, off)) {
+                off = round_up((bits + 7) / 8, fa);
+                while (esub_conflict(t->cls, off))
+                    off += fa;
+            }
+            fl->off = off;
+            esub_add(t->cls, off);
+            if (off + fs > size)
+                size = off + fs;
+            if (fa > align)
+                align = fa;
+            continue;
+        }
         long off = round_up((bits + 7) / 8, fa);
         struct cty *e = base_elem(t);
         if (e->k == CT_CLASS && e->cls->empty && t->k == CT_CLASS)
             while (esub_conflict(e->cls, off))
                 off += fa;
         fl->off = off;
+        if (fl->nua && t->k == CT_CLASS) {
+            /* ... of another class: what follows may use its tail
+             * padding, as a base's */
+            esub_add(t->cls, off);
+            bits = (off + base_dsize(t->cls)) * 8;
+            if (off + fs > size)
+                size = off + fs;
+            if (fa > align)
+                align = fa;
+            continue;
+        }
         if (e->k == CT_CLASS && t->k == CT_CLASS)
             esub_add(e->cls, off);
         bits = (off + fs) * 8;
@@ -708,9 +744,16 @@ void class_complete(struct cclass *c)
     c->complete = 1;
     c->explicit_layout = (c->nbases > 0 || c->dynamic) && !plain_layout(c);
     int named = 0;
-    for (int i = 0; i < c->nfields; i++)
-        named |= c->fields[i]->name != NULL ||
-                 c->fields[i]->bitwidth != 0;
+    for (int i = 0; i < c->nfields; i++) {
+        struct cfield *fl = c->fields[i];
+        if (fl->nua && fl->type->k == CT_CLASS && !c->is_union) {
+            /* (C cannot overlap members: its offsets written out) */
+            c->explicit_layout = 1;
+            if (fl->type->cls->empty)
+                continue;             /* takes no room: still empty */
+        }
+        named |= fl->name != NULL || fl->bitwidth != 0;
+    }
     c->empty = !c->dynamic && !named;
     for (int i = 0; i < c->nbases; i++)
         c->empty &= c->bases[i].cls->empty;

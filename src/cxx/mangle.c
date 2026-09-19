@@ -1000,6 +1000,7 @@ const char *mangle_func(struct cfunc *f)
     nested = name_step > 0;
     if (nested || (std && name_step > 0)) {
         put(&m, "N");
+        if (f->type->xobj) put(&m, "H");   /* an explicit object member */
         if (f->type->fq & CQ_VOLATILE) put(&m, "V");
         if (f->type->fq & CQ_CONST) put(&m, "K");
         if (f->type->refq) put(&m, f->type->refq == 1 ? "R" : "O");

@@ -96,6 +96,8 @@ struct cty {
     int variadic;             /* FUNC: `...` */
     unsigned fq;              /* FUNC: a member function's cv (CQ_*) */
     int refq;                 /* FUNC: a member function's & (1) or && (2) */
+    int xobj;                 /* FUNC: params[0] is an explicit object
+                               * parameter (this Self &&self, C++23) */
     int nothrow;              /* FUNC: noexcept (or throw()) */
     struct cclass *cls;       /* CLASS */
     struct cenum *en;         /* ENUM */
@@ -318,6 +320,8 @@ struct csym *lookup_raw(struct cscope *from, const char *name);
 struct csym *lookup_tag(struct cscope *from, const char *name);
 /* Qualified lookup: name as a member of namespace or class scope `in`. */
 struct csym *lookup_in(struct cscope *in, const char *name);
+/* ... argument-dependent lookup's: hidden friends found too */
+struct csym *lookup_in_adl(struct cscope *in, const char *name);
 struct cscope *enclosing_ns(struct cscope *s);
 struct cclass *enclosing_class(struct cscope *s);
 
@@ -479,6 +483,8 @@ void class_ensure(struct cclass *c);
  * its declaration instantiated; NULL when substitution fails (SFINAE). */
 struct cfunc *func_instance(struct ctemplate *t, struct ctarg *args,
                             int nargs);
+/* Is f's requires-clause not satisfied (checked on first asking)? */
+int func_unsat(struct cfunc *f);
 /* Is function template a more specialized than b (for n arguments)? */
 int more_specialized(struct ctemplate *a, struct ctemplate *b, int n);
 /* Deduce t's arguments from a call's (explicit ones first): 1 on success. */
@@ -627,6 +633,13 @@ struct cfunc {
     struct clambda *lambda;   /* a lambda's operator(): the lambda */
     int unsat;                /* its requires-clause is not satisfied: no
                                * candidate for overload resolution */
+    struct cscope *treq_scope;/* ... to be checked when first a candidate
+                               * (a member of an instance: its class may be
+                               * incomplete when it is declared), in this
+                               * scope — see func_unsat */
+    int hidden_friend;        /* first declared as a friend in a class: its
+                               * namespace's ordinary lookup does not find
+                               * it, argument-dependent lookup does */
     struct cfunc *alias_of;   /* an overload set's entry a using-declaration
                                * made: this function, declared elsewhere */
     struct cfunc *inherited;  /* an inherited constructor (using B::B): the
@@ -666,7 +679,13 @@ struct cfield {
     int dflt_tok;             /* ... its delayed tokens (-1 if none) */
     int dflt_braced;          /* ... written { } rather than = */
     struct cclass *anon;      /* an anonymous union/struct member */
+    int nua;                  /* [[no_unique_address]]: potentially
+                               * overlapping — of an empty class, it takes
+                               * no room (Itanium II.3, as an empty base) */
 };
+/* A member that has no C field of its own (an empty one that overlaps):
+ * reached at its offset. */
+int field_omitted(const struct cclass *c, const struct cfield *fl);
 
 /* A base-specifier: the base, and where its subobject sits. */
 struct cbase {
@@ -951,6 +970,22 @@ struct cexpr *parse_requires_expr(void);
 struct ctemplate *concept_at(int *ntok, int *args_tok);
 /* the constraints of template parameters ps bound in scope (their
  * type-constraints) and of the requires-clause start..end */
+struct cscope *concept_bind(struct ctemplate *c, struct ctarg *args, int n,
+                            struct ctarg **fitted, const struct ctok *at);
+int targs_same(const struct ctarg *a, int na, const struct ctarg *b, int nb);
+/* Constraints in normal form (13.5.4): template parameters ps's
+ * type-constraints and a requires-clause, bound in scope — and whether
+ * one such subsumes another (13.5.5; NULL: no constraints) */
+struct cnorm;
+struct cnorm *constraints_normal(struct ctparam *ps, int np, int req_start,
+                                 int req_end, struct cscope *scope);
+struct cnorm *constraints_normal2(struct ctparam *ps, int np, int req_start,
+                                  int req_end, int treq, int treq_end,
+                                  struct cscope *scope);
+int constraint_subsumes(struct cnorm *p, struct cnorm *q);
+/* Of two specializations of function templates equally specialized by
+ * their types: is a's template the more constrained (13.5.5)? */
+int spec_more_constrained(struct cfunc *a, struct cfunc *b);
 int template_constraints(struct ctparam *ps, int np, int req_start,
                          int req_end, struct cscope *scope,
                          const struct ctok *at);
@@ -958,6 +993,9 @@ void skip_template_args(void);           /* at `<`: past the matching `>` */
 int targ_is_dependent(const struct ctarg *a);
 int deduce_func_type(struct ctemplate *t, struct ctarg *expl, int nexpl,
                      struct cty *A, struct ctarg **outp, int *nout);
+/* a conversion function template's arguments converting to `to` */
+int deduce_conv(struct ctemplate *t, struct cty *to, struct ctarg **outp,
+                int *nout);
 /* template<> ... v<args> = ...: v's instance for args is the variable */
 void var_explicit_spec(struct ctemplate *t, struct ctarg *args, int n,
                        struct cvar *v, const struct ctok *at);

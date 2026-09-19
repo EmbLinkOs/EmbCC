@@ -108,6 +108,20 @@ struct csym *scope_find_tag(struct cscope *s, const char *name)
     return NULL;
 }
 
+/* Argument-dependent lookup is on: hidden friends are found. */
+static int see_hidden;
+
+/* functions all of which only a friend declaration declared */
+static int only_hidden_friends(const struct csym *y)
+{
+    if (y->k != CS_FUNC || !y->fns)
+        return 0;
+    for (struct cfunc *f = y->fns; f; f = f->next)
+        if (!f->hidden_friend)
+            return 0;
+    return 1;
+}
+
 /* A name in `s` or in a namespace a using-directive in `s` nominates
  * (transitively; `depth` guards a cycle of directives). */
 static struct csym *find_with_usings(struct cscope *s, const char *name,
@@ -115,6 +129,8 @@ static struct csym *find_with_usings(struct cscope *s, const char *name,
 {
     struct csym *y = tags ? scope_find_tag(s, name)
                           : scope_find_here(s, name);
+    if (y && !see_hidden && only_hidden_friends(y))
+        y = NULL;                 /* (a hidden friend: not for this) */
     if (y || depth > 16)
         return y;
     for (int i = 0; i < s->nusings; i++) {
@@ -191,6 +207,15 @@ struct csym *lookup_tag(struct cscope *from, const char *name)
 struct csym *lookup_in(struct cscope *in, const char *name)
 {
     return find_in(in, name);
+}
+
+struct csym *lookup_in_adl(struct cscope *in, const char *name)
+{
+    int saved = see_hidden;
+    see_hidden = 1;
+    struct csym *y = find_in(in, name);
+    see_hidden = saved;
+    return y;
 }
 
 struct cscope *enclosing_ns(struct cscope *s)

@@ -76,6 +76,8 @@ static const char *tok_text(int k)
 
 struct attrs {
     int weak, used, noreturn, packed;
+    int no_unique_address;    /* [[no_unique_address]]: a member that may
+                               * overlap others */
     long aligned;
     const char *section;
     const char *asm_name;
@@ -145,6 +147,9 @@ static void parse_attrs(struct attrs *a)
                 if (cx_kind() == TOK_IDENT &&
                     strcmp(cx_cur()->t.text, "noreturn") == 0)
                     a->noreturn = 1;
+                if (cx_kind() == TOK_IDENT &&
+                    attr_is(cx_cur()->t.text, "no_unique_address"))
+                    a->no_unique_address = 1;
                 if (cx_kind() == TOK_LPAREN)
                     cx_skip_balanced();
                 else
@@ -1132,6 +1137,8 @@ static int params_follow(void)
         return 1;
     int save = cx_pos;
     cx_advance();
+    if (k == TOK_CX_THIS)       /* (this Self &&self): not (this) */
+        cx_advance();
     int r = at_type_start();
     cx_pos = save;
     if (!r)
@@ -1502,6 +1509,9 @@ static struct cty *parse_params(void)
     struct cpgroup *groups = NULL;
     int ngroups = 0;
     int saved_ok = decl_pack_ok;
+    /* an explicit object parameter (C++23 `this Self &&self`): the object
+     * a member function is called on, as its first parameter */
+    int xobj = cx_accept(TOK_CX_THIS);
     if (cx_kind() == TOK_KW_VOID && cx_kind_at(1) == TOK_RPAREN) {
         cx_advance();
     } else {
@@ -1581,6 +1591,7 @@ static struct cty *parse_params(void)
     decl_pack_ok = saved_ok;
     cx_expect(TOK_RPAREN, "')' to close the parameters");
     struct cty *ft = ct_func(NULL, params, np, variadic);
+    ft->xobj = xobj;
     ft->pdecl = pdecl;
     ft->pnames = names;
     ft->pgroups = groups;
@@ -1715,6 +1726,37 @@ static struct cscope *with_params(struct cty *ft, struct cscope *parent)
     return s;
 }
 
+/* A special member's signature for class c: a default constructor, a
+ * copy or move constructor (ctor), or a copy or move assignment. */
+static int special_signature(struct cclass *c, int ctor, struct cty *ft)
+{
+    if (ctor && ft->np == 0)
+        return 1;
+    if (ft->np < 1)
+        return 0;
+    struct cty *p = ct_strip_ref(ft->params[0]);
+    if (p->k != CT_CLASS || p->cls != c)
+        return 0;
+    return ctor ? ct_is_ref(ft->params[0]) : ft->np == 1;
+}
+
+/* The same trailing requires-clause (by its tokens), or both none? */
+static int same_treq(const struct cty *a, const struct cty *b)
+{
+    if (!a->treq || !b->treq)
+        return !a->treq && !b->treq;
+    if (a->treq_end - a->treq != b->treq_end - b->treq)
+        return 0;
+    for (int i = 0; i < a->treq_end - a->treq; i++) {
+        const struct token *x = &cx_toks[a->treq + i].t,
+                           *y = &cx_toks[b->treq + i].t;
+        if (x->kind != y->kind ||
+            (x->text && y->text && strcmp(x->text, y->text) != 0))
+            return 0;
+    }
+    return 1;
+}
+
 /* Declare (or redeclare) the function d names, with type ft, in scope
  * `target` (a namespace, or the class for members). */
 static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
@@ -1738,7 +1780,14 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
         y = func_sym(target, d->name, d->at);
         set = &y->fns;
     }
-    int unsat = ft->treq && !cx_pattern &&
+    /* a requires-clause: a special member's is decided with its class
+     * (which one is eligible makes the class trivial or not); another's
+     * when the function is first a candidate — its class, or one it
+     * names, may be incomplete now (view_interface<D>'s, D's base) */
+    int special = d->kind == DN_DTOR ||
+                  (cls && (d->kind == DN_CTOR || !strcmp(d->name, "operator="))
+                   && special_signature(cls, d->kind == DN_CTOR, ft));
+    int unsat = ft->treq && !cx_pattern && special &&
                 !constraint_satisfied(ft->treq, ft->treq_end,
                                       with_params(ft, cx_scope));
     for (struct cfunc *f = unsat ? NULL : *set; f; f = f->next) {
@@ -1749,6 +1798,8 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
             continue;
         if (d->kind == DN_CONV && !ct_same(f->type->to, ft->to))
             continue;       /* conversion functions differ by their type */
+        if (!same_treq(f->type, ft))
+            continue;       /* ... and functions by their constraints */
         if (f->inherited) {
             /* the class's own constructor hides the inherited one */
             f->unsat = 1;
@@ -1758,6 +1809,8 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
             cx_error(d->at, "'%s' redeclared with a different return type",
                      d->name);
         merge_defaults(f, ft);
+        if (!ds->is_friend)
+            f->hidden_friend = 0;   /* declared where lookup finds it */
         if (ds->is_inline || ds->is_constexpr)
             f->is_inline = 1;
         if (ds->a.weak)
@@ -1776,7 +1829,10 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     f->is_ctor = d->kind == DN_CTOR;
     f->is_dtor = d->kind == DN_DTOR;
     f->is_conv = d->kind == DN_CONV;
-    f->is_static = ds->storage == SK_STATIC;
+    f->hidden_friend = ds->is_friend && !d->qual;
+    /* (an explicit object member function has no `this`: C sees the
+     * object as its first parameter) */
+    f->is_static = ds->storage == SK_STATIC || ft->xobj;
     /* a class's operator new/delete are static members (11.12) */
     if (cls && (strncmp(d->name, "operator new", 12) == 0 ||
                 strncmp(d->name, "operator delete", 15) == 0))
@@ -1807,6 +1863,8 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
         f->unsat = 1;
         return f;
     }
+    if (ft->treq && !cx_pattern && !special)
+        f->treq_scope = with_params(ft, cx_scope);
     struct cfunc **tail = set;
     while (*tail)
         tail = &(*tail)->next;
@@ -1873,14 +1931,18 @@ static void skip_body(struct cfunc *f)
     f->body_end = cx_pos;
 }
 
+static int in_instance(struct cclass *c);
+
 static void run_pending(void)
 {
-    /* default member initializers first: constructors use them */
+    /* default member initializers first: constructors use them — an
+     * instance's only when used (a constructor that initializes the
+     * member never reads `_Vp _M_base = _Vp();`) */
     for (int i = 0; i < npend; i++)
-        if (pend[i].fl)
+        if (pend[i].fl && !in_instance(pend[i].c))
             field_parse_default(pend[i].c, pend[i].fl);
     for (int i = 0; i < npend; i++) {
-        if (!pend[i].f || pend[i].f->defined || pend[i].f->unsat)
+        if (!pend[i].f || pend[i].f->defined || func_unsat(pend[i].f))
             continue;               /* (read early: its return type) */
         struct cfunc *f = pend[i].f;
         int save = cx_pos;
@@ -3670,6 +3732,7 @@ static void parse_member(struct cclass *c, int *access)
             fl->is_mutable = ds.is_mutable;
             fl->bitwidth = -1;
             fl->dflt_tok = -1;
+            fl->nua = ds.a.no_unique_address || d.a.no_unique_address;
             if (t->k == CT_AUTO)
                 cx_error(at, "a member cannot be 'auto'");
             if (!ct_is_complete(t) && !(t->k == CT_ARRAY && t->n < 0 &&
@@ -5167,7 +5230,17 @@ static void skip_stmt(void)
     cx_advance();
 }
 
+static struct cstmt *parse_stmt_or_none(void);
+
+/* A statement — one that is nothing (a static_assert, a using-declaration,
+ * a typedef) a null statement, so an if or a loop has a body */
 static struct cstmt *parse_stmt(void)
+{
+    struct cstmt *s = parse_stmt_or_none();
+    return s ? s : st_new(S_NULL);
+}
+
+static struct cstmt *parse_stmt_or_none(void)
 {
     /* [[likely]], [[fallthrough]] ...: attributes of the statement */
     while (cx_kind() == TOK_LBRACKET && cx_kind_at(1) == TOK_LBRACKET)
@@ -6990,9 +7063,10 @@ void parse_template_decl(struct cclass *cls, int access)
         f->tmpl = tm;
         f->owner = home;
         f->cls = ds.is_friend ? NULL : ocls;
+        f->hidden_friend = ds.is_friend && !d.qual;
         f->is_ctor = d.kind == DN_CTOR;
         f->is_conv = d.kind == DN_CONV;
-        f->is_static = ds.storage == SK_STATIC;
+        f->is_static = ds.storage == SK_STATIC || t->xobj;
         f->is_explicit = ds.is_explicit;
         f->access = access;
         f->vslot = -1;
@@ -7027,6 +7101,8 @@ void parse_template_decl(struct cclass *cls, int access)
             if (g->tmpl && g->tmpl->nparams == np &&
                 same_signature(g->type, t) &&
                 (!has_body || !g->tmpl->has_body)) {
+                if (!ds.is_friend)
+                    g->hidden_friend = 0;
                 if (has_body) {
                     if (!g->tmpl->decl0_tok)
                         g->tmpl->decl0_tok = g->tmpl->decl_tok + 1;
@@ -7112,7 +7188,7 @@ static void parse_explicit_instantiation(int is_extern)
          * class, or outside it (template<class T> R A<T>::f() {...}) */
         for (struct cfunc *f = cx_funcs; f; f = f->all_next)
             if (f->cls == c && !f->tmpl && !f->defined && !f->is_implicit &&
-                !f->is_deleted) {
+                !f->is_deleted && !func_unsat(f)) {
                 func_ensure_body(f);
                 if (f->defined)
                     f->explicit_inst = 1;

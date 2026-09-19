@@ -888,12 +888,32 @@ static const char *binop_text(int op)
     }
 }
 
+/* Member fl of class c of the object `obj` (an lvalue's text): an
+ * overlapping [[no_unique_address]] one, which has no C field, at its
+ * offset */
+static char *field_of(const char *obj, struct cclass *c, struct cfield *fl)
+{
+    if (c && field_omitted(c, fl))
+        return cx_fmt("(*(%s)((char *)&(%s) + %ld))", ctype(ct_ptr(fl->type)),
+                      obj, fl->off);
+    return cx_fmt("(%s).%s", obj, field_cname(fl));
+}
+
+static struct cclass *class_of(struct cty *t)
+{
+    return t && t->k == CT_CLASS ? t->cls : NULL;
+}
+
 static char *member_text(struct cexpr *e)
 {
     struct cexpr *o = e->a[0];
     const char *f = field_cname(e->field);
-    char *t = o->k == E_DEREF ? cx_fmt("(%s)->%s", ev(o->a[0]), f)
-                              : cx_fmt("(%s).%s", elv(o), f);
+    struct cclass *c = class_of(o->t);
+    char *t = c && field_omitted(c, e->field)
+              ? field_of(o->k == E_DEREF ? cx_fmt("(*%s)", ev(o->a[0]))
+                                         : elv(o), c, e->field)
+              : o->k == E_DEREF ? cx_fmt("(%s)->%s", ev(o->a[0]), f)
+                                : cx_fmt("(%s).%s", elv(o), f);
     if (ct_is_ref(e->field->type))
         return cx_fmt("(*%s)", t);
     return t;
@@ -1523,6 +1543,13 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
             /* a base subobject, or a class whose tail padding a derived
              * class may use: only its data is written */
             struct cclass *ic = init->t->cls;
+            if (ic->empty && !init->fn) {
+                /* an empty class has no data: its byte may be another
+                 * object's (an empty base, [[no_unique_address]]) */
+                if (init->na == 1)
+                    sb_printf(b, "(void)%s; ", eaddr(init->a[0]));
+                return;
+            }
             long bytes = init->baseobj ? ic->nvsize
                          : ic->dsize < ic->size ? ic->dsize : 0;
             if (init->zero && bytes)
@@ -1581,8 +1608,7 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
                 einit(b, cx_fmt("(%s)[%d]", dest, i), lt->to, init->a[i]);
             } else {
                 struct cfield *fl = lt->cls->fields[i];
-                einit(b, cx_fmt("(%s).%s", dest, field_cname(fl)), fl->type,
-                      init->a[i]);
+                einit(b, field_of(dest, lt->cls, fl), fl->type, init->a[i]);
             }
         }
         return;
@@ -1696,6 +1722,12 @@ static int c_const(struct cexpr *e)
     case E_INITLIST:
         if (e->binit)
             return 0;         /* (bases: written member by member) */
+        if (e->t && e->t->k == CT_CLASS && e->t->cls->explicit_layout)
+            for (int i = 0; i < e->t->cls->nfields; i++) {
+                struct cfield *fl = e->t->cls->fields[i];
+                if (field_omitted(e->t->cls, fl) && !fl->type->cls->empty)
+                    return 0; /* (overlapping data: no C field to name) */
+            }
         for (int i = 0; i < e->na; i++)
             if (!c_const(e->a[i]))
                 return 0;
@@ -1727,17 +1759,26 @@ static char *cinit_text(struct cty *t, struct cexpr *e)
         if (t->k == CT_CLASS && t->cls->is_union && n > 1)
             n = 1;
         int any = 0;
+        /* a class laid out explicitly (padding, members that overlap and
+         * have no C field): each named member designated */
+        int desig = t->k == CT_CLASS && t->cls->explicit_layout;
         for (int i = 0; i < n; i++) {
             struct cty *et;
+            const char *d = "";
             if (t->k == CT_ARRAY) {
                 et = t->to;
             } else {
                 struct cfield *fl = t->cls->fields[i];
                 if (!fl->name)
                     continue;               /* unnamed bit-fields take none */
+                if (desig && field_omitted(t->cls, fl))
+                    continue;               /* (empty: nothing to write) */
                 et = fl->type;
+                if (desig)
+                    d = cx_fmt(".%s = ", field_cname(fl));
             }
-            sb_printf(&b, "%s%s", any ? ", " : "", cinit_text(et, e->a[i]));
+            sb_printf(&b, "%s%s%s", any ? ", " : "", d,
+                      cinit_text(et, e->a[i]));
             any = 1;
         }
         if (!any)
@@ -2078,7 +2119,8 @@ static int c_list_ok(struct cexpr *e)
     if (!e)
         return 1;
     if (e->k == E_INITLIST) {
-        if (e->t->k == CT_CLASS && (e->t->cls->is_union || e->binit))
+        if (e->t->k == CT_CLASS && (e->t->cls->is_union || e->binit ||
+                                    e->t->cls->explicit_layout))
             return 0;
         for (int i = 0; i < e->na; i++)
             if (!c_list_ok(e->a[i]))
@@ -3007,10 +3049,11 @@ static void emit_function(struct cfunc *f)
                 struct cfield *fl = c->fields[i];
                 if (!f->meminit[i] || !fl->name)
                     continue;
-                stmt_init(&b, cx_fmt("this->%s", field_cname(fl)), fl->type,
+                stmt_init(&b, field_of("(*this)", c, fl), fl->type,
                           f->meminit[i]);
                 char *d = eh_on && !ct_is_ref(fl->type)
-                          ? destroy_text(cx_fmt("&this->%s", field_cname(fl)),
+                          ? destroy_text(cx_fmt("&%s", field_of("(*this)", c,
+                                                                fl)),
                                          fl->type) : NULL;
                 if (d)           /* built: destroyed if the rest throws */
                     push_clean(&b, d, NULL, 1);
@@ -3036,7 +3079,7 @@ static void emit_function(struct cfunc *f)
             struct cfield *fl = c->fields[i];
             if (!fl->name || ct_is_ref(fl->type))
                 continue;
-            char *d = destroy_text(cx_fmt("&this->%s", field_cname(fl)),
+            char *d = destroy_text(cx_fmt("&%s", field_of("(*this)", c, fl)),
                                    fl->type);
             if (d)
                 sb_printf(&b, "%s\n", d);
@@ -3267,6 +3310,15 @@ static void emit_explicit_struct(struct sb *out, struct cclass *c)
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];
         long sz = ct_is_ref(fl->type) ? 8 : ct_size(fl->type);
+        if (field_omitted(c, fl)) {
+            /* overlapping: its data only (none, when empty) */
+            struct cclass *fc = fl->type->cls;
+            if (!fc->empty)
+                it[n++] = (struct item){ fl->off, fc->dsize,
+                                         cx_fmt("char __cx_m%d[%ld]", i,
+                                                fc->dsize) };
+            continue;
+        }
         it[n++] = (struct item){ fl->off, sz, cdecl(fl->type,
                                                     field_cname(fl)) };
     }

@@ -180,13 +180,19 @@ static int eval_primary(int end)
     return eval_atom(end);
 }
 
+/* A conjunction's right operand is checked only when its left one is
+ * satisfied, a disjunction's only when its left one is not (13.5.2.2):
+ * checking it could instantiate what depends on the answer (a class
+ * being defined, the one whose partial specialization is being chosen) */
 static int eval_and(int end)
 {
     int v = eval_primary(end);
     while (cx_pos < end && cx_kind() == TOK_ANDAND) {
         cx_advance();
-        int w = eval_primary(end);
-        v = v && w;
+        if (v)
+            v = eval_primary(end);
+        else
+            skip_atom(end);
     }
     return v;
 }
@@ -196,8 +202,15 @@ static int eval_or(int end)
     int v = eval_and(end);
     while (cx_pos < end && cx_kind() == TOK_OROR) {
         cx_advance();
-        int w = eval_and(end);
-        v = v || w;
+        if (!v) {
+            v = eval_and(end);
+            continue;
+        }
+        skip_atom(end);
+        while (cx_pos < end && cx_kind() == TOK_ANDAND) {
+            cx_advance();
+            skip_atom(end);
+        }
     }
     return v;
 }
@@ -213,6 +226,268 @@ int constraint_satisfied(int start, int end, struct cscope *scope)
     int v = eval_or(end);
     parse_restore(st);
     return v;
+}
+
+/* ---- subsumption (13.5.4, 13.5.5) ---- */
+
+/* A constraint in normal form: atomic constraints joined by conjunction
+ * and disjunction, a concept-id replaced by its definition. An atom is
+ * its expression's tokens with the arguments of the concept it appears
+ * in (NULL outside any): two are the same only when both are. */
+struct cnorm {
+    int k;                    /* 0 an atom, 1 and, 2 or */
+    struct cnorm *l, *r;
+    int tok;
+    struct ctarg *map;
+    int nmap;
+};
+
+static struct cnorm *cn_new(int k, struct cnorm *l, struct cnorm *r)
+{
+    if (k && !l)
+        return r;             /* (a missing side: none of it) */
+    if (k && !r)
+        return l;
+    struct cnorm *n = xcalloc(1, sizeof *n);
+    n->k = k;
+    n->l = l;
+    n->r = r;
+    return n;
+}
+
+static struct cnorm *norm_or(int end, struct ctarg *map, int nmap, int depth);
+
+/* concept c for args: its definition, normalized with them bound */
+static struct cnorm *norm_concept(struct ctemplate *c, struct ctarg *args,
+                                  int n, int depth)
+{
+    if (depth > 64)
+        return NULL;
+    struct ctarg *fitted;
+    struct parse_state *st = parse_save();
+    cx_scope = concept_bind(c, args, n, &fitted, cx_cur());
+    cx_pos = c->req_start;
+    cx_half_gt = 0;
+    struct cnorm *r = norm_or(c->req_end, fitted, c->nparams, depth + 1);
+    parse_restore(st);
+    return r;
+}
+
+static struct cnorm *norm_primary(int end, struct ctarg *map, int nmap,
+                                  int depth)
+{
+    if (cx_kind() == TOK_LPAREN) {
+        int open = cx_pos;
+        cx_skip_balanced();
+        int close = cx_pos - 1;
+        if (!is_fold(open, close) &&
+            (cx_pos >= end || cx_kind() == TOK_ANDAND ||
+             cx_kind() == TOK_OROR)) {
+            cx_pos = open + 1;
+            struct cnorm *v = norm_or(close, map, nmap, depth);
+            if (cx_pos == close) {
+                cx_pos = close + 1;
+                return v;
+            }
+        }
+        cx_pos = open;
+    }
+    int ntok, args_tok;
+    struct ctemplate *c = concept_at(&ntok, &args_tok);
+    if (c) {
+        enum tok_kind after = cx_pos + ntok < end
+                              ? cx_toks[cx_pos + ntok].t.kind : TOK_EOF;
+        if (cx_pos + ntok >= end || after == TOK_ANDAND ||
+            after == TOK_OROR) {
+            /* a concept-id alone: its normal form, its arguments bound */
+            struct ctarg *args = NULL;
+            int n = 0, next = cx_pos + ntok;
+            jmp_buf jb;
+            void *saved = cx_sfinae;
+            struct parse_state *st = parse_save();
+            if (setjmp(jb)) {
+                parse_restore(st);
+                cx_sfinae = saved;
+                c = NULL;             /* (an atom, then) */
+            } else {
+                cx_sfinae = &jb;
+                if (args_tok >= 0) {
+                    cx_pos = args_tok;
+                    n = parse_template_args(c, &args);
+                }
+                struct cnorm *r = norm_concept(c, args, n, depth);
+                cx_sfinae = saved;
+                parse_restore(st);
+                cx_pos = next;
+                cx_half_gt = 0;
+                return r;
+            }
+        }
+    }
+    struct cnorm *a = cn_new(0, NULL, NULL);
+    a->tok = cx_pos;
+    a->map = map;
+    a->nmap = nmap;
+    skip_atom(end);
+    return a;
+}
+
+static struct cnorm *norm_and(int end, struct ctarg *map, int nmap,
+                              int depth)
+{
+    struct cnorm *v = norm_primary(end, map, nmap, depth);
+    while (cx_pos < end && cx_kind() == TOK_ANDAND) {
+        cx_advance();
+        v = cn_new(1, v, norm_primary(end, map, nmap, depth));
+    }
+    return v;
+}
+
+static struct cnorm *norm_or(int end, struct ctarg *map, int nmap, int depth)
+{
+    struct cnorm *v = norm_and(end, map, nmap, depth);
+    while (cx_pos < end && cx_kind() == TOK_OROR) {
+        cx_advance();
+        v = cn_new(2, v, norm_and(end, map, nmap, depth));
+    }
+    return v;
+}
+
+struct cnorm *constraints_normal(struct ctparam *ps, int np, int req_start,
+                                 int req_end, struct cscope *scope)
+{
+    return constraints_normal2(ps, np, req_start, req_end, 0, 0, scope);
+}
+
+struct cnorm *constraints_normal2(struct ctparam *ps, int np, int req_start,
+                                  int req_end, int treq, int treq_end,
+                                  struct cscope *scope)
+{
+    struct cnorm *r = NULL;
+    struct parse_state *st = parse_save();
+    cx_scope = scope;
+    cx_pattern = 0;
+    cx_in_targs = 0;
+    for (int i = 0; i < np; i++) {
+        struct ctparam *p = &ps[i];
+        if (!p->tc || !p->name)
+            continue;
+        struct csym *y = lookup_in(scope, p->name);
+        if (!y || y->k != CS_TYPEDEF)
+            continue;             /* (a pack's: left out) */
+        /* C<A...> T: C<T, A...> */
+        struct ctarg *given = NULL;
+        int ng = 0;
+        if (p->tc_args >= 0) {
+            cx_pos = p->tc_args;
+            cx_half_gt = 0;
+            ng = parse_template_args(NULL, &given);
+        }
+        struct ctarg *args = xcalloc((size_t)ng + 1, sizeof *args);
+        args[0].kind = TP_TYPE;
+        args[0].type = y->type;
+        for (int k = 0; k < ng; k++)
+            args[k + 1] = given[k];
+        r = cn_new(1, r, norm_concept(p->tc, args, ng + 1, 0));
+    }
+    if (req_start) {
+        cx_pos = req_start;
+        cx_half_gt = 0;
+        r = cn_new(1, r, norm_or(req_end, NULL, 0, 0));
+    }
+    if (treq) {
+        cx_pos = treq;
+        cx_half_gt = 0;
+        r = cn_new(1, r, norm_or(treq_end, NULL, 0, 0));
+    }
+    parse_restore(st);
+    return r;
+}
+
+/* clauses: each a list of atoms */
+struct clauses {
+    struct cnorm ***c;
+    int *len;
+    int n;
+    int over;                 /* too many to decide */
+};
+
+static void cl_add(struct clauses *s, struct cnorm **atoms, int len)
+{
+    if (s->n >= 512) {
+        s->over = 1;
+        return;
+    }
+    s->c = xrealloc(s->c, (size_t)(s->n + 1) * sizeof *s->c);
+    s->len = xrealloc(s->len, (size_t)(s->n + 1) * sizeof *s->len);
+    s->c[s->n] = atoms;
+    s->len[s->n] = len;
+    s->n++;
+}
+
+/* n's clauses: disjunctive (dnf: an or of ands) or conjunctive normal
+ * form — the operator that distributes is the other one */
+static struct clauses clauses_of(struct cnorm *n, int dnf)
+{
+    struct clauses r = { NULL, NULL, 0, 0 };
+    if (!n)
+        return r;
+    if (n->k == 0) {
+        struct cnorm **one = xmalloc(sizeof *one);
+        one[0] = n;
+        cl_add(&r, one, 1);
+        return r;
+    }
+    struct clauses a = clauses_of(n->l, dnf), b = clauses_of(n->r, dnf);
+    r.over = a.over || b.over;
+    if ((n->k == 2) == dnf) {
+        /* the clause joiner: the clauses of both */
+        for (int i = 0; i < a.n; i++)
+            cl_add(&r, a.c[i], a.len[i]);
+        for (int i = 0; i < b.n; i++)
+            cl_add(&r, b.c[i], b.len[i]);
+        return r;
+    }
+    /* the other: every pairing, merged */
+    for (int i = 0; i < a.n && !r.over; i++)
+        for (int j = 0; j < b.n && !r.over; j++) {
+            int len = a.len[i] + b.len[j];
+            struct cnorm **m = xmalloc((size_t)len * sizeof *m);
+            memcpy(m, a.c[i], (size_t)a.len[i] * sizeof *m);
+            memcpy(m + a.len[i], b.c[j], (size_t)b.len[j] * sizeof *m);
+            cl_add(&r, m, len);
+        }
+    return r;
+}
+
+static int atom_same(const struct cnorm *a, const struct cnorm *b)
+{
+    if (a->tok != b->tok)
+        return 0;
+    if (!a->map || !b->map)
+        return !a->map && !b->map;
+    return targs_same(a->map, a->nmap, b->map, b->nmap);
+}
+
+int constraint_subsumes(struct cnorm *p, struct cnorm *q)
+{
+    if (!q)
+        return 1;             /* everything subsumes no constraint */
+    if (!p)
+        return 0;
+    struct clauses dp = clauses_of(p, 1), cq = clauses_of(q, 0);
+    if (dp.over || cq.over)
+        return 0;
+    for (int i = 0; i < dp.n; i++)
+        for (int j = 0; j < cq.n; j++) {
+            int found = 0;
+            for (int x = 0; x < dp.len[i] && !found; x++)
+                for (int y = 0; y < cq.len[j] && !found; y++)
+                    found = atom_same(dp.c[i][x], cq.c[j][y]);
+            if (!found)
+                return 0;
+        }
+    return 1;
 }
 
 /* ---- concepts named where a type is ---- */

@@ -695,10 +695,62 @@ tests/golden/cxx-abi.sh checks both across the compilers. tests/cxx
 `cxx20misc3`, tests/golden/cxx-reject.sh (deleted functions, coroutine
 misuse).
 
-Next: conversion function templates (`template<class T> operator T()`:
-`<ranges>`' `__max_size_type`), `consteval` as more than `constexpr` (a
-format string is checked at run time for now), bit-fields in classes with
-non-empty bases.
+`<ranges>` and `<functional>` run: iota views (`__max_size_type`'s
+conversions), filter, transform, reverse, take — called, partially
+applied and piped, and composed — `ranges::size`, `find_if`, `sort`,
+`count_if`; `std::bind` with placeholders, `bind_front`, `not_fn`
+(tests/libstdcxx/ranges.cc matches g++'s build on both targets). What
+they needed:
+- conversion function templates (`template<class T> operator T()`, their
+  arguments deduced from the target type, 13.10.3.4; a non-template
+  wins a tie)
+- explicit object parameters (C++23 `this Self &&self`), which libstdc++
+  uses whenever the compiler says it is g++ 14 or later: the object the
+  first argument, deduced from; mangled `NH...` as g++ does
+- constraint subsumption (13.5.4-5): constraints normalized into atoms
+  (a concept-id replaced by its definition, its arguments bound; an atom
+  is its expression with those arguments), P subsuming Q when each
+  disjunctive clause of P has an atom in each conjunctive clause of Q —
+  ordering partial specializations (`_CachedPosition<forward_range>` and
+  `<random_access_range>`), function templates, and an instance's
+  members differing only in their requires-clause (which are now two
+  functions, not a redeclaration)
+- a member's requires-clause checked when the member is a candidate, not
+  when its class template is instantiated — view_interface<D>'s, while D
+  is incomplete — except the special members', whose eligibility makes
+  the class trivial or not
+- a conjunction's right operand is not checked when its left one fails,
+  a disjunction's when its left one holds (13.5.2.2): checking it could
+  instantiate what is being decided (`iterator_traits<X>` while choosing
+  `__iterator_traits<X>`'s specialization)
+- argument-dependent lookup also in the namespaces of a class's bases and
+  of a specialization's type arguments (`v | views::reverse`: operator|
+  is `_RangeAdaptorClosure`'s namespace's), finding friends declared only
+  in a class (which ordinary lookup no longer finds: `ranges::iter_swap`
+  is the customization point object, not `filter_view`'s iterator's
+  friend), and never for a qualified name
+- a default member initializer of an instance read only when a
+  constructor uses it (`_Vp _M_base = _Vp();` of a view with no default
+  constructor)
+- a function bound to a reference to its type, or to a const reference to
+  a function pointer (a temporary); a parameter with no template
+  parameter in it left out of deduction (13.10.2.1)
+- `if constexpr (...) static_assert(...);` (a statement that declares only
+  is a null statement)
+- `[[no_unique_address]]`: a member of an empty class takes no room (at
+  offset 0 unless a subobject of its type is there, as an empty base),
+  one of another class lends its tail padding, and a class whose members
+  are all such is empty — so std::tuple of empty types, and what is built
+  on it, is laid out as g++ lays it out (`unordered_map<int, int>` was 64
+  bytes, libstdc++'s 56); such a member has no C field (the class is
+  written with explicit offsets, reached by its offset); an empty class's
+  trivial copy writes nothing (its byte may be another object's)
+- EmbCC's C accepts `f(...)` with no named parameter (C23; C++'s)
+
+tests/cxx/cxx20misc4.cc (g++ agrees on both targets).
+
+Next: `consteval` as more than `constexpr` (a format string is checked at
+run time for now), bit-fields in classes with non-empty bases.
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their

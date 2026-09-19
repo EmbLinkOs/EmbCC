@@ -607,9 +607,18 @@ static struct ics ref_ics(struct cexpr *e, struct cty *rt)
     struct cty *T = rt->to;
     int rv = rt->k == CT_RREF;
     int cref = (T->q & CQ_CONST) && !(T->q & CQ_VOLATILE);
+    if ((e->k == E_OVL || e->k == E_FUNC) && T->k == CT_FUNC) {
+        /* a function named, bound to a reference to its type: an exact
+         * match, as its address would be (bind_ref takes that) */
+        r = ics_of(e, ct_ptr(T));
+        r.is_ref = 1;
+        r.binds_rvref = rv;
+        r.ref_cv = T->q;
+        return r;
+    }
     if (e->k == E_INITLIST || e->k == E_OVL || e->k == E_FUNC) {
-        if (!rv && !cref && e->k == E_INITLIST)
-            return r;
+        if (!rv && !cref)
+            return r;             /* (a temporary would be bound) */
         r = ics_of(e, ct_unqual(T));
         r.is_ref = 1;
         r.binds_rvref = rv;
@@ -829,6 +838,15 @@ static int cand_better(const struct cand *a, const struct cand *b)
         more_specialized(a->f->spec_of, b->f->spec_of,
                          a->nparams < b->nparams ? a->nparams : b->nparams))
         return 1;
+    /* ... as specialized: the more constrained (13.5.5) */
+    if (a->f->spec_of && b->f->spec_of && a->f->spec_of != b->f->spec_of &&
+        spec_more_constrained(a->f, b->f))
+        return 1;
+    /* two non-templates (an instance's members): one with constraints
+     * beats one without, which they subsume */
+    if (!a->f->spec_of && !b->f->spec_of && a->f->type->treq &&
+        !b->f->type->treq)
+        return 1;
     return 0;
 }
 
@@ -881,6 +899,18 @@ static int cur_ntargs, cur_has_targs;
 /* The candidates with each function template replaced by its
  * specialization for these arguments — or dropped, when deduction or
  * substitution fails (13.10.3). */
+/* The object a member call is on (obj its address): an lvalue, or an
+ * xvalue for std::move(x).f() */
+static struct cexpr *object_lvalue(struct cexpr *obj)
+{
+    if (!obj)
+        return NULL;
+    struct cexpr *o = ex_deref(obj);
+    if (obj->obj_xvalue)
+        o->vc = VC_XVALUE;
+    return o;
+}
+
 static int instantiate_candidates(struct cfunc **fs, int nf,
                                   struct cexpr *obj, struct cexpr **args,
                                   int na, int opform, struct ctarg *expl,
@@ -902,6 +932,17 @@ static int instantiate_candidates(struct cfunc **fs, int nf,
         int member = f->cls && !f->is_ctor && (!f->is_static || opform);
         struct cexpr **xa = opform && member ? args + 1 : args;
         int nx = opform && member ? na - 1 : na;
+        if (f->tmpl->pattern && f->tmpl->pattern->type->xobj) {
+            /* an explicit object parameter: deduced from the object */
+            struct cexpr *o = opform ? args[0] : object_lvalue(obj);
+            if (!o)
+                continue;
+            xa = xmalloc((size_t)(nx + 1) * sizeof *xa);
+            xa[0] = o;
+            memcpy(xa + 1, opform ? args + 1 : args,
+                   (size_t)(opform ? na - 1 : na) * sizeof *xa);
+            nx = (opform ? na - 1 : na) + 1;
+        }
         struct ctarg *targs;
         int nt;
         if (!deduce_call(f->tmpl, expl, nexpl, xa, nx, &targs, &nt))
@@ -978,12 +1019,14 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
     for (int k = 0; k < nf; k++) {
         struct cfunc *f = fs[k];
         struct cty *ft = f->type;
-        int member = f->cls && !f->is_ctor && (!f->is_static || opform);
+        int xo = ft->xobj;            /* params[0] the explicit object */
+        int member = f->cls && !f->is_ctor &&
+                     (!f->is_static || opform || xo);
         int nx = opform && member ? na - 1 : na;    /* explicit arguments */
         struct cexpr **xa = opform && member ? args + 1 : args;
-        if (nx > ft->np && !ft->variadic)
+        if (nx + xo > ft->np && !ft->variadic)
             continue;
-        if (nx < ft->np && (!f->defargs || !f->defargs[nx]))
+        if (nx + xo < ft->np && (!f->defargs || !f->defargs[nx + xo]))
             continue;
         if ((flags & RS_NO_EXPLICIT) && f->is_explicit)
             continue;
@@ -996,7 +1039,12 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
         c->nparams = nx;
         c->ics = xcalloc((size_t)(c->n ? c->n : 1), sizeof *c->ics);
         int ok = 1, base = opform ? 0 : 1;
-        if (member && f->is_static) {
+        if (xo) {
+            /* the object, converted to the explicit object parameter */
+            c->ics[0] = ics_of(opform ? args[0] : objlv, ft->params[0]);
+            ok = c->ics[0].rank != R_BAD;
+            base = 1;
+        } else if (member && f->is_static) {
             c->ics[0].rank = R_EXACT;   /* the object: not converted */
             base = 1;
         } else if (member) {
@@ -1007,14 +1055,14 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
         }
         for (int i = 0; ok && i < nx; i++) {
             struct ics *ic = &c->ics[base + i];
-            if (i >= ft->np) {
+            if (i + xo >= ft->np) {
                 ic->rank = R_ELLIPSIS;
                 continue;
             }
             int saved_nuc = no_user_conv;
             if (flags & RS_NO_USER)
                 no_user_conv = 1;
-            *ic = ics_of(xa[i], ft->params[i]);
+            *ic = ics_of(xa[i], ft->params[i + xo]);
             no_user_conv = saved_nuc;
             ok = ic->rank != R_BAD;
             if ((flags & RS_NO_USER) && ic->rank == R_USER)
@@ -1078,7 +1126,7 @@ struct fnset {
 
 static void set_add(struct fnset *s, struct cfunc *f)
 {
-    if (f->unsat)
+    if (func_unsat(f))
         return;                  /* its requires-clause says no */
     if (f->alias_of)
         f = f->alias_of;         /* (brought in by a using-declaration) */
@@ -1147,9 +1195,26 @@ static void assoc_ns(struct cty *t, struct cscope **ns, int *n, int depth)
     while (t->k == CT_PTR || ct_is_ref(t) || t->k == CT_ARRAY)
         t = t->to;
     struct cscope *s = NULL;
-    if (t->k == CT_CLASS)
-        s = enclosing_ns(t->cls->owner);
-    else if (t->k == CT_ENUM)
+    if (t->k == CT_CLASS) {
+        struct cclass *c = t->cls;
+        s = enclosing_ns(c->owner);
+        /* its bases' too, and a specialization's type arguments' (views::
+         * reverse | ...: operator| is its base _RangeAdaptorClosure's
+         * namespace's) */
+        if (c->complete)
+            for (int i = 0; i < c->nbases; i++)
+                assoc_ns(ct_class(c->bases[i].cls), ns, n, depth + 1);
+        for (int i = 0; i < c->ntargs; i++) {
+            struct ctarg *a = &c->targs[i];
+            if (a->is_pack) {
+                for (int k = 0; k < a->nelems; k++)
+                    if (a->elems[k].kind == TP_TYPE)
+                        assoc_ns(a->elems[k].type, ns, n, depth + 1);
+            } else if (a->kind == TP_TYPE) {
+                assoc_ns(a->type, ns, n, depth + 1);
+            }
+        }
+    } else if (t->k == CT_ENUM)
         s = enclosing_ns(t->en->owner);
     else if (t->k == CT_FUNC) {
         assoc_ns(t->to, ns, n, depth + 1);
@@ -1177,7 +1242,7 @@ static void adl(struct fnset *fs, const char *name, struct cexpr **args,
         if (args[i]->t)
             assoc_ns(args[i]->t, ns, &n, 0);
     for (int i = 0; i < n; i++) {
-        struct csym *y = lookup_in(ns[i], name);
+        struct csym *y = lookup_in_adl(ns[i], name);
         if (y && y->k == CS_FUNC)
             set_add_all(fs, y->fns);
     }
@@ -1213,7 +1278,7 @@ static struct cfunc *converting_ctor(struct cclass *c, struct cexpr *e,
         struct cfunc *f = g;
         if (f->is_explicit && !allow_explicit)
             continue;
-        if (f->unsat)
+        if (func_unsat(f))
             continue;
         if (f->tmpl) {
             /* a constructor template: its specialization for e */
@@ -1290,9 +1355,19 @@ static struct cfunc *conv_function(struct cexpr *e, struct cty *to,
     for (struct csym *y = cls[ci]->scope->syms; y; y = y->next) {
         if (y->k != CS_FUNC)
             continue;
-        for (struct cfunc *f = y->fns; f; f = f->next) {
-            if (!f->is_conv || (f->is_explicit && !allow_explicit))
+        for (struct cfunc *f0 = y->fns; f0; f0 = f0->next) {
+            struct cfunc *f = f0;
+            if (!f->is_conv || (f->is_explicit && !allow_explicit) ||
+                func_unsat(f))
                 continue;
+            if (f->tmpl) {
+                /* a template: its specialization for `to`, if one */
+                struct ctarg *ta;
+                int nta;
+                if (!deduce_conv(f->tmpl, to, &ta, &nta) ||
+                    !(f = func_instance(f->tmpl, ta, nta)) || f->unsat)
+                    continue;
+            }
             int hidden = 0;
             for (int cj = 0; cj < ci && !hidden; cj++)
                 for (struct csym *z = cls[cj]->scope->syms; z && !hidden;
@@ -1326,11 +1401,14 @@ static struct cfunc *conv_function(struct cexpr *e, struct cty *to,
             if (s.rank > R_CONV)
                 continue;
             int cmp = best ? ics_cmp(&s, &bs) : 1;
+            /* as good: a non-template beats a template's specialization */
+            if (cmp == 0 && best->spec_of && !f->spec_of)
+                cmp = 1;
             if (cmp > 0) {
                 best = f;
                 bs = s;
                 tie = 0;
-            } else if (cmp == 0) {
+            } else if (cmp == 0 && !(f->spec_of && !best->spec_of)) {
                 tie = 1;
             }
         }
@@ -1468,11 +1546,13 @@ struct cexpr *bind_ref(struct cexpr *e, struct cty *rt, const char *ctx)
                                                &e, 1, NULL)));
     }
     if (e->k == E_OVL || e->k == E_FUNC) {
-        if (T->k != CT_FUNC)
+        if (T->k == CT_FUNC)
+            return convert(e, ct_ptr(T), ctx);
+        /* const FP &: the function's address, a temporary bound */
+        if (!rv && !cref)
             ex_error(e, "cannot bind '%s' to a reference to %s (%s)",
                      e->fn->name, ct_name(T), ctx);
-        struct cexpr *f = convert(e, ct_ptr(T), ctx);
-        return f;
+        return ex_addr(materialize(convert(e, ct_unqual(T), ctx)));
     }
     if (e->t->k == CT_CLASS && T->k == CT_CLASS &&
         is_proper_base(e->t->cls, T->cls) && e->vc != VC_PRVALUE)
@@ -1588,6 +1668,15 @@ struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
 {
     if (fn->alias_of)
         fn = fn->alias_of;
+    if (fn->type->xobj && obj) {
+        /* an explicit object parameter: the object its first argument */
+        struct cexpr **all = xmalloc((size_t)(na + 1) * sizeof *all);
+        all[0] = object_lvalue(obj);
+        memcpy(all + 1, args, (size_t)na * sizeof *args);
+        args = all;
+        na++;
+        obj = NULL;
+    }
     if (fn->is_deleted)
         cx_error(at, "use of deleted function '%s'", fn->name);
     func_deduce_return(fn, at);
@@ -1780,6 +1869,8 @@ static struct cexpr *aggregate_init(struct cty *t, struct cexpr **items,
             continue;                         /* an unnamed bit-field */
         if (c->is_union && i > 0)
             break;
+        if (*idx >= n && fl->dflt_tok >= 0 && !fl->dflt)
+            field_parse_default(c, fl);
         if (*idx < n) {
             L->a[i] = init_from_items(fl->type, items, n, idx, at);
         } else if (fl->dflt) {
@@ -1889,7 +1980,8 @@ static struct cexpr *designated_init(struct cty *t, struct cexpr *list,
             chosen = 1;
         } else if (c->is_union) {
             continue;
-        } else if (fl->dflt) {
+        } else if (fl->dflt || (fl->dflt_tok >= 0 &&
+                                (field_parse_default(c, fl), fl->dflt))) {
             L->a[i] = fl->dflt;
         } else if (ct_is_ref(fl->type)) {
             cx_error(at, "reference member '%s' is not initialized",
@@ -2202,6 +2294,8 @@ static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
         struct cexpr *obj = l->vc == VC_PRVALUE ? materialize(l) : l;
         return make_call(f, ex_addr(obj), args + 1, na - 1, at);
     }
+    if (f->cls && f->type->xobj)         /* the object its first argument */
+        return make_call(f, NULL, args, na, at);
     if (f->cls && f->is_static)          /* a static operator(): no object */
         return make_call(f, NULL, args + 1, na - 1, at);
     return make_call(f, NULL, args, na, at);
@@ -4375,6 +4469,8 @@ static struct cexpr *parse_primary(void)
         if (y && q.scope && y->k == CS_FUNC) {
             struct cexpr *o = name_expr(y, name, at);
             o->nonvirt = 1;           /* C::f() calls C's f, not an override */
+            if (o->k == E_OVL)
+                o->adl = 0;           /* a qualified name: no ADL (6.5.4) */
             return o;
         }
         if (!y) {
@@ -4450,9 +4546,9 @@ static struct cexpr *call(struct cexpr *f, struct cexpr **args, int na,
         cur_has_targs = 0;
         cur_ntargs = 0;
         cur_targs = NULL;
-        struct cexpr *r = make_call(fn, fn->cls && !fn->is_static ? f->obj
-                                                                  : NULL,
-                                    args, na, at);
+        struct cexpr *r = make_call(fn, fn->cls && (!fn->is_static ||
+                                                    fn->type->xobj)
+                                        ? f->obj : NULL, args, na, at);
         r->nonvirt = f->nonvirt;
         return r;
     }

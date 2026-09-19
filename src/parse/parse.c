@@ -2559,10 +2559,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (cur(ps)->kind != TOK_RPAREN) {
         for (;;) {
             if (cur(ps)->kind == TOK_ELLIPSIS) {
-                if (f->nparams == 0)
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
-                               "'...' needs at least one named "
-                               "parameter before it");
+                /* (C23, and C++'s f(...): no named parameter before) */
                 f->is_varargs = 1;
                 advance(ps);
                 break;

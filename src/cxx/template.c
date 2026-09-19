@@ -476,6 +476,22 @@ int concept_satisfied(struct ctemplate *c, struct ctarg *args, int n,
     return v;
 }
 
+/* A concept's parameters bound to args (fitted: packs, defaults): the
+ * scope its definition is read in; *fitted the arguments as bound. */
+struct cscope *concept_bind(struct ctemplate *c, struct ctarg *args, int n,
+                            struct ctarg **fitted, const struct ctok *at)
+{
+    struct ctarg *a = fit_args(c, c->params, c->nparams, args, n, c->scope,
+                               at);
+    *fitted = a;
+    return tparam_scope(c->params, c->nparams, a, c->nparams, c->scope);
+}
+
+int targs_same(const struct ctarg *a, int na, const struct ctarg *b, int nb)
+{
+    return args_same(a, na, b, nb);
+}
+
 int template_constraints(struct ctparam *ps, int np, int req_start,
                          int req_end, struct cscope *scope,
                          const struct ctok *at)
@@ -1012,6 +1028,37 @@ int more_specialized(struct ctemplate *a, struct ctemplate *b, int n)
            !at_least_as_specialized(b, a, n);
 }
 
+/* a specialization's template's constraints, its arguments bound */
+static struct cnorm *spec_constraints(struct cfunc *f)
+{
+    struct ctemplate *t = f->spec_of;
+    struct cty *pt = t->pattern ? t->pattern->type : NULL;
+    int any = t->req_start || (pt && pt->treq);
+    for (int i = 0; i < t->nparams; i++)
+        any |= t->params[i].tc != NULL;
+    if (!any)
+        return NULL;
+    struct cscope *s = tparam_scope(t->params, t->nparams, f->targs,
+                                    f->ntargs, t->scope);
+    return constraints_normal2(t->params, t->nparams, t->req_start,
+                               t->req_end, pt ? pt->treq : 0,
+                               pt ? pt->treq_end : 0, s);
+}
+
+int spec_more_constrained(struct cfunc *a, struct cfunc *b)
+{
+    struct ctemplate *ta = a->spec_of, *tb = b->spec_of;
+    int n = ta->pattern && tb->pattern
+            ? (ta->pattern->type->np < tb->pattern->type->np
+               ? ta->pattern->type->np : tb->pattern->type->np) : 0;
+    if (!ta->pattern || !tb->pattern ||
+        !at_least_as_specialized(ta, tb, n) ||
+        !at_least_as_specialized(tb, ta, n))
+        return 0;
+    struct cnorm *na = spec_constraints(a), *nb = spec_constraints(b);
+    return constraint_subsumes(na, nb) && !constraint_subsumes(nb, na);
+}
+
 /* A value parameter whose type is dependent (`typename enable_if<C,
  * bool>::type = true`): its type substituted with the arguments before
  * it — failing, deduction fails (13.10.3.1) — and its argument converted
@@ -1049,6 +1096,9 @@ static int value_type_substitutes(struct ctemplate *t, int i,
 /* Template t's arguments deduced from a function type A (its address
  * taken where a pointer to A is wanted, 13.10.3.3): explicit ones first,
  * the rest from A's parameters and return type, then defaults. */
+static int deduce_rest(struct ctemplate *t, struct ctarg *out, int *set,
+                       int np, struct ctarg **outp, int *nout);
+
 int deduce_func_type(struct ctemplate *t, struct ctarg *expl, int nexpl,
                      struct cty *A, struct ctarg **outp, int *nout)
 {
@@ -1072,6 +1122,33 @@ int deduce_func_type(struct ctemplate *t, struct ctarg *expl, int nexpl,
     }
     if (!deduce(t->pattern->type, A, out, set, np))
         return 0;
+    return deduce_rest(t, out, set, np, outp, nout);
+}
+
+/* A conversion function template's arguments for a conversion to `to`
+ * ([temp.deduct.conv]): its return type deduced from `to`, the
+ * references and top-level cv of both set aside. */
+int deduce_conv(struct ctemplate *t, struct cty *to, struct ctarg **outp,
+                int *nout)
+{
+    int np = t->nparams;
+    struct ctarg *out = xcalloc((size_t)(np ? np : 1), sizeof *out);
+    int *set = xcalloc((size_t)(np ? np : 1), sizeof *set);
+    struct cty *P = t->pattern->type->to, *A = to;
+    if (ct_is_ref(P))
+        P = P->to;
+    if (ct_is_ref(A))
+        A = A->to;
+    if (!deduce(ct_unqual(P), ct_unqual(A), out, set, np))
+        return 0;
+    return deduce_rest(t, out, set, np, outp, nout);
+}
+
+/* After deduction: the parameters left to their defaults, each value
+ * parameter's type checked. */
+static int deduce_rest(struct ctemplate *t, struct ctarg *out, int *set,
+                       int np, struct ctarg **outp, int *nout)
+{
     for (int i = 0; i < np; i++) {
         if (set[i]) {
             if (!value_type_substitutes(t, i, out, np))
@@ -1173,6 +1250,9 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
             if (e->fn->next || e->fn->tmpl)
                 continue;                    /* an overload set: skip */
         }
+        if (ppack < 0 && !ct_dependent(P))
+            continue;       /* no template parameter to deduce: the
+                             * argument converts, or not, later */
         struct cty *A = e->k == E_OVL ? e->fn->type : e->t;
         if (ppack >= 0) {
             /* a function parameter pack: each argument deduces one
@@ -1433,17 +1513,20 @@ static int partial_constraints(struct cpartial *p, struct ctarg *bound,
                                 p->req_end, s, cx_cur());
 }
 
-/* Of two partial specializations whose patterns are alike, is a the more
- * constrained? (Constrained over unconstrained: subsumption as far as
- * EmbCC decides it.) */
-static int more_constrained(struct cpartial *a, struct cpartial *b)
+/* Of two partial specializations whose patterns are alike (bound here to
+ * ba and bb), is a the more constrained: do its constraints subsume b's
+ * and not the reverse (13.5.5)? */
+static int more_constrained(struct cpartial *a, struct ctarg *ba,
+                            struct cpartial *b, struct ctarg *bb,
+                            struct ctemplate *t)
 {
-    int ca = a->req_start != 0, cb = b->req_start != 0;
-    for (int i = 0; i < a->nparams; i++)
-        ca |= a->params[i].tc != NULL;
-    for (int i = 0; i < b->nparams; i++)
-        cb |= b->params[i].tc != NULL;
-    return ca && !cb;
+    struct cnorm *na = constraints_normal(
+        a->params, a->nparams, a->req_start, a->req_end,
+        tparam_scope(a->params, a->nparams, ba, a->nparams, t->scope));
+    struct cnorm *nb = constraints_normal(
+        b->params, b->nparams, b->req_start, b->req_end,
+        tparam_scope(b->params, b->nparams, bb, b->nparams, t->scope));
+    return constraint_subsumes(na, nb) && !constraint_subsumes(nb, na);
 }
 
 /* The partial specialization whose pattern the arguments match — of
@@ -1465,7 +1548,8 @@ static struct cpartial *match_partial(struct ctemplate *t, struct ctarg *a,
         for (int j = 0; best && j < n; j++)
             best = i == j || (partial_at_least(m[i], m[j]) &&
                               (!partial_at_least(m[j], m[i]) ||
-                               more_constrained(m[i], m[j])));
+                               more_constrained(m[i], mb[i], m[j], mb[j],
+                                                t)));
         if (best) {
             *bound = mb[i];
             return m[i];
@@ -1563,6 +1647,17 @@ void class_ensure(struct cclass *c)
                       ps);
     cx_inst_pop();
     inst_depth--;
+}
+
+int func_unsat(struct cfunc *f)
+{
+    if (f->treq_scope) {
+        struct cscope *s = f->treq_scope;
+        f->treq_scope = NULL;
+        f->unsat = !constraint_satisfied(f->type->treq, f->type->treq_end,
+                                         s);
+    }
+    return f->unsat;
 }
 
 struct cfunc *func_instance(struct ctemplate *t, struct ctarg *args,
