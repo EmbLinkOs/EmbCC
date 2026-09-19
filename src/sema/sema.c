@@ -14,6 +14,7 @@
 #include "../arch/target.h"
 #include "ldfloat.h"
 #include "type.h"
+#include "w128.h"
 
 struct vardef {
     const char *name;
@@ -163,6 +164,10 @@ static struct type *arith_common(struct type *a, struct type *b)
         return ty_base(TY_FLOAT, 0);
     a = promote(a);
     b = promote(b);
+    int qa = a->kind == TY_INT128, qb = b->kind == TY_INT128;
+    if (qa || qb)       /* __int128 outranks long, holds all its values */
+        return ty_base(TY_INT128, qa && qb ? a->is_unsigned || b->is_unsigned
+                                           : (qa ? a : b)->is_unsigned);
     int wa = ty_wide(a), wb = ty_wide(b);
     if (wa || wb) {
         int uns;
@@ -1810,6 +1815,58 @@ static int const_fold(const struct expr *e, long *out)
     }
 }
 
+/* e, a constant integer expression, as 128 bits (its own type's value,
+ * extended per its signedness) */
+static int const_fold128(const struct expr *e, struct w128 *out)
+{
+    if (!e->ty || e->ty->kind != TY_INT128) {
+        long v;
+        if (!e->ty || !ty_is_integer(e->ty) || !const_fold(e, &v))
+            return 0;
+        *out = w_make((unsigned long)v,
+                      !e->ty->is_unsigned && v < 0 ? ~0UL : 0);
+        return 1;
+    }
+    struct w128 a, b;
+    int sign = !e->ty->is_unsigned;
+    switch (e->kind) {
+    case EXPR_NUM:
+        *out = w_make((unsigned long)e->num, e->num < 0 ? ~0UL : 0);
+        return 1;
+    case EXPR_CAST:
+        return const_fold128(e->rhs, out);
+    case EXPR_NEG:
+        if (!const_fold128(e->rhs, &a))
+            return 0;
+        *out = w_neg(a);
+        return 1;
+    case EXPR_BNOT:
+        if (!const_fold128(e->rhs, &a))
+            return 0;
+        *out = w_make(~a.lo, ~a.hi);
+        return 1;
+    case EXPR_BINOP:
+        if (!const_fold128(e->lhs, &a) || !const_fold128(e->rhs, &b))
+            return 0;
+        switch (e->op) {
+        case B_ADD: *out = w_add(a, b); return 1;
+        case B_SUB: *out = w_add(a, w_neg(b)); return 1;
+        case B_MUL: *out = w_mul(a, b); return 1;
+        case B_AND: *out = w_make(a.lo & b.lo, a.hi & b.hi); return 1;
+        case B_OR:  *out = w_make(a.lo | b.lo, a.hi | b.hi); return 1;
+        case B_XOR: *out = w_make(a.lo ^ b.lo, a.hi ^ b.hi); return 1;
+        case B_SHL: *out = w_shl(a, (int)b.lo); return 1;
+        case B_SHR: *out = w_shr(a, (int)b.lo, sign); return 1;
+        case B_DIV: case B_MOD:
+            return w_div(a, b, sign, e->op == B_MOD, out);
+        default:
+            return 0;
+        }
+    default:
+        return 0;
+    }
+}
+
 /* Fold a FLOATING constant expression to a double, for static initializers of
  * float/double storage (`double g = 1.0/3.0;`). Integer leaves promote to
  * double; a cast to an integer type truncates (C semantics), a cast to float
@@ -2245,6 +2302,31 @@ static void lower_static_bytes(struct unit *u, int line, int size,
             }
             for (int b = 0; b < sz; b++)
                 bytes[v[k].off + b] = (char)(ubits >> (8 * b));
+            continue;
+        }
+        if (v[k].ty->kind == TY_INT128) {
+            struct w128 w;
+            if (!const_fold128(v[k].e, &w))
+                diag_fatal(u->file, line,
+                           "a static __int128 initializer must be a constant "
+                           "expression");
+            if (v[k].bit_width) {
+                /* a bit-field: its bits merged into the 16-byte unit */
+                struct w128 mask = w_shr(w_make(~0UL, ~0UL),
+                                         128 - v[k].bit_width, 0);
+                w.lo &= mask.lo;
+                w.hi &= mask.hi;
+                w = w_shl(w, v[k].bit_off);
+                for (int b = 0; b < 8; b++) {
+                    bytes[v[k].off + b] |= (char)(w.lo >> (8 * b));
+                    bytes[v[k].off + 8 + b] |= (char)(w.hi >> (8 * b));
+                }
+                continue;
+            }
+            for (int b = 0; b < 8; b++) {
+                bytes[v[k].off + b] = (char)(w.lo >> (8 * b));
+                bytes[v[k].off + 8 + b] = (char)(w.hi >> (8 * b));
+            }
             continue;
         }
         long cv;

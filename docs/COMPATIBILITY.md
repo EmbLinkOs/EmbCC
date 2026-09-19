@@ -25,6 +25,7 @@ diagnostic (never miscompiled).
 | `float` / `double` | IEEE binary32 / binary64 | IEEE binary32 / binary64 |
 | `long double` | **x87 80-bit extended**, 16 bytes, 16-aligned | **IEEE binary128**, 16 bytes, 16-aligned |
 | `_Complex` (float, double, long double) | ✓ | ✓ |
+| `__int128`, `unsigned __int128` (GNU) | ✓ 16 bytes, 16-aligned | ✓ 16 bytes, 16-aligned |
 | Largest honoured alignment | 16 | 16 |
 
 ## The C language
@@ -38,7 +39,8 @@ took target-specific work, or that a reader might doubt.
 | Variable-length arrays (incl. parameters, `sizeof`, release on `break`/`continue`/`goto`) | ✓ | ✓ |
 | `long double` arithmetic, conversions, exact constants | ✓ x87 | ✓ libgcc soft-float |
 | `_Complex` arithmetic (`*`, `/` through libgcc, Annex G) | ✓ | ✓ |
-| Variadic functions, `va_arg` (incl. `double`, `long double`), `va_copy` | ✓ | ✓ |
+| `__int128` arithmetic (`+ - & \| ^ ~`, comparisons inline; `* / % << >>` and float conversions through libgcc), bit-fields, static initializers; not optimized, and no `__atomic_*` (refused) | ✓ | ✓ |
+| Variadic functions, `va_arg` (incl. `double`, `long double`, `__int128`), `va_copy` | ✓ | ✓ |
 | `_Atomic`, `__atomic_*`, `__sync_*` | ✓ `lock`-prefixed | ✓ `ldxr`/`stxr` + barriers |
 | Statement expressions, `typeof`, computed `goto`, `__real__`/`__imag__`, imaginary constants | ✓ | ✓ |
 | Attributes: `packed`, `aligned`, `weak`, `noreturn`, `section` (file-scope variables); `embcc_sret` on a first parameter (the ABI's indirect-result pointer — what C++ lowering writes) | ✓ | ✓ (`x8`) |
@@ -87,11 +89,13 @@ targets, so EmbCC's C++ objects link with g++'s and with libstdc++.
 | Aggregates | classified by eightbyte: INTEGER / SSE / MEMORY | HFA in `v` registers; ≤16 bytes in `x` registers; larger by reference (B.3); result > 16 bytes through `x8` |
 | `long double` | in memory (X87 class), returned in `st0` | `q` register |
 | `_Complex` | float: one `xmm`; double: two; long double: memory in, `st0`/`st1` out | HFA of two: `s`, `d` or `q` registers |
+| `__int128` | two GPRs (any two) or a 16-aligned stack slot; returned in `rax:rdx` | an even `x` pair (C.8) or a 16-aligned stack slot; returned in `x0:x1` |
 | `va_list` | `char *` to a `__va_list_tag` (what newlib reads) | `char *` to the 32-byte record (B.3 makes it gcc-compatible) |
 
 Each of these is checked against gcc by linking an EmbCC half and a gcc half
 that call each other in both directions: `tests/golden/sysv-abi.sh`,
-`cross-varargs.sh`, `ldouble-abi.sh`, `complex-abi.sh` — on both targets.
+`cross-varargs.sh`, `ldouble-abi.sh`, `complex-abi.sh`, `int128-abi.sh` — on
+both targets.
 
 ## Toolchain components
 

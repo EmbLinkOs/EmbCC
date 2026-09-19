@@ -500,6 +500,13 @@ struct cty *peek_type_name(int *ntok)
         *ntok = 1;
         return ct_basic(CT_VALIST);
     }
+    if (cx_kind() == TOK_IDENT &&
+        (strcmp(cx_cur()->t.text, "__int128_t") == 0 ||
+         strcmp(cx_cur()->t.text, "__uint128_t") == 0)) {
+        /* (GCC's typedefs for the 128-bit integers) */
+        *ntok = 1;
+        return ct_basic(cx_cur()->t.text[2] == 'u' ? CT_UINT128 : CT_INT128);
+    }
     if (cx_kind() != TOK_IDENT && cx_kind() != TOK_COLONCOLON &&
         cx_kind() != TOK_CX_TEMPLATE)
         return NULL;
@@ -588,6 +595,7 @@ static int is_decl_keyword(enum tok_kind k)
 {
     switch (k) {
     case TOK_KW_INT: case TOK_KW_CHAR: case TOK_KW_SHORT: case TOK_KW_LONG:
+    case TOK_KW_INT128:
     case TOK_KW_FLOAT: case TOK_KW_DOUBLE: case TOK_KW_BOOL: case TOK_CX_BOOL:
     case TOK_KW_UNSIGNED: case TOK_KW_SIGNED: case TOK_KW_VOID:
     case TOK_CX_WCHAR_T: case TOK_CX_CHAR8_T: case TOK_CX_CHAR16_T:
@@ -760,7 +768,8 @@ static void parse_dspec(struct dspec *ds)
     memset(ds, 0, sizeof *ds);
     ds->at = cx_cur();
     int n_void = 0, n_bool = 0, n_char = 0, n_short = 0, n_int = 0;
-    int n_long = 0, n_signed = 0, n_unsigned = 0, n_float = 0, n_double = 0;
+    int n_long = 0, n_int128 = 0, n_signed = 0, n_unsigned = 0;
+    int n_float = 0, n_double = 0;
     int n_complex = 0;
     enum cty_kind special = CT_VOID;
     int n_special = 0;
@@ -824,6 +833,7 @@ static void parse_dspec(struct dspec *ds)
         case TOK_KW_SHORT: n_short++; cx_advance(); continue;
         case TOK_KW_INT: n_int++; cx_advance(); continue;
         case TOK_KW_LONG: n_long++; cx_advance(); continue;
+        case TOK_KW_INT128: n_int128++; cx_advance(); continue;
         case TOK_KW_SIGNED: n_signed++; cx_advance(); continue;
         case TOK_KW_UNSIGNED: n_unsigned++; cx_advance(); continue;
         case TOK_KW_FLOAT: n_float++; cx_advance(); continue;
@@ -955,6 +965,7 @@ static void parse_dspec(struct dspec *ds)
         else if (n_float) k = CT_FLOAT;
         else if (n_double) k = n_long ? CT_LDOUBLE : CT_DOUBLE;
         else if (n_short) k = n_unsigned ? CT_USHORT : CT_SHORT;
+        else if (n_int128) k = n_unsigned ? CT_UINT128 : CT_INT128;
         else if (n_long >= 2) k = n_unsigned ? CT_ULLONG : CT_LLONG;
         else if (n_long) k = n_unsigned ? CT_ULONG : CT_LONG;
         else if (n_int || n_signed || n_unsigned)
@@ -981,6 +992,7 @@ int at_simple_type_kw(void)
 {
     switch (cx_kind()) {
     case TOK_KW_INT: case TOK_KW_CHAR: case TOK_KW_SHORT: case TOK_KW_LONG:
+    case TOK_KW_INT128:
     case TOK_KW_FLOAT: case TOK_KW_DOUBLE: case TOK_KW_BOOL: case TOK_CX_BOOL:
     case TOK_KW_UNSIGNED: case TOK_KW_SIGNED: case TOK_KW_VOID:
     case TOK_CX_WCHAR_T: case TOK_CX_CHAR8_T: case TOK_CX_CHAR16_T:
@@ -3932,7 +3944,10 @@ static void parse_member(struct cclass *c, int *access)
                 cx_curfn = NULL;
                 init_variable(v, d.at);
                 cx_curfn = sf;
-                if (!v->is_inline && !v->has_const)
+                struct cty *vt = ct_unqual(v->type);
+                int c128 = (vt->k == CT_INT128 || vt->k == CT_UINT128) &&
+                           (v->type->q & CQ_CONST);
+                if (!v->is_inline && !v->has_const && !c128)
                     cx_error(d.at, "a static data member initialized in "
                                    "its class must be const integral or "
                                    "inline");

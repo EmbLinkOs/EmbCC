@@ -211,6 +211,13 @@ struct S {
 int tags_b();                        // side B calls side A's
 }
 
+// __int128 in signatures (mangled n and o), both ways
+namespace i128 {
+__int128 from_gxx(__int128 a, unsigned __int128 b, int k);
+unsigned __int128 from_embcc(unsigned __int128 a, __int128 b);
+int i128_b();                        // side B calls side A's
+}
+
 // pointers to member functions, virtual or not, passed both ways (the
 // representation differs by target: Itanium's, ARM's variant)
 namespace pmf {

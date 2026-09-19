@@ -6,6 +6,7 @@
  * resolution (12.2) — and initialization (9.4), which declarations,
  * arguments, returns and new-expressions all share. */
 #include "cxx.h"
+#include "../sema/w128.h"
 #include "../arch/target.h"
 
 #include <setjmp.h>
@@ -175,9 +176,129 @@ static long truncate_to(long v, const struct cty *t)
     return (long)u;
 }
 
+static int is128(const struct cty *t)
+{
+    return t && (t->k == CT_INT128 || t->k == CT_UINT128);
+}
+
+/* e, an integer constant, in 128 bits: its type's value, extended as the
+ * type is signed or not (an __int128's computed in two eightbytes) */
+static int fold128(struct cexpr *e, struct w128 *out)
+{
+    struct cty *t = e->t ? ct_unqual(e->t) : NULL;
+    if (!t || !ct_is_integer(t))
+        return 0;
+    if (!is128(t)) {
+        long v;
+        if (!expr_fold(e, &v))
+            return 0;
+        *out = w_from(v, ct_is_signed(t));
+        return 1;
+    }
+    struct w128 a, b;
+    int sign = t->k == CT_INT128;
+    switch (e->k) {
+    case E_INT:
+        *out = w_from(e->ival, 1);
+        return 1;
+    case E_VAR: {
+        static int depth;
+        struct cvar *v = e->var;
+        if (v->has_const) {
+            *out = w_from(v->const_val, 1);
+            return 1;
+        }
+        /* a const one whose value a long does not hold: its initializer */
+        if (!(v->type->q & CQ_CONST) || !v->init || depth > 32)
+            return 0;
+        depth++;
+        int ok = fold128(v->init, out);
+        depth--;
+        return ok;
+    }
+    case E_CAST:
+        return fold128(e->a[0], out);    /* (to the widest: the value) */
+    case E_UNARY:
+        if (!fold128(e->a[0], &a))
+            return 0;
+        switch (e->op) {
+        case TOK_MINUS: *out = w_neg(a); return 1;
+        case TOK_PLUS: *out = a; return 1;
+        case TOK_TILDE: *out = w_make(~a.lo, ~a.hi); return 1;
+        default: return 0;
+        }
+    case E_BINARY:
+        if (!fold128(e->a[0], &a) || !fold128(e->a[1], &b))
+            return 0;
+        switch (e->op) {
+        case TOK_PLUS: *out = w_add(a, b); return 1;
+        case TOK_MINUS: *out = w_add(a, w_neg(b)); return 1;
+        case TOK_STAR: *out = w_mul(a, b); return 1;
+        case TOK_SLASH: return w_div(a, b, sign, 0, out);
+        case TOK_PERCENT: return w_div(a, b, sign, 1, out);
+        case TOK_SHL: *out = w_shl(a, (int)b.lo); return 1;
+        case TOK_SHR: *out = w_shr(a, (int)b.lo, sign); return 1;
+        case TOK_AMP: *out = w_make(a.lo & b.lo, a.hi & b.hi); return 1;
+        case TOK_PIPE: *out = w_make(a.lo | b.lo, a.hi | b.hi); return 1;
+        case TOK_CARET: *out = w_make(a.lo ^ b.lo, a.hi ^ b.hi); return 1;
+        default: return 0;
+        }
+    case E_COND: {
+        long c;
+        if (!expr_fold(e->a[0], &c))
+            return 0;
+        return fold128(e->a[c ? 1 : 2], out);
+    }
+    default:
+        return 0;
+    }
+}
+
 int expr_fold(struct cexpr *e, long *out)
 {
     long a, b, c;
+    if (is128(e->t)) {
+        /* an __int128's value: kept only when a long holds it (E_INT) */
+        struct w128 w;
+        if (!fold128(e, &w))
+            return 0;
+        int fits = e->t->k == CT_INT128
+                   ? w.hi == ((long)w.lo < 0 ? ~0UL : 0)
+                   : w.hi == 0 && (long)w.lo >= 0;
+        if (!fits)
+            return 0;
+        *out = (long)w.lo;
+        return 1;
+    }
+    if ((e->k == E_BINARY && e->a[0]->t && is128(ct_unqual(e->a[0]->t)) &&
+         e->op != TOK_ANDAND && e->op != TOK_OROR) ||
+        (e->k == E_CAST && is128(ct_unqual(e->a[0]->t)))) {
+        /* a comparison of __int128s, or one converted to a narrower type:
+         * computed in 128 bits */
+        struct w128 x, y;
+        if (!fold128(e->a[0], &x))
+            return 0;
+        if (e->k == E_CAST) {
+            if (!ct_is_integer(e->t))
+                return 0;
+            *out = truncate_to((long)x.lo, e->t);
+            return 1;
+        }
+        if (!fold128(e->a[1], &y))
+            return 0;
+        int sign = ct_unqual(e->a[0]->t)->k == CT_INT128;
+        int lt = sign ? w_slt(x, y) : w_ult(x, y);
+        int gt = sign ? w_slt(y, x) : w_ult(y, x);
+        switch (e->op) {
+        case TOK_EQEQ: *out = !lt && !gt; return 1;
+        case TOK_NEQ: *out = lt || gt; return 1;
+        case TOK_LT: *out = lt; return 1;
+        case TOK_GT: *out = gt; return 1;
+        case TOK_LE: *out = !gt; return 1;
+        case TOK_GE: *out = !lt; return 1;
+        default: return 0;
+        }
+    }
     switch (e->k) {
     case E_INT:
         *out = e->ival;
@@ -2303,7 +2424,18 @@ static void list_element(struct cexpr ***v, int *n, int *cap)
     }
 }
 
+static struct cexpr *braced_list(void);
+
 struct cexpr *parse_braced_list(void)
+{
+    int saved = cx_in_targs;              /* (X<T{a > b}>) */
+    cx_in_targs = 0;
+    struct cexpr *L = braced_list();
+    cx_in_targs = saved;
+    return L;
+}
+
+static struct cexpr *braced_list(void)
 {
     struct cexpr *L = ex_new(E_INITLIST, NULL, VC_PRVALUE);
     cx_expect(TOK_LBRACE, "'{'");
@@ -3307,12 +3439,15 @@ static struct cexpr *functional_cast(struct cty *t, const struct ctok *at)
     cx_expect(TOK_LPAREN, "'('");
     struct cexpr **args = NULL;
     int na = 0, cap = 0;
+    int saved = cx_in_targs;              /* (int(a >> b) in X<...>) */
+    cx_in_targs = 0;
     while (cx_kind() != TOK_RPAREN) {
         list_element(&args, &na, &cap);
         if (!cx_accept(TOK_COMMA))
             break;
     }
     cx_expect(TOK_RPAREN, "')'");
+    cx_in_targs = saved;
     if (na == 0) {
         if (t->k == CT_VOID)
             return ex_cast(ex_int(0, ct_basic(CT_INT)), t);

@@ -106,6 +106,7 @@ static const struct {
     { "char", TOK_KW_CHAR },
     { "short", TOK_KW_SHORT },
     { "long", TOK_KW_LONG },
+    { "__int128", TOK_KW_INT128 },
     { "float", TOK_KW_FLOAT },
     { "double", TOK_KW_DOUBLE },
     { "_Bool", TOK_KW_BOOL },
@@ -998,6 +999,7 @@ const char *tok_describe(const struct token *t)
     case TOK_KW_CHAR: return "'char'";
     case TOK_KW_SHORT: return "'short'";
     case TOK_KW_LONG: return "'long'";
+    case TOK_KW_INT128: return "'__int128'";
     case TOK_KW_FLOAT: return "'float'";
     case TOK_KW_DOUBLE: return "'double'";
     case TOK_KW_BOOL: return "'_Bool'";

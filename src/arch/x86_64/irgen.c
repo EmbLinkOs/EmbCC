@@ -74,8 +74,14 @@ int irg_va_arg_sysv(struct ir_func *fn, struct expr *e)
         return v;
     }
 
+    /* __int128 takes two eightbytes: two registers (any two; the save area
+     * holds them in order) while two are left, else a 16-aligned slot of 16
+     * in the overflow area — gp_offset left as it was, as the caller left
+     * the last register to the next argument. */
+    int n8 = rt->kind == TY_INT128 ? 2 : 1;
     int gp = emit_load(fn, ap, u32);        /* gp_offset (at ap+0) */
-    int in_reg = emit_cmp(fn, B_LT, gp, emit_const(fn, 48, 4), 4, 0);
+    int in_reg = emit_cmp(fn, B_LT, gp, emit_const(fn, 48 - 8 * (n8 - 1), 4),
+                          4, 0);
 
     int addr = new_temp(fn);
     int l_over = new_label(fn), l_done = new_label(fn);
@@ -84,15 +90,19 @@ int irg_va_arg_sysv(struct ir_func *fn, struct expr *e)
     /* register save area: addr = reg_save_area + gp_offset; gp_offset += 8 */
     int rsa = emit_load(fn, a_rsa, ptr);
     emit_mov(fn, addr, emit_bin(fn, IR_ADD, rsa, gp, 8, 1));
-    emit_store(fn, ap, emit_bin(fn, IR_ADD, gp, emit_const(fn, 8, 4), 4, 0),
-               u32);
+    emit_store(fn, ap, emit_bin(fn, IR_ADD, gp, emit_const(fn, 8 * n8, 4), 4,
+                                0), u32);
     emit_jmp(fn, l_done);
 
     /* overflow area: addr = overflow_arg_area; advance it by 8 */
     emit_label(fn, l_over);
     int ova = emit_load(fn, a_ova, ptr);
+    if (n8 == 2)
+        ova = emit_bin(fn, IR_AND,
+                       emit_bin(fn, IR_ADD, ova, emit_const(fn, 15, 8), 8, 1),
+                       emit_const(fn, -16, 8), 8, 1);
     emit_mov(fn, addr, ova);
-    emit_store(fn, a_ova, emit_bin(fn, IR_ADD, ova, emit_const(fn, 8, 8),
+    emit_store(fn, a_ova, emit_bin(fn, IR_ADD, ova, emit_const(fn, 8 * n8, 8),
                                    8, 1), ptr);
 
     emit_label(fn, l_done);

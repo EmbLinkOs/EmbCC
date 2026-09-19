@@ -244,7 +244,7 @@ int ct_same_unqual(const struct cty *a, const struct cty *b)
 
 int ct_is_integer(const struct cty *t)
 {
-    return (t->k >= CT_BOOL && t->k <= CT_ULLONG) || t->k == CT_ENUM;
+    return (t->k >= CT_BOOL && t->k <= CT_UINT128) || t->k == CT_ENUM;
 }
 
 int ct_is_float(const struct cty *t)
@@ -292,6 +292,7 @@ int ct_is_signed(const struct cty *t)
     case CT_CHAR:  return target_get() != TARGET_AARCH64;
     case CT_WCHAR: return target_get() != TARGET_AARCH64;
     case CT_SCHAR: case CT_SHORT: case CT_INT: case CT_LONG: case CT_LLONG:
+    case CT_INT128:
         return 1;
     case CT_ENUM:  return ct_is_signed(t->en->underlying);
     default:
@@ -327,7 +328,7 @@ long ct_size(const struct cty *t)
     case CT_DOUBLE: case CT_PTR: case CT_NULLPTR: case CT_LREF: case CT_RREF:
     case CT_VALIST:
         return 8;
-    case CT_LDOUBLE: return 16;
+    case CT_LDOUBLE: case CT_INT128: case CT_UINT128: return 16;
     case CT_COMPLEX: return 2 * ct_size(t->to);
     case CT_ARRAY: return t->n < 0 ? 0 : t->n * ct_size(t->to);
     case CT_CLASS: return t->cls->size;
@@ -379,6 +380,7 @@ static int rank(enum cty_kind k)
     case CT_INT: case CT_UINT: return 1;
     case CT_LONG: case CT_ULONG: return 2;
     case CT_LLONG: case CT_ULLONG: return 3;
+    case CT_INT128: case CT_UINT128: return 4;
     default: return 0;
     }
 }
@@ -389,6 +391,7 @@ static enum cty_kind to_unsigned(enum cty_kind k)
     case CT_INT: return CT_UINT;
     case CT_LONG: return CT_ULONG;
     case CT_LLONG: return CT_ULLONG;
+    case CT_INT128: return CT_UINT128;
     default: return k;
     }
 }
@@ -445,6 +448,8 @@ static const char *basic_name(enum cty_kind k)
     case CT_ULONG: return "unsigned long";
     case CT_LLONG: return "long long";
     case CT_ULLONG: return "unsigned long long";
+    case CT_INT128: return "__int128";
+    case CT_UINT128: return "unsigned __int128";
     case CT_FLOAT: return "float";
     case CT_DOUBLE: return "double";
     case CT_LDOUBLE: return "long double";

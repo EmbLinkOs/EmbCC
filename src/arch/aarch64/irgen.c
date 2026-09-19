@@ -33,10 +33,18 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e)
     int addr = new_temp(fn);
     int l_stack = new_label(fn), l_done = new_label(fn);
 
+    /* __int128: an even register pair (C.8: the offset rounded up to 16,
+     * as the save area's x0 is at -64), 16 bytes of it */
+    int i128 = rt->kind == TY_INT128;
     int offs = emit_load(fn, a_offs, s32);
     emit_brnz(fn, emit_cmp(fn, B_GE, offs, emit_const(fn, 0, 4), 4, 1), 4,
               l_stack);                                  /* already spent */
-    int next = emit_bin(fn, IR_ADD, offs, emit_const(fn, flt ? 16 : 8, 4), 4, 1);
+    if (i128)
+        offs = emit_bin(fn, IR_AND,
+                        emit_bin(fn, IR_ADD, offs, emit_const(fn, 15, 4), 4, 1),
+                        emit_const(fn, -16, 4), 4, 1);
+    int next = emit_bin(fn, IR_ADD, offs,
+                        emit_const(fn, flt || i128 ? 16 : 8, 4), 4, 1);
     emit_store(fn, a_offs, next, s32);
     emit_brnz(fn, emit_cmp(fn, B_GT, next, emit_const(fn, 0, 4), 4, 1), 4,
               l_stack);                                  /* did not fit */
@@ -48,7 +56,7 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e)
     emit_label(fn, l_stack);
     int stk = emit_load(fn, ap, ptr);
     int ssz = 8;
-    if (rt->kind == TY_LDOUBLE) {   /* a 16-aligned, 16-byte stack slot */
+    if (rt->kind == TY_LDOUBLE || i128) {  /* a 16-aligned stack slot of 16 */
         stk = emit_bin(fn, IR_AND,
                        emit_bin(fn, IR_ADD, stk, emit_const(fn, 15, 8), 8, 1),
                        emit_const(fn, -16, 8), 8, 1);

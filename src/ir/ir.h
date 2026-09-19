@@ -213,6 +213,8 @@ struct ir_func {
     int nlabels;
     int scratch_bytes;       /* struct-return temporaries */
     int outgoing_bytes;      /* widest stack-argument area of any call */
+    int has_i128;            /* computes with __int128 (w 16, not float):
+                              * the optimizer and inliner leave it alone */
     int has_alloca;          /* an IR_ALLOCA moves the stack pointer at run
                               * time, so the frame must not be addressed
                               * from it (aarch64 then uses x19) */

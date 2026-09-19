@@ -184,6 +184,8 @@ static const char *basic_c(enum cty_kind k)
     case CT_ULONG: return "unsigned long";
     case CT_LLONG: return "long long";
     case CT_ULLONG: return "unsigned long long";
+    case CT_INT128: return "__int128";
+    case CT_UINT128: return "unsigned __int128";
     case CT_FLOAT: return "float";
     case CT_DOUBLE: return "double";
     case CT_LDOUBLE: return "long double";
@@ -379,6 +381,12 @@ static char *int_lit(long v, struct cty *t)
         return cx_fmt("%luUL", (unsigned long)v);
     case CT_ULLONG:
         return cx_fmt("%luULL", (unsigned long)v);
+    case CT_INT128: case CT_UINT128:
+        /* (only values a long holds are ever folded to one) */
+        return cx_fmt("((%s)%s)", t->k == CT_INT128 ? "__int128"
+                                                    : "unsigned __int128",
+                      v == LONG_MIN ? "(-9223372036854775807LL-1)"
+                                    : cx_fmt("%ldLL", v));
     default:
         break;
     }
@@ -869,7 +877,14 @@ static char *overflow_text(struct cexpr *e)
                       a, ev(e->a[0]), b, ev(e->a[1]), r, a, sym, b, pty, u,
                       ev(e->a[2]), u, ctype(rt), r, r, ctype(rt), r);
     }
-    const char *w = uns ? "unsigned long" : "long";
+    /* in the result's width (a 64- or a 128-bit one), wrapping as its
+     * unsigned form does, then the overflow read off the operands */
+    int wide = sz == 16;
+    const char *w = wide ? (uns ? "unsigned __int128" : "__int128")
+                         : (uns ? "unsigned long" : "long");
+    const char *uw = wide ? "unsigned __int128" : "unsigned long";
+    const char *smin = wide ? "((__int128)((unsigned __int128)1 << 127))"
+                            : "(-9223372036854775807L - 1)";
     char *test;
     if (uns)
         test = op == 'a' ? cx_fmt("%s < %s", r, a)
@@ -879,13 +894,13 @@ static char *overflow_text(struct cexpr *e)
         test = op == 'a' ? cx_fmt("((%s ^ %s) & (%s ^ %s)) < 0", a, r, b, r)
                : op == 's' ? cx_fmt("((%s ^ %s) & (%s ^ %s)) < 0", a, b, a,
                                     r)
-               : cx_fmt("%s != 0 && ((%s == -1 && %s == (-9223372036854775807L "
-                        "- 1)) || %s / %s != %s)", b, b, a, r, b, a);
-    return cx_fmt("({ %s %s = (%s)(%s), %s = (%s)(%s); %s %s = (%s)((unsigned "
-                  "long)%s %s (unsigned long)%s); %s __cx_op%d = %s; "
+               : cx_fmt("%s != 0 && ((%s == -1 && %s == %s) || %s / %s != "
+                        "%s)", b, b, a, smin, r, b, a);
+    return cx_fmt("({ %s %s = (%s)(%s), %s = (%s)(%s); %s %s = (%s)((%s)%s "
+                  "%s (%s)%s); %s __cx_op%d = %s; "
                   "*__cx_op%d = (%s)%s; (_Bool)(%s); })",
-                  w, a, w, ev(e->a[0]), b, w, ev(e->a[1]), w, r, w, a, sym, b,
-                  pty, u, ev(e->a[2]), u, ctype(rt), r, test);
+                  w, a, w, ev(e->a[0]), b, w, ev(e->a[1]), w, r, w, uw, a,
+                  sym, uw, b, pty, u, ev(e->a[2]), u, ctype(rt), r, test);
 }
 
 /* The call, its result slot first when it has one (dest: an lvalue). */

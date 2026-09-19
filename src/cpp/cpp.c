@@ -1583,6 +1583,13 @@ char *cpp_process(const char *path, const char *src,
         define_macro(&boot, "__GNUC_MINOR__ 2");
         define_macro(&boot, "__GNUC_PATCHLEVEL__ 0");
         define_macro(&boot, "__GNUC_STDC_INLINE__ 1");  /* (as g++) */
+        /* __int128, as g++ — libstdc++'s traits and limits take it as an
+         * integer type too, outside the strict modes */
+        define_macro(&boot, "__SIZEOF_INT128__ 16");
+        if (!cxx_strict) {
+            define_macro(&boot, "__GLIBCXX_TYPE_INT_N_0 __int128");
+            define_macro(&boot, "__GLIBCXX_BITSIZE_INT_N_0 128");
+        }
         if (cxx_exceptions) {
             define_macro(&boot, "__EXCEPTIONS 1");
             define_macro(&boot, "__cpp_exceptions 199711L");

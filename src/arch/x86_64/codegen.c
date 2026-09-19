@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "../../driver/util.h"
 
@@ -242,9 +243,13 @@ static int wide_def(const struct ir_ins *i)
         return i->size == 16;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_NEG:
     case IR_CALL:
-        return i->flt && i->w == 16;
+        return i->w == 16;          /* (a long double, or an __int128) */
     case IR_I2F: case IR_F2F:
         return i->w == 16;
+    /* __int128: its ops at width 16, an extension to it, a conversion */
+    case IR_CONST: case IR_MOD: case IR_AND: case IR_OR: case IR_XOR:
+    case IR_SHL: case IR_SHR: case IR_BNOT: case IR_EXT: case IR_F2I:
+        return !i->flt && i->w == 16;
     default:
         return 0;
     }
@@ -256,7 +261,8 @@ char *cg_wide_vregs(struct ir_func *fn)
     char *w = xcalloc((size_t)nv, 1);
     int any = 0;
     for (int v = 0; v < fn->src->nvars; v++)
-        if (fn->src->var_tys[v] && fn->src->var_tys[v]->kind == TY_LDOUBLE)
+        if (fn->src->var_tys[v] && (fn->src->var_tys[v]->kind == TY_LDOUBLE ||
+                                    fn->src->var_tys[v]->kind == TY_INT128))
             w[v] = any = 1;
     for (int n = 0; n < fn->nins; n++)
         if (wide_def(&fn->ins[n]) && fn->ins[n].dst >= 0)
@@ -1353,6 +1359,254 @@ static int addr_reg(struct code *text, const int *sd, int v)
     return REG_RCX;
 }
 
+/* ---- __int128: two eightbytes in a 16-byte slot ----
+ * Add, subtract, the bitwise ops, negation and equality are inline;
+ * multiplication, division, shifts, ordering and the float conversions are
+ * libgcc's (__multi3, __divti3, __ashlti3, __cmpti2, __floattidf ...), whose
+ * 128-bit arguments travel in rdi:rsi and rdx:rcx and come back in
+ * rax:rdx. (A function computing with one is kept out of the register
+ * allocator: these calls clobber the caller-saved registers.) */
+static int i128_ins(const struct ir_ins *i)
+{
+    if (i->flt)
+        return 0;
+    switch (i->op) {
+    case IR_CONST: case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+    case IR_MOD: case IR_AND: case IR_OR: case IR_XOR: case IR_SHL:
+    case IR_SHR: case IR_NEG: case IR_BNOT: case IR_CMP:
+        return i->w == 16;
+    case IR_EXT:
+        return i->w == 16 || (g_wide && i->a >= 0 && g_wide[i->a]);
+    case IR_I2F:
+        return i->size == 16;
+    case IR_F2I:
+        return i->w == 16;
+    default:
+        return 0;
+    }
+}
+
+static struct func *x86_helper(const char *name)
+{
+    static struct func *made[32];
+    static int nmade;
+    for (int k = 0; k < nmade; k++)
+        if (strcmp(made[k]->name, name) == 0)
+            return made[k];
+    if (nmade == (int)(sizeof made / sizeof made[0]))
+        diag_fatal(NULL, 0, "internal: too many libgcc helpers");
+    struct func *h = xcalloc(1, sizeof *h);
+    h->name = name;
+    made[nmade++] = h;
+    return h;
+}
+
+static void x86_call_helper(struct code *text, struct sites *st,
+                            const char *name)
+{
+    struct extcall ec;
+    ec.patch_off = x86_call_rel32(text);
+    ec.callee = x86_helper(name);
+    PUSH(st->ext, st->next, st->capext, ec);
+}
+
+static void ld8(struct code *text, int reg, int disp)
+{
+    x86_load_reg_mem(text, reg, REG_RBP, disp, 8);
+}
+
+static void st8(struct code *text, int disp, int reg)
+{
+    x86_store_mem_reg(text, REG_RBP, disp, reg, 8);
+}
+
+/* dst += src with the carry (adc), dst -= src with the borrow (sbb):
+ * 64-bit, registers below r8 */
+static void adc_sbb(struct code *text, int sbb, int dst, int src)
+{
+    code_byte(text, 0x48);
+    code_byte(text, sbb ? 0x19 : 0x11);
+    code_byte(text, 0xC0 | (src << 3) | dst);
+}
+
+static void gen_i128(struct code *text, const int *sd, struct ir_ins *i,
+                     struct sites *st)
+{
+    cg_reset();
+    int d = i->dst >= 0 ? sd[i->dst] : 0;
+    switch (i->op) {
+    case IR_CONST:
+        x86_mov_reg_imm(text, REG_RAX, i->imm, 8);
+        st8(text, d, REG_RAX);
+        x86_mov_reg_imm(text, REG_RAX, i->imm < 0 ? -1 : 0, 8);
+        st8(text, d + 8, REG_RAX);
+        break;
+    case IR_ADD: case IR_SUB:
+        ld8(text, REG_RAX, sd[i->a]);
+        ld8(text, REG_RDX, sd[i->a] + 8);
+        ld8(text, REG_RCX, sd[i->b]);
+        ld8(text, REG_RSI, sd[i->b] + 8);
+        x86_alu_rr(text, i->op == IR_ADD ? '+' : '-', REG_RAX, REG_RCX, 8);
+        adc_sbb(text, i->op == IR_SUB, REG_RDX, REG_RSI);
+        st8(text, d, REG_RAX);
+        st8(text, d + 8, REG_RDX);
+        break;
+    case IR_AND: case IR_OR: case IR_XOR: {
+        int op = i->op == IR_AND ? '&' : i->op == IR_OR ? '|' : '^';
+        for (int q = 0; q < 16; q += 8) {
+            ld8(text, REG_RAX, sd[i->a] + q);
+            ld8(text, REG_RCX, sd[i->b] + q);
+            x86_alu_rr(text, op, REG_RAX, REG_RCX, 8);
+            st8(text, d + q, REG_RAX);
+        }
+        break;
+    }
+    case IR_NEG:                /* neg lo; adc hi, 0; neg hi */
+        ld8(text, REG_RAX, sd[i->a]);
+        ld8(text, REG_RDX, sd[i->a] + 8);
+        x86_neg_reg(text, REG_RAX, 8);
+        code_byte(text, 0x48);          /* adc rdx, 0 */
+        code_byte(text, 0x83);
+        code_byte(text, 0xD2);
+        code_byte(text, 0x00);
+        x86_neg_reg(text, REG_RDX, 8);
+        st8(text, d, REG_RAX);
+        st8(text, d + 8, REG_RDX);
+        break;
+    case IR_BNOT:
+        for (int q = 0; q < 16; q += 8) {
+            ld8(text, REG_RAX, sd[i->a] + q);
+            x86_not_reg(text, REG_RAX, 8);
+            st8(text, d + q, REG_RAX);
+        }
+        break;
+    case IR_MUL: case IR_DIV: case IR_MOD:
+        ld8(text, REG_RDI, sd[i->a]);
+        ld8(text, REG_RSI, sd[i->a] + 8);
+        ld8(text, REG_RDX, sd[i->b]);
+        ld8(text, REG_RCX, sd[i->b] + 8);
+        x86_call_helper(text, st, i->op == IR_MUL ? "__multi3"
+                                  : i->op == IR_DIV
+                                  ? (i->sign ? "__divti3" : "__udivti3")
+                                  : (i->sign ? "__modti3" : "__umodti3"));
+        st8(text, d, REG_RAX);
+        st8(text, d + 8, REG_RDX);
+        break;
+    case IR_SHL: case IR_SHR:
+        /* the count: its low bits, from a narrow value or a wide one */
+        if (g_wide && g_wide[i->b])
+            ld8(text, REG_RAX, sd[i->b]);
+        else
+            cg_load(text, sd, i->b, 8, 0, 8);
+        x86_mov_reg_reg(text, REG_RDX, REG_RAX);
+        ld8(text, REG_RDI, sd[i->a]);
+        ld8(text, REG_RSI, sd[i->a] + 8);
+        x86_call_helper(text, st, i->op == IR_SHL ? "__ashlti3"
+                                  : i->sign ? "__ashrti3" : "__lshrti3");
+        st8(text, d, REG_RAX);
+        st8(text, d + 8, REG_RDX);
+        break;
+    case IR_CMP:
+        if (i->pred == B_EQ || i->pred == B_NE) {
+            ld8(text, REG_RAX, sd[i->a]);
+            ld8(text, REG_RCX, sd[i->b]);
+            x86_alu_rr(text, '^', REG_RAX, REG_RCX, 8);
+            ld8(text, REG_RDX, sd[i->a] + 8);
+            ld8(text, REG_RCX, sd[i->b] + 8);
+            x86_alu_rr(text, '^', REG_RDX, REG_RCX, 8);
+            x86_alu_rr(text, '|', REG_RAX, REG_RDX, 8);
+            x86_setcc_eax(text, cc_for(i->pred, 0));
+        } else {
+            /* x - y as cmp lo; sbb hi: the flags of the whole difference
+             * (CF below, SF/OF less) — <, >= from a - b, >, <= from b - a */
+            int swap = i->pred == B_GT || i->pred == B_LE;
+            int x = swap ? i->b : i->a, y = swap ? i->a : i->b;
+            ld8(text, REG_RAX, sd[x]);
+            ld8(text, REG_RDX, sd[x] + 8);
+            ld8(text, REG_RCX, sd[y]);
+            ld8(text, REG_RSI, sd[y] + 8);
+            x86_cmp_rr(text, REG_RAX, REG_RCX, 8);
+            adc_sbb(text, 1, REG_RDX, REG_RSI);
+            x86_setcc_eax(text, cc_for(i->pred == B_LT || i->pred == B_GT
+                                       ? B_LT : B_GE, i->sign));
+        }
+        cg_store(text, sd, i->dst, 4);
+        break;
+    case IR_EXT:
+        if (i->w == 16) {
+            /* to 128: the value as its class holds it, then its sign (or
+             * zero) in the high eightbyte */
+            if (g_wide && g_wide[i->a])
+                ld8(text, REG_RAX, sd[i->a]);
+            else
+                cg_load(text, sd, i->a, i->size, i->sign, 8);
+            cg_reset();
+            st8(text, d, REG_RAX);
+            if (i->sign) {
+                x86_mov_reg_reg(text, REG_RDX, REG_RAX);
+                x86_shift_reg_imm(text, REG_RDX, '>', 63, 8);
+            } else {
+                x86_alu_rr(text, '^', REG_RDX, REG_RDX, 4);
+            }
+            st8(text, d + 8, REG_RDX);
+        } else {
+            /* from 128: the low bytes, re-extended as the target type */
+            ld8(text, REG_RAX, sd[i->a]);
+            if (i->size == 4 && i->w == 8) {
+                if (i->sign) {
+                    x86_movsxd_rr(text, REG_RAX, REG_RAX);
+                } else {
+                    code_byte(text, 0x89);              /* mov eax, eax */
+                    code_byte(text, 0xc0);
+                }
+            } else if (i->size < 4) {  /* (x86_movx_rr: 8- and 16-bit) */
+                x86_movx_rr(text, REG_RAX, REG_RAX, i->size, i->sign,
+                            i->w);
+            }
+            cg_store(text, sd, i->dst, i->w);
+        }
+        break;
+    case IR_I2F: {
+        /* 128-bit integer -> float/double (xmm0) or long double (st0) */
+        ld8(text, REG_RDI, sd[i->a]);
+        ld8(text, REG_RSI, sd[i->a] + 8);
+        const char *h = i->w == 4 ? (i->sign ? "__floattisf" : "__floatuntisf")
+                      : i->w == 8 ? (i->sign ? "__floattidf" : "__floatuntidf")
+                      : (i->sign ? "__floattixf" : "__floatuntixf");
+        x86_call_helper(text, st, h);
+        if (i->w == 16)
+            x86_x87_mem(text, 0xDB, 7, REG_RBP, d);        /* fstp tword */
+        else
+            x86_movs_store(text, 0, d, i->w);
+        break;
+    }
+    case IR_F2I: {
+        /* float/double (xmm0) or long double (on the stack) -> 128-bit */
+        const char *h = i->size == 4 ? (i->sign ? "__fixsfti" : "__fixunssfti")
+                      : i->size == 8 ? (i->sign ? "__fixdfti" : "__fixunsdfti")
+                      : (i->sign ? "__fixxfti" : "__fixunsxfti");
+        if (i->size == 16) {
+            x86_alu_reg_imm(text, '-', REG_RSP, 16, 8);
+            for (int q = 0; q < 16; q += 8) {
+                ld8(text, REG_RAX, sd[i->a] + q);
+                x86_store_mem_reg(text, REG_RSP, q, REG_RAX, 8);
+            }
+            x86_call_helper(text, st, h);
+            x86_alu_reg_imm(text, '+', REG_RSP, 16, 8);
+        } else {
+            x86_movs_load(text, 0, sd[i->a], i->size);
+            x86_call_helper(text, st, h);
+        }
+        st8(text, d, REG_RAX);
+        st8(text, d + 8, REG_RDX);
+        break;
+    }
+    default:
+        break;
+    }
+    cg_reset();
+}
+
 #define FLD_T(d)  x86_x87_mem(text, 0xDB, 5, REG_RBP, (d))   /* fld tword  */
 #define FSTP_T(d) x86_x87_mem(text, 0xDB, 7, REG_RBP, (d))   /* fstp tword */
 
@@ -1477,6 +1731,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * register). Restored at the single exit so other functions are unaffected. */
     int saved_regalloc = g_regalloc, saved_regcache = g_regcache;
     if (g_has_cgoto) { g_regalloc = 0; g_regcache = 0; }
+    if (fn->has_i128) { g_regalloc = 0; g_regcache = 0; }   /* (gen_i128) */
     g_wide = cg_wide_vregs(fn);
 
     /* -O2: allocate eligible vregs to callee-saved registers first, so the
@@ -1583,6 +1838,22 @@ static void gen_func(struct ir_func *fn, struct code *text,
             struct type *pt = f->param_tys[i];
             enum arg_class cls[2];
             int n = ty_classify(pt, cls);
+            if (pt->kind == TY_INT128) {
+                /* two integer registers, or 16 aligned bytes of the stack */
+                if (ireg + 2 <= 6) {
+                    x86_store_arg(text, ireg++, sd[i]);
+                    x86_store_arg(text, ireg++, sd[i] + 8);
+                } else {
+                    incoming = (incoming + 15) & ~15;
+                    for (int q = 0; q < 16; q += 8) {
+                        x86_load_reg_mem(text, REG_RAX, REG_RBP,
+                                         incoming + q, 8);
+                        x86_store_slot(text, sd[i] + q, 8);
+                    }
+                    incoming += 16;
+                }
+                continue;
+            }
             if (pt->kind == TY_LDOUBLE) {
                 /* X87 class: always on the caller's stack, 16-aligned */
                 incoming = (incoming + 15) & ~15;
@@ -1718,6 +1989,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * math, an int<->float conversion) has no non-SSE lowering — refuse
          * it rather than emit a #UD. The kernel reaches this never (it has no
          * float math); if a caller does, the diagnostic names why. */
+        if (i128_ins(i)) {           /* __int128 (before the x87's: I2F) */
+            gen_i128(text, sd, i, st);
+            continue;
+        }
         /* long double: the x87 unit, which -mno-sse leaves available */
         if (x87_ins(i)) {
             gen_x87(text, sd, i);
@@ -2443,7 +2718,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     struct ir_arg *a = &i->argv[k];
                     if (a->on_stack)
                         continue;
-                    if (a->is_struct) {
+                    if (a->is_struct || a->nclass == 2) {
                         for (int q = 0; q < a->nclass; q++)
                             if (a->cls[q] != CLASS_SSE) pireg++;
                     } else if (a->cls[0] != CLASS_SSE) {
@@ -2476,7 +2751,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                     continue;
                 }
-                if (a->cls[0] == CLASS_SSE)
+                if (a->nclass == 2) {           /* an __int128 */
+                    x86_load_arg(text, ireg++, sd[a->vreg]);
+                    x86_load_arg(text, ireg++, sd[a->vreg] + 8);
+                } else if (a->cls[0] == CLASS_SSE)
                     x86_movs_load(text, freg++, sd[a->vreg], a->size);
                 else if (in_reg(a->vreg))
                     ireg++;              /* already placed by the parallel move */
@@ -2543,7 +2821,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
             }
             if (i->flt && i->w == 16)      /* long double comes back in st0 */
                 x86_x87_mem(text, 0xDB, 7, REG_RBP, sd[i->dst]);
-            else if (i->flt)
+            else if (i->w == 16) {         /* an __int128 in rax:rdx */
+                x86_store_mem_reg(text, REG_RBP, sd[i->dst], REG_RAX, 8);
+                x86_store_mem_reg(text, REG_RBP, sd[i->dst] + 8, REG_RDX, 8);
+            } else if (i->flt)
                 x86_movs_store(text, 0, sd[i->dst], i->w);   /* stays reset */
             else
                 cg_store(text, sd, i->dst, i->w);
@@ -2698,6 +2979,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                                              REG_RCX, q * 8, 8);
                     }
                 }
+            } else if (i->a >= 0 && f->ret_ty->kind == TY_INT128) {
+                x86_load_reg_mem(text, REG_RAX, REG_RBP, sd[i->a], 8);
+                x86_load_reg_mem(text, REG_RDX, REG_RBP, sd[i->a] + 8, 8);
             } else if (i->a >= 0 && i->flt && i->w == 16) {
                 x86_x87_mem(text, 0xDB, 5, REG_RBP, sd[i->a]);   /* -> st0 */
             } else if (i->a >= 0 && i->flt) {

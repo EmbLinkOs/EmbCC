@@ -20,6 +20,7 @@ enum tok_kind {
     TOK_KW_CHAR,
     TOK_KW_SHORT,
     TOK_KW_LONG,
+    TOK_KW_INT128,    /* GNU __int128 */
     TOK_KW_FLOAT,
     TOK_KW_DOUBLE,
     TOK_KW_BOOL,

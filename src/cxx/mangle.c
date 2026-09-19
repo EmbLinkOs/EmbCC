@@ -642,6 +642,8 @@ static const char *builtin_code(enum cty_kind k)
     case CT_ULONG: return "m";
     case CT_LLONG: return "x";
     case CT_ULLONG: return "y";
+    case CT_INT128: return "n";
+    case CT_UINT128: return "o";
     case CT_FLOAT: return "f";
     case CT_DOUBLE: return "d";
     case CT_LDOUBLE: return "e";

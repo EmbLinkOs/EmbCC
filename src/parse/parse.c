@@ -94,7 +94,7 @@ static void reject_reserved(struct parser *ps, const char *name, int line, int c
 static int tok_is_type_start(enum tok_kind k)
 {
     return k == TOK_KW_INT || k == TOK_KW_CHAR || k == TOK_KW_SHORT ||
-           k == TOK_KW_LONG || k == TOK_KW_UNSIGNED ||
+           k == TOK_KW_LONG || k == TOK_KW_INT128 || k == TOK_KW_UNSIGNED ||
            k == TOK_KW_SIGNED || k == TOK_KW_VOID ||
            k == TOK_KW_STRUCT || k == TOK_KW_UNION || k == TOK_KW_ENUM ||
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
@@ -137,7 +137,9 @@ static int at_type_start(struct parser *ps)
         return 1;
     return cur(ps)->kind == TOK_IDENT &&
            (find_typedef(ps, cur(ps)->text) != NULL ||
-            strcmp(cur(ps)->text, "__builtin_va_list") == 0);
+            strcmp(cur(ps)->text, "__builtin_va_list") == 0 ||
+            strcmp(cur(ps)->text, "__int128_t") == 0 ||
+            strcmp(cur(ps)->text, "__uint128_t") == 0);
 }
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret);
@@ -572,6 +574,13 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             advance(ps);
             return ty_ptr(ty_plain_char());
         }
+        /* GCC's names for the 128-bit integers (typedefs it predeclares) */
+        if (strcmp(cur(ps)->text, "__int128_t") == 0 ||
+            strcmp(cur(ps)->text, "__uint128_t") == 0) {
+            int u = cur(ps)->text[2] == 'u';
+            advance(ps);
+            return ty_base(TY_INT128, u);
+        }
         struct type *td = find_typedef(ps, cur(ps)->text);
         if (!td)
             return NULL;
@@ -580,7 +589,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     }
     /* base specifiers in any order: unsigned long int, long unsigned... */
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
-    int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0;
+    int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0, n128 = 0;
     int any = 0;
     for (;;) {
         enum tok_kind k = cur(ps)->kind;
@@ -591,6 +600,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         else if (k == TOK_KW_UNSIGNED) uns = 1;
         else if (k == TOK_KW_SIGNED) uns = 0;
         else if (k == TOK_KW_LONG) nlong++;
+        else if (k == TOK_KW_INT128) n128++;
         else if (k == TOK_KW_SHORT) nshort++;
         else if (k == TOK_KW_CHAR) nchar++;
         else if (k == TOK_KW_INT) nint++;
@@ -648,6 +658,13 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                        "void cannot combine with other specifiers");
         return ty_base(TY_VOID, 0);
+    }
+    if (n128) {
+        if (n128 > 1 || nlong || nshort || nchar || nint || nvoid || nfloat ||
+            ndouble || nbool || ncomplex)
+            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                       "invalid type specifier combination");
+        return ty_base(TY_INT128, uns == 1);
     }
     if (nlong > 2 || (nshort && nlong) || (nchar && (nshort || nlong)) ||
         (nchar && nint))
@@ -1033,6 +1050,11 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
         diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                    "a struct/union needs at least one member");
     ty_struct_layout(t, ms, n, at.packed, at.aligned);
+    for (int i = 0; i < n; i++)
+        if (ms[i].bf_bytes && ms[i].ty->kind == TY_INT128)
+            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                    "packed __int128 bit-field '%s' crosses its storage unit "
+                    "(not supported)", ms[i].name ? ms[i].name : "<anon>");
     return t;
 }
 

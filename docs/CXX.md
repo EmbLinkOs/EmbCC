@@ -369,9 +369,11 @@ macro's expansion produced it, as `_GLIBCXX_HAS_BUILTIN` does),
 "defined" to `#ifdef` — and defines the `__cpp_*` macros of the features
 implemented (`__cpp_exceptions`/`__EXCEPTIONS` unless -fno-exceptions,
 `__cpp_rtti`, `__GNUG__`); C units see none of it. The C++ predefined
-table no longer claims `__int128`, `__float128`, `__float80` or the
-extended floating types (tools/gen-predef.sh), which libstdc++ would
-otherwise use. tests/cxx `features`.
+table no longer claims `__float128`, `__float80` or the extended floating
+types (tools/gen-predef.sh), which libstdc++ would otherwise use;
+`__int128` it does claim (`__SIZEOF_INT128__`, and libstdc++'s
+`__GLIBCXX_TYPE_INT_N_0` outside strict modes, as g++ defines them), now
+that EmbCC has it. tests/cxx `features`.
 
 Type-trait intrinsics (src/cxx/traits.c), g++'s names: the class
 categories and properties (`__is_class`, `__is_empty`, `__is_polymorphic`,
@@ -924,7 +926,41 @@ this adjustment plus 1 for a virtual one (x86-64 keeps Itanium's: ptr the
 vtable offset + 1). tests/golden/cxx-abi.sh passes them between EmbCC's
 code and g++'s and compares them, on both targets.
 
-Next: `__int128`; running the suites wholly on EmbCC's library.
+**`__int128`** (GNU), in C and in C++, on both targets: `__int128`,
+`unsigned __int128`, `__int128_t`, `__uint128_t` — 16 bytes, 16-aligned,
+ranked above long long in the usual arithmetic conversions. EmbCC's C
+computes it in two eightbytes: addition and subtraction with the carry,
+the bitwise operations, negation, comparisons and extensions inline;
+multiplication, division, shifts and the float conversions through
+libgcc's helpers (`__multi3`, `__divti3`, `__ashlti3`, `__floattidf`, ...),
+as gcc calls them. It is passed as the ABIs say — x86-64 in two integer
+registers (any two) or a 16-aligned stack slot, returned in rax:rdx;
+aarch64 in an even register pair (AAPCS64 C.8, after an int in x0 it
+takes x2:x3) or a 16-aligned stack slot, returned in x0:x1 — and va_arg
+reads it so. Bit-fields of it, switch on it, static initializers folded
+in 128 bits (src/sema/w128.c). A function using it is not optimized
+(IR passes, the inliner and x86-64's register allocation skip it). C++
+mangles it `n`/`o`, evaluates constant expressions of it in 128 bits
+(static_assert, template arguments, a const static member no long
+holds), and libstdc++ compiled by EmbCC enables it: its integer traits,
+numeric_limits, to_chars/from_chars, `<random>`'s 64-bit engines and
+distributions, and Ryu's 128-bit arithmetic in floating_to_chars. So all
+193 of libstdc++'s objects are EmbCC's on both targets (floating_from_chars,
+whose fast_float multiplies in `__uint128_t`, was the last), and the 56
+programs of tests/libstdcxx and tests/cxx linked with that library agree
+with g++. tests/exec/int128.c, int128-more.c; tests/golden/int128-abi.sh
+(an EmbCC half and a gcc half calling each other: arguments past the
+registers, structs holding one, va_arg of the other's arguments);
+tests/golden/cxx-abi.sh (overloads on it across compilers);
+tests/cxx/int128.cc; tests/libstdcxx/int128.cc. Not yet: `__int128` in
+the constant-evaluation interpreter — a constexpr variable a constexpr
+function computes is initialized at run time, and a static_assert that
+needs such a call is refused (expressions without calls are folded);
+`__atomic_*` on one (refused; `_Atomic` is volatile, as for every type);
+a packed struct's bit-field of it that crosses its 16-byte unit
+(refused).
+
+Next: running the suites wholly on EmbCC's library.
 
 Next (language): `consteval` as more than `constexpr` (a format string is
 checked at run time for now).

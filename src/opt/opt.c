@@ -1725,7 +1725,7 @@ static void inline_unit(struct ir_unit *iu)
         int done = 0;
         for (;;) {
             if (done >= INLINE_MAX_PER_FUNC || fn->nins > INLINE_MAX_CALLER ||
-                fn->neh)
+                fn->neh || fn->has_i128)
                 break;
             int ci = -1;
             struct ir_func *cf = NULL;
@@ -1735,7 +1735,11 @@ static void inline_unit(struct ir_unit *iu)
                     in->retsize)
                     continue;
                 struct ir_func *c = func_ir(iu, in->callee);
-                if (c && c != fn && inlinable(c)) { ci = i; cf = c; break; }
+                if (c && c != fn && !c->has_i128 && inlinable(c)) {
+                    ci = i;
+                    cf = c;
+                    break;
+                }
             }
             if (ci < 0)
                 break;
@@ -1856,5 +1860,6 @@ void opt_run(struct ir_unit *iu, int level)
     if (level >= 2)               /* inline before the per-function passes clean up */
         inline_unit(iu);
     for (int f = 0; f < iu->nfuncs; f++)
-        opt_func(&iu->funcs[f]);
+        if (!iu->funcs[f].has_i128)    /* (its folds are 64-bit) */
+            opt_func(&iu->funcs[f]);
 }

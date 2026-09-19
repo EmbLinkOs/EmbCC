@@ -39,6 +39,7 @@ SRCS := \
 	src/sema/sema.c \
 	src/sema/type.c \
 	src/sema/ldfloat.c \
+	src/sema/w128.c \
 	src/ir/irgen.c \
 	src/opt/opt.c \
 	src/debug/dwarf.c \

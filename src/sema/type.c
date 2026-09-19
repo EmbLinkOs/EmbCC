@@ -9,7 +9,7 @@
 /* [kind][is_unsigned] — TY_PTR/TY_ARRAY/TY_STRUCT handled separately.
  * Designated initializers so this table survives struct type growing.
  * _Bool is unsigned in both slots (it holds only 0 or 1). */
-static struct type bases[9][2] = {
+static struct type bases[10][2] = {
     { { .kind = TY_VOID }, { .kind = TY_VOID } },
     { { .kind = TY_BOOL, .is_unsigned = 1 },
       { .kind = TY_BOOL, .is_unsigned = 1 } },
@@ -22,6 +22,8 @@ static struct type bases[9][2] = {
     /* long double: x87 80-bit extended in 16 bytes (x86-64), IEEE binary128
      * (aarch64) — 16 bytes, 16-aligned, on both */
     { { .kind = TY_LDOUBLE }, { .kind = TY_LDOUBLE } },
+    /* GNU __int128: two eightbytes, 16-aligned (both ABIs) */
+    { { .kind = TY_INT128 }, { .kind = TY_INT128, .is_unsigned = 1 } },
 };
 
 struct type *ty_plain_char(void)
@@ -210,6 +212,7 @@ int ty_size(const struct type *t)
     case TY_FLOAT: return 4;
     case TY_DOUBLE: return 8;
     case TY_LDOUBLE: return 16;
+    case TY_INT128: return 16;
     case TY_PTR: return 8;
     case TY_ARRAY: return t->count * ty_size(t->pointee);
     case TY_STRUCT: return t->size; /* 0 while incomplete */
@@ -259,7 +262,8 @@ int ty_equal(const struct type *a, const struct type *b)
 int ty_is_integer(const struct type *t)
 {
     return t->kind == TY_BOOL || t->kind == TY_CHAR ||
-           t->kind == TY_SHORT || t->kind == TY_INT || t->kind == TY_LONG;
+           t->kind == TY_SHORT || t->kind == TY_INT || t->kind == TY_LONG ||
+           t->kind == TY_INT128;
 }
 
 int ty_is_float(const struct type *t)
@@ -392,6 +396,10 @@ int ty_classify(const struct type *t, enum arg_class *classes)
      * struct holding one is MEMORY too (SysV 3.2.3). */
     if (has_ldouble(t))
         return 0;
+    if (t->kind == TY_INT128) {         /* two INTEGER eightbytes */
+        classes[0] = classes[1] = CLASS_INTEGER;
+        return 2;
+    }
     if (t->kind != TY_STRUCT) {
         classes[0] = ty_is_float(t) ? CLASS_SSE : CLASS_INTEGER;
         return 1;
@@ -446,6 +454,8 @@ const char *ty_name(const struct type *t)
     case TY_FLOAT: base = "float"; break;
     case TY_DOUBLE: base = "double"; break;
     case TY_LDOUBLE: base = "long double"; break;
+    case TY_INT128: base = t->is_unsigned ? "unsigned __int128" : "__int128";
+        break;
     case TY_STRUCT:
         if (t->is_complex) {
             snprintf(structbuf, sizeof structbuf, "%s _Complex",

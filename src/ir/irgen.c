@@ -53,7 +53,7 @@ int new_label(struct ir_func *fn) { return fn->nlabels++; }
  * produces one says w = 16 (codegen sizes the slot from that). */
 static int ty_w(const struct type *t)
 {
-    if (t->kind == TY_LDOUBLE) return 16;
+    if (t->kind == TY_LDOUBLE || t->kind == TY_INT128) return 16;
     return ty_wide(t) ? 8 : 4;
 }
 
@@ -281,7 +281,7 @@ static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
 static int bf_load(struct ir_func *fn, int addr, const struct member *m)
 {
     const struct type *bt = m->ty;
-    int w = ty_wide(bt) ? 8 : 4;          /* value-class width, bytes */
+    int w = bt->kind == TY_INT128 ? 16 : ty_wide(bt) ? 8 : 4; /* class, bytes */
     int vb = w * 8;
     if (m->bf_bytes) {
         /* the bytes, then the same two shifts in 64 bits */
@@ -340,6 +340,26 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
         return bf_load(fn, addr, m);
     }
     struct type *ut = ty_base(bt->kind, 1);
+    if (bt->kind == TY_INT128) {
+        /* the masks in 128 bits, from all ones: fmask = ~0 >> (128 - width) */
+        int ones = emit_const(fn, -1, 16);
+        int fm = m->bit_width < 128
+                 ? emit_bin(fn, IR_SHR, ones,
+                            emit_const(fn, 128 - m->bit_width, 4), 16, 0)
+                 : ones;
+        int pl = m->bit_off ? emit_bin(fn, IR_SHL, fm,
+                                       emit_const(fn, m->bit_off, 4), 16, 0)
+                            : fm;
+        int old = emit_load(fn, addr, ut);
+        int cleared = emit_bin(fn, IR_AND, old,
+                               emit_bin(fn, IR_XOR, pl, ones, 16, 0), 16, 0);
+        int low = emit_bin(fn, IR_AND, val, fm, 16, 0);
+        if (m->bit_off)
+            low = emit_bin(fn, IR_SHL, low, emit_const(fn, m->bit_off, 4), 16,
+                           0);
+        emit_store(fn, addr, emit_bin(fn, IR_OR, cleared, low, 16, 0), ut);
+        return bf_load(fn, addr, m);
+    }
     unsigned long fmask = m->bit_width >= 64
                         ? ~0UL : (((unsigned long)1 << m->bit_width) - 1);
     unsigned long placed = fmask << m->bit_off;
@@ -632,7 +652,7 @@ static int emit_tobool(struct ir_func *fn, int v, const struct type *from)
  * temp to branch on, and its width in *w. */
 static int truth(struct ir_func *fn, int v, const struct type *t, int *w)
 {
-    if (ty_is_float(t)) {
+    if (ty_is_float(t) || t->kind == TY_INT128) {   /* (no 16-byte branch) */
         *w = 4;
         return emit_tobool(fn, v, t);
     }
@@ -719,6 +739,40 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
     /* To _Bool is a normalize-to-0/1, not a truncation. */
     if (to->kind == TY_BOOL && from->kind != TY_BOOL)
         return emit_tobool(fn, v, from);
+
+    /* __int128 (w 16): to or from it, an IR_EXT at width 16 (extend) or
+     * from a 16-byte value (truncate), or an I2F/F2I of size/width 16 */
+    if (from->kind == TY_INT128 || to->kind == TY_INT128) {
+        struct ir_ins *i;
+        if (from->kind == TY_INT128 && to->kind == TY_INT128)
+            return v;
+        if (ty_is_float(to) || ty_is_float(from)) {
+            i = emit(fn);
+            i->op = ty_is_float(to) ? IR_I2F : IR_F2I;
+            i->a = v;
+            i->size = ty_is_float(to) ? 16 : fsize;
+            i->w = ty_is_float(to) ? tsize : 16;
+            i->sign = ty_is_float(to) ? !from->is_unsigned : !to->is_unsigned;
+            i->dst = new_temp(fn);
+            return i->dst;
+        }
+        i = emit(fn);
+        i->op = IR_EXT;
+        i->a = v;
+        if (to->kind == TY_INT128) {
+            /* extend: the source as its class holds it */
+            i->size = fw == 8 ? 8 : 4;
+            i->sign = fsize <= 2 ? 1 : ty_signed_int(from);
+            i->w = 16;
+        } else {
+            /* truncate: the low bytes, re-extended as the target */
+            i->size = tsize;
+            i->sign = ty_signed_int(to);
+            i->w = tw;
+        }
+        i->dst = new_temp(fn);
+        return i->dst;
+    }
 
     /* Floating conversions are real instructions, not reinterpretations
      * — the bit patterns have nothing in common. */
@@ -1710,7 +1764,7 @@ int gen_expr(struct ir_func *fn, struct expr *e)
             fn->scratch_bytes += (i->retsize + 7) & ~7;
         }
         i->flt = ty_is_float(e->ty);
-        i->w = i->flt ? ty_size(e->ty) : 8;
+        i->w = i->flt ? ty_size(e->ty) : e->ty->kind == TY_INT128 ? 16 : 8;
         i->dst = new_temp(fn);
         return i->dst;
     }
@@ -2229,6 +2283,19 @@ static void gen_func(struct ir_func *fn, struct func *f)
         if (!g_labels[i].defined)
             diag_fatal(fn->src->file, g_labels[i].line,
                        "label '%s' used but not defined", g_labels[i].name);
+    /* __int128 anywhere: a local, a parameter, the result, or an op */
+    fn->has_i128 = f->ret_ty && f->ret_ty->kind == TY_INT128;
+    for (int i = 0; i < f->nvars && !fn->has_i128; i++)
+        fn->has_i128 = f->var_tys && f->var_tys[i] &&
+                       f->var_tys[i]->kind == TY_INT128;
+    for (int n = 0; n < fn->nins && !fn->has_i128; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        fn->has_i128 = (!i->flt && i->w == 16 && i->op != IR_LOAD &&
+                        i->op != IR_LDVAR && i->op != IR_I2F &&
+                        i->op != IR_F2F) ||
+                       (i->op == IR_I2F && i->size == 16) ||
+                       (i->op == IR_F2I && i->w == 16);
+    }
 }
 
 struct ir_unit *irgen(struct unit *u)

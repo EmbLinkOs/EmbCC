@@ -128,6 +128,11 @@ template <class T> std::Holder<T>::operator Holder<long>() const
 }
 template struct std::Holder<int>;
 
+unsigned __int128 i128::from_embcc(unsigned __int128 a, __int128 b)
+{
+    return (a >> 1) + (unsigned __int128)b;
+}
+
 tags::W tags::make_w(int x) { return W{x}; }
 int tags::take(T t, W w) { return t.x * w.x; }
 tags::W *tags::wptr(T) { return nullptr; }
@@ -176,6 +181,12 @@ int main()
           tags::wrap(2).x == 4 && tags::tvar.x == 5 &&
           tags::S().get().x == 7);
     CHECK("ABI tags: embcc's, called by g++", tags::tags_b() == 3 + 20 + 100);
+    {
+        __int128 big = (__int128)1 << 90;
+        CHECK("__int128 across (n, o)",
+              i128::from_gxx(big, (unsigned __int128)7 << 64, 3) == big * 3 - 7 &&
+              i128::i128_b() == 1);
+    }
     {
         using namespace pmf;
         Pm base;

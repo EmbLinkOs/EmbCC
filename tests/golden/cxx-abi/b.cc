@@ -153,6 +153,16 @@ int two_holders(Holder<int> a, Holder<char> b)
 
 int global_fn(abi::Pod *a, abi::Pod *b) { return a->a + b->a; }
 
+__int128 i128::from_gxx(__int128 a, unsigned __int128 b, int k)
+{
+    return a * k - (__int128)(b >> 64);
+}
+int i128::i128_b()
+{
+    unsigned __int128 big = (unsigned __int128)1 << 100;
+    return from_embcc(big, -3) == (big >> 1) - 3;
+}
+
 int pmf::Pm::v(int x) const { return x + k; }
 int pmf::Pm::nv(int x) const { return x * k; }
 pmf::Pm::~Pm() {}

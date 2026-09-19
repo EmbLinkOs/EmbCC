@@ -215,6 +215,18 @@ static void a64_place(const struct type *t, struct a64_cursor *cu,
         }
         return;
     }
+    if (t->kind == TY_INT128) {                         /* C.8, C.9 */
+        /* 16-aligned: an even-numbered pair of x registers */
+        cu->ngrn = (cu->ngrn + 1) & ~1;
+        if (cu->ngrn + 2 <= 8) {
+            p->where = AP_X; p->reg = cu->ngrn; p->nreg = 2;
+            cu->ngrn += 2;
+        } else {
+            cu->ngrn = 8;
+            to_stack(cu, p, 16, 16);
+        }
+        return;
+    }
     int nslot = p->is_struct ? (p->size + 7) / 8 : 1;   /* C.9 / C.10 */
     if (cu->ngrn + nslot <= 8) {
         p->where = AP_X; p->reg = cu->ngrn; p->nreg = nslot;
@@ -581,6 +593,185 @@ static void gen_a64_ld(struct code *t, const long *sd, struct ir_ins *i,
     }
 }
 
+/* ---- __int128: two eightbytes in a 16-byte slot ----
+ * Add, subtract, the bitwise ops, negation and comparison are inline (adds/
+ * adc, subs/sbcs); multiplication, division, shifts and the float
+ * conversions are libgcc's, the 128-bit values in x0:x1 and x2:x3. */
+static int a64_i128_ins(const struct ir_ins *i)
+{
+    if (i->flt)
+        return 0;
+    switch (i->op) {
+    case IR_CONST: case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+    case IR_MOD: case IR_AND: case IR_OR: case IR_XOR: case IR_SHL:
+    case IR_SHR: case IR_NEG: case IR_BNOT: case IR_CMP:
+        return i->w == 16;
+    case IR_EXT:
+        return i->w == 16 || (g_a64_wide && i->a >= 0 && g_a64_wide[i->a]);
+    case IR_I2F:
+        return i->size == 16;
+    case IR_F2I:
+        return i->w == 16;
+    default:
+        return 0;
+    }
+}
+
+/* op Xd, Xn, Xm with a register-register encoding base */
+static void a64_rrr(struct code *t, unsigned long base, int d, int n, int m)
+{
+    a64_word(t, base | ((unsigned long)m << 16) | ((unsigned long)n << 5) |
+                (unsigned long)d);
+}
+
+#define A64_ADDS 0xAB000000UL
+#define A64_ADC  0x9A000000UL
+#define A64_SUBS 0xEB000000UL
+#define A64_SBC  0xDA000000UL
+#define A64_SBCS 0xFA000000UL
+
+static void gen_a64_i128(struct code *t, const long *sd, struct ir_ins *i,
+                         struct a64_sites *st)
+{
+    long d = i->dst >= 0 ? sd[i->dst] : 0;
+    int X = A64_ACC, Y = A64_TMP, Z = 13, W = 14;   /* x9 x10 x13 x14 */
+    switch (i->op) {
+    case IR_CONST:
+        a64_mov_imm(t, X, i->imm, 8);
+        a64_str(t, X, FB, d, 8);
+        a64_mov_imm(t, X, i->imm < 0 ? -1 : 0, 8);
+        a64_str(t, X, FB, d + 8, 8);
+        break;
+    case IR_ADD: case IR_SUB:
+        a64_ldr(t, X, FB, sd[i->a], 8, 0, 8);
+        a64_ldr(t, Y, FB, sd[i->a] + 8, 8, 0, 8);
+        a64_ldr(t, Z, FB, sd[i->b], 8, 0, 8);
+        a64_ldr(t, W, FB, sd[i->b] + 8, 8, 0, 8);
+        a64_rrr(t, i->op == IR_ADD ? A64_ADDS : A64_SUBS, X, X, Z);
+        a64_rrr(t, i->op == IR_ADD ? A64_ADC : A64_SBC, Y, Y, W);
+        a64_str(t, X, FB, d, 8);
+        a64_str(t, Y, FB, d + 8, 8);
+        break;
+    case IR_AND: case IR_OR: case IR_XOR: {
+        int op = i->op == IR_AND ? '&' : i->op == IR_OR ? '|' : '^';
+        for (int q = 0; q < 16; q += 8) {
+            a64_ldr(t, X, FB, sd[i->a] + q, 8, 0, 8);
+            a64_ldr(t, Y, FB, sd[i->b] + q, 8, 0, 8);
+            a64_alu_reg(t, op, X, X, Y, 8);
+            a64_str(t, X, FB, d + q, 8);
+        }
+        break;
+    }
+    case IR_NEG:                   /* negs lo; ngc hi */
+        a64_ldr(t, X, FB, sd[i->a], 8, 0, 8);
+        a64_ldr(t, Y, FB, sd[i->a] + 8, 8, 0, 8);
+        a64_rrr(t, A64_SUBS, X, A64_ZR, X);
+        a64_rrr(t, A64_SBC, Y, A64_ZR, Y);
+        a64_str(t, X, FB, d, 8);
+        a64_str(t, Y, FB, d + 8, 8);
+        break;
+    case IR_BNOT:
+        for (int q = 0; q < 16; q += 8) {
+            a64_ldr(t, X, FB, sd[i->a] + q, 8, 0, 8);
+            a64_mvn(t, X, X, 8);
+            a64_str(t, X, FB, d + q, 8);
+        }
+        break;
+    case IR_MUL: case IR_DIV: case IR_MOD:
+        a64_ldr(t, 0, FB, sd[i->a], 8, 0, 8);
+        a64_ldr(t, 1, FB, sd[i->a] + 8, 8, 0, 8);
+        a64_ldr(t, 2, FB, sd[i->b], 8, 0, 8);
+        a64_ldr(t, 3, FB, sd[i->b] + 8, 8, 0, 8);
+        call_helper(t, st, i->op == IR_MUL ? "__multi3"
+                           : i->op == IR_DIV
+                           ? (i->sign ? "__divti3" : "__udivti3")
+                           : (i->sign ? "__modti3" : "__umodti3"));
+        a64_str(t, 0, FB, d, 8);
+        a64_str(t, 1, FB, d + 8, 8);
+        break;
+    case IR_SHL: case IR_SHR:
+        if (g_a64_wide && g_a64_wide[i->b])
+            a64_ldr(t, 2, FB, sd[i->b], 8, 0, 8);
+        else
+            ld_slot(t, sd, i->b, 2, 8, 0, 8);
+        a64_ldr(t, 0, FB, sd[i->a], 8, 0, 8);
+        a64_ldr(t, 1, FB, sd[i->a] + 8, 8, 0, 8);
+        call_helper(t, st, i->op == IR_SHL ? "__ashlti3"
+                           : i->sign ? "__ashrti3" : "__lshrti3");
+        a64_str(t, 0, FB, d, 8);
+        a64_str(t, 1, FB, d + 8, 8);
+        break;
+    case IR_CMP:
+        if (i->pred == B_EQ || i->pred == B_NE) {
+            a64_ldr(t, X, FB, sd[i->a], 8, 0, 8);
+            a64_ldr(t, Y, FB, sd[i->b], 8, 0, 8);
+            a64_alu_reg(t, '^', X, X, Y, 8);
+            a64_ldr(t, Z, FB, sd[i->a] + 8, 8, 0, 8);
+            a64_ldr(t, W, FB, sd[i->b] + 8, 8, 0, 8);
+            a64_alu_reg(t, '^', Z, Z, W, 8);
+            a64_alu_reg(t, '|', X, X, Z, 8);
+            a64_cmp_reg(t, X, A64_ZR, 8);
+            a64_cset(t, X, cond_for(i->pred, 0));
+        } else {
+            /* cmp lo; sbcs hi: the flags of the whole difference — <,
+             * >= from a - b, >, <= from b - a */
+            int swap = i->pred == B_GT || i->pred == B_LE;
+            int x = swap ? i->b : i->a, y = swap ? i->a : i->b;
+            a64_ldr(t, X, FB, sd[x], 8, 0, 8);
+            a64_ldr(t, Y, FB, sd[x] + 8, 8, 0, 8);
+            a64_ldr(t, Z, FB, sd[y], 8, 0, 8);
+            a64_ldr(t, W, FB, sd[y] + 8, 8, 0, 8);
+            a64_rrr(t, A64_SUBS, A64_ZR, X, Z);
+            a64_rrr(t, A64_SBCS, A64_ZR, Y, W);
+            a64_cset(t, X, cond_for(i->pred == B_LT || i->pred == B_GT
+                                    ? B_LT : B_GE, i->sign));
+        }
+        st_slot(t, sd, i->dst, X, 8);
+        break;
+    case IR_EXT:
+        if (i->w == 16) {
+            if (g_a64_wide && g_a64_wide[i->a])
+                a64_ldr(t, X, FB, sd[i->a], 8, 0, 8);
+            else
+                ld_slot(t, sd, i->a, X, i->size, i->sign, 8);
+            a64_str(t, X, FB, d, 8);
+            if (i->sign)                  /* asr y, x, #63 */
+                a64_word(t, 0x937FFC00UL | ((unsigned long)X << 5) |
+                            (unsigned long)Y);
+            else
+                a64_mov_imm(t, Y, 0, 8);
+            a64_str(t, Y, FB, d + 8, 8);
+        } else {
+            /* the low bytes, re-extended as the target type */
+            a64_ldr(t, X, FB, sd[i->a], i->size, i->sign, i->w);
+            st_slot(t, sd, i->dst, X, 8);
+        }
+        break;
+    case IR_I2F:
+        a64_ldr(t, 0, FB, sd[i->a], 8, 0, 8);
+        a64_ldr(t, 1, FB, sd[i->a] + 8, 8, 0, 8);
+        call_helper(t, st, i->w == 4 ? (i->sign ? "__floattisf"
+                                                : "__floatuntisf")
+                           : i->w == 8 ? (i->sign ? "__floattidf"
+                                                  : "__floatuntidf")
+                           : (i->sign ? "__floattitf" : "__floatuntitf"));
+        a64_fstr(t, 0, FB, d, i->w);
+        break;
+    case IR_F2I:
+        a64_fldr(t, 0, FB, sd[i->a], i->size);
+        call_helper(t, st, i->size == 4 ? (i->sign ? "__fixsfti"
+                                                   : "__fixunssfti")
+                           : i->size == 8 ? (i->sign ? "__fixdfti"
+                                                     : "__fixunsdfti")
+                           : (i->sign ? "__fixtfti" : "__fixunstfti"));
+        a64_str(t, 0, FB, d, 8);
+        a64_str(t, 1, FB, d + 8, 8);
+        break;
+    default:
+        break;
+    }
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                      int want_debug)
 {
@@ -655,7 +846,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 addr_of(t, A64_ADDR, FB, sd[p]);
                 emit_copy(t, A64_ADDR, src, pl.size);
             } else if (pl.where == AP_X) {
-                if (pl.is_struct)
+                if (pl.is_struct || pl.nreg == 2)   /* (or an __int128) */
                     for (int q = 0; q < pl.nreg; q++)
                         a64_str(t, pl.reg + q, FB, sd[p] + q * 8, 8);
                 else
@@ -714,6 +905,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                        "floating point used under -mgeneral-regs-only "
                        "(in '%s')", f->name);
 
+        if (a64_i128_ins(i)) {        /* __int128 (before: I2F, F2I) */
+            gen_a64_i128(t, sd, i, st);
+            continue;
+        }
         if (a64_ld_ins(i)) {          /* long double: 16 bytes, libgcc */
             gen_a64_ld(t, sd, i, st);
             continue;
@@ -982,6 +1177,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                         emit_copy(t, A64_SCR, A64_ADDR, size);
                         a64_ldr(t, 0, FB, fr.sret, 8, 0, 8);
                     }
+                } else if (rt->kind == TY_INT128) {
+                    a64_ldr(t, 0, FB, sd[i->a], 8, 0, 8);
+                    a64_ldr(t, 1, FB, sd[i->a] + 8, 8, 0, 8);
                 } else {
                     ld_slot(t, sd, i->a, 0, 8, 0, 8);
                 }
@@ -1051,6 +1249,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                         ld_slot(t, sd, v, A64_ADDR, 8, 0, 8);
                         for (int q = 0; q < pl[k].nreg; q++)
                             a64_ldr(t, pl[k].reg + q, A64_ADDR, q * 8, 8, 0, 8);
+                    } else if (pl[k].nreg == 2) {         /* an __int128 */
+                        a64_ldr(t, pl[k].reg, FB, sd[v], 8, 0, 8);
+                        a64_ldr(t, pl[k].reg + 1, FB, sd[v] + 8, 8, 0, 8);
                     } else {
                         ld_slot(t, sd, v, pl[k].reg, 8, 0, 8);
                     }
@@ -1094,6 +1295,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 st_slot(t, sd, i->dst, A64_ADDR, 8);
             } else if (i->flt) {
                 a64_fstr(t, 0, FB, sd[i->dst], i->w);
+            } else if (i->w == 16) {                      /* x0:x1 */
+                a64_str(t, 0, FB, sd[i->dst], 8);
+                a64_str(t, 1, FB, sd[i->dst] + 8, 8);
             } else {
                 st_slot(t, sd, i->dst, 0, 8);
             }

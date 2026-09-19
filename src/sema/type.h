@@ -24,7 +24,7 @@
 struct expr;
 
 enum ty_kind { TY_VOID, TY_BOOL, TY_CHAR, TY_SHORT, TY_INT, TY_LONG,
-               TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, TY_PTR,
+               TY_FLOAT, TY_DOUBLE, TY_LDOUBLE, TY_INT128, TY_PTR,
                TY_ARRAY, TY_STRUCT, TY_FUNC };
 
 struct member {

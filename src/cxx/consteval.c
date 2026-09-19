@@ -1160,6 +1160,8 @@ static struct cval ev(struct cexpr *e)
     static int nest;
     if (nest > 4000)
         no();
+    if (e->t && (e->t->k == CT_INT128 || e->t->k == CT_UINT128))
+        no();       /* (values are longs here: __int128 is run time's) */
     nest++;
     jmp_buf jb, *saved = fail_to;
     if (setjmp(jb)) {
