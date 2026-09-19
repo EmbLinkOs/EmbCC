@@ -2729,7 +2729,6 @@ static struct cexpr *parse_delete(const struct ctok *at, int global)
 /* ---- builtins ---- */
 
 static struct cty *builtin_type(const char *n);
-int trait_known(const char *name);
 
 int cxx_has_builtin(const char *name)
 {
@@ -3469,6 +3468,8 @@ static struct cexpr *parse_primary(void)
         cx_error(at, "requires-expressions are not supported yet (CX7)");
         return NULL;
     case TOK_IDENT: case TOK_COLONCOLON: case TOK_CX_OPERATOR: {
+        if (trait_at() && !trait_is_type(cx_cur()->t.text))
+            return parse_trait();
         int n;
         struct cty *t = peek_type_name(&n);
         if (t && (cx_kind_at(n) == TOK_LPAREN || cx_kind_at(n) == TOK_LBRACE)) {
@@ -4132,10 +4133,7 @@ long expr_parse_const(const char *what)
     return v;
 }
 
-/* ---- type-trait intrinsics ---- */
-
-int trait_known(const char *name)
+int cx_expr_nothrow(struct cexpr *e)
 {
-    (void)name;
-    return 0;
+    return e ? expr_nothrow(e) : 1;
 }

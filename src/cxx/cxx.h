@@ -116,6 +116,10 @@ struct cty {
     const char **dnames;
     int ndnames;
     int dauto;                /* CT_AUTO: decltype(auto) */
+    struct cty *mclass;       /* CT_MPTR in a pattern: its class, a
+                               * dependent type (cls then NULL) */
+    const char *dexpr;        /* CT_DEP: decltype(e) of a dependent e — e's
+                               * mangling (NULL: not known) */
     int pack_expansion;       /* CT_TPARAM etc.: `T...` in a pattern */
     int bparam;               /* ARRAY in a pattern with n -2: the value
                                * parameter its bound is */
@@ -341,6 +345,7 @@ struct cpartial {
     int head_end;             /* the definition: at `:` or `{` */
     enum tok_kind key;
     struct cpartial *next;
+    int is_final;             /* its definition says `final` */
 };
 
 /* An out-of-class definition of a class template's member:
@@ -391,6 +396,7 @@ struct ctemplate {
                                * pack */
     struct clambda *lambda;   /* a generic lambda's operator(): the lambda
                                * (its declaration is the lambda's) */
+    int is_final;             /* TK_CLASS: its definition says `final` */
 };
 
 /* Class template instance: the class for these arguments (made, not yet
@@ -458,6 +464,13 @@ struct cvar *var_instance(struct ctemplate *t, struct ctarg *args, int n,
  * something else, saves and restores. */
 struct parse_state;
 struct parse_state *parse_save(void);
+/* The instantiations under way (template.c), for an error's notes:
+ * pushed as each starts (its use at `at`), popped as it ends. */
+void cx_inst_push(const char *what, const struct ctok *at);
+void cx_inst_pop(void);
+int cx_inst_mark(void);
+void cx_inst_reset(int mark);
+void cx_inst_notes(void);
 void parse_restore(struct parse_state *st);
 extern int cx_pattern;         /* reading a pattern: dependent types allowed */
 extern int cx_exceptions;      /* exceptions on (the default; -fno-exceptions) */
@@ -638,6 +651,7 @@ struct cclass {
     int vtable_done, rtti_used, rtti_done;
     long align_attr;          /* __attribute__((aligned)) / alignas */
     int packed;
+    int is_final;             /* declared `final` */
     int complete;
     int defining;             /* its body is being parsed */
     int local;                /* declared inside a function */
@@ -786,6 +800,14 @@ struct cexpr *expr_parse_assign(void);     /* an assignment-expression */
 struct cexpr *expr_parse_cond(void);       /* a conditional-expression */
 long expr_parse_const(const char *what);   /* an integral constant */
 int expr_const(struct cexpr *e, long *out); /* integer constant expression */
+int cx_expr_nothrow(struct cexpr *e);   /* can it not throw? (noexcept) */
+/* Type-trait intrinsics (traits.c): known by that name (a type or a
+ * bool)? a type one? at one here (its name, then `(`, not declared)? */
+int trait_known(const char *name);
+int trait_is_type(const char *name);
+int trait_at(void);
+struct cexpr *parse_trait(void);          /* __is_class(T) ...: a bool */
+struct cty *parse_type_trait(void);       /* __underlying_type(T) ... */
 /* ... folded only: no calls evaluated (what emit.c may write as a constant
  * without changing what the program does) */
 int expr_fold(struct cexpr *e, long *out);

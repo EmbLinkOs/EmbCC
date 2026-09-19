@@ -373,7 +373,9 @@ static const char *type_key(struct cty *t)
                       t->refq == 1 ? "R" : t->refq == 2 ? "O" : "");
     }
     case CT_MPTR:
-        return cx_fmt("M%s%s", type_key(ct_class(t->cls)), type_key(t->to));
+        return cx_fmt("M%s%s", type_key(t->mclass ? t->mclass
+                                                  : ct_class(t->cls)),
+                      type_key(t->to));
     case CT_CLASS:
         return class_key(t->cls);
     case CT_ENUM:
@@ -393,6 +395,8 @@ static const char *type_key(struct cty *t)
         return st[n - 1].key;
     }
     case CT_DEP: {
+        if (t->dexpr)
+            return cx_fmt("DT%sE", mexpr_key(t->dexpr));
         char *k = cx_fmt("N%s", t->to ? type_key(t->to) : "?");
         for (int i = 0; i < t->ndnames; i++)
             k = cx_fmt("%s%zu%s", k, strlen(t->dnames[i]), t->dnames[i]);
@@ -402,6 +406,8 @@ static const char *type_key(struct cty *t)
         return "?";
     }
 }
+
+static void put_mexpr(struct mbuf *m, const char *x);
 
 static void mangle_type(struct mbuf *m, struct cty *t)
 {
@@ -457,7 +463,7 @@ static void mangle_type(struct mbuf *m, struct cty *t)
         }
         case CT_MPTR:
             put(m, "M");
-            mangle_type(m, ct_class(t->cls));
+            mangle_type(m, t->mclass ? t->mclass : ct_class(t->cls));
             mangle_type(m, t->to);
             break;
         default:
@@ -528,6 +534,14 @@ static void mangle_type(struct mbuf *m, struct cty *t)
         int i = sub_find(m, key);
         if (i >= 0) {
             put_sub(m, i);
+            return;
+        }
+        if (t->dexpr) {
+            /* decltype(e): DT <expression> E */
+            put(m, "DT");
+            put_mexpr(m, t->dexpr);
+            put(m, "E");
+            sub_add(m, key);
             return;
         }
         put(m, "N");

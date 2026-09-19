@@ -453,6 +453,8 @@ int at_type_start(void)
 {
     if (is_decl_keyword(cx_kind()))
         return 1;
+    if (trait_at() && trait_is_type(cx_cur()->t.text))
+        return 1;
     if (cx_kind() == TOK_LBRACKET && cx_kind_at(1) == TOK_LBRACKET)
         return 1;
     int n;
@@ -494,6 +496,9 @@ static unsigned parse_cv(void)
 
 /* decltype(e): the declared type of a named entity, else e's type made a
  * reference by its value category. */
+static int targ_mentions_param(void);
+static const char *dep_expr_cond(void);
+
 static struct cty *decltype_of(struct cexpr *e)
 {
     if (!e->paren && e->k == E_VAR)
@@ -519,6 +524,34 @@ static struct cty *parse_decltype(void)
         t->k = CT_AUTO;
         t->dauto = 1;
         return t;
+    }
+    if (cx_pattern && targ_mentions_param()) {
+        /* in a pattern, of an expression of the template's parameters:
+         * a dependent type, known by the expression's mangling (when
+         * EmbCC can spell it) */
+        struct cty *d = xcalloc(1, sizeof *d);
+        d->k = CT_DEP;
+        int save = cx_pos;
+        jmp_buf jb;
+        void *saved = cx_sfinae;
+        struct parse_state *st = parse_save();
+        if (!setjmp(jb)) {
+            cx_sfinae = &jb;
+            const char *m = dep_expr_cond();
+            cx_sfinae = saved;
+            if (cx_kind() == TOK_RPAREN)
+                d->dexpr = m;
+        } else {
+            parse_restore(st);
+            cx_sfinae = saved;
+        }
+        if (!d->dexpr) {
+            cx_pos = save - 1;          /* at the `(` */
+            cx_skip_balanced();
+        } else {
+            cx_expect(TOK_RPAREN, "')'");
+        }
+        return d;
     }
     struct cexpr *e = expr_parse();
     cx_expect(TOK_RPAREN, "')'");
@@ -643,6 +676,10 @@ static void parse_dspec(struct dspec *ds)
         case TOK_IDENT: case TOK_COLONCOLON: {
             if (named || builtin)
                 break;
+            if (trait_at() && trait_is_type(cx_cur()->t.text)) {
+                named = parse_type_trait();     /* __underlying_type(T) */
+                continue;
+            }
             if (at_ctor_declarator())
                 break;
             int n;
@@ -1069,6 +1106,17 @@ static struct cty *ptr_ops(struct cty *t, int mode)
         if (cx_kind() == TOK_IDENT || cx_kind() == TOK_COLONCOLON) {
             /* C::* : a pointer to a member of C */
             struct qname q = peek_qname();
+            if (cx_pattern && q.dep && q.fin > 0 &&
+                cx_kind_at(q.fin) == TOK_STAR) {
+                /* T C::* with C a template parameter (in a pattern) */
+                cx_pos += q.fin + 1;
+                t = ct_mptr(NULL, t);
+                t->mclass = q.dep;
+                unsigned cq = parse_cv();
+                if (cq)
+                    t = ct_qual(t, cq);
+                continue;
+            }
             if (!q.bad && q.scope && q.fin > 0 &&
                 cx_kind_at(q.fin) == TOK_STAR) {
                 if (q.scope->k != SC_CLASS)
@@ -2318,9 +2366,12 @@ static struct cty *parse_class_spec(struct dspec *ds)
         name = cx_cur()->t.text;
         cx_advance();
     }
+    int is_final = 0;
     if (cx_kind() == TOK_IDENT && strcmp(cx_cur()->t.text, "final") == 0 &&
-        (cx_kind_at(1) == TOK_LBRACE || cx_kind_at(1) == TOK_COLON))
+        (cx_kind_at(1) == TOK_LBRACE || cx_kind_at(1) == TOK_COLON)) {
         cx_advance();
+        is_final = 1;
+    }
     parse_attrs(&a);
     int is_def = cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON;
     struct cclass *c = NULL;
@@ -2364,6 +2415,7 @@ static struct cty *parse_class_spec(struct dspec *ds)
     if (c->complete)
         cx_error(at, "redefinition of '%s'", name);
     ds->cls_defined = c;
+    c->is_final = is_final;
     return parse_class_body(c, kw, &a, at);
 }
 
@@ -4229,7 +4281,7 @@ static struct cstmt *parse_stmt(void)
 
 struct parse_state {
     int pos, half, extern_c, pattern, in_targs, class_depth;
-    int npend, cappend, dependent_ok, packs;
+    int npend, cappend, dependent_ok, packs, insts;
     struct pending *pend;
     struct cscope *scope;
     struct cfunc *curfn;
@@ -4250,6 +4302,7 @@ struct parse_state *parse_save(void)
     st->pend = pend;
     st->dependent_ok = dependent_type_ok;
     st->packs = pack_mark();
+    st->insts = cx_inst_mark();
     st->scope = cx_scope;
     st->curfn = cx_curfn;
     st->curblk = cx_curblk;
@@ -4258,6 +4311,7 @@ struct parse_state *parse_save(void)
 
 void parse_restore(struct parse_state *st)
 {
+    cx_inst_reset(st->insts);
     cx_pos = st->pos;
     cx_half_gt = st->half;
     cx_extern_c = st->extern_c;
@@ -4361,7 +4415,12 @@ static void skip_targ(void)
             depth++;
         else if (k == TOK_GT)
             depth--;
-        else if (k == TOK_SHR)
+        else if (k == TOK_SHR && depth == 1) {
+            /* X<Y>> : the first `>` closes X's arguments, the second
+             * the list this argument is in — left for the caller */
+            cx_half_gt = 1;
+            return;
+        } else if (k == TOK_SHR)
             depth -= 2;
         cx_advance();
     }
@@ -4507,16 +4566,25 @@ static const char *dep_expr_name(void)
         return r;
     }
     cx_pos += q.fin;
+    if (cx_kind() == TOK_CX_TEMPLATE && cx_kind_at(1) == TOK_IDENT)
+        cx_advance();
     if (cx_kind() != TOK_IDENT)
         cx_error(at, "expected an expression in a template argument");
     const char *n = cx_cur()->t.text;
-    struct csym *y = lookup(cx_scope, n);
+    struct csym *y = q.scope ? lookup_in(q.scope, n) : lookup(cx_scope, n);
     cx_advance();
     if (y && y->k == CS_VAR && y->var->is_tparam)
         return param_ref(y->var->tparam_index);
     if (y && y->k == CS_ENUMERATOR)
         return cx_fmt("L%s%ldE", "i", y->value);
-    return cx_fmt("%zu%s", strlen(n), n);
+    const char *r = cx_fmt("%zu%s", strlen(n), n);
+    if (cx_kind() == TOK_LT && y && (y->k == CS_FUNC || y->k == CS_TEMPLATE)) {
+        /* f<args>: the arguments (vendor-spelled, as sr's) */
+        int p0 = cx_pos;
+        skip_template_args();
+        r = cx_fmt("%sI_%dE", r, p0);
+    }
+    return r;
 }
 
 static const char *dep_expr_postfix(const char *e)
@@ -4657,28 +4725,63 @@ static const char *dep_expr_unary(void)
         cx_expect(TOK_RPAREN, "')'");
         return dep_expr_postfix(r);
     }
+    if (trait_at()) {
+        /* __is_constructible(T, Args...) in a pattern: u <name> <types> E */
+        const char *tn = cx_cur()->t.text;
+        cx_advance();
+        cx_expect(TOK_LPAREN, "'('");
+        int saved = cx_in_targs;
+        cx_in_targs = 0;
+        const char *r = cx_fmt("u%zu%s", strlen(tn), tn);
+        while (cx_kind() != TOK_RPAREN) {
+            r = cx_fmt("%s%s", r, dep_type_mangle());
+            if (cx_accept(TOK_ELLIPSIS))
+                r = cx_fmt("%sDp", r);
+            if (!cx_accept(TOK_COMMA))
+                break;
+        }
+        cx_expect(TOK_RPAREN, "')'");
+        cx_in_targs = saved;
+        return cx_fmt("%sE", r);
+    }
     int n;
+    const char *ty = NULL;
     if (peek_type_name(&n) &&
         (cx_kind_at(n) == TOK_LPAREN || cx_kind_at(n) == TOK_LBRACE)) {
-        /* T(args), T{}: a functional cast */
-        const char *ty = dep_type_mangle();
+        ty = dep_type_mangle();
+    } else if (at_type_start() && cx_kind() != TOK_IDENT &&
+               cx_kind() != TOK_COLONCOLON) {
+        /* bool(e), unsigned long(e): a type the keywords spell */
+        int save = cx_pos;
+        struct dspec ds;
+        parse_dspec(&ds);
+        if (ds.type && (cx_kind() == TOK_LPAREN || cx_kind() == TOK_LBRACE))
+            ty = type_ref(ds.type);
+        else
+            cx_pos = save;
+    }
+    if (ty) {
+        /* T(args), T{}: a functional cast — cv <type> <expr> for one
+         * argument, cv <type> _ <expr>* E otherwise, tl <type> <expr>* E
+         * braced */
         int brace = cx_kind() == TOK_LBRACE;
         cx_advance();
         int saved = cx_in_targs;
         cx_in_targs = 0;
-        char *r = cx_fmt("%s%s", brace ? "tl" : "cv", ty);
-        int any = 0;
+        const char *args = "";
+        int na = 0;
         while (cx_kind() != (brace ? TOK_RBRACE : TOK_RPAREN)) {
-            r = cx_fmt("%s%s%s", r, !brace && !any ? "_" : "",
-                       dep_expr_cond());
-            any = 1;
+            args = cx_fmt("%s%s", args, dep_expr_cond());
+            na++;
             if (!cx_accept(TOK_COMMA))
                 break;
         }
         cx_expect(brace ? TOK_RBRACE : TOK_RPAREN, "')'");
         cx_in_targs = saved;
-        return dep_expr_postfix(cx_fmt("%s%s", r, brace || any ? "E"
-                                                              : "_E"));
+        const char *r = brace ? cx_fmt("tl%s%sE", ty, args)
+                        : na == 1 ? cx_fmt("cv%s%s", ty, args)
+                        : cx_fmt("cv%s_%sE", ty, args);
+        return dep_expr_postfix(r);
     }
     return dep_expr_postfix(dep_expr_name());
 }
@@ -5134,13 +5237,35 @@ void parse_template_decl(struct cclass *cls, int access)
     if (cx_kind() == TOK_CX_CONCEPT)
         cx_error(cx_cur(), "concepts are not supported yet (CX7)");
     enum tok_kind k = cx_kind();
+    /* attributes may sit between the key and the name */
+    int an = 1;
+    for (;;) {
+        if (cx_kind_at(an) == TOK_KW_ATTRIBUTE &&
+            cx_kind_at(an + 1) == TOK_LPAREN) {
+            int save = cx_pos;
+            cx_pos += an + 1;
+            cx_skip_balanced();
+            an = cx_pos - save;
+            cx_pos = save;
+        } else if (cx_kind_at(an) == TOK_LBRACKET &&
+                   cx_kind_at(an + 1) == TOK_LBRACKET) {
+            int save = cx_pos;
+            cx_pos += an;
+            cx_skip_balanced();
+            an = cx_pos - save;
+            cx_pos = save;
+        } else {
+            break;
+        }
+    }
     if ((k == TOK_KW_STRUCT || k == TOK_CX_CLASS || k == TOK_KW_UNION) &&
-        cx_kind_at(1) == TOK_IDENT &&
-        (cx_kind_at(2) == TOK_LBRACE || cx_kind_at(2) == TOK_COLON ||
-         cx_kind_at(2) == TOK_SEMI || cx_kind_at(2) == TOK_LT ||
-         (cx_kind_at(2) == TOK_IDENT &&
-          strcmp(cx_peek(2)->t.text, "final") == 0))) {
+        cx_kind_at(an) == TOK_IDENT &&
+        (cx_kind_at(an + 1) == TOK_LBRACE || cx_kind_at(an + 1) == TOK_COLON ||
+         cx_kind_at(an + 1) == TOK_SEMI || cx_kind_at(an + 1) == TOK_LT ||
+         (cx_kind_at(an + 1) == TOK_IDENT &&
+          strcmp(cx_peek(an + 1)->t.text, "final") == 0))) {
         cx_advance();
+        parse_attrs(NULL);
         const char *name = cx_cur()->t.text;
         cx_advance();
         struct csym *y = scope_find_here(home, name);
@@ -5158,8 +5283,10 @@ void parse_template_decl(struct cclass *cls, int access)
             p->npattern = parse_template_args(y->tmpl, &p->pattern);
             cx_pattern--;
             if (cx_kind() == TOK_IDENT &&
-                strcmp(cx_cur()->t.text, "final") == 0)
+                strcmp(cx_cur()->t.text, "final") == 0) {
                 cx_advance();
+                p->is_final = 1;
+            }
             p->head_end = cx_pos;
             p->key = k;
             skip_class_def();
@@ -5178,8 +5305,10 @@ void parse_template_decl(struct cclass *cls, int access)
             t->member_of = cls;
         }
         t->key = k;
-        if (cx_kind() == TOK_IDENT && strcmp(cx_cur()->t.text, "final") == 0)
+        if (cx_kind() == TOK_IDENT && strcmp(cx_cur()->t.text, "final") == 0) {
             cx_advance();
+            t->is_final = 1;
+        }
         if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON) {
             if (t->head_end >= 0)
                 cx_error(at, "redefinition of class template '%s'", name);

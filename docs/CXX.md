@@ -358,6 +358,25 @@ table no longer claims `__int128`, `__float128`, `__float80` or the
 extended floating types (tools/gen-predef.sh), which libstdc++ would
 otherwise use. tests/cxx `features`.
 
+Type-trait intrinsics (src/cxx/traits.c), g++'s names: the class
+categories and properties (`__is_class`, `__is_empty`, `__is_polymorphic`,
+`__is_final`, `__is_trivial`, `__is_pod`, `__is_standard_layout`, ...),
+`__is_same`, `__is_base_of`, the constructible / assignable / convertible
+families (built as the expressions std::declval would give, a failure a
+substitution failure), `__underlying_type` and the type transforms
+`<type_traits>` asks `__has_builtin` about. Pattern fixes on the way:
+`T C::*` with C a template parameter; an attribute between `struct` and
+a class template's name; default template arguments ending in `>>`; an
+alias template instantiated in the middle of a `>>`; decltype of a
+dependent expression in a declaration (a dependent type, mangled
+`DT...E`); `bool(...)` and `f<args>` in dependent expressions (a
+one-argument functional cast mangled `cv <type> <expr>` as the ABI says).
+C++ errors now end with the instantiations under way ("note: in the
+instantiation of ..."). tests/cxx `traits`.
+
+Next for `<type_traits>`: requires-clauses and requires-expressions (C++20
+mode uses them unconditionally) — concepts' core, from CX7.
+
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their
 values are known to the interpreter, not yet written as static data);

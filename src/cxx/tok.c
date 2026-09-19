@@ -133,6 +133,7 @@ void cx_error(const struct ctok *at, const char *fmt, ...)
     va_end(ap);
     diag_error_at(at ? at->file : "<c++>", at ? at->t.line : 0,
                   at ? at->t.col : 0, "%s", msg);
+    cx_inst_notes();
     exit(1);
 }
 

@@ -145,7 +145,7 @@ int ct_dependent(const struct cty *t)
     case CT_PTR: case CT_LREF: case CT_RREF: case CT_ARRAY:
         return t->n == -2 || t->n == -3 || ct_dependent(t->to);
     case CT_MPTR:
-        return ct_dependent(t->to);
+        return t->mclass || ct_dependent(t->to);
     case CT_FUNC:
         if (ct_dependent(t->to))
             return 1;
@@ -190,6 +190,9 @@ static int same(const struct cty *a, const struct cty *b, int quals)
     case CT_ENUM:
         return a->en == b->en;
     case CT_MPTR:
+        if (a->mclass || b->mclass)
+            return a->mclass && b->mclass && same(a->mclass, b->mclass, 1) &&
+                   same(a->to, b->to, 1);
         return a->cls == b->cls && same(a->to, b->to, 1);
     case CT_TPARAM:
         return a->n == b->n;
@@ -470,11 +473,16 @@ static void name_into(char *buf, size_t cap, const struct cty *t)
         snprintf(buf, cap, "%s%s", cv, t->cls->name ? t->cls->name
                                                    : "<anonymous>");
         return;
-    case CT_MPTR:
+    case CT_MPTR: {
+        char cn[256];
         name_into(inner, sizeof inner, t->to);
-        snprintf(buf, cap, "%s %s::*", inner, t->cls->name ? t->cls->name
-                                                           : "<anonymous>");
+        if (t->mclass)
+            name_into(cn, sizeof cn, t->mclass);
+        snprintf(buf, cap, "%s %s::*", inner, t->mclass ? cn
+                                              : t->cls->name ? t->cls->name
+                                              : "<anonymous>");
         return;
+    }
     case CT_TPARAM:
         snprintf(buf, cap, "%s%s", cv, t->tpname ? t->tpname : "T");
         return;

@@ -374,6 +374,7 @@ static struct ctarg default_arg(struct ctemplate *t, struct ctparam *ps,
     struct parse_state *st = parse_save();
     cx_scope = tparam_scope(ps, np, prev, i, scope);
     cx_pos = p->def_tok;
+    cx_half_gt = 0;
     cx_in_targs = 1;
     a.kind = p->kind;
     if (p->kind == TP_TYPE) {
@@ -629,8 +630,16 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
                 return 0;
         return 1;
     case CT_MPTR:
-        if (A->k != CT_MPTR || (deduce_exact && A->cls != P->cls))
+        if (A->k != CT_MPTR)
             return 0;
+        if (P->mclass) {
+            /* T C::*: C deduced too */
+            if (!deduce(P->mclass, A->mclass ? A->mclass : ct_class(A->cls),
+                        out, set, np))
+                return 0;
+        } else if (deduce_exact && A->cls != P->cls) {
+            return 0;
+        }
         return deduce(P->to, A->to, out, set, np);
     case CT_TID: {
         if (A->k == CT_TID && A->tmpl == P->tmpl && !P->tmpl->tparam) {
@@ -949,6 +958,48 @@ static struct cpartial *match_partial(struct ctemplate *t, struct ctarg *a,
 
 static int inst_depth;
 
+/* ---- the instantiation stack (an error's notes) ---- */
+
+static struct { const char *what; const struct ctok *at; } insts[64];
+static int ninsts;
+
+void cx_inst_push(const char *what, const struct ctok *at)
+{
+    if (ninsts < 64) {
+        insts[ninsts].what = what;
+        insts[ninsts].at = at;
+    }
+    ninsts++;
+}
+
+void cx_inst_pop(void)
+{
+    if (ninsts > 0)
+        ninsts--;
+}
+
+int cx_inst_mark(void)
+{
+    return ninsts;
+}
+
+void cx_inst_reset(int mark)
+{
+    ninsts = mark;
+}
+
+void cx_inst_notes(void)
+{
+    int shown = 0;
+    for (int i = (ninsts < 64 ? ninsts : 64) - 1; i >= 0 && shown < 12;
+         i--, shown++) {
+        const struct ctok *at = insts[i].at;
+        diag_note_at(at ? at->file : "<c++>", at ? at->t.line : 0,
+                     at ? at->t.col : 0, "in the instantiation of %s",
+                     insts[i].what);
+    }
+}
+
 void class_ensure(struct cclass *c)
 {
     if (!c->inst_pending)
@@ -967,8 +1018,11 @@ void class_ensure(struct cclass *c)
                           : tparam_scope(t->params, t->nparams, c->targs,
                                          c->ntargs, t->scope);
     c->inst_partial = p;
+    c->is_final = p ? p->is_final : t->is_final;
+    cx_inst_push(ct_name(ct_class(c)), cx_cur());
     class_define_from(c, p ? p->head_end : t->head_end, p ? p->key : t->key,
                       ps);
+    cx_inst_pop();
     inst_depth--;
 }
 
@@ -996,7 +1050,9 @@ struct cfunc *func_instance(struct ctemplate *t, struct ctarg *args,
         return NULL;
     }
     cx_sfinae = &jb;
+    cx_inst_push(cx_fmt("the declaration of '%s'", t->name), cx_cur());
     struct cfunc *f = func_decl_replay(t, ps);
+    cx_inst_pop();
     cx_sfinae = saved;
     parse_restore(st);
     f->spec_of = t;
@@ -1046,7 +1102,9 @@ void func_ensure_body(struct cfunc *f)
     if (++inst_depth > 900)
         cx_error(cx_cur(), "template instantiation depth exceeds 900 (in "
                            "'%s')", f->name);
+    cx_inst_push(cx_fmt("the body of '%s'", f->name), cx_cur());
     func_define_from(f);
+    cx_inst_pop();
     inst_depth--;
 }
 
@@ -1059,9 +1117,12 @@ struct cty *alias_instance(struct ctemplate *t, struct ctarg *args, int n,
         if (args_same(in->args, in->nargs, a, t->nparams))
             return in->type;
     struct parse_state *st = parse_save();
+    cx_inst_push(cx_fmt("alias template '%s'", t->name), cx_cur());
     cx_scope = tparam_scope(t->params, t->nparams, a, t->nparams, t->scope);
     cx_pos = t->decl_tok;
+    cx_half_gt = 0;
     cx_in_targs = 0;
+    cx_pattern = 0;
     struct cty *ty = parse_type_id();
     parse_restore(st);
     struct cinst *in = xcalloc(1, sizeof *in);
