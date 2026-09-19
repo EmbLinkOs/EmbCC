@@ -120,6 +120,8 @@ struct cty {
                                * dependent type (cls then NULL) */
     const char *dexpr;        /* CT_DEP: decltype(e) of a dependent e — e's
                                * mangling (NULL: not known) */
+    int treq, treq_end;       /* FUNC: a trailing requires-clause's tokens
+                               * (0: none) */
     int pack_expansion;       /* CT_TPARAM etc.: `T...` in a pattern */
     int bparam;               /* ARRAY in a pattern with n -2: the value
                                * parameter its bound is */
@@ -227,6 +229,9 @@ struct cvar {
     int emitted;
     int refd, declared;       /* emit.c's bookkeeping */
     int is_tparam;            /* a value template parameter in a pattern */
+    int fparam;               /* a function parameter seen in its
+                               * declaration (a trailing return type): its
+                               * index + 1 */
     int tparam_index;
     struct ctarg *targs;      /* a variable template's instance: its args */
     int ntargs;
@@ -311,6 +316,9 @@ enum { TP_TYPE, TP_VALUE, TP_TEMPLATE };
 struct ctparam {
     int kind;                 /* TP_* */
     const char *name;
+    struct ctemplate *tc;     /* a type-constraint: `C T` or `C<A> T` */
+    int tc_args;              /* ... C's written arguments (their `<`), or
+                               * -1 */
     int pack;                 /* a parameter pack: ...name */
     struct cty *vtype;        /* TP_VALUE: its type (a pattern) */
     int vtype_tok;            /* ... as tokens, for a dependent one */
@@ -333,7 +341,7 @@ struct ctarg {
                                * pattern (it deduces a pack) */
 };
 
-enum { TK_CLASS, TK_FUNC, TK_ALIAS, TK_VAR };
+enum { TK_CLASS, TK_FUNC, TK_ALIAS, TK_VAR, TK_CONCEPT };
 
 /* A partial specialization of a class template: its own parameters, the
  * argument patterns it matches, and its definition's tokens. */
@@ -346,6 +354,7 @@ struct cpartial {
     enum tok_kind key;
     struct cpartial *next;
     int is_final;             /* its definition says `final` */
+    int req_start, req_end;   /* its requires-clause (0: none) */
 };
 
 /* An out-of-class definition of a class template's member:
@@ -397,6 +406,8 @@ struct ctemplate {
     struct clambda *lambda;   /* a generic lambda's operator(): the lambda
                                * (its declaration is the lambda's) */
     int is_final;             /* TK_CLASS: its definition says `final` */
+    int req_start, req_end;   /* its requires-clause's tokens (0: none);
+                               * TK_CONCEPT: the constraint, decl_tok on */
 };
 
 /* Class template instance: the class for these arguments (made, not yet
@@ -434,7 +445,7 @@ void class_define_from(struct cclass *c, int pos, enum tok_kind key,
                        struct cscope *ps);
 struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps);
 void func_define_from(struct cfunc *f);
-struct cvar *var_define_from(struct ctemplate *t, struct ctarg *args,
+struct cvar *var_define_from(struct ctemplate *t, int pos, struct ctarg *args,
                              struct cscope *ps);
 struct cscope *tparam_scope(struct ctparam *ps, int np, struct ctarg *args,
                             int na, struct cscope *parent);
@@ -544,6 +555,10 @@ struct cfunc {
     int mi_tok;               /* ... and its mem-initializer list (or -1) */
     int deducing;             /* its body is being read for its return type */
     struct clambda *lambda;   /* a lambda's operator(): the lambda */
+    int unsat;                /* its requires-clause is not satisfied: no
+                               * candidate for overload resolution */
+    struct cfunc *alias_of;   /* an overload set's entry a using-declaration
+                               * made: this function, declared elsewhere */
     int local_inst;           /* an instance for a class with no linkage:
                                * internal, named as a local class's are */
     struct cstmt *fn_try;     /* a function-try-block: its handlers (S_TRY;
@@ -652,6 +667,7 @@ struct cclass {
     long align_attr;          /* __attribute__((aligned)) / alignas */
     int packed;
     int is_final;             /* declared `final` */
+    int explicit_spec;        /* an instance given as template<> ... */
     int complete;
     int defining;             /* its body is being parsed */
     int local;                /* declared inside a function */
@@ -801,6 +817,33 @@ struct cexpr *expr_parse_cond(void);       /* a conditional-expression */
 long expr_parse_const(const char *what);   /* an integral constant */
 int expr_const(struct cexpr *e, long *out); /* integer constant expression */
 int cx_expr_nothrow(struct cexpr *e);   /* can it not throw? (noexcept) */
+/* An expression of the binary operators binding tighter than minprec
+ * (3: none of && and ||, as a constraint's operand). */
+struct cexpr *expr_parse_binary(int minprec);
+/* Constraints (concepts.c): a requires-clause skipped (general: a
+ * concept's whole expression, to `;`); satisfied, read from its tokens in
+ * scope; a concept's value for arguments (template.c, cached); a
+ * type-constraint C<A...> on t; a requires-expression at `requires`; a
+ * concept named at the cursor (its tokens, its arguments' `<` or -1). */
+void skip_constraint(int general);
+int constraint_satisfied(int start, int end, struct cscope *scope);
+int concept_satisfied(struct ctemplate *c, struct ctarg *args, int n,
+                      const struct ctok *at);
+int type_constraint_holds(struct ctemplate *c, int args_tok, struct cty *t,
+                          const struct ctok *at);
+struct cexpr *parse_requires_expr(void);
+struct ctemplate *concept_at(int *ntok, int *args_tok);
+/* the constraints of template parameters ps bound in scope (their
+ * type-constraints) and of the requires-clause start..end */
+int template_constraints(struct ctparam *ps, int np, int req_start,
+                         int req_end, struct cscope *scope,
+                         const struct ctok *at);
+void skip_template_args(void);           /* at `<`: past the matching `>` */
+int targ_is_dependent(const struct ctarg *a);
+/* template<> ... v<args> = ...: v's instance for args is the variable */
+void var_explicit_spec(struct ctemplate *t, struct ctarg *args, int n,
+                       struct cvar *v, const struct ctok *at);
+struct cty *parse_param_list(void);      /* ( params ): a function type */
 /* Type-trait intrinsics (traits.c): known by that name (a type or a
  * bool)? a type one? at one here (its name, then `(`, not declared)? */
 int trait_known(const char *name);

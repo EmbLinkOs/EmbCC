@@ -948,6 +948,10 @@ struct fnset {
 
 static void set_add(struct fnset *s, struct cfunc *f)
 {
+    if (f->unsat)
+        return;                  /* its requires-clause says no */
+    if (f->alias_of)
+        f = f->alias_of;         /* (brought in by a using-declaration) */
     for (int i = 0; i < s->n; i++)
         if (s->f[i] == f)
             return;
@@ -1389,6 +1393,8 @@ static struct cexpr *call_result(struct cty *ret)
 struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
                         struct cexpr **args, int na, const struct ctok *at)
 {
+    if (fn->alias_of)
+        fn = fn->alias_of;
     if (fn->is_deleted)
         cx_error(at, "use of deleted function '%s'", fn->name);
     func_deduce_return(fn, at);
@@ -2730,9 +2736,13 @@ static struct cexpr *parse_delete(const struct ctok *at, int global)
 
 static struct cty *builtin_type(const char *n);
 
+static const char *lib_sig(const char *n);
+
 int cxx_has_builtin(const char *name)
 {
     if (strncmp(name, "__builtin_", 10) == 0) {
+        if (lib_sig(name + 10))
+            return 1;
         static const char *const special[] = {
             "offsetof", "is_constant_evaluated", "addressof", "launder",
             "expect", "constant_p", "va_arg",
@@ -2838,6 +2848,149 @@ static int call_args_rest(struct cexpr ***out)
     return na;
 }
 
+/* ---- builtins that are library functions ----
+ * __builtin_memchr, __builtin_acosf, ... : the C function itself, called
+ * (EmbCC's C does not know them by their builtin names). Signatures: the
+ * return type then the parameters — v void, i int, l long, L long long,
+ * z size_t, d double, f float, e long double, P void *, C const void *,
+ * s char *, c const char *, h wchar_t, w wchar_t *, W const wchar_t *,
+ * I int *, D double *, F float *, E long double *, V va_list, . `...` */
+
+static struct cty *sig_type(char c)
+{
+    switch (c) {
+    case 'v': return ct_basic(CT_VOID);
+    case 'i': return ct_basic(CT_INT);
+    case 'l': return ct_basic(CT_LONG);
+    case 'L': return ct_basic(CT_LLONG);
+    case 'z': return ct_size_t();
+    case 'd': return ct_basic(CT_DOUBLE);
+    case 'f': return ct_basic(CT_FLOAT);
+    case 'e': return ct_basic(CT_LDOUBLE);
+    case 'P': return ct_ptr(ct_basic(CT_VOID));
+    case 'C': return ct_ptr(ct_qual(ct_basic(CT_VOID), CQ_CONST));
+    case 's': return ct_ptr(ct_basic(CT_CHAR));
+    case 'c': return ct_ptr(ct_qual(ct_basic(CT_CHAR), CQ_CONST));
+    case 'h': return ct_basic(CT_WCHAR);
+    case 'w': return ct_ptr(ct_basic(CT_WCHAR));
+    case 'W': return ct_ptr(ct_qual(ct_basic(CT_WCHAR), CQ_CONST));
+    case 'I': return ct_ptr(ct_basic(CT_INT));
+    case 'D': return ct_ptr(ct_basic(CT_DOUBLE));
+    case 'F': return ct_ptr(ct_basic(CT_FLOAT));
+    case 'E': return ct_ptr(ct_basic(CT_LDOUBLE));
+    case 'V': return ct_basic(CT_VALIST);
+    default: return NULL;
+    }
+}
+
+/* the signature of library builtin n (NULL: not one) */
+static const char *lib_sig(const char *n)
+{
+    static const struct { const char *name, *sig; } fns[] = {
+        { "memchr", "PCiz" }, { "memcmp", "iCCz" }, { "strchr", "sci" },
+        { "strrchr", "sci" }, { "strpbrk", "scc" }, { "strstr", "scc" },
+        { "strlen", "zc" }, { "strcmp", "icc" }, { "strncmp", "iccz" },
+        { "strcpy", "ssc" }, { "strncpy", "sscz" }, { "strcat", "ssc" },
+        { "strncat", "sscz" }, { "strspn", "zcc" }, { "strcspn", "zcc" },
+        { "wcslen", "zW" }, { "wmemchr", "wWhz" }, { "wmemcmp", "iWWz" },
+        { "wmemcpy", "wwWz" }, { "wmemmove", "wwWz" }, { "wmemset", "wwhz" },
+        { "vsnprintf", "iszcV" }, { "snprintf", "iszc." },
+        { "sprintf", "isc." }, { "vsprintf", "iscV" }, { "printf", "ic." },
+        { "puts", "ic" }, { "putchar", "ii" }, { "abort", "v" },
+        { "exit", "vi" }, { "malloc", "Pz" }, { "calloc", "Pzz" },
+        { "realloc", "PPz" }, { "free", "vP" }, { "abs", "ii" },
+        { "labs", "ll" }, { "llabs", "LL" }, { "alloca", "Pz" },
+    };
+    for (size_t i = 0; i < sizeof fns / sizeof fns[0]; i++)
+        if (strcmp(fns[i].name, n) == 0)
+            return fns[i].sig;
+    /* libm: each in double, float (f) and long double (l) */
+    static const char *const unary[] = {
+        "acos", "asin", "atan", "ceil", "cos", "cosh", "exp", "fabs",
+        "floor", "log", "log10", "sin", "sinh", "sqrt", "tan", "tanh",
+        "acosh", "asinh", "atanh", "cbrt", "erf", "erfc", "exp2", "expm1",
+        "lgamma", "log1p", "log2", "logb", "nearbyint", "rint", "round",
+        "tgamma", "trunc",
+    };
+    static const char *const binary[] = {
+        "atan2", "fmod", "pow", "copysign", "fdim", "fmax", "fmin", "hypot",
+        "nextafter", "remainder",
+    };
+    static const struct { const char *name, *sig; } other[] = {
+        { "fma", "xxxx" }, { "frexp", "xxJ" }, { "ldexp", "xxi" },
+        { "modf", "xxX" }, { "scalbn", "xxi" }, { "scalbln", "xxl" },
+        { "ilogb", "ix" }, { "llrint", "Lx" }, { "llround", "Lx" },
+        { "lrint", "lx" }, { "lround", "lx" }, { "nexttoward", "xxe" },
+        { "remquo", "xxxJ" },
+    };
+    size_t len = strlen(n);
+    char suf = len > 1 && (n[len - 1] == 'f' || n[len - 1] == 'l')
+               ? n[len - 1] : 0;
+    for (int pass = 0; pass < 2; pass++) {
+        size_t bl = pass ? len - (suf != 0) : len;
+        char x = pass && suf ? (suf == 'f' ? 'f' : 'e') : 'd';
+        if (pass && !suf)
+            break;
+        char xp = x == 'f' ? 'F' : x == 'e' ? 'E' : 'D';
+        for (size_t i = 0; i < sizeof unary / sizeof unary[0]; i++)
+            if (strlen(unary[i]) == bl && !strncmp(unary[i], n, bl))
+                return cx_fmt("%c%c", x, x);
+        for (size_t i = 0; i < sizeof binary / sizeof binary[0]; i++)
+            if (strlen(binary[i]) == bl && !strncmp(binary[i], n, bl))
+                return cx_fmt("%c%c%c", x, x, x);
+        for (size_t i = 0; i < sizeof other / sizeof other[0]; i++)
+            if (strlen(other[i].name) == bl &&
+                !strncmp(other[i].name, n, bl)) {
+                char *sg = cx_strdup(other[i].sig);
+                for (char *q = sg; *q; q++)
+                    *q = *q == 'x' ? x : *q == 'X' ? xp : *q == 'J' ? 'I'
+                         : *q;
+                return sg;
+            }
+    }
+    return NULL;
+}
+
+/* the C function a library builtin is: as the unit declared it, or made */
+static struct cfunc *lib_builtin(const char *n)
+{
+    const char *sig = lib_sig(n);
+    if (!sig)
+        return NULL;
+    struct csym *y = scope_find_here(cx_global, n);
+    if (y && y->k == CS_FUNC)
+        for (struct cfunc *f = y->fns; f; f = f->next)
+            if (f->c_linkage && !f->tmpl)
+                return f->alias_of ? f->alias_of : f;
+    static struct { const char *name; struct cfunc *f; } made[128];
+    static int nmade;
+    for (int i = 0; i < nmade; i++)
+        if (strcmp(made[i].name, n) == 0)
+            return made[i].f;
+    int np = 0, variadic = 0;
+    struct cty *ps[8];
+    for (const char *q = sig + 1; *q && np < 8; q++) {
+        if (*q == '.')
+            variadic = 1;
+        else
+            ps[np++] = sig_type(*q);
+    }
+    struct cfunc *f = xcalloc(1, sizeof *f);
+    f->name = cx_strdup(n);
+    f->type = ct_func(sig_type(sig[0]), ps, np, variadic);
+    f->owner = cx_global;
+    f->c_linkage = 1;
+    f->vslot = -1;
+    f->body_tok = f->mi_tok = -1;
+    func_register(f);
+    if (nmade < 128) {
+        made[nmade].name = f->name;
+        made[nmade].f = f;
+        nmade++;
+    }
+    return f;
+}
+
 static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
 {
     const char *n = name + 10;
@@ -2900,6 +3053,15 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         long v;
         return ex_int(expr_const(args[0], &v), ct_basic(CT_INT));
     }
+    if (strcmp(n, "object_size") == 0 && na == 2) {
+        long v = 0;
+        expr_const(args[1], &v);
+        return ex_int(v < 2 ? -1 : 0, ct_size_t());   /* not known */
+    }
+    struct cfunc *lf = strcmp(n, "memcpy") && strcmp(n, "memmove") &&
+                       strcmp(n, "memset") ? lib_builtin(n) : NULL;
+    if (lf)
+        return make_call(lf, NULL, args, na, at);
     struct cty *t = builtin_type(n);
     if (!t)
         cx_error(at, "'%s' is not a supported builtin", name);
@@ -2972,6 +3134,16 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
 {
     switch (y->k) {
     case CS_TEMPLATE: {
+        if (y->tmpl->kind == TK_CONCEPT && cx_kind() == TOK_LT) {
+            /* C<args>: true when they satisfy it */
+            struct ctarg *args;
+            int n = parse_template_args(y->tmpl, &args);
+            for (int i = 0; i < n; i++)
+                if (targ_is_dependent(&args[i]))
+                    return ex_int(0, ct_basic(CT_BOOL));   /* a pattern */
+            return ex_int(concept_satisfied(y->tmpl, args, n, at),
+                          ct_basic(CT_BOOL));
+        }
         if (y->tmpl->kind != TK_VAR || cx_kind() != TOK_LT)
             cx_error(at, "template '%s' used without its arguments", name);
         struct ctarg *args;
@@ -3465,8 +3637,7 @@ static struct cexpr *parse_primary(void)
     case TOK_LBRACKET:
         return parse_lambda();
     case TOK_CX_REQUIRES:
-        cx_error(at, "requires-expressions are not supported yet (CX7)");
-        return NULL;
+        return parse_requires_expr();
     case TOK_IDENT: case TOK_COLONCOLON: case TOK_CX_OPERATOR: {
         if (trait_at() && !trait_is_type(cx_cur()->t.text))
             return parse_trait();
@@ -4131,6 +4302,11 @@ long expr_parse_const(const char *what)
     if (!ct_is_integer(e->t) || !expr_const(e, &v))
         cx_error(at, "%s is not an integral constant expression", what);
     return v;
+}
+
+struct cexpr *expr_parse_binary(int minprec)
+{
+    return parse_binary(minprec);
 }
 
 int cx_expr_nothrow(struct cexpr *e)

@@ -269,6 +269,8 @@ static int need_atexit, need_guard;
 
 static void need_fn(struct cfunc *f)
 {
+    if (f->alias_of)
+        f = f->alias_of;
     /* an implicit or defaulted member a vtable (or a call) reaches */
     if ((f->is_implicit || f->is_defaulted) && !f->defined && !f->is_deleted)
         define_implicit(f);
@@ -681,6 +683,75 @@ static char *vbase_addr(const char *p, struct cexpr *e)
                   e->vbindex, e->ival);
 }
 
+/* The type-generic floating classifications (__builtin_isnan, ...), which
+ * EmbCC's C does not have: written out on a temporary of the operand's
+ * type — NaN is unequal to itself, x - x is 0 only for a finite x, the
+ * sign is the top bit of the value's most significant byte. */
+static char *fp_class_text(struct cexpr *e)
+{
+    const char *n = e->name + 10;
+    if (strncmp(e->name, "__builtin_", 10) != 0)
+        return NULL;
+    static const char *const names[] = {
+        "isnan", "isinf", "isfinite", "isnormal", "signbit", "fpclassify",
+        "isgreater", "isgreaterequal", "isless", "islessequal",
+        "islessgreater", "isunordered", "isinf_sign",
+    };
+    int k = -1;
+    for (int i = 0; i < (int)(sizeof names / sizeof names[0]); i++)
+        if (!strcmp(n, names[i]))
+            k = i;
+    if (k < 0)
+        return NULL;
+    int fpc = k == 5;
+    struct cexpr *x = e->a[fpc ? 5 : 0];
+    struct cty *t = ct_unqual(x->t);
+    if (!ct_is_float(t))
+        t = ct_basic(CT_DOUBLE);
+    int u = cx_uid();
+    char *v = cx_fmt("__cx_f%d", u);
+    const char *min = t->k == CT_FLOAT ? "0x1p-126f"
+                      : t->k == CT_DOUBLE ? "0x1p-1022" : "0x1p-16382L";
+    int signbyte = t->k == CT_FLOAT ? 3 : t->k == CT_DOUBLE ? 7
+                   : target_get() == TARGET_AARCH64 ? 15 : 9;
+    const char *decl = cdecl(t, v);
+    char *nan = cx_fmt("(%s != %s)", v, v);
+    char *fin = cx_fmt("(%s - %s == %s - %s)", v, v, v, v);
+    char *inf = cx_fmt("(%s == %s && !%s)", v, v, fin);
+    char *nrm = cx_fmt("(%s && (%s < 0 ? -%s : %s) >= %s)", fin, v, v, v,
+                       min);
+    char *sgn = cx_fmt("({ unsigned char __cx_b%d[sizeof %s]; "
+                       "__builtin_memcpy(__cx_b%d, &%s, sizeof %s); "
+                       "__cx_b%d[%d] >> 7; })", u, v, u, v, v, u, signbyte);
+    if (k >= 6 && k <= 11) {
+        /* two operands: compared, without traps */
+        struct cexpr *y = e->a[1];
+        char *w = cx_fmt("__cx_g%d", u);
+        const char *op = k == 6 ? ">" : k == 7 ? ">=" : k == 8 ? "<"
+                         : k == 9 ? "<=" : NULL;
+        char *body = op ? cx_fmt("%s %s %s", v, op, w)
+                     : k == 10 ? cx_fmt("(%s < %s || %s > %s)", v, w, v, w)
+                     : cx_fmt("(%s != %s || %s != %s)", v, v, w, w);
+        return cx_fmt("({ long double %s = %s, %s = %s; (int)(%s); })",
+                      v, ev(x), w, ev(y), body);
+    }
+    const char *r;
+    switch (k) {
+    case 0: r = nan; break;
+    case 1: r = inf; break;
+    case 2: r = fin; break;
+    case 3: r = nrm; break;
+    case 4: r = sgn; break;
+    case 12: r = cx_fmt("(%s ? (%s ? -1 : 1) : 0)", inf, sgn); break;
+    default:
+        r = cx_fmt("(%s ? %s : %s ? %s : %s ? %s : %s == 0 ? %s : %s)",
+                   nan, ev(e->a[0]), inf, ev(e->a[1]), nrm, ev(e->a[2]),
+                   v, ev(e->a[4]), ev(e->a[3]));
+        break;
+    }
+    return cx_fmt("({ %s = %s; (int)%s; })", decl, ev(x), r);
+}
+
 /* The call, its result slot first when it has one (dest: an lvalue). */
 static char *call_text(struct cexpr *e, const char *dest)
 {
@@ -1001,6 +1072,11 @@ static char *ev(struct cexpr *e)
     case E_BUILTIN: {
         if (strcmp(e->name, "__builtin_is_constant_evaluated") == 0)
             return "((_Bool)0)";       /* run time: not constant evaluation */
+        {
+            char *fp = fp_class_text(e);
+            if (fp)
+                return fp;
+        }
         struct sb b = { 0, 0, 0 };
         int va = strncmp(e->name, "__builtin_va_", 13) == 0;
         for (int i = 0; i < e->na; i++)

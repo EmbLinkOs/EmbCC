@@ -387,6 +387,12 @@ static struct ctarg default_arg(struct ctemplate *t, struct ctparam *ps,
                          "constant", t->name);
         a.value = v;
         a.vtype = ct_unqual(e->t);
+        if (p->vtype && !ct_dependent(p->vtype) && ct_is_integer(p->vtype)) {
+            /* converted to the parameter's type, as a given one is */
+            a.vtype = ct_unqual(p->vtype);
+            if (a.vtype->k == CT_BOOL)
+                a.value = v != 0;
+        }
     } else {
         struct qname q = peek_qname();
         cx_pos += q.fin;
@@ -439,6 +445,62 @@ static struct ctarg *fit_args(struct ctemplate *t, struct ctparam *ps,
     if (k < na)
         cx_error(at, "too many template arguments for '%s'", t->name);
     return r;
+}
+
+/* ---- constraints ---- */
+
+int concept_satisfied(struct ctemplate *c, struct ctarg *args, int n,
+                      const struct ctok *at)
+{
+    struct ctarg *a = fit_args(c, c->params, c->nparams, args, n, c->scope,
+                               at);
+    for (struct cinst *in = c->insts; in; in = in->next)
+        if (args_same(in->args, in->nargs, a, c->nparams)) {
+            if (in->failed == 2)
+                cx_error(at, "concept '%s' depends on itself", c->name);
+            return !in->failed;
+        }
+    struct cinst *in = xcalloc(1, sizeof *in);
+    in->args = a;
+    in->nargs = c->nparams;
+    in->failed = 2;                     /* being decided */
+    in->next = c->insts;
+    c->insts = in;
+    struct cscope *s = tparam_scope(c->params, c->nparams, a, c->nparams,
+                                    c->scope);
+    cx_inst_push(cx_fmt("concept '%s'", c->name), at);
+    int v = constraint_satisfied(c->req_start, c->req_end, s);
+    cx_inst_pop();
+    in->failed = !v;
+    return v;
+}
+
+int template_constraints(struct ctparam *ps, int np, int req_start,
+                         int req_end, struct cscope *scope,
+                         const struct ctok *at)
+{
+    for (int i = 0; i < np; i++) {
+        struct ctparam *p = &ps[i];
+        if (!p->tc || !p->name)
+            continue;
+        struct csym *y = lookup_in(scope, p->name);
+        if (!y)
+            continue;
+        struct cscope *saved = cx_scope;
+        cx_scope = scope;
+        int ok = 1;
+        if (y->k == CS_PACK) {
+            for (int k = 0; ok && k < y->npack; k++)
+                ok = type_constraint_holds(p->tc, p->tc_args,
+                                           y->pack[k].type, at);
+        } else if (y->k == CS_TYPEDEF) {
+            ok = type_constraint_holds(p->tc, p->tc_args, y->type, at);
+        }
+        cx_scope = saved;
+        if (!ok)
+            return 0;
+    }
+    return !req_start || constraint_satisfied(req_start, req_end, scope);
 }
 
 /* ---- deduction ---- */
@@ -928,6 +990,35 @@ static int partial_at_least(struct cpartial *a, struct cpartial *b)
     return partial_matches(b, a->pattern, a->npattern, &bound);
 }
 
+/* Are partial specialization p's constraints satisfied, its parameters
+ * bound (13.7.6.2)? */
+static int partial_constraints(struct cpartial *p, struct ctarg *bound,
+                               struct ctemplate *t)
+{
+    int any = p->req_start;
+    for (int i = 0; i < p->nparams; i++)
+        any |= p->params[i].tc != NULL;
+    if (!any)
+        return 1;
+    struct cscope *s = tparam_scope(p->params, p->nparams, bound, p->nparams,
+                                    t->scope);
+    return template_constraints(p->params, p->nparams, p->req_start,
+                                p->req_end, s, cx_cur());
+}
+
+/* Of two partial specializations whose patterns are alike, is a the more
+ * constrained? (Constrained over unconstrained: subsumption as far as
+ * EmbCC decides it.) */
+static int more_constrained(struct cpartial *a, struct cpartial *b)
+{
+    int ca = a->req_start != 0, cb = b->req_start != 0;
+    for (int i = 0; i < a->nparams; i++)
+        ca |= a->params[i].tc != NULL;
+    for (int i = 0; i < b->nparams; i++)
+        cb |= b->params[i].tc != NULL;
+    return ca && !cb;
+}
+
 /* The partial specialization whose pattern the arguments match — of
  * several, the one more specialized than each other (13.7.6.2). */
 static struct cpartial *match_partial(struct ctemplate *t, struct ctarg *a,
@@ -937,7 +1028,8 @@ static struct cpartial *match_partial(struct ctemplate *t, struct ctarg *a,
     struct ctarg *mb[64];
     int n = 0;
     for (struct cpartial *p = t->partials; p && n < 64; p = p->next)
-        if (partial_matches(p, a, t->nparams, &mb[n]))
+        if (partial_matches(p, a, t->nparams, &mb[n]) &&
+            partial_constraints(p, mb[n], t))
             m[n++] = p;
     if (n == 0)
         return NULL;
@@ -945,7 +1037,8 @@ static struct cpartial *match_partial(struct ctemplate *t, struct ctarg *a,
         int best = 1;
         for (int j = 0; best && j < n; j++)
             best = i == j || (partial_at_least(m[i], m[j]) &&
-                              !partial_at_least(m[j], m[i]));
+                              (!partial_at_least(m[j], m[i]) ||
+                               more_constrained(m[i], m[j])));
         if (best) {
             *bound = mb[i];
             return m[i];
@@ -1052,6 +1145,10 @@ struct cfunc *func_instance(struct ctemplate *t, struct ctarg *args,
     cx_sfinae = &jb;
     cx_inst_push(cx_fmt("the declaration of '%s'", t->name), cx_cur());
     struct cfunc *f = func_decl_replay(t, ps);
+    if (!template_constraints(t->params, t->nparams, t->req_start,
+                              t->req_end, ps, cx_cur()))
+        cx_error(cx_cur(), "the constraints of '%s' are not satisfied",
+                 t->name);
     cx_inst_pop();
     cx_sfinae = saved;
     parse_restore(st);
@@ -1147,8 +1244,37 @@ struct cvar *var_instance(struct ctemplate *t, struct ctarg *args, int n,
     in->nargs = t->nparams;
     in->next = t->insts;
     t->insts = in;
-    in->var = var_define_from(t, a,
-                              tparam_scope(t->params, t->nparams, a,
-                                           t->nparams, t->scope));
+    struct ctarg *bound = NULL;
+    struct cpartial *p = t->partials ? match_partial(t, a, &bound) : NULL;
+    cx_inst_push(cx_fmt("variable template '%s'", t->name), at);
+    if (p)
+        in->var = var_define_from(t, p->head_end, a,
+                                  tparam_scope(p->params, p->nparams, bound,
+                                               p->nparams, t->scope));
+    else
+        in->var = var_define_from(t, t->decl_tok, a,
+                                  tparam_scope(t->params, t->nparams, a,
+                                               t->nparams, t->scope));
+    cx_inst_pop();
     return in->var;
+}
+
+void var_explicit_spec(struct ctemplate *t, struct ctarg *args, int n,
+                       struct cvar *v, const struct ctok *at)
+{
+    struct ctarg *a = fit_args(t, t->params, t->nparams, args, n, t->scope,
+                               at);
+    for (struct cinst *in = t->insts; in; in = in->next)
+        if (args_same(in->args, in->nargs, a, t->nparams))
+            cx_error(at, "'%s' is specialized after its instantiation",
+                     t->name);
+    struct cinst *in = xcalloc(1, sizeof *in);
+    in->args = a;
+    in->nargs = t->nparams;
+    in->var = v;
+    in->next = t->insts;
+    t->insts = in;
+    v->targs = a;
+    v->ntargs = t->nparams;
+    v->cname = mangle_var(v, t->scope);
 }

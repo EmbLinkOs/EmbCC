@@ -374,8 +374,41 @@ one-argument functional cast mangled `cv <type> <expr>` as the ABI says).
 C++ errors now end with the instantiations under way ("note: in the
 instantiation of ..."). tests/cxx `traits`.
 
-Next for `<type_traits>`: requires-clauses and requires-expressions (C++20
-mode uses them unconditionally) — concepts' core, from CX7.
+Concepts' core (from CX7), which C++20-mode libstdc++ uses unconditionally
+(src/cxx/concepts.c): concept definitions; requires-clauses after a
+template head and trailing (a class template's member whose clause fails
+in an instance is no candidate, its body never read); requires-expressions
+(simple, type, compound with `noexcept` and `-> C<...>`, nested
+requirements, parameters); type-constraints (`template<C T>`) and
+constrained placeholders (`C auto`). A constraint is kept as tokens and
+decided by replaying them with the arguments bound — each operand of `&&`
+and `||` on its own, a substitution failure making that operand false (so
+`||` works as the standard says); a concept's answer is cached per
+arguments. Partial specializations are chosen by their constraints too,
+the constrained one winning a tie with an unconstrained one (subsumption
+beyond that is not decided). `__cpp_concepts` stays undefined for now,
+so libstdc++ keeps its concept-based library parts (ranges, <concepts>)
+off. tests/cxx `concepts`.
+
+libstdc++'s headers, continued: `<type_traits>`, `<utility>`, `<tuple>`,
+`<new>`, `<limits>`, `<exception>`, `<typeinfo>`, `<initializer_list>`,
+`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cwchar>`, `<cmath>`
+and `<algorithm>` compile with EmbCC. On the way: variable templates'
+explicit and partial specializations; defaults on a class template's
+forward declaration kept by its definition; explicit specializations
+declared before being defined; friend class templates; constructor
+templates were registered as ordinary functions (hiding the
+injected-class-name) — now constructors; using-declarations join
+overload sets (entries standing for the named functions); aliases
+declared with an attribute; function parameters in scope in a trailing
+return type (mangled `fp_`, `fp0_`, ...); a parenthesized dependent
+`X<T>::v && ...` no longer taken for a cast; default template arguments
+converted to their parameter's type; the library builtins
+(`__builtin_memchr`, `__builtin_acosf`, ...) become calls of the C
+functions, and the floating classifications (`__builtin_isnan`,
+`__builtin_signbit`, `__builtin_fpclassify`, ...) C expressions, EmbCC's C
+knowing neither; stddef.h's `max_align_t` for C++. tests/cxx
+`headerforms`.
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their
