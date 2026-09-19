@@ -544,14 +544,15 @@ static void fx_clean(const char *text)
 static char *materialize(struct cty *t, struct cexpr *init)
 {
     t = ct_unqual(t);
-    char *name = cx_fmt("__cx_t%d", ++ntemps);
+    int num = ++ntemps;               /* (einit below may make more) */
+    char *name = cx_fmt("__cx_t%d", num);
     sb_printf(&fx->decls, "%s; ", cdecl(t, name));
     struct sb s = { 0, 0, 0 };
     einit(&s, name, t, init);
     char *d = destroy_text(cx_fmt("&%s", name), t);
     if (d) {
         if (fx->cond || eh_on) {   /* a throw may come before it is made */
-            char *flag = cx_fmt("__cx_f%d", ntemps);
+            char *flag = cx_fmt("__cx_f%d", num);
             sb_printf(&fx->decls, "_Bool %s = 0; ", flag);
             sb_printf(&s, "%s = 1; ", flag);
             fx_clean(cx_fmt("if (%s) %s", flag, d));
@@ -709,7 +710,7 @@ static char *fp_class_text(struct cexpr *e)
     if (!ct_is_float(t))
         t = ct_basic(CT_DOUBLE);
     int u = cx_uid();
-    char *v = cx_fmt("__cx_f%d", u);
+    char *v = cx_fmt("__cx_fc%d", u);
     const char *min = t->k == CT_FLOAT ? "0x1p-126f"
                       : t->k == CT_DOUBLE ? "0x1p-1022" : "0x1p-16382L";
     int signbyte = t->k == CT_FLOAT ? 3 : t->k == CT_DOUBLE ? 7
@@ -726,7 +727,7 @@ static char *fp_class_text(struct cexpr *e)
     if (k >= 6 && k <= 11) {
         /* two operands: compared, without traps */
         struct cexpr *y = e->a[1];
-        char *w = cx_fmt("__cx_g%d", u);
+        char *w = cx_fmt("__cx_fd%d", u);
         const char *op = k == 6 ? ">" : k == 7 ? ">=" : k == 8 ? "<"
                          : k == 9 ? "<=" : NULL;
         char *body = op ? cx_fmt("%s %s %s", v, op, w)

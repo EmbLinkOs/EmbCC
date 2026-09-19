@@ -257,6 +257,8 @@ struct csym {
     struct cfunc *fns;        /* FUNC: the overload set (cfunc.next) */
     struct cscope *ns;        /* NAMESPACE: its scope */
     struct cfield *field;     /* FIELD: a non-static data member */
+    struct cclass *fcls;      /* FIELD brought in by a using-declaration:
+                               * the class declaring it */
     struct cfield **fpath;    /* FIELD of an anonymous union or struct
                                * member: those members, outermost first,
                                * the way to it */
@@ -857,6 +859,8 @@ int template_constraints(struct ctparam *ps, int np, int req_start,
                          const struct ctok *at);
 void skip_template_args(void);           /* at `<`: past the matching `>` */
 int targ_is_dependent(const struct ctarg *a);
+int deduce_func_type(struct ctemplate *t, struct ctarg *expl, int nexpl,
+                     struct cty *A, struct ctarg **outp, int *nout);
 /* template<> ... v<args> = ...: v's instance for args is the variable */
 void var_explicit_spec(struct ctemplate *t, struct ctarg *args, int n,
                        struct cvar *v, const struct ctok *at);

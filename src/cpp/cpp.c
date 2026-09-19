@@ -306,6 +306,11 @@ static void expand_funclike(struct src *s, struct macro *m,
         exp[nargs] = xstrndup("", 0);
         nargs++;
     }
+    if (nargs == 0 && m->nparams == 1) {
+        raw[0] = xstrndup("", 0);    /* M(): one empty argument (C99) */
+        exp[0] = xstrndup("", 0);
+        nargs = 1;
+    }
     if (nargs != m->nparams)
         cerr(s, "wrong number of arguments to macro '%s'", m->name);
 
@@ -1353,6 +1358,7 @@ char *cpp_process(const char *path, const char *src,
          * libstdc++ takes its paths without them */
         static const char *const feats[] = {
             "__GNUG__ 16",
+            "__VERSION__ \"16.2.0 (EmbCC)\"",
             "__GXX_RTTI 1", "__cpp_rtti 199711L",
             "__cpp_aggregate_nsdmi 201304L",
             "__cpp_aggregate_paren_init 201902L",
@@ -1393,10 +1399,12 @@ char *cpp_process(const char *path, const char *src,
         };
         for (size_t i = 0; i < sizeof feats / sizeof feats[0]; i++)
             define_macro(&boot, feats[i]);
-        /* newlib declares vprintf and friends with __VALIST, `char *`
-         * unless the compiler is GNU: C++ gives them the va_list type
-         * libstdc++ passes them (include/stdarg.h) */
-        define_macro(&boot, "__VALIST __builtin_va_list");
+        /* C++ units present as g++ to the headers: libstdc++ is GCC's
+         * own library, built against GCC's view of newlib (va_list,
+         * __func__, attributes); C units keep EmbCC's own identity */
+        define_macro(&boot, "__GNUC__ 16");
+        define_macro(&boot, "__GNUC_MINOR__ 2");
+        define_macro(&boot, "__GNUC_PATCHLEVEL__ 0");
         if (cxx_exceptions) {
             define_macro(&boot, "__EXCEPTIONS 1");
             define_macro(&boot, "__cpp_exceptions 199711L");

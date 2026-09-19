@@ -803,7 +803,16 @@ static int at_least_as_specialized(struct ctemplate *a, struct ctemplate *b,
             A = A->to;
         if (ct_is_ref(P))
             P = P->to;
-        if (!deduce(ct_unqual(P), ct_unqual(A), out, set, np))
+        /* each pair deduced on its own (13.10.3.5/2, /10), exactly: a
+         * type the other template names concretely does not take a's
+         * unique one */
+        memset(out, 0, (size_t)(np > 0 ? np : 1) * sizeof *out);
+        memset(set, 0, (size_t)(np > 0 ? np : 1) * sizeof *set);
+        int saved = deduce_exact;
+        deduce_exact = 1;
+        int ok = deduce(ct_unqual(P), ct_unqual(A), out, set, np);
+        deduce_exact = saved;
+        if (!ok)
             return 0;
         /* T&& does not take the place of T& */
         if (aref == 2 && pref == 1)
@@ -816,6 +825,60 @@ int more_specialized(struct ctemplate *a, struct ctemplate *b, int n)
 {
     return at_least_as_specialized(a, b, n) &&
            !at_least_as_specialized(b, a, n);
+}
+
+/* Template t's arguments deduced from a function type A (its address
+ * taken where a pointer to A is wanted, 13.10.3.3): explicit ones first,
+ * the rest from A's parameters and return type, then defaults. */
+int deduce_func_type(struct ctemplate *t, struct ctarg *expl, int nexpl,
+                     struct cty *A, struct ctarg **outp, int *nout)
+{
+    int np = t->nparams;
+    struct ctarg *out = xcalloc((size_t)(np ? np : 1), sizeof *out);
+    int *set = xcalloc((size_t)(np ? np : 1), sizeof *set);
+    for (int i = 0, k = 0; k < nexpl; i++) {
+        if (i >= np)
+            return 0;
+        if (t->params[i].pack) {
+            out[i].kind = t->params[i].kind;
+            out[i].is_pack = 1;
+            out[i].nelems = nexpl - k;
+            out[i].elems = args_copy(expl + k, nexpl - k);
+            set[i] = 2;
+            k = nexpl;
+            break;
+        }
+        out[i] = expl[k++];
+        set[i] = 3;
+    }
+    if (!deduce(t->pattern->type, A, out, set, np))
+        return 0;
+    for (int i = 0; i < np; i++) {
+        if (set[i])
+            continue;
+        if (t->params[i].pack) {
+            out[i].kind = t->params[i].kind;
+            out[i].is_pack = 1;
+            continue;
+        }
+        if (t->params[i].def_tok < 0)
+            return 0;
+        jmp_buf jb;
+        void *saved = cx_sfinae;
+        struct parse_state *st = parse_save();
+        if (setjmp(jb)) {
+            parse_restore(st);
+            cx_sfinae = saved;
+            return 0;
+        }
+        cx_sfinae = &jb;
+        out[i] = default_arg(t, t->params, np, i, out, t->scope, cx_cur());
+        cx_sfinae = saved;
+        parse_restore(st);
+    }
+    *outp = out;
+    *nout = np;
+    return 1;
 }
 
 int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
@@ -1298,8 +1361,9 @@ void func_ensure_body(struct cfunc *f)
             member_from_outdef(f);
         return;
     }
-    if (f->cls && f->cls->extern_inst)
-        return;                  /* `extern template`: another unit's */
+    /* (`extern template` leaves a class's non-inline members to another
+     * unit; one defined in the class is inline, instantiated here as
+     * g++ does, 13.9.3/10) */
     f->lazy = 0;
     if (++inst_depth > 900)
         cx_error(cx_cur(), "template instantiation depth exceeds 900 (in "

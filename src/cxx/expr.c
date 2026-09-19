@@ -451,6 +451,31 @@ static int is_integral_promotion(struct cty *from, struct cty *to)
     return p->k == to->k && from->k != to->k;
 }
 
+/* Of overload set e (or function e), the function of type ft — a
+ * template's specialization deduced from ft — or NULL (13.4). */
+static struct cfunc *ovl_pick(struct cexpr *e, struct cty *ft)
+{
+    for (struct cfunc *f = e->fn; f; f = e->k == E_OVL ? f->next : NULL) {
+        struct cfunc *g = f->alias_of ? f->alias_of : f;
+        if (g->cls && !g->is_static)
+            continue;
+        if (g->tmpl) {
+            struct ctarg *args;
+            int n;
+            if (!deduce_func_type(g->tmpl, e->targs, e->ntargs, ft, &args,
+                                  &n))
+                continue;
+            struct cfunc *inst = func_instance(g->tmpl, args, n);
+            if (inst && ct_same_unqual(inst->type, ft))
+                return inst;
+            continue;
+        }
+        if (ct_same_unqual(g->type, ft))
+            return g;
+    }
+    return NULL;
+}
+
 /* The standard conversion from e to the non-reference, non-class t. */
 static struct ics std_conv(struct cexpr *e, struct cty *to)
 {
@@ -478,10 +503,8 @@ static struct ics std_conv(struct cexpr *e, struct cty *to)
         struct cty *ft = tu->k == CT_PTR ? tu->to : NULL;
         if (!ft || ft->k != CT_FUNC)
             return r;
-        struct cfunc *set = e->fn;
-        for (struct cfunc *f = set; f; f = e->k == E_OVL ? f->next : NULL)
-            if ((!f->cls || f->is_static) && ct_same_unqual(f->type, ft))
-                r.rank = R_EXACT;
+        if (ovl_pick(e, ft))
+            r.rank = R_EXACT;
         return r;
     }
     if (e->t->k == CT_CLASS)
@@ -752,6 +775,8 @@ struct cand {
     struct ics *ics;
     int n;
     int has_obj;
+    int nparams;              /* the function's parameters the arguments
+                               * match (partial ordering compares them) */
 };
 
 static int cand_better(const struct cand *a, const struct cand *b)
@@ -774,7 +799,7 @@ static int cand_better(const struct cand *a, const struct cand *b)
     /* two templates' specializations: the more specialized template */
     if (a->f->spec_of && b->f->spec_of && a->f->spec_of != b->f->spec_of &&
         more_specialized(a->f->spec_of, b->f->spec_of,
-                         a->has_obj && b->has_obj ? a->n - 1 : a->n - 1))
+                         a->nparams < b->nparams ? a->nparams : b->nparams))
         return 1;
     return 0;
 }
@@ -893,6 +918,7 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
         c->f = f;
         c->n = opform ? na : na + 1;
         c->has_obj = opform || member;
+        c->nparams = nx;
         c->ics = xcalloc((size_t)(c->n ? c->n : 1), sizeof *c->ics);
         int ok = 1, base = opform ? 0 : 1;
         if (member) {
@@ -1225,18 +1251,16 @@ struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx)
     }
     if (e->k == E_OVL || (e->k == E_FUNC && t->k == CT_PTR)) {
         struct cty *ft = t->k == CT_PTR ? t->to : NULL;
-        if (ft && ft->k == CT_FUNC)
-            for (struct cfunc *f = e->fn; f;
-                 f = e->k == E_OVL ? f->next : NULL)
-                if ((!f->cls || f->is_static) &&
-                    ct_same_unqual(f->type, ft)) {
-                    struct cexpr *r = ex_new(E_FUNC, ct_ptr(f->type),
-                                             VC_PRVALUE);
-                    r->fn = f;
-                    r->line = e->line;
-                    r->file = e->file;
-                    return r;
-                }
+        struct cfunc *f = ft && ft->k == CT_FUNC ? ovl_pick(e, ft) : NULL;
+        if (f) {
+            if (!cx_unevaluated)
+                func_ensure_body(f);
+            struct cexpr *r = ex_new(E_FUNC, ct_ptr(f->type), VC_PRVALUE);
+            r->fn = f;
+            r->line = e->line;
+            r->file = e->file;
+            return r;
+        }
         ex_error(e, "no overload of '%s' converts to '%s' in %s",
                  e->fn->name, ct_name(t), ctx);
     }
@@ -3007,6 +3031,12 @@ static struct cexpr *parse_atomic(const char *name, const struct ctok *at)
     struct cty *T = pt && pt->k == CT_PTR ? ct_unqual(pt->to)
                                           : ct_basic(CT_INT);
     const char *n = name[2] == 'a' ? name + 9 : name + 7;
+    long sz;
+    if ((!strcmp(n, "always_lock_free") || !strcmp(n, "is_lock_free")) &&
+        na >= 1 && expr_const(args[0], &sz))
+        /* both targets: 1, 2, 4 and 8 bytes are lock-free (as g++ says) */
+        return ex_int(sz == 1 || sz == 2 || sz == 4 || sz == 8,
+                      ct_basic(CT_BOOL));
     struct cty *rt;
     if (!strcmp(n, "store_n") || !strcmp(n, "load") || !strcmp(n, "store") ||
         !strcmp(n, "exchange") || !strcmp(n, "clear") ||
@@ -3199,6 +3229,17 @@ static void explicit_targs(struct cexpr *e)
     struct ctemplate *t = e->fn ? set_template(e->fn) : NULL;
     if (!t || cx_kind() != TOK_LT)
         return;
+    /* several templates whose parameters differ in kind (f<true> beside
+     * f<T>): the arguments read for none of them in particular, each
+     * candidate checking them */
+    for (struct cfunc *f = e->fn; f; f = f->next) {
+        struct ctemplate *u = f->alias_of ? f->alias_of->tmpl : f->tmpl;
+        if (u && u != t && (u->nparams < 1 || t->nparams < 1 ||
+                            u->params[0].kind != t->params[0].kind)) {
+            t = NULL;
+            break;
+        }
+    }
     e->ntargs = parse_template_args(t, &e->targs);
     e->has_targs = 1;
 }
@@ -3262,7 +3303,7 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         return e;
     }
     case CS_FIELD: {
-        struct cclass *c = y->scope->cls;
+        struct cclass *c = y->fcls ? y->fcls : y->scope->cls;
         if (cx_curfn && cx_curfn->this_var &&
             class_derives(cx_curfn->cls, c, NULL))
             return field_via(to_base(ex_deref(ex_this()), c, 0), y);
@@ -3758,6 +3799,26 @@ static struct cexpr *parse_primary(void)
                 (strncmp(name, "__atomic_", 9) == 0 ||
                  strncmp(name, "__sync_", 7) == 0))
                 return parse_atomic(name, at);
+            if (!q.scope && (strcmp(name, "__func__") == 0 ||
+                             strcmp(name, "__FUNCTION__") == 0 ||
+                             strcmp(name, "__PRETTY_FUNCTION__") == 0)) {
+                /* the function's name (__PRETTY_FUNCTION__ qualified by
+                 * its class), a string */
+                const char *fn = cx_curfn ? cx_curfn->name : "";
+                if (name[2] == 'P' && cx_curfn && cx_curfn->cls &&
+                    cx_curfn->cls->name)
+                    fn = cx_fmt("%s::%s", cx_curfn->cls->name, fn);
+                size_t len = strlen(fn);
+                e = ex_new(E_STR, ct_array(ct_qual(ct_basic(CT_CHAR),
+                                                   CQ_CONST),
+                                           (long)len + 1), VC_LVALUE);
+                e->text = xstrndup(fn, len);
+                e->slen = (long)len + 1;
+                e->swidth = 1;
+                e->line = at->t.line;
+                e->file = at->file;
+                return e;
+            }
             if (!q.scope && strcmp(name, "__null") == 0) {
                 e = ex_int(0, ct_basic(CT_LONG));
                 e->is_null_const = 1;
@@ -4044,7 +4105,8 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
                  name, ct_name(obj->t));
     switch (y->k) {
     case CS_FIELD:
-        return field_via(to_base(obj, y->scope->cls, 0), y);
+        return field_via(to_base(obj, y->fcls ? y->fcls : y->scope->cls, 0),
+                         y);
     case CS_VAR: {
         if (y->var->is_member_static && !y->var->defined)
             member_var_from_outdef(y->var);
@@ -4290,8 +4352,9 @@ static int cast_type_at(void)
     if (!setjmp(jb)) {
         cx_sfinae = &jb;
         cx_advance();
-        parse_type_id();
-        ok = cx_kind() == TOK_RPAREN;
+        struct cty *t = parse_type_id();
+        /* (E()) is a value, never a cast to a function type */
+        ok = cx_kind() == TOK_RPAREN && t->k != CT_FUNC;
         cx_sfinae = saved;
         parse_restore(st);
     } else {

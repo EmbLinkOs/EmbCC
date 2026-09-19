@@ -1009,7 +1009,8 @@ struct cfunc *class_dtor(struct cclass *c)
         define_defaulted(d);
     if (d->is_deleted)
         cx_error(cx_cur(), "the destructor of '%s' is deleted", c->name);
-    func_ensure_body(d);
+    if (!cx_unevaluated)
+        func_ensure_body(d);
     d->used = 1;
     return d;
 }
@@ -1044,7 +1045,8 @@ static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
         define_implicit(f);
     else if (f->is_defaulted)
         define_defaulted(f);
-    func_ensure_body(f);
+    if (!cx_unevaluated)          /* (an unevaluated operand uses no body) */
+        func_ensure_body(f);
     struct cexpr **conv;
     int n = convert_args(f, args, na, at, &conv);
     e->fn = f;

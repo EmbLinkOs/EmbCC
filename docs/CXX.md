@@ -443,9 +443,32 @@ libstdc++ declares `std::construct_at` only with it); in C++ units
 `va_list` is `__builtin_va_list` and newlib's `__VALIST` follows, so
 `vsnprintf` matches libstdc++'s calls. tests/cxx `headerforms2`.
 
+A first program runs against the library: tests/libstdcxx/hello.cc
+(`std::vector`, `std::string`, `std::sort`, `std::cout`, a sorted
+`vector<string>`) is compiled by EmbCC with libstdc++'s headers, linked
+with g++'s libstdc++.a, and prints what g++'s build prints, on both
+targets (tests/golden/cxx-libstdcxx.sh; skipped where the cross libstdc++
+is not installed). That needs EmbCC's names to be g++'s: the Itanium
+standard abbreviations (`Sa`, `Sb`, `Ss`, `Si`, `So`, `Sd`, also for the
+scopes of members of those classes); and C++ units now present
+themselves as g++ 16 (`__GNUC__`, `__GNUC_MINOR__`), newlib's headers
+then taking their GNU branches (`__func__` was NULL without it; C units
+unchanged). `<memory>` and `<optional>` compile too. On the way: partial
+ordering of function templates deduces each parameter pair on its own
+and exactly (and counts an operator's implicit object parameter); `&f`
+of an overloaded function template deduced from the target type; inline
+members of an `extern template` class instantiated when used; default
+arguments merged across redeclarations; default arguments in patterns
+kept as tokens till used (`_Alloc()` read too early); `(throw (E()))` is
+no cast; `__func__`, `__FUNCTION__`, `__PRETTY_FUNCTION__`; the lock-free
+queries of `<atomic>` folded; an instantiated body leaves an unevaluated
+operand's context; the preprocessor takes `M()` as one empty argument of
+a one-parameter macro.
+
 Next: a program using std::map (a `tuple` constructor overload is
-ambiguous), then running what EmbCC compiles against g++'s libstdc++.a;
-out-of-class members of partial specializations are still skipped.
+ambiguous), `<functional>`, `<chrono>`, `<variant>`, `<fstream>`,
+`<iomanip>`, `<thread>`; out-of-class members of partial specializations
+are still skipped.
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their

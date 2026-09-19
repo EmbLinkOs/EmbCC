@@ -1079,8 +1079,9 @@ static int nested_follows(int mode)
         cx_advance();
         struct qname q = peek_qname();
         cx_pos = save;
-        if (!q.bad && q.scope && q.fin > 0 && cx_kind_at(1 + q.fin) == TOK_STAR)
-            return 1;
+        if (!q.bad && (q.scope || (q.dep && cx_pattern)) && q.fin > 0 &&
+            cx_kind_at(1 + q.fin) == TOK_STAR)
+            return 1;                  /* (a dependent C: C::* in a pattern) */
     }
     if (k == TOK_LPAREN)
         return 1;
@@ -1389,6 +1390,33 @@ struct cty *parse_param_list(void)
     return parse_params();
 }
 
+/* Past a default argument, unread: to the `,` or `)` that ends it (a
+ * template-id's `<` ... `>` skipped as a unit). */
+static void skip_default_arg(void)
+{
+    for (;;) {
+        enum tok_kind k = cx_kind();
+        if (k == TOK_COMMA || k == TOK_RPAREN || k == TOK_EOF ||
+            k == TOK_SEMI)
+            return;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
+            cx_skip_balanced();
+            continue;
+        }
+        if (k == TOK_IDENT && cx_kind_at(1) == TOK_LT) {
+            struct csym *y = lookup(cx_scope, cx_cur()->t.text);
+            if (y && (y->k == CS_TEMPLATE ||
+                      (y->k == CS_FUNC && y->fns && y->fns->tmpl) ||
+                      as_template(y))) {
+                cx_advance();
+                skip_template_args();
+                continue;
+            }
+        }
+        cx_advance();
+    }
+}
+
 static struct cty *parse_params(void)
 {
     cx_expect(TOK_LPAREN, "'('");
@@ -1457,8 +1485,16 @@ static struct cty *parse_params(void)
                 }
             }
             if (ex < 0 && cx_accept(TOK_ASSIGN)) {
-                defs[np - 1] = cx_kind() == TOK_LBRACE ? parse_braced_list()
-                                                       : expr_parse_assign();
+                if (cx_pattern) {
+                    /* a pattern's default: only that there is one (an
+                     * instance reads it with its arguments) */
+                    skip_default_arg();
+                    defs[np - 1] = ex_int(0, ct_basic(CT_INT));
+                } else {
+                    defs[np - 1] = cx_kind() == TOK_LBRACE
+                                   ? parse_braced_list()
+                                   : expr_parse_assign();
+                }
                 anydef = 1;
             }
             if (cx_accept(TOK_COMMA))
@@ -3114,6 +3150,8 @@ static void parse_using(void)
     y->hnext = hn;
     y->next = nx;
     y->scope = sc;
+    if (src->k == CS_FIELD && !y->fcls)    /* using Base::m; */
+        y->fcls = src->scope->cls;
     /* a class brought in also keeps its tag */
     if (src->k != CS_CLASS && src->k != CS_ENUM) {
         struct csym *tag = scope_find_tag(q.scope, name);
@@ -5730,6 +5768,16 @@ void parse_template_decl(struct cclass *cls, int access)
             t->member_of = cls;
         }
         t->key = k;
+        if (y && t->params != ps) {
+            /* a redeclaration may add defaults (template<class C, class
+             * T = traits<C>> class X; after one without) */
+            for (int i = 0; i < np && i < t->nparams; i++)
+                if (t->params[i].def_tok < 0 && ps[i].def_tok >= 0) {
+                    t->params[i].def_tok = ps[i].def_tok;
+                    if (!t->params[i].name)
+                        t->params[i].name = ps[i].name;
+                }
+        }
         if (req_s) {
             t->req_start = req_s;
             t->req_end = req_e;
@@ -6112,6 +6160,7 @@ void class_define_from(struct cclass *c, int pos, enum tok_kind key,
                        struct cscope *ps)
 {
     struct parse_state *st = parse_save();
+    cx_unevaluated = 0;
     cx_scope = ps;
     cx_pos = pos;
     cx_half_gt = 0;
@@ -6206,6 +6255,7 @@ struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
 void func_define_from(struct cfunc *f)
 {
     struct parse_state *st = parse_save();
+    cx_unevaluated = 0;               /* a body is evaluated */
     cx_half_gt = 0;
     cx_pattern = 0;
     cx_in_targs = 0;
@@ -6235,8 +6285,8 @@ int member_from_outdef(struct cfunc *f)
             up = inst->scope->parent->cls;
         inst = up;
     }
-    if (!inst || inst->extern_inst)
-        return 0;
+    if (!inst || (inst->extern_inst && !f->is_inline && !f->is_constexpr))
+        return 0;         /* extern template: another unit's (not inline) */
     struct ctemplate *t = inst->tmpl;
     const char *want = f->is_conv ? "operator" : f->name;
     if (f->name && strncmp(f->name, "operator", 8) == 0)
@@ -6326,6 +6376,7 @@ struct cvar *var_define_from(struct ctemplate *t, int pos, struct ctarg *args,
                              struct cscope *ps)
 {
     struct parse_state *st = parse_save();
+    cx_unevaluated = 0;
     cx_scope = ps;
     cx_pos = pos;
     cx_half_gt = 0;

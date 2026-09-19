@@ -160,6 +160,8 @@ struct step {
     const char *name;         /* a source name, or NULL: arguments */
     struct ctarg *args;
     int nargs;
+    const char *abbr;         /* a standard abbreviation written instead
+                               * (Sa, So, ...): no substitution candidate */
 };
 
 static int add_step(struct step *st, int n, const char *prev,
@@ -171,15 +173,83 @@ static int add_step(struct step *st, int n, const char *prev,
     st[n].name = name;
     st[n].args = NULL;
     st[n].nargs = 0;
+    st[n].abbr = NULL;
     n++;
     if (is_template) {
         st[n].key = cx_fmt("%sI%sE", k, targs_key(args, nargs));
         st[n].name = NULL;
         st[n].args = args;
         st[n].nargs = nargs;
+        st[n].abbr = NULL;
         n++;
     }
     return n;
+}
+
+/* Is class argument a std::X<char, ...> as the abbreviations mean it? */
+static int std_class_is(struct ctarg *a, const char *name)
+{
+    if (a->kind != TP_TYPE || a->type->k != CT_CLASS || a->type->q)
+        return 0;
+    struct cclass *c = a->type->cls;
+    if (!c->name || strcmp(c->name, name) != 0 || !c->owner ||
+        !is_std(c->owner) || c->ntargs != 1 || c->targs[0].kind != TP_TYPE)
+        return 0;
+    struct cty *t = c->targs[0].type;
+    return t->k == CT_CHAR && !t->q;
+}
+
+static int is_char_arg(struct ctarg *a)
+{
+    return a->kind == TP_TYPE && a->type->k == CT_CHAR && !a->type->q;
+}
+
+/* The Itanium ABI's standard abbreviations (5.1.8): a class of ::std named
+ * `std::allocator<...>` is SaI...E, `std::basic_string<...>` SbI...E,
+ * basic_string<char, char_traits<char>, allocator<char>> Ss, and
+ * basic_istream / basic_ostream / basic_iostream<char, char_traits<char>>
+ * Si / So / Sd. 0 when none applies; else the steps written (from n). */
+static int std_abbrev(struct cclass *c, struct step *st, int n)
+{
+    if (!c->name || !c->tmpl)
+        return 0;
+    const char *whole = NULL, *prefix = NULL;
+    if (!strcmp(c->name, "allocator"))
+        prefix = "Sa";
+    else if (!strcmp(c->name, "basic_string")) {
+        prefix = "Sb";
+        if (c->ntargs == 3 && is_char_arg(&c->targs[0]) &&
+            std_class_is(&c->targs[1], "char_traits") &&
+            std_class_is(&c->targs[2], "allocator"))
+            whole = "Ss";
+    } else if (c->ntargs == 2 && is_char_arg(&c->targs[0]) &&
+               std_class_is(&c->targs[1], "char_traits")) {
+        whole = !strcmp(c->name, "basic_istream") ? "Si"
+                : !strcmp(c->name, "basic_ostream") ? "So"
+                : !strcmp(c->name, "basic_iostream") ? "Sd" : NULL;
+    }
+    if (whole) {
+        st[n].key = whole;
+        st[n].name = whole;
+        st[n].args = NULL;
+        st[n].nargs = 0;
+        st[n].abbr = whole;
+        return n + 1;
+    }
+    if (!prefix)
+        return 0;
+    st[n].key = prefix;
+    st[n].name = prefix;
+    st[n].args = NULL;
+    st[n].nargs = 0;
+    st[n].abbr = prefix;
+    n++;
+    st[n].key = cx_fmt("%sI%sE", prefix, targs_key(c->targs, c->ntargs));
+    st[n].name = NULL;
+    st[n].args = c->targs;
+    st[n].nargs = c->ntargs;
+    st[n].abbr = NULL;
+    return n + 1;
 }
 
 /* The steps naming scope s (namespaces and classes, outermost first); *std
@@ -197,6 +267,15 @@ static int scope_steps(struct cscope *s, struct step *st, int *std)
     for (; i < n && k < 120; i++) {
         struct cscope *c = chain[i];
         struct cclass *cls = c->k == SC_CLASS ? c->cls : NULL;
+        if (cls && *std && k == 0) {
+            int a = std_abbrev(cls, st, 0);
+            if (a) {                  /* std::basic_ostream<char>::... */
+                k = a;
+                *std = 0;
+                prev = st[k - 1].key;
+                continue;
+            }
+        }
         k = add_step(st, k, prev, scope_ident(c),
                      cls ? cls->targs : NULL, cls ? cls->ntargs : 0,
                      cls && cls->tmpl);
@@ -212,6 +291,8 @@ static void put_steps(struct mbuf *m, struct step *st, int n, int nocand)
 {
     int from = 0;
     for (int j = n - 1 - nocand; j >= 0; j--) {
+        if (st[j].abbr)
+            continue;
         int i = sub_find(m, st[j].key);
         if (i >= 0) {
             put_sub(m, i);
@@ -220,6 +301,10 @@ static void put_steps(struct mbuf *m, struct step *st, int n, int nocand)
         }
     }
     for (int j = from; j < n; j++) {
+        if (st[j].abbr) {
+            put(m, st[j].abbr);       /* (no candidate) */
+            continue;
+        }
         if (st[j].name)
             put_source(m, st[j].name);
         else
@@ -238,7 +323,7 @@ static void put_name(struct mbuf *m, struct step *st, int n, int std,
     while (last_name > 0 && !st[last_name].name)
         last_name--;
     int nested = last_name > 0;             /* more than one component */
-    if (!nocand) {
+    if (!nocand && !st[n - 1].abbr) {
         int i = sub_find(m, st[n - 1].key);
         if (i >= 0) {
             put_sub(m, i);
@@ -261,6 +346,13 @@ static void put_name(struct mbuf *m, struct step *st, int n, int std,
 static int class_steps(struct cclass *c, struct step *st, int *std)
 {
     int n = scope_steps(c->owner, st, std);
+    if (*std && n == 0) {
+        int k = std_abbrev(c, st, 0);
+        if (k) {
+            *std = 0;                   /* (the abbreviation says std) */
+            return k;
+        }
+    }
     const char *prev = n ? st[n - 1].key : *std ? "St" : "";
     return add_step(st, n, prev, c->name ? c->name : "._anon", c->targs,
                     c->ntargs, c->tmpl != NULL);
@@ -853,8 +945,11 @@ const char *mangle_func(struct cfunc *f)
     /* writing: the same as put_name, but the name step is raw text and
      * only a template's name (not a plain function's) is a candidate */
     int from = 0;
+    st[name_step].abbr = NULL;
+    if (tmpl)
+        st[n - 1].abbr = NULL;
     for (int j2 = n - 1 - (tmpl ? 1 : 1); j2 >= 0; j2--) {
-        if (j2 == name_step && !tmpl)
+        if ((j2 == name_step && !tmpl) || st[j2].abbr)
             continue;
         int i2 = sub_find(&m, st[j2].key);
         if (i2 >= 0) {
@@ -876,7 +971,10 @@ const char *mangle_func(struct cfunc *f)
     for (int j2 = from; j2 < n; j2++) {
         if (j2 == name_step)
             put(&m, u.p);
-        else if (st[j2].name)
+        else if (st[j2].abbr) {
+            put(&m, st[j2].abbr);        /* Sa, So...: no candidate */
+            continue;
+        } else if (st[j2].name)
             put_source(&m, st[j2].name);
         else
             put_targs(&m, st[j2].args, st[j2].nargs);
