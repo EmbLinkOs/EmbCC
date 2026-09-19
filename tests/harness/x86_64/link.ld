@@ -16,6 +16,15 @@ SECTIONS
         *(.text .text.*)
     }
     .rodata : { *(.rodata .rodata.*) }
+    /* C++ exceptions: the unwind tables, which ../crt.c registers with
+     * libgcc's unwinder (a bare-metal image has no dl_iterate_phdr), ended
+     * by the zero word the unwinder stops at; and the LSDAs */
+    .eh_frame : {
+        __eh_frame_start = .;
+        KEEP(*(.eh_frame))
+        LONG(0)
+    }
+    .gcc_except_table : { *(.gcc_except_table .gcc_except_table.*) }
     /* static constructors (C++ globals), run by ../crt.c before main.
      * .init_array runs forward; .ctors — what x86_64-elf gcc still emits —
      * runs BACKWARD, so it is laid out as GNU ld does: plain entries, then
@@ -51,5 +60,5 @@ SECTIONS
     . = ALIGN(16);
     __stack_top = .;
 
-    /DISCARD/ : { *(.eh_frame) *(.note.*) *(.comment) }
+    /DISCARD/ : { *(.note.*) *(.comment) }
 }

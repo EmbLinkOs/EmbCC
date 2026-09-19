@@ -14,8 +14,17 @@ void *__dso_handle = &__dso_handle;
 int main(int argc, char **argv);
 void exit(int code) __attribute__((noreturn));
 
+/* The unwind tables, for C++ exceptions: libgcc's unwinder finds a
+ * frame's FDE among the objects registered with it. Weak, so an image
+ * without the unwinder (no C++) does not pull it in. */
+extern char __eh_frame_start[];
+void __register_frame_info(const void *, void *) __attribute__((weak));
+static long eh_object[16];            /* libgcc's struct object, and room */
+
 void __harness_main(void)
 {
+    if (__register_frame_info)
+        __register_frame_info(__eh_frame_start, eh_object);
     /* .ctors first (backward): x86 g++ code, libstdc++'s stream set-up
      * among it, which constructors in .init_array may already use */
     for (initfn *f = __ctors_end; f > __ctors_start; )
