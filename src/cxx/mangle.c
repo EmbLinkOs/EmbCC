@@ -472,6 +472,7 @@ static const char *type_key(struct cty *t)
         return b;
     switch (t->k) {
     case CT_PTR: return cx_fmt("P%s", type_key(t->to));
+    case CT_COMPLEX: return cx_fmt("C%s", type_key(t->to));
     case CT_LREF: return cx_fmt("R%s", type_key(t->to));
     case CT_RREF: return cx_fmt("O%s", type_key(t->to));
     case CT_ARRAY:
@@ -549,7 +550,7 @@ static void mangle_type(struct mbuf *m, struct cty *t)
     }
     switch (t->k) {
     case CT_PTR: case CT_LREF: case CT_RREF: case CT_ARRAY: case CT_FUNC:
-    case CT_MPTR: {
+    case CT_MPTR: case CT_COMPLEX: {
         const char *key = type_key(t);
         int i = sub_find(m, key);
         if (i >= 0) {
@@ -559,6 +560,7 @@ static void mangle_type(struct mbuf *m, struct cty *t)
         /* written out: its parts are numbered first, then the whole */
         switch (t->k) {
         case CT_PTR: put(m, "P"); mangle_type(m, t->to); break;
+        case CT_COMPLEX: put(m, "C"); mangle_type(m, t->to); break;
         case CT_LREF: put(m, "R"); mangle_type(m, t->to); break;
         case CT_RREF: put(m, "O"); mangle_type(m, t->to); break;
         case CT_ARRAY: {

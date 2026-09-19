@@ -211,6 +211,9 @@ static char *cdecl(struct cty *t, const char *inner)
     case CT_ARRAY:
         return cdecl(t->to, t->n >= 0 ? cx_fmt("%s[%ld]", inner, t->n)
                                       : cx_fmt("%s[]", inner));
+    case CT_COMPLEX:
+        return cx_fmt("%s%s _Complex%s%s", vol, basic_c(t->to->k), sp,
+                      inner);
     case CT_FUNC: {
         /* the ABI's C: a class not trivially copyable is passed as a
          * pointer, and returned through the indirect-result pointer */
@@ -1113,6 +1116,14 @@ static char *ev(struct cexpr *e)
         }
         return elv(e);
     case E_BUILTIN: {
+        if (strcmp(e->name, "__cx_complex") == 0) {
+            /* a complex from its two parts */
+            int u = cx_uid();
+            return cx_fmt("({ %s; __real__ __cx_z%d = %s; __imag__ "
+                          "__cx_z%d = %s; __cx_z%d; })",
+                          cdecl(e->t, cx_fmt("__cx_z%d", u)), u,
+                          ev(e->a[0]), u, ev(e->a[1]), u);
+        }
         if (strcmp(e->name, "__builtin_is_constant_evaluated") == 0)
             return "((_Bool)0)";       /* run time: not constant evaluation */
         {
@@ -1154,6 +1165,9 @@ static char *ev(struct cexpr *e)
         return cx_fmt("(%s %s %s)", ev(e->a[0]), binop_text(e->op),
                       ev(e->a[1]));
     }
+    case E_CPART:
+        return cx_fmt("(%s %s)", e->ival ? "__imag__" : "__real__",
+                      e->a[0]->vc == VC_LVALUE ? elv(e->a[0]) : ev(e->a[0]));
     case E_CMP3: {
         /* each operand once; the category object's one byte (_M_value:
          * less -1, equivalent 0, greater 1, unordered -128) */
@@ -1251,6 +1265,9 @@ static char *ev(struct cexpr *e)
 static char *elv(struct cexpr *e)
 {
     switch (e->k) {
+    case E_CPART:                /* __real__ z = x */
+        return cx_fmt("(%s %s)", e->ival ? "__imag__" : "__real__",
+                      elv(e->a[0]));
     case E_EXCOBJ:               /* the caught object itself, in a handler */
         return cx_fmt("(*(%s)__cx_c)", ctype(ct_ptr(e->t)));
     case E_VAR:

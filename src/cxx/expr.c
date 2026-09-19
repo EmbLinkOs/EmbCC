@@ -514,8 +514,15 @@ static struct ics std_conv(struct cexpr *e, struct cty *to)
         r.rank = R_EXACT;
         return r;
     }
+    if (tu->k == CT_COMPLEX) {          /* a real or another complex */
+        if (from->k == CT_COMPLEX ||
+            (ct_is_arith(from) && !(from->k == CT_ENUM && from->en->scoped)))
+            r.rank = R_CONV;
+        return r;
+    }
     if (tu->k == CT_BOOL) {
-        if (ct_is_arith(from) && !(from->k == CT_ENUM && from->en->scoped)) {
+        if ((ct_is_arith(from) && !(from->k == CT_ENUM && from->en->scoped)) ||
+            from->k == CT_COMPLEX) {
             r.rank = R_CONV;
         } else if (from->k == CT_PTR || from->k == CT_NULLPTR ||
                    from->k == CT_MPTR) {
@@ -1987,6 +1994,16 @@ struct cexpr *init_object(struct cty *t, enum init_form form,
         struct cexpr *l = args[0];
         if (l->na == 0)
             return zero_of(t);
+        if (t->k == CT_COMPLEX && l->na == 2) {
+            /* { re, im } (GNU): a complex of its parts */
+            struct cexpr *e = ex_new(E_BUILTIN, ct_unqual(t), VC_PRVALUE);
+            e->name = "__cx_complex";
+            e->a = xmalloc(2 * sizeof *e->a);
+            e->a[0] = convert(l->a[0], t->to, "a complex's part");
+            e->a[1] = convert(l->a[1], t->to, "a complex's part");
+            e->na = 2;
+            return e;
+        }
         if (l->na != 1)
             ex_error(l, "too many initializers for '%s'", ct_name(t));
         struct cexpr *a = l->a[0];
@@ -2390,6 +2407,55 @@ static struct cexpr *rewritten_cmp(int op, struct cexpr *l, struct cexpr *r)
     return res;
 }
 
+/* GNU complex arithmetic: + - * / and == != on complex operands (a real
+ * one converted), in the wider element type — as C computes them */
+static struct cexpr *complex_binary(int op, struct cexpr *l, struct cexpr *r)
+{
+    l = rvalue(l);
+    r = rvalue(r);
+    struct cty *le = l->t->k == CT_COMPLEX ? l->t->to : l->t;
+    struct cty *re = r->t->k == CT_COMPLEX ? r->t->to : r->t;
+    if (!ct_is_arith(le) || !ct_is_arith(re))
+        ex_error(l, "invalid operands '%s' and '%s' to a binary operator",
+                 ct_name(l->t), ct_name(r->t));
+    struct cty *el = ct_arith_common(ct_unqual(le), ct_unqual(re));
+    if (!ct_is_float(el))
+        el = ct_basic(CT_DOUBLE);
+    struct cty *ct = ct_complex(el);
+    if (!ct_same_unqual(l->t, ct))
+        l = ex_cast(l, ct);
+    if (!ct_same_unqual(r->t, ct))
+        r = ex_cast(r, ct);
+    struct cexpr *e = binop(op, l, r);
+    switch (op) {
+    case TOK_PLUS: case TOK_MINUS: case TOK_STAR: case TOK_SLASH:
+        e->t = ct;
+        return e;
+    case TOK_EQEQ: case TOK_NEQ:
+        e->t = ct_basic(CT_BOOL);
+        return e;
+    default:
+        ex_error(l, "invalid operator on complex operands");
+        return NULL;
+    }
+}
+
+/* __real__ e, __imag__ e (imag 1): a complex's part — of a real e, e
+ * itself and 0 (GNU) */
+static struct cexpr *complex_part(struct cexpr *e, int imag)
+{
+    if (!e->t || e->t->k != CT_COMPLEX) {
+        e = rvalue(e);
+        if (!ct_is_arith(e->t))
+            ex_error(e, "__real__/__imag__ of a '%s'", ct_name(e->t));
+        return imag ? ex_int(0, e->t) : e;
+    }
+    struct cexpr *p = ex1(E_CPART, ct_qual(e->t->to, e->t->q),
+                          e->vc == VC_LVALUE ? VC_LVALUE : VC_PRVALUE, e);
+    p->ival = imag;
+    return p;
+}
+
 static struct cexpr *binary(int op, struct cexpr *l, struct cexpr *r)
 {
     if (op == TOK_DOTSTAR || op == TOK_ARROWSTAR)
@@ -2426,6 +2492,8 @@ static struct cexpr *binary(int op, struct cexpr *l, struct cexpr *r)
     }
     if (op == TOK_SPACESHIP)
         return three_way(l, r);
+    if ((l->t && l->t->k == CT_COMPLEX) || (r->t && r->t->k == CT_COMPLEX))
+        return complex_binary(op, l, r);
     l = rvalue(l);
     r = rvalue(r);
     struct cty *lt = l->t, *rt = r->t;
@@ -2626,6 +2694,11 @@ static struct cexpr *unary(int op, struct cexpr *e)
     e = rvalue(e);
     if (op == TOK_PLUS && e->t->k == CT_PTR)
         return e;
+    if (e->t->k == CT_COMPLEX && (op == TOK_PLUS || op == TOK_MINUS)) {
+        struct cexpr *r = ex1(E_UNARY, ct_unqual(e->t), VC_PRVALUE, e);
+        r->op = op;
+        return r;
+    }
     if (!ct_is_arith(e->t) || (e->t->k == CT_ENUM && e->t->en->scoped) ||
         (op == TOK_TILDE && !ct_is_integer(e->t)))
         ex_error(e, "invalid operand '%s' to a unary operator",
@@ -3306,6 +3379,9 @@ static struct cty *sig_type(char c)
     case 'F': return ct_ptr(ct_basic(CT_FLOAT));
     case 'E': return ct_ptr(ct_basic(CT_LDOUBLE));
     case 'V': return ct_basic(CT_VALIST);
+    case 'q': return ct_complex(ct_basic(CT_FLOAT));
+    case 'Q': return ct_complex(ct_basic(CT_DOUBLE));
+    case 'R': return ct_complex(ct_basic(CT_LDOUBLE));
     default: return NULL;
     }
 }
@@ -3374,6 +3450,29 @@ static const char *lib_sig(const char *n)
                          : *q;
                 return sg;
             }
+    }
+    /* <complex.h>'s: complex from complex (cpow of two), and cabs, carg,
+     * creal, cimag a real from a complex — f and l suffixed too */
+    static const char *const cunary[] = {
+        "cacos", "casin", "catan", "cacosh", "casinh", "catanh", "ccos",
+        "csin", "ctan", "ccosh", "csinh", "ctanh", "cexp", "clog", "csqrt",
+        "cproj", "conj",
+    };
+    static const char *const creal_of[] = { "cabs", "carg", "creal", "cimag" };
+    for (int pass = 0; pass < 2; pass++) {
+        size_t bl = pass ? len - (suf != 0) : len;
+        if (pass && !suf)
+            break;
+        char x = pass && suf ? (suf == 'f' ? 'f' : 'e') : 'd';
+        char z = x == 'f' ? 'q' : x == 'e' ? 'R' : 'Q';
+        for (size_t i = 0; i < sizeof cunary / sizeof cunary[0]; i++)
+            if (strlen(cunary[i]) == bl && !strncmp(cunary[i], n, bl))
+                return cx_fmt("%c%c", z, z);
+        for (size_t i = 0; i < sizeof creal_of / sizeof creal_of[0]; i++)
+            if (strlen(creal_of[i]) == bl && !strncmp(creal_of[i], n, bl))
+                return cx_fmt("%c%c", x, z);
+        if (bl == 4 && !strncmp(n, "cpow", 4))
+            return cx_fmt("%c%c%c", z, z, z);
     }
     return NULL;
 }
@@ -4700,6 +4799,9 @@ static struct cexpr *parse_unary(void)
     case TOK_PLUS: case TOK_MINUS: case TOK_TILDE: case TOK_BANG:
         cx_advance();
         return unary(k, parse_cast());
+    case TOK_KW_REAL: case TOK_KW_IMAG:
+        cx_advance();
+        return complex_part(parse_cast(), k == TOK_KW_IMAG);
     case TOK_KW_SIZEOF: case TOK_KW_ALIGNOF: {
         cx_advance();
         if (k == TOK_KW_SIZEOF && cx_accept(TOK_ELLIPSIS)) {
@@ -4756,9 +4858,6 @@ static struct cexpr *parse_unary(void)
         cx_expect(TOK_RPAREN, "')'");
         return ex_int(expr_nothrow(e), ct_basic(CT_BOOL));
     }
-    case TOK_KW_REAL: case TOK_KW_IMAG:
-        cx_error(at, "__real__/__imag__ are not supported in C++ yet");
-        return NULL;
     case TOK_ANDAND:
         cx_error(at, "label addresses are not supported in C++");
         return NULL;

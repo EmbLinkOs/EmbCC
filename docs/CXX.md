@@ -627,9 +627,26 @@ instance's vtables name are instantiated at the end of the unit;
 function returns). tests/cxx `cxx20misc2`, tests/exec `alloca`;
 tests/libstdcxx/format.cc matches g++'s build on both targets.
 
-Next: `<complex>` (GNU `__complex__` types), `<coroutine>` (coroutines),
-`consteval` as more than `constexpr` (a format string is checked at run
-time for now), bit-fields in classes with non-empty bases.
+GNU complex types (`__complex__ float/double/long double`, CT_COMPLEX,
+lowered to C's `_Complex`, mangled `C<type>`): arithmetic with complex
+and real operands, `==`/`!=`, unary `-`/`+`, compound assignment,
+`__real__`/`__imag__` as values and lvalues (E_CPART), `{re, im}`
+construction, conversions between element types and from reals, and the
+`<complex.h>` builtins (`__builtin_cabs`, `csqrt`, `cexp`, `cpow`, ... as
+newlib's functions). With them `<complex>` compiles; tests/cxx `complex`;
+tests/libstdcxx/complex.cc (arithmetic, abs/arg/norm/conj, sqrt, exp,
+pow, float/double conversions) matches g++'s build on both targets. Every
+libstdc++ header now compiles except `<coroutine>`.
+
+The OS's `user/tests/cxxdemo/cxxdemo.cc` (global constructors, new/delete,
+templates, local statics, destructors at exit, `<string>`, `<vector>`,
+`<iostream>`) compiles with EmbCC for both targets under the OS's flags
+and links against its crt0/syscalls and libstdc++ (CX8's proof; running it
+waits for the OS image, CX9).
+
+Next: `<coroutine>` (coroutines), `consteval` as more than `constexpr` (a
+format string is checked at run time for now), bit-fields in classes with
+non-empty bases.
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their

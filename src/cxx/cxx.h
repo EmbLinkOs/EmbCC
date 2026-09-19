@@ -74,7 +74,9 @@ enum cty_kind {
                                * tmpl<targs> (a pattern) */
     CT_DEP,                   /* some other dependent type: `typename
                                * to::names` (to may be NULL: unknown) */
-    CT_AUTO                   /* `auto`, until its initializer deduces it */
+    CT_AUTO,                  /* `auto`, until its initializer deduces it */
+    CT_COMPLEX                /* GNU `__complex__ T` (C's `T _Complex`): of
+                               * the floating type `to` */
 };
 
 enum { CQ_CONST = 1, CQ_VOLATILE = 2 };
@@ -158,6 +160,7 @@ struct cty *ct_promote(struct cty *t);      /* integral promotion */
 struct cty *ct_arith_common(struct cty *a, struct cty *b);
 struct cty *ct_decay(struct cty *t);        /* array -> ptr, func -> ptr */
 struct cty *ct_strip_ref(struct cty *t);
+struct cty *ct_complex(struct cty *elem);     /* __complex__ elem */
 int ct_has_auto(const struct cty *t);
 /* std::initializer_list: the template (t is it?), and the element type of
  * an instance t (through references and cv; NULL if t is not one) */
@@ -793,6 +796,8 @@ enum cexpr_kind {
     E_BUILTIN,    /* a __builtin_ function passed to C: name, a */
     E_UNARY,      /* op: '-', '+', '~', '!' */
     E_BINARY,     /* op: a binop (arith, compare, logical, shifts) */
+    E_CPART,      /* GNU __real__ a[0] (ival 0) or __imag__ (1): a
+                   * complex's part, an lvalue when a[0] is one */
     E_CMP3,       /* the built-in a[0] <=> a[1] (operands converted to one
                    * type): t the comparison category (std::strong_ordering,
                    * or std::partial_ordering with ival 1: may be unordered) */

@@ -205,6 +205,8 @@ static int same(const struct cty *a, const struct cty *b, int quals)
         return 1;
     case CT_DEP:
         return 0;                 /* two unknown types: never known alike */
+    case CT_COMPLEX:
+        return a->to->k == b->to->k;
     default:
         return 1;
     }
@@ -297,6 +299,19 @@ int ct_is_signed(const struct cty *t)
     }
 }
 
+struct cty *ct_complex(struct cty *elem)
+{
+    static struct cty *made[3];
+    int i = elem->k == CT_FLOAT ? 0 : elem->k == CT_LDOUBLE ? 2 : 1;
+    if (!made[i]) {
+        made[i] = xcalloc(1, sizeof *made[i]);
+        made[i]->k = CT_COMPLEX;
+        made[i]->to = ct_basic(i == 0 ? CT_FLOAT : i == 2 ? CT_LDOUBLE
+                                                         : CT_DOUBLE);
+    }
+    return made[i];
+}
+
 long ct_size(const struct cty *t)
 {
     if (t->k == CT_CLASS)
@@ -313,6 +328,7 @@ long ct_size(const struct cty *t)
     case CT_VALIST:
         return 8;
     case CT_LDOUBLE: return 16;
+    case CT_COMPLEX: return 2 * ct_size(t->to);
     case CT_ARRAY: return t->n < 0 ? 0 : t->n * ct_size(t->to);
     case CT_CLASS: return t->cls->size;
     case CT_ENUM: return ct_size(t->en->underlying);
@@ -328,7 +344,7 @@ long ct_align(const struct cty *t)
     if (t->k == CT_CLASS)
         class_ensure(t->cls);
     switch (t->k) {
-    case CT_ARRAY: return ct_align(t->to);
+    case CT_ARRAY: case CT_COMPLEX: return ct_align(t->to);
     case CT_CLASS: return t->cls->align;
     case CT_ENUM: return ct_align(t->en->underlying);
     case CT_FUNC: case CT_VOID: return 1;
@@ -446,6 +462,10 @@ static void name_into(char *buf, size_t cap, const struct cty *t)
                      ? "const volatile " : "const ")
                    : (t->q & CQ_VOLATILE) ? "volatile " : "";
     switch (t->k) {
+    case CT_COMPLEX:
+        name_into(inner, sizeof inner, t->to);
+        snprintf(buf, cap, "%s__complex__ %s", cv, inner);
+        return;
     case CT_PTR: case CT_LREF: case CT_RREF:
         name_into(inner, sizeof inner, t->to);
         snprintf(buf, cap, "%s%s%s", inner,

@@ -617,6 +617,7 @@ static void parse_dspec(struct dspec *ds)
     ds->at = cx_cur();
     int n_void = 0, n_bool = 0, n_char = 0, n_short = 0, n_int = 0;
     int n_long = 0, n_signed = 0, n_unsigned = 0, n_float = 0, n_double = 0;
+    int n_complex = 0;
     enum cty_kind special = CT_VOID;
     int n_special = 0;
     unsigned cv = 0;
@@ -697,8 +698,9 @@ static void parse_dspec(struct dspec *ds)
             named = ct_basic(CT_AUTO);
             cx_advance();
             continue;
-        case TOK_KW_COMPLEX:
-            cx_error(cx_cur(), "_Complex is not supported in C++ yet");
+        case TOK_KW_COMPLEX:        /* __complex__ double (GNU) */
+            n_complex++;
+            cx_advance();
             continue;
         case TOK_KW_STRUCT: case TOK_KW_UNION: case TOK_CX_CLASS:
             if (named || builtin)
@@ -812,8 +814,15 @@ static void parse_dspec(struct dspec *ds)
             k = n_unsigned ? CT_UINT : CT_INT;
         else
             k = CT_AUTO;          /* no type at all */
+        if (k == CT_AUTO && n_complex)
+            k = CT_DOUBLE;        /* a bare __complex__: double's */
         if (k != CT_AUTO)
             t = ct_basic(k);
+    }
+    if (n_complex) {
+        if (!t || !ct_is_float(t))
+            cx_error(ds->at, "__complex__ of a non-floating type");
+        t = ct_complex(t);
     }
     if (t && cv)
         t = ct_qual(t, cv);
