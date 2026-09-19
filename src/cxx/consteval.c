@@ -16,13 +16,18 @@
  * expression is then simply not a constant, and the caller says so if it
  * needed one. Not modelled: virtual calls, virtual bases, dynamic
  * allocation, bit-fields, long double, unions' active members, the end
- * of lifetimes (destructors do not run). */
+ * of lifetimes (destructors do not run).
+ *
+ * An integer is 128 bits wide here, i its low half and hi its high one:
+ * for the narrower types hi is what extending i as the type says gives
+ * (fit), for __int128 its own; its arithmetic is w128's. */
 #include "cxx.h"
 
 #include <setjmp.h>
 #include <string.h>
 
 #include "../driver/util.h"
+#include "../sema/w128.h"
 
 struct cblk {
     unsigned char *b;
@@ -42,7 +47,8 @@ enum { V_VOID, V_INT, V_FLT, V_PTR, V_OBJ };
 
 struct cval {
     int k;
-    long i;                   /* V_INT */
+    long i;                   /* V_INT (the low half) */
+    long hi;                  /* V_INT: the high half (fit) */
     double f;                 /* V_FLT */
     struct cptr p;            /* V_PTR; V_OBJ: where the object is */
 };
@@ -108,7 +114,31 @@ static struct cval v_int(long i)
     memset(&v, 0, sizeof v);
     v.k = V_INT;
     v.i = i;
+    v.hi = i < 0 ? -1 : 0;
     return v;
+}
+
+static struct cval v_w(struct w128 w)
+{
+    struct cval v = v_int((long)w.lo);
+    v.hi = (long)w.hi;
+    return v;
+}
+
+static struct w128 w_of(struct cval v)
+{
+    return w_make((unsigned long)v.i, (unsigned long)v.hi);
+}
+
+static int is128(const struct cty *t)
+{
+    return t && (t->k == CT_INT128 || t->k == CT_UINT128);
+}
+
+/* does a long hold v's value (as its signed 128 bits say)? */
+static int fits_long(struct cval v)
+{
+    return v.hi == (v.i < 0 ? -1 : 0);
 }
 
 static struct cval v_flt(double f)
@@ -155,6 +185,22 @@ static long trunc_to(long v, const struct cty *t)
     if (ct_is_signed(t) && (u >> (sz * 8 - 1)))
         u |= ~mask;
     return (long)u;
+}
+
+/* the integer v as a value of integer type t: truncated to it, and its
+ * high half what extending it as t says */
+static struct cval fit(struct cval v, const struct cty *t)
+{
+    if (v.k != V_INT || !ct_is_integer(t))
+        return v;
+    if (t->k == CT_BOOL)
+        return v_int(v.i != 0 || v.hi != 0);
+    if (is128(t))
+        return v;
+    struct cval r = v_int(trunc_to(v.i, t));
+    if (ct_size(t) == 8 && !ct_is_signed(t))
+        r.hi = 0;
+    return r;
 }
 
 /* ---- memory ---- */
@@ -218,12 +264,16 @@ static struct cval load(struct cptr p, const struct cty *t)
         memcpy(&d, q, 8);
         return v_flt(d);
     }
-    unsigned long u = 0;
-    for (long i = n - 1; i >= 0; i--)
+    unsigned long u = 0, uh = 0;
+    for (long i = (n > 8 ? 8 : n) - 1; i >= 0; i--)
         u = u << 8 | q[i];
+    for (long i = n - 1; i >= 8; i--)
+        uh = uh << 8 | q[i];
     if (k == V_PTR)
         return v_ptr(get_handle((long)u));
-    return v_int(trunc_to((long)u, t));
+    if (n == 16)
+        return v_w(w_make(u, uh));
+    return fit(v_int((long)u), t);
 }
 
 /* v as a value of scalar type t (a conversion the tree left implicit) */
@@ -232,13 +282,28 @@ static struct cval as_type(struct cval v, const struct cty *t)
     int k = scalar_kind(t);
     if (k == V_INT) {
         if (v.k == V_INT)
-            return v_int(trunc_to(v.i, t));
+            return fit(v, t);
         if (v.k == V_FLT) {
             if (t->k == CT_BOOL)
                 return v_int(v.f != 0);
-            if (v.f != v.f || v.f >= 9.3e18 || v.f <= -9.3e18)
+            if (v.f != v.f)
                 no();
-            return v_int(trunc_to((long)v.f, t));
+            if (is128(t) && (v.f >= 9.3e18 || v.f <= -9.3e18)) {
+                /* truncated toward zero, in two halves (2^64 each) */
+                double m = v.f < 0 ? -v.f : v.f;
+                if (m >= (t->k == CT_INT128 ? 1.7014118346046923e38
+                                            : 3.4028236692093846e38) ||
+                    (v.f < 0 && t->k == CT_UINT128))
+                    no();
+                unsigned long h = (unsigned long)(m / 18446744073709551616.0);
+                unsigned long l = (unsigned long)(m - (double)h *
+                                                  18446744073709551616.0);
+                struct w128 w = w_make(l, h);
+                return v_w(v.f < 0 ? w_neg(w) : w);
+            }
+            if (v.f >= 9.3e18 || v.f <= -9.3e18)
+                no();
+            return fit(v_int((long)v.f), t);
         }
         if (v.k == V_PTR && t->k == CT_BOOL)
             return v_int(v.p.blk || v.p.fn);
@@ -248,8 +313,13 @@ static struct cval as_type(struct cval v, const struct cty *t)
         double d;
         if (v.k == V_FLT)
             d = v.f;
-        else if (v.k == V_INT)
+        else if (v.k == V_INT && fits_long(v))
             d = (double)v.i;
+        else if (v.k == V_INT && v.hi == 0)
+            d = (double)(unsigned long)v.i;
+        else if (v.k == V_INT)             /* (a signed __int128's) */
+            d = (double)v.hi * 18446744073709551616.0 +
+                (double)(unsigned long)v.i;
         else
             no();
         if (t->k == CT_FLOAT)
@@ -281,7 +351,10 @@ static void store(struct cptr p, const struct cty *t, struct cval v)
     }
     unsigned long u = v.k == V_PTR ? (unsigned long)put_handle(v.p)
                                    : (unsigned long)v.i;
-    for (long i = 0; i < n; i++, u >>= 8)
+    for (long i = 0; i < n && i < 8; i++, u >>= 8)
+        q[i] = (unsigned char)u;
+    u = (unsigned long)v.hi;
+    for (long i = 8; i < n; i++, u >>= 8)
         q[i] = (unsigned char)u;
 }
 
@@ -710,6 +783,46 @@ static long elem_size(struct cty *pt)
     return ct_size(el);
 }
 
+/* a op b, of __int128s (b a shift's count: any integer) */
+static struct cval arith128(int op, struct cval a, struct cval b,
+                            struct cty *ta, struct cty *rt)
+{
+    int sign = ct_unqual(ta)->k == CT_INT128;
+    struct w128 x = w_of(a), y = w_of(b), r;
+    int lt = sign ? w_slt(x, y) : w_ult(x, y);
+    int gt = sign ? w_slt(y, x) : w_ult(y, x);
+    switch (op) {
+    case TOK_PLUS: r = w_add(x, y); break;
+    case TOK_MINUS: r = w_add(x, w_neg(y)); break;
+    case TOK_STAR: r = w_mul(x, y); break;
+    case TOK_SLASH: case TOK_PERCENT:
+        if (sign && x.hi == 1UL << 63 && !x.lo && y.hi == ~0UL &&
+            y.lo == ~0UL)
+            no();                       /* (the one quotient too big) */
+        if (!w_div(x, y, sign, op == TOK_PERCENT, &r))
+            no();                       /* (by zero) */
+        break;
+    case TOK_SHL: case TOK_SHR:
+        if (!fits_long(b) || b.i < 0 || b.i >= 128)
+            no();
+        r = op == TOK_SHL ? w_shl(x, (int)b.i) : w_shr(x, (int)b.i, sign);
+        break;
+    case TOK_AMP: r = w_make(x.lo & y.lo, x.hi & y.hi); break;
+    case TOK_PIPE: r = w_make(x.lo | y.lo, x.hi | y.hi); break;
+    case TOK_CARET: r = w_make(x.lo ^ y.lo, x.hi ^ y.hi); break;
+    case TOK_EQEQ: return v_int(!lt && !gt);
+    case TOK_NEQ: return v_int(lt || gt);
+    case TOK_LT: return v_int(lt);
+    case TOK_GT: return v_int(gt);
+    case TOK_LE: return v_int(!gt);
+    case TOK_GE: return v_int(!lt);
+    case TOK_ANDAND: return v_int((a.i || a.hi) && (b.i || b.hi));
+    case TOK_OROR: return v_int(a.i || a.hi || b.i || b.hi);
+    default: no(); return a;
+    }
+    return fit(v_w(r), rt);
+}
+
 static struct cval arith(int op, struct cval a, struct cval b,
                          struct cty *ta, struct cty *tb, struct cty *rt)
 {
@@ -749,15 +862,15 @@ static struct cval arith(int op, struct cval a, struct cval b,
             return p;
         }
         if (op == TOK_ANDAND || op == TOK_OROR) {
-            long x = a.k == V_PTR ? (a.p.blk || a.p.fn) : a.i != 0;
-            long y = b.k == V_PTR ? (b.p.blk || b.p.fn) : b.i != 0;
+            long x = a.k == V_PTR ? (a.p.blk || a.p.fn) : a.i || a.hi;
+            long y = b.k == V_PTR ? (b.p.blk || b.p.fn) : b.i || b.hi;
             return v_int(op == TOK_ANDAND ? x && y : x || y);
         }
         no();
     }
     if (a.k == V_FLT || b.k == V_FLT) {
-        double x = a.k == V_FLT ? a.f : (double)a.i;
-        double y = b.k == V_FLT ? b.f : (double)b.i;
+        double x = a.k == V_FLT ? a.f : as_type(a, ct_basic(CT_DOUBLE)).f;
+        double y = b.k == V_FLT ? b.f : as_type(b, ct_basic(CT_DOUBLE)).f;
         double r;
         switch (op) {
         case TOK_PLUS: r = x + y; break;
@@ -782,6 +895,8 @@ static struct cval arith(int op, struct cval a, struct cval b,
     }
     if (a.k != V_INT || b.k != V_INT)
         no();
+    if (is128(ct_unqual(ta)))
+        return arith128(op, a, b, ta, rt);
     long x = a.i, y = b.i;
     int uns = !ct_is_signed(ta);
     unsigned long ux = (unsigned long)x, uy = (unsigned long)y;
@@ -823,13 +938,13 @@ static struct cval arith(int op, struct cval a, struct cval b,
     case TOK_OROR: return v_int(x || y);
     default: no(); return a;
     }
-    return v_int(ct_is_integer(rt) ? trunc_to(r, rt) : r);
+    return fit(v_int(r), rt);
 }
 
 static int truth(struct cval v)
 {
     switch (v.k) {
-    case V_INT: return v.i != 0;
+    case V_INT: return v.i != 0 || v.hi != 0;
     case V_FLT: return v.f != 0;
     case V_PTR: return v.p.blk || v.p.fn;
     default: no(); return 0;
@@ -913,7 +1028,7 @@ static struct cval builtin(struct cexpr *e)
         unsigned long r = 0;
         for (int i = 0; i < nb; i++)
             r = r << 8 | (u >> (8 * i) & 0xff);
-        return v_int(trunc_to((long)r, e->t));
+        return fit(v_int((long)r), e->t);
     }
     if (strcmp(n, "abs") == 0 || strcmp(n, "labs") == 0 ||
         strcmp(n, "llabs") == 0)
@@ -982,6 +1097,8 @@ static struct cty *common_type(struct cty *a, struct cty *b)
     long sz = sa > sb ? sa : sb;
     int uns = (ct_size(a) >= 4 && sa == sz && !ct_is_signed(a)) ||
               (ct_size(b) >= 4 && sb == sz && !ct_is_signed(b));
+    if (sz == 16)
+        return ct_basic(uns ? CT_UINT128 : CT_INT128);
     if (sz == 8)
         return ct_basic(uns ? CT_ULONG : CT_LONG);
     return ct_basic(uns ? CT_UINT : CT_INT);
@@ -1039,8 +1156,7 @@ static struct cval incdec(struct cexpr *e, struct cptr *where)
     } else if (t->k == CT_BOOL) {
         nw = v_int(e->ival > 0 ? 1 : !old.i);
     } else {
-        nw = v_int(trunc_to((long)((unsigned long)old.i +
-                                   (unsigned long)e->ival), t));
+        nw = fit(v_w(w_add(w_of(old), w_from(e->ival, 1))), t);
     }
     store(at, t, nw);
     *where = at;
@@ -1160,8 +1276,6 @@ static struct cval ev(struct cexpr *e)
     static int nest;
     if (nest > 4000)
         no();
-    if (e->t && (e->t->k == CT_INT128 || e->t->k == CT_UINT128))
-        no();       /* (values are longs here: __int128 is run time's) */
     nest++;
     jmp_buf jb, *saved = fail_to;
     if (setjmp(jb)) {
@@ -1208,7 +1322,7 @@ static struct cval ev_(struct cexpr *e)
             for (int i = fr->n - 1; i >= 0 && !local; i--)
                 local = fr->b[i].v == e->var;
             if (!local)
-                return v_int(e->var->const_val);
+                return fit(v_int(e->var->const_val), e->t);
         }
         /* fall through */
     case E_MEMBER: case E_DEREF: case E_TEMP: case E_BASE: {
@@ -1277,11 +1391,12 @@ static struct cval ev_(struct cexpr *e)
                 return as_type(v_flt(-a.f), e->t);
             if (a.k != V_INT)
                 no();
-            return v_int(trunc_to((long)(0UL - (unsigned long)a.i), e->t));
+            return fit(v_w(w_neg(w_of(a))), e->t);
         case TOK_TILDE:
             if (a.k != V_INT)
                 no();
-            return v_int(trunc_to(~a.i, e->t));
+            return fit(v_w(w_make(~(unsigned long)a.i, ~(unsigned long)a.hi)),
+                       e->t);
         default:
             no();
         }
@@ -1345,7 +1460,9 @@ static struct cval ev_(struct cexpr *e)
             return a;
         if (a.k == V_INT && ct_is_float(e->t) &&
             ct_is_integer(e->a[0]->t) && !ct_is_signed(e->a[0]->t))
-            return as_type(v_flt((double)(unsigned long)a.i), e->t);
+            return as_type(v_flt((double)(unsigned long)a.hi *
+                                 18446744073709551616.0 +
+                                 (double)(unsigned long)a.i), e->t);
         return as_type(a, e->t);
     }
     case E_CONSTRUCT: case E_INITLIST: {
@@ -1560,6 +1677,9 @@ static int exec(struct cstmt *s)
             no();
         struct cstmt *dflt = NULL;
         struct cstmt *to = find_case(s->body, v.i, &dflt);
+        if (is128(ct_unqual(s->e->t)) &&
+            (!fits_long(v) || (v.i < 0 && ct_unqual(s->e->t)->k == CT_UINT128)))
+            to = NULL;                  /* (no label, a long, is it) */
         if (!to)
             to = dflt;
         int r = X_NORMAL;
@@ -1597,7 +1717,8 @@ static int exec(struct cstmt *s)
 
 /* ---- the entry ---- */
 
-int cx_consteval_int(struct cexpr *e, long *out)
+/* e evaluated from outside any call: its value, or 0 */
+static int run(struct cexpr *e, struct cval *out)
 {
     if (cx_pattern || !e || !e->t || !ct_is_integer(e->t))
         return 0;
@@ -1626,13 +1747,33 @@ int cx_consteval_int(struct cexpr *e, long *out)
     steps = savesteps;
     depth = savedepth;
     seek = saveseek;
-    if (v.k == V_INT) {
-        *out = trunc_to(v.i, e->t);
-        return 1;
-    }
-    if (v.k == V_PTR && e->t->k == CT_BOOL) {
-        *out = v.p.blk || v.p.fn;
-        return 1;
-    }
-    return 0;
+    if (v.k == V_PTR && e->t->k == CT_BOOL)
+        v = v_int(v.p.blk || v.p.fn);
+    if (v.k != V_INT)
+        return 0;
+    *out = fit(v, ct_unqual(e->t));
+    return 1;
+}
+
+int cx_consteval_int(struct cexpr *e, long *out)
+{
+    struct cval v;
+    if (!run(e, &v))
+        return 0;
+    if (is128(ct_unqual(e->t)) &&
+        (ct_unqual(e->t)->k == CT_INT128 ? !fits_long(v)
+                                         : v.hi != 0 || v.i < 0))
+        return 0;                 /* (as expr_fold: a long must hold it) */
+    *out = v.i;
+    return 1;
+}
+
+/* e's value in 128 bits, extended as its type says */
+int cx_consteval_w128(struct cexpr *e, struct w128 *out)
+{
+    struct cval v;
+    if (!run(e, &v))
+        return 0;
+    *out = w_of(v);
+    return 1;
 }

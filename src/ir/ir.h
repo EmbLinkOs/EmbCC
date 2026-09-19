@@ -79,6 +79,10 @@ enum ir_op {
                * the value seen, whether or not the swap happened — the
                * __sync_*_compare_and_swap shape, where IR_CMPXCHG is the
                * __atomic one (expected passed by address, a bool back). */
+    IR_CAS16, /* IR_CAS of 16 bytes (an __int128): b, c and dst wide
+               * (x86-64's lock cmpxchg16b, aarch64's exclusive pair;
+               * a full barrier both) — irgen builds the other atomics of
+               * an __int128 as loops of it */
     IR_FRAMEADDR, /* dst = this function's frame pointer (rbp / x29), which
                    * on both targets points at [saved fp][return address] —
                    * the base of __builtin_frame_address/_return_address */

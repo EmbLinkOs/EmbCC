@@ -15,6 +15,7 @@ for c in tests/exec/*.c tests/exec/$ARCH/*.c; do
     [ -e "$c" ] || continue
     name=$(basename "$c" .c)
     pinned_elsewhere "$c" && { echo "$name: pinned to another target, skipped"; continue; }
+    no_gcc_reference "$c" && continue
     rm -f "$out_dir/$name".*
     "$EMBCC" --target="$TARGET" -c "$c" -o "$out_dir/$name.embcc.o" || {
         echo "$name: embcc failed"; exit 1; }

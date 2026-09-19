@@ -80,6 +80,30 @@ static struct func *find_func(struct unit *u, const char *name)
     return NULL;
 }
 
+/* __builtin_memcpy, __builtin_memmove, __builtin_memset with no
+ * declaration of the libc function in sight: its prototype, as gcc knows
+ * it, declared at the unit's start */
+static void implicit_mem_decl(struct unit *u, const char *name)
+{
+    if (find_func(u, name))
+        return;
+    struct func *fd = xcalloc(1, sizeof *fd);
+    fd->name = name;
+    fd->file = u->file;
+    fd->seq = -1;
+    fd->declared = 1;
+    fd->ret_ty = ty_ptr(ty_base(TY_VOID, 0));
+    fd->nparams = 3;
+    fd->param_tys[0] = ty_ptr(ty_base(TY_VOID, 0));
+    fd->param_tys[1] = strcmp(name, "memset") == 0 ? ty_base(TY_INT, 0)
+                                                   : ty_ptr(ty_base(TY_VOID, 0));
+    fd->param_tys[2] = ty_base(TY_LONG, 1);            /* size_t */
+    struct func **pp = &u->funcs;
+    while (*pp)
+        pp = &(*pp)->next;
+    *pp = fd;
+}
+
 static struct global *find_global(struct unit *u, const char *name)
 {
     for (struct global *g = u->globals; g; g = g->next)
@@ -288,6 +312,23 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                                struct initelem *v, int n,
                                const char **out_bytes,
                                struct greloc **out_rel, int *out_nrel);
+
+/* A bit-field's value merged into its storage unit's nb bytes at p
+ * (they start zeroed, so OR is enough and neighbours are kept): its low
+ * `width` bits, at bit_off of p[0] — 17 bytes for a packed __int128's at
+ * bit 1..7, the last one past what 128 bits hold. */
+static void merge_bits(char *p, int nb, struct w128 val, int bit_off,
+                       int width)
+{
+    struct w128 mask = w_shr(w_make(~0UL, ~0UL), 128 - width, 0);
+    val.lo &= mask.lo;
+    val.hi &= mask.hi;
+    struct w128 lo = w_shl(val, bit_off);
+    for (int b = 0; b < nb && b < 16; b++)
+        p[b] |= (char)((b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7)));
+    if (nb == 17 && bit_off)
+        p[16] |= (char)w_shr(val, 128 - bit_off, 0).lo;
+}
 static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                        struct stmt *s, int in_loop, int in_switch,
                        int at_sw_level);
@@ -1618,8 +1659,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * reserved name -- rename and let the ordinary call path resolve
              * them (the program must declare/provide them). */
             if (strcmp(bn, "memcpy") == 0 || strcmp(bn, "memmove") == 0 ||
-                strcmp(bn, "memset") == 0)
+                strcmp(bn, "memset") == 0) {
                 e->lhs->name = bn;   /* fall through to normal call handling */
+                implicit_mem_decl(u, bn);
+            }
             /* byte swaps -> a single instruction; the result is the argument's
              * width as an unsigned integer. */
             else if (strcmp(bn, "bswap16") == 0 || strcmp(bn, "bswap32") == 0 ||
@@ -2311,16 +2354,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static __int128 initializer must be a constant "
                            "expression");
             if (v[k].bit_width) {
-                /* a bit-field: its bits merged into the 16-byte unit */
-                struct w128 mask = w_shr(w_make(~0UL, ~0UL),
-                                         128 - v[k].bit_width, 0);
-                w.lo &= mask.lo;
-                w.hi &= mask.hi;
-                w = w_shl(w, v[k].bit_off);
-                for (int b = 0; b < 8; b++) {
-                    bytes[v[k].off + b] |= (char)(w.lo >> (8 * b));
-                    bytes[v[k].off + 8 + b] |= (char)(w.hi >> (8 * b));
-                }
+                merge_bits(bytes + v[k].off,
+                           v[k].bf_bytes ? v[k].bf_bytes : 16, w,
+                           v[k].bit_off, v[k].bit_width);
                 continue;
             }
             for (int b = 0; b < 8; b++) {
@@ -2335,14 +2371,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                        "a static initializer must be a constant, a "
                        "string literal, or the address of a global");
         if (v[k].bit_width) {
-            /* merge the field's bits into its storage unit (bytes start
-             * zeroed, so OR is enough and neighbours are preserved) */
-            unsigned long mask = v[k].bit_width >= 64
-                               ? ~0UL : (((unsigned long)1 << v[k].bit_width) - 1);
-            unsigned long field = ((unsigned long)cv & mask) << v[k].bit_off;
-            int nb = v[k].bf_bytes ? v[k].bf_bytes : sz;
-            for (int b = 0; b < nb && b < 8; b++)
-                bytes[v[k].off + b] |= (char)(field >> (8 * b));
+            merge_bits(bytes + v[k].off, v[k].bf_bytes ? v[k].bf_bytes : sz,
+                       w_make((unsigned long)cv, 0), v[k].bit_off,
+                       v[k].bit_width);
             continue;
         }
         for (int b = 0; b < sz; b++)
@@ -2464,15 +2495,16 @@ enum atomic_kind atomic_builtin(const char *name, int *op)
 }
 
 /* The object an atomic builtin works on must be one the machines can move
- * in one access: an integer or a pointer of 1, 2, 4 or 8 bytes. */
+ * in one access: an integer or a pointer of 1, 2, 4 or 8 bytes — or an
+ * __int128, which both do with a 16-byte compare-and-swap (irgen). */
 static void need_atomic_object(struct unit *u, struct expr *e, struct type *t)
 {
     int sz = ty_size(t);
     if (!(ty_is_integer(t) || t->kind == TY_PTR) ||
-        (sz != 1 && sz != 2 && sz != 4 && sz != 8))
+        (sz != 1 && sz != 2 && sz != 4 && sz != 8 && t->kind != TY_INT128))
         diag_at(u->file, e->line, e->col,
-                "%s works on an integer or pointer of 1, 2, 4 or 8 bytes, "
-                "not %s", e->lhs->name, ty_name(t));
+                "%s works on an integer or pointer of 1, 2, 4, 8 or 16 "
+                "bytes, not %s", e->lhs->name, ty_name(t));
 }
 
 /* Types a call to an atomic builtin (see atomic_builtin). */

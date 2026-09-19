@@ -47,6 +47,19 @@ void gvar_register(struct cvar *v)
     cx_gvars[cx_ngvars++] = v;
 }
 
+/* v, declared before, is defined here: its place in the unit's order of
+ * initialization is its definition's (6.9.3.3), not its declaration's */
+static void gvar_defined_here(struct cvar *v)
+{
+    for (int i = cx_ngvars - 1; i >= 0; i--)
+        if (cx_gvars[i] == v) {
+            memmove(&cx_gvars[i], &cx_gvars[i + 1],
+                    (size_t)(cx_ngvars - 1 - i) * sizeof *cx_gvars);
+            cx_gvars[cx_ngvars - 1] = v;
+            return;
+        }
+}
+
 static void class_register(struct cclass *c)
 {
     if (cx_nclasses == capclasses) {
@@ -3182,6 +3195,7 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
     struct cscope *target = d->qual ? d->qual : cx_scope;
     struct csym *y = scope_find_here(target, d->name);
     struct cvar *v = NULL;
+    int declared_before = y && y->k == CS_VAR;
     if (ds->is_constexpr)
         t = ct_qual(t, CQ_CONST);   /* (as the declaration may say const) */
     if (y && y->k == CS_VAR) {
@@ -3253,6 +3267,8 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
             cx_error(d->at, "redefinition of '%s'", d->name);
         v->defined = 1;
         v->is_extern = 0;
+        if (declared_before)
+            gvar_defined_here(v);
         if ((v->init || v->ctor) && cx_kind() != TOK_ASSIGN &&
             cx_kind() != TOK_LBRACE && cx_kind() != TOK_LPAREN)
             return;           /* const T C::x; : initialized in the class */

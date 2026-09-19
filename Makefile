@@ -120,7 +120,17 @@ test: embcc embread embld embdbg
 test-arm64: embcc
 	tests/run.sh --target=aarch64-elf
 
+# The C++ suites wholly on EmbCC's library: libstdc++ and libsupc++ built
+# from GCC's sources by EmbCC, every tests/libstdcxx and tests/cxx program
+# linked with it and compared with g++'s build — both targets. Opt-in (the
+# library takes minutes to build): tests/golden/cxx-libstdcxx-embcc.sh.
+test-libstdcxx: embcc
+	EMBCC=$(CURDIR)/embcc EMBCC_TARGET=x86_64-elf EMBCC_LIBSTDCXX=1 \
+	    sh tests/golden/cxx-libstdcxx-embcc.sh
+	EMBCC=$(CURDIR)/embcc EMBCC_TARGET=aarch64-elf EMBCC_LIBSTDCXX=1 \
+	    sh tests/golden/cxx-libstdcxx-embcc.sh
+
 clean:
 	rm -rf $(BUILD) embcc embread embld embdbg embas
 
-.PHONY: all test test-arm64 clean
+.PHONY: all test test-arm64 test-libstdcxx clean

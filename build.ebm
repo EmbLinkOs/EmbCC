@@ -91,7 +91,7 @@ output: /data/build/out/embcc/cxx_template.o
 
 name: cxx_consteval.o
 kind: compile
-inputs: /data/src/embcc/cxx/consteval.c /data/src/embcc/cxx/cxx.h /data/src/embcc/lex/lex.h /data/src/embcc/cxx/translate.h /system/abi/include/setjmp.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/machine/setjmp.h /data/apps/embcc/include/string.h /data/apps/embcc/include/stddef.h /data/src/embcc/driver/util.h 
+inputs: /data/src/embcc/cxx/consteval.c /data/src/embcc/cxx/cxx.h /data/src/embcc/lex/lex.h /data/src/embcc/cxx/translate.h /system/abi/include/setjmp.h /system/abi/include/_ansi.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/features.h /system/abi/include/machine/setjmp.h /data/apps/embcc/include/string.h /data/apps/embcc/include/stddef.h /data/src/embcc/driver/util.h /data/src/embcc/sema/w128.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/cxx/consteval.c -o /data/build/out/embcc/cxx_consteval.o
 output: /data/build/out/embcc/cxx_consteval.o
 
@@ -121,7 +121,7 @@ output: /data/build/out/embcc/cxx_mangle.o
 
 name: cxx_emit.o
 kind: compile
-inputs: /data/src/embcc/cxx/emit.c /data/src/embcc/cxx/cxx.h /data/src/embcc/lex/lex.h /data/src/embcc/cxx/translate.h /data/apps/embcc/include/limits.h /system/abi/include/limits.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /system/abi/include/sys/features.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/syslimits.h /system/abi/include/math.h /system/abi/include/sys/reent.h /system/abi/include/_ansi.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /data/apps/embcc/include/stdarg.h /system/abi/include/stdio.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/arch/target.h /data/src/embcc/driver/util.h 
+inputs: /data/src/embcc/cxx/emit.c /data/src/embcc/cxx/cxx.h /data/src/embcc/lex/lex.h /data/src/embcc/cxx/translate.h /data/apps/embcc/include/limits.h /system/abi/include/limits.h /system/abi/include/newlib.h /system/abi/include/_newlib_version.h /system/abi/include/sys/cdefs.h /system/abi/include/machine/_default_types.h /system/abi/include/sys/features.h /data/apps/embcc/include/stddef.h /system/abi/include/sys/syslimits.h /system/abi/include/math.h /system/abi/include/sys/reent.h /system/abi/include/_ansi.h /system/abi/include/sys/config.h /system/abi/include/machine/ieeefp.h /system/abi/include/sys/_types.h /system/abi/include/machine/_types.h /system/abi/include/sys/lock.h /data/apps/embcc/include/stdarg.h /system/abi/include/stdio.h /system/abi/include/sys/stdio.h /system/abi/include/stdlib.h /system/abi/include/machine/stdlib.h /system/abi/include/alloca.h /data/apps/embcc/include/string.h /data/src/embcc/arch/target.h /data/src/embcc/driver/util.h /data/src/embcc/sema/w128.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/cxx/emit.c -o /data/build/out/embcc/cxx_emit.o
 output: /data/build/out/embcc/cxx_emit.o
 

@@ -250,6 +250,8 @@ static int wide_def(const struct ir_ins *i)
     case IR_CONST: case IR_MOD: case IR_AND: case IR_OR: case IR_XOR:
     case IR_SHL: case IR_SHR: case IR_BNOT: case IR_EXT: case IR_F2I:
         return !i->flt && i->w == 16;
+    case IR_CAS16:
+        return 1;
     default:
         return 0;
     }
@@ -318,7 +320,7 @@ static int ins_def(const struct ir_ins *in)
     case IR_STRADDR: case IR_GADDR: case IR_FADDR: case IR_LOAD: case IR_EXT:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_BSWAP: case IR_SHL:
     case IR_SHR: case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
-    case IR_ARMW: case IR_CAS: case IR_FRAMEADDR:
+    case IR_ARMW: case IR_CAS: case IR_CAS16: case IR_FRAMEADDR:
     case IR_ALLOCA: case IR_SPSAVE:
     case IR_STVAR:            /* the local written */
     case IR_CALL:             /* always stores a (possibly-unused) result temp */
@@ -382,7 +384,7 @@ static unsigned long *compute_live_intervals(struct ir_func *fn, int *first,
         case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
         case IR_XCHG: case IR_XADD: case IR_ARMW:
             USE(s->a); USE(s->b); break;
-        case IR_CMPXCHG: case IR_CAS:
+        case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
             USE(s->a); USE(s->b); USE(s->c); break;
         case IR_STVAR: case IR_VA_START:
         case IR_ALLOCA: case IR_SPRESTORE:
@@ -551,7 +553,7 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
         case IR_VA_START:  OPAQUE(in->a); break;
         case IR_XCHG: case IR_XADD: case IR_ARMW:
             OPAQUE(in->a); OPAQUE(in->b); break;          /* raw addr/val slots */
-        case IR_CMPXCHG: case IR_CAS:
+        case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
             OPAQUE(in->a); OPAQUE(in->b); OPAQUE(in->c); break;
         case IR_FRAMEADDR:
             OPAQUE(in->dst); break;                        /* a raw-slot result */
@@ -1069,7 +1071,7 @@ static void count_vreg_uses(struct ir_func *fn, int *cnt)
         case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
         case IR_XCHG: case IR_XADD: case IR_ARMW:
             UZ(s->a); UZ(s->b); break;
-        case IR_CMPXCHG: case IR_CAS:
+        case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
             UZ(s->a); UZ(s->b); UZ(s->c); break;
         case IR_CALL:
             if (s->indirect) UZ(s->a);
@@ -1381,6 +1383,8 @@ static int i128_ins(const struct ir_ins *i)
         return i->size == 16;
     case IR_F2I:
         return i->w == 16;
+    case IR_CAS16:
+        return 1;
     default:
         return 0;
     }
@@ -1440,6 +1444,25 @@ static void gen_i128(struct code *text, const int *sd, struct ir_ins *i,
         st8(text, d, REG_RAX);
         x86_mov_reg_imm(text, REG_RAX, i->imm < 0 ? -1 : 0, 8);
         st8(text, d + 8, REG_RAX);
+        break;
+    case IR_CAS16:
+        /* lock cmpxchg16b [rsi]: rdx:rax expected, rcx:rbx desired; rdx:rax
+         * after it the value seen, swapped or not. rbx is callee-saved,
+         * and nothing here allocates it: kept on the stack meanwhile. */
+        code_byte(text, 0x53);                          /* push rbx */
+        ld8(text, REG_RSI, sd[i->a]);
+        ld8(text, REG_RAX, sd[i->b]);
+        ld8(text, REG_RDX, sd[i->b] + 8);
+        ld8(text, 3, sd[i->c]);                         /* rbx */
+        ld8(text, REG_RCX, sd[i->c] + 8);
+        code_byte(text, 0xf0);                          /* lock */
+        code_byte(text, 0x48);                          /* REX.W */
+        code_byte(text, 0x0f);
+        code_byte(text, 0xc7);
+        code_byte(text, 0x0e);                          /* /1, [rsi] */
+        code_byte(text, 0x5b);                          /* pop rbx */
+        st8(text, d, REG_RAX);
+        st8(text, d + 8, REG_RDX);
         break;
     case IR_ADD: case IR_SUB:
         ld8(text, REG_RAX, sd[i->a]);
@@ -2528,6 +2551,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_lock_cmpxchg_rcx(text, i->size);
             cg_store(text, sd, i->dst, i->w);
             break;
+        case IR_CAS16:
+            break;                      /* (gen_i128's) */
         case IR_FRAMEADDR:
             cg_reset();
             x86_mov_reg_reg(text, REG_RAX, REG_RBP);

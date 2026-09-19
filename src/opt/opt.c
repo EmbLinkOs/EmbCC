@@ -26,8 +26,8 @@ static int writes_temp(enum ir_op op)
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
     case IR_FADDR: case IR_LOAD: case IR_EXT: case IR_BSWAP:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_CALL: case IR_XCHG:
-    case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_FRAMEADDR:
-    case IR_ALLOCA: case IR_SPSAVE:
+    case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_CAS16:
+    case IR_FRAMEADDR: case IR_ALLOCA: case IR_SPSAVE:
         return 1;
     default:
         return 0;
@@ -87,7 +87,7 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
         cb(&i->a, ctx);
         cb(&i->b, ctx);
         break;
-    case IR_CMPXCHG: case IR_CAS:
+    case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
         cb(&i->a, ctx);
         cb(&i->b, ctx);
         cb(&i->c, ctx);
@@ -395,7 +395,7 @@ static int writes_memory(enum ir_op op)
     switch (op) {
     case IR_STORE: case IR_STVAR: case IR_CALL: case IR_MEMCPY:
     case IR_MEMZERO: case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
-    case IR_ARMW: case IR_CAS: case IR_ASM: case IR_VA_START:
+    case IR_ARMW: case IR_CAS: case IR_CAS16: case IR_ASM: case IR_VA_START:
     /* A fence writes nothing, but a load cached from before it must not be
      * reused after it: that reuse IS the reordering the fence forbids, and a
      * loop polling a flag across __sync_synchronize() would spin on a stale
@@ -1179,7 +1179,7 @@ static int lcse_kills_mem(enum ir_op op)
     switch (op) {
     case IR_STORE: case IR_CALL: case IR_MEMCPY: case IR_MEMZERO:
     case IR_XCHG: case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS:
-    case IR_ASM: case IR_VA_START:
+    case IR_CAS16: case IR_ASM: case IR_VA_START:
     case IR_FENCE:           /* a barrier: see writes_memory */
         return 1;
     default:

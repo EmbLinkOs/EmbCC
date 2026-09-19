@@ -1049,6 +1049,9 @@ int expr_fold(struct cexpr *e, long *out);
 /* Constant evaluation (consteval.c): e's value, calls of constexpr
  * functions and all; 0 if it is not a constant expression. */
 int cx_consteval_int(struct cexpr *e, long *out);
+struct w128;
+/* e's value in 128 bits (extended as its type says), calls and all */
+int cx_consteval_w128(struct cexpr *e, struct w128 *out);
 /* Convert e to type t implicitly (copy-initialization); ctx for messages. */
 struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx);
 struct cexpr *convert_bool(struct cexpr *e, const char *ctx);

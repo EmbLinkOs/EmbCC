@@ -18,6 +18,7 @@ for c in tests/exec/*.c; do
     [ -e "$c" ] || continue
     name=$(basename "$c" .c)
     pinned_elsewhere "$c" && continue
+    no_gcc_reference "$c" && continue
     "$EMBCC" --target="$TARGET" -O2 -c "$c" -o "$out_dir/$name.o" || {
         echo "$name: embcc -O2 failed to compile"; exit 1; }
     t_link "$out_dir/$name.embcc" "$out_dir/$name.o" || {

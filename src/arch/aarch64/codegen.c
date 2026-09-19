@@ -612,6 +612,8 @@ static int a64_i128_ins(const struct ir_ins *i)
         return i->size == 16;
     case IR_F2I:
         return i->w == 16;
+    case IR_CAS16:
+        return 1;
     default:
         return 0;
     }
@@ -636,6 +638,38 @@ static void gen_a64_i128(struct code *t, const long *sd, struct ir_ins *i,
     long d = i->dst >= 0 ? sd[i->dst] : 0;
     int X = A64_ACC, Y = A64_TMP, Z = 13, W = 14;   /* x9 x10 x13 x14 */
     switch (i->op) {
+    case IR_CAS16: {
+        /* An exclusive pair: ldxp, and stxp of the desired value if the
+         * pair read is the expected one — or of the pair read itself if
+         * not, as only a successful stxp makes the ldxp's 16 bytes one
+         * single-copy-atomic read; retried until a stxp goes through.
+         * x0:x1 expected, x2:x3 desired, x4:x5 seen, w6 the status. */
+        a64_ldr(t, A64_ADDR, FB, sd[i->a], 8, 0, 8);
+        a64_ldr(t, 0, FB, sd[i->b], 8, 0, 8);
+        a64_ldr(t, 1, FB, sd[i->b] + 8, 8, 0, 8);
+        a64_ldr(t, 2, FB, sd[i->c], 8, 0, 8);
+        a64_ldr(t, 3, FB, sd[i->c] + 8, 8, 0, 8);
+        a64_dmb_ish(t);
+        int loop = t->len;
+        a64_word(t, 0xC87F0000UL | (5UL << 10) |       /* ldxp x4, x5, */
+                    ((unsigned long)A64_ADDR << 5) | 4UL);   /* [addr] */
+        a64_alu_reg(t, '^', 7, 4, 0, 8);
+        a64_alu_reg(t, '^', Z, 5, 1, 8);
+        a64_alu_reg(t, '|', 7, 7, Z, 8);
+        int miss = a64_cbz(t, 7, 1, 8);                 /* not expected */
+        a64_word(t, 0xC8200000UL | (6UL << 16) | (3UL << 10) |
+                    ((unsigned long)A64_ADDR << 5) | 2UL); /* stxp w6, x2, x3 */
+        int done = a64_b(t);
+        a64_patch_b19(t, miss, t->len);
+        a64_word(t, 0xC8200000UL | (6UL << 16) | (5UL << 10) |
+                    ((unsigned long)A64_ADDR << 5) | 4UL); /* stxp w6, x4, x5 */
+        a64_patch_b26(t, done, t->len);
+        a64_patch_b19(t, a64_cbz(t, 6, 1, 4), loop);    /* lost it: again */
+        a64_dmb_ish(t);
+        a64_str(t, 4, FB, d, 8);
+        a64_str(t, 5, FB, d + 8, 8);
+        break;
+    }
     case IR_CONST:
         a64_mov_imm(t, X, i->imm, 8);
         a64_str(t, X, FB, d, 8);

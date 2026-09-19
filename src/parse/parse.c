@@ -1050,11 +1050,6 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
         diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                    "a struct/union needs at least one member");
     ty_struct_layout(t, ms, n, at.packed, at.aligned);
-    for (int i = 0; i < n; i++)
-        if (ms[i].bf_bytes && ms[i].ty->kind == TY_INT128)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
-                    "packed __int128 bit-field '%s' crosses its storage unit "
-                    "(not supported)", ms[i].name ? ms[i].name : "<anon>");
     return t;
 }
 

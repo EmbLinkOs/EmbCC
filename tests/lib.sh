@@ -113,6 +113,14 @@ t_run() {
 }
 
 # pinned_elsewhere FILE.c  — true if the test says `// target: X` for another X.
+# no_gcc_reference FILE: the program says gcc cannot build a reference for
+# it (`// no-gcc-reference: why`) — e.g. gcc calls libatomic for what EmbCC
+# does inline, and the cross toolchains have no libatomic. Prints why.
+no_gcc_reference() {
+    why=$(sed -n 's|.*// no-gcc-reference: *\(.*\)|\1|p' "$1" | head -1)
+    [ -n "$why" ] && echo "$(basename "$1" .c): no gcc reference ($why), skipped"
+}
+
 pinned_elsewhere() {
     only=$(sed -n 's|.*// target: *\([a-z0-9_-]*\).*|\1|p' "$1" | head -1)
     [ -n "$only" ] && [ "$only" != "$TARGET" ]

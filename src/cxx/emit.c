@@ -25,6 +25,7 @@
 
 #include "../arch/target.h"
 #include "../driver/util.h"
+#include "../sema/w128.h"
 
 /* ---- text buffers ---- */
 
@@ -1824,6 +1825,64 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
 
 /* ---- constant initializers (for static storage) ---- */
 
+/* A static object's integer initializer that constant evaluation gives a
+ * value — a constexpr function's call and all — is written as that
+ * value: constant initialization (6.9.3.2), no code run, as g++ does.
+ * Only there (ce_ok): in a function the expression runs as written. */
+static int ce_ok;
+
+struct ce_memo {
+    struct cexpr *e;
+    int ok;
+    struct w128 w;
+};
+static struct ce_memo *ce_tab;
+static long ce_cap, ce_n;
+
+static int ce_value(struct cexpr *e, struct w128 *w)
+{
+    if (ce_n * 2 >= ce_cap) {
+        struct ce_memo *old = ce_tab;
+        long oc = ce_cap;
+        ce_cap = ce_cap ? ce_cap * 2 : 256;
+        ce_tab = xcalloc((size_t)ce_cap, sizeof *ce_tab);
+        for (long i = 0; i < oc; i++)
+            if (old[i].e) {
+                long h = (long)(((unsigned long)old[i].e >> 4) &
+                                (unsigned long)(ce_cap - 1));
+                while (ce_tab[h].e)
+                    h = (h + 1) & (ce_cap - 1);
+                ce_tab[h] = old[i];
+            }
+        free(old);
+    }
+    long h = (long)(((unsigned long)e >> 4) & (unsigned long)(ce_cap - 1));
+    while (ce_tab[h].e && ce_tab[h].e != e)
+        h = (h + 1) & (ce_cap - 1);
+    if (!ce_tab[h].e) {
+        ce_tab[h].e = e;
+        ce_tab[h].ok = cx_consteval_w128(e, &ce_tab[h].w);
+        ce_n++;
+    }
+    *w = ce_tab[h].w;
+    return ce_tab[h].ok;
+}
+
+/* the integer w as a C constant of type t */
+static char *w128_lit(struct w128 w, struct cty *t)
+{
+    struct cty *u = ct_unqual(t);
+    if (u->k == CT_ENUM)
+        u = u->en->underlying;
+    int big = u->k == CT_INT128 ? w.hi != ((long)w.lo < 0 ? ~0UL : 0)
+            : u->k == CT_UINT128 ? w.hi != 0 || (long)w.lo < 0 : 0;
+    if (!big)
+        return int_lit((long)w.lo, t);
+    return cx_fmt("((%s)((unsigned __int128)0x%lxUL << 64 | 0x%lxUL))",
+                  u->k == CT_INT128 ? "__int128" : "unsigned __int128",
+                  w.hi, w.lo);
+}
+
 static int addr_const(struct cexpr *e)
 {
     switch (e->k) {
@@ -1853,9 +1912,12 @@ static int addr_const(struct cexpr *e)
 static int c_const(struct cexpr *e)
 {
     long v;
+    struct w128 w;
     if (!e)
         return 1;
     if (e->t && ct_is_integer(e->t) && expr_fold(e, &v))
+        return 1;
+    if (ce_ok && e->t && ct_is_integer(e->t) && ce_value(e, &w))
         return 1;
     switch (e->k) {
     case E_INT: case E_FLT: case E_STR: case E_NULLPTR:
@@ -1923,6 +1985,11 @@ static char *cinit_text(struct cty *t, struct cexpr *e)
     }
     if (e->k == E_CAST && ct_is_pmf(e->t) && e->a[0]->t->k != CT_MPTR)
         return "{ 0, 0 }";
+    long fv;
+    struct w128 w;
+    if (e->t && ct_is_integer(e->t) && !expr_fold(e, &fv) &&
+        e->k != E_INITLIST && ce_value(e, &w))
+        return w128_lit(w, t);           /* (constant evaluation's) */
     if (e->k == E_INITLIST) {
         struct sb b = { 0, 0, 0 };
         sb_put(&b, "{ ");
@@ -2229,11 +2296,12 @@ static void local_static_names(struct cvar *v, char **guard)
 static int need_guard_init(struct cvar *v)
 {
     struct cty *t = v->type;
-    if (ct_is_ref(t))
-        return !c_const(v->init);
-    if (t->k == CT_CLASS || t->k == CT_ARRAY)
-        return v->ctor && !c_const(v->ctor);
-    return v->init && !c_const(v->init);
+    ce_ok = 1;
+    int r = ct_is_ref(t) ? !c_const(v->init)
+            : t->k == CT_CLASS || t->k == CT_ARRAY ? v->ctor && !c_const(v->ctor)
+            : v->init && !c_const(v->init);
+    ce_ok = 0;
+    return r;
 }
 
 static void emit_local_static(struct sb *b, struct cstmt *s)
@@ -3378,7 +3446,9 @@ static void emit_gvar(struct cvar *v)
     struct cexpr *ini = ct_is_ref(t) || !(t->k == CT_CLASS ||
                                           t->k == CT_ARRAY) ? v->init
                                                             : v->ctor;
+    ce_ok = 1;
     int dyn = ini && !c_const(ini);
+    ce_ok = 0;
     if (!dyn && ini)
         sb_printf(&out_vars, "%s%s%s = %s;\n", st, cdecl(t, v->cname),
                   sb_str(&attrs), ini->k == E_STR && t->k == CT_ARRAY
@@ -3429,7 +3499,10 @@ static int gvar_has_effects(struct cvar *v)
     struct cexpr *ini = ct_is_ref(t) || !(t->k == CT_CLASS ||
                                           t->k == CT_ARRAY) ? v->init
                                                             : v->ctor;
-    if (ini && !c_const(ini))
+    ce_ok = 1;
+    int dyn = ini && !c_const(ini);
+    ce_ok = 0;
+    if (dyn)
         return 1;
     struct cty *e = t;
     while (e->k == CT_ARRAY)

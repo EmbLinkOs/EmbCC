@@ -12,7 +12,9 @@
 #     compared with the other's;
 #   * variadic calls: one compiler's va_arg reading the other's arguments
 #     (in registers, then — x86-64 with one register left, aarch64 past an
-#     odd one — in 16-aligned stack slots).
+#     odd one — in 16-aligned stack slots);
+#   * a packed struct of bit-fields — one of them 128 bits at bit 3, over
+#     17 bytes — filled by one compiler and read by the other.
 set -u
 echo "TEST-MARKER int128-abi"
 . "$(dirname "$0")/../lib.sh"
@@ -35,6 +37,12 @@ u128 gcc_mul(u128 a, u128 b);
 u128 emb_mul(u128 a, u128 b);
 i128 gcc_div(i128 a, i128 b);
 i128 emb_div(i128 a, i128 b);
+struct __attribute__((packed)) PQ {
+    unsigned char c : 3; i128 x : 128; unsigned char d : 5;
+    unsigned long long y : 64; signed char e : 7; u128 z : 90;
+};
+void gcc_fill_pq(struct PQ *p);
+int gcc_check_pq(const struct PQ *p);
 i128 gcc_va(int n, ...);
 i128 emb_va(int n, ...);
 int gcc_call_emb(void);
@@ -43,6 +51,17 @@ EOF
 cat > "$out_dir/gcchalf.c" << 'EOF'
 #include <stdarg.h>
 #include "x.h"
+void gcc_fill_pq(struct PQ *p)
+{
+    p->c = 5; p->x = -((i128)1 << 120) + 77; p->d = 19;
+    p->y = 0x8765432187654321ULL; p->e = -33; p->z = ((u128)1 << 89) | 12345;
+}
+int gcc_check_pq(const struct PQ *p)
+{
+    return p->c == 2 && p->x == ((i128)1 << 126) - 99 && p->d == 31 &&
+           p->y == 0x0123456789abcdefULL && p->e == 63 &&
+           p->z == (((u128)1 << 90) - 1);
+}
 i128 gcc_va(int n, ...)
 {
     va_list ap;
@@ -124,6 +143,19 @@ int main(void)
                                   5 * ((i128)big << 3)) return 7;
     /* gcc -> EmbCC */
     if (!gcc_call_emb()) return 6;
+    /* a packed struct each way */
+    struct PQ a, b;
+    __builtin_memset(&a, 0, sizeof a);
+    gcc_fill_pq(&a);
+    if (sizeof a != 38 || a.c != 5 || a.x != -((i128)1 << 120) + 77 ||
+        a.d != 19 || a.y != 0x8765432187654321ULL || a.e != -33 ||
+        a.z != (((u128)1 << 89) | 12345))
+        return 8;
+    __builtin_memset(&b, 0, sizeof b);
+    b.c = 2; b.x = ((i128)1 << 126) - 99; b.d = 31;
+    b.y = 0x0123456789abcdefULL; b.e = 63; b.z = ((u128)1 << 90) - 1;
+    if (!gcc_check_pq(&b))
+        return 9;
     return 42;
 }
 EOF
@@ -141,4 +173,4 @@ t_run "$out_dir/prog" >/dev/null; got=$?
     echo "cross run exited $got (a nonzero N is the Nth check)"; exit 1; }
 echo "EmbCC and gcc agree on __int128 across the boundary ($ARCH): arguments"
 echo "past the registers, structs by value, returns, the same arithmetic,"
-echo "va_arg of the other's variadic arguments"
+echo "va_arg of the other's variadic arguments, packed bit-fields of it"

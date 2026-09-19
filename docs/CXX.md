@@ -937,30 +937,48 @@ as gcc calls them. It is passed as the ABIs say — x86-64 in two integer
 registers (any two) or a 16-aligned stack slot, returned in rax:rdx;
 aarch64 in an even register pair (AAPCS64 C.8, after an int in x0 it
 takes x2:x3) or a 16-aligned stack slot, returned in x0:x1 — and va_arg
-reads it so. Bit-fields of it, switch on it, static initializers folded
-in 128 bits (src/sema/w128.c). A function using it is not optimized
-(IR passes, the inliner and x86-64's register allocation skip it). C++
-mangles it `n`/`o`, evaluates constant expressions of it in 128 bits
-(static_assert, template arguments, a const static member no long
-holds), and libstdc++ compiled by EmbCC enables it: its integer traits,
-numeric_limits, to_chars/from_chars, `<random>`'s 64-bit engines and
-distributions, and Ryu's 128-bit arithmetic in floating_to_chars. So all
-193 of libstdc++'s objects are EmbCC's on both targets (floating_from_chars,
-whose fast_float multiplies in `__uint128_t`, was the last), and the 56
-programs of tests/libstdcxx and tests/cxx linked with that library agree
-with g++. tests/exec/int128.c, int128-more.c; tests/golden/int128-abi.sh
-(an EmbCC half and a gcc half calling each other: arguments past the
-registers, structs holding one, va_arg of the other's arguments);
-tests/golden/cxx-abi.sh (overloads on it across compilers);
-tests/cxx/int128.cc; tests/libstdcxx/int128.cc. Not yet: `__int128` in
-the constant-evaluation interpreter — a constexpr variable a constexpr
-function computes is initialized at run time, and a static_assert that
-needs such a call is refused (expressions without calls are folded);
-`__atomic_*` on one (refused; `_Atomic` is volatile, as for every type);
-a packed struct's bit-field of it that crosses its 16-byte unit
-(refused).
+reads it so, and `__atomic_*` / `__sync_*` do it inline and lock-free
+with a 16-byte compare-and-swap (x86-64's `lock cmpxchg16b`, aarch64's
+exclusive pair; the rest are loops of it) where gcc calls libatomic.
+Bit-fields of it, packed ones across their unit too (17 bytes at most),
+switch on it, static initializers folded in 128 bits (src/sema/w128.c).
+A function using it is not optimized (IR passes, the inliner and x86-64's
+register allocation skip it). C++ mangles it `n`/`o`, and evaluates it
+in 128 bits: constant expressions (static_assert, template arguments, a
+const static member no long holds) and constexpr functions of it, in the
+interpreter (consteval.c: an integer there is 128 bits wide). libstdc++
+compiled by EmbCC enables it: its integer traits, numeric_limits,
+to_chars/from_chars, `<random>`'s 64-bit engines and distributions, and
+Ryu's 128-bit arithmetic in floating_to_chars. So all 193 of libstdc++'s
+objects are EmbCC's on both targets (floating_from_chars, whose
+fast_float multiplies in `__uint128_t`, was the last).
+tests/exec/int128.c, int128-more.c, int128-atomic.c,
+packed-wide-bitfields.c; tests/golden/int128-abi.sh (an EmbCC half and a
+gcc half calling each other: arguments past the registers, structs
+holding one, va_arg of the other's arguments, a packed struct of its
+bit-fields); tests/golden/cxx-abi.sh (overloads on it across compilers);
+tests/cxx/int128.cc; tests/libstdcxx/int128.cc. `_Atomic` stays
+volatile, as for every type. Found on the way: a packed 64-bit
+bit-field at bit 1..7 of its first byte (9 bytes) lost its last byte;
+`__builtin_memcpy`/`memmove`/`memset` needed a prototype in sight (gcc
+knows theirs, and so does EmbCC now).
 
-Next: running the suites wholly on EmbCC's library.
+**Constant initialization** (6.9.3.2): a static object's integer
+initializer that constant evaluation gives a value — a constexpr
+function's call and all, `long x = f(3);` — is written as that value,
+statically, as g++ does; it was computed at run time, so a dynamic
+initializer running earlier (another object's constructor) read 0. Local
+statics so initialized need no guard. And the unit's dynamic
+initializers run in the order of their DEFINITIONS (6.9.3.3): an object
+declared `extern` before was initialized where it was declared.
+tests/cxx/constinit.cc.
+
+**The suites wholly on EmbCC's library.** `make test-libstdcxx`
+(tests/golden/cxx-libstdcxx-embcc.sh, opt-in: the library takes minutes
+to build) builds libstdc++ and libsupc++ from GCC's sources with EmbCC —
+every object, or it fails — and links every program of tests/libstdcxx
+and tests/cxx with that library: each must exit and print as g++'s build
+does with g++'s library, on both targets (57 programs each).
 
 Next (language): `consteval` as more than `constexpr` (a format string is
 checked at run time for now).

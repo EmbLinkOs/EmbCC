@@ -278,11 +278,97 @@ static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
     return raw;
 }
 
+/* A packed field across its unit that 8 bytes do not hold (a long long's
+ * at bit 1..7 of its first byte takes 9, an __int128's 16 or 17): worked
+ * in 128 bits — bytes [from, n) as one value, byte k at bit 8(k - from).
+ * A 17th byte, past what 128 bits hold, is read and merged apart. */
+static int bf_wide_bytes(struct ir_func *fn, int addr, int from, int n)
+{
+    struct type *u8 = ty_base(TY_CHAR, 1), *u128 = ty_base(TY_INT128, 1);
+    int raw = emit_const(fn, 0, 16);
+    for (int k = from; k < n; k++) {
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+                  : addr;
+        int b = gen_convert(fn, emit_load(fn, a, u8), u8, u128);
+        if (k > from)
+            b = emit_bin(fn, IR_SHL, b, emit_const(fn, 8 * (k - from), 4), 16,
+                         0);
+        raw = emit_bin(fn, IR_OR, raw, b, 16, 0);
+    }
+    return raw;
+}
+
+static int bf_wide_load(struct ir_func *fn, int addr, const struct member *m)
+{
+    const struct type *bt = m->ty;
+    int n = m->bf_bytes, off = m->bit_off, wd = m->bit_width;
+    int v = bf_wide_bytes(fn, addr, 0, n < 16 ? n : 16);
+    if (off)
+        v = emit_bin(fn, IR_SHR, v, emit_const(fn, off, 4), 16, 0);
+    if (n == 17) {                        /* (then off >= 1) */
+        int hi = bf_wide_bytes(fn, addr, 16, 17);
+        v = emit_bin(fn, IR_OR, v, emit_bin(fn, IR_SHL, hi,
+                                           emit_const(fn, 128 - off, 4), 16, 0),
+                     16, 0);
+    }
+    if (wd < 128) {
+        v = emit_bin(fn, IR_SHL, v, emit_const(fn, 128 - wd, 4), 16, 0);
+        v = emit_bin(fn, IR_SHR, v, emit_const(fn, 128 - wd, 4), 16,
+                     ty_signed_int(bt));
+    }
+    if (bt->kind == TY_INT128)
+        return v;
+    return gen_convert(fn, v, ty_base(TY_INT128, !ty_signed_int(bt)), bt);
+}
+
+static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
+                         int val)
+{
+    const struct type *bt = m->ty;
+    int n = m->bf_bytes, off = m->bit_off, wd = m->bit_width;
+    struct type *u8 = ty_base(TY_CHAR, 1), *u128 = ty_base(TY_INT128, 1);
+    int v = bt->kind == TY_INT128 ? val : gen_convert(fn, val, bt, u128);
+    int ones = emit_const(fn, -1, 16);
+    int fm = wd < 128 ? emit_bin(fn, IR_SHR, ones,
+                                 emit_const(fn, 128 - wd, 4), 16, 0)
+                      : ones;
+    v = emit_bin(fn, IR_AND, v, fm, 16, 0);
+    int lo = bf_wide_bytes(fn, addr, 0, n < 16 ? n : 16);
+    int pl = off ? emit_bin(fn, IR_SHL, fm, emit_const(fn, off, 4), 16, 0)
+                 : fm;
+    int nv = off ? emit_bin(fn, IR_SHL, v, emit_const(fn, off, 4), 16, 0) : v;
+    lo = emit_bin(fn, IR_OR, emit_bin(fn, IR_AND, lo,
+                                      emit_bin(fn, IR_XOR, pl, ones, 16, 0),
+                                      16, 0),
+                  nv, 16, 0);
+    for (int k = 0; k < n && k < 16; k++) {
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+                  : addr;
+        int b = k ? emit_bin(fn, IR_SHR, lo, emit_const(fn, 8 * k, 4), 16, 0)
+                  : lo;
+        emit_store(fn, a, gen_convert(fn, b, u128, u8), u8);
+    }
+    if (n == 17) {
+        int hi = bf_wide_bytes(fn, addr, 16, 17);
+        int sh = emit_const(fn, 128 - off, 4);
+        int hm = emit_bin(fn, IR_SHR, fm, sh, 16, 0);
+        hi = emit_bin(fn, IR_OR, emit_bin(fn, IR_AND, hi,
+                                          emit_bin(fn, IR_XOR, hm, ones, 16, 0),
+                                          16, 0),
+                      emit_bin(fn, IR_SHR, v, sh, 16, 0), 16, 0);
+        emit_store(fn, emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, 8), 8, 0),
+                   gen_convert(fn, hi, u128, u8), u8);
+    }
+    return bf_wide_load(fn, addr, m);
+}
+
 static int bf_load(struct ir_func *fn, int addr, const struct member *m)
 {
     const struct type *bt = m->ty;
     int w = bt->kind == TY_INT128 ? 16 : ty_wide(bt) ? 8 : 4; /* class, bytes */
     int vb = w * 8;
+    if (m->bf_bytes > 8 || (m->bf_bytes && bt->kind == TY_INT128))
+        return bf_wide_load(fn, addr, m);
     if (m->bf_bytes) {
         /* the bytes, then the same two shifts in 64 bits */
         int v = bf_bytes_load(fn, addr, m);
@@ -313,6 +399,8 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
 {
     const struct type *bt = m->ty;
     int w = ty_wide(bt) ? 8 : 4;
+    if (m->bf_bytes > 8 || (m->bf_bytes && bt->kind == TY_INT128))
+        return bf_wide_store(fn, addr, m, val);
     if (m->bf_bytes) {
         /* merge in 64 bits, then write each byte back */
         unsigned long fmask = m->bit_width >= 64
@@ -945,6 +1033,125 @@ static int atomic_value(struct ir_func *fn, struct expr *arg,
     return gen_convert(fn, gen_expr(fn, arg), arg->ty, t);
 }
 
+/* dst = the value *addr held, *addr = des if it was exp (IR_CAS16) */
+static int cas16(struct ir_func *fn, int addr, int exp, int des)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = IR_CAS16;
+    i->a = addr;
+    i->b = exp;
+    i->c = des;
+    i->size = 16;
+    i->w = 16;
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+/* *addr = f(old), atomically, by compare-and-swap until no one else wrote
+ * in between: f is `op` of old and val ('=' for val itself). Returns the
+ * old value; *nvp the one stored. */
+static int cas16_loop(struct ir_func *fn, int addr, int op, int val,
+                      const struct type *t, int *nvp)
+{
+    int cur = new_temp(fn);
+    emit_mov(fn, cur, emit_load(fn, addr, t));   /* a guess: the CAS checks */
+    int l_loop = new_label(fn), l_done = new_label(fn);
+    emit_label(fn, l_loop);
+    int nv;
+    switch (op) {
+    case '=': nv = val; break;
+    case '+': nv = emit_bin(fn, IR_ADD, cur, val, 16, 1); break;
+    case '-': nv = emit_bin(fn, IR_SUB, cur, val, 16, 1); break;
+    case '&': nv = emit_bin(fn, IR_AND, cur, val, 16, 0); break;
+    case '|': nv = emit_bin(fn, IR_OR, cur, val, 16, 0); break;
+    case '^': nv = emit_bin(fn, IR_XOR, cur, val, 16, 0); break;
+    default: {                                        /* nand */
+        struct ir_ins *n = emit(fn);
+        n->op = IR_BNOT;
+        n->a = emit_bin(fn, IR_AND, cur, val, 16, 0);
+        n->w = 16;
+        n->dst = new_temp(fn);
+        nv = n->dst;
+        break;
+    }
+    }
+    int seen = cas16(fn, addr, cur, nv);
+    emit_brnz(fn, emit_cmp(fn, B_EQ, seen, cur, 16, 0), 4, l_done);
+    emit_mov(fn, cur, seen);
+    emit_jmp(fn, l_loop);
+    emit_label(fn, l_done);
+    if (nvp)
+        *nvp = nv;
+    return cur;
+}
+
+/* The atomics of an __int128: a load is a compare-and-swap of 0 with 0
+ * (the value seen, whatever it is, and nothing changed); the rest loops */
+static int gen_atomic16(struct ir_func *fn, struct expr *e,
+                        enum atomic_kind ak, int op, const struct type *obj,
+                        int addr)
+{
+    int zero = emit_const(fn, 0, 16);
+    switch (ak) {
+    case AK_LOAD_N:
+        return cas16(fn, addr, zero, zero);
+    case AK_LOAD:
+        emit_store(fn, gen_expr(fn, e->args[1]), cas16(fn, addr, zero, zero),
+                   obj);
+        return -1;
+    case AK_STORE_N:
+        cas16_loop(fn, addr, '=', atomic_value(fn, e->args[1], obj), obj,
+                   NULL);
+        return -1;
+    case AK_STORE:
+        cas16_loop(fn, addr, '=', emit_load(fn, gen_expr(fn, e->args[1]), obj),
+                   obj, NULL);
+        return -1;
+    case AK_SYNC_LOCK_RELEASE:
+        cas16_loop(fn, addr, '=', zero, obj, NULL);
+        return -1;
+    case AK_EXCHANGE_N: case AK_SYNC_LOCK_TAS:
+        return cas16_loop(fn, addr, '=', atomic_value(fn, e->args[1], obj),
+                          obj, NULL);
+    case AK_EXCHANGE: {
+        int vp = gen_expr(fn, e->args[1]);
+        int rp = gen_expr(fn, e->args[2]);
+        emit_store(fn, rp, cas16_loop(fn, addr, '=', emit_load(fn, vp, obj),
+                                      obj, NULL), obj);
+        return -1;
+    }
+    case AK_FETCH_OP: case AK_OP_FETCH: {
+        int nv;
+        int old = cas16_loop(fn, addr, op, atomic_value(fn, e->args[1], obj),
+                             obj, &nv);
+        return ak == AK_FETCH_OP ? old : nv;
+    }
+    case AK_CMPXCHG_N: case AK_CMPXCHG: {
+        int ep = gen_expr(fn, e->args[1]);           /* &expected */
+        int des = ak == AK_CMPXCHG_N
+            ? atomic_value(fn, e->args[2], obj)
+            : emit_load(fn, gen_expr(fn, e->args[2]), obj);
+        int exp = emit_load(fn, ep, obj);
+        int seen = cas16(fn, addr, exp, des);
+        int ok = emit_cmp(fn, B_EQ, seen, exp, 16, 0);
+        int l_ok = new_label(fn);
+        emit_brnz(fn, ok, 4, l_ok);
+        emit_store(fn, ep, seen, obj);               /* *expected = seen */
+        emit_label(fn, l_ok);
+        return ok;
+    }
+    case AK_SYNC_VAL_CAS: case AK_SYNC_BOOL_CAS: {
+        int expv = atomic_value(fn, e->args[1], obj);
+        int old = cas16(fn, addr, expv, atomic_value(fn, e->args[2], obj));
+        return ak == AK_SYNC_VAL_CAS ? old
+                                     : emit_cmp(fn, B_EQ, old, expv, 16, 0);
+    }
+    default:
+        diag_fatal(fn->src->file, e->line, "internal: atomic kind %d", (int)ak);
+        return -1;
+    }
+}
+
 static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
                       int op)
 {
@@ -959,6 +1166,8 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         obj = ty_base(TY_CHAR, 1);                    /* one byte, as gcc does */
     int w = ty_w(obj), sign = ty_signed_int(obj);
     int addr = gen_expr(fn, e->args[0]);
+    if (ty_size(obj) == 16)
+        return gen_atomic16(fn, e, ak, op, obj, addr);
 
     switch (ak) {
     case AK_LOAD_N:
