@@ -392,16 +392,26 @@ static int compile(const char *in, const char *out, int pp_only)
             dwsec_ndx[s] = elfw_add_section(w, dwsec_name[s], SHT_PROGBITS, 0,
                                             dw.sec[s], (Elf64_Xword)dw.seclen[s],
                                             1);
-    /* the unwind tables (x86-64 gives .eh_frame its own section type) */
-    int eh_ndx = 0;
+    /* the unwind tables (x86-64 gives .eh_frame its own section type) and
+     * the exception tables */
+    int eh_ndx = 0, lsda_ndx = 0;
     if (unwind)
         eh_ndx = elfw_add_section(w, ".eh_frame",
                                   ta == TARGET_AARCH64 ? SHT_PROGBITS
                                                        : SHT_X86_64_UNWIND,
-                                  SHF_ALLOC, eh.frame,
-                                  (Elf64_Xword)eh.framelen, 8);
+                                  SHF_ALLOC, eh.frame.p,
+                                  (Elf64_Xword)eh.frame.len, 8);
+    if (eh.lsda.len)
+        lsda_ndx = elfw_add_section(w, ".gcc_except_table", SHT_PROGBITS,
+                                    SHF_ALLOC, eh.lsda.p,
+                                    (Elf64_Xword)eh.lsda.len, 4);
     elfw_add_symbol(w, path_basename(in), 0, 0,
                     ELF64_ST_INFO(STB_LOCAL, STT_FILE), SHN_ABS);
+    int lsda_sym = 0;
+    if (lsda_ndx)
+        lsda_sym = elfw_add_symbol(w, "", 0, 0,
+                                   ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
+                                   (Elf64_Half)lsda_ndx);
     int text_sym = elfw_add_symbol(w, "", 0, 0,
                     ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
                     (Elf64_Half)text_ndx);
@@ -594,12 +604,31 @@ static int compile(const char *in, const char *out, int pp_only)
         dwarf_free(&dw);
     }
 
-    /* the unwind tables' pointers: PC-relative, into .text */
-    for (int i = 0; i < eh.nrelocs; i++)
-        elfw_add_rela(w, eh_ndx, (Elf64_Addr)eh.relocs[i].off, text_sym,
-                      target_reloc_type(ta, RK_DATA_PREL32),
-                      target_reloc_addend(ta, RK_DATA_PREL32,
-                                          eh.relocs[i].addend));
+    /* the unwind and exception tables' pointers, all PC-relative: into
+     * .text and .gcc_except_table, to the personality routine, to the
+     * catch types' typeinfo objects */
+    int personality_sym = 0;
+    for (int i = 0; i < eh.nrelocs; i++) {
+        struct eh_reloc *r = &eh.relocs[i];
+        int sym;
+        switch (r->target) {
+        case EHT_TEXT: sym = text_sym; break;
+        case EHT_LSDA: sym = lsda_sym; break;
+        case EHT_PERSONALITY:
+            if (!personality_sym)
+                personality_sym = elfw_add_symbol(
+                    w, "__gxx_personality_v0", 0, 0,
+                    ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), SHN_UNDEF);
+            sym = personality_sym;
+            break;
+        default:
+            sym = r->glob->sym_ndx;
+            break;
+        }
+        elfw_add_rela(w, r->in_lsda ? lsda_ndx : eh_ndx, (Elf64_Addr)r->off,
+                      sym, target_reloc_type(ta, RK_DATA_PREL32),
+                      target_reloc_addend(ta, RK_DATA_PREL32, r->addend));
+    }
     eh_free(&eh);
 
     int rc = elfw_write(w, out);

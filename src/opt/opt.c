@@ -1602,6 +1602,8 @@ static int inlinable(struct ir_func *cf)
     struct func *c = cf->src;
     if (c->is_varargs || cf->nins == 0 || cf->nins > INLINE_MAX_CALLEE)
         return 0;
+    if (cf->neh)                /* exception regions: instruction ranges */
+        return 0;
     if (c->ret_ty->kind == TY_STRUCT || ty_is_float(c->ret_ty))
         return 0;
     for (int k = 0; k < c->nvars; k++)
@@ -1722,7 +1724,8 @@ static void inline_unit(struct ir_unit *iu)
         struct ir_func *fn = &iu->funcs[f];
         int done = 0;
         for (;;) {
-            if (done >= INLINE_MAX_PER_FUNC || fn->nins > INLINE_MAX_CALLER)
+            if (done >= INLINE_MAX_PER_FUNC || fn->nins > INLINE_MAX_CALLER ||
+                fn->neh)
                 break;
             int ci = -1;
             struct ir_func *cf = NULL;
@@ -1799,6 +1802,11 @@ static void opt_func(struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++)
         if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
             return;
+    /* Likewise exception regions: a landing pad is entered from every call
+     * of its region, edges the passes do not see (and its code, reached by
+     * no jump, would look dead). */
+    if (fn->neh)
+        return;
     int verify = getenv("EMBCC_VERIFY") != NULL;
     if (verify) verify_func(fn, "irgen");
     if (g_mem2reg)

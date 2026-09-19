@@ -1202,6 +1202,21 @@ static struct expr *parse_primary(struct parser *ps)
         /* va_arg(ap, type) -> __builtin_va_arg((ap), type): a special form,
          * because its second argument is a TYPE, not an expression. lhs
          * holds ap; cast_ty holds the type read. */
+        if (strcmp(t->text, "__builtin_eh_typeid") == 0) {
+            /* the selector value of a catch type (EXPR_EHTYPEID) */
+            int line = t->line;
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'(' after __builtin_eh_typeid");
+            e = new_expr(EXPR_EHTYPEID, line, 0);
+            if (cur(ps)->kind == TOK_IDENT)
+                e->name = cur(ps)->text;
+            else if (!(cur(ps)->kind == TOK_NUM && cur(ps)->num == 0))
+                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                        "expected a typeinfo object or 0");
+            advance(ps);
+            expect(ps, TOK_RPAREN, "')' to close __builtin_eh_typeid");
+            return e;
+        }
         if (strcmp(t->text, "__builtin_va_arg") == 0) {
             int line = t->line;
             advance(ps);
@@ -1845,6 +1860,56 @@ static struct stmt *parse_asm_stmt(struct parser *ps)
     return s;
 }
 
+/* __builtin_eh_region { body } __builtin_eh_landing (exc, sel, action...)
+ * { pad } — EmbCC's own statement, written by the C++ lowering (D-013,
+ * CX5): a call in body that throws lands in pad, the exception pointer
+ * stored to exc and the selector to sel; actions are catch types
+ * (typeinfo objects, or 0 for any) and __eh_cleanup. */
+static struct stmt *parse_eh_region(struct parser *ps)
+{
+    struct token *t = cur(ps);
+    struct stmt *s = new_stmt(STMT_EHREGION, t->line, t->col);
+    advance(ps);
+    if (cur(ps)->kind != TOK_LBRACE)
+        diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                "expected '{' after __builtin_eh_region");
+    s->body = parse_stmt(ps, 1);
+    t = cur(ps);
+    if (t->kind != TOK_IDENT || strcmp(t->text, "__builtin_eh_landing") != 0)
+        diag_at(ps->lx.file, t->line, t->col,
+                "expected __builtin_eh_landing after an exception region");
+    advance(ps);
+    expect(ps, TOK_LPAREN, "'(' after __builtin_eh_landing");
+    s->expr = parse_expr(ps);
+    expect(ps, TOK_COMMA, "',' after the exception pointer");
+    s->cond = parse_expr(ps);
+    int cap = 0;
+    while (cur(ps)->kind == TOK_COMMA) {
+        advance(ps);
+        t = cur(ps);
+        if (s->neh_acts == cap) {
+            cap = cap ? cap * 2 : 4;
+            s->eh_acts = xrealloc(s->eh_acts, (size_t)cap * sizeof *s->eh_acts);
+        }
+        struct eh_act *a = &s->eh_acts[s->neh_acts++];
+        memset(a, 0, sizeof *a);
+        if (t->kind == TOK_IDENT && strcmp(t->text, "__eh_cleanup") == 0)
+            a->cleanup = 1;
+        else if (t->kind == TOK_IDENT)
+            a->name = t->text;
+        else if (!(t->kind == TOK_NUM && t->num == 0))
+            diag_at(ps->lx.file, t->line, t->col,
+                    "expected a typeinfo object, 0 or __eh_cleanup");
+        advance(ps);
+    }
+    expect(ps, TOK_RPAREN, "')' to close __builtin_eh_landing");
+    if (cur(ps)->kind != TOK_LBRACE)
+        diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                "expected '{' to begin the landing pad");
+    s->thn = parse_stmt(ps, 1);
+    return s;
+}
+
 static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
 {
     struct token *t = cur(ps);
@@ -1852,6 +1917,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
 
     if (t->kind == TOK_KW_ASM)
         return parse_asm_stmt(ps);
+    if (t->kind == TOK_IDENT && strcmp(t->text, "__builtin_eh_region") == 0)
+        return parse_eh_region(ps);
 
     /* A block-scope `_Static_assert`: checked now, emits nothing. */
     if (t->kind == TOK_KW_STATIC_ASSERT) {

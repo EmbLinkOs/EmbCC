@@ -1037,11 +1037,15 @@ static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int w)
     return gen_convert(fn, r, ut, ty_base(TY_INT, 0));    /* the result is int */
 }
 
+static int eh_type_index(struct ir_func *fn, struct global *ti);
+
 int gen_expr(struct ir_func *fn, struct expr *e)
 {
     switch (e->kind) {
     case EXPR_NUM:
         return emit_const(fn, e->num, ty_w(e->ty));
+    case EXPR_EHTYPEID:          /* a catch type's selector: a constant */
+        return emit_const(fn, eh_type_index(fn, e->gref), 8);
     case EXPR_FNUM:
         if (e->ty->kind == TY_LDOUBLE)
             return emit_ldconst(fn, e->ldv ? e->ldv : ldf_from_double(e->fnum));
@@ -1643,6 +1647,79 @@ struct loopctx {
                               * break/continue leaves are those above it */
 };
 
+/* The exception region being generated (ir_func.eh), or -1. */
+static int g_eh_cur = -1;
+
+/* The selector a landing pad sees for catch type ti (NULL: catch-all):
+ * its 1-based place in the function's type table. */
+static int eh_type_index(struct ir_func *fn, struct global *ti)
+{
+    for (int i = 0; i < fn->neh_types; i++)
+        if (fn->eh_types[i] == ti)
+            return i + 1;
+    fn->eh_types = xrealloc(fn->eh_types, (size_t)(fn->neh_types + 1) *
+                                          sizeof *fn->eh_types);
+    fn->eh_types[fn->neh_types++] = ti;
+    return fn->neh_types;
+}
+
+static void gen_eh_region(struct ir_func *fn, struct stmt *s,
+                          const struct loopctx *loop)
+{
+    int r = fn->neh++;
+    fn->eh = xrealloc(fn->eh, (size_t)fn->neh * sizeof *fn->eh);
+    memset(&fn->eh[r], 0, sizeof fn->eh[r]);
+    fn->eh[r].parent = g_eh_cur;
+    fn->eh[r].acts = s->eh_acts;
+    fn->eh[r].nacts = s->neh_acts;
+    int lp = fn->eh[r].lp_label = new_label(fn);
+    int end = new_label(fn);
+    for (int i = 0; i < s->neh_acts; i++)
+        if (!s->eh_acts[i].cleanup)
+            eh_type_index(fn, s->eh_acts[i].ti);
+    int saved = g_eh_cur;
+    g_eh_cur = r;
+    fn->eh[r].lo = fn->nins;
+    gen_stmt(fn, s->body, loop);
+    fn->eh[r].hi = fn->nins;
+    g_eh_cur = saved;
+    emit_jmp(fn, end);
+    /* the landing pad: its calls are the enclosing region's */
+    emit_label(fn, lp);
+    struct ir_ins *i = emit(fn);
+    i->op = IR_LANDING;
+    i->dst = new_temp(fn);
+    i->b = new_temp(fn);
+    i->w = 8;
+    int exc = i->dst, sel = i->b;
+    emit_store(fn, gen_addr(fn, s->expr), exc, s->expr->ty);
+    emit_store(fn, gen_addr(fn, s->cond), sel, s->cond->ty);
+    gen_stmt(fn, s->thn, loop);
+    emit_label(fn, end);
+}
+
+void ir_add_csite(struct ir_func *fn, int start, int end, int region)
+{
+    if (fn->ncsites == fn->capcsites) {
+        fn->capcsites = fn->capcsites ? fn->capcsites * 2 : 16;
+        fn->csites = xrealloc(fn->csites,
+                              (size_t)fn->capcsites * sizeof *fn->csites);
+    }
+    fn->csites[fn->ncsites].start = start;
+    fn->csites[fn->ncsites].end = end;
+    fn->csites[fn->ncsites].region = region;
+    fn->ncsites++;
+}
+
+/* Each call's innermost region (regions are numbered outermost first). */
+static void mark_eh_calls(struct ir_func *fn)
+{
+    for (int r = 0; r < fn->neh; r++)
+        for (int n = fn->eh[r].lo; n < fn->eh[r].hi; n++)
+            if (fn->ins[n].op == IR_CALL)
+                fn->ins[n].eh_region = r + 1;
+}
+
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop)
 {
@@ -1657,6 +1734,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
         case STMT_CONTINUE:
             vla_release(fn, loop->cont_vla);
             emit_jmp(fn, loop->cont);
+            break;
+        case STMT_EHREGION:
+            gen_eh_region(fn, s, loop);
             break;
         case STMT_LABEL: {
             int ix = label_idx(fn, s->name, s->line);
@@ -2002,6 +2082,10 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
             collect_locals(fn, s->thn);
             collect_locals(fn, s->els);
             break;
+        case STMT_EHREGION:
+            collect_locals(fn, s->body);
+            collect_locals(fn, s->thn);
+            break;
         case STMT_WHILE:
         case STMT_DO:
             collect_locals(fn, s->body);
@@ -2046,7 +2130,10 @@ static void gen_func(struct ir_func *fn, struct func *f)
     if (f->has_vm_params)               /* `int a[n][m]`: its row size */
         for (int i = 0; i < f->nparams; i++)
             vla_eval(fn, f->param_tys[i]);
+    g_eh_cur = -1;
     gen_stmt(fn, f->body, NULL);
+    if (fn->neh)
+        mark_eh_calls(fn);
     for (int i = 0; i < f->nvars; i++)  /* clamp the un-narrowed default */
         if (fn->var_scope_hi[i] == 0x7fffffff)
             fn->var_scope_hi[i] = fn->nins;

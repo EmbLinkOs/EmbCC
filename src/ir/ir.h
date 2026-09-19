@@ -85,8 +85,11 @@ enum ir_op {
     IR_ALLOCA,    /* dst = a fresh 16-aligned block of `a` bytes on the
                    * stack, above the outgoing-argument area (a VLA) */
     IR_SPSAVE,    /* dst = the stack pointer */
-    IR_SPRESTORE  /* stack pointer = a (releases every IR_ALLOCA since the
+    IR_SPRESTORE, /* stack pointer = a (releases every IR_ALLOCA since the
                    * IR_SPSAVE that produced a) */
+    IR_LANDING    /* a landing pad's entry (exception regions): dst = the
+                   * exception pointer, b = the selector — what the unwinder
+                   * left in rax/rdx (x0/x1) */
 };
 
 /* One resolved asm operand: an input carries the temp holding its VALUE, an
@@ -168,6 +171,27 @@ struct ir_ins {
                               * 2 a long double _Complex in st0/st1 */
     int scratch;             /* frame offset of the returned struct */
     struct ir_asm *asm_ir;   /* IR_ASM */
+    int eh_region;           /* IR_CALL: 1 + the innermost exception region
+                              * it is in (ir_func.eh), 0 if none */
+};
+
+/* An exception region (STMT_EHREGION): instructions [lo, hi) are its
+ * body; a call among them that throws lands at lp_label. */
+struct ir_eh {
+    int parent;              /* the enclosing region, or -1 */
+    int lo, hi;
+    int lp_label;
+    struct eh_act *acts;
+    int nacts;
+    int lp_off;              /* codegen: the landing pad's offset in the
+                              * function's code */
+};
+
+/* codegen: a call's code in a function with exception regions — its
+ * offsets in the function's code and its region (ir_ins.eh_region). */
+struct ir_csite {
+    int start, end;
+    int region;
 };
 
 /* One line-table row: a .text offset (within this function) maps to a
@@ -205,6 +229,15 @@ struct ir_func {
      * function-level locals span the whole function; only nested-block locals get
      * a narrower range. Length nvars; unused (NULL) when there are no locals. */
     int *var_scope_lo, *var_scope_hi;
+    /* exception regions (C++'s lowering), the catch types their landing
+     * pads' selectors number (1-based; NULL: catch-all), and — codegen —
+     * every call's code */
+    struct ir_eh *eh;
+    int neh;
+    struct global **eh_types;
+    int neh_types;
+    struct ir_csite *csites;
+    int ncsites, capcsites;
 };
 
 /* One .rodata string; offsets are assigned sequentially at collection
@@ -225,6 +258,10 @@ struct ir_unit {
 };
 
 struct ir_unit *irgen(struct unit *u);
+
+/* codegen: record a call's code (offsets in the function's code) in a
+ * function with exception regions. */
+void ir_add_csite(struct ir_func *fn, int start, int end, int region);
 
 /* Intern a string into the unit's .rodata pool (used by the driver to
  * place a global initializer's string targets). Returns its index; the

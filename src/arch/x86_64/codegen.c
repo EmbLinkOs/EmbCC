@@ -1466,6 +1466,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
     for (int n = 0; n < fn->nins; n++)
         if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
             { g_has_cgoto = 1; break; }
+    /* So does a landing pad, entered from any call of its region (a
+     * control-flow edge the liveness below does not see). */
+    if (fn->neh)
+        g_has_cgoto = 1;
     /* Give such a function the plain memory model for its whole codegen: no
      * register allocation and no RAX residency cache. Both reason about values
      * across straight-line control flow, which an indirect jump violates (the
@@ -1689,6 +1693,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int *epi_patch = NULL, nepi = 0, capepi = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        int ins_start = text->len;
         /* -g: a row where the source line changes. text->len is the .text
          * offset this instruction's code begins at (the switch below emits
          * it). Multiple IR ops from one statement share a line and collapse
@@ -2717,7 +2722,17 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_epilogue(text);
             }
             break;
+        case IR_LANDING:
+            /* the unwinder left the exception in rax, the selector in rdx */
+            cg_reset();
+            cg_store(text, sd, i->dst, 8);
+            x86_mov_reg_reg(text, REG_RAX, REG_RDX);
+            cg_store(text, sd, i->b, 8);
+            break;
         }
+        if (i->op == IR_CALL && fn->neh)
+            ir_add_csite(fn, ins_start - f->code_off, text->len - f->code_off,
+                         i->eh_region - 1);
     }
 
     /* Every function ends with an epilogue, whether or not its last
@@ -2750,6 +2765,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
     }
     free(epi_patch);
 
+    for (int r = 0; r < fn->neh; r++)      /* where each landing pad is */
+        fn->eh[r].lp_off = label_off[fn->eh[r].lp_label] - f->code_off;
     for (int n = 0; n < nbrs; n++) {
         int target = label_off[brs[n].label];
         if (target < 0) {

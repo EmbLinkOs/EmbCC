@@ -24,7 +24,10 @@ enum expr_kind { EXPR_NUM, EXPR_FNUM, EXPR_STR, EXPR_VAR, EXPR_BINOP, EXPR_CALL,
                  EXPR_MEMBER, EXPR_COND, EXPR_COMMA,
                  EXPR_COMPOUND, EXPR_INITLIST, EXPR_VA_ARG, EXPR_COMPLIT,
                  EXPR_GENERIC, EXPR_STMTEXPR, EXPR_LABELADDR,
-                 EXPR_REAL, EXPR_IMAG };   /* GNU __real__ / __imag__ (rhs) */
+                 EXPR_REAL, EXPR_IMAG,     /* GNU __real__ / __imag__ (rhs) */
+                 EXPR_EHTYPEID };  /* __builtin_eh_typeid(ti): the selector
+                                    * value a landing pad sees for catch
+                                    * type ti (name; 0 = catch-all) */
 
 struct stmt;   /* a statement expression `({ ... })` carries a block */
 
@@ -131,7 +134,19 @@ struct greloc {
 enum stmt_kind { STMT_RETURN, STMT_DECL, STMT_EXPR, STMT_IF, STMT_WHILE,
                  STMT_FOR, STMT_BLOCK, STMT_BREAK, STMT_CONTINUE,
                  STMT_DO, STMT_SWITCH, STMT_CASE, STMT_DEFAULT, STMT_ASM,
-                 STMT_LABEL, STMT_GOTO };
+                 STMT_LABEL, STMT_GOTO,
+                 STMT_EHREGION };  /* EmbCC's own, for C++'s lowering: calls
+                                    * in `body` that throw land in `thn` */
+
+/* An action of an exception region (STMT_EHREGION): a catch clause's type
+ * (the typeinfo object `name`; NULL: catch-all) or a cleanup. The landing
+ * pad runs for any of them; a region's calls inherit its enclosing
+ * regions' actions after their own. */
+struct eh_act {
+    int cleanup;
+    const char *name;
+    struct global *ti;    /* sema: the typeinfo object */
+};
 
 /* One operand of an extended-asm statement: a constraint string and the C
  * expression it binds. Output constraints begin with '=' (or '+') and name
@@ -209,6 +224,10 @@ struct stmt {
      * C's fallthrough means they cannot be nested nodes. */
     long cval;
     int label;            /* irgen: the marker's label id */
+    /* STMT_EHREGION: body the region, thn the landing pad; expr and cond
+     * the lvalues the exception pointer and the selector are stored to */
+    struct eh_act *eh_acts;
+    int neh_acts;
 };
 
 /* A file-scope variable. Like functions, later declarations merge into

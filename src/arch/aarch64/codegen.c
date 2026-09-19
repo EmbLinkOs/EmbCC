@@ -683,6 +683,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        int ins_start = t->len;
 
         /* -g: a line-table row wherever the source line changes, exactly
          * as the x86 backend records them (t->len is where this
@@ -1298,12 +1299,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
             a64_br(t, A64_ADDR);
             break;
+        case IR_LANDING:
+            /* the unwinder left the exception in x0, the selector in x1 */
+            st_slot(t, sd, i->dst, 0, 8);
+            st_slot(t, sd, i->b, 1, 8);
+            break;
         default:
             diag_fatal(f->file, i->line ? i->line : f->line,
                        "aarch64 codegen: unhandled IR op %d in '%s'",
                        (int)i->op, f->name);
             break;
         }
+        if (i->op == IR_CALL && fn->neh)
+            ir_add_csite(fn, ins_start - f->code_off, t->len - f->code_off,
+                         i->eh_region - 1);
     }
 
     /* The single epilogue every `return` branches to. With a VLA, sp is
@@ -1336,6 +1345,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
     }
 
+    for (int r = 0; r < fn->neh; r++)      /* where each landing pad is */
+        fn->eh[r].lp_off = loff[fn->eh[r].lp_label] - f->code_off;
     f->code_len = t->len - f->code_off;
     free(loff); free(fix); free(retfix); free(sd);
 }

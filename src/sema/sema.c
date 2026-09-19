@@ -1022,6 +1022,16 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * existence is resolved in irgen (labels may be forward-referenced). */
         e->ty = ty_ptr(ty_base(TY_VOID, 0));
         break;
+    case EXPR_EHTYPEID:
+        if (e->name) {
+            e->gref = find_global(u, e->name);
+            if (!e->gref)
+                diag_at(u->file, e->line, e->col, "'%s' is not a declared "
+                        "typeinfo object", e->name);
+            e->gref->used = 1;
+        }
+        e->ty = ty_base(TY_LONG, 1);
+        break;
     case EXPR_ADDR:
         check_expr(u, f, sc, e->rhs);
         if (e->rhs->fref) {
@@ -2877,6 +2887,29 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             /* the labeled statement is checked in the label's own context */
             check_stmt(u, f, sc, s->body, in_loop, in_switch, 0);
             break;
+        case STMT_EHREGION:
+            check_stmt(u, f, sc, s->body, in_loop, in_switch, 0);
+            check_expr(u, f, sc, s->expr);
+            check_expr(u, f, sc, s->cond);
+            if (!is_lvalue(s->expr) || s->expr->ty->kind != TY_PTR)
+                diag_at(u->file, s->line, s->col, "a landing pad's exception "
+                        "pointer must be a pointer lvalue");
+            if (!is_lvalue(s->cond) || !ty_is_integer(s->cond->ty) ||
+                ty_size(s->cond->ty) != 8)
+                diag_at(u->file, s->line, s->col, "a landing pad's selector "
+                        "must be a long lvalue");
+            for (int i = 0; i < s->neh_acts; i++) {
+                struct eh_act *a = &s->eh_acts[i];
+                if (!a->name)
+                    continue;
+                a->ti = find_global(u, a->name);
+                if (!a->ti)
+                    diag_at(u->file, s->line, s->col, "'%s' is not a declared "
+                            "typeinfo object", a->name);
+                a->ti->used = 1;
+            }
+            check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
+            break;
         case STMT_GOTO:
             /* target existence is validated function-wide at codegen */
             if (s->expr) {   /* computed goto `goto *expr` (GNU) */
@@ -2911,6 +2944,10 @@ static int has_own_break(struct stmt *s)
         case STMT_IF:
             if (has_own_break(s->thn) ||
                 (s->els && has_own_break(s->els)))
+                return 1;
+            break;
+        case STMT_EHREGION:
+            if (has_own_break(s->body) || has_own_break(s->thn))
                 return 1;
             break;
         default:
@@ -2954,6 +2991,8 @@ static int stmt_returns(struct stmt *s)
         return list_returns(s->body);
     case STMT_IF:
         return s->els && stmt_returns(s->thn) && stmt_returns(s->els);
+    case STMT_EHREGION:          /* either way, returning */
+        return stmt_returns(s->body) && stmt_returns(s->thn);
     case STMT_SWITCH: {
         /* Sound: with a default every value matches something, and with
          * no break the only way out is falling off the end — which the
