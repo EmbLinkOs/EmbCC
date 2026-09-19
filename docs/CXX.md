@@ -465,10 +465,48 @@ queries of `<atomic>` folded; an instantiated body leaves an unevaluated
 operand's context; the preprocessor takes `M()` as one empty argument of
 a one-parameter macro.
 
-Next: a program using std::map (a `tuple` constructor overload is
-ambiguous), `<functional>`, `<chrono>`, `<variant>`, `<fstream>`,
-`<iomanip>`, `<thread>`; out-of-class members of partial specializations
-are still skipped.
+A second program runs the same way: tests/libstdcxx/map.cc (std::map
+with string and int keys — `operator[]`'s piecewise construction through
+tuples, a braced `insert`, ordered iteration, structured bindings).
+`<functional>`, `<fstream>`, `<variant>`, `<thread>`, `<mutex>`,
+`<condition_variable>`, `<future>` and `<shared_mutex>` compile too. On the
+way: a value template parameter whose type is dependent (`typename
+enable_if<C, bool>::type = true`) is substituted during deduction, a
+failure dropping the candidate (pair's implicit and explicit constructors
+were both viable); deduction sees through alias templates (the alias's own
+parameters deduced through its pattern, then the written arguments from
+those — `index_sequence<I...>`); a base class template is deduced from
+each of a class's bases that are instances of it (tuple's `_Tuple_impl<I,
+...>`); member templates of class templates defined outside the class, and
+their out-of-class destructors; pack expansions in a variable's
+parenthesized initializer; Clang's `__make_integer_seq` (libstdc++ asks
+`__has_builtin` and builds its index sequences with it; the classes, and
+so the ABI, are g++'s); fold-expressions in dependent template arguments;
+partial ordering that sees `__void_t<...>` as `void`; a call's explicit
+template arguments no longer leak into the calls resolved while deducing
+it (they dropped every non-template constructor there); conversions to an
+instance not yet instantiated; a converting constructor taking its class
+by value; a defaulted constructor first needed in an unevaluated operand
+still instantiates what it calls; the primary template's out-of-class
+static members not defined for an explicit specialization, and a
+template's static data members weak, as inline variables are — whose
+dynamic initialization is now guarded by Itanium's `_ZGV` variable (each
+unit that defines one initializes it once). The ambiguity error lists the
+two candidates. tests/cxx `templates3`.
+
+The C front end, on the way (the C++ front end emits it for
+`std::forward<const char (&)[N]>`): declarators nested in parentheses
+around a function declarator — functions returning pointers to functions
+or to arrays, `void (*signal(int, void (*)(int)))(int)` — declared and
+defined; the declarator reader is now general (a parenthesized declarator
+read after the suffixes that bind tighter). tests/exec `nested-decl`.
+
+Next: `<=>` (three-way comparison, which `<chrono>`'s calendar types use
+unconditionally), `<iomanip>`/`<locale>`/`<regex>` (explicit
+specializations of static data members), `<any>`, `<list>`, `<random>`,
+`<complex>`, `<string_view>`, `<charconv>`/`<format>`,
+`<memory_resource>`; out-of-class members of partial specializations are
+still skipped.
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their

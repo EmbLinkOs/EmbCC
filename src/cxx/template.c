@@ -515,6 +515,21 @@ static int deduce_exact;
 /* ... a dependent part of the pattern was skipped: the match is known
  * only once the pattern is substituted */
 static int deduce_deferred;
+/* Ordering two templates (patterns against patterns): an alias whose type
+ * does not depend on its arguments is that type (__void_t<...> is void) */
+static int deduce_ordering;
+
+static struct cty *alias_plain(struct cty *t)
+{
+    while (t->k == CT_DEP && t->tmpl && t->tmpl->kind == TK_ALIAS &&
+           !t->tmpl->tparam) {
+        struct cty *pat = alias_pattern(t->tmpl);
+        if (!pat || ct_dependent(pat))
+            break;
+        t = t->q ? ct_qual(pat, pat->q | t->q) : pat;
+    }
+    return t;
+}
 
 /* Is A (a class) or one of its bases an instance of template tm? */
 static struct cclass *instance_base(struct cclass *c, struct ctemplate *tm)
@@ -637,11 +652,98 @@ static struct cty *strip_elem_cv(struct cty *a, unsigned q)
     return ct_array(strip_elem_cv(a->to, q), a->n);
 }
 
+/* The bases of c (c itself first, then outward) that are instances of
+ * template tm */
+static void instance_bases(struct cclass *c, struct ctemplate *tm,
+                           struct cclass ***v, int *n, int *cap)
+{
+    if (c->tmpl == tm) {
+        for (int i = 0; i < *n; i++)
+            if ((*v)[i] == c)
+                return;
+        if (*n == *cap) {
+            *cap = *cap ? *cap * 2 : 8;
+            *v = xrealloc(*v, (size_t)*cap * sizeof **v);
+        }
+        (*v)[(*n)++] = c;
+    }
+    class_ensure(c);
+    for (int i = 0; i < c->nbases; i++)
+        instance_bases(c->bases[i].cls, tm, v, n, cap);
+}
+
+/* P = B<...> against a class deriving from instances of B: each tried
+ * (13.10.3.2/4.3) — `_Tuple_impl<I, H, T...>&` from a tuple, whose bases
+ * are _Tuple_impl<0, ...>, <1, ...>, ...: the one that deduces */
+static int deduce_from_bases(struct cty *P, struct cclass *c,
+                             struct ctarg *out, int *set, int np)
+{
+    struct cclass **v = NULL;
+    int n = 0, cap = 0;
+    instance_bases(c, P->tmpl, &v, &n, &cap);
+    struct ctarg *o1 = xcalloc((size_t)(np ? np : 1), sizeof *o1);
+    int *s1 = xcalloc((size_t)(np ? np : 1), sizeof *s1);
+    int nP = P->ntargs;
+    struct ctarg *pf = flatten(P->targs, &nP);
+    for (int k = 0; k < n; k++) {
+        memcpy(o1, out, (size_t)np * sizeof *o1);
+        memcpy(s1, set, (size_t)np * sizeof *s1);
+        int na = v[k]->ntargs;
+        struct ctarg *flat = flatten(v[k]->targs, &na);
+        if (deduce_seq(pf, nP, flat, na, o1, s1, np)) {
+            memcpy(out, o1, (size_t)np * sizeof *out);
+            memcpy(set, s1, (size_t)np * sizeof *set);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* P an alias template-id with dependent arguments (index_sequence<I...>,
+ * an alias being the type it names, 13.7.8): the alias's own parameters
+ * deduced from A through its pattern (integer_sequence<size_t, I...>),
+ * then P's arguments as written from those. Parameters the pattern leaves
+ * undeduced (a non-deduced context, as in enable_if_t) deduce nothing. */
+static int deduce_alias(struct cty *P, struct cty *A, struct ctarg *out,
+                        int *set, int np)
+{
+    struct ctemplate *al = P->tmpl;
+    struct cty *pat = alias_pattern(al);
+    if (!pat)
+        return 1;
+    int anp = al->nparams;
+    struct ctarg *aout = xcalloc((size_t)(anp ? anp : 1), sizeof *aout);
+    int *aset = xcalloc((size_t)(anp ? anp : 1), sizeof *aset);
+    if (!deduce(pat, A, aout, aset, anp))
+        return 0;
+    int nw = P->ntargs, k = 0;
+    struct ctarg *w = flatten(P->targs, &nw);
+    for (int i = 0; i < anp && k < nw; i++) {
+        struct ctparam *p = &al->params[i];
+        if (p->pack) {
+            if (aset[i] && !deduce_seq(w + k, nw - k, aout[i].elems,
+                                       aout[i].nelems, out, set, np))
+                return 0;
+            break;
+        }
+        if (w[k].expansion)
+            break;            /* spread over parameters: not deduced */
+        if (aset[i] && !deduce_arg(&w[k], &aout[i], out, set, np))
+            return 0;
+        k++;
+    }
+    return 1;
+}
+
 /* Deduce the template parameters P mentions from the argument type A
  * (13.10.3.6): out[i] for parameter i, set[i] once known. */
 static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
                   int *set, int np)
 {
+    if (deduce_ordering) {
+        P = alias_plain(P);
+        A = alias_plain(A);
+    }
     if (deduce_exact && P->k != CT_TPARAM && P->q != A->q)
         return 0;
     switch (P->k) {
@@ -762,6 +864,8 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
             }
         } else {
             c = instance_base(A->cls, P->tmpl);
+            if (c && c != A->cls && !deduce_exact)
+                return deduce_from_bases(P, A->cls, out, set, np);
         }
         if (!c)
             return 0;
@@ -771,6 +875,11 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
         struct ctarg *pf = flatten(P->targs, &nP);
         return deduce_seq(pf, nP, flat, na, out, set, np);
     }
+    case CT_DEP:
+        if (!deduce_exact && P->tmpl && P->tmpl->kind == TK_ALIAS &&
+            !P->tmpl->tparam)
+            return deduce_alias(P, A, out, set, np);
+        /* fall through */
     default:
         /* non-deduced: checked by conversion later — or, matching a
          * partial specialization, the same type; a dependent one
@@ -808,10 +917,11 @@ static int at_least_as_specialized(struct ctemplate *a, struct ctemplate *b,
          * unique one */
         memset(out, 0, (size_t)(np > 0 ? np : 1) * sizeof *out);
         memset(set, 0, (size_t)(np > 0 ? np : 1) * sizeof *set);
-        int saved = deduce_exact;
-        deduce_exact = 1;
+        int saved = deduce_exact, saved_ord = deduce_ordering;
+        deduce_exact = deduce_ordering = 1;
         int ok = deduce(ct_unqual(P), ct_unqual(A), out, set, np);
         deduce_exact = saved;
+        deduce_ordering = saved_ord;
         if (!ok)
             return 0;
         /* T&& does not take the place of T& */
@@ -825,6 +935,40 @@ int more_specialized(struct ctemplate *a, struct ctemplate *b, int n)
 {
     return at_least_as_specialized(a, b, n) &&
            !at_least_as_specialized(b, a, n);
+}
+
+/* A value parameter whose type is dependent (`typename enable_if<C,
+ * bool>::type = true`): its type substituted with the arguments before
+ * it — failing, deduction fails (13.10.3.1) — and its argument converted
+ * to it. */
+static int value_type_substitutes(struct ctemplate *t, int i,
+                                  struct ctarg *out, int np)
+{
+    struct ctparam *p = &t->params[i];
+    if (p->kind != TP_VALUE || p->pack || p->vtype_tok < 0 || !p->vtype ||
+        !ct_dependent(p->vtype) || out[i].is_pack)
+        return 1;
+    jmp_buf jb;
+    void *saved = cx_sfinae;
+    struct parse_state *st = parse_save();
+    if (setjmp(jb)) {
+        parse_restore(st);
+        cx_sfinae = saved;
+        return 0;
+    }
+    cx_sfinae = &jb;
+    cx_scope = tparam_scope(t->params, np, out, i, t->scope);
+    cx_half_gt = 0;
+    cx_in_targs = 1;
+    struct cty *vt = parse_value_tparam_type(p->vtype_tok);
+    cx_sfinae = saved;
+    parse_restore(st);
+    if (ct_is_integer(vt) && !ct_dependent(vt)) {
+        out[i].vtype = ct_unqual(vt);
+        if (out[i].vtype->k == CT_BOOL)
+            out[i].value = out[i].value != 0;
+    }
+    return 1;
 }
 
 /* Template t's arguments deduced from a function type A (its address
@@ -854,8 +998,11 @@ int deduce_func_type(struct ctemplate *t, struct ctarg *expl, int nexpl,
     if (!deduce(t->pattern->type, A, out, set, np))
         return 0;
     for (int i = 0; i < np; i++) {
-        if (set[i])
+        if (set[i]) {
+            if (!value_type_substitutes(t, i, out, np))
+                return 0;
             continue;
+        }
         if (t->params[i].pack) {
             out[i].kind = t->params[i].kind;
             out[i].is_pack = 1;
@@ -875,6 +1022,8 @@ int deduce_func_type(struct ctemplate *t, struct ctarg *expl, int nexpl,
         out[i] = default_arg(t, t->params, np, i, out, t->scope, cx_cur());
         cx_sfinae = saved;
         parse_restore(st);
+        if (!value_type_substitutes(t, i, out, np))
+            return 0;
     }
     *outp = out;
     *nout = np;
@@ -1020,8 +1169,11 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
     }
     /* a pack deduced from nothing is empty; the rest default */
     for (int i = 0; i < np; i++) {
-        if (set[i])
+        if (set[i]) {
+            if (!value_type_substitutes(t, i, out, np))
+                return 0;
             continue;
+        }
         if (t->params[i].pack) {
             out[i].kind = t->params[i].kind;
             out[i].is_pack = 1;
@@ -1046,6 +1198,8 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
         cx_sfinae = saved;
         parse_restore(st);
         set[i] = 1;
+        if (!value_type_substitutes(t, i, out, np))
+            return 0;
     }
     *outp = out;
     *nout = np;
@@ -1151,7 +1305,11 @@ static int partial_matches(struct cpartial *p, struct ctarg *a, int na,
 static int partial_at_least(struct cpartial *a, struct cpartial *b)
 {
     struct ctarg *bound;
-    return partial_matches(b, a->pattern, a->npattern, &bound, NULL);
+    int saved = deduce_ordering;
+    deduce_ordering = 1;
+    int r = partial_matches(b, a->pattern, a->npattern, &bound, NULL);
+    deduce_ordering = saved;
+    return r;
 }
 
 /* Are partial specialization p's constraints satisfied, its parameters
@@ -1374,11 +1532,67 @@ void func_ensure_body(struct cfunc *f)
     inst_depth--;
 }
 
+struct cty *alias_pattern(struct ctemplate *t)
+{
+    if (t->alias_pat_done)
+        return t->alias_pat;
+    t->alias_pat_done = 1;
+    if (!t->pscope || t->builtin)
+        return NULL;
+    jmp_buf jb;
+    void *saved = cx_sfinae;
+    struct parse_state *st = parse_save();
+    if (setjmp(jb)) {
+        parse_restore(st);
+        cx_sfinae = saved;
+        return NULL;
+    }
+    cx_sfinae = &jb;
+    cx_scope = t->pscope;
+    cx_pos = t->decl_tok;
+    cx_half_gt = 0;
+    cx_in_targs = 0;
+    cx_pattern = 1;
+    t->alias_pat = parse_type_id();
+    cx_sfinae = saved;
+    parse_restore(st);
+    return t->alias_pat;
+}
+
+/* __make_integer_seq<TT, T, N>: TT<T, 0, 1, ..., N - 1> */
+static struct cty *make_integer_seq(struct ctemplate *t, struct ctarg *a,
+                                    const struct ctok *at)
+{
+    if (!a[0].tmpl || a[0].tmpl->tparam || !a[1].type ||
+        !ct_is_integer(a[1].type))
+        cx_error(at, "'%s' takes a template, an integer type and a count",
+                 t->name);
+    long num = a[2].value;
+    if (num < 0 || num > 100000)
+        cx_error(at, "'%s' of %ld elements", t->name, num);
+    struct ctarg *r = xcalloc((size_t)num + 1, sizeof *r);
+    r[0].kind = TP_TYPE;
+    r[0].type = a[1].type;
+    for (long i = 0; i < num; i++) {
+        r[i + 1].kind = TP_VALUE;
+        r[i + 1].value = i;
+        r[i + 1].vtype = ct_unqual(a[1].type);
+    }
+    struct ctemplate *tt = a[0].tmpl;
+    if (tt->kind == TK_ALIAS)
+        return alias_instance(tt, r, (int)num + 1, at);
+    if (tt->kind != TK_CLASS)
+        cx_error(at, "'%s' takes a class or alias template", t->name);
+    return ct_class(class_instance(tt, r, (int)num + 1, at));
+}
+
 struct cty *alias_instance(struct ctemplate *t, struct ctarg *args, int n,
                            const struct ctok *at)
 {
     struct ctarg *a = fit_args(t, t->params, t->nparams, args, n, t->scope,
                                at);
+    if (t->builtin == BT_MAKE_INTEGER_SEQ)
+        return make_integer_seq(t, a, at);
     for (struct cinst *in = t->insts; in; in = in->next)
         if (args_same(in->args, in->nargs, a, t->nparams))
             return in->type;

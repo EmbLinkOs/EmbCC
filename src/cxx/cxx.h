@@ -422,7 +422,19 @@ struct ctemplate {
     int is_final;             /* TK_CLASS: its definition says `final` */
     int req_start, req_end;   /* its requires-clause's tokens (0: none);
                                * TK_CONCEPT: the constraint, decl_tok on */
+    int builtin;              /* the compiler's own: BT_* */
+    struct cscope *pscope;    /* TK_ALIAS: its parameters (as patterns) */
+    struct cty *alias_pat;    /* ... its type in terms of them (deduction
+                               * sees through it), once read */
+    int alias_pat_done;
 };
+/* An alias template's type with its own parameters unsubstituted (NULL
+ * when it cannot be read so) */
+struct cty *alias_pattern(struct ctemplate *t);
+/* Builtin templates: __make_integer_seq<TT, T, N> is TT<T, 0, ..., N-1>
+ * (Clang's; libstdc++ asks __has_builtin and builds its index sequences
+ * with it — the classes, and so the ABI, are the same as g++'s). */
+enum { BT_NONE, BT_MAKE_INTEGER_SEQ };
 
 /* Class template instance: the class for these arguments (made, not yet
  * defined: class_ensure defines it when needed). */
@@ -1126,6 +1138,7 @@ struct cexpr *lambda_this(const struct ctok *at);
 
 void cx_parse_unit(void);
 struct cty *parse_type_id(void);           /* e.g. inside sizeof(...) */
+struct cty *parse_value_tparam_type(int tok);
 struct cty *parse_new_type_id(void);       /* after `new` */
 int at_simple_type_kw(void);               /* int(x): a keyword type */
 struct cty *parse_simple_type_spec(void);

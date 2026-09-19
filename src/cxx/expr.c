@@ -667,6 +667,7 @@ static struct ics ics_of(struct cexpr *e, struct cty *to)
     memset(&r, 0, sizeof r);
     r.rank = R_BAD;
     if (to->k == CT_CLASS) {
+        class_ensure(to->cls);      /* its constructors, its bases */
         if (!(e->k == E_INITLIST && !e->t) && e->t && e->t->k == CT_CLASS &&
             e->t->cls == to->cls) {
             r.rank = R_EXACT;
@@ -850,7 +851,9 @@ static int cur_ntargs, cur_has_targs;
  * substitution fails (13.10.3). */
 static int instantiate_candidates(struct cfunc **fs, int nf,
                                   struct cexpr *obj, struct cexpr **args,
-                                  int na, int opform, struct cfunc ***out)
+                                  int na, int opform, struct ctarg *expl,
+                                  int nexpl, int has_expl,
+                                  struct cfunc ***out)
 {
     struct cfunc **r = xmalloc((size_t)(nf ? nf : 1) * sizeof *r);
     int n = 0;
@@ -858,7 +861,7 @@ static int instantiate_candidates(struct cfunc **fs, int nf,
     for (int k = 0; k < nf; k++) {
         struct cfunc *f = fs[k];
         if (!f->tmpl) {
-            if (!cur_has_targs)
+            if (!has_expl)
                 r[n++] = f;
             continue;
         }
@@ -867,8 +870,7 @@ static int instantiate_candidates(struct cfunc **fs, int nf,
         int nx = opform && member ? na - 1 : na;
         struct ctarg *targs;
         int nt;
-        if (!deduce_call(f->tmpl, cur_targs, cur_ntargs, xa, nx, &targs,
-                         &nt))
+        if (!deduce_call(f->tmpl, expl, nexpl, xa, nx, &targs, &nt))
             continue;
         struct cfunc *spec = func_instance(f->tmpl, targs, nt);
         if (spec)
@@ -876,6 +878,34 @@ static int instantiate_candidates(struct cfunc **fs, int nf,
     }
     *out = r;
     return n;
+}
+
+/* an ambiguous call's error: with the two candidates neither better */
+static void ambiguous(const struct ctok *at, const char *what,
+                      struct cexpr **args, int na, struct cfunc *a,
+                      struct cfunc *b)
+{
+    if (cx_sfinae)
+        longjmp(*(jmp_buf *)cx_sfinae, 1);
+    diag_error_at(at ? at->file : "<c++>", at ? at->t.line : 0,
+                  at ? at->t.col : 0, "call to '%s(%s)' is ambiguous", what,
+                  arg_types(args, na));
+    struct cfunc *two[2] = { a, b };
+    for (int k = 0; k < 2; k++) {
+        struct cfunc *f = two[k];
+        struct cty *ft = f->type;
+        char buf[512];
+        size_t n = 0;
+        buf[0] = 0;
+        for (int i = 0; i < ft->np && n < sizeof buf - 64; i++)
+            n += (size_t)snprintf(buf + n, sizeof buf - n, "%s%s",
+                                  i ? ", " : "", ct_name(ft->params[i]));
+        diag_note_at(f->file ? f->file : "<c++>", f->line, 0,
+                     "candidate: %s%s(%s)%s", f->spec_of ? "(template) " : "",
+                     f->name, buf, f->is_explicit ? " explicit" : "");
+    }
+    cx_inst_notes();
+    exit(1);
 }
 
 /* The best of the candidates fs[0..nf) for the arguments. In call form,
@@ -888,12 +918,19 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
                              const struct ctok *at, const char *what,
                              int flags)
 {
+    /* this call's explicit template arguments, taken before anything
+     * (deduction, an instantiation) resolves another call */
+    struct ctarg *expl = cur_targs;
+    int nexpl = cur_ntargs, has_expl = cur_has_targs;
+    cur_targs = NULL;
+    cur_ntargs = cur_has_targs = 0;
     int templ = 0;
     for (int k = 0; k < nf; k++)
         templ |= fs[k]->tmpl != NULL;
-    if (templ || cur_has_targs) {
+    if (templ || has_expl) {
         const char *w = what ? what : nf ? fs[0]->name : "?";
-        nf = instantiate_candidates(fs, nf, obj, args, na, opform, &fs);
+        nf = instantiate_candidates(fs, nf, obj, args, na, opform, expl,
+                                    nexpl, has_expl, &fs);
         what = w;
     }
     struct cand *cs = xcalloc((size_t)(nf ? nf : 1), sizeof *cs);
@@ -958,8 +995,8 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
             resolve_ambiguous = 1;
             if (!at)
                 return NULL;
-            cx_error(at, "call to '%s(%s)' is ambiguous",
-                     what ? what : fs[0]->name, arg_types(args, na));
+            ambiguous(at, what ? what : fs[0]->name, args, na,
+                      cs[best].f, cs[i].f);
         }
     }
     return cs[best].f;
@@ -1101,6 +1138,7 @@ static void nonmember_lookup(struct fnset *fs, const char *name)
 static struct cfunc *converting_ctor(struct cclass *c, struct cexpr *e,
                                      int allow_explicit)
 {
+    class_ensure(c);                /* an instance not yet instantiated */
     if (!c->complete)
         return NULL;
     struct cfunc *found = NULL;
@@ -1120,8 +1158,14 @@ static struct cfunc *converting_ctor(struct cclass *c, struct cexpr *e,
         if (ct_is_ref(p)) {
             s = ref_ics(e, p);
         } else if (pb->k == CT_CLASS) {
+            /* by value: the argument's own class (a copy) or a derived
+             * one — not another user conversion */
             memset(&s, 0, sizeof s);
             s.rank = R_BAD;
+            if (!(e->k == E_INITLIST && !e->t) && e->t &&
+                e->t->k == CT_CLASS && (e->t->cls == pb->cls ||
+                                        is_proper_base(e->t->cls, pb->cls)))
+                s.rank = e->t->cls == pb->cls ? R_EXACT : R_CONV;
         } else {
             s = std_conv(e, p);
         }
@@ -1142,6 +1186,7 @@ static struct cfunc *conv_function(struct cexpr *e, struct cty *to,
                                    int allow_explicit, struct ics *second)
 {
     struct cclass *c = e->t->cls;
+    class_ensure(c);
     if (!c->complete)
         return NULL;
     struct cfunc *best = NULL;
@@ -2780,6 +2825,8 @@ int cxx_has_builtin(const char *name)
             return 1;
         return builtin_type(n) != NULL;
     }
+    if (!strcmp(name, "__make_integer_seq"))
+        return 1;
     return trait_known(name);
 }
 

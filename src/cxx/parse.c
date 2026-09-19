@@ -423,6 +423,8 @@ static int at_ctor_declarator(void)
     struct qname q = peek_qname();
     if (q.bad || !q.scope || q.scope->k != SC_CLASS || q.fin == 0)
         return 0;
+    if (cx_kind_at(q.fin) == TOK_TILDE)     /* X<T>::~X() */
+        q.fin++;
     return cx_kind_at(q.fin) == TOK_IDENT && q.scope->cls->name &&
            strcmp(tok_text(q.fin), q.scope->cls->name) == 0 &&
            cx_kind_at(q.fin + 1) == TOK_LPAREN;
@@ -2045,7 +2047,7 @@ static struct cexpr *parse_init_args(enum init_form *form,
                                      struct cexpr ***argsp, int *nap)
 {
     struct cexpr **args = NULL;
-    int na = 0, cap = 0;
+    int na = 0;
     *form = INIT_DEFAULT;
     if (cx_kind() == TOK_ASSIGN) {
         cx_advance();
@@ -2066,17 +2068,7 @@ static struct cexpr *parse_init_args(enum init_form *form,
     } else if (cx_kind() == TOK_LPAREN) {
         *form = INIT_DIRECT;
         cx_advance();
-        while (cx_kind() != TOK_RPAREN) {
-            if (na == cap) {
-                cap = cap ? cap * 2 : 4;
-                args = xrealloc(args, (size_t)cap * sizeof *args);
-            }
-            args[na++] = cx_kind() == TOK_LBRACE ? parse_braced_list()
-                                                 : expr_parse_assign();
-            if (!cx_accept(TOK_COMMA))
-                break;
-        }
-        cx_expect(TOK_RPAREN, "')' to close the initializer");
+        na = expr_call_args_rest(&args);    /* (packs expanded) */
     }
     *argsp = args;
     *nap = na;
@@ -4789,6 +4781,61 @@ static const char *dep_binop(enum tok_kind k, int *prec)
     }
 }
 
+/* A fold-expression's operator (C++17, 7.5.6): its mangled name */
+static const char *fold_op(enum tok_kind k)
+{
+    int p;
+    if (k == TOK_COMMA)
+        return "cm";
+    if (k == TOK_GT || k == TOK_SHR) /* (inside the fold's parentheses) */
+        return k == TOK_GT ? "gt" : "rs";
+    return dep_binop(k, &p);
+}
+
+/* After `(`: a fold-expression — `(e op ...)` fr, `(... op e)` fl,
+ * `(e op ... op i)` fR, `(i op ... op e)` fL — to its `)`; NULL (the
+ * cursor unmoved) if it is not one */
+static const char *dep_fold(void)
+{
+    if (cx_kind() == TOK_ELLIPSIS) {
+        const char *op = fold_op(cx_kind_at(1));
+        if (!op)
+            cx_error(cx_cur(), "expected an operator after '...' in a "
+                               "fold-expression");
+        cx_advance();
+        cx_advance();
+        return cx_fmt("fl%s%s", op, dep_expr_unary());
+    }
+    int start = cx_pos, save_half = cx_half_gt;
+    jmp_buf jb;
+    void *sv = cx_sfinae;
+    struct parse_state *st = parse_save();
+    const char *l = NULL;
+    if (!setjmp(jb)) {
+        cx_sfinae = &jb;
+        l = dep_expr_unary();
+        cx_sfinae = sv;
+    } else {
+        parse_restore(st);
+        cx_sfinae = sv;
+    }
+    const char *op = l ? fold_op(cx_kind()) : NULL;
+    if (!op || cx_kind_at(1) != TOK_ELLIPSIS) {
+        cx_pos = start;
+        cx_half_gt = save_half;
+        return NULL;
+    }
+    cx_advance();
+    cx_advance();
+    if (cx_kind() == TOK_RPAREN)
+        return cx_fmt("fr%s%s", op, l);
+    const char *op2 = fold_op(cx_kind());
+    if (!op2 || strcmp(op, op2) != 0)
+        cx_error(cx_cur(), "a binary fold-expression's operators differ");
+    cx_advance();
+    return cx_fmt("fR%s%s%s", op, l, dep_expr_unary());
+}
+
 static const char *dep_expr_cond(void)
 {
     const char *c = dep_expr_bin(1);
@@ -5023,7 +5070,9 @@ static const char *dep_expr_unary(void)
                 return cx_fmt("cv%s%s", ty, dep_expr_unary());
             }
         }
-        r = dep_expr_cond();
+        r = dep_fold();
+        if (!r)
+            r = dep_expr_cond();
         cx_in_targs = saved;
         cx_expect(TOK_RPAREN, "')'");
         return dep_expr_postfix(r);
@@ -5234,6 +5283,21 @@ int parse_template_args(struct ctemplate *t, struct ctarg **out)
  * a type parameter a CT_TPARAM, a value parameter a variable marked
  * is_tparam, a template template parameter a template of no known
  * parameters. */
+/* a value template parameter's type, read again from its tokens (in the
+ * current scope, the parameters before it bound): its name dropped */
+struct cty *parse_value_tparam_type(int tok)
+{
+    cx_pos = tok;
+    struct dspec ds;
+    parse_dspec(&ds);
+    if (!ds.type)
+        cx_error(cx_cur(), "expected a template parameter's type");
+    cx_accept(TOK_ELLIPSIS);
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    return parse_declarator(ds.type, &d, DK_NAMED | DK_ABSTRACT);
+}
+
 static int parse_tparams(struct ctparam **out)
 {
     int n = 0, cap = 4;
@@ -5594,6 +5658,7 @@ void parse_template_decl(struct cclass *cls, int access)
         cx_expect(TOK_ASSIGN, "'=' in an alias template");
         struct ctemplate *t = template_new(TK_ALIAS, name, home, ps, np);
         t->decl_tok = cx_pos;
+        t->pscope = cx_scope;
         skip_declaration();
         struct csym *y = scope_add(home, CS_TEMPLATE, name);
         y->tmpl = t;
@@ -6270,6 +6335,48 @@ void func_define_from(struct cfunc *f)
     parse_restore(st);
 }
 
+/* At `template<...> R A<T>::f(...) { ... }` (the class template's
+ * parameters bound): f, a specialization of the instance's member
+ * template f, defined by it — if this is that template's definition (its
+ * type, the parameters bound to f's arguments, is f's). */
+static void member_template_from_outdef(struct cfunc *f)
+{
+    struct ctemplate *mt = f->spec_of;
+    jmp_buf jb;
+    void *saved = cx_sfinae;
+    struct parse_state *st = parse_save();
+    if (setjmp(jb)) {
+        /* not this template's definition (another overload's) */
+        parse_restore(st);
+        cx_sfinae = saved;
+        return;
+    }
+    cx_sfinae = &jb;
+    cx_advance();                                   /* template */
+    cx_expect(TOK_LT, "'<'");
+    struct cscope *outer = cx_scope;
+    scope_push(SC_TEMPLATE, NULL);
+    struct ctparam *ps;
+    int np = parse_tparams(&ps);
+    if (np != mt->nparams || np != f->ntargs)
+        cx_error(cx_cur(), "another member template");
+    cx_scope = tparam_scope(ps, np, f->targs, f->ntargs, outer);
+    struct dspec ds;
+    parse_dspec(&ds);
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    struct cty *ft = parse_declarator(ds.type ? ds.type : ct_basic(CT_VOID),
+                                      &d, DK_NAMED);
+    if (ft->k != CT_FUNC || !ct_same(ft, f->type) ||
+        (cx_kind() != TOK_LBRACE && cx_kind() != TOK_COLON &&
+         cx_kind() != TOK_CX_TRY))
+        cx_error(cx_cur(), "another member template");
+    cx_sfinae = saved;
+    f->def_scope = cx_scope;
+    define_function(f, ft);
+    parse_restore(st);
+}
+
 /* A class template instance's member that has no definition yet: its
  * out-of-class definition, if the template has one, replayed with the
  * instance's arguments (the qualified declarator then finds the member). */
@@ -6287,6 +6394,8 @@ int member_from_outdef(struct cfunc *f)
     }
     if (!inst || (inst->extern_inst && !f->is_inline && !f->is_constexpr))
         return 0;         /* extern template: another unit's (not inline) */
+    if (inst->explicit_spec)
+        return 0;         /* its members are its own, not the template's */
     struct ctemplate *t = inst->tmpl;
     const char *want = f->is_conv ? "operator" : f->name;
     if (f->name && strncmp(f->name, "operator", 8) == 0)
@@ -6308,7 +6417,10 @@ int member_from_outdef(struct cfunc *f)
         cx_curblk = NULL;
         cx_extern_c = 0;
         if (cx_kind() == TOK_CX_TEMPLATE) {
-            /* a member template: its own parameters are not bound here */
+            /* a member template's: for one of its specializations, with
+             * the template's own parameters bound to its arguments */
+            if (f->spec_of)
+                member_template_from_outdef(f);
             parse_restore(st);
             continue;
         }
@@ -6351,7 +6463,8 @@ void member_var_from_outdef(struct cvar *v)
     while (inst && !inst->tmpl)
         inst = inst->owner && inst->owner->k == SC_CLASS ? inst->owner->cls
                                                          : NULL;
-    if (!inst || inst->extern_inst || inst->inst_partial)
+    if (!inst || inst->extern_inst || inst->inst_partial ||
+        inst->explicit_spec)
         return;
     struct ctemplate *t = inst->tmpl;
     for (struct coutdef *o = t->outdefs; o && !v->defined; o = o->next) {
@@ -6369,6 +6482,8 @@ void member_var_from_outdef(struct cvar *v)
         cx_extern_c = 0;
         parse_declaration(1, NULL);
         parse_restore(st);
+        if (v->defined)
+            v->is_inline = 1;   /* each unit's instance: one object */
     }
 }
 
@@ -6444,6 +6559,26 @@ static void declare_builtin_ops(void)
     }
 }
 
+/* template<template<class T, T...> class TT, class T, T N> using
+ * __make_integer_seq = TT<T, 0, 1, ..., N - 1>; (template.c makes it) */
+static void declare_builtin_templates(void)
+{
+    struct ctparam *ps = xcalloc(3, sizeof *ps);
+    static const char *const names[3] = { "_Seq", "_Tp", "_Num" };
+    static const int kinds[3] = { TP_TEMPLATE, TP_TYPE, TP_VALUE };
+    for (int i = 0; i < 3; i++) {
+        ps[i].kind = kinds[i];
+        ps[i].name = names[i];
+        ps[i].def_tok = ps[i].vtype_tok = ps[i].tc_args = -1;
+    }
+    ps[2].vtype = ct_tparam(1, "_Tp");
+    struct ctemplate *t = template_new(TK_ALIAS, "__make_integer_seq",
+                                       cx_global, ps, 3);
+    t->builtin = BT_MAKE_INTEGER_SEQ;
+    struct csym *y = scope_add(cx_global, CS_TEMPLATE, t->name);
+    y->tmpl = t;
+}
+
 void cx_parse_unit(void)
 {
     cx_funcs = NULL;
@@ -6458,6 +6593,7 @@ void cx_parse_unit(void)
     cx_curblk = NULL;
     cx_extern_c = 0;
     declare_builtin_ops();
+    declare_builtin_templates();
     while (cx_kind() != TOK_EOF)
         parse_declaration(1, NULL);
 }

@@ -39,6 +39,9 @@ struct parser {
     int vla_ok;           /* inside a function (its parameters or body) and
                            * not in a struct body: a non-constant array size
                            * makes a VLA rather than an error */
+    const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
+                           * function declarator inside parentheses
+                           * (`(*f(int a))[3]`) */
 };
 
 static struct token *cur(struct parser *ps) { return &ps->lx.tok; }
@@ -137,6 +140,8 @@ static int at_type_start(struct parser *ps)
 }
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret);
+static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
+                                          const char **names);
 /* The GNU attributes EmbCC honors; everything else is parsed and dropped.
  * section("name") is honored on file-scope variables and refused (never
  * dropped) anywhere else — a silently-ignored section is a table the
@@ -229,79 +234,67 @@ static void parse_static_assert(struct parser *ps);
 static struct expr *parse_initializer(struct parser *ps);
 static struct stmt *parse_block(struct parser *ps);
 
-/* Declarator over a base type: leading stars, then either the function-
- * pointer form '( * [*...] [name] [dims] ) ( params )' or a plain
- * [name] [dims]. name_out is NULL when no name appeared (legal in
+/* Declarator over a base type (C11 6.7.6): pointers, then a name — or a
+ * parenthesized declarator — then array and function suffixes. The
+ * parenthesized one binds looser than the suffixes after it (`int
+ * (*fp)(void)`, `int (*pa)[4]`, `int (*arr[2])(void)`, `void
+ * (*signal(int, void (*)(int)))(int)`, `char (*f(void))[6]`): the
+ * suffixes are read first, on the base, then the declarator inside the
+ * parentheses over that type. A `(params)` right after a name is read here
+ * only inside parentheses — outside, callers handle a function declarator
+ * themselves; its parameter names (a definition needs them) are left in
+ * ps->fn_pnames. name_out is NULL when no name appeared (legal in
  * prototypes and abstract declarators). */
-static struct type *parse_declarator(struct parser *ps, struct type *base,
-                                     const char **name_out)
+static struct type *declarator(struct parser *ps, struct type *base,
+                               const char **name_out, int nested)
 {
     base = parse_stars(ps, base);
     *name_out = NULL;
     if (cur(ps)->kind == TOK_LPAREN) {
-        struct lexer save = ps->lx;
+        struct lexer open = ps->lx;
         advance(ps);
         if (cur(ps)->kind == TOK_STAR) {
+            /* past the parentheses to the suffixes */
+            int depth = 1;
+            while (depth > 0) {
+                if (cur(ps)->kind == TOK_EOF)
+                    diag_fatal(ps->lx.file, open.tok.line,
+                               "unbalanced '(' in a declarator");
+                advance(ps);
+                if (cur(ps)->kind == TOK_LPAREN)
+                    depth++;
+                else if (cur(ps)->kind == TOK_RPAREN)
+                    depth--;
+            }
             advance(ps);
-            int extra = 0;
-            while (cur(ps)->kind == TOK_STAR) {
-                advance(ps);
-                extra++;
-            }
-            skip_quals(ps);
-            if (cur(ps)->kind == TOK_IDENT) {
-                *name_out = cur(ps)->text;
-                advance(ps);
-            }
-            int adims[4];
-            int nad = 0;
-            while (cur(ps)->kind == TOK_LBRACKET) {
-                advance(ps);
-                if (nad >= 4)
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
-                               "more than 4 array dimensions");
-                if (cur(ps)->kind == TOK_RBRACKET) {
-                    /* an omitted size: `(*arr[])(void)` — an incomplete
-                     * array, valid for an extern like crt0's brackets. */
-                    adims[nad++] = 0;
-                    advance(ps);
-                    continue;
-                }
-                int dline = cur(ps)->line;
-                struct expr *de = parse_cond(ps);
-                long dv;
-                if (!size_fold(de, &dv) || dv <= 0)
-                    diag_fatal(ps->lx.file, dline,
-                               "array size must be a positive constant "
-                               "expression");
-                adims[nad++] = (int)dv;
-                expect(ps, TOK_RBRACKET, "']'");
-            }
-            expect(ps, TOK_RPAREN, "')'");
-            /* What the parenthesized `(*name...)` refers to is decided by what
-             * follows: `(params)` a function pointer, `[dims]` a pointer to an
-             * array (`int (*p)[N]`), otherwise a plain parenthesized pointer. */
-            struct type *inner;
+            struct type *outer = base;
             if (cur(ps)->kind == TOK_LPAREN)
-                inner = parse_fn_params(ps, base);
+                outer = parse_fn_params(ps, base);
             else if (cur(ps)->kind == TOK_LBRACKET)
-                inner = parse_array_dims(ps, base);
-            else
-                inner = base;
-            struct type *t = ty_ptr(inner);
-            for (int i = 0; i < extra; i++)
-                t = ty_ptr(t);
-            for (int i = nad - 1; i >= 0; i--)
-                t = ty_array(t, adims[i]);
+                outer = parse_array_dims(ps, base);
+            struct lexer after = ps->lx;
+            ps->lx = open;
+            advance(ps);
+            struct type *t = declarator(ps, outer, name_out, 1);
+            expect(ps, TOK_RPAREN, "')'");
+            ps->lx = after;
             return t;
         }
-        ps->lx = save; /* not a function-pointer declarator */
+        ps->lx = open; /* not a parenthesized declarator */
     }
     if (cur(ps)->kind == TOK_IDENT) {
         *name_out = cur(ps)->text;
         advance(ps);
     }
+    if (nested && cur(ps)->kind == TOK_LPAREN)
+        return parse_fn_params_named(ps, base, ps->fn_pnames);
     return parse_array_dims(ps, base);
+}
+
+static struct type *parse_declarator(struct parser *ps, struct type *base,
+                                     const char **name_out)
+{
+    return declarator(ps, base, name_out, 0);
 }
 
 /* An abstract type name (a cast target, a sizeof operand): a declarator
@@ -332,6 +325,13 @@ static int param_sret_attr(struct parser *ps, int index)
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret)
 {
+    return parse_fn_params_named(ps, ret, NULL);
+}
+
+/* ... and the parameters' names into names[] (NULL where unnamed) */
+static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
+                                          const char **names)
+{
     expect(ps, TOK_LPAREN, "'('");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 1;   /* prototype scope: `int a[n]`, `int a[*]` */
@@ -358,8 +358,10 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
                 diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                            "expected a parameter type before %s",
                            tok_describe(cur(ps)));
-            const char *dummy;
-            struct type *t = parse_declarator(ps, spec, &dummy);
+            const char *pname;
+            struct type *t = parse_declarator(ps, spec, &pname);
+            if (names && n < MAX_PARAMS)
+                names[n] = pname;
             if (t->kind == TY_ARRAY)
                 t = ty_ptr(t->pointee); /* C's adjustment */
             if (t->kind == TY_FUNC)
@@ -2464,6 +2466,8 @@ static void parse_top(struct parser *ps, struct unit *u,
     struct type *ty = parse_stars(ps, base);
     const char *name = NULL;
     int line = cur(ps)->line;
+    struct func *f;
+    int saved_vla_ok;
     if (cur(ps)->kind == TOK_IDENT) {
         name = cur(ps)->text;
         advance(ps);
@@ -2471,7 +2475,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (!name || cur(ps)->kind != TOK_LPAREN) {
         /* not a function: rewind and parse global declarators */
         ps->lx = fork;
-        for (;;) {
+        for (int first = 1;; first = 0) {
             const char *gname;
             int gline = cur(ps)->line;
             struct type *gt = parse_declarator(ps, base, &gname);
@@ -2479,6 +2483,31 @@ static void parse_top(struct parser *ps, struct unit *u,
                 diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                            "expected a name before %s",
                            tok_describe(cur(ps)));
+            if (gt->kind == TY_FUNC && first) {
+                /* a function whose declarator is parenthesized: it
+                 * returns a pointer to a function or to an array
+                 * (`void (*signal(int, void (*)(int)))(int)`) */
+                f = xcalloc(1, sizeof *f);
+                f->is_static = is_static;
+                f->is_weak = at.weak;
+                f->is_noreturn = at.noreturn;
+                f->is_nothrow = at.nothrow;
+                f->ret_ty = gt->ret;
+                f->name = name = gname;
+                f->file = ps->lx.file;
+                f->line = line = gline;
+                f->seq = seq;
+                f->nparams = gt->nptypes;
+                for (int i = 0; i < gt->nptypes; i++) {
+                    f->param_tys[i] = gt->ptypes[i];
+                    f->params[i] = ps->fn_pnames[i];
+                }
+                f->is_varargs = gt->is_varargs;
+                f->sret_first = gt->sret_first;
+                saved_vla_ok = ps->vla_ok;
+                ps->vla_ok = 1;
+                goto fn_tail;
+            }
             if (gt->kind == TY_FUNC)
                 diag_fatal(ps->lx.file, gline,
                            "a variable cannot have a function type — "
@@ -2502,7 +2531,7 @@ static void parse_top(struct parser *ps, struct unit *u,
         return;
     }
 
-    struct func *f = xcalloc(1, sizeof *f);
+    f = xcalloc(1, sizeof *f);
     /* 'extern' on a function is the default linkage — accept, ignore */
     f->is_static = is_static;
     f->is_weak = at.weak;   /* leading __attribute__((weak)) */
@@ -2514,7 +2543,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->line = line;
     f->seq = seq;
     advance(ps); /* '(' */
-    int saved_vla_ok = ps->vla_ok;
+    saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 1;   /* parameters and body: VLAs allowed */
 
     if (cur(ps)->kind == TOK_KW_VOID) {
@@ -2569,6 +2598,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
     expect(ps, TOK_RPAREN, "')'");
 
+fn_tail:
     /* trailing attributes: void f(void) __attribute__((noreturn/weak)) */
     parse_attributes(ps, &at);
     f->is_weak = at.weak;

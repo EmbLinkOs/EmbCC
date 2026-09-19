@@ -875,6 +875,10 @@ void define_implicit(struct cfunc *f)
     }
     struct cfunc *savefn = cx_curfn;
     cx_curfn = f;
+    /* its body is evaluated, even when first needed in an unevaluated
+     * operand (decltype(::new T(...))): what it calls is instantiated */
+    int saved_uneval = cx_unevaluated;
+    cx_unevaluated = 0;
     int move = f->special == SP_MOVE || f->special == SP_MOVE_ASSIGN;
     switch (f->special) {
     case SP_DEFAULT:
@@ -985,6 +989,7 @@ void define_implicit(struct cfunc *f)
     default:
         break;                  /* a destructor: emit.c destroys members */
     }
+    cx_unevaluated = saved_uneval;
     cx_curfn = savefn;
 }
 

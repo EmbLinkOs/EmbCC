@@ -2550,6 +2550,18 @@ static void emit_gvar(struct cvar *v)
     else
         sb_printf(&out_vars, "%s%s%s;\n", st, cdecl(t, v->cname),
                   sb_str(&attrs));
+    /* an object every unit defines (an inline variable, a template's
+     * static member): initialized by the first unit to get there, as its
+     * guard variable says — Itanium's, so g++'s objects agree */
+    const char *guard = NULL;
+    if (!v->is_static && (v->is_inline || v->weak) &&
+        strncmp(v->cname, "_Z", 2) == 0 &&
+        (dyn || (t->k == CT_CLASS && class_dtor(t->cls)))) {
+        guard = cx_fmt("_ZGV%s", v->cname + 2);
+        sb_printf(&out_vars, "__attribute__((weak)) long long %s;\n", guard);
+        sb_printf(&out_init, "if (!*(volatile char *)&%s) {\n"
+                             "*(volatile char *)&%s = 1;\n", guard, guard);
+    }
     if (dyn) {
         line_marker(&out_init, v->line, v->file);
         stmt_init(&out_init, v->cname, t, ini);
@@ -2569,6 +2581,8 @@ static void emit_gvar(struct cvar *v)
             cx_error(NULL, "a namespace-scope array of objects with "
                            "destructors is not supported yet");
     }
+    if (guard)
+        sb_put(&out_init, "}\n");
 }
 
 /* Does initializing or destroying v run code? Then it exists whether or

@@ -189,7 +189,8 @@ static int add_step(struct step *st, int n, const char *prev,
 /* Is class argument a std::X<char, ...> as the abbreviations mean it? */
 static int std_class_is(struct ctarg *a, const char *name)
 {
-    if (a->kind != TP_TYPE || a->type->k != CT_CLASS || a->type->q)
+    if (a->kind != TP_TYPE || a->is_pack || !a->type ||
+        a->type->k != CT_CLASS || a->type->q)
         return 0;
     struct cclass *c = a->type->cls;
     if (!c->name || strcmp(c->name, name) != 0 || !c->owner ||
@@ -201,7 +202,8 @@ static int std_class_is(struct ctarg *a, const char *name)
 
 static int is_char_arg(struct ctarg *a)
 {
-    return a->kind == TP_TYPE && a->type->k == CT_CHAR && !a->type->q;
+    return a->kind == TP_TYPE && !a->is_pack && a->type &&
+           a->type->k == CT_CHAR && !a->type->q;
 }
 
 /* The Itanium ABI's standard abbreviations (5.1.8): a class of ::std named
