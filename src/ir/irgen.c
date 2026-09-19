@@ -434,6 +434,11 @@ int gen_addr(struct ir_func *fn, struct expr *e)
     case EXPR_COMPLIT:
         return gen_complit(fn, e);
     default:
+        /* a struct value that is no lvalue (a call's result, `?:`, a
+         * comma or an assignment): gen_expr's value is its address —
+         * `f().m` reads a member of it */
+        if (e->ty && e->ty->kind == TY_STRUCT)
+            return gen_expr(fn, e);
         fprintf(stderr, "embcc: internal: address of a non-lvalue\n");
         exit(1);
     }
