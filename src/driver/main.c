@@ -785,6 +785,22 @@ int main(int argc, char **argv)
             cpp_set_cxx_char8(1);   /* (C++: char8_t is a keyword anyway) */
         } else if (strcmp(argv[i], "-fno-exceptions") == 0) {
             want_exceptions = 0;
+        } else if (strcmp(argv[i], "-fno-stack-protector") == 0) {
+            /* what EmbCC does: it emits no stack protection. The positive
+             * forms are refused below rather than quietly ignored. */
+        } else if (strncmp(argv[i], "-fstack-protector", 17) == 0) {
+            fprintf(stderr, "embcc: '%s' is not supported (EmbCC emits no "
+                            "stack protection); -fno-stack-protector is\n",
+                    argv[i]);
+            return 1;
+        } else if (strcmp(argv[i], "-fno-rtti") == 0 ||
+                   strcmp(argv[i], "-frtti") == 0) {
+            /* accepted; EmbCC always emits RTTI, so typeid and
+             * dynamic_cast keep working (g++ refuses them under
+             * -fno-rtti) — the objects link with either */
+        } else if (argv[i][0] == '-' && argv[i][1] == 'W') {
+            /* warning options: EmbCC has one level, and its diagnostics
+             * are errors, so these say nothing to it */
         } else if (strncmp(argv[i], "-O", 2) == 0) {
             /* -O / -O1 / -O2 / -O3 enable the optimizer (one level for now);
              * -O0 turns it off. Anything else after -O is an error. */

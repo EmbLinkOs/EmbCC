@@ -27,7 +27,7 @@ targets, and must agree; cross-ABI tests link an EmbCC half with a g++ half.
 | **CX5** | exceptions: `throw`/`try`/`catch`, unwind tables, the Itanium personality routine, `noexcept` | exceptions crossing EmbCC/g++ frames |
 | **CX6** | the modern core: `auto`, `decltype`, lambdas, `constexpr` evaluation, range-`for`, `initializer_list`, `enum class`, structured bindings, `if constexpr` | |
 | **CX7** | C++20: concepts and `requires`, `<=>`, `consteval`/`constinit`, designated initializers, coroutines | |
-| **CX8** | libstdc++: its headers, then its sources, compiled by EmbCC | the OS's cxxdemo, with `<iostream>` |
+| **CX8** | libstdc++: its headers, then its sources, compiled by EmbCC | **done** — 193/193 objects on both targets (`make test-libstdcxx`), and the OS's cxxdemo, with `<iostream>`, running on EmbLinkOS |
 | **CX9** | C++ on EmbLinkOS: embcc compiling C++ on the metal, over newlib and emlibc | on-OS tests |
 
 ## Using it
@@ -972,6 +972,25 @@ statics so initialized need no guard. And the unit's dynamic
 initializers run in the order of their DEFINITIONS (6.9.3.3): an object
 declared `extern` before was initialized where it was declared.
 tests/cxx/constinit.cc.
+
+**C++ on EmbLinkOS (CX8's acceptance).** The OS's own C++ program,
+user/tests/cxxdemo/cxxdemo.cc, compiled by EmbCC with the flags the OS's
+C++ rule uses and linked with the libstdc++ and libsupc++ EmbCC built
+from GCC's sources — no g++ in the program or in the library — staged
+onto an EmbLinkOS image (its STAGED_APPS, for binaries built outside its
+tree, so nothing in the OS is modified) and run by the kernel's own
+`test cxx`: global constructors and their order, new/delete and
+new[]/delete[], templates, a function-local static (libsupc++'s guards),
+std::string, std::vector, `<iostream>` (the library's ios_base::Init
+constructor runs from the image's own .init_array), destructors at exit —
+13 checks, exit 0. The OS had never run a C++ program before: its C++ is
+gated on a g++ cross toolchain that is not on this machine.
+tests/golden/x86_64/emblinkos-cxx.sh, opt-in (EMBCC_OS_CXX=1: it rebuilds
+the image and boots QEMU). EmbCC also takes the flags that build line
+passes: `-W...` (it has one warning level, and its diagnostics are
+errors), `-fno-stack-protector` (what it does; `-fstack-protector` is
+refused rather than ignored), `-fno-rtti`/`-frtti` (accepted; EmbCC
+always emits RTTI, so typeid and dynamic_cast keep working).
 
 **The suites wholly on EmbCC's library.** `make test-libstdcxx`
 (tests/golden/cxx-libstdcxx-embcc.sh, opt-in: the library takes minutes

@@ -68,7 +68,10 @@ targets, so EmbCC's C++ objects link with g++'s and with libstdc++.
 | **CX4** class, function, member, alias and variable templates; deduction, explicit and partial specialization (the most specialized chosen), partial ordering, SFINAE, explicit instantiation; variadic templates (type, value and function parameter packs, every expansion context, `sizeof...`, fold expressions); Itanium names for all of it (dependent expressions and pack expansions included) | ✓ | ✓ |
 | **CX3b** virtual base classes: g++'s layouts, vtables, construction vtables and VTTs (byte for byte), nearly empty virtual primaries, constructors and destructors taking the VTT — interchangeable with g++'s in both directions | ✓ | ✓ |
 | **CX5** exceptions: unwind tables and LSDAs g++'s runtime reads, `throw`/`try`/`catch`, function-try-blocks, destructors during unwinding (locals, temporaries, partly built objects and arrays), `noexcept` and the `noexcept` operator — thrown and caught across EmbCC and g++ code both ways | ✓ | ✓ |
-| CX6..CX9 — lambdas, C++20, libstdc++ compiled by EmbCC, C++ on the OS | ✗ refused, naming the milestone | ✗ |
+| **CX6** the modern core: `auto`, `decltype`, lambdas (generic, captures, `mutable`), `constexpr` evaluation (an interpreter: loops, recursion, classes, virtual calls, bit-fields), range-`for`, `initializer_list`, `enum class`, structured bindings, `if constexpr` | ✓ | ✓ |
+| **CX7** C++20: concepts and `requires`, `<=>`, `consteval` (immediate functions) and `constinit`, designated initializers, coroutines, abbreviated function templates | ✓ | ✓ |
+| **CX8** libstdc++ compiled by EmbCC: its headers, then all 193 objects of its sources (`make test-libstdcxx`), and the OS's cxxdemo with `<iostream>` running on EmbLinkOS | ✓ | ✓ (the library; the OS is x86 today) |
+| **CX9** C++ on EmbLinkOS: embcc compiling C++ on the metal | in progress | — |
 
     embcc -c prog.cc -o prog.o          # .cc .cpp .cxx .C .c++, or -x c++
     embcc --emit-c prog.cc              # the C it lowers to
