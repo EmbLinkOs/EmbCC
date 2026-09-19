@@ -153,6 +153,16 @@ int two_holders(Holder<int> a, Holder<char> b)
 
 int global_fn(abi::Pod *a, abi::Pod *b) { return a->a + b->a; }
 
+tags::T tags::make_t(int x) { return T{x}; }
+tags::W tags::wrap(int x) { return W{x * 2}; }
+tags::T tags::tvar = { 5 };
+tags::T tags::S::get() const { return T{7}; }
+int tags::tags_b()
+{
+    static W w;
+    return make_w(3).x + take(T{4}, W{5}) + (wptr(T{1}) == &w) + S().own();
+}
+
 abi::Right::Right() {}
 abi::Right::~Right() { vb_trail = vb_trail * 10 + 2; }
 int abi::Right::right() const { return r + base; }

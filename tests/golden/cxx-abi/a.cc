@@ -128,6 +128,11 @@ template <class T> std::Holder<T>::operator Holder<long>() const
 }
 template struct std::Holder<int>;
 
+tags::W tags::make_w(int x) { return W{x}; }
+int tags::take(T t, W w) { return t.x * w.x; }
+tags::W *tags::wptr(T) { return nullptr; }
+int tags::S::own() { return 100; }
+
 static int sq(int x) { return x * x; }
 static void nothing() {}
 static int podcmp(abi::Pod &a, abi::Pod &b) { return a.a - b.a; }
@@ -167,6 +172,10 @@ int main()
     CHECK("std:: substitutions", std::two_holders(std::Holder<int>{20},
                                                   std::Holder<char>{2}) == 42);
     CHECK("global namespace", global_fn(&p, &q) == 5);
+    CHECK("ABI tags: g++'s tagged names", tags::make_t(1).x == 1 &&
+          tags::wrap(2).x == 4 && tags::tvar.x == 5 &&
+          tags::S().get().x == 7);
+    CHECK("ABI tags: embcc's, called by g++", tags::tags_b() == 3 + 20 + 100);
     {
         Buf b = make_buf(3);                       // g++ fills our slot
         CHECK("class returned through the slot", b.size() == 3 && b.sum() == 6);

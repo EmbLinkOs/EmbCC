@@ -192,4 +192,23 @@ int two_holders(Holder<int>, Holder<char>);   // St6HolderIiES_IcE, not StS_
 int global_fn(abi::Pod *, abi::Pod *);
 extern "C" int c_fn(int);
 
+// ABI tags (B <name>, as std::__cxx11's string gives libstdc++'s names)
+namespace tags {
+inline namespace v2 __attribute__((abi_tag("v2"))) {
+struct W { int x; };
+W make_w(int);                       // in the tagged namespace: no B2v2
+}
+struct __attribute__((abi_tag("tg"))) T { int x; };   // 1TB2tg
+T make_t(int);                       // its return type's tag: make_tB2tg
+W wrap(int);                         // wrapB2v2
+int take(T, W);                      // the parameters show them: none
+W *wptr(T);                          // only v2 is new: wptrB2v2
+extern T tvar;                       // tvarB2tg
+struct S {
+    T get() const;                   // getB2tg
+    __attribute__((abi_tag("ex"))) int own();   // ownB2ex
+};
+int tags_b();                        // side B calls side A's
+}
+
 #endif

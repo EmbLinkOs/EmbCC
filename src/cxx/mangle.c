@@ -138,6 +138,168 @@ static const char *scope_ident(struct cscope *s)
     return s->name;
 }
 
+/* ---- ABI tags (5.1.2: <abi-tag> ::= B <source-name>) ----
+ * An entity's own tags (__abi_tag__) follow its name, sorted. A function
+ * whose return type carries tags its parameters and scopes do not — a
+ * type is tagged by its class's tags, by those of the inline namespaces
+ * around it (std::__cxx11), and by its template arguments' — has them too
+ * (std::string f() is _Z1fB5cxx11v); a variable likewise by its type. */
+
+void abi_tag_add(const char ***v, int *n, const char *t)
+{
+    int i = 0;
+    while (i < *n && strcmp((*v)[i], t) < 0)
+        i++;
+    if (i < *n && strcmp((*v)[i], t) == 0)
+        return;
+    *v = xrealloc(*v, (size_t)(*n + 1) * sizeof **v);
+    memmove(*v + i + 1, *v + i, (size_t)(*n - i) * sizeof **v);
+    (*v)[i] = t;
+    (*n)++;
+}
+
+static int tag_in(const char **v, int n, const char *t)
+{
+    for (int i = 0; i < n; i++)
+        if (!strcmp(v[i], t))
+            return 1;
+    return 0;
+}
+
+/* the mangled suffix of a tag set ("" for none) */
+static const char *tags_text(const char **v, int n)
+{
+    const char *r = "";
+    for (int i = 0; i < n; i++)
+        r = cx_fmt("%sB%zu%s", r, strlen(v[i]), v[i]);
+    return r;
+}
+
+static void type_tags(struct cty *t, const char ***v, int *n, int depth);
+
+/* the tags scope s (and those around it) give what is declared in it */
+static void scope_tags(struct cscope *s, const char ***v, int *n, int depth)
+{
+    for (; s && depth < 16; s = s->parent) {
+        if (s->k == SC_NAMESPACE) {
+            for (int i = 0; i < s->nabi_tags; i++)
+                abi_tag_add(v, n, s->abi_tags[i]);
+        } else if (s->k == SC_CLASS && s->cls) {
+            type_tags(ct_class(s->cls), v, n, depth + 1);
+            return;
+        }
+    }
+}
+
+static void type_tags(struct cty *t, const char ***v, int *n, int depth)
+{
+    if (!t || depth > 16)
+        return;
+    switch (t->k) {
+    case CT_PTR: case CT_LREF: case CT_RREF: case CT_ARRAY:
+        type_tags(t->to, v, n, depth + 1);
+        return;
+    case CT_MPTR:
+        if (t->cls)
+            type_tags(ct_class(t->cls), v, n, depth + 1);
+        type_tags(t->to, v, n, depth + 1);
+        return;
+    case CT_FUNC:
+        type_tags(t->to, v, n, depth + 1);
+        for (int i = 0; i < t->np; i++)
+            type_tags(t->params[i], v, n, depth + 1);
+        return;
+    case CT_CLASS: {
+        struct cclass *c = t->cls;
+        for (int i = 0; i < c->nabi_tags; i++)
+            abi_tag_add(v, n, c->abi_tags[i]);
+        for (int i = 0; i < c->ntargs; i++) {
+            struct ctarg *a = &c->targs[i];
+            if (a->is_pack) {
+                for (int j = 0; j < a->nelems; j++)
+                    if (a->elems[j].kind == TP_TYPE)
+                        type_tags(a->elems[j].type, v, n, depth + 1);
+            } else if (a->kind == TP_TYPE) {
+                type_tags(a->type, v, n, depth + 1);
+            }
+        }
+        scope_tags(c->owner, v, n, depth + 1);
+        return;
+    }
+    case CT_ENUM:
+        scope_tags(t->en->owner, v, n, depth + 1);
+        return;
+    default:
+        return;
+    }
+}
+
+/* the tags an entity of type t (a function's return type, a variable's)
+ * declared in `scope` takes on beyond `have` (its own, and what its
+ * signature already shows) */
+static void implicit_tags(struct cty *t, struct cscope *scope,
+                          const char **have, int nhave, const char ***v,
+                          int *n)
+{
+    const char **tt = NULL;
+    int nt = 0;
+    type_tags(t, &tt, &nt, 0);
+    if (!nt)
+        return;
+    const char **ctx = NULL;
+    int nc = 0;
+    scope_tags(scope, &ctx, &nc, 0);
+    for (int i = 0; i < nt; i++)
+        if (!tag_in(have, nhave, tt[i]) && !tag_in(ctx, nc, tt[i]))
+            abi_tag_add(v, n, tt[i]);
+}
+
+/* A function's tags, mangled: its own (its template's), and — not a
+ * template's specialization (whose return type is mangled), nor a
+ * constructor, destructor or conversion — its return type's that its
+ * parameters lack */
+static const char *func_tags(struct cfunc *f)
+{
+    struct cfunc *src = f->alias_of ? f->alias_of : f;
+    const char **v = NULL;
+    int n = 0;
+    struct cfunc *own = src->spec_of && src->spec_of->pattern
+                        ? src->spec_of->pattern : src;
+    for (int i = 0; i < own->nabi_tags; i++)
+        abi_tag_add(&v, &n, own->abi_tags[i]);
+    for (int i = 0; i < src->nabi_tags; i++)
+        abi_tag_add(&v, &n, src->abi_tags[i]);
+    struct cty *ft = src->type;
+    if (!src->spec_of && !src->is_ctor && !src->is_dtor && !src->is_conv &&
+        ft && ft->to) {
+        const char **have = NULL;
+        int nh = 0;
+        for (int i = 0; i < n; i++)
+            abi_tag_add(&have, &nh, v[i]);
+        for (int i = 0; i < ft->np; i++)
+            type_tags(ft->params[i], &have, &nh, 0);
+        implicit_tags(ft->to, src->owner, have, nh, &v, &n);
+    }
+    return tags_text(v, n);
+}
+
+static const char *var_tags(struct cvar *v, struct cscope *owner)
+{
+    const char **t = NULL;
+    int n = 0;
+    for (int i = 0; i < v->nabi_tags; i++)
+        abi_tag_add(&t, &n, v->abi_tags[i]);
+    if (!v->is_local)
+        implicit_tags(v->type, owner, t, n, &t, &n);
+    return tags_text(t, n);
+}
+
+static const char *class_tags(struct cclass *c)
+{
+    return c ? tags_text(c->abi_tags, c->nabi_tags) : "";
+}
+
+
 static void mangle_type(struct mbuf *m, struct cty *t);
 /* A template-id's arguments as written, those for a trailing parameter
  * pack gathered into one (J ... E), as an instance's are. */
@@ -178,19 +340,21 @@ static void put_targs(struct mbuf *m, struct ctarg *a, int n);
 struct step {
     const char *key;
     const char *name;         /* a source name, or NULL: arguments */
+    const char *tags;         /* ... its ABI tags, mangled ("" none) */
     struct ctarg *args;
     int nargs;
     const char *abbr;         /* a standard abbreviation written instead
                                * (Sa, So, ...): no substitution candidate */
 };
 
-static int add_step(struct step *st, int n, const char *prev,
-                    const char *name, struct ctarg *args, int nargs,
-                    int is_template)
+static int add_step_tagged(struct step *st, int n, const char *prev,
+                           const char *name, const char *tags,
+                           struct ctarg *args, int nargs, int is_template)
 {
-    const char *k = cx_fmt("%s%zu%s", prev, strlen(name), name);
+    const char *k = cx_fmt("%s%zu%s%s", prev, strlen(name), name, tags);
     st[n].key = k;
     st[n].name = name;
+    st[n].tags = tags;
     st[n].args = NULL;
     st[n].nargs = 0;
     st[n].abbr = NULL;
@@ -198,12 +362,20 @@ static int add_step(struct step *st, int n, const char *prev,
     if (is_template) {
         st[n].key = cx_fmt("%sI%sE", k, targs_key(args, nargs));
         st[n].name = NULL;
+        st[n].tags = "";
         st[n].args = args;
         st[n].nargs = nargs;
         st[n].abbr = NULL;
         n++;
     }
     return n;
+}
+
+static int add_step(struct step *st, int n, const char *prev,
+                    const char *name, struct ctarg *args, int nargs,
+                    int is_template)
+{
+    return add_step_tagged(st, n, prev, name, "", args, nargs, is_template);
 }
 
 /* Is class argument a std::X<char, ...> as the abbreviations mean it? */
@@ -252,6 +424,7 @@ static int std_abbrev(struct cclass *c, struct step *st, int n)
     }
     if (whole) {
         st[n].key = whole;
+        st[n].tags = "";
         st[n].name = whole;
         st[n].args = NULL;
         st[n].nargs = 0;
@@ -261,12 +434,14 @@ static int std_abbrev(struct cclass *c, struct step *st, int n)
     if (!prefix)
         return 0;
     st[n].key = prefix;
+    st[n].tags = "";
     st[n].name = prefix;
     st[n].args = NULL;
     st[n].nargs = 0;
     st[n].abbr = prefix;
     n++;
     st[n].key = cx_fmt("%sI%sE", prefix, targs_key(c->targs, c->ntargs));
+    st[n].tags = "";
     st[n].name = NULL;
     st[n].args = c->targs;
     st[n].nargs = c->ntargs;
@@ -298,9 +473,9 @@ static int scope_steps(struct cscope *s, struct step *st, int *std)
                 continue;
             }
         }
-        k = add_step(st, k, prev, scope_ident(c),
-                     cls ? cls->targs : NULL, cls ? cls->ntargs : 0,
-                     cls && cls->tmpl);
+        k = add_step_tagged(st, k, prev, scope_ident(c), class_tags(cls),
+                            cls ? cls->targs : NULL, cls ? cls->ntargs : 0,
+                            cls && cls->tmpl);
         prev = st[k - 1].key;
     }
     return k;
@@ -327,10 +502,13 @@ static void put_steps(struct mbuf *m, struct step *st, int n, int nocand)
             put(m, st[j].abbr);       /* (no candidate) */
             continue;
         }
-        if (st[j].name)
+        if (st[j].name) {
             put_source(m, st[j].name);
-        else
+            if (st[j].tags)
+                put(m, st[j].tags);
+        } else {
             put_targs(m, st[j].args, st[j].nargs);
+        }
         if (j < n - nocand)
             sub_add(m, st[j].key);
     }
@@ -389,9 +567,10 @@ static int class_steps(struct cclass *c, struct step *st, int *std)
         }
     }
     const char *prev = n ? st[n - 1].key : *std ? "St" : "";
-    return add_step(st, n, prev, c->name ? c->name : unnamed(c->unnamed_no),
-                    c->targs,
-                    c->ntargs, c->tmpl != NULL);
+    return add_step_tagged(st, n, prev,
+                           c->name ? c->name : unnamed(c->unnamed_no),
+                           class_tags(c), c->targs, c->ntargs,
+                           c->tmpl != NULL);
 }
 
 static const char *type_name_key(struct cscope *owner, const char *name)
@@ -966,17 +1145,21 @@ const char *mangle_func(struct cfunc *f)
     struct mbuf u;
     memset(&u, 0, sizeof u);
     put_unqualified(&u, f);
+    if (!f->is_conv)
+        put(&u, func_tags(f));      /* (a name's ABI tags: after it) */
     int tmpl = f->spec_of != NULL;
     /* steps: the scopes, then the name as written (a raw step), then the
      * template arguments */
     st[n].key = cx_fmt("%s%s", prev, u.p);
     st[n].name = NULL;
+    st[n].tags = "";
     st[n].args = NULL;
     st[n].nargs = 0;
     int name_step = n++;
     if (tmpl) {
         st[n].key = cx_fmt("%sI%sE", st[name_step].key,
                            targs_key(f->targs, f->ntargs));
+        st[n].tags = "";
         st[n].name = NULL;
         st[n].args = f->targs;
         st[n].nargs = f->ntargs;
@@ -1021,10 +1204,13 @@ const char *mangle_func(struct cfunc *f)
         else if (st[j2].abbr) {
             put(&m, st[j2].abbr);        /* Sa, So...: no candidate */
             continue;
-        } else if (st[j2].name)
+        } else if (st[j2].name) {
             put_source(&m, st[j2].name);
-        else
+            if (st[j2].tags)
+                put(&m, st[j2].tags);
+        } else {
             put_targs(&m, st[j2].args, st[j2].nargs);
+        }
         if (j2 < name_step || (j2 == name_step && tmpl))
             sub_add(&m, st[j2].key);
     }
@@ -1060,13 +1246,15 @@ const char *mangle_var(struct cvar *v, struct cscope *owner)
     struct step st[128];
     int std;
     int n = scope_steps(owner, st, &std);
-    if (n == 0 && !std && !v->targs)
+    const char *tags = var_tags(v, owner);
+    if (n == 0 && !std && !v->targs && !*tags)
         return v->name;          /* a global-namespace variable: unmangled */
     struct mbuf m;
     memset(&m, 0, sizeof m);
     put(&m, "_Z");
     const char *prev = n ? st[n - 1].key : std ? "St" : "";
-    n = add_step(st, n, prev, v->name, v->targs, v->ntargs, v->targs != NULL);
+    n = add_step_tagged(st, n, prev, v->name, tags, v->targs, v->ntargs,
+                        v->targs != NULL);
     int last_name = n - 1;
     while (last_name > 0 && !st[last_name].name)
         last_name--;

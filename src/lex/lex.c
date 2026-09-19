@@ -466,9 +466,10 @@ static int cxx_number(struct lexer *lx, struct token *t)
     }
     const char *suf = d;
     int ud = !std_suffix(suf, is_float);
-    if (!ud && !seps && !bin) {
+    if (!ud && !seps && !bin && !strchr(suf, 'z') && !strchr(suf, 'Z')) {
         free(buf);
-        return 0;                       /* the C paths read it */
+        return 0;                       /* the C paths read it (not C++23's
+                                         * z and uz: size_t's) */
     }
     size_t dl = (size_t)(suf - buf);
     char *digits = xmalloc(dl + 1);

@@ -6,6 +6,7 @@
  * resolution (12.2) — and initialization (9.4), which declarations,
  * arguments, returns and new-expressions all share. */
 #include "cxx.h"
+#include "../arch/target.h"
 
 #include <setjmp.h>
 #include <stdarg.h>
@@ -313,6 +314,7 @@ struct ics {
     int binds_rvref;          /* ... of an rvalue reference to an rvalue */
     unsigned ref_cv;          /* ... to this cv-qualified type */
     struct cclass *base_to;   /* a derived-to-base conversion, to this */
+    int to_void_ptr;          /* a pointer converted to void * */
     struct cfunc *user;       /* the user-defined conversion */
     struct cclass *list_cls;  /* ... or, none named, the class a braced list
                                * makes (an aggregate's, {}) */
@@ -497,8 +499,13 @@ static struct ics std_conv(struct cexpr *e, struct cty *to)
     if (e->k == E_OVL && e->memptr) {
         if (ct_is_pmf(tu))
             for (struct cfunc *f = e->fn; f; f = f->next)
-                if (f->cls == tu->cls && ct_same_unqual(f->type, tu->to))
-                    r.rank = R_EXACT;
+                if (ct_same_unqual(f->type, tu->to)) {
+                    if (f->cls == tu->cls)
+                        r.rank = R_EXACT;
+                    else if (r.rank == R_BAD &&
+                             class_derives(tu->cls, f->cls, NULL))
+                        r.rank = R_CONV;   /* (to the derived class's) */
+                }
         return r;
     }
     if (e->k == E_OVL || e->k == E_FUNC) {
@@ -583,6 +590,7 @@ static struct ics std_conv(struct cexpr *e, struct cty *to)
         }
         if (pt->k == CT_VOID && pf->k != CT_FUNC) {
             r.rank = R_CONV;
+            r.to_void_ptr = pf->k != CT_VOID;
             return r;
         }
         if (pf->k == CT_CLASS && pt->k == CT_CLASS &&
@@ -781,6 +789,11 @@ static int ics_cmp(const struct ics *a, const struct ics *b)
         return 0;     /* (the same conversion: its second part decides) */
     if (a->ptr_bool != b->ptr_bool)
         return a->ptr_bool ? -1 : 1;
+    /* B* to A* beats B* to void* (12.2.4.3) */
+    if (a->base_to && b->to_void_ptr)
+        return 1;
+    if (b->base_to && a->to_void_ptr)
+        return -1;
     if (a->base_to && b->base_to && a->base_to != b->base_to) {
         /* to a base that derives from the other's: the nearer is better */
         if (is_proper_base(a->base_to, b->base_to))
@@ -1701,7 +1714,7 @@ static int convert_args_ft(struct cty *ft, struct cexpr **defs,
         if (!a)
             cx_error(at, "too few arguments");
         if (i >= na)
-            a = default_at(a, at);        /* a default: the caller's place */
+            a = default_at(defarg_read(a), at);  /* the caller's place */
         o[i] = convert_param(a, ft->params[i], at);
     }
     *out = o;
@@ -2405,10 +2418,19 @@ static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
             /* a trivial assignment is the struct's bytes */
             need_modifiable(l, "assignment");
             struct cexpr *r = args[1];
-            struct cexpr *v = init_object(ct_unqual(l->t),
-                                          r->k == E_INITLIST && !r->t
-                                          ? INIT_COPY_LIST : INIT_COPY,
-                                          &r, 1, at);
+            struct cty *lt = ct_unqual(l->t);
+            struct cexpr *v;
+            int amb = 0;
+            if (r->vc != VC_PRVALUE && r->t && r->t->k == CT_CLASS &&
+                (r->t->cls == lt->cls ||
+                 class_derives(r->t->cls, lt->cls, &amb)))
+                /* from an object: its bytes, not a copy of it (which
+                 * would be a temporary to destroy) */
+                v = r->t->cls == lt->cls ? r : to_base(r, lt->cls, 0);
+            else
+                v = init_object(lt, r->k == E_INITLIST && !r->t
+                                    ? INIT_COPY_LIST : INIT_COPY,
+                                &r, 1, at);
             struct cexpr *e = ex2(E_ASSIGN, l->t, VC_LVALUE, l, v);
             e->op = TOK_ASSIGN;
             return e;
@@ -3119,6 +3141,29 @@ static struct cexpr *cast_to(struct cty *t, struct cexpr *e, int kind,
         return ex_cast(e, t);
     if (t->k == CT_CLASS)
         return init_object(t, INIT_DIRECT, &e, 1, at);
+    if ((kind == CAST_C || kind == CAST_REINTERPRET) && t->k == CT_PTR &&
+        ((e->k == E_PMEM && e->t->k == CT_FUNC) ||
+         (e->k == E_MEMPTR && e->fn))) {
+        /* GNU's pointer-to-member-function conversions: a bound one's
+         * function (obj.*pmf), or a constant's (&C::f) */
+        struct cexpr *b = ex_new(E_BUILTIN, ct_ptr(ct_basic(CT_VOID)),
+                                 VC_PRVALUE);
+        if (e->k == E_PMEM) {
+            b->name = "__cx_bound_pmf";
+            b->a = xmalloc(2 * sizeof *b->a);
+            b->a[0] = ex_addr(e->a[0]);
+            b->a[1] = e->a[1];
+            b->na = 2;
+        } else {
+            b->name = "__cx_pmf_fn";
+            b->fn = e->fn;
+            if (!cx_unevaluated)
+                e->fn->called = 1;
+        }
+        b->line = at->t.line;
+        b->file = at->file;
+        return ex_cast(b, ct_unqual(t));
+    }
     if (e->k == E_OVL)
         return convert(e, t, "a cast");
     e = rvalue(e);
@@ -3505,11 +3550,41 @@ static struct cty *builtin_type(const char *n);
 
 static const char *lib_sig(const char *n);
 
+/* __builtin_ia32_rdrand{16,32,64}_step, __builtin_ia32_rdseed_{hi,si,di}
+ * _step: the value's width in bits (0: not one of them) */
+int rdrand_width(const char *n)
+{
+    static const struct { const char *name; int w; } rd[] = {
+        { "ia32_rdrand16_step", 16 }, { "ia32_rdrand32_step", 32 },
+        { "ia32_rdrand64_step", 64 }, { "ia32_rdseed_hi_step", 16 },
+        { "ia32_rdseed_si_step", 32 }, { "ia32_rdseed_di_step", 64 },
+    };
+    for (size_t i = 0; i < sizeof rd / sizeof rd[0]; i++)
+        if (!strcmp(n, rd[i].name))
+            return rd[i].w;
+    return 0;
+}
+
+/* __builtin_powi[fl]: libgcc's __powi?f2 for the type (long double's
+ * the x87 format on x86-64, IEEE quad on aarch64) */
+static const char *powi_fn(const char *n)
+{
+    if (!strcmp(n, "powi"))
+        return "__powidf2";
+    if (!strcmp(n, "powif"))
+        return "__powisf2";
+    if (!strcmp(n, "powil"))
+        return target_get() == TARGET_AARCH64 ? "__powitf2" : "__powixf2";
+    return NULL;
+}
+
 int cxx_has_builtin(const char *name)
 {
     if (strncmp(name, "__builtin_", 10) == 0) {
-        if (lib_sig(name + 10))
+        if (lib_sig(name + 10) || powi_fn(name + 10))
             return 1;
+        if (rdrand_width(name + 10) || !strcmp(name + 10, "ia32_pause"))
+            return target_get() != TARGET_AARCH64;
         static const char *const special[] = {
             "offsetof", "is_constant_evaluated", "addressof", "launder",
             "expect", "constant_p", "va_arg", "coro_done", "coro_resume",
@@ -3677,6 +3752,9 @@ static const char *lib_sig(const char *n)
         { "exit", "vi" }, { "malloc", "Pz" }, { "calloc", "Pzz" },
         { "realloc", "PPz" }, { "free", "vP" }, { "abs", "ii" },
         { "labs", "ll" }, { "llabs", "LL" }, { "alloca", "Pz" },
+        /* libgcc's, for __builtin_powi (x to an int power) */
+        { "__powidf2", "ddi" }, { "__powisf2", "ffi" },
+        { "__powixf2", "eei" }, { "__powitf2", "eei" },
     };
     for (size_t i = 0; i < sizeof fns / sizeof fns[0]; i++)
         if (strcmp(fns[i].name, n) == 0)
@@ -3979,6 +4057,37 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         e->na = prom ? 3 : 1;
         return e;
     }
+    if (!strcmp(n, "ia32_pause")) {
+        /* the spin-wait hint: pause (emit.c) */
+        if (target_get() == TARGET_AARCH64)
+            cx_error(at, "'%s' is an x86 builtin", name);
+        struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_VOID), VC_PRVALUE);
+        e->name = name;
+        e->line = at->t.line;
+        e->file = at->file;
+        return e;
+    }
+    if (rdrand_width(n)) {
+        /* x86's rdrand/rdseed: a random value stored, 1 when there was
+         * one (emit.c writes the instruction) */
+        if (target_get() == TARGET_AARCH64)
+            cx_error(at, "'%s' is an x86 builtin", name);
+        if (na != 1)
+            cx_error(at, "'%s' takes one pointer", name);
+        struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_INT), VC_PRVALUE);
+        e->name = name;
+        e->line = at->t.line;
+        e->file = at->file;
+        e->a = xmalloc(sizeof *e->a);
+        e->a[0] = rvalue(args[0]);
+        e->na = 1;
+        if (e->a[0]->t->k != CT_PTR || !ct_is_integer(e->a[0]->t->to))
+            cx_error(at, "'%s' takes a pointer to an integer", name);
+        return e;
+    }
+    const char *powi = powi_fn(n);
+    if (powi)
+        n = powi;
     struct cfunc *lf = strcmp(n, "memcpy") && strcmp(n, "memmove") &&
                        strcmp(n, "memset") ? lib_builtin(n) : NULL;
     if (lf)
@@ -4743,9 +4852,11 @@ static struct cexpr *call(struct cexpr *f, struct cexpr **args, int na,
         all[0] = f;
         memcpy(all + 1, args, (size_t)na * sizeof *args);
         struct cexpr *o = overloaded("operator()", all, na + 1, 1, at);
-        if (!o)
-            cx_error(at, "'%s' has no viable operator() for (%s)",
-                     ct_name(f->t), arg_types(args, na));
+        if (!o) {
+            const char *on = cx_strdup(ct_name(f->t));  /* (one buffer) */
+            cx_error(at, "'%s' has no viable operator() for (%s)", on,
+                     arg_types(args, na));
+        }
         return o;
     }
     struct cexpr *p = rvalue(f);
@@ -4931,11 +5042,15 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
         obj = materialize(obj);
     cx_accept(TOK_CX_TEMPLATE);          /* x.template f<T>() */
     if (cx_kind() == TOK_TILDE) {
-        /* an explicit destructor call: p->~T() */
+        /* an explicit destructor call: p->~T(), p->~X<A>() */
         cx_advance();
         if (cx_kind() != TOK_IDENT)
             cx_error(cx_cur(), "expected a class name after '~'");
-        cx_advance();
+        int n;
+        if (cx_kind_at(1) == TOK_LT && peek_type_name(&n))
+            cx_skip_peek(n);
+        else
+            cx_advance();
         cx_expect(TOK_LPAREN, "'('");
         cx_expect(TOK_RPAREN, "')'");
         struct cfunc *d = class_dtor(c);
@@ -5084,13 +5199,16 @@ static struct cexpr *member_pointer(void)
         cx_pos = save;
         return NULL;
     }
-    struct csym *y = scope_find_here(c->scope, name);
+    /* (a base's member: a pointer to member of the base, 7.6.2.2) */
+    struct csym *y = class_member(c, name);
     if (y && y->k == CS_FIELD) {
         if (ct_is_ref(y->field->type))
             cx_error(at, "a pointer to reference member '%s'", name);
         if (y->field->bitwidth >= 0)
             cx_error(at, "a pointer to bit-field '%s'", name);
-        struct cexpr *e = ex_new(E_MEMPTR, ct_mptr(c, y->field->type),
+        struct cclass *of = y->fcls ? y->fcls
+                            : y->scope->k == SC_CLASS ? y->scope->cls : c;
+        struct cexpr *e = ex_new(E_MEMPTR, ct_mptr(of, y->field->type),
                                  VC_PRVALUE);
         e->field = y->field;
         return e;
@@ -5101,8 +5219,9 @@ static struct cexpr *member_pointer(void)
             stat |= f->is_static;
         if (!stat) {
             if (!y->fns->next) {
+                struct cclass *of = y->fns->cls ? y->fns->cls : c;
                 struct cexpr *e = ex_new(E_MEMPTR,
-                                         ct_mptr(c, y->fns->type),
+                                         ct_mptr(of, y->fns->type),
                                          VC_PRVALUE);
                 e->fn = y->fns;
                 if (!cx_unevaluated)
@@ -5182,6 +5301,8 @@ static struct cexpr *parse_unary(void)
         if (t->k == CT_FUNC || (!ct_is_complete(t) && t->k != CT_VOID))
             cx_error(at, "%s of incomplete type %s",
                      k == TOK_KW_SIZEOF ? "sizeof" : "alignof", ct_name(t));
+        if (k == TOK_KW_SIZEOF && t->k == CT_ARRAY && t->vla)
+            cx_error(at, "sizeof a variable-length array is not supported");
         long al = ct_align(t) > member_align ? ct_align(t) : member_align;
         return ex_int(k == TOK_KW_SIZEOF ? ct_size(t) : al, ct_size_t());
     }
@@ -5399,6 +5520,22 @@ struct cexpr *expr_parse(void)
 long expr_parse_const(const char *what)
 {
     return expr_parse_const_as(what, 0);
+}
+
+/* An array declarator's bound: a constant — or, where vla is given (a
+ * local's), any integer, *vla its value as a long (-1 returned). */
+long expr_parse_bound(struct cexpr **vla)
+{
+    const struct ctok *at = cx_cur();
+    struct cexpr *e = expr_parse_cond();
+    long v = 0;
+    if (ct_is_integer(e->t) && expr_const(e, &v))
+        return v;
+    if (!vla || !(ct_is_integer(e->t) || e->t->k == CT_ENUM))
+        cx_error(at, "an array bound is not an integral constant "
+                     "expression");
+    *vla = convert_param(e, ct_basic(CT_LONG), at);
+    return -1;
 }
 
 /* ... as_bool: contextually converted to bool (explicit(...), noexcept(...):

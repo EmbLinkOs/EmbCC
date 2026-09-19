@@ -211,6 +211,9 @@ static char *cdecl(struct cty *t, const char *inner)
         return cdecl(t->to, s);
     }
     case CT_ARRAY:
+        if (t->vla)
+            return cdecl(t->to, cx_fmt("%s[%s]", inner,
+                                       t->vla_name ? t->vla_name : "1"));
         return cdecl(t->to, t->n >= 0 ? cx_fmt("%s[%ld]", inner, t->n)
                                       : cx_fmt("%s[]", inner));
     case CT_COMPLEX:
@@ -432,6 +435,53 @@ static char *str_lit(struct cexpr *e)
     }
     sb_put(&b, "\"");
     return b.p;
+}
+
+/* s as a C string literal */
+static char *c_quote(const char *s)
+{
+    struct sb b = { 0, 0, 0 };
+    sb_put(&b, "\"");
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p >= 0x20 && *p < 0x7f && *p != '"' && *p != '\\' && *p != '?')
+            sb_printf(&b, "%c", *p);
+        else
+            sb_printf(&b, "\\%03o", *p);
+    }
+    sb_put(&b, "\"");
+    return b.p;
+}
+
+static char *elv(struct cexpr *e);
+static char *ev(struct cexpr *e);
+
+/* a GNU asm statement, in C: its operands the expressions' C (an input a
+ * value, unless its constraint wants memory and it is an lvalue) */
+static void emit_asm(struct sb *b, struct casm *a)
+{
+    sb_printf(b, "__asm__ %s%s(%s", a->is_volatile ? "volatile " : "",
+              a->is_inline ? "inline " : "", c_quote(a->tmpl));
+    int sections = a->nclob ? 3 : a->nin ? 2 : a->nout ? 1 : 0;
+    for (int k = 1; k <= sections; k++) {
+        sb_put(b, " :");
+        struct casm_op *ops = k == 1 ? a->outs : a->ins;
+        int n = k == 1 ? a->nout : k == 2 ? a->nin : a->nclob;
+        for (int i = 0; i < n; i++) {
+            sb_put(b, i ? ", " : " ");
+            if (k == 3) {
+                sb_put(b, c_quote(a->clobs[i]));
+                continue;
+            }
+            struct casm_op *o = &ops[i];
+            if (o->name)
+                sb_printf(b, "[%s] ", o->name);
+            int mem = strchr(o->cons, 'm') != NULL;
+            sb_printf(b, "%s (%s)", c_quote(o->cons),
+                      k == 1 || (mem && o->e->vc != VC_PRVALUE)
+                      ? elv(o->e) : ev(o->e));
+        }
+    }
+    sb_put(b, ");\n");
 }
 
 /* ---- full-expressions and their temporaries ---- */
@@ -1130,8 +1180,13 @@ static char *ev(struct cexpr *e)
     case E_MEMPTR:
         if (e->field)
             return cx_fmt("%ldL", e->field->off);
-        need_fn(e->fn);
         need_pmf = 1;
+        if (e->fn->is_virtual && !e->fn->is_static && e->fn->vslot >= 0)
+            /* a virtual function's: its vtable offset + 1 (Itanium) —
+             * called, the object's override */
+            return cx_fmt("((struct __cx_pmf){ (void *)%ldL, 0 })",
+                          (long)e->fn->vslot * 8 + 1);
+        need_fn(e->fn);
         return cx_fmt("((struct __cx_pmf){ (void *)%s, 0 })",
                       fn_name(e->fn, 1));
     case E_PMEM: case E_TYPEID:
@@ -1187,7 +1242,41 @@ static char *ev(struct cexpr *e)
         cx_error(NULL, "%s:%d: co_await here is not supported yet",
                  e->file ? e->file : "?", e->line);
         return NULL;
+    case E_DEFARG:
+        return ev(defarg_read(e));
     case E_BUILTIN: {
+        if (strcmp(e->name, "__cx_bound_pmf") == 0) {
+            /* GNU: (void *)(obj.*pmf) — the function the call would
+             * reach, its override when virtual */
+            int u = cx_uid();
+            need_pmf = 1;
+            return cx_fmt("({ struct __cx_pmf __cx_m%d = %s; char *__cx_o%d"
+                          " = (char *)%s + __cx_m%d.adj; (void *)(((long)"
+                          "__cx_m%d.ptr & 1) ? *(void **)(*(char **)__cx_o%d"
+                          " + (long)__cx_m%d.ptr - 1) : __cx_m%d.ptr); })",
+                          u, ev(e->a[1]), u, ev(e->a[0]), u, u, u, u, u);
+        }
+        if (strncmp(e->name, "__builtin_", 10) == 0 &&
+            rdrand_width(e->name + 10)) {
+            /* rdrand/rdseed (a 64-bit register), carry set: a value */
+            int u = cx_uid();
+            struct cty *vt = e->a[0]->t->to;
+            return cx_fmt("({ unsigned long __cx_rv%d; unsigned char "
+                          "__cx_ok%d; __asm__ volatile(\"%s %%0; setc %%1\" : "
+                          "\"=r\"(__cx_rv%d), \"=qm\"(__cx_ok%d) :: \"cc\"); "
+                          "*(%s)%s = (%s)__cx_rv%d; (int)__cx_ok%d; })",
+                          u, u, strstr(e->name, "rdseed") ? "rdseed"
+                                                          : "rdrand",
+                          u, u, ctype(ct_ptr(ct_unqual(vt))), ev(e->a[0]),
+                          ctype(ct_unqual(vt)), u, u);
+        }
+        if (strcmp(e->name, "__builtin_ia32_pause") == 0)
+            return "({ __asm__ volatile(\"pause\"); (void)0; })";
+        if (strcmp(e->name, "__cx_pmf_fn") == 0) {
+            /* GNU: (void *)&C::f — the function itself */
+            need_fn(e->fn);
+            return cx_fmt("((void *)%s)", fn_name(e->fn, 1));
+        }
         if (strncmp(e->name, "__builtin_coro_", 15) == 0) {
             /* through the frame: its resume and destroy functions' addresses
              * first (resume null once at the final suspend), then the
@@ -2232,6 +2321,11 @@ static void emit_decl(struct sb *b, struct cstmt *s)
     }
     const char *al = v->align_attr ? cx_fmt(" __attribute__((aligned(%ld)))",
                                             v->align_attr) : "";
+    if (t->k == CT_ARRAY && t->vla) {
+        /* a variable-length array: its bound, evaluated here once */
+        t->vla_name = cx_fmt("__cx_vla%d", cx_uid());
+        sb_printf(b, "long %s = %s;\n", t->vla_name, full_value(t->vla));
+    }
     if (ct_is_ref(t)) {
         struct cexpr *p = v->init;
         if (p && p->k == E_ADDR && p->a[0]->k == E_TEMP) {
@@ -2609,7 +2703,7 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         emit_stmt(b, s->body);
         return;
     case S_ASM:
-        sb_printf(b, "%s\n", s->asm_text);
+        emit_asm(b, s->asm_);
         return;
     case S_TRY:
         emit_try(b, s);
@@ -2692,8 +2786,10 @@ static const char *fn_storage(struct cfunc *f)
 static void emit_prototype(struct cfunc *f)
 {
     /* weak goes on definitions only: a weak declaration would let a
-     * missing body link as address 0 */
-    const char *st = fn_internal(f) ? "static " : "";
+     * missing body link as address 0 — unless the source says so (a
+     * weak reference: libitm's functions, where there may be none) */
+    const char *st = fn_internal(f) ? "static "
+                     : f->weak && !f->defined ? "__attribute__((weak)) " : "";
     /* one that cannot throw: its calls need no landing pads */
     const char *sec = eh_on && func_nothrow(f) ? "__attribute__((nothrow)) "
                                                : "";
@@ -3296,7 +3392,7 @@ static int gvar_needed(struct cvar *v)
     if (!v->defined || v->emitted)
         return 0;
     if (v->is_inline)
-        return v->refd;
+        return v->refd || v->explicit_inst;
     if (v->is_static)
         return v->refd || gvar_has_effects(v);
     return 1;
@@ -3408,12 +3504,32 @@ static struct sb out_rtti_decl;
 
 /* Where c's vtable and typeinfo live: 0 another unit (the one defining
  * its key function), 1 here and weak (no key function), 2 here. */
+/* The class template instance c is, or is a member of (NULL: neither, or
+ * an explicit specialization — an ordinary class). */
+static struct cclass *template_instance(struct cclass *c)
+{
+    while (c && !c->tmpl) {
+        struct cclass *up = c->owner && c->owner->k == SC_CLASS
+                            ? c->owner->cls : NULL;
+        if (!up && c->scope->parent && c->scope->parent->k == SC_CLASS)
+            up = c->scope->parent->cls;
+        c = up;
+    }
+    return c && !c->explicit_spec ? c : NULL;
+}
+
+/* where c's vtable and RTTI live: 2 this unit's, 0 another's, 1 every
+ * unit's that needs them, weak — a template instance's (vague linkage,
+ * Itanium 5.2.3), unless `extern template` names another unit's */
 static int rtti_home(struct cclass *c)
 {
     if (class_internal(c))
         return 1;
     if (!c->dynamic || !c->key)
         return 1;
+    struct cclass *inst = template_instance(c);
+    if (inst)
+        return inst->extern_inst ? 0 : 1;
     return c->key->defined ? 2 : 0;
 }
 
@@ -3733,11 +3849,13 @@ char *cx_emit_unit(void)
     fx_begin(&top, &save);
 
     for (struct cfunc *f = cx_funcs; f; f = f->all_next)
-        if (f->defined && !f->is_inline && !f->is_implicit)
+        if (f->defined && ((!f->is_inline && !f->is_implicit) ||
+                           f->explicit_inst))
             need_fn(f);
     /* a vtable homed here is emitted whether or not this unit uses it */
     for (int i = 0; i < cx_nclasses; i++)
-        if (cx_classes[i]->dynamic && rtti_home(cx_classes[i]) == 2)
+        if (cx_classes[i]->dynamic && (rtti_home(cx_classes[i]) == 2 ||
+                                       cx_classes[i]->explicit_inst))
             need_vtable(cx_classes[i]);
     int progress = 1;
     int wi = 0;

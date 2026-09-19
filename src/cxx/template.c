@@ -896,6 +896,10 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
     case CT_ARRAY:
         if (A->k != CT_ARRAY)
             return 0;
+        if ((P->n == -1) != (A->n == -1) &&
+            (P->n != -2 || A->n == -1) && (deduce_exact || A->n == -1))
+            return 0;           /* T[] and T[N]: not one form (T[] of an
+                                 * argument T[4]: no) */
         if (P->n == -2 && P->bparam < np) {     /* T (&)[N] */
             int i = P->bparam;
             if (set[i])

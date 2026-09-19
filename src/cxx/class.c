@@ -770,6 +770,14 @@ void class_complete(struct cclass *c)
     int own_ctors = 0;
     for (struct cfunc *f = c->ctors; f; f = f->next)
         own_ctors |= !f->inherited;
+    if (!own_ctors)       /* the implicit default constructor hides a
+                           * base's, inherited (9.9/15) */
+        for (struct cfunc **p = &c->ctors; *p;) {
+            if ((*p)->inherited && !(*p)->tmpl && (*p)->type->np == 0)
+                *p = (*p)->next;
+            else
+                p = &(*p)->next;
+        }
     struct cfunc *ucopy = NULL, *umove = NULL, *ucopy_as = NULL,
                  *umove_as = NULL;
     for (struct cfunc *f = c->ctors; f; f = f->next) {
@@ -1092,6 +1100,23 @@ static void define_defaulted(struct cfunc *f)
     if (!f->special)
         cx_error(cx_cur(), "'%s' cannot be defaulted", f->name);
     define_implicit(f);
+}
+
+/* C::f() = default; after the class: user-provided (so not trivial) and
+ * defined here, this unit's (9.5.2) */
+void class_default_outside(struct cfunc *f)
+{
+    struct cclass *c = f->cls;
+    if (f->is_dtor)
+        f->special = SP_DTOR;
+    else if (f->is_ctor)
+        f->special = f->type->np == 0 ? SP_DEFAULT : copy_kind(f, c);
+    else
+        f->special = copy_kind(f, c);
+    f->trivial = 0;
+    int inl = f->is_inline;
+    define_defaulted(f);
+    f->is_inline = inl;           /* (not an implicit one's: inline) */
 }
 
 struct cfunc *class_dtor(struct cclass *c)

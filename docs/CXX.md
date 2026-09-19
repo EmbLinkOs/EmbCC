@@ -823,9 +823,88 @@ took:
   that are constant expressions, a comma expression as an `if`/`while`/
   `for` condition, form feed and vertical tab as white space
   (tests/exec/c-extras2.c); tests/cxx/alignednew.cc.
-Next: the src/ directories (C++98 through C++26: the locale, string,
-stream and filesystem implementations), then running the suites wholly on
-EmbCC's library.
+**The src/ directories too.** tools/build-libstdcxx.sh now compiles
+src/c++98 through src/c++26 with the Makefiles' per-file flags (the
+`*_cow` objects with `-D_GLIBCXX_USE_CXX11_ABI=0`, format and print as
+C++26, cxx11-ios_failure with its typeinfo rewritten as the Makefile
+rewrites g++'s assembly — here in the lowered C), and puts each object in
+place of the reference archive's member it matches by content (libtool
+stored the second codecvt.o as lt1-codecvt.o). On x86-64, 191 of the 193
+objects are EmbCC's (the two module units hold no code and are left out);
+every program of tests/libstdcxx and tests/cxx linked with that library
+prints and exits as g++'s build does. What remains: floating_from_chars
+(fast_float multiplies in `__uint128_t`, and EmbCC has no `__int128` yet)
+and tzdb (ranges::subrange's constructor is an abbreviated function
+template, `C auto` parameter, which EmbCC does not read yet). On aarch64,
+190 of 193 — floating_to_chars too, where newlib's fenv.h writes
+`__asm __volatile("mrs ...")` — and the same 52 programs agree with g++.
+What it took:
+- explicit instantiation of an instance's static data members
+  (`template T A<X>::m;`, and the `extern template` declaration), its
+  destructor, a nested class's members, and GNU's `inline template class`
+  (the vtable and RTTI, not the members); `template class` instantiates the
+  members defined in the class too (they were left out), and never a
+  member template's specializations that overload resolution made
+- vague linkage as g++ gives it: a template instance's members defined
+  outside the class, their local statics, and its vtable and RTTI are weak
+  in every unit (they were strong: two units using one instance clashed);
+  an explicit specialization is an ordinary function (strong, unless
+  declared inline); a namespace-scope `constexpr` variable has internal
+  linkage
+- ABI tags (5.1.2): `__abi_tag__` on functions, variables, classes and
+  inline namespaces, mangled `B <name>` after the name — and the implicit
+  ones: a function whose return type carries tags its parameters and
+  scopes do not (`std::string f()` is `_Z1fB5cxx11v`), a variable by its
+  type. Without them EmbCC's names missed g++'s libstdc++'s
+  (`std::locale::name[abi:cxx11]()`, `filesystem::current_path()`);
+  tests/golden/cxx-abi.sh calls across both ways
+- a member function's default arguments are read when first used, the
+  class complete (`replace_extension(const path& = path())` in path);
+  a function template's default arguments, and its declaration's default
+  template arguments, survive its definition
+- overload sets across inline namespaces are one set (`std::rotate` in
+  std::_V2 beside pstl's in std); `struct N::X`, `N::f() { }` for what an
+  inline namespace of N declares; a qualified class's bases looked up in
+  its namespace
+- pointers to inherited members (`&D::f` of B's f: a `B::*`, converting to
+  D's); B* over void* in overload ranking; the default constructor
+  inherited too (C++17) unless the class declares its own; `= default`
+  after the class (user-provided: defined in that unit, not trivial); a
+  trivial assignment from an object copies its bytes (it copied into a
+  temporary it then destroyed)
+- a typedef names an unnamed class for linkage (newlib's `mbstate_t`: the
+  class had no linkage, so `codecvt<wchar_t, char, mbstate_t>` was local)
+- constant locals read in a lambda without a capture (not odr-uses);
+  GNU variable-length arrays (locals of scalars: C's VLA); `p->~X<T>()`;
+  `(dependent::value)` as a template argument (a value, not a cast), and
+  `<`, `<=>`, `->*`, `++`, assignment operators in dependent expressions;
+  C++23 `if consteval` and the `z`/`uz` literal suffixes; a variable
+  template initialized by an immediately-called lambda; `decltype(operator>
+  (a, b))` in a partial specialization; `T[]` never matches `T[N]` (the
+  extent_v partial specializations were ambiguous — ranges algorithms on
+  built-in arrays failed)
+- GNU asm statements in C++ (operands of C++ expressions, passed to C —
+  random_device's cpuid and rdrand), EmbCC's own cpuid.h, and
+  `__builtin_ia32_rdrand*_step`, `__builtin_ia32_rdseed*_step`,
+  `__builtin_ia32_pause`, `__builtin_powi[fl]` (libgcc's `__powi?f2`)
+- GNU's pointer-to-member-function conversions: `(void *)(obj.*pmf)` the
+  function the call would reach, `(void *)&C::f` the function itself (the
+  locale facets test for overridden do_get this way); a virtual function's
+  pointer to member is now its vtable offset + 1, as Itanium says (it was
+  the function, so a call through it was not virtual)
+- attributes after a declarator's parameters (`void f(int)
+  __attribute__((weak))`), and weak declarations: a weak undefined
+  function or variable is a weak reference (0 if nothing defines it) —
+  on aarch64 through the GOT (adrp/add cannot give 0), in EmbCC's C too
+- the preprocessor: C++ raw string literals (no directives, splices or
+  comments inside), `#elifdef`/`#elifndef` (C23/C++23, and GNU's before
+  except strict C++20), `#line` and GNU's `# N "file"` linemarkers; asm
+  labels of adjacent literals (newlib's `__ASMNAME`); `__cpp_sized_deallocation`;
+  include/float.h complete (`LDBL_MANT_DIG` and the rest)
+tests/cxx/libsources.cc (g++ agrees on both targets).
+Next: `__int128`; abbreviated function templates (`C auto x` parameters:
+ranges::subrange's constructor, so `ranges::equal_range` with a
+projection); running the suites wholly on EmbCC's library, aarch64's too.
 
 Next (language): `consteval` as more than `constexpr` (a format string is
 checked at run time for now).

@@ -851,28 +851,42 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_GADDR: {
+            /* (a weak reference through its GOT slot: adrp/add would give
+             * the page of the pc, not 0, for an undefined one) */
+            int got = i->glob->is_weak && !i->glob->defined;
             struct gsite hi, lo;
             hi.patch_off = a64_adrp(t, A64_ACC);
             hi.glob = i->glob;
-            hi.kind = RK_ADR_HI21;
+            hi.kind = got ? RK_GOT_PAGE : RK_ADR_HI21;
             PUSH(st->g, st->ng, st->capg, hi);
-            lo.patch_off = a64_add_lo12(t, A64_ACC, A64_ACC);
+            if (got) {
+                lo.patch_off = t->len;
+                a64_ldr(t, A64_ACC, A64_ACC, 0, 8, 0, 8);
+            } else {
+                lo.patch_off = a64_add_lo12(t, A64_ACC, A64_ACC);
+            }
             lo.glob = i->glob;
-            lo.kind = RK_ADD_LO12;
+            lo.kind = got ? RK_GOT_LO12 : RK_ADD_LO12;
             PUSH(st->g, st->ng, st->capg, lo);
             st_slot(t, sd, i->dst, A64_ACC, 8);
             break;
         }
 
         case IR_FADDR: {
+            int got = i->callee->is_weak && !i->callee->has_defn;
             struct fsite hi, lo;
             hi.patch_off = a64_adrp(t, A64_ACC);
             hi.target = i->callee;
-            hi.kind = RK_ADR_HI21;
+            hi.kind = got ? RK_GOT_PAGE : RK_ADR_HI21;
             PUSH(st->f, st->nf, st->capf, hi);
-            lo.patch_off = a64_add_lo12(t, A64_ACC, A64_ACC);
+            if (got) {
+                lo.patch_off = t->len;
+                a64_ldr(t, A64_ACC, A64_ACC, 0, 8, 0, 8);
+            } else {
+                lo.patch_off = a64_add_lo12(t, A64_ACC, A64_ACC);
+            }
             lo.target = i->callee;
-            lo.kind = RK_ADD_LO12;
+            lo.kind = got ? RK_GOT_LO12 : RK_ADD_LO12;
             PUSH(st->f, st->nf, st->capf, lo);
             st_slot(t, sd, i->dst, A64_ACC, 8);
             break;

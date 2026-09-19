@@ -81,7 +81,16 @@ struct attrs {
     long aligned;
     const char *section;
     const char *asm_name;
+    const char **abi_tags;    /* __abi_tag__("...", ...), sorted */
+    int nabi_tags;
 };
+
+/* a's ABI tags added to the set (v, *n) */
+static void tags_from(const char ***v, int *n, const struct attrs *a)
+{
+    for (int i = 0; i < a->nabi_tags; i++)
+        abi_tag_add(v, n, a->abi_tags[i]);
+}
 
 static int attr_is(const char *n, const char *w)
 {
@@ -115,6 +124,16 @@ static void parse_attrs(struct attrs *a)
                     if (attr_is(n, "aligned")) {
                         cx_advance();
                         a->aligned = expr_parse_const("an alignment");
+                        cx_expect(TOK_RPAREN, "')'");
+                    } else if (attr_is(n, "abi_tag")) {
+                        cx_advance();
+                        while (cx_kind() == TOK_STR) {
+                            abi_tag_add(&a->abi_tags, &a->nabi_tags,
+                                        cx_cur()->t.text);
+                            cx_advance();
+                            if (!cx_accept(TOK_COMMA))
+                                break;
+                        }
                         cx_expect(TOK_RPAREN, "')'");
                     } else if (attr_is(n, "section") &&
                                cx_kind_at(1) == TOK_STR) {
@@ -174,6 +193,111 @@ static void parse_attrs(struct attrs *a)
 }
 
 /* `__asm__("symbol")` after a declarator: the name to use in the object. */
+/* A GNU asm statement's string: adjacent literals are one. */
+static const char *asm_string(const char *what)
+{
+    if (cx_kind() != TOK_STR)
+        cx_error(cx_cur(), "expected a string for %s", what);
+    const char *r = "";
+    while (cx_kind() == TOK_STR) {
+        r = cx_fmt("%s%s", r, cx_cur()->t.text);
+        cx_advance();
+    }
+    return r;
+}
+
+/* [name] "constraint" (expression), ... — outputs lvalues */
+static int asm_operands(struct casm_op **out, int output)
+{
+    int n = 0, cap = 0;
+    *out = NULL;
+    if (cx_kind() != TOK_STR && cx_kind() != TOK_LBRACKET)
+        return 0;
+    for (;;) {
+        if (n == cap) {
+            cap = cap ? cap * 2 : 4;
+            *out = xrealloc(*out, (size_t)cap * sizeof **out);
+        }
+        struct casm_op *o = &(*out)[n++];
+        o->name = NULL;
+        if (cx_accept(TOK_LBRACKET)) {
+            if (cx_kind() != TOK_IDENT)
+                cx_error(cx_cur(), "expected an operand name");
+            o->name = cx_cur()->t.text;
+            cx_advance();
+            cx_expect(TOK_RBRACKET, "']'");
+        }
+        o->cons = asm_string("an operand's constraint");
+        const struct ctok *at = cx_cur();
+        cx_expect(TOK_LPAREN, "'(' before an asm operand");
+        struct cexpr *e = expr_parse();
+        cx_expect(TOK_RPAREN, "')' after an asm operand");
+        if (e->t->k == CT_CLASS)
+            cx_error(at, "an asm operand of class type '%s'",
+                     ct_name(e->t));
+        if (output && e->vc != VC_LVALUE)
+            cx_error(at, "an asm output is not an lvalue");
+        o->e = e;
+        if (!cx_accept(TOK_COMMA))
+            return n;
+    }
+}
+
+/* asm [volatile] [inline] ( template [: outputs [: inputs [: clobbers]]] );
+ * (a colon pair may be one `::` token) */
+static struct cstmt *parse_asm_stmt(const struct ctok *at)
+{
+    struct cstmt *s = st_new(S_ASM);
+    struct casm *a = xcalloc(1, sizeof *a);
+    s->asm_ = a;
+    s->line = at->t.line;
+    s->file = at->file;
+    cx_advance();
+    for (;;) {
+        if (cx_accept(TOK_KW_VOLATILE))
+            a->is_volatile = 1;
+        else if (cx_accept(TOK_KW_INLINE))
+            a->is_inline = 1;
+        else if (cx_kind() == TOK_KW_GOTO)
+            cx_error(cx_cur(), "asm goto in C++ is not supported yet");
+        else
+            break;
+    }
+    cx_expect(TOK_LPAREN, "'(' after asm");
+    a->tmpl = asm_string("the asm template");
+    int part = 0;           /* the section the next colon opens */
+    for (;;) {
+        if (cx_accept(TOK_COLONCOLON))
+            part += 2;
+        else if (cx_accept(TOK_COLON))
+            part += 1;
+        else
+            break;
+        if (part > 3)
+            cx_error(cx_cur(), "asm goto labels in C++ are not supported "
+                               "yet");
+        if (part == 1 && cx_kind() != TOK_COLON &&
+            cx_kind() != TOK_COLONCOLON)
+            a->nout = asm_operands(&a->outs, 1);
+        else if (part == 2 && cx_kind() != TOK_COLON &&
+                 cx_kind() != TOK_COLONCOLON)
+            a->nin = asm_operands(&a->ins, 0);
+        else if (part == 3)
+            while (cx_kind() == TOK_STR) {
+                a->clobs = xrealloc(a->clobs, (size_t)(a->nclob + 1) *
+                                              sizeof *a->clobs);
+                a->clobs[a->nclob++] = asm_string("a clobber");
+                if (!cx_accept(TOK_COMMA))
+                    break;
+            }
+    }
+    cx_expect(TOK_RPAREN, "')' after the asm");
+    cx_expect(TOK_SEMI, "';' after asm");
+    if (!a->nout)
+        a->is_volatile = 1;         /* (no outputs: implicitly volatile) */
+    return s;
+}
+
 static void parse_asm_label(struct attrs *a)
 {
     if (cx_kind() != TOK_KW_ASM || cx_kind_at(1) != TOK_LPAREN)
@@ -182,9 +306,13 @@ static void parse_asm_label(struct attrs *a)
     cx_advance();
     if (cx_kind() != TOK_STR)
         cx_error(cx_cur(), "expected a string in an asm label");
-    a->asm_name = cx_cur()->t.text;
-    while (cx_kind() == TOK_STR)
+    /* (adjacent literals are one: `"" "__xpg_strerror_r"`, newlib's
+     * __ASMNAME with an empty __USER_LABEL_PREFIX__) */
+    a->asm_name = "";
+    while (cx_kind() == TOK_STR) {
+        a->asm_name = cx_fmt("%s%s", a->asm_name, cx_cur()->t.text);
         cx_advance();
+    }
     cx_expect(TOK_RPAREN, "')'");
 }
 
@@ -1242,6 +1370,7 @@ static struct cty *parse_suffixes(struct cty *t, struct declarator *d,
         cx_advance();
         long n = -1;
         int bparam = -1;
+        struct cexpr *vla = NULL;
         if (cx_kind() != TOK_RBRACKET) {
             if (mode & DK_NEW) {
                 /* new T[n]: n is any expression; the caller reads it */
@@ -1251,8 +1380,11 @@ static struct cty *parse_suffixes(struct cty *t, struct declarator *d,
             if (cx_pattern && pattern_bound(&bparam)) {
                 n = bparam >= 0 ? -2 : -3;      /* [N], or unknown */
             } else {
-                n = expr_parse_const("an array bound");
-                if (n < 0)
+                /* (a local's may be a run-time value: GNU's VLA) */
+                int local = cx_curfn && cx_curblk && !cx_in_targs &&
+                            (mode & DK_NAMED) && after_id;
+                n = expr_parse_bound(local ? &vla : NULL);
+                if (n < 0 && !vla)
                     cx_error(at, "array bound is negative");
             }
         }
@@ -1260,8 +1392,12 @@ static struct cty *parse_suffixes(struct cty *t, struct declarator *d,
         struct cty *inner = parse_suffixes(t, d, mode, 0);
         if (inner->k == CT_FUNC || ct_is_ref(inner) || inner->k == CT_VOID)
             cx_error(at, "array of %s", ct_name(inner));
+        if (vla && !ct_is_scalar(inner))
+            cx_error(at, "a variable-length array of %s is not supported",
+                     ct_name(inner));
         struct cty *at_ = ct_array(inner, n);
         at_->bparam = bparam;
+        at_->vla = vla;
         return at_;
     }
     if (cx_kind() == TOK_LPAREN && !(mode & DK_NEW) &&
@@ -1345,8 +1481,25 @@ static struct cty *ptr_ops(struct cty *t, int mode)
     }
 }
 
+/* where attributes after a declarator's parameter list go (`void f(int)
+ * __attribute__((weak))`): the declarator being read's */
+static struct attrs *attr_sink;
+
+static struct cty *parse_declarator_(struct cty *t, struct declarator *d,
+                                     int mode);
+
 static struct cty *parse_declarator(struct cty *t, struct declarator *d,
                                     int mode)
+{
+    struct attrs *saved = attr_sink;
+    attr_sink = &d->a;
+    t = parse_declarator_(t, d, mode);
+    attr_sink = saved;
+    return t;
+}
+
+static struct cty *parse_declarator_(struct cty *t, struct declarator *d,
+                                     int mode)
 {
     parse_attrs(&d->a);
     t = ptr_ops(t, mode);
@@ -1503,6 +1656,8 @@ static void skip_default_arg(void)
     }
 }
 
+static int class_depth;          /* inside class bodies being parsed */
+
 static struct cty *parse_params(void)
 {
     cx_expect(TOK_LPAREN, "'('");
@@ -1579,6 +1734,16 @@ static struct cty *parse_params(void)
                      * instance reads it with its arguments) */
                     skip_default_arg();
                     defs[np - 1] = ex_int(0, ct_basic(CT_INT));
+                } else if (class_depth > 0 && cx_scope->k == SC_CLASS &&
+                           !cx_scope->cls->complete) {
+                    /* a member's, in its class: read when used, the
+                     * class complete (`f(const path& = path())`) */
+                    struct cexpr *d = ex_new(E_DEFARG, ct_basic(CT_INT),
+                                             VC_PRVALUE);
+                    d->ival = cx_pos;
+                    d->dscope = cx_scope;
+                    skip_default_arg();
+                    defs[np - 1] = d;
                 } else {
                     defs[np - 1] = cx_kind() == TOK_LBRACE
                                    ? parse_braced_list()
@@ -1602,6 +1767,8 @@ static struct cty *parse_params(void)
     ft->pgroups = groups;
     ft->npgroups = ngroups;
     ft->defargs = anydef ? defs : NULL;
+    if (cx_kind() == TOK_KW_ATTRIBUTE)     /* (the declarator's) */
+        parse_attrs(attr_sink);
     ft->fq = parse_cv();
     if (cx_kind() == TOK_AMP) {
         cx_advance();
@@ -1632,7 +1799,7 @@ static struct cty *parse_params(void)
         }
         if (cx_kind() == TOK_KW_ATTRIBUTE ||
             (cx_kind() == TOK_LBRACKET && cx_kind_at(1) == TOK_LBRACKET)) {
-            parse_attrs(NULL);
+            parse_attrs(attr_sink);
             continue;
         }
         /* virt-specifiers: checked by overriding, not needed to emit */
@@ -1850,6 +2017,8 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     f->c_linkage = cx_extern_c && !cls;
     f->weak = ds->a.weak || d->a.weak;
     f->noreturn = ds->a.noreturn || d->a.noreturn;
+    tags_from(&f->abi_tags, &f->nabi_tags, &ds->a);
+    tags_from(&f->abi_tags, &f->nabi_tags, &d->a);
     f->section = ds->a.section ? ds->a.section : d->a.section;
     f->asm_name = d->a.asm_name;
     f->body_tok = -1;
@@ -1888,7 +2057,6 @@ struct pending {
 };
 static struct pending *pend;
 static int npend, cappend;
-static int class_depth;
 
 static void add_pending(struct cfunc *f, struct cclass *c, struct cfield *fl)
 {
@@ -2942,8 +3110,12 @@ static void init_variable_as(struct cvar *v, enum init_form form,
         if (ct_is_ref(t) && !v->is_extern && !v->is_param)
             cx_error(at, "reference '%s' is not initialized", v->name);
         if (!v->is_extern && !ct_is_ref(t)) {
-            if (t->k == CT_ARRAY && t->n < 0)
+            if (t->k == CT_ARRAY && t->n < 0 && !t->vla)
                 cx_error(at, "array '%s' has no size", v->name);
+            if (t->vla && form == INIT_DEFAULT) {
+                v->ctor = NULL;           /* (scalars: left as they are) */
+                return;
+            }
             if (!ct_is_complete(t))
                 cx_error(at, "'%s' has incomplete type %s", v->name,
                          ct_name(t));
@@ -3018,9 +3190,10 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
         /* internal linkage: static, const without extern, unnamed ns */
         if (ds->storage == SK_STATIC)
             v->is_static = 1;
-        else if ((t->q & CQ_CONST) && ds->storage != SK_EXTERN &&
-                 !ds->is_inline && !cx_extern_c)
-            v->is_static = 1;
+        else if (((t->q & CQ_CONST) || ds->is_constexpr) &&
+                 ds->storage != SK_EXTERN && !ds->is_inline && !cx_extern_c &&
+                 !d->qual)
+            v->is_static = 1;     /* (constexpr is const: 6.6/3.2) */
         for (struct cscope *s = target; s; s = s->parent)
             if (s->k == SC_NAMESPACE && s->anon)
                 v->is_static = 1;
@@ -3033,6 +3206,12 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
     }
     if (ds->a.weak || d->a.weak)
         v->weak = 1;
+    if (ds->a.nabi_tags || d->a.nabi_tags) {
+        tags_from(&v->abi_tags, &v->nabi_tags, &ds->a);
+        tags_from(&v->abi_tags, &v->nabi_tags, &d->a);
+        if (!v->c_linkage && !d->a.asm_name)
+            v->cname = mangle_var(v, v->owner);
+    }
     if (ds->a.section || d->a.section)
         v->section = ds->a.section ? ds->a.section : d->a.section;
     if (ds->a.aligned || d->a.aligned)
@@ -3257,7 +3436,8 @@ static struct cty *parse_class_spec(struct dspec *ds)
     struct csym *y = NULL;
     if (name) {
         if (qual) {
-            y = scope_find_tag(qual, name);
+            y = qual->k == SC_NAMESPACE ? scope_find_tag_inline(qual, name)
+                                        : scope_find_tag(qual, name);
             if (!y)
                 cx_error(at, "no class '%s' in '%s'", name,
                          qual->name ? qual->name : "::");
@@ -3292,6 +3472,12 @@ static struct cty *parse_class_spec(struct dspec *ds)
             y->type = ct_class(c);
         }
     }
+    if (a.nabi_tags && !c->tmpl) {
+        /* class __attribute__((abi_tag("cxx11"))) failure: in its name */
+        tags_from(&c->abi_tags, &c->nabi_tags, &a);
+        if (!c->local && c->name)
+            c->cname = cx_fmt("_C%s", mangle_class_name(c));
+    }
     if (!is_def) {
         if (cx_kind() == TOK_SEMI)
             ds->decl_only = 1;
@@ -3319,6 +3505,14 @@ static struct cty *parse_class_spec(struct dspec *ds)
         return ct_class(c);
     }
     ds->cls_defined = c;
+    if (qual) {
+        /* struct N::X : B { }: B is looked up as from inside N */
+        struct cscope *save = cx_scope;
+        cx_scope = c->scope->parent;
+        struct cty *t = parse_class_body(c, kw, &a, at);
+        cx_scope = save;
+        return t;
+    }
     return parse_class_body(c, kw, &a, at);
 }
 
@@ -3870,7 +4064,9 @@ static void inherit_ctors(struct cclass *c, struct cclass *b,
     class_ensure(b);
     for (struct cfunc *g = b->ctors; g; g = g->next) {
         struct cty *ft = g->type;
-        if (!g->tmpl && ft->np == 0)
+        /* (a default constructor too, since C++17: unless the class
+         * declares its own, implicitly — class.c drops it then) */
+        if (!g->tmpl && ft->np == 0 && (g->is_implicit || g->is_deleted))
             continue;
         if (ft->np == 1 && !g->tmpl) {
             struct cty *p = ct_unqual(ct_strip_ref(ft->params[0]));
@@ -4147,7 +4343,9 @@ static void parse_namespace(void)
         cx_advance();
     }
     cx_advance();                               /* namespace */
-    parse_attrs(NULL);
+    struct attrs na;
+    memset(&na, 0, sizeof na);
+    parse_attrs(&na);
     const char *names[16];
     int nn = 0;
     if (cx_kind() == TOK_IDENT) {
@@ -4161,7 +4359,7 @@ static void parse_namespace(void)
             cx_advance();
         }
     }
-    parse_attrs(NULL);
+    parse_attrs(&na);
     if (nn == 1 && cx_kind() == TOK_ASSIGN) {       /* namespace alias */
         cx_advance();
         struct qname q = peek_qname();
@@ -4211,6 +4409,8 @@ static void parse_namespace(void)
         }
         cx_scope = y->ns;
         opened = 1;
+        if (i == nn - 1 && y->ns->is_inline)   /* (else ignored, as g++) */
+            tags_from(&y->ns->abi_tags, &y->ns->nabi_tags, &na);
     }
     (void)opened;
     cx_expect(TOK_LBRACE, "'{' after the namespace name");
@@ -4274,6 +4474,14 @@ static void parse_declaration(int toplevel, struct cstmt **out)
     case TOK_KW_INLINE:
         if (toplevel && cx_kind_at(1) == TOK_CX_NAMESPACE) {
             parse_namespace();
+            return;
+        }
+        if (cx_kind_at(1) == TOK_CX_TEMPLATE && cx_kind_at(2) != TOK_LT) {
+            /* GNU: `inline template class X<A>;` — the class's vtable
+             * and RTTI here, not its members */
+            cx_advance();
+            cx_advance();
+            parse_explicit_instantiation(2);
             return;
         }
         break;
@@ -4366,6 +4574,7 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                 if (t->k == CT_CLASS && t->cls->anon && !t->cls->name) {
                     t->cls->name = d.name;
                     t->cls->scope->name = d.name;
+                    t->cls->anon = 0;     /* (it has linkage now) */
                     if (!t->cls->local)
                         t->cls->cname = cx_fmt("_C%s",
                                                mangle_class_name(t->cls));
@@ -4387,6 +4596,15 @@ static void parse_declaration(int toplevel, struct cstmt **out)
             }
             if (d.qual && d.kind != DN_CTOR && d.kind != DN_DTOR) {
                 struct csym *y = scope_find_here(d.qual, d.name);
+                if ((!y || y->k != CS_FUNC) && d.qual->k == SC_NAMESPACE) {
+                    /* N::f() { } of an f an inline namespace of N
+                     * declares: that namespace's */
+                    struct cscope *in = inline_ns_declaring(d.qual, d.name);
+                    if (in) {
+                        target = in;
+                        y = scope_find_here(in, d.name);
+                    }
+                }
                 if (!y || y->k != CS_FUNC)
                     cx_error(d.at, "no function '%s' declared in '%s'",
                              d.name, d.qual->name ? d.qual->name : "::");
@@ -4420,12 +4638,15 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                 return;
             }
             if (cx_accept(TOK_ASSIGN)) {
-                if (cx_accept(TOK_KW_DEFAULT))
+                if (cx_accept(TOK_KW_DEFAULT)) {
                     f->is_defaulted = 1;
-                else if (cx_accept(TOK_CX_DELETE))
+                    if (d.qual && f->cls && f->cls->complete)
+                        class_default_outside(f);
+                } else if (cx_accept(TOK_CX_DELETE)) {
                     f->is_deleted = 1;
-                else
+                } else {
                     cx_error(cx_cur(), "expected 'default' or 'delete'");
+                }
             }
         } else if (toplevel || ds.storage == SK_EXTERN) {
             if (t->k == CT_VOID)
@@ -5264,6 +5485,26 @@ static struct cstmt *parse_stmt_or_none(void)
     case TOK_KW_IF: {
         s = st_new(S_IF);
         cx_advance();
+        if (cx_kind() == TOK_CX_CONSTEVAL ||
+            (cx_kind() == TOK_BANG && cx_kind_at(1) == TOK_CX_CONSTEVAL)) {
+            /* C++23 if consteval { } else { }: the first in a constant
+             * evaluation, the second at run time — as
+             * if (__builtin_is_constant_evaluated()) (! : reversed) */
+            int neg = cx_accept(TOK_BANG);
+            cx_advance();
+            struct cexpr *c = ex_new(E_BUILTIN, ct_basic(CT_BOOL),
+                                     VC_PRVALUE);
+            c->name = "__builtin_is_constant_evaluated";
+            s->e = c;
+            if (cx_kind() != TOK_LBRACE)
+                cx_error(cx_cur(), "expected '{' after 'if consteval'");
+            struct cstmt *a = parse_stmt(), *b = NULL;
+            if (cx_accept(TOK_KW_ELSE))
+                b = parse_stmt();
+            s->body = neg ? (b ? b : st_new(S_NULL)) : a;
+            s->els = neg ? a : b;
+            return s;
+        }
         int is_constexpr = cx_accept(TOK_CX_CONSTEXPR);
         cx_expect(TOK_LPAREN, "'(' after if");
         scope_push(SC_BLOCK, NULL);
@@ -5510,22 +5751,8 @@ static struct cstmt *parse_stmt_or_none(void)
         cx_expect(TOK_SEMI, "';' after return");
         return s;
     }
-    case TOK_KW_ASM: {
-        /* a GNU asm statement: passed to C as written */
-        s = st_new(S_ASM);
-        int start = cx_pos;
-        cx_advance();
-        while (cx_kind() == TOK_KW_VOLATILE || cx_kind() == TOK_KW_INLINE ||
-               cx_kind() == TOK_KW_GOTO)
-            cx_advance();
-        if (cx_kind() != TOK_LPAREN)
-            cx_error(cx_cur(), "expected '(' after asm");
-        cx_skip_balanced();
-        cx_expect(TOK_SEMI, "';' after asm");
-        (void)start;
-        cx_error(at, "asm statements in C++ are not supported yet");
-        return s;
-    }
+    case TOK_KW_ASM:
+        return parse_asm_stmt(at);
     case TOK_CX_TRY:
         return parse_try(at);
     case TOK_CX_USING:
@@ -5747,6 +5974,12 @@ static int targ_mentions_param(void)
     int depth = 0;
     for (int i = cx_pos; i < cx_ntoks; i++) {
         enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_CX_OPERATOR && i + 1 < cx_ntoks) {
+            /* operator> ... : the operator is a name's, not a bracket */
+            enum tok_kind o = cx_toks[i + 1].t.kind;
+            i += (o == TOK_LPAREN || o == TOK_LBRACKET) ? 2 : 1;
+            continue;
+        }
         if (depth == 0 && (k == TOK_COMMA || k == TOK_GT || k == TOK_SHR ||
                            k == TOK_SEMI))
             return 0;
@@ -5817,6 +6050,7 @@ static const char *dep_binop(enum tok_kind k, int *prec)
     case TOK_GT: *prec = cx_in_targs > 0 ? 0 : 7; return "gt";
     case TOK_LE: *prec = 7; return "le";
     case TOK_GE: *prec = 7; return "ge";
+    case TOK_SPACESHIP: *prec = 8; return "ss";
     case TOK_SHL: *prec = 9; return "ls";
     case TOK_SHR: *prec = cx_in_targs > 0 ? 0 : 9; return "rs";
     case TOK_PLUS: *prec = 10; return "pl";
@@ -5824,6 +6058,8 @@ static const char *dep_binop(enum tok_kind k, int *prec)
     case TOK_STAR: *prec = 11; return "ml";
     case TOK_SLASH: *prec = 11; return "dv";
     case TOK_PERCENT: *prec = 11; return "rm";
+    case TOK_ARROWSTAR: *prec = 12; return "pm";
+    case TOK_DOTSTAR: *prec = 12; return "ds";
     default: *prec = 0; return NULL;
     }
 }
@@ -5883,9 +6119,34 @@ static const char *dep_fold(void)
     return cx_fmt("fR%s%s%s", op, l, dep_expr_unary());
 }
 
+/* an assignment operator's mangled name (5.1.6), or NULL */
+static const char *dep_assign_op(enum tok_kind k)
+{
+    switch (k) {
+    case TOK_ASSIGN: return "aS";
+    case TOK_PLUSEQ: return "pL";
+    case TOK_MINUSEQ: return "mI";
+    case TOK_STAREQ: return "mL";
+    case TOK_SLASHEQ: return "dV";
+    case TOK_PERCENTEQ: return "rM";
+    case TOK_AMPEQ: return "aN";
+    case TOK_PIPEEQ: return "oR";
+    case TOK_CARETEQ: return "eO";
+    case TOK_SHLEQ: return "lS";
+    case TOK_SHREQ: return "rS";
+    default: return NULL;
+    }
+}
+
 static const char *dep_expr_cond(void)
 {
     const char *c = dep_expr_bin(1);
+    const char *aop = dep_assign_op(cx_kind());
+    if (aop && !cx_in_targs) {
+        /* (an assignment, right to left) */
+        cx_advance();
+        return cx_fmt("%s%s%s", aop, c, dep_expr_cond());
+    }
     if (!cx_accept(TOK_QUESTION))
         return c;
     int saved = cx_in_targs;
@@ -5924,12 +6185,22 @@ static const char *dep_expr_name(void)
             qt = ct_class(q.scope->cls);
         cx_pos += q.fin;
         cx_half_gt = 0;
+        int tkw = cx_accept(TOK_CX_TEMPLATE) ||
+                  cx_toks[cx_pos - 1].t.kind == TOK_CX_TEMPLATE;
         if (cx_kind() != TOK_IDENT)
             cx_error(at, "expected a name after '::'");
         const char *n = cx_cur()->t.text;
         cx_advance();
         const char *r = cx_fmt("sr%s%zu%s", type_ref(qt), strlen(n), n);
-        if (cx_kind() == TOK_LT) {
+        /* `<` after a dependent type's member: its template arguments
+         * only after `template` (T::template f<X>); else less-than
+         * ((L::value < R::value)) — a known class's member template
+         * aside */
+        struct csym *my = !q.dep && q.scope ? lookup_in(q.scope, n) : NULL;
+        int targs = tkw || (my && (my->k == CS_TEMPLATE ||
+                                   (my->k == CS_FUNC && my->fns &&
+                                    my->fns->tmpl)));
+        if (cx_kind() == TOK_LT && targs) {
             int p0 = cx_pos;
             skip_template_args();
             r = cx_fmt("%sI_%dE", r, p0);     /* template args: vendor */
@@ -5989,6 +6260,11 @@ static const char *dep_expr_postfix(const char *e)
             e = cx_fmt("%s%s%zu%s", op, e, strlen(n), n);
             continue;
         }
+        if (cx_kind() == TOK_PLUSPLUS || cx_kind() == TOK_MINUSMINUS) {
+            e = cx_fmt("%s%s", cx_kind() == TOK_PLUSPLUS ? "pp" : "mm", e);
+            cx_advance();                   /* (postfix) */
+            continue;
+        }
         return e;
     }
 }
@@ -6002,6 +6278,12 @@ static const char *dep_expr_unary(void)
     if (op) {
         cx_advance();
         return cx_fmt("%s%s", op, dep_expr_unary());
+    }
+    if (k == TOK_PLUSPLUS || k == TOK_MINUSMINUS) {
+        /* prefix: pp_ / mm_ (5.1.6) */
+        cx_advance();
+        return cx_fmt("%s_%s", k == TOK_PLUSPLUS ? "pp" : "mm",
+                      dep_expr_unary());
     }
     if (k == TOK_KW_SIZEOF || k == TOK_KW_ALIGNOF) {
         cx_advance();
@@ -6088,7 +6370,13 @@ static const char *dep_expr_unary(void)
         int saved = cx_in_targs;
         cx_in_targs = 0;
         const char *r;
-        if (at_type_start()) {
+        /* (X<T>::value): a dependent qualified name without `typename`
+         * names a value (13.8.1), not a type to cast to */
+        struct qname dq = peek_qname();
+        int dep_value = !dq.bad && dq.dep && dq.fin > 0 &&
+                        cx_kind_at(dq.fin) == TOK_IDENT &&
+                        cx_kind_at(dq.fin + 1) == TOK_RPAREN;
+        if (!dep_value && at_type_start()) {
             /* (T)e — if what follows `(` is a type ending at `)`
              * (X<T>::value && ... is an expression, not a cast) */
             int start = cx_pos;
@@ -6560,9 +6848,11 @@ static void skip_declaration(void)
         }
         if (k == TOK_LBRACE) {
             cx_skip_balanced();
-            /* a body ends a function definition; an initializer does not */
-            if (depth == 0 && cx_kind() != TOK_SEMI &&
-                cx_kind() != TOK_COMMA)
+            /* a body ends a function definition; an initializer does not
+             * (nor a lambda's body: `= []{ ... }();`) */
+            enum tok_kind n = cx_kind();
+            if (depth == 0 && n != TOK_SEMI && n != TOK_COMMA &&
+                n != TOK_LPAREN && n != TOK_RPAREN)
                 return;
             continue;
         }
@@ -6763,6 +7053,28 @@ static struct cguide *guide_at(void)
     return g;
 }
 
+/* At a declarator: is it qualified by two template-ids, A<T>::B<U>::? */
+static int nested_template_member(void)
+{
+    int ids = 0, depth = 0;
+    for (int i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_LT)
+            depth++;
+        else if (k == TOK_GT && depth > 0) {
+            if (--depth == 0 && cx_toks[i + 1].t.kind == TOK_COLONCOLON)
+                ids++;
+        } else if (k == TOK_SHR && depth > 0) {
+            depth = depth > 2 ? depth - 2 : 0;
+            if (depth == 0 && cx_toks[i + 1].t.kind == TOK_COLONCOLON)
+                ids++;
+        } else if (depth == 0 && (k == TOK_LPAREN || k == TOK_SEMI ||
+                                  k == TOK_LBRACE))
+            break;
+    }
+    return ids >= 2;
+}
+
 void parse_template_decl(struct cclass *cls, int access)
 {
     const struct ctok *at = cx_cur();
@@ -6798,6 +7110,14 @@ void parse_template_decl(struct cclass *cls, int access)
         cx_expect(TOK_LT, "'<'");
         skip_template_args();
         struct ctemplate *t = outdef_target(&member);
+        if (!t && nested_template_member()) {
+            /* template<..> template<..> A<T>::B<U>::f(): a member of a
+             * member class template — not kept yet (out_ptr_t's _Impl:
+             * a use of it fails to link, not to compile) */
+            skip_declaration();
+            cx_scope = home;
+            return;
+        }
         if (!t)
             cx_error(at, "expected a member of a class template");
         struct coutdef *o = xcalloc(1, sizeof *o);
@@ -7114,6 +7434,8 @@ void parse_template_decl(struct cclass *cls, int access)
         f->body_tok = f->mi_tok = -1;
         f->line = d.at ? d.at->t.line : 0;
         f->file = d.at ? d.at->file : NULL;
+        tags_from(&f->abi_tags, &f->nabi_tags, &ds.a);
+        tags_from(&f->abi_tags, &f->nabi_tags, &d.a);
         tm->pattern = f;
         /* a redeclaration (the definition after a declaration): keep one
          * pattern, the one with the body */
@@ -7144,15 +7466,28 @@ void parse_template_decl(struct cclass *cls, int access)
                 (!has_body || !g->tmpl->has_body)) {
                 if (!ds.is_friend)
                     g->hidden_friend = 0;
+                for (int i = 0; i < f->nabi_tags; i++)
+                    abi_tag_add(&g->abi_tags, &g->nabi_tags, f->abi_tags[i]);
                 if (has_body) {
                     if (!g->tmpl->decl0_tok)
                         g->tmpl->decl0_tok = g->tmpl->decl_tok + 1;
                     g->tmpl->decl_tok = decl;
+                    /* the declaration's default template arguments stay
+                     * too (read with the definition's names for the
+                     * parameters: the same, as a rule) */
+                    for (int i = 0; i < np; i++)
+                        if (ps[i].def_tok < 0)
+                            ps[i].def_tok = g->tmpl->params[i].def_tok;
                     g->tmpl->params = ps;
                     g->tmpl->has_body = 1;
                     g->tmpl->scope = tm->scope;  /* the definition's names */
                     g->tmpl->req_start = req_s;
                     g->tmpl->req_end = req_e;
+                    /* (the declaration's default arguments stay: the
+                     * definition may not repeat them) */
+                    if (g->type->defargs && !t->defargs && t->np ==
+                                                           g->type->np)
+                        t->defargs = g->type->defargs;
                     g->type = t;
                 }
                 cx_scope = home;
@@ -7206,6 +7541,8 @@ void parse_template_decl(struct cclass *cls, int access)
 
 /* template class A<int>; / template void f<int>(int); (and with extern:
  * instantiated elsewhere) */
+static void member_var_define(struct cvar *v, int explicit_inst);
+
 static void parse_explicit_instantiation(int is_extern)
 {
     const struct ctok *at = cx_cur();
@@ -7219,17 +7556,31 @@ static void parse_explicit_instantiation(int is_extern)
         cx_skip_peek(n);
         cx_expect(TOK_SEMI, "';'");
         struct cclass *c = t->cls;
+        if (is_extern == 2) {
+            class_ensure(c);
+            c->explicit_inst = 1;
+            return;
+        }
         if (is_extern) {
             c->tmpl->is_extern = 1;
             c->extern_inst = 1;
             return;
         }
+        c->extern_inst = 0;           /* (after an extern template) */
+        c->explicit_inst = 1;
         class_ensure(c);
         /* every member it has a definition of is instantiated — in the
          * class, or outside it (template<class T> R A<T>::f() {...}) */
+        for (struct csym *y = c->scope->syms; y; y = y->next)
+            if (y->k == CS_VAR && y->var->is_member_static &&
+                !y->var->defined) {
+                member_var_define(y->var, 1);
+                if (y->var->defined)
+                    y->var->used = 1;
+            }
         for (struct cfunc *f = cx_funcs; f; f = f->all_next)
-            if (f->cls == c && !f->tmpl && !f->defined && !f->is_implicit &&
-                !f->is_deleted && !func_unsat(f)) {
+            if (f->cls == c && !f->tmpl && !f->spec_of && !f->defined &&
+                !f->is_implicit && !f->is_deleted && !func_unsat(f)) {
                 func_ensure_body(f);
                 if (f->defined)
                     f->explicit_inst = 1;
@@ -7246,17 +7597,35 @@ static void parse_explicit_instantiation(int is_extern)
     if (d.saved)
         cx_scope = d.saved;
     cx_expect(TOK_SEMI, "';'");
-    if (ft->k != CT_FUNC)
-        cx_error(at, "explicit instantiation of a variable template is not "
-                     "supported yet");
-    if (d.qual && d.qual->k == SC_CLASS && d.qual->cls->tmpl &&
+    if (ft->k != CT_FUNC) {
+        /* template T A<X>::m; : a static data member of an instance —
+         * defined here (its definition out of the class, replayed), or,
+         * extern, not (another unit's) */
+        struct csym *y = d.qual && d.qual->k == SC_CLASS && d.name
+                         ? scope_find_here(d.qual, d.name) : NULL;
+        if (!y || y->k != CS_VAR)
+            cx_error(at, "explicit instantiation of a variable template is "
+                         "not supported yet");
+        struct cvar *v = y->var;
+        if (is_extern) {
+            v->extern_inst = 1;
+        } else {
+            v->extern_inst = 0;
+            member_var_define(v, 1);
+            v->used = 1;
+        }
+        return;
+    }
+    if (d.qual && d.qual->k == SC_CLASS && in_instance(d.qual->cls) &&
         !d.has_targs) {
         /* template R A<X>::f(...); : a member of a class template's
-         * instance, not a template itself */
+         * instance (or of a class in one), not a template itself */
         struct cclass *c = d.qual->cls;
         class_ensure(c);
-        struct csym *y = scope_find_here(c->scope, d.name);
+        struct csym *y = d.kind == DN_CTOR || d.kind == DN_DTOR ? NULL
+                         : scope_find_here(c->scope, d.name);
         struct cfunc *set = d.kind == DN_CTOR ? c->ctors
+                            : d.kind == DN_DTOR ? c->dtor
                             : y && y->k == CS_FUNC ? y->fns : NULL;
         for (struct cfunc *f = set; f; f = f->next) {
             if (f->tmpl || !same_signature(f->type, ft))
@@ -7440,6 +7809,8 @@ static void parse_explicit_specialization(struct cclass *cls, int access)
         if (f) {
             f->lazy = 0;
             f->def_scope = cx_scope;
+            /* (its own definition: inline only as declared here) */
+            f->is_inline = ds.is_inline || ds.is_constexpr;
             if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON)
                 define_function(f, ft);
             else
@@ -7455,6 +7826,8 @@ static void parse_explicit_specialization(struct cclass *cls, int access)
     spec->lazy = 0;
     spec->pnames = ft->pnames;
     spec->type = ft;
+    /* an ordinary function: inline only when declared so */
+    spec->is_inline = ds.is_inline || ds.is_constexpr;
     if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON) {
         spec->def_scope = cx_scope;
         define_function(spec, ft);
@@ -7894,6 +8267,9 @@ int member_from_outdef(struct cfunc *f)
     for (struct coutdef *o = t->outdefs; o && !f->defined; o = o->next) {
         if (!o->member || strcmp(o->member, want) != 0)
             continue;
+        if (o->class_body)
+            continue;       /* A<T>::B { }: a member class (B's ctor is
+                             * named B too), not a function */
         struct ctarg *args = inst->targs;
         int na = inst->ntargs;
         if (o->partial && !inst->inst_partial)
@@ -7940,6 +8316,8 @@ int member_from_outdef(struct cfunc *f)
         cx_sfinae = saved_sf;
         parse_restore(st);
     }
+    if (f->defined)
+        f->is_inline = 1;   /* each unit's instance: one function (weak) */
     return f->defined;
 }
 
@@ -7966,17 +8344,26 @@ void member_class_from_outdef(struct cclass *c)
 
 /* A class template instance's static data member used: its definition
  * out of the class, replayed with the instance's arguments. */
+static void member_var_define(struct cvar *v, int explicit_inst);
+
 void member_var_from_outdef(struct cvar *v)
 {
-    if (v->defined || v->explicit_spec || !v->owner ||
+    member_var_define(v, 0);
+}
+
+/* (explicitly instantiated: though its class's instantiation is another
+ * unit's) */
+static void member_var_define(struct cvar *v, int explicit_inst)
+{
+    if (v->defined || v->explicit_spec || v->extern_inst || !v->owner ||
         v->owner->k != SC_CLASS)
         return;
     struct cclass *inst = v->owner->cls;
     while (inst && !inst->tmpl)
         inst = inst->owner && inst->owner->k == SC_CLASS ? inst->owner->cls
                                                          : NULL;
-    if (!inst || inst->extern_inst || inst->inst_partial ||
-        inst->explicit_spec)
+    if (!inst || (inst->extern_inst && !explicit_inst) ||
+        inst->inst_partial || inst->explicit_spec)
         return;
     struct ctemplate *t = inst->tmpl;
     for (struct coutdef *o = t->outdefs; o && !v->defined; o = o->next) {
@@ -7994,9 +8381,39 @@ void member_var_from_outdef(struct cvar *v)
         cx_extern_c = 0;
         parse_declaration(1, NULL);
         parse_restore(st);
-        if (v->defined)
+        if (v->defined) {
             v->is_inline = 1;   /* each unit's instance: one object */
+            v->explicit_inst = explicit_inst;
+        }
     }
+}
+
+/* A member function's default argument read where it was written, now
+ * its class is complete. */
+struct cexpr *defarg_read(struct cexpr *d)
+{
+    if (d->k != E_DEFARG)
+        return d;
+    if (d->na)
+        return d->a[0];
+    struct parse_state *st = parse_save();
+    cx_scope = d->dscope;
+    cx_pos = (int)d->ival;
+    cx_half_gt = 0;
+    cx_pattern = 0;
+    cx_in_targs = 0;
+    cx_unevaluated = 0;
+    cx_curfn = NULL;
+    cx_curblk = NULL;
+    struct cexpr *e = cx_kind() == TOK_LBRACE ? parse_braced_list()
+                                              : expr_parse_assign();
+    if (cx_kind() != TOK_COMMA && cx_kind() != TOK_RPAREN)
+        cx_error(cx_cur(), "expected ',' or ')' after a default argument");
+    parse_restore(st);
+    d->a = xmalloc(sizeof *d->a);
+    d->a[0] = e;
+    d->na = 1;
+    return e;
 }
 
 struct cvar *var_define_from(struct ctemplate *t, int pos, struct ctarg *args,
@@ -8226,6 +8643,8 @@ static struct ccapture *var_capture(struct clambda *L, struct cvar *v,
         if (L->caps[i].var == v)
             return &L->caps[i];
     if (!L->dflt) {
+        if (v->has_const)
+            return NULL;          /* its value: not an odr-use (6.3) */
         cx_error(at, "'%s' is not captured by the lambda", v->name);
         return NULL;
     }
@@ -8248,7 +8667,10 @@ static struct ccapture *var_capture(struct clambda *L, struct cvar *v,
 static struct cexpr *capture_var_in(struct clambda *L, struct cvar *v,
                                     const struct ctok *at)
 {
-    return capture_use(L, var_capture(L, v, at));
+    struct ccapture *c = var_capture(L, v, at);
+    if (!c)       /* a constant (constexpr int n = ...; [] { n; }) */
+        return ex_int(v->const_val, ct_unqual(v->type));
+    return capture_use(L, c);
 }
 
 /* L's capture of member fl of enclosing lambda Lk's closure (an

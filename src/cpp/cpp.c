@@ -924,6 +924,71 @@ static int needs_more_input(struct cpp *cpp, const char *text)
 
 /* ---- the line-oriented driver ---- */
 
+/* At `R"` (after an encoding prefix, if any, already copied): a C++ raw
+ * string literal, R"d(...)d". Its characters are the source's exactly —
+ * no splicing, no comments, no directives on its lines — so it is read
+ * here, whole, and written out as the ordinary literal it equals. */
+static int raw_string_at(struct src *s, const struct tbuf *out)
+{
+    if (!predef_is_cxx() || s->p[0] != 'R' || s->p[1] != '"')
+        return 0;
+    /* R alone, or after u8, u, U, L — not the end of another name */
+    size_t n = out->len;
+    const char *o = out->p;
+    size_t pre = n >= 2 && o[n - 2] == 'u' && o[n - 1] == '8' ? 2
+                 : n >= 1 && (o[n - 1] == 'u' || o[n - 1] == 'U' ||
+                              o[n - 1] == 'L') ? 1 : 0;
+    if (n > pre && is_idc(o[n - pre - 1]))
+        return 0;
+    if (pre == 0 && n > 0 && is_idc(o[n - 1]))
+        return 0;
+    return 1;
+}
+
+static void read_raw_string(struct src *s, struct tbuf *out, int *nl)
+{
+    const char *p = s->p + 2;
+    char delim[17];
+    size_t dn = 0;
+    while (*p && *p != '(') {
+        if (dn >= 16 || *p == ' ' || *p == ')' || *p == '\\' ||
+            *p == '\n')
+            cerr(s, "bad raw string delimiter", NULL);
+        delim[dn++] = *p++;
+    }
+    if (!*p)
+        cerr(s, "unterminated raw string", NULL);
+    delim[dn] = 0;
+    p++;
+    tb_putc(out, '"');
+    for (;;) {
+        if (!*p)
+            cerr(s, "unterminated raw string", NULL);
+        if (*p == ')' && !strncmp(p + 1, delim, dn) && p[1 + dn] == '"') {
+            p += dn + 2;
+            break;
+        }
+        unsigned char c = (unsigned char)*p++;
+        if (c == '\n') {
+            (*nl)++;
+            tb_puts(out, "\\n");
+        } else if (c == '\\' || c == '"') {
+            tb_putc(out, '\\');
+            tb_putc(out, (char)c);
+        } else if (c < 0x20 || c == 0x7F) {
+            char esc[8];
+            snprintf(esc, sizeof esc, "\\%03o", c);
+            tb_puts(out, esc);
+        } else if (c == '?') {
+            tb_puts(out, "\\?");             /* (no trigraph) */
+        } else {
+            tb_putc(out, (char)c);
+        }
+    }
+    tb_putc(out, '"');
+    s->p = p;
+}
+
 /* Reads one logical line (backslash-newline spliced, comments
  * stripped) from s into out. Returns 0 at EOF. Leaves s->line at the
  * FIRST line of the logical line; *nl gets the newline count. */
@@ -962,6 +1027,10 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
                 cerr(s, "unterminated comment", NULL);
             s->p += 2;
             tb_putc(out, ' ');
+            continue;
+        }
+        if (c == 'R' && raw_string_at(s, out)) {
+            read_raw_string(s, out, nl);
             continue;
         }
         if (c == '"' || c == '\'') {
@@ -1217,7 +1286,11 @@ static void process_file(struct cpp *cpp, const char *path,
                 cond[ncond++] = !live ? COND_DONE
                                       : eval_if(&s, arg) ? COND_LIVE
                                                          : COND_DEAD;
-            } else if (DIR("elif")) {
+            } else if (DIR("elif") ||
+                       ((DIR("elifdef") || DIR("elifndef")) &&
+                        !(predef_is_cxx() && cxx_strict && cxx_std < 2023))) {
+                /* (#elifdef/#elifndef: C23, C++23 — and GNU's before, as
+                 * g++ has them but for a strict -std=c++20) */
                 if (!ncond)
                     cerr(&s, "#elif without #if", NULL);
                 if (cond[ncond - 1] == COND_LIVE)
@@ -1227,7 +1300,21 @@ static void process_file(struct cpp *cpp, const char *path,
                     for (int i = 0; i < ncond - 1; i++)
                         if (cond[i] != COND_LIVE)
                             outer_live = 0;
-                    if (outer_live && eval_if(&s, arg))
+                    int take = 0;
+                    if (outer_live && DIR("elif")) {
+                        take = eval_if(&s, arg);
+                    } else if (outer_live) {
+                        size_t idn = 0;
+                        while (is_idc(arg[idn]))
+                            idn++;
+                        if (!idn)
+                            cerr(&s, "#elifdef needs a name", NULL);
+                        take = find_macro(cpp, arg, idn) != NULL ||
+                               has_operator(arg, idn);
+                        if (DIR("elifndef"))
+                            take = !take;
+                    }
+                    if (take)
                         cond[ncond - 1] = COND_LIVE;
                 }
             } else if (DIR("else")) {
@@ -1264,6 +1351,29 @@ static void process_file(struct cpp *cpp, const char *path,
                         s.file, startline, arg);
             } else if (DIR("pragma")) {
                 /* no pragmas mean anything to us yet */
+            } else if (DIR("line") || (dn > 0 && lp[0] >= '0' &&
+                                        lp[0] <= '9')) {
+                /* #line N ["file"], and GNU's linemarker # N "file" ...
+                 * (preprocessed input): the next line is N of file */
+                char *end;
+                const char *q = DIR("line") ? arg : lp;
+                long ln = strtol(q, &end, 10);
+                if (end == q || ln <= 0)
+                    cerr(&s, "#line needs a positive line number", NULL);
+                while (*end == ' ' || *end == '\t')
+                    end++;
+                if (*end == '"') {
+                    const char *e = strchr(end + 1, '"');
+                    if (!e)
+                        cerr(&s, "#line's file name is unterminated", NULL);
+                    s.file = path = xstrndup(end + 1, (size_t)(e - end - 1));
+                }
+                snprintf(marker, sizeof marker, "# %ld \"%s\"\n", ln, path);
+                tb_puts(out, marker);
+                for (int i = 1; i < nl; i++)
+                    tb_putc(out, '\n');
+                s.line = (int)ln + (nl > 1 ? nl - 1 : 0);
+                continue;
             } else if (dn == 0) {
                 /* '#' alone: the null directive */
             } else {
@@ -1429,6 +1539,7 @@ char *cpp_process(const char *path, const char *src,
             { "__cpp_ref_qualifiers", { 0, 200710L, 200710L, 200710L, 200710L } },
             { "__cpp_return_type_deduction", { 0, 0, 201304L, 201304L, 201304L } },
             { "__cpp_rvalue_references", { 0, 200610L, 200610L, 200610L, 200610L } },
+            { "__cpp_sized_deallocation", { 0, 0, 201309L, 201309L, 201309L } },
             { "__cpp_static_assert", { 0, 200410L, 200410L, 201411L, 201411L } },
             { "__cpp_structured_bindings", { 0, 0, 0, 201606L, 201606L } },
             { "__cpp_threadsafe_static_init", { 200806L, 200806L, 200806L, 200806L, 200806L } },

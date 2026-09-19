@@ -47,8 +47,12 @@ enum reloc_kind {
     RK_ADD_LO12,  /* aarch64: the paired add's 12-bit in-page field */
     RK_ABS64,     /* an absolute 64-bit pointer slot in .data */
     RK_ABS32,     /* an absolute 32-bit field (DWARF section offsets) */
-    RK_DATA_PREL32 /* a 32-bit field holding target - its own address
+    RK_DATA_PREL32, /* a 32-bit field holding target - its own address
                    * (unwind tables' pointers) */
+    RK_GOT_PAGE,  /* aarch64: adrp to the page of the symbol's GOT slot */
+    RK_GOT_LO12   /* aarch64: the paired ldr's offset in that page — a
+                   * weak symbol's address (0 when it is undefined, which
+                   * adrp/add cannot give) */
 };
 
 /* The ELF relocation type for this kind on this target, or -1 if the kind

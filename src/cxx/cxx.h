@@ -91,6 +91,9 @@ struct cty {
     unsigned q;               /* CQ_* on this type */
     struct cty *to;           /* PTR/REF/ARRAY: element; FUNC: return type */
     long n;                   /* ARRAY: element count, -1 when omitted */
+    struct cexpr *vla;        /* ARRAY: a local's run-time bound (GNU
+                               * variable-length array; n -1) */
+    const char *vla_name;     /* ... emit.c: the C local holding it */
     struct cty **params;      /* FUNC */
     int np;
     int variadic;             /* FUNC: `...` */
@@ -210,6 +213,9 @@ struct cvar {
     int explicit_spec;        /* a static member of an instance given its
                                * own (template<> T A<X>::m ...;): not the
                                * template's definition */
+    int extern_inst;          /* extern template T A<X>::m; : defined in
+                               * another unit */
+    int explicit_inst;        /* template T A<X>::m; : defined here */
     int is_inline;            /* an inline variable (C++17) */
     int is_constexpr;
     int defined;              /* a namespace-scope definition was seen */
@@ -217,6 +223,8 @@ struct cvar {
     int weak;                 /* __attribute__((weak)) */
     const char *section;      /* __attribute__((section)) */
     long align_attr;          /* __attribute__((aligned)) / alignas */
+    const char **abi_tags;    /* __abi_tag__("...") (sorted) */
+    int nabi_tags;
     struct cexpr *init;       /* scalar/reference initializer (a reference's
                                * is the pointer to store) */
     struct cexpr *ctor;       /* an object's initialization (construct,
@@ -296,6 +304,9 @@ struct cscope {
     int nusings;
     int anon;                 /* an unnamed namespace */
     int is_inline;            /* an inline namespace */
+    const char **abi_tags;    /* an inline namespace's __abi_tag__s (its
+                               * members carry them, unmangled: 5.1.2) */
+    int nabi_tags;
     int nunnamed;             /* unnamed classes and enums declared here */
 };
 
@@ -309,6 +320,8 @@ struct cscope *scope_push(enum cscope_kind k, const char *name);
 void scope_pop(void);
 struct csym *scope_add(struct cscope *s, enum csym_kind k, const char *name);
 struct csym *scope_find_here(struct cscope *s, const char *name);
+struct csym *scope_find_tag_inline(struct cscope *s, const char *name);
+struct cscope *inline_ns_declaring(struct cscope *s, const char *name);
 /* The class or enum named `name` declared in s (hidden or not). */
 struct csym *scope_find_tag(struct cscope *s, const char *name);
 /* Unqualified lookup from `from` outward (through using-directives). */
@@ -448,6 +461,9 @@ struct ctemplate {
     struct cty *alias_pat;    /* ... its type in terms of them (deduction
                                * sees through it), once read */
     int alias_pat_done;
+    const char **abi_tags;    /* TK_CLASS: its __abi_tag__s, each
+                               * instance's */
+    int nabi_tags;
 };
 /* An alias template's type with its own parameters unsubstituted (NULL
  * when it cannot be read so) */
@@ -501,6 +517,8 @@ void func_deduce_return(struct cfunc *f, const struct ctok *at);
  * from that definition (1 if one was found). */
 int member_from_outdef(struct cfunc *f);
 void member_var_from_outdef(struct cvar *v);
+struct cexpr *defarg_read(struct cexpr *d);
+int rdrand_width(const char *n);
 /* `< args >` after the name of template t (at `<`). */
 int parse_template_args(struct ctemplate *t, struct ctarg **out);
 /* template<...> declaration, at `template` (ctx: in class c, or NULL). */
@@ -613,6 +631,8 @@ struct cfunc {
     int noreturn;
     const char *section;
     const char *asm_name;     /* `__asm__("name")`: the symbol instead */
+    const char **abi_tags;    /* __abi_tag__("...") (sorted) */
+    int nabi_tags;
     int access;
     int ctor_variant;         /* emit.c: 1 complete, 2 base object */
     int defined;              /* has a body */
@@ -760,6 +780,11 @@ struct cclass {
     int inst_pending;         /* instance not yet defined (class_ensure) */
     int extern_inst;          /* `extern template class`: its members are
                                * another unit's */
+    int explicit_inst;        /* `template class`: its members, vtable and
+                               * RTTI emitted here */
+    const char **abi_tags;    /* __abi_tag__("...") (sorted): mangled after
+                               * its name (ios_base::failure[abi:cxx11]) */
+    int nabi_tags;
     struct cpartial *inst_partial;   /* defined by this partial spec */
     int vtable_used;          /* emit.c: the vtable (and RTTI) is needed */
     int vtable_done, rtti_used, rtti_done;
@@ -857,12 +882,15 @@ enum cexpr_kind {
                    * object's type, a[0] its initialization */
     E_EXCOBJ,     /* in a handler: the caught object (an lvalue of type t);
                    * is_array: a caught pointer's value */
-    E_COAWAIT     /* co_await: the awaiter var (initialized by a[0]: its
+    E_COAWAIT,    /* co_await: the awaiter var (initialized by a[0]: its
                    * ctor, or the pointer a reference one stores), then
                    * a[1] await_ready(), a[2] await_suspend(handle) — ival
                    * what it returns: 0 void, 1 bool, 2 a handle (a[2] its
                    * address) — and the value a[3], await_resume(); coro
                    * 1 the initial suspend, 2 the final */
+    E_DEFARG      /* a member function's default argument, unread: its
+                   * tokens at ival, read in dscope when a call first
+                   * uses it (the class complete, 7.2.2); then a[0] */
 };
 
 enum { VC_PRVALUE, VC_LVALUE, VC_XVALUE };
@@ -917,6 +945,7 @@ struct cexpr {
     int has_targs;
     struct cfunc *dtor;       /* E_DELETE: the destructor to run first */
     int coro;                 /* E_COAWAIT: 1 initial, 2 final suspend */
+    struct cscope *dscope;    /* E_DEFARG */
     int line;
     const char *file;
 };
@@ -943,7 +972,8 @@ int convert_args(struct cfunc *fn, struct cexpr **args, int na,
 struct cexpr *expr_parse(void);            /* a full expression (with ,) */
 struct cexpr *expr_parse_assign(void);     /* an assignment-expression */
 struct cexpr *expr_parse_cond(void);       /* a conditional-expression */
-long expr_parse_const(const char *what);   /* an integral constant */
+long expr_parse_const(const char *what);
+long expr_parse_bound(struct cexpr **vla);   /* an integral constant */
 long expr_parse_const_as(const char *what, int as_bool);
 /* overload resolution's "standard conversions only" state, swapped out
  * by nested work (a class or body instantiated meanwhile) */
@@ -1226,6 +1256,7 @@ struct cstmt {
     struct cvar *ret_var;     /* RETURN: the local object it returns by name
                                * (a named-return-value candidate) */
     const char *asm_text;     /* ASM: the statement, verbatim */
+    struct casm *asm_;        /* ASM: a GNU asm statement's parts */
     struct chandler *handlers;    /* TRY: body, then these */
     int nhandlers;
     int line;
@@ -1233,6 +1264,23 @@ struct cstmt {
 };
 
 struct cstmt *st_new(enum cstmt_kind k);
+
+/* A GNU asm statement: its template, and the operands (a constraint and
+ * a C++ expression each: outputs lvalues), clobbers and the rest passed
+ * to C as they are — EmbCC's C assembles it. */
+struct casm_op {
+    const char *name;         /* [name], or NULL */
+    const char *cons;
+    struct cexpr *e;
+};
+struct casm {
+    const char *tmpl;
+    int is_volatile, is_inline;
+    struct casm_op *outs, *ins;
+    int nout, nin;
+    const char **clobs;
+    int nclob;
+};
 
 /* ---- coroutines (coro.c) ---- */
 
@@ -1368,6 +1416,7 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
                         struct cexpr **args, int na, const struct ctok *at);
 /* The destructor to call for c (NULL when trivial); used. */
 struct cfunc *class_dtor(struct cclass *c);
+void class_default_outside(struct cfunc *f);
 /* A constructor's mem-initializer as written: `name(args)` / `name{args}`. */
 struct meminit_raw {
     const char *name;
@@ -1393,7 +1442,9 @@ void field_parse_default(struct cclass *c, struct cfield *fl);
 const char *mangle_func(struct cfunc *f);
 const char *mangle_var(struct cvar *v, struct cscope *owner);
 const char *mangle_local_static(struct cvar *v, struct cfunc *fn, int disc);
-const char *mangle_class_name(struct cclass *c);   /* the nested-name form */
+const char *mangle_class_name(struct cclass *c);
+/* t added to the sorted set of ABI tags (v, *n), once */
+void abi_tag_add(const char ***v, int *n, const char *t);   /* the nested-name form */
 const char *mangle_type_alone(struct cty *t);
 /* A type referenced from an expression's mangling, and such a mangling's
  * substitution-free key (mangle.c). */

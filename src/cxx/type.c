@@ -277,7 +277,7 @@ int ct_is_complete(const struct cty *t)
 {
     switch (t->k) {
     case CT_VOID: return 0;
-    case CT_ARRAY: return t->n >= 0 && ct_is_complete(t->to);
+    case CT_ARRAY: return (t->n >= 0 || t->vla) && ct_is_complete(t->to);
     case CT_CLASS:
         class_ensure(t->cls);
         return t->cls->complete;

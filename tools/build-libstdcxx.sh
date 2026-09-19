@@ -40,11 +40,26 @@ for d in $dirs; do
     for o in "$B/$d"/*.o; do
         [ -e "$o" ] || continue
         name=$(basename "$o" .o)
+        # the Makefiles' per-file flags (-fimplicit-templates, and
+        # format's -fno-access-control and -fexec-charset=UTF-8, are what
+        # EmbCC does anyway)
         extra=
         case "$d/$name" in
         src/c++11/codecvt|src/c++11/limits|src/c++11/locale_init|\
         src/c++11/localename)
             extra=-fchar8_t ;;
+        src/c++98/*_cow)
+            extra=-D_GLIBCXX_USE_CXX11_ABI=0 ;;   # the COW string's
+        src/c++98/concept-inst)
+            extra=-D_GLIBCXX_CONCEPT_CHECKS ;;
+        src/c++98/parallel_settings)
+            extra=-D_GLIBCXX_PARALLEL ;;
+        src/c++20/format|src/c++23/print)
+            extra=-std=gnu++26 ;;
+        src/c++23/std|src/c++23/std.compat)
+            # module interface units (import std;): EmbCC has no modules,
+            # and g++'s objects of them hold no code
+            continue ;;
         esac
         src=
         for cand in "$B/$d/$name.cc" "$SRC/$d/$name.cc" "$B/$d/$name.c" \
@@ -62,12 +77,28 @@ for d in $dirs; do
         *) lang= std_flag=-std=$std ;;
         esac
         rm -f "$OUT/$d/$name.o"
-        if msg=$("$EMBCC" --target="$target" $lang $std_flag $extra \
-                     -DHAVE_CONFIG_H -I"$B/$d" -I"$SRC/$d" -I"$B" \
-                     -I"$B/include/$target" -I"$B/include" \
-                     -I"$SRC/libsupc++" -I"$SRC/../libgcc" \
-                     -I"$SRC/../libiberty" -I"$NL/include" \
-                     -c "$src" -o "$OUT/$d/$name.o" 2>&1); then
+        flags="--target=$target $lang $std_flag $extra -DHAVE_CONFIG_H
+               -I$B/$d -I$SRC/$d -I$B -I$B/include/$target -I$B/include
+               -I$B/include/backward -I$SRC/libsupc++ -I$SRC/../libgcc
+               -I$SRC/../libiberty -I$NL/include"
+        if [ "$d/$name" = src/c++11/cxx11-ios_failure ]; then
+            # (as the Makefile's rewrite_ios_failure_typeinfo does to g++'s
+            # assembly: __ios_failure's typeinfo is an __iosfail_type_info,
+            # which lets a handler for the old ABI's failure catch it)
+            c=$OUT/$d/$name.c
+            if msg=$("$EMBCC" $flags --emit-c "$src" 2>&1 > "$c"); then
+                sed -e '/void \*_ZTISt13__ios_failure\[3\] = /{
+                          i\
+extern void *_ZTVSt19__iosfail_type_info[];
+                          s/_ZTVN10__cxxabiv120__si_class_type_infoE/_ZTVSt19__iosfail_type_info/
+                        }' "$c" > "$c.tmp" && mv "$c.tmp" "$c"
+                msg=$("$EMBCC" --target="$target" -x c -fexceptions -c "$c" \
+                          -o "$OUT/$d/$name.o" 2>&1)
+            fi
+        else
+            msg=$("$EMBCC" $flags -c "$src" -o "$OUT/$d/$name.o" 2>&1)
+        fi
+        if [ -f "$OUT/$d/$name.o" ]; then
             ok=$((ok + 1))
         else
             bad=$((bad + 1))
@@ -81,18 +112,34 @@ echo "libstdc++ for $target: $ok compiled, $bad failed (objects in $OUT)"
 
 # The archives: the reference build's libstdc++.a and libsupc++.a with each
 # member EmbCC compiled put in its place — $OUT/ref stands in for
-# EMBCC_REF_GXX when linking (tests/harness/*/link.sh --cxx).
+# EMBCC_REF_GXX when linking (tests/harness/*/link.sh --cxx). Members are
+# matched to the build tree's objects by their bytes: libtool stored the
+# second codecvt.o (src/c++11's) as lt1-codecvt.o, and so on.
 REF=$( [ "$target" = aarch64-elf ] && echo "$AARCH64_REF_GXX" || echo "$X86_REF_GXX" )
 AR=${AR:-$target-ar}
-lib=$OUT/ref/$target/lib
-mkdir -p "$lib"
-cp "$REF/$target/lib/libstdc++.a" "$REF/$target/lib/libsupc++.a" "$lib/"
-for obj in "$OUT"/libsupc++/*.o "$OUT"/src/*/*.o; do
-    [ -e "$obj" ] || continue
-    "$AR" r "$lib/libstdc++.a" "$obj"
-    case $obj in
-    "$OUT"/libsupc++/*) "$AR" r "$lib/libsupc++.a" "$obj" ;;
-    esac
+mkdir -p "$OUT/ref/$target/lib"
+lib=$(cd "$OUT/ref/$target/lib" && pwd)
+for a in libstdc++.a libsupc++.a; do
+    tmp=$OUT/ar-$a
+    rm -rf "$tmp"
+    mkdir -p "$tmp"
+    (cd "$tmp" && "$AR" x "$REF/$target/lib/$a")
+    members=$("$AR" t "$REF/$target/lib/$a")
+    for m in $members; do
+        name=${m#lt[0-9]-}
+        name=${name#lt[0-9][0-9]-}
+        for o in "$B"/libsupc++/"$name" "$B"/src/c++*/"$name"; do
+            [ -f "$o" ] && cmp -s "$o" "$tmp/$m" || continue
+            d=${o#"$B"/}
+            if [ -f "$OUT/$d" ]; then
+                cp "$OUT/$d" "$tmp/$m"
+            fi
+            break
+        done
+    done
+    rm -f "$lib/$a"
+    (cd "$tmp" && "$AR" rc "$lib/$a" $members)
+    rm -rf "$tmp"
 done
 echo "archives with EmbCC's objects: $lib"
 [ "$bad" -eq 0 ]

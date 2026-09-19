@@ -122,8 +122,48 @@ static int only_hidden_friends(const struct csym *y)
     return 1;
 }
 
+/* Functions of two sets found for one name as one overload set: entries
+ * standing for them all (each set is its own list), each once. */
+static struct csym *merge_sets(struct csym *y, struct csym *z)
+{
+    int news = 0;
+    for (struct cfunc *g = z->fns; g && !news; g = g->next) {
+        struct cfunc *og = g->alias_of ? g->alias_of : g;
+        news = 1;
+        for (struct cfunc *f = y->fns; f && news; f = f->next)
+            if (f == og || f->alias_of == og)
+                news = 0;
+    }
+    if (!news)
+        return y;
+    struct csym *m = xmalloc(sizeof *m);
+    *m = *y;
+    m->hnext = m->next = NULL;
+    m->fns = NULL;
+    struct cfunc **tail = &m->fns;
+    struct csym *both[2] = { y, z };
+    for (int k = 0; k < 2; k++)
+        for (struct cfunc *g = both[k]->fns; g; g = g->next) {
+            struct cfunc *og = g->alias_of ? g->alias_of : g;
+            int have = 0;
+            for (struct cfunc *f = m->fns; f && !have; f = f->next)
+                have = f->alias_of == og;
+            if (have)
+                continue;
+            struct cfunc *a = xmalloc(sizeof *a);
+            *a = *og;
+            a->alias_of = og;
+            a->next = NULL;
+            *tail = a;
+            tail = &a->next;
+        }
+    return m;
+}
+
 /* A name in `s` or in a namespace a using-directive in `s` nominates
- * (transitively; `depth` guards a cycle of directives). */
+ * (transitively; `depth` guards a cycle of directives) — an inline
+ * namespace's among them. Functions found in more than one are one
+ * overload set (std::rotate: pstl's in std, the algorithm's in std::_V2). */
 static struct csym *find_with_usings(struct cscope *s, const char *name,
                                      int tags, int depth)
 {
@@ -131,14 +171,22 @@ static struct csym *find_with_usings(struct cscope *s, const char *name,
                           : scope_find_here(s, name);
     if (y && !see_hidden && only_hidden_friends(y))
         y = NULL;                 /* (a hidden friend: not for this) */
-    if (y || depth > 16)
+    if (depth > 16 || (y && (tags || y->k != CS_FUNC)))
         return y;
     for (int i = 0; i < s->nusings; i++) {
-        y = find_with_usings(s->usings[i], name, tags, depth + 1);
-        if (y)
-            return y;
+        struct csym *z = find_with_usings(s->usings[i], name, tags,
+                                          depth + 1);
+        if (!z)
+            continue;
+        if (!y) {
+            y = z;
+            if (tags || y->k != CS_FUNC)
+                return y;
+        } else if (z->k == CS_FUNC) {
+            y = merge_sets(y, z);
+        }
     }
-    return NULL;
+    return y;
 }
 
 /* A class's member `name`: its own, else what its bases have (6.5.2) —
@@ -190,6 +238,33 @@ struct csym *lookup_raw(struct cscope *from, const char *name)
         struct csym *y = find_in(s, name);
         if (y)
             return y;
+    }
+    return NULL;
+}
+
+/* The class or enum `name` a qualified name s::name declares or defines:
+ * s's own, or its inline namespaces' (9.8.2.2) */
+struct csym *scope_find_tag_inline(struct cscope *s, const char *name)
+{
+    struct csym *y = scope_find_tag(s, name);
+    for (int i = 0; !y && i < s->nusings; i++)
+        if (s->usings[i]->is_inline && s->usings[i]->parent == s)
+            y = scope_find_tag_inline(s->usings[i], name);
+    return y;
+}
+
+/* The inline namespace of s (nested, perhaps) declaring `name`, or NULL */
+struct cscope *inline_ns_declaring(struct cscope *s, const char *name)
+{
+    for (int i = 0; i < s->nusings; i++) {
+        struct cscope *u = s->usings[i];
+        if (!u->is_inline || u->parent != s)
+            continue;
+        if (scope_find_here(u, name))
+            return u;
+        struct cscope *in = inline_ns_declaring(u, name);
+        if (in)
+            return in;
     }
     return NULL;
 }

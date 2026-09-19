@@ -51,6 +51,8 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_ABS64:    return R_AARCH64_ABS64;
         case RK_ABS32:    return R_AARCH64_ABS32;
         case RK_DATA_PREL32: return R_AARCH64_PREL32;
+        case RK_GOT_PAGE: return R_AARCH64_ADR_GOT_PAGE;
+        case RK_GOT_LO12: return R_AARCH64_LD64_GOT_LO12_NC;
         default:          return -1;
         }
     }
