@@ -1799,6 +1799,68 @@ static struct cexpr *call_alloc_op(const char *name, struct cty *t,
     return call_global_op(name, args, na, at);
 }
 
+/* std::align_val_t (from <new>): what over-aligned allocations pass
+ * (C++17); NULL when <new> is not included */
+static struct cty *align_val_type(void)
+{
+    struct csym *ns = scope_find_here(cx_global, "std");
+    struct csym *y = ns && ns->k == CS_NAMESPACE
+                     ? lookup_in(ns->ns, "align_val_t") : NULL;
+    return y && y->k == CS_ENUM ? y->type : NULL;
+}
+
+long over_alignment(struct cty *t)
+{
+    long al = ct_align(t);
+    return al > 16 && align_val_type() ? al : 0;   /* (the default new's) */
+}
+
+/* The allocation functions an allocation of t looks at: its class's (they
+ * hide the global ones), else the global ones */
+static struct cfunc *alloc_set(const char *name, struct cty *t, int global)
+{
+    if (!global && t->k == CT_CLASS && ct_is_complete(t)) {
+        struct csym *y = scope_find_here(t->cls->scope, name);
+        if (y && y->k == CS_FUNC)
+            return y->fns;
+    }
+    struct csym *y = lookup_in(cx_global, name);
+    return y && y->k == CS_FUNC ? y->fns : NULL;
+}
+
+struct cfunc *dealloc_fn(struct cty *t, int global, int arr, int sized)
+{
+    const char *name = arr ? "operator delete[]" : "operator delete";
+    struct cfunc *set = alloc_set(name, t, global);
+    if (!set)
+        cx_error(cx_cur(), "'%s' is not declared", name);
+    struct cexpr *vp = ex_new(E_NULLPTR, ct_ptr(ct_basic(CT_VOID)),
+                              VC_PRVALUE);
+    struct cexpr *sz = ex_int(0, ct_size_t());
+    long al = over_alignment(t);
+    struct cexpr *ae = al ? ex_int(al, align_val_type()) : NULL;
+    /* the aligned forms first (for an over-aligned t), then sized (when
+     * the size is known), then plain */
+    struct cexpr *tries[4][3] = { { vp, sz, ae }, { vp, ae, NULL },
+                                  { vp, sz, NULL }, { vp, NULL, NULL } };
+    int ns[4] = { 3, 2, 2, 1 };
+    for (int k = 0; k < 4; k++) {
+        if ((k < 2 && !al) || ((k == 0 || k == 2) && !sized))
+            continue;
+        struct cfunc *f = resolve(set, NULL, tries[k], ns[k], NULL, name);
+        if (f) {
+            if (f->alias_of)
+                f = f->alias_of;
+            if (f->is_deleted)
+                cx_error(cx_cur(), "use of deleted function '%s'", name);
+            f->used = 1;
+            return f;
+        }
+    }
+    struct cfunc *f = resolve(set, NULL, tries[3], 1, cx_cur(), name);
+    return f;
+}
+
 struct cexpr *call_delete_op(struct cclass *c, struct cexpr **args)
 {
     return call_alloc_op("operator delete", ct_class(c), 0, args, 2,
@@ -2875,9 +2937,9 @@ static struct cexpr *unary(int op, struct cexpr *e)
 static struct cexpr *address_of(struct cexpr *e)
 {
     if (e->k == E_OVL) {
-        if (e->fn->next)
-            ex_error(e, "taking the address of an overloaded function "
-                        "needs a target type");
+        if (e->fn->next || e->fn->tmpl)
+            return e;       /* &f of an overload set: which one, the type
+                             * it converts to says (a parameter's) */
         return rvalue(e);
     }
     if (e->t->k == CT_FUNC)
@@ -2986,6 +3048,16 @@ static struct cexpr *conditional(struct cexpr *c, struct cexpr *a,
         } else {
             e->t = arith_pair(&a, &b);
         }
+    } else if ((at->k == CT_MPTR && (bt->k == CT_NULLPTR ||
+                                     is_null_const(b))) ||
+               (bt->k == CT_MPTR && (at->k == CT_NULLPTR ||
+                                     is_null_const(a)))) {
+        /* a pointer to member and nullptr: that pointer to member's type */
+        e->t = at->k == CT_MPTR ? at : bt;
+        if (at->k != CT_MPTR)
+            a = convert(a, e->t, "?:");
+        if (bt->k != CT_MPTR)
+            b = convert(b, e->t, "?:");
     } else if (is_ptrish(a) && is_ptrish(b)) {
         if (at->k == CT_NULLPTR && bt->k == CT_NULLPTR) {
             e->t = at;
@@ -3366,9 +3438,24 @@ static struct cexpr *parse_new(const struct ctok *at, int global)
     }
     for (int i = 0; i < nplace; i++)
         oa[i + 1] = place[i];
-    struct cexpr *call = call_alloc_op(count ? "operator new[]"
-                                             : "operator new", elem, global,
-                                       oa, nplace + 1, at);
+    const char *opname = count ? "operator new[]" : "operator new";
+    long al = over_alignment(elem);
+    if (al) {
+        /* over-aligned: operator new(size, align_val_t, placement...)
+         * when one is viable, else as any other (C++17, 7.6.2.8) */
+        struct cexpr **aa = xmalloc((size_t)(nplace + 2) * sizeof *aa);
+        aa[0] = oa[0];
+        aa[1] = ex_int(al, align_val_type());
+        for (int i = 0; i < nplace; i++)
+            aa[i + 2] = place[i];
+        struct cfunc *set = alloc_set(opname, elem, global);
+        if (set && resolve(set, NULL, aa, nplace + 2, NULL, opname)) {
+            oa = aa;
+            nplace++;
+        }
+    }
+    struct cexpr *call = call_alloc_op(opname, elem, global, oa, nplace + 1,
+                                       at);
     e->fn = call->fn;
     e->a = call->a;
     e->na = call->na;
@@ -3401,16 +3488,11 @@ static struct cexpr *parse_delete(const struct ctok *at, int global)
         if (arr && e->dtor)
             e->cookie = ct_align(t) > 8 ? ct_align(t) : 8;
     }
-    /* g++ calls the sized forms where it knows the size */
-    struct cexpr *vp = ex_new(E_NULLPTR, ct_ptr(ct_basic(CT_VOID)),
-                              VC_PRVALUE);
-    struct cexpr *sz = ex_int(0, ct_size_t());
-    struct cexpr *oa[2] = { vp, sz };
+    /* g++ calls the sized forms where it knows the size, the aligned
+     * ones for an over-aligned type */
     int sized = t->k != CT_VOID && (!arr || e->cookie);
-    struct cexpr *call = call_alloc_op(arr ? "operator delete[]"
-                                           : "operator delete", t, global,
-                                       oa, sized ? 2 : 1, at);
-    e->fn = call->fn;
+    e->fn = dealloc_fn(t, global, arr, sized);
+    e->ival = over_alignment(t);
     e->a = xmalloc(sizeof *e->a);
     e->a[0] = p;
     e->na = 1;
@@ -3432,6 +3514,7 @@ int cxx_has_builtin(const char *name)
             "offsetof", "is_constant_evaluated", "addressof", "launder",
             "expect", "constant_p", "va_arg", "coro_done", "coro_resume",
             "coro_destroy", "coro_promise", "source_location",
+            "eh_return_data_regno", "extend_pointer",
         };
         const char *n = name + 10;
         for (size_t i = 0; i < sizeof special / sizeof special[0]; i++)
@@ -3805,6 +3888,21 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         }
         cx_expect(TOK_RPAREN, "')'");
         return ex_int(off, ct_size_t());
+    }
+    if (strcmp(n, "eh_return_data_regno") == 0) {
+        /* the DWARF registers a landing pad gets the exception object and
+         * selector in: 0 and 1 (rax and rdx; x0 and x1) */
+        cx_expect(TOK_LPAREN, "'('");
+        long v = expr_parse_const("a register index");
+        cx_expect(TOK_RPAREN, "')'");
+        return ex_int(v == 0 || v == 1 ? v : -1, ct_basic(CT_INT));
+    }
+    if (strcmp(n, "extend_pointer") == 0) {
+        /* a pointer as an unwinder word: LP64, the same bits */
+        cx_expect(TOK_LPAREN, "'('");
+        struct cexpr *p = rvalue(expr_parse_assign());
+        cx_expect(TOK_RPAREN, "')'");
+        return ex_cast(p, ct_basic(CT_ULONG));
     }
     if (strcmp(n, "source_location") == 0) {
         cx_expect(TOK_LPAREN, "'('");
@@ -5062,21 +5160,30 @@ static struct cexpr *parse_unary(void)
             return ex_int(pack_length(y), ct_size_t());
         }
         struct cty *t;
+        long member_align = 0;
         if (cx_kind() == TOK_LPAREN && paren_type_id()) {
             cx_advance();
             t = parse_type_id();
             cx_expect(TOK_RPAREN, "')'");
         } else {
             cx_unevaluated++;
-            t = parse_unary()->t;
+            struct cexpr *x = parse_unary();
             cx_unevaluated--;
+            t = x->t;
+            if (k == TOK_KW_ALIGNOF && x->k == E_MEMBER && x->field) {
+                /* GNU __alignof__ of a member: as the member is aligned
+                 * (its attribute; a flexible array's elements) */
+                member_align = x->field->align_attr;
+                if (t->k == CT_ARRAY && t->n < 0)
+                    t = t->to;
+            }
         }
         t = ct_strip_ref(t);
         if (t->k == CT_FUNC || (!ct_is_complete(t) && t->k != CT_VOID))
             cx_error(at, "%s of incomplete type %s",
                      k == TOK_KW_SIZEOF ? "sizeof" : "alignof", ct_name(t));
-        return ex_int(k == TOK_KW_SIZEOF ? ct_size(t) : ct_align(t),
-                      ct_size_t());
+        long al = ct_align(t) > member_align ? ct_align(t) : member_align;
+        return ex_int(k == TOK_KW_SIZEOF ? ct_size(t) : al, ct_size_t());
     }
     case TOK_CX_NEW:
         return parse_new(at, 0);

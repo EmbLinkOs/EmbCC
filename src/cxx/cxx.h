@@ -679,6 +679,7 @@ struct cfield {
     long bitpos;              /* ... its first bit, from the class's start */
     int access;
     int is_mutable;
+    long align_attr;          /* alignas / __attribute__((aligned)) on it */
     struct cexpr *dflt;       /* default member initializer */
     int dflt_tok;             /* ... its delayed tokens (-1 if none) */
     int dflt_braced;          /* ... written { } rather than = */
@@ -1158,6 +1159,14 @@ struct cexpr *init_aggregate(struct cty *t, struct cexpr *list,
 /* The operator delete (the class's own, else the global one) a deleting
  * destructor of c calls, for args {pointer, size}. */
 struct cexpr *call_delete_op(struct cclass *c, struct cexpr **args);
+/* The deallocation function for storage of type t (a class's own, else
+ * the global one; global: `::delete`): the aligned forms first when t is
+ * over-aligned, the sized ones when sized; its extra parameters are the
+ * size (size_t) and the alignment (std::align_val_t) */
+struct cfunc *dealloc_fn(struct cty *t, int global, int arr, int sized);
+/* t's alignment when an allocation passes it (over the default new's,
+ * and std::align_val_t declared), else 0 */
+long over_alignment(struct cty *t);
 /* The call to the operator (new, delete, ...) `name` in the global scope. */
 struct cexpr *call_global_op(const char *name, struct cexpr **args, int na,
                              const struct ctok *at);

@@ -787,8 +787,48 @@ only the unit's part), tests/exec/packed-bitfields.c. Also in EmbCC's C:
 `__builtin_va_list` declares a variable in a function too
 (std::to_string(double)'s).
 
-Next: `consteval` as more than `constexpr` (a format string is checked at
-run time for now).
+**CX8's second half started: libstdc++'s sources compiled by EmbCC.**
+tools/build-libstdcxx.sh compiles every object of the reference build of
+libstdc++ (the configured tree tools/build-ref-gxx.sh leaves) from GCC's
+sources, with its directory's standard and the build's include paths,
+then puts them into copies of libstdc++.a and libsupc++.a (a stand-in
+EMBCC_REF_GXX for the harness). libsupc++ — all 65 objects: exceptions and
+the personality routine, RTTI and dynamic_cast, operator new/delete (the
+aligned ones too), guards, the demangler, the fundamental types' typeinfo —
+compiles on both targets, and tests/libstdcxx and tests/cxx behave with it
+as with g++'s (tests/golden/cxx-libsupcxx.sh runs five of them). What it
+took:
+- `-std=` for C++: `__cplusplus` and the feature macros per standard, as
+  g++ gives them (each EmbCC claims defined in the standards g++ defines
+  it in, its value capped at what EmbCC does; tests/golden/cxx-std.sh);
+  `__STRICT_ANSI__` for c++NN, `-fchar8_t`, `__GNUC_STDC_INLINE__` (newlib's
+  inline functions are then `static inline`, not GNU89 `extern inline`,
+  which EmbCC emitted as global definitions); `-D`/`-U` on the command line
+- aligned allocation (C++17, `__cpp_aligned_new`): new and delete of an
+  over-aligned type call the std::align_val_t operators — the class's own
+  first, then sized and plain as they are viable; arrays, a new's cleanup
+  when the constructor throws, deleting destructors
+- alignas and `__attribute__((aligned))` on data members (they were
+  ignored: a layout differing from g++'s), `__alignof__` of a member
+- EmbCC's own include/unwind.h: the Itanium unwinder interface with GCC's
+  extensions and libgcc's layouts (`_Unwind_Exception` 16-byte aligned)
+- the fundamental types' typeinfo (and their pointers', const or not),
+  emitted where `__cxxabiv1::__fundamental_type_info`'s key function is
+  defined, as g++ does — the same symbols
+- `__constinit`; `&f` of an overload set resolved by the parameter it
+  converts to; `X::operator T()` outside X with T X's member; `?:` of a
+  pointer to member and nullptr; `__builtin_eh_return_data_regno`,
+  `__builtin_extend_pointer`
+- EmbCC's C: flexible array members (and GNU's `[0]`), enumerator values
+  that are constant expressions, a comma expression as an `if`/`while`/
+  `for` condition, form feed and vertical tab as white space
+  (tests/exec/c-extras2.c); tests/cxx/alignednew.cc.
+Next: the src/ directories (C++98 through C++26: the locale, string,
+stream and filesystem implementations), then running the suites wholly on
+EmbCC's library.
+
+Next (language): `consteval` as more than `constexpr` (a format string is
+checked at run time for now).
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their

@@ -195,6 +195,7 @@ static const char *basic_c(enum cty_kind k)
 
 static int need_pmf;            /* the unit uses struct __cx_pmf */
 static int need_srcloc;         /* ... struct __cx_srcloc */
+static int fundamental_tinfos;  /* the fundamental types' typeinfo here */
 
 /* t declaring `inner` (a name, or "" for an abstract type), in C. */
 static char *cdecl(struct cty *t, const char *inner)
@@ -291,6 +292,8 @@ static void need_fn(struct cfunc *f)
         work[nwork++] = f;
     }
 }
+
+static char *dealloc_rest(struct cfunc *fn, const char *size, long align);
 
 static int any_vtable;
 static int need_dyncast;
@@ -990,15 +993,12 @@ static char *new_text(struct cexpr *e)
             int lp = -1;
             const char *free_it = NULL;
             if (eh_on && e->na == 1 && el->k == CT_CLASS) {
-                struct cexpr *vp = ex_new(E_NULLPTR, ct_ptr(ct_basic(CT_VOID)),
-                                          VC_PRVALUE);
-                struct cexpr *sz = ex_int(ct_size(el), ct_size_t());
-                struct cexpr *oa[2] = { vp, sz };
-                struct cexpr *call = call_delete_op(el->cls, oa);
-                need_fn(call->fn);
-                free_it = cx_fmt("%s(%s%s);", fn_name(call->fn, 1), p,
-                                 call->fn->type->np == 2
-                                 ? cx_fmt(", %ldUL", ct_size(el)) : "");
+                struct cfunc *df = dealloc_fn(el, 0, 0, 1);
+                need_fn(df);
+                free_it = cx_fmt("%s(%s%s);", fn_name(df, 1), p,
+                                 dealloc_rest(df, cx_fmt("%ldUL",
+                                                         ct_size(el)),
+                                              over_alignment(el)));
                 lp = eh_open(&s);
             }
             einit(&s, cx_fmt("(*%s)", p), el, e->init);
@@ -1033,6 +1033,21 @@ static char *new_text(struct cexpr *e)
     return b.p;
 }
 
+/* A deallocation function's arguments after the pointer: the size (its
+ * size_t parameter) and the alignment (its std::align_val_t one) */
+static char *dealloc_rest(struct cfunc *fn, const char *size, long align)
+{
+    struct sb b = { 0, 0, 0 };
+    for (int i = 1; i < fn->type->np; i++) {
+        struct cty *pt = fn->type->params[i];
+        if (pt->k == CT_ENUM)
+            sb_printf(&b, ", %ldUL", align);
+        else
+            sb_printf(&b, ", %s", size);
+    }
+    return b.p ? b.p : "";
+}
+
 static char *delete_text(struct cexpr *e)
 {
     need_fn(e->fn);
@@ -1040,7 +1055,6 @@ static char *delete_text(struct cexpr *e)
     struct cty *el = e->alloc_t;
     struct cty *pt = ct_ptr(el);
     char *p = cx_fmt("__cx_p%d", u);
-    int sized = e->fn->type->np == 2;
     struct sb b = { 0, 0, 0 };
     sb_printf(&b, "({ %s = %s; if (%s) { ", cdecl(pt, p), ev(e->a[0]), p);
     if (!e->is_array && e->dtor && e->dtor->is_virtual) {
@@ -1057,26 +1071,23 @@ static char *delete_text(struct cexpr *e)
             need_fn(e->dtor);
             sb_printf(&b, "%s(%s); ", fn_name(e->dtor, 1), p);
         }
-        if (sized)
-            sb_printf(&b, "%s(%s, %ldUL); ", fn_name(e->fn, 1), p,
-                      ct_size(el));
-        else
-            sb_printf(&b, "%s(%s); ", fn_name(e->fn, 1), p);
+        sb_printf(&b, "%s(%s%s); ", fn_name(e->fn, 1), p,
+                  dealloc_rest(e->fn, cx_fmt("%ldUL", ct_size(el)),
+                               e->ival));
     } else if (e->cookie) {
         need_fn(e->dtor);
         sb_printf(&b, "unsigned long __cx_n%d = *(unsigned long *)((char *)"
                       "%s - 8); for (unsigned long __cx_i%d = __cx_n%d; "
                       "__cx_i%d-- > 0; ) %s(&%s[__cx_i%d]); ", u, p, u, u, u,
                   fn_name(e->dtor, 1), p, u);
-        if (sized)
-            sb_printf(&b, "%s((char *)%s - %ldUL, __cx_n%d * %ldUL + %ldUL); ",
-                      fn_name(e->fn, 1), p, e->cookie, u, ct_size(el),
-                      e->cookie);
-        else
-            sb_printf(&b, "%s((char *)%s - %ldUL); ", fn_name(e->fn, 1), p,
-                      e->cookie);
+        sb_printf(&b, "%s((char *)%s - %ldUL%s); ", fn_name(e->fn, 1), p,
+                  e->cookie,
+                  dealloc_rest(e->fn, cx_fmt("__cx_n%d * %ldUL + %ldUL", u,
+                                             ct_size(el), e->cookie),
+                               e->ival));
     } else {
-        sb_printf(&b, "%s(%s); ", fn_name(e->fn, 1), p);
+        sb_printf(&b, "%s(%s%s); ", fn_name(e->fn, 1), p,
+                  dealloc_rest(e->fn, "0UL", e->ival));
     }
     sb_put(&b, "} (void)0; })");
     return b.p;
@@ -3091,6 +3102,9 @@ static void emit_function(struct cfunc *f)
     }
     if (f->is_dtor)           /* virtual calls in it reach this class */
         store_vptrs(&b, c, vtt ? "__cx_vtt" : NULL);
+    if (f->is_dtor && c->name && !strcmp(c->name, "__fundamental_type_info") &&
+        c->owner && c->owner->name && !strcmp(c->owner->name, "__cxxabiv1"))
+        fundamental_tinfos = 1;
     if (f->body)
         emit_block_items(&b, f->body->body);
     close_cleans(&b, 0);
@@ -3187,16 +3201,13 @@ static void emit_function(struct cfunc *f)
         if (f->is_dtor && f->is_virtual) {
             /* the deleting destructor: destroy, then free with the
              * class's size */
-            struct cexpr *vp = ex_new(E_NULLPTR, ct_ptr(ct_basic(CT_VOID)),
-                                      VC_PRVALUE);
-            struct cexpr *sz = ex_int(c->size, ct_size_t());
-            struct cexpr *oa[2] = { vp, sz };
-            struct cexpr *call = call_delete_op(c, oa);
-            need_fn(call->fn);
+            struct cfunc *df = dealloc_fn(ct_class(c), 0, 0, 1);
+            need_fn(df);
             sb_printf(&b, "%s%s\n{\n%s(this);\n%s(this%s);\n}\n", st,
                       func_header(f, fn_name(f, 0), 1), fn_name(f, 1),
-                      fn_name(call->fn, 1), call->fn->type->np == 2
-                      ? cx_fmt(", %ldUL", c->size) : "");
+                      fn_name(df, 1),
+                      dealloc_rest(df, cx_fmt("%ldUL", c->size),
+                                   over_alignment(ct_class(c))));
         }
     }
     sb_put(&out_code, sb_str(&b));
@@ -3663,6 +3674,39 @@ static void emit_vtable(struct cclass *c)
 
 /* ---- the unit ---- */
 
+/* The unit defining __cxxabiv1::__fundamental_type_info's key function
+ * (libsupc++'s fundamental_type_info.cc) defines the typeinfo of every
+ * fundamental type, of a pointer to it and of a pointer to it const, as
+ * g++ does there (weak, as g++'s): no other unit makes them. */
+static void emit_fundamental_tinfos(void)
+{
+    static const char *const codes[] = {
+        "v", "b", "w", "Ds", "Di", "Du", "c", "a", "h", "s", "t", "i", "j",
+        "l", "m", "x", "y", "n", "o", "f", "d", "e", "g", "Dn", "DF16_",
+        "DF32_", "DF64_", "DF128_", "DF32x", "DF64x", "DF16b", "Df", "Dd",
+        "De",
+    };
+    sb_put(&out_rtti_decl,
+           "extern void *_ZTVN10__cxxabiv123__fundamental_type_infoE[];\n"
+           "extern void *_ZTVN10__cxxabiv119__pointer_type_infoE[];\n");
+    const char *w = "__attribute__((weak)) ";
+    for (size_t i = 0; i < sizeof codes / sizeof codes[0]; i++) {
+        const char *c = codes[i];
+        sb_printf(&out_rtti, "%schar _ZTS%s[] = \"%s\";\n", w, c, c);
+        sb_printf(&out_rtti, "%svoid *_ZTI%s[2] = { (void *)((char *)"
+                             "_ZTVN10__cxxabiv123__fundamental_type_infoE + "
+                             "16), (void *)_ZTS%s };\n", w, c, c);
+        for (int k = 0; k < 2; k++) {
+            const char *m = cx_fmt("%s%s", k ? "PK" : "P", c);
+            sb_printf(&out_rtti, "%schar _ZTS%s[] = \"%s\";\n", w, m, m);
+            sb_printf(&out_rtti, "%svoid *_ZTI%s[4] = { (void *)((char *)"
+                                 "_ZTVN10__cxxabiv119__pointer_type_infoE + "
+                                 "16), (void *)_ZTS%s, (void *)%dL, "
+                                 "(void *)_ZTI%s };\n", w, m, m, k, c);
+        }
+    }
+}
+
 char *cx_emit_unit(void)
 {
     memset(&out_types, 0, sizeof out_types);
@@ -3681,6 +3725,7 @@ char *cx_emit_unit(void)
     memset(&out_thunks, 0, sizeof out_thunks);
     nthunks_done = 0;
     nptr_ti_done = 0;
+    fundamental_tinfos = 0;
     eh_on = cx_exceptions;
     eh_used = 0;
     ntemps = 0;
@@ -3719,6 +3764,8 @@ char *cx_emit_unit(void)
     for (int i = 0; i < cx_nclasses; i++)
         if (cx_classes[i]->rtti_used && !cx_classes[i]->rtti_done)
             emit_rtti(cx_classes[i]);
+    if (fundamental_tinfos)
+        emit_fundamental_tinfos();
     fx_end(save);
 
     struct sb out = { 0, 0, 0 };
@@ -3743,8 +3790,11 @@ char *cx_emit_unit(void)
                           cdecl(fl->type, fl->name ? field_cname(fl) : ""),
                           fl->bitwidth);
             } else {
-                sb_printf(&out, "    %s;\n",
-                          cdecl(fl->type, field_cname(fl)));
+                sb_printf(&out, "    %s%s;\n",
+                          cdecl(fl->type, field_cname(fl)),
+                          fl->align_attr
+                          ? cx_fmt(" __attribute__((aligned(%ld)))",
+                                   fl->align_attr) : "");
             }
             if (fl->name)
                 any = 1;

@@ -1113,7 +1113,12 @@ static void parse_declarator_id(struct declarator *d, int mode)
         d->kind = DN_DTOR;
         cx_advance();
     } else {
+        /* X::operator T: T is looked up in X too (X's member typedefs) */
+        struct cscope *ss = cx_scope;
+        if (q.scope && q.scope->k == SC_CLASS && q.scope != cx_scope)
+            cx_scope = with_template_params(q.scope, cx_scope);
         d->name = parse_operator_name(&d->conv_type);
+        cx_scope = ss;
         d->kind = d->conv_type ? DN_CONV : DN_OPERATOR;
     }
     (void)mode;
@@ -3734,6 +3739,8 @@ static void parse_member(struct cclass *c, int *access)
             fl->bitwidth = -1;
             fl->dflt_tok = -1;
             fl->nua = ds.a.no_unique_address || d.a.no_unique_address;
+            fl->align_attr = ds.a.aligned > d.a.aligned ? ds.a.aligned
+                                                        : d.a.aligned;
             if (t->k == CT_AUTO)
                 cx_error(at, "a member cannot be 'auto'");
             if (!ct_is_complete(t) && !(t->k == CT_ARRAY && t->n < 0 &&

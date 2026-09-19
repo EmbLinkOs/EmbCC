@@ -30,7 +30,7 @@ static void skip_space_and_comments(struct lexer *lx)
 {
     for (;;) {
         while (*lx->p == ' ' || *lx->p == '\t' || *lx->p == '\r' ||
-               *lx->p == '\n') {
+               *lx->p == '\n' || *lx->p == '\f' || *lx->p == '\v') {
             if (*lx->p == '\n') {
                 lx->line++;
                 lx->line_start = lx->p + 1;
@@ -78,7 +78,8 @@ static const struct {
     { "nullptr", TOK_CX_NULLPTR }, { "bool", TOK_CX_BOOL },
     { "explicit", TOK_CX_EXPLICIT }, { "mutable", TOK_CX_MUTABLE },
     { "constexpr", TOK_CX_CONSTEXPR }, { "consteval", TOK_CX_CONSTEVAL },
-    { "constinit", TOK_CX_CONSTINIT }, { "decltype", TOK_CX_DECLTYPE },
+    { "constinit", TOK_CX_CONSTINIT }, { "__constinit", TOK_CX_CONSTINIT },
+    { "decltype", TOK_CX_DECLTYPE },
     { "__decltype", TOK_CX_DECLTYPE }, { "auto", TOK_CX_AUTO },
     { "noexcept", TOK_CX_NOEXCEPT }, { "throw", TOK_CX_THROW },
     { "try", TOK_CX_TRY }, { "catch", TOK_CX_CATCH },

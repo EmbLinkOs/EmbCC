@@ -273,6 +273,8 @@ static void layout(struct cclass *c)
         long fa = ct_is_ref(t) ? 8 : ct_align(t);
         if (c->packed)
             fa = 1;
+        if (fl->bitwidth < 0 && fl->align_attr > fa)
+            fa = fl->align_attr;      /* alignas / aligned: even packed */
         if (c->is_union) {
             fl->off = 0;
             long sz = fl->bitwidth >= 0 ? (fl->bitwidth + 7) / 8 : fs;
@@ -716,6 +718,8 @@ static int plain_layout(struct cclass *c)
         long fa = ct_is_ref(t) ? 8 : ct_align(t);
         if (c->packed)
             fa = 1;
+        if (fl->bitwidth < 0 && fl->align_attr > fa)
+            fa = fl->align_attr;      /* alignas / aligned: even packed */
         if (fl->bitwidth >= 0) {
             long w = fl->bitwidth, unit = fs * 8;
             if (w == 0) {

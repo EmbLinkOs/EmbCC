@@ -571,11 +571,46 @@ static long eval_or(struct evalp *e) { return eval_or_(e); }
 static char *read_file_or_null(const char *path, long *len);
 static int (*cxx_has_builtin)(const char *name);
 static int cxx_exceptions;
+static int cxx_std = 2020, cxx_strict;
 
 void cpp_set_cxx(int (*has_builtin)(const char *name), int exceptions)
 {
     cxx_has_builtin = has_builtin;
     cxx_exceptions = exceptions;
+}
+
+static int cxx_char8;
+
+/* -D and -U, in command-line order */
+static struct { const char *text; int undef; } *cmdline_defs;
+static int ncmdline_defs;
+
+void cpp_cmdline_define(const char *text, int undef)
+{
+    cmdline_defs = xrealloc(cmdline_defs, (size_t)(ncmdline_defs + 1) *
+                                          sizeof *cmdline_defs);
+    cmdline_defs[ncmdline_defs].text = text;
+    cmdline_defs[ncmdline_defs].undef = undef;
+    ncmdline_defs++;
+}
+
+void cpp_set_cxx_std(int year, int strict)
+{
+    cxx_std = year;
+    cxx_strict = strict;
+}
+
+void cpp_set_cxx_char8(int on)
+{
+    cxx_char8 = on;
+}
+
+/* "NAME VALUEL", for define_macro */
+static const char *cx_macro_fmt(const char *name, long v)
+{
+    static char buf[128];
+    snprintf(buf, sizeof buf, "%s %ldL", name, v);
+    return buf;
 }
 
 /* C++'s (and GNU's) feature-test operators, which a #if may use, and
@@ -1351,68 +1386,111 @@ char *cpp_process(const char *path, const char *src,
         define_macro(&boot, "__STDC_VERSION__ 199901L");
     define_macro(&boot, "__STDC_HOSTED__ 1");
     if (predef_is_cxx()) {
-        /* the C++ features EmbCC implements (docs/CXX.md), at the
-         * values g++ gives the standard they come from; those it does
-         * not yet (consteval, aligned new, ...) are left undefined, so
-         * libstdc++ takes its paths without them */
-        static const char *const feats[] = {
-            "__GNUG__ 16",
-            "__VERSION__ \"16.2.0 (EmbCC)\"",
-            "__GXX_RTTI 1", "__cpp_rtti 199711L",
-            "__cpp_aggregate_nsdmi 201304L",
-            "__cpp_aggregate_paren_init 201902L",
-            "__cpp_alias_templates 200704L", "__cpp_attributes 200809L",
-            "__cpp_binary_literals 201304L",
-            "__cpp_capture_star_this 201603L", "__cpp_char8_t 202207L",
-            "__cpp_concepts 201907L",
-            "__cpp_conditional_explicit 201806L",
-            "__cpp_constexpr 201603L", "__cpp_decltype 200707L",
-            /* constexpr destructors, and std::construct_at (which C++20
-             * libstdc++ uses unconditionally); new in a constant
-             * evaluation makes it not constant, as anything the
-             * interpreter cannot do */
-            "__cpp_constexpr_dynamic_alloc 201907L",
-            "__cpp_decltype_auto 201304L",
-            "__cpp_deduction_guides 201703L",
-            "__cpp_delegating_constructors 200604L",
-            "__cpp_enumerator_attributes 201411L",
-            "__cpp_fold_expressions 201603L",
-            "__cpp_generic_lambdas 201304L",
-            "__cpp_guaranteed_copy_elision 201606L",
-            "__cpp_hex_float 201603L", "__cpp_if_constexpr 201606L",
-            "__cpp_impl_coroutine 201902L",
-            "__cpp_impl_three_way_comparison 201907L",
-            "__cpp_init_captures 201304L",
-            "__cpp_initializer_lists 200806L",
-            "__cpp_inline_variables 201606L", "__cpp_lambdas 200907L",
-            "__cpp_namespace_attributes 201411L",
-            "__cpp_nested_namespace_definitions 201411L",
-            "__cpp_nsdmi 200809L", "__cpp_range_based_for 201603L",
-            "__cpp_ref_qualifiers 200710L",
-            "__cpp_return_type_deduction 201304L",
-            "__cpp_rvalue_references 200610L",
-            "__cpp_static_assert 201411L",
-            "__cpp_structured_bindings 201606L",
-            "__cpp_threadsafe_static_init 200806L",
-            "__cpp_unicode_characters 200704L",
-            "__cpp_unicode_literals 200710L",
-            "__cpp_user_defined_literals 200809L",
-            "__cpp_using_enum 201907L",
-            "__cpp_variable_templates 201304L",
-            "__cpp_variadic_templates 200704L",
+        /* the C++ features EmbCC implements (docs/CXX.md): each one
+         * from the standard g++ first defines it in, at the value g++
+         * gives that standard — no higher than what EmbCC does; those
+         * it does not do yet (consteval, aligned new, ...) are left
+         * undefined, so libstdc++ takes its paths without them.
+         * Values for C++98, 11, 14, 17 and 20 (on) — 0 undefined. */
+        static const struct { const char *name; long v[5]; } feats[] = {
+            { "__cpp_rtti", { 199711L, 199711L, 199711L, 199711L, 199711L } },
+            { "__cpp_aggregate_nsdmi", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_aggregate_paren_init", { 0, 0, 0, 0, 201902L } },
+            { "__cpp_alias_templates", { 0, 200704L, 200704L, 200704L, 200704L } },
+            { "__cpp_aligned_new", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_attributes", { 0, 200809L, 200809L, 200809L, 200809L } },
+            { "__cpp_binary_literals", { 201304L, 201304L, 201304L, 201304L, 201304L } },
+            { "__cpp_capture_star_this", { 0, 0, 0, 201603L, 201603L } },
+            { "__cpp_char8_t", { 0, 0, 0, 0, 202207L } },
+            { "__cpp_concepts", { 0, 0, 0, 0, 201907L } },
+            { "__cpp_conditional_explicit", { 0, 0, 0, 0, 201806L } },
+            { "__cpp_constexpr", { 0, 200704L, 201304L, 201603L, 201603L } },
+            { "__cpp_decltype", { 0, 200707L, 200707L, 200707L, 200707L } },
+            { "__cpp_constexpr_dynamic_alloc", { 0, 0, 0, 0, 201907L } },
+            { "__cpp_decltype_auto", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_deduction_guides", { 0, 0, 0, 201703L, 201703L } },
+            { "__cpp_delegating_constructors", { 0, 200604L, 200604L, 200604L, 200604L } },
+            { "__cpp_enumerator_attributes", { 0, 0, 0, 201411L, 201411L } },
+            { "__cpp_fold_expressions", { 0, 0, 0, 201603L, 201603L } },
+            { "__cpp_generic_lambdas", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_guaranteed_copy_elision", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_hex_float", { 201603L, 201603L, 201603L, 201603L, 201603L } },
+            { "__cpp_if_constexpr", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_impl_coroutine", { 0, 0, 0, 0, 201902L } },
+            { "__cpp_impl_three_way_comparison", { 0, 0, 0, 0, 201907L } },
+            { "__cpp_init_captures", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_initializer_lists", { 0, 200806L, 200806L, 200806L, 200806L } },
+            { "__cpp_inline_variables", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_lambdas", { 0, 200907L, 200907L, 200907L, 200907L } },
+            { "__cpp_namespace_attributes", { 0, 0, 0, 201411L, 201411L } },
+            { "__cpp_nested_namespace_definitions", { 0, 0, 0, 201411L, 201411L } },
+            { "__cpp_nsdmi", { 0, 200809L, 200809L, 200809L, 200809L } },
+            { "__cpp_range_based_for", { 0, 200907L, 200907L, 201603L, 201603L } },
+            { "__cpp_ref_qualifiers", { 0, 200710L, 200710L, 200710L, 200710L } },
+            { "__cpp_return_type_deduction", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_rvalue_references", { 0, 200610L, 200610L, 200610L, 200610L } },
+            { "__cpp_static_assert", { 0, 200410L, 200410L, 201411L, 201411L } },
+            { "__cpp_structured_bindings", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_threadsafe_static_init", { 200806L, 200806L, 200806L, 200806L, 200806L } },
+            { "__cpp_unicode_characters", { 0, 200704L, 200704L, 200704L, 200704L } },
+            { "__cpp_unicode_literals", { 0, 200710L, 200710L, 200710L, 200710L } },
+            { "__cpp_user_defined_literals", { 0, 200809L, 200809L, 200809L, 200809L } },
+            { "__cpp_using_enum", { 0, 0, 0, 0, 201907L } },
+            { "__cpp_variable_templates", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_variadic_templates", { 0, 200704L, 200704L, 200704L, 200704L } },
         };
+        int si = cxx_std >= 2020 ? 4 : cxx_std >= 2017 ? 3
+                 : cxx_std >= 2014 ? 2 : cxx_std >= 2011 ? 1 : 0;
         for (size_t i = 0; i < sizeof feats / sizeof feats[0]; i++)
-            define_macro(&boot, feats[i]);
+            if (feats[i].v[si])
+                define_macro(&boot, cx_macro_fmt(feats[i].name,
+                                                 feats[i].v[si]));
+        define_macro(&boot, "__GNUG__ 16");
+        define_macro(&boot, "__VERSION__ \"16.2.0 (EmbCC)\"");
+        define_macro(&boot, "__GXX_RTTI 1");
+        /* the standard -std= names (g++'s value for C++26 drafts) */
+        undef_macro(&cpp, "__cplusplus", 11);
+        define_macro(&boot, cxx_std >= 2026 ? "__cplusplus 202400L"
+                            : cxx_std >= 2023 ? "__cplusplus 202302L"
+                            : cxx_std >= 2020 ? "__cplusplus 202002L"
+                            : cxx_std >= 2017 ? "__cplusplus 201703L"
+                            : cxx_std >= 2014 ? "__cplusplus 201402L"
+                            : cxx_std >= 2011 ? "__cplusplus 201103L"
+                            : "__cplusplus 199711L");
+        if (cxx_std < 2011)
+            undef_macro(&cpp, "__GXX_EXPERIMENTAL_CXX0X__", 26);
+        if (cxx_strict)
+            define_macro(&boot, "__STRICT_ANSI__ 1");
+        if (si >= 3)                            /* (aligned new: C++17) */
+            define_macro(&boot, "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 16");
+        if (cxx_char8 && si < 4)                /* -fchar8_t before C++20 */
+            define_macro(&boot, "__cpp_char8_t 202207L");
         /* C++ units present as g++ to the headers: libstdc++ is GCC's
          * own library, built against GCC's view of newlib (va_list,
          * __func__, attributes); C units keep EmbCC's own identity */
         define_macro(&boot, "__GNUC__ 16");
         define_macro(&boot, "__GNUC_MINOR__ 2");
         define_macro(&boot, "__GNUC_PATCHLEVEL__ 0");
+        define_macro(&boot, "__GNUC_STDC_INLINE__ 1");  /* (as g++) */
         if (cxx_exceptions) {
             define_macro(&boot, "__EXCEPTIONS 1");
             define_macro(&boot, "__cpp_exceptions 199711L");
         }
+    }
+    /* -DNAME[=VALUE] (VALUE 1 when absent), -UNAME, after the built-ins */
+    for (int i = 0; i < ncmdline_defs; i++) {
+        const char *t = cmdline_defs[i].text;
+        if (cmdline_defs[i].undef) {
+            undef_macro(&cpp, t, strlen(t));
+            continue;
+        }
+        const char *eq = strchr(t, '=');
+        size_t n = eq ? (size_t)(eq - t) : strlen(t);
+        char *line = xmalloc(n + (eq ? strlen(eq) : 2) + 2);
+        memcpy(line, t, n);
+        line[n] = ' ';
+        strcpy(line + n + 1, eq ? eq + 1 : "1");
+        define_macro(&boot, line);
     }
 
     struct tbuf out = { 0, 0, 0 };

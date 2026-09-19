@@ -744,8 +744,28 @@ int main(int argc, char **argv)
                 return 1;
             }
         } else if (strncmp(argv[i], "-std=", 5) == 0) {
-            /* accepted: EmbCC speaks one dialect per language — C11 with
-             * GNU extensions, and C++ working toward C++20 */
+            /* C: accepted (C11 with GNU extensions, always). C++: the
+             * standard __cplusplus and the feature macros say (libstdc++'s
+             * sources pick their code by them); the language EmbCC reads
+             * is C++20's either way */
+            const char *v = argv[i] + 5;
+            int strict = strncmp(v, "c++", 3) == 0;
+            if (strict || strncmp(v, "gnu++", 5) == 0) {
+                const char *y = v + (strict ? 3 : 5);
+                int year = !strcmp(y, "98") || !strcmp(y, "03") ? 1998
+                           : !strcmp(y, "11") || !strcmp(y, "0x") ? 2011
+                           : !strcmp(y, "14") || !strcmp(y, "1y") ? 2014
+                           : !strcmp(y, "17") || !strcmp(y, "1z") ? 2017
+                           : !strcmp(y, "20") || !strcmp(y, "2a") ? 2020
+                           : !strcmp(y, "23") || !strcmp(y, "2b") ? 2023
+                           : !strcmp(y, "26") || !strcmp(y, "2c") ? 2026 : 0;
+                if (!year) {
+                    fprintf(stderr, "embcc: error: unknown C++ standard "
+                                    "'%s'\n", argv[i]);
+                    return 1;
+                }
+                cpp_set_cxx_std(year, strict);
+            }
         } else if (strcmp(argv[i], "--emit-c") == 0) {
             emit_c_only = 1;
         } else if (strcmp(argv[i], "-E") == 0) {
@@ -761,6 +781,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-fno-unwind-tables") == 0 ||
                    strcmp(argv[i], "-fno-asynchronous-unwind-tables") == 0) {
             want_unwind = 0;
+        } else if (strcmp(argv[i], "-fchar8_t") == 0) {
+            cpp_set_cxx_char8(1);   /* (C++: char8_t is a keyword anyway) */
         } else if (strcmp(argv[i], "-fno-exceptions") == 0) {
             want_exceptions = 0;
         } else if (strncmp(argv[i], "-O", 2) == 0) {
@@ -786,6 +808,17 @@ int main(int argc, char **argv)
                    strncmp(argv[i], "-mcmodel=", 9) == 0) {
             /* accepted: EmbCC never uses MMX or the red zone, and its default
              * code model already suits the kernel's higher-half link. */
+        } else if (strncmp(argv[i], "-D", 2) == 0 ||
+                   strncmp(argv[i], "-U", 2) == 0) {
+            int undef = argv[i][1] == 'U';
+            const char *d = argv[i][2] ? argv[i] + 2
+                                       : (i + 1 < argc ? argv[++i] : 0);
+            if (!d || !*d) {
+                fprintf(stderr, "embcc: -%c needs a macro name\n",
+                        undef ? 'U' : 'D');
+                return 1;
+            }
+            cpp_cmdline_define(d, undef);
         } else if (strncmp(argv[i], "-I", 2) == 0) {
             const char *dir = argv[i][2] ? argv[i] + 2
                                          : (i + 1 < argc ? argv[++i] : 0);

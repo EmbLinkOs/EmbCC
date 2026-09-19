@@ -987,7 +987,12 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                 diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                            "expected a member name before %s",
                            tok_describe(cur(ps)));
-            if (!is_bf && ty_size(mty) == 0)
+            /* (an array of no elements — `T m[]`, C99's flexible array
+             * member, or GNU's `T m[0]` — takes no room: its elements are
+             * what follows the struct) */
+            if (!is_bf && ty_size(mty) == 0 &&
+                !(mty->kind == TY_ARRAY && mty->count == 0 && !mty->vla_len &&
+                  ty_size(mty->pointee) > 0))
                 diag_fatal(ps->lx.file, mline,
                            "member '%s' has incomplete type %s",
                            mname, ty_name(mty));
@@ -1046,17 +1051,12 @@ static void parse_enum_body(struct parser *ps)
         advance(ps);
         if (cur(ps)->kind == TOK_ASSIGN) {
             advance(ps);
-            int neg = 0;
-            if (cur(ps)->kind == TOK_MINUS) {
-                neg = 1;
-                advance(ps);
-            }
-            if (cur(ps)->kind != TOK_NUM)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
-                           "an enumerator value must be an integer "
-                           "literal for now");
-            val = neg ? -cur(ps)->num : cur(ps)->num;
-            advance(ps);
+            int vline = cur(ps)->line, vcol = cur(ps)->col;
+            struct expr *ve = parse_cond(ps);
+            if (!size_fold(ve, &val))
+                diag_at(ps->lx.file, vline, vcol,
+                        "an enumerator value must be an integer constant "
+                        "expression");
         }
         for (struct econst *ec = ps->unit->econsts; ec; ec = ec->next)
             if (strcmp(ec->name, name) == 0)
@@ -2161,7 +2161,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         s = new_stmt(STMT_IF, t->line, t->col);
         advance(ps);
         expect(ps, TOK_LPAREN, "'('");
-        s->cond = parse_expr(ps);
+        s->cond = parse_comma(ps);       /* an expression: commas too */
         expect(ps, TOK_RPAREN, "')'");
         s->thn = parse_controlled(ps);
         if (cur(ps)->kind == TOK_KW_ELSE) {
@@ -2173,7 +2173,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         s = new_stmt(STMT_WHILE, t->line, t->col);
         advance(ps);
         expect(ps, TOK_LPAREN, "'('");
-        s->cond = parse_expr(ps);
+        s->cond = parse_comma(ps);       /* an expression: commas too */
         expect(ps, TOK_RPAREN, "')'");
         s->body = parse_controlled(ps);
         return s;
@@ -2193,7 +2193,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             expect(ps, TOK_SEMI, "';'");
         }
         if (cur(ps)->kind != TOK_SEMI) /* NULL cond = forever; break exits */
-            s->cond = parse_expr(ps);
+            s->cond = parse_comma(ps);
         expect(ps, TOK_SEMI, "';'");
         if (cur(ps)->kind != TOK_RPAREN)
             s->step = parse_comma(ps);
