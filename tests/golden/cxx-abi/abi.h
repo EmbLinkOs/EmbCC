@@ -86,6 +86,39 @@ struct Both : Shape, Tagged {
     int area() const override;
     long tag() const override;
 };
+// Virtual bases split across the compilers: Left and Join are embcc's,
+// Right and Join2 g++'s — each builds the other's class as a base, through
+// a VTT pointing into its own construction vtables.
+struct VBase {
+    virtual ~VBase();
+    virtual int who() const;
+    int base = 5;
+};
+struct Left : virtual VBase {
+    Left();
+    ~Left() override;
+    int who() const override;
+    int l = 1;
+};
+struct Right : virtual VBase {
+    Right();
+    ~Right() override;
+    virtual int right() const;
+    int r = 2;
+};
+struct Join : Left, Right {
+    Join();
+    ~Join() override;
+    int who() const override;
+    int j = 3;
+};
+struct Join2 : Right, Left {
+    Join2();
+    ~Join2() override;
+    int right() const override;
+    int k = 4;
+};
+extern long vb_trail;               // each destructor appends a digit
 struct NonPodBase { int x = 1; char c = 2; };
 struct TailUser : NonPodBase { char d = 3; };      // d in NonPodBase's padding
 struct EmptyBase {};
@@ -98,6 +131,11 @@ long tagged_tag(const Tagged *);
 Circle *as_circle(Shape *);                         // g++'s dynamic_cast
 const char *type_name(const Shape &);
 long layout_code();                                 // g++'s offsets/sizes
+VBase *make_join2();                                // g++ builds
+int vbase_who(const VBase &);                       // g++ calls who()
+int right_of(const Right &);                        // ... and right()
+Join *as_join(VBase *);                             // down from a virtual base
+long vb_layout();                                   // g++'s offsets/sizes
 int via(const Pt *, int (Pt::*)(int) const, int Pt::*);   // g++ side
 int Pt::*member_of(int which);                              // embcc side
 int (Pt::*method())() const;                                // embcc side

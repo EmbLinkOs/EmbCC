@@ -22,7 +22,7 @@ targets, and must agree; cross-ABI tests link an EmbCC half with a g++ half.
 |---|---|---|
 | **CX1** | C++ as a better C: `bool`, `nullptr`, references, namespaces, `extern "C"`, overloading and Itanium mangling, default arguments, classes (members, methods, access, `this`), constructors and destructors (run on every scope exit), `new`/`delete`, static members, global constructors/destructors, function-local statics (guards) | tests/cxx, both targets, agreeing with g++; linking with libsupc++ |
 | **CX2** | operator overloading, conversions (converting constructors, conversion operators, `explicit`), copy and move (implicit special members, rvalue references), temporaries and their lifetimes, classes by value in the ABI | cross-ABI tests with g++ |
-| **CX3** | inheritance (single, multiple, virtual), virtual functions and vtables, pure virtuals, RTTI (`typeid`, `dynamic_cast`) | g++ calling EmbCC virtuals and back |
+| **CX3** | inheritance (single, multiple, virtual), virtual functions and vtables, pure virtuals, RTTI (`typeid`, `dynamic_cast`) | g++ calling EmbCC virtuals and back; each building the other's classes as virtual-base hierarchies |
 | **CX4** | templates: class, function, alias and variable templates; deduction; explicit and partial specialization; SFINAE; variadics and fold expressions | every template symbol named as g++ names it |
 | **CX5** | exceptions: `throw`/`try`/`catch`, unwind tables, the Itanium personality routine, `noexcept` | exceptions crossing EmbCC/g++ frames |
 | **CX6** | the modern core: `auto`, `decltype`, lambdas, `constexpr` evaluation, range-`for`, `initializer_list`, `enum class`, structured bindings, `if constexpr` | |
@@ -45,11 +45,14 @@ libstdc++ and libsupc++ (the harness: `tests/harness/<arch>/link.sh --cxx`).
   replay); `parse.c` parses declarations and statements with their
   semantics, `expr.c` expressions — every implicit conversion, reference
   binding and temporary made explicit in the tree — and overload
-  resolution; `class.c` lays classes out and builds objects; `mangle.c`
-  names things as the Itanium ABI does; `emit.c` writes C.
+  resolution; `class.c` lays classes out and builds objects; `vtable.c`
+  makes vtables, construction vtables and VTTs; `template.c` instantiates
+  templates; `mangle.c` names things as the Itanium ABI does; `emit.c`
+  writes C.
 - A reference is a pointer in C; a member function takes `this` first; a
   constructor or destructor is two functions, C2/D2 (the base-object body)
-  and C1/D1 (the complete object, calling it).
+  and C1/D1 (the complete object, calling it — with virtual bases, both
+  call one body, see below).
 - A temporary is a variable declared at its full-expression (a GNU
   statement expression) and destroyed at its end — or, bound to a local
   reference, at the end of that reference's block.
@@ -94,6 +97,17 @@ libstdc++ and libsupc++ (the harness: `tests/harness/<arch>/link.sh --cxx`).
   a virtual destructor has its deleting D0; typeinfo objects are
   libsupc++'s classes' (`__si_`/`__vmi_class_type_info`), and typeid and
   dynamic_cast use them and `__dynamic_cast`.
+- Virtual bases (vtable.c): the complete object's subobjects as a tree, a
+  virtual base once; the tables built from it the way g++'s class.cc does
+  (vcall and vbase offsets, virtual thunks `_ZTv0_n24_...`, construction
+  vtables `_ZTC...`, the VTT `_ZTT...`, the null entries g++ leaves), so
+  they come out byte for byte the same. A class with virtual bases has
+  one constructor body taking the VTT and whether the object is complete:
+  C1 passes its own VTT and builds the virtual bases first (in their
+  construction order, with the most derived class's mem-initializers),
+  C2 takes its derived class's sub-VTT; destructors mirror it. A virtual
+  base is reached through the vbase offset in the object's vtable (an
+  `E_BASE` with a virtual step).
 
 ## Status
 
@@ -125,32 +139,51 @@ types, `auto` and `decltype` for variables, `if`/`switch` with an
 initializer, `static_assert`, delegating constructors, default member
 initializers.
 
-**CX3 done, but for virtual bases** (September 2026): single and multiple
-inheritance with g++'s layouts, virtual functions (overriding with and
-without `virtual`, `override`/`final`, pure virtuals and abstract
-classes, virtual destructors and deleting destructors, thunks), `typeid`
-and `dynamic_cast` (down, across, to `void *`, failing, of references).
+**CX3 done** (September 2026): single and multiple inheritance with g++'s
+layouts, virtual functions (overriding with and without `virtual`,
+`override`/`final`, pure virtuals and abstract classes, virtual
+destructors and deleting destructors, thunks), `typeid` and
+`dynamic_cast` (down, across, to `void *`, failing, of references).
 tests/cxx `inherit` and `rtti` agree with g++ on both targets, and
 cxx-abi splits one hierarchy across the two compilers — each calling the
 other's virtual functions, g++'s dynamic_cast reading EmbCC's typeinfo,
 deleting through a thunk to EmbCC's D0, layouts compared number for
 number.
 
-Virtual base classes are the one CX3 piece left, as **CX3b**: vbase
-offsets, vcall offsets and virtual thunks, VTTs and construction vtables
-(`_ZTT`, `_ZTC`), the base-object constructors that take a VTT — g++'s
-exact output for a diamond is recorded and is the target. libstdc++'s
-stream classes use virtual bases, but through explicit instantiations
-compiled into libstdc++ itself; templates (CX4) come first.
+**CX3b done** (September 2026): virtual base classes — layout after the
+non-virtual part, nearly empty virtual bases sharing the vptr (with g++'s
+"lost" primaries: the interface pattern), vbase and vcall offsets, virtual
+thunks, construction vtables and VTTs (virtual VTTs for virtual bases with
+their own), constructors and destructors taking the VTT, virtual bases
+built first by the most derived class, conversions and member access
+through the vtable, pointers to their members, copies and assignment. For
+every hierarchy tried (diamonds, virtual bases without virtual functions,
+interfaces, a virtual base's own virtual base, construction-time virtual
+calls) every vtable, construction vtable, VTT and typeinfo g++ emits is
+byte for byte what EmbCC emits (compared symbol by symbol, relocations
+included). tests/cxx `vbases` agrees with g++ on both targets, and
+cxx-abi now splits a virtual-base hierarchy across the compilers the
+hard way: EmbCC's `Join : Left, Right` builds g++'s `Right` through a VTT
+entry pointing into EmbCC's construction vtable, g++'s `Join2 : Right,
+Left` builds EmbCC's `Left` the same way, and each destroys through the
+other's destructors, casts down from the virtual base with the other's
+typeinfo, and agrees on the layout.
+
+Found on the way: a pointer to a base's member did not apply to a derived
+object nor convert to the derived class's (both done, a conversion
+through a virtual base refused); a nested implicit constructor reset the
+flag that lets an abstract class be built as a base; `cx_fmt` cut its
+result at 1024 bytes; and EmbCC's C could not take a member of a struct
+returned by value (`f().m`), which vtable.c uses — tests/exec
+`struct-rvalue-member` now runs it at every level on both targets.
 
 Already there ahead of their milestones: `enum class` and fixed underlying
 types, `auto` and `decltype` for variables, `if`/`switch` with an
 initializer, `static_assert`, delegating constructors, default member
 initializers.
 
-Refused until later, each naming its milestone: virtual base classes
-(CX3b); exceptions (CX5); lambdas, range-`for`, `initializer_list`,
-deduced return types (CX6); designated initializers, `<=>` and C++20's
+Refused until later, each naming its milestone: exceptions (CX5);
+lambdas, range-`for`, `initializer_list`, deduced return types (CX6); designated initializers, `<=>` and C++20's
 rewritten comparisons, `auto` parameters, coroutines (CX7). Access control
 is parsed but not yet enforced; anonymous struct/union members, bit-fields
 in a class with bases or virtual functions, and copying arrays of
@@ -203,4 +236,7 @@ enclosing expansion is iterating, within one list element (`f(g(xs,
 xs...)...)`); function parameter packs named in a dependent signature
 (`sZfp_`).
 
-Next: CX3b (virtual bases), then CX5 (exceptions).
+Not yet with virtual bases: covariant return types that need a thunk to
+adjust the result.
+
+Next: CX5 (exceptions).

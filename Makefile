@@ -28,6 +28,7 @@ SRCS := \
 	src/cxx/parse.c \
 	src/cxx/expr.c \
 	src/cxx/class.c \
+	src/cxx/vtable.c \
 	src/cxx/template.c \
 	src/cxx/mangle.c \
 	src/cxx/emit.c \

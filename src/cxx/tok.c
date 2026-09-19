@@ -144,11 +144,19 @@ char *cx_strdup(const char *s)
 char *cx_fmt(const char *fmt, ...)
 {
     char buf[1024];
-    va_list ap;
+    va_list ap, ap2;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_copy(ap2, ap);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    return cx_strdup(buf);
+    if (n < (int)sizeof buf) {
+        va_end(ap2);
+        return cx_strdup(buf);
+    }
+    char *big = xmalloc((size_t)n + 1);        /* longer than the buffer */
+    vsnprintf(big, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
+    return big;
 }
 
 int cx_uid(void)

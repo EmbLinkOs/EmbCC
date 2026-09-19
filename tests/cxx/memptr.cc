@@ -1,7 +1,8 @@
 // CX2: pointers to members — to data members (an offset; null is -1) and
 // to member functions ({ptr, adj}) — formed with &C::m, used with .* and
 // ->*, compared, tested, passed and stored; overloaded members picked by
-// the target type.
+// the target type; a base's, applied to a derived object and converted to
+// the derived class's (its offset added).
 // expect-exit: 42
 #include <stdio.h>
 
@@ -39,6 +40,9 @@ struct Table {
 static const Table table[] = {
     { "sum", &Point::sum },
 };
+struct Pad { long pad = 0; };
+struct Tag { int t = 3; int twice() const { return t * 2; } };
+struct Rec : Pad, Tag { int r = 4; };
 static int Point::*g_member = &Point::y;
 static int Point::*g_null = nullptr;
 
@@ -71,6 +75,18 @@ int main()
     check("comparisons", s == &Point::sum && a != nf && m == g_member &&
           sizeof(s) == 16);
 
+    Rec rec;
+    int Tag::*pt = &Tag::t;
+    int (Tag::*pf)() const = &Tag::twice;
+    int Rec::*pr = pt;
+    int (Rec::*prf)() const = &Tag::twice;
+    int Tag::*tnull = nullptr;
+    int Rec::*rnull = tnull;
+    check("a base's member pointer on a derived object",
+          rec.*pt == 3 && (rec.*pf)() == 6);
+    check("... converted to the derived class's",
+          rec.*pr == 3 && (rec.*prf)() == 6 && rnull == nullptr &&
+          pr != nullptr);
     printf("%s\n", fails ? "FAILED" : "all ok");
     return fails ? 1 : 42;
 }

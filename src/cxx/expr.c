@@ -278,17 +278,31 @@ static int path_count(struct cclass *d, struct cclass *b)
     if (d == b)
         return 1;
     class_ensure(d);
+    if (d->nvbases) {
+        /* a virtual base is one subobject however it is reached */
+        struct cclass *vb;
+        long off;
+        return class_base_path(d, b, &vb, &off);
+    }
     int n = 0;
     for (int i = 0; i < d->nbases; i++)
         n += path_count(d->bases[i].cls, b);
     return n;
 }
 
-/* The offset of the (first) b subobject in d, or -1. */
+/* The offset of the (first) b subobject in d, or -1 (or reached through a
+ * virtual base: not fixed). */
 static long base_offset(struct cclass *d, struct cclass *b)
 {
     if (d == b)
         return 0;
+    if (d->nvbases) {
+        struct cclass *vb;
+        long off;
+        if (class_base_path(d, b, &vb, &off) != 1 || vb)
+            return -1;
+        return off;
+    }
     for (int i = 0; i < d->nbases; i++) {
         long o = base_offset(d->bases[i].cls, b);
         if (o >= 0)
@@ -338,6 +352,15 @@ struct cexpr *to_base(struct cexpr *e, struct cclass *b, int ptr)
         ex_error(e, "'%s' is not a base of '%s'", b->name, d->name);
     if (n > 1)
         ex_error(e, "'%s' is an ambiguous base of '%s'", b->name, d->name);
+    if (d->nvbases) {
+        struct cclass *vb;
+        long off;
+        class_base_path(d, b, &vb, &off);
+        struct cexpr *r = shift_object(e, b, off, ptr);
+        if (vb)
+            r->vbindex = class_vbindex(d, vb);
+        return r;
+    }
     return shift_object(e, b, base_offset(d, b), ptr);
 }
 
@@ -349,10 +372,28 @@ static struct cexpr *to_derived(struct cexpr *e, struct cclass *d, int ptr)
     if (!is_proper_base(d, b))
         ex_error(e, "'%s' is not an unambiguous base of '%s'", b->name,
                  d->name);
+    if (base_offset(d, b) < 0)
+        ex_error(e, "'%s' is a virtual base of '%s': a cast down from it "
+                    "needs dynamic_cast", b->name, d->name);
     return shift_object(e, d, -base_offset(d, b), ptr);
 }
 
 static struct ics ics_of(struct cexpr *e, struct cty *to);
+
+/* A pointer to member of base B as one of derived class t->cls: the
+ * base's offset added (not through a virtual base: no fixed offset). */
+static struct cexpr *mptr_to_derived(struct cexpr *e, struct cty *t)
+{
+    long off = base_offset(t->cls, e->t->cls);
+    if (off < 0)
+        ex_error(e, "'%s' converted to '%s' through a virtual base",
+                 ct_name(e->t), ct_name(t));
+    if (!off)
+        return ex_cast(e, t);
+    struct cexpr *r = ex1(E_MPCONV, ct_unqual(t), VC_PRVALUE, e);
+    r->ival = off;
+    return r;
+}
 
 static int is_integral_promotion(struct cty *from, struct cty *to)
 {
@@ -422,6 +463,12 @@ static struct ics std_conv(struct cexpr *e, struct cty *to)
         else if (from->k == CT_MPTR && from->cls == tu->cls &&
                  ct_same_unqual(from->to, tu->to))
             r.rank = R_EXACT;
+        else if (from->k == CT_MPTR && ct_same_unqual(from->to, tu->to)) {
+            /* B::* to D::*, B a base of D (7.3.13) */
+            int amb;
+            if (class_derives(tu->cls, from->cls, &amb) && !amb)
+                r.rank = R_CONV;
+        }
         return r;
     }
     if (ct_is_arith(tu) && tu->k != CT_ENUM) {
@@ -1057,13 +1104,17 @@ struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx)
     if (e->k == E_OVL && e->memptr) {
         if (ct_is_pmf(t))
             for (struct cfunc *f = e->fn; f; f = f->next)
-                if (f->cls == t->cls && ct_same_unqual(f->type, t->to)) {
-                    struct cexpr *r = ex_new(E_MEMPTR, ct_unqual(t),
+                if ((f->cls == t->cls ||
+                     class_derives(t->cls, f->cls, NULL)) &&
+                    ct_same_unqual(f->type, t->to)) {
+                    struct cexpr *r = ex_new(E_MEMPTR,
+                                             ct_mptr(f->cls, t->to),
                                              VC_PRVALUE);
                     r->fn = f;
                     r->line = e->line;
                     r->file = e->file;
-                    return r;
+                    return f->cls == t->cls ? r
+                           : mptr_to_derived(r, ct_unqual(t));
                 }
         ex_error(e, "no overload of '%s' converts to '%s' in %s",
                  e->fn->name, ct_name(t), ctx);
@@ -1100,6 +1151,8 @@ struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx)
         if (ct_same(e->t, tu))
             return e;
     }
+    if (tu->k == CT_MPTR && e->t->k == CT_MPTR && e->t->cls != tu->cls)
+        return mptr_to_derived(e, tu);
     return ex_cast(e, tu);
 }
 
@@ -1759,9 +1812,14 @@ static struct cexpr *member_via_pointer(int op, struct cexpr *l,
     if (r->t->k != CT_MPTR)
         ex_error(r, "'%s' is not a pointer to member",
                  ct_name(r->t));
-    if (obj->t->k != CT_CLASS || obj->t->cls != r->t->cls)
+    int amb = 0;
+    if (obj->t->k != CT_CLASS ||
+        (obj->t->cls != r->t->cls &&
+         (!class_derives(obj->t->cls, r->t->cls, &amb) || amb)))
         ex_error(obj, "'%s' has no members of '%s'", ct_name(obj->t),
                  ct_name(r->t));
+    if (obj->t->cls != r->t->cls)
+        obj = to_base(obj, r->t->cls, 0);   /* the base it is a member of */
     if (obj->vc == VC_PRVALUE)
         obj = materialize(obj);
     if (ct_is_pmf(r->t))
@@ -2254,7 +2312,7 @@ static struct cexpr *dynamic_cast_to(struct cty *t, struct cexpr *e,
     if (tt->k == CT_CLASS) {
         int amb;
         if (class_derives(tt->cls, src, &amb) && !amb)
-            d->ival = base_offset(tt->cls, src);
+            d->ival = base_offset(tt->cls, src);    /* -1 if virtual */
         else if (!class_derives(tt->cls, src, NULL))
             d->ival = -2;
     }

@@ -81,6 +81,17 @@ long layout_code()
            (long)sizeof(TailUser) * 10000 + (long)sizeof(EboUser) * 100 +
            (long)sizeof(Both);
 }
+VBase *make_join2() { return new Join2; }
+int vbase_who(const VBase &v) { return v.who(); }
+int right_of(const Right &r) { return r.right(); }
+Join *as_join(VBase *v) { return dynamic_cast<Join *>(v); }
+long vb_layout()
+{
+    Join j;
+    return (long)sizeof(Join) * 1000000 +
+           (long)((char *)(VBase *)&j - (char *)&j) * 1000 +
+           (long)((char *)(Right *)&j - (char *)&j);
+}
 int via(const Pt *p, int (Pt::*f)(int) const, int Pt::*d)
 {
     return (p->*f)(p->*d) + p->*member_of(1);
@@ -114,6 +125,13 @@ int std_name(int x) { return x + 1; }
 }
 
 int global_fn(abi::Pod *a, abi::Pod *b) { return a->a + b->a; }
+
+abi::Right::Right() {}
+abi::Right::~Right() { vb_trail = vb_trail * 10 + 2; }
+int abi::Right::right() const { return r + base; }
+abi::Join2::Join2() {}
+abi::Join2::~Join2() { vb_trail = vb_trail * 10 + 4; }
+int abi::Join2::right() const { return 40 + k; }
 
 abi::Circle::~Circle() {}                           // Circle's key function
 int abi::Circle::area() const { return r * r * 3; }

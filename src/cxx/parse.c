@@ -2127,9 +2127,6 @@ static void add_base(struct cclass *c, const struct ctok *at, int virt,
         for (int i = 0; i < c->nbases; i++)
             if (c->bases[i].cls == b)
                 cx_error(at, "'%s' is a direct base twice", b->name);
-        if (virt)
-            cx_error(at, "virtual base classes are not supported yet "
-                         "(CX3b: vbase and vcall offsets, VTTs)");
         if (c->nbases == *cap) {
             *cap = *cap ? *cap * 2 : 4;
             c->bases = xrealloc(c->bases, (size_t)*cap * sizeof *c->bases);

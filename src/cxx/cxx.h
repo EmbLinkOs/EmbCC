@@ -478,6 +478,8 @@ struct cfunc {
     int vslot;                /* a virtual function's slot in the vtable of
                                * vclass (-1: not virtual) */
     struct cclass *vclass;    /* the class whose primary vtable has it */
+    struct cexpr **vbaseinit; /* ... of each virtual base (c->vbases), by the
+                               * complete-object constructor */
     struct cexpr **baseinit;  /* a constructor's initialization of each
                                * direct base (class.c), or NULL */
     int is_builtin;           /* implicitly declared (operator new, ...) */
@@ -541,6 +543,10 @@ struct cbase {
     long off;                 /* offset in the object (a non-virtual base's;
                                * a virtual base's is in the complete object
                                * only: vbases) */
+    long vbindex;             /* in vbases: where the primary vtable holds
+                               * its offset (bytes from the address point) */
+    int claimed;              /* ... a subobject's primary base: at its
+                               * address, taking no space of its own */
 };
 
 /* A slot of a vtable: the final overrider it calls, and how to get there
@@ -562,8 +568,15 @@ struct cclass {
     struct cbase *bases;      /* direct bases, in declaration order */
     int nbases;
     struct cbase *vbases;     /* every virtual base, at its offset in a
-                               * complete object */
+                               * complete object, in inheritance graph
+                               * order */
     int nvbases;
+    struct cclass **vinit;    /* ... in the order they are constructed */
+    int nvinit;
+    void *vinfo;              /* vtable.c's tables */
+    struct cfunc **vcfns;     /* as a virtual base: the functions with a */
+    long *vcidx;              /* vcall offset, and where it is */
+    int nvc, vc_done;
     long size, align;
     long nvsize, nvalign;     /* the object without its virtual bases (what
                                * a base subobject occupies, and later
@@ -576,6 +589,8 @@ struct cclass {
                                * vptr): a packed C struct */
     int dynamic;              /* has a vptr at offset 0 */
     struct cclass *primary;   /* the primary base: shares the vptr */
+    int primary_virt;         /* ... a nearly empty virtual base */
+    int abstract, abstract_known;
     struct vslot *vtab;       /* the primary vtable's function slots */
     int nvtab;
     struct cfunc *key;        /* the key function: the vtable's home unit
@@ -659,7 +674,10 @@ enum cexpr_kind {
                    * t: ival the offset hint; is_array: to void *; zero: a
                    * reference (failure calls __cxa_bad_cast) */
     E_PMEM,       /* a[0].*a[1]: the data member a pointer to member names */
-    E_PMCALL      /* (a[0]->*a[1])(a[2]...): a[0] the object's address */
+    E_PMCALL,     /* (a[0]->*a[1])(a[2]...): a[0] the object's address */
+    E_MPCONV      /* a[0], a pointer to member of a base, as one of its
+                   * derived class: ival added (a data member's offset,
+                   * a member function's this adjustment) */
 };
 
 enum { VC_PRVALUE, VC_LVALUE, VC_XVALUE };
@@ -670,6 +688,8 @@ struct cexpr {
     int vc;                   /* VC_* */
     int op;                   /* E_UNARY/E_BINARY/E_ASSIGN: a TOK_ kind */
     long ival;                /* E_INT; E_INCDEC delta */
+    long vbindex;             /* E_BASE through a virtual base: its offset is
+                               * at vptr + vbindex (then ival) */
     int post;                 /* E_INCDEC */
     int lvcast;               /* E_CAST: to a reference type */
     int is_null_const;        /* an integer literal 0 (a null pointer) */
@@ -766,10 +786,70 @@ struct cexpr *to_base(struct cexpr *e, struct cclass *b, int ptr);
  * class_lookup_ambiguous is set when two bases have different ones. */
 struct csym *class_member(struct cclass *c, const char *name);
 extern int class_lookup_ambiguous;
-/* The vtable group of a dynamic class (class.c): the primary vtable, then
- * one per secondary dynamic base subobject. */
-int class_vtables(struct cclass *c, long **offs, struct vslot ***slots,
-                  int **counts);
+/* ---- vtables (vtable.c) ---- */
+
+/* A vtable's function entry: f (NULL: a null entry, a destructor's in a
+ * construction vtable) reached through a thunk when delta or vcall. */
+struct vfn {
+    struct cfunc *f;
+    int deleting;             /* the deleting destructor (D0) */
+    int pure;                 /* __cxa_pure_virtual */
+    long delta;               /* this += delta, */
+    long vcall;               /* then += the vcall offset at vptr + vcall */
+};
+/* One vtable of a group: vcall and vbase offsets (lowest address first),
+ * offset to top, typeinfo, functions; its vptr points at `point`. */
+struct vtbl {
+    long *pre;
+    int npre;
+    long ott;
+    struct cclass *rtti;
+    struct vfn *fns;
+    int nfns;
+    int point;                /* the address point, in words into the group */
+    long off;                 /* its subobject, from the group's root */
+};
+struct vgroup {
+    struct vtbl *v;
+    void **of;                /* vtable.c's: each one's subobject */
+    int n;
+    int words;
+};
+/* A construction vtable group: base `base` at `off` in the class. */
+struct ctorgrp {
+    struct cclass *base;
+    long off;
+    struct vgroup *g;
+};
+/* A VTT entry: an address point in the main group (ctor -1) or a
+ * construction group. */
+struct vttent {
+    int ctor;
+    int point;
+};
+/* A vptr a constructor or destructor sets: at this + off, or when virt at
+ * the virtual base whose offset is at vptr + vbindex, + off; to vtt[vtt]
+ * (with virtual bases) or the group's address point. */
+struct vstore {
+    int virt;
+    long vbindex;
+    long off;
+    int vtt;
+    int point;
+};
+struct vgroup *vtable_group(struct cclass *c);
+int class_ctor_groups(struct cclass *c, struct ctorgrp **out);
+int class_vtt(struct cclass *c, struct vttent **out);
+int class_vstores(struct cclass *c, struct vstore **out);
+int class_subvtt(struct cclass *c, int base);    /* direct non-virtual base */
+int class_vvtt(struct cclass *c, int vbase);     /* c->vbases[vbase] */
+long class_vbindex(struct cclass *c, struct cclass *v);
+int class_rtti_flags(struct cclass *c);
+/* The base subobjects of class b in c: how many; for one, the last
+ * virtual base on the path to it (NULL: none) and b's offset from it (or
+ * from c). */
+int class_base_path(struct cclass *c, struct cclass *b, struct cclass **vb,
+                    long *off);
 int class_abstract(struct cclass *c);   /* a slot's final overrider is pure */
 
 /* Aggregate initialization of t from a braced list. */

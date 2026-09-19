@@ -71,6 +71,16 @@ long Tagged::tag() const { return t; }
 int Both::area() const { return 7; }
 long Both::tag() const { return t + 1; }
 
+long vb_trail = 0;
+VBase::~VBase() { vb_trail = vb_trail * 10 + 9; }
+int VBase::who() const { return base; }
+Left::Left() {}
+Left::~Left() { vb_trail = vb_trail * 10 + 1; }
+int Left::who() const { return 10 + l; }
+Join::Join() {}
+Join::~Join() { vb_trail = vb_trail * 10 + 3; }
+int Join::who() const { return 30 + j; }
+
 namespace detail {
 int Pt::*member_of(int which) { return which ? &Pt::y : &Pt::x; }
 int (Pt::*method())() const { return &Pt::sum; }
@@ -168,6 +178,37 @@ int main()
                     (long)sizeof(TailUser) * 10000 + (long)sizeof(EboUser) * 100 +
                     (long)sizeof(Both);
         CHECK("layouts agree", layout_code() == mine && sizeof(eu) == 4);
+    }
+    {
+        vb_trail = 0;
+        {
+            Join jn;                                 // g++'s Right inside
+            VBase *pb = &jn;
+            Left *pl = &jn;
+            Right *pr = &jn;
+            CHECK("virtual bases: embcc's class over g++'s",
+                  pb->who() == 33 && pl->who() == 33 && vbase_who(jn) == 33 &&
+                  pr->right() == 7 && right_of(jn) == 7 && jn.base == 5 &&
+                  pr->base == 5 && pl->l == 1 && pr->r == 2);
+            CHECK("g++'s dynamic_cast from a virtual base",
+                  as_join(pb) == &jn && as_join(pr) == &jn);
+            long mine = (long)sizeof(Join) * 1000000 +
+                        (long)((char *)pb - (char *)&jn) * 1000 +
+                        (long)((char *)pr - (char *)&jn);
+            CHECK("virtual base layouts agree", vb_layout() == mine);
+            vb_trail = 0;                            // g++'s Join is gone
+        }
+        CHECK("... destroyed in order through both", vb_trail == 3219);
+        vb_trail = 0;
+        VBase *g = make_join2();                     // embcc's Left inside
+        Right *gr = dynamic_cast<Right *>(g);
+        CHECK("g++'s class over embcc's", g->who() == 11 && gr &&
+              gr->right() == 44 && dynamic_cast<Left *>(g)->l == 1 &&
+              g->base == 5);
+        delete g;                                    // g++'s D0
+        CHECK("... destroyed in order through both", vb_trail == 4129);
+        Right r;
+        CHECK("g++'s constructor, complete", r.right() == 7 && r.who() == 5);
     }
     Pt pt = { 3, 4 };
     CHECK("member pointers to and from g++",

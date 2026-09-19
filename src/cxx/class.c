@@ -57,7 +57,8 @@ static void esub_add(struct cclass *c, long off)
     esubs[nesubs].off = off;
     nesubs++;
     for (int i = 0; i < c->nbases; i++)
-        esub_add(c->bases[i].cls, off + c->bases[i].off);
+        if (!c->bases[i].is_virtual)     /* those are the whole object's */
+            esub_add(c->bases[i].cls, off + c->bases[i].off);
 }
 
 static int esub_conflict(struct cclass *c, long off)
@@ -68,9 +69,57 @@ static int esub_conflict(struct cclass *c, long off)
         if (esubs[i].c == c && esubs[i].off == off)
             return 1;
     for (int i = 0; i < c->nbases; i++)
-        if (esub_conflict(c->bases[i].cls, off + c->bases[i].off))
+        if (!c->bases[i].is_virtual &&
+            esub_conflict(c->bases[i].cls, off + c->bases[i].off))
             return 1;
     return 0;
+}
+
+/* A class whose non-virtual part is just a vptr (Itanium 2.2). */
+static int nearly_empty(const struct cclass *c)
+{
+    return c->dynamic && c->nvsize == 8;
+}
+
+/* c's virtual bases in inheritance graph order (a depth-first preorder:
+ * layout and vtables), and in the order they are constructed (postorder,
+ * 11.9.3). */
+static void add_vbase(struct cclass *c, struct cclass *v)
+{
+    for (int i = 0; i < c->nvbases; i++)
+        if (c->vbases[i].cls == v)
+            return;
+    c->vbases = xrealloc(c->vbases, (size_t)(c->nvbases + 1) *
+                                    sizeof *c->vbases);
+    memset(&c->vbases[c->nvbases], 0, sizeof *c->vbases);
+    c->vbases[c->nvbases].cls = v;
+    c->vbases[c->nvbases].is_virtual = 1;
+    c->vbases[c->nvbases].access = CA_PUBLIC;
+    c->nvbases++;
+}
+
+static void add_vinit(struct cclass *c, struct cclass *v)
+{
+    for (int i = 0; i < c->nvinit; i++)
+        if (c->vinit[i] == v)
+            return;
+    c->vinit = xrealloc(c->vinit, (size_t)(c->nvinit + 1) * sizeof *c->vinit);
+    c->vinit[c->nvinit++] = v;
+}
+
+static void virtual_bases(struct cclass *c)
+{
+    for (int i = 0; i < c->nbases; i++) {
+        struct cbase *b = &c->bases[i];
+        if (b->is_virtual)
+            add_vbase(c, b->cls);
+        for (int k = 0; k < b->cls->nvbases; k++)
+            add_vbase(c, b->cls->vbases[k].cls);
+        for (int k = 0; k < b->cls->nvinit; k++)
+            add_vinit(c, b->cls->vinit[k]);
+        if (b->is_virtual)
+            add_vinit(c, b->cls);
+    }
 }
 
 /* What a base subobject of c occupies: a POD's whole size (its tail
@@ -80,15 +129,103 @@ static long base_dsize(const struct cclass *c)
     return c->pod_layout ? c->size : c->nvsize;
 }
 
+/* Is v the (virtual) primary base of some base of c? */
+static int indirect_primary(struct cclass *c, struct cclass *v)
+{
+    for (int i = 0; i < c->nbases; i++) {
+        struct cclass *b = c->bases[i].cls;
+        if ((b->primary == v && b->primary_virt) || indirect_primary(b, v))
+            return 1;
+    }
+    return 0;
+}
+
+/* A virtual base some subobject of m has as its primary: it shares that
+ * subobject's address — the first such subobject in inheritance graph
+ * order (a later one's primary is "lost"). */
+struct claim {
+    int claimed, done;
+    int under;                /* within virtual base `under` (-1: m) */
+    long rel;                 /* at this offset from it */
+};
+
+static int vbase_of(struct cclass *m, struct cclass *v)
+{
+    for (int i = 0; i < m->nvbases; i++)
+        if (m->vbases[i].cls == v)
+            return i;
+    return -1;
+}
+
+static void claim_walk(struct cclass *m, struct cclass *x, int under,
+                       long rel, struct claim *cl, int *seen)
+{
+    if (x->primary && x->primary_virt) {
+        int k = vbase_of(m, x->primary);
+        if (!cl[k].claimed) {          /* else x's primary is lost */
+            cl[k].claimed = 1;
+            cl[k].under = under;
+            cl[k].rel = rel;
+        }
+    }
+    for (int i = 0; i < x->nbases; i++) {
+        struct cbase *b = &x->bases[i];
+        if (b->is_virtual) {
+            int k = vbase_of(m, b->cls);
+            if (seen[k])
+                continue;
+            seen[k] = 1;
+            claim_walk(m, b->cls, k, 0, cl, seen);
+        } else {
+            claim_walk(m, b->cls, under, rel + b->off, cl, seen);
+        }
+    }
+}
+
+static void claimed_offset(struct cclass *m, int k, struct claim *cl)
+{
+    if (!cl[k].claimed || cl[k].done)
+        return;
+    cl[k].done = 1;
+    long base = 0;
+    if (cl[k].under >= 0) {
+        claimed_offset(m, cl[k].under, cl);
+        base = m->vbases[cl[k].under].off;
+    }
+    m->vbases[k].off = base + cl[k].rel;
+    m->vbases[k].claimed = 1;
+}
+
 static void layout(struct cclass *c)
 {
     long bits = 0, align = 1, size = 0;
     nesubs = 0;
     c->primary = NULL;
+    c->primary_virt = 0;
     for (int i = 0; i < c->nbases && !c->primary; i++)
         if (c->bases[i].cls->dynamic && !c->bases[i].is_virtual)
             c->primary = c->bases[i].cls;
-    if (c->dynamic && !c->primary) {
+    if (!c->primary) {
+        /* else the first nearly empty virtual base that is not already
+         * another base's primary, or the first of them (II.1) */
+        struct cclass *first = NULL;
+        for (int i = 0; i < c->nvbases && !c->primary; i++) {
+            struct cclass *v = c->vbases[i].cls;
+            if (!nearly_empty(v))
+                continue;
+            if (!first)
+                first = v;
+            if (!indirect_primary(c, v))
+                c->primary = v;
+        }
+        if (!c->primary)
+            c->primary = first;
+        c->primary_virt = c->primary != NULL;
+    }
+    if (c->primary_virt) {
+        bits = 64;                           /* its vptr, at 0 */
+        size = align = 8;
+    } else if (c->dynamic && !c->primary) {
         bits = 64;                           /* the vptr */
         size = align = 8;
     }
@@ -97,7 +234,7 @@ static void layout(struct cclass *c)
         for (int i = 0; i < c->nbases; i++) {
             struct cbase *b = &c->bases[i];
             struct cclass *bc = b->cls;
-            if ((pass == 0) != (bc == c->primary))
+            if (b->is_virtual || (pass == 0) != (bc == c->primary))
                 continue;
             long ba = bc->nvalign;
             if (bc->empty) {
@@ -172,6 +309,47 @@ static void layout(struct cclass *c)
     c->dsize = c->is_union ? size : dsize;
     c->nvsize = c->dsize;
     c->nvalign = align;
+    /* then the virtual bases, in inheritance graph order (II.3) — except
+     * those some subobject has as its primary base: they are there */
+    struct claim *cl = xcalloc((size_t)(c->nvbases ? c->nvbases : 1),
+                               sizeof *cl);
+    int *seen = xcalloc((size_t)(c->nvbases ? c->nvbases : 1), sizeof *seen);
+    claim_walk(c, c, -1, 0, cl, seen);
+    for (int i = 0; i < c->nvbases; i++) {
+        struct cbase *v = &c->vbases[i];
+        struct cclass *vc = v->cls;
+        long off;
+        if (cl[i].claimed)
+            continue;
+        if (vc->empty) {
+            off = 0;
+            if (esub_conflict(vc, off)) {
+                off = dsize;
+                while (esub_conflict(vc, off))
+                    off += vc->nvalign;
+            }
+        } else {
+            off = round_up(dsize, vc->nvalign);
+            dsize = off + vc->nvsize;
+        }
+        v->off = off;
+        esub_add(vc, off);
+        if (off + vc->nvsize > size)
+            size = off + vc->nvsize;
+        if (vc->nvalign > align)
+            align = vc->nvalign;
+    }
+    for (int i = 0; i < c->nvbases; i++)
+        claimed_offset(c, i, cl);
+    for (int i = 0; i < c->nvbases; i++)
+        for (int k = 0; k < c->nbases; k++)
+            if (c->bases[k].is_virtual && c->bases[k].cls == c->vbases[i].cls)
+                c->bases[k].off = c->vbases[i].off;
+    if (c->nvbases) {
+        c->dsize = dsize;
+        if (dsize > size)
+            size = dsize;
+    }
     size = round_up(size, align);
     if (size == 0)
         size = 1;                     /* an empty class is one byte */
@@ -254,17 +432,6 @@ static int mark_virtuals(struct cclass *c)
     return any;
 }
 
-/* A vtable of c's group: for the subobject at `off` (0: the primary). */
-struct ventry {
-    long off;
-    struct vslot *slots;
-    int n;
-};
-
-/* A slot's `adjust` here is the offset, in c, of the subobject whose type
- * is the function's class — the thunk subtracts off - adjust. */
-static struct ventry *vgroup_of(struct cclass *c, int *n);
-
 static void push_slot(struct vslot **v, int *n, int *cap, struct cfunc *f,
                       int deleting, long impl)
 {
@@ -330,76 +497,6 @@ static void build_vtables(struct cclass *c)
         if (fs[i]->is_virtual && !fs[i]->is_pure && !fs[i]->is_inline &&
             !fs[i]->is_implicit && !fs[i]->is_defaulted)
             c->key = fs[i];
-}
-
-static struct ventry *vgroup_of(struct cclass *c, int *n)
-{
-    int cap = 4;
-    struct ventry *g = xmalloc((size_t)cap * sizeof *g);
-    *n = 0;
-    if (!c->dynamic)
-        return g;
-    g[0].off = 0;
-    g[0].slots = c->vtab;
-    g[0].n = c->nvtab;
-    *n = 1;
-    for (int i = 0; i < c->nbases; i++) {
-        struct cbase *b = &c->bases[i];
-        if (!b->cls->dynamic)
-            continue;
-        int bn;
-        struct ventry *bg = vgroup_of(b->cls, &bn);
-        for (int k = 0; k < bn; k++) {
-            if (b->cls == c->primary && k == 0)
-                continue;                  /* shared with c's primary */
-            struct ventry e;
-            e.off = b->off + bg[k].off;
-            e.n = bg[k].n;
-            e.slots = xmalloc((size_t)(e.n ? e.n : 1) * sizeof *e.slots);
-            for (int s = 0; s < e.n; s++) {
-                struct vslot sl = bg[k].slots[s];
-                struct cfunc *o = sl.f ? own_overrider(c, sl.f) : NULL;
-                e.slots[s].f = o ? o : sl.f;
-                e.slots[s].deleting = sl.deleting;
-                e.slots[s].adjust = o ? 0 : b->off + sl.adjust;
-            }
-            if (*n == cap) {
-                cap *= 2;
-                g = xrealloc(g, (size_t)cap * sizeof *g);
-            }
-            g[(*n)++] = e;
-        }
-    }
-    return g;
-}
-
-/* The vtable group of c (emit.c): the primary, then the secondaries. */
-int class_vtables(struct cclass *c, long **offs, struct vslot ***slots,
-                  int **counts)
-{
-    int n;
-    struct ventry *g = vgroup_of(c, &n);
-    *offs = xmalloc((size_t)(n ? n : 1) * sizeof **offs);
-    *slots = xmalloc((size_t)(n ? n : 1) * sizeof **slots);
-    *counts = xmalloc((size_t)(n ? n : 1) * sizeof **counts);
-    for (int i = 0; i < n; i++) {
-        (*offs)[i] = g[i].off;
-        (*slots)[i] = g[i].slots;
-        (*counts)[i] = g[i].n;
-    }
-    return n;
-}
-
-/* An object of c cannot be made while a slot's final overrider is pure. */
-int class_abstract(struct cclass *c)
-{
-    int n;
-    struct ventry *g = vgroup_of(c, &n);
-    for (int i = 0; i < n; i++)
-        for (int s = 0; s < g[i].n; s++)
-            if (g[i].slots[s].f && g[i].slots[s].f->is_pure)
-                return 1;
-    return 0;
 }
 
 /* The special member f is, by its signature: a copy or move constructor
@@ -495,7 +592,8 @@ void class_complete(struct cclass *c)
     int virt = mark_virtuals(c);
     c->dynamic = virt;
     for (int i = 0; i < c->nbases; i++)
-        c->dynamic |= c->bases[i].cls->dynamic;
+        c->dynamic |= c->bases[i].cls->dynamic | c->bases[i].is_virtual;
+    virtual_bases(c);
     layout(c);
     c->complete = 1;
     c->explicit_layout = c->nbases > 0 || c->dynamic;
@@ -714,9 +812,14 @@ void define_implicit(struct cfunc *f)
     case SP_COPY: case SP_MOVE:
         f->baseinit = xcalloc((size_t)(c->nbases ? c->nbases : 1),
                               sizeof *f->baseinit);
-        building_base = 1;
-        for (int b = 0; b < c->nbases; b++) {
-            struct cexpr *src = to_base(other, c->bases[b].cls, 0);
+        f->vbaseinit = xcalloc((size_t)(c->nvbases ? c->nvbases : 1),
+                               sizeof *f->vbaseinit);
+        for (int b = 0; b < c->nbases + c->nvbases; b++) {
+            struct cbase *cb = b < c->nbases ? &c->bases[b]
+                                             : &c->vbases[b - c->nbases];
+            if (b < c->nbases && cb->is_virtual)
+                continue;                /* built by the complete object */
+            struct cexpr *src = to_base(other, cb->cls, 0);
             if (move) {
                 struct cexpr *x = ex_new(E_CAST, src->t, VC_XVALUE);
                 x->a = xmalloc(sizeof *x->a);
@@ -725,13 +828,18 @@ void define_implicit(struct cfunc *f)
                 x->lvcast = 1;
                 src = x;
             }
-            struct cexpr *e = init_object(ct_class(c->bases[b].cls),
-                                          INIT_DIRECT, &src, 1, NULL);
+            int saved = building_base;
+            building_base = 1;
+            struct cexpr *e = init_object(ct_class(cb->cls), INIT_DIRECT,
+                                          &src, 1, NULL);
+            building_base = saved;
             if (e && e->k == E_CONSTRUCT)
                 e->baseobj = 1;
-            f->baseinit[b] = e;
+            if (b < c->nbases)
+                f->baseinit[b] = e;
+            else
+                f->vbaseinit[b - c->nbases] = e;
         }
-        building_base = 0;
         f->meminit = xcalloc((size_t)(c->nfields ? c->nfields : 1),
                              sizeof *f->meminit);
         for (int i = 0; i < c->nfields; i++) {
@@ -976,6 +1084,28 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
     return NULL;
 }
 
+/* A base subobject's initialization: as a mem-initializer r says, else
+ * by default; built by its base-object constructor. */
+static struct cexpr *base_init(struct cclass *bc, struct meminit_raw *r,
+                               const struct ctok *at)
+{
+    struct cexpr *e;
+    int saved = building_base;
+    building_base = 1;
+    if (!r)
+        e = construct(bc, INIT_DEFAULT, NULL, 0, at);
+    else if (r->braced)
+        e = construct(bc, INIT_LIST, r->args, 1, r->at);
+    else if (r->na == 0)
+        e = construct(bc, INIT_VALUE, NULL, 0, r->at);
+    else
+        e = construct(bc, INIT_DIRECT, r->args, r->na, r->at);
+    building_base = saved;
+    if (e && e->k == E_CONSTRUCT)
+        e->baseobj = 1;
+    return e;
+}
+
 void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
 {
     struct cclass *c = f->cls;
@@ -995,6 +1125,8 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
                                       sizeof *by);
     struct meminit_raw **bby = xcalloc((size_t)(c->nbases ? c->nbases : 1),
                                        sizeof *bby);
+    struct meminit_raw **vby = xcalloc((size_t)(c->nvbases ? c->nvbases : 1),
+                                       sizeof *vby);
     for (int i = 0; i < n; i++) {
         if (mi[i].cls ? mi[i].cls == c
                       : c->name && strcmp(mi[i].name, c->name) == 0)
@@ -1002,13 +1134,31 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
                                "nothing else");
         int b;
         for (b = 0; b < c->nbases; b++)
-            if (mi[i].cls ? c->bases[b].cls == mi[i].cls
-                          : c->bases[b].cls->name &&
-                            strcmp(c->bases[b].cls->name, mi[i].name) == 0)
+            if (!c->bases[b].is_virtual &&
+                (mi[i].cls ? c->bases[b].cls == mi[i].cls
+                           : c->bases[b].cls->name &&
+                             strcmp(c->bases[b].cls->name, mi[i].name) == 0))
                 break;
+        int v = c->nvbases;
+        if (b == c->nbases)
+            for (v = 0; v < c->nvbases; v++)
+                if (mi[i].cls ? c->vbases[v].cls == mi[i].cls
+                              : c->vbases[v].cls->name &&
+                                strcmp(c->vbases[v].cls->name,
+                                       mi[i].name) == 0)
+                    break;
+        if (v < c->nvbases) {
+            /* a virtual base, direct or not: the most derived class's */
+            if (vby[v])
+                cx_error(mi[i].at, "base '%s' is initialized twice",
+                         mi[i].name);
+            vby[v] = &mi[i];
+            continue;
+        }
         if (mi[i].cls && b == c->nbases)
-            cx_error(mi[i].at, "'%s' is not a direct base of '%s'",
-                     mi[i].name, c->name ? c->name : "class");
+            cx_error(mi[i].at, "'%s' is not a direct or virtual base of "
+                               "'%s'", mi[i].name,
+                     c->name ? c->name : "class");
         if (b < c->nbases) {
             if (bby[b])
                 cx_error(mi[i].at, "base '%s' is initialized twice",
@@ -1031,24 +1181,15 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
     /* the bases, in declaration order: as written, else by default */
     f->baseinit = xcalloc((size_t)(c->nbases ? c->nbases : 1),
                           sizeof *f->baseinit);
-    building_base = 1;
     for (int b = 0; b < c->nbases; b++) {
-        struct cclass *bc = c->bases[b].cls;
-        struct meminit_raw *r = bby[b];
-        struct cexpr *e;
-        if (!r)
-            e = construct(bc, INIT_DEFAULT, NULL, 0, at);
-        else if (r->braced)
-            e = construct(bc, INIT_LIST, r->args, 1, r->at);
-        else if (r->na == 0)
-            e = construct(bc, INIT_VALUE, NULL, 0, r->at);
-        else
-            e = construct(bc, INIT_DIRECT, r->args, r->na, r->at);
-        if (e && e->k == E_CONSTRUCT)
-            e->baseobj = 1;
-        f->baseinit[b] = e;
+        if (c->bases[b].is_virtual)
+            continue;                    /* built by the complete object */
+        f->baseinit[b] = base_init(c->bases[b].cls, bby[b], at);
     }
-    building_base = 0;
+    f->vbaseinit = xcalloc((size_t)(c->nvbases ? c->nvbases : 1),
+                           sizeof *f->vbaseinit);
+    for (int v = 0; v < c->nvbases; v++)
+        f->vbaseinit[v] = base_init(c->vbases[v].cls, vby[v], at);
     f->meminit = xcalloc((size_t)(c->nfields ? c->nfields : 1),
                          sizeof *f->meminit);
     for (int i = 0; i < c->nfields; i++) {
