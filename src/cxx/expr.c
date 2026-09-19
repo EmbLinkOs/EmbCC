@@ -3383,6 +3383,8 @@ static struct cty *type_info_type(const struct ctok *at)
 static struct cexpr *dynamic_cast_to(struct cty *t, struct cexpr *e,
                                      const struct ctok *at)
 {
+    if (!cx_rtti)
+        cx_error(at, "dynamic_cast with -fno-rtti");
     int ref = ct_is_ref(t);
     struct cty *tt = ref ? t->to : ct_unqual(t)->k == CT_PTR ? t->to : NULL;
     if (!tt || (tt->k != CT_CLASS && !(tt->k == CT_VOID && !ref)))
@@ -4848,6 +4850,8 @@ static struct cexpr *parse_primary(void)
         int is_type = paren_type_id();
         cx_advance();
         struct cty *ti = type_info_type(at);
+        if (!cx_rtti)
+            cx_error(at, "typeid with -fno-rtti");
         struct cexpr *e = ex_new(E_TYPEID, ct_qual(ti, CQ_CONST), VC_LVALUE);
         if (is_type) {
             e->alloc_t = ct_unqual(ct_strip_ref(parse_type_id()));

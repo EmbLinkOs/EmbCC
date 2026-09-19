@@ -155,6 +155,7 @@ static int want_unwind = -1;
 
 /* C++ exceptions (-fno-exceptions turns them off, as g++'s). */
 static int want_exceptions = 1;
+static int want_rtti = 1;
 
 /* --emit-c: print the C a C++ unit lowers to, instead of compiling it. */
 static int emit_c_only;
@@ -173,6 +174,7 @@ static int compile(const char *in, const char *out, int pp_only)
     }
     if (lang_cxx) {
         cxx_set_exceptions(want_exceptions);
+        cxx_set_rtti(want_rtti);
         pp = cxx_translate(in, pp);
         if (emit_c_only) {
             if (out) {
@@ -793,11 +795,10 @@ int main(int argc, char **argv)
                             "stack protection); -fno-stack-protector is\n",
                     argv[i]);
             return 1;
-        } else if (strcmp(argv[i], "-fno-rtti") == 0 ||
-                   strcmp(argv[i], "-frtti") == 0) {
-            /* accepted; EmbCC always emits RTTI, so typeid and
-             * dynamic_cast keep working (g++ refuses them under
-             * -fno-rtti) — the objects link with either */
+        } else if (strcmp(argv[i], "-fno-rtti") == 0) {
+            want_rtti = 0;
+        } else if (strcmp(argv[i], "-frtti") == 0) {
+            want_rtti = 1;
         } else if (argv[i][0] == '-' && argv[i][1] == 'W') {
             /* warning options: EmbCC has one level, and its diagnostics
              * are errors, so these say nothing to it */

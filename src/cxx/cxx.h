@@ -581,6 +581,10 @@ extern int cx_pattern;         /* reading a pattern: dependent types allowed */
 extern int cx_unevaluated;     /* inside decltype, sizeof, noexcept or a
                                 * requires-expression: calls need no body */
 extern int cx_exceptions;      /* exceptions on (the default; -fno-exceptions) */
+extern int cx_rtti;            /* RTTI on (the default; -fno-rtti): without
+                                * it a vtable's typeinfo slot is null, no
+                                * typeinfo object is written, and typeid
+                                * and dynamic_cast are refused — as g++ */
 extern int cx_in_targs;        /* inside < > of template arguments */
 /* SFINAE: while set, an error unwinds to it instead of ending the run. */
 extern void *cx_sfinae;

@@ -5,10 +5,16 @@
 #include "translate.h"
 
 int cx_exceptions = 1;
+int cx_rtti = 1;
 
 void cxx_set_exceptions(int on)
 {
     cx_exceptions = on;
+}
+
+void cxx_set_rtti(int on)
+{
+    cx_rtti = on;
 }
 
 char *cxx_translate(const char *file, const char *src)

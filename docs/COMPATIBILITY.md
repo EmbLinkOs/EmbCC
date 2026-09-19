@@ -47,6 +47,7 @@ took target-specific work, or that a reader might doubt.
 | Builtins: bit family, `expect`, `frame_address`/`return_address`, `constant_p`, `unreachable`, ... | ✓ | ✓ |
 | Extended inline asm | ✓ AT&T, the x86 kernel's vocabulary; constraints `a b c d S D r m i x +` | ✓ GNU A64, the ARM kernel's 67 templates; constraints `r =r +r i`, register variables |
 | File-scope `__asm__` | ✓ (crt0's vocabulary) | ✗ |
+| gcc flags accepted: `-W...` (one warning level), `-fno-stack-protector` (what EmbCC does; `-fstack-protector` refused), `-fno-rtti`/`-frtti`, `-fno-exceptions` | ✓ | ✓ |
 | Preprocessor (full, incl. `#include_next`), newlib headers | ✓ | ✓ |
 
 ## C++
@@ -71,7 +72,7 @@ targets, so EmbCC's C++ objects link with g++'s and with libstdc++.
 | **CX6** the modern core: `auto`, `decltype`, lambdas (generic, captures, `mutable`), `constexpr` evaluation (an interpreter: loops, recursion, classes, virtual calls, bit-fields), range-`for`, `initializer_list`, `enum class`, structured bindings, `if constexpr` | ✓ | ✓ |
 | **CX7** C++20: concepts and `requires`, `<=>`, `consteval` (immediate functions) and `constinit`, designated initializers, coroutines, abbreviated function templates | ✓ | ✓ |
 | **CX8** libstdc++ compiled by EmbCC: its headers, then all 193 objects of its sources (`make test-libstdcxx`), and the OS's cxxdemo with `<iostream>` running on EmbLinkOS | ✓ | ✓ (the library; the OS is x86 today) |
-| **CX9** C++ on EmbLinkOS: embcc compiling C++ on the metal | in progress | — |
+| **CX9** C++ on EmbLinkOS: embcc compiling C++ on the metal (the kernel's `test embcc cxx`: embcc.elf compiles, embld.elf links, it runs) | ✓ | — (the OS is x86 today) |
 
     embcc -c prog.cc -o prog.o          # .cc .cpp .cxx .C .c++, or -x c++
     embcc --emit-c prog.cc              # the C it lowers to

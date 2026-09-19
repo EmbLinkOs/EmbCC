@@ -61,8 +61,11 @@ done
 # (TARGET_ABI §4a) — crt0.o provides _start, no interpreter, no crtX.
 ELF="$MYOS/build/embld.elf"
 echo "$CROSS-gcc -nostartfiles -static -T newlib.ld crt0.o syscalls.o <objs> -lc -lgcc -o embld.elf"
+# -L the script's own directory too: newlib.ld INCLUDEs newlib-body.ld, and
+# ld searches the current directory and the -L paths for it, never the
+# including script's directory.
 "$CROSS-gcc" -nostartfiles -static -T "$LDSCRIPT" \
-    -L"$NEWLIB/$CROSS/lib" \
+    -L"$MYOS/user/lib" -L"$NEWLIB/$CROSS/lib" \
     "$CRT0" "$SYSCALLS" $OBJS -lc -lgcc -o "$ELF"
 
 # Independent shape check with a tool that has no stake in EmbCC being right.

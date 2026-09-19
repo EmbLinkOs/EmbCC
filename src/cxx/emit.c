@@ -3869,6 +3869,8 @@ static const char *ptr_typeinfo(struct cty *t)
 
 static void need_rtti(struct cclass *c)
 {
+    if (!cx_rtti)
+        return;
     if (c->rtti_used)
         return;
     c->rtti_used = 1;
@@ -3993,8 +3995,11 @@ static void emit_group(struct sb *b, const char *st, const char *sym,
             sb_printf(b, "%s (void *)%ldL", sep, v->pre[k]);
             sep = ",";
         }
-        sb_printf(b, "%s (void *)%ldL, (void *)%s", sep, v->ott,
-                  typeinfo_sym(ct_class(v->rtti)));
+        if (cx_rtti)
+            sb_printf(b, "%s (void *)%ldL, (void *)%s", sep, v->ott,
+                      typeinfo_sym(ct_class(v->rtti)));
+        else
+            sb_printf(b, "%s (void *)%ldL, (void *)0", sep, v->ott);
         sep = ",";
         for (int k = 0; k < v->nfns; k++) {
             struct vfn *e = &v->fns[k];
@@ -4030,7 +4035,7 @@ static const char *ctor_group_sym(struct cclass *c, struct ctorgrp *cg)
 static void emit_vtable(struct cclass *c)
 {
     c->vtable_done = 1;
-    need_rtti(c);
+    need_rtti(c);        /* (-fno-rtti: none, and the slot is null) */
     const char *tv = class_sym(c, "_ZTV"), *tt = class_sym(c, "_ZTT");
     int home = rtti_home(c);
     if (home == 0) {

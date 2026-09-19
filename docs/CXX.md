@@ -28,7 +28,7 @@ targets, and must agree; cross-ABI tests link an EmbCC half with a g++ half.
 | **CX6** | the modern core: `auto`, `decltype`, lambdas, `constexpr` evaluation, range-`for`, `initializer_list`, `enum class`, structured bindings, `if constexpr` | |
 | **CX7** | C++20: concepts and `requires`, `<=>`, `consteval`/`constinit`, designated initializers, coroutines | |
 | **CX8** | libstdc++: its headers, then its sources, compiled by EmbCC | **done** — 193/193 objects on both targets (`make test-libstdcxx`), and the OS's cxxdemo, with `<iostream>`, running on EmbLinkOS |
-| **CX9** | C++ on EmbLinkOS: embcc compiling C++ on the metal, over newlib and emlibc | on-OS tests |
+| **CX9** | C++ on EmbLinkOS: embcc compiling C++ on the metal, over newlib and emlibc | **done** — the kernel's `test embcc cxx`: embcc.elf compiles C++ on the OS, embld.elf links it, it runs |
 
 ## Using it
 
@@ -659,8 +659,8 @@ libstdc++ header now compiles except `<coroutine>` (since: below).
 The OS's `user/tests/cxxdemo/cxxdemo.cc` (global constructors, new/delete,
 templates, local statics, destructors at exit, `<string>`, `<vector>`,
 `<iostream>`) compiles with EmbCC for both targets under the OS's flags
-and links against its crt0/syscalls and libstdc++ (CX8's proof; running it
-waits for the OS image, CX9).
+and links against its crt0/syscalls and libstdc++ (CX8's proof; it now
+runs on the OS too — below).
 
 **Coroutines** (CX7's last core feature; `__cpp_impl_coroutine`, so
 `<coroutine>` compiles — every libstdc++ header now does): `co_await`,
@@ -991,6 +991,26 @@ passes: `-W...` (it has one warning level, and its diagnostics are
 errors), `-fno-stack-protector` (what it does; `-fstack-protector` is
 refused rather than ignored), `-fno-rtti`/`-frtti` (accepted; EmbCC
 always emits RTTI, so typeid and dynamic_cast keep working).
+
+**C++ compiled ON EmbLinkOS (CX9).** The toolchain that does it is
+EmbCC's own and runs on the metal: embcc.elf — EmbCC's output, EmbLD-linked
+(docs/SELFHOST_ONOS.md) — compiles a C++ program the kernel writes to
+/data/tmp, embld.elf links it against the sealed ABI (/system/abi:
+crt0.o, syscalls.o, libc.a), and the kernel runs it and reads its exit
+code: the OS's own `test embcc cxx` oracle. No host compiler, no tcc, no
+gcc in that loop. The program is self-contained C++ — it defines
+operator new/delete, a local static's guard and __cxa_pure_virtual — so
+nothing but the C ABI need be on the image: what is judged is the
+compiler, not a C++ library. It uses a global constructor, virtual
+dispatch through a base, templates over two types, new/delete and
+new[]/delete[], a guarded function-local static and recursion, and exits
+42. tests/golden/x86_64/emblinkos-cxx-onos.sh, opt-in (EMBCC_OS_CXX=1).
+
+That needs `-fno-rtti` to mean it, and it now does, as g++ does: no
+typeinfo object is written, a vtable's typeinfo slot is null, and typeid
+and dynamic_cast are refused — which is what lets freestanding C++ link
+against the C ABI alone, with no libsupc++ for __class_type_info's
+vtables. tests/golden/cxx-no-rtti.sh (g++ agrees, both targets).
 
 **The suites wholly on EmbCC's library.** `make test-libstdcxx`
 (tests/golden/cxx-libstdcxx-embcc.sh, opt-in: the library takes minutes
