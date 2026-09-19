@@ -635,6 +635,7 @@ struct cfunc {
                                * each specialization wrapped when chosen) */
     int local_inst;           /* an instance for a class with no linkage:
                                * internal, named as a local class's are */
+    struct ccoro *coro;       /* a coroutine: its promise and the rest */
     struct cstmt *fn_try;     /* a function-try-block: its handlers (S_TRY;
                                * its body is the function's) */
     struct cscope *def_scope; /* where a delayed body is parsed */
@@ -830,8 +831,14 @@ enum cexpr_kind {
                    * a member function's this adjustment) */
     E_THROW,      /* throw a[0] (na 0: rethrow); alloc_t the exception
                    * object's type, a[0] its initialization */
-    E_EXCOBJ      /* in a handler: the caught object (an lvalue of type t);
+    E_EXCOBJ,     /* in a handler: the caught object (an lvalue of type t);
                    * is_array: a caught pointer's value */
+    E_COAWAIT     /* co_await: the awaiter var (initialized by a[0]: its
+                   * ctor, or the pointer a reference one stores), then
+                   * a[1] await_ready(), a[2] await_suspend(handle) — ival
+                   * what it returns: 0 void, 1 bool, 2 a handle (a[2] its
+                   * address) — and the value a[3], await_resume(); coro
+                   * 1 the initial suspend, 2 the final */
 };
 
 enum { VC_PRVALUE, VC_LVALUE, VC_XVALUE };
@@ -885,6 +892,7 @@ struct cexpr {
     int ntargs;
     int has_targs;
     struct cfunc *dtor;       /* E_DELETE: the destructor to run first */
+    int coro;                 /* E_COAWAIT: 1 initial, 2 final suspend */
     int line;
     const char *file;
 };
@@ -986,6 +994,13 @@ struct cexpr *expr_call_named_targs(struct cexpr *obj, const char *name,
 struct cexpr *expr_call_named(struct cexpr *obj, const char *name,
                               struct cexpr **args, int na,
                               const struct ctok *at);
+/* C::name(args), a static member function */
+struct cexpr *expr_call_static(struct cclass *c, const char *name,
+                               struct cexpr **args, int na,
+                               const struct ctok *at);
+/* The overloaded operator `name` (member or not) for args, or NULL. */
+struct cexpr *expr_operator_call(const char *name, struct cexpr **args,
+                                 int na, const struct ctok *at);
 /* A reference of type `rt` (a CT_LREF/CT_RREF) bound to e: returns the
  * pointer-valued expression to store (e's address, or a temp's). */
 struct cexpr *bind_ref(struct cexpr *e, struct cty *rt, const char *ctx);
@@ -1129,7 +1144,7 @@ int expr_call_args_rest(struct cexpr ***out);   /* after `(` */
 enum cstmt_kind {
     S_EXPR, S_DECL, S_BLOCK, S_IF, S_WHILE, S_DO, S_FOR, S_SWITCH, S_CASE,
     S_DEFAULT, S_BREAK, S_CONTINUE, S_RETURN, S_GOTO, S_LABEL, S_NULL,
-    S_ASM, S_TRY
+    S_ASM, S_TRY, S_CORETURN
 };
 
 /* A catch clause: the type it catches (NULL: catch (...)), as written —
@@ -1167,6 +1182,43 @@ struct cstmt {
 };
 
 struct cstmt *st_new(enum cstmt_kind k);
+
+/* ---- coroutines (coro.c) ---- */
+
+/* A coroutine's parts, for emit.c's lowering: the frame (C struct
+ * `frame`) begins with the resume and destroy functions' addresses — where
+ * std::coroutine_handle finds them — then the promise, then what the body
+ * keeps across a suspension (the parameters' copies, `this`, locals,
+ * awaiters, temporaries). */
+struct ccoro {
+    const char *frame;        /* the frame's struct tag */
+    struct cty *promise_t;
+    struct cvar *promise;     /* the frame's promise */
+    struct cvar *fp;          /* the frame's address, a void * */
+    struct cexpr **pcopy;     /* a parameter's copy moved from it (a class
+                               * not trivially copyable), or NULL: copied
+                               * as C copies */
+    struct cexpr *promise_init;
+    struct cexpr *get_ro;     /* the return object, from get_return_object */
+    struct cexpr *init_susp;  /* co_await promise.initial_suspend() */
+    struct cexpr *final_susp; /* co_await promise.final_suspend() */
+    struct cexpr *unhandled;  /* promise.unhandled_exception() (or NULL:
+                               * -fno-exceptions) */
+    struct cexpr *ret_void;   /* promise.return_void(), or NULL */
+    struct cexpr *alloc;      /* operator new(the frame's size) */
+    struct cexpr *alloc_fail; /* the return object when that gives null
+                               * (get_return_object_on_allocation_failure),
+                               * or NULL: it throws instead */
+    struct cexpr *dealloc;    /* operator delete(the frame[, size]) */
+};
+/* The function being parsed made a coroutine (once): its parts. */
+struct ccoro *coro_of(const struct ctok *at);
+/* co_await e (kind 0); the await of co_yield's yield_value (1), of the
+ * initial (2) and final (3) suspend */
+struct cexpr *coro_await(struct cexpr *e, int kind, const struct ctok *at);
+struct cexpr *coro_yield(struct cexpr *e, const struct ctok *at);
+/* co_return's promise call (e NULL: none; braced: a braced list) */
+struct cexpr *coro_return(struct cexpr *e, int braced, const struct ctok *at);
 
 /* ---- lambdas (parse.c) ---- */
 
@@ -1239,6 +1291,9 @@ void cx_skip_peek(int n);
 const char *parse_operator_name(struct cty **conv);
 int at_type_start(void);                   /* a type can begin here */
 struct cstmt *parse_compound(void);        /* { ... } with its scope */
+/* A local variable of the function being parsed (not in any scope). */
+struct cvar *cx_new_local(const char *name, struct cty *t,
+                          const struct ctok *at);
 /* The function being defined (for `this`, return type, labels). */
 extern struct cfunc *cx_curfn;
 extern struct cstmt *cx_curblk;            /* the innermost block */

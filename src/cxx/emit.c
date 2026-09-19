@@ -486,7 +486,30 @@ struct fx {
     char **clean;             /* their destruction, in construction order */
     int nclean, capclean;
     int cond;                 /* inside a conditionally evaluated operand */
+    int coro;                 /* in a coroutine, with a suspension: its
+                               * temporaries in the frame (decls resets
+                               * their flags) */
+    struct sb pre;            /* ... and its suspensions, run first */
+    struct fx *prev;          /* the enclosing full-expression's */
 };
+
+/* The coroutine whose body is being emitted (emit_coroutine): the
+ * members its frame has besides the promise — each `__cx_fr->name` —
+ * and its suspend points. */
+struct coro_emit {
+    struct sb fields;
+    int nsusp;                /* 1 is the final suspend's; the rest from 2 */
+};
+static struct coro_emit *coro;
+
+/* A new member of the frame, of type t: its lvalue. */
+static char *coro_field(struct cty *t, const char *base, long align)
+{
+    char *m = cx_fmt("%s_%d", base, cx_uid());
+    sb_printf(&coro->fields, "%s%s;\n", cdecl(t, m),
+              align ? cx_fmt(" __attribute__((aligned(%ld)))", align) : "");
+    return cx_fmt("__cx_fr->%s", m);
+}
 
 static struct fx *fx;
 static int ntemps;
@@ -548,13 +571,25 @@ static char *materialize(struct cty *t, struct cexpr *init)
 {
     t = ct_unqual(t);
     int num = ++ntemps;               /* (einit below may make more) */
-    char *name = cx_fmt("__cx_t%d", num);
-    sb_printf(&fx->decls, "%s; ", cdecl(t, name));
+    char *name;
+    if (fx->coro) {
+        name = coro_field(t, "__t", 0);   /* alive across a suspension */
+    } else {
+        name = cx_fmt("__cx_t%d", num);
+        sb_printf(&fx->decls, "%s; ", cdecl(t, name));
+    }
     struct sb s = { 0, 0, 0 };
     einit(&s, name, t, init);
     char *d = destroy_text(cx_fmt("&%s", name), t);
     if (d) {
-        if (fx->cond || eh_on) {   /* a throw may come before it is made */
+        /* a throw may come before it is made; a coroutine destroyed
+         * where it is suspended destroys only those made */
+        if (fx->coro) {
+            char *flag = coro_field(ct_basic(CT_BOOL), "__f", 0);
+            sb_printf(&fx->decls, "%s = 0; ", flag);
+            sb_printf(&s, "%s = 1; ", flag);
+            fx_clean(cx_fmt("if (%s) %s", flag, d));
+        } else if (fx->cond || eh_on) {
             char *flag = cx_fmt("__cx_f%d", num);
             sb_printf(&fx->decls, "_Bool %s = 0; ", flag);
             sb_printf(&s, "%s = 1; ", flag);
@@ -569,6 +604,7 @@ static char *materialize(struct cty *t, struct cexpr *init)
 static void fx_begin(struct fx *f, struct fx **save)
 {
     memset(f, 0, sizeof *f);
+    f->prev = fx;
     *save = fx;
     fx = f;
 }
@@ -1115,7 +1151,28 @@ static char *ev(struct cexpr *e)
                           u, u, e->ival);
         }
         return elv(e);
+    case E_COAWAIT:
+        cx_error(NULL, "%s:%d: co_await here is not supported yet",
+                 e->file ? e->file : "?", e->line);
+        return NULL;
     case E_BUILTIN: {
+        if (strncmp(e->name, "__builtin_coro_", 15) == 0) {
+            /* through the frame: its resume and destroy functions' addresses
+             * first (resume null once at the final suspend), then the
+             * promise, as aligned */
+            const char *n = e->name + 15;
+            char *p = ev(e->a[0]);
+            if (strcmp(n, "done") == 0)
+                return cx_fmt("(*(void **)(%s) == 0)", p);
+            if (strcmp(n, "resume") == 0 || strcmp(n, "destroy") == 0)
+                return cx_fmt("({ void *__cx_q = %s; (((void (**)(void *))"
+                              "__cx_q)[%d])(__cx_q); })", p,
+                              n[0] == 'd');
+            return cx_fmt("({ long __cx_al = %s; long __cx_o = (16 + __cx_al "
+                          "- 1) & -__cx_al; (void *)((char *)(%s) + (%s ? "
+                          "-__cx_o : __cx_o)); })", ev(e->a[1]), p,
+                          ev(e->a[2]));
+        }
         if (strcmp(e->name, "__cx_complex") == 0) {
             /* a complex from its two parts */
             int u = cx_uid();
@@ -1712,6 +1769,7 @@ struct clean {
 static struct clean *cleans;
 static int ncleans, capcleans;
 static int brk_mark[256], cont_mark[256];
+static int cont_lab[256];     /* continue: goto __cx_c<n> (0: continue) */
 static int nbrk, ncont;
 static int line_now;
 static const char *file_now;
@@ -1749,6 +1807,186 @@ static void close_cleans(struct sb *b, int mark)
             sb_printf(b, "%s\n", cleans[i].text);
     }
     ncleans = mark;
+}
+
+/* ---- coroutines: suspensions inside full-expressions ---- */
+
+/* Has e a co_await to run (not inside a statement expression's own
+ * statements)? */
+static int has_await(struct cexpr *e)
+{
+    if (!e || e->k == E_STMTEXPR)
+        return 0;
+    if (e->k == E_COAWAIT)
+        return 1;
+    for (int i = 0; i < e->na; i++)
+        if (e->a && has_await(e->a[i]))
+            return 1;
+    if (e->k == E_NEW && (has_await(e->count) || has_await(e->init)))
+        return 1;
+    if (e->binit && e->t && e->t->k == CT_CLASS)
+        for (int i = 0; i < e->t->cls->nbases; i++)
+            if (has_await(e->binit[i]))
+                return 1;
+    return 0;
+}
+
+/* A suspend point, co_await e: into the full-expression's statements
+ * before its value (fx->pre), the awaiter made in the frame, then unless
+ * it is ready: suspended — the point's number stored, await_suspend
+ * called, and the body returns (or, told by a false or given another
+ * coroutine to resume, goes on or resumes that) — and at the point's
+ * label resumed, or destroyed: the objects alive there destroyed, then
+ * the frame. */
+static void coro_suspend(struct cexpr *e)
+{
+    struct sb *p = &fx->pre;
+    struct cvar *v = e->var;
+    int n = e->coro == 2 ? 1 : ++coro->nsusp;
+    v->cname = coro_field(v->type, "__aw", 0);
+    if (ct_is_ref(v->type)) {
+        sb_printf(p, "%s = %s;\n", v->cname, ev(e->a[0]));
+    } else {
+        struct sb s = { 0, 0, 0 };
+        einit(&s, v->cname, v->type, e->a[0]);
+        sb_printf(p, "%s\n", sb_str(&s));
+        char *d = destroy_text(cx_fmt("&%s", v->cname), v->type);
+        if (d) {
+            char *flag = coro_field(ct_basic(CT_BOOL), "__f", 0);
+            sb_printf(&fx->decls, "%s = 0; ", flag);
+            sb_printf(p, "%s = 1;\n", flag);
+            fx_clean(cx_fmt("if (%s) %s", flag, d));
+        }
+    }
+    sb_printf(p, "if (!(%s)) {\n__cx_fr->__i = %d;\n", ev(e->a[1]), n);
+    if (e->coro == 2)
+        sb_put(p, "__cx_fr->__r = 0;\n");     /* done() from now on */
+    if (e->ival == 0)
+        sb_printf(p, "%s;\nreturn;\n", ev(e->a[2]));
+    else if (e->ival == 1)
+        sb_printf(p, "if (%s)\nreturn;\n", ev(e->a[2]));
+    else
+        sb_printf(p, "{\nvoid *__cx_h = %s;\n(*(void (**)(void *))__cx_h)"
+                     "(__cx_h);\nreturn;\n}\n", ev(e->a[2]));
+    sb_printf(p, "__cx_s%d:;\nif (__cx_destroying) {\n", n);
+    for (struct fx *x = fx; x; x = x->prev)
+        if (x->coro)
+            for (int i = x->nclean - 1; i >= 0; i--)
+                sb_printf(p, "%s\n", x->clean[i]);
+    run_cleans(p, 0);
+    sb_put(p, "goto __cx_destroy;\n}\n}\n");
+    if (e->coro == 1)       /* an exception now is the promise's to handle */
+        sb_put(p, "__cx_fr->__started = 1;\n");
+}
+
+/* e's co_awaits, innermost and leftmost first, run up to their
+ * suspensions, each left as its value: await_resume(). Those in an
+ * operand evaluated only on a condition (?:, &&, ||) run only then: the
+ * condition evaluated first, into the frame, and the expression then
+ * tests that. */
+static void hoist_awaits(struct cexpr *e)
+{
+    if (!e || e->k == E_STMTEXPR)
+        return;
+    if (e->k == E_COAWAIT) {
+        hoist_awaits(e->a[0]);
+        coro_suspend(e);
+        *e = *e->a[3];
+        return;
+    }
+    int logic = e->k == E_BINARY && (e->op == TOK_ANDAND ||
+                                     e->op == TOK_OROR);
+    if ((e->k == E_COND || logic) &&
+        (has_await(e->a[1]) || (e->k == E_COND && has_await(e->a[2])))) {
+        hoist_awaits(e->a[0]);
+        char *flag = coro_field(ct_basic(CT_BOOL), "__c", 0);
+        sb_printf(&fx->pre, "%s = %s;\nif (%s%s) {\n", flag, ev(e->a[0]),
+                  logic && e->op == TOK_OROR ? "!" : "", flag);
+        hoist_awaits(e->a[1]);
+        if (e->k == E_COND) {
+            sb_put(&fx->pre, "} else {\n");
+            hoist_awaits(e->a[2]);
+        }
+        sb_put(&fx->pre, "}\n");
+        struct cvar *fv = xcalloc(1, sizeof *fv);
+        fv->name = fv->cname = flag;
+        fv->type = ct_basic(CT_BOOL);
+        fv->is_local = 1;
+        struct cexpr *x = xcalloc(1, sizeof *x);
+        x->k = E_VAR;
+        x->t = fv->type;
+        x->vc = VC_PRVALUE;
+        x->var = fv;
+        e->a[0] = x;
+        return;
+    }
+    if (e->k == E_NEW) {
+        hoist_awaits(e->count);
+        hoist_awaits(e->init);
+    }
+    if (e->binit && e->t && e->t->k == CT_CLASS)
+        for (int i = 0; i < e->t->cls->nbases; i++)
+            hoist_awaits(e->binit[i]);
+    for (int i = 0; i < e->na; i++)
+        if (e->a)
+            hoist_awaits(e->a[i]);
+}
+
+/* In a coroutine, full-expression e with a co_await, as statements: its
+ * temporaries (and awaiters) in the frame, alive across its suspension
+ * points, which run first; then its value stored to dest (of type t),
+ * or discarded (dest NULL). */
+static void coro_full(struct sb *b, struct cexpr *e, const char *dest,
+                      struct cty *t)
+{
+    struct fx f, *save;
+    fx_begin(&f, &save);
+    f.coro = 1;
+    hoist_awaits(e);
+    struct sb s = { 0, 0, 0 };
+    if (dest)
+        einit(&s, dest, t, e);
+    else
+        sb_printf(&s, "(void)%s;", ev(e));
+    fx_end(save);
+    char *clean = fx_cleanup(&f);
+    sb_printf(b, "{\n%s\n", sb_str(&f.decls));
+    int lp = eh_on && f.nclean ? eh_open(b) : -1;
+    sb_printf(b, "%s%s\n", sb_str(&f.pre), sb_str(&s));
+    if (lp >= 0)
+        eh_close(b, lp, clean);
+    sb_printf(b, "%s}\n", clean);
+}
+
+/* A condition's value: in a coroutine, one with a co_await computed
+ * first, into a C variable. */
+static char *cond_text(struct sb *b, struct cexpr *e)
+{
+    if (!coro || !has_await(e))
+        return full_value(e);
+    char *name = cx_fmt("__cx_v%d", cx_uid());
+    struct cty *t = ct_unqual(ct_decay(e->t));
+    sb_printf(b, "%s;\n", cdecl(t, name));
+    coro_full(b, e, name, t);
+    return name;
+}
+
+/* A statement's full-expression: in a coroutine, one that suspends. */
+static void stmt_full(struct sb *b, struct cexpr *e)
+{
+    if (coro && has_await(e))
+        coro_full(b, e, NULL, NULL);
+    else
+        full_stmt(b, e);
+}
+
+static void coro_init(struct sb *b, const char *dest, struct cty *t,
+                      struct cexpr *init)
+{
+    if (has_await(init))
+        coro_full(b, init, dest, t);
+    else
+        stmt_init(b, dest, t, init);
 }
 
 static void line_marker(struct sb *b, int line, const char *file)
@@ -1855,6 +2093,56 @@ static int c_list_ok(struct cexpr *e)
            c_const(e);
 }
 
+/* A local of a coroutine: a member of its frame, made where it is
+ * declared. */
+static void coro_decl(struct sb *b, struct cstmt *s)
+{
+    struct cvar *v = s->var;
+    struct cty *t = v->type;
+    const char *base = v->name ? v->name : "__l";
+    if (ct_is_ref(t)) {
+        struct cexpr *p = v->init;
+        if (p && p->k == E_ADDR && p->a[0]->k == E_TEMP) {
+            /* a temporary bound to it lives as long */
+            struct cexpr *tmp = p->a[0];
+            struct cty *tt = ct_unqual(tmp->t);
+            char *name = coro_field(tt, "__e", 0);
+            coro_init(b, name, tt, tmp->a[0]);
+            char *d = destroy_text(cx_fmt("&%s", name), tt);
+            if (d)
+                push_clean(b, d, s->blk, 0);
+            v->cname = coro_field(t, base, 0);
+            sb_printf(b, "%s = &%s;\n", v->cname, name);
+            return;
+        }
+        v->cname = coro_field(t, base, 0);
+        if (p)
+            coro_init(b, v->cname, t, p);
+        return;
+    }
+    v->cname = coro_field(t, base, v->align_attr);
+    if (t->k == CT_CLASS || t->k == CT_ARRAY) {
+        struct cexpr *c = v->ctor;
+        if (c && (c->k == E_INITLIST || c->k == E_STR) && c_list_ok(c)) {
+            char *tmp = cx_fmt("__cx_l%d", cx_uid());
+            sb_printf(b, "{ %s = %s; __builtin_memcpy(&%s, &%s, sizeof %s); "
+                         "}\n", cdecl(t, tmp),
+                      c->k == E_STR ? str_lit(c) : cinit_text(t, c),
+                      v->cname, tmp, tmp);
+        } else if (c) {
+            coro_init(b, v->cname, t, c);
+        }
+        if (s->dtor) {
+            char *d = destroy_text(cx_fmt("&%s", v->cname), t);
+            if (d)
+                push_clean(b, d, s->blk, 0);
+        }
+        return;
+    }
+    if (v->init)
+        coro_init(b, v->cname, t, v->init);
+}
+
 static void emit_decl(struct sb *b, struct cstmt *s)
 {
     struct cvar *v = s->var;
@@ -1862,6 +2150,10 @@ static void emit_decl(struct sb *b, struct cstmt *s)
     line_marker(b, s->line, s->file);
     if (v->is_static) {
         emit_local_static(b, s);
+        return;
+    }
+    if (coro) {
+        coro_decl(b, s);
         return;
     }
     const char *al = v->align_attr ? cx_fmt(" __attribute__((aligned(%ld)))",
@@ -2018,7 +2310,7 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         sb_put(b, ";\n");
         return;
     case S_EXPR:
-        full_stmt(b, s->e);
+        stmt_full(b, s->e);
         return;
     case S_DECL:
         emit_decl(b, s);
@@ -2034,7 +2326,8 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
     case S_IF: {
         sb_put(b, "{\n");
         int mark = emit_inits(b, s->init);
-        sb_printf(b, "if (%s) ", full_value(s->e));
+        char *c = cond_text(b, s->e);
+        sb_printf(b, "if (%s) ", c);
         emit_stmt(b, s->body);
         if (s->els) {
             sb_put(b, "else ");
@@ -2045,14 +2338,16 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         return;
     }
     case S_WHILE:
-        if (s->init) {
+        if (s->init || (coro && has_await(s->e))) {
             /* the condition's variable is made anew each iteration */
             sb_put(b, "for (;;) {\n");
             int mark = emit_inits(b, s->init);
-            sb_printf(b, "if (!(%s)) { ", full_value(s->e));
+            char *c = cond_text(b, s->e);
+            sb_printf(b, "if (!(%s)) { ", c);
             run_cleans(b, mark);
             sb_put(b, "break; }\n");
             brk_mark[nbrk++] = mark;
+            cont_lab[ncont] = 0;
             cont_mark[ncont++] = mark;
             emit_stmt(b, s->body);
             nbrk--;
@@ -2063,14 +2358,31 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         }
         sb_printf(b, "while (%s) ", full_value(s->e));
         brk_mark[nbrk++] = ncleans;
+        cont_lab[ncont] = 0;
         cont_mark[ncont++] = ncleans;
         emit_stmt(b, s->body);
         nbrk--;
         ncont--;
         return;
     case S_DO:
+        if (coro && has_await(s->e)) {
+            /* the condition suspends: continue goes to it */
+            int u = cx_uid();
+            sb_put(b, "for (;;) {\n");
+            brk_mark[nbrk++] = ncleans;
+            cont_lab[ncont] = u;
+            cont_mark[ncont++] = ncleans;
+            emit_stmt(b, s->body);
+            nbrk--;
+            ncont--;
+            sb_printf(b, "__cx_c%d:;\n", u);
+            char *c = cond_text(b, s->e);
+            sb_printf(b, "if (!(%s))\nbreak;\n}\n", c);
+            return;
+        }
         sb_put(b, "do ");
         brk_mark[nbrk++] = ncleans;
+        cont_lab[ncont] = 0;
         cont_mark[ncont++] = ncleans;
         emit_stmt(b, s->body);
         nbrk--;
@@ -2080,9 +2392,32 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
     case S_FOR: {
         sb_put(b, "{\n");
         int mark = emit_inits(b, s->init);
+        if (coro && (has_await(s->e) || has_await(s->e2))) {
+            /* the condition or the step suspends: statements of a loop */
+            int u = cx_uid();
+            sb_put(b, "for (;;) {\n");
+            if (s->e) {
+                char *c = cond_text(b, s->e);
+                sb_printf(b, "if (!(%s))\nbreak;\n", c);
+            }
+            brk_mark[nbrk++] = ncleans;
+            cont_lab[ncont] = u;
+            cont_mark[ncont++] = ncleans;
+            emit_stmt(b, s->body);
+            nbrk--;
+            ncont--;
+            sb_printf(b, "__cx_c%d:;\n", u);
+            if (s->e2)
+                stmt_full(b, s->e2);
+            sb_put(b, "}\n");
+            close_cleans(b, mark);
+            sb_put(b, "}\n");
+            return;
+        }
         sb_printf(b, "for (; %s; %s) ", s->e ? full_value(s->e) : "",
                   s->e2 ? full_value(s->e2) : "");
         brk_mark[nbrk++] = ncleans;
+        cont_lab[ncont] = 0;
         cont_mark[ncont++] = ncleans;
         emit_stmt(b, s->body);
         nbrk--;
@@ -2094,7 +2429,8 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
     case S_SWITCH: {
         sb_put(b, "{\n");
         int mark = emit_inits(b, s->init);
-        sb_printf(b, "switch (%s) ", full_value(s->e));
+        char *c = cond_text(b, s->e);
+        sb_printf(b, "switch (%s) ", c);
         brk_mark[nbrk++] = ncleans;
         emit_stmt(b, s->body);
         nbrk--;
@@ -2131,9 +2467,22 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         sb_put(b, "{ ");
         if (ncont)
             run_cleans(b, cont_mark[ncont - 1]);
-        sb_put(b, "continue; }\n");
+        if (ncont && cont_lab[ncont - 1])
+            sb_printf(b, "goto __cx_c%d; }\n", cont_lab[ncont - 1]);
+        else
+            sb_put(b, "continue; }\n");
+        return;
+    case S_CORETURN:
+        /* the promise told; the locals destroyed; the final suspend */
+        sb_put(b, "{\n");
+        stmt_full(b, s->e);
+        run_cleans(b, 0);
+        sb_put(b, "goto __cx_final;\n}\n");
         return;
     case S_RETURN: {
+        if (coro)
+            cx_error(NULL, "%s:%d: a coroutine returns with co_return, not "
+                           "return", s->file ? s->file : "?", s->line);
         struct cty *rt = cur_fn->type->to;
         if (cur_fn->is_dtor || !s->e || rt->k == CT_VOID) {
             sb_put(b, "{ ");
@@ -2353,12 +2702,219 @@ static const char *vtt_arg(struct cfunc *f, int baseobj)
     return cx_fmt(", %s", cur_vtt_base);
 }
 
+/* A coroutine: its frame (struct co->frame: the resume and destroy
+ * functions' addresses, the promise, the point it is suspended at,
+ * whether it got past its initial suspend, then the parameters' copies,
+ * `this`, and what emitting the body put there); its body, one C
+ * function run to resume it (destroying 0) or to destroy it (1) — a
+ * switch on the suspend point to its label, 0 the start; and the ramp,
+ * the function itself: the frame allocated and filled, the promise made,
+ * the return object from it, then the body run to its first suspension.
+ */
+static void emit_coroutine(struct cfunc *f)
+{
+    struct ccoro *co = f->coro;
+    struct coro_emit ce;
+    memset(&ce, 0, sizeof ce);
+    ce.nsusp = 1;
+    cur_fn = f;
+    ncleans = 0;
+    nbrk = ncont = 0;
+    line_now = 0;
+    fn_eh = 0;
+    neh_lp = 0;
+    coro = &ce;
+    int u = cx_uid();
+    const char *fr = co->frame;
+    const char *body = cx_fmt("__cx_cb%d", u);
+    const char *res = cx_fmt("__cx_cr%d", u), *des = cx_fmt("__cx_cd%d", u);
+
+    /* the parameters: in the body (and for the promise), their copies */
+    int np = f->type->np;
+    const char **pname = xmalloc((size_t)(np ? np : 1) * sizeof *pname);
+    const char **pfield = xmalloc((size_t)(np ? np : 1) * sizeof *pfield);
+    int *pind = xmalloc((size_t)(np ? np : 1) * sizeof *pind);
+    for (int i = 0; i < np; i++) {
+        struct cvar *pv = f->params[i];
+        pname[i] = pv->cname;
+        pind[i] = pv->is_param;
+        pfield[i] = coro_field(ct_is_ref(pv->type) ? pv->type
+                                                   : ct_unqual(pv->type),
+                               "__a", 0);
+    }
+    struct cty *this_t = f->this_var ? f->this_var->type : NULL;
+    if (this_t)
+        sb_printf(&ce.fields, "%s;\n", cdecl(this_t, "__this"));
+
+    struct sb b = { 0, 0, 0 };
+    line_marker(&b, f->line, f->file);
+    sb_printf(&b, "static void %s(struct %s *__cx_fr, int __cx_destroying)\n"
+                  "{\n", body, fr);
+    int body_at = b.len;          /* where __cx_exc/__cx_sel go, if used */
+    if (this_t)
+        sb_printf(&b, "%s = __cx_fr->__this;\n", cdecl(this_t, "this"));
+    int disp_at = b.len;          /* where the switch goes */
+    for (int i = 0; i < np; i++) {
+        f->params[i]->cname = pfield[i];
+        f->params[i]->is_param = 0;     /* the copy is the object */
+    }
+    int try_lp = eh_on && co->unhandled ? eh_open(&b) : -1;
+    coro_full(&b, co->init_susp, NULL, NULL);
+    if (f->body)
+        emit_block_items(&b, f->body->body);
+    close_cleans(&b, 0);
+    if (co->ret_void)                     /* flowing off the end */
+        full_stmt(&b, co->ret_void);
+    sb_put(&b, "goto __cx_final;\n");
+    if (try_lp >= 0) {
+        /* catch (...): before the initial suspend's await_resume, to the
+         * caller; after it, to the promise — the coroutine at its final
+         * suspend point should that throw */
+        neh_lp--;
+        sb_printf(&b, "} __builtin_eh_landing (__cx_exc, __cx_sel, 0) {\n"
+                      "__cx_lp%d:;\n((void *(*)(void *))__cxa_begin_catch)"
+                      "(__cx_exc);\n", try_lp);
+        push_clean(&b, "((void (*)(void))__cxa_end_catch)();", NULL, 0);
+        sb_put(&b, "if (!__cx_fr->__started) {\n((void (*)(void))"
+                   "__cxa_rethrow)();\n__builtin_unreachable();\n}\n"
+                   "__cx_fr->__r = 0;\n__cx_fr->__i = 1;\n");
+        full_stmt(&b, co->unhandled);
+        close_cleans(&b, 0);
+        sb_put(&b, "}\n");
+    }
+    sb_put(&b, "__cx_final:;\n");
+    coro_full(&b, co->final_susp, NULL, NULL);
+    /* the end: the promise and the copies destroyed, the frame freed */
+    sb_put(&b, "__cx_destroy:;\n");
+    char *d = destroy_text("&__cx_fr->__p", co->promise_t);
+    if (d)
+        sb_printf(&b, "%s\n", d);
+    for (int i = np - 1; i >= 0; i--) {
+        struct cty *pt = f->params[i]->type;
+        d = ct_is_ref(pt) ? NULL : destroy_text(cx_fmt("&%s", pfield[i]),
+                                                 ct_unqual(pt));
+        if (d)
+            sb_printf(&b, "%s\n", d);
+    }
+    full_stmt(&b, co->dealloc);
+    sb_put(&b, "}\n");
+    {
+        struct sb nb = { 0, 0, 0 };
+        sb_printf(&nb, "%.*s", body_at, b.p);
+        if (fn_eh)
+            sb_put(&nb, "void *__cx_exc; long __cx_sel;\n");
+        sb_printf(&nb, "%.*s", disp_at - body_at, b.p + body_at);
+        sb_put(&nb, "switch (__cx_fr->__i) {\n");
+        for (int k = 1; k <= ce.nsusp; k++)
+            sb_printf(&nb, "case %d: goto __cx_s%d;\n", k, k);
+        sb_put(&nb, "}\n");
+        sb_put(&nb, b.p + disp_at);
+        b = nb;
+    }
+    sb_printf(&b, "static void %s(void *__cx_p)\n{\n%s((struct %s *)__cx_p, "
+                  "0);\n}\n", res, body, fr);
+    sb_printf(&b, "static void %s(void *__cx_p)\n{\n%s((struct %s *)__cx_p, "
+                  "1);\n}\n", des, body, fr);
+    coro = NULL;
+
+    /* the ramp */
+    for (int i = 0; i < np; i++) {
+        f->params[i]->cname = pname[i];
+        f->params[i]->is_param = pind[i];
+    }
+    ncleans = 0;
+    nbrk = ncont = 0;
+    fn_eh = 0;
+    neh_lp = 0;
+    struct sb r = { 0, 0, 0 };
+    sb_printf(&r, "%s%s\n{\n", fn_storage(f),
+              func_header(f, fn_name(f, 1), 1));
+    int ramp_at = r.len;
+    sb_printf(&r, "struct %s *__cx_fr = (struct %s *)%s;\n", fr, fr,
+              full_value(co->alloc));
+    struct cty *R = f->type->to;
+    if (co->alloc_fail) {
+        /* no memory: the promise type's return object for that */
+        sb_put(&r, "if (!__cx_fr) {\n");
+        if (R->k == CT_VOID) {
+            full_stmt(&r, co->alloc_fail);
+            sb_put(&r, "return;\n");
+        } else if (class_indirect(R)) {
+            stmt_init(&r, "(*__cx_sret)", ct_unqual(R), co->alloc_fail);
+            sb_put(&r, "return __cx_sret;\n");
+        } else if (ct_is_ref(R)) {
+            sb_printf(&r, "return %s;\n", full_value(co->alloc_fail));
+        } else {
+            sb_printf(&r, "%s;\n", cdecl(ct_unqual(R), "__cx_ret"));
+            stmt_init(&r, "__cx_ret", ct_unqual(R), co->alloc_fail);
+            sb_put(&r, "return __cx_ret;\n");
+        }
+        sb_put(&r, "}\n");
+    }
+    sb_printf(&r, "__builtin_memset(__cx_fr, 0, sizeof(struct %s));\n", fr);
+    sb_printf(&r, "__cx_fr->__r = %s;\n__cx_fr->__d = %s;\n", res, des);
+    if (this_t)
+        sb_put(&r, "__cx_fr->__this = this;\n");
+    for (int i = 0; i < np; i++) {
+        if (co->pcopy[i])
+            stmt_init(&r, pfield[i], ct_unqual(f->params[i]->type),
+                      co->pcopy[i]);
+        else
+            sb_printf(&r, "%s = %s;\n", pfield[i], pname[i]);
+    }
+    for (int i = 0; i < np; i++) {
+        f->params[i]->cname = pfield[i];
+        f->params[i]->is_param = 0;
+    }
+    if (co->promise_init)
+        stmt_init(&r, "__cx_fr->__p", co->promise_t, co->promise_init);
+    if (R->k == CT_VOID) {
+        full_stmt(&r, co->get_ro);
+        sb_printf(&r, "%s(__cx_fr);\nreturn;\n", res);
+    } else if (class_indirect(R)) {
+        stmt_init(&r, "(*__cx_sret)", ct_unqual(R), co->get_ro);
+        sb_printf(&r, "%s(__cx_fr);\nreturn __cx_sret;\n", res);
+    } else if (ct_is_ref(R)) {
+        sb_printf(&r, "%s = %s;\n", cdecl(R, "__cx_ret"),
+                  full_value(co->get_ro));
+        sb_printf(&r, "%s(__cx_fr);\nreturn __cx_ret;\n", res);
+    } else {
+        sb_printf(&r, "%s;\n", cdecl(ct_unqual(R), "__cx_ret"));
+        stmt_init(&r, "__cx_ret", ct_unqual(R), co->get_ro);
+        sb_printf(&r, "%s(__cx_fr);\nreturn __cx_ret;\n", res);
+    }
+    sb_put(&r, "}\n");
+    for (int i = 0; i < np; i++) {
+        f->params[i]->cname = pname[i];
+        f->params[i]->is_param = pind[i];
+    }
+    if (fn_eh) {
+        struct sb nr = { 0, 0, 0 };
+        sb_printf(&nr, "%.*s", ramp_at, r.p);
+        sb_put(&nr, "void *__cx_exc; long __cx_sel;\n");
+        sb_put(&nr, r.p + ramp_at);
+        r = nr;
+    }
+
+    sb_printf(&out_code, "struct %s {\nvoid (*__r)(void *);\n"
+                         "void (*__d)(void *);\n%s;\nint __i;\n"
+                         "_Bool __started;\n%s};\n", fr,
+              cdecl(co->promise_t, "__p"), sb_str(&ce.fields));
+    sb_put(&out_code, sb_str(&b));
+    sb_put(&out_code, sb_str(&r));
+    cur_fn = NULL;
+}
+
 static void emit_function(struct cfunc *f)
 {
     if (f->emitted || !f->defined)
         return;
     f->emitted = 1;
     f->declared = 1;
+    if (f->coro) {
+        emit_coroutine(f);
+        return;
+    }
     cur_fn = f;
     ncleans = 0;
     nbrk = ncont = 0;

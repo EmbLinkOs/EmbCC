@@ -122,6 +122,12 @@ Pod make_pod(int k)
 
 extern "C" int c_fn(int x) { return x * 3; }
 
+template <class T> std::Holder<T>::operator Holder<long>() const
+{
+    return Holder<long>{(long)v * 2};
+}
+template struct std::Holder<int>;
+
 static int sq(int x) { return x * x; }
 static void nothing() {}
 static int podcmp(abi::Pod &a, abi::Pod &b) { return a.a - b.a; }
@@ -158,6 +164,8 @@ int main()
     CHECK("nested class", nested(&e1, e2) == 7 + 5 + 5);
     CHECK("class by value", pod_sum(make_pod(10)) == 10 + 20 + 11);
     CHECK("std::", std::std_name(41) == 42);
+    CHECK("std:: substitutions", std::two_holders(std::Holder<int>{20},
+                                                  std::Holder<char>{2}) == 42);
     CHECK("global namespace", global_fn(&p, &q) == 5);
     {
         Buf b = make_buf(3);                       // g++ fills our slot

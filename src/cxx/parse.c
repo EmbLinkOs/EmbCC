@@ -442,6 +442,15 @@ static int at_ctor_declarator(void)
            cx_kind_at(q.fin + 1) == TOK_LPAREN;
 }
 
+/* At `A::operator T` — or `X<T>::operator T`, outside the class: a
+ * conversion function's declarator, with no decl-specifiers. */
+static int at_qualified_operator(void)
+{
+    struct qname q = peek_qname();
+    return !q.bad && q.scope && q.fin > 0 &&
+           cx_kind_at(q.fin) == TOK_CX_OPERATOR;
+}
+
 static int is_decl_keyword(enum tok_kind k)
 {
     switch (k) {
@@ -906,13 +915,34 @@ static const char *op_spelling(enum tok_kind k)
     case TOK_ANDAND: return "&&"; case TOK_OROR: return "||";
     case TOK_PLUSPLUS: return "++"; case TOK_MINUSMINUS: return "--";
     case TOK_COMMA: return ","; case TOK_ARROWSTAR: return "->*";
-    case TOK_ARROW: return "->";
+    case TOK_ARROW: return "->"; case TOK_CX_CO_AWAIT: return " co_await";
     default: return NULL;
     }
 }
 
 static struct cty *parse_declarator(struct cty *t, struct declarator *d,
                                     int mode);
+
+/* After `->`: a trailing return type, the parameters of ft in scope
+ * (-> decltype(a + b)). */
+static struct cty *trailing_return_type(struct cty *ft)
+{
+    scope_push(SC_PARAMS, NULL);
+    for (int i = 0; i < ft->np; i++) {
+        if (!ft->pnames || !ft->pnames[i])
+            continue;
+        struct cvar *v = xcalloc(1, sizeof *v);
+        v->name = v->cname = ft->pnames[i];
+        v->type = ft->pdecl ? ft->pdecl[i] : ft->params[i];
+        v->is_param = 1;
+        v->fparam = i + 1;
+        struct csym *y = scope_add(cx_scope, CS_VAR, v->name);
+        y->var = v;
+    }
+    struct cty *ret = parse_type_id();
+    scope_pop();
+    return ret;
+}
 
 /* After `operator`: the function's name ("operator+", "operator new[]",
  * "operator()") or, for a conversion function, its type. */
@@ -1228,21 +1258,7 @@ static struct cty *parse_suffixes(struct cty *t, struct declarator *d,
         struct cty *ret = t;
         if (cx_kind() == TOK_ARROW) {
             cx_advance();
-            /* the parameters are in scope: -> decltype(a + b) */
-            scope_push(SC_PARAMS, NULL);
-            for (int i = 0; i < ft->np; i++) {
-                if (!ft->pnames || !ft->pnames[i])
-                    continue;
-                struct cvar *v = xcalloc(1, sizeof *v);
-                v->name = v->cname = ft->pnames[i];
-                v->type = ft->pdecl ? ft->pdecl[i] : ft->params[i];
-                v->is_param = 1;
-                v->fparam = i + 1;
-                struct csym *y = scope_add(cx_scope, CS_VAR, v->name);
-                y->var = v;
-            }
-            ret = parse_type_id();
-            scope_pop();
+            ret = trailing_return_type(ft);
             if (t->k != CT_AUTO)
                 cx_error(cx_cur(), "a trailing return type needs 'auto'");
         }
@@ -1911,6 +1927,12 @@ static struct cvar *new_local(const char *name, struct cty *t,
     v->line = at ? at->t.line : 0;
     v->file = at ? at->file : NULL;
     return v;
+}
+
+struct cvar *cx_new_local(const char *name, struct cty *t,
+                          const struct ctok *at)
+{
+    return new_local(name, t, at);
 }
 
 static struct cstmt *parse_stmt(void);
@@ -4226,7 +4248,8 @@ static void parse_declaration(int toplevel, struct cstmt **out)
     struct dspec ds;
     parse_dspec(&ds);
     if (!ds.type && !at_ctor_declarator() && cx_kind() != TOK_TILDE &&
-        !(toplevel && cx_kind() == TOK_IDENT && cx_kind_at(1) == TOK_COLONCOLON))
+        !(toplevel && cx_kind() == TOK_IDENT && cx_kind_at(1) == TOK_COLONCOLON) &&
+        !at_qualified_operator())
         cx_error(cx_cur(), "expected a declaration before %s",
                  tok_describe(&cx_cur()->t));
     if (cx_kind() == TOK_SEMI) {
@@ -5348,7 +5371,22 @@ static struct cstmt *parse_stmt(void)
         cx_advance();
         cx_expect(TOK_SEMI, "';' after goto");
         return s;
+    case TOK_CX_CO_RETURN: {
+        s = st_new(S_CORETURN);
+        cx_advance();
+        struct cexpr *e = NULL;
+        int braced = cx_kind() == TOK_LBRACE;
+        if (braced)
+            e = parse_braced_list();
+        else if (cx_kind() != TOK_SEMI)
+            e = expr_parse();
+        s->e = coro_return(e, braced, at);
+        cx_expect(TOK_SEMI, "';' after co_return");
+        return s;
+    }
     case TOK_KW_RETURN: {
+        if (cx_curfn->coro)
+            cx_error(at, "a coroutine returns with co_return, not return");
         s = st_new(S_RETURN);
         cx_advance();
         struct cty *rt = cx_curfn->type->to;
@@ -7070,12 +7108,14 @@ static void parse_explicit_instantiation(int is_extern)
             return;
         }
         class_ensure(c);
-        /* every member it has a definition of is instantiated */
+        /* every member it has a definition of is instantiated — in the
+         * class, or outside it (template<class T> R A<T>::f() {...}) */
         for (struct cfunc *f = cx_funcs; f; f = f->all_next)
-            if (f->cls == c && (f->lazy || f->body_tok >= 0) &&
-                !f->defined) {
+            if (f->cls == c && !f->tmpl && !f->defined && !f->is_implicit &&
+                !f->is_deleted) {
                 func_ensure_body(f);
-                f->explicit_inst = 1;
+                if (f->defined)
+                    f->explicit_inst = 1;
             }
         return;
     }
@@ -7170,10 +7210,19 @@ static void parse_explicit_specialization(struct cclass *cls, int access)
 {
     const struct ctok *at = cx_cur();
     enum tok_kind k = cx_kind();
-    if ((k == TOK_KW_STRUCT || k == TOK_CX_CLASS || k == TOK_KW_UNION) &&
-        cx_kind_at(1) == TOK_IDENT && cx_kind_at(2) == TOK_LT) {
+    struct qname q = { NULL, 0, 0, NULL };
+    if (k == TOK_KW_STRUCT || k == TOK_CX_CLASS || k == TOK_KW_UNION) {
         cx_advance();
-        struct csym *y = lookup(cx_scope, cx_cur()->t.text);
+        q = peek_qname();             /* (template<> struct std::X<...>) */
+        cx_pos--;
+    }
+    if ((k == TOK_KW_STRUCT || k == TOK_CX_CLASS || k == TOK_KW_UNION) &&
+        !q.bad && cx_kind_at(1 + q.fin) == TOK_IDENT &&
+        cx_kind_at(2 + q.fin) == TOK_LT) {
+        cx_advance();
+        cx_pos += q.fin;
+        struct csym *y = q.scope ? lookup_in(q.scope, cx_cur()->t.text)
+                                 : lookup(cx_scope, cx_cur()->t.text);
         if (!y || y->k != CS_TEMPLATE || y->tmpl->kind != TK_CLASS)
             cx_error(at, "'%s' is not a class template", cx_cur()->t.text);
         cx_advance();
@@ -7194,7 +7243,7 @@ static void parse_explicit_specialization(struct cclass *cls, int access)
                      y->tmpl->name);
         c->explicit_spec = 1;
         c->inst_pending = 0;
-        c->scope->parent = cx_scope;
+        c->scope->parent = q.scope ? q.scope : cx_scope;
         struct attrs a;
         memset(&a, 0, sizeof a);
         if (cx_kind() == TOK_IDENT && strcmp(cx_cur()->t.text, "final") == 0)
@@ -8361,7 +8410,7 @@ static void lambda_declarator_rest(struct cty *ft)
     }
     struct cty *ret = ct_basic(CT_AUTO);
     if (cx_accept(TOK_ARROW))
-        ret = parse_type_id();
+        ret = trailing_return_type(ft);
     ft->to = ret;
     ft->fq = is_mutable ? 0 : CQ_CONST;
 }

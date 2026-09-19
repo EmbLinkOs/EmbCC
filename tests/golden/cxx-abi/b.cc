@@ -144,6 +144,11 @@ int b_checks()
 
 namespace std {
 int std_name(int x) { return x + 1; }
+int two_holders(Holder<int> a, Holder<char> b)
+{
+    Holder<long> l = a;              // side A's conversion
+    return (int)l.v + b.v;
+}
 }
 
 int global_fn(abi::Pod *a, abi::Pod *b) { return a->a + b->a; }

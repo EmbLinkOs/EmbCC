@@ -314,6 +314,8 @@ struct ics {
     unsigned ref_cv;          /* ... to this cv-qualified type */
     struct cclass *base_to;   /* a derived-to-base conversion, to this */
     struct cfunc *user;       /* the user-defined conversion */
+    struct cclass *list_cls;  /* ... or, none named, the class a braced list
+                               * makes (an aggregate's, {}) */
     int to_il;                /* a braced list to std::initializer_list */
 };
 
@@ -718,6 +720,7 @@ static struct ics ics_of(struct cexpr *e, struct cty *to)
             }
             if (to->cls->aggregate || e->na == 0) {
                 r.rank = R_USER;
+                r.list_cls = to->cls;
                 return r;
             }
             struct cfunc *f = resolve(to->cls->ctors, NULL, e->a, e->na,
@@ -763,7 +766,9 @@ static int ics_cmp(const struct ics *a, const struct ics *b)
         return a->to_il ? 1 : -1;
     if (a->rank != b->rank)
         return a->rank < b->rank ? 1 : -1;
-    if (a->rank == R_USER && (a->user != b->user || !a->user))
+    if (a->rank == R_USER &&
+        (a->user != b->user ||
+         (!a->user && (!a->list_cls || a->list_cls != b->list_cls))))
         return 0;     /* (the same conversion: its second part decides) */
     if (a->ptr_bool != b->ptr_bool)
         return a->ptr_bool ? -1 : 1;
@@ -2179,6 +2184,8 @@ static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
         return NULL;
     }
     if (f->cls && !f->is_static) {
+        if (f->is_deleted)
+            cx_error(at, "use of deleted function '%s'", f->name);
         if ((f->is_implicit || f->is_defaulted) && f->trivial &&
             (f->special == SP_COPY_ASSIGN || f->special == SP_MOVE_ASSIGN)) {
             /* a trivial assignment is the struct's bytes */
@@ -2775,11 +2782,40 @@ static struct cexpr *conditional(struct cexpr *c, struct cexpr *a,
         e->vc = a->vc;
         return e;
     }
-    if (at->k == CT_CLASS || bt->k == CT_CLASS) {
-        if (!(at->k == CT_CLASS && bt->k == CT_CLASS &&
-              at->cls == bt->cls))
-            ex_error(a, "?: between '%s' and '%s' is not supported yet (CX2)",
+    if ((at->k == CT_CLASS || bt->k == CT_CLASS) &&
+        !(at->k == CT_CLASS && bt->k == CT_CLASS && at->cls == bt->cls)) {
+        /* [expr.cond]/4: operands of different types, a class among them
+         * — a derived and a base lvalue give the base lvalue; else each
+         * converted to the other's type, one way and one only */
+        if (a->vc == VC_LVALUE && b->vc == VC_LVALUE &&
+            at->k == CT_CLASS && bt->k == CT_CLASS) {
+            if (is_proper_base(at->cls, bt->cls) && (bt->q & at->q) == at->q)
+                return conditional(c, to_base(a, bt->cls, 0), b);
+            if (is_proper_base(bt->cls, at->cls) && (at->q & bt->q) == bt->q)
+                return conditional(c, a, to_base(b, at->cls, 0));
+        }
+        struct ics ab = ics_of(a, ct_unqual(bt)), ba = ics_of(b, ct_unqual(at));
+        if (at->k == CT_CLASS && bt->k == CT_CLASS) {
+            /* between a base and a derived class: to the base only */
+            if (is_proper_base(bt->cls, at->cls))
+                ab.rank = R_BAD;
+            if (is_proper_base(at->cls, bt->cls))
+                ba.rank = R_BAD;
+        }
+        if (ab.rank != R_BAD && ba.rank != R_BAD)
+            ex_error(a, "?: between '%s' and '%s' is ambiguous: each converts "
+                        "to the other", ct_name(at), ct_name(bt));
+        if (ab.rank == R_BAD && ba.rank == R_BAD)
+            ex_error(a, "incompatible operands '%s' and '%s' to ?:",
                      ct_name(at), ct_name(bt));
+        if (ab.rank != R_BAD)
+            a = convert(a, ct_unqual(bt), "?:");
+        else
+            b = convert(b, ct_unqual(at), "?:");
+        at = a->t;
+        bt = b->t;
+    }
+    if (at->k == CT_CLASS || bt->k == CT_CLASS) {
         struct cty *t = ct_unqual(at);
         e->a[1] = init_object(t, INIT_COPY, &a, 1, NULL);
         e->a[2] = init_object(t, INIT_COPY, &b, 1, NULL);
@@ -3240,7 +3276,8 @@ int cxx_has_builtin(const char *name)
             return 1;
         static const char *const special[] = {
             "offsetof", "is_constant_evaluated", "addressof", "launder",
-            "expect", "constant_p", "va_arg",
+            "expect", "constant_p", "va_arg", "coro_done", "coro_resume",
+            "coro_destroy", "coro_promise",
         };
         const char *n = name + 10;
         for (size_t i = 0; i < sizeof special / sizeof special[0]; i++)
@@ -3661,6 +3698,28 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         e->na = 3;
         if (e->a[2]->t->k != CT_PTR || !ct_is_integer(e->a[2]->t->to))
             cx_error(at, "%s's third argument points at an integer", name);
+        return e;
+    }
+    if (!strcmp(n, "coro_done") || !strcmp(n, "coro_resume") ||
+        !strcmp(n, "coro_destroy") || !strcmp(n, "coro_promise")) {
+        /* std::coroutine_handle's: through the frame (emit.c) — a
+         * frame's address, and for the promise's its alignment and
+         * which way (from the promise's address to the frame's) */
+        struct cty *vp = ct_ptr(ct_basic(CT_VOID));
+        int prom = n[5] == 'p';
+        if (na != (prom ? 3 : 1))
+            cx_error(at, "wrong number of arguments to '%s'", name);
+        struct cty *rt = prom ? vp : ct_basic(strcmp(n, "coro_done") == 0
+                                              ? CT_BOOL : CT_VOID);
+        struct cexpr *e = ex_new(E_BUILTIN, rt, VC_PRVALUE);
+        e->name = name;
+        e->a = xmalloc(3 * sizeof *e->a);
+        e->a[0] = convert(args[0], vp, name);
+        if (prom) {
+            e->a[1] = convert(args[1], ct_basic(CT_LONG), name);
+            e->a[2] = convert_bool(args[2], name);
+        }
+        e->na = prom ? 3 : 1;
         return e;
     }
     struct cfunc *lf = strcmp(n, "memcpy") && strcmp(n, "memmove") &&
@@ -4525,6 +4584,28 @@ struct cexpr *expr_call_named_targs(struct cexpr *obj, const char *name,
     return call(f, args, na, at);
 }
 
+/* C::name(args): a static member function */
+struct cexpr *expr_call_static(struct cclass *c, const char *name,
+                               struct cexpr **args, int na,
+                               const struct ctok *at)
+{
+    class_ensure(c);
+    struct csym *y = class_member(c, name);
+    if (!y || y->k != CS_FUNC)
+        cx_error(at, "'%s' has no member function '%s'",
+                 c->name ? c->name : "class", name);
+    struct cexpr *f = ex_new(E_OVL, y->fns->type, VC_LVALUE);
+    f->fn = y->fns;
+    f->name = name;
+    return call(f, args, na, at);
+}
+
+struct cexpr *expr_operator_call(const char *name, struct cexpr **args,
+                                 int na, const struct ctok *at)
+{
+    return overloaded(name, args, na, 0, at);
+}
+
 /* x.~T(), p->~T() where the object is not of class type: a
  * pseudo-destructor call — nothing but the object's evaluation. The
  * cursor at `~` (or at `T::~T`). */
@@ -4862,8 +4943,8 @@ static struct cexpr *parse_unary(void)
         cx_error(at, "label addresses are not supported in C++");
         return NULL;
     case TOK_CX_CO_AWAIT:
-        cx_error(at, "coroutines are not supported yet (CX7)");
-        return NULL;
+        cx_advance();
+        return coro_await(parse_cast(), 0, at);
     default:
         break;
     }
@@ -5021,6 +5102,12 @@ struct cexpr *expr_parse_assign(void)
 {
     if (cx_kind() == TOK_CX_THROW)
         return parse_throw();
+    if (cx_kind() == TOK_CX_CO_YIELD) {
+        const struct ctok *at = cx_cur();
+        cx_advance();
+        return coro_yield(cx_kind() == TOK_LBRACE ? parse_braced_list()
+                                                  : expr_parse_assign(), at);
+    }
     struct cexpr *l = expr_parse_cond();
     enum tok_kind k = cx_kind();
     if (!is_assign_op(k))

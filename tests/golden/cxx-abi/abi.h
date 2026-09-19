@@ -182,6 +182,11 @@ extern const char *tag;
 
 namespace std {
 int std_name(int);                   // St, not N3std...E
+template <class T> struct Holder {
+    T v;
+    operator Holder<long>() const;   // cvS_IlE: S_ is std::Holder
+};
+int two_holders(Holder<int>, Holder<char>);   // St6HolderIiES_IcE, not StS_
 }
 
 int global_fn(abi::Pod *, abi::Pod *);

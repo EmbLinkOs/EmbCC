@@ -1353,8 +1353,7 @@ char *cpp_process(const char *path, const char *src,
     if (predef_is_cxx()) {
         /* the C++ features EmbCC implements (docs/CXX.md), at the
          * values g++ gives the standard they come from; those it does
-         * not yet (concepts, coroutines, designated initializers,
-         * CTAD, consteval, aligned new, ...) are left undefined, so
+         * not yet (consteval, aligned new, ...) are left undefined, so
          * libstdc++ takes its paths without them */
         static const char *const feats[] = {
             "__GNUG__ 16",
@@ -1381,6 +1380,7 @@ char *cpp_process(const char *path, const char *src,
             "__cpp_generic_lambdas 201304L",
             "__cpp_guaranteed_copy_elision 201606L",
             "__cpp_hex_float 201603L", "__cpp_if_constexpr 201606L",
+            "__cpp_impl_coroutine 201902L",
             "__cpp_impl_three_way_comparison 201907L",
             "__cpp_init_captures 201304L",
             "__cpp_initializer_lists 200806L",

@@ -108,6 +108,22 @@ libstdc++ and libsupc++ (the harness: `tests/harness/<arch>/link.sh --cxx`).
   C2 takes its derived class's sub-VTT; destructors mirror it. A virtual
   base is reached through the vbase offset in the object's vtable (an
   `E_BASE` with a virtual step).
+- Coroutines (coro.c builds the parts, emit.c lowers them): the frame is a
+  C struct beginning as libstdc++'s `coroutine_handle` and g++ expect —
+  the resume and destroy functions' addresses (resume null once at the
+  final suspend: `done()`), then the promise at its alignment — followed
+  by the suspend point, the parameters' copies, `this`, and every local,
+  awaiter and temporary of a full-expression that suspends. The function
+  itself is the ramp (allocate, copy the parameters, build the promise,
+  the return object, run the body to its first suspension); the body is
+  one C function a `switch` enters at the suspend point's label, run to
+  resume (`destroying` 0) or to destroy (1: at the label, what is alive
+  there is destroyed, then the promise, the copies and the frame). A
+  `co_await` is taken out of its expression: its awaiter made and, unless
+  ready, the point stored, `await_suspend` called and the body returned
+  from — before the rest of the expression, which then reads
+  `await_resume()`; one in an operand of `?:`, `&&`, `||` runs only when
+  that operand would.
 
 ## Status
 
@@ -636,7 +652,7 @@ construction, conversions between element types and from reals, and the
 newlib's functions). With them `<complex>` compiles; tests/cxx `complex`;
 tests/libstdcxx/complex.cc (arithmetic, abs/arg/norm/conj, sqrt, exp,
 pow, float/double conversions) matches g++'s build on both targets. Every
-libstdc++ header now compiles except `<coroutine>`.
+libstdc++ header now compiles except `<coroutine>` (since: below).
 
 The OS's `user/tests/cxxdemo/cxxdemo.cc` (global constructors, new/delete,
 templates, local statics, destructors at exit, `<string>`, `<vector>`,
@@ -644,7 +660,43 @@ templates, local statics, destructors at exit, `<string>`, `<vector>`,
 and links against its crt0/syscalls and libstdc++ (CX8's proof; running it
 waits for the OS image, CX9).
 
-Next: `<coroutine>` (coroutines), `consteval` as more than `constexpr` (a
+**Coroutines** (CX7's last core feature; `__cpp_impl_coroutine`, so
+`<coroutine>` compiles — every libstdc++ header now does): `co_await`,
+`co_yield`, `co_return`; the promise from `std::coroutine_traits` (a
+specialization can make a void function a coroutine) built from the
+parameters when a constructor takes them; the frame from the promise's
+own `operator new`/`delete` when it has them (nothrow, and
+`get_return_object_on_allocation_failure`, when that is declared);
+`await_suspend` returning void, bool or a handle to resume (symmetric
+transfer); `operator co_await` (member or not), `await_transform`;
+initial and final suspends; exceptions to `unhandled_exception`, or to the
+resumer; `__builtin_coro_done/resume/destroy/promise`, laid out as g++'s.
+tests/cxx `coroutines` (a hand-written `std::coroutine_handle`, g++
+agrees); tests/libstdcxx `coroutine` and `coroutine2` (generators, lazy
+tasks chained by symmetric transfer, exceptions, early destruction,
+template/member/lambda/generic-lambda coroutines, `co_await` in `?:`,
+`&&`, `||`, loops, a `switch`, a range-for, structured bindings)
+match g++'s builds on both targets, at -O2 too.
+
+On the way: `?:` between different class types (one converted to the
+other; a derived and a base lvalue giving the base lvalue); `x = {}`
+choosing the move assignment (two list conversions to the same class are
+compared by their reference binding); a lambda's trailing return type
+naming its parameters; `template<> struct ns::T<...>` from outside the
+namespace; a class template's conversion function defined outside it; an
+explicit instantiation defining the members defined outside the class; a
+deleted assignment refused even when the class's assignment would be a
+byte copy (a move constructor declared). Two mangling fixes, found against
+g++: a conversion function's type may use the substitutions of the name
+before it (`cvS_IvE`), and a name in `std` that begins with a
+substitution has no `St` before it (`St6HolderIiES_IcE`, as two
+specializations of one std template in one signature) —
+tests/golden/cxx-abi.sh checks both across the compilers. tests/cxx
+`cxx20misc3`, tests/golden/cxx-reject.sh (deleted functions, coroutine
+misuse).
+
+Next: conversion function templates (`template<class T> operator T()`:
+`<ranges>`' `__max_size_type`), `consteval` as more than `constexpr` (a
 format string is checked at run time for now), bit-fields in classes with
 non-empty bases.
 

@@ -33,6 +33,7 @@ SRCS := \
 	src/cxx/consteval.c \
 	src/cxx/traits.c \
 	src/cxx/concepts.c \
+	src/cxx/coro.c \
 	src/cxx/mangle.c \
 	src/cxx/emit.c \
 	src/sema/sema.c \

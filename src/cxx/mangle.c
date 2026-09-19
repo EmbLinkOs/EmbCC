@@ -336,6 +336,17 @@ static void put_steps(struct mbuf *m, struct step *st, int n, int nocand)
     }
 }
 
+/* Will put_steps begin with a substitution (which, for a name in std,
+ * stands for the St as well)? */
+static int steps_start_with_sub(struct mbuf *m, struct step *st, int n,
+                                int nocand)
+{
+    for (int j = n - 1 - nocand; j >= 0; j--)
+        if (!st[j].abbr && sub_find(m, st[j].key) >= 0)
+            return 1;
+    return 0;
+}
+
 /* A name made of scope steps plus the entity's own: `3Foo`, `St3Foo`,
  * `1AIiE`, `N3foo3BarE`, `N2ns3BoxIlE2InE` — or one substitution. */
 static void put_name(struct mbuf *m, struct step *st, int n, int std,
@@ -352,6 +363,8 @@ static void put_name(struct mbuf *m, struct step *st, int n, int std,
             return;
         }
     }
+    if (std && steps_start_with_sub(m, st, n, nocand))
+        std = 0;                        /* (St1HIcES_IiE: S_ is std::H) */
     if (!nested) {
         if (std)
             put(m, "St");
@@ -882,6 +895,7 @@ static const char *operator_code(const char *name)
 {
     static const struct { const char *op, *code; } ops[] = {
         { "operator new", "nw" }, { "operator new[]", "na" },
+        { "operator co_await", "aw" },
         { "operator delete", "dl" }, { "operator delete[]", "da" },
         { "operator+", "pl" }, { "operator-", "mi" }, { "operator*", "ml" },
         { "operator/", "dv" }, { "operator%", "rm" }, { "operator&", "an" },
@@ -995,7 +1009,13 @@ const char *mangle_func(struct cfunc *f)
     if (from > 0)
         put_sub(&m, sub_find(&m, st[from - 1].key));
     for (int j2 = from; j2 < n; j2++) {
-        if (j2 == name_step)
+        if (j2 == name_step && f->is_conv) {
+            /* cv <type>: after the prefix, whose names it may refer to
+             * (S_...); a template's in terms of its parameters (cvT_) */
+            put(&m, "cv");
+            mangle_type(&m, tmpl ? f->spec_of->pattern->type->to
+                                 : f->type->to);
+        } else if (j2 == name_step)
             put(&m, u.p);
         else if (st[j2].abbr) {
             put(&m, st[j2].abbr);        /* Sa, So...: no candidate */
