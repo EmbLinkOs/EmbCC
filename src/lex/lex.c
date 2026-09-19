@@ -140,9 +140,11 @@ static const struct {
     { "const", TOK_KW_CONST },
     { "volatile", TOK_KW_VOLATILE },
     { "__volatile__", TOK_KW_VOLATILE },
+    { "__volatile", TOK_KW_VOLATILE },
     { "restrict", TOK_KW_RESTRICT },
     { "asm", TOK_KW_ASM },
     { "__asm__", TOK_KW_ASM },
+    { "__asm", TOK_KW_ASM },          /* (newlib's aarch64 fenv.h) */
     { "inline", TOK_KW_INLINE },
     { "__inline", TOK_KW_INLINE },
     { "__inline__", TOK_KW_INLINE },

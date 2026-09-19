@@ -579,6 +579,15 @@ static struct ics std_conv(struct cexpr *e, struct cty *to)
             r.qual_adj = pt->q != pf->q;
             return r;
         }
+        /* T(*)[N] -> const T(*)[N]: an array's qualifiers are its
+         * elements' (T(*)[] -> const T(*)[]: span's compatibility test) */
+        if (pf->k == CT_ARRAY && pt->k == CT_ARRAY && pf->n == pt->n &&
+            ct_same_unqual(pf->to, pt->to) &&
+            (pt->to->q & pf->to->q) == pf->to->q) {
+            r.rank = R_EXACT;
+            r.qual_adj = pt->to->q != pf->to->q;
+            return r;
+        }
         /* T** -> const T* const* and the like: one level deep */
         if (pf->k == CT_PTR && pt->k == CT_PTR &&
             ct_same_unqual(pf->to, pt->to) &&
@@ -642,6 +651,12 @@ static struct ics ref_ics(struct cexpr *e, struct cty *rt)
         r.base_to = T->cls;
     }
     int compat = related && (T->q & e->t->q) == e->t->q;
+    if (!related && e->t->k == CT_ARRAY && T->k == CT_ARRAY &&
+        e->t->n == T->n && ct_same_unqual(e->t->to, T->to)) {
+        /* const T (&)[N] to a T[N]: an array's cv is its elements' */
+        related = 1;
+        compat = (T->to->q & e->t->to->q) == e->t->to->q;
+    }
     int lv = e->vc == VC_LVALUE && !is_bitfield(e);
     r.is_ref = 1;
     r.ref_cv = T->q;
@@ -1574,6 +1589,11 @@ struct cexpr *bind_ref(struct cexpr *e, struct cty *rt, const char *ctx)
         e = to_base(e, T->cls, 0);
     int related = ct_same_unqual(e->t, T);
     int compat = related && (T->q & e->t->q) == e->t->q;
+    if (!related && e->t->k == CT_ARRAY && T->k == CT_ARRAY &&
+        e->t->n == T->n && ct_same_unqual(e->t->to, T->to)) {
+        related = 1;                  /* const T (&)[N] to a T[N] */
+        compat = (T->to->q & e->t->to->q) == e->t->to->q;
+    }
     if (related && !compat && !is_bitfield(e))
         ex_error(e, "binding a reference to '%s' to a '%s' drops a qualifier "
                     "(%s)", ct_name(T), ct_name(e->t), ctx);
@@ -3116,6 +3136,16 @@ static struct cexpr *cast_to(struct cty *t, struct cexpr *e, int kind,
             /* (const T&)rvalue, static_cast<T&&>(rvalue): a temporary */
             if (kind != CAST_STATIC && kind != CAST_C)
                 cx_error(at, "casting an rvalue to a reference");
+            struct cexpr *r = ex_deref(bind_ref(e, t, "a cast"));
+            r->vc = vc;
+            return r;
+        }
+        if ((kind == CAST_STATIC || kind == CAST_C) &&
+            e->t->k == CT_CLASS && T->k == CT_CLASS && e->t->cls != T->cls &&
+            !is_proper_base(e->t->cls, T->cls) &&
+            !is_proper_base(T->cls, e->t->cls)) {
+            /* unrelated: T& initialized from it (a conversion function's
+             * result, bound — static_cast<const string_view&>(str)) */
             struct cexpr *r = ex_deref(bind_ref(e, t, "a cast"));
             r->vc = vc;
             return r;

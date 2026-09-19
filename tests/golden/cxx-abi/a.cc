@@ -177,6 +177,22 @@ int main()
           tags::S().get().x == 7);
     CHECK("ABI tags: embcc's, called by g++", tags::tags_b() == 3 + 20 + 100);
     {
+        using namespace pmf;
+        Pm base;
+        base.k = 10;
+        Pd der;
+        der.k = 10;
+        CHECK("g++ calling embcc's pointers to members",
+              call(base, &Pm::v, 1) == 11 && call(der, &Pm::v, 1) == -9 &&
+              call(der, &Pm::nv, 2) == 20);
+        F gv = pick(0), gn = pick(1), g0 = pick(2);
+        CHECK("calling g++'s pointers to members",
+              (base.*gv)(5) == 15 && (der.*gv)(5) == -5 && (der.*gn)(3) == 30);
+        CHECK("pointers to members compared both ways",
+              gv == &Pm::v && gn != gv && !g0 && gv && same(&Pm::v, gv) &&
+              !same(&Pm::nv, gv) && same(nullptr, g0));
+    }
+    {
         Buf b = make_buf(3);                       // g++ fills our slot
         CHECK("class returned through the slot", b.size() == 3 && b.sum() == 6);
         CHECK("class passed by reference to a copy", consume(b, 10) == 36 &&

@@ -23,6 +23,8 @@
 static const struct { const char *name; int enc; } sysregs[] = {
     { "nzcv",             A64_SYSREG(3, 3,  4, 2, 0) },
     { "daif",             A64_SYSREG(3, 3,  4, 2, 1) },
+    { "fpcr",             A64_SYSREG(3, 3,  4, 4, 0) },   /* (newlib's fenv.h) */
+    { "fpsr",             A64_SYSREG(3, 3,  4, 4, 1) },
     { "currentel",        A64_SYSREG(3, 0,  4, 2, 2) },
     { "pan",              A64_SYSREG(3, 0,  4, 2, 3) },
     { "spsel",            A64_SYSREG(3, 0,  4, 2, 0) },

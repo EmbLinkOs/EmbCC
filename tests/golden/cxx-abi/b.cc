@@ -153,6 +153,17 @@ int two_holders(Holder<int> a, Holder<char> b)
 
 int global_fn(abi::Pod *a, abi::Pod *b) { return a->a + b->a; }
 
+int pmf::Pm::v(int x) const { return x + k; }
+int pmf::Pm::nv(int x) const { return x * k; }
+pmf::Pm::~Pm() {}
+int pmf::Pd::v(int x) const { return x - k; }
+int pmf::call(const Pm &o, F f, int x) { return (o.*f)(x); }
+pmf::F pmf::pick(int which)
+{
+    return which == 0 ? &Pm::v : which == 1 ? &Pm::nv : nullptr;
+}
+bool pmf::same(F a, F b) { return a == b; }
+
 tags::T tags::make_t(int x) { return T{x}; }
 tags::W tags::wrap(int x) { return W{x * 2}; }
 tags::T tags::tvar = { 5 };

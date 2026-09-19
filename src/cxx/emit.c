@@ -975,6 +975,32 @@ static char *member_text(struct cexpr *e)
 
 /* (obj->*pmf)(args): adjust `this` by adj; an odd ptr is 1 + a vtable
  * offset (a virtual function), else the function itself. */
+/* A pointer to member function is { ptr, adj } (Itanium 2.3): on x86-64
+ * a virtual one's ptr is its vtable offset + 1 and adj the this
+ * adjustment; on aarch64 (the ARM C++ ABI's variant, which g++ follows
+ * there) ptr is the vtable offset, and adj twice the adjustment plus 1 for
+ * a virtual one. For PMF variable m: `this` from the object o, and the
+ * function (with ob, that object adjusted). */
+static int arm_pmf(void)
+{
+    return target_get() == TARGET_AARCH64;
+}
+
+static char *pmf_this(const char *m, const char *o)
+{
+    return arm_pmf() ? cx_fmt("(char *)%s + (%s.adj >> 1)", o, m)
+                     : cx_fmt("(char *)%s + %s.adj", o, m);
+}
+
+static char *pmf_fn(const char *m, const char *ob)
+{
+    return arm_pmf()
+           ? cx_fmt("((%s.adj & 1) ? *(void **)(*(char **)%s + (long)%s.ptr)"
+                    " : %s.ptr)", m, ob, m, m)
+           : cx_fmt("(((long)%s.ptr & 1) ? *(void **)(*(char **)%s + (long)"
+                    "%s.ptr - 1) : %s.ptr)", m, ob, m, m);
+}
+
 static char *pmcall_text(struct cexpr *e, const char *dest)
 {
     struct cty *pmt = e->a[1]->t, *ft = pmt->to;
@@ -986,12 +1012,10 @@ static char *pmcall_text(struct cexpr *e, const char *dest)
     int u = cx_uid();
     struct sb b = { 0, 0, 0 };
     need_pmf = 1;
-    sb_printf(&b, "({ struct __cx_pmf __cx_m%d = %s; char *__cx_o%d = "
-                  "(char *)%s + __cx_m%d.adj; ", u, ev(e->a[1]), u,
-              ev(e->a[0]), u);
-    sb_printf(&b, "((%s)(((long)__cx_m%d.ptr & 1) ? *(void **)(*(char **)"
-                  "__cx_o%d + (long)__cx_m%d.ptr - 1) : __cx_m%d.ptr))(",
-              ctype(ct_ptr(cft)), u, u, u, u);
+    char *m = cx_fmt("__cx_m%d", u), *o = cx_fmt("__cx_o%d", u);
+    sb_printf(&b, "({ struct __cx_pmf %s = %s; char *%s = %s; ", m,
+              ev(e->a[1]), o, pmf_this(m, ev(e->a[0])));
+    sb_printf(&b, "((%s)%s)(", ctype(ct_ptr(cft)), pmf_fn(m, o));
     if (dest)
         sb_printf(&b, "&(%s), ", dest);
     sb_printf(&b, "(%s)__cx_o%d%s%s); })", ctype(ps[0]), u,
@@ -1182,10 +1206,13 @@ static char *ev(struct cexpr *e)
             return cx_fmt("%ldL", e->field->off);
         need_pmf = 1;
         if (e->fn->is_virtual && !e->fn->is_static && e->fn->vslot >= 0)
-            /* a virtual function's: its vtable offset + 1 (Itanium) —
+            /* a virtual function's: its vtable offset, flagged (pmf_fn) —
              * called, the object's override */
-            return cx_fmt("((struct __cx_pmf){ (void *)%ldL, 0 })",
-                          (long)e->fn->vslot * 8 + 1);
+            return arm_pmf()
+                   ? cx_fmt("((struct __cx_pmf){ (void *)%ldL, 1 })",
+                            (long)e->fn->vslot * 8)
+                   : cx_fmt("((struct __cx_pmf){ (void *)%ldL, 0 })",
+                            (long)e->fn->vslot * 8 + 1);
         need_fn(e->fn);
         return cx_fmt("((struct __cx_pmf){ (void *)%s, 0 })",
                       fn_name(e->fn, 1));
@@ -1211,7 +1238,8 @@ static char *ev(struct cexpr *e)
         if (ct_is_pmf(e->t)) {
             need_pmf = 1;
             return cx_fmt("({ struct __cx_pmf __cx_m%d = %s; __cx_m%d.adj += "
-                          "%ldL; __cx_m%d; })", u, ev(e->a[0]), u, e->ival, u);
+                          "%ldL; __cx_m%d; })", u, ev(e->a[0]), u,
+                          arm_pmf() ? 2 * e->ival : e->ival, u);
         }
         return cx_fmt("({ long __cx_m%d = %s; __cx_m%d == -1L ? -1L : "
                       "__cx_m%d + %ldL; })", u, ev(e->a[0]), u, u, e->ival);
@@ -1250,11 +1278,10 @@ static char *ev(struct cexpr *e)
              * reach, its override when virtual */
             int u = cx_uid();
             need_pmf = 1;
-            return cx_fmt("({ struct __cx_pmf __cx_m%d = %s; char *__cx_o%d"
-                          " = (char *)%s + __cx_m%d.adj; (void *)(((long)"
-                          "__cx_m%d.ptr & 1) ? *(void **)(*(char **)__cx_o%d"
-                          " + (long)__cx_m%d.ptr - 1) : __cx_m%d.ptr); })",
-                          u, ev(e->a[1]), u, ev(e->a[0]), u, u, u, u, u);
+            char *m = cx_fmt("__cx_m%d", u), *o = cx_fmt("__cx_o%d", u);
+            return cx_fmt("({ struct __cx_pmf %s = %s; char *%s = %s; "
+                          "(void *)%s; })", m, ev(e->a[1]), o,
+                          pmf_this(m, ev(e->a[0])), pmf_fn(m, o));
         }
         if (strncmp(e->name, "__builtin_", 10) == 0 &&
             rdrand_width(e->name + 10)) {
@@ -1352,13 +1379,18 @@ static char *ev(struct cexpr *e)
             return cx_fmt("(%s %s %s)", l, binop_text(e->op), r);
         }
         if (ct_is_pmf(e->a[0]->t)) {
-            /* equal: the same ptr, and — unless null — the same adj */
+            /* equal: the same ptr, and — unless both null — the same adj
+             * (null: ptr 0, and on aarch64 not flagged virtual) */
             int u = cx_uid();
+            const char *nul = arm_pmf()
+                ? cx_fmt("(!__cx_a%d.ptr && !(__cx_a%d.adj & 1) && "
+                         "!(__cx_b%d.adj & 1))", u, u, u)
+                : cx_fmt("!__cx_a%d.ptr", u);
             return cx_fmt("({ struct __cx_pmf __cx_a%d = %s, __cx_b%d = %s; "
-                          "%s(__cx_a%d.ptr == __cx_b%d.ptr && (!__cx_a%d.ptr "
+                          "%s(__cx_a%d.ptr == __cx_b%d.ptr && (%s "
                           "|| __cx_a%d.adj == __cx_b%d.adj)); })", u,
                           ev(e->a[0]), u, ev(e->a[1]),
-                          e->op == TOK_NEQ ? "!" : "", u, u, u, u, u);
+                          e->op == TOK_NEQ ? "!" : "", u, u, nul, u, u);
         }
         return cx_fmt("(%s %s %s)", ev(e->a[0]), binop_text(e->op),
                       ev(e->a[1]));
@@ -1425,7 +1457,10 @@ static char *ev(struct cexpr *e)
         }
         if (e->t->k == CT_BOOL && e->a[0]->t->k == CT_MPTR)
             return ct_is_pmf(e->a[0]->t)
-                   ? cx_fmt("((%s).ptr != 0)", ev(e->a[0]))
+                   ? (arm_pmf() ? cx_fmt("({ struct __cx_pmf __cx_q = %s; "
+                                         "__cx_q.ptr != 0 || (__cx_q.adj & "
+                                         "1); })", ev(e->a[0]))
+                                : cx_fmt("((%s).ptr != 0)", ev(e->a[0])))
                    : cx_fmt("(%s != -1L)", ev(e->a[0]));
         return cx_fmt("((%s)%s)", ctype(e->t), ev(e->a[0]));
     case E_ADDR:

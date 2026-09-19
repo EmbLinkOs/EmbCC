@@ -902,9 +902,29 @@ What it took:
   labels of adjacent literals (newlib's `__ASMNAME`); `__cpp_sized_deallocation`;
   include/float.h complete (`LDBL_MANT_DIG` and the rest)
 tests/cxx/libsources.cc (g++ agrees on both targets).
-Next: `__int128`; abbreviated function templates (`C auto x` parameters:
-ranges::subrange's constructor, so `ranges::equal_range` with a
-projection); running the suites wholly on EmbCC's library, aarch64's too.
+**Abbreviated function templates** (C++20, 9.3.4.6): a function with
+`auto` or `C auto` parameters is a template of invented parameters, as a
+generic lambda's operator() — at namespace scope, as members of classes
+and of class templates, beside declared template parameters (appended
+after them), packs (`auto...`); `C auto` gives the invented parameter C
+as its type-constraint, so overloads are ordered by it. With them and a
+few more fixes — `const T (&)[N]` bound to a `T[N]`, `T(*)[]` to `const
+T(*)[]` (span's compatibility test), static_cast to a reference to an
+unrelated class through a conversion function (string to const
+string_view&), a constexpr definition of a member declared const — tzdb
+compiles too: 192 of libstdc++'s 193 objects are EmbCC's on both targets,
+all but floating_from_chars (`__uint128_t`), and the 54 programs agree
+with g++ (tests/cxx/abbrev.cc, tests/libstdcxx/ranges2.cc). newlib's
+aarch64 fenv.h needed `__asm`/`__volatile` spelled so, and EmbCC's aarch64
+assembler FPCR and FPSR.
+
+Pointers to member functions on aarch64 now take the ARM C++ ABI's form,
+as g++ there does: ptr the function or the vtable offset, adj twice the
+this adjustment plus 1 for a virtual one (x86-64 keeps Itanium's: ptr the
+vtable offset + 1). tests/golden/cxx-abi.sh passes them between EmbCC's
+code and g++'s and compares them, on both targets.
+
+Next: `__int128`; running the suites wholly on EmbCC's library.
 
 Next (language): `consteval` as more than `constexpr` (a format string is
 checked at run time for now).

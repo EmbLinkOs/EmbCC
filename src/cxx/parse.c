@@ -617,7 +617,9 @@ int at_type_start(void)
         int ctn, cargs;                 /* C auto: a constrained placeholder */
         if (concept_at(&ctn, &cargs) &&
             (cx_kind_at(ctn) == TOK_CX_AUTO ||
-             cx_kind_at(ctn) == TOK_CX_DECLTYPE))
+             cx_kind_at(ctn) == TOK_CX_DECLTYPE ||
+             (cx_kind_at(ctn) == TOK_IDENT &&
+              !strncmp(cx_peek(ctn)->t.text, "__cx_abv", 8))))
             return 1;
     }
     if (cx_kind() == TOK_LBRACKET && cx_kind_at(1) == TOK_LBRACKET)
@@ -910,8 +912,11 @@ static void parse_dspec(struct dspec *ds)
                 int ctn, cargs;
                 if (concept_at(&ctn, &cargs) &&
                     (cx_kind_at(ctn) == TOK_CX_AUTO ||
-                     cx_kind_at(ctn) == TOK_CX_DECLTYPE)) {
-                    cx_pos += ctn;
+                     cx_kind_at(ctn) == TOK_CX_DECLTYPE ||
+                     (cx_kind_at(ctn) == TOK_IDENT &&
+                      !strncmp(cx_peek(ctn)->t.text, "__cx_abv", 8)))) {
+                    cx_pos += ctn;          /* (C __cx_abvN: its type-
+                                             * constraint, checked there) */
                     continue;
                 }
             }
@@ -2483,6 +2488,8 @@ static void skip_default_init_tokens(void);
 static void skip_declaration(void);
 static int parse_tparams(struct ctparam **out);
 static int tparam_base;
+static int abbrev_lparen(void);
+static void parse_abbreviated_template(struct cclass *cls, int access);
 
 /* A deduction candidate: a function template made of a constructor of
  * the primary template (C's own parameters first, then the constructor's
@@ -3163,6 +3170,8 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
     struct cscope *target = d->qual ? d->qual : cx_scope;
     struct csym *y = scope_find_here(target, d->name);
     struct cvar *v = NULL;
+    if (ds->is_constexpr)
+        t = ct_qual(t, CQ_CONST);   /* (as the declaration may say const) */
     if (y && y->k == CS_VAR) {
         v = y->var;
         if (!ct_same(ct_unqual(v->type), ct_unqual(t)) &&
@@ -3794,6 +3803,10 @@ static void parse_member(struct cclass *c, int *access)
         return;
     default:
         break;
+    }
+    if (abbrev_lparen() >= 0) {
+        parse_abbreviated_template(c, *access);  /* f(C auto x) */
+        return;
     }
     struct dspec ds;
     parse_dspec(&ds);
@@ -4522,6 +4535,11 @@ static void parse_declaration(int toplevel, struct cstmt **out)
         guide_at()) {
         /* C(P...) -> C<A...>; : a deduction guide, not a template */
         skip_declaration();
+        return;
+    }
+    if (toplevel && abbrev_lparen() >= 0) {
+        /* void f(C auto x): a function template */
+        parse_abbreviated_template(enclosing_class(cx_scope), CA_PUBLIC);
         return;
     }
     struct dspec ds;
@@ -7053,6 +7071,199 @@ static struct cguide *guide_at(void)
     return g;
 }
 
+/* An abbreviated function template (C++20, 9.3.4.6): the declaration at
+ * the cursor declares a function one of whose parameters' types is `auto`
+ * (or `C auto`) — the `(` of that parameter list, else -1. (Its `auto`s
+ * already named __cx_autoN count: a class template's body read again.) */
+static int abbrev_lparen(void)
+{
+    int depth = 0;
+    for (int i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_EOF || (depth == 0 && (k == TOK_SEMI ||
+                                            k == TOK_LBRACE ||
+                                            k == TOK_ASSIGN)))
+            return -1;
+        if (k == TOK_LBRACKET || k == TOK_LBRACE) {
+            depth++;
+            continue;
+        }
+        if (k == TOK_RBRACKET || k == TOK_RBRACE || k == TOK_RPAREN) {
+            depth--;
+            continue;
+        }
+        if (k != TOK_LPAREN)
+            continue;
+        if (depth) {
+            depth++;
+            continue;
+        }
+        /* the declarator's parameters: after its name (or operator) */
+        enum tok_kind b = i > 0 ? cx_toks[i - 1].t.kind : TOK_EOF;
+        if (b != TOK_IDENT && b != TOK_GT && b != TOK_RPAREN) {
+            if (b == TOK_CX_OPERATOR) {
+                depth++;            /* operator() */
+                continue;
+            }
+            int op = i > 1 && cx_toks[i - 2].t.kind == TOK_CX_OPERATOR;
+            if (!op) {
+                depth++;
+                continue;
+            }
+        }
+        int opcall = b == TOK_RPAREN && i > 2 &&
+                     cx_toks[i - 2].t.kind == TOK_LPAREN &&
+                     cx_toks[i - 3].t.kind == TOK_CX_OPERATOR;
+        if (b == TOK_RPAREN && !opcall)
+            return -1;
+        /* auto at the parameters' top level, not in a default argument
+         * nor decltype(auto) */
+        int d = 0, in_def = 0;
+        for (int j = i + 1; j < cx_ntoks; j++) {
+            enum tok_kind kj = cx_toks[j].t.kind;
+            if (kj == TOK_LPAREN || kj == TOK_LBRACKET || kj == TOK_LBRACE) {
+                d++;
+                continue;
+            }
+            if (kj == TOK_RPAREN || kj == TOK_RBRACKET || kj == TOK_RBRACE) {
+                if (d-- == 0)
+                    break;
+                continue;
+            }
+            if (d)
+                continue;
+            if (kj == TOK_COMMA)
+                in_def = 0;
+            else if (kj == TOK_ASSIGN)
+                in_def = 1;
+            else if (!in_def && (kj == TOK_CX_AUTO ||
+                                 (kj == TOK_IDENT &&
+                                  !strncmp(cx_toks[j].t.text, "__cx_abv", 8))))
+                return i;
+            else if (kj == TOK_EOF)
+                return -1;
+        }
+        return -1;
+    }
+    return -1;
+}
+
+/* ... its `auto`s: each an invented type parameter after the n declared
+ * ones (__cx_abvN in the tokens from now on, declared in the template's
+ * scope), a concept before one its type-constraint (`C auto`, `C<A>
+ * auto`), `auto...` a pack. The parameters' number. */
+static int invent_abbrev_params(int lparen, struct ctparam **ps, int n)
+{
+    int cap = n + 4, first = n;
+    struct ctparam *v = xcalloc((size_t)cap, sizeof *v);
+    if (n)
+        memcpy(v, *ps, (size_t)n * sizeof *v);
+    int depth = 0, in_def = 0, k0 = n;
+    for (int i = lparen + 1; i < cx_ntoks; i++) {
+        struct ctok *tk = &cx_toks[i];
+        enum tok_kind k = tk->t.kind;
+        if (k == TOK_EOF)
+            break;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
+            depth++;
+            continue;
+        }
+        if (k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE) {
+            if (depth-- == 0)
+                break;
+            continue;
+        }
+        if (depth)
+            continue;
+        if (k == TOK_COMMA) {
+            in_def = 0;
+            first = n;
+            continue;
+        }
+        if (k == TOK_ASSIGN) {
+            in_def = 1;
+            continue;
+        }
+        if (k == TOK_ELLIPSIS && !in_def) {
+            for (int j = first; j < n; j++)
+                v[j].pack = 1;
+            continue;
+        }
+        if (in_def || !(k == TOK_CX_AUTO ||
+                        (k == TOK_IDENT &&
+                         !strncmp(tk->t.text, "__cx_abv", 8))))
+            continue;
+        if (n == cap) {
+            cap *= 2;
+            v = xrealloc(v, (size_t)cap * sizeof *v);
+        }
+        struct ctparam *p = &v[n];
+        memset(p, 0, sizeof *p);
+        p->kind = TP_TYPE;
+        p->name = cx_fmt("__cx_abv%d", n - k0);
+        p->def_tok = p->vtype_tok = -1;
+        p->tc_args = -1;
+        /* the concept before it: C, N::C, C<A> */
+        int s0 = i - 1;
+        if (s0 > lparen && cx_toks[s0].t.kind == TOK_GT) {
+            int dd = 0;
+            for (; s0 > lparen; s0--) {
+                enum tok_kind kk = cx_toks[s0].t.kind;
+                if (kk == TOK_GT)
+                    dd++;
+                else if (kk == TOK_SHR)
+                    dd += 2;
+                else if (kk == TOK_LT && --dd == 0)
+                    break;
+            }
+            s0--;
+        }
+        while (s0 - 2 > lparen && cx_toks[s0].t.kind == TOK_IDENT &&
+               cx_toks[s0 - 1].t.kind == TOK_COLONCOLON &&
+               cx_toks[s0 - 2].t.kind == TOK_IDENT)
+            s0 -= 2;
+        if (s0 > lparen && cx_toks[s0].t.kind == TOK_IDENT) {
+            int save = cx_pos, ctn, cargs;
+            cx_pos = s0;
+            struct ctemplate *tc = concept_at(&ctn, &cargs);
+            cx_pos = save;
+            if (tc && s0 + ctn == i) {
+                p->tc = tc;
+                p->tc_args = cargs;
+            }
+        }
+        tk->t.kind = TOK_IDENT;
+        tk->t.text = (char *)p->name;
+        struct csym *y = scope_add(cx_scope, CS_TYPEDEF, p->name);
+        y->type = ct_tparam(tparam_base + n, p->name);
+        n++;
+    }
+    for (int j = k0; j < n; j++) {
+        struct csym *y = scope_find_here(cx_scope, v[j].name);
+        if (y)
+            y->pack_param = v[j].pack;
+    }
+    *ps = v;
+    return n;
+}
+
+static void template_decl_rest(struct cclass *cls, int access,
+                               const struct ctok *at, struct cscope *home,
+                               struct ctparam *ps, int np, int req_s,
+                               int req_e);
+
+/* void f(C auto x) { }: a function template of the invented parameters
+ * alone */
+static void parse_abbreviated_template(struct cclass *cls, int access)
+{
+    const struct ctok *at = cx_cur();
+    struct cscope *home = cx_scope;
+    scope_push(SC_TEMPLATE, NULL);
+    struct ctparam *ps = NULL;
+    int np = invent_abbrev_params(abbrev_lparen(), &ps, 0);
+    template_decl_rest(cls, access, at, home, ps, np, 0, 0);
+}
+
 /* At a declarator: is it qualified by two template-ids, A<T>::B<U>::? */
 static int nested_template_member(void)
 {
@@ -7100,6 +7311,20 @@ void parse_template_decl(struct cclass *cls, int access)
         skip_constraint(0);
         req_e = cx_pos;
     }
+    /* (an abbreviated template's `auto` parameters join them) */
+    if (cx_kind() != TOK_CX_TEMPLATE) {
+        int lp = abbrev_lparen();
+        if (lp >= 0)
+            np = invent_abbrev_params(lp, &ps, np);
+    }
+    template_decl_rest(cls, access, at, home, ps, np, req_s, req_e);
+}
+
+static void template_decl_rest(struct cclass *cls, int access,
+                               const struct ctok *at, struct cscope *home,
+                               struct ctparam *ps, int np, int req_s,
+                               int req_e)
+{
     int decl = cx_pos;
     if (cx_kind() == TOK_CX_TEMPLATE) {
         /* template<class T> template<class U> R A<T>::f(U): a member

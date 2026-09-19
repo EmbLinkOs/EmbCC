@@ -211,4 +211,22 @@ struct S {
 int tags_b();                        // side B calls side A's
 }
 
+// pointers to member functions, virtual or not, passed both ways (the
+// representation differs by target: Itanium's, ARM's variant)
+namespace pmf {
+struct Pm {
+    int k;
+    virtual int v(int x) const;      // g++ defines them (b.cc)
+    int nv(int x) const;
+    virtual ~Pm();
+};
+struct Pd : Pm {
+    int v(int x) const override;
+};
+using F = int (Pm::*)(int) const;
+int call(const Pm &, F, int);        // g++ calls embcc's
+F pick(int which);                   // embcc calls g++'s (2: null)
+bool same(F, F);                     // g++ compares
+}
+
 #endif
