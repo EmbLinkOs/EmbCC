@@ -1374,6 +1374,7 @@ char *cpp_process(const char *path, const char *src,
              * interpreter cannot do */
             "__cpp_constexpr_dynamic_alloc 201907L",
             "__cpp_decltype_auto 201304L",
+            "__cpp_deduction_guides 201703L",
             "__cpp_delegating_constructors 200604L",
             "__cpp_enumerator_attributes 201411L",
             "__cpp_fold_expressions 201603L",

@@ -856,6 +856,11 @@ static struct ics object_ics(struct cexpr *obj, struct cfunc *f)
 
 static int resolve_ambiguous;
 
+int expr_resolve_was_ambiguous(void)
+{
+    return resolve_ambiguous;
+}
+
 /* A call's explicit template arguments (f<int>(x)), for the template
  * candidates of the next resolution. */
 static struct ctarg *cur_targs;
@@ -890,6 +895,8 @@ static int instantiate_candidates(struct cfunc **fs, int nf,
         if (!deduce_call(f->tmpl, expl, nexpl, xa, nx, &targs, &nt))
             continue;
         struct cfunc *spec = func_instance(f->tmpl, targs, nt);
+        if (spec && f->inherited)       /* a base's constructor template */
+            spec = inherited_spec(f, spec);
         if (spec)
             r[n++] = spec;
     }
@@ -2785,6 +2792,31 @@ static struct cexpr *functional_cast(struct cty *t, const struct ctok *at)
     return init_object(t, INIT_DIRECT, args, na, at);
 }
 
+/* C(args) or C{args}, C a class template: its arguments deduced from
+ * these (12.2.2.9), then a C<...> made of them */
+static struct cexpr *ctad_cast(struct ctemplate *tm, const struct ctok *at)
+{
+    if (cx_kind() == TOK_LBRACE) {
+        struct cexpr *l = parse_braced_list();
+        struct cty *t = ctad_deduce(tm, INIT_LIST, &l, 1, at);
+        struct cexpr *r = init_object(t, INIT_LIST, &l, 1, at);
+        return r ? r : init_object(t, INIT_VALUE, NULL, 0, at);
+    }
+    cx_expect(TOK_LPAREN, "'('");
+    struct cexpr **args = NULL;
+    int na = 0, cap = 0;
+    while (cx_kind() != TOK_RPAREN) {
+        list_element(&args, &na, &cap);
+        if (!cx_accept(TOK_COMMA))
+            break;
+    }
+    cx_expect(TOK_RPAREN, "')'");
+    struct cty *t = ctad_deduce(tm, na ? INIT_DIRECT : INIT_VALUE, args, na,
+                                at);
+    return na ? init_object(t, INIT_DIRECT, args, na, at)
+              : init_object(t, INIT_VALUE, NULL, 0, at);
+}
+
 /* At `(`: is a type-id inside (a cast) rather than an expression? */
 static int paren_type_id(void)
 {
@@ -3505,6 +3537,9 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
             return ex_int(concept_satisfied(y->tmpl, args, n, at),
                           ct_basic(CT_BOOL));
         }
+        if (y->tmpl->kind == TK_CLASS && !y->tmpl->tparam &&
+            (cx_kind() == TOK_LPAREN || cx_kind() == TOK_LBRACE))
+            return ctad_cast(y->tmpl, at);    /* C(args): C's deduced */
         if (y->tmpl->kind != TK_VAR || cx_kind() != TOK_LT)
             cx_error(at, "template '%s' used without its arguments", name);
         struct ctarg *args;

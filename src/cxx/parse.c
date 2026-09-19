@@ -393,6 +393,18 @@ struct cty *peek_type_name(int *ntok)
         return d;
     }
     struct csym *y = find_final(q.scope, tok_text(q.fin));
+    if (y && y->k == CS_TEMPLATE && y->tmpl->kind == TK_CLASS &&
+        !y->tmpl->tparam && cx_kind_at(q.fin + 1) == TOK_IDENT &&
+        !cx_pattern) {
+        /* C x(args): a placeholder for a deduced class type (9.2.9.8),
+         * C's arguments deduced from the initializer */
+        struct cty *d = xcalloc(1, sizeof *d);
+        d->k = CT_AUTO;
+        d->tmpl = y->tmpl;
+        *ntok = q.fin + 1;
+        peek_half = 0;
+        return d;
+    }
     if (as_template(y) && cx_kind_at(q.fin + 1) == TOK_LT) {
         int save = cx_pos, save_half = cx_half_gt;
         cx_pos += q.fin;
@@ -1683,6 +1695,11 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
             continue;
         if (d->kind == DN_CONV && !ct_same(f->type->to, ft->to))
             continue;       /* conversion functions differ by their type */
+        if (f->inherited) {
+            /* the class's own constructor hides the inherited one */
+            f->unsat = 1;
+            continue;
+        }
         if (!ct_same(f->type->to, ft->to))
             cx_error(d->at, "'%s' redeclared with a different return type",
                      d->name);
@@ -2164,10 +2181,528 @@ static struct cty *match_auto(struct cty *P, struct cty *A,
 }
 
 /* A declared type P holding `auto`, deduced from its initializer. */
+/* ---- class template argument deduction (12.2.2.9) ---- */
+
+static void skip_default_init_tokens(void);
+static void skip_declaration(void);
+static int parse_tparams(struct ctparam **out);
+static int tparam_base;
+
+/* A deduction candidate: a function template made of a constructor of
+ * the primary template (C's own parameters first, then the constructor's
+ * if it is a template: `template<class... P> C(params) -> C<T...>`), of a
+ * deduction guide, or — for an aggregate — of its members' types. */
+struct ctad_cand {
+    struct ctemplate t;       /* the parameters, and pattern.type */
+    struct cfunc pat;
+    int nclass;               /* made of a constructor: C's parameters */
+    int ptok;                 /* the parameter list's `(` (-1: aggregate) */
+    int ret_tok;              /* a guide: its result type */
+    struct cscope *pscope;    /* a constructor template's own parameters */
+    int from_guide, is_explicit, il_first;
+    struct cty **agg;         /* an aggregate's member types, in order */
+    int nagg;
+    struct ctad_cand *next;
+};
+
+/* C<T...> with C's own parameters as its arguments (the injected-class-
+ * name, in a pattern) */
+static struct cty *ctad_self(struct ctemplate *tm)
+{
+    struct cty *d = xcalloc(1, sizeof *d);
+    d->k = CT_TID;
+    d->tmpl = tm;
+    d->ntargs = tm->nparams;
+    d->targs = xcalloc((size_t)(tm->nparams ? tm->nparams : 1),
+                       sizeof *d->targs);
+    for (int i = 0; i < tm->nparams; i++) {
+        struct ctarg *a = &d->targs[i];
+        struct ctparam *p = &tm->params[i];
+        struct ctarg one;
+        memset(&one, 0, sizeof one);
+        one.kind = p->kind;
+        if (p->kind == TP_TYPE)
+            one.type = ct_tparam(i, p->name);
+        else if (p->kind == TP_VALUE)
+            one.vtype = ct_tparam(i, p->name);
+        if (p->pack) {
+            /* T...: an expansion of the pack's pattern */
+            struct cty *pt = one.type;
+            if (pt) {
+                pt = xmalloc(sizeof *pt);
+                *pt = *one.type;
+                pt->pack_expansion = 1;
+                one.type = pt;
+            }
+            a->kind = p->kind;
+            a->is_pack = a->expansion = 1;
+            a->elems = xmalloc(sizeof *a->elems);
+            a->elems[0] = one;
+            a->nelems = 1;
+        } else {
+            *a = one;
+        }
+    }
+    return d;
+}
+
+static int is_il_param(struct cty *t)
+{
+    t = ct_strip_ref(t);
+    return (t->k == CT_TID && is_std_il(t->tmpl)) ||
+           (t->k == CT_CLASS && t->cls->tmpl && is_std_il(t->cls->tmpl));
+}
+
+static struct ctad_cand *ctad_new(struct ctemplate *tm, struct ctparam *ps,
+                                  int np, struct cty *ft, struct cscope *scope)
+{
+    struct ctad_cand *c = xcalloc(1, sizeof *c);
+    c->t.kind = TK_FUNC;
+    c->t.name = tm->name;
+    c->t.scope = scope;
+    c->t.params = ps;
+    c->t.nparams = np;
+    c->t.head_end = -1;
+    c->t.pattern = &c->pat;
+    c->pat.name = tm->name;
+    c->pat.type = ft;
+    c->pat.tmpl = &c->t;
+    c->il_first = ft->np >= 1 && is_il_param(ft->params[0]);
+    return c;
+}
+
+/* The candidates made of C's constructors: its body scanned for them (and
+ * for the member typedefs their parameters may name), each parameter
+ * list read as a pattern */
+static void ctad_from_ctors(struct ctemplate *tm, struct ctad_cand **list)
+{
+    if (tm->head_end < 0 || !tm->pscope)
+        return;
+    struct parse_state *st = parse_save();
+    int nclass = tm->nparams;
+    struct cscope *cs = scope_new(SC_BLOCK, NULL, tm->pscope);
+    struct csym *self = scope_add(cs, CS_TYPEDEF, tm->name);
+    self->type = ctad_self(tm);
+    cx_pattern = 1;
+    cx_half_gt = 0;
+    cx_in_targs = 0;
+    cx_pos = tm->head_end;
+    while (cx_kind() != TOK_LBRACE && cx_kind() != TOK_EOF) {
+        if (cx_kind() == TOK_LPAREN)
+            cx_skip_balanced();
+        else
+            cx_advance();
+    }
+    cx_advance();
+    int nctors = 0, user = 0;
+    struct cty **agg = NULL;
+    int nagg = 0, capagg = 0;
+    while (cx_kind() != TOK_RBRACE && cx_kind() != TOK_EOF) {
+        int start = cx_pos;
+        enum tok_kind k = cx_kind();
+        if ((k == TOK_CX_PUBLIC || k == TOK_CX_PRIVATE ||
+             k == TOK_CX_PROTECTED) && cx_kind_at(1) == TOK_COLON) {
+            cx_pos += 2;
+            continue;
+        }
+        if (k == TOK_SEMI) {
+            cx_advance();
+            continue;
+        }
+        jmp_buf jb;
+        void *saved = cx_sfinae;
+        struct parse_state *mst = parse_save();
+        if (setjmp(jb)) {
+            parse_restore(mst);
+            cx_sfinae = saved;
+            tparam_base = 0;
+            cx_pos = start;
+            cx_half_gt = 0;
+            skip_declaration();
+            continue;
+        }
+        cx_sfinae = &jb;
+        cx_scope = cs;
+        if (k == TOK_KW_TYPEDEF) {
+            cx_advance();
+            struct dspec ds;
+            parse_dspec(&ds);
+            for (;;) {
+                struct declarator d;
+                memset(&d, 0, sizeof d);
+                struct cty *t = parse_declarator(ds.type, &d, DK_NAMED);
+                if (d.name) {
+                    struct csym *y = scope_add(cs, CS_TYPEDEF, d.name);
+                    y->type = t;
+                }
+                if (!cx_accept(TOK_COMMA))
+                    break;
+            }
+            cx_expect(TOK_SEMI, "';'");
+        } else if (k == TOK_CX_USING && cx_kind_at(1) == TOK_IDENT &&
+                   cx_kind_at(2) == TOK_ASSIGN) {
+            const char *n = cx_peek(1)->t.text;
+            cx_pos += 3;
+            struct cty *t = parse_type_id();
+            struct csym *y = scope_add(cs, CS_TYPEDEF, n);
+            y->type = t;
+            cx_expect(TOK_SEMI, "';'");
+        } else {
+            /* [template<...>] [explicit] [constexpr] ... C( : a
+             * constructor; else another member (a data member's type is
+             * kept, for an aggregate) */
+            struct ctparam *tps = NULL;
+            int ntps = 0;
+            struct cscope *ts = NULL;
+            if (k == TOK_CX_TEMPLATE && cx_kind_at(1) == TOK_LT) {
+                cx_advance();
+                cx_advance();
+                ts = scope_push(SC_TEMPLATE, NULL);
+                int saved_base = tparam_base;
+                tparam_base = nclass;
+                ntps = parse_tparams(&tps);
+                tparam_base = saved_base;
+                if (cx_accept(TOK_CX_REQUIRES))
+                    skip_constraint(0);
+            }
+            int is_explicit = 0, is_static = 0, other = 0;
+            for (;;) {
+                enum tok_kind q = cx_kind();
+                if (q == TOK_CX_EXPLICIT) {
+                    is_explicit = 1;
+                    cx_advance();
+                    if (cx_kind() == TOK_LPAREN)
+                        cx_skip_balanced();   /* (conditional: taken as
+                                               * explicit) */
+                } else if (q == TOK_CX_CONSTEXPR || q == TOK_KW_INLINE ||
+                           q == TOK_CX_CONSTEVAL) {
+                    cx_advance();
+                } else if (q == TOK_LBRACKET && cx_kind_at(1) ==
+                           TOK_LBRACKET) {
+                    cx_skip_balanced();
+                } else if (q == TOK_KW_ATTRIBUTE) {
+                    cx_advance();
+                    cx_skip_balanced();
+                } else {
+                    break;
+                }
+            }
+            if (cx_kind() == TOK_IDENT && cx_kind_at(1) == TOK_LPAREN &&
+                strcmp(cx_cur()->t.text, tm->name) == 0) {
+                cx_advance();
+                int ptok = cx_pos;
+                struct cty *ft = parse_params();
+                user = 1;
+                /* not the copy or move constructor: that is the copy
+                 * deduction candidate's */
+                struct cty *p0 = ft->np == 1 ? ct_unqual(ct_strip_ref(
+                                                   ft->params[0])) : NULL;
+                if (!(p0 && p0->k == CT_TID && p0->tmpl == tm)) {
+                    int np = nclass + ntps;
+                    struct ctparam *ps = xcalloc((size_t)(np ? np : 1),
+                                                 sizeof *ps);
+                    memcpy(ps, tm->params, (size_t)nclass * sizeof *ps);
+                    if (ntps)
+                        memcpy(ps + nclass, tps, (size_t)ntps * sizeof *ps);
+                    struct ctad_cand *c = ctad_new(tm, ps, np, ft,
+                                                   tm->scope);
+                    c->nclass = nclass;
+                    c->ptok = ptok;
+                    c->pscope = ts;
+                    c->is_explicit = is_explicit;
+                    c->next = *list;
+                    *list = c;
+                    nctors++;
+                }
+                cx_pos = start;
+                cx_half_gt = 0;
+                skip_declaration();
+            } else if (!ts && (at_type_start() || cx_kind() == TOK_IDENT) &&
+                       cx_kind() != TOK_CX_FRIEND &&
+                       cx_kind() != TOK_KW_STATIC &&
+                       cx_kind() != TOK_CX_USING &&
+                       cx_kind() != TOK_KW_STATIC_ASSERT &&
+                       cx_kind() != TOK_TILDE) {
+                /* a data member: T a, b; (a function: not one) */
+                struct dspec ds;
+                parse_dspec(&ds);
+                is_static = ds.storage == SK_STATIC;
+                if (ds.type && !is_static && !ds.is_friend &&
+                    !ds.cls_defined) {
+                    for (;;) {
+                        struct declarator d;
+                        memset(&d, 0, sizeof d);
+                        struct cty *t = parse_declarator(ds.type, &d,
+                                                         DK_NAMED);
+                        if (t->k == CT_FUNC || !d.name) {
+                            other = 1;
+                            break;
+                        }
+                        if (nagg == capagg) {
+                            capagg = capagg ? capagg * 2 : 8;
+                            agg = xrealloc(agg, (size_t)capagg *
+                                                sizeof *agg);
+                        }
+                        agg[nagg++] = t;
+                        if (cx_kind() == TOK_ASSIGN || cx_kind() ==
+                            TOK_LBRACE)
+                            skip_default_init_tokens();
+                        if (!cx_accept(TOK_COMMA))
+                            break;
+                    }
+                }
+                cx_pos = start;
+                cx_half_gt = 0;
+                skip_declaration();
+            } else {
+                cx_pos = start;
+                cx_half_gt = 0;
+                skip_declaration();
+            }
+            (void)other;
+        }
+        cx_sfinae = saved;
+        int end = cx_pos;
+        parse_restore(mst);
+        cx_pos = end;
+        cx_half_gt = 0;
+    }
+    if (!user && nagg) {
+        /* an aggregate (C++20): its members' types, in order */
+        struct cty *ft = ct_func(ct_basic(CT_VOID), agg, nagg, 0);
+        struct ctad_cand *c = ctad_new(tm, tm->params, nclass, ft,
+                                       tm->scope);
+        c->nclass = nclass;
+        c->ptok = -1;
+        c->agg = agg;
+        c->nagg = nagg;
+        c->next = *list;
+        *list = c;
+    }
+    (void)nctors;
+    parse_restore(st);
+}
+
+/* Past a default member initializer's tokens (= x or {x}) */
+static void skip_default_init_tokens(void)
+{
+    if (cx_kind() == TOK_LBRACE) {
+        cx_skip_balanced();
+        return;
+    }
+    cx_advance();
+    int depth = 0;
+    while (cx_kind() != TOK_EOF) {
+        enum tok_kind k = cx_kind();
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
+            cx_skip_balanced();
+            continue;
+        }
+        if (k == TOK_LT)
+            depth++;
+        else if (k == TOK_GT && depth)
+            depth--;
+        else if (!depth && (k == TOK_SEMI || k == TOK_COMMA))
+            return;
+        cx_advance();
+    }
+}
+
+/* The candidates made of C's deduction guides, in declaration order */
+static void ctad_from_guides(struct ctemplate *tm, struct ctad_cand **list)
+{
+    struct cguide *gs[256];
+    int n = 0;
+    for (struct cguide *g = tm->guides; g && n < 256; g = g->next)
+        gs[n++] = g;
+    for (int i = 0; i < n; i++) {           /* (the list is newest first) */
+        struct cguide *g = gs[i];
+        jmp_buf jb;
+        void *saved = cx_sfinae;
+        struct parse_state *st = parse_save();
+        if (setjmp(jb)) {
+            parse_restore(st);
+            cx_sfinae = saved;
+            continue;
+        }
+        cx_sfinae = &jb;
+        cx_scope = g->scope;
+        cx_pos = g->tok + 1;
+        cx_half_gt = 0;
+        cx_in_targs = 0;
+        cx_pattern = g->nparams > 0;
+        int ptok = cx_pos;
+        struct cty *ft = parse_params();
+        cx_expect(TOK_ARROW, "'->' in a deduction guide");
+        int ret = cx_pos;
+        cx_sfinae = saved;
+        parse_restore(st);
+        struct cscope *home = g->nparams && g->scope->parent
+                              ? g->scope->parent : g->scope;
+        struct ctad_cand *c = ctad_new(tm, g->params, g->nparams, ft, home);
+        c->from_guide = 1;
+        c->ptok = ptok;
+        c->ret_tok = ret;
+        c->is_explicit = g->is_explicit;
+        c->pscope = g->scope;
+        c->next = *list;
+        *list = c;
+    }
+}
+
+/* A viable candidate: the class it deduces, and its parameters with the
+ * arguments substituted (as a function overload resolution compares) */
+struct ctad_try {
+    struct ctad_cand *c;
+    struct cty *cls;
+    struct cfunc *fn;
+};
+
+static int ctad_try(struct ctad_cand *c, struct ctemplate *tm,
+                    struct cexpr **args, int na, struct ctad_try *out,
+                    const struct ctok *at)
+{
+    struct ctarg *targs;
+    int nt;
+    if (!deduce_call(&c->t, NULL, 0, args, na, &targs, &nt))
+        return 0;
+    jmp_buf jb;
+    void *saved = cx_sfinae;
+    struct parse_state *st = parse_save();
+    if (setjmp(jb)) {
+        parse_restore(st);
+        cx_sfinae = saved;
+        return 0;
+    }
+    cx_sfinae = &jb;
+    struct cty *cls;
+    struct cty *ft;
+    cx_half_gt = 0;
+    cx_in_targs = 0;
+    cx_pattern = 0;
+    if (c->from_guide) {
+        struct cscope *b = tparam_scope(c->t.params, c->t.nparams, targs, nt,
+                                        c->t.scope);
+        cx_scope = b;
+        cx_pos = c->ret_tok;
+        cls = parse_type_id();
+        cx_scope = b;
+        cx_pos = c->ptok;
+        ft = parse_params();
+    } else {
+        cls = ct_class(class_instance(tm, targs, c->nclass, at));
+        class_ensure(cls->cls);
+        if (c->ptok < 0) {
+            /* an aggregate: its members' types, in this instance */
+            struct cty **ps = xcalloc((size_t)c->nagg, sizeof *ps);
+            int k = 0;
+            for (int i = 0; i < cls->cls->nfields && k < c->nagg; i++)
+                if (cls->cls->fields[i]->name)
+                    ps[k++] = cls->cls->fields[i]->type;
+            ft = ct_func(ct_basic(CT_VOID), ps, k, 0);
+        } else {
+            struct cscope *b = cls->cls->scope;
+            if (c->t.nparams > c->nclass)
+                b = tparam_scope(c->t.params + c->nclass,
+                                 c->t.nparams - c->nclass, targs + c->nclass,
+                                 nt - c->nclass, b);
+            cx_scope = b;
+            cx_pos = c->ptok;
+            ft = parse_params();
+        }
+    }
+    cx_sfinae = saved;
+    parse_restore(st);
+    struct cfunc *f = xcalloc(1, sizeof *f);
+    f->name = tm->name;
+    f->type = ft;
+    f->pnames = ft->pnames;
+    f->defargs = ft->defargs;
+    f->is_explicit = c->is_explicit;
+    f->vslot = -1;
+    out->c = c;
+    out->cls = cls;
+    out->fn = f;
+    return 1;
+}
+
+struct cty *ctad_deduce(struct ctemplate *tm, int form, struct cexpr **args,
+                        int na, const struct ctok *at)
+{
+    int list = form == INIT_LIST || form == INIT_COPY_LIST;
+    struct cexpr **xs = args;
+    int nx = na;
+    if (list) {
+        xs = args[0]->a;
+        nx = args[0]->na;
+    }
+    if (form == INIT_DEFAULT || form == INIT_VALUE)
+        nx = 0;
+    /* the copy deduction candidate: C(C<T...>) -> C<T...> */
+    if (nx == 1 && xs[0]->t && xs[0]->t->k == CT_CLASS &&
+        !(xs[0]->k == E_INITLIST && !xs[0]->t)) {
+        struct cclass *k = xs[0]->t->cls;
+        class_ensure(k);
+        for (struct cclass *b = k; b; ) {
+            if (b->tmpl == tm)
+                return ct_class(b);
+            b = b->nbases == 1 ? b->bases[0].cls : NULL;
+        }
+    }
+    if (!tm->ctad_done) {
+        tm->ctad_done = 1;
+        struct ctad_cand *cands = NULL;
+        ctad_from_guides(tm, &cands);
+        ctad_from_ctors(tm, &cands);
+        tm->ctad = cands;
+    }
+    int flags = form == INIT_COPY || form == INIT_COPY_LIST ? RS_NO_EXPLICIT
+                                                           : 0;
+    struct ctad_try tries[128];
+    int nt = 0;
+    /* a braced list: initializer-list candidates first, the list one
+     * argument; then every candidate with the elements */
+    for (int phase = list ? 0 : 1; phase < 2 && !nt; phase++) {
+        for (struct ctad_cand *c = tm->ctad; c && nt < 128; c = c->next) {
+            if (phase == 0 && !c->il_first)
+                continue;
+            if (ctad_try(c, tm, phase == 0 ? args : xs, phase == 0 ? 1 : nx,
+                         &tries[nt], at))
+                nt++;
+        }
+        if (nt) {
+            struct cfunc *set = NULL, **tail = &set;
+            for (int i = 0; i < nt; i++) {
+                *tail = tries[i].fn;
+                tail = &tries[i].fn->next;
+            }
+            struct cfunc *best = resolve_ex(set, NULL, phase == 0 ? args : xs,
+                                            phase == 0 ? 1 : nx, NULL, NULL,
+                                            flags);
+            for (int i = 0; best && i < nt; i++)
+                if (tries[i].fn == best)
+                    return tries[i].cls;
+            if (!best && expr_resolve_was_ambiguous()) {
+                /* equally good: a guide over a constructor (12.2.4.3) */
+                for (int i = 0; i < nt; i++)
+                    if (tries[i].c->from_guide)
+                        return tries[i].cls;
+                return tries[0].cls;
+            }
+            nt = 0;                         /* none viable */
+        }
+    }
+    cx_error(at, "cannot deduce the template arguments of '%s' from this "
+                 "initializer", tm->name);
+    return NULL;
+}
+
 static struct cty *deduce_auto(struct cty *P, enum init_form form,
                                struct cexpr **args, int na,
                                const struct ctok *at)
 {
+    if (P->k == CT_AUTO && P->tmpl)
+        return ct_qual(ctad_deduce(P->tmpl, form, args, na, at), P->q);
     if (na != 1)
         cx_error(at, "cannot deduce 'auto' from this initializer");
     struct cexpr *e = args[0];
@@ -3097,6 +3632,142 @@ static void parse_static_assert(void)
 }
 
 /* using namespace N; / using N::x; / using T = type; */
+/* ---- inheriting constructors ---- */
+
+static struct { struct cfunc *bf; struct cclass *c; struct cfunc *f; }
+    *inh;
+static int ninh, capinh;
+
+struct cfunc *inherited_ctor(struct cclass *c, struct cfunc *bf)
+{
+    for (int i = 0; i < ninh; i++)
+        if (inh[i].bf == bf && inh[i].c == c)
+            return inh[i].f;
+    struct cfunc *f = xcalloc(1, sizeof *f);
+    f->name = c->name;
+    f->type = bf->type;
+    f->pnames = bf->pnames;
+    f->defargs = bf->defargs;
+    f->owner = c->scope;
+    f->cls = c;
+    f->is_ctor = 1;
+    f->is_explicit = bf->is_explicit;
+    f->is_constexpr = bf->is_constexpr;
+    f->is_inline = 1;
+    f->inherited = bf;
+    f->access = CA_PUBLIC;
+    f->vslot = -1;
+    f->body_tok = f->mi_tok = -1;
+    f->line = bf->line;
+    f->file = bf->file;
+    if (!bf->tmpl)
+        func_register(f);
+    if (ninh == capinh) {
+        capinh = capinh ? capinh * 2 : 16;
+        inh = xrealloc(inh, (size_t)capinh * sizeof *inh);
+    }
+    inh[ninh].bf = bf;
+    inh[ninh].c = c;
+    inh[ninh].f = f;
+    ninh++;
+    return f;
+}
+
+/* A specialization of a base's constructor template, chosen through the
+ * entry that stands for it in a derived class: wrapped as that class's,
+ * level by level when the base inherited it too */
+struct cfunc *inherited_spec(struct cfunc *entry, struct cfunc *spec)
+{
+    struct cfunc *from = entry->inherited;
+    if (from->inherited && from->tmpl)
+        spec = inherited_spec(from, spec);
+    return inherited_ctor(entry->cls, spec);
+}
+
+/* using B::B in class c: each of B's constructors but the copy and move
+ * ones (and the default one) — unless c declares one like it */
+static void inherit_ctors(struct cclass *c, struct cclass *b,
+                          const struct ctok *at)
+{
+    int base = 0;
+    for (int i = 0; i < c->nbases; i++)
+        base |= c->bases[i].cls == b;
+    if (!base)
+        cx_error(at, "'%s' is not a direct base of '%s'", b->name,
+                 c->name ? c->name : "class");
+    class_ensure(b);
+    for (struct cfunc *g = b->ctors; g; g = g->next) {
+        struct cty *ft = g->type;
+        if (!g->tmpl && ft->np == 0)
+            continue;
+        if (ft->np == 1 && !g->tmpl) {
+            struct cty *p = ct_unqual(ct_strip_ref(ft->params[0]));
+            if (p->k == CT_CLASS && p->cls == b)
+                continue;                   /* copy, move */
+        }
+        int hidden = 0;
+        for (struct cfunc *h = c->ctors; h && !hidden; h = h->next)
+            hidden = !h->inherited && !h->tmpl && !g->tmpl &&
+                     same_signature(h->type, ft);
+        if (hidden)
+            continue;
+        struct cfunc *f = inherited_ctor(c, g);
+        if (g->tmpl)
+            f->tmpl = g->tmpl;      /* each specialization wrapped */
+        struct cfunc **tail = &c->ctors;
+        while (*tail)
+            tail = &(*tail)->next;
+        *tail = f;
+    }
+}
+
+/* An inherited constructor's definition: the base from its arguments
+ * (forwarded as they came), the rest as a defaulted constructor would */
+void define_inherited_ctor(struct cfunc *f)
+{
+    if (f->defined)
+        return;
+    struct cfunc *bf = f->inherited;
+    const struct ctok *at = cx_cur();
+    struct cty *ft = f->type;
+    f->defined = 1;
+    struct cfunc *savefn = cx_curfn;
+    struct cstmt *saveblk = cx_curblk;
+    int saved_uneval = cx_unevaluated;
+    cx_unevaluated = 0;
+    cx_curfn = f;
+    f->params = xcalloc((size_t)(ft->np ? ft->np : 1), sizeof *f->params);
+    struct cexpr **args = xcalloc((size_t)(ft->np ? ft->np : 1),
+                                  sizeof *args);
+    for (int i = 0; i < ft->np; i++) {
+        struct cvar *v = new_local(NULL, ft->params[i], at);
+        v->is_param = 1;
+        f->params[i] = v;
+        struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type),
+                                 ft->params[i]->k == CT_LREF ? VC_LVALUE
+                                                             : VC_XVALUE);
+        e->var = v;
+        args[i] = e;
+    }
+    struct cvar *tv = new_local("this", NULL, at);
+    tv->cname = "this";
+    tv->type = ct_ptr(ct_class(f->cls));
+    tv->is_param = 1;
+    f->this_var = tv;
+    struct meminit_raw mi;
+    memset(&mi, 0, sizeof mi);
+    mi.cls = bf->cls;
+    mi.name = bf->cls->name;
+    mi.args = args;
+    mi.na = ft->np;
+    mi.at = at;
+    ctor_meminit(f, &mi, 1);
+    f->body = st_new(S_BLOCK);
+    cx_unevaluated = saved_uneval;
+    cx_curfn = savefn;
+    cx_curblk = saveblk;
+}
+
 static void parse_using(void)
 {
     const struct ctok *at = cx_cur();
@@ -3156,6 +3827,13 @@ static void parse_using(void)
         cx_advance();
     }
     cx_expect(TOK_SEMI, "';'");
+    struct cclass *here = cx_scope->k == SC_CLASS ? cx_scope->cls : NULL;
+    if (here && q.scope->k == SC_CLASS && q.scope->cls->name &&
+        strcmp(name, q.scope->cls->name) == 0 && !cx_pattern) {
+        /* using B::B; : B's constructors are this class's too (11.9.4) */
+        inherit_ctors(here, q.scope->cls, at);
+        return;
+    }
     struct csym *src = lookup_in(q.scope, name);
     if (!src)
         cx_error(at, "'%s' is not declared in '%s'", name,
@@ -5357,6 +6035,9 @@ struct cty *parse_value_tparam_type(int tok)
     return parse_declarator(ds.type, &d, DK_NAMED | DK_ABSTRACT);
 }
 
+/* (tparam_base: parse_tparams's first index — a constructor template's
+ * parameters follow its class's in a deduction guide made of it) */
+
 static int parse_tparams(struct ctparam **out)
 {
     int n = 0, cap = 4;
@@ -5396,7 +6077,7 @@ static int parse_tparams(struct ctparam **out)
             }
             struct csym *y = scope_add(cx_scope, CS_TYPEDEF,
                                        p->name ? p->name : "");
-            y->type = ct_tparam(n, p->name);
+            y->type = ct_tparam(tparam_base + n, p->name);
             y->pack_param = p->pack;
             n++;
             if (!cx_accept(TOK_COMMA))
@@ -5426,7 +6107,7 @@ static int parse_tparams(struct ctparam **out)
             }
             struct csym *y = scope_add(cx_scope, CS_TYPEDEF,
                                        p->name ? p->name : "");
-            y->type = ct_tparam(n, p->name);
+            y->type = ct_tparam(tparam_base + n, p->name);
             y->pack_param = p->pack;
         } else if (cx_kind() == TOK_CX_TEMPLATE) {
             p->kind = TP_TEMPLATE;
@@ -5468,7 +6149,7 @@ static int parse_tparams(struct ctparam **out)
             ph->name = p->name ? p->name : "";
             ph->nparams = -1;               /* a placeholder: dependent */
             ph->head_end = -1;
-            ph->tparam = n + 1;
+            ph->tparam = tparam_base + n + 1;
             ph->tt_pack = tt_pack;
             struct csym *y = scope_add(cx_scope, CS_TEMPLATE, ph->name);
             y->tmpl = ph;
@@ -5498,7 +6179,7 @@ static int parse_tparams(struct ctparam **out)
             v->name = v->cname = p->name ? p->name : "";
             v->type = p->vtype;
             v->is_tparam = 1;
-            v->tparam_index = n;
+            v->tparam_index = tparam_base + n;
             struct csym *y = scope_add(cx_scope, CS_VAR, v->name);
             y->var = v;
             y->pack_param = p->pack;
@@ -5965,6 +6646,7 @@ void parse_template_decl(struct cclass *cls, int access)
             t->params = ps;
             t->nparams = np;
             t->head_end = cx_pos;
+            t->pscope = cx_scope;       /* (its parameters: for CTAD) */
             skip_class_def();
         } else {
             cx_expect(TOK_SEMI, "';'");

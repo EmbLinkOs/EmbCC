@@ -1521,6 +1521,10 @@ void func_ensure_body(struct cfunc *f)
         define_defaulted_cmp(f);
         return;
     }
+    if (f->inherited) {
+        define_inherited_ctor(f);
+        return;
+    }
     if (!f->lazy) {
         /* a member of an instance, defined outside its class */
         if (f->cls && !f->is_implicit && !f->is_defaulted &&

@@ -425,6 +425,9 @@ struct ctemplate {
                                * TK_CONCEPT: the constraint, decl_tok on */
     int builtin;              /* the compiler's own: BT_* */
     struct cguide *guides;    /* TK_CLASS: its deduction guides */
+    struct ctad_cand *ctad;   /* ... the candidates made of them and of its
+                               * constructors, once built */
+    int ctad_done;
     struct cscope *pscope;    /* TK_ALIAS: its parameters (as patterns) */
     struct cty *alias_pat;    /* ... its type in terms of them (deduction
                                * sees through it), once read */
@@ -433,6 +436,12 @@ struct ctemplate {
 /* An alias template's type with its own parameters unsubstituted (NULL
  * when it cannot be read so) */
 struct cty *alias_pattern(struct ctemplate *t);
+struct ctad_cand;
+/* The class a placeholder C (a class template's name alone) stands for,
+ * its arguments deduced from an initializer (12.2.2.9) */
+struct cty *ctad_deduce(struct ctemplate *tm, int form, struct cexpr **args,
+                        int na, const struct ctok *at);
+
 /* A deduction guide (13.7.2.3): `template<params> C(P...) -> C<A...>;`,
  * kept as its tokens (at the name) with its template parameters (none
  * for a guide that is not a template), read when C's arguments are
@@ -489,6 +498,10 @@ void func_define_from(struct cfunc *f);
 /* A defaulted comparison operator: is f one, and its definition */
 int is_defaultable_cmp(struct cfunc *f);
 void define_defaulted_cmp(struct cfunc *f);
+/* The constructor of c inheriting base constructor bf, and its body */
+struct cfunc *inherited_ctor(struct cclass *c, struct cfunc *bf);
+struct cfunc *inherited_spec(struct cfunc *entry, struct cfunc *spec);
+void define_inherited_ctor(struct cfunc *f);
 struct cvar *var_define_from(struct ctemplate *t, int pos, struct ctarg *args,
                              struct cscope *ps);
 struct cscope *tparam_scope(struct ctparam *ps, int np, struct ctarg *args,
@@ -605,6 +618,10 @@ struct cfunc {
                                * candidate for overload resolution */
     struct cfunc *alias_of;   /* an overload set's entry a using-declaration
                                * made: this function, declared elsewhere */
+    struct cfunc *inherited;  /* an inherited constructor (using B::B): the
+                               * base's it forwards to (its template, for an
+                               * entry standing for a constructor template:
+                               * each specialization wrapped when chosen) */
     int local_inst;           /* an instance for a class with no linkage:
                                * internal, named as a local class's are */
     struct cstmt *fn_try;     /* a function-try-block: its handlers (S_TRY;
@@ -875,6 +892,8 @@ long expr_parse_const_as(const char *what, int as_bool);
 /* overload resolution's "standard conversions only" state, swapped out
  * by nested work (a class or body instantiated meanwhile) */
 int expr_swap_no_user_conv(int v);
+/* did the last probing resolution (no location) fail by a tie? */
+int expr_resolve_was_ambiguous(void);
 int expr_const(struct cexpr *e, long *out); /* integer constant expression */
 int cx_expr_nothrow(struct cexpr *e);   /* can it not throw? (noexcept) */
 /* e (of another class) made a c by one of its conversion functions: the

@@ -683,6 +683,11 @@ void class_complete(struct cclass *c)
                                    "yet");
     int private_field = 0;
     c->user_ctors = c->ctors != NULL;
+    /* inherited constructors (using B::B) make no aggregate, but leave the
+     * implicit default one declared (11.4.5.2) */
+    int own_ctors = 0;
+    for (struct cfunc *f = c->ctors; f; f = f->next)
+        own_ctors |= !f->inherited;
     struct cfunc *ucopy = NULL, *umove = NULL, *ucopy_as = NULL,
                  *umove_as = NULL;
     for (struct cfunc *f = c->ctors; f; f = f->next) {
@@ -751,7 +756,7 @@ void class_complete(struct cclass *c)
             !f->is_defaulted)
             udefault = 1;
     c->trivial_default = mdefault && !udefault &&
-                         (!c->user_ctors || c->has_default_ctor);
+                         (!own_ctors || c->has_default_ctor);
     c->trivial_for_calls = c->trivial_copy && c->trivial_dtor;
     int plain_bases = 1;
     for (int i = 0; i < c->nbases; i++)
@@ -765,7 +770,7 @@ void class_complete(struct cclass *c)
                     !udtor;
     if (c->pod_layout)
         c->nvsize = c->dsize = c->size;
-    if (!c->user_ctors)
+    if (!own_ctors)
         c->has_default_ctor = 1;
 
     /* the user's `= default`s: trivial or defined memberwise */
@@ -787,7 +792,7 @@ void class_complete(struct cclass *c)
 
     /* the implicit declarations (11.4.5.2, 11.4.5.3, 11.4.6, 11.4.7) */
     int any_user_copy = ucopy || umove || ucopy_as || umove_as;
-    if (!c->user_ctors)
+    if (!own_ctors)
         declare_implicit(c, SP_DEFAULT, c->trivial_default, 0);
     if (!ucopy)
         declare_implicit(c, SP_COPY, c->trivial_copy, umove || umove_as);
@@ -1042,10 +1047,17 @@ static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
     e->file = at->file;
     if (runs_no_code(f)) {
         /* a trivial default constructor does nothing; a trivial copy or
-         * move is the object's bytes */
+         * move is the object's bytes — a derived object's base part (a
+         * slice: random_access_iterator_tag passed as forward_iterator_tag) */
         if (f->special != SP_DEFAULT) {
+            struct cexpr *src = args[0];
+            if (src->t && src->t->k == CT_CLASS && src->t->cls != c) {
+                if (src->vc == VC_PRVALUE)
+                    src = ex_materialize(src);
+                src = to_base(src, c, 0);
+            }
             e->a = xmalloc(sizeof *e->a);
-            e->a[0] = args[0];
+            e->a[0] = src;
             e->na = 1;
         }
         return e;

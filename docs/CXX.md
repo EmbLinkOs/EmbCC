@@ -534,14 +534,36 @@ class instantiation re-entered while choosing its partial specialization
 enums mangled `Ut_`, `Ut0_`, ... as g++ does (they were `._anon`, not an
 identifier); a definition of a friend-declared function template reads
 its names where it is defined; defaulted comparisons are defined, not
-given an empty body; the constant evaluator bounds its nesting. Deduction
-guides are recorded (class template argument deduction itself: next).
+given an empty body; the constant evaluator bounds its nesting.
 tests/cxx `spaceship`; tests/libstdcxx/compare.cc (vector, string, pair
 and tuple `<=>`, a defaulted `<=>` over a string member, `std::sort`
 through the rewritten `<`) matches g++'s build on both targets.
 
-Next: class template argument deduction (the guides are kept),
-designated initializers (`<chrono>`), `<iomanip>`/`<locale>`/`<regex>`
+Class template argument deduction (C++17, with C++20's aggregates;
+`__cpp_deduction_guides` defined, so libstdc++'s guides are declared): a
+class template's name alone before a declarator, or before `(` / `{` in
+an expression, stands for the class its arguments are deduced for from
+the initializer. The candidates are function templates made of the
+deduction guides (their parameter lists and result types kept as tokens,
+read with the deduced arguments bound), of the primary template's
+constructors (its body scanned for them, and for the member typedefs
+their parameters name — constructor templates' parameters after the
+class's), and of an aggregate's members; the copy deduction candidate
+first; for a braced list, initializer-list constructors first with the
+list one argument. Each is deduced as a call's template arguments are,
+the viable ones compared by their substituted parameters (explicit ones
+not for copy-initialization, a guide winning a tie). Inheriting
+constructors (`using B::B;`): each base constructor but the default, copy
+and move ones becomes the class's (unless it declares one like it), its
+body the base built from the forwarded arguments — constructor templates
+wrapped per specialization, through as many levels as inherited them
+(`std::optional`'s storage). A class-type argument sliced to a base
+parameter by value (`random_access_iterator_tag` as
+`forward_iterator_tag`) now copies the base part. tests/cxx `ctad`;
+tests/libstdcxx/ctad.cc (pair, tuple, vector from a list and a range,
+array, optional, map from a list of pairs) matches g++ on both targets.
+
+Next: designated initializers (`<chrono>`), `<iomanip>`/`<locale>`/`<regex>`
 (explicit specializations of static data members), `<any>`, `<list>`,
 `<random>`, `<complex>`, `<string_view>`, `<memory_resource>`;
 out-of-class members of partial specializations are still skipped.
