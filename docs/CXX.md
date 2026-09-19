@@ -597,9 +597,39 @@ these `<list>`, `<any>`, `<string_view>`, `<random>`, `<iomanip>`,
 unordered_map, string_view, any, variant, mt19937 with a fixed seed,
 iomanip, designated initializers) matches g++'s build on both targets.
 
-Next: `<chrono>` and `<format>` (bit-fields in a class with bases),
-`<complex>` (GNU `__complex__` types), coroutines, `consteval` as more
-than `constexpr`.
+`<format>` and `<chrono>` (with its calendar) compile and run —
+`std::format` with widths, fill, precision and bases, durations,
+`year_month_day` arithmetic — and `<climits>`: EmbCC now ships a GCC-style
+`include/limits.h` (newlib's chains to it with `#include_next` in C++
+units, and it chains to newlib's when found first, as in the OS build; it
+only defines what the C library did not). On the way: a class whose only
+bases are empty (at offset 0, no vptr, no member displaced) is laid out
+as the plain struct of its members, bit-fields included (`_Spec :
+_SpecBase`); partial specializations written with fewer arguments than
+the template has (`__common_ref_impl<X&, Y&&>` of a `<A, B, class =
+void>`) match when the rest are the defaults; a template template
+parameter in a partial specialization's pattern is deduced
+(`__is_specialization_of<C<A...>, C>`); a parameter whose template
+parameters sit only in non-deduced contexts (`type_identity_t<C>`,
+`format_string<Args...>`) leaves the argument to its conversion; a
+written template-id's defaulted arguments are not compared
+(`basic_string_view<C>` against `basic_string_view<char, traits>`);
+`decltype(e)::type`; `switch` on a scoped enum; `__remove_cv` of an array
+removes its elements' cv; a block's using-declaration keeps
+argument-dependent lookup; `&&`-qualified members chosen for an rvalue
+object; an explicit instantiation (declaration) of one member of an
+instance; template arguments of a declarator naming one of several
+function templates read as written; default arguments of a function
+template's first declaration kept by its later definition; member
+template definitions with a requires-clause; the functions a constructed
+instance's vtables name are instantiated at the end of the unit;
+`__builtin_alloca` (in EmbCC's C too: an `IR_ALLOCA` alive until the
+function returns). tests/cxx `cxx20misc2`, tests/exec `alloca`;
+tests/libstdcxx/format.cc matches g++'s build on both targets.
+
+Next: `<complex>` (GNU `__complex__` types), `<coroutine>` (coroutines),
+`consteval` as more than `constexpr` (a format string is checked at run
+time for now), bit-fields in classes with non-empty bases.
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their

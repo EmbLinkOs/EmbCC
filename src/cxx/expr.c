@@ -961,6 +961,8 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
     int nv = 0;
     resolve_ambiguous = 0;
     struct cexpr *objlv = obj ? ex_deref(obj) : NULL;
+    if (objlv && obj->obj_xvalue)
+        objlv->vc = VC_XVALUE;       /* std::move(x).f(): f() && */
     for (int k = 0; k < nf; k++) {
         struct cfunc *f = fs[k];
         struct cty *ft = f->type;
@@ -1012,8 +1014,30 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
     if (nv == 0) {
         if (!at)
             return NULL;
-        cx_error(at, "no matching function for call to '%s(%s)'",
-                 what ? what : nf ? fs[0]->name : "?", arg_types(args, na));
+        if (cx_sfinae)
+            longjmp(*(jmp_buf *)cx_sfinae, 1);
+        diag_error_at(at->file, at->t.line, at->t.col,
+                      "no matching function for call to '%s(%s)'",
+                      what ? what : nf ? fs[0]->name : "?",
+                      arg_types(args, na));
+        for (int k = 0; k < nf && k < 6; k++) {
+            struct cfunc *f = fs[k];
+            char buf[512];
+            size_t n = 0;
+            buf[0] = 0;
+            for (int i = 0; i < f->type->np && n < sizeof buf - 64; i++)
+                n += (size_t)snprintf(buf + n, sizeof buf - n, "%s%s",
+                                      i ? ", " : "",
+                                      ct_name(f->type->params[i]));
+            diag_note_at(f->file ? f->file : "<c++>", f->line, 0,
+                         "candidate: %s(%s)%s", f->name, buf,
+                         f->type->variadic ? " ..." : "");
+        }
+        if (nf == 0 && templ)
+            diag_note_at(at->file, at->t.line, at->t.col,
+                         "no template's arguments could be deduced");
+        cx_inst_notes();
+        exit(1);
     }
     int best = 0;
     for (int i = 1; i < nv; i++)
@@ -3506,6 +3530,16 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         return address_of(args[0]);
     if (strcmp(n, "launder") == 0 && na == 1)
         return rvalue(args[0]);
+    if (strcmp(n, "alloca") == 0 && na == 1) {
+        /* stack memory, EmbCC's C's own builtin (no alloca function) */
+        struct cexpr *e = ex_new(E_BUILTIN, ct_ptr(ct_basic(CT_VOID)),
+                                 VC_PRVALUE);
+        e->name = "__builtin_alloca";
+        e->a = xmalloc(sizeof *e->a);
+        e->a[0] = convert(args[0], ct_size_t(), "__builtin_alloca");
+        e->na = 1;
+        return e;
+    }
     if (strcmp(n, "expect") == 0 && na == 2)
         return convert(args[0], ct_basic(CT_LONG), "__builtin_expect");
     if (strcmp(n, "constant_p") == 0 && na == 1) {
@@ -3714,7 +3748,9 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         e->name = name;
         e->line = at->t.line;
         e->file = at->file;
-        e->adl = y->scope->k == SC_NAMESPACE;
+        /* (a block's using-declaration leaves ADL on, 6.5.4) */
+        e->adl = y->scope->k == SC_NAMESPACE ||
+                 (y->scope->k != SC_CLASS && y->fns && y->fns->alias_of);
         if (y->scope->k == SC_CLASS && cx_curfn && cx_curfn->this_var &&
             class_derives(cx_curfn->cls, y->scope->cls, NULL)) {
             e->obj = ex_this();
@@ -4369,6 +4405,7 @@ struct cexpr *expr_call_named_targs(struct cexpr *obj, const char *name,
         f->fn = y->fns;
         f->name = name;
         f->obj = ex_addr(obj);
+        f->obj->obj_xvalue = obj->vc != VC_LVALUE;
     } else {
         struct csym *y = lookup(cx_scope, name);
         f = ex_new(E_OVL, ct_basic(CT_VOID), VC_LVALUE);
@@ -4377,7 +4414,8 @@ struct cexpr *expr_call_named_targs(struct cexpr *obj, const char *name,
         if (y && y->k == CS_FUNC) {
             f->fn = y->fns;
             f->t = y->fns->type;
-            f->adl = y->scope->k == SC_NAMESPACE;
+            f->adl = y->scope->k == SC_NAMESPACE ||
+                     (y->scope->k != SC_CLASS && y->fns && y->fns->alias_of);
         }
     }
     if (targs) {
@@ -4508,10 +4546,14 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
         return e;
     }
     case CS_FUNC: {
+        if (!y->fns)
+            cx_error(at, "'%s' has no usable member function '%s'",
+                     ct_name(obj->t), name);
         struct cexpr *e = ex_new(E_OVL, y->fns->type, VC_LVALUE);
         e->fn = y->fns;
         e->name = name;
         e->obj = ex_addr(obj);
+        e->obj->obj_xvalue = obj->vc != VC_LVALUE;
         e->nonvirt = qualified;
         explicit_targs(e);
         return e;

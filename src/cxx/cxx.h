@@ -427,6 +427,9 @@ struct ctemplate {
     int req_start, req_end;   /* its requires-clause's tokens (0: none);
                                * TK_CONCEPT: the constraint, decl_tok on */
     int builtin;              /* the compiler's own: BT_* */
+    int decl0_tok;            /* TK_FUNC defined after a declaration: that
+                               * declaration (+1; its default arguments),
+                               * or 0 */
     struct cguide *guides;    /* TK_CLASS: its deduction guides */
     struct ctad_cand *ctad;   /* ... the candidates made of them and of its
                                * constructors, once built */
@@ -839,6 +842,8 @@ struct cexpr {
     int post;                 /* E_INCDEC */
     int lvcast;               /* E_CAST: to a reference type */
     int is_null_const;        /* an integer literal 0 (a null pointer) */
+    int obj_xvalue;           /* E_ADDR of a member call's object: that
+                               * object was an rvalue (&& overloads) */
     const char **desig;       /* E_INITLIST as written: each element's
                                * designator (.name = x), or NULL */
     struct cexpr **binit;     /* E_INITLIST of an aggregate with bases: each

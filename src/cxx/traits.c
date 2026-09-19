@@ -132,6 +132,15 @@ static int trait_args(struct cty ***out)
 
 /* ---- the answers ---- */
 
+/* T without top-level cv — an array's is its elements' (const char[3]
+ * is char[3]) */
+static struct cty *remove_cv(struct cty *t)
+{
+    if (t->k == CT_ARRAY)
+        return ct_array(remove_cv(t->to), t->n);
+    return ct_unqual(t);
+}
+
 static struct cclass *class_of(struct cty *t)
 {
     if (t->k != CT_CLASS)
@@ -490,11 +499,11 @@ static struct cty *type_trait(const char *n, struct cty *t,
         return t->en->underlying ? t->en->underlying : ct_basic(CT_INT);
     }
     if (!strcmp(n, "__remove_cv"))
-        return ct_unqual(t);
+        return remove_cv(t);
     if (!strcmp(n, "__remove_reference"))
         return ct_strip_ref(t);
     if (!strcmp(n, "__remove_cvref"))
-        return ct_unqual(ct_strip_ref(t));
+        return remove_cv(ct_strip_ref(t));
     if (!strcmp(n, "__remove_pointer"))
         return t->k == CT_PTR ? t->to : t;
     if (!strcmp(n, "__add_pointer"))

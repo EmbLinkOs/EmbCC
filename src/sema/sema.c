@@ -1573,6 +1573,22 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 }
                 break;
             }
+            /* __builtin_alloca(n): n bytes on this function's stack (16-
+             * aligned), freed when it returns — as a VLA's storage is
+             * carved, without a scope of its own. */
+            if (strcmp(bn, "alloca") == 0 ||
+                strcmp(bn, "alloca_with_align") == 0) {
+                if (e->nargs < 1)
+                    diag_at(u->file, e->line, e->col, "%s takes a size",
+                            e->lhs->name);
+                for (int i = 0; i < e->nargs; i++)
+                    check_expr(u, f, sc, e->args[i]);
+                e->args[0] = mk_cast(e->args[0], ty_base(TY_LONG, 1));
+                e->nargs = 1;
+                e->name = "__builtin_alloca";
+                e->ty = ty_ptr(ty_base(TY_VOID, 0));
+                break;
+            }
             /* __builtin_return_address(N) / __builtin_frame_address(N): the
              * frame chain, which EmbCC always keeps (both targets lay a frame
              * out as [saved frame pointer][return address]). N must be a

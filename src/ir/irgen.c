@@ -1536,6 +1536,15 @@ int gen_expr(struct ir_func *fn, struct expr *e)
             if (ak != AK_NONE)
                 return gen_atomic(fn, e, ak, aop);
         }
+        if (e->name && strcmp(e->name, "__builtin_alloca") == 0) {
+            int size = gen_expr(fn, e->args[0]);
+            struct ir_ins *al = emit(fn);
+            al->op = IR_ALLOCA;
+            al->a = size;
+            al->dst = new_temp(fn);
+            fn->has_alloca = 1;
+            return al->dst;
+        }
         if (e->name && (strcmp(e->name, "__builtin_return_address") == 0 ||
                         strcmp(e->name, "__builtin_frame_address") == 0)) {
             /* Walk e->num saved frame pointers up the chain, then either

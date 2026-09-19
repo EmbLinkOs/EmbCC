@@ -640,8 +640,20 @@ static int deduce_arg(struct ctarg *P, struct ctarg *A, struct ctarg *out,
             return 0;             /* dependent: not known to be equal */
         return P->value == A->value;
     }
-    if (P->kind == TP_TEMPLATE && A->kind == TP_TEMPLATE)
+    if (P->kind == TP_TEMPLATE && A->kind == TP_TEMPLATE) {
+        if (P->tmpl && P->tmpl->tparam && P->tmpl->tparam <= np) {
+            /* a template template parameter: deduced, or as deduced */
+            int i = P->tmpl->tparam - 1;
+            if (set[i])
+                return out[i].kind == TP_TEMPLATE &&
+                       out[i].tmpl == A->tmpl;
+            out[i].kind = TP_TEMPLATE;
+            out[i].tmpl = A->tmpl;
+            set[i] = 1;
+            return 1;
+        }
         return P->tmpl == A->tmpl;
+    }
     return 0;
 }
 
@@ -699,6 +711,43 @@ static int deduce_from_bases(struct cty *P, struct cclass *c,
     return 0;
 }
 
+/* Does pattern P name a template parameter where it can be deduced (not
+ * only inside typename X<T>::type, type_identity_t<T>, ...)? */
+static int deducible_in(struct cty *P)
+{
+    switch (P->k) {
+    case CT_TPARAM:
+        return 1;
+    case CT_PTR: case CT_LREF: case CT_RREF: case CT_ARRAY:
+        return deducible_in(P->to) || (P->k == CT_ARRAY && P->n == -2);
+    case CT_FUNC:
+        if (deducible_in(P->to))
+            return 1;
+        for (int i = 0; i < P->np; i++)
+            if (deducible_in(P->params[i]))
+                return 1;
+        return 0;
+    case CT_MPTR:
+        return deducible_in(P->to) || (P->mclass && deducible_in(P->mclass));
+    case CT_TID:
+        if (P->tmpl->tparam)
+            return 1;
+        for (int i = 0; i < P->ntargs; i++) {
+            struct ctarg *a = &P->targs[i];
+            if (a->expansion && a->nelems)
+                a = &a->elems[0];
+            if (a->kind == TP_TYPE && a->type && deducible_in(a->type))
+                return 1;
+            if (a->kind == TP_VALUE && a->vtype &&
+                a->vtype->k == CT_TPARAM)
+                return 1;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 /* P an alias template-id with dependent arguments (index_sequence<I...>,
  * an alias being the type it names, 13.7.8): the alias's own parameters
  * deduced from A through its pattern (integer_sequence<size_t, I...>),
@@ -715,7 +764,9 @@ static int deduce_alias(struct cty *P, struct cty *A, struct ctarg *out,
     struct ctarg *aout = xcalloc((size_t)(anp ? anp : 1), sizeof *aout);
     int *aset = xcalloc((size_t)(anp ? anp : 1), sizeof *aset);
     if (!deduce(pat, A, aout, aset, anp))
-        return 0;
+        /* (format_string<Args...>: its parameters only in non-deduced
+         * contexts — the pair deduces nothing, the argument converts) */
+        return !deduce_exact && !deducible_in(pat);
     int nw = P->ntargs, k = 0;
     struct ctarg *w = flatten(P->targs, &nw);
     for (int i = 0; i < anp && k < nw; i++) {
@@ -846,7 +897,7 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
             return deduce_seq(pf, nP, af, na, out, set, np);
         }
         if (A->k != CT_CLASS)
-            return 0;
+            return !deduce_exact && !deducible_in(P);
         struct cclass *c;
         if (P->tmpl->tparam && P->tmpl->tparam <= np) {
             /* TT<...>: TT is A's template */
@@ -867,12 +918,19 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
             if (c && c != A->cls && !deduce_exact)
                 return deduce_from_bases(P, A->cls, out, set, np);
         }
-        if (!c)
-            return 0;
-        /* the class's arguments against the pattern's as written */
+        if (!c)                 /* (nothing deducible: the pair is left
+                                 * to the argument's conversion) */
+            return !deduce_exact && !deducible_in(P);
+        /* the class's arguments against the pattern's as written (those
+         * it leaves to their defaults, basic_string_view<C>'s traits,
+         * follow from the rest) */
         int na = c->ntargs, nP = P->ntargs;
         struct ctarg *flat = flatten(c->targs, &na);
         struct ctarg *pf = flatten(P->targs, &nP);
+        if (nP < na && (!nP || !pf[nP - 1].expansion) &&
+            nP < c->tmpl->nparams && c->tmpl->params[nP].def_tok >= 0 &&
+            !c->tmpl->params[nP].pack)
+            na = nP;
         return deduce_seq(pf, nP, flat, na, out, set, np);
     }
     case CT_DEP:
@@ -1302,6 +1360,36 @@ static int partial_matches(struct cpartial *p, struct ctarg *a, int na,
     int nP = p->npattern;
     struct ctarg *pf = flatten(p->pattern, &nP);
     struct ctarg *af = flatten(a, &na);
+    int full = na;
+    if (t && nP < na && (!nP || !pf[nP - 1].expansion)) {
+        /* A<X&, Y&&> for template<class, class, class = void>: the
+         * arguments past the pattern's must be the defaults */
+        {
+            for (int i = nP; i < na; i++) {
+                if (i >= t->nparams || t->params[i].def_tok < 0 ||
+                    t->params[i].pack)
+                    return 0;
+                struct ctarg d;
+                jmp_buf jb;
+                void *sv = cx_sfinae;
+                struct parse_state *st = parse_save();
+                if (setjmp(jb)) {
+                    parse_restore(st);
+                    cx_sfinae = sv;
+                    return 0;
+                }
+                cx_sfinae = &jb;
+                d = default_arg(t, t->params, t->nparams, i, af, t->scope,
+                                cx_cur());
+                cx_sfinae = sv;
+                parse_restore(st);
+                if (!targ_same(&d, &af[i]))
+                    return 0;
+            }
+        }
+        na = nP;
+    }
+    (void)full;
     int saved = deduce_exact, saved_def = deduce_deferred;
     deduce_exact = 1;
     deduce_deferred = 0;

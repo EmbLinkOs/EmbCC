@@ -658,6 +658,45 @@ static struct cfunc *declare_implicit(struct cclass *c, int sp, int trivial,
     return f;
 }
 
+/* Is c laid out as the plain C struct of its members would be — its
+ * bases all empty, at offset 0, no vptr, no member moved off another
+ * empty subobject? Then it is emitted as that struct (bit-fields and all:
+ * format's _Spec : _SpecBase). */
+static int plain_layout(struct cclass *c)
+{
+    if (c->dynamic || c->nvbases || c->is_union)
+        return 0;
+    for (int i = 0; i < c->nbases; i++)
+        if (c->bases[i].is_virtual || !c->bases[i].cls->empty ||
+            c->bases[i].off != 0)
+            return 0;
+    long bits = 0;
+    for (int i = 0; i < c->nfields; i++) {
+        struct cfield *fl = c->fields[i];
+        struct cty *t = fl->type;
+        long fs = ct_is_ref(t) ? 8 : ct_size(t);
+        long fa = ct_is_ref(t) ? 8 : ct_align(t);
+        if (c->packed)
+            fa = 1;
+        if (fl->bitwidth >= 0) {
+            long w = fl->bitwidth, unit = fs * 8;
+            if (w == 0) {
+                bits = (bits + fa * 8 - 1) / (fa * 8) * (fa * 8);
+                continue;
+            }
+            if (!c->packed && bits / unit != (bits + w - 1) / unit)
+                bits = (bits + unit - 1) / unit * unit;
+            bits += w;
+            continue;
+        }
+        long off = round_up((bits + 7) / 8, fa);
+        if (off != fl->off)
+            return 0;
+        bits = (off + fs) * 8;
+    }
+    return 1;
+}
+
 void class_complete(struct cclass *c)
 {
     int virt = mark_virtuals(c);
@@ -667,7 +706,7 @@ void class_complete(struct cclass *c)
     virtual_bases(c);
     layout(c);
     c->complete = 1;
-    c->explicit_layout = c->nbases > 0 || c->dynamic;
+    c->explicit_layout = (c->nbases > 0 || c->dynamic) && !plain_layout(c);
     int named = 0;
     for (int i = 0; i < c->nfields; i++)
         named |= c->fields[i]->name != NULL ||

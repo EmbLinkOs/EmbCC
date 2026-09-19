@@ -714,6 +714,26 @@ static void parse_dspec(struct dspec *ds)
             if (named || builtin)
                 break;
             named = parse_decltype();
+            /* decltype(e)::type: a member of that class */
+            while (cx_kind() == TOK_COLONCOLON && cx_kind_at(1) == TOK_IDENT) {
+                const char *mn = cx_peek(1)->t.text;
+                const struct ctok *mat = cx_peek(1);
+                cx_advance();
+                cx_advance();
+                if (named->k == CT_CLASS) {
+                    class_ensure(named->cls);
+                    struct csym *y = lookup_in(named->cls->scope, mn);
+                    if (!y || (y->k != CS_TYPEDEF && y->k != CS_CLASS &&
+                               y->k != CS_ENUM))
+                        cx_error(mat, "'%s' names no type in '%s'", mn,
+                                 ct_name(named));
+                    named = y->type;
+                } else if (ct_dependent(named)) {
+                    named = dep_member(named, mn);
+                } else {
+                    cx_error(mat, "'%s' is not a class", ct_name(named));
+                }
+            }
             continue;
         case TOK_KW_TYPEOF: {
             if (named || builtin)
@@ -1019,11 +1039,19 @@ static void parse_declarator_id(struct declarator *d, int mode)
             /* f<args>: a function template's specialization named */
             struct csym *y = find_final(q.scope, d->name);
             struct ctemplate *ft = NULL;
+            int ntm = 0;
             if (y && y->k == CS_FUNC)
-                for (struct cfunc *g = y->fns; g && !ft; g = g->next)
-                    ft = g->tmpl;
+                for (struct cfunc *g = y->fns; g; g = g->next)
+                    if (g->tmpl) {
+                        if (!ft)
+                            ft = g->tmpl;
+                        ntm++;
+                    }
             if (ft) {
-                d->ntargs = parse_template_args(ft, &d->targs);
+                /* (several templates of the name: the arguments read as
+                 * written, kinds from their spelling) */
+                d->ntargs = parse_template_args(ntm == 1 ? ft : NULL,
+                                                &d->targs);
                 d->has_targs = 1;
             } else if (y && y->k == CS_TEMPLATE && y->tmpl->kind == TK_VAR) {
                 /* v<args>: a variable template's specialization */
@@ -5262,9 +5290,14 @@ static struct cstmt *parse_stmt(void)
         cx_expect(TOK_LPAREN, "'(' after switch");
         scope_push(SC_BLOCK, NULL);
         struct cexpr *e = rvalue(parse_condition(&s->init));
+        if (e->t->k == CT_CLASS)          /* its one conversion to one */
+            e = rvalue(convert(e, ct_basic(CT_LONG), "a switch"));
         if (!ct_is_integer(e->t))
             cx_error(at, "switch on a non-integral %s", ct_name(e->t));
-        s->e = convert(e, ct_promote(e->t), "a switch");
+        /* (an enumeration, scoped too, switches on its value) */
+        s->e = e->t->k == CT_ENUM
+               ? ex_cast(e, ct_promote(e->t->en->underlying))
+               : convert(e, ct_promote(e->t), "a switch");
         cx_expect(TOK_RPAREN, "')'");
         s->body = parse_stmt();
         scope_pop();
@@ -6351,7 +6384,7 @@ static int parse_tparams(struct ctparam **out)
  * a function body (and a constructor's mem-initializers before it). */
 static void skip_declaration(void)
 {
-    int depth = 0;
+    int depth = 0, first = cx_pos;
     for (;;) {
         enum tok_kind k = cx_kind();
         if (k == TOK_EOF)
@@ -6361,7 +6394,9 @@ static void skip_declaration(void)
             continue;
         }
         if (k == TOK_COLON && depth == 0 && cx_pos > 0 &&
-            cx_toks[cx_pos - 1].t.kind == TOK_RPAREN) {
+            (cx_pos == first ||
+             cx_toks[cx_pos - 1].t.kind == TOK_RPAREN ||
+             cx_toks[cx_pos - 1].t.kind == TOK_CX_NOEXCEPT)) {
             /* a constructor's mem-initializers (`: m{x}, B(y)`), then
              * its body — a braced initializer is not the body */
             int save = cx_pos;
@@ -6946,6 +6981,8 @@ void parse_template_decl(struct cclass *cls, int access)
                 same_signature(g->type, t) &&
                 (!has_body || !g->tmpl->has_body)) {
                 if (has_body) {
+                    if (!g->tmpl->decl0_tok)
+                        g->tmpl->decl0_tok = g->tmpl->decl_tok + 1;
                     g->tmpl->decl_tok = decl;
                     g->tmpl->params = ps;
                     g->tmpl->has_body = 1;
@@ -7046,6 +7083,28 @@ static void parse_explicit_instantiation(int is_extern)
     if (ft->k != CT_FUNC)
         cx_error(at, "explicit instantiation of a variable template is not "
                      "supported yet");
+    if (d.qual && d.qual->k == SC_CLASS && d.qual->cls->tmpl &&
+        !d.has_targs) {
+        /* template R A<X>::f(...); : a member of a class template's
+         * instance, not a template itself */
+        struct cclass *c = d.qual->cls;
+        class_ensure(c);
+        struct csym *y = scope_find_here(c->scope, d.name);
+        struct cfunc *set = d.kind == DN_CTOR ? c->ctors
+                            : y && y->k == CS_FUNC ? y->fns : NULL;
+        for (struct cfunc *f = set; f; f = f->next) {
+            if (f->tmpl || !same_signature(f->type, ft))
+                continue;
+            if (is_extern) {
+                f->extern_inst = 1;
+            } else {
+                func_ensure_body(f);
+                f->explicit_inst = 1;
+            }
+            return;
+        }
+        /* (else a member template's specialization, below) */
+    }
     struct cfunc *spec = specialization_named(&d, ft, at);
     if (!is_extern) {
         func_ensure_body(spec);
@@ -7262,6 +7321,39 @@ void class_define_from(struct cclass *c, int pos, enum tok_kind key,
  * scope — overload resolution holds it — whose body is read when used. */
 static struct cfunc *lambda_call_replay(struct ctemplate *t);
 
+/* f, a specialization of t read from t's definition: the default
+ * arguments t's earlier declaration gave (the definition repeats none) */
+static void decl0_defaults(struct ctemplate *t, struct cfunc *f)
+{
+    jmp_buf jb;
+    void *saved = cx_sfinae;
+    struct parse_state *st = parse_save();
+    if (setjmp(jb)) {
+        parse_restore(st);
+        cx_sfinae = saved;
+        return;
+    }
+    cx_sfinae = &jb;
+    cx_pos = t->decl0_tok - 1;
+    cx_half_gt = 0;
+    struct dspec ds;
+    parse_dspec(&ds);
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    struct cty *ft = parse_declarator(ds.type ? ds.type : ct_basic(CT_VOID),
+                                      &d, DK_NAMED);
+    cx_sfinae = saved;
+    parse_restore(st);
+    if (ft->k != CT_FUNC || ft->np != f->type->np || !ft->defargs)
+        return;
+    if (!f->defargs)
+        f->defargs = xcalloc((size_t)(ft->np ? ft->np : 1),
+                             sizeof *f->defargs);
+    for (int i = 0; i < ft->np; i++)
+        if (!f->defargs[i])
+            f->defargs[i] = ft->defargs[i];
+}
+
 struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
 {
     cx_scope = ps;
@@ -7313,6 +7405,8 @@ struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
         for (int i = 0; i < ft->np; i++)
             f->defargs[i] = ft->defargs[i];
     }
+    if (t->decl0_tok)
+        decl0_defaults(t, f);
     if (cx_accept(TOK_ASSIGN)) {
         if (cx_accept(TOK_CX_DELETE))
             f->is_deleted = 1;
@@ -7575,6 +7669,8 @@ static void member_template_from_outdef(struct cfunc *f)
     int np = parse_tparams(&ps);
     if (np != mt->nparams || np != f->ntargs)
         cx_error(cx_cur(), "another member template");
+    if (cx_accept(TOK_CX_REQUIRES))
+        skip_constraint(0);
     cx_scope = tparam_scope(ps, np, f->targs, f->ntargs, outer);
     struct dspec ds;
     parse_dspec(&ds);
@@ -7582,9 +7678,14 @@ static void member_template_from_outdef(struct cfunc *f)
     memset(&d, 0, sizeof d);
     struct cty *ft = parse_declarator(ds.type ? ds.type : ct_basic(CT_VOID),
                                       &d, DK_NAMED);
-    if (ft->k != CT_FUNC || !ct_same(ft, f->type) ||
-        (cx_kind() != TOK_LBRACE && cx_kind() != TOK_COLON &&
-         cx_kind() != TOK_CX_TRY))
+    int same = ft->k == CT_FUNC && ft->np == f->type->np;
+    for (int i = 0; same && i < ft->np; i++)
+        same = ct_same(ft->params[i], f->type->params[i]);
+    if (same && !f->is_ctor && !f->is_dtor)  /* (a constructor's is void) */
+        same = ct_same(ft->to, f->type->to) && ft->fq == f->type->fq &&
+               ft->refq == f->type->refq;
+    if (!same || (cx_kind() != TOK_LBRACE && cx_kind() != TOK_COLON &&
+                  cx_kind() != TOK_CX_TRY))
         cx_error(cx_cur(), "another member template");
     cx_sfinae = saved;
     f->def_scope = cx_scope;
@@ -7842,6 +7943,30 @@ void cx_parse_unit(void)
                 func_ensure_body(f);
                 progress |= f->defined;
             }
+        /* a constructed class's vtables name its virtual functions: an
+         * instance's are instantiated for them (a vtable is their only
+         * use: _Formatting_scanner's _M_on_chars) */
+        for (int ci = 0; ci < cx_nclasses; ci++) {
+            struct cclass *c = cx_classes[ci];
+            if (!c->dynamic || !c->complete || !in_instance(c))
+                continue;
+            int built = 0;
+            for (struct cfunc *k = c->ctors; k && !built; k = k->next)
+                built = k->used;
+            if (!built)
+                continue;
+            struct vgroup *g = vtable_group(c);
+            for (int vi = 0; g && vi < g->n; vi++)
+                for (int j = 0; j < g->v[vi].nfns; j++) {
+                    struct cfunc *f = g->v[vi].fns[j].f;
+                    if (!f || g->v[vi].fns[j].pure || f->defined ||
+                        f->is_deleted || f->tmpl || f->is_implicit ||
+                        f->is_defaulted)
+                        continue;
+                    func_ensure_body(f);
+                    progress |= f->defined;
+                }
+        }
     }
 }
 
@@ -8259,6 +8384,8 @@ static struct cfunc *lambda_call_replay(struct ctemplate *t)
         for (int i = 0; i < ft->np; i++)
             f->defargs[i] = ft->defargs[i];
     }
+    if (t->decl0_tok)
+        decl0_defaults(t, f);
     skip_body(f);
     f->lazy = 1;
     f->def_scope = cx_scope;
