@@ -2090,11 +2090,17 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
             sb_printf(b, "case %ld ... %ld:\n", s->cval, s->cval2);
         else
             sb_printf(b, "case %s:\n", int_lit(s->cval, ct_basic(CT_LONG)));
-        emit_stmt(b, s->body);
+        if (s->body)
+            emit_stmt(b, s->body);
+        else
+            sb_put(b, ";\n");       /* a label ending its block (C++23) */
         return;
     case S_DEFAULT:
         sb_put(b, "default:\n");
-        emit_stmt(b, s->body);
+        if (s->body)
+            emit_stmt(b, s->body);
+        else
+            sb_put(b, ";\n");
         return;
     /* a jump runs the destructors of the scopes it leaves: its own braces
      * keep them with it under a brace-less if */

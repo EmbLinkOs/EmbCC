@@ -202,6 +202,9 @@ struct cvar {
                                * linkage at namespace scope */
     int is_extern;            /* a declaration only */
     int is_member_static;     /* a static data member */
+    int explicit_spec;        /* a static member of an instance given its
+                               * own (template<> T A<X>::m ...;): not the
+                               * template's definition */
     int is_inline;            /* an inline variable (C++17) */
     int is_constexpr;
     int defined;              /* a namespace-scope definition was seen */
@@ -599,6 +602,8 @@ struct cfunc {
     int ctor_variant;         /* emit.c: 1 complete, 2 base object */
     int defined;              /* has a body */
     int used;                 /* odr-used: an inline one is emitted then */
+    int called;               /* ... by evaluated code (not only named in
+                               * decltype or sizeof) */
     int emitted;
     int queued, declared;     /* emit.c's bookkeeping */
     int nlocal_statics;       /* numbering local statics for mangling */
@@ -731,6 +736,13 @@ struct cclass {
     int packed;
     int is_final;             /* declared `final` */
     int explicit_spec;        /* an instance given as template<> ... */
+    struct ctarg *inst_bound; /* ... the partial specialization's own
+                               * parameters' values */
+    int lazy_pos;             /* a member class of a template's instance:
+                               * its definition (at `:` or `{`), read when
+                               * first needed (0: none) */
+    enum tok_kind lazy_key;
+    struct cscope *lazy_scope;
     int complete;
     int defining;             /* its body is being parsed */
     int local;                /* declared inside a function */
@@ -827,6 +839,8 @@ struct cexpr {
     int post;                 /* E_INCDEC */
     int lvcast;               /* E_CAST: to a reference type */
     int is_null_const;        /* an integer literal 0 (a null pointer) */
+    const char **desig;       /* E_INITLIST as written: each element's
+                               * designator (.name = x), or NULL */
     struct cexpr **binit;     /* E_INITLIST of an aggregate with bases: each
                                * base subobject's initialization (a[] its
                                * members') */
@@ -899,6 +913,8 @@ int cx_expr_nothrow(struct cexpr *e);   /* can it not throw? (noexcept) */
 /* e (of another class) made a c by one of its conversion functions: the
  * call (NULL if it has none that fits) */
 struct cexpr *class_conversion(struct cexpr *e, struct cclass *c);
+struct cexpr *class_conversion_ex(struct cexpr *e, struct cclass *c,
+                                  int allow_explicit);
 /* An expression of the binary operators binding tighter than minprec
  * (3: none of && and ||, as a constraint's operand). */
 struct cexpr *expr_parse_binary(int minprec);

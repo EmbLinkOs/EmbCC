@@ -1327,7 +1327,14 @@ static struct cexpr *through_conv(struct cexpr *e, struct cty *t,
 
 struct cexpr *class_conversion(struct cexpr *e, struct cclass *c)
 {
-    struct cfunc *f = conv_function(e, ct_class(c), 0, NULL);
+    return class_conversion_ex(e, c, 0);
+}
+
+/* ... explicit conversion functions too (direct-initialization) */
+struct cexpr *class_conversion_ex(struct cexpr *e, struct cclass *c,
+                                  int allow_explicit)
+{
+    struct cfunc *f = conv_function(e, ct_class(c), allow_explicit, NULL);
     if (!f)
         return NULL;
     struct cexpr *obj = e->vc == VC_PRVALUE ? materialize(e) : e;
@@ -1581,6 +1588,8 @@ struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
         e->na = n;
     }
     fn->used = 1;
+    if (!cx_unevaluated)
+        fn->called = 1;
     return e;
 }
 
@@ -1802,9 +1811,75 @@ struct cexpr *il_make(struct cty *ilt, struct cexpr *list,
     return o;
 }
 
+/* {.a = x, .c{y}}: each member named in declaration order, the others
+ * from their default member initializers or value-initialized; a
+ * union's one member chosen (9.4.2) */
+static struct cexpr *designated_init(struct cty *t, struct cexpr *list,
+                                     const struct ctok *at)
+{
+    if (t->k != CT_CLASS || !t->cls->aggregate)
+        cx_error(at, "designated initializers for '%s', not an aggregate "
+                     "class", ct_name(t));
+    struct cclass *c = t->cls;
+    struct cexpr *L = ex_new(E_INITLIST, t, VC_PRVALUE);
+    L->a = xcalloc((size_t)(c->nfields ? c->nfields : 1), sizeof *L->a);
+    L->na = c->nfields;
+    if (c->nbases) {
+        L->binit = xcalloc((size_t)c->nbases, sizeof *L->binit);
+        for (int i = 0; i < c->nbases; i++)
+            L->binit[i] = value_init_elem(ct_class(c->bases[i].cls), at);
+    }
+    int k = 0, chosen = 0;
+    for (int i = 0; i < c->nfields; i++) {
+        struct cfield *fl = c->fields[i];
+        if (!fl->name)
+            continue;
+        if (k < list->na && strcmp(list->desig[k], fl->name) == 0) {
+            struct cexpr *it = list->a[k++];
+            int braced = it->k == E_INITLIST && !it->t;
+            if (c->is_union) {
+                /* the union's member: first in the C list emitted */
+                L->a[0] = NULL;
+                if (i != 0)
+                    cx_error(at, "a designated initializer of union '%s' "
+                                 "other than its first member is not "
+                                 "supported yet", ct_name(t));
+            }
+            L->a[i] = ct_is_ref(fl->type)
+                      ? bind_ref(braced && it->na == 1 ? it->a[0] : it,
+                                 fl->type, "an initializer")
+                      : init_object(fl->type, braced ? INIT_COPY_LIST
+                                                     : INIT_COPY, &it, 1, at);
+            chosen = 1;
+        } else if (c->is_union) {
+            continue;
+        } else if (fl->dflt) {
+            L->a[i] = fl->dflt;
+        } else if (ct_is_ref(fl->type)) {
+            cx_error(at, "reference member '%s' is not initialized",
+                     fl->name);
+        } else {
+            L->a[i] = value_init_elem(fl->type, at);
+        }
+    }
+    (void)chosen;
+    if (k < list->na) {
+        int known = 0;
+        for (int i = 0; i < c->nfields; i++)
+            known |= c->fields[i]->name &&
+                     strcmp(c->fields[i]->name, list->desig[k]) == 0;
+        cx_error(at, known ? "designator '.%s' out of the members' order"
+                           : "'%s' has no member '%s'",
+                 known ? list->desig[k] : ct_name(t), list->desig[k]);
+    }
+    return L;
+}
+
 struct cexpr *init_aggregate(struct cty *t, struct cexpr *list,
                              const struct ctok *at)
 {
+    if (list->desig)
+        return designated_init(t, list, at);
     int idx = 0;
     struct cexpr *r = aggregate_init(t, list->a, list->na, &idx, at);
     if (idx < list->na)
@@ -1941,13 +2016,36 @@ struct cexpr *parse_braced_list(void)
     cx_expect(TOK_LBRACE, "'{'");
     int cap = 0;
     while (cx_kind() != TOK_RBRACE) {
-        if (cx_kind() == TOK_DOT && cx_kind_at(1) == TOK_IDENT)
-            cx_error(cx_cur(), "designated initializers are not supported "
-                               "yet (CX7)");
-        list_element(&L->a, &L->na, &cap);
+        if (cx_kind() == TOK_DOT && cx_kind_at(1) == TOK_IDENT) {
+            /* .name = x, .name{x}: a designated initializer (C++20) */
+            const char *name = cx_peek(1)->t.text;
+            cx_advance();
+            cx_advance();
+            if (L->na == cap) {
+                cap = cap ? cap * 2 : 4;
+                L->a = xrealloc(L->a, (size_t)cap * sizeof *L->a);
+            }
+            L->desig = xrealloc(L->desig, (size_t)cap * sizeof *L->desig);
+            L->desig[L->na] = name;
+            if (cx_kind() == TOK_LBRACE) {
+                L->a[L->na++] = parse_braced_list();
+            } else {
+                cx_expect(TOK_ASSIGN, "'=' or '{' after a designator");
+                L->a[L->na++] = cx_kind() == TOK_LBRACE ? parse_braced_list()
+                                                        : expr_parse_assign();
+            }
+        } else {
+            if (L->desig)
+                cx_error(cx_cur(), "an initializer list designates all its "
+                                   "elements or none");
+            list_element(&L->a, &L->na, &cap);
+        }
         if (!cx_accept(TOK_COMMA))
             break;
     }
+    if (L->desig && L->na && !L->desig[0])
+        cx_error(cx_cur(), "an initializer list designates all its "
+                           "elements or none");
     cx_expect(TOK_RBRACE, "'}' to close the initializer list");
     return L;
 }
@@ -2022,7 +2120,8 @@ static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
     if (l->t && l->t->k == CT_CLASS) {
         if (!ct_is_complete(l->t))
             ex_error(l, "'%s' on incomplete '%s'", name, ct_name(l->t));
-        struct csym *y = scope_find_here(l->t->cls->scope, name);
+        /* (a member operator may be a base's: hash<string>'s operator()) */
+        struct csym *y = lookup_in(l->t->cls->scope, name);
         if (y && y->k == CS_FUNC)
             set_add_all(&fs, y->fns);
     }
@@ -3545,6 +3644,9 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         struct ctarg *args;
         int n = parse_template_args(y->tmpl, &args);
         struct cvar *v = var_instance(y->tmpl, args, n, at);
+        if (!v)
+            cx_error(at, "'%s' cannot be instantiated for these arguments",
+                     name);
         struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
         e->var = v;
         e->line = at->t.line;
@@ -3592,7 +3694,16 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
             if (e)
                 return e;
         }
-        struct cexpr *t = lambda_this(at);     /* the enclosing object's */
+        struct cexpr *t = cx_unevaluated ? NULL : lambda_this(at);
+        if (!t && cx_unevaluated) {
+            /* sizeof(m), decltype(m): an unevaluated operand may name a
+             * member without an object (7.5.5.1) — on a stand-in one */
+            struct cexpr *obj = ex_new(E_DEREF, ct_class(c), VC_LVALUE);
+            obj->a = xmalloc(sizeof *obj->a);
+            obj->a[0] = ex_int(0, ct_ptr(ct_class(c)));
+            obj->na = 1;
+            return field_via(obj, y);
+        }
         if (!t || !class_derives(t->t->to->cls, c, NULL))
             cx_error(at, "member '%s' used without an object", name);
         return field_via(to_base(ex_deref(t), c, 0), y);
@@ -4622,6 +4733,8 @@ static struct cexpr *parse_unary(void)
  * may begin an expression: (T()(a, b) || c) is not a cast) */
 static int cast_type_at(void)
 {
+    if (fold_at() >= 0)
+        return 0;          /* (A<Ts>::v && ...): a fold, not a cast */
     if (!paren_type_id())
         return 0;
     int save = cx_pos, save_half = cx_half_gt;

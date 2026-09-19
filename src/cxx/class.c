@@ -1051,10 +1051,17 @@ static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
          * slice: random_access_iterator_tag passed as forward_iterator_tag) */
         if (f->special != SP_DEFAULT) {
             struct cexpr *src = args[0];
-            if (src->t && src->t->k == CT_CLASS && src->t->cls != c) {
+            int amb = 0;
+            if (src->t && src->t->k == CT_CLASS && src->t->cls != c &&
+                class_derives(src->t->cls, c, &amb)) {
                 if (src->vc == VC_PRVALUE)
                     src = ex_materialize(src);
                 src = to_base(src, c, 0);
+            } else if (src->t && src->t->k == CT_CLASS && src->t->cls != c) {
+                /* through its conversion function (TP{ymd}: operator TP) */
+                struct cexpr *cv = class_conversion(src, c);
+                if (cv)
+                    src = cv;
             }
             e->a = xmalloc(sizeof *e->a);
             e->a[0] = src;
@@ -1074,6 +1081,8 @@ static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
     e->a = conv;
     e->na = n;
     f->used = 1;
+    if (!cx_unevaluated)
+        f->called = 1;
     return e;
 }
 
@@ -1149,6 +1158,27 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
     case INIT_DIRECT: {
         if (na == 1 && same_class(args[0], c))
             return copy_from(c, args[0], 1, at);
+        if (na == 1 && args[0]->t && args[0]->t->k == CT_CLASS &&
+            !(args[0]->k == E_INITLIST && !args[0]->t) &&
+            args[0]->t->cls != c &&
+            !resolve_ex(c->ctors, NULL, args, 1, NULL, NULL, 0)) {
+            /* no constructor takes it: its class's conversion function
+             * to this one, explicit ones too (iterator(__loc)) */
+            struct cexpr *cv = class_conversion_ex(args[0], c, 1);
+            if (cv)
+                return cv;
+        }
+        int amb = 0;
+        if (na == 1 && args[0]->t && args[0]->t->k == CT_CLASS &&
+            !(args[0]->k == E_INITLIST && !args[0]->t) &&
+            class_derives(args[0]->t->cls, c, &amb) && !amb) {
+            /* a derived object: the copy or move constructor, bound to
+             * its base part (before any aggregate reading of the
+             * parentheses) */
+            struct cfunc *f = resolve_ex(c->ctors, NULL, args, 1, at,
+                                         c->name ? c->name : "class", 0);
+            return ctor_call(c, f, args, 1, at);
+        }
         if (!c->user_ctors) {
             if (c->aggregate) {
                 /* C++20: an aggregate from a parenthesized list */
@@ -1245,6 +1275,7 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
                                        sizeof *bby);
     struct meminit_raw **vby = xcalloc((size_t)(c->nvbases ? c->nvbases : 1),
                                        sizeof *vby);
+    struct meminit_raw ***anon_by = NULL;   /* [field][its member] */
     for (int i = 0; i < n; i++) {
         if (mi[i].cls ? mi[i].cls == c
                       : c->name && strcmp(mi[i].name, c->name) == 0)
@@ -1289,9 +1320,28 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
                                    strcmp(c->fields[k]->name,
                                           mi[i].name) == 0))
             k++;
-        if (k == c->nfields)
-            cx_error(mi[i].at, "'%s' has no member named '%s'",
-                     c->name ? c->name : "class", mi[i].name);
+        if (k == c->nfields) {
+            /* a member of an anonymous union or struct member */
+            int m = -1;
+            for (k = 0; k < c->nfields && m < 0; k++) {
+                struct cclass *ac = c->fields[k]->anon;
+                for (int j = 0; ac && j < ac->nfields && m < 0; j++)
+                    if (ac->fields[j]->name &&
+                        strcmp(ac->fields[j]->name, mi[i].name) == 0)
+                        m = j;
+            }
+            if (m < 0)
+                cx_error(mi[i].at, "'%s' has no member named '%s'",
+                         c->name ? c->name : "class", mi[i].name);
+            k--;
+            if (!anon_by)
+                anon_by = xcalloc((size_t)c->nfields, sizeof *anon_by);
+            if (!anon_by[k])
+                anon_by[k] = xcalloc((size_t)c->fields[k]->anon->nfields,
+                                     sizeof **anon_by);
+            anon_by[k][m] = &mi[i];
+            continue;
+        }
         if (by[k])
             cx_error(mi[i].at, "'%s' is initialized twice", mi[i].name);
         by[k] = &mi[i];
@@ -1315,6 +1365,37 @@ void ctor_meminit(struct cfunc *f, struct meminit_raw *mi, int n)
         struct meminit_raw *r = by[i];
         if (!fl->name)
             continue;
+        if (anon_by && anon_by[i]) {
+            /* the anonymous member's own members, as their mem-
+             * initializers say (a union's one: the rest untouched) */
+            struct cclass *ac = fl->anon;
+            struct cexpr *L = ex_new(E_INITLIST, fl->type, VC_PRVALUE);
+            L->na = ac->nfields;
+            L->a = xcalloc((size_t)(ac->nfields ? ac->nfields : 1),
+                           sizeof *L->a);
+            for (int j = 0; j < ac->nfields; j++) {
+                struct meminit_raw *ar = anon_by[i][j];
+                struct cfield *af = ac->fields[j];
+                if (!ar)
+                    continue;
+                if (ct_is_ref(af->type))
+                    L->a[j] = bind_ref(ar->args[0], af->type,
+                                       "a mem-initializer");
+                else if (ar->braced)
+                    L->a[j] = init_object(af->type, INIT_LIST, ar->args, 1,
+                                          ar->at);
+                else if (ar->na == 0)
+                    L->a[j] = init_object(af->type, INIT_VALUE, NULL, 0,
+                                          ar->at);
+                else
+                    L->a[j] = init_object(af->type, INIT_DIRECT, ar->args,
+                                          ar->na, ar->at);
+                if (!L->a[j])            /* (a scalar's value-init: 0) */
+                    L->a[j] = ex_int(0, ct_unqual(af->type));
+            }
+            f->meminit[i] = L;
+            continue;
+        }
         if (r) {
             if (ct_is_ref(fl->type)) {
                 struct cexpr *a = r->na == 1 ? r->args[0] : NULL;

@@ -876,9 +876,22 @@ static int deduce(struct cty *P, struct cty *A, struct ctarg *out,
         return deduce_seq(pf, nP, flat, na, out, set, np);
     }
     case CT_DEP:
-        if (!deduce_exact && P->tmpl && P->tmpl->kind == TK_ALIAS &&
-            !P->tmpl->tparam)
+        if (P->tmpl && A->k == CT_DEP && A->tmpl == P->tmpl &&
+            P->tmpl->kind == TK_ALIAS) {
+            /* the same alias, pattern against pattern (ordering) */
+            int na = A->ntargs, nP = P->ntargs;
+            struct ctarg *af = flatten(A->targs, &na);
+            struct ctarg *pf = flatten(P->targs, &nP);
+            return deduce_seq(pf, nP, af, na, out, set, np);
+        }
+        if (P->tmpl && P->tmpl->kind == TK_ALIAS && !P->tmpl->tparam &&
+            alias_pattern(P->tmpl)) {
+            /* matching a partial specialization, the pattern is still
+             * substituted afterwards to confirm (index_sequence<I...>) */
+            if (deduce_exact && !deduce_ordering)
+                deduce_deferred = 1;
             return deduce_alias(P, A, out, set, np);
+        }
         /* fall through */
     default:
         /* non-deduced: checked by conversion later — or, matching a
@@ -906,17 +919,21 @@ static int at_least_as_specialized(struct ctemplate *a, struct ctemplate *b,
     for (int i = 0; i < n && i < fa->np && i < fb->np; i++) {
         struct cty *A = fa->pdecl ? fa->pdecl[i] : fa->params[i];
         struct cty *P = fb->pdecl ? fb->pdecl[i] : fb->params[i];
+        /* a's parameter pack cannot stand for b's single parameter
+         * (13.10.3.5/8): f(T&&) is more specialized than f(Ts&&...) */
+        if ((fa->params[i]->pack_expansion || A->pack_expansion) &&
+            !(fb->params[i]->pack_expansion || P->pack_expansion))
+            return 0;
         int aref = A->k == CT_LREF ? 1 : A->k == CT_RREF ? 2 : 0;
         int pref = P->k == CT_LREF ? 1 : P->k == CT_RREF ? 2 : 0;
         if (ct_is_ref(A))
             A = A->to;
         if (ct_is_ref(P))
             P = P->to;
-        /* each pair deduced on its own (13.10.3.5/2, /10), exactly: a
-         * type the other template names concretely does not take a's
-         * unique one */
-        memset(out, 0, (size_t)(np > 0 ? np : 1) * sizeof *out);
-        memset(set, 0, (size_t)(np > 0 ? np : 1) * sizeof *set);
+        /* exactly: a type the other template names concretely does not
+         * take a's unique one; and consistently across the pairs (a
+         * parameter deduced from two pairs must get one value: (T, U) is
+         * not as specialized as (const V&, V)) */
         int saved = deduce_exact, saved_ord = deduce_ordering;
         deduce_exact = deduce_ordering = 1;
         int ok = deduce(ct_unqual(P), ct_unqual(A), out, set, np);
@@ -1418,6 +1435,15 @@ void cx_inst_notes(void)
 void class_ensure(struct cclass *c)
 {
     if (!c->inst_pending) {
+        if (!c->complete && !c->defining && c->lazy_pos) {
+            /* a member class of an instance, needed now */
+            int pos = c->lazy_pos;
+            c->lazy_pos = 0;
+            cx_inst_push(ct_name(ct_class(c)), cx_cur());
+            class_define_from(c, pos, c->lazy_key, c->lazy_scope);
+            cx_inst_pop();
+            return;
+        }
         if (!c->complete && !c->defining && c->name && c->owner &&
             c->owner->k == SC_CLASS)
             member_class_from_outdef(c);
@@ -1442,6 +1468,7 @@ void class_ensure(struct cclass *c)
                           : tparam_scope(t->params, t->nparams, c->targs,
                                          c->ntargs, t->scope);
     c->inst_partial = p;
+    c->inst_bound = p ? bound : NULL;
     c->is_final = p ? p->is_final : t->is_final;
     cx_inst_push(ct_name(ct_class(c)), cx_cur());
     class_define_from(c, p ? p->head_end : t->head_end, p ? p->key : t->key,

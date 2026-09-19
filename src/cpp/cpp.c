@@ -1397,6 +1397,7 @@ char *cpp_process(const char *path, const char *src,
             "__cpp_unicode_characters 200704L",
             "__cpp_unicode_literals 200710L",
             "__cpp_user_defined_literals 200809L",
+            "__cpp_using_enum 201907L",
             "__cpp_variable_templates 201304L",
             "__cpp_variadic_templates 200704L",
         };

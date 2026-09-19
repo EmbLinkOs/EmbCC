@@ -183,8 +183,7 @@ initializer, `static_assert`, delegating constructors, default member
 initializers.
 
 Refused until later, each naming its milestone: lambdas, range-`for`,
-`initializer_list`, deduced return types (CX6); designated initializers,
-coroutines (CX7). Access control
+`initializer_list`, deduced return types (CX6); coroutines (CX7). Access control
 is parsed but not yet enforced; anonymous struct/union members, bit-fields
 in a class with bases or virtual functions, and copying arrays of
 non-trivially copyable objects are not supported yet.
@@ -563,10 +562,44 @@ parameter by value (`random_access_iterator_tag` as
 tests/libstdcxx/ctad.cc (pair, tuple, vector from a list and a range,
 array, optional, map from a list of pairs) matches g++ on both targets.
 
-Next: designated initializers (`<chrono>`), `<iomanip>`/`<locale>`/`<regex>`
-(explicit specializations of static data members), `<any>`, `<list>`,
-`<random>`, `<complex>`, `<string_view>`, `<memory_resource>`;
-out-of-class members of partial specializations are still skipped.
+Designated initializers (C++20: members named in declaration order, the
+rest from their default member initializers or value-initialized) and
+`using enum` (`__cpp_using_enum`). For the library: explicit
+specializations of an instance's static data members (declared here,
+defined by the library — `__timepunct_cache<char>::_S_timezones`);
+mem-initializers naming an anonymous union's members (`_M_dummy()`,
+`_M_loc(l)`); member classes of a class template's instance defined only
+when first needed (`vector<T>`'s helpers hold a `T`, and
+`pmr::vector<_BigBlock>` is declared while `_BigBlock` is incomplete);
+using-declarations with pack expansions (`using _Bases::_S_fun...;`,
+std::variant's converting constructor) and several declarators; inheriting
+constructors named through an alias (`using _Base::_Base;`); out-of-class
+members of partial specializations (`_Map_base<...>::operator[]`, their
+own parameters bound; a replay into another class skipped) and of member
+class templates (`any::_Manager_internal<T>::_S_manage`); instance members
+called before their out-of-class definition is read, defined at the end
+of the unit (the point of instantiation); a qualified friend template
+declares nothing (it made a second `__get`); partial ordering that
+requires a parameter deduced from two pairs to agree, and that ranks a
+parameter pack below a single parameter; alias template-ids deduced and
+ordered in partial specializations (`index_sequence<I...>`); a fold
+whose operand names a type pack in template arguments is no cast; member
+operators found in bases (`hash<string>`'s `operator()`); a class
+constant as a value template argument (`__and_<...>{}`); explicit
+conversion functions in direct-initialization (`iterator(__loc)`), and
+a derived argument sliced to a base by the copy constructor (before any
+parenthesized aggregate initialization); `sizeof(member)` in a class
+without an object; `<` after a value in a default template argument is
+less-than; a redeclaration of a defined explicit specialization. With
+these `<list>`, `<any>`, `<string_view>`, `<random>`, `<iomanip>`,
+`<locale>`, `<regex>` and `<memory_resource>` compile. tests/cxx
+`cxx20misc`; tests/libstdcxx/containers.cc (list, deque, set,
+unordered_map, string_view, any, variant, mt19937 with a fixed seed,
+iomanip, designated initializers) matches g++'s build on both targets.
+
+Next: `<chrono>` and `<format>` (bit-fields in a class with bases),
+`<complex>` (GNU `__complex__` types), coroutines, `consteval` as more
+than `constexpr`.
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their
