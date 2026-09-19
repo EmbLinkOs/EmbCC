@@ -65,7 +65,8 @@ targets, so EmbCC's C++ objects link with g++'s and with libstdc++.
 | Itanium mangling (nested names, `St`, substitutions, member pointers, conversion functions, thunks, typeinfo); EmbCC objects linking with g++ objects both ways — including one class hierarchy split across the two compilers | ✓ | ✓ |
 | **CX4** class, function, member, alias and variable templates; deduction, explicit and partial specialization (the most specialized chosen), partial ordering, SFINAE, explicit instantiation; variadic templates (type, value and function parameter packs, every expansion context, `sizeof...`, fold expressions); Itanium names for all of it (dependent expressions and pack expansions included) | ✓ | ✓ |
 | **CX3b** virtual base classes: g++'s layouts, vtables, construction vtables and VTTs (byte for byte), nearly empty virtual primaries, constructors and destructors taking the VTT — interchangeable with g++'s in both directions | ✓ | ✓ |
-| CX5..CX9 — exceptions, lambdas, C++20, libstdc++ compiled by EmbCC, C++ on the OS | ✗ refused, naming the milestone | ✗ |
+| **CX5** (in progress) exceptions: unwind tables and LSDAs g++'s runtime reads, `throw`/`try`/`catch`, destructors during unwinding, `noexcept` — thrown and caught across EmbCC and g++ code both ways | ✓ | ✓ |
+| CX6..CX9 — lambdas, C++20, libstdc++ compiled by EmbCC, C++ on the OS | ✗ refused, naming the milestone | ✗ |
 
     embcc -c prog.cc -o prog.o          # .cc .cpp .cxx .C .c++, or -x c++
     embcc --emit-c prog.cc              # the C it lowers to

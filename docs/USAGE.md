@@ -36,6 +36,7 @@ usage: embcc [-E] -c FILE.c [-o FILE.o] [--target=TRIPLE] [-I DIR]... [flags]
 | `-g` | Emit debug info (DWARF). |
 | `-O0` / `-O1` / `-O2` | Optimization level. Bare `-O` = `-O1`. `-O2` enables register allocation. |
 | `-funwind-tables` (also `-fasynchronous-unwind-tables`, `-fexceptions`) | Emit unwind tables (`.eh_frame`), so a C++ exception can unwind through the unit's functions. Always on for C++; off by default for C (a C callback library that C++ code may throw through wants it). `-fno-…` turns it off. |
+| `-fno-exceptions` | C++ without exceptions: `throw`/`try` are errors and no cleanup regions are made (as g++'s flag). |
 
 **Codegen flags** (for freestanding / kernel targets)
 

@@ -81,6 +81,28 @@ long layout_code()
            (long)sizeof(TailUser) * 10000 + (long)sizeof(EboUser) * 100 +
            (long)sizeof(Both);
 }
+int gxx_unwound = 0;
+struct Unwound { ~Unwound() { gxx_unwound++; } };
+int gxx_catches(void (*f)(int), int k)
+{
+    Unwound u;
+    try {
+        Unwound v;
+        f(k);
+    } catch (const AbiErr &e) {
+        return e.code;
+    } catch (int i) {
+        return -i;
+    }
+    return 0;
+}
+void gxx_throws(int k)
+{
+    Unwound u;
+    if (k > 0)
+        throw AbiErr(k);
+    throw k;
+}
 VBase *make_join2() { return new Join2; }
 int vbase_who(const VBase &v) { return v.who(); }
 int right_of(const Right &r) { return r.right(); }

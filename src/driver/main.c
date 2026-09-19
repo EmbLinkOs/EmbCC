@@ -153,6 +153,9 @@ static int lang_cxx;
  * way), off by default so C output stays as it was. */
 static int want_unwind = -1;
 
+/* C++ exceptions (-fno-exceptions turns them off, as g++'s). */
+static int want_exceptions = 1;
+
 /* --emit-c: print the C a C++ unit lowers to, instead of compiling it. */
 static int emit_c_only;
 
@@ -167,6 +170,7 @@ static int compile(const char *in, const char *out, int pp_only)
         return 0;
     }
     if (lang_cxx) {
+        cxx_set_exceptions(want_exceptions);
         pp = cxx_translate(in, pp);
         if (emit_c_only) {
             if (out) {
@@ -354,7 +358,8 @@ static int compile(const char *in, const char *out, int pp_only)
         dwarf_emit(iu, in, &dw);
     struct eh_out eh;
     memset(&eh, 0, sizeof eh);
-    int unwind = want_unwind > 0 || (want_unwind < 0 && lang_cxx);
+    int unwind = want_unwind > 0 ||
+                 (lang_cxx && (want_unwind < 0 || want_exceptions));
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
@@ -746,13 +751,16 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
         } else if (strcmp(argv[i], "-funwind-tables") == 0 ||
-                   strcmp(argv[i], "-fasynchronous-unwind-tables") == 0 ||
-                   strcmp(argv[i], "-fexceptions") == 0) {
+                   strcmp(argv[i], "-fasynchronous-unwind-tables") == 0) {
             want_unwind = 1;
+        } else if (strcmp(argv[i], "-fexceptions") == 0) {
+            want_unwind = 1;
+            want_exceptions = 1;
         } else if (strcmp(argv[i], "-fno-unwind-tables") == 0 ||
-                   strcmp(argv[i], "-fno-asynchronous-unwind-tables") == 0 ||
-                   strcmp(argv[i], "-fno-exceptions") == 0) {
+                   strcmp(argv[i], "-fno-asynchronous-unwind-tables") == 0) {
             want_unwind = 0;
+        } else if (strcmp(argv[i], "-fno-exceptions") == 0) {
+            want_exceptions = 0;
         } else if (strncmp(argv[i], "-O", 2) == 0) {
             /* -O / -O1 / -O2 / -O3 enable the optimizer (one level for now);
              * -O0 turns it off. Anything else after -O is an error. */

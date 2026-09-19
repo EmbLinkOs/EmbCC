@@ -6,4 +6,8 @@
 
 char *cxx_translate(const char *file, const char *src);
 
+/* -fno-exceptions: no throw, try or catch, and no exception tables' worth
+ * of cleanups (the default is on, as g++'s). */
+void cxx_set_exceptions(int on);
+
 #endif

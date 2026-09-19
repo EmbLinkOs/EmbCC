@@ -286,6 +286,7 @@ static void need_fn(struct cfunc *f)
 static int any_vtable;
 static int need_dyncast;
 static const char *typeinfo_sym(struct cty *t);
+static const char *ptr_typeinfo(struct cty *t);
 
 static void need_vtable(struct cclass *c)
 {
@@ -423,6 +424,55 @@ static char *str_lit(struct cexpr *e)
 
 /* ---- full-expressions and their temporaries ---- */
 
+/* ---- exception regions ---- */
+
+/* C++ exceptions are on: what a throw must undo is put in regions of
+ * EmbCC's C (__builtin_eh_region ... __builtin_eh_landing), each landing
+ * pad doing its part and handing on to the enclosing one — by goto, to
+ * its label __cx_lp<n>, as resuming inside the frame that handles the
+ * exception would find the same pad again — or, from the outermost, to
+ * the caller (_Unwind_Resume). */
+static int eh_on;
+static int fn_eh;             /* this function has regions: its __cx_exc
+                               * and __cx_sel */
+static int eh_used;           /* the unit calls the ABI's EH functions */
+static int eh_lp[1024];       /* the open regions' pads, innermost last */
+static int neh_lp;
+
+static int eh_open(struct sb *b)
+{
+    int lp = cx_uid();
+    if (neh_lp == 1024)
+        cx_error(NULL, "exception regions nested too deeply");
+    eh_lp[neh_lp++] = lp;
+    fn_eh = 1;
+    eh_used = 1;
+    sb_put(b, "__builtin_eh_region {\n");
+    return lp;
+}
+
+/* After a pad's own work: the enclosing pad's, or the caller's. */
+static void eh_chain(struct sb *b)
+{
+    if (neh_lp)
+        sb_printf(b, "goto __cx_lp%d;\n", eh_lp[neh_lp - 1]);
+    else
+        sb_put(b, "((void (*)(void *))_Unwind_Resume)(__cx_exc); "
+                  "__builtin_unreachable();\n");
+}
+
+/* Close region lp as a cleanup: its pad runs text, then hands on. */
+static void eh_close(struct sb *b, int lp, const char *text)
+{
+    if (!neh_lp || eh_lp[neh_lp - 1] != lp)
+        cx_error(NULL, "internal: exception regions closed out of order");
+    neh_lp--;
+    sb_printf(b, "} __builtin_eh_landing (__cx_exc, __cx_sel, __eh_cleanup) "
+                 "{\n__cx_lp%d:;\n%s\n", lp, text);
+    eh_chain(b);
+    sb_put(b, "}\n");
+}
+
 struct fx {
     struct sb decls;          /* the temporaries' declarations */
     char **clean;             /* their destruction, in construction order */
@@ -493,7 +543,7 @@ static char *materialize(struct cty *t, struct cexpr *init)
     einit(&s, name, t, init);
     char *d = destroy_text(cx_fmt("&%s", name), t);
     if (d) {
-        if (fx->cond) {
+        if (fx->cond || eh_on) {   /* a throw may come before it is made */
             char *flag = cx_fmt("__cx_f%d", ntemps);
             sb_printf(&fx->decls, "_Bool %s = 0; ", flag);
             sb_printf(&s, "%s = 1; ", flag);
@@ -535,6 +585,20 @@ static char *full_value(struct cexpr *e)
     fx_end(save);
     if (!f.decls.len && !f.nclean)
         return v;
+    if (eh_on && f.nclean) {
+        /* the temporaries made so far destroyed if it throws */
+        struct sb b = { 0, 0, 0 };
+        char *clean = fx_cleanup(&f);
+        int isvoid = e->t->k == CT_VOID;
+        sb_printf(&b, "({ %s", sb_str(&f.decls));
+        if (!isvoid)
+            sb_printf(&b, "%s; ", cdecl(ct_unqual(e->t), "__cx_r"));
+        int lp = eh_open(&b);
+        sb_printf(&b, isvoid ? "%s;\n" : "__cx_r = %s;\n", v);
+        eh_close(&b, lp, clean);
+        sb_printf(&b, "%s%s})", clean, isvoid ? "" : "__cx_r; ");
+        return b.p;
+    }
     if (e->t->k == CT_VOID)
         return cx_fmt("({ %s%s; %s})", sb_str(&f.decls), v, fx_cleanup(&f));
     return cx_fmt("({ %s%s = %s; %s__cx_r; })", sb_str(&f.decls),
@@ -553,6 +617,15 @@ static void full_stmt(struct sb *b, struct cexpr *e)
         sb_printf(b, "%s;\n", v);
         return;
     }
+    if (eh_on && f.nclean) {
+        char *clean = fx_cleanup(&f);
+        sb_printf(b, "{ %s", sb_str(&f.decls));
+        int lp = eh_open(b);
+        sb_printf(b, "(void)%s;\n", v);
+        eh_close(b, lp, clean);
+        sb_printf(b, "%s}\n", clean);
+        return;
+    }
     sb_printf(b, "{ %s(void)%s; %s}\n", sb_str(&f.decls), v, fx_cleanup(&f));
 }
 
@@ -567,6 +640,15 @@ static void stmt_init(struct sb *b, const char *dest, struct cty *t,
     fx_end(save);
     if (!f.decls.len && !f.nclean) {
         sb_printf(b, "%s\n", sb_str(&s));
+        return;
+    }
+    if (eh_on && f.nclean) {
+        char *clean = fx_cleanup(&f);
+        sb_printf(b, "{ %s", sb_str(&f.decls));
+        int lp = eh_open(b);
+        sb_printf(b, "%s\n", sb_str(&s));
+        eh_close(b, lp, clean);
+        sb_printf(b, "%s}\n", clean);
         return;
     }
     sb_printf(b, "{ %s%s %s}\n", sb_str(&f.decls), sb_str(&s),
@@ -685,6 +767,32 @@ static char *pmcall_text(struct cexpr *e, const char *dest)
     return b.p;
 }
 
+/* throw x: the exception object made in __cxa_allocate_exception's
+ * memory, then __cxa_throw with its typeinfo and destructor; throw;
+ * rethrows the one being handled. */
+static char *throw_text(struct cexpr *e)
+{
+    eh_used = 1;
+    if (!e->na)
+        return cx_fmt("({ ((void (*)(void))__cxa_rethrow)(); "
+                      "__builtin_unreachable(); })");
+    struct cty *t = e->alloc_t;
+    int u = cx_uid();
+    char *x = cx_fmt("__cx_x%d", u);
+    struct sb b = { 0, 0, 0 };
+    sb_printf(&b, "({ void *%s = ((void *(*)(unsigned long))"
+                  "__cxa_allocate_exception)(%ldUL); ", x, ct_size(t));
+    einit(&b, cx_fmt("(*(%s)%s)", ctype(ct_ptr(t)), x), t, e->a[0]);
+    struct cfunc *d = t->k == CT_CLASS ? class_dtor(t->cls) : NULL;
+    if (d)
+        need_fn(d);
+    sb_printf(&b, "((void (*)(void *, void *, void (*)(void *)))__cxa_throw)"
+                  "(%s, (void *)%s, (void (*)(void *))%s); "
+                  "__builtin_unreachable(); })", x, typeinfo_sym(t),
+              d ? fn_name(d, 1) : "0");
+    return b.p;
+}
+
 static char *new_text(struct cexpr *e)
 {
     need_fn(e->fn);
@@ -698,7 +806,25 @@ static char *new_text(struct cexpr *e)
                   fn_name(e->fn, 1), args_text(e->a, e->na, 0));
         if (e->init) {
             struct sb s = { 0, 0, 0 };
+            /* if the constructor throws, the storage goes back to the
+             * matching operator delete (not after placement new) */
+            int lp = -1;
+            const char *free_it = NULL;
+            if (eh_on && e->na == 1 && el->k == CT_CLASS) {
+                struct cexpr *vp = ex_new(E_NULLPTR, ct_ptr(ct_basic(CT_VOID)),
+                                          VC_PRVALUE);
+                struct cexpr *sz = ex_int(ct_size(el), ct_size_t());
+                struct cexpr *oa[2] = { vp, sz };
+                struct cexpr *call = call_delete_op(el->cls, oa);
+                need_fn(call->fn);
+                free_it = cx_fmt("%s(%s%s);", fn_name(call->fn, 1), p,
+                                 call->fn->type->np == 2
+                                 ? cx_fmt(", %ldUL", ct_size(el)) : "");
+                lp = eh_open(&s);
+            }
             einit(&s, cx_fmt("(*%s)", p), el, e->init);
+            if (lp >= 0)
+                eh_close(&s, lp, free_it);
             if (e->na > 1)
                 sb_printf(&b, "if (%s) { %s} ", p, sb_str(&s));
             else
@@ -959,6 +1085,12 @@ static char *ev(struct cexpr *e)
         return materialize(e->t, e);
     case E_NEW:
         return new_text(e);
+    case E_THROW:
+        return throw_text(e);
+    case E_EXCOBJ:               /* __cxa_begin_catch's result, in a handler */
+        if (e->is_array)
+            return cx_fmt("((%s)__cx_c)", ctype(e->t));
+        return cx_fmt("(*(%s)__cx_c)", ctype(ct_ptr(e->t)));
     case E_DELETE:
         return delete_text(e);
     case E_STMTEXPR: {
@@ -976,6 +1108,8 @@ static char *ev(struct cexpr *e)
 static char *elv(struct cexpr *e)
 {
     switch (e->k) {
+    case E_EXCOBJ:               /* the caught object itself, in a handler */
+        return cx_fmt("(*(%s)__cx_c)", ctype(ct_ptr(e->t)));
     case E_VAR:
         need_var(e->var);
         if (var_is_ptr(e->var))
@@ -1057,6 +1191,8 @@ static char *elv(struct cexpr *e)
 static char *eaddr(struct cexpr *e)
 {
     switch (e->k) {
+    case E_EXCOBJ:
+        return cx_fmt("((%s)__cx_c)", ctype(ct_ptr(e->t)));
     case E_VAR:
         need_var(e->var);
         if (var_is_ptr(e->var))
@@ -1366,9 +1502,16 @@ static char *cinit_text(struct cty *t, struct cexpr *e)
 
 /* ---- statements ---- */
 
+/* What must run when a scope is left: a destructor call (or a handler's
+ * __cxa_end_catch), at every exit — and, with exceptions, in a region
+ * opened as it was pushed, whose landing pad runs it when a call in the
+ * rest of the scope throws. An eh_only one (a constructor's finished
+ * members) runs only then. */
 struct clean {
     char *text;
     struct cstmt *blk;
+    int lp;                   /* its region's landing pad (-1: none) */
+    int eh_only;
 };
 
 static struct clean *cleans;
@@ -1378,7 +1521,8 @@ static int nbrk, ncont;
 static int line_now;
 static const char *file_now;
 
-static void push_clean(char *text, struct cstmt *blk)
+static void push_clean(struct sb *b, char *text, struct cstmt *blk,
+                       int eh_only)
 {
     if (ncleans == capcleans) {
         capcleans = capcleans ? capcleans * 2 : 16;
@@ -1386,13 +1530,30 @@ static void push_clean(char *text, struct cstmt *blk)
     }
     cleans[ncleans].text = text;
     cleans[ncleans].blk = blk;
+    cleans[ncleans].lp = eh_on ? eh_open(b) : -1;
+    cleans[ncleans].eh_only = eh_only;
     ncleans++;
 }
 
+/* Leaving the scopes above mark by a jump: their destructors. */
 static void run_cleans(struct sb *b, int mark)
 {
     for (int i = ncleans - 1; i >= mark; i--)
-        sb_printf(b, "%s\n", cleans[i].text);
+        if (!cleans[i].eh_only)
+            sb_printf(b, "%s\n", cleans[i].text);
+}
+
+/* The end of the scopes above mark: each region closed (its pad runs its
+ * cleanup and hands on), and the cleanup run. */
+static void close_cleans(struct sb *b, int mark)
+{
+    for (int i = ncleans - 1; i >= mark; i--) {
+        if (cleans[i].lp >= 0)
+            eh_close(b, cleans[i].lp, cleans[i].text);
+        if (!cleans[i].eh_only)
+            sb_printf(b, "%s\n", cleans[i].text);
+    }
+    ncleans = mark;
 }
 
 static void line_marker(struct sb *b, int line, const char *file)
@@ -1516,7 +1677,7 @@ static void emit_decl(struct sb *b, struct cstmt *s)
             stmt_init(b, name, ct_unqual(tmp->t), tmp->a[0]);
             char *d = destroy_text(cx_fmt("&%s", name), ct_unqual(tmp->t));
             if (d)
-                push_clean(d, s->blk);
+                push_clean(b, d, s->blk, 0);
             sb_printf(b, "%s = &%s;\n", cdecl(t, v->cname), name);
             return;
         }
@@ -1545,7 +1706,7 @@ static void emit_decl(struct sb *b, struct cstmt *s)
         if (s->dtor) {
             char *d = destroy_text(cx_fmt("&%s", v->cname), t);
             if (d)
-                push_clean(d, s->blk);
+                push_clean(b, d, s->blk, 0);
         }
         return;
     }
@@ -1592,6 +1753,48 @@ static int emit_inits(struct sb *b, struct cstmt *init)
     return mark;
 }
 
+/* The typeinfo a handler for t names: the type caught, without its
+ * reference and top-level qualifiers (NULL t: catch (...), 0). */
+static const char *catch_ti(struct cty *t)
+{
+    if (!t)
+        return "0";
+    if (ct_is_ref(t))
+        t = t->to;
+    t = ct_unqual(ct_decay(t));
+    return typeinfo_sym(t);
+}
+
+/* try { body } catch ...: body in a region whose landing pad picks the
+ * handler by the selector — the type table index of the one the
+ * personality routine matched — or hands on. A handler is a block that
+ * begins the catch and whose cleanup ends it (on every way out). */
+static void emit_try(struct sb *b, struct cstmt *s)
+{
+    int lp = eh_open(b);
+    emit_stmt(b, s->body);
+    neh_lp--;
+    sb_put(b, "} __builtin_eh_landing (__cx_exc, __cx_sel");
+    for (int i = 0; i < s->nhandlers; i++)
+        sb_printf(b, ", %s", catch_ti(s->handlers[i].type));
+    sb_printf(b, ") {\n__cx_lp%d:;\n", lp);
+    for (int i = 0; i < s->nhandlers; i++) {
+        struct chandler *h = &s->handlers[i];
+        sb_printf(b, "%sif (__cx_sel == __builtin_eh_typeid(%s)) {\n",
+                  i ? "else " : "", catch_ti(h->type));
+        sb_put(b, "void *__cx_c = ((void *(*)(void *))__cxa_begin_catch)"
+                  "(__cx_exc);\n");
+        int mark = ncleans;
+        push_clean(b, "((void (*)(void))__cxa_end_catch)();", h->body, 0);
+        emit_block_items(b, h->body->body);
+        close_cleans(b, mark);
+        sb_put(b, "}\n");
+    }
+    sb_put(b, "else {\n");
+    eh_chain(b);
+    sb_put(b, "}\n}\n");
+}
+
 static void emit_stmt(struct sb *b, struct cstmt *s)
 {
     if (s->k != S_BLOCK && s->k != S_DECL)
@@ -1610,8 +1813,7 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         sb_put(b, "{\n");
         int mark = ncleans;
         emit_block_items(b, s->body);
-        run_cleans(b, mark);
-        ncleans = mark;
+        close_cleans(b, mark);
         sb_put(b, "}\n");
         return;
     }
@@ -1624,8 +1826,7 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
             sb_put(b, "else ");
             emit_stmt(b, s->els);
         }
-        run_cleans(b, mark);
-        ncleans = mark;
+        close_cleans(b, mark);
         sb_put(b, "}\n");
         return;
     }
@@ -1642,8 +1843,7 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
             emit_stmt(b, s->body);
             nbrk--;
             ncont--;
-            run_cleans(b, mark);
-            ncleans = mark;
+            close_cleans(b, mark);
             sb_put(b, "}\n");
             return;
         }
@@ -1673,8 +1873,7 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         emit_stmt(b, s->body);
         nbrk--;
         ncont--;
-        run_cleans(b, mark);
-        ncleans = mark;
+        close_cleans(b, mark);
         sb_put(b, "}\n");
         return;
     }
@@ -1685,8 +1884,7 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         brk_mark[nbrk++] = ncleans;
         emit_stmt(b, s->body);
         nbrk--;
-        run_cleans(b, mark);
-        ncleans = mark;
+        close_cleans(b, mark);
         sb_put(b, "}\n");
         return;
     }
@@ -1758,7 +1956,7 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
             cx_error(NULL, "label '%s' used but not defined", s->label);
         sb_put(b, "{ ");
         for (int i = ncleans - 1; i >= 0; i--)
-            if (!is_ancestor(cleans[i].blk, l->blk))
+            if (!cleans[i].eh_only && !is_ancestor(cleans[i].blk, l->blk))
                 sb_printf(b, "%s\n", cleans[i].text);
         sb_printf(b, "goto %s; }\n", s->label);
         return;
@@ -1769,6 +1967,9 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
         return;
     case S_ASM:
         sb_printf(b, "%s\n", s->asm_text);
+        return;
+    case S_TRY:
+        emit_try(b, s);
         return;
     }
 }
@@ -1932,6 +2133,8 @@ static void emit_function(struct cfunc *f)
     ncleans = 0;
     nbrk = ncont = 0;
     line_now = 0;
+    fn_eh = 0;
+    neh_lp = 0;
     struct sb b = { 0, 0, 0 };
     int special = f->is_ctor || f->is_dtor;
     struct cclass *c = f->cls;
@@ -1950,6 +2153,12 @@ static void emit_function(struct cfunc *f)
         hdr_vtt = 2;
     sb_printf(&b, "%s%s%s\n{\n", vtt ? "static " : st, sec,
               func_header(f, body, 1));
+    int body_at = b.len;          /* where __cx_exc/__cx_sel go, if used */
+    /* noexcept (a destructor is, implicitly): an exception leaving it
+     * calls std::terminate — a catch-all region around everything */
+    int nothrow_lp = -1;
+    if (eh_on && (f->type->nothrow || f->is_dtor))
+        nothrow_lp = eh_open(&b);
     if (f->is_ctor) {
         if (!f->delegate && vtt && f->vbaseinit) {
             /* only the most derived class builds the virtual bases, in
@@ -1974,6 +2183,16 @@ static void emit_function(struct cfunc *f)
                 cur_vtt_base = sv >= 0 ? cx_fmt("__cx_vtt + %d", sv) : NULL;
                 stmt_init(&b, base_lvalue(c, i), ct_class(c->bases[i].cls),
                           f->baseinit[i]);
+                /* built: destroyed if the rest of the constructor throws */
+                struct cfunc *bd = class_dtor(c->bases[i].cls);
+                if (eh_on && bd) {
+                    need_fn(bd);
+                    push_clean(&b, cx_fmt("%s(&%s%s);", fn_name(bd, 2),
+                                          base_lvalue(c, i),
+                                          sv >= 0 ? cx_fmt(", __cx_vtt + %d",
+                                                           sv) : ""),
+                               NULL, 1);
+                }
             }
         cur_vtt_base = NULL;
         if (!f->delegate)
@@ -1999,6 +2218,19 @@ static void emit_function(struct cfunc *f)
                     continue;
                 stmt_init(&b, cx_fmt("this->%s", field_cname(fl)), fl->type,
                           f->meminit[i]);
+                char *d = eh_on && !ct_is_ref(fl->type)
+                          ? destroy_text(cx_fmt("&this->%s", field_cname(fl)),
+                                         fl->type) : NULL;
+                if (d)           /* built: destroyed if the rest throws */
+                    push_clean(&b, d, NULL, 1);
+            }
+        }
+        if (f->delegate && eh_on) {
+            /* the object is complete: its destructor, if the body throws */
+            struct cfunc *d = class_dtor(c);
+            if (d) {
+                need_fn(d);
+                push_clean(&b, cx_fmt("%s(this);", fn_name(d, 1)), NULL, 1);
             }
         }
     }
@@ -2006,8 +2238,7 @@ static void emit_function(struct cfunc *f)
         store_vptrs(&b, c, vtt ? "__cx_vtt" : NULL);
     if (f->body)
         emit_block_items(&b, f->body->body);
-    run_cleans(&b, 0);
-    ncleans = 0;
+    close_cleans(&b, 0);
     if (f->is_dtor) {
         sb_put(&b, "goto __cx_dtor_end;\n__cx_dtor_end: ;\n");
         for (int i = c->nfields - 1; i >= 0; i--) {
@@ -2045,10 +2276,31 @@ static void emit_function(struct cfunc *f)
             sb_put(&b, "}\n");
         }
     }
+    /* flowing off the end of a non-void function is undefined — and a
+     * body ending in a throw does not (to C's eye) return */
+    if (!special && f->type->to->k != CT_VOID &&
+        !(!f->cls && !f->c_linkage && f->owner == cx_global &&
+          strcmp(f->name, "main") == 0))
+        sb_put(&b, "__builtin_unreachable();\n");
+    if (nothrow_lp >= 0) {
+        neh_lp--;
+        sb_printf(&b, "} __builtin_eh_landing (__cx_exc, __cx_sel, 0) {\n"
+                      "__cx_lp%d:;\n((void (*)(void *))__cxa_call_terminate)"
+                      "(__cx_exc); __builtin_unreachable();\n}\n",
+                  nothrow_lp);
+    }
     if (!f->cls && !f->c_linkage && f->owner == cx_global &&
         strcmp(f->name, "main") == 0)
         sb_put(&b, "return 0;\n");
     sb_put(&b, "}\n");
+    if (fn_eh) {
+        /* the landing pads' exception pointer and selector */
+        struct sb nb = { 0, 0, 0 };
+        sb_printf(&nb, "%.*s", body_at, b.p);
+        sb_put(&nb, "void *__cx_exc; long __cx_sel;\n");
+        sb_put(&nb, b.p + body_at);
+        b = nb;
+    }
     if (special && vtt) {
         /* C2/D2 take the VTT; C1/D1 pass the class's own */
         struct sb args = { 0, 0, 0 };
@@ -2263,10 +2515,45 @@ static const char *typeinfo_sym(struct cty *t)
         return class_sym(t->cls, "_ZTI");
     }
     struct cty *b = t->k == CT_PTR ? ct_unqual(t->to) : t;
+    if (t->k == CT_PTR && b->k == CT_CLASS)
+        return ptr_typeinfo(t);
     if (b->k > CT_NULLPTR || (t->k == CT_PTR && ct_is_ref(t->to)))
         cx_error(NULL, "typeid of '%s' is not supported yet", ct_name(t));
     const char *sym = cx_fmt("_ZTI%s", mangle_type_alone(t));
     sb_printf(&out_rtti_decl, "extern void *%s[];\n", sym);
+    return sym;
+}
+
+/* The typeinfo of a pointer to a class (a __pointer_type_info: its
+ * pointee's cv as flags, and the class's typeinfo), weak in every unit
+ * that needs it, as g++ makes it. */
+static const char **ptr_ti_done;
+static int nptr_ti_done;
+
+static const char *ptr_typeinfo(struct cty *t)
+{
+    struct cty *pointee = t->to;
+    const char *m = mangle_type_alone(t);
+    const char *sym = cx_fmt("_ZTI%s", m);
+    for (int i = 0; i < nptr_ti_done; i++)
+        if (strcmp(ptr_ti_done[i], sym) == 0)
+            return sym;
+    ptr_ti_done = xrealloc(ptr_ti_done, (size_t)(nptr_ti_done + 1) *
+                                        sizeof *ptr_ti_done);
+    ptr_ti_done[nptr_ti_done++] = sym;
+    const char *cls = typeinfo_sym(ct_unqual(pointee));
+    int internal = class_internal(ct_unqual(pointee)->cls);
+    const char *st = internal ? "static " : "__attribute__((weak)) ";
+    long flags = ((pointee->q & CQ_CONST) ? 1 : 0) |
+                 ((pointee->q & CQ_VOLATILE) ? 2 : 0);
+    sb_printf(&out_rtti_decl, "%svoid *%s[4];\nextern void "
+                              "*_ZTVN10__cxxabiv119__pointer_type_infoE[];\n",
+              internal ? "static " : "extern ", sym);
+    sb_printf(&out_rtti, "%schar _ZTS%s[] = \"%s\";\n", st, m, m);
+    sb_printf(&out_rtti, "%svoid *%s[4] = { (void *)((char *)"
+                         "_ZTVN10__cxxabiv119__pointer_type_infoE + 16), "
+                         "(void *)_ZTS%s, (void *)%ldL, (void *)%s };\n",
+              st, sym, m, flags, cls);
     return sym;
 }
 
@@ -2482,6 +2769,9 @@ char *cx_emit_unit(void)
     memset(&out_vtables, 0, sizeof out_vtables);
     memset(&out_thunks, 0, sizeof out_thunks);
     nthunks_done = 0;
+    nptr_ti_done = 0;
+    eh_on = cx_exceptions;
+    eh_used = 0;
     ntemps = 0;
     struct fx top, *save;
     fx_begin(&top, &save);
@@ -2574,6 +2864,27 @@ char *cx_emit_unit(void)
     }
     if (use_set)
         sb_put(&out, "void *memset(void *, int, unsigned long);\n");
+    if (eh_used) {
+        /* the C++ ABI's exception functions — called through casts, so a
+         * declaration of the program's own (<cxxabi.h>) serves as well */
+        static const char *const abi[][2] = {
+            { "__cxa_allocate_exception", "void *%s(unsigned long);\n" },
+            { "__cxa_throw", "void %s(void *, void *, void (*)(void *));\n" },
+            { "__cxa_rethrow", "void %s(void);\n" },
+            { "__cxa_begin_catch", "void *%s(void *);\n" },
+            { "__cxa_end_catch", "void %s(void);\n" },
+            { "_Unwind_Resume", "void %s(void *);\n" },
+            { "__cxa_call_terminate", "void %s(void *);\n" },
+        };
+        for (unsigned i = 0; i < sizeof abi / sizeof abi[0]; i++) {
+            int theirs = 0;
+            for (struct cfunc *f = cx_funcs; f && !theirs; f = f->all_next)
+                theirs = f->declared && f->c_linkage &&
+                         strcmp(f->name, abi[i][0]) == 0;
+            if (!theirs)
+                sb_printf(&out, abi[i][1], abi[i][0]);
+        }
+    }
     if (use_cpy)
         sb_put(&out, "void *memcpy(void *, const void *, unsigned long);\n");
     for (struct cfunc *f = cx_funcs; f; f = f->all_next)

@@ -94,6 +94,7 @@ struct cty {
     int variadic;             /* FUNC: `...` */
     unsigned fq;              /* FUNC: a member function's cv (CQ_*) */
     int refq;                 /* FUNC: a member function's & (1) or && (2) */
+    int nothrow;              /* FUNC: noexcept (or throw()) */
     struct cclass *cls;       /* CLASS */
     struct cenum *en;         /* ENUM */
     /* FUNC, as a declarator wrote it: the parameters' declared types (top-
@@ -437,6 +438,7 @@ struct parse_state;
 struct parse_state *parse_save(void);
 void parse_restore(struct parse_state *st);
 extern int cx_pattern;         /* reading a pattern: dependent types allowed */
+extern int cx_exceptions;      /* exceptions on (the default; -fno-exceptions) */
 extern int cx_in_targs;        /* inside < > of template arguments */
 /* SFINAE: while set, an error unwinds to it instead of ending the run. */
 extern void *cx_sfinae;
@@ -675,9 +677,13 @@ enum cexpr_kind {
                    * reference (failure calls __cxa_bad_cast) */
     E_PMEM,       /* a[0].*a[1]: the data member a pointer to member names */
     E_PMCALL,     /* (a[0]->*a[1])(a[2]...): a[0] the object's address */
-    E_MPCONV      /* a[0], a pointer to member of a base, as one of its
+    E_MPCONV,     /* a[0], a pointer to member of a base, as one of its
                    * derived class: ival added (a data member's offset,
                    * a member function's this adjustment) */
+    E_THROW,      /* throw a[0] (na 0: rethrow); alloc_t the exception
+                   * object's type, a[0] its initialization */
+    E_EXCOBJ      /* in a handler: the caught object (an lvalue of type t);
+                   * is_array: a caught pointer's value */
 };
 
 enum { VC_PRVALUE, VC_LVALUE, VC_XVALUE };
@@ -886,7 +892,15 @@ int expr_call_args_rest(struct cexpr ***out);   /* after `(` */
 enum cstmt_kind {
     S_EXPR, S_DECL, S_BLOCK, S_IF, S_WHILE, S_DO, S_FOR, S_SWITCH, S_CASE,
     S_DEFAULT, S_BREAK, S_CONTINUE, S_RETURN, S_GOTO, S_LABEL, S_NULL,
-    S_ASM
+    S_ASM, S_TRY
+};
+
+/* A catch clause: the type it catches (NULL: catch (...)), as written —
+ * a reference, a pointer, or a value — and its block, whose first
+ * statement declares the parameter when it is named. */
+struct chandler {
+    struct cty *type;
+    struct cstmt *body;
 };
 
 struct cstmt {
@@ -909,6 +923,8 @@ struct cstmt {
     struct cvar *ret_var;     /* RETURN: the local object it returns by name
                                * (a named-return-value candidate) */
     const char *asm_text;     /* ASM: the statement, verbatim */
+    struct chandler *handlers;    /* TRY: body, then these */
+    int nhandlers;
     int line;
     const char *file;
 };

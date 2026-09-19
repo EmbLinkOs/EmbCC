@@ -119,6 +119,16 @@ struct Join2 : Right, Left {
     int k = 4;
 };
 extern long vb_trail;               // each destructor appends a digit
+
+// Exceptions across the compilers: AbiErr's members are embcc's; each
+// side throws, the other catches, frames of both between.
+struct AbiErr {
+    int code;
+    explicit AbiErr(int c);
+    AbiErr(const AbiErr &);
+    ~AbiErr();
+    static int live;
+};
 struct NonPodBase { int x = 1; char c = 2; };
 struct TailUser : NonPodBase { char d = 3; };      // d in NonPodBase's padding
 struct EmptyBase {};
@@ -136,6 +146,9 @@ int vbase_who(const VBase &);                       // g++ calls who()
 int right_of(const Right &);                        // ... and right()
 Join *as_join(VBase *);                             // down from a virtual base
 long vb_layout();                                   // g++'s offsets/sizes
+int gxx_catches(void (*)(int), int);                // g++ catches
+void gxx_throws(int);                               // g++ throws
+extern int gxx_unwound;                             // g++'s locals destroyed
 int via(const Pt *, int (Pt::*)(int) const, int Pt::*);   // g++ side
 int Pt::*member_of(int which);                              // embcc side
 int (Pt::*method())() const;                                // embcc side

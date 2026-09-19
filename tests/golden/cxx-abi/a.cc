@@ -71,6 +71,21 @@ long Tagged::tag() const { return t; }
 int Both::area() const { return 7; }
 long Both::tag() const { return t + 1; }
 
+int AbiErr::live = 0;
+AbiErr::AbiErr(int c) : code(c) { live++; }
+AbiErr::AbiErr(const AbiErr &o) : code(o.code) { live++; }
+AbiErr::~AbiErr() { live--; }
+
+static int emb_unwound;
+struct EmbGuard { ~EmbGuard() { emb_unwound++; } };
+static void emb_throw(int k)
+{
+    EmbGuard g;
+    if (k > 0)
+        throw AbiErr(k);
+    throw k;
+}
+
 long vb_trail = 0;
 VBase::~VBase() { vb_trail = vb_trail * 10 + 9; }
 int VBase::who() const { return base; }
@@ -209,6 +224,27 @@ int main()
         CHECK("... destroyed in order through both", vb_trail == 4129);
         Right r;
         CHECK("g++'s constructor, complete", r.right() == 7 && r.who() == 5);
+    }
+    {
+        using namespace detail;
+        CHECK("g++ catches embcc's exceptions",
+              gxx_catches(emb_throw, 5) == 5 && gxx_catches(emb_throw, -3) == 3 &&
+              emb_unwound == 2 && gxx_unwound == 4 && AbiErr::live == 0);
+        int got = 0;
+        try {
+            EmbGuard g;
+            gxx_throws(7);
+        } catch (const AbiErr &e) {
+            got = e.code;
+        }
+        try {
+            gxx_throws(-8);
+        } catch (int i) {
+            got += i * 100;
+        }
+        CHECK("embcc catches g++'s, unwinding both",
+              got == 7 - 800 && emb_unwound == 3 && gxx_unwound == 6 &&
+              AbiErr::live == 0);
     }
     Pt pt = { 3, 4 };
     CHECK("member pointers to and from g++",

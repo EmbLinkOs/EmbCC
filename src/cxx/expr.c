@@ -15,6 +15,8 @@
 
 #include "../driver/util.h"
 
+static struct cexpr *parse_throw(void);
+
 struct cexpr *ex_new(enum cexpr_kind k, struct cty *t, int vc)
 {
     struct cexpr *e = xcalloc(1, sizeof *e);
@@ -3175,8 +3177,7 @@ static struct cexpr *parse_primary(void)
         return e;
     }
     case TOK_CX_THROW:
-        cx_error(at, "exceptions are not supported yet (CX5)");
-        return NULL;
+        return parse_throw();
     case TOK_LBRACKET:
         cx_error(at, "lambdas are not supported yet (CX6)");
         return NULL;
@@ -3710,10 +3711,41 @@ static int is_assign_op(enum tok_kind k)
     }
 }
 
+/* throw [assignment-expression]: the exception object, of the operand's
+ * decayed, unqualified type, initialized from it (the object is
+ * __cxa_allocate_exception's); without one, a rethrow. */
+static struct cexpr *parse_throw(void)
+{
+    const struct ctok *at = cx_cur();
+    cx_advance();
+    if (!cx_exceptions)
+        cx_error(at, "'throw' with exceptions disabled (-fno-exceptions)");
+    struct cexpr *r = ex_new(E_THROW, ct_basic(CT_VOID), VC_PRVALUE);
+    r->line = at->t.line;
+    r->file = at->file;
+    enum tok_kind k = cx_kind();
+    if (k == TOK_SEMI || k == TOK_RPAREN || k == TOK_COMMA ||
+        k == TOK_COLON || k == TOK_RBRACKET || k == TOK_RBRACE)
+        return r;                            /* throw; */
+    struct cexpr *e = expr_parse_assign();
+    struct cty *t = ct_unqual(ct_decay(ct_strip_ref(e->t)));
+    if (t->k == CT_VOID || (t->k == CT_CLASS && !ct_is_complete(t)))
+        cx_error(at, "throwing an object of incomplete type '%s'",
+                 ct_name(t));
+    if (t->k == CT_CLASS && class_abstract(t->cls))
+        cx_error(at, "throwing an object of abstract class '%s'",
+                 ct_name(t));
+    r->alloc_t = t;
+    r->a = xmalloc(sizeof *r->a);
+    r->a[0] = init_object(t, INIT_COPY, &e, 1, at);
+    r->na = 1;
+    return r;
+}
+
 struct cexpr *expr_parse_assign(void)
 {
     if (cx_kind() == TOK_CX_THROW)
-        cx_error(cx_cur(), "exceptions are not supported yet (CX5)");
+        return parse_throw();
     struct cexpr *l = expr_parse_cond();
     enum tok_kind k = cx_kind();
     if (!is_assign_op(k))

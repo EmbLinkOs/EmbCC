@@ -1284,11 +1284,20 @@ static struct cty *parse_params(void)
     }
     for (;;) {
         if (cx_accept(TOK_CX_NOEXCEPT)) {
-            if (cx_kind() == TOK_LPAREN)
+            /* noexcept, noexcept(true): no exception leaves it; an
+             * expression EmbCC cannot settle here counts as false (so an
+             * exception passes rather than terminates) */
+            ft->nothrow = 1;
+            if (cx_kind() == TOK_LPAREN) {
+                ft->nothrow = cx_kind_at(1) == TOK_CX_TRUE &&
+                              cx_kind_at(2) == TOK_RPAREN;
                 cx_skip_balanced();
+            }
             continue;
         }
         if (cx_kind() == TOK_CX_THROW && cx_kind_at(1) == TOK_LPAREN) {
+            /* a dynamic exception specification: throw() is noexcept */
+            ft->nothrow = cx_kind_at(2) == TOK_RPAREN;
             cx_advance();
             cx_skip_balanced();
             continue;
@@ -3077,6 +3086,92 @@ static struct cstmt *parse_block_body(struct cscope *s)
     return b;
 }
 
+/* A catch clause's parameter: a local of its handler, initialized from
+ * the caught object — referring to it, copying it, or (a pointer) taking
+ * the value __cxa_begin_catch adjusted. */
+static struct cstmt *handler_param(struct cty *t, const char *name,
+                                   const struct ctok *at)
+{
+    struct cvar *v = new_local(name, t, at);
+    struct csym *y = scope_add(cx_scope, CS_VAR, name);
+    y->var = v;
+    struct cstmt *s = st_new(S_DECL);
+    s->line = at->t.line;
+    s->file = at->file;
+    s->var = v;
+    struct cty *ot = ct_is_ref(t) ? t->to : ct_unqual(t);
+    struct cexpr *obj = ex_new(E_EXCOBJ, ot, VC_LVALUE);
+    if (ct_is_ref(t)) {
+        v->init = ex_addr(obj);
+    } else if (ot->k == CT_PTR) {
+        obj->vc = VC_PRVALUE;
+        obj->is_array = 1;
+        v->init = obj;
+    } else if (ot->k == CT_CLASS) {
+        v->ctor = construct(ot->cls, INIT_DIRECT, &obj, 1, at);
+        s->dtor = class_dtor(ot->cls) != NULL;
+    } else {
+        v->init = rvalue(obj);
+    }
+    return s;
+}
+
+/* try { } catch (T x) { } ... */
+static struct cstmt *parse_try(const struct ctok *at)
+{
+    if (!cx_exceptions)
+        cx_error(at, "'try' with exceptions disabled (-fno-exceptions)");
+    cx_advance();
+    struct cstmt *s = st_new(S_TRY);
+    s->line = at->t.line;
+    s->file = at->file;
+    s->blk = cx_curblk;
+    s->body = parse_compound();
+    int cap = 0;
+    while (cx_kind() == TOK_CX_CATCH) {
+        const struct ctok *hat = cx_cur();
+        cx_advance();
+        cx_expect(TOK_LPAREN, "'(' after catch");
+        struct cscope *hs = scope_push(SC_BLOCK, NULL);
+        struct chandler h;
+        memset(&h, 0, sizeof h);
+        struct cstmt *param = NULL;
+        if (!cx_accept(TOK_ELLIPSIS)) {
+            struct dspec ds;
+            parse_dspec(&ds);
+            if (!ds.type)
+                cx_error(cx_cur(), "expected the type a handler catches");
+            struct declarator d;
+            memset(&d, 0, sizeof d);
+            h.type = parse_declarator(ds.type, &d, DK_NAMED | DK_ABSTRACT);
+            if (d.saved)
+                cx_scope = d.saved;
+            struct cty *ot = ct_is_ref(h.type) ? h.type->to : h.type;
+            if (ot->k == CT_CLASS && !ct_is_complete(ot))
+                cx_error(hat, "catching incomplete type '%s'", ct_name(ot));
+            if (d.name)
+                param = handler_param(h.type, d.name, d.at ? d.at : hat);
+        }
+        cx_expect(TOK_RPAREN, "')' after the handler's parameter");
+        h.body = parse_block_body(hs);
+        scope_pop();
+        if (param) {
+            param->blk = h.body;
+            param->next = h.body->body;
+            h.body->body = param;
+        }
+        if (s->nhandlers == cap) {
+            cap = cap ? cap * 2 : 4;
+            s->handlers = xrealloc(s->handlers,
+                                   (size_t)cap * sizeof *s->handlers);
+        }
+        s->handlers[s->nhandlers++] = h;
+    }
+    if (!s->nhandlers)
+        cx_error(at, "a try block needs a handler");
+    return s;
+}
+
 struct cstmt *parse_compound(void)
 {
     struct cscope *s = scope_push(SC_BLOCK, NULL);
@@ -3459,8 +3554,7 @@ static struct cstmt *parse_stmt(void)
         return s;
     }
     case TOK_CX_TRY:
-        cx_error(at, "exceptions are not supported yet (CX5)");
-        return NULL;
+        return parse_try(at);
     case TOK_CX_USING:
         parse_using();
         return NULL;

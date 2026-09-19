@@ -182,8 +182,8 @@ types, `auto` and `decltype` for variables, `if`/`switch` with an
 initializer, `static_assert`, delegating constructors, default member
 initializers.
 
-Refused until later, each naming its milestone: exceptions (CX5);
-lambdas, range-`for`, `initializer_list`, deduced return types (CX6); designated initializers, `<=>` and C++20's
+Refused until later, each naming its milestone: lambdas, range-`for`,
+`initializer_list`, deduced return types (CX6); designated initializers, `<=>` and C++20's
 rewritten comparisons, `auto` parameters, coroutines (CX7). Access control
 is parsed but not yet enforced; anonymous struct/union members, bit-fields
 in a class with bases or virtual functions, and copying arrays of
@@ -239,4 +239,41 @@ xs...)...)`); function parameter packs named in a dependent signature
 Not yet with virtual bases: covariant return types that need a thunk to
 adjust the result.
 
-Next: CX5 (exceptions).
+**CX5 in progress** (September 2026): exceptions, interchangeable with
+g++'s, built in three layers.
+
+1. *Unwind tables* (debug/eh.c): the code generators record what each
+   prologue did and every function gets a CIE/FDE in `.eh_frame` — always
+   for C++, for C on `-funwind-tables` — so libgcc's unwinder can cross
+   EmbCC's frames (tests/golden/unwind-through.sh: g++'s exception through
+   EmbCC's C at -O0 and -O2, the catcher's callee-saved registers intact).
+2. *Landing pads in EmbCC's C*: `__builtin_eh_region { } __builtin_eh_landing
+   (exc, sel, actions) { }` and `__builtin_eh_typeid`, which C++'s lowering
+   writes; irgen keeps regions as instruction ranges, both code generators
+   record calls and pads, and eh.c writes the LSDA `__gxx_personality_v0`
+   reads (tests/golden/eh-regions.sh).
+3. *C++*: `throw` (`__cxa_allocate_exception`/`__cxa_throw` with the type's
+   typeinfo — pointers to classes get their `__pointer_type_info` — and
+   destructor), `throw;`, `try`/`catch` by value, reference, pointer and
+   `...` (the pad dispatching on the selector; a handler is a block whose
+   cleanup is `__cxa_end_catch`), and every destructor a throw must run:
+   locals (a region opened as each is built, closed at its scope's end,
+   its pad destroying it and handing on — by `goto` to the enclosing pad,
+   or `_Unwind_Resume` from the outermost), temporaries (flagged as built),
+   a constructor's finished bases and members, `new`'s storage.
+   `noexcept` functions and destructors get a catch-all region calling
+   `__cxa_call_terminate`. `-fno-exceptions` turns it all off.
+
+tests/cxx `except` agrees with g++ on both targets; cxx-abi throws each
+way across the compilers (EmbCC's exception type caught by g++'s code,
+g++'s by EmbCC's, destructors of both sides' frames run);
+tests/golden/cxx-noexcept.sh ends in std::terminate as it must.
+
+Not yet: function-try-blocks; the `noexcept` operator (always false, which
+is safe: move_if_noexcept then copies); partial destruction of arrays of
+objects and of `new T[n]`; a guarded local static whose initializer throws
+(`__cxa_guard_abort`); and optimization — a function with a landing pad is
+compiled in the plain memory model (the optimizer and register allocation
+do not yet model the edges into pads).
+
+Next: the rest of CX5, then CX6.
