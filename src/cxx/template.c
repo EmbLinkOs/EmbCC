@@ -764,6 +764,62 @@ static int deducible_in(struct cty *P)
     }
 }
 
+/* Does P mention a template parameter not given explicitly (set 3)?
+ * If none, the argument only has to convert to P with the given ones
+ * substituted: nothing to deduce from it (13.10.2). Unsure: yes. */
+static int mentions_unset(struct cty *P, const int *set, int np);
+
+static int targs_mention_unset(struct ctarg *a, int n, const int *set,
+                               int np)
+{
+    for (int i = 0; i < n; i++) {
+        if (a[i].is_pack || a[i].expansion || a[i].mexpr)
+            return 1;
+        if (a[i].kind == TP_TYPE && mentions_unset(a[i].type, set, np))
+            return 1;
+        if (a[i].kind == TP_VALUE && a[i].vtype &&
+            a[i].vtype->k == CT_TPARAM)
+            return 1;
+        if (a[i].kind == TP_TEMPLATE && a[i].tmpl && a[i].tmpl->tparam)
+            return 1;
+    }
+    return 0;
+}
+
+static int mentions_unset(struct cty *P, const int *set, int np)
+{
+    if (!P)
+        return 0;
+    switch (P->k) {
+    case CT_TPARAM:
+        return !(P->n >= 0 && P->n < np && set[P->n] == 3);
+    case CT_PTR: case CT_LREF: case CT_RREF: case CT_ARRAY:
+        if (P->n == -2 || P->n == -3)
+            return 1;
+        return mentions_unset(P->to, set, np);
+    case CT_MPTR:
+        return P->mclass ? 1 : mentions_unset(P->to, set, np);
+    case CT_FUNC:
+        if (mentions_unset(P->to, set, np))
+            return 1;
+        for (int i = 0; i < P->np; i++)
+            if (mentions_unset(P->params[i], set, np))
+                return 1;
+        return 0;
+    case CT_TID:
+        if (!P->tmpl || P->tmpl->tparam)
+            return 1;
+        return targs_mention_unset(P->targs, P->ntargs, set, np);
+    case CT_DEP:
+        if (P->dexpr || (!P->to && !P->tmpl))
+            return 1;
+        return mentions_unset(P->to, set, np) ||
+               targs_mention_unset(P->targs, P->ntargs, set, np);
+    default:
+        return ct_dependent(P);
+    }
+}
+
 /* P an alias template-id with dependent arguments (index_sequence<I...>,
  * an alias being the type it names, 13.7.8): the alias's own parameters
  * deduced from A through its pattern (integer_sequence<size_t, I...>),
@@ -1250,7 +1306,7 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
             if (e->fn->next || e->fn->tmpl)
                 continue;                    /* an overload set: skip */
         }
-        if (ppack < 0 && !ct_dependent(P))
+        if (ppack < 0 && (!ct_dependent(P) || !mentions_unset(P, set, np)))
             continue;       /* no template parameter to deduce: the
                              * argument converts, or not, later */
         struct cty *A = e->k == E_OVL ? e->fn->type : e->t;
@@ -1821,9 +1877,22 @@ struct cty *alias_instance(struct ctemplate *t, struct ctarg *args, int n,
     for (struct cinst *in = t->insts; in; in = in->next)
         if (args_same(in->args, in->nargs, a, t->nparams))
             return in->type;
+    struct cscope *ps = tparam_scope(t->params, t->nparams, a, t->nparams,
+                                     t->scope);
+    int constrained = t->req_start && !cx_pattern;
+    for (int i = 0; i < t->nparams; i++) {
+        constrained |= t->params[i].tc != NULL && !cx_pattern;
+        if (targ_is_dependent(&a[i]))
+            constrained = 0;          /* (a pattern's: decided later) */
+    }
+    if (constrained && !template_constraints(t->params, t->nparams,
+                                             t->req_start, t->req_end, ps,
+                                             at))
+        cx_error(at, "the constraints of alias template '%s' are not "
+                     "satisfied", t->name);   /* (in SFINAE: a failure) */
     struct parse_state *st = parse_save();
     cx_inst_push(cx_fmt("alias template '%s'", t->name), cx_cur());
-    cx_scope = tparam_scope(t->params, t->nparams, a, t->nparams, t->scope);
+    cx_scope = ps;
     cx_pos = t->decl_tok;
     cx_half_gt = 0;
     cx_in_targs = 0;

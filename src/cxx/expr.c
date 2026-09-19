@@ -1476,6 +1476,8 @@ struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx)
                                              ct_mptr(f->cls, t->to),
                                              VC_PRVALUE);
                     r->fn = f;
+                    if (!cx_unevaluated)
+                        f->called = 1;   /* (its body: made for this) */
                     r->line = e->line;
                     r->file = e->file;
                     return f->cls == t->cls ? r
@@ -1628,6 +1630,62 @@ static struct cexpr *convert_param(struct cexpr *arg, struct cty *p,
     return convert(arg, p, "an argument");
 }
 
+/* __builtin_source_location() at `at`: where it is, in which function
+ * (as g++ spells __PRETTY_FUNCTION__: `int main()`) — a pointer to a
+ * record laid out as std::source_location::__impl */
+static struct cexpr *source_location_at(const struct ctok *at)
+{
+    struct cexpr *e = ex_new(E_BUILTIN, ct_ptr(ct_qual(ct_basic(CT_VOID),
+                                                       CQ_CONST)),
+                             VC_PRVALUE);
+    e->name = "__builtin_source_location";
+    e->line = at ? at->t.line : 0;
+    e->file = at ? at->file : "";
+    e->ival = at ? at->t.col : 0;
+    const char *fn = "";
+    struct cfunc *f = cx_curfn;
+    if (f && f->name && !f->lambda) {
+        const char *ps = "";
+        for (int i = 0; i < f->type->np; i++)
+            ps = cx_fmt("%s%s%s", ps, i ? ", " : "",
+                        ct_name(f->type->params[i]));
+        const char *qn = f->cls && f->cls->name
+                         ? cx_fmt("%s::%s", f->cls->name, f->name) : f->name;
+        fn = f->is_ctor || f->is_dtor
+             ? cx_fmt("%s(%s)", qn, ps)
+             : cx_fmt("%s%s %s(%s)", f->is_static && f->cls ? "static " : "",
+                      ct_name(f->type->to), qn, ps);
+    }
+    e->text = fn;
+    return e;
+}
+
+/* A default argument used at `at`: __builtin_source_location() in it
+ * (std::source_location::current() as a default) says where the call
+ * is — the tree copied along the way to each */
+static struct cexpr *default_at(struct cexpr *e, const struct ctok *at)
+{
+    if (!e)
+        return NULL;
+    if (e->k == E_BUILTIN && e->name &&
+        strcmp(e->name, "__builtin_source_location") == 0)
+        return source_location_at(at);
+    struct cexpr *r = e;
+    for (int i = 0; i < e->na; i++) {
+        struct cexpr *c = e->a ? default_at(e->a[i], at) : NULL;
+        if (c == (e->a ? e->a[i] : NULL))
+            continue;
+        if (r == e) {
+            r = xmalloc(sizeof *r);
+            *r = *e;
+            r->a = xmalloc((size_t)e->na * sizeof *r->a);
+            memcpy(r->a, e->a, (size_t)e->na * sizeof *r->a);
+        }
+        r->a[i] = c;
+    }
+    return r;
+}
+
 static int convert_args_ft(struct cty *ft, struct cexpr **defs,
                            struct cexpr **args, int na,
                            const struct ctok *at, struct cexpr ***out)
@@ -1642,6 +1700,8 @@ static int convert_args_ft(struct cty *ft, struct cexpr **defs,
         struct cexpr *a = i < na ? args[i] : defs ? defs[i] : NULL;
         if (!a)
             cx_error(at, "too few arguments");
+        if (i >= na)
+            a = default_at(a, at);        /* a default: the caller's place */
         o[i] = convert_param(a, ft->params[i], at);
     }
     *out = o;
@@ -3371,7 +3431,7 @@ int cxx_has_builtin(const char *name)
         static const char *const special[] = {
             "offsetof", "is_constant_evaluated", "addressof", "launder",
             "expect", "constant_p", "va_arg", "coro_done", "coro_resume",
-            "coro_destroy", "coro_promise",
+            "coro_destroy", "coro_promise", "source_location",
         };
         const char *n = name + 10;
         for (size_t i = 0; i < sizeof special / sizeof special[0]; i++)
@@ -3745,6 +3805,11 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         }
         cx_expect(TOK_RPAREN, "')'");
         return ex_int(off, ct_size_t());
+    }
+    if (strcmp(n, "source_location") == 0) {
+        cx_expect(TOK_LPAREN, "'('");
+        cx_expect(TOK_RPAREN, "')'");
+        return source_location_at(at);
     }
     if (strcmp(n, "is_constant_evaluated") == 0) {
         /* true in a constant evaluation (consteval.c), false at run time */
@@ -4942,6 +5007,8 @@ static struct cexpr *member_pointer(void)
                                          ct_mptr(c, y->fns->type),
                                          VC_PRVALUE);
                 e->fn = y->fns;
+                if (!cx_unevaluated)
+                    y->fns->called = 1;  /* (its body: made for this) */
                 return e;
             }
             struct cexpr *e = ex_new(E_OVL, y->fns->type, VC_LVALUE);

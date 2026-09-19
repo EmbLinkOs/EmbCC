@@ -1791,8 +1791,9 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
                 !constraint_satisfied(ft->treq, ft->treq_end,
                                       with_params(ft, cx_scope));
     for (struct cfunc *f = unsat ? NULL : *set; f; f = f->next) {
-        if (f->unsat)
-            continue;
+        if (f->unsat || f->tmpl)
+            continue;       /* (a template of the same signature is
+                             * another function: bitset's to_string) */
         if (!same_signature(f->type, ft) &&
             !(f->c_linkage && cx_extern_c))
             continue;
@@ -5526,6 +5527,12 @@ static struct cstmt *parse_stmt_or_none(void)
     case TOK_KW_STATIC_ASSERT:
         parse_static_assert();
         return NULL;
+    case TOK_CX_NAMESPACE:
+        if (cx_kind_at(1) == TOK_IDENT && cx_kind_at(2) == TOK_ASSIGN) {
+            parse_namespace();          /* a block's namespace alias */
+            return NULL;
+        }
+        break;
     case TOK_IDENT:
         if (cx_kind_at(1) == TOK_COLON) {
             s = st_new(S_LABEL);
@@ -6597,6 +6604,28 @@ static struct ctemplate *template_new(int kind, const char *name,
 /* The class template `A` of `A<...>::` — the qualifier of an out-of-class
  * member definition — found by scanning the declaration: the last
  * template-id before its declarator's parameters or initializer. */
+/* the `<` of the qualifier outdef_target last found (A<T, U>::f) */
+static int outdef_qual_lt;
+
+/* Are the template arguments at `<` (lt) the parameters ps themselves, in
+ * order: the primary template's members, not a partial
+ * specialization's (vector<bool, _Alloc>::f)? */
+static int args_are_params(int lt, struct ctparam *ps, int np)
+{
+    int i = lt + 1;
+    for (int k = 0; k < np; k++) {
+        if (k > 0 && cx_toks[i++].t.kind != TOK_COMMA)
+            return 0;
+        if (cx_toks[i].t.kind != TOK_IDENT || !ps[k].name ||
+            strcmp(cx_toks[i].t.text, ps[k].name) != 0)
+            return 0;
+        i++;
+        if (ps[k].pack && cx_toks[i++].t.kind != TOK_ELLIPSIS)
+            return 0;
+    }
+    return cx_toks[i].t.kind == TOK_GT || cx_toks[i].t.kind == TOK_SHR;
+}
+
 static struct ctemplate *outdef_target(const char **member)
 {
     struct ctemplate *found = NULL;
@@ -6678,6 +6707,7 @@ static struct ctemplate *outdef_target(const char **member)
                 ak == TOK_SEMI || ak == TOK_LBRACE || ak == TOK_LBRACKET) {
                 found = y->tmpl;
                 *member = m;
+                outdef_qual_lt = i + 1;
             }
         }
         i = cx_pos - 1;
@@ -6768,6 +6798,7 @@ void parse_template_decl(struct cclass *cls, int access)
         o->nparams = np;
         o->tok = inner;
         o->member = member;
+        o->partial = !args_are_params(outdef_qual_lt, ps, np);
         o->next = t->outdefs;
         t->outdefs = o;
         skip_declaration();
@@ -6786,6 +6817,8 @@ void parse_template_decl(struct cclass *cls, int access)
         struct ctemplate *t = template_new(TK_ALIAS, name, home, ps, np);
         t->decl_tok = cx_pos;
         t->pscope = cx_scope;
+        t->req_start = req_s;       /* its constraints: checked per use */
+        t->req_end = req_e;
         skip_declaration();
         struct csym *y = scope_add(home, CS_TEMPLATE, name);
         y->tmpl = t;
@@ -7015,6 +7048,7 @@ void parse_template_decl(struct cclass *cls, int access)
         o->nparams = np;
         o->tok = decl;
         o->member = member;
+        o->partial = !args_are_params(outdef_qual_lt, ps, np);
         o->next = owner->outdefs;
         owner->outdefs = o;
         skip_declaration();
@@ -7855,6 +7889,8 @@ int member_from_outdef(struct cfunc *f)
             continue;
         struct ctarg *args = inst->targs;
         int na = inst->ntargs;
+        if (o->partial && !inst->inst_partial)
+            continue;       /* a partial specialization's member */
         if (inst->inst_partial) {
             /* a partial specialization's member: its own parameters
              * bound (a definition of another's fails its qualifier) */
@@ -8085,8 +8121,14 @@ void cx_parse_unit(void)
             if (!c->dynamic || !c->complete || !in_instance(c))
                 continue;
             int built = 0;
-            for (struct cfunc *k = c->ctors; k && !built; k = k->next)
+            for (struct cfunc *k = c->ctors; k && !built; k = k->next) {
                 built = k->used;
+                /* ... or a specialization of a constructor template
+                 * (_Sp_counted_ptr_inplace's) */
+                for (struct cinst *in = k->tmpl ? k->tmpl->insts : NULL;
+                     in && !built; in = in->next)
+                    built = in->fn && in->fn->used;
+            }
             if (!built)
                 continue;
             struct vgroup *g = vtable_group(c);

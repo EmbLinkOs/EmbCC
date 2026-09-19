@@ -385,6 +385,9 @@ struct coutdef {
     int class_body;           /* a member class's definition: at its `{`
                                * or `:` (0: a function's or variable's) */
     enum tok_kind key;        /* ... class, struct or union */
+    int partial;              /* its qualifier names a partial
+                               * specialization (A<bool, T>::f), not the
+                               * primary template (A<T, U>::f) */
     struct coutdef *next;
 };
 /* A class template instance's member class declared, not defined, in the

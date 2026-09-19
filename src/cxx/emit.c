@@ -194,6 +194,7 @@ static const char *basic_c(enum cty_kind k)
 }
 
 static int need_pmf;            /* the unit uses struct __cx_pmf */
+static int need_srcloc;         /* ... struct __cx_srcloc */
 
 /* t declaring `inner` (a name, or "" for an abstract type), in C. */
 static char *cdecl(struct cty *t, const char *inner)
@@ -1203,6 +1204,26 @@ static char *ev(struct cexpr *e)
         }
         if (strcmp(e->name, "__builtin_is_constant_evaluated") == 0)
             return "((_Bool)0)";       /* run time: not constant evaluation */
+        if (strcmp(e->name, "__builtin_source_location") == 0) {
+            /* a record for the place, as std::source_location::__impl */
+            need_srcloc = 1;
+            int u = cx_uid();
+            struct cexpr fs, fn;
+            memset(&fs, 0, sizeof fs);
+            memset(&fn, 0, sizeof fn);
+            fs.text = e->file ? e->file : "";
+            fs.slen = (long)strlen(fs.text) + 1;
+            fs.swidth = 1;
+            fs.t = ct_ptr(ct_basic(CT_CHAR));
+            fn.text = e->text ? e->text : "";
+            fn.slen = (long)strlen(fn.text) + 1;
+            fn.swidth = 1;
+            fn.t = fs.t;
+            return cx_fmt("({ static const struct __cx_srcloc __cx_sl%d = { "
+                          "%s, %s, %uU, %uU }; (const void *)&__cx_sl%d; })", u,
+                          str_lit(&fs), str_lit(&fn), (unsigned)e->line,
+                          (unsigned)e->ival, u);
+        }
         {
             char *fp = fp_class_text(e);
             if (fp)
@@ -3051,7 +3072,7 @@ static void emit_function(struct cfunc *f)
                     continue;
                 stmt_init(&b, field_of("(*this)", c, fl), fl->type,
                           f->meminit[i]);
-                char *d = eh_on && !ct_is_ref(fl->type)
+                char *d = eh_on && !ct_is_ref(fl->type) && !c->is_union
                           ? destroy_text(cx_fmt("&%s", field_of("(*this)", c,
                                                                 fl)),
                                          fl->type) : NULL;
@@ -3075,7 +3096,9 @@ static void emit_function(struct cfunc *f)
     close_cleans(&b, 0);
     if (f->is_dtor) {
         sb_put(&b, "goto __cx_dtor_end;\n__cx_dtor_end: ;\n");
-        for (int i = c->nfields - 1; i >= 0; i--) {
+        /* its members, newest first — not a union's (which of them is
+         * alive, it does not know: 11.5.1) */
+        for (int i = c->is_union ? -1 : c->nfields - 1; i >= 0; i--) {
             struct cfield *fl = c->fields[i];
             if (!fl->name || ct_is_ref(fl->type))
                 continue;
@@ -3765,10 +3788,14 @@ char *cx_emit_unit(void)
     sb_put(&out, sb_str(&out_rtti_decl));
     sb_put(&out, sb_str(&out_rtti));
     sb_put(&out, sb_str(&out_vtables));
-    if (need_pmf) {
+    if (need_pmf || need_srcloc) {
         /* whatever above names it is written first */
         struct sb pre = { 0, 0, 0 };
-        sb_put(&pre, "struct __cx_pmf { void *ptr; long adj; };\n");
+        if (need_pmf)
+            sb_put(&pre, "struct __cx_pmf { void *ptr; long adj; };\n");
+        if (need_srcloc)
+            sb_put(&pre, "struct __cx_srcloc { const char *file, *func; "
+                         "unsigned line, col; };\n");
         sb_put(&pre, sb_str(&out));
         out = pre;
     }

@@ -749,6 +749,34 @@ they needed:
 
 tests/cxx/cxx20misc4.cc (g++ agrees on both targets).
 
+Most of the rest of libstdc++ runs (tests/libstdcxx/utilities.cc and
+library.cc, each matching g++'s build on both targets): variant and visit,
+shared/weak/unique_ptr, std::function, string streams, to_chars/
+from_chars, span, <bit>, optional, any, the containers and adaptors,
+tuple/apply, string_view; algorithms with back_inserter and
+ostream_iterator, <iomanip>, <random>, <regex>, bitset, valarray,
+exceptions from vector::at, error codes, std::pmr, atomics,
+std::source_location, <numbers>. What it took:
+- a union's destructor leaves its members alone (it cannot know which is
+  alive: std::variant's storage destroyed a string never built)
+- a namespace alias in a block; an alias template's requires-clause
+  (substitution failure when it does not hold: `v << x` on an lvalue
+  stream no longer finds the rvalue inserter)
+- a member function and a member template of the same signature are two
+  functions (bitset::to_string)
+- a partial specialization's members defined outside it are not the
+  primary template's (vector<bool, A>::_M_erase for vector<char>)
+- a member function whose address is taken is instantiated
+  (regex's _Scanner::_M_eat_escape_ecma); a class built only through a
+  constructor template gets its vtable's functions
+  (_Sp_counted_ptr_inplace)
+- a parameter whose template parameters are all given explicitly takes
+  its argument by conversion, not deduction (`f<T>(nullptr)`)
+- __builtin_source_location: a static record laid out as
+  source_location::__impl, the function named as g++ does (`int main()`);
+  as (or inside) a default argument, the caller's place
+tests/cxx/cxx20misc5.cc (g++ agrees on both targets).
+
 Next: `consteval` as more than `constexpr` (a format string is checked at
 run time for now), bit-fields in classes with non-empty bases.
 
