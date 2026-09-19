@@ -980,12 +980,32 @@ every object, or it fails — and links every program of tests/libstdcxx
 and tests/cxx with that library: each must exit and print as g++'s build
 does with g++'s library, on both targets (57 programs each).
 
-Next (language): `consteval` as more than `constexpr` (a format string is
-checked at run time for now).
+**`consteval`: immediate functions** (7.7). Every call of a consteval
+function outside another's body (and outside `if consteval`) is evaluated
+when the program is compiled — before the function holding it is written
+(emit.c) — and must be a constant expression. When it is not, it is an
+error that says why: the constant evaluator (consteval.c) now tells a
+failure that makes an expression not a constant one (undefined
+behaviour, a throw, a call of a function that is not constexpr — with
+the string it was passed, a throw helper's message —, a write to a
+constant, a read of what is not one) from one only because it does not
+model something; the second runs at run time, the function being
+constexpr too. An integer's value is written as a constant; a class's is
+built at run time by the same code, once its evaluation succeeded. For
+the evaluator to follow libstdc++'s format checking it now does virtual
+calls — each object's dynamic type recorded as its constructor, bases and
+members built, runs; the final overrider the first class declaring one on
+the path down to the called function's — and bit-fields (read, written,
+initialized, by their bits). So std::format's strings are checked when
+the program is compiled, as with g++: `std::format("{:d}", "x")` is an
+error (tests/golden/cxx-format-check.sh: EmbCC and g++ agree on which of
+12 strings are ill-formed, both targets). tests/cxx/consteval.cc;
+tests/golden/cxx-reject.sh (runtime arguments, division by zero, throw,
+a non-constexpr call, a non-constant global).
 
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their
 values are known to the interpreter, not yet written as static data);
-`new`/`delete`, virtual calls, virtual bases, bit-fields, long double and
-unions in constant evaluation; a structured binding at namespace scope or
-of a class whose members are in a base.
+`new`/`delete`, virtual bases, long double and unions in constant
+evaluation; `constinit` is accepted but not checked; a structured binding
+at namespace scope or of a class whose members are in a base.

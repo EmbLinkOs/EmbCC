@@ -603,6 +603,7 @@ struct cfunc {
     int is_inline;            /* inline (incl. defined in a class body) */
     int is_ctor, is_dtor;
     int is_explicit, is_virtual, is_constexpr;
+    int is_consteval;         /* an immediate function (7.7) */
     int is_deleted, is_defaulted;
     int is_implicit;          /* declared by the compiler */
     int special;              /* an implicit one's kind: SP_* */
@@ -1052,6 +1053,9 @@ int cx_consteval_int(struct cexpr *e, long *out);
 struct w128;
 /* e's value in 128 bits (extended as its type says), calls and all */
 int cx_consteval_w128(struct cexpr *e, struct w128 *out);
+/* A consteval function's call: 1 a constant (*val an integer's value), -1
+ * not a constant expression (*reason why), 0 not known here */
+int cx_immediate(struct cexpr *e, struct w128 *val, const char **reason);
 /* Convert e to type t implicitly (copy-initialization); ctx for messages. */
 struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx);
 struct cexpr *convert_bool(struct cexpr *e, const char *ctx);

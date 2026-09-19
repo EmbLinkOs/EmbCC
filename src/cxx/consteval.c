@@ -14,9 +14,21 @@
  * call a function that is not constexpr (or has no body), go past an
  * array's end, divide by zero, run too long — fails it quietly: the
  * expression is then simply not a constant, and the caller says so if it
- * needed one. Not modelled: virtual calls, virtual bases, dynamic
- * allocation, bit-fields, long double, unions' active members, the end
- * of lifetimes (destructors do not run).
+ * needed one. Not modelled: virtual bases, dynamic allocation, long
+ * double, unions' active members, the end of lifetimes (destructors do
+ * not run).
+ *
+ * A failure is either what makes an expression not a constant one —
+ * undefined behaviour, a call of a function that is not constexpr (a
+ * throw's helper), a throw, a write to a constant, a read of what is not
+ * one — or only what this interpreter does not do. notconst() says the
+ * first (with why): a consteval function's call that fails so is an
+ * error (cx_immediate); one that fails otherwise runs at run time.
+ *
+ * Virtual calls go by the object's dynamic type: a constructor, its bases
+ * and members built, records its class for the object (and so for its
+ * base subobjects); the final overrider is the first class on the path
+ * from there down to the called function's that declares one.
  *
  * An integer is 128 bits wide here, i its low half and hi its high one:
  * for the narrower types hi is what extending i as the type says gives
@@ -24,6 +36,8 @@
 #include "cxx.h"
 
 #include <setjmp.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "../driver/util.h"
@@ -38,6 +52,8 @@ struct cblk {
 };
 
 struct cptr {
+    int bw, bo;               /* a bit-field's lvalue: its width, and its
+                               * first bit in the byte at off */
     struct cblk *blk;         /* NULL (with no fn): the null pointer */
     long off;
     struct cfunc *fn;         /* a pointer to a function */
@@ -88,6 +104,19 @@ static void no(void)
     longjmp(*fail_to, 1);
 }
 
+static int definite;          /* the failure makes it not a constant */
+static char why[256];
+
+static void notconst(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(why, sizeof why, fmt, ap);
+    va_end(ap);
+    definite = 1;
+    no();
+}
+
 static void step(void)
 {
     if (++steps > MAX_STEPS)
@@ -105,6 +134,17 @@ static struct cblk *new_blk(long size)
 static struct cptr at_off(struct cptr p, long off)
 {
     p.off += off;
+    return p;
+}
+
+/* a member of the object at p: a bit-field's lvalue by its bits */
+static struct cptr field_at(struct cptr p, struct cfield *fl)
+{
+    if (fl->bitwidth < 0)
+        return at_off(p, fl->off);
+    p.off += fl->bitpos / 8;
+    p.bo = (int)(fl->bitpos % 8);
+    p.bw = fl->bitwidth;
     return p;
 }
 
@@ -207,10 +247,14 @@ static struct cval fit(struct cval v, const struct cty *t)
 
 static void check_range(struct cptr p, long n, int write)
 {
-    if (!p.blk || p.off < 0 || p.off + n > p.blk->size || p.blk->opaque)
-        no();
+    if (!p.blk)
+        notconst("a null pointer is dereferenced");
+    if (p.off < 0 || p.off + n > p.blk->size)
+        notconst("an access is outside its object");
+    if (p.blk->opaque)
+        notconst("an object that is not a constant is read");
     if (write && p.blk->readonly)
-        no();
+        notconst("a constant is modified");
 }
 
 static long put_handle(struct cptr p)
@@ -248,8 +292,32 @@ static int scalar_kind(const struct cty *t)
     return 0;
 }
 
+/* a bit-field's bytes: from its first, as many as its bits reach */
+static struct w128 bits_read(struct cptr p, int nb)
+{
+    unsigned char *q = p.blk->b + p.off;
+    struct w128 w = w_make(0, 0);
+    for (int i = nb - 1; i >= 0; i--)
+        w = w_shl(w, 8), w.lo |= q[i];
+    return w;
+}
+
+static struct cval load_bits(struct cptr p, const struct cty *t)
+{
+    int nb = (p.bo + p.bw + 7) / 8;
+    if (nb > 16)
+        no();
+    check_range(p, nb, 0);
+    struct w128 w = w_shr(bits_read(p, nb), p.bo, 0);
+    w = w_shr(w_shl(w, 128 - p.bw), 128 - p.bw,
+              ct_is_signed(t) && t->k != CT_BOOL);
+    return fit(v_w(w), t);
+}
+
 static struct cval load(struct cptr p, const struct cty *t)
 {
+    if (p.bw)
+        return load_bits(p, t);
     int k = scalar_kind(t);
     long n = ct_is_ref(t) ? 8 : ct_size(t);
     check_range(p, n, 0);
@@ -287,14 +355,14 @@ static struct cval as_type(struct cval v, const struct cty *t)
             if (t->k == CT_BOOL)
                 return v_int(v.f != 0);
             if (v.f != v.f)
-                no();
+                notconst("a NaN is converted to an integer");
             if (is128(t) && (v.f >= 9.3e18 || v.f <= -9.3e18)) {
                 /* truncated toward zero, in two halves (2^64 each) */
                 double m = v.f < 0 ? -v.f : v.f;
                 if (m >= (t->k == CT_INT128 ? 1.7014118346046923e38
                                             : 3.4028236692093846e38) ||
                     (v.f < 0 && t->k == CT_UINT128))
-                    no();
+                    notconst("a floating value out of the integer's range");
                 unsigned long h = (unsigned long)(m / 18446744073709551616.0);
                 unsigned long l = (unsigned long)(m - (double)h *
                                                   18446744073709551616.0);
@@ -302,7 +370,7 @@ static struct cval as_type(struct cval v, const struct cty *t)
                 return v_w(v.f < 0 ? w_neg(w) : w);
             }
             if (v.f >= 9.3e18 || v.f <= -9.3e18)
-                no();
+                notconst("a floating value out of the integer's range");
             return fit(v_int((long)v.f), t);
         }
         if (v.k == V_PTR && t->k == CT_BOOL)
@@ -337,6 +405,22 @@ static struct cval as_type(struct cval v, const struct cty *t)
 static void store(struct cptr p, const struct cty *t, struct cval v)
 {
     v = as_type(v, t);
+    if (p.bw) {
+        int nb = (p.bo + p.bw + 7) / 8;
+        if (nb > 16)
+            no();
+        check_range(p, nb, 1);
+        struct w128 ones = w_make(~0UL, ~0UL);
+        struct w128 fm = w_shr(ones, 128 - p.bw, 0);
+        struct w128 m = w_shl(fm, p.bo), x = w_of(v);
+        x = w_shl(w_make(x.lo & fm.lo, x.hi & fm.hi), p.bo);
+        struct w128 w = bits_read(p, nb);
+        w = w_make((w.lo & ~m.lo) | x.lo, (w.hi & ~m.hi) | x.hi);
+        unsigned char *q = p.blk->b + p.off;
+        for (int i = 0; i < nb; i++, w = w_shr(w, 8, 0))
+            q[i] = (unsigned char)w.lo;
+        return;
+    }
     long n = ct_is_ref(t) ? 8 : ct_size(t);
     check_range(p, n, 1);
     unsigned char *q = p.blk->b + p.off;
@@ -463,6 +547,137 @@ static struct cptr var_at(struct cvar *v)
     return outside_var(v);
 }
 
+/* ---- dynamic types ---- */
+
+struct dynrec {
+    struct cblk *blk;
+    long off;
+    struct cclass *cls;
+};
+static struct dynrec *dyns;
+static long ndyns, capdyns;
+
+/* the records of c's base subobjects at off (as the object's now) gone */
+static void drop_bases(struct cblk *blk, long off, struct cclass *c)
+{
+    for (int i = 0; i < c->nbases; i++) {
+        long bo = off + c->bases[i].off;
+        for (long k = 0; k < ndyns; k++)
+            if (dyns[k].blk == blk && dyns[k].off == bo) {
+                dyns[k] = dyns[--ndyns];
+                break;
+            }
+        drop_bases(blk, bo, c->bases[i].cls);
+    }
+}
+
+/* the object at at is (for now) a c: its bases and members built */
+static void set_dyn(struct cptr at, struct cclass *c)
+{
+    drop_bases(at.blk, at.off, c);
+    for (long k = 0; k < ndyns; k++)
+        if (dyns[k].blk == at.blk && dyns[k].off == at.off) {
+            dyns[k].cls = c;
+            return;
+        }
+    if (ndyns == capdyns) {
+        capdyns = capdyns ? capdyns * 2 : 64;
+        dyns = xrealloc(dyns, (size_t)capdyns * sizeof *dyns);
+    }
+    dyns[ndyns].blk = at.blk;
+    dyns[ndyns].off = at.off;
+    dyns[ndyns].cls = c;
+    ndyns++;
+}
+
+/* the innermost object with a dynamic type that p is (a subobject of) */
+static struct dynrec *dyn_of(struct cptr p)
+{
+    struct dynrec *best = NULL;
+    for (long k = 0; k < ndyns; k++) {
+        struct dynrec *r = &dyns[k];
+        if (r->blk == p.blk && r->off <= p.off &&
+            p.off < r->off + r->cls->size && (!best || r->off > best->off))
+            best = r;
+    }
+    return best;
+}
+
+static int same_sig(struct cfunc *a, struct cfunc *b)
+{
+    if (a->is_dtor || b->is_dtor)
+        return a->is_dtor && b->is_dtor;
+    if (strcmp(a->name, b->name) != 0)
+        return 0;
+    struct cty *x = a->type, *y = b->type;
+    if (x->np != y->np || x->variadic != y->variadic || x->fq != y->fq ||
+        x->refq != y->refq)
+        return 0;
+    for (int i = 0; i < x->np; i++)
+        if (!ct_same_unqual(x->params[i], y->params[i]))
+            return 0;
+    return 1;
+}
+
+/* c's own declaration of fn or of what overrides it */
+static struct cfunc *declared_in(struct cclass *c, struct cfunc *fn)
+{
+    if (fn->cls == c)
+        return fn;
+    for (struct cfunc *g = cx_funcs; g; g = g->all_next)
+        if (g->cls == c && g->is_virtual && !g->is_ctor && !g->is_static &&
+            same_sig(g, fn))
+            return g;
+    return NULL;
+}
+
+/* the path from c (at 0) to its base subobject of class s at offset rel:
+ * the classes and their offsets, c's first */
+static int base_path(struct cclass *c, long off, struct cclass *s, long rel,
+                     struct cclass **pc, long *po, int depth)
+{
+    if (depth >= 64)
+        return 0;
+    pc[depth] = c;
+    po[depth] = off;
+    if (c == s && off == rel)
+        return depth + 1;
+    for (int i = 0; i < c->nbases; i++) {
+        if (c->bases[i].is_virtual)
+            continue;
+        int n = base_path(c->bases[i].cls, off + c->bases[i].off, s, rel,
+                          pc, po, depth + 1);
+        if (n)
+            return n;
+    }
+    return 0;
+}
+
+/* a virtual call of fn on the object at *self: the final overrider, and
+ * *self moved to its subobject */
+static struct cfunc *overrider(struct cfunc *fn, struct cptr *self)
+{
+    struct dynrec *r = dyn_of(*self);
+    if (!r)
+        no();
+    struct cclass *pc[64];
+    long po[64];
+    int n = base_path(r->cls, 0, fn->cls, self->off - r->off, pc, po, 0);
+    if (!n)
+        no();
+    for (int i = 0; i < n; i++) {
+        struct cfunc *g = declared_in(pc[i], fn);
+        if (!g)
+            continue;
+        if (g->is_pure)
+            notconst("pure virtual '%s' is called", fn->name);
+        self->off = r->off + po[i];
+        return g;
+    }
+    no();
+    return fn;
+}
+
 /* ---- calls ---- */
 
 static int exec(struct cstmt *s);
@@ -484,7 +699,7 @@ static void need_body(struct cfunc *f)
         no();
     if (!f->is_constexpr && !f->lambda && !f->is_implicit &&
         !f->is_defaulted)
-        no();
+        notconst("'%s' is called, which is not constexpr", f->name);
     if (f->cls && f->cls->nvbases)
         no();
 }
@@ -535,10 +750,22 @@ static void run_body(struct cfunc *f, struct cframe *nf)
 
 /* a call of f (a member's object at self), its class result built at
  * slot */
+/* a string literal an argument passes (a throw helper's message), or NULL */
+static const char *str_arg(struct cexpr *e)
+{
+    while (e && (e->k == E_CAST || e->k == E_ADDR) && e->na >= 1)
+        e = e->a[0];
+    return e && e->k == E_STR && e->swidth == 1 ? e->text : NULL;
+}
+
 static struct cval call(struct cfunc *f, struct cexpr **args, int na,
                         struct cptr *self, struct cptr *slot)
 {
     step();
+    if (!f->is_constexpr && !f->lambda && !f->is_implicit &&
+        !f->is_defaulted && na > 0 && str_arg(args[0]))
+        notconst("'%s' is called, which is not constexpr: \"%s\"", f->name,
+                 str_arg(args[0]));
     need_body(f);
     struct cframe nf;
     memset(&nf, 0, sizeof nf);
@@ -565,7 +792,7 @@ static struct cval call(struct cfunc *f, struct cexpr **args, int na,
     if (rt->k == CT_CLASS)
         return v_obj(nf.slot);
     if (rt->k != CT_VOID && nf.ret.k == V_VOID)
-        no();                            /* flowed off the end */
+        notconst("'%s' ends without returning a value", f->name);
     return nf.ret;
 }
 
@@ -576,7 +803,7 @@ static void construct_with(struct cfunc *f, struct cptr at, struct cexpr **args,
     step();
     need_body(f);
     struct cclass *c = f->cls;
-    if (c->dynamic)
+    if (c->nvbases)
         no();
     struct cframe nf;
     memset(&nf, 0, sizeof nf);
@@ -600,11 +827,11 @@ static void construct_with(struct cfunc *f, struct cptr at, struct cexpr **args,
                 struct cfield *fl = c->fields[i];
                 if (!f->meminit[i] || !fl->name)
                     continue;
-                if (fl->bitwidth >= 0)
-                    no();
-                init_at(at_off(at, fl->off), fl->type, f->meminit[i]);
+                init_at(field_at(at, fl), fl->type, f->meminit[i]);
             }
     }
+    if (c->dynamic)
+        set_dyn(at, c);
     struct cstmt *saveseek = seek;
     seek = NULL;
     exec(f->body);
@@ -661,6 +888,16 @@ static void init_at(struct cptr at, struct cty *t, struct cexpr *init)
     step();
     if (!init)
         return;
+    if (at.bw) {                        /* a bit-field: its value */
+        struct cval v;
+        if ((init->k == E_CONSTRUCT || init->k == E_INITLIST) && !init->fn &&
+            init->na <= 1)
+            v = init->na ? ev(init->a[0]) : v_int(0);
+        else
+            v = ev(init);
+        store(at, t, v);
+        return;
+    }
     if (ct_is_ref(t)) {
         struct cval p = ev(init);
         if (p.k != V_PTR)
@@ -692,9 +929,7 @@ static void init_at(struct cptr at, struct cty *t, struct cexpr *init)
                 init_at(at_off(at, i * ct_size(lt->to)), lt->to, init->a[i]);
             } else if (lt->k == CT_CLASS) {
                 struct cfield *fl = lt->cls->fields[i];
-                if (fl->bitwidth >= 0)
-                    no();
-                init_at(at_off(at, fl->off), fl->type, init->a[i]);
+                init_at(field_at(at, fl), fl->type, init->a[i]);
             } else {
                 init_at(at, lt, init->a[i]);
             }
@@ -734,6 +969,8 @@ static void init_at(struct cptr at, struct cty *t, struct cexpr *init)
                 if (o.k != V_PTR)
                     no();
                 self = o.p;
+                if (f->is_virtual && !init->nonvirt)
+                    f = overrider(f, &self);
             }
             call(f, init->a + member, init->na - member,
                  member ? &self : NULL, &at);
@@ -798,13 +1035,13 @@ static struct cval arith128(int op, struct cval a, struct cval b,
     case TOK_SLASH: case TOK_PERCENT:
         if (sign && x.hi == 1UL << 63 && !x.lo && y.hi == ~0UL &&
             y.lo == ~0UL)
-            no();                       /* (the one quotient too big) */
+            notconst("a quotient overflows");
         if (!w_div(x, y, sign, op == TOK_PERCENT, &r))
-            no();                       /* (by zero) */
+            notconst("a division by zero");
         break;
     case TOK_SHL: case TOK_SHR:
         if (!fits_long(b) || b.i < 0 || b.i >= 128)
-            no();
+            notconst("a shift by a count out of range");
         r = op == TOK_SHL ? w_shl(x, (int)b.i) : w_shr(x, (int)b.i, sign);
         break;
     case TOK_AMP: r = w_make(x.lo & y.lo, x.hi & y.hi); break;
@@ -878,7 +1115,7 @@ static struct cval arith(int op, struct cval a, struct cval b,
         case TOK_STAR: r = x * y; break;
         case TOK_SLASH:
             if (y == 0)
-                no();
+                notconst("a division by zero");
             r = x / y;
             break;
         case TOK_EQEQ: return v_int(x == y);
@@ -907,18 +1144,18 @@ static struct cval arith(int op, struct cval a, struct cval b,
     case TOK_STAR: r = (long)(ux * uy); break;
     case TOK_SLASH:
         if (!y || (!uns && y == -1 && x == (long)(1UL << 63)))
-            no();
+            notconst(y ? "a quotient overflows" : "a division by zero");
         r = uns ? (long)(ux / uy) : x / y;
         break;
     case TOK_PERCENT:
         if (!y || (!uns && y == -1))
-            return y ? v_int(0) : (no(), a);
+            return y ? v_int(0) : (notconst("a division by zero"), a);
         r = uns ? (long)(ux % uy) : x % y;
         break;
     case TOK_SHL: case TOK_SHR: {
         long w = ct_size(ta) * 8;
         if (y < 0 || y >= (w < 32 ? 32 : w))
-            no();
+            notconst("a shift by a count out of range");
         if (op == TOK_SHL)
             r = (long)(ux << y);
         else
@@ -964,7 +1201,7 @@ static struct cval builtin(struct cexpr *e)
     if (strcmp(n, "is_constant_evaluated") == 0)
         return v_int(1);
     if (strcmp(n, "unreachable") == 0 || strcmp(n, "trap") == 0)
-        no();
+        notconst("__builtin_%s is reached", n);
     if (strcmp(n, "expect") == 0 && e->na == 2)
         return ev(e->a[0]);
     if (strcmp(n, "constant_p") == 0)
@@ -1059,7 +1296,7 @@ static struct cval eval_call(struct cexpr *e)
             if (o.k != V_PTR)
                 no();
             if (f->is_virtual && !e->nonvirt)
-                no();
+                f = overrider(f, &o.p);
             return call(f, e->a + 1, e->na - 1, &o.p, NULL);
         }
         return call(f, e->a, e->na, NULL, NULL);
@@ -1199,9 +1436,7 @@ static struct cptr lv(struct cexpr *e)
             base = lv(o);
         }
         struct cfield *fl = e->field;
-        if (fl->bitwidth >= 0)
-            no();
-        p = at_off(base, fl->off);
+        p = field_at(base, fl);
         if (ct_is_ref(fl->type)) {
             struct cval r = load(p, fl->type);
             if (!r.p.blk)
@@ -1315,15 +1550,20 @@ static struct cval ev_(struct cexpr *e)
         p.fn = e->fn;
         return v_ptr(p);
     }
-    case E_VAR:
-        if (e->var->has_const && ct_is_integer(e->t) &&
-            !ct_is_ref(e->var->type)) {
-            int local = 0;
-            for (int i = fr->n - 1; i >= 0 && !local; i--)
-                local = fr->b[i].v == e->var;
-            if (!local)
-                return fit(v_int(e->var->const_val), e->t);
-        }
+    case E_VAR: {
+        struct cvar *v = e->var;
+        int local = 0;
+        for (int i = fr->n - 1; i >= 0 && !local; i--)
+            local = fr->b[i].v == v;
+        if (v->has_const && ct_is_integer(e->t) && !ct_is_ref(v->type) &&
+            !local)
+            return fit(v_int(v->const_val), e->t);
+        if (!local && v->is_local && !v->is_static && !v->has_const &&
+            !v->is_constexpr && !(ct_strip_ref(v->type)->q & CQ_CONST) &&
+            !ct_is_ref(v->type) && e->t->k != CT_CLASS &&
+            e->t->k != CT_ARRAY)
+            notconst("the value of '%s' is not a constant", v->name);
+    }
         /* fall through */
     case E_MEMBER: case E_DEREF: case E_TEMP: case E_BASE: {
         if (e->k == E_BASE && e->is_array) {
@@ -1479,6 +1719,9 @@ static struct cval ev_(struct cexpr *e)
         init_at(p, e->t, e);
         return v_obj(p);
     }
+    case E_THROW:
+        notconst("an exception is thrown");
+        break;
     case E_STMTEXPR: {
         struct cstmt *last = NULL;
         for (struct cstmt *s = e->body->body; s; s = s->next)
@@ -1717,10 +1960,12 @@ static int exec(struct cstmt *s)
 
 /* ---- the entry ---- */
 
-/* e evaluated from outside any call: its value, or 0 */
-static int run(struct cexpr *e, struct cval *out)
+/* e evaluated from outside any call: its value, or 0 (definite says
+ * whether that is because it is not a constant expression). A class's or
+ * an array's value is built in a block of its own. */
+static int eval_top(struct cexpr *e, struct cval *out)
 {
-    if (cx_pattern || !e || !e->t || !ct_is_integer(e->t))
+    if (cx_pattern || !e || !e->t)
         return 0;
     jmp_buf jb, *savejb = fail_to;
     struct cframe f, *savefr = fr;
@@ -1728,6 +1973,8 @@ static int run(struct cexpr *e, struct cval *out)
     int savedepth = depth;
     struct cstmt *saveseek = seek;
     memset(&f, 0, sizeof f);
+    definite = 0;
+    why[0] = 0;
     if (setjmp(jb)) {
         fail_to = savejb;
         fr = savefr;
@@ -1741,18 +1988,54 @@ static int run(struct cexpr *e, struct cval *out)
     steps = 0;
     depth = 0;
     seek = NULL;
-    struct cval v = ev(e);
+    struct cval v;
+    struct cty *t = ct_unqual(e->t);
+    if (t->k == CT_CLASS || t->k == CT_ARRAY) {
+        struct cptr p;
+        memset(&p, 0, sizeof p);
+        p.blk = new_blk(ct_size(t));
+        init_at(p, t, e);
+        v = v_obj(p);
+    } else {
+        v = ev(e);
+    }
     fail_to = savejb;
     fr = savefr;
     steps = savesteps;
     depth = savedepth;
     seek = saveseek;
+    *out = v;
+    return 1;
+}
+
+/* e evaluated from outside any call: its value, or 0 */
+static int run(struct cexpr *e, struct cval *out)
+{
+    if (!e || !e->t || !ct_is_integer(e->t) || !eval_top(e, out))
+        return 0;
+    struct cval v = *out;
     if (v.k == V_PTR && e->t->k == CT_BOOL)
         v = v_int(v.p.blk || v.p.fn);
     if (v.k != V_INT)
         return 0;
     *out = fit(v, ct_unqual(e->t));
     return 1;
+}
+
+/* An immediate invocation (a consteval function's call): 1 if it is a
+ * constant expression (*val its value, an integer's), -1 if it is not
+ * (*reason why), 0 if this interpreter cannot tell (it runs at run
+ * time, as a constexpr call would). */
+int cx_immediate(struct cexpr *e, struct w128 *val, const char **reason)
+{
+    struct cval v;
+    if (eval_top(e, &v)) {
+        if (v.k == V_INT && ct_is_integer(e->t))
+            *val = w_of(fit(v, ct_unqual(e->t)));
+        return 1;
+    }
+    *reason = why;
+    return definite ? -1 : 0;
 }
 
 int cx_consteval_int(struct cexpr *e, long *out)

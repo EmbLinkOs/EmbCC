@@ -64,3 +64,27 @@ check coroutine-no-promise \
     'namespace std { template <class R, class... A> struct coroutine_traits {}; }
 int f() { co_return 1; }' \
     "has no promise_type"
+# consteval (7.7): each call of an immediate function outside another must
+# be a constant expression — said why when it is not
+check consteval-runtime-arg \
+    'consteval int sq(int x) { return x * x; }
+int f(int n) { return sq(n); }' \
+    "call to consteval function 'sq' is not a constant expression: the value of 'n' is not a constant"
+check consteval-div-zero \
+    'consteval int quot(int a, int b) { return a / b; }
+int g() { return quot(1, 0); }' \
+    "not a constant expression: a division by zero"
+check consteval-throw \
+    'consteval int pos(int x) { if (x < 0) throw 1; return x; }
+int g() { return pos(-2); }' \
+    "not a constant expression: an exception is thrown"
+check consteval-not-constexpr \
+    'void fail(const char *);
+consteval int pos(int x) { if (x < 0) fail("negative"); return x; }
+int g() { return pos(-2); }' \
+    "'fail' is called, which is not constexpr: \"negative\""
+check consteval-global \
+    'consteval int one(int *p) { return *p; }
+int x = 1;
+int y = one(&x);' \
+    "an object that is not a constant is read"

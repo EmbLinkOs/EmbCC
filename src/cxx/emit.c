@@ -463,6 +463,8 @@ static char *c_quote(const char *s)
 
 static char *elv(struct cexpr *e);
 static char *ev(struct cexpr *e);
+static int imm_value(struct cexpr *e, struct w128 *w);
+static char *w128_lit(struct w128 w, struct cty *t);
 
 /* a GNU asm statement, in C: its operands the expressions' C (an input a
  * value, unless its constraint wants memory and it is an lvalue) */
@@ -1190,8 +1192,11 @@ static void emit_block_items(struct sb *b, struct cstmt *first);
 static char *ev(struct cexpr *e)
 {
     long v;
+    struct w128 iw;
     if (e->t && ct_is_integer(e->t) && e->k != E_INT && expr_fold(e, &v))
         return int_lit(v, e->t);
+    if (imm_value(e, &iw))
+        return w128_lit(iw, e->t);
     switch (e->k) {
     case E_INT:
         return int_lit(e->ival, e->t);
@@ -1821,6 +1826,148 @@ static void einit(struct sb *b, const char *dest, struct cty *t,
         break;
     }
     sb_printf(b, "%s = %s; ", dest, ev(init));
+}
+
+/* ---- immediate invocations ---- */
+
+/* A consteval function's call, outside an immediate function's body and
+ * `if consteval`, must be a constant expression (7.7): each is evaluated
+ * here, before the function holding it is written. Not a constant: an
+ * error, saying why. An integer's value: written as that value. What the
+ * interpreter cannot follow, or a class's value (not yet written as
+ * static data), runs at run time — the function is constexpr too. */
+struct imm_memo {
+    struct cexpr *e;
+    int st;                   /* cx_immediate's answer */
+    struct w128 w;
+};
+static struct imm_memo *imm_tab;
+static long imm_cap, imm_n;
+
+static struct imm_memo *imm_find(struct cexpr *e, int add)
+{
+    if (add && imm_n * 2 >= imm_cap) {
+        struct imm_memo *old = imm_tab;
+        long oc = imm_cap;
+        imm_cap = imm_cap ? imm_cap * 2 : 256;
+        imm_tab = xcalloc((size_t)imm_cap, sizeof *imm_tab);
+        imm_n = 0;
+        for (long i = 0; i < oc; i++)
+            if (old[i].e)
+                *imm_find(old[i].e, 1) = old[i];
+        free(old);
+    }
+    if (!imm_cap)
+        return NULL;
+    long h = (long)(((unsigned long)e >> 4) & (unsigned long)(imm_cap - 1));
+    while (imm_tab[h].e && imm_tab[h].e != e)
+        h = (h + 1) & (imm_cap - 1);
+    if (!imm_tab[h].e) {
+        if (!add)
+            return NULL;
+        imm_tab[h].e = e;
+        imm_n++;
+    }
+    return &imm_tab[h];
+}
+
+static int is_immediate(struct cexpr *e)
+{
+    return (e->k == E_CALL || e->k == E_CONSTRUCT) && e->fn &&
+           e->fn->is_consteval;
+}
+
+/* its value, if the call is known to be a constant of integer type */
+static int imm_value(struct cexpr *e, struct w128 *w)
+{
+    if (!is_immediate(e) || !e->t || !ct_is_integer(e->t))
+        return 0;
+    struct imm_memo *m = imm_find(e, 0);
+    if (!m || m->st != 1)
+        return 0;
+    *w = m->w;
+    return 1;
+}
+
+static void imm_stmt(struct cstmt *s);
+
+static void imm_expr(struct cexpr *e)
+{
+    if (!e)
+        return;
+    if (is_immediate(e)) {
+        struct imm_memo *m = imm_find(e, 0);
+        if (!m) {
+            struct w128 w = w_make(0, 0);
+            const char *why = "";
+            int st = cx_immediate(e, &w, &why);
+            if (st < 0) {
+                struct ctok at;
+                memset(&at, 0, sizeof at);
+                at.file = e->file ? e->file : (cur_fn ? cur_fn->file : NULL);
+                at.t.line = e->line ? e->line : (cur_fn ? cur_fn->line : 0);
+                cx_error(at.file ? &at : NULL,
+                         "call to consteval function '%s' is not a constant "
+                         "expression: %s", e->fn->name, why);
+            }
+            m = imm_find(e, 1);
+            m->st = st;
+            m->w = w;
+        }
+        if (m->st == 1)
+            return;             /* (its arguments are in it) */
+    }
+    for (int i = 0; i < e->na; i++)
+        imm_expr(e->a[i]);
+    if (e->binit && e->t && e->t->k == CT_CLASS)
+        for (int i = 0; i < e->t->cls->nbases; i++)
+            imm_expr(e->binit[i]);
+    imm_expr(e->init);
+    imm_expr(e->count);
+    if (e->body)
+        imm_stmt(e->body);
+}
+
+static void imm_stmt(struct cstmt *s)
+{
+    for (; s; s = s->next) {
+        if (s->k == S_IF && s->e && s->e->k == E_BUILTIN && s->e->name &&
+            strcmp(s->e->name, "__builtin_is_constant_evaluated") == 0) {
+            imm_stmt(s->els);           /* (the body: `if consteval`'s) */
+            continue;
+        }
+        imm_expr(s->e);
+        imm_expr(s->e2);
+        imm_stmt(s->init);
+        imm_stmt(s->body);
+        imm_stmt(s->els);
+        for (struct cstmt *d = s; d && s->k == S_DECL; d = d->more)
+            if (d->var) {
+                imm_expr(d->var->init);
+                imm_expr(d->var->ctor);
+            }
+        for (int i = 0; i < s->nhandlers; i++)
+            imm_stmt(s->handlers[i].body);
+    }
+}
+
+static void imm_function(struct cfunc *f)
+{
+    if (f->is_consteval || cx_pattern)
+        return;
+    struct cfunc *save = cur_fn;
+    cur_fn = f;
+    imm_stmt(f->body);
+    if (f->is_ctor && f->cls) {
+        for (int i = 0; f->baseinit && i < f->cls->nbases; i++)
+            imm_expr(f->baseinit[i]);
+        for (int i = 0; f->vbaseinit && i < f->cls->nvbases; i++)
+            imm_expr(f->vbaseinit[i]);
+        for (int i = 0; f->meminit && i < f->cls->nfields; i++)
+            imm_expr(f->meminit[i]);
+        imm_expr(f->delegate);
+    }
+    cur_fn = save;
 }
 
 /* ---- constant initializers (for static storage) ---- */
@@ -3203,6 +3350,7 @@ static void emit_function(struct cfunc *f)
         emit_coroutine(f);
         return;
     }
+    imm_function(f);
     cur_fn = f;
     ncleans = 0;
     nbrk = ncont = 0;
@@ -3434,6 +3582,8 @@ static void emit_gvar(struct cvar *v)
 {
     v->emitted = 1;
     v->declared = 1;
+    imm_expr(v->init);
+    imm_expr(v->ctor);
     struct cty *t = v->type;
     const char *st = v->is_static ? "static "
                      : (v->is_inline || v->weak) ? "__attribute__((weak)) "

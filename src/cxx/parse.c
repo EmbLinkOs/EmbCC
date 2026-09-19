@@ -660,6 +660,7 @@ struct dspec {
     struct cty *type;
     int storage;
     int is_inline, is_constexpr, is_virtual, is_explicit, is_friend;
+    int is_consteval;
     int is_mutable;
     struct attrs a;
     const struct ctok *at;
@@ -804,6 +805,8 @@ static void parse_dspec(struct dspec *ds)
         case TOK_KW_INLINE: ds->is_inline = 1; cx_advance(); continue;
         case TOK_CX_CONSTEXPR: case TOK_CX_CONSTEVAL:
             ds->is_constexpr = 1;
+            if (cx_kind() == TOK_CX_CONSTEVAL)
+                ds->is_consteval = 1;
             cx_advance();
             continue;
         case TOK_CX_CONSTINIT: cx_advance(); continue;
@@ -2042,6 +2045,7 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
         f->is_static = 1;
     f->is_inline = ds->is_inline || ds->is_constexpr;
     f->is_constexpr = ds->is_constexpr;
+    f->is_consteval = ds->is_consteval;
     f->is_explicit = ds->is_explicit;
     f->is_virtual = ds->is_virtual;
     f->c_linkage = cx_extern_c && !cls;
@@ -4063,6 +4067,7 @@ struct cfunc *inherited_ctor(struct cclass *c, struct cfunc *bf)
     f->is_ctor = 1;
     f->is_explicit = bf->is_explicit;
     f->is_constexpr = bf->is_constexpr;
+    f->is_consteval = bf->is_consteval;
     f->is_inline = 1;
     f->inherited = bf;
     f->access = CA_PUBLIC;
@@ -8198,6 +8203,7 @@ struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
     f->is_explicit = pat->is_explicit || ds.is_explicit;
     f->is_inline = 1;
     f->is_constexpr = ds.is_constexpr;
+    f->is_consteval = ds.is_consteval;
     f->access = pat->access;
     f->vslot = -1;
     f->line = pat->line;
