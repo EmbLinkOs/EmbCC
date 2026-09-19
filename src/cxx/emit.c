@@ -915,7 +915,7 @@ static void emit_block_items(struct sb *b, struct cstmt *first);
 static char *ev(struct cexpr *e)
 {
     long v;
-    if (e->t && ct_is_integer(e->t) && e->k != E_INT && expr_const(e, &v))
+    if (e->t && ct_is_integer(e->t) && e->k != E_INT && expr_fold(e, &v))
         return int_lit(v, e->t);
     switch (e->k) {
     case E_INT:
@@ -999,6 +999,8 @@ static char *ev(struct cexpr *e)
         }
         return elv(e);
     case E_BUILTIN: {
+        if (strcmp(e->name, "__builtin_is_constant_evaluated") == 0)
+            return "((_Bool)0)";       /* run time: not constant evaluation */
         struct sb b = { 0, 0, 0 };
         int va = strncmp(e->name, "__builtin_va_", 13) == 0;
         for (int i = 0; i < e->na; i++)
@@ -1411,7 +1413,7 @@ static int addr_const(struct cexpr *e)
         struct cexpr *p = e->a[0];
         if (p->k == E_BINARY && p->op == TOK_PLUS) {
             long v;
-            return expr_const(p->a[1], &v) && p->a[0]->t->k == CT_PTR &&
+            return expr_fold(p->a[1], &v) && p->a[0]->t->k == CT_PTR &&
                    (p->a[0]->k == E_VAR || p->a[0]->k == E_STR ||
                     p->a[0]->k == E_MEMBER) && addr_const(p->a[0]);
         }
@@ -1427,7 +1429,7 @@ static int c_const(struct cexpr *e)
     long v;
     if (!e)
         return 1;
-    if (e->t && ct_is_integer(e->t) && expr_const(e, &v))
+    if (e->t && ct_is_integer(e->t) && expr_fold(e, &v))
         return 1;
     switch (e->k) {
     case E_INT: case E_FLT: case E_STR: case E_NULLPTR:
@@ -1459,7 +1461,7 @@ static int c_const(struct cexpr *e)
         return ct_is_arith(e->t) && c_const(e->a[0]);
     case E_BINARY:
         if (e->t->k == CT_PTR)
-            return c_const(e->a[0]) && expr_const(e->a[1], &v);
+            return c_const(e->a[0]) && expr_fold(e->a[1], &v);
         return ct_is_arith(e->a[0]->t) && ct_is_arith(e->a[1]->t) &&
                c_const(e->a[0]) && c_const(e->a[1]);
     case E_INITLIST:

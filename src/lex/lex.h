@@ -185,6 +185,10 @@ struct token {
                         * then holds the digits (no suffix), which the
                         * exact conversion needs — a double would lose them */
     char *text;    /* TOK_IDENT; TOK_STR: the bytes (may contain NULs) */
+    char *ud_suffix;   /* C++: a user-defined literal's suffix (_km in 5_km),
+                        * on TOK_NUM, TOK_FNUM and TOK_STR */
+    char *ud_spelling; /* ... a numeric one's digits as written (for a raw
+                        * literal operator) */
 };
 
 struct lexer {

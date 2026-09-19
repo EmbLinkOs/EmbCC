@@ -494,14 +494,8 @@ static unsigned parse_cv(void)
 
 /* decltype(e): the declared type of a named entity, else e's type made a
  * reference by its value category. */
-static struct cty *parse_decltype(void)
+static struct cty *decltype_of(struct cexpr *e)
 {
-    cx_advance();
-    cx_expect(TOK_LPAREN, "'(' after decltype");
-    if (cx_kind() == TOK_CX_AUTO)
-        cx_error(cx_cur(), "decltype(auto) is not supported yet (CX6)");
-    struct cexpr *e = expr_parse();
-    cx_expect(TOK_RPAREN, "')'");
     if (!e->paren && e->k == E_VAR)
         return e->var->type;
     if (!e->paren && e->k == E_MEMBER)
@@ -511,6 +505,24 @@ static struct cty *parse_decltype(void)
     if (e->vc == VC_XVALUE)
         return ct_ref(e->t, 1);
     return e->t;
+}
+
+/* ... and decltype(auto): a placeholder its initializer (or a return)
+ * gives decltype's type */
+static struct cty *parse_decltype(void)
+{
+    cx_advance();
+    cx_expect(TOK_LPAREN, "'(' after decltype");
+    if (cx_accept(TOK_CX_AUTO)) {
+        cx_expect(TOK_RPAREN, "')' after decltype(auto");
+        struct cty *t = xcalloc(1, sizeof *t);
+        t->k = CT_AUTO;
+        t->dauto = 1;
+        return t;
+    }
+    struct cexpr *e = expr_parse();
+    cx_expect(TOK_RPAREN, "')'");
+    return decltype_of(e);
 }
 
 static void parse_dspec(struct dspec *ds)
@@ -796,8 +808,21 @@ const char *parse_operator_name(struct cty **conv)
         cx_advance();
         return cx_fmt("operator%s", sp);
     }
-    if (k == TOK_STR)
-        cx_error(at, "user-defined literals are not supported yet (CX6)");
+    if (k == TOK_STR) {
+        /* operator""_x: a literal operator */
+        const struct token *st = &cx_cur()->t;
+        if (st->num != 1)
+            cx_error(at, "a literal operator's name has an empty \"\"");
+        cx_advance();
+        const char *suffix = st->ud_suffix;
+        if (!suffix) {
+            if (cx_kind() != TOK_IDENT)
+                cx_error(at, "expected a literal operator's suffix");
+            suffix = cx_cur()->t.text;
+            cx_advance();
+        }
+        return cx_fmt("operator\"\"%s", suffix);
+    }
     /* a conversion function: operator T */
     struct dspec ds;
     parse_dspec(&ds);
@@ -1835,6 +1860,48 @@ static struct cexpr *parse_init_args(enum init_form *form,
     return na ? args[0] : NULL;
 }
 
+/* std::initializer_list<X> */
+static struct cty *il_type(struct cty *X, const struct ctok *at)
+{
+    struct csym *ns = scope_find_here(cx_global, "std");
+    struct csym *y = ns && ns->k == CS_NAMESPACE
+                     ? scope_find_here(ns->ns, "initializer_list") : NULL;
+    if (!y || y->k != CS_TEMPLATE || !is_std_il(y->tmpl))
+        cx_error(at, "std::initializer_list is not declared (#include "
+                     "<initializer_list>)");
+    struct ctarg a;
+    memset(&a, 0, sizeof a);
+    a.kind = TP_TYPE;
+    a.type = X;
+    return ct_class(class_instance(y->tmpl, &a, 1, at));
+}
+
+static struct cstmt *decl_of(struct cvar *v, const struct ctok *at);
+
+/* While a local std::initializer_list is initialized: the hidden
+ * variables holding the backing arrays (a DECL chain its declaration puts
+ * first — il_last_decls, after init_variable_with), so they live as long
+ * as it (9.4.5). */
+static struct cstmt *il_decls, *il_decls_tail, *il_last_decls;
+static struct cfunc *il_hoist_fn;
+static int il_collect;       /* the caller puts il_last_decls first */
+
+struct cexpr *il_backing_var(struct cty *arr, struct cexpr *init,
+                             const struct ctok *at)
+{
+    if (!il_hoist_fn || il_hoist_fn != cx_curfn)
+        return NULL;
+    struct cvar *v = new_local(cx_fmt("__cx_il%d", cx_uid()), arr, at);
+    v->ctor = init;
+    struct cstmt *d = decl_of(v, at);
+    if (il_decls_tail)
+        il_decls_tail->more = d;
+    else
+        il_decls = d;
+    il_decls_tail = d;
+    return expr_var(v);
+}
+
 /* Deduce `auto` in P from A (template argument deduction's rules, for
  * the forms a declaration uses: cv auto, auto *, auto &, auto &&). */
 static struct cty *match_auto(struct cty *P, struct cty *A,
@@ -1860,10 +1927,38 @@ static struct cty *deduce_auto(struct cty *P, enum init_form form,
     if (na != 1)
         cx_error(at, "cannot deduce 'auto' from this initializer");
     struct cexpr *e = args[0];
-    if (form == INIT_LIST || form == INIT_COPY_LIST) {
-        if (form == INIT_COPY_LIST || e->na != 1)
-            cx_error(at, "'auto' from a braced list (std::initializer_list) "
-                         "is not supported yet (CX6)");
+    if (P->k == CT_AUTO && P->dauto) {
+        if (form == INIT_LIST || form == INIT_COPY_LIST)
+            cx_error(at, "decltype(auto) from a braced list");
+        if (e->k == E_OVL && !e->fn->next)
+            return e->fn->type;
+        return decltype_of(e);
+    }
+    if (form == INIT_COPY_LIST) {
+        /* auto x = { a, b }: a std::initializer_list of their type */
+        if (!e->na)
+            cx_error(at, "cannot deduce 'auto' from an empty braced list");
+        struct cty *X = NULL;
+        for (int i = 0; i < e->na; i++) {
+            struct cexpr *el = e->a[i];
+            if (el->k == E_INITLIST && !el->t)
+                cx_error(at, "cannot deduce 'auto' from a nested braced "
+                             "list");
+            struct cty *A = ct_unqual(ct_decay(el->k == E_OVL
+                                               ? el->fn->type : el->t));
+            if (X && !ct_same(X, A))
+                cx_error(at, "'auto' deduced as both %s and %s", ct_name(X),
+                         ct_name(A));
+            X = A;
+        }
+        struct cty *il = il_type(X, at);
+        if (ct_is_ref(P))
+            return ct_ref(ct_qual(il, P->to->q), P->k == CT_RREF);
+        return ct_qual(il, P->q);
+    }
+    if (form == INIT_LIST) {
+        if (e->na != 1)
+            cx_error(at, "'auto' from a braced list of %d values", e->na);
         e = e->a[0];
     }
     struct cty *A = e->t;
@@ -1902,6 +1997,10 @@ static void init_variable(struct cvar *v, const struct ctok *at)
 }
 
 /* v initialized as `form` from args (its `auto` deduced from them). */
+static void init_variable_as(struct cvar *v, enum init_form form,
+                             struct cexpr **args, int na,
+                             const struct ctok *at);
+
 static void init_variable_with(struct cvar *v, enum init_form form,
                                struct cexpr **args, int na,
                                const struct ctok *at)
@@ -1912,6 +2011,26 @@ static void init_variable_with(struct cvar *v, enum init_form form,
         t = deduce_auto(t, form, args, na, at);
         v->type = t;
     }
+    int collect = il_collect;
+    il_collect = 0;
+    struct cstmt *sd = il_decls, *st = il_decls_tail;
+    struct cfunc *sf = il_hoist_fn;
+    il_decls = il_decls_tail = NULL;
+    il_hoist_fn = collect && v->is_local && !v->is_static && cx_curfn &&
+                  ct_il_elem(ct_strip_ref(t)) ? cx_curfn : NULL;
+    init_variable_as(v, form, args, na, at);
+    il_last_decls = il_decls;
+    il_decls = sd;
+    il_decls_tail = st;
+    il_hoist_fn = sf;
+}
+
+/* v initialized as `form` from args, its type known. */
+static void init_variable_as(struct cvar *v, enum init_form form,
+                             struct cexpr **args, int na,
+                             const struct ctok *at)
+{
+    struct cty *t = v->type;
     if (form == INIT_DEFAULT) {
         if (ct_is_ref(t) && !v->is_extern && !v->is_param)
             cx_error(at, "reference '%s' is not initialized", v->name);
@@ -1930,7 +2049,11 @@ static void init_variable_with(struct cvar *v, enum init_form form,
     }
     if (ct_is_ref(t)) {
         struct cexpr *e = args[0];
-        if (form == INIT_LIST || form == INIT_COPY_LIST) {
+        if ((form == INIT_LIST || form == INIT_COPY_LIST) &&
+            ct_il_elem(t->to)) {
+            /* a reference to a std::initializer_list made from the list */
+            e = il_make(ct_unqual(t->to), e, at);
+        } else if (form == INIT_LIST || form == INIT_COPY_LIST) {
             if (e->na != 1)
                 cx_error(at, "a reference is initialized by one value");
             e = e->a[0];
@@ -2864,6 +2987,12 @@ static void parse_linkage_spec(void)
 
 /* A declaration in namespace scope (toplevel) or block scope: in a block,
  * each variable's S_DECL is appended to *out. */
+static int binding_follows(void);
+static struct cstmt *parse_structured_binding(struct cty *ds_type,
+                                              struct cexpr *given,
+                                              const struct ctok *at);
+static struct cstmt *decl_of(struct cvar *v, const struct ctok *at);
+
 static void parse_declaration(int toplevel, struct cstmt **out)
 {
     const struct ctok *at = cx_cur();
@@ -2923,6 +3052,17 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                  tok_describe(&cx_cur()->t));
     if (cx_kind() == TOK_SEMI) {
         cx_advance();
+        return;
+    }
+    if (ds.type && ds.type->k == CT_AUTO && !ds.type->dauto &&
+        binding_follows()) {
+        if (toplevel)
+            cx_error(at, "a structured binding at namespace scope is not "
+                         "supported yet");
+        struct cstmt *d = parse_structured_binding(ds.type, NULL, at);
+        if (out)
+            *out = d;
+        cx_expect(TOK_SEMI, "';' after the declaration");
         return;
     }
     struct cstmt *tail = NULL;
@@ -3057,7 +3197,22 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                 cx_error(d.at, "redeclaration of '%s'", d.name);
             struct csym *y = scope_add(cx_scope, CS_VAR, d.name);
             y->var = v;
+            il_collect = 1;
+            il_last_decls = NULL;
             init_variable(v, d.at);
+            il_collect = 0;
+            struct cstmt *pre = il_last_decls;
+            il_last_decls = NULL;
+            if (pre && out) {
+                /* the backing arrays first */
+                if (tail)
+                    tail->more = pre;
+                else
+                    *out = pre;
+                tail = pre;
+                while (tail->more)
+                    tail = tail->more;
+            }
             if (v->type->k == CT_CLASS && !v->is_static)
                 s->dtor = class_dtor(v->type->cls) != NULL;
             if (v->type->k == CT_ARRAY && !v->is_static) {
@@ -3082,6 +3237,220 @@ static void parse_declaration(int toplevel, struct cstmt **out)
         cx_expect(TOK_SEMI, "';' after the declaration");
         return;
     }
+}
+
+/* ---- structured bindings ---- */
+
+/* At `[` after `auto` (and a `&` or `&&` before it)? */
+static int binding_follows(void)
+{
+    if (cx_kind() == TOK_LBRACKET)
+        return cx_kind_at(1) == TOK_IDENT;
+    return (cx_kind() == TOK_AMP || cx_kind() == TOK_ANDAND) &&
+           cx_kind_at(1) == TOK_LBRACKET && cx_kind_at(2) == TOK_IDENT;
+}
+
+static struct ctemplate *std_template(const char *name)
+{
+    struct csym *ns = scope_find_here(cx_global, "std");
+    if (!ns || ns->k != CS_NAMESPACE)
+        return NULL;
+    struct csym *y = scope_find_here(ns->ns, name);
+    return y && y->k == CS_TEMPLATE && y->tmpl->kind == TK_CLASS ? y->tmpl
+                                                                 : NULL;
+}
+
+static struct ctarg size_targ(long i)
+{
+    struct ctarg a;
+    memset(&a, 0, sizeof a);
+    a.kind = TP_VALUE;
+    a.value = i;
+    a.vtype = ct_size_t();
+    return a;
+}
+
+/* std::tuple_size<E>::value, if E is tuple-like (-1 if not) */
+static long tuple_size_of(struct cty *E, const struct ctok *at)
+{
+    struct ctemplate *ts = std_template("tuple_size");
+    if (!ts)
+        return -1;
+    struct ctarg a;
+    memset(&a, 0, sizeof a);
+    a.kind = TP_TYPE;
+    a.type = E;
+    struct cclass *c = class_instance(ts, &a, 1, at);
+    class_ensure(c);
+    if (!c->complete)
+        return -1;
+    struct csym *y = class_member(c, "value");
+    long v = 0;
+    if (!y || y->k != CS_VAR || !expr_const(expr_var(y->var), &v))
+        cx_error(at, "std::tuple_size<%s>::value is not a constant",
+                 ct_name(E));
+    return v;
+}
+
+/* auto [a, b, ...] = e; (9.6): a hidden variable holds the initializer
+ * (or refers to it), and each name is a part of it — an array's
+ * element, a class's data member, or (a tuple-like class:
+ * std::tuple_size<E> is complete) a reference initialized from
+ * get<i>. The cursor at the `&` or `[`; ds_type: `auto` with its cv;
+ * given: the initializer when a range-based for gives it (else it
+ * follows). The declarations made, as a DECL chain. */
+static struct cstmt *parse_structured_binding(struct cty *ds_type,
+                                              struct cexpr *given,
+                                              const struct ctok *at)
+{
+    struct cty *declared = ds_type;
+    if (cx_accept(TOK_AMP))
+        declared = ct_ref(ds_type, 0);
+    else if (cx_accept(TOK_ANDAND))
+        declared = ct_ref(ds_type, 1);
+    cx_expect(TOK_LBRACKET, "'['");
+    const char *names[64];
+    const struct ctok *ats[64];
+    int n = 0;
+    do {
+        if (cx_kind() != TOK_IDENT)
+            cx_error(cx_cur(), "expected a name to bind");
+        if (n == 64)
+            cx_error(cx_cur(), "too many names in a structured binding");
+        ats[n] = cx_cur();
+        names[n++] = cx_cur()->t.text;
+        cx_advance();
+    } while (cx_accept(TOK_COMMA));
+    cx_expect(TOK_RBRACKET, "']' after the names");
+    parse_attrs(NULL);
+    enum init_form form = INIT_COPY;
+    struct cexpr **args = &given;
+    int na = 1;
+    if (!given) {
+        if (cx_kind() != TOK_ASSIGN && cx_kind() != TOK_LBRACE &&
+            cx_kind() != TOK_LPAREN)
+            cx_error(cx_cur(), "a structured binding needs an initializer");
+        parse_init_args(&form, &args, &na);
+    }
+    if (na != 1)
+        cx_error(at, "a structured binding is initialized by one value");
+    /* the hidden variable */
+    struct cvar *e = new_local(cx_fmt("__cx_sb%d", cx_uid()), declared, at);
+    struct cexpr *src = args[0];
+    if ((form == INIT_LIST || form == INIT_COPY_LIST) && src->na == 1)
+        src = src->a[0];
+    if (!ct_is_ref(declared) && src->t->k == CT_ARRAY) {
+        /* an array: copied, element by element */
+        struct cty *el = src->t;
+        while (el->k == CT_ARRAY)
+            el = el->to;
+        if (el->k == CT_CLASS && !el->cls->trivial_copy)
+            cx_error(at, "copying an array of '%s' is not supported yet",
+                     ct_name(el));
+        e->type = ct_qual(src->t, declared->q);
+        struct cexpr *cp = ex_new(E_CONSTRUCT, e->type, VC_PRVALUE);
+        cp->a = xmalloc(sizeof *cp->a);
+        cp->a[0] = src;
+        cp->na = 1;
+        e->ctor = cp;
+    } else {
+        init_variable_with(e, form, args, na, at);
+    }
+    struct cstmt *head = decl_of(e, at), *tail = head;
+    struct cty *E = ct_strip_ref(e->type);
+    long ts;
+    if (E->k == CT_ARRAY) {
+        if (E->n != n)
+            cx_error(at, "%d names bind an array of %ld", n, E->n);
+    } else if (E->k != CT_CLASS) {
+        cx_error(at, "cannot bind names to a '%s'", ct_name(E));
+    } else if ((ts = tuple_size_of(E, at)) >= 0) {
+        /* tuple-like */
+        if (ts != n)
+            cx_error(at, "%d names bind a tuple-like '%s' of %ld", n,
+                     ct_name(E), ts);
+        struct ctemplate *te = std_template("tuple_element");
+        if (!te)
+            cx_error(at, "std::tuple_element is not declared");
+        struct csym *mg = class_member(E->cls, "get");
+        int member_get = 0;
+        if (mg && mg->k == CS_FUNC)
+            for (struct cfunc *g = mg->fns; g; g = g->next)
+                if (g->tmpl)
+                    member_get = 1;
+        for (int i = 0; i < n; i++) {
+            struct ctarg ta[2];
+            ta[0] = size_targ(i);
+            memset(&ta[1], 0, sizeof ta[1]);
+            ta[1].kind = TP_TYPE;
+            ta[1].type = E;
+            struct cclass *tc = class_instance(te, ta, 2, at);
+            class_ensure(tc);
+            struct csym *ty = class_member(tc, "type");
+            if (!ty || ty->k != CS_TYPEDEF)
+                cx_error(at, "std::tuple_element<%d, %s>::type is not a "
+                             "type", i, ct_name(E));
+            /* e as an xvalue unless it is an lvalue reference */
+            struct cexpr *obj = expr_var(e);
+            if (e->type->k != CT_LREF) {
+                struct cexpr *x = ex_new(E_CAST, obj->t, VC_XVALUE);
+                x->a = xmalloc(sizeof *x->a);
+                x->a[0] = obj;
+                x->na = 1;
+                x->lvcast = 1;
+                obj = x;
+            }
+            struct ctarg *gi = xmalloc(sizeof *gi);
+            *gi = size_targ(i);
+            struct cexpr *g = member_get
+                ? expr_call_named_targs(obj, "get", gi, 1, NULL, 0, ats[i])
+                : expr_call_named_targs(NULL, "get", gi, 1, &obj, 1, ats[i]);
+            struct cty *rt = ct_ref(ty->type, g->vc != VC_LVALUE);
+            struct cvar *r = new_local(names[i], rt, ats[i]);
+            init_variable_with(r, INIT_COPY, &g, 1, ats[i]);
+            struct csym *y = scope_add(cx_scope, CS_VAR, names[i]);
+            y->var = r;
+            struct cstmt *d = decl_of(r, ats[i]);
+            tail->more = d;
+            tail = d;
+        }
+        return head;
+    }
+    /* the names: parts of e */
+    struct cfield *fls[64];
+    if (E->k == CT_CLASS) {
+        struct cclass *c = E->cls;
+        class_ensure(c);
+        int k = 0;
+        for (int i = 0; i < c->nfields; i++) {
+            if (!c->fields[i]->name)
+                continue;
+            if (k < 64)
+                fls[k] = c->fields[i];
+            k++;
+        }
+        if (!k)
+            for (int i = 0; i < c->nbases; i++)
+                if (c->bases[i].cls->nfields)
+                    cx_error(at, "binding the members of a base of '%s' is "
+                                 "not supported yet", ct_name(E));
+        if (k != n)
+            cx_error(at, "%d names bind '%s', which has %d members", n,
+                     ct_name(E), k);
+    }
+    for (int i = 0; i < n; i++) {
+        struct cvar *b = new_local(names[i], E->k == CT_ARRAY ? E->to
+                                                              : fls[i]->type,
+                                   ats[i]);
+        b->sb_var = e;
+        if (E->k == CT_ARRAY)
+            b->sb_index = i;
+        else
+            b->sb_field = fls[i];
+        struct csym *y = scope_add(cx_scope, CS_VAR, names[i]);
+        y->var = b;
+    }
+    return head;
 }
 
 /* ---- statements ---- */
@@ -3141,17 +3510,31 @@ static void parse_range_for(struct cstmt *s, const struct ctok *at,
     int decl_pos = cx_pos;
     int u = cx_uid();
     cx_pos = colon + 1;
-    if (cx_kind() == TOK_LBRACE)
-        cx_error(at, "a braced list as the range (std::initializer_list) "
-                     "is not supported yet (CX6)");
-    struct cexpr *re = expr_parse();
-    cx_expect(TOK_RPAREN, "')' after the range");
+    struct cvar *r;
+    struct cstmt *pre = NULL;
+    struct cty *ct;
+    if (cx_kind() == TOK_LBRACE) {
+        /* auto &&__range = { ... }: a std::initializer_list */
+        struct cexpr *list = parse_braced_list();
+        cx_expect(TOK_RPAREN, "')' after the range");
+        r = new_local(cx_fmt("__for_range%d", u),
+                      ct_ref(ct_basic(CT_AUTO), 1), at);
+        il_collect = 1;
+        il_last_decls = NULL;
+        init_variable_with(r, INIT_COPY_LIST, &list, 1, at);
+        il_collect = 0;
+        pre = il_last_decls;
+        il_last_decls = NULL;
+        ct = ct_unqual(ct_strip_ref(r->type));
+    } else {
+        struct cexpr *re = expr_parse();
+        cx_expect(TOK_RPAREN, "')' after the range");
+        struct cty *rt = ct_ref(re->t, re->vc != VC_LVALUE);
+        r = new_local(cx_fmt("__for_range%d", u), rt, at);
+        r->init = bind_ref(re, rt, "a range-based for");
+        ct = ct_unqual(re->t);
+    }
     int body_pos = cx_pos;
-
-    struct cty *rt = ct_ref(re->t, re->vc != VC_LVALUE);
-    struct cvar *r = new_local(cx_fmt("__for_range%d", u), rt, at);
-    r->init = bind_ref(re, rt, "a range-based for");
-    struct cty *ct = ct_unqual(re->t);
     struct cexpr *b0, *e0;
     if (ct->k == CT_ARRAY) {
         if (ct->n < 0)
@@ -3172,7 +3555,7 @@ static void parse_range_for(struct cstmt *s, const struct ctok *at,
         }
     } else {
         cx_error(at, "a range-based for over '%s', which has no begin/end",
-                 ct_name(re->t));
+                 ct_name(ct));
         return;
     }
     struct cvar *bv = new_local(cx_fmt("__for_begin%d", u),
@@ -3186,6 +3569,13 @@ static void parse_range_for(struct cstmt *s, const struct ctok *at,
     d1->more = d2;
     d2->more = d3;
     s->init = d1;
+    if (pre) {                /* the backing array first */
+        struct cstmt *p = pre;
+        while (p->more)
+            p = p->more;
+        p->more = d1;
+        s->init = pre;
+    }
     s->e = convert_bool(expr_binary(TOK_NEQ, expr_var(bv), expr_var(ev)),
                         "a range-based for");
     s->e2 = expr_preinc(expr_var(bv));
@@ -3201,17 +3591,25 @@ static void parse_range_for(struct cstmt *s, const struct ctok *at,
     parse_dspec(&ds);
     if (!ds.type)
         cx_error(cx_cur(), "expected a declaration in a range-based for");
-    struct declarator d;
-    memset(&d, 0, sizeof d);
-    struct cty *t = parse_declarator(ds.type, &d, DK_NAMED);
-    if (cx_kind() != TOK_COLON)
-        cx_error(cx_cur(), "expected ':' in a range-based for");
-    struct cvar *v = new_local(d.name, t, d.at);
-    struct csym *y = scope_add(cx_scope, CS_VAR, d.name);
-    y->var = v;
-    struct cexpr *de = expr_deref(expr_var(bv));
-    init_variable_with(v, INIT_COPY, &de, 1, d.at);
-    struct cstmt *dv = decl_of(v, d.at);
+    struct cstmt *dv;
+    if (ds.type->k == CT_AUTO && !ds.type->dauto && binding_follows()) {
+        struct cexpr *de = expr_deref(expr_var(bv));
+        dv = parse_structured_binding(ds.type, de, at);
+        if (cx_kind() != TOK_COLON)
+            cx_error(cx_cur(), "expected ':' in a range-based for");
+    } else {
+        struct declarator d;
+        memset(&d, 0, sizeof d);
+        struct cty *t = parse_declarator(ds.type, &d, DK_NAMED);
+        if (cx_kind() != TOK_COLON)
+            cx_error(cx_cur(), "expected ':' in a range-based for");
+        struct cvar *v = new_local(d.name, t, d.at);
+        struct csym *y = scope_add(cx_scope, CS_VAR, d.name);
+        y->var = v;
+        struct cexpr *de = expr_deref(expr_var(bv));
+        init_variable_with(v, INIT_COPY, &de, 1, d.at);
+        dv = decl_of(v, d.at);
+    }
     cx_pos = body_pos;
     dv->next = parse_stmt();
     blk->body = dv;
@@ -3470,6 +3868,73 @@ static void mark_nrvo(struct cfunc *f)
         v->nrvo = 1;
 }
 
+/* Past a statement, unread (a discarded branch of `if constexpr`). */
+static void skip_stmt(void)
+{
+    switch (cx_kind()) {
+    case TOK_LBRACE:
+        cx_skip_balanced();
+        return;
+    case TOK_KW_IF:
+        cx_advance();
+        cx_accept(TOK_CX_CONSTEXPR);
+        if (cx_kind() == TOK_BANG)
+            cx_advance();                 /* if !consteval */
+        if (cx_kind() == TOK_LPAREN)
+            cx_skip_balanced();
+        skip_stmt();
+        if (cx_accept(TOK_KW_ELSE))
+            skip_stmt();
+        return;
+    case TOK_KW_WHILE: case TOK_KW_FOR: case TOK_KW_SWITCH:
+        cx_advance();
+        cx_skip_balanced();
+        skip_stmt();
+        return;
+    case TOK_KW_DO:
+        cx_advance();
+        skip_stmt();
+        cx_expect(TOK_KW_WHILE, "'while' after a do body");
+        cx_skip_balanced();
+        cx_expect(TOK_SEMI, "';' after do-while");
+        return;
+    case TOK_CX_TRY:
+        cx_advance();
+        cx_skip_balanced();
+        while (cx_accept(TOK_CX_CATCH)) {
+            cx_skip_balanced();
+            cx_skip_balanced();
+        }
+        return;
+    case TOK_KW_CASE: case TOK_KW_DEFAULT:
+        while (cx_kind() != TOK_COLON && cx_kind() != TOK_EOF)
+            cx_advance();
+        cx_advance();
+        skip_stmt();
+        return;
+    case TOK_IDENT:
+        if (cx_kind_at(1) == TOK_COLON) {    /* a label */
+            cx_advance();
+            cx_advance();
+            skip_stmt();
+            return;
+        }
+        break;
+    default:
+        break;
+    }
+    while (cx_kind() != TOK_SEMI) {
+        if (cx_kind() == TOK_EOF)
+            cx_error(cx_cur(), "expected ';'");
+        if (cx_kind() == TOK_LPAREN || cx_kind() == TOK_LBRACKET ||
+            cx_kind() == TOK_LBRACE)
+            cx_skip_balanced();
+        else
+            cx_advance();
+    }
+    cx_advance();
+}
+
 static struct cstmt *parse_stmt(void)
 {
     const struct ctok *at = cx_cur();
@@ -3483,8 +3948,7 @@ static struct cstmt *parse_stmt(void)
     case TOK_KW_IF: {
         s = st_new(S_IF);
         cx_advance();
-        if (cx_accept(TOK_CX_CONSTEXPR))
-            ;                                   /* folded like any if */
+        int is_constexpr = cx_accept(TOK_CX_CONSTEXPR);
         cx_expect(TOK_LPAREN, "'(' after if");
         scope_push(SC_BLOCK, NULL);
         struct cstmt *decl = NULL;
@@ -3528,6 +3992,28 @@ static struct cstmt *parse_stmt(void)
         }
         s->init = init;
         cx_expect(TOK_RPAREN, "')' after the condition");
+        if (is_constexpr) {
+            /* the condition a constant; the other branch discarded —
+             * never read, so what it says need not hold for these
+             * template arguments (8.5.2) */
+            long v;
+            if (!expr_const(s->e, &v))
+                cx_error(at, "the condition of 'if constexpr' is not a "
+                             "constant expression");
+            s->e = ex_int(v != 0, ct_basic(CT_BOOL));
+            if (v)
+                s->body = parse_stmt();
+            else
+                skip_stmt(), s->body = st_new(S_NULL);
+            if (cx_accept(TOK_KW_ELSE)) {
+                if (v)
+                    skip_stmt();
+                else
+                    s->els = parse_stmt();
+            }
+            scope_pop();
+            return s;
+        }
         s->body = parse_stmt();
         if (cx_accept(TOK_KW_ELSE))
             s->els = parse_stmt();
@@ -5493,6 +5979,8 @@ static struct ccapture *this_capture(struct clambda *L, const struct ctok *at)
 static struct cexpr *this_in(struct clambda *L, const struct ctok *at)
 {
     struct ccapture *c = this_capture(L, at);
+    if (c && c->self_copy)              /* [*this]: the copy's address */
+        return ex_addr(capture_use(L, c));
     return c ? rvalue(capture_use(L, c)) : NULL;
 }
 
@@ -5821,7 +6309,17 @@ struct cexpr *parse_lambda(void)
             k->value = v;
             capture_field(L, k, v->t, "__cx_this");
         } else if (cx_kind() == TOK_STAR && cx_kind_at(1) == TOK_CX_THIS) {
-            cx_error(cat, "capturing *this is not supported yet");
+            /* [*this]: a copy of the object, which `this` then points at */
+            cx_advance();
+            cx_advance();
+            struct cexpr *v = this_outside(L, cat);
+            if (!v)
+                cx_error(cat, "'*this' captured outside a member function");
+            struct ccapture *k = new_capture(L);
+            k->is_this = 1;
+            k->self_copy = 1;
+            k->value = ex_deref(v);
+            capture_field(L, k, ct_unqual(v->t->to), "__cx_self");
         } else {
             int byref = cx_accept(TOK_AMP);
             if (cx_kind() != TOK_IDENT)

@@ -115,6 +115,7 @@ struct cty {
     int ntargs;
     const char **dnames;
     int ndnames;
+    int dauto;                /* CT_AUTO: decltype(auto) */
     int pack_expansion;       /* CT_TPARAM etc.: `T...` in a pattern */
     int bparam;               /* ARRAY in a pattern with n -2: the value
                                * parameter its bound is */
@@ -151,7 +152,13 @@ struct cty *ct_promote(struct cty *t);      /* integral promotion */
 struct cty *ct_arith_common(struct cty *a, struct cty *b);
 struct cty *ct_decay(struct cty *t);        /* array -> ptr, func -> ptr */
 struct cty *ct_strip_ref(struct cty *t);
-int ct_has_auto(const struct cty *t);       /* auto, auto&, auto *... */
+int ct_has_auto(const struct cty *t);
+/* std::initializer_list: the template (t is it?), and the element type of
+ * an instance t (through references and cv; NULL if t is not one) */
+int is_std_il(const struct ctemplate *t);
+struct cty *ct_il_elem(struct cty *t);
+/* ... or a pattern's parameter naming it (initializer_list<T>) */
+int ct_il_param(struct cty *t);       /* auto, auto&, auto *... */
 struct ctarg;
 int ct_is_local(const struct cty *t);        /* a class with no linkage */
 int targs_local(const struct ctarg *a, int n);
@@ -204,6 +211,14 @@ struct cvar {
                                * caller's return slot (emit.c) */
     int has_const;            /* a const integral with a constant value */
     long const_val;
+    struct cvar *sb_var;      /* a structured binding's name: it names
+                               * member sb_field of this hidden variable,
+                               * or its element sb_index */
+    struct cfield *sb_field;
+    int sb_index;
+    int ce_state;             /* consteval.c: its object evaluated (2), being
+                               * (1), only its address known (3) */
+    void *ce_obj;
     int used;
     int emitted;
     int refd, declared;       /* emit.c's bookkeeping */
@@ -771,6 +786,12 @@ struct cexpr *expr_parse_assign(void);     /* an assignment-expression */
 struct cexpr *expr_parse_cond(void);       /* a conditional-expression */
 long expr_parse_const(const char *what);   /* an integral constant */
 int expr_const(struct cexpr *e, long *out); /* integer constant expression */
+/* ... folded only: no calls evaluated (what emit.c may write as a constant
+ * without changing what the program does) */
+int expr_fold(struct cexpr *e, long *out);
+/* Constant evaluation (consteval.c): e's value, calls of constexpr
+ * functions and all; 0 if it is not a constant expression. */
+int cx_consteval_int(struct cexpr *e, long *out);
 /* Convert e to type t implicitly (copy-initialization); ctx for messages. */
 struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx);
 struct cexpr *convert_bool(struct cexpr *e, const char *ctx);
@@ -783,6 +804,10 @@ struct cexpr *expr_parse_name_value(struct csym *y, const char *name,
 struct cexpr *expr_binary(int op, struct cexpr *l, struct cexpr *r);
 struct cexpr *expr_preinc(struct cexpr *e);
 struct cexpr *expr_deref(struct cexpr *e);
+struct cexpr *expr_call_named_targs(struct cexpr *obj, const char *name,
+                                    struct ctarg *targs, int ntargs,
+                                    struct cexpr **args, int na,
+                                    const struct ctok *at);
 struct cexpr *expr_call_named(struct cexpr *obj, const char *name,
                               struct cexpr **args, int na,
                               const struct ctok *at);
@@ -802,7 +827,9 @@ struct cfunc *resolve(struct cfunc *set, struct cexpr *obj,
 enum {
     RS_NO_USER = 1,           /* only standard conversions (a constructor
                                * in copy-initialization, 12.2.2.5) */
-    RS_NO_EXPLICIT = 2        /* explicit constructors are not candidates */
+    RS_NO_EXPLICIT = 2,       /* explicit constructors are not candidates */
+    RS_IL_CTORS = 4           /* only initializer-list constructors (the
+                               * first phase of list-initialization) */
 };
 struct cfunc *resolve_ex(struct cfunc *set, struct cexpr *obj,
                          struct cexpr **args, int na, const struct ctok *at,
@@ -885,6 +912,15 @@ int class_abstract(struct cclass *c);   /* a slot's final overrider is pure */
 int func_nothrow(struct cfunc *f);      /* a call of f cannot throw */
 
 /* Aggregate initialization of t from a braced list. */
+/* A std::initializer_list (of class type ilt) made from the braced list
+ * `list`: its backing array built, then the object pointing at it. */
+struct cexpr *il_make(struct cty *ilt, struct cexpr *list,
+                      const struct ctok *at);
+/* parse.c: the backing array made a hidden local — when a local variable
+ * is initialized (its lifetime then is the variable's); NULL otherwise
+ * (a temporary, as for an argument) */
+struct cexpr *il_backing_var(struct cty *arr, struct cexpr *init,
+                             const struct ctok *at);
 struct cexpr *init_aggregate(struct cty *t, struct cexpr *list,
                              const struct ctok *at);
 /* The operator delete (the class's own, else the global one) a deleting
@@ -967,6 +1003,7 @@ struct ccapture {
     struct cvar *var;
     struct cfield *of;        /* or an enclosing lambda's member (one not
                                * standing for a variable: an init-capture) */
+    int self_copy;            /* [*this]: is_this, a copy of the object */
     int is_this;
     int byref;
     struct cfield *field;

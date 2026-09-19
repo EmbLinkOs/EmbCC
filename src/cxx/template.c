@@ -752,8 +752,23 @@ int deduce_call(struct ctemplate *t, struct ctarg *expl, int nexpl,
             return 0;
         }
         struct cexpr *e = args[i];
-        if (e->k == E_INITLIST && !e->t)
-            continue;                        /* non-deduced */
+        if (e->k == E_INITLIST && !e->t) {
+            /* std::initializer_list<P'> (or a reference to one): P'
+             * deduced from each element; else non-deduced (13.10.3.2) */
+            struct cty *Pl = ct_is_ref(P) ? P->to : P;
+            if (Pl->k == CT_TID && is_std_il(Pl->tmpl) && Pl->ntargs == 1 &&
+                Pl->targs[0].kind == TP_TYPE && ppack < 0)
+                for (int k = 0; k < e->na; k++) {
+                    struct cexpr *el = e->a[k];
+                    if (el->k == E_INITLIST && !el->t)
+                        continue;
+                    struct cty *A = el->k == E_OVL ? el->fn->type : el->t;
+                    if (!deduce(ct_unqual(Pl->targs[0].type),
+                                ct_unqual(ct_decay(A)), out, set, np))
+                        return 0;
+                }
+            continue;
+        }
         if (e->k == E_OVL && !e->memptr) {
             if (e->fn->next || e->fn->tmpl)
                 continue;                    /* an overload set: skip */

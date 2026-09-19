@@ -379,6 +379,164 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
     return v > 0x7FFFFFFFUL ? (long)v - 0x100000000L : (long)v;  /* int wchar_t */
 }
 
+/* A standard integer or floating suffix (C++)? */
+static int std_suffix(const char *s, int is_float)
+{
+    if (!*s)
+        return 1;
+    if (is_float)
+        return (s[0] == 'f' || s[0] == 'F' || s[0] == 'l' || s[0] == 'L') &&
+               !s[1];
+    int u = 0, l = 0, z = 0;
+    for (; *s; s++) {
+        if ((*s == 'u' || *s == 'U') && !u)
+            u = 1;
+        else if ((*s == 'l' || *s == 'L') && !l && !z) {
+            l = 1;
+            if (s[1] == s[0])
+                s++, l = 2;
+        } else if ((*s == 'z' || *s == 'Z') && !z && !l)
+            z = 1;
+        else
+            return 0;
+    }
+    return 1;
+}
+
+/* C++ numbers (lex_next's): 1 if lexed here — one with a separator, a
+ * binary one, or one with a user-defined suffix; 0 leaves the plain C
+ * forms to the C paths. */
+static int cxx_number(struct lexer *lx, struct token *t)
+{
+    const char *p = lx->p, *q = p;
+    /* the pp-number (5.9) */
+    while (isalnum((unsigned char)*q) || *q == '_' || *q == '.' ||
+           (*q == '\'' && (isalnum((unsigned char)q[1]) || q[1] == '_')) ||
+           ((*q == '+' || *q == '-') &&
+            (q[-1] == 'e' || q[-1] == 'E' || q[-1] == 'p' || q[-1] == 'P') &&
+            !(p[0] == '0' && (p[1] == 'x' || p[1] == 'X') &&
+              (q[-1] == 'e' || q[-1] == 'E'))))
+        q++;
+    size_t n = (size_t)(q - p);
+    char *buf = xmalloc(n + 1);
+    size_t k = 0;
+    int seps = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (p[i] == '\'')
+            seps = 1;
+        else
+            buf[k++] = p[i];
+    }
+    buf[k] = 0;
+    int hex = buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X');
+    int bin = buf[0] == '0' && (buf[1] == 'b' || buf[1] == 'B');
+    /* where the digits end: the suffix after */
+    const char *d = buf;
+    int is_float = 0;
+    if (hex) {
+        d += 2;
+        while (isxdigit((unsigned char)*d) || *d == '.')
+            is_float |= *d++ == '.';
+        if (*d == 'p' || *d == 'P') {
+            is_float = 1;
+            d++;
+            if (*d == '+' || *d == '-')
+                d++;
+            while (isdigit((unsigned char)*d))
+                d++;
+        }
+    } else if (bin) {
+        d += 2;
+        while (*d == '0' || *d == '1')
+            d++;
+    } else {
+        while (isdigit((unsigned char)*d) || *d == '.')
+            is_float |= *d++ == '.';
+        if ((*d == 'e' || *d == 'E') &&
+            (isdigit((unsigned char)d[1]) ||
+             ((d[1] == '+' || d[1] == '-') && isdigit((unsigned char)d[2])))) {
+            is_float = 1;
+            d++;
+            if (*d == '+' || *d == '-')
+                d++;
+            while (isdigit((unsigned char)*d))
+                d++;
+        }
+    }
+    const char *suf = d;
+    int ud = !std_suffix(suf, is_float);
+    if (!ud && !seps && !bin) {
+        free(buf);
+        return 0;                       /* the C paths read it */
+    }
+    size_t dl = (size_t)(suf - buf);
+    char *digits = xmalloc(dl + 1);
+    memcpy(digits, buf, dl);
+    digits[dl] = 0;
+    if (ud) {
+        if (*suf != '_')
+            ; /* reserved for the standard library (10ms, 1.5i): allowed */
+        t->ud_suffix = xstrndup(suf, strlen(suf));
+        t->ud_spelling = digits;
+    }
+    /* the value, from the digits and a standard suffix */
+    if (is_float) {
+        char *fend;
+        t->kind = TOK_FNUM;
+        t->fnum = strtod(digits, &fend);
+        t->fnum_is_float = !ud && (*suf == 'f' || *suf == 'F');
+        t->fnum_is_ld = !ud && (*suf == 'l' || *suf == 'L');
+        t->fnum_is_imag = 0;
+        if (t->fnum_is_ld || ud)
+            t->text = digits;
+    } else {
+        unsigned long v = bin ? strtoul(digits + 2, NULL, 2)
+                              : strtoul(digits, NULL, 0);
+        int has_u = 0, has_l = 0;
+        t->num_llong = 0;
+        t->char_lit = 0;
+        if (!ud)
+            for (const char *s = suf; *s; s++) {
+                if (*s == 'u' || *s == 'U')
+                    has_u = 1;
+                else if (*s == 'l' || *s == 'L') {
+                    if (has_l)
+                        t->num_llong = 1;
+                    has_l = 1;
+                } else if (*s == 'z' || *s == 'Z')
+                    has_l = 1;          /* size_t's width */
+            }
+        t->kind = TOK_NUM;
+        t->num = (long)v;
+        t->num_long = has_l || v > (unsigned long)INT_MAX;
+        t->num_uns = has_u;
+        if ((hex || bin) && !has_u) {
+            if (v > (unsigned long)INT_MAX && v <= 0xffffffffUL) {
+                t->num_uns = 1;
+                t->num_long = has_l;
+            } else if (v > (unsigned long)LONG_MAX) {
+                t->num_uns = 1;
+            }
+        }
+    }
+    free(buf);
+    lx->p = q;
+    return 1;
+}
+
+/* C++: a user-defined suffix right after a string or character literal
+ * ("abc"_s, 'x'_c) */
+static void cxx_lit_suffix(struct lexer *lx, struct token *t)
+{
+    if (!lx->cxx || !(isalpha((unsigned char)*lx->p) || *lx->p == '_'))
+        return;
+    const char *q = lx->p;
+    while (isalnum((unsigned char)*q) || *q == '_')
+        q++;
+    t->ud_suffix = xstrndup(lx->p, (size_t)(q - lx->p));
+    lx->p = q;
+}
+
 void lex_next(struct lexer *lx)
 {
     struct token *t = &lx->tok;
@@ -390,6 +548,8 @@ void lex_next(struct lexer *lx)
     t->num = 0;
     t->str_width = 1;
     t->str_prefix = 0;
+    t->ud_suffix = NULL;
+    t->ud_spelling = NULL;
 
     t->lit = NULL;
     t->nlit = 0;
@@ -426,6 +586,47 @@ void lex_next(struct lexer *lx)
                 t->str_prefix = (char)pfx;
             }
         }
+    }
+
+    /* C++: a pp-number with digit separators (1'000) or a user-defined
+     * suffix (5_km, 1.5_m, 10ms), and binary literals: read from a
+     * cleaned copy, the suffix kept apart. */
+    if (lx->cxx && (isdigit((unsigned char)*lx->p) ||
+                    (*lx->p == '.' && isdigit((unsigned char)lx->p[1])))) {
+        if (cxx_number(lx, t))
+            return;
+    }
+    if (*lx->p == '0' && (lx->p[1] == 'b' || lx->p[1] == 'B') &&
+        (lx->p[2] == '0' || lx->p[2] == '1')) {
+        /* 0b101: a binary constant (GNU C, C23, C++14) */
+        const char *q = lx->p + 2;
+        unsigned long v = 0;
+        while (*q == '0' || *q == '1')
+            v = v << 1 | (unsigned long)(*q++ - '0');
+        int has_u = 0, has_l = 0;
+        t->num_llong = 0;
+        t->char_lit = 0;
+        while (*q == 'u' || *q == 'U' || *q == 'l' || *q == 'L') {
+            if (*q == 'u' || *q == 'U')
+                has_u = 1;
+            else if (has_l)
+                t->num_llong = 1;
+            else
+                has_l = 1;
+            q++;
+        }
+        if (isalnum((unsigned char)*q) || *q == '_' || *q == '.')
+            diag_fatal(lx->file, lx->line, "malformed binary constant");
+        t->kind = TOK_NUM;
+        t->num = (long)v;
+        t->num_long = has_l || v > (unsigned long)INT_MAX;
+        t->num_uns = has_u || (v > (unsigned long)INT_MAX &&
+                               v <= 0xffffffffUL && !has_l) ||
+                     v > (unsigned long)LONG_MAX;
+        if (!has_l && v > (unsigned long)INT_MAX && v <= 0xffffffffUL)
+            t->num_long = 0;
+        lx->p = q;
+        return;
     }
 
     /* A floating constant: digits with a '.', or an exponent, or the
@@ -722,7 +923,9 @@ void lex_next(struct lexer *lx)
         t->num_uns = uns;
         t->char_lit = 1;
         t->str_prefix = (char)pfx;
-        break;
+        lx->p++;
+        cxx_lit_suffix(lx, t);
+        return;
     }
     case '"': {
         lx->p++;
@@ -751,7 +954,9 @@ void lex_next(struct lexer *lx)
         t->lit = lc;
         t->nlit = n;
         t->text = lit_encode(lc, n, t->str_width, &t->num, lx->file, lx->line);
-        break;
+        lx->p++;
+        cxx_lit_suffix(lx, t);
+        return;
     }
     case '.':
         if (lx->p[1] == '.' && lx->p[2] == '.') {

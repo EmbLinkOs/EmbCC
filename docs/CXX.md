@@ -313,6 +313,42 @@ linkage (`6._anon`); a function returning a pointer to function
 (`int (*f(int))(int)`) is written through a typedef, which EmbCC's C needs;
 a braced list already given its type recursed forever in conversions.
 
-Not yet (CX6): `initializer_list`, structured bindings, `if constexpr`,
-`constexpr` evaluation, `decltype(auto)`, user-defined literals; a
-generic lambda's conversion to a pointer to function; capturing `*this`.
+Part 2: constant evaluation (src/cxx/consteval.c). Where a constant is
+needed — `static_assert`, an array bound, a template argument, an
+enumerator, a case label, `if constexpr`, a const variable's value — an
+expression the folder cannot reduce is run by an interpreter over the
+front-end's own trees: objects are byte blocks laid out as the target lays
+them out (members, bases and elements are offsets), a pointer is a block
+and an offset (stored in an object as a handle, so copies keep pointing
+where they did), each call's locals get blocks of their own. Loops,
+`switch`, recursion, references, member functions, constexpr constructors
+(bases and mem-initializers), aggregates, strings, lambdas, floating
+point; anything else (a non-constant variable, a function that is not
+constexpr, out-of-bounds access, division by zero, 20M steps) makes the
+expression not a constant, quietly — the caller reports it if it needed
+one. emit.c keeps the plain folder, so run-time code still calls constexpr
+functions. `__builtin_is_constant_evaluated()` is true in the interpreter,
+false at run time. `if constexpr` skips the discarded branch unread.
+
+Also: `decltype(auto)` (variables and returns; mangled `Dc`); structured
+bindings to an array's elements, a class's data members and a tuple-like
+class's parts (`std::tuple_size`, `std::tuple_element`, `get<i>` as a
+member template or by ADL), in declarations and range-`for`, visible to
+lambdas; `std::initializer_list` — a braced list converted for an
+argument (its backing array a temporary of the full-expression) or a
+variable (a hidden local, living as long; also a range-`for` over a braced
+list), `auto x = {...}`, initializer-list constructors tried first in
+list-initialization, `initializer_list<T>` deduced from a braced list, the
+list-to-`initializer_list` conversion preferred in overload resolution;
+user-defined literals (cooked, raw, `template<char...>`, strings with their
+length; mangled `li<suffix>` as g++ does) — the lexer keeps a C++
+literal's suffix, and reads digit separators (`1'000`) and binary literals
+(`0b101`, C too); `[*this]`. tests/cxx `constexpr`, `bindings`,
+`initlist`, `udl` agree with g++ on both targets.
+
+Not yet (CX6): a generic lambda's conversion to a pointer to function;
+constexpr objects of class type are still initialized at run time (their
+values are known to the interpreter, not yet written as static data);
+`new`/`delete`, virtual calls, virtual bases, bit-fields, long double and
+unions in constant evaluation; a structured binding at namespace scope or
+of a class whose members are in a base.

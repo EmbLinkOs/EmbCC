@@ -1135,6 +1135,9 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
     }
     case INIT_LIST: case INIT_COPY_LIST: {
         struct cexpr *l = args[0];
+        if (c->tmpl && is_std_il(c->tmpl) && !(l->na == 1 &&
+                                               same_class(l->a[0], c)))
+            return il_make(ct_class(c), l, at);
         if (c->aggregate) {
             if (l->na == 1 && same_class(l->a[0], c))
                 return copy_from(c, l->a[0], form == INIT_LIST, at);
@@ -1144,6 +1147,17 @@ struct cexpr *construct(struct cclass *c, enum init_form form,
             return default_construct(c, 1, at);
         if (l->na == 1 && same_class(l->a[0], c))
             return copy_from(c, l->a[0], form == INIT_LIST, at);
+        /* first the initializer-list constructors, the list their one
+         * argument; then every constructor, its elements the arguments
+         * (12.2.2.8) */
+        struct cfunc *ilf = resolve_ex(c->ctors, NULL, &l, 1, NULL, NULL,
+                                       RS_IL_CTORS);
+        if (ilf) {
+            if (ilf->is_explicit && form == INIT_COPY_LIST)
+                cx_error(at, "copy-list-initialization of '%s' chose an "
+                             "explicit constructor", c->name);
+            return ctor_call(c, ilf, &l, 1, at);
+        }
         struct cfunc *f = resolve(c->ctors, NULL, l->a, l->na, at,
                                   c->name ? c->name : "class");
         if (f->is_explicit && form == INIT_COPY_LIST)

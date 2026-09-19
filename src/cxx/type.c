@@ -503,6 +503,38 @@ const char *ct_name(const struct cty *t)
     return b;
 }
 
+int is_std_il(const struct ctemplate *t)
+{
+    return t && t->kind == TK_CLASS && t->name &&
+           strcmp(t->name, "initializer_list") == 0 && t->scope &&
+           t->scope->k == SC_NAMESPACE && t->scope->name &&
+           strcmp(t->scope->name, "std") == 0 &&
+           t->scope->parent == cx_global;
+}
+
+struct cty *ct_il_elem(struct cty *t)
+{
+    if (!t)
+        return NULL;
+    if (ct_is_ref(t))
+        t = t->to;
+    if (t->k != CT_CLASS || !t->cls->tmpl || !is_std_il(t->cls->tmpl) ||
+        t->cls->ntargs != 1 || t->cls->targs[0].kind != TP_TYPE)
+        return NULL;
+    return t->cls->targs[0].type;
+}
+
+int ct_il_param(struct cty *t)
+{
+    if (!t)
+        return 0;
+    if (ct_is_ref(t))
+        t = t->to;
+    if (t->k == CT_TID)
+        return is_std_il(t->tmpl);
+    return ct_il_elem(t) != NULL;
+}
+
 int ct_has_auto(const struct cty *t)
 {
     while (t && (t->k == CT_LREF || t->k == CT_RREF || t->k == CT_PTR))

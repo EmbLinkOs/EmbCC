@@ -174,7 +174,7 @@ static long truncate_to(long v, const struct cty *t)
     return (long)u;
 }
 
-int expr_const(struct cexpr *e, long *out)
+int expr_fold(struct cexpr *e, long *out)
 {
     long a, b, c;
     switch (e->k) {
@@ -191,14 +191,14 @@ int expr_const(struct cexpr *e, long *out)
         }
         return 0;
     case E_CAST:
-        if (!ct_is_integer(e->t) || !expr_const(e->a[0], &a))
+        if (!ct_is_integer(e->t) || !expr_fold(e->a[0], &a))
             return 0;
         if (!ct_is_integer(e->a[0]->t) && e->a[0]->t->k != CT_NULLPTR)
             return 0;
         *out = truncate_to(a, e->t);
         return 1;
     case E_UNARY:
-        if (!expr_const(e->a[0], &a))
+        if (!expr_fold(e->a[0], &a))
             return 0;
         switch (e->op) {
         case TOK_MINUS: *out = truncate_to(-a, e->t); return 1;
@@ -209,18 +209,18 @@ int expr_const(struct cexpr *e, long *out)
         }
     case E_BINARY: {
         if (e->op == TOK_ANDAND || e->op == TOK_OROR) {
-            if (!expr_const(e->a[0], &a))
+            if (!expr_fold(e->a[0], &a))
                 return 0;
             if (e->op == TOK_ANDAND && !a) { *out = 0; return 1; }
             if (e->op == TOK_OROR && a) { *out = 1; return 1; }
-            if (!expr_const(e->a[1], &b))
+            if (!expr_fold(e->a[1], &b))
                 return 0;
             *out = b != 0;
             return 1;
         }
         if (!ct_is_integer(e->a[0]->t) || !ct_is_integer(e->a[1]->t))
             return 0;
-        if (!expr_const(e->a[0], &a) || !expr_const(e->a[1], &b))
+        if (!expr_fold(e->a[0], &a) || !expr_fold(e->a[1], &b))
             return 0;
         int uns = !ct_is_signed(e->a[0]->t);
         unsigned long ua = (unsigned long)a, ub = (unsigned long)b;
@@ -254,12 +254,19 @@ int expr_const(struct cexpr *e, long *out)
         return 1;
     }
     case E_COND:
-        if (!expr_const(e->a[0], &c))
+        if (!expr_fold(e->a[0], &c))
             return 0;
-        return expr_const(e->a[c ? 1 : 2], out);
+        return expr_fold(e->a[c ? 1 : 2], out);
     default:
         return 0;
     }
+}
+
+/* A constant expression's value: folded, or else evaluated — calls of
+ * constexpr functions and all (consteval.c). */
+int expr_const(struct cexpr *e, long *out)
+{
+    return expr_fold(e, out) || cx_consteval_int(e, out);
 }
 
 /* ---- conversions ---- */
@@ -307,6 +314,7 @@ struct ics {
     unsigned ref_cv;          /* ... to this cv-qualified type */
     struct cclass *base_to;   /* a derived-to-base conversion, to this */
     struct cfunc *user;       /* the user-defined conversion */
+    int to_il;                /* a braced list to std::initializer_list */
 };
 
 /* ---- bases ---- */
@@ -648,6 +656,24 @@ static struct ics ics_of(struct cexpr *e, struct cty *to)
             return r;
         }
         if (e->k == E_INITLIST && !e->t) {
+            struct cty *X = ct_il_elem(to);
+            if (X) {
+                /* each element to X: the worst of those (12.2.4.2.6) */
+                r.rank = R_EXACT;
+                r.to_il = 1;
+                for (int i = 0; i < e->na; i++) {
+                    struct ics s = ics_of(e->a[i], X);
+                    if (s.rank == R_BAD) {
+                        r.rank = R_BAD;
+                        return r;
+                    }
+                    if (s.rank > r.rank)
+                        r.rank = s.rank;
+                }
+                if (r.rank == R_USER)
+                    r.rank = R_CONV;   /* no one conversion of the list */
+                return r;
+            }
             if (to->cls->aggregate || e->na == 0) {
                 r.rank = R_USER;
                 return r;
@@ -685,6 +711,10 @@ static struct ics ics_of(struct cexpr *e, struct cty *to)
 /* 1 if a is a better conversion than b, -1 if worse, 0 if neither. */
 static int ics_cmp(const struct ics *a, const struct ics *b)
 {
+    /* a list to std::initializer_list beats any other conversion of
+     * that list (12.2.4.3) */
+    if (a->to_il != b->to_il && a->rank != R_BAD && b->rank != R_BAD)
+        return a->to_il ? 1 : -1;
     if (a->rank != b->rank)
         return a->rank < b->rank ? 1 : -1;
     if (a->rank == R_USER)
@@ -947,7 +977,29 @@ struct cfunc *resolve_ex(struct cfunc *set, struct cexpr *obj,
 {
     struct fnset fs = { NULL, 0, 0 };
     set_add_all(&fs, set);
-    return best_of(fs.f, fs.n, obj, args, na, 0, at, what, flags);
+    if (flags & RS_IL_CTORS) {
+        /* initializer-list constructors: a first parameter
+         * std::initializer_list<X> (or a reference to one), any other
+         * with a default */
+        int k = 0;
+        for (int i = 0; i < fs.n; i++) {
+            struct cfunc *f = fs.f[i];
+            struct cty *ft = f->type;
+            if (ft->np < 1 || !ct_il_param(ft->pdecl ? ft->pdecl[0]
+                                                     : ft->params[0]))
+                continue;
+            if (ft->np > 1 && !(f->defargs && f->defargs[1]) &&
+                !(ft->defargs && ft->defargs[1]) &&
+                !(ft->defarg_toks && ft->defarg_toks[1] >= 0))
+                continue;
+            fs.f[k++] = f;
+        }
+        fs.n = k;
+        if (!k)
+            return NULL;
+    }
+    return best_of(fs.f, fs.n, obj, args, na, 0, at, what,
+                   flags & ~RS_IL_CTORS);
 }
 
 /* The namespaces argument-dependent lookup searches for an argument of
@@ -1523,6 +1575,59 @@ static struct cexpr *aggregate_init(struct cty *t, struct cexpr **items,
         }
     }
     return L;
+}
+
+struct cexpr *il_make(struct cty *ilt, struct cexpr *list,
+                      const struct ctok *at)
+{
+    struct cty *X = ct_il_elem(ilt);
+    struct cclass *c = ilt->cls;
+    class_ensure(c);
+    /* the backing array: const X[N], each element copy-initialized from
+     * its initializer (9.4.5) — stored as X[N], which C lets the
+     * elements be built in */
+    struct cty *arr = ct_array(ct_unqual(X), list->na);
+    struct cexpr *L = ex_new(E_INITLIST, arr, VC_PRVALUE);
+    L->na = list->na;
+    L->a = xcalloc((size_t)(list->na ? list->na : 1), sizeof *L->a);
+    for (int i = 0; i < list->na; i++) {
+        struct cexpr *el = list->a[i];
+        int braced = el->k == E_INITLIST && !el->t;
+        if (ct_is_ref(X))
+            ex_error(el, "an initializer_list of references");
+        L->a[i] = init_object(ct_unqual(X), braced ? INIT_COPY_LIST
+                                                    : INIT_COPY, &el, 1, at);
+    }
+    struct cexpr *first;
+    if (!list->na) {
+        first = ex_new(E_NULLPTR, ct_ptr(ct_qual(X, CQ_CONST)), VC_PRVALUE);
+    } else {
+        struct cexpr *store = il_backing_var(arr, L, at);
+        if (!store) {
+            store = ex_new(E_TEMP, arr, VC_LVALUE);
+            store->a = xmalloc(sizeof *store->a);
+            store->a[0] = L;
+            store->na = 1;
+        }
+        first = ex_cast(ex_addr(store), ct_ptr(ct_qual(X, CQ_CONST)));
+    }
+    /* the object: its pointer and length (libstdc++'s _M_array, _M_len —
+     * whatever their names, in that order) */
+    struct cexpr *o = ex_new(E_INITLIST, ilt, VC_PRVALUE);
+    o->na = c->nfields;
+    o->a = xcalloc((size_t)(c->nfields ? c->nfields : 1), sizeof *o->a);
+    int np = 0, nn = 0;
+    for (int i = 0; i < c->nfields; i++) {
+        struct cty *ft = c->fields[i]->type;
+        if (ft->k == CT_PTR && !np++)
+            o->a[i] = first;
+        else if (ct_is_integer(ft) && !nn++)
+            o->a[i] = ex_int(list->na, ft);
+    }
+    if (np != 1 || nn != 1 || c->nfields != 2)
+        cx_error(at, "std::initializer_list is not laid out as a pointer "
+                     "and a length");
+    return o;
 }
 
 struct cexpr *init_aggregate(struct cty *t, struct cexpr *list,
@@ -2758,9 +2863,12 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         return ex_int(off, ct_size_t());
     }
     if (strcmp(n, "is_constant_evaluated") == 0) {
+        /* true in a constant evaluation (consteval.c), false at run time */
         cx_expect(TOK_LPAREN, "'('");
         cx_expect(TOK_RPAREN, "')'");
-        return ex_int(0, ct_basic(CT_BOOL));
+        struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_BOOL), VC_PRVALUE);
+        e->name = "__builtin_is_constant_evaluated";
+        return e;
     }
     struct cexpr **args;
     int na = call_args(&args);
@@ -2863,6 +2971,15 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         return NULL;
     case CS_VAR: {
         struct cvar *v = y->var;
+        if (v->sb_var) {            /* a structured binding's name */
+            struct csym hidden = *y;
+            hidden.var = v->sb_var;
+            struct cexpr *base = name_expr(&hidden, v->sb_var->name, at);
+            if (v->sb_field)
+                return member_of(base, v->sb_field);
+            return deref(binary(TOK_PLUS, rvalue(base),
+                                ex_int(v->sb_index, ct_basic(CT_LONG))));
+        }
         if (v->is_local && !v->is_static && v->fn != cx_curfn &&
             !(v->fn == NULL)) {
             struct cexpr *c = lambda_capture(v, at);   /* a lambda's */
@@ -2936,14 +3053,92 @@ struct cexpr *expr_parse_name_value(struct csym *y, const char *name,
     return name_expr(y, name, at);
 }
 
+/* A user-defined literal (5.13.9): a call of operator""suffix — given
+ * the literal's value (the cooked form: unsigned long long, long double,
+ * a character), its spelling (the raw form, const char *, or a literal
+ * operator template's char... arguments), or a string literal and its
+ * length. kind: 'i' integer, 'f' floating, 'c' character, 's' string. */
+static struct cexpr *udl_call(int kind, struct cexpr *lit,
+                              const char *spelling, const char *suffix,
+                              const struct ctok *at)
+{
+    const char *name = cx_fmt("operator\"\"%s", suffix);
+    struct csym *y = lookup(cx_scope, name);
+    if (!y || y->k != CS_FUNC)
+        cx_error(at, "no literal operator '%s' for this literal", name);
+    if (kind == 's') {
+        struct cexpr *args[2];
+        args[0] = lit;
+        args[1] = ex_int(lit->slen - 1, ct_size_t());
+        return expr_call_named(NULL, name, args, 2, at);
+    }
+    if (kind == 'c')
+        return expr_call_named(NULL, name, &lit, 1, at);
+    int cooked = 0, raw = 0, tmpl = 0;
+    for (struct cfunc *f = y->fns; f; f = f->next) {
+        if (f->tmpl) {
+            tmpl = 1;
+            continue;
+        }
+        if (f->type->np != 1)
+            continue;
+        struct cty *p = f->type->params[0];
+        if ((kind == 'i' && p->k == CT_ULLONG) ||
+            (kind == 'f' && p->k == CT_LDOUBLE))
+            cooked = 1;
+        if (p->k == CT_PTR && p->to->k == CT_CHAR)
+            raw = 1;
+    }
+    if (cooked) {
+        struct cexpr *a;
+        if (kind == 'i') {
+            a = ex_int(lit->ival, ct_basic(CT_ULLONG));
+        } else {
+            a = ex_new(E_FLT, ct_basic(CT_LDOUBLE), VC_PRVALUE);
+            a->fval = lit->fval;
+            a->text = spelling;
+        }
+        return expr_call_named(NULL, name, &a, 1, at);
+    }
+    size_t n = strlen(spelling);
+    if (raw) {
+        struct cexpr *str = ex_new(E_STR, ct_array(ct_qual(ct_basic(CT_CHAR),
+                                                           CQ_CONST),
+                                                   (long)n + 1), VC_LVALUE);
+        str->text = xstrndup(spelling, n);
+        str->slen = (long)n + 1;
+        str->swidth = 1;
+        return expr_call_named(NULL, name, &str, 1, at);
+    }
+    if (tmpl) {
+        /* template <char...> operator""X(): the characters as arguments */
+        struct ctarg *ta = xcalloc(n ? n : 1, sizeof *ta);
+        for (size_t i = 0; i < n; i++) {
+            ta[i].kind = TP_VALUE;
+            ta[i].value = (unsigned char)spelling[i];
+            ta[i].vtype = ct_basic(CT_CHAR);
+        }
+        return expr_call_named_targs(NULL, name, ta, (int)n, NULL, 0, at);
+    }
+    cx_error(at, "no literal operator '%s' takes this literal", name);
+    return NULL;
+}
+
 static struct cexpr *parse_string(void)
 {
     const struct ctok *at = cx_cur();
     int width = at->t.str_width, prefix = at->t.str_prefix;
     size_t n = 0, cap = 0;
     struct litch *lc = NULL;
+    const char *suffix = NULL;
     while (cx_kind() == TOK_STR) {
         struct token *st = &cx_cur()->t;
+        if (st->ud_suffix) {
+            if (suffix && strcmp(suffix, st->ud_suffix) != 0)
+                cx_error(cx_cur(), "concatenating string literals with "
+                                   "different suffixes");
+            suffix = st->ud_suffix;
+        }
         if (st->str_prefix) {
             if (prefix && prefix != st->str_prefix)
                 cx_error(cx_cur(), "concatenating differently-prefixed "
@@ -2972,6 +3167,8 @@ static struct cexpr *parse_string(void)
     e->swidth = width;
     e->line = at->t.line;
     e->file = at->file;
+    if (suffix)
+        return udl_call('s', e, NULL, suffix, at);
     return e;
 }
 
@@ -3137,8 +3334,11 @@ static struct cexpr *parse_primary(void)
         else
             k = t->num_uns ? CT_UINT : CT_INT;
         e = ex_int(t->num, ct_basic(k));
-        e->is_null_const = !t->char_lit && t->num == 0;
+        e->is_null_const = !t->char_lit && t->num == 0 && !t->ud_suffix;
         cx_advance();
+        if (t->ud_suffix)
+            return udl_call(t->char_lit ? 'c' : 'i', e, t->ud_spelling,
+                            t->ud_suffix, at);
         return e;
     }
     case TOK_FNUM: {
@@ -3151,6 +3351,8 @@ static struct cexpr *parse_primary(void)
         e->fval = t->fnum;
         e->text = t->text;
         cx_advance();
+        if (t->ud_suffix)
+            return udl_call('f', e, t->ud_spelling, t->ud_suffix, at);
         return e;
     }
     case TOK_STR:
@@ -3422,6 +3624,15 @@ struct cexpr *expr_call_named(struct cexpr *obj, const char *name,
                               struct cexpr **args, int na,
                               const struct ctok *at)
 {
+    return expr_call_named_targs(obj, name, NULL, 0, args, na, at);
+}
+
+/* ... with explicit template arguments (name<targs>(args)) */
+struct cexpr *expr_call_named_targs(struct cexpr *obj, const char *name,
+                                    struct ctarg *targs, int ntargs,
+                                    struct cexpr **args, int na,
+                                    const struct ctok *at)
+{
     struct cexpr *f;
     if (obj) {
         struct cclass *c = obj->t->cls;
@@ -3446,6 +3657,11 @@ struct cexpr *expr_call_named(struct cexpr *obj, const char *name,
             f->t = y->fns->type;
             f->adl = y->scope->k == SC_NAMESPACE;
         }
+    }
+    if (targs) {
+        f->targs = targs;
+        f->ntargs = ntargs;
+        f->has_targs = 1;
     }
     return call(f, args, na, at);
 }

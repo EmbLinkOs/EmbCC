@@ -351,7 +351,7 @@ static const char *type_key(struct cty *t)
     if (t->q && t->k != CT_FUNC)
         return cx_fmt("%s%s%s", (t->q & CQ_VOLATILE) ? "V" : "",
                       (t->q & CQ_CONST) ? "K" : "", type_key(ct_unqual(t)));
-    const char *b = builtin_code(t->k);
+    const char *b = t->dauto ? "Dc" : builtin_code(t->k);
     if (b)
         return b;
     switch (t->k) {
@@ -420,7 +420,7 @@ static void mangle_type(struct mbuf *m, struct cty *t)
         sub_add(m, key);
         return;
     }
-    const char *b = builtin_code(t->k);
+    const char *b = t->dauto ? "Dc" : builtin_code(t->k);
     if (b) {
         put(m, b);
         return;
@@ -791,6 +791,11 @@ static void put_unqualified(struct mbuf *m, struct cfunc *f)
     const char *oc = operator_code(f->name);
     if (oc) {
         put(m, oc);
+        return;
+    }
+    if (strncmp(f->name, "operator\"\"", 10) == 0) {
+        put(m, "li");               /* a literal operator: li <suffix> */
+        put_source(m, f->name + 10);
         return;
     }
     put_source(m, f->name);

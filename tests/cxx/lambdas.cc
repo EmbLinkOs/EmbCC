@@ -2,7 +2,7 @@
 // copy and by reference, explicit, implicit (capture-defaults) and
 // init-captures; `this` captured; mutable; trailing return types; the
 // conversion to a pointer to function of a lambda that captures nothing;
-// lambdas in lambdas (capturing what the enclosing one captured); generic
+// [*this]; lambdas in lambdas (capturing what the enclosing one captured); generic
 // lambdas (`auto` parameters: operator() is a member template), including
 // `auto...` packs.
 // expect-exit: 42
@@ -44,6 +44,8 @@ struct Counter {
     {
         return [=] { int a = n; return [=] { return a + n; }(); }();
     }
+    auto snapshot() { return [*this] { return n; }; }
+    auto live() { return [this] { return n; }; }
 };
 
 template <class T> T twice(T v)
@@ -88,6 +90,10 @@ int main()
     Counter c2;
     check("generic, in a member function", c2.generic(7) == 1 + 2 + 7 + 1);
     check("this through nested lambdas", c2.nested() == 2);
+    auto snap = c2.snapshot();
+    auto lv = c2.live();
+    c2.n = 99;
+    check("[*this]: a copy", snap() == 1 && lv() == 99);
 
     // ---- passed around ----
     check("to a template", apply([](int x) { return x * x; }, 7) == 49);
