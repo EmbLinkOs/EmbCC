@@ -1,0 +1,304 @@
+/* <chrono> — C++ [time].
+ *
+ * Durations and time points with the unit IN THE TYPE. That is the whole
+ * design: `sleep(100)` is a bug report waiting to happen, and
+ * `sleep(milliseconds(100))` cannot be misread -- and cannot be passed a
+ * value in seconds by mistake, because the conversion is the compiler's
+ * job rather than the reader's.
+ *
+ * The conversion rule is the part worth knowing: a duration converts
+ * IMPLICITLY only when no information is lost -- seconds to milliseconds
+ * yes, milliseconds to seconds no. Narrowing needs duration_cast, which
+ * TRUNCATES toward zero. That asymmetry is not fussiness: it is what
+ * stops a timeout in milliseconds from silently becoming zero seconds.
+ */
+#ifndef _LIBCXX_CHRONO
+#define _LIBCXX_CHRONO
+
+#include <cstdint>
+#include <ctime>
+#include <type_traits>
+#include <limits>
+#include <ratio>
+
+namespace std {
+namespace chrono {
+
+template <class R, class P = ratio<1>> class duration;
+template <class C, class D> class time_point;
+
+}  // namespace chrono
+
+/* common_type of two durations is the FINER of them, so that adding
+ * seconds to milliseconds gives milliseconds and loses nothing. */
+template <class R1, class P1, class R2, class P2>
+struct common_type<chrono::duration<R1, P1>, chrono::duration<R2, P2>> {
+private:
+    static constexpr intmax_t __n =
+        __detail::__gcd_c(P1::num, P2::num);
+    static constexpr intmax_t __d =
+        P1::den / __detail::__gcd_c(P1::den, P2::den) * P2::den;
+public:
+    using type = chrono::duration<common_type_t<R1, R2>, ratio<__n, __d>>;
+};
+
+namespace chrono {
+
+template <class T> struct treat_as_floating_point : is_floating_point<T> {};
+
+template <class R>
+struct duration_values {
+    static constexpr R zero() { return R(0); }
+    static constexpr R min() { return numeric_limits<R>::lowest(); }
+    static constexpr R max() { return numeric_limits<R>::max(); }
+};
+
+template <class R, class P>
+class duration {
+public:
+    using rep = R;
+    using period = P;
+
+    constexpr duration() = default;
+    template <class R2>
+    constexpr explicit duration(const R2 &r) : __r(static_cast<R>(r)) {}
+
+    /* Implicit ONLY when the conversion cannot lose anything: the target
+     * period must divide the source's exactly, or the representation must
+     * be floating point. This is the constraint that makes the unit in
+     * the type worth having. */
+    template <class R2, class P2,
+              class = enable_if_t<
+                  treat_as_floating_point<R>::value ||
+                  (ratio_divide<P2, P>::den == 1 &&
+                   !treat_as_floating_point<R2>::value)>>
+    constexpr duration(const duration<R2, P2> &o)
+        : __r(static_cast<R>(o.count()) *
+              static_cast<R>(ratio_divide<P2, P>::num)) {}
+
+    constexpr R count() const { return __r; }
+
+    static constexpr duration zero() { return duration(R(0)); }
+    static constexpr duration min() { return duration(duration_values<R>::min()); }
+    static constexpr duration max() { return duration(duration_values<R>::max()); }
+
+    constexpr duration operator+() const { return *this; }
+    constexpr duration operator-() const { return duration(-__r); }
+    duration &operator++() { ++__r; return *this; }
+    duration &operator--() { --__r; return *this; }
+    duration &operator+=(const duration &o) { __r += o.__r; return *this; }
+    duration &operator-=(const duration &o) { __r -= o.__r; return *this; }
+    duration &operator*=(const R &v) { __r *= v; return *this; }
+    duration &operator/=(const R &v) { __r /= v; return *this; }
+
+private:
+    R __r{};
+};
+
+using nanoseconds  = duration<int64_t, nano>;
+using microseconds = duration<int64_t, micro>;
+using milliseconds = duration<int64_t, milli>;
+using seconds      = duration<int64_t>;
+using minutes      = duration<int64_t, ratio<60>>;
+using hours        = duration<int64_t, ratio<3600>>;
+using days         = duration<int64_t, ratio<86400>>;
+
+/* The explicit, possibly-lossy conversion. It TRUNCATES toward zero --
+ * not rounds -- which is why duration_cast<seconds>(1999ms) is 1. */
+template <class To, class R, class P>
+constexpr To duration_cast(const duration<R, P> &d)
+{
+    using CF = ratio_divide<P, typename To::period>;
+    using CR = common_type_t<typename To::rep, R, intmax_t>;
+    return To(static_cast<typename To::rep>(
+        static_cast<CR>(d.count()) * static_cast<CR>(CF::num) /
+        static_cast<CR>(CF::den)));
+}
+
+template <class R1, class P1, class R2, class P2>
+constexpr common_type_t<duration<R1, P1>, duration<R2, P2>>
+operator+(const duration<R1, P1> &a, const duration<R2, P2> &b)
+{
+    using C = common_type_t<duration<R1, P1>, duration<R2, P2>>;
+    return C(C(a).count() + C(b).count());
+}
+
+template <class R1, class P1, class R2, class P2>
+constexpr common_type_t<duration<R1, P1>, duration<R2, P2>>
+operator-(const duration<R1, P1> &a, const duration<R2, P2> &b)
+{
+    using C = common_type_t<duration<R1, P1>, duration<R2, P2>>;
+    return C(C(a).count() - C(b).count());
+}
+
+template <class R, class P, class V>
+constexpr duration<common_type_t<R, V>, P>
+operator*(const duration<R, P> &d, const V &v)
+{ return duration<common_type_t<R, V>, P>(d.count() * v); }
+
+template <class R, class P, class V>
+constexpr duration<common_type_t<R, V>, P>
+operator/(const duration<R, P> &d, const V &v)
+{ return duration<common_type_t<R, V>, P>(d.count() / v); }
+
+template <class R1, class P1, class R2, class P2>
+constexpr bool operator==(const duration<R1, P1> &a, const duration<R2, P2> &b)
+{
+    using C = common_type_t<duration<R1, P1>, duration<R2, P2>>;
+    return C(a).count() == C(b).count();
+}
+template <class R1, class P1, class R2, class P2>
+constexpr bool operator!=(const duration<R1, P1> &a, const duration<R2, P2> &b)
+{ return !(a == b); }
+template <class R1, class P1, class R2, class P2>
+constexpr bool operator<(const duration<R1, P1> &a, const duration<R2, P2> &b)
+{
+    using C = common_type_t<duration<R1, P1>, duration<R2, P2>>;
+    return C(a).count() < C(b).count();
+}
+template <class R1, class P1, class R2, class P2>
+constexpr bool operator>(const duration<R1, P1> &a, const duration<R2, P2> &b)
+{ return b < a; }
+template <class R1, class P1, class R2, class P2>
+constexpr bool operator<=(const duration<R1, P1> &a, const duration<R2, P2> &b)
+{ return !(b < a); }
+template <class R1, class P1, class R2, class P2>
+constexpr bool operator>=(const duration<R1, P1> &a, const duration<R2, P2> &b)
+{ return !(a < b); }
+
+/* A time_point is a duration since a CLOCK'S OWN epoch, and the clock is
+ * in the type -- so a steady_clock point cannot be compared with a
+ * system_clock one, which is the mistake the type system is here to
+ * prevent. */
+template <class C, class D = typename C::duration>
+class time_point {
+public:
+    using clock = C;
+    using duration = D;
+    using rep = typename D::rep;
+
+    constexpr time_point() = default;
+    constexpr explicit time_point(const D &d) : __d(d) {}
+    template <class D2>
+    constexpr time_point(const time_point<C, D2> &t)
+        : __d(t.time_since_epoch()) {}
+
+    constexpr D time_since_epoch() const { return __d; }
+
+    time_point &operator+=(const D &d) { __d += d; return *this; }
+    time_point &operator-=(const D &d) { __d -= d; return *this; }
+
+private:
+    D __d{};
+};
+
+template <class C, class D1, class D2>
+constexpr common_type_t<D1, D2>
+operator-(const time_point<C, D1> &a, const time_point<C, D2> &b)
+{ return a.time_since_epoch() - b.time_since_epoch(); }
+
+template <class C, class D, class R, class P>
+constexpr time_point<C, common_type_t<D, duration<R, P>>>
+operator+(const time_point<C, D> &t, const duration<R, P> &d)
+{
+    using CT = common_type_t<D, duration<R, P>>;
+    return time_point<C, CT>(t.time_since_epoch() + d);
+}
+
+template <class C, class D1, class D2>
+constexpr bool operator==(const time_point<C, D1> &a, const time_point<C, D2> &b)
+{ return a.time_since_epoch() == b.time_since_epoch(); }
+template <class C, class D1, class D2>
+constexpr bool operator<(const time_point<C, D1> &a, const time_point<C, D2> &b)
+{ return a.time_since_epoch() < b.time_since_epoch(); }
+template <class C, class D1, class D2>
+constexpr bool operator!=(const time_point<C, D1> &a, const time_point<C, D2> &b)
+{ return !(a == b); }
+template <class C, class D1, class D2>
+constexpr bool operator>(const time_point<C, D1> &a, const time_point<C, D2> &b)
+{ return b < a; }
+template <class C, class D1, class D2>
+constexpr bool operator<=(const time_point<C, D1> &a, const time_point<C, D2> &b)
+{ return !(b < a); }
+template <class C, class D1, class D2>
+constexpr bool operator>=(const time_point<C, D1> &a, const time_point<C, D2> &b)
+{ return !(a < b); }
+
+template <class C, class D, class R, class P>
+constexpr time_point<C, common_type_t<D, duration<R, P>>>
+operator-(const time_point<C, D> &t, const duration<R, P> &d)
+{
+    using CT = common_type_t<D, duration<R, P>>;
+    return time_point<C, CT>(t.time_since_epoch() - d);
+}
+
+template <class To, class C, class D>
+constexpr time_point<C, To> time_point_cast(const time_point<C, D> &t)
+{ return time_point<C, To>(duration_cast<To>(t.time_since_epoch())); }
+
+/* The wall clock. It can be SET, so it can go backwards -- which is why
+ * it must never be used to measure an interval, and why steady_clock
+ * exists. Our <time.h> gives seconds, so that is the resolution; saying
+ * so is better than multiplying by a thousand to look precise. */
+struct system_clock {
+    using rep = int64_t;
+    using period = ratio<1>;
+    using duration = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<system_clock>;
+    static constexpr bool is_steady = false;
+
+    static time_point now() noexcept
+    { return time_point(duration(::time(nullptr))); }
+
+    static ::time_t to_time_t(const time_point &t) noexcept
+    { return (::time_t)t.time_since_epoch().count(); }
+    static time_point from_time_t(::time_t t) noexcept
+    { return time_point(duration(t)); }
+};
+
+/* Never goes backwards, which is the only property an interval
+ * measurement needs. It is built on clock(), so on a target whose
+ * backend has no clock it does not advance -- an honest zero rather than
+ * an invented number. */
+struct steady_clock {
+    using rep = int64_t;
+    using period = nano;
+    using duration = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<steady_clock>;
+    static constexpr bool is_steady = true;
+
+    static time_point now() noexcept
+    {
+        ::clock_t c = ::clock();
+        if (c == (::clock_t)-1)
+            return time_point(duration(0));
+        return time_point(duration((rep)c * (1000000000LL / CLOCKS_PER_SEC)));
+    }
+};
+
+using high_resolution_clock = steady_clock;
+
+}  // namespace chrono
+
+/* The literals people actually write: 100ms rather than
+ * milliseconds(100). */
+inline namespace literals {
+inline namespace chrono_literals {
+constexpr chrono::nanoseconds operator""ns(unsigned long long v)
+{ return chrono::nanoseconds((int64_t)v); }
+constexpr chrono::microseconds operator""us(unsigned long long v)
+{ return chrono::microseconds((int64_t)v); }
+constexpr chrono::milliseconds operator""ms(unsigned long long v)
+{ return chrono::milliseconds((int64_t)v); }
+constexpr chrono::seconds operator""s(unsigned long long v)
+{ return chrono::seconds((int64_t)v); }
+constexpr chrono::minutes operator""min(unsigned long long v)
+{ return chrono::minutes((int64_t)v); }
+constexpr chrono::hours operator""h(unsigned long long v)
+{ return chrono::hours((int64_t)v); }
+}
+}
+
+}  // namespace std
+
+#endif

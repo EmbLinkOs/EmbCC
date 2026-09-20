@@ -1,0 +1,251 @@
+/* <random> — C++ [rand].
+ *
+ * The design separates two things the C library's rand() conflates: an
+ * ENGINE that produces uniformly distributed bits, and a DISTRIBUTION
+ * that shapes them. That separation is not academic -- it is what makes
+ * `rand() % n` avoidable.
+ *
+ * `rand() % n` is biased whenever n does not divide the engine's range:
+ * the low values occur once more often than the high ones. With
+ * RAND_MAX = 2^31-1 and n = 10 the bias is invisible; with a small
+ * range or a large n it is not, and it is always there. Every
+ * distribution here rejects rather than folds, which is the fix.
+ */
+#ifndef _LIBCXX_RANDOM
+#define _LIBCXX_RANDOM
+
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+#include <limits>
+#include <cmath>
+
+namespace std {
+
+/* A linear congruential engine, spelled as the standard does so that
+ * minstd_rand is the same sequence everywhere. */
+template <class U, U A, U C, U M>
+class linear_congruential_engine {
+public:
+    using result_type = U;
+    static constexpr U multiplier = A;
+    static constexpr U increment = C;
+    static constexpr U modulus = M;
+    static constexpr U default_seed = 1u;
+
+    static constexpr U min() { return C == 0u ? 1u : 0u; }
+    static constexpr U max() { return M - 1u; }
+
+    explicit linear_congruential_engine(U s = default_seed) { seed(s); }
+
+    void seed(U s = default_seed)
+    {
+        /* A zero seed with no increment is a fixed point: the sequence
+         * would be all zeros. The standard says to use 1 instead. */
+        __x = (C == 0u && s % M == 0u) ? 1u : s % M;
+    }
+
+    U operator()()
+    {
+        __x = (U)(((uint64_t)A * __x + C) % M);
+        return __x;
+    }
+
+    void discard(unsigned long long n) { while (n--) (*this)(); }
+
+private:
+    U __x;
+};
+
+using minstd_rand0 = linear_congruential_engine<uint32_t, 16807u, 0u, 2147483647u>;
+using minstd_rand  = linear_congruential_engine<uint32_t, 48271u, 0u, 2147483647u>;
+
+/* A 64-bit xorshift* engine as the default. Not mt19937 -- that is 2.5 KB
+ * of state and a page of initialisation, and nothing here needs its
+ * equidistribution. This is stated rather than pretending: a program
+ * needing Mersenne Twister's exact sequence will not find it here. */
+class xorshift64star {
+public:
+    using result_type = uint64_t;
+    static constexpr uint64_t default_seed = 88172645463325252ULL;
+
+    static constexpr uint64_t min() { return 0; }
+    static constexpr uint64_t max() { return ~0ULL; }
+
+    explicit xorshift64star(uint64_t s = default_seed) { seed(s); }
+
+    void seed(uint64_t s = default_seed)
+    {
+        /* Zero is an absorbing state for xorshift: it would produce
+         * zeros forever. */
+        __x = s ? s : default_seed;
+    }
+
+    uint64_t operator()()
+    {
+        __x ^= __x >> 12;
+        __x ^= __x << 25;
+        __x ^= __x >> 27;
+        return __x * 2685821657736338717ULL;
+    }
+
+    void discard(unsigned long long n) { while (n--) (*this)(); }
+
+private:
+    uint64_t __x;
+};
+
+using default_random_engine = xorshift64star;
+using mt19937_64 = xorshift64star;   /* a name, not the algorithm */
+
+template <class T = int>
+class uniform_int_distribution {
+public:
+    using result_type = T;
+
+    uniform_int_distribution() : __a(0), __b(numeric_limits<T>::max()) {}
+    uniform_int_distribution(T a, T b) : __a(a), __b(b) {}
+
+    T a() const { return __a; }
+    T b() const { return __b; }
+    void reset() {}
+
+    /* REJECTION, not modulo. The engine's range is split into whole
+     * buckets of size `range`; anything in the ragged remainder at the
+     * top is thrown away and redrawn. That is what makes every value
+     * equally likely, where `% range` makes the first
+     * (engine_range % range) values one draw more likely than the rest.
+     * The loop terminates with probability 1 and, in practice, almost
+     * always on the first try. */
+    template <class E>
+    T operator()(E &e)
+    {
+        using U = uint64_t;
+        U range = (U)(__b - __a) + 1;
+        if (range == 0)
+            return (T)e();                 /* the whole width is wanted */
+        U espan = (U)(e.max() - e.min());
+        U limit;
+        if (espan == ~(U)0) {
+            limit = ~(U)0 - (~(U)0 % range) - 1;
+            for (;;) {
+                U v = (U)(e() - e.min());
+                if (v <= limit)
+                    return (T)(__a + (T)(v % range));
+            }
+        }
+        U span = espan + 1;
+        limit = span - (span % range);      /* the ragged top */
+        for (;;) {
+            U v = (U)(e() - e.min());
+            if (v < limit)
+                return (T)(__a + (T)(v % range));
+        }
+    }
+
+private:
+    T __a, __b;
+};
+
+template <class T = double>
+class uniform_real_distribution {
+public:
+    using result_type = T;
+
+    uniform_real_distribution() : __a(0), __b(1) {}
+    uniform_real_distribution(T a, T b) : __a(a), __b(b) {}
+
+    T a() const { return __a; }
+    T b() const { return __b; }
+    void reset() {}
+
+    template <class E>
+    T operator()(E &e)
+    {
+        uint64_t span = (uint64_t)(e.max() - e.min());
+        T u = (T)(uint64_t)(e() - e.min()) / (T)span;
+        return __a + u * (__b - __a);
+    }
+
+private:
+    T __a, __b;
+};
+
+class bernoulli_distribution {
+public:
+    using result_type = bool;
+
+    bernoulli_distribution() : __p(0.5) {}
+    explicit bernoulli_distribution(double p) : __p(p) {}
+
+    double p() const { return __p; }
+    void reset() {}
+
+    template <class E>
+    bool operator()(E &e)
+    {
+        uniform_real_distribution<double> u(0.0, 1.0);
+        return u(e) < __p;
+    }
+
+private:
+    double __p;
+};
+
+/* Box-Muller, which produces TWO normal values per pair of uniforms --
+ * so the second is cached rather than thrown away, which halves the
+ * cost. */
+template <class T = double>
+class normal_distribution {
+public:
+    using result_type = T;
+
+    normal_distribution() : __mean(0), __sd(1), __have(false), __spare(0) {}
+    normal_distribution(T mean, T sd)
+        : __mean(mean), __sd(sd), __have(false), __spare(0) {}
+
+    T mean() const { return __mean; }
+    T stddev() const { return __sd; }
+    void reset() { __have = false; }
+
+    template <class E>
+    T operator()(E &e)
+    {
+        if (__have) { __have = false; return __mean + __sd * __spare; }
+        uniform_real_distribution<T> u(0, 1);
+        T u1, u2;
+        do { u1 = u(e); } while (u1 <= (T)0);   /* log(0) is -inf */
+        u2 = u(e);
+        T r = (T)sqrt(-2.0 * log((double)u1));
+        T th = (T)(6.283185307179586476925286766559 * (double)u2);
+        __spare = r * (T)sin((double)th);
+        __have = true;
+        return __mean + __sd * r * (T)cos((double)th);
+    }
+
+private:
+    T __mean, __sd;
+    bool __have;
+    T __spare;
+};
+
+/* A seed from the OS when it has one, and a REFUSAL when it does not --
+ * not a timestamp. A caller handed a predictable "random" seed cannot
+ * tell; one handed an exception can. */
+class random_device {
+public:
+    using result_type = unsigned;
+
+    random_device() = default;
+    explicit random_device(const char * = nullptr) {}
+
+    static constexpr result_type min() { return 0; }
+    static constexpr result_type max() { return ~0u; }
+
+    result_type operator()();
+    double entropy() const noexcept;
+};
+
+}  // namespace std
+
+#endif

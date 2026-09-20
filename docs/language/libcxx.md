@@ -54,8 +54,8 @@ those exact two members in that order.
 `<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`,
 `<unordered_map>`, `<unordered_set>`, `<list>`, `<deque>`,
 `<forward_list>`, `<queue>`, `<stack>`, `<string_view>`, `<span>`,
-`<bitset>`, `<iostream>` and the rest of the stream headers,
-`<stdexcept>`, and the `<c*>` wrappers
+`<bitset>`, `<chrono>`, `<ratio>`, `<random>`, `<iostream>` and the rest
+of the stream headers, `<stdexcept>`, and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
@@ -91,6 +91,23 @@ the three words, it has to re-aim the pointer, and a raw `const C *`
 argument may point into the buffer that a reallocation is about to free.
 `a += a` is the case that finds it, and the test does exactly that at
 the short/long boundary.
+
+**`<chrono>` puts the unit in the type**, and the conversion rule is the
+part worth knowing: a duration converts *implicitly* only when nothing
+is lost — seconds to milliseconds yes, milliseconds to seconds no.
+Narrowing needs `duration_cast`, which *truncates* toward zero. That
+asymmetry is not fussiness; it is what stops a timeout expressed in
+milliseconds from silently becoming zero seconds.
+
+**`<random>` separates the engine from the distribution**, which is what
+makes `rand() % n` avoidable. Every distribution here *rejects* rather
+than folds: the engine's range is split into whole buckets and a draw in
+the ragged remainder is thrown away and redrawn. `% n` instead makes the
+first `range % n` values one draw more likely than the rest — invisible
+for a die and a 64-bit engine, always present, and unnecessary.
+`random_device` refuses when the OS has no entropy rather than falling
+back to a timestamp: a caller handed a predictable seed cannot tell, and
+one handed an exception can decide.
 
 **`string_view` and `span` own nothing**, which is both the point and
 the hazard: passing one costs two words instead of a copy, and outliving

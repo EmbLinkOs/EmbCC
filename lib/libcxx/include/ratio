@@ -1,0 +1,69 @@
+/* <ratio> — C++ [ratio].
+ *
+ * Compile-time rational numbers, which exist so that <chrono> can convert
+ * between units without ever multiplying at run time by a number nobody
+ * checked. The ratio is REDUCED at compile time, so seconds-to-
+ * nanoseconds is one multiply by 1000000000 and not a division too.
+ */
+#ifndef _LIBCXX_RATIO
+#define _LIBCXX_RATIO
+
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+
+namespace std {
+
+namespace __detail {
+constexpr intmax_t __gcd_c(intmax_t a, intmax_t b)
+{ return b == 0 ? (a < 0 ? -a : a) : __gcd_c(b, a % b); }
+}
+
+template <intmax_t N, intmax_t D = 1>
+struct ratio {
+    static_assert(D != 0, "a ratio cannot have a zero denominator");
+    /* Reduced and sign-normalised at compile time: ratio<2,4> and
+     * ratio<1,2> must be the SAME type, or ratio_equal would be a
+     * comparison of spellings rather than of values. */
+    static constexpr intmax_t __g = __detail::__gcd_c(N, D);
+    static constexpr intmax_t __s = D < 0 ? -1 : 1;
+    static constexpr intmax_t num = __s * N / __g;
+    static constexpr intmax_t den = __s * D / __g;
+    using type = ratio<num, den>;
+};
+
+template <class R1, class R2>
+struct ratio_multiply_impl {
+    using type = typename ratio<R1::num * R2::num, R1::den * R2::den>::type;
+};
+template <class R1, class R2>
+using ratio_multiply = typename ratio_multiply_impl<R1, R2>::type;
+
+template <class R1, class R2>
+struct ratio_divide_impl {
+    using type = typename ratio<R1::num * R2::den, R1::den * R2::num>::type;
+};
+template <class R1, class R2>
+using ratio_divide = typename ratio_divide_impl<R1, R2>::type;
+
+template <class R1, class R2>
+struct ratio_equal
+    : bool_constant<R1::num == R2::num && R1::den == R2::den> {};
+template <class R1, class R2>
+struct ratio_less
+    : bool_constant<(R1::num * R2::den) < (R2::num * R1::den)> {};
+
+using nano  = ratio<1, 1000000000>;
+using micro = ratio<1, 1000000>;
+using milli = ratio<1, 1000>;
+using centi = ratio<1, 100>;
+using deci  = ratio<1, 10>;
+using deca  = ratio<10, 1>;
+using hecto = ratio<100, 1>;
+using kilo  = ratio<1000, 1>;
+using mega  = ratio<1000000, 1>;
+using giga  = ratio<1000000000, 1>;
+
+}  // namespace std
+
+#endif
