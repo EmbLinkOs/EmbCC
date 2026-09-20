@@ -17,7 +17,7 @@ until the front ends can keep going after an error.
 | **T2** | **Error recovery.** The C front end keeps going after an error — synchronising at statement and declaration boundaries — so one run reports every independent problem instead of the first. A recovery must never produce a *wrong* later diagnostic: each is either suppressed or real. | done (C) — tests/golden/diagnostics-recovery.sh; the C++ front end is still first-error |
 | **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Fix-its for the mechanical cases: a missing `;`, a missing `&`/`*`, `.` for `->`, an unspelled `struct` tag, a misspelt name, a missing `#include` for a known declaration. | before/after files in a golden, and a fixed file compiles |
 | **T4** | **The driver GCC and Clang users already know.** Dependency generation, `-fsyntax-only`, `--help`, `-dumpmachine` — done. Still to come: `-S`, `@file`, `-###`, and warnings that mean something: `-Wall`/`-Wextra` as groups over real analyses (unused, shadowed, uninitialised, sign-compare, fallthrough, format), each with its `-Wno-` and its name printed in the diagnostic. | half — tests/golden/driver-deps.sh (gcc's own rule, and `make` reads it); warning groups pending |
-| **T5** | **`embls`, the language server.** LSP over stdio on a tolerant parse: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords, `#include` paths), hover (type, declaration, comment), go-to-definition, find references, signature help, document symbols, rename. | an LSP conversation transcript test, and it drives a real editor |
+| **T5** | **`embls`, the language server.** LSP over stdio: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords), hover, go-to-definition, document symbols. Still to come: find references, signature help, rename, `#include` completion, cross-file indexing. | done (first five) — tests/golden/embls.sh drives a whole session |
 | **T6** | **Past the bar.** `embcc --explain <id>`: what the error means, why it fired *here*, and the smallest edit that fixes it. Suggestions that use the index rather than edit distance alone (the member you meant, on the type you have; the header that declares the name). `embcc doctor`: why a link failed, in terms of symbols and the units that needed them. | worked examples, each a test |
 
 ## T1 — the engine (done)
@@ -107,3 +107,42 @@ must describe the compile that happened.
 asks for, and what a build's "does this still compile" step wants.
 `--help` lists the options in the spellings GCC and Clang use;
 `-dumpmachine` prints the target `--target` chose.
+
+## T5 — the language server (first five answers)
+
+`tools/embls/embls.c`, built by `make embls`. It speaks LSP over stdio and
+answers from the compiler itself rather than from a second parser that
+would drift from it:
+
+- **diagnostics** by running `embcc -fsyntax-only
+  -fdiagnostics-format=json` over the buffer, so what the editor shows is
+  what the build will say — notes included, under the message;
+- **completion, hover, definition, symbols** from an index built by
+  EmbCC's own preprocessor and parser over the buffer: the members offered
+  after `.` are the members of the struct the compiler sees, with their
+  types; the names offered in a body are that function's parameters and
+  locals (another function's are not), plus globals, typedefs,
+  enumerators and keywords.
+
+The parse runs in a **forked child**, which is what makes it safe to use a
+compiler front end this way: a front end ends the process where it cannot
+continue, and a server must not end. The child writes what it learned down
+a pipe; if it dies early the parent has a smaller index and the next
+keystroke tries again.
+
+A header the editor was not told how to find is not fatal either
+(`cpp_set_tolerant`, which only a tool sets — for the compiler a missing
+header is an error): the rest of the file is still worth understanding,
+and completion keeps working while the diagnostics honestly say the header
+is missing.
+
+Flags come from `compile_flags.txt` beside the file or above it (clangd's
+format, so a project set up for clangd works here), plus `EMBLS_FLAGS`.
+
+Editor setup: point the client at the `embls` binary, no arguments. For
+example, in Neovim:
+
+```lua
+vim.lsp.start({ name = "embls", cmd = { "/path/to/EmbCC/embls" },
+                root_dir = vim.fn.getcwd() })
+```

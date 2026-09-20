@@ -30,6 +30,10 @@ void cpp_set_cxx_char8(int on);             /* -fchar8_t */
 /* -DNAME[=VALUE] (undef 0) or -UNAME (undef 1), before cpp_process */
 void cpp_cmdline_define(const char *text, int undef);
 
+/* Keep going where a header cannot be found (a tool reading an editor's
+ * buffer; never the compiler). */
+void cpp_set_tolerant(int on);
+
 /* Which include directories are system ones (-isystem, the compiler's own):
  * their headers are what -MM leaves out of the dependency list. `flags` is
  * indexed as incdirs is, and must outlive the preprocessing. */

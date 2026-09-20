@@ -13,20 +13,8 @@
 /* Tags (struct/union/enum) live in their own namespace; typedef names
  * live in the ordinary one and must be known DURING parsing (the
  * classic C ambiguity), so both tables belong to the parser. */
-enum tag_kind { TAG_STRUCT, TAG_UNION, TAG_ENUM };
-
-struct tagdef {
-    const char *tag;
-    enum tag_kind kind;
-    struct type *ty;      /* struct/union node; NULL for enums */
-    struct tagdef *next;
-};
-
-struct typedefent {
-    const char *name;
-    struct type *ty;
-    struct typedefent *next;
-};
+/* (struct tagdef, struct typedefent and enum tag_kind live in ast.h: a
+ * tool that answers questions about a unit needs to walk them.) */
 
 struct parser {
     struct lexer lx;
@@ -2799,6 +2787,8 @@ struct unit *parse_unit(const char *file, const char *src)
         ps.recover = save;
     }
     g_parse_errors = ps.nerrors;
+    u->tags = ps.tags;            /* what a tool needs to answer questions */
+    u->typedefs = ps.typedefs;
     /* A translation unit of only data (a table of globals, no functions) is
      * valid C — EmbCC's own predef macro table is exactly that. An entirely
      * empty unit is legal too (a header-only .c, a fully #if'd-out file);

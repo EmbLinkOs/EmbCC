@@ -354,12 +354,33 @@ struct topasm {
     struct topasm *next;
 };
 
+enum tag_kind { TAG_STRUCT, TAG_UNION, TAG_ENUM };
+
+struct tagdef {
+    const char *tag;
+    enum tag_kind kind;
+    struct type *ty;      /* struct/union node; NULL for enums */
+    struct tagdef *next;
+};
+
+struct typedefent {
+    const char *name;
+    struct type *ty;
+    struct typedefent *next;
+};
+
 struct unit {
     const char *file;
     struct func *funcs;
     struct global *globals;
     struct econst *econsts;
     struct topasm *topasm;
+    /* What the parser knew by the end: the struct/union/enum tags and the
+     * typedefs. Semantic analysis does not need them (types are resolved
+     * in the tree), but a tool that answers "what members does this have?"
+     * does — src/tools/embls. */
+    struct tagdef *tags;
+    struct typedefent *typedefs;
 };
 
 /* Syntax errors the last parse_unit reported (parse.c). */

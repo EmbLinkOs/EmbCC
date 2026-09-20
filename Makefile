@@ -65,7 +65,7 @@ SRCS := \
 
 OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
 
-all: embcc embread embld embas
+all: embcc embread embld embas embls
 
 embcc: $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS)
@@ -93,6 +93,20 @@ embld: tools/embld/embld.c src/link/link.c src/driver/util.c \
 	    src/driver/util.c src/driver/diag.c src/embx/embx.c \
 	    tools/embdbg/embdbg.c
 
+# embls — the language server (docs/TOOLING.md T5). It links EmbCC's own
+# preprocessor and parser, so what an editor is told about a file comes from
+# the compiler that will compile it; diagnostics it gets by running embcc
+# itself. The parse runs in a forked child, because a front end ends the
+# process where it cannot continue and a server must not.
+EMBLS_SRCS = tools/embls/embls.c src/cpp/cpp.c src/lex/lex.c \
+             src/parse/parse.c src/sema/type.c src/sema/ldfloat.c \
+             src/sema/w128.c src/driver/util.c src/driver/diag.c \
+             src/arch/target.c src/arch/predef.c src/arch/x86_64/predef.c \
+             src/arch/aarch64/predef.c src/arch/x86_64/predef_cxx.c \
+             src/arch/aarch64/predef_cxx.c
+embls: $(EMBLS_SRCS)
+	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
+
 # embread — the EMBX dumper/verifier (EMBX spec §9). A separate binary,
 # not part of embcc: it reads images, it does not compile. The EMBX
 # container definition it shares with the future linker lives in
@@ -114,7 +128,7 @@ $(BUILD)/%.o: src/%.c
 # enough and cannot go stale (CONTRIBUTING lie #1).
 $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 
-test: embcc embread embld embdbg
+test: embcc embread embld embdbg embls
 	tests/run.sh
 
 # The aarch64 suite: compile for the second architecture and RUN the result
@@ -134,6 +148,6 @@ test-libstdcxx: embcc
 	    sh tests/golden/cxx-libstdcxx-embcc.sh
 
 clean:
-	rm -rf $(BUILD) embcc embread embld embdbg embas
+	rm -rf $(BUILD) embcc embread embld embdbg embas embls
 
 .PHONY: all test test-arm64 test-libstdcxx clean

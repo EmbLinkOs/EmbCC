@@ -581,6 +581,14 @@ static int g_ndeps, g_capdeps;
 static const int *g_sysdir;      /* per include directory: is it a system one */
 static int g_nsysdir;
 
+/* A tool (not the compiler) may ask to keep going where a header cannot be
+ * found: an editor's buffer often includes something the editor was not
+ * told how to find, and the rest of the file is still worth understanding.
+ * The compiler never sets this — a missing header there is an error. */
+static int g_tolerant;
+
+void cpp_set_tolerant(int on) { g_tolerant = on; }
+
 void cpp_set_system_dirs(const int *flags, int n)
 {
     g_sysdir = flags;
@@ -1158,9 +1166,12 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
         if (text)
             found_idx = i;
     }
-    if (!text)
+    if (!text) {
+        if (g_tolerant)
+            return;                  /* a tool asked to read on without it */
         cerr(s, is_next ? "cannot find a NEXT include file \"%s\""
                         : "cannot find include file \"%s\"", fname);
+    }
 
     s->cpp->depth++;
     {

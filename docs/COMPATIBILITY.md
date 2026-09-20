@@ -52,6 +52,7 @@ took target-specific work, or that a reader might doubt.
 | Error recovery: every independent syntax and semantic error in one run, not the first only | ✓ | ✓ |
 | Dependencies: `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`, `-MP` (the rule gcc writes, and `make` reads) | ✓ | ✓ |
 | `-fsyntax-only`, `--help`, `-dumpmachine` | ✓ | ✓ |
+| `embls`, the language server (LSP: diagnostics, completion, hover, definition, symbols) | ✓ | ✓ |
 | Preprocessor (full, incl. `#include_next`), newlib headers | ✓ | ✓ |
 
 ## C++
