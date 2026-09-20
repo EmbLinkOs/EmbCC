@@ -43,7 +43,7 @@
 /* An operation's mnemonic. Table-driven so the printer cannot drift from the
  * enum: a new opcode without a name here prints as `op<N>`, visibly wrong,
  * rather than silently as its neighbour. */
-static const char *opname(enum ir_op op)
+const char *ir_opname(enum ir_op op)
 {
     static const char *const n[] = {
         "const", "mov", "add", "sub", "mul", "div", "mod", "and", "or",
@@ -128,11 +128,11 @@ static void print_ins(struct outbuf *b, const struct ir_ins *i)
         break;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
-        ob_fmt(b, "%%%d = %s", i->dst, opname(i->op)); suffix(b, i, 1);
+        ob_fmt(b, "%%%d = %s", i->dst, ir_opname(i->op)); suffix(b, i, 1);
         ob_fmt(b, " %%%d, ", i->a); operand_b(b, i);
         break;
     case IR_NEG: case IR_BNOT: case IR_BSWAP:
-        ob_fmt(b, "%%%d = %s", i->dst, opname(i->op)); suffix(b, i, 1);
+        ob_fmt(b, "%%%d = %s", i->dst, ir_opname(i->op)); suffix(b, i, 1);
         ob_fmt(b, " %%%d", i->a);
         break;
     case IR_CMP:
@@ -174,7 +174,7 @@ static void print_ins(struct outbuf *b, const struct ir_ins *i)
         ob_fmt(b, " %%%d", i->a);
         break;
     case IR_I2F: case IR_F2I: case IR_F2F:
-        ob_fmt(b, "%%%d = %s", i->dst, opname(i->op)); memsuffix(b, i, 1);
+        ob_fmt(b, "%%%d = %s", i->dst, ir_opname(i->op)); memsuffix(b, i, 1);
         ob_fmt(b, " %%%d", i->a);
         break;
     case IR_CALL:
@@ -202,7 +202,7 @@ static void print_ins(struct outbuf *b, const struct ir_ins *i)
         ob_fmt(b, "jmp L%d", i->label);
         break;
     case IR_BRZ: case IR_BRNZ:
-        ob_fmt(b, "%s", opname(i->op)); suffix(b, i, 1);
+        ob_fmt(b, "%s", ir_opname(i->op)); suffix(b, i, 1);
         ob_fmt(b, " %%%d -> L%d", i->a, i->label);
         break;
     case IR_LABELADDR:
@@ -218,7 +218,7 @@ static void print_ins(struct outbuf *b, const struct ir_ins *i)
         ob_fmt(b, "memzero:%d [%%%d]", i->size, i->a);
         break;
     case IR_XCHG: case IR_XADD: case IR_CAS: case IR_CAS16: case IR_ARMW:
-        ob_fmt(b, "%%%d = %s", i->dst, opname(i->op)); memsuffix(b, i, 1);
+        ob_fmt(b, "%%%d = %s", i->dst, ir_opname(i->op)); memsuffix(b, i, 1);
         ob_fmt(b, " [%%%d], %%%d", i->a, i->b);
         if (i->op == IR_CAS || i->op == IR_CAS16)
             ob_fmt(b, ", %%%d", i->c);
@@ -256,15 +256,22 @@ static void print_ins(struct outbuf *b, const struct ir_ins *i)
                    i->asm_ir->nin, i->asm_ir->nout);
         break;
     case IR_FENCE: case IR_UD2:
-        ob_str(b, opname(i->op));
+        ob_str(b, ir_opname(i->op));
         break;
     default:
-        ob_fmt(b, "%s dst=%%%d a=%%%d b=%%%d", opname(i->op),
+        ob_fmt(b, "%s dst=%%%d a=%%%d b=%%%d", ir_opname(i->op),
                i->dst, i->a, i->b);
         break;
     }
-    if (i->line)
-        ob_fmt(b, "\t; line %d", i->line);   /* provenance, R3 */
+    /* Provenance (R3): line and, since it is now carried, the column. */
+    if (i->line) {
+        if (i->col)
+            ob_fmt(b, "\t; %d:%d", i->line, i->col);
+        else
+            ob_fmt(b, "\t; line %d", i->line);
+    } else if (i->synth) {
+        ob_str(b, "\t; compiler-synthesized");
+    }
     ob_ch(b, '\n');
 }
 

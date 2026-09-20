@@ -19,7 +19,16 @@
  * offsets back to source lines. irgen runs one function at a time, single
  * threaded, so a file-scope cursor is sound. Off (-g absent) it is simply
  * ignored — nothing reads ir_ins.line. */
+static int gen_expr_inner(struct ir_func *fn, struct expr *e);
 static int g_cur_line;
+/* The column within that line, from the expression being lowered (R3). A
+ * statement-granular location is enough for a line table; a diagnostic or a
+ * remark about one operand inside a long expression is not. */
+static int g_cur_col;
+/* Set while lowering something the compiler invented rather than something
+ * the programmer wrote: the prologue, a landing pad, a temporary's cleanup.
+ * The verifier allows these to carry no location. */
+static int g_synth;
 
 struct ir_ins *emit(struct ir_func *fn)
 {
@@ -36,6 +45,8 @@ struct ir_ins *emit(struct ir_func *fn)
     memset(i, 0, sizeof *i);
     i->op = IR_CONST;
     i->line = g_cur_line;
+    i->col = g_cur_col;
+    i->synth = g_synth;
     i->dst = i->a = i->b = -1;
     i->w = 4;
     i->size = 4;
@@ -1371,6 +1382,23 @@ static int eh_type_index(struct ir_func *fn, struct global *ti);
 
 int gen_expr(struct ir_func *fn, struct expr *e)
 {
+    /* Every instruction this expression lowers to is attributed to the
+     * expression, not to the statement containing it -- so `a[i] + b[j]`
+     * blames the right subscript. Saved and restored, because lowering
+     * recurses and the caller's position must survive it. */
+    int save_line = g_cur_line, save_col = g_cur_col;
+    if (e->line) {
+        g_cur_line = e->line;
+        g_cur_col = e->col;
+    }
+    int r = gen_expr_inner(fn, e);
+    g_cur_line = save_line;
+    g_cur_col = save_col;
+    return r;
+}
+
+static int gen_expr_inner(struct ir_func *fn, struct expr *e)
+{
     switch (e->kind) {
     case EXPR_NUM:
         return emit_const(fn, e->num, ty_w(e->ty));
@@ -2074,8 +2102,10 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop)
 {
     for (; s; s = s->next) {
-        if (s->line)
+        if (s->line) {
             g_cur_line = s->line;   /* -g: rows key off statement lines */
+            g_cur_col = s->col;
+        }
         switch (s->kind) {
         case STMT_BREAK:
             vla_release(fn, loop->brk_vla);

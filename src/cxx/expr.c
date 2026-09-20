@@ -62,6 +62,7 @@ struct cexpr *ex_new(enum cexpr_kind k, struct cty *t, int vc)
     e->t = t;
     e->vc = vc;
     e->line = cx_cur()->t.line;
+    e->col = cx_cur()->t.col;
     e->file = cx_cur()->file;
     return e;
 }
@@ -81,6 +82,7 @@ static struct cexpr *ex1(enum cexpr_kind k, struct cty *t, int vc,
     e->a[0] = a0;
     e->na = 1;
     e->line = a0->line;
+    e->col = a0->col;
     e->file = a0->file;
     return e;
 }
@@ -94,6 +96,7 @@ static struct cexpr *ex2(enum cexpr_kind k, struct cty *t, int vc,
     e->a[1] = a1;
     e->na = 2;
     e->line = a0->line;
+    e->col = a0->col;
     e->file = a0->file;
     return e;
 }
@@ -107,8 +110,12 @@ static void ex_error(const struct cexpr *e, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
+    /* Now that a cexpr carries one, the caret goes where the expression is
+     * (R3) instead of at column 0 -- which rendered as a bare line with no
+     * caret at all, for every C++ error in the compiler. */
     diag_error_at(e && e->file ? e->file : cx_cur()->file,
-                  e ? e->line : cx_cur()->t.line, 0, "%s", msg);
+                  e ? e->line : cx_cur()->t.line,
+                  e ? e->col : cx_cur()->t.col, "%s", msg);
     fatal_unwind();
 }
 
@@ -1794,6 +1801,7 @@ static struct cexpr *source_location_at(const struct ctok *at)
                              VC_PRVALUE);
     e->name = "__builtin_source_location";
     e->line = at ? at->t.line : 0;
+    e->col = at ? at->t.col : 0;
     e->file = at ? at->file : "";
     e->ival = at ? at->t.col : 0;
     const char *fn = "";
@@ -3152,6 +3160,7 @@ static struct cexpr *conditional(struct cexpr *c, struct cexpr *a,
     struct cty *at = a->t, *bt = b->t;
     struct cexpr *e = ex_new(E_COND, NULL, VC_PRVALUE);
     e->line = c->line;
+    e->col = c->col;
     e->file = c->file;
     e->a = xmalloc(3 * sizeof *e->a);
     e->a[0] = c;
@@ -3622,6 +3631,7 @@ static struct cexpr *parse_new(const struct ctok *at, int global)
     }
     struct cexpr *e = ex_new(E_NEW, ct_ptr(t), VC_PRVALUE);
     e->line = at->t.line;
+    e->col = at->t.col;
     e->file = at->file;
     e->alloc_t = t;
     e->is_array = count != NULL;
@@ -3689,6 +3699,7 @@ static struct cexpr *parse_delete(const struct ctok *at, int global)
     struct cty *t = p->t->to;
     struct cexpr *e = ex_new(E_DELETE, ct_basic(CT_VOID), VC_PRVALUE);
     e->line = at->t.line;
+    e->col = at->t.col;
     e->file = at->file;
     e->alloc_t = t;
     e->is_array = arr;
@@ -4079,6 +4090,7 @@ static struct cexpr *parse_atomic(const char *name, const struct ctok *at)
     e->a = args;
     e->na = na;
     e->line = at->t.line;
+    e->col = at->t.col;
     e->file = at->file;
     return e;
 }
@@ -4231,6 +4243,7 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_VOID), VC_PRVALUE);
         e->name = name;
         e->line = at->t.line;
+        e->col = at->t.col;
         e->file = at->file;
         return e;
     }
@@ -4244,6 +4257,7 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_INT), VC_PRVALUE);
         e->name = name;
         e->line = at->t.line;
+        e->col = at->t.col;
         e->file = at->file;
         e->a = xmalloc(sizeof *e->a);
         e->a[0] = rvalue(args[0]);
@@ -4265,6 +4279,7 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
     struct cexpr *e = ex_new(E_BUILTIN, t, VC_PRVALUE);
     e->name = name;
     e->line = at->t.line;
+    e->col = at->t.col;
     e->file = at->file;
     e->a = xmalloc((size_t)(na ? na : 1) * sizeof *e->a);
     for (int i = 0; i < na; i++) {
@@ -4375,6 +4390,7 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
         e->var = v;
         e->line = at->t.line;
+        e->col = at->t.col;
         e->file = at->file;
         v->used = 1;
         return e;
@@ -4405,6 +4421,7 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
         e->var = v;
         e->line = at->t.line;
+        e->col = at->t.col;
         e->file = at->file;
         v->used = 1;
         return e;
@@ -4438,6 +4455,7 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
         e->fn = y->fns;
         e->name = name;
         e->line = at->t.line;
+        e->col = at->t.col;
         e->file = at->file;
         /* (a block's using-declaration leaves ADL on, 6.5.4) */
         e->adl = y->scope->k == SC_NAMESPACE ||
@@ -4458,6 +4476,7 @@ static struct cexpr *name_expr(struct csym *y, const char *name,
     case CS_ENUMERATOR: {
         struct cexpr *e = ex_int(y->value, y->type);
         e->line = at->t.line;
+        e->col = at->t.col;
         e->file = at->file;
         return e;
     }
@@ -4590,6 +4609,7 @@ static struct cexpr *parse_string(void)
     e->slen = units;
     e->swidth = width;
     e->line = at->t.line;
+    e->col = at->t.col;
     e->file = at->file;
     if (suffix)
         return udl_call('s', e, NULL, suffix, at);
@@ -4938,6 +4958,7 @@ static struct cexpr *parse_primary(void)
                 e->slen = (long)len + 1;
                 e->swidth = 1;
                 e->line = at->t.line;
+                e->col = at->t.col;
                 e->file = at->file;
                 return e;
             }
@@ -5008,6 +5029,7 @@ static struct cexpr *call(struct cexpr *f, struct cexpr **args, int na,
         struct cexpr *e = call_result(ft->to);
         e->k = E_PMCALL;
         e->line = at->t.line;
+        e->col = at->t.col;
         e->file = at->file;
         e->a = xmalloc((size_t)(n + 2) * sizeof *e->a);
         e->a[0] = ex_addr(obj);
@@ -5040,6 +5062,7 @@ static struct cexpr *call(struct cexpr *f, struct cexpr **args, int na,
     struct cexpr *e = call_result(ft->to);
     e->k = E_ICALL;
     e->line = at->t.line;
+    e->col = at->t.col;
     e->file = at->file;
     e->a = xmalloc((size_t)(n + 1) * sizeof *e->a);
     e->a[0] = p;

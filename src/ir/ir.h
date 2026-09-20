@@ -119,9 +119,15 @@ struct ir_asm {
 
 struct ir_ins {
     enum ir_op op;
-    int line;                /* source line this instruction lowers from, 0
-                              * if none — stamped by irgen, read only by the
-                              * -g line-table pass in codegen */
+    /* Where this instruction came from (R3). `line` is the statement or
+     * expression it lowers from; `col` is the column within it, 0 when
+     * unknown. `synth` marks an instruction the compiler invented that
+     * corresponds to no source construct at all -- a prologue store, a
+     * landing pad's entry -- which is the exception §9.1 allows to the
+     * verifier's "every instruction has a location" rule. */
+    int line;
+    int col;
+    int synth;
     int dst, a, b;
     int c;                   /* IR_CMPXCHG: the third operand (desired value) */
     int w;                   /* 4 or 8: operation width class */
@@ -280,6 +286,8 @@ struct ir_unit *irgen(struct unit *u);
 struct outbuf;
 void ir_print_unit(struct outbuf *b, const struct ir_unit *u);
 void ir_print_func(struct outbuf *b, const struct ir_func *f);
+/* An opcode's mnemonic, so a diagnostic can name the instruction. */
+const char *ir_opname(enum ir_op op);
 
 /* codegen: record a call's code (offsets in the function's code) in a
  * function with exception regions. */

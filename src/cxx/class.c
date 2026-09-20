@@ -1151,6 +1151,7 @@ static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
                  ? "move" : "a", c->name ? c->name : "class");
     struct cexpr *e = ex_new(E_CONSTRUCT, ct_class(c), VC_PRVALUE);
     e->line = at->t.line;
+    e->col = at->t.col;
     e->file = at->file;
     if (runs_no_code(f)) {
         /* a trivial default constructor does nothing; a trivial copy or

@@ -131,7 +131,7 @@ wish list. Every claim here has a test named for it.
 |---|---|
 | **R1** don't duplicate compiler knowledge | **Held.** `embls`, the language server, does not re-implement anything: it forks a child that runs EmbCC's own preprocessor and parser (C, or the C++ front end by suffix) and indexes what they built. Its diagnostics are `embcc -fsyntax-only -fdiagnostics-format=json`. There is one parser. |
 | **R2** record decisions where they are made | **Largely held (v0.3).** `src/driver/remark.c` is the API; `inline`, `mem2reg`, `sccp`, the optimizer's per-function summary and the x86-64 register allocator are producers. `-fremarks[=json]` prints them; `embcc why <decision> [subject]` queries them (§19). Still silent: local and global CSE, DCE, copy propagation, load elimination and store forwarding — they run inside a fixpoint where `changed` doubles as loop control, so counting them means restructuring the loop, and the per-function `opt` summary covers their aggregate effect until then. |
-| **R3** preserve provenance | **Partly.** Every AST node carries line and column; every IR instruction carries a line; DWARF line, frame and local info is emitted and read back by EmbDBG. But IR instructions carry no *column*, `struct cexpr` (C++) carries a line and no column at all, and nothing verifies that a pass preserved a location. The verifier does not yet reject an instruction without one. |
+| **R3** preserve provenance | **Held for the C and C++ front ends and EmbIR (v0.3).** Every AST node, every `cexpr` and every IR instruction carries line *and* column; `struct ir_dbgvar` carries the declaration's position, so a diagnostic about a variable points at the variable. **The verifier enforces it** (§9.1): an instruction with no location and no `synth` mark fails the compile under `EMBCC_VERIFY`, which the whole suite sets. Turning it on found five passes silently dropping locations — see §4.3. What is still not covered: the machine instruction and the emitted byte (§14's chain ends at EmbIR), and `-g` variable location lists under optimization. |
 | **R4** deterministic output | **Held, and it is the strongest test in the project.** The self-host fixed point is byte-identical objects across host and OS, sixteen sources, checked every release. |
 | **R5** don't couple the compiler to EmbLinkOS | **Held.** Nothing in `src/` includes an EmbLinkOS header. |
 | **R6** stages are libraries with contracts | **Held structurally** — `embld`, `embas`, `embdbg`, `embls` and `embcc` are thin drivers over the same libraries, which is why the language server can exist at all. **Not held for dump formats**: there is no `embcc inspect`, and no stage has a textual round-trip form (§4.3). |
@@ -160,6 +160,30 @@ scheduled, because the OS needed them:
   including a dataflow `-Wuninitialized`, a language server, and
   `embld --doctor` for why a link failed. This is §13 and much of §24,
   arrived at from the bottom up rather than from this document.
+
+### What the provenance verifier found
+
+Turning on §9.1's rule — *"the verifier rejects instructions without a
+location, except where explicitly marked compiler-synthesized"* — was not a
+formality. **Five places were silently dropping provenance**, and nothing
+downstream had ever complained, because a line table with a hole still
+links and a debugger just steps into nowhere:
+
+| where | what it built without a location |
+|---|---|
+| the inliner | every parameter store, the result copy, and the exit jump |
+| out-of-SSA | the phi copies on each edge |
+| out-of-SSA | the trampoline blocks' labels and jumps |
+| mem2reg | the entry seed for a variable read before it is written |
+| SCCP | the jump replacing a branch whose condition folded |
+
+Four were fixed by attributing them to the construct they came from — the
+call site, the edge's terminator, the folded branch. Two are genuinely
+compiler-synthesized (the SSA seed stands for a value the program never
+produced; a trampoline exists only because SSA had to be undone) and are now
+**marked** rather than left absent, which is the distinction the rule exists
+to make: the verifier can tell a deliberate exception from a pass that
+forgot.
 
 ## 4.3 What has not been built
 

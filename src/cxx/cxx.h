@@ -956,7 +956,11 @@ struct cexpr {
     struct cfunc *dtor;       /* E_DELETE: the destructor to run first */
     int coro;                 /* E_COAWAIT: 1 initial, 2 final suspend */
     struct cscope *dscope;    /* E_DEFARG */
+    /* Where it was written (R3). `col` is 1-based; a diagnostic about one
+     * operand of a long expression needs it, and a rename in the language
+     * server cannot work without it. */
     int line;
+    int col;
     const char *file;
 };
 

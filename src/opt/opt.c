@@ -792,6 +792,16 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
     int pi = -1;
     for (int k = 0; k < S->npred; k++) if (S->pred[k] == p) { pi = k; break; }
     if (pi < 0) return;
+    /* A phi copy runs on the EDGE from p, so it belongs to whatever ends p
+     * -- the branch or the fall-through's last instruction (R3). Going out
+     * of SSA is the compiler's own bookkeeping, but the copy still executes
+     * at a place the programmer wrote, and a line table with a hole here is
+     * a debugger stepping into nowhere. */
+    int eline = 0, ecol = 0;
+    if (bb[p].end > bb[p].start) {
+        eline = fn->ins[bb[p].end - 1].line;
+        ecol = fn->ins[bb[p].end - 1].col;
+    }
     /* A conflict — an incoming value that is another phi result of this block
      * (a swap, a self-referential loop phi) — needs read-all-then-write-all
      * through temps. The common case has none: emit direct copies, no temps. */
@@ -803,6 +813,7 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         for (int k = 0; k < S->nphi; k++) {
             struct ir_ins *mv = ib_push(nb);
             mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = S->phi_inc[pi][k];
+            mv->line = eline; mv->col = ecol; mv->synth = !eline;
         }
         return;
     }
@@ -811,10 +822,12 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         tmp[k] = fn->nvregs++;
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = tmp[k]; mv->a = S->phi_inc[pi][k];
+        mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     for (int k = 0; k < S->nphi; k++) {
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = tmp[k];
+        mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     free(tmp);
 }
@@ -1033,6 +1046,11 @@ static int pass_mem2reg(struct ir_func *fn)
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_CONST; c->dst = undef[p]; c->imm = 0;
         c->w = ty_size(fn->src->var_tys[ploc[p]]) == 8 ? 8 : 4;
+        /* The seed for a variable read before it is written: it stands for
+         * a value the program never produced, so it corresponds to no
+         * source construct at all. The §9.1 exception, marked so the
+         * verifier can tell it from a location a pass forgot to copy. */
+        c->synth = 1;
     }
     struct { int lbl, from, edge_pred; } *tramp = NULL; int ntramp = 0, ctramp = 0;
     for (int b = 0; b < nbb; b++) {
@@ -1080,17 +1098,25 @@ static int pass_mem2reg(struct ir_func *fn)
         if (lt != IR_JMP && lt != IR_RET && lt != IR_UD2) {
             struct ir_ins *r = ib_push(&nb);
             r->op = IR_RET; r->a = -1;
+            /* A cap so the trampolines below cannot be fallen into: it
+             * stands for no `return` the programmer wrote (R3, §9.1). */
+            r->synth = 1;
         }
     }
+    /* A trampoline block exists because SSA had to be undone on one edge.
+     * Its label and its jump are the compiler's own; the copies between
+     * them take the edge's location in emit_edge_copies. */
     for (int t = 0; t < ntramp; t++) {   /* trampoline blocks: label; copies; jmp */
         struct ir_ins *lb = ib_push(&nb);
         lb->op = IR_LABEL; lb->label = tramp[t].lbl;
+        lb->synth = 1;
         emit_edge_copies(&nb, bb, tramp[t].edge_pred, tramp[t].from, fn);
         struct ir_ins *jp = ib_push(&nb);
         int origlbl = -1;
         for (int i = bb[tramp[t].edge_pred].start; i < bb[tramp[t].edge_pred].end; i++)
             if (fn->ins[i].op == IR_LABEL) { origlbl = fn->ins[i].label; break; }
         jp->op = IR_JMP; jp->label = origlbl;
+        jp->synth = 1;
     }
     free(tramp);
 
@@ -1468,6 +1494,12 @@ static int pass_sccp(struct ir_func *fn)
                 struct ir_ins *j = ib_push(&nb);
                 j->op = IR_JMP; j->dst = -1; j->a = -1; j->b = -1;
                 j->label = fn->ins[bb[ls].start].label;
+                /* It replaces the branch that ended this block, so it is
+                 * that branch's `if` as far as the programmer is concerned
+                 * (R3) -- not a jump from nowhere. */
+                j->line = fn->ins[bb[b].end - 1].line;
+                j->col = fn->ins[bb[b].end - 1].col;
+                j->synth = fn->ins[bb[b].end - 1].synth;
             }
         } else {
             for (int n = bb[b].start; n < bb[b].end; n++)
@@ -1734,6 +1766,11 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     /* 2. Build param stores + the remapped body + one exit label. */
     struct ir_ins *buf = xmalloc((size_t)(nparams + 2 * cf->nins + 1) * sizeof *buf);
     int m = 0;
+    /* Every instruction the inliner INVENTS still has a source location:
+     * the call it replaces (R3). A pass that builds an instruction from
+     * scratch and leaves line 0 puts a hole in the line table, and nothing
+     * downstream notices -- which is exactly what the verifier's location
+     * check now catches, and what it caught here. */
     for (int k = 0; k < nparams; k++) {
         struct ir_ins *s = &buf[m++];
         memset(s, 0, sizeof *s);
@@ -1741,6 +1778,8 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
         s->dst = V + k;                  /* callee param -> caller local */
         s->a = call.argv[k].vreg;
         s->size = ty_size(cf->src->var_tys[k]);
+        s->line = call.line;             /* the argument was written there */
+        s->col = call.col;
     }
     struct rmp cm = { 1, V, N, v, L };
     for (int i = 0; i < cf->nins; i++) {
@@ -1751,11 +1790,15 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
                 struct ir_ins *mv = &buf[m++];
                 memset(mv, 0, sizeof *mv);
                 mv->op = IR_MOV; mv->dst = dst; mv->a = in.a;
+                mv->line = in.line;      /* the callee's `return` */
+                mv->col = in.col;
             }
             if (i != cf->nins - 1) {     /* the last RET falls into `after` */
                 struct ir_ins *jp = &buf[m++];
                 memset(jp, 0, sizeof *jp);
                 jp->op = IR_JMP; jp->label = after;
+                jp->line = in.line;
+                jp->col = in.col;
             }
         } else {
             buf[m++] = in;
@@ -1764,6 +1807,10 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     struct ir_ins *lb = &buf[m++];
     memset(lb, 0, sizeof *lb);
     lb->op = IR_LABEL; lb->label = after;
+    /* The join label belongs to no source construct: it exists only because
+     * the body was spliced in. This is the §9.1 exception, marked rather
+     * than left as an absent location the verifier cannot tell from a bug. */
+    lb->synth = 1;
 
     /* 3. Splice buf over the call. */
     int newn = fn->nins - 1 + m;
@@ -1901,6 +1948,28 @@ static void verify_func(struct ir_func *fn, const char *tag)
                     "(after %s) — a pass renumbered instructions without remapping "
                     "var_scope", fn->src->name, i, lo, hi, fn->nins, tag);
         }
+
+    /* R3 / §9.1: "Every instruction carries a debug location. The verifier
+     * rejects instructions without one, except where explicitly marked
+     * compiler-synthesized."
+     *
+     * This is what stops provenance rotting quietly. A pass that builds a
+     * replacement instruction from scratch, instead of copying the one it
+     * replaces, drops the location -- and nothing downstream complains,
+     * because a line table with a hole still links. The verifier is the only
+     * place that can notice, and it runs after every optimizing compile
+     * under EMBCC_VERIFY (which the whole test suite sets).
+     */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->line || i->synth)
+            continue;
+        diag_fatal(fn->src->file, 0,
+            "internal: %s instruction %d (%s) has no source location after %s "
+            "— a pass built it without copying the location of what it "
+            "replaced; if it corresponds to no source construct, mark it "
+            "synth", fn->src->name, n, ir_opname(i->op), tag);
+    }
     free_defs(&d);
 }
 

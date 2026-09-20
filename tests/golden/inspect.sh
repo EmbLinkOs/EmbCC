@@ -37,8 +37,9 @@ grep -q "^func @sum {" "$out/O0.txt" || { echo "FAIL: sum missing"; exit 1; }
 # Widths read left to right: result, then memory, then flags.
 grep -qE "ldvar\.[48]:[1248]s? v[0-9]+" "$out/O0.txt" ||
     { echo "FAIL: ldvar suffix"; exit 1; }
-# Every instruction that came from source carries its line (R3, provenance).
-grep -q "; line 2" "$out/O0.txt" || { echo "FAIL: no line provenance"; exit 1; }
+# Every instruction that came from source carries its line AND column
+# (R3) -- `; 2:30`, since provenance.sh made the column real.
+grep -qE "; 2:[0-9]+" "$out/O0.txt" || { echo "FAIL: no line:col provenance"; exit 1; }
 echo "the form: a header, a func per function, widths as .result:memory+flags,
 and a source line on every instruction that has one"
 
@@ -58,13 +59,14 @@ echo "mem2reg is visible: ldvar $o0 -> $o2"
 # inside sum() carrying add()'s line. That is R3 surviving a transformation,
 # which is exactly what a line table needs and what no other test checks.
 awk '/^func @sum/,/^}/' "$out/O2.txt" > "$out/sum2.txt"
-grep -q "; line 2" "$out/sum2.txt" ||
+grep -qE "; 2:[0-9]+" "$out/sum2.txt" ||
     { cat "$out/sum2.txt"; echo "FAIL: add() was not inlined into sum(), or"
       echo "      the inliner dropped the callee's source line"; exit 1; }
 grep -q "call @add" "$out/sum2.txt" &&
     echo "note: the call survives too (partial inlining)"
 echo "inlining is visible: sum() holds an instruction from add()'s line 2,
-so provenance survived the transformation"
+so provenance survived the transformation -- including the parameter stores
+the inliner invents, which the verifier now insists carry the call's place"
 
 # The immediate-fold pass turns `i + 1` into an operand.
 grep -qE "add\.[48]s? %[0-9]+, #1" "$out/O2.txt" ||
