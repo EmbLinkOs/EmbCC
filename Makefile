@@ -16,6 +16,7 @@ BUILD   := build
 # architecture — everything x86-64-only under x86_64/, aarch64-only under
 # aarch64/ (src/arch/README.md; docs/COMPATIBILITY.md for what each supports).
 SRCS := \
+	src/platform/platform_posix.c \
 	src/driver/main.c \
 	src/driver/util.c \
 	src/driver/diag.c \
@@ -44,6 +45,7 @@ SRCS := \
 	src/sema/w128.c \
 	src/sema/uninit.c \
 	src/ir/irgen.c \
+	src/ir/irprint.c \
 	src/opt/opt.c \
 	src/debug/dwarf.c \
 	src/debug/eh.c \
@@ -76,9 +78,11 @@ embcc: $(OBJS)
 # the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)
 # the compiler uses produces, so the toolchain owns the whole build (drops nasm).
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
-       src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c
+       src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
+       src/platform/platform_posix.c src/platform/platform.h
 	$(CC) $(CFLAGS) -o $@ tools/embas/embas.c src/arch/x86_64/as.c \
-	    src/elf/write.c src/driver/util.c src/driver/diag.c
+	    src/elf/write.c src/driver/util.c src/driver/diag.c \
+	    src/platform/platform_posix.c
 
 # embld — the integrated linker (ARCHITECTURE §6, WORKPLAN stream B), as
 # a standalone tool for host development. The link library also gets
@@ -89,18 +93,19 @@ embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
 embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
        src/link/link.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
-       tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
+       tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
+       src/platform/platform_posix.c src/platform/platform.h
 	$(CC) $(CFLAGS) -DEMBDBG_NO_MAIN -Wno-unused-function -o $@ \
 	    tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
-	    src/embx/embx.c tools/embdbg/embdbg.c
+	    src/embx/embx.c tools/embdbg/embdbg.c src/platform/platform_posix.c
 
 # embls — the language server (docs/TOOLING.md T5). It links EmbCC's own
 # preprocessor and parser, so what an editor is told about a file comes from
 # the compiler that will compile it; diagnostics it gets by running embcc
 # itself. The parse runs in a forked child, because a front end ends the
 # process where it cannot continue and a server must not.
-EMBLS_SRCS = tools/embls/embls.c src/cpp/cpp.c src/lex/lex.c \
+EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src/lex/lex.c \
              src/parse/parse.c src/sema/type.c src/sema/ldfloat.c \
              src/sema/w128.c src/sema/uninit.c \
              src/driver/util.c src/driver/diag.c \
@@ -109,6 +114,7 @@ EMBLS_SRCS = tools/embls/embls.c src/cpp/cpp.c src/lex/lex.c \
              src/arch/aarch64/predef.c src/arch/x86_64/predef_cxx.c \
              src/arch/aarch64/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
+             src/ir/irprint.c \
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
              src/arch/code.c src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \

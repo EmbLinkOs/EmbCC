@@ -12,6 +12,7 @@
  * org-relative absolute addresses. Byte-identical to nasm on the kernel corpus.
  */
 #include "as.h"
+#include "../../platform/platform.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -461,16 +462,17 @@ static void process_line(struct as *a, int ln, char *line){
         if (!q||!q2){ aerr(a,ln,"incbin needs a quoted path",NULL); return; }
         char path[256]; int pl=(int)(q2-q-1); if(pl>255)pl=255;
         memcpy(path,q+1,(size_t)pl); path[pl]=0;
-        FILE *bf=fopen(path,"rb");
-        if (!bf && a->incbin_dir){ char full[512];
-            snprintf(full,sizeof full,"%s/%s",a->incbin_dir,path); bf=fopen(full,"rb"); }
-        if (!bf){ aerr(a,ln,"cannot open incbin file",path); return; }
-        unsigned char buf[32]; size_t r;
-        while ((r=fread(buf,1,sizeof buf,bf))>0){
+        long blen=0; char *bdata=plat_read_file(path,&blen);
+        if (!bdata && a->incbin_dir){ char full[512];
+            snprintf(full,sizeof full,"%s/%s",a->incbin_dir,path);
+            bdata=plat_read_file(full,&blen); }
+        if (!bdata){ aerr(a,ln,"cannot open incbin file",path); return; }
+        for (long off=0; off<blen; ){
+            long r = blen-off; if (r>32) r=32;
             struct item *it=new_item(a); it->kind=IT_BYTES; it->n=(int)r;
-            memcpy(it->b,buf,r);
+            memcpy(it->b,bdata+off,(size_t)r); off+=r;
         }
-        fclose(bf); return;
+        free(bdata); return;
     }
 
     /* an instruction: parse up to 2 comma-separated operands */
@@ -545,7 +547,7 @@ static void pp_line(struct pp *p, const char *t, int depth)
     if (depth > 32) {
         fprintf(stderr, "embas: macro '%s' nests more than 32 deep "
                         "(does it invoke itself?)\n", first);
-        exit(1);
+        fatal_unwind();
     }
     char *args[9] = { 0 }; int na = 0;
     char *acopy = xstrdup(t + fi), *asave = acopy, *at;
@@ -745,10 +747,9 @@ static int write_elf(struct as *a, const char *out){
 }
 
 int as_assemble(const char *in_path, const char *out_path, enum as_format fmt){
-    FILE *f=fopen(in_path,"rb");
-    if (!f){ fprintf(stderr,"embas: cannot open %s\n",in_path); return 1; }
-    fseek(f,0,SEEK_END); long len=ftell(f); fseek(f,0,SEEK_SET);
-    char *text=xmalloc((size_t)len+1); if(fread(text,1,(size_t)len,f)!=(size_t)len){fclose(f);return 1;} text[len]=0; fclose(f);
+    /* a .asm the user named: a source, so the provider may hold it */
+    char *text=src_read(in_path,NULL);
+    if (!text){ fprintf(stderr,"embas: cannot open %s\n",in_path); return 1; }
 
     struct as a; memset(&a,0,sizeof a); a.file=in_path; a.cur=SEC_TEXT; a.bits=64;
     int nl; char **lines=preprocess(&a,text,&nl);

@@ -24,16 +24,28 @@ source ──► lex ──► parse ──► sema ──► IR ──► codeg
                                                      └── all in-process ──┘
 ```
 
+**One process has a second consequence, and it took a refactor to honour it:
+a stage must not end the process.** If the phases cannot be isolated behind
+`fork`, then a backend that calls `exit()` from four frames down takes its
+host with it — and the host is not always `embcc`. It is also `embls`, which
+must keep serving, and one day an in-process build server. So the stages are
+libraries that *report and unwind*: `internal_error()` for an impossible
+state, `fatal_unwind()` where a diagnostic is already recorded, and a
+`setjmp` boundary that the driver installs and only the driver acts on
+(`src/driver/util.h`, vision R6). The single documented exception is
+out-of-memory, where building a diagnostic would itself allocate.
+
 ## 2. Phases
 
 | Phase | Responsibility | Notes |
 |---|---|---|
+| **platform** | every host interaction: read a file, write a file, ask the environment | [`src/platform/`](../src/platform/README.md). The bottom layer — nothing above it knows what a `FILE*` is. **No process API, ever**: §1 is why |
 | **driver** | argv, flags, deciding compile-vs-link, file discovery | Keep flags a *deliberate subset*; do not clone gcc's surface |
 | **lex** | tokens, including the preprocessor's needs | |
 | **cpp** | `#include`, `#define`, conditionals | Needed early — the OS's headers are real newlib headers (see §5) |
 | **parse** | C → AST | The subset grew by need, not by standard-completeness; `todo.md` tracks what is left |
 | **sema** | types, declarations, conversions, diagnostics | Where most "real compiler" work lives |
-| **IR** | a small typed intermediate form | See §3 |
+| **IR** | a small typed intermediate form | See §3; `embcc inspect ir` prints it ([`src/ir/irprint.c`](../src/ir/irprint.c)) |
 | **codegen** | IR → x86-64, System V AMD64 | See §4 |
 | **asm** | encode instructions to bytes | Integrated; no external assembler exists on-OS |
 | **as** | standalone NASM/Intel `.asm` → ELF object | `embas` / `embcc -c foo.asm`; byte-identical to nasm on the kernel corpus (A1) |

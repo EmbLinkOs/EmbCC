@@ -10,6 +10,16 @@
 #ifndef EMBCC_DRIVER_UTIL_H
 #define EMBCC_DRIVER_UTIL_H
 
+/* The calls below that never come back say so, so that a caller's control
+ * flow analysis -- ours and the host compiler's -- knows a switch arm that
+ * ends in one needs no return. EmbCC understands the attribute too, which
+ * matters when it compiles itself. */
+#if defined(__GNUC__) || defined(__clang__) || defined(__EMBCC__)
+#define EMBCC_NORETURN __attribute__((noreturn))
+#else
+#define EMBCC_NORETURN
+#endif
+
 #include <stddef.h>
 
 void *xmalloc(size_t n);
@@ -27,10 +37,10 @@ void diag_register_expansion(const char *file, int line, const char *macro);
 
 /* "embcc: FILE:LINE: error: ..." then the source line and a caret, then
  * exit(1). line 0 omits the line; a registered source adds the line + caret. */
-void diag_fatal(const char *file, int line, const char *fmt, ...);
+EMBCC_NORETURN void diag_fatal(const char *file, int line, const char *fmt, ...);
 
 /* As diag_fatal, but with a column for the caret. */
-void diag_at(const char *file, int line, int col, const char *fmt, ...);
+EMBCC_NORETURN void diag_at(const char *file, int line, int col, const char *fmt, ...);
 
 /* An "error:" that does NOT exit — the primary of an error+note pair. Follow it
  * with diag_note_at(s) and then exit(1) yourself. */
@@ -111,5 +121,55 @@ void diag_flush(void);                 /* render everything held (atexit) */
 /* The closing "compilation terminated: N errors" (text only: in JSON the
  * array is the whole output). */
 void diag_terminated(int nerrors);
+
+/* ---- the fatal boundary (R6: stages are libraries) ----
+ *
+ * A library must not end the process. `embcc` may; a language server holding
+ * the same libraries in-process may not, and neither may a future in-process
+ * build server -- on EmbLinkOS there is no fork/exec to isolate them behind
+ * (ARCHITECTURE §1), so a backend that calls exit() takes the whole host with
+ * it.
+ *
+ * So the driver installs a boundary and the libraries unwind to it:
+ *
+ *     jmp_buf boundary;
+ *     if (setjmp(boundary) == 0) {
+ *         fatal_set_boundary(&boundary);
+ *         ... compile ...
+ *     } else {
+ *         ... the unit failed; the diagnostic is already recorded ...
+ *     }
+ *     fatal_set_boundary(NULL);
+ *
+ * With no boundary installed, fatal_error exits as before, so a tool that
+ * has not adopted the pattern still behaves correctly.
+ *
+ * `internal_error` is for an impossible state -- a compiler bug, not the
+ * user's mistake. It says so, because a reader who is told "internal error"
+ * knows to report it rather than to edit their program.
+ */
+void fatal_set_boundary(void *jmp_buf_ptr);
+EMBCC_NORETURN void internal_error(const char *fmt, ...);
+
+/* The diagnostic is already recorded and this unit cannot continue: leave
+ * for the boundary. This is what the front ends' "no recovery point" paths
+ * call instead of exit(1). */
+EMBCC_NORETURN void fatal_unwind(void);
+
+/* ---- a growable text buffer ----
+ *
+ * So a stage can BUILD its output and hand it over as bytes, instead of
+ * streaming to a FILE* it opened itself. That is what lets writing go
+ * through the platform layer (§16), and what lets the same dump be sent to
+ * a file, to stdout, or to a caller in memory without three code paths.
+ */
+struct outbuf { char *p; size_t n, cap; };
+
+void ob_add(struct outbuf *b, const char *s, size_t n);
+void ob_str(struct outbuf *b, const char *s);
+void ob_ch(struct outbuf *b, char c);
+/* Returns the number of characters appended, so callers can track a column. */
+int ob_fmt(struct outbuf *b, const char *fmt, ...);
+void ob_free(struct outbuf *b);
 
 #endif

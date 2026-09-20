@@ -1099,8 +1099,7 @@ static int cc_for(enum binop pred, int sign)
     case B_GT: return sign ? 0x9f : 0x97; /* setg / seta */
     case B_GE: return sign ? 0x9d : 0x93; /* setge / setae */
     default:
-        fprintf(stderr, "embcc: internal: bad cmp predicate %d\n", pred);
-        exit(1);
+        internal_error("bad cmp predicate %d", pred);
     }
 }
 
@@ -3079,9 +3078,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
     for (int n = 0; n < nbrs; n++) {
         int target = label_off[brs[n].label];
         if (target < 0) {
-            fprintf(stderr, "embcc: internal: label %d in '%s' was never "
-                            "placed\n", brs[n].label, f->name);
-            exit(1);
+            internal_error("label %d in '%s' was never placed",
+                           brs[n].label, f->name);
         }
         int from = brs[n].patch_off + 4;
         code_patch32(text, brs[n].patch_off,

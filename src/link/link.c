@@ -11,6 +11,7 @@
  * hash lands when a measured corpus makes it slow, not before.
  */
 #include "link.h"
+#include "../platform/platform.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -141,7 +142,7 @@ static void die(const char *fmt, ...)
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
-    exit(1);
+    fatal_unwind();
 }
 
 /* ---- symbol table (linear; §3 correct-and-slow) ---- */
@@ -867,12 +868,8 @@ static void write_exec(struct linker *l, const char *out,
         memcpy(img + base + (s->vaddr - segva), s->data, (size_t)s->size);
     }
 
-    FILE *f = fopen(out, "wb");
-    if (!f)
-        die("cannot open '%s' for writing", out);
-    if (fwrite(img, 1, (size_t)total, f) != (size_t)total)
-        die("write error on '%s'", out);
-    fclose(f);
+    if (plat_write_file(out, img, (size_t)total) != 0)
+        die("cannot write '%s'", out);
     free(img);
 }
 
@@ -969,11 +966,8 @@ static void emit_embx(struct linker *l, const char *out, unsigned long long caps
     embdbg_sha256(img, (long)image_size, h->build_id);
     h->header_checksum = embx_crc32c(img, EMBX_HDR_BODY_SIZE);
 
-    FILE *f = fopen(out, "wb");
-    if (!f) die("cannot open '%s' for writing", out);
-    if (fwrite(img, 1, (size_t)image_size, f) != (size_t)image_size)
-        die("write error on '%s'", out);
-    fclose(f);
+    if (plat_write_file(out, img, (size_t)image_size) != 0)
+        die("cannot write '%s'", out);
     free(img);
     fprintf(stderr, "embld: wrote %s (EMBX, %d capabilit%s)\n",
             out, ncaps, ncaps == 1 ? "y" : "ies");
@@ -1034,16 +1028,10 @@ static void emit_embdbg(struct linker *l, const char *out)
 
 static unsigned char *read_file(const char *path, long *len)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        die("cannot open '%s'", path);
-    fseek(f, 0, SEEK_END);
-    *len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    unsigned char *buf = xmalloc((size_t)*len);
-    if (fread(buf, 1, (size_t)*len, f) != (size_t)*len)
-        die("read error on '%s'", path);
-    fclose(f);
+    /* an object or an archive: an ordinary file, not a source */
+    unsigned char *buf = (unsigned char *)plat_read_file(path, len);
+    if (!buf)
+        die("cannot read '%s'", path);
     return buf;
 }
 

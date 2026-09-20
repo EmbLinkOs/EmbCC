@@ -11,8 +11,10 @@
  * flush runs from atexit. What they print is what they always printed.
  */
 #include "util.h"
+#include "../platform/platform.h"
 
 #include <ctype.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -551,15 +553,10 @@ int diag_apply_fixits(void)
             lastline = here[k].line;
             did++;
         }
-        if (did) {
-            FILE *f = fopen(fx[i].file, "w");
-            if (f) {
-                fwrite(buf.p, 1, buf.n, f);
-                fclose(f);
-                fprintf(stderr, "embcc: %s: applied %d fix%s\n", fx[i].file,
-                        did, did == 1 ? "" : "es");
-                applied += did;
-            }
+        if (did && plat_write_file(fx[i].file, buf.p, buf.n) == 0) {
+            fprintf(stderr, "embcc: %s: applied %d fix%s\n", fx[i].file,
+                    did, did == 1 ? "" : "es");
+            applied += did;
         }
         free(buf.p);
         /* the rest of this file's fix-its are done (the name is kept: the
@@ -743,6 +740,23 @@ void diag_fixit_at(const char *file, int line, int col, int end_col,
     x->text = xstrndup(text, strlen(text));
 }
 
+/* Where a library unwinds to instead of ending the process (util.h). */
+static jmp_buf *g_fatal_boundary;
+
+void fatal_set_boundary(void *jmp_buf_ptr)
+{
+    g_fatal_boundary = (jmp_buf *)jmp_buf_ptr;
+}
+
+/* Leave for the boundary if there is one; otherwise this really is the end. */
+EMBCC_NORETURN static void leave(void)
+{
+    diag_flush();
+    if (g_fatal_boundary)
+        longjmp(*g_fatal_boundary, 1);
+    exit(1);
+}
+
 /* -fmax-errors=N: stop once N errors are out, as GCC does. */
 static void check_max_errors(void)
 {
@@ -750,18 +764,18 @@ static void check_max_errors(void)
         diag_flush();
         fprintf(stderr, "embcc: compilation terminated due to -fmax-errors=%d\n",
                 g_max_errors);
-        exit(1);
+        leave();
     }
 }
 
-void diag_at(const char *file, int line, int col, const char *fmt, ...)
+EMBCC_NORETURN void diag_at(const char *file, int line, int col, const char *fmt, ...)
 {
     install_flush();
     va_list ap;
     va_start(ap, fmt);
     new_diag(DIAG_ERROR, file, line, col, vfmt(fmt, ap));
     va_end(ap);
-    exit(1);
+    leave();
 }
 
 void diag_error_at(const char *file, int line, int col, const char *fmt, ...)
@@ -830,12 +844,36 @@ void diag_warn_opt(const char *file, int line, int col, const char *name,
         check_max_errors();
 }
 
-void diag_fatal(const char *file, int line, const char *fmt, ...)
+EMBCC_NORETURN void fatal_unwind(void)
+{
+    leave();
+}
+
+EMBCC_NORETURN void internal_error(const char *fmt, ...)
+{
+    install_flush();
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    char *what = vfmt(fmt, ap);
+    va_end(ap);
+    snprintf(buf, sizeof buf, "internal error: %s", what);
+    free(what);
+    /* No location: an internal error is about the compiler's state, not
+     * about a place in the user's file. Naming a line would send the reader
+     * to one that is very likely innocent. */
+    new_diag(DIAG_ERROR, NULL, 0, 0, xstrndup(buf, strlen(buf)));
+    diag_note_at(NULL, 0, 0,
+                 "this is a bug in EmbCC, not in the program being compiled");
+    leave();
+}
+
+EMBCC_NORETURN void diag_fatal(const char *file, int line, const char *fmt, ...)
 {
     install_flush();
     va_list ap;
     va_start(ap, fmt);
     new_diag(DIAG_ERROR, file, line, 0, vfmt(fmt, ap));
     va_end(ap);
-    exit(1);
+    leave();
 }

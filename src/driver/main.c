@@ -24,7 +24,10 @@
 #include "../parse/parse.h"
 #include "../sema/sema.h"
 #include "../arch/target.h"
+#include <setjmp.h>
+
 #include "util.h"
+#include "../platform/platform.h"
 
 #define EMBCC_VERSION "1.0.0-m2.complete"
 
@@ -130,17 +133,9 @@ static int emit_empty_object(const char *path)
 
 static char *read_file(const char *path)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    char *buf = src_read(path, NULL);   /* a source: the provider may own it */
+    if (!buf)
         diag_fatal(path, 0, "cannot open file");
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = xmalloc((size_t)n + 1);
-    if (fread(buf, 1, (size_t)n, f) != (size_t)n)
-        diag_fatal(path, 0, "read error");
-    buf[n] = 0;
-    fclose(f);
     return buf;
 }
 
@@ -209,6 +204,9 @@ static int want_fix;
  * (docs/TOOLING.md T5) and what a build's "does this still compile" step
  * wants. */
 static int syntax_only;
+/* Tool mode (§17): `embcc inspect <stage> file.c` stops the pipeline at a
+ * stage and prints what it built, instead of producing an object. */
+static const char *inspect_stage;
 
 /* -M and friends: the make rule naming what this file included. `dep_mode`
  * 0 none, 1 every header (-M/-MD), 2 only the ones that are not system
@@ -232,41 +230,66 @@ static void write_deps(const char *in, const char *obj)
                  dot ? (int)(dot - base) : (int)strlen(base), base);
         target = defname;
     }
+    /* Built, then written: one path for the bytes whether they go to a
+     * file (through the platform layer) or to the console. */
     char path[4096];
-    FILE *f = stdout;
+    const char *dest = NULL;          /* NULL: stdout */
     if (dep_file) {
-        f = fopen(dep_file, "w");
+        dest = dep_file;
     } else if (!dep_only) {           /* -MD/-MMD: beside the object */
         const char *end = strrchr(target, '.');
         snprintf(path, sizeof path, "%.*s.d",
                  end ? (int)(end - target) : (int)strlen(target), target);
-        f = fopen(path, "w");
+        dest = path;
     }
-    if (!f)
-        diag_fatal(dep_file ? dep_file : path, 0, "cannot write the file");
-    int col = fprintf(f, "%s: %s", target, in);
+    struct outbuf b = { NULL, 0, 0 };
+    int col = ob_fmt(&b, "%s: %s", target, in);
     for (int i = 0; i < cpp_dep_count(); i++) {
         if (dep_mode == 2 && cpp_dep_is_system(i))
             continue;
         const char *d = cpp_dep_path(i);
         if (col + (int)strlen(d) > 72) {
-            fprintf(f, " \\\n ");
+            ob_str(&b, " \\\n ");
             col = 1;
         }
-        col += fprintf(f, " %s", d);
+        col += ob_fmt(&b, " %s", d);
     }
-    fputc('\n', f);
+    ob_ch(&b, '\n');
     if (dep_phony)
         for (int i = 0; i < cpp_dep_count(); i++) {
             if (dep_mode == 2 && cpp_dep_is_system(i))
                 continue;
-            fprintf(f, "\n%s:\n", cpp_dep_path(i));
+            ob_fmt(&b, "\n%s:\n", cpp_dep_path(i));
         }
-    if (f != stdout)
-        fclose(f);
+    if (!dest)
+        fwrite(b.p, 1, b.n, stdout);
+    else if (plat_write_file(dest, b.p, b.n) != 0)
+        diag_fatal(dest, 0, "cannot write the file");
+    ob_free(&b);
 }
 
+/* The boundary the libraries unwind to (util.h, R6). `embcc` is the one
+ * program entitled to end the process over a failed unit, and it does that
+ * here -- by returning 1 -- rather than letting a backend call exit() from
+ * four frames down. The same libraries inside a language server install
+ * their own boundary and keep serving. */
+static int compile_unit(const char *in, const char *out, int pp_only);
+
 static int compile(const char *in, const char *out, int pp_only)
+{
+    jmp_buf boundary;
+    volatile int rc;
+    if (setjmp(boundary) == 0) {
+        fatal_set_boundary(&boundary);
+        rc = compile_unit(in, out, pp_only);
+    } else {
+        rc = 1;                       /* the diagnostic is already out */
+    }
+    fatal_set_boundary(NULL);
+    return rc;
+}
+
+static int compile_unit(const char *in, const char *out, int pp_only)
 {
     char *src = read_file(in);
     diag_register_source(in, src);   /* so diagnostics can show its lines */
@@ -295,11 +318,8 @@ static int compile(const char *in, const char *out, int pp_only)
         }
         if (emit_c_only) {
             if (out) {
-                FILE *f = fopen(out, "w");
-                if (!f)
+                if (plat_write_file(out, pp, strlen(pp)) != 0)
                     diag_fatal(out, 0, "cannot write the file");
-                fputs(pp, f);
-                fclose(f);
             } else {
                 fputs(pp, stdout);
             }
@@ -350,6 +370,17 @@ static int compile(const char *in, const char *out, int pp_only)
 
     struct ir_unit *iu = irgen(u);
     opt_run(iu, opt_level);
+
+    /* `inspect ir` reports the IR as it stands at the current -O level, so
+     * the same command shows irgen's output at -O0 and the optimizer's at
+     * -O2 -- which is what makes a pass's effect visible: diff the two. */
+    if (inspect_stage && !strcmp(inspect_stage, "ir")) {
+        struct outbuf b = { NULL, 0, 0 };
+        ir_print_unit(&b, iu);
+        fwrite(b.p, 1, b.n, stdout);
+        ob_free(&b);
+        return 0;
+    }
 
     struct code text = { 0, 0, 0 };
     struct extcall *ext;
@@ -839,6 +870,32 @@ int main(int argc, char **argv)
         print_usage(stderr);
         return 1;
     }
+    /* Tool mode (§17): `embcc inspect <stage> <file> [flags]`. A subcommand,
+     * not a flag, because it does not modify a compilation -- it replaces
+     * one. The remaining argv is an ordinary command line, so -I, -D and -O
+     * work exactly as they do when compiling, and what you inspect is what
+     * you would have built. */
+    if (!strcmp(argv[1], "inspect")) {
+        static const char *const stages[] = { "ir", "pp" };
+        if (argc < 4) {
+            fprintf(stderr, "usage: embcc inspect <stage> <file> [options]\n"
+                            "stages: ir  (EmbIR at the current -O level)\n"
+                            "        pp  (preprocessed source)\n");
+            return 1;
+        }
+        int known = 0;
+        for (size_t k = 0; k < sizeof stages / sizeof stages[0]; k++)
+            if (!strcmp(argv[2], stages[k]))
+                known = 1;
+        if (!known) {
+            fprintf(stderr, "embcc: inspect: unknown stage '%s'\n", argv[2]);
+            return 1;
+        }
+        inspect_stage = argv[2];
+        argv[2] = argv[0];            /* shift: argv[2..] is now the command */
+        argv += 2;
+        argc -= 2;
+    }
     /* Scanned ahead of everything else: --version and --dump-predef must
      * describe the target that was asked for, not the default. */
     for (int i = 1; i < argc; i++) {
@@ -1153,6 +1210,16 @@ int main(int argc, char **argv)
         incdir_sys[nincdirs] = 1;
         incdirs[nincdirs++] = selfinc;
     }
+    /* `inspect` produces a report, not an object, so like -fsyntax-only it
+     * implies -c. This has to happen BEFORE the dispatches below read
+     * pp_only: `inspect pp` IS the preprocessor's own stage, which the
+     * driver already had under -E. */
+    if (inspect_stage) {
+        compile_mode = 1;
+        if (!strcmp(inspect_stage, "pp"))
+            pp_only = 1;
+    }
+
     /* A `.asm` input goes to the built-in assembler (A1), not the C front-end.
      * Like gcc dispatching `.s`, embcc owns the kernel's hand-written assembly:
      * `embcc -c foo.asm -o foo.o` replaces `nasm -f elf64`. */
@@ -1178,6 +1245,13 @@ int main(int argc, char **argv)
      * is nothing to link: they imply -c, as they do in GCC. */
     if (syntax_only)
         compile_mode = 1;
+    /* `inspect` likewise produces a report, not an object. `inspect pp` is
+     * the preprocessor's own stage, which the driver already has. */
+    if (inspect_stage) {
+        compile_mode = 1;
+        if (!strcmp(inspect_stage, "pp"))
+            pp_only = 1;
+    }
     if (!compile_mode) {
         fprintf(stderr,
                 "embcc: error: cannot link '%s': the integrated linker is "

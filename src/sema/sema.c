@@ -92,7 +92,7 @@ static void sema_error_id(struct unit *u, int line, int col, const char *id,
     g_sema_errors++;
     if (g_recover)
         longjmp(*g_recover, 1);
-    exit(1);
+    fatal_unwind();
 }
 
 /* A semantic error: recorded, then analysis resumes at the next statement,
@@ -107,7 +107,7 @@ static void sema_error_at(struct unit *u, int line, int col,
     g_sema_errors++;
     if (g_recover)
         longjmp(*g_recover, 1);
-    exit(1);
+    fatal_unwind();
 }
 
 /* The same where the location is a declaration rather than a token, so
@@ -121,7 +121,7 @@ static void sema_error_line(struct unit *u, int line, const char *fmt, ...)
     g_sema_errors++;
     if (g_recover)
         longjmp(*g_recover, 1);
-    exit(1);
+    fatal_unwind();
 }
 
 static int scope_find(struct scope *sc, const char *name)
@@ -1067,7 +1067,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     g_sema_errors++;
                     if (g_recover)
                         longjmp(*g_recover, 1);
-                    exit(1);
+                    fatal_unwind();
                 }
                 const char *sug = suggest_name(u, sc, e->name);
                 const char *hdr = header_declaring(e->name);
@@ -1096,7 +1096,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 g_sema_errors++;
                 if (g_recover)
                     longjmp(*g_recover, 1);
-                exit(1);
+                fatal_unwind();
             }
         }
         if (e->ty->kind == TY_ARRAY) {
@@ -1498,7 +1498,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 g_sema_errors++;
                 if (g_recover)
                     longjmp(*g_recover, 1);
-                exit(1);
+                fatal_unwind();
             }
             base = base->pointee;
         } else if (base->kind != TY_STRUCT) {
@@ -1514,7 +1514,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             g_sema_errors++;
             if (g_recover)
                 longjmp(*g_recover, 1);
-            exit(1);
+            fatal_unwind();
         }
         if (!base->complete)
             sema_error_at(u, e->line, e->col,
@@ -1545,7 +1545,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             g_sema_errors++;
             if (g_recover)
                 longjmp(*g_recover, 1);
-            exit(1);
+            fatal_unwind();
         }
         e->memb = mm;
         e->ty = e->memb->ty;
@@ -3434,7 +3434,7 @@ static void check_func(struct unit *u, struct func *f)
         g_sema_errors++;
         if (g_recover)
             longjmp(*g_recover, 1);
-        exit(1);
+        fatal_unwind();
     }
 
     /* -Wunused-variable / -Wunused-parameter: nothing read it and nothing
@@ -3517,7 +3517,7 @@ static void merge_decls(struct unit *u)
                           "conflicting declaration of '%s'", f->name);
             diag_note_at(canon->file, canon->line, 0,
                          "previous declaration of '%s' here", f->name);
-            exit(1);
+            fatal_unwind();
         }
         if (f->is_static && !canon->is_static)
             sema_error_line(u, f->line,
@@ -3529,7 +3529,7 @@ static void merge_decls(struct unit *u)
                               f->name);
                 diag_note_at(canon->file, canon->line, 0,
                              "previous definition of '%s' here", f->name);
-                exit(1);
+                fatal_unwind();
             }
             canon->has_defn = 1;
             canon->body = f->body;
@@ -3593,7 +3593,7 @@ static void merge_globals(struct unit *u)
                           g->name, ty_name(g->ty), ty_name(canon->ty));
             diag_note_at(canon->file, canon->line, 0,
                          "previous declaration of '%s' here", g->name);
-            exit(1);
+            fatal_unwind();
         }
         if (g->is_static && !canon->is_static)
             sema_error_line(u, g->line,
@@ -3605,7 +3605,7 @@ static void merge_globals(struct unit *u)
                               g->name);
                 diag_note_at(canon->file, canon->line, 0,
                              "previous definition of '%s' here", g->name);
-                exit(1);
+                fatal_unwind();
             }
             canon->has_init = 1;
             canon->init = g->init;
@@ -3621,7 +3621,7 @@ static void merge_globals(struct unit *u)
                               "'%s'", g->name, g->section, canon->section);
                 diag_note_at(canon->file, canon->line, 0,
                              "previous declaration of '%s' here", g->name);
-                exit(1);
+                fatal_unwind();
             }
             canon->section = g->section;
         }

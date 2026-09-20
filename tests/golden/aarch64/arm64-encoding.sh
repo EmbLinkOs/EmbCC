@@ -25,7 +25,7 @@ trap 'rm -rf "$out"' EXIT
 
 $CC -std=c99 -Wall -Wextra -Werror -o "$out/a64check" \
     tools/a64check/a64check.c src/arch/aarch64/emit.c src/arch/code.c \
-    src/driver/util.c
+    src/driver/util.c src/driver/diag.c src/platform/platform_posix.c
 
 "$out/a64check" > "$out/bin" 2> "$out/want"
 

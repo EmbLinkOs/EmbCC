@@ -615,8 +615,7 @@ int gen_addr(struct ir_func *fn, struct expr *e)
          * `f().m` reads a member of it */
         if (e->ty && e->ty->kind == TY_STRUCT)
             return gen_expr(fn, e);
-        fprintf(stderr, "embcc: internal: address of a non-lvalue\n");
-        exit(1);
+        internal_error("address of a non-lvalue");
     }
 }
 

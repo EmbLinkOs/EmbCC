@@ -86,7 +86,7 @@ static void parse_error_at(struct parser *ps, int line, int col,
     ps->nerrors++;
     if (ps->recover)
         longjmp(*ps->recover, 1);
-    exit(1);
+    fatal_unwind();
 }
 
 /* Where parsing can start again after an error: past the next `;` at this
@@ -131,7 +131,7 @@ static void parse_error_line(struct parser *ps, int line, const char *fmt, ...)
     ps->nerrors++;
     if (ps->recover)
         longjmp(*ps->recover, 1);
-    exit(1);
+    fatal_unwind();
 }
 
 static void expect(struct parser *ps, enum tok_kind kind, const char *what)
@@ -2232,7 +2232,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 ps->nerrors++;
                 if (ps->recover)
                     longjmp(*ps->recover, 1);
-                exit(1);
+                fatal_unwind();
             }
             *dtail = s;
             dtail = &s->next;

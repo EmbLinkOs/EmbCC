@@ -172,10 +172,24 @@ this document depends on most:
    warning applies: it cannot be retrofitted cheaply. It is a day-one API
    requirement that was not honoured, and every pass written since is a pass
    that will have to be revisited.
-2. **`embcc inspect` and stage dump formats (§18, R6).** No stage has a
-   textual form, so EmbIR has no round-trip print→parse→identical test and no
-   pass is testable text-in/text-out (§9.1, §30). `-S` is not implemented
-   either.
+2. **Stage dump formats (§18, R6) — started.** `embcc inspect ir` and
+   `embcc inspect pp` exist (`src/ir/irprint.c`), and the IR's textual form
+   is what makes a pass's effect visible: the same command at `-O0` and
+   `-O2` shows mem2reg removing stack traffic, the inliner pulling a callee
+   in, and immediate folding. The remaining stages (`tokens`, `ast`,
+   `symbols`, `types`, `mir`, `cfg`, `callgraph`) and `-S` are not done.
+
+   **The round-trip half of §9.1 is a structural change, not a printer
+   feature, and this is where that was discovered.** `struct ir_ins` points
+   at `struct func`, `struct global` and `struct type` in seven places
+   (`callee`, `glob`, `argv[].ty`, `rety`, `dbgvar.ty`, `src`, `eh_types`).
+   EmbIR is therefore not a self-contained module — it is a view over the
+   AST. Printing follows those pointers and writes a name; *parsing* would
+   have to rebuild them, which means interning names and types into the
+   `ir_unit`. Until that is done there is no print→parse→identical test and
+   no pass is testable text-in/text-out (§9.1, §30). It is the same shape of
+   debt as the missing remarks: a day-one property of the IR that was not
+   built in.
 3. **The project knowledge graph (§8.2).** No USRs, no interface hashes, no
    cross-TU index. Incremental compilation is at Level 1 (`-MD` file
    dependencies) and Levels 2–3 (§21), `embcc diff` (§22) and project-wide

@@ -145,7 +145,7 @@ void cx_error(const struct ctok *at, const char *fmt, ...)
     cx_nerrors++;
     if (cx_recover)
         longjmp(*(jmp_buf *)cx_recover, 1);
-    exit(1);
+    fatal_unwind();
 }
 
 char *cx_strdup(const char *s)

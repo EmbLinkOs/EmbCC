@@ -265,6 +265,13 @@ struct ir_unit {
 
 struct ir_unit *irgen(struct unit *u);
 
+/* EmbIR's textual form (src/ir/irprint.c, vision §18) — what
+ * `embcc --inspect=ir` prints. Print only: see that file's head for why the
+ * round-trip half of §9.1 is a structural change, not a printer feature. */
+struct outbuf;
+void ir_print_unit(struct outbuf *b, const struct ir_unit *u);
+void ir_print_func(struct outbuf *b, const struct ir_func *f);
+
 /* codegen: record a call's code (offsets in the function's code) in a
  * function with exception regions. */
 void ir_add_csite(struct ir_func *fn, int start, int end, int region);

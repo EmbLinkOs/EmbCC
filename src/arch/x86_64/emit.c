@@ -96,8 +96,7 @@ void x86_load_reg_mem(struct code *c, int dst, int base, int disp,
         code_byte(c, 0x8b);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad load size %d\n", size);
-        exit(1);
+        internal_error("bad load size %d", size);
     }
     modrm_base(c, dst, base, disp);
 }
@@ -124,8 +123,7 @@ void x86_store_mem_reg(struct code *c, int base, int disp, int src,
         code_byte(c, 0x89);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad store size %d\n", size);
-        exit(1);
+        internal_error("bad store size %d", size);
     }
     modrm_base(c, src, base, disp);
 }
@@ -206,8 +204,7 @@ void x86_alu_rr(struct code *c, int op, int dst, int src, int w)
     case '|': code_byte(c, 0x0b); break;
     case '^': code_byte(c, 0x33); break;
     default:
-        fprintf(stderr, "embcc: internal: no reg-reg encoding for '%c'\n", op);
-        exit(1);
+        internal_error("no reg-reg encoding for '%c'", op);
     }
     code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
 }
@@ -227,8 +224,7 @@ void x86_alu_reg_imm(struct code *c, int op, int reg, long imm, int w)
     case '^': ext = 6; break;
     case 'c': ext = 7; break;   /* cmp */
     default:
-        fprintf(stderr, "embcc: internal: no reg-imm encoding for '%c'\n", op);
-        exit(1);
+        internal_error("no reg-imm encoding for '%c'", op);
     }
     rex_rb(c, w == 8, 0, reg);   /* reg is the r/m operand -> REX.B */
     if (imm >= -128 && imm <= 127) {
@@ -293,9 +289,7 @@ int x86_argreg(int index)
 void x86_prologue(struct code *c, int framesize)
 {
     if (framesize % 16 != 0) {
-        fprintf(stderr, "embcc: internal: frame size %d not 16-aligned\n",
-                framesize);
-        exit(1);
+        internal_error("frame size %d not 16-aligned", framesize);
     }
     code_byte(c, 0x55);                     /* push rbp */
     code_byte(c, 0x48); code_byte(c, 0x89); /* mov rbp, rsp */
@@ -383,8 +377,7 @@ void x86_load_slot(struct code *c, int disp, int size, int sign, int w)
         modrm_rbp(c, 0, disp);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad load size %d\n", size);
-        exit(1);
+        internal_error("bad load size %d", size);
     }
 }
 
@@ -406,8 +399,7 @@ void x86_store_slot(struct code *c, int disp, int size)
         code_byte(c, 0x89);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad store size %d\n", size);
-        exit(1);
+        internal_error("bad store size %d", size);
     }
     modrm_rbp(c, 0, disp);
 }
@@ -443,8 +435,7 @@ void x86_load_mem_rax(struct code *c, int size, int sign, int w)
         code_byte(c, 0x00);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad load size %d\n", size);
-        exit(1);
+        internal_error("bad load size %d", size);
     }
 }
 
@@ -515,8 +506,7 @@ void x86_load_baseindex_rax(struct code *c, int base, int index, int scale,
         modrm_baseindex0(c, 0, base, index, scale);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad load size %d\n", size);
-        exit(1);
+        internal_error("bad load size %d", size);
     }
 }
 
@@ -557,8 +547,7 @@ void x86_load_base_reg(struct code *c, int dst, int base,
         modrm_base0(c, dst, base);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad load size %d\n", size);
-        exit(1);
+        internal_error("bad load size %d", size);
     }
 }
 
@@ -596,8 +585,7 @@ void x86_load_reg_basedisp(struct code *c, int dst, int base, int disp,
         modrm_base(c, dst, base, disp);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad load size %d\n", size);
-        exit(1);
+        internal_error("bad load size %d", size);
     }
 }
 
@@ -632,8 +620,7 @@ void x86_load_basedisp_rax(struct code *c, int base, int disp,
         modrm_base(c, 0, base, disp);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad load size %d\n", size);
-        exit(1);
+        internal_error("bad load size %d", size);
     }
 }
 
@@ -669,8 +656,7 @@ void x86_load_base_rax(struct code *c, int base, int size, int sign, int w)
         modrm_base0(c, 0, base);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad load size %d\n", size);
-        exit(1);
+        internal_error("bad load size %d", size);
     }
 }
 
@@ -692,8 +678,7 @@ void x86_store_mem_rcx(struct code *c, int size)
         code_byte(c, 0x89);
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad store size %d\n", size);
-        exit(1);
+        internal_error("bad store size %d", size);
     }
     code_byte(c, 0x01); /* ModRM: [rcx], eax/rax */
 }
@@ -708,7 +693,7 @@ void x86_store_basedisp_rax(struct code *c, int base, int disp, int size)
     case 2: code_byte(c, 0x66); if (rexb) code_byte(c, 0x41); code_byte(c, 0x89); break;
     case 4: if (rexb) code_byte(c, 0x41);        code_byte(c, 0x89); break;
     case 8: code_byte(c, 0x48 | rexb);           code_byte(c, 0x89); break;
-    default: fprintf(stderr, "embcc: internal: bad store size %d\n", size); exit(1);
+    default: internal_error("bad store size %d", size);
     }
     modrm_base(c, 0, base, disp);
 }
@@ -723,7 +708,7 @@ void x86_store_baseindex_rax(struct code *c, int base, int index, int scale,
     case 2: code_byte(c, 0x66); if (rexXB) code_byte(c, 0x40 | rexXB); code_byte(c, 0x89); break;
     case 4: if (rexXB) code_byte(c, 0x40 | rexXB);        code_byte(c, 0x89); break;
     case 8: code_byte(c, 0x48 | rexXB);                   code_byte(c, 0x89); break;
-    default: fprintf(stderr, "embcc: internal: bad store size %d\n", size); exit(1);
+    default: internal_error("bad store size %d", size);
     }
     modrm_baseindex0(c, 0, base, index, scale);
 }
@@ -818,8 +803,7 @@ void x86_alu_eax_mem(struct code *c, int op, int disp, int w)
         code_byte(c, 0x33); /* xor r, r/m */
         break;
     default:
-        fprintf(stderr, "embcc: internal: no encoding for op '%c'\n", op);
-        exit(1);
+        internal_error("no encoding for op '%c'", op);
     }
     modrm_rbp(c, 0, disp);
 }
@@ -872,8 +856,7 @@ void x86_shift_eax_cl(struct code *c, int kind, int w)
         code_byte(c, 0xe8); /* shr: /5 */
         break;
     default:
-        fprintf(stderr, "embcc: internal: bad shift kind\n");
-        exit(1);
+        internal_error("bad shift kind");
     }
 }
 
@@ -942,8 +925,7 @@ void x86_xchg_rax_mem_rcx(struct code *c, int size)
     case 4: code_byte(c, 0x87); break;
     case 8: code_byte(c, 0x48); code_byte(c, 0x87); break;
     default:
-        fprintf(stderr, "embcc: internal: bad xchg size %d\n", size);
-        exit(1);
+        internal_error("bad xchg size %d", size);
     }
     code_byte(c, 0x01); /* ModRM: [rcx] <-> eax/rax */
 }
@@ -1024,8 +1006,7 @@ void x86_sse_alu_mem(struct code *c, int op, int disp, int w)
     case '*': code_byte(c, 0x59); break; /* mulss/mulsd */
     case '/': code_byte(c, 0x5e); break; /* divss/divsd */
     default:
-        fprintf(stderr, "embcc: internal: no SSE encoding for '%c'\n", op);
-        exit(1);
+        internal_error("no SSE encoding for '%c'", op);
     }
     modrm_rbp(c, 0, disp); /* always xmm0 */
 }

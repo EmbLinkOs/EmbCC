@@ -7,6 +7,8 @@
  */
 #include "emit.h"
 
+#include "../../driver/util.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -20,9 +22,7 @@ void a64_word(struct code *c, unsigned long word)
 
 static void bad(const char *what, long v)
 {
-    fprintf(stderr, "embcc: internal error: aarch64 %s cannot encode %ld\n",
-            what, v);
-    exit(1);
+    internal_error("aarch64 %s cannot encode %ld", what, v);
 }
 
 /* sf: the bit that selects the 64-bit form of most instructions. */

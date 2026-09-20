@@ -23,7 +23,8 @@ trap 'rm -rf "$out"' EXIT
 
 $CC -std=c99 -Wall -Wextra -Werror -o "$out/check" \
     tools/a64check/a64asmcheck.c src/arch/aarch64/asm.c \
-    src/arch/aarch64/emit.c src/arch/code.c src/driver/util.c
+    src/arch/aarch64/emit.c src/arch/code.c src/driver/util.c \
+    src/driver/diag.c src/platform/platform_posix.c
 
 { grep -v '^//' tests/golden/aarch64/arm64-asm.s; "$out/check" --vocabulary; } > "$out/lines"
 

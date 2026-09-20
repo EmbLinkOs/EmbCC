@@ -109,7 +109,7 @@ static void ex_error(const struct cexpr *e, const char *fmt, ...)
     va_end(ap);
     diag_error_at(e && e->file ? e->file : cx_cur()->file,
                   e ? e->line : cx_cur()->t.line, 0, "%s", msg);
-    exit(1);
+    fatal_unwind();
 }
 
 struct cexpr *ex_cast(struct cexpr *e, struct cty *t)
@@ -1131,7 +1131,7 @@ static void ambiguous(const struct ctok *at, const char *what,
                      f->name, buf, f->is_explicit ? " explicit" : "");
     }
     cx_inst_notes();
-    exit(1);
+    fatal_unwind();
 }
 
 /* The best of the candidates fs[0..nf) for the arguments. In call form,
@@ -1246,7 +1246,7 @@ static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
             diag_note_at(at->file, at->t.line, at->t.col,
                          "no template's arguments could be deduced");
         cx_inst_notes();
-        exit(1);
+        fatal_unwind();
     }
     int best = 0;
     for (int i = 1; i < nv; i++)

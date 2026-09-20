@@ -1,4 +1,5 @@
 #include "cpp.h"
+#include "../platform/platform.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1092,23 +1093,12 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
     return 1;
 }
 
+/* An #include's bytes, through the source provider -- so a language server
+ * compiling an unsaved buffer sees the headers as the editor has them too,
+ * not just the file it was asked about (platform.h, vision §7). */
 static char *read_file_or_null(const char *path, long *len)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return NULL;
-    fseek(f, 0, SEEK_END);
-    *len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = xmalloc((size_t)*len + 1);
-    if (fread(buf, 1, (size_t)*len, f) != (size_t)*len) {
-        fclose(f);
-        free(buf);
-        return NULL;
-    }
-    buf[*len] = 0;
-    fclose(f);
-    return buf;
+    return src_read(path, len);
 }
 
 static void process_file(struct cpp *cpp, const char *path,
@@ -1491,7 +1481,7 @@ static void load_predefined(struct cpp *cpp)
                 if (m->nparams >= MAX_MACRO_PARAMS) {
                     fprintf(stderr, "embcc: internal error: predefined macro "
                                     "'%s' has too many parameters\n", name);
-                    exit(1);
+                    fatal_unwind();
                 }
                 if (p[0] == '.' && p[1] == '.' && p[2] == '.') {
                     m->is_varargs = 1;
