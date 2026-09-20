@@ -51,8 +51,9 @@ those exact two members in that order.
 
 `<type_traits>`, `<utility>`, `<limits>`, `<iterator>`, `<memory>`,
 `<functional>`, `<array>`, `<vector>`, `<string>`, `<algorithm>`,
-`<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`, `<iostream>` and
-the rest of the stream headers, `<stdexcept>`, and the `<c*>` wrappers
+`<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`,
+`<unordered_map>`, `<unordered_set>`, `<iostream>` and the rest of the
+stream headers, `<stdexcept>`, and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
@@ -88,6 +89,25 @@ the three words, it has to re-aim the pointer, and a raw `const C *`
 argument may point into the buffer that a reallocation is about to free.
 `a += a` is the case that finds it, and the test does exactly that at
 the short/long boundary.
+
+**`shared_ptr` keeps two counts, and the second one is why `weak_ptr`
+can exist.** The strong count decides when the *object* dies; the weak
+count decides when the *control block* does. They must be separate
+because a `weak_ptr` has to be able to ask "is it still alive?" after
+the object is gone, which means the block outlives what it describes.
+`lock()` is the only safe way to use one — it takes a strong reference
+and tells you whether it could, where testing `expired()` and then
+dereferencing is a race even single-threaded.
+
+**The unordered containers use separate chaining**, for the same reason
+the ordered ones use a tree: they promise that a reference to an element
+survives a rehash, and open addressing moves elements on insert. A
+rehash *relinks* the nodes rather than reallocating them, and the test
+holds a reference across 500 insertions to prove it. The bucket index is
+a mask on a power-of-two count, so the hash is *mixed* first —
+`std::hash` on an integer is the identity, and without mixing the keys
+0, 8, 16… would all land in one bucket. The test inserts 2000
+sequential integers for exactly that reason.
 
 **A streambuf is not "an object with a virtual write."** It owns two
 windows into a character sequence, and the fast path is a *pointer bump*

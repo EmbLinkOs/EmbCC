@@ -265,7 +265,7 @@ want "moveifnoexcept moves 1 copies 0 v 5"
 # 42, so every expectation lives beside the code it is about and a
 # failure names its own line -- see libcxx-std/check.h.
 for prog in iterator memory functional array vector string algorithm \
-            vocabulary associative iostreams containers; do
+            vocabulary associative iostreams smartptr containers; do
     if run "tests/golden/libcxx-std/$prog.cc"; then rc=0; else rc=$?; fi
     [ "$rc" = 42 ] || {
         cat "$out/run.txt"
