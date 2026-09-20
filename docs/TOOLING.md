@@ -14,7 +14,7 @@ until the front ends can keep going after an error.
 | | what | proven by |
 |---|---|---|
 | **T1** | **The diagnostic engine.** A diagnostic is a record: severity, location, source range, notes, fix-its, the option that controls it. Buffered, then rendered — text exactly as before, or `-fdiagnostics-format=json` (GCC's schema, so existing tools read it). `-fdiagnostics-color`, `-fmax-errors`, `-w`, `-Werror`. First fix-its: the name suggestions the front ends already compute. | done — tests/golden/diagnostics-json.sh; the text goldens unchanged |
-| **T2** | **Error recovery.** The C front end keeps going after an error — synchronising at statement and declaration boundaries — so one run reports every independent problem instead of the first. A recovery must never produce a *wrong* later diagnostic: each is either suppressed or real. | done (C) — tests/golden/diagnostics-recovery.sh; the C++ front end is still first-error |
+| **T2** | **Error recovery.** Both front ends keep going after an error — synchronising at statement and declaration boundaries — so one run reports every independent problem instead of the first. A recovery must never produce a *wrong* later diagnostic: each is either suppressed or real. | done (C and C++) — tests/golden/diagnostics-recovery.sh |
 | **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Producers: a misspelt name, a missing `;`, `.` for `->` (and back), the member the type actually has, and the header that declares a C library name. | done — tests/golden/diagnostics-fix.sh: the fixed file compiles |
 | **T4** | **The driver GCC and Clang users already know.** Dependency generation, `-fsyntax-only`, `--help`, `-dumpmachine`, and warning groups over real analyses (unused variable/parameter/function, shadow, sign-compare), each with its `-Wno-` and its name in the diagnostic. Still to come: `-S`, `@file`, `-###`, and more analyses (uninitialised, fallthrough, format). | done for those — tests/golden/driver-deps.sh and warnings.sh (gcc agrees on which code warns) |
 | **T5** | **`embls`, the language server.** LSP over stdio: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords), hover, go-to-definition, document symbols. Still to come: find references, signature help, rename, `#include` completion, cross-file indexing. | done (first five) — tests/golden/embls.sh drives a whole session |
@@ -85,6 +85,14 @@ deliberately: dropping a half-declared variable would turn one error into a
 crowd of "not declared" ones below it.
 
 `-fmax-errors=N` stops after N, as GCC does.
+
+The C++ front end recovers the same way, at declarations and at statements,
+with one difference that matters: it restores the parser's own state
+(`parse_save`/`parse_restore` — scope, current function, template context)
+before resynchronising, since a longjmp out of a class body would otherwise
+leave the parser inside it. Once parsing is over and instantiation has
+begun there is no statement boundary to resume at, so an error there ends
+the compile, deliberately.
 
 ## T4 — the driver, first half (done)
 

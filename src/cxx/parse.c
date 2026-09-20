@@ -2207,6 +2207,7 @@ struct cvar *cx_new_local(const char *name, struct cty *t,
 
 static struct cstmt *parse_stmt(void);
 static struct cstmt *parse_block_body(struct cscope *s);
+static void cx_resync(int top);
 static void mark_nrvo(struct cfunc *f);
 
 /* How many local statics named `name` function fn declared before: the
@@ -5019,17 +5020,34 @@ static struct cstmt *parse_block_body(struct cscope *s)
     cx_curblk = b;
     (void)s;
     cx_expect(TOK_LBRACE, "'{'");
-    struct cstmt **tail = &b->body;
+    struct cstmt **volatile tail = &b->body;
     while (cx_kind() != TOK_RBRACE) {
-        if (cx_kind() == TOK_EOF)
-            cx_error(cx_cur(), "unterminated block");
-        struct cstmt *st = parse_stmt();
-        if (!st)
-            continue;
-        *tail = st;
-        while (st->next)
-            st = st->next;
-        tail = &st->next;
+        if (cx_kind() == TOK_EOF) {
+            /* Reported once: recovery cannot make more tokens. */
+            cx_nerrors++;
+            diag_error_at(cx_cur()->file, cx_cur()->t.line, cx_cur()->t.col,
+                          "unterminated block");
+            return b;
+        }
+        struct parse_state *ps = parse_save();
+        jmp_buf jb;
+        void *save = cx_recover;
+        cx_recover = &jb;
+        if (!setjmp(jb)) {
+            struct cstmt *st = parse_stmt();
+            if (st) {
+                *tail = st;
+                while (st->next)
+                    st = st->next;
+                tail = &st->next;
+            }
+        } else {
+            int at = cx_pos;
+            parse_restore(ps);
+            cx_pos = at;
+            cx_resync(0);
+        }
+        cx_recover = save;
     }
     cx_advance();
     cx_curblk = saveblk;
@@ -8770,6 +8788,37 @@ static void declare_builtin_templates(void)
     y->tmpl = t;
 }
 
+/* Where parsing can start again after an error: past the next `;` at this
+ * brace depth, or at the `}` that closes the enclosing block (which the
+ * block's loop consumes); `top` consumes that `}` too, since nothing
+ * encloses a declaration. Always consumes a token, so recovery cannot spin
+ * on the one it failed at. */
+static void cx_resync(int top)
+{
+    int depth = 0;
+    if (cx_kind() != TOK_EOF)
+        cx_advance();
+    for (;;) {
+        enum tok_kind k = cx_kind();
+        if (k == TOK_EOF)
+            return;
+        if (k == TOK_LBRACE) {
+            depth++;
+        } else if (k == TOK_RBRACE) {
+            if (depth == 0) {
+                if (top)
+                    cx_advance();
+                return;
+            }
+            depth--;
+        } else if (k == TOK_SEMI && depth == 0) {
+            cx_advance();
+            return;
+        }
+        cx_advance();
+    }
+}
+
 void cx_parse_unit(void)
 {
     cx_funcs = NULL;
@@ -8785,8 +8834,29 @@ void cx_parse_unit(void)
     cx_extern_c = 0;
     declare_builtin_ops();
     declare_builtin_templates();
-    while (cx_kind() != TOK_EOF)
-        parse_declaration(1, NULL);
+    while (cx_kind() != TOK_EOF) {
+        /* Each declaration is a recovery point: an error in one is
+         * reported and the next is still read. The parser's own save and
+         * restore put back the scope, the current function and the
+         * template state, which a longjmp out of a class body would
+         * otherwise leave pointing inside it. */
+        struct parse_state *st = parse_save();
+        jmp_buf jb;
+        void *save = cx_recover;
+        cx_recover = &jb;
+        if (!setjmp(jb)) {
+            parse_declaration(1, NULL);
+        } else {
+            int at = cx_pos;
+            parse_restore(st);
+            cx_pos = at;             /* keep the progress, drop the state */
+            cx_resync(1);
+        }
+        cx_recover = save;
+    }
+    /* Parsing is over: from here on (instantiation, emission) there is no
+     * statement boundary to resume at, so an error ends the compile. */
+    cx_recover = NULL;
     /* members of instances called before their out-of-class definitions
      * were read: defined now (the point of instantiation is the unit's
      * end too, 13.8.4.1) */

@@ -122,6 +122,14 @@ void cx_warn(const struct ctok *at, const char *fmt, ...)
                  at ? at->t.col : 0, "%s", msg);
 }
 
+/* Where the C++ front end resumes after an error, and how many it has
+ * reported (docs/TOOLING.md T2). NULL means the error ends the compile, as
+ * every C++ error once did — which is still the case once parsing is over
+ * and instantiation has begun, where there is no statement boundary to
+ * resume at. */
+void *cx_recover;
+int cx_nerrors;
+
 void cx_error(const struct ctok *at, const char *fmt, ...)
 {
     if (cx_sfinae)                  /* a substitution failure, not an error */
@@ -134,6 +142,9 @@ void cx_error(const struct ctok *at, const char *fmt, ...)
     diag_error_at(at ? at->file : "<c++>", at ? at->t.line : 0,
                   at ? at->t.col : 0, "%s", msg);
     cx_inst_notes();
+    cx_nerrors++;
+    if (cx_recover)
+        longjmp(*(jmp_buf *)cx_recover, 1);
     exit(1);
 }
 

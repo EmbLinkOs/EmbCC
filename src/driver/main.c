@@ -287,6 +287,12 @@ static int compile(const char *in, const char *out, int pp_only)
         cxx_set_exceptions(want_exceptions);
         cxx_set_rtti(want_rtti);
         pp = cxx_translate(in, pp);
+        if (cx_nerrors) {
+            /* Every C++ error is out; what it lowered to describes a
+             * program that does not exist, so nothing downstream runs. */
+            diag_terminated(cx_nerrors);
+            return 1;
+        }
         if (emit_c_only) {
             if (out) {
                 FILE *f = fopen(out, "w");

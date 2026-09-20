@@ -114,7 +114,33 @@ grep -q "due to -fmax-errors=2" "$out/max.log" || {
     echo "no -fmax-errors note:"; cat "$out/max.log"; exit 1; }
 echo "-fmax-errors=2: two errors, then it stops and says so"
 
-# 6. All of them reach an editor: the JSON carries one object per error.
+# 6. C++ recovers too: three independent errors in three functions are
+#    three diagnostics, and what it lowered to never reaches the C stage.
+cat > "$out/rec.cc" << 'EOF2'
+struct P { int x; int y; };
+int a(P p) { return p.z; }
+int b(P p) { return p.x + undeclared_here; }
+int c(P p) { return p.y; }
+int d(P p) { return p.w; }
+EOF2
+NLX=$([ "$ARCH" = aarch64 ] && echo "$AARCH64_NEWLIB" || echo "$X86_NEWLIB")
+"$EMBCC" --target="$TARGET" -isystem "$NLX/include" -c "$out/rec.cc"     -o "$out/rec.o" > "$out/rec.log" 2>&1 && { echo "the broken C++ compiled"; exit 1; }
+[ "$(nerr "$out/rec.log")" -eq 3 ] || {
+    echo "expected 3 C++ errors:"; cat "$out/rec.log"; exit 1; }
+for line in 2 3 5; do
+    grep -q "rec.cc:$line:" "$out/rec.log" || {
+        echo "nothing reported on C++ line $line:"; cat "$out/rec.log"; exit 1; }
+done
+grep -q "compilation terminated: 3 errors" "$out/rec.log" || {
+    echo "no summary after the C++ errors"; exit 1; }
+printf 'struct Q { int v; };
+int ok(Q q) { return q.v; }
+' > "$out/ok.cc"
+"$EMBCC" --target="$TARGET" -isystem "$NLX/include" -c "$out/ok.cc" -o "$out/ok.o" || {
+    echo "correct C++ stopped compiling"; exit 1; }
+echo "C++: three errors in one run; correct C++ unaffected"
+
+# 7. All of them reach an editor: the JSON carries one object per error.
 if command -v python3 >/dev/null 2>&1; then
     "$EMBCC" -fdiagnostics-format=json -c "$out/three.c" -o "$out/three.o" \
         2> "$out/three.json" || true

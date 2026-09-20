@@ -54,6 +54,10 @@ void cx_skip_balanced(void);         /* past a ( [ { group and its close */
 
 /* diagnostics at a token (exit) */
 void cx_error(const struct ctok *at, const char *fmt, ...);
+/* Where an error resumes (a jmp_buf *, NULL to stop the compile) and how
+ * many have been reported. */
+extern void *cx_recover;
+extern int cx_nerrors;
 void cx_warn(const struct ctok *at, const char *fmt, ...);
 
 /* ---- types ---- */

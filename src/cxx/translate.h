@@ -11,6 +11,10 @@ char *cxx_translate(const char *file, const char *src);
 void cxx_set_exceptions(int on);
 void cxx_set_rtti(int on);
 
+/* Errors the C++ front end reported (it recovers and keeps reading, as the
+ * C one does): the driver stops before the C stage when there were any. */
+extern int cx_nerrors;
+
 /* What the preprocessor's __has_builtin answers in a C++ unit: the
  * builtin functions and type-trait intrinsics the front-end implements. */
 int cxx_has_builtin(const char *name);
