@@ -1,0 +1,334 @@
+/* <system_error> — C++ [syserr].
+ *
+ * An `errno` that says which errno it is. The problem this solves is
+ * real and is not about C++: the number 2 means "no such file" if it
+ * came from `open`, and something else entirely if it came from a
+ * network library or a database. A bare int carries the value and
+ * loses the namespace, so code that passes one up three layers has to
+ * remember where it came from, and eventually does not.
+ *
+ * An `error_code` is that int PLUS its category: {2, generic_category()}
+ * is ENOENT and {2, some_other_category()} is not, and they compare
+ * unequal even though both hold 2. The category is compared by ADDRESS,
+ * which is why each one is a singleton returned by a function.
+ *
+ * ---- code against condition ------------------------------------------------
+ *
+ * Two types that look identical and mean opposite things, and the
+ * distinction is the whole design:
+ *
+ *   error_code      what actually happened, in the terms of whoever
+ *                   reported it -- a platform's own number.
+ *   error_condition what you want to ASK about, portably.
+ *
+ * A caller says `if (ec == errc::no_such_file_or_directory)`, and the
+ * category decides whether its own number means that. So code written
+ * against conditions survives a platform whose numbers differ, and the
+ * platform's own value is still there for anybody who needs it.
+ */
+#ifndef _LIBCXX_SYSTEM_ERROR
+#define _LIBCXX_SYSTEM_ERROR
+
+#include <cerrno>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+
+namespace std {
+
+/* ---- errc: the portable names for the errno values ----------------------- */
+
+enum class errc {
+    address_family_not_supported       = EAFNOSUPPORT,
+    address_in_use                     = EADDRINUSE,
+    address_not_available              = EADDRNOTAVAIL,
+    already_connected                  = EISCONN,
+    argument_list_too_long             = E2BIG,
+    argument_out_of_domain             = EDOM,
+    bad_address                        = EFAULT,
+    bad_file_descriptor                = EBADF,
+    bad_message                        = EBADMSG,
+    broken_pipe                        = EPIPE,
+    connection_aborted                 = ECONNABORTED,
+    connection_already_in_progress     = EALREADY,
+    connection_refused                 = ECONNREFUSED,
+    connection_reset                   = ECONNRESET,
+    cross_device_link                  = EXDEV,
+    destination_address_required       = EDESTADDRREQ,
+    device_or_resource_busy            = EBUSY,
+    directory_not_empty                = ENOTEMPTY,
+    executable_format_error            = ENOEXEC,
+    file_exists                        = EEXIST,
+    file_too_large                     = EFBIG,
+    filename_too_long                  = ENAMETOOLONG,
+    function_not_supported             = ENOSYS,
+    host_unreachable                   = EHOSTUNREACH,
+    identifier_removed                 = EIDRM,
+    illegal_byte_sequence              = EILSEQ,
+    inappropriate_io_control_operation = ENOTTY,
+    interrupted                        = EINTR,
+    invalid_argument                   = EINVAL,
+    invalid_seek                       = ESPIPE,
+    io_error                           = EIO,
+    is_a_directory                     = EISDIR,
+    message_size                       = EMSGSIZE,
+    network_down                       = ENETDOWN,
+    network_reset                      = ENETRESET,
+    network_unreachable                = ENETUNREACH,
+    no_buffer_space                    = ENOBUFS,
+    no_child_process                   = ECHILD,
+    no_link                            = ENOLINK,
+    no_lock_available                  = ENOLCK,
+    no_message                         = ENOMSG,
+    no_protocol_option                 = ENOPROTOOPT,
+    no_space_on_device                 = ENOSPC,
+    no_such_device_or_address          = ENXIO,
+    no_such_device                     = ENODEV,
+    no_such_file_or_directory          = ENOENT,
+    no_such_process                    = ESRCH,
+    not_a_directory                    = ENOTDIR,
+    not_a_socket                       = ENOTSOCK,
+    not_connected                      = ENOTCONN,
+    not_enough_memory                  = ENOMEM,
+    not_supported                      = ENOTSUP,
+    operation_canceled                 = ECANCELED,
+    operation_in_progress              = EINPROGRESS,
+    operation_not_permitted            = EPERM,
+    operation_not_supported            = EOPNOTSUPP,
+    operation_would_block              = EWOULDBLOCK,
+    permission_denied                  = EACCES,
+    protocol_error                     = EPROTO,
+    protocol_not_supported             = EPROTONOSUPPORT,
+    read_only_file_system              = EROFS,
+    resource_deadlock_would_occur      = EDEADLK,
+    resource_unavailable_try_again     = EAGAIN,
+    result_out_of_range                = ERANGE,
+    too_many_files_open_in_system      = ENFILE,
+    too_many_files_open                = EMFILE,
+    too_many_links                     = EMLINK,
+    too_many_symbolic_link_levels      = ELOOP,
+    value_too_large                    = EOVERFLOW,
+    wrong_protocol_type                = EPROTOTYPE
+};
+
+class error_code;
+class error_condition;
+
+template <class T> struct is_error_code_enum : false_type {};
+template <class T> struct is_error_condition_enum : false_type {};
+template <> struct is_error_condition_enum<errc> : true_type {};
+
+/* ---- error_category --------------------------------------------------------
+ *
+ * Compared by ADDRESS, never by name: two categories with the same name
+ * from two libraries are two categories, and a value-based comparison
+ * would silently merge them. That is why `operator==` below compares
+ * `this` and why every category is a singleton behind a function.
+ */
+class error_category {
+public:
+    constexpr error_category() noexcept = default;
+    virtual ~error_category() = default;
+
+    error_category(const error_category &) = delete;
+    error_category &operator=(const error_category &) = delete;
+
+    virtual const char *name() const noexcept = 0;
+    virtual string message(int ev) const = 0;
+
+    /* The mapping from this category's own number to a portable
+     * condition. A category that has no portable equivalents leaves the
+     * default, which maps nothing. */
+    virtual error_condition default_error_condition(int ev) const noexcept;
+    virtual bool equivalent(int code, const error_condition &cond) const noexcept;
+    virtual bool equivalent(const error_code &code, int cond) const noexcept;
+
+    bool operator==(const error_category &o) const noexcept
+    { return this == &o; }
+    bool operator!=(const error_category &o) const noexcept
+    { return this != &o; }
+    bool operator<(const error_category &o) const noexcept
+    { return this < &o; }
+};
+
+const error_category &generic_category() noexcept;
+const error_category &system_category() noexcept;
+
+/* ---- error_code ------------------------------------------------------------ */
+
+class error_code {
+public:
+    error_code() noexcept : __v(0), __c(&system_category()) {}
+    error_code(int v, const error_category &c) noexcept : __v(v), __c(&c) {}
+
+    template <class E, class = enable_if_t<is_error_code_enum<E>::value>>
+    error_code(E e) noexcept { *this = make_error_code(e); }
+
+    void assign(int v, const error_category &c) noexcept
+    { __v = v; __c = &c; }
+    void clear() noexcept { __v = 0; __c = &system_category(); }
+
+    int value() const noexcept { return __v; }
+    const error_category &category() const noexcept { return *__c; }
+    error_condition default_error_condition() const noexcept;
+    string message() const { return __c->message(__v); }
+
+    /* Zero means success in every category, so this is the one test
+     * that needs no category at all -- and it is why `if (ec)` reads
+     * as "if something went wrong". */
+    explicit operator bool() const noexcept { return __v != 0; }
+
+private:
+    int __v;
+    const error_category *__c;
+};
+
+class error_condition {
+public:
+    error_condition() noexcept : __v(0), __c(&generic_category()) {}
+    error_condition(int v, const error_category &c) noexcept
+        : __v(v), __c(&c) {}
+
+    template <class E, class = enable_if_t<is_error_condition_enum<E>::value>>
+    error_condition(E e) noexcept { *this = make_error_condition(e); }
+
+    void assign(int v, const error_category &c) noexcept
+    { __v = v; __c = &c; }
+    void clear() noexcept { __v = 0; __c = &generic_category(); }
+
+    int value() const noexcept { return __v; }
+    const error_category &category() const noexcept { return *__c; }
+    string message() const { return __c->message(__v); }
+    explicit operator bool() const noexcept { return __v != 0; }
+
+private:
+    int __v;
+    const error_category *__c;
+};
+
+inline error_code make_error_code(errc e) noexcept
+{ return error_code((int)e, generic_category()); }
+inline error_condition make_error_condition(errc e) noexcept
+{ return error_condition((int)e, generic_category()); }
+
+/* Two codes are equal when their category AND value match. A code and a
+ * condition are equal when the CATEGORY says so -- which is the whole
+ * asymmetry, and the reason a portable test survives a platform whose
+ * numbers differ. */
+inline bool operator==(const error_code &a, const error_code &b) noexcept
+{ return a.category() == b.category() && a.value() == b.value(); }
+inline bool operator!=(const error_code &a, const error_code &b) noexcept
+{ return !(a == b); }
+inline bool operator==(const error_condition &a,
+                       const error_condition &b) noexcept
+{ return a.category() == b.category() && a.value() == b.value(); }
+inline bool operator!=(const error_condition &a,
+                       const error_condition &b) noexcept
+{ return !(a == b); }
+
+inline bool operator==(const error_code &a, const error_condition &b) noexcept
+{
+    return a.category().equivalent(a.value(), b) ||
+           b.category().equivalent(a, b.value());
+}
+inline bool operator==(const error_condition &a, const error_code &b) noexcept
+{ return b == a; }
+inline bool operator!=(const error_code &a, const error_condition &b) noexcept
+{ return !(a == b); }
+inline bool operator!=(const error_condition &a, const error_code &b) noexcept
+{ return !(b == a); }
+
+inline bool operator==(const error_code &a, errc b) noexcept
+{ return a == make_error_condition(b); }
+inline bool operator==(errc a, const error_code &b) noexcept
+{ return b == make_error_condition(a); }
+inline bool operator!=(const error_code &a, errc b) noexcept
+{ return !(a == b); }
+inline bool operator!=(errc a, const error_code &b) noexcept
+{ return !(b == a); }
+
+/* ---- the two categories ----------------------------------------------------
+ *
+ * generic_category is the portable one: its numbers ARE the errc
+ * values. system_category is the platform's; here the platform's
+ * numbers happen to be the same errno values, so it maps every one of
+ * its codes onto the generic condition with the same number. On a
+ * platform where they differ, only this file changes.
+ */
+namespace __detail {
+
+class __generic_category : public error_category {
+public:
+    const char *name() const noexcept override { return "generic"; }
+    string message(int ev) const override { return string(strerror(ev)); }
+};
+
+class __system_category : public error_category {
+public:
+    const char *name() const noexcept override { return "system"; }
+    string message(int ev) const override { return string(strerror(ev)); }
+    error_condition default_error_condition(int ev) const noexcept override
+    { return error_condition(ev, generic_category()); }
+};
+
+inline __generic_category __gc{};
+inline __system_category __sc{};
+
+}  // namespace __detail
+
+inline const error_category &generic_category() noexcept
+{ return __detail::__gc; }
+inline const error_category &system_category() noexcept
+{ return __detail::__sc; }
+
+inline error_condition
+error_category::default_error_condition(int ev) const noexcept
+{ return error_condition(ev, *this); }
+
+inline bool
+error_category::equivalent(int code, const error_condition &cond) const noexcept
+{ return default_error_condition(code) == cond; }
+
+inline bool
+error_category::equivalent(const error_code &code, int cond) const noexcept
+{ return *this == code.category() && code.value() == cond; }
+
+inline error_condition error_code::default_error_condition() const noexcept
+{ return __c->default_error_condition(__v); }
+
+/* ---- the exception ---------------------------------------------------------
+ *
+ * It carries the CODE, not just a string, so a handler can test what
+ * went wrong instead of parsing what() -- which is the reason it is not
+ * simply a runtime_error with a message.
+ */
+class system_error : public runtime_error {
+public:
+    system_error(error_code ec, const string &what)
+        : runtime_error(what + ": " + ec.message()), __ec(ec) {}
+    system_error(error_code ec, const char *what)
+        : runtime_error(string(what) + ": " + ec.message()), __ec(ec) {}
+    explicit system_error(error_code ec)
+        : runtime_error(ec.message()), __ec(ec) {}
+    system_error(int v, const error_category &c, const string &what)
+        : system_error(error_code(v, c), what) {}
+    system_error(int v, const error_category &c, const char *what)
+        : system_error(error_code(v, c), what) {}
+    system_error(int v, const error_category &c)
+        : system_error(error_code(v, c)) {}
+
+    const error_code &code() const noexcept { return __ec; }
+
+private:
+    error_code __ec;
+};
+
+/* The shorthand every OS call in this library reaches for: whatever
+ * errno says, right now, as a code in the platform's category. */
+inline error_code __last_error() noexcept
+{ return error_code(errno, system_category()); }
+
+}  // namespace std
+
+#endif

@@ -1,0 +1,68 @@
+/* <iosfwd> — C++ [iosfwd].
+ *
+ * Declarations without definitions, and the reason it exists is compile
+ * time. A header that only needs to say `void print(std::ostream &)`
+ * does not need <ostream>'s several thousand lines -- it needs the
+ * NAME, and a reference to an incomplete type is enough to declare a
+ * function. Including <ostream> there pulls the whole stream hierarchy
+ * into every translation unit that includes yours, transitively, and
+ * that is how a build gets slow.
+ *
+ * Everything here is a forward declaration. Nothing in this header can
+ * be used; that is the point.
+ */
+#ifndef _LIBCXX_IOSFWD
+#define _LIBCXX_IOSFWD
+
+#include <cstddef>
+
+namespace std {
+
+template <class C> struct char_traits;
+template <class T> struct allocator;
+
+template <class C, class T = char_traits<C>> class basic_ios;
+template <class C, class T = char_traits<C>> class basic_streambuf;
+template <class C, class T = char_traits<C>> class basic_istream;
+template <class C, class T = char_traits<C>> class basic_ostream;
+template <class C, class T = char_traits<C>> class basic_iostream;
+
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_stringbuf;
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_istringstream;
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_ostringstream;
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_stringstream;
+
+template <class C, class T = char_traits<C>> class basic_filebuf;
+template <class C, class T = char_traits<C>> class basic_ifstream;
+template <class C, class T = char_traits<C>> class basic_ofstream;
+template <class C, class T = char_traits<C>> class basic_fstream;
+
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_string;
+
+using ios         = basic_ios<char>;
+using streambuf   = basic_streambuf<char>;
+using istream     = basic_istream<char>;
+using ostream     = basic_ostream<char>;
+using iostream    = basic_iostream<char>;
+using stringbuf   = basic_stringbuf<char>;
+using istringstream = basic_istringstream<char>;
+using ostringstream = basic_ostringstream<char>;
+using stringstream  = basic_stringstream<char>;
+using filebuf     = basic_filebuf<char>;
+using ifstream    = basic_ifstream<char>;
+using ofstream    = basic_ofstream<char>;
+using fstream     = basic_fstream<char>;
+
+using streamoff  = long;
+using streamsize = ptrdiff_t;
+
+template <class State> class fpos;
+
+}  // namespace std
+
+#endif

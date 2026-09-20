@@ -1,0 +1,260 @@
+/* <condition_variable> — C++ [thread.condition].
+ *
+ * "Wait until something is true." A mutex protects the something; a
+ * condition variable is how you wait for it without spinning.
+ *
+ * The part everybody gets wrong the first time is why `wait` takes the
+ * LOCK. The waiter must test the predicate while holding the mutex --
+ * otherwise the answer is stale before it is acted on -- and then sleep
+ * without holding it, or the notifier could never take the mutex to
+ * change anything. So wait must RELEASE the mutex and SLEEP as one
+ * indivisible step. Doing it in two steps loses a wakeup: a notify
+ * landing between the unlock and the sleep wakes nobody, and the waiter
+ * sleeps through the event it was waiting for.
+ *
+ * That is the whole reason this is a primitive and not a helper. Here
+ * the indivisibility comes from the futex: the sequence number is read
+ * while the mutex is held, and the futex sleeps only if the number is
+ * still what was read -- so a notify that bumped it in between makes
+ * the sleep return instantly instead of waiting.
+ *
+ * ---- spurious wakeups -----------------------------------------------------
+ *
+ * `wait` may return without a notify. This is not a defect to be
+ * apologised for; it is what lets the implementation be simple and
+ * fast, and it is REQUIRED to be tolerated. The predicate overload
+ * exists so the loop is written once, correctly, rather than at every
+ * call site:
+ *
+ *     cv.wait(lk, []{ return ready; });   // not: if (!ready) cv.wait(lk);
+ */
+#ifndef _LIBCXX_CONDITION_VARIABLE
+#define _LIBCXX_CONDITION_VARIABLE
+
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <system_error>
+
+extern "C" {
+int __os_futex_wait(const volatile int *addr, int expected, long timeout_ns);
+int __os_futex_wake(const volatile int *addr, int count);
+void __os_thread_yield(void);
+}
+
+namespace std {
+
+enum class cv_status { no_timeout, timeout };
+
+class condition_variable {
+public:
+    constexpr condition_variable() noexcept : __seq(0) {}
+    ~condition_variable() = default;
+    condition_variable(const condition_variable &) = delete;
+    condition_variable &operator=(const condition_variable &) = delete;
+
+    void notify_one() noexcept
+    {
+        /* Bump first, wake second. A waiter that reads the sequence and
+         * is about to sleep will now find it changed and not sleep at
+         * all -- which is how a notify that arrives "too early" is
+         * still not lost. */
+        __seq.fetch_add(1, memory_order_release);
+        __os_futex_wake(__word(), 1);
+    }
+
+    void notify_all() noexcept
+    {
+        __seq.fetch_add(1, memory_order_release);
+        __os_futex_wake(__word(), -1);
+    }
+
+    void wait(unique_lock<mutex> &lk)
+    {
+        if (!lk.owns_lock())
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "condition_variable::wait without the lock");
+        /* Read the sequence WHILE HOLDING the mutex: everything the
+         * notifier does happens under the same mutex, so a notify
+         * cannot slip between this read and the sleep below without
+         * changing the number this sleep tests. */
+        int s = __seq.load(memory_order_relaxed);
+        lk.unlock();
+        if (__os_futex_wait(__word(), s, -1) < 0)
+            __os_thread_yield();
+        lk.lock();
+    }
+
+    template <class P>
+    void wait(unique_lock<mutex> &lk, P pred)
+    {
+        /* The loop, written once. A spurious wakeup and a real one are
+         * indistinguishable from here, so the only correct thing is to
+         * re-test -- which is exactly what a hand-written `if` forgets. */
+        while (!pred())
+            wait(lk);
+    }
+
+    template <class R, class Per>
+    cv_status wait_for(unique_lock<mutex> &lk, const chrono::duration<R, Per> &d)
+    {
+        auto ns = chrono::duration_cast<chrono::nanoseconds>(d).count();
+        if (ns < 0)
+            ns = 0;
+        if (!lk.owns_lock())
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "condition_variable::wait_for without the lock");
+        int s = __seq.load(memory_order_relaxed);
+        lk.unlock();
+        int r = __os_futex_wait(__word(), s, (long)ns);
+        lk.lock();
+        /* "Timed out" is reported only when the sequence really did not
+         * move; a wakeup that raced with the timeout is a wakeup. */
+        return r < 0 && __seq.load(memory_order_relaxed) == s
+               ? cv_status::timeout : cv_status::no_timeout;
+    }
+
+    template <class R, class Per, class P>
+    bool wait_for(unique_lock<mutex> &lk, const chrono::duration<R, Per> &d,
+                  P pred)
+    {
+        /* Returns the PREDICATE, not whether it timed out -- so a
+         * caller writes `if (!cv.wait_for(...))` and means "gave up",
+         * with no second test. */
+        auto deadline = chrono::steady_clock::now() + d;
+        while (!pred()) {
+            /* No second thread can make the predicate true, so waiting
+             * for it is waiting for nothing. One last test, then give
+             * up -- looping against a clock that may not advance is
+             * how this used to hang. */
+            if (!__can_block())
+                return pred();
+            auto now = chrono::steady_clock::now();
+            if (now >= deadline)
+                return pred();
+            wait_for(lk, deadline - now);
+        }
+        return true;
+    }
+
+    template <class C, class D>
+    cv_status wait_until(unique_lock<mutex> &lk,
+                         const chrono::time_point<C, D> &t)
+    {
+        auto now = C::now();
+        return t <= now ? cv_status::timeout : wait_for(lk, t - now);
+    }
+
+    template <class C, class D, class P>
+    bool wait_until(unique_lock<mutex> &lk, const chrono::time_point<C, D> &t,
+                    P pred)
+    {
+        while (!pred()) {
+            if (!__can_block())
+                return pred();
+            auto now = C::now();
+            if (now >= t)
+                return pred();
+            wait_for(lk, t - now);
+        }
+        return true;
+    }
+
+    using native_handle_type = int *;
+    native_handle_type native_handle() { return (int *)__word(); }
+
+private:
+    const volatile int *__word() const
+    { return (const volatile int *)&__seq; }
+    atomic<int> __seq;
+};
+
+/* ---- condition_variable_any ------------------------------------------------
+ *
+ * The same thing over any lockable type, and it costs a mutex of its
+ * own. The reason: `wait` must unlock the caller's lock and sleep
+ * indivisibly, and with an unknown lock type there is no way to hand
+ * both to one primitive -- so an internal mutex is taken FIRST,
+ * establishing the ordering, and the caller's lock is released after.
+ * A notifier must take that internal mutex too, so it cannot slip
+ * between.
+ */
+class condition_variable_any {
+public:
+    condition_variable_any() = default;
+    condition_variable_any(const condition_variable_any &) = delete;
+    condition_variable_any &operator=(const condition_variable_any &) = delete;
+
+    void notify_one() noexcept
+    {
+        lock_guard<mutex> g(__m);
+        __cv.notify_one();
+    }
+
+    void notify_all() noexcept
+    {
+        lock_guard<mutex> g(__m);
+        __cv.notify_all();
+    }
+
+    template <class L>
+    void wait(L &lk)
+    {
+        unique_lock<mutex> own(__m);
+        lk.unlock();
+        __cv.wait(own);
+        own.unlock();
+        lk.lock();
+    }
+
+    template <class L, class P>
+    void wait(L &lk, P pred)
+    {
+        while (!pred())
+            wait(lk);
+    }
+
+    template <class L, class R, class Per>
+    cv_status wait_for(L &lk, const chrono::duration<R, Per> &d)
+    {
+        unique_lock<mutex> own(__m);
+        lk.unlock();
+        cv_status s = __cv.wait_for(own, d);
+        own.unlock();
+        lk.lock();
+        return s;
+    }
+
+    template <class L, class R, class Per, class P>
+    bool wait_for(L &lk, const chrono::duration<R, Per> &d, P pred)
+    {
+        auto deadline = chrono::steady_clock::now() + d;
+        while (!pred()) {
+            if (!__can_block())
+                return pred();
+            auto now = chrono::steady_clock::now();
+            if (now >= deadline)
+                return pred();
+            wait_for(lk, deadline - now);
+        }
+        return true;
+    }
+
+private:
+    mutex __m;
+    condition_variable __cv;
+};
+
+/* The standard's helper for a thread that must not be left running past
+ * its notify: notify_all AFTER the lock is released and the thread has
+ * ended, so a waiter that wakes finds the thread already joinable. */
+inline void notify_all_at_thread_exit(condition_variable &cv,
+                                      unique_lock<mutex> lk)
+{
+    lk.unlock();
+    cv.notify_all();
+}
+
+}  // namespace std
+
+#endif

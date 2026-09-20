@@ -9,6 +9,10 @@
 #include <type_traits>
 #include <utility>
 #include <memory>
+#include <tuple>
+#include <typeinfo>
+#include <exception>
+#include <new>
 
 namespace std {
 
@@ -334,6 +338,390 @@ private:
 template <class F>
 constexpr __not_fn_t<decay_t<F>> not_fn(F &&f)
 { return __not_fn_t<decay_t<F>>(forward<F>(f)); }
+
+/* ---- mem_fn -----------------------------------------------------------
+ *
+ * A member pointer as a callable. `&T::size` cannot be called like a
+ * function -- the syntax is `(obj.*p)()` -- so an algorithm that takes
+ * a callable cannot take one directly. mem_fn wraps it, and the wrapper
+ * accepts an object, a reference, a pointer or a smart pointer, because
+ * invoke already knows all four spellings.
+ */
+template <class F>
+class __mem_fn_t {
+public:
+    explicit constexpr __mem_fn_t(F f) : __f(f) {}
+    template <class... A>
+    constexpr auto operator()(A &&...a) const
+        -> decltype(invoke(declval<F>(), forward<A>(a)...))
+    { return invoke(__f, forward<A>(a)...); }
+
+private:
+    F __f;
+};
+
+template <class R, class T>
+constexpr __mem_fn_t<R T::*> mem_fn(R T::*p) noexcept
+{ return __mem_fn_t<R T::*>(p); }
+
+/* ---- bad_function_call ------------------------------------------------- */
+
+class bad_function_call : public exception {
+public:
+    const char *what() const noexcept override
+    { return "std::function called with no target"; }
+};
+
+/* ---- std::function ------------------------------------------------------
+ *
+ * A callable of a known SIGNATURE and an unknown type. It is the same
+ * type erasure <any> uses -- a table of functions built per stored
+ * type, and a pointer to it -- with one more entry: how to CALL the
+ * thing. That entry is why a std::function costs an indirect call that
+ * a lambda does not, and why passing a lambda to a template parameter
+ * is faster than passing it through a std::function. The price buys
+ * one thing: the type can be decided at run time.
+ *
+ * Small-object optimization, as in <any>, and for the same reason: a
+ * lambda capturing one pointer is the overwhelmingly common case and
+ * must not allocate. A stored object that fits the buffer and moves
+ * without throwing lives inside; anything else goes on the heap.
+ *
+ * Calling an EMPTY function throws bad_function_call rather than
+ * crashing. A null check on every call would cost the one thing this
+ * type is already paying for, so the check lives where the table
+ * pointer is read -- there is no table, so there is nothing to call,
+ * and that is detectable for free.
+ */
+template <class> class function;
+
+template <class R, class... A>
+class function<R(A...)> {
+public:
+    using result_type = R;
+
+    function() noexcept : __ops(nullptr) {}
+    function(decltype(nullptr)) noexcept : __ops(nullptr) {}
+
+    function(const function &o) : __ops(nullptr)
+    {
+        if (o.__ops) {
+            o.__ops->__copy(&__s, &o.__s);
+            __ops = o.__ops;
+        }
+    }
+
+    function(function &&o) noexcept : __ops(nullptr)
+    {
+        if (o.__ops) {
+            o.__ops->__move(&__s, &o.__s);
+            __ops = o.__ops;
+            o.__ops = nullptr;
+        }
+    }
+
+    template <class F, class D = decay_t<F>,
+              class = enable_if_t<!is_same_v<D, function> &&
+                                  is_invocable_r_v<R, D &, A...>>>
+    function(F &&f) : __ops(nullptr)
+    { __emplace<D>(forward<F>(f)); }
+
+    ~function() { __reset(); }
+
+    function &operator=(const function &o)
+    {
+        function t(o);
+        swap(t);
+        return *this;
+    }
+
+    function &operator=(function &&o) noexcept
+    {
+        if (this != &o) {
+            __reset();
+            if (o.__ops) {
+                o.__ops->__move(&__s, &o.__s);
+                __ops = o.__ops;
+                o.__ops = nullptr;
+            }
+        }
+        return *this;
+    }
+
+    function &operator=(decltype(nullptr)) noexcept
+    {
+        __reset();
+        return *this;
+    }
+
+    template <class F, class D = decay_t<F>,
+              class = enable_if_t<!is_same_v<D, function> &&
+                                  is_invocable_r_v<R, D &, A...>>>
+    function &operator=(F &&f)
+    {
+        function t(forward<F>(f));
+        swap(t);
+        return *this;
+    }
+
+    void swap(function &o) noexcept
+    {
+        /* Through a temporary, not a byte swap: a stored object in the
+         * small buffer is at a DIFFERENT ADDRESS afterwards, and only
+         * its move constructor knows how to put it there. */
+        if (!__ops && !o.__ops)
+            return;
+        function t(static_cast<function &&>(*this));
+        *this = static_cast<function &&>(o);
+        o = static_cast<function &&>(t);
+    }
+
+    explicit operator bool() const noexcept { return __ops != nullptr; }
+
+    R operator()(A... a) const
+    {
+        if (!__ops)
+            throw bad_function_call();
+        return __ops->__call(const_cast<void *>((const void *)&__s),
+                             forward<A>(a)...);
+    }
+
+    const type_info &target_type() const noexcept
+    { return __ops ? __ops->__type() : typeid(void); }
+
+    template <class T>
+    T *target() noexcept
+    {
+        if (!__ops || __ops->__type() != typeid(T))
+            return nullptr;
+        return static_cast<T *>(__ops->__get(&__s));
+    }
+
+    template <class T>
+    const T *target() const noexcept
+    {
+        if (!__ops || __ops->__type() != typeid(T))
+            return nullptr;
+        return static_cast<const T *>(
+            __ops->__get(const_cast<void *>((const void *)&__s)));
+    }
+
+private:
+    static constexpr size_t __bufsz = 3 * sizeof(void *);
+
+    struct __ops_t {
+        R (*__call)(void *, A &&...);
+        void (*__destroy)(void *);
+        void (*__copy)(void *, const void *);
+        void (*__move)(void *, void *);
+        const type_info &(*__type)();
+        void *(*__get)(void *);
+    };
+
+    union {
+        void *__ptr;
+        char __buf[__bufsz];
+    } __s;
+    const __ops_t *__ops;
+
+    template <class T>
+    static constexpr bool __is_small =
+        sizeof(T) <= __bufsz && alignof(T) <= alignof(void *) &&
+        is_nothrow_move_constructible_v<T>;
+
+    template <class T>
+    struct __small {
+        static R __call(void *s, A &&...a)
+        { return invoke_r<R>(*(T *)s, forward<A>(a)...); }
+        static void __destroy(void *s) { ((T *)s)->~T(); }
+        static void __copy(void *d, const void *s)
+        { ::new (d) T(*(const T *)s); }
+        static void __move(void *d, void *s)
+        { ::new (d) T(static_cast<T &&>(*(T *)s)); ((T *)s)->~T(); }
+        static const type_info &__type() { return typeid(T); }
+        static void *__get(void *s) { return s; }
+        /* Defined IN the class, as an inline variable. An out-of-line
+         * definition would be a static data member of a nested class
+         * template inside a class template, which is a shape EmbCC does
+         * not instantiate -- and this is better anyway: one definition,
+         * beside the functions it points at. */
+        static inline const __ops_t __table = {
+            &__call, &__destroy, &__copy, &__move, &__type, &__get
+        };
+    };
+
+    template <class T>
+    struct __large {
+        static R __call(void *s, A &&...a)
+        { return invoke_r<R>(**(T **)s, forward<A>(a)...); }
+        static void __destroy(void *s) { delete *(T **)s; }
+        static void __copy(void *d, const void *s)
+        { *(T **)d = new T(**(T *const *)s); }
+        static void __move(void *d, void *s)
+        { *(T **)d = *(T **)s; *(T **)s = nullptr; }
+        static const type_info &__type() { return typeid(T); }
+        static void *__get(void *s) { return *(T **)s; }
+        static inline const __ops_t __table = {
+            &__call, &__destroy, &__copy, &__move, &__type, &__get
+        };
+    };
+
+    template <class T, class F>
+    void __emplace(F &&f)
+    {
+        if constexpr (__is_small<T>) {
+            ::new ((void *)&__s) T(forward<F>(f));
+            __ops = &__small<T>::__table;
+        } else {
+            __s.__ptr = new T(forward<F>(f));
+            __ops = &__large<T>::__table;
+        }
+    }
+
+    void __reset() noexcept
+    {
+        if (__ops) {
+            __ops->__destroy(&__s);
+            __ops = nullptr;
+        }
+    }
+};
+
+template <class R, class... A>
+void swap(function<R(A...)> &a, function<R(A...)> &b) noexcept { a.swap(b); }
+
+template <class R, class... A>
+bool operator==(const function<R(A...)> &f, decltype(nullptr)) noexcept
+{ return !f; }
+template <class R, class... A>
+bool operator==(decltype(nullptr), const function<R(A...)> &f) noexcept
+{ return !f; }
+template <class R, class... A>
+bool operator!=(const function<R(A...)> &f, decltype(nullptr)) noexcept
+{ return (bool)f; }
+template <class R, class... A>
+bool operator!=(decltype(nullptr), const function<R(A...)> &f) noexcept
+{ return (bool)f; }
+
+/* Deduction guides, so `function f = [](int){ return 1; };` works
+ * without spelling the signature. */
+template <class R, class... A>
+function(R (*)(A...)) -> function<R(A...)>;
+
+/* ---- bind ---------------------------------------------------------------
+ *
+ * Fix some arguments now, supply the rest later. A lambda does this
+ * better in nearly every case -- it is clearer, it does not need
+ * placeholders, and it compiles to less -- so this exists for the code
+ * that already uses it and for member pointers, where `bind(&T::f, obj)`
+ * is still shorter than the lambda.
+ *
+ * The placeholders are the one part that has to be a library trick: `_1`
+ * is an object whose TYPE encodes its index, so the substitution happens
+ * at compile time and costs nothing at run time.
+ */
+namespace placeholders {
+template <int N> struct __ph {};
+inline constexpr __ph<1> _1{};
+inline constexpr __ph<2> _2{};
+inline constexpr __ph<3> _3{};
+inline constexpr __ph<4> _4{};
+inline constexpr __ph<5> _5{};
+inline constexpr __ph<6> _6{};
+}
+
+template <class T> struct is_placeholder : integral_constant<int, 0> {};
+template <int N>
+struct is_placeholder<placeholders::__ph<N>> : integral_constant<int, N> {};
+/* The cv-qualified forms too: the placeholders are `inline constexpr`
+ * objects, so `decltype(_1)` is `const __ph<1>` and a program that asks
+ * the obvious question would otherwise get 0. */
+template <int N>
+struct is_placeholder<const placeholders::__ph<N>>
+    : integral_constant<int, N> {};
+template <int N>
+struct is_placeholder<volatile placeholders::__ph<N>>
+    : integral_constant<int, N> {};
+template <int N>
+struct is_placeholder<const volatile placeholders::__ph<N>>
+    : integral_constant<int, N> {};
+template <class T>
+inline constexpr int is_placeholder_v = is_placeholder<T>::value;
+
+template <class T> struct is_bind_expression : false_type {};
+template <class T>
+inline constexpr bool is_bind_expression_v = is_bind_expression<T>::value;
+
+namespace __detail {
+
+/* One bound argument, resolved against the call's arguments: a
+ * placeholder picks one out, a reference_wrapper unwraps, and anything
+ * else is itself. */
+template <class Bound, class Tup>
+constexpr decltype(auto) __bind_arg(Bound &b, Tup &&t)
+{
+    constexpr int n = is_placeholder_v<remove_cvref_t<Bound>>;
+    if constexpr (n != 0)
+        return get<n - 1>(static_cast<Tup &&>(t));
+    else
+        return (b);
+}
+
+template <class F, class Bounds, size_t... I, class Tup>
+constexpr decltype(auto) __bind_call(F &f, Bounds &bs, index_sequence<I...>,
+                                     Tup &&t)
+{
+    return invoke(f, __bind_arg(get<I>(bs), static_cast<Tup &&>(t))...);
+}
+
+template <class F, class... B>
+class __binder {
+public:
+    /* Constrained, or this greedy constructor beats the COPY
+     * constructor whenever a binder is copied from a non-const
+     * binder: the template is an exact match and the copy constructor
+     * needs a qualification conversion. Storing a binder in a
+     * std::function copies it, which is how this was found. */
+    template <class G, class... C,
+              class = enable_if_t<!is_same_v<decay_t<G>, __binder>>>
+    explicit constexpr __binder(G &&g, C &&...c)
+        : __f(forward<G>(g)), __b(forward<C>(c)...) {}
+
+    __binder(const __binder &) = default;
+    __binder(__binder &&) = default;
+    __binder &operator=(const __binder &) = default;
+    __binder &operator=(__binder &&) = default;
+
+    template <class... A>
+    constexpr decltype(auto) operator()(A &&...a)
+    {
+        return __bind_call(__f, __b, make_index_sequence<sizeof...(B)>{},
+                           tuple<A &&...>(forward<A>(a)...));
+    }
+
+    template <class... A>
+    constexpr decltype(auto) operator()(A &&...a) const
+    {
+        return __bind_call(__f, __b, make_index_sequence<sizeof...(B)>{},
+                           tuple<A &&...>(forward<A>(a)...));
+    }
+
+private:
+    mutable F __f;
+    mutable tuple<B...> __b;
+};
+
+}  // namespace __detail
+
+template <class F, class... B>
+struct is_bind_expression<__detail::__binder<F, B...>> : true_type {};
+
+template <class F, class... B>
+constexpr __detail::__binder<decay_t<F>, decay_t<B>...> bind(F &&f, B &&...b)
+{
+    return __detail::__binder<decay_t<F>, decay_t<B>...>(forward<F>(f),
+                                                         forward<B>(b)...);
+}
 
 }  // namespace std
 

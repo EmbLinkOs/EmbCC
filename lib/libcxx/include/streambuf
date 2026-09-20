@@ -19,6 +19,7 @@
 #ifndef _LIBCXX_STREAMBUF
 #define _LIBCXX_STREAMBUF
 
+#include <iosfwd>
 #include <cstddef>
 #include <string>
 
@@ -27,7 +28,7 @@ namespace std {
 using streamsize = ptrdiff_t;
 using streamoff = long;
 
-template <class C, class T = char_traits<C>>
+template <class C, class T>
 class basic_streambuf {
 public:
     using char_type = C;

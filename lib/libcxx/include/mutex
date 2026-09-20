@@ -1,0 +1,703 @@
+/* <mutex> — C++ [thread.mutex].
+ *
+ * A mutex is two things and the second is the one people forget. It is
+ * MUTUAL EXCLUSION, so that two threads do not touch the same object at
+ * once; and it is a SYNCHRONISATION POINT, so that everything one
+ * thread wrote before unlocking is visible to the thread that locks
+ * next. The second is why `lock` is an acquire and `unlock` a release,
+ * and why a "mutex" built from a relaxed atomic flag is not one: it
+ * would exclude and not publish, and the reader would see a lock it
+ * could take guarding data it could not see.
+ *
+ * ---- how these are built ---------------------------------------------------
+ *
+ * One atomic int, and the OS seam's futex. The uncontended path never
+ * enters the kernel -- it is a compare-exchange on that int and nothing
+ * else -- and only a thread that finds the mutex held goes to sleep on
+ * the word. That is the whole design, and it is why the seam offers a
+ * futex rather than a "mutex": the policy (recursion, fairness, try_lock)
+ * belongs here, where it is written once, and not in each target.
+ *
+ * The three states are the classic ones, and two is not enough:
+ *
+ *   0  free
+ *   1  held, and nobody is waiting
+ *   2  held, and somebody might be
+ *
+ * Unlock has to wake a sleeper, and it can only know there is one if
+ * locking recorded it. With two states, unlock must either wake
+ * unconditionally -- a syscall on every unlock, including the
+ * uncontended ones this design exists to keep out of the kernel -- or
+ * never, which loses wakeups.
+ *
+ * ---- a target without threads ----------------------------------------------
+ *
+ * Everything below still works and never blocks: a single-threaded
+ * program locking an unlocked mutex takes the uncontended path, which
+ * does not touch the seam at all. Contention on such a target cannot
+ * happen, because there is no second thread to contend. What DOES fail
+ * there is creating a thread, and <thread> says so.
+ */
+#ifndef _LIBCXX_MUTEX
+#define _LIBCXX_MUTEX
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+
+extern "C" {
+int __os_futex_wait(const volatile int *addr, int expected, long timeout_ns);
+int __os_futex_wake(const volatile int *addr, int count);
+void __os_thread_yield(void);
+unsigned long __os_thread_self(void);
+}
+
+namespace std {
+
+/* ---- can this target block at all? ----------------------------------------
+ *
+ * Asked once, and the answer changes what a BOUNDED wait does. If there
+ * is no futex there is no second thread either, so a timed wait for
+ * something another thread would have to do can never succeed -- and
+ * polling until a deadline is worse than useless, because a target with
+ * no futex usually has no clock either, and `steady_clock::now()` then
+ * returns the same value forever. The loop never ends.
+ *
+ * So a bounded wait on such a target tries once more and gives up. An
+ * UNBOUNDED wait still waits: a program that blocks forever with no
+ * other thread has deadlocked, and faithfully hanging is the honest
+ * report of its own bug.
+ *
+ * The probe cannot hang: it waits for a word to stop being a value it
+ * already is not, which a working futex answers immediately.
+ */
+inline bool __can_block() noexcept
+{
+    static const bool yes = [] {
+        /* errno is saved and put back: this probe runs the first time
+         * anything waits, which may be inside a library call whose own
+         * errno the caller is about to read. */
+        volatile int probe = 0;
+        int saved = errno;
+        errno = 0;
+        (void)__os_futex_wait(&probe, 1, 0);
+        bool ok = errno != ENOSYS;
+        errno = saved;
+        return ok;
+    }();
+    return yes;
+}
+
+/* ---- the tag types ------------------------------------------------------
+ * Three of them, because "I already hold it", "do not take it yet" and
+ * "take it only if it is free" are three different intentions and a
+ * bool cannot say which. */
+struct defer_lock_t { explicit defer_lock_t() = default; };
+struct try_to_lock_t { explicit try_to_lock_t() = default; };
+struct adopt_lock_t { explicit adopt_lock_t() = default; };
+
+inline constexpr defer_lock_t defer_lock{};
+inline constexpr try_to_lock_t try_to_lock{};
+inline constexpr adopt_lock_t adopt_lock{};
+
+/* ---- mutex ---------------------------------------------------------------- */
+
+class mutex {
+public:
+    constexpr mutex() noexcept : __s(0) {}
+    ~mutex() = default;
+    mutex(const mutex &) = delete;
+    mutex &operator=(const mutex &) = delete;
+
+    void lock()
+    {
+        /* The fast path: one compare-exchange, no syscall, no loop.
+         * This is the path an uncontended mutex always takes and the
+         * reason a mutex is cheap. */
+        int expected = 0;
+        if (__s.compare_exchange_strong(expected, 1, memory_order_acquire,
+                                        memory_order_relaxed))
+            return;
+        __lock_slow();
+    }
+
+    bool try_lock() noexcept
+    {
+        int expected = 0;
+        return __s.compare_exchange_strong(expected, 1, memory_order_acquire,
+                                           memory_order_relaxed);
+    }
+
+    void unlock() noexcept
+    {
+        /* Release, so everything written under the lock is visible to
+         * whoever acquires next. The exchange tells us whether anybody
+         * was waiting, so the wake -- a syscall -- happens only when
+         * there is somebody to wake. */
+        if (__s.exchange(0, memory_order_release) == 2)
+            __os_futex_wake(&__word(), 1);
+    }
+
+    using native_handle_type = int *;
+    native_handle_type native_handle() { return (int *)&__word(); }
+
+private:
+    void __lock_slow()
+    {
+        int c = __s.load(memory_order_relaxed);
+        for (;;) {
+            if (c == 0) {
+                if (__s.compare_exchange_weak(c, 2, memory_order_acquire,
+                                              memory_order_relaxed))
+                    return;
+                continue;
+            }
+            /* Record that somebody is waiting BEFORE sleeping, or an
+             * unlock between the two would see state 1, skip the wake,
+             * and leave this thread asleep forever. Announcing it first
+             * is what makes the lost wakeup impossible. */
+            if (c == 1) {
+                int one = 1;
+                if (!__s.compare_exchange_weak(one, 2, memory_order_relaxed,
+                                               memory_order_relaxed)) {
+                    c = one;
+                    continue;
+                }
+                c = 2;
+            }
+            if (__os_futex_wait(&__word(), 2, -1) < 0) {
+                /* No futex on this target: there is no other thread
+                 * that could release it, so spinning is the only
+                 * honest thing left and the yield makes it visible in
+                 * a profile rather than silent. */
+                __os_thread_yield();
+            }
+            c = __s.load(memory_order_relaxed);
+        }
+    }
+
+    volatile int &__word() { return *(volatile int *)&__s; }
+    atomic<int> __s;
+};
+
+/* ---- recursive_mutex -------------------------------------------------------
+ *
+ * The same lock with an owner and a count. It exists for code that
+ * cannot tell whether its caller already holds the lock -- a virtual
+ * method calling another on the same object, say -- and it is worth
+ * saying that needing it is usually a sign the locking is in the wrong
+ * place: a public method that locks and calls another public method
+ * that locks has two entry points to the same invariant.
+ */
+class recursive_mutex {
+public:
+    recursive_mutex() : __owner(0), __count(0) {}
+    ~recursive_mutex() = default;
+    recursive_mutex(const recursive_mutex &) = delete;
+    recursive_mutex &operator=(const recursive_mutex &) = delete;
+
+    void lock()
+    {
+        unsigned long me = __os_thread_self();
+        if (__count && __owner.load(memory_order_relaxed) == me) {
+            __count++;
+            return;
+        }
+        __m.lock();
+        __owner.store(me, memory_order_relaxed);
+        __count = 1;
+    }
+
+    bool try_lock() noexcept
+    {
+        unsigned long me = __os_thread_self();
+        if (__count && __owner.load(memory_order_relaxed) == me) {
+            __count++;
+            return true;
+        }
+        if (!__m.try_lock())
+            return false;
+        __owner.store(me, memory_order_relaxed);
+        __count = 1;
+        return true;
+    }
+
+    void unlock() noexcept
+    {
+        if (--__count == 0) {
+            __owner.store(0, memory_order_relaxed);
+            __m.unlock();
+        }
+    }
+
+private:
+    mutex __m;
+    atomic<unsigned long> __owner;
+    /* Not atomic, and it does not need to be: it is only ever read or
+     * written by the thread that holds the lock. */
+    unsigned __count;
+};
+
+/* ---- timed_mutex -----------------------------------------------------------
+ *
+ * A mutex whose wait gives up. The timeout is passed to the futex, so
+ * waiting is still a sleep rather than a spin -- which is the whole
+ * difference between a timed lock and a loop of try_lock.
+ */
+class timed_mutex {
+public:
+    constexpr timed_mutex() noexcept : __s(0) {}
+    timed_mutex(const timed_mutex &) = delete;
+    timed_mutex &operator=(const timed_mutex &) = delete;
+
+    void lock()
+    {
+        int e = 0;
+        if (__s.compare_exchange_strong(e, 1, memory_order_acquire,
+                                        memory_order_relaxed))
+            return;
+        __wait(-1);
+    }
+
+    bool try_lock() noexcept
+    {
+        int e = 0;
+        return __s.compare_exchange_strong(e, 1, memory_order_acquire,
+                                           memory_order_relaxed);
+    }
+
+    template <class R, class P>
+    bool try_lock_for(const chrono::duration<R, P> &d)
+    {
+        auto ns = chrono::duration_cast<chrono::nanoseconds>(d).count();
+        if (ns < 0)
+            ns = 0;
+        int e = 0;
+        if (__s.compare_exchange_strong(e, 1, memory_order_acquire,
+                                        memory_order_relaxed))
+            return true;
+        return __wait((long)ns);
+    }
+
+    template <class C, class D>
+    bool try_lock_until(const chrono::time_point<C, D> &t)
+    { return try_lock_for(t - C::now()); }
+
+    void unlock() noexcept
+    {
+        if (__s.exchange(0, memory_order_release) == 2)
+            __os_futex_wake((const volatile int *)&__s, 1);
+    }
+
+private:
+    bool __wait(long ns)
+    {
+        int c = __s.load(memory_order_relaxed);
+        for (;;) {
+            if (c == 0) {
+                if (__s.compare_exchange_weak(c, 2, memory_order_acquire,
+                                              memory_order_relaxed))
+                    return true;
+                continue;
+            }
+            if (c == 1) {
+                int one = 1;
+                if (!__s.compare_exchange_weak(one, 2, memory_order_relaxed,
+                                               memory_order_relaxed)) {
+                    c = one;
+                    continue;
+                }
+                c = 2;
+            }
+            if (__os_futex_wait((const volatile int *)&__s, 2, ns) < 0) {
+                /* Timed out, or no futex here. Either way a bounded
+                 * wait has to end rather than spin forever. */
+                if (ns >= 0)
+                    return try_lock();
+                __os_thread_yield();
+            }
+            if (ns >= 0 && !__can_block())
+                return try_lock();
+            c = __s.load(memory_order_relaxed);
+        }
+    }
+
+    atomic<int> __s;
+};
+
+class recursive_timed_mutex {
+public:
+    recursive_timed_mutex() : __owner(0), __count(0) {}
+    recursive_timed_mutex(const recursive_timed_mutex &) = delete;
+    recursive_timed_mutex &operator=(const recursive_timed_mutex &) = delete;
+
+    void lock()
+    {
+        unsigned long me = __os_thread_self();
+        if (__count && __owner.load(memory_order_relaxed) == me) {
+            __count++;
+            return;
+        }
+        __m.lock();
+        __owner.store(me, memory_order_relaxed);
+        __count = 1;
+    }
+
+    bool try_lock() noexcept
+    {
+        unsigned long me = __os_thread_self();
+        if (__count && __owner.load(memory_order_relaxed) == me) {
+            __count++;
+            return true;
+        }
+        if (!__m.try_lock())
+            return false;
+        __owner.store(me, memory_order_relaxed);
+        __count = 1;
+        return true;
+    }
+
+    template <class R, class P>
+    bool try_lock_for(const chrono::duration<R, P> &d)
+    {
+        unsigned long me = __os_thread_self();
+        if (__count && __owner.load(memory_order_relaxed) == me) {
+            __count++;
+            return true;
+        }
+        if (!__m.try_lock_for(d))
+            return false;
+        __owner.store(me, memory_order_relaxed);
+        __count = 1;
+        return true;
+    }
+
+    template <class C, class D>
+    bool try_lock_until(const chrono::time_point<C, D> &t)
+    { return try_lock_for(t - C::now()); }
+
+    void unlock() noexcept
+    {
+        if (--__count == 0) {
+            __owner.store(0, memory_order_relaxed);
+            __m.unlock();
+        }
+    }
+
+private:
+    timed_mutex __m;
+    atomic<unsigned long> __owner;
+    unsigned __count;
+};
+
+/* ---- the guards ------------------------------------------------------------
+ *
+ * The reason a raw lock()/unlock() pair is a bug waiting to happen: an
+ * exception, an early return, or a `break` added six months later skips
+ * the unlock. A guard cannot skip it, because the destructor runs on
+ * every path out of the scope including the one nobody thought about.
+ */
+template <class M>
+class lock_guard {
+public:
+    using mutex_type = M;
+    explicit lock_guard(M &m) : __m(m) { __m.lock(); }
+    /* Adopting means "I already hold it": the guard takes over the
+     * unlocking without locking again, which is what a function that
+     * receives a locked mutex needs. */
+    lock_guard(M &m, adopt_lock_t) : __m(m) {}
+    ~lock_guard() { __m.unlock(); }
+    lock_guard(const lock_guard &) = delete;
+    lock_guard &operator=(const lock_guard &) = delete;
+
+private:
+    M &__m;
+};
+
+template <class M>
+class unique_lock {
+public:
+    using mutex_type = M;
+
+    unique_lock() noexcept : __m(nullptr), __owns(false) {}
+    explicit unique_lock(M &m) : __m(&m), __owns(false) { lock(); }
+    unique_lock(M &m, defer_lock_t) noexcept : __m(&m), __owns(false) {}
+    unique_lock(M &m, try_to_lock_t) : __m(&m), __owns(m.try_lock()) {}
+    unique_lock(M &m, adopt_lock_t) : __m(&m), __owns(true) {}
+
+    template <class R, class P>
+    unique_lock(M &m, const chrono::duration<R, P> &d)
+        : __m(&m), __owns(m.try_lock_for(d)) {}
+
+    ~unique_lock()
+    {
+        if (__owns)
+            __m->unlock();
+    }
+
+    unique_lock(unique_lock &&o) noexcept : __m(o.__m), __owns(o.__owns)
+    { o.__m = nullptr; o.__owns = false; }
+
+    unique_lock &operator=(unique_lock &&o) noexcept
+    {
+        if (this != &o) {
+            if (__owns)
+                __m->unlock();
+            __m = o.__m;
+            __owns = o.__owns;
+            o.__m = nullptr;
+            o.__owns = false;
+        }
+        return *this;
+    }
+
+    unique_lock(const unique_lock &) = delete;
+    unique_lock &operator=(const unique_lock &) = delete;
+
+    /* Locking twice, or unlocking what is not held, is a logic error
+     * and is reported as one. A guard that silently did nothing would
+     * leave the caller believing it holds a lock it does not. */
+    void lock()
+    {
+        if (!__m)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "unique_lock::lock with no mutex");
+        if (__owns)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "unique_lock::lock when already locked");
+        __m->lock();
+        __owns = true;
+    }
+
+    bool try_lock()
+    {
+        if (!__m || __owns)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "unique_lock::try_lock");
+        __owns = __m->try_lock();
+        return __owns;
+    }
+
+    template <class R, class P>
+    bool try_lock_for(const chrono::duration<R, P> &d)
+    {
+        if (!__m || __owns)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "unique_lock::try_lock_for");
+        __owns = __m->try_lock_for(d);
+        return __owns;
+    }
+
+    void unlock()
+    {
+        if (!__owns)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "unique_lock::unlock when not locked");
+        __m->unlock();
+        __owns = false;
+    }
+
+    void swap(unique_lock &o) noexcept
+    {
+        M *tm = __m; __m = o.__m; o.__m = tm;
+        bool to = __owns; __owns = o.__owns; o.__owns = to;
+    }
+
+    /* Hand the mutex back still locked. The caller becomes responsible
+     * for unlocking it, which is the point. */
+    M *release() noexcept
+    {
+        M *r = __m;
+        __m = nullptr;
+        __owns = false;
+        return r;
+    }
+
+    bool owns_lock() const noexcept { return __owns; }
+    explicit operator bool() const noexcept { return __owns; }
+    M *mutex() const noexcept { return __m; }
+
+private:
+    M *__m;
+    bool __owns;
+};
+
+/* ---- locking several at once -----------------------------------------------
+ *
+ * Two threads taking two mutexes in opposite orders deadlock, and no
+ * amount of care at the call sites prevents it in a large program. The
+ * standard's answer is an algorithm that cannot deadlock: take the
+ * first, TRY the rest, and on any failure drop everything and start
+ * again from the one that failed. Because a thread that fails releases
+ * what it holds, there is no cycle to wait in.
+ */
+template <class M1, class M2>
+void lock(M1 &a, M2 &b)
+{
+    for (;;) {
+        {
+            unique_lock<M1> l1(a);
+            if (b.try_lock()) {
+                l1.release();
+                return;
+            }
+        }
+        /* Give the other thread a chance to finish before trying the
+         * other way round; without this the two can livelock, each
+         * taking its first and failing its second forever. */
+        __os_thread_yield();
+        {
+            unique_lock<M2> l2(b);
+            if (a.try_lock()) {
+                l2.release();
+                return;
+            }
+        }
+        __os_thread_yield();
+    }
+}
+
+template <class M1, class M2, class M3, class... Rest>
+void lock(M1 &a, M2 &b, M3 &c, Rest &...rest)
+{
+    /* The general case, simplified honestly: take them in the order
+     * given, and if any try fails, release and retry. It is the same
+     * no-hold-and-wait argument as the two-mutex form. */
+    for (;;) {
+        unique_lock<M1> l1(a);
+        if (!b.try_lock()) { __os_thread_yield(); continue; }
+        unique_lock<M2> l2(b, adopt_lock);
+        if (!c.try_lock()) { __os_thread_yield(); continue; }
+        unique_lock<M3> l3(c, adopt_lock);
+        bool ok = true;
+        (void)(..., (ok = ok && rest.try_lock()));
+        if (!ok) {
+            __os_thread_yield();
+            continue;
+        }
+        l1.release();
+        l2.release();
+        l3.release();
+        return;
+    }
+}
+
+template <class M1, class M2>
+int try_lock(M1 &a, M2 &b)
+{
+    if (!a.try_lock())
+        return 0;
+    if (!b.try_lock()) {
+        a.unlock();
+        return 1;                 /* the index that failed */
+    }
+    return -1;
+}
+
+/* scoped_lock is lock_guard over any number of mutexes, and over
+ * several it uses the deadlock-free algorithm above rather than taking
+ * them in order. That is the whole reason to prefer it. */
+template <class... M>
+class scoped_lock;
+
+template <>
+class scoped_lock<> {
+public:
+    explicit scoped_lock() = default;
+    explicit scoped_lock(adopt_lock_t) {}
+    ~scoped_lock() = default;
+};
+
+template <class M>
+class scoped_lock<M> {
+public:
+    using mutex_type = M;
+    explicit scoped_lock(M &m) : __m(m) { __m.lock(); }
+    scoped_lock(M &m, adopt_lock_t) : __m(m) {}
+    ~scoped_lock() { __m.unlock(); }
+    scoped_lock(const scoped_lock &) = delete;
+    scoped_lock &operator=(const scoped_lock &) = delete;
+
+private:
+    M &__m;
+};
+
+template <class M1, class M2>
+class scoped_lock<M1, M2> {
+public:
+    scoped_lock(M1 &a, M2 &b) : __a(a), __b(b) { std::lock(__a, __b); }
+    scoped_lock(M1 &a, M2 &b, adopt_lock_t) : __a(a), __b(b) {}
+    ~scoped_lock() { __b.unlock(); __a.unlock(); }
+    scoped_lock(const scoped_lock &) = delete;
+    scoped_lock &operator=(const scoped_lock &) = delete;
+
+private:
+    M1 &__a;
+    M2 &__b;
+};
+
+/* ---- once_flag and call_once -----------------------------------------------
+ *
+ * "Run this exactly once, however many threads arrive, and make every
+ * one of them wait until it has finished." The second half is what a
+ * plain `if (!done) { init(); done = true; }` gets wrong: a second
+ * thread sees done still false, runs init again, or sees done true
+ * while init is half-way through and uses what is not built yet.
+ *
+ * Three states again, and for the same reason as the mutex: a caller
+ * that finds the work IN PROGRESS must sleep and be woken, and the
+ * waker can only know to wake it if it said so.
+ */
+class once_flag {
+public:
+    constexpr once_flag() noexcept : __s(0) {}
+    once_flag(const once_flag &) = delete;
+    once_flag &operator=(const once_flag &) = delete;
+
+private:
+    template <class F, class... A>
+    friend void call_once(once_flag &, F &&, A &&...);
+    atomic<int> __s;             /* 0 untouched, 1 running, 2 done */
+};
+
+template <class F, class... A>
+void call_once(once_flag &f, F &&fn, A &&...a)
+{
+    /* Acquire on the fast path: a thread that sees "done" must also see
+     * everything the initialising thread wrote. Relaxed here would let
+     * it see the flag and not the object. */
+    if (f.__s.load(memory_order_acquire) == 2)
+        return;
+    for (;;) {
+        int e = 0;
+        if (f.__s.compare_exchange_strong(e, 1, memory_order_acquire,
+                                          memory_order_relaxed)) {
+            /* If it throws, the flag goes back to untouched and the
+             * next caller tries again -- which the standard requires,
+             * and which is the only sane answer: a failed
+             * initialization has not initialized anything. */
+            try {
+                static_cast<F &&>(fn)(static_cast<A &&>(a)...);
+            } catch (...) {
+                f.__s.store(0, memory_order_release);
+                __os_futex_wake((const volatile int *)&f.__s, -1);
+                throw;
+            }
+            f.__s.store(2, memory_order_release);
+            __os_futex_wake((const volatile int *)&f.__s, -1);
+            return;
+        }
+        if (e == 2)
+            return;
+        if (__os_futex_wait((const volatile int *)&f.__s, 1, -1) < 0)
+            __os_thread_yield();
+    }
+}
+
+}  // namespace std
+
+#endif

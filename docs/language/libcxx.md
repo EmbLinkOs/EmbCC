@@ -56,7 +56,11 @@ those exact two members in that order.
 `<forward_list>`, `<queue>`, `<stack>`, `<string_view>`, `<span>`,
 `<bitset>`, `<chrono>`, `<ratio>`, `<random>`, `<variant>`, `<any>`,
 `<compare>`, `<concepts>`, `<format>`, `<ranges>`, `<atomic>`,
-`<regex>`, `<iostream>`
+`<regex>`, `<coroutine>`, `<source_location>`, `<bit>`, `<numbers>`,
+`<version>`, `<system_error>`, `<mutex>`, `<thread>`,
+`<condition_variable>`, `<shared_mutex>`, `<semaphore>`, `<latch>`,
+`<barrier>`, `<future>`, `<iosfwd>`, `<execution>`, `<typeindex>`,
+`<scoped_allocator>`, `<iostream>`
 and the rest of the stream headers including `<fstream>`, `<stdexcept>`,
 and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
@@ -360,6 +364,65 @@ acceptance test belongs where backtracking can respond to it. And
 `regex_replace` looped while `pos != e`, which stops one position
 short — `x*` matches empty at *every* position including the last, so
 "abc" is "-a-b-c-" with four replacements and not three.
+
+**`<coroutine>` is the library half of a language feature.** EmbCC
+compiles `co_await`/`co_yield`/`co_return` (`src/cxx/coro.c`) and cannot
+do any of it without the names here: it looks up
+`std::coroutine_traits` for the promise type and `std::coroutine_handle`
+to hand one back, exactly as `<=>` needs `<compare>`. A
+`coroutine_handle` is **one pointer** — not a smart pointer, not an
+owner. `destroy()` frees the frame and every other handle to it dangles;
+somebody has to own the coroutine, and that somebody is the return
+object `get_return_object()` produced. The frame layout is an ABI
+between this header and `src/cxx/emit.c` — two function pointers,
+resume then destroy, with `done()` meaning "the resume pointer is null"
+— and all four operations go through `__builtin_coro_*` so the layout is
+stated in *one* place.
+
+**`<source_location>` exists because `__FILE__` cannot be passed along.**
+A logging *function* taking them reports its own position; only a macro
+reports its caller's. `source_location::current()` as a **default
+argument** is evaluated at the call site, which is a language rule
+rather than a library trick, and is the whole reason the class exists.
+
+**The threading headers are real, and say so honestly.** Every mutex
+here is one atomic int and the seam's futex: the uncontended path never
+enters the kernel, and only a thread that finds the lock held sleeps on
+the word. That is why the seam offers a *futex* rather than a "mutex" —
+the policy (recursion, fairness, try_lock) belongs in the library, where
+it is written once, not in each target. The three states are the classic
+ones, and two is not enough: unlock has to wake a sleeper and can only
+know there is one if locking recorded it.
+
+On a target with no threads, everything that does not need a second
+thread still works — mutexes, `call_once`, `this_thread` — and
+`std::thread`'s constructor throws `system_error`. That is the design
+committing to an answer: running the function on the calling thread and
+calling it a thread deadlocks the first time anything joins from inside
+it.
+
+One hole this opened and closed: a **bounded** wait must terminate. With
+no futex there is no second thread, so a timed wait for something
+another thread would have to do can never succeed — and polling a
+deadline is worse than useless, because a target with no futex usually
+has no clock either and `steady_clock::now()` then returns the same
+value forever. The test hung until `__can_block()` was added. An
+*unbounded* wait still waits: a program that blocks forever with no
+other thread has deadlocked, and hanging is the honest report of its own
+bug.
+
+**`std::function` and `exception_ptr` were both missing**, and the second
+is why nothing could cross a thread boundary: a worker has no caller to
+throw to, so a failure has to be *captured* and rethrown where somebody
+is waiting. That needed four `__cxa_` entry points and a `referenceCount`
+in the exception header — the count is separate from `handlerCount` and
+means a different thing, and the object dies when both are done.
+
+**`<iosfwd>` caught a real mistake.** It declares the stream and string
+templates with their default arguments, and every header that *defines*
+one now includes it and repeats the parameters without defaults — which
+is what the standard requires, and which this library was violating
+until EmbCC learned to diagnose a repeated default template argument.
 
 **`<fstream>` is exercised where a filesystem exists.** The QEMU harness
 has an `open` that returns `ENOSYS`, and on such a target the *correct*

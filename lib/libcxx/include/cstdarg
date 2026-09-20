@@ -1,0 +1,17 @@
+/* <cstdarg> — the C header's names, in namespace std as well as at
+ * global scope.
+ *
+ * `va_start`, `va_arg`, `va_end` and `va_copy` are MACROS and stay
+ * macros: they cannot be functions, because va_arg needs a type and
+ * va_start needs the last named parameter. Only `va_list` is a name
+ * that can be brought into a namespace, so that is the only using-
+ * declaration here. */
+#ifndef _LIBCXX_CSTDARG
+#define _LIBCXX_CSTDARG
+#include <stdarg.h>
+
+namespace std {
+using ::va_list;
+}
+
+#endif

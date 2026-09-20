@@ -9,6 +9,7 @@
 #ifndef _LIBCXX_SSTREAM
 #define _LIBCXX_SSTREAM
 
+#include <iosfwd>
 #include <string>
 #include <ios>
 #include <streambuf>
@@ -17,7 +18,7 @@
 
 namespace std {
 
-template <class C, class T = char_traits<C>, class A = allocator<C>>
+template <class C, class T, class A>
 class basic_stringbuf : public basic_streambuf<C, T> {
     using base = basic_streambuf<C, T>;
 
@@ -105,7 +106,7 @@ private:
 
 using stringbuf = basic_stringbuf<char>;
 
-template <class C, class T = char_traits<C>, class A = allocator<C>>
+template <class C, class T, class A>
 class basic_ostringstream : public basic_ostream<C, T> {
 public:
     basic_ostringstream() : basic_ostream<C, T>(&__b), __b(ios_base::out) {}
@@ -120,7 +121,7 @@ private:
     basic_stringbuf<C, T, A> __b;
 };
 
-template <class C, class T = char_traits<C>, class A = allocator<C>>
+template <class C, class T, class A>
 class basic_istringstream : public basic_istream<C, T> {
 public:
     explicit basic_istringstream(const basic_string<C, T, A> &s)

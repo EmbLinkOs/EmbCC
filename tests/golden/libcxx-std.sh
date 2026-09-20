@@ -283,7 +283,8 @@ want "moveifnoexcept moves 1 copies 0 v 5"
 # failure names its own line -- see libcxx-std/check.h.
 for prog in iterator memory functional array vector string algorithm \
             vocabulary associative iostreams smartptr sequences views timing \
-            files containers compare erasure formatting rangeviews atomics regexes; do
+            files containers compare erasure formatting rangeviews atomics \
+            regexes concurrency langsupport callable; do
     if run "tests/golden/libcxx-std/$prog.cc"; then rc=0; else rc=$?; fi
     [ "$rc" = 42 ] || {
         cat "$out/run.txt"

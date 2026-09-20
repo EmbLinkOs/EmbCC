@@ -1,0 +1,231 @@
+/* <thread> — C++ [thread.threads].
+ *
+ * A thread of execution, owned by an object. The ownership is the part
+ * worth understanding, because it is the part that terminates your
+ * program when you get it wrong.
+ *
+ * A `std::thread` that is still JOINABLE when it is destroyed calls
+ * `std::terminate()`. Not "detaches", not "joins" -- terminates. That
+ * looks harsh and is the only defensible choice: joining in the
+ * destructor would make `~thread` block for an unbounded time at a
+ * point the programmer did not write, and detaching would let the
+ * thread run on with references to locals that are about to die. The
+ * standard refuses to guess, and requires you to say `join()` or
+ * `detach()` before the object goes out of scope.
+ *
+ * ---- a target with no threads ---------------------------------------------
+ *
+ * Constructing a thread here throws `system_error` carrying
+ * `errc::function_not_supported`, because `__os_thread_create` returned
+ * ENOSYS (see lib/libc/os/backend.h). That is the honest answer and the
+ * useful one: the alternative -- running the function on the calling
+ * thread and calling it a thread -- deadlocks the first time anything
+ * joins from inside it, and silently serialises everything else.
+ *
+ * Everything that does NOT need a second thread works on such a target:
+ * `this_thread::get_id()`, `yield()`, the sleeps, and every mutex.
+ */
+#ifndef _LIBCXX_THREAD
+#define _LIBCXX_THREAD
+
+#include <chrono>
+#include <cstddef>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <system_error>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+extern "C" {
+int __os_thread_create(unsigned long *id, void (*fn)(void *), void *arg);
+int __os_thread_join(unsigned long id);
+int __os_thread_detach(unsigned long id);
+unsigned long __os_thread_self(void);
+void __os_thread_yield(void);
+int __os_sleep_ns(long ns);
+}
+
+namespace std {
+
+class thread {
+public:
+    /* An id is comparable and hashable and nothing else -- you cannot
+     * do anything TO a thread through it. That is deliberate: a handle
+     * you can act on would outlive the thread and act on whatever
+     * replaced it. */
+    class id {
+    public:
+        id() noexcept : __v(0) {}
+        explicit id(unsigned long v) noexcept : __v(v) {}
+
+        friend bool operator==(id a, id b) noexcept { return a.__v == b.__v; }
+        friend bool operator!=(id a, id b) noexcept { return a.__v != b.__v; }
+        friend bool operator<(id a, id b) noexcept { return a.__v < b.__v; }
+        friend bool operator>(id a, id b) noexcept { return a.__v > b.__v; }
+        friend bool operator<=(id a, id b) noexcept { return a.__v <= b.__v; }
+        friend bool operator>=(id a, id b) noexcept { return a.__v >= b.__v; }
+
+        unsigned long __value() const noexcept { return __v; }
+
+    private:
+        unsigned long __v;
+    };
+
+    using native_handle_type = unsigned long;
+
+    thread() noexcept : __id(0), __joinable(false) {}
+
+    /* The arguments are COPIED (decayed) into the new thread, and that
+     * is not an oversight to work around with a reference: the caller's
+     * frame may be gone before the thread runs. `std::ref` is how you
+     * say you have thought about it, and it is deliberately something
+     * you have to type. */
+    template <class F, class... A,
+              class = enable_if_t<!is_same_v<decay_t<F>, thread>>>
+    explicit thread(F &&f, A &&...a)
+    {
+        using Pack = tuple<decay_t<F>, decay_t<A>...>;
+        /* Heap-allocated because the new thread reads it after this
+         * constructor has returned. Freed by the trampoline, on the new
+         * thread, whether the call throws or not. */
+        unique_ptr<Pack> p(new Pack(static_cast<F &&>(f),
+                                    static_cast<A &&>(a)...));
+        unsigned long id = 0;
+        if (__os_thread_create(&id, &__run<Pack>, (void *)p.get()) != 0)
+            throw system_error(__last_error(), "std::thread");
+        p.release();
+        __id = id;
+        __joinable = true;
+    }
+
+    thread(const thread &) = delete;
+    thread &operator=(const thread &) = delete;
+
+    thread(thread &&o) noexcept : __id(o.__id), __joinable(o.__joinable)
+    { o.__id = 0; o.__joinable = false; }
+
+    thread &operator=(thread &&o) noexcept
+    {
+        /* Assigning over a joinable thread terminates, for the same
+         * reason the destructor does: the thread it held would be
+         * abandoned with nobody able to join it. */
+        if (__joinable)
+            terminate();
+        __id = o.__id;
+        __joinable = o.__joinable;
+        o.__id = 0;
+        o.__joinable = false;
+        return *this;
+    }
+
+    ~thread()
+    {
+        if (__joinable)
+            terminate();
+    }
+
+    bool joinable() const noexcept { return __joinable; }
+    id get_id() const noexcept { return id(__joinable ? __id : 0); }
+    native_handle_type native_handle() { return __id; }
+
+    void join()
+    {
+        if (!__joinable)
+            throw system_error(make_error_code(errc::invalid_argument),
+                               "std::thread::join on a non-joinable thread");
+        if (__os_thread_self() == __id)
+            throw system_error(
+                make_error_code(errc::resource_deadlock_would_occur),
+                "std::thread::join on itself");
+        if (__os_thread_join(__id) != 0)
+            throw system_error(__last_error(), "std::thread::join");
+        __joinable = false;
+        __id = 0;
+    }
+
+    void detach()
+    {
+        if (!__joinable)
+            throw system_error(make_error_code(errc::invalid_argument),
+                               "std::thread::detach on a non-joinable thread");
+        if (__os_thread_detach(__id) != 0)
+            throw system_error(__last_error(), "std::thread::detach");
+        __joinable = false;
+        __id = 0;
+    }
+
+    void swap(thread &o) noexcept
+    {
+        unsigned long ti = __id; __id = o.__id; o.__id = ti;
+        bool tj = __joinable; __joinable = o.__joinable; o.__joinable = tj;
+    }
+
+    /* A hint, and honestly a hint: zero means "no idea", which is what
+     * the standard says to return when the answer is not known, and is
+     * better than guessing 1 and having a thread pool believe it. */
+    static unsigned hardware_concurrency() noexcept { return 0; }
+
+private:
+    template <class Pack>
+    static void __run(void *raw)
+    {
+        unique_ptr<Pack> p(static_cast<Pack *>(raw));
+        /* An exception that escapes a thread's function terminates the
+         * program. There is nobody to catch it: the thread has no
+         * caller, and a stack unwound to nothing has nowhere to
+         * propagate to. */
+        __invoke_pack(*p, make_index_sequence<tuple_size<Pack>::value>{});
+    }
+
+    template <class Pack, size_t... I>
+    static void __invoke_pack(Pack &p, index_sequence<I...>)
+    { invoke(static_cast<tuple_element_t<I, Pack> &&>(get<I>(p))...); }
+
+    unsigned long __id;
+    bool __joinable;
+};
+
+inline void swap(thread &a, thread &b) noexcept { a.swap(b); }
+
+template <class T> struct hash;
+template <>
+struct hash<thread::id> {
+    size_t operator()(thread::id v) const noexcept
+    { return (size_t)v.__value(); }
+};
+
+namespace this_thread {
+
+inline thread::id get_id() noexcept
+{ return thread::id(__os_thread_self()); }
+
+inline void yield() noexcept { __os_thread_yield(); }
+
+template <class R, class P>
+inline void sleep_for(const chrono::duration<R, P> &d)
+{
+    auto ns = chrono::duration_cast<chrono::nanoseconds>(d).count();
+    if (ns <= 0)
+        return;
+    /* A target with no sleep still has to make progress rather than
+     * return instantly claiming to have slept -- the yield is the
+     * closest honest thing, and it is visible in a profile. */
+    if (__os_sleep_ns((long)ns) != 0)
+        __os_thread_yield();
+}
+
+template <class C, class D>
+inline void sleep_until(const chrono::time_point<C, D> &t)
+{
+    auto now = C::now();
+    if (t > now)
+        sleep_for(t - now);
+}
+
+}  // namespace this_thread
+
+}  // namespace std
+
+#endif

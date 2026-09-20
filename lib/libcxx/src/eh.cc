@@ -37,6 +37,14 @@ namespace __cxxabiv1 {
 static const _Unwind_Exception_Class kCxxClass = 0x474e5543432b2b00UL;
 
 struct __cxa_exception {
+    /* First, as the 64-bit Itanium ABI lays it out, and it is what
+     * makes std::exception_ptr possible: an exception that is being
+     * held by an exception_ptr outlives every handler, so somebody has
+     * to count the holders. Zero means "owned by the unwinder and the
+     * handler stack alone", which is every exception that is never put
+     * in an exception_ptr -- so the field costs those nothing. */
+    std::size_t referenceCount;
+
     const std::type_info *exceptionType;
     void (*exceptionDestructor)(void *);
     std::terminate_handler unexpectedHandler;
@@ -206,7 +214,14 @@ extern "C" void __cxa_end_catch()
     }
     if (--count == 0) {
         g->caughtExceptions = h->nextException;
-        _Unwind_DeleteException(&h->unwindHeader);
+        h->handlerCount = 0;
+        /* Only if no exception_ptr holds it. An exception captured by
+         * std::current_exception() must survive the handler that caught
+         * it -- that is the entire point of exception_ptr -- so the
+         * handler's last end_catch gives up its claim and leaves the
+         * object to the holders. */
+        if (h->referenceCount == 0)
+            _Unwind_DeleteException(&h->unwindHeader);
     } else if (count > 0) {
         h->handlerCount = count;
     } else {
@@ -220,6 +235,65 @@ extern "C" std::type_info *__cxa_current_exception_type() noexcept
 {
     __cxa_exception *h = __cxa_get_globals()->caughtExceptions;
     return h ? const_cast<std::type_info *>(h->exceptionType) : nullptr;
+}
+
+/* ---- exception_ptr ---------------------------------------------------
+ *
+ * An exception that outlives its handler. `std::current_exception()`
+ * inside a `catch` hands back a counted reference to the exception
+ * being handled, which can then be stored, moved to another thread, and
+ * rethrown there -- which is the whole mechanism std::future uses to
+ * carry a worker's failure back to whoever asked for the work.
+ *
+ * The count is separate from handlerCount and means a different thing.
+ * handlerCount is how many handlers are running for it; referenceCount
+ * is how many exception_ptrs hold it. Either can be zero while the
+ * other is not, and the exception dies when BOTH are done: the last
+ * handler's __cxa_end_catch deletes it only if nobody holds it, and the
+ * last holder's decrement deletes it only if no handler is running.
+ */
+extern "C" void *__cxa_current_primary_exception() noexcept
+{
+    __cxa_exception *h = __cxa_get_globals()->caughtExceptions;
+    if (!h)
+        return nullptr;             /* not in a handler: a null ptr */
+    h->referenceCount++;
+    return object_of(h);
+}
+
+extern "C" void __cxa_increment_exception_refcount(void *obj) noexcept
+{
+    if (!obj)
+        return;
+    header_of(obj)->referenceCount++;
+}
+
+extern "C" void __cxa_decrement_exception_refcount(void *obj) noexcept
+{
+    if (!obj)
+        return;
+    __cxa_exception *h = header_of(obj);
+    if (--h->referenceCount == 0 && h->handlerCount == 0)
+        _Unwind_DeleteException(&h->unwindHeader);
+}
+
+extern "C" void __cxa_rethrow_primary_exception(void *obj)
+{
+    if (!obj)
+        return;                     /* rethrowing a null ptr does nothing */
+    /* Throw it AGAIN rather than resuming the original unwind: the
+     * original unwind finished long ago, possibly on another thread.
+     * The reference the caller holds keeps the object alive across the
+     * throw, and the count is incremented for the throw's own
+     * ownership. */
+    __cxa_exception *h = header_of(obj);
+    h->referenceCount++;
+    h->handlerCount = 0;
+    h->nextException = nullptr;
+    h->unwindHeader.exception_class = kCxxClass;
+    __cxa_get_globals()->uncaughtExceptions++;
+    _Unwind_RaiseException(&h->unwindHeader);
+    std::terminate();
 }
 
 extern "C" void *__cxa_get_exception_ptr(void *exc) noexcept

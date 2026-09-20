@@ -15,6 +15,7 @@
 #ifndef _LIBCXX_IOS
 #define _LIBCXX_IOS
 
+#include <iosfwd>
 #include <cstddef>
 #include <string>
 #include <streambuf>
@@ -87,7 +88,7 @@ protected:
     char __fill;
 };
 
-template <class C, class T = char_traits<C>>
+template <class C, class T>
 class basic_ios : public ios_base {
 public:
     using char_type = C;

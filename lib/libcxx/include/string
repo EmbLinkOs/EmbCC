@@ -19,6 +19,7 @@
 #ifndef _LIBCXX_STRING
 #define _LIBCXX_STRING
 
+#include <iosfwd>
 #include <cstddef>
 #include <cstring>
 #include <type_traits>
@@ -70,7 +71,7 @@ struct char_traits<char> {
     { return i == eof() ? 0 : i; }
 };
 
-template <class C, class T = char_traits<C>, class A = allocator<C>>
+template <class C, class T, class A>
 class basic_string {
     using __atr = allocator_traits<A>;
 
