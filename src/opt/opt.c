@@ -2064,9 +2064,22 @@ static void opt_func(struct ir_func *fn)
             return;
     /* Likewise exception regions: a landing pad is entered from every call
      * of its region, edges the passes do not see (and its code, reached by
-     * no jump, would look dead). */
+     * no jump, would look dead).
+     *
+     * The test is the PAD, not fn->neh, and the difference is not academic.
+     * mark_eh_calls() clears neh when no call in any region can actually
+     * throw -- which is true of every `noexcept` function that calls
+     * nothing, and of `type_info::name()` in our own C++ runtime -- but it
+     * leaves the pad's instructions in the stream. They are then
+     * unreachable code the passes do not model: IR_LANDING writes TWO
+     * temps, dst and b, which the single-dst tables above cannot express,
+     * so DCE would delete the landing while keeping the stores that read
+     * what it produced. Found by the IR verifier on lib/libcxx. */
     if (fn->neh)
         return;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LANDING)
+            return;
     int verify = getenv("EMBCC_VERIFY") != NULL;
     if (verify) verify_func(fn, "irgen");
     int ins_before = fn->nins;

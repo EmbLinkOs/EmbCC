@@ -16,8 +16,13 @@
 
 #ifndef _ASSERT_H_DECLS
 #define _ASSERT_H_DECLS
+#ifdef __cplusplus
+extern "C" [[noreturn]] void __assert_fail(const char *expr, const char *file,
+                                           int line, const char *func);
+#else
 _Noreturn void __assert_fail(const char *expr, const char *file, int line,
                              const char *func);
+#endif
 #endif
 
 /* C11 §7.2p3: static_assert is a macro here, not a keyword. */

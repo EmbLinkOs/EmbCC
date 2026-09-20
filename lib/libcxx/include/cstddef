@@ -1,0 +1,14 @@
+/* <cstddef> — C++ [cstddef.syn]. */
+#ifndef _LIBCXX_CSTDDEF
+#define _LIBCXX_CSTDDEF
+#include <stddef.h>
+namespace std {
+using ::size_t;
+using ::ptrdiff_t;
+using ::max_align_t;
+using nullptr_t = decltype(nullptr);
+/* byte is a scoped enum, not a typedef: the point is that it does NOT
+ * convert to an integer type, so arithmetic on it has to be spelled out. */
+enum class byte : unsigned char {};
+}
+#endif

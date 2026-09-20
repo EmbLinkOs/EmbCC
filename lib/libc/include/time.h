@@ -14,6 +14,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef long time_t;
 typedef long clock_t;
 
@@ -46,14 +50,18 @@ time_t mktime(struct tm *tm);
 time_t timegm(struct tm *tm);
 struct tm *gmtime(const time_t *t);
 struct tm *localtime(const time_t *t);
-struct tm *gmtime_r(const time_t *restrict t, struct tm *restrict out);
-struct tm *localtime_r(const time_t *restrict t, struct tm *restrict out);
+struct tm *gmtime_r(const time_t *__restrict t, struct tm *__restrict out);
+struct tm *localtime_r(const time_t *__restrict t, struct tm *__restrict out);
 
 char *asctime(const struct tm *tm);
 char *ctime(const time_t *t);
-char *asctime_r(const struct tm *restrict tm, char *restrict buf);
-char *ctime_r(const time_t *restrict t, char *restrict buf);
-size_t strftime(char *restrict s, size_t max, const char *restrict fmt,
-                const struct tm *restrict tm);
+char *asctime_r(const struct tm *__restrict tm, char *__restrict buf);
+char *ctime_r(const time_t *__restrict t, char *__restrict buf);
+size_t strftime(char *__restrict s, size_t max, const char *__restrict fmt,
+                const struct tm *__restrict tm);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

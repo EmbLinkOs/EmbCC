@@ -79,6 +79,21 @@ tidy 1 makes that bug visible on the first run instead of after a port.
   result to be freed with plain `free`, so there must be exactly one kind
   of block.
 
+## atexit belongs to exit, not to the C++ runtime
+
+`__cxa_atexit`/`__cxa_finalize` are in `src/stdlib/exit.c`, on the same
+list as `atexit`. C++ static destructors and C `atexit` handlers have to
+interleave by registration order — an object constructed before an
+`atexit()` call is destroyed after that handler runs — and two lists
+cannot express that ordering however they are drained. `atexit` is stored
+as the one-argument form with the function as its own argument, which
+keeps one list at the cost of one indirect call.
+
+The table is fixed at 256 entries rather than grown with `malloc`: it is
+walked during exit, when calling the allocator may be the last thing a
+failing program should do. Overflow is reported on stderr rather than
+ignored, because a dropped destructor is a file that never got flushed.
+
 ## Math
 
 `src/math/fdlibm/` is Sun's fdlibm, kept **verbatim** (its notice preserved)

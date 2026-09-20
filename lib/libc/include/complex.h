@@ -6,6 +6,10 @@
 #ifndef _COMPLEX_H
 #define _COMPLEX_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define complex _Complex
 #define _Complex_I (1.0iF)
 #define I _Complex_I
@@ -39,5 +43,9 @@ float _Complex csqrtf(float _Complex), cpowf(float _Complex, float _Complex);
 long double creall(long double _Complex), cimagl(long double _Complex);
 long double cabsl(long double _Complex), cargl(long double _Complex);
 long double _Complex conjl(long double _Complex);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

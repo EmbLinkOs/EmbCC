@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 #define RAND_MAX 2147483647
@@ -18,13 +22,13 @@ void *realloc(void *p, size_t n);
 void  free(void *p);
 void *aligned_alloc(size_t align, size_t n);
 
-double             strtod(const char *restrict s, char **restrict end);
-float              strtof(const char *restrict s, char **restrict end);
-long double        strtold(const char *restrict s, char **restrict end);
-long               strtol(const char *restrict s, char **restrict end, int base);
-long long          strtoll(const char *restrict s, char **restrict end, int base);
-unsigned long      strtoul(const char *restrict s, char **restrict end, int base);
-unsigned long long strtoull(const char *restrict s, char **restrict end, int base);
+double             strtod(const char *__restrict s, char **__restrict end);
+float              strtof(const char *__restrict s, char **__restrict end);
+long double        strtold(const char *__restrict s, char **__restrict end);
+long               strtol(const char *__restrict s, char **__restrict end, int base);
+long long          strtoll(const char *__restrict s, char **__restrict end, int base);
+unsigned long      strtoul(const char *__restrict s, char **__restrict end, int base);
+unsigned long long strtoull(const char *__restrict s, char **__restrict end, int base);
 
 int       atoi(const char *s);
 long      atol(const char *s);
@@ -36,6 +40,11 @@ void srand(unsigned seed);
 
 void  abort(void);
 int   atexit(void (*f)(void));
+/* Not C11, but the form C++ static destructors need -- and it shares
+ * atexit's list, so the two interleave by registration order. The C++
+ * runtime calls it; see lib/libc/src/stdlib/exit.c. */
+int   __cxa_atexit(void (*f)(void *), void *arg, void *dso);
+void  __cxa_finalize(void *dso);
 void  exit(int status);
 void  _Exit(int status);
 char *getenv(const char *name);
@@ -56,5 +65,9 @@ long long llabs(long long x);
 div_t     div(int num, int den);
 ldiv_t    ldiv(long num, long den);
 lldiv_t   lldiv(long long num, long long den);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

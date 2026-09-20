@@ -689,3 +689,53 @@ are now implemented too: braced initialization of **bitfields** (static/local/
 designated) and **file-scope compound literals** (direct value, nested, and
 `&(T){...}` via an anonymous global). The remaining Tier-3 entries are
 integration notes, not compiler work.
+
+## C++ access checking on casts (found 2026-09-20)
+
+`dynamic_cast<B*>(d)` and `static_cast<B*>(d)` where `B` is a **private**
+base of `D` are accepted. `[expr.static.cast]/11` and
+`[expr.dynamic.cast]/5` make both ill-formed — the base has to be
+accessible at the point of the cast — and g++ rejects them with
+"'B' is an inaccessible base of 'D'".
+
+EmbCC compiles them into a plain offset adjustment, so the cast quietly
+succeeds. This is a front-end access-check gap, not a runtime one: the
+runtime's own handling of private bases is correct and tested
+(`tests/golden/libcxx.sh` casts *sideways* to a private base and gets the
+null it should). It was found while writing that test, when the obvious
+spelling of "a private base is not reachable" never reached the runtime
+at all.
+
+Nothing in this tree relies on the current behaviour. The fix belongs
+with the rest of member-access checking in `src/cxx`.
+
+## Dead landing pads block optimization (found 2026-09-20)
+
+`mark_eh_calls()` (src/ir/irgen.c) clears `fn->neh` when no call inside any
+exception region can actually throw — correct, and true of every
+`noexcept` function that calls nothing. But it leaves the landing pad's
+*instructions* in the stream, so `opt_func` must now refuse the function
+anyway (it scans for `IR_LANDING`), and those functions are compiled at
+`-O0` however the build was invoked.
+
+That is a real cost: it is exactly the small `noexcept` accessors — all
+over a C++ standard library — that lose optimization.
+
+Two ways out, in order of preference:
+
+1. **Delete the pads** in `mark_eh_calls` when it clears `neh`. The
+   comment there already says "the function has no landing pads after
+   all"; making that literally true is the fix. The work is bookkeeping:
+   a region records `lo`/`hi` of its *body*, not of its pad, so the pad's
+   instruction range has to be recorded too, and nested regions mean
+   deleting one shifts the others' indices.
+
+2. **Teach the passes about `IR_LANDING`.** It writes TWO temps (`dst`
+   and `b`), which `writes_temp`/`compute_defs` cannot express — they are
+   keyed on `dst` alone. Adding it to `writes_temp` is *not* enough and is
+   actively unsafe: LVN/GCSE would then be free to treat two landing pads
+   as the same computation and merge them.
+
+Found by the IR verifier while building `lib/libcxx`: `type_info::name()`
+tripped "reads temp with no definition", because DCE had deleted an
+`IR_LANDING` whose results the following stores still read.

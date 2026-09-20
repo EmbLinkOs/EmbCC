@@ -6,6 +6,10 @@
 #ifndef _MATH_H
 #define _MATH_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define HUGE_VAL  (__builtin_huge_val())
 #define HUGE_VALF (__builtin_huge_valf())
 #define HUGE_VALL (__builtin_huge_vall())
@@ -86,5 +90,9 @@ long double sinl(long double), cosl(long double), tanl(long double);
 long double expl(long double), logl(long double), sqrtl(long double);
 long double powl(long double, long double), fabsl(long double);
 long double ceill(long double), floorl(long double), fmodl(long double, long double);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

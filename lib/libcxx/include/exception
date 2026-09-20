@@ -1,0 +1,38 @@
+/* <exception> — C++ [exception.syn]. */
+#ifndef _LIBCXX_EXCEPTION
+#define _LIBCXX_EXCEPTION
+
+#include <cstddef>
+
+namespace std {
+
+/* The base of every standard exception. Its destructor is virtual and
+ * out-of-line on purpose: that makes THIS translation unit the home of the
+ * vtable and the typeinfo, so every catch(std::exception&) in the program
+ * compares against one object rather than one per unit. */
+class exception {
+public:
+    exception() noexcept {}
+    exception(const exception &) noexcept = default;
+    exception &operator=(const exception &) noexcept = default;
+    virtual ~exception() noexcept;
+    virtual const char *what() const noexcept;
+};
+
+class bad_exception : public exception {
+public:
+    bad_exception() noexcept {}
+    ~bad_exception() noexcept override;
+    const char *what() const noexcept override;
+};
+
+using terminate_handler = void (*)();
+terminate_handler set_terminate(terminate_handler h) noexcept;
+terminate_handler get_terminate() noexcept;
+[[noreturn]] void terminate() noexcept;
+
+int uncaught_exceptions() noexcept;
+
+}  // namespace std
+
+#endif

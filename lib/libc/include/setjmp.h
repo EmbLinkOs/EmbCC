@@ -19,6 +19,10 @@
 #ifndef _SETJMP_H
 #define _SETJMP_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef long jmp_buf[32];
 
 int  setjmp(jmp_buf env);
@@ -32,5 +36,9 @@ void longjmp(jmp_buf env, int val);
  * library has no signal mask to save, so they are the same functions. */
 #define _setjmp  setjmp
 #define _longjmp longjmp
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

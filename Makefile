@@ -157,13 +157,17 @@ $(BUILD)/%.o: src/%.c
 # enough and cannot go stale (CONTRIBUTING lie #1).
 $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 
-test: embcc embread embld embdbg embls
+# The libc and libcxx goldens run against the BUILT archives, so the suite
+# depends on them: without this a stale archive is silently what gets
+# tested, and a fix made in the library is reported as still broken (or,
+# worse, a break is reported as fixed).
+test: embcc embread embld embdbg embls libc-x86_64 libcxx-x86_64
 	tests/run.sh
 
 # The aarch64 suite: compile for the second architecture and RUN the result
 # under qemu-system-aarch64 (tests/harness/aarch64). Separate from `test`
 # because it needs the cross newlib and QEMU, which `test` does not.
-test-arm64: embcc
+test-arm64: embcc libc-aarch64 libcxx-aarch64
 	tests/run.sh --target=aarch64-elf
 
 # The C++ suites wholly on EmbCC's library: libstdc++ and libsupc++ built
@@ -228,8 +232,40 @@ libc-emblinkos: embcc
 
 libc: libc-x86_64 libc-aarch64
 
+# ---- our C++ runtime (lib/libcxx) --------------------------------------
+# The Itanium C++ ABI on top of libgcc's unwinder: operator new, static-
+# local guards, the type_info hierarchy, dynamic_cast, and the personality
+# routine. This is what libsupc++ is; the standard library sits above it.
+LIBCXX_SRCS := $(wildcard lib/libcxx/src/*.cc)
+LIBCXX_INC  := -Ilib/libcxx/include -Ilib/libc/include
+
+libcxx-x86_64: embcc
+	@mkdir -p $(BUILD)/libcxx/x86_64
+	@for f in $(LIBCXX_SRCS); do \
+	    o=$(BUILD)/libcxx/x86_64/$$(basename $$f .cc).o; \
+	    ./embcc -c -O2 -x c++ $(LIBCXX_INC) $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libcxx/x86_64/libcxx.a
+	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libcxx/x86_64/libcxx.a \
+	    $(BUILD)/libcxx/x86_64/*.o
+	@echo "libcxx: $(BUILD)/libcxx/x86_64/libcxx.a"
+
+libcxx-aarch64: embcc
+	@mkdir -p $(BUILD)/libcxx/aarch64
+	@for f in $(LIBCXX_SRCS); do \
+	    o=$(BUILD)/libcxx/aarch64/$$(basename $$f .cc).o; \
+	    ./embcc -c -O2 -x c++ --target=aarch64-elf $(LIBCXX_INC) $$f -o $$o \
+	        || exit 1; \
+	done
+	@rm -f $(BUILD)/libcxx/aarch64/libcxx.a
+	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs \
+	    $(BUILD)/libcxx/aarch64/libcxx.a $(BUILD)/libcxx/aarch64/*.o
+	@echo "libcxx: $(BUILD)/libcxx/aarch64/libcxx.a"
+
+libcxx: libcxx-x86_64 libcxx-aarch64
+
 clean:
 	rm -rf $(BUILD) embcc embread embld embdbg embas embls
 
 .PHONY: all test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
-        libc-emblinkos clean
+        libc-emblinkos libcxx libcxx-x86_64 libcxx-aarch64 clean

@@ -15,6 +15,14 @@
 
 #include <stddef.h>
 
+/* The C++ runtime's terminate handler writes its final message through
+ * __os_write, for the same reason assert does: a diagnostic that needs a
+ * working allocator disappears in the cases worth diagnosing. So this
+ * contract is reached from C++ and carries C linkage explicitly. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Bytes in and out. Return the count moved, or -1 with errno set. A short
  * write is not an error and the caller loops — which is why stdio, not the
  * backend, owns buffering. */
@@ -62,5 +70,9 @@ int  __os_isatty(int fd);
 /* Random bytes for the few library functions that must not be predictable.
  * 0 on success, -1 when the OS cannot provide them. */
 int  __os_getentropy(void *buf, size_t n);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

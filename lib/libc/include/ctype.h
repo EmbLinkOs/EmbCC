@@ -7,6 +7,10 @@
 #ifndef _CTYPE_H
 #define _CTYPE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern const unsigned short __ctype_table[257];
 extern const int __ctype_lower[257];
 extern const int __ctype_upper[257];
@@ -36,5 +40,9 @@ int isupper(int c);
 int isxdigit(int c);
 int tolower(int c);
 int toupper(int c);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

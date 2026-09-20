@@ -1,0 +1,114 @@
+# Our C++ runtime
+
+*The Itanium C++ ABI, written against libgcc's unwinder.*
+
+Code: [`lib/libcxx/`](../../lib/libcxx/README.md). Built with EmbCC
+itself: `make libcxx`. Tested by `tests/golden/libcxx.sh`, on both
+targets.
+
+## Why
+
+EmbCC has compiled GCC's **libstdc++** for a while — 193/193 objects on
+both targets. That is the *headers*. This is the other half: the
+**runtime** those headers call into, which was still GCC's `libsupc++`.
+
+The same argument as for the C library applies, and more sharply. A
+compiler that targets several operating systems cannot borrow one
+toolchain's C++ runtime, because that runtime is where the compiler's own
+output is interpreted: the RTTI objects `src/cxx/emit.c` writes, the
+landing pads it generates, the guard variables it emits around static
+locals. Those are EmbCC's decisions, and the code that reads them belongs
+next to the code that writes them (R1).
+
+## The split with libgcc
+
+Walking the stack is the **unwinder**: decode `.eh_frame`, restore
+callee-saved registers frame by frame, transfer control. It stays
+libgcc's. It is language-neutral — every language on the platform shares
+one — and `include/unwind.h` is EmbCC's declaration of its interface.
+
+What is *not* neutral is the **policy**: given a frame, does this
+exception match one of its catch clauses, and what address does the
+handler receive? That question is about C++ types. The unwinder answers it
+by calling back into `__gxx_personality_v0`, which is here.
+
+libgcc owns the machine; this owns the meaning.
+
+## What it provides
+
+`operator new`/`delete` (all twenty spellings), static-local guards,
+`std::type_info` and the ABI's type_info hierarchy,
+`__dynamic_cast`, the exception object and the whole `__cxa_*` layer,
+`__gxx_personality_v0`, and `std::terminate`.
+
+Headers: `<new>`, `<typeinfo>`, `<exception>`, `<initializer_list>`,
+`<cstddef>`, `<cstdint>`. `<initializer_list>` is not optional and cannot
+be replaced — `{1, 2, 3}` in a call is a *core language* construct whose
+type is `std::initializer_list`, so the compiler requires that exact class
+with those exact two members in that order.
+
+## Five things that are easy to get wrong
+
+**The two unwind passes are not the same pass.** Pass one only asks "is
+there a handler anywhere above?" and changes nothing; only when one is
+found does pass two run, destroying each frame on the way. Conflating them
+is the classic personality-routine bug. Keeping them apart is what lets an
+uncaught exception call `terminate()` with the throwing frame still intact
+and inspectable, instead of after the stack has already been destroyed —
+which is why a debugger can still show you where it came from.
+
+**A match is not enough; the address has to be right too.** Catching a
+`Derived` as `Base&` must hand the handler the address of the *base
+subobject*, which under multiple inheritance is not the address of the
+object. Catching `T*` must hand it the pointer's *value*, not the address
+of the slot the value sits in. This implementation got the second one
+wrong first: pointers were matched by the exact-type test, which returned
+early and skipped the adjustment. Every pointer catch then received a
+plausible-looking pointer to a pointer. The test that caught it prints
+what the handler actually read.
+
+**A rethrown exception is owned by the unwinder, not by the handler that
+let it go.** `__cxa_end_catch` running as the stack unwinds out of a
+handler that did `throw;` must pop the exception from the caught list and
+*not* destroy it — the unwinder is still carrying it to whichever handler
+keeps it next. Destroying it there is a use-after-free that reads
+plausible memory nearly every time. Fixing that exposed the opposite
+error: the handler count has to be written back even when it reaches
+zero, or the next `__cxa_begin_catch` takes the rethrow path, counts the
+exception as held twice, and it is then **never destroyed at all**.
+Measured here as 0 destructor calls where the reference runtime makes 1.
+Neither mistake is visible to any test of what a handler *does*, so
+`tests/golden/libcxx.sh` counts destructor calls.
+
+**Static destructors are not the C++ runtime's list.** `__cxa_atexit` and
+`__cxa_finalize` live in the *C* library, beside `exit()`, because C++
+static destructors and C `atexit` handlers must interleave by
+**registration** order: an object constructed before an `atexit()` call
+has to be destroyed after that handler runs. Two lists cannot express that
+ordering however they are drained. This runtime had two lists at first,
+and the result was not a subtle mis-ordering — the C++ destructors were
+registered on a list nothing ever walked, so they simply never ran.
+
+**"Exactly one" is the whole of `dynamic_cast`.** The cast succeeds iff
+the most-derived object contains *exactly one* publicly reachable target
+subobject. A search that returns its first hit passes every
+single-inheritance test and is silently wrong the first time a class
+inherits the same base twice. `tests/golden/libcxx.sh` builds that shape
+deliberately and requires null.
+
+## Status
+
+C++ programs with virtual dispatch, RTTI, `dynamic_cast`, static locals,
+`new`/`delete` and exceptions run on this runtime and our C library with
+**no `libsupc++` and no newlib**, on x86-64 and aarch64, unchanged between
+them.
+
+Not yet here: `std::exception_ptr` and `std::nested_exception`, thread-safe
+guards (the runtime is single-threaded throughout, and the ABI routes
+every initialisation through `__cxa_guard_*` precisely so that becomes a
+change to one file), and `__cxa_vec_*` (the compiler lowers array
+new/delete itself and does not call them).
+
+The **standard library** above this — `<type_traits>`, `<utility>`,
+`<memory>`, `<string>`, the containers, `<algorithm>`, the iostreams — is
+the next and much larger piece of work.

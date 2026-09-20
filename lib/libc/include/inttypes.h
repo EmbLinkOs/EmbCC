@@ -11,6 +11,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define PRId8   "d"
 #define PRId16  "d"
 #define PRId32  "d"
@@ -110,7 +114,11 @@ typedef struct { intmax_t quot; intmax_t rem; } imaxdiv_t;
 
 intmax_t  imaxabs(intmax_t j);
 imaxdiv_t imaxdiv(intmax_t num, intmax_t den);
-intmax_t  strtoimax(const char *restrict s, char **restrict end, int base);
-uintmax_t strtoumax(const char *restrict s, char **restrict end, int base);
+intmax_t  strtoimax(const char *__restrict s, char **__restrict end, int base);
+uintmax_t strtoumax(const char *__restrict s, char **__restrict end, int base);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

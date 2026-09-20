@@ -4,6 +4,10 @@
 #ifndef _ERRNO_H
 #define _ERRNO_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* A function, so that a threaded backend can give each thread its own
  * without every caller changing. */
 int *__errno_location(void);
@@ -48,5 +52,9 @@ int *__errno_location(void);
 #define ENOTEMPTY 39
 #define EOVERFLOW 75
 #define EILSEQ  84
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
