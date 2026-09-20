@@ -753,6 +753,16 @@ static struct ics ref_ics(struct cexpr *e, struct cty *rt)
     int rv = rt->k == CT_RREF;
     int cref = (T->q & CQ_CONST) && !(T->q & CQ_VOLATILE);
     if ((e->k == E_OVL || e->k == E_FUNC) && T->k == CT_FUNC) {
+        /* A named function is an LVALUE ([expr.prim.id]/1), so an rvalue
+         * reference cannot bind to it and the candidate is not viable.
+         * Without this both `T&` and `const T&&` are exact matches for
+         * `take(f)`, and the deleted `const T&&` guard that std::ref and
+         * std::cref use to reject temporaries wins -- so `std::ref` of a
+         * function is rejected as deleted. (A forwarding reference `T&&`
+         * is unaffected: deduction collapses it to an lvalue reference
+         * before it reaches here.) */
+        if (rv)
+            return r;
         /* a function named, bound to a reference to its type: an exact
          * match, as its address would be (bind_ref takes that) */
         r = ics_of(e, ct_ptr(T));
@@ -3116,7 +3126,11 @@ static struct cexpr *unary(int op, struct cexpr *e)
     return r;
 }
 
-static struct cexpr *address_of(struct cexpr *e)
+/* The BUILT-IN address-of: the object's real address, whatever the class
+ * may have said unary & should mean. __builtin_addressof is this, which
+ * is how std::addressof keeps working for a type that overloads the
+ * operator -- the one job addressof has. */
+static struct cexpr *address_of_builtin(struct cexpr *e)
 {
     if (e->k == E_OVL) {
         if (e->fn->next || e->fn->tmpl)
@@ -3131,6 +3145,26 @@ static struct cexpr *address_of(struct cexpr *e)
     if (is_bitfield(e))
         ex_error(e, "taking the address of a bit-field");
     return ex_addr(e);
+}
+
+/* `&x` as written in source. A class may overload unary &
+ * ([over.oper]/3), and then this means whatever it says. Rare and widely
+ * discouraged, but not optional: a type that overloads it and a compiler
+ * that ignores the overload disagree silently about what `&x` evaluates
+ * to. Tried before the built-in, exactly as deref() tries operator*. */
+static struct cexpr *address_of(struct cexpr *e)
+{
+    /* Completeness first, and it is not a formality: `&x` on an
+     * INCOMPLETE class is perfectly legal -- libstdc++'s chrono does
+     * `&**this` on one -- and looking for an overload there requires the
+     * definition, which is exactly what there is not. An incomplete class
+     * can have no visible operator& anyway, so the built-in applies. */
+    if (class_or_enum(e) && ct_is_complete(e->t)) {
+        struct cexpr *o = overloaded("operator&", &e, 1, 0, cx_cur());
+        if (o)
+            return o;
+    }
+    return address_of_builtin(e);
 }
 
 static struct cexpr *deref(struct cexpr *e)
@@ -4177,7 +4211,7 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
     struct cexpr **args;
     int na = call_args(&args);
     if (strcmp(n, "addressof") == 0 && na == 1)
-        return address_of(args[0]);
+        return address_of_builtin(args[0]);
     if (strcmp(n, "launder") == 0 && na == 1)
         return rvalue(args[0]);
     if (strcmp(n, "alloca") == 0 && na == 1) {

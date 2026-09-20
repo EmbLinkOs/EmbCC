@@ -1,0 +1,348 @@
+/* <functional> — C++ [function.objects].
+ *
+ * INVOKE made callable, the transparent operators, and reference_wrapper.
+ */
+#ifndef _LIBCXX_FUNCTIONAL
+#define _LIBCXX_FUNCTIONAL
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <memory>
+
+namespace std {
+
+/* invoke is INVOKE spelled as a function: it calls anything the standard
+ * calls callable, including a pointer to member through an object, a
+ * reference to one, or a pointer to one. Generic code calls this instead
+ * of writing f(a...) so that a member pointer works too. */
+template <class F, class... A>
+constexpr invoke_result_t<F, A...> invoke(F &&f, A &&...a)
+{
+    if constexpr (is_member_pointer_v<remove_cvref_t<F>>) {
+        static_assert(sizeof...(A) >= 1,
+                      "a pointer to member needs an object to apply it to");
+        return __detail::__invoke_mem(forward<F>(f), forward<A>(a)...);
+    } else {
+        return forward<F>(f)(forward<A>(a)...);
+    }
+}
+
+namespace __detail {
+template <class F, class O, class... A>
+constexpr decltype(auto) __invoke_mem(F &&f, O &&o, A &&...a)
+{
+    using C = typename __memptr_class<remove_cvref_t<F>>::type;
+    if constexpr (is_member_function_pointer_v<remove_cvref_t<F>>) {
+        if constexpr (is_base_of_v<C, decay_t<O>>)
+            return (forward<O>(o).*f)(forward<A>(a)...);
+        else
+            return ((*forward<O>(o)).*f)(forward<A>(a)...);
+    } else {
+        static_assert(sizeof...(A) == 0,
+                      "a pointer to data member takes no arguments");
+        if constexpr (is_base_of_v<C, decay_t<O>>)
+            return forward<O>(o).*f;
+        else
+            return (*forward<O>(o)).*f;
+    }
+}
+}
+
+template <class R, class F, class... A>
+constexpr R invoke_r(F &&f, A &&...a)
+{
+    if constexpr (is_void_v<R>)
+        (void)invoke(forward<F>(f), forward<A>(a)...);
+    else
+        return invoke(forward<F>(f), forward<A>(a)...);
+}
+
+/* ---- reference_wrapper --------------------------------------------------
+ * A reference that can be copied, assigned and stored in a container --
+ * which a real reference cannot. It holds a POINTER; the constructor
+ * takes an lvalue and the rvalue overload is deleted, because binding it
+ * to a temporary would leave it dangling the moment the full expression
+ * ends. */
+template <class T>
+class reference_wrapper {
+public:
+    using type = T;
+
+    constexpr reference_wrapper(T &t) noexcept : __p(addressof(t)) {}
+    reference_wrapper(T &&) = delete;
+    constexpr reference_wrapper(const reference_wrapper &) noexcept = default;
+    constexpr reference_wrapper &
+    operator=(const reference_wrapper &) noexcept = default;
+
+    constexpr operator T &() const noexcept { return *__p; }
+    constexpr T &get() const noexcept { return *__p; }
+
+    template <class... A>
+    constexpr invoke_result_t<T &, A...> operator()(A &&...a) const
+    { return invoke(get(), forward<A>(a)...); }
+
+private:
+    T *__p;
+};
+
+template <class T> reference_wrapper(T &) -> reference_wrapper<T>;
+
+template <class T>
+constexpr reference_wrapper<T> ref(T &t) noexcept
+{ return reference_wrapper<T>(t); }
+template <class T>
+constexpr reference_wrapper<T> ref(reference_wrapper<T> t) noexcept
+{ return t; }
+template <class T> void ref(const T &&) = delete;
+
+template <class T>
+constexpr reference_wrapper<const T> cref(const T &t) noexcept
+{ return reference_wrapper<const T>(t); }
+template <class T>
+constexpr reference_wrapper<const T> cref(reference_wrapper<T> t) noexcept
+{ return reference_wrapper<const T>(t.get()); }
+template <class T> void cref(const T &&) = delete;
+
+/* unwrap_reference: what a reference_wrapper means when it is stored.
+ * make_pair and friends use it, which is why `make_pair(ref(x), 1)` holds
+ * an `int &` and not a `reference_wrapper<int>`. */
+template <class T> struct unwrap_reference { using type = T; };
+template <class T> struct unwrap_reference<reference_wrapper<T>>
+{ using type = T &; };
+template <class T> using unwrap_reference_t = typename unwrap_reference<T>::type;
+template <class T>
+struct unwrap_ref_decay : unwrap_reference<decay_t<T>> {};
+template <class T>
+using unwrap_ref_decay_t = typename unwrap_ref_decay<T>::type;
+
+/* ---- the function objects ----------------------------------------------
+ * Each has a `void` specialisation -- the TRANSPARENT form -- which
+ * deduces its arguments instead of fixing them. `less<>` can compare a
+ * std::string with a const char* without building a string; `less<string>`
+ * cannot, and that conversion is the cost people forget. */
+/* Written out one by one rather than macro-generated: a macro cannot take
+ * an operator as a parameter and paste it into both a body and a trailing
+ * return type, and a macro that almost works is worse than a table. */
+template <class T = void> struct plus
+{ constexpr T operator()(const T &a, const T &b) const { return a + b; } };
+template <> struct plus<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) + forward<B>(b))
+    { return forward<A>(a) + forward<B>(b); }
+};
+
+template <class T = void> struct minus
+{ constexpr T operator()(const T &a, const T &b) const { return a - b; } };
+template <> struct minus<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) - forward<B>(b))
+    { return forward<A>(a) - forward<B>(b); }
+};
+
+template <class T = void> struct multiplies
+{ constexpr T operator()(const T &a, const T &b) const { return a * b; } };
+template <> struct multiplies<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) * forward<B>(b))
+    { return forward<A>(a) * forward<B>(b); }
+};
+
+template <class T = void> struct divides
+{ constexpr T operator()(const T &a, const T &b) const { return a / b; } };
+template <> struct divides<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) / forward<B>(b))
+    { return forward<A>(a) / forward<B>(b); }
+};
+
+template <class T = void> struct modulus
+{ constexpr T operator()(const T &a, const T &b) const { return a % b; } };
+template <> struct modulus<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) % forward<B>(b))
+    { return forward<A>(a) % forward<B>(b); }
+};
+
+template <class T = void> struct negate
+{ constexpr T operator()(const T &a) const { return -a; } };
+template <> struct negate<void> {
+    using is_transparent = void;
+    template <class A>
+    constexpr auto operator()(A &&a) const -> decltype(-forward<A>(a))
+    { return -forward<A>(a); }
+};
+
+template <class T = void> struct equal_to
+{ constexpr bool operator()(const T &a, const T &b) const { return a == b; } };
+template <> struct equal_to<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) == forward<B>(b))
+    { return forward<A>(a) == forward<B>(b); }
+};
+
+template <class T = void> struct not_equal_to
+{ constexpr bool operator()(const T &a, const T &b) const { return a != b; } };
+template <> struct not_equal_to<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) != forward<B>(b))
+    { return forward<A>(a) != forward<B>(b); }
+};
+
+template <class T = void> struct less
+{ constexpr bool operator()(const T &a, const T &b) const { return a < b; } };
+template <> struct less<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) < forward<B>(b))
+    { return forward<A>(a) < forward<B>(b); }
+};
+
+template <class T = void> struct greater
+{ constexpr bool operator()(const T &a, const T &b) const { return a > b; } };
+template <> struct greater<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) > forward<B>(b))
+    { return forward<A>(a) > forward<B>(b); }
+};
+
+template <class T = void> struct less_equal
+{ constexpr bool operator()(const T &a, const T &b) const { return a <= b; } };
+template <> struct less_equal<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) <= forward<B>(b))
+    { return forward<A>(a) <= forward<B>(b); }
+};
+
+template <class T = void> struct greater_equal
+{ constexpr bool operator()(const T &a, const T &b) const { return a >= b; } };
+template <> struct greater_equal<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) >= forward<B>(b))
+    { return forward<A>(a) >= forward<B>(b); }
+};
+
+template <class T = void> struct logical_and
+{ constexpr bool operator()(const T &a, const T &b) const { return a && b; } };
+template <> struct logical_and<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) && forward<B>(b))
+    { return forward<A>(a) && forward<B>(b); }
+};
+
+template <class T = void> struct logical_or
+{ constexpr bool operator()(const T &a, const T &b) const { return a || b; } };
+template <> struct logical_or<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) || forward<B>(b))
+    { return forward<A>(a) || forward<B>(b); }
+};
+
+template <class T = void> struct logical_not
+{ constexpr bool operator()(const T &a) const { return !a; } };
+template <> struct logical_not<void> {
+    using is_transparent = void;
+    template <class A>
+    constexpr auto operator()(A &&a) const -> decltype(!forward<A>(a))
+    { return !forward<A>(a); }
+};
+
+template <class T = void> struct bit_and
+{ constexpr T operator()(const T &a, const T &b) const { return a & b; } };
+template <> struct bit_and<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) & forward<B>(b))
+    { return forward<A>(a) & forward<B>(b); }
+};
+
+template <class T = void> struct bit_or
+{ constexpr T operator()(const T &a, const T &b) const { return a | b; } };
+template <> struct bit_or<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) | forward<B>(b))
+    { return forward<A>(a) | forward<B>(b); }
+};
+
+template <class T = void> struct bit_xor
+{ constexpr T operator()(const T &a, const T &b) const { return a ^ b; } };
+template <> struct bit_xor<void> {
+    using is_transparent = void;
+    template <class A, class B>
+    constexpr auto operator()(A &&a, B &&b) const
+        -> decltype(forward<A>(a) ^ forward<B>(b))
+    { return forward<A>(a) ^ forward<B>(b); }
+};
+
+template <class T = void> struct bit_not
+{ constexpr T operator()(const T &a) const { return ~a; } };
+template <> struct bit_not<void> {
+    using is_transparent = void;
+    template <class A>
+    constexpr auto operator()(A &&a) const -> decltype(~forward<A>(a))
+    { return ~forward<A>(a); }
+};
+
+/* identity: the function that returns its argument, used as the default
+ * projection wherever an algorithm takes one. */
+struct identity {
+    using is_transparent = void;
+    template <class T>
+    constexpr T &&operator()(T &&t) const noexcept { return forward<T>(t); }
+};
+
+/* not_fn wraps a predicate so `not_fn(pred)` is its negation -- with the
+ * call forwarded through invoke, so a member pointer works as a
+ * predicate too. */
+template <class F>
+class __not_fn_t {
+public:
+    /* Templated, so that not_fn() can pass an LVALUE callable through.
+     * A constructor taking F&& on the already-decayed F is an rvalue
+     * reference to a concrete type, and `not_fn(pred)` with a named
+     * predicate has nothing to bind to it. */
+    template <class G>
+    explicit constexpr __not_fn_t(G &&g) : __f(forward<G>(g)) {}
+    template <class... A>
+    constexpr auto operator()(A &&...a) const
+        -> decltype(!invoke(declval<const F &>(), forward<A>(a)...))
+    { return !invoke(__f, forward<A>(a)...); }
+private:
+    F __f;
+};
+
+template <class F>
+constexpr __not_fn_t<decay_t<F>> not_fn(F &&f)
+{ return __not_fn_t<decay_t<F>>(forward<F>(f)); }
+
+}  // namespace std
+
+#endif

@@ -1,0 +1,400 @@
+/* <memory> — C++ [memory].
+ *
+ * Where raw storage becomes objects, and where ownership is written down.
+ */
+#ifndef _LIBCXX_MEMORY
+#define _LIBCXX_MEMORY
+
+#include <cstddef>
+#include <new>
+#include <type_traits>
+#include <utility>
+#include <iterator>
+
+namespace std {
+
+/* addressof gets the real address even when the class has overloaded
+ * unary &, which is the whole reason it exists: a container must be able
+ * to find its elements whatever they think & should mean. */
+template <class T>
+constexpr T *addressof(T &x) noexcept { return __builtin_addressof(x); }
+template <class T> const T *addressof(const T &&) = delete;
+
+/* ---- constructing and destroying in place ------------------------------ */
+
+template <class T, class... A>
+constexpr T *construct_at(T *p, A &&...a)
+{
+    return ::new (static_cast<void *>(p)) T(forward<A>(a)...);
+}
+
+template <class T>
+constexpr void destroy_at(T *p)
+{
+    if constexpr (is_array_v<T>)
+        for (auto &e : *p)
+            destroy_at(addressof(e));
+    else
+        p->~T();
+}
+
+template <class I>
+constexpr void destroy(I first, I last)
+{
+    for (; first != last; ++first)
+        destroy_at(addressof(*first));
+}
+
+template <class I>
+constexpr I destroy_n(I first, size_t n)
+{
+    for (; n > 0; --n, ++first)
+        destroy_at(addressof(*first));
+    return first;
+}
+
+/* The uninitialized_* algorithms all share one shape, and it is the shape
+ * that matters: if constructing element k throws, the k-1 already built
+ * must be destroyed before the exception leaves. Without that a vector
+ * that throws while growing leaks every element it had managed to copy. */
+template <class I, class S>
+I uninitialized_copy(I first, I last, S out)
+{
+    S start = out;
+    try {
+        for (; first != last; ++first, ++out)
+            construct_at(addressof(*out), *first);
+    } catch (...) {
+        destroy(start, out);
+        throw;
+    }
+    return out;
+}
+
+template <class I, class S>
+S uninitialized_copy_n(I first, size_t n, S out)
+{
+    S start = out;
+    try {
+        for (; n > 0; --n, ++first, ++out)
+            construct_at(addressof(*out), *first);
+    } catch (...) {
+        destroy(start, out);
+        throw;
+    }
+    return out;
+}
+
+template <class I, class S>
+S uninitialized_move(I first, I last, S out)
+{
+    S start = out;
+    try {
+        for (; first != last; ++first, ++out)
+            construct_at(addressof(*out), move(*first));
+    } catch (...) {
+        destroy(start, out);
+        throw;
+    }
+    return out;
+}
+
+template <class I, class T>
+void uninitialized_fill(I first, I last, const T &v)
+{
+    I start = first;
+    try {
+        for (; first != last; ++first)
+            construct_at(addressof(*first), v);
+    } catch (...) {
+        destroy(start, first);
+        throw;
+    }
+}
+
+template <class I>
+I uninitialized_value_construct_n(I first, size_t n)
+{
+    I start = first;
+    try {
+        for (; n > 0; --n, ++first)
+            construct_at(addressof(*first));
+    } catch (...) {
+        destroy(start, first);
+        throw;
+    }
+    return first;
+}
+
+/* ---- allocator --------------------------------------------------------- */
+
+template <class T>
+struct allocator {
+    using value_type = T;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using propagate_on_container_move_assignment = true_type;
+
+    constexpr allocator() noexcept = default;
+    constexpr allocator(const allocator &) noexcept = default;
+    template <class U> constexpr allocator(const allocator<U> &) noexcept {}
+    constexpr ~allocator() = default;
+
+    [[nodiscard]] constexpr T *allocate(size_t n)
+    {
+        /* n * sizeof(T) can wrap, and a wrapped size asks for a small
+         * block that the caller then writes n elements into. The standard
+         * spells the answer: bad_array_new_length. */
+        if (n > (size_t)-1 / sizeof(T))
+            throw bad_array_new_length();
+        if constexpr (alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+            return static_cast<T *>(
+                ::operator new(n * sizeof(T), align_val_t{alignof(T)}));
+        else
+            return static_cast<T *>(::operator new(n * sizeof(T)));
+    }
+
+    constexpr void deallocate(T *p, size_t n) noexcept
+    {
+        if constexpr (alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+            ::operator delete(p, n * sizeof(T), align_val_t{alignof(T)});
+        else
+            ::operator delete(p, n * sizeof(T));
+    }
+};
+
+template <class T, class U>
+constexpr bool operator==(const allocator<T> &, const allocator<U> &) noexcept
+{ return true; }
+template <class T, class U>
+constexpr bool operator!=(const allocator<T> &, const allocator<U> &) noexcept
+{ return false; }
+
+/* allocator_traits is the indirection containers go through, so that an
+ * allocator only has to provide what it wants to change. Every member
+ * below has a default expressed in terms of the few that do not. */
+namespace __detail {
+template <class A, class = void> struct __alloc_ptr
+{ using type = typename A::value_type *; };
+template <class A> struct __alloc_ptr<A, void_t<typename A::pointer>>
+{ using type = typename A::pointer; };
+
+template <class A, class = void> struct __alloc_size
+{ using type = size_t; };
+template <class A> struct __alloc_size<A, void_t<typename A::size_type>>
+{ using type = typename A::size_type; };
+
+template <class A, class = void> struct __alloc_diff
+{ using type = ptrdiff_t; };
+template <class A> struct __alloc_diff<A, void_t<typename A::difference_type>>
+{ using type = typename A::difference_type; };
+}
+
+template <class A>
+struct allocator_traits {
+    using allocator_type = A;
+    using value_type = typename A::value_type;
+    using pointer = typename __detail::__alloc_ptr<A>::type;
+    using const_pointer = const value_type *;
+    using void_pointer = void *;
+    using size_type = typename __detail::__alloc_size<A>::type;
+    using difference_type = typename __detail::__alloc_diff<A>::type;
+
+    template <class U> using rebind_alloc = allocator<U>;
+
+    [[nodiscard]] static constexpr pointer allocate(A &a, size_type n)
+    { return a.allocate(n); }
+    static constexpr void deallocate(A &a, pointer p, size_type n)
+    { a.deallocate(p, n); }
+
+    template <class T, class... Args>
+    static constexpr void construct(A &, T *p, Args &&...args)
+    { construct_at(p, forward<Args>(args)...); }
+    template <class T>
+    static constexpr void destroy(A &, T *p) { destroy_at(p); }
+
+    static constexpr size_type max_size(const A &) noexcept
+    { return (size_type)-1 / sizeof(value_type); }
+
+    static constexpr A select_on_container_copy_construction(const A &a)
+    { return a; }
+};
+
+/* ---- unique_ptr --------------------------------------------------------- */
+
+template <class T>
+struct default_delete {
+    constexpr default_delete() noexcept = default;
+    template <class U> default_delete(const default_delete<U> &) noexcept {}
+    void operator()(T *p) const
+    {
+        /* Deleting through a pointer to an incomplete type is undefined
+         * and silently skips the destructor, so it is refused here where
+         * the mistake is. */
+        static_assert(sizeof(T) > 0, "cannot delete an incomplete type");
+        delete p;
+    }
+};
+
+template <class T>
+struct default_delete<T[]> {
+    constexpr default_delete() noexcept = default;
+    template <class U> void operator()(U *) const = delete;
+    void operator()(T *p) const
+    {
+        static_assert(sizeof(T) > 0, "cannot delete an incomplete type");
+        delete[] p;
+    }
+};
+
+template <class T, class D = default_delete<T>>
+class unique_ptr {
+public:
+    using pointer = T *;
+    using element_type = T;
+    using deleter_type = D;
+
+    constexpr unique_ptr() noexcept : __p(nullptr), __d() {}
+    constexpr unique_ptr(decltype(nullptr)) noexcept : __p(nullptr), __d() {}
+    explicit unique_ptr(pointer p) noexcept : __p(p), __d() {}
+    unique_ptr(pointer p, const D &d) noexcept : __p(p), __d(d) {}
+
+    unique_ptr(unique_ptr &&o) noexcept
+        : __p(o.release()), __d(move(o.__d)) {}
+    template <class U, class E>
+    unique_ptr(unique_ptr<U, E> &&o) noexcept : __p(o.release()), __d() {}
+
+    /* Copying is what unique_ptr exists to prevent, and deleting the
+     * members says so at the call site instead of at a link error. */
+    unique_ptr(const unique_ptr &) = delete;
+    unique_ptr &operator=(const unique_ptr &) = delete;
+
+    ~unique_ptr() { if (__p) __d(__p); }
+
+    unique_ptr &operator=(unique_ptr &&o) noexcept
+    {
+        /* Self-move must not destroy the object: reset() would delete it
+         * and then store the pointer it has just freed. */
+        if (this != addressof(o)) {
+            reset(o.release());
+            __d = move(o.__d);
+        }
+        return *this;
+    }
+    unique_ptr &operator=(decltype(nullptr)) noexcept { reset(); return *this; }
+
+    pointer get() const noexcept { return __p; }
+    D &get_deleter() noexcept { return __d; }
+    const D &get_deleter() const noexcept { return __d; }
+    explicit operator bool() const noexcept { return __p != nullptr; }
+
+    typename add_lvalue_reference<T>::type operator*() const { return *__p; }
+    pointer operator->() const noexcept { return __p; }
+
+    pointer release() noexcept { pointer p = __p; __p = nullptr; return p; }
+
+    void reset(pointer p = pointer()) noexcept
+    {
+        /* Old pointer taken first, deleted last: the deleter may run code
+         * that reaches this unique_ptr again, and it must not see a
+         * dangling one. */
+        pointer old = __p;
+        __p = p;
+        if (old)
+            __d(old);
+    }
+
+    void swap(unique_ptr &o) noexcept
+    {
+        using std::swap;
+        swap(__p, o.__p);
+        swap(__d, o.__d);
+    }
+
+private:
+    pointer __p;
+    D __d;
+};
+
+template <class T, class D>
+class unique_ptr<T[], D> {
+public:
+    using pointer = T *;
+    using element_type = T;
+    using deleter_type = D;
+
+    constexpr unique_ptr() noexcept : __p(nullptr), __d() {}
+    constexpr unique_ptr(decltype(nullptr)) noexcept : __p(nullptr), __d() {}
+    explicit unique_ptr(pointer p) noexcept : __p(p), __d() {}
+    unique_ptr(unique_ptr &&o) noexcept : __p(o.release()), __d(move(o.__d)) {}
+    unique_ptr(const unique_ptr &) = delete;
+    unique_ptr &operator=(const unique_ptr &) = delete;
+    ~unique_ptr() { if (__p) __d(__p); }
+
+    unique_ptr &operator=(unique_ptr &&o) noexcept
+    {
+        if (this != addressof(o)) { reset(o.release()); __d = move(o.__d); }
+        return *this;
+    }
+
+    pointer get() const noexcept { return __p; }
+    explicit operator bool() const noexcept { return __p != nullptr; }
+    T &operator[](size_t i) const { return __p[i]; }
+    pointer release() noexcept { pointer p = __p; __p = nullptr; return p; }
+    void reset(pointer p = pointer()) noexcept
+    { pointer old = __p; __p = p; if (old) __d(old); }
+    void swap(unique_ptr &o) noexcept
+    { using std::swap; swap(__p, o.__p); swap(__d, o.__d); }
+
+private:
+    pointer __p;
+    D __d;
+};
+
+template <class T, class D>
+void swap(unique_ptr<T, D> &a, unique_ptr<T, D> &b) noexcept { a.swap(b); }
+
+template <class T, class D, class U, class E>
+bool operator==(const unique_ptr<T, D> &a, const unique_ptr<U, E> &b)
+{ return a.get() == b.get(); }
+template <class T, class D, class U, class E>
+bool operator!=(const unique_ptr<T, D> &a, const unique_ptr<U, E> &b)
+{ return a.get() != b.get(); }
+template <class T, class D>
+bool operator==(const unique_ptr<T, D> &a, decltype(nullptr)) noexcept
+{ return !a; }
+template <class T, class D>
+bool operator==(decltype(nullptr), const unique_ptr<T, D> &a) noexcept
+{ return !a; }
+template <class T, class D>
+bool operator!=(const unique_ptr<T, D> &a, decltype(nullptr)) noexcept
+{ return (bool)a; }
+template <class T, class D>
+bool operator!=(decltype(nullptr), const unique_ptr<T, D> &a) noexcept
+{ return (bool)a; }
+
+/* make_unique is not a convenience. `f(unique_ptr<A>(new A), g())` may
+ * evaluate `new A` and then g(), and if g() throws the A leaks -- the
+ * unique_ptr was never constructed. make_unique has no such window. */
+template <class T, class... A>
+enable_if_t<!is_array_v<T>, unique_ptr<T>> make_unique(A &&...a)
+{
+    return unique_ptr<T>(new T(forward<A>(a)...));
+}
+
+template <class T>
+enable_if_t<is_unbounded_array_v<T>, unique_ptr<T>> make_unique(size_t n)
+{
+    return unique_ptr<T>(new remove_extent_t<T>[n]());
+}
+
+template <class T, class... A>
+enable_if_t<is_bounded_array_v<T>> make_unique(A &&...) = delete;
+
+template <class T>
+enable_if_t<!is_array_v<T>, unique_ptr<T>> make_unique_for_overwrite()
+{ return unique_ptr<T>(new T); }
+
+}  // namespace std
+
+#endif

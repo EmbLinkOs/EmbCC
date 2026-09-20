@@ -49,7 +49,8 @@ those exact two members in that order.
 
 ## The standard library, so far
 
-`<type_traits>`, `<utility>`, `<limits>`, and the `<c*>` wrappers
+`<type_traits>`, `<utility>`, `<limits>`, `<iterator>`, `<memory>`,
+`<functional>`, `<array>`, `<stdexcept>`, and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
@@ -65,7 +66,18 @@ whether a constructor is trivial. The ones written out in C++ are the ones
 that genuinely are expressible — the type-list membership tests, and the
 transformations that are just partial specialisation.
 
-Writing these headers found four compiler bugs, which was rather the
+Two things in them are worth reading for the reasoning rather than the
+code. `<memory>`'s `uninitialized_*` algorithms all share one shape: if
+constructing element *k* throws, the *k−1* already built are destroyed
+before the exception leaves — without that, a vector that throws while
+growing leaks every element it had copied. And `<stdexcept>`'s message is
+**copied and reference-counted**: copied because a `what()` returning the
+caller's pointer dangles exactly when it is read, during unwinding; and
+reference-counted because `catch (logic_error e)` by value copies the
+exception, and a copy constructor that allocates can throw — throwing
+while unwinding is `terminate()`.
+
+Writing these headers found six compiler bugs, which was rather the
 point of writing them:
 
 - **partial-specialisation matching read past the end of its argument
@@ -82,6 +94,17 @@ point of writing them:
   `1.0L + LDBL_EPSILON > 1.0L` is true, as it is on the machine.
 - **a conditional was not folded** in a constant expression, making
   `int buf[(N > 4) ? N : 4];` a VLA or an error.
+- **an overloaded unary `operator&` was ignored**, so `&x` on a type that
+  overloads it gave the built-in address. That is the whole reason
+  `std::addressof` exists — and the fix had to keep
+  `__builtin_addressof` on the built-in path, and had to skip the lookup
+  for an *incomplete* class, where `&x` is legal and no overload can be
+  visible (libstdc++'s `<chrono>` does exactly that).
+- **an rvalue reference bound to a function lvalue**, so for `ref(f)` the
+  deleted `const T&&` guard that `std::ref` uses to reject temporaries
+  beat the `T&` overload and `std::ref` of a function was rejected as
+  deleted. A named function is an lvalue, so that candidate is not
+  viable.
 - and `_Noreturn` and `__func__` were missing from C entirely (found by
   the C library, and fixed with it).
 

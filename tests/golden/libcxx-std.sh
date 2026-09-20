@@ -238,7 +238,7 @@ for part in start sys crt; do
         -c "$src" -o "$out/$part.o"
 done
 run() {
-    "$EMBCC" -c -x c++ -O2 $INC "$1" -o "$out/p.o"
+    "$EMBCC" -c -x c++ -O2 $INC -Itests/golden/libcxx-std "$1" -o "$out/p.o"
     x86_64-elf-ld -n -z max-page-size=0x1000 -T "$H/link.ld" -o "$out/p.64" \
         "$out/start.o" "$out/p.o" "$out/sys.o" "$out/crt.o" \
         build/libcxx/x86_64/libcxx.a build/libc/x86_64/libc.a \
@@ -259,6 +259,19 @@ want "order 1 0"
 # move_if_noexcept moves when the move cannot throw -- which is what makes a
 # vector's reallocation exception-safe.
 want "moveifnoexcept moves 1 copies 0 v 5"
+# ---- <iterator>, <memory>, <functional>, <array> ------------------------
+# These four only make sense running: they are about what happens to
+# objects, not about what a type is. Each program CHECKS ITSELF and exits
+# 42, so every expectation lives beside the code it is about and a
+# failure names its own line -- see libcxx-std/check.h.
+for prog in iterator memory functional array; do
+    if run "tests/golden/libcxx-std/$prog.cc"; then rc=0; else rc=$?; fi
+    [ "$rc" = 42 ] || {
+        cat "$out/run.txt"
+        echo "FAIL: <$prog> exited $rc"; exit 1; }
+    echo "<$prog>: every check passed"
+done
+
 if run "$out/cheaders.cc"; then rc=0; else rc=$?; fi
 cat "$out/run.txt"
 [ "$rc" = 42 ] || { echo "FAIL: the <c*> program exited $rc"; exit 1; }

@@ -1,0 +1,86 @@
+/* <stdexcept> — C++ [stdexcept].
+ *
+ * The standard exception hierarchy. Each carries a message, and the
+ * message is COPIED into the object: a `what()` that returned a pointer
+ * into a caller's buffer would dangle exactly when it is read, which is
+ * during unwinding after that buffer's scope has gone.
+ */
+#ifndef _LIBCXX_STDEXCEPT
+#define _LIBCXX_STDEXCEPT
+
+#include <exception>
+
+namespace std {
+
+class __msg_exception : public exception {
+public:
+    explicit __msg_exception(const char *w);
+    __msg_exception(const __msg_exception &o) noexcept;
+    __msg_exception &operator=(const __msg_exception &o) noexcept;
+    ~__msg_exception() noexcept override;
+    const char *what() const noexcept override;
+private:
+    /* Reference-counted, so that copying one while it is in flight --
+     * which catching by value does -- cannot throw. A copy constructor
+     * that allocates can throw during unwinding, and that is terminate(). */
+    struct __rep;
+    __rep *__r;
+};
+
+class logic_error : public __msg_exception {
+public:
+    explicit logic_error(const char *w) : __msg_exception(w) {}
+    ~logic_error() noexcept override;
+};
+
+class domain_error : public logic_error {
+public:
+    explicit domain_error(const char *w) : logic_error(w) {}
+    ~domain_error() noexcept override;
+};
+
+class invalid_argument : public logic_error {
+public:
+    explicit invalid_argument(const char *w) : logic_error(w) {}
+    ~invalid_argument() noexcept override;
+};
+
+class length_error : public logic_error {
+public:
+    explicit length_error(const char *w) : logic_error(w) {}
+    ~length_error() noexcept override;
+};
+
+class out_of_range : public logic_error {
+public:
+    explicit out_of_range(const char *w) : logic_error(w) {}
+    ~out_of_range() noexcept override;
+};
+
+class runtime_error : public __msg_exception {
+public:
+    explicit runtime_error(const char *w) : __msg_exception(w) {}
+    ~runtime_error() noexcept override;
+};
+
+class range_error : public runtime_error {
+public:
+    explicit range_error(const char *w) : runtime_error(w) {}
+    ~range_error() noexcept override;
+};
+
+class overflow_error : public runtime_error {
+public:
+    explicit overflow_error(const char *w) : runtime_error(w) {}
+    ~overflow_error() noexcept override;
+};
+
+class underflow_error : public runtime_error {
+public:
+    explicit underflow_error(const char *w) : runtime_error(w) {}
+    ~underflow_error() noexcept override;
+};
+
+}  // namespace std
+
+#endif
