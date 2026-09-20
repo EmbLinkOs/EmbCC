@@ -9,6 +9,15 @@
  * file descriptors, to grow its heap, to know the time, and to stop. It
  * does not need anything else, and a backend that offers more invites the
  * library above it to depend on a particular OS.
+ *
+ * The threading primitives at the end are the one OPTIONAL group. A
+ * target without them is not broken -- it is single-threaded, and the
+ * C++ library above says so by failing where a thread would have been
+ * created rather than by pretending. Every one of them returns ENOSYS
+ * when the target provides nothing, and that answer travels up to
+ * std::thread's constructor as a system_error. The alternative, a
+ * std::thread that runs its function on the calling thread, would be a
+ * lie that deadlocks the first time somebody joins from inside it.
  */
 #ifndef EMBLIBC_OS_BACKEND_H
 #define EMBLIBC_OS_BACKEND_H
@@ -77,6 +86,58 @@ int  __os_isatty(int fd);
 /* Random bytes for the few library functions that must not be predictable.
  * 0 on success, -1 when the OS cannot provide them. */
 int  __os_getentropy(void *buf, size_t n);
+
+/* ---- threads, and blocking ------------------------------------------------
+ *
+ * Optional: a target that implements none of these is single-threaded,
+ * and each returns -1 with errno ENOSYS there.
+ *
+ * There are two ideas here and only two. A thread is something that
+ * runs a function and can be waited for. Blocking is something that
+ * sleeps until a WORD IN MEMORY changes -- the futex operation, which
+ * is the one primitive every mutex, condition variable, semaphore and
+ * latch in the C++ library is built from. Offering a "mutex" primitive
+ * instead would push the policy into the OS and make every target
+ * reimplement the same fairness and recursion decisions; offering the
+ * word is enough and leaves the policy here.
+ */
+
+/* Run fn(arg) on a new thread. 0 on success, with *id set to a handle
+ * the target chooses; -1 with errno otherwise. The thread ends when fn
+ * returns. */
+int  __os_thread_create(unsigned long *id, void (*fn)(void *), void *arg);
+
+/* Wait for it to end. 0, or -1 with errno. Joining a thread twice, or
+ * joining a detached one, is the caller's mistake and is not checked
+ * here -- the C++ library above checks, because it has the state to. */
+int  __os_thread_join(unsigned long id);
+
+/* Give up the claim to join it: its resources are released when it
+ * ends. 0, or -1 with errno. */
+int  __os_thread_detach(unsigned long id);
+
+/* This thread's handle. 0 on a target with no threads, which is a valid
+ * answer: there is exactly one thread and it needs no name. */
+unsigned long __os_thread_self(void);
+
+/* Let another runnable thread have the processor. A no-op is a correct
+ * implementation. */
+void __os_thread_yield(void);
+
+/* Sleep for at least ns nanoseconds. 0, or -1 with errno. */
+int  __os_sleep_ns(long ns);
+
+/* Sleep until *addr differs from expected, or until somebody wakes this
+ * address, or until timeout_ns has passed (negative: no timeout). The
+ * comparison and the sleep must be ATOMIC with respect to a wake --
+ * that is the entire difficulty and the entire reason this is a
+ * primitive rather than a loop. A spurious return is allowed and every
+ * caller here loops. 0, or -1 with errno. */
+int  __os_futex_wait(const volatile int *addr, int expected, long timeout_ns);
+
+/* Wake up to `count` waiters on addr (-1: all of them). The number
+ * woken, or -1 with errno. */
+int  __os_futex_wake(const volatile int *addr, int count);
 
 #ifdef __cplusplus
 }

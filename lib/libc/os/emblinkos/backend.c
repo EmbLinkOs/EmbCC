@@ -250,3 +250,65 @@ int __os_getentropy(void *buf, size_t n)
     return -1;
 #endif
 }
+
+/* ---- threads ---------------------------------------------------------------
+ *
+ * EmbLinkOS does not have them yet. Saying so here, in the one file
+ * that knows about EmbLinkOS, is the point of the seam: the C++ library
+ * above learns from ENOSYS that this target is single-threaded and
+ * reports it as a system_error where a thread would have been created.
+ * Nothing above this file is conditional on which OS it is.
+ *
+ * When the kernel grows threads, this is the file that changes, and it
+ * needs two ideas and no more: run a function on a new thread, and
+ * sleep until a word in memory changes. Every mutex, condition
+ * variable, semaphore and latch in the C++ library is built from the
+ * second (see os/backend.h).
+ */
+int __os_thread_create(unsigned long *id, void (*fn)(void *), void *arg)
+{
+    (void)id; (void)fn; (void)arg;
+    errno = ENOSYS;
+    return -1;
+}
+
+int __os_thread_join(unsigned long id)
+{
+    (void)id;
+    errno = ENOSYS;
+    return -1;
+}
+
+int __os_thread_detach(unsigned long id)
+{
+    (void)id;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* One thread, so it needs no name. */
+unsigned long __os_thread_self(void) { return 0ul; }
+
+/* Nobody to yield to. */
+void __os_thread_yield(void) {}
+
+int __os_sleep_ns(long ns)
+{
+    (void)ns;
+    errno = ENOSYS;
+    return -1;
+}
+
+int __os_futex_wait(const volatile int *addr, int expected, long timeout_ns)
+{
+    (void)addr; (void)expected; (void)timeout_ns;
+    errno = ENOSYS;
+    return -1;
+}
+
+int __os_futex_wake(const volatile int *addr, int count)
+{
+    (void)addr; (void)count;
+    errno = ENOSYS;
+    return -1;
+}

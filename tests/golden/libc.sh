@@ -330,6 +330,248 @@ echo "setjmp/longjmp across frames, the calendar before and after the epoch
 and on a leap day, strftime, scanf's matching and input failures, and
 printf's floating conversion exact at every tie, carry and extreme"
 
+# ---- the wide half, and the three headers that reach the hardware ---------
+#
+# UTF-8 is where the bugs are, and they are always the same three: an
+# overlong form that smuggles a NUL past a NUL check, a surrogate that
+# gives one string two encodings, and a sequence split across two calls
+# that a stateless decoder mangles. Each is checked here because each is
+# a real attack rather than a corner case.
+cat > "$out/wide.c" << 'EOF'
+#include <wchar.h>
+#include <wctype.h>
+#include <uchar.h>
+#include <locale.h>
+#include <fenv.h>
+#include <signal.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+
+static int fails;
+#define CHK(e) do { if (!(e)) { printf("FAIL %d: %s\n", __LINE__, #e); fails++; } } while (0)
+
+static volatile sig_atomic_t caught;
+static void handler(int s) { (void)s; caught = 1; }
+
+int main(void)
+{
+    /* ---- wide strings ------------------------------------------------ */
+    CHK(wcslen(L"hello") == 5);
+    CHK(wcslen(L"") == 0);
+    wchar_t buf[16];
+    wcscpy(buf, L"abc");
+    CHK(wcscmp(buf, L"abc") == 0);
+    wcscat(buf, L"def");
+    CHK(wcscmp(buf, L"abcdef") == 0);
+    CHK(wcsncmp(L"abcx", L"abcy", 3) == 0);
+    CHK(wcscmp(L"a", L"b") < 0 && wcscmp(L"b", L"a") > 0);
+    CHK(wcschr(L"abc", L'b') != NULL);
+    CHK(wcschr(L"abc", L'z') == NULL);
+    CHK(*wcsrchr(L"abcabc", L'b') == L'b');
+    CHK(wcsstr(L"hello world", L"world") != NULL);
+    CHK(wcsstr(L"hello", L"xyz") == NULL);
+    CHK(wcsspn(L"aabbc", L"ab") == 4);
+    CHK(wcscspn(L"aabbc", L"c") == 4);
+    wmemset(buf, L'x', 3);
+    CHK(buf[0] == L'x' && buf[2] == L'x');
+    CHK(wmemchr(L"abc", L'c', 3) != NULL);
+
+    /* wcstok is the reentrant one -- the only form C11 gives for wide
+     * strings, because strtok's hidden state was a mistake. */
+    wchar_t tok[] = L"a,b,,c";
+    wchar_t *save = NULL;
+    CHK(wcscmp(wcstok(tok, L",", &save), L"a") == 0);
+    CHK(wcscmp(wcstok(NULL, L",", &save), L"b") == 0);
+    CHK(wcscmp(wcstok(NULL, L",", &save), L"c") == 0);
+    CHK(wcstok(NULL, L",", &save) == NULL);
+
+    /* ---- UTF-8, and what must be refused ------------------------------ */
+    wchar_t wc;
+    mbstate_t st;
+    memset(&st, 0, sizeof st);
+    CHK(mbsinit(&st));
+
+    CHK(mbrtowc(&wc, "A", 1, &st) == 1 && wc == 0x41);
+    CHK(mbrtowc(&wc, "\xc3\xa9", 2, &st) == 2 && wc == 0xE9);
+    CHK(mbrtowc(&wc, "\xe2\x82\xac", 3, &st) == 3 && wc == 0x20AC);
+    CHK(mbrtowc(&wc, "\xf0\x9f\x98\x80", 4, &st) == 4 && wc == 0x1F600);
+    /* A NUL converts and returns 0, not 1: the standard says so, and a
+     * loop that adds the return value must handle it. */
+    CHK(mbrtowc(&wc, "\0", 1, &st) == 0 && wc == 0);
+
+    /* OVERLONG: 0xC0 0x80 decodes arithmetically to U+0000, and a
+     * decoder that accepts it lets a NUL through a string that was
+     * checked for NULs. */
+    memset(&st, 0, sizeof st);
+    CHK(mbrtowc(&wc, "\xc0\x80", 2, &st) == (size_t)-1);
+    memset(&st, 0, sizeof st);
+    CHK(mbrtowc(&wc, "\xe0\x80\x80", 3, &st) == (size_t)-1);
+    /* A SURROGATE: not a character, and accepting it gives one string
+     * two encodings. */
+    memset(&st, 0, sizeof st);
+    CHK(mbrtowc(&wc, "\xed\xa0\x80", 3, &st) == (size_t)-1);
+    /* Above U+10FFFF, and a lone continuation byte. */
+    memset(&st, 0, sizeof st);
+    CHK(mbrtowc(&wc, "\xf5\x80\x80\x80", 4, &st) == (size_t)-1);
+    memset(&st, 0, sizeof st);
+    CHK(mbrtowc(&wc, "\x80", 1, &st) == (size_t)-1);
+
+    /* SPLIT across calls: -2 means incomplete, and the state remembers
+     * where we were. A stateless decoder mangles exactly this. */
+    memset(&st, 0, sizeof st);
+    CHK(mbrtowc(&wc, "\xe2", 1, &st) == (size_t)-2);
+    CHK(!mbsinit(&st));
+    CHK(mbrtowc(&wc, "\x82", 1, &st) == (size_t)-2);
+    CHK(mbrtowc(&wc, "\xac", 1, &st) == (size_t)-2 || wc == 0x20AC);
+    CHK(wc == 0x20AC);
+    CHK(mbsinit(&st));
+
+    /* ---- the other direction ------------------------------------------ */
+    char out[8];
+    memset(&st, 0, sizeof st);
+    CHK(wcrtomb(out, 0x41, &st) == 1 && out[0] == 'A');
+    CHK(wcrtomb(out, 0xE9, &st) == 2);
+    CHK((unsigned char)out[0] == 0xc3 && (unsigned char)out[1] == 0xa9);
+    CHK(wcrtomb(out, 0x20AC, &st) == 3);
+    CHK(wcrtomb(out, 0x1F600, &st) == 4);
+    /* A surrogate cannot be encoded either. */
+    CHK(wcrtomb(out, 0xD800, &st) == (size_t)-1);
+
+    /* Round trip through both. */
+    const char *utf8 = "h\xc3\xa9llo \xe2\x82\xac";
+    wchar_t wide[32];
+    const char *p = utf8;
+    memset(&st, 0, sizeof st);
+    size_t n = mbsrtowcs(wide, &p, 32, &st);
+    CHK(n == 7 && wide[1] == 0xE9 && wide[6] == 0x20AC);
+    char back[32];
+    const wchar_t *q = wide;
+    memset(&st, 0, sizeof st);
+    size_t m = wcsrtombs(back, &q, 32, &st);
+    CHK(m == strlen(utf8) && strcmp(back, utf8) == 0);
+
+    /* ---- UTF-16, and the surrogate pair it exists for ------------------ */
+    char16_t u16;
+    memset(&st, 0, sizeof st);
+    CHK(mbrtoc16(&u16, "A", 1, &st) == 1 && u16 == 0x41);
+    memset(&st, 0, sizeof st);
+    /* A code point above the basic plane takes TWO units: the first
+     * call consumes the bytes and returns the high surrogate, the
+     * second consumes NOTHING and returns the low one -- which is what
+     * -3 means and is the only way a one-unit-at-a-time interface can
+     * report it. */
+    CHK(mbrtoc16(&u16, "\xf0\x9f\x98\x80", 4, &st) == 4);
+    CHK(u16 >= 0xD800 && u16 <= 0xDBFF);
+    CHK(mbrtoc16(&u16, "", 0, &st) == (size_t)-3);
+    CHK(u16 >= 0xDC00 && u16 <= 0xDFFF);
+
+    memset(&st, 0, sizeof st);
+    /* And back: a high surrogate writes nothing yet and returns 0. */
+    CHK(c16rtomb(out, 0xD83D, &st) == 0);
+    CHK(c16rtomb(out, 0xDE00, &st) == 4);
+    /* A lone low surrogate is an error, not a character. */
+    memset(&st, 0, sizeof st);
+    CHK(c16rtomb(out, 0xDE00, &st) == (size_t)-1);
+
+    char32_t u32;
+    memset(&st, 0, sizeof st);
+    CHK(mbrtoc32(&u32, "\xf0\x9f\x98\x80", 4, &st) == 4 && u32 == 0x1F600);
+    CHK(c32rtomb(out, 0x1F600, &st) == 4);
+
+    /* ---- classification, in the "C" locale ----------------------------- */
+    CHK(iswalpha(L'a') && iswalpha(L'Z'));
+    CHK(!iswalpha(L'1') && !iswalpha(L' '));
+    CHK(iswdigit(L'7') && !iswdigit(L'x'));
+    CHK(iswspace(L' ') && iswspace(L'\t'));
+    CHK(iswupper(L'A') && iswlower(L'a'));
+    CHK(towupper(L'a') == L'A' && towlower(L'Z') == L'z');
+    CHK(towupper(L'1') == L'1');
+    /* The "C" locale classifies exactly the basic set and says no above
+     * it -- which is what the locale MEANS, not a shortcut. */
+    CHK(!iswalpha(0xE9));
+    CHK(towupper(0xE9) == 0xE9);
+    CHK(iswctype(L'a', wctype("alpha")));
+    CHK(!iswctype(L'a', wctype("digit")));
+    CHK(wctype("nosuch") == 0);
+    CHK(towctrans(L'a', wctrans("toupper")) == L'A');
+
+    /* ---- wide numeric conversion --------------------------------------- */
+    wchar_t *end;
+    CHK(wcstol(L"  -42rest", &end, 10) == -42 && *end == L'r');
+    CHK(wcstoul(L"ff", &end, 16) == 255);
+    CHK(wcstod(L"1.5", &end) == 1.5 && *end == 0);
+    CHK(wcstod(L"abc", &end) == 0.0 && end[0] == L'a');
+
+    /* ---- locale: one, and it says so ----------------------------------- */
+    CHK(setlocale(LC_ALL, "C") != NULL);
+    CHK(setlocale(LC_ALL, "") != NULL);
+    CHK(setlocale(LC_ALL, "fr_FR.UTF-8") == NULL);
+    CHK(strcmp(localeconv()->decimal_point, ".") == 0);
+    CHK(localeconv()->thousands_sep[0] == 0);
+
+    /* ---- fenv: the rounding mode really reaches the hardware ----------- */
+    CHK(fegetround() == FE_TONEAREST);
+    feclearexcept(FE_ALL_EXCEPT);
+    CHK(fetestexcept(FE_ALL_EXCEPT) == 0);
+    feraiseexcept(FE_INEXACT);
+    CHK(fetestexcept(FE_INEXACT) == FE_INEXACT);
+    CHK(fetestexcept(FE_OVERFLOW) == 0);
+    feclearexcept(FE_INEXACT);
+    CHK(fetestexcept(FE_INEXACT) == 0);
+
+    /* The mode is set and read BACK from the register, so this fails if
+     * the store never reached it. */
+    CHK(fesetround(FE_TOWARDZERO) == 0 && fegetround() == FE_TOWARDZERO);
+    CHK(fesetround(FE_UPWARD) == 0 && fegetround() == FE_UPWARD);
+    CHK(fesetround(FE_DOWNWARD) == 0 && fegetround() == FE_DOWNWARD);
+    CHK(fesetround(FE_TONEAREST) == 0 && fegetround() == FE_TONEAREST);
+    CHK(fesetround(99) != 0);
+
+    /* And it CHANGES arithmetic, which is the only check that proves
+     * the bits are the right ones. The values are volatile so the
+     * division happens at run time under the mode just set. */
+    {
+        volatile double a = 1.0, b = 3.0;
+        fesetround(FE_DOWNWARD);
+        volatile double lo = a / b;
+        fesetround(FE_UPWARD);
+        volatile double hi = a / b;
+        fesetround(FE_TONEAREST);
+        CHK(lo < hi);
+    }
+
+    fenv_t saved;
+    CHK(feholdexcept(&saved) == 0);
+    feraiseexcept(FE_DIVBYZERO);
+    CHK(feupdateenv(&saved) == 0);
+    CHK(fetestexcept(FE_DIVBYZERO) == FE_DIVBYZERO);
+    feclearexcept(FE_ALL_EXCEPT);
+
+    /* ---- signal: raise reaches the handler, once ----------------------- */
+    CHK(signal(SIGINT, handler) != SIG_ERR);
+    CHK(raise(SIGINT) == 0);
+    CHK(caught == 1);
+    /* The handler is cleared before it is called, so a second raise
+     * would take the default -- which is why this reinstalls it rather
+     * than raising again. */
+    CHK(signal(SIGINT, SIG_IGN) != SIG_ERR);
+    CHK(raise(SIGINT) == 0);
+    CHK(signal(SIGINT, SIG_IGN) == SIG_IGN);
+    CHK(signal(999, handler) == SIG_ERR);
+
+    if (!fails)
+        printf("wide, locale, fenv and signal: ok\n");
+    return fails ? 1 : 42;
+}
+EOF
+if build_run "$out/wide.c" -O1; then rc=0; else rc=$?; fi
+cat "$out/run.txt"
+[ "$rc" = 42 ] || { echo "FAIL: the wide/fenv program exited $rc"; exit 1; }
+want_line "wide, locale, fenv and signal: ok"
+echo "UTF-8 refusing overlong forms, surrogates and split sequences; the
+rounding mode reaching the hardware and changing arithmetic"
+
 # ---- the acceptance: the whole execution corpus ---------------------------
 ok=0; bad=0
 for f in tests/exec/*.c; do

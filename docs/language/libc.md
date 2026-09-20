@@ -153,6 +153,78 @@ double's range prints `inf`. Doing that exactly needs a big integer
 fourteen times larger (5^16445 rather than 5^1074), paid on every call
 for a conversion nothing here makes.
 
+## The wide half, and three headers that reach the hardware
+
+`<wchar.h>`, `<wctype.h>` and `<uchar.h>` arrived together, and the
+substance is the **UTF-8 conversion**, not the string functions. The
+multibyte encoding is locale-dependent in C; this library has one locale
+(below) and its encoding is UTF-8, which is the only choice that is not
+arbitrary.
+
+Most of that file is **refusals**, and each is a real attack rather than
+a corner case:
+
+- **Overlong forms.** `C0 80` decodes arithmetically to U+0000, so a
+  decoder that accepts it lets a NUL through a string that was checked
+  for NULs. Every length has a smallest value it may encode.
+- **Surrogates.** U+D800–U+DFFF are not characters; they exist only as
+  UTF-16 code units. Accepting them gives one string two encodings.
+- **Anything above U+10FFFF.** Not a code point. The old five- and
+  six-byte forms encode them and are not UTF-8.
+
+And the conversion **state** is a real object, not a placeholder: a
+sequence split across two calls has to be remembered somewhere, and a
+function that ignores it mangles exactly the input that arrives in
+chunks — which is the case that only shows up in production. `mbrtowc`
+returns −2 and keeps its place.
+
+UTF-16 is where `<uchar.h>` earns its keep. A code point above U+FFFF
+takes **two** code units, so `mbrtoc16` returns the high surrogate,
+consumes the bytes, and returns the low one on the next call consuming
+*nothing* — which is what the return value −3 means and is the only way
+a one-unit-at-a-time interface can report it. `c16rtomb` mirrors it:
+handed a high surrogate it writes nothing and returns 0.
+
+`wchar_t` is 32 bits here, so one `wchar_t` is one code point and there
+are no surrogates to think about in the wide direction. That is the
+comfortable case, and it is worth saying because the uncomfortable one —
+16-bit `wchar_t`, where a code point may take two — is why so much
+wide-character code is subtly wrong.
+
+**`<locale.h>` has one locale, named "C".** A locale is a table of
+cultural conventions that has to come from somewhere, and on a
+freestanding target there is nowhere; shipping somebody's idea of a
+decimal separator and calling it the system's would be worse than
+saying so. `setlocale` accepts `"C"` and `""` — the native locale here
+*is* `"C"` — and returns NULL for anything else, which is the same
+interface a hosted library offers. `<wctype.h>` follows from it: in the
+"C" locale the classifications are exactly the basic execution character
+set and "no" above it, because that is what the locale *means*.
+
+**`<fenv.h>` reaches a hardware register**, and the two targets disagree
+about where everything is. x86-64 keeps the sticky flags and the
+rounding mode in one register, MXCSR — the flag bits *are* the `FE_*`
+values, which is why they were numbered that way. aarch64 splits them:
+FPSR for the flags, FPCR for the mode, in a different bit order, so both
+directions are translated rather than passed through. Passing them
+through would work on one target and silently test the wrong bit on the
+other.
+
+The golden does not merely read the mode back. It sets one and checks
+that `1.0/3.0` rounds **differently** — the only check that proves the
+right bits are being set.
+
+**`<signal.h>` is the C standard's model, not POSIX's**: six signals, one
+handler each, and a very short list of what a handler may legally do —
+`abort`, `_Exit`, `quick_exit`, `signal` for its own signal, and
+assigning to a `volatile sig_atomic_t`. Not printf, not malloc: the
+handler can interrupt those mid-way and re-entering finds a broken
+invariant. C has no way for an OS to *deliver* one, because C does not
+know what an OS is, so `raise` is the only path a signal takes here —
+and that is the real thing for a freestanding target, not a
+simplification. A backend that gains delivery calls `__raise_signal` and
+everything above it is already correct.
+
 ## Math
 
 `src/math/fdlibm/` is Sun's fdlibm, kept **verbatim** (its notice preserved)
