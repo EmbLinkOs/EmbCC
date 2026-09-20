@@ -102,9 +102,17 @@ embld: tools/embld/embld.c src/link/link.c src/driver/util.c \
 EMBLS_SRCS = tools/embls/embls.c src/cpp/cpp.c src/lex/lex.c \
              src/parse/parse.c src/sema/type.c src/sema/ldfloat.c \
              src/sema/w128.c src/driver/util.c src/driver/diag.c \
+             src/driver/explain.c \
              src/arch/target.c src/arch/predef.c src/arch/x86_64/predef.c \
              src/arch/aarch64/predef.c src/arch/x86_64/predef_cxx.c \
-             src/arch/aarch64/predef_cxx.c
+             src/arch/aarch64/predef_cxx.c \
+             $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
+             src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
+             src/arch/code.c src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
+             src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
+             src/arch/x86_64/as.c src/arch/aarch64/irgen.c \
+             src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
+             src/arch/aarch64/asm.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
 

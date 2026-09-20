@@ -39,7 +39,10 @@
 #include "../../src/parse/ast.h"
 #include "../../src/sema/type.h"
 #include "../../src/cpp/cpp.h"
+#include "../../src/cxx/cxx.h"
+#include "../../src/cxx/translate.h"
 #include "../../src/arch/target.h"
+#include "../../src/arch/predef.h"
 
 struct unit *parse_unit(const char *file, const char *src);
 
@@ -298,6 +301,20 @@ struct doc {
 static struct doc *g_docs;
 static int g_ndocs;
 
+/* C++ by its suffix, as the driver decides it. */
+static int is_cxx_path(const char *p)
+{
+    static const char *const sfx[] = { ".cc", ".cpp", ".cxx", ".C", ".c++",
+                                       ".hpp", ".hh", ".hxx" };
+    size_t n = strlen(p);
+    for (size_t i = 0; i < sizeof sfx / sizeof sfx[0]; i++) {
+        size_t k = strlen(sfx[i]);
+        if (n > k && !strcmp(p + n - k, sfx[i]))
+            return 1;
+    }
+    return 0;
+}
+
 static char *uri_to_path(const char *uri)
 {
     if (strncmp(uri, "file://", 7) != 0)
@@ -533,6 +550,89 @@ static void emit_index(FILE *f, struct unit *u)
     }
 }
 
+/* The same for C++, from the C++ front end's own tables: its functions
+ * (with their signatures as written, not mangled), its classes and their
+ * members, its namespace-scope variables. A member is recorded under its
+ * class's name, which is what completion after a `.` looks up. */
+static void emit_cxx_locals(FILE *f, struct cstmt *s, const char *fn,
+                            const char *file, int s0, int s1)
+{
+    for (; s; s = s->next) {
+        if (s->k == S_DECL)
+            for (struct cstmt *d = s; d; d = d->more)
+                if (d->var && d->var->name)
+                    emit_rec(f, SYM_LOCAL, d->var->name, ct_name(d->var->type),
+                             fn, file, d->var->line, 1, s0, s1);
+        emit_cxx_locals(f, s->body, fn, file, s0, s1);
+        emit_cxx_locals(f, s->els, fn, file, s0, s1);
+    }
+}
+
+static int cxx_last_line(struct cstmt *s, int best)
+{
+    for (; s; s = s->next) {
+        if (s->line > best) best = s->line;
+        best = cxx_last_line(s->body, best);
+        best = cxx_last_line(s->els, best);
+    }
+    return best;
+}
+
+static void emit_cxx_index(FILE *f)
+{
+    for (struct cfunc *fn = cx_funcs; fn; fn = fn->all_next) {
+        if (!fn->name || fn->name[0] == '<')
+            continue;
+        struct sb sig = { 0, 0, 0 };
+        struct cty *t = fn->type;
+        sb_fmt(&sig, "%s %s%s%s(", t && t->to ? ct_name(t->to) : "auto",
+               fn->cls && fn->cls->name ? fn->cls->name : "",
+               fn->cls && fn->cls->name ? "::" : "", fn->name);
+        for (int i = 0; t && i < t->np; i++)
+            sb_fmt(&sig, "%s%s%s%s", i ? ", " : "", ct_name(t->params[i]),
+                   fn->pnames && fn->pnames[i] ? " " : "",
+                   fn->pnames && fn->pnames[i] ? fn->pnames[i] : "");
+        sb_fmt(&sig, "%s)", t && t->variadic ? ", ..." : "");
+        emit_rec(f, SYM_FUNC, fn->name, sig.p, fn->cls ? fn->cls->name : "",
+                 fn->file, fn->line, 1, 0, 0);
+        free(sig.p);
+        if (!fn->body)
+            continue;
+        int end = cxx_last_line(fn->body, fn->line);
+        for (int i = 0; t && fn->pnames && i < t->np; i++)
+            if (fn->pnames[i])
+                emit_rec(f, SYM_PARAM, fn->pnames[i], ct_name(t->params[i]),
+                         fn->name, fn->file, fn->line, 1, fn->line, end);
+        emit_cxx_locals(f, fn->body, fn->name, fn->file, fn->line, end);
+    }
+    for (int i = 0; i < cx_nclasses; i++) {
+        struct cclass *c = cx_classes[i];
+        if (!c || !c->name)
+            continue;
+        char detail[256];
+        snprintf(detail, sizeof detail, "%s %s",
+                 c->is_union ? "union" : c->is_struct ? "struct" : "class",
+                 c->name);
+        emit_rec(f, SYM_TYPE, c->name, detail, "", "", 0, 0, 0, 0);
+        for (int k = 0; k < c->nfields; k++)
+            if (c->fields[k] && c->fields[k]->name)
+                emit_rec(f, SYM_MEMBER, c->fields[k]->name,
+                         ct_name(c->fields[k]->type), c->name, "", 0, 0, 0, 0);
+        /* member functions are members too: completion after a `.` should
+         * offer what you can call, not only what you can read */
+        for (struct cfunc *m = cx_funcs; m; m = m->all_next)
+            if (m->cls == c && m->name && m->name[0] != '<' && !m->is_ctor &&
+                !m->is_dtor && !m->is_implicit && !m->is_deleted)
+                emit_rec(f, SYM_MEMBER, m->name,
+                         m->type && m->type->to ? ct_name(m->type->to) : "auto",
+                         c->name, m->file, m->line, 1, 0, 0);
+    }
+    for (int i = 0; i < cx_ngvars; i++)
+        if (cx_gvars[i] && cx_gvars[i]->name && !cx_gvars[i]->is_local)
+            emit_rec(f, SYM_VAR, cx_gvars[i]->name, ct_name(cx_gvars[i]->type),
+                     "", cx_gvars[i]->file, cx_gvars[i]->line, 1, 0, 0);
+}
+
 /* The parent's side: fork, let the child parse, read what it wrote. The
  * child's stderr goes nowhere — its diagnostics are the compiler's job, and
  * this run is only for the index. */
@@ -587,9 +687,22 @@ static void index_build(struct doc *d)
         }
         if (src) {
             cpp_set_tolerant(1);     /* a header we cannot find is not fatal */
+            int cxx = is_cxx_path(d->path);
+            predef_set_cxx(cxx);
+            if (cxx)
+                cpp_set_cxx(NULL, 1);
             char *pp = cpp_process(tmp, src, incs, ninc);
-            struct unit *u = parse_unit(tmp, pp);
-            emit_index(out, u);
+            if (cxx) {
+                /* The C++ front end's own tables, so what an editor is
+                 * told matches what the compiler sees. */
+                scope_init();
+                cx_tokenize(d->path, pp);
+                cx_parse_unit();
+                emit_cxx_index(out);
+            } else {
+                struct unit *u = parse_unit(tmp, pp);
+                emit_index(out, u);
+            }
         }
         fflush(out);
         _exit(0);
@@ -773,21 +886,38 @@ static int member_context(struct doc *d, int line, int ch, char *base,
     return 1;
 }
 
-/* The struct tag a name's type names, e.g. "struct P *" -> "P". */
+/* The class a type names: "struct P *" -> "P" in C, "const Point &" ->
+ * "Point" in C++, where a class name stands on its own. The first word
+ * that is not a qualifier or an aggregate keyword is it. */
 static void tag_of_type(const char *detail, char *tag, size_t cap)
 {
+    static const char *const skip[] = { "const", "volatile", "struct",
+                                        "union", "class", "enum" };
     tag[0] = 0;
-    if (!detail) return;
-    const char *p = strstr(detail, "struct ");
-    if (!p) p = strstr(detail, "union ");
-    if (!p) return;
-    p = strchr(p, ' ');
-    if (!p) return;
-    p++;
-    size_t n = 0;
-    while (p[n] && (ident_char((unsigned char)p[n])) && n + 1 < cap) n++;
-    memcpy(tag, p, n);
-    tag[n] = 0;
+    if (!detail)
+        return;
+    const char *p = detail;
+    for (;;) {
+        while (*p && !ident_char((unsigned char)*p))
+            p++;
+        if (!*p)
+            return;
+        size_t n = 0;
+        while (p[n] && ident_char((unsigned char)p[n]))
+            n++;
+        int skipit = 0;
+        for (size_t i = 0; i < sizeof skip / sizeof skip[0]; i++)
+            if (n == strlen(skip[i]) && !memcmp(p, skip[i], n))
+                skipit = 1;
+        if (!skipit) {
+            if (n >= cap)
+                n = cap - 1;
+            memcpy(tag, p, n);
+            tag[n] = 0;
+            return;
+        }
+        p += n;
+    }
 }
 
 /* A name's type, looking at locals of the enclosing function first. */

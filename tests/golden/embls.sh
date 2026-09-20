@@ -39,6 +39,26 @@ int main(void)
 }
 EOF
 
+cat > "$out/demo.cc" << 'EOF2'
+struct Point {
+    int x;
+    int y;
+    int sum() const { return x + y; }
+};
+
+int scale(Point p, int factor)
+{
+    int base = p.sum();
+    return base * factor;
+}
+
+int main()
+{
+    Point origin{2, 3};
+    return scale(origin, 2) - 10;
+}
+EOF2
+
 cat > "$out/broken.c" << 'EOF'
 struct Point { int x; int y; };
 int area(struct Point p)
@@ -146,6 +166,22 @@ print("a broken file: both errors, at their lines, with the suggestion")
 items2 = [i["label"] for i in ask("textDocument/completion", uri2, 4, 19)["items"]]
 assert items2 == ["x", "y"], items2
 print("completion while the file is broken: %s" % ", ".join(items2))
+
+# C++ is indexed by the C++ front end, so the members offered after a `.`
+# are that class's own — data and the functions you can call, without the
+# ones the compiler generated for you.
+uri3, diags3 = open_doc(out + "/demo.cc")
+assert diags3 == [], diags3
+items3 = [i["label"] for i in ask("textDocument/completion", uri3, 8, 17)["items"]]
+assert items3 == ["x", "y", "sum"], items3
+h3 = ask("textDocument/hover", uri3, 15, 13)["contents"]["value"]
+assert "int scale(Point p, int factor)" in h3, h3
+d3 = ask("textDocument/definition", uri3, 15, 13)
+assert d3["range"]["start"]["line"] == 6, d3
+syms3 = [s["name"] for s in ask("textDocument/documentSymbol", uri3, 0, 0)]
+assert "scale" in syms3 and "sum" in syms3, syms3
+print("C++: members after `.` are %s; hover and definition from the C++ parse"
+      % ", ".join(items3))
 
 send({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": {}})
 recv()

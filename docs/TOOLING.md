@@ -17,7 +17,7 @@ until the front ends can keep going after an error.
 | **T2** | **Error recovery.** Both front ends keep going after an error — synchronising at statement and declaration boundaries — so one run reports every independent problem instead of the first. A recovery must never produce a *wrong* later diagnostic: each is either suppressed or real. | done (C and C++) — tests/golden/diagnostics-recovery.sh |
 | **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Producers: a misspelt name, a missing `;`, `.` for `->` (and back), the member the type actually has, and the header that declares a C library name. | done — tests/golden/diagnostics-fix.sh: the fixed file compiles |
 | **T4** | **The driver GCC and Clang users already know.** Dependency generation, `-fsyntax-only`, `--help`, `-dumpmachine`, and warning groups over real analyses (unused variable/parameter/function, shadow, sign-compare), each with its `-Wno-` and its name in the diagnostic. Still to come: `-S`, `@file`, `-###`, and more analyses (uninitialised, fallthrough, format). | done for those — tests/golden/driver-deps.sh and warnings.sh (gcc agrees on which code warns) |
-| **T5** | **`embls`, the language server.** LSP over stdio: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords), hover, go-to-definition, document symbols. Still to come: find references, signature help, rename, `#include` completion, cross-file indexing. | done (first five) — tests/golden/embls.sh drives a whole session |
+| **T5** | **`embls`, the language server.** LSP over stdio, C and C++: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords), hover, go-to-definition, document symbols. Still to come: find references, signature help, rename, `#include` completion, cross-file indexing. | done (first five, both languages) — tests/golden/embls.sh drives a whole session |
 | **T6** | **Past the bar.** `embcc --explain <id>` — done: a stable id per diagnostic, printed with it, and an entry with the rule, a worked example, the fix and the citation. Still to come: suggestions that use the index rather than edit distance alone (the member you meant, on the type you have; the header that declares the name), and `embcc doctor` for why a link failed. | tests/golden/diagnostics-explain.sh, incl. "every id printed has an entry" |
 
 ## T1 — the engine (done)
@@ -143,6 +143,13 @@ A header the editor was not told how to find is not fatal either
 header is an error): the rest of the file is still worth understanding,
 and completion keeps working while the diagnostics honestly say the header
 is missing.
+
+C++ is indexed by the C++ front end rather than the C one: the child
+tokenizes and parses with `cx_parse_unit` and walks its tables, so the
+members offered after a `.` are the class's own — its data and the
+functions you can call, without the ones the compiler generated for you —
+and hover shows the signature as written, not the mangled name. Which front
+end runs is decided by the file's suffix, as the driver decides it.
 
 Flags come from `compile_flags.txt` beside the file or above it (clangd's
 format, so a project set up for clangd works here), plus `EMBLS_FLAGS`.
