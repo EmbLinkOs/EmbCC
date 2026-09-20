@@ -1,0 +1,96 @@
+/* <queue> — C++ [queue], [priority.queue].
+ *
+ * Container ADAPTORS, not containers: each holds one and restricts what
+ * can be done to it. The restriction is the product -- a queue is a
+ * deque you cannot reach into the middle of, and that is exactly why one
+ * is used where a deque would also work.
+ */
+#ifndef _LIBCXX_QUEUE
+#define _LIBCXX_QUEUE
+
+#include <cstddef>
+#include <utility>
+#include <functional>
+#include <deque>
+#include <vector>
+#include <algorithm>
+
+namespace std {
+
+template <class T, class C = deque<T>>
+class queue {
+public:
+    using value_type = T;
+    using size_type = size_t;
+    using container_type = C;
+
+    queue() = default;
+    explicit queue(const C &c) : __c(c) {}
+
+    bool empty() const { return __c.empty(); }
+    size_type size() const { return __c.size(); }
+    T &front() { return __c.front(); }
+    const T &front() const { return __c.front(); }
+    T &back() { return __c.back(); }
+    const T &back() const { return __c.back(); }
+    void push(const T &v) { __c.push_back(v); }
+    void push(T &&v) { __c.push_back(std::move(v)); }
+    template <class... A>
+    decltype(auto) emplace(A &&...a)
+    { return __c.emplace_back(forward<A>(a)...); }
+    /* pop() returns NOTHING, which surprises people. Returning the
+     * element would have to copy it, and a copy constructor that throws
+     * after the element was removed loses it -- so the standard split
+     * the two operations. */
+    void pop() { __c.pop_front(); }
+    void swap(queue &o) noexcept { __c.swap(o.__c); }
+
+protected:
+    C __c;
+};
+
+/* A binary heap over a vector, which is what <algorithm>'s heap
+ * operations are for -- this adaptor is mostly a name for them. The
+ * comparator is LESS by default and the result is a MAX-heap: top() is
+ * the greatest. Wanting the smallest means passing greater<>, which
+ * reads backwards and catches everyone once. */
+template <class T, class C = vector<T>, class Cmp = less<typename C::value_type>>
+class priority_queue {
+public:
+    using value_type = T;
+    using size_type = size_t;
+    using container_type = C;
+
+    priority_queue() = default;
+    explicit priority_queue(const Cmp &c) : __cmp(c) {}
+    priority_queue(const Cmp &c, C cont) : __c(std::move(cont)), __cmp(c)
+    { make_heap(__c.begin(), __c.end(), __cmp); }
+    template <class It>
+    priority_queue(It f, It l) : __c(f, l)
+    { make_heap(__c.begin(), __c.end(), __cmp); }
+
+    bool empty() const { return __c.empty(); }
+    size_type size() const { return __c.size(); }
+    const T &top() const { return __c.front(); }
+
+    void push(const T &v)
+    { __c.push_back(v); push_heap(__c.begin(), __c.end(), __cmp); }
+    void push(T &&v)
+    { __c.push_back(std::move(v)); push_heap(__c.begin(), __c.end(), __cmp); }
+    template <class... A>
+    void emplace(A &&...a)
+    {
+        __c.emplace_back(forward<A>(a)...);
+        push_heap(__c.begin(), __c.end(), __cmp);
+    }
+    void pop()
+    { pop_heap(__c.begin(), __c.end(), __cmp); __c.pop_back(); }
+
+protected:
+    C __c;
+    Cmp __cmp;
+};
+
+}  // namespace std
+
+#endif

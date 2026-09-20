@@ -1,0 +1,143 @@
+/* <forward_list> — C++ [forwardlist].
+ *
+ * A singly-linked list, and the container whose interface looks wrong
+ * until the reason is clear: insert_after, erase_after, before_begin.
+ * A singly-linked node cannot reach its predecessor, so an operation at
+ * `pos` would have to walk from the head to find it -- which would make
+ * O(1) insertion O(n) and defeat the point. Naming the operations
+ * "after" is the honest interface for what the structure can do.
+ */
+#ifndef _LIBCXX_FORWARD_LIST
+#define _LIBCXX_FORWARD_LIST
+
+#include <cstddef>
+#include <utility>
+#include <iterator>
+#include <memory>
+#include <initializer_list>
+
+namespace std {
+
+template <class T, class A = allocator<T>>
+class forward_list {
+    struct node { node *next; T value;
+                  template <class... Args>
+                  explicit node(Args &&...a)
+                      : next(nullptr), value(forward<Args>(a)...) {} };
+
+public:
+    using value_type = T;
+    using size_type = size_t;
+
+    class iterator {
+    public:
+        using iterator_category = forward_iterator_tag;
+        using value_type = T;
+        using difference_type = ptrdiff_t;
+        using pointer = T *;
+        using reference = T &;
+
+        iterator() : __p(nullptr) {}
+        explicit iterator(node *p) : __p(p) {}
+        T &operator*() const { return __p->value; }
+        T *operator->() const { return addressof(__p->value); }
+        iterator &operator++() { __p = __p->next; return *this; }
+        iterator operator++(int) { iterator t = *this; __p = __p->next; return t; }
+        bool operator==(const iterator &o) const { return __p == o.__p; }
+        bool operator!=(const iterator &o) const { return __p != o.__p; }
+        node *__ptr() const { return __p; }
+    private:
+        node *__p;
+    };
+    using const_iterator = iterator;
+
+    forward_list() : __head(nullptr) {}
+    forward_list(initializer_list<T> l) : __head(nullptr)
+    {
+        /* Built backwards, because pushing at the front is the only O(1)
+         * insertion a singly-linked list has. */
+        for (auto it = l.end(); it != l.begin(); )
+            push_front(*--it);
+    }
+    forward_list(const forward_list &o) : __head(nullptr)
+    {
+        node **tail = &__head;
+        for (node *p = o.__head; p; p = p->next)
+        { *tail = new node(p->value); tail = &(*tail)->next; }
+    }
+    forward_list(forward_list &&o) noexcept : __head(o.__head)
+    { o.__head = nullptr; }
+    ~forward_list() { clear(); }
+
+    forward_list &operator=(forward_list &&o) noexcept
+    {
+        if (this != addressof(o))
+        { clear(); __head = o.__head; o.__head = nullptr; }
+        return *this;
+    }
+
+    /* before_begin() names a position that is not an element, so that
+     * insert_after has something to name for "at the front". */
+    iterator before_begin() { return iterator(__before()); }
+    iterator begin() const { return iterator(__head); }
+    iterator end() const { return iterator(nullptr); }
+
+    bool empty() const noexcept { return __head == nullptr; }
+    T &front() { return __head->value; }
+    const T &front() const { return __head->value; }
+
+    void push_front(const T &v)
+    { node *n = new node(v); n->next = __head; __head = n; }
+    void push_front(T &&v)
+    { node *n = new node(std::move(v)); n->next = __head; __head = n; }
+    template <class... Args>
+    T &emplace_front(Args &&...a)
+    {
+        node *n = new node(forward<Args>(a)...);
+        n->next = __head; __head = n;
+        return n->value;
+    }
+    void pop_front() { node *p = __head; __head = p->next; delete p; }
+
+    iterator insert_after(iterator pos, const T &v)
+    {
+        node *at = pos.__ptr();
+        if (!at) { push_front(v); return begin(); }
+        node *n = new node(v);
+        n->next = at->next;
+        at->next = n;
+        return iterator(n);
+    }
+
+    iterator erase_after(iterator pos)
+    {
+        node *at = pos.__ptr();
+        if (!at) { pop_front(); return begin(); }
+        node *z = at->next;
+        if (!z) return end();
+        at->next = z->next;
+        delete z;
+        return iterator(at->next);
+    }
+
+    void clear() { while (__head) pop_front(); }
+
+    void reverse() noexcept
+    {
+        node *prev = nullptr, *p = __head;
+        while (p) { node *nx = p->next; p->next = prev; prev = p; p = nx; }
+        __head = prev;
+    }
+
+private:
+    node *__head;
+    /* before_begin() has to yield an iterator whose ++ lands on the
+     * head. A null pointer serves, with insert_after and erase_after
+     * treating it as "at the front" -- which keeps the node layout to
+     * one pointer. */
+    node *__before() const { return nullptr; }
+};
+
+}  // namespace std
+
+#endif

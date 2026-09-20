@@ -52,7 +52,8 @@ those exact two members in that order.
 `<type_traits>`, `<utility>`, `<limits>`, `<iterator>`, `<memory>`,
 `<functional>`, `<array>`, `<vector>`, `<string>`, `<algorithm>`,
 `<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`,
-`<unordered_map>`, `<unordered_set>`, `<iostream>` and the rest of the
+`<unordered_map>`, `<unordered_set>`, `<list>`, `<deque>`,
+`<forward_list>`, `<queue>`, `<stack>`, `<iostream>` and the rest of the
 stream headers, `<stdexcept>`, and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
@@ -89,6 +90,27 @@ the three words, it has to re-aim the pointer, and a raw `const C *`
 argument may point into the buffer that a reallocation is about to free.
 `a += a` is the case that finds it, and the test does exactly that at
 the short/long boundary.
+
+**`list` uses a sentinel node**, so every operation is pointer-shuffling
+with no special case for "the list is empty" or "this is the first
+element" — the cases that are otherwise half the code and all of the
+bugs. Because the sentinel is a *member*, moving a list has to re-close
+the ring around the new object's own sentinel rather than copying three
+words; the test moves one and then keeps using both.
+
+**`deque` here is a ring buffer, not the map-of-blocks a full
+implementation uses**, and the difference is visible: the standard says
+a reference to an element survives a push at either *end*, and this does
+not — growing moves everything. That is stated rather than glossed. What
+it does give is the reason to reach for a deque at all: O(1) at both
+ends with random access, where a vector is O(*n*) at the front.
+
+**`forward_list`'s interface looks wrong until the reason is clear.**
+`insert_after`, `erase_after`, `before_begin`: a singly-linked node
+cannot reach its predecessor, so an operation *at* a position would have
+to walk from the head — turning O(1) insertion into O(*n*) and defeating
+the point. Naming the operations "after" is the honest interface for
+what the structure can do.
 
 **`shared_ptr` keeps two counts, and the second one is why `weak_ptr`
 can exist.** The strong count decides when the *object* dies; the weak
