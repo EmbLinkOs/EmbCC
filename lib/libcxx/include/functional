@@ -104,17 +104,9 @@ constexpr reference_wrapper<const T> cref(reference_wrapper<T> t) noexcept
 { return reference_wrapper<const T>(t.get()); }
 template <class T> void cref(const T &&) = delete;
 
-/* unwrap_reference: what a reference_wrapper means when it is stored.
- * make_pair and friends use it, which is why `make_pair(ref(x), 1)` holds
- * an `int &` and not a `reference_wrapper<int>`. */
-template <class T> struct unwrap_reference { using type = T; };
-template <class T> struct unwrap_reference<reference_wrapper<T>>
-{ using type = T &; };
-template <class T> using unwrap_reference_t = typename unwrap_reference<T>::type;
-template <class T>
-struct unwrap_ref_decay : unwrap_reference<decay_t<T>> {};
-template <class T>
-using unwrap_ref_decay_t = typename unwrap_ref_decay<T>::type;
+/* unwrap_reference and unwrap_ref_decay are in <type_traits>, where
+ * [meta.trans.other] puts them -- they are what makes
+ * `make_tuple(ref(x))` hold an `int &` rather than a wrapper. */
 
 /* ---- the function objects ----------------------------------------------
  * Each has a `void` specialisation -- the TRANSPARENT form -- which

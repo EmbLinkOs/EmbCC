@@ -1,0 +1,132 @@
+/* <numeric> — C++ [numeric.ops].
+ *
+ * Small, and one thing about it is not obvious: accumulate's INIT sets
+ * the accumulator's type, so `accumulate(v.begin(), v.end(), 0)` over a
+ * vector<double> accumulates in `int` and truncates every addition. That
+ * is not a defect here, it is the specified behaviour, and it is the
+ * single most common misuse of this header.
+ */
+#ifndef _LIBCXX_NUMERIC
+#define _LIBCXX_NUMERIC
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <iterator>
+#include <functional>
+
+namespace std {
+
+template <class I, class T, class F>
+constexpr T accumulate(I first, I last, T init, F op)
+{
+    for (; first != last; ++first)
+        init = op(std::move(init), *first);
+    return init;
+}
+template <class I, class T>
+constexpr T accumulate(I first, I last, T init)
+{ return accumulate(first, last, std::move(init), plus<>{}); }
+
+/* reduce differs from accumulate by PERMISSION, not by result: it may
+ * reassociate and reorder, so the operation has to be associative and
+ * commutative. With floating point it therefore need not give the same
+ * answer twice. This one evaluates left to right, which is a valid
+ * choice and not a guarantee. */
+template <class I, class T, class F>
+constexpr T reduce(I first, I last, T init, F op)
+{ return accumulate(first, last, std::move(init), op); }
+template <class I, class T>
+constexpr T reduce(I first, I last, T init)
+{ return accumulate(first, last, std::move(init), plus<>{}); }
+
+template <class I, class J, class T, class F1, class F2>
+constexpr T inner_product(I f1, I l1, J f2, T init, F1 add, F2 mul)
+{
+    for (; f1 != l1; ++f1, ++f2)
+        init = add(std::move(init), mul(*f1, *f2));
+    return init;
+}
+template <class I, class J, class T>
+constexpr T inner_product(I f1, I l1, J f2, T init)
+{ return inner_product(f1, l1, f2, std::move(init), plus<>{}, multiplies<>{}); }
+
+template <class I, class O, class F>
+constexpr O partial_sum(I first, I last, O out, F op)
+{
+    if (first == last) return out;
+    auto acc = *first;
+    *out = acc;
+    for (++first, ++out; first != last; ++first, ++out) {
+        acc = op(std::move(acc), *first);
+        *out = acc;
+    }
+    return ++out;
+}
+template <class I, class O>
+constexpr O partial_sum(I first, I last, O out)
+{ return partial_sum(first, last, out, plus<>{}); }
+
+/* The previous value is held BEFORE the write, so the range may be
+ * adjacent_difference'd in place -- which is the usual way it is used. */
+template <class I, class O, class F>
+constexpr O adjacent_difference(I first, I last, O out, F op)
+{
+    if (first == last) return out;
+    auto prev = *first;
+    *out = prev;
+    for (++first, ++out; first != last; ++first, ++out) {
+        auto cur = *first;
+        *out = op(cur, prev);
+        prev = std::move(cur);
+    }
+    return ++out;
+}
+template <class I, class O>
+constexpr O adjacent_difference(I first, I last, O out)
+{ return adjacent_difference(first, last, out, minus<>{}); }
+
+template <class I, class T>
+constexpr void iota(I first, I last, T v)
+{ for (; first != last; ++first, ++v) *first = v; }
+
+/* gcd and lcm take the ABSOLUTE values: [numeric.ops.gcd] defines them on
+ * |m| and |n|, so gcd(-4, 6) is 2 and not -2. */
+template <class M, class N>
+constexpr common_type_t<M, N> gcd(M m, N n)
+{
+    using R = common_type_t<M, N>;
+    R a = m < 0 ? (R)-(R)m : (R)m;
+    R b = n < 0 ? (R)-(R)n : (R)n;
+    while (b != 0) { R t = a % b; a = b; b = t; }
+    return a;
+}
+
+template <class M, class N>
+constexpr common_type_t<M, N> lcm(M m, N n)
+{
+    using R = common_type_t<M, N>;
+    if (m == 0 || n == 0) return 0;
+    R g = gcd(m, n);
+    R a = m < 0 ? (R)-(R)m : (R)m;
+    R b = n < 0 ? (R)-(R)n : (R)n;
+    /* Divide FIRST, so that a product which would overflow the type does
+     * not have to be formed at all. */
+    return (a / g) * b;
+}
+
+template <class T>
+constexpr T midpoint(T a, T b) noexcept
+{
+    if constexpr (is_integral_v<T>) {
+        /* Not (a + b) / 2: that overflows for large values of the same
+         * sign, which is the bug this function exists to avoid. */
+        return a > b ? a - (a - b) / 2 : a + (b - a) / 2;
+    } else {
+        return (a + b) / 2;
+    }
+}
+
+}  // namespace std
+
+#endif

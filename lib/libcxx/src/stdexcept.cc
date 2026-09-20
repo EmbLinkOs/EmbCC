@@ -106,3 +106,13 @@ void __throw_vector_too_long()
     throw length_error("vector: requested size exceeds max_size()");
 }
 }
+
+/* <optional>'s failure, out of line beside the others so that header need
+ * not include <stdexcept> either. */
+#include <optional>
+
+namespace std {
+bad_optional_access::~bad_optional_access() noexcept {}
+const char *bad_optional_access::what() const noexcept
+{ return "std::bad_optional_access"; }
+}

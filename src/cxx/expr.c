@@ -744,6 +744,15 @@ static struct ics std_conv(struct cexpr *e, struct cty *to)
     return r;
 }
 
+static struct cfunc *converting_ctor(struct cclass *c, struct cexpr *e,
+                                     int allow_explicit);
+static struct cfunc *conv_function(struct cexpr *e, struct cty *to,
+                                   int allow_explicit, struct ics *second);
+
+/* Set while a candidate's arguments may take only standard conversions
+ * (RS_NO_USER): no user-defined conversion is tried, so none recurses */
+static int no_user_conv;
+
 static struct ics ref_ics(struct cexpr *e, struct cty *rt)
 {
     struct ics r;
@@ -820,8 +829,28 @@ static struct ics ref_ics(struct cexpr *e, struct cty *rt)
         if (rv && lv)
             return r;
     }
-    if (!rv && !cref)
+    if (!rv && !cref) {
+        /* [dcl.init.ref]/5.1.2, in the form overload resolution needs: a
+         * class with a conversion function whose result is a reference
+         * the parameter can bind to gives a USER-DEFINED conversion
+         * sequence. Without it, passing a reference_wrapper<int> to a
+         * function taking int& finds no viable candidate at all.
+         *
+         * ONLY for a non-const lvalue reference, which is the case that
+         * has no other path. The const-reference and rvalue-reference
+         * forms already reach the user-conversion fallback below, and
+         * answering here as well made those two equally ranked -- which
+         * turned `partial_ordering = strong_ordering` in libstdc++'s
+         * <tuple> from a working assignment into an ambiguity. */
+        if (!no_user_conv && e->t && e->t->k == CT_CLASS &&
+            conv_function(e, rt, 0, NULL)) {
+            r.rank = R_USER;
+            r.is_ref = 1;
+            r.binds_rvref = 0;
+            r.ref_cv = T->q;
+        }
         return r;
+    }
     if (compat && e->vc == VC_LVALUE && rv)
         return r;
     struct ics s = ics_of(e, ct_unqual(T));
@@ -832,15 +861,6 @@ static struct ics ref_ics(struct cexpr *e, struct cty *rt)
     s.ref_cv = T->q;
     return s;
 }
-
-static struct cfunc *converting_ctor(struct cclass *c, struct cexpr *e,
-                                     int allow_explicit);
-static struct cfunc *conv_function(struct cexpr *e, struct cty *to,
-                                   int allow_explicit, struct ics *second);
-
-/* Set while a candidate's arguments may take only standard conversions
- * (RS_NO_USER): no user-defined conversion is tried, so none recurses */
-static int no_user_conv;
 
 int expr_swap_no_user_conv(int v)
 {
@@ -1747,6 +1767,26 @@ struct cexpr *bind_ref(struct cexpr *e, struct cty *rt, const char *ctx)
         if (e->vc == VC_XVALUE)
             return ex_addr(e);
         return ex_addr(materialize(e));
+    }
+    /* [dcl.init.ref]/5.1.2: a class with a conversion function whose
+     * result is a reference the target can bind to binds DIRECTLY to that
+     * result -- no temporary, and no const required. It is what makes
+     * std::reference_wrapper's `operator T&()` usable wherever a T& is
+     * wanted, which is the entire point of that type; without it
+     * `int &r = ref(x);` and every tuple<int&> built from one fail.
+     *
+     * Tried before the errors below, because those are about binding to
+     * the object itself and this does not bind to the object at all. */
+    if (e->t->k == CT_CLASS) {
+        struct cfunc *cf = conv_function(e, rt, 0, NULL);
+        if (cf) {
+            struct cexpr *obj = e->vc == VC_PRVALUE ? materialize(e) : e;
+            struct cexpr *call = make_call(cf, ex_addr(obj), NULL, 0,
+                                           cx_cur());
+            call->line = e->line;
+            call->file = e->file;
+            return ex_addr(call);
+        }
     }
     if (!rv && !cref)
         ex_error(e, "cannot bind a reference of type '%s&' to a value of "

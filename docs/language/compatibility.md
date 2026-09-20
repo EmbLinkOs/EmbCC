@@ -47,6 +47,7 @@ took target-specific work, or that a reader might doubt.
 | `_Noreturn` (C11 §6.7.4) — the same field as `__attribute__((noreturn))`, so the flow analysis cannot tell them apart | ✓ | ✓ |
 | `__func__` (C99 §6.4.2.2), and the GNU `__FUNCTION__` / `__PRETTY_FUNCTION__` spellings | ✓ | ✓ |
 | A **conditional** in a constant expression — `int buf[(N > 4) ? N : 4];` — and `&&`/`||` short-circuiting so the unevaluated half need not fold | ✓ | ✓ |
+| Binding a reference through a class's **conversion function** ([dcl.init.ref]/5.1.2) — in a declaration, a mem-initializer and an argument, which is what makes `std::reference_wrapper` usable wherever a `T&` is wanted | ✓ | ✓ |
 | An overloaded unary **`operator&`** ([over.oper]/3) — `__builtin_addressof` stays on the built-in path, which is what `std::addressof` needs | ✓ | ✓ |
 | An rvalue reference is **not viable** for a function lvalue, so a deleted `const T&&` guard does not beat `T&` (`std::ref` of a function) | ✓ | ✓ |
 | **`long double` in constant expressions**, folded exactly in the target's format (x87 80-bit / binary128), not at double precision — which is what makes `DBL_MAX` usable in a `static_assert` at all, since the compiler spells it as a long double literal cast to double | ✓ | ✓ |

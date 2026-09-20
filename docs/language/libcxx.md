@@ -51,7 +51,8 @@ those exact two members in that order.
 
 `<type_traits>`, `<utility>`, `<limits>`, `<iterator>`, `<memory>`,
 `<functional>`, `<array>`, `<vector>`, `<string>`, `<algorithm>`,
-`<stdexcept>`, and the `<c*>` wrappers
+`<tuple>`, `<optional>`, `<numeric>`, `<stdexcept>`, and the `<c*>`
+wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by

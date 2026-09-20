@@ -1,0 +1,270 @@
+/* <tuple> — C++ [tuple].
+ *
+ * Built by INHERITANCE rather than recursion into a member: each element
+ * is a distinct empty-able base, so a tuple of empty types costs nothing
+ * (the empty base optimisation applies) where a chain of members would
+ * cost one byte each. The index is part of the base's type, which is what
+ * makes `get<I>` a static_cast rather than a walk.
+ */
+#ifndef _LIBCXX_TUPLE
+#define _LIBCXX_TUPLE
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __detail {
+
+/* One element, tagged by its index so that two elements of the SAME type
+ * are still different bases -- without the tag, tuple<int,int> would
+ * inherit from the same class twice and get<0> would be ambiguous. */
+template <size_t I, class T>
+struct __tuple_leaf {
+    T __v;
+    constexpr __tuple_leaf() : __v() {}
+    template <class U>
+    constexpr explicit __tuple_leaf(U &&u) : __v(forward<U>(u)) {}
+};
+
+template <class Seq, class... T> struct __tuple_impl;
+
+template <size_t... I, class... T>
+struct __tuple_impl<index_sequence<I...>, T...> : __tuple_leaf<I, T>... {
+    constexpr __tuple_impl() = default;
+    template <class... U>
+    constexpr explicit __tuple_impl(U &&...u)
+        : __tuple_leaf<I, T>(forward<U>(u))... {}
+};
+
+}  // namespace __detail
+
+template <class... T>
+class tuple {
+    using __impl = __detail::__tuple_impl<index_sequence_for<T...>, T...>;
+    __impl __m;
+
+public:
+    constexpr tuple() = default;
+
+    template <class... U, class = enable_if_t<sizeof...(U) == sizeof...(T) &&
+                                              sizeof...(U) != 0>>
+    constexpr explicit tuple(U &&...u) : __m(forward<U>(u)...) {}
+
+    constexpr tuple(const tuple &) = default;
+    constexpr tuple(tuple &&) = default;
+    constexpr tuple &operator=(const tuple &) = default;
+    constexpr tuple &operator=(tuple &&) = default;
+
+    /* Converting construction and assignment, element by element. The
+     * assignment is what makes `tie(a, b) = f()` work: the left side is a
+     * tuple of REFERENCES, so assigning to its elements assigns through
+     * to the caller's variables. Without it, tie() would build an object
+     * and then have nothing to do with it. */
+    template <class... U, class = enable_if_t<sizeof...(U) == sizeof...(T)>>
+    constexpr tuple(const tuple<U...> &o)
+        : tuple(o, index_sequence_for<T...>{}) {}
+
+    template <class... U, class = enable_if_t<sizeof...(U) == sizeof...(T)>>
+    constexpr tuple &operator=(const tuple<U...> &o)
+    { __assign_all(o, index_sequence_for<T...>{}); return *this; }
+
+    template <class... U, class = enable_if_t<sizeof...(U) == sizeof...(T)>>
+    constexpr tuple &operator=(tuple<U...> &&o)
+    { __assign_move(std::move(o), index_sequence_for<T...>{}); return *this; }
+
+    __impl &__base() noexcept { return __m; }
+    const __impl &__base() const noexcept { return __m; }
+
+    constexpr void swap(tuple &o)
+    { using std::swap; __swap_all(o, index_sequence_for<T...>{}); }
+
+private:
+    template <size_t... I>
+    constexpr void __swap_all(tuple &o, index_sequence<I...>);
+    template <class Other, size_t... I>
+    constexpr tuple(const Other &o, index_sequence<I...>);
+    template <class Other, size_t... I>
+    constexpr void __assign_all(const Other &o, index_sequence<I...>);
+    template <class Other, size_t... I>
+    constexpr void __assign_move(Other &&o, index_sequence<I...>);
+};
+
+template <>
+class tuple<> {
+public:
+    constexpr tuple() = default;
+    constexpr void swap(tuple &) noexcept {}
+};
+
+template <size_t I, class... T> struct tuple_element;
+template <class... T> struct tuple_size;
+
+template <class... T>
+struct tuple_size<tuple<T...>> : integral_constant<size_t, sizeof...(T)> {};
+template <class T> struct tuple_size<const T> : tuple_size<T> {};
+
+namespace __detail {
+template <size_t I, class... T> struct __nth;
+template <class H, class... R> struct __nth<0, H, R...> { using type = H; };
+template <size_t I, class H, class... R>
+struct __nth<I, H, R...> : __nth<I - 1, R...> {};
+}
+
+template <size_t I, class... T>
+struct tuple_element<I, tuple<T...>>
+{ using type = typename __detail::__nth<I, T...>::type; };
+
+/* get<I> is a cast to the right base and a member access: no loop, and
+ * no dependence on how many elements there are. Deduction picks the base
+ * because only one __tuple_leaf<I, ...> is a base of the tuple. */
+template <size_t I, class... T>
+constexpr typename tuple_element<I, tuple<T...>>::type &get(tuple<T...> &t)
+{
+    using E = typename tuple_element<I, tuple<T...>>::type;
+    return static_cast<__detail::__tuple_leaf<I, E> &>(t.__base()).__v;
+}
+template <size_t I, class... T>
+constexpr const typename tuple_element<I, tuple<T...>>::type &
+get(const tuple<T...> &t)
+{
+    using E = typename tuple_element<I, tuple<T...>>::type;
+    return static_cast<const __detail::__tuple_leaf<I, E> &>(t.__base()).__v;
+}
+template <size_t I, class... T>
+constexpr typename tuple_element<I, tuple<T...>>::type &&get(tuple<T...> &&t)
+{
+    using E = typename tuple_element<I, tuple<T...>>::type;
+    return static_cast<E &&>(
+        static_cast<__detail::__tuple_leaf<I, E> &>(t.__base()).__v);
+}
+
+template <class... T>
+template <size_t... I>
+constexpr void tuple<T...>::__swap_all(tuple &o, index_sequence<I...>)
+{
+    using std::swap;
+    (void)o;
+    int dummy[] = {0, (swap(get<I>(*this), get<I>(o)), 0)...};
+    (void)dummy;
+}
+
+template <class... T>
+template <class Other, size_t... I>
+constexpr tuple<T...>::tuple(const Other &o, index_sequence<I...>)
+    : __m(get<I>(o)...) {}
+
+template <class... T>
+template <class Other, size_t... I>
+constexpr void tuple<T...>::__assign_all(const Other &o, index_sequence<I...>)
+{
+    int dummy[] = {0, ((get<I>(*this) = get<I>(o)), 0)...};
+    (void)dummy;
+}
+
+template <class... T>
+template <class Other, size_t... I>
+constexpr void tuple<T...>::__assign_move(Other &&o, index_sequence<I...>)
+{
+    int dummy[] = {0, ((get<I>(*this) = get<I>(std::move(o))), 0)...};
+    (void)dummy;
+}
+
+/* make_tuple DECAYS, so `make_tuple(arr)` holds a pointer and a
+ * reference_wrapper becomes a real reference -- which is the whole
+ * purpose of ref() at a call site. */
+template <class... T>
+constexpr tuple<unwrap_ref_decay_t<T>...> make_tuple(T &&...t)
+{ return tuple<unwrap_ref_decay_t<T>...>(forward<T>(t)...); }
+
+/* tie does NOT decay: it holds references, which is what makes
+ * `tie(a, b) = f()` assign through to the caller's variables. */
+template <class... T>
+constexpr tuple<T &...> tie(T &...t) noexcept
+{ return tuple<T &...>(t...); }
+
+template <class... T>
+constexpr tuple<T &&...> forward_as_tuple(T &&...t) noexcept
+{ return tuple<T &&...>(forward<T>(t)...); }
+
+namespace __detail {
+template <class A, class B, size_t I, size_t N>
+struct __tuple_eq {
+    static constexpr bool go(const A &a, const B &b)
+    { return get<I>(a) == get<I>(b) && __tuple_eq<A, B, I + 1, N>::go(a, b); }
+};
+template <class A, class B, size_t N>
+struct __tuple_eq<A, B, N, N>
+{ static constexpr bool go(const A &, const B &) { return true; } };
+
+template <class A, class B, size_t I, size_t N>
+struct __tuple_lt {
+    static constexpr bool go(const A &a, const B &b)
+    {
+        if (get<I>(a) < get<I>(b)) return true;
+        if (get<I>(b) < get<I>(a)) return false;
+        return __tuple_lt<A, B, I + 1, N>::go(a, b);
+    }
+};
+template <class A, class B, size_t N>
+struct __tuple_lt<A, B, N, N>
+{ static constexpr bool go(const A &, const B &) { return false; } };
+}
+
+template <class... A, class... B>
+constexpr bool operator==(const tuple<A...> &a, const tuple<B...> &b)
+{
+    static_assert(sizeof...(A) == sizeof...(B), "tuples of different size");
+    return __detail::__tuple_eq<tuple<A...>, tuple<B...>, 0,
+                                sizeof...(A)>::go(a, b);
+}
+template <class... A, class... B>
+constexpr bool operator!=(const tuple<A...> &a, const tuple<B...> &b)
+{ return !(a == b); }
+template <class... A, class... B>
+constexpr bool operator<(const tuple<A...> &a, const tuple<B...> &b)
+{
+    return __detail::__tuple_lt<tuple<A...>, tuple<B...>, 0,
+                                sizeof...(A)>::go(a, b);
+}
+template <class... A, class... B>
+constexpr bool operator>(const tuple<A...> &a, const tuple<B...> &b)
+{ return b < a; }
+template <class... A, class... B>
+constexpr bool operator<=(const tuple<A...> &a, const tuple<B...> &b)
+{ return !(b < a); }
+template <class... A, class... B>
+constexpr bool operator>=(const tuple<A...> &a, const tuple<B...> &b)
+{ return !(a < b); }
+
+template <class... T>
+constexpr void swap(tuple<T...> &a, tuple<T...> &b) { a.swap(b); }
+
+namespace __detail {
+template <class F, class T, size_t... I>
+constexpr decltype(auto) __apply(F &&f, T &&t, index_sequence<I...>)
+{ return forward<F>(f)(get<I>(forward<T>(t))...); }
+}
+
+template <class F, class T>
+constexpr decltype(auto) apply(F &&f, T &&t)
+{
+    return __detail::__apply(
+        forward<F>(f), forward<T>(t),
+        make_index_sequence<tuple_size<remove_reference_t<T>>::value>{});
+}
+
+/* `ignore` is an object that swallows any assignment, so a tie can name
+ * the elements it does not want. */
+namespace __detail {
+struct __ignore_t {
+    template <class T> constexpr const __ignore_t &operator=(T &&) const
+    { return *this; }
+};
+}
+inline constexpr __detail::__ignore_t ignore{};
+
+}  // namespace std
+
+#endif
