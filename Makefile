@@ -18,6 +18,7 @@ BUILD   := build
 SRCS := \
 	src/driver/main.c \
 	src/driver/util.c \
+	src/driver/diag.c \
 	src/lex/lex.c \
 	src/cpp/cpp.c \
 	src/parse/parse.c \
@@ -73,9 +74,9 @@ embcc: $(OBJS)
 # the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)
 # the compiler uses produces, so the toolchain owns the whole build (drops nasm).
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
-       src/elf/write.c src/elf/elf.h src/driver/util.c
+       src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c
 	$(CC) $(CFLAGS) -o $@ tools/embas/embas.c src/arch/x86_64/as.c \
-	    src/elf/write.c src/driver/util.c
+	    src/elf/write.c src/driver/util.c src/driver/diag.c
 
 # embld — the integrated linker (ARCHITECTURE §6, WORKPLAN stream B), as
 # a standalone tool for host development. The link library also gets
@@ -84,11 +85,13 @@ embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
 # so the linker can emit a native .embdbg at link time through the SAME format
 # writer the embdbg tool uses — one implementation, not two.
 embld: tools/embld/embld.c src/link/link.c src/driver/util.c \
+       src/driver/diag.c \
        src/link/link.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	$(CC) $(CFLAGS) -DEMBDBG_NO_MAIN -Wno-unused-function -o $@ \
 	    tools/embld/embld.c src/link/link.c \
-	    src/driver/util.c src/embx/embx.c tools/embdbg/embdbg.c
+	    src/driver/util.c src/driver/diag.c src/embx/embx.c \
+	    tools/embdbg/embdbg.c
 
 # embread — the EMBX dumper/verifier (EMBX spec §9). A separate binary,
 # not part of embcc: it reads images, it does not compile. The EMBX

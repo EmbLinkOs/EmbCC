@@ -652,6 +652,13 @@ static int has_c_suffix(const char *s)
 }
 
 /* g++'s C++ suffixes. */
+/* The status a compile ends with: its own, unless a diagnostic the engine
+ * counted as an error (a -Werror warning) says otherwise. */
+static int done(int rc)
+{
+    return rc ? rc : (diag_error_count() ? 1 : 0);
+}
+
 static int has_cxx_suffix(const char *s)
 {
     static const char *const sfx[] = { ".cc", ".cpp", ".cxx", ".C", ".c++",
@@ -799,9 +806,34 @@ int main(int argc, char **argv)
             want_rtti = 0;
         } else if (strcmp(argv[i], "-frtti") == 0) {
             want_rtti = 1;
+        } else if (strcmp(argv[i], "-Werror") == 0) {
+            diag_set_werror(1);
+        } else if (strcmp(argv[i], "-Wno-error") == 0) {
+            diag_set_werror(0);
+        } else if (strcmp(argv[i], "-w") == 0) {
+            diag_set_no_warnings(1);
+        } else if (strncmp(argv[i], "-fdiagnostics-format=", 21) == 0) {
+            const char *f = argv[i] + 21;
+            if (strcmp(f, "json") == 0)
+                diag_set_format(DIAG_JSON);
+            else if (strcmp(f, "text") == 0)
+                diag_set_format(DIAG_TEXT);
+            else {
+                fprintf(stderr, "embcc: unknown diagnostic format '%s' "
+                                "(text, json)\n", f);
+                return 1;
+            }
+        } else if (strncmp(argv[i], "-fdiagnostics-color", 19) == 0) {
+            const char *m = argv[i] + 19;
+            diag_set_color(*m == '\0' || strcmp(m, "=always") == 0 ? 1
+                           : strcmp(m, "=never") == 0 ? 0 : -1);
+        } else if (strcmp(argv[i], "-fno-diagnostics-color") == 0) {
+            diag_set_color(0);
+        } else if (strncmp(argv[i], "-fmax-errors=", 13) == 0) {
+            diag_set_max_errors(atoi(argv[i] + 13));
         } else if (argv[i][0] == '-' && argv[i][1] == 'W') {
-            /* warning options: EmbCC has one level, and its diagnostics
-             * are errors, so these say nothing to it */
+            /* other warning options: EmbCC has one level for now (T4 gives
+             * -Wall/-Wextra real groups), so these say nothing to it */
         } else if (strncmp(argv[i], "-O", 2) == 0) {
             /* -O / -O1 / -O2 / -O3 enable the optimizer (one level for now);
              * -O0 turns it off. Anything else after -O is an error. */
@@ -918,14 +950,14 @@ int main(int argc, char **argv)
                            AS_ELF64);
     }
     if (pp_only)
-        return compile(input, NULL, 1);
+        return done(compile(input, NULL, 1));
     if (emit_c_only) {
         if (!lang_cxx) {
             fprintf(stderr, "embcc: error: --emit-c lowers C++; '%s' is C\n",
                     input);
             return 1;
         }
-        return compile(input, output, 0);
+        return done(compile(input, output, 0));
     }
     if (!compile_mode) {
         fprintf(stderr,
@@ -934,5 +966,5 @@ int main(int argc, char **argv)
                 "the existing toolchain\n", input);
         return 1;
     }
-    return compile(input, output ? output : default_output(input), 0);
+    return done(compile(input, output ? output : default_output(input), 0));
 }

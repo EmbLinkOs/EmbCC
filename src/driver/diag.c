@@ -1,0 +1,532 @@
+/* The diagnostic engine (docs/TOOLING.md T1).
+ *
+ * A diagnostic is a record, not a line printed on the way out: severity, a
+ * location with a source range, the option that controls it, notes under
+ * it, and fix-its — a replacement for a span of the source, which an editor
+ * can apply without parsing English. Records are held and rendered once, so
+ * the same compile can print GCC's caret output or GCC's JSON, and so a
+ * fix-it attached after its diagnostic was built still reaches the reader.
+ *
+ * The ~300 places that call an error and then exit(1) need no change: the
+ * flush runs from atexit. What they print is what they always printed.
+ */
+#include "util.h"
+
+#include <ctype.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>   /* isatty — auto colour when stderr is a terminal */
+
+/* ---- source registry -------------------------------------------------------
+ *
+ * Diagnostics render the offending source line, so the text of every file a
+ * diagnostic can name is registered here under the exact name the lexer reports
+ * (the driver registers the main file; the preprocessor each #include). A
+ * diagnostic with an unregistered file (a synthetic location) still prints its
+ * message and location — just no source line. */
+struct src_ent { const char *file; const char *text; };
+static struct src_ent *g_srcs;
+static int g_nsrc, g_capsrc;
+
+void diag_register_source(const char *file, const char *text)
+{
+    for (int i = 0; i < g_nsrc; i++)
+        if (!strcmp(g_srcs[i].file, file)) { g_srcs[i].text = text; return; }
+    if (g_nsrc == g_capsrc) {
+        g_capsrc = g_capsrc ? g_capsrc * 2 : 8;
+        g_srcs = xrealloc(g_srcs, (size_t)g_capsrc * sizeof *g_srcs);
+    }
+    g_srcs[g_nsrc].file = file;
+    g_srcs[g_nsrc].text = text;
+    g_nsrc++;
+}
+
+/* Start of 1-based `line` in `file` (NUL/newline-terminated run), or NULL. */
+static const char *src_line(const char *file, int line, int *len_out)
+{
+    const char *text = NULL;
+    for (int i = 0; i < g_nsrc; i++)
+        if (!strcmp(g_srcs[i].file, file)) { text = g_srcs[i].text; break; }
+    if (!text || line < 1)
+        return NULL;
+    const char *p = text;
+    for (int n = 1; n < line; n++) {
+        p = strchr(p, '\n');
+        if (!p) return NULL;
+        p++;
+    }
+    const char *e = p;
+    while (*e && *e != '\n') e++;
+    *len_out = (int)(e - p);
+    return p;
+}
+
+/* ---- macro-expansion registry ----
+ *
+ * The parser runs on preprocessed text, so an error inside a macro expansion is
+ * reported at the INVOCATION line — a line that often looks fine, because the
+ * offending code is in the macro body. The preprocessor records each expansion
+ * here (file, line -> macro name); an error at that line then adds a bare
+ * "expanded from macro 'X'" note, explaining the caret. Line-granularity, so it
+ * fires only when the macro's name actually appears on the error's line. */
+struct exp_ent { const char *file; int line; const char *macro; };
+static struct exp_ent *g_exps;
+static int g_nexp, g_capexp;
+
+void diag_register_expansion(const char *file, int line, const char *macro)
+{
+    if (g_nexp == g_capexp) {
+        g_capexp = g_capexp ? g_capexp * 2 : 16;
+        g_exps = xrealloc(g_exps, (size_t)g_capexp * sizeof *g_exps);
+    }
+    g_exps[g_nexp].file = file;
+    g_exps[g_nexp].line = line;
+    g_exps[g_nexp].macro = macro;
+    g_nexp++;
+}
+
+/* 1-based column of `needle`'s first whole-identifier occurrence in hay[0..len),
+ * or 0 if absent. */
+static int word_col(const char *hay, int len, const char *needle)
+{
+    int nl = (int)strlen(needle);
+    for (int i = 0; i + nl <= len; i++) {
+        if (memcmp(hay + i, needle, (size_t)nl) != 0)
+            continue;
+        int lok = i == 0 || !(isalnum((unsigned char)hay[i - 1]) || hay[i - 1] == '_');
+        int rok = i + nl == len ||
+                  !(isalnum((unsigned char)hay[i + nl]) || hay[i + nl] == '_');
+        if (lok && rok)
+            return i + 1;
+    }
+    return 0;
+}
+
+/* The macro whose expansion an error at file:line:col came from, or NULL. An
+ * error inside an expansion is reported at the macro's start column, so this
+ * fires only when the column lands within the macro name on that line — which
+ * keeps an unrelated error that merely shares a line with some macro from being
+ * misattributed. (col 0 = column unknown: fall back to name-on-line.) */
+static const char *expanded_from(const char *file, int line, int col)
+{
+    for (int i = g_nexp - 1; i >= 0; i--) {
+        if (g_exps[i].line != line || strcmp(g_exps[i].file, file) != 0)
+            continue;
+        int len;
+        const char *ln = src_line(file, line, &len);
+        if (!ln)
+            continue;
+        const char *m = g_exps[i].macro;
+        int mc = word_col(ln, len, m);
+        if (mc == 0)
+            continue;
+        if (col > 0 && !(col >= mc && col < mc + (int)strlen(m)))
+            continue;
+        return m;
+    }
+    return NULL;
+}
+
+/* ---- the records ---- */
+
+struct fixit {
+    int line, col, end_col;        /* replace [col, end_col) on this line */
+    char *text;
+};
+
+struct diag {
+    int level;                     /* DIAG_* */
+    const char *file;
+    int line, col, end_col;        /* end_col 0: infer the token's extent */
+    char *msg;
+    const char *option;            /* the -W that controls it, or NULL */
+    struct fixit *fixits;
+    int nfixits;
+    struct diag *notes;            /* children, in order */
+    int nnotes, capnotes;
+};
+
+static struct diag *g_diags;
+static int g_ndiag, g_capdiag;
+static int g_errors, g_warnings;
+static int g_format = DIAG_TEXT;
+static int g_color = -1;           /* -1 auto, 0 never, 1 always */
+static int g_max_errors;           /* 0: no limit */
+static int g_werror, g_no_warnings;
+static int g_flushed;
+
+static char *vfmt(const char *fmt, va_list ap)
+{
+    va_list ap2;
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap2);
+    va_end(ap2);
+    if (n < 0)
+        n = 0;
+    char *p = xmalloc((size_t)n + 1);
+    vsnprintf(p, (size_t)n + 1, fmt, ap);
+    return p;
+}
+
+/* The diagnostic a note attaches to: the last one recorded. */
+static struct diag *last_diag(void)
+{
+    return g_ndiag ? &g_diags[g_ndiag - 1] : NULL;
+}
+
+/* The record a fix-it attaches to: the last note of the last diagnostic, or
+ * the diagnostic itself — clang hangs "did you mean 'x'?"'s fix-it on the
+ * note, and so does this. */
+static struct diag *fixit_target(void)
+{
+    struct diag *d = last_diag();
+    if (!d)
+        return NULL;
+    return d->nnotes ? &d->notes[d->nnotes - 1] : d;
+}
+
+static struct diag *new_diag(int level, const char *file, int line, int col,
+                             char *msg)
+{
+    if (level == DIAG_NOTE && g_ndiag) {
+        struct diag *p = last_diag();
+        if (p->nnotes == p->capnotes) {
+            p->capnotes = p->capnotes ? p->capnotes * 2 : 4;
+            p->notes = xrealloc(p->notes, (size_t)p->capnotes * sizeof *p->notes);
+        }
+        struct diag *n = &p->notes[p->nnotes++];
+        memset(n, 0, sizeof *n);
+        n->level = level;
+        n->file = file;
+        n->line = line;
+        n->col = col;
+        n->msg = msg;
+        return n;
+    }
+    if (g_ndiag == g_capdiag) {
+        g_capdiag = g_capdiag ? g_capdiag * 2 : 16;
+        g_diags = xrealloc(g_diags, (size_t)g_capdiag * sizeof *g_diags);
+    }
+    struct diag *d = &g_diags[g_ndiag++];
+    memset(d, 0, sizeof *d);
+    d->level = level;
+    d->file = file;
+    d->line = line;
+    d->col = col;
+    d->msg = msg;
+    if (level == DIAG_ERROR)
+        g_errors++;
+    else if (level == DIAG_WARNING)
+        g_warnings++;
+    /* the expansion this location came from, as a note under it */
+    if (level != DIAG_NOTE && file) {
+        const char *m = expanded_from(file, line, col);
+        if (m) {
+            int save = g_ndiag;
+            (void)save;
+            char *nm = xmalloc(strlen(m) + 40);
+            sprintf(nm, "expanded from macro '%s'", m);
+            struct diag *n;
+            if (d->nnotes == d->capnotes) {
+                d->capnotes = d->capnotes ? d->capnotes * 2 : 4;
+                d->notes = xrealloc(d->notes,
+                                    (size_t)d->capnotes * sizeof *d->notes);
+            }
+            n = &d->notes[d->nnotes++];
+            memset(n, 0, sizeof *n);
+            n->level = DIAG_NOTE;
+            n->file = file;
+            n->line = line;
+            n->col = 0;              /* the heading only, as before */
+            n->msg = nm;
+            n->end_col = -1;         /* (a bare note: no source line) */
+        }
+    }
+    return d;
+}
+
+/* ---- rendering: text ---- */
+
+static const char *cc(const char *code)
+{
+    if (g_color < 0)
+        g_color = isatty(2) ? 1 : 0;
+    return g_color ? code : "";
+}
+
+static const char *level_name(int level)
+{
+    return level == DIAG_ERROR ? "error"
+         : level == DIAG_WARNING ? "warning" : "note";
+}
+
+static const char *level_sgr(int level)
+{
+    return level == DIAG_ERROR ? "\033[1;31m"
+         : level == DIAG_WARNING ? "\033[1;35m" : "\033[1;36m";
+}
+
+/* The columns a caret marks: [col, end) — the given range, or the extent of
+ * the identifier or number the caret lands on. */
+static int caret_end(const struct diag *d, const char *ln, int len)
+{
+    if (d->end_col > d->col)
+        return d->end_col;
+    int c = d->col - 1;
+    if (c >= 0 && c < len && (isalnum((unsigned char)ln[c]) || ln[c] == '_')) {
+        int j = c + 1;
+        while (j < len && (isalnum((unsigned char)ln[j]) || ln[j] == '_'))
+            j++;
+        return j + 1;
+    }
+    return d->col + 1;
+}
+
+static void render_text(const struct diag *d)
+{
+    fprintf(stderr, "embcc: ");
+    fprintf(stderr, "%s%s", cc("\033[1m"), d->file ? d->file : "<embcc>");
+    if (d->line > 0) fprintf(stderr, ":%d", d->line);
+    if (d->col > 0)  fprintf(stderr, ":%d", d->col);
+    fprintf(stderr, ":%s %s%s:%s %s%s", cc("\033[0m"), cc(level_sgr(d->level)),
+            level_name(d->level), cc("\033[0m"), cc("\033[1m"), d->msg);
+    if (d->option)
+        fprintf(stderr, " [%s]", d->option);
+    fprintf(stderr, "%s\n", cc("\033[0m"));
+
+    int len;
+    const char *ln = d->end_col == -1 || d->line <= 0 || !d->file
+                     ? NULL : src_line(d->file, d->line, &len);
+    if (!ln)
+        return;
+    fprintf(stderr, "  %.*s\n", len, ln);
+    if (d->col > 0 && d->col <= len + 1) {   /* a caret only when known */
+        int end = caret_end(d, ln, len);
+        fputs("  ", stderr);
+        for (int i = 1; i < d->col; i++)
+            fputc(ln[i - 1] == '\t' ? '\t' : ' ', stderr);
+        fprintf(stderr, "%s^", cc("\033[1;32m"));
+        for (int j = d->col + 1; j < end; j++)
+            fputc('~', stderr);
+        fprintf(stderr, "%s\n", cc("\033[0m"));
+    }
+    /* A fix-it prints under the caret, as GCC prints it: the replacement
+     * text where it goes, so the eye reads the edit. */
+    for (int i = 0; i < d->nfixits; i++) {
+        const struct fixit *f = &d->fixits[i];
+        if (f->line != d->line || f->col <= 0)
+            continue;
+        fputs("  ", stderr);
+        for (int k = 1; k < f->col; k++)
+            fputc(k - 1 < len && ln[k - 1] == '\t' ? '\t' : ' ', stderr);
+        fprintf(stderr, "%s%s%s\n", cc("\033[1;32m"), f->text, cc("\033[0m"));
+    }
+}
+
+/* ---- rendering: JSON (GCC's -fdiagnostics-format=json schema) ---- */
+
+static void json_str(FILE *f, const char *s)
+{
+    fputc('"', f);
+    for (; s && *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        switch (c) {
+        case '"':  fputs("\\\"", f); break;
+        case '\\': fputs("\\\\", f); break;
+        case '\n': fputs("\\n", f); break;
+        case '\r': fputs("\\r", f); break;
+        case '\t': fputs("\\t", f); break;
+        default:
+            if (c < 0x20)
+                fprintf(f, "\\u%04x", c);
+            else
+                fputc((int)c, f);
+        }
+    }
+    fputc('"', f);
+}
+
+static void json_point(FILE *f, const char *name, const char *file, int line,
+                       int col)
+{
+    fprintf(f, "\"%s\": {\"file\": ", name);
+    json_str(f, file ? file : "<embcc>");
+    fprintf(f, ", \"line\": %d, \"column\": %d, \"display-column\": %d, "
+               "\"byte-column\": %d}", line, col, col, col);
+}
+
+static void render_json(FILE *f, const struct diag *d, int indent)
+{
+    const char *pad = indent ? "      " : "  ";
+    fprintf(f, "%s{\"kind\": ", pad);
+    json_str(f, level_name(d->level));
+    fprintf(f, ", \"message\": ");
+    json_str(f, d->msg);
+    if (d->option) {
+        fprintf(f, ", \"option\": ");
+        json_str(f, d->option);
+    }
+    fprintf(f, ", \"column-origin\": 1");
+    fprintf(f, ", \"locations\": [{");
+    json_point(f, "caret", d->file, d->line, d->col);
+    if (d->line > 0 && d->col > 0) {
+        int len;
+        const char *ln = d->file ? src_line(d->file, d->line, &len) : NULL;
+        int end = ln ? caret_end(d, ln, len) : d->col + 1;
+        fprintf(f, ", ");
+        json_point(f, "finish", d->file, d->line, end - 1);
+    }
+    fprintf(f, "}]");
+    if (d->nfixits) {
+        fprintf(f, ", \"fixits\": [");
+        for (int i = 0; i < d->nfixits; i++) {
+            const struct fixit *x = &d->fixits[i];
+            fprintf(f, "%s{", i ? ", " : "");
+            json_point(f, "start", d->file, x->line, x->col);
+            fprintf(f, ", ");
+            json_point(f, "next", d->file, x->line, x->end_col);
+            fprintf(f, ", \"string\": ");
+            json_str(f, x->text);
+            fputc('}', f);
+        }
+        fputc(']', f);
+    }
+    if (d->nnotes) {
+        fprintf(f, ", \"children\": [\n");
+        for (int i = 0; i < d->nnotes; i++) {
+            render_json(f, &d->notes[i], 1);
+            fprintf(f, "%s\n", i + 1 < d->nnotes ? "," : "");
+        }
+        fprintf(f, "%s]", pad);
+    }
+    fputc('}', f);
+}
+
+/* ---- the flush ---- */
+
+void diag_flush(void)
+{
+    if (g_flushed)
+        return;
+    g_flushed = 1;
+    if (g_format == DIAG_JSON) {
+        fprintf(stderr, "[\n");
+        for (int i = 0; i < g_ndiag; i++) {
+            render_json(stderr, &g_diags[i], 0);
+            fprintf(stderr, "%s\n", i + 1 < g_ndiag ? "," : "");
+        }
+        fprintf(stderr, "]\n");
+        return;
+    }
+    for (int i = 0; i < g_ndiag; i++) {
+        render_text(&g_diags[i]);
+        for (int k = 0; k < g_diags[i].nnotes; k++)
+            render_text(&g_diags[i].notes[k]);
+    }
+}
+
+static void install_flush(void)
+{
+    static int done;
+    if (!done) {
+        done = 1;
+        atexit(diag_flush);
+    }
+}
+
+/* ---- the API the front ends call ---- */
+
+void diag_set_format(int format) { g_format = format; }
+void diag_set_color(int mode)    { g_color = mode; }
+void diag_set_max_errors(int n)  { g_max_errors = n; }
+void diag_set_werror(int on)     { g_werror = on; }
+void diag_set_no_warnings(int on){ g_no_warnings = on; }
+int  diag_error_count(void)      { return g_errors; }
+
+void diag_range(int end_col)
+{
+    struct diag *d = fixit_target();
+    if (d)
+        d->end_col = end_col;
+}
+
+void diag_fixit_at(const char *file, int line, int col, int end_col,
+                   const char *text)
+{
+    struct diag *d = fixit_target();
+    if (!d)
+        return;
+    (void)file;                      /* (a fix-it is on its diagnostic's file) */
+    d->fixits = xrealloc(d->fixits, (size_t)(d->nfixits + 1) * sizeof *d->fixits);
+    struct fixit *x = &d->fixits[d->nfixits++];
+    x->line = line;
+    x->col = col;
+    x->end_col = end_col;
+    x->text = xstrndup(text, strlen(text));
+}
+
+/* -fmax-errors=N: stop once N errors are out, as GCC does. */
+static void check_max_errors(void)
+{
+    if (g_max_errors && g_errors >= g_max_errors) {
+        diag_flush();
+        fprintf(stderr, "embcc: compilation terminated due to -fmax-errors=%d\n",
+                g_max_errors);
+        exit(1);
+    }
+}
+
+void diag_at(const char *file, int line, int col, const char *fmt, ...)
+{
+    install_flush();
+    va_list ap;
+    va_start(ap, fmt);
+    new_diag(DIAG_ERROR, file, line, col, vfmt(fmt, ap));
+    va_end(ap);
+    exit(1);
+}
+
+void diag_error_at(const char *file, int line, int col, const char *fmt, ...)
+{
+    install_flush();
+    va_list ap;
+    va_start(ap, fmt);
+    new_diag(DIAG_ERROR, file, line, col, vfmt(fmt, ap));
+    va_end(ap);
+    check_max_errors();
+}
+
+void diag_note_at(const char *file, int line, int col, const char *fmt, ...)
+{
+    install_flush();
+    va_list ap;
+    va_start(ap, fmt);
+    new_diag(DIAG_NOTE, file, line, col, vfmt(fmt, ap));
+    va_end(ap);
+}
+
+void diag_warn_at(const char *file, int line, int col, const char *fmt, ...)
+{
+    install_flush();
+    if (g_no_warnings)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    char *msg = vfmt(fmt, ap);
+    va_end(ap);
+    new_diag(g_werror ? DIAG_ERROR : DIAG_WARNING, file, line, col, msg);
+    if (g_werror)
+        check_max_errors();
+}
+
+void diag_fatal(const char *file, int line, const char *fmt, ...)
+{
+    install_flush();
+    va_list ap;
+    va_start(ap, fmt);
+    new_diag(DIAG_ERROR, file, line, 0, vfmt(fmt, ap));
+    va_end(ap);
+    exit(1);
+}

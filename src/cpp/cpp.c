@@ -77,15 +77,14 @@ static void cerr(struct src *s, const char *msg, const char *arg)
     diag_fatal(s->file, s->line, "%s", msg);
 }
 
-/* A non-fatal preprocessor diagnostic (the compile continues). */
+/* A non-fatal preprocessor diagnostic (the compile continues) — through the
+ * engine, so -w, -Werror and the JSON format reach it too. */
 static void cwarn(struct src *s, const char *msg, const char *arg)
 {
-    fprintf(stderr, "embcc: %s:%d: warning: ", s->file, s->line);
     if (arg)
-        fprintf(stderr, msg, arg);
+        diag_warn_at(s->file, s->line, 0, msg, arg);
     else
-        fprintf(stderr, "%s", msg);
-    fprintf(stderr, "\n");
+        diag_warn_at(s->file, s->line, 0, "%s", msg);
 }
 
 static struct macro *find_macro(struct cpp *cpp, const char *name, size_t n)
@@ -1347,8 +1346,7 @@ static void process_file(struct cpp *cpp, const char *path,
             } else if (DIR("error")) {
                 cerr(&s, "#error: %s", arg);
             } else if (DIR("warning")) {
-                fprintf(stderr, "embcc: %s:%d: warning: %s\n",
-                        s.file, startline, arg);
+                diag_warn_at(s.file, startline, 0, "#warning: %s", arg);
             } else if (DIR("pragma")) {
                 /* no pragmas mean anything to us yet */
             } else if (DIR("line") || (dn > 0 && lp[0] >= '0' &&

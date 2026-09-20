@@ -1,9 +1,11 @@
-/* Allocation that cannot fail quietly, and fatal diagnostics.
+/* Allocation that cannot fail quietly, and the diagnostic API.
  *
- * Diagnostics carry file:line from M1 on (ROADMAP M2 raises the bar
- * further). A diagnostic here is always fatal: the M1 compiler stops at
- * the first error rather than guessing its way past it — recovery is
- * sema/M2 territory.
+ * A diagnostic is a record (src/driver/diag.c, docs/TOOLING.md): severity,
+ * location and source range, the option that controls it, notes under it,
+ * and fix-its. They are held and rendered once — as GCC's caret text, or as
+ * GCC's JSON for an editor — so the API here builds them rather than
+ * printing. diag_at and diag_fatal still stop the compile; recovery (T2)
+ * will give the front ends a way not to.
  */
 #ifndef EMBCC_DRIVER_UTIL_H
 #define EMBCC_DRIVER_UTIL_H
@@ -40,5 +42,28 @@ void diag_note_at(const char *file, int line, int col, const char *fmt, ...);
 
 /* A "warning:" at a location. Does not exit. */
 void diag_warn_at(const char *file, int line, int col, const char *fmt, ...);
+
+/* ---- the diagnostic engine (diag.c) ---- */
+
+enum { DIAG_ERROR, DIAG_WARNING, DIAG_NOTE };
+enum { DIAG_TEXT, DIAG_JSON };
+
+/* Widen the last diagnostic's caret to end at `end_col` (exclusive). Without
+ * one, a caret underlines the identifier or number it lands on. */
+void diag_range(int end_col);
+
+/* Attach a fix-it to the last diagnostic (or to its last note, which is
+ * where "did you mean 'x'?" carries it): replace [col, end_col) of `line`
+ * with `text`. Inserting is col == end_col; deleting is text "". */
+void diag_fixit_at(const char *file, int line, int col, int end_col,
+                   const char *text);
+
+void diag_set_format(int format);      /* DIAG_TEXT (default) or DIAG_JSON */
+void diag_set_color(int mode);         /* -1 auto (a terminal), 0 no, 1 yes */
+void diag_set_max_errors(int n);       /* stop after n errors; 0 = no limit */
+void diag_set_werror(int on);          /* warnings become errors */
+void diag_set_no_warnings(int on);     /* -w: drop them */
+int  diag_error_count(void);           /* for the driver's exit status */
+void diag_flush(void);                 /* render everything held (atexit) */
 
 #endif

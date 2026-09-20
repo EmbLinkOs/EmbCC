@@ -950,9 +950,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                               "'%s' is not declared in '%s' — for a call, "
                               "add a prototype or define it first",
                               e->name, f->name);
-                if (sug)
+                if (sug) {
                     diag_note_at(u->file, e->line, e->col,
                                  "did you mean '%s'?", sug);
+                    /* the edit itself, for whoever reads the JSON */
+                    diag_fixit_at(u->file, e->line, e->col,
+                                  e->col + (int)strlen(e->name), sug);
+                }
                 exit(1);
             }
         }

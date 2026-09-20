@@ -48,6 +48,7 @@ took target-specific work, or that a reader might doubt.
 | Extended inline asm | ✓ AT&T, the x86 kernel's vocabulary; constraints `a b c d S D r m i x +` | ✓ GNU A64, the ARM kernel's 67 templates; constraints `r =r +r i`, register variables |
 | File-scope `__asm__` | ✓ (crt0's vocabulary) | ✗ |
 | gcc flags accepted: `-W...` (one warning level), `-fno-stack-protector` (what EmbCC does; `-fstack-protector` refused), `-fno-rtti`/`-frtti`, `-fno-exceptions` | ✓ | ✓ |
+| Diagnostics: located heading, source line, caret + range, notes, fix-its; `-fdiagnostics-format=text\|json` (GCC's JSON schema), `-fdiagnostics-color=auto\|always\|never`, `-fmax-errors=N`, `-w`, `-Werror` (docs/TOOLING.md) | ✓ | ✓ |
 | Preprocessor (full, incl. `#include_next`), newlib headers | ✓ | ✓ |
 
 ## C++
