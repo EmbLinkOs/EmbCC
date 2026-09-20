@@ -531,8 +531,26 @@ candidates when no operator is written for a comparison: `x @ y` as `(x
 reversed (a synthesized 0 is a null pointer constant, as `<compare>`'s
 `__literal_zero` wants); defaulted `==` and `<=>` (bases then members;
 an `auto` `<=>` returns the weakest member category) and defaulted
-relational operators (through `<=>`); `operator<=>` declared as a friend
-specialization. On the way, for the library: a static `operator()`
+relational operators (through `<=>`); a conversion function inherited
+from a base considered when an operator's built-in candidates are built,
+so `a == 7` works on a class whose `operator int()` is in a base; a base
+member brought in by a using-declaration given the DERIVED class's
+implicit object parameter ([over.match.funcs]/4), without which
+`a = 3` was ambiguous against the implicit copy assignment; a nested
+braced list offered to an
+initializer-list constructor as one argument before its elements are
+offered one by one, so `vector<vector<int>> v{{1, 2, 3}}` is accepted
+(overload resolution skipped the first step, and rejected the call
+whenever no constructor happened to take that many arguments); an
+unnamed local type numbered per enclosing FUNCTION rather than per
+block, so two lambdas in two different `{ }` no longer mangle alike —
+invisible until one reaches a template argument, where it made two
+distinct instantiations collide; a defaulted `operator<=>`
+implicitly declaring `operator==` with the same access
+([class.compare.default]/2) — without which `a != b`, which rewrites
+through `==` and never through `<=>`, did not compile for a class whose
+only comparison was the defaulted `<=>`; `operator<=>` declared as a
+friend specialization. On the way, for the library: a static `operator()`
 (C++23, which g++ and libstdc++ use in C++20); hidden friend function
 templates (their declarations read in their class, an instance's
 arguments bound); a trailing requires-clause sees the function's
@@ -939,7 +957,15 @@ aarch64 in an even register pair (AAPCS64 C.8, after an int in x0 it
 takes x2:x3) or a 16-aligned stack slot, returned in x0:x1 — and va_arg
 reads it so, and `__atomic_*` / `__sync_*` do it inline and lock-free
 with a 16-byte compare-and-swap (x86-64's `lock cmpxchg16b`, aarch64's
-exclusive pair; the rest are loops of it) where gcc calls libatomic.
+exclusive pair; the rest are loops of it) where gcc calls libatomic. The
+GENERIC atomic builtins — `__atomic_load`, `__atomic_store`,
+`__atomic_exchange`, `__atomic_compare_exchange` — take any object of 1,
+2, 4, 8 or 16 bytes rather than only an integer or pointer, because
+their values travel by pointer and the operation is a byte copy; irgen
+lowers such an object as the unsigned integer of the same size, which is
+the identical instruction. That is what `std::atomic<double>` and
+`std::atomic<SmallStruct>` need, and a tagged pointer under a 16-byte
+compare-and-swap is why the second is wanted.
 Bit-fields of it, packed ones across their unit too (17 bytes at most),
 switch on it, static initializers folded in 128 bits (src/sema/w128.c).
 A function using it is not optimized (IR passes, the inliner and x86-64's

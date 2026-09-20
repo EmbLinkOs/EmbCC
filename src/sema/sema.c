@@ -2759,11 +2759,29 @@ enum atomic_kind atomic_builtin(const char *name, int *op)
 }
 
 /* The object an atomic builtin works on must be one the machines can move
- * in one access: an integer or a pointer of 1, 2, 4 or 8 bytes — or an
- * __int128, which both do with a 16-byte compare-and-swap (irgen). */
-static void need_atomic_object(struct unit *u, struct expr *e, struct type *t)
+ * in one access: 1, 2, 4 or 8 bytes — or 16, which both do with a
+ * 16-byte compare-and-swap (irgen).
+ *
+ * WHICH types are allowed depends on the form. The _n forms and the
+ * arithmetic ones pass the value in a register, so it has to be an
+ * integer or a pointer. The generic forms pass everything by POINTER
+ * and copy bytes, so any object of a workable size will do -- which is
+ * what makes std::atomic<double> and std::atomic<SmallStruct> possible,
+ * and a tagged pointer under a 16-byte compare-and-swap is the reason
+ * anyone wants the second. */
+static void need_atomic_object(struct unit *u, struct expr *e, struct type *t,
+                               int generic)
 {
     int sz = ty_size(t);
+    int ok_size = sz == 1 || sz == 2 || sz == 4 || sz == 8 || sz == 16;
+    if (generic) {
+        if (!ok_size || t->kind == TY_VOID || t->kind == TY_FUNC ||
+            t->kind == TY_ARRAY)
+            sema_error_at(u, e->line, e->col,
+                    "%s works on an object of 1, 2, 4, 8 or 16 bytes, "
+                    "not %s", e->lhs->name, ty_name(t));
+        return;
+    }
     if (!(ty_is_integer(t) || t->kind == TY_PTR) ||
         (sz != 1 && sz != 2 && sz != 4 && sz != 8 && t->kind != TY_INT128))
         sema_error_at(u, e->line, e->col,
@@ -2831,7 +2849,9 @@ static void check_atomic_call(struct unit *u, struct func *f,
     if (ak == AK_TEST_AND_SET) { e->ty = ty_base(TY_BOOL, 0); return; }
     if (ak == AK_CLEAR)        { e->ty = ty_base(TY_VOID, 0); return; }
 
-    need_atomic_object(u, e, obj);
+    need_atomic_object(u, e, obj,
+                       ak == AK_LOAD || ak == AK_STORE ||
+                       ak == AK_EXCHANGE || ak == AK_CMPXCHG);
     /* The generic forms pass values by pointer; each must point at an
      * object the same size as the atomic one. */
     if (ak == AK_LOAD || ak == AK_STORE || ak == AK_EXCHANGE ||

@@ -3300,7 +3300,24 @@ struct cclass *class_new(const char *name, struct cscope *owner)
             c->local = 1;
     if (!name) {
         c->cname = cx_fmt("__cx_anon%d", cx_uid());
-        c->unnamed_no = ++owner->nunnamed;
+        /* An unnamed type's number is what distinguishes it in a
+         * mangled name, so the counter has to cover everything the
+         * mangling puts in one place. Inside a function that is the
+         * FUNCTION, not the block: a lambda's closure type is a local
+         * name and two lambdas in two different `{ }` blocks of one
+         * function both came out `Ut_`. That is invisible until such a
+         * type reaches a template argument, and then two distinct
+         * instantiations mangle identically -- which is what
+         * `v | filter(a)` and `v | filter(b)` in two blocks did, and
+         * the emitted C was rejected as a redefinition. */
+        struct cscope *ctr = owner;
+        for (struct cscope *s = owner; s; s = s->parent) {
+            if (s->k != SC_BLOCK && s->k != SC_PARAMS)
+                break;
+            if (s->fn)
+                ctr = s;
+        }
+        c->unnamed_no = ++ctr->nunnamed;
     } else if (c->local)
         c->cname = cx_fmt("__cx_%s_%d", name, cx_uid());
     else

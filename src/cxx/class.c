@@ -698,6 +698,59 @@ static struct cfunc *declare_implicit(struct cclass *c, int sp, int trivial,
     return f;
 }
 
+/* [class.compare.default]/2: a class that declares a DEFAULTED
+ * three-way comparison and does not declare an == gets one implicitly,
+ * defaulted, with the same access.
+ *
+ * It is not a nicety. `a != b` is rewritten as `!(a == b)` and never as
+ * `(a <=> b) != 0`, so without this a class with a defaulted <=> can be
+ * ordered and cannot be compared for equality -- which is both surprising
+ * and the opposite of what the one line `auto operator<=>(const T&) const
+ * = default;` is written to mean.
+ *
+ * Declared here beside the other implicit members and defined, like
+ * them, only if it is used. */
+static void declare_implicit_eq(struct cclass *c)
+{
+    struct cfunc *spaceship = NULL;
+    struct csym *ss = scope_find_here(c->scope, "operator<=>");
+    if (ss && ss->k == CS_FUNC)
+        for (struct cfunc *f = ss->fns; f; f = f->next)
+            if (f->is_defaulted && f->type && f->type->np == 1)
+                { spaceship = f; break; }
+    if (!spaceship)
+        return;
+    struct csym *eq = scope_find_here(c->scope, "operator==");
+    if (eq && eq->k == CS_FUNC && eq->fns)
+        return;                       /* the class declared its own */
+
+    struct cty *self = ct_class(c);
+    struct cty *param = ct_ref(ct_qual(self, CQ_CONST), 0);
+    struct cfunc *f = xcalloc(1, sizeof *f);
+    f->type = ct_func(ct_basic(CT_BOOL), &param, 1, 0);
+    /* const, like the <=> it stands for: `a == b` on a const object has
+     * to work, or the declaration buys nothing. */
+    f->type->fq = spaceship->type->fq;
+    f->name = "operator==";
+    f->owner = c->scope;
+    f->cls = c;
+    f->is_implicit = 1;
+    f->is_inline = 1;
+    f->is_defaulted = 1;              /* so define_defaulted_cmp builds it */
+    f->vslot = -1;
+    f->special = 0;                   /* NOT a special member: a comparison */
+    f->access = spaceship->access;
+    f->body_tok = f->mi_tok = -1;
+    func_register(f);
+    struct csym *y = scope_find_here(c->scope, "operator==");
+    if (!y || y->k != CS_FUNC)
+        y = scope_add(c->scope, CS_FUNC, "operator==");
+    struct cfunc **set = &y->fns;
+    while (*set)
+        set = &(*set)->next;
+    *set = f;
+}
+
 /* Is c laid out as the plain C struct of its members would be — its
  * bases all empty, at offset 0, no vptr, no member moved off another
  * empty subobject? Then it is emitted as that struct (bit-fields and all:
@@ -897,6 +950,7 @@ void class_complete(struct cclass *c)
         struct cfunc *d = declare_implicit(c, SP_DTOR, c->trivial_dtor, 0);
         d->is_virtual = vdtor;            /* overriding a virtual one */
     }
+    declare_implicit_eq(c);
     if (c->dynamic)
         build_vtables(c);
 }

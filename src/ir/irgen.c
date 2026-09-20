@@ -1255,6 +1255,19 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
     const struct type *obj = e->args[0]->ty->pointee;
     if (ak == AK_TEST_AND_SET || ak == AK_CLEAR)
         obj = ty_base(TY_CHAR, 1);                    /* one byte, as gcc does */
+    /* The generic forms move BYTES -- their values travel by pointer --
+     * so the object may be a double or a small struct. Lower it as the
+     * unsigned integer of the same size and nothing below here has to
+     * know: the instruction is the same either way, and sema has
+     * already refused a size the machines cannot move at once. */
+    if (!ty_is_integer(obj) && obj->kind != TY_PTR) {
+        int sz = ty_size(obj);
+        obj = sz == 1  ? ty_base(TY_CHAR, 1)
+            : sz == 2  ? ty_base(TY_SHORT, 1)
+            : sz == 4  ? ty_base(TY_INT, 1)
+            : sz == 16 ? ty_base(TY_INT128, 1)
+                       : ty_base(TY_LONG, 1);
+    }
     int w = ty_w(obj), sign = ty_signed_int(obj);
     int addr = gen_expr(fn, e->args[0]);
     if (ty_size(obj) == 16)

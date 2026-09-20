@@ -913,8 +913,22 @@ static struct ics ics_of(struct cexpr *e, struct cty *to)
                 r.list_cls = to->cls;
                 return r;
             }
-            struct cfunc *f = resolve(to->cls->ctors, NULL, e->a, e->na,
-                                      NULL, NULL);
+            /* The initializer-list constructors first, the list their
+             * ONE argument, and only then every constructor with the
+             * elements as arguments (12.2.2.8) -- the order construct()
+             * already used. Scoring skipped the first step, so a nested
+             * list was only ever offered to the constructors element by
+             * element: `vector<vector<int>> v{{1, 2, 3}}` looked for a
+             * three-argument vector<int>, found none, and the whole
+             * outer call was reported as having no viable candidate.
+             * The initialization itself was right all along -- this
+             * rejected programs rather than miscompiling them, which is
+             * why `{{1, 2}}` worked (vector(n, value) happens to take
+             * two) and `{{1, 2, 3}}` did not. */
+            struct cfunc *f = resolve_ex(to->cls->ctors, NULL, &e, 1,
+                                         NULL, NULL, RS_IL_CTORS);
+            if (!f)
+                f = resolve(to->cls->ctors, NULL, e->a, e->na, NULL, NULL);
             if (f) {
                 r.rank = R_USER;
                 r.user = f;
@@ -1051,6 +1065,30 @@ static const char *arg_types(struct cexpr **args, int na)
     return buf;
 }
 
+/* [over.match.funcs]/4: the implicit object parameter names the class
+ * the function is a member of -- EXCEPT that a base's member brought
+ * into a derived class by a using-declaration is treated as a member of
+ * the derived class.
+ *
+ * The exception is not a nicety. Without it, `d = 3` where
+ * `operator=(int)` came through a using-declaration is AMBIGUOUS against
+ * the implicit copy assignment: the first wants a derived-to-base
+ * conversion for its object and an exact match for its argument, the
+ * second the reverse, and neither is better in every argument. That is
+ * what made `std::atomic<int> a; a = 3;` fail to compile. */
+static struct cclass *object_class(struct cexpr *obj, struct cfunc *f)
+{
+    struct cclass *oc = obj->t->cls;
+    if (f->cls == oc || !f->name)
+        return f->cls;
+    struct csym *y = scope_find_here(oc->scope, f->name);
+    if (y && y->k == CS_FUNC)
+        for (struct cfunc *g = y->fns; g; g = g->next)
+            if (g->alias_of == f)
+                return oc;
+    return f->cls;
+}
+
 /* The implicit object parameter's conversion: `cv C&` (or && for an
  * &&-qualified member) — which, unless &-qualified, an rvalue binds too. */
 static struct ics object_ics(struct cexpr *obj, struct cfunc *f)
@@ -1059,7 +1097,8 @@ static struct ics object_ics(struct cexpr *obj, struct cfunc *f)
     struct cexpr lv = *obj;
     if (ft->refq == 0)
         lv.vc = VC_LVALUE;
-    struct cty *self = ct_ref(ct_qual(ct_class(f->cls), ft->fq),
+    struct cclass *pc = obj->t->k == CT_CLASS ? object_class(obj, f) : f->cls;
+    struct cty *self = ct_ref(ct_qual(ct_class(pc), ft->fq),
                               ft->refq == 2);
     if (obj->t->k != CT_CLASS || !class_derives(obj->t->cls, f->cls, NULL)) {
         struct ics bad;
@@ -2655,6 +2694,32 @@ static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
     return make_call(f, NULL, args, na, at);
 }
 
+/* The conversion functions to a scalar that c offers: its own, and --
+ * only if it declares none -- those it inherits. The two are separate
+ * passes rather than one walk because a derived class that re-declares
+ * a base's conversion would otherwise look like two candidates and be
+ * given up on, where the language says the derived one HIDES the
+ * base's. */
+static void scalar_convs(struct cclass *c, struct cfunc **only, int *n,
+                         int depth)
+{
+    if (depth > 16)
+        return;
+    int before = *n;
+    for (struct csym *y = c->scope->syms; y; y = y->next)
+        if (y->k == CS_FUNC)
+            for (struct cfunc *f = y->fns; f; f = f->next)
+                if (f->is_conv && !f->is_explicit &&
+                    ct_is_scalar(ct_strip_ref(f->type->to))) {
+                    *only = f;
+                    (*n)++;
+                }
+    if (*n != before)
+        return;
+    for (int i = 0; i < c->nbases; i++)
+        scalar_convs(c->bases[i].cls, only, n, depth + 1);
+}
+
 /* A class operand of a built-in operator, through its one non-explicit
  * conversion function to a scalar — if it has exactly one. */
 static struct cexpr *class_to_builtin(struct cexpr *e)
@@ -2663,14 +2728,13 @@ static struct cexpr *class_to_builtin(struct cexpr *e)
         return e;
     struct cfunc *only = NULL;
     int n = 0;
-    for (struct csym *y = e->t->cls->scope->syms; y; y = y->next)
-        if (y->k == CS_FUNC)
-            for (struct cfunc *f = y->fns; f; f = f->next)
-                if (f->is_conv && !f->is_explicit &&
-                    ct_is_scalar(ct_strip_ref(f->type->to))) {
-                    only = f;
-                    n++;
-                }
+    /* Bases included: an operator's built-in candidates are built from
+     * every conversion the operand has, and an inherited one is one of
+     * them. Without this, `a == 7` on a class whose `operator int()`
+     * came from a base found no candidate at all -- which is how
+     * std::atomic<int>, whose conversion lives in __atomic_base, was
+     * unusable in a comparison. */
+    scalar_convs(e->t->cls, &only, &n, 0);
     if (n != 1)
         return e;
     return through_conv(e, ct_unqual(ct_strip_ref(only->type->to)), 0,
