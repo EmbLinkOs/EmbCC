@@ -41,10 +41,10 @@ out-of-memory, where building a diagnostic would itself allocate.
 |---|---|---|
 | **platform** | every host interaction: read a file, write a file, ask the environment | [`src/platform/`](../src/platform/README.md). The bottom layer — nothing above it knows what a `FILE*` is. **No process API, ever**: §1 is why |
 | **driver** | argv, flags, deciding compile-vs-link, file discovery | Keep flags a *deliberate subset*; do not clone gcc's surface |
-| **lex** | tokens, including the preprocessor's needs | |
+| **lex** | tokens, including the preprocessor's needs | `embcc inspect tokens` |
 | **cpp** | `#include`, `#define`, conditionals | Needed early — the OS's headers are real newlib headers (see §5) |
-| **parse** | C → AST | The subset grew by need, not by standard-completeness; `todo.md` tracks what is left |
-| **sema** | types, declarations, conversions, diagnostics | Where most "real compiler" work lives |
+| **parse** | C → AST | The subset grew by need, not by standard-completeness; `todo.md` tracks what is left. `embcc inspect ast` |
+| **sema** | types, declarations, conversions, diagnostics | Where most "real compiler" work lives. `embcc inspect symbols` / `inspect types` (layout: offsets, bit-field positions, padding) |
 | **IR** | a small typed intermediate form | See §3; `embcc inspect ir` prints it ([`src/ir/irprint.c`](../src/ir/irprint.c)) |
 | **codegen** | IR → x86-64, System V AMD64 | See §4 |
 | **asm** | encode instructions to bytes | Integrated; no external assembler exists on-OS |

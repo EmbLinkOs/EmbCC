@@ -76,6 +76,80 @@ echo "immediate folding is visible: an operand printed as #1"
 grep -q "int sum(int n)" "$out/pp.txt" || { echo "FAIL: pp"; exit 1; }
 echo "inspect pp: the preprocessed source"
 
+# ---- the front-end stages -------------------------------------------------
+cat > "$out/s.c" << 'EOF'
+struct Packet {
+    unsigned char kind;
+    unsigned int flags : 3;
+    unsigned int prio  : 5;
+    int          len;
+    char        *data;
+};
+static int total;
+int process(struct Packet *p) { total += p->len; return p->flags; }
+EOF
+
+"$EMBCC" inspect tokens "$out/s.c" > "$out/tok.txt"
+grep -q "^   1:1   'struct'" "$out/tok.txt" || { echo "FAIL: tokens"; exit 1; }
+grep -q "'Packet'  *Packet" "$out/tok.txt" || { echo "FAIL: ident text"; exit 1; }
+grep -qE "^; [0-9]+ tokens" "$out/tok.txt" || { echo "FAIL: count"; exit 1; }
+echo "inspect tokens: $(sed -n 's/^; \([0-9]*\) tokens/\1/p' "$out/tok.txt"),
+each with its line and column"
+
+# The AST carries RESOLVED types -- it runs after sema, because a tree with
+# every type shown as "?" answers a question nobody asks.
+"$EMBCC" inspect ast "$out/s.c" > "$out/ast.txt"
+sed "s|$out/||" "$out/ast.txt" | head -8
+grep -q "^function process : int(struct Packet \* p)" "$out/ast.txt" ||
+    { echo "FAIL: ast signature"; exit 1; }
+grep -q "member ->len : int" "$out/ast.txt" || { echo "FAIL: ast member"; exit 1; }
+grep -q "var p : struct Packet \*" "$out/ast.txt" ||
+    { echo "FAIL: ast resolved type"; exit 1; }
+echo "inspect ast: the tree, with the types sema resolved"
+
+"$EMBCC" inspect symbols "$out/s.c" > "$out/sym.txt"
+grep -q "^function  process .*int(struct Packet \*)" "$out/sym.txt" ||
+    { cat "$out/sym.txt"; echo "FAIL: symbols"; exit 1; }
+grep -q "^variable  total .*static" "$out/sym.txt" ||
+    { echo "FAIL: static not shown"; exit 1; }
+echo "inspect symbols: what the unit declares, with linkage"
+
+# ---- layout: the decision the compiler never explains ----------------------
+"$EMBCC" inspect types "$out/s.c" > "$out/ty.txt"
+cat "$out/ty.txt"
+grep -q "^struct Packet  (16 bytes, align 8)" "$out/ty.txt" ||
+    { echo "FAIL: struct size"; exit 1; }
+# A bit-field's position is the part nobody can predict from the source.
+grep -q "flags .*: 3  (bits 8-10 of the unit at 0)" "$out/ty.txt" ||
+    { echo "FAIL: bit-field position"; exit 1; }
+grep -q "prio .*: 5  (bits 11-15 of the unit at 0)" "$out/ty.txt" ||
+    { echo "FAIL: second bit-field"; exit 1; }
+# Padding is invisible in the source and expensive in RAM, so it is named.
+grep -q "(padding) *2 bytes" "$out/ty.txt" ||
+    { echo "FAIL: padding not reported, or reported at the wrong size"; exit 1; }
+echo "inspect types: offsets, bit-field positions, and the padding between"
+
+# And the layout is the REAL one: the referee agrees on the numbers.
+if command -v "${EMBCC_REFEREE_GCC:-x86_64-elf-gcc}" > /dev/null 2>&1; then
+    cat > "$out/off.c" << 'EOF'
+#include <stddef.h>
+struct Packet {
+    unsigned char kind;
+    unsigned int flags : 3;
+    unsigned int prio  : 5;
+    int          len;
+    char        *data;
+};
+char a[sizeof(struct Packet) == 16 ? 1 : -1];
+char b[offsetof(struct Packet, len) == 4 ? 1 : -1];
+char c[offsetof(struct Packet, data) == 8 ? 1 : -1];
+EOF
+    "${EMBCC_REFEREE_GCC:-x86_64-elf-gcc}" -c -isystem "$X86_NEWLIB/include"         "$out/off.c" -o "$out/off.o" 2> "$out/off.err" ||
+        { cat "$out/off.err"
+          echo "FAIL: gcc disagrees with the layout we printed"; exit 1; }
+    echo "and gcc agrees: 16 bytes, len at 4, data at 8"
+fi
+
 # Flags still mean what they mean: inspect replaces a compilation, it does
 # not change one.
 "$EMBCC" inspect ir "$out/p.c" -O0 -DUNUSED=1 > /dev/null ||

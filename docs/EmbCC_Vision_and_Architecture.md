@@ -178,12 +178,15 @@ this document depends on most:
    cost the same kind of pass. Until they are done, `embcc why` answers only
    about inlining, and performance provenance (§25) and half of §22 remain
    blocked.
-2. **Stage dump formats (§18, R6) — started.** `embcc inspect ir` and
-   `embcc inspect pp` exist (`src/ir/irprint.c`), and the IR's textual form
-   is what makes a pass's effect visible: the same command at `-O0` and
-   `-O2` shows mem2reg removing stack traffic, the inliner pulling a callee
-   in, and immediate folding. The remaining stages (`tokens`, `ast`,
-   `symbols`, `types`, `mir`, `cfg`, `callgraph`) and `-S` are not done.
+2. **Stage dump formats (§18, R6) — six of the ten.** `embcc inspect`
+   answers `tokens`, `pp`, `ast`, `symbols`, `types` and `ir`
+   (`src/driver/inspect.c`, `src/ir/irprint.c`). The IR's form is what makes
+   a pass's effect visible — the same command at `-O0` and `-O2` shows
+   mem2reg removing stack traffic, the inliner pulling a callee in, and
+   immediate folding — and `types` prints the one decision the compiler
+   otherwise never explains: offsets, bit-field bit positions, and the
+   padding between, cross-checked against gcc in the golden. `mir`, `cfg`,
+   `callgraph` and `-S` are not done.
 
    **The round-trip half of §9.1 is a structural change, not a printer
    feature, and this is where that was discovered.** `struct ir_ins` points

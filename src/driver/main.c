@@ -26,6 +26,7 @@
 #include "../arch/target.h"
 #include <setjmp.h>
 
+#include "inspect.h"
 #include "remark.h"
 #include "util.h"
 #include "../platform/platform.h"
@@ -334,6 +335,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             return 0;
         }
     }
+    /* `inspect tokens` is the lexer's own stage: after preprocessing, where
+     * the token stream is a real thing, and before the parser consumes it. */
+    if (inspect_stage && !strcmp(inspect_stage, "tokens")) {
+        struct outbuf b = { NULL, 0, 0 };
+        inspect_tokens(&b, in, pp, lang_cxx);
+        fwrite(b.p, 1, b.n, stdout);
+        ob_free(&b);
+        return 0;
+    }
+
     struct unit *u = parse_unit(in, pp);
     if (parse_error_count()) {
         /* Every syntax error is out; the tree is not whole, so nothing
@@ -346,6 +357,25 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         diag_terminated(sema_error_count());
         return 1;                     /* (--fix still gets its turn) */
     }
+    /* The stages that read the analysed tree. They come after sema so the
+     * types printed are the resolved ones -- an AST dump with every type
+     * shown as "?" would answer a question nobody asks. */
+    if (inspect_stage) {
+        struct outbuf b = { NULL, 0, 0 };
+        if (!strcmp(inspect_stage, "ast"))
+            inspect_ast(&b, u);
+        else if (!strcmp(inspect_stage, "symbols"))
+            inspect_symbols(&b, u);
+        else if (!strcmp(inspect_stage, "types"))
+            inspect_types(&b, u);
+        if (b.n) {
+            fwrite(b.p, 1, b.n, stdout);
+            ob_free(&b);
+            return 0;
+        }
+        ob_free(&b);
+    }
+
     if (dep_mode)                     /* -MD/-MMD: beside the object */
         write_deps(in, out);
     if (syntax_only)                  /* checked; nothing to write */
@@ -937,11 +967,19 @@ int main(int argc, char **argv)
         argc -= shift;
     }
     if (!strcmp(argv[1], "inspect")) {
-        static const char *const stages[] = { "ir", "pp" };
+        static const char *const stages[] = {
+            "tokens", "pp", "ast", "symbols", "types", "ir"
+        };
         if (argc < 4) {
-            fprintf(stderr, "usage: embcc inspect <stage> <file> [options]\n"
-                            "stages: ir  (EmbIR at the current -O level)\n"
-                            "        pp  (preprocessed source)\n");
+            fprintf(stderr,
+                "usage: embcc inspect <stage> <file> [options]\n"
+                "stages, in pipeline order:\n"
+                "  tokens   what the lexer made of the preprocessed source\n"
+                "  pp       the preprocessed source itself\n"
+                "  ast      the tree the parser built\n"
+                "  symbols  what the unit declares, with resolved types\n"
+                "  types    struct layout: offsets, bit-fields, padding\n"
+                "  ir       EmbIR at the current -O level\n");
             return 1;
         }
         int known = 0;
