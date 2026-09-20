@@ -263,7 +263,7 @@ char *cg_wide_vregs(struct ir_func *fn)
     int nv = fn->nvregs ? fn->nvregs : 1;
     char *w = xcalloc((size_t)nv, 1);
     int any = 0;
-    for (int v = 0; v < fn->src->nvars; v++)
+    for (int v = 0; v < fn->nvars; v++)
         if (fn->src->var_tys[v] && (fn->src->var_tys[v]->kind == TY_LDOUBLE ||
                                     fn->src->var_tys[v]->kind == TY_INT128))
             w[v] = any = 1;
@@ -477,7 +477,7 @@ static unsigned long *compute_live_intervals(struct ir_func *fn, int *first,
 static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
 {
     int nins = fn->nins, nvr = fn->nvregs;
-    int nvars = fn->src->nvars;
+    int nvars = fn->nvars;
     int *loc = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *loc);
     for (int v = 0; v < nvr; v++) loc[v] = -1;
     *nused_out = 0;
@@ -487,7 +487,7 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
      * registers in it are then masked per value by `crosses`/`is_arg` below (a
      * leaf, having no calls, is never masked). A variadic function reserves the
      * argument register file, so it drops r8/r9. */
-    int variadic = fn->src->is_varargs;
+    int variadic = fn->is_varargs;
     const int *POOL = variadic ? VARIADIC_POOL : LEAF_POOL;
     int NP = variadic ? NVARIADIC : NLEAF;
 
@@ -799,9 +799,9 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
      * of any one value. So it is reported once, with both numbers. */
     if (nspill && remarks_on())
         remark_add("regalloc", "spilled-to-stack",
-                   fn->src ? fn->src->name : NULL, "no-register-free",
-                   fn->src ? fn->src->file : NULL,
-                   fn->src ? fn->src->line : 0,
+                   fn->src ? fn->name : NULL, "no-register-free",
+                   fn->src ? fn->file : NULL,
+                   fn->src ? fn->line : 0,
                    "%d of %d values did not get one of the %d allocatable "
                    "registers", nspill, E, NP);
 
@@ -847,7 +847,7 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
  * variable keeps a distinct DWARF location). Length nvars; caller frees. */
 static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
 {
-    int n = fn->src->nvars;
+    int n = fn->nvars;
     int *slot = xmalloc((size_t)(n ? n : 1) * sizeof *slot);
     if (n == 0 || g_want_debug || g_has_cgoto || !fn->var_scope_lo) {
         for (int i = 0; i < n; i++) slot[i] = i;   /* one slot each */
@@ -949,7 +949,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
     int *lslot = coalesce_locals(fn, &nls);
     int *ssize = xcalloc((size_t)(nls ? nls : 1), sizeof *ssize);
     int *salign = xcalloc((size_t)(nls ? nls : 1), sizeof *salign);
-    for (int i = 0; i < f->nvars; i++) {
+    for (int i = 0; i < fn->nvars; i++) {
         int s = lslot[i];
         int sz = (ty_size(f->var_tys[i]) + 7) & ~7;
         if (sz > ssize[s]) ssize[s] = sz;
@@ -979,20 +979,20 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         }
         soff[s] = -running;
     }
-    for (int i = 0; i < f->nvars; i++)
+    for (int i = 0; i < fn->nvars; i++)
         disp[i] = soff[lslot[i]];
     free(lslot); free(ssize); free(salign); free(soff);
     /* Temporaries share a coalesced pool of 8-byte slots (K13) instead of one
      * slot each — the temp region is `npool` slots wide, not (nvregs-nvars). */
     int npool = 0;
-    int *tslot = coalesce_temps(fn, f->nvars, &npool);
+    int *tslot = coalesce_temps(fn, fn->nvars, &npool);
     int temp_base = running;
-    for (int t = f->nvars; t < fn->nvregs; t++)
-        disp[t] = -(temp_base + (tslot[t - f->nvars] + 1) * 8);
+    for (int t = fn->nvars; t < fn->nvregs; t++)
+        disp[t] = -(temp_base + (tslot[t - fn->nvars] + 1) * 8);
     running = temp_base + npool * 8;
     free(tslot);
     /* a long double temp: its own 16-aligned 16-byte slot, outside the pool */
-    for (int t = f->nvars; t < fn->nvregs; t++)
+    for (int t = fn->nvars; t < fn->nvregs; t++)
         if (g_wide && g_wide[t]) {
             running = (running + 16 + 15) & ~15;
             disp[t] = -running;
@@ -1804,9 +1804,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * DWARF emitter can write DW_OP_fbreg. sd is indexed by vreg; params and
      * locals are vregs [0, nvars), which is what dbgvars reference. */
     if (g_want_debug) {
-        int nv = fn->src->nvars ? fn->src->nvars : 1;
+        int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
-        for (int v = 0; v < fn->src->nvars; v++)
+        for (int v = 0; v < fn->nvars; v++)
             fn->var_off[v] = sd[v];
     }
 
@@ -1983,7 +1983,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_load_reg_mem(text, g_loc[p], REG_RBP, sd[p], psz);
         }
 
-    rc_nvars = fn->src->nvars;
+    rc_nvars = fn->nvars;
     cg_reset();
     /* Use counts drive comparison/branch fusion below (a compare feeding only
      * the next branch). Built once; freed after the loop. */
@@ -2036,7 +2036,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
         }
         if (g_no_sse && (i->flt || i->op == IR_I2F || i->op == IR_F2I ||
                          i->op == IR_F2F))
-            diag_fatal(fn->src->file, i->line,
+            diag_fatal(fn->file, i->line,
                        "floating point needs SSE, which -mno-sse forbids");
         switch (i->op) {
         case IR_CONST:

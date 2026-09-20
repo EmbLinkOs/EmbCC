@@ -477,7 +477,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
 
         int rtoff = type_lookup(&tm, fn->src->ret_ty);
         db_uleb(b, rtoff >= 0 ? AB_SUBPROGRAM_T : AB_SUBPROGRAM);
-        db_str(b, fn->src->name);
+        db_str(b, fn->name);
         if (rtoff >= 0) db_u32(b, (unsigned long)rtoff);  /* return type */
         reloc(out, DWSEC_INFO, b->len, 8, DWTGT_TEXT, lo);
         db_u64(b, 0);                    /* low_pc */

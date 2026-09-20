@@ -195,7 +195,7 @@ static char *a64_subst(const char *file, int line, const char *tmpl,
 void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
 {
     struct asm_stmt *a = s->asm_s;
-    const char *file = fn->src->file;
+    const char *file = fn->file;
     int nops = a->nout + a->nin;
     int regs[2 * MAX_PARAMS], isimm[2 * MAX_PARAMS], sizes[2 * MAX_PARAMS];
     long imms[2 * MAX_PARAMS];

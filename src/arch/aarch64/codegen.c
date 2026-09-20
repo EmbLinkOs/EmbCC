@@ -325,7 +325,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
         running += 32;
     }
 
-    for (int v = 0; v < f->nvars; v++) {
+    for (int v = 0; v < fn->nvars; v++) {
         int al = f->var_aligns ? f->var_aligns[v] : 0;
         int tal = ty_align(f->var_tys[v]);
         if (tal > al) al = tal;
@@ -341,7 +341,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
     }
 
     running = (running + 7) & ~7L;
-    for (int t = f->nvars; t < fn->nvregs; t++) {
+    for (int t = fn->nvars; t < fn->nvregs; t++) {
         if (g_a64_wide && g_a64_wide[t]) {
             running = (running + 15) & ~15L;
             disp[t] = running;
@@ -819,9 +819,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * x29. The prologue leaves sp (and x19, which pins it in a function
      * with a VLA) exactly fr.size below x29, and slots are sp-relative. */
     if (want_debug) {
-        int nv = f->nvars ? f->nvars : 1;
+        int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
-        for (int v = 0; v < f->nvars; v++)
+        for (int v = 0; v < fn->nvars; v++)
             fn->var_off[v] = (int)(sd[v] - fr.size);
     }
 

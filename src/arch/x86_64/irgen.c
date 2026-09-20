@@ -393,7 +393,7 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
                          const int *opregs, const char *const *opnames,
                          int nops, struct ir_asm *ia)
 {
-    const char *file = fn->src->file;
+    const char *file = fn->file;
     int line = s->line;
     const char *tmpl = s->asm_s->tmpl;
     unsigned char *code = NULL;
@@ -1012,16 +1012,16 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
     const char *opnames[2 * MAX_PARAMS];
     for (int i = 0; i < a->nout; i++) {
         int r = a->out[i].reg;
-        if (r == -2)      r = asm_alloc_reg(used, fn->src->file, s->line);
-        else if (r == -3) r = asm_alloc_xmm(xused, fn->src->file, s->line);
+        if (r == -2)      r = asm_alloc_reg(used, fn->file, s->line);
+        else if (r == -3) r = asm_alloc_xmm(xused, fn->file, s->line);
         ia->out[i].reg = r;
         opnames[nops] = a->out[i].name;
         opregs[nops++] = r;
     }
     for (int i = 0; i < a->nin; i++) {
         int r = a->in[i].reg;
-        if (r == -2)      r = asm_alloc_reg(used, fn->src->file, s->line);
-        else if (r == -3) r = asm_alloc_xmm(xused, fn->src->file, s->line);
+        if (r == -2)      r = asm_alloc_reg(used, fn->file, s->line);
+        else if (r == -3) r = asm_alloc_xmm(xused, fn->file, s->line);
         ia->in[i].reg = r;
         opnames[nops] = a->in[i].name;
         opregs[nops++] = r;

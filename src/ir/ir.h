@@ -143,6 +143,11 @@ struct ir_ins {
     enum binop pred;         /* IR_CMP */
     int label;               /* IR_LABEL/IR_JMP/IR_BRZ */
     struct func *callee;     /* IR_CALL (direct), IR_FADDR */
+    /* The same target as an index into ir_unit::syms -- what a self-contained
+     * IR refers to, and what its textual form prints (§9.1). The pointers
+     * above remain while the type side is still being interned. */
+    int callee_sym;
+    int glob_sym;
     int indirect;            /* IR_CALL through a function pointer */
     int sret_first;          /* IR_CALL: argument 0 is the indirect-result
                               * pointer (type.h sret_first) */
@@ -227,7 +232,22 @@ struct ir_dbgvar {
 };
 
 struct ir_func {
-    struct func *src;        /* name, linkage, code_off/len live here */
+    /* EmbIR is meant to be a module, not a view over the AST (§9.1): what a
+     * pass or a backend needs about the function is HERE, copied at irgen
+     * time, so nothing downstream has to follow a pointer back into the
+     * parse tree. `src` remains for what genuinely still lives there --
+     * code_off/code_len, which the linker writes back, and the types the
+     * ABI classification has not yet absorbed -- and every use of it is a
+     * remaining step toward a self-contained IR. */
+    const char *name;
+    const char *file;
+    int line;
+    int is_static;
+    int is_varargs;
+    int nparams;
+    int nvars;
+
+    struct func *src;        /* code_off/len; the types not yet interned */
     int nvregs;
     int nlabels;
     int scratch_bytes;       /* struct-return temporaries */
@@ -269,14 +289,36 @@ struct ir_str {
     int off;                 /* offset inside .rodata */
 };
 
+/* A symbol EmbIR refers to, by NAME rather than by a pointer into the AST
+ * (§9.1). The fields are exactly what the backends read off a callee or a
+ * global -- nothing speculative -- so the table stays small and a textual
+ * form can carry all of it. */
+struct ir_sym {
+    const char *name;
+    int is_func;
+    int defined;       /* a definition exists in this unit */
+    int is_weak;
+    int is_varargs;    /* functions */
+    int sret_first;    /* functions: argument 0 is the indirect result */
+    int is_nothrow;    /* functions: no exception leaves it */
+};
+
 struct ir_unit {
     struct unit *src;
+    struct ir_sym *syms;     /* every name the IR mentions */
+    int nsyms, capsyms;
     struct ir_func *funcs;   /* array, same order as src->funcs */
     int nfuncs;
     struct ir_str *strs;
     int nstrs, capstrs;
     int rodata_len;
 };
+
+/* Intern a symbol, returning its index. Interning by name means the same
+ * function referred to from two instructions is one entry, which is what
+ * lets a parsed IR resolve a name without a frontend symbol table. */
+int ir_sym_func(struct ir_unit *u, struct func *f);
+int ir_sym_global(struct ir_unit *u, struct global *g);
 
 struct ir_unit *irgen(struct unit *u);
 

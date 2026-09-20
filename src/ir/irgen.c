@@ -20,6 +20,9 @@
  * threaded, so a file-scope cursor is sound. Off (-g absent) it is simply
  * ignored — nothing reads ir_ins.line. */
 static int gen_expr_inner(struct ir_func *fn, struct expr *e);
+/* The unit being lowered: string and symbol interning are unit-scoped,
+ * and irgen is single-threaded (see the note on g_cur_line). */
+static struct ir_unit *cur_unit;
 static int g_cur_line;
 /* The column within that line, from the expression being lowered (R3). A
  * statement-granular location is enough for a line table; a diagnostic or a
@@ -29,6 +32,52 @@ static int g_cur_col;
  * the programmer wrote: the prologue, a landing pad, a temporary's cleanup.
  * The verifier allows these to carry no location. */
 static int g_synth;
+
+/* ---- the symbol table (ir.h) ----
+ *
+ * Interned by name: two instructions naming the same function share one
+ * entry, so a textual IR can say `@memcpy` and a reader can resolve it
+ * without a parse tree. Linear search -- a unit mentions tens of symbols,
+ * not thousands, and a hash here would cost more than it saves.
+ */
+static int sym_intern(struct ir_unit *u, const char *name, int is_func,
+                      int defined, int is_weak, int is_varargs,
+                      int sret_first, int is_nothrow)
+{
+    if (!name)
+        return -1;
+    for (int i = 0; i < u->nsyms; i++)
+        if (!strcmp(u->syms[i].name, name) && u->syms[i].is_func == is_func)
+            return i;
+    if (u->nsyms == u->capsyms) {
+        u->capsyms = u->capsyms ? u->capsyms * 2 : 32;
+        u->syms = xrealloc(u->syms, (size_t)u->capsyms * sizeof *u->syms);
+    }
+    struct ir_sym *s = &u->syms[u->nsyms];
+    s->name = name;
+    s->is_func = is_func;
+    s->defined = defined;
+    s->is_weak = is_weak;
+    s->is_varargs = is_varargs;
+    s->sret_first = sret_first;
+    s->is_nothrow = is_nothrow;
+    return u->nsyms++;
+}
+
+int ir_sym_func(struct ir_unit *u, struct func *f)
+{
+    if (!f)
+        return -1;
+    return sym_intern(u, f->name, 1, f->has_defn, f->is_weak, f->is_varargs,
+                      f->sret_first, f->is_nothrow);
+}
+
+int ir_sym_global(struct ir_unit *u, struct global *g)
+{
+    if (!g)
+        return -1;
+    return sym_intern(u, g->name, 0, g->defined, g->is_weak, 0, 0, 0);
+}
 
 struct ir_ins *emit(struct ir_func *fn)
 {
@@ -53,6 +102,7 @@ struct ir_ins *emit(struct ir_func *fn)
     i->sign = 1;
     i->pred = B_ADD;
     i->label = -1;
+    i->callee_sym = i->glob_sym = -1;
     return i;
 }
 
@@ -97,7 +147,7 @@ static int label_idx(struct ir_func *fn, const char *name, int line)
         if (strcmp(g_labels[i].name, name) == 0)
             return i;
     if (g_nlabels_used >= IRGEN_MAX_LABELS)
-        diag_fatal(fn->src->file, line, "too many labels in one function");
+        diag_fatal(fn->file, line, "too many labels in one function");
     g_labels[g_nlabels_used].name = name;
     g_labels[g_nlabels_used].label = new_label(fn);
     g_labels[g_nlabels_used].defined = 0;
@@ -216,6 +266,7 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
     struct ir_ins *i = emit(fn);
     i->op = IR_GADDR;
     i->glob = g;
+    i->glob_sym = ir_sym_global(cur_unit, g);
     i->dst = new_temp(fn);
     return i->dst;
 }
@@ -662,7 +713,6 @@ static int gen_complit(struct ir_func *fn, struct expr *e)
 
 /* The unit being generated — for the string table. One compilation per
  * process, so a file-scope current-unit pointer is honest. */
-static struct ir_unit *cur_unit;
 
 /* Intern a string into the unit's .rodata pool, returning its index.
  * Deduping means a literal shared by code and a global initializer lands
@@ -1157,7 +1207,7 @@ static int gen_atomic16(struct ir_func *fn, struct expr *e,
                                      : emit_cmp(fn, B_EQ, old, expv, 16, 0);
     }
     default:
-        diag_fatal(fn->src->file, e->line, "internal: atomic kind %d", (int)ak);
+        diag_fatal(fn->file, e->line, "internal: atomic kind %d", (int)ak);
         return -1;
     }
 }
@@ -1283,7 +1333,7 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         return emit_cmp(fn, B_EQ, old, expv, w, sign);
     }
     default:
-        diag_fatal(fn->src->file, e->line, "internal: atomic kind %d", (int)ak);
+        diag_fatal(fn->file, e->line, "internal: atomic kind %d", (int)ak);
         return -1;
     }
 }
@@ -1431,6 +1481,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             struct ir_ins *i = emit(fn);
             i->op = IR_FADDR;
             i->callee = e->fref;
+            i->callee_sym = ir_sym_func(cur_unit, e->fref);
             i->dst = new_temp(fn);
             return i->dst;
         }
@@ -1930,6 +1981,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         struct ir_ins *i = emit(fn);
         i->op = IR_CALL;
         i->callee = e->callee;
+        i->callee_sym = ir_sym_func(cur_unit, e->callee);
         i->indirect = !e->callee;
         i->a = fptemp;
         i->call_varargs = e->callee ? e->callee->is_varargs
@@ -2121,7 +2173,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
         case STMT_LABEL: {
             int ix = label_idx(fn, s->name, s->line);
             if (g_labels[ix].defined)
-                diag_fatal(fn->src->file, s->line, "duplicate label '%s'",
+                diag_fatal(fn->file, s->line, "duplicate label '%s'",
                            s->name);
             g_labels[ix].defined = 1;
             emit_label(fn, g_labels[ix].label);
@@ -2168,7 +2220,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 emit_stvar(fn, s->var_index, al->dst, ty_ptr(s->dty->pointee));
                 fn->has_alloca = 1;
                 if (g_nvla == (int)(sizeof g_vla / sizeof g_vla[0]))
-                    diag_fatal(fn->src->file, s->line,
+                    diag_fatal(fn->file, s->line,
                                "more than %d nested variable length arrays",
                                (int)(sizeof g_vla / sizeof g_vla[0]));
                 g_vla[g_nvla].sp_slot = s->vla_sp;
@@ -2385,7 +2437,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             int hi = fn->nins;
             for (struct stmt *c = s->body; c; c = c->next)
                 if (c->kind == STMT_DECL && !c->is_extern && !c->sglob &&
-                    c->var_index >= 0 && c->var_index < fn->src->nvars) {
+                    c->var_index >= 0 && c->var_index < fn->nvars) {
                     fn->var_scope_lo[c->var_index] = lo;
                     fn->var_scope_hi[c->var_index] = hi;
                 }
@@ -2489,6 +2541,14 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
 static void gen_func(struct ir_func *fn, struct func *f)
 {
     fn->src = f;
+    /* Copied, not referenced: see struct ir_func. */
+    fn->name = f->name;
+    fn->file = f->file;
+    fn->line = f->line;
+    fn->is_static = f->is_static;
+    fn->is_varargs = f->is_varargs;
+    fn->nparams = f->nparams;
+    fn->nvars = f->nvars;
     fn->nvregs = f->nvars; /* params + locals occupy [0, nvars) */
     g_cur_line = f->line;  /* prologue rows attribute to the definition */
     /* -g bookkeeping (harmless when -g is off — only the DWARF pass reads it):
@@ -2522,7 +2582,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
             fn->var_scope_hi[i] = fn->nins;
     for (int i = 0; i < g_nlabels_used; i++)
         if (!g_labels[i].defined)
-            diag_fatal(fn->src->file, g_labels[i].line,
+            diag_fatal(fn->file, g_labels[i].line,
                        "label '%s' used but not defined", g_labels[i].name);
     /* __int128 anywhere: a local, a parameter, the result, or an op */
     fn->has_i128 = f->ret_ty && f->ret_ty->kind == TY_INT128;

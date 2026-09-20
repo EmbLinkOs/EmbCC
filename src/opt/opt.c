@@ -133,7 +133,7 @@ static void compute_defs(struct ir_func *fn, struct defs *d)
     for (int v = 0; v < fn->nvregs; v++)
         d->ins[v] = -1;
     /* a parameter is bound once at entry — count that as its definition */
-    int np = fn->src->nparams;
+    int np = fn->nparams;
     for (int v = 0; v < np && v < fn->nvregs; v++)
         d->cnt[v] = 1;
     for (int n = 0; n < fn->nins; n++) {
@@ -600,7 +600,7 @@ static int pass_dce(struct ir_func *fn)
     }
     if (newpos) {
         newpos[fn->nins] = j;
-        for (int v = 0; v < fn->src->nvars; v++) {
+        for (int v = 0; v < fn->nvars; v++) {
             int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
             if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
             if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
@@ -860,7 +860,7 @@ static const struct ir_dbgvar *local_var(const struct ir_func *fn, int L)
 
 static int pass_mem2reg(struct ir_func *fn)
 {
-    int nvars = fn->src->nvars;
+    int nvars = fn->nvars;
     if (nvars == 0 || fn->nins == 0)
         return 0;
 
@@ -870,7 +870,7 @@ static int pass_mem2reg(struct ir_func *fn)
      * Each rejection keeps its OWN reason (R2): "why is this variable still
      * on the stack" is the question this pass answers, and five different
      * causes used to leave the same zero behind. */
-    int nparams = fn->src->nparams;
+    int nparams = fn->nparams;
     char *ok = xmalloc((size_t)nvars);
     const char **why = xcalloc((size_t)nvars, sizeof *why);
     for (int L = 0; L < nvars; L++) {
@@ -912,8 +912,8 @@ static int pass_mem2reg(struct ir_func *fn)
             const struct ir_dbgvar *v = local_var(fn, L);
             if (!v || !v->name || v->name[0] == '<')  /* a compiler-invented name */
                 continue;
-            const char *file = fn->src ? fn->src->file : NULL;
-            int line = v->line ? v->line : (fn->src ? fn->src->line : 0);
+            const char *file = fn->src ? fn->file : NULL;
+            int line = v->line ? v->line : (fn->src ? fn->line : 0);
             if (ok[L])
                 remark_add("mem2reg", "promoted-to-register", v->name,
                            "scalar-and-never-addressed", file, line, NULL);
@@ -1263,7 +1263,7 @@ static int lcse_kills_mem(enum ir_op op)
 
 static int pass_loadcse(struct ir_func *fn)
 {
-    int nvars = fn->src->nvars;
+    int nvars = fn->nvars;
     if (fn->nins == 0)
         return 0;
     struct defs d;
@@ -1448,9 +1448,9 @@ static int pass_sccp(struct ir_func *fn)
              * fact, which is the one that is certainly true. */
             remark_add("sccp",
                        taken ? "branch-always-jumps" : "branch-never-jumps",
-                       fn->src ? fn->src->name : NULL,
+                       fn->src ? fn->name : NULL,
                        "condition-is-a-constant",
-                       fn->src ? fn->src->file : NULL, t->line,
+                       fn->src ? fn->file : NULL, t->line,
                        "the condition folded to %ld, so one arm is "
                        "unreachable", v);
         }
@@ -1540,7 +1540,7 @@ static int sf_plain(int size, int sign, int w)
 
 static int pass_storefwd(struct ir_func *fn)
 {
-    int nvars = fn->src->nvars;
+    int nvars = fn->nvars;
     if (nvars == 0)
         return 0;
     char *taken = xcalloc((size_t)fn->nvregs, 1);
@@ -1718,7 +1718,7 @@ static int inlinable(struct ir_func *cf, const char **why, char *detail,
     if (cf->neh)             { *why = "callee-has-exception-regions"; return 0; }
     if (c->ret_ty->kind == TY_STRUCT) { *why = "returns-a-struct"; return 0; }
     if (ty_is_float(c->ret_ty))       { *why = "returns-floating-point"; return 0; }
-    for (int k = 0; k < c->nvars; k++)
+    for (int k = 0; k < cf->nvars; k++)
         if (c->var_tys[k] &&
             (c->var_tys[k]->kind == TY_STRUCT || ty_is_float(c->var_tys[k]))) {
             *why = "callee-has-a-struct-or-float-local";
@@ -1751,8 +1751,8 @@ static int inlinable(struct ir_func *cf, const char **why, char *detail,
 /* Splice the body of cf in place of the call at fn->ins[ci]. */
 static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
 {
-    int V = fn->src->nvars, N = fn->nvregs, L = fn->nlabels;
-    int v = cf->src->nvars, n = cf->nvregs, nparams = cf->src->nparams;
+    int V = fn->nvars, N = fn->nvregs, L = fn->nlabels;
+    int v = cf->nvars, n = cf->nvregs, nparams = cf->nparams;
 
     /* 1. Open room: shift the caller's temps up by v (locals stay put). */
     struct rmp shift = { 0, V, v, 0, 0 };
@@ -1849,7 +1849,7 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
         free(fn->var_scope_lo); free(fn->var_scope_hi);
         fn->var_scope_lo = lo; fn->var_scope_hi = hi;
     }
-    fn->src->nvars = nv;
+    fn->nvars = nv;
 }
 
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
@@ -1883,7 +1883,7 @@ static void inline_unit(struct ir_unit *iu)
                     ok = inlinable(c, &why, detail, sizeof detail);
                 if (!ok) {
                     remark_add("inline", "not-inlined", in->callee->name, why,
-                               fn->src ? fn->src->file : NULL, in->line,
+                               fn->src ? fn->file : NULL, in->line,
                                detail[0] ? "%s" : NULL, detail);
                     continue;
                 }
@@ -1893,10 +1893,10 @@ static void inline_unit(struct ir_unit *iu)
             }
             if (ci < 0)
                 break;
-            remark_add("inline", "inlined", cf->src->name, "small-enough",
-                       fn->src ? fn->src->file : NULL, fn->ins[ci].line,
+            remark_add("inline", "inlined", cf->name, "small-enough",
+                       fn->src ? fn->file : NULL, fn->ins[ci].line,
                        "%d instructions into %s, budget %d", cf->nins,
-                       fn->src ? fn->src->name : "?", INLINE_MAX_CALLEE);
+                       fn->src ? fn->name : "?", INLINE_MAX_CALLEE);
             inline_call(fn, ci, cf);
             done++;
         }
@@ -1928,25 +1928,25 @@ static void vrfy_read_cb(int *p, void *ctx)
         return;
     if (r < v->fn->nvregs && v->d->cnt[r] > 0)   /* a temp with a definition: fine */
         return;
-    diag_fatal(v->fn->src->file, 0,
+    diag_fatal(v->fn->file, 0,
         "internal: %s reads temp %%%d with no definition (after %s) — an optimizer "
-        "pass dropped a value that is still used", v->fn->src->name, r, v->tag);
+        "pass dropped a value that is still used", v->fn->name, r, v->tag);
 }
 static void verify_func(struct ir_func *fn, const char *tag)
 {
     struct defs d;
     compute_defs(fn, &d);
-    struct vrfy v = { &d, fn->src->nparams, fn->src->nvars, fn, tag };
+    struct vrfy v = { &d, fn->nparams, fn->nvars, fn, tag };
     for (int n = 0; n < fn->nins; n++)
         each_read(&fn->ins[n], vrfy_read_cb, &v);
     if (fn->var_scope_lo)
-        for (int i = 0; i < fn->src->nvars; i++) {
+        for (int i = 0; i < fn->nvars; i++) {
             int lo = fn->var_scope_lo[i], hi = fn->var_scope_hi[i];
             if (lo < 0 || lo > fn->nins || hi < lo || hi > fn->nins)
-                diag_fatal(fn->src->file, 0,
+                diag_fatal(fn->file, 0,
                     "internal: %s local %d has out-of-range scope [%d,%d] for nins=%d "
                     "(after %s) — a pass renumbered instructions without remapping "
-                    "var_scope", fn->src->name, i, lo, hi, fn->nins, tag);
+                    "var_scope", fn->name, i, lo, hi, fn->nins, tag);
         }
 
     /* R3 / §9.1: "Every instruction carries a debug location. The verifier
@@ -1964,11 +1964,11 @@ static void verify_func(struct ir_func *fn, const char *tag)
         const struct ir_ins *i = &fn->ins[n];
         if (i->line || i->synth)
             continue;
-        diag_fatal(fn->src->file, 0,
+        diag_fatal(fn->file, 0,
             "internal: %s instruction %d (%s) has no source location after %s "
             "— a pass built it without copying the location of what it "
             "replaced; if it corresponds to no source construct, mark it "
-            "synth", fn->src->name, n, ir_opname(i->op), tag);
+            "synth", fn->name, n, ir_opname(i->op), tag);
     }
     free_defs(&d);
 }
@@ -2029,8 +2029,8 @@ static void opt_func(struct ir_func *fn)
      * decisions above answer "why"; this answers "did anything happen", and
      * it is the number a person compares between two builds. */
     if (remarks_on() && fn->src)
-        remark_add("opt", "optimized", fn->src->name, "fixpoint-reached",
-                   fn->src->file, fn->src->line,
+        remark_add("opt", "optimized", fn->name, "fixpoint-reached",
+                   fn->file, fn->line,
                    "%d instructions -> %d", ins_before, fn->nins);
 }
 

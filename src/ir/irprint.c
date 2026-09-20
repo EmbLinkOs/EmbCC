@@ -107,7 +107,20 @@ static void operand_b(struct outbuf *b, const struct ir_ins *i)
         ob_fmt(b, "%%%d", i->b);
 }
 
-static void print_ins(struct outbuf *b, const struct ir_ins *i)
+/* A symbol's name, from the unit's own table rather than from the AST --
+ * which is the point of interning it (§9.1). The pointer is the fallback
+ * while both exist, so a regression in the table shows up as a NAME that
+ * differs, not as a crash. */
+static const char *sym_name(const struct ir_unit *u, int idx,
+                            const char *fallback)
+{
+    if (u && idx >= 0 && idx < u->nsyms)
+        return u->syms[idx].name;
+    return fallback ? fallback : "?";
+}
+
+static void print_ins(struct outbuf *b, const struct ir_unit *u,
+                      const struct ir_ins *i)
 {
     /* A label is the only thing that starts at column 0: it is a position in
      * the instruction stream, not an operation on values. */
@@ -163,11 +176,11 @@ static void print_ins(struct outbuf *b, const struct ir_ins *i)
         break;
     case IR_GADDR:
         ob_fmt(b, "%%%d = gaddr @%s", i->dst,
-               i->glob && i->glob->name ? i->glob->name : "?");
+               sym_name(u, i->glob_sym, i->glob ? i->glob->name : NULL));
         break;
     case IR_FADDR:
         ob_fmt(b, "%%%d = faddr @%s", i->dst,
-               i->callee && i->callee->name ? i->callee->name : "?");
+               sym_name(u, i->callee_sym, i->callee ? i->callee->name : NULL));
         break;
     case IR_EXT:
         ob_fmt(b, "%%%d = ext", i->dst); memsuffix(b, i, 1);
@@ -184,7 +197,8 @@ static void print_ins(struct outbuf *b, const struct ir_ins *i)
             ob_fmt(b, "call [%%%d](", i->a);
         else
             ob_fmt(b, "call @%s(",
-                   i->callee && i->callee->name ? i->callee->name : "?");
+                   sym_name(u, i->callee_sym,
+                            i->callee ? i->callee->name : NULL));
         for (int k = 0; k < i->nargs; k++)
             ob_fmt(b, "%s%%%d", k ? ", " : "", i->argv[k].vreg);
         ob_ch(b, ')');
@@ -275,11 +289,11 @@ static void print_ins(struct outbuf *b, const struct ir_ins *i)
     ob_ch(b, '\n');
 }
 
-void ir_print_func(struct outbuf *b, const struct ir_func *f)
+static void print_func(struct outbuf *b, const struct ir_unit *u,
+                       const struct ir_func *f)
 {
-    const char *name = f->src && f->src->name ? f->src->name : "?";
-    ob_fmt(b, "func @%s", name);
-    if (f->src && f->src->is_static)
+    ob_fmt(b, "func @%s", f->name ? f->name : "?");
+    if (f->is_static)
         ob_str(b, " static");
     ob_str(b, " {\n");
     ob_fmt(b, "  ; vregs %d, labels %d", f->nvregs, f->nlabels);
@@ -293,8 +307,13 @@ void ir_print_func(struct outbuf *b, const struct ir_func *f)
         ob_str(b, ", i128");
     ob_ch(b, '\n');
     for (int i = 0; i < f->nins; i++)
-        print_ins(b, &f->ins[i]);
+        print_ins(b, u, &f->ins[i]);
     ob_str(b, "}\n");
+}
+
+void ir_print_func(struct outbuf *b, const struct ir_func *f)
+{
+    print_func(b, NULL, f);
 }
 
 void ir_print_unit(struct outbuf *b, const struct ir_unit *u)
@@ -315,9 +334,24 @@ void ir_print_unit(struct outbuf *b, const struct ir_unit *u)
     }
     if (u->nstrs)
         ob_ch(b, '\n');
+    /* The symbols the unit refers to, with what the backends need of them.
+     * Printed because a self-contained IR has to CARRY this: a reader of
+     * the text must be able to resolve `@memcpy` without a parse tree. */
+    for (int i = 0; i < u->nsyms; i++) {
+        const struct ir_sym *y = &u->syms[i];
+        ob_fmt(b, "%s @%s", y->is_func ? "func" : "data", y->name);
+        if (y->defined)    ob_str(b, " defined");
+        if (y->is_weak)    ob_str(b, " weak");
+        if (y->is_varargs) ob_str(b, " varargs");
+        if (y->sret_first) ob_str(b, " sret");
+        if (y->is_nothrow) ob_str(b, " nothrow");
+        ob_str(b, " ;decl\n");
+    }
+    if (u->nsyms)
+        ob_ch(b, '\n');
     for (int i = 0; i < u->nfuncs; i++) {
         if (i)
             ob_ch(b, '\n');
-        ir_print_func(b, &u->funcs[i]);
+        print_func(b, u, &u->funcs[i]);
     }
 }
