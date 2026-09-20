@@ -1383,7 +1383,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                            f->name);
             /* A "+" output starts with the lvalue's current value. */
             for (int k = 0; k < ia->nout; k++) {
-                if (!ia->out[k].inout)
+                if (!ia->out[k].inout || ia->out[k].mem)
                     continue;
                 ld_slot(t, sd, ia->out[k].temp, scr, 8, 0, 8);
                 a64_ldr(t, ia->out[k].reg, scr, 0, ia->out[k].size, 0,
@@ -1394,6 +1394,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             for (int k = 0; k < ia->codelen; k++)
                 code_byte(t, ia->code[k]);
             for (int k = 0; k < ia->nout; k++) {
+                /* An "m" output was written BY the template, through the
+                 * address this register holds; storing the register over
+                 * it would destroy what the asm produced. */
+                if (ia->out[k].mem)
+                    continue;
                 ld_slot(t, sd, ia->out[k].temp, scr, 8, 0, 8);
                 a64_str(t, ia->out[k].reg, scr, 0, ia->out[k].size);
             }

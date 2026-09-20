@@ -2633,6 +2633,16 @@ static void parse_top(struct parser *ps, struct unit *u,
         advance(ps);
         return;
     }
+    /* GCC lets an attribute sit between the declaration specifiers and
+     * the declarator -- `extern int __attribute__((weak)) f(void);` --
+     * and that position is where `weak`, `noreturn` and `section`
+     * naturally belong, because they are about the entity being
+     * declared rather than about a pointer in the middle of its type.
+     * Real headers write it this way, so it is read here rather than
+     * refused; parse_stars still refuses the ones that reach it after a
+     * `*`, where there is nothing to carry them. */
+    if (cur(ps)->kind == TOK_KW_ATTRIBUTE)
+        parse_attributes(ps, &at);
     struct lexer fork = ps->lx;
     struct type *ty = parse_stars(ps, base);
     const char *name = NULL;

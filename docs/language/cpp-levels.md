@@ -531,7 +531,20 @@ candidates when no operator is written for a comparison: `x @ y` as `(x
 reversed (a synthesized 0 is a null pointer constant, as `<compare>`'s
 `__literal_zero` wants); defaulted `==` and `<=>` (bases then members;
 an `auto` `<=>` returns the weakest member category) and defaulted
-relational operators (through `<=>`); a conversion function inherited
+relational operators (through `<=>`); `__builtin_bit_cast(T, e)`, the
+only defined way to reinterpret an object's bytes -- `*(int *)&f` breaks
+strict aliasing, a union is defined in C and merely conventional in
+C++, and memcpy cannot appear in a constant expression; a function
+parameter PACK visible in a trailing return type, so `-> decltype(f(a...))`
+-- the shape every forwarding wrapper in the standard library is written
+in -- deduces (it worked only when a TYPE pack happened to appear in the
+expansion too, as `forward<A>(a)...`, which is why it had gone
+unnoticed); `typeid` of a function type, an enum, an array, a member
+pointer and a pointer to any of them, each emitted as the ABI class the
+Itanium ABI names for that shape; a repeated default template argument
+DIAGNOSED (13.2p12) rather than silently accepted, which is a missing
+refusal and was hiding a real mistake in this tree's own `<iosfwd>`; a
+conversion function inherited
 from a base considered when an operator's built-in candidates are built,
 so `a == 7` works on a class whose `operator int()` is in a base; a base
 member brought in by a using-declaration given the DERIVED class's

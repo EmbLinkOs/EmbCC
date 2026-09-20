@@ -113,6 +113,12 @@ struct ir_asm_op {
     int inout;   /* a "+" output: the register must hold the lvalue's
                   * CURRENT value when the asm starts, not just receive its
                   * new one. Set on aarch64; the x86 path leaves it 0. */
+    int mem;     /* an "m" operand: the register holds the lvalue's ADDRESS
+                  * and the template reads or writes through it. Nothing is
+                  * loaded into it beforehand and nothing is stored out of
+                  * it afterwards -- the asm IS the access. Without this an
+                  * "=m" output had the register stored over what the
+                  * template had just written there. */
 };
 
 struct ir_asm {

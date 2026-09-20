@@ -718,6 +718,31 @@ member's own access in `struct csym`, and `class_derives`/`path_count` in
 current access context (the class whose member or friend is doing the
 naming) threaded through name lookup and the cast paths.
 
+## Closed: the asm "m" constraint, both directions (2026-09-21)
+
+Found by writing `<fenv.h>`, which has to reach a hardware register and
+so is the first code in this tree to use an `"=m"` output on a scalar.
+
+**An `"m"` INPUT passed the operand's VALUE where the template needs its
+ADDRESS.** It happened to work for a struct -- whose "value" in this IR
+already is an address -- and read from a garbage address for a scalar.
+`lgdt %0` with `"m"(*(char *)p)` was the only existing use and it is a
+char lvalue, so the golden checked the instruction's own bytes and never
+noticed what surrounded them.
+
+**An `"=m"` OUTPUT was stored over.** The lowering loads inputs, emits
+the template, then stores each output register through the lvalue's
+address -- which is right for `"=r"` and destroys an `"=m"` result,
+because the template already wrote that memory. `stmxcsr %0` read MXCSR
+into the local and the next instruction overwrote it with a register.
+
+Both fixed on both targets, with a `mem` flag on the operand.
+
+On the way: `stmxcsr`/`ldmxcsr` were not in the x86-64 inline
+assembler at all, so nothing could reach the SSE rounding mode or the
+sticky exception flags. Encodings verified byte for byte against the
+cross assembler.
+
 ## Closed: five front-end gaps the standard library found (2026-09-20)
 
 None of these was found by reading the compiler. Each was found by

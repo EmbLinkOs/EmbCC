@@ -1094,6 +1094,7 @@ static struct cty *parse_declarator(struct cty *t, struct declarator *d,
 static struct cty *trailing_return_type(struct cty *ft)
 {
     scope_push(SC_PARAMS, NULL);
+    struct cvar **pv = ft->np ? xcalloc((size_t)ft->np, sizeof *pv) : NULL;
     for (int i = 0; i < ft->np; i++) {
         if (!ft->pnames || !ft->pnames[i])
             continue;
@@ -1102,8 +1103,36 @@ static struct cty *trailing_return_type(struct cty *ft)
         v->type = ft->pdecl ? ft->pdecl[i] : ft->params[i];
         v->is_param = 1;
         v->fparam = i + 1;
+        pv[i] = v;
+        /* A parameter that BELONGS to a pack is not a name of its own:
+         * the pack's name stands for all of them, and adding the
+         * individual one would let `-> decltype(a)` name a single
+         * element that has no name in the source. */
+        int in_pack = 0;
+        for (int g = 0; g < ft->npgroups; g++)
+            in_pack |= i >= ft->pgroups[g].first &&
+                       i < ft->pgroups[g].first + ft->pgroups[g].n;
+        if (in_pack)
+            continue;
         struct csym *y = scope_add(cx_scope, CS_VAR, v->name);
         y->var = v;
+    }
+    /* A function parameter PACK, registered as one. Without this a
+     * trailing return type could not expand it at all: `sizeof...(a)`
+     * and `f(a...)` both look the name up and need a CS_PACK to find,
+     * so `-> decltype(f(a...))` -- the shape every forwarding wrapper
+     * in the standard library is written in -- failed to deduce, while
+     * `-> decltype(f(forward<A>(a)...))` worked only because the TYPE
+     * pack A was found and carried the expansion. */
+    for (int g = 0; g < ft->npgroups; g++) {
+        struct cpgroup *pg = &ft->pgroups[g];
+        if (!pg->name)
+            continue;
+        struct csym *y = scope_add(cx_scope, CS_PACK, pg->name);
+        y->npack = pg->n;
+        y->pvars = xcalloc((size_t)(pg->n ? pg->n : 1), sizeof *y->pvars);
+        for (int k = 0; k < pg->n; k++)
+            y->pvars[k] = pv[pg->first + k];
     }
     struct cty *ret = parse_type_id();
     scope_pop();
@@ -7627,8 +7656,20 @@ static void template_decl_rest(struct cclass *cls, int access,
         }
         t->key = k;
         if (y && t->params != ps) {
-            /* a redeclaration may add defaults (template<class C, class
-             * T = traits<C>> class X; after one without) */
+            /* A redeclaration may ADD defaults (template<class C, class
+             * T = traits<C>> class X; after one without) and may not
+             * repeat one (13.2p12). Repeating is not harmless: the two
+             * defaults may differ, and then which one a later use gets
+             * depends on include order. It is also the mistake a
+             * library makes when it declares a template in <iosfwd> and
+             * again where it is defined -- which this library did until
+             * this diagnostic was added. */
+            for (int i = 0; i < np && i < t->nparams; i++)
+                if (t->params[i].def_tok >= 0 && ps[i].def_tok >= 0)
+                    cx_error(at, "redeclaration of '%s' gives a default "
+                                 "argument for template parameter %d "
+                                 "again; only one declaration may",
+                             name, i + 1);
             for (int i = 0; i < np && i < t->nparams; i++)
                 if (t->params[i].def_tok < 0 && ps[i].def_tok >= 0) {
                     t->params[i].def_tok = ps[i].def_tok;

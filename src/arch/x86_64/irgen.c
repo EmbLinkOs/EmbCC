@@ -840,6 +840,23 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
             if (r >= 8) code[n++] = 0x41;
             code[n++] = 0x0f; code[n++] = 0x01;
             code[n++] = (unsigned char)(0x18 | (r & 7));     /* /3 (%r) */
+        }
+        /* ---- stmxcsr/ldmxcsr %N: the SSE control and status register,
+         * which is where the floating-point rounding mode and the
+         * sticky exception flags live. No C expression can reach it, so
+         * <fenv.h> has to, and these two are the whole interface ---- */
+        else if (mlen == 7 && strncmp(m, "stmxcsr", 7) == 0) {
+            int r = reg >= 0 ? reg
+                  : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
+            if (r >= 8) code[n++] = 0x41;
+            code[n++] = 0x0f; code[n++] = 0xae;
+            code[n++] = (unsigned char)(0x18 | (r & 7));     /* /3 (%r) */
+        } else if (mlen == 7 && strncmp(m, "ldmxcsr", 7) == 0) {
+            int r = reg >= 0 ? reg
+                  : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
+            if (r >= 8) code[n++] = 0x41;
+            code[n++] = 0x0f; code[n++] = 0xae;
+            code[n++] = (unsigned char)(0x10 | (r & 7));     /* /2 (%r) */
         } else if (mlen == 6 && strncmp(m, "invlpg", 6) == 0) {
             int r = a_memreg(&p, opregs, opnames, nops, file, line, tmpl);
             if (r >= 8) code[n++] = 0x41;
@@ -1037,7 +1054,14 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
      * lvalue. An xmm ('x') input is moved with movss/movsd, so its
      * size is the operand's own float width. */
     for (int i = 0; i < a->nin; i++) {
-        ia->in[i].temp = gen_expr(fn, a->in[i].expr);
+        /* An "m" input names MEMORY, so what the register carries is its
+         * ADDRESS -- the template dereferences it. Passing the value
+         * happened to work for a struct, whose "value" in this IR is
+         * already an address, and silently read from a garbage address
+         * for a scalar. */
+        ia->in[i].mem = strchr(a->in[i].constraint, 'm') != NULL;
+        ia->in[i].temp = ia->in[i].mem ? gen_addr(fn, a->in[i].expr)
+                                       : gen_expr(fn, a->in[i].expr);
         ia->in[i].size = ia->in[i].reg >= 16
                        ? ty_size(a->in[i].expr->ty) : 8;
     }
@@ -1046,6 +1070,7 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
         ia->out[i].size = ty_size(a->out[i].expr->ty);
         /* "+": the register must START with the lvalue's value */
         ia->out[i].inout = strchr(a->out[i].constraint, '+') != NULL;
+        ia->out[i].mem = strchr(a->out[i].constraint, 'm') != NULL;
     }
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;

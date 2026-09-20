@@ -2905,7 +2905,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 for (unsigned p = 0; p < sizeof pre_pool / sizeof pre_pool[0]; p++)
                     if (!busy[pre_pool[p]]) { pre = pre_pool[p]; break; }
                 for (int k = 0; k < ia->nout; k++) {
-                    if (!ia->out[k].inout)
+                    if (!ia->out[k].inout || ia->out[k].mem)
                         continue;
                     if (pre < 0)
                         diag_fatal(f->file, i->line ? i->line : f->line,
@@ -2949,6 +2949,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
             /* Outputs store the result register THROUGH the lvalue address
              * (held in the operand's slot). xmm results go out via movss/movsd. */
             for (int k = 0; k < ia->nout; k++) {
+                /* An "m" output was written BY the template, through the
+                 * address this register holds. Storing the register over
+                 * it would destroy exactly what the asm produced. */
+                if (ia->out[k].mem)
+                    continue;
                 x86_load_reg_mem(text, scr, REG_RBP,
                                  sd[ia->out[k].temp], 8);
                 if (ia->out[k].reg >= 16)

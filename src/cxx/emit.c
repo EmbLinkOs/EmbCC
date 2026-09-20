@@ -1352,6 +1352,19 @@ static char *ev(struct cexpr *e)
         }
         if (strcmp(e->name, "__builtin_is_constant_evaluated") == 0)
             return "((_Bool)0)";       /* run time: not constant evaluation */
+        if (strcmp(e->name, "__builtin_bit_cast") == 0) {
+            /* The bytes, copied. Through two named objects rather than
+             * a cast: the copy is what makes it defined, and a memcpy
+             * between two distinct objects is the one form no aliasing
+             * rule can object to. The C compiler below turns it back
+             * into a register move. */
+            int u = cx_uid();
+            char *s = cx_fmt("__cx_bs%d", u), *d = cx_fmt("__cx_bd%d", u);
+            return cx_fmt("({ %s = %s; %s; __builtin_memcpy(&%s, &%s, "
+                          "sizeof %s); %s; })",
+                          cdecl(e->a[0]->t, s), ev(e->a[0]),
+                          cdecl(e->t, d), d, s, d, d);
+        }
         if (strcmp(e->name, "__builtin_source_location") == 0) {
             /* a record for the place, as std::source_location::__impl */
             need_srcloc = 1;
@@ -3815,8 +3828,12 @@ static const char *rtti_storage(struct cclass *c)
 
 static void need_rtti(struct cclass *c);
 
+static const char *simple_typeinfo(struct cty *t, const char *abi_class);
+static const char *mptr_typeinfo(struct cty *t);
+
 /* The typeinfo object of t: a class's (emitted by this unit or another),
- * or a fundamental type's — libsupc++ has those, and their pointers'. */
+ * a fundamental type's — the runtime has those — or, for the shapes
+ * whose set is open, one emitted here. */
 static const char *typeinfo_sym(struct cty *t)
 {
     t = ct_unqual(t);
@@ -3824,8 +3841,20 @@ static const char *typeinfo_sym(struct cty *t)
         need_rtti(t->cls);
         return class_sym(t->cls, "_ZTI");
     }
+    /* A shape the ABI has a class of its own for. Each is emitted here
+     * rather than looked up in the runtime, because there is one per
+     * TYPE and the set is open: the runtime can ship _ZTIi, it cannot
+     * ship _ZTIFiiE for every function type a program mentions. */
+    if (t->k == CT_FUNC)
+        return simple_typeinfo(t, "20__function_type_info");
+    if (t->k == CT_ENUM)
+        return simple_typeinfo(t, "16__enum_type_info");
+    if (t->k == CT_ARRAY)
+        return simple_typeinfo(t, "17__array_type_info");
+    if (t->k == CT_MPTR)
+        return mptr_typeinfo(t);
     struct cty *b = t->k == CT_PTR ? ct_unqual(t->to) : t;
-    if (t->k == CT_PTR && b->k == CT_CLASS)
+    if (t->k == CT_PTR && !ct_is_ref(t->to) && b->k != CT_VOID)
         return ptr_typeinfo(t);
     if (b->k > CT_NULLPTR || (t->k == CT_PTR && ct_is_ref(t->to)))
         cx_error(NULL, "typeid of '%s' is not supported yet", ct_name(t));
@@ -3834,25 +3863,55 @@ static const char *typeinfo_sym(struct cty *t)
     return sym;
 }
 
-/* The typeinfo of a pointer to a class (a __pointer_type_info: its
- * pointee's cv as flags, and the class's typeinfo), weak in every unit
- * that needs it, as g++ makes it. */
+/* Every typeinfo this unit has emitted, so a type mentioned twice gets
+ * one definition. */
 static const char **ptr_ti_done;
 static int nptr_ti_done;
 
+static int ti_first_time(const char *sym)
+{
+    for (int i = 0; i < nptr_ti_done; i++)
+        if (strcmp(ptr_ti_done[i], sym) == 0)
+            return 0;
+    ptr_ti_done = xrealloc(ptr_ti_done, (size_t)(nptr_ti_done + 1) *
+                                        sizeof *ptr_ti_done);
+    ptr_ti_done[nptr_ti_done++] = sym;
+    return 1;
+}
+
+/* A typeinfo whose only content is its name: a function type, an enum,
+ * an array. Two words -- the ABI class's vtable and the mangled name --
+ * and weak, because every unit that mentions the type emits one. */
+static const char *simple_typeinfo(struct cty *t, const char *abi_class)
+{
+    const char *m = mangle_type_alone(t);
+    const char *sym = cx_fmt("_ZTI%s", m);
+    if (!ti_first_time(sym))
+        return sym;
+    sb_printf(&out_rtti_decl,
+              "extern void *%s[2];\nextern void *_ZTVN10__cxxabiv1%sE[];\n",
+              sym, abi_class);
+    sb_printf(&out_rtti, "__attribute__((weak)) char _ZTS%s[] = \"%s\";\n",
+              m, m);
+    sb_printf(&out_rtti, "__attribute__((weak)) void *%s[2] = { (void *)"
+                         "((char *)_ZTVN10__cxxabiv1%sE + 16), "
+                         "(void *)_ZTS%s };\n", sym, abi_class, m);
+    return sym;
+}
+
+/* The typeinfo of a pointer (a __pointer_type_info: its pointee's cv as
+ * flags, and the pointee's typeinfo), weak in every unit that needs it,
+ * as g++ makes it. */
 static const char *ptr_typeinfo(struct cty *t)
 {
     struct cty *pointee = t->to;
     const char *m = mangle_type_alone(t);
     const char *sym = cx_fmt("_ZTI%s", m);
-    for (int i = 0; i < nptr_ti_done; i++)
-        if (strcmp(ptr_ti_done[i], sym) == 0)
-            return sym;
-    ptr_ti_done = xrealloc(ptr_ti_done, (size_t)(nptr_ti_done + 1) *
-                                        sizeof *ptr_ti_done);
-    ptr_ti_done[nptr_ti_done++] = sym;
+    if (!ti_first_time(sym))
+        return sym;
     const char *cls = typeinfo_sym(ct_unqual(pointee));
-    int internal = class_internal(ct_unqual(pointee)->cls);
+    struct cty *pu = ct_unqual(pointee);
+    int internal = pu->k == CT_CLASS && class_internal(pu->cls);
     const char *st = internal ? "static " : "__attribute__((weak)) ";
     long flags = ((pointee->q & CQ_CONST) ? 1 : 0) |
                  ((pointee->q & CQ_VOLATILE) ? 2 : 0);
@@ -3864,6 +3923,31 @@ static const char *ptr_typeinfo(struct cty *t)
                          "_ZTVN10__cxxabiv119__pointer_type_infoE + 16), "
                          "(void *)_ZTS%s, (void *)%ldL, (void *)%s };\n",
               st, sym, m, flags, cls);
+    return sym;
+}
+
+/* A pointer to member: the ABI's __pointer_to_member_type_info, which
+ * is a __pbase_type_info with one more word -- the CLASS the member
+ * belongs to. Two typeinfos, because `int A::*` and `int B::*` are
+ * different types however identical the member's type is. */
+static const char *mptr_typeinfo(struct cty *t)
+{
+    const char *m = mangle_type_alone(t);
+    const char *sym = cx_fmt("_ZTI%s", m);
+    if (!ti_first_time(sym))
+        return sym;
+    const char *pointee = typeinfo_sym(ct_unqual(t->to));
+    const char *cls = t->cls ? typeinfo_sym(ct_class(t->cls)) : "0";
+    long flags = ((t->to->q & CQ_CONST) ? 1 : 0) |
+                 ((t->to->q & CQ_VOLATILE) ? 2 : 0);
+    sb_printf(&out_rtti_decl, "extern void *%s[5];\nextern void "
+              "*_ZTVN10__cxxabiv129__pointer_to_member_type_infoE[];\n", sym);
+    sb_printf(&out_rtti, "__attribute__((weak)) char _ZTS%s[] = \"%s\";\n",
+              m, m);
+    sb_printf(&out_rtti, "__attribute__((weak)) void *%s[5] = { (void *)"
+              "((char *)_ZTVN10__cxxabiv129__pointer_to_member_type_infoE"
+              " + 16), (void *)_ZTS%s, (void *)%ldL, (void *)%s, "
+              "(void *)%s };\n", sym, m, flags, pointee, cls);
     return sym;
 }
 

@@ -3904,7 +3904,7 @@ int cxx_has_builtin(const char *name)
         static const char *const special[] = {
             "offsetof", "is_constant_evaluated", "addressof", "launder",
             "expect", "constant_p", "va_arg", "coro_done", "coro_resume",
-            "coro_destroy", "coro_promise", "source_location",
+            "coro_destroy", "coro_promise", "source_location", "bit_cast",
             "eh_return_data_regno", "extend_pointer",
         };
         const char *n = name + 10;
@@ -4243,6 +4243,30 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
         struct cty *t = parse_type_id();
         cx_expect(TOK_RPAREN, "')'");
         struct cexpr *e = ex1(E_VAARG, ct_unqual(t), VC_PRVALUE, ap);
+        return e;
+    }
+    if (strcmp(n, "bit_cast") == 0) {
+        /* std::bit_cast: the SAME BYTES read as another type. It has to
+         * be a builtin and not a library function because every way of
+         * writing it in C++ is either undefined or not a constant
+         * expression -- `*(int *)&f` breaks strict aliasing and the
+         * optimizer may assume it never happens, a union is defined in
+         * C and merely conventional in C++, and memcpy is defined but
+         * cannot appear in a constant expression. */
+        cx_expect(TOK_LPAREN, "'('");
+        struct cty *t = parse_type_id();
+        cx_expect(TOK_COMMA, "','");
+        struct cexpr *v = rvalue(expr_parse_assign());
+        cx_expect(TOK_RPAREN, "')'");
+        struct cty *to = ct_unqual(t);
+        if (!ct_is_complete(to) || !ct_is_complete(v->t))
+            cx_error(at, "__builtin_bit_cast needs complete types");
+        if (ct_size(to) != ct_size(v->t))
+            cx_error(at, "__builtin_bit_cast between '%s' and '%s': they "
+                         "are %ld and %ld bytes",
+                     ct_name(v->t), ct_name(to), ct_size(v->t), ct_size(to));
+        struct cexpr *e = ex1(E_BUILTIN, to, VC_PRVALUE, v);
+        e->name = name;
         return e;
     }
     if (strcmp(n, "offsetof") == 0) {
