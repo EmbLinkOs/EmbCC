@@ -89,11 +89,20 @@ underflow_error::~underflow_error() noexcept {}
 
 }  // namespace std
 
-/* <array>'s at() thrower, defined here so that header need not include
- * <stdexcept>. */
+/* The containers' throwers, defined here so those headers need not
+ * include <stdexcept> -- otherwise every use of a fixed-size array or a
+ * vector drags in the whole exception hierarchy. */
 namespace std {
 void __throw_array_out_of_range()
 {
     throw out_of_range("array::at: index out of range");
+}
+void __throw_vector_out_of_range()
+{
+    throw out_of_range("vector::at: index out of range");
+}
+void __throw_vector_too_long()
+{
+    throw length_error("vector: requested size exceeds max_size()");
 }
 }

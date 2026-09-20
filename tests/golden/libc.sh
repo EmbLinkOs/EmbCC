@@ -191,6 +191,7 @@ echo "the visible surface: strings, every printf conversion, math, qsort"
 # and scanf's two different kinds of failure.
 cat > "$out/hosted.c" << 'EOF'
 #include <stdio.h>
+#include <stdlib.h>
 #include <setjmp.h>
 #include <time.h>
 #include <inttypes.h>
@@ -239,6 +240,22 @@ int main(void)
     int64_t big2 = 0;
     sscanf("-9223372036854775807", "%" SCNd64, &big2);
     printf("scn %" PRId64 " %" PRIdMAX "\n", big2, imaxabs(-5));
+
+    /* strtod. The fast path is EXACT -- at most 15 significant digits
+     * and |exponent| <= 22 means two exactly representable operands and
+     * one rounding, which IEEE makes the nearest value. So these compare
+     * equal to the literals rather than merely close to them. */
+    char *e;
+    printf("strtod %d %d %d %d\n",
+           strtod("1.5", &e) == 1.5 && *e == 0,
+           strtod("-0.125e1", &e) == -1.25,
+           strtod("1e22", &e) == 1e22,
+           strtod("0x1.8p3", &e) == 12.0 && *e == 0);
+    printf("strtod2 %d %d %d\n",
+           strtod("  12.5rest", &e) == 12.5 && e[0] == 'r',
+           /* Nothing converted: zero, and `end` back at the start. */
+           strtod("abc", &e) == 0.0,
+           strtod("inf", &e) > 1e308 && strtod("-inf", &e) < -1e308);
     assert(a != 999999);
     return 42;
 }

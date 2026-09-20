@@ -94,6 +94,26 @@ walked during exit, when calling the allocator may be the last thing a
 failing program should do. Overflow is reported on stderr rather than
 ignored, because a dropped destructor is a file that never got flushed.
 
+## strtod
+
+Decimal text to a binary float is harder than it looks: the decimal value
+almost never has an exact binary form, so the answer is a *rounding*, and
+where it lands can depend on digits past any accumulator.
+
+The fast path is **exact**, and that is its point. Powers of ten up to
+10²² are exactly representable as doubles, and so is an integer of up to
+15 significant digits. When both hold, one multiply or divide of two
+exact values rounds once — and IEEE makes that single rounding the
+nearest representable value. So `strtod("1e22")` compares *equal* to
+`1e22`, not merely close, and the golden asserts equality.
+
+Outside that range the value is scaled by repeated squaring, which rounds
+more than once and can land one unit in the last place from nearest. C11
+§7.22.1.3p10 permits exactly that, and this says so rather than claiming
+better; correct rounding for every input needs arbitrary-precision
+arithmetic. Hex floats (`0x1.8p3`) are exact by construction — they are
+binary already — and are parsed separately for that reason.
+
 ## Math
 
 `src/math/fdlibm/` is Sun's fdlibm, kept **verbatim** (its notice preserved)

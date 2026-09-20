@@ -56,9 +56,14 @@ constexpr I destroy_n(I first, size_t n)
 /* The uninitialized_* algorithms all share one shape, and it is the shape
  * that matters: if constructing element k throws, the k-1 already built
  * must be destroyed before the exception leaves. Without that a vector
- * that throws while growing leaks every element it had managed to copy. */
+ * that throws while growing leaks every element it had managed to copy.
+ *
+ * Each returns the OUTPUT iterator past the last element constructed --
+ * S, not I. The two are different types whenever the source is const,
+ * which is every braced vector, since an initializer_list iterates as
+ * const. */
 template <class I, class S>
-I uninitialized_copy(I first, I last, S out)
+S uninitialized_copy(I first, I last, S out)
 {
     S start = out;
     try {

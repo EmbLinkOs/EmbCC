@@ -50,7 +50,8 @@ those exact two members in that order.
 ## The standard library, so far
 
 `<type_traits>`, `<utility>`, `<limits>`, `<iterator>`, `<memory>`,
-`<functional>`, `<array>`, `<stdexcept>`, and the `<c*>` wrappers
+`<functional>`, `<array>`, `<vector>`, `<string>`, `<stdexcept>`, and the
+`<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
@@ -66,7 +67,28 @@ whether a constructor is trivial. The ones written out in C++ are the ones
 that genuinely are expressible — the type-list membership tests, and the
 transformations that are just partial specialisation.
 
-Two things in them are worth reading for the reasoning rather than the
+Two design decisions are worth stating. **`vector` doubles** its capacity,
+so *n* appends cost O(*n*) rather than O(*n*²) — and when it grows it
+*moves* the elements only if moving cannot throw, otherwise it copies.
+That is the whole of its exception safety: a move constructor that throws
+halfway through relocation has already hollowed out the old buffer and
+there is nothing to roll back to, while a copy leaves the original
+intact. It is why a type that wants fast vector growth must mark its move
+constructor `noexcept` — not a hint, but the difference between moving
+and copying.
+
+**`string` keeps short strings inside the object** (15 characters and the
+NUL, in 32 bytes) with the pointer aimed at its own buffer, so a short
+string costs no allocation. "Is it short?" is `__p == __buf`, a pointer
+comparison rather than a stolen capacity bit — one word larger than
+libc++'s trick and free of any assumption about byte order. The cost is
+that the object is *self-referential*: copying or moving one cannot copy
+the three words, it has to re-aim the pointer, and a raw `const C *`
+argument may point into the buffer that a reallocation is about to free.
+`a += a` is the case that finds it, and the test does exactly that at
+the short/long boundary.
+
+Two more things are worth reading for the reasoning rather than the
 code. `<memory>`'s `uninitialized_*` algorithms all share one shape: if
 constructing element *k* throws, the *k−1* already built are destroyed
 before the exception leaves — without that, a vector that throws while
