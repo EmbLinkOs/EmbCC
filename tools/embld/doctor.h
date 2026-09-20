@@ -1,5 +1,5 @@
 /* `embld --doctor`: why the link failed, per undefined symbol, in terms of
- * what the inputs hold (tools/embld/doctor.c, docs/TOOLING.md T6). */
+ * what the inputs hold (tools/embld/doctor.c, docs/tools/diagnostics.md T6). */
 #ifndef EMBCC_EMBLD_DOCTOR_H
 #define EMBCC_EMBLD_DOCTOR_H
 

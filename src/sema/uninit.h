@@ -1,5 +1,5 @@
 /* -Wuninitialized / -Wmaybe-uninitialized: reading a local before anything
- * wrote it (docs/TOOLING.md T4). */
+ * wrote it (docs/tools/diagnostics.md T4). */
 #ifndef EMBCC_UNINIT_H
 #define EMBCC_UNINIT_H
 

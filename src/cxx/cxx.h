@@ -1,4 +1,4 @@
-/* The C++ front-end's internal interface (D-013; docs/CXX.md).
+/* The C++ front-end's internal interface (D-013; docs/language/cpp-levels.md).
  *
  * src/cxx parses preprocessed C++ with semantic analysis interleaved — C++
  * cannot be parsed without knowing which names are types — and lowers it to

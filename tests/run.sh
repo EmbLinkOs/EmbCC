@@ -173,7 +173,7 @@ for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do
     fi
 done
 
-# C++ (docs/CXX.md): each tests/cxx program compiled by embcc over the
+# C++ (docs/language/cpp-levels.md): each tests/cxx program compiled by embcc over the
 # target's newlib, linked with the reference libstdc++ (tools/build-ref-gxx.sh)
 # and run on the QEMU harness — never the host, whose C++ runtime is not the
 # one EmbLinkOS uses.

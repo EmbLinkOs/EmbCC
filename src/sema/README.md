@@ -1,6 +1,6 @@
 # src/sema
 
-Types, declarations, checking, diagnostics — ../../docs/ARCHITECTURE.md §2.
+Types, declarations, checking, diagnostics — ../../docs/architecture/overview.md §2.
 
 **The type system** lives in `type.h`/`type.c`: void, the integer types with
 their unsigned variants, `_Bool`, `float`/`double`/`long double`, pointers,

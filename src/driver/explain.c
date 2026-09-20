@@ -1,5 +1,5 @@
 /* `embcc --explain E0004` — what a diagnostic means, why it fired, and the
- * smallest edit that fixes it (docs/TOOLING.md T6).
+ * smallest edit that fixes it (docs/tools/diagnostics.md T6).
  *
  * A C compiler tells you what is wrong at the place it noticed. That is not
  * the same as telling you what the rule is. Rust's error index is the thing

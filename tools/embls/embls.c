@@ -1,4 +1,4 @@
-/* embls — EmbCC's language server (LSP over stdio, docs/TOOLING.md T5).
+/* embls — EmbCC's language server (LSP over stdio, docs/tools/diagnostics.md T5).
  *
  * What an editor asks a compiler, answered by the compiler itself rather
  * than by a second parser that drifts from it:

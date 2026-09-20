@@ -7,7 +7,7 @@ for one target, chosen with `--target=`:
 |---|---|---|
 | Machine | x86-64 | AArch64 (ARMv8-A; QEMU `virt`, Cortex-A72) |
 | ABI | System V AMD64 | AAPCS64 |
-| Source | [`src/arch/x86_64/`](../src/arch/x86_64/README.md) | [`src/arch/aarch64/`](../src/arch/aarch64/README.md) |
+| Source | [`src/arch/x86_64/`](../../src/arch/x86_64/README.md) | [`src/arch/aarch64/`](../../src/arch/aarch64/README.md) |
 | Reference compiler (tests, predefined macros) | `x86_64-elf-gcc` 16.2 | `aarch64-elf-gcc` 16.2 |
 | Tests run on | QEMU `qemu-system-x86_64` (natively on x86-64 Linux) | QEMU `qemu-system-aarch64 -M virt` |
 
@@ -48,7 +48,7 @@ took target-specific work, or that a reader might doubt.
 | Extended inline asm | ✓ AT&T, the x86 kernel's vocabulary; constraints `a b c d S D r m i x +` | ✓ GNU A64, the ARM kernel's 67 templates; constraints `r =r +r i`, register variables |
 | File-scope `__asm__` | ✓ (crt0's vocabulary) | ✗ |
 | gcc flags accepted: `-W...` (one warning level), `-fno-stack-protector` (what EmbCC does; `-fstack-protector` refused), `-fno-rtti`/`-frtti`, `-fno-exceptions` | ✓ | ✓ |
-| Diagnostics: located heading, source line, caret + range, notes, fix-its; `-fdiagnostics-format=text\|json` (GCC's JSON schema), `-fdiagnostics-color=auto\|always\|never`, `-fmax-errors=N`, `-w`, `-Werror` (docs/TOOLING.md) | ✓ | ✓ |
+| Diagnostics: located heading, source line, caret + range, notes, fix-its; `-fdiagnostics-format=text\|json` (GCC's JSON schema), `-fdiagnostics-color=auto\|always\|never`, `-fmax-errors=N`, `-w`, `-Werror` (docs/tools/diagnostics.md) | ✓ | ✓ |
 | Error recovery: every independent syntax and semantic error in one run, not the first only | ✓ | ✓ |
 | Dependencies: `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`, `-MP` (the rule gcc writes, and `make` reads) | ✓ | ✓ |
 | `-fsyntax-only`, `--help`, `-dumpmachine` | ✓ | ✓ |
@@ -59,7 +59,7 @@ took target-specific work, or that a reader might doubt.
 
 ## C++
 
-In progress toward C++20 with libstdc++ (D-013, [CXX.md](CXX.md)), the same
+In progress toward C++20 with libstdc++ (D-013, [CXX.md](cpp-levels.md)), the same
 on both targets: `src/cxx` lowers C++ to C for the pipeline above. Names,
 class layout and calls follow the Itanium C++ ABI, as g++ does on both
 targets, so EmbCC's C++ objects link with g++'s and with libstdc++.

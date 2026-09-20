@@ -25,7 +25,8 @@
 |---|---|
 | 0.1 | Initial vision |
 | 0.2 | Added current-state baseline, non-goals, invariants on determinism and provenance, host/target/format matrix, ABI & runtime, backend internals, preprocessor-configuration problem, staged C++, milestone exit criteria, open questions. Reordered roadmap (IR and self-hosting moved earlier). Merged duplicated sections. |
-| 0.3 | **Reconciled with the code (2026-09-20).** §4's table filled in and ADR-0000 resolved (evolve). Added §4.2, an inventory of what has been built against this document's own invariants and milestones, and §4.3, what has not. Target and host matrices updated (aarch64 and EmbLinkOS self-hosting are done, not "later"). §12.2 marked against reality: C++ went past C++2 into parts of C++3, which contradicts Non-goal 2 and open question 6 — both flagged for amendment rather than quietly dropped. §29 mapped onto `docs/ROADMAP.md`'s separate milestone track. No invariant or MUST was weakened. |
+| 0.4 | **Docs arranged as §31 asks.** `docs/` became the tree this document sketches — `architecture/`, `language/`, `ir/`, `tools/`, `developer/`, `design/` — with [docs/README.md](../README.md) as the index and `ir/specification.md` newly written, EmbIR having acquired a specification worth writing once its textual form round-tripped. §31 updated to describe the tree that exists and the four places it differs on purpose. |
+| 0.3 | **Reconciled with the code (2026-09-20).** §4's table filled in and ADR-0000 resolved (evolve). Added §4.2, an inventory of what has been built against this document's own invariants and milestones, and §4.3, what has not. Target and host matrices updated (aarch64 and EmbLinkOS self-hosting are done, not "later"). §12.2 marked against reality: C++ went past C++2 into parts of C++3, which contradicts Non-goal 2 and open question 6 — both flagged for amendment rather than quietly dropped. §29 mapped onto `docs/design/roadmap.md`'s separate milestone track. No invariant or MUST was weakened. |
 
 ---
 
@@ -93,11 +94,11 @@ names where to verify it.
 | Question | Answer |
 |---|---|
 | Implementation language of current EmbCC | **C99** — `CFLAGS = -std=c99 -Wall -Wextra -Werror`. No C++ in the compiler itself, which is what makes self-hosting reachable with a C frontend alone (§28.2). |
-| C standard level and extensions currently accepted | **C11 in full** on both targets, plus the GNU extensions EmbLinkOS needs: extended `asm`, `__attribute__`, `__builtin_*`, `__atomic_*`, `typeof`, `__int128`, statement expressions, computed `goto`. Per-clause detail: `docs/COMPATIBILITY.md`. C17/C23 are additive from here, not a rewrite. |
+| C standard level and extensions currently accepted | **C11 in full** on both targets, plus the GNU extensions EmbLinkOS needs: extended `asm`, `__attribute__`, `__builtin_*`, `__atomic_*`, `typeof`, `__int128`, statement expressions, computed `goto`. Per-clause detail: `docs/language/compatibility.md`. C17/C23 are additive from here, not a rewrite. |
 | Architecture: single-pass or separate AST / IR stages? | **Separate stages**, already: `src/lex` → `src/cpp` → `src/parse` (AST) → `src/sema` (semantic model) → `src/ir` (EmbIR) → `src/opt` → `src/arch/<arch>` → `src/elf`. This is why ADR-0000 resolves to *evolve* (§4.1). |
 | Output: assembly text + external assembler, or direct object emission? | **Direct object emission.** The backend writes ELF objects itself; `src/arch/x86_64/as.c` is additionally a standalone assembler (`embas`) that assembles the kernel's hand-written NASM byte-identically to nasm. `-S` (assembly text) is **not** implemented and is a known gap (§4.3). |
 | Object/executable formats produced | **ELF64** relocatable and executable, x86-64 and AArch64; **EMBX** via EmbLD (`embld --embx`), byte-identical to the reference producer. |
-| Calling convention and data layout | **SysV AMD64** on x86-64, **AAPCS64** on AArch64 — adopted as-is, no deviation. Data layout LP64 on both; `long double` is x87 80-bit on x86-64 and IEEE binary128 on AArch64; plain `char` is signed on x86-64, unsigned on AArch64. Full matrix: `docs/TARGET_ABI.md`, `docs/COMPATIBILITY.md`. This answers open question 2. |
+| Calling convention and data layout | **SysV AMD64** on x86-64, **AAPCS64** on AArch64 — adopted as-is, no deviation. Data layout LP64 on both; `long double` is x87 80-bit on x86-64 and IEEE binary128 on AArch64; plain `char` is signed on x86-64, unsigned on AArch64. Full matrix: `docs/architecture/abi.md`, `docs/language/compatibility.md`. This answers open question 2. |
 | Debug info emitted, and what EmbDBG consumes | **DWARF-4** line, frame and local information under `-g`. **EmbDBG** (`tools/embdbg/`) reads it back: symbolize, backtrace, disassemble, inspect locals, analyse a kernel crash dump, a TUI — no gdb in the loop. Aggregate type DIEs are the remaining producer gap. This answers open question 3. |
 | Which parts of EmbLinkOS / emlibc it compiles today | **All of both.** The kernel: 89 C units via `embcc`, 6 `.asm` via `embas`, linked by `embld` — no gcc, no nasm, no `ld` — booting to the desktop behaviourally identical to the gcc build, at `-O0`, `-O1` and `-O2`. **emlibc**, including real `fdlibm` floating point (38 units), compiled on the OS and self-hosting. Plus **libstdc++** (193/193 objects on both targets). |
 | Status of the KM1 self-build milestone | **Host half done.** `tools/gen-kernel-manifest.sh` generates a 96-target EmbBuild manifest and `tests/golden/x86_64/embbuild-kernel.sh` (opt-in, `EMBCC_KM1=1`) walks it to a higher-half `kernel.elf` that boots in QEMU. KM2/KM3 stay OS-side. |
@@ -154,7 +155,7 @@ scheduled, because the OS needed them:
   kernel's NASM byte-identically to nasm; `embld` links, and emits EMBX
   directly; `embdbg` reads the DWARF back. No gcc, no nasm, no `ld`, no gdb.
 - **C++ far past what §12.2 scheduled.** See §12.2.
-- **A diagnostics and tooling layer** (`docs/TOOLING.md`): structured
+- **A diagnostics and tooling layer** (`docs/tools/diagnostics.md`): structured
   diagnostics with stable IDs, `--explain`, fix-its that `--fix` applies,
   error recovery in both front ends, warning groups over real analyses
   including a dataflow `-Wuninitialized`, a language server, and
@@ -490,7 +491,7 @@ Full C++ is the single largest cost in this document. It is delivered in subsets
 **This contradicts the document, and the contradiction is the point.** Non-goal
 2 says "no full modern C++ in the foreseeable plan" and open question 6 asks
 whether C++ goes beyond C++0 at all. The answer, decided by the project owner
-and recorded in `docs/DECISIONS.md` D-013, is **C++20 with libstdc++ on both
+and recorded in `docs/design/decisions.md` D-013, is **C++20 with libstdc++ on both
 architectures** — and it is built: CX8 compiles libstdc++ itself (193/193
 objects per target) and CX9 compiles C++ on EmbLinkOS, with EmbLD linking it.
 
@@ -504,7 +505,7 @@ Two things follow that this document must now say plainly:
   through the existing C pipeline to either backend. That is why a second
   architecture cost nothing in C++ terms, and why "shared frontend, EmbIR"
   (below) held: the architecture did not have to assume C++ would happen,
-  because C++ arrived as a *consumer* of it. Detail: `docs/CXX.md`.
+  because C++ arrived as a *consumer* of it. Detail: `docs/language/cpp-levels.md`.
 
 The remaining caution stands unchanged: the architecture (shared frontend,
 EmbIR) must not *assume* C++, and does not.
@@ -788,7 +789,7 @@ Three ordering principles, each a change from v0.1:
 
 ## 29.0 Two milestone tracks, and which is which (v0.3)
 
-`docs/ROADMAP.md` has its own **M0–M4**, and they are not these. That document
+`docs/design/roadmap.md` has its own **M0–M4**, and they are not these. That document
 is the **delivery track** — what the compiler had to do next for EmbLinkOS to
 exist — and it is closed: M0–M3 done, M4's host half done and its OS half the
 one named milestone still open. This document's **M0–M9 are capability
@@ -801,7 +802,7 @@ them through this mapping instead.
 | This document | State | Where it actually happened |
 |---|---|---|
 | **M0** baseline and decisions | **Done** (v0.3) | §4 filled; ADR-0000 resolved to *evolve*; open questions 2, 3 and 4 answered below |
-| **M1** C frontend library | **Done, and past its gate** | The gate was "EmbLinkOS + emlibc + EmbCC parse and type-check with zero false errors". All three are not merely parsed but *compiled and run*. Error recovery, structured diagnostics and a `SourceProvider`-less language server landed in `docs/TOOLING.md` T1–T5. Still missing from the gate: `inspect tokens\|pp\|ast\|types`, and 24-hour fuzzing |
+| **M1** C frontend library | **Done, and past its gate** | The gate was "EmbLinkOS + emlibc + EmbCC parse and type-check with zero false errors". All three are not merely parsed but *compiled and run*. Error recovery, structured diagnostics and a `SourceProvider`-less language server landed in `docs/tools/diagnostics.md` T1–T5. Still missing from the gate: `inspect tokens\|pp\|ast\|types`, and 24-hour fuzzing |
 | **M2** EmbIR v1 and x86-64 backend | **Done, except the IR's own contract** | Codegen, inline asm, ELF and EMBX, DWARF line tables: done. The **verifier** exists (`EMBCC_VERIFY=1`). The **textual form** and the **remark API** — both §9.1 MUSTs — do not (§4.3) |
 | **M3** self-hosting and EmbLinkOS | **Done** | `ROADMAP.md` M3. Stage-to-stage byte-identity is a standing test over sixteen sources, on the OS |
 | **M4** inspect, diagnostics, first "why" | **Half done, and the wrong half** | Diagnostics went far past the gate (stable IDs, JSON, `--explain`, fix-its, `--fix`, warning groups, a dataflow analysis, `embld --doctor`). `inspect`, `why` and the memory/stack reports have not started, because **no pass emits remarks** |
@@ -882,7 +883,7 @@ No milestone exits with a known wrong-code bug open.
 
 # 31. Documentation and ADRs
 
-Documentation is part of the architecture, and the `docs/` tree mirrors the libraries. **The tree below is the intended shape; the actual `docs/` is flat** (`ARCHITECTURE.md`, `COMPATIBILITY.md`, `CXX.md`, `DECISIONS.md`, `ROADMAP.md`, `TARGET_ABI.md`, `TOOLING.md`, `USAGE.md`, and per-directory `README.md` files under `src/`). Decisions live in `docs/DECISIONS.md` as D-NNN entries rather than as ADR files; that is the project's ADR mechanism, and the seed ADRs below map onto it. Restructuring is not urgent, but the mapping should be recorded before the tree grows further. Each subsystem document covers: purpose, architecture, public API, data structures, invariants, input/output contracts, error handling, threading assumptions, performance characteristics, security considerations, examples, tests, rationale, known limitations, and future evolution.
+Documentation is part of the architecture, and the `docs/` tree mirrors the libraries. **This is now the layout** (v0.4): [docs/README.md](../README.md) is the index, and it records the four places the tree deliberately differs from the sketch below — ADRs as numbered D-NNN entries in one `design/decisions.md` rather than separate files, `tools/diagnostics.md` not yet split per tool, `architecture/` thin because most per-library detail lives in a `README.md` beside its code, and no `embbuild`/`embstudio` chapters since neither is in this repository. Each subsystem document covers: purpose, architecture, public API, data structures, invariants, input/output contracts, error handling, threading assumptions, performance characteristics, security considerations, examples, tests, rationale, known limitations, and future evolution.
 
 ```text
 docs/
@@ -918,7 +919,7 @@ Architectural changes require an ADR; this document is updated in the same chang
 To be resolved by ADR before the milestone that needs them:
 
 1. ~~Evolve or stage-0 (§4.1)~~ — **answered (v0.3): evolve.** The stages were already separate.
-2. ~~Calling convention and data layout~~ — **answered: SysV AMD64 as-is** on x86-64, **AAPCS64** on AArch64, no deviation (§4, `docs/TARGET_ABI.md`).
+2. ~~Calling convention and data layout~~ — **answered: SysV AMD64 as-is** on x86-64, **AAPCS64** on AArch64, no deviation (§4, `docs/architecture/abi.md`).
 3. ~~Debug format~~ — **answered: DWARF-4**, emitted under `-g` and consumed by EmbDBG (§4).
 4. Is the Linux ELF test target acceptable as a permanent supported target, or test-only? — **still open**, but in practice it is permanent: it is how every test is refereed against GCC on both architectures.
 5. Project-graph storage: custom format, SQLite, or append-only log? — **M6**.

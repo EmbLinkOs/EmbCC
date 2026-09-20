@@ -1,6 +1,6 @@
 # src/link
 
-EmbLD — the integrated linker. ../../docs/ARCHITECTURE.md §6 is the spec, and
+EmbLD — the integrated linker. ../../docs/architecture/overview.md §6 is the spec, and
 TARGET_ABI §4 is the contract it must satisfy.
 
 Library-shaped, never a subprocess (§1: no `fork`/`exec` on the target). The

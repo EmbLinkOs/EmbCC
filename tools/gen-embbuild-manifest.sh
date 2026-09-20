@@ -10,7 +10,7 @@
 # edit. So the header closure of every unit is DERIVED here (cc -MM), exactly
 # what §6 argues for. Re-run this whenever the sources or their includes change.
 #
-# Paths are the on-OS layout (docs/SELFHOST_ONOS.md): sources under
+# Paths are the on-OS layout (docs/developer/selfhost-on-os.md): sources under
 # /data/src/embcc (the src/ prefix dropped, subdirs preserved), EmbCC's own
 # freestanding headers at /data/apps/embcc/include, newlib's ABI headers at
 # /system/abi/include, the ABI objects at /system/abi, outputs staged under

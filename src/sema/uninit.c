@@ -1,4 +1,4 @@
-/* -Wuninitialized / -Wmaybe-uninitialized (docs/TOOLING.md T4).
+/* -Wuninitialized / -Wmaybe-uninitialized (docs/tools/diagnostics.md T4).
  *
  * `int x; if (c) x = 1; return x;` compiles, links and runs, and returns
  * whatever the frame happened to hold. No diagnostic so far in EmbCC said

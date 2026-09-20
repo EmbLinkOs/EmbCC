@@ -1,5 +1,5 @@
 /* `embld --doctor` — why the link failed, in terms a person can act on
- * (docs/TOOLING.md T6).
+ * (docs/tools/diagnostics.md T6).
  *
  * A linker says "undefined reference to `foo'" and stops at the first one.
  * That names the symptom. What the programmer needs is the cause, and the

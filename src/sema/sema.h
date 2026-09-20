@@ -9,7 +9,7 @@
 void sema_check(struct unit *u);
 
 /* Semantic errors the last sema_check reported: the driver stops before
- * generating code when there were any (docs/TOOLING.md T2). */
+ * generating code when there were any (docs/tools/diagnostics.md T2). */
 int sema_error_count(void);
 
 /* The statement list a switch dispatches over: its body, unwrapped when

@@ -1,5 +1,5 @@
 #!/bin/sh
-# The options a build system drives a compiler with (docs/TOOLING.md T4):
+# The options a build system drives a compiler with (docs/tools/diagnostics.md T4):
 # -M/-MM/-MD/-MMD/-MF/-MT/-MP write the make rule naming what the file
 # included, which is how every C project tracks header dependencies, and
 # -fsyntax-only checks without writing anything.

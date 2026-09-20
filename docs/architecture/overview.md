@@ -39,13 +39,13 @@ out-of-memory, where building a diagnostic would itself allocate.
 
 | Phase | Responsibility | Notes |
 |---|---|---|
-| **platform** | every host interaction: read a file, write a file, ask the environment | [`src/platform/`](../src/platform/README.md). The bottom layer — nothing above it knows what a `FILE*` is. **No process API, ever**: §1 is why |
+| **platform** | every host interaction: read a file, write a file, ask the environment | [`src/platform/`](../../src/platform/README.md). The bottom layer — nothing above it knows what a `FILE*` is. **No process API, ever**: §1 is why |
 | **driver** | argv, flags, deciding compile-vs-link, file discovery | Keep flags a *deliberate subset*; do not clone gcc's surface |
 | **lex** | tokens, including the preprocessor's needs | `embcc inspect tokens` |
 | **cpp** | `#include`, `#define`, conditionals | Needed early — the OS's headers are real newlib headers (see §5) |
 | **parse** | C → AST | The subset grew by need, not by standard-completeness; `todo.md` tracks what is left. `embcc inspect ast` |
 | **sema** | types, declarations, conversions, diagnostics | Where most "real compiler" work lives. `embcc inspect symbols` / `inspect types` (layout: offsets, bit-field positions, padding) |
-| **IR** | a small typed intermediate form | See §3. `embcc inspect ir` prints it ([`src/ir/irprint.c`](../src/ir/irprint.c)) and reads it back ([`src/ir/irparse.c`](../src/ir/irparse.c)): `embcc inspect ir foo.ir` round-trips, byte for byte |
+| **IR** | a small typed intermediate form | See §3. `embcc inspect ir` prints it ([`src/ir/irprint.c`](../../src/ir/irprint.c)) and reads it back ([`src/ir/irparse.c`](../../src/ir/irparse.c)): `embcc inspect ir foo.ir` round-trips, byte for byte |
 | **codegen** | IR → x86-64, System V AMD64 | See §4 |
 | **asm** | encode instructions to bytes | Integrated; no external assembler exists on-OS |
 | **as** | standalone NASM/Intel `.asm` → ELF object | `embas` / `embcc -c foo.asm`; byte-identical to nasm on the kernel corpus (A1) |
@@ -167,7 +167,7 @@ tests/
 ```
 
 What each architecture supports is tabulated in
-[COMPATIBILITY.md](COMPATIBILITY.md).
+[COMPATIBILITY.md](../language/compatibility.md).
 
 **Self-hosting constrains the source itself.** EmbCC compiles EmbCC, so its own
 code stays within the C subset it implements — no dependency on anything it
@@ -189,7 +189,7 @@ info** (`-g` emits DWARF-4 line/frame/locals, and EmbDBG reads it back), and the
 compiles the whole EmbLinkOS kernel, which boots to the desktop).
 
 **C++**, the intended second language (D-008), is now under way (D-013,
-`docs/CXX.md`): `src/cxx` lowers C++ to C for the pipeline above, milestone
+`docs/language/cpp-levels.md`): `src/cxx` lowers C++ to C for the pipeline above, milestone
 by milestone toward C++20 with libstdc++, and refuses what a later milestone
 brings by naming it.
 

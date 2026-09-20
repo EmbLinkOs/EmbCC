@@ -1,6 +1,6 @@
 #!/bin/sh
 # Generate the self-hosting reference objects (ref/*.o) and relink stage1
-# (embcc.elf) from them, for the on-OS fixed point (docs/SELFHOST_ONOS.md).
+# (embcc.elf) from them, for the on-OS fixed point (docs/developer/selfhost-on-os.md).
 # The references are the gcc-built embcc's output for EmbCC's own sources;
 # STT_FILE is the basename, so they match what the OS embcc produces.
 set -eu

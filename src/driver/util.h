@@ -1,6 +1,6 @@
 /* Allocation that cannot fail quietly, and the diagnostic API.
  *
- * A diagnostic is a record (src/driver/diag.c, docs/TOOLING.md): severity,
+ * A diagnostic is a record (src/driver/diag.c, docs/tools/diagnostics.md): severity,
  * location and source range, the option that controls it, notes under it,
  * and fix-its. They are held and rendered once — as GCC's caret text, or as
  * GCC's JSON for an editor — so the API here builds them rather than

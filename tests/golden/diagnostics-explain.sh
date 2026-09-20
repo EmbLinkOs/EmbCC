@@ -1,5 +1,5 @@
 #!/bin/sh
-# `embcc --explain` (docs/TOOLING.md T6): a diagnostic prints a stable id,
+# `embcc --explain` (docs/tools/diagnostics.md T6): a diagnostic prints a stable id,
 # and the id has an entry that says what the rule is, shows the mistake and
 # the fix, and cites the standard. Rust has had this for years; no C
 # compiler does.

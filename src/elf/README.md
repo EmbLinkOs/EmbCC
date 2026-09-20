@@ -1,6 +1,6 @@
 # src/elf
 
-Shared ELF structures used by asm, as, and link — ../../docs/ARCHITECTURE.md §2.
+Shared ELF structures used by asm, as, and link — ../../docs/architecture/overview.md §2.
 
 - **elf.h** — ELF64 definitions, hand-written. There is no `<elf.h>` dependency:
   the source must stay inside the subset EmbCC compiles, because EmbCC compiles

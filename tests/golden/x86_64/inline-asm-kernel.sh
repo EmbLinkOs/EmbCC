@@ -1,5 +1,5 @@
 #!/bin/sh
-# K1: the inline-asm instruction set the EmbLinkOS kernel needs (docs/todo.md).
+# K1: the inline-asm instruction set the EmbLinkOS kernel needs (docs/developer/todo.md).
 # Most are privileged (cli/hlt/out/mov-cr/wrmsr/lidt/...) so they cannot RUN in
 # userland; the check is that EmbCC emits the CORRECT machine bytes — objdump,
 # the reference decoder, must reproduce each mnemonic and flag nothing (bad).

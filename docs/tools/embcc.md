@@ -2,7 +2,7 @@
 
 How to invoke the compiler (`embcc`) and the linker (`embld`). This is the CLI
 reference; for *what* is implemented and what is still coming, see
-[todo.md](todo.md); for the design, [ARCHITECTURE.md](ARCHITECTURE.md).
+[todo.md](../developer/todo.md); for the design, [ARCHITECTURE.md](../architecture/overview.md).
 
 EmbCC is a self-contained C compiler + linker: `embcc` turns C into ELF objects,
 `embld` links them into an ELF executable (or an EMBX binary). No GCC/binutils in
@@ -168,7 +168,7 @@ embdbg foo.elf line 0x401234         # address -> func:file:line
 
 `embdbg FILE` with no subcommand prints the full command list (symbolize,
 inspect locals, disassemble, and a small TUI). It reads the DWARF-4 EmbCC emits
-— no gdb in the loop. See [EMBDBG_Requirements.md](EMBDBG_Requirements.md).
+— no gdb in the loop. See [EMBDBG_Requirements.md](embdbg.md).
 
 ## What is not there
 
@@ -190,7 +190,7 @@ Refused loudly rather than faked, per THE RULE:
   values** — literals, casts, `+`, `-` and scaling by a real fold; `*` and `/`
   of two complex values are left to run time, which is where Annex G's
   special cases (libgcc) apply.
-- **C++ beyond what docs/CXX.md marks done** — each refusal names the
+- **C++ beyond what docs/language/cpp-levels.md marks done** — each refusal names the
   milestone that brings the construct (e.g. "exceptions are not supported
   yet (CX5)").
 - **`__thread`/TLS, PIE/PIC output** — out of scope by decision

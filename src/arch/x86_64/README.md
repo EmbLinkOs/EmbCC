@@ -2,7 +2,7 @@
 
 x86-64, **System V AMD64 ABI** — the EmbLinkOS x86-64 kernel and userspace
 (`--target=x86_64-elf`, the default). What it supports against aarch64:
-[docs/COMPATIBILITY.md](../../../docs/COMPATIBILITY.md).
+[docs/language/compatibility.md](../../../docs/language/compatibility.md).
 
 | file        | what it is |
 |-------------|------------|

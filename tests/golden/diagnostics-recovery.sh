@@ -1,5 +1,5 @@
 #!/bin/sh
-# Every reason the file does not compile, in one run (docs/TOOLING.md T2):
+# Every reason the file does not compile, in one run (docs/tools/diagnostics.md T2):
 # a syntax error is reported and the parser resumes at the next statement or
 # declaration, so three independent mistakes are three diagnostics — not the
 # first one and silence. The other half of the claim matters as much:

@@ -46,13 +46,13 @@ static void print_version(void)
            "x87 long double) and aarch64-elf (AAPCS64, binary128 long "
            "double through libgcc).\n");
     printf("C++ (.cc/.cpp/.cxx/.C, or -x c++): in progress toward C++20 "
-           "with libstdc++ (docs/CXX.md) — namespaces, overloading, "
+           "with libstdc++ (docs/language/cpp-levels.md) — namespaces, overloading, "
            "references, classes with constructors and destructors, "
            "new/delete, lowered through C to either target.\n");
     printf("Also: the preprocessor (-E), -O0..-O2, -g (DWARF), embas "
            "(NASM-syntax .asm, x86-64) and embld (the linker, x86-64 ELF "
            "and EMBX). Not yet: __thread, PIE, embld for aarch64 — "
-           "see docs/COMPATIBILITY.md.\n");
+           "see docs/language/compatibility.md.\n");
 }
 
 static void print_usage(FILE *out)
@@ -92,7 +92,7 @@ static void print_options(FILE *out)
       "  -O0 -O1 -O2            optimisation\n"
       "  -g                     debug information (DWARF)\n"
       "  -mno-sse -mno-red-zone -mcmodel=kernel -mgeneral-regs-only\n"
-      "\ndiagnostics (docs/TOOLING.md)\n"
+      "\ndiagnostics (docs/tools/diagnostics.md)\n"
       "  -fdiagnostics-format=text|json   caret output, or GCC's JSON\n"
       "  -fdiagnostics-color=auto|always|never\n"
       "  -fmax-errors=N         stop after N\n"
@@ -211,7 +211,7 @@ static int emit_c_only;
 static int want_fix;
 
 /* -fsyntax-only: run the front end, write nothing. What an editor asks for
- * (docs/TOOLING.md T5) and what a build's "does this still compile" step
+ * (docs/tools/diagnostics.md T5) and what a build's "does this still compile" step
  * wants. */
 static int syntax_only;
 /* Tool mode (§17): `embcc inspect <stage> file.c` stops the pipeline at a
@@ -1298,7 +1298,7 @@ int main(int argc, char **argv)
          * to — where a template instantiated from a header is attributed to
          * the .cc that instantiated it. A warning pointing at the wrong line
          * is worse than none, so they stay C-only until the C++ front end
-         * grows its own (docs/TOOLING.md T4). */
+         * grows its own (docs/tools/diagnostics.md T4). */
         diag_enable_warning("unused-variable", 0);
         diag_enable_warning("unused-parameter", 0);
         diag_enable_warning("unused-function", 0);
@@ -1380,7 +1380,7 @@ int main(int argc, char **argv)
     if (!compile_mode) {
         fprintf(stderr,
                 "embcc: error: cannot link '%s': the integrated linker is "
-                "M3 (see docs/ROADMAP.md) — compile with -c and link with "
+                "M3 (see docs/design/roadmap.md) — compile with -c and link with "
                 "the existing toolchain\n", input);
         return 1;
     }

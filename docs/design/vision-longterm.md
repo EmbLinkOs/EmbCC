@@ -1,7 +1,7 @@
 # EmbCC — Vision Beyond a C Compiler
 
-*Status: **long-horizon picture**, not a plan. [VISION.md](VISION.md) states why
-EmbCC exists and its discipline of restraint; [ROADMAP.md](ROADMAP.md) states
+*Status: **long-horizon picture**, not a plan. [VISION.md](vision-first.md) states why
+EmbCC exists and its discipline of restraint; [ROADMAP.md](roadmap.md) states
 what is actually committed (M0–M4). This document records where the project
 could go **after** the total loop closes — and every item here is governed by
 DECISIONS D-006: a capability is added for a stated reason, never because a
@@ -44,7 +44,7 @@ and the build system.
 
 EmbCC is designed specifically for EmbLinkOS and understands its architecture.
 
-* Direct support for the EmbLinkOS ABI ([TARGET_ABI.md](TARGET_ABI.md)).
+* Direct support for the EmbLinkOS ABI ([TARGET_ABI.md](../architecture/abi.md)).
 * **Executable format: ELF *and* EMBX.** ~~Per D-003 (firm), a native format is
   an **ELF superset**.~~ **D-003 was REVISED 2026-07-24** once the OS's
   capability model landed: EmbLinkOS has its own capability-carrying container,

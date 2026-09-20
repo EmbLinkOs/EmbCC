@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fix-its that are edits, not prose (docs/TOOLING.md T3):
+# Fix-its that are edits, not prose (docs/tools/diagnostics.md T3):
 # -fdiagnostics-parseable-fixits prints them in GCC's line format, and
 # --fix performs them. The test that means something is the round trip:
 # take a file that does not compile, run --fix, and require that the file

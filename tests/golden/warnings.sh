@@ -1,5 +1,5 @@
 #!/bin/sh
-# Warnings that mean something (docs/TOOLING.md T4): each has a name, a
+# Warnings that mean something (docs/tools/diagnostics.md T4): each has a name, a
 # group, and an off switch, and each is a real analysis rather than a
 # spelling of "maybe". The check that matters is the last one: on the same
 # code, EmbCC warns where gcc warns — a warning nobody else raises is a

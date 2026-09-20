@@ -106,7 +106,7 @@ self-hosting. It did not change stream A's order.
 | `EmbLD` | the integrated linker; emits ELF ET_EXEC and EMBX | **done** — `src/link` + `tools/embld/`; links EmbCC and the kernel, on host and OS |
 | `EmbAS` | standalone NASM/Intel assembler | **done** — `src/arch/x86_64/as.c` + `tools/embas/`; byte-identical to nasm on all 6 kernel `.asm` (A1) |
 | `emlibc` | the OS's own non-POSIX libc | **EmbCC compiles it**, fdlibm floating point included, and it self-hosts on the OS (D-009) |
-| `EmbDBG` | debugger | **v0 done** — `embcc -g` emits DWARF-4 line/frame/locals and `tools/embdbg` reads it back (symbolize, inspect, disassemble, TUI), no gdb needed. `docs/EMBDBG_Requirements.md` tracks what is past v0. |
+| `EmbDBG` | debugger | **v0 done** — `embcc -g` emits DWARF-4 line/frame/locals and `tools/embdbg` reads it back (symbolize, inspect, disassemble, TUI), no gdb needed. `docs/tools/embdbg.md` tracks what is past v0. |
 
 ## Stream B — the integrated linker (M3's long pole — delivered)
 
@@ -196,7 +196,7 @@ stream A**, and vice versa.
    `/data/src`, to TinyCC and newlib (~500 files), to **emlibc including
    fdlibm**, to **the whole EmbLinkOS kernel** (89 units). Each step was diffed
    against gcc. The corpus is what stream A compiles *next*, so C effectively
-   wrote A's requirements — `docs/todo.md` is that ranking, and what remains of
+   wrote A's requirements — `docs/developer/todo.md` is that ranking, and what remains of
    it is the language gap list.
 3. **Diagnostics polish — done.** Colour when stderr is a tty, caret lines with
    real columns, span underlines, "did you mean?", and notes for previous

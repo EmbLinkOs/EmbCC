@@ -82,7 +82,7 @@ Note the tension honestly: this points *opposite* to EmbLinkOS's ports story
 (git, CPython, C++, TCC — "meet the existing software world on its own terms and
 refuse to fake it"). One soul says *host the world*, the other *own the stack*.
 Both are legitimate; EmbCC is the second, entered with eyes open. See
-[docs/VISION.md](docs/VISION.md).
+[docs/design/vision-first.md](docs/design/vision-first.md).
 
 ## The shape of the plan
 
@@ -108,31 +108,38 @@ Both are legitimate; EmbCC is the second, entered with eyes open. See
 
 ## Documents
 
+**[docs/README.md](docs/README.md) is the index** — the tree is laid out as
+the specification's §31 asks (`architecture/`, `language/`, `ir/`, `tools/`,
+`developer/`, `design/`), and that page says where everything is and where
+it deliberately differs.
+
 | Doc | What it is |
 |---|---|
-| [docs/VISION.md](docs/VISION.md) | Why a native compiler; the ownership thesis; the own-the-stack vs host-the-world tension |
-| [docs/VISION_LONGTERM.md](docs/VISION_LONGTERM.md) | The horizon past the named milestones: C++, deeper analysis, compiler services — gated by D-006. Optimization and diagnostics have since landed off this list; see `src/opt`, `src/arch`, `src/driver/util.c` |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | Decisions already made, each with its rationale (ADR-style) |
-| [docs/TARGET_ABI.md](docs/TARGET_ABI.md) | **The grounding doc.** The exact EmbLinkOS contract EmbCC must emit — syscalls, crt0, and the precise ELF the in-kernel loader accepts |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Intended compiler structure and phases |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Milestones M0–M4, each with a concrete acceptance test, and what is open past them |
-| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | **What works on which architecture** — types, language, ABI, tools, EmbLinkOS status and test coverage, x86-64 against aarch64 |
-| [docs/USAGE.md](docs/USAGE.md) | The `embcc`/`embas`/`embld`/`embdbg` CLI reference |
+| [docs/design/vision.md](docs/design/vision.md) | **The specification.** What EmbCC is, the invariants it never breaks, and what is and is not built |
+| [docs/ir/specification.md](docs/ir/specification.md) | EmbIR: the form, its textual syntax, provenance, and the round-trip |
+| [docs/design/vision-first.md](docs/design/vision-first.md) | Why a native compiler; the ownership thesis; the own-the-stack vs host-the-world tension |
+| [docs/design/vision-longterm.md](docs/design/vision-longterm.md) | The horizon past the named milestones: C++, deeper analysis, compiler services — gated by D-006. Optimization and diagnostics have since landed off this list; see `src/opt`, `src/arch`, `src/driver/util.c` |
+| [docs/design/decisions.md](docs/design/decisions.md) | Decisions already made, each with its rationale (ADR-style) |
+| [docs/architecture/abi.md](docs/architecture/abi.md) | **The grounding doc.** The exact EmbLinkOS contract EmbCC must emit — syscalls, crt0, and the precise ELF the in-kernel loader accepts |
+| [docs/architecture/overview.md](docs/architecture/overview.md) | Intended compiler structure and phases |
+| [docs/design/roadmap.md](docs/design/roadmap.md) | Milestones M0–M4, each with a concrete acceptance test, and what is open past them |
+| [docs/language/compatibility.md](docs/language/compatibility.md) | **What works on which architecture** — types, language, ABI, tools, EmbLinkOS status and test coverage, x86-64 against aarch64 |
+| [docs/tools/embcc.md](docs/tools/embcc.md) | The `embcc`/`embas`/`embld`/`embdbg` CLI reference |
 | [tests/harness/](tests/harness/) | The aarch64 proving ground: a bare-metal QEMU `virt` image with an ARM-semihosting syscall floor, so compiled code is RUN on the architecture it was compiled for |
-| [docs/todo.md](docs/todo.md) | The evidence-backed completeness audit: what C we do not yet compile, ranked by a real corpus |
-| [docs/WORKPLAN.md](docs/WORKPLAN.md) | The team's three streams (core, linker, proving ground), what each is working on now, and the process that keeps them off each other's critical path |
-| [docs/EMBDBG_Requirements.md](docs/EMBDBG_Requirements.md) | Producer-side debug-info requirements + the DWARF-bridge decision (D-010); the byte format & kernel contract live OS-side in `myos/docs/EMBDBG_Specification.md` |
+| [docs/developer/todo.md](docs/developer/todo.md) | The evidence-backed completeness audit: what C we do not yet compile, ranked by a real corpus |
+| [docs/design/workplan.md](docs/design/workplan.md) | The team's three streams (core, linker, proving ground), what each is working on now, and the process that keeps them off each other's critical path |
+| [docs/tools/embdbg.md](docs/tools/embdbg.md) | Producer-side debug-info requirements + the DWARF-bridge decision (D-010); the byte format & kernel contract live OS-side in `myos/docs/EMBDBG_Specification.md` |
 | [src/embx/embx.h](src/embx/embx.h) | The EMBX container, byte-exact — mirrors the kernel's loader header; written by EmbLD, read by `embread` |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | The discipline inherited from EmbLinkOS (prove on the host, selftest the invariant, THE RULE) |
 
 ## Where to start reading
 
-For the *why*, read [docs/VISION.md](docs/VISION.md), then
-[docs/DECISIONS.md](docs/DECISIONS.md) — the arguments are settled there, with
+For the *why*, read [docs/design/vision-first.md](docs/design/vision-first.md), then
+[docs/design/decisions.md](docs/design/decisions.md) — the arguments are settled there, with
 their reopen conditions.
 
-For the *how*, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the phase
-structure, then [docs/TARGET_ABI.md](docs/TARGET_ABI.md), which is the grounding
+For the *how*, read [docs/architecture/overview.md](docs/architecture/overview.md) for the phase
+structure, then [docs/architecture/abi.md](docs/architecture/abi.md), which is the grounding
 doc: the exact contract the OS enforces, and the expensive facts that cost a
 debugging session each.
 
@@ -160,12 +167,12 @@ machine — the same machine EmbLinkOS itself targets — with ARM semihosting
 carrying stdout and the exit status back to the host. See
 [tests/harness/aarch64/](tests/harness/aarch64/).
 
-Then [docs/USAGE.md](docs/USAGE.md) for the CLI.
+Then [docs/tools/embcc.md](docs/tools/embcc.md) for the CLI.
 
 ## Where aarch64 stands
 
 The feature-by-feature comparison with x86-64 is
-[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). In short, working and proven
+[docs/language/compatibility.md](docs/language/compatibility.md). In short, working and proven
 by running it: the integer and floating types, pointers,
 arrays, structs and unions by value (AAPCS64 — including the composite-return
 rules and the hidden `x8` pointer), the full operator and statement set,
@@ -212,7 +219,7 @@ oversight.
   on x86-64, IEEE binary128 through libgcc on aarch64, constants bit for bit
   as gcc's) and `_Complex` (float, double and long double, gcc-compatible
   across the call boundary, newlib's `<complex.h>` included). What remains
-  refused is listed in `docs/USAGE.md` — GNU extensions like integer
+  refused is listed in `docs/tools/embcc.md` — GNU extensions like integer
   `_Complex`, and a few seams such as `va_arg` of a struct.
 - **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
   the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1

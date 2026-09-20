@@ -2,7 +2,7 @@
 
 AArch64, **AAPCS64** — the EmbLinkOS ARM64 kernel and userspace, QEMU `virt`
 (`--target=aarch64-elf`, D-011). What it supports against x86-64:
-[docs/COMPATIBILITY.md](../../../docs/COMPATIBILITY.md).
+[docs/language/compatibility.md](../../../docs/language/compatibility.md).
 
 | file        | what it is |
 |-------------|------------|

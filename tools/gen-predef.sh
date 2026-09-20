@@ -37,7 +37,7 @@ reference() {
 # macro that CLAIMS a feature EmbCC's C++ does not implement yet — the __cpp_*
 # feature tests, exceptions, RTTI, constexpr asm. libstdc++ switches on these,
 # so claiming one early would compile code the front-end cannot. A pattern
-# leaves this list when its feature lands (docs/CXX.md). The implemented
+# leaves this list when its feature lands (docs/language/cpp-levels.md). The implemented
 # ones cpp defines itself (cpp_process), as exceptions depend on
 # -fno-exceptions. Also excluded: the types EmbCC's C++ has not got —
 # __int128 (and libstdc++'s __GLIBCXX_TYPE_INT_N_0 naming it), __float128,

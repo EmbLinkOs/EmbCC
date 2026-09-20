@@ -332,7 +332,7 @@ here answers to.
 ## D-010 — Debug info: **DWARF as the bridge, native `.embdbg` derived last**
 
 **Decided:** 2026-07-24. **Status:** landing as predicted. Requirements written
-(`docs/EMBDBG_Requirements.md`); the OS side carries the byte-exact format AND
+(`docs/tools/embdbg.md`); the OS side carries the byte-exact format AND
 the kernel debugging contract (`myos/docs/EMBDBG_Specification.md`) — the
 consumer and invariants this decision said `.embdbg` must be derived from.
 **Realized 2026-07-26:** EmbCC emits **DWARF line info** (`-g`, the host bridge),
@@ -471,7 +471,7 @@ x86-64 also its file-scope asm and EmbAS, aarch64 its inline-asm assembler.
 The rest of `src/` never names a machine. The tests follow the same rule:
 `tests/golden/` and `tests/exec/` run for every target, `tests/golden/<arch>/`
 and `tests/exec/<arch>/` for one. What each target supports is one document,
-docs/COMPATIBILITY.md.
+docs/language/compatibility.md.
 
 **Why.** Two machines had grown into the tree by accretion — `codegen.c` next
 to `codegen_arm64.c`, `emit.c` next to `emit_arm64.c`, both targets' `va_arg`
@@ -530,7 +530,7 @@ must agree, and cross-ABI tests link halves from each. The runtime pieces that
 touch the OS (operator new, `__cxa_atexit`, guards, the unwinder) come from
 libsupc++/libgcc first and are owned later where emlibc needs it.
 
-**Milestones** (docs/CXX.md): CX1 C++ as a better C (namespaces, classes,
+**Milestones** (docs/language/cpp-levels.md): CX1 C++ as a better C (namespaces, classes,
 ctors/dtors, overloading and mangling, new/delete, static initialization);
 CX2 operators, conversions, copy/move; CX3 inheritance, virtual functions,
 RTTI; CX4 templates; CX5 exceptions; CX6 the modern core (auto, lambdas,

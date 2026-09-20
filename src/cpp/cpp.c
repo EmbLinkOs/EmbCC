@@ -1545,7 +1545,7 @@ char *cpp_process(const char *path, const char *src,
         define_macro(&boot, "__STDC_VERSION__ 199901L");
     define_macro(&boot, "__STDC_HOSTED__ 1");
     if (predef_is_cxx()) {
-        /* the C++ features EmbCC implements (docs/CXX.md): each one
+        /* the C++ features EmbCC implements (docs/language/cpp-levels.md): each one
          * from the standard g++ first defines it in, at the value g++
          * gives that standard — no higher than what EmbCC does; those
          * it does not do yet (consteval, aligned new, ...) are left

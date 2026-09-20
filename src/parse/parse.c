@@ -74,7 +74,7 @@ static struct type *find_typedef(struct parser *ps, const char *name)
 
 /* A syntax error: recorded, then the parser resumes at the nearest recovery
  * point — the enclosing statement, or the next external declaration — so one
- * run reports every independent problem (docs/TOOLING.md T2). Where no
+ * run reports every independent problem (docs/tools/diagnostics.md T2). Where no
  * recovery point is set, it stops the compile, as every error once did. */
 static void parse_error_at(struct parser *ps, int line, int col,
                            const char *fmt, ...)
@@ -180,7 +180,7 @@ static void reject_reserved(struct parser *ps, const char *name, int line, int c
          i++)
         if (strcmp(reserved_unsupported[i], name) == 0)
             parse_error_at(ps, line, col,
-                    "'%s' is not supported yet (see docs/ROADMAP.md M2)",
+                    "'%s' is not supported yet (see docs/design/roadmap.md M2)",
                     name);
 }
 

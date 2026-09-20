@@ -1,6 +1,6 @@
 # src/driver
 
-argv, flags, orchestration — ../../docs/ARCHITECTURE.md §2.
+argv, flags, orchestration — ../../docs/architecture/overview.md §2.
 
 Runs the whole pipeline in one process (§1 — the OS has no `fork`/`exec`, so
 there is no `cc1`/`as` to spawn):

@@ -11,7 +11,7 @@
  *
  * --doctor links nothing: it reads the inputs and says why a link over
  * them would fail, every undefined symbol at once, with the cause the
- * symbol tables reveal (docs/TOOLING.md T6).
+ * symbol tables reveal (docs/tools/diagnostics.md T6).
  */
 #include <stdio.h>
 #include <stdlib.h>

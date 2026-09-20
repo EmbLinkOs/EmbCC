@@ -1,7 +1,7 @@
 #!/bin/sh
 # ROADMAP M0: "a --version that prints something honest": what the compiler
 # is, which machines it targets, and what is still missing — it must never
-# claim more than the tree holds (docs/COMPATIBILITY.md is the long form).
+# claim more than the tree holds (docs/language/compatibility.md is the long form).
 set -u
 echo "TEST-MARKER version"
 . "$(dirname "$0")/../lib.sh"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# `embld --doctor` (docs/TOOLING.md T6): why the link failed.
+# `embld --doctor` (docs/tools/diagnostics.md T6): why the link failed.
 #
 # A linker prints "undefined reference to `foo'" and stops. That is the
 # symptom; the cause is in the inputs, and the doctor reads them. Each case

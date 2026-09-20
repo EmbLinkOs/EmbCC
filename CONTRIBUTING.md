@@ -60,12 +60,12 @@ boot cycles.
 
 ## Record the decision, not just the code
 
-Design decisions go in [docs/DECISIONS.md](docs/DECISIONS.md) with their
+Design decisions go in [docs/design/decisions.md](docs/design/decisions.md) with their
 **rationale and what would reopen them**. A decision whose reasoning is lost gets
 re-litigated every time someone new looks at it — or worse, silently reversed.
 
 When something is learned the hard way — a target fact that cost a debugging
-session — write it into [docs/TARGET_ABI.md](docs/TARGET_ABI.md) as an
+session — write it into [docs/architecture/abi.md](docs/architecture/abi.md) as an
 "expensive fact." That file exists so the next person does not pay twice.
 
 ## Commits

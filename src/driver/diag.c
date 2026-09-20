@@ -1,4 +1,4 @@
-/* The diagnostic engine (docs/TOOLING.md T1).
+/* The diagnostic engine (docs/tools/diagnostics.md T1).
  *
  * A diagnostic is a record, not a line printed on the way out: severity, a
  * location with a source range, the option that controls it, notes under

@@ -994,7 +994,7 @@ always emits RTTI, so typeid and dynamic_cast keep working).
 
 **C++ compiled ON EmbLinkOS (CX9).** The toolchain that does it is
 EmbCC's own and runs on the metal: embcc.elf — EmbCC's output, EmbLD-linked
-(docs/SELFHOST_ONOS.md) — compiles a C++ program the kernel writes to
+(docs/developer/selfhost-on-os.md) — compiles a C++ program the kernel writes to
 /data/tmp, embld.elf links it against the sealed ABI (/system/abi:
 crt0.o, syscalls.o, libc.a), and the kernel runs it and reads its exit
 code: the OS's own `test embcc cxx` oracle. No host compiler, no tcc, no

@@ -36,7 +36,7 @@ out=$HOST/tests/golden/out/emblinkos-cxx-onos
 rm -rf "$out"; mkdir -p "$out"
 
 # 1. The compiler for the metal: EmbCC compiles its own sources, EmbLD links
-#    them into embcc.elf (docs/SELFHOST_ONOS.md), and EmbLD itself is
+#    them into embcc.elf (docs/developer/selfhost-on-os.md), and EmbLD itself is
 #    cross-built into embld.elf.
 ( cd "$HOST" && MYOS="$OS" tools/gen-selfhost-ref.sh ) > "$out/stage.log" 2>&1 || {
     echo "gen-selfhost-ref.sh failed:"; tail -10 "$out/stage.log"; exit 1; }

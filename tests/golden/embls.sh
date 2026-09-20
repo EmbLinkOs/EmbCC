@@ -1,5 +1,5 @@
 #!/bin/sh
-# embls, the language server (docs/TOOLING.md T5): an editor's questions
+# embls, the language server (docs/tools/diagnostics.md T5): an editor's questions
 # answered by the compiler itself. The session below is a real LSP
 # conversation over stdio — initialize, didOpen, completion, hover,
 # definition, documentSymbol — and every answer is checked against what the

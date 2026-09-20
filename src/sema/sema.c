@@ -44,7 +44,7 @@ struct scope {
 
 /* Where semantic analysis resumes after an error: the statement being
  * checked. NULL means the error stops the compile, as every semantic error
- * once did (docs/TOOLING.md T2). */
+ * once did (docs/tools/diagnostics.md T2). */
 static jmp_buf *g_recover;
 static int g_sema_errors;
 
@@ -79,7 +79,7 @@ static int reported_undeclared(const char *name)
 
 int sema_error_count(void) { return g_sema_errors; }
 
-/* A semantic error with an explain id (docs/TOOLING.md T6): the reader is
+/* A semantic error with an explain id (docs/tools/diagnostics.md T6): the reader is
  * told what to type to learn the rule. */
 static void sema_error_id(struct unit *u, int line, int col, const char *id,
                           const char *fmt, ...)

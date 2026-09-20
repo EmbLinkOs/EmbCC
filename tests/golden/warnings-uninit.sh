@@ -1,5 +1,5 @@
 #!/bin/sh
-# -Wuninitialized / -Wmaybe-uninitialized (docs/TOOLING.md T4).
+# -Wuninitialized / -Wmaybe-uninitialized (docs/tools/diagnostics.md T4).
 #
 # Every other warning EmbCC has is a check on one construct. This one is a
 # question about every path that reaches a read, so it is a real dataflow

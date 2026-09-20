@@ -1,6 +1,6 @@
 # src/ir
 
-EmbIR, the intermediate form — ../../docs/ARCHITECTURE.md §3.
+EmbIR, the intermediate form — ../../docs/architecture/overview.md §3.
 
 Linear three-address code over virtual registers. Width model: temps hold
 promoted values (32-bit int class or 64-bit long/pointer class, the `w` field,

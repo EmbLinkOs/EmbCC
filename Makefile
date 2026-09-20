@@ -14,7 +14,7 @@ BUILD   := build
 # The target-neutral compiler, then src/arch: what every target shares
 # (selection, the backend contract, the code buffer), then one directory per
 # architecture — everything x86-64-only under x86_64/, aarch64-only under
-# aarch64/ (src/arch/README.md; docs/COMPATIBILITY.md for what each supports).
+# aarch64/ (src/arch/README.md; docs/language/compatibility.md for what each supports).
 SRCS := \
 	src/platform/platform_posix.c \
 	src/driver/main.c \
@@ -103,7 +103,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c src/platform/platform_posix.c
 
-# embls — the language server (docs/TOOLING.md T5). It links EmbCC's own
+# embls — the language server (docs/tools/diagnostics.md T5). It links EmbCC's own
 # preprocessor and parser, so what an editor is told about a file comes from
 # the compiler that will compile it; diagnostics it gets by running embcc
 # itself. The parse runs in a forked child, because a front end ends the

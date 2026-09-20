@@ -1,5 +1,5 @@
 #!/bin/sh
-# Diagnostics an editor can act on (docs/TOOLING.md T1): the same compile
+# Diagnostics an editor can act on (docs/tools/diagnostics.md T1): the same compile
 # rendered as GCC's caret text or as GCC's -fdiagnostics-format=json, and a
 # fix-it that is a real edit — a span of the source and the text to put
 # there. The proof that the edit is real: applying it, mechanically, from

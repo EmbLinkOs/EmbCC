@@ -20,14 +20,14 @@ may be a subprocess (ARCHITECTURE §1).
 - **embdbg/** — EmbDBG, our own debug-info reader. Consumes the DWARF-4 that
   `embcc -g` emits: symbolizes an address to `func:file:line`, inspects frames
   and locals, disassembles, and drives a small TUI — with no gdb in the loop.
-  See `docs/EMBDBG_Requirements.md`.
+  See `docs/tools/embdbg.md`.
 
 ## Generators and harness
 
 - **gen-predef.sh** — regenerates `src/arch/<arch>/predef.c` from the reference gcc
   (ARCHITECTURE §5). The only way that table may change.
 - **gen-selfhost-ref.sh** — builds the reference objects for the self-hosting
-  fixed point (the 16 sources) and relinks stage1. See `docs/SELFHOST_ONOS.md`.
+  fixed point (the 16 sources) and relinks stage1. See `docs/developer/selfhost-on-os.md`.
 - **gen-embbuild-manifest.sh** — generates `build.ebm`, the EmbBuild manifest
   that builds EmbCC on the OS, with every unit's header closure **derived**
   (`cc -MM`) rather than hand-maintained.

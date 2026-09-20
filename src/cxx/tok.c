@@ -123,7 +123,7 @@ void cx_warn(const struct ctok *at, const char *fmt, ...)
 }
 
 /* Where the C++ front end resumes after an error, and how many it has
- * reported (docs/TOOLING.md T2). NULL means the error ends the compile, as
+ * reported (docs/tools/diagnostics.md T2). NULL means the error ends the compile, as
  * every C++ error once did — which is still the case once parsing is over
  * and instantiation has begun, where there is no statement boundary to
  * resume at. */
