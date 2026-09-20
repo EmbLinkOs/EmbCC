@@ -85,14 +85,14 @@ embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
 # embld also links the EmbDBG core (compiled -DEMBDBG_NO_MAIN, so no CLI main)
 # so the linker can emit a native .embdbg at link time through the SAME format
 # writer the embdbg tool uses — one implementation, not two.
-embld: tools/embld/embld.c src/link/link.c src/driver/util.c \
-       src/driver/diag.c \
+embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
+       src/driver/util.c src/driver/diag.c src/driver/explain.c \
        src/link/link.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	$(CC) $(CFLAGS) -DEMBDBG_NO_MAIN -Wno-unused-function -o $@ \
-	    tools/embld/embld.c src/link/link.c \
-	    src/driver/util.c src/driver/diag.c src/embx/embx.c \
-	    tools/embdbg/embdbg.c
+	    tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
+	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
+	    src/embx/embx.c tools/embdbg/embdbg.c
 
 # embls — the language server (docs/TOOLING.md T5). It links EmbCC's own
 # preprocessor and parser, so what an editor is told about a file comes from

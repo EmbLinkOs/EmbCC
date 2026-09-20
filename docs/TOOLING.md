@@ -18,7 +18,7 @@ until the front ends can keep going after an error.
 | **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Producers: a misspelt name, a missing `;`, `.` for `->` (and back), the member the type actually has, and the header that declares a C library name. | done — tests/golden/diagnostics-fix.sh: the fixed file compiles |
 | **T4** | **The driver GCC and Clang users already know.** Dependency generation, `-fsyntax-only`, `--help`, `-dumpmachine`, and warning groups over real analyses (unused variable/parameter/function, shadow, sign-compare), each with its `-Wno-` and its name in the diagnostic. Still to come: `-S`, `@file`, `-###`, and more analyses (uninitialised, fallthrough, format). | done for those — tests/golden/driver-deps.sh and warnings.sh (gcc agrees on which code warns) |
 | **T5** | **`embls`, the language server.** LSP over stdio, C and C++: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords), hover, go-to-definition, document symbols. Still to come: find references, signature help, rename, `#include` completion, cross-file indexing. | done (first five, both languages) — tests/golden/embls.sh drives a whole session |
-| **T6** | **Past the bar.** `embcc --explain <id>` — done: a stable id per diagnostic, printed with it, and an entry with the rule, a worked example, the fix and the citation. Still to come: suggestions that use the index rather than edit distance alone (the member you meant, on the type you have; the header that declares the name), and `embcc doctor` for why a link failed. | tests/golden/diagnostics-explain.sh, incl. "every id printed has an entry" |
+| **T6** | **Past the bar.** `embcc --explain <id>` — a stable id per diagnostic, printed with it, and an entry with the rule, a worked example, the fix and the citation. Suggestions come from the index rather than edit distance alone (the member you meant, on the type you have; the header that declares the name). `embld --doctor` says why a link failed, for every undefined symbol at once. | tests/golden/diagnostics-explain.sh, incl. "every id printed has an entry"; tests/golden/embld-doctor.sh |
 
 ## T1 — the engine (done)
 
@@ -243,3 +243,34 @@ Found on the way: every semantic diagnostic named the *unit's* file, so an
 error inside a header was reported against the `#include` line. Semantic
 analysis now reports against the file of the function it is checking, which
 is what a header's own errors always deserved.
+
+## T6 — `embld --doctor`, why the link failed
+
+A linker prints `undefined reference to 'foo'` and stops at the first one.
+That names the symptom. The cause is already in the inputs, and nobody
+reads them for you: `embld --doctor *.o *.a` does, and answers every
+undefined symbol in one run.
+
+It scans each object's symbol table, and every member of each archive —
+the question is what *could* define the name, not what the link happened to
+pull in — then, per undefined symbol, says which of these it is:
+
+| what the inputs show | what it says |
+| --- | --- |
+| another unit defines it, but `static` | names that unit: the definition exists and is private, so drop the `static` or move the caller |
+| it is a C library name | names the header that declares it (`strlen` → `<string.h>`) and the library a freestanding link does not add |
+| `__cxa_*`, `_Unwind_*`, `__cxxabiv1`, `_ZSt*` | the C++ runtime: link libsupc++ and libstdc++ |
+| `_ZTV…` / `_ZTI…` | the **key function** rule — a vtable is emitted with the first non-inline virtual function, so a key function that is only declared leaves no unit emitting it |
+| a mangled member function | a member declared in the class and never defined looks exactly like this |
+| nothing at all | is a source file missing from the link, or a library? |
+
+The C++ cases need the name read back, so the doctor carries enough Itanium
+demangling to turn `_ZTV5Shape` into `vtable for Shape` and
+`_ZNK5Shape4areaEv` into `Shape::area() const`, CV-qualifiers included.
+Anything more elaborate — templates, substitutions — is left mangled rather
+than guessed at, since a wrong name is worse than a raw one.
+
+The ordering of those cases is itself a judgement. libsupc++'s own
+`_ZTVN10__cxxabiv117__class_type_infoE` *is* a `_ZTV` symbol, and the
+key-function rule is true of it and useless: it sends the reader looking
+for a virtual function they never wrote. The runtime check runs first.
