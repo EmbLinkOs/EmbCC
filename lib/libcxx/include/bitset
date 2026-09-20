@@ -1,0 +1,160 @@
+/* <bitset> — C++ [template.bitset].
+ *
+ * N bits in ceil(N/64) words. The interesting part is operator[], which
+ * must return something ASSIGNABLE for a non-const bitset -- and a bit
+ * is not addressable, so there is nothing to return a reference to. The
+ * answer is a proxy object that remembers which word and which bit, and
+ * it is the canonical example of the pattern (vector<bool> is the
+ * other, and the reason that one is disliked).
+ */
+#ifndef _LIBCXX_BITSET
+#define _LIBCXX_BITSET
+
+#include <cstddef>
+#include <string>
+#include <stdexcept>
+
+namespace std {
+
+template <size_t N>
+class bitset {
+    static const size_t __bits = 64;
+    static const size_t __nw = (N + __bits - 1) / __bits ? (N + __bits - 1) / __bits : 1;
+    unsigned long __w[__nw];
+
+public:
+    /* A bit has no address, so operator[] on a mutable bitset returns
+     * this instead of `bool &`. Everything it does is read-modify-write
+     * on the word it remembers. */
+    class reference {
+    public:
+        reference(bitset &b, size_t p) : __b(b), __p(p) {}
+        reference &operator=(bool v) { __b.set(__p, v); return *this; }
+        reference &operator=(const reference &r)
+        { __b.set(__p, (bool)r); return *this; }
+        operator bool() const { return __b.test(__p); }
+        bool operator~() const { return !__b.test(__p); }
+        reference &flip() { __b.flip(__p); return *this; }
+    private:
+        bitset &__b;
+        size_t __p;
+    };
+
+    constexpr bitset() noexcept : __w{} {}
+    bitset(unsigned long long v) : __w{}
+    {
+        __w[0] = (unsigned long)v;
+        if (__nw > 1 && __bits < 64) __w[1] = (unsigned long)(v >> __bits);
+        __trim();
+    }
+    explicit bitset(const string &s) : __w{}
+    {
+        /* The string reads LEFT TO RIGHT as most-significant first,
+         * which is how a number is written and the opposite of the
+         * index order -- the one thing to get right here. */
+        size_t n = s.size() < N ? s.size() : N;
+        for (size_t i = 0; i < n; i++)
+            if (s[s.size() - 1 - i] == '1') set(i);
+    }
+
+    bool test(size_t p) const { return (__w[p / __bits] >> (p % __bits)) & 1; }
+    bool operator[](size_t p) const { return test(p); }
+    reference operator[](size_t p) { return reference(*this, p); }
+
+    bitset &set() { for (size_t i = 0; i < __nw; i++) __w[i] = ~0UL;
+                    __trim(); return *this; }
+    bitset &set(size_t p, bool v = true)
+    {
+        if (p >= N) __throw_bitset_out_of_range();
+        if (v) __w[p / __bits] |= 1UL << (p % __bits);
+        else __w[p / __bits] &= ~(1UL << (p % __bits));
+        return *this;
+    }
+    bitset &reset() { for (size_t i = 0; i < __nw; i++) __w[i] = 0; return *this; }
+    bitset &reset(size_t p) { return set(p, false); }
+    bitset &flip() { for (size_t i = 0; i < __nw; i++) __w[i] = ~__w[i];
+                     __trim(); return *this; }
+    bitset &flip(size_t p)
+    { __w[p / __bits] ^= 1UL << (p % __bits); return *this; }
+
+    size_t count() const
+    {
+        size_t c = 0;
+        for (size_t i = 0; i < __nw; i++)
+            c += (size_t)__builtin_popcountl(__w[i]);
+        return c;
+    }
+    constexpr size_t size() const noexcept { return N; }
+    bool any() const { return count() != 0; }
+    bool none() const { return count() == 0; }
+    bool all() const { return count() == N; }
+
+    bitset &operator&=(const bitset &o)
+    { for (size_t i = 0; i < __nw; i++) __w[i] &= o.__w[i]; return *this; }
+    bitset &operator|=(const bitset &o)
+    { for (size_t i = 0; i < __nw; i++) __w[i] |= o.__w[i]; return *this; }
+    bitset &operator^=(const bitset &o)
+    { for (size_t i = 0; i < __nw; i++) __w[i] ^= o.__w[i]; return *this; }
+    bitset operator~() const { bitset r = *this; r.flip(); return r; }
+
+    bitset &operator<<=(size_t k)
+    {
+        for (size_t i = N; i-- > 0; )
+            set(i, i >= k ? test(i - k) : false);
+        return *this;
+    }
+    bitset &operator>>=(size_t k)
+    {
+        for (size_t i = 0; i < N; i++)
+            set(i, i + k < N ? test(i + k) : false);
+        return *this;
+    }
+    bitset operator<<(size_t k) const { bitset r = *this; r <<= k; return r; }
+    bitset operator>>(size_t k) const { bitset r = *this; r >>= k; return r; }
+
+    bool operator==(const bitset &o) const
+    {
+        for (size_t i = 0; i < __nw; i++) if (__w[i] != o.__w[i]) return false;
+        return true;
+    }
+    bool operator!=(const bitset &o) const { return !(*this == o); }
+
+    unsigned long to_ulong() const { return __w[0]; }
+    unsigned long long to_ullong() const { return __w[0]; }
+
+    string to_string() const
+    {
+        string s;
+        for (size_t i = N; i-- > 0; ) s.push_back(test(i) ? '1' : '0');
+        return s;
+    }
+
+private:
+    /* The bits above N in the last word must stay zero, or count(), all()
+     * and == would all be wrong after a flip() or set(). */
+    void __trim()
+    {
+        size_t extra = __nw * __bits - N;
+        if (extra && extra < __bits)
+            __w[__nw - 1] &= ~0UL >> extra;
+    }
+    [[noreturn]] static void __throw_bitset_out_of_range();
+};
+
+template <size_t N>
+void bitset<N>::__throw_bitset_out_of_range()
+{ throw out_of_range("bitset: index out of range"); }
+
+template <size_t N>
+bitset<N> operator&(const bitset<N> &a, const bitset<N> &b)
+{ bitset<N> r = a; r &= b; return r; }
+template <size_t N>
+bitset<N> operator|(const bitset<N> &a, const bitset<N> &b)
+{ bitset<N> r = a; r |= b; return r; }
+template <size_t N>
+bitset<N> operator^(const bitset<N> &a, const bitset<N> &b)
+{ bitset<N> r = a; r ^= b; return r; }
+
+}  // namespace std
+
+#endif

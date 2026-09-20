@@ -53,8 +53,9 @@ those exact two members in that order.
 `<functional>`, `<array>`, `<vector>`, `<string>`, `<algorithm>`,
 `<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`,
 `<unordered_map>`, `<unordered_set>`, `<list>`, `<deque>`,
-`<forward_list>`, `<queue>`, `<stack>`, `<iostream>` and the rest of the
-stream headers, `<stdexcept>`, and the `<c*>` wrappers
+`<forward_list>`, `<queue>`, `<stack>`, `<string_view>`, `<span>`,
+`<bitset>`, `<iostream>` and the rest of the stream headers,
+`<stdexcept>`, and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
@@ -90,6 +91,22 @@ the three words, it has to re-aim the pointer, and a raw `const C *`
 argument may point into the buffer that a reallocation is about to free.
 `a += a` is the case that finds it, and the test does exactly that at
 the short/long boundary.
+
+**`string_view` and `span` own nothing**, which is both the point and
+the hazard: passing one costs two words instead of a copy, and outliving
+the characters it names is a dangling read that looks exactly like a
+working program until the buffer is reused. The rule that follows is
+worth stating: a view *parameter* is safe; a view *member* or *return
+value* is a promise about a lifetime you must be able to keep.
+`string_view` is also not guaranteed NUL-terminated, which is why it has
+`data()` and no `c_str()`.
+
+**`bitset::operator[]` returns a proxy**, because a bit has no address
+for a `bool &` to point at. It is the canonical example of the pattern —
+`vector<bool>` is the other, and the reason that one is disliked. The
+bits above *N* in the last word are kept zero, or `count()`, `all()` and
+`==` all lie after a `flip()`; the test uses `bitset<70>` so the
+trimming is exercised rather than assumed.
 
 **`list` uses a sentinel node**, so every operation is pointer-shuffling
 with no special case for "the list is empty" or "this is the first

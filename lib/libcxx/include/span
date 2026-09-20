@@ -1,0 +1,70 @@
+/* <span> — C++ [views.span].
+ *
+ * A pointer and a length over someone else's array. The same
+ * non-ownership as string_view, and the same hazard -- but mutable, so
+ * a span is how a function says "I will read and write these N elements
+ * and not resize them", which neither a pointer nor a vector& can say.
+ */
+#ifndef _LIBCXX_SPAN
+#define _LIBCXX_SPAN
+
+#include <cstddef>
+#include <type_traits>
+#include <iterator>
+#include <array>
+
+namespace std {
+
+inline constexpr size_t dynamic_extent = (size_t)-1;
+
+template <class T>
+class span {
+public:
+    using element_type = T;
+    using value_type = remove_cv_t<T>;
+    using size_type = size_t;
+    using pointer = T *;
+    using reference = T &;
+    using iterator = T *;
+
+    constexpr span() noexcept : __p(nullptr), __n(0) {}
+    constexpr span(T *p, size_type n) : __p(p), __n(n) {}
+    constexpr span(T *first, T *last) : __p(first), __n(last - first) {}
+    template <size_t N>
+    constexpr span(T (&a)[N]) : __p(a), __n(N) {}
+    template <class U, size_t N>
+    constexpr span(array<U, N> &a) : __p(a.data()), __n(N) {}
+    /* Any contiguous range with data() and size(): a vector, a string,
+     * another span. Deliberately not a list -- span means contiguous. */
+    template <class R, class = decltype(declval<R &>().data()),
+              class = decltype(declval<R &>().size())>
+    constexpr span(R &r) : __p(r.data()), __n(r.size()) {}
+
+    constexpr T *data() const noexcept { return __p; }
+    constexpr size_type size() const noexcept { return __n; }
+    constexpr size_type size_bytes() const noexcept { return __n * sizeof(T); }
+    constexpr bool empty() const noexcept { return __n == 0; }
+
+    constexpr T &operator[](size_type i) const { return __p[i]; }
+    constexpr T &front() const { return __p[0]; }
+    constexpr T &back() const { return __p[__n - 1]; }
+
+    constexpr T *begin() const noexcept { return __p; }
+    constexpr T *end() const noexcept { return __p + __n; }
+
+    constexpr span first(size_type n) const { return span(__p, n); }
+    constexpr span last(size_type n) const { return span(__p + __n - n, n); }
+    constexpr span subspan(size_type off, size_type n = dynamic_extent) const
+    { return span(__p + off, n == dynamic_extent ? __n - off : n); }
+
+private:
+    T *__p;
+    size_type __n;
+};
+
+template <class T, size_t N> span(T (&)[N]) -> span<T>;
+template <class R> span(R &) -> span<remove_reference_t<decltype(*declval<R &>().data())>>;
+
+}  // namespace std
+
+#endif

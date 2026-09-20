@@ -32,9 +32,26 @@ So: libgcc owns the machine, this owns the meaning.
 
 ## The standard library
 
-`include/` also holds the beginning of the standard library proper:
-`<type_traits>`, `<utility>`, `<limits>` and the `<c*>` wrappers. See
-`docs/language/libcxx.md`.
+`include/` also holds the standard library over it. Fifty headers so
+far, grouped roughly as:
+
+| | |
+|---|---|
+| foundation | `<type_traits>` `<utility>` `<limits>` `<iterator>` `<functional>` `<memory>` |
+| containers | `<array>` `<vector>` `<string>` `<list>` `<deque>` `<forward_list>` `<map>` `<set>` `<unordered_map>` `<unordered_set>` `<queue>` `<stack>` |
+| views | `<string_view>` `<span>` `<bitset>` |
+| vocabulary | `<tuple>` `<optional>` `<stdexcept>` |
+| algorithms | `<algorithm>` `<numeric>` |
+| streams | `<iostream>` `<ostream>` `<istream>` `<streambuf>` `<sstream>` `<iomanip>` `<ios>` |
+| C headers | the `<c*>` wrappers |
+
+Two are not standard headers: `include/__tree` is the red-black tree
+`<map>` and `<set>` share, and `include/__hash` is the hash table
+`<unordered_map>` and `<unordered_set>` share. They exist so those pairs
+have one implementation each rather than two.
+
+See `docs/language/libcxx.md` for the design decisions and what each
+part is tested by.
 
 ## Status
 

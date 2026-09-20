@@ -33,7 +33,7 @@ Per-library detail lives with the library, as a `README.md` beside the code:
 | [compatibility.md](language/compatibility.md) | what C EmbCC accepts, per clause and per extension, per architecture |
 | [cpp-levels.md](language/cpp-levels.md) | C++: the staged milestones CX1–CX9 and how the lowering works |
 | [libc.md](language/libc.md) | our C library: one implementation, one small backend per OS |
-| [libcxx.md](language/libcxx.md) | our C++ runtime: the Itanium ABI on libgcc's unwinder |
+| [libcxx.md](language/libcxx.md) | our C++ runtime (the Itanium ABI on libgcc's unwinder) and the standard library above it |
 
 ## ir/
 

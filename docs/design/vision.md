@@ -480,6 +480,16 @@ A compiler that generates correct code but disagrees with the linker, libc, or d
 - **TLS model**, stack alignment, red zone (disabled for kernel code), code models.
 - **Symbol naming** and section conventions.
 
+**The compiler owns a C++ standard library too**, for the sharper form
+of the same argument. EmbCC compiled GCC's libstdc++ (193/193 objects on
+both targets), but that is the *headers*; the runtime beneath them was
+GCC's `libsupc++`, and that runtime is where the compiler's own output
+is interpreted — the RTTI objects `src/cxx/emit.c` writes, the landing
+pads it generates, the guard variables around static locals. Those are
+EmbCC's decisions, so the code that reads them belongs beside the code
+that writes them. `lib/libcxx/` is now that runtime plus the standard
+library over it; see `docs/language/libcxx.md`.
+
 **The compiler owns a C library too.** This was not in the original plan,
 which assumed newlib for the test targets and emlibc for EmbLinkOS. Once
 EmbCC targeted more than one operating system that stopped being tenable:

@@ -1,0 +1,160 @@
+/* <string_view> — C++ [string.view].
+ *
+ * A pointer and a length. It owns NOTHING, and that is both the point
+ * and the hazard: passing one costs two words instead of a string copy,
+ * and outliving the characters it names is a dangling read that looks
+ * exactly like a working program until the buffer is reused.
+ *
+ * The rule that follows: a string_view parameter is safe, a string_view
+ * member or return value is a promise about a lifetime you must be able
+ * to keep. `sv = std::string("x")` dangles immediately -- the temporary
+ * dies at the end of the statement.
+ *
+ * It is also NOT guaranteed NUL-terminated, which is why it has data()
+ * and no c_str(). Handing data() to a C function is the other half of
+ * the same mistake.
+ */
+#ifndef _LIBCXX_STRING_VIEW
+#define _LIBCXX_STRING_VIEW
+
+#include <cstddef>
+#include <string>
+#include <iterator>
+#include <stdexcept>
+
+namespace std {
+
+/* Declared, not defined: the specialisation below needs the primary
+ * template's name, and pulling in <__hash> for it would drag the whole
+ * hash table into every string_view user. */
+template <class T> struct hash;
+
+template <class C, class T = char_traits<C>>
+class basic_string_view {
+public:
+    using value_type = C;
+    using size_type = size_t;
+    using const_iterator = const C *;
+    using iterator = const C *;
+    static const size_type npos = (size_type)-1;
+
+    constexpr basic_string_view() noexcept : __p(nullptr), __n(0) {}
+    constexpr basic_string_view(const C *s, size_type n) : __p(s), __n(n) {}
+    constexpr basic_string_view(const C *s) : __p(s), __n(T::length(s)) {}
+    template <class A>
+    basic_string_view(const basic_string<C, T, A> &s)
+        : __p(s.data()), __n(s.size()) {}
+
+    constexpr const C *data() const noexcept { return __p; }
+    constexpr size_type size() const noexcept { return __n; }
+    constexpr size_type length() const noexcept { return __n; }
+    constexpr bool empty() const noexcept { return __n == 0; }
+
+    constexpr const C &operator[](size_type i) const { return __p[i]; }
+    const C &at(size_type i) const
+    { if (i >= __n) __throw_sv_out_of_range(); return __p[i]; }
+    constexpr const C &front() const { return __p[0]; }
+    constexpr const C &back() const { return __p[__n - 1]; }
+
+    constexpr const C *begin() const noexcept { return __p; }
+    constexpr const C *end() const noexcept { return __p + __n; }
+    constexpr const C *cbegin() const noexcept { return __p; }
+    constexpr const C *cend() const noexcept { return __p + __n; }
+
+    /* These move the WINDOW; they copy nothing, which is what makes
+     * tokenising with a string_view allocation-free. */
+    constexpr void remove_prefix(size_type n) { __p += n; __n -= n; }
+    constexpr void remove_suffix(size_type n) { __n -= n; }
+
+    constexpr basic_string_view substr(size_type pos = 0,
+                                       size_type n = npos) const
+    {
+        if (pos > __n) __throw_sv_out_of_range();
+        size_type k = n < __n - pos ? n : __n - pos;
+        return basic_string_view(__p + pos, k);
+    }
+
+    int compare(basic_string_view o) const noexcept
+    {
+        size_type n = __n < o.__n ? __n : o.__n;
+        int r = T::compare(__p, o.__p, n);
+        if (r != 0) return r;
+        return __n < o.__n ? -1 : __n > o.__n ? 1 : 0;
+    }
+
+    size_type find(basic_string_view s, size_type pos = 0) const noexcept
+    {
+        if (s.__n == 0) return pos <= __n ? pos : npos;
+        if (s.__n > __n) return npos;
+        for (size_type i = pos; i + s.__n <= __n; i++)
+            if (T::compare(__p + i, s.__p, s.__n) == 0) return i;
+        return npos;
+    }
+    size_type find(C c, size_type pos = 0) const noexcept
+    {
+        for (size_type i = pos; i < __n; i++)
+            if (T::eq(__p[i], c)) return i;
+        return npos;
+    }
+
+    bool starts_with(basic_string_view s) const noexcept
+    { return s.__n <= __n && T::compare(__p, s.__p, s.__n) == 0; }
+    bool ends_with(basic_string_view s) const noexcept
+    { return s.__n <= __n && T::compare(__p + __n - s.__n, s.__p, s.__n) == 0; }
+    bool contains(basic_string_view s) const noexcept
+    { return find(s) != npos; }
+
+private:
+    const C *__p;
+    size_type __n;
+
+    [[noreturn]] static void __throw_sv_out_of_range();
+};
+
+template <class C, class T>
+void basic_string_view<C, T>::__throw_sv_out_of_range()
+{ throw out_of_range("string_view: index out of range"); }
+
+using string_view = basic_string_view<char>;
+
+template <class C, class T>
+bool operator==(basic_string_view<C, T> a, basic_string_view<C, T> b) noexcept
+{ return a.size() == b.size() && a.compare(b) == 0; }
+template <class C, class T>
+bool operator!=(basic_string_view<C, T> a, basic_string_view<C, T> b) noexcept
+{ return !(a == b); }
+template <class C, class T>
+bool operator<(basic_string_view<C, T> a, basic_string_view<C, T> b) noexcept
+{ return a.compare(b) < 0; }
+template <class C, class T>
+bool operator>(basic_string_view<C, T> a, basic_string_view<C, T> b) noexcept
+{ return b < a; }
+
+/* Comparing with a string or a literal without building either. */
+template <class C, class T, class A>
+bool operator==(basic_string_view<C, T> a, const basic_string<C, T, A> &b)
+{ return a == basic_string_view<C, T>(b); }
+template <class C, class T, class A>
+bool operator==(const basic_string<C, T, A> &a, basic_string_view<C, T> b)
+{ return basic_string_view<C, T>(a) == b; }
+template <class C, class T>
+bool operator==(basic_string_view<C, T> a, const C *b)
+{ return a == basic_string_view<C, T>(b); }
+template <class C, class T>
+bool operator==(const C *a, basic_string_view<C, T> b)
+{ return basic_string_view<C, T>(a) == b; }
+
+template <class C, class T>
+struct hash<basic_string_view<C, T>> {
+    size_t operator()(basic_string_view<C, T> s) const noexcept
+    {
+        size_t h = 1469598103934665603UL;
+        for (size_t i = 0; i < s.size(); i++)
+        { h ^= (unsigned char)s[i]; h *= 1099511628211UL; }
+        return h;
+    }
+};
+
+}  // namespace std
+
+#endif
