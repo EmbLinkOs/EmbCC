@@ -961,6 +961,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             st_slot(t, sd, i->dst, A64_ACC, 8);
             break;
 
+        case IR_SQRT:
+            a64_fldr(t, A64_FACC, FB, sd[i->a], i->w);
+            a64_fsqrt(t, A64_FACC, A64_FACC, i->w);
+            a64_fstr(t, A64_FACC, FB, sd[i->dst], i->w);
+            break;
+
         case IR_NEG:
             if (i->flt) {
                 a64_fldr(t, A64_FACC, FB, sd[i->a], i->w);

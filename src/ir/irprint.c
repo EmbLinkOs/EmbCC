@@ -44,7 +44,7 @@ const char *ir_opname(enum ir_op op)
         "f2f", "call", "ret", "label", "jmp", "memcpy", "memzero", "brz",
         "brnz", "va_start", "bswap", "fence", "ud2", "xchg", "xadd",
         "cmpxchg", "asm", "labeladdr", "igoto", "armw", "cas", "cas16",
-        "frameaddr", "alloca", "spsave", "sprestore", "landing",
+        "frameaddr", "alloca", "spsave", "sprestore", "landing", "sqrt",
     };
     if ((int)op < 0 || (size_t)op >= sizeof n / sizeof n[0])
         return "op?";
@@ -156,7 +156,7 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         ob_fmt(b, "%%%d = %s", i->dst, ir_opname(i->op)); suffix(b, i, 1);
         ob_fmt(b, " %%%d, ", i->a); operand_b(b, i);
         break;
-    case IR_NEG: case IR_BNOT: case IR_BSWAP:
+    case IR_NEG: case IR_BNOT: case IR_BSWAP: case IR_SQRT:
         ob_fmt(b, "%%%d = %s", i->dst, ir_opname(i->op)); suffix(b, i, 1);
         ob_fmt(b, " %%%d", i->a);
         break;

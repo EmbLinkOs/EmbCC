@@ -318,7 +318,8 @@ static int ins_def(const struct ir_ins *in)
     case IR_DIV: case IR_MOD: case IR_AND: case IR_OR: case IR_XOR:
     case IR_NEG: case IR_BNOT: case IR_CMP: case IR_LDVAR: case IR_ADDR:
     case IR_STRADDR: case IR_GADDR: case IR_FADDR: case IR_LOAD: case IR_EXT:
-    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BSWAP: case IR_SHL:
+    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BSWAP: case IR_SQRT:
+    case IR_SHL:
     case IR_SHR: case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
     case IR_ARMW: case IR_CAS: case IR_CAS16: case IR_FRAMEADDR:
     case IR_ALLOCA: case IR_SPSAVE:
@@ -376,6 +377,7 @@ static unsigned long *compute_live_intervals(struct ir_func *fn, int *first,
         defv[i] = ins_def(s);
         switch (s->op) {
         case IR_MOV: case IR_NEG: case IR_BNOT: case IR_EXT: case IR_BSWAP:
+        case IR_SQRT:
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
         case IR_ADDR:
             USE(s->a); break;
@@ -1074,6 +1076,7 @@ static void count_vreg_uses(struct ir_func *fn, int *cnt)
         struct ir_ins *s = &fn->ins[i];
         switch (s->op) {
         case IR_MOV: case IR_NEG: case IR_BNOT: case IR_EXT: case IR_BSWAP:
+        case IR_SQRT:
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
         case IR_ADDR: case IR_STVAR: case IR_VA_START:
         case IR_RET: case IR_BRZ: case IR_BRNZ:
@@ -2201,6 +2204,14 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     x86_alu_eax_mem(text, aop, sd[i->b], i->w);
             }
             cg_store(text, sd, i->dst, i->w);
+            break;
+        case IR_SQRT:
+            /* sqrtsd xmm0, [a] -- the hardware's result is correctly
+             * rounded, which is why the C library calls this rather than
+             * iterating. */
+            cg_reset();
+            x86_sse_alu_mem(text, 'q', sd[i->a], i->w);
+            x86_movs_store(text, 0, sd[i->dst], i->w);
             break;
         case IR_DIV:
         case IR_MOD:

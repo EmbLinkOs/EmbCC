@@ -1941,6 +1941,17 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 emit_store(fn, gen_addr(fn, d), tag, d->ty);
             return -1;
         }
+        if (e->name && strncmp(e->name, "__builtin_sqrt", 14) == 0) {
+            int v = gen_expr(fn, e->args[0]);
+            struct ir_ins *i = emit(fn);
+            i->op = IR_SQRT;
+            i->a = v;
+            i->flt = 1;
+            i->w = ty_size(e->ty);
+            i->size = ty_size(e->ty);
+            i->dst = new_temp(fn);
+            return i->dst;
+        }
         if (e->name && strncmp(e->name, "__builtin_bswap", 15) == 0) {
             int v = gen_expr(fn, e->args[0]);
             struct ir_ins *i = emit(fn);

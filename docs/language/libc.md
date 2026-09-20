@@ -38,15 +38,16 @@ deliberately, so every target gets the same behaviour and a fix lands once.
 | `<errno.h>` | complete, with the POSIX numbers |
 | `<stdlib.h>` | allocator, conversions, `qsort`/`bsearch`, process control, `rand` |
 | `<stdio.h>` | `FILE`, buffering, the whole `printf` family, files by name, positioning |
-| `<math.h>` | **not yet** — fdlibm is in emlibc and has to come across |
+| `<math.h>` | fdlibm's cores under their C11 names, plus what its 1993 set never carried |
+| `<complex.h>` | complete — new; emlibc never had one |
 | `<time.h>`, `<setjmp.h>`, `<assert.h>`, `<inttypes.h>` | **not yet** |
 | `<wchar.h>`, `<locale.h>`, `<signal.h>`, `<threads.h>` | **not yet** |
 | `scanf` family | declared, **not yet implemented** |
 
-**The acceptance test is the execution corpus.** 89 of the 90 x86-64
-programs in `tests/exec` compile, link and run against this library with
-**no newlib at all**, each producing its expected exit status. The one that
-does not is `complex.c`, which needs `cabs` — math is the next piece.
+**The acceptance test is the execution corpus.** All **90** x86-64 programs
+in `tests/exec` compile, link and run against this library with **no newlib
+at all**, each producing its expected exit status
+(`tests/golden/libc.sh`).
 
 ## Where it deliberately differs
 
@@ -70,3 +71,25 @@ tidy 1 makes that bug visible on the first run instead of after a port.
   interior pointer with the original stashed below it. C requires the
   result to be freed with plain `free`, so there must be exactly one kind
   of block.
+
+## Math
+
+`src/math/fdlibm/` is Sun's fdlibm, kept **verbatim** (its notice preserved)
+so it stays auditable against the original — the same source newlib's libm
+is built from, ~1 ulp. `src/math/math.c` is the layer over it: its
+`__ieee754_*` cores under the names C11 uses, the functions its 1993 set
+never carried (`log2`, `exp2`, `log1p`, the inverse hyperbolics, `lgamma`,
+`tgamma`, `erf`), IEEE classification, and the float and long-double forms.
+
+`sqrt` is `__builtin_sqrt`, so EmbCC emits the machine's own instruction —
+`sqrtsd` on x86-64, `fsqrt` on aarch64. Both are correctly rounded by
+hardware, which no software core matches, and it is one instruction rather
+than a call. Inline asm would have served one target; the builtin serves
+every target that has the instruction, which is why it belongs in the
+compiler.
+
+`<complex.h>` is new — emlibc never had one, and it is why `complex.c` was
+the last program that would not link. `cabs` is `hypot`, not
+`sqrt(x*x + y*y)`: the naive form overflows for magnitudes that are
+perfectly representable and underflows small ones to zero, which is the
+commonest bug in a hand-rolled complex library.

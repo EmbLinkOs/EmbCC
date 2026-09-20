@@ -1882,6 +1882,20 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                 bn[5] == '3' ? TY_INT : TY_LONG, 1);
                 break;
             }
+            /* square root -- one instruction on both targets, and the
+             * hardware's result is correctly rounded. */
+            else if (strcmp(bn, "sqrt") == 0 || strcmp(bn, "sqrtf") == 0 ||
+                     strcmp(bn, "sqrtl") == 0) {
+                if (e->nargs != 1)
+                    sema_error_at(u, e->line, e->col, "%s takes one argument",
+                               e->lhs->name);
+                check_expr(u, f, sc, e->args[0]);
+                e->name = e->lhs->name;
+                e->ty = ty_base(bn[4] == 'f' ? TY_FLOAT : TY_DOUBLE, 0);
+                e->args[0] = convert_assign(u, e->args[0], e->ty,
+                                            "__builtin_sqrt");
+                break;
+            }
             /* the value IS the first argument; the hint is discarded */
             else if (strcmp(bn, "expect") == 0 ||
                      strcmp(bn, "expect_with_probability") == 0 ||

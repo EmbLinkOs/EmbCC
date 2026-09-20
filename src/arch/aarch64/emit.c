@@ -520,6 +520,14 @@ void a64_fneg(struct code *c, int vd, int vn, int w)
     fdp1(c, 2, vd, vn, ftype(w));
 }
 
+/* fsqrt: FP data-processing, one source, opcode 3 -- the same shape as
+ * fneg. One instruction, correctly rounded by the hardware, which is why
+ * the C library reaches for it instead of iterating (lib/libc/src/math). */
+void a64_fsqrt(struct code *c, int vd, int vn, int w)
+{
+    fdp1(c, 3, vd, vn, ftype(w));
+}
+
 void a64_fcvt(struct code *c, int vd, int vn, int from_w, int to_w)
 {
     if (from_w == to_w) {

@@ -59,6 +59,11 @@ enum ir_op {
     IR_VA_START, /* init the va_list whose ADDRESS is in temp a (SysV:
                   * fill a __va_list_tag on the frame, point *a at it) */
     IR_BSWAP, /* dst = byteswap(a)   (size: 2/4/8; __builtin_bswapN) */
+    IR_SQRT,  /* dst = sqrt(a)       (flt; w: 4 float / 8 double)
+               * One instruction on both targets -- sqrtss/sqrtsd and
+               * fsqrt -- and correctly rounded by the hardware, which no
+               * software core matches. A C library that had to call out
+               * to software here would be slower AND less accurate. */
     IR_FENCE, /* a full memory barrier (mfence; __sync_synchronize) */
     IR_UD2,   /* the undefined instruction (ud2; __builtin_unreachable) */
     IR_XCHG,  /* dst = *(temp a); *(temp a) = b   (atomic; size) */

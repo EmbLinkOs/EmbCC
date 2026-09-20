@@ -1005,6 +1005,9 @@ void x86_sse_alu_mem(struct code *c, int op, int disp, int w)
     case '-': code_byte(c, 0x5c); break; /* subss/subsd */
     case '*': code_byte(c, 0x59); break; /* mulss/mulsd */
     case '/': code_byte(c, 0x5e); break; /* divss/divsd */
+    case 'q': code_byte(c, 0x51); break; /* sqrtss/sqrtsd: reads memory
+                                          * straight into xmm0, so no
+                                          * separate load is needed */
     default:
         internal_error("no SSE encoding for '%c'", op);
     }

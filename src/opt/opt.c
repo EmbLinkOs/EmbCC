@@ -27,7 +27,7 @@ static int writes_temp(enum ir_op op)
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
     case IR_NEG: case IR_BNOT: case IR_CMP:
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
-    case IR_FADDR: case IR_LOAD: case IR_EXT: case IR_BSWAP:
+    case IR_FADDR: case IR_LOAD: case IR_EXT: case IR_BSWAP: case IR_SQRT:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_CALL: case IR_XCHG:
     case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_CAS16:
     case IR_FRAMEADDR: case IR_ALLOCA: case IR_SPSAVE:
@@ -48,7 +48,7 @@ static int is_pure(enum ir_op op)
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
     case IR_NEG: case IR_BNOT: case IR_CMP:
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
-    case IR_FADDR: case IR_EXT: case IR_BSWAP:
+    case IR_FADDR: case IR_EXT: case IR_BSWAP: case IR_SQRT:
     case IR_I2F: case IR_F2I: case IR_F2F:
         return 1;
     default:
@@ -73,7 +73,8 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
     switch (i->op) {
     case IR_MOV: case IR_NEG: case IR_BNOT:
     case IR_I2F: case IR_F2I: case IR_F2F:
-    case IR_EXT: case IR_BSWAP: case IR_LDVAR: case IR_ADDR: case IR_LOAD:
+    case IR_EXT: case IR_BSWAP: case IR_SQRT:
+    case IR_LDVAR: case IR_ADDR: case IR_LOAD:
     case IR_MEMZERO: case IR_VA_START: case IR_STVAR:
     case IR_ALLOCA: case IR_SPRESTORE:
         cb(&i->a, ctx);
@@ -451,7 +452,9 @@ static int vn_key(struct ir_ins *i, int memver, struct vn *k)
     case IR_CMP:
         k->a = i->a; k->b = i->b; k->w = i->w; k->sign = i->sign;
         k->pred = i->pred; return 1;
-    case IR_NEG: case IR_BNOT:
+    case IR_NEG: case IR_BNOT: case IR_SQRT:
+        /* `op` is already part of the key, so these three cannot
+         * collide with each other. */
         k->a = i->a; k->w = i->w; return 1;
     case IR_EXT:
         k->a = i->a; k->w = i->w; k->sign = i->sign; k->size = i->size; return 1;

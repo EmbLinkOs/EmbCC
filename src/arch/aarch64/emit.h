@@ -135,6 +135,7 @@ void a64_fldr(struct code *c, int vt, int rn, long off, int w);
 void a64_fstr(struct code *c, int vt, int rn, long off, int w);
 /* op: '+' '-' '*' '/' */
 void a64_falu(struct code *c, int op, int vd, int vn, int vm, int w);
+void a64_fsqrt(struct code *c, int vd, int vn, int w);
 void a64_fneg(struct code *c, int vd, int vn, int w);
 void a64_fmov_reg(struct code *c, int vd, int vn, int w);
 void a64_fcmp(struct code *c, int vn, int vm, int w);

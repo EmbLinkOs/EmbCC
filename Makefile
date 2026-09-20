@@ -180,8 +180,9 @@ test-libstdcxx: embcc
 # One implementation, ported to an OS by one small backend. Built with
 # EmbCC itself, per target -- which is also the widest test the compiler
 # gets outside its own sources.
-LIBC_SRCS := $(wildcard lib/libc/src/*/*.c) lib/libc/os/posixlike/backend.c
-LIBC_INC  := -Ilib/libc/include
+LIBC_SRCS := $(wildcard lib/libc/src/*/*.c) $(wildcard lib/libc/src/math/fdlibm/*.c) \
+             lib/libc/os/posixlike/backend.c
+LIBC_INC  := -Ilib/libc/include -Ilib/libc/src/math
 
 libc-x86_64: embcc
 	@mkdir -p $(BUILD)/libc/x86_64

@@ -344,6 +344,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
             in->imm = strtol(word(p), NULL, 10);
             break;
         case IR_MOV: case IR_NEG: case IR_BNOT: case IR_BSWAP:
+        case IR_SQRT:
             in->a = vreg(p, word(p));
             break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:

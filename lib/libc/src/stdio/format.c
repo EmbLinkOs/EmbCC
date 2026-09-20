@@ -84,6 +84,10 @@ static void put_int(struct out *o, unsigned long long v, int base, int upper,
 static void put_double(struct out *o, double v, char conv, int flags,
                        int width, int prec)
 {
+    /* %g strips trailing zeros from the fraction unless '#' is given
+     * (C11 §7.21.6.1p8) -- which is most of what makes %g readable, and is
+     * the step a hand-written formatter always leaves out. */
+    int strip = (conv == 'g' || conv == 'G') && !(flags & F_HASH);
     char sign[2] = {0, 0};
     if (v < 0 || (v == 0 && 1.0 / v < 0)) { sign[0] = '-'; v = -v; }
     else if (flags & F_PLUS)  sign[0] = '+';
@@ -162,6 +166,27 @@ static void put_double(struct out *o, double v, char conv, int flags,
         if (e >= 100) { digits[nd++] = (char)('0' + e / 100); e %= 100; }
         digits[nd++] = (char)('0' + e / 10);
         digits[nd++] = (char)('0' + e % 10);
+    }
+
+    if (strip) {
+        /* Only within the fraction, and only up to the '.', so 100.0 with
+         * %g is "100" and not "1". An exponent, if there is one, is moved
+         * back over the removed digits. */
+        int epos = nd;
+        for (int i = 0; i < nd; i++)
+            if (digits[i] == 'e' || digits[i] == 'E') { epos = i; break; }
+        int dot = -1;
+        for (int i = 0; i < epos; i++)
+            if (digits[i] == '.') { dot = i; break; }
+        if (dot >= 0) {
+            int end = epos;
+            while (end > dot + 1 && digits[end - 1] == '0') end--;
+            if (end == dot + 1) end = dot;      /* nothing left after it */
+            if (end < epos) {
+                for (int i = epos; i < nd; i++) digits[end + (i - epos)] = digits[i];
+                nd -= epos - end;
+            }
+        }
     }
 
     int body = nd + (sign[0] ? 1 : 0);
