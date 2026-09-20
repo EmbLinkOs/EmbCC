@@ -196,6 +196,7 @@ cat > "$out/hosted.c" << 'EOF'
 #include <time.h>
 #include <inttypes.h>
 #include <assert.h>
+#include <string.h>
 static jmp_buf jb;
 static int depth;
 static void inner(int n) { if (n == 0) longjmp(jb, 7); inner(n - 1); }
@@ -256,6 +257,38 @@ int main(void)
            /* Nothing converted: zero, and `end` back at the start. */
            strtod("abc", &e) == 0.0,
            strtod("inf", &e) > 1e308 && strtod("-inf", &e) < -1e308);
+    /* printf's floating conversion is EXACT, which is a stronger claim
+     * than "close" and is checked as one. Each of these is a tie or a
+     * near-tie -- the cases where an implementation that scales in
+     * floating point and rounds half away from zero gives a different
+     * answer than C requires.
+     *
+     * 2.5 and 0.35 are the two shapes of the bug. 2.5 is an exact tie
+     * and rounds to EVEN, so "2". 0.35 is not a tie at all: the nearest
+     * double is slightly below 0.35, so it rounds DOWN to 0.3 -- but
+     * multiplying its fraction by ten rounds up to exactly 3.5 and
+     * invents a tie, which then rounds up to 0.4. */
+    char fb[400];
+    snprintf(fb, sizeof fb, "%.0f %.0f %.0f %.0f", 0.5, 1.5, 2.5, 3.5);
+    printf("ties %s\n", fb);
+    snprintf(fb, sizeof fb, "%.1f %.1f %.2f", 0.25, 0.35, 2.675);
+    printf("neartie %s\n", fb);
+    /* A carry out of the leading digit, in both styles: %f grows by a
+     * character, %e keeps one digit and moves the exponent. */
+    snprintf(fb, sizeof fb, "%.1f %.1e %.0e", 9.99, 9.99, 9.5);
+    printf("carry %s\n", fb);
+    /* %g's style is chosen from the exponent AFTER rounding, so 9.9999
+     * at four significant digits is 10 and prints as %f, not 1e+01. */
+    snprintf(fb, sizeof fb, "%.4g %g %g", 9.9999, 100.0, 0.0001);
+    printf("gstyle %s\n", fb);
+    /* The extremes: a subnormal, and the largest double, exactly. */
+    snprintf(fb, sizeof fb, "%.2e %.0f", 5e-324, 1e15 + 0.5);
+    printf("extreme %s\n", fb);
+    /* The largest double printed in full: 309 digits, all of them exact
+     * -- it is an integer, and every one of its digits is determined. */
+    snprintf(fb, sizeof fb, "%.0f", 1.7976931348623157e308);
+    printf("dblmax %d %c%c%c\n", (int)strlen(fb), fb[0], fb[1], fb[2]);
+
     assert(a != 999999);
     return 42;
 }
@@ -286,8 +319,16 @@ want_line "scanset n=2 abc 123"
 # every read loop written against it.
 want_line "fail 0 eof -1"
 want_line "scn -9223372036854775807 5"
+# Ties round to EVEN, and a value that is not a tie is not turned into one.
+want_line "ties 0 2 2 4"
+want_line "neartie 0.2 0.3 2.67"
+want_line "carry 10.0 1.0e+01 1e+01"
+want_line "gstyle 10 100 0.0001"
+want_line "extreme 4.94e-324 1000000000000000"
+want_line "dblmax 309 179"
 echo "setjmp/longjmp across frames, the calendar before and after the epoch
-and on a leap day, strftime, and scanf's matching and input failures"
+and on a leap day, strftime, scanf's matching and input failures, and
+printf's floating conversion exact at every tie, carry and extreme"
 
 # ---- the acceptance: the whole execution corpus ---------------------------
 ok=0; bad=0

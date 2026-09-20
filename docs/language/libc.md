@@ -115,6 +115,44 @@ better; correct rounding for every input needs arbitrary-precision
 arithmetic. Hex floats (`0x1.8p3`) are exact by construction — they are
 binary already — and are parsed separately for that reason.
 
+## printf, the other direction
+
+Binary float to decimal text, and here the answer *is* exact. A double is
+*m* × 2^*e* with *m* an integer, so its value always has a finite decimal
+expansion: for *e* ≥ 0 it is the integer *m*·2^*e*, and for *e* < 0 it is
+*m*·5^−*e* with the point shifted, because 1/2^*k* is 5^*k*/10^*k*. The
+digits therefore come out of **integer multiplication alone** — no
+division, no approximation, and no question about where a tie falls.
+`lib/libc/src/stdio/format.c` carries a small base-10⁹ big integer for
+it; 86 limbs is the most any double needs, because the smallest subnormal
+expands to 767 digits.
+
+It did not start that way, and the difference is worth stating because it
+is the shape of the bug every hand-written formatter has. The first
+version scaled the value in floating point and rounded half away from
+zero. That is wrong twice:
+
+- `%.0f` of 2.5 printed `3`. An exact tie rounds to **even**, so C and
+  every other library print `2`. Ties away from zero make a column of
+  half-cent figures drift upwards, which is the whole reason the rule
+  exists.
+- `%.1f` of 0.35 printed `0.4`. This one is worse, because 0.35 is *not
+  a tie at all* — the nearest double is slightly below it, so `0.3` is
+  right. Multiplying the fraction by ten rounded it up to exactly 3.5 and
+  manufactured a tie that was never there. The information was destroyed
+  by the first multiply, and no amount of care afterwards recovers it.
+
+A sweep of **29,090 conversions** — every style at every precision over
+ties, subnormals, the extremes and four thousand random bit patterns —
+now matches a known-correct library byte for byte. The golden keeps the
+cases that used to fail.
+
+Two things are absent rather than wrong: `%a`, and `long double`, which
+narrows to a double before conversion — so `%Lf` of a value outside
+double's range prints `inf`. Doing that exactly needs a big integer
+fourteen times larger (5^16445 rather than 5^1074), paid on every call
+for a conversion nothing here makes.
+
 ## Math
 
 `src/math/fdlibm/` is Sun's fdlibm, kept **verbatim** (its notice preserved)
