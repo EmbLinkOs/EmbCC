@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../../driver/remark.h"
 #include "../../driver/util.h"
 
 /* -g: when set, DWARF wants each source variable at a distinct stack location,
@@ -741,6 +742,7 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
     }
 
     int reg_used[NLEAF];
+    int nspill = 0;
     for (int k = 0; k < NP; k++) reg_used[k] = 0;
     for (int oi = 0; oi < E; oi++) {
         int e = order[oi];
@@ -789,7 +791,19 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
             for (int k = 0; k < NP; k++)               /* else lowest free */
                 if (!(taken & (1 << k))) { pick = k; break; }
         if (pick >= 0) { loc[eidx[e]] = POOL[pick]; reg_used[pick] = 1; }
+        else nspill++;               /* no colour: this value lives in memory */
     }
+    /* Why a value ended up in memory is the other question people ask of an
+     * optimizer, and the answer is a property of the whole function -- how
+     * many values were live at once against how many registers exist -- not
+     * of any one value. So it is reported once, with both numbers. */
+    if (nspill && remarks_on())
+        remark_add("regalloc", "spilled-to-stack",
+                   fn->src ? fn->src->name : NULL, "no-register-free",
+                   fn->src ? fn->src->file : NULL,
+                   fn->src ? fn->src->line : 0,
+                   "%d of %d values did not get one of the %d allocatable "
+                   "registers", nspill, E, NP);
 
     /* Inline asm can hard-code a callee-saved register the allocator never sees
      * — cpuid writes RBX (its "=b" output), and any operand fixed to rbx/r12..r15

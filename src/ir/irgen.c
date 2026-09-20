@@ -2398,7 +2398,7 @@ static int gen_stmtexpr(struct ir_func *fn, struct expr *e)
 /* -g: record one source variable. Skips the unnamed (prototype params never
  * reach a definition, but be defensive) so the DWARF DIE always has a name. */
 static void add_dbgvar(struct ir_func *fn, const char *name, int vreg,
-                       int is_param, struct type *ty)
+                       int is_param, struct type *ty, int line, int col)
 {
     if (!name) return;
     if (fn->ndbgvars == fn->dbgvarcap) {
@@ -2411,6 +2411,8 @@ static void add_dbgvar(struct ir_func *fn, const char *name, int vreg,
     v->vreg = vreg;
     v->is_param = is_param;
     v->ty = ty;
+    v->line = line;
+    v->col = col;
 }
 
 /* -g: walk the body for block-scope locals. Each STMT_DECL owns a var slot
@@ -2426,7 +2428,7 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
                 break;
             if (!s->sglob)
                 add_dbgvar(fn, s->name, s->var_index, 0,
-                           fn->src->var_tys[s->var_index]);
+                           fn->src->var_tys[s->var_index], s->line, s->col);
             break;
         case STMT_IF:
             collect_locals(fn, s->thn);
@@ -2462,7 +2464,8 @@ static void gen_func(struct ir_func *fn, struct func *f)
     /* -g bookkeeping (harmless when -g is off — only the DWARF pass reads it):
      * parameters are vregs [0, nparams); locals come from the body. */
     for (int i = 0; i < f->nparams; i++)
-        add_dbgvar(fn, f->params[i], i, 1, f->param_tys[i]);
+        add_dbgvar(fn, f->params[i], i, 1, f->param_tys[i],
+                   f->param_lines[i], f->param_cols[i]);
     collect_locals(fn, f->body);
     /* Local scope ranges: default to the whole function ([0, +inf), narrowed to
      * the real end below) so any local not inside a nested block never coalesces

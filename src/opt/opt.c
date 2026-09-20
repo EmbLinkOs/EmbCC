@@ -834,6 +834,17 @@ static void mem2reg_free(struct bb *bb, int nbb, int **df, int *ndf, int *l2b,
     free(bb); free(df); free(ndf); free(l2b); free(order);
 }
 
+/* The name a local was written with. irgen records these unconditionally
+ * ("harmless when -g is off"), so a remark can name the variable the
+ * programmer knows rather than a slot number. */
+static const struct ir_dbgvar *local_var(const struct ir_func *fn, int L)
+{
+    for (int i = 0; i < fn->ndbgvars; i++)
+        if (fn->dbgvars[i].vreg == L && !fn->dbgvars[i].is_param)
+            return &fn->dbgvars[i];
+    return NULL;
+}
+
 static int pass_mem2reg(struct ir_func *fn)
 {
     int nvars = fn->src->nvars;
@@ -841,29 +852,63 @@ static int pass_mem2reg(struct ir_func *fn)
         return 0;
 
     /* 1. Promotable locals: a scalar int/ptr of 4 or 8 bytes, never
-     * address-taken, every load full-width plain. */
+     * address-taken, every load full-width plain.
+     *
+     * Each rejection keeps its OWN reason (R2): "why is this variable still
+     * on the stack" is the question this pass answers, and five different
+     * causes used to leave the same zero behind. */
     int nparams = fn->src->nparams;
     char *ok = xmalloc((size_t)nvars);
+    const char **why = xcalloc((size_t)nvars, sizeof *why);
     for (int L = 0; L < nvars; L++) {
         struct type *t = fn->src->var_tys[L];
         /* Params are excluded: their value is live on entry (no defining IR
          * instruction), so SSA has no version to seed a read with. Only true
          * locals, always assigned before use, are promoted. */
-        ok[L] = L >= nparams && t &&
-                (ty_is_integer(t) || t->kind == TY_PTR) &&
-                (ty_size(t) == 4 || ty_size(t) == 8);
+        ok[L] = 1;
+        if (L < nparams)                        { ok[L] = 0; why[L] = "is-a-parameter"; }
+        else if (!t)                            { ok[L] = 0; why[L] = "type-unknown"; }
+        else if (!(ty_is_integer(t) || t->kind == TY_PTR))
+                                                { ok[L] = 0; why[L] = "not-a-scalar-integer-or-pointer"; }
+        else if (!(ty_size(t) == 4 || ty_size(t) == 8))
+                                                { ok[L] = 0; why[L] = "not-4-or-8-bytes"; }
     }
     for (int L = 0; L < nvars; L++)
-        if (fn->src->var_tys[L] && fn->src->var_tys[L]->is_volatile)
+        if (ok[L] && fn->src->var_tys[L] && fn->src->var_tys[L]->is_volatile) {
             ok[L] = 0;                          /* volatile: every access must stay */
+            why[L] = "declared-volatile";
+        }
     for (int i = 0; i < fn->nins; i++) {
         struct ir_ins *in = &fn->ins[i];
-        if (in->op == IR_ADDR && in->a >= 0 && in->a < nvars) ok[in->a] = 0;
-        if (in->op == IR_LDVAR && in->a >= 0 && in->a < nvars &&
-            (in->vol || !m2r_plain(in->size, in->sign, in->w))) ok[in->a] = 0;
-        if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars && in->vol)
-            ok[in->dst] = 0;
+        if (in->op == IR_ADDR && in->a >= 0 && in->a < nvars && ok[in->a]) {
+            ok[in->a] = 0; why[in->a] = "address-is-taken";
+        }
+        if (in->op == IR_LDVAR && in->a >= 0 && in->a < nvars && ok[in->a] &&
+            (in->vol || !m2r_plain(in->size, in->sign, in->w))) {
+            ok[in->a] = 0;
+            why[in->a] = in->vol ? "read-is-volatile"
+                                 : "read-is-partial-or-extending";
+        }
+        if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars &&
+            in->vol && ok[in->dst]) {
+            ok[in->dst] = 0; why[in->dst] = "write-is-volatile";
+        }
     }
+    if (remarks_on())
+        for (int L = nparams; L < nvars; L++) {
+            const struct ir_dbgvar *v = local_var(fn, L);
+            if (!v || !v->name || v->name[0] == '<')  /* a compiler-invented name */
+                continue;
+            const char *file = fn->src ? fn->src->file : NULL;
+            int line = v->line ? v->line : (fn->src ? fn->src->line : 0);
+            if (ok[L])
+                remark_add("mem2reg", "promoted-to-register", v->name,
+                           "scalar-and-never-addressed", file, line, NULL);
+            else
+                remark_add("mem2reg", "kept-in-memory", v->name,
+                           why[L] ? why[L] : "unknown", file, line, NULL);
+        }
+    free(why);
     int nprom = 0;
     int *prom = xmalloc((size_t)nvars * sizeof *prom);     /* local -> prom idx */
     int *ploc = xmalloc((size_t)nvars * sizeof *ploc);     /* prom idx -> local */
@@ -1364,8 +1409,25 @@ static int pass_sccp(struct ir_func *fn)
         long v = fn->ins[d.ins[t->a]].imm;
         int taken = (t->op == IR_BRZ) ? (v == 0) : (v != 0);
         int want = taken ? 0 : 1;
-        if (want < bb[b].nsucc)      /* only if that edge actually exists */
+        if (want < bb[b].nsucc) {     /* only if that edge actually exists */
             live_only[b] = want;
+            /* A branch whose condition is a constant always goes the same
+             * way, which is worth saying out loud: it is as often a bug in
+             * the program as an optimization in the compiler.
+             *
+             * `taken` means the BRANCH jumps, not that the source condition
+             * was true -- for `if (c)` irgen emits `BRZ c -> else`, so a
+             * taken branch is a FALSE condition. Rather than guess at the
+             * source's polarity from the lowering, the remark states the IR
+             * fact, which is the one that is certainly true. */
+            remark_add("sccp",
+                       taken ? "branch-always-jumps" : "branch-never-jumps",
+                       fn->src ? fn->src->name : NULL,
+                       "condition-is-a-constant",
+                       fn->src ? fn->src->file : NULL, t->line,
+                       "the condition folded to %ld, so one arm is "
+                       "unreachable", v);
+        }
     }
 
     /* Reachability over the live edges only. */
@@ -1858,6 +1920,7 @@ static void opt_func(struct ir_func *fn)
         return;
     int verify = getenv("EMBCC_VERIFY") != NULL;
     if (verify) verify_func(fn, "irgen");
+    int ins_before = fn->nins;
     if (g_mem2reg)
         pass_mem2reg(fn);         /* global mem2reg (subsumes store-forwarding) */
     /* Global load CSE is the expensive pass (CFG + an available-expressions
@@ -1892,6 +1955,14 @@ static void opt_func(struct ir_func *fn)
     if (pass_immfold(fn))
         pass_dce(fn);
     if (verify) verify_func(fn, "opt");
+
+    /* What the whole fixpoint came to, for this function. The per-pass
+     * decisions above answer "why"; this answers "did anything happen", and
+     * it is the number a person compares between two builds. */
+    if (remarks_on() && fn->src)
+        remark_add("opt", "optimized", fn->src->name, "fixpoint-reached",
+                   fn->src->file, fn->src->line,
+                   "%d instructions -> %d", ins_before, fn->nins);
 }
 
 void opt_run(struct ir_unit *iu, int level)

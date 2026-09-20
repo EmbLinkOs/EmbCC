@@ -209,7 +209,16 @@ struct ir_line { int off; int line; };
  * rbp-relative offset into ir_func.var_off[vreg], and the DWARF emitter turns
  * the pair into DW_AT_location = DW_OP_fbreg(offset). Statics are excluded —
  * they are globals, not frame storage. */
-struct ir_dbgvar { const char *name; int vreg; int is_param; struct type *ty; };
+/* `line`/`col` are where the variable was DECLARED (R3). A diagnostic or a
+ * remark about a variable has to point at the variable, not at the function
+ * that happens to contain it. */
+struct ir_dbgvar {
+    const char *name;
+    int vreg;
+    int is_param;
+    struct type *ty;
+    int line, col;
+};
 
 struct ir_func {
     struct func *src;        /* name, linkage, code_off/len live here */

@@ -462,7 +462,41 @@ no reason":
     (remarks come from the passes that RAN -- an optimization
     decision needs -O2)
 
-**One producer so far.** SCCP, CSE, DCE, mem2reg and the register allocator
-still record nothing. Each will cost the same kind of pass through its own
-decisions, which is exactly what the vision document meant by "this cannot be
-retrofitted".
+### The producers
+
+| pass | decisions it records |
+|---|---|
+| `inline` | `inlined` / `not-inlined`, with the reason out of twelve and the size that settled it |
+| `mem2reg` | `promoted-to-register` / `kept-in-memory` **per variable**, at that variable's own declaration line |
+| `sccp` | `branch-always-jumps` / `branch-never-jumps` when a condition folds to a constant |
+| `opt` | `optimized`: what the whole fixpoint came to, as instructions before → after |
+| `regalloc` | `spilled-to-stack`: how many values missed a register, out of how many, against how many registers exist |
+
+**"Why is my variable still on the stack?"** is the question `mem2reg`
+answers, and five different causes used to leave the same zero behind:
+
+    $ embcc why kept-in-memory prog.c -O2
+    vol (prog.c:7): kept-in-memory
+      because declared-volatile
+    addressed (prog.c:8): kept-in-memory
+      because address-is-taken
+    agg (prog.c:9): kept-in-memory
+      because not-a-scalar-integer-or-pointer
+
+Each points at its own declaration line, which needed `struct ir_dbgvar` to
+carry one — R3 work that fell out of R2, because a remark about a variable
+has to point at the variable and not at the function containing it.
+
+**A remark states the fact it is sure of.** SCCP knows a branch folded; it
+does *not* know whether the programmer's condition was true, because `if (c)`
+lowers to `BRZ c -> else` and a *taken* branch is therefore a *false*
+condition. Reporting "condition is always true" there would be exactly
+backwards, so the remark reports the IR fact and the golden asserts that the
+source-polarity wording never appears.
+
+**Still silent:** local CSE, global CSE, DCE, copy propagation, load
+elimination and store forwarding. These run inside a fixpoint where `changed`
+doubles as loop control, so counting them means restructuring the loop rather
+than adding a line — the per-function `opt` summary covers their aggregate
+effect until then. The aarch64 backend has no register allocator (memory-model
+codegen), so `spilled-to-stack` correctly never appears on that target.
