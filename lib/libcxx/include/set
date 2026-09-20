@@ -1,0 +1,135 @@
+/* <set> and <multiset> — C++ [set], [multiset].
+ *
+ * The same red-black tree as <map>, with the key and the value the same
+ * thing. That is the only difference, which is why they share
+ * include/__tree rather than each having their own.
+ *
+ * A set's elements are CONST through its iterators: changing one in place
+ * would move where it belongs in the tree without the tree being told,
+ * and every later search would miss it. Erase and re-insert is the only
+ * way, and the const-ness is what says so at compile time.
+ */
+#ifndef _LIBCXX_SET
+#define _LIBCXX_SET
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <iterator>
+#include <functional>
+#include <initializer_list>
+#include <__tree>
+
+namespace std {
+
+namespace __detail {
+template <class K>
+struct __set_key_of { const K &operator()(const K &k) const { return k; } };
+}
+
+template <class K, class Cmp = less<K>>
+class set {
+    using tree = __detail::__rb_tree<K, K, __detail::__set_key_of<K>,
+                                     Cmp, false>;
+    tree __t;
+
+public:
+    using key_type = K;
+    using value_type = K;
+    using key_compare = Cmp;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    /* Both are const_iterator: see the header comment. */
+    using iterator = typename tree::const_iterator;
+    using const_iterator = typename tree::const_iterator;
+
+    set() = default;
+    explicit set(const Cmp &c) : __t(c) {}
+    set(initializer_list<K> l) { for (auto &v : l) insert(v); }
+    template <class It> set(It first, It last)
+    { for (; first != last; ++first) insert(*first); }
+
+    iterator begin() const { return __t.begin(); }
+    iterator end() const { return __t.end(); }
+    iterator cbegin() const { return __t.begin(); }
+    iterator cend() const { return __t.end(); }
+
+    bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+    void clear() { __t.clear(); }
+
+    pair<iterator, bool> insert(const K &v)
+    { auto r = __t.insert(v); return {iterator(r.first), r.second}; }
+    pair<iterator, bool> insert(K &&v)
+    { auto r = __t.insert(std::move(v)); return {iterator(r.first), r.second}; }
+    void insert(initializer_list<K> l) { for (auto &v : l) insert(v); }
+    template <class... A>
+    pair<iterator, bool> emplace(A &&...a)
+    { auto r = __t.emplace(forward<A>(a)...); return {iterator(r.first), r.second}; }
+
+    iterator find(const K &k) const { return __t.find(k); }
+    size_type count(const K &k) const { return __t.find(k) == __t.end() ? 0 : 1; }
+    bool contains(const K &k) const { return __t.find(k) != __t.end(); }
+    iterator lower_bound(const K &k) const { return __t.lower_bound(k); }
+    iterator upper_bound(const K &k) const { return __t.upper_bound(k); }
+
+    size_type erase(const K &k) { return __t.erase(k); }
+    iterator erase(iterator pos)
+    { return iterator(__t.erase(typename tree::iterator(pos.__node()))); }
+
+    void swap(set &o) noexcept { __t.swap(o.__t); }
+    key_compare key_comp() const { return __t.__comparator(); }
+    bool __check() const { return __t.__check(); }
+};
+
+template <class K, class Cmp>
+bool operator==(const set<K, Cmp> &a, const set<K, Cmp> &b)
+{
+    if (a.size() != b.size()) return false;
+    auto i = a.begin(); auto j = b.begin();
+    for (; i != a.end(); ++i, ++j)
+        if (!(*i == *j)) return false;
+    return true;
+}
+template <class K, class Cmp>
+bool operator!=(const set<K, Cmp> &a, const set<K, Cmp> &b)
+{ return !(a == b); }
+
+template <class K, class Cmp>
+void swap(set<K, Cmp> &a, set<K, Cmp> &b) noexcept { a.swap(b); }
+
+template <class K, class Cmp = less<K>>
+class multiset {
+    using tree = __detail::__rb_tree<K, K, __detail::__set_key_of<K>,
+                                     Cmp, true>;
+    tree __t;
+
+public:
+    using key_type = K;
+    using value_type = K;
+    using size_type = size_t;
+    using iterator = typename tree::const_iterator;
+    using const_iterator = typename tree::const_iterator;
+
+    multiset() = default;
+    multiset(initializer_list<K> l) { for (auto &v : l) insert(v); }
+
+    iterator begin() const { return __t.begin(); }
+    iterator end() const { return __t.end(); }
+    bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+    void clear() { __t.clear(); }
+
+    iterator insert(const K &v) { return iterator(__t.insert(v).first); }
+    iterator find(const K &k) const { return __t.find(k); }
+    size_type count(const K &k) const { return __t.count(k); }
+    iterator lower_bound(const K &k) const { return __t.lower_bound(k); }
+    iterator upper_bound(const K &k) const { return __t.upper_bound(k); }
+    size_type erase(const K &k) { return __t.erase(k); }
+    void swap(multiset &o) noexcept { __t.swap(o.__t); }
+    bool __check() const { return __t.__check(); }
+};
+
+}  // namespace std
+
+#endif

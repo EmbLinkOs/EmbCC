@@ -51,8 +51,8 @@ those exact two members in that order.
 
 `<type_traits>`, `<utility>`, `<limits>`, `<iterator>`, `<memory>`,
 `<functional>`, `<array>`, `<vector>`, `<string>`, `<algorithm>`,
-`<tuple>`, `<optional>`, `<numeric>`, `<stdexcept>`, and the `<c*>`
-wrappers
+`<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`, `<stdexcept>`,
+and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
@@ -88,6 +88,23 @@ the three words, it has to re-aim the pointer, and a raw `const C *`
 argument may point into the buffer that a reallocation is about to free.
 `a += a` is the case that finds it, and the test does exactly that at
 the short/long boundary.
+
+**The ordered containers share one red-black tree** (`include/__tree`):
+a `map` is that tree keyed on a pair's first member, a `set` is it with
+the key and the value the same thing. Red-black rather than something
+simpler because the containers promise not only O(log *n*) but that an
+iterator stays valid until its own element is erased — and that second
+promise is the one people rely on, since it is what lets a loop erase
+while iterating. Erasing a node with two children therefore *relinks*
+the successor rather than copying its value, which would silently
+invalidate an iterator to it.
+
+The test checks the tree's invariants **directly**, at *n* = 1000, after
+ascending, descending and interleaved insertion and then erasing back to
+empty. That is deliberate: a tree that is merely "sorted and works" can
+be arbitrarily unbalanced and still pass every functional test, so the
+property that makes the complexity guarantee true has to be asserted and
+not inferred.
 
 **`sort` is an introsort**, because the standard requires O(*n* log *n*)
 in the *worst* case and plain quicksort does not give it. The recursion
