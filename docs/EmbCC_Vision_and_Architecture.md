@@ -130,7 +130,7 @@ wish list. Every claim here has a test named for it.
 | | State |
 |---|---|
 | **R1** don't duplicate compiler knowledge | **Held.** `embls`, the language server, does not re-implement anything: it forks a child that runs EmbCC's own preprocessor and parser (C, or the C++ front end by suffix) and indexes what they built. Its diagnostics are `embcc -fsyntax-only -fdiagnostics-format=json`. There is one parser. |
-| **R2** record decisions where they are made | **Not held.** There is no remark API and no pass emits one. This is the largest single gap between this document and the code, and §4.3 says what it blocks. |
+| **R2** record decisions where they are made | **Started (v0.3).** `src/driver/remark.c` is the API and the inliner is the first producer: every decision it makes, taken or refused, is recorded with a stable reason code and the fact that settled it. `-fremarks[=json]` prints them; `embcc why <decision> [subject]` queries them (§19). Every OTHER pass — SCCP, CSE, DCE, mem2reg, the register allocator — still records nothing, so the invariant is not yet held. |
 | **R3** preserve provenance | **Partly.** Every AST node carries line and column; every IR instruction carries a line; DWARF line, frame and local info is emitted and read back by EmbDBG. But IR instructions carry no *column*, `struct cexpr` (C++) carries a line and no column at all, and nothing verifies that a pass preserved a location. The verifier does not yet reject an instruction without one. |
 | **R4** deterministic output | **Held, and it is the strongest test in the project.** The self-host fixed point is byte-identical objects across host and OS, sixteen sources, checked every release. |
 | **R5** don't couple the compiler to EmbLinkOS | **Held.** Nothing in `src/` includes an EmbLinkOS header. |
@@ -166,12 +166,18 @@ scheduled, because the OS needed them:
 Named so the gap is a decision rather than a surprise. In rough order of what
 this document depends on most:
 
-1. **Remarks (R2, §13, ADR-0004).** No pass records why it did what it did.
-   Everything in §19 (`embcc why`), the inlining and vectorization answers,
-   performance provenance (§25) and half of §22 rests on this, and §2's own
-   warning applies: it cannot be retrofitted cheaply. It is a day-one API
-   requirement that was not honoured, and every pass written since is a pass
-   that will have to be revisited.
+1. **Remarks (R2, §13, ADR-0004) — the API exists; most passes do not use
+   it.** The store, the two output formats and `embcc why` are built, and the
+   inliner is wired to them. The document's warning about retrofitting proved
+   exact, and the shape of the cost is now measured rather than guessed:
+   `inlinable()` returned 0 from **a dozen places, each meaning something
+   different**, and by the time anyone asked, the dozen answers had collapsed
+   into one. Adding the API took an afternoon; giving that ONE function its
+   reasons meant going back through every branch and naming it. SCCP, CSE,
+   DCE, mem2reg and the register allocator are still silent, and each will
+   cost the same kind of pass. Until they are done, `embcc why` answers only
+   about inlining, and performance provenance (§25) and half of §22 remain
+   blocked.
 2. **Stage dump formats (§18, R6) — started.** `embcc inspect ir` and
    `embcc inspect pp` exist (`src/ir/irprint.c`), and the IR's textual form
    is what makes a pass's effect visible: the same command at `-O0` and

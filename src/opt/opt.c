@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <stdio.h>
+
+#include "../driver/remark.h"
 #include "../driver/util.h"
 
 /* ---- op classification ---- */
@@ -1597,33 +1600,56 @@ static struct ir_func *func_ir(struct ir_unit *iu, struct func *callee)
 /* Conservative eligibility: a real, small body; scalar-integer params and
  * return only (no varargs / struct / float); no inline asm, va_start, or a
  * struct-returning call in the body. */
-static int inlinable(struct ir_func *cf)
+/* Each refusal has its OWN reason code (R2). This function used to return 0
+ * from a dozen places and every one of them meant something different; by
+ * the time anyone asked why a function was not inlined, the twelve answers
+ * had collapsed into one. `*why` is the stable code, `*detail` the fact. */
+static int inlinable(struct ir_func *cf, const char **why, char *detail,
+                     size_t dcap)
 {
     struct func *c = cf->src;
-    if (c->is_varargs || cf->nins == 0 || cf->nins > INLINE_MAX_CALLEE)
+    *why = NULL;
+    if (detail && dcap)
+        detail[0] = 0;
+
+    if (c->is_varargs)       { *why = "callee-is-varargs";  return 0; }
+    if (cf->nins == 0)       { *why = "callee-not-defined-here"; return 0; }
+    if (cf->nins > INLINE_MAX_CALLEE) {
+        *why = "callee-too-large";
+        if (detail)
+            snprintf(detail, dcap, "%d instructions, budget %d",
+                     cf->nins, INLINE_MAX_CALLEE);
         return 0;
-    if (cf->neh)                /* exception regions: instruction ranges */
-        return 0;
-    if (c->ret_ty->kind == TY_STRUCT || ty_is_float(c->ret_ty))
-        return 0;
+    }
+    if (cf->neh)             { *why = "callee-has-exception-regions"; return 0; }
+    if (c->ret_ty->kind == TY_STRUCT) { *why = "returns-a-struct"; return 0; }
+    if (ty_is_float(c->ret_ty))       { *why = "returns-floating-point"; return 0; }
     for (int k = 0; k < c->nvars; k++)
         if (c->var_tys[k] &&
-            (c->var_tys[k]->kind == TY_STRUCT || ty_is_float(c->var_tys[k])))
+            (c->var_tys[k]->kind == TY_STRUCT || ty_is_float(c->var_tys[k]))) {
+            *why = "callee-has-a-struct-or-float-local";
             return 0;
+        }
     for (int i = 0; i < cf->nins; i++) {
         const struct ir_ins *in = &cf->ins[i];
+        if (in->op == IR_ASM)      { *why = "callee-has-inline-asm"; return 0; }
+        if (in->op == IR_VA_START) { *why = "callee-uses-va_start"; return 0; }
+        if (in->flt)               { *why = "callee-computes-in-floating-point";
+                                     return 0; }
         /* a VLA's allocation is released by the callee's own epilogue;
          * inlined into a loop it would never be */
-        if (in->op == IR_ASM || in->op == IR_VA_START || in->flt ||
-            in->op == IR_ALLOCA)
-            return 0;
+        if (in->op == IR_ALLOCA)   { *why = "callee-has-a-vla"; return 0; }
         /* Computed goto: a label address / indirect jump can't be inlined —
          * the callee's label ids would need remapping into the caller, and the
          * caller then can't be optimized either (opt_func bails on it). */
-        if (in->op == IR_LABELADDR || in->op == IR_IGOTO)
+        if (in->op == IR_LABELADDR || in->op == IR_IGOTO) {
+            *why = "callee-uses-a-computed-goto";
             return 0;
-        if (in->op == IR_CALL && in->retsize)
+        }
+        if (in->op == IR_CALL && in->retsize) {
+            *why = "callee-calls-a-struct-returning-function";
             return 0;
+        }
     }
     return 1;
 }
@@ -1735,14 +1761,33 @@ static void inline_unit(struct ir_unit *iu)
                     in->retsize)
                     continue;
                 struct ir_func *c = func_ir(iu, in->callee);
-                if (c && c != fn && !c->has_i128 && inlinable(c)) {
-                    ci = i;
-                    cf = c;
-                    break;
+                const char *why = NULL;
+                char detail[160] = "";
+                int ok = 0;
+                if (!c)
+                    why = "callee-not-defined-here";
+                else if (c == fn)
+                    why = "would-be-recursive";
+                else if (c->has_i128)
+                    why = "callee-computes-in-__int128";
+                else
+                    ok = inlinable(c, &why, detail, sizeof detail);
+                if (!ok) {
+                    remark_add("inline", "not-inlined", in->callee->name, why,
+                               fn->src ? fn->src->file : NULL, in->line,
+                               detail[0] ? "%s" : NULL, detail);
+                    continue;
                 }
+                ci = i;
+                cf = c;
+                break;
             }
             if (ci < 0)
                 break;
+            remark_add("inline", "inlined", cf->src->name, "small-enough",
+                       fn->src ? fn->src->file : NULL, fn->ins[ci].line,
+                       "%d instructions into %s, budget %d", cf->nins,
+                       fn->src ? fn->src->name : "?", INLINE_MAX_CALLEE);
             inline_call(fn, ci, cf);
             done++;
         }

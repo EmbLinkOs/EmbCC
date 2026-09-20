@@ -20,6 +20,7 @@ SRCS := \
 	src/driver/main.c \
 	src/driver/util.c \
 	src/driver/diag.c \
+	src/driver/remark.c \
 	src/driver/explain.c \
 	src/lex/lex.c \
 	src/cpp/cpp.c \
@@ -108,7 +109,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src/lex/lex.c \
              src/parse/parse.c src/sema/type.c src/sema/ldfloat.c \
              src/sema/w128.c src/sema/uninit.c \
-             src/driver/util.c src/driver/diag.c \
+             src/driver/util.c src/driver/diag.c src/driver/remark.c \
              src/driver/explain.c \
              src/arch/target.c src/arch/predef.c src/arch/x86_64/predef.c \
              src/arch/aarch64/predef.c src/arch/x86_64/predef_cxx.c \

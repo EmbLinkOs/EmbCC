@@ -26,6 +26,7 @@
 #include "../arch/target.h"
 #include <setjmp.h>
 
+#include "remark.h"
 #include "util.h"
 #include "../platform/platform.h"
 
@@ -207,6 +208,13 @@ static int syntax_only;
 /* Tool mode (§17): `embcc inspect <stage> file.c` stops the pipeline at a
  * stage and prints what it built, instead of producing an object. */
 static const char *inspect_stage;
+/* -fremarks[=json]: what the passes decided, and why (R2, §13). Off by
+ * default -- a pass that always built strings would slow every compile for
+ * a report almost nobody asked for. */
+static int want_remarks;
+static int remarks_json;
+/* `embcc why <decision> [subject] <file>`: the query layer (§19). */
+static const char *why_decision, *why_subject;
 
 /* -M and friends: the make rule naming what this file included. `dep_mode`
  * 0 none, 1 every header (-M/-MD), 2 only the ones that are not system
@@ -368,8 +376,26 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     f->used = 1;
     }
 
+    remarks_enable(want_remarks || why_decision != NULL);
     struct ir_unit *iu = irgen(u);
     opt_run(iu, opt_level);
+
+    /* A question was asked (§19): answer it and stop. The remarks exist
+     * because the passes have run; rendering here means the answer is a
+     * query over what the compiler actually decided, not a re-derivation. */
+    if (why_decision) {
+        struct outbuf b = { NULL, 0, 0 };
+        int hits = remarks_render_why(&b, why_decision, why_subject);
+        if (!hits)
+            ob_fmt(&b, "nothing recorded: no pass made a '%s' decision%s%s\n"
+                       "(remarks come from the passes that RAN -- an "
+                       "optimization\ndecision needs -O2)\n",
+                   why_decision, why_subject ? " about " : "",
+                   why_subject ? why_subject : "");
+        fwrite(b.p, 1, b.n, stdout);
+        ob_free(&b);
+        return 0;
+    }
 
     /* `inspect ir` reports the IR as it stands at the current -O level, so
      * the same command shows irgen's output at -O0 and the optimizer's at
@@ -818,6 +844,18 @@ static int has_c_suffix(const char *s)
  * counted as an error (a -Werror warning) says otherwise. */
 static int done(int rc)
 {
+    /* Rendered once, at the end, like diagnostics -- a remark printed as it
+     * happened could not be queried, sorted or counted, and §19's premise is
+     * that "why" is a query over records. */
+    if (want_remarks) {
+        struct outbuf b = { NULL, 0, 0 };
+        if (remarks_json)
+            remarks_render_json(&b);
+        else
+            remarks_render_text(&b);
+        fwrite(b.p, 1, b.n, stderr);
+        ob_free(&b);
+    }
     if (want_fix) {
         /* What the diagnostics proposed, actually done. The compile has
          * failed by now: that is the normal case for --fix. */
@@ -875,6 +913,29 @@ int main(int argc, char **argv)
      * one. The remaining argv is an ordinary command line, so -I, -D and -O
      * work exactly as they do when compiling, and what you inspect is what
      * you would have built. */
+    /* `embcc why <decision> [subject] <file> [options]` (§19). The answer
+     * comes from remarks the passes recorded, so the compile really runs --
+     * which is why the -O level matters, and why the message says so when
+     * nothing was recorded. */
+    if (!strcmp(argv[1], "why")) {
+        if (argc < 4) {
+            fprintf(stderr,
+                "usage: embcc why <decision> [subject] <file> [options]\n"
+                "decisions: inlined, not-inlined\n"
+                "example:   embcc why not-inlined helper prog.c -O2\n");
+            return 1;
+        }
+        why_decision = argv[2];
+        int shift = 2;
+        /* an optional subject: argv[3], unless that is already the file */
+        if (argc > 4 && argv[3][0] != '-' && strchr(argv[3], '.') == NULL) {
+            why_subject = argv[3];
+            shift = 3;
+        }
+        argv[shift] = argv[0];
+        argv += shift;
+        argc -= shift;
+    }
     if (!strcmp(argv[1], "inspect")) {
         static const char *const stages[] = { "ir", "pp" };
         if (argc < 4) {
@@ -1022,6 +1083,10 @@ int main(int argc, char **argv)
             syntax_only = 1;          /* the point is the edit, not an object */
         } else if (strcmp(argv[i], "-fsyntax-only") == 0) {
             syntax_only = 1;
+        } else if (strcmp(argv[i], "-fremarks") == 0) {
+            want_remarks = 1;
+        } else if (strcmp(argv[i], "-fremarks=json") == 0) {
+            want_remarks = remarks_json = 1;
         } else if (strcmp(argv[i], "-M") == 0) {
             dep_mode = 1; dep_only = 1;
         } else if (strcmp(argv[i], "-MM") == 0) {
@@ -1219,6 +1284,8 @@ int main(int argc, char **argv)
         if (!strcmp(inspect_stage, "pp"))
             pp_only = 1;
     }
+    if (why_decision)
+        compile_mode = 1;         /* a question, not an object */
 
     /* A `.asm` input goes to the built-in assembler (A1), not the C front-end.
      * Like gcc dispatching `.s`, embcc owns the kernel's hand-written assembly:
@@ -1245,13 +1312,6 @@ int main(int argc, char **argv)
      * is nothing to link: they imply -c, as they do in GCC. */
     if (syntax_only)
         compile_mode = 1;
-    /* `inspect` likewise produces a report, not an object. `inspect pp` is
-     * the preprocessor's own stage, which the driver already has. */
-    if (inspect_stage) {
-        compile_mode = 1;
-        if (!strcmp(inspect_stage, "pp"))
-            pp_only = 1;
-    }
     if (!compile_mode) {
         fprintf(stderr,
                 "embcc: error: cannot link '%s': the integrated linker is "

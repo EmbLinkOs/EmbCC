@@ -421,3 +421,48 @@ name-and-scope matching the C side does.
 - `flags_load` ran on every keystroke and **appended**, so the `-I` list
   grew by a full copy per edit until it hit its 64-entry cap and silently
   dropped whatever came after. It clears first now.
+
+## Remarks — why the compiler did what it did
+
+Diagnostics say what is wrong with the program. **Remarks say what the
+compiler decided about it**, and they are recorded by the pass that decided,
+at the moment it decided (vision R2). That is the whole design: `embcc why`
+is a query over records, never an engine that re-derives a reason afterwards.
+
+    $ embcc why not-inlined prog.c -O2
+    variadic (prog.c:20): not-inlined
+      because callee-is-varargs
+      decided by the inline pass
+    fp (prog.c:20): not-inlined
+      because returns-floating-point
+      decided by the inline pass
+    big (prog.c:20): not-inlined
+      because callee-too-large — 74 instructions, budget 24
+      decided by the inline pass
+
+Three refusals, three different reasons. Before this, `inlinable()` returned
+`0` from a dozen places and every one of them meant something else; the
+information existed for a microsecond and was thrown away. Naming those
+branches — not writing the API — was the work.
+
+A remark is data, and text is the last step (§13): `-fremarks` prints the
+text form during an ordinary compile, `-fremarks=json` the record form, and
+both are off by default because a pass that always built strings would slow
+every compile for a report almost nobody wants.
+
+`reason` is the part that must stay stable — it is what a query matches and
+what a person learns. `detail` is free text and may be improved at will.
+
+**The answer says when it has none.** The inliner is an `-O2` pass, so at
+`-O0` there is nothing recorded — and an empty list would read as "there was
+no reason":
+
+    $ embcc why not-inlined prog.c -O0
+    nothing recorded: no pass made a 'not-inlined' decision
+    (remarks come from the passes that RAN -- an optimization
+    decision needs -O2)
+
+**One producer so far.** SCCP, CSE, DCE, mem2reg and the register allocator
+still record nothing. Each will cost the same kind of pass through its own
+decisions, which is exactly what the vision document meant by "this cannot be
+retrofitted".
