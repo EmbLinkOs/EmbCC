@@ -176,7 +176,36 @@ test-libstdcxx: embcc
 	EMBCC=$(CURDIR)/embcc EMBCC_TARGET=aarch64-elf EMBCC_LIBSTDCXX=1 \
 	    sh tests/golden/cxx-libstdcxx-embcc.sh
 
+# ---- our C library (lib/libc) ------------------------------------------
+# One implementation, ported to an OS by one small backend. Built with
+# EmbCC itself, per target -- which is also the widest test the compiler
+# gets outside its own sources.
+LIBC_SRCS := $(wildcard lib/libc/src/*/*.c) lib/libc/os/posixlike/backend.c
+LIBC_INC  := -Ilib/libc/include
+
+libc-x86_64: embcc
+	@mkdir -p $(BUILD)/libc/x86_64
+	@for f in $(LIBC_SRCS); do \
+	    o=$(BUILD)/libc/x86_64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
+	    ./embcc --target=x86_64-elf -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libc/x86_64/libc.a
+	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/x86_64/libc.a $(BUILD)/libc/x86_64/*.o
+	@echo "libc: $(BUILD)/libc/x86_64/libc.a"
+
+libc-aarch64: embcc
+	@mkdir -p $(BUILD)/libc/aarch64
+	@for f in $(LIBC_SRCS); do \
+	    o=$(BUILD)/libc/aarch64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
+	    ./embcc --target=aarch64-elf -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libc/aarch64/libc.a
+	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs $(BUILD)/libc/aarch64/libc.a $(BUILD)/libc/aarch64/*.o
+	@echo "libc: $(BUILD)/libc/aarch64/libc.a"
+
+libc: libc-x86_64 libc-aarch64
+
 clean:
 	rm -rf $(BUILD) embcc embread embld embdbg embas embls
 
-.PHONY: all test test-arm64 test-libstdcxx clean
+.PHONY: all test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 clean
