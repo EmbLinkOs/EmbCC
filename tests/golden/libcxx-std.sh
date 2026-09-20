@@ -264,13 +264,25 @@ want "moveifnoexcept moves 1 copies 0 v 5"
 # objects, not about what a type is. Each program CHECKS ITSELF and exits
 # 42, so every expectation lives beside the code it is about and a
 # failure names its own line -- see libcxx-std/check.h.
-for prog in iterator memory functional array vector string algorithm vocabulary associative containers; do
+for prog in iterator memory functional array vector string algorithm \
+            vocabulary associative iostreams containers; do
     if run "tests/golden/libcxx-std/$prog.cc"; then rc=0; else rc=$?; fi
     [ "$rc" = 42 ] || {
         cat "$out/run.txt"
         echo "FAIL: <$prog> exited $rc"; exit 1; }
+    [ "$prog" = iostreams ] && cp "$out/run.txt" "$out/iostreams.txt"
     echo "<$prog>: every check passed"
 done
+
+# The iostreams program is the one whose result is also OUTPUT: the
+# checks above prove the string streams format correctly, and these two
+# lines prove std::cout reaches the terminal through our own streambuf,
+# our own FILE and our own write.
+grep -qx "iostreams: 1 2.5 ok" "$out/iostreams.txt" ||
+    { cat "$out/iostreams.txt"; echo "FAIL: cout did not print"; exit 1; }
+grep -qx "\.\.\.\.42" "$out/iostreams.txt" ||
+    { echo "FAIL: setw/setfill did not reach cout"; exit 1; }
+echo "and std::cout really prints, through our streambuf and our FILE"
 
 if run "$out/cheaders.cc"; then rc=0; else rc=$?; fi
 cat "$out/run.txt"

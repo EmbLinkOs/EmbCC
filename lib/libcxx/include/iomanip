@@ -1,0 +1,56 @@
+/* <iomanip> — C++ [iomanip].
+ *
+ * Manipulators that take an argument. Each is a tiny object with an
+ * operator<< of its own, because a manipulator is recognised by being a
+ * FUNCTION the stream can call -- and a function cannot carry a value.
+ */
+#ifndef _LIBCXX_IOMANIP
+#define _LIBCXX_IOMANIP
+
+#include <ios>
+#include <ostream>
+#include <istream>
+
+namespace std {
+
+namespace __detail {
+struct __setw { streamsize n; };
+struct __setprecision { streamsize n; };
+struct __setfill { char c; };
+struct __setbase { int b; };
+}
+
+/* Width is consumed by the next insertion; precision and fill are
+ * sticky. That is why setw has to be repeated in a loop and the others
+ * do not. */
+inline __detail::__setw setw(int n) { return {n}; }
+inline __detail::__setprecision setprecision(int n) { return {n}; }
+inline __detail::__setfill setfill(char c) { return {c}; }
+inline __detail::__setbase setbase(int b) { return {b}; }
+
+template <class C, class T>
+basic_ostream<C, T> &operator<<(basic_ostream<C, T> &os, __detail::__setw m)
+{ os.width(m.n); return os; }
+template <class C, class T>
+basic_ostream<C, T> &operator<<(basic_ostream<C, T> &os,
+                                __detail::__setprecision m)
+{ os.precision(m.n); return os; }
+template <class C, class T>
+basic_ostream<C, T> &operator<<(basic_ostream<C, T> &os, __detail::__setfill m)
+{ os.fill(m.c); return os; }
+template <class C, class T>
+basic_ostream<C, T> &operator<<(basic_ostream<C, T> &os, __detail::__setbase m)
+{
+    os.setf(m.b == 16 ? ios_base::hex : m.b == 8 ? ios_base::oct
+                                                 : ios_base::dec,
+            ios_base::basefield);
+    return os;
+}
+
+template <class C, class T>
+basic_istream<C, T> &operator>>(basic_istream<C, T> &is, __detail::__setw m)
+{ is.width(m.n); return is; }
+
+}  // namespace std
+
+#endif

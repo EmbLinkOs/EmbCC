@@ -51,8 +51,8 @@ those exact two members in that order.
 
 `<type_traits>`, `<utility>`, `<limits>`, `<iterator>`, `<memory>`,
 `<functional>`, `<array>`, `<vector>`, `<string>`, `<algorithm>`,
-`<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`, `<stdexcept>`,
-and the `<c*>` wrappers
+`<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`, `<iostream>` and
+the rest of the stream headers, `<stdexcept>`, and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
@@ -88,6 +88,30 @@ the three words, it has to re-aim the pointer, and a raw `const C *`
 argument may point into the buffer that a reallocation is about to free.
 `a += a` is the case that finds it, and the test does exactly that at
 the short/long boundary.
+
+**A streambuf is not "an object with a virtual write."** It owns two
+windows into a character sequence, and the fast path is a *pointer bump*
+inside the current window with no virtual call at all; the virtuals exist
+only for the moment a window runs out. That is why `cout << c` in a loop
+is not one virtual call per character, and it is the whole reason the
+indirection is shaped the way it is.
+
+Above it, two rules are worth knowing because they catch everyone once.
+The **sentry** is what skips leading whitespace before a formatted
+extraction — which is why `in >> a >> b` reads across lines without
+anyone writing a skip — and what honours `unitbuf` on the way out.
+And **width is consumed** by the next insertion while fill and precision
+are sticky, which is why `setw` has to be repeated in a loop and
+`setprecision` does not.
+
+The standard streams sit on the C library's `FILE *` rather than on the
+OS directly, because the C library already owns the buffering and two
+buffers over one descriptor interleave wrongly the moment a program
+mixes `printf` and `cout`. They live in raw storage that is never
+destroyed: a static object in another translation unit may write to
+`cout` from its *destructor*, and "after cout's destructor" must not be
+reachable. Leaking three objects at process exit is the accepted trade,
+and is what every implementation makes.
 
 **The ordered containers share one red-black tree** (`include/__tree`):
 a `map` is that tree keyed on a pair's first member, a `set` is it with

@@ -1,0 +1,142 @@
+/* <sstream> — C++ [string.streams].
+ *
+ * A streambuf over a std::string. The get and put areas point INTO the
+ * string's own storage, which means every append that grows the string
+ * invalidates them -- so the areas are re-pointed after each growth
+ * rather than being set once. Forgetting that is how a stringstream
+ * starts writing into freed memory after its first reallocation.
+ */
+#ifndef _LIBCXX_SSTREAM
+#define _LIBCXX_SSTREAM
+
+#include <string>
+#include <ios>
+#include <streambuf>
+#include <ostream>
+#include <istream>
+
+namespace std {
+
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_stringbuf : public basic_streambuf<C, T> {
+    using base = basic_streambuf<C, T>;
+
+public:
+    using int_type = typename T::int_type;
+
+    explicit basic_stringbuf(ios_base::openmode m = ios_base::in | ios_base::out)
+        : __mode(m) { __sync_get(0); }
+
+    explicit basic_stringbuf(const basic_string<C, T, A> &s,
+                             ios_base::openmode m = ios_base::in | ios_base::out)
+        : __buf(s), __mode(m) { __sync_get(0); }
+
+    basic_string<C, T, A> str() const { return __buf; }
+    void str(const basic_string<C, T, A> &s) { __buf = s; __sync_get(0); }
+
+protected:
+    /* Output APPENDS to the string, and appending may reallocate it --
+     * which moves the characters the get area points at. So the get area
+     * is re-pointed after every growth, keeping its position as an
+     * OFFSET across the move. A version that set the areas once starts
+     * reading freed memory after the first reallocation, and does so
+     * only for strings long enough to grow. */
+    int_type overflow(int_type c) override
+    {
+        if (T::eq_int_type(c, T::eof()))
+            return T::not_eof(c);
+        if (!(__mode & ios_base::out))
+            return T::eof();
+        size_t pos = __gpos();
+        __buf.push_back(T::to_char_type(c));
+        __sync_get(pos);
+        return c;
+    }
+
+    streamsize xsputn(const C *s, streamsize n) override
+    {
+        if (!(__mode & ios_base::out))
+            return 0;
+        size_t pos = __gpos();
+        __buf.append(s, (size_t)n);
+        __sync_get(pos);
+        return n;
+    }
+
+    /* Reached when the get area is exhausted. It can still be short of
+     * the string's end if a write has grown it since, so re-point first
+     * and only then report eof. */
+    int_type underflow() override
+    {
+        if (!(__mode & ios_base::in))
+            return T::eof();
+        size_t pos = __gpos();
+        __sync_get(pos);
+        if (this->gptr() == this->egptr())
+            return T::eof();
+        return T::to_int_type(*this->gptr());
+    }
+
+    int_type pbackfail(int_type c) override
+    {
+        if (this->gptr() == this->eback())
+            return T::eof();
+        this->gbump(-1);
+        if (!T::eq_int_type(c, T::eof()))
+            *this->gptr() = T::to_char_type(c);
+        return T::to_int_type(*this->gptr());
+    }
+
+private:
+    basic_string<C, T, A> __buf;
+    ios_base::openmode __mode;
+
+    size_t __gpos() const
+    { return this->gptr() ? (size_t)(this->gptr() - this->eback()) : 0; }
+
+    void __sync_get(size_t pos)
+    {
+        C *b = const_cast<C *>(__buf.data());
+        size_t n = __buf.size();
+        if (pos > n) pos = n;
+        this->setg(b, b + pos, b + n);
+    }
+};
+
+using stringbuf = basic_stringbuf<char>;
+
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_ostringstream : public basic_ostream<C, T> {
+public:
+    basic_ostringstream() : basic_ostream<C, T>(&__b), __b(ios_base::out) {}
+    explicit basic_ostringstream(const basic_string<C, T, A> &s)
+        : basic_ostream<C, T>(&__b), __b(s, ios_base::out) {}
+
+    basic_string<C, T, A> str() const { return __b.str(); }
+    void str(const basic_string<C, T, A> &s) { __b.str(s); }
+    basic_stringbuf<C, T, A> *rdbuf() { return &__b; }
+
+private:
+    basic_stringbuf<C, T, A> __b;
+};
+
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_istringstream : public basic_istream<C, T> {
+public:
+    explicit basic_istringstream(const basic_string<C, T, A> &s)
+        : basic_istream<C, T>(&__b), __b(s, ios_base::in) {}
+
+    basic_string<C, T, A> str() const { return __b.str(); }
+    void str(const basic_string<C, T, A> &s) { __b.str(s); }
+    basic_stringbuf<C, T, A> *rdbuf() { return &__b; }
+
+private:
+    basic_stringbuf<C, T, A> __b;
+};
+
+using ostringstream = basic_ostringstream<char>;
+using istringstream = basic_istringstream<char>;
+
+}  // namespace std
+
+#endif

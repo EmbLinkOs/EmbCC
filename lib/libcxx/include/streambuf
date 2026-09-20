@@ -1,0 +1,151 @@
+/* <streambuf> — C++ [stream.buffers].
+ *
+ * The layer every stream sits on, and the one piece of iostreams whose
+ * design is worth understanding before the rest makes sense.
+ *
+ * A streambuf is NOT "an object with a virtual write". It owns two
+ * windows into a character sequence -- a get area and a put area -- and
+ * the fast path is a POINTER BUMP inside the current window with no
+ * virtual call at all. The virtuals exist only for the moment a window
+ * runs out: underflow() when the get area is empty, overflow() when the
+ * put area is full. That is why `cout << c` in a loop is not one virtual
+ * call per character, and it is the entire reason this indirection is
+ * shaped the way it is.
+ *
+ * Each area is three pointers: begin, current, end. The protected
+ * accessors below are named for them (eback/gptr/egptr, pbase/pptr/epptr)
+ * and a derived buffer sets them with setg/setp.
+ */
+#ifndef _LIBCXX_STREAMBUF
+#define _LIBCXX_STREAMBUF
+
+#include <cstddef>
+#include <string>
+
+namespace std {
+
+using streamsize = ptrdiff_t;
+using streamoff = long;
+
+template <class C, class T = char_traits<C>>
+class basic_streambuf {
+public:
+    using char_type = C;
+    using traits_type = T;
+    using int_type = typename T::int_type;
+
+    virtual ~basic_streambuf() {}
+
+    /* ---- the public surface, all non-virtual ----------------------------
+     * Each is the pointer-bump fast path with a virtual only on the edge.
+     */
+    streamsize sgetn(C *s, streamsize n) { return xsgetn(s, n); }
+    streamsize sputn(const C *s, streamsize n) { return xsputn(s, n); }
+
+    int_type sbumpc()
+    {
+        if (__gcur == __gend) {
+            int_type c = underflow();
+            if (T::eq_int_type(c, T::eof()))
+                return c;
+        }
+        return T::to_int_type(*__gcur++);
+    }
+
+    int_type sgetc()
+    {
+        if (__gcur == __gend)
+            return underflow();
+        return T::to_int_type(*__gcur);
+    }
+
+    int_type snextc() { return sbumpc() == T::eof() ? T::eof() : sgetc(); }
+
+    /* One character of putback, which is all the standard promises and
+     * all any parser here needs. */
+    int_type sputbackc(C c)
+    {
+        if (__gcur != __gbeg && T::eq(c, __gcur[-1]))
+            return T::to_int_type(*--__gcur);
+        return pbackfail(T::to_int_type(c));
+    }
+
+    int_type sungetc()
+    {
+        if (__gcur != __gbeg)
+            return T::to_int_type(*--__gcur);
+        return pbackfail(T::eof());
+    }
+
+    int_type sputc(C c)
+    {
+        if (__pcur == __pend)
+            return overflow(T::to_int_type(c));
+        *__pcur++ = c;
+        return T::to_int_type(c);
+    }
+
+    streamsize in_avail() { return __gend - __gcur; }
+
+    int pubsync() { return sync(); }
+
+protected:
+    basic_streambuf()
+        : __gbeg(nullptr), __gcur(nullptr), __gend(nullptr),
+          __pbeg(nullptr), __pcur(nullptr), __pend(nullptr) {}
+
+    C *eback() const { return __gbeg; }
+    C *gptr() const { return __gcur; }
+    C *egptr() const { return __gend; }
+    void gbump(int n) { __gcur += n; }
+    void setg(C *b, C *c, C *e) { __gbeg = b; __gcur = c; __gend = e; }
+
+    C *pbase() const { return __pbeg; }
+    C *pptr() const { return __pcur; }
+    C *epptr() const { return __pend; }
+    void pbump(int n) { __pcur += n; }
+    void setp(C *b, C *e) { __pbeg = b; __pcur = b; __pend = e; }
+
+    /* The virtuals. Each has a default that says "I cannot", so a
+     * read-only buffer need not implement overflow and vice versa. */
+    virtual int_type underflow() { return T::eof(); }
+    virtual int_type pbackfail(int_type) { return T::eof(); }
+    virtual int_type overflow(int_type) { return T::eof(); }
+    virtual int sync() { return 0; }
+
+    /* The bulk forms loop over the single-character ones by default. A
+     * derived buffer overrides them when it can move a block at once --
+     * which is where the real speed of a file stream comes from. */
+    virtual streamsize xsgetn(C *s, streamsize n)
+    {
+        streamsize got = 0;
+        while (got < n) {
+            int_type c = sbumpc();
+            if (T::eq_int_type(c, T::eof()))
+                break;
+            s[got++] = T::to_char_type(c);
+        }
+        return got;
+    }
+
+    virtual streamsize xsputn(const C *s, streamsize n)
+    {
+        streamsize put = 0;
+        while (put < n) {
+            if (T::eq_int_type(sputc(s[put]), T::eof()))
+                break;
+            put++;
+        }
+        return put;
+    }
+
+private:
+    C *__gbeg, *__gcur, *__gend;
+    C *__pbeg, *__pcur, *__pend;
+};
+
+using streambuf = basic_streambuf<char>;
+
+}  // namespace std
+
+#endif

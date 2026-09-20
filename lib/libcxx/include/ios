@@ -1,0 +1,131 @@
+/* <ios> — C++ [iostreams.base].
+ *
+ * The state every stream carries: its flags, its width and precision, and
+ * the three error bits.
+ *
+ * The bits are worth stating precisely because their names mislead.
+ * `eofbit` means the end was REACHED, not that anything went wrong --
+ * reading the last token of a file sets it, and the read succeeded.
+ * `failbit` means a conversion did not happen. `badbit` means the stream
+ * itself is broken. And `stream >> x` is tested by `operator bool`, which
+ * is `!fail()` -- so it is false for failbit OR badbit and true for a
+ * successful read that happened to hit the end. Testing eof() in a loop
+ * condition instead is the classic way to process the last item twice.
+ */
+#ifndef _LIBCXX_IOS
+#define _LIBCXX_IOS
+
+#include <cstddef>
+#include <string>
+#include <streambuf>
+
+namespace std {
+
+class ios_base {
+public:
+    using fmtflags = unsigned;
+    static const fmtflags boolalpha   = 0x0001;
+    static const fmtflags dec         = 0x0002;
+    static const fmtflags fixed       = 0x0004;
+    static const fmtflags hex         = 0x0008;
+    static const fmtflags internal    = 0x0010;
+    static const fmtflags left        = 0x0020;
+    static const fmtflags oct         = 0x0040;
+    static const fmtflags right       = 0x0080;
+    static const fmtflags scientific  = 0x0100;
+    static const fmtflags showbase    = 0x0200;
+    static const fmtflags showpoint   = 0x0400;
+    static const fmtflags showpos     = 0x0800;
+    static const fmtflags skipws      = 0x1000;
+    static const fmtflags unitbuf     = 0x2000;
+    static const fmtflags uppercase   = 0x4000;
+    static const fmtflags adjustfield = left | right | internal;
+    static const fmtflags basefield   = dec | oct | hex;
+    static const fmtflags floatfield  = fixed | scientific;
+
+    using iostate = unsigned;
+    static const iostate goodbit = 0;
+    static const iostate eofbit  = 1;
+    static const iostate failbit = 2;
+    static const iostate badbit  = 4;
+
+    using openmode = unsigned;
+    static const openmode in     = 0x01;
+    static const openmode out    = 0x02;
+    static const openmode ate    = 0x04;
+    static const openmode app    = 0x08;
+    static const openmode trunc  = 0x10;
+    static const openmode binary = 0x20;
+
+    using seekdir = int;
+    static const seekdir beg = 0;
+    static const seekdir cur = 1;
+    static const seekdir end = 2;
+
+    fmtflags flags() const { return __fl; }
+    fmtflags flags(fmtflags f) { fmtflags o = __fl; __fl = f; return o; }
+    fmtflags setf(fmtflags f) { fmtflags o = __fl; __fl |= f; return o; }
+    fmtflags setf(fmtflags f, fmtflags mask)
+    { fmtflags o = __fl; __fl = (__fl & ~mask) | (f & mask); return o; }
+    void unsetf(fmtflags f) { __fl &= ~f; }
+
+    streamsize width() const { return __w; }
+    streamsize width(streamsize w) { streamsize o = __w; __w = w; return o; }
+    streamsize precision() const { return __prec; }
+    streamsize precision(streamsize p)
+    { streamsize o = __prec; __prec = p; return o; }
+    char fill() const { return __fill; }
+    char fill(char c) { char o = __fill; __fill = c; return o; }
+
+protected:
+    ios_base() : __fl(dec | skipws), __w(0), __prec(6), __fill(' ') {}
+    ~ios_base() {}
+
+    fmtflags __fl;
+    streamsize __w;
+    streamsize __prec;
+    char __fill;
+};
+
+template <class C, class T = char_traits<C>>
+class basic_ios : public ios_base {
+public:
+    using char_type = C;
+    using traits_type = T;
+    using int_type = typename T::int_type;
+
+    explicit basic_ios(basic_streambuf<C, T> *sb) : __sb(sb), __st(goodbit) {}
+
+    basic_streambuf<C, T> *rdbuf() const { return __sb; }
+    basic_streambuf<C, T> *rdbuf(basic_streambuf<C, T> *sb)
+    { basic_streambuf<C, T> *o = __sb; __sb = sb; return o; }
+
+    bool good() const { return __st == goodbit; }
+    bool eof() const { return (__st & eofbit) != 0; }
+    bool fail() const { return (__st & (failbit | badbit)) != 0; }
+    bool bad() const { return (__st & badbit) != 0; }
+
+    /* `while (in >> x)` tests THIS, and it is !fail() -- so a read that
+     * succeeded and happened to reach the end is still true, which is
+     * why testing eof() in the condition processes the last item twice. */
+    explicit operator bool() const { return !fail(); }
+    bool operator!() const { return fail(); }
+
+    iostate rdstate() const { return __st; }
+    void clear(iostate s = goodbit) { __st = __sb ? s : (s | badbit); }
+    void setstate(iostate s) { clear(__st | s); }
+
+protected:
+    basic_ios() : __sb(nullptr), __st(goodbit) {}
+    void init(basic_streambuf<C, T> *sb) { __sb = sb; __st = goodbit; }
+
+private:
+    basic_streambuf<C, T> *__sb;
+    iostate __st;
+};
+
+using ios = basic_ios<char>;
+
+}  // namespace std
+
+#endif
