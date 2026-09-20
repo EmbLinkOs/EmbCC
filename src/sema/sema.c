@@ -3,6 +3,8 @@
  * would perform is materialized as an explicit EXPR_CAST node — irgen
  * never guesses about widths or signedness, it just reads the tree.
  */
+#include <setjmp.h>
+#include <stdarg.h>
 #include "sema.h"
 
 #include <stdio.h>
@@ -35,6 +37,62 @@ struct scope {
     int n, cap;
     int block_start;    /* index where the innermost block began */
 };
+
+/* Where semantic analysis resumes after an error: the statement being
+ * checked. NULL means the error stops the compile, as every semantic error
+ * once did (docs/TOOLING.md T2). */
+static jmp_buf *g_recover;
+static int g_sema_errors;
+
+/* Names already reported undeclared in this function: a name misspelt once
+ * is usually used several times, and one diagnostic per use is noise. */
+static const char **g_undeclared;
+static int g_nundeclared, g_capundeclared;
+
+static int reported_undeclared(const char *name)
+{
+    for (int i = 0; i < g_nundeclared; i++)
+        if (strcmp(g_undeclared[i], name) == 0)
+            return 1;
+    if (g_nundeclared == g_capundeclared) {
+        g_capundeclared = g_capundeclared ? g_capundeclared * 2 : 8;
+        g_undeclared = xrealloc(g_undeclared,
+                                (size_t)g_capundeclared * sizeof *g_undeclared);
+    }
+    g_undeclared[g_nundeclared++] = name;
+    return 0;
+}
+
+int sema_error_count(void) { return g_sema_errors; }
+
+/* A semantic error: recorded, then analysis resumes at the next statement,
+ * so one run reports every independent problem. */
+static void sema_error_at(struct unit *u, int line, int col,
+                          const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    diag_verror_at(u->file, line, col, fmt, ap);
+    va_end(ap);
+    g_sema_errors++;
+    if (g_recover)
+        longjmp(*g_recover, 1);
+    exit(1);
+}
+
+/* The same where the location is a declaration rather than a token, so
+ * there is no column to point at. */
+static void sema_error_line(struct unit *u, int line, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    diag_verror_at(u->file, line, 0, fmt, ap);
+    va_end(ap);
+    g_sema_errors++;
+    if (g_recover)
+        longjmp(*g_recover, 1);
+    exit(1);
+}
 
 static int scope_find(struct scope *sc, const char *name)
 {
@@ -207,21 +265,21 @@ static struct type *arith_common(struct type *a, struct type *b)
 static void need_scalar(struct unit *u, struct expr *e, const char *what)
 {
     if (!ty_is_scalar(e->ty))
-        diag_at(u->file, e->line, e->col, "%s needs a scalar value, got %s",
+        sema_error_at(u, e->line, e->col, "%s needs a scalar value, got %s",
                    what, ty_name(e->ty));
 }
 
 static void need_integer(struct unit *u, struct expr *e, const char *what)
 {
     if (!ty_is_integer(e->ty))
-        diag_at(u->file, e->line, e->col, "%s needs an integer, got %s",
+        sema_error_at(u, e->line, e->col, "%s needs an integer, got %s",
                    what, ty_name(e->ty));
 }
 
 static void need_arith(struct unit *u, struct expr *e, const char *what)
 {
     if (!ty_is_arith(e->ty))
-        diag_at(u->file, e->line, e->col,
+        sema_error_at(u, e->line, e->col,
                    "%s needs an arithmetic value, got %s", what,
                    ty_name(e->ty));
 }
@@ -245,7 +303,7 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
         return cx_cast(rhs, to);
     if (to->kind == TY_STRUCT || rhs->ty->kind == TY_STRUCT) {
         if (!ty_equal(to, rhs->ty))
-            diag_at(u->file, rhs->line, rhs->col, "%s: cannot convert %s to %s",
+            sema_error_at(u, rhs->line, rhs->col, "%s: cannot convert %s to %s",
                        ctx, ty_name(rhs->ty), ty_name(to));
         return rhs; /* same struct type: passed/returned as its bytes */
     }
@@ -270,18 +328,18 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
             return mk_cast(rhs, to);
         if (is_null_const(rhs))
             return mk_cast(rhs, to);
-        diag_at(u->file, rhs->line, rhs->col,
+        sema_error_at(u, rhs->line, rhs->col,
                    "%s: cannot convert %s to %s without a cast",
                    ctx, ty_name(rhs->ty), ty_name(to));
     }
     if (ty_is_float(to) && rhs->ty->kind == TY_PTR)
-        diag_at(u->file, rhs->line, rhs->col,
+        sema_error_at(u, rhs->line, rhs->col,
                    "%s: a pointer cannot become %s", ctx, ty_name(to));
     if (ty_is_integer(to) && rhs->ty->kind == TY_PTR)
-        diag_at(u->file, rhs->line, rhs->col,
+        sema_error_at(u, rhs->line, rhs->col,
                    "%s: converting %s to %s needs an explicit cast",
                    ctx, ty_name(rhs->ty), ty_name(to));
-    diag_at(u->file, rhs->line, rhs->col, "%s: cannot convert %s to %s",
+    sema_error_at(u, rhs->line, rhs->col, "%s: cannot convert %s to %s",
                ctx, ty_name(rhs->ty), ty_name(to));
     return NULL;
 }
@@ -640,10 +698,10 @@ static void cx_binop(struct unit *u, struct expr *e)
 {
     struct type *lt = e->lhs->ty, *rt = e->rhs->ty;
     if (!ty_is_arith(lt) && !ty_is_complex(lt))
-        diag_at(u->file, e->line, e->col, "invalid operand %s to a complex "
+        sema_error_at(u, e->line, e->col, "invalid operand %s to a complex "
                 "operation", ty_name(lt));
     if (!ty_is_arith(rt) && !ty_is_complex(rt))
-        diag_at(u->file, e->line, e->col, "invalid operand %s to a complex "
+        sema_error_at(u, e->line, e->col, "invalid operand %s to a complex "
                 "operation", ty_name(rt));
     if (e->op == B_LAND || e->op == B_LOR) {
         if (!cx_lowering()) { e->ty = ty_base(TY_INT, 0); return; }
@@ -654,7 +712,7 @@ static void cx_binop(struct unit *u, struct expr *e)
     }
     if (e->op != B_ADD && e->op != B_SUB && e->op != B_MUL &&
         e->op != B_DIV && e->op != B_EQ && e->op != B_NE)
-        diag_at(u->file, e->line, e->col,
+        sema_error_at(u, e->line, e->col,
                 "a complex value only takes + - * / == and !=");
     struct type *T = cx_common(lt, rt), *CT = ty_complex(T);
     int eq = e->op == B_EQ || e->op == B_NE;
@@ -826,7 +884,7 @@ static void vla_prepare(struct unit *u, struct func *f, struct scope *sc,
         return;
     check_expr(u, f, sc, t->vla_len);
     if (!ty_is_integer(t->vla_len->ty))
-        diag_at(u->file, t->vla_len->line, t->vla_len->col,
+        sema_error_at(u, t->vla_len->line, t->vla_len->col,
                 "size of array has non-integer type %s",
                 ty_name(t->vla_len->ty));
     t->vla_len = mk_cast(t->vla_len, ty_base(TY_LONG, 0));
@@ -914,7 +972,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 break;
             }
             if (ec)
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "enumerator '%s' is used before its "
                            "declaration", e->name);
             struct global *g = find_global(u, e->name);
@@ -926,7 +984,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 g->used = 1;
                 e->ty = g->ty;
             } else if (g) {
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "'%s' is used before its declaration "
                            "(line %d)", e->name, g->line);
             } else if (find_func(u, e->name)) {
@@ -936,7 +994,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                  * lowered before that walk runs, but is still legal if the
                  * function was declared earlier in the source. */
                 if (fd->seq > cur_body_seq)
-                    diag_at(u->file, e->line, e->col,
+                    sema_error_at(u, e->line, e->col,
                                "'%s' is used before its declaration",
                                e->name);
                 e->fref = fd;
@@ -945,6 +1003,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                        fd->nparams, fd->is_varargs));
                 e->ty->pointee->sret_first = fd->sret_first;
             } else {
+                /* A name misspelt once is usually used several times:
+                 * report it once per function, then carry on quietly. */
+                if (reported_undeclared(e->name)) {
+                    g_sema_errors++;
+                    if (g_recover)
+                        longjmp(*g_recover, 1);
+                    exit(1);
+                }
                 const char *sug = suggest_name(u, sc, e->name);
                 diag_error_at(u->file, e->line, e->col,
                               "'%s' is not declared in '%s' — for a call, "
@@ -957,6 +1023,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     diag_fixit_at(u->file, e->line, e->col,
                                   e->col + (int)strlen(e->name), sug);
                 }
+                g_sema_errors++;
+                if (g_recover)
+                    longjmp(*g_recover, 1);
                 exit(1);
             }
         }
@@ -969,18 +1038,18 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_ASSIGN:
         check_expr(u, f, sc, e->lhs);
         if (!is_lvalue(e->lhs))
-            diag_at(u->file, e->line, e->col, "assignment target is not an "
+            sema_error_at(u, e->line, e->col, "assignment target is not an "
                                          "lvalue");
         if (e->lhs->undecayed)
-            diag_at(u->file, e->line, e->col, "cannot assign to an array");
+            sema_error_at(u, e->line, e->col, "cannot assign to an array");
         if (e->lhs->fref)
-            diag_at(u->file, e->line, e->col, "cannot assign to a function");
+            sema_error_at(u, e->line, e->col, "cannot assign to a function");
         check_expr(u, f, sc, e->rhs);
         if (ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) {
             e->rhs = convert_assign(u, e->rhs, e->lhs->ty, "assignment");
         } else if (e->lhs->ty->kind == TY_STRUCT) {
             if (!ty_equal(e->lhs->ty, e->rhs->ty))
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "cannot assign %s to %s",
                            ty_name(e->rhs->ty), ty_name(e->lhs->ty));
         } else {
@@ -992,7 +1061,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_INCDEC: {
         check_expr(u, f, sc, e->lhs);
         if (!is_lvalue(e->lhs) || e->lhs->undecayed || e->lhs->fref)
-            diag_at(u->file, e->line, e->col, "++/-- needs an lvalue");
+            sema_error_at(u, e->line, e->col, "++/-- needs an lvalue");
         e->ty = e->lhs->ty;
         if (ty_is_complex(e->ty) && cx_lowering()) {   /* z += 1 */
             struct expr *one = cx_node(EXPR_NUM, e->line, ty_base(TY_INT, 0));
@@ -1004,10 +1073,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->ty->kind == TY_PTR) {
             if (e->ty->pointee->kind == TY_VOID ||
                 e->ty->pointee->kind == TY_FUNC)
-                diag_at(u->file, e->line, e->col, "++/-- on %s",
+                sema_error_at(u, e->line, e->col, "++/-- on %s",
                            ty_name(e->ty));
         } else if (!ty_is_arith(e->ty)) {
-            diag_at(u->file, e->line, e->col, "++/-- needs an integer or "
+            sema_error_at(u, e->line, e->col, "++/-- needs an integer or "
                                          "pointer, got %s",
                        ty_name(e->ty));
         }
@@ -1051,14 +1120,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_DEREF:
         check_expr(u, f, sc, e->rhs);
         if (e->rhs->ty->kind != TY_PTR)
-            diag_at(u->file, e->line, e->col, "cannot dereference %s",
+            sema_error_at(u, e->line, e->col, "cannot dereference %s",
                        ty_name(e->rhs->ty));
         if (e->rhs->ty->pointee->kind == TY_FUNC) {
             e->ty = e->rhs->ty; /* *fp is fp, as in C */
             break;
         }
         if (e->rhs->ty->pointee->kind == TY_VOID)
-            diag_at(u->file, e->line, e->col, "cannot dereference void *");
+            sema_error_at(u, e->line, e->col, "cannot dereference void *");
         e->ty = e->rhs->ty->pointee;
         if (e->ty->kind == TY_ARRAY) {
             /* m[i] of a 2-D array is itself an array: it decays, and
@@ -1076,7 +1145,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->name) {
             e->gref = find_global(u, e->name);
             if (!e->gref)
-                diag_at(u->file, e->line, e->col, "'%s' is not a declared "
+                sema_error_at(u, e->line, e->col, "'%s' is not a declared "
                         "typeinfo object", e->name);
             e->gref->used = 1;
         }
@@ -1089,7 +1158,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             break;
         }
         if (!is_lvalue(e->rhs))
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "'&' needs a variable or *pointer");
         if (e->rhs->undecayed) {
             /* &arr yields a pointer to the whole ARRAY object, T(*)[N]; its
@@ -1099,7 +1168,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         }
         if (e->rhs->kind == EXPR_MEMBER && e->rhs->memb &&
             e->rhs->memb->is_bitfield)
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "cannot take the address of bitfield '%s'",
                        e->rhs->memb->name);
         e->ty = ty_ptr(e->rhs->ty);
@@ -1112,11 +1181,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * carried by address, a scalar is loaded). */
         struct type *ty = e->cast_ty;
         if (ty->kind == TY_VOID || ty->kind == TY_FUNC)
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "a compound literal cannot have type %s",
                        ty_name(ty));
         if (ty->kind == TY_STRUCT && !ty->complete)
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "compound literal of incomplete type %s",
                        ty_name(ty));
         /* `(int[]){...}` takes its size from the initializer, as `int a[]`
@@ -1205,7 +1274,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (!chosen)
             chosen = deflt;
         if (!chosen)
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "no _Generic association matches type %s",
                        ty_name(e->lhs->ty));
         check_expr(u, f, sc, chosen);
@@ -1216,7 +1285,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         check_expr(u, f, sc, e->rhs);
         if (ty_is_complex(e->cast_ty) || ty_is_complex(e->rhs->ty)) {
             if (!ty_is_complex(e->rhs->ty) && !ty_is_arith(e->rhs->ty))
-                diag_at(u->file, e->line, e->col, "cannot cast %s to %s",
+                sema_error_at(u, e->line, e->col, "cannot cast %s to %s",
                         ty_name(e->rhs->ty), ty_name(e->cast_ty));
             if (e->cast_ty->kind == TY_VOID) { e->ty = e->cast_ty; break; }
             *e = *cx_cast(e->rhs, e->cast_ty);
@@ -1230,11 +1299,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         }
         need_scalar(u, e->rhs, "a cast");
         if (!ty_is_scalar(e->cast_ty))
-            diag_at(u->file, e->line, e->col, "cannot cast to %s",
+            sema_error_at(u, e->line, e->col, "cannot cast to %s",
                        ty_name(e->cast_ty));
         if ((ty_is_float(e->cast_ty) && e->rhs->ty->kind == TY_PTR) ||
             (e->cast_ty->kind == TY_PTR && ty_is_float(e->rhs->ty)))
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "cannot convert between %s and %s",
                        ty_name(e->rhs->ty), ty_name(e->cast_ty));
         e->ty = e->cast_ty;
@@ -1266,7 +1335,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         } else if (a->kind == TY_PTR && b->kind == TY_PTR) {
             if (!ty_equal(a, b) && a->pointee->kind != TY_VOID &&
                 b->pointee->kind != TY_VOID)
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "'?:' branches have incompatible pointer "
                            "types (%s vs %s)", ty_name(a), ty_name(b));
             e->ty = a->pointee->kind == TY_VOID ? b : a;
@@ -1283,7 +1352,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         } else if (a->kind == TY_STRUCT && ty_equal(a, b)) {
             e->ty = a; /* both arms are the same aggregate */
         } else {
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "'?:' branches have incompatible types "
                        "(%s vs %s)", ty_name(a), ty_name(b));
         }
@@ -1292,7 +1361,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_INITLIST:
         /* Only ever reached through flatten_init(), which knows the
          * target type; a brace list has no type of its own. */
-        diag_at(u->file, e->line, e->col,
+        sema_error_at(u, e->line, e->col,
                    "a brace initializer cannot appear here");
         break;
     case EXPR_COMPOUND: {
@@ -1302,7 +1371,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         check_expr(u, f, sc, e->lhs);
         check_expr(u, f, sc, e->rhs);
         if (!is_lvalue(e->lhs) || e->lhs->undecayed || e->lhs->fref)
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "compound assignment needs an lvalue");
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
             cx_lowering()) {
@@ -1311,7 +1380,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         }
         if (e->lhs->ty->kind == TY_PTR) {
             if (e->op != B_ADD && e->op != B_SUB)
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "only += and -= apply to a pointer");
             need_integer(u, e->rhs, "pointer arithmetic");
             e->rhs = mk_cast(e->rhs, ty_base(TY_LONG, 0));
@@ -1345,22 +1414,22 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         struct type *base = e->lhs->ty;
         if (e->is_arrow) {
             if (base->kind != TY_PTR || base->pointee->kind != TY_STRUCT)
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "'->' needs a pointer to a struct/union, "
                            "got %s", ty_name(base));
             base = base->pointee;
         } else if (base->kind != TY_STRUCT) {
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "'.' needs a struct/union, got %s (use '->' "
                        "through a pointer)", ty_name(base));
         }
         if (!base->complete)
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "%s is incomplete here (its body comes later "
                        "or never)", ty_name(base));
         struct member *mm = xcalloc(1, sizeof *mm);
         if (!find_member_deep(base, e->name, mm, 0))
-            diag_at(u->file, e->line, e->col, "%s has no member '%s'",
+            sema_error_at(u, e->line, e->col, "%s has no member '%s'",
                        ty_name(base), e->name);
         e->memb = mm;
         e->ty = e->memb->ty;
@@ -1400,14 +1469,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         }
         if (e->cast_ty) {
             if (e->cast_ty->kind == TY_VOID)
-                diag_at(u->file, e->line, e->col, "sizeof(void)");
+                sema_error_at(u, e->line, e->col, "sizeof(void)");
             if (ty_size(e->cast_ty) == 0)
-                diag_at(u->file, e->line, e->col, "sizeof of incomplete %s",
+                sema_error_at(u, e->line, e->col, "sizeof of incomplete %s",
                            ty_name(e->cast_ty));
             size = ty_size(e->cast_ty);
         } else {
             if (e->rhs->ty->kind == TY_VOID)
-                diag_at(u->file, e->line, e->col, "sizeof a void expression");
+                sema_error_at(u, e->line, e->col, "sizeof a void expression");
             /* sizeof is the one context where an array does NOT decay */
             size = ty_size(e->rhs->undecayed ? e->rhs->undecayed
                                              : e->rhs->ty);
@@ -1427,7 +1496,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             t = e->rhs->undecayed ? e->rhs->undecayed : e->rhs->ty;
         }
         if (t->kind == TY_VOID || (ty_size(t) == 0 && !ty_is_vla(t)))
-            diag_at(u->file, e->line, e->col, "_Alignof of incomplete %s",
+            sema_error_at(u, e->line, e->col, "_Alignof of incomplete %s",
                     ty_name(t));
         e->kind = EXPR_NUM;                 /* folds to a size_t constant */
         e->num = ty_align(t);
@@ -1438,9 +1507,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_VA_ARG:
         check_expr(u, f, sc, e->lhs);   /* the va_list */
         if (e->cast_ty->kind == TY_VOID)
-            diag_at(u->file, e->line, e->col, "va_arg cannot read type 'void'");
+            sema_error_at(u, e->line, e->col, "va_arg cannot read type 'void'");
         if (e->cast_ty->kind == TY_STRUCT)
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "va_arg of a struct passed by value is not "
                        "supported yet");
         e->ty = e->cast_ty;
@@ -1466,27 +1535,27 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             int lp = lt->kind == TY_PTR, rp = rt->kind == TY_PTR;
             if (lp && rp) {
                 if (e->op == B_ADD)
-                    diag_at(u->file, e->line, e->col,
+                    sema_error_at(u, e->line, e->col,
                                "cannot add two pointers");
                 if (!ty_equal(lt, rt))
-                    diag_at(u->file, e->line, e->col,
+                    sema_error_at(u, e->line, e->col,
                                "subtracting incompatible pointers "
                                "(%s vs %s)", ty_name(lt), ty_name(rt));
                 if (lt->pointee->kind == TY_VOID ||
                     lt->pointee->kind == TY_FUNC)
-                    diag_at(u->file, e->line, e->col, "arithmetic on %s",
+                    sema_error_at(u, e->line, e->col, "arithmetic on %s",
                                ty_name(lt));
                 e->ty = ty_base(TY_LONG, 0); /* ptrdiff_t */
             } else if (lp || rp) {
                 if (rp && e->op == B_SUB)
-                    diag_at(u->file, e->line, e->col,
+                    sema_error_at(u, e->line, e->col,
                                "cannot subtract a pointer from an "
                                "integer");
                 struct expr **ip = lp ? &e->rhs : &e->lhs;
                 struct type *pt = lp ? lt : rt;
                 if (pt->pointee->kind == TY_VOID ||
                     pt->pointee->kind == TY_FUNC)
-                    diag_at(u->file, e->line, e->col, "arithmetic on %s",
+                    sema_error_at(u, e->line, e->col, "arithmetic on %s",
                                ty_name(pt));
                 need_integer(u, *ip, "pointer arithmetic");
                 *ip = mk_cast(*ip, ty_base(TY_LONG, 0));
@@ -1512,14 +1581,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     if (!ty_equal(lt, rt) &&
                         lt->pointee->kind != TY_VOID &&
                         rt->pointee->kind != TY_VOID)
-                        diag_at(u->file, e->line, e->col,
+                        sema_error_at(u, e->line, e->col,
                                    "comparing incompatible pointers "
                                    "(%s vs %s)", ty_name(lt),
                                    ty_name(rt));
                 } else {
                     struct expr **ip = lp ? &e->rhs : &e->lhs;
                     if (!is_null_const(*ip))
-                        diag_at(u->file, e->line, e->col,
+                        sema_error_at(u, e->line, e->col,
                                    "comparing a pointer with an "
                                    "integer needs a cast");
                     *ip = mk_cast(*ip, lp ? lt : rt);
@@ -1576,17 +1645,17 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             int is_copy = strcmp(e->lhs->name, "__builtin_va_copy") == 0;
             int want = is_start || is_copy ? 2 : 1;
             if (e->nargs != want)
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "%s takes %d argument%s", e->lhs->name, want,
                            want == 1 ? "" : "s");
             for (int i = 0; i < e->nargs; i++)
                 check_expr(u, f, sc, e->args[i]);
             if (!is_lvalue(e->args[0]))
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "the first argument to %s must be a va_list "
                            "variable", e->lhs->name);
             if (is_start && !f->is_varargs)
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "va_start in '%s', which is not variadic",
                            f->name);
             if (is_copy)   /* SysV's tag is 24 bytes, AAPCS64's 32 */
@@ -1629,7 +1698,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             if (strcmp(bn, "alloca") == 0 ||
                 strcmp(bn, "alloca_with_align") == 0) {
                 if (e->nargs < 1)
-                    diag_at(u->file, e->line, e->col, "%s takes a size",
+                    sema_error_at(u, e->line, e->col, "%s takes a size",
                             e->lhs->name);
                 for (int i = 0; i < e->nargs; i++)
                     check_expr(u, f, sc, e->args[i]);
@@ -1647,11 +1716,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 strcmp(bn, "frame_address") == 0) {
                 long lvl;
                 if (e->nargs != 1)
-                    diag_at(u->file, e->line, e->col, "%s takes one argument",
+                    sema_error_at(u, e->line, e->col, "%s takes one argument",
                             e->lhs->name);
                 check_expr(u, f, sc, e->args[0]);
                 if (!const_fold(e->args[0], &lvl) || lvl < 0)
-                    diag_at(u->file, e->line, e->col,
+                    sema_error_at(u, e->line, e->col,
                             "%s needs a non-negative constant level",
                             e->lhs->name);
                 e->name = e->lhs->name;
@@ -1672,7 +1741,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             else if (strcmp(bn, "bswap16") == 0 || strcmp(bn, "bswap32") == 0 ||
                      strcmp(bn, "bswap64") == 0) {
                 if (e->nargs != 1)
-                    diag_at(u->file, e->line, e->col, "%s takes one argument",
+                    sema_error_at(u, e->line, e->col, "%s takes one argument",
                                e->lhs->name);
                 check_expr(u, f, sc, e->args[0]);
                 need_integer(u, e->args[0], "__builtin_bswap");
@@ -1687,7 +1756,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                      strcmp(bn, "assume_aligned") == 0) {
                 /* hints: the value is the first argument, unchanged */
                 if (e->nargs < 2)
-                    diag_at(u->file, e->line, e->col,
+                    sema_error_at(u, e->line, e->col,
                                "%s takes at least two arguments", e->lhs->name);
                 for (int i = 0; i < e->nargs; i++)
                     check_expr(u, f, sc, e->args[i]);
@@ -1699,7 +1768,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             else if (strcmp(bn, "constant_p") == 0) {
                 long cv;
                 if (e->nargs != 1)
-                    diag_at(u->file, e->line, e->col,
+                    sema_error_at(u, e->line, e->col,
                             "__builtin_constant_p takes one argument");
                 check_expr(u, f, sc, e->args[0]);
                 int line = e->line, col = e->col;
@@ -1716,7 +1785,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * is still evaluated for its side effects. */
             else if (strcmp(bn, "prefetch") == 0) {
                 if (e->nargs < 1)
-                    diag_at(u->file, e->line, e->col,
+                    sema_error_at(u, e->line, e->col,
                             "__builtin_prefetch takes an address");
                 for (int i = 0; i < e->nargs; i++)
                     check_expr(u, f, sc, e->args[i]);
@@ -1729,7 +1798,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * ordinary integer ops, on both targets alike. */
             else if (builtin_bitop(bn, NULL) != 0) {
                 if (e->nargs != 1)
-                    diag_at(u->file, e->line, e->col, "%s takes one argument",
+                    sema_error_at(u, e->line, e->col, "%s takes one argument",
                             e->lhs->name);
                 check_expr(u, f, sc, e->args[0]);
                 need_integer(u, e->args[0], e->lhs->name);
@@ -1771,7 +1840,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             find_func(u, e->lhs->name)) {
             struct func *callee = find_func(u, e->lhs->name);
             if (callee->seq > cur_body_seq)
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "call to '%s' before its declaration — "
                            "declare or define functions before their "
                            "callers", e->lhs->name);
@@ -1784,14 +1853,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             check_expr(u, f, sc, e->lhs);
             if (e->lhs->ty->kind != TY_PTR ||
                 e->lhs->ty->pointee->kind != TY_FUNC)
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                            "called object is not a function (type %s)",
                            ty_name(e->lhs->ty));
             ft = e->lhs->ty->pointee;
         }
         if (ft->is_varargs ? e->nargs < ft->nptypes
                            : e->nargs != ft->nptypes)
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                        "this call needs %s%d argument%s, got %d",
                        ft->is_varargs ? "at least " : "", ft->nptypes,
                        ft->nptypes == 1 ? "" : "s", e->nargs);
@@ -2089,7 +2158,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                 ty_size(ty->pointee) == (init->str_width ? init->str_width : 1)) {
                 int len = (int)init->num, esz = ty_size(ty->pointee);
                 if (ty->count && ty->count < len - 1)
-                    diag_at(u->file, init->line, init->col,
+                    sema_error_at(u, init->line, init->col,
                                "initializer is longer than the array");
                 for (int i = 0; i < len && (!ty->count || i < ty->count);
                      i++) {
@@ -2108,7 +2177,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                 }
                 return;
             }
-            diag_at(u->file, init->line, init->col,
+            sema_error_at(u, init->line, init->col,
                        "an array needs a brace initializer or a string");
         }
         check_expr(u, f, sc, init);
@@ -2129,7 +2198,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
         for (int i = 0; i < init->nelems; i++) {
             struct expr *el = init->elems[i];
             if (el->desig_field)
-                diag_at(u->file, el->line, el->col,
+                sema_error_at(u, el->line, el->col,
                            "field designator '.%s' in an array initializer",
                            el->desig_field);
             if (el->desig_index >= 0)
@@ -2140,7 +2209,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
              * which also keeps a huge `[a ... b] = 0` cheap. */
             int hi = el->desig_index_hi >= 0 ? el->desig_index_hi : ai;
             if (ty->count && hi >= ty->count)
-                diag_at(u->file, el->line, el->col,
+                sema_error_at(u, el->line, el->col,
                            "initializer index %d is past the end of an "
                            "array of %d", hi, ty->count);
             int is_zero = el->kind == EXPR_NUM && el->num == 0;
@@ -2160,7 +2229,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
             if (el->desig_field) {
                 struct member *m = ty_find_member(ty, el->desig_field);
                 if (!m)
-                    diag_at(u->file, el->line, el->col,
+                    sema_error_at(u, el->line, el->col,
                                "%s has no member '%s'", ty_name(ty),
                                el->desig_field);
                 mi = (int)(m - ty->members);
@@ -2171,7 +2240,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                    !ty->members[mi].name)
                 mi++;
             if (mi >= ty->nmembers)
-                diag_at(u->file, init->line, init->col,
+                sema_error_at(u, init->line, init->col,
                            "too many initializers for %s, which has %d "
                            "members", ty_name(ty), ty->nmembers);
             struct member *m = &ty->members[mi];
@@ -2195,7 +2264,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
     }
     /* a braced scalar: { x } */
     if (init->nelems != 1)
-        diag_at(u->file, init->line, init->col,
+        sema_error_at(u, init->line, init->col,
                    "a scalar takes exactly one initializer");
     flatten_init(u, f, sc, init->elems[0], ty, off, out);
 }
@@ -2308,7 +2377,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                              : ldf_target_fmt();
             struct ldf *re, *im;
             if (!cx_fold(v[k].e, fmt, &re, &im))
-                diag_fatal(u->file, line,
+                sema_error_line(u, line,
                            "a static complex initializer must be a constant "
                            "that EmbCC folds: literals, casts, + and -, and "
                            "scaling by a real");
@@ -2324,7 +2393,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         if (v[k].ty->kind == TY_LDOUBLE) {
             struct ldf *x = const_fold_ld(v[k].e);
             if (!x)
-                diag_fatal(u->file, line,
+                sema_error_line(u, line,
                            "a static long double initializer must be a "
                            "constant expression");
             unsigned char lb[16];
@@ -2337,7 +2406,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         if (ty_is_float(v[k].ty)) {
             double dv;
             if (!const_fold_f(v[k].e, &dv))
-                diag_fatal(u->file, line,
+                sema_error_line(u, line,
                            "a static float initializer must be a constant "
                            "expression");
             unsigned long ubits;
@@ -2354,7 +2423,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         if (v[k].ty->kind == TY_INT128) {
             struct w128 w;
             if (!const_fold128(v[k].e, &w))
-                diag_fatal(u->file, line,
+                sema_error_line(u, line,
                            "a static __int128 initializer must be a constant "
                            "expression");
             if (v[k].bit_width) {
@@ -2371,7 +2440,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         }
         long cv;
         if (!const_fold(v[k].e, &cv))
-            diag_fatal(u->file, line,
+            sema_error_line(u, line,
                        "a static initializer must be a constant, a "
                        "string literal, or the address of a global");
         if (v[k].bit_width) {
@@ -2506,7 +2575,7 @@ static void need_atomic_object(struct unit *u, struct expr *e, struct type *t)
     int sz = ty_size(t);
     if (!(ty_is_integer(t) || t->kind == TY_PTR) ||
         (sz != 1 && sz != 2 && sz != 4 && sz != 8 && t->kind != TY_INT128))
-        diag_at(u->file, e->line, e->col,
+        sema_error_at(u, e->line, e->col,
                 "%s works on an integer or pointer of 1, 2, 4, 8 or 16 "
                 "bytes, not %s", e->lhs->name, ty_name(t));
 }
@@ -2536,7 +2605,7 @@ static void check_atomic_call(struct unit *u, struct func *f,
         want = strncmp(name, "__sync_", 7) == 0 ? 2 : 3;
     int is_sync = strncmp(name, "__sync_", 7) == 0;
     if (e->nargs < want || (!is_sync && e->nargs != want))
-        diag_at(u->file, e->line, e->col, "%s takes %d arguments, not %d",
+        sema_error_at(u, e->line, e->col, "%s takes %d arguments, not %d",
                 name, want, e->nargs);
     e->name = name;
 
@@ -2549,7 +2618,7 @@ static void check_atomic_call(struct unit *u, struct func *f,
          * constant so `_Static_assert(__atomic_always_lock_free(...))` works. */
         long n;
         if (!const_fold(e->args[0], &n))
-            diag_at(u->file, e->line, e->col,
+            sema_error_at(u, e->line, e->col,
                     "%s needs a constant size", name);
         struct expr *c = e;
         int line = c->line, col = c->col;
@@ -2563,7 +2632,7 @@ static void check_atomic_call(struct unit *u, struct func *f,
     }
 
     if (e->args[0]->ty->kind != TY_PTR)
-        diag_at(u->file, e->line, e->col,
+        sema_error_at(u, e->line, e->col,
                 "%s needs a pointer first argument", name);
     struct type *obj = e->args[0]->ty->pointee;
 
@@ -2582,7 +2651,7 @@ static void check_atomic_call(struct unit *u, struct func *f,
                 break;                           /* desired is a value */
             struct type *pt = e->args[k]->ty;
             if (pt->kind != TY_PTR || ty_size(pt->pointee) != ty_size(obj))
-                diag_at(u->file, e->line, e->col,
+                sema_error_at(u, e->line, e->col,
                         "argument %d of %s must point to a %d-byte object",
                         k + 1, name, ty_size(obj));
         }
@@ -2638,7 +2707,7 @@ static int asm_resolve_reg_arm64(struct unit *u, struct stmt *s,
          * callee-saved, which a register variable would have to preserve
          * and EmbCC does not yet save around asm. */
         if (r < 0 || r == 12 || r >= 16)
-            diag_at(u->file, s->line, s->col,
+            sema_error_at(u, s->line, s->col,
                     "register variable bound to '%s' is not supported for "
                     "aarch64 asm (use x0..x11 or x13..x15)", rn);
         return r;
@@ -2667,7 +2736,7 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
 {
     const char *c = op->constraint;
     if (is_out && *c != '=' && *c != '+')
-        diag_at(u->file, s->line, s->col,
+        sema_error_at(u, s->line, s->col,
                    "an asm output constraint must start with '=' or '+' "
                    "(got \"%s\")", op->constraint);
     while (*c == '=' || *c == '+' || *c == '&')
@@ -2695,7 +2764,7 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
     for (const char *p = c; *p; p++)             /* an SSE/XMM ('x') operand */
         if (*p == 'x')
             return -3;                            /* irgen allocates an xmm */
-    diag_at(u->file, s->line, s->col,
+    sema_error_at(u, s->line, s->col,
                "asm constraint \"%s\" is not supported "
                "(EmbCC handles a/b/c/d/S/D, 'r'/'q'/'g'/'m', 'x', and a "
                "register-asm variable)", op->constraint);
@@ -2707,26 +2776,36 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
  * refusing shadowed names accepts strictly fewer programs than C does,
  * so the subset stays a subset. */
 static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
-                       struct stmt *s, int in_loop, int in_switch,
+                       struct stmt *s_in, int in_loop, int in_switch,
                        int at_sw_level)
 {
+    /* Each statement is a recovery point: an error in one is reported and
+     * the next is still checked. What a failed statement already added to
+     * the scope stays — dropping it would turn one error into several
+     * ("not declared") further down. `s` is written between setjmp and
+     * longjmp, so it is volatile (C99 7.13.2.1p3). */
+    struct stmt *volatile s = s_in;
+    jmp_buf jb, *save = g_recover;
     for (; s; s = s->next) {
+        g_recover = &jb;
+        if (setjmp(jb))
+            continue;
         switch (s->kind) {
         case STMT_BREAK:
             /* break leaves the nearest loop OR switch; continue only
              * ever belongs to a loop. */
             if (!in_loop && !in_switch)
-                diag_at(u->file, s->line, s->col,
+                sema_error_at(u, s->line, s->col,
                            "'break' outside of a loop or switch");
             break;
         case STMT_CONTINUE:
             if (!in_loop)
-                diag_at(u->file, s->line, s->col, "'continue' outside of a loop");
+                sema_error_at(u, s->line, s->col, "'continue' outside of a loop");
             break;
         case STMT_CASE:
         case STMT_DEFAULT:
             if (!at_sw_level)
-                diag_at(u->file, s->line, s->col,
+                sema_error_at(u, s->line, s->col,
                            "'%s' must appear directly in its switch body "
                            "(labels inside a nested block are not "
                            "supported)",
@@ -2735,7 +2814,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 check_expr(u, f, sc, s->expr);
                 need_integer(u, s->expr, "a case label");
                 if (!const_fold(s->expr, &s->cval))
-                    diag_at(u->file, s->line, s->col,
+                    sema_error_at(u, s->line, s->col,
                                "a case label must be an integer constant "
                                "expression");
             }
@@ -2750,13 +2829,13 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             int ndefault = 0;
             for (struct stmt *a = list; a; a = a->next) {
                 if (a->kind == STMT_DEFAULT && ++ndefault > 1)
-                    diag_fatal(u->file, a->line,
+                    sema_error_line(u, a->line,
                                "a switch can have only one 'default'");
                 if (a->kind != STMT_CASE)
                     continue;
                 for (struct stmt *b = a->next; b; b = b->next)
                     if (b->kind == STMT_CASE && b->cval == a->cval)
-                        diag_fatal(u->file, b->line,
+                        sema_error_line(u, b->line,
                                    "duplicate case label %ld", b->cval);
             }
             break;
@@ -2809,11 +2888,11 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             }
             if (ty_is_vm(s->dty)) {
                 if (s->is_static)
-                    diag_at(u->file, s->line, s->col,
+                    sema_error_at(u, s->line, s->col,
                             "static '%s' cannot have a variably modified "
                             "type (%s)", s->name, ty_name(s->dty));
                 if (ty_is_vla(s->dty) && s->expr)
-                    diag_at(u->file, s->line, s->col,
+                    sema_error_at(u, s->line, s->col,
                             "variable length array '%s' cannot be "
                             "initialized", s->name);
                 /* sizes first: the lengths are evaluated where the
@@ -2831,7 +2910,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 int w = s->expr->str_width ? s->expr->str_width : 1;
                 if (!ty_is_integer(s->dty->pointee) ||
                     ty_size(s->dty->pointee) != w)
-                    diag_at(u->file, s->line, s->col,
+                    sema_error_at(u, s->line, s->col,
                                "a string literal can only initialize an integer "
                                "array whose element width matches it");
                 if (s->dty->count == 0)
@@ -2849,7 +2928,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
              * it before checking the initializer; a static local's
              * global is wired onto this same entry below. */
             if (scope_find_here(sc, s->name) >= 0)
-                diag_at(u->file, s->line, s->col,
+                sema_error_at(u, s->line, s->col,
                            "'%s' is already declared in this block",
                            s->name);
             s->var_index = scope_add(sc, s->name, s->dty, NULL);
@@ -2935,12 +3014,12 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
         case STMT_RETURN:
             if (f->ret_ty->kind == TY_VOID) {
                 if (s->expr)
-                    diag_at(u->file, s->line, s->col,
+                    sema_error_at(u, s->line, s->col,
                                "returning a value from void '%s'",
                                f->name);
             } else {
                 if (!s->expr)
-                    diag_at(u->file, s->line, s->col,
+                    sema_error_at(u, s->line, s->col,
                                "'%s' returns %s; 'return' needs a value",
                                f->name, ty_name(f->ret_ty));
                 check_expr(u, f, sc, s->expr);
@@ -2958,7 +3037,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             for (int i = 0; i < a->nout; i++) {
                 check_expr(u, f, sc, a->out[i].expr);
                 if (!is_lvalue(a->out[i].expr))
-                    diag_at(u->file, s->line, s->col,
+                    sema_error_at(u, s->line, s->col,
                                "an asm output operand must be an lvalue");
                 a->out[i].reg = asm_resolve_reg(u, s, &a->out[i], 1);
             }
@@ -3030,11 +3109,11 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             check_expr(u, f, sc, s->expr);
             check_expr(u, f, sc, s->cond);
             if (!is_lvalue(s->expr) || s->expr->ty->kind != TY_PTR)
-                diag_at(u->file, s->line, s->col, "a landing pad's exception "
+                sema_error_at(u, s->line, s->col, "a landing pad's exception "
                         "pointer must be a pointer lvalue");
             if (!is_lvalue(s->cond) || !ty_is_integer(s->cond->ty) ||
                 ty_size(s->cond->ty) != 8)
-                diag_at(u->file, s->line, s->col, "a landing pad's selector "
+                sema_error_at(u, s->line, s->col, "a landing pad's selector "
                         "must be a long lvalue");
             for (int i = 0; i < s->neh_acts; i++) {
                 struct eh_act *a = &s->eh_acts[i];
@@ -3042,7 +3121,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     continue;
                 a->ti = find_global(u, a->name);
                 if (!a->ti)
-                    diag_at(u->file, s->line, s->col, "'%s' is not a declared "
+                    sema_error_at(u, s->line, s->col, "'%s' is not a declared "
                             "typeinfo object", a->name);
                 a->ti->used = 1;
             }
@@ -3053,12 +3132,13 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             if (s->expr) {   /* computed goto `goto *expr` (GNU) */
                 check_expr(u, f, sc, s->expr);
                 if (s->expr->ty->kind != TY_PTR)
-                    diag_at(u->file, s->line, s->col,
+                    sema_error_at(u, s->line, s->col,
                             "computed goto ('goto *') needs a pointer operand");
             }
             break;
         }
     }
+    g_recover = save;
 }
 
 /* Conservative all-paths-return. Refusing a maybe-missing return is
@@ -3182,12 +3262,13 @@ static int list_returns(struct stmt *s)
 
 static void check_func(struct unit *u, struct func *f)
 {
+    g_nundeclared = 0;           /* a fresh function: report its names again */
     struct scope sc = { 0, 0, 0, 0 };
     g_cx_sc = &sc;       /* complex lowering adds its temps here */
 
     for (int i = 0; i < f->nparams; i++) {
         if (scope_find(&sc, f->params[i]) >= 0)
-            diag_fatal(u->file, f->line,
+            sema_error_line(u, f->line,
                        "duplicate parameter '%s' in '%s'",
                        f->params[i], f->name);
         scope_add(&sc, f->params[i], f->param_tys[i], NULL);
@@ -3251,7 +3332,7 @@ static void merge_decls(struct unit *u)
             exit(1);
         }
         if (f->is_static && !canon->is_static)
-            diag_fatal(u->file, f->line,
+            sema_error_line(u, f->line,
                        "static declaration of '%s' follows non-static "
                        "declaration (line %d)", f->name, canon->line);
         if (f->defined) {
@@ -3286,7 +3367,7 @@ static void merge_globals(struct unit *u)
             continue;
         struct global *canon = find_global(u, g->name);
         if (find_func(u, g->name))
-            diag_fatal(u->file, g->line,
+            sema_error_line(u, g->line,
                        "'%s' is declared as both a function and a "
                        "variable", g->name);
         if (canon == g) {
@@ -3316,7 +3397,7 @@ static void merge_globals(struct unit *u)
             exit(1);
         }
         if (g->is_static && !canon->is_static)
-            diag_fatal(u->file, g->line,
+            sema_error_line(u, g->line,
                        "static declaration of '%s' follows non-static "
                        "declaration (line %d)", g->name, canon->line);
         if (g->has_init) {
@@ -3373,7 +3454,7 @@ void sema_check(struct unit *u)
      * of emitting an unresolvable object (THE RULE). */
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && !f->has_defn && f->is_static && f->used)
-            diag_fatal(u->file, f->line,
+            sema_error_line(u, f->line,
                        "static function '%s' is called but never defined",
                        f->name);
 }

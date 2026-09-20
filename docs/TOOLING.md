@@ -14,7 +14,7 @@ until the front ends can keep going after an error.
 | | what | proven by |
 |---|---|---|
 | **T1** | **The diagnostic engine.** A diagnostic is a record: severity, location, source range, notes, fix-its, the option that controls it. Buffered, then rendered — text exactly as before, or `-fdiagnostics-format=json` (GCC's schema, so existing tools read it). `-fdiagnostics-color`, `-fmax-errors`, `-w`, `-Werror`. First fix-its: the name suggestions the front ends already compute. | done — tests/golden/diagnostics-json.sh; the text goldens unchanged |
-| **T2** | **Error recovery.** The C front end keeps going after an error — synchronising at statement and declaration boundaries — so one run reports every independent problem instead of the first. Then the C++ front end. A recovery must never produce a *wrong* later diagnostic: each is either suppressed or real. | a file with N independent errors reports N |
+| **T2** | **Error recovery.** The C front end keeps going after an error — synchronising at statement and declaration boundaries — so one run reports every independent problem instead of the first. A recovery must never produce a *wrong* later diagnostic: each is either suppressed or real. | done (C) — tests/golden/diagnostics-recovery.sh; the C++ front end is still first-error |
 | **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Fix-its for the mechanical cases: a missing `;`, a missing `&`/`*`, `.` for `->`, an unspelled `struct` tag, a misspelt name, a missing `#include` for a known declaration. | before/after files in a golden, and a fixed file compiles |
 | **T4** | **The driver GCC and Clang users already know.** A real option table (`--help` generated from it), `-M`/`-MM`/`-MD`/`-MMD`/`-MF`/`-MT`/`-MP`, `-fsyntax-only`, `-S`, `@file`, `--version`, `-dumpmachine`, `-x`, `-###`. And warnings that mean something: `-Wall`/`-Wextra` as groups over real analyses (unused, shadowed, uninitialised, sign-compare, fallthrough, format), each with its `-Wno-` and its name printed in the diagnostic. | gcc's own option spellings on EmbCC, and each warning's golden |
 | **T5** | **`embls`, the language server.** LSP over stdio on a tolerant parse: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords, `#include` paths), hover (type, declaration, comment), go-to-definition, find references, signature help, document symbols, rename. | an LSP conversation transcript test, and it drives a real editor |
@@ -57,3 +57,31 @@ The first fix-its come from the suggestions the front ends already make:
 `'fooo' is not declared` → note `did you mean 'foo'?` with a fix-it
 replacing the identifier. In JSON that is a `fixits` entry an editor can
 apply without parsing English.
+
+## T2 — recovery (done, for C)
+
+A syntax error is recorded and the parser resumes at the nearest recovery
+point: the next statement inside a block, or the next external declaration.
+Resynchronising means skipping to the `;` that ends the broken construct or
+the `}` that ends its block, and it always consumes at least one token, so
+recovery cannot spin on the token it failed at. Semantic analysis does the
+same per statement, which matters more in practice — most of the reasons a
+file will not build are semantic (a name not declared, a member that does
+not exist, an argument that does not fit).
+
+Two rules keep the extra diagnostics honest:
+
+- **Nothing downstream runs on a broken tree.** If the parse reported
+  errors, semantic analysis never starts; if semantic analysis reported
+  any, code generation never starts. The compile ends with `compilation
+  terminated: N errors`. A later pass on a half-built tree would invent
+  diagnostics that are not about the program.
+- **A repeated cause is reported once.** A name misspelt once is usually
+  used several times; the first use reports it, the rest are counted and
+  quiet.
+
+What a failed statement already added to the scope is left there
+deliberately: dropping a half-declared variable would turn one error into a
+crowd of "not declared" ones below it.
+
+`-fmax-errors=N` stops after N, as GCC does.

@@ -362,6 +362,9 @@ struct unit {
     struct topasm *topasm;
 };
 
+/* Syntax errors the last parse_unit reported (parse.c). */
+int parse_error_count(void);
+
 /* Element count an EXPR_INITLIST implies for an unsized array, honoring
  * `[i] =` designators (defined in parse.c, used there and in sema). */
 int initlist_array_count(const struct expr *il);

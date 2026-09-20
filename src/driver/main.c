@@ -190,7 +190,17 @@ static int compile(const char *in, const char *out, int pp_only)
         }
     }
     struct unit *u = parse_unit(in, pp);
+    if (parse_error_count()) {
+        /* Every syntax error is out; the tree is not whole, so nothing
+         * downstream runs on it (a later pass would only invent errors). */
+        diag_terminated(parse_error_count());
+        exit(1);
+    }
     sema_check(u);
+    if (sema_error_count()) {
+        diag_terminated(sema_error_count());
+        exit(1);
+    }
 
     /* File-scope asm (crt0's _start) can reference a function by name with
      * `call sym`. That reference has to count as a USE before irgen decides

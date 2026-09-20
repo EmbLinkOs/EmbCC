@@ -427,6 +427,16 @@ void diag_flush(void)
     }
 }
 
+/* "compilation terminated": the line a person reads after the errors. In
+ * JSON the array is the whole output, so there is nothing to add to it. */
+void diag_terminated(int nerrors)
+{
+    diag_flush();
+    if (g_format == DIAG_TEXT)
+        fprintf(stderr, "embcc: compilation terminated: %d error%s\n",
+                nerrors, nerrors == 1 ? "" : "s");
+}
+
 static void install_flush(void)
 {
     static int done;
@@ -495,6 +505,16 @@ void diag_error_at(const char *file, int line, int col, const char *fmt, ...)
     va_start(ap, fmt);
     new_diag(DIAG_ERROR, file, line, col, vfmt(fmt, ap));
     va_end(ap);
+    check_max_errors();
+}
+
+/* The same, for a front end that already has the va_list (its own
+ * error function on top of this one). */
+void diag_verror_at(const char *file, int line, int col, const char *fmt,
+                    va_list ap)
+{
+    install_flush();
+    new_diag(DIAG_ERROR, file, line, col, vfmt(fmt, ap));
     check_max_errors();
 }
 

@@ -43,7 +43,8 @@ int f(int n)
 {
     int a = n * ;
     int b = n + 1;
-    return a + * b;
+    if (b > ) return 0;
+    return a + b;
 }
 EOF
 "$EMBCC" -c "$out/body.c" -o "$out/body.o" > "$out/body.log" 2>&1 && {
@@ -75,7 +76,36 @@ EOF
     echo "a correct file stopped compiling"; exit 1; }
 echo "one mistake: exactly one error; correct code unaffected"
 
-# 4. -fmax-errors stops where it says.
+# 4. Semantic errors recover too, and that is most of them: a name that is
+#    not declared, a member that does not exist, an argument that does not
+#    fit — four in one run, across two functions. A name misspelt once is
+#    reported once, however many times it is used.
+cat > "$out/sem.c" << 'EOF2'
+int strlen(const char *s);
+struct P { int x; int y; };
+int f(struct P p, int n)
+{
+    int a = undeclared_one + 1;
+    int b = p.z;
+    int c = strlen(p);
+    return a + b + c + n + undeclared_one;
+}
+int g(void) { return missing_two(); }
+EOF2
+"$EMBCC" -c "$out/sem.c" -o "$out/sem.o" > "$out/sem.log" 2>&1 && {
+    echo "the file with semantic errors compiled"; exit 1; }
+[ "$(nerr "$out/sem.log")" -eq 4 ] || {
+    echo "expected 4 semantic errors:"; cat "$out/sem.log"; exit 1; }
+for want in "'undeclared_one' is not declared" "has no member 'z'" \
+            "cannot convert struct P" "'missing_two' is not declared"; do
+    grep -q "$want" "$out/sem.log" || {
+        echo "missing: $want"; cat "$out/sem.log"; exit 1; }
+done
+[ "$(grep -c "'undeclared_one' is not declared" "$out/sem.log")" -eq 1 ] || {
+    echo "the same name reported twice:"; cat "$out/sem.log"; exit 1; }
+echo "four semantic errors in one run; a repeated name reported once"
+
+# 5. -fmax-errors stops where it says.
 "$EMBCC" -fmax-errors=2 -c "$out/three.c" -o "$out/three.o" \
     > "$out/max.log" 2>&1 || true
 [ "$(nerr "$out/max.log")" -eq 2 ] || {
@@ -84,7 +114,7 @@ grep -q "due to -fmax-errors=2" "$out/max.log" || {
     echo "no -fmax-errors note:"; cat "$out/max.log"; exit 1; }
 echo "-fmax-errors=2: two errors, then it stops and says so"
 
-# 5. All of them reach an editor: the JSON carries one object per error.
+# 6. All of them reach an editor: the JSON carries one object per error.
 if command -v python3 >/dev/null 2>&1; then
     "$EMBCC" -fdiagnostics-format=json -c "$out/three.c" -o "$out/three.o" \
         2> "$out/three.json" || true
@@ -93,8 +123,8 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 errs = [x for x in d if x["kind"] == "error"]
 assert len(errs) == int(sys.argv[2]), (len(errs), sys.argv[2])
-lines = sorted(x["locations"][0]["caret"]["line"] for x in errs)
-assert lines == sorted(set(lines)), lines
-print("json: %d errors, one per line" % len(errs))
+lines = set(x["locations"][0]["caret"]["line"] for x in errs)
+assert {2, 4, 6} <= lines, lines
+print("json: %d errors, covering every broken line" % len(errs))
 PY
 fi

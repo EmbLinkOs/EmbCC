@@ -8,6 +8,10 @@
  * EXPR_CALL a callee, and every func its nvars. */
 void sema_check(struct unit *u);
 
+/* Semantic errors the last sema_check reported: the driver stops before
+ * generating code when there were any (docs/TOOLING.md T2). */
+int sema_error_count(void);
+
 /* The statement list a switch dispatches over: its body, unwrapped when
  * it is the usual brace block. Shared with irgen so both agree on which
  * statements carry the case markers. */

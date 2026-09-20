@@ -43,6 +43,13 @@ void diag_note_at(const char *file, int line, int col, const char *fmt, ...);
 /* A "warning:" at a location. Does not exit. */
 void diag_warn_at(const char *file, int line, int col, const char *fmt, ...);
 
+/* An error whose arguments a front end already gathered (parse.c builds its
+ * own error on top of this one). Needs <stdarg.h> included first. */
+#ifdef va_arg
+void diag_verror_at(const char *file, int line, int col, const char *fmt,
+                    va_list ap);
+#endif
+
 /* ---- the diagnostic engine (diag.c) ---- */
 
 enum { DIAG_ERROR, DIAG_WARNING, DIAG_NOTE };
@@ -65,5 +72,8 @@ void diag_set_werror(int on);          /* warnings become errors */
 void diag_set_no_warnings(int on);     /* -w: drop them */
 int  diag_error_count(void);           /* for the driver's exit status */
 void diag_flush(void);                 /* render everything held (atexit) */
+/* The closing "compilation terminated: N errors" (text only: in JSON the
+ * array is the whole output). */
+void diag_terminated(int nerrors);
 
 #endif
