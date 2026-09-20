@@ -1174,6 +1174,10 @@ int main(int argc, char **argv)
         }
         return done(compile(input, output, 0));
     }
+    /* -fsyntax-only (and --fix) check the file and write nothing, so there
+     * is nothing to link: they imply -c, as they do in GCC. */
+    if (syntax_only)
+        compile_mode = 1;
     if (!compile_mode) {
         fprintf(stderr,
                 "embcc: error: cannot link '%s': the integrated linker is "

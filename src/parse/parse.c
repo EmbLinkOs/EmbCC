@@ -2727,6 +2727,11 @@ fn_tail:
     /* trailing attributes: void f(void) __attribute__((noreturn/weak)) */
     parse_attributes(ps, &at);
     f->is_weak = at.weak;
+    /* Trailing is GCC's usual spelling for these two -- `void die(void)
+     * __attribute__((noreturn));` -- and they were parsed here and then
+     * dropped, so only the leading form ever reached the func node. */
+    f->is_noreturn = at.noreturn;
+    f->is_nothrow = at.nothrow;
     if (at.section)
         parse_error_line(ps, line,
                    "section attribute on function '%s' is not supported — "

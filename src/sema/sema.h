@@ -41,4 +41,10 @@ enum atomic_kind atomic_builtin(const char *name, int *op);
  * operand width — 4 for the plain form, 8 for the l / ll forms. */
 int builtin_bitop(const char *bn, int *width);
 
+/* A call that never comes back -- __attribute__((noreturn)), or one of
+ * the handful of library names that genuinely never return. Statements
+ * after it are unreachable, which both the missing-return check and the
+ * uninitialized analysis need to know. */
+int is_noreturn_call(const struct expr *e);
+
 #endif

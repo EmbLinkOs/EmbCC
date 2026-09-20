@@ -635,6 +635,11 @@ static struct warn_opt g_warns[] = {
     { "unused-function",      0,  1,    0 },
     { "shadow",               0,  0,    0 },
     { "sign-compare",         0,  0,    1 },
+    /* GCC puts both in -Wall: a definite read of an uninitialized local is
+     * a bug, and a read on some path is one often enough to be worth the
+     * reader's attention. */
+    { "uninitialized",        0,  1,    0 },
+    { "maybe-uninitialized",  0,  1,    0 },
 };
 static const int g_nwarns = (int)(sizeof g_warns / sizeof g_warns[0]);
 

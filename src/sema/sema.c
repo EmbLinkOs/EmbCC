@@ -16,6 +16,7 @@
 #include "../arch/target.h"
 #include "ldfloat.h"
 #include "type.h"
+#include "uninit.h"
 #include "w128.h"
 
 struct vardef {
@@ -3318,7 +3319,7 @@ static int has_own_break(struct stmt *s)
  * recognized by name — sound because these genuinely never return, and
  * the worst case of a same-named user function is a missed diagnostic,
  * never a miscompile. diag_fatal is EmbCC's own, used at many tails. */
-static int is_noreturn_call(const struct expr *e)
+int is_noreturn_call(const struct expr *e)
 {
     if (e->kind != EXPR_CALL || !e->name)
         return 0;
@@ -3456,6 +3457,24 @@ static void check_func(struct unit *u, struct func *f)
                           "unused variable '%s'", v->name);
     }
 
+    /* -Wuninitialized: a dataflow question, so it gets its own pass over
+     * the body — with the scope table still alive, since its indices ARE
+     * the frame slots the walk reasons about (uninit.c). */
+    if (sc.n > 0) {
+        struct uninit_var *uv = xmalloc((size_t)sc.n * sizeof *uv);
+        for (int i = 0; i < sc.n; i++) {
+            uv[i].name = sc.vars[i].name;
+            uv[i].ty = sc.vars[i].ty;
+            uv[i].is_param = sc.vars[i].is_param;
+            uv[i].is_static = sc.vars[i].g != NULL ||
+                              sc.vars[i].asm_reg != NULL;
+            uv[i].line = sc.vars[i].line;
+            uv[i].col = sc.vars[i].col;
+        }
+        uninit_check(diag_file(u), f, uv, sc.n);
+        free(uv);
+    }
+
     f->nvars = sc.n;
     f->var_tys = xmalloc((size_t)(sc.n ? sc.n : 1) * sizeof *f->var_tys);
     f->var_aligns = xmalloc((size_t)(sc.n ? sc.n : 1) * sizeof *f->var_aligns);
@@ -3514,6 +3533,14 @@ static void merge_decls(struct unit *u)
             }
             canon->has_defn = 1;
             canon->body = f->body;
+            /* The canonical node now IS the definition, so it must carry
+             * where the definition is. Otherwise every diagnostic about the
+             * body -- an unused local, a missing return, a variable used
+             * uninitialized -- is reported against the prototype's file,
+             * which for a function declared in a header is the header, with
+             * the .c file's line numbers. */
+            canon->file = f->file;
+            canon->line = f->line;
             for (int i = 0; i < f->nparams; i++)
                 canon->params[i] = f->params[i]; /* definition names win */
         }

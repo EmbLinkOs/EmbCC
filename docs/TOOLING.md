@@ -222,6 +222,8 @@ their groups.
 | `-Wunused-parameter` | `-Wextra` | a parameter the body never touches |
 | `-Wshadow` | — | a declaration that hides one still in scope, with a note at the one it hides |
 | `-Wsign-compare` | `-Wextra` | a comparison the usual conversions turn unsigned, where the signed side can be negative |
+| `-Wuninitialized` | `-Wall` | a local read on a path that never wrote it |
+| `-Wmaybe-uninitialized` | `-Wall` | a local read where only some paths wrote it |
 
 The golden's last check is the one that matters: on the same file, with the
 same flags, EmbCC warns where gcc warns — a warning nobody else raises is a
@@ -274,3 +276,78 @@ The ordering of those cases is itself a judgement. libsupc++'s own
 `_ZTVN10__cxxabiv117__class_type_infoE` *is* a `_ZTV` symbol, and the
 key-function rule is true of it and useless: it sends the reader looking
 for a virtual function they never wrote. The runtime check runs first.
+
+## T4 — `-Wuninitialized`, the first analysis with a lattice
+
+Every warning before this one is a check on a single construct: this
+declaration, that comparison. `int x; if (c) x = 1; return x;` is not that
+kind of question. It compiles, links, runs, and returns whatever the frame
+held, and answering it means knowing what every path reaching the read has
+done.
+
+So `src/sema/uninit.c` is a real dataflow analysis, run over the statement
+tree once semantic analysis has bound every name to a frame slot. Each slot
+holds one of three values — written on no path, every path, some path — and
+the walk joins them wherever control rejoins: after an `if`, around a loop's
+back edge, at each `case` label (which is another way in, carrying the state
+at the switch head, so a switch with no `default` leaves a slot unwritten).
+A read of a slot written on no path is `-Wuninitialized`; on some,
+`-Wmaybe-uninitialized`. One warning per variable, because the second read
+is the same bug seen again.
+
+**The bar is false positives, not coverage.** A missed bug is still a bug
+the programmer can find; an invented one is a bug they cannot. The analysis
+was built against EmbCC's own 50 source files — code gcc compiles `-Werror`
+clean, where every warning is by definition a false positive. The first run
+produced 36. What each one turned out to be is the interesting part:
+
+- **20 were `va_list ap; va_start(ap, fmt);`**. Spelled as a call,
+  `va_start` looks like a read of an uninitialized `va_list`; it is a
+  *write* — irgen takes the address. Now treated as one.
+- **13 were slot 0, seen through a function's name.** `fprintf` is an
+  `EXPR_VAR` whose `fref` is set and whose `gref` is not, so `var_index`
+  kept its default of 0 — a real slot, belonging to some other variable.
+  A bound name now has to match the slot's name.
+- **1 was `a && (sh = f()) >= 0 && g(sh)`.** Taken pairwise, the last
+  operand is analysed from a state where the middle one might not have run.
+  But it runs only if the middle one did: the chain of one operator is now
+  walked whole, each operand seeing the state in which all before it ran.
+- **1 was `... else no();`**, where `no()` leaves through `longjmp`. No
+  analysis can see that, so `no()` now says `__attribute__((noreturn))`,
+  and the walk honours it (reusing sema's own `is_noreturn_call`).
+- **1 was a guarded loop-carried value**: `for (…) { if (i) use(w); w = i; }`
+  — written late, read early on a later turn, under a test that is false on
+  the first. The test is the guard, and the analysis cannot relate it to the
+  iteration count; gcc is silent here too. A MAYBE that the back edge alone
+  produced, read under a test inside that loop, is not reported. Unguarded,
+  the same shape is a first-iteration read and still is.
+
+It now warns nowhere in EmbCC's own source, and the golden asserts that.
+
+**Against the referee.** On the four-case file in
+tests/golden/warnings-uninit.sh, gcc `-O2` agrees on three: the definite
+read, the loop that may not run, and the switch with no `default`. It misses
+`if (c) x = 1; return x;` at every `-O` level — clang reports that one as
+`-Wsometimes-uninitialized`, so it is a true positive gcc happens not to
+find. gcc catches one EmbCC does not: a read through a pointer to a local
+whose address was taken. That is deliberate. `&x` hands the slot to code the
+walk is not looking at, and gcc only sees it by working after inlining.
+Both differences are asserted, so either one changing shows up as a failure.
+
+**Two bugs fell out of writing it**, both older than the analysis and both
+affecting diagnostics that already shipped:
+
+- `-fsyntax-only` did not imply `-c`, so it ran to the link step and failed
+  with "cannot link" instead of checking the file. It implies it now, as in
+  GCC.
+- A function prototyped in a header and defined in a `.c` reported *every*
+  diagnostic about its body against the **header**, with the `.c` file's
+  line numbers. `merge_decls` moved the definition's body into the canonical
+  node but left the prototype's file and line on it. The canonical node now
+  takes the definition's location, because after the merge it *is* the
+  definition. This was wrong for unused-variable, unused-parameter, shadow,
+  sign-compare and missing-return too.
+
+And one gap: a trailing `__attribute__((noreturn))` — GCC's usual spelling
+— was parsed at `fn_tail` and then dropped; only `weak` was copied onto the
+function node. Both `noreturn` and `nothrow` now survive it.

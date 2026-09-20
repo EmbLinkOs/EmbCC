@@ -42,6 +42,7 @@ SRCS := \
 	src/sema/type.c \
 	src/sema/ldfloat.c \
 	src/sema/w128.c \
+	src/sema/uninit.c \
 	src/ir/irgen.c \
 	src/opt/opt.c \
 	src/debug/dwarf.c \
@@ -101,7 +102,8 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 # process where it cannot continue and a server must not.
 EMBLS_SRCS = tools/embls/embls.c src/cpp/cpp.c src/lex/lex.c \
              src/parse/parse.c src/sema/type.c src/sema/ldfloat.c \
-             src/sema/w128.c src/driver/util.c src/driver/diag.c \
+             src/sema/w128.c src/sema/uninit.c \
+             src/driver/util.c src/driver/diag.c \
              src/driver/explain.c \
              src/arch/target.c src/arch/predef.c src/arch/x86_64/predef.c \
              src/arch/aarch64/predef.c src/arch/x86_64/predef_cxx.c \

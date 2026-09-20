@@ -99,7 +99,10 @@ static struct cstmt *seek;    /* a switch's jump: the label looked for */
 #define MAX_STEPS 20000000L
 #define MAX_DEPTH 512
 
-static void no(void)
+/* noreturn, and it has to SAY so: it leaves through longjmp, which no
+ * analysis can see, so without the attribute every `... else no();` looks
+ * like a path that falls through with nothing assigned. */
+__attribute__((noreturn)) static void no(void)
 {
     longjmp(*fail_to, 1);
 }
