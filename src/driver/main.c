@@ -27,6 +27,7 @@
 #include <setjmp.h>
 
 #include "asmout.h"
+#include "iface.h"
 #include "inspect.h"
 #include "remark.h"
 #include "util.h"
@@ -220,6 +221,9 @@ static int syntax_only;
 static const char *inspect_stage;
 /* -S: emit the assembly the backend produced, rather than an object. */
 static int want_asm;
+/* --emit-interfaces: the USRs and interface hashes of what this unit
+ * provides and observes (§8.2, §21). */
+static int want_iface;
 /* -fremarks[=json]: what the passes decided, and why (R2, §13). Off by
  * default -- a pass that always built strings would slow every compile for
  * a report almost nobody asked for. */
@@ -385,6 +389,20 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             return 0;
         }
         ob_free(&b);
+    }
+
+    /* Emitted after semantic analysis, because an interface hash is over
+     * the RESOLVED declaration -- a layout, a signature -- not over what
+     * the parser saw. */
+    if (want_iface) {
+        struct outbuf ib = { NULL, 0, 0 };
+        iface_emit(&ib, u);
+        int irc = out ? plat_write_file(out, ib.p, ib.n)
+                      : (fwrite(ib.p, 1, ib.n, stdout), 0);
+        if (irc != 0)
+            diag_fatal(out, 0, "cannot write the file");
+        ob_free(&ib);
+        return 0;
     }
 
     if (dep_mode)                     /* -MD/-MMD: beside the object */
@@ -1181,6 +1199,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--fix") == 0) {
             want_fix = 1;
             syntax_only = 1;          /* the point is the edit, not an object */
+        } else if (strcmp(argv[i], "--emit-interfaces") == 0) {
+            want_iface = 1;
+            compile_mode = 1;      /* a report, not an object */
         } else if (strcmp(argv[i], "-S") == 0) {
             want_asm = 1;
             compile_mode = 1;      /* like -c: no link */
@@ -1441,5 +1462,9 @@ int main(int argc, char **argv)
                 "the existing toolchain\n", input);
         return 1;
     }
+    /* A report goes to stdout unless the caller named a file; an object
+     * gets the default name. */
+    if ((want_iface || want_asm) && !output)
+        return done(compile(input, NULL, 0));
     return done(compile(input, output ? output : default_output(input), 0));
 }

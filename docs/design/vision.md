@@ -255,10 +255,22 @@ this document depends on most:
    carry: a parsed unit's `src` is NULL, so it can be printed, analysed and
    transformed, but not handed to the DWARF emitter. Text-in/text-out pass
    tests — §9.1's stated reason for wanting this — are now possible.
-3. **The project knowledge graph (§8.2).** No USRs, no interface hashes, no
-   cross-TU index. Incremental compilation is at Level 1 (`-MD` file
-   dependencies) and Levels 2–3 (§21), `embcc diff` (§22) and project-wide
-   refactoring (§24) all wait on it.
+3. **The project knowledge graph (§8.2) — the per-unit half exists.**
+   `embcc --emit-interfaces` gives every declaration a **USR** that survives
+   unrelated edits and an **interface hash** over what dependents can
+   observe — a function's signature but not its body, a struct's layout but
+   not its comments — and reports, per unit, what it *provides* and what it
+   *uses*. That is what §21 Level 2 asks for, and the golden tests both
+   directions: a comment, reformatting, reordering, an unused declaration
+   and a rewritten function body change **no** hash; a member added, a
+   parameter retyped, a global retyped or members reordered change exactly
+   one.
+
+   What is still missing is the **cross-TU** half: nothing stores these
+   across units or across builds, so there is no persistent index, no
+   invalidation graph, and no storage format (§32 open question 5).
+   `embcc diff` (§22) and project-wide refactoring (§24) need that; a build
+   system can use the per-unit output today.
 4. **`SourceProvider` (§7, §16).** The frontend reads files directly; the
    language server works around it by writing the editor's buffer to a
    temporary file. Cancellation and incrementality (§7) are likewise absent —

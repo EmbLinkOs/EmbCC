@@ -230,3 +230,33 @@ Idiomatic assembly would need the backend to record text as it emits bytes,
 one call site producing both, which is a larger change to the 71 emit
 helpers and the only way to get it without a second implementation that can
 drift.
+
+## `--emit-interfaces` — what this unit provides, and what it compiled against
+
+    embcc --emit-interfaces -Iinclude a.c
+
+    provides c:@F@use          e7616081aa18a82b
+    uses     c:@F@compute      2037fc2425d84b3d
+    uses     c:@V@shared       3769e4c2b874ce54
+    uses     c:@S@Point        8109bf0e612d76d5
+
+Each line is a **USR** — a name for a declaration that survives unrelated
+edits — and an **interface hash** over what dependents can observe.
+
+`-MD` says this unit read `h.h`, so *any* edit to `h.h` rebuilds it. These
+hashes say what it actually depends on, which is what vision §21's Level-2
+incremental build needs: **a header edit that changes no hash this unit uses
+does not require rebuilding it.**
+
+What is hashed is what a dependent compiles in — a function's signature, a
+global's type, a struct's size, alignment, member names, types, offsets and
+bit positions. What is **not**: file names, line numbers, declaration order,
+and a function's body. Moving a declaration or rewriting a body must not
+invalidate anybody, or the exercise buys nothing.
+
+An entity with internal linkage carries its file in its USR, because two
+units may each have a `static int count` and they are not the same thing.
+
+The hash is FNV-1a over a canonical string built from the semantic model in
+a fixed order: same input, same hash, on any host (R4) — which a build cache
+depends on absolutely.
