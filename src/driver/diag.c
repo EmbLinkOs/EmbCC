@@ -154,7 +154,7 @@ static int g_errors, g_warnings;
 static int g_format = DIAG_TEXT;
 static int g_color = -1;           /* -1 auto, 0 never, 1 always */
 static int g_max_errors;           /* 0: no limit */
-static int g_werror, g_no_warnings;
+static int g_werror, g_no_warnings, g_parseable_fixits;
 static int g_flushed;
 
 static char *vfmt(const char *fmt, va_list ap)
@@ -404,6 +404,135 @@ static void render_json(FILE *f, const struct diag *d, int indent)
     fputc('}', f);
 }
 
+/* ---- fix-its an editor or the driver can apply ----------------------------
+ *
+ * GCC's parseable form, one line per fix-it:
+ *     fix-it:"FILE":{LINE:COL-LINE:NEXT}:"TEXT"
+ * and --fix, which does the edit itself. Both work from the same records,
+ * so what is printed is what would be applied. */
+static void render_fixits_parseable(const struct diag *d)
+{
+    for (int i = 0; i < d->nfixits; i++) {
+        const struct fixit *x = &d->fixits[i];
+        fprintf(stderr, "fix-it:\"%s\":{%d:%d-%d:%d}:\"",
+                d->file ? d->file : "<embcc>", x->line, x->col, x->line,
+                x->end_col);
+        for (const char *p = x->text; *p; p++) {
+            if (*p == '"' || *p == '\\') fputc('\\', stderr);
+            fputc(*p, stderr);
+        }
+        fputs("\"\n", stderr);
+    }
+    for (int i = 0; i < d->nnotes; i++)
+        render_fixits_parseable(&d->notes[i]);
+}
+
+/* Every fix-it of every diagnostic, flattened: (file, line, col, end, text). */
+struct flat_fix { const char *file; int line, col, end_col; const char *text; };
+
+static int collect_fixits(const struct diag *d, struct flat_fix *out, int n,
+                          int cap)
+{
+    for (int i = 0; i < d->nfixits && n < cap; i++) {
+        out[n].file = d->file;
+        out[n].line = d->fixits[i].line;
+        out[n].col = d->fixits[i].col;
+        out[n].end_col = d->fixits[i].end_col;
+        out[n].text = d->fixits[i].text;
+        n++;
+    }
+    for (int i = 0; i < d->nnotes; i++)
+        n = collect_fixits(&d->notes[i], out, n, cap);
+    return n;
+}
+
+/* --fix: rewrite each file the fix-its name. Applied from the end of the
+ * file backwards so earlier positions stay valid, one fix-it per line at
+ * most (two edits to one line could overlap, and a wrong edit is worse
+ * than none). Returns how many were applied. */
+int diag_apply_fixits(void)
+{
+    enum { MAXFIX = 512 };
+    struct flat_fix fx[MAXFIX];
+    int n = 0;
+    for (int i = 0; i < g_ndiag; i++)
+        n = collect_fixits(&g_diags[i], fx, n, MAXFIX);
+    int applied = 0;
+    for (int i = 0; i < n; i++) {
+        if (!fx[i].file)
+            continue;
+        /* the file's current text, as the diagnostics saw it */
+        const char *text = NULL;
+        for (int k = 0; k < g_nsrc; k++)
+            if (!strcmp(g_srcs[k].file, fx[i].file)) { text = g_srcs[k].text; break; }
+        if (!text)
+            continue;
+        /* the edits for this file, later lines first */
+        struct flat_fix here[MAXFIX];
+        int m = 0;
+        for (int k = i; k < n; k++)
+            if (fx[k].file && !strcmp(fx[k].file, fx[i].file))
+                here[m++] = fx[k];
+        for (int a = 0; a < m; a++)
+            for (int b = a + 1; b < m; b++)
+                if (here[b].line > here[a].line ||
+                    (here[b].line == here[a].line && here[b].col > here[a].col)) {
+                    struct flat_fix t = here[a]; here[a] = here[b]; here[b] = t;
+                }
+        struct sb { char *p; size_t n, cap; } buf = { NULL, 0, 0 };
+        size_t tlen = strlen(text);
+        buf.p = xmalloc(tlen + 4096);
+        memcpy(buf.p, text, tlen + 1);
+        buf.n = tlen;
+        int did = 0, lastline = -1;
+        for (int k = 0; k < m; k++) {
+            if (here[k].line == lastline)
+                continue;                  /* one edit a line */
+            /* offset of the line's start */
+            size_t off = 0;
+            for (int ln = 1; ln < here[k].line; ln++) {
+                char *nl = strchr(buf.p + off, '\n');
+                if (!nl) { off = (size_t)-1; break; }
+                off = (size_t)(nl - buf.p) + 1;
+            }
+            if (off == (size_t)-1)
+                continue;
+            size_t a = off + (size_t)(here[k].col - 1);
+            size_t b = off + (size_t)(here[k].end_col - 1);
+            if (a > buf.n || b > buf.n || b < a)
+                continue;
+            size_t tl = strlen(here[k].text);
+            char *nbuf = xmalloc(buf.n - (b - a) + tl + 1);
+            memcpy(nbuf, buf.p, a);
+            memcpy(nbuf + a, here[k].text, tl);
+            memcpy(nbuf + a + tl, buf.p + b, buf.n - b + 1);
+            free(buf.p);
+            buf.p = nbuf;
+            buf.n = buf.n - (b - a) + tl;
+            lastline = here[k].line;
+            did++;
+        }
+        if (did) {
+            FILE *f = fopen(fx[i].file, "w");
+            if (f) {
+                fwrite(buf.p, 1, buf.n, f);
+                fclose(f);
+                fprintf(stderr, "embcc: %s: applied %d fix%s\n", fx[i].file,
+                        did, did == 1 ? "" : "es");
+                applied += did;
+            }
+        }
+        free(buf.p);
+        /* the rest of this file's fix-its are done (the name is kept: the
+         * loop below clears fx[i].file itself) */
+        const char *donefile = fx[i].file;
+        for (int k = i; k < n; k++)
+            if (fx[k].file && !strcmp(fx[k].file, donefile))
+                fx[k].file = NULL;
+    }
+    return applied;
+}
+
 /* ---- the flush ---- */
 
 void diag_flush(void)
@@ -424,6 +553,8 @@ void diag_flush(void)
         render_text(&g_diags[i]);
         for (int k = 0; k < g_diags[i].nnotes; k++)
             render_text(&g_diags[i].notes[k]);
+        if (g_parseable_fixits)
+            render_fixits_parseable(&g_diags[i]);
     }
 }
 
@@ -453,6 +584,7 @@ void diag_set_color(int mode)    { g_color = mode; }
 void diag_set_max_errors(int n)  { g_max_errors = n; }
 void diag_set_werror(int on)     { g_werror = on; }
 void diag_set_no_warnings(int on){ g_no_warnings = on; }
+void diag_set_parseable_fixits(int on) { g_parseable_fixits = on; }
 int  diag_error_count(void)      { return g_errors; }
 
 void diag_range(int end_col)

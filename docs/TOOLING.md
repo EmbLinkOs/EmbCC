@@ -15,7 +15,7 @@ until the front ends can keep going after an error.
 |---|---|---|
 | **T1** | **The diagnostic engine.** A diagnostic is a record: severity, location, source range, notes, fix-its, the option that controls it. Buffered, then rendered — text exactly as before, or `-fdiagnostics-format=json` (GCC's schema, so existing tools read it). `-fdiagnostics-color`, `-fmax-errors`, `-w`, `-Werror`. First fix-its: the name suggestions the front ends already compute. | done — tests/golden/diagnostics-json.sh; the text goldens unchanged |
 | **T2** | **Error recovery.** The C front end keeps going after an error — synchronising at statement and declaration boundaries — so one run reports every independent problem instead of the first. A recovery must never produce a *wrong* later diagnostic: each is either suppressed or real. | done (C) — tests/golden/diagnostics-recovery.sh; the C++ front end is still first-error |
-| **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Fix-its for the mechanical cases: a missing `;`, a missing `&`/`*`, `.` for `->`, an unspelled `struct` tag, a misspelt name, a missing `#include` for a known declaration. | before/after files in a golden, and a fixed file compiles |
+| **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Producers so far: a misspelt name, a missing `;`. Still to come: `.` for `->`, an unspelled `struct` tag, a missing `#include` for a known declaration. | done — tests/golden/diagnostics-fix.sh: the fixed file compiles |
 | **T4** | **The driver GCC and Clang users already know.** Dependency generation, `-fsyntax-only`, `--help`, `-dumpmachine` — done. Still to come: `-S`, `@file`, `-###`, and warnings that mean something: `-Wall`/`-Wextra` as groups over real analyses (unused, shadowed, uninitialised, sign-compare, fallthrough, format), each with its `-Wno-` and its name printed in the diagnostic. | half — tests/golden/driver-deps.sh (gcc's own rule, and `make` reads it); warning groups pending |
 | **T5** | **`embls`, the language server.** LSP over stdio: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords), hover, go-to-definition, document symbols. Still to come: find references, signature help, rename, `#include` completion, cross-file indexing. | done (first five) — tests/golden/embls.sh drives a whole session |
 | **T6** | **Past the bar.** `embcc --explain <id>`: what the error means, why it fired *here*, and the smallest edit that fixes it. Suggestions that use the index rather than edit distance alone (the member you meant, on the type you have; the header that declares the name). `embcc doctor`: why a link failed, in terms of symbols and the units that needed them. | worked examples, each a test |
@@ -146,3 +146,24 @@ example, in Neovim:
 vim.lsp.start({ name = "embls", cmd = { "/path/to/EmbCC/embls" },
                 root_dir = vim.fn.getcwd() })
 ```
+
+## T3 — fix-its that apply (done)
+
+`-fdiagnostics-parseable-fixits` prints GCC's line form,
+`fix-it:"FILE":{LINE:COL-LINE:NEXT}:"TEXT"`, and `embcc --fix` performs
+the edits itself — in the files the fix-its name, from the end backwards so
+earlier positions stay valid, at most one edit a line (two edits to one
+line could overlap, and a wrong edit is worse than none). A file with no
+fix-it is left exactly as it was, and `--fix` says so rather than
+pretending.
+
+The producers today are the two whose fix is never in doubt: the name the
+front end already suggested, and a missing `;`. The second changes how the
+parser recovers — rather than resynchronising, it carries on as if the
+semicolon were there, so a file missing two of them reports both and
+`--fix` inserts both in one pass. The position is remembered so the same
+insertion cannot repeat and spin.
+
+Every parser diagnostic is now recoverable: the 37 that still ended the
+compile (a declaration's, which have a line but no column) join the 62
+that already recovered.

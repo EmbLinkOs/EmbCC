@@ -71,6 +71,10 @@ void diag_set_max_errors(int n);       /* stop after n errors; 0 = no limit */
 void diag_set_werror(int on);          /* warnings become errors */
 void diag_set_no_warnings(int on);     /* -w: drop them */
 int  diag_error_count(void);           /* for the driver's exit status */
+void diag_set_parseable_fixits(int on); /* GCC's fix-it: lines */
+/* --fix: do the edits the fix-its describe, in the files they name.
+ * Returns how many were applied. */
+int diag_apply_fixits(void);
 void diag_flush(void);                 /* render everything held (atexit) */
 /* The closing "compilation terminated: N errors" (text only: in JSON the
  * array is the whole output). */

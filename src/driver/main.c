@@ -199,6 +199,9 @@ static int want_rtti = 1;
 /* --emit-c: print the C a C++ unit lowers to, instead of compiling it. */
 static int emit_c_only;
 
+/* --fix: apply the fix-its instead of only printing them. */
+static int want_fix;
+
 /* -fsyntax-only: run the front end, write nothing. What an editor asks for
  * (docs/TOOLING.md T5) and what a build's "does this still compile" step
  * wants. */
@@ -299,12 +302,12 @@ static int compile(const char *in, const char *out, int pp_only)
         /* Every syntax error is out; the tree is not whole, so nothing
          * downstream runs on it (a later pass would only invent errors). */
         diag_terminated(parse_error_count());
-        exit(1);
+        return 1;                     /* (--fix still gets its turn) */
     }
     sema_check(u);
     if (sema_error_count()) {
         diag_terminated(sema_error_count());
-        exit(1);
+        return 1;                     /* (--fix still gets its turn) */
     }
     if (dep_mode)                     /* -MD/-MMD: beside the object */
         write_deps(in, out);
@@ -775,6 +778,16 @@ static int has_c_suffix(const char *s)
  * counted as an error (a -Werror warning) says otherwise. */
 static int done(int rc)
 {
+    if (want_fix) {
+        /* What the diagnostics proposed, actually done. The compile has
+         * failed by now: that is the normal case for --fix. */
+        diag_flush();
+        int n = diag_apply_fixits();
+        fprintf(stderr, n ? "embcc: %d fix%s applied; compile again\n"
+                          : "embcc: nothing to fix automatically\n",
+                n, n == 1 ? "" : "es");
+        return n ? 0 : (rc ? rc : (diag_error_count() ? 1 : 0));
+    }
     return rc ? rc : (diag_error_count() ? 1 : 0);
 }
 
@@ -921,6 +934,11 @@ int main(int argc, char **argv)
             want_unwind = 0;
         } else if (strcmp(argv[i], "-fchar8_t") == 0) {
             cpp_set_cxx_char8(1);   /* (C++: char8_t is a keyword anyway) */
+        } else if (strcmp(argv[i], "-fdiagnostics-parseable-fixits") == 0) {
+            diag_set_parseable_fixits(1);
+        } else if (strcmp(argv[i], "--fix") == 0) {
+            want_fix = 1;
+            syntax_only = 1;          /* the point is the edit, not an object */
         } else if (strcmp(argv[i], "-fsyntax-only") == 0) {
             syntax_only = 1;
         } else if (strcmp(argv[i], "-M") == 0) {
