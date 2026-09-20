@@ -79,6 +79,37 @@ int ir_sym_global(struct ir_unit *u, struct global *g)
     return sym_intern(u, g->name, 0, g->defined, g->is_weak, 0, 0, 0);
 }
 
+/* Recompute the per-slot descriptors from the function's types. Called at
+ * irgen, and again by the inliner after it extends the slot arrays -- the
+ * two must never disagree (ir.h). */
+void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
+{
+    /* The COUNT is passed, never read from `f`: the AST's nvars stopped
+     * being authoritative when ir_func took ownership of it, so sizing this
+     * array from f->nvars leaves it short of what the IR indexes after
+     * inlining -- reading past the end with no crash and no failing test,
+     * only quietly different code. The byte-identity check caught it; the
+     * suite did not. */
+    size_t n = (size_t)(nvars > 0 ? nvars : 1);
+    fn->locals = xrealloc(fn->locals, n * sizeof *fn->locals);
+    memset(fn->locals, 0, n * sizeof *fn->locals);
+    for (int i = 0; i < nvars; i++) {
+        struct type *t = f->var_tys[i];
+        struct ir_local *L = &fn->locals[i];
+        if (!t)
+            continue;
+        L->size = ty_size(t);
+        L->align = ty_align(t);
+        L->user_align = f->var_aligns ? f->var_aligns[i] : 0;
+        L->is_volatile = t->is_volatile;
+        L->is_ldouble = t->kind == TY_LDOUBLE;
+        L->is_int128 = t->kind == TY_INT128;
+        L->is_int_or_ptr = ty_is_integer(t) || t->kind == TY_PTR;
+        L->is_scalar_int_or_ptr =
+            L->is_int_or_ptr && (L->size == 4 || L->size == 8);
+    }
+}
+
 struct ir_ins *emit(struct ir_func *fn)
 {
     if (fn->nins == fn->cap) {
@@ -2009,6 +2040,13 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             struct ir_arg *ar = &i->argv[k];
             ar->vreg = args[k];
             ar->ty = at;
+            /* The ABI question answered here, not in the backend (§9.1). */
+            ar->hfa_size = 0;
+            ar->hfa_n = ty_hfa(at, &ar->hfa_size);
+            ar->byref = ty_aapcs64_byref(at);
+            ar->align = ty_align(at);
+            ar->is_float = ty_is_float(at);
+            ar->is_int128 = at->kind == TY_INT128;
             ar->is_struct = at->kind == TY_STRUCT;
             ar->size = ty_size(at);
             ar->nclass = ty_classify(at, ar->cls);
@@ -2046,6 +2084,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                                                         : ty_x87_ret(e->ty);
             i->retsize = ty_size(e->ty);
             i->rety = e->ty;
+            i->ret_hfa_size = 0;
+            i->ret_hfa_n = ty_hfa(e->ty, &i->ret_hfa_size);
+            i->ret_byref = ty_aapcs64_byref(e->ty);
             i->retnclass = ty_classify(e->ty, i->retcls);
             fn->scratch_bytes = (fn->scratch_bytes + 7) & ~7;
             i->scratch = fn->scratch_bytes;
@@ -2549,6 +2590,39 @@ static void gen_func(struct ir_func *fn, struct func *f)
     fn->is_varargs = f->is_varargs;
     fn->nparams = f->nparams;
     fn->nvars = f->nvars;
+    /* The same for every frame slot, and for the return type. */
+    ir_locals_fill(fn, f, f->nvars);
+    {
+        struct type *rt = f->ret_ty;
+        fn->ret_abi.size = rt ? ty_size(rt) : 0;
+        fn->ret_abi.align = rt ? ty_align(rt) : 1;
+        fn->ret_abi.is_struct = rt && rt->kind == TY_STRUCT;
+        fn->ret_abi.is_float = rt && ty_is_float(rt);
+        fn->ret_abi.is_int128 = rt && rt->kind == TY_INT128;
+        fn->ret_abi.hfa_size = 0;
+        fn->ret_abi.hfa_n = ty_hfa(rt, &fn->ret_abi.hfa_size);
+        fn->ret_abi.byref = ty_aapcs64_byref(rt);
+        fn->ret_abi.ty = rt;
+    }
+    /* The ABI facts about each parameter, decided here where the types are
+     * still in hand. */
+    if (f->nparams > 0) {
+        fn->param_abi = xcalloc((size_t)f->nparams, sizeof *fn->param_abi);
+        for (int k = 0; k < f->nparams; k++) {
+            struct type *pt = f->param_tys[k];
+            struct ir_arg *a = &fn->param_abi[k];
+            a->vreg = k;
+            a->size = pt ? ty_size(pt) : 0;
+            a->align = pt ? ty_align(pt) : 1;
+            a->is_struct = pt && pt->kind == TY_STRUCT;
+            a->is_float = pt && ty_is_float(pt);
+            a->is_int128 = pt && pt->kind == TY_INT128;
+            a->hfa_size = 0;
+            a->hfa_n = ty_hfa(pt, &a->hfa_size);
+            a->byref = ty_aapcs64_byref(pt);
+            a->ty = pt;
+        }
+    }
     fn->nvregs = f->nvars; /* params + locals occupy [0, nvars) */
     g_cur_line = f->line;  /* prologue rows attribute to the definition */
     /* -g bookkeeping (harmless when -g is off — only the DWARF pass reads it):

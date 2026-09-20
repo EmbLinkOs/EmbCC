@@ -83,61 +83,12 @@ struct a64_sites {
  * to four of them, with no padding. It travels in v registers, one member per
  * register, which no SysV class can describe. Returns the member count (0:
  * not an HFA) and the member size in *esz (4 float, 8 double). */
-static int hfa_walk(const struct type *t, int *esz)
-{
-    switch (t->kind) {
-    case TY_FLOAT:
-    case TY_DOUBLE:
-    case TY_LDOUBLE: {
-        int sz = ty_size(t);
-        if (*esz && *esz != sz)
-            return -1;
-        *esz = sz;
-        return 1;
-    }
-    case TY_ARRAY: {
-        if (t->count <= 0)
-            return -1;
-        int n = hfa_walk(t->pointee, esz);
-        return n < 0 ? -1 : n * t->count;
-    }
-    case TY_STRUCT: {
-        int n = 0;
-        for (int m = 0; m < t->nmembers; m++) {
-            const struct member *mb = &t->members[m];
-            if (mb->is_bitfield)
-                return -1;
-            int k = hfa_walk(mb->ty, esz);
-            if (k < 0)
-                return -1;
-            if (t->is_union) { if (k > n) n = k; }   /* the widest member */
-            else n += k;
-        }
-        return n;
-    }
-    default:
-        return -1;
-    }
-}
-
-static int a64_hfa(const struct type *t, int *esz)
-{
-    if (!t || t->kind != TY_STRUCT)
-        return 0;
-    *esz = 0;
-    int n = hfa_walk(t, esz);
-    if (n < 1 || n > 4 || ty_size(t) != n * *esz)
-        return 0;
-    return n;
-}
-
-/* A composite larger than 16 bytes that is not an HFA is passed as a POINTER
- * to a copy the caller makes (stage B.3), and returned through x8. */
-static int a64_byref(const struct type *t)
-{
-    int esz;
-    return t && t->kind == TY_STRUCT && ty_size(t) > 16 && !a64_hfa(t, &esz);
-}
+/* AAPCS64's homogeneous-float-aggregate test and the by-reference rule now
+ * live with the types (src/sema/type.c), because irgen has to ask the same
+ * questions while the types still exist -- an IR that carries the ANSWER
+ * instead of the type is a step toward a self-contained EmbIR (§9.1). */
+#define a64_hfa(t, esz)  ty_hfa((t), (esz))
+#define a64_byref(t)     ty_aapcs64_byref(t)
 
 /* Where one argument goes. The same classifier places a call's arguments and
  * a function's parameters, so the two sides cannot disagree. */
@@ -175,14 +126,17 @@ static void to_stack(struct a64_cursor *cu, struct a64_argplan *p, long size,
 /* AAPCS64 §6.8.2 stages B and C, for the types EmbCC has. No back-filling:
  * once a register file is declared spent (C.3 for v registers, C.11 for x
  * registers), later small arguments go to the stack too. */
-static void a64_place(const struct type *t, struct a64_cursor *cu,
-                      struct a64_argplan *p)
+/* The placer works from what irgen recorded about the type, not from the
+ * type (§9.1) -- so the IR carries the ABI facts and the AST is not
+ * consulted during code generation. */
+static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
+                           struct a64_argplan *p)
 {
     memset(p, 0, sizeof *p);
-    p->size = ty_size(t);
-    p->is_struct = t->kind == TY_STRUCT;
+    p->size = a->size;
+    p->is_struct = a->is_struct;
 
-    if (ty_is_float(t)) {                               /* C.1 / C.5 */
+    if (a->is_float) {                                  /* C.1 / C.5 */
         if (cu->nsrn < 8) {
             p->where = AP_V; p->reg = cu->nsrn++; p->nreg = 1; p->esz = p->size;
         } else if (p->size == 16) {
@@ -192,18 +146,18 @@ static void a64_place(const struct type *t, struct a64_cursor *cu,
         }
         return;
     }
-    int esz, n = a64_hfa(t, &esz);
+    int esz = a->hfa_size, n = a->hfa_n;
     if (n) {                                            /* C.2 - C.4 */
         if (cu->nsrn + n <= 8) {
             p->where = AP_V; p->reg = cu->nsrn; p->nreg = n; p->esz = esz;
             cu->nsrn += n;
         } else {
             cu->nsrn = 8;
-            to_stack(cu, p, p->size, ty_align(t));
+            to_stack(cu, p, p->size, a->align);
         }
         return;
     }
-    if (a64_byref(t)) {                                 /* B.3: a pointer */
+    if (a->byref) {                                     /* B.3: a pointer */
         p->byref = 1;
         cu->byref_bytes = (cu->byref_bytes + 15) & ~15L;
         p->copy_off = cu->byref_bytes;
@@ -215,7 +169,7 @@ static void a64_place(const struct type *t, struct a64_cursor *cu,
         }
         return;
     }
-    if (t->kind == TY_INT128) {                         /* C.8, C.9 */
+    if (a->is_int128) {                                 /* C.8, C.9 */
         /* 16-aligned: an even-numbered pair of x registers */
         cu->ngrn = (cu->ngrn + 1) & ~1;
         if (cu->ngrn + 2 <= 8) {
@@ -234,14 +188,14 @@ static void a64_place(const struct type *t, struct a64_cursor *cu,
         return;
     }
     cu->ngrn = 8;                                       /* C.11 */
-    to_stack(cu, p, p->is_struct ? p->size : 8, ty_align(t));
+    to_stack(cu, p, p->is_struct ? p->size : 8, a->align);
 }
 
 /* Argument k of a call or function whose argument 0 may be the indirect-
  * result pointer (sret_first: the C++ return slot of a class that is not
  * trivially copyable), which AAPCS64 passes in x8 whatever the result's
  * size — taking none of x0..x7. */
-static void a64_place_arg(const struct type *t, int k, int sret_first,
+static void a64_place_arg(const struct ir_arg *a, int k, int sret_first,
                           struct a64_cursor *cu, struct a64_argplan *p)
 {
     if (sret_first && k == 0) {
@@ -252,7 +206,7 @@ static void a64_place_arg(const struct type *t, int k, int sret_first,
         p->nreg = 1;
         return;
     }
-    a64_place(t, cu, p);
+    a64_place_info(a, cu, p);
 }
 
 /* ---- frame layout ---------------------------------------------------- */
@@ -286,7 +240,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
         struct a64_cursor cu = { 0, 0, 0, 0 };
         struct a64_argplan pl;
         for (int k = 0; k < i->nargs; k++)
-            a64_place_arg(i->argv[k].ty, k, i->sret_first, &cu, &pl);
+            a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl);
         if (cu.nsaa > outgoing) outgoing = cu.nsaa;
         if (cu.byref_bytes > byref) byref = cu.byref_bytes;
     }
@@ -863,9 +817,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         if (fr.sret >= 0)
             a64_str(t, A64_SRET, FB, fr.sret, 8);
         for (int p = 0; p < f->nparams; p++) {
-            struct type *pt = f->param_tys[p];
             struct a64_argplan pl;
-            a64_place_arg(pt, p, f->sret_first, &cu, &pl);
+            a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl);
             if (pl.where == AP_V) {
                 for (int q = 0; q < pl.nreg; q++)
                     a64_fstr(t, pl.reg + q, FB, sd[p] + q * pl.esz, pl.esz);
@@ -1228,7 +1181,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             struct a64_argplan pl[MAX_PARAMS];
             struct a64_cursor cu = { 0, 0, 0, 0 };
             for (int k = 0; k < i->nargs; k++)
-                a64_place_arg(i->argv[k].ty, k, i->sret_first, &cu, &pl[k]);
+                a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl[k]);
 
             /* 1. The copies B.3 passes by reference: the callee may write
              * its parameter, so it gets a copy, never the caller's object.
@@ -1293,8 +1246,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             }
             /* A large composite return: the callee writes it to our scratch
              * through x8. */
-            int resz, resn = i->retsize ? a64_hfa(i->rety, &resz) : 0;
-            if (i->retsize && a64_byref(i->rety))
+            /* Precomputed by irgen (§9.1): the IR carries the ABI answer,
+             * not the type it was derived from. */
+            int resz = i->ret_hfa_size, resn = i->retsize ? i->ret_hfa_n : 0;
+            if (i->retsize && i->ret_byref)
                 addr_of(t, A64_SRET, FB, fr.scratch + i->scratch);
 
             if (i->indirect) {
@@ -1322,7 +1277,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 if (resn) {
                     for (int q = 0; q < resn; q++)
                         a64_fstr(t, q, A64_ADDR, q * resz, resz);
-                } else if (!a64_byref(i->rety)) {
+                } else if (!i->ret_byref) {
                     for (int q = 0; q * 8 < i->retsize; q++)
                         a64_str(t, q, A64_ADDR, q * 8, 8);
                 }
@@ -1377,7 +1332,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             struct a64_cursor cu = { 0, 0, 0, 0 };
             struct a64_argplan pl;
             for (int p = 0; p < f->nparams; p++)
-                a64_place_arg(f->param_tys[p], p, f->sret_first, &cu, &pl);
+                a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl);
             long tag = fr.va_tag;
             addr_of(t, A64_ACC, A64_FP, 16 + ((cu.nsaa + 7) & ~7L));
             a64_str(t, A64_ACC, FB, tag + 0, 8);

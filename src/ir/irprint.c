@@ -8,24 +8,16 @@
  * ---- what this is not, yet ----
  *
  * §9.1 asks for a ROUND-TRIP textual form: print -> parse -> identical IR,
- * so every pass is testable text-in/text-out. This is the print half only,
- * and the reason the other half is not here is worth recording rather than
- * leaving as an omission:
+ * so every pass is testable text-in/text-out. This is the print half. The
+ * IR is now self-contained enough for the other half to be possible -- it
+ * carries its own function facts, its own symbol table, and the ABI answers
+ * that used to be derived from `struct type` at codegen time -- but the
+ * parser is not written.
  *
- *     struct ir_ins  points at  struct func, struct global, struct type
- *
- * in seven places (ir.h: callee, glob, arg->ty, rety, dbgvar->ty, src,
- * eh_types). The IR is not a self-contained module; it is a view over the
- * AST that outlives it only by accident. Printing follows those pointers and
- * writes a name. Parsing would have to REBUILD them — a frontend symbol
- * table and type interner driven from text — which is a change to what the
- * IR *is*, not a feature of its printer.
- *
- * That is the same shape of debt as the missing remark API: a day-one
- * property of the IR (§9.1) that was not built in, and now costs a
- * structural change. Making the IR self-contained — interning names and
- * types into the ir_unit — is the prerequisite, and it is named in the
- * vision document's §4.3 so it stays a decision.
+ * What a parsed IR still could not do is emit DWARF *types*: `add_dbgvar`
+ * and the DWARF emitter want the type GRAPH (member names, nested types,
+ * array bounds), which EmbIR does not carry and which carrying would be a
+ * separate design decision. Code generation needs none of it.
  *
  * What this DOES give: every pass's effect is now visible
  * (`--inspect-at=irgen` vs `--inspect-at=opt`), which is what made the

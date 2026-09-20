@@ -212,17 +212,30 @@ this document depends on most:
    padding between, cross-checked against gcc in the golden. `mir`, `cfg`,
    `callgraph` and `-S` are not done.
 
-   **The round-trip half of §9.1 is a structural change, not a printer
-   feature, and this is where that was discovered.** `struct ir_ins` points
-   at `struct func`, `struct global` and `struct type` in seven places
-   (`callee`, `glob`, `argv[].ty`, `rety`, `dbgvar.ty`, `src`, `eh_types`).
-   EmbIR is therefore not a self-contained module — it is a view over the
-   AST. Printing follows those pointers and writes a name; *parsing* would
-   have to rebuild them, which means interning names and types into the
-   `ir_unit`. Until that is done there is no print→parse→identical test and
-   no pass is testable text-in/text-out (§9.1, §30). It is the same shape of
-   debt as the missing remarks: a day-one property of the IR that was not
-   built in.
+   **EmbIR is now self-contained for compilation (v0.3).** It was a view
+   over the AST: `struct ir_ins` and `struct ir_func` pointed into the parse
+   tree in seven places, which is why printing worked and parsing could not.
+   Those reaches went from 73+ to **10**, and every one that remains is
+   **debug information**:
+
+   | what | why |
+   |---|---|
+   | `code_off` / `code_len` | the function's address range, written back by codegen |
+   | `ret_ty`, and `var_tys` for `add_dbgvar` | DWARF **type DIEs** |
+   | the inliner extending `var_tys` / `var_aligns` | keeping those arrays alive for DWARF |
+
+   So a parsed IR would generate **correct code** — the ABI answers now
+   travel in the IR, precomputed at irgen where the types exist, which is
+   what `ir.h` always claimed the design was — but could not produce DWARF
+   *types*, because those need the type **graph** (member names, nested
+   types, array bounds), not the handful of facts codegen asks. That is a
+   design boundary worth stating here rather than discovering after somebody
+   writes the parser. Carrying a full type graph in EmbIR is a separate
+   decision, not a consequence of this one.
+
+   **The parser itself is not written**, so there is still no
+   print→parse→identical test and no pass is testable text-in/text-out
+   (§9.1, §30).
 3. **The project knowledge graph (§8.2).** No USRs, no interface hashes, no
    cross-TU index. Incremental compilation is at Level 1 (`-MD` file
    dependencies) and Levels 2–3 (§21), `embcc diff` (§22) and project-wide

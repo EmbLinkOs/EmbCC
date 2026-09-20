@@ -264,8 +264,7 @@ char *cg_wide_vregs(struct ir_func *fn)
     char *w = xcalloc((size_t)nv, 1);
     int any = 0;
     for (int v = 0; v < fn->nvars; v++)
-        if (fn->src->var_tys[v] && (fn->src->var_tys[v]->kind == TY_LDOUBLE ||
-                                    fn->src->var_tys[v]->kind == TY_INT128))
+        if (fn->locals[v].is_ldouble || fn->locals[v].is_int128)
             w[v] = any = 1;
     for (int n = 0; n < fn->nins; n++)
         if (wide_def(&fn->ins[n]) && fn->ins[n].dst >= 0)
@@ -528,11 +527,11 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
         if (v >= nvars) {
             elig[v] = 1;                          /* a temp */
         } else {
-            struct type *t = fn->src->var_tys[v]; /* param or local */
-            int sz = ty_size(t);
+            const struct ir_local *L = &fn->locals[v]; /* param or local */
+            int sz = L->size;
             /* any scalar int/pointer that fits a GPR — char/short included: a
              * narrow write keeps the low bytes, a read movsx/movzx-extends. */
-            elig[v] = (ty_is_integer(t) || t->kind == TY_PTR) &&
+            elig[v] = L->is_int_or_ptr &&
                       (sz == 1 || sz == 2 || sz == 4 || sz == 8);
         }
     }
@@ -565,7 +564,7 @@ static int *regalloc(struct ir_func *fn, int used_out[NCALLEE], int *nused_out)
         case IR_RET:
             /* a scalar return is register-aware; a struct/float one reads its
              * slot raw, so its operand must stay in memory. */
-            if (fn->src->ret_ty->kind == TY_STRUCT || in->flt)
+            if (fn->ret_abi.is_struct || in->flt)
                 OPAQUE(in->a);
             break;
         case IR_CALL:

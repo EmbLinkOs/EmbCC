@@ -166,6 +166,14 @@ struct ir_ins {
         enum arg_class cls[2];
         int on_stack;        /* no registers left (or MEMORY class) */
         int stk_off;         /* offset in the outgoing area */
+        /* Everything the AAPCS64 placer needs about this argument's type,
+         * computed at irgen where the type still exists (§9.1). The backend
+         * reads these instead of walking `ty`. */
+        int align;
+        int is_float;
+        int is_int128;
+        int hfa_n, hfa_size;
+        int byref;
         const struct type *ty; /* the argument's type: AAPCS64 decides an
                                 * aggregate's placement from its MEMBERS
                                 * (a Homogeneous Floating-point Aggregate
@@ -177,6 +185,9 @@ struct ir_ins {
      * caller-side scratch the result lands in. nclass 0 means MEMORY,
      * i.e. the hidden-pointer (sret) convention. */
     int retsize;
+    /* The same, for the value a call returns. */
+    int ret_hfa_n, ret_hfa_size;
+    int ret_byref;
     const struct type *rety; /* IR_CALL returning a struct: its type (AAPCS64
                               * returns an HFA in v0..v3) */
     int retnclass;
@@ -231,6 +242,20 @@ struct ir_dbgvar {
     int line, col;
 };
 
+/* What EmbIR needs to know about one frame slot's type, decided at irgen
+ * (§9.1). Everything the backends and the optimizer actually asked `struct
+ * type` -- a size, an alignment, and four yes/no questions -- and nothing
+ * more, so a textual form can carry it. */
+struct ir_local {
+    int size, align;
+    int user_align;          /* __attribute__((aligned(N))); 0 = natural */
+    int is_volatile;
+    int is_ldouble;          /* x86-64: lives in x87, not an SSE register */
+    int is_int128;
+    int is_int_or_ptr;       /* an integer or a pointer, any width */
+    int is_scalar_int_or_ptr; /* ... and 4 or 8 bytes: mem2reg's test */
+};
+
 struct ir_func {
     /* EmbIR is meant to be a module, not a view over the AST (§9.1): what a
      * pass or a backend needs about the function is HERE, copied at irgen
@@ -246,6 +271,19 @@ struct ir_func {
     int is_varargs;
     int nparams;
     int nvars;
+
+    /* This function's OWN parameters, classified at irgen exactly as a
+     * call's arguments are, so the prologue places them without consulting
+     * the AST either (§9.1). Length nparams; the vreg field is the
+     * parameter's slot. */
+    struct ir_arg *param_abi;
+
+    /* One per frame slot, length nvars. The inliner extends this alongside
+     * the AST's var_tys -- both must grow together, which is the failure
+     * that made `nvars` a split brain the first time. */
+    struct ir_local *locals;
+    /* The function's own return type, classified as a call's is. */
+    struct ir_arg ret_abi;
 
     struct func *src;        /* code_off/len; the types not yet interned */
     int nvregs;
@@ -317,6 +355,7 @@ struct ir_unit {
 /* Intern a symbol, returning its index. Interning by name means the same
  * function referred to from two instructions is one entry, which is what
  * lets a parsed IR resolve a name without a frontend symbol table. */
+void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars);
 int ir_sym_func(struct ir_unit *u, struct func *f);
 int ir_sym_global(struct ir_unit *u, struct global *g);
 

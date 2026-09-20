@@ -874,20 +874,19 @@ static int pass_mem2reg(struct ir_func *fn)
     char *ok = xmalloc((size_t)nvars);
     const char **why = xcalloc((size_t)nvars, sizeof *why);
     for (int L = 0; L < nvars; L++) {
-        struct type *t = fn->src->var_tys[L];
+        const struct ir_local *Li = &fn->locals[L];
         /* Params are excluded: their value is live on entry (no defining IR
          * instruction), so SSA has no version to seed a read with. Only true
          * locals, always assigned before use, are promoted. */
         ok[L] = 1;
         if (L < nparams)                        { ok[L] = 0; why[L] = "is-a-parameter"; }
-        else if (!t)                            { ok[L] = 0; why[L] = "type-unknown"; }
-        else if (!(ty_is_integer(t) || t->kind == TY_PTR))
+        else if (!Li->size)                     { ok[L] = 0; why[L] = "type-unknown"; }
+        else if (!Li->is_scalar_int_or_ptr && (Li->size == 4 || Li->size == 8))
                                                 { ok[L] = 0; why[L] = "not-a-scalar-integer-or-pointer"; }
-        else if (!(ty_size(t) == 4 || ty_size(t) == 8))
-                                                { ok[L] = 0; why[L] = "not-4-or-8-bytes"; }
+        else if (!Li->is_scalar_int_or_ptr)     { ok[L] = 0; why[L] = "not-4-or-8-bytes"; }
     }
     for (int L = 0; L < nvars; L++)
-        if (ok[L] && fn->src->var_tys[L] && fn->src->var_tys[L]->is_volatile) {
+        if (ok[L] && fn->locals[L].is_volatile) {
             ok[L] = 0;                          /* volatile: every access must stay */
             why[L] = "declared-volatile";
         }
@@ -1045,7 +1044,7 @@ static int pass_mem2reg(struct ir_func *fn)
     for (int p = 0; p < nprom; p++) {   /* entry undef defs */
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_CONST; c->dst = undef[p]; c->imm = 0;
-        c->w = ty_size(fn->src->var_tys[ploc[p]]) == 8 ? 8 : 4;
+        c->w = fn->locals[ploc[p]].size == 8 ? 8 : 4;
         /* The seed for a variable read before it is written: it stands for
          * a value the program never produced, so it corresponds to no
          * source construct at all. The §9.1 exception, marked so the
@@ -1777,7 +1776,7 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
         s->op = IR_STVAR;
         s->dst = V + k;                  /* callee param -> caller local */
         s->a = call.argv[k].vreg;
-        s->size = ty_size(cf->src->var_tys[k]);
+        s->size = cf->locals[k].size;
         s->line = call.line;             /* the argument was written there */
         s->col = call.col;
     }
@@ -1832,6 +1831,12 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     for (int k = 0; k < v; k++) { vt[V + k] = cf->src->var_tys[k]; va[V + k] = cf->src->var_aligns[k]; }
     fn->src->var_tys = vt;
     fn->src->var_aligns = va;
+    /* Both representations grow together: the IR's per-slot descriptors are
+     * rebuilt from the types the inliner just extended. Letting them drift
+     * is exactly the split brain that miscompiled same-scope. The new count
+     * is `nv`; fn->nvars is not updated until the end of this function, and
+     * fn->src->nvars is stale by design. */
+    ir_locals_fill(fn, fn->src, nv);
 
     /* Scope ranges are instruction indices; the splice inserted (m-1) net at ci.
      * Shift every existing endpoint past ci, and scope the new callee locals to

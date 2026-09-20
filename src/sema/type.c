@@ -486,3 +486,67 @@ const char *ty_name(const struct type *t)
     buf[n] = 0;
     return buf;
 }
+
+/* ---- AAPCS64 aggregate classification ----
+ *
+ * A property of the TYPE under that ABI, asked by two places: the aarch64
+ * backend, and irgen, which records the answer on the instruction so the
+ * IR need not carry the type itself.
+ */
+static int hfa_walk(const struct type *t, int *esz)
+{
+    switch (t->kind) {
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE: {
+        int sz = ty_size(t);
+        if (*esz && *esz != sz)
+            return -1;
+        *esz = sz;
+        return 1;
+    }
+    case TY_ARRAY: {
+        if (t->count <= 0)
+            return -1;
+        int n = hfa_walk(t->pointee, esz);
+        return n < 0 ? -1 : n * t->count;
+    }
+    case TY_STRUCT: {
+        int n = 0;
+        for (int m = 0; m < t->nmembers; m++) {
+            const struct member *mb = &t->members[m];
+            if (mb->is_bitfield)
+                return -1;
+            int k = hfa_walk(mb->ty, esz);
+            if (k < 0)
+                return -1;
+            if (t->is_union) { if (k > n) n = k; }   /* the widest member */
+            else n += k;
+        }
+        return n;
+    }
+    default:
+        return -1;
+    }
+}
+
+int ty_hfa(const struct type *t, int *esz)
+{
+    if (!t || t->kind != TY_STRUCT)
+        return 0;
+    *esz = 0;
+    int n = hfa_walk(t, esz);
+    if (n < 1 || n > 4 || ty_size(t) != n * *esz)
+        return 0;
+    return n;
+}
+
+/* A composite larger than 16 bytes that is not an HFA is passed as a POINTER
+ * to a copy the caller makes (stage B.3), and returned through x8. */
+int ty_aapcs64_byref(const struct type *t)
+{
+    int esz;
+    return t && t->kind == TY_STRUCT && ty_size(t) > 16 && !ty_hfa(t, &esz);
+}
+
+

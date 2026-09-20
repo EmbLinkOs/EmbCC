@@ -120,6 +120,12 @@ int ty_x87_ret(const struct type *t);
 struct type *ty_vla(struct type *elem, struct expr *len);
 /* t is an array whose size is only known at run time. */
 int ty_is_vla(const struct type *t);
+
+/* AAPCS64: is `t` a homogeneous floating-point aggregate? Returns the
+ * element count (1..4) and sets *esz to the element size, or 0. And: is it
+ * a composite passed as a pointer to a caller-made copy (stage B.3)? */
+int ty_hfa(const struct type *t, int *esz);
+int ty_aapcs64_byref(const struct type *t);
 /* t is variably modified: a VLA, or a pointer/array/function return
  * reaching one (C99 6.7.5p3) — `int (*p)[n]` is VM but not a VLA. */
 int ty_is_vm(const struct type *t);
