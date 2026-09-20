@@ -65,6 +65,22 @@ static int reported_undeclared(const char *name)
 
 int sema_error_count(void) { return g_sema_errors; }
 
+/* A semantic error with an explain id (docs/TOOLING.md T6): the reader is
+ * told what to type to learn the rule. */
+static void sema_error_id(struct unit *u, int line, int col, const char *id,
+                          const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    diag_verror_at(u->file, line, col, fmt, ap);
+    va_end(ap);
+    diag_set_id(id);
+    g_sema_errors++;
+    if (g_recover)
+        longjmp(*g_recover, 1);
+    exit(1);
+}
+
 /* A semantic error: recorded, then analysis resumes at the next statement,
  * so one run reports every independent problem. */
 static void sema_error_at(struct unit *u, int line, int col,
@@ -303,7 +319,8 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
         return cx_cast(rhs, to);
     if (to->kind == TY_STRUCT || rhs->ty->kind == TY_STRUCT) {
         if (!ty_equal(to, rhs->ty))
-            sema_error_at(u, rhs->line, rhs->col, "%s: cannot convert %s to %s",
+            sema_error_id(u, rhs->line, rhs->col, "E0003",
+                          "%s: cannot convert %s to %s",
                        ctx, ty_name(rhs->ty), ty_name(to));
         return rhs; /* same struct type: passed/returned as its bytes */
     }
@@ -1016,6 +1033,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                               "'%s' is not declared in '%s' — for a call, "
                               "add a prototype or define it first",
                               e->name, f->name);
+                diag_set_id("E0001");
                 if (sug) {
                     diag_note_at(u->file, e->line, e->col,
                                  "did you mean '%s'?", sug);
@@ -1429,7 +1447,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        "or never)", ty_name(base));
         struct member *mm = xcalloc(1, sizeof *mm);
         if (!find_member_deep(base, e->name, mm, 0))
-            sema_error_at(u, e->line, e->col, "%s has no member '%s'",
+            sema_error_id(u, e->line, e->col, "E0004", "%s has no member '%s'",
                        ty_name(base), e->name);
         e->memb = mm;
         e->ty = e->memb->ty;
@@ -3283,10 +3301,16 @@ static void check_func(struct unit *u, struct func *f)
 
     check_stmt(u, f, &sc, f->body, 0, 0, 0);
 
-    if (f->ret_ty->kind != TY_VOID && !list_returns(f->body))
-        diag_fatal(f->file ? f->file : u->file, f->line,
-                   "control may reach the end of '%s' — every path must "
-                   "end in a return statement", f->name);
+    if (f->ret_ty->kind != TY_VOID && !list_returns(f->body)) {
+        diag_error_at(f->file ? f->file : u->file, f->line, 0,
+                      "control may reach the end of '%s' — every path must "
+                      "end in a return statement", f->name);
+        diag_set_id("E0008");
+        g_sema_errors++;
+        if (g_recover)
+            longjmp(*g_recover, 1);
+        exit(1);
+    }
 
     f->nvars = sc.n;
     f->var_tys = xmalloc((size_t)(sc.n ? sc.n : 1) * sizeof *f->var_tys);

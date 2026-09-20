@@ -18,7 +18,7 @@ until the front ends can keep going after an error.
 | **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Producers so far: a misspelt name, a missing `;`. Still to come: `.` for `->`, an unspelled `struct` tag, a missing `#include` for a known declaration. | done — tests/golden/diagnostics-fix.sh: the fixed file compiles |
 | **T4** | **The driver GCC and Clang users already know.** Dependency generation, `-fsyntax-only`, `--help`, `-dumpmachine` — done. Still to come: `-S`, `@file`, `-###`, and warnings that mean something: `-Wall`/`-Wextra` as groups over real analyses (unused, shadowed, uninitialised, sign-compare, fallthrough, format), each with its `-Wno-` and its name printed in the diagnostic. | half — tests/golden/driver-deps.sh (gcc's own rule, and `make` reads it); warning groups pending |
 | **T5** | **`embls`, the language server.** LSP over stdio: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords), hover, go-to-definition, document symbols. Still to come: find references, signature help, rename, `#include` completion, cross-file indexing. | done (first five) — tests/golden/embls.sh drives a whole session |
-| **T6** | **Past the bar.** `embcc --explain <id>`: what the error means, why it fired *here*, and the smallest edit that fixes it. Suggestions that use the index rather than edit distance alone (the member you meant, on the type you have; the header that declares the name). `embcc doctor`: why a link failed, in terms of symbols and the units that needed them. | worked examples, each a test |
+| **T6** | **Past the bar.** `embcc --explain <id>` — done: a stable id per diagnostic, printed with it, and an entry with the rule, a worked example, the fix and the citation. Still to come: suggestions that use the index rather than edit distance alone (the member you meant, on the type you have; the header that declares the name), and `embcc doctor` for why a link failed. | tests/golden/diagnostics-explain.sh, incl. "every id printed has an entry" |
 
 ## T1 — the engine (done)
 
@@ -167,3 +167,23 @@ insertion cannot repeat and spin.
 Every parser diagnostic is now recoverable: the 37 that still ended the
 compile (a declaration's, which have a line but no column) join the 62
 that already recovered.
+
+## T6 — `--explain` (done)
+
+A C compiler tells you what is wrong where it noticed. That is not the same
+as telling you what the rule is. `src/driver/explain.c` holds an entry per
+diagnostic worth explaining — the rule, the mistake and the fix side by
+side, and the paragraph of C99 it comes from — and the diagnostic prints
+its id, so the next step is in front of the reader:
+
+    error: struct Point has no member 'z' [E0004]
+    $ embcc --explain E0004
+
+Eight entries to begin with, on the diagnostics people actually hit: an
+undeclared name, a missing `;`, a conversion that does not exist, a member
+that does not exist, an object of a type with no size, the wrong number of
+arguments, assigning to what cannot be assigned, and a path that does not
+return. The ids reach editors too — JSON diagnostics carry `"id"`.
+
+The invariant the golden enforces: every id the compiler can print has an
+entry, so an id is never a dead end.

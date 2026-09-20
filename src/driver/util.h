@@ -59,6 +59,14 @@ enum { DIAG_TEXT, DIAG_JSON };
  * one, a caret underlines the identifier or number it lands on. */
 void diag_range(int end_col);
 
+/* Tag the diagnostic just raised with an explain id ("E0001"), which is
+ * printed with it and understood by `embcc --explain`. */
+void diag_set_id(const char *id);
+
+/* src/driver/explain.c */
+int explain_print(const char *id);      /* NULL/"" lists them */
+const char *explain_title(const char *id);
+
 /* Attach a fix-it to the last diagnostic (or to its last note, which is
  * where "did you mean 'x'?" carries it): replace [col, end_col) of `line`
  * with `text`. Inserting is col == end_col; deleting is text "". */

@@ -19,6 +19,7 @@ SRCS := \
 	src/driver/main.c \
 	src/driver/util.c \
 	src/driver/diag.c \
+	src/driver/explain.c \
 	src/lex/lex.c \
 	src/cpp/cpp.c \
 	src/parse/parse.c \

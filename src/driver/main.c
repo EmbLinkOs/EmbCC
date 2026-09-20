@@ -97,7 +97,9 @@ static void print_options(FILE *out)
       "  -MD, -MMD              write it beside the object\n"
       "  -MF FILE, -MT TARGET, -MP\n"
       "\nreporting\n"
-      "  --version, --help, --dump-predef\n", out);
+      "  --version, --help, --dump-predef\n"
+      "  --explain ID           what a diagnostic means, and the fix\n"
+      "  --fix                  apply the fix-its it proposes\n", out);
 }
 
 static void dump_predef(void)
@@ -857,6 +859,10 @@ int main(int argc, char **argv)
             print_options(stdout);
             return 0;
         }
+        if (strcmp(argv[i], "--explain") == 0)
+            return explain_print(i + 1 < argc ? argv[i + 1] : NULL);
+        if (strncmp(argv[i], "--explain=", 10) == 0)
+            return explain_print(argv[i] + 10);
         if (strcmp(argv[i], "-dumpmachine") == 0) {
             printf("%s\n", target_get() == TARGET_AARCH64 ? "aarch64-elf"
                                                           : "x86_64-elf");

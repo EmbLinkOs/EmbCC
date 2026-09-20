@@ -142,6 +142,7 @@ struct diag {
     int line, col, end_col;        /* end_col 0: infer the token's extent */
     char *msg;
     const char *option;            /* the -W that controls it, or NULL */
+    const char *id;                /* "E0001": `embcc --explain` knows it */
     struct fixit *fixits;
     int nfixits;
     struct diag *notes;            /* children, in order */
@@ -294,6 +295,8 @@ static void render_text(const struct diag *d)
             level_name(d->level), cc("\033[0m"), cc("\033[1m"), d->msg);
     if (d->option)
         fprintf(stderr, " [%s]", d->option);
+    if (d->id)
+        fprintf(stderr, " [%s]", d->id);
     fprintf(stderr, "%s\n", cc("\033[0m"));
 
     int len;
@@ -367,6 +370,10 @@ static void render_json(FILE *f, const struct diag *d, int indent)
     if (d->option) {
         fprintf(f, ", \"option\": ");
         json_str(f, d->option);
+    }
+    if (d->id) {
+        fprintf(f, ", \"id\": ");
+        json_str(f, d->id);
     }
     fprintf(f, ", \"column-origin\": 1");
     fprintf(f, ", \"locations\": [{");
@@ -586,6 +593,14 @@ void diag_set_werror(int on)     { g_werror = on; }
 void diag_set_no_warnings(int on){ g_no_warnings = on; }
 void diag_set_parseable_fixits(int on) { g_parseable_fixits = on; }
 int  diag_error_count(void)      { return g_errors; }
+
+/* The id of the diagnostic just raised, for `embcc --explain`. */
+void diag_set_id(const char *id)
+{
+    struct diag *d = last_diag();
+    if (d)
+        d->id = id;
+}
 
 void diag_range(int end_col)
 {

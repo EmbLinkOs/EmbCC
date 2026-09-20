@@ -144,6 +144,7 @@ static void expect(struct parser *ps, enum tok_kind kind, const char *what)
         ps->semi_col = cur(ps)->col;
         diag_error_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                       "expected %s before %s", what, tok_describe(cur(ps)));
+        diag_set_id("E0002");
         diag_note_at(ps->lx.file, ps->prev_line, ps->prev_end_col,
                      "insert ';' here");
         diag_fixit_at(ps->lx.file, ps->prev_line, ps->prev_end_col,
@@ -2211,10 +2212,16 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * takes its size from the literal */
             /* an omitted array size is filled in by sema from the
              * initializer, so only an UNINITIALIZED one is incomplete */
-            if (ty_size(s->dty) == 0 && !s->expr && !ty_is_vla(s->dty))
-                parse_error_line(ps, s->line,
-                           "'%s' has incomplete type %s", s->name,
-                           ty_name(s->dty));
+            if (ty_size(s->dty) == 0 && !s->expr && !ty_is_vla(s->dty)) {
+                diag_error_at(ps->lx.file, s->line, 0,
+                              "'%s' has incomplete type %s", s->name,
+                              ty_name(s->dty));
+                diag_set_id("E0005");
+                ps->nerrors++;
+                if (ps->recover)
+                    longjmp(*ps->recover, 1);
+                exit(1);
+            }
             *dtail = s;
             dtail = &s->next;
             if (cur(ps)->kind == TOK_COMMA) {
