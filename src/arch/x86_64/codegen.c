@@ -3050,6 +3050,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_mov_reg_reg(text, REG_RAX, REG_RDX);
             cg_store(text, sd, i->b, 8);
             break;
+        case IR_OPCOUNT:                 /* not an opcode (ir.h) */
+            internal_error("IR_OPCOUNT reached code generation");
         }
         if (i->op == IR_CALL && fn->neh)
             ir_add_csite(fn, ins_start - f->code_off, text->len - f->code_off,

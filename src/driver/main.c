@@ -141,6 +141,14 @@ static char *read_file(const char *path)
     return buf;
 }
 
+/* EmbIR's own textual form — an input only to `inspect ir`, which parses
+ * and reprints it (the §9.1 round-trip). */
+static int has_ir_suffix(const char *p)
+{
+    size_t n = strlen(p);
+    return n > 3 && !strcmp(p + n - 3, ".ir");
+}
+
 /* The input with its suffix (.c, .cc, .cpp ...) swapped for .o. */
 static const char *default_output(const char *in)
 {
@@ -1264,7 +1272,7 @@ int main(int argc, char **argv)
             }
             output = argv[++i];
         } else if (has_c_suffix(argv[i]) || has_asm_suffix(argv[i]) ||
-                   has_cxx_suffix(argv[i]) ||
+                   has_cxx_suffix(argv[i]) || has_ir_suffix(argv[i]) ||
                    (lang >= 0 && argv[i][0] != '-')) {
             if (input) {
                 fprintf(stderr, "embcc: error: more than one input file "
@@ -1324,6 +1332,25 @@ int main(int argc, char **argv)
     }
     if (why_decision)
         compile_mode = 1;         /* a question, not an object */
+
+    /* A `.ir` input is EmbIR's own textual form: parse it and print it back
+     * (§9.1). That is the round-trip -- `print | parse | print` must produce
+     * the same bytes -- and it is what makes a pass testable text-in,
+     * text-out with no C source and no backend in the loop. */
+    if (inspect_stage && !strcmp(inspect_stage, "ir")) {
+        size_t ln = strlen(input);
+        if (ln > 3 && !strcmp(input + ln - 3, ".ir")) {
+            char *txt = src_read(input, NULL);
+            if (!txt)
+                diag_fatal(input, 0, "cannot open file");
+            struct ir_unit *pu = ir_parse(input, txt);
+            struct outbuf ob = { NULL, 0, 0 };
+            ir_print_unit(&ob, pu);
+            fwrite(ob.p, 1, ob.n, stdout);
+            ob_free(&ob);
+            return done(0);
+        }
+    }
 
     /* A `.asm` input goes to the built-in assembler (A1), not the C front-end.
      * Like gcc dispatching `.s`, embcc owns the kernel's hand-written assembly:

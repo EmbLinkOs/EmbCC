@@ -48,6 +48,7 @@ SRCS := \
 	src/sema/uninit.c \
 	src/ir/irgen.c \
 	src/ir/irprint.c \
+	src/ir/irparse.c \
 	src/opt/opt.c \
 	src/debug/dwarf.c \
 	src/debug/eh.c \
@@ -117,7 +118,7 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/arch/aarch64/predef.c src/arch/x86_64/predef_cxx.c \
              src/arch/aarch64/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
-             src/ir/irprint.c \
+             src/ir/irprint.c src/ir/irparse.c \
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
              src/arch/code.c src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \

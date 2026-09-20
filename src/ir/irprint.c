@@ -51,6 +51,26 @@ const char *ir_opname(enum ir_op op)
     return n[op];
 }
 
+/* The inverse, for the parser: a mnemonic back to its opcode, or -1. One
+ * table serves both directions, so print and parse cannot drift apart. */
+int ir_op_from_name(const char *n)
+{
+    for (int op = 0; op < IR_OPCOUNT; op++)
+        if (!strcmp(ir_opname((enum ir_op)op), n))
+            return op;
+    return -1;
+}
+
+int ir_pred_from_name(const char *n)
+{
+    static const char *const p[] = { "eq","ne","lt","le","gt","ge" };
+    static const enum binop v[] = { B_EQ,B_NE,B_LT,B_LE,B_GT,B_GE };
+    for (size_t i = 0; i < sizeof p / sizeof p[0]; i++)
+        if (!strcmp(p[i], n))
+            return v[i];
+    return -1;
+}
+
 static const char *predname(enum binop p)
 {
     switch (p) {
@@ -285,19 +305,32 @@ static void print_func(struct outbuf *b, const struct ir_unit *u,
                        const struct ir_func *f)
 {
     ob_fmt(b, "func @%s", f->name ? f->name : "?");
-    if (f->is_static)
-        ob_str(b, " static");
-    ob_str(b, " {\n");
-    ob_fmt(b, "  ; vregs %d, labels %d", f->nvregs, f->nlabels);
+    if (f->is_static)  ob_str(b, " static");
+    if (f->is_varargs) ob_str(b, " varargs");
+    if (f->has_alloca) ob_str(b, " alloca");
+    if (f->has_i128)   ob_str(b, " i128");
+    ob_fmt(b, " nparams=%d nvars=%d vregs=%d labels=%d",
+           f->nparams, f->nvars, f->nvregs, f->nlabels);
     if (f->scratch_bytes)
-        ob_fmt(b, ", scratch %d", f->scratch_bytes);
+        ob_fmt(b, " scratch=%d", f->scratch_bytes);
     if (f->outgoing_bytes)
-        ob_fmt(b, ", outgoing %d", f->outgoing_bytes);
-    if (f->has_alloca)
-        ob_str(b, ", alloca");
-    if (f->has_i128)
-        ob_str(b, ", i128");
-    ob_ch(b, '\n');
+        ob_fmt(b, " outgoing=%d", f->outgoing_bytes);
+    ob_str(b, " {\n");
+    /* The frame slots, with what irgen decided about each type. A reader
+     * rebuilding this IR needs them, and a reader UNDERSTANDING it wanted
+     * them anyway: `v3 is 8 bytes, aligned 8, a pointer` is the question a
+     * stack-layout bug always comes down to. */
+    for (int i = 0; i < f->nvars && f->locals; i++) {
+        const struct ir_local *L = &f->locals[i];
+        ob_fmt(b, "  local v%d size=%d align=%d", i, L->size, L->align);
+        if (L->user_align)          ob_fmt(b, " user_align=%d", L->user_align);
+        if (L->is_volatile)         ob_str(b, " volatile");
+        if (L->is_ldouble)          ob_str(b, " ldouble");
+        if (L->is_int128)           ob_str(b, " int128");
+        if (L->is_int_or_ptr)       ob_str(b, " intptr");
+        if (L->is_scalar_int_or_ptr) ob_str(b, " scalar");
+        ob_ch(b, '\n');
+    }
     for (int i = 0; i < f->nins; i++)
         print_ins(b, u, &f->ins[i]);
     ob_str(b, "}\n");

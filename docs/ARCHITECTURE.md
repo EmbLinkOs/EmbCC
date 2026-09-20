@@ -45,7 +45,7 @@ out-of-memory, where building a diagnostic would itself allocate.
 | **cpp** | `#include`, `#define`, conditionals | Needed early — the OS's headers are real newlib headers (see §5) |
 | **parse** | C → AST | The subset grew by need, not by standard-completeness; `todo.md` tracks what is left. `embcc inspect ast` |
 | **sema** | types, declarations, conversions, diagnostics | Where most "real compiler" work lives. `embcc inspect symbols` / `inspect types` (layout: offsets, bit-field positions, padding) |
-| **IR** | a small typed intermediate form | See §3; `embcc inspect ir` prints it ([`src/ir/irprint.c`](../src/ir/irprint.c)) |
+| **IR** | a small typed intermediate form | See §3. `embcc inspect ir` prints it ([`src/ir/irprint.c`](../src/ir/irprint.c)) and reads it back ([`src/ir/irparse.c`](../src/ir/irparse.c)): `embcc inspect ir foo.ir` round-trips, byte for byte |
 | **codegen** | IR → x86-64, System V AMD64 | See §4 |
 | **asm** | encode instructions to bytes | Integrated; no external assembler exists on-OS |
 | **as** | standalone NASM/Intel `.asm` → ELF object | `embas` / `embcc -c foo.asm`; byte-identical to nasm on the kernel corpus (A1) |

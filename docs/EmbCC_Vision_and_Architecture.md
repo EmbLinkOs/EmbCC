@@ -233,9 +233,19 @@ this document depends on most:
    writes the parser. Carrying a full type graph in EmbIR is a separate
    decision, not a consequence of this one.
 
-   **The parser itself is not written**, so there is still no
-   print→parse→identical test and no pass is testable text-in/text-out
-   (§9.1, §30).
+   **The round-trip exists (v0.3).** `src/ir/irparse.c` reads the textual
+   form back, `embcc inspect ir foo.ir` parses and reprints it, and the
+   check is that printing a parsed unit reproduces the text it was parsed
+   from **byte for byte** — which proves the form is a lossless encoding of
+   everything it claims to carry, and fails the moment the printer emits
+   something the parser cannot read. EmbCC's own 55 sources at `-O0` and
+   `-O2` give 110 round-trips, all identical
+   (tests/golden/ir-roundtrip.sh). §9.1's requirement is met.
+
+   What it does not do is reconstruct what EmbIR deliberately does not
+   carry: a parsed unit's `src` is NULL, so it can be printed, analysed and
+   transformed, but not handed to the DWARF emitter. Text-in/text-out pass
+   tests — §9.1's stated reason for wanting this — are now possible.
 3. **The project knowledge graph (§8.2).** No USRs, no interface hashes, no
    cross-TU index. Incremental compilation is at Level 1 (`-MD` file
    dependencies) and Levels 2–3 (§21), `embcc diff` (§22) and project-wide

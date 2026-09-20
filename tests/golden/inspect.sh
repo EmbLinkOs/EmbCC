@@ -32,16 +32,23 @@ EOF
 "$EMBCC" inspect ir "$out/p.c" -O0 > "$out/O0.txt"
 head -12 "$out/O0.txt"
 grep -q "^; EmbIR" "$out/O0.txt" || { echo "FAIL: no header"; exit 1; }
-grep -q "^func @add {" "$out/O0.txt" || { echo "FAIL: add missing"; exit 1; }
-grep -q "^func @sum {" "$out/O0.txt" || { echo "FAIL: sum missing"; exit 1; }
+grep -qE "^func @add .*\{" "$out/O0.txt" || { echo "FAIL: add missing"; exit 1; }
+grep -qE "^func @sum .*\{" "$out/O0.txt" || { echo "FAIL: sum missing"; exit 1; }
 # Widths read left to right: result, then memory, then flags.
 grep -qE "ldvar\.[48]:[1248]s? v[0-9]+" "$out/O0.txt" ||
     { echo "FAIL: ldvar suffix"; exit 1; }
 # Every instruction that came from source carries its line AND column
 # (R3) -- `; 2:30`, since provenance.sh made the column real.
 grep -qE "; 2:[0-9]+" "$out/O0.txt" || { echo "FAIL: no line:col provenance"; exit 1; }
-echo "the form: a header, a func per function, widths as .result:memory+flags,
-and a source line on every instruction that has one"
+# The header carries the function's shape, which is what lets the text be
+# read back (tests/golden/ir-roundtrip.sh).
+grep -qE "^func @sum .*nparams=1 nvars=[0-9]+ vregs=" "$out/O0.txt" ||
+    { echo "FAIL: the func header lost its shape"; exit 1; }
+grep -qE "^  local v0 size=4 align=4" "$out/O0.txt" ||
+    { echo "FAIL: the frame slots are not described"; exit 1; }
+echo "the form: a header carrying each function's shape, its frame slots with
+their sizes and alignments, widths as .result:memory+flags, and a source
+line and column on every instruction that has one"
 
 # ---- what it is FOR: the optimizer becomes visible -------------------------
 "$EMBCC" inspect ir "$out/p.c" -O2 > "$out/O2.txt"

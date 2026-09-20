@@ -91,9 +91,11 @@ enum ir_op {
     IR_SPSAVE,    /* dst = the stack pointer */
     IR_SPRESTORE, /* stack pointer = a (releases every IR_ALLOCA since the
                    * IR_SPSAVE that produced a) */
-    IR_LANDING    /* a landing pad's entry (exception regions): dst = the
+    IR_LANDING,   /* a landing pad's entry (exception regions): dst = the
                    * exception pointer, b = the selector — what the unwinder
                    * left in rax/rdx (x0/x1) */
+    IR_OPCOUNT    /* not an opcode: the table size, so print and parse can
+                   * agree on how many there are */
 };
 
 /* One resolved asm operand: an input carries the temp holding its VALUE, an
@@ -369,6 +371,13 @@ void ir_print_unit(struct outbuf *b, const struct ir_unit *u);
 void ir_print_func(struct outbuf *b, const struct ir_func *f);
 /* An opcode's mnemonic, so a diagnostic can name the instruction. */
 const char *ir_opname(enum ir_op op);
+/* The inverse, for the parser (src/ir/irparse.c): -1 when unknown. */
+int ir_op_from_name(const char *n);
+/* Read EmbIR back from its textual form (src/ir/irparse.c). `text` is
+ * modified in place. The unit's `src` is NULL: a parsed IR can be printed,
+ * analysed and transformed, but not handed to the DWARF emitter. */
+struct ir_unit *ir_parse(const char *file, char *text);
+int ir_pred_from_name(const char *n);
 
 /* codegen: record a call's code (offsets in the function's code) in a
  * function with exception regions. */
