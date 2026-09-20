@@ -1069,11 +1069,22 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     exit(1);
                 }
                 const char *sug = suggest_name(u, sc, e->name);
+                const char *hdr = header_declaring(e->name);
                 diag_error_at(diag_file(u), e->line, e->col,
                               "'%s' is not declared in '%s' — for a call, "
                               "add a prototype or define it first",
                               e->name, f->name);
                 diag_set_id("E0001");
+                if (hdr) {
+                    /* The C library's own surface is fixed by the standard,
+                     * so this is knowledge, not a guess: say which header,
+                     * and offer to add it. */
+                    diag_note_at(diag_file(u), 1, 1,
+                                 "'%s' is declared in %s", e->name, hdr);
+                    char inc[64];
+                    snprintf(inc, sizeof inc, "#include %s\n", hdr);
+                    diag_fixit_at(diag_file(u), 1, 1, 1, inc);
+                }
                 if (sug) {
                     diag_note_at(diag_file(u), e->line, e->col,
                                  "did you mean '%s'?", sug);
@@ -1471,24 +1482,70 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         check_expr(u, f, sc, e->lhs);
         struct type *base = e->lhs->ty;
         if (e->is_arrow) {
-            if (base->kind != TY_PTR || base->pointee->kind != TY_STRUCT)
-                sema_error_at(u, e->line, e->col,
-                           "'->' needs a pointer to a struct/union, "
-                           "got %s", ty_name(base));
+            if (base->kind != TY_PTR || base->pointee->kind != TY_STRUCT) {
+                /* `->` on a value of struct type: the edit is a '.' */
+                int fixable = base->kind == TY_STRUCT;
+                diag_error_at(diag_file(u), e->line, e->col,
+                              "'->' needs a pointer to a struct/union, "
+                              "got %s%s", ty_name(base),
+                              fixable ? " (use '.' on a value)" : "");
+                if (fixable) {
+                    diag_note_at(diag_file(u), e->line, e->col,
+                                 "use '.' here");
+                    diag_fixit_find(diag_file(u), e->line, e->col, "->", ".");
+                }
+                g_sema_errors++;
+                if (g_recover)
+                    longjmp(*g_recover, 1);
+                exit(1);
+            }
             base = base->pointee;
         } else if (base->kind != TY_STRUCT) {
-            sema_error_at(u, e->line, e->col,
-                       "'.' needs a struct/union, got %s (use '->' "
-                       "through a pointer)", ty_name(base));
+            int fixable = base->kind == TY_PTR &&
+                          base->pointee->kind == TY_STRUCT;
+            diag_error_at(diag_file(u), e->line, e->col,
+                          "'.' needs a struct/union, got %s%s", ty_name(base),
+                          fixable ? " (use '->' through a pointer)" : "");
+            if (fixable) {
+                diag_note_at(diag_file(u), e->line, e->col, "use '->' here");
+                diag_fixit_find(diag_file(u), e->line, e->col, ".", "->");
+            }
+            g_sema_errors++;
+            if (g_recover)
+                longjmp(*g_recover, 1);
+            exit(1);
         }
         if (!base->complete)
             sema_error_at(u, e->line, e->col,
                        "%s is incomplete here (its body comes later "
                        "or never)", ty_name(base));
         struct member *mm = xcalloc(1, sizeof *mm);
-        if (!find_member_deep(base, e->name, mm, 0))
-            sema_error_id(u, e->line, e->col, "E0004", "%s has no member '%s'",
-                       ty_name(base), e->name);
+        if (!find_member_deep(base, e->name, mm, 0)) {
+            /* The member it is nearest to, among the ones this type has:
+             * a suggestion from the type in hand, not from a dictionary. */
+            const char *best = NULL;
+            int bestd = 1000, nlen = (int)strlen(e->name);
+            for (int mi = 0; mi < base->nmembers; mi++) {
+                const char *mn = base->members[mi].name;
+                if (!mn)
+                    continue;
+                int d = edit_distance(e->name, mn);
+                if (d > 0 && d < bestd) { bestd = d; best = mn; }
+            }
+            int thresh = nlen / 3 < 2 ? 2 : nlen / 3;
+            diag_error_at(diag_file(u), e->line, e->col,
+                          "%s has no member '%s'", ty_name(base), e->name);
+            diag_set_id("E0004");
+            if (best && bestd <= thresh) {
+                diag_note_at(diag_file(u), e->line, e->col,
+                             "did you mean '%s'?", best);
+                diag_fixit_find(diag_file(u), e->line, e->col, e->name, best);
+            }
+            g_sema_errors++;
+            if (g_recover)
+                longjmp(*g_recover, 1);
+            exit(1);
+        }
         e->memb = mm;
         e->ty = e->memb->ty;
         /* C: a member of a `volatile`-qualified struct/union is itself

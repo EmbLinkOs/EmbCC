@@ -160,6 +160,75 @@ static const struct explain g_explains[] = {
 },
 };
 
+/* ---- what declares a name ------------------------------------------------
+ *
+ * A name that is not declared is most often a missing #include, and the
+ * compiler knows perfectly well which header declares printf. Saying so
+ * turns "not declared" into an edit. The table is the C library's own
+ * surface, which is fixed by the standard — not a guess about the
+ * project's own names, which EmbCC suggests from what it has parsed.
+ */
+static const struct { const char *name; const char *header; } g_headers[] = {
+    /* <stdio.h> */
+    { "printf", "<stdio.h>" }, { "fprintf", "<stdio.h>" },
+    { "sprintf", "<stdio.h>" }, { "snprintf", "<stdio.h>" },
+    { "puts", "<stdio.h>" }, { "putchar", "<stdio.h>" },
+    { "fputs", "<stdio.h>" }, { "fopen", "<stdio.h>" },
+    { "fclose", "<stdio.h>" }, { "fread", "<stdio.h>" },
+    { "fwrite", "<stdio.h>" }, { "fgets", "<stdio.h>" },
+    { "scanf", "<stdio.h>" }, { "sscanf", "<stdio.h>" },
+    { "perror", "<stdio.h>" }, { "fflush", "<stdio.h>" },
+    { "fseek", "<stdio.h>" }, { "ftell", "<stdio.h>" },
+    /* <stdlib.h> */
+    { "malloc", "<stdlib.h>" }, { "calloc", "<stdlib.h>" },
+    { "realloc", "<stdlib.h>" }, { "free", "<stdlib.h>" },
+    { "exit", "<stdlib.h>" }, { "abort", "<stdlib.h>" },
+    { "atoi", "<stdlib.h>" }, { "atol", "<stdlib.h>" },
+    { "strtol", "<stdlib.h>" }, { "strtoul", "<stdlib.h>" },
+    { "strtod", "<stdlib.h>" }, { "qsort", "<stdlib.h>" },
+    { "bsearch", "<stdlib.h>" }, { "getenv", "<stdlib.h>" },
+    { "rand", "<stdlib.h>" }, { "srand", "<stdlib.h>" },
+    /* <string.h> */
+    { "strlen", "<string.h>" }, { "strcpy", "<string.h>" },
+    { "strncpy", "<string.h>" }, { "strcat", "<string.h>" },
+    { "strncat", "<string.h>" }, { "strcmp", "<string.h>" },
+    { "strncmp", "<string.h>" }, { "strchr", "<string.h>" },
+    { "strrchr", "<string.h>" }, { "strstr", "<string.h>" },
+    { "strdup", "<string.h>" }, { "memcpy", "<string.h>" },
+    { "memmove", "<string.h>" }, { "memset", "<string.h>" },
+    { "memcmp", "<string.h>" }, { "memchr", "<string.h>" },
+    /* <math.h> */
+    { "sqrt", "<math.h>" }, { "pow", "<math.h>" }, { "fabs", "<math.h>" },
+    { "sin", "<math.h>" }, { "cos", "<math.h>" }, { "tan", "<math.h>" },
+    { "log", "<math.h>" }, { "log2", "<math.h>" }, { "log10", "<math.h>" },
+    { "exp", "<math.h>" }, { "floor", "<math.h>" }, { "ceil", "<math.h>" },
+    { "round", "<math.h>" }, { "fmod", "<math.h>" },
+    /* <ctype.h>, <assert.h>, <time.h>, <errno.h> */
+    { "isalpha", "<ctype.h>" }, { "isdigit", "<ctype.h>" },
+    { "isalnum", "<ctype.h>" }, { "isspace", "<ctype.h>" },
+    { "isupper", "<ctype.h>" }, { "islower", "<ctype.h>" },
+    { "toupper", "<ctype.h>" }, { "tolower", "<ctype.h>" },
+    { "assert", "<assert.h>" },
+    { "time", "<time.h>" }, { "clock", "<time.h>" },
+    { "strftime", "<time.h>" }, { "localtime", "<time.h>" },
+    { "errno", "<errno.h>" }, { "strerror", "<string.h>" },
+    /* <unistd.h>, <fcntl.h> — POSIX, but what a program on this OS uses */
+    { "write", "<unistd.h>" }, { "read", "<unistd.h>" },
+    { "close", "<unistd.h>" }, { "open", "<fcntl.h>" },
+    { "lseek", "<unistd.h>" }, { "unlink", "<unistd.h>" },
+};
+
+/* The header that declares `name`, or NULL. */
+const char *header_declaring(const char *name)
+{
+    if (!name)
+        return NULL;
+    for (unsigned i = 0; i < sizeof g_headers / sizeof g_headers[0]; i++)
+        if (!strcmp(g_headers[i].name, name))
+            return g_headers[i].header;
+    return NULL;
+}
+
 static const int g_nexplains =
     (int)(sizeof g_explains / sizeof g_explains[0]);
 

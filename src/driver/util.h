@@ -81,12 +81,21 @@ void diag_set_id(const char *id);
 /* src/driver/explain.c */
 int explain_print(const char *id);      /* NULL/"" lists them */
 const char *explain_title(const char *id);
+/* The standard header that declares this name, or NULL: a name that is not
+ * declared is most often a missing #include. */
+const char *header_declaring(const char *name);
 
 /* Attach a fix-it to the last diagnostic (or to its last note, which is
  * where "did you mean 'x'?" carries it): replace [col, end_col) of `line`
  * with `text`. Inserting is col == end_col; deleting is text "". */
 void diag_fixit_at(const char *file, int line, int col, int end_col,
                    const char *text);
+
+/* The same, for a token the front end can name but not locate: replaces
+ * the first `find` at or after (line, from_col) in the registered source.
+ * 0 (and nothing attached) if it is not there. */
+int diag_fixit_find(const char *file, int line, int from_col,
+                    const char *find, const char *text);
 
 void diag_set_format(int format);      /* DIAG_TEXT (default) or DIAG_JSON */
 void diag_set_color(int mode);         /* -1 auto (a terminal), 0 no, 1 yes */

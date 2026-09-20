@@ -56,6 +56,32 @@ grep -q "applied 2 fixes" "$out/fix2.log" || {
     echo "the fixed file does not compile:"; cat "$out/semi.c"; exit 1; }
 echo "--fix: both missing ';' inserted; the file compiles"
 
+# 3b. The suggestions that come from what the compiler knows, not from a
+#     dictionary: the member this type actually has, `.` where the value is
+#     a pointer, and the header the C library declares a name in.
+cat > "$out/sug.c" << 'EOF'
+struct P { int x; int label; };
+int f(struct P *p) { return p.x; }
+int g(struct P q) { return q->x; }
+int h(struct P q) { return q.labl; }
+int i(void) { char *p = malloc(4); return p ? 0 : 1; }
+EOF
+"$EMBCC" -c "$out/sug.c" -o "$out/sug.o" > "$out/sug.log" 2>&1 || true
+grep -q "use '->' here" "$out/sug.log" || { echo "no -> suggestion"; exit 1; }
+grep -q "use '.' here" "$out/sug.log" || { echo "no . suggestion"; exit 1; }
+grep -q "did you mean 'label'?" "$out/sug.log" || { echo "no member suggestion"; exit 1; }
+grep -q "'malloc' is declared in <stdlib.h>" "$out/sug.log" || {
+    echo "no header suggestion:"; cat "$out/sug.log"; exit 1; }
+"$EMBCC" --fix -c "$out/sug.c" > "$out/sug2.log" 2>&1 || true
+grep -q "applied 4 fixes" "$out/sug2.log" || {
+    echo "--fix did not apply all four:"; cat "$out/sug2.log"; exit 1; }
+head -1 "$out/sug.c" | grep -q "#include <stdlib.h>" || {
+    echo "the include was not added:"; head -2 "$out/sug.c"; exit 1; }
+grep -q "return p->x;" "$out/sug.c" || { echo "-> not applied"; exit 1; }
+grep -q "return q.x;" "$out/sug.c" || { echo ". not applied"; exit 1; }
+grep -q "return q.label;" "$out/sug.c" || { echo "member not applied"; exit 1; }
+echo "--fix: '->' for '.', the member meant, and the missing #include"
+
 # 4. Nothing to fix is said, not done: a file whose error has no known
 #    edit is left exactly as it was.
 cat > "$out/hard.c" << 'EOF'

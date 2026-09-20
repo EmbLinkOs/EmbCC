@@ -702,6 +702,27 @@ void diag_range(int end_col)
         d->end_col = end_col;
 }
 
+/* A fix-it for the first `find` at or after (line, from_col) in the
+ * registered source: the front end knows what to replace but not where the
+ * token is, and the source is right here. Returns 0 if it is not there (a
+ * macro expansion, a file with no registered text), having done nothing —
+ * a fix-it must never point at something it did not see. */
+int diag_fixit_find(const char *file, int line, int from_col,
+                    const char *find, const char *text)
+{
+    int len;
+    const char *ln = src_line(file, line, &len);
+    if (!ln || from_col < 1)
+        return 0;
+    int flen = (int)strlen(find);
+    for (int i = from_col - 1; i + flen <= len; i++)
+        if (!memcmp(ln + i, find, (size_t)flen)) {
+            diag_fixit_at(file, line, i + 1, i + 1 + flen, text);
+            return 1;
+        }
+    return 0;
+}
+
 void diag_fixit_at(const char *file, int line, int col, int end_col,
                    const char *text)
 {
