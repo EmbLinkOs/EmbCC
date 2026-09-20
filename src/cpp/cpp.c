@@ -568,6 +568,48 @@ EVAL_LEVEL(eval_or_, eval_and, {
 static long eval_or(struct evalp *e) { return eval_or_(e); }
 
 static char *read_file_or_null(const char *path, long *len);
+
+/* ---- what the file depended on -------------------------------------------
+ *
+ * Every header actually opened, in order, each marked with whether it came
+ * from a system directory (-isystem, or the compiler's own include dir).
+ * -M writes them all as the make rule's prerequisites; -MM writes only the
+ * ones that are not system headers. */
+struct dep_ent { const char *path; int system; };
+static struct dep_ent *g_deps;
+static int g_ndeps, g_capdeps;
+static const int *g_sysdir;      /* per include directory: is it a system one */
+static int g_nsysdir;
+
+void cpp_set_system_dirs(const int *flags, int n)
+{
+    g_sysdir = flags;
+    g_nsysdir = n;
+}
+
+static int g_in_system;            /* the file being read is a system header */
+
+static void record_dep(const char *path, int incdir_idx)
+{
+    for (int i = 0; i < g_ndeps; i++)
+        if (strcmp(g_deps[i].path, path) == 0)
+            return;                    /* included twice, needed once */
+    if (g_ndeps == g_capdeps) {
+        g_capdeps = g_capdeps ? g_capdeps * 2 : 32;
+        g_deps = xrealloc(g_deps, (size_t)g_capdeps * sizeof *g_deps);
+    }
+    g_deps[g_ndeps].path = path;
+    /* A system header's own includes are system headers too: stdio.h finds
+     * _ansi.h beside itself, through no -isystem directory at all. */
+    g_deps[g_ndeps].system = g_in_system ||
+                             (incdir_idx >= 0 && incdir_idx < g_nsysdir &&
+                              g_sysdir && g_sysdir[incdir_idx]);
+    g_ndeps++;
+}
+
+int cpp_dep_count(void) { return g_ndeps; }
+const char *cpp_dep_path(int i) { return g_deps[i].path; }
+int cpp_dep_is_system(int i) { return g_deps[i].system; }
 static int (*cxx_has_builtin)(const char *name);
 static int cxx_exceptions;
 static int cxx_std = 2020, cxx_strict;
@@ -1124,7 +1166,12 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
     {
         char *ipath = xstrndup(path, strlen(path));
         diag_register_source(ipath, text);   /* header errors show their lines */
+        record_dep(ipath, found_idx);        /* -M: what this file needed */
+        int was = g_in_system;
+        g_in_system = g_ndeps && g_deps[g_ndeps - 1].system &&
+                      strcmp(g_deps[g_ndeps - 1].path, ipath) == 0;
         process_file(s->cpp, ipath, text, out, found_idx);
+        g_in_system = was;
     }
     s->cpp->depth--;
 }

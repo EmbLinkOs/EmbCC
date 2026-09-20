@@ -16,7 +16,7 @@ until the front ends can keep going after an error.
 | **T1** | **The diagnostic engine.** A diagnostic is a record: severity, location, source range, notes, fix-its, the option that controls it. Buffered, then rendered — text exactly as before, or `-fdiagnostics-format=json` (GCC's schema, so existing tools read it). `-fdiagnostics-color`, `-fmax-errors`, `-w`, `-Werror`. First fix-its: the name suggestions the front ends already compute. | done — tests/golden/diagnostics-json.sh; the text goldens unchanged |
 | **T2** | **Error recovery.** The C front end keeps going after an error — synchronising at statement and declaration boundaries — so one run reports every independent problem instead of the first. A recovery must never produce a *wrong* later diagnostic: each is either suppressed or real. | done (C) — tests/golden/diagnostics-recovery.sh; the C++ front end is still first-error |
 | **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Fix-its for the mechanical cases: a missing `;`, a missing `&`/`*`, `.` for `->`, an unspelled `struct` tag, a misspelt name, a missing `#include` for a known declaration. | before/after files in a golden, and a fixed file compiles |
-| **T4** | **The driver GCC and Clang users already know.** A real option table (`--help` generated from it), `-M`/`-MM`/`-MD`/`-MMD`/`-MF`/`-MT`/`-MP`, `-fsyntax-only`, `-S`, `@file`, `--version`, `-dumpmachine`, `-x`, `-###`. And warnings that mean something: `-Wall`/`-Wextra` as groups over real analyses (unused, shadowed, uninitialised, sign-compare, fallthrough, format), each with its `-Wno-` and its name printed in the diagnostic. | gcc's own option spellings on EmbCC, and each warning's golden |
+| **T4** | **The driver GCC and Clang users already know.** Dependency generation, `-fsyntax-only`, `--help`, `-dumpmachine` — done. Still to come: `-S`, `@file`, `-###`, and warnings that mean something: `-Wall`/`-Wextra` as groups over real analyses (unused, shadowed, uninitialised, sign-compare, fallthrough, format), each with its `-Wno-` and its name printed in the diagnostic. | half — tests/golden/driver-deps.sh (gcc's own rule, and `make` reads it); warning groups pending |
 | **T5** | **`embls`, the language server.** LSP over stdio on a tolerant parse: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords, `#include` paths), hover (type, declaration, comment), go-to-definition, find references, signature help, document symbols, rename. | an LSP conversation transcript test, and it drives a real editor |
 | **T6** | **Past the bar.** `embcc --explain <id>`: what the error means, why it fired *here*, and the smallest edit that fixes it. Suggestions that use the index rather than edit distance alone (the member you meant, on the type you have; the header that declares the name). `embcc doctor`: why a link failed, in terms of symbols and the units that needed them. | worked examples, each a test |
 
@@ -85,3 +85,25 @@ deliberately: dropping a half-declared variable would turn one error into a
 crowd of "not declared" ones below it.
 
 `-fmax-errors=N` stops after N, as GCC does.
+
+## T4 — the driver, first half (done)
+
+`-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`, `-MP`: the make rule
+naming what the file included, which is how a C project knows to rebuild
+when a header changes. The preprocessor records every header it opened, in
+order, each marked with whether it came from a system directory — which is
+what `-MM` leaves out. System-ness is inherited: `stdio.h` finds `_ansi.h`
+beside itself, through no `-isystem` directory at all, and it is still a
+system header.
+
+The rule is checked three ways (tests/golden/driver-deps.sh): it names
+every header gcc's own `-M` names, `make` itself accepts the file, and
+`-MM` drops the system ones. EmbCC's list can be *longer* than gcc's, and
+here it is: EmbCC defines no `__GNUC__`, so newlib's `__GNUC_PREREQ` tests
+take their portable branch and really do include `<limits.h>`. The rule
+must describe the compile that happened.
+
+`-fsyntax-only` runs the front end and writes nothing — what an editor
+asks for, and what a build's "does this still compile" step wants.
+`--help` lists the options in the spellings GCC and Clang use;
+`-dumpmachine` prints the target `--target` chose.

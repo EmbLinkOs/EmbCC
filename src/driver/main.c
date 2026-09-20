@@ -62,6 +62,44 @@ static void print_usage(FILE *out)
             " | --emit-empty-object FILE\n");
 }
 
+/* What --help prints under the usage line: the options EmbCC takes, in the
+ * spellings GCC and Clang use, so a build system's flags land as expected. */
+static void print_options(FILE *out)
+{
+    fputs(
+      "\nwhat to do\n"
+      "  -c                     compile to an object\n"
+      "  -E                     preprocess only\n"
+      "  -S                     (not yet: EmbCC writes objects, not assembly)\n"
+      "  -fsyntax-only          check, write nothing\n"
+      "  --emit-c               print the C a C++ unit lowers to\n"
+      "  -o FILE                where to write it\n"
+      "\nthe language\n"
+      "  -x c|c++               treat the input as this language\n"
+      "  -std=...               accepted; EmbCC has one dialect per language\n"
+      "  -I DIR, -isystem DIR   header search paths\n"
+      "  -D NAME[=VALUE], -U NAME  define and undefine macros\n"
+      "  -include FILE          include it before the file\n"
+      "  -fno-exceptions, -fno-rtti   C++ without them\n"
+      "\nthe target\n"
+      "  --target=x86_64-elf|aarch64-elf\n"
+      "  -dumpmachine           print that target\n"
+      "  -O0 -O1 -O2            optimisation\n"
+      "  -g                     debug information (DWARF)\n"
+      "  -mno-sse -mno-red-zone -mcmodel=kernel -mgeneral-regs-only\n"
+      "\ndiagnostics (docs/TOOLING.md)\n"
+      "  -fdiagnostics-format=text|json   caret output, or GCC's JSON\n"
+      "  -fdiagnostics-color=auto|always|never\n"
+      "  -fmax-errors=N         stop after N\n"
+      "  -w                     no warnings;  -Werror  warnings are errors\n"
+      "\ndependencies\n"
+      "  -M, -MM                write the make rule instead of compiling\n"
+      "  -MD, -MMD              write it beside the object\n"
+      "  -MF FILE, -MT TARGET, -MP\n"
+      "\nreporting\n"
+      "  --version, --help, --dump-predef\n", out);
+}
+
 static void dump_predef(void)
 {
     int n;
@@ -127,6 +165,7 @@ static const char *path_basename(const char *p)
 
 #define MAX_INCDIRS 16
 static const char *incdirs[MAX_INCDIRS];
+static int incdir_sys[MAX_INCDIRS];   /* -isystem, or EmbCC's own include */
 static int nincdirs;
 
 /* -g: emit DWARF line info (D-010 step 1). Opt-in — with it off, output is
@@ -160,6 +199,67 @@ static int want_rtti = 1;
 /* --emit-c: print the C a C++ unit lowers to, instead of compiling it. */
 static int emit_c_only;
 
+/* -fsyntax-only: run the front end, write nothing. What an editor asks for
+ * (docs/TOOLING.md T5) and what a build's "does this still compile" step
+ * wants. */
+static int syntax_only;
+
+/* -M and friends: the make rule naming what this file included. `dep_mode`
+ * 0 none, 1 every header (-M/-MD), 2 only the ones that are not system
+ * headers (-MM/-MMD); `dep_only` is the -M/-MM form, which replaces the
+ * compile rather than accompanying it. */
+static int dep_mode, dep_only, dep_phony;
+static const char *dep_file, *dep_target;
+
+/* The make rule: "target: source header...", wrapped as GCC wraps it, and
+ * with -MP a bare rule per header so a deleted header does not break the
+ * build. */
+static void write_deps(const char *in, const char *obj)
+{
+    const char *target = dep_target ? dep_target : obj;
+    char defname[4096];
+    if (!target) {                    /* neither -MT nor -o: the input's .o */
+        const char *base = strrchr(in, '/');
+        base = base ? base + 1 : in;
+        const char *dot = strrchr(base, '.');
+        snprintf(defname, sizeof defname, "%.*s.o",
+                 dot ? (int)(dot - base) : (int)strlen(base), base);
+        target = defname;
+    }
+    char path[4096];
+    FILE *f = stdout;
+    if (dep_file) {
+        f = fopen(dep_file, "w");
+    } else if (!dep_only) {           /* -MD/-MMD: beside the object */
+        const char *end = strrchr(target, '.');
+        snprintf(path, sizeof path, "%.*s.d",
+                 end ? (int)(end - target) : (int)strlen(target), target);
+        f = fopen(path, "w");
+    }
+    if (!f)
+        diag_fatal(dep_file ? dep_file : path, 0, "cannot write the file");
+    int col = fprintf(f, "%s: %s", target, in);
+    for (int i = 0; i < cpp_dep_count(); i++) {
+        if (dep_mode == 2 && cpp_dep_is_system(i))
+            continue;
+        const char *d = cpp_dep_path(i);
+        if (col + (int)strlen(d) > 72) {
+            fprintf(f, " \\\n ");
+            col = 1;
+        }
+        col += fprintf(f, " %s", d);
+    }
+    fputc('\n', f);
+    if (dep_phony)
+        for (int i = 0; i < cpp_dep_count(); i++) {
+            if (dep_mode == 2 && cpp_dep_is_system(i))
+                continue;
+            fprintf(f, "\n%s:\n", cpp_dep_path(i));
+        }
+    if (f != stdout)
+        fclose(f);
+}
+
 static int compile(const char *in, const char *out, int pp_only)
 {
     char *src = read_file(in);
@@ -167,7 +267,12 @@ static int compile(const char *in, const char *out, int pp_only)
     predef_set_cxx(lang_cxx);
     if (lang_cxx)
         cpp_set_cxx(cxx_has_builtin, want_exceptions);
+    cpp_set_system_dirs(incdir_sys, nincdirs);
     char *pp = cpp_process(in, src, incdirs, nincdirs);
+    if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
+        write_deps(in, out);
+        return 0;
+    }
     if (pp_only) {
         fputs(pp, stdout);
         return 0;
@@ -201,6 +306,10 @@ static int compile(const char *in, const char *out, int pp_only)
         diag_terminated(sema_error_count());
         exit(1);
     }
+    if (dep_mode)                     /* -MD/-MMD: beside the object */
+        write_deps(in, out);
+    if (syntax_only)                  /* checked; nothing to write */
+        return 0;
 
     /* File-scope asm (crt0's _start) can reference a function by name with
      * `call sym`. That reference has to count as a USE before irgen decides
@@ -730,6 +839,16 @@ int main(int argc, char **argv)
             print_version();
             return 0;
         }
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(stdout);
+            print_options(stdout);
+            return 0;
+        }
+        if (strcmp(argv[i], "-dumpmachine") == 0) {
+            printf("%s\n", target_get() == TARGET_AARCH64 ? "aarch64-elf"
+                                                          : "x86_64-elf");
+            return 0;
+        }
         if (strcmp(argv[i], "--dump-predef") == 0) {
             dump_predef();
             return 0;
@@ -802,6 +921,26 @@ int main(int argc, char **argv)
             want_unwind = 0;
         } else if (strcmp(argv[i], "-fchar8_t") == 0) {
             cpp_set_cxx_char8(1);   /* (C++: char8_t is a keyword anyway) */
+        } else if (strcmp(argv[i], "-fsyntax-only") == 0) {
+            syntax_only = 1;
+        } else if (strcmp(argv[i], "-M") == 0) {
+            dep_mode = 1; dep_only = 1;
+        } else if (strcmp(argv[i], "-MM") == 0) {
+            dep_mode = 2; dep_only = 1;
+        } else if (strcmp(argv[i], "-MD") == 0) {
+            dep_mode = 1;
+        } else if (strcmp(argv[i], "-MMD") == 0) {
+            dep_mode = 2;
+        } else if (strcmp(argv[i], "-MP") == 0) {
+            dep_phony = 1;
+        } else if (strcmp(argv[i], "-MF") == 0 || strcmp(argv[i], "-MT") == 0 ||
+                   strcmp(argv[i], "-MQ") == 0) {
+            int mf = argv[i][2] == 'F';
+            if (i + 1 >= argc) {
+                fprintf(stderr, "embcc: %s needs a file name\n", argv[i]);
+                return 1;
+            }
+            if (mf) dep_file = argv[++i]; else dep_target = argv[++i];
         } else if (strcmp(argv[i], "-fno-exceptions") == 0) {
             want_exceptions = 0;
         } else if (strcmp(argv[i], "-fno-stack-protector") == 0) {
@@ -891,9 +1030,8 @@ int main(int argc, char **argv)
             }
             incdirs[nincdirs++] = dir;
         } else if (strncmp(argv[i], "-isystem", 8) == 0) {
-            /* A system-include directory. EmbCC keeps one search path, so
-             * -isystem DIR is accepted as an -I DIR — enough to drive real
-             * build scripts that pass it. */
+            /* A system-include directory: searched as an -I one, but marked,
+             * so -MM can leave its headers out of the dependency list. */
             const char *dir = argv[i][8] ? argv[i] + 8
                                          : (i + 1 < argc ? argv[++i] : 0);
             if (!dir) {
@@ -904,6 +1042,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "embcc: too many include directories\n");
                 return 1;
             }
+            incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = dir;
         } else if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 == argc) {
@@ -946,6 +1085,7 @@ int main(int argc, char **argv)
                      (int)(slash - argv[0]), argv[0]);
         else
             snprintf(selfinc, sizeof selfinc, "./include");
+        incdir_sys[nincdirs] = 1;
         incdirs[nincdirs++] = selfinc;
     }
     /* A `.asm` input goes to the built-in assembler (A1), not the C front-end.

@@ -49,6 +49,9 @@ took target-specific work, or that a reader might doubt.
 | File-scope `__asm__` | ✓ (crt0's vocabulary) | ✗ |
 | gcc flags accepted: `-W...` (one warning level), `-fno-stack-protector` (what EmbCC does; `-fstack-protector` refused), `-fno-rtti`/`-frtti`, `-fno-exceptions` | ✓ | ✓ |
 | Diagnostics: located heading, source line, caret + range, notes, fix-its; `-fdiagnostics-format=text\|json` (GCC's JSON schema), `-fdiagnostics-color=auto\|always\|never`, `-fmax-errors=N`, `-w`, `-Werror` (docs/TOOLING.md) | ✓ | ✓ |
+| Error recovery: every independent syntax and semantic error in one run, not the first only | ✓ | ✓ |
+| Dependencies: `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`, `-MP` (the rule gcc writes, and `make` reads) | ✓ | ✓ |
+| `-fsyntax-only`, `--help`, `-dumpmachine` | ✓ | ✓ |
 | Preprocessor (full, incl. `#include_next`), newlib headers | ✓ | ✓ |
 
 ## C++

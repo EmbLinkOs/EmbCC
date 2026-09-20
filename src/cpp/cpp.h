@@ -30,4 +30,14 @@ void cpp_set_cxx_char8(int on);             /* -fchar8_t */
 /* -DNAME[=VALUE] (undef 0) or -UNAME (undef 1), before cpp_process */
 void cpp_cmdline_define(const char *text, int undef);
 
+/* Which include directories are system ones (-isystem, the compiler's own):
+ * their headers are what -MM leaves out of the dependency list. `flags` is
+ * indexed as incdirs is, and must outlive the preprocessing. */
+void cpp_set_system_dirs(const int *flags, int n);
+
+/* The headers the last cpp_process opened, in order (-M and friends). */
+int cpp_dep_count(void);
+const char *cpp_dep_path(int i);
+int cpp_dep_is_system(int i);
+
 #endif
