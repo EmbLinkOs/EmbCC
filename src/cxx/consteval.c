@@ -359,13 +359,11 @@ static struct cval load(struct cptr p, const struct cty *t)
             return v_flt(f);
         }
         if (n > 8)
-            /* A long double in memory. Reading it back exactly needs a
-             * decoder from the target's format, which ldfloat.c does not
-             * have yet (it only encodes). Refusing is the honest answer:
-             * the alternative is to read the low eight bytes as a double,
-             * which is not a narrower answer but a wrong one. See
-             * docs/developer/todo.md. */
-            notconst("reading a long double object back");
+            /* A long double in memory, decoded from the TARGET's format
+             * (x87 80-bit or binary128) rather than read as a double --
+             * which would not be a narrower answer but a wrong one, since
+             * the low eight bytes of either format are not a double. */
+            return v_ldf(ldf_from_bytes(q, ldf_target_fmt()));
         double d;
         memcpy(&d, q, 8);
         return v_flt(d);
@@ -482,6 +480,11 @@ static void store(struct cptr p, const struct cty *t, struct cval v)
         if (n == 4) {
             float f = (float)v.f;
             memcpy(q, &f, 4);
+        } else if (n > 8) {
+            /* A long double takes the target's own encoding, all sixteen
+             * bytes of it. Writing the double half would leave the object
+             * holding a bit pattern that is not the value stored. */
+            ldf_encode(as_ldf(v), ldf_target_fmt(), q);
         } else {
             memcpy(q, &v.f, 8);
         }

@@ -559,6 +559,77 @@ void ldf_encode(const struct ldf *a, enum ldf_fmt fmt, unsigned char *out)
     }
 }
 
+/* The exact inverse of ldf_encode: a value read back out of memory.
+ *
+ * Needed because a constant expression may STORE a long double and then
+ * read it (`constexpr long double x = 2.5L; static_assert(x > 1);`), and
+ * the evaluator has to get back the value it wrote rather than an
+ * approximation. Nothing is rounded here -- every bit pattern in a format
+ * denotes a value that format can hold exactly, which is why this is the
+ * one conversion in the file with no fmtinfo rounding step.
+ */
+struct ldf *ldf_from_bytes(const unsigned char *in, enum ldf_fmt fmt)
+{
+    struct fmtinfo fi = finfo(fmt);
+    int nbytes = fmt == LDF_DOUBLE ? 8 : fmt == LDF_FLOAT ? 4 : 16;
+
+    unsigned long lo = 0, hi = 0;
+    for (int i = 0; i < 8 && i < nbytes; i++)
+        lo |= (unsigned long)in[i] << (8 * i);
+    if (fmt == LDF_X87) {
+        hi = (unsigned long)in[8] | (unsigned long)in[9] << 8;
+    } else if (fmt == LDF_QUAD) {
+        for (int i = 0; i < 8; i++)
+            hi |= (unsigned long)in[8 + i] << (8 * i);
+    }
+
+    int neg;
+    unsigned long biased;
+    struct big mant;
+    if (fmt == LDF_X87) {
+        neg = (int)(hi >> 15) & 1;
+        biased = hi & 0x7fff;
+        mant = big_from_u64(lo);          /* the integer bit is IN here */
+    } else if (fmt == LDF_QUAD) {
+        neg = (int)(hi >> 63) & 1;
+        biased = (hi >> 48) & 0x7fff;
+        mant = big_add(big_shl(big_from_u64(hi & 0xffffffffffffUL), 64),
+                       big_from_u64(lo));
+    } else if (fmt == LDF_DOUBLE) {
+        neg = (int)(lo >> 63) & 1;
+        biased = (lo >> 52) & 0x7ff;
+        mant = big_from_u64(lo & 0xfffffffffffffUL);
+    } else {
+        neg = (int)(lo >> 31) & 1;
+        biased = (lo >> 23) & 0xff;
+        mant = big_from_u64(lo & 0x7fffffUL);
+    }
+
+    if (biased == (unsigned long)(2 * fi.bias + 1)) {
+        /* All-ones exponent. x87 stores an explicit integer bit, so the
+         * significand there is the low 63 bits; everywhere else it is the
+         * whole field. Nonzero means NaN, zero means infinity. */
+        struct big payload = fmt == LDF_X87
+            ? big_from_u64(lo & 0x7fffffffffffffffUL) : mant;
+        return mk(big_is_zero(payload) ? LDF_INF : LDF_NAN, neg);
+    }
+
+    struct ldf *v = mk(LDF_FINITE, neg);
+    if (biased == 0) {
+        /* Zero or subnormal: no implicit bit, and the quantum is fixed. */
+        v->m = mant;
+        v->e = fi.emin - (fi.p - 1);
+        if (big_is_zero(mant))
+            v->e = 0;                     /* a clean signed zero */
+        return v;
+    }
+    if (fmt != LDF_X87)
+        mant = big_add(mant, big_shl(big_from_u64(1), fi.p - 1));
+    v->m = mant;
+    v->e = (long)biased - fi.bias - (fi.p - 1);
+    return v;
+}
+
 double ldf_to_double(const struct ldf *a)
 {
     unsigned char b[8];

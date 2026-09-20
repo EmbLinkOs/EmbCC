@@ -690,65 +690,59 @@ designated) and **file-scope compound literals** (direct value, nested, and
 `&(T){...}` via an anonymous global). The remaining Tier-3 entries are
 integration notes, not compiler work.
 
-## C++ access checking on casts (found 2026-09-20)
+## C++ access control is not implemented (scoped 2026-09-20)
 
-`dynamic_cast<B*>(d)` and `static_cast<B*>(d)` where `B` is a **private**
-base of `D` are accepted. `[expr.static.cast]/11` and
-`[expr.dynamic.cast]/5` make both ill-formed — the base has to be
-accessible at the point of the cast — and g++ rejects them with
-"'B' is an inaccessible base of 'D'".
+This was first written up as a cast bug — `static_cast`/`dynamic_cast` to
+a **private** base is accepted where g++ says "'B' is an inaccessible base
+of 'D'". It is not a cast bug. `private` and `protected` are parsed and
+recorded (`CA_PRIVATE`, `struct cbase::access`) and then never enforced
+anywhere: reading a private data member of another class compiles too.
 
-EmbCC compiles them into a plain offset adjustment, so the cast quietly
-succeeds. This is a front-end access-check gap, not a runtime one: the
-runtime's own handling of private bases is correct and tested
-(`tests/golden/libcxx.sh` casts *sideways* to a private base and gets the
-null it should). It was found while writing that test, when the obvious
-spelling of "a private base is not reachable" never reached the runtime
-at all.
+That makes it a FEATURE, not a defect, and a deliberately different kind
+of work from the rest of this file. Every other entry here is about the
+compiler producing wrong code or rejecting valid code. Access control can
+only do the opposite — it exists to *reject* programs that compile today,
+and it cannot make a single working program work. The whole tree,
+libstdc++ and EmbLinkOS included, builds without it.
 
-Nothing in this tree relies on the current behaviour. The fix belongs
-with the rest of member-access checking in `src/cxx`.
+So the risk runs the other way, and an incomplete implementation is worse
+than none: friends, nested classes, using-declarations that change access,
+protected access from a derived class, and the rule that a class may reach
+its own private bases are all part of it, and getting any of them wrong
+rejects correct code. It wants to be done once, properly, with the
+existing corpus as the regression test — not slipped in.
 
-## Dead landing pads block optimization (found 2026-09-20)
+What exists to build on: `struct cbase::access` per base edge, the
+member's own access in `struct csym`, and `class_derives`/`path_count` in
+`src/cxx/expr.c` for the base walk. What is missing is the notion of a
+current access context (the class whose member or friend is doing the
+naming) threaded through name lookup and the cast paths.
 
-`mark_eh_calls()` (src/ir/irgen.c) clears `fn->neh` when no call inside any
-exception region can actually throw — correct, and true of every
-`noexcept` function that calls nothing. But it leaves the landing pad's
-*instructions* in the stream, so `opt_func` must now refuse the function
-anyway (it scans for `IR_LANDING`), and those functions are compiled at
-`-O0` however the build was invoked.
+## Closed: dead landing pads, and long double objects (2026-09-20)
 
-That is a real cost: it is exactly the small `noexcept` accessors — all
-over a C++ standard library — that lose optimization.
+Both entries that stood here are fixed, and each turned out to be one
+line of MODEL rather than the structural change they were written up as.
 
-Two ways out, in order of preference:
+**Dead landing pads.** The pads were never the problem. `IR_LANDING` is
+the one instruction with two destinations — the exception pointer and
+the selector, as the unwinder leaves them — and `def_target()` reports
+one, so `compute_defs()` thought the selector undefined and DCE deleted
+the landing while keeping the stores that read it. Naming both
+definitions in `compute_defs` was enough; `opt_func` no longer has to
+refuse the function, so every `noexcept` function that calls nothing is
+optimized again. It is deliberately still absent from `writes_temp`,
+because an instruction there is one LVN and GCSE may value-number, and
+two landing pads are not the same computation however identical they
+look.
 
-1. **Delete the pads** in `mark_eh_calls` when it clears `neh`. The
-   comment there already says "the function has no landing pads after
-   all"; making that literally true is the fix. The work is bookkeeping:
-   a region records `lo`/`hi` of its *body*, not of its pad, so the pad's
-   instruction range has to be recorded too, and nested regions mean
-   deleting one shifts the others' indices.
+The same blind spot was in the **inliner**: `remap_ins()` renumbered one
+destination, so an inlined pad kept the callee's numbering for its
+selector and read a vreg that did not exist in the caller. Inlining any
+`noexcept` function reached it — `std::exception::exception()` did,
+which is how the verifier found it.
 
-2. **Teach the passes about `IR_LANDING`.** It writes TWO temps (`dst`
-   and `b`), which `writes_temp`/`compute_defs` cannot express — they are
-   keyed on `dst` alone. Adding it to `writes_temp` is *not* enough and is
-   actively unsafe: LVN/GCSE would then be free to treat two landing pads
-   as the same computation and merge them.
-
-Found by the IR verifier while building `lib/libcxx`: `type_info::name()`
-tripped "reads temp with no definition", because DCE had deleted an
-`IR_LANDING` whose results the following stores still read.
-
-## Long double objects in constant expressions (found 2026-09-20)
-
-`constexpr long double x = 2.5L; static_assert(x > 1);` is refused. Long
-double *values* now flow through constant evaluation exactly
-(`src/cxx/consteval.c` carries a `struct ldf` alongside the double), but
-reading one back out of an object needs a decoder from the target's
-format, and `src/sema/ldfloat.c` only encodes.
-
-`load()` refuses rather than reading the low eight bytes as a double,
-which would not be a narrower answer but a wrong one. The fix is an
-`ldf_from_bytes(const unsigned char *, enum ldf_fmt)` beside
-`ldf_encode`, and the matching case in `load`/`store`.
+**Long double objects.** `ldf_from_bytes()` is the exact inverse of
+`ldf_encode`, so a `constexpr long double` can be stored and read back
+in the target's own format. `store` writes all sixteen bytes now, rather
+than the double half — which left the object holding a bit pattern that
+was not the value stored.

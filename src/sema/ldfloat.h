@@ -58,4 +58,9 @@ int ldf_cmp(const struct ldf *a, const struct ldf *b);
 /* Is this value zero (of either sign)? */
 int ldf_is_zero(const struct ldf *a);
 
+/* A value read back out of memory: the exact inverse of ldf_encode, for
+ * the same format. Nothing is rounded -- every bit pattern in a format
+ * denotes a value it holds exactly. */
+struct ldf *ldf_from_bytes(const unsigned char *in, enum ldf_fmt fmt);
+
 #endif

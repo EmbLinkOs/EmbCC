@@ -138,6 +138,28 @@ static void compute_defs(struct ir_func *fn, struct defs *d)
     for (int v = 0; v < np && v < fn->nvregs; v++)
         d->cnt[v] = 1;
     for (int n = 0; n < fn->nins; n++) {
+        /* IR_LANDING is the one instruction with TWO destinations -- the
+         * exception pointer in dst and the selector in b, as the unwinder
+         * left them. def_target returns a single index and writes_temp is
+         * deliberately silent about it (an instruction in writes_temp is
+         * one LVN and GCSE may value-number, and two landing pads are not
+         * the same computation however identical they look). So its
+         * definitions are counted here, explicitly. Without this its
+         * results look undefined and DCE deletes the landing while
+         * keeping the stores that read what it produced. */
+        if (fn->ins[n].op == IR_LANDING) {
+            int o[2] = { fn->ins[n].dst, fn->ins[n].b };
+            for (int k = 0; k < 2; k++) {
+                int v = o[k];
+                if (v < 0 || v >= fn->nvregs)
+                    continue;
+                if (d->cnt[v]++ == 0)
+                    d->ins[v] = n;
+                else
+                    d->ins[v] = -1;
+            }
+            continue;
+        }
         int t = def_target(&fn->ins[n]);
         if (t < 0)
             continue;
@@ -1677,8 +1699,17 @@ static void rmp_cb(int *p, void *ctx) { *p = vmap(ctx, *p); }
 static void remap_ins(struct ir_ins *in, struct rmp *r)
 {
     each_read(in, rmp_cb, r);
-    if (def_target(in) >= 0)
+    /* IR_LANDING's SECOND destination, for the same reason compute_defs
+     * has to name it: def_target reports one, and a landing pad left with
+     * the callee's numbering for its selector reads a vreg that does not
+     * exist in the caller. Inlining a `noexcept` function is enough to
+     * reach this -- its pad comes along with it. */
+    if (in->op == IR_LANDING) {
         in->dst = vmap(r, in->dst);
+        in->b = vmap(r, in->b);
+    } else if (def_target(in) >= 0) {
+        in->dst = vmap(r, in->dst);
+    }
     if (in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ ||
         in->op == IR_LABEL)
         in->label += r->lbase;
@@ -2066,20 +2097,18 @@ static void opt_func(struct ir_func *fn)
      * of its region, edges the passes do not see (and its code, reached by
      * no jump, would look dead).
      *
-     * The test is the PAD, not fn->neh, and the difference is not academic.
-     * mark_eh_calls() clears neh when no call in any region can actually
-     * throw -- which is true of every `noexcept` function that calls
-     * nothing, and of `type_info::name()` in our own C++ runtime -- but it
-     * leaves the pad's instructions in the stream. They are then
-     * unreachable code the passes do not model: IR_LANDING writes TWO
-     * temps, dst and b, which the single-dst tables above cannot express,
-     * so DCE would delete the landing while keeping the stores that read
-     * what it produced. Found by the IR verifier on lib/libcxx. */
+     * Only while a region EXISTS, though. mark_eh_calls() clears neh when
+     * no call in any region can actually throw -- true of every `noexcept`
+     * function that calls nothing, and of type_info::name() in our own C++
+     * runtime -- and then the pad really is ordinary unreachable code that
+     * the passes may optimize or drop. What used to make that unsafe was
+     * not the pad but the MODEL: IR_LANDING writes two temps and
+     * compute_defs only saw one, so DCE deleted the landing and kept the
+     * stores reading what it produced. compute_defs knows both now, so
+     * these functions are optimized again instead of being compiled at
+     * -O0 however the build was invoked. */
     if (fn->neh)
         return;
-    for (int n = 0; n < fn->nins; n++)
-        if (fn->ins[n].op == IR_LANDING)
-            return;
     int verify = getenv("EMBCC_VERIFY") != NULL;
     if (verify) verify_func(fn, "irgen");
     int ins_before = fn->nins;
