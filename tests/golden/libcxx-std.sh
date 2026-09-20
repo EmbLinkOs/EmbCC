@@ -23,6 +23,23 @@ check() {                  # check <name> <file>
     echo "$1"
 }
 
+# ---- every header, on its own --------------------------------------------
+# A header that only works after some other header has been included is a
+# trap that hides until the one program that includes it first. Each is
+# compiled alone, so an include this library forgot to make is a failure
+# here rather than a surprise in a user's translation unit.
+nsolo=0
+for h in lib/libcxx/include/*; do
+    b=$(basename "$h")
+    printf '#include <%s>\nint main(){return 42;}\n' "$b" > "$out/solo.cc"
+    "$EMBCC" -c -x c++ -O0 $TGT $INC "$out/solo.cc" -o "$out/solo.o" \
+        2> "$out/err.txt" || { head -3 "$out/err.txt"
+                               echo "FAIL: <$b> does not compile alone"
+                               exit 1; }
+    nsolo=$((nsolo + 1))
+done
+echo "all $nsolo headers compile on their own"
+
 # ---- <type_traits> -------------------------------------------------------
 cat > "$out/traits.cc" << 'EOF'
 #include <type_traits>
@@ -265,7 +282,8 @@ want "moveifnoexcept moves 1 copies 0 v 5"
 # 42, so every expectation lives beside the code it is about and a
 # failure names its own line -- see libcxx-std/check.h.
 for prog in iterator memory functional array vector string algorithm \
-            vocabulary associative iostreams smartptr sequences views timing files containers; do
+            vocabulary associative iostreams smartptr sequences views timing \
+            files containers compare erasure formatting rangeviews atomics regexes; do
     if run "tests/golden/libcxx-std/$prog.cc"; then rc=0; else rc=$?; fi
     [ "$rc" = 42 ] || {
         cat "$out/run.txt"

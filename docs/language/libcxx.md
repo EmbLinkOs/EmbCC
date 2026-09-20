@@ -54,7 +54,9 @@ those exact two members in that order.
 `<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`,
 `<unordered_map>`, `<unordered_set>`, `<list>`, `<deque>`,
 `<forward_list>`, `<queue>`, `<stack>`, `<string_view>`, `<span>`,
-`<bitset>`, `<chrono>`, `<ratio>`, `<random>`, `<variant>`, `<iostream>`
+`<bitset>`, `<chrono>`, `<ratio>`, `<random>`, `<variant>`, `<any>`,
+`<compare>`, `<concepts>`, `<format>`, `<ranges>`, `<atomic>`,
+`<regex>`, `<iostream>`
 and the rest of the stream headers including `<fstream>`, `<stdexcept>`,
 and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
@@ -101,6 +103,263 @@ is what `valueless_by_exception()` reports, and why the state exists.
 `get` always checks: a variant's alternative can change, so an unchecked
 `get` would be a type confusion rather than merely a null dereference,
 which is why there is no member `operator*` as `optional` has.
+
+**`<compare>` is an ABI, not a header.** `a <=> b` on built-in types
+yields `std::strong_ordering` or `std::partial_ordering` *by name*, so
+the compiler needs the class to exist before it can compile the
+operator — which is why a program using `<=>` must include this header
+even though it names nothing from it. EmbCC's lowering writes a signed
+char at offset 0 (less −1, equivalent 0, greater 1, unordered −128) and
+the header reads a signed char at offset 0. Neither file checks the
+other, so `tests/golden/libcxx-std/compare.cc` constructs an ordering
+with the compiler and reads it with the header: that test is the only
+place the two meet.
+
+Only a **literal 0** may be compared against an ordering, and that is
+enforced rather than documented: the comparisons take a
+`__detail::__cmp_unspec`, constructible only from a null pointer, so
+`(a <=> b) == 1` is a compile error instead of a silent comparison
+against something meaningless.
+
+Writing the header found a real conformance gap. A defaulted
+`operator<=>` **implicitly declares `operator==`**
+([class.compare.default]/2) and EmbCC did not, so a class written with
+the one line `auto operator<=>(const T &) const = default;` could be
+ordered and could not be compared for equality — because `a != b` is
+rewritten as `!(a == b)` and *never* as `(a <=> b) != 0`. The implicit
+declaration is now made in `src/cxx/class.c` beside the other implicit
+members, with the same access as the `<=>` and defaulted, so it is
+defined only if it is used.
+
+**`<concepts>` is built out of itself, and that is the point.**
+`signed_integral` is spelled `integral<T> && is_signed_v<T>` rather than
+`is_integral_v<T> && is_signed_v<T>`, which gives the same answers and
+loses everything: a concept participates in *partial ordering* by
+**subsumption**, computed over the conjunction it is written as. Two
+overloads constrained by `integral` and by `signed_integral` are
+ordered, so a `long` picks the second; two `enable_if`s are two
+unrelated expressions and the same call is ambiguous. `common_with` and
+`swappable` are the two that are deliberately narrower than the
+standard's — the first because there is no `basic_common_reference`
+customization point here, the second because the standard's is written
+over a niebloid that finds a member or ADL `swap` first. Both say so in
+the header rather than answering a question they cannot answer.
+
+Writing them found the second real gap: `common_reference` did not
+exist, and `common_reference_with` on `common_type` is *wrong* in a way
+that only shows up on move-only types. `common_type_t<const T &, const
+T &>` is `T` — it decays, which is a **copy** — so a non-copyable type
+had no common type with *itself*, and `movable<T>` was false for every
+move-only type in the language. `common_reference_t<const T &, const T
+&>` is `const T &`, nothing is copied, and the question is answerable
+for any type at all. `<type_traits>` now has it, built on the
+standard's COND-RES (calling a reference-to-function returning `T`,
+which is the only way to produce an expression of exactly `T`'s value
+category — `declval<T>()` is always an xvalue).
+
+**`<any>` is a hand-written vtable, and writing it out is the point.**
+The type is erased from the *object* and kept in a table of
+*functions*: one static table per stored type, holding destroy, copy,
+move and `type_info`. A virtual base class would work and would force
+every stored value onto the heap with a vptr; this leaves the stored
+bytes alone, so a value that fits in four words and whose move cannot
+throw lives inside the `any` and `any(42)` allocates nothing. The
+nothrow-move condition is not a tuning knob — `any`'s own move is
+`noexcept` and moves the stored value in place, so a move that threw
+halfway would leave the `any` holding neither the old value nor the
+new. `swap` goes through a temporary rather than exchanging the
+buffers, because a value in the small buffer is at a *different
+address* afterwards and only its move constructor knows how to put it
+there; a `memcpy` is right for a trivially copyable type and silently
+wrong for our own `string`, which points into itself. The test counts
+constructions against destructions rather than checking round-trips: an
+`any` that leaked every value it held would pass a round-trip test.
+
+**`<format>` is `printf` with the types put back.** `printf("%d", x)` is
+a promise the compiler cannot keep: the format string says `int`, `x` is
+whatever it is, and when they disagree the result is undefined behaviour
+that usually looks like a plausible number. Here the replacement field
+says only *how* to print; *what* to print comes from the argument's own
+type through a `formatter<T>` chosen by overload resolution, so there is
+no `%d` to get wrong — and a user type gets a `formatter<T>` and then
+works everywhere `format` does.
+
+The implementation erases its arguments exactly once, into a small array
+of {kind, value} pairs plus, for a user type, one function pointer that
+knows how to format it. The formatting loop is `vformat`, a single
+non-template function; the template part is only the erasure. That is
+why this is not one instantiation per call site per argument pack, and
+it is the same reason `printf` is small and iostreams are not.
+
+The replacement-field grammar is complete — argument ids automatic and
+manual, fill and align, sign, `#`, `0`, width, precision, nested `{}`
+for width and precision, and the type characters for every fundamental
+type. Two behaviours are easy to get wrong and are tested for that
+reason: the **fill** is read by looking at the character *after* it, so
+`{:<<5}` fills with `<` rather than meaning align-left; and `0` is an
+*alignment*, not a fill, so `{:08.2f}` of −1.5 is `-0001.50` with the
+sign outside the zeros, and an explicit alignment turns it off entirely.
+
+What is **not** here is compile-time checking of the format string.
+C++20's `format` takes a `format_string<Args...>` whose `consteval`
+constructor parses the string against the argument types and rejects a
+bad one at compile time. That needs the whole parser to be
+constant-evaluable; ours checks at run time and throws `format_error`.
+It is the one place this header is weaker than the standard's rather
+than merely narrower.
+
+Writing it found two more gaps. `<stdexcept>` had only the `const char *`
+constructors, so a message that is *built* — which is nearly every
+message worth throwing — could not be thrown without keeping the buffer
+alive past the throw. And `<iterator>` had no **insert iterators** at
+all, so `copy(a.begin(), a.end(), back_inserter(b))` did not compile;
+without it the destination has to be sized first, and `copy` into an
+empty vector is the single most common way to write out of bounds,
+because nothing in `copy`'s signature says the destination must already
+be big enough.
+
+**`<ranges>` is about laziness, and the test measures it rather than
+describing it.** `v | filter(odd) | transform(sq)` allocates nothing and
+touches no element until it is iterated, because the composition is a
+*type*, not a pipeline of containers; the same thing written with the
+classic algorithms means two intermediate vectors and two full passes.
+So the predicates and transforms in `rangeviews.cc` **count their
+calls**, and the checks are on the counts: building the pipeline calls
+the predicate zero times, `filter | transform` calls the transform five
+times where `transform | filter` calls it fifteen, and `take(3)` over a
+transform evaluates three elements rather than ten. A pipeline that
+quietly materialised an intermediate would produce the right numbers and
+fail every one of those.
+
+The other half is honesty about **categories**. `filter_view` over a
+random-access source is only *bidirectional*, because you cannot jump
+*n* kept elements ahead without looking at the ones in between; an
+iterator that claimed random access would make `std::advance` skip the
+wrong elements silently, which is a bug this tree has already had once,
+in `deque`. `transform_view` keeps its source's category exactly,
+because applying *f* to element *n* costs what reaching element *n*
+costs.
+
+Two design notes. The adaptors are ordinary function objects rather than
+niebloids, so ADL is not blocked — narrower than the standard, and
+nothing here notices because every container has members. And `iota`'s
+unboundedness is a **type**, not a flag: `end()`'s type depends on it,
+so a runtime `bool` cannot express it — `end()` would have to return an
+iterator either way, and the only iterator it could return is one equal
+to `begin()`, making the range empty. That was this view's first bug and
+it is why `unreachable_sentinel_t` exists.
+
+Writing `<ranges>` found **two more compiler bugs**, both of which had
+been latent for want of a program shaped like this:
+
+- **A nested braced list was scored one element at a time.** Choosing an
+  overload for `vector<vector<int>> v{{1, 2, 3}}` offered the inner
+  `{1, 2, 3}` to `vector<int>`'s constructors *as three arguments*,
+  never as one `initializer_list` — so it found no three-argument
+  constructor and reported the whole outer call as having no viable
+  candidate. The initialization itself was right all along, which is why
+  `{{1, 2}}` worked (`vector(n, value)` happens to take two) and
+  `{{1, 2, 3}}` did not: it rejected valid programs rather than
+  miscompiling them. `ics_of` now tries the initializer-list
+  constructors first, the order `construct` already used.
+
+- **Two lambdas in two different blocks of one function mangled the
+  same.** An unnamed type's number was counted per *block* scope, so the
+  first lambda in every `{ }` came out `Ut_`. Invisible until such a
+  type reaches a template argument — and then
+  `v | filter(a)` in one block and `v | filter(b)` in another produce
+  two distinct `filter_view` instantiations with identical mangled
+  names, which the emitted C rejects as a redefinition. The counter now
+  belongs to the enclosing function.
+
+**`<atomic>` is built on the compiler's builtins, deliberately.** The
+correct instruction for a sequentially consistent store is `xchg` on
+x86-64 and `stlr` on aarch64, and that knowledge belongs to the back
+end — a library emitting its own inline assembly would be duplicating
+the one thing the compiler already knows and would be wrong on the next
+target. So everything here is `__atomic_*`, and everything takes a
+memory order with `seq_cst` as the default, so the cheap forms are
+available and never accidental.
+
+There is one thread here, so the test cannot look for a race. What it
+can check is everything else, which is most of what goes wrong: that
+`fetch_add` returns the value *before* and `++` the value *after* —
+getting that backwards makes a ticket dispenser hand out the same number
+twice, a bug that needs two threads to bite and one to write; that a
+failed `compare_exchange` writes back what was **actually** there, which
+is the whole reason its argument is a reference and the whole reason a
+CAS loop terminates; and that every memory order reaches the compiler,
+so a target missing one lowering fails here rather than in a kernel.
+
+`wait`/`notify_one`/`notify_all` are **absent**, and so are `<thread>`
+and `<mutex>`. They must *block*, which needs a futex or equivalent, and
+`lib/libc/os/backend.h` has no such primitive. Writing them as spin
+loops would be a correctness-preserving lie that burns a core.
+
+Writing it found a **third compiler bug and a fourth gap**:
+
+- **A conversion function inherited from a base was invisible to the
+  built-in operators.** `a == 7` on a class whose `operator int()` comes
+  from a base found no candidate at all, because the scan looked only at
+  the class's own scope. `std::atomic<int>`, whose conversion lives in
+  `__atomic_base`, could not be compared with anything.
+
+- **A using-declared base member did not get the derived class's
+  implicit object parameter** ([over.match.funcs]/4). `a = 3` was
+  *ambiguous* against the implicit copy assignment: the first wanted a
+  derived-to-base conversion for its object and an exact match for its
+  argument, the second the reverse, and neither was better in every
+  argument.
+
+- **The generic atomic builtins refused anything but an integer or
+  pointer.** They pass their values by *pointer* and copy bytes, so any
+  object of a workable size will do — which is what
+  `std::atomic<double>` and `std::atomic<SmallStruct>` need, and a
+  tagged pointer under a 16-byte compare-and-swap is why anyone wants
+  the second. `irgen` now lowers such an object as the unsigned integer
+  of the same size; the instruction is identical either way.
+
+**`<regex>` is a backtracker, and that is a decision rather than a
+shortcut.** A Thompson NFA simulation runs in O(*nm*) and never blows
+up; a backtracker can take exponential time, because `(a+)+b` against
+*n* a's tries every way of splitting them. But an automaton cannot
+support **backreferences** — `(a*)` requires remembering what a group
+captured, and an automaton has no state for that. The standard's
+grammar has backreferences, so an implementation of it is a
+backtracker, and every real one is. What can be done is to *bound* it:
+this one counts steps and raises `error_complexity` rather than
+hanging.
+
+The matcher is backtracking with an **explicit continuation list** — a
+linked stack of "what remains", built on the C stack as the walk
+descends. Making it explicit rather than a chain of closures is what
+lets a group's *end* and a repetition's *next round* be frames of their
+own, and those two are the awkward cases: a capture must be recorded
+when the body finishes *and undone* if the match later fails past it,
+and a repetition can only decide whether to go round again once its
+body has matched.
+
+Two behaviours are the ones an engine gets completely wrong, so the
+test is weighted towards them. **Greedy against lazy**: `<.+>` on
+"<a><b>" matches the whole thing and `<.+?>` matches "<a>", and getting
+this backwards produces plausible output on simple inputs and destroys
+any parser built on it. **Leftmost, not longest**: `(a|ab)` against
+"ab" matches "a", because the alternation takes the first branch that
+lets the *rest* succeed and here nothing follows — POSIX answers "ab"
+to the same question, and the standard says ECMAScript. Every
+expectation in `regexes.cc` was checked against libc++ before it was
+checked against this implementation; the three places the grammars
+genuinely disagree (`[]]`, a bare `{`, a backreference to a group that
+never participated) are described in the test rather than asserted.
+
+Two bugs it found in itself, both of the same shape — a decision made
+too late. `regex_match` first tested "did it reach the end?" *after* a
+match was found, so `(a|ab)c*` against "abc" failed: the engine settled
+on "a" with no c's and was never asked to try "ab" with one. The
+acceptance test belongs where backtracking can respond to it. And
+`regex_replace` looped while `pos != e`, which stops one position
+short — `x*` matches empty at *every* position including the last, so
+"abc" is "-a-b-c-" with four replacements and not three.
 
 **`<fstream>` is exercised where a filesystem exists.** The QEMU harness
 has an `open` that returns `ENOSYS`, and on such a target the *correct*

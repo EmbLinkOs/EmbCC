@@ -1,0 +1,319 @@
+/* <any> — C++ [any].
+ *
+ * A value of a type decided at run time, that still destroys and copies
+ * itself correctly. `void *` does neither: it forgets the destructor, so
+ * a `void *` holding a `std::string` leaks it, and it forgets the copy
+ * constructor, so copying one gives two owners of the same bytes.
+ *
+ * What makes that possible is one idea: the type is erased from the
+ * OBJECT and kept in a table of FUNCTIONS. Each `any` stores a pointer
+ * to a static table, built by a template, holding the four operations
+ * that need to know the type -- destroy, copy, move, and report
+ * type_info. The table is generated once per stored type at compile
+ * time; the any itself holds one pointer to it.
+ *
+ * This is a hand-written vtable, and writing it out is the point:
+ * a virtual base class would work and would force every stored value
+ * into a heap allocation with a vptr, where this leaves the stored bytes
+ * alone and lets a small one live inside the any.
+ *
+ * Small-object optimization: a value that fits in the buffer and whose
+ * move cannot throw lives there, so `any(42)` allocates nothing. The
+ * nothrow-move condition is not an optimization detail -- moving an any
+ * moves the stored value in place, and a move that throws mid-way would
+ * leave the any holding neither the old value nor the new.
+ */
+#ifndef _LIBCXX_ANY
+#define _LIBCXX_ANY
+
+#include <initializer_list>
+#include <new>
+#include <type_traits>
+#include <typeinfo>
+#include <utility>
+
+namespace std {
+
+class bad_any_cast : public bad_cast {
+public:
+    const char *what() const noexcept override
+    { return "bad any_cast"; }
+};
+
+class any;
+
+template <class T> const T *any_cast(const any *) noexcept;
+template <class T> T *any_cast(any *) noexcept;
+
+class any {
+public:
+    constexpr any() noexcept : __ops(nullptr) {}
+
+    any(const any &o) : __ops(nullptr)
+    {
+        if (o.__ops) {
+            o.__ops->__copy(__storage(), o.__storage_c());
+            __ops = o.__ops;
+        }
+    }
+
+    /* Moving leaves the source EMPTY, not merely unspecified: the
+     * standard says so, and code that moves an any then asks
+     * has_value() is entitled to false. */
+    any(any &&o) noexcept : __ops(nullptr)
+    {
+        if (o.__ops) {
+            o.__ops->__move(__storage(), o.__storage());
+            __ops = o.__ops;
+            o.__ops = nullptr;
+        }
+    }
+
+    template <class T, class D = decay_t<T>,
+              class = enable_if_t<!is_same_v<D, any>>>
+    any(T &&v) : __ops(nullptr)
+    {
+        __do_emplace<D>(static_cast<T &&>(v));
+    }
+
+    template <class T, class... A>
+    explicit any(in_place_type_t<T>, A &&...a) : __ops(nullptr)
+    {
+        __do_emplace<decay_t<T>>(static_cast<A &&>(a)...);
+    }
+
+    ~any() { reset(); }
+
+    any &operator=(const any &o)
+    {
+        if (this != &o) {
+            any t(o);
+            swap(t);
+        }
+        return *this;
+    }
+
+    any &operator=(any &&o) noexcept
+    {
+        if (this != &o) {
+            reset();
+            if (o.__ops) {
+                o.__ops->__move(__storage(), o.__storage());
+                __ops = o.__ops;
+                o.__ops = nullptr;
+            }
+        }
+        return *this;
+    }
+
+    template <class T, class D = decay_t<T>,
+              class = enable_if_t<!is_same_v<D, any>>>
+    any &operator=(T &&v)
+    {
+        any t(static_cast<T &&>(v));
+        swap(t);
+        return *this;
+    }
+
+    template <class T, class... A>
+    decay_t<T> &emplace(A &&...a)
+    {
+        reset();
+        __do_emplace<decay_t<T>>(static_cast<A &&>(a)...);
+        return *static_cast<decay_t<T> *>(__value());
+    }
+
+    template <class T, class U, class... A>
+    decay_t<T> &emplace(initializer_list<U> il, A &&...a)
+    {
+        reset();
+        __do_emplace<decay_t<T>>(il, static_cast<A &&>(a)...);
+        return *static_cast<decay_t<T> *>(__value());
+    }
+
+    void reset() noexcept
+    {
+        if (__ops) {
+            __ops->__destroy(__storage());
+            __ops = nullptr;
+        }
+    }
+
+    void swap(any &o) noexcept
+    {
+        /* Through a temporary rather than byte-swapping the buffers:
+         * a value in the small buffer is at a different ADDRESS after a
+         * swap, and only its move constructor knows how to put it
+         * there. A memcpy would be right for a trivially copyable type
+         * and silently wrong for a self-referential one -- our own
+         * std::string is exactly that. */
+        if (!__ops && !o.__ops)
+            return;
+        any t(static_cast<any &&>(*this));
+        *this = static_cast<any &&>(o);
+        o = static_cast<any &&>(t);
+    }
+
+    bool has_value() const noexcept { return __ops != nullptr; }
+
+    const type_info &type() const noexcept
+    { return __ops ? __ops->__type() : typeid(void); }
+
+private:
+    /* Four pointers, which is what libstdc++ and libc++ both land on:
+     * enough for a std::string or a small struct, and the whole any is
+     * then five words. */
+    static constexpr size_t __bufsz = 4 * sizeof(void *);
+
+    struct __ops_t {
+        void (*__destroy)(void *);
+        void (*__copy)(void *, const void *);
+        void (*__move)(void *, void *);
+        const type_info &(*__type)();
+        void *(*__get)(void *);
+    };
+
+    union {
+        void *__ptr;
+        char __buf[__bufsz];
+    } __s;
+    const __ops_t *__ops;
+
+    void *__storage() noexcept { return &__s; }
+    const void *__storage_c() const noexcept { return &__s; }
+
+    template <class T>
+    static constexpr bool __is_small =
+        sizeof(T) <= __bufsz && alignof(T) <= alignof(void *) &&
+        is_nothrow_move_constructible_v<T>;
+
+    /* The table for a type stored INSIDE the buffer. */
+    template <class T>
+    struct __small_ops {
+        static T *__cast(void *s) { return (T *)s; }
+        static const T *__cast(const void *s) { return (const T *)s; }
+        static void __destroy(void *s) { __cast(s)->~T(); }
+        static void __copy(void *d, const void *s)
+        { ::new (d) T(*__cast(s)); }
+        static void __move(void *d, void *s)
+        { ::new (d) T(static_cast<T &&>(*__cast(s))); __cast(s)->~T(); }
+        static const type_info &__type() { return typeid(T); }
+        static void *__get(void *s) { return __cast(s); }
+        static const __ops_t __table;
+    };
+
+    /* ... and for one on the heap. Moving is then a POINTER move, which
+     * is why a type whose own move may throw is still nothrow-movable
+     * inside an any once it is out of line. */
+    template <class T>
+    struct __large_ops {
+        static void __destroy(void *s) { delete *(T **)s; }
+        static void __copy(void *d, const void *s)
+        { *(T **)d = new T(**(T *const *)s); }
+        static void __move(void *d, void *s)
+        { *(T **)d = *(T **)s; *(T **)s = nullptr; }
+        static const type_info &__type() { return typeid(T); }
+        static void *__get(void *s) { return *(T **)s; }
+        static const __ops_t __table;
+    };
+
+    template <class T, class... A>
+    void __do_emplace(A &&...a)
+    {
+        if constexpr (__is_small<T>) {
+            ::new (__storage()) T(static_cast<A &&>(a)...);
+            __ops = &__small_ops<T>::__table;
+        } else {
+            __s.__ptr = new T(static_cast<A &&>(a)...);
+            __ops = &__large_ops<T>::__table;
+        }
+    }
+
+    void *__value() noexcept
+    { return __ops ? __ops->__get(__storage()) : nullptr; }
+    const void *__value() const noexcept
+    { return __ops ? __ops->__get(const_cast<void *>(__storage_c()))
+                   : nullptr; }
+
+    template <class T> friend const T *any_cast(const any *) noexcept;
+    template <class T> friend T *any_cast(any *) noexcept;
+};
+
+template <class T>
+const any::__ops_t any::__small_ops<T>::__table = {
+    &__small_ops<T>::__destroy, &__small_ops<T>::__copy,
+    &__small_ops<T>::__move, &__small_ops<T>::__type, &__small_ops<T>::__get
+};
+
+template <class T>
+const any::__ops_t any::__large_ops<T>::__table = {
+    &__large_ops<T>::__destroy, &__large_ops<T>::__copy,
+    &__large_ops<T>::__move, &__large_ops<T>::__type, &__large_ops<T>::__get
+};
+
+inline void swap(any &a, any &b) noexcept { a.swap(b); }
+
+template <class T, class... A>
+any make_any(A &&...a)
+{ return any(in_place_type<T>, static_cast<A &&>(a)...); }
+
+template <class T, class U, class... A>
+any make_any(initializer_list<U> il, A &&...a)
+{ return any(in_place_type<T>, il, static_cast<A &&>(a)...); }
+
+/* The pointer forms answer "is it a T?" without throwing, and the
+ * check is on type_info IDENTITY -- no derived-to-base conversion.
+ * An any holding a Derived is not a Base, and that is deliberate: the
+ * stored bytes are a Derived and the offset to its Base subobject is
+ * not recorded anywhere. */
+template <class T>
+const T *any_cast(const any *a) noexcept
+{
+    if (!a || !a->has_value() || a->type() != typeid(T))
+        return nullptr;
+    return static_cast<const T *>(a->__value());
+}
+
+template <class T>
+T *any_cast(any *a) noexcept
+{
+    if (!a || !a->has_value() || a->type() != typeid(T))
+        return nullptr;
+    return static_cast<T *>(a->__value());
+}
+
+/* The value forms throw, because there is no value to return on a
+ * mismatch and returning a default-constructed T would hide the bug. */
+template <class T>
+T any_cast(const any &a)
+{
+    using U = remove_cvref_t<T>;
+    const U *p = any_cast<U>(&a);
+    if (!p)
+        throw bad_any_cast();
+    return static_cast<T>(*p);
+}
+
+template <class T>
+T any_cast(any &a)
+{
+    using U = remove_cvref_t<T>;
+    U *p = any_cast<U>(&a);
+    if (!p)
+        throw bad_any_cast();
+    return static_cast<T>(*p);
+}
+
+template <class T>
+T any_cast(any &&a)
+{
+    using U = remove_cvref_t<T>;
+    U *p = any_cast<U>(&a);
+    if (!p)
+        throw bad_any_cast();
+    return static_cast<T>(static_cast<U &&>(*p));
+}
+
+}  // namespace std
+
+#endif

@@ -4,17 +4,31 @@
  * message is COPIED into the object: a `what()` that returned a pointer
  * into a caller's buffer would dangle exactly when it is read, which is
  * during unwinding after that buffer's scope has gone.
+ *
+ * Each class takes both a `const char *` and a `const string &`, which
+ * is what the standard says and not a convenience: nearly every message
+ * worth throwing is BUILT -- "index 7 out of range for size 3" -- and
+ * without the string overload the caller has to keep the buffer alive
+ * past the throw, which is the one thing that cannot be done.
+ *
+ * This header therefore includes <string>, and <string> does NOT
+ * include this one: it throws through the out-of-line
+ * `__throw_string_out_of_range`, declared where it is used and defined
+ * in lib/libcxx/src. That asymmetry is deliberate and is the only thing
+ * keeping the two out of a cycle.
  */
 #ifndef _LIBCXX_STDEXCEPT
 #define _LIBCXX_STDEXCEPT
 
 #include <exception>
+#include <string>
 
 namespace std {
 
 class __msg_exception : public exception {
 public:
     explicit __msg_exception(const char *w);
+    explicit __msg_exception(const string &w) : __msg_exception(w.c_str()) {}
     __msg_exception(const __msg_exception &o) noexcept;
     __msg_exception &operator=(const __msg_exception &o) noexcept;
     ~__msg_exception() noexcept override;
@@ -30,54 +44,63 @@ private:
 class logic_error : public __msg_exception {
 public:
     explicit logic_error(const char *w) : __msg_exception(w) {}
+    explicit logic_error(const string &w) : __msg_exception(w) {}
     ~logic_error() noexcept override;
 };
 
 class domain_error : public logic_error {
 public:
     explicit domain_error(const char *w) : logic_error(w) {}
+    explicit domain_error(const string &w) : logic_error(w) {}
     ~domain_error() noexcept override;
 };
 
 class invalid_argument : public logic_error {
 public:
     explicit invalid_argument(const char *w) : logic_error(w) {}
+    explicit invalid_argument(const string &w) : logic_error(w) {}
     ~invalid_argument() noexcept override;
 };
 
 class length_error : public logic_error {
 public:
     explicit length_error(const char *w) : logic_error(w) {}
+    explicit length_error(const string &w) : logic_error(w) {}
     ~length_error() noexcept override;
 };
 
 class out_of_range : public logic_error {
 public:
     explicit out_of_range(const char *w) : logic_error(w) {}
+    explicit out_of_range(const string &w) : logic_error(w) {}
     ~out_of_range() noexcept override;
 };
 
 class runtime_error : public __msg_exception {
 public:
     explicit runtime_error(const char *w) : __msg_exception(w) {}
+    explicit runtime_error(const string &w) : __msg_exception(w) {}
     ~runtime_error() noexcept override;
 };
 
 class range_error : public runtime_error {
 public:
     explicit range_error(const char *w) : runtime_error(w) {}
+    explicit range_error(const string &w) : runtime_error(w) {}
     ~range_error() noexcept override;
 };
 
 class overflow_error : public runtime_error {
 public:
     explicit overflow_error(const char *w) : runtime_error(w) {}
+    explicit overflow_error(const string &w) : runtime_error(w) {}
     ~overflow_error() noexcept override;
 };
 
 class underflow_error : public runtime_error {
 public:
     explicit underflow_error(const char *w) : runtime_error(w) {}
+    explicit underflow_error(const string &w) : runtime_error(w) {}
     ~underflow_error() noexcept override;
 };
 

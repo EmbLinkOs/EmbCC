@@ -492,6 +492,53 @@ struct common_type<T, U, R...>
     : common_type<typename common_type<T, U>::type, R...> {};
 template <class... T> using common_type_t = typename common_type<T...>::type;
 
+/* ---- common_reference --------------------------------------------------
+ *
+ * common_type with the references KEPT, and the distinction matters far
+ * more than the name suggests. `common_type_t<const T &, const T &>` is
+ * `T` -- it decays, which is a COPY -- so a trait built on it says a
+ * non-copyable type has no common type with itself, and every concept
+ * resting on that (assignable_from, movable) silently rejects it.
+ * `common_reference_t<const T &, const T &>` is `const T &`: nothing is
+ * copied and the question is answerable for any type at all.
+ *
+ * The rule doing the work is the standard's COND-RES: the type of a
+ * conditional expression over two expressions of the given value
+ * categories. Calling a reference-to-function returning T is the
+ * standard trick for producing an expression of exactly type T with
+ * exactly T's value category -- a prvalue for T, an lvalue for T &, an
+ * xvalue for T && -- which `declval<T>()` cannot do, since it is always
+ * an xvalue.
+ *
+ * This implements the reference-preserving cases and falls back to
+ * common_type for the rest. The full [meta.trans.other] algorithm also
+ * consults basic_common_reference, a customization point nothing here
+ * specializes; it is left out rather than half-written.
+ */
+namespace __detail {
+template <class T, class U>
+using __cond_res =
+    decltype(false ? declval<T (&)()>()() : declval<U (&)()>()());
+
+template <class T, class U, class = void>
+struct __common_ref2 : common_type<T, U> {};
+template <class T, class U>
+struct __common_ref2<T, U, void_t<__cond_res<T, U>>> {
+    using type = __cond_res<T, U>;
+};
+}
+
+template <class...> struct common_reference {};
+template <> struct common_reference<> {};
+template <class T> struct common_reference<T> { using type = T; };
+template <class T, class U>
+struct common_reference<T, U> : __detail::__common_ref2<T, U> {};
+template <class T, class U, class... R>
+struct common_reference<T, U, R...>
+    : common_reference<typename common_reference<T, U>::type, R...> {};
+template <class... T>
+using common_reference_t = typename common_reference<T...>::type;
+
 /* make_signed / make_unsigned map within the integer types of the same
  * size, and carry the cv-qualifiers across. bool is excluded by the
  * standard: it has no signed counterpart. */

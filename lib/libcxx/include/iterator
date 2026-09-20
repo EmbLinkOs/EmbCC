@@ -253,6 +253,126 @@ template <class I>
 constexpr move_iterator<I> make_move_iterator(I i)
 { return move_iterator<I>(i); }
 
+/* ---- the insert iterators -----------------------------------------------
+ *
+ * An OUTPUT iterator that grows its container instead of overwriting
+ * it, and the trick is the same in all three: `*it = v` does the work.
+ * `operator*` returns the iterator itself, `operator=` calls
+ * push_back/push_front/insert, and `++` does nothing at all.
+ *
+ * That is what lets `copy(a.begin(), a.end(), back_inserter(b))` work.
+ * Without it the destination has to be sized first -- and `copy` into
+ * an empty vector is the single most common way to write out of
+ * bounds, because nothing in `copy`'s signature says the destination
+ * must already be big enough.
+ *
+ * Note which operation each uses: a vector has push_back and no
+ * push_front, a forward_list the reverse, and a set neither. The three
+ * classes exist because the three containers do different things, not
+ * as a convenience.
+ */
+template <class C>
+class back_insert_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+    using container_type = C;
+
+    explicit back_insert_iterator(C &c) : __c(&c) {}
+
+    back_insert_iterator &operator=(const typename C::value_type &v)
+    { __c->push_back(v); return *this; }
+    back_insert_iterator &operator=(typename C::value_type &&v)
+    { __c->push_back(static_cast<typename C::value_type &&>(v)); return *this; }
+
+    /* The three no-ops. `*it` is the iterator so that `*it = v` lands
+     * on operator= above; `++` has nothing to advance past, because
+     * the insertion already moved the end. */
+    back_insert_iterator &operator*() { return *this; }
+    back_insert_iterator &operator++() { return *this; }
+    back_insert_iterator operator++(int) { return *this; }
+
+protected:
+    C *__c;
+};
+
+template <class C>
+back_insert_iterator<C> back_inserter(C &c)
+{ return back_insert_iterator<C>(c); }
+
+template <class C>
+class front_insert_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+    using container_type = C;
+
+    explicit front_insert_iterator(C &c) : __c(&c) {}
+
+    /* Each insertion goes in front of the last, so a sequence copied
+     * through this arrives REVERSED. That is not a flaw to work around
+     * -- it is occasionally the reason to use it. */
+    front_insert_iterator &operator=(const typename C::value_type &v)
+    { __c->push_front(v); return *this; }
+    front_insert_iterator &operator=(typename C::value_type &&v)
+    { __c->push_front(static_cast<typename C::value_type &&>(v)); return *this; }
+
+    front_insert_iterator &operator*() { return *this; }
+    front_insert_iterator &operator++() { return *this; }
+    front_insert_iterator operator++(int) { return *this; }
+
+protected:
+    C *__c;
+};
+
+template <class C>
+front_insert_iterator<C> front_inserter(C &c)
+{ return front_insert_iterator<C>(c); }
+
+template <class C>
+class insert_iterator {
+public:
+    using iterator_category = output_iterator_tag;
+    using value_type = void;
+    using difference_type = ptrdiff_t;
+    using pointer = void;
+    using reference = void;
+    using container_type = C;
+
+    insert_iterator(C &c, typename C::iterator i) : __c(&c), __i(i) {}
+
+    /* The stored position is ADVANCED past each insertion, so a
+     * sequence arrives in its own order. Keeping the original position
+     * would insert each element before the last and reverse them --
+     * and would also dangle, since insert can invalidate it. */
+    insert_iterator &operator=(const typename C::value_type &v)
+    { __i = __c->insert(__i, v); ++__i; return *this; }
+    insert_iterator &operator=(typename C::value_type &&v)
+    {
+        __i = __c->insert(__i, static_cast<typename C::value_type &&>(v));
+        ++__i;
+        return *this;
+    }
+
+    insert_iterator &operator*() { return *this; }
+    insert_iterator &operator++() { return *this; }
+    insert_iterator &operator++(int) { return *this; }
+
+protected:
+    C *__c;
+    typename C::iterator __i;
+};
+
+template <class C, class I>
+insert_iterator<C> inserter(C &c, I i)
+{ return insert_iterator<C>(c, i); }
+
 /* ---- the range access functions -----------------------------------------
  * Free functions rather than members so that a C ARRAY is a range too --
  * which is what lets `for (auto &x : arr)` work on one. */

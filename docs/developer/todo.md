@@ -718,6 +718,66 @@ member's own access in `struct csym`, and `class_derives`/`path_count` in
 current access context (the class whose member or friend is doing the
 naming) threaded through name lookup and the cast paths.
 
+## Closed: five front-end gaps the standard library found (2026-09-20)
+
+None of these was found by reading the compiler. Each was found by
+writing a header that a real C++ program would include, which is the
+point of writing the library at all — a corpus that exercises overload
+resolution and name lookup the way library code does, rather than the
+way test cases do.
+
+**A defaulted `operator<=>` did not implicitly declare `operator==`**
+([class.compare.default]/2). `a != b` rewrites through `==` and *never*
+through `<=>`, so a class written with the one line
+`auto operator<=>(const T &) const = default;` could be ordered and
+could not be compared for equality. The declaration is now made in
+`src/cxx/class.c` beside the other implicit members, defaulted and with
+the same access, so it is defined only if it is used.
+
+**A nested braced list was scored one element at a time.** Choosing an
+overload for `vector<vector<int>> v{{1, 2, 3}}` offered the inner
+`{1, 2, 3}` to `vector<int>`'s constructors as *three arguments* and
+never as one `initializer_list`, so it found no three-argument
+constructor and the whole outer call was reported as having no viable
+candidate. The initialization itself was right all along — this rejected
+valid programs rather than miscompiling them, which is why `{{1, 2}}`
+worked (`vector(n, value)` happens to take two) and `{{1, 2, 3}}` did
+not. `ics_of` now tries the initializer-list constructors first, the
+order `construct` already used.
+
+**Two lambdas in two different blocks of one function mangled the
+same.** An unnamed type's number was counted per *block* scope, so the
+first lambda in every `{ }` came out `Ut_`. Invisible until such a type
+reaches a template argument — and then `v | filter(a)` in one block and
+`v | filter(b)` in another give two distinct `filter_view`
+instantiations with identical mangled names, which the emitted C rejects
+as a redefinition. The counter belongs to the enclosing function.
+
+**A conversion function inherited from a base was invisible to the
+built-in operators.** `a == 7` on a class whose `operator int()` comes
+from a base found no candidate at all, because `class_to_builtin`
+scanned only the class's own scope. `std::atomic<int>`, whose conversion
+lives in `__atomic_base`, could not be compared with anything.
+
+**A using-declared base member did not get the derived class's implicit
+object parameter** ([over.match.funcs]/4). `a = 3` where `operator=(T)`
+came through a using-declaration was *ambiguous* against the implicit
+copy assignment: the first wanted a derived-to-base conversion for its
+object and an exact match for its argument, the second the reverse, and
+neither was better in every argument.
+
+Two more, not front-end: the generic atomic builtins now take any object
+of a workable size rather than only an integer or pointer (they pass by
+pointer and copy bytes, so `std::atomic<double>` works), and printf's
+floating conversion is exact — see `docs/language/libc.md`.
+
+The library grew with them: `<compare>`, `<concepts>`, `<any>`,
+`<format>`, `<ranges>`, `<atomic>` and `<regex>`, which takes
+`lib/libcxx/include` to 65 headers. Still missing on purpose:
+`<thread>`, `<mutex>` and atomic `wait`/`notify`, which must BLOCK and
+have no primitive to block on — `lib/libc/os/backend.h` has no futex —
+and would otherwise be spin loops wearing the right names.
+
 ## Closed: dead landing pads, and long double objects (2026-09-20)
 
 Both entries that stood here are fixed, and each turned out to be one

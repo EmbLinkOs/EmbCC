@@ -1,0 +1,418 @@
+/* <atomic> — C++ [atomics].
+ *
+ * Not "a variable with a lock around it". An atomic is the ONLY way to
+ * touch a value from two threads without undefined behaviour, and the
+ * reason is that a plain `int` read concurrently with a write is a data
+ * race — which is UB in the language, not merely a wrong answer. The
+ * compiler is entitled to assume races never happen, so it may hoist
+ * the read out of a loop, split the write in two, or invent a read that
+ * was never written. `while (!flag) ;` on a plain bool is legally an
+ * infinite loop even after another thread sets it.
+ *
+ * The other half is the MEMORY ORDER, and it is the half that is easy to
+ * get wrong because the wrong answer only appears on a machine with a
+ * weak memory model. `seq_cst`, the default, is the one order under
+ * which every thread agrees on a single total order of operations; it is
+ * also the most expensive, and on aarch64 it is a materially different
+ * instruction sequence from `relaxed`. Everything here defaults to
+ * `seq_cst` and takes an order, so the cheap forms are available and
+ * never accidental.
+ *
+ * ---- what this is built on ---------------------------------------------
+ *
+ * The `__atomic_*` builtins, which EmbCC implements (src/sema/sema.c)
+ * and lowers per target. That is deliberate and not a shortcut: the
+ * correct instruction for a sequentially consistent store is `xchg` on
+ * x86-64 and `stlr` on aarch64, and *that* knowledge belongs to the
+ * compiler's back end. A library that emitted its own inline assembly
+ * would be duplicating the one thing the compiler already knows, and
+ * would be wrong on the next target.
+ *
+ * ---- what is not here ---------------------------------------------------
+ *
+ * `wait`/`notify_one`/`notify_all` (C++20). They are not spin loops
+ * dressed up — they must BLOCK, which needs a futex or equivalent from
+ * the operating system, and `lib/libc/os/backend.h` has no such
+ * primitive. Writing them as spins would be a correctness-preserving
+ * lie that burns a core; they are absent instead. The same reasoning
+ * keeps `<thread>` and `<mutex>` out of this library altogether: there
+ * is no thread to synchronize with yet.
+ */
+#ifndef _LIBCXX_ATOMIC
+#define _LIBCXX_ATOMIC
+
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+
+namespace std {
+
+enum memory_order : int {
+    memory_order_relaxed = __ATOMIC_RELAXED,
+    memory_order_consume = __ATOMIC_CONSUME,
+    memory_order_acquire = __ATOMIC_ACQUIRE,
+    memory_order_release = __ATOMIC_RELEASE,
+    memory_order_acq_rel = __ATOMIC_ACQ_REL,
+    memory_order_seq_cst = __ATOMIC_SEQ_CST
+};
+
+/* The C++20 scoped spellings, for code that prefers them. */
+struct __mo {
+    static constexpr memory_order relaxed = memory_order_relaxed;
+    static constexpr memory_order consume = memory_order_consume;
+    static constexpr memory_order acquire = memory_order_acquire;
+    static constexpr memory_order release = memory_order_release;
+    static constexpr memory_order acq_rel = memory_order_acq_rel;
+    static constexpr memory_order seq_cst = memory_order_seq_cst;
+};
+
+/* A failure order may not be release or acq_rel -- a failed
+ * compare_exchange performs no store, so there is nothing to release --
+ * and it may not be stronger than the success order. The standard says
+ * so; this enforces it rather than passing a bad order down. */
+constexpr memory_order __fail_order(memory_order m) noexcept
+{
+    return m == memory_order_acq_rel   ? memory_order_acquire
+         : m == memory_order_release   ? memory_order_relaxed
+                                       : m;
+}
+
+/* ---- fences -------------------------------------------------------------
+ *
+ * A fence orders the operations AROUND it rather than one operation, and
+ * the two differ: a signal fence emits no instruction at all, because a
+ * signal handler runs on the same core and only the COMPILER needs to be
+ * stopped from reordering. A thread fence emits the barrier.
+ */
+inline void atomic_thread_fence(memory_order m = memory_order_seq_cst) noexcept
+{ __atomic_thread_fence((int)m); }
+
+inline void atomic_signal_fence(memory_order m = memory_order_seq_cst) noexcept
+{ __atomic_signal_fence((int)m); }
+
+/* ---- atomic_flag --------------------------------------------------------
+ *
+ * The one type the standard guarantees is lock-free on every
+ * implementation, and the only one that needs no support beyond
+ * test-and-set. Everything else may in principle fall back to a lock;
+ * on both targets here nothing does.
+ */
+#define ATOMIC_FLAG_INIT { 0 }
+
+struct atomic_flag {
+    unsigned char _M_i;
+
+    atomic_flag() noexcept = default;
+    constexpr atomic_flag(int v) noexcept : _M_i((unsigned char)v) {}
+    atomic_flag(const atomic_flag &) = delete;
+    atomic_flag &operator=(const atomic_flag &) = delete;
+
+    bool test_and_set(memory_order m = memory_order_seq_cst) noexcept
+    { return __atomic_test_and_set(&_M_i, (int)m); }
+    bool test_and_set(memory_order m = memory_order_seq_cst) volatile noexcept
+    { return __atomic_test_and_set(&_M_i, (int)m); }
+
+    void clear(memory_order m = memory_order_seq_cst) noexcept
+    { __atomic_clear(&_M_i, (int)m); }
+    void clear(memory_order m = memory_order_seq_cst) volatile noexcept
+    { __atomic_clear(&_M_i, (int)m); }
+
+    bool test(memory_order m = memory_order_seq_cst) const noexcept
+    { return __atomic_load_n(&_M_i, (int)m) != 0; }
+};
+
+inline bool atomic_flag_test_and_set(atomic_flag *f) noexcept
+{ return f->test_and_set(); }
+inline bool atomic_flag_test_and_set_explicit(atomic_flag *f,
+                                              memory_order m) noexcept
+{ return f->test_and_set(m); }
+inline void atomic_flag_clear(atomic_flag *f) noexcept { f->clear(); }
+inline void atomic_flag_clear_explicit(atomic_flag *f, memory_order m) noexcept
+{ f->clear(m); }
+
+/* ---- the common part ----------------------------------------------------
+ *
+ * Load, store, exchange and compare-exchange work on any trivially
+ * copyable T through the generic builtins, which take addresses and copy
+ * sizeof(T) bytes. The integral and pointer specializations add the
+ * arithmetic on top.
+ *
+ * compare_exchange compares the OBJECT REPRESENTATION -- the bytes --
+ * not `operator==`. Two values that compare equal and differ in a
+ * padding byte will never exchange, which is why the standard tells you
+ * not to put an atomic around a type with padding, and why `expected` is
+ * updated on failure with what was actually there.
+ */
+template <class T>
+struct __atomic_base {
+    static_assert(is_trivially_copyable_v<T>,
+                  "std::atomic<T> requires a trivially copyable T");
+
+    T _M_i;
+
+    __atomic_base() noexcept = default;
+    constexpr __atomic_base(T v) noexcept : _M_i(v) {}
+    __atomic_base(const __atomic_base &) = delete;
+    __atomic_base &operator=(const __atomic_base &) = delete;
+
+    static constexpr bool is_always_lock_free =
+        sizeof(T) <= sizeof(void *) &&
+        (sizeof(T) & (sizeof(T) - 1)) == 0;
+    bool is_lock_free() const noexcept { return is_always_lock_free; }
+
+    void store(T v, memory_order m = memory_order_seq_cst) noexcept
+    { __atomic_store(&_M_i, &v, (int)m); }
+
+    T load(memory_order m = memory_order_seq_cst) const noexcept
+    {
+        T r;
+        __atomic_load(const_cast<T *>(&_M_i), &r, (int)m);
+        return r;
+    }
+
+    operator T() const noexcept { return load(); }
+
+    /* Assignment returns the VALUE, not a reference: returning `*this`
+     * would let `a = b = c` read b again after another thread wrote it,
+     * and the read would not be the value that was stored. */
+    T operator=(T v) noexcept { store(v); return v; }
+
+    T exchange(T v, memory_order m = memory_order_seq_cst) noexcept
+    {
+        T r;
+        __atomic_exchange(&_M_i, &v, &r, (int)m);
+        return r;
+    }
+
+    /* The weak form may fail SPURIOUSLY -- report a mismatch when the
+     * bytes did match -- and on a load-linked/store-conditional machine
+     * like aarch64 that is the cheap one, because the strong form has to
+     * loop internally. Weak belongs in a loop you were going to write
+     * anyway; strong belongs where you were not. */
+    bool compare_exchange_weak(T &expected, T desired, memory_order s,
+                               memory_order f) noexcept
+    {
+        return __atomic_compare_exchange(&_M_i, &expected, &desired, true,
+                                         (int)s, (int)f);
+    }
+    bool compare_exchange_weak(T &expected, T desired,
+                               memory_order m = memory_order_seq_cst) noexcept
+    { return compare_exchange_weak(expected, desired, m, __fail_order(m)); }
+
+    bool compare_exchange_strong(T &expected, T desired, memory_order s,
+                                 memory_order f) noexcept
+    {
+        return __atomic_compare_exchange(&_M_i, &expected, &desired, false,
+                                         (int)s, (int)f);
+    }
+    bool compare_exchange_strong(T &expected, T desired,
+                                 memory_order m = memory_order_seq_cst) noexcept
+    { return compare_exchange_strong(expected, desired, m, __fail_order(m)); }
+};
+
+template <class T, class = void>
+struct atomic : __atomic_base<T> {
+    using __atomic_base<T>::__atomic_base;
+    using __atomic_base<T>::operator=;
+    atomic() noexcept = default;
+    constexpr atomic(T v) noexcept : __atomic_base<T>(v) {}
+    /* Declared here as well as in the base: `atomic(T)` would
+     * otherwise make a copy work by going through `operator T()` --
+     * read the value, then construct a new atomic from it -- which is
+     * two operations and therefore not a copy of an atomic at all. */
+    atomic(const atomic &) = delete;
+    atomic &operator=(const atomic &) = delete;
+};
+
+/* ---- the integral specialization ---------------------------------------- */
+
+template <class T>
+struct atomic<T, enable_if_t<is_integral_v<T> && !is_same_v<T, bool>>>
+    : __atomic_base<T> {
+    using __atomic_base<T>::__atomic_base;
+    using __atomic_base<T>::operator=;
+    using difference_type = T;
+
+    atomic() noexcept = default;
+    constexpr atomic(T v) noexcept : __atomic_base<T>(v) {}
+    /* Declared here as well as in the base: `atomic(T)` would
+     * otherwise make a copy work by going through `operator T()` --
+     * read the value, then construct a new atomic from it -- which is
+     * two operations and therefore not a copy of an atomic at all. */
+    atomic(const atomic &) = delete;
+    atomic &operator=(const atomic &) = delete;
+
+    /* Each returns the value BEFORE the operation, which is what makes
+     * `fetch_add(1)` a ticket dispenser: every caller gets a different
+     * number and none is skipped. `++a` returning the new value is the
+     * same instruction read the other way. */
+    T fetch_add(T v, memory_order m = memory_order_seq_cst) noexcept
+    { return __atomic_fetch_add(&this->_M_i, v, (int)m); }
+    T fetch_sub(T v, memory_order m = memory_order_seq_cst) noexcept
+    { return __atomic_fetch_sub(&this->_M_i, v, (int)m); }
+    T fetch_and(T v, memory_order m = memory_order_seq_cst) noexcept
+    { return __atomic_fetch_and(&this->_M_i, v, (int)m); }
+    T fetch_or(T v, memory_order m = memory_order_seq_cst) noexcept
+    { return __atomic_fetch_or(&this->_M_i, v, (int)m); }
+    T fetch_xor(T v, memory_order m = memory_order_seq_cst) noexcept
+    { return __atomic_fetch_xor(&this->_M_i, v, (int)m); }
+
+    T operator++() noexcept { return __atomic_add_fetch(&this->_M_i, 1, __ATOMIC_SEQ_CST); }
+    T operator++(int) noexcept { return fetch_add(1); }
+    T operator--() noexcept { return __atomic_sub_fetch(&this->_M_i, 1, __ATOMIC_SEQ_CST); }
+    T operator--(int) noexcept { return fetch_sub(1); }
+    T operator+=(T v) noexcept { return __atomic_add_fetch(&this->_M_i, v, __ATOMIC_SEQ_CST); }
+    T operator-=(T v) noexcept { return __atomic_sub_fetch(&this->_M_i, v, __ATOMIC_SEQ_CST); }
+    T operator&=(T v) noexcept { return __atomic_and_fetch(&this->_M_i, v, __ATOMIC_SEQ_CST); }
+    T operator|=(T v) noexcept { return __atomic_or_fetch(&this->_M_i, v, __ATOMIC_SEQ_CST); }
+    T operator^=(T v) noexcept { return __atomic_xor_fetch(&this->_M_i, v, __ATOMIC_SEQ_CST); }
+};
+
+/* ---- the pointer specialization -----------------------------------------
+ * Arithmetic is in ELEMENTS, as pointer arithmetic always is: the
+ * builtin takes bytes, so the scaling is here. */
+template <class T>
+struct atomic<T *, void> : __atomic_base<T *> {
+    using __atomic_base<T *>::__atomic_base;
+    using __atomic_base<T *>::operator=;
+    using difference_type = ptrdiff_t;
+
+    atomic() noexcept = default;
+    constexpr atomic(T *v) noexcept : __atomic_base<T *>(v) {}
+    /* Declared here as well as in the base: `atomic(T)` would
+     * otherwise make a copy work by going through `operator T()` --
+     * read the value, then construct a new atomic from it -- which is
+     * two operations and therefore not a copy of an atomic at all. */
+    atomic(const atomic &) = delete;
+    atomic &operator=(const atomic &) = delete;
+
+    T *fetch_add(ptrdiff_t n, memory_order m = memory_order_seq_cst) noexcept
+    {
+        return (T *)__atomic_fetch_add((char **)&this->_M_i,
+                                       n * (ptrdiff_t)sizeof(T), (int)m);
+    }
+    T *fetch_sub(ptrdiff_t n, memory_order m = memory_order_seq_cst) noexcept
+    {
+        return (T *)__atomic_fetch_sub((char **)&this->_M_i,
+                                       n * (ptrdiff_t)sizeof(T), (int)m);
+    }
+    T *operator++() noexcept { return fetch_add(1) + 1; }
+    T *operator++(int) noexcept { return fetch_add(1); }
+    T *operator--() noexcept { return fetch_sub(1) - 1; }
+    T *operator--(int) noexcept { return fetch_sub(1); }
+    T *operator+=(ptrdiff_t n) noexcept { return fetch_add(n) + n; }
+    T *operator-=(ptrdiff_t n) noexcept { return fetch_sub(n) - n; }
+};
+
+/* ---- the named types ---------------------------------------------------- */
+
+using atomic_bool = atomic<bool>;
+using atomic_char = atomic<char>;
+using atomic_schar = atomic<signed char>;
+using atomic_uchar = atomic<unsigned char>;
+using atomic_short = atomic<short>;
+using atomic_ushort = atomic<unsigned short>;
+using atomic_int = atomic<int>;
+using atomic_uint = atomic<unsigned>;
+using atomic_long = atomic<long>;
+using atomic_ulong = atomic<unsigned long>;
+using atomic_llong = atomic<long long>;
+using atomic_ullong = atomic<unsigned long long>;
+using atomic_int8_t = atomic<int8_t>;
+using atomic_uint8_t = atomic<uint8_t>;
+using atomic_int16_t = atomic<int16_t>;
+using atomic_uint16_t = atomic<uint16_t>;
+using atomic_int32_t = atomic<int32_t>;
+using atomic_uint32_t = atomic<uint32_t>;
+using atomic_int64_t = atomic<int64_t>;
+using atomic_uint64_t = atomic<uint64_t>;
+using atomic_size_t = atomic<size_t>;
+using atomic_ptrdiff_t = atomic<ptrdiff_t>;
+using atomic_intptr_t = atomic<intptr_t>;
+using atomic_uintptr_t = atomic<uintptr_t>;
+
+/* ---- the free-function forms, for C compatibility ----------------------- */
+
+template <class T>
+inline void atomic_store(atomic<T> *a, T v) noexcept { a->store(v); }
+template <class T>
+inline void atomic_store_explicit(atomic<T> *a, T v, memory_order m) noexcept
+{ a->store(v, m); }
+template <class T>
+inline T atomic_load(const atomic<T> *a) noexcept { return a->load(); }
+template <class T>
+inline T atomic_load_explicit(const atomic<T> *a, memory_order m) noexcept
+{ return a->load(m); }
+template <class T>
+inline T atomic_exchange(atomic<T> *a, T v) noexcept { return a->exchange(v); }
+template <class T>
+inline T atomic_exchange_explicit(atomic<T> *a, T v, memory_order m) noexcept
+{ return a->exchange(v, m); }
+template <class T>
+inline bool atomic_compare_exchange_weak(atomic<T> *a, T *e, T d) noexcept
+{ return a->compare_exchange_weak(*e, d); }
+template <class T>
+inline bool atomic_compare_exchange_strong(atomic<T> *a, T *e, T d) noexcept
+{ return a->compare_exchange_strong(*e, d); }
+template <class T>
+inline T atomic_fetch_add(atomic<T> *a, T v) noexcept { return a->fetch_add(v); }
+template <class T>
+inline T atomic_fetch_sub(atomic<T> *a, T v) noexcept { return a->fetch_sub(v); }
+
+/* ---- atomic_ref ---------------------------------------------------------
+ *
+ * The same operations over an object someone else owns, which is the
+ * case `atomic<T>` cannot cover: an array shared between threads, or a
+ * field of a struct whose layout is fixed by an ABI. The object must be
+ * touched ONLY through atomic_refs for as long as one exists -- a plain
+ * access alongside is still a race.
+ */
+template <class T>
+class atomic_ref {
+public:
+    static_assert(is_trivially_copyable_v<T>,
+                  "std::atomic_ref<T> requires a trivially copyable T");
+    using value_type = T;
+
+    explicit atomic_ref(T &o) noexcept : __p(&o) {}
+    atomic_ref(const atomic_ref &o) noexcept = default;
+
+    static constexpr bool is_always_lock_free =
+        sizeof(T) <= sizeof(void *) && (sizeof(T) & (sizeof(T) - 1)) == 0;
+    bool is_lock_free() const noexcept { return is_always_lock_free; }
+
+    void store(T v, memory_order m = memory_order_seq_cst) const noexcept
+    { __atomic_store(__p, &v, (int)m); }
+    T load(memory_order m = memory_order_seq_cst) const noexcept
+    { T r; __atomic_load(__p, &r, (int)m); return r; }
+    operator T() const noexcept { return load(); }
+    T operator=(T v) const noexcept { store(v); return v; }
+
+    T exchange(T v, memory_order m = memory_order_seq_cst) const noexcept
+    { T r; __atomic_exchange(__p, &v, &r, (int)m); return r; }
+
+    bool compare_exchange_weak(T &e, T d,
+                               memory_order m = memory_order_seq_cst) const noexcept
+    { return __atomic_compare_exchange(__p, &e, &d, true, (int)m,
+                                       (int)__fail_order(m)); }
+    bool compare_exchange_strong(T &e, T d,
+                                 memory_order m = memory_order_seq_cst) const noexcept
+    { return __atomic_compare_exchange(__p, &e, &d, false, (int)m,
+                                       (int)__fail_order(m)); }
+
+    template <class U = T>
+    enable_if_t<is_integral_v<U>, U>
+    fetch_add(U v, memory_order m = memory_order_seq_cst) const noexcept
+    { return __atomic_fetch_add(__p, v, (int)m); }
+    template <class U = T>
+    enable_if_t<is_integral_v<U>, U>
+    fetch_sub(U v, memory_order m = memory_order_seq_cst) const noexcept
+    { return __atomic_fetch_sub(__p, v, (int)m); }
+
+private:
+    T *__p;
+};
+
+}  // namespace std
+
+#endif
