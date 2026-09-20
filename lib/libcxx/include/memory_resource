@@ -1,0 +1,454 @@
+/* <memory_resource> — C++ [mem.res].
+ *
+ * Allocators, fixed. The problem with `std::allocator<T>` is that it is
+ * a TEMPLATE PARAMETER: `vector<int>` and `vector<int, MyAlloc>` are
+ * different types, so a function taking one cannot take the other, and
+ * a library that wants to be allocator-agnostic must be a template
+ * itself, all the way down. Changing where a container gets its memory
+ * changes the type of everything that touches it.
+ *
+ * `polymorphic_allocator` is one type with a POINTER to a
+ * `memory_resource`, which is an abstract class with virtual allocate
+ * and deallocate. So `pmr::vector<int>` is one type whatever its memory
+ * comes from, and the choice is made at run time by passing a
+ * different resource.
+ *
+ * The cost is a virtual call per allocation, and it is a real cost: a
+ * container that allocates in a hot loop should not use this. What it
+ * buys is that the choice becomes a value rather than a type -- and for
+ * an arena that is created, filled and dropped whole, the virtual call
+ * is lost in the noise of not calling free at all.
+ *
+ * ---- monotonic_buffer_resource is the one that pays ---------------------
+ *
+ * It allocates by bumping a pointer and DOES NOT FREE -- `deallocate`
+ * is a no-op. Everything goes back at once when the resource dies. That
+ * sounds like a leak and is the whole point: for a parse, a request, a
+ * frame of a game, the lifetime is the phase, and a bump allocator with
+ * no bookkeeping beats any general allocator by a margin that does not
+ * need measuring.
+ *
+ * ---- what is NOT here ---------------------------------------------------
+ *
+ * `synchronized_pool_resource`, which needs the pooling below plus a
+ * mutex per pool. `unsynchronized_pool_resource` IS here. The `pmr::`
+ * container aliases are here for the containers this library has.
+ */
+#ifndef _LIBCXX_MEMORY_RESOURCE
+#define _LIBCXX_MEMORY_RESOURCE
+
+#include <cstddef>
+#include <cstdlib>
+#include <memory>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace pmr {
+
+/* ---- memory_resource ---------------------------------------------------
+ *
+ * Three virtuals, and the third is the one that is easy to get wrong.
+ * `is_equal` asks "can memory from THIS resource be returned to THAT
+ * one?", and the default answer -- identity -- is the only safe one: a
+ * resource that claimed equality with another would let a container
+ * hand its blocks to something that does not own them.
+ */
+class memory_resource {
+public:
+    memory_resource() = default;
+    memory_resource(const memory_resource &) = default;
+    virtual ~memory_resource() = default;
+
+    void *allocate(size_t bytes, size_t align = alignof(max_align_t))
+    { return do_allocate(bytes, align); }
+
+    void deallocate(void *p, size_t bytes, size_t align = alignof(max_align_t))
+    { do_deallocate(p, bytes, align); }
+
+    bool is_equal(const memory_resource &o) const noexcept
+    { return do_is_equal(o); }
+
+protected:
+    virtual void *do_allocate(size_t bytes, size_t align) = 0;
+    /* deallocate is given the SIZE and ALIGNMENT back, which is what
+     * lets a pool return the block to the right pool without a header
+     * on every allocation. A general allocator has to store that
+     * somewhere; this one is told. */
+    virtual void do_deallocate(void *p, size_t bytes, size_t align) = 0;
+    virtual bool do_is_equal(const memory_resource &o) const noexcept = 0;
+};
+
+inline bool operator==(const memory_resource &a, const memory_resource &b)
+{ return &a == &b || a.is_equal(b); }
+inline bool operator!=(const memory_resource &a, const memory_resource &b)
+{ return !(a == b); }
+
+/* ---- the two resources every program gets ------------------------------ */
+
+namespace __detail {
+
+/* operator new and operator delete, behind the interface. */
+class __new_delete_resource : public memory_resource {
+protected:
+    void *do_allocate(size_t bytes, size_t align) override
+    { return ::operator new(bytes, align_val_t(align)); }
+    void do_deallocate(void *p, size_t bytes, size_t align) override
+    {
+        (void)bytes;
+        ::operator delete(p, align_val_t(align));
+    }
+    bool do_is_equal(const memory_resource &o) const noexcept override
+    { return this == &o; }
+};
+
+/* Every allocation throws. Not a joke: it is how a program proves that
+ * a path it believes allocation-free really is -- set it as the default
+ * resource and any allocation becomes a bad_alloc with a stack trace
+ * instead of a silent cost. */
+class __null_resource : public memory_resource {
+protected:
+    void *do_allocate(size_t, size_t) override { throw bad_alloc(); }
+    void do_deallocate(void *, size_t, size_t) override {}
+    bool do_is_equal(const memory_resource &o) const noexcept override
+    { return this == &o; }
+};
+
+inline __new_delete_resource __nd{};
+inline __null_resource __null{};
+inline memory_resource *__default = &__nd;
+
+}  // namespace __detail
+
+inline memory_resource *new_delete_resource() noexcept
+{ return &__detail::__nd; }
+
+inline memory_resource *null_memory_resource() noexcept
+{ return &__detail::__null; }
+
+inline memory_resource *get_default_resource() noexcept
+{ return __detail::__default; }
+
+inline memory_resource *set_default_resource(memory_resource *r) noexcept
+{
+    memory_resource *prev = __detail::__default;
+    __detail::__default = r ? r : &__detail::__nd;
+    return prev;
+}
+
+/* ---- polymorphic_allocator ---------------------------------------------- */
+
+template <class T = byte>
+class polymorphic_allocator {
+public:
+    using value_type = T;
+
+    polymorphic_allocator() noexcept : __r(get_default_resource()) {}
+    polymorphic_allocator(memory_resource *r) noexcept : __r(r) {}
+    polymorphic_allocator(const polymorphic_allocator &) = default;
+    template <class U>
+    polymorphic_allocator(const polymorphic_allocator<U> &o) noexcept
+        : __r(o.resource()) {}
+
+    /* Assignment is DELETED, and that is the rule that makes this
+     * safe: a container whose allocator changed would free blocks back
+     * to a resource that never owned them. An allocator may be copied
+     * into a new container and may not be replaced in an old one. */
+    polymorphic_allocator &operator=(const polymorphic_allocator &) = delete;
+
+    T *allocate(size_t n)
+    {
+        if (n > (size_t)-1 / sizeof(T))
+            throw bad_alloc();
+        return (T *)__r->allocate(n * sizeof(T), alignof(T));
+    }
+
+    void deallocate(T *p, size_t n)
+    { __r->deallocate(p, n * sizeof(T), alignof(T)); }
+
+    template <class U, class... A>
+    void construct(U *p, A &&...a)
+    { ::new ((void *)p) U(static_cast<A &&>(a)...); }
+
+    template <class U>
+    void destroy(U *p) { p->~U(); }
+
+    /* A container copied from one arena does NOT take the arena with
+     * it: the copy gets the default resource unless told otherwise.
+     * That is what select_on_container_copy_construction says, and it
+     * is the right default -- an arena's lifetime is the phase it
+     * belongs to, and a copy that outlives the phase must not point
+     * into it. */
+    polymorphic_allocator select_on_container_copy_construction() const
+    { return polymorphic_allocator(); }
+
+    memory_resource *resource() const noexcept { return __r; }
+
+private:
+    memory_resource *__r;
+};
+
+template <class T, class U>
+bool operator==(const polymorphic_allocator<T> &a,
+                const polymorphic_allocator<U> &b) noexcept
+{ return *a.resource() == *b.resource(); }
+template <class T, class U>
+bool operator!=(const polymorphic_allocator<T> &a,
+                const polymorphic_allocator<U> &b) noexcept
+{ return !(a == b); }
+
+/* ---- monotonic_buffer_resource ------------------------------------------
+ *
+ * Bump a pointer; never free. When the buffer runs out, ask the
+ * upstream resource for a bigger one and keep the old ones in a list so
+ * they can be released together at the end.
+ *
+ * The growth is geometric for the same reason a vector's is: a linear
+ * increment makes n allocations cost O(n^2) in upstream calls.
+ */
+class monotonic_buffer_resource : public memory_resource {
+public:
+    explicit monotonic_buffer_resource(memory_resource *up)
+        : __up(up), __cur(nullptr), __end(nullptr), __chunks(nullptr),
+          __next(__initial) {}
+
+    monotonic_buffer_resource()
+        : monotonic_buffer_resource(get_default_resource()) {}
+
+    explicit monotonic_buffer_resource(size_t initial,
+                                       memory_resource *up =
+                                           get_default_resource())
+        : __up(up), __cur(nullptr), __end(nullptr), __chunks(nullptr),
+          __next(initial ? initial : __initial) {}
+
+    /* An initial buffer the CALLER owns -- typically on the stack, which
+     * is the form that allocates nothing at all until it is exhausted. */
+    monotonic_buffer_resource(void *buffer, size_t size,
+                              memory_resource *up = get_default_resource())
+        : __up(up), __cur((char *)buffer), __end((char *)buffer + size),
+          __chunks(nullptr), __next(size ? size * 2 : __initial) {}
+
+    monotonic_buffer_resource(const monotonic_buffer_resource &) = delete;
+    monotonic_buffer_resource &
+    operator=(const monotonic_buffer_resource &) = delete;
+
+    ~monotonic_buffer_resource() override { release(); }
+
+    /* Everything at once. This is the operation the type exists for. */
+    void release()
+    {
+        while (__chunks) {
+            __chunk *c = __chunks;
+            __chunks = c->next;
+            __up->deallocate(c, c->size, alignof(max_align_t));
+        }
+        __cur = __end = nullptr;
+    }
+
+    memory_resource *upstream_resource() const noexcept { return __up; }
+
+protected:
+    void *do_allocate(size_t bytes, size_t align) override
+    {
+        if (align == 0)
+            align = 1;
+        char *p = __align_up(__cur, align);
+        if (!__cur || p + bytes > __end) {
+            __grow(bytes, align);
+            p = __align_up(__cur, align);
+        }
+        __cur = p + bytes;
+        return p;
+    }
+
+    /* A no-op, and not an omission: the memory goes back when the
+     * resource is released. A bump allocator that tried to free an
+     * arbitrary block would have to keep the bookkeeping that makes it
+     * no longer a bump allocator. */
+    void do_deallocate(void *, size_t, size_t) override {}
+
+    bool do_is_equal(const memory_resource &o) const noexcept override
+    { return this == &o; }
+
+private:
+    struct __chunk {
+        __chunk *next;
+        size_t size;
+    };
+
+    static constexpr size_t __initial = 1024;
+
+    static char *__align_up(char *p, size_t a)
+    {
+        size_t v = (size_t)p;
+        size_t r = v % a;
+        return r ? p + (a - r) : p;
+    }
+
+    void __grow(size_t bytes, size_t align)
+    {
+        /* Geometric, and at least big enough for the request plus the
+         * header and the worst-case alignment padding. */
+        size_t want = sizeof(__chunk) + align + bytes;
+        size_t size = __next > want ? __next : want;
+        void *raw = __up->allocate(size, alignof(max_align_t));
+        __chunk *c = (__chunk *)raw;
+        c->next = __chunks;
+        c->size = size;
+        __chunks = c;
+        __cur = (char *)raw + sizeof(__chunk);
+        __end = (char *)raw + size;
+        __next = size * 2;
+    }
+
+    memory_resource *__up;
+    char *__cur, *__end;
+    __chunk *__chunks;
+    size_t __next;
+};
+
+/* ---- pool_options and unsynchronized_pool_resource ----------------------
+ *
+ * Many small allocations of a few sizes, which is what a node-based
+ * container does. Each size class keeps a free list, so allocating is
+ * popping a pointer and freeing is pushing one -- no search, no
+ * coalescing, no headers.
+ *
+ * Anything larger than the largest block goes straight upstream, and
+ * that is tracked separately so it can be returned: a pool that
+ * forgot its oversized blocks would leak exactly the allocations that
+ * matter most.
+ */
+struct pool_options {
+    size_t max_blocks_per_chunk = 0;
+    size_t largest_required_pool_block = 0;
+};
+
+class unsynchronized_pool_resource : public memory_resource {
+public:
+    unsynchronized_pool_resource(const pool_options &opts, memory_resource *up)
+        : __up(up), __opts(opts), __arena(up), __big(nullptr)
+    {
+        for (int i = 0; i < __nclass; i++)
+            __free[i] = nullptr;
+    }
+
+    unsynchronized_pool_resource()
+        : unsynchronized_pool_resource(pool_options(),
+                                       get_default_resource()) {}
+    explicit unsynchronized_pool_resource(memory_resource *up)
+        : unsynchronized_pool_resource(pool_options(), up) {}
+    explicit unsynchronized_pool_resource(const pool_options &opts)
+        : unsynchronized_pool_resource(opts, get_default_resource()) {}
+
+    unsynchronized_pool_resource(const unsynchronized_pool_resource &) = delete;
+    unsynchronized_pool_resource &
+    operator=(const unsynchronized_pool_resource &) = delete;
+
+    ~unsynchronized_pool_resource() override { release(); }
+
+    void release()
+    {
+        while (__big) {
+            __big_block *b = __big;
+            __big = b->next;
+            __up->deallocate(b->p, b->size, b->align);
+            __up->deallocate(b, sizeof *b, alignof(__big_block));
+        }
+        for (int i = 0; i < __nclass; i++)
+            __free[i] = nullptr;
+        __arena.release();
+    }
+
+    memory_resource *upstream_resource() const noexcept { return __up; }
+    pool_options options() const noexcept { return __opts; }
+
+protected:
+    void *do_allocate(size_t bytes, size_t align) override
+    {
+        int c = __class_of(bytes, align);
+        if (c < 0) {
+            /* Too big to pool. Recorded, because a pool that forgot its
+             * oversized blocks would leak exactly the ones that matter. */
+            void *p = __up->allocate(bytes, align);
+            __big_block *b = (__big_block *)__up->allocate(
+                sizeof(__big_block), alignof(__big_block));
+            b->p = p;
+            b->size = bytes;
+            b->align = align;
+            b->next = __big;
+            __big = b;
+            return p;
+        }
+        if (__free[c]) {
+            __node *n = __free[c];
+            __free[c] = n->next;
+            return n;
+        }
+        return __arena.allocate(__size_of(c), __max_align);
+    }
+
+    void do_deallocate(void *p, size_t bytes, size_t align) override
+    {
+        int c = __class_of(bytes, align);
+        if (c < 0) {
+            for (__big_block **pp = &__big; *pp; pp = &(*pp)->next)
+                if ((*pp)->p == p) {
+                    __big_block *b = *pp;
+                    *pp = b->next;
+                    __up->deallocate(p, b->size, b->align);
+                    __up->deallocate(b, sizeof *b, alignof(__big_block));
+                    return;
+                }
+            return;
+        }
+        /* Onto the free list. The block is at least a pointer wide --
+         * the size classes start there -- so the link can live in the
+         * block itself and cost nothing. */
+        __node *n = (__node *)p;
+        n->next = __free[c];
+        __free[c] = n;
+    }
+
+    bool do_is_equal(const memory_resource &o) const noexcept override
+    { return this == &o; }
+
+private:
+    struct __node { __node *next; };
+    struct __big_block {
+        void *p;
+        size_t size, align;
+        __big_block *next;
+    };
+
+    /* Powers of two from one pointer up to 512 bytes. Sized so that a
+     * node of any container here lands in one. */
+    static constexpr int __nclass = 8;
+    static constexpr size_t __max_align = alignof(max_align_t);
+
+    static size_t __size_of(int c)
+    { return sizeof(void *) << c; }
+
+    int __class_of(size_t bytes, size_t align) const
+    {
+        if (align > __max_align)
+            return -1;
+        size_t want = bytes < sizeof(void *) ? sizeof(void *) : bytes;
+        for (int i = 0; i < __nclass; i++)
+            if (want <= __size_of(i))
+                return i;
+        return -1;
+    }
+
+    memory_resource *__up;
+    pool_options __opts;
+    monotonic_buffer_resource __arena;
+    __node *__free[__nclass];
+    __big_block *__big;
+};
+
+}  // namespace pmr
+}  // namespace std
+
+#endif

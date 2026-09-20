@@ -60,7 +60,8 @@ those exact two members in that order.
 `<version>`, `<system_error>`, `<mutex>`, `<thread>`,
 `<condition_variable>`, `<shared_mutex>`, `<semaphore>`, `<latch>`,
 `<barrier>`, `<future>`, `<iosfwd>`, `<execution>`, `<typeindex>`,
-`<scoped_allocator>`, `<iostream>`
+`<scoped_allocator>`, `<charconv>`, `<complex>`, `<memory_resource>`,
+`<iostream>`
 and the rest of the stream headers including `<fstream>`, `<stdexcept>`,
 and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
@@ -423,6 +424,70 @@ templates with their default arguments, and every header that *defines*
 one now includes it and repeats the parameters without defaults — which
 is what the standard requires, and which this library was violating
 until EmbCC learned to diagnose a repeated default template argument.
+
+**`<charconv>` is the answer to a question that had four bad answers.**
+`sprintf` consults the locale, so the decimal separator can be a comma
+and the same program produces different bytes on different machines.
+`stringstream` allocates and costs a stream. `strtol` reports failure
+through `errno`, so "no digits" is told from "converted zero" only by
+clearing errno first and comparing pointers after. `stoi` allocates a
+`std::string` to parse from. These allocate nothing, throw nothing,
+consult no locale, and report failure in the return value.
+
+Two refusals are deliberate and are the reason it is not a wrapper over
+`strtol`: **no leading whitespace is skipped and no `+` is accepted**. A
+parser that silently swallows spaces cannot tell `" 1"` from `"1"`, and
+one that accepts `+` disagrees with the format it was told to read.
+Failure is also two things, not one: `invalid_argument` means nothing
+was parsed and `ptr` is the start; `result_out_of_range` means the
+digits were valid and `ptr` is *past* them, so the caller can carry on
+reading its input.
+
+Writing the test found a real bug in it. The overflow limit is computed
+from the **type**, and was written as `~(U)0 / 2` — but `~` promotes a
+narrow unsigned type to `int` first, so `~(unsigned char)0` is the int
+−1 and dividing it by two gives zero. Every narrow type's limit was
+zero, the comparison wrapped, and `from_chars("128", c)` for a
+`signed char` silently produced −128. Casting −1 instead of
+complementing 0 is the fix.
+
+The floating `to_chars` *with* a precision is exact, because it goes
+through printf's exact conversion. The one **without** a precision —
+the shortest form that round-trips — needs a Ryu- or Grisu-style
+algorithm and is not here; seventeen significant digits always
+round-trip a double and are usually a character or two longer.
+`__cpp_lib_to_chars` is therefore not defined.
+
+**`<complex>`'s two interesting decisions are both about overflow.**
+`abs` is *not* `sqrt(x*x + y*y)`: squaring overflows for any part above
+about 1e154 in a double, which is a perfectly ordinary magnitude, so it
+scales by the larger part first — the entire reason `hypot` exists in C.
+Multiplication and division *are* written the naive way, and that is a
+stated trade: `(ac−bd, ad+bc)` overflows to infinity when the true
+product is representable, C99's Annex G describes the rescaling that
+avoids it, and this does not do it. The naive form is exact for every
+input whose intermediate products fit.
+
+The layout is the guarantee that matters: a `complex<T>` is exactly two
+`T` in order, so an array is interleaved as C's is and can be handed to
+an FFT written in C. The test checks that through a `reinterpret_cast`.
+
+**`<memory_resource>` makes the allocator a value instead of a type.**
+`std::allocator<T>` is a *template parameter*, so `vector<int>` and
+`vector<int, MyAlloc>` are different types and a function taking one
+cannot take the other — changing where a container gets its memory
+changes the type of everything that touches it. A
+`polymorphic_allocator` holds a pointer to an abstract
+`memory_resource`, so `pmr::vector<int>` is one type whatever its memory
+comes from. The cost is a virtual call per allocation, and it is real.
+
+`monotonic_buffer_resource` is the one that pays for itself: it
+allocates by bumping a pointer and **does not free** — everything goes
+back at once when the resource dies. That sounds like a leak and is the
+whole point, because for a parse, a request or a frame the lifetime *is*
+the phase. Constructed over a caller's stack buffer it allocates nothing
+at all until exhausted, and the test proves that by giving it
+`null_memory_resource()` upstream — which throws on every allocation.
 
 **`<fstream>` is exercised where a filesystem exists.** The QEMU harness
 has an `open` that returns `ENOSYS`, and on such a target the *correct*
