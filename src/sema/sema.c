@@ -3541,8 +3541,11 @@ static void merge_decls(struct unit *u)
              * the .c file's line numbers. */
             canon->file = f->file;
             canon->line = f->line;
-            for (int i = 0; i < f->nparams; i++)
+            for (int i = 0; i < f->nparams; i++) {
                 canon->params[i] = f->params[i]; /* definition names win */
+                canon->param_lines[i] = f->param_lines[i];
+                canon->param_cols[i] = f->param_cols[i];
+            }
         }
         canon->is_weak |= f->is_weak;  /* weak on any declaration is weak */
         canon->sret_first |= f->sret_first;

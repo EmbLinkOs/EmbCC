@@ -31,6 +31,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -374,8 +376,19 @@ static void flags_add(const char *f)
         g_flags[g_nflags++] = xstrndup(f, strlen(f));
 }
 
+/* Reloaded on every edit, so it must START empty: appending left the list
+ * holding one more copy of every flag per keystroke, until it hit the cap
+ * and silently dropped whatever came next. */
+static void flags_clear(void)
+{
+    for (int i = 0; i < g_nflags; i++)
+        free(g_flags[i]);
+    g_nflags = 0;
+}
+
 static void flags_load(const char *path)
 {
+    flags_clear();
     char dir[4096];
     snprintf(dir, sizeof dir, "%s", path);
     char *slash = strrchr(dir, '/');
@@ -412,7 +425,14 @@ static void flags_load(const char *path)
  * One record per thing a question can be about. Built by the front end in a
  * forked child (see the file's head) and read back as tab-separated lines. */
 enum { SYM_FUNC, SYM_VAR, SYM_LOCAL, SYM_PARAM, SYM_TYPE, SYM_ENUM,
-       SYM_MEMBER, SYM_MACRO };
+       SYM_MEMBER, SYM_MACRO,
+       /* Not a declaration: one PLACE a name is used. The parse knows an
+        * identifier in expression position from one inside a comment, a
+        * string or a member name, which is the whole difference between
+        * "find references" and grep. detail says which: "v" a name in
+        * expression position, "c" the callee of a call, "m" a member after
+        * . or ->; owner is the function it sits in. */
+       SYM_REF };
 
 struct sym {
     int kind;
@@ -500,6 +520,66 @@ static void emit_locals(FILE *f, struct stmt *s, const char *fn,
     }
 }
 
+/* Every place a name is USED, from the tree rather than from the text.
+ * An identifier inside a comment or a string literal is not a node, so it
+ * cannot be found here; a member name after a `.` is a different node from
+ * a variable of the same spelling, so the two do not collide. */
+static void emit_refs_expr(FILE *f, struct expr *e, const char *fn,
+                           const char *file)
+{
+    if (!e)
+        return;
+    switch (e->kind) {
+    case EXPR_VAR:
+        emit_rec(f, SYM_REF, e->name, "v", fn, file, e->line, e->col, 0, 0);
+        break;
+    case EXPR_INCDEC:
+        if (e->name)
+            emit_rec(f, SYM_REF, e->name, "v", fn, file, e->line, e->col, 0, 0);
+        break;
+    case EXPR_MEMBER:
+        /* the member's own name, not the base's: `p.x` and a local `x` are
+         * different names that happen to be spelt the same */
+        if (e->name)
+            emit_rec(f, SYM_REF, e->name, "m", fn, file, e->line, e->col, 0, 0);
+        break;
+    case EXPR_CALL:
+        if (e->lhs && e->lhs->kind == EXPR_VAR && e->lhs->name) {
+            emit_rec(f, SYM_REF, e->lhs->name, "c", fn, file,
+                     e->lhs->line, e->lhs->col, 0, 0);
+            for (int i = 0; i < e->nargs; i++)
+                emit_refs_expr(f, e->args[i], fn, file);
+            return;                      /* the callee is already recorded */
+        }
+        break;
+    default:
+        break;
+    }
+    emit_refs_expr(f, e->lhs, fn, file);
+    emit_refs_expr(f, e->rhs, fn, file);
+    for (int i = 0; i < e->nargs; i++)
+        emit_refs_expr(f, e->args[i], fn, file);
+    for (int i = 0; i < e->nelems; i++)
+        emit_refs_expr(f, e->elems[i], fn, file);
+    for (int i = 0; i < e->ngen; i++)
+        emit_refs_expr(f, e->gexprs[i], fn, file);
+}
+
+static void emit_refs(FILE *f, struct stmt *s, const char *fn,
+                      const char *file)
+{
+    for (; s; s = s->next) {
+        emit_refs_expr(f, s->expr, fn, file);
+        emit_refs_expr(f, s->cond, fn, file);
+        emit_refs_expr(f, s->init, fn, file);
+        emit_refs_expr(f, s->step, fn, file);
+        emit_refs(f, s->initdecl, fn, file);
+        emit_refs(f, s->thn, fn, file);
+        emit_refs(f, s->els, fn, file);
+        emit_refs(f, s->body, fn, file);
+    }
+}
+
 static void emit_index(FILE *f, struct unit *u)
 {
     for (struct func *fn = u->funcs; fn; fn = fn->next) {
@@ -519,8 +599,12 @@ static void emit_index(FILE *f, struct unit *u)
         for (int i = 0; i < fn->nparams; i++)
             if (fn->params[i])
                 emit_rec(f, SYM_PARAM, fn->params[i], ty_name(fn->param_tys[i]),
-                         fn->name, fn->file, fn->line, 1, fn->line, end);
+                         fn->name, fn->file,
+                         fn->param_lines[i] ? fn->param_lines[i] : fn->line,
+                         fn->param_cols[i] ? fn->param_cols[i] : 1,
+                         fn->line, end);
         emit_locals(f, fn->body, fn->name, fn->file, fn->line, end);
+        emit_refs(f, fn->body, fn->name, fn->file);
     }
     for (struct global *g = u->globals; g; g = g->next)
         if (!g->absorbed)
@@ -975,9 +1059,111 @@ static const char *const c_keywords[] = {
     "_Atomic", "_Bool", "_Generic", "_Noreturn", "_Static_assert",
 };
 
+/* On an `#include` line: the headers the compiler would actually search
+ * for, from the same -I list the index was built with, plus the document's
+ * own directory. A name offered here is a name that will resolve. */
+static int include_context(struct doc *d, int line, int ch, char *pre,
+                           size_t cap)
+{
+    int len = 0;
+    const char *lp = doc_line(d, line, &len);
+    if (!lp) return 0;
+    if (ch > len) ch = len;
+    int i = 0;
+    while (i < ch && (lp[i] == ' ' || lp[i] == '\t')) i++;
+    if (i >= ch || lp[i] != '#') return 0;
+    i++;
+    while (i < ch && (lp[i] == ' ' || lp[i] == '\t')) i++;
+    if (ch - i < 7 || strncmp(lp + i, "include", 7)) return 0;
+    i += 7;
+    while (i < ch && (lp[i] == ' ' || lp[i] == '\t')) i++;
+    if (i >= ch || (lp[i] != '<' && lp[i] != '"')) return 0;
+    i++;
+    size_t n = (size_t)(ch - i);
+    if (n >= cap) n = cap - 1;
+    memcpy(pre, lp + i, n);
+    pre[n] = 0;
+    return 1;
+}
+
+static void complete_includes(struct jv *id, struct doc *d, const char *pre)
+{
+    /* the same directories the child searches, in the same order */
+    const char *dirs[64];
+    int nd = 0;
+    char selfdir[4096] = ".";
+    char *slash = strrchr(d->path, '/');
+    if (slash)
+        snprintf(selfdir, sizeof selfdir, "%.*s",
+                 (int)(slash - d->path), d->path);
+    dirs[nd++] = selfdir;
+    for (int i = 0; i < g_nflags && nd < 60; i++) {
+        if (!strncmp(g_flags[i], "-I", 2) && g_flags[i][2])
+            dirs[nd++] = g_flags[i] + 2;
+        else if (!strncmp(g_flags[i], "-isystem", 8) && g_flags[i][8])
+            dirs[nd++] = g_flags[i] + 8;
+        else if ((!strcmp(g_flags[i], "-I") || !strcmp(g_flags[i], "-isystem"))
+                 && i + 1 < g_nflags)
+            dirs[nd++] = g_flags[++i];
+    }
+    /* a partial path after the quote: `sys/` searches inside it */
+    char sub[1024] = "";
+    const char *tail = pre;
+    const char *last = strrchr(pre, '/');
+    if (last) {
+        size_t n = (size_t)(last - pre) + 1;
+        if (n >= sizeof sub) n = sizeof sub - 1;
+        memcpy(sub, pre, n);
+        sub[n] = 0;
+        tail = last + 1;
+    }
+    struct sb b = { 0, 0, 0 };
+    sb_str(&b, "{\"isIncomplete\":false,\"items\":[");
+    int any = 0, shown = 0;
+    for (int i = 0; i < nd && shown < 400; i++) {
+        char path[4096];
+        snprintf(path, sizeof path, "%s/%s", dirs[i], sub);
+        DIR *dp = opendir(path);
+        if (!dp) continue;
+        struct dirent *de;
+        while ((de = readdir(dp)) && shown < 400) {
+            if (de->d_name[0] == '.') continue;
+            size_t nl = strlen(de->d_name);
+            int isdir = 0;
+            char full[8192];
+            snprintf(full, sizeof full, "%s/%s", path, de->d_name);
+            struct stat st;
+            if (!stat(full, &st) && S_ISDIR(st.st_mode)) isdir = 1;
+            if (!isdir && !(nl > 2 && !strcmp(de->d_name + nl - 2, ".h")) &&
+                !(nl > 4 && !strcmp(de->d_name + nl - 4, ".hpp")) &&
+                strchr(de->d_name, '.'))
+                continue;                /* not a header */
+            if (*tail && strncmp(de->d_name, tail, strlen(tail)))
+                continue;
+            sb_fmt(&b, "%s{\"label\":", any ? "," : "");
+            sb_json_str(&b, de->d_name);
+            /* 17 File, 19 Folder */
+            sb_fmt(&b, ",\"kind\":%d,\"detail\":", isdir ? 19 : 17);
+            sb_json_str(&b, dirs[i]);
+            sb_str(&b, "}");
+            any = 1;
+            shown++;
+        }
+        closedir(dp);
+    }
+    sb_str(&b, "]}");
+    send_result(id, b.p);
+    free(b.p);
+}
+
 static void completion(struct jv *id, struct doc *d, int line, int ch)
 {
     char base[256], tag[256];
+    char pre[1024];
+    if (include_context(d, line, ch, pre, sizeof pre)) {
+        complete_includes(id, d, pre);
+        return;
+    }
     struct sb b = { 0, 0, 0 };
     sb_str(&b, "{\"isIncomplete\":false,\"items\":[");
     int any = 0;
@@ -1001,6 +1187,8 @@ static void completion(struct jv *id, struct doc *d, int line, int ch)
             struct sym *s = &g_syms[i];
             if (s->kind == SYM_MEMBER)
                 continue;                     /* only after a `.` */
+            if (s->kind == SYM_REF)
+                continue;                     /* a use is not a candidate */
             if ((s->kind == SYM_LOCAL || s->kind == SYM_PARAM) &&
                 !(line + 1 >= s->scope_start && line + 1 <= s->scope_end))
                 continue;                     /* not in scope here */
@@ -1032,11 +1220,19 @@ static struct sym *lookup_at(struct doc *d, int line, int ch, char *word,
     struct sym *best = NULL;
     for (int i = 0; i < g_nsyms; i++) {
         struct sym *s = &g_syms[i];
+        if (s->kind == SYM_REF)
+            continue;                    /* a use, not what declares it */
         if (strcmp(s->name, word) != 0)
             continue;
-        if ((s->kind == SYM_LOCAL || s->kind == SYM_PARAM) &&
-            line + 1 >= s->scope_start && line + 1 <= s->scope_end)
-            return s;
+        if (s->kind == SYM_LOCAL || s->kind == SYM_PARAM) {
+            /* Only where it is actually in scope. Another function's local
+             * of the same spelling is a different name entirely, and
+             * falling back to it made `total` at file scope resolve to a
+             * parameter three functions away. */
+            if (line + 1 >= s->scope_start && line + 1 <= s->scope_end)
+                return s;
+            continue;
+        }
         if (!best) best = s;
     }
     return best;
@@ -1079,6 +1275,273 @@ static void definition(struct jv *id, struct doc *d, int line, int ch)
     send_result(id, b.p);
     free(b.p);
     free(uri.p);
+}
+
+/* ---- references, and the rename built on them ----------------------------
+ *
+ * grep finds a name. This finds the THING: the parse recorded every place
+ * an identifier stands in expression position, so a match inside a comment
+ * or a string is not a match at all, a member `p.x` is not the local `x`,
+ * and a local named `n` in one function is not the global `n` used in
+ * another. Renaming is then the same set with a new spelling, which is why
+ * it is safe to offer.
+ */
+
+/* Does a local or parameter of this name shadow the file-scope one, in the
+ * function `owner`, at line `line` (1-based)? */
+static int shadowed(const char *name, const char *owner, int line)
+{
+    if (!owner || !*owner)
+        return 0;
+    for (int i = 0; i < g_nsyms; i++) {
+        struct sym *s = &g_syms[i];
+        if (s->kind != SYM_LOCAL && s->kind != SYM_PARAM)
+            continue;
+        if (strcmp(s->name, name) || strcmp(s->owner, owner))
+            continue;
+        if (line >= s->scope_start && line <= s->scope_end)
+            return 1;
+    }
+    return 0;
+}
+
+/* Every use of what `target` declares. Returns indices into g_syms. */
+static int collect_refs(struct sym *target, int **out)
+{
+    int cap = 32, n = 0;
+    int *v = xmalloc((size_t)cap * sizeof *v);
+    int local = target->kind == SYM_LOCAL || target->kind == SYM_PARAM;
+    int member = target->kind == SYM_MEMBER;
+    for (int i = 0; i < g_nsyms; i++) {
+        struct sym *s = &g_syms[i];
+        if (s->kind != SYM_REF || strcmp(s->name, target->name))
+            continue;
+        int is_member_use = s->detail[0] == 'm';
+        if (member != is_member_use)
+            continue;                    /* `p.x` is not the variable `x` */
+        if (local) {
+            /* the same function, and inside the declaration's scope */
+            if (strcmp(s->owner, target->owner) ||
+                s->line < target->scope_start || s->line > target->scope_end)
+                continue;
+        } else if (!member && shadowed(s->name, s->owner, s->line)) {
+            continue;                    /* a local of that name owns this */
+        }
+        if (n == cap) {
+            cap *= 2;
+            v = xrealloc(v, (size_t)cap * sizeof *v);
+        }
+        v[n++] = i;
+    }
+    *out = v;
+    return n;
+}
+
+/* The URI a symbol's file belongs to: the document itself unless the parse
+ * placed it in a header it could name outright. */
+static void sym_uri(struct sb *b, struct sym *s, struct doc *d)
+{
+    if (s->file[0] == '/')
+        sb_fmt(b, "file://%s", s->file);
+    else
+        sb_fmt(b, "%s", d->uri);
+}
+
+static void one_location(struct sb *b, struct sym *s, struct doc *d, int len)
+{
+    struct sb uri = { 0, 0, 0 };
+    sym_uri(&uri, s, d);
+    sb_str(b, "{\"uri\":");
+    sb_json_str(b, uri.p);
+    int c0 = s->col > 0 ? s->col - 1 : 0;
+    sb_fmt(b, ",\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
+              "\"end\":{\"line\":%d,\"character\":%d}}}",
+           s->line - 1, c0, s->line - 1, c0 + len);
+    free(uri.p);
+}
+
+static void references(struct jv *id, struct doc *d, int line, int ch,
+                       int want_decl)
+{
+    char word[256];
+    struct sym *t = lookup_at(d, line, ch, word, sizeof word);
+    if (!t) { send_result(id, "null"); return; }
+    int *v = NULL;
+    int n = collect_refs(t, &v);
+    int len = (int)strlen(t->name);
+    struct sb b = { 0, 0, 0 };
+    sb_str(&b, "[");
+    int any = 0;
+    if (want_decl && t->line > 0) {
+        one_location(&b, t, d, len);
+        any = 1;
+    }
+    for (int i = 0; i < n; i++) {
+        struct sym *s = &g_syms[v[i]];
+        if (want_decl && t->line == s->line && t->col == s->col)
+            continue;                    /* the declaration, already in */
+        if (any) sb_str(&b, ",");
+        one_location(&b, s, d, len);
+        any = 1;
+    }
+    sb_str(&b, "]");
+    send_result(id, b.p);
+    free(b.p);
+    free(v);
+}
+
+/* The identifier under the cursor, so the editor can show what it is about
+ * to rename before asking for the new spelling. */
+static void prepare_rename(struct jv *id, struct doc *d, int line, int ch)
+{
+    char word[256];
+    struct sym *t = lookup_at(d, line, ch, word, sizeof word);
+    if (!t) { send_result(id, "null"); return; }
+    int len = 0, start = ch;
+    const char *lp = doc_line(d, line, &len);
+    if (!lp) { send_result(id, "null"); return; }
+    if (start > len) start = len;
+    while (start > 0 && ident_char((unsigned char)lp[start - 1]))
+        start--;
+    int end = start;
+    while (end < len && ident_char((unsigned char)lp[end]))
+        end++;
+    struct sb b = { 0, 0, 0 };
+    sb_fmt(&b, "{\"start\":{\"line\":%d,\"character\":%d},"
+               "\"end\":{\"line\":%d,\"character\":%d}}", line, start,
+           line, end);
+    send_result(id, b.p);
+    free(b.p);
+}
+
+static void rename_sym(struct jv *id, struct doc *d, int line, int ch,
+                       const char *newname)
+{
+    char word[256];
+    struct sym *t = lookup_at(d, line, ch, word, sizeof word);
+    if (!t || !newname || !*newname) { send_result(id, "null"); return; }
+    int *v = NULL;
+    int n = collect_refs(t, &v);
+    int len = (int)strlen(t->name);
+    struct sb uri = { 0, 0, 0 };
+    sym_uri(&uri, t, d);
+    struct sb b = { 0, 0, 0 };
+    sb_str(&b, "{\"changes\":{");
+    sb_json_str(&b, uri.p);
+    sb_str(&b, ":[");
+    int any = 0;
+    /* The declaration too: a rename that leaves it behind does not compile. */
+    if (t->line > 0) {
+        sb_fmt(&b, "{\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
+                   "\"end\":{\"line\":%d,\"character\":%d}},\"newText\":",
+               t->line - 1, t->col > 0 ? t->col - 1 : 0,
+               t->line - 1, (t->col > 0 ? t->col - 1 : 0) + len);
+        sb_json_str(&b, newname);
+        sb_str(&b, "}");
+        any = 1;
+    }
+    for (int i = 0; i < n; i++) {
+        struct sym *s = &g_syms[v[i]];
+        if (t->line == s->line && t->col == s->col)
+            continue;
+        if (any) sb_str(&b, ",");
+        int c0 = s->col > 0 ? s->col - 1 : 0;
+        sb_fmt(&b, "{\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
+                   "\"end\":{\"line\":%d,\"character\":%d}},\"newText\":",
+               s->line - 1, c0, s->line - 1, c0 + len);
+        sb_json_str(&b, newname);
+        sb_str(&b, "}");
+        any = 1;
+    }
+    sb_str(&b, "]}}");
+    send_result(id, b.p);
+    free(b.p);
+    free(uri.p);
+    free(v);
+}
+
+/* ---- signature help ------------------------------------------------------
+ *
+ * Inside a call's parentheses: which function, and which argument the
+ * cursor is on. The signature comes from the index, so it is the one the
+ * compiler parsed, parameter names included.
+ */
+static void signature_help(struct jv *id, struct doc *d, int line, int ch)
+{
+    int len = 0;
+    const char *lp = doc_line(d, line, &len);
+    if (!lp) { send_result(id, "null"); return; }
+    if (ch > len) ch = len;
+    /* Walk back to the '(' that is still open, counting the commas at that
+     * depth on the way -- those are the arguments already given. */
+    int depth = 0, comma = 0, i = ch - 1;
+    for (; i >= 0; i--) {
+        char c = lp[i];
+        if (c == ')') depth++;
+        else if (c == '(') { if (depth == 0) break; depth--; }
+        else if (c == ',' && depth == 0) comma++;
+    }
+    if (i < 0) { send_result(id, "null"); return; }
+    int e = i;                           /* the callee's name ends before '(' */
+    while (e > 0 && (lp[e - 1] == ' ' || lp[e - 1] == '\t')) e--;
+    int s0 = e;
+    while (s0 > 0 && ident_char((unsigned char)lp[s0 - 1])) s0--;
+    if (s0 == e) { send_result(id, "null"); return; }
+    char name[256];
+    int nl = e - s0 < (int)sizeof name - 1 ? e - s0 : (int)sizeof name - 1;
+    memcpy(name, lp + s0, (size_t)nl);
+    name[nl] = 0;
+
+    struct sym *fn = NULL;
+    for (int k = 0; k < g_nsyms; k++)
+        if (g_syms[k].kind == SYM_FUNC && !strcmp(g_syms[k].name, name)) {
+            fn = &g_syms[k];
+            break;
+        }
+    if (!fn || !fn->detail[0]) { send_result(id, "null"); return; }
+
+    /* Split the recorded signature's parameter list, so each parameter can
+     * be highlighted in turn. */
+    const char *op = strchr(fn->detail, '(');
+    const char *cp = op ? strrchr(fn->detail, ')') : NULL;
+    struct sb b = { 0, 0, 0 };
+    sb_str(&b, "{\"signatures\":[{\"label\":");
+    sb_json_str(&b, fn->detail);
+    sb_str(&b, ",\"parameters\":[");
+    int np = 0;
+    if (op && cp && cp > op + 1) {
+        const char *p = op + 1;
+        int dep = 0;
+        const char *start = p;
+        for (; p <= cp; p++) {
+            if (p < cp && (*p == '(' || *p == '[')) dep++;
+            else if (p < cp && (*p == ')' || *p == ']')) dep--;
+            if (p == cp || (*p == ',' && dep == 0)) {
+                while (start < p && *start == ' ') start++;
+                const char *end = p;
+                while (end > start && end[-1] == ' ') end--;
+                if (end > start) {
+                    char par[256];
+                    int pl = (int)(end - start);
+                    if (pl > (int)sizeof par - 1) pl = (int)sizeof par - 1;
+                    memcpy(par, start, (size_t)pl);
+                    par[pl] = 0;
+                    if (np) sb_str(&b, ",");
+                    sb_str(&b, "{\"label\":");
+                    sb_json_str(&b, par);
+                    sb_str(&b, "}");
+                    np++;
+                }
+                start = p + 1;
+            }
+        }
+    }
+    if (comma >= np && np > 0)
+        comma = np - 1;                  /* a varargs tail stays on the last */
+    sb_fmt(&b, "]}],\"activeSignature\":0,\"activeParameter\":%d}",
+           np ? comma : 0);
+    send_result(id, b.p);
+    free(b.p);
 }
 
 static void document_symbols(struct jv *id, struct doc *d)
@@ -1168,6 +1631,9 @@ int main(void)
                 "\"completionProvider\":{\"triggerCharacters\":[\".\",\">\"]},"
                 "\"hoverProvider\":true,"
                 "\"definitionProvider\":true,"
+                "\"referencesProvider\":true,"
+                "\"renameProvider\":{\"prepareProvider\":true},"
+                "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},"
                 "\"documentSymbolProvider\":true},"
                 "\"serverInfo\":{\"name\":\"embls\",\"version\":\"0.1\"}}");
         } else if (!strcmp(method, "shutdown")) {
@@ -1194,6 +1660,10 @@ int main(void)
         } else if (!strcmp(method, "textDocument/completion") ||
                    !strcmp(method, "textDocument/hover") ||
                    !strcmp(method, "textDocument/definition") ||
+                   !strcmp(method, "textDocument/references") ||
+                   !strcmp(method, "textDocument/prepareRename") ||
+                   !strcmp(method, "textDocument/rename") ||
+                   !strcmp(method, "textDocument/signatureHelp") ||
                    !strcmp(method, "textDocument/documentSymbol")) {
             struct jv *td = jget(params, "textDocument");
             const char *uri = jstr(td, "uri");
@@ -1209,6 +1679,18 @@ int main(void)
                     completion(id, d, line, ch);
                 else if (!strcmp(method, "textDocument/hover"))
                     hover(id, d, line, ch);
+                else if (!strcmp(method, "textDocument/references")) {
+                    struct jv *ctx = jget(params, "context");
+                    struct jv *inc = ctx ? jget(ctx, "includeDeclaration")
+                                         : NULL;
+                    references(id, d, line, ch,
+                               !inc || inc->kind != JBOOL || inc->bval);
+                } else if (!strcmp(method, "textDocument/prepareRename"))
+                    prepare_rename(id, d, line, ch);
+                else if (!strcmp(method, "textDocument/rename"))
+                    rename_sym(id, d, line, ch, jstr(params, "newName"));
+                else if (!strcmp(method, "textDocument/signatureHelp"))
+                    signature_help(id, d, line, ch);
                 else
                     definition(id, d, line, ch);
             }

@@ -59,6 +59,39 @@ int main()
 }
 EOF2
 
+cat > "$out/refs.c" << 'EOF'
+struct Point { int x; int y; };
+static int total;
+
+int scale(struct Point p, int n)
+{
+    int x = p.x * n;
+    total = total + x;
+    return x;
+}
+
+int other(int total)
+{
+    return total + 1;
+}
+
+int main(void)
+{
+    struct Point q = { 1, 2 };
+    /* total in a comment, and "total" in a string */
+    return scale(q, 3) + total;
+}
+EOF
+
+mkdir -p "$out/inc/sys"
+: > "$out/inc/alpha.h"; : > "$out/inc/beta.h"
+: > "$out/inc/notaheader.txt"; : > "$out/inc/sys/types.h"
+printf -- '-I%s/inc\n' "$(cd "$out" && pwd)" > "$out/compile_flags.txt"
+cat > "$out/inc.c" << 'EOF'
+#include <sys/
+int main(void) { return 0; }
+EOF
+
 cat > "$out/broken.c" << 'EOF'
 struct Point { int x; int y; };
 int area(struct Point p)
@@ -182,6 +215,82 @@ syms3 = [s["name"] for s in ask("textDocument/documentSymbol", uri3, 0, 0)]
 assert "scale" in syms3 and "sum" in syms3, syms3
 print("C++: members after `.` are %s; hover and definition from the C++ parse"
       % ", ".join(items3))
+
+# --- find references: the parse knows a name from a lookalike ------------
+uri4, _ = open_doc(out + "/refs.c")
+
+def refs(line, ch, decl=True):
+    send({"jsonrpc": "2.0", "id": 8, "method": "textDocument/references",
+          "params": {"textDocument": {"uri": uri4},
+                     "position": {"line": line, "character": ch},
+                     "context": {"includeDeclaration": decl}}})
+    return sorted((r["range"]["start"]["line"] + 1,
+                   r["range"]["start"]["character"] + 1)
+                  for r in recv()["result"])
+
+# The global `total`: both uses on line 7, the one on line 20, its own
+# declaration -- and NOT the parameter of other(), NOT the word in the
+# comment, NOT the word inside the string literal.
+g = refs(6, 4)
+assert g == [(2, 1), (7, 5), (7, 13), (20, 26)], g
+print("references to the global 'total': %s" % g)
+
+# The parameter of other() has the same spelling and is a different thing.
+pr = refs(12, 11)
+assert pr == [(11, 15), (13, 12)], pr
+print("references to other()'s parameter 'total': %s -- a different name"
+      % pr)
+
+# A local `x` and the member `p.x` share a spelling too.
+lx = refs(5, 8)
+assert lx == [(6, 9), (7, 21), (8, 12)], lx
+assert (6, 15) not in lx, "p.x was counted as the local x"
+print("references to the local 'x': %s -- `p.x` stays out" % lx)
+
+# --- rename is that set, with a new spelling -----------------------------
+send({"jsonrpc": "2.0", "id": 9, "method": "textDocument/rename",
+      "params": {"textDocument": {"uri": uri4},
+                 "position": {"line": 3, "character": 30},
+                 "newName": "count"}})
+edits = list(recv()["result"]["changes"].values())[0]
+src = open(out + "/refs.c").read().split("\n")
+spans = sorted((e["range"]["start"]["line"], e["range"]["start"]["character"],
+                e["range"]["end"]["character"]) for e in edits)
+assert len(spans) == 2, spans
+for ln, a, b in spans:
+    assert src[ln][a:b] == "n", (ln, a, b, src[ln][a:b])
+print("renaming the parameter 'n' edits exactly the two 'n' tokens, "
+      "including its declaration")
+
+send({"jsonrpc": "2.0", "id": 10, "method": "textDocument/prepareRename",
+      "params": {"textDocument": {"uri": uri4},
+                 "position": {"line": 6, "character": 6}}})
+pr = recv()["result"]
+assert src[pr["start"]["line"]][pr["start"]["character"]:
+                                pr["end"]["character"]] == "total", pr
+print("prepareRename returns the identifier's own span")
+
+# --- signature help ------------------------------------------------------
+send({"jsonrpc": "2.0", "id": 11, "method": "textDocument/signatureHelp",
+      "params": {"textDocument": {"uri": uri4},
+                 "position": {"line": 19, "character": 20}}})
+sh = recv()["result"]
+sig = sh["signatures"][0]
+assert sig["label"] == "int scale(struct Point p, int n)", sig["label"]
+assert [p["label"] for p in sig["parameters"]] == \
+       ["struct Point p", "int n"], sig["parameters"]
+assert sh["activeParameter"] == 1, sh
+print("signature help inside scale(q, |): %s, on parameter %d"
+      % (sig["label"], sh["activeParameter"]))
+
+# --- #include completion, from the real search path ----------------------
+uri5, _ = open_doc(out + "/inc.c")
+send({"jsonrpc": "2.0", "id": 12, "method": "textDocument/completion",
+      "params": {"textDocument": {"uri": uri5},
+                 "position": {"line": 0, "character": 14}}})
+inc = sorted(i["label"] for i in recv()["result"]["items"])
+assert inc == ["types.h"], inc
+print("completion after `#include <sys/`: %s" % ", ".join(inc))
 
 send({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": {}})
 recv()

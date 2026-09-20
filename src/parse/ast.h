@@ -286,6 +286,9 @@ struct func {
     struct type *ret_ty;
     int nparams;
     const char *params[MAX_PARAMS]; /* names; NULL in unnamed prototypes */
+    /* where each name was written -- a tool that renames a parameter has
+     * to edit the name, not the function's first column */
+    int param_lines[MAX_PARAMS], param_cols[MAX_PARAMS];
     struct type *param_tys[MAX_PARAMS];
     struct type **var_tys;          /* sema: type of every var slot */
     int *var_aligns;                /* sema: __attribute__((aligned(N))) per

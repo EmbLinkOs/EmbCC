@@ -36,6 +36,11 @@ struct parser {
     int vla_ok;           /* inside a function (its parameters or body) and
                            * not in a struct body: a non-constant array size
                            * makes a VLA rather than an error */
+    /* Where the last declarator's name token was, so a parameter can be
+     * pointed AT rather than at the function's line -- an editor renaming
+     * one has to edit the name, not the first column of the signature. */
+    int decl_name_line, decl_name_col;
+    int fn_plines[MAX_PARAMS], fn_pcols[MAX_PARAMS];
     const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
                            * function declarator inside parentheses
                            * (`(*f(int a))[3]`) */
@@ -377,6 +382,8 @@ static struct type *declarator(struct parser *ps, struct type *base,
     }
     if (cur(ps)->kind == TOK_IDENT) {
         *name_out = cur(ps)->text;
+        ps->decl_name_line = cur(ps)->line;
+        ps->decl_name_col = cur(ps)->col;
         advance(ps);
     }
     if (nested && cur(ps)->kind == TOK_LPAREN)
@@ -453,8 +460,13 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                            tok_describe(cur(ps)));
             const char *pname;
             struct type *t = parse_declarator(ps, spec, &pname);
-            if (names && n < MAX_PARAMS)
+            if (names && n < MAX_PARAMS) {
                 names[n] = pname;
+                if (names == ps->fn_pnames) {
+                    ps->fn_plines[n] = ps->decl_name_line;
+                    ps->fn_pcols[n] = ps->decl_name_col;
+                }
+            }
             if (t->kind == TY_ARRAY)
                 t = ty_ptr(t->pointee); /* C's adjustment */
             if (t->kind == TY_FUNC)
@@ -2629,6 +2641,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                 for (int i = 0; i < gt->nptypes; i++) {
                     f->param_tys[i] = gt->ptypes[i];
                     f->params[i] = ps->fn_pnames[i];
+                    f->param_lines[i] = ps->fn_plines[i];
+                    f->param_cols[i] = ps->fn_pcols[i];
                 }
                 f->is_varargs = gt->is_varargs;
                 f->sret_first = gt->sret_first;
@@ -2715,6 +2729,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                            "more than %d parameters", MAX_PARAMS);
             f->param_tys[f->nparams] = pt;
             f->params[f->nparams] = pname; /* NULL fine in prototypes */
+            f->param_lines[f->nparams] = pname ? ps->decl_name_line : 0;
+            f->param_cols[f->nparams] = pname ? ps->decl_name_col : 0;
             f->nparams++;
             if (cur(ps)->kind != TOK_COMMA)
                 break;

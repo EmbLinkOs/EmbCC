@@ -351,3 +351,73 @@ affecting diagnostics that already shipped:
 And one gap: a trailing `__attribute__((noreturn))` — GCC's usual spelling
 — was parsed at `fn_tail` and then dropped; only `weak` was copied onto the
 function node. Both `noreturn` and `nothrow` now survive it.
+
+## T5 — references, rename, signature help, `#include`
+
+grep finds a *name*. An editor needs the *thing*. The difference shows up
+the moment two things share a spelling, which in C they constantly do: a
+member `p.x` and a local `x`, a parameter `total` in one function and the
+file-scope `total` in another, the word `total` in a comment and inside a
+string literal.
+
+So the index now records, besides every declaration, every **place a name
+is used** — emitted from the parse tree, not from the text. An identifier
+inside a comment or a string is not a node, so it cannot be found; a member
+name after `.` is a different node from a variable of the same spelling, so
+the two never collide. On this file:
+
+```c
+struct Point { int x; int y; };
+static int total;
+int scale(struct Point p, int n) {
+    int x = p.x * n;
+    total = total + x;
+    return x;
+}
+int other(int total) { return total + 1; }
+int main(void) {
+    /* total in a comment, and "total" in a string */
+    return scale(q, 3) + total;
+}
+```
+
+references on the file-scope `total` gives its declaration and the three
+real uses, and leaves out `other`'s parameter, the comment and the string.
+references on that parameter gives two locations, in `other` alone.
+references on the local `x` gives three, and `p.x` is not among them.
+
+**Rename is that set with a new spelling**, which is the only reason it is
+safe to offer: it is exactly as correct as the reference list, and it
+includes the declaration, because a rename that leaves the declaration
+behind does not compile.
+
+**Signature help** reads the signature out of the index — the one the
+parser built, parameter names and all — splits its parameter list, and
+counts the commas at the cursor's paren depth to say which argument is
+being typed.
+
+**`#include` completion** lists the headers under the same `-I` and
+`-isystem` directories the index was built with, so a name it offers is a
+name that will resolve. A partial path (`sys/`) searches inside it.
+
+C++ gets the other five answers but not these three: `struct cexpr` carries
+a line and no column, and a rename needs the column. That is the next step
+there, not a limitation of the approach — the C++ front end resolves a name
+to its declaration *pointer* at parse time, which is stronger than the
+name-and-scope matching the C side does.
+
+**Three bugs came out of building it**, all older than the feature:
+
+- `lookup_at` fell back to a local or parameter that was **not in scope**
+  when nothing else matched. Hovering the file-scope `total` reported the
+  parameter of a function three declarations away. An out-of-scope local is
+  now skipped outright, which also fixes hover and go-to-definition.
+- A parameter was indexed at its **function's line, column 1**, because
+  `struct func` never recorded where each name was written. Renaming one
+  would have overwritten the first character of the signature. The parser
+  now records each parameter name's own line and column, `merge_decls`
+  carries the definition's over, and the rename edits exactly the right
+  bytes.
+- `flags_load` ran on every keystroke and **appended**, so the `-I` list
+  grew by a full copy per edit until it hit its 64-entry cap and silently
+  dropped whatever came after. It clears first now.
