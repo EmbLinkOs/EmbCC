@@ -92,6 +92,7 @@ static void print_options(FILE *out)
       "  -fdiagnostics-color=auto|always|never\n"
       "  -fmax-errors=N         stop after N\n"
       "  -w                     no warnings;  -Werror  warnings are errors\n"
+      "  -Wall, -Wextra, -Wname, -Wno-name (see --help-warnings)\n"
       "\ndependencies\n"
       "  -M, -MM                write the make rule instead of compiling\n"
       "  -MD, -MMD              write it beside the object\n"
@@ -859,6 +860,17 @@ int main(int argc, char **argv)
             print_options(stdout);
             return 0;
         }
+        if (strcmp(argv[i], "--help-warnings") == 0) {
+            printf("the warnings EmbCC has, and the group each is in:\n\n");
+            for (int k = 0; k < diag_warning_count(); k++) {
+                int g = diag_warning_group(k);
+                printf("  -W%-22s %s\n", diag_warning_name(k),
+                       g == 1 ? "(-Wall)" : g == 2 ? "(-Wextra)" : "");
+            }
+            printf("\nEach can be turned off with -Wno-NAME, and every one\n"
+                   "prints its name, so a diagnostic says what controls it.\n");
+            return 0;
+        }
         if (strcmp(argv[i], "--explain") == 0)
             return explain_print(i + 1 < argc ? argv[i + 1] : NULL);
         if (strncmp(argv[i], "--explain=", 10) == 0)
@@ -1004,9 +1016,20 @@ int main(int argc, char **argv)
             diag_set_color(0);
         } else if (strncmp(argv[i], "-fmax-errors=", 13) == 0) {
             diag_set_max_errors(atoi(argv[i] + 13));
+        } else if (strcmp(argv[i], "-Wsystem-headers") == 0) {
+            diag_set_warn_system(1);
+        } else if (strcmp(argv[i], "-Wall") == 0) {
+            diag_enable_group(1, 0);
+        } else if (strcmp(argv[i], "-Wextra") == 0 ||
+                   strcmp(argv[i], "-W") == 0) {
+            diag_enable_group(0, 1);
+        } else if (strncmp(argv[i], "-Wno-", 5) == 0) {
+            diag_enable_warning(argv[i] + 5, 0);
         } else if (argv[i][0] == '-' && argv[i][1] == 'W') {
-            /* other warning options: EmbCC has one level for now (T4 gives
-             * -Wall/-Wextra real groups), so these say nothing to it */
+            /* -Wname turns one on; a name EmbCC does not have is accepted
+             * and ignored, so a build that passes GCC's whole warning
+             * vocabulary still compiles. */
+            diag_enable_warning(argv[i] + 2, 1);
         } else if (strncmp(argv[i], "-O", 2) == 0) {
             /* -O / -O1 / -O2 / -O3 enable the optimizer (one level for now);
              * -O0 turns it off. Anything else after -O is an error. */
@@ -1096,6 +1119,18 @@ int main(int argc, char **argv)
         return 1;
     }
     lang_cxx = lang >= 0 ? lang : has_cxx_suffix(input);
+    if (lang_cxx) {
+        /* These analyses run in the C front end, over the C that C++ lowers
+         * to — where a template instantiated from a header is attributed to
+         * the .cc that instantiated it. A warning pointing at the wrong line
+         * is worse than none, so they stay C-only until the C++ front end
+         * grows its own (docs/TOOLING.md T4). */
+        diag_enable_warning("unused-variable", 0);
+        diag_enable_warning("unused-parameter", 0);
+        diag_enable_warning("unused-function", 0);
+        diag_enable_warning("shadow", 0);
+        diag_enable_warning("sign-compare", 0);
+    }
 
     /* EmbCC's own freestanding headers (stddef, stdarg, stdbool, float)
      * ship beside the binary, so <stdarg.h> resolves with no -I — exactly

@@ -1178,6 +1178,9 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
         char *ipath = xstrndup(path, strlen(path));
         diag_register_source(ipath, text);   /* header errors show their lines */
         record_dep(ipath, found_idx);        /* -M: what this file needed */
+        if (g_ndeps && g_deps[g_ndeps - 1].system &&
+            !strcmp(g_deps[g_ndeps - 1].path, ipath))
+            diag_mark_system(ipath);         /* its warnings are not ours */
         int was = g_in_system;
         g_in_system = g_ndeps && g_deps[g_ndeps - 1].system &&
                       strcmp(g_deps[g_ndeps - 1].path, ipath) == 0;

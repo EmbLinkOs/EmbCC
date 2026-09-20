@@ -53,6 +53,8 @@ took target-specific work, or that a reader might doubt.
 | Dependencies: `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`, `-MP` (the rule gcc writes, and `make` reads) | ✓ | ✓ |
 | `-fsyntax-only`, `--help`, `-dumpmachine` | ✓ | ✓ |
 | `embls`, the language server (LSP: diagnostics, completion, hover, definition, symbols) | ✓ | ✓ |
+| Warnings: `-Wall`/`-Wextra` groups over real analyses (`-Wunused-variable`, `-Wunused-function`, `-Wunused-parameter`, `-Wshadow`, `-Wsign-compare`), `-Wno-NAME`, `-Wsystem-headers`, `--help-warnings` | ✓ C | ✓ C |
+| `--fix` (apply fix-its), `-fdiagnostics-parseable-fixits`, `--explain ID` | ✓ | ✓ |
 | Preprocessor (full, incl. `#include_next`), newlib headers | ✓ | ✓ |
 
 ## C++

@@ -21,6 +21,9 @@
 struct vardef {
     const char *name;
     struct type *ty;
+    int used;           /* an expression read or wrote it (-Wunused-variable) */
+    int is_param;       /* a parameter, not a local (-Wunused-parameter) */
+    int line, col;      /* where it was declared, for the warning */
     struct global *g;   /* non-NULL for a static local: it lives in
                          * static storage, not the frame */
     int active;         /* 0 once its block has closed */
@@ -43,6 +46,16 @@ struct scope {
  * once did (docs/TOOLING.md T2). */
 static jmp_buf *g_recover;
 static int g_sema_errors;
+
+/* The file whose code is being checked: a function defined in a header
+ * belongs to that header, and its diagnostics must say so — the unit's own
+ * name would send the reader to the #include line. */
+static const char *g_file;
+
+static const char *diag_file(struct unit *u)
+{
+    return g_file ? g_file : u->file;
+}
 
 /* Names already reported undeclared in this function: a name misspelt once
  * is usually used several times, and one diagnostic per use is noise. */
@@ -72,7 +85,7 @@ static void sema_error_id(struct unit *u, int line, int col, const char *id,
 {
     va_list ap;
     va_start(ap, fmt);
-    diag_verror_at(u->file, line, col, fmt, ap);
+    diag_verror_at(diag_file(u), line, col, fmt, ap);
     va_end(ap);
     diag_set_id(id);
     g_sema_errors++;
@@ -88,7 +101,7 @@ static void sema_error_at(struct unit *u, int line, int col,
 {
     va_list ap;
     va_start(ap, fmt);
-    diag_verror_at(u->file, line, col, fmt, ap);
+    diag_verror_at(diag_file(u), line, col, fmt, ap);
     va_end(ap);
     g_sema_errors++;
     if (g_recover)
@@ -102,7 +115,7 @@ static void sema_error_line(struct unit *u, int line, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    diag_verror_at(u->file, line, 0, fmt, ap);
+    diag_verror_at(diag_file(u), line, 0, fmt, ap);
     va_end(ap);
     g_sema_errors++;
     if (g_recover)
@@ -139,9 +152,35 @@ static int scope_add(struct scope *sc, const char *name, struct type *ty,
     sc->vars[sc->n].ty = ty;
     sc->vars[sc->n].g = g;
     sc->vars[sc->n].active = 1;
+    sc->vars[sc->n].used = 0;
+    sc->vars[sc->n].is_param = 0;
+    sc->vars[sc->n].line = 0;
+    sc->vars[sc->n].col = 0;
     sc->vars[sc->n].asm_reg = NULL;
     sc->vars[sc->n].user_align = 0;
     return sc->n++;
+}
+
+/* -Wshadow: a declaration that hides one still in scope. Reported where
+ * the new one is, with a note at the one it hides — the pair is the point.
+ * A name that shadows nothing costs a scan of the active entries. */
+static void warn_shadow(struct unit *u, struct scope *sc, const char *name,
+                        int line, int col)
+{
+    if (!diag_warning_enabled("shadow") || !name || name[0] == '<')
+        return;
+    for (int i = sc->n - 1; i >= 0; i--)
+        if (sc->vars[i].active && sc->vars[i].name &&
+            strcmp(sc->vars[i].name, name) == 0) {
+            diag_warn_opt(diag_file(u), line, col, "shadow",
+                          "declaration of '%s' shadows %s", name,
+                          sc->vars[i].is_param ? "a parameter"
+                                               : "an earlier one");
+            if (sc->vars[i].line)
+                diag_note_at(diag_file(u), sc->vars[i].line, sc->vars[i].col,
+                             "the one it hides is here");
+            return;
+        }
 }
 
 /* Returns the canonical node for a name: the first declaration, into
@@ -967,6 +1006,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     case EXPR_VAR: {
         int i = scope_find(sc, e->name);
         if (i >= 0) {
+            sc->vars[i].used = 1;     /* -Wunused-variable: it was read */
             e->var_index = i;
             e->ty = sc->vars[i].ty;
             e->gref = sc->vars[i].g; /* set for a static local */
@@ -1029,16 +1069,16 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     exit(1);
                 }
                 const char *sug = suggest_name(u, sc, e->name);
-                diag_error_at(u->file, e->line, e->col,
+                diag_error_at(diag_file(u), e->line, e->col,
                               "'%s' is not declared in '%s' — for a call, "
                               "add a prototype or define it first",
                               e->name, f->name);
                 diag_set_id("E0001");
                 if (sug) {
-                    diag_note_at(u->file, e->line, e->col,
+                    diag_note_at(diag_file(u), e->line, e->col,
                                  "did you mean '%s'?", sug);
                     /* the edit itself, for whoever reads the JSON */
-                    diag_fixit_at(u->file, e->line, e->col,
+                    diag_fixit_at(diag_file(u), e->line, e->col,
                                   e->col + (int)strlen(e->name), sug);
                 }
                 g_sema_errors++;
@@ -1615,6 +1655,22 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 need_arith(u, e->lhs, "comparison");
                 need_arith(u, e->rhs, "comparison");
                 struct type *ct = arith_common(lt, rt);
+                /* -Wsign-compare: the conversion the standard prescribes
+                 * turns the signed side unsigned, so a negative value
+                 * compares as a very large one. Only worth saying when the
+                 * signed side really can be negative — a constant that is
+                 * not is converted at compile time and means what it
+                 * says. */
+                if (ty_is_integer(lt) && ty_is_integer(rt) &&
+                    ty_signed_int(lt) != ty_signed_int(rt) &&
+                    !ty_signed_int(ct)) {
+                    struct expr *se = ty_signed_int(lt) ? e->lhs : e->rhs;
+                    long v;
+                    if (!(const_fold(se, &v) && v >= 0))
+                        diag_warn_opt(diag_file(u), e->line, e->col, "sign-compare",
+                                      "comparison between %s and %s",
+                                      ty_name(lt), ty_name(rt));
+                }
                 e->lhs = mk_cast(e->lhs, ct);
                 e->rhs = mk_cast(e->rhs, ct);
             }
@@ -2899,6 +2955,8 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                         *gt = g;
                     }
                     s->var_index = scope_add(sc, s->name, s->dty, NULL);
+                    sc->vars[s->var_index].line = s->line;
+                    sc->vars[s->var_index].col = s->col;
                     sc->vars[s->var_index].g = g;
                     s->sglob = g;   /* irgen: this decl carries no local storage */
                 }
@@ -2949,7 +3007,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 sema_error_at(u, s->line, s->col,
                            "'%s' is already declared in this block",
                            s->name);
+            warn_shadow(u, sc, s->name, s->line, s->col);
             s->var_index = scope_add(sc, s->name, s->dty, NULL);
+            sc->vars[s->var_index].line = s->line;
+            sc->vars[s->var_index].col = s->col;
             sc->vars[s->var_index].asm_reg = s->asm_reg;
             sc->vars[s->var_index].user_align = s->user_align;
             /* A static local has static storage, so a compound literal in its
@@ -3281,6 +3342,8 @@ static int list_returns(struct stmt *s)
 static void check_func(struct unit *u, struct func *f)
 {
     g_nundeclared = 0;           /* a fresh function: report its names again */
+    const char *savefile = g_file;
+    g_file = f->file ? f->file : u->file;
     struct scope sc = { 0, 0, 0, 0 };
     g_cx_sc = &sc;       /* complex lowering adds its temps here */
 
@@ -3289,7 +3352,11 @@ static void check_func(struct unit *u, struct func *f)
             sema_error_line(u, f->line,
                        "duplicate parameter '%s' in '%s'",
                        f->params[i], f->name);
-        scope_add(&sc, f->params[i], f->param_tys[i], NULL);
+        {
+            int pi = scope_add(&sc, f->params[i], f->param_tys[i], NULL);
+            sc.vars[pi].is_param = 1;
+            sc.vars[pi].line = f->line;
+        }
     }
     /* `int a[n][m]` arrives as int (*)[m]: its row size is computed at
      * entry from the parameters before it */
@@ -3312,6 +3379,26 @@ static void check_func(struct unit *u, struct func *f)
         exit(1);
     }
 
+    /* -Wunused-variable / -Wunused-parameter: nothing read it and nothing
+     * wrote it, in the whole function. A name the compiler invented for
+     * its own lowering (<vla size>, <compound literal>) is not the
+     * programmer's and is never reported. */
+    for (int i = 0; i < sc.n; i++) {
+        struct vardef *v = &sc.vars[i];
+        if (v->used || !v->name || v->name[0] == '<' || !v->line)
+            continue;
+        /* Names the C++ lowering invents (`this`, __cx_*) are EmbCC's, not
+         * the programmer's: reporting them would be reporting ourselves. */
+        if (!strcmp(v->name, "this") || !strncmp(v->name, "__cx_", 5))
+            continue;
+        if (v->is_param)
+            diag_warn_opt(diag_file(u), v->line, v->col, "unused-parameter",
+                          "unused parameter '%s'", v->name);
+        else
+            diag_warn_opt(diag_file(u), v->line, v->col, "unused-variable",
+                          "unused variable '%s'", v->name);
+    }
+
     f->nvars = sc.n;
     f->var_tys = xmalloc((size_t)(sc.n ? sc.n : 1) * sizeof *f->var_tys);
     f->var_aligns = xmalloc((size_t)(sc.n ? sc.n : 1) * sizeof *f->var_aligns);
@@ -3327,6 +3414,7 @@ static void check_func(struct unit *u, struct func *f)
     }
     free(sc.vars);
     g_cx_sc = NULL;
+    g_file = savefile;
 }
 
 /* Merge every later declaration of a name into its first (canonical)
@@ -3472,6 +3560,15 @@ void sema_check(struct unit *u)
             check_func(u, canon);
         }
     }
+
+    /* -Wunused-function: a static nobody calls is dead in this unit, and
+     * no other unit can reach it. (A non-static one may be called from
+     * anywhere, so it is never reported.) */
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && f->has_defn && f->is_static && !f->used &&
+            f->name && strcmp(f->name, "main") != 0)
+            diag_warn_opt(f->file ? f->file : u->file, f->line, 0,
+                          "unused-function", "unused function '%s'", f->name);
 
     /* An undefined non-static is an external: the linker gets a chance.
      * An undefined static has no linker to save it — refuse now instead

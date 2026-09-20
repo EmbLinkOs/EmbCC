@@ -63,6 +63,38 @@ static const char *src_line(const char *file, int line, int *len_out)
     return p;
 }
 
+/* ---- system headers ---------------------------------------------------
+ *
+ * A warning about code in a header the project did not write is not
+ * something its author can act on, so — as GCC does — warnings from system
+ * headers are dropped unless -Wsystem-headers asks for them. Errors are
+ * never dropped: those stop the build wherever they are. */
+static const char **g_sysfiles;
+static int g_nsysfiles, g_capsysfiles;
+static int g_warn_system;
+
+void diag_mark_system(const char *file)
+{
+    if (g_nsysfiles == g_capsysfiles) {
+        g_capsysfiles = g_capsysfiles ? g_capsysfiles * 2 : 32;
+        g_sysfiles = xrealloc(g_sysfiles,
+                              (size_t)g_capsysfiles * sizeof *g_sysfiles);
+    }
+    g_sysfiles[g_nsysfiles++] = file;
+}
+
+void diag_set_warn_system(int on) { g_warn_system = on; }
+
+static int in_system_header(const char *file)
+{
+    if (g_warn_system || !file)
+        return 0;
+    for (int i = 0; i < g_nsysfiles; i++)
+        if (!strcmp(g_sysfiles[i], file))
+            return 1;
+    return 0;
+}
+
 /* ---- macro-expansion registry ----
  *
  * The parser runs on preprocessed text, so an error inside a macro expansion is
@@ -584,6 +616,67 @@ static void install_flush(void)
     }
 }
 
+/* ---- warnings a -W option controls ---------------------------------------
+ *
+ * Each has a name, the groups it belongs to, and whether it is on. A
+ * warning that is off is not recorded at all — no cost beyond the check.
+ * The name is printed with the diagnostic, as GCC prints it, so the reader
+ * knows what to turn off (or what to look up). */
+struct warn_opt {
+    const char *name;
+    int on;
+    int in_wall, in_wextra;
+};
+
+static struct warn_opt g_warns[] = {
+    /* name                  on  -Wall -Wextra */
+    { "unused-variable",      0,  1,    0 },
+    { "unused-parameter",     0,  0,    1 },
+    { "unused-function",      0,  1,    0 },
+    { "shadow",               0,  0,    0 },
+    { "sign-compare",         0,  0,    1 },
+};
+static const int g_nwarns = (int)(sizeof g_warns / sizeof g_warns[0]);
+
+static struct warn_opt *warn_find(const char *name)
+{
+    for (int i = 0; i < g_nwarns; i++)
+        if (!strcmp(g_warns[i].name, name))
+            return &g_warns[i];
+    return NULL;
+}
+
+int diag_warning_enabled(const char *name)
+{
+    struct warn_opt *w = warn_find(name);
+    return w ? w->on : 0;
+}
+
+/* -Wname / -Wno-name. An unknown name is accepted and ignored: a build
+ * that passes GCC's whole warning vocabulary must still compile. */
+void diag_enable_warning(const char *name, int on)
+{
+    struct warn_opt *w = warn_find(name);
+    if (w)
+        w->on = on;
+}
+
+/* -Wall / -Wextra: the groups, as GCC draws them. */
+void diag_enable_group(int wall, int wextra)
+{
+    for (int i = 0; i < g_nwarns; i++)
+        if ((wall && g_warns[i].in_wall) || (wextra && g_warns[i].in_wextra))
+            g_warns[i].on = 1;
+}
+
+/* The names, for --help. */
+int diag_warning_count(void) { return g_nwarns; }
+const char *diag_warning_name(int i) { return g_warns[i].name; }
+int diag_warning_group(int i)
+{
+    return g_warns[i].in_wall ? 1 : g_warns[i].in_wextra ? 2 : 0;
+}
+
 /* ---- the API the front ends call ---- */
 
 void diag_set_format(int format) { g_format = format; }
@@ -677,13 +770,36 @@ void diag_note_at(const char *file, int line, int col, const char *fmt, ...)
 void diag_warn_at(const char *file, int line, int col, const char *fmt, ...)
 {
     install_flush();
-    if (g_no_warnings)
+    if (g_no_warnings || in_system_header(file))
         return;
     va_list ap;
     va_start(ap, fmt);
     char *msg = vfmt(fmt, ap);
     va_end(ap);
     new_diag(g_werror ? DIAG_ERROR : DIAG_WARNING, file, line, col, msg);
+    if (g_werror)
+        check_max_errors();
+}
+
+/* A warning the option `name` controls: silent unless it is on, and
+ * printed with "[-Wname]" so the reader knows which it is. */
+void diag_warn_opt(const char *file, int line, int col, const char *name,
+                   const char *fmt, ...)
+{
+    install_flush();
+    if (g_no_warnings || !diag_warning_enabled(name) ||
+        in_system_header(file))
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    char *msg = vfmt(fmt, ap);
+    va_end(ap);
+    struct diag *d = new_diag(g_werror ? DIAG_ERROR : DIAG_WARNING, file,
+                              line, col, msg);
+    /* the option as the reader would type it */
+    char *opt = xmalloc(strlen(name) + 4);
+    sprintf(opt, "-W%s", name);
+    d->option = opt;
     if (g_werror)
         check_max_errors();
 }

@@ -43,6 +43,21 @@ void diag_note_at(const char *file, int line, int col, const char *fmt, ...);
 /* A "warning:" at a location. Does not exit. */
 void diag_warn_at(const char *file, int line, int col, const char *fmt, ...);
 
+/* A warning that a -W option controls: silent unless that option is on,
+ * and printed with "[-Wname]". */
+void diag_warn_opt(const char *file, int line, int col, const char *name,
+                   const char *fmt, ...);
+int diag_warning_enabled(const char *name);
+/* Warnings from this file are dropped (a system header), unless
+ * -Wsystem-headers. */
+void diag_mark_system(const char *file);
+void diag_set_warn_system(int on);
+void diag_enable_warning(const char *name, int on);   /* -Wname / -Wno-name */
+void diag_enable_group(int wall, int wextra);         /* -Wall / -Wextra */
+int diag_warning_count(void);                         /* for --help */
+const char *diag_warning_name(int i);
+int diag_warning_group(int i);                        /* 0 none, 1 all, 2 extra */
+
 /* An error whose arguments a front end already gathered (parse.c builds its
  * own error on top of this one). Needs <stdarg.h> included first. */
 #ifdef va_arg
