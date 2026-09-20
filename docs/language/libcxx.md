@@ -50,8 +50,8 @@ those exact two members in that order.
 ## The standard library, so far
 
 `<type_traits>`, `<utility>`, `<limits>`, `<iterator>`, `<memory>`,
-`<functional>`, `<array>`, `<vector>`, `<string>`, `<stdexcept>`, and the
-`<c*>` wrappers
+`<functional>`, `<array>`, `<vector>`, `<string>`, `<algorithm>`,
+`<stdexcept>`, and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
@@ -87,6 +87,21 @@ the three words, it has to re-aim the pointer, and a raw `const C *`
 argument may point into the buffer that a reallocation is about to free.
 `a += a` is the case that finds it, and the test does exactly that at
 the short/long boundary.
+
+**`sort` is an introsort**, because the standard requires O(*n* log *n*)
+in the *worst* case and plain quicksort does not give it. The recursion
+depth is counted and heapsort takes over past 2 log *n* — quicksort's
+speed with heapsort's guarantee — and below sixteen elements it switches
+to insertion sort, where the constant factors win. The test sorts the
+three patterns that turn a naive quicksort quadratic (already sorted,
+reversed, all equal) at *n* = 2000.
+
+One detail in that header is worth singling out because no test of a
+*value* can see it: `min` and `max` both return their **first** argument
+when the two are equivalent, and `max_element` returns the **first**
+maximum. Algorithms built on them inherit that tie behaviour, and it is
+what decides whether a sort is stable. Writing this, the code was right
+and the comment beside it was wrong; g++ settled it.
 
 Two more things are worth reading for the reasoning rather than the
 code. `<memory>`'s `uninitialized_*` algorithms all share one shape: if
