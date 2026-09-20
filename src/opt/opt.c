@@ -1908,6 +1908,78 @@ static void inline_unit(struct ir_unit *iu)
     }
 }
 
+/* ---- the CFG, as a report (opt.h, vision §18) ----
+ *
+ * Built by build_cfg, the same function mem2reg, global CSE and SCCP use,
+ * so what this prints is the graph the passes reason about. Dominators are
+ * computed too, because "which block dominates which" is the question a
+ * mem2reg or a CSE bug always turns into.
+ */
+void opt_cfg_dump(struct outbuf *b, struct ir_func *fn)
+{
+    if (fn->nins == 0) {
+        ob_fmt(b, "function %s: no instructions\n", fn->name);
+        return;
+    }
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    int *order = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *order), norder;
+    compute_rpo(bb, nbb, order, &norder);
+    int reachable = norder == nbb;
+    if (reachable)
+        compute_idom(bb, order, norder);
+
+    ob_fmt(b, "function %s: %d blocks, %d instructions\n",
+           fn->name, nbb, fn->nins);
+    if (!reachable)
+        ob_fmt(b, "  (%d block%s unreachable: dominators not computed)\n",
+               nbb - norder, nbb - norder == 1 ? "" : "s");
+    for (int i = 0; i < nbb; i++) {
+        ob_fmt(b, "  B%-3d ins [%d,%d)", i, bb[i].start, bb[i].end);
+        /* The label a block carries, when it has one: it is what the
+         * instruction dump calls it, so the two can be read together. */
+        if (bb[i].end > bb[i].start && fn->ins[bb[i].start].op == IR_LABEL)
+            ob_fmt(b, " L%d", fn->ins[bb[i].start].label);
+        if (bb[i].end > bb[i].start) {
+            const struct ir_ins *t = &fn->ins[bb[i].end - 1];
+            ob_fmt(b, "  ends %s", ir_opname(t->op));
+            if (t->line)
+                ob_fmt(b, " (line %d)", t->line);
+        }
+        ob_str(b, "\n");
+        if (bb[i].npred) {
+            ob_str(b, "       from");
+            for (int k = 0; k < bb[i].npred; k++)
+                ob_fmt(b, " B%d", bb[i].pred[k]);
+            ob_str(b, "\n");
+        }
+        if (bb[i].nsucc) {
+            ob_str(b, "       to  ");
+            for (int k = 0; k < bb[i].nsucc; k++)
+                ob_fmt(b, " B%d", bb[i].succ[k]);
+            ob_str(b, "\n");
+        } else {
+            ob_str(b, "       to   (exit)\n");
+        }
+        if (reachable && bb[i].idom >= 0 && bb[i].idom != i)
+            ob_fmt(b, "       idom B%d\n", bb[i].idom);
+        /* A back edge is a successor that dominates this block: that is
+         * what makes it a loop, and it is worth naming. */
+        for (int k = 0; reachable && k < bb[i].nsucc; k++) {
+            int sdom = bb[i].succ[k], q = i;
+            while (q >= 0 && q != sdom)
+                q = bb[q].idom == q ? -1 : bb[q].idom;
+            if (q == sdom)
+                ob_fmt(b, "       back edge to B%d (a loop)\n", sdom);
+        }
+    }
+    free(order);
+    free(l2b);
+    for (int i = 0; i < nbb; i++)
+        free(bb[i].pred);
+    free(bb);
+}
+
 /* ---- driver ---- */
 
 static int g_mem2reg;   /* -O2: promote locals to SSA before the fixpoint */

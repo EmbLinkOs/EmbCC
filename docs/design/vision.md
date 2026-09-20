@@ -210,8 +210,12 @@ this document depends on most:
    mem2reg removing stack traffic, the inliner pulling a callee in, and
    immediate folding — and `types` prints the one decision the compiler
    otherwise never explains: offsets, bit-field bit positions, and the
-   padding between, cross-checked against gcc in the golden. `mir`, `cfg`,
-   `callgraph` and `-S` are not done.
+   padding between, cross-checked against gcc in the golden. `cfg` and `callgraph` are done too — the
+   CFG from the optimizer's own builder, with dominators and back edges,
+   and the call graph read from the IR so it shows the post-inlining shape.
+   **`mir` cannot be done: there is no EmbMIR** (§9.2's third level); code
+   generation writes bytes straight from EmbIR, and `inspect mir` says so.
+   `-S` is not done.
 
    **EmbIR is now self-contained for compilation (v0.3).** It was a view
    over the AST: `struct ir_ins` and `struct ir_func` pointed into the parse

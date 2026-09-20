@@ -85,6 +85,67 @@ echo "immediate folding is visible: an operand printed as #1"
 grep -q "int sum(int n)" "$out/pp.txt" || { echo "FAIL: pp"; exit 1; }
 echo "inspect pp: the preprocessed source"
 
+# ---- the control-flow graph -----------------------------------------------
+# It comes from the SAME builder the passes use (R1), so what it prints is
+# the graph mem2reg and CSE reason about, not a second one written for the
+# dump -- which would disagree exactly where somebody was debugging.
+cat > "$out/cg.c" << 'EOF'
+extern int leaf(int);
+extern void (*hook)(void);
+static int helper(int x) { return leaf(x) + 1; }
+int outer(int n)
+{
+    int t = 0;
+    for (int i = 0; i < n; i++) { if (i & 1) continue; t += helper(i); }
+    hook();
+    return t;
+}
+EOF
+"$EMBCC" inspect cfg "$out/cg.c" -O0 > "$out/cfg.txt"
+sed -n '/function outer/,/^$/p' "$out/cfg.txt" | head -12
+grep -qE "^function outer: [0-9]+ blocks" "$out/cfg.txt" ||
+    { echo "FAIL: no block count"; exit 1; }
+grep -qE "^  B[0-9]+ +ins \[[0-9]+,[0-9]+\)" "$out/cfg.txt" ||
+    { echo "FAIL: no block ranges"; exit 1; }
+grep -q "       from B" "$out/cfg.txt" || { echo "FAIL: no predecessors"; exit 1; }
+grep -q "       idom B" "$out/cfg.txt" || { echo "FAIL: no dominators"; exit 1; }
+# A loop is a back edge -- a successor that dominates you -- and naming it is
+# the difference between a block list and a control-flow graph.
+grep -q "back edge to B.* (a loop)" "$out/cfg.txt" ||
+    { cat "$out/cfg.txt"; echo "FAIL: the loop's back edge is not identified"; exit 1; }
+echo "inspect cfg: blocks, edges, dominators, and the back edge that makes
+the for-loop a loop"
+
+# ---- the call graph -------------------------------------------------------
+"$EMBCC" inspect callgraph "$out/cg.c" -O0 > "$out/cg0.txt"
+grep -q "^helper (static)" "$out/cg0.txt" || { echo "FAIL: linkage"; exit 1; }
+grep -q -- "-> leaf   (not defined in this unit)" "$out/cg0.txt" ||
+    { cat "$out/cg0.txt"; echo "FAIL: external callee"; exit 1; }
+grep -q -- "-> (through a function pointer)" "$out/cg0.txt" ||
+    { echo "FAIL: indirect call"; exit 1; }
+grep -q -- "-> helper" "$out/cg0.txt" || { echo "FAIL: internal call"; exit 1; }
+
+# It is read from the IR, so at -O2 it is the graph AFTER inlining -- which
+# is the graph the linker and a stack analysis will actually see.
+"$EMBCC" inspect callgraph "$out/cg.c" -O2 > "$out/cg2.txt"
+if grep -q -- "-> helper" "$out/cg2.txt"; then
+    cat "$out/cg2.txt"; echo "FAIL: -O2 should have inlined helper away"; exit 1
+fi
+grep -q -- "-> leaf" "$out/cg2.txt" ||
+    { echo "FAIL: outer should call leaf directly once helper is inlined"; exit 1; }
+echo "inspect callgraph: at -O0 outer calls helper; at -O2 helper is inlined
+and outer calls leaf directly -- the graph the linker will see"
+
+# ---- a stage the design names but the compiler does not have --------------
+if "$EMBCC" inspect mir "$out/cg.c" > "$out/mir.txt" 2>&1; then
+    echo "FAIL: inspect mir claimed to work"; exit 1
+fi
+grep -q "no EmbMIR" "$out/mir.txt" ||
+    { cat "$out/mir.txt"; echo "FAIL: should say why, not 'unknown stage'"; exit 1; }
+grep -q "inspect ir" "$out/mir.txt" ||
+    { echo "FAIL: should point at the nearest view"; exit 1; }
+echo "inspect mir says there is no EmbMIR and what to look at instead"
+
 # ---- the front-end stages -------------------------------------------------
 cat > "$out/s.c" << 'EOF'
 struct Packet {

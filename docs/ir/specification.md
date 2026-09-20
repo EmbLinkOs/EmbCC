@@ -149,9 +149,28 @@ as loop control, so counting them means restructuring the loop.
   local-slot coalescing, which is how one miscompile got in;
 - every instruction has a location, or says it is synthesized (§4).
 
-## 8. Known gaps
+## 8. Views of the graph
 
-- **No `mir`, `cfg` or `callgraph` dump.** §18 lists them.
+`embcc inspect cfg` prints the control-flow graph **from the same builder
+the passes use** (R1: one piece of compiler knowledge, one implementation —
+a second CFG written for the dump could disagree with the real one, exactly
+where somebody was debugging). Blocks, their instruction ranges, edges both
+ways, immediate dominators, and back edges named as loops.
+
+`embcc inspect callgraph` reads the calls out of the IR, so it shows the
+graph *after* inlining and includes calls the front end generated — a
+constructor, a temporary's destructor, a libgcc helper for a 128-bit divide
+— which the source does not show. That is the graph the linker and a
+worst-case stack analysis (§20.2) will see.
+
+## 9. Known gaps
+
+- **There is no EmbMIR.** §9.2 describes a third level — machine IR with
+  virtual registers, between instruction selection and register allocation
+  — and EmbCC does not have one: `src/arch/<arch>/codegen.c` writes bytes
+  straight from EmbIR. `embcc inspect mir` says so rather than reporting an
+  unknown stage. Adding the level would be a design decision about where
+  register allocation and scheduling live, not a missing dump.
 - **The parsed unit is not code-generated.** The parser exists to test
   passes; producing an object from `.ir` would need the DWARF boundary in §2
   resolved or explicitly skipped.

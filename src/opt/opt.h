@@ -20,4 +20,14 @@
  * (0 = none, >=1 = the local passes). */
 void opt_run(struct ir_unit *iu, int level);
 
+/* ---- the control-flow graph, for `embcc inspect cfg` (§18) ----
+ *
+ * The dump comes from the SAME builder the passes use (R1: one piece of
+ * compiler knowledge, one implementation). A second CFG written for the
+ * dump could disagree with the real one, and the case where it disagreed
+ * would be exactly the case somebody was trying to debug.
+ */
+struct outbuf;
+void opt_cfg_dump(struct outbuf *b, struct ir_func *fn);
+
 #endif

@@ -11,4 +11,7 @@ void inspect_ast(struct outbuf *b, const struct unit *u);
 void inspect_symbols(struct outbuf *b, const struct unit *u);
 void inspect_types(struct outbuf *b, const struct unit *u);
 
+struct ir_unit;
+void inspect_callgraph(struct outbuf *b, const struct ir_unit *u);
+
 #endif

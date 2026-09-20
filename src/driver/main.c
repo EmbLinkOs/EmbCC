@@ -438,9 +438,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* `inspect ir` reports the IR as it stands at the current -O level, so
      * the same command shows irgen's output at -O0 and the optimizer's at
      * -O2 -- which is what makes a pass's effect visible: diff the two. */
-    if (inspect_stage && !strcmp(inspect_stage, "ir")) {
+    if (inspect_stage && (!strcmp(inspect_stage, "ir") ||
+                          !strcmp(inspect_stage, "cfg") ||
+                          !strcmp(inspect_stage, "callgraph"))) {
         struct outbuf b = { NULL, 0, 0 };
-        ir_print_unit(&b, iu);
+        if (!strcmp(inspect_stage, "ir")) {
+            ir_print_unit(&b, iu);
+        } else if (!strcmp(inspect_stage, "callgraph")) {
+            inspect_callgraph(&b, iu);
+        } else {
+            for (int n = 0; n < iu->nfuncs; n++) {
+                if (n)
+                    ob_ch(&b, '\n');
+                opt_cfg_dump(&b, &iu->funcs[n]);
+            }
+        }
         fwrite(b.p, 1, b.n, stdout);
         ob_free(&b);
         return 0;
@@ -976,7 +988,8 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[1], "inspect")) {
         static const char *const stages[] = {
-            "tokens", "pp", "ast", "symbols", "types", "ir"
+            "tokens", "pp", "ast", "symbols", "types", "ir", "cfg",
+            "callgraph"
         };
         if (argc < 4) {
             fprintf(stderr,
@@ -987,7 +1000,24 @@ int main(int argc, char **argv)
                 "  ast      the tree the parser built\n"
                 "  symbols  what the unit declares, with resolved types\n"
                 "  types    struct layout: offsets, bit-fields, padding\n"
-                "  ir       EmbIR at the current -O level\n");
+                "  ir       EmbIR at the current -O level\n"
+                "  cfg      the control-flow graph the passes reason about\n"
+                "  callgraph who calls whom, from the IR\n");
+            return 1;
+        }
+        /* §18 lists `mir` too, and EmbCC has no EmbMIR: instruction
+         * selection writes bytes straight from EmbIR. Saying that is more
+         * use than "unknown stage", because the reader is asking for a
+         * level of the design (§9.2) that was never built. */
+        if (!strcmp(argv[2], "mir")) {
+            fprintf(stderr,
+                "embcc: there is no EmbMIR to inspect.\n"
+                "Instruction selection emits machine code directly from "
+                "EmbIR (src/arch/<arch>/codegen.c),\n"
+                "so the separate machine-IR level of the design (vision "
+                "§9.2) does not exist.\n"
+                "The nearest views are `inspect ir` (what codegen is "
+                "given) and `embdbg` (what it produced).\n");
             return 1;
         }
         int known = 0;

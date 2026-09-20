@@ -20,6 +20,7 @@
 #include "util.h"
 #include "../lex/lex.h"
 #include "../parse/ast.h"
+#include "../ir/ir.h"
 #include "../sema/type.h"
 
 /* ---- tokens -------------------------------------------------------------
@@ -313,4 +314,78 @@ void inspect_types(struct outbuf *b, const struct unit *u)
                    ty_size(t->ty) - prev_end == 1 ? "" : "s");
         ob_ch(b, '\n');
     }
+}
+
+/* ---- the call graph (§18) --------------------------------------------
+ *
+ * Who calls whom, within this unit, from the IR rather than from the
+ * source — so a call the front end generated (a constructor, a temporary's
+ * destructor, a libgcc helper for a 128-bit divide) appears exactly as a
+ * hand-written one does. That is the whole point of reading it here: the
+ * graph the linker and the stack analysis will see, not the one the source
+ * suggests.
+ */
+void inspect_callgraph(struct outbuf *b, const struct ir_unit *u)
+{
+    for (int i = 0; i < u->nfuncs; i++) {
+        const struct ir_func *f = &u->funcs[i];
+        ob_fmt(b, "%s", f->name ? f->name : "?");
+        if (f->is_static)
+            ob_str(b, " (static)");
+        ob_str(b, "\n");
+        int any = 0;
+        /* Each callee once, in first-call order: a loop calling the same
+         * helper thirty times is one edge, and the order is the order a
+         * reader finds them in the body. */
+        for (int n = 0; n < f->nins; n++) {
+            const struct ir_ins *in = &f->ins[n];
+            if (in->op != IR_CALL && in->op != IR_FADDR)
+                continue;
+            if (in->indirect) {
+                int seen = 0;
+                for (int m = 0; m < n; m++)
+                    if (f->ins[m].op == IR_CALL && f->ins[m].indirect)
+                        seen = 1;
+                if (!seen) {
+                    ob_str(b, "    -> (through a function pointer)\n");
+                    any = 1;
+                }
+                continue;
+            }
+            int sym = in->callee_sym;
+            if (sym < 0 || sym >= u->nsyms)
+                continue;
+            int seen = 0;
+            for (int m = 0; m < n && !seen; m++)
+                if ((f->ins[m].op == IR_CALL || f->ins[m].op == IR_FADDR) &&
+                    f->ins[m].callee_sym == sym)
+                    seen = 1;
+            if (seen)
+                continue;
+            ob_fmt(b, "    -> %s", u->syms[sym].name);
+            if (in->op == IR_FADDR)
+                ob_str(b, "   (address taken, not called here)");
+            else if (!u->syms[sym].defined)
+                ob_str(b, "   (not defined in this unit)");
+            if (in->line)
+                ob_fmt(b, "\t; line %d", in->line);
+            ob_str(b, "\n");
+            any = 1;
+        }
+        if (!any)
+            ob_str(b, "    (calls nothing)\n");
+    }
+    /* A unit's leaves are what a worst-case stack analysis starts from
+     * (§20.2), so they are worth naming even before that exists. */
+    int leaves = 0;
+    for (int i = 0; i < u->nfuncs; i++) {
+        int calls = 0;
+        for (int n = 0; n < u->funcs[i].nins; n++)
+            if (u->funcs[i].ins[n].op == IR_CALL)
+                calls = 1;
+        if (!calls)
+            leaves++;
+    }
+    ob_fmt(b, "\n; %d function%s, %d of them leaves\n", u->nfuncs,
+           u->nfuncs == 1 ? "" : "s", leaves);
 }
