@@ -22,6 +22,7 @@ SRCS := \
 	src/driver/diag.c \
 	src/driver/remark.c \
 	src/driver/inspect.c \
+	src/driver/asmout.c \
 	src/driver/explain.c \
 	src/lex/lex.c \
 	src/cpp/cpp.c \
@@ -61,6 +62,7 @@ SRCS := \
 	src/arch/x86_64/emit.c \
 	src/arch/x86_64/topasm.c \
 	src/arch/x86_64/as.c \
+	src/arch/x86_64/disasm.c \
 	src/arch/x86_64/predef.c \
 	src/arch/x86_64/predef_cxx.c \
 	src/arch/aarch64/irgen.c \
@@ -101,7 +103,8 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	$(CC) $(CFLAGS) -DEMBDBG_NO_MAIN -Wno-unused-function -o $@ \
 	    tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
-	    src/embx/embx.c tools/embdbg/embdbg.c src/platform/platform_posix.c
+	    src/embx/embx.c tools/embdbg/embdbg.c src/platform/platform_posix.c \
+	    src/arch/x86_64/disasm.c
 
 # embls — the language server (docs/tools/diagnostics.md T5). It links EmbCC's own
 # preprocessor and parser, so what an editor is told about a file comes from
@@ -112,7 +115,7 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/parse/parse.c src/sema/type.c src/sema/ldfloat.c \
              src/sema/w128.c src/sema/uninit.c \
              src/driver/util.c src/driver/diag.c src/driver/remark.c \
-             src/driver/inspect.c \
+             src/driver/inspect.c src/driver/asmout.c \
              src/driver/explain.c \
              src/arch/target.c src/arch/predef.c src/arch/x86_64/predef.c \
              src/arch/aarch64/predef.c src/arch/x86_64/predef_cxx.c \
@@ -122,7 +125,7 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
              src/arch/code.c src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
-             src/arch/x86_64/as.c src/arch/aarch64/irgen.c \
+             src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
              src/arch/aarch64/asm.c
 embls: $(EMBLS_SRCS)
@@ -138,8 +141,12 @@ embread: tools/embread/embread.c src/embx/embx.c src/embx/embx.h
 # embdbg — EmbDBG v0, the debug-info reader/symbolizer (EMBDBG step 1's
 # consumer). Standalone like embread: it reads the DWARF EmbCC emits, it does
 # not compile. The live-control half is gated on the kernel debug contract.
-embdbg: tools/embdbg/embdbg.c src/elf/elf.h
-	$(CC) $(CFLAGS) -o $@ tools/embdbg/embdbg.c
+# embdbg reads the x86-64 decoder from src/arch/x86_64 (disasm.c) rather
+# than carrying its own: the compiler needs it for -S, and one decoder is
+# the same discipline as one encoder (R1).
+embdbg: tools/embdbg/embdbg.c src/elf/elf.h src/arch/x86_64/disasm.c \
+        src/arch/x86_64/disasm.h
+	$(CC) $(CFLAGS) -o $@ tools/embdbg/embdbg.c src/arch/x86_64/disasm.c
 
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)

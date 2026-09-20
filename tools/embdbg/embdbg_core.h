@@ -19,4 +19,12 @@ int embdbg_emit_objects(const unsigned char **objs, const long *lens,
  * build_id with the same hash the .embdbg producer uses. */
 void embdbg_sha256(const unsigned char *data, long n, unsigned char out[32]);
 
+/* Decode one x86-64 instruction at code[0..n) with runtime address `addr`,
+ * writing AT&T text to `out`; returns its byte length (>=1). Exposed so
+ * `embcc -S` renders the bytes the backend emitted through the SAME decoder
+ * the debugger uses -- one encoder, one decoder, no parallel emitter that
+ * could disagree with the object (src/driver/asmout.c). */
+int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
+                      char *out);
+
 #endif

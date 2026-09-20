@@ -215,7 +215,11 @@ this document depends on most:
    and the call graph read from the IR so it shows the post-inlining shape.
    **`mir` cannot be done: there is no EmbMIR** (§9.2's third level); code
    generation writes bytes straight from EmbIR, and `inspect mir` says so.
-   `-S` is not done.
+   **`-S` is done for x86-64** (`src/driver/asmout.c`), and its acceptance
+   is byte-identity: assembling the output with the GNU assembler gives the
+   same `.text` and the same relocations as `-c`, for all 89 programs of
+   the execution corpus. It refuses for aarch64, which has no disassembler
+   here, rather than emitting text it cannot verify.
 
    **EmbIR is now self-contained for compilation (v0.3).** It was a view
    over the AST: `struct ir_ins` and `struct ir_func` pointed into the parse

@@ -197,3 +197,36 @@ Refused loudly rather than faked, per THE RULE:
   (ARCHITECTURE §8, DECISIONS D-008).
 
 Run `embcc`, `embas` or `embld` with no arguments for the current usage line.
+
+## `-S` — the assembly the backend emitted
+
+    embcc -S prog.c -o prog.s
+
+x86-64 only; for aarch64 it refuses, because there is no disassembler here
+and text that cannot be verified is worse than no text.
+
+**The acceptance is byte-identity**: assembling the output with the GNU
+assembler gives the same `.text` and the same relocations as `embcc -c`, for
+every program in the execution corpus (tests/golden/asm-S.sh). That bar is
+what shaped the output:
+
+    	.byte	0x48,0x89,0xe5	# mov    %rsp,%rbp
+    	.byte	0x48,0x8d,0x05,0x00,0x00,0x00,0x00	# lea    0x0(%rip),%rax
+    	.reloc	.-4, R_X86_64_PC32, .LC0-4
+
+Each instruction is its **bytes**, with the disassembly as a comment, and
+each relocation is attached with an explicit `.reloc`. Written as ordinary
+mnemonics instead, the file does not reassemble to the same object, because
+an assembler chooses what the backend already chose: it writes
+`sub $0x10,%rsp` in four bytes where the backend wrote seven, shrinks a
+`0f 84` rel32 branch to a `74` rel8, and resolves `lea add(%rip)` to a fixed
+displacement with no relocation at all. Measured on this corpus, that
+version silently miscompiled 10 of 89 programs. Emitting the bytes leaves
+the assembler nothing to choose.
+
+The file is still readable — every instruction carries its disassembly — but
+it is a record of what was compiled, not a starting point for hand-editing.
+Idiomatic assembly would need the backend to record text as it emits bytes,
+one call site producing both, which is a larger change to the 71 emit
+helpers and the only way to get it without a second implementation that can
+drift.

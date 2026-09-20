@@ -26,6 +26,7 @@
 #include "../arch/target.h"
 #include <setjmp.h>
 
+#include "asmout.h"
 #include "inspect.h"
 #include "remark.h"
 #include "util.h"
@@ -75,7 +76,7 @@ static void print_options(FILE *out)
       "\nwhat to do\n"
       "  -c                     compile to an object\n"
       "  -E                     preprocess only\n"
-      "  -S                     (not yet: EmbCC writes objects, not assembly)\n"
+      "  -S                     write assembly (.s) instead of an object (x86-64)\n"
       "  -fsyntax-only          check, write nothing\n"
       "  --emit-c               print the C a C++ unit lowers to\n"
       "  -o FILE                where to write it\n"
@@ -217,6 +218,8 @@ static int syntax_only;
 /* Tool mode (§17): `embcc inspect <stage> file.c` stops the pipeline at a
  * stage and prints what it built, instead of producing an object. */
 static const char *inspect_stage;
+/* -S: emit the assembly the backend produced, rather than an object. */
+static int want_asm;
 /* -fremarks[=json]: what the passes decided, and why (R2, §13). Off by
  * default -- a pass that always built strings would slow every compile for
  * a report almost nobody asked for. */
@@ -604,6 +607,27 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                  (lang_cxx && (want_unwind < 0 || want_exceptions));
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
+
+    /* -S: the same bytes, as text (src/driver/asmout.c). Everything the
+     * emitter needs is in hand here -- the code, the string pool, and the
+     * relocation sites the backend recorded. */
+    if (want_asm) {
+        if (ta == TARGET_AARCH64)
+            diag_fatal(in, 0,
+                       "-S is x86-64 only: there is no aarch64 disassembler "
+                       "here, and emitting text that is not the object would "
+                       "be worse than refusing");
+        struct outbuf ab = { NULL, 0, 0 };
+        asm_emit_unit(&ab, in, u, iu, (const unsigned char *)text.p,
+                      text.len, (const unsigned char *)rodata,
+                      ext, next, strs, nstrs, gs, ngs, fs, nfs);
+        int arc = out ? plat_write_file(out, ab.p, ab.n)
+                      : (fwrite(ab.p, 1, ab.n, stdout), 0);
+        if (arc != 0)
+            diag_fatal(out, 0, "cannot write the file");
+        ob_free(&ab);
+        return 0;
+    }
 
     struct elfw *w = elfw_new(target_elf_machine(target_get()));
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
@@ -1157,6 +1181,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--fix") == 0) {
             want_fix = 1;
             syntax_only = 1;          /* the point is the edit, not an object */
+        } else if (strcmp(argv[i], "-S") == 0) {
+            want_asm = 1;
+            compile_mode = 1;      /* like -c: no link */
         } else if (strcmp(argv[i], "-fsyntax-only") == 0) {
             syntax_only = 1;
         } else if (strcmp(argv[i], "-fremarks") == 0) {
