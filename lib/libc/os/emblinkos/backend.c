@@ -151,6 +151,34 @@ void *__os_sbrk(long increment)
     return (void *)(uintptr_t)r;
 }
 
+int __os_remove(const char *path)
+{
+    char tmp[EM_PATH_MAX];
+    const char *ap = path_abs(path, tmp, sizeof tmp);
+    long r = (long)embk_syscall1(EMBK_SYS_unlink, (int64_t)(intptr_t)ap);
+    return embk_is_err(r) ? (int)fail(r) : 0;
+}
+
+/* The kernel's rename is STRICT: it fails -EEXIST when the destination
+ * exists, where C's rename replaces it. Replacing is the libc's job, so
+ * the destination is removed first -- and only after the source is known
+ * to exist, or a failed rename would have destroyed the target. */
+int __os_rename(const char *from, const char *to)
+{
+    char fb[EM_PATH_MAX], tb[EM_PATH_MAX];
+    const char *fa = path_abs(from, fb, sizeof fb);
+    struct embk_stat st;
+    long r = (long)embk_syscall2(EMBK_SYS_stat, (int64_t)(intptr_t)fa,
+                                 (int64_t)(intptr_t)&st);
+    if (embk_is_err(r))
+        return (int)fail(r);
+    const char *ta = path_abs(to, tb, sizeof tb);
+    embk_syscall1(EMBK_SYS_unlink, (int64_t)(intptr_t)ta);   /* may fail */
+    r = (long)embk_syscall2(EMBK_SYS_rename, (int64_t)(intptr_t)fa,
+                            (int64_t)(intptr_t)ta);
+    return embk_is_err(r) ? (int)fail(r) : 0;
+}
+
 long __os_time(void)
 {
     uint64_t out[2];          /* [0] seconds, [1] microseconds */

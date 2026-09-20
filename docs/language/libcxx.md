@@ -54,8 +54,9 @@ those exact two members in that order.
 `<tuple>`, `<optional>`, `<numeric>`, `<map>`, `<set>`,
 `<unordered_map>`, `<unordered_set>`, `<list>`, `<deque>`,
 `<forward_list>`, `<queue>`, `<stack>`, `<string_view>`, `<span>`,
-`<bitset>`, `<chrono>`, `<ratio>`, `<random>`, `<iostream>` and the rest
-of the stream headers, `<stdexcept>`, and the `<c*>` wrappers
+`<bitset>`, `<chrono>`, `<ratio>`, `<random>`, `<variant>`, `<iostream>`
+and the rest of the stream headers including `<fstream>`, `<stdexcept>`,
+and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
 `<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
 `<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
@@ -91,6 +92,22 @@ the three words, it has to re-aim the pointer, and a raw `const C *`
 argument may point into the buffer that a reallocation is about to free.
 `a += a` is the case that finds it, and the test does exactly that at
 the short/long boundary.
+
+**`<variant>`'s hard part is not the storage.** Changing the alternative
+must destroy the old one before constructing the new, and if that
+construction throws there is nothing valid left to hold — the
+alternatives live in place and there is nowhere to put a fallback. That
+is what `valueless_by_exception()` reports, and why the state exists.
+`get` always checks: a variant's alternative can change, so an unchecked
+`get` would be a type confusion rather than merely a null dereference,
+which is why there is no member `operator*` as `optional` has.
+
+**`<fstream>` is exercised where a filesystem exists.** The QEMU harness
+has an `open` that returns `ENOSYS`, and on such a target the *correct*
+behaviour of every file operation is to fail — so the test probes first
+and asserts that a stream which could not open reports `!is_open()` and
+`failbit`, rather than pretending the target has files it does not. The
+buffer logic above it is the same code the string streams exercise.
 
 **`<chrono>` puts the unit in the type**, and the conversion rule is the
 part worth knowing: a duration converts *implicitly* only when nothing

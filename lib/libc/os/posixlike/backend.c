@@ -49,6 +49,23 @@ void __os_exit(int status) { _exit(status); for (;;) {} }
 
 int __os_isatty(int fd) { return isatty(fd); }
 
+/* The bare harness has no filesystem removal -- it has no filesystem.
+ * Reporting that is the honest answer; inventing success would leave a
+ * caller believing a file is gone. */
+int __os_remove(const char *path)
+{
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+}
+
+int __os_rename(const char *from, const char *to)
+{
+    (void)from; (void)to;
+    errno = ENOSYS;
+    return -1;
+}
+
 /* No clock on a bare harness. Reporting -1 is the honest answer, and
  * time()/clock() pass it through rather than inventing a number. */
 long __os_time(void)     { errno = ENOSYS; return -1; }

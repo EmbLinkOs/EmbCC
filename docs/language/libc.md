@@ -21,9 +21,10 @@ every new target inherited somebody else's porting problem.
       arch/<arch>/    what portable C cannot express
       os/<name>/      the backend
 
-**`os/backend.h` is the entire contract with an operating system**: eleven
+**`os/backend.h` is the entire contract with an operating system**: thirteen
 primitives — read, write, open, close, lseek, sbrk, time, clock, exit,
-isatty, getentropy. A new OS implements those and gets the library. Nothing
+isatty, getentropy, remove, rename. A new OS implements those and gets
+the library. Nothing
 above the seam knows which OS it is on, and there are no `#ifdef`s there.
 
 Two backends exist. `os/posixlike/` maps the primitives onto the classic

@@ -1,0 +1,312 @@
+/* <variant> — C++ [variant].
+ *
+ * One of N types, in storage big enough for the largest, with an index
+ * saying which. A tagged union that knows how to destroy itself.
+ *
+ * The hard part is not the storage; it is that changing the alternative
+ * must destroy the old one before constructing the new, and that if the
+ * new constructor THROWS there is nothing valid left to hold. The
+ * standard's answer is valueless_by_exception(): a state that is not any
+ * alternative, reachable only that way. It exists because the
+ * alternatives are stored in place and there is nowhere to put a
+ * fallback.
+ */
+#ifndef _LIBCXX_VARIANT
+#define _LIBCXX_VARIANT
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <memory>
+#include <exception>
+#include <new>
+
+namespace std {
+
+inline constexpr size_t variant_npos = (size_t)-1;
+
+class bad_variant_access : public exception {
+public:
+    bad_variant_access() noexcept {}
+    ~bad_variant_access() noexcept override;
+    const char *what() const noexcept override;
+};
+
+namespace __detail {
+
+template <class... T> struct __max_size;
+template <> struct __max_size<> { static constexpr size_t value = 1; };
+template <class H, class... R>
+struct __max_size<H, R...> {
+    static constexpr size_t __r = __max_size<R...>::value;
+    static constexpr size_t value = sizeof(H) > __r ? sizeof(H) : __r;
+};
+
+template <class... T> struct __max_align;
+template <> struct __max_align<> { static constexpr size_t value = 1; };
+template <class H, class... R>
+struct __max_align<H, R...> {
+    static constexpr size_t __r = __max_align<R...>::value;
+    static constexpr size_t value = alignof(H) > __r ? alignof(H) : __r;
+};
+
+template <size_t I, class... T> struct __nth_type;
+template <class H, class... R> struct __nth_type<0, H, R...>
+{ using type = H; };
+template <size_t I, class H, class... R> struct __nth_type<I, H, R...>
+    : __nth_type<I - 1, R...> {};
+
+/* Which alternative is T? Returns the number of alternatives when it is
+ * none, so the caller can diagnose rather than pick index 0. */
+template <class T, class... A> struct __index_of;
+template <class T> struct __index_of<T> { static constexpr size_t value = 0; };
+template <class T, class H, class... R>
+struct __index_of<T, H, R...> {
+    static constexpr size_t value =
+        is_same_v<T, H> ? 0 : 1 + __index_of<T, R...>::value;
+};
+
+/* Destroy, copy and visit dispatch on a RUN-TIME index, as a recursive
+ * walk that the compiler collapses -- there is no table of function
+ * pointers and no virtual in a variant.
+ *
+ * Written as function templates with `if constexpr` rather than as a
+ * class with a terminating specialisation, because the obvious
+ * terminator does not work: `__var_ops<sizeof...(T), T...>` puts the
+ * pack's size in a NON-DEDUCED context, so that partial specialisation
+ * never matches and the recursion runs off the end of the pack. The
+ * failure surfaces as "__nth_type is incomplete" a long way from the
+ * cause. `if constexpr` stops the recursion by not instantiating the
+ * branch at all.
+ */
+template <size_t I, class... T>
+void __var_destroy(size_t i, void *p)
+{
+    if constexpr (I < sizeof...(T)) {
+        using Cur = typename __nth_type<I, T...>::type;
+        if (i == I) destroy_at(static_cast<Cur *>(p));
+        else __var_destroy<I + 1, T...>(i, p);
+    }
+}
+
+template <size_t I, class... T>
+void __var_copy(size_t i, void *d, const void *s)
+{
+    if constexpr (I < sizeof...(T)) {
+        using Cur = typename __nth_type<I, T...>::type;
+        if (i == I)
+            construct_at(static_cast<Cur *>(d), *static_cast<const Cur *>(s));
+        else __var_copy<I + 1, T...>(i, d, s);
+    }
+}
+
+template <size_t I, class... T>
+void __var_move(size_t i, void *d, void *s)
+{
+    if constexpr (I < sizeof...(T)) {
+        using Cur = typename __nth_type<I, T...>::type;
+        if (i == I)
+            construct_at(static_cast<Cur *>(d),
+                         std::move(*static_cast<Cur *>(s)));
+        else __var_move<I + 1, T...>(i, d, s);
+    }
+}
+
+template <size_t I, class... T>
+bool __var_equal(size_t i, const void *a, const void *b)
+{
+    if constexpr (I < sizeof...(T)) {
+        using Cur = typename __nth_type<I, T...>::type;
+        if (i == I)
+            return *static_cast<const Cur *>(a) == *static_cast<const Cur *>(b);
+        return __var_equal<I + 1, T...>(i, a, b);
+    } else {
+        return false;
+    }
+}
+
+/* Every alternative's handler must return the SAME type, which the
+ * standard requires of a visitor -- so the return type is taken from the
+ * first alternative and the rest must convert to it. */
+template <size_t I, class R, class V, class... T>
+R __var_visit(size_t i, V &&v, void *p)
+{
+    if constexpr (I < sizeof...(T)) {
+        using Cur = typename __nth_type<I, T...>::type;
+        if (i == I)
+            return forward<V>(v)(*static_cast<Cur *>(p));
+        return __var_visit<I + 1, R, V, T...>(i, forward<V>(v), p);
+    } else {
+        throw bad_variant_access();
+    }
+}
+
+}  // namespace __detail
+
+template <class... T>
+class variant {
+    static_assert(sizeof...(T) > 0, "a variant needs at least one type");
+public:
+    variant() : __i(0)
+    { construct_at(reinterpret_cast<typename __detail::__nth_type<0, T...>::type *>(__buf)); }
+
+    /* The comparison is PARENTHESISED: inside a template argument list a
+     * bare `<` is read as the start of another template argument list,
+     * and the trailing `>>` then closes the wrong things. C++ requires
+     * the parentheses here for that reason, and leaving them out
+     * misparses far from where it was written. */
+    template <class U, class = enable_if_t<
+        (__detail::__index_of<decay_t<U>, T...>::value < sizeof...(T))>>
+    variant(U &&v) : __i(__detail::__index_of<decay_t<U>, T...>::value)
+    { construct_at(reinterpret_cast<decay_t<U> *>(__buf), forward<U>(v)); }
+
+    variant(const variant &o) : __i(o.__i)
+    { if (__i != variant_npos) __detail::__var_copy<0, T...>(__i, __buf, o.__buf); }
+
+    variant(variant &&o) : __i(o.__i)
+    { if (__i != variant_npos) __detail::__var_move<0, T...>(__i, __buf, o.__buf); }
+
+    ~variant() { __clear(); }
+
+    variant &operator=(const variant &o)
+    {
+        if (this != addressof(o)) {
+            __clear();
+            if (o.__i != variant_npos) {
+                __detail::__var_copy<0, T...>(o.__i, __buf, o.__buf);
+                __i = o.__i;
+            }
+        }
+        return *this;
+    }
+
+    variant &operator=(variant &&o)
+    {
+        if (this != addressof(o)) {
+            __clear();
+            if (o.__i != variant_npos) {
+                __detail::__var_move<0, T...>(o.__i, __buf, o.__buf);
+                __i = o.__i;
+            }
+        }
+        return *this;
+    }
+
+    template <class U, class = enable_if_t<
+        (__detail::__index_of<decay_t<U>, T...>::value < sizeof...(T))>>
+    variant &operator=(U &&v)
+    {
+        __clear();
+        /* If this construction throws, the variant stays valueless --
+         * which is exactly what valueless_by_exception() reports, and
+         * why the state exists at all. */
+        construct_at(reinterpret_cast<decay_t<U> *>(__buf), forward<U>(v));
+        __i = __detail::__index_of<decay_t<U>, T...>::value;
+        return *this;
+    }
+
+    template <class U, class... A>
+    U &emplace(A &&...a)
+    {
+        __clear();
+        U *p = reinterpret_cast<U *>(__buf);
+        construct_at(p, forward<A>(a)...);
+        __i = __detail::__index_of<U, T...>::value;
+        return *p;
+    }
+
+    constexpr size_t index() const noexcept { return __i; }
+    constexpr bool valueless_by_exception() const noexcept
+    { return __i == variant_npos; }
+
+    void *__storage() { return __buf; }
+    const void *__storage() const { return __buf; }
+
+private:
+    /* Named first: the storage is as large and as aligned as the
+     * largest alternative, and naming the two makes the declaration
+     * readable as well as parseable. */
+    static constexpr size_t __sz = __detail::__max_size<T...>::value;
+    static constexpr size_t __al = __detail::__max_align<T...>::value;
+
+    alignas(__al) unsigned char __buf[__sz];
+    size_t __i;
+
+    void __clear()
+    {
+        if (__i != variant_npos) {
+            __detail::__var_destroy<0, T...>(__i, __buf);
+            __i = variant_npos;
+        }
+    }
+};
+
+template <class T, class... A>
+bool holds_alternative(const variant<A...> &v) noexcept
+{ return v.index() == __detail::__index_of<T, A...>::value; }
+
+/* get<T> CHECKS and throws; there is no unchecked member form, which is
+ * the difference from optional's operator*. A variant's alternative can
+ * change, so an unchecked get would be a type confusion rather than
+ * merely a null dereference. */
+template <class T, class... A>
+T &get(variant<A...> &v)
+{
+    if (!holds_alternative<T>(v))
+        throw bad_variant_access();
+    return *static_cast<T *>(v.__storage());
+}
+template <class T, class... A>
+const T &get(const variant<A...> &v)
+{
+    if (!holds_alternative<T>(v))
+        throw bad_variant_access();
+    return *static_cast<const T *>(v.__storage());
+}
+
+template <class T, class... A>
+T *get_if(variant<A...> *v) noexcept
+{
+    if (!v || !holds_alternative<T>(*v))
+        return nullptr;
+    return static_cast<T *>(v->__storage());
+}
+
+template <size_t I, class... A>
+typename __detail::__nth_type<I, A...>::type &get(variant<A...> &v)
+{
+    if (v.index() != I)
+        throw bad_variant_access();
+    using U = typename __detail::__nth_type<I, A...>::type;
+    return *static_cast<U *>(v.__storage());
+}
+
+/* visit calls the one function that matches whichever alternative is
+ * held -- which is how a variant is used without a chain of
+ * holds_alternative tests. */
+template <class V, class... A>
+decltype(auto) visit(V &&vis, variant<A...> &v)
+{
+    if (v.valueless_by_exception())
+        throw bad_variant_access();
+    using R = decltype(forward<V>(vis)(
+        declval<typename __detail::__nth_type<0, A...>::type &>()));
+    return __detail::__var_visit<0, R, V, A...>(v.index(), forward<V>(vis),
+                                                v.__storage());
+}
+
+template <class... A>
+bool operator==(const variant<A...> &a, const variant<A...> &b)
+{
+    if (a.index() != b.index()) return false;
+    if (a.valueless_by_exception()) return true;
+    return __detail::__var_equal<0, A...>(a.index(), a.__storage(),
+                                          b.__storage());
+}
+template <class... A>
+bool operator!=(const variant<A...> &a, const variant<A...> &b)
+{ return !(a == b); }
+
+}  // namespace std
+
+#endif

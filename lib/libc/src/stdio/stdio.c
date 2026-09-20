@@ -302,3 +302,13 @@ int fgetpos(FILE *restrict f, fpos_t *restrict pos)
 }
 
 int fsetpos(FILE *f, const fpos_t *pos) { return fseek(f, *pos, SEEK_SET); }
+
+/* remove and rename — C11 §7.21.4. Both are the backend's, because what
+ * a name refers to and whether it can be unlinked is the OS's business
+ * (os/backend.h). */
+int remove(const char *path) { return __os_remove(path); }
+
+int rename(const char *from, const char *to)
+{
+    return __os_rename(from, to);
+}

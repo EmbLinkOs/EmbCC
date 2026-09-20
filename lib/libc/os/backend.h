@@ -50,6 +50,13 @@ int  __os_open(const char *path, int flags, int mode);
 int  __os_close(int fd);
 long __os_lseek(int fd, long off, int whence);
 
+/* Files by name, removed and renamed. C11 §7.21.4 requires both, and a
+ * target with no way to remove a file returns -1 with ENOSYS rather than
+ * pretending to succeed -- a caller that cannot tell a removal from a
+ * no-op writes a program that leaves its temporary files behind. */
+int  __os_remove(const char *path);
+int  __os_rename(const char *from, const char *to);
+
 /* The heap. Returns the previous break, or (void *)-1. A backend that
  * cannot grow returns -1 and malloc reports failure honestly rather than
  * handing back memory it does not have. */

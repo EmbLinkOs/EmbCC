@@ -116,3 +116,12 @@ bad_optional_access::~bad_optional_access() noexcept {}
 const char *bad_optional_access::what() const noexcept
 { return "std::bad_optional_access"; }
 }
+
+/* <variant>'s failure, beside the others for the same reason. */
+#include <variant>
+
+namespace std {
+bad_variant_access::~bad_variant_access() noexcept {}
+const char *bad_variant_access::what() const noexcept
+{ return "std::bad_variant_access"; }
+}
