@@ -1,0 +1,33 @@
+/* <cstring> — the C header's names, in namespace std as well as at
+ * global scope. C++ requires the std:: spellings; every real
+ * implementation also leaves the global ones, and code depends on it. */
+#ifndef _LIBCXX_CSTRING
+#define _LIBCXX_CSTRING
+#include <string.h>
+
+namespace std {
+using ::memcpy;
+using ::memmove;
+using ::strcpy;
+using ::strncpy;
+using ::strcat;
+using ::strncat;
+using ::memcmp;
+using ::strcmp;
+using ::strncmp;
+using ::strcoll;
+using ::strxfrm;
+using ::strchr;
+using ::strrchr;
+using ::strspn;
+using ::strcspn;
+using ::strpbrk;
+using ::strstr;
+using ::strtok;
+using ::memset;
+using ::strerror;
+using ::strlen;
+using ::memchr;
+}
+
+#endif

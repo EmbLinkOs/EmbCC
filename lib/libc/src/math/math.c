@@ -222,3 +222,42 @@ float modff(float x, float *ip) { double d; float r = (float)modf((double)x, &d)
 LD1(sin) LD1(cos) LD1(tan) LD1(exp) LD1(log) LD1(sqrt) LD1(fabs)
 LD1(ceil) LD1(floor)
 LD2(pow) LD2(fmod)
+
+/* ---- ilogb / logb -------------------------------------------------------
+ * The unbiased exponent of x: the e in x = m * 2^e with 1 <= |m| < 2.
+ * Not in fdlibm's set, so they are built on frexp, whose m is in
+ * [0.5, 1) -- hence the -1. The special cases are the whole difficulty
+ * and C99 spells each one out: ilogb(0) is INT_MIN, ilogb(inf) is
+ * INT_MAX, ilogb(nan) is INT_MIN, while logb returns -inf, +inf and nan
+ * respectively. Returning something plausible for zero is the usual bug;
+ * a caller that scales by 2^ilogb(x) needs to be able to tell.
+ */
+int ilogb(double x)
+{
+    if (x == 0.0)
+        return -2147483647 - 1;      /* FP_ILOGB0 */
+    if (isnan(x))
+        return -2147483647 - 1;      /* FP_ILOGBNAN */
+    if (isinf(x))
+        return 2147483647;
+    int e;
+    frexp(x, &e);
+    return e - 1;
+}
+
+int ilogbf(float x) { return ilogb((double)x); }
+int ilogbl(long double x) { return ilogb((double)x); }
+
+double logb(double x)
+{
+    if (x == 0.0)
+        return -HUGE_VAL;
+    if (isnan(x) || isinf(x))
+        return fabs(x);
+    int e;
+    frexp(x, &e);
+    return (double)(e - 1);
+}
+
+float logbf(float x) { return (float)logb((double)x); }
+long double logbl(long double x) { return (long double)logb((double)x); }

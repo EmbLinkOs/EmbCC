@@ -41,6 +41,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
+#include "../sema/ldfloat.h"
 #include "../sema/w128.h"
 
 struct cblk {
@@ -66,6 +67,15 @@ struct cval {
     long i;                   /* V_INT (the low half) */
     long hi;                  /* V_INT: the high half (fit) */
     double f;                 /* V_FLT */
+    /* V_FLT of type long double: the EXACT value in the target's format.
+     * `f` still holds its double approximation so every path that only
+     * needs a double keeps working, but arithmetic and comparison must
+     * use this one -- the host's own long double may be narrower than the
+     * target's (plain double on arm64 macOS), and two distinct target
+     * long doubles can round to the same double, so deciding `a < b`
+     * through `f` would answer a different question. NULL for float and
+     * double. */
+    struct ldf *ld;
     struct cptr p;            /* V_PTR; V_OBJ: where the object is */
 };
 
@@ -193,6 +203,23 @@ static struct cval v_flt(double f)
     return v;
 }
 
+/* A long double value, exact. */
+static struct cval v_ldf(struct ldf *x)
+{
+    struct cval v;
+    memset(&v, 0, sizeof v);
+    v.k = V_FLT;
+    v.ld = x;
+    v.f = ldf_to_double(x);
+    return v;
+}
+
+/* The exact value of a V_FLT, whatever width it came from. */
+static struct ldf *as_ldf(struct cval v)
+{
+    return v.ld ? v.ld : ldf_from_double(v.f);
+}
+
 static struct cval v_ptr(struct cptr p)
 {
     struct cval v;
@@ -287,7 +314,7 @@ static int scalar_kind(const struct cty *t)
 {
     if (ct_is_integer(t))
         return V_INT;
-    if (t->k == CT_FLOAT || t->k == CT_DOUBLE)
+    if (t->k == CT_FLOAT || t->k == CT_DOUBLE || t->k == CT_LDOUBLE)
         return V_FLT;
     if (t->k == CT_PTR || t->k == CT_NULLPTR || ct_is_ref(t))
         return V_PTR;
@@ -331,6 +358,14 @@ static struct cval load(struct cptr p, const struct cty *t)
             memcpy(&f, q, 4);
             return v_flt(f);
         }
+        if (n > 8)
+            /* A long double in memory. Reading it back exactly needs a
+             * decoder from the target's format, which ldfloat.c does not
+             * have yet (it only encodes). Refusing is the honest answer:
+             * the alternative is to read the low eight bytes as a double,
+             * which is not a narrower answer but a wrong one. See
+             * docs/developer/todo.md. */
+            notconst("reading a long double object back");
         double d;
         memcpy(&d, q, 8);
         return v_flt(d);
@@ -381,9 +416,25 @@ static struct cval as_type(struct cval v, const struct cty *t)
         no();
     }
     if (k == V_FLT) {
+        /* To long double: keep (or gain) the exact representation, rounded
+         * once to the target's format, as one IEEE conversion. */
+        if (t->k == CT_LDOUBLE) {
+            if (v.k == V_FLT)
+                return v_ldf(ldf_round(as_ldf(v), ldf_target_fmt()));
+            if (v.k == V_INT && fits_long(v))
+                return v_ldf(ldf_round(ldf_from_int(v.i, 0),
+                                       ldf_target_fmt()));
+            if (v.k == V_INT && v.hi == 0)
+                return v_ldf(ldf_round(ldf_from_int(v.i, 1),
+                                       ldf_target_fmt()));
+            no();
+        }
         double d;
         if (v.k == V_FLT)
-            d = v.f;
+            /* From long double: round through the exact value, not
+             * through v.f -- v.f is already a double, and rounding it
+             * again to float would round twice. */
+            d = v.ld ? ldf_to_double(v.ld) : v.f;
         else if (v.k == V_INT && fits_long(v))
             d = (double)v.i;
         else if (v.k == V_INT && v.hi == 0)
@@ -1109,6 +1160,44 @@ static struct cval arith(int op, struct cval a, struct cval b,
         no();
     }
     if (a.k == V_FLT || b.k == V_FLT) {
+        /* If either side is a long double, the whole operation happens at
+         * long double precision -- which is what the usual arithmetic
+         * conversions say, and what the target would do at run time. */
+        if (a.ld || b.ld) {
+            struct ldf *x = a.k == V_FLT ? as_ldf(a)
+                          : as_ldf(as_type(a, ct_basic(CT_LDOUBLE)));
+            struct ldf *y = b.k == V_FLT ? as_ldf(b)
+                          : as_ldf(as_type(b, ct_basic(CT_LDOUBLE)));
+            int c;
+            switch (op) {
+            case TOK_PLUS: case TOK_MINUS: case TOK_STAR:
+                return as_type(v_ldf(ldf_binop(op == TOK_PLUS ? '+'
+                                               : op == TOK_MINUS ? '-' : '*',
+                                               x, y, ldf_target_fmt())), rt);
+            case TOK_SLASH:
+                if (ldf_is_zero(y))
+                    notconst("a division by zero");
+                return as_type(v_ldf(ldf_binop('/', x, y,
+                                               ldf_target_fmt())), rt);
+            case TOK_ANDAND: return v_int(!ldf_is_zero(x) && !ldf_is_zero(y));
+            case TOK_OROR:   return v_int(!ldf_is_zero(x) || !ldf_is_zero(y));
+            default: break;
+            }
+            c = ldf_cmp(x, y);
+            /* An unordered comparison (a NaN operand) is false for every
+             * relation except !=, which is the one rule people forget. */
+            if (c == LDF_UNORDERED)
+                return v_int(op == TOK_NEQ);
+            switch (op) {
+            case TOK_EQEQ: return v_int(c == 0);
+            case TOK_NEQ:  return v_int(c != 0);
+            case TOK_LT:   return v_int(c < 0);
+            case TOK_GT:   return v_int(c > 0);
+            case TOK_LE:   return v_int(c <= 0);
+            case TOK_GE:   return v_int(c >= 0);
+            default: no();
+            }
+        }
         double x = a.k == V_FLT ? a.f : as_type(a, ct_basic(CT_DOUBLE)).f;
         double y = b.k == V_FLT ? b.f : as_type(b, ct_basic(CT_DOUBLE)).f;
         double r;
@@ -1535,6 +1624,16 @@ static struct cval ev_(struct cexpr *e)
     case E_INT:
         return v_int(e->ival);
     case E_FLT:
+        /* A long double literal is converted from its EXACT decimal text,
+         * never through a double: `0.1L` has more significant bits than a
+         * double holds, and going via one would round twice and lose the
+         * last of them. e->text is the literal without its suffix, which
+         * is what ldf_from_text wants. */
+        if (ct_unqual(e->t)->k == CT_LDOUBLE && e->text) {
+            struct ldf *x = ldf_from_text(e->text, ldf_target_fmt());
+            if (x)
+                return v_ldf(x);
+        }
         return as_type(v_flt(e->fval), e->t);
     case E_NULLPTR: {
         struct cptr p;

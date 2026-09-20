@@ -41,11 +41,49 @@ libgcc owns the machine; this owns the meaning.
 `__dynamic_cast`, the exception object and the whole `__cxa_*` layer,
 `__gxx_personality_v0`, and `std::terminate`.
 
-Headers: `<new>`, `<typeinfo>`, `<exception>`, `<initializer_list>`,
-`<cstddef>`, `<cstdint>`. `<initializer_list>` is not optional and cannot
-be replaced — `{1, 2, 3}` in a call is a *core language* construct whose
-type is `std::initializer_list`, so the compiler requires that exact class
-with those exact two members in that order.
+Runtime headers: `<new>`, `<typeinfo>`, `<exception>`,
+`<initializer_list>`. `<initializer_list>` is not optional and cannot be
+replaced — `{1, 2, 3}` in a call is a *core language* construct whose type
+is `std::initializer_list`, so the compiler requires that exact class with
+those exact two members in that order.
+
+## The standard library, so far
+
+`<type_traits>`, `<utility>`, `<limits>`, and the `<c*>` wrappers
+(`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
+`<cmath>`, `<cctype>`, `<cerrno>`, `<ctime>`, `<csetjmp>`, `<cassert>`,
+`<cinttypes>`, `<climits>`, `<cfloat>`). Tested by
+`tests/golden/libcxx-std.sh`, which is mostly `static_assert`s — for a
+compile-time library that is the strongest check there is, and a trait
+that answers the wrong question does not crash, it silently selects the
+wrong overload three layers up.
+
+`<type_traits>` uses EmbCC's intrinsics wherever one exists, and that is
+not an optimisation: most of these traits *cannot* be written in the
+language. No expression tells you whether a class is polymorphic or
+whether a constructor is trivial. The ones written out in C++ are the ones
+that genuinely are expressible — the type-list membership tests, and the
+transformations that are just partial specialisation.
+
+Writing these headers found four compiler bugs, which was rather the
+point of writing them:
+
+- **partial-specialisation matching read past the end of its argument
+  array** whenever a deduced pack had two or more elements, because the
+  already-flattened arguments were re-flattened using the flattened count
+  over the *un*flattened array. The counts agree for a pack of nought or
+  one, so `is_invocable<F, int>` worked and `is_invocable<F, int, double>`
+  did not. That one construct underpins every detection idiom in a
+  standard library.
+- **`long double` had no case in the constant evaluator at all**, so
+  `DBL_MAX` — which the compiler spells as a long double literal cast to
+  double — was not a constant expression. Now folded exactly in the
+  target's format rather than at double precision, so
+  `1.0L + LDBL_EPSILON > 1.0L` is true, as it is on the machine.
+- **a conditional was not folded** in a constant expression, making
+  `int buf[(N > 4) ? N : 4];` a VLA or an error.
+- and `_Noreturn` and `__func__` were missing from C entirely (found by
+  the C library, and fixed with it).
 
 ## Five things that are easy to get wrong
 

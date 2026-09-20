@@ -30,6 +30,12 @@ back into the personality routine here.
 
 So: libgcc owns the machine, this owns the meaning.
 
+## The standard library
+
+`include/` also holds the beginning of the standard library proper:
+`<type_traits>`, `<utility>`, `<limits>` and the `<c*>` wrappers. See
+`docs/language/libcxx.md`.
+
 ## Status
 
 The runtime is complete enough to run C++ programs with virtual dispatch,

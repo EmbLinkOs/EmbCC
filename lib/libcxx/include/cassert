@@ -1,0 +1,6 @@
+/* <cassert> — C++ [cassert.syn].
+ *
+ * No include guard, deliberately: like <assert.h>, this header may be
+ * included more than once and NDEBUG is consulted each time.
+ */
+#include <assert.h>

@@ -1,0 +1,61 @@
+/* <cmath> — the C header's names, in namespace std as well as at
+ * global scope. C++ requires the std:: spellings; every real
+ * implementation also leaves the global ones, and code depends on it. */
+#ifndef _LIBCXX_CMATH
+#define _LIBCXX_CMATH
+#include <math.h>
+
+namespace std {
+using ::fabs;
+using ::fmod;
+using ::remainder;
+using ::fma;
+using ::fmax;
+using ::fmin;
+using ::fdim;
+using ::exp;
+using ::exp2;
+using ::expm1;
+using ::log;
+using ::log10;
+using ::log2;
+using ::log1p;
+using ::pow;
+using ::sqrt;
+using ::cbrt;
+using ::hypot;
+using ::sin;
+using ::cos;
+using ::tan;
+using ::asin;
+using ::acos;
+using ::atan;
+using ::atan2;
+using ::sinh;
+using ::cosh;
+using ::tanh;
+using ::asinh;
+using ::acosh;
+using ::atanh;
+using ::erf;
+using ::erfc;
+using ::tgamma;
+using ::lgamma;
+using ::ceil;
+using ::floor;
+using ::trunc;
+using ::round;
+using ::nearbyint;
+using ::rint;
+using ::modf;
+using ::frexp;
+using ::ldexp;
+using ::scalbn;
+using ::ilogb;
+using ::logb;
+using ::copysign;
+using ::nan;
+using ::nextafter;
+}
+
+#endif

@@ -1,0 +1,242 @@
+/* <limits> — C++ [support.limits].
+ *
+ * numeric_limits<T>, which exists so that generic code can ask about a
+ * type instead of choosing between INT_MAX and DBL_MAX with an #if. The
+ * values come from <climits>/<cfloat>, which come from the compiler, so
+ * this header states no number of its own — it only arranges them.
+ *
+ * The primary template is DELIBERATELY empty of useful answers:
+ * numeric_limits<MyClass>::max() returns MyClass() and is_specialized is
+ * false, so a caller can tell "this type has no limits" from "its maximum
+ * is zero". Filling the primary template with plausible values is how a
+ * generic algorithm ends up silently treating a class as if it were an
+ * int.
+ */
+#ifndef _LIBCXX_LIMITS
+#define _LIBCXX_LIMITS
+
+#include <cfloat>
+#include <climits>
+
+namespace std {
+
+enum float_round_style {
+    round_indeterminate       = -1,
+    round_toward_zero         = 0,
+    round_to_nearest          = 1,
+    round_toward_infinity     = 2,
+    round_toward_neg_infinity = 3
+};
+
+enum float_denorm_style {
+    denorm_indeterminate = -1,
+    denorm_absent        = 0,
+    denorm_present       = 1
+};
+
+template <class T>
+class numeric_limits {
+public:
+    static constexpr bool is_specialized = false;
+    static constexpr T min() noexcept { return T(); }
+    static constexpr T max() noexcept { return T(); }
+    static constexpr T lowest() noexcept { return T(); }
+    static constexpr int digits = 0;
+    static constexpr int digits10 = 0;
+    static constexpr int max_digits10 = 0;
+    static constexpr bool is_signed = false;
+    static constexpr bool is_integer = false;
+    static constexpr bool is_exact = false;
+    static constexpr int radix = 0;
+    static constexpr T epsilon() noexcept { return T(); }
+    static constexpr T round_error() noexcept { return T(); }
+    static constexpr int min_exponent = 0;
+    static constexpr int min_exponent10 = 0;
+    static constexpr int max_exponent = 0;
+    static constexpr int max_exponent10 = 0;
+    static constexpr bool has_infinity = false;
+    static constexpr bool has_quiet_NaN = false;
+    static constexpr bool has_signaling_NaN = false;
+    static constexpr float_denorm_style has_denorm = denorm_absent;
+    static constexpr bool has_denorm_loss = false;
+    static constexpr T infinity() noexcept { return T(); }
+    static constexpr T quiet_NaN() noexcept { return T(); }
+    static constexpr T signaling_NaN() noexcept { return T(); }
+    static constexpr T denorm_min() noexcept { return T(); }
+    static constexpr bool is_iec559 = false;
+    static constexpr bool is_bounded = false;
+    static constexpr bool is_modulo = false;
+    static constexpr bool traps = false;
+    static constexpr bool tinyness_before = false;
+    static constexpr float_round_style round_style = round_toward_zero;
+};
+
+/* cv-qualification does not change a type's limits. */
+template <class T> class numeric_limits<const T> : public numeric_limits<T> {};
+template <class T> class numeric_limits<volatile T> : public numeric_limits<T> {};
+template <class T>
+class numeric_limits<const volatile T> : public numeric_limits<T> {};
+
+/* digits10 is how many DECIMAL digits survive a round trip through the
+ * type, which is floor(digits * log10(2)) -- 643/2136 is that ratio to
+ * more precision than any integer width here needs, and is exact integer
+ * arithmetic rather than a float constant. */
+#define _LIBCXX_DIGITS10(bits) ((bits) * 643L / 2136)
+
+#define _LIBCXX_INT_LIMITS(T, MIN, MAX, SIGNED)                              \
+template <> class numeric_limits<T> {                                        \
+public:                                                                      \
+    static constexpr bool is_specialized = true;                             \
+    static constexpr T min() noexcept { return MIN; }                        \
+    static constexpr T max() noexcept { return MAX; }                        \
+    static constexpr T lowest() noexcept { return MIN; }                     \
+    static constexpr int digits = (int)(sizeof(T) * CHAR_BIT - (SIGNED));    \
+    static constexpr int digits10 = (int)_LIBCXX_DIGITS10(digits);           \
+    static constexpr int max_digits10 = 0;                                   \
+    static constexpr bool is_signed = SIGNED;                                \
+    static constexpr bool is_integer = true;                                 \
+    static constexpr bool is_exact = true;                                   \
+    static constexpr int radix = 2;                                          \
+    static constexpr T epsilon() noexcept { return 0; }                      \
+    static constexpr T round_error() noexcept { return 0; }                  \
+    static constexpr int min_exponent = 0;                                   \
+    static constexpr int min_exponent10 = 0;                                 \
+    static constexpr int max_exponent = 0;                                   \
+    static constexpr int max_exponent10 = 0;                                 \
+    static constexpr bool has_infinity = false;                              \
+    static constexpr bool has_quiet_NaN = false;                             \
+    static constexpr bool has_signaling_NaN = false;                         \
+    static constexpr float_denorm_style has_denorm = denorm_absent;          \
+    static constexpr bool has_denorm_loss = false;                           \
+    static constexpr T infinity() noexcept { return 0; }                     \
+    static constexpr T quiet_NaN() noexcept { return 0; }                    \
+    static constexpr T signaling_NaN() noexcept { return 0; }                \
+    static constexpr T denorm_min() noexcept { return 0; }                   \
+    static constexpr bool is_iec559 = false;                                 \
+    static constexpr bool is_bounded = true;                                 \
+    /* Unsigned arithmetic wraps; signed overflow is undefined, so only    \
+     * the unsigned types are "modulo". */                                  \
+    static constexpr bool is_modulo = !(SIGNED);                             \
+    static constexpr bool traps = false;                                     \
+    static constexpr bool tinyness_before = false;                           \
+    static constexpr float_round_style round_style = round_toward_zero;      \
+}
+
+template <> class numeric_limits<bool> {
+public:
+    static constexpr bool is_specialized = true;
+    static constexpr bool min() noexcept { return false; }
+    static constexpr bool max() noexcept { return true; }
+    static constexpr bool lowest() noexcept { return false; }
+    static constexpr int digits = 1;
+    static constexpr int digits10 = 0;
+    static constexpr int max_digits10 = 0;
+    static constexpr bool is_signed = false;
+    static constexpr bool is_integer = true;
+    static constexpr bool is_exact = true;
+    static constexpr int radix = 2;
+    static constexpr bool epsilon() noexcept { return false; }
+    static constexpr bool round_error() noexcept { return false; }
+    static constexpr int min_exponent = 0;
+    static constexpr int min_exponent10 = 0;
+    static constexpr int max_exponent = 0;
+    static constexpr int max_exponent10 = 0;
+    static constexpr bool has_infinity = false;
+    static constexpr bool has_quiet_NaN = false;
+    static constexpr bool has_signaling_NaN = false;
+    static constexpr float_denorm_style has_denorm = denorm_absent;
+    static constexpr bool has_denorm_loss = false;
+    static constexpr bool infinity() noexcept { return false; }
+    static constexpr bool quiet_NaN() noexcept { return false; }
+    static constexpr bool signaling_NaN() noexcept { return false; }
+    static constexpr bool denorm_min() noexcept { return false; }
+    static constexpr bool is_iec559 = false;
+    static constexpr bool is_bounded = true;
+    static constexpr bool is_modulo = false;
+    static constexpr bool traps = false;
+    static constexpr bool tinyness_before = false;
+    static constexpr float_round_style round_style = round_toward_zero;
+};
+
+_LIBCXX_INT_LIMITS(char, CHAR_MIN, CHAR_MAX, (CHAR_MIN < 0));
+_LIBCXX_INT_LIMITS(signed char, SCHAR_MIN, SCHAR_MAX, true);
+_LIBCXX_INT_LIMITS(unsigned char, 0, UCHAR_MAX, false);
+_LIBCXX_INT_LIMITS(wchar_t, WCHAR_MIN, WCHAR_MAX, (WCHAR_MIN < 0));
+_LIBCXX_INT_LIMITS(char16_t, 0, USHRT_MAX, false);
+_LIBCXX_INT_LIMITS(char32_t, 0, UINT_MAX, false);
+_LIBCXX_INT_LIMITS(short, SHRT_MIN, SHRT_MAX, true);
+_LIBCXX_INT_LIMITS(unsigned short, 0, USHRT_MAX, false);
+_LIBCXX_INT_LIMITS(int, INT_MIN, INT_MAX, true);
+_LIBCXX_INT_LIMITS(unsigned int, 0, UINT_MAX, false);
+_LIBCXX_INT_LIMITS(long, LONG_MIN, LONG_MAX, true);
+_LIBCXX_INT_LIMITS(unsigned long, 0, ULONG_MAX, false);
+_LIBCXX_INT_LIMITS(long long, LLONG_MIN, LLONG_MAX, true);
+_LIBCXX_INT_LIMITS(unsigned long long, 0, ULLONG_MAX, false);
+
+#undef _LIBCXX_INT_LIMITS
+
+/* min() for a floating type is the smallest POSITIVE normal value, not
+ * the most negative one -- an asymmetry with the integer specialisations
+ * that lowest() was added in C++11 to fix, precisely because generic code
+ * kept getting it wrong. */
+#define _LIBCXX_FLT_LIMITS(T, MIN, MAX, EPS, DIG, DIG10, MAXDIG10,           \
+                           MINEXP, MINEXP10, MAXEXP, MAXEXP10, DENORM,       \
+                           INF, QNAN, SNAN)                                  \
+template <> class numeric_limits<T> {                                        \
+public:                                                                      \
+    static constexpr bool is_specialized = true;                             \
+    static constexpr T min() noexcept { return MIN; }                        \
+    static constexpr T max() noexcept { return MAX; }                        \
+    static constexpr T lowest() noexcept { return -MAX; }                    \
+    static constexpr int digits = DIG;                                       \
+    static constexpr int digits10 = DIG10;                                   \
+    static constexpr int max_digits10 = MAXDIG10;                            \
+    static constexpr bool is_signed = true;                                  \
+    static constexpr bool is_integer = false;                                \
+    static constexpr bool is_exact = false;                                  \
+    static constexpr int radix = FLT_RADIX;                                  \
+    static constexpr T epsilon() noexcept { return EPS; }                    \
+    static constexpr T round_error() noexcept { return T(0.5); }             \
+    static constexpr int min_exponent = MINEXP;                              \
+    static constexpr int min_exponent10 = MINEXP10;                          \
+    static constexpr int max_exponent = MAXEXP;                              \
+    static constexpr int max_exponent10 = MAXEXP10;                          \
+    static constexpr bool has_infinity = true;                               \
+    static constexpr bool has_quiet_NaN = true;                              \
+    static constexpr bool has_signaling_NaN = true;                          \
+    static constexpr float_denorm_style has_denorm = denorm_present;         \
+    static constexpr bool has_denorm_loss = false;                           \
+    static constexpr T infinity() noexcept { return INF; }                   \
+    static constexpr T quiet_NaN() noexcept { return QNAN; }                 \
+    static constexpr T signaling_NaN() noexcept { return SNAN; }             \
+    static constexpr T denorm_min() noexcept { return DENORM; }              \
+    static constexpr bool is_iec559 = true;                                  \
+    static constexpr bool is_bounded = true;                                 \
+    static constexpr bool is_modulo = false;                                 \
+    static constexpr bool traps = false;                                     \
+    static constexpr bool tinyness_before = false;                           \
+    static constexpr float_round_style round_style = round_to_nearest;       \
+}
+
+_LIBCXX_FLT_LIMITS(float, FLT_MIN, FLT_MAX, FLT_EPSILON, FLT_MANT_DIG,
+                   FLT_DIG, FLT_DECIMAL_DIG, FLT_MIN_EXP, FLT_MIN_10_EXP,
+                   FLT_MAX_EXP, FLT_MAX_10_EXP, FLT_TRUE_MIN,
+                   __builtin_huge_valf(), __builtin_nanf(""),
+                   __builtin_nansf(""));
+_LIBCXX_FLT_LIMITS(double, DBL_MIN, DBL_MAX, DBL_EPSILON, DBL_MANT_DIG,
+                   DBL_DIG, DBL_DECIMAL_DIG, DBL_MIN_EXP, DBL_MIN_10_EXP,
+                   DBL_MAX_EXP, DBL_MAX_10_EXP, DBL_TRUE_MIN,
+                   __builtin_huge_val(), __builtin_nan(""),
+                   __builtin_nans(""));
+_LIBCXX_FLT_LIMITS(long double, LDBL_MIN, LDBL_MAX, LDBL_EPSILON,
+                   LDBL_MANT_DIG, LDBL_DIG, LDBL_DECIMAL_DIG, LDBL_MIN_EXP,
+                   LDBL_MIN_10_EXP, LDBL_MAX_EXP, LDBL_MAX_10_EXP,
+                   LDBL_TRUE_MIN, __builtin_huge_vall(), __builtin_nanl(""),
+                   __builtin_nansl(""));
+
+#undef _LIBCXX_FLT_LIMITS
+#undef _LIBCXX_DIGITS10
+
+}  // namespace std
+
+#endif

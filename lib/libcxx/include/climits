@@ -1,0 +1,5 @@
+/* <climits> — C++ [climits.syn]. */
+#ifndef _LIBCXX_CLIMITS
+#define _LIBCXX_CLIMITS
+#include <limits.h>
+#endif

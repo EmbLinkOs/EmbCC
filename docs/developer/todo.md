@@ -739,3 +739,16 @@ Two ways out, in order of preference:
 Found by the IR verifier while building `lib/libcxx`: `type_info::name()`
 tripped "reads temp with no definition", because DCE had deleted an
 `IR_LANDING` whose results the following stores still read.
+
+## Long double objects in constant expressions (found 2026-09-20)
+
+`constexpr long double x = 2.5L; static_assert(x > 1);` is refused. Long
+double *values* now flow through constant evaluation exactly
+(`src/cxx/consteval.c` carries a `struct ldf` alongside the double), but
+reading one back out of an object needs a decoder from the target's
+format, and `src/sema/ldfloat.c` only encodes.
+
+`load()` refuses rather than reading the low eight bytes as a double,
+which would not be a narrower answer but a wrong one. The fix is an
+`ldf_from_bytes(const unsigned char *, enum ldf_fmt)` beside
+`ldf_encode`, and the matching case in `load`/`store`.

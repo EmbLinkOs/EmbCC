@@ -57,6 +57,12 @@ double exp(double), exp2(double), expm1(double);
 double log(double), log2(double), log10(double), log1p(double);
 double pow(double, double), sqrt(double), cbrt(double), hypot(double, double);
 double frexp(double, int *), ldexp(double, int), scalbn(double, int);
+/* ilogb/logb: the exponent as an int and as a value of the same type.
+ * Neither is in fdlibm's 1993 set; C99 §7.12.6.5/.11 requires both. */
+int    ilogb(double), ilogbf(float), ilogbl(long double);
+double logb(double);
+float  logbf(float);
+long double logbl(long double);
 
 /* rounding and remainder */
 double ceil(double), floor(double), trunc(double), round(double);

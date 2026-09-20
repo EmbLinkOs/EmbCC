@@ -17,6 +17,13 @@
 #define NGROUPS_MAX  32
 #define SSIZE_MAX  __LONG_MAX__
 
+/* wchar_t's range. It belongs here rather than being assumed, because its
+ * signedness is a TARGET decision, not a C one: it is signed 32-bit on
+ * x86-64 and unsigned 32-bit on aarch64, exactly as those ABIs say. The
+ * compiler knows which and publishes it. */
+#define WCHAR_MIN  __WCHAR_MIN__
+#define WCHAR_MAX  __WCHAR_MAX__
+
 /* the compiler's half: CHAR_BIT, INT_MAX and the rest, from the target */
 #include_next <limits.h>
 

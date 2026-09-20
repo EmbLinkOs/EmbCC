@@ -1,0 +1,13 @@
+/* <csetjmp> — the C header's names, in namespace std as well as at
+ * global scope. C++ requires the std:: spellings; every real
+ * implementation also leaves the global ones, and code depends on it. */
+#ifndef _LIBCXX_CSETJMP
+#define _LIBCXX_CSETJMP
+#include <setjmp.h>
+
+namespace std {
+using ::jmp_buf;
+using ::longjmp;
+}
+
+#endif

@@ -1459,8 +1459,16 @@ struct cclass *class_instance(struct ctemplate *t, struct ctarg *args,
 /* Partial specialization p's pattern with its parameters bound: the
  * arguments a? (Read again from its tokens; a substitution failure is no
  * match.) */
+/* `af`/`na` are the ORIGINAL arguments ALREADY FLATTENED -- packs expanded
+ * into their elements. Taking them flattened is not a convenience: the
+ * caller has already flattened them to deduce against, and re-flattening
+ * here with the caller's (flattened) count over the caller's (unflattened)
+ * array walks off its end. That read is harmless for a pack of nought or
+ * one element, because then the two counts happen to agree, and wrong for
+ * every longer one -- which is why `S<void_t<...>, A...>` matched
+ * `S<void, int>` and not `S<void, int, double>`. */
 static int pattern_substitutes(struct cpartial *p, struct ctarg *bound,
-                               struct ctarg *a, int na, struct ctemplate *t)
+                               struct ctarg *af, int na, struct ctemplate *t)
 {
     jmp_buf jb;
     void *saved = cx_sfinae;
@@ -1483,10 +1491,9 @@ static int pattern_substitutes(struct cpartial *p, struct ctarg *bound,
     parse_restore(st);
     struct ctarg *full = fit_args(t, t->params, t->nparams, sub, ns,
                                   t->scope, cx_cur());
-    int nf = t->nparams, nb = na;
+    int nf = t->nparams;
     struct ctarg *ff = flatten(full, &nf);
-    struct ctarg *af = flatten(a, &nb);
-    return args_same(ff, nf, af, nb);
+    return args_same(ff, nf, af, na);
 }
 
 /* Does partial specialization p's pattern match arguments a (np of p's
@@ -1500,7 +1507,8 @@ static int partial_matches(struct cpartial *p, struct ctarg *a, int na,
     int nP = p->npattern;
     struct ctarg *pf = flatten(p->pattern, &nP);
     struct ctarg *af = flatten(a, &na);
-    int full = na;
+    int full = na;                 /* the flattened count, before any
+                                    * default-argument truncation below */
     if (t && nP < na && (!nP || !pf[nP - 1].expansion)) {
         /* A<X&, Y&&> for template<class, class, class = void>: the
          * arguments past the pattern's must be the defaults */
@@ -1529,7 +1537,6 @@ static int partial_matches(struct cpartial *p, struct ctarg *a, int na,
         }
         na = nP;
     }
-    (void)full;
     int saved = deduce_exact, saved_def = deduce_deferred;
     deduce_exact = 1;
     deduce_deferred = 0;
@@ -1541,7 +1548,9 @@ static int partial_matches(struct cpartial *p, struct ctarg *a, int na,
         ok = set[i] || p->params[i].pack;
     *bound = out;
     if (ok && deferred && p->pat_tok > 0 && t)
-        ok = pattern_substitutes(p, out, a, na, t);
+        /* The FLATTENED arguments, and the count from before `na` was cut
+         * back to the pattern's length for the default-argument check. */
+        ok = pattern_substitutes(p, out, af, full, t);
     return ok;
 }
 

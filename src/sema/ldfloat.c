@@ -404,6 +404,44 @@ struct ldf *ldf_neg(const struct ldf *a)
     return r;
 }
 
+int ldf_is_zero(const struct ldf *a)
+{
+    return a->kind == LDF_FINITE && big_is_zero(a->m);
+}
+
+int ldf_cmp(const struct ldf *a, const struct ldf *b)
+{
+    if (a->kind == LDF_NAN || b->kind == LDF_NAN)
+        return LDF_UNORDERED;
+
+    /* +0 == -0, which is the one place IEEE says two different bit
+     * patterns compare equal -- and the reason this cannot just compare
+     * sign first and be done. */
+    int az = ldf_is_zero(a), bz = ldf_is_zero(b);
+    if (az && bz)
+        return 0;
+    if (az)
+        return b->neg ? 1 : -1;
+    if (bz)
+        return a->neg ? -1 : 1;
+
+    if (a->neg != b->neg)
+        return a->neg ? -1 : 1;
+    int sign = a->neg ? -1 : 1;          /* both the same sign */
+
+    if (a->kind == LDF_INF || b->kind == LDF_INF) {
+        if (a->kind == LDF_INF && b->kind == LDF_INF)
+            return 0;
+        return a->kind == LDF_INF ? sign : -sign;
+    }
+
+    /* Both finite, same sign: compare the significands at a common
+     * exponent. Shifting rather than normalising keeps it exact. */
+    long e = a->e < b->e ? a->e : b->e;
+    struct big ma = big_shl(a->m, a->e - e), mb = big_shl(b->m, b->e - e);
+    return sign * big_cmp(ma, mb);
+}
+
 struct ldf *ldf_binop(int op, const struct ldf *a, const struct ldf *b,
                       enum ldf_fmt fmt)
 {

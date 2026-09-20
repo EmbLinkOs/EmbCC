@@ -1,0 +1,16 @@
+/* <cinttypes> — the C header's names, in namespace std as well as at
+ * global scope. C++ requires the std:: spellings; every real
+ * implementation also leaves the global ones, and code depends on it. */
+#ifndef _LIBCXX_CINTTYPES
+#define _LIBCXX_CINTTYPES
+#include <inttypes.h>
+
+namespace std {
+using ::imaxdiv_t;
+using ::imaxabs;
+using ::imaxdiv;
+using ::strtoimax;
+using ::strtoumax;
+}
+
+#endif

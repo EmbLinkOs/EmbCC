@@ -2077,7 +2077,31 @@ static int const_fold(const struct expr *e, long *out)
             return 0;
         *out = !a;
         return 1;
+    case EXPR_COND: {
+        /* `int buf[(N > 4) ? N : 4];` -- a constant conditional, which C11
+         * 6.6 admits like any other operator and which was the one piece
+         * missing here. Only the SELECTED arm has to be constant: the
+         * standard evaluates one branch, so `1 ? 1 : 1/0` is well-formed
+         * and folding both would reject it. */
+        long c;
+        if (!const_fold(e->args[0], &c))
+            return 0;
+        return const_fold(c ? e->args[1] : e->args[2], out);
+    }
     case EXPR_BINOP:
+        /* && and || short-circuit, so the right operand must neither be
+         * evaluated nor be required to fold when the left one decides the
+         * answer: `sizeof(long) > 8 && 1/0` is a constant expression whose
+         * value is 0. */
+        if (e->op == B_LAND || e->op == B_LOR) {
+            if (!const_fold(e->lhs, &a))
+                return 0;
+            if (e->op == B_LAND ? !a : a) { *out = e->op == B_LOR; return 1; }
+            if (!const_fold(e->rhs, &b))
+                return 0;
+            *out = !!b;
+            return 1;
+        }
         if (!const_fold(e->lhs, &a) || !const_fold(e->rhs, &b))
             return 0;
         switch (e->op) {

@@ -46,4 +46,16 @@ void ldf_encode(const struct ldf *a, enum ldf_fmt fmt, unsigned char *out);
 double ldf_to_double(const struct ldf *a);
 long ldf_to_long(const struct ldf *a);
 
+/* IEEE comparison: -1, 0, 1, or LDF_UNORDERED when either is NaN.
+ *
+ * It exists because comparing through ldf_to_double() is not the same
+ * question: two distinct long doubles can round to the same double, and
+ * `a < b` would then answer false for values that differ. Constant
+ * evaluation has to give the answer the target would give at run time. */
+#define LDF_UNORDERED 2
+int ldf_cmp(const struct ldf *a, const struct ldf *b);
+
+/* Is this value zero (of either sign)? */
+int ldf_is_zero(const struct ldf *a);
+
 #endif
