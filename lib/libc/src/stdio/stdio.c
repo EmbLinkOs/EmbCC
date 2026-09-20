@@ -193,12 +193,14 @@ void perror(const char *s)
 
 /* ---- files by name ---- */
 
-#define O_RDONLY 0
-#define O_WRONLY 1
-#define O_RDWR   2
-#define O_CREAT  0100
-#define O_TRUNC  01000
-#define O_APPEND 02000
+/* The open flags belong to the OS contract (os/backend.h), not to stdio:
+ * a backend has to be able to see the same numbers this file asks with. */
+#define O_RDONLY __OS_O_RDONLY
+#define O_WRONLY __OS_O_WRONLY
+#define O_RDWR   __OS_O_RDWR
+#define O_CREAT  __OS_O_CREAT
+#define O_TRUNC  __OS_O_TRUNC
+#define O_APPEND __OS_O_APPEND
 
 FILE *fopen(const char *restrict path, const char *restrict mode)
 {

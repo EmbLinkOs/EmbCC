@@ -180,8 +180,11 @@ test-libstdcxx: embcc
 # One implementation, ported to an OS by one small backend. Built with
 # EmbCC itself, per target -- which is also the widest test the compiler
 # gets outside its own sources.
-LIBC_SRCS := $(wildcard lib/libc/src/*/*.c) $(wildcard lib/libc/src/math/fdlibm/*.c) \
-             lib/libc/os/posixlike/backend.c
+# Everything above the seam, which is every target's library verbatim. The
+# backend is appended per target -- that difference IS the port.
+LIBC_SRCS_PORTABLE := $(wildcard lib/libc/src/*/*.c) \
+                      $(wildcard lib/libc/src/math/fdlibm/*.c)
+LIBC_SRCS := $(LIBC_SRCS_PORTABLE) lib/libc/os/posixlike/backend.c
 LIBC_INC  := -Ilib/libc/include -Ilib/libc/src/math
 
 libc-x86_64: embcc
@@ -204,9 +207,29 @@ libc-aarch64: embcc
 	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs $(BUILD)/libc/aarch64/libc.a $(BUILD)/libc/aarch64/*.o
 	@echo "libc: $(BUILD)/libc/aarch64/libc.a"
 
+# EmbLinkOS is a backend, not a second library: same sources, one different
+# file at the bottom. It needs that OS's ABI headers, so it is opt-in.
+#   make libc-emblinkos EMBLINKOS=$HOME/EmbLinkOs
+EMBLINKOS ?= $(HOME)/EmbLinkOs
+
+libc-emblinkos: embcc
+	@[ -f "$(EMBLINKOS)/user/lib/embk.h" ] || { \
+	    echo "libc-emblinkos: no $(EMBLINKOS)/user/lib/embk.h"; \
+	    echo "  set EMBLINKOS=/path/to/EmbLinkOs"; exit 1; }
+	@mkdir -p $(BUILD)/libc/emblinkos
+	@for f in $(LIBC_SRCS_PORTABLE) lib/libc/os/emblinkos/backend.c; do \
+	    o=$(BUILD)/libc/emblinkos/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
+	    ./embcc -c -O2 $(LIBC_INC) -I$(EMBLINKOS)/user/lib $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libc/emblinkos/libc.a
+	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/emblinkos/libc.a \
+	    $(BUILD)/libc/emblinkos/*.o
+	@echo "libc: $(BUILD)/libc/emblinkos/libc.a"
+
 libc: libc-x86_64 libc-aarch64
 
 clean:
 	rm -rf $(BUILD) embcc embread embld embdbg embas embls
 
-.PHONY: all test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 clean
+.PHONY: all test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
+        libc-emblinkos clean

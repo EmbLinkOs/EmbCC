@@ -552,6 +552,12 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
             code[n++] = 0x0f; code[n++] = 0xae; code[n++] = 0xf8;
         } else if (mlen == 6 && strncmp(m, "wbinvd", 6) == 0) {
             code[n++] = 0x0f; code[n++] = 0x09;
+        } else if (mlen == 7 && strncmp(m, "syscall", 7) == 0) {
+            /* The fast system-call entry. EmbLinkOS's user-side ABI is
+             * written on it (user/lib/embk_syscall.h), so without this the
+             * C library's backend for that OS cannot be compiled by the
+             * compiler the OS is built with. */
+            code[n++] = 0x0f; code[n++] = 0x05;
         } else if (mlen == 5 && strncmp(m, "rdtsc", 5) == 0) {
             code[n++] = 0x0f; code[n++] = 0x31;
         } else if (mlen == 5 && strncmp(m, "rdmsr", 5) == 0) {

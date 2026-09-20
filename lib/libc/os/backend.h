@@ -21,6 +21,21 @@
 long __os_write(int fd, const void *buf, size_t n);
 long __os_read(int fd, void *buf, size_t n);
 
+/* The flags __os_open takes. They are part of THIS contract, not of any
+ * one OS's headers: the library has to name them to ask for "create it,
+ * truncate it", and a backend whose kernel numbers them differently
+ * translates. The values are the ones Linux x86 chose and nearly every
+ * kernel since copied, so most backends translate by doing nothing --
+ * EmbLinkOS's numbers are identical, and tests/golden/libc-emblinkos.sh
+ * asserts that rather than trusting it. */
+#define __OS_O_RDONLY 0x0000
+#define __OS_O_WRONLY 0x0001
+#define __OS_O_RDWR   0x0002
+#define __OS_O_CREAT  0x0040
+#define __OS_O_EXCL   0x0080
+#define __OS_O_TRUNC  0x0200
+#define __OS_O_APPEND 0x0400
+
 /* Files by name. A backend with no filesystem returns -1 and sets ENOSYS;
  * everything that does not need one still works. */
 int  __os_open(const char *path, int flags, int mode);

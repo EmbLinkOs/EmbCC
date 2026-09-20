@@ -100,7 +100,7 @@ names where to verify it.
 | Object/executable formats produced | **ELF64** relocatable and executable, x86-64 and AArch64; **EMBX** via EmbLD (`embld --embx`), byte-identical to the reference producer. |
 | Calling convention and data layout | **SysV AMD64** on x86-64, **AAPCS64** on AArch64 — adopted as-is, no deviation. Data layout LP64 on both; `long double` is x87 80-bit on x86-64 and IEEE binary128 on AArch64; plain `char` is signed on x86-64, unsigned on AArch64. Full matrix: `docs/architecture/abi.md`, `docs/language/compatibility.md`. This answers open question 2. |
 | Debug info emitted, and what EmbDBG consumes | **DWARF-4** line, frame and local information under `-g`. **EmbDBG** (`tools/embdbg/`) reads it back: symbolize, backtrace, disassemble, inspect locals, analyse a kernel crash dump, a TUI — no gdb in the loop. Aggregate type DIEs are the remaining producer gap. This answers open question 3. |
-| Which parts of EmbLinkOS / emlibc it compiles today | **All of both.** The kernel: 89 C units via `embcc`, 6 `.asm` via `embas`, linked by `embld` — no gcc, no nasm, no `ld` — booting to the desktop behaviourally identical to the gcc build, at `-O0`, `-O1` and `-O2`. **emlibc**, including real `fdlibm` floating point (38 units), compiled on the OS and self-hosting. Plus **libstdc++** (193/193 objects on both targets). |
+| Which parts of EmbLinkOS / emlibc it compiles today | **All of both** — and emlibc is now a 200-line *backend* of EmbCC's own C library rather than a separate one (§11, `docs/language/libc.md`). The kernel: 89 C units via `embcc`, 6 `.asm` via `embas`, linked by `embld` — no gcc, no nasm, no `ld` — booting to the desktop behaviourally identical to the gcc build, at `-O0`, `-O1` and `-O2`. **emlibc**, including real `fdlibm` floating point (38 units), compiled on the OS and self-hosting. Plus **libstdc++** (193/193 objects on both targets). |
 | Status of the KM1 self-build milestone | **Host half done.** `tools/gen-kernel-manifest.sh` generates a 96-target EmbBuild manifest and `tests/golden/x86_64/embbuild-kernel.sh` (opt-in, `EMBCC_KM1=1`) walks it to a higher-half `kernel.elf` that boots in QEMU. KM2/KM3 stay OS-side. |
 | Existing test suite and pass rate | 65 golden scripts plus per-target execution corpora: **195/195 on x86_64, 170/170 on AArch64**, run by `make test` / `make test-arm64`. Both are release gates; `EMBCC_VERIFY=1` runs the IR verifier after every optimizing compile for the whole suite. |
 | Which hosts it currently runs on | **macOS arm64** (primary development), **Linux x86_64** (CI/test), and **EmbLinkOS x86_64** — where it compiles and links its own sixteen sources into a byte-identical `embcc`. |
@@ -480,7 +480,16 @@ A compiler that generates correct code but disagrees with the linker, libc, or d
 - **TLS model**, stack alignment, red zone (disabled for kernel code), code models.
 - **Symbol naming** and section conventions.
 
-The compiler also owns runtime pieces that are not libc:
+**The compiler owns a C library too.** This was not in the original plan,
+which assumed newlib for the test targets and emlibc for EmbLinkOS. Once
+EmbCC targeted more than one operating system that stopped being tenable:
+borrowing one OS's C library means every new target inherits somebody
+else's porting problem, and it meant two `printf`s and two `strtod`s — the
+duplication R1 forbids everywhere else. So `lib/libc/` is one portable
+implementation over an eleven-primitive OS seam, and **emlibc is now one
+backend of it** rather than a separate library. See
+`docs/language/libc.md`. The compiler also owns runtime pieces that are
+not libc:
 
 - **Freestanding headers** shipped with the compiler: `stddef.h`, `stdint.h`, `stdarg.h`, `stdbool.h`, `stdalign.h`, `stdnoreturn.h`, `float.h`, `limits.h`, `iso646.h`.
 - **Builtins runtime (`emrt`)**: helper routines the compiler emits calls to (128-bit arithmetic, soft-float on FPU-less targets, overflow-checking helpers). Note that the compiler may emit calls to `memcpy`/`memset`/`memmove`/`memcmp`; freestanding environments must provide them.

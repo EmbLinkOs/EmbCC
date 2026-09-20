@@ -16,6 +16,8 @@ the duplication this project removes everywhere else.
       string/ ctype/ stdlib/ stdio/ time/ math/
       setjmp/         the one part that cannot be portable C
     os/<name>/        the backend: 11 primitives (os/backend.h)
+      posixlike/      write/read/open/... -- the test harness, anything Unix
+      emblinkos/      EmbLinkOS's syscall ABI; this is what replaced emlibc
 
 `src/setjmp/` holds one file per architecture, each wrapped whole in
 `#ifdef __x86_64__` / `#ifdef __aarch64__` so the build picks one and the
@@ -28,6 +30,10 @@ code: no function in this library has two bodies. See
 `os/backend.h` is the whole contract between the library and an operating
 system. A new OS implements those and gets the entire C library; nothing
 above the seam knows which OS it is on, and there are no `#ifdef`s there.
+
+EmbLinkOS is the proof. Its C library was `emlibc`; it is now
+`os/emblinkos/backend.c`, about 200 lines, and that OS gets the same
+printf, malloc and math as every other target.
 
 ## Status
 

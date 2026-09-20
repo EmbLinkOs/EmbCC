@@ -39,6 +39,8 @@ int   atexit(void (*f)(void));
 void  exit(int status);
 void  _Exit(int status);
 char *getenv(const char *name);
+/* The vector getenv reads; the program's startup code publishes it. */
+extern char **environ;
 int   setenv(const char *name, const char *value, int overwrite);
 int   unsetenv(const char *name);
 int   system(const char *cmd);

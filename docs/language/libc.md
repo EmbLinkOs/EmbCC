@@ -26,6 +26,11 @@ primitives — read, write, open, close, lseek, sbrk, time, clock, exit,
 isatty, getentropy. A new OS implements those and gets the library. Nothing
 above the seam knows which OS it is on, and there are no `#ifdef`s there.
 
+Two backends exist. `os/posixlike/` maps the primitives onto the classic
+calls, which is what the QEMU test harness and anything Unix-shaped
+provides. `os/emblinkos/` is **EmbLinkOS**, and it is the proof the seam
+works: see below.
+
 Buffering, formatting and allocation policy live **above** the seam
 deliberately, so every target gets the same behaviour and a fix lands once.
 
@@ -158,3 +163,44 @@ be read; `sscanf("", "%d", &n)` returns `EOF`. A library that returns `EOF`
 for both breaks every read loop written against it, and it is an easy
 mistake to make when the test for "nothing happened" is written as
 "consumed no characters".
+
+## EmbLinkOS is a backend, not a second library
+
+`emlibc` was EmbLinkOS's own C library. It is now
+[`os/emblinkos/backend.c`](../../lib/libc/os/emblinkos/backend.c) — about
+200 lines — and the operating system gets the same `printf`, `strtod`,
+`malloc`, `qsort` and fdlibm as every other target.
+
+That is the arithmetic the seam was designed for. `emlibc/rim/syscalls.c`
+was 184 lines of genuinely EmbLinkOS-specific code sitting under several
+thousand lines of portable C that duplicated what newlib already did.
+Only the 184 lines were ever really the OS's, and only they survive.
+A bug fixed in `printf` is now fixed for EmbLinkOS too, which was the
+entire argument.
+
+Three things in that file are worth reading, because they are what "a
+backend" actually means:
+
+**Paths.** The kernel resolves absolute paths only, so the working
+directory is a userspace fact, and it lives in the backend rather than in
+the portable library. What a name refers to is part of how an operating
+system names files. A target with no filesystem never compiles it.
+
+**errno.** The kernel returns `-errno` using the same numbers this
+library's `<errno.h>` defines — `kernel/include/errno.h` and
+`lib/libc/include/errno.h` agree value for value — so the mapping is the
+identity. Saying that in a comment is better than a translation table that
+would rot silently if either side moved.
+
+**`clock()` fails.** `SYS_uptime_ms` exists and would give a plausible
+number, which is exactly why it is not used: the kernel has no per-process
+CPU accounting, so under any load the number would be wrong in a way the
+caller cannot detect. EmbLinkOS's own `clock_gettime` refuses the CPU-time
+clocks for the same reason. What the kernel does not provide is absent, not
+stubbed to lie.
+
+Build it with `make libc-emblinkos EMBLINKOS=/path/to/EmbLinkOs`. It is
+opt-in because it needs that OS's ABI headers, and it takes the syscall
+numbers from the OS's own `<embk.h>` rather than from a copy in this
+repository — those numbers belong to the kernel and are hand-synchronised
+with it, so a second copy would be a second thing to forget.
