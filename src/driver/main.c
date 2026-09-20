@@ -420,14 +420,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * its own template, not on code layout — and mark its call targets used.
      * The placement pass further down reuses these already-assembled bytes. */
     for (struct topasm *ta = u->topasm; ta; ta = ta->next) {
-        /* The built-in assembler is NASM/Intel x86-64 (src/as). There is no
-         * aarch64 assembler yet, so file-scope asm on that target must fail
-         * loudly rather than emit x86 bytes into an aarch64 image. */
-        if (target_get() == TARGET_AARCH64)
-            diag_fatal(in, 0,
-                       "file-scope asm is not supported for aarch64 yet — "
-                       "EmbCC's assembler is x86-64 NASM syntax");
-        topasm_assemble(ta);
+        /* The mnemonics the built-in assembler encodes are x86-64. The
+         * directives -- labels and .byte/.long/.quad -- are not, so a
+         * block written as data assembles on any target, and one written
+         * with mnemonics is refused there by name instead of quietly
+         * emitting x86 bytes into an aarch64 image. */
+        topasm_assemble(ta, target_get() != TARGET_AARCH64);
         for (int r = 0; r < ta->nrels; r++)
             for (struct func *f = u->funcs; f; f = f->next)
                 if (!f->absorbed &&

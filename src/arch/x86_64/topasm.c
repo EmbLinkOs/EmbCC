@@ -1,9 +1,18 @@
 /* A tiny assembler for file-scope `__asm__` blocks. EmbCC has no general
- * text assembler; this recognizes exactly the vocabulary EmbLinkOS's crt0
- * _start stub is written in — directives (.global/.globl), labels (named
- * and numeric-local), and a handful of instructions — and refuses anything
- * else loudly (THE RULE). It is the file-scope companion to the fixed-
- * register inline asm the syscall stubs use. */
+ * text assembler; this recognizes exactly the vocabulary its own sources
+ * are written in — directives (.global/.globl and the data directives),
+ * labels (named and numeric-local), and a handful of x86-64 instructions —
+ * and refuses anything else loudly (THE RULE). It is the file-scope
+ * companion to the fixed-register inline asm the syscall stubs use.
+ *
+ * The data directives carry the weight for anything the mnemonics cannot
+ * say. A library routine that must be machine code — setjmp saving the
+ * callee-saved registers, longjmp jumping to a stored address — is written
+ * as `.byte`/`.long` with its disassembly in a comment beside it, which is
+ * the same form `embcc -S` emits and for the same reason: the bytes are
+ * what runs, and nothing downstream gets to re-decide them. That half is
+ * arch-neutral, so it works on a target this file could not otherwise
+ * assemble a single instruction for. */
 #include "topasm.h"
 
 #include <stdlib.h>
@@ -97,14 +106,44 @@ static struct line *split(const char *tmpl, int *nout)
     return v;
 }
 
-/* One instruction's byte length (0 for a directive or label). */
-static int insn_len(struct topasm *ta, const char *l)
+/* A data directive's element width in bytes, or 0 if `l` is not one. */
+static int data_width(const char *l)
 {
+    if (strncmp(l, ".byte ", 6) == 0) return 1;
+    if (strncmp(l, ".long ", 6) == 0) return 4;
+    if (strncmp(l, ".quad ", 6) == 0) return 8;
+    return 0;
+}
+
+/* How many comma-separated values a data directive carries. */
+static int data_count(const char *l)
+{
+    int n = 1;
+    for (const char *p = l; *p; p++)
+        if (*p == ',')
+            n++;
+    return n;
+}
+
+/* One line's byte length (0 for a non-data directive or a bare label). */
+static int insn_len(struct topasm *ta, const char *l, int mnemonics_ok)
+{
+    int w = data_width(l);
+    if (w)
+        return w * data_count(l);
     if (l[0] == '.')
         return 0;                                 /* directive */
     size_t n = strlen(l);
     if (n && l[n - 1] == ':')
         return 0;                                 /* label */
+    /* On a target this file cannot encode for, say so in those words
+     * rather than blaming the mnemonic: the block may be perfectly good
+     * asm that simply needs writing as data here. */
+    if (!mnemonics_ok)
+        diag_fatal(ta->file, ta->line,
+                   "file-scope asm instruction \"%s\": EmbCC assembles "
+                   "instructions for x86-64 only. On this target write the "
+                   "block as .byte/.long data (see lib/libc/src/setjmp).", l);
     if (strncmp(l, "and ", 4) == 0)
         return 4;                                 /* 48 83 /4 ib */
     if (strncmp(l, "call ", 5) == 0)
@@ -114,8 +153,9 @@ static int insn_len(struct topasm *ta, const char *l)
     if (strcmp(l, "ret") == 0)
         return 1;
     diag_fatal(ta->file, ta->line,
-               "file-scope asm instruction not supported: \"%s\" "
-               "(EmbCC assembles .global/labels/and/call/jmp/ret)", l);
+               "file-scope asm instruction not supported: \"%s\" (EmbCC "
+               "assembles .global/labels/.byte/.long/.quad and "
+               "and/call/jmp/ret)", l);
     return 0;
 }
 
@@ -185,7 +225,7 @@ static const char *strip_label(struct topasm *ta, const char *l, int off,
     return p;
 }
 
-void topasm_assemble(struct topasm *ta)
+void topasm_assemble(struct topasm *ta, int mnemonics_ok)
 {
     int nl;
     struct line *ls = split(ta->tmpl, &nl);
@@ -201,7 +241,7 @@ void topasm_assemble(struct topasm *ta)
         l = strip_label(ta, l, off, 1);
         ls[i].off = off;
         if (*l)
-            off += insn_len(ta, l);
+            off += insn_len(ta, l, mnemonics_ok);
     }
     /* apply .global to the matching label symbols */
     for (int i = 0; i < nl; i++) {
@@ -226,13 +266,34 @@ void topasm_assemble(struct topasm *ta)
     unsigned char *c = ta->code;
     for (int i = 0; i < nl; i++) {
         const char *l = ls[i].text;
-        if (l[0] == '.')
+        int w = data_width(l);
+        if (!w && l[0] == '.')
             continue;
         l = strip_label(ta, l, 0, 0);   /* labels defined in pass 1 */
         if (!*l)
             continue;
         int here = ls[i].off;
-        if (strncmp(l, "and ", 4) == 0) {
+        w = data_width(l);
+        if (w) {
+            /* Little-endian, which is both targets. Values are parsed as
+             * unsigned so 0xff and 0xffffffff are written as given rather
+             * than overflowing a signed long on the way in. */
+            const char *p = l + 6;
+            for (;;) {
+                char *end;
+                unsigned long v = strtoul(p, &end, 0);
+                if (end == p)
+                    diag_fatal(ta->file, ta->line,
+                               "asm data directive wants a number: \"%s\"", l);
+                for (int b = 0; b < w; b++)
+                    *c++ = (unsigned char)((v >> (8 * b)) & 0xff);
+                while (is_ws(*end)) end++;
+                if (*end != ',')
+                    break;
+                p = end + 1;
+                while (is_ws(*p)) p++;
+            }
+        } else if (strncmp(l, "and ", 4) == 0) {
             const char *ops = l + 4;
             if (ops[0] != '$')
                 diag_fatal(ta->file, ta->line,

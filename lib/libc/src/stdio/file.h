@@ -36,4 +36,9 @@ int  __stdio_flush(FILE *f);
 int __vformat(void (*sink)(void *, const char *, size_t), void *ctx,
               const char *fmt, va_list ap);
 
+/* The formatted-INPUT engine, its mirror. get/unget rather than a source
+ * callback because scanning needs one character of lookahead; see scan.c. */
+int __vscan(int (*get)(void *), void (*unget)(void *, int), void *ctx,
+            const char *fmt, va_list ap);
+
 #endif

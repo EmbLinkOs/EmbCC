@@ -40,9 +40,11 @@ deliberately, so every target gets the same behaviour and a fix lands once.
 | `<stdio.h>` | `FILE`, buffering, the whole `printf` family, files by name, positioning |
 | `<math.h>` | fdlibm's cores under their C11 names, plus what its 1993 set never carried |
 | `<complex.h>` | complete — new; emlibc never had one |
-| `<time.h>`, `<setjmp.h>`, `<assert.h>`, `<inttypes.h>` | **not yet** |
+| `<time.h>` | the calendar complete and exact; the clock is whatever the backend has |
+| `<setjmp.h>` | complete, per architecture |
+| `<assert.h>`, `<inttypes.h>` | complete |
+| `scanf` family | complete, including `%[`, `%n`, `%a` and hex floats |
 | `<wchar.h>`, `<locale.h>`, `<signal.h>`, `<threads.h>` | **not yet** |
-| `scanf` family | declared, **not yet implemented** |
 
 **The acceptance test is the execution corpus.** All **90** x86-64 programs
 in `tests/exec` compile, link and run against this library with **no newlib
@@ -93,3 +95,66 @@ the last program that would not link. `cabs` is `hypot`, not
 `sqrt(x*x + y*y)`: the naive form overflows for magnitudes that are
 perfectly representable and underflows small ones to zero, which is the
 commonest bug in a hand-rolled complex library.
+
+## setjmp, and why it is written as bytes
+
+`setjmp` saves the registers the ABI says a callee must preserve; `longjmp`
+resumes at a stored address with a stored stack pointer. No C expression
+denotes either, so these two functions are machine code — the only such
+code in the library.
+
+They are placed with `.byte`/`.long` in a file-scope `__asm__` block, each
+instruction carrying its disassembly in a comment. The alternative was to
+grow a full assembler inside the compiler for the sake of two functions;
+`embcc -S` had already made the same call for the same reason, that the
+bytes are what runs and nothing downstream gets to re-decide them.
+
+A comment is not checked by anything, which is how an encoding rots. So
+`tests/golden/libc.sh` checks it: it strips the bytes from one column and
+the mnemonics from the other, assembles the mnemonics with the platform's
+own assembler, and requires the two to agree byte for byte. That test
+caught the aarch64 `stp d8, d9` encoding being wrong the first time it was
+written.
+
+What must be saved is exactly what the ABI calls callee-saved. On x86-64
+that is `rbx`, `rbp`, `r12`–`r15`, the stack pointer and the return
+address; every vector register is caller-saved, so none appear. On aarch64
+it is `x19`–`x28`, the frame pointer, the link register, `sp` — **and the
+low 64 bits of `v8`–`v15`**. Omitting those is the classic aarch64
+`setjmp` bug: it surfaces only when the compiler happens to keep a `double`
+in `v8` across the `setjmp`, which depends on the optimisation level.
+
+## Time without a timezone
+
+The calendar conversions are exact over the whole range of `time_t`, using
+the days-from-civil algorithm rather than a loop over years: shift the year
+to start in March, which moves the leap day to the end where it perturbs
+nothing, and the month lengths become a closed form. `-1` seconds is
+23:59:59 on 1969-12-31, not a negative time of day, which is what a
+division that floors gives and a division that truncates does not.
+
+There is **no timezone database**, so `localtime` is `gmtime` and `%z` is
+`+0000`. That is a real limitation, and it is stated rather than hidden
+behind a `TZ` variable this library would silently ignore.
+
+The clock is separate from the calendar on purpose. `time()` and `clock()`
+return whatever `__os_time`/`__os_clock_ns` give, which on a bare harness
+is `-1`; a program that converts a `time_t` it obtained some other way
+works on a target with no clock at all.
+
+## scanf
+
+One engine over a get/unget pair, the mirror of `printf`'s one engine over
+a sink. Scanning needs one character of lookahead — `%d` on `"12x"` has to
+read the `x` to learn the number ended — and exactly one is ever needed,
+which is why a `scanf` can be written against `ungetc` at all.
+
+The subtlety worth stating is the return value. C distinguishes an **input
+failure** (the input ended before the first conversion completed, return
+`EOF`) from a **matching failure** (there was input and it was the wrong
+shape, return the number assigned, possibly 0). `sscanf("x", "%d", &n)`
+consumes nothing and returns **0**, because there is an `x` there still to
+be read; `sscanf("", "%d", &n)` returns `EOF`. A library that returns `EOF`
+for both breaks every read loop written against it, and it is an easy
+mistake to make when the test for "nothing happened" is written as
+"consumed no characters".

@@ -123,6 +123,7 @@ static const struct {
     { "__alignof__", TOK_KW_ALIGNOF },
     { "__alignof", TOK_KW_ALIGNOF },
     { "_Alignas", TOK_KW_ALIGNAS },
+    { "_Noreturn", TOK_KW_NORETURN },
     { "typeof", TOK_KW_TYPEOF },
     { "__typeof__", TOK_KW_TYPEOF },
     { "__typeof", TOK_KW_TYPEOF },
@@ -1028,6 +1029,7 @@ const char *tok_describe(const struct token *t)
     case TOK_KW_RESTRICT: return "'restrict'";
     case TOK_KW_ASM: return "'asm'";
     case TOK_KW_INLINE: return "'inline'";
+    case TOK_KW_NORETURN: return "'_Noreturn'";
     case TOK_KW_ATTRIBUTE: return "'__attribute__'";
     case TOK_DOT: return "'.'";
     case TOK_ARROW: return "'->'";

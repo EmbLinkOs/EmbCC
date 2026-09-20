@@ -14,6 +14,66 @@ EMBCC=${EMBCC:-./embcc}
 out=tests/golden/out/libc
 rm -rf "$out"; mkdir -p "$out"
 
+# ---- setjmp: the bytes ARE the comments beside them -----------------------
+# setjmp and longjmp cannot be written in C -- they save the registers the
+# ABI says a callee must preserve and resume at a stored address -- so they
+# are machine code placed with .byte/.long, each instruction carrying its
+# disassembly in a comment. A comment is not checked by anything, which is
+# how an encoding rots. So check it: strip the bytes from one column and the
+# mnemonics from the other, assemble the mnemonics with the platform's own
+# assembler, and require the two to agree byte for byte. (This caught the
+# aarch64 `stp d8, d9` encoding being wrong when it was first written.)
+cat > "$out/split.awk" << 'AWK'
+function hexval(s,   i, c, v, d) {
+    v = 0
+    for (i = 1; i <= length(s); i++) {
+        c = tolower(substr(s, i, 1))
+        d = index("0123456789abcdef", c) - 1
+        if (d >= 0) v = v * 16 + d
+    }
+    return v
+}
+{
+    i = index($0, dir);   if (!i) next
+    h = index($0, "#");   if (!h) next
+    vals = substr($0, i + length(dir), h - i - length(dir))
+    gsub(/[ \t]/, "", vals)
+    n = split(vals, a, ",")
+    for (k = 1; k <= n; k++) {              # little-endian, both targets
+        v = hexval(a[k])
+        for (b = 0; b < width; b++) { printf "%02x\n", v % 256 > bytes
+                                      v = int(v / 256) }
+    }
+    m = substr($0, h + 1)
+    sub(/\\n".*$/, "", m)
+    gsub(/^[ \t]+|[ \t]+$/, "", m)
+    print m > asm
+}
+AWK
+
+verify_setjmp() {           # verify_setjmp <arch> <assembler> <directive> <w>
+    src=lib/libc/src/setjmp/setjmp-$1.c
+    command -v "$2" > /dev/null 2>&1 ||
+        { echo "  ($1: $2 absent, not checked)"; return 0; }
+    rm -f "$out/$1-bytes.txt" "$out/$1.s"
+    awk -v dir=".$3 " -v width="$4" -v bytes="$out/$1-bytes.txt" \
+        -v asm="$out/$1.s" -f "$out/split.awk" "$src"
+    [ -s "$out/$1.s" ] || { echo "FAIL: no instructions found in $src"; exit 1; }
+    "$2" "$out/$1.s" -o "$out/$1.o" ||
+        { echo "FAIL: the disassembly comments in $src are not valid asm"
+          exit 1; }
+    "${2%as}objcopy" -O binary -j .text "$out/$1.o" "$out/$1.bin"
+    od -An -tx1 -v "$out/$1.bin" | tr -s ' ' '\n' | sed '/^$/d' \
+        > "$out/$1-asm.txt"
+    diff "$out/$1-bytes.txt" "$out/$1-asm.txt" > "$out/$1-diff.txt" ||
+        { head -20 "$out/$1-diff.txt"
+          echo "FAIL: $src: the bytes and their disassembly disagree"; exit 1; }
+    echo "  $1: $(wc -l < "$out/$1.s" | tr -d ' ') instructions; the bytes are
+  what ${2##*/} produces for the comments beside them"
+}
+verify_setjmp x86_64  "${EMBCC_REFEREE_AS:-x86_64-elf-as}"    byte 1
+verify_setjmp aarch64 "${EMBCC_AARCH64_AS:-aarch64-elf-as}" long 4
+
 [ "${ARCH:-x86_64}" = x86_64 ] ||
     { echo "skipped: the libc harness is x86-64 (aarch64 next)"; exit 0; }
 command -v x86_64-elf-ld > /dev/null 2>&1 ||
@@ -124,6 +184,93 @@ grep -q "sqrt=1.414214 pow=1024.000000 log=1.000000 sin=0.000000" \
     "$out/run.txt" || { echo "FAIL: math"; exit 1; }
 grep -q "^sorted: 1 2 3 5 7 8 9$" "$out/run.txt" || { echo "FAIL: qsort"; exit 1; }
 echo "the visible surface: strings, every printf conversion, math, qsort"
+
+# ---- the second surface: control flow, the calendar, and input ------------
+# These are the parts a libc gets subtly wrong and nobody notices for years:
+# longjmp through several frames, dates before the epoch and on a leap day,
+# and scanf's two different kinds of failure.
+cat > "$out/hosted.c" << 'EOF'
+#include <stdio.h>
+#include <setjmp.h>
+#include <time.h>
+#include <inttypes.h>
+#include <assert.h>
+static jmp_buf jb;
+static int depth;
+static void inner(int n) { if (n == 0) longjmp(jb, 7); inner(n - 1); }
+int main(void)
+{
+    int v = setjmp(jb);
+    if (v == 0) { depth = 5; inner(depth); }
+    printf("longjmp v=%d depth=%d\n", v, depth);
+    jmp_buf jb2;
+    if ((v = setjmp(jb2)) == 0) longjmp(jb2, 0);
+    printf("longjmp0 %d\n", v);
+
+    struct tm tm; char buf[128]; time_t t = 0;
+    gmtime_r(&t, &tm);
+    strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S %a %j", &tm);
+    printf("epoch %s\n", buf);
+    t = 951782400; gmtime_r(&t, &tm);          /* 2000-02-29 */
+    strftime(buf, sizeof buf, "%F %A", &tm);
+    printf("leap %s\n", buf);
+    t = -1; gmtime_r(&t, &tm);                 /* before the epoch */
+    strftime(buf, sizeof buf, "%F %T", &tm);
+    printf("before %s\n", buf);
+    tm.tm_year = 124; tm.tm_mon = 0; tm.tm_mday = 32;
+    tm.tm_hour = 12; tm.tm_min = tm.tm_sec = tm.tm_isdst = 0;
+    timegm(&tm);
+    strftime(buf, sizeof buf, "%F", &tm);
+    printf("norm %s\n", buf);
+    t = 1234567890;
+    printf("ctime %s", ctime(&t));
+    printf("roundtrip %d\n", (int)(timegm(gmtime(&t)) == t));
+
+    int a, b, consumed; char w[32], set[32]; double d; long long big;
+    unsigned u;
+    int n = sscanf("  42 -17 hello 3.5e2 0x2a", "%d %d %s %lf %llx",
+                   &a, &b, w, &d, &big);
+    printf("scan n=%d %d %d %s %g %lld\n", n, a, b, w, d, big);
+    n = sscanf("ff,12|rest", "%x,%2u%n", &u, &a, &consumed);
+    printf("scan2 n=%d %u %d %d\n", n, u, a, consumed);
+    n = sscanf("abc123def", "%[a-c]%[0-9]", w, set);
+    printf("scanset n=%d %s %s\n", n, w, set);
+    printf("fail %d eof %d\n", sscanf("x", "%d", &a), sscanf("", "%d", &a));
+    int64_t big2 = 0;
+    sscanf("-9223372036854775807", "%" SCNd64, &big2);
+    printf("scn %" PRId64 " %" PRIdMAX "\n", big2, imaxabs(-5));
+    assert(a != 999999);
+    return 42;
+}
+EOF
+if build_run "$out/hosted.c" -O2; then rc=0; else rc=$?; fi
+cat "$out/run.txt"
+[ "$rc" = 42 ] || { echo "FAIL: the hosted program exited $rc"; exit 1; }
+want_line() {
+    grep -qx "$1" "$out/run.txt" || { echo "FAIL: expected \"$1\""; exit 1; }
+}
+# longjmp unwound five frames and delivered its value; longjmp(env, 0)
+# returns 1 so the caller can always tell the jump from the first call.
+want_line "longjmp v=7 depth=5"
+want_line "longjmp0 1"
+want_line "epoch 1970-01-01 00:00:00 Thu 001"
+want_line "leap 2000-02-29 Tuesday"
+# -1 second is the last second of 1969, not a negative time of day: the
+# conversion floors, it does not truncate toward zero.
+want_line "before 1969-12-31 23:59:59"
+want_line "norm 2024-02-01"
+want_line "ctime Fri Feb 13 23:31:30 2009"
+want_line "roundtrip 1"
+want_line "scan n=5 42 -17 hello 350 42"
+want_line "scan2 n=2 255 12 5"
+want_line "scanset n=2 abc 123"
+# The two failures scanf must distinguish: "x" is input that does not match
+# (0), "" is no input at all (EOF). A libc that returns EOF for both breaks
+# every read loop written against it.
+want_line "fail 0 eof -1"
+want_line "scn -9223372036854775807 5"
+echo "setjmp/longjmp across frames, the calendar before and after the epoch
+and on a leap day, strftime, and scanf's matching and input failures"
 
 # ---- the acceptance: the whole execution corpus ---------------------------
 ok=0; bad=0

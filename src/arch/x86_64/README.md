@@ -82,10 +82,19 @@ registers excluded from allocation.
 
 ## topasm.c — file-scope asm
 
-The two-pass mini-assembler for file-scope `__asm__`: crt0's `_start`
-vocabulary — `.global`/`.globl`, named and numeric-local labels,
-`and $imm,%reg`, `call sym` (PLT32), `jmp local-label`, `ret`. (aarch64 has no
-file-scope asm yet; it refuses one.)
+The two-pass mini-assembler for file-scope `__asm__`, in two halves.
+
+The **directive** half is arch-neutral and runs on every target:
+`.global`/`.globl`, named and numeric-local labels, and the data directives
+`.byte`/`.long`/`.quad`, which place bytes with no interpretation. The
+**mnemonic** half is crt0's `_start` vocabulary — `and $imm,%reg`,
+`call sym` (PLT32), `jmp local-label`, `ret` — and is x86-64, so on aarch64
+a block containing one is refused by name.
+
+That split is what lets `lib/libc/src/setjmp/` exist on a target EmbCC has
+no assembler for: the instructions are written as `.long` with their
+disassembly in a comment, and `tests/golden/libc.sh` assembles the comments
+and checks they produce the bytes.
 
 ## as.c — EmbAS
 

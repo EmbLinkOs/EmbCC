@@ -2139,7 +2139,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         } else if (is_register) {
             advance(ps);
         }
-        while (cur(ps)->kind == TOK_KW_INLINE) /* accepted, ignored */
+        while (cur(ps)->kind == TOK_KW_INLINE ||   /* accepted, ignored */
+               cur(ps)->kind == TOK_KW_NORETURN)   /* on a local prototype */
             advance(ps);
         if ((t->kind == TOK_KW_STATIC || is_register) && !at_type_start(ps))
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -2547,6 +2548,12 @@ static void parse_top(struct parser *ps, struct unit *u,
             is_extern = 1;
             advance(ps);
         } else if (cur(ps)->kind == TOK_KW_INLINE) {
+            advance(ps);
+        } else if (cur(ps)->kind == TOK_KW_NORETURN) {
+            /* C11 §6.7.4: _Noreturn is a function specifier, and means
+             * exactly what __attribute__((noreturn)) means — so it lands in
+             * the same field and the flow analysis cannot tell them apart. */
+            at.noreturn = 1;
             advance(ps);
         } else if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             parse_attributes(ps, &at); /* leading __attribute__((weak)) etc. */

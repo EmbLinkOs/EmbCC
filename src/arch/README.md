@@ -26,7 +26,7 @@ Each architecture directory holds the same kinds of file:
 | `irgen.c`   | the target's share of IR generation: `va_arg`, inline asm | yes    | yes     |
 | `predef.c`  | predefined macros, generated from the target's gcc       | yes    | yes     |
 | `asm.c/.h`  | inline-asm template assembler (GNU syntax)               | in `irgen.c` | yes |
-| `topasm.c`  | file-scope `__asm__` (crt0's `_start`)                   | yes    | —       |
+| `topasm.c`  | file-scope `__asm__`: directives and labels on any target, x86-64 mnemonics | yes    | shared  |
 | `as.c/.h`   | EmbAS, the standalone NASM-syntax assembler (`embas`)    | yes    | —       |
 
 ## Target selection

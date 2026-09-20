@@ -44,6 +44,8 @@ took target-specific work, or that a reader might doubt.
 | `_Atomic`, `__atomic_*`, `__sync_*` | ✓ `lock`-prefixed | ✓ `ldxr`/`stxr` + barriers |
 | Statement expressions, `typeof`, computed `goto`, `__real__`/`__imag__`, imaginary constants | ✓ | ✓ |
 | Attributes: `packed`, `aligned`, `weak`, `noreturn`, `section` (file-scope variables); `embcc_sret` on a first parameter (the ABI's indirect-result pointer — what C++ lowering writes) | ✓ | ✓ (`x8`) |
+| `_Noreturn` (C11 §6.7.4) — the same field as `__attribute__((noreturn))`, so the flow analysis cannot tell them apart | ✓ | ✓ |
+| `__func__` (C99 §6.4.2.2), and the GNU `__FUNCTION__` / `__PRETTY_FUNCTION__` spellings | ✓ | ✓ |
 | Builtins: bit family, `expect`, `frame_address`/`return_address`, `constant_p`, `unreachable`, ... | ✓ | ✓ |
 | Extended inline asm | ✓ AT&T, the x86 kernel's vocabulary; constraints `a b c d S D r m i x +` | ✓ GNU A64, the ARM kernel's 67 templates; constraints `r =r +r i`, register variables |
 | File-scope `__asm__` | ✓ (crt0's vocabulary) | ✗ |

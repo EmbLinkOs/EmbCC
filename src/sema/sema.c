@@ -1060,6 +1060,27 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_ptr(ty_func(fd->ret_ty, fd->param_tys,
                                        fd->nparams, fd->is_varargs));
                 e->ty->pointee->sret_first = fd->sret_first;
+            } else if (strcmp(e->name, "__func__") == 0 ||
+                       strcmp(e->name, "__FUNCTION__") == 0 ||
+                       strcmp(e->name, "__PRETTY_FUNCTION__") == 0) {
+                /* C99 §6.4.2.2: __func__ is declared by the translator, as
+                 * if by `static const char __func__[] = "name";`, at the
+                 * top of every function body. It is looked up LAST so a
+                 * real declaration of the name still wins -- the standard
+                 * reserves it, but a unit that defines it anyway should get
+                 * its own definition rather than this one silently.
+                 *
+                 * __FUNCTION__ and __PRETTY_FUNCTION__ are the GNU
+                 * spellings. C has no overloading, so there is nothing for
+                 * the "pretty" form to add and all three are the same
+                 * string; the C++ front end distinguishes them. */
+                const char *nm = f->name;
+                e->kind = EXPR_STR;
+                e->name = nm;
+                e->num = (long)strlen(nm) + 1;
+                e->str_width = 1;
+                e->str_prefix = 0;
+                check_expr(u, f, sc, e);   /* give it the array/pointer type */
             } else {
                 /* A name misspelt once is usually used several times:
                  * report it once per function, then carry on quietly. */
