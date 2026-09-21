@@ -2327,20 +2327,41 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
      * operand — so accept it as a qualifier before the type. */
     int is_register = t->kind == TOK_IDENT &&
                       strcmp(t->text, "register") == 0;
-    if (t->kind == TOK_KW_STATIC || is_register || at_type_start(ps)) {
-        int local_static = 0;
-        if (t->kind == TOK_KW_STATIC) {
-            local_static = 1;
+    if (t->kind == TOK_KW_STATIC || t->kind == TOK_KW_THREAD ||
+        is_register || at_type_start(ps)) {
+        int local_static = 0, local_tls = 0;
+        if (is_register)
             advance(ps);
-        } else if (is_register) {
+        /* `static __thread` and `__thread static` are the same
+         * declaration, so they are consumed in either order rather than
+         * one being spelled correctly and the other falling through to
+         * "expected a type" -- which is what used to happen, and what
+         * took the parser down a path that dereferenced nothing. */
+        while (cur(ps)->kind == TOK_KW_STATIC ||
+               cur(ps)->kind == TOK_KW_THREAD) {
+            if (cur(ps)->kind == TOK_KW_STATIC)
+                local_static = 1;
+            else
+                local_tls = 1;
             advance(ps);
         }
         while (cur(ps)->kind == TOK_KW_INLINE ||   /* accepted, ignored */
                cur(ps)->kind == TOK_KW_NORETURN)   /* on a local prototype */
             advance(ps);
-        if ((t->kind == TOK_KW_STATIC || is_register) && !at_type_start(ps))
+        if ((t->kind == TOK_KW_STATIC || t->kind == TOK_KW_THREAD ||
+             is_register) && !at_type_start(ps))
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type after the storage specifier");
+        /* C11 §6.7.1: at block scope _Thread_local must be accompanied
+         * by static or extern. Without one it would name an object with
+         * automatic storage that is also per-thread, which is two
+         * answers to the same question -- an automatic object is
+         * already private to the call. */
+        if (local_tls && !local_static)
+            parse_error_at(ps, t->line, t->col,
+                       "a block-scope __thread object must also be "
+                       "static: an automatic one is already private to "
+                       "the call");
         if (!allow_decl)
             parse_error_at(ps, t->line, t->col,
                        "a declaration cannot be the body of if/while/for "
@@ -2373,6 +2394,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                            tok_describe(cur(ps)));
             s->name = dname;
             s->is_static = local_static;
+            s->is_tls = local_tls;
             /* An optional `__asm__("reg")` register binding follows the
              * declarator: `register long r10 __asm__("r10") = a4;`. */
             if (cur(ps)->kind == TOK_KW_ASM) {
@@ -2711,7 +2733,7 @@ static void parse_top(struct parser *ps, struct unit *u,
         return;
     }
 
-    int is_static = 0, is_extern = 0;
+    int is_static = 0, is_extern = 0, is_tls = 0;
     struct attrs at = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0 };
     ps->seq = seq;
 
@@ -2750,6 +2772,13 @@ static void parse_top(struct parser *ps, struct unit *u,
              * exactly what __attribute__((noreturn)) means — so it lands in
              * the same field and the flow analysis cannot tell them apart. */
             at.noreturn = 1;
+            advance(ps);
+        } else if (cur(ps)->kind == TOK_KW_THREAD) {
+            /* A storage class, not a qualifier: it changes which SECTION
+             * the object lands in and how its address is formed, not its
+             * type. `static __thread` and `extern __thread` are both
+             * legal and mean what they say. */
+            is_tls = 1;
             advance(ps);
         } else if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             parse_attributes(ps, &at); /* leading __attribute__((weak)) etc. */
@@ -2886,6 +2915,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                                             is_static, is_extern);
             parse_attributes(ps, &at); /* trailing: T x[] __attribute__((weak)) */
             g->is_weak = at.weak;
+            g->is_tls = is_tls;
             g->section = at.section;
             g->seq = seq;
             g->def_seq = seq;
@@ -3034,6 +3064,7 @@ fn_tail:
                                                 is_static, is_extern);
                 parse_attributes(ps, &at);
                 g->is_weak = at.weak;
+                g->is_tls = is_tls;
                 g->section = at.section;
                 g->seq = seq;
                 g->def_seq = seq;

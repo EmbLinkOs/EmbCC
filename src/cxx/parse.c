@@ -689,6 +689,7 @@ struct dspec {
     int is_inline, is_constexpr, is_virtual, is_explicit, is_friend;
     int is_consteval;
     int is_mutable;
+    int is_thread_local;          /* thread_local: lowered to __thread */
     struct attrs a;
     const struct ctok *at;
     struct cclass *cls_defined;   /* a class defined by the specifiers */
@@ -845,7 +846,13 @@ static void parse_dspec(struct dspec *ds)
         case TOK_KW_EXTERN: ds->storage = SK_EXTERN; cx_advance(); continue;
         case TOK_CX_REGISTER: cx_advance(); continue;
         case TOK_CX_THREAD_LOCAL:
-            cx_error(cx_cur(), "thread_local is not supported");
+            /* One object per thread, which C spells __thread -- and
+             * since this front end lowers to C, that is exactly what it
+             * becomes. `static thread_local` and `thread_local` at
+             * namespace scope mean the same storage, differing only in
+             * linkage, so the two flags stay independent. */
+            ds->is_thread_local = 1;
+            cx_advance();
             continue;
         case TOK_KW_INLINE: ds->is_inline = 1; cx_advance(); continue;
         case TOK_CX_CONSTEXPR: case TOK_CX_CONSTEVAL:
@@ -3324,6 +3331,8 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
         y->var = v;
         gvar_register(v);
     }
+    if (ds->is_thread_local)
+        v->is_tls = 1;
     if (ds->a.weak || d->a.weak)
         v->weak = 1;
     if (ds->a.nabi_tags || d->a.nabi_tags) {
@@ -4868,6 +4877,12 @@ static void parse_declaration(int toplevel, struct cstmt **out)
                 cx_error(d.at, "variable '%s' declared void", d.name);
             struct cvar *v = new_local(d.name, t, d.at);
             v->is_static = ds.storage == SK_STATIC;
+            v->is_tls = ds.is_thread_local;
+            /* A block-scope thread_local has static storage whether or
+             * not `static` was written: one object per thread outlives
+             * the call, so it cannot be on the stack. */
+            if (v->is_tls)
+                v->is_static = 1;
             if (v->is_static)
                 v->disc = static_disc(cx_curfn, d.name);
             if (ds.is_constexpr) {

@@ -62,6 +62,7 @@
 #define LSYS_truncate     76
 #define LSYS_statfs      137
 #define LSYS_gettid      186
+#define LSYS_arch_prctl  158
 #define LSYS_futex       202
 #define LSYS_getdents64  217
 #define LSYS_clock_gettime 228

@@ -121,6 +121,10 @@ void a64_patch_b19(struct code *c, int at, int target);
  * driver can attach ADR_PREL_PG_HI21 and ADD_ABS_LO12_NC relocations. */
 int  a64_adrp(struct code *c, int rd);
 int  a64_add_lo12(struct code *c, int rd, int rn);
+/* Local-exec TLS: the thread pointer, then a 24-bit offset into
+ * the thread block as a pair of relocated add immediates. */
+void a64_mrs_tpidr(struct code *c, int rd);
+int  a64_add_hi12(struct code *c, int rd, int rn);
 
 /* adr rd, . — a PC-relative address within ±1 MiB, patched to a .text
  * offset later. Used for the address of a label (GNU &&label), which is

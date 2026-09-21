@@ -749,6 +749,51 @@ int x86_lea_reg_rip(struct code *c, int reg)
     return off;
 }
 
+/* ---- local-exec thread-local storage -------------------------------------
+ *
+ * Two instructions. The first asks the CPU where THIS thread's block
+ * is; the second adds the object's offset within it, which only the
+ * linker can know (it depends on how much thread-local data the whole
+ * program turned out to have) and so is left to a relocation.
+ *
+ * `mov %fs:0, reg` reads the word at offset 0 of the FS segment, which
+ * by the x86-64 TLS ABI is a self-pointer: the thread pointer holds its
+ * own address there precisely so a program can load it, since the FS
+ * BASE itself is not readable from user space without a syscall.
+ *
+ *   64 48 8b 04 25 00000000   mov %fs:0x0, %rax
+ *   ^  ^  ^  ^  ^  ^
+ *   |  |  |  |  |  the absolute address inside the segment: 0
+ *   |  |  |  |  SIB: no base, no index -> disp32 is the whole address
+ *   |  |  |  mod=00 reg=dst rm=100 (SIB follows)
+ *   |  |  opcode: mov r64, r/m64
+ *   |  REX.W (+REX.R for r8..r15)
+ *   the FS segment-override prefix
+ */
+void x86_mov_reg_fsbase(struct code *c, int reg)
+{
+    code_byte(c, 0x64);                          /* FS prefix */
+    code_byte(c, 0x48 | ((reg & 8) ? 4 : 0));    /* REX.W (+REX.R) */
+    code_byte(c, 0x8b);
+    code_byte(c, 0x04 | ((reg & 7) << 3));       /* mod=00 rm=100 (SIB) */
+    code_byte(c, 0x25);                          /* base=101 idx=100: disp32 */
+    code_u32(c, 0);
+}
+
+/* `add $imm32, reg`, with the immediate left for a relocation to fill.
+ * Returns the offset of that field. The offset is negative on x86-64 --
+ * the thread block sits BELOW the thread pointer -- which is why the
+ * field is a signed 32-bit add rather than anything narrower. */
+int x86_add_reg_imm32_reloc(struct code *c, int reg)
+{
+    code_byte(c, 0x48 | ((reg & 8) ? 1 : 0));    /* REX.W (+REX.B) */
+    code_byte(c, 0x81);
+    code_byte(c, 0xc0 | (reg & 7));              /* /0 = ADD */
+    int off = c->len;
+    code_u32(c, 0);
+    return off;
+}
+
 /* mov reg, imm into an arbitrary register — the register-targeted form of
  * x86_mov_eax_imm (identical bytes when reg == rax): 32-bit immediate,
  * sign-extended 32-bit into a 64-bit register, or a full movabs imm64. */

@@ -3617,6 +3617,10 @@ static void emit_gvar(struct cvar *v)
     const char *st = v->is_static ? "static "
                      : (v->is_inline || v->weak) ? "__attribute__((weak)) "
                      : "";
+    /* thread_local becomes C's __thread, which is the same storage
+     * under the other language's name -- and since this front end
+     * lowers to C, saying it in C is the whole implementation. */
+    const char *tls = v->is_tls ? "__thread " : "";
     struct sb attrs = { 0, 0, 0 };
     if (v->section)
         sb_printf(&attrs, " __attribute__((section(\"%s\")))", v->section);
@@ -3629,11 +3633,11 @@ static void emit_gvar(struct cvar *v)
     int dyn = ini && !c_const(ini);
     ce_ok = 0;
     if (!dyn && ini)
-        sb_printf(&out_vars, "%s%s%s = %s;\n", st, cdecl(t, v->cname),
+        sb_printf(&out_vars, "%s%s%s%s = %s;\n", st, tls, cdecl(t, v->cname),
                   sb_str(&attrs), ini->k == E_STR && t->k == CT_ARRAY
                   ? str_lit(ini) : cinit_text(t, ini));
     else
-        sb_printf(&out_vars, "%s%s%s;\n", st, cdecl(t, v->cname),
+        sb_printf(&out_vars, "%s%s%s%s;\n", st, tls, cdecl(t, v->cname),
                   sb_str(&attrs));
     /* an object every unit defines (an inline variable, a template's
      * static member): initialized by the first unit to get there, as its
@@ -4373,11 +4377,17 @@ char *cx_emit_unit(void)
         sb_put(&pre, sb_str(&out));
         out = pre;
     }
-    /* every referenced variable declared before any definition uses it */
+    /* every referenced variable declared before any definition uses it.
+     * __thread belongs on the DECLARATION too, not only the definition:
+     * the C in front of this is read in order, and a plain `extern int
+     * x;` first would establish x as an ordinary global that the later
+     * `__thread int x = 3;` then merges into -- putting it in .data,
+     * shared by every thread, with nothing having complained. */
     for (int i = 0; i < cx_ngvars; i++) {
         struct cvar *v = cx_gvars[i];
         if (v->refd && !v->is_static)
-            sb_printf(&out, "extern %s;\n", cdecl(v->type, v->cname));
+            sb_printf(&out, "extern %s%s;\n", v->is_tls ? "__thread " : "",
+                      cdecl(v->type, v->cname));
     }
     sb_put(&out, sb_str(&out_vars));
     sb_put(&out, sb_str(&out_code));

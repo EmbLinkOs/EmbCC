@@ -3196,6 +3196,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 g->seq = -1;      /* visible from its own function only */
                 g->ty = s->dty;
                 g->is_static = 1;
+                /* `static __thread` inside a function is still one
+                 * object per thread -- the scope decides who can NAME
+                 * it, not how many there are. */
+                g->is_tls = s->is_tls;
                 g->defined = 1;
                 g->used = 1;
                 /* Aggregates arrive pre-flattened in s->inits; a scalar's
@@ -3685,6 +3689,16 @@ static void merge_globals(struct unit *u)
             sema_error_line(u, g->line,
                        "static declaration of '%s' follows non-static "
                        "declaration (line %d)", g->name, canon->line);
+        /* One of the two says the object is per-thread and the other
+         * says it is not. Merging them silently picks whichever came
+         * first, which is how a thread_local can end up in .data --
+         * shared by every thread, with nothing having complained. */
+        if (g->is_tls != canon->is_tls)
+            sema_error_line(u, g->line,
+                       "'%s' is declared __thread here but not at line %d "
+                       "(or the other way round): a thread-local object "
+                       "and a shared one cannot be the same object",
+                       g->name, canon->line);
         if (g->has_init) {
             if (canon->has_init) {
                 diag_error_at(g->file, g->line, 0, "redefinition of '%s'",

@@ -51,6 +51,11 @@
 
 void __libc_start(long *sp);
 int main(int argc, char **argv);
+/* ./tls.c: finds PT_TLS in the auxiliary vector and gives this thread
+ * its copy. It runs before anything else because errno is itself
+ * thread-local, so the first syscall that could fail already needs a
+ * thread pointer to exist. */
+void __libc_tls_init(long *sp);
 
 #if defined(__x86_64__)
 
@@ -115,6 +120,9 @@ static void run_fini(void)
 
 void __libc_start(long *sp)
 {
+    /* First of all, before any code that could touch a thread-local. */
+    __libc_tls_init(sp);
+
     int argc = (int)sp[0];
     char **argv = (char **)(sp + 1);
 

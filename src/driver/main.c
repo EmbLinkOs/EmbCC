@@ -545,6 +545,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                    char *buf; } named[64];
     int nnamed = 0;
     int data_len = 0, bss_len = 0;
+    /* Thread-local objects get their own pair. The offsets recorded for
+     * them are within the THREAD BLOCK, not within this image: the
+     * linker gathers every .tdata/.tbss into PT_TLS, and each thread
+     * gets a private copy made from that template. */
+    int tdata_len = 0, tbss_len = 0, tdata_align = 1, tbss_align = 1;
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->defined)
             continue;
@@ -552,7 +557,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         g->in_bss = !g->has_init;
         g->named = 0;
         int *len = g->in_bss ? &bss_len : &data_len;
-        if (g->section) {
+        if (g->is_tls) {
+            if (g->section)
+                diag_fatal(g->file, g->line,
+                           "'%s' is __thread and also names a section: a "
+                           "thread-local object has to be in .tdata or "
+                           ".tbss, which is what makes it per-thread",
+                           g->name);
+            len = g->in_bss ? &tbss_len : &tdata_len;
+            int *al = g->in_bss ? &tbss_align : &tdata_align;
+            if (align > *al)
+                *al = align;
+        } else if (g->section) {
             int k = 0;
             while (k < nnamed && strcmp(named[k].name, g->section) != 0)
                 k++;
@@ -593,11 +609,15 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     char *data = NULL;
     if (data_len)
         data = xcalloc(1, (size_t)data_len);
-    if (data_len || nnamed) {
+    char *tdata = NULL;
+    if (tdata_len)
+        tdata = xcalloc(1, (size_t)tdata_len);
+    if (data_len || nnamed || tdata_len) {
         for (struct global *g = u->globals; g; g = g->next) {
             if (g->absorbed || !g->defined || g->in_bss)
                 continue;
-            char *img = g->named ? named[g->named - 1].buf : data;
+            char *img = g->is_tls ? tdata
+                      : g->named  ? named[g->named - 1].buf : data;
             if (!img)
                 continue;                   /* a zero-length section */
             if (g->init_bytes) {
@@ -720,6 +740,19 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                            "references is not supported for a Darwin "
                            "target yet: its bytes would be emitted but "
                            "its symbols and relocations dropped");
+        /* Mach-O has no .tdata/.tbss and no PT_TLS. Its thread-locals
+         * go through __thread_vars descriptors and a call to
+         * tlv_get_addr, which is a different mechanism rather than a
+         * different spelling -- and this writer emits none of it, so a
+         * __thread object silently DISAPPEARED from the output
+         * entirely. Refused by name instead. */
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->is_tls)
+                diag_fatal(g->file, g->line,
+                           "__thread is not supported for a Darwin target "
+                           "yet: Mach-O addresses a thread-local through "
+                           "a __thread_vars descriptor, which this writer "
+                           "does not emit");
         /* Mach-O gathers these from __DATA,__mod_init_func rather than
          * from an SHT_INIT_ARRAY section, and this writer emits no such
          * section. Dropping them would give back exactly the silent
@@ -1064,6 +1097,22 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         bss_ndx = elfw_add_section(w, ".bss", SHT_NOBITS,
                                    SHF_ALLOC | SHF_WRITE, NULL,
                                    (Elf64_Xword)bss_len, 8);
+    /* The thread-block template. SHF_TLS is the whole difference: with
+     * it the linker puts these in PT_TLS and every thread gets its own
+     * copy; without it they would be one shared object, which is the
+     * opposite of what __thread asked for. .tbss is NOBITS for the
+     * usual reason and takes no file space. */
+    int tdata_ndx = 0, tbss_ndx = 0;
+    if (tdata_len)
+        tdata_ndx = elfw_add_section(w, ".tdata", SHT_PROGBITS,
+                                     SHF_ALLOC | SHF_WRITE | SHF_TLS,
+                                     tdata, (Elf64_Xword)tdata_len,
+                                     (Elf64_Xword)tdata_align);
+    if (tbss_len)
+        tbss_ndx = elfw_add_section(w, ".tbss", SHT_NOBITS,
+                                    SHF_ALLOC | SHF_WRITE | SHF_TLS,
+                                    NULL, (Elf64_Xword)tbss_len,
+                                    (Elf64_Xword)tbss_align);
     for (int k = 0; k < nnamed; k++)
         named[k].ndx = elfw_add_section(
             w, named[k].name, named[k].nobits ? SHT_NOBITS : SHT_PROGBITS,
@@ -1163,8 +1212,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, (Elf64_Addr)g->off,
                 (Elf64_Xword)ty_size(g->ty),
-                ELF64_ST_INFO(STB_LOCAL, STT_OBJECT),
-                (Elf64_Half)(g->named ? named[g->named - 1].ndx
+                ELF64_ST_INFO(STB_LOCAL, g->is_tls ? STT_TLS : STT_OBJECT),
+                (Elf64_Half)(g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)
+                             : g->named ? named[g->named - 1].ndx
                              : g->in_bss ? bss_ndx : data_ndx));
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && !f->is_static)
@@ -1178,8 +1228,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, (Elf64_Addr)g->off,
                 (Elf64_Xword)ty_size(g->ty),
-                ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL, STT_OBJECT),
-                (Elf64_Half)(g->named ? named[g->named - 1].ndx
+                ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
+                              g->is_tls ? STT_TLS : STT_OBJECT),
+                (Elf64_Half)(g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)
+                             : g->named ? named[g->named - 1].ndx
                              : g->in_bss ? bss_ndx : data_ndx));
     /* File-scope asm's .global labels (_start): global functions at their
      * .text offset. Local labels stay internal — the assembler already

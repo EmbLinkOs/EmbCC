@@ -200,6 +200,7 @@ struct stmt {
     const char *name;     /* STMT_DECL */
     struct type *dty;     /* STMT_DECL: declared type */
     int is_static;        /* STMT_DECL: a static local -> its own global */
+    int is_tls;           /* STMT_DECL: `static __thread` -> a TLS global */
     int is_extern;        /* STMT_DECL: block-scope extern -> a unit global/func */
     struct initelem *inits; /* STMT_DECL: flattened aggregate init */
     int ninits;
@@ -250,6 +251,10 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    /* __thread / _Thread_local / thread_local: one instance per thread,
+     * in .tdata or .tbss rather than .data or .bss, and addressed off
+     * the thread pointer instead of off the program's own image. */
+    int is_tls;
     const char *section;  /* __attribute__((section("name"))), or NULL */
     int has_init;
     long init;            /* constant initializer value (scalar) */

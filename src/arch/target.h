@@ -131,9 +131,17 @@ enum reloc_kind {
     RK_DATA_PREL32, /* a 32-bit field holding target - its own address
                    * (unwind tables' pointers) */
     RK_GOT_PAGE,  /* aarch64: adrp to the page of the symbol's GOT slot */
-    RK_GOT_LO12   /* aarch64: the paired ldr's offset in that page — a
+    RK_GOT_LO12,  /* aarch64: the paired ldr's offset in that page — a
                    * weak symbol's address (0 when it is undefined, which
                    * adrp/add cannot give) */
+    /* Local-exec thread-local storage: the object's offset from the
+     * thread pointer. The compiler cannot compute it -- it depends on
+     * how large the WHOLE program's thread block turns out to be, which
+     * only the linker knows -- so the field is left to a relocation
+     * exactly as an address would be. */
+    RK_TPOFF32,   /* x86-64: the disp32 of `lea off(%fs-base), reg` */
+    RK_TPREL_HI12,/* aarch64: the high add of the tprel pair */
+    RK_TPREL_LO12 /* aarch64: the low add of the tprel pair */
 };
 
 /* The ELF relocation type for this kind on this target, or -1 if the kind

@@ -2424,10 +2424,21 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_GADDR: {
             int D = in_reg(i->dst);
             struct gsite gs;
-            gs.patch_off = D ? x86_lea_reg_rip(text, g_loc[i->dst])
-                             : x86_lea_rax_rip(text);
+            if (i->glob->is_tls) {
+                /* Not an address in this image: an offset into a block
+                 * that is different for every thread. So the thread
+                 * pointer is read first and the offset added to it,
+                 * and the offset is what the relocation carries. */
+                int r = D ? g_loc[i->dst] : 0;   /* 0 = rax */
+                x86_mov_reg_fsbase(text, r);
+                gs.patch_off = x86_add_reg_imm32_reloc(text, r);
+                gs.kind = RK_TPOFF32;
+            } else {
+                gs.patch_off = D ? x86_lea_reg_rip(text, g_loc[i->dst])
+                                 : x86_lea_rax_rip(text);
+                gs.kind = RK_PCREL32;
+            }
             gs.glob = i->glob;
-            gs.kind = RK_PCREL32;
             PUSH(st->g, st->ng, st->capg, gs);
             if (!D) cg_store(text, sd, i->dst, 8);
             break;

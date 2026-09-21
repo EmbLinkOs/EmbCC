@@ -122,6 +122,13 @@ static void ok(const char *what, int cond)
  * output can. */
 static int ctor_ran;
 __attribute__((constructor)) static void before(void) { ctor_ran = 1; }
+
+/* One initialised and one zero thread-local, so the image has both a
+ * .tdata and a .tbss and PT_TLS's memsz exceeds its filesz. The main
+ * thread's block is built by crt1 before anything here runs. */
+__thread int tls_init = 77;
+__thread long tls_zero;
+static __thread int tls_local = 5;    /* block scope: same storage */
 __attribute__((destructor)) static void after(void)
 {
     /* Through stdio, so this also proves exit() flushed after the
@@ -199,12 +206,17 @@ int main(int argc, char **argv)
      * seconds field was read from the right place, not what time it is. */
     ok("time", __os_time() > 1600000000L);
     ok("constructor", ctor_ran == 1);
+    ok("tls initialised", tls_init == 77);
+    ok("tls zeroed", tls_zero == 0);
+    ok("tls static-local", tls_local == 5);
+    tls_init++; tls_zero = 9; tls_local += 2;
+    ok("tls writable", tls_init == 78 && tls_zero == 9 && tls_local == 7);
 
     ok("unlink", __os_unlink("embcc-d/f") == 0);
     ok("rmdir", __os_rmdir("embcc-d") == 0);
     ok("gone", __os_stat("embcc-d", &st) != 0);
 
-    printf("seam: %d checks, %d failed\n", 22, fails);
+    printf("seam: %d checks, %d failed\n", 26, fails);
     return fails ? 1 : 42;
 }
 EOF
@@ -212,7 +224,14 @@ EOF
     -I"$EMBCC_ROOT/lib/libc/os" -o "$out/hello.o" 2> "$out/cc.log" || {
     echo "FAIL: embcc could not compile for $triple:"; cat "$out/cc.log"
     exit 1; }
-"$LD" -static -e _start -o "$out/hello" \
+#  -T our own script, because the program headers have to be INSIDE
+#  the first loadable segment: the kernel reports AT_PHDR only when
+#  some PT_LOAD covers them, and ./tls.c finds PT_TLS through AT_PHDR.
+#  aarch64-elf-ld's default script leaves them outside and the default
+#  is silent about it -- the failure is a SIGSEGV on the first
+#  thread-local access, on one architecture only.
+LDSCRIPT=$EMBCC_ROOT/lib/libc/os/linux/link.ld
+"$LD" -static -T "$LDSCRIPT" -o "$out/hello" \
     "$LIBDIR/crt1.o" "$out/hello.o" "$LIBDIR/libc.a" 2> "$out/ld.log" || {
     echo "FAIL: linking a static Linux image:"; cat "$out/ld.log"; exit 1; }
 
@@ -238,6 +257,19 @@ startaddr=$("$NM" "$out/hello" | sed -n 's/^0*\([0-9a-f]*\) T _start$/\1/p')
 [ "$(printf '%d' "0x$entry")" = "$(printf '%d' "0x$startaddr")" ] || {
     echo "FAIL: the entry point is 0x$entry but _start is at 0x$startaddr"
     exit 1; }
+
+#  The program headers must be inside a loadable segment, or the
+#  kernel cannot tell the program where they are (AT_PHDR = 0) and
+#  nothing can find PT_TLS. A first LOAD at file offset 0 is what says
+#  so -- it is the one structural property whose absence shows up much
+#  later, as a fault on an unrelated line.
+"$RE" -lW "$out/hello" | grep -qE 'LOAD +0x0*0 ' || {
+    echo "FAIL: the first LOAD does not start at file offset 0, so the"
+    echo "      program headers are outside it and AT_PHDR will be 0:"
+    "$RE" -lW "$out/hello" | grep -E 'LOAD|TLS'; exit 1; }
+grep -q 'TLS' "$out/elf.txt" || {
+    echo "FAIL: no PT_TLS, though the program has __thread objects:"
+    cat "$out/elf.txt"; exit 1; }
 
 #  The claim of the whole file: nothing is expected from outside.
 "$NM" -u "$out/hello" > "$out/undef.txt" 2>&1 || true
@@ -429,13 +461,13 @@ grep -qx 'destructor ran' "$out/run.txt" || {
 [ "$(tail -1 "$out/run.txt")" = 'destructor ran' ] || {
     echo "FAIL: the destructor did not run last:"; cat "$out/run.txt"
     exit 1; }
-grep -qx 'seam: 22 checks, 0 failed' "$out/run.txt" || {
+grep -qx 'seam: 26 checks, 0 failed' "$out/run.txt" || {
     echo "FAIL: the seam checks did not all pass:"; cat "$out/run.txt"
     exit 1; }
 
 if [ "$runner" = native ]; then
     echo "and it RUNS on this kernel: stdio, argv off the initial stack,
-the heap through brk, and 22 checks over files, statx, getdents64, getcwd
+the heap through brk, and 26 checks over files, statx, getdents64, getcwd
 and the clock, plus a constructor before main and a destructor after
 it -- exit status 42"
 else
@@ -470,7 +502,7 @@ build_and_run() {                     # build_and_run NAME [extra-ld-args...]
     #  calls __trunctfdf2 and friends from inside the math library, so a
     #  -lgcc placed earlier is already finished with by the time the
     #  archive that needs it is read.
-    "$LD" -static -e _start -o "$out/$name" "$LIBDIR/crt1.o" \
+    "$LD" -static -T "$LDSCRIPT" -o "$out/$name" "$LIBDIR/crt1.o" \
         "$out/$name.o" "$@" "$LIBDIR/libc.a" ${LDEXTRA:-} \
         2> "$out/$name-ld.log" || {
         echo "FAIL: linking $name:"; cat "$out/$name-ld.log"; exit 1; }
@@ -492,11 +524,22 @@ cat > "$out/threads.c" << 'EOF'
 static volatile int counter;
 static unsigned long worker_self;
 
+/* Every thread starts from the same template and then diverges. If
+ * CLONE_SETTLS had been left out, or the block laid out where the
+ * linker did not put it, both workers would agree here -- which is why
+ * the check is that they DISAGREE, and each by its own amount. */
+__thread int private = 5;
+static int saw[3];
+
+/* The argument is which worker this is, 1 or 2 -- so the two diverge by
+ * different amounts and neither can be mistaken for the other. */
 static void worker(void *arg)
 {
-    int n = *(int *)arg;
-    for (int i = 0; i < n; i++)
+    int k = *(int *)arg;
+    private += k;                    /* only this thread's copy */
+    for (int i = 0; i < 1000; i++)
         __atomic_fetch_add(&counter, 1, __ATOMIC_SEQ_CST);
+    saw[k] = private;
     worker_self = __os_thread_self();
 }
 
@@ -504,7 +547,7 @@ static void quiet(void *arg) { (void)arg; }
 
 int main(void)
 {
-    int n = 1000;
+    int k1 = 1, k2 = 2;
     unsigned long a = 0, b = 0, c = 0;
 
     /* The thread the program started on never had a handle, and 0 is
@@ -512,8 +555,8 @@ int main(void)
      * that being distinct from every real one. */
     printf("main-self=%lu\n", __os_thread_self());
 
-    if (__os_thread_create(&a, worker, &n) != 0 ||
-        __os_thread_create(&b, worker, &n) != 0) {
+    if (__os_thread_create(&a, worker, &k1) != 0 ||
+        __os_thread_create(&b, worker, &k2) != 0) {
         printf("create failed\n");
         return 1;
     }
@@ -528,6 +571,9 @@ int main(void)
     }
     printf("counter=%d\n", counter);
     printf("worker-had-handle=%d\n", worker_self != 0);
+    /* 5 is the template's value: each worker started from it and added
+     * its own key, and the creator's copy never moved. */
+    printf("tls-private main=%d workers=%d,%d\n", private, saw[1], saw[2]);
 
     if (__os_thread_create(&c, quiet, 0) != 0 ||
         __os_thread_detach(c) != 0) {
@@ -535,7 +581,7 @@ int main(void)
         return 1;
     }
     printf("detached=1\n");
-    return counter == 2 * n ? 42 : 1;
+    return counter == 2000 ? 42 : 1;
 }
 EOF
 EXT=c XFLAGS= build_and_run threads
@@ -544,13 +590,16 @@ probably waiting on a futex the kernel never wakes"; exit 1; }
 [ "$rc" = 42 ] || { echo "FAIL: the thread test exited $rc, wanted 42:"
                     cat "$out/threads.txt"; exit 1; }
 for want in 'main-self=0' 'distinct=1' 'counter=2000' \
-            'worker-had-handle=1' 'detached=1'; do
+            'worker-had-handle=1' 'detached=1' \
+            'tls-private main=5 workers=6,7'; do
     grep -qx "$want" "$out/threads.txt" || {
         echo "FAIL: threads: expected \"$want\":"
         cat "$out/threads.txt"; exit 1; }
 done
 echo "threads: two ran and were joined, 2000 atomic increments arrived,
-each knew its own handle and the main thread has none, and one detached"
+each knew its own handle and the main thread has none, one detached, and
+each had its OWN copy of a __thread object while the creator's stayed
+at the template's value"
 
 # The C++ layer, when its runtime has been built for this triple. libgcc
 # supplies _Unwind_Resume, which a cleanup path references even in a
@@ -576,18 +625,30 @@ static std::mutex m;
 static int guarded;
 static std::atomic<int> flag{0};
 
+/* C++'s spelling of the same storage, which this front end lowers to
+ * C's __thread -- so the whole chain from `thread_local` down to
+ * CLONE_SETTLS is what this line tests. */
+thread_local int depth = 10;
+static int saw[3];
+
 int main()
 {
     /* A contended mutex: ten thousand increments of a plain int that
      * is only correct if the lock is. */
-    std::thread a([]{ for (int i = 0; i < 5000; i++)
-                          { std::lock_guard<std::mutex> g(m); guarded++; } });
-    std::thread b([]{ for (int i = 0; i < 5000; i++)
-                          { std::lock_guard<std::mutex> g(m); guarded++; } });
+    std::thread a([]{ depth += 1;
+                      for (int i = 0; i < 5000; i++)
+                          { std::lock_guard<std::mutex> g(m); guarded++; }
+                      saw[1] = depth; });
+    std::thread b([]{ depth += 2;
+                      for (int i = 0; i < 5000; i++)
+                          { std::lock_guard<std::mutex> g(m); guarded++; }
+                      saw[2] = depth; });
     std::printf("joinable=%d\n", (int)(a.joinable() && b.joinable()));
     a.join();
     b.join();
     std::printf("guarded=%d\n", guarded);
+    std::printf("thread-local main=%d workers=%d,%d\n",
+                depth, saw[1], saw[2]);
 
     /* And the futex half, through the interface it exists for: this
      * blocks in the kernel until the other thread stores and notifies. */
@@ -596,7 +657,8 @@ int main()
     c.detach();
     flag.wait(0, std::memory_order_acquire);
     std::printf("notified=%d\n", flag.load());
-    return guarded == 10000 && flag.load() == 1 ? 42 : 1;
+    return guarded == 10000 && flag.load() == 1 &&
+           depth == 10 && saw[1] == 11 && saw[2] == 12 ? 42 : 1;
 }
 EOF
 EXT=cc XFLAGS="-x c++" LDEXTRA="-L$LIBGCC -lgcc" \
@@ -604,11 +666,13 @@ EXT=cc XFLAGS="-x c++" LDEXTRA="-L$LIBGCC -lgcc" \
 [ "$rc" != 124 ] || { echo "FAIL: the C++ thread test timed out"; exit 1; }
 [ "$rc" = 42 ] || { echo "FAIL: the C++ thread test exited $rc, wanted 42:"
                     cat "$out/cxxthreads.txt"; exit 1; }
-for want in 'joinable=1' 'guarded=10000' 'notified=1'; do
+for want in 'joinable=1' 'guarded=10000' 'notified=1' \
+            'thread-local main=10 workers=11,12'; do
     grep -qx "$want" "$out/cxxthreads.txt" || {
         echo "FAIL: C++ threads: expected \"$want\":"
         cat "$out/cxxthreads.txt"; exit 1; }
 done
 echo "and the C++ layer over it: std::thread joined and detached,
-std::mutex kept 10000 contended increments exact, and
-std::atomic::wait/notify blocked and woke through the futex"
+std::mutex kept 10000 contended increments exact, std::atomic::wait and
+notify blocked and woke through the futex, and each thread had its own
+thread_local while the creator's kept the template's value"

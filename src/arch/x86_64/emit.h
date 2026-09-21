@@ -55,6 +55,10 @@ void x86_lea_rax_slot(struct code *c, int disp);  /* lea rax,[rbp+disp] */
 int x86_lea_rax_rip(struct code *c);
 /* Same into an arbitrary register (for -O2 register-resident address temps). */
 int x86_lea_reg_rip(struct code *c, int reg);
+/* Local-exec TLS: read the thread pointer, then add the object's
+ * offset within the thread block (a relocation fills it). */
+void x86_mov_reg_fsbase(struct code *c, int reg);
+int  x86_add_reg_imm32_reloc(struct code *c, int reg);
 /* mov reg,imm — register-targeted x86_mov_eax_imm (same bytes when reg==rax). */
 void x86_mov_reg_imm(struct code *c, int reg, long imm, int w);
 void x86_zero_eax(struct code *c); /* xor eax,eax — al=0 for varargs calls */

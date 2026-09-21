@@ -214,6 +214,9 @@ struct cvar {
     int is_static;            /* static storage in a function, or internal
                                * linkage at namespace scope */
     int is_extern;            /* a declaration only */
+    /* thread_local: one object per thread. Lowered to C's __thread,
+     * which is the same storage under the other language's name. */
+    int is_tls;
     int is_member_static;     /* a static data member */
     int explicit_spec;        /* a static member of an instance given its
                                * own (template<> T A<X>::m ...;): not the

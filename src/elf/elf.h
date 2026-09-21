@@ -101,6 +101,11 @@ typedef struct {
 #define R_X86_64_PC64         24
 #define R_X86_64_GOTPCRELX    41
 #define R_X86_64_REX_GOTPCRELX 42
+/* Local-exec TLS: the 32-bit field holds the object's offset from the
+ * thread pointer, which the LINKER computes once it knows how big the
+ * whole thread block is. x86-64 puts the block below the thread
+ * pointer, so the value is negative. */
+#define R_X86_64_TPOFF32      23
 
 /* aarch64 (ELF for the Arm 64-bit Architecture, §4.6.3). Only the four
  * EmbCC emits are named: a `bl`'s 26-bit branch, the adrp/add pair that
@@ -113,6 +118,17 @@ typedef struct {
 #define R_AARCH64_CALL26             283
 #define R_AARCH64_ADR_GOT_PAGE       311
 #define R_AARCH64_LD64_GOT_LO12_NC   312
+/* Local-exec TLS, the aarch64 half of the same idea, as an add pair
+ * because the offset does not fit one instruction. aarch64 puts the
+ * block ABOVE the thread pointer, so the value is positive. */
+#define R_AARCH64_TLSLE_ADD_TPREL_HI12    549
+/* _NC: no overflow check. 550 is the CHECKING variant of the same
+ * field, and it is the wrong one here -- the low add legitimately
+ * drops the bits the high add already carried, so a checked form would
+ * reject every offset above 4095. The numbers are what
+ * aarch64-elf-as emits for :tprel_hi12: and :tprel_lo12_nc:, read off
+ * its own output rather than remembered. */
+#define R_AARCH64_TLSLE_ADD_TPREL_LO12_NC 551
 
 /* e_ident indices and values */
 #define EI_MAG0       0
@@ -168,6 +184,12 @@ typedef struct {
 #define SHF_ALLOC     0x2
 #define SHF_EXECINSTR 0x4
 #define SHF_INFO_LINK 0x40
+/* Thread-local storage. A section with this flag is not part of the
+ * image every thread shares: it is the TEMPLATE from which each
+ * thread's own block is made, and the linker gathers such sections
+ * into PT_TLS rather than into a PT_LOAD the program addresses
+ * directly. */
+#define SHF_TLS       0x400
 
 /* special section indices */
 #define SHN_UNDEF     0
@@ -183,6 +205,10 @@ typedef struct {
 #define STT_FUNC      2
 #define STT_SECTION   3
 #define STT_FILE      4
+/* A symbol whose st_value is an offset within the thread block, not an
+ * address. A TLS object marked STT_OBJECT would be relocated as though
+ * it had one fixed location shared by every thread. */
+#define STT_TLS       6
 #define ELF64_ST_INFO(bind, type) ((Elf64_Uchar)(((bind) << 4) | ((type) & 0xf)))
 
 #endif
