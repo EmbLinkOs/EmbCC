@@ -139,6 +139,92 @@ int  __os_futex_wait(const volatile int *addr, int expected, long timeout_ns);
  * woken, or -1 with errno. */
 int  __os_futex_wake(const volatile int *addr, int count);
 
+/* ---- the filesystem --------------------------------------------------------
+ *
+ * The second OPTIONAL group, on the same terms as the threads above: a
+ * target that implements none of these has no filesystem beyond the
+ * file descriptors at the top of this file, each returns -1 with errno
+ * ENOSYS, and <filesystem> reports that as a filesystem_error carrying
+ * errc::function_not_supported.
+ *
+ * The set is the one <filesystem> actually needs and no more. What it
+ * needs, and why each is here rather than derivable from the others:
+ *
+ *   stat    everything about a path that is not its contents. exists,
+ *           is_directory, file_size and last_write_time are all one
+ *           call, so asking four questions costs one syscall rather
+ *           than four.
+ *   lstat   the same WITHOUT following a symlink. The distinction is
+ *           the whole of symlink_status versus status, and a recursive
+ *           walk that confuses them follows a loop forever.
+ *   opendir/readdir/closedir
+ *           directory_iterator, which cannot be built from anything
+ *           else: a directory's contents are not readable as a file.
+ *   getcwd/chdir
+ *           current_path, and what an empty relative path resolves
+ *           against.
+ *   statfs  space(), which reports three numbers and not one --
+ *           "free" and "available to this caller" differ wherever
+ *           space is reserved for the superuser.
+ *
+ * The rest -- mkdir, rmdir, unlink, chmod, truncate, utime, symlink,
+ * readlink, link -- are the mutations. Each is one operation because
+ * each is one syscall on every OS that has them.
+ */
+
+/* What a path is. A symlink reports SYMLINK only from lstat; stat
+ * follows it and reports what it points at. */
+#define __OS_FT_UNKNOWN   0
+#define __OS_FT_NOT_FOUND 1
+#define __OS_FT_REGULAR   2
+#define __OS_FT_DIRECTORY 3
+#define __OS_FT_SYMLINK   4
+#define __OS_FT_CHARDEV   5
+#define __OS_FT_BLOCKDEV  6
+#define __OS_FT_FIFO      7
+#define __OS_FT_SOCKET    8
+
+struct __os_fileinfo {
+    unsigned long long size;
+    long mtime;                /* seconds since the epoch */
+    unsigned int mode;         /* the permission bits, POSIX-shaped */
+    int type;                  /* __OS_FT_* */
+    /* Identity. Two paths name the same file when BOTH match, which is
+     * what equivalent() asks and what a comparison of paths cannot
+     * answer -- two different paths may be one file. */
+    unsigned long long dev, ino;
+    unsigned long long nlink;
+};
+
+int  __os_stat(const char *path, struct __os_fileinfo *out);
+int  __os_lstat(const char *path, struct __os_fileinfo *out);
+int  __os_mkdir(const char *path, unsigned mode);
+int  __os_rmdir(const char *path);
+int  __os_unlink(const char *path);
+int  __os_chmod(const char *path, unsigned mode);
+int  __os_truncate(const char *path, long long size);
+int  __os_utime(const char *path, long mtime);
+int  __os_symlink(const char *target, const char *linkpath);
+long __os_readlink(const char *path, char *buf, size_t n);
+int  __os_link(const char *target, const char *linkpath);
+int  __os_getcwd(char *buf, size_t n);
+int  __os_chdir(const char *path);
+int  __os_statfs(const char *path, unsigned long long *capacity,
+                 unsigned long long *freespace, unsigned long long *available);
+
+/* Reading a directory. The handle is whatever the target wants it to
+ * be; NULL means failure, with errno set.
+ *
+ * __os_readdir returns 1 for an entry, 0 at the end, -1 on error --
+ * three outcomes, because "no more entries" and "something went wrong"
+ * are different and a caller that cannot tell them apart silently
+ * truncates a listing. `.` and `..` are NOT returned: every caller
+ * filters them, so filtering once here is one place to get it right
+ * rather than one per caller. */
+void *__os_opendir(const char *path);
+int   __os_readdir(void *dir, char *name, size_t n, int *type);
+void  __os_closedir(void *dir);
+
 #ifdef __cplusplus
 }
 #endif

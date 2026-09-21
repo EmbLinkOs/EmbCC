@@ -8,6 +8,7 @@
 #include "../backend.h"
 
 #include <errno.h>
+#include <stddef.h>
 
 /* Provided by the target: the raw calls, with the classic signatures. A
  * bare-metal harness implements them over a serial port; an OS over its
@@ -170,4 +171,190 @@ int __os_futex_wake(const volatile int *addr, int count)
         return -1;
     }
     return futex_wake(addr, count);
+}
+
+/* ---- the filesystem --------------------------------------------------------
+ *
+ * Optional, and taken from the target if it has it, on exactly the
+ * terms the threads above use: each symbol is WEAK, so a target that
+ * provides it gets a real filesystem and one that does not links
+ * anyway and gets ENOSYS. That is what keeps a harness with a serial
+ * port and no disk linkable against the same library as a hosted OS.
+ *
+ * The names are the classic ones so that a target already implementing
+ * a Unix-shaped kernel has nothing to write.
+ */
+struct __os_fileinfo;
+
+extern int __attribute__((weak)) fs_stat(const char *, struct __os_fileinfo *);
+extern int __attribute__((weak)) fs_lstat(const char *, struct __os_fileinfo *);
+extern int __attribute__((weak)) fs_mkdir(const char *, unsigned);
+extern int __attribute__((weak)) fs_rmdir(const char *);
+extern int __attribute__((weak)) fs_unlink(const char *);
+extern int __attribute__((weak)) fs_chmod(const char *, unsigned);
+extern int __attribute__((weak)) fs_truncate(const char *, long long);
+extern int __attribute__((weak)) fs_utime(const char *, long);
+extern int __attribute__((weak)) fs_symlink(const char *, const char *);
+extern long __attribute__((weak)) fs_readlink(const char *, char *, size_t);
+extern int __attribute__((weak)) fs_link(const char *, const char *);
+extern int __attribute__((weak)) fs_getcwd(char *, size_t);
+extern int __attribute__((weak)) fs_chdir(const char *);
+extern int __attribute__((weak)) fs_statfs(const char *, unsigned long long *,
+                                           unsigned long long *,
+                                           unsigned long long *);
+extern void *__attribute__((weak)) fs_opendir(const char *);
+extern int __attribute__((weak)) fs_readdir(void *, char *, size_t, int *);
+extern void __attribute__((weak)) fs_closedir(void *);
+
+int __os_stat(const char *path, struct __os_fileinfo *out)
+{
+    if (!fs_stat) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_stat(path, out);
+}
+
+/* Without an lstat the target cannot distinguish a symlink from what it
+ * points at, so stat is the honest answer -- a filesystem with no
+ * symlinks gives the same result either way, and one WITH symlinks and
+ * no lstat would be lying whichever we chose. */
+int __os_lstat(const char *path, struct __os_fileinfo *out)
+{
+    if (fs_lstat)
+        return fs_lstat(path, out);
+    return __os_stat(path, out);
+}
+
+int __os_mkdir(const char *path, unsigned mode)
+{
+    if (!fs_mkdir) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_mkdir(path, mode);
+}
+
+int __os_rmdir(const char *path)
+{
+    if (!fs_rmdir) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_rmdir(path);
+}
+
+int __os_unlink(const char *path)
+{
+    if (fs_unlink)
+        return fs_unlink(path);
+    /* remove() is already in the seam above and does the same thing for
+     * a file, so a target that has one and not the other still works. */
+    return __os_remove(path);
+}
+
+int __os_chmod(const char *path, unsigned mode)
+{
+    if (!fs_chmod) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_chmod(path, mode);
+}
+
+int __os_truncate(const char *path, long long size)
+{
+    if (!fs_truncate) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_truncate(path, size);
+}
+
+int __os_utime(const char *path, long mtime)
+{
+    if (!fs_utime) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_utime(path, mtime);
+}
+
+int __os_symlink(const char *target, const char *linkpath)
+{
+    if (!fs_symlink) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_symlink(target, linkpath);
+}
+
+long __os_readlink(const char *path, char *buf, size_t n)
+{
+    if (!fs_readlink) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_readlink(path, buf, n);
+}
+
+int __os_link(const char *target, const char *linkpath)
+{
+    if (!fs_link) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_link(target, linkpath);
+}
+
+int __os_getcwd(char *buf, size_t n)
+{
+    if (!fs_getcwd) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_getcwd(buf, n);
+}
+
+int __os_chdir(const char *path)
+{
+    if (!fs_chdir) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_chdir(path);
+}
+
+int __os_statfs(const char *path, unsigned long long *capacity,
+                unsigned long long *freespace, unsigned long long *available)
+{
+    if (!fs_statfs) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_statfs(path, capacity, freespace, available);
+}
+
+void *__os_opendir(const char *path)
+{
+    if (!fs_opendir) {
+        errno = ENOSYS;
+        return 0;
+    }
+    return fs_opendir(path);
+}
+
+int __os_readdir(void *dir, char *name, size_t n, int *type)
+{
+    if (!fs_readdir) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return fs_readdir(dir, name, n, type);
+}
+
+void __os_closedir(void *dir)
+{
+    if (fs_closedir)
+        fs_closedir(dir);
 }

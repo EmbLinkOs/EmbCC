@@ -17,6 +17,7 @@
 #include "../backend.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* embk.h is header-only and usable from a freestanding program, so this
@@ -253,62 +254,351 @@ int __os_getentropy(void *buf, size_t n)
 
 /* ---- threads ---------------------------------------------------------------
  *
- * EmbLinkOS does not have them yet. Saying so here, in the one file
- * that knows about EmbLinkOS, is the point of the seam: the C++ library
- * above learns from ENOSYS that this target is single-threaded and
- * reports it as a system_error where a thread would have been created.
- * Nothing above this file is conditional on which OS it is.
+ * EmbLinkOS HAS them, and a futex, so both halves of the seam's
+ * optional threading group are real here: the C++ <mutex>, <thread>
+ * and <future>, and C's <threads.h>, all light up on this target
+ * without a line of either library knowing which OS it is.
  *
- * When the kernel grows threads, this is the file that changes, and it
- * needs two ideas and no more: run a function on a new thread, and
- * sleep until a word in memory changes. Every mutex, condition
- * variable, semaphore and latch in the C++ library is built from the
- * second (see os/backend.h).
+ * Two shapes have to be bridged. The kernel's thread entry takes a
+ * `long` and the seam's takes a `void *`, so the pointer travels as the
+ * long -- which is exact on LP64 and is the only reason this is a cast
+ * rather than a table. And the kernel's futex word is a `uint32_t`
+ * while the seam's is an `int`; they are the same four bytes and the
+ * comparison the kernel does is bitwise, so the cast is safe and is
+ * where the difference is written down.
  */
+struct __os_start { void (*fn)(void *); void *arg; };
+
+/* The kernel's entry takes a long; the seam's takes a void *. The
+ * block is freed by the thread that runs it, so a thread that is
+ * never joined still leaks nothing. */
+static void __os_thread_trampoline(long a)
+{
+    struct __os_start *st = (struct __os_start *)(intptr_t)a;
+    void (*fn)(void *) = st->fn;
+    void *arg = st->arg;
+    free(st);
+    fn(arg);
+    embk_thread_exit(0);
+}
+
 int __os_thread_create(unsigned long *id, void (*fn)(void *), void *arg)
 {
-    (void)id; (void)fn; (void)arg;
-    errno = ENOSYS;
-    return -1;
+    /* The entry signature differs, so the seam's function pointer and
+     * its argument are packed into one allocation and the trampoline
+     * unpacks them. A static table would bound the thread count for no
+     * reason; the block is freed by the thread that runs it. */
+    struct __os_start *st = malloc(sizeof *st);
+    if (!st) {
+        errno = ENOMEM;
+        return -1;
+    }
+    st->fn = fn;
+    st->arg = arg;
+    int64_t r = embk_thread_create(__os_thread_trampoline, (long)(intptr_t)st);
+    if (embk_is_err(r)) {
+        free(st);
+        return (int)fail(r);
+    }
+    *id = (unsigned long)r;
+    return 0;
 }
 
 int __os_thread_join(unsigned long id)
 {
-    (void)id;
-    errno = ENOSYS;
-    return -1;
+    int64_t r = embk_thread_join((int)id);
+    return embk_is_err(r) ? (int)fail(r) : 0;
 }
 
+/* The kernel reclaims a thread when it ends, so there is nothing to
+ * release: detaching is giving up the right to join, which is a
+ * decision the caller has already made by calling this. */
 int __os_thread_detach(unsigned long id)
 {
     (void)id;
-    errno = ENOSYS;
-    return -1;
+    return 0;
 }
 
-/* One thread, so it needs no name. */
-unsigned long __os_thread_self(void) { return 0ul; }
+unsigned long __os_thread_self(void)
+{
+    return (unsigned long)embk_thread_self();
+}
 
-/* Nobody to yield to. */
-void __os_thread_yield(void) {}
+void __os_thread_yield(void) { embk_yield(); }
 
 int __os_sleep_ns(long ns)
 {
-    (void)ns;
-    errno = ENOSYS;
-    return -1;
+    /* The kernel sleeps in milliseconds. A sub-millisecond request
+     * rounds UP to one rather than to zero: a caller asking to sleep
+     * has asked to yield the processor, and returning immediately is
+     * the one answer that is never what was meant. */
+    uint64_t ms = (uint64_t)((ns + 999999L) / 1000000L);
+    if (ns > 0 && ms == 0)
+        ms = 1;
+    int r = embk_sleep_ms(ms);
+    return embk_is_err(r) ? (int)fail(r) : 0;
 }
 
 int __os_futex_wait(const volatile int *addr, int expected, long timeout_ns)
 {
-    (void)addr; (void)expected; (void)timeout_ns;
-    errno = ENOSYS;
-    return -1;
+    /* The kernel's futex has no timeout, so a bounded wait cannot be
+     * expressed and is refused rather than turned into an unbounded
+     * one -- which would hang where the caller asked not to. The C++
+     * library handles the refusal (see lib/libcxx/include/mutex). */
+    if (timeout_ns >= 0) {
+        errno = ENOSYS;
+        return -1;
+    }
+    int64_t r = embk_futex((volatile uint32_t *)(uintptr_t)addr,
+                           EMBK_FUTEX_WAIT, (uint32_t)expected);
+    return embk_is_err(r) ? (int)fail(r) : 0;
 }
 
 int __os_futex_wake(const volatile int *addr, int count)
 {
-    (void)addr; (void)count;
+    int64_t r = embk_futex((volatile uint32_t *)(uintptr_t)addr,
+                           EMBK_FUTEX_WAKE,
+                           count < 0 ? 0x7FFFFFFFu : (uint32_t)count);
+    return embk_is_err(r) ? (int)fail(r) : (int)r;
+}
+
+/* ---- the filesystem ---------------------------------------------------------
+ *
+ * EmbLinkOS has the whole set, so <filesystem> works here rather than
+ * reporting ENOSYS. Two mappings are worth stating because they are not
+ * one-to-one:
+ *
+ *   readdir reads the WHOLE directory in one call -- the kernel's is
+ *   not resumable -- so opendir snapshots it and readdir walks the
+ *   snapshot. A directory that changes while it is being walked is
+ *   therefore read as it was at the open, which is what the standard
+ *   permits and what every implementation does for the same reason.
+ *
+ *   the kernel numbers its file types itself (EMBK_DT_*), so they are
+ *   translated to the seam's rather than passed through. Passing them
+ *   through would work until either side renumbered.
+ */
+static int type_of(uint8_t t, uint32_t mode)
+{
+    switch (t) {
+    case EMBK_DT_REG: return __OS_FT_REGULAR;
+    case EMBK_DT_DIR: return __OS_FT_DIRECTORY;
+    case EMBK_DT_LNK: return __OS_FT_SYMLINK;
+    default: break;
+    }
+    /* No type from the entry: fall back to the mode bits, which are
+     * POSIX-shaped. */
+    switch (mode & 0170000u) {
+    case 0100000u: return __OS_FT_REGULAR;
+    case 0040000u: return __OS_FT_DIRECTORY;
+    case 0120000u: return __OS_FT_SYMLINK;
+    case 0020000u: return __OS_FT_CHARDEV;
+    case 0060000u: return __OS_FT_BLOCKDEV;
+    case 0010000u: return __OS_FT_FIFO;
+    case 0140000u: return __OS_FT_SOCKET;
+    default: return __OS_FT_UNKNOWN;
+    }
+}
+
+static int fill_info(const struct embk_stat *st, struct __os_fileinfo *out)
+{
+    out->size = st->size;
+    out->mtime = (long)st->mtime;
+    out->mode = st->mode & 07777u;
+    out->type = type_of(st->type, st->mode);
+    out->nlink = st->nlink;
+    /* The kernel has no device number, and an inode only in a dirent.
+     * equivalent() therefore compares the resolved PATHS here, which is
+     * right for a single filesystem and is what this target has. */
+    out->dev = 0;
+    out->ino = 0;
+    return 0;
+}
+
+int __os_stat(const char *path, struct __os_fileinfo *out)
+{
+    char pb[EM_PATH_MAX];
+    const char *ap = path_abs(path, pb, sizeof pb);
+    struct embk_stat st;
+    long r = (long)embk_syscall2(EMBK_SYS_stat, (int64_t)(intptr_t)ap,
+                                 (int64_t)(intptr_t)&st);
+    if (embk_is_err(r))
+        return (int)fail(r);
+    return fill_info(&st, out);
+}
+
+int __os_lstat(const char *path, struct __os_fileinfo *out)
+{
+    char pb[EM_PATH_MAX];
+    const char *ap = path_abs(path, pb, sizeof pb);
+    struct embk_stat st;
+    long r = (long)embk_syscall2(EMBK_SYS_lstat, (int64_t)(intptr_t)ap,
+                                 (int64_t)(intptr_t)&st);
+    if (embk_is_err(r))
+        return (int)fail(r);
+    return fill_info(&st, out);
+}
+
+int __os_mkdir(const char *path, unsigned mode)
+{
+    char pb[EM_PATH_MAX];
+    (void)mode;               /* the kernel's mkdir takes no mode */
+    int r = embk_mkdir(path_abs(path, pb, sizeof pb));
+    return embk_is_err(r) ? (int)fail(r) : 0;
+}
+
+int __os_rmdir(const char *path)
+{
+    char pb[EM_PATH_MAX];
+    int r = embk_rmdir(path_abs(path, pb, sizeof pb));
+    return embk_is_err(r) ? (int)fail(r) : 0;
+}
+
+int __os_unlink(const char *path)
+{
+    char pb[EM_PATH_MAX];
+    long r = (long)embk_syscall1(EMBK_SYS_unlink,
+                                 (int64_t)(intptr_t)path_abs(path, pb,
+                                                             sizeof pb));
+    return embk_is_err(r) ? (int)fail(r) : 0;
+}
+
+int __os_chmod(const char *path, unsigned mode)
+{
+    char pb[EM_PATH_MAX];
+    long r = (long)embk_syscall2(EMBK_SYS_chmod,
+                                 (int64_t)(intptr_t)path_abs(path, pb,
+                                                             sizeof pb),
+                                 (int64_t)mode);
+    return embk_is_err(r) ? (int)fail(r) : 0;
+}
+
+/* The kernel truncates by DESCRIPTOR, so the file is opened for the
+ * one call. Opening write-only is deliberate: resize_file must not
+ * need read permission. */
+int __os_truncate(const char *path, long long size)
+{
+    char pb[EM_PATH_MAX];
+    int fd = __os_open(path_abs(path, pb, sizeof pb), 1 /* O_WRONLY */, 0);
+    if (fd < 0)
+        return -1;
+    long r = (long)embk_syscall2(EMBK_SYS_ftruncate, fd, (int64_t)size);
+    __os_close(fd);
+    return embk_is_err(r) ? (int)fail(r) : 0;
+}
+
+/* No syscall sets a modification time: the kernel tracks it and does
+ * not let userland write it. Saying so is better than succeeding and
+ * changing nothing, which would make last_write_time's setter a silent
+ * no-op. */
+int __os_utime(const char *path, long mtime)
+{
+    (void)path; (void)mtime;
     errno = ENOSYS;
     return -1;
 }
+
+int __os_symlink(const char *target, const char *linkpath)
+{
+    char lb[EM_PATH_MAX];
+    /* The TARGET is a string stored in the link and is not resolved --
+     * a relative target stays relative, which is what makes a symlink
+     * survive its directory being moved. Only the link's own path is
+     * made absolute. */
+    int r = embk_symlink(target, path_abs(linkpath, lb, sizeof lb));
+    return embk_is_err(r) ? (int)fail(r) : 0;
+}
+
+long __os_readlink(const char *path, char *buf, size_t n)
+{
+    char pb[EM_PATH_MAX];
+    int64_t r = embk_readlink(path_abs(path, pb, sizeof pb), buf, n);
+    return embk_is_err(r) ? fail((long)r) : (long)r;
+}
+
+int __os_link(const char *target, const char *linkpath)
+{
+    char tb[EM_PATH_MAX], lb[EM_PATH_MAX];
+    /* A hard link is a reference to the OBJECT, so both sides resolve. */
+    int r = embk_link(path_abs(target, tb, sizeof tb),
+                      path_abs(linkpath, lb, sizeof lb));
+    return embk_is_err(r) ? (int)fail(r) : 0;
+}
+
+int __os_getcwd(char *buf, size_t n)
+{
+    return getcwd(buf, n) ? 0 : -1;
+}
+
+int __os_chdir(const char *path) { return chdir(path); }
+
+int __os_statfs(const char *path, unsigned long long *capacity,
+                unsigned long long *freespace, unsigned long long *available)
+{
+    /* meminfo reports MEMORY, not disk, and reporting it as disk space
+     * would be a plausible number that is simply about something else.
+     * There is no disk-usage syscall, so this fails. */
+    (void)path; (void)capacity; (void)freespace; (void)available;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* One snapshot per open directory, because the kernel's readdir is not
+ * resumable: it walks the whole directory in one call. The count is
+ * bounded, and a directory with more entries than this reports the
+ * first MAXENT -- which is a limitation and is stated rather than
+ * silently truncating to zero. */
+#define EM_MAXENT 512
+
+struct em_dir {
+    struct embk_dirent ents[EM_MAXENT];
+    int n;
+    int at;
+};
+
+void *__os_opendir(const char *path)
+{
+    char pb[EM_PATH_MAX];
+    struct em_dir *d = malloc(sizeof *d);
+    if (!d) {
+        errno = ENOMEM;
+        return 0;
+    }
+    int64_t r = embk_readdir(path_abs(path, pb, sizeof pb), d->ents,
+                             EM_MAXENT);
+    if (embk_is_err(r)) {
+        fail((long)r);
+        free(d);
+        return 0;
+    }
+    d->n = (int)r;
+    d->at = 0;
+    return d;
+}
+
+int __os_readdir(void *dir, char *name, size_t n, int *type)
+{
+    struct em_dir *d = dir;
+    if (!d)
+        return -1;
+    while (d->at < d->n) {
+        struct embk_dirent *e = &d->ents[d->at++];
+        /* `.` and `..` are filtered here, once, rather than in every
+         * caller -- see os/backend.h. */
+        if (e->name[0] == '.' &&
+            (e->name[1] == 0 || (e->name[1] == '.' && e->name[2] == 0)))
+            continue;
+        size_t len = strlen(e->name);
+        if (len + 1 > n) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        memcpy(name, e->name, len + 1);
+        if (type)
+            *type = type_of(e->type, 0);
+        return 1;
+    }
+    return 0;
+}
+
+void __os_closedir(void *dir) { free(dir); }

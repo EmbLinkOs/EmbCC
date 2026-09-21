@@ -71,6 +71,25 @@ struct char_traits<char> {
     { return i == eof() ? 0 : i; }
 };
 
+/* "string-view-like": a type that hands out C characters through
+ * data() and size(). [string.cons]/15 spells this out as "convertible
+ * to basic_string_view<C, T>", but <string> cannot ask that question:
+ * <string_view> includes THIS header, so basic_string_view is only
+ * ever incomplete here, and is_convertible to an incomplete type is
+ * not a question C++ allows. Asking for the two members instead needs
+ * no declaration at all and admits exactly the types that matter.
+ *
+ * A string is excluded because its own constructors handle it, and
+ * anything converting to const C* because `string s("x")` must go on
+ * choosing the pointer constructor. */
+template <class C, class V, class = void>
+struct __sv_like : false_type {};
+template <class C, class V>
+struct __sv_like<C, V,
+    void_t<decltype(static_cast<const C *>(declval<const V &>().data())),
+           decltype(declval<const V &>().size())>>
+    : bool_constant<!is_convertible<const V &, const C *>::value> {};
+
 template <class C, class T, class A>
 class basic_string {
     using __atr = allocator_traits<A>;
@@ -96,6 +115,16 @@ public:
     explicit basic_string(const A &a) noexcept : __a(a) { __init_short(0); }
 
     basic_string(const C *s) : __a() { __init_from(s, T::length(s)); }
+
+    /* From a string_view, or anything else shaped like one. Explicit,
+     * as the standard has it: a view does not own its characters, so
+     * making a string out of one is a copy worth writing down. */
+    template <class V, class = typename enable_if<
+        __sv_like<C, V>::value &&
+        !is_same<typename decay<V>::type, basic_string>::value>::type>
+    explicit basic_string(const V &v) : __a()
+    { __init_from(v.data(), v.size()); }
+
     basic_string(const C *s, size_type n) : __a() { __init_from(s, n); }
 
     basic_string(size_type n, C c) : __a()

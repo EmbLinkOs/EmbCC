@@ -61,7 +61,7 @@ those exact two members in that order.
 `<condition_variable>`, `<shared_mutex>`, `<semaphore>`, `<latch>`,
 `<barrier>`, `<future>`, `<iosfwd>`, `<execution>`, `<typeindex>`,
 `<scoped_allocator>`, `<charconv>`, `<complex>`, `<memory_resource>`,
-`<stop_token>`, `<syncstream>`, `<valarray>`, `<iostream>`
+`<stop_token>`, `<syncstream>`, `<valarray>`, `<filesystem>`, `<iostream>`
 and the rest of the stream headers including `<fstream>`, `<stdexcept>`,
 and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
@@ -530,6 +530,40 @@ read as the closing angle bracket of the enclosing template argument
 list. Call arguments and casts already cleared that state; `decltype`
 did not.
 
+**`<filesystem>` splits cleanly in two, and the split is the point.**
+`path` is pure string algebra: appending, decomposition into root,
+parent, stem and extension, normalisation, and the relative-path
+arithmetic that answers "how do I get from a to b". None of it touches
+a disk, so all of it works on every target, including one with no
+filesystem at all. The operations — `status`, `create_directory`,
+`rename`, `remove_all`, `directory_iterator` — sit on seventeen new
+primitives in the OS seam, and where a target has no filesystem they
+fail with `errc::function_not_supported` rather than pretending. That
+is the same bargain the threads group struck, for the same reason: a
+library that lies about the target is worse than one that says no.
+
+Three details are worth writing down, because each is a rule that reads
+like an inconsistency until you see what it protects. Appending an
+ABSOLUTE path *replaces* rather than concatenates — `path("/a") /
+"/b"` is `"/b"` — which is what stops a caller's absolute input from
+being silently reinterpreted under some base directory. A leading dot
+is not an extension, so `.bashrc` has stem `.bashrc` and no extension,
+and `.` and `..` are never split. And `path("/").parent_path()` is
+`"/"`, not the empty path: a walk upward stops at the root instead of
+falling off it.
+
+Writing it found the **use-after-free** described below, and two bugs
+of my own that the C++ lookup rules caught rather than a test:
+`path::string()` and `directory_entry::status()` HIDE `std::string` and
+`filesystem::status` inside their own class bodies, so the uses had to
+say `string_type` and `filesystem::status` — the same shadowing every
+implementation of this header has to work around. It also turned up a
+real gap underneath: `basic_string` had no constructor from a
+`string_view`. It now has one, constrained on the shape of the
+argument rather than on `basic_string_view` itself, because
+`<string_view>` includes `<string>` and so the name is never complete
+here.
+
 **`<fstream>` is exercised where a filesystem exists.** The QEMU harness
 has an `open` that returns `ENOSYS`, and on such a target the *correct*
 behaviour of every file operation is to fail — so the test probes first
@@ -770,6 +804,7 @@ every initialisation through `__cxa_guard_*` precisely so that becomes a
 change to one file), and `__cxa_vec_*` (the compiler lowers array
 new/delete itself and does not call them).
 
-The **standard library** above this — `<type_traits>`, `<utility>`,
-`<memory>`, `<string>`, the containers, `<algorithm>`, the iostreams — is
-the next and much larger piece of work.
+The **standard library** above this is now 97 headers — every one the
+standard lists except `<locale>`, which is left out deliberately: it is
+the one header whose whole subject is the host's cultural data, and a
+freestanding target has none to report.

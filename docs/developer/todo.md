@@ -825,8 +825,10 @@ pointer and copy bytes, so `std::atomic<double>` works), and printf's
 floating conversion is exact — see `docs/language/libc.md`.
 
 The library grew with them, and has kept growing: `lib/libcxx/include`
-is now 96 headers and `lib/libc/include` has every C11 header. The C++
-list is down to two, `<filesystem>` and `<locale>`.
+is now 97 headers and `lib/libc/include` has every C11 header. With
+`<filesystem>` in, the C++ list is down to `<locale>` alone, which is
+left out on purpose — it is the one header whose entire subject is the
+host's cultural data, and a freestanding target has none.
 
 Still absent on purpose: atomic `wait`/`notify`, which must BLOCK. The
 futex PRIMITIVE now exists in the seam; only the two backends return
@@ -834,6 +836,47 @@ ENOSYS, so a target with real threads lights it up without the library
 changing. `tss_create` and `thread_local` are absent for a different
 reason -- they need thread-local storage, which EmbCC does not have,
 and a key every thread shared would be a global under another name.
+
+## Closed: a rollback that restored a freed pointer (2026-09-21)
+
+`<filesystem>` would not compile: the compiler took SIGSEGV inside
+`malloc`, which is never where the bug is. It reproduced only when
+writing a real object file — `-o /dev/null` and `--emit-c` both
+succeeded — which is the signature of heap corruption rather than a
+parse error, since those paths simply allocate differently. ASan named
+it in one run: a heap-use-after-free WRITE in `add_pending`, in a call
+path with no connection to the one that did the `free`.
+
+The cause is a save/restore pair that saved a POINTER into a growable
+array. `parse_save`/`parse_restore` capture the parser's state so a
+speculative parse can be unwound, and among the fields they captured
+were `pend`, `npend` and `cappend` — the delayed-member array, its
+length and its capacity. If anything between the save and the restore
+called `add_pending` often enough to grow the array, the `xrealloc`
+freed the old block; the restore then put that freed pointer back into
+the global, and the next `add_pending` wrote through it. Nothing was
+wrong at either site. The bug lived in the assumption that a pointer
+is part of a state you can roll back, when a realloc has made it a
+pointer to nothing.
+
+What makes it interesting is that the two callers wanted DIFFERENT
+things and the one mechanism could not serve both. `class_define_from`
+sets `pend = NULL` before parsing a nested class body, deliberately
+starting a fresh list so the interrupted parse's queued members are not
+run by the inner one — it genuinely needs the pointer put back. Every
+other caller goes on appending to the SAME array, and for those
+restoring the pointer is the use-after-free. So the fix is not one
+change but a separation: `parse_save` keeps only `npend`, the logical
+length, which is the correct rollback for a shared buffer that only
+grows and whose entries past the mark are dead; and `class_define_from`
+does its own explicit three-variable swap, which is safe because the
+array it swaps in starts empty and the outer one is never touched.
+
+The first attempt — dropping the pointer from the saved state and
+stopping there — turned the use-after-free into a null dereference at
+`pend[1]`, because `class_define_from` still cleared `pend` and now
+nothing put it back. That failure was useful: it is what pointed at the
+second caller and its opposite requirement.
 
 ## Closed: dead landing pads, and long double objects (2026-09-20)
 

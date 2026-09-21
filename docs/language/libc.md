@@ -284,6 +284,25 @@ with the failure invisible until two threads corrupted each other.
 `thread_local` is likewise left undefined rather than aliased to
 nothing.
 
+## The filesystem group
+
+The seam has a second optional group, seventeen primitives wide:
+`__os_stat` and `__os_lstat`, `__os_mkdir`, `__os_rmdir`, `__os_unlink`,
+`__os_chmod`, `__os_truncate`, `__os_utime`, `__os_symlink`,
+`__os_readlink`, `__os_link`, `__os_getcwd`, `__os_chdir`,
+`__os_statfs`, and the three that walk a directory — `__os_opendir`,
+`__os_readdir`, `__os_closedir`. C++'s `<filesystem>` is built on them
+and nothing else.
+
+Like the thread group they are **weak** in `os/posixlike/backend.c`, so
+a freestanding harness still links and every one of them returns
+`ENOSYS`. EmbLinkOS implements them for real. Two details of that
+backend are forced by the kernel rather than chosen: `__os_opendir`
+SNAPSHOTS the directory, up to 512 entries, because `embk_readdir` is
+not resumable and cannot be continued from a position; and
+`__os_readdir` filters `.` and `..` itself, so every caller above the
+seam sees the same listing whether or not the host reports them.
+
 ## Math
 
 `src/math/fdlibm/` is Sun's fdlibm, kept **verbatim** (its notice preserved)

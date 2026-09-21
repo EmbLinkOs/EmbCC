@@ -1,0 +1,1701 @@
+/* <filesystem> — C++ [filesystems].
+ *
+ * Two halves that are worth keeping apart in your head.
+ *
+ * `path` is PURE STRING MANIPULATION. It touches no filesystem, asks
+ * the OS nothing, and answers every question about a path's SHAPE --
+ * its stem, its extension, its parent, whether it is absolute. All of
+ * it works on a target with no filesystem at all, because none of it
+ * is about files.
+ *
+ * The operations -- exists, create_directory, directory_iterator and
+ * the rest -- go through lib/libc/os/backend.h's second optional
+ * group. A target that implements none of it gets `ENOSYS` reported as
+ * a `filesystem_error` carrying `errc::function_not_supported`, and a
+ * target that does (EmbLinkOS) gets the real thing without a line here
+ * changing.
+ *
+ * ---- every operation comes in two forms ---------------------------------
+ *
+ * One throws, one takes an `error_code &`. That is not a convenience:
+ * on a filesystem, failure is ORDINARY. A file disappearing between
+ * the `exists` and the `open` is not exceptional, it is Tuesday, and
+ * an interface that can only report it by throwing forces a try/catch
+ * around ordinary control flow. The `error_code` forms are also
+ * `noexcept`, which is what lets them be used where an exception
+ * cannot escape.
+ *
+ * ---- what is NOT here ----------------------------------------------------
+ *
+ * `path::format` distinctions between native and generic form: this
+ * target has one separator, `/`, so the two forms are the same string
+ * and pretending otherwise would be ceremony. `u8path` and the wide
+ * constructors are absent for the same reason the rest of this library
+ * is byte-oriented (see <wchar.h>). Hard links are reported but
+ * `hard_link_count` needs a stat field this target may not have, and
+ * says so.
+ */
+#ifndef _LIBCXX_FILESYSTEM
+#define _LIBCXX_FILESYSTEM
+
+#include <chrono>
+#include <cstddef>
+#include <cstring>
+#include <iterator>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+extern "C" {
+#define __OS_FT_UNKNOWN   0
+#define __OS_FT_NOT_FOUND 1
+#define __OS_FT_REGULAR   2
+#define __OS_FT_DIRECTORY 3
+#define __OS_FT_SYMLINK   4
+#define __OS_FT_CHARDEV   5
+#define __OS_FT_BLOCKDEV  6
+#define __OS_FT_FIFO      7
+#define __OS_FT_SOCKET    8
+
+struct __os_fileinfo {
+    unsigned long long size;
+    long mtime;
+    unsigned int mode;
+    int type;
+    unsigned long long dev, ino;
+    unsigned long long nlink;
+};
+
+int  __os_stat(const char *path, struct __os_fileinfo *out);
+int  __os_lstat(const char *path, struct __os_fileinfo *out);
+int  __os_mkdir(const char *path, unsigned mode);
+int  __os_rmdir(const char *path);
+int  __os_unlink(const char *path);
+int  __os_chmod(const char *path, unsigned mode);
+int  __os_truncate(const char *path, long long size);
+int  __os_utime(const char *path, long mtime);
+int  __os_symlink(const char *target, const char *linkpath);
+long __os_readlink(const char *path, char *buf, size_t n);
+int  __os_link(const char *target, const char *linkpath);
+int  __os_getcwd(char *buf, size_t n);
+int  __os_chdir(const char *path);
+int  __os_statfs(const char *path, unsigned long long *capacity,
+                 unsigned long long *freespace, unsigned long long *available);
+void *__os_opendir(const char *path);
+int   __os_readdir(void *dir, char *name, size_t n, int *type);
+void  __os_closedir(void *dir);
+int  __os_rename(const char *from, const char *to);
+}
+
+namespace std {
+namespace filesystem {
+
+/* ---- path ---------------------------------------------------------------- */
+
+class path {
+public:
+    using value_type = char;
+    using string_type = string;
+    static constexpr char preferred_separator = '/';
+
+    path() = default;
+    path(const path &) = default;
+    path(path &&) noexcept = default;
+    path(string_type s) : __s(static_cast<string_type &&>(s)) {}
+    path(const char *s) : __s(s) {}
+    path(string_view s) : __s(s) {}
+    template <class I>
+    path(I first, I last) : __s(first, last) {}
+
+    path &operator=(const path &) = default;
+    path &operator=(path &&) noexcept = default;
+    path &operator=(string_type s)
+    { __s = static_cast<string_type &&>(s); return *this; }
+
+    /* ---- appending ------------------------------------------------- */
+
+    /* `/` APPENDS A COMPONENT, and an absolute right-hand side REPLACES
+     * rather than appending: `path("/a") / "/b"` is "/b". That surprises
+     * everyone once and is the only sane rule -- an absolute path is
+     * absolute, and quietly making it relative to something else would
+     * turn a bug into a silently wrong file. */
+    path &operator/=(const path &p)
+    {
+        if (p.is_absolute()) {
+            __s = p.__s;
+            return *this;
+        }
+        if (p.__s.empty()) {
+            /* A trailing separator is added, which is what makes
+             * `dir / ""` mean "the directory itself" and round-trip
+             * through iteration. */
+            if (!__s.empty() && __s.back() != '/')
+                __s += '/';
+            return *this;
+        }
+        if (!__s.empty() && __s.back() != '/')
+            __s += '/';
+        __s += p.__s;
+        return *this;
+    }
+
+    /* `+=` CONCATENATES without a separator -- which is how an
+     * extension or a suffix is added. Two operators because they are
+     * two different things and one of them is nearly always wrong. */
+    path &operator+=(const path &p) { __s += p.__s; return *this; }
+    path &operator+=(const string_type &s) { __s += s; return *this; }
+    path &operator+=(const char *s) { __s += s; return *this; }
+    path &operator+=(char c) { __s += c; return *this; }
+
+    path &append(const path &p) { return *this /= p; }
+    path &concat(const path &p) { return *this += p; }
+
+    void clear() { __s.clear(); }
+
+    path &remove_filename()
+    {
+        size_t i = __last_sep();
+        if (i == string_type::npos)
+            __s.clear();
+        else
+            __s.erase(i + 1);
+        return *this;
+    }
+
+    path &replace_filename(const path &p)
+    {
+        remove_filename();
+        return *this /= p;
+    }
+
+    path &replace_extension(const path &p = path())
+    {
+        string_type e = extension().__s;
+        if (!e.empty())
+            __s.erase(__s.size() - e.size());
+        if (!p.__s.empty()) {
+            if (p.__s[0] != '.')
+                __s += '.';
+            __s += p.__s;
+        }
+        return *this;
+    }
+
+    void swap(path &o) noexcept { __s.swap(o.__s); }
+
+    /* ---- observers -------------------------------------------------- */
+
+    const string_type &native() const noexcept { return __s; }
+    const char *c_str() const noexcept { return __s.c_str(); }
+    operator string_type() const { return __s; }
+    string_type string() const { return __s; }
+    /* One separator on this target, so the generic form IS the native
+     * form -- see the note at the top. */
+    string_type generic_string() const { return __s; }
+
+    int compare(const path &o) const noexcept { return __s.compare(o.__s); }
+    int compare(const string_type &s) const { return __s.compare(s); }
+    int compare(const char *s) const { return __s.compare(s); }
+
+    /* ---- decomposition ----------------------------------------------- */
+
+    /* No drive letters here, so the root NAME is always empty and the
+     * root DIRECTORY is "/" when the path starts with one. */
+    path root_name() const { return path(); }
+    path root_directory() const
+    { return __abs() ? path("/") : path(); }
+    path root_path() const { return root_directory(); }
+
+    path relative_path() const
+    {
+        if (!__abs())
+            return *this;
+        size_t i = 0;
+        while (i < __s.size() && __s[i] == '/')
+            i++;
+        return path(__s.substr(i));
+    }
+
+    path parent_path() const
+    {
+        size_t i = __last_sep();
+        if (i == string_type::npos)
+            return path();
+        if (i == 0)
+            return path("/");     /* the parent of "/a" is "/" */
+        return path(__s.substr(0, i));
+    }
+
+    path filename() const
+    {
+        size_t i = __last_sep();
+        return path(i == string_type::npos ? __s : __s.substr(i + 1));
+    }
+
+    /* The stem and the extension split at the LAST dot, and three cases
+     * are not extensions however much they look like one: a leading dot
+     * (".bashrc" is all stem), "." and "..". Getting those wrong turns
+     * a dotfile into an extension with an empty name. */
+    path stem() const
+    {
+        string_type f = filename().__s;
+        if (f == "." || f == "..")
+            return path(f);
+        size_t d = f.rfind('.');
+        if (d == string_type::npos || d == 0)
+            return path(f);
+        return path(f.substr(0, d));
+    }
+
+    path extension() const
+    {
+        string_type f = filename().__s;
+        if (f == "." || f == "..")
+            return path();
+        size_t d = f.rfind('.');
+        if (d == string_type::npos || d == 0)
+            return path();
+        return path(f.substr(d));
+    }
+
+    bool empty() const noexcept { return __s.empty(); }
+    bool has_root_path() const { return __abs(); }
+    bool has_root_name() const { return false; }
+    bool has_root_directory() const { return __abs(); }
+    bool has_relative_path() const { return !relative_path().empty(); }
+    bool has_parent_path() const { return !parent_path().empty(); }
+    bool has_filename() const { return !filename().empty(); }
+    bool has_stem() const { return !stem().empty(); }
+    bool has_extension() const { return !extension().empty(); }
+    bool is_absolute() const { return __abs(); }
+    bool is_relative() const { return !__abs(); }
+
+    /* ---- lexical operations ------------------------------------------
+     *
+     * "Lexical" means WITHOUT ASKING THE FILESYSTEM, and the
+     * distinction matters: `lexically_normal` resolves ".." by deleting
+     * the previous component, which is wrong if that component is a
+     * symlink -- "a/b/.." is not "a" when b points elsewhere. That is
+     * why `canonical` exists and needs a filesystem, and why this one
+     * says "lexically" in its name.
+     */
+    path lexically_normal() const
+    {
+        vector<string_type> parts;
+        bool abs = __abs();
+        size_t i = 0;
+        bool trailing = false;
+        while (i < __s.size()) {
+            while (i < __s.size() && __s[i] == '/')
+                i++;
+            size_t j = i;
+            while (j < __s.size() && __s[j] != '/')
+                j++;
+            if (j > i) {
+                string_type c = __s.substr(i, j - i);
+                if (c == ".") {
+                    trailing = true;
+                } else if (c == "..") {
+                    if (!parts.empty() && parts.back() != "..") {
+                        parts.pop_back();
+                        trailing = true;
+                    } else if (!abs) {
+                        /* A leading ".." in a RELATIVE path is kept:
+                         * there is nothing above it to cancel. In an
+                         * absolute one it is dropped, because the root
+                         * has no parent. */
+                        parts.push_back(c);
+                        trailing = false;
+                    } else {
+                        trailing = true;
+                    }
+                } else {
+                    parts.push_back(c);
+                    trailing = false;
+                }
+            }
+            i = j;
+        }
+        string_type r;
+        if (abs)
+            r += '/';
+        for (size_t k = 0; k < parts.size(); k++) {
+            if (k)
+                r += '/';
+            r += parts[k];
+        }
+        if (r.empty())
+            r = abs ? "/" : ".";
+        else if (trailing && r != "/" && !parts.empty())
+            r += '/';
+        return path(r);
+    }
+
+    /* The path that leads from `base` to this one, or empty when there
+     * is none -- which happens when one is absolute and the other is
+     * not, because no sequence of ".." crosses that. */
+    path lexically_relative(const path &base) const
+    {
+        if (is_absolute() != base.is_absolute())
+            return path();
+        vector<string_type> a = __split(lexically_normal().__s);
+        vector<string_type> b = __split(base.lexically_normal().__s);
+        size_t i = 0;
+        while (i < a.size() && i < b.size() && a[i] == b[i])
+            i++;
+        /* A ".." in what remains of base cannot be undone without
+         * knowing what it pointed at, so there is no relative path. */
+        for (size_t k = i; k < b.size(); k++)
+            if (b[k] == "..")
+                return path();
+        if (i == a.size() && i == b.size())
+            return path(".");
+        string_type r;
+        for (size_t k = i; k < b.size(); k++) {
+            if (!r.empty())
+                r += '/';
+            r += "..";
+        }
+        for (size_t k = i; k < a.size(); k++) {
+            if (!r.empty())
+                r += '/';
+            r += a[k];
+        }
+        return path(r.empty() ? "." : r);
+    }
+
+    path lexically_proximate(const path &base) const
+    {
+        path r = lexically_relative(base);
+        return r.empty() ? *this : r;
+    }
+
+    /* ---- iteration ---------------------------------------------------
+     *
+     * A path iterates over its COMPONENTS, with the root directory as a
+     * component of its own: "/a/b" is "/", "a", "b". That is what makes
+     * an absolute path distinguishable from a relative one by iteration
+     * alone.
+     */
+    /* Declared here and DEFINED after the class: an iterator holds the
+     * component it is on, as a path, and a path is not complete until
+     * its own definition closes. */
+    class iterator;
+    using const_iterator = iterator;
+
+    iterator begin() const;
+    iterator end() const;
+
+
+
+private:
+    bool __abs() const { return !__s.empty() && __s[0] == '/'; }
+
+    size_t __last_sep() const
+    {
+        size_t i = __s.rfind('/');
+        return i;
+    }
+
+    static vector<string_type> __split(const string_type &s)
+    {
+        vector<string_type> r;
+        size_t i = 0;
+        while (i < s.size()) {
+            while (i < s.size() && s[i] == '/')
+                i++;
+            size_t j = i;
+            while (j < s.size() && s[j] != '/')
+                j++;
+            if (j > i)
+                r.push_back(s.substr(i, j - i));
+            i = j;
+        }
+        return r;
+    }
+
+    string_type __s;
+};
+
+class path::iterator {
+public:
+    using value_type = path;
+    using difference_type = ptrdiff_t;
+    using reference = const path &;
+    using pointer = const path *;
+    using iterator_category = bidirectional_iterator_tag;
+
+    iterator() : __p(nullptr), __pos(0), __end(0) {}
+    iterator(const path *p, size_t pos) : __p(p), __pos(pos), __end(pos)
+    { __load(); }
+
+    reference operator*() const { return __cur; }
+    pointer operator->() const { return &__cur; }
+
+    iterator &operator++()
+    {
+        __pos = __end;
+        __load();
+        return *this;
+    }
+    iterator operator++(int) { iterator t = *this; ++*this; return t; }
+
+    friend bool operator==(const iterator &a, const iterator &b)
+    { return a.__p == b.__p && a.__pos == b.__pos; }
+    friend bool operator!=(const iterator &a, const iterator &b)
+    { return !(a == b); }
+
+private:
+    void __load()
+    {
+        const string_type &s = __p->__s;
+        if (__pos >= s.size()) {
+            __cur = path();
+            __end = __pos;
+            return;
+        }
+        if (__pos == 0 && s[0] == '/') {
+            /* The root directory is one component, however many
+             * slashes were written. */
+            size_t j = 0;
+            while (j < s.size() && s[j] == '/')
+                j++;
+            __cur = path("/");
+            __end = j;
+            return;
+        }
+        size_t i = __pos;
+        while (i < s.size() && s[i] == '/')
+            i++;
+        size_t j = i;
+        while (j < s.size() && s[j] != '/')
+            j++;
+        if (j == i) {
+            __cur = path();
+            __end = s.size();
+            return;
+        }
+        __cur = path(s.substr(i, j - i));
+        __end = j;
+    }
+
+    const path *__p;
+    size_t __pos, __end;
+    path __cur;
+};
+
+inline path::iterator path::begin() const { return iterator(this, 0); }
+inline path::iterator path::end() const { return iterator(this, __s.size()); }
+
+inline path operator/(const path &a, const path &b)
+{ path r = a; r /= b; return r; }
+
+inline bool operator==(const path &a, const path &b) noexcept
+{ return a.compare(b) == 0; }
+inline bool operator!=(const path &a, const path &b) noexcept
+{ return a.compare(b) != 0; }
+inline bool operator<(const path &a, const path &b) noexcept
+{ return a.compare(b) < 0; }
+inline bool operator>(const path &a, const path &b) noexcept
+{ return a.compare(b) > 0; }
+inline bool operator<=(const path &a, const path &b) noexcept
+{ return a.compare(b) <= 0; }
+inline bool operator>=(const path &a, const path &b) noexcept
+{ return a.compare(b) >= 0; }
+
+inline void swap(path &a, path &b) noexcept { a.swap(b); }
+
+/* ---- file types and permissions ----------------------------------------- */
+
+enum class file_type {
+    none = 0,
+    not_found = -1,
+    regular = 1,
+    directory = 2,
+    symlink = 3,
+    block = 4,
+    character = 5,
+    fifo = 6,
+    socket = 7,
+    unknown = 8
+};
+
+enum class perms : unsigned {
+    none = 0,
+    owner_read = 0400, owner_write = 0200, owner_exec = 0100, owner_all = 0700,
+    group_read = 040,  group_write = 020,  group_exec = 010,  group_all = 070,
+    others_read = 04,  others_write = 02,  others_exec = 01,  others_all = 07,
+    all = 0777,
+    set_uid = 04000, set_gid = 02000, sticky_bit = 01000,
+    mask = 07777,
+    unknown = 0xFFFF
+};
+
+constexpr perms operator|(perms a, perms b)
+{ return (perms)((unsigned)a | (unsigned)b); }
+constexpr perms operator&(perms a, perms b)
+{ return (perms)((unsigned)a & (unsigned)b); }
+constexpr perms operator^(perms a, perms b)
+{ return (perms)((unsigned)a ^ (unsigned)b); }
+constexpr perms operator~(perms a)
+{ return (perms)(~(unsigned)a & 07777u); }
+inline perms &operator|=(perms &a, perms b) { a = a | b; return a; }
+inline perms &operator&=(perms &a, perms b) { a = a & b; return a; }
+
+enum class perm_options { replace = 1, add = 2, remove = 4, nofollow = 8 };
+
+enum class copy_options {
+    none = 0,
+    skip_existing = 1, overwrite_existing = 2, update_existing = 4,
+    recursive = 8,
+    copy_symlinks = 16, skip_symlinks = 32, directories_only = 64,
+    create_symlinks = 128, create_hard_links = 256
+};
+
+constexpr copy_options operator|(copy_options a, copy_options b)
+{ return (copy_options)((int)a | (int)b); }
+constexpr copy_options operator&(copy_options a, copy_options b)
+{ return (copy_options)((int)a & (int)b); }
+
+enum class directory_options { none = 0, follow_directory_symlink = 1,
+                               skip_permission_denied = 2 };
+
+constexpr directory_options operator|(directory_options a, directory_options b)
+{ return (directory_options)((int)a | (int)b); }
+constexpr directory_options operator&(directory_options a, directory_options b)
+{ return (directory_options)((int)a & (int)b); }
+
+class file_status {
+public:
+    file_status() noexcept : __t(file_type::none), __p(perms::unknown) {}
+    explicit file_status(file_type t, perms p = perms::unknown) noexcept
+        : __t(t), __p(p) {}
+
+    file_type type() const noexcept { return __t; }
+    perms permissions() const noexcept { return __p; }
+    void type(file_type t) noexcept { __t = t; }
+    void permissions(perms p) noexcept { __p = p; }
+
+    friend bool operator==(const file_status &a, const file_status &b) noexcept
+    { return a.__t == b.__t && a.__p == b.__p; }
+
+private:
+    file_type __t;
+    perms __p;
+};
+
+using file_time_type = chrono::time_point<chrono::system_clock>;
+
+struct space_info {
+    uintmax_t capacity;
+    uintmax_t free;
+    uintmax_t available;
+};
+
+/* ---- filesystem_error ----------------------------------------------------
+ *
+ * Carries the PATHS as well as the code, and that is the difference
+ * from a plain system_error: "No such file or directory" is not a
+ * diagnosis, and reconstructing which path failed from a call stack is
+ * exactly the work this saves.
+ */
+class filesystem_error : public system_error {
+public:
+    filesystem_error(const string &what, error_code ec)
+        : system_error(ec, what), __p1(), __p2() {}
+    filesystem_error(const string &what, const path &p1, error_code ec)
+        : system_error(ec, what + " [" + p1.string() + "]"), __p1(p1), __p2() {}
+    filesystem_error(const string &what, const path &p1, const path &p2,
+                     error_code ec)
+        : system_error(ec, what + " [" + p1.string() + "] [" + p2.string() + "]"),
+          __p1(p1), __p2(p2) {}
+
+    const path &path1() const noexcept { return __p1; }
+    const path &path2() const noexcept { return __p2; }
+
+private:
+    path __p1, __p2;
+};
+
+namespace __detail {
+
+inline error_code __last() noexcept
+{ return error_code(errno, system_category()); }
+
+/* Either report through the code or throw, from one place: every
+ * operation below comes in both forms, and writing the choice twice per
+ * operation is how the two drift apart. */
+inline void __fail(error_code *ec, error_code e, const char *what,
+                   const path &p)
+{
+    if (ec) {
+        *ec = e;
+        return;
+    }
+    throw filesystem_error(what, p, e);
+}
+
+inline void __fail2(error_code *ec, error_code e, const char *what,
+                    const path &a, const path &b)
+{
+    if (ec) {
+        *ec = e;
+        return;
+    }
+    throw filesystem_error(what, a, b, e);
+}
+
+inline void __ok(error_code *ec) { if (ec) ec->clear(); }
+
+inline file_type __type_of(int t)
+{
+    switch (t) {
+    case __OS_FT_REGULAR:   return file_type::regular;
+    case __OS_FT_DIRECTORY: return file_type::directory;
+    case __OS_FT_SYMLINK:   return file_type::symlink;
+    case __OS_FT_CHARDEV:   return file_type::character;
+    case __OS_FT_BLOCKDEV:  return file_type::block;
+    case __OS_FT_FIFO:      return file_type::fifo;
+    case __OS_FT_SOCKET:    return file_type::socket;
+    case __OS_FT_NOT_FOUND: return file_type::not_found;
+    default:                return file_type::unknown;
+    }
+}
+
+inline file_status __status(const path &p, bool follow, error_code *ec)
+{
+    __os_fileinfo fi;
+    int r = follow ? __os_stat(p.c_str(), &fi) : __os_lstat(p.c_str(), &fi);
+    if (r != 0) {
+        error_code e = __last();
+        /* A path that is NOT THERE is not an error for status(): it is
+         * the answer, `file_type::not_found`. Every other failure --
+         * no permission, no filesystem at all -- is an error, and
+         * conflating them is how a program decides a file is missing
+         * when the disk is unreadable. */
+        if (e == errc::no_such_file_or_directory ||
+            e == errc::not_a_directory) {
+            __ok(ec);
+            return file_status(file_type::not_found, perms::none);
+        }
+        if (ec) {
+            *ec = e;
+            return file_status(file_type::none, perms::unknown);
+        }
+        throw filesystem_error("status", p, e);
+    }
+    __ok(ec);
+    return file_status(__type_of(fi.type), (perms)(fi.mode & 07777u));
+}
+
+}  // namespace __detail
+
+/* ---- status --------------------------------------------------------------- */
+
+inline file_status status(const path &p)
+{ return __detail::__status(p, true, nullptr); }
+inline file_status status(const path &p, error_code &ec) noexcept
+{
+    try {
+        return __detail::__status(p, true, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return file_status();
+    }
+}
+
+/* WITHOUT following a symlink, which is the whole distinction: a
+ * recursive walk that confuses the two follows a loop forever. */
+inline file_status symlink_status(const path &p)
+{ return __detail::__status(p, false, nullptr); }
+inline file_status symlink_status(const path &p, error_code &ec) noexcept
+{
+    try {
+        return __detail::__status(p, false, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return file_status();
+    }
+}
+
+inline bool status_known(file_status s) noexcept
+{ return s.type() != file_type::none; }
+inline bool exists(file_status s) noexcept
+{ return status_known(s) && s.type() != file_type::not_found; }
+inline bool is_regular_file(file_status s) noexcept
+{ return s.type() == file_type::regular; }
+inline bool is_directory(file_status s) noexcept
+{ return s.type() == file_type::directory; }
+inline bool is_symlink(file_status s) noexcept
+{ return s.type() == file_type::symlink; }
+inline bool is_block_file(file_status s) noexcept
+{ return s.type() == file_type::block; }
+inline bool is_character_file(file_status s) noexcept
+{ return s.type() == file_type::character; }
+inline bool is_fifo(file_status s) noexcept
+{ return s.type() == file_type::fifo; }
+inline bool is_socket(file_status s) noexcept
+{ return s.type() == file_type::socket; }
+inline bool is_other(file_status s) noexcept
+{
+    return exists(s) && !is_regular_file(s) && !is_directory(s) &&
+           !is_symlink(s);
+}
+
+inline bool exists(const path &p) { return exists(status(p)); }
+inline bool exists(const path &p, error_code &ec) noexcept
+{ return exists(status(p, ec)); }
+inline bool is_regular_file(const path &p) { return is_regular_file(status(p)); }
+inline bool is_regular_file(const path &p, error_code &ec) noexcept
+{ return is_regular_file(status(p, ec)); }
+inline bool is_directory(const path &p) { return is_directory(status(p)); }
+inline bool is_directory(const path &p, error_code &ec) noexcept
+{ return is_directory(status(p, ec)); }
+inline bool is_symlink(const path &p) { return is_symlink(symlink_status(p)); }
+inline bool is_symlink(const path &p, error_code &ec) noexcept
+{ return is_symlink(symlink_status(p, ec)); }
+inline bool is_block_file(const path &p) { return is_block_file(status(p)); }
+inline bool is_character_file(const path &p)
+{ return is_character_file(status(p)); }
+inline bool is_fifo(const path &p) { return is_fifo(status(p)); }
+inline bool is_socket(const path &p) { return is_socket(status(p)); }
+inline bool is_other(const path &p) { return is_other(status(p)); }
+
+inline bool is_empty(const path &p, error_code &ec) noexcept;
+
+/* ---- queries ---------------------------------------------------------------- */
+
+inline uintmax_t file_size(const path &p, error_code *ec)
+{
+    __os_fileinfo fi;
+    if (__os_stat(p.c_str(), &fi) != 0) {
+        __detail::__fail(ec, __detail::__last(), "file_size", p);
+        return (uintmax_t)-1;
+    }
+    if (fi.type != __OS_FT_REGULAR) {
+        /* The size of a directory is not a number anyone should act
+         * on, so it is refused rather than reported. */
+        __detail::__fail(ec, make_error_code(errc::is_a_directory),
+                         "file_size", p);
+        return (uintmax_t)-1;
+    }
+    __detail::__ok(ec);
+    return (uintmax_t)fi.size;
+}
+
+inline uintmax_t file_size(const path &p) { return file_size(p, nullptr); }
+inline uintmax_t file_size(const path &p, error_code &ec) noexcept
+{
+    try {
+        return file_size(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return (uintmax_t)-1;
+    }
+}
+
+inline uintmax_t hard_link_count(const path &p, error_code *ec)
+{
+    __os_fileinfo fi;
+    if (__os_stat(p.c_str(), &fi) != 0) {
+        __detail::__fail(ec, __detail::__last(), "hard_link_count", p);
+        return (uintmax_t)-1;
+    }
+    __detail::__ok(ec);
+    return (uintmax_t)fi.nlink;
+}
+
+inline uintmax_t hard_link_count(const path &p)
+{ return hard_link_count(p, nullptr); }
+inline uintmax_t hard_link_count(const path &p, error_code &ec) noexcept
+{
+    try {
+        return hard_link_count(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return (uintmax_t)-1;
+    }
+}
+
+inline file_time_type last_write_time(const path &p, error_code *ec)
+{
+    __os_fileinfo fi;
+    if (__os_stat(p.c_str(), &fi) != 0) {
+        __detail::__fail(ec, __detail::__last(), "last_write_time", p);
+        return file_time_type();
+    }
+    __detail::__ok(ec);
+    return file_time_type(chrono::seconds(fi.mtime));
+}
+
+inline file_time_type last_write_time(const path &p)
+{ return last_write_time(p, nullptr); }
+inline file_time_type last_write_time(const path &p, error_code &ec) noexcept
+{
+    try {
+        return last_write_time(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return file_time_type();
+    }
+}
+
+inline void last_write_time(const path &p, file_time_type t, error_code *ec)
+{
+    auto secs = chrono::duration_cast<chrono::seconds>(
+                    t.time_since_epoch()).count();
+    if (__os_utime(p.c_str(), (long)secs) != 0) {
+        __detail::__fail(ec, __detail::__last(), "last_write_time", p);
+        return;
+    }
+    __detail::__ok(ec);
+}
+
+inline void last_write_time(const path &p, file_time_type t)
+{ last_write_time(p, t, nullptr); }
+inline void last_write_time(const path &p, file_time_type t,
+                            error_code &ec) noexcept
+{
+    try {
+        last_write_time(p, t, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+    }
+}
+
+/* Two paths name the same file when the OS says so -- comparing the
+ * strings cannot answer it, because two different paths may be one
+ * file through a link. */
+inline bool equivalent(const path &a, const path &b, error_code *ec)
+{
+    __os_fileinfo fa, fb;
+    if (__os_stat(a.c_str(), &fa) != 0 || __os_stat(b.c_str(), &fb) != 0) {
+        __detail::__fail2(ec, __detail::__last(), "equivalent", a, b);
+        return false;
+    }
+    __detail::__ok(ec);
+    /* On a target with no device or inode numbers, the resolved paths
+     * are the best answer available -- and it is the right one for a
+     * single filesystem with no hard links. */
+    if (fa.dev == 0 && fa.ino == 0 && fb.dev == 0 && fb.ino == 0)
+        return a.lexically_normal() == b.lexically_normal();
+    return fa.dev == fb.dev && fa.ino == fb.ino;
+}
+
+inline bool equivalent(const path &a, const path &b)
+{ return equivalent(a, b, nullptr); }
+inline bool equivalent(const path &a, const path &b, error_code &ec) noexcept
+{
+    try {
+        return equivalent(a, b, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return false;
+    }
+}
+
+inline space_info space(const path &p, error_code *ec)
+{
+    space_info s{(uintmax_t)-1, (uintmax_t)-1, (uintmax_t)-1};
+    unsigned long long cap = 0, fr = 0, av = 0;
+    if (__os_statfs(p.c_str(), &cap, &fr, &av) != 0) {
+        __detail::__fail(ec, __detail::__last(), "space", p);
+        return s;
+    }
+    __detail::__ok(ec);
+    s.capacity = (uintmax_t)cap;
+    s.free = (uintmax_t)fr;
+    s.available = (uintmax_t)av;
+    return s;
+}
+
+inline space_info space(const path &p) { return space(p, nullptr); }
+inline space_info space(const path &p, error_code &ec) noexcept
+{
+    try {
+        return space(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return space_info{(uintmax_t)-1, (uintmax_t)-1, (uintmax_t)-1};
+    }
+}
+
+/* ---- the current directory --------------------------------------------- */
+
+inline path current_path(error_code *ec)
+{
+    char buf[4096];
+    if (__os_getcwd(buf, sizeof buf) != 0) {
+        __detail::__fail(ec, __detail::__last(), "current_path", path());
+        return path();
+    }
+    __detail::__ok(ec);
+    return path(buf);
+}
+
+inline path current_path() { return current_path(nullptr); }
+inline path current_path(error_code &ec) noexcept
+{
+    try {
+        return current_path(&ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return path();
+    }
+}
+
+inline void current_path(const path &p, error_code *ec)
+{
+    if (__os_chdir(p.c_str()) != 0) {
+        __detail::__fail(ec, __detail::__last(), "current_path", p);
+        return;
+    }
+    __detail::__ok(ec);
+}
+
+inline void current_path(const path &p) { current_path(p, nullptr); }
+inline void current_path(const path &p, error_code &ec) noexcept
+{
+    try {
+        current_path(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+    }
+}
+
+inline path absolute(const path &p, error_code *ec)
+{
+    if (p.is_absolute()) {
+        __detail::__ok(ec);
+        return p;
+    }
+    path cwd = current_path(ec);
+    if (ec && *ec)
+        return path();
+    return cwd / p;
+}
+
+inline path absolute(const path &p) { return absolute(p, nullptr); }
+inline path absolute(const path &p, error_code &ec) noexcept
+{
+    try {
+        return absolute(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return path();
+    }
+}
+
+/* canonical asks the FILESYSTEM, which is what separates it from
+ * lexically_normal: resolving ".." by deleting the previous component
+ * is wrong when that component is a symlink. It therefore requires the
+ * path to exist. */
+inline path canonical(const path &p, error_code *ec)
+{
+    path a = absolute(p, ec);
+    if (ec && *ec)
+        return path();
+    __os_fileinfo fi;
+    if (__os_stat(a.c_str(), &fi) != 0) {
+        __detail::__fail(ec, __detail::__last(), "canonical", p);
+        return path();
+    }
+    __detail::__ok(ec);
+    return a.lexically_normal();
+}
+
+inline path canonical(const path &p) { return canonical(p, nullptr); }
+inline path canonical(const path &p, error_code &ec) noexcept
+{
+    try {
+        return canonical(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return path();
+    }
+}
+
+inline path weakly_canonical(const path &p, error_code &ec) noexcept
+{
+    ec.clear();
+    return absolute(p, ec).lexically_normal();
+}
+inline path weakly_canonical(const path &p)
+{ return absolute(p).lexically_normal(); }
+
+inline path temp_directory_path(error_code *ec)
+{
+    /* No environment here, so there is one answer. Saying "/tmp" is
+     * better than failing: a program that needs scratch space needs a
+     * path, and this target's convention is the Unix one. */
+    __detail::__ok(ec);
+    return path("/tmp");
+}
+inline path temp_directory_path() { return temp_directory_path(nullptr); }
+inline path temp_directory_path(error_code &ec) noexcept
+{ ec.clear(); return path("/tmp"); }
+
+/* ---- creating and removing ---------------------------------------------- */
+
+inline bool create_directory(const path &p, error_code *ec)
+{
+    if (__os_mkdir(p.c_str(), 0777) == 0) {
+        __detail::__ok(ec);
+        return true;
+    }
+    error_code e = __detail::__last();
+    /* Already there is NOT an error -- it is "false, and nothing was
+     * created", which is what lets create_directory be called
+     * unconditionally. */
+    if (e == errc::file_exists) {
+        __detail::__ok(ec);
+        return false;
+    }
+    __detail::__fail(ec, e, "create_directory", p);
+    return false;
+}
+
+inline bool create_directory(const path &p)
+{ return create_directory(p, nullptr); }
+inline bool create_directory(const path &p, error_code &ec) noexcept
+{
+    try {
+        return create_directory(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return false;
+    }
+}
+
+inline bool create_directories(const path &p, error_code *ec)
+{
+    /* Every missing parent, in order. The loop builds the path up
+     * component by component rather than recursing, so a very deep
+     * path costs no stack. */
+    path built;
+    bool made = false;
+    if (p.is_absolute())
+        built = path("/");
+    for (const path &c : p) {
+        if (c == path("/"))
+            continue;
+        built /= c;
+        if (__os_mkdir(built.c_str(), 0777) == 0) {
+            made = true;
+            continue;
+        }
+        error_code e = __detail::__last();
+        if (e == errc::file_exists)
+            continue;
+        __detail::__fail(ec, e, "create_directories", built);
+        return false;
+    }
+    __detail::__ok(ec);
+    return made;
+}
+
+inline bool create_directories(const path &p)
+{ return create_directories(p, nullptr); }
+inline bool create_directories(const path &p, error_code &ec) noexcept
+{
+    try {
+        return create_directories(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return false;
+    }
+}
+
+inline bool remove(const path &p, error_code *ec)
+{
+    __os_fileinfo fi;
+    if (__os_lstat(p.c_str(), &fi) != 0) {
+        error_code e = __detail::__last();
+        /* Removing what is not there is FALSE, not an error: the
+         * postcondition -- it is gone -- already holds. */
+        if (e == errc::no_such_file_or_directory) {
+            __detail::__ok(ec);
+            return false;
+        }
+        __detail::__fail(ec, e, "remove", p);
+        return false;
+    }
+    int r = fi.type == __OS_FT_DIRECTORY ? __os_rmdir(p.c_str())
+                                         : __os_unlink(p.c_str());
+    if (r != 0) {
+        __detail::__fail(ec, __detail::__last(), "remove", p);
+        return false;
+    }
+    __detail::__ok(ec);
+    return true;
+}
+
+inline bool remove(const path &p) { return remove(p, nullptr); }
+inline bool remove(const path &p, error_code &ec) noexcept
+{
+    try {
+        return remove(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return false;
+    }
+}
+
+inline uintmax_t remove_all(const path &p, error_code *ec);
+
+inline void rename(const path &from, const path &to, error_code *ec)
+{
+    if (__os_rename(from.c_str(), to.c_str()) != 0) {
+        __detail::__fail2(ec, __detail::__last(), "rename", from, to);
+        return;
+    }
+    __detail::__ok(ec);
+}
+
+inline void rename(const path &from, const path &to)
+{ rename(from, to, nullptr); }
+inline void rename(const path &from, const path &to, error_code &ec) noexcept
+{
+    try {
+        rename(from, to, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+    }
+}
+
+inline void resize_file(const path &p, uintmax_t n, error_code *ec)
+{
+    if (__os_truncate(p.c_str(), (long long)n) != 0) {
+        __detail::__fail(ec, __detail::__last(), "resize_file", p);
+        return;
+    }
+    __detail::__ok(ec);
+}
+
+inline void resize_file(const path &p, uintmax_t n)
+{ resize_file(p, n, nullptr); }
+inline void resize_file(const path &p, uintmax_t n, error_code &ec) noexcept
+{
+    try {
+        resize_file(p, n, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+    }
+}
+
+inline void permissions(const path &p, perms pr,
+                        perm_options opts = perm_options::replace)
+{
+    unsigned m = (unsigned)pr & 07777u;
+    if (opts != perm_options::replace) {
+        file_status s = status(p);
+        unsigned cur = (unsigned)s.permissions() & 07777u;
+        if (opts == perm_options::add)
+            m = cur | m;
+        else if (opts == perm_options::remove)
+            m = cur & ~m;
+    }
+    if (__os_chmod(p.c_str(), m) != 0)
+        throw filesystem_error("permissions", p, __detail::__last());
+}
+
+inline void permissions(const path &p, perms pr, error_code &ec) noexcept
+{
+    if (__os_chmod(p.c_str(), (unsigned)pr & 07777u) != 0)
+        ec = __detail::__last();
+    else
+        ec.clear();
+}
+
+inline void create_symlink(const path &target, const path &link,
+                           error_code *ec)
+{
+    if (__os_symlink(target.c_str(), link.c_str()) != 0) {
+        __detail::__fail2(ec, __detail::__last(), "create_symlink", target,
+                          link);
+        return;
+    }
+    __detail::__ok(ec);
+}
+
+inline void create_symlink(const path &target, const path &link)
+{ create_symlink(target, link, nullptr); }
+inline void create_symlink(const path &target, const path &link,
+                           error_code &ec) noexcept
+{
+    try {
+        create_symlink(target, link, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+    }
+}
+
+inline void create_directory_symlink(const path &target, const path &link)
+{ create_symlink(target, link); }
+inline void create_directory_symlink(const path &target, const path &link,
+                                     error_code &ec) noexcept
+{ create_symlink(target, link, ec); }
+
+inline void create_hard_link(const path &target, const path &link,
+                             error_code *ec)
+{
+    if (__os_link(target.c_str(), link.c_str()) != 0) {
+        __detail::__fail2(ec, __detail::__last(), "create_hard_link", target,
+                          link);
+        return;
+    }
+    __detail::__ok(ec);
+}
+
+inline void create_hard_link(const path &target, const path &link)
+{ create_hard_link(target, link, nullptr); }
+inline void create_hard_link(const path &target, const path &link,
+                             error_code &ec) noexcept
+{
+    try {
+        create_hard_link(target, link, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+    }
+}
+
+inline path read_symlink(const path &p, error_code *ec)
+{
+    char buf[4096];
+    long n = __os_readlink(p.c_str(), buf, sizeof buf - 1);
+    if (n < 0) {
+        __detail::__fail(ec, __detail::__last(), "read_symlink", p);
+        return path();
+    }
+    if ((size_t)n >= sizeof buf)
+        n = sizeof buf - 1;
+    buf[n] = 0;
+    __detail::__ok(ec);
+    return path(buf);
+}
+
+inline path read_symlink(const path &p) { return read_symlink(p, nullptr); }
+inline path read_symlink(const path &p, error_code &ec) noexcept
+{
+    try {
+        return read_symlink(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return path();
+    }
+}
+
+/* ---- directory_entry ------------------------------------------------------
+ *
+ * Holds the path AND a cached status, because a directory listing
+ * usually already knows the type from the entry itself -- so asking
+ * `is_directory` costs nothing where a bare path would cost a syscall
+ * per entry. `refresh()` is how a caller says the cache is stale.
+ */
+class directory_entry {
+public:
+    directory_entry() = default;
+    explicit directory_entry(const class path &p) : __p(p) { __refresh_quiet(); }
+    directory_entry(const class path &p, file_type t)
+        : __p(p), __st(t, perms::unknown), __have(t != file_type::none) {}
+
+    void assign(const class path &p) { __p = p; __have = false; __refresh_quiet(); }
+    void replace_filename(const class path &p)
+    { __p.replace_filename(p); __have = false; __refresh_quiet(); }
+    void refresh() { __have = false; __refresh_quiet(); }
+    void refresh(error_code &ec) noexcept
+    {
+        __st = filesystem::symlink_status(__p, ec);
+        __have = !ec;
+    }
+
+    const class path &path() const noexcept { return __p; }
+    operator const class path &() const noexcept { return __p; }
+
+    bool exists() const { return filesystem::exists(__status()); }
+    bool is_regular_file() const
+    { return filesystem::is_regular_file(__status()); }
+    bool is_directory() const { return filesystem::is_directory(__status()); }
+    bool is_symlink() const { return filesystem::is_symlink(__status()); }
+    bool is_other() const { return filesystem::is_other(__status()); }
+    bool is_block_file() const { return filesystem::is_block_file(__status()); }
+    bool is_character_file() const
+    { return filesystem::is_character_file(__status()); }
+    bool is_fifo() const { return filesystem::is_fifo(__status()); }
+    bool is_socket() const { return filesystem::is_socket(__status()); }
+
+    uintmax_t file_size() const { return filesystem::file_size(__p); }
+    uintmax_t hard_link_count() const
+    { return filesystem::hard_link_count(__p); }
+    file_time_type last_write_time() const
+    { return filesystem::last_write_time(__p); }
+
+    file_status status() const { return filesystem::status(__p); }
+    file_status symlink_status() const
+    { return filesystem::symlink_status(__p); }
+
+    friend bool operator==(const directory_entry &a, const directory_entry &b)
+    { return a.__p == b.__p; }
+    friend bool operator!=(const directory_entry &a, const directory_entry &b)
+    { return a.__p != b.__p; }
+    friend bool operator<(const directory_entry &a, const directory_entry &b)
+    { return a.__p < b.__p; }
+
+private:
+    void __refresh_quiet()
+    {
+        error_code ec;
+        __st = filesystem::symlink_status(__p, ec);
+        __have = !ec;
+    }
+
+    file_status __status() const
+    {
+        if (__have)
+            return __st;
+        return filesystem::symlink_status(__p);
+    }
+
+    class path __p;
+    file_status __st;
+    bool __have = false;
+};
+
+/* ---- directory_iterator ---------------------------------------------------
+ *
+ * An input iterator over a directory's entries, and the END is the
+ * DEFAULT-CONSTRUCTED one -- the same shape every range of unknown
+ * length takes. The handle is shared between copies, because the
+ * standard makes copies refer to the same position: two copies advanced
+ * independently would read one directory twice.
+ */
+class directory_iterator {
+public:
+    using value_type = directory_entry;
+    using difference_type = ptrdiff_t;
+    using pointer = const directory_entry *;
+    using reference = const directory_entry &;
+    using iterator_category = input_iterator_tag;
+
+    directory_iterator() noexcept = default;
+
+    explicit directory_iterator(const path &p,
+                                directory_options opts = directory_options::none)
+        : __opts(opts)
+    {
+        __open(p, nullptr);
+    }
+
+    directory_iterator(const path &p, error_code &ec) noexcept
+        : __opts(directory_options::none)
+    {
+        __open(p, &ec);
+    }
+
+    directory_iterator(const path &p, directory_options opts,
+                       error_code &ec) noexcept : __opts(opts)
+    {
+        __open(p, &ec);
+    }
+
+    directory_iterator(const directory_iterator &) = default;
+    directory_iterator(directory_iterator &&) noexcept = default;
+    directory_iterator &operator=(const directory_iterator &) = default;
+    directory_iterator &operator=(directory_iterator &&) noexcept = default;
+
+    reference operator*() const { return __cur; }
+    pointer operator->() const { return &__cur; }
+
+    directory_iterator &operator++() { __advance(nullptr); return *this; }
+    directory_iterator &increment(error_code &ec) noexcept
+    { __advance(&ec); return *this; }
+
+    friend bool operator==(const directory_iterator &a,
+                           const directory_iterator &b) noexcept
+    { return a.__d == b.__d; }
+    friend bool operator!=(const directory_iterator &a,
+                           const directory_iterator &b) noexcept
+    { return !(a == b); }
+
+private:
+    struct __dir {
+        void *h;
+        ~__dir() { if (h) __os_closedir(h); }
+    };
+
+    void __open(const path &p, error_code *ec)
+    {
+        void *h = __os_opendir(p.c_str());
+        if (!h) {
+            error_code e = __detail::__last();
+            if ((int)(__opts & directory_options::skip_permission_denied) &&
+                e == errc::permission_denied) {
+                /* Asked to skip it: the iterator is simply empty, which
+                 * is what lets a walk continue past a directory it may
+                 * not read. */
+                __detail::__ok(ec);
+                return;
+            }
+            __detail::__fail(ec, e, "directory_iterator", p);
+            return;
+        }
+        __base = p;
+        __d = shared_ptr<__dir>(new __dir{h});
+        __advance(ec);
+    }
+
+    void __advance(error_code *ec)
+    {
+        if (!__d)
+            return;
+        char name[512];
+        int type = __OS_FT_UNKNOWN;
+        int r = __os_readdir(__d->h, name, sizeof name, &type);
+        if (r < 0) {
+            __detail::__fail(ec, __detail::__last(), "directory_iterator",
+                             __base);
+            __d.reset();
+            return;
+        }
+        if (r == 0) {
+            /* The end. Dropping the handle is what makes this compare
+             * equal to a default-constructed iterator. */
+            __d.reset();
+            __detail::__ok(ec);
+            return;
+        }
+        __cur = directory_entry(__base / path(name), __detail::__type_of(type));
+        __detail::__ok(ec);
+    }
+
+    path __base;
+    shared_ptr<__dir> __d;
+    directory_entry __cur;
+    directory_options __opts = directory_options::none;
+};
+
+inline directory_iterator begin(directory_iterator i) noexcept { return i; }
+inline directory_iterator end(directory_iterator) noexcept
+{ return directory_iterator(); }
+
+/* ---- recursive_directory_iterator -----------------------------------------
+ *
+ * The same walk, descending. It keeps a STACK of iterators rather than
+ * recursing, so a deep tree costs heap rather than stack -- and
+ * `disable_recursion_pending()` can prune a subtree before it is
+ * entered, which recursion cannot express without unwinding.
+ *
+ * It does NOT follow symlinks by default, and that is not caution: a
+ * symlink pointing at an ancestor makes the walk infinite.
+ */
+class recursive_directory_iterator {
+public:
+    using value_type = directory_entry;
+    using difference_type = ptrdiff_t;
+    using pointer = const directory_entry *;
+    using reference = const directory_entry &;
+    using iterator_category = input_iterator_tag;
+
+    recursive_directory_iterator() noexcept = default;
+
+    explicit recursive_directory_iterator(
+        const path &p, directory_options opts = directory_options::none)
+        : __opts(opts)
+    {
+        __stack.push_back(directory_iterator(p, opts));
+        __settle(nullptr);
+    }
+
+    recursive_directory_iterator(const path &p, error_code &ec) noexcept
+    {
+        __stack.push_back(directory_iterator(p, ec));
+        /* Settle even on failure. A directory that would not open
+         * leaves an END directory_iterator on the stack, and __settle
+         * is what pops it -- skipping it here left a one-deep stack
+         * that was neither a real position nor the end, so a failed
+         * construction compared unequal to the end iterator and a
+         * range-for over it would dereference nothing. */
+        __settle(&ec);
+    }
+
+    reference operator*() const { return *__stack.back(); }
+    pointer operator->() const { return &*__stack.back(); }
+
+    int depth() const { return (int)__stack.size() - 1; }
+    directory_options options() const { return __opts; }
+
+    bool recursion_pending() const { return __pending; }
+    void disable_recursion_pending() { __pending = false; }
+
+    /* Leave the current directory without finishing it -- which is how
+     * a caller abandons a subtree it has seen enough of. */
+    void pop()
+    {
+        if (__stack.empty())
+            return;
+        __stack.pop_back();
+        if (!__stack.empty())
+            ++__stack.back();
+        __settle(nullptr);
+    }
+
+    recursive_directory_iterator &operator++()
+    {
+        __step(nullptr);
+        return *this;
+    }
+
+    recursive_directory_iterator &increment(error_code &ec) noexcept
+    {
+        __step(&ec);
+        return *this;
+    }
+
+    friend bool operator==(const recursive_directory_iterator &a,
+                           const recursive_directory_iterator &b) noexcept
+    { return a.__stack.empty() == b.__stack.empty(); }
+    friend bool operator!=(const recursive_directory_iterator &a,
+                           const recursive_directory_iterator &b) noexcept
+    { return !(a == b); }
+
+private:
+    void __step(error_code *ec)
+    {
+        if (__stack.empty())
+            return;
+        const directory_entry &e = *__stack.back();
+        bool descend = __pending && e.is_directory() &&
+                       (!e.is_symlink() ||
+                        (int)(__opts &
+                              directory_options::follow_directory_symlink));
+        __pending = true;
+        if (descend) {
+            /* A symlinked directory is not entered unless asked,
+             * because one pointing at an ancestor makes this walk
+             * infinite. */
+            directory_iterator sub(e.path(), __opts);
+            __stack.push_back(sub);
+        } else {
+            ++__stack.back();
+        }
+        __settle(ec);
+    }
+
+    /* Pop every finished level, so that `operator*` always names a real
+     * entry and the end is an empty stack. */
+    void __settle(error_code *ec)
+    {
+        (void)ec;
+        while (!__stack.empty() && __stack.back() == directory_iterator()) {
+            __stack.pop_back();
+            if (!__stack.empty())
+                ++__stack.back();
+        }
+    }
+
+    vector<directory_iterator> __stack;
+    directory_options __opts = directory_options::none;
+    bool __pending = true;
+};
+
+inline recursive_directory_iterator
+begin(recursive_directory_iterator i) noexcept { return i; }
+inline recursive_directory_iterator
+end(recursive_directory_iterator) noexcept
+{ return recursive_directory_iterator(); }
+
+/* ---- remove_all and is_empty, which need the iterators ------------------ */
+
+inline uintmax_t remove_all(const path &p, error_code *ec)
+{
+    error_code sec;
+    file_status st = symlink_status(p, sec);
+    if (sec) {
+        if (sec == errc::no_such_file_or_directory) {
+            __detail::__ok(ec);
+            return 0;
+        }
+        __detail::__fail(ec, sec, "remove_all", p);
+        return (uintmax_t)-1;
+    }
+    if (!exists(st)) {
+        __detail::__ok(ec);
+        return 0;
+    }
+    uintmax_t n = 0;
+    /* A DIRECTORY is emptied first, depth first, because a directory
+     * cannot be removed while anything is in it. A symlink TO a
+     * directory is removed as a link -- following it would delete
+     * somebody else's tree. */
+    if (st.type() == file_type::directory) {
+        error_code iec;
+        directory_iterator it(p, iec);
+        if (iec) {
+            __detail::__fail(ec, iec, "remove_all", p);
+            return (uintmax_t)-1;
+        }
+        for (directory_iterator e; it != e;) {
+            path child = it->path();
+            uintmax_t sub = remove_all(child, ec);
+            if (sub == (uintmax_t)-1)
+                return sub;
+            n += sub;
+            it.increment(iec);
+            if (iec) {
+                __detail::__fail(ec, iec, "remove_all", p);
+                return (uintmax_t)-1;
+            }
+        }
+    }
+    if (!remove(p, ec))
+        return ec && *ec ? (uintmax_t)-1 : n;
+    return n + 1;
+}
+
+inline uintmax_t remove_all(const path &p) { return remove_all(p, nullptr); }
+inline uintmax_t remove_all(const path &p, error_code &ec) noexcept
+{
+    try {
+        return remove_all(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return (uintmax_t)-1;
+    }
+}
+
+inline bool is_empty(const path &p, error_code *ec)
+{
+    file_status st = __detail::__status(p, true, ec);
+    if (ec && *ec)
+        return false;
+    if (st.type() == file_type::directory) {
+        error_code iec;
+        directory_iterator it(p, iec);
+        if (iec) {
+            __detail::__fail(ec, iec, "is_empty", p);
+            return false;
+        }
+        __detail::__ok(ec);
+        return it == directory_iterator();
+    }
+    return file_size(p, ec) == 0;
+}
+
+inline bool is_empty(const path &p) { return is_empty(p, nullptr); }
+inline bool is_empty(const path &p, error_code &ec) noexcept
+{
+    try {
+        return is_empty(p, &ec);
+    } catch (...) {
+        ec = make_error_code(errc::io_error);
+        return false;
+    }
+}
+
+}  // namespace filesystem
+}  // namespace std
+
+#endif
