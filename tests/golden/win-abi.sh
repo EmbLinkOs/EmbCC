@@ -135,7 +135,53 @@ want v 'movq[[:space:]]+%xmm2,%r8|mov[[:space:]].*%r8' \
 echo "a variadic double is placed in its xmm register and in the integer
 register of the same slot, as the reference does"
 
-# ---- 4. what is refused rather than passed the System V way --------------
+# ---- 4. aggregates: by value at 1/2/4/8 bytes, by reference otherwise ----
+#
+# The size rule has no analogue in System V, which classifies an
+# aggregate into eightbytes and can put a twelve-byte struct in two
+# registers. Here that same struct travels as an ADDRESS, and the
+# registers the SysV reading would use are where the callee expects a
+# pointer -- so the two are not a special case of one another and the
+# Windows branch has to come first.
+cat > "$out/agg.c" << 'EOF'
+struct p8  { int a, b; };            /* exactly 8: by value */
+struct odd { int a, b, c; };         /* 12: by reference */
+struct big { long a, b, c; };        /* 24: by reference, and returned so */
+int t8(struct p8 s);
+int todd(struct odd s);
+struct big mk(int x);
+int g8(struct p8 s)   { return t8(s); }
+int godd(struct odd s){ return todd(s); }
+int use(int x)        { struct big b = mk(x); return (int)b.a; }
+EOF
+embcc_asm "$out/agg.c"
+clang --target=x86_64-windows-gnu -O1 -S -o "$out/cagg.s" "$out/agg.c" \
+    > /dev/null 2>&1 || true
+
+#  Eight bytes ride in the slot register as a VALUE.
+want g8 'mov .*%rcx' 'pass an eight-byte struct in rcx by value'
+
+#  Twelve bytes: the caller copies and passes the address. The lea is
+#  the whole difference -- without it the callee reads the struct's
+#  first eight bytes as a pointer.
+want godd 'lea .*%rcx' 'pass a twelve-byte struct by reference in rcx'
+grep -qE 'leaq[[:space:]]+[0-9]+\(%rsp\), *%rcx' "$out/cagg.s" || {
+    echo "FAIL: the reference does not pass the odd struct by address,"
+    echo "      so this check has the rule wrong:"; cat "$out/cagg.s"
+    exit 1; }
+
+#  A struct returned in memory takes the FIRST argument register as its
+#  hidden pointer -- rcx here, rdi under System V -- and everything
+#  real shifts one slot along. Getting this wrong put the pointer in a
+#  register Windows never reads while rcx still held the first real
+#  argument, so the callee wrote its result through it.
+want use 'lea .*%rcx' 'pass the hidden return pointer in rcx'
+want use 'mov .*%rdx' 'shift the first real argument to rdx'
+echo "aggregates: eight bytes by value in the slot, other sizes by
+reference with a caller-made copy, and a memory return takes rcx with
+every real argument shifted one slot along"
+
+# ---- 5. what is refused rather than passed the System V way --------------
 #
 # Each of these has a Microsoft x64 answer EmbCC does not implement, and
 # the System V answer is not it. Refusing names the thing; passing it
@@ -151,9 +197,24 @@ refuses() {                       # refuses SOURCE EXPECTED
         echo "FAIL: the refusal does not say what is wrong:"
         cat "$out/r.log"; exit 1; }
 }
-refuses 'struct s { int a, b, c; }; int t(struct s); int g(struct s v){ return t(v); }' \
-        'by reference with a copy the caller makes'
+#    __int128's arithmetic becomes libgcc helper calls whose arguments
+#    this backend places in System V's registers; on Windows those
+#    helpers take Microsoft's, so the CALL is wrong before the type is.
 refuses 'int t(__int128); int g(__int128 v){ return t(v); }' \
-        'callee-saved there'
-echo "a struct that must travel by reference, and the types lowered
-through the registers Windows makes callee-saved, are refused by name"
+        'libgcc helpers'
+#    long double is sixteen bytes on MinGW and travels by reference,
+#    returned through a hidden pointer like a large aggregate -- not on
+#    the stack by value, which is what EmbCC does.
+refuses 'int t(long double); int g(long double v){ return t(v); }' \
+        'travels by reference'
+#    ...and on the SIGNATURE, not only at a call: a function needs the
+#    convention its caller will use whether or not it contains a call.
+#    Checking call sites alone left this compiling silently.
+refuses 'long double g(long double x){ return x + 1.0L; }' \
+        'in the signature'
+refuses '__int128 h(__int128 a){ return a + 1; }' \
+        'in the signature'
+echo "the two types whose Windows answer is not a variation on System
+V's are refused -- at a call and in a signature -- each naming the
+reason that is actually true of it"
+

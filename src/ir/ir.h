@@ -194,6 +194,12 @@ struct ir_ins {
         int is_int128;
         int hfa_n, hfa_size;
         int byref;
+        /* Microsoft x64: where the CALLER's private copy of a byref
+         * aggregate lives, as an offset into the caller's scratch area.
+         * The convention says the caller makes that copy because the
+         * callee may write to it, so the copy is the caller's frame's
+         * business and only its ADDRESS travels in the argument slot. */
+        int copy_off;
         const struct type *ty; /* the argument's type: AAPCS64 decides an
                                 * aggregate's placement from its MEMBERS
                                 * (a Homogeneous Floating-point Aggregate

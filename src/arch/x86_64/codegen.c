@@ -1889,6 +1889,31 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * argument list mixes the two classes. */
                 int slot = ireg++;
                 freg = ireg;
+                /* An aggregate that travelled by reference arrives as a
+                 * POINTER to the caller's copy. It is copied again into
+                 * this function's own slot so that the parameter is an
+                 * ordinary local with an ordinary address -- taking its
+                 * address, or assigning to it, then behaves as the
+                 * language says. The extra copy is redundant (the
+                 * caller's is already private) and is the simple thing
+                 * that cannot be subtly wrong. */
+                if (fn->param_abi && fn->param_abi[i].byref) {
+                    int sz = ty_size(pt);
+                    if (slot >= 4) {
+                        x86_load_reg_mem(text, REG_RCX, REG_RBP, incoming, 8);
+                        incoming += 8;
+                    } else if (x86_argreg(slot) != REG_RCX) {
+                        x86_mov_reg_reg(text, REG_RCX, x86_argreg(slot));
+                    }
+                    x86_lea_reg_slot(text, 11 /*r11*/, sd[i]);
+                    for (int off = 0; off < sz; off += 8) {
+                        int chunk = sz - off >= 8 ? 8 : sz - off;
+                        x86_load_reg_mem(text, REG_RAX, REG_RCX, off, chunk);
+                        x86_store_mem_reg(text, 11 /*r11*/, off, REG_RAX,
+                                          chunk);
+                    }
+                    continue;
+                }
                 if (slot >= 4) {
                     x86_load_reg_mem(text, REG_RAX, REG_RBP, incoming, 8);
                     x86_store_slot(text, sd[i], 8);
@@ -2739,6 +2764,28 @@ static void gen_func(struct ir_func *fn, struct code *text,
             cg_reset();     /* a call clobbers every caller-saved register */
             int ireg = 0, freg = 0;
 
+            /* Microsoft x64: an aggregate whose size is not exactly 1,
+             * 2, 4 or 8 bytes travels BY REFERENCE, and the copy is the
+             * CALLER's -- the callee may write to it, so passing the
+             * original would let a callee modify its caller's variable.
+             * Made here, while rax and rcx are still free, into this
+             * frame's scratch area; only the address goes in the slot. */
+            if (target_win64_abi())
+                for (int k = 0; k < i->nargs; k++) {
+                    struct ir_arg *a = &i->argv[k];
+                    if (!a->byref)
+                        continue;
+                    /* a->vreg holds the struct's ADDRESS, not its value. */
+                    x86_load_reg_mem(text, REG_RCX, REG_RBP, sd[a->vreg], 8);
+                    for (int off = 0; off < a->size; off += 8) {
+                        int chunk = a->size - off >= 8 ? 8 : a->size - off;
+                        x86_load_reg_mem(text, REG_RAX, REG_RCX, off, chunk);
+                        x86_store_mem_reg(text, REG_RBP,
+                                          scratch_base + a->copy_off + off,
+                                          REG_RAX, chunk);
+                    }
+                }
+
             /* MEMORY-class aggregates go to the outgoing area first,
              * while rax/rcx/rdx are still free to copy with. */
             for (int k = 0; k < i->nargs; k++) {
@@ -2781,12 +2828,24 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     off += chunk;
                 }
             }
-            /* A struct returned in MEMORY takes rdi as a hidden pointer
-             * to the caller's scratch, before any real argument. */
+            /* A struct returned in MEMORY takes the FIRST argument
+             * register as a hidden pointer to the caller's scratch,
+             * before any real argument -- rdi under System V and rcx
+             * under Microsoft x64. Hardcoding rdi put the pointer in a
+             * register Windows does not read and left rcx holding the
+             * first real argument, so the callee wrote its result
+             * through whatever that happened to be. */
             if (i->retsize && i->retnclass == 0 && !i->ret_x87) {
-                x86_lea_reg_slot(text, REG_RDI,
+                x86_lea_reg_slot(text, x86_argreg(0),
                                  scratch_base + i->scratch);
                 ireg++;
+                /* Only Microsoft x64 keeps the two counters in step --
+                 * the hidden pointer consumes SLOT zero there, so the
+                 * first real float is xmm1. Under System V the files
+                 * are independent and the pointer costs the float
+                 * count nothing. */
+                if (target_win64_abi())
+                    freg = ireg;
             }
             /* Register arguments already in a register (r8..r15/rbx) are moved
              * as ONE parallel move: an argument sitting in r8/r9 must not be
@@ -2808,8 +2867,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     if (target_win64_abi()) {
                         /* One slot per argument, whatever its class --
                          * so a float still CONSUMES its integer
-                         * register rather than skipping it. */
-                        if (a->cls[0] != CLASS_SSE && in_reg(a->vreg)) {
+                         * register rather than skipping it. A struct is
+                         * loaded from memory either way, so it is not a
+                         * parallel-move source. */
+                        if (!a->is_struct && a->cls[0] != CLASS_SSE &&
+                            in_reg(a->vreg)) {
                             mvdest[nmv] = x86_argreg(pireg);
                             mvsrc[nmv] = g_loc[a->vreg]; nmv++;
                         }
@@ -2837,6 +2899,33 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 struct ir_arg *a = &i->argv[k];
                 if (a->on_stack)
                     continue; /* placed above */
+                /* Microsoft x64 FIRST, because its answer for a struct
+                 * is not a special case of System V's: an aggregate in
+                 * a slot is an ADDRESS there, and the eightbyte
+                 * classification below would put its contents in the
+                 * registers the callee reads a pointer from. */
+                if (target_win64_abi()) {
+                    if (a->byref) {
+                        /* the address of the copy made above */
+                        x86_lea_reg_slot(text, x86_argreg(ireg),
+                                         scratch_base + a->copy_off);
+                    } else if (a->is_struct) {
+                        /* 1, 2, 4 or 8 bytes: the VALUE, in one
+                         * register, loaded from the struct's address. */
+                        x86_load_slot(text, sd[a->vreg], 8, 0, 8);
+                        x86_load_reg_mem(text, x86_argreg(ireg), REG_RAX, 0,
+                                         a->size);
+                    } else if (a->cls[0] == CLASS_SSE) {
+                        x86_movs_load(text, ireg, sd[a->vreg], a->size);
+                        if (i->call_varargs)
+                            x86_load_arg(text, ireg, sd[a->vreg]);
+                    } else if (!in_reg(a->vreg)) {
+                        x86_load_arg(text, ireg, sd[a->vreg]);
+                    }
+                    ireg++;
+                    freg = ireg;
+                    continue;
+                }
                 if (a->is_struct) {
                     x86_load_slot(text, sd[a->vreg], 8, 0, 8);
                     for (int q = 0; q < a->nclass; q++) {
@@ -2847,22 +2936,6 @@ static void gen_func(struct ir_func *fn, struct code *text,
                             x86_load_reg_mem(text, x86_argreg(ireg++),
                                              REG_RAX, q * 8, 8);
                     }
-                    continue;
-                }
-                if (target_win64_abi()) {
-                    /* One slot, shared: the float and the integer
-                     * register both carry the argument's POSITION. A
-                     * variadic float goes in BOTH, because the callee
-                     * has no prototype to tell it which to read. */
-                    if (a->cls[0] == CLASS_SSE) {
-                        x86_movs_load(text, ireg, sd[a->vreg], a->size);
-                        if (i->call_varargs)
-                            x86_load_arg(text, ireg, sd[a->vreg]);
-                    } else if (!in_reg(a->vreg)) {
-                        x86_load_arg(text, ireg, sd[a->vreg]);
-                    }
-                    ireg++;
-                    freg = ireg;
                     continue;
                 }
                 if (a->nclass == 2) {           /* an __int128 */
