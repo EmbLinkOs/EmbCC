@@ -53,7 +53,7 @@ The differentiator is not any single feature. It is that **the compiler records 
 
 Stating what EmbCC will not do is what keeps the vision achievable.
 
-1. **Not a drop-in replacement for GCC/Clang on all platforms.** EmbCC does not aim to produce Mach-O or PE/COFF binaries for macOS/Windows until an ADR says otherwise. Running *on* those hosts is a goal; *targeting* them is not.
+1. **~~Not a drop-in replacement for GCC/Clang on all platforms.~~** *Superseded 2026-09-21 by ADR **D-014**, which is the ADR this clause named.* Targeting macOS, Linux and Windows is now a goal, and the aim is a **hosted toolchain** — objects that link, programs that run, the standard libraries working — not format coverage. The non-goal that survives is narrower: **MSVC ABI compatibility is not scheduled** (Windows means MinGW first, because our C++ runtime is Itanium and MSVC's scheme shares nothing with it), and EmbLD is not taught Mach-O or PE — hosted targets invoke the system linker, as gcc and clang do.
 2. **~~No full modern C++ in the foreseeable plan.~~** *Superseded in v0.3 — see §12.2.* C++ is still delivered in explicit subsets (§12), but the target is C++20 with libstdc++ on both architectures (D-013), and C++0 through C++2 plus much of C++3 are built. The non-goal that survives is narrower: **modules are not scheduled**, and conformance is measured against g++ agreement on a test corpus, not claimed in the abstract.
 3. **No soundness claims from the security analyzer** unless an analysis is formally sound for a stated subset. Findings are evidence-graded (§23), not proofs.
 4. **`embcc` does not build projects.** Project orchestration belongs to EmbBuild. `embcc` compiles translation units and answers questions (§17).
@@ -324,7 +324,10 @@ Host and target are independent everywhere in the code. No `#ifdef __APPLE__` in
 | `x86_64-linux-gnu` | ELF | Test target: conformance and differential suites against GCC | **Done.** Every test runs against `x86_64-elf-gcc` 16.2 under QEMU (natively where the host is x86-64 Linux) |
 | `aarch64-elf` / `aarch64-emblink` | ELF, EMBX | Second architecture | **Done, early.** Own backend and AAPCS64; 170/170 its own suite; referee `aarch64-elf-gcc` 16.2 under QEMU `virt` |
 | `thumbv7em-none-eabi` / `riscv32-none-elf` | ELF | Bare-metal embedded (where memory/stack budgets matter most) | Later. Note both are 32-bit: the backends assume LP64 today |
-| `*-darwin`, `*-windows` | Mach-O, COFF | Not planned (see Non-goals) | — |
+| `x86_64-linux-gnu`, `aarch64-linux-gnu` | ELF | Hosted Linux | **Planned first (D-014).** Three of its five rows exist — ELF, SysV, Itanium/DWARF EH; the gap is the triple, dynamic linking and the system libc |
+| `*-darwin` | Mach-O | Hosted macOS | Planned (D-014). Adds exactly one new thing: a second object format |
+| `x86_64-windows-gnu` | PE/COFF | Hosted Windows, MinGW | Planned (D-014), last. A format, the Microsoft x64 convention, and an unwinder — three new things at once |
+| `*-windows-msvc` | PE/COFF | MSVC ABI | Not scheduled — a second C++ runtime (D-014) |
 
 The Linux ELF test target is deliberate: it lets thousands of test programs be compiled by EmbCC and GCC, run, and compared on a normal CI machine. Without it, differential testing depends on booting EmbLinkOS.
 
@@ -334,7 +337,7 @@ The Linux ELF test target is deliberate: it lets thousands of test programs be c
 |---|---|---|
 | macOS arm64 | Primary development host | **Done** |
 | Linux x86_64 | CI and test host | **Done** |
-| Windows x86_64 | Portability check | Later |
+| Windows x86_64 | Portability check, and a target host (D-014) | Later |
 | EmbLinkOS x86_64 | Self-hosting | **Done.** Compiles and links its own sixteen sources on the metal, byte-identical to the host build |
 
 ---

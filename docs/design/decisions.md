@@ -546,3 +546,141 @@ complete one is a multi-year authoring project, and conformance would be ours
 alone to prove); libc++ (not binary-compatible with the g++-built C++ already
 on the OS).
 
+
+---
+
+## D-014 — **Host operating systems as targets**: Linux, macOS, Windows
+
+**Decided:** 2026-09-21 (design; no code yet). **Status:** the ADR the
+vision's first non-goal named. Supersedes that non-goal.
+
+`docs/design/vision.md` Non-goals §1 said it plainly: *"EmbCC does not aim
+to produce Mach-O or PE/COFF binaries for macOS/Windows **until an ADR says
+otherwise**. Running on those hosts is a goal; targeting them is not."*
+This is that ADR. Targeting them is now a goal, and the aim is the whole
+thing — objects that link, programs that run, the C and C++ standard
+libraries working — not format coverage.
+
+**The reason the non-goal existed is gone.** It was written to keep the
+vision achievable while the compiler did not yet have a second
+architecture, an optimizer, exceptions, or a C++ front end. It has all of
+those, aarch64 proved the target seam works (D-011), and the remaining
+distance to a hosted platform is mostly *format and convention*, not
+*compiler*.
+
+### It is five pieces, not one
+
+Saying "support macOS" hides the fact that an OS target is five
+independent things, and their costs differ by an order of magnitude:
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| object format | ELF — **have** | Mach-O | PE/COFF |
+| calling convention | SysV — **have** | SysV / AAPCS64 — **have*** | **Microsoft x64** |
+| C++ exceptions | Itanium + DWARF — **have** | Itanium + DWARF — **have** | SEH, or DWARF via MinGW |
+| triple and predefines | — | — | — |
+| libc, startup, linking | glibc, crt1, `ld` | libSystem, `ld64` | UCRT or MinGW, `lld-link` |
+
+\* Apple's arm64 varargs differ from AAPCS64; a real but contained quirk.
+
+Linux is most of the way there because three of its five rows already
+exist. Windows shares none of them.
+
+**The order is Linux, then macOS, then Windows**, and it is chosen by what
+each one *teaches*. Linux exercises the new triple machinery against an
+object format and an ABI that already work, so a failure there is a
+failure of the refactor and nothing else. macOS adds exactly one new
+thing, a second object format. Windows adds three at once — a format, a
+calling convention, and an unwinder — and is the only one that can be
+attempted with two of them already proven.
+
+### The architectural consequence: the target becomes a triple
+
+Today `enum target_arch` has two values and **no operating-system
+dimension at all**, and `target_elf_machine()` assumes the object format.
+That is the foundation this rests on and it is built first, before any
+platform work: a target becomes **architecture × OS × object format**,
+with `--target=` parsing the full triple.
+
+What does *not* change is D-011's rule, which this extends rather than
+revises: only the phases that genuinely differ may know. The lexer,
+parser and the bulk of sema stay machine- and OS-neutral. The relocation
+seam already generalises — codegen records a machine-neutral
+`enum reloc_kind` and the driver maps (kind, target) to a concrete type —
+and that mapping becomes (kind, arch, format).
+
+### Microsoft x64 is a third calling convention on an architecture that
+### already has one
+
+This is the part with no precedent in the tree. aarch64's AAPCS64 arrived
+*with* a new backend, so "one architecture, one convention" held. Win64 is
+a different convention on x86-64: four argument registers rather than six,
+32 bytes of shadow space the caller reserves, every composite larger than
+eight bytes passed by reference, and a different varargs shape. The
+classification cannot live in `irgen` keyed on architecture, as the SysV
+numbers do now (D-011 already had to recompute AAPCS64 in the backend for
+the same reason). It becomes a property of the *target*, asked for by
+name.
+
+### MinGW before MSVC, and possibly instead of it
+
+C++ exceptions are the decisive cost on Windows. Our runtime implements
+the **Itanium** C++ ABI — `__cxa_*`, `__gxx_personality_v0`, DWARF
+unwinding — which is native on Linux and macOS alike. MSVC's scheme shares
+nothing with it: different mangling, different EH tables, different
+personality. MinGW-w64 uses the Itanium ABI and DWARF or SEH unwinding, so
+`x86_64-windows-gnu` reuses the C++ runtime that exists while
+`x86_64-windows-msvc` requires a second one.
+
+So Windows means **MinGW first**. MSVC compatibility is a separate
+decision, deliberately not taken here.
+
+### The system's libc, not ours — and D-009 stands
+
+D-009 chose to own a libc because EmbLinkOS is not POSIX and nobody else's
+fits it. A hosted target is the opposite case: the platform's libc is
+already there, already correct, and already what every other program on
+the machine links against. Hosted targets use **the system's** headers,
+startup objects and libc. `lib/libc` remains what it is — the freestanding
+library for EmbLinkOS and bare metal — and neither replaces the other.
+
+### The system's linker, not EmbLD, to begin with
+
+EmbLD emits ET_EXEC ELF and EMBX. Teaching it Mach-O and PE is a second
+linker project, and it is not on the path to a running program: `ld`,
+`ld64` and `lld-link` are present on the machines these targets run on.
+The driver invokes the system linker for hosted targets, as gcc and clang
+do. Owning the link for hosted platforms is a later decision, made against
+a working toolchain rather than instead of one.
+
+### What is refused loudly rather than emitted wrong (THE RULE)
+
+Every capability absent for a given triple is an error naming the triple,
+never a silent fallback to another platform's behaviour. Specifically, at
+decision time: a Windows target refuses C++ exceptions until SEH or the
+MinGW DWARF path lands; any hosted target refuses `-g` until its debug
+format is proven against the platform's own debugger; and a triple whose
+object writer does not exist is refused by the driver rather than falling
+back to ELF.
+
+**Rejected:**
+
+- **Emitting only object files and calling it done.** Valid `.o` files
+  that nobody can link into a running program prove the writer and nothing
+  else. The gate is a program that runs on the platform.
+- **A separate binary per platform.** Same reasoning as D-011: one `embcc`
+  chooses its target at run time, or the on-OS build picks a platform when
+  it is built rather than when it is used.
+- **Doing Windows first** because it is the most different. The most
+  different target is the worst place to debug a new triple abstraction,
+  because every failure has three possible causes.
+- **MSVC ABI compatibility as part of this decision.** It is a second C++
+  runtime, and bundling it here would make a large decision unfalsifiable.
+- **Retiring `lib/libc`.** It is for the targets that have no libc. That
+  is still most of them.
+
+**Reopens if:** the triple abstraction starts leaking into the front end —
+if the parser or sema acquire OS knowledge, the seam is in the wrong
+place, and the answer is to move it rather than to spread it. Also if
+MinGW's Itanium EH turns out not to work on Windows in practice, since
+that assumption is what makes Windows C++ affordable at all.
