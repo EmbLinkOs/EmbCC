@@ -637,6 +637,10 @@ static struct warn_opt g_warns[] = {
      * reader's attention. */
     { "uninitialized",        0,  1,    0 },
     { "maybe-uninitialized",  0,  1,    0 },
+    /* GCC puts -Wformat in -Wall, and for the same reason: a format
+     * that disagrees with its arguments reads the wrong bytes off the
+     * variadic tail, which nothing else in the language catches. */
+    { "format",               0,  1,    0 },
 };
 static const int g_nwarns = (int)(sizeof g_warns / sizeof g_warns[0]);
 

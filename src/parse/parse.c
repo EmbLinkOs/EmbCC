@@ -20,6 +20,11 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                const char *section;
                int sret; /* embcc_sret on a parameter (type.h sret_first) */
                int nothrow;
+               /* format(archetype, string-index, first-to-check): 1 printf,
+                * 2 scanf, 0 none. This is how a function says "my nth
+                * argument is a format string" without the compiler
+                * hard-coding the names of the standard library. */
+               int fmt_kind, fmt_idx, fmt_first;
 };
 
 struct parser {
@@ -291,8 +296,39 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             long arg = -1;
             const char *sarg = NULL;
             int aline = cur(ps)->line;
+            int fkind = 0;
+            long fidx = 0, ffirst = 0;
             if (cur(ps)->kind == TOK_LPAREN) {
                 advance(ps);
+                if (name && attr_is(name, "format") &&
+                    cur(ps)->kind == TOK_IDENT) {
+                    /* Both arguments are 1-based and count the format
+                     * string itself, as GCC defines them. An archetype
+                     * this compiler does not check (strftime, strfmon)
+                     * leaves fkind 0 and the attribute is skipped like
+                     * any other. */
+                    const char *arch = cur(ps)->text;
+                    if (attr_is(arch, "printf") || attr_is(arch, "gnu_printf"))
+                        fkind = 1;
+                    else if (attr_is(arch, "scanf") ||
+                             attr_is(arch, "gnu_scanf"))
+                        fkind = 2;
+                    advance(ps);
+                    if (cur(ps)->kind == TOK_COMMA) {
+                        advance(ps);
+                        if (cur(ps)->kind == TOK_NUM) {
+                            fidx = cur(ps)->num;
+                            advance(ps);
+                        }
+                        if (cur(ps)->kind == TOK_COMMA) {
+                            advance(ps);
+                            if (cur(ps)->kind == TOK_NUM) {
+                                ffirst = cur(ps)->num;
+                                advance(ps);
+                            }
+                        }
+                    }
+                }
                 if (cur(ps)->kind == TOK_NUM)
                     arg = cur(ps)->num;
                 else if (cur(ps)->kind == TOK_STR)
@@ -312,6 +348,11 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "embcc_sret")) out->sret = 1;
                 else if (attr_is(name, "aligned"))
                     out->aligned = arg > 0 ? (int)arg : 16;
+                else if (attr_is(name, "format") && fkind && fidx > 0) {
+                    out->fmt_kind = fkind;
+                    out->fmt_idx = (int)fidx;
+                    out->fmt_first = (int)ffirst;
+                }
                 else if (attr_is(name, "section")) {
                     if (!sarg || !*sarg)
                         parse_error_line(ps, aline,
@@ -428,7 +469,7 @@ static int param_sret_attr(struct parser *ps, int index)
     if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
         return 0;
     struct token *at = cur(ps);
-    struct attrs a = { 0, 0, 0, 0, NULL, 0, 0 };
+    struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
     parse_attributes(ps, &a);
     if (a.sret && index != 0)
         parse_error_at(ps, at->line, at->col,
@@ -519,7 +560,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
      * closing brace (parse_struct_body). Leading ones are collected here and
      * applied to the body exactly as trailing ones are. Between the tag and
      * the '{' is NOT a place gcc accepts one, so neither does EmbCC. */
-    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0 };
+    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
     parse_attributes(ps, &lead);
     const char *tag = NULL;
     if (cur(ps)->kind == TOK_IDENT) {
@@ -805,6 +846,11 @@ static void take_carried(struct parser *ps, struct attrs *a)
         return;
     if (ps->attr_slot.weak)     a->weak = 1;
     if (ps->attr_slot.noreturn) a->noreturn = 1;
+    if (ps->attr_slot.fmt_kind) {
+        a->fmt_kind = ps->attr_slot.fmt_kind;
+        a->fmt_idx = ps->attr_slot.fmt_idx;
+        a->fmt_first = ps->attr_slot.fmt_first;
+    }
     if (ps->attr_slot.packed)   a->packed = 1;
     if (ps->attr_slot.aligned > a->aligned)
         a->aligned = ps->attr_slot.aligned;
@@ -831,12 +877,17 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * they are refused rather than silently dropped. */
         if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             struct token *at_tok = cur(ps);
-            struct attrs a = { 0, 0, 0, 0, NULL, 0, 0 };
+            struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
             parse_attributes(ps, &a);
             if (ps->attr_carry_on) {
                 /* The enclosing declaration will take them. */
                 if (a.weak)     ps->attr_slot.weak = 1;
                 if (a.noreturn) ps->attr_slot.noreturn = 1;
+                if (a.fmt_kind) {
+                    ps->attr_slot.fmt_kind = a.fmt_kind;
+                    ps->attr_slot.fmt_idx = a.fmt_idx;
+                    ps->attr_slot.fmt_first = a.fmt_first;
+                }
                 if (a.packed)   ps->attr_slot.packed = 1;
                 if (a.aligned > ps->attr_slot.aligned)
                     ps->attr_slot.aligned = a.aligned;
@@ -1200,7 +1251,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                 cap = cap ? cap * 2 : 8;
                 ms = xrealloc(ms, (size_t)cap * sizeof *ms);
             }
-            struct attrs mat = { 0, 0, 0, 0, NULL, 0, 0 };
+            struct attrs mat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
             parse_attributes(ps, &mat);  /* T buf[N] __attribute__((aligned(N))) */
             ms[n].name = mname;
             ms[n].ty = mty;
@@ -2267,7 +2318,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * on a local declarator; aligned(N) raises the stack slot's
              * alignment (codegen rounds the frame offset). */
             {
-                struct attrs lat = { 0, 0, 0, 0, NULL, 0, 0 };
+                struct attrs lat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
                 parse_attributes(ps, &lat);
                 if (lat.section)
                     parse_error_line(ps, s->line,
@@ -2594,7 +2645,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
 
     int is_static = 0, is_extern = 0;
-    struct attrs at = { 0, 0, 0, 0, NULL, 0, 0 };
+    struct attrs at = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
     ps->seq = seq;
 
     /* A file-scope `__asm__("...")` block (crt0's _start stub). Basic asm
@@ -2733,6 +2784,9 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->is_static = is_static;
                 f->is_weak = at.weak;
                 f->is_noreturn = at.noreturn;
+    f->fmt_kind = at.fmt_kind;
+    f->fmt_idx = at.fmt_idx;
+    f->fmt_first = at.fmt_first;
                 f->is_nothrow = at.nothrow;
                 f->ret_ty = gt->ret;
                 f->name = name = gname;
@@ -2780,6 +2834,9 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->is_static = is_static;
     f->is_weak = at.weak;   /* leading __attribute__((weak)) */
     f->is_noreturn = at.noreturn;
+    f->fmt_kind = at.fmt_kind;
+    f->fmt_idx = at.fmt_idx;
+    f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
     f->ret_ty = ty;
     f->name = name;
@@ -2849,6 +2906,9 @@ fn_tail:
      * __attribute__((noreturn));` -- and they were parsed here and then
      * dropped, so only the leading form ever reached the func node. */
     f->is_noreturn = at.noreturn;
+    f->fmt_kind = at.fmt_kind;
+    f->fmt_idx = at.fmt_idx;
+    f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
     if (at.section)
         parse_error_line(ps, line,

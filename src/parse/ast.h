@@ -280,6 +280,9 @@ struct func {
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
     int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
                            * (a call of it needs no landing pad) */
+    /* __attribute__((format(printf|scanf, idx, first))): 1 printf,
+     * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */
+    int fmt_kind, fmt_idx, fmt_first;
     int is_varargs;       /* declared with a trailing ", ..." */
     int sret_first;       /* param 0 is the indirect-result pointer
                            * (embcc_sret; type.h) */

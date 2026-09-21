@@ -16,6 +16,7 @@
 #include "../arch/target.h"
 #include "ldfloat.h"
 #include "type.h"
+#include "format.h"
 #include "uninit.h"
 #include "w128.h"
 
@@ -2042,6 +2043,12 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->args[i] = mk_cast(e->args[i],
                                      default_arg_promote(e->args[i]->ty));
         }
+        /* After the promotions, because those are what the variadic
+         * tail actually carries: a float arrives as a double and a
+         * short as an int, so %f of a float and %d of a short are both
+         * right and neither is reported. */
+        if (e->callee)
+            format_check(diag_file(u), e, e->callee);
         e->ty = ft->ret;
         break;
     }

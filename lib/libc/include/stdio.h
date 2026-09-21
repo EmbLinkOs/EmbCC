@@ -73,22 +73,42 @@ void perror(const char *s);
 int remove(const char *path);
 int rename(const char *from, const char *to);
 
-int printf(const char *__restrict fmt, ...);
-int fprintf(FILE *__restrict f, const char *__restrict fmt, ...);
-int sprintf(char *__restrict s, const char *__restrict fmt, ...);
-int snprintf(char *__restrict s, size_t n, const char *__restrict fmt, ...);
-int vprintf(const char *__restrict fmt, va_list ap);
-int vfprintf(FILE *__restrict f, const char *__restrict fmt, va_list ap);
-int vsprintf(char *__restrict s, const char *__restrict fmt, va_list ap);
-int vsnprintf(char *__restrict s, size_t n, const char *__restrict fmt,
-              va_list ap);
+/* Which argument is the format, and where the tail it describes begins
+ * -- both 1-based, as GCC has spelled this for thirty years. It is what
+ * lets -Wformat check a call, and the knowledge belongs HERE rather
+ * than in a list of names inside the compiler: a compiler that knew
+ * "printf" would still know nothing about anyone's own log().
+ *
+ * The v-forms take a va_list, so there is no tail to compare against
+ * and the second number is 0 -- the string is still checked for a
+ * conversion that does not exist. */
+#define __fmt(kind, m, n) __attribute__((format(kind, m, n)))
 
-int scanf(const char *__restrict fmt, ...);
-int fscanf(FILE *__restrict f, const char *__restrict fmt, ...);
-int sscanf(const char *__restrict s, const char *__restrict fmt, ...);
-int vscanf(const char *__restrict fmt, va_list ap);
-int vfscanf(FILE *__restrict f, const char *__restrict fmt, va_list ap);
-int vsscanf(const char *__restrict s, const char *__restrict fmt, va_list ap);
+int printf(const char *__restrict fmt, ...)               __fmt(printf, 1, 2);
+int fprintf(FILE *__restrict f, const char *__restrict fmt, ...)
+                                                          __fmt(printf, 2, 3);
+int sprintf(char *__restrict s, const char *__restrict fmt, ...)
+                                                          __fmt(printf, 2, 3);
+int snprintf(char *__restrict s, size_t n, const char *__restrict fmt, ...)
+                                                          __fmt(printf, 3, 4);
+int vprintf(const char *__restrict fmt, va_list ap)       __fmt(printf, 1, 0);
+int vfprintf(FILE *__restrict f, const char *__restrict fmt, va_list ap)
+                                                          __fmt(printf, 2, 0);
+int vsprintf(char *__restrict s, const char *__restrict fmt, va_list ap)
+                                                          __fmt(printf, 2, 0);
+int vsnprintf(char *__restrict s, size_t n, const char *__restrict fmt,
+              va_list ap)                                 __fmt(printf, 3, 0);
+
+int scanf(const char *__restrict fmt, ...)                __fmt(scanf, 1, 2);
+int fscanf(FILE *__restrict f, const char *__restrict fmt, ...)
+                                                          __fmt(scanf, 2, 3);
+int sscanf(const char *__restrict s, const char *__restrict fmt, ...)
+                                                          __fmt(scanf, 2, 3);
+int vscanf(const char *__restrict fmt, va_list ap)        __fmt(scanf, 1, 0);
+int vfscanf(FILE *__restrict f, const char *__restrict fmt, va_list ap)
+                                                          __fmt(scanf, 2, 0);
+int vsscanf(const char *__restrict s, const char *__restrict fmt, va_list ap)
+                                                          __fmt(scanf, 2, 0);
 
 #ifdef __cplusplus
 }

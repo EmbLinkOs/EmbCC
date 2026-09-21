@@ -1374,7 +1374,14 @@ int main(int argc, char **argv)
          * to — where a template instantiated from a header is attributed to
          * the .cc that instantiated it. A warning pointing at the wrong line
          * is worse than none, so they stay C-only until the C++ front end
-         * grows its own (docs/tools/diagnostics.md T4). */
+         * grows its own (docs/tools/diagnostics.md T4).
+         *
+         * The test is whether the analysis is about code the LOWERING
+         * invented. These five are: an unused variable or a shadowed name
+         * in generated C means nothing to the reader. -Wformat is not, and
+         * is deliberately absent — a format string and the arguments
+         * beside it are the programmer's own, they survive lowering
+         * unchanged, and the diagnostic lands on their line. */
         diag_enable_warning("unused-variable", 0);
         diag_enable_warning("unused-parameter", 0);
         diag_enable_warning("unused-function", 0);

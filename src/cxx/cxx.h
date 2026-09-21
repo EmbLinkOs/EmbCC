@@ -639,6 +639,9 @@ struct cfunc {
     int c_linkage;
     int weak;                 /* __attribute__((weak)) */
     int noreturn;
+    /* __attribute__((format(printf|scanf, idx, first))), as WRITTEN --
+     * emit.c shifts the indices past whatever lowering prepends. */
+    int fmt_kind, fmt_idx, fmt_first;
     const char *section;
     const char *asm_name;     /* `__asm__("name")`: the symbol instead */
     const char **abi_tags;    /* __abi_tag__("...") (sorted) */

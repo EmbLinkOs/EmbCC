@@ -89,6 +89,11 @@ static const char *tok_text(int k)
 
 struct attrs {
     int weak, used, noreturn, packed;
+    /* format(printf|scanf, idx, first): 1 printf, 2 scanf, 0 none. Both
+     * indices count the SOURCE parameters; emit.c shifts them past the
+     * ones lowering prepends (a return slot, `this`) so the C the
+     * checker reads describes the same arguments. */
+    int fmt_kind, fmt_idx, fmt_first;
     int no_unique_address;    /* [[no_unique_address]]: a member that may
                                * overlap others */
     long aligned;
@@ -147,6 +152,28 @@ static void parse_attrs(struct attrs *a)
                             if (!cx_accept(TOK_COMMA))
                                 break;
                         }
+                        cx_expect(TOK_RPAREN, "')'");
+                    } else if (attr_is(n, "format") &&
+                               cx_kind_at(1) == TOK_IDENT) {
+                        cx_advance();
+                        const char *arch = cx_cur()->t.text;
+                        int k = 0;
+                        if (attr_is(arch, "printf") ||
+                            attr_is(arch, "gnu_printf")) k = 1;
+                        else if (attr_is(arch, "scanf") ||
+                                 attr_is(arch, "gnu_scanf")) k = 2;
+                        cx_advance();
+                        if (k && cx_accept(TOK_COMMA)) {
+                            a->fmt_kind = k;
+                            a->fmt_idx = (int)expr_parse_const("an argument "
+                                                               "index");
+                            if (cx_accept(TOK_COMMA))
+                                a->fmt_first =
+                                    (int)expr_parse_const("an argument index");
+                        }
+                        while (cx_kind() != TOK_RPAREN &&
+                               cx_kind() != TOK_EOF)
+                            cx_advance();
                         cx_expect(TOK_RPAREN, "')'");
                     } else if (attr_is(n, "section") &&
                                cx_kind_at(1) == TOK_STR) {
@@ -2097,6 +2124,12 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     f->is_virtual = ds->is_virtual;
     f->c_linkage = cx_extern_c && !cls;
     f->weak = ds->a.weak || d->a.weak;
+    if (ds->a.fmt_kind || d->a.fmt_kind) {
+        const struct attrs *fa = d->a.fmt_kind ? &d->a : &ds->a;
+        f->fmt_kind = fa->fmt_kind;
+        f->fmt_idx = fa->fmt_idx;
+        f->fmt_first = fa->fmt_first;
+    }
     f->noreturn = ds->a.noreturn || d->a.noreturn;
     tags_from(&f->abi_tags, &f->nabi_tags, &ds->a);
     tags_from(&f->abi_tags, &f->nabi_tags, &d->a);

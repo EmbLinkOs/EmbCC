@@ -3071,6 +3071,22 @@ static void emit_prototype(struct cfunc *f)
     /* one that cannot throw: its calls need no landing pads */
     const char *sec = eh_on && func_nothrow(f) ? "__attribute__((nothrow)) "
                                                : "";
+    /* Carried into the C so -Wformat can check C++ calls too. The
+     * indices are 1-based positions, and `this` does NOT move them: GCC
+     * defines a non-static member's arguments as counting from two
+     * precisely because of it, so the source already accounts for the
+     * parameter lowering makes explicit. A return slot does move them,
+     * because that one is this compiler's own and comes before `this`.
+     * A va_list form's second index is 0 -- no argument tail -- and
+     * stays 0. */
+    const char *fmt = "";
+    if (f->fmt_kind && f->fmt_idx > 0) {
+        int shift = class_indirect(f->type->to) ? 1 : 0;
+        fmt = cx_fmt("__attribute__((format(%s, %d, %d))) ",
+                     f->fmt_kind == 2 ? "scanf" : "printf",
+                     f->fmt_idx + shift,
+                     f->fmt_first > 0 ? f->fmt_first + shift : 0);
+    }
     if (f->is_ctor || f->is_dtor) {
         sb_printf(&out_decls, "%s%s%s;\n", st, sec,
                   func_header(f, fn_name(f, 1), 0));
@@ -3082,7 +3098,7 @@ static void emit_prototype(struct cfunc *f)
                       func_header(f, fn_name(f, 0), 0));
         return;
     }
-    sb_printf(&out_decls, "%s%s%s;\n", st, sec,
+    sb_printf(&out_decls, "%s%s%s%s;\n", st, sec, fmt,
               func_header(f, fn_name(f, 1), 0));
 }
 

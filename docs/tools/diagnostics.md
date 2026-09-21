@@ -16,7 +16,7 @@ until the front ends can keep going after an error.
 | **T1** | **The diagnostic engine.** A diagnostic is a record: severity, location, source range, notes, fix-its, the option that controls it. Buffered, then rendered — text exactly as before, or `-fdiagnostics-format=json` (GCC's schema, so existing tools read it). `-fdiagnostics-color`, `-fmax-errors`, `-w`, `-Werror`. First fix-its: the name suggestions the front ends already compute. | done — tests/golden/diagnostics-json.sh; the text goldens unchanged |
 | **T2** | **Error recovery.** Both front ends keep going after an error — synchronising at statement and declaration boundaries — so one run reports every independent problem instead of the first. A recovery must never produce a *wrong* later diagnostic: each is either suppressed or real. | done (C and C++) — tests/golden/diagnostics-recovery.sh |
 | **T3** | **Fix-its that apply.** `-fdiagnostics-parseable-fixits` (GCC's line format) and `embcc --fix`, which rewrites the file. Producers: a misspelt name, a missing `;`, `.` for `->` (and back), the member the type actually has, and the header that declares a C library name. | done — tests/golden/diagnostics-fix.sh: the fixed file compiles |
-| **T4** | **The driver GCC and Clang users already know.** Dependency generation, `-fsyntax-only`, `--help`, `-dumpmachine`, and warning groups over real analyses (unused variable/parameter/function, shadow, sign-compare), each with its `-Wno-` and its name in the diagnostic. Still to come: `-S`, `@file`, `-###`, and more analyses (uninitialised, fallthrough, format). | done for those — tests/golden/driver-deps.sh and warnings.sh (gcc agrees on which code warns) |
+| **T4** | **The driver GCC and Clang users already know.** Dependency generation, `-fsyntax-only`, `--help`, `-dumpmachine`, and warning groups over real analyses (unused variable/parameter/function, shadow, sign-compare, uninitialised, format), each with its `-Wno-` and its name in the diagnostic. Still to come: `-S`, `@file`, `-###`, and fallthrough. | done for those — tests/golden/driver-deps.sh, warnings.sh and format-check.sh (gcc agrees on which code warns) |
 | **T5** | **`embls`, the language server.** LSP over stdio, C and C++: diagnostics as you type, completion (members after `.`/`->`, locals, globals, keywords), hover, go-to-definition, document symbols. Still to come: find references, signature help, rename, `#include` completion, cross-file indexing. | done (first five, both languages) — tests/golden/embls.sh drives a whole session |
 | **T6** | **Past the bar.** `embcc --explain <id>` — a stable id per diagnostic, printed with it, and an entry with the rule, a worked example, the fix and the citation. Suggestions come from the index rather than edit distance alone (the member you meant, on the type you have; the header that declares the name). `embld --doctor` says why a link failed, for every undefined symbol at once. | tests/golden/diagnostics-explain.sh, incl. "every id printed has an entry"; tests/golden/embld-doctor.sh |
 
@@ -224,6 +224,7 @@ their groups.
 | `-Wsign-compare` | `-Wextra` | a comparison the usual conversions turn unsigned, where the signed side can be negative |
 | `-Wuninitialized` | `-Wall` | a local read on a path that never wrote it |
 | `-Wmaybe-uninitialized` | `-Wall` | a local read where only some paths wrote it |
+| `-Wformat` | `-Wall` | a `printf` or `scanf` format that disagrees with the arguments beside it |
 
 The golden's last check is the one that matters: on the same file, with the
 same flags, EmbCC warns where gcc warns — a warning nobody else raises is a
@@ -351,6 +352,59 @@ affecting diagnostics that already shipped:
 And one gap: a trailing `__attribute__((noreturn))` — GCC's usual spelling
 — was parsed at `fn_tail` and then dropped; only `weak` was copied onto the
 function node. Both `noreturn` and `nothrow` now survive it.
+
+## T4 — `-Wformat`, and where the knowledge lives
+
+`printf("%d\n", some_long)` compiles with nothing to say, and then reads
+four bytes where eight were passed. A variadic call has no prototype for
+its tail, so nothing in the language relates the format string to the
+arguments — but both are right there at the call, and the types are
+known. Only nobody was comparing them.
+
+**Which functions to check is not a list inside the compiler.** A
+function says so itself, with
+`__attribute__((format(printf, n, m)))` — GCC's spelling for thirty
+years, already on every declaration in a real `<stdio.h>`, and now on
+ours. A compiler that knew the name `printf` would hold that knowledge
+in two places and still know nothing about anyone's own `log()`.
+
+**What is compared is the PROMOTED type**, because that is what actually
+lands in the variadic tail. A `float` arrives as a `double` and a
+`short` as an `int`, so `printf("%f", 1.0f)` and `printf("%d", (short)x)`
+are both correct and neither is reported. sema has already applied the
+default argument promotions by the time the check runs, so it reads the
+types as they will be passed rather than as they were written. scanf is
+the mirror: nothing is promoted through a pointer, so plain `%f` writes
+a `float` and `%lf` a `double`, and `sscanf(s, "%f", &a_double)` is
+caught.
+
+**A signedness mismatch is deliberately not reported.** `printf("%d", 3u)`
+and `printf("%x", 3)` have the same size and the same representation for
+every value that reaches them. GCC reports them; in a codebase of any
+size the result is noise, and noise inside `-Wall` trains the reader to
+skip the category — which costs the warnings that do matter. What is
+reported is a difference the machine can see: a wrong size, a wrong
+class, a pointer where a number goes, `%s` with something that is not a
+pointer to characters, or a count that does not match.
+
+**C++ is checked too**, through the lowering rather than beside it: the
+attribute is carried into the emitted C, so one implementation serves
+both front ends. The indices move with it, and exactly one thing moves
+them. `this` does not — GCC defines a non-static member's arguments as
+counting from two *because* of it, so the source already accounts for
+the parameter lowering makes explicit. A hidden return slot does, since
+that one is this compiler's own and comes before `this`.
+`tests/golden/format-check.sh` has a member function of each kind.
+
+**The judge is gcc**, on the same file with the same attributes, and the
+invariant runs one way: every line EmbCC reports, gcc must report too.
+The golden holds sixteen wrong calls that must all be caught and twenty
+correct ones that must all be silent — and the second list is the one
+that found the bugs. Checking a scanf field's pointee against a size
+reported `sscanf(s, "%s", buf)`, because `%s` takes a character *buffer*
+rather than a pointer to one object; a checker that says that is
+unusable, and the fix is that `%s`, `%c` and `%[` ask nothing about what
+they point at.
 
 ## T5 — references, rename, signature help, `#include`
 

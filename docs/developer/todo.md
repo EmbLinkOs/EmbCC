@@ -837,6 +837,46 @@ changing. `tss_create` and `thread_local` are absent for a different
 reason -- they need thread-local storage, which EmbCC does not have,
 and a key every thread shared would be a global under another name.
 
+## Closed: -Wformat (2026-09-21)
+
+`printf("%d\n", some_long)` compiled with nothing to say and then read
+four bytes where eight were passed. Nothing in the language relates a
+variadic call's format string to its arguments, but both are at the
+call and the types are known.
+
+Which functions to check does NOT live in the compiler.
+`__attribute__((format(printf, n, m)))` is how a declaration says so --
+GCC's spelling, already on every declaration in a real <stdio.h> -- and
+lib/libc/include/stdio.h now carries it. A compiler that knew the name
+`printf` would hold that knowledge twice and still know nothing about
+anyone's own log().
+
+What is compared is the PROMOTED type, because that is what lands in
+the variadic tail: a float arrives as a double and a short as an int,
+so %f of a float and %d of a short are both right. scanf is the mirror
+-- nothing promotes through a pointer -- so plain %f writes a float and
+`sscanf(s, "%f", &a_double)` is caught.
+
+A signedness mismatch is deliberately NOT reported. GCC reports it; the
+values have the same size and representation, and noise inside -Wall
+trains the reader to skip the category, which costs the warnings that
+do matter.
+
+C++ is checked through the LOWERING rather than beside it: the
+attribute is carried into the emitted C, so one implementation serves
+both front ends. Exactly one thing moves the indices, and it is not
+`this` -- GCC defines a non-static member's arguments as counting from
+two because of it, so the source already accounts for the parameter
+lowering makes explicit. A hidden return slot does move them, being
+this compiler's own and coming before `this`.
+
+tests/golden/format-check.sh judges against gcc, one way: every line
+EmbCC reports, gcc must report too. Sixteen wrong calls that must all
+be caught, twenty correct ones that must all be silent -- and the
+second list is what found the bugs. Checking a scanf field's pointee
+against a size reported `sscanf(s, "%s", buf)`, since %s takes a
+character BUFFER rather than a pointer to one object.
+
 ## `strtold` parses through a double (2026-09-21)
 
 `conv()` in `lib/libc/src/stdlib/strtod.c` takes a `wide` flag and then
