@@ -58,6 +58,7 @@ SRCS := \
 	src/debug/eh.c \
 	src/elf/write.c \
 	src/macho/write.c \
+	src/coff/write.c \
 	src/arch/target.c \
 	src/arch/code.c \
 	src/arch/predef.c \

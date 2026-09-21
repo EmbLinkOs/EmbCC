@@ -20,6 +20,7 @@
 #include "../arch/x86_64/as.h"
 #include "../elf/write.h"
 #include "../macho/write.h"
+#include "../coff/write.h"
 #include "../ir/ir.h"
 #include "../opt/opt.h"
 #include "../parse/parse.h"
@@ -148,7 +149,7 @@ static int stv_of(const char *v)
 
 static int object_format_ready(void)
 {
-    if (target_fmt_get() == TGT_FMT_ELF)
+    if (target_fmt_get() == TGT_FMT_ELF || target_fmt_get() == TGT_FMT_COFF)
         return 1;
     fprintf(stderr,
             "embcc: error: no object writer for %s yet, which is what "
@@ -1090,6 +1091,229 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         int mrc = machow_write(mw, out);
         machow_free(mw);
         return mrc != 0;
+    }
+
+    if (target_fmt_get() == TGT_FMT_COFF) {
+        /* ---- Windows: COFF (D-014) -------------------------------------
+         *
+         * The same three steps the Mach-O branch above takes, and for
+         * the same reason: a COFF relocation carries NO ADDEND, so
+         * every value has to be in the field before the section is
+         * handed over, and coffw_add_section copies as it takes.
+         *
+         * What differs from Mach-O is happier. Sections are numbered
+         * from one and a symbol names one directly, so there is no
+         * address arithmetic to get wrong and no local-before-global
+         * ordering to violate. And REL32 is measured from the END of
+         * the instruction, which is what an x86 rel32 means anyway --
+         * so the -4 that ELF's PC32 needs is absent here, and carrying
+         * it over would displace every call by four bytes.
+         */
+        if (want_debug)
+            diag_fatal(in, 0,
+                       "-g is not supported for a Windows target yet: its "
+                       "debug information goes in CodeView records this "
+                       "does not write, and emitting DWARF under a COFF "
+                       "name would be worse than refusing");
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+            if (tas->nsyms || tas->nrels)
+                diag_fatal(tas->file, tas->line,
+                           "a file-scope asm block with labels or symbol "
+                           "references is not supported for a Windows "
+                           "target yet");
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && (f->is_ctor || f->is_dtor))
+                diag_fatal(f->file, f->line,
+                           "__attribute__((%s)) is not supported for a "
+                           "Windows target yet: it needs the .ctors/.dtors "
+                           "sections this COFF writer does not emit",
+                           f->is_ctor ? "constructor" : "destructor");
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->is_tls)
+                diag_fatal(g->file, g->line,
+                           "__thread is not supported for a Windows target "
+                           "yet: Windows reaches a thread-local through a "
+                           "_tls_index and a TLS directory this writer "
+                           "does not emit");
+        if (unwind)
+            diag_fatal(in, 0,
+                       "C++ exceptions are not supported for a Windows "
+                       "target yet: the unwind tables go in .pdata and "
+                       ".xdata and neither is written");
+
+        /* The object format is right and the CALLING CONVENTION is not
+         * yet: arguments still go in System V's registers. Objects
+         * EmbCC compiles are consistent with each other, so a
+         * self-contained program works -- and the first call into a
+         * Win32 API or MinGW's libc reads its arguments out of the
+         * wrong registers.
+         *
+         * D-014 says a capability a triple lacks must be an error
+         * naming the triple rather than a silent fallback to another
+         * platform's behaviour, and this IS that fallback. It is a
+         * warning rather than an error only because refusing would
+         * leave the object writer untestable; it is on by default and
+         * fires on every Windows compile, so it cannot be mistaken for
+         * a finished target. */
+        diag_warn_opt(in, 0, 0, "windows-abi",
+                      "%s passes arguments in the System V registers "
+                      "(rdi, rsi, rdx, rcx, r8, r9), not the Microsoft "
+                      "x64 ones (rcx, rdx, r8, r9 with 32 bytes of "
+                      "shadow space): objects EmbCC compiles agree with "
+                      "each other and with nothing else",
+                      target_triple_now());
+
+        /* 1. the bytes, before any section is handed over. */
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->defined || g->in_bss || g->named)
+                continue;
+            for (int i = 0; i < g->nrelocs; i++) {
+                long add = g->relocs[i].ftarget || g->relocs[i].gtarget
+                           ? g->relocs[i].addend
+                           : g->relocs[i].str_off + g->relocs[i].addend;
+                long at = g->off + g->relocs[i].off;
+                if (!data || at < 0 || at + 8 > data_len)
+                    continue;
+                unsigned char *d = (unsigned char *)data + at;
+                for (int b = 0; b < 8; b++)
+                    d[b] = (unsigned char)((unsigned long long)add >> (b * 8));
+            }
+        }
+        /* A string's offset within .rdata goes in the rel32 field:
+         * COFF computes S + field - (here + 4), and S is the section. */
+        for (int i = 0; i < nstrs; i++) {
+            long at = strs[i].patch_off;
+            if (at < 0 || at + 4 > (long)text.len)
+                continue;
+            for (int b = 0; b < 4; b++)
+                text.p[at + b] =
+                    (unsigned char)((unsigned long)strs[i].str_off >> (b * 8));
+        }
+
+        struct coffw *cw = coffw_new(IMAGE_FILE_MACHINE_AMD64);
+
+        /* 2. every section. */
+        int c_text = coffw_add_section(cw, ".text",
+                                       IMAGE_SCN_CNT_CODE |
+                                       IMAGE_SCN_MEM_EXECUTE |
+                                       IMAGE_SCN_MEM_READ,
+                                       text.p, (unsigned)text.len, 16);
+        int c_rdata = 0, c_data = 0, c_bss = 0;
+        if (rodata)
+            c_rdata = coffw_add_section(cw, ".rdata",
+                                        IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                        IMAGE_SCN_MEM_READ,
+                                        rodata, (unsigned)iu->rodata_len, 16);
+        if (data_len)
+            c_data = coffw_add_section(cw, ".data",
+                                       IMAGE_SCN_CNT_INITIALIZED_DATA |
+                                       IMAGE_SCN_MEM_READ |
+                                       IMAGE_SCN_MEM_WRITE,
+                                       data, (unsigned)data_len, 8);
+        if (bss_len)
+            c_bss = coffw_add_section(cw, ".bss",
+                                      IMAGE_SCN_CNT_UNINITIALIZED_DATA |
+                                      IMAGE_SCN_MEM_READ |
+                                      IMAGE_SCN_MEM_WRITE,
+                                      NULL, (unsigned)bss_len, 8);
+
+        /* 3. symbols. .rdata gets a section symbol, because a string's
+         * address is relocated against the SECTION rather than against
+         * a name of its own. sym_ndx is kept one-based here as in the
+         * other branches, so that zero still means "none yet". */
+        int c_rdata_sym = 0;
+        if (c_rdata)
+            c_rdata_sym = coffw_add_symbol(cw, ".rdata", 0, c_rdata,
+                                           IMAGE_SYM_TYPE_NULL,
+                                           IMAGE_SYM_CLASS_STATIC);
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && f->has_defn && (!f->is_static || f->used))
+                f->sym_ndx = coffw_add_symbol(
+                    cw, f->name, (unsigned)f->code_off, c_text,
+                    IMAGE_SYM_DTYPE_FUNCTION,
+                    f->is_static ? IMAGE_SYM_CLASS_STATIC
+                                 : IMAGE_SYM_CLASS_EXTERNAL) + 1;
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->defined)
+                continue;
+            int sect = g->in_bss ? c_bss : c_data;
+            if (!sect)
+                continue;
+            g->sym_ndx = coffw_add_symbol(
+                cw, g->name, (unsigned)g->off, sect, IMAGE_SYM_TYPE_NULL,
+                g->is_static ? IMAGE_SYM_CLASS_STATIC
+                             : IMAGE_SYM_CLASS_EXTERNAL) + 1;
+        }
+        /* Undefined: section zero with a ZERO value. A nonzero value
+         * there would make it a COMMON rather than a reference. */
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && !g->defined && g->used)
+                g->sym_ndx = coffw_add_symbol(
+                    cw, g->name, 0, IMAGE_SYM_UNDEFINED,
+                    IMAGE_SYM_TYPE_NULL, IMAGE_SYM_CLASS_EXTERNAL) + 1;
+
+        /* 4. relocations. */
+        for (int i = 0; i < next; i++) {
+            struct func *callee = ext[i].callee;
+            if (!callee->sym_ndx)
+                callee->sym_ndx = coffw_add_symbol(
+                    cw, callee->name, 0, IMAGE_SYM_UNDEFINED,
+                    IMAGE_SYM_DTYPE_FUNCTION,
+                    IMAGE_SYM_CLASS_EXTERNAL) + 1;
+            coffw_add_reloc(cw, c_text, (unsigned)ext[i].patch_off,
+                            callee->sym_ndx - 1,
+                            target_coff_reloc(ta, RK_CALL));
+        }
+        for (int i = 0; i < nstrs; i++)
+            coffw_add_reloc(cw, c_text, (unsigned)strs[i].patch_off,
+                            c_rdata_sym, target_coff_reloc(ta, strs[i].kind));
+        for (int i = 0; i < ngs; i++) {
+            struct global *g = gs[i].glob;
+            if (!g->sym_ndx)
+                g->sym_ndx = coffw_add_symbol(
+                    cw, g->name, 0, IMAGE_SYM_UNDEFINED,
+                    IMAGE_SYM_TYPE_NULL, IMAGE_SYM_CLASS_EXTERNAL) + 1;
+            coffw_add_reloc(cw, c_text, (unsigned)gs[i].patch_off,
+                            g->sym_ndx - 1, target_coff_reloc(ta, gs[i].kind));
+        }
+        for (int i = 0; i < nfs; i++) {
+            struct func *tf = fs[i].target;
+            if (!tf->sym_ndx)
+                tf->sym_ndx = coffw_add_symbol(
+                    cw, tf->name, 0, IMAGE_SYM_UNDEFINED,
+                    IMAGE_SYM_DTYPE_FUNCTION,
+                    IMAGE_SYM_CLASS_EXTERNAL) + 1;
+            coffw_add_reloc(cw, c_text, (unsigned)fs[i].patch_off,
+                            tf->sym_ndx - 1, target_coff_reloc(ta, fs[i].kind));
+        }
+        /* Pointer slots in .data holding an address. */
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->defined || g->in_bss || !c_data)
+                continue;
+            for (int i = 0; i < g->nrelocs; i++) {
+                struct func *ft = g->relocs[i].ftarget;
+                int sym;
+                if (ft) {
+                    if (!ft->sym_ndx)
+                        ft->sym_ndx = coffw_add_symbol(
+                            cw, ft->name, 0, IMAGE_SYM_UNDEFINED,
+                            IMAGE_SYM_DTYPE_FUNCTION,
+                            IMAGE_SYM_CLASS_EXTERNAL) + 1;
+                    sym = ft->sym_ndx - 1;
+                } else if (g->relocs[i].gtarget) {
+                    sym = g->relocs[i].gtarget->sym_ndx - 1;
+                } else {
+                    sym = c_rdata_sym;
+                }
+                coffw_add_reloc(cw, c_data,
+                                (unsigned)(g->off + g->relocs[i].off), sym,
+                                target_coff_reloc(ta, RK_ABS64));
+            }
+        }
+        free(ext); free(strs); free(gs); free(fs);
+        int crc = coffw_write(cw, out);
+        coffw_free(cw);
+        return crc != 0;
     }
 
     if (!object_format_ready())

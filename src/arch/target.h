@@ -165,6 +165,14 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k);
  * again would move every string reference four bytes -- so the Mach-O
  * path uses the UNBIASED offset, and this comment is why.
  */
+/* The COFF relocation type for this kind, or -1 where COFF has none.
+ * COFF carries no addend -- like Mach-O and unlike ELF -- so the caller
+ * writes it into the field being relocated. Its REL32 is also measured
+ * from the END of the instruction rather than from the field, which is
+ * what an x86 rel32 means anyway, so the -4 that ELF needs is absent
+ * and passing it on would displace every call by four bytes. */
+int target_coff_reloc(enum target_arch a, enum reloc_kind k);
+
 int target_macho_reloc(enum target_arch a, enum reloc_kind k,
                        int *pcrel, int *length);
 

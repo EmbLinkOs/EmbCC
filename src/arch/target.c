@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "../elf/elf.h"
+#include "../coff/coff.h"
 #include "../macho/macho.h"
 
 static enum target_arch g_arch = TARGET_X86_64;
@@ -165,6 +166,22 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
     case RK_ABS32:    return R_X86_64_32;
     case RK_DATA_PREL32: return R_X86_64_PC32;
     case RK_TPOFF32:  return R_X86_64_TPOFF32;
+    default:          return -1;
+    }
+}
+
+int target_coff_reloc(enum target_arch a, enum reloc_kind k)
+{
+    /* Windows on aarch64 is not a triple EmbCC offers (D-014 puts MinGW
+     * x86-64 first, because it reuses the Itanium C++ ABI this tree
+     * already has), so there is no ARM64 table to get wrong. */
+    if (a != TARGET_X86_64)
+        return -1;
+    switch (k) {
+    case RK_CALL:     return IMAGE_REL_AMD64_REL32;
+    case RK_PCREL32:  return IMAGE_REL_AMD64_REL32;
+    case RK_ABS64:    return IMAGE_REL_AMD64_ADDR64;
+    case RK_ABS32:    return IMAGE_REL_AMD64_ADDR32;
     default:          return -1;
     }
 }
