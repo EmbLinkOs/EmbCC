@@ -81,6 +81,52 @@ void machow_free(struct machow *w)
     free(w);
 }
 
+unsigned long long machow_section_addr(struct machow *w, int sect)
+{
+    return sect >= 1 && sect <= w->nsect ? w->sect[sect - 1].addr : 0;
+}
+
+void machow_add_reloc_sect(struct machow *w, int sect,
+                           unsigned long long offset, int sect_target,
+                           int length)
+{
+    if (sect < 1 || sect > w->nsect || sect_target < 1)
+        return;
+    struct sect *s = &w->sect[sect - 1];
+    int uns = w->cputype == CPU_TYPE_ARM64 ? ARM64_RELOC_UNSIGNED
+                                           : X86_64_RELOC_UNSIGNED;
+    struct relocation_info r;
+    r.r_address = (int32_t)offset;
+    /* extern=0: the "symbol number" is a section index, not a symbol. */
+    r.r_packed = macho_reloc_pack((uint32_t)sect_target, 0, length, 0, uns);
+    buf_append(&s->relocs, &r, sizeof r);
+    s->nreloc++;
+}
+
+void machow_add_reloc_sub(struct machow *w, int sect,
+                          unsigned long long offset, int minuend, int target,
+                          int length)
+{
+    if (sect < 1 || sect > w->nsect || minuend < 1 || target < 1)
+        return;
+    struct sect *s = &w->sect[sect - 1];
+    int sub = w->cputype == CPU_TYPE_ARM64 ? ARM64_RELOC_SUBTRACTOR
+                                           : X86_64_RELOC_SUBTRACTOR;
+    int uns = w->cputype == CPU_TYPE_ARM64 ? ARM64_RELOC_UNSIGNED
+                                           : X86_64_RELOC_UNSIGNED;
+    struct relocation_info r;
+    /* The order is fixed: SUBTRACTOR first, UNSIGNED second, and the
+     * pair shares one address. A linker reading them apart would have
+     * no way to tell which difference was meant. */
+    r.r_address = (int32_t)offset;
+    r.r_packed = macho_reloc_pack((uint32_t)(minuend - 1), 0, length, 1, sub);
+    buf_append(&s->relocs, &r, sizeof r);
+    r.r_address = (int32_t)offset;
+    r.r_packed = macho_reloc_pack((uint32_t)(target - 1), 0, length, 1, uns);
+    buf_append(&s->relocs, &r, sizeof r);
+    s->nreloc += 2;
+}
+
 static unsigned long long round_up(unsigned long long v, unsigned long long a)
 {
     return a ? (v + a - 1) / a * a : v;

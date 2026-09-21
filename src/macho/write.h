@@ -71,6 +71,36 @@ int machow_add_symbol_raw(struct machow *w, const char *name,
 void machow_add_reloc(struct machow *w, int sect, unsigned long long offset,
                       int sym, int type, int pcrel, int length, long addend);
 
+/* "target - here", which Mach-O has no single relocation for: it is a
+ * SUBTRACTOR naming the symbol to subtract, immediately followed by an
+ * UNSIGNED naming the target, both at the same address. The linker
+ * computes target - minuend + whatever the field already holds.
+ *
+ * `minuend` is an anchor symbol at the start of the section the field
+ * is in, because SUBTRACTOR needs a SYMBOL and "here" is not one. The
+ * caller stores (addend - offset_of_field) in the field, which turns
+ * the anchor-relative answer into a field-relative one. */
+void machow_add_reloc_sub(struct machow *w, int sect,
+                          unsigned long long offset, int minuend, int target,
+                          int length);
+
+/* Where a section was placed in this object's address space. Needed
+ * because a section-relative relocation's field holds the target's
+ * ADDRESS, not its offset within the section -- the same rule a
+ * symbol's n_value follows, and just as easy to miss when __text
+ * happens to sit at zero and makes the two look alike. */
+unsigned long long machow_section_addr(struct machow *w, int sect);
+
+/* A relocation against a SECTION rather than a symbol (extern=0). The
+ * field holds the target's address within this object, and the linker
+ * adjusts it by however far that section moved. Mach-O has no section
+ * symbols to relocate against the way ELF does, so this is how a
+ * reference to "somewhere in __text" is spelled. `sect_target` is a
+ * 1-based section index. */
+void machow_add_reloc_sect(struct machow *w, int sect,
+                           unsigned long long offset, int sect_target,
+                           int length);
+
 /* Writes the MH_OBJECT file. Returns 0, or -1 with a message on stderr. */
 int machow_write(struct machow *w, const char *path);
 

@@ -693,11 +693,6 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                        "DWARF goes in a __DWARF segment this does not "
                        "write, and emitting the ELF layout under a Mach-O "
                        "name would be worse than refusing");
-        if (unwind || eh.lsda.len)
-            diag_fatal(in, 0,
-                       "exceptions are not supported for a Darwin target "
-                       "yet: the unwind tables need SUBTRACTOR relocation "
-                       "pairs this does not emit");
         struct machow *mw = machow_new(
             ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
             ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
@@ -858,6 +853,147 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                  sym, mt - 1, mpc, mlen, add);
             }
         }
+
+        /* ---- the unwind and exception tables --------------------------
+         *
+         * Darwin does not use .eh_frame. Its linker refuses one whose
+         * CIE names a personality routine -- "CIE reference to
+         * personality function not supported" -- and clang emits none
+         * at all: it writes __LD,__compact_unwind instead, one 32-byte
+         * entry per function, and ld folds those into the __unwind_info
+         * the system unwinder actually reads.
+         *
+         * So this is a THIRD unwind format beside DWARF CFI and none,
+         * and it is a much smaller one. Where an FDE is a program of
+         * rules played back instruction by instruction, a compact entry
+         * is a single word describing the whole function -- which works
+         * only because every prologue this compiler emits has the same
+         * shape. EmbCC always builds a frame record, so the mode is
+         * always FRAME and the encoding carries nothing else but
+         * whether there is a language-specific data area.
+         *
+         * The LSDA still goes in __gcc_except_tab, unchanged: the
+         * personality routine reads it, and the personality routine is
+         * ours.
+         */
+        if (unwind && eh.nfuncs) {
+            /* The fields FIRST, before any section is added: the writer
+             * copies a section's bytes as it takes them, so anything
+             * written afterwards lands in a buffer nobody reads. This
+             * cost an afternoon -- catch(...) worked throughout,
+             * because it is the one case with no type-table entry to
+             * patch, and everything else segfaulted. */
+            for (int i = 0; i < eh.nrelocs; i++) {
+                struct eh_reloc *r = &eh.relocs[i];
+                if (!r->in_lsda || !eh.lsda.p ||
+                    (size_t)r->off + 4 > (size_t)eh.lsda.len)
+                    continue;
+                unsigned char *f = (unsigned char *)eh.lsda.p + r->off;
+                /* A type-table entry is PC-relative and the linker
+                 * measures it from the slot, so the field carries
+                 * nothing. Everything else is "target minus here",
+                 * which a SUBTRACTOR pair answers against an anchor at
+                 * the section's start -- so the field turns that
+                 * anchor-relative answer into a field-relative one. */
+                long v = r->target == EHT_GLOBAL ? 0 : r->addend - r->off;
+                for (int b = 0; b < 4; b++)
+                    f[b] = (unsigned char)((unsigned long)v >> (b * 8));
+            }
+
+            int m_lsda = 0;
+            if (eh.lsda.len)
+                m_lsda = machow_add_section(mw, "__TEXT", "__gcc_except_tab",
+                                            S_REGULAR, eh.lsda.p,
+                                            (unsigned long long)eh.lsda.len,
+                                            2);
+            /* A section-relative relocation's field holds the target's
+             * ADDRESS in this object, not its offset inside the
+             * section. __text sits at zero, so a function's offset and
+             * its address are the same number and the mistake is
+             * invisible there; __gcc_except_tab does not. */
+            long n = eh.nfuncs;
+            unsigned long long text_at = machow_section_addr(mw, m_text);
+            unsigned long long lsda_at = m_lsda
+                ? machow_section_addr(mw, m_lsda) : 0;
+            unsigned char *cu = xcalloc((size_t)n, 32);
+            for (long k = 0; k < n; k++) {
+                unsigned char *e = cu + k * 32;
+                unsigned long long fa =
+                    text_at + (unsigned long long)eh.funcs[k].code_off;
+                unsigned long len = (unsigned long)eh.funcs[k].code_len;
+                unsigned long enc = ta == TARGET_AARCH64 ? 0x04000000ul
+                                                         : 0x01000000ul;
+                if (eh.funcs[k].lsda_off >= 0)
+                    enc |= 0x40000000ul;         /* UNWIND_HAS_LSDA */
+                for (int b = 0; b < 8; b++) e[b] = (unsigned char)(fa >> (b*8));
+                for (int b = 0; b < 4; b++) e[8+b] = (unsigned char)(len >> (b*8));
+                for (int b = 0; b < 4; b++) e[12+b] = (unsigned char)(enc >> (b*8));
+                if (eh.funcs[k].lsda_off >= 0) {
+                    unsigned long long la =
+                        lsda_at + (unsigned long long)eh.funcs[k].lsda_off;
+                    for (int b = 0; b < 8; b++)
+                        e[24+b] = (unsigned char)(la >> (b*8));
+                }
+            }
+            int m_cu = machow_add_section(mw, "__LD", "__compact_unwind",
+                                          S_REGULAR | 0x02000000u /* DEBUG */,
+                                          cu, (unsigned long long)n * 32, 3);
+            free(cu);
+
+            int pers = 0;
+            for (long k = 0; k < n; k++) {
+                machow_add_reloc_sect(mw, m_cu, (unsigned long long)(k * 32),
+                                      m_text, 3);
+                if (eh.funcs[k].lsda_off < 0)
+                    continue;
+                if (!pers)
+                    pers = machow_add_symbol(mw, "__gxx_personality_v0",
+                                             0, 0, 1);
+                machow_add_reloc(mw, m_cu,
+                                 (unsigned long long)(k * 32 + 16), pers,
+                                 ta == TARGET_AARCH64 ? ARM64_RELOC_UNSIGNED
+                                                      : X86_64_RELOC_UNSIGNED,
+                                 0, 3, 0);
+                if (m_lsda)
+                    machow_add_reloc_sect(mw, m_cu,
+                                          (unsigned long long)(k * 32 + 24),
+                                          m_lsda, 3);
+            }
+
+            if (m_lsda) {
+                int lsda_anchor = machow_add_symbol_raw(mw, "ltmp_lsda", 0,
+                                                        m_lsda, 0);
+                int text_anchor = machow_add_symbol_raw(mw, "ltmp_text", 0,
+                                                        m_text, 0);
+                for (int i = 0; i < eh.nrelocs; i++) {
+                    struct eh_reloc *r = &eh.relocs[i];
+                    if (!r->in_lsda)
+                        continue;
+                    if (r->target == EHT_GLOBAL && r->glob &&
+                        r->glob->sym_ndx) {
+                        /* Darwin names a typeinfo INDIRECTLY -- the slot
+                         * holds the offset to a GOT entry pointing at
+                         * it -- so the relocation is POINTER_TO_GOT and
+                         * the encoding beside it says 0x9b (eh.c). A
+                         * SUBTRACTOR pair would name the object
+                         * directly, and the personality would then
+                         * follow one dereference too few. */
+                        machow_add_reloc(mw, m_lsda,
+                                         (unsigned long long)r->off,
+                                         r->glob->sym_ndx,
+                                         ta == TARGET_AARCH64
+                                             ? ARM64_RELOC_POINTER_TO_GOT
+                                             : X86_64_RELOC_GOT,
+                                         1, 2, 0);
+                    } else if (r->target == EHT_TEXT) {
+                        machow_add_reloc_sub(mw, m_lsda,
+                                             (unsigned long long)r->off,
+                                             lsda_anchor, text_anchor, 2);
+                    }
+                }
+            }
+        }
+        eh_free(&eh);
 
         int mrc = machow_write(mw, out);
         machow_free(mw);

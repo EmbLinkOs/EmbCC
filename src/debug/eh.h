@@ -43,10 +43,23 @@ struct eh_buf {
     int len, cap;
 };
 
+/* One function, for a format that describes functions rather than
+ * instructions. DWARF's FDE is a program of rules; Darwin's compact
+ * unwind is one 32-bit word per function plus its personality and LSDA,
+ * so the emitter there needs the functions as a LIST rather than as a
+ * byte stream it has already written. Recorded while the FDEs are
+ * built, because that is where the LSDA offsets are known. */
+struct eh_func {
+    long code_off, code_len;
+    int lsda_off;       /* -1 when the function has no exception table */
+};
+
 struct eh_out {
     struct eh_buf frame, lsda;
     struct eh_reloc *relocs;
     int nrelocs, reloccap;
+    struct eh_func *funcs;
+    int nfuncs, funccap;
 };
 
 /* The tables for every function of iu with code (caller zero-inits out);

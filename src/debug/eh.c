@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
+#include "../arch/target.h"
 
 /* DWARF call frame instructions (DWARF 4, 6.4.2) */
 #define CFA_advance_loc   0x40
@@ -22,6 +23,12 @@
 /* pointer encodings (the LSB Core specification's DW_EH_PE_*) */
 #define EH_PE_uleb128      0x01
 #define EH_PE_pcrel_sdata4 0x1b     /* DW_EH_PE_pcrel | DW_EH_PE_sdata4 */
+/* ... and the same, one level of indirection away: the slot holds the
+ * ADDRESS of a pointer to the object rather than the object. Darwin's
+ * type table is written this way so a typeinfo living in another dylib
+ * can be named at all, and its linker only offers a relocation for the
+ * indirect form (ARM64_RELOC_POINTER_TO_GOT). */
+#define EH_PE_indirect_pcrel_sdata4 0x9b
 #define EH_PE_omit         0xff
 
 static void need(struct eh_buf *b, int n)
@@ -205,7 +212,9 @@ static void emit_lsda(struct eh_out *o, struct ir_func *fn)
     u8(&o->lsda, EH_PE_omit);                 /* landing pads: from the
                                                * function's start */
     if (fn->neh_types) {
-        u8(&o->lsda, EH_PE_pcrel_sdata4);     /* the type table's */
+        u8(&o->lsda, target_os_get() == TGT_OS_DARWIN
+                     ? EH_PE_indirect_pcrel_sdata4
+                     : EH_PE_pcrel_sdata4);    /* the type table's */
         uleb(&o->lsda, (unsigned long)(1 + uleb_size((unsigned long)cs.len) +
                                        cs.len + at.len + 4 * fn->neh_types));
     } else {
@@ -293,6 +302,16 @@ void eh_emit(struct ir_unit *iu, int arm64, struct eh_out *out)
             lsda = out->lsda.len;
             emit_lsda(out, fn);
         }
+        if (out->nfuncs == out->funccap) {
+            out->funccap = out->funccap ? out->funccap * 2 : 16;
+            out->funcs = xrealloc(out->funcs,
+                                  (size_t)out->funccap * sizeof *out->funcs);
+        }
+        out->funcs[out->nfuncs].code_off = f->code_off;
+        out->funcs[out->nfuncs].code_len = f->code_len;
+        out->funcs[out->nfuncs].lsda_off = lsda;
+        out->nfuncs++;
+
         int fde = b->len;
         u32(b, 0);                    /* length, patched */
         u32(b, (unsigned long)(b->len - (lsda >= 0 ? cie_lsda : cie)));
@@ -337,5 +356,6 @@ void eh_free(struct eh_out *out)
     free(out->frame.p);
     free(out->lsda.p);
     free(out->relocs);
+    free(out->funcs);
     memset(out, 0, sizeof *out);
 }

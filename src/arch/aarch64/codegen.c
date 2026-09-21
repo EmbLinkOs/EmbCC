@@ -1071,9 +1071,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_GADDR: {
-            /* (a weak reference through its GOT slot: adrp/add would give
-             * the page of the pc, not 0, for an undefined one) */
-            int got = i->glob->is_weak && !i->glob->defined;
+            /* Through the GOT when adrp/add cannot give the answer.
+             *
+             * A weak undefined symbol is one case everywhere: its
+             * address is meant to be 0, and adrp/add would give the
+             * page of the pc instead.
+             *
+             * On Darwin it is EVERY undefined symbol. One that resolves
+             * from a dylib has no address at static-link time at all,
+             * and ld says so rather than guessing: "target does not
+             * have address". So the indirection is the rule there and
+             * the exception elsewhere. */
+            int got = !i->glob->defined &&
+                      (i->glob->is_weak || target_os_get() == TGT_OS_DARWIN);
             struct gsite hi, lo;
             hi.patch_off = a64_adrp(t, A64_ACC);
             hi.glob = i->glob;
@@ -1093,7 +1103,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_FADDR: {
-            int got = i->callee->is_weak && !i->callee->has_defn;
+            /* As IR_GADDR: on Darwin an undefined function has no
+             * link-time address, so its address comes from the GOT. */
+            int got = !i->callee->has_defn &&
+                      (i->callee->is_weak ||
+                       target_os_get() == TGT_OS_DARWIN);
             struct fsite hi, lo;
             hi.patch_off = a64_adrp(t, A64_ACC);
             hi.target = i->callee;
