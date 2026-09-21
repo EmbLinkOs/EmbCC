@@ -61,7 +61,7 @@ those exact two members in that order.
 `<condition_variable>`, `<shared_mutex>`, `<semaphore>`, `<latch>`,
 `<barrier>`, `<future>`, `<iosfwd>`, `<execution>`, `<typeindex>`,
 `<scoped_allocator>`, `<charconv>`, `<complex>`, `<memory_resource>`,
-`<iostream>`
+`<stop_token>`, `<syncstream>`, `<valarray>`, `<iostream>`
 and the rest of the stream headers including `<fstream>`, `<stdexcept>`,
 and the `<c*>` wrappers
 (`<cstddef>`, `<cstdint>`, `<cstring>`, `<cstdlib>`, `<cstdio>`,
@@ -488,6 +488,47 @@ whole point, because for a parse, a request or a frame the lifetime *is*
 the phase. Constructed over a caller's stack buffer it allocates nothing
 at all until exhausted, and the test proves that by giving it
 `null_memory_resource()` upstream — which throws on every allocation.
+
+**`<stop_token>` closes three holes in the `volatile bool stop` idiom.**
+A worker *blocked* on a condition variable never reaches the poll, so
+the flag is set and nothing happens until the wait times out; nothing
+says who may set it or how many may watch it; and the flag must outlive
+every worker that reads it, which is exactly what goes wrong when a
+worker outlives its owner. A `stop_callback` is what wakes a blocked
+worker — the callback does the notify — and the guarantee that makes it
+usable is that when `~stop_callback` returns, the callback is not
+running and never will be. Without that, a callback capturing a local
+can fire after the local is gone, which is the use-after-free every
+hand-rolled cancellation scheme has. `jthread` is here too: it joins in
+its destructor where `std::thread` terminates, and asks first, which is
+what makes the wait bounded.
+
+**`<syncstream>` fixes interleaved output**, and the reason it is needed
+is subtler than "the stream is unsynchronised" — it is. `cout << a << b
+<< c` is *three* operations and another thread may write between any
+two. Locking `cout` does not help unless every writer agrees to take the
+same lock around the whole expression, which is the discipline nobody
+maintains. An `osyncstream` buffers and emits in **one** write on
+destruction, so the unit of atomicity becomes the statement and no
+agreement between writers is needed.
+
+**`<valarray>` is the oldest container in the standard library**, and it
+is worth being honest about why it is rarely used: it was designed for a
+compiler that would recognise the whole expression and fuse it, and that
+optimization mostly did not arrive. Written plainly, `a = b + c * d`
+builds two temporaries; an expression-template library computes it in
+one pass with none. What it still does well is read like the
+mathematics, and its slice types describe strided selections in a way
+nothing else in the standard library does. One property is worth
+knowing: the comparisons give a `valarray<bool>` **mask**, not a bool —
+so `if (a == b)` does not compile, which is the design refusing to guess
+whether "equal" meant all or any.
+
+Writing these found a **compiler bug**: `is_same_v<decltype(a > 2),
+bool>` did not parse, because a `>` inside `decltype`'s parentheses was
+read as the closing angle bracket of the enclosing template argument
+list. Call arguments and casts already cleared that state; `decltype`
+did not.
 
 **`<fstream>` is exercised where a filesystem exists.** The QEMU harness
 has an `open` that returns `ENOSYS`, and on such a target the *correct*

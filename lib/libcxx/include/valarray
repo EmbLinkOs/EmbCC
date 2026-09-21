@@ -1,0 +1,586 @@
+/* <valarray> — C++ [numarray].
+ *
+ * A numeric array where the operators apply ELEMENTWISE: `a + b` adds
+ * two arrays, `a * 2` scales one, and `sin(a)` takes the sine of every
+ * element. It predates the STL, it is the oldest container in the
+ * standard library, and it is worth being honest about why it is
+ * rarely used.
+ *
+ * It was designed for a compiler that could recognise the whole
+ * expression and fuse it -- the `valarray` proposal assumed aggressive
+ * optimization that mostly did not arrive. Written plainly, as here,
+ * `a = b + c * d` builds TWO temporaries: one for `c * d` and one for
+ * the sum. An expression-template library (Eigen, Blaze) computes it in
+ * one pass with none. So this is the right tool for clarity on small
+ * data and the wrong one for a hot loop on large data, and saying so is
+ * better than implying otherwise.
+ *
+ * What it still does well is read like the mathematics, and the slice
+ * types -- `slice`, `gslice`, masks and index arrays -- describe
+ * strided and scattered selections in a way nothing else in the
+ * standard library does.
+ *
+ * ---- one sharp edge ------------------------------------------------------
+ *
+ * Operations on arrays of DIFFERENT lengths are undefined. Not "throws",
+ * not "uses the shorter" -- undefined, because the check would cost a
+ * comparison per operation for a mistake the type system nearly
+ * prevents. This implementation uses the LEFT operand's size, which is
+ * a defined behaviour for an undefined case and stops a mismatch from
+ * reading off the end.
+ */
+#ifndef _LIBCXX_VALARRAY
+#define _LIBCXX_VALARRAY
+
+#include <cmath>
+#include <cstddef>
+#include <initializer_list>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+template <class T> class valarray;
+class slice;
+template <class T> class slice_array;
+
+/* ---- slice: start, count, stride ---------------------------------------
+ *
+ * A strided selection, and the three numbers are in that order for a
+ * reason that trips everyone once: `slice(1, 3, 2)` is elements 1, 3, 5
+ * -- three of them, two apart -- not "from 1 to 3 by 2".
+ */
+class slice {
+public:
+    slice() : __start(0), __size(0), __stride(0) {}
+    slice(size_t start, size_t size, size_t stride)
+        : __start(start), __size(size), __stride(stride) {}
+
+    size_t start() const { return __start; }
+    size_t size() const { return __size; }
+    size_t stride() const { return __stride; }
+
+private:
+    size_t __start, __size, __stride;
+};
+
+template <class T>
+class valarray {
+public:
+    using value_type = T;
+
+    valarray() : __p(nullptr), __n(0) {}
+
+    explicit valarray(size_t n) : __p(nullptr), __n(0) { __alloc(n); __fill(T()); }
+
+    valarray(const T &v, size_t n) : __p(nullptr), __n(0)
+    { __alloc(n); __fill(v); }
+
+    valarray(const T *p, size_t n) : __p(nullptr), __n(0)
+    {
+        __alloc(n);
+        for (size_t i = 0; i < n; i++)
+            __p[i] = p[i];
+    }
+
+    valarray(const valarray &o) : __p(nullptr), __n(0)
+    {
+        __alloc(o.__n);
+        for (size_t i = 0; i < __n; i++)
+            __p[i] = o.__p[i];
+    }
+
+    valarray(valarray &&o) noexcept : __p(o.__p), __n(o.__n)
+    { o.__p = nullptr; o.__n = 0; }
+
+    valarray(initializer_list<T> l) : __p(nullptr), __n(0)
+    {
+        __alloc(l.size());
+        size_t i = 0;
+        for (const T &v : l)
+            __p[i++] = v;
+    }
+
+    valarray(const slice_array<T> &s);
+
+    ~valarray() { __free(); }
+
+    /* Assigning a valarray of a DIFFERENT size resizes -- unlike
+     * almost everything else here, which assumes matching sizes. The
+     * standard says so, and it is what makes `a = b + c` work when a
+     * was default-constructed. */
+    valarray &operator=(const valarray &o)
+    {
+        if (this != &o) {
+            if (__n != o.__n) {
+                __free();
+                __alloc(o.__n);
+            }
+            for (size_t i = 0; i < __n; i++)
+                __p[i] = o.__p[i];
+        }
+        return *this;
+    }
+
+    valarray &operator=(valarray &&o) noexcept
+    {
+        if (this != &o) {
+            __free();
+            __p = o.__p;
+            __n = o.__n;
+            o.__p = nullptr;
+            o.__n = 0;
+        }
+        return *this;
+    }
+
+    /* Assigning a SCALAR fills, which is the shorthand that makes
+     * `a = 0;` clear the whole array. */
+    valarray &operator=(const T &v)
+    {
+        __fill(v);
+        return *this;
+    }
+
+    valarray &operator=(initializer_list<T> l)
+    {
+        if (__n != l.size()) {
+            __free();
+            __alloc(l.size());
+        }
+        size_t i = 0;
+        for (const T &v : l)
+            __p[i++] = v;
+        return *this;
+    }
+
+    valarray &operator=(const slice_array<T> &s);
+
+    const T &operator[](size_t i) const { return __p[i]; }
+    T &operator[](size_t i) { return __p[i]; }
+
+    slice_array<T> operator[](slice s);
+    valarray operator[](slice s) const;
+
+    size_t size() const { return __n; }
+
+    /* resize DISCARDS the contents -- it does not preserve them the way
+     * a vector's does. The standard says so, and the name is the
+     * trap: this is "make it this size, filled with v". */
+    void resize(size_t n, T v = T())
+    {
+        __free();
+        __alloc(n);
+        __fill(v);
+    }
+
+    void swap(valarray &o) noexcept
+    {
+        T *tp = __p; __p = o.__p; o.__p = tp;
+        size_t tn = __n; __n = o.__n; o.__n = tn;
+    }
+
+    /* ---- the reductions -------------------------------------------- */
+
+    /* sum() and min()/max() on an EMPTY valarray are undefined -- there
+     * is no identity element the standard is willing to pick, because T
+     * may be a type for which T() is not one. The first element is used
+     * as the seed, which is why an empty array has no answer. */
+    T sum() const
+    {
+        T r = __p[0];
+        for (size_t i = 1; i < __n; i++)
+            r += __p[i];
+        return r;
+    }
+
+    T min() const
+    {
+        T r = __p[0];
+        for (size_t i = 1; i < __n; i++)
+            if (__p[i] < r)
+                r = __p[i];
+        return r;
+    }
+
+    T max() const
+    {
+        T r = __p[0];
+        for (size_t i = 1; i < __n; i++)
+            if (r < __p[i])
+                r = __p[i];
+        return r;
+    }
+
+    /* A rotation, not a shift of the storage: shift(n) moves elements
+     * toward the front and fills with T(), cshift(n) wraps them round.
+     * A NEGATIVE count goes the other way, which is the half that is
+     * easy to get wrong. */
+    valarray shift(int n) const
+    {
+        valarray r(T(), __n);
+        for (size_t i = 0; i < __n; i++) {
+            long j = (long)i + n;
+            if (j >= 0 && (size_t)j < __n)
+                r.__p[i] = __p[(size_t)j];
+        }
+        return r;
+    }
+
+    valarray cshift(int n) const
+    {
+        valarray r(T(), __n);
+        if (__n == 0)
+            return r;
+        for (size_t i = 0; i < __n; i++) {
+            long j = ((long)i + n) % (long)__n;
+            if (j < 0)
+                j += (long)__n;
+            r.__p[i] = __p[(size_t)j];
+        }
+        return r;
+    }
+
+    /* apply returns a NEW array: the element type of the result is T,
+     * so a function changing the type is not expressible here. That is
+     * the standard's design, not an omission. */
+    valarray apply(T f(T)) const
+    {
+        valarray r(__n);
+        for (size_t i = 0; i < __n; i++)
+            r.__p[i] = f(__p[i]);
+        return r;
+    }
+
+    valarray apply(T f(const T &)) const
+    {
+        valarray r(__n);
+        for (size_t i = 0; i < __n; i++)
+            r.__p[i] = f(__p[i]);
+        return r;
+    }
+
+    /* ---- the compound operators ------------------------------------- */
+
+#define _LIBCXX_VA_OPEQ(op)                                     \
+    valarray &operator op(const valarray &o)                    \
+    {                                                           \
+        for (size_t i = 0; i < __n; i++)                        \
+            __p[i] op o.__p[i];                                 \
+        return *this;                                           \
+    }                                                           \
+    valarray &operator op(const T &v)                           \
+    {                                                           \
+        for (size_t i = 0; i < __n; i++)                        \
+            __p[i] op v;                                        \
+        return *this;                                           \
+    }
+
+    _LIBCXX_VA_OPEQ(+=)
+    _LIBCXX_VA_OPEQ(-=)
+    _LIBCXX_VA_OPEQ(*=)
+    _LIBCXX_VA_OPEQ(/=)
+    _LIBCXX_VA_OPEQ(%=)
+    _LIBCXX_VA_OPEQ(&=)
+    _LIBCXX_VA_OPEQ(|=)
+    _LIBCXX_VA_OPEQ(^=)
+    _LIBCXX_VA_OPEQ(<<=)
+    _LIBCXX_VA_OPEQ(>>=)
+#undef _LIBCXX_VA_OPEQ
+
+    valarray operator+() const { return *this; }
+
+    valarray operator-() const
+    {
+        valarray r(__n);
+        for (size_t i = 0; i < __n; i++)
+            r.__p[i] = -__p[i];
+        return r;
+    }
+
+    valarray operator~() const
+    {
+        valarray r(__n);
+        for (size_t i = 0; i < __n; i++)
+            r.__p[i] = ~__p[i];
+        return r;
+    }
+
+    valarray<bool> operator!() const
+    {
+        valarray<bool> r(__n);
+        for (size_t i = 0; i < __n; i++)
+            r[i] = !__p[i];
+        return r;
+    }
+
+    T *__data() { return __p; }
+    const T *__data() const { return __p; }
+
+private:
+    void __alloc(size_t n)
+    {
+        __n = n;
+        /* One raw allocation and placement new, so a T with no default
+         * constructor is still storable -- and the elements are
+         * destroyed in reverse on the way out. */
+        __p = n ? (T *)::operator new(n * sizeof(T)) : nullptr;
+        for (size_t i = 0; i < n; i++)
+            ::new ((void *)(__p + i)) T();
+    }
+
+    void __free()
+    {
+        if (__p) {
+            for (size_t i = __n; i-- > 0;)
+                __p[i].~T();
+            ::operator delete(__p);
+        }
+        __p = nullptr;
+        __n = 0;
+    }
+
+    void __fill(const T &v)
+    {
+        for (size_t i = 0; i < __n; i++)
+            __p[i] = v;
+    }
+
+    T *__p;
+    size_t __n;
+};
+
+/* ---- slice_array: a strided view that can be ASSIGNED to -------------- */
+
+template <class T>
+class slice_array {
+public:
+    using value_type = T;
+
+    /* Assigning to a slice writes THROUGH to the original -- that is
+     * the whole point, and it is why `a[slice(0,3,2)] = 0;` sets every
+     * other element rather than building a temporary and dropping it. */
+    void operator=(const valarray<T> &v) const
+    {
+        for (size_t i = 0; i < __s.size(); i++)
+            __a->operator[](__s.start() + i * __s.stride()) = v[i];
+    }
+
+    void operator=(const T &v) const
+    {
+        for (size_t i = 0; i < __s.size(); i++)
+            __a->operator[](__s.start() + i * __s.stride()) = v;
+    }
+
+#define _LIBCXX_SA_OPEQ(op)                                          \
+    void operator op(const valarray<T> &v) const                     \
+    {                                                                \
+        for (size_t i = 0; i < __s.size(); i++)                      \
+            __a->operator[](__s.start() + i * __s.stride()) op v[i]; \
+    }
+
+    _LIBCXX_SA_OPEQ(+=)
+    _LIBCXX_SA_OPEQ(-=)
+    _LIBCXX_SA_OPEQ(*=)
+    _LIBCXX_SA_OPEQ(/=)
+#undef _LIBCXX_SA_OPEQ
+
+    slice_array(valarray<T> *a, slice s) : __a(a), __s(s) {}
+    const slice &__slice() const { return __s; }
+    valarray<T> *__array() const { return __a; }
+
+private:
+    slice_array(const slice_array &) = default;
+    slice_array &operator=(const slice_array &) = delete;
+    template <class U> friend class valarray;
+
+    valarray<T> *__a;
+    slice __s;
+};
+
+template <class T>
+slice_array<T> valarray<T>::operator[](slice s)
+{ return slice_array<T>(this, s); }
+
+template <class T>
+valarray<T> valarray<T>::operator[](slice s) const
+{
+    valarray<T> r(s.size());
+    for (size_t i = 0; i < s.size(); i++)
+        r[i] = __p[s.start() + i * s.stride()];
+    return r;
+}
+
+template <class T>
+valarray<T>::valarray(const slice_array<T> &sa) : __p(nullptr), __n(0)
+{
+    const slice &s = sa.__slice();
+    __alloc(s.size());
+    for (size_t i = 0; i < s.size(); i++)
+        __p[i] = (*sa.__array())[s.start() + i * s.stride()];
+}
+
+template <class T>
+valarray<T> &valarray<T>::operator=(const slice_array<T> &sa)
+{
+    const slice &s = sa.__slice();
+    if (__n != s.size()) {
+        __free();
+        __alloc(s.size());
+    }
+    for (size_t i = 0; i < s.size(); i++)
+        __p[i] = (*sa.__array())[s.start() + i * s.stride()];
+    return *this;
+}
+
+/* ---- the binary operators ---------------------------------------------
+ *
+ * Each builds a temporary, and that is the cost this design pays: an
+ * expression-template library computes `a + b * c` in one pass with
+ * none. See the note at the top.
+ */
+#define _LIBCXX_VA_BINOP(op)                                        \
+    template <class T>                                              \
+    valarray<T> operator op(const valarray<T> &a, const valarray<T> &b) \
+    {                                                               \
+        valarray<T> r(a.size());                                    \
+        for (size_t i = 0; i < a.size(); i++)                       \
+            r[i] = a[i] op b[i];                                    \
+        return r;                                                   \
+    }                                                               \
+    template <class T>                                              \
+    valarray<T> operator op(const valarray<T> &a, const T &v)       \
+    {                                                               \
+        valarray<T> r(a.size());                                    \
+        for (size_t i = 0; i < a.size(); i++)                       \
+            r[i] = a[i] op v;                                       \
+        return r;                                                   \
+    }                                                               \
+    template <class T>                                              \
+    valarray<T> operator op(const T &v, const valarray<T> &a)       \
+    {                                                               \
+        valarray<T> r(a.size());                                    \
+        for (size_t i = 0; i < a.size(); i++)                       \
+            r[i] = v op a[i];                                       \
+        return r;                                                   \
+    }
+
+_LIBCXX_VA_BINOP(+)
+_LIBCXX_VA_BINOP(-)
+_LIBCXX_VA_BINOP(*)
+_LIBCXX_VA_BINOP(/)
+_LIBCXX_VA_BINOP(%)
+_LIBCXX_VA_BINOP(&)
+_LIBCXX_VA_BINOP(|)
+_LIBCXX_VA_BINOP(^)
+_LIBCXX_VA_BINOP(<<)
+_LIBCXX_VA_BINOP(>>)
+#undef _LIBCXX_VA_BINOP
+
+/* The comparisons give a valarray<bool>, elementwise -- NOT a single
+ * bool. `a == b` is a mask, and testing it with `if` does not compile,
+ * which is the design refusing to guess whether "equal" meant all or
+ * any. */
+#define _LIBCXX_VA_CMP(op)                                          \
+    template <class T>                                              \
+    valarray<bool> operator op(const valarray<T> &a,                \
+                               const valarray<T> &b)                \
+    {                                                               \
+        valarray<bool> r(a.size());                                 \
+        for (size_t i = 0; i < a.size(); i++)                       \
+            r[i] = a[i] op b[i];                                    \
+        return r;                                                   \
+    }                                                               \
+    template <class T>                                              \
+    valarray<bool> operator op(const valarray<T> &a, const T &v)    \
+    {                                                               \
+        valarray<bool> r(a.size());                                 \
+        for (size_t i = 0; i < a.size(); i++)                       \
+            r[i] = a[i] op v;                                       \
+        return r;                                                   \
+    }                                                               \
+    template <class T>                                              \
+    valarray<bool> operator op(const T &v, const valarray<T> &a)    \
+    {                                                               \
+        valarray<bool> r(a.size());                                 \
+        for (size_t i = 0; i < a.size(); i++)                       \
+            r[i] = v op a[i];                                       \
+        return r;                                                   \
+    }
+
+_LIBCXX_VA_CMP(==)
+_LIBCXX_VA_CMP(!=)
+_LIBCXX_VA_CMP(<)
+_LIBCXX_VA_CMP(>)
+_LIBCXX_VA_CMP(<=)
+_LIBCXX_VA_CMP(>=)
+#undef _LIBCXX_VA_CMP
+
+template <class T>
+void swap(valarray<T> &a, valarray<T> &b) noexcept { a.swap(b); }
+
+template <class T> T *begin(valarray<T> &v) { return v.__data(); }
+template <class T> const T *begin(const valarray<T> &v) { return v.__data(); }
+template <class T> T *end(valarray<T> &v) { return v.__data() + v.size(); }
+template <class T> const T *end(const valarray<T> &v)
+{ return v.__data() + v.size(); }
+
+/* ---- the transcendental functions, elementwise ------------------------ */
+
+#define _LIBCXX_VA_FN1(fn)                                          \
+    template <class T>                                              \
+    valarray<T> fn(const valarray<T> &a)                            \
+    {                                                               \
+        valarray<T> r(a.size());                                    \
+        for (size_t i = 0; i < a.size(); i++)                       \
+            r[i] = (T)::fn((double)a[i]);                           \
+        return r;                                                   \
+    }
+
+_LIBCXX_VA_FN1(abs)
+_LIBCXX_VA_FN1(acos)
+_LIBCXX_VA_FN1(asin)
+_LIBCXX_VA_FN1(atan)
+_LIBCXX_VA_FN1(cos)
+_LIBCXX_VA_FN1(cosh)
+_LIBCXX_VA_FN1(exp)
+_LIBCXX_VA_FN1(log)
+_LIBCXX_VA_FN1(log10)
+_LIBCXX_VA_FN1(sin)
+_LIBCXX_VA_FN1(sinh)
+_LIBCXX_VA_FN1(sqrt)
+_LIBCXX_VA_FN1(tan)
+_LIBCXX_VA_FN1(tanh)
+#undef _LIBCXX_VA_FN1
+
+template <class T>
+valarray<T> pow(const valarray<T> &a, const valarray<T> &b)
+{
+    valarray<T> r(a.size());
+    for (size_t i = 0; i < a.size(); i++)
+        r[i] = (T)::pow((double)a[i], (double)b[i]);
+    return r;
+}
+
+template <class T>
+valarray<T> pow(const valarray<T> &a, const T &v)
+{
+    valarray<T> r(a.size());
+    for (size_t i = 0; i < a.size(); i++)
+        r[i] = (T)::pow((double)a[i], (double)v);
+    return r;
+}
+
+template <class T>
+valarray<T> atan2(const valarray<T> &a, const valarray<T> &b)
+{
+    valarray<T> r(a.size());
+    for (size_t i = 0; i < a.size(); i++)
+        r[i] = (T)::atan2((double)a[i], (double)b[i]);
+    return r;
+}
+
+}  // namespace std
+
+#endif

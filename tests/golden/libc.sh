@@ -341,6 +341,7 @@ cat > "$out/wide.c" << 'EOF'
 #include <wchar.h>
 #include <wctype.h>
 #include <uchar.h>
+#include <tgmath.h>
 #include <locale.h>
 #include <fenv.h>
 #include <signal.h>
@@ -560,6 +561,73 @@ int main(void)
     CHK(signal(SIGINT, SIG_IGN) == SIG_IGN);
     CHK(signal(999, handler) == SIG_ERR);
 
+    /* ---- every width C11 requires, and the ties-to-even family ------- */
+    /* <tgmath.h> makes a missing variant a compile error rather than a
+     * quiet fallback, which is how the gaps were found. */
+    CHK(sizeof(sqrt(1.0f)) == sizeof(float));
+    CHK(sizeof(sqrt(1.0)) == sizeof(double));
+    CHK(sizeof(sqrt(1.0L)) == sizeof(long double));
+    CHK(sizeof(sqrt(1)) == sizeof(double));      /* an integer widens */
+    CHK(sqrtl(4.0L) == 2.0L && sqrtf(4.0f) == 2.0f);
+    CHK(cbrtl(27.0L) > 2.999L && cbrtl(27.0L) < 3.001L);
+    CHK(fmaf(2.0f, 3.0f, 1.0f) == 7.0f);
+    CHK(expm1f(0.0f) == 0.0f && log1pf(0.0f) == 0.0f);
+    CHK(lroundf(2.6f) == 3 && llroundf(-2.6f) == -3);
+
+    /* The long double forms that MOVE a value rather than computing one
+     * must be exact: narrowing them would lose the bits a long double
+     * was chosen for. This value needs more than 53. */
+    {
+        long double big = 1.0L;
+        for (int i = 0; i < 60; i++)
+            big *= 2.0L;
+        long double x = big + 1.0L;
+        CHK(x != big);
+        CHK(truncl(x + 0.5L) == x);
+        CHK(floorl(-2.5L) == -3.0L && ceill(-2.5L) == -2.0L);
+        CHK(roundl(2.5L) == 3.0L && roundl(-2.5L) == -3.0L);
+        CHK(fmodl(7.5L, 2.0L) == 1.5L);
+        int e = 0;
+        CHK(frexpl(8.0L, &e) == 0.5L && e == 4);
+        long double ip;
+        CHK(modfl(3.25L, &ip) == 0.25L && ip == 3.0L);
+        CHK(ldexpl(1.0L, 10) == 1024.0L);
+    }
+
+    /* nearbyint and rint follow the CURRENT rounding direction, and
+     * round() does not -- round takes a tie AWAY from zero, the default
+     * direction takes it to EVEN. An implementation written as
+     * floor(x + 0.5), which this one was, is round() under another
+     * name, and it drifts a column of half-integers upward in exactly
+     * the way printf's conversion used to. */
+    CHK(nearbyint(2.5) == 2.0 && nearbyint(3.5) == 4.0);
+    CHK(nearbyint(-2.5) == -2.0);
+    CHK(rint(0.5) == 0.0 && rint(1.5) == 2.0);
+    CHK(round(2.5) == 3.0 && round(-2.5) == -3.0);
+    CHK(llrint(2.5) == 2 && llrint(3.5) == 4);
+    /* ... and it really does follow the mode. */
+    fesetround(FE_UPWARD);
+    CHK(nearbyint(2.1) == 3.0);
+    fesetround(FE_DOWNWARD);
+    CHK(nearbyint(2.9) == 2.0);
+    fesetround(FE_TOWARDZERO);
+    CHK(nearbyint(-2.9) == -2.0);
+    fesetround(FE_TONEAREST);
+
+    /* remainder is NOT fmod: fmod truncates the quotient, remainder
+     * rounds it to nearest with ties to EVEN. The nearest multiple of 2
+     * to 7 is 8, so the answer is negative. The tie rule was missing,
+     * and it is the case an argument reduction depends on. */
+    CHK(fmod(7.0, 2.0) == 1.0);
+    CHK(remainder(7.0, 2.0) == -1.0);
+    CHK(remainder(5.0, 2.0) == 1.0);
+    CHK(remainder(3.0, 2.0) == -1.0);
+    CHK(remainder(9.0, 2.0) == 1.0);
+    {
+        int q = 0;
+        CHK(remquo(7.0, 2.0, &q) == -1.0 && q == 4);
+    }
+
     if (!fails)
         printf("wide, locale, fenv and signal: ok\n");
     return fails ? 1 : 42;
@@ -570,7 +638,8 @@ cat "$out/run.txt"
 [ "$rc" = 42 ] || { echo "FAIL: the wide/fenv program exited $rc"; exit 1; }
 want_line "wide, locale, fenv and signal: ok"
 echo "UTF-8 refusing overlong forms, surrogates and split sequences; the
-rounding mode reaching the hardware and changing arithmetic"
+rounding mode reaching the hardware and changing arithmetic; every
+width C11 asks for, and nearbyint and remainder rounding ties to even"
 
 # ---- the acceptance: the whole execution corpus ---------------------------
 ok=0; bad=0
