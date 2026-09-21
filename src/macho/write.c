@@ -81,6 +81,11 @@ void machow_free(struct machow *w)
     free(w);
 }
 
+static unsigned long long round_up(unsigned long long v, unsigned long long a)
+{
+    return a ? (v + a - 1) / a * a : v;
+}
+
 /* The 16-byte name fields are NOT NUL-terminated when the name is
  * exactly sixteen characters; they are padded with zeros otherwise.
  * strncpy is the one call whose surprising behaviour is the required
@@ -106,48 +111,84 @@ int machow_add_section(struct machow *w, const char *segname,
     s->flags = flags;
     s->align = align;
     s->size = size;
+    /* The address is fixed NOW rather than at write time, because a
+     * symbol added next needs it: a Mach-O symbol's n_value is an
+     * address in the object's own space, so a function at offset 0 of
+     * __text and a global at offset 0 of __data do not both have
+     * value 0. ld says so plainly -- "symbol is ignored, because its
+     * address isn't in its designated section". */
+    unsigned long long a = 1ULL << align;
+    s->addr = w->nsect ? round_up(w->sect[w->nsect - 1].addr +
+                                  w->sect[w->nsect - 1].size, a) : 0;
     s->zerofill = (flags & 0xff) == S_ZEROFILL;
     if (!s->zerofill && size)
         buf_append(&s->data, data, (size_t)size);
     return ++w->nsect;              /* 1-based, as n_sect wants */
 }
 
-int machow_add_symbol(struct machow *w, const char *name,
-                      unsigned long long value, int sect, int ext)
+static int add_sym(struct machow *w, const char *name, int prefix,
+                   unsigned long long value, int sect, int ext)
 {
     struct nlist_64 n;
     memset(&n, 0, sizeof n);
-    /* The platform's leading underscore. Applied here so that nothing
-     * above this file has to know the target's symbol convention. */
     n.n_strx = (uint32_t)w->strtab.len;
     if (name && *name) {
-        buf_append(&w->strtab, "_", 1);
+        if (prefix)
+            buf_append(&w->strtab, "_", 1);
         buf_append(&w->strtab, name, strlen(name) + 1);
     } else {
         buf_append(&w->strtab, "", 1);
     }
     n.n_type = (uint8_t)((sect ? N_SECT : N_UNDF) | (ext ? N_EXT : 0));
     n.n_sect = (uint8_t)sect;
-    n.n_value = sect ? value : 0;
+    n.n_value = sect ? w->sect[sect - 1].addr + value : 0;
     buf_append(&w->syms, &n, sizeof n);
-    return w->nsyms++;
+    return ++w->nsyms;              /* 1-based: see write.h */
+}
+
+/* The platform's leading underscore is applied here, so that nothing
+ * above this file has to know the target's symbol convention. */
+int machow_add_symbol(struct machow *w, const char *name,
+                      unsigned long long value, int sect, int ext)
+{
+    return add_sym(w, name, 1, value, sect, ext);
+}
+
+int machow_add_symbol_raw(struct machow *w, const char *name,
+                          unsigned long long value, int sect, int ext)
+{
+    return add_sym(w, name, 0, value, sect, ext);
 }
 
 void machow_add_reloc(struct machow *w, int sect, unsigned long long offset,
                       int sym, int type, int pcrel, int length, long addend)
 {
-    if (sect < 1 || sect > w->nsect)
+    if (sect < 1 || sect > w->nsect || sym < 1)
         return;
+    sym--;                          /* the handle is 1-based; the file is not */
     struct sect *s = &w->sect[sect - 1];
     struct relocation_info r;
 
     /* An addend has nowhere to live in a Mach-O relocation, so each
-     * target carries it the way its own tools do. aarch64 emits an
-     * ARM64_RELOC_ADDEND entry FIRST, whose "symbol number" is the
-     * addend itself; the pair is read together. x86-64 has no such
-     * entry — the addend is already in the instruction or data word,
-     * put there by codegen, and nothing more is needed here. */
-    if (addend && w->cputype == CPU_TYPE_ARM64) {
+     * target carries it the way its own tools do, and aarch64 uses two
+     * different ways depending on WHAT is being patched.
+     *
+     * An instruction field -- a 21-bit page, a 12-bit offset, a 26-bit
+     * branch -- has no room for it, so an ARM64_RELOC_ADDEND entry goes
+     * FIRST, carrying the addend in the place a symbol number would
+     * otherwise sit; the pair is read together.
+     *
+     * A DATA word has room, so the addend belongs in the word and
+     * ARM64_RELOC_ADDEND is rejected outright: ld says "relocation is
+     * not supported: r_type=10 ... r_length=3". The caller stores it,
+     * which is why the driver patches the data buffer before handing
+     * the section over. */
+    int instr_field = type == ARM64_RELOC_PAGE21 ||
+                      type == ARM64_RELOC_PAGEOFF12 ||
+                      type == ARM64_RELOC_BRANCH26 ||
+                      type == ARM64_RELOC_GOT_LOAD_PAGE21 ||
+                      type == ARM64_RELOC_GOT_LOAD_PAGEOFF12;
+    if (addend && w->cputype == CPU_TYPE_ARM64 && instr_field) {
         r.r_address = (int32_t)offset;
         r.r_packed = macho_reloc_pack((uint32_t)addend, 0, length, 0,
                                       ARM64_RELOC_ADDEND);
@@ -158,11 +199,6 @@ void machow_add_reloc(struct machow *w, int sect, unsigned long long offset,
     r.r_packed = macho_reloc_pack((uint32_t)sym, pcrel, length, 1, type);
     buf_append(&s->relocs, &r, sizeof r);
     s->nreloc++;
-}
-
-static unsigned long long round_up(unsigned long long v, unsigned long long a)
-{
-    return a ? (v + a - 1) / a * a : v;
 }
 
 int machow_write(struct machow *w, const char *path)
@@ -187,9 +223,9 @@ int machow_write(struct machow *w, const char *path)
     for (int i = 0; i < w->nsect; i++) {
         struct sect *s = &w->sect[i];
         unsigned long long a = 1ULL << s->align;
-        addr = round_up(addr, a);
-        s->addr = addr;
-        addr += s->size;
+        /* s->addr was fixed when the section was added, so that symbols
+         * could be given real addresses; this only tracks the end. */
+        addr = s->addr + s->size;
         if (s->zerofill) {
             s->offset = 0;          /* nothing in the file */
             continue;

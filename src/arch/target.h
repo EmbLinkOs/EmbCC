@@ -143,6 +143,23 @@ enum reloc_kind {
  * arch). */
 int target_reloc_type(enum target_arch a, enum reloc_kind k);
 
+/* How a kind is spelled as a Mach-O relocation: the type, whether the
+ * field is PC-relative, and the log2 of its width. Returns 0 when the
+ * kind has no Mach-O spelling yet, which is a refusal the caller must
+ * make loudly rather than guess past.
+ *
+ * The ADDEND is the part that does not carry over and is the easiest
+ * thing here to get quietly wrong. ELF's RELA holds it explicitly, and
+ * target_reloc_addend() biases x86-64's PC-relative kinds by -4 because
+ * the field is measured from the END of the instruction. Mach-O has no
+ * addend field: the value sits in the patched word, and the linker
+ * already accounts for the instruction's length itself. Biasing it
+ * again would move every string reference four bytes -- so the Mach-O
+ * path uses the UNBIASED offset, and this comment is why.
+ */
+int target_macho_reloc(enum target_arch a, enum reloc_kind k,
+                       int *pcrel, int *length);
+
 /* The addend the kind carries. x86-64's PC-relative fields are measured
  * from the END of the instruction, so they bias by -4; aarch64's are
  * measured from the instruction itself and bias by 0. `bias` is the

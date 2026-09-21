@@ -36,10 +36,27 @@ int machow_add_section(struct machow *w, const char *segname,
                        unsigned int align);
 
 /* A defined symbol in section `sect` (from machow_add_section), or an
- * undefined one when sect is 0. `name` is the C name; the platform's
- * leading underscore is added here. Returns the symbol index. */
+ * undefined one when sect is 0. `value` is the offset WITHIN that
+ * section; the section's base is added here, because a Mach-O symbol
+ * records an address and an ELF one in a relocatable object records an
+ * offset, and every caller of both would otherwise have to remember
+ * which it was talking to.
+ *
+ * Returns a 1-BASED handle, so that 0 can mean "no symbol yet" -- which
+ * is what callers want, and what ELF gets for free from its reserved
+ * index 0. Mach-O has no such reserved entry: index 0 there is an
+ * ordinary symbol, and a caller using 0 as a sentinel silently
+ * relocates against whichever symbol happened to be added first. */
 int machow_add_symbol(struct machow *w, const char *name,
                       unsigned long long value, int sect, int ext);
+
+/* The same, with the name taken EXACTLY as given -- no underscore.
+ * Assembler temporaries (`ltmp0`, the anchor a section-relative
+ * reference relocates against) have no C name to prefix, and ld strips
+ * a symbol whose name begins with 'l' or 'L' from the final table,
+ * which is the whole reason they are spelled that way. */
+int machow_add_symbol_raw(struct machow *w, const char *name,
+                          unsigned long long value, int sect, int ext);
 
 /* One relocation against `sect`. `offset` is from the start of that
  * section. `length` is the log2 of the patched field's width, `type` a

@@ -19,6 +19,7 @@
 #include "../arch/predef.h"
 #include "../arch/x86_64/as.h"
 #include "../elf/write.h"
+#include "../macho/write.h"
 #include "../ir/ir.h"
 #include "../opt/opt.h"
 #include "../parse/parse.h"
@@ -669,6 +670,205 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             diag_fatal(out, 0, "cannot write the file");
         ob_free(&ab);
         return 0;
+    }
+
+    /* ---- Mach-O (D-014) ------------------------------------------------
+     *
+     * A parallel path rather than a shared one, for the reason D-011
+     * gave when the second backend arrived: the common shape is derived
+     * from two WORKING implementations, not invented from one. Until
+     * this emits everything the ELF path does, what they share is a
+     * guess.
+     *
+     * Refused loudly rather than emitted wrong (THE RULE): debug info,
+     * whose DWARF lives in a __DWARF segment with its own section names
+     * and relocation rules, and the unwind tables, whose "this address
+     * minus that one" is a SUBTRACTOR/UNSIGNED pair here rather than
+     * one relocation.
+     */
+    if (target_fmt_get() == TGT_FMT_MACHO) {
+        if (want_debug)
+            diag_fatal(in, 0,
+                       "-g is not supported for a Darwin target yet: its "
+                       "DWARF goes in a __DWARF segment this does not "
+                       "write, and emitting the ELF layout under a Mach-O "
+                       "name would be worse than refusing");
+        if (unwind || eh.lsda.len)
+            diag_fatal(in, 0,
+                       "exceptions are not supported for a Darwin target "
+                       "yet: the unwind tables need SUBTRACTOR relocation "
+                       "pairs this does not emit");
+        /* Calling a variadic function on Darwin works -- its arguments
+         * go on the stack, as Apple's arm64 requires. DEFINING one does
+         * not yet: va_arg still reads the AAPCS64 register save area,
+         * which now disagrees with what every caller writes. The two
+         * halves would agree only when our code called our code, which
+         * is the worst kind of wrong -- it passes every test that does
+         * not leave the building. */
+        if (ta == TARGET_AARCH64)
+            for (struct func *vf = u->funcs; vf; vf = vf->next)
+                if (!vf->absorbed && vf->has_defn && vf->is_varargs)
+                    diag_fatal(in, vf->line,
+                               "defining a variadic function is not "
+                               "supported for a Darwin arm64 target yet: "
+                               "its arguments arrive on the stack there, "
+                               "and va_arg still reads them from the "
+                               "register save area AAPCS64 uses");
+        struct machow *mw = machow_new(
+            ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
+            ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
+                                 : CPU_SUBTYPE_X86_64_ALL);
+        int m_text = machow_add_section(mw, "__TEXT", "__text",
+                                        S_REGULAR | S_ATTR_PURE_INSTRUCTIONS |
+                                        S_ATTR_SOME_INSTRUCTIONS,
+                                        text.p, text.len, 4);
+        /* Mach-O's data relocations carry no addend field, so the value
+         * goes in the word being patched. The ELF path leaves that word
+         * zero and puts the addend in the RELA entry; here it has to be
+         * written before the section is handed over, because the writer
+         * copies the bytes as it takes them. */
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->defined || g->in_bss || g->named)
+                continue;
+            for (int i = 0; i < g->nrelocs; i++) {
+                long add = g->relocs[i].ftarget || g->relocs[i].gtarget
+                           ? g->relocs[i].addend
+                           : g->relocs[i].str_off + g->relocs[i].addend;
+                long at = g->off + g->relocs[i].off;
+                if (!data || at < 0 || at + 8 > data_len)
+                    continue;
+                unsigned char *d = (unsigned char *)data + at;
+                for (int b = 0; b < 8; b++)
+                    d[b] = (unsigned char)((unsigned long long)add >> (b * 8));
+            }
+        }
+        int m_rodata = 0, m_data = 0, m_bss = 0;
+        if (rodata)
+            m_rodata = machow_add_section(mw, "__TEXT", "__const", S_REGULAR,
+                                          rodata, iu->rodata_len, 0);
+        if (data_len)
+            m_data = machow_add_section(mw, "__DATA", "__data", S_REGULAR,
+                                        data, (unsigned long long)data_len, 3);
+        if (bss_len)
+            m_bss = machow_add_section(mw, "__DATA", "__bss", S_ZEROFILL,
+                                       NULL, (unsigned long long)bss_len, 3);
+        for (int k = 0; k < nnamed; k++)
+            named[k].ndx = machow_add_section(
+                mw, "__DATA", named[k].name,
+                named[k].nobits ? S_ZEROFILL : S_REGULAR,
+                named[k].nobits ? NULL : named[k].buf,
+                (unsigned long long)named[k].len,
+                named[k].align <= 1 ? 0 : named[k].align <= 2 ? 1
+                : named[k].align <= 4 ? 2 : named[k].align <= 8 ? 3 : 4);
+
+        /* The anchor a string reference relocates against. Mach-O has no
+         * section symbols, so a reference into __const needs a symbol of
+         * its own; an `l`-prefixed one is an assembler temporary that ld
+         * uses and then strips from the final table. */
+        int m_rodata_sym = 0;
+        if (m_rodata)
+            m_rodata_sym = machow_add_symbol_raw(mw, "ltmp_const", 0,
+                                                 m_rodata, 0);
+
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && f->has_defn && (!f->is_static || f->used))
+                f->sym_ndx = machow_add_symbol(mw, f->name,
+                                               (unsigned long long)f->code_off,
+                                               m_text, !f->is_static);
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->defined)
+                g->sym_ndx = machow_add_symbol(
+                    mw, g->name, (unsigned long long)g->off,
+                    g->named ? named[g->named - 1].ndx
+                             : g->in_bss ? m_bss : m_data,
+                    !g->is_static);
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && !g->defined && g->used)
+                g->sym_ndx = machow_add_symbol(mw, g->name, 0, 0, 1);
+
+        int mpc = 0, mlen = 2, mt;
+        for (int i = 0; i < next; i++) {
+            struct func *callee = ext[i].callee;
+            if (!callee->sym_ndx)
+                callee->sym_ndx = machow_add_symbol(mw, callee->name, 0, 0, 1);
+            mt = target_macho_reloc(ta, RK_CALL, &mpc, &mlen);
+            if (!mt)
+                diag_fatal(in, 0, "no Mach-O relocation for a call here");
+            machow_add_reloc(mw, m_text,
+                             (unsigned long long)ext[i].patch_off,
+                             callee->sym_ndx, mt - 1, mpc, mlen, 0);
+        }
+        free(ext);
+
+        /* The offset goes in UNBIASED -- see target_macho_reloc's note:
+         * Mach-O accounts for the instruction's length itself, so ELF's
+         * -4 here would move every reference four bytes. */
+        for (int i = 0; i < nstrs; i++) {
+            mt = target_macho_reloc(ta, strs[i].kind, &mpc, &mlen);
+            if (!mt)
+                diag_fatal(in, 0,
+                           "no Mach-O relocation for a string reference here");
+            machow_add_reloc(mw, m_text,
+                             (unsigned long long)strs[i].patch_off,
+                             m_rodata_sym, mt - 1, mpc, mlen,
+                             strs[i].str_off);
+        }
+        free(strs);
+
+        for (int i = 0; i < ngs; i++) {
+            mt = target_macho_reloc(ta, gs[i].kind, &mpc, &mlen);
+            if (!mt)
+                diag_fatal(in, 0,
+                           "no Mach-O relocation for a global reference here");
+            machow_add_reloc(mw, m_text, (unsigned long long)gs[i].patch_off,
+                             gs[i].glob->sym_ndx, mt - 1, mpc, mlen, 0);
+        }
+        free(gs);
+
+        for (int i = 0; i < nfs; i++) {
+            struct func *tf = fs[i].target;
+            if (!tf->sym_ndx)
+                tf->sym_ndx = machow_add_symbol(mw, tf->name, 0, 0, 1);
+            mt = target_macho_reloc(ta, fs[i].kind, &mpc, &mlen);
+            if (!mt)
+                diag_fatal(in, 0,
+                           "no Mach-O relocation for a function address here");
+            machow_add_reloc(mw, m_text, (unsigned long long)fs[i].patch_off,
+                             tf->sym_ndx, mt - 1, mpc, mlen, 0);
+        }
+        free(fs);
+
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->defined || g->in_bss)
+                continue;
+            for (int i = 0; i < g->nrelocs; i++) {
+                struct func *ft = g->relocs[i].ftarget;
+                int sym;
+                long add;
+                if (ft) {
+                    if (!ft->sym_ndx)
+                        ft->sym_ndx = machow_add_symbol(mw, ft->name, 0, 0, 1);
+                    sym = ft->sym_ndx;
+                    add = g->relocs[i].addend;
+                } else if (g->relocs[i].gtarget) {
+                    sym = g->relocs[i].gtarget->sym_ndx;
+                    add = g->relocs[i].addend;
+                } else {
+                    sym = m_rodata_sym;
+                    add = g->relocs[i].str_off + g->relocs[i].addend;
+                }
+                mt = target_macho_reloc(ta, RK_ABS64, &mpc, &mlen);
+                machow_add_reloc(mw,
+                                 g->named ? named[g->named - 1].ndx : m_data,
+                                 (unsigned long long)(g->off +
+                                                      g->relocs[i].off),
+                                 sym, mt - 1, mpc, mlen, add);
+            }
+        }
+
+        int mrc = machow_write(mw, out);
+        machow_free(mw);
+        return mrc != 0;
     }
 
     if (!object_format_ready())

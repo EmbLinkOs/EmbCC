@@ -215,7 +215,7 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
             ob_fmt(b, "%s%%%d", k ? ", " : "", i->argv[k].vreg);
         ob_ch(b, ')');
         if (i->call_varargs)
-            ob_str(b, " varargs");
+            ob_fmt(b, " varargs(%d)", i->call_nfixed);
         if (i->sret_first)
             ob_str(b, " sret");
         break;

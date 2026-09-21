@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "../elf/elf.h"
+#include "../macho/macho.h"
 
 static enum target_arch g_arch = TARGET_X86_64;
 static enum target_os   g_os   = TGT_OS_NONE;
@@ -163,6 +164,40 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
     case RK_DATA_PREL32: return R_X86_64_PC32;
     default:          return -1;
     }
+}
+
+int target_macho_reloc(enum target_arch a, enum reloc_kind k,
+                       int *pcrel, int *length)
+{
+    int t = 0, pc = 0, len = 2;
+    if (a == TARGET_AARCH64) {
+        switch (k) {
+        case RK_CALL:     t = ARM64_RELOC_BRANCH26;  pc = 1; break;
+        case RK_ADR_HI21: t = ARM64_RELOC_PAGE21;    pc = 1; break;
+        case RK_ADD_LO12: t = ARM64_RELOC_PAGEOFF12; pc = 0; break;
+        case RK_GOT_PAGE: t = ARM64_RELOC_GOT_LOAD_PAGE21;    pc = 1; break;
+        case RK_GOT_LO12: t = ARM64_RELOC_GOT_LOAD_PAGEOFF12; pc = 0; break;
+        case RK_ABS64:    t = ARM64_RELOC_UNSIGNED; pc = 0; len = 3; break;
+        case RK_ABS32:    t = ARM64_RELOC_UNSIGNED; pc = 0; break;
+        /* RK_DATA_PREL32 is "target minus this address", which Mach-O
+         * expresses as a SUBTRACTOR/UNSIGNED PAIR rather than one
+         * entry. It is only used by the unwind tables, which this
+         * target does not emit yet, so it is refused rather than
+         * approximated. */
+        default: return 0;
+        }
+    } else {
+        switch (k) {
+        case RK_CALL:    t = X86_64_RELOC_BRANCH;   pc = 1; break;
+        case RK_PCREL32: t = X86_64_RELOC_SIGNED;   pc = 1; break;
+        case RK_ABS64:   t = X86_64_RELOC_UNSIGNED; pc = 0; len = 3; break;
+        case RK_ABS32:   t = X86_64_RELOC_UNSIGNED; pc = 0; break;
+        default: return 0;
+        }
+    }
+    if (pcrel)  *pcrel = pc;
+    if (length) *length = len;
+    return t + 1;          /* +1 so type 0 (UNSIGNED) is not "no answer" */
 }
 
 long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)

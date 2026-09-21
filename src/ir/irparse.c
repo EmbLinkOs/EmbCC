@@ -457,7 +457,19 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                         break;
                 }
             }
-            in->call_varargs = has_flag(rest, "varargs");
+            /* "varargs(N)": N is how many parameters are NAMED, which
+             * decides where the rest go on Darwin. Printed with the flag
+             * rather than beside it so a round-trip cannot keep one and
+             * lose the other -- §9.1 requires print/parse to give back
+             * identical IR, and a dropped field is identical text over
+             * different meaning. */
+            {
+                const char *va = strstr(rest, "varargs");
+                in->call_varargs = va != NULL;
+                in->call_nfixed = 0;
+                if (va && va[7] == '(')
+                    in->call_nfixed = atoi(va + 8);
+            }
             in->sret_first = has_flag(rest, "sret");
             break;
         }

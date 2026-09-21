@@ -165,6 +165,13 @@ struct ir_ins {
     int sret_first;          /* IR_CALL: argument 0 is the indirect-result
                               * pointer (type.h sret_first) */
     int call_varargs;        /* al = 0 needed at the call */
+    int call_nfixed;         /* IR_CALL: how many NAMED parameters the
+                              * callee has. Needed because Darwin's
+                              * arm64 passes every argument past them on
+                              * the stack, where AAPCS64 puts them in
+                              * registers like any other -- so the split
+                              * point, not merely the fact of variadicity,
+                              * decides where an argument goes. */
     struct global *glob;     /* IR_GADDR */
     /* IR_CALL arguments. SysV splits the argument REGISTERS by class —
      * integers walk rdi..r9, floats walk xmm0..7, independently — and

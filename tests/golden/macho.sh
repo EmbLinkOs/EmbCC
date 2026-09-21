@@ -80,3 +80,61 @@ rc=$?
 set -e
 [ "$rc" = 42 ] || { echo "FAIL: the linked program exited $rc, wanted 42"; exit 1; }
 echo "the system linker accepts it and the program runs, exiting 42"
+
+# 4. The whole point: REAL C, compiled by embcc, linked by the system,
+#    calling into libSystem. Everything before this proves the
+#    container; this proves the compiler can fill it.
+EMBCC=${EMBCC:-$EMBCC_ROOT/embcc}
+triple=$([ "$cpu" = arm64 ] && echo aarch64-apple-darwin \
+                            || echo x86_64-apple-darwin)
+cat > "$out/real.c" << 'EOF'
+int puts(const char *);
+int printf(const char *, ...);
+static int counter = 7;
+int table[4] = { 10, 20, 30, 40 };
+const char *msg = "a string through __const";
+static int add(int a, int b) { return a + b; }
+int main(void)
+{
+    puts("compiled by EmbCC, linked by the system");
+    printf("%s c=%d t2=%d sum=%d\n", msg, counter, table[2], add(40, 2));
+    return table[0] + counter;
+}
+EOF
+"$EMBCC" --target="$triple" -c "$out/real.c" -o "$out/real.o" 2> "$out/cc.log" || {
+    echo "FAIL: embcc could not compile for $triple:"; cat "$out/cc.log"; exit 1; }
+cc -o "$out/real" "$out/real.o" 2> "$out/rlink.log" || {
+    echo "FAIL: the system linker refused embcc's object:"
+    cat "$out/rlink.log"; exit 1; }
+set +e
+"$out/real" > "$out/real.txt" 2>&1
+rc=$?
+set -e
+[ "$rc" = 17 ] || { echo "FAIL: the program exited $rc, wanted 17"
+                    cat "$out/real.txt"; exit 1; }
+grep -qx 'compiled by EmbCC, linked by the system' "$out/real.txt" || {
+    echo "FAIL: wrong output:"; cat "$out/real.txt"; exit 1; }
+#    Every value here goes through a different path: the string through
+#    a __const anchor symbol, the two globals through __data symbols,
+#    the sum through a local call -- and all four are VARIADIC
+#    arguments, which Darwin passes on the stack where AAPCS64 would
+#    use registers.
+grep -qx 'a string through __const c=7 t2=30 sum=42' "$out/real.txt" || {
+    echo "FAIL: wrong values -- check the Darwin variadic rule:"
+    cat "$out/real.txt"; exit 1; }
+echo "real C: strings, globals, a local call and Darwin's stack-passed
+varargs all correct, linked against libSystem"
+
+# 5. And what is NOT supported is refused rather than emitted wrong.
+printf '#include <stdarg.h>\nint s(int n, ...) { va_list a; va_start(a, n); int t = va_arg(a, int); va_end(a); return t; }\n' > "$out/va.c"
+if [ "$cpu" = arm64 ]; then
+    "$EMBCC" --target="$triple" -c "$out/va.c" -o "$out/va.o" \
+        2> "$out/va.log" && {
+        echo "FAIL: defining a variadic function was accepted, but va_arg"
+        echo "      still reads the AAPCS64 save area the caller no longer fills"
+        exit 1; }
+    grep -q 'variadic' "$out/va.log" || {
+        echo "FAIL: the refusal does not say what is wrong:"
+        cat "$out/va.log"; exit 1; }
+    echo "defining a variadic function is refused, not silently miscompiled"
+fi

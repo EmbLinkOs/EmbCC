@@ -195,8 +195,26 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
  * result pointer (sret_first: the C++ return slot of a class that is not
  * trivially copyable), which AAPCS64 passes in x8 whatever the result's
  * size — taking none of x0..x7. */
+/* Darwin's arm64 passes every VARIADIC argument on the stack, where
+ * AAPCS64 gives it a register like any other. Apple documents it as a
+ * deliberate divergence, and it is invisible until you call someone
+ * else's printf: our own variadic functions would read the registers we
+ * wrote and agree with themselves.
+ *
+ * Exhausting both register files is how it is expressed here rather
+ * than a fourth placement rule, because that is exactly what the
+ * divergence IS -- the argument is placed by the ordinary C.11/C.12
+ * stack path, having found no registers left. */
+static int a64_on_stack_here(int k, int sret_first, int varargs, int nfixed)
+{
+    if (!varargs || target_os_get() != TGT_OS_DARWIN)
+        return 0;
+    return (sret_first ? k - 1 : k) >= nfixed;
+}
+
 static void a64_place_arg(const struct ir_arg *a, int k, int sret_first,
-                          struct a64_cursor *cu, struct a64_argplan *p)
+                          struct a64_cursor *cu, struct a64_argplan *p,
+                          int varargs, int nfixed)
 {
     if (sret_first && k == 0) {
         memset(p, 0, sizeof *p);
@@ -205,6 +223,10 @@ static void a64_place_arg(const struct ir_arg *a, int k, int sret_first,
         p->reg = 8;
         p->nreg = 1;
         return;
+    }
+    if (a64_on_stack_here(k, sret_first, varargs, nfixed)) {
+        cu->ngrn = 8;
+        cu->nsrn = 8;
     }
     a64_place_info(a, cu, p);
 }
@@ -240,7 +262,8 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
         struct a64_cursor cu = { 0, 0, 0, 0 };
         struct a64_argplan pl;
         for (int k = 0; k < i->nargs; k++)
-            a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl);
+            a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl,
+                          i->call_varargs, i->call_nfixed);
         if (cu.nsaa > outgoing) outgoing = cu.nsaa;
         if (cu.byref_bytes > byref) byref = cu.byref_bytes;
     }
@@ -818,7 +841,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             a64_str(t, A64_SRET, FB, fr.sret, 8);
         for (int p = 0; p < f->nparams; p++) {
             struct a64_argplan pl;
-            a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl);
+            /* 0, 0: a function's DECLARED parameters are all named, so
+             * the Darwin variadic rule has nothing to act on here. What
+             * a variadic callee does with the rest is va_arg's problem,
+             * not this placement's. */
+            a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl,
+                          0, 0);
             if (pl.where == AP_V) {
                 for (int q = 0; q < pl.nreg; q++)
                     a64_fstr(t, pl.reg + q, FB, sd[p] + q * pl.esz, pl.esz);
@@ -1187,7 +1215,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             struct a64_argplan pl[MAX_PARAMS];
             struct a64_cursor cu = { 0, 0, 0, 0 };
             for (int k = 0; k < i->nargs; k++)
-                a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl[k]);
+                a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl[k],
+                              i->call_varargs, i->call_nfixed);
 
             /* 1. The copies B.3 passes by reference: the callee may write
              * its parameter, so it gets a copy, never the caller's object.
@@ -1338,7 +1367,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             struct a64_cursor cu = { 0, 0, 0, 0 };
             struct a64_argplan pl;
             for (int p = 0; p < f->nparams; p++)
-                a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl);
+                /* 0, 0: a function's DECLARED parameters are all named, so
+             * the Darwin variadic rule has nothing to act on here. What
+             * a variadic callee does with the rest is va_arg's problem,
+             * not this placement's. */
+            a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl,
+                          0, 0);
             long tag = fr.va_tag;
             addr_of(t, A64_ACC, A64_FP, 16 + ((cu.nsaa + 7) & ~7L));
             a64_str(t, A64_ACC, FB, tag + 0, 8);

@@ -111,8 +111,9 @@ echo "__ELF__ follows the format, not the architecture"
 
 # 5. THE RULE. A target whose object writer does not exist is refused,
 #    by name, and writes nothing -- rather than quietly emitting ELF and
-#    calling it a Mach-O object.
-for t in aarch64-apple-darwin x86_64-windows-gnu; do
+#    calling it a COFF object. Darwin was on this list until its writer
+#    was built; that it had to be taken off is the check working.
+for t in x86_64-windows-gnu; do
     rm -f "$out/o.o"
     if "$EMBCC" --target="$t" -c "$out/t.c" -o "$out/o.o" 2> "$out/err.txt"; then
         echo "FAIL: $t emitted an object it has no writer for"; exit 1
@@ -128,11 +129,28 @@ echo "a format with no writer is refused by name, and writes no file"
 # 6. ...and the parts that DO work for such a target keep working, which
 #    is why the triple is in the table before its writer exists: the
 #    macros and the preprocessor are how the port gets developed.
-"$EMBCC" --target=aarch64-apple-darwin -E "$out/t.c" > "$out/pp.txt" 2>&1 || {
+"$EMBCC" --target=x86_64-windows-gnu -E "$out/t.c" > "$out/pp.txt" 2>&1 || {
     echo "FAIL: -E refused for a target whose writer is missing"; exit 1; }
 grep -q 'int main' "$out/pp.txt" || {
     echo "FAIL: -E produced nothing useful"; cat "$out/pp.txt"; exit 1; }
 echo "-E still works for a target whose object writer is not built yet"
+
+# 6b. Darwin HAS a writer now, and it produces a Mach-O rather than an
+#     ELF wearing the name. Checked here on any host -- writing the
+#     format needs nothing from the platform; only linking it does, and
+#     macho.sh does that where it can.
+"$EMBCC" --target=aarch64-apple-darwin -c "$out/t.c" -o "$out/d.o" || {
+    echo "FAIL: aarch64-apple-darwin did not produce an object"; exit 1; }
+#     0xfeedfacf little-endian, and CPU_TYPE_ARM64 = 0x0100000c.
+od -An -tx1 -N8 "$out/d.o" | tr -d ' \n' > "$out/magic.txt"
+grep -qi '^cffaedfe0c000001$' "$out/magic.txt" || {
+    echo "FAIL: not a Mach-O arm64 header: $(cat "$out/magic.txt")"; exit 1; }
+"$EMBCC" --target=x86_64-apple-darwin -c "$out/t.c" -o "$out/d64.o" || {
+    echo "FAIL: x86_64-apple-darwin did not produce an object"; exit 1; }
+od -An -tx1 -N8 "$out/d64.o" | tr -d ' \n' > "$out/magic64.txt"
+grep -qi '^cffaedfe07000001$' "$out/magic64.txt" || {
+    echo "FAIL: not a Mach-O x86-64 header: $(cat "$out/magic64.txt")"; exit 1; }
+echo "both Darwin triples emit a Mach-O object with their own cputype"
 
 # 7. The one hosted target that is complete enough to emit: Linux is ELF
 #    and System V, both of which already existed, so it produces a real
