@@ -232,49 +232,13 @@ int __os_getentropy(void *buf, size_t n)
 
 /* ---- threads, and blocking ------------------------------------------------
  *
- * The futex half is here and works; the thread half is not, and says
- * so.
- *
- * Creating a thread on Linux means clone(2) with a stack the caller
- * allocated, and the child comes back from the syscall on that stack
- * with no return address and no frame -- so the entry has to be written
- * in assembly, per architecture, and it cannot be got approximately
- * right. Nothing in this repository can currently RUN a Linux program
- * to find out whether it was (see tests/golden/linux.sh, which says the
- * same). An untested clone stub would compile, link, and crash in a way
- * that looked like a bug in whatever ran on the new thread.
- *
- * So these three return ENOSYS, which the seam documents as the answer
- * for a target with no threads, and std::thread's constructor turns
- * into a system_error the caller can see. That is a program that
- * refuses to start a thread, rather than one that starts a broken one.
+ * The lifecycle half -- create, join, detach, self -- is in thread.c,
+ * because it needs clone(2) and a per-architecture assembly entry and
+ * is a different kind of thing from a syscall wrapper. What is left
+ * here is what is: yield, sleep, and the futex operation every mutex,
+ * condition variable, semaphore and latch in the C++ library is built
+ * from.
  */
-int __os_thread_create(unsigned long *id, void (*fn)(void *), void *arg)
-{
-    (void)id; (void)fn; (void)arg;
-    errno = ENOSYS;
-    return -1;
-}
-
-int __os_thread_join(unsigned long id)
-{
-    (void)id;
-    errno = ENOSYS;
-    return -1;
-}
-
-int __os_thread_detach(unsigned long id)
-{
-    (void)id;
-    errno = ENOSYS;
-    return -1;
-}
-
-unsigned long __os_thread_self(void)
-{
-    return 0;
-}
-
 void __os_thread_yield(void)
 {
     lsys0(LSYS_sched_yield);

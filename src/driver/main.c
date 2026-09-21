@@ -466,6 +466,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     f->used = 1;
     }
 
+    /* A constructor is called by the startup code, not by this unit, so
+     * nothing here refers to it -- and a `static` one would otherwise
+     * look dead, be dropped, and leave a relocation pointing at a
+     * symbol that was never emitted. Being in .init_array IS the use. */
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && (f->is_ctor || f->is_dtor))
+            f->used = 1;
+
     remarks_enable(want_remarks || why_decision != NULL);
     struct ir_unit *iu = irgen(u);
     opt_run(iu, opt_level);
@@ -712,6 +720,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                            "references is not supported for a Darwin "
                            "target yet: its bytes would be emitted but "
                            "its symbols and relocations dropped");
+        /* Mach-O gathers these from __DATA,__mod_init_func rather than
+         * from an SHT_INIT_ARRAY section, and this writer emits no such
+         * section. Dropping them would give back exactly the silent
+         * failure this attribute was implemented to end. */
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && (f->is_ctor || f->is_dtor))
+                diag_fatal(f->file, f->line,
+                           "__attribute__((%s)) is not supported for a "
+                           "Darwin target yet: it needs a "
+                           "__DATA,__mod_init_func section this Mach-O "
+                           "writer does not emit",
+                           f->is_ctor ? "constructor" : "destructor");
         struct machow *mw = machow_new(
             ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
             ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
@@ -1049,6 +1069,37 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             w, named[k].name, named[k].nobits ? SHT_NOBITS : SHT_PROGBITS,
             (Elf64_Xword)named[k].flags, named[k].buf,
             (Elf64_Xword)named[k].len, (Elf64_Xword)named[k].align);
+
+    /* __attribute__((constructor)) / ((destructor)): the function's
+     * ADDRESS goes in .init_array / .fini_array, one eight-byte slot
+     * each, and the relocations further down fill the slots in. The
+     * bytes are zero here because an object file records the question,
+     * not the answer -- the address is not known until the link.
+     *
+     * The section TYPE carries the meaning. A linker gathers these by
+     * SHT_INIT_ARRAY, so the same bytes under SHT_PROGBITS would be
+     * laid out as ordinary data and the constructors would never run,
+     * which is exactly the failure this whole path exists to fix. */
+    int nctor = 0, ndtor = 0;
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && f->has_defn) {
+            if (f->is_ctor) nctor++;
+            if (f->is_dtor) ndtor++;
+        }
+    int init_ndx = 0, fini_ndx = 0;
+    unsigned char *initbuf = NULL, *finibuf = NULL;
+    if (nctor) {
+        initbuf = xcalloc((size_t)nctor, 8);
+        init_ndx = elfw_add_section(w, ".init_array", SHT_INIT_ARRAY,
+                                    SHF_ALLOC | SHF_WRITE, initbuf,
+                                    (Elf64_Xword)(nctor * 8), 8);
+    }
+    if (ndtor) {
+        finibuf = xcalloc((size_t)ndtor, 8);
+        fini_ndx = elfw_add_section(w, ".fini_array", SHT_FINI_ARRAY,
+                                    SHF_ALLOC | SHF_WRITE, finibuf,
+                                    (Elf64_Xword)(ndtor * 8), 8);
+    }
     /* -g: the three DWARF sections (non-alloc, so no load cost; stripped
      * from a shipped image without touching the code). Their indices feed
      * the relocation-target lookup below. */
@@ -1167,6 +1218,27 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                       target_reloc_addend(ta, RK_CALL, 0));
     }
     free(ext);
+
+    /* Fill the constructor/destructor slots: each is the address of a
+     * function of this unit, so each is an absolute 64-bit relocation
+     * against that function's symbol. Source order, which is the order
+     * the section was sized in -- a priority would change it, and
+     * parse.c refuses one rather than quietly running them wrong. */
+    if (nctor || ndtor) {
+        int ci = 0, di = 0;
+        for (struct func *f = u->funcs; f; f = f->next) {
+            if (f->absorbed || !f->has_defn)
+                continue;
+            if (f->is_ctor)
+                elfw_add_rela(w, init_ndx, (Elf64_Addr)(ci++ * 8),
+                              f->sym_ndx,
+                              target_reloc_type(target_get(), RK_ABS64), 0);
+            if (f->is_dtor)
+                elfw_add_rela(w, fini_ndx, (Elf64_Addr)(di++ * 8),
+                              f->sym_ndx,
+                              target_reloc_type(target_get(), RK_ABS64), 0);
+        }
+    }
 
     /* File-scope asm relocations against the target: a function of this
      * unit (already symboled and forced used above) or, failing that, a

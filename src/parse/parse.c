@@ -25,6 +25,10 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * argument is a format string" without the compiler
                 * hard-coding the names of the standard library. */
                int fmt_kind, fmt_idx, fmt_first;
+               /* constructor / destructor: run before main, or at exit.
+                * The function's address goes in .init_array/.fini_array
+                * and the startup code walks them. */
+               int ctor, dtor;
 };
 
 struct parser {
@@ -279,9 +283,50 @@ static int attr_is(const char *n, const char *base)
            strcmp(n + 2 + bl, "__") == 0;
 }
 
+/* Attributes EmbCC does not implement and must not skip.
+ *
+ * Skipping an unknown attribute is the right default and stays the
+ * default: `always_inline`, `pure`, `hot`, `unused` and the rest are
+ * HINTS, and a compiler that ignores a hint is slower than it could be,
+ * not wrong.
+ *
+ * These are not hints. Each one changes the code that has to be
+ * generated, and a program that asked for one and did not get it
+ * compiles, links, runs, and does something else:
+ *
+ *   naked      the prologue the function said it must not have is
+ *              emitted anyway, so its own asm runs on a frame it did
+ *              not set up.
+ *   interrupt  the handler returns with `ret` where the CPU needs
+ *              `iret`, and without the caller-saved registers.
+ *   cleanup    the cleanup never runs.
+ *   ms_abi     the arguments go in System V's registers.
+ *   sysv_abi   and the other way round.
+ *
+ * So each is refused by name (THE RULE). `returns_twice` belongs here
+ * and is deliberately absent: newlib's headers put it on setjmp, so
+ * refusing it would stop a corpus this compiler is tested against from
+ * building at all. docs/developer/todo.md records that.
+ *
+ * `constructor` and `destructor` were on this list while it was being
+ * written, which is how they were found -- but refusing them would have
+ * broken EmbLinkOS's own crt0, so they are implemented below instead. */
+static int attr_unimplemented(const char *n)
+{
+    static const char *const bad[] = {
+        "naked", "interrupt", "cleanup", "ms_abi", "sysv_abi",
+    };
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        if (attr_is(n, bad[i]))
+            return 1;
+    return 0;
+}
+
 /* Consume a run of `__attribute__((...))`. packed / aligned(N) (struct
- * layout) and weak (symbol binding) are recorded in `out`; every other
- * attribute is skipped along with its balanced parenthesized arguments.
+ * layout), weak (symbol binding) and constructor/destructor (static
+ * initialisation) are recorded in `out`; every other attribute is
+ * skipped along with its balanced parenthesized arguments, unless
+ * attr_unimplemented() says skipping it would be a lie.
  * Callers pass out=NULL where no attribute is meaningful (member/param). */
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
@@ -340,12 +385,34 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     advance(ps);
                 }
             }
+            if (name && attr_unimplemented(name))
+                parse_error_line(ps, aline,
+                    "__attribute__((%s)) is not supported: honouring it "
+                    "would change the code EmbCC generates, and ignoring "
+                    "it would produce a program that compiles and does "
+                    "something else", name);
             if (name && out) {
                 if (attr_is(name, "packed")) out->packed = 1;
                 else if (attr_is(name, "weak")) out->weak = 1;
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;
                 else if (attr_is(name, "nothrow")) out->nothrow = 1;
                 else if (attr_is(name, "embcc_sret")) out->sret = 1;
+                else if (attr_is(name, "constructor") ||
+                         attr_is(name, "destructor")) {
+                    /* A priority orders the array, and EmbCC emits one
+                     * .init_array in source order. Accepting the
+                     * argument and ignoring it would run them in the
+                     * wrong order, which is the whole point of writing
+                     * one -- so it is refused and the plain form is
+                     * not. */
+                    if (arg >= 0)
+                        parse_error_line(ps, aline,
+                            "__attribute__((%s(%ld))) is not supported: "
+                            "EmbCC emits one .init_array in source order "
+                            "and cannot honour a priority", name, arg);
+                    if (attr_is(name, "constructor")) out->ctor = 1;
+                    else out->dtor = 1;
+                }
                 else if (attr_is(name, "aligned"))
                     out->aligned = arg > 0 ? (int)arg : 16;
                 else if (attr_is(name, "format") && fkind && fidx > 0) {
@@ -469,7 +536,7 @@ static int param_sret_attr(struct parser *ps, int index)
     if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
         return 0;
     struct token *at = cur(ps);
-    struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+    struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0 };
     parse_attributes(ps, &a);
     if (a.sret && index != 0)
         parse_error_at(ps, at->line, at->col,
@@ -560,7 +627,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
      * closing brace (parse_struct_body). Leading ones are collected here and
      * applied to the body exactly as trailing ones are. Between the tag and
      * the '{' is NOT a place gcc accepts one, so neither does EmbCC. */
-    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0 };
     parse_attributes(ps, &lead);
     const char *tag = NULL;
     if (cur(ps)->kind == TOK_IDENT) {
@@ -877,7 +944,7 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * they are refused rather than silently dropped. */
         if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             struct token *at_tok = cur(ps);
-            struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+            struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0 };
             parse_attributes(ps, &a);
             if (ps->attr_carry_on) {
                 /* The enclosing declaration will take them. */
@@ -1251,7 +1318,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                 cap = cap ? cap * 2 : 8;
                 ms = xrealloc(ms, (size_t)cap * sizeof *ms);
             }
-            struct attrs mat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+            struct attrs mat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0 };
             parse_attributes(ps, &mat);  /* T buf[N] __attribute__((aligned(N))) */
             ms[n].name = mname;
             ms[n].ty = mty;
@@ -2318,7 +2385,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * on a local declarator; aligned(N) raises the stack slot's
              * alignment (codegen rounds the frame offset). */
             {
-                struct attrs lat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+                struct attrs lat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0 };
                 parse_attributes(ps, &lat);
                 if (lat.section)
                     parse_error_line(ps, s->line,
@@ -2645,7 +2712,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
 
     int is_static = 0, is_extern = 0;
-    struct attrs at = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+    struct attrs at = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0 };
     ps->seq = seq;
 
     /* A file-scope `__asm__("...")` block (crt0's _start stub). Basic asm
@@ -2788,6 +2855,10 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_idx = at.fmt_idx;
     f->fmt_first = at.fmt_first;
                 f->is_nothrow = at.nothrow;
+    f->is_ctor = at.ctor;
+    f->is_dtor = at.dtor;
+                f->is_ctor = at.ctor;
+                f->is_dtor = at.dtor;
                 f->ret_ty = gt->ret;
                 f->name = name = gname;
                 f->file = ps->lx.file;
@@ -2838,6 +2909,8 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_idx = at.fmt_idx;
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
+    f->is_ctor = at.ctor;
+    f->is_dtor = at.dtor;
     f->ret_ty = ty;
     f->name = name;
     f->file = ps->lx.file;
@@ -2910,6 +2983,8 @@ fn_tail:
     f->fmt_idx = at.fmt_idx;
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
+    f->is_ctor = at.ctor;
+    f->is_dtor = at.dtor;
     if (at.section)
         parse_error_line(ps, line,
                    "section attribute on function '%s' is not supported — "

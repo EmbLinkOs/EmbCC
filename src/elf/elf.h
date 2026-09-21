@@ -155,6 +155,12 @@ typedef struct {
 #define SHT_STRTAB    3
 #define SHT_RELA      4
 #define SHT_NOBITS    8
+/* Arrays of function pointers the startup code walks before main and at
+ * exit. Their TYPE is what says so -- a linker gathers sections by type
+ * here, not by name -- so a .init_array emitted as SHT_PROGBITS would
+ * be laid out as ordinary data and never run. */
+#define SHT_INIT_ARRAY 14
+#define SHT_FINI_ARRAY 15
 #define SHT_X86_64_UNWIND 0x70000001   /* x86-64 psABI: .eh_frame's type */
 
 /* sh_flags */

@@ -46,17 +46,22 @@
 #define LSYS_write         1
 #define LSYS_close         3
 #define LSYS_lseek         8
+#define LSYS_mmap          9
+#define LSYS_mprotect     10
+#define LSYS_munmap       11
 #define LSYS_brk          12
 #define LSYS_ioctl        16
 #define LSYS_writev       20
 #define LSYS_sched_yield  24
 #define LSYS_nanosleep    35
+#define LSYS_clone        56
 #define LSYS_exit         60
 #define LSYS_ftruncate    77
 #define LSYS_getcwd       79
 #define LSYS_chdir        80
 #define LSYS_truncate     76
 #define LSYS_statfs      137
+#define LSYS_gettid      186
 #define LSYS_futex       202
 #define LSYS_getdents64  217
 #define LSYS_clock_gettime 228
@@ -116,7 +121,12 @@
 #define LSYS_nanosleep   101
 #define LSYS_clock_gettime 113
 #define LSYS_sched_yield 124
+#define LSYS_gettid      178
 #define LSYS_brk         214
+#define LSYS_munmap      215
+#define LSYS_clone       220
+#define LSYS_mmap        222
+#define LSYS_mprotect    226
 #define LSYS_getrandom   278
 #define LSYS_statx       291
 
@@ -184,6 +194,19 @@ static inline long lsys5(long n, long a, long b, long c, long d, long e)
                       : "rcx", "r11", "memory");
     return r;
 }
+static inline long lsys6(long n, long a, long b, long c, long d, long e,
+                         long f)
+{
+    long r;
+    register long r10 __asm__("r10") = d;
+    register long r8  __asm__("r8")  = e;
+    register long r9  __asm__("r9")  = f;
+    __asm__ volatile ("syscall" : "=a"(r)
+                      : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8),
+                        "r"(r9)
+                      : "rcx", "r11", "memory");
+    return r;
+}
 
 #elif defined(__aarch64__)
 
@@ -237,6 +260,21 @@ static inline long lsys5(long n, long a, long b, long c, long d, long e)
     register long x4 __asm__("x4") = e;
     __asm__ volatile ("svc #0" : "+r"(x0)
                       : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4)
+                      : "memory", "cc");
+    return x0;
+}
+static inline long lsys6(long n, long a, long b, long c, long d, long e,
+                         long f)
+{
+    register long x8 __asm__("x8") = n;
+    register long x0 __asm__("x0") = a;
+    register long x1 __asm__("x1") = b;
+    register long x2 __asm__("x2") = c;
+    register long x3 __asm__("x3") = d;
+    register long x4 __asm__("x4") = e;
+    register long x5 __asm__("x5") = f;
+    __asm__ volatile ("svc #0" : "+r"(x0)
+                      : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
                       : "memory", "cc");
     return x0;
 }

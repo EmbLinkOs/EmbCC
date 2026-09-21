@@ -115,6 +115,20 @@ static void ok(const char *what, int cond)
     if (!cond) { printf("FAIL %s\n", what); fails++; }
 }
 
+/* A constructor runs before main and a destructor after it, both walked
+ * by our own crt1 (lib/libc/os/linux/start.c). The destructor is
+ * checked HERE rather than in tests/exec, because it runs after main
+ * has returned its value and so no exit status can witness one -- only
+ * output can. */
+static int ctor_ran;
+__attribute__((constructor)) static void before(void) { ctor_ran = 1; }
+__attribute__((destructor)) static void after(void)
+{
+    /* Through stdio, so this also proves exit() flushed after the
+     * .fini_array walk rather than before it. */
+    printf("destructor ran\n");
+}
+
 int main(int argc, char **argv)
 {
     /* The library through its public face: stdio's formatting and
@@ -184,12 +198,13 @@ int main(int argc, char **argv)
     /* A plausible clock rather than a fixed one: the check is that the
      * seconds field was read from the right place, not what time it is. */
     ok("time", __os_time() > 1600000000L);
+    ok("constructor", ctor_ran == 1);
 
     ok("unlink", __os_unlink("embcc-d/f") == 0);
     ok("rmdir", __os_rmdir("embcc-d") == 0);
     ok("gone", __os_stat("embcc-d", &st) != 0);
 
-    printf("seam: %d checks, %d failed\n", 21, fails);
+    printf("seam: %d checks, %d failed\n", 22, fails);
     return fails ? 1 : 42;
 }
 EOF
@@ -406,17 +421,194 @@ grep -qx "$want_argv" "$out/run.txt" || {
 grep -qx 'heap 1.500 42' "$out/run.txt" || {
     echo "FAIL: the heap, float formatting or strtol is wrong:"
     cat "$out/run.txt"; exit 1; }
-grep -qx 'seam: 21 checks, 0 failed' "$out/run.txt" || {
+#  The destructor's line has to be LAST: .fini_array runs from exit(),
+#  after main returned, and stdio is flushed after that.
+grep -qx 'destructor ran' "$out/run.txt" || {
+    echo "FAIL: the .fini_array destructor did not run:"
+    cat "$out/run.txt"; exit 1; }
+[ "$(tail -1 "$out/run.txt")" = 'destructor ran' ] || {
+    echo "FAIL: the destructor did not run last:"; cat "$out/run.txt"
+    exit 1; }
+grep -qx 'seam: 22 checks, 0 failed' "$out/run.txt" || {
     echo "FAIL: the seam checks did not all pass:"; cat "$out/run.txt"
     exit 1; }
 
 if [ "$runner" = native ]; then
     echo "and it RUNS on this kernel: stdio, argv off the initial stack,
-the heap through brk, and 21 checks over files, statx, getdents64, getcwd
-and the clock -- exit status 42"
+the heap through brk, and 22 checks over files, statx, getdents64, getcwd
+and the clock, plus a constructor before main and a destructor after
+it -- exit status 42"
 else
     echo "and it RUNS as PID 1 on a real Linux kernel under QEMU: stdio,
-argv off the initial stack, the heap through brk, and 21 checks over
-files, statx, getdents64, getcwd and the clock. The exit status 42 is
-the kernel's own report of what main returned."
+argv off the initial stack, the heap through brk, and 22 checks over
+files, statx, getdents64, getcwd and the clock, plus a constructor
+before main and a destructor after it. The exit status 42 is the
+kernel's own report of what main returned."
 fi
+
+# ---- 6. threads ------------------------------------------------------------
+#
+# clone(2) returns into the child on a stack the caller allocated, with
+# no frame and no return address, so lib/libc/os/linux/thread.c enters
+# it through a per-architecture assembly stub. That stub was not written
+# until this file could boot a kernel, because a wrong one compiles,
+# links, and crashes inside whatever the new thread was supposed to do.
+#
+# So this part exists to run it. It also runs the C++ layer above it
+# when that library has been built, because std::mutex and
+# std::atomic::wait are what the futex half is FOR and neither is
+# exercised by the seam alone.
+build_and_run() {                     # build_and_run NAME [extra-ld-args...]
+    name=$1; shift
+    "$EMBCC" --target="$triple" ${XFLAGS:-} -c "$out/$name.$EXT" \
+        -I"$EMBCC_ROOT/lib/libc/include" -I"$EMBCC_ROOT/lib/libc/os" \
+        -I"$EMBCC_ROOT/lib/libcxx/include" \
+        -o "$out/$name.o" 2> "$out/$name-cc.log" || {
+        echo "FAIL: embcc could not compile $name.$EXT:"
+        cat "$out/$name-cc.log"; exit 1; }
+    #  libgcc goes LAST, after libc.a: aarch64's binary128 long double
+    #  calls __trunctfdf2 and friends from inside the math library, so a
+    #  -lgcc placed earlier is already finished with by the time the
+    #  archive that needs it is read.
+    "$LD" -static -e _start -o "$out/$name" "$LIBDIR/crt1.o" \
+        "$out/$name.o" "$@" "$LIBDIR/libc.a" ${LDEXTRA:-} \
+        2> "$out/$name-ld.log" || {
+        echo "FAIL: linking $name:"; cat "$out/$name-ld.log"; exit 1; }
+    set +e
+    if [ "$runner" = native ]; then
+        ( cd "$out" && "./$name" ) > "$out/$name.txt" 2>&1
+    else
+        "$EMBCC_ROOT/tests/harness/linux/run.sh" "$ARCH" "$out/$name" \
+            > "$out/$name.txt" 2>&1
+    fi
+    rc=$?
+    set -e
+}
+
+cat > "$out/threads.c" << 'EOF'
+#include <stdio.h>
+#include "backend.h"
+
+static volatile int counter;
+static unsigned long worker_self;
+
+static void worker(void *arg)
+{
+    int n = *(int *)arg;
+    for (int i = 0; i < n; i++)
+        __atomic_fetch_add(&counter, 1, __ATOMIC_SEQ_CST);
+    worker_self = __os_thread_self();
+}
+
+static void quiet(void *arg) { (void)arg; }
+
+int main(void)
+{
+    int n = 1000;
+    unsigned long a = 0, b = 0, c = 0;
+
+    /* The thread the program started on never had a handle, and 0 is
+     * the answer the seam documents for it. recursive_mutex depends on
+     * that being distinct from every real one. */
+    printf("main-self=%lu\n", __os_thread_self());
+
+    if (__os_thread_create(&a, worker, &n) != 0 ||
+        __os_thread_create(&b, worker, &n) != 0) {
+        printf("create failed\n");
+        return 1;
+    }
+    printf("distinct=%d\n", a && b && a != b);
+
+    /* join is the kernel's CLONE_CHILD_CLEARTID: it zeroes the word and
+     * wakes it. If the wait and the wake disagreed about whether the
+     * futex is private, this would hang rather than fail. */
+    if (__os_thread_join(a) != 0 || __os_thread_join(b) != 0) {
+        printf("join failed\n");
+        return 1;
+    }
+    printf("counter=%d\n", counter);
+    printf("worker-had-handle=%d\n", worker_self != 0);
+
+    if (__os_thread_create(&c, quiet, 0) != 0 ||
+        __os_thread_detach(c) != 0) {
+        printf("detach failed\n");
+        return 1;
+    }
+    printf("detached=1\n");
+    return counter == 2 * n ? 42 : 1;
+}
+EOF
+EXT=c XFLAGS= build_and_run threads
+[ "$rc" != 124 ] || { echo "FAIL: the thread test timed out -- join is
+probably waiting on a futex the kernel never wakes"; exit 1; }
+[ "$rc" = 42 ] || { echo "FAIL: the thread test exited $rc, wanted 42:"
+                    cat "$out/threads.txt"; exit 1; }
+for want in 'main-self=0' 'distinct=1' 'counter=2000' \
+            'worker-had-handle=1' 'detached=1'; do
+    grep -qx "$want" "$out/threads.txt" || {
+        echo "FAIL: threads: expected \"$want\":"
+        cat "$out/threads.txt"; exit 1; }
+done
+echo "threads: two ran and were joined, 2000 atomic increments arrived,
+each knew its own handle and the main thread has none, and one detached"
+
+# The C++ layer, when its runtime has been built for this triple. libgcc
+# supplies _Unwind_Resume, which a cleanup path references even in a
+# program that throws nothing.
+CXXLIB=$EMBCC_ROOT/build/libcxx/linux-$ARCH/libcxx.a
+GCC=$([ "$ARCH" = x86_64 ] && echo x86_64-elf-gcc || echo aarch64-elf-gcc)
+if [ ! -f "$CXXLIB" ]; then
+    echo "skipped: no $CXXLIB (make libcxx-linux-$ARCH), so std::thread
+and std::mutex over this backend are not exercised"
+    exit 0
+fi
+command -v "$GCC" > /dev/null 2>&1 || {
+    echo "skipped: no $GCC for libgcc's unwinder"; exit 0; }
+LIBGCC=$(dirname "$("$GCC" -print-libgcc-file-name)")
+
+cat > "$out/cxxthreads.cc" << 'EOF'
+#include <cstdio>
+#include <thread>
+#include <mutex>
+#include <atomic>
+
+static std::mutex m;
+static int guarded;
+static std::atomic<int> flag{0};
+
+int main()
+{
+    /* A contended mutex: ten thousand increments of a plain int that
+     * is only correct if the lock is. */
+    std::thread a([]{ for (int i = 0; i < 5000; i++)
+                          { std::lock_guard<std::mutex> g(m); guarded++; } });
+    std::thread b([]{ for (int i = 0; i < 5000; i++)
+                          { std::lock_guard<std::mutex> g(m); guarded++; } });
+    std::printf("joinable=%d\n", (int)(a.joinable() && b.joinable()));
+    a.join();
+    b.join();
+    std::printf("guarded=%d\n", guarded);
+
+    /* And the futex half, through the interface it exists for: this
+     * blocks in the kernel until the other thread stores and notifies. */
+    std::thread c([]{ flag.store(1, std::memory_order_release);
+                      flag.notify_one(); });
+    c.detach();
+    flag.wait(0, std::memory_order_acquire);
+    std::printf("notified=%d\n", flag.load());
+    return guarded == 10000 && flag.load() == 1 ? 42 : 1;
+}
+EOF
+EXT=cc XFLAGS="-x c++" LDEXTRA="-L$LIBGCC -lgcc" \
+    build_and_run cxxthreads "$CXXLIB"
+[ "$rc" != 124 ] || { echo "FAIL: the C++ thread test timed out"; exit 1; }
+[ "$rc" = 42 ] || { echo "FAIL: the C++ thread test exited $rc, wanted 42:"
+                    cat "$out/cxxthreads.txt"; exit 1; }
+for want in 'joinable=1' 'guarded=10000' 'notified=1'; do
+    grep -qx "$want" "$out/cxxthreads.txt" || {
+        echo "FAIL: C++ threads: expected \"$want\":"
+        cat "$out/cxxthreads.txt"; exit 1; }
+done
+echo "and the C++ layer over it: std::thread joined and detached,
+std::mutex kept 10000 contended increments exact, and
+std::atomic::wait/notify blocked and woke through the futex"

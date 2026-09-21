@@ -96,6 +96,14 @@ extern initfn __init_array_end[] __attribute__((weak));
 extern initfn __fini_array_start[] __attribute__((weak));
 extern initfn __fini_array_end[] __attribute__((weak));
 
+/* The token __cxa_atexit is handed to say WHICH module registered a
+ * destructor, so that unloading a shared object can run just its own.
+ * A static image is one module, and its address is the only thing that
+ * ever has to be unique -- which is why it points at itself. Every C++
+ * program with a global that has a destructor references this, so a
+ * crt without it fails to link rather than misbehaving. */
+void *__dso_handle = &__dso_handle;
+
 /* .fini_array runs BACKWARD, and through atexit rather than after main
  * returns: a program that calls exit() must still run it, and exit() is
  * the only path both endings share. */

@@ -172,13 +172,14 @@ $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 # tested, and a fix made in the library is reported as still broken (or,
 # worse, a break is reported as fixed).
 test: embcc embread embld embdbg embls libc-x86_64 libcxx-x86_64 \
-      libc-linux-x86_64
+      libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
 # The aarch64 suite: compile for the second architecture and RUN the result
 # under qemu-system-aarch64 (tests/harness/aarch64). Separate from `test`
 # because it needs the cross newlib and QEMU, which `test` does not.
-test-arm64: embcc libc-aarch64 libcxx-aarch64 libc-linux-aarch64
+test-arm64: embcc libc-aarch64 libcxx-aarch64 libc-linux-aarch64 \
+            libcxx-linux-aarch64
 	tests/run.sh --target=aarch64-elf
 
 # The C++ suites wholly on EmbCC's library: libstdc++ and libsupc++ built
@@ -251,7 +252,8 @@ libc-emblinkos: embcc
 # exactly once in an image, and a definition that arrives by archive
 # member is a definition that arrives by accident.
 #   make libc-linux-x86_64   /   make libc-linux-aarch64
-LIBC_SRCS_LINUX := $(LIBC_SRCS_PORTABLE) lib/libc/os/linux/backend.c
+LIBC_SRCS_LINUX := $(LIBC_SRCS_PORTABLE) lib/libc/os/linux/backend.c \
+                   lib/libc/os/linux/thread.c
 
 libc-linux-x86_64: embcc
 	@mkdir -p $(BUILD)/libc/linux-x86_64
@@ -313,6 +315,31 @@ libcxx-aarch64: embcc
 	    $(BUILD)/libcxx/aarch64/libcxx.a $(BUILD)/libcxx/aarch64/*.o
 	@echo "libcxx: $(BUILD)/libcxx/aarch64/libcxx.a"
 
+# The same runtime for the Linux triples, so std::thread, std::mutex and
+# the exception machinery can be exercised on a real kernel rather than
+# only on the freestanding harness.
+libcxx-linux-x86_64: embcc
+	@mkdir -p $(BUILD)/libcxx/linux-x86_64
+	@for f in $(LIBCXX_SRCS); do \
+	    o=$(BUILD)/libcxx/linux-x86_64/$$(basename $$f .cc).o; \
+	    ./embcc --target=x86_64-linux-gnu -c -O2 -x c++ $(LIBCXX_INC) $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libcxx/linux-x86_64/libcxx.a
+	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libcxx/linux-x86_64/libcxx.a \
+	    $(BUILD)/libcxx/linux-x86_64/*.o
+	@echo "libcxx: $(BUILD)/libcxx/linux-x86_64/libcxx.a"
+
+libcxx-linux-aarch64: embcc
+	@mkdir -p $(BUILD)/libcxx/linux-aarch64
+	@for f in $(LIBCXX_SRCS); do \
+	    o=$(BUILD)/libcxx/linux-aarch64/$$(basename $$f .cc).o; \
+	    ./embcc --target=aarch64-linux-gnu -c -O2 -x c++ $(LIBCXX_INC) $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libcxx/linux-aarch64/libcxx.a
+	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs $(BUILD)/libcxx/linux-aarch64/libcxx.a \
+	    $(BUILD)/libcxx/linux-aarch64/*.o
+	@echo "libcxx: $(BUILD)/libcxx/linux-aarch64/libcxx.a"
+
 libcxx: libcxx-x86_64 libcxx-aarch64
 
 clean:
@@ -320,4 +347,5 @@ clean:
 
 .PHONY: all test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
-        libcxx libcxx-x86_64 libcxx-aarch64 clean
+        libcxx libcxx-x86_64 libcxx-aarch64 \
+        libcxx-linux-x86_64 libcxx-linux-aarch64 clean
