@@ -927,62 +927,57 @@ second list is what found the bugs. Checking a scanf field's pointee
 against a size reported `sscanf(s, "%s", buf)`, since %s takes a
 character BUFFER rather than a pointer to one object.
 
-## C++ exceptions on Darwin: phase one works, phase two never starts (2026-09-21)
+## C++ exceptions on Darwin: a typeinfo from the wrong runtime (2026-09-21)
 
-Everything up to the handler is built and verified. What remains is one
-bug, and it is localised to a single transition.
+`catch (...)` works, with cleanups: destructors run during unwinding
+and the handler is entered. A TYPED catch -- `catch (int)` as much as
+`catch (Base &)` -- crashes.
 
-**What works.** C++ compiles for `aarch64-apple-darwin` and links: the
-whole runtime (10 objects), virtual dispatch, RTTI, templates. An
-exception is raised, the stack unwinds, cleanup landing pads run
-destructors, and `catch (...)` catches. `tb` -- a destructor and a
-catch-all -- prints its destructor, catches, and exits 42.
+**The cause, finally.** At the crash, x1 holds
+`libc++abi.dylib`typeinfo for int`. The program is using the SYSTEM
+runtime's typeinfo object, not ours -- so `ti_kind_of`, which
+recognises a typeinfo by comparing its vptr against OUR vtables, sees a
+stranger and every comparison after it is meaningless. `catch (...)`
+survives because it needs no typeinfo at all.
 
-**What does not.** A TYPED catch -- `catch (int)` as much as
-`catch (E &)` -- jumps to address 0x10 and takes SIGSEGV.
+Our runtime does define `__ZTIi`, and ld resolves it into the
+executable: `nm` shows it at our own address, `weak external`. It is
+the DYNAMIC linker that rebinds it. macOS coalesces weak definitions
+across the whole process, `cc` links libSystem, and libSystem
+re-exports libc++abi -- so a weak definition in the executable can be
+superseded at load time by the dylib's.
 
-**Where it stops, exactly.** Tracing the personality with write(2)
-shows it called once with actions=1 (_UA_SEARCH_PHASE), returning
-_URC_HANDLER_FOUND, and then never called again. For `catch (...)` the
-same trace shows actions=1 followed by actions=6
-(_UA_CLEANUP_PHASE | _UA_HANDLER_FRAME) and the handler runs. So phase
-one succeeds and libunwind crashes between the phases, before it calls
-the personality a second time.
+Two things tried and rejected, both recorded so they are not tried
+again: `-nodefaultlibs -lSystem` still gets libc++abi, because
+libSystem re-exports it; and emitting the typeinfo as a STRONG symbol
+rather than weak does not stop the rebinding either.
 
-**What has been ruled out**, each checked rather than assumed:
+So this is not a codegen bug. It is that our C++ runtime and the
+platform's cannot share a process while both define the Itanium ABI's
+symbols. The directions worth trying, in order: `private_extern`
+(hidden) visibility on our typeinfo and vtable symbols, so nothing
+outside the image can bind to them; a two-level namespace that pins our
+references to our own image; or accepting libc++abi as the runtime on
+Darwin and building only the language support on top of it.
 
-  - The type table. Its encoding is 0x9b, as clang's is; the
-    relocation is ARM64_RELOC_POINTER_TO_GOT with pcrel=1, byte for
-    byte what clang emits; and the value read back at run time is the
-    correct `_ZTIi`, with the correct vptr into
-    __ZTVN10__cxxabiv123__fundamental_type_infoE + 16.
-  - The landing pad. Traced as func_start + 0xa8, which is right.
-  - Our LSDA. Clang's own object, compiled by clang, fails the same way
-    when linked against our runtime -- so the tables we emit are not
-    what is wrong.
-  - `_Unwind_Exception`'s layout. include/unwind.h matches Apple's
-    field for field, including `__attribute__((__aligned__))`.
-  - Static data relocations. A C program with pointers into another
-    global at several offsets links and reads back correctly.
+## Closed on the way: Mach-O symbol table ordering (2026-09-21)
 
-**A methodological note worth keeping.** Instrumenting the personality
-with our own printf made the WORKING case fail too -- buffered output
-through our libc disturbs something in that context. Only write(2) is
-safe to trace with here, and the first set of conclusions drawn with
-printf had to be thrown away.
+Found while chasing the above, and a real bug in its own right. Mach-O
+orders a symbol table locals, defined externals, undefined -- and ld
+reads it that way whether or not anything declares the ranges. The
+Mach-O emission added its exception-table anchors (locals) AFTER the
+undefined symbols.
 
-**Also ruled out the hard way:** an afternoon went into a value that
-looked corrupt when read from the linked image on disk. It was not.
-macOS uses chained fixups, so a pointer slot on disk holds packed
-fixup metadata rather than an address; the value is only meaningful
-once the process has loaded. Read it under a debugger, after `run`.
+It is not an error in the file. It is a CALL that lands in another
+section: `__cxa_throw` branched into `__gcc_except_tab`, and the
+instruction fetch faulted on an address that was not even 4-aligned.
 
-Next place to look: what libunwind does with `private_2` -- Apple's
-header says it "holds sp that phase1 found for phase2 to use" -- and
-whether our compact unwind encoding describes the frame well enough
-for that sp to be found. The encoding is currently
-UNWIND_ARM64_MODE_FRAME with no saved register pairs, which is true of
-every prologue EmbCC emits except one that allocas.
+`machow_add_symbol` now refuses a symbol that would break the order,
+exactly as `elfw_add_symbol` already refused the same mistake for the
+gABI. The emission was restructured to add every section, then every
+local, then every defined external, then every undefined -- which also
+meant creating undefined symbols up front rather than lazily at their
+first use, since a lazy one lands wherever the loop happens to be.
 
 ## Our libc on macOS: two things the OS seam did not anticipate (2026-09-21)
 

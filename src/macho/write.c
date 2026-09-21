@@ -54,6 +54,7 @@ struct machow {
     int nsect;
     struct buf syms;               /* struct nlist_64, packed */
     int nsyms;
+    int symrank;                   /* 0 local, 1 defined external, 2 undef */
     struct buf strtab;
 };
 
@@ -175,6 +176,24 @@ int machow_add_section(struct machow *w, const char *segname,
 static int add_sym2(struct machow *w, const char *name, int prefix,
                     unsigned long long value, int sect, int ext, int weak)
 {
+    /* Mach-O orders a symbol table: locals, then external definitions,
+     * then undefined references. ld reads it that way whether or not
+     * LC_DYSYMTAB says so, and a local added after an undefined one
+     * does not produce an error -- it produces a CALL that lands in
+     * whatever section the misread index points at. This writer refuses
+     * instead, exactly as elfw_add_symbol refuses the same mistake for
+     * the gABI's ordering, because it is invisible in the object and
+     * spectacular at run time. */
+    int rank = !ext ? 0 : sect ? 1 : 2;
+    if (rank < w->symrank) {
+        fprintf(stderr, "embcc: internal error: a %s Mach-O symbol (%s) "
+                        "after a %s one\n",
+                rank == 0 ? "local" : "defined external",
+                name && *name ? name : "?",
+                w->symrank == 2 ? "undefined" : "defined external");
+        fatal_unwind();
+    }
+    w->symrank = rank;
     struct nlist_64 n;
     memset(&n, 0, sizeof n);
     n.n_strx = (uint32_t)w->strtab.len;

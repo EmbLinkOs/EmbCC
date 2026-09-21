@@ -697,15 +697,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
             ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
                                  : CPU_SUBTYPE_X86_64_ALL);
-        int m_text = machow_add_section(mw, "__TEXT", "__text",
-                                        S_REGULAR | S_ATTR_PURE_INSTRUCTIONS |
-                                        S_ATTR_SOME_INSTRUCTIONS,
-                                        text.p, text.len, 4);
-        /* Mach-O's data relocations carry no addend field, so the value
-         * goes in the word being patched. The ELF path leaves that word
-         * zero and puts the addend in the RELA entry; here it has to be
-         * written before the section is handed over, because the writer
-         * copies the bytes as it takes them. */
+
+        /* ---- 1. the bytes, before any section is handed over ---------
+         *
+         * machow_add_section COPIES a section's contents as it takes
+         * them, so every field that carries a value has to hold it
+         * already. Mach-O relocations have no addend of their own: the
+         * value lives in the word being patched. */
         for (struct global *g = u->globals; g; g = g->next) {
             if (g->absorbed || !g->defined || g->in_bss || g->named)
                 continue;
@@ -721,7 +719,32 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     d[b] = (unsigned char)((unsigned long long)add >> (b * 8));
             }
         }
-        int m_rodata = 0, m_data = 0, m_bss = 0;
+        if (unwind)
+            for (int i = 0; i < eh.nrelocs; i++) {
+                struct eh_reloc *r = &eh.relocs[i];
+                if (!r->in_lsda || !eh.lsda.p ||
+                    (size_t)r->off + 4 > (size_t)eh.lsda.len)
+                    continue;
+                unsigned char *f = (unsigned char *)eh.lsda.p + r->off;
+                /* A type-table entry is PC-relative and the linker
+                 * measures it from the slot, so the field carries
+                 * nothing. Everything else is "target minus here",
+                 * which a SUBTRACTOR pair answers against an anchor at
+                 * the section's start -- so the field turns that
+                 * anchor-relative answer into a field-relative one. */
+                long v = r->target == EHT_GLOBAL ? 0 : r->addend - r->off;
+                for (int b = 0; b < 4; b++)
+                    f[b] = (unsigned char)((unsigned long)v >> (b * 8));
+            }
+
+        /* ---- 2. every section, before any symbol ---------------------
+         * A symbol's n_value is an ADDRESS, so the section it sits in
+         * has to have one first. */
+        int m_text = machow_add_section(mw, "__TEXT", "__text",
+                                        S_REGULAR | S_ATTR_PURE_INSTRUCTIONS |
+                                        S_ATTR_SOME_INSTRUCTIONS,
+                                        text.p, text.len, 4);
+        int m_rodata = 0, m_data = 0, m_bss = 0, m_lsda = 0, m_cu = 0;
         if (rodata)
             m_rodata = machow_add_section(mw, "__TEXT", "__const", S_REGULAR,
                                           rodata, iu->rodata_len, 0);
@@ -740,183 +763,25 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 named[k].align <= 1 ? 0 : named[k].align <= 2 ? 1
                 : named[k].align <= 4 ? 2 : named[k].align <= 8 ? 3 : 4);
 
-        /* The anchor a string reference relocates against. Mach-O has no
-         * section symbols, so a reference into __const needs a symbol of
-         * its own; an `l`-prefixed one is an assembler temporary that ld
-         * uses and then strips from the final table. */
-        int m_rodata_sym = 0;
-        if (m_rodata)
-            m_rodata_sym = machow_add_symbol_raw(mw, "ltmp_const", 0,
-                                                 m_rodata, 0);
-
-        for (struct func *f = u->funcs; f; f = f->next)
-            if (!f->absorbed && f->has_defn && (!f->is_static || f->used))
-                f->sym_ndx = (f->is_weak ? machow_add_symbol_weak
-                                         : machow_add_symbol)(
-                    mw, f->name, (unsigned long long)f->code_off,
-                    m_text, !f->is_static);
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && g->defined)
-                g->sym_ndx = machow_add_symbol(
-                    mw, g->name, (unsigned long long)g->off,
-                    g->named ? named[g->named - 1].ndx
-                             : g->in_bss ? m_bss : m_data,
-                    !g->is_static);
-        for (struct global *g = u->globals; g; g = g->next)
-            if (!g->absorbed && !g->defined && g->used)
-                g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
-                                         : machow_add_symbol)(
-                    mw, g->name, 0, 0, 1);
-
-        int mpc = 0, mlen = 2, mt;
-        for (int i = 0; i < next; i++) {
-            struct func *callee = ext[i].callee;
-            if (!callee->sym_ndx)
-                callee->sym_ndx = (callee->is_weak ? machow_add_symbol_weak
-                                                  : machow_add_symbol)(
-                    mw, callee->name, 0, 0, 1);
-            mt = target_macho_reloc(ta, RK_CALL, &mpc, &mlen);
-            if (!mt)
-                diag_fatal(in, 0, "no Mach-O relocation for a call here");
-            machow_add_reloc(mw, m_text,
-                             (unsigned long long)ext[i].patch_off,
-                             callee->sym_ndx, mt - 1, mpc, mlen, 0);
-        }
-        free(ext);
-
-        /* The offset goes in UNBIASED -- see target_macho_reloc's note:
-         * Mach-O accounts for the instruction's length itself, so ELF's
-         * -4 here would move every reference four bytes. */
-        for (int i = 0; i < nstrs; i++) {
-            mt = target_macho_reloc(ta, strs[i].kind, &mpc, &mlen);
-            if (!mt)
-                diag_fatal(in, 0,
-                           "no Mach-O relocation for a string reference here");
-            machow_add_reloc(mw, m_text,
-                             (unsigned long long)strs[i].patch_off,
-                             m_rodata_sym, mt - 1, mpc, mlen,
-                             strs[i].str_off);
-        }
-        free(strs);
-
-        for (int i = 0; i < ngs; i++) {
-            mt = target_macho_reloc(ta, gs[i].kind, &mpc, &mlen);
-            if (!mt)
-                diag_fatal(in, 0,
-                           "no Mach-O relocation for a global reference here");
-            machow_add_reloc(mw, m_text, (unsigned long long)gs[i].patch_off,
-                             gs[i].glob->sym_ndx, mt - 1, mpc, mlen, 0);
-        }
-        free(gs);
-
-        for (int i = 0; i < nfs; i++) {
-            struct func *tf = fs[i].target;
-            if (!tf->sym_ndx)
-                tf->sym_ndx = (tf->is_weak ? machow_add_symbol_weak
-                                           : machow_add_symbol)(
-                    mw, tf->name, 0, 0, 1);
-            mt = target_macho_reloc(ta, fs[i].kind, &mpc, &mlen);
-            if (!mt)
-                diag_fatal(in, 0,
-                           "no Mach-O relocation for a function address here");
-            machow_add_reloc(mw, m_text, (unsigned long long)fs[i].patch_off,
-                             tf->sym_ndx, mt - 1, mpc, mlen, 0);
-        }
-        free(fs);
-
-        for (struct global *g = u->globals; g; g = g->next) {
-            if (g->absorbed || !g->defined || g->in_bss)
-                continue;
-            for (int i = 0; i < g->nrelocs; i++) {
-                struct func *ft = g->relocs[i].ftarget;
-                int sym;
-                long add;
-                if (ft) {
-                    if (!ft->sym_ndx)
-                        ft->sym_ndx = (ft->is_weak ? machow_add_symbol_weak
-                                                   : machow_add_symbol)(
-                            mw, ft->name, 0, 0, 1);
-                    sym = ft->sym_ndx;
-                    add = g->relocs[i].addend;
-                } else if (g->relocs[i].gtarget) {
-                    sym = g->relocs[i].gtarget->sym_ndx;
-                    add = g->relocs[i].addend;
-                } else {
-                    sym = m_rodata_sym;
-                    add = g->relocs[i].str_off + g->relocs[i].addend;
-                }
-                mt = target_macho_reloc(ta, RK_ABS64, &mpc, &mlen);
-                machow_add_reloc(mw,
-                                 g->named ? named[g->named - 1].ndx : m_data,
-                                 (unsigned long long)(g->off +
-                                                      g->relocs[i].off),
-                                 sym, mt - 1, mpc, mlen, add);
-            }
-        }
-
-        /* ---- the unwind and exception tables --------------------------
-         *
-         * Darwin does not use .eh_frame. Its linker refuses one whose
-         * CIE names a personality routine -- "CIE reference to
-         * personality function not supported" -- and clang emits none
-         * at all: it writes __LD,__compact_unwind instead, one 32-byte
-         * entry per function, and ld folds those into the __unwind_info
-         * the system unwinder actually reads.
-         *
-         * So this is a THIRD unwind format beside DWARF CFI and none,
-         * and it is a much smaller one. Where an FDE is a program of
-         * rules played back instruction by instruction, a compact entry
-         * is a single word describing the whole function -- which works
-         * only because every prologue this compiler emits has the same
-         * shape. EmbCC always builds a frame record, so the mode is
-         * always FRAME and the encoding carries nothing else but
-         * whether there is a language-specific data area.
-         *
-         * The LSDA still goes in __gcc_except_tab, unchanged: the
-         * personality routine reads it, and the personality routine is
-         * ours.
-         */
-        if (unwind && eh.nfuncs) {
-            /* The fields FIRST, before any section is added: the writer
-             * copies a section's bytes as it takes them, so anything
-             * written afterwards lands in a buffer nobody reads. This
-             * cost an afternoon -- catch(...) worked throughout,
-             * because it is the one case with no type-table entry to
-             * patch, and everything else segfaulted. */
-            for (int i = 0; i < eh.nrelocs; i++) {
-                struct eh_reloc *r = &eh.relocs[i];
-                if (!r->in_lsda || !eh.lsda.p ||
-                    (size_t)r->off + 4 > (size_t)eh.lsda.len)
-                    continue;
-                unsigned char *f = (unsigned char *)eh.lsda.p + r->off;
-                /* A type-table entry is PC-relative and the linker
-                 * measures it from the slot, so the field carries
-                 * nothing. Everything else is "target minus here",
-                 * which a SUBTRACTOR pair answers against an anchor at
-                 * the section's start -- so the field turns that
-                 * anchor-relative answer into a field-relative one. */
-                long v = r->target == EHT_GLOBAL ? 0 : r->addend - r->off;
-                for (int b = 0; b < 4; b++)
-                    f[b] = (unsigned char)((unsigned long)v >> (b * 8));
-            }
-
-            int m_lsda = 0;
+        /* Darwin does not use .eh_frame -- its linker refuses a CIE that
+         * names a personality routine, and clang emits none. The unwind
+         * description is __LD,__compact_unwind: one 32-byte entry per
+         * function, which ld folds into the __unwind_info the system
+         * unwinder reads. One word describes a whole function, which
+         * works because every prologue EmbCC emits has one shape. */
+        unsigned char *cu = NULL;
+        long ncu = unwind ? eh.nfuncs : 0;
+        if (ncu) {
             if (eh.lsda.len)
                 m_lsda = machow_add_section(mw, "__TEXT", "__gcc_except_tab",
                                             S_REGULAR, eh.lsda.p,
                                             (unsigned long long)eh.lsda.len,
                                             2);
-            /* A section-relative relocation's field holds the target's
-             * ADDRESS in this object, not its offset inside the
-             * section. __text sits at zero, so a function's offset and
-             * its address are the same number and the mistake is
-             * invisible there; __gcc_except_tab does not. */
-            long n = eh.nfuncs;
             unsigned long long text_at = machow_section_addr(mw, m_text);
             unsigned long long lsda_at = m_lsda
                 ? machow_section_addr(mw, m_lsda) : 0;
-            unsigned char *cu = xcalloc((size_t)n, 32);
-            for (long k = 0; k < n; k++) {
+            cu = xcalloc((size_t)ncu, 32);
+            for (long k = 0; k < ncu; k++) {
                 unsigned char *e = cu + k * 32;
                 unsigned long long fa =
                     text_at + (unsigned long long)eh.funcs[k].code_off;
@@ -935,20 +800,169 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                         e[24+b] = (unsigned char)(la >> (b*8));
                 }
             }
-            int m_cu = machow_add_section(mw, "__LD", "__compact_unwind",
-                                          S_REGULAR | 0x02000000u /* DEBUG */,
-                                          cu, (unsigned long long)n * 32, 3);
+            m_cu = machow_add_section(mw, "__LD", "__compact_unwind",
+                                      S_REGULAR | 0x02000000u /* S_ATTR_DEBUG */,
+                                      cu, (unsigned long long)ncu * 32, 3);
             free(cu);
+        }
 
-            int pers = 0;
-            for (long k = 0; k < n; k++) {
+        /* ---- 3. LOCAL symbols, all of them, first --------------------
+         *
+         * Mach-O orders its symbol table locals, defined externals,
+         * undefined -- and ld reads it that way whether or not anything
+         * declares the ranges. A local added after an undefined one is
+         * not an error in the file; it is a call that lands in another
+         * section. machow_add_symbol now refuses it outright, which is
+         * how this ordering came to be written down rather than
+         * discovered twice. */
+        int m_rodata_sym = m_rodata
+            ? machow_add_symbol_raw(mw, "ltmp_const", 0, m_rodata, 0) : 0;
+        int lsda_anchor = m_lsda
+            ? machow_add_symbol_raw(mw, "ltmp_lsda", 0, m_lsda, 0) : 0;
+        int text_anchor = ncu
+            ? machow_add_symbol_raw(mw, "ltmp_text", 0, m_text, 0) : 0;
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && f->has_defn && f->is_static && f->used)
+                f->sym_ndx = machow_add_symbol(mw, f->name,
+                                               (unsigned long long)f->code_off,
+                                               m_text, 0);
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->defined && g->is_static)
+                g->sym_ndx = machow_add_symbol(
+                    mw, g->name, (unsigned long long)g->off,
+                    g->named ? named[g->named - 1].ndx
+                             : g->in_bss ? m_bss : m_data, 0);
+
+        /* ---- 4. defined externals ------------------------------------ */
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && f->has_defn && !f->is_static)
+                f->sym_ndx = (f->is_weak ? machow_add_symbol_weak
+                                         : machow_add_symbol)(
+                    mw, f->name, (unsigned long long)f->code_off, m_text, 1);
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->defined && !g->is_static)
+                g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
+                                         : machow_add_symbol)(
+                    mw, g->name, (unsigned long long)g->off,
+                    g->named ? named[g->named - 1].ndx
+                             : g->in_bss ? m_bss : m_data, 1);
+
+        /* ---- 5. undefined, all of them, before any relocation --------
+         * Created up front rather than lazily where each is first
+         * needed, because a lazily created one would land after the
+         * relocations that precede it and break the ordering above. */
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && !g->defined && g->used)
+                g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
+                                         : machow_add_symbol)(
+                    mw, g->name, 0, 0, 1);
+        for (int i = 0; i < next; i++)
+            if (!ext[i].callee->sym_ndx)
+                ext[i].callee->sym_ndx =
+                    (ext[i].callee->is_weak ? machow_add_symbol_weak
+                                            : machow_add_symbol)(
+                        mw, ext[i].callee->name, 0, 0, 1);
+        for (int i = 0; i < nfs; i++)
+            if (!fs[i].target->sym_ndx)
+                fs[i].target->sym_ndx =
+                    (fs[i].target->is_weak ? machow_add_symbol_weak
+                                           : machow_add_symbol)(
+                        mw, fs[i].target->name, 0, 0, 1);
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->defined || g->in_bss)
+                continue;
+            for (int i = 0; i < g->nrelocs; i++) {
+                struct func *ft = g->relocs[i].ftarget;
+                if (ft && !ft->sym_ndx)
+                    ft->sym_ndx = (ft->is_weak ? machow_add_symbol_weak
+                                               : machow_add_symbol)(
+                        mw, ft->name, 0, 0, 1);
+            }
+        }
+        int pers = 0;
+        if (ncu)
+            for (long k = 0; k < ncu; k++)
+                if (eh.funcs[k].lsda_off >= 0) {
+                    pers = machow_add_symbol(mw, "__gxx_personality_v0",
+                                             0, 0, 1);
+                    break;
+                }
+
+        /* ---- 6. relocations ------------------------------------------ */
+        int mpc = 0, mlen = 2, mt;
+        for (int i = 0; i < next; i++) {
+            mt = target_macho_reloc(ta, RK_CALL, &mpc, &mlen);
+            if (!mt)
+                diag_fatal(in, 0, "no Mach-O relocation for a call here");
+            machow_add_reloc(mw, m_text,
+                             (unsigned long long)ext[i].patch_off,
+                             ext[i].callee->sym_ndx, mt - 1, mpc, mlen, 0);
+        }
+        free(ext);
+
+        /* The offset goes in UNBIASED -- see target_macho_reloc's note:
+         * Mach-O accounts for the instruction's length itself, so ELF's
+         * -4 here would move every reference four bytes. */
+        for (int i = 0; i < nstrs; i++) {
+            mt = target_macho_reloc(ta, strs[i].kind, &mpc, &mlen);
+            if (!mt)
+                diag_fatal(in, 0,
+                           "no Mach-O relocation for a string reference here");
+            machow_add_reloc(mw, m_text,
+                             (unsigned long long)strs[i].patch_off,
+                             m_rodata_sym, mt - 1, mpc, mlen, strs[i].str_off);
+        }
+        free(strs);
+
+        for (int i = 0; i < ngs; i++) {
+            mt = target_macho_reloc(ta, gs[i].kind, &mpc, &mlen);
+            if (!mt)
+                diag_fatal(in, 0,
+                           "no Mach-O relocation for a global reference here");
+            machow_add_reloc(mw, m_text, (unsigned long long)gs[i].patch_off,
+                             gs[i].glob->sym_ndx, mt - 1, mpc, mlen, 0);
+        }
+        free(gs);
+
+        for (int i = 0; i < nfs; i++) {
+            mt = target_macho_reloc(ta, fs[i].kind, &mpc, &mlen);
+            if (!mt)
+                diag_fatal(in, 0,
+                           "no Mach-O relocation for a function address here");
+            machow_add_reloc(mw, m_text, (unsigned long long)fs[i].patch_off,
+                             fs[i].target->sym_ndx, mt - 1, mpc, mlen, 0);
+        }
+        free(fs);
+
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->defined || g->in_bss)
+                continue;
+            for (int i = 0; i < g->nrelocs; i++) {
+                struct func *ft = g->relocs[i].ftarget;
+                int sym;
+                if (ft)
+                    sym = ft->sym_ndx;
+                else if (g->relocs[i].gtarget)
+                    sym = g->relocs[i].gtarget->sym_ndx;
+                else
+                    sym = m_rodata_sym;
+                if (!sym)
+                    continue;
+                mt = target_macho_reloc(ta, RK_ABS64, &mpc, &mlen);
+                machow_add_reloc(mw,
+                                 g->named ? named[g->named - 1].ndx : m_data,
+                                 (unsigned long long)(g->off +
+                                                      g->relocs[i].off),
+                                 sym, mt - 1, mpc, mlen, 0);
+            }
+        }
+
+        if (ncu) {
+            for (long k = 0; k < ncu; k++) {
                 machow_add_reloc_sect(mw, m_cu, (unsigned long long)(k * 32),
                                       m_text, 3);
                 if (eh.funcs[k].lsda_off < 0)
                     continue;
-                if (!pers)
-                    pers = machow_add_symbol(mw, "__gxx_personality_v0",
-                                             0, 0, 1);
                 machow_add_reloc(mw, m_cu,
                                  (unsigned long long)(k * 32 + 16), pers,
                                  ta == TARGET_AARCH64 ? ARM64_RELOC_UNSIGNED
@@ -959,12 +973,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                           (unsigned long long)(k * 32 + 24),
                                           m_lsda, 3);
             }
-
-            if (m_lsda) {
-                int lsda_anchor = machow_add_symbol_raw(mw, "ltmp_lsda", 0,
-                                                        m_lsda, 0);
-                int text_anchor = machow_add_symbol_raw(mw, "ltmp_text", 0,
-                                                        m_text, 0);
+            if (m_lsda)
                 for (int i = 0; i < eh.nrelocs; i++) {
                     struct eh_reloc *r = &eh.relocs[i];
                     if (!r->in_lsda)
@@ -974,10 +983,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                         /* Darwin names a typeinfo INDIRECTLY -- the slot
                          * holds the offset to a GOT entry pointing at
                          * it -- so the relocation is POINTER_TO_GOT and
-                         * the encoding beside it says 0x9b (eh.c). A
-                         * SUBTRACTOR pair would name the object
-                         * directly, and the personality would then
-                         * follow one dereference too few. */
+                         * the encoding beside it says 0x9b (eh.c). */
                         machow_add_reloc(mw, m_lsda,
                                          (unsigned long long)r->off,
                                          r->glob->sym_ndx,
@@ -985,13 +991,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                              ? ARM64_RELOC_POINTER_TO_GOT
                                              : X86_64_RELOC_GOT,
                                          1, 2, 0);
-                    } else if (r->target == EHT_TEXT) {
+                    } else if (r->target == EHT_TEXT && text_anchor) {
                         machow_add_reloc_sub(mw, m_lsda,
                                              (unsigned long long)r->off,
                                              lsda_anchor, text_anchor, 2);
                     }
                 }
-            }
         }
         eh_free(&eh);
 
