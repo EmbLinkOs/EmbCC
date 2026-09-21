@@ -594,6 +594,46 @@ thing, a second object format. Windows adds three at once — a format, a
 calling convention, and an unwinder — and is the only one that can be
 attempted with two of them already proven.
 
+### EmbLinkOS is one of the operating systems, and the first draft forgot it
+
+*(Added 2026-09-21, the same day, after the omission was caught in
+review.)* The table above lists Linux, macOS and Windows, and the first
+implementation of the triple put EmbLinkOS in `TGT_OS_NONE` alongside
+bare metal. That is wrong, and wrong in the direction that matters: the
+OS this compiler exists for is the **primary product target** (vision
+§5.2 names `x86_64-emblink`), it has syscalls, a libc and a process to
+start, and "no operating system" describes none of that.
+
+`x86_64-emblink` and `aarch64-emblink` are triples in their own right,
+and code built for the OS can ask `__emblink__` rather than infer the
+platform from the *absence* of `__linux__`. Nothing in the OS tree read
+such a macro before — the platform was selected by which `backend.c` the
+Makefile compiled — so this names it for the first time rather than
+matching an existing convention.
+
+**It forces a distinction that would otherwise have stayed hidden.**
+"Has an operating system" and "the platform owns the toolchain" are not
+the same question, and only EmbLinkOS separates them. On Linux the right
+answer is glibc's headers, `crt1.o` and `ld`, because they are there and
+they are what every other program on the machine links against. On
+EmbLinkOS the right answer is `lib/libc` over `os/emblinkos/backend.c`
+and EmbLD, because those **are** the platform's — we wrote them (D-009).
+A single `target_is_hosted()` meaning "has an OS" would have sent the
+primary product target looking for a glibc that does not exist. So there
+are two predicates, `target_has_os()` and `target_is_hosted()`, and
+EmbLinkOS is the only target that answers them differently.
+
+### EMBX is not a fourth object format
+
+`enum target_fmt` has ELF, Mach-O and COFF and deliberately no EMBX,
+which looks like the same omission and is not. EMBX is a **link**
+output: `embld --embx` writes a native, capability-carrying image
+instead of an ELF executable (D-003), and the objects that go into it
+are ELF like any others. The format dimension is the container an
+*object* goes in, so EMBX would be a category error there — and worse,
+it would tell the compiler it had a fourth object writer to build when
+it has three.
+
 ### The architectural consequence: the target becomes a triple
 
 Today `enum target_arch` has two values and **no operating-system

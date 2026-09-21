@@ -39,7 +39,7 @@ static void print_version(void)
 {
     /* Honest: names what exists and what does not. */
     printf("EmbCC %s — C compiler for EmbLinkOS, target %s\n",
-           EMBCC_VERSION, target_triple(target_get()));
+           EMBCC_VERSION, target_triple_now());
     printf("Language: C11 on both targets — VLAs, _Complex, long double, "
            "_Atomic and the atomic builtins, _Generic — plus the GNU "
            "extensions EmbLinkOS uses (statement expressions, typeof, "
@@ -119,11 +119,36 @@ static void dump_predef(void)
         printf("#define %s %s\n", tab[i].name, tab[i].value);
 }
 
+/* The object format a target needs, against the writers that exist.
+ *
+ * D-014 adds Mach-O and COFF targets to the triple table before their
+ * writers are built, which is deliberate: the triple, the predefined
+ * macros and `-E` are useful while the writer is being written, and
+ * every one of them can be developed and tested without it. What must
+ * NOT happen is an ELF file written for a Darwin target and named .o as
+ * though it were right -- so this is the one place that says no, and it
+ * says which triple and which format (THE RULE). */
+static int object_format_ready(void)
+{
+    if (target_fmt_get() == TGT_FMT_ELF)
+        return 1;
+    fprintf(stderr,
+            "embcc: error: no object writer for %s yet, which is what "
+            "'%s' needs\n",
+            target_fmt_name(target_fmt_get()), target_triple_now());
+    fprintf(stderr,
+            "embcc: the triple, its predefined macros and -E work today; "
+            "emitting objects for it does not (D-014)\n");
+    return 0;
+}
+
 /* An empty but genuine relocatable object: the smallest output readelf,
  * objdump and the cross ld all accept. Kept from M0 so the writer stays
  * testable independently of the compiler. */
 static int emit_empty_object(const char *path)
 {
+    if (!object_format_ready())
+        return 1;
     struct elfw *w = elfw_new(target_elf_machine(target_get()));
     int text = elfw_add_section(w, ".text", SHT_PROGBITS,
                                 SHF_ALLOC | SHF_EXECINSTR, NULL, 0, 16);
@@ -646,6 +671,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 0;
     }
 
+    if (!object_format_ready())
+        return 1;
     struct elfw *w = elfw_new(target_elf_machine(target_get()));
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_EXECINSTR,
@@ -1080,13 +1107,19 @@ int main(int argc, char **argv)
         if (strncmp(argv[i], "--target=", 9) != 0)
             continue;
         enum target_arch a;
-        if (!target_from_triple(argv[i] + 9, &a)) {
-            fprintf(stderr,
-                    "embcc: error: unknown target '%s' — EmbCC emits "
-                    "x86_64-elf and aarch64-elf\n", argv[i] + 9);
+        enum target_os os;
+        enum target_fmt fmt;
+        if (!target_from_triple(argv[i] + 9, &a, &os, &fmt)) {
+            fprintf(stderr, "embcc: error: unknown target '%s'\n",
+                    argv[i] + 9);
+            fprintf(stderr, "embcc: the targets it emits for are:\n");
+            for (int t = 0; t < target_triple_count(); t++)
+                fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
             return 1;
         }
         target_set(a);
+        target_os_set(os);
+        target_fmt_set(fmt);
     }
     /* Scanned across the whole command line, not just argv[1]: these
      * describe the TARGET, so `--target=aarch64-elf --dump-predef` has to

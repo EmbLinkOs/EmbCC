@@ -320,9 +320,9 @@ Host and target are independent everywhere in the code. No `#ifdef __APPLE__` in
 
 | Target triple | Format | Role | Status |
 |---|---|---|---|
-| `x86_64-elf` / `x86_64-emblink` | ELF, EMBX | Primary product target | **Done.** Builds and boots the EmbLinkOS kernel; EMBX emitted by EmbLD |
+| `x86_64-elf` / `x86_64-emblink` | ELF, EMBX | Primary product target | **Done.** Builds and boots the EmbLinkOS kernel; EMBX emitted by EmbLD. Since D-014 `x86_64-emblink` is a triple in its own right (`__emblink__`), not a synonym for freestanding |
 | `x86_64-linux-gnu` | ELF | Test target: conformance and differential suites against GCC | **Done.** Every test runs against `x86_64-elf-gcc` 16.2 under QEMU (natively where the host is x86-64 Linux) |
-| `aarch64-elf` / `aarch64-emblink` | ELF, EMBX | Second architecture | **Done, early.** Own backend and AAPCS64; 170/170 its own suite; referee `aarch64-elf-gcc` 16.2 under QEMU `virt` |
+| `aarch64-elf` / `aarch64-emblink` | ELF, EMBX | Second architecture | **Done, early.** `aarch64-emblink` likewise. Own backend and AAPCS64; 170/170 its own suite; referee `aarch64-elf-gcc` 16.2 under QEMU `virt` |
 | `thumbv7em-none-eabi` / `riscv32-none-elf` | ELF | Bare-metal embedded (where memory/stack budgets matter most) | Later. Note both are 32-bit: the backends assume LP64 today |
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | ELF | Hosted Linux | **Planned first (D-014).** Three of its five rows exist — ELF, SysV, Itanium/DWARF EH; the gap is the triple, dynamic linking and the system libc |
 | `*-darwin` | Mach-O | Hosted macOS | Planned (D-014). Adds exactly one new thing: a second object format |

@@ -265,7 +265,7 @@ output: /data/build/out/embcc/arch_code.o
 
 name: arch_predef.o
 kind: compile
-inputs: /data/src/embcc/arch/predef.c /data/src/embcc/arch/predef.h /data/src/embcc/arch/target.h 
+inputs: /data/src/embcc/arch/predef.c /data/src/embcc/arch/predef.h /data/src/embcc/arch/target.h /data/src/embcc/driver/util.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/string.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/predef.c -o /data/build/out/embcc/arch_predef.o
 output: /data/build/out/embcc/arch_predef.o
 
