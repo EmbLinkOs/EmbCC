@@ -308,6 +308,62 @@ int main()
         atomic_flag_clear_explicit(&f, memory_order_release);
     }
 
+    /* ---- wait / notify ---------------------------------------------------
+     *
+     * What is testable without a second thread is the half that must NOT
+     * block: wait() returns at once when the value already differs from
+     * the one being waited on. The blocking half cannot be exercised
+     * here -- this harness has no futex, so there is no second thread to
+     * do the notifying, and a wait that did block would hang the suite.
+     * What IS checked is that every spelling exists, compiles, and gets
+     * the compare right. */
+    {
+        atomic<int> a{7};
+        a.wait(6);                    /* already different: returns */
+        a.wait(6, memory_order_acquire);
+        a.notify_one();
+        a.notify_all();
+
+        atomic_wait(&a, 6);
+        atomic_wait_explicit(&a, 6, memory_order_acquire);
+        atomic_notify_one(&a);
+        atomic_notify_all(&a);
+
+        atomic<int *> p{nullptr};
+        int x = 0;
+        p.wait(&x);                   /* a pointer specialization */
+        p.notify_all();
+
+        /* The comparison is of the OBJECT REPRESENTATION, not
+         * operator== -- so waiting on -0.0 while the value is +0.0 must
+         * RETURN, even though the two compare equal as numbers. */
+        atomic<double> d{0.0};
+        d.wait(-0.0);
+        d.notify_all();
+
+        atomic_flag f = ATOMIC_FLAG_INIT;
+        f.wait(true);                 /* it is clear, so not true */
+        f.notify_one();
+        f.notify_all();
+        atomic_flag_wait(&f, true);
+        atomic_flag_wait_explicit(&f, true, memory_order_acquire);
+        atomic_flag_notify_one(&f);
+        atomic_flag_notify_all(&f);
+        CHECK(!atomic_flag_test(&f));
+        CHECK(!atomic_flag_test_explicit(&f, memory_order_acquire));
+
+        int r = 3;
+        atomic_ref<int> ar(r);
+        ar.wait(4);
+        ar.notify_all();
+        CHECK(ar.load() == 3);
+
+        /* A notify with nobody waiting is not an error, and it leaves
+         * the value alone -- it moves a counter beside it. */
+        CHECK(a.load() == 7);
+        CHECK(d.load() == 0.0);
+    }
+
     /* ---- an atomic is not copyable, and that is deliberate --------------- */
     static_assert(!is_copy_constructible_v<atomic<int>>);
     static_assert(!is_copy_assignable_v<atomic<int>>);

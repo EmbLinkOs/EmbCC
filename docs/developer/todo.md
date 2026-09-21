@@ -830,12 +830,43 @@ is now 97 headers and `lib/libc/include` has every C11 header. With
 left out on purpose — it is the one header whose entire subject is the
 host's cultural data, and a freestanding target has none.
 
-Still absent on purpose: atomic `wait`/`notify`, which must BLOCK. The
-futex PRIMITIVE now exists in the seam; only the two backends return
-ENOSYS, so a target with real threads lights it up without the library
-changing. `tss_create` and `thread_local` are absent for a different
-reason -- they need thread-local storage, which EmbCC does not have,
-and a key every thread shared would be a global under another name.
+`tss_create` and `thread_local` are absent for a reason of their own --
+they need thread-local storage, which EmbCC does not have, and a key
+every thread shared would be a global under another name.
+
+## Closed: atomic wait/notify (2026-09-21)
+
+The last entry in this file that said "absent on purpose". The futex
+primitive had been in the seam for a while; what was missing was the
+library above it.
+
+The futex word is NOT the atomic object, for two reasons and the second
+decides it: the object may be one byte or sixteen while the primitive
+takes a 32-bit word, and a word per object would put four extra bytes
+in every std::atomic for an operation most never use. Waiters share a
+64-entry table indexed by a hash of the address. Collisions cost a
+wakeup that finds nothing changed, which the standard explicitly
+allows -- every caller re-checks and loops.
+
+The protocol is the correctness: the notifier bumps the counter BEFORE
+waking, the waiter reads it BEFORE checking the value. Either one
+backwards loses a notification that lands in the window between a
+waiter's check and its sleep.
+
+tests/golden/libcxx-std/atomicwait.cc supplies the seam's own weak
+futex_wait/futex_wake, so the "other thread" runs at a chosen instant
+inside the sleep rather than by luck -- one thread, no timing. Swapping
+the two lines in the notifier makes it fail, which was verified rather
+than assumed. The waiter's half is not covered and the file says so:
+telling its two orders apart needs a notification delivered between two
+inline loads, with no seam between them to hang one on. A racing second
+thread would be the kind of test that passes for a year and then does
+not.
+
+Comparison is of the OBJECT REPRESENTATION, not operator==, as
+compare_exchange already was: 0.0 and -0.0 compare equal and are
+different values, and a wait returning on one seeing the other would
+report a change that never happened.
 
 ## Closed: -Wformat (2026-09-21)
 

@@ -296,10 +296,37 @@ is the whole reason its argument is a reference and the whole reason a
 CAS loop terminates; and that every memory order reaches the compiler,
 so a target missing one lowering fails here rather than in a kernel.
 
-`wait`/`notify_one`/`notify_all` are **absent**, and so are `<thread>`
-and `<mutex>`. They must *block*, which needs a futex or equivalent, and
-`lib/libc/os/backend.h` has no such primitive. Writing them as spin
-loops would be a correctness-preserving lie that burns a core.
+**`wait`/`notify_one`/`notify_all` are here, on the seam's futex.** The
+futex word is deliberately *not* the atomic object: the object may be
+one byte or sixteen while the primitive takes a 32-bit word, and a word
+per object would put four extra bytes in every `std::atomic` for an
+operation most never use. So waiters share a table indexed by a hash of
+the address. Two unrelated objects can collide, which costs a wakeup
+that finds nothing changed — and the standard allows exactly that,
+which is why every caller re-checks and loops.
+
+The protocol is the whole of the correctness. A notifier bumps the
+bucket's counter **before** it wakes; a waiter reads that counter
+**before** it checks the value. So a notification landing in the window
+between a waiter's check and its sleep leaves the counter different
+from the one the sleep is conditioned on, and the sleep returns at once
+instead of waiting for something that already happened. Backwards, and
+the program hangs — rarely, on a machine you do not own.
+
+Which is why it is *tested* rather than argued.
+`tests/golden/libcxx-std/atomicwait.cc` supplies the seam's weak
+`futex_wait`/`futex_wake` itself, so the "other thread" runs at a
+chosen instant inside the sleep instead of by luck: swap the two lines
+in the notifier and the test fails. The waiter's half is the asymmetry
+worth admitting — telling its two orders apart needs a notification
+delivered *between* two inline loads, and there is no seam between them
+to hang one on. That half is argued in the header and the test says so.
+
+Where a target has no futex the wait degrades to a yield loop, which is
+the honest shape of the situation rather than a fallback: with no futex
+there is no second thread, so a wait that is not already satisfied never
+can be, and the program has deadlocked. Hanging faithfully is the
+report; the yield is there so it hangs without burning the processor.
 
 Writing it found a **third compiler bug and a fourth gap**:
 

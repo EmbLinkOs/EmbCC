@@ -28,15 +28,16 @@
  * would be duplicating the one thing the compiler already knows, and
  * would be wrong on the next target.
  *
- * ---- what is not here ---------------------------------------------------
+ * ---- and what blocks ----------------------------------------------------
  *
- * `wait`/`notify_one`/`notify_all` (C++20). They are not spin loops
- * dressed up — they must BLOCK, which needs a futex or equivalent from
- * the operating system, and `lib/libc/os/backend.h` has no such
- * primitive. Writing them as spins would be a correctness-preserving
- * lie that burns a core; they are absent instead. The same reasoning
- * keeps `<thread>` and `<mutex>` out of this library altogether: there
- * is no thread to synchronize with yet.
+ * `wait`/`notify_one`/`notify_all` (C++20) are the only operations here
+ * that put a thread away, and they are built on the seam's futex —
+ * never on a spin dressed up as a wait. Where a target has no futex
+ * they degrade to a yield loop, which is the honest shape of a program
+ * that has deadlocked: with no futex there is no second thread, so a
+ * wait that is not already satisfied never can be. See the protocol
+ * note below; the order of the counter and the value check is the whole
+ * of the correctness.
  */
 #ifndef _LIBCXX_ATOMIC
 #define _LIBCXX_ATOMIC
@@ -90,6 +91,92 @@ inline void atomic_thread_fence(memory_order m = memory_order_seq_cst) noexcept
 inline void atomic_signal_fence(memory_order m = memory_order_seq_cst) noexcept
 { __atomic_signal_fence((int)m); }
 
+/* ---- wait / notify ------------------------------------------------------
+ *
+ * These are the only operations in this header that BLOCK, and blocking
+ * is not something a library can invent: it needs the operating system
+ * to put the thread away and bring it back when a word in memory
+ * changes. `lib/libc/os/backend.h` has exactly that primitive, and this
+ * is built on it and nothing else.
+ *
+ * The futex word is NOT the atomic object. Two reasons, and the second
+ * is the one that decides it: the object may be one byte or sixteen, or
+ * a struct, while the primitive takes a 32-bit word; and a word per
+ * object would mean every std::atomic carried an extra four bytes for
+ * an operation most of them never use. So the waiters share a table,
+ * indexed by a hash of the object's address. Two unrelated objects can
+ * land in the same bucket, which costs a wakeup that finds nothing
+ * changed -- and the standard allows exactly that, which is why every
+ * caller re-checks the value and loops.
+ *
+ * The protocol is the whole of the correctness here. A notifier bumps
+ * the bucket's counter BEFORE it wakes anyone; a waiter reads the
+ * counter BEFORE it checks the value. So a notification landing between
+ * a waiter's check and its sleep leaves the counter different from what
+ * the sleep is conditioned on, and the sleep returns immediately
+ * instead of waiting for a thing that already happened. Get that order
+ * backwards and the program hangs, rarely, on a machine you do not own.
+ */
+extern "C" {
+int  __os_futex_wait(const volatile int *addr, int expected, long timeout_ns);
+int  __os_futex_wake(const volatile int *addr, int count);
+void __os_thread_yield(void);
+}
+
+namespace __wait {
+
+/* Enough buckets that unrelated objects rarely collide, few enough that
+ * the table is 256 bytes. A collision is a spurious wake, not a bug. */
+inline constexpr size_t __nbucket = 64;
+
+inline volatile int *__bucket(const volatile void *p) noexcept
+{
+    /* Zero-initialized static storage: no guard variable, no
+     * initialization order, nothing to run before main. */
+    static volatile int __words[__nbucket];
+    uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    /* Past the low bits every allocator aligns away, which would
+     * otherwise leave most of the table unused. */
+    return &__words[(a >> 4) % __nbucket];
+}
+
+inline int __seq(const volatile void *p) noexcept
+{
+    return __atomic_load_n((const int *)__bucket(p), __ATOMIC_ACQUIRE);
+}
+
+inline void __notify(const volatile void *p, int count) noexcept
+{
+    volatile int *w = __bucket(p);
+    __atomic_fetch_add((int *)w, 1, __ATOMIC_RELEASE);
+    (void)__os_futex_wake(w, count);
+}
+
+/* Sleep until the bucket's counter leaves `seq`. Where the target has
+ * no futex the call fails at once and there is nothing to do but yield
+ * and look again: a target with no futex has no other thread either, so
+ * a wait that is not already satisfied can never become satisfied, and
+ * the program has deadlocked. Spinning is not a fix for that -- hanging
+ * faithfully is the honest report of the program's own bug, and the
+ * yield is there so it hangs without burning the processor. */
+inline void __sleep(const volatile void *p, int seq) noexcept
+{
+    if (__os_futex_wait(__bucket(p), seq, -1) < 0)
+        __os_thread_yield();
+}
+
+/* The standard compares the OBJECT REPRESENTATION here, as
+ * compare_exchange does -- not operator==. It matters: 0.0 and -0.0
+ * compare equal and are different values, and a wait that returned on
+ * one seeing the other would report a change that never happened. */
+template <class T>
+inline bool __same(const T &a, const T &b) noexcept
+{
+    return __builtin_memcmp(&a, &b, sizeof(T)) == 0;
+}
+
+}  // namespace __wait
+
 /* ---- atomic_flag --------------------------------------------------------
  *
  * The one type the standard guarantees is lock-free on every
@@ -119,6 +206,18 @@ struct atomic_flag {
 
     bool test(memory_order m = memory_order_seq_cst) const noexcept
     { return __atomic_load_n(&_M_i, (int)m) != 0; }
+
+    void wait(bool old, memory_order m = memory_order_seq_cst) const noexcept
+    {
+        for (;;) {
+            int seq = __wait::__seq(&_M_i);
+            if (test(m) != old)
+                return;
+            __wait::__sleep(&_M_i, seq);
+        }
+    }
+    void notify_one() noexcept { __wait::__notify(&_M_i, 1); }
+    void notify_all() noexcept { __wait::__notify(&_M_i, -1); }
 };
 
 inline bool atomic_flag_test_and_set(atomic_flag *f) noexcept
@@ -129,6 +228,19 @@ inline bool atomic_flag_test_and_set_explicit(atomic_flag *f,
 inline void atomic_flag_clear(atomic_flag *f) noexcept { f->clear(); }
 inline void atomic_flag_clear_explicit(atomic_flag *f, memory_order m) noexcept
 { f->clear(m); }
+inline bool atomic_flag_test(const atomic_flag *f) noexcept { return f->test(); }
+inline bool atomic_flag_test_explicit(const atomic_flag *f,
+                                      memory_order m) noexcept
+{ return f->test(m); }
+inline void atomic_flag_wait(const atomic_flag *f, bool old) noexcept
+{ f->wait(old); }
+inline void atomic_flag_wait_explicit(const atomic_flag *f, bool old,
+                                      memory_order m) noexcept
+{ f->wait(old, m); }
+inline void atomic_flag_notify_one(atomic_flag *f) noexcept
+{ f->notify_one(); }
+inline void atomic_flag_notify_all(atomic_flag *f) noexcept
+{ f->notify_all(); }
 
 /* ---- the common part ----------------------------------------------------
  *
@@ -208,6 +320,21 @@ struct __atomic_base {
     bool compare_exchange_strong(T &expected, T desired,
                                  memory_order m = memory_order_seq_cst) noexcept
     { return compare_exchange_strong(expected, desired, m, __fail_order(m)); }
+
+    /* Block while the value is still `old`. The counter is read first
+     * and the value checked after -- see the protocol above. */
+    void wait(T old, memory_order m = memory_order_seq_cst) const noexcept
+    {
+        for (;;) {
+            int seq = __wait::__seq(&_M_i);
+            T cur = load(m);
+            if (!__wait::__same(cur, old))
+                return;
+            __wait::__sleep(&_M_i, seq);
+        }
+    }
+    void notify_one() noexcept { __wait::__notify(&_M_i, 1); }
+    void notify_all() noexcept { __wait::__notify(&_M_i, -1); }
 };
 
 template <class T, class = void>
@@ -344,6 +471,17 @@ template <class T>
 inline T atomic_load_explicit(const atomic<T> *a, memory_order m) noexcept
 { return a->load(m); }
 template <class T>
+inline void atomic_wait(const atomic<T> *a, T old) noexcept { a->wait(old); }
+template <class T>
+inline void atomic_wait_explicit(const atomic<T> *a, T old,
+                                 memory_order m) noexcept
+{ a->wait(old, m); }
+template <class T>
+inline void atomic_notify_one(atomic<T> *a) noexcept { a->notify_one(); }
+template <class T>
+inline void atomic_notify_all(atomic<T> *a) noexcept { a->notify_all(); }
+
+template <class T>
 inline T atomic_exchange(atomic<T> *a, T v) noexcept { return a->exchange(v); }
 template <class T>
 inline T atomic_exchange_explicit(atomic<T> *a, T v, memory_order m) noexcept
@@ -408,6 +546,19 @@ public:
     enable_if_t<is_integral_v<U>, U>
     fetch_sub(U v, memory_order m = memory_order_seq_cst) const noexcept
     { return __atomic_fetch_sub(__p, v, (int)m); }
+
+    void wait(T old, memory_order m = memory_order_seq_cst) const noexcept
+    {
+        for (;;) {
+            int seq = __wait::__seq(__p);
+            T cur = load(m);
+            if (!__wait::__same(cur, old))
+                return;
+            __wait::__sleep(__p, seq);
+        }
+    }
+    void notify_one() const noexcept { __wait::__notify(__p, 1); }
+    void notify_all() const noexcept { __wait::__notify(__p, -1); }
 
 private:
     T *__p;
