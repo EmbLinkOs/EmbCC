@@ -1,0 +1,70 @@
+/* <source_location> — C++ [support.srcloc].
+ *
+ * Where the caller is, without a macro. `__FILE__` and `__LINE__` work
+ * and cannot be passed along: a logging *function* that takes them has
+ * to be a macro, or it reports its own position instead of its
+ * caller's. This reports the caller's, because
+ * `source_location::current()` as a DEFAULT ARGUMENT is evaluated at
+ * the call site -- which is a language rule, not a library trick, and
+ * is the whole of why the class exists.
+ *
+ * The object is one pointer to a static record the compiler emits, so
+ * passing one costs a pointer and the strings are never copied. That
+ * record's layout is an ABI between this header and src/cxx/emit.c:
+ * file, function, line, column, in that order. __builtin_source_
+ * location() returns its address, and the compiler substitutes a fresh
+ * one at every place a default argument containing it is used
+ * (src/cxx/expr.c, default_at).
+ */
+#ifndef _LIBCXX_SOURCE_LOCATION
+#define _LIBCXX_SOURCE_LOCATION
+
+#include <cstdint>
+
+namespace std {
+
+class source_location {
+public:
+    /* The layout the compiler writes. Public because the compiler names
+     * it, not because a program should. */
+    struct __impl {
+        const char *_M_file_name;
+        const char *_M_function_name;
+        unsigned _M_line;
+        unsigned _M_column;
+    };
+
+    constexpr source_location() noexcept : __i(nullptr) {}
+
+    /* The default argument is the point: `current()` written here is
+     * evaluated where the enclosing default argument is USED, so a
+     * function declared `log(const char *, source_location =
+     * source_location::current())` reports its caller. */
+    static constexpr source_location
+    current(const void *p = __builtin_source_location()) noexcept
+    {
+        source_location s;
+        s.__i = static_cast<const __impl *>(p);
+        return s;
+    }
+
+    /* Every accessor answers for a default-constructed one too: an
+     * empty string and zero, never a null dereference. A default
+     * source_location is a legal value and code that logs it should
+     * print something rather than crash. */
+    constexpr const char *file_name() const noexcept
+    { return __i ? __i->_M_file_name : ""; }
+    constexpr const char *function_name() const noexcept
+    { return __i ? __i->_M_function_name : ""; }
+    constexpr uint_least32_t line() const noexcept
+    { return __i ? __i->_M_line : 0u; }
+    constexpr uint_least32_t column() const noexcept
+    { return __i ? __i->_M_column : 0u; }
+
+private:
+    const __impl *__i;
+};
+
+}  // namespace std
+
+#endif

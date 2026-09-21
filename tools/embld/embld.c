@@ -7,12 +7,18 @@
  *
  * usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR]
  *              [--embx [--cap NAME]...] INPUT.o|INPUT.a ...
+ *        embld --doctor INPUT.o|INPUT.a ...
+ *
+ * --doctor links nothing: it reads the inputs and says why a link over
+ * them would fail, every undefined symbol at once, with the cause the
+ * symbol tables reveal (docs/tools/diagnostics.md T6).
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../../src/link/link.h"
+#include "doctor.h"
 #include "../../src/embx/embx.h"
 
 int main(int argc, char **argv)
@@ -21,6 +27,7 @@ int main(int argc, char **argv)
     struct link_opts opts;
     const char *inputs[256];
     int ninputs = 0;
+    int doctor = 0;
 
     memset(&opts, 0, sizeof opts);
 
@@ -50,6 +57,8 @@ int main(int argc, char **argv)
             int id = embx_cap_id(argv[i]);
             if (id <= 0) { fprintf(stderr, "embld: unknown capability '%s'\n", argv[i]); return 2; }
             opts.caps |= (1ULL << id);     /* declare it in the EMBX cap table */
+        } else if (strcmp(argv[i], "--doctor") == 0) {
+            doctor = 1;
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "embld: unknown option '%s'\n", argv[i]);
             return 2;
@@ -60,8 +69,12 @@ int main(int argc, char **argv)
     }
     if (!ninputs) {
         fprintf(stderr, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR]\n"
-                        "             [--embx [--cap NAME]...] INPUT.o|INPUT.a ...\n");
+                        "             [--embx [--cap NAME]...] INPUT.o|INPUT.a ...\n"
+                        "       embld --doctor INPUT.o|INPUT.a ...   "
+                        "(why the link fails)\n");
         return 2;
     }
+    if (doctor)
+        return doctor_run((char **)inputs, ninputs);
     return embld_link(inputs, ninputs, out, &opts);
 }

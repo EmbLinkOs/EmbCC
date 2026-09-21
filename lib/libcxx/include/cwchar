@@ -1,0 +1,53 @@
+/* <cwchar> — the C header's names, in namespace std as well as at
+ * global scope. See <wchar.h>: wchar_t is 32 bits here, so one wchar_t
+ * is one code point, and the multibyte encoding is UTF-8. */
+#ifndef _LIBCXX_CWCHAR
+#define _LIBCXX_CWCHAR
+#include <wchar.h>
+
+namespace std {
+using ::mbstate_t;
+using ::wint_t;
+using ::size_t;
+
+using ::wcslen;
+using ::wcsnlen;
+using ::wcscpy;
+using ::wcsncpy;
+using ::wcscat;
+using ::wcsncat;
+using ::wcscmp;
+using ::wcsncmp;
+using ::wcscoll;
+using ::wcsxfrm;
+using ::wcschr;
+using ::wcsrchr;
+using ::wcsstr;
+using ::wcsspn;
+using ::wcscspn;
+using ::wcspbrk;
+using ::wcstok;
+
+using ::wmemcpy;
+using ::wmemmove;
+using ::wmemset;
+using ::wmemcmp;
+using ::wmemchr;
+
+using ::mbsinit;
+using ::mbrlen;
+using ::mbrtowc;
+using ::wcrtomb;
+using ::mbsrtowcs;
+using ::wcsrtombs;
+
+using ::wcstol;
+using ::wcstoul;
+using ::wcstoll;
+using ::wcstoull;
+using ::wcstod;
+using ::wcstof;
+using ::wcstold;
+}
+
+#endif

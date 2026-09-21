@@ -1,0 +1,254 @@
+/* <concepts> — C++ [concepts].
+ *
+ * The standard's named requirements, finally written down as something
+ * the compiler checks rather than something a comment promises.
+ *
+ * The reason to prefer these over the `enable_if` they replace is not
+ * brevity. It is that a concept participates in PARTIAL ORDERING: given
+ * two overloads, one requiring `integral` and one requiring
+ * `signed_integral`, the compiler knows the second subsumes the first
+ * and picks it, because `signed_integral` is spelled as `integral<T> &&
+ * ...` and subsumption is computed on that conjunction. Two `enable_if`s
+ * are two unrelated expressions and the call is ambiguous.
+ *
+ * That is why the definitions below are built up out of each other
+ * rather than each written from its own traits: writing
+ * `signed_integral` as `is_integral_v<T> && is_signed_v<T>` would give
+ * the same answers and lose the ordering.
+ *
+ * Several of these cannot be written in the language and are traits
+ * underneath (`same_as`, `destructible`); that is not a shortcut, it is
+ * where the information lives -- see <type_traits>.
+ */
+#ifndef _LIBCXX_CONCEPTS
+#define _LIBCXX_CONCEPTS
+
+#include <compare>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+/* ---- core language concepts [concepts.lang] --------------------------- */
+
+/* same_as is written with a helper and used BOTH ways round on purpose.
+ * `same_as<T, U>` and `same_as<U, V>` must subsume each other for the
+ * relation to be symmetric in the ordering as well as in its answers,
+ * and a bare `is_same_v<T, U>` is one atomic constraint that does not. */
+namespace __detail {
+template <class T, class U>
+concept __same_impl = is_same_v<T, U>;
+}
+template <class T, class U>
+concept same_as = __detail::__same_impl<T, U> && __detail::__same_impl<U, T>;
+
+template <class D, class B>
+concept derived_from =
+    is_base_of_v<B, D> && is_convertible_v<const volatile D *,
+                                           const volatile B *>;
+
+/* Both directions, because a conversion is not one thing: `From` may be
+ * implicitly convertible where `static_cast` is ill-formed, or the other
+ * way round, and generic code that does one while the constraint checked
+ * the other is the bug this catches. */
+template <class F, class T>
+concept convertible_to =
+    is_convertible_v<F, T> &&
+    requires { static_cast<T>(declval<F>()); };
+
+/* On common_reference, not common_type: `common_type_t<const T &,
+ * const T &>` is `T`, which is a COPY, so a non-copyable type would
+ * have no common reference with ITSELF and movable<T> would be false
+ * for every move-only type. See <type_traits>. */
+template <class T, class U>
+concept common_reference_with =
+    same_as<common_reference_t<T, U>, common_reference_t<U, T>> &&
+    convertible_to<T, common_reference_t<T, U>> &&
+    convertible_to<U, common_reference_t<T, U>>;
+
+template <class T, class U>
+concept common_with =
+    same_as<common_type_t<T, U>, common_type_t<U, T>> &&
+    requires {
+        static_cast<common_type_t<T, U>>(declval<T>());
+        static_cast<common_type_t<T, U>>(declval<U>());
+    };
+
+template <class T>
+concept integral = is_integral_v<T>;
+template <class T>
+concept signed_integral = integral<T> && is_signed_v<T>;
+template <class T>
+concept unsigned_integral = integral<T> && !signed_integral<T>;
+template <class T>
+concept floating_point = is_floating_point_v<T>;
+
+/* An assignment yields an lvalue referring to the left operand, and the
+ * concept says so: a type whose operator= returns by value satisfies
+ * "you can assign to it" and breaks `a = b = c`. */
+template <class L, class R>
+concept assignable_from =
+    is_lvalue_reference_v<L> &&
+    common_reference_with<const remove_reference_t<L> &,
+                          const remove_reference_t<R> &> &&
+    requires(L l, R &&r) {
+        { l = static_cast<R &&>(r) } -> same_as<L>;
+    };
+
+template <class T>
+concept destructible = is_nothrow_destructible_v<T>;
+
+template <class T, class... A>
+concept constructible_from =
+    destructible<T> && is_constructible_v<T, A...>;
+
+template <class T>
+concept default_initializable =
+    constructible_from<T> &&
+    requires { T{}; };
+
+template <class T>
+concept move_constructible =
+    constructible_from<T, T> && convertible_to<T, T>;
+
+template <class T>
+concept copy_constructible =
+    move_constructible<T> &&
+    constructible_from<T, T &> && convertible_to<T &, T> &&
+    constructible_from<T, const T &> && convertible_to<const T &, T> &&
+    constructible_from<T, const T> && convertible_to<const T, T>;
+
+/* swappable is the plain form: the standard's is written over a
+ * customization point that finds a member or an ADL swap first. Ours
+ * calls std::swap, which is what every type here wants; a type with its
+ * own free swap and no specialization of std::swap is the case this
+ * does not cover, and it is stated rather than silently mis-answered. */
+template <class T>
+concept swappable = requires(T &a, T &b) { swap(a, b); };
+
+template <class T, class U>
+concept swappable_with =
+    common_reference_with<T, U> &&
+    requires(T &&t, U &&u) {
+        swap(static_cast<T &&>(t), static_cast<T &&>(t));
+        swap(static_cast<U &&>(u), static_cast<U &&>(u));
+        swap(static_cast<T &&>(t), static_cast<U &&>(u));
+        swap(static_cast<U &&>(u), static_cast<T &&>(t));
+    };
+
+/* ---- comparison concepts [concepts.compare] --------------------------- */
+
+/* The contextual conversion is the point: `if (a == b)` works for
+ * anything convertible to bool, but so does a type whose conversion is
+ * to int, and `a == b` yielding 2 is not a comparison. Requiring
+ * `bool(!(e))` as well rules out the types with a one-way conversion. */
+template <class T>
+concept __boolean_testable_impl = convertible_to<T, bool>;
+template <class T>
+concept __boolean_testable =
+    __boolean_testable_impl<T> &&
+    requires(T &&t) {
+        { !static_cast<T &&>(t) } -> __boolean_testable_impl;
+    };
+
+template <class T, class U>
+concept __weakly_eq_cmp_with =
+    requires(const remove_reference_t<T> &t,
+             const remove_reference_t<U> &u) {
+        { t == u } -> __boolean_testable;
+        { t != u } -> __boolean_testable;
+        { u == t } -> __boolean_testable;
+        { u != t } -> __boolean_testable;
+    };
+
+template <class T>
+concept equality_comparable = __weakly_eq_cmp_with<T, T>;
+
+template <class T, class U>
+concept equality_comparable_with =
+    equality_comparable<T> && equality_comparable<U> &&
+    __weakly_eq_cmp_with<T, U>;
+
+template <class T, class U>
+concept __partially_ordered_with =
+    requires(const remove_reference_t<T> &t,
+             const remove_reference_t<U> &u) {
+        { t <  u } -> __boolean_testable;
+        { t >  u } -> __boolean_testable;
+        { t <= u } -> __boolean_testable;
+        { t >= u } -> __boolean_testable;
+        { u <  t } -> __boolean_testable;
+        { u >  t } -> __boolean_testable;
+        { u <= t } -> __boolean_testable;
+        { u >= t } -> __boolean_testable;
+    };
+
+template <class T>
+concept totally_ordered =
+    equality_comparable<T> && __partially_ordered_with<T, T>;
+
+template <class T, class U>
+concept totally_ordered_with =
+    totally_ordered<T> && totally_ordered<U> &&
+    equality_comparable_with<T, U> && __partially_ordered_with<T, U>;
+
+/* ---- object concepts [concepts.object] -------------------------------- */
+
+template <class T>
+concept movable =
+    is_object_v<T> && move_constructible<T> &&
+    assignable_from<T &, T> && swappable<T>;
+
+template <class T>
+concept copyable =
+    copy_constructible<T> && movable<T> &&
+    assignable_from<T &, T &> &&
+    assignable_from<T &, const T &> &&
+    assignable_from<T &, const T>;
+
+template <class T>
+concept semiregular = copyable<T> && default_initializable<T>;
+
+/* "Behaves like an int": copy it, default-construct it, compare it. The
+ * name is Stepanov's and it is the bar a type must clear to be usable in
+ * a container without surprises. */
+template <class T>
+concept regular = semiregular<T> && equality_comparable<T>;
+
+/* ---- callable concepts [concepts.callable] ---------------------------- */
+
+template <class F, class... A>
+concept invocable = requires(F &&f, A &&...a) {
+    declval<F>()(declval<A>()...);
+};
+
+/* regular_invocable adds a promise the compiler cannot check -- that
+ * calling it twice with the same arguments gives the same answer -- so
+ * it is the same constraint with a different meaning. Saying so is the
+ * whole of its definition in the standard too. */
+template <class F, class... A>
+concept regular_invocable = invocable<F, A...>;
+
+template <class F, class... A>
+concept predicate =
+    regular_invocable<F, A...> &&
+    __boolean_testable<invoke_result_t<F, A...>>;
+
+template <class R, class T, class U>
+concept relation =
+    predicate<R, T, T> && predicate<R, U, U> &&
+    predicate<R, T, U> && predicate<R, U, T>;
+
+/* An equivalence relation and a strict weak ordering are both `relation`
+ * plus a promise about its shape. std::sort needs the second and cannot
+ * verify it; a comparator that is merely a relation makes sort read out
+ * of bounds, which is why the promise is named even though it is not
+ * checked. */
+template <class R, class T, class U>
+concept equivalence_relation = relation<R, T, U>;
+template <class R, class T, class U>
+concept strict_weak_order = relation<R, T, U>;
+
+}  // namespace std
+
+#endif

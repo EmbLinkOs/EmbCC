@@ -1,0 +1,246 @@
+/* <ostream> — C++ [output.streams].
+ *
+ * Formatted output. Two things here are not decoration:
+ *
+ * The SENTRY. Every formatted insertion constructs one first, and it is
+ * what checks the stream is good, flushes a tied stream, and -- on
+ * destruction -- honours `unitbuf`. Doing those in each operator<< would
+ * be twenty copies of the same four lines, and the one that got it wrong
+ * would be the one nobody tested.
+ *
+ * WIDTH IS CONSUMED. `os.width(8)` applies to the next insertion and then
+ * resets to zero; `fill` and `precision` are sticky. That asymmetry
+ * surprises everyone once, and it is why `setw` has to be repeated in a
+ * loop while `setprecision` does not.
+ */
+#ifndef _LIBCXX_OSTREAM
+#define _LIBCXX_OSTREAM
+
+#include <iosfwd>
+#include <cstddef>
+#include <cstdio>
+#include <string>
+#include <ios>
+#include <streambuf>
+
+namespace std {
+
+template <class C, class T>
+class basic_ostream : public basic_ios<C, T> {
+    using base = basic_ios<C, T>;
+
+public:
+    using char_type = C;
+    using traits_type = T;
+
+    explicit basic_ostream(basic_streambuf<C, T> *sb) : base(sb) {}
+
+    class sentry {
+    public:
+        explicit sentry(basic_ostream &os) : __os(os), __ok(false)
+        {
+            if (os.good())
+                __ok = true;
+        }
+        ~sentry()
+        {
+            /* unitbuf means "flush after every insertion", and doing it
+             * here is what makes cerr unbuffered without every operator
+             * having to know. */
+            if (__ok && (__os.flags() & ios_base::unitbuf))
+                __os.flush();
+        }
+        explicit operator bool() const { return __ok; }
+        sentry(const sentry &) = delete;
+        sentry &operator=(const sentry &) = delete;
+    private:
+        basic_ostream &__os;
+        bool __ok;
+    };
+
+    basic_ostream &put(C c)
+    {
+        sentry s(*this);
+        if (s && T::eq_int_type(this->rdbuf()->sputc(c), T::eof()))
+            this->setstate(ios_base::badbit);
+        return *this;
+    }
+
+    basic_ostream &write(const C *p, streamsize n)
+    {
+        sentry s(*this);
+        if (s && this->rdbuf()->sputn(p, n) != n)
+            this->setstate(ios_base::badbit);
+        return *this;
+    }
+
+    basic_ostream &flush()
+    {
+        if (this->rdbuf() && this->rdbuf()->pubsync() == -1)
+            this->setstate(ios_base::badbit);
+        return *this;
+    }
+
+    /* ---- the formatted inserters ---- */
+    basic_ostream &operator<<(bool v)
+    {
+        if (this->flags() & ios_base::boolalpha)
+            return __pad(v ? "true" : "false");
+        return *this << (v ? 1 : 0);
+    }
+
+    basic_ostream &operator<<(short v) { return *this << (long)v; }
+    basic_ostream &operator<<(int v) { return *this << (long)v; }
+    basic_ostream &operator<<(long v) { return __put_signed(v); }
+    basic_ostream &operator<<(long long v) { return __put_signed(v); }
+    basic_ostream &operator<<(unsigned short v)
+    { return *this << (unsigned long)v; }
+    basic_ostream &operator<<(unsigned v) { return *this << (unsigned long)v; }
+    basic_ostream &operator<<(unsigned long v) { return __put_unsigned(v); }
+    basic_ostream &operator<<(unsigned long long v)
+    { return __put_unsigned(v); }
+
+    basic_ostream &operator<<(float v) { return *this << (double)v; }
+    basic_ostream &operator<<(double v) { return __put_double(v); }
+    basic_ostream &operator<<(long double v)
+    { return __put_double((double)v); }
+
+    basic_ostream &operator<<(const void *p)
+    {
+        char buf[32];
+        snprintf(buf, sizeof buf, "%p", p);
+        return __pad(buf);
+    }
+
+    basic_ostream &operator<<(basic_ostream &(*f)(basic_ostream &))
+    { return f(*this); }
+    basic_ostream &operator<<(basic_ios<C, T> &(*f)(basic_ios<C, T> &))
+    { f(*this); return *this; }
+    basic_ostream &operator<<(ios_base &(*f)(ios_base &))
+    { f(*this); return *this; }
+
+    /* Pad `s` to the stream's width, on the side `adjustfield` names,
+     * then CLEAR the width -- which is the rule people trip on. */
+    basic_ostream &__pad(const char *s)
+    {
+        sentry sen(*this);
+        if (!sen)
+            return *this;
+        size_t n = __builtin_strlen(s);
+        streamsize w = this->width();
+        this->width(0);
+        streamsize padn = w > (streamsize)n ? w - (streamsize)n : 0;
+        bool left = (this->flags() & ios_base::left) != 0;
+        if (!left)
+            for (streamsize i = 0; i < padn; i++)
+                this->rdbuf()->sputc(this->fill());
+        this->rdbuf()->sputn(s, (streamsize)n);
+        if (left)
+            for (streamsize i = 0; i < padn; i++)
+                this->rdbuf()->sputc(this->fill());
+        return *this;
+    }
+
+private:
+    basic_ostream &__put_signed(long long v)
+    {
+        char buf[32];
+        const char *spec = "%lld";
+        if (this->flags() & ios_base::hex) spec = "%llx";
+        else if (this->flags() & ios_base::oct) spec = "%llo";
+        else if (this->flags() & ios_base::showpos) spec = "%+lld";
+        snprintf(buf, sizeof buf, spec, v);
+        return __pad(buf);
+    }
+
+    basic_ostream &__put_unsigned(unsigned long long v)
+    {
+        char buf[32];
+        const char *spec = "%llu";
+        unsigned f = this->flags();
+        if (f & ios_base::hex)
+            spec = (f & ios_base::uppercase)
+                 ? ((f & ios_base::showbase) ? "%#llX" : "%llX")
+                 : ((f & ios_base::showbase) ? "%#llx" : "%llx");
+        else if (f & ios_base::oct)
+            spec = (f & ios_base::showbase) ? "%#llo" : "%llo";
+        snprintf(buf, sizeof buf, spec, v);
+        return __pad(buf);
+    }
+
+    basic_ostream &__put_double(double v)
+    {
+        char buf[512];
+        unsigned f = this->flags();
+        int prec = (int)this->precision();
+        if (f & ios_base::fixed)
+            snprintf(buf, sizeof buf, "%.*f", prec, v);
+        else if (f & ios_base::scientific)
+            snprintf(buf, sizeof buf, "%.*e", prec, v);
+        else
+            snprintf(buf, sizeof buf, "%.*g", prec, v);
+        return __pad(buf);
+    }
+};
+
+using ostream = basic_ostream<char>;
+
+template <class C, class T>
+basic_ostream<C, T> &operator<<(basic_ostream<C, T> &os, C c)
+{ os.put(c); return os; }
+template <class C, class T>
+basic_ostream<C, T> &operator<<(basic_ostream<C, T> &os, const C *s)
+{ return os.__pad(s); }
+template <class T>
+basic_ostream<char, T> &operator<<(basic_ostream<char, T> &os, signed char c)
+{ os.put((char)c); return os; }
+template <class T>
+basic_ostream<char, T> &operator<<(basic_ostream<char, T> &os, unsigned char c)
+{ os.put((char)c); return os; }
+
+template <class C, class T, class A>
+basic_ostream<C, T> &operator<<(basic_ostream<C, T> &os,
+                                const basic_string<C, T, A> &s)
+{ return os.__pad(s.c_str()); }
+
+/* ---- manipulators ---- */
+template <class C, class T>
+basic_ostream<C, T> &endl(basic_ostream<C, T> &os)
+{ os.put('\n'); os.flush(); return os; }
+template <class C, class T>
+basic_ostream<C, T> &ends(basic_ostream<C, T> &os) { os.put('\0'); return os; }
+template <class C, class T>
+basic_ostream<C, T> &flush(basic_ostream<C, T> &os) { os.flush(); return os; }
+
+inline ios_base &boolalpha(ios_base &s) { s.setf(ios_base::boolalpha); return s; }
+inline ios_base &noboolalpha(ios_base &s)
+{ s.unsetf(ios_base::boolalpha); return s; }
+inline ios_base &showbase(ios_base &s) { s.setf(ios_base::showbase); return s; }
+inline ios_base &noshowbase(ios_base &s)
+{ s.unsetf(ios_base::showbase); return s; }
+inline ios_base &showpos(ios_base &s) { s.setf(ios_base::showpos); return s; }
+inline ios_base &noshowpos(ios_base &s)
+{ s.unsetf(ios_base::showpos); return s; }
+inline ios_base &uppercase(ios_base &s) { s.setf(ios_base::uppercase); return s; }
+inline ios_base &nouppercase(ios_base &s)
+{ s.unsetf(ios_base::uppercase); return s; }
+inline ios_base &skipws(ios_base &s) { s.setf(ios_base::skipws); return s; }
+inline ios_base &noskipws(ios_base &s) { s.unsetf(ios_base::skipws); return s; }
+inline ios_base &dec(ios_base &s)
+{ s.setf(ios_base::dec, ios_base::basefield); return s; }
+inline ios_base &hex(ios_base &s)
+{ s.setf(ios_base::hex, ios_base::basefield); return s; }
+inline ios_base &oct(ios_base &s)
+{ s.setf(ios_base::oct, ios_base::basefield); return s; }
+inline ios_base &fixed(ios_base &s)
+{ s.setf(ios_base::fixed, ios_base::floatfield); return s; }
+inline ios_base &scientific(ios_base &s)
+{ s.setf(ios_base::scientific, ios_base::floatfield); return s; }
+inline ios_base &left(ios_base &s)
+{ s.setf(ios_base::left, ios_base::adjustfield); return s; }
+inline ios_base &right(ios_base &s)
+{ s.setf(ios_base::right, ios_base::adjustfield); return s; }
+
+}  // namespace std
+
+#endif

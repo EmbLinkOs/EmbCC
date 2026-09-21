@@ -1,0 +1,214 @@
+/* <map> and <multimap> — C++ [map], [multimap].
+ *
+ * A red-black tree (include/__tree) keyed on the pair's first member.
+ * The container is thin; the tree is where the work is.
+ *
+ * The one member with a surprise in it is operator[]: it INSERTS a
+ * value-initialised element when the key is absent, which is why
+ * `if (m[k] == 0)` grows the map and `m.find(k)` does not. It is also
+ * why operator[] has no const overload -- it cannot promise not to
+ * modify.
+ */
+#ifndef _LIBCXX_MAP
+#define _LIBCXX_MAP
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <iterator>
+#include <functional>
+#include <initializer_list>
+#include <stdexcept>
+#include <__tree>
+
+namespace std {
+
+namespace __detail {
+template <class K, class T>
+struct __map_key_of {
+    const K &operator()(const pair<const K, T> &p) const { return p.first; }
+};
+}
+
+template <class K, class T, class Cmp = less<K>>
+class map {
+    using tree = __detail::__rb_tree<pair<const K, T>, K,
+                                     __detail::__map_key_of<K, T>, Cmp, false>;
+    tree __t;
+
+public:
+    using key_type = K;
+    using mapped_type = T;
+    using value_type = pair<const K, T>;
+    using key_compare = Cmp;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = value_type &;
+    using const_reference = const value_type &;
+    using iterator = typename tree::iterator;
+    using const_iterator = typename tree::const_iterator;
+
+    map() = default;
+    explicit map(const Cmp &c) : __t(c) {}
+    map(initializer_list<value_type> l) { for (auto &v : l) insert(v); }
+    template <class It> map(It first, It last)
+    { for (; first != last; ++first) insert(*first); }
+
+    iterator begin() { return __t.begin(); }
+    const_iterator begin() const { return __t.begin(); }
+    const_iterator cbegin() const { return __t.begin(); }
+    iterator end() { return __t.end(); }
+    const_iterator end() const { return __t.end(); }
+    const_iterator cend() const { return __t.end(); }
+
+    bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+    void clear() { __t.clear(); }
+
+    pair<iterator, bool> insert(const value_type &v) { return __t.insert(v); }
+    pair<iterator, bool> insert(value_type &&v)
+    { return __t.insert(std::move(v)); }
+    void insert(initializer_list<value_type> l)
+    { for (auto &v : l) insert(v); }
+
+    template <class... A>
+    pair<iterator, bool> emplace(A &&...a)
+    { return __t.emplace(forward<A>(a)...); }
+
+    /* try_emplace does NOT construct the mapped value when the key is
+     * already there -- which is the difference from emplace, and matters
+     * when constructing it is expensive or has side effects. */
+    template <class... A>
+    pair<iterator, bool> try_emplace(const K &k, A &&...a)
+    {
+        iterator it = __t.find(k);
+        if (it != end())
+            return {it, false};
+        return __t.emplace(value_type(k, T(forward<A>(a)...)));
+    }
+
+    template <class M>
+    pair<iterator, bool> insert_or_assign(const K &k, M &&v)
+    {
+        iterator it = __t.find(k);
+        if (it != end()) { it->second = forward<M>(v); return {it, false}; }
+        return __t.emplace(value_type(k, T(forward<M>(v))));
+    }
+
+    /* Inserts when absent. No const overload exists for that reason. */
+    T &operator[](const K &k)
+    {
+        iterator it = __t.find(k);
+        if (it != end())
+            return it->second;
+        return __t.emplace(value_type(k, T())).first->second;
+    }
+
+    T &at(const K &k)
+    {
+        iterator it = __t.find(k);
+        if (it == end()) __throw_map_out_of_range();
+        return it->second;
+    }
+    const T &at(const K &k) const
+    {
+        const_iterator it = __t.find(k);
+        if (it == end()) __throw_map_out_of_range();
+        return it->second;
+    }
+
+    iterator find(const K &k) { return __t.find(k); }
+    const_iterator find(const K &k) const { return __t.find(k); }
+    size_type count(const K &k) const { return __t.find(k) == __t.end() ? 0 : 1; }
+    bool contains(const K &k) const { return __t.find(k) != __t.end(); }
+
+    iterator lower_bound(const K &k) { return __t.lower_bound(k); }
+    const_iterator lower_bound(const K &k) const { return __t.lower_bound(k); }
+    iterator upper_bound(const K &k) { return __t.upper_bound(k); }
+    const_iterator upper_bound(const K &k) const { return __t.upper_bound(k); }
+    pair<iterator, iterator> equal_range(const K &k)
+    { return __t.equal_range(k); }
+
+    size_type erase(const K &k) { return __t.erase(k); }
+    iterator erase(iterator pos) { return __t.erase(pos); }
+
+    void swap(map &o) noexcept { __t.swap(o.__t); }
+    key_compare key_comp() const { return __t.__comparator(); }
+
+    bool __check() const { return __t.__check(); }
+
+private:
+    [[noreturn]] static void __throw_map_out_of_range();
+};
+
+template <class K, class T, class Cmp>
+void map<K, T, Cmp>::__throw_map_out_of_range()
+{ throw out_of_range("map::at: key not found"); }
+
+template <class K, class T, class Cmp>
+bool operator==(const map<K, T, Cmp> &a, const map<K, T, Cmp> &b)
+{
+    if (a.size() != b.size()) return false;
+    auto i = a.begin(); auto j = b.begin();
+    for (; i != a.end(); ++i, ++j)
+        if (!(i->first == j->first) || !(i->second == j->second))
+            return false;
+    return true;
+}
+template <class K, class T, class Cmp>
+bool operator!=(const map<K, T, Cmp> &a, const map<K, T, Cmp> &b)
+{ return !(a == b); }
+
+template <class K, class T, class Cmp>
+void swap(map<K, T, Cmp> &a, map<K, T, Cmp> &b) noexcept { a.swap(b); }
+
+/* multimap: the same tree, told to keep equal keys rather than reject
+ * them. It has no operator[] and no at(), because with several values per
+ * key neither has an answer. */
+template <class K, class T, class Cmp = less<K>>
+class multimap {
+    using tree = __detail::__rb_tree<pair<const K, T>, K,
+                                     __detail::__map_key_of<K, T>, Cmp, true>;
+    tree __t;
+
+public:
+    using key_type = K;
+    using mapped_type = T;
+    using value_type = pair<const K, T>;
+    using size_type = size_t;
+    using iterator = typename tree::iterator;
+    using const_iterator = typename tree::const_iterator;
+
+    multimap() = default;
+    multimap(initializer_list<value_type> l) { for (auto &v : l) insert(v); }
+
+    iterator begin() { return __t.begin(); }
+    const_iterator begin() const { return __t.begin(); }
+    iterator end() { return __t.end(); }
+    const_iterator end() const { return __t.end(); }
+    bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+    void clear() { __t.clear(); }
+
+    iterator insert(const value_type &v) { return __t.insert(v).first; }
+    iterator insert(value_type &&v) { return __t.insert(std::move(v)).first; }
+    template <class... A>
+    iterator emplace(A &&...a) { return __t.emplace(forward<A>(a)...).first; }
+
+    iterator find(const K &k) { return __t.find(k); }
+    const_iterator find(const K &k) const { return __t.find(k); }
+    size_type count(const K &k) const { return __t.count(k); }
+    iterator lower_bound(const K &k) { return __t.lower_bound(k); }
+    iterator upper_bound(const K &k) { return __t.upper_bound(k); }
+    pair<iterator, iterator> equal_range(const K &k)
+    { return __t.equal_range(k); }
+
+    size_type erase(const K &k) { return __t.erase(k); }
+    iterator erase(iterator pos) { return __t.erase(pos); }
+    void swap(multimap &o) noexcept { __t.swap(o.__t); }
+    bool __check() const { return __t.__check(); }
+};
+
+}  // namespace std
+
+#endif

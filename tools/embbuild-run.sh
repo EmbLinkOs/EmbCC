@@ -18,10 +18,11 @@ set -eu
 cd "$(dirname "$0")/.."
 MANIFEST=${1:?usage: embbuild-run.sh MANIFEST.ebm [OUTDIR]}
 OUT=${2:-tests/golden/out/embbuild}
-NEWLIB_INC=${NEWLIB_INC:-/home/motsou/cross/newlib-c99/x86_64-elf/include}
-CRT0=${CRT0:-/home/motsou/myos/build/crt0.o}
-SYSCALLS=${SYSCALLS:-/home/motsou/myos/build/syscalls.o}
-LIBC=${LIBC:-/home/motsou/cross/newlib-c99/x86_64-elf/lib/libc.a}
+. "$(dirname "$0")/hostpaths.sh"
+NEWLIB_INC=${NEWLIB_INC:-$X86_NEWLIB/include}
+CRT0=${CRT0:-$MYOS_BUILD/crt0.o}
+SYSCALLS=${SYSCALLS:-$MYOS_BUILD/syscalls.o}
+LIBC=${LIBC:-$X86_NEWLIB/lib/libc.a}
 HOST=$(pwd)
 
 for f in "$NEWLIB_INC/stdio.h" "$CRT0" "$SYSCALLS" "$LIBC"; do
@@ -85,8 +86,8 @@ echo "EmbBuild(host) ran project '$project' from $MANIFEST"
 # linked against newlib for the EmbLink syscall ABI, not this host's glibc.)
 ELF="$STAGE/embcc.elf"
 [ -f "$ELF" ] || { echo "manifest produced no embcc.elf"; exit 1; }
-readelf -h "$ELF" | grep -q 'EXEC (Executable file)' || { echo "embcc.elf is not ET_EXEC"; exit 1; }
-und=$(readelf -sW "$ELF" 2>/dev/null | awk '$7=="UND" && $8!="" {print $8}' | grep -v '^$' || true)
+"$READELF" -h "$ELF" | grep -q 'EXEC (Executable file)' || { echo "embcc.elf is not ET_EXEC"; exit 1; }
+und=$("$READELF" -sW "$ELF" 2>/dev/null | awk '$7=="UND" && $8!="" {print $8}' | grep -v '^$' || true)
 [ -z "$und" ] || { echo "embcc.elf has unresolved symbols:"; echo "$und"; exit 1; }
-sz=$(stat -c%s "$ELF")
+sz=$(wc -c < "$ELF" | tr -d " ")
 echo "manifest built embcc.elf ($sz bytes): ET_EXEC, every symbol resolved"

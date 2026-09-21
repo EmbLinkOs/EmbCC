@@ -1,13 +1,24 @@
 # EmbCC — a native C compiler for EmbLinkOS
 
-**Status: the toolchain is real and builds the OS.** EmbCC compiles *itself*
-(the self-hosting fixed point holds over all 16 sources), and the entire
-EmbLinkOS **kernel** — 89 C translation units through `embcc`, 6 hand-written
-`.asm` through `embas`, linked by `embld` — builds and **boots to the home
-desktop** with no gcc, no nasm and no `ld` anywhere in the loop.
+**Status: the toolchain is real and has built the OS.** EmbCC compiles
+*itself* (the self-hosting fixed point holds), and the EmbLinkOS **kernel** —
+89 C translation units through `embcc`, 6 hand-written `.asm` through `embas`,
+linked by `embld` — built and **booted to the home desktop** with no gcc, no
+nasm and no `ld` anywhere in the loop. The kernel has kept growing since —
+165 C units and 6 `.asm` today — and the whole of it still builds from its
+EmbBuild manifest with EmbCC alone and boots
+(`tests/golden/x86_64/embbuild-kernel.sh`).
 
-`embcc -c` compiles C to genuine x86_64-elf relocatable objects, cross-checked
-against gcc on every test: the integer and floating types, pointers (incl.
+**EmbCC now emits for two machines.** EmbLinkOS became two architectures when
+its aarch64 campaign closed (`myos/docs/ARM64.md`), and `--target=aarch64-elf`
+answers it: one binary, two backends, chosen at run time (D-011). The whole
+test corpus compiles for aarch64 and RUNS on it under `qemu-system-aarch64`,
+agreeing with gcc's build of every program, and **all 131 C files in the
+EmbLinkOS ARM kernel build compile** — see "Where aarch64 stands" below.
+
+`embcc -c` compiles C11 to genuine relocatable objects for either machine,
+cross-checked against gcc on every test: the integer and floating types
+(`long double` and `_Complex` included), VLAs, pointers (incl.
 function pointers), arrays, structs/unions/enums, bitfields, globals, the full
 operator and statement set, C11 (`_Alignof`/`_Alignas`/`_Atomic`/`_Generic`/
 `_Static_assert`), and the GNU extensions the kernel needs — statement
@@ -22,7 +33,23 @@ debug info (`-g`) that our own **EmbDBG** reads back. **EmbLD** links, emitting
 ET_EXEC ELF and the native **EMBX**; `embread` verifies EMBX images; **EmbAS**
 assembles NASM/Intel source byte-identically to nasm.
 
-`make test` is **102/102**. The decision record below still governs.
+The decision record below still governs.
+
+**On test counts.** Both suites RUN what EmbCC compiles, on the architecture
+it was compiled for: aarch64 on `qemu-system-aarch64 -M virt`, and x86-64
+either natively (on a Linux x86-64 host) or as a Multiboot image on
+`qemu-system-x86_64` (anywhere else) — see [tests/harness/](tests/harness/).
+`make test` and `make test-arm64` both pass in full on the Apple Silicon
+development machine. A test that cannot run on a host says SKIP and why; it is
+never counted as a pass (that is how 23 golden tests "passed" here for a while
+while proving nothing — and how a stale build manifest went unnoticed).
+
+The differential tests are the ones that carry the weight: every exec program
+built by EmbCC and by the target's gcc and run, with exit codes and output
+compared (`agrees-with-gcc`, and again at `-O1` and `-O2`), and the cross-ABI
+tests that link an EmbCC half with a gcc half. `tools/x86-identity.sh`
+additionally requires x86-64 objects to be byte-identical to a baseline
+revision, so a change to shared code proves what it did to the x86 backend.
 
 ## Where it stands next to TCC
 
@@ -55,7 +82,7 @@ Note the tension honestly: this points *opposite* to EmbLinkOS's ports story
 (git, CPython, C++, TCC — "meet the existing software world on its own terms and
 refuse to fake it"). One soul says *host the world*, the other *own the stack*.
 Both are legitimate; EmbCC is the second, entered with eyes open. See
-[docs/VISION.md](docs/VISION.md).
+[docs/design/vision-first.md](docs/design/vision-first.md).
 
 ## The shape of the plan
 
@@ -81,43 +108,119 @@ Both are legitimate; EmbCC is the second, entered with eyes open. See
 
 ## Documents
 
+**[docs/README.md](docs/README.md) is the index** — the tree is laid out as
+the specification's §31 asks (`architecture/`, `language/`, `ir/`, `tools/`,
+`developer/`, `design/`), and that page says where everything is and where
+it deliberately differs.
+
 | Doc | What it is |
 |---|---|
-| [docs/VISION.md](docs/VISION.md) | Why a native compiler; the ownership thesis; the own-the-stack vs host-the-world tension |
-| [docs/VISION_LONGTERM.md](docs/VISION_LONGTERM.md) | The horizon past the named milestones: C++, deeper analysis, compiler services — gated by D-006. Optimization and diagnostics have since landed off this list; see `src/opt`, `src/codegen`, `src/driver/util.c` |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | Decisions already made, each with its rationale (ADR-style) |
-| [docs/TARGET_ABI.md](docs/TARGET_ABI.md) | **The grounding doc.** The exact EmbLinkOS contract EmbCC must emit — syscalls, crt0, and the precise ELF the in-kernel loader accepts |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Intended compiler structure and phases |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Milestones M0–M4, each with a concrete acceptance test, and what is open past them |
-| [docs/USAGE.md](docs/USAGE.md) | The `embcc`/`embas`/`embld`/`embdbg` CLI reference |
-| [docs/todo.md](docs/todo.md) | The evidence-backed completeness audit: what C we do not yet compile, ranked by a real corpus |
-| [docs/WORKPLAN.md](docs/WORKPLAN.md) | The team's three streams (core, linker, proving ground), what each is working on now, and the process that keeps them off each other's critical path |
-| [docs/EMBDBG_Requirements.md](docs/EMBDBG_Requirements.md) | Producer-side debug-info requirements + the DWARF-bridge decision (D-010); the byte format & kernel contract live OS-side in `myos/docs/EMBDBG_Specification.md` |
+| [docs/design/vision.md](docs/design/vision.md) | **The specification.** What EmbCC is, the invariants it never breaks, and what is and is not built |
+| [docs/ir/specification.md](docs/ir/specification.md) | EmbIR: the form, its textual syntax, provenance, and the round-trip |
+| [docs/design/vision-first.md](docs/design/vision-first.md) | Why a native compiler; the ownership thesis; the own-the-stack vs host-the-world tension |
+| [docs/design/vision-longterm.md](docs/design/vision-longterm.md) | The horizon past the named milestones: C++, deeper analysis, compiler services — gated by D-006. Optimization and diagnostics have since landed off this list; see `src/opt`, `src/arch`, `src/driver/util.c` |
+| [docs/design/decisions.md](docs/design/decisions.md) | Decisions already made, each with its rationale (ADR-style) |
+| [docs/architecture/abi.md](docs/architecture/abi.md) | **The grounding doc.** The exact EmbLinkOS contract EmbCC must emit — syscalls, crt0, and the precise ELF the in-kernel loader accepts |
+| [docs/architecture/overview.md](docs/architecture/overview.md) | Intended compiler structure and phases |
+| [docs/design/roadmap.md](docs/design/roadmap.md) | Milestones M0–M4, each with a concrete acceptance test, and what is open past them |
+| [docs/language/compatibility.md](docs/language/compatibility.md) | **What works on which architecture** — types, language, ABI, tools, EmbLinkOS status and test coverage, x86-64 against aarch64 |
+| [docs/tools/embcc.md](docs/tools/embcc.md) | The `embcc`/`embas`/`embld`/`embdbg` CLI reference |
+| [tests/harness/](tests/harness/) | The aarch64 proving ground: a bare-metal QEMU `virt` image with an ARM-semihosting syscall floor, so compiled code is RUN on the architecture it was compiled for |
+| [docs/developer/todo.md](docs/developer/todo.md) | The evidence-backed completeness audit: what C we do not yet compile, ranked by a real corpus |
+| [docs/design/workplan.md](docs/design/workplan.md) | The team's three streams (core, linker, proving ground), what each is working on now, and the process that keeps them off each other's critical path |
+| [docs/tools/embdbg.md](docs/tools/embdbg.md) | Producer-side debug-info requirements + the DWARF-bridge decision (D-010); the byte format & kernel contract live OS-side in `myos/docs/EMBDBG_Specification.md` |
 | [src/embx/embx.h](src/embx/embx.h) | The EMBX container, byte-exact — mirrors the kernel's loader header; written by EmbLD, read by `embread` |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | The discipline inherited from EmbLinkOS (prove on the host, selftest the invariant, THE RULE) |
 
 ## Where to start reading
 
-For the *why*, read [docs/VISION.md](docs/VISION.md), then
-[docs/DECISIONS.md](docs/DECISIONS.md) — the arguments are settled there, with
+For the *why*, read [docs/design/vision-first.md](docs/design/vision-first.md), then
+[docs/design/decisions.md](docs/design/decisions.md) — the arguments are settled there, with
 their reopen conditions.
 
-For the *how*, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the phase
-structure, then [docs/TARGET_ABI.md](docs/TARGET_ABI.md), which is the grounding
+For the *how*, read [docs/architecture/overview.md](docs/architecture/overview.md) for the phase
+structure, then [docs/architecture/abi.md](docs/architecture/abi.md), which is the grounding
 doc: the exact contract the OS enforces, and the expensive facts that cost a
 debugging session each.
+
+The source is laid out by phase, with the machine confined to one place:
+`src/lex`, `cpp`, `parse`, `sema`, `ir`, `opt`, `debug`, `elf`, `driver` never
+name a target; everything that does is under `src/arch/` — shared pieces at
+its top, then [`src/arch/x86_64/`](src/arch/x86_64/README.md) and
+[`src/arch/aarch64/`](src/arch/aarch64/README.md), each with its backend,
+encoder, share of IR generation (`va_arg`, inline asm) and predefined macros
+([src/arch/README.md](src/arch/README.md)). The tests follow suit:
+`tests/golden/` runs for both targets, `tests/golden/<arch>/` for one.
 
 To build and run it:
 
 ```sh
 make && make embdbg     # embdbg is not in `all`, and the golden tests need it
-make test               # 102/102
+make test               # x86-64: compiles AND runs, natively or under qemu-system-x86_64
+make test-arm64         # aarch64: compiles AND runs, under qemu-system-aarch64
 ```
 
-Then [docs/USAGE.md](docs/USAGE.md) for the CLI.
+`make test-arm64` needs `aarch64-elf-gcc`, `qemu-system-aarch64`, and an
+aarch64 newlib (`EMBCC_AARCH64_NEWLIB`, default `~/cross/newlib-aarch64-c99`).
+It links each test into a bare-metal image and runs it on QEMU's `virt`
+machine — the same machine EmbLinkOS itself targets — with ARM semihosting
+carrying stdout and the exit status back to the host. See
+[tests/harness/aarch64/](tests/harness/aarch64/).
+
+Then [docs/tools/embcc.md](docs/tools/embcc.md) for the CLI.
+
+## Where aarch64 stands
+
+The feature-by-feature comparison with x86-64 is
+[docs/language/compatibility.md](docs/language/compatibility.md). In short, working and proven
+by running it: the integer and floating types, pointers,
+arrays, structs and unions by value (AAPCS64 — including the composite-return
+rules and the hidden `x8` pointer), the full operator and statement set,
+globals, string literals, computed `goto`, calls both direct and through
+function pointers, and **extended inline asm**. `--target=aarch64-elf`
+produces real `EM_AARCH64` ET_REL objects with `R_AARCH64_CALL26` /
+`ADR_PREL_PG_HI21` / `ADD_ABS_LO12_NC` / `ABS64` relocations that
+`aarch64-elf-ld` links against stock newlib.
+
+The inline-asm assembler (`src/arch/aarch64/asm.c`) covers exactly the
+vocabulary the ARM kernel uses, measured rather than guessed — 67 distinct
+templates collected by preprocessing every C file the aarch64 kernel build
+compiles: `mrs`/`msr` over 41 named system registers plus the generic
+`S<op0>_<op1>_C<n>_C<m>_<op2>` form, `msr daifset/daifclr`, the barriers and
+hints, `tlbi`, `hvc`/`smc`/`brk`, `ldr`/`str` (including `q` registers) and
+`.inst`. Every encoding is refereed against `aarch64-elf-as`; the kernel's own
+PSCI call — register variables `x0`–`x3`, a `"+r"` operand, `hvc #0` — runs
+under QEMU and returns what gcc's build returns.
+
+**The ARM kernel: all 131 C files compile.** The atomics (`ldxr`/`stxr`
+retry loops between barriers), `va_start`/`va_arg` over AAPCS64's register
+save areas, Homogeneous Floating-point Aggregates in `v` registers, and
+composites over 16 bytes passed by reference (stage B.3) are all in, each
+checked against gcc's own code by the cross-ABI tests — EmbCC calling gcc,
+gcc calling EmbCC, and a `va_list` handed across the line in both directions.
+
+`-g` works on aarch64 as on x86-64 — DWARF lines, and variable locations off
+x29 — and a real gdb debugs the program running in QEMU on both targets
+(`tests/golden/debug-live.sh`).
+
+VLAs, `long double` (IEEE binary128 through libgcc, as gcc does) and
+`_Complex` work here as on x86-64, each checked against gcc across the call
+boundary.
+
+The backend is also naive where the x86 one is not: no slot coalescing, no
+residency cache, no register allocator, so frames are wider and the code is
+longer. That is the same order the x86 backend was built in (D-005), not an
+oversight.
 
 ## What's next
 
+- **C itself is covered on both targets.** The last gaps closed in
+  September 2026: variable-length arrays, `long double` (x87 80-bit extended
+  on x86-64, IEEE binary128 through libgcc on aarch64, constants bit for bit
+  as gcc's) and `_Complex` (float, double and long double, gcc-compatible
+  across the call boundary, newlib's `<complex.h>` included). What remains
+  refused is listed in `docs/tools/embcc.md` — GNU extensions like integer
+  `_Complex`, and a few seams such as `va_arg` of a struct.
 - **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
   the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1
   program to exit 42. The manifest and a host reference walker already exist;
@@ -125,8 +228,5 @@ Then [docs/USAGE.md](docs/USAGE.md) for the CLI.
   last named milestone.
 - **The kernel, through EmbBuild on the OS** — the same step for the bigger
   prize; the two blockers (an on-OS assembler, `kernel_end`) are closed.
-- **The C gaps that remain** — VLA, `_Complex`, 80-bit `long double`. Each is
-  refused loudly today rather than miscompiled; `docs/todo.md` ranks them
-  against a real corpus.
 - **Past that, only if earned** (D-006): C++ as the second language (D-008),
   `__thread`/TLS, and dynamic-linking output. Candidates, not commitments.

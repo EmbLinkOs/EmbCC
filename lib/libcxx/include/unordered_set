@@ -1,0 +1,98 @@
+/* <unordered_set> — C++ [unord.set].
+ *
+ * The same hash table, with the key and the value the same thing --
+ * exactly the relationship set has to the red-black tree.
+ */
+#ifndef _LIBCXX_UNORDERED_SET
+#define _LIBCXX_UNORDERED_SET
+
+#include <cstddef>
+#include <utility>
+#include <functional>
+#include <initializer_list>
+#include <__hash>
+
+namespace std {
+
+namespace __detail {
+template <class K>
+struct __uset_key_of { const K &operator()(const K &k) const { return k; } };
+}
+
+template <class K, class H = hash<K>, class E = equal_to<K>>
+class unordered_set {
+    using table = __detail::__hash_table<K, K, __detail::__uset_key_of<K>,
+                                         H, E, false>;
+    table __t;
+
+public:
+    using key_type = K;
+    using value_type = K;
+    using size_type = size_t;
+    using iterator = typename table::iterator;
+    using const_iterator = typename table::const_iterator;
+
+    unordered_set() = default;
+    unordered_set(initializer_list<K> l) { for (auto &v : l) insert(v); }
+    template <class It> unordered_set(It f, It l)
+    { for (; f != l; ++f) insert(*f); }
+
+    iterator begin() const { return __t.begin(); }
+    iterator end() const { return __t.end(); }
+    bool empty() const noexcept { return __t.empty(); }
+    size_type size() const noexcept { return __t.size(); }
+    void clear() { __t.clear(); }
+    void reserve(size_type n) { __t.reserve(n); }
+    size_type bucket_count() const noexcept { return __t.bucket_count(); }
+    float load_factor() const noexcept { return __t.load_factor(); }
+
+    pair<iterator, bool> insert(const K &v) { return __t.emplace(v); }
+    template <class... A>
+    pair<iterator, bool> emplace(A &&...a)
+    { return __t.emplace(forward<A>(a)...); }
+
+    iterator find(const K &k) const { return __t.find(k); }
+    size_type count(const K &k) const { return __t.count(k); }
+    bool contains(const K &k) const { return __t.find(k) != __t.end(); }
+    size_type erase(const K &k) { return __t.erase(k); }
+    void swap(unordered_set &o) noexcept { __t.swap(o.__t); }
+    bool __check() const { return __t.__check(); }
+};
+
+template <class K, class H, class E>
+bool operator==(const unordered_set<K, H, E> &a, const unordered_set<K, H, E> &b)
+{
+    if (a.size() != b.size()) return false;
+    for (auto it = a.begin(); it != a.end(); ++it)
+        if (!b.contains(*it)) return false;
+    return true;
+}
+template <class K, class H, class E>
+bool operator!=(const unordered_set<K, H, E> &a, const unordered_set<K, H, E> &b)
+{ return !(a == b); }
+
+template <class K, class H = hash<K>, class E = equal_to<K>>
+class unordered_multiset {
+    using table = __detail::__hash_table<K, K, __detail::__uset_key_of<K>,
+                                         H, E, true>;
+    table __t;
+
+public:
+    using value_type = K;
+    using size_type = size_t;
+    using iterator = typename table::iterator;
+
+    unordered_multiset() = default;
+    unordered_multiset(initializer_list<K> l) { for (auto &v : l) insert(v); }
+    iterator begin() const { return __t.begin(); }
+    iterator end() const { return __t.end(); }
+    size_type size() const noexcept { return __t.size(); }
+    iterator insert(const K &v) { return __t.emplace(v).first; }
+    size_type count(const K &k) const { return __t.count(k); }
+    size_type erase(const K &k) { return __t.erase(k); }
+    bool __check() const { return __t.__check(); }
+};
+
+}  // namespace std
+
+#endif

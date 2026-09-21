@@ -1,13 +1,13 @@
 # src/driver
 
-argv, flags, orchestration — ../../docs/ARCHITECTURE.md §2.
+argv, flags, orchestration — ../../docs/architecture/overview.md §2.
 
 Runs the whole pipeline in one process (§1 — the OS has no `fork`/`exec`, so
 there is no `cc1`/`as` to spawn):
 
-    lex → cpp → parse → sema → IR → opt → codegen → ELF
+    lex → cpp → parse → sema → IR → opt → codegen (../arch/<arch>) → ELF
 
-**Inputs.** `-c FILE.c` compiles; `-c FILE.asm` dispatches to `../as` (EmbAS),
+**Inputs.** `-c FILE.c` compiles; `-c FILE.asm` dispatches to `../arch/x86_64/as.c` (EmbAS),
 the way gcc dispatches `.s`. `-E` stops after preprocessing.
 
 **Flags.** `-o`, `-I`, `-isystem`, `-O` (`-O0`/`-O1`/`-O2`, ../opt + codegen),

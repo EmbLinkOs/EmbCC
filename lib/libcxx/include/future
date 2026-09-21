@@ -1,0 +1,676 @@
+/* <future> — C++ [futures].
+ *
+ * A value that will exist later, and the exception that might arrive
+ * instead. The second half is the point: a thread's function cannot
+ * `throw` to its caller -- there is no caller -- so without a future an
+ * error in a worker either kills the program or has to be encoded by
+ * hand into the result. A future carries whichever of the two happened,
+ * and `get()` rethrows on the waiting thread, so the failure is handled
+ * where the work was asked for.
+ *
+ * ---- the shared state -----------------------------------------------------
+ *
+ * One object, referred to by the promise and the future. It holds the
+ * value or the exception, a flag saying which, and a mutex and
+ * condition variable to wait on. It is reference-counted because either
+ * end may die first: a promise destroyed without setting anything makes
+ * the future throw `broken_promise`, which is far better than a wait
+ * that never ends.
+ *
+ * ---- get() is once --------------------------------------------------------
+ *
+ * `future::get()` MOVES the value out and leaves the future invalid. It
+ * looks unfriendly and is the honest signature: the value is not copied
+ * to every caller, there is exactly one, and a second `get()` would
+ * either copy something already moved from or silently return junk.
+ * `shared_future` is the type for the other case, and it costs a copy
+ * per reader by design.
+ */
+#ifndef _LIBCXX_FUTURE
+#define _LIBCXX_FUTURE
+
+#include <condition_variable>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <system_error>
+#include <thread>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+enum class future_status { ready, timeout, deferred };
+enum class launch { async = 1, deferred = 2 };
+
+constexpr launch operator|(launch a, launch b)
+{ return (launch)((int)a | (int)b); }
+constexpr launch operator&(launch a, launch b)
+{ return (launch)((int)a & (int)b); }
+
+enum class future_errc {
+    broken_promise = 1,
+    future_already_retrieved,
+    promise_already_satisfied,
+    no_state
+};
+
+template <> struct is_error_code_enum<future_errc> : true_type {};
+
+namespace __detail {
+class __future_category : public error_category {
+public:
+    const char *name() const noexcept override { return "future"; }
+    string message(int ev) const override
+    {
+        switch ((future_errc)ev) {
+        case future_errc::broken_promise:
+            return "the promise was destroyed before it was satisfied";
+        case future_errc::future_already_retrieved:
+            return "the future was already retrieved from this promise";
+        case future_errc::promise_already_satisfied:
+            return "the promise was already satisfied";
+        case future_errc::no_state:
+            return "no shared state";
+        }
+        return "unknown future error";
+    }
+};
+inline __future_category __fc{};
+}
+
+inline const error_category &future_category() noexcept
+{ return __detail::__fc; }
+
+inline error_code make_error_code(future_errc e) noexcept
+{ return error_code((int)e, future_category()); }
+inline error_condition make_error_condition(future_errc e) noexcept
+{ return error_condition((int)e, future_category()); }
+
+class future_error : public logic_error {
+public:
+    explicit future_error(future_errc e)
+        : logic_error(make_error_code(e).message()),
+          __ec(make_error_code(e)) {}
+    const error_code &code() const noexcept { return __ec; }
+
+private:
+    error_code __ec;
+};
+
+/* ---- the shared state ---------------------------------------------------- */
+
+namespace __detail {
+
+struct __state_base {
+    mutex __m;
+    condition_variable __cv;
+    bool __ready = false;
+    bool __retrieved = false;
+    exception_ptr __exc{};
+
+    void __wait()
+    {
+        unique_lock<mutex> lk(__m);
+        __cv.wait(lk, [this] { return __ready; });
+    }
+
+    template <class R, class P>
+    future_status __wait_for(const chrono::duration<R, P> &d)
+    {
+        unique_lock<mutex> lk(__m);
+        return __cv.wait_for(lk, d, [this] { return __ready; })
+               ? future_status::ready : future_status::timeout;
+    }
+
+    void __set_exception(exception_ptr p)
+    {
+        unique_lock<mutex> lk(__m);
+        if (__ready)
+            throw future_error(future_errc::promise_already_satisfied);
+        __exc = p;
+        __ready = true;
+        lk.unlock();
+        __cv.notify_all();
+    }
+
+    /* A promise destroyed without a value is a BROKEN PROMISE, and
+     * reporting it is the difference between a bug that shows up here
+     * and a program that hangs. */
+    void __abandon()
+    {
+        unique_lock<mutex> lk(__m);
+        if (__ready)
+            return;
+        __exc = make_exception_ptr(future_error(future_errc::broken_promise));
+        __ready = true;
+        lk.unlock();
+        __cv.notify_all();
+    }
+
+    void __rethrow_if()
+    {
+        if (__exc)
+            rethrow_exception(__exc);
+    }
+
+    virtual ~__state_base() = default;
+};
+
+template <class T>
+struct __state : __state_base {
+    /* Storage rather than a T member: the state exists before the value
+     * does, and a T that has no default constructor must still be
+     * storable. */
+    alignas(T) unsigned char __buf[sizeof(T)];
+    bool __has = false;
+
+    ~__state() override
+    {
+        if (__has)
+            reinterpret_cast<T *>(__buf)->~T();
+    }
+
+    void __set(T &&v)
+    {
+        unique_lock<mutex> lk(__m);
+        if (__ready)
+            throw future_error(future_errc::promise_already_satisfied);
+        ::new ((void *)__buf) T(static_cast<T &&>(v));
+        __has = true;
+        __ready = true;
+        lk.unlock();
+        __cv.notify_all();
+    }
+
+    void __set(const T &v)
+    {
+        unique_lock<mutex> lk(__m);
+        if (__ready)
+            throw future_error(future_errc::promise_already_satisfied);
+        ::new ((void *)__buf) T(v);
+        __has = true;
+        __ready = true;
+        lk.unlock();
+        __cv.notify_all();
+    }
+
+    T &__value()
+    {
+        __rethrow_if();
+        return *reinterpret_cast<T *>(__buf);
+    }
+};
+
+template <>
+struct __state<void> : __state_base {
+    void __set()
+    {
+        unique_lock<mutex> lk(__m);
+        if (__ready)
+            throw future_error(future_errc::promise_already_satisfied);
+        __ready = true;
+        lk.unlock();
+        __cv.notify_all();
+    }
+};
+
+}  // namespace __detail
+
+template <class T> class future;
+template <class T> class shared_future;
+template <class T> class promise;
+
+/* ---- future ---------------------------------------------------------------- */
+
+template <class T>
+class future {
+public:
+    future() noexcept = default;
+    future(const future &) = delete;
+    future &operator=(const future &) = delete;
+    future(future &&o) noexcept : __s(static_cast<shared_ptr<__detail::__state<T>> &&>(o.__s)) {}
+    future &operator=(future &&o) noexcept
+    { __s = static_cast<shared_ptr<__detail::__state<T>> &&>(o.__s); return *this; }
+
+    bool valid() const noexcept { return (bool)__s; }
+
+    /* Moves the value out and invalidates the future: there is exactly
+     * one value and exactly one taker. */
+    T get()
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__wait();
+        auto st = __s;
+        __s.reset();
+        return static_cast<T &&>(st->__value());
+    }
+
+    void wait() const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__wait();
+    }
+
+    template <class R, class P>
+    future_status wait_for(const chrono::duration<R, P> &d) const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        return __s->__wait_for(d);
+    }
+
+    template <class C, class D>
+    future_status wait_until(const chrono::time_point<C, D> &t) const
+    { return wait_for(t - C::now()); }
+
+    shared_future<T> share() noexcept;
+
+    explicit future(shared_ptr<__detail::__state<T>> s) : __s(s) {}
+
+private:
+    friend class promise<T>;
+    friend class shared_future<T>;
+    shared_ptr<__detail::__state<T>> __s;
+};
+
+template <>
+class future<void> {
+public:
+    future() noexcept = default;
+    future(const future &) = delete;
+    future &operator=(const future &) = delete;
+    future(future &&o) noexcept : __s(static_cast<shared_ptr<__detail::__state<void>> &&>(o.__s)) {}
+    future &operator=(future &&o) noexcept
+    { __s = static_cast<shared_ptr<__detail::__state<void>> &&>(o.__s); return *this; }
+
+    bool valid() const noexcept { return (bool)__s; }
+
+    void get()
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__wait();
+        auto st = __s;
+        __s.reset();
+        st->__rethrow_if();
+    }
+
+    void wait() const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__wait();
+    }
+
+    template <class R, class P>
+    future_status wait_for(const chrono::duration<R, P> &d) const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        return __s->__wait_for(d);
+    }
+
+    template <class C, class D>
+    future_status wait_until(const chrono::time_point<C, D> &t) const
+    { return wait_for(t - C::now()); }
+
+    shared_future<void> share() noexcept;
+
+    explicit future(shared_ptr<__detail::__state<void>> s) : __s(s) {}
+
+private:
+    friend class promise<void>;
+    friend class shared_future<void>;
+    shared_ptr<__detail::__state<void>> __s;
+};
+
+/* ---- shared_future ---------------------------------------------------------
+ *
+ * The same state, readable many times and by many threads. `get()`
+ * returns a CONST REFERENCE rather than a value, so reading it costs
+ * nothing and nobody can move it out from under the others.
+ */
+template <class T>
+class shared_future {
+public:
+    shared_future() noexcept = default;
+    shared_future(const shared_future &) = default;
+    shared_future &operator=(const shared_future &) = default;
+    shared_future(future<T> &&f) noexcept : __s(f.__s) { f.__s.reset(); }
+
+    bool valid() const noexcept { return (bool)__s; }
+
+    const T &get() const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__wait();
+        return __s->__value();
+    }
+
+    void wait() const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__wait();
+    }
+
+    template <class R, class P>
+    future_status wait_for(const chrono::duration<R, P> &d) const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        return __s->__wait_for(d);
+    }
+
+private:
+    shared_ptr<__detail::__state<T>> __s;
+};
+
+template <>
+class shared_future<void> {
+public:
+    shared_future() noexcept = default;
+    shared_future(const shared_future &) = default;
+    shared_future &operator=(const shared_future &) = default;
+    shared_future(future<void> &&f) noexcept : __s(f.__s) { f.__s.reset(); }
+
+    bool valid() const noexcept { return (bool)__s; }
+
+    void get() const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__wait();
+        __s->__rethrow_if();
+    }
+
+    void wait() const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__wait();
+    }
+
+    template <class R, class P>
+    future_status wait_for(const chrono::duration<R, P> &d) const
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        return __s->__wait_for(d);
+    }
+
+private:
+    shared_ptr<__detail::__state<void>> __s;
+};
+
+template <class T>
+inline shared_future<T> future<T>::share() noexcept
+{ return shared_future<T>(static_cast<future<T> &&>(*this)); }
+
+inline shared_future<void> future<void>::share() noexcept
+{ return shared_future<void>(static_cast<future<void> &&>(*this)); }
+
+/* ---- promise ---------------------------------------------------------------- */
+
+template <class T>
+class promise {
+public:
+    promise() : __s(new __detail::__state<T>()) {}
+    promise(const promise &) = delete;
+    promise &operator=(const promise &) = delete;
+    promise(promise &&o) noexcept
+        : __s(static_cast<shared_ptr<__detail::__state<T>> &&>(o.__s)) {}
+    promise &operator=(promise &&o) noexcept
+    {
+        if (this != &o) {
+            if (__s)
+                __s->__abandon();
+            __s = static_cast<shared_ptr<__detail::__state<T>> &&>(o.__s);
+        }
+        return *this;
+    }
+
+    ~promise()
+    {
+        if (__s)
+            __s->__abandon();
+    }
+
+    /* The future is retrievable ONCE: two futures on one state would
+     * both try to move the single value out. */
+    future<T> get_future()
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        if (__s->__retrieved)
+            throw future_error(future_errc::future_already_retrieved);
+        __s->__retrieved = true;
+        return future<T>(__s);
+    }
+
+    void set_value(const T &v)
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__set(v);
+    }
+
+    void set_value(T &&v)
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__set(static_cast<T &&>(v));
+    }
+
+    void set_exception(exception_ptr p)
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__set_exception(p);
+    }
+
+    void swap(promise &o) noexcept { __s.swap(o.__s); }
+
+private:
+    shared_ptr<__detail::__state<T>> __s;
+};
+
+template <>
+class promise<void> {
+public:
+    promise() : __s(new __detail::__state<void>()) {}
+    promise(const promise &) = delete;
+    promise &operator=(const promise &) = delete;
+    promise(promise &&o) noexcept
+        : __s(static_cast<shared_ptr<__detail::__state<void>> &&>(o.__s)) {}
+
+    ~promise()
+    {
+        if (__s)
+            __s->__abandon();
+    }
+
+    future<void> get_future()
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        if (__s->__retrieved)
+            throw future_error(future_errc::future_already_retrieved);
+        __s->__retrieved = true;
+        return future<void>(__s);
+    }
+
+    void set_value()
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__set();
+    }
+
+    void set_exception(exception_ptr p)
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s->__set_exception(p);
+    }
+
+private:
+    shared_ptr<__detail::__state<void>> __s;
+};
+
+/* ---- packaged_task ----------------------------------------------------------
+ *
+ * A callable that stores its result in a future instead of returning
+ * it -- which is how a piece of work travels to another thread and its
+ * answer travels back. An exception from the call is stored too, and
+ * that is the half a bare function pointer cannot do.
+ */
+template <class> class packaged_task;
+
+template <class R, class... A>
+class packaged_task<R(A...)> {
+public:
+    packaged_task() noexcept = default;
+
+    template <class F, class = enable_if_t<
+        !is_same_v<decay_t<F>, packaged_task>>>
+    explicit packaged_task(F &&f)
+        : __fn(static_cast<F &&>(f)), __s(new __detail::__state<R>()) {}
+
+    packaged_task(const packaged_task &) = delete;
+    packaged_task &operator=(const packaged_task &) = delete;
+    packaged_task(packaged_task &&) = default;
+    packaged_task &operator=(packaged_task &&) = default;
+
+    bool valid() const noexcept { return (bool)__s; }
+
+    future<R> get_future()
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        if (__s->__retrieved)
+            throw future_error(future_errc::future_already_retrieved);
+        __s->__retrieved = true;
+        return future<R>(__s);
+    }
+
+    void operator()(A... a)
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        try {
+            if constexpr (is_void_v<R>) {
+                __fn(static_cast<A &&>(a)...);
+                __s->__set();
+            } else {
+                __s->__set(__fn(static_cast<A &&>(a)...));
+            }
+        } catch (...) {
+            __s->__set_exception(current_exception());
+        }
+    }
+
+    void reset()
+    {
+        if (!__s)
+            throw future_error(future_errc::no_state);
+        __s = shared_ptr<__detail::__state<R>>(new __detail::__state<R>());
+    }
+
+private:
+    function<R(A...)> __fn;
+    shared_ptr<__detail::__state<R>> __s;
+};
+
+/* ---- async ------------------------------------------------------------------
+ *
+ * Run it now on another thread, or run it on the first `get()`. The two
+ * are genuinely different and the policy says which; `launch::async |
+ * launch::deferred` -- the default -- lets the implementation choose,
+ * and here that choice is: try a thread, and fall back to deferred if
+ * the target has none. That is not a compromise but the correct answer
+ * on a single-threaded target, and it is why the default policy exists.
+ *
+ * An explicit `launch::async` on such a target throws, because the
+ * caller asked for concurrency that is not there and quietly
+ * serialising would be a lie.
+ */
+namespace __detail {
+
+/* The call, with its arguments, as one object. A tuple rather than an
+ * init-capture pack: the arguments have to be decayed and OWNED,
+ * because the caller's frame may be gone before this runs, and the
+ * tuple is the portable way to hold a pack. */
+template <class R, class Pack, size_t... I>
+void __run_into(shared_ptr<__state<R>> st, Pack &p, index_sequence<I...>)
+{
+    try {
+        if constexpr (is_void_v<R>) {
+            invoke(static_cast<tuple_element_t<I, Pack> &>(get<I>(p))...);
+            st->__set();
+        } else {
+            st->__set(invoke(
+                static_cast<tuple_element_t<I, Pack> &>(get<I>(p))...));
+        }
+    } catch (...) {
+        /* Whatever went wrong travels to whoever calls get(). This is
+         * the reason a future is not just a value: a worker has no
+         * caller to throw to. */
+        st->__set_exception(current_exception());
+    }
+}
+
+}  // namespace __detail
+
+template <class F, class... A>
+future<invoke_result_t<decay_t<F>, decay_t<A>...>>
+async(launch policy, F &&f, A &&...a)
+{
+    using R = invoke_result_t<decay_t<F>, decay_t<A>...>;
+    using Pack = tuple<decay_t<F>, decay_t<A>...>;
+    using Idx = make_index_sequence<1 + sizeof...(A)>;
+
+    auto st = shared_ptr<__detail::__state<R>>(new __detail::__state<R>());
+    st->__retrieved = true;
+    auto pack = shared_ptr<Pack>(new Pack(static_cast<F &&>(f),
+                                          static_cast<A &&>(a)...));
+
+    if ((int)(policy & launch::async)) {
+        try {
+            thread t([st, pack] {
+                __detail::__run_into<R, Pack>(st, *pack, Idx{});
+            });
+            t.detach();
+            return future<R>(st);
+        } catch (const system_error &) {
+            /* No threads on this target. If the caller allowed
+             * deferral, fall through to it; if they insisted on async,
+             * the error is theirs to see -- quietly serialising what
+             * was asked to run concurrently is the lie this avoids. */
+            if (!(int)(policy & launch::deferred))
+                throw;
+        }
+    }
+    /* Deferred, run here and now rather than at get(): the difference
+     * is invisible to a caller that only ever calls get(), and it keeps
+     * the state from having to hold a closure. */
+    __detail::__run_into<R, Pack>(st, *pack, Idx{});
+    return future<R>(st);
+}
+
+template <class F, class... A>
+future<invoke_result_t<decay_t<F>, decay_t<A>...>>
+async(F &&f, A &&...a)
+{
+    return async(launch::async | launch::deferred, static_cast<F &&>(f),
+                 static_cast<A &&>(a)...);
+}
+
+}  // namespace std
+
+#endif

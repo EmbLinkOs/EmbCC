@@ -7,6 +7,7 @@
 # proves the SysV classification is right.
 set -u
 echo "TEST-MARKER sysv-abi"
+. "$(dirname "$0")/../lib.sh"
 
 out_dir="tests/golden/out/abi"
 rm -rf "$out_dir"; mkdir -p "$out_dir"
@@ -111,15 +112,19 @@ int main(void) {
 }
 EOF
 
-cc -std=c99 -c "$out_dir/gcchalf.c" -o "$out_dir/gcchalf.o" -I "$out_dir" || {
+# The same C is a SysV AMD64 check on x86-64 and an AAPCS64 check on aarch64:
+# either way one half is EmbCC's and the other the target's gcc, linked into
+# one program, so any disagreement about where an argument lives is a wrong
+# answer at run time.
+t_gcc_c "$out_dir/gcchalf.c" -std=c11 -o "$out_dir/gcchalf.o" -I "$out_dir" || {
     echo "gcc half failed to build"; exit 1; }
-"$EMBCC" -c "$out_dir/embhalf.c" -o "$out_dir/embhalf.o" -I "$out_dir" || {
-    echo "embcc half failed to build"; exit 1; }
-cc -no-pie -o "$out_dir/prog" "$out_dir/embhalf.o" "$out_dir/gcchalf.o" || {
+"$EMBCC" --target="$TARGET" -c "$out_dir/embhalf.c" -o "$out_dir/embhalf.o" \
+    -I "$out_dir" || { echo "embcc half failed to build"; exit 1; }
+t_link "$out_dir/prog" "$out_dir/embhalf.o" "$out_dir/gcchalf.o" || {
     echo "link failed"; exit 1; }
-out=$("$out_dir/prog"); got=$?
+out=$(t_run "$out_dir/prog"); got=$?
 [ "$got" -eq 42 ] || {
     echo "cross-ABI run exited $got (a nonzero N is the Nth check above)"
     exit 1; }
 [ "$out" = "cross-abi ok" ] || { echo "wrong output: $out"; exit 1; }
-echo "EmbCC and GCC agree on SysV struct passing, both directions"
+echo "EmbCC and GCC agree on $ARCH struct passing, both directions"

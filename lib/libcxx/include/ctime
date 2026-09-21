@@ -1,0 +1,25 @@
+/* <ctime> — the C header's names, in namespace std as well as at
+ * global scope. C++ requires the std:: spellings; every real
+ * implementation also leaves the global ones, and code depends on it. */
+#ifndef _LIBCXX_CTIME
+#define _LIBCXX_CTIME
+#include <time.h>
+
+namespace std {
+using ::clock_t;
+using ::time_t;
+using ::tm;
+using ::timespec;
+using ::clock;
+using ::difftime;
+using ::mktime;
+using ::time;
+using ::asctime;
+using ::ctime;
+using ::gmtime;
+using ::localtime;
+using ::strftime;
+using ::timespec_get;
+}
+
+#endif

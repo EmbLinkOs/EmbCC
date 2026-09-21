@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "../driver/util.h"
+#include "../arch/target.h"
 
 /* --- DWARF constants (only the handful this emitter uses) --- */
 #define DW_TAG_compile_unit     0x11
@@ -12,6 +13,11 @@
 #define DW_TAG_variable         0x34
 #define DW_TAG_base_type        0x24
 #define DW_TAG_pointer_type     0x0f
+#define DW_TAG_array_type       0x01
+#define DW_TAG_structure_type   0x13
+#define DW_TAG_union_type       0x17
+#define DW_TAG_member           0x0d
+#define DW_TAG_subrange_type    0x21
 #define DW_CHILDREN_no        0x00
 #define DW_CHILDREN_yes       0x01
 #define DW_AT_name            0x03
@@ -26,6 +32,10 @@
 #define DW_AT_frame_base      0x40
 #define DW_AT_type            0x49
 #define DW_AT_location        0x02
+#define DW_AT_bit_size        0x0d
+#define DW_AT_upper_bound     0x2f
+#define DW_AT_data_member_location 0x38
+#define DW_AT_data_bit_offset 0x6b
 #define DW_FORM_addr          0x01
 #define DW_FORM_block1        0x0a
 #define DW_FORM_data1         0x0b
@@ -38,6 +48,7 @@
 #define DW_LANG_C99           0x000c
 /* DW_ATE base-type encodings */
 #define DW_ATE_boolean        0x02
+#define DW_ATE_complex_float  0x03
 #define DW_ATE_float          0x04
 #define DW_ATE_signed         0x05
 #define DW_ATE_signed_char    0x06
@@ -45,7 +56,8 @@
 #define DW_ATE_unsigned_char  0x08
 /* location/frame-base operations */
 #define DW_OP_fbreg           0x91
-#define DW_OP_reg6            0x56   /* rbp — EmbCC's frame pointer */
+#define DW_OP_reg6            0x56   /* rbp — EmbCC's x86-64 frame pointer */
+#define DW_OP_reg29           0x6d   /* x29 — its aarch64 frame pointer */
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -62,6 +74,15 @@
 #define AB_PTR_T         8   /* pointer_type, with type */
 #define AB_PTR           9   /* pointer_type, no type (void *) */
 #define AB_SUBPROGRAM_T 10   /* subprogram, with a return type */
+#define AB_STRUCT       11   /* structure_type, named */
+#define AB_STRUCT_ANON  12   /* structure_type, anonymous */
+#define AB_UNION        13
+#define AB_UNION_ANON   14
+#define AB_MEMBER       15   /* member at a byte offset */
+#define AB_MEMBER_BF    16   /* bitfield member: bit offset + width */
+#define AB_ARRAY        17   /* array_type; one subrange child */
+#define AB_SUBRANGE     18   /* subrange_type with its upper bound */
+#define AB_SUBRANGE_NB  19   /* subrange_type, no bound ([] / a VLA) */
 
 /* Line-program standard opcodes */
 #define DW_LNS_copy           0x01
@@ -198,6 +219,18 @@ static void emit_abbrev(struct dbuf *b)
         DW_AT_type, DW_FORM_ref4, DW_AT_byte_size, DW_FORM_data1 };
     static const unsigned char ptr[] = {
         DW_AT_byte_size, DW_FORM_data1 };
+    static const unsigned char agg[] = {
+        DW_AT_name, DW_FORM_string, DW_AT_byte_size, DW_FORM_data4 };
+    static const unsigned char agg_anon[] = {
+        DW_AT_byte_size, DW_FORM_data4 };
+    static const unsigned char member[] = {
+        DW_AT_name, DW_FORM_string, DW_AT_type, DW_FORM_ref4,
+        DW_AT_data_member_location, DW_FORM_data4 };
+    static const unsigned char member_bf[] = {
+        DW_AT_name, DW_FORM_string, DW_AT_type, DW_FORM_ref4,
+        DW_AT_data_bit_offset, DW_FORM_data4, DW_AT_bit_size, DW_FORM_data1 };
+    static const unsigned char array[] = { DW_AT_type, DW_FORM_ref4 };
+    static const unsigned char subrange[] = { DW_AT_upper_bound, DW_FORM_data4 };
 
     one_abbrev(b, AB_CU,         DW_TAG_compile_unit,     DW_CHILDREN_yes, cu, 7);
     one_abbrev(b, AB_SUBPROGRAM, DW_TAG_subprogram,       DW_CHILDREN_yes, sub, 4);
@@ -209,6 +242,15 @@ static void emit_abbrev(struct dbuf *b)
     one_abbrev(b, AB_PTR_T,      DW_TAG_pointer_type,     DW_CHILDREN_no, ptr_t, 2);
     one_abbrev(b, AB_PTR,        DW_TAG_pointer_type,     DW_CHILDREN_no, ptr, 1);
     one_abbrev(b, AB_SUBPROGRAM_T, DW_TAG_subprogram,     DW_CHILDREN_yes, sub_t, 5);
+    one_abbrev(b, AB_STRUCT,      DW_TAG_structure_type, DW_CHILDREN_yes, agg, 2);
+    one_abbrev(b, AB_STRUCT_ANON, DW_TAG_structure_type, DW_CHILDREN_yes, agg_anon, 1);
+    one_abbrev(b, AB_UNION,       DW_TAG_union_type,     DW_CHILDREN_yes, agg, 2);
+    one_abbrev(b, AB_UNION_ANON,  DW_TAG_union_type,     DW_CHILDREN_yes, agg_anon, 1);
+    one_abbrev(b, AB_MEMBER,      DW_TAG_member,         DW_CHILDREN_no, member, 3);
+    one_abbrev(b, AB_MEMBER_BF,   DW_TAG_member,         DW_CHILDREN_no, member_bf, 4);
+    one_abbrev(b, AB_ARRAY,       DW_TAG_array_type,     DW_CHILDREN_yes, array, 1);
+    one_abbrev(b, AB_SUBRANGE,    DW_TAG_subrange_type,  DW_CHILDREN_no, subrange, 1);
+    one_abbrev(b, AB_SUBRANGE_NB, DW_TAG_subrange_type,  DW_CHILDREN_no, subrange, 0);
     db_uleb(b, 0);                       /* end of the abbrev table */
 }
 
@@ -216,10 +258,18 @@ static void emit_abbrev(struct dbuf *b)
  * DW_FORM_ref4 — CU-relative, and our single CU starts at section offset 0,
  * so the section offset IS the reference). This maps each already-emitted
  * type to that offset. */
-struct typemap { struct type **k; int *off; int n, cap; };
+struct typemap {
+    struct type **k; int *off; int n, cap;
+    /* A struct whose DIE is being built (its member types first), and the
+     * ref4 fields of pointers to it that wait for its offset — the only
+     * cycle C types have is a struct reaching itself through a pointer. */
+    struct type *open[16]; int nopen;
+    struct { int at; struct type *to; } *fix; int nfix, capfix;
+};
 
 static int type_lookup(struct typemap *m, struct type *t)
 {
+    if (t && t->canon) t = t->canon;      /* as ensure_type records it */
     for (int i = 0; i < m->n; i++)
         if (m->k[i] == t) return m->off[i];
     return -1;
@@ -244,25 +294,62 @@ static int base_encoding(struct type *t)
     return t->is_unsigned ? DW_ATE_unsigned : DW_ATE_signed;
 }
 
+static void db_patch_u32(struct dbuf *b, int at, unsigned long v)
+{
+    b->p[at + 0] = (unsigned char)v;
+    b->p[at + 1] = (unsigned char)(v >> 8);
+    b->p[at + 2] = (unsigned char)(v >> 16);
+    b->p[at + 3] = (unsigned char)(v >> 24);
+}
+
+static int type_is_open(struct typemap *m, struct type *t)
+{
+    for (int i = 0; i < m->nopen; i++)
+        if (m->open[i] == t) return 1;
+    return 0;
+}
+
 /* Emit (once) the DIE for t and return its offset, or -1 if EmbCC has no DIE
- * for it yet (aggregates/functions/void — step 3). A pointer's pointee is
- * emitted first so the ref4 points backward at an existing DIE. */
+ * for it (functions, void, an incomplete struct). A type's components are
+ * emitted first so every ref4 points backward at an existing DIE — except a
+ * pointer back into a struct still being built, patched when it completes. */
 static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
 {
     if (!t) return -1;
+    if (t->canon) t = t->canon;           /* volatile: describe the original */
     int e = type_lookup(m, t);
     if (e >= 0) return e;
 
-    if (ty_is_integer(t) || ty_is_float(t)) {
+    if (ty_is_integer(t) || ty_is_float(t) || ty_is_complex(t)) {
+        /* a complex is a base type to DWARF (DW_ATE_complex_float), which
+         * is what makes a debugger print it as re + im i */
         int off = b->len;
         db_uleb(b, AB_BASE);
-        db_str(b, ty_name(t));           /* "int", "unsigned char", ... */
-        db_u8(b, base_encoding(t));
+        db_str(b, ty_name(t));           /* "int", "double _Complex", ... */
+        db_u8(b, ty_is_complex(t) ? DW_ATE_complex_float : base_encoding(t));
         db_u8(b, ty_size(t));
         type_record(m, t, off);
         return off;
     }
     if (t->kind == TY_PTR) {
+        struct type *pt = t->pointee && t->pointee->canon ? t->pointee->canon
+                                                          : t->pointee;
+        if (pt && pt->kind == TY_STRUCT && type_is_open(m, pt)) {
+            /* struct node { struct node *next; }: its offset comes later */
+            int off = b->len;
+            db_uleb(b, AB_PTR_T);
+            if (m->nfix == m->capfix) {
+                m->capfix = m->capfix ? m->capfix * 2 : 8;
+                m->fix = xrealloc(m->fix, (size_t)m->capfix * sizeof *m->fix);
+            }
+            m->fix[m->nfix].at = b->len;
+            m->fix[m->nfix].to = pt;
+            m->nfix++;
+            db_u32(b, 0);
+            db_u8(b, 8);
+            type_record(m, t, off);
+            return off;
+        }
         int pe = ensure_type(b, m, t->pointee);
         int off = b->len;
         if (pe >= 0) {
@@ -274,6 +361,62 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
             db_u8(b, 8);
         }
         type_record(m, t, off);
+        return off;
+    }
+    if (t->kind == TY_ARRAY) {
+        int el = ensure_type(b, m, t->pointee);
+        if (el < 0) return -1;
+        int off = b->len;
+        db_uleb(b, AB_ARRAY);
+        db_u32(b, (unsigned long)el);
+        if (t->count > 0 && !t->vla_len) {
+            db_uleb(b, AB_SUBRANGE);
+            db_u32(b, (unsigned long)(t->count - 1));
+        } else {
+            db_uleb(b, AB_SUBRANGE_NB);   /* [] or a VLA: no static bound */
+        }
+        db_u8(b, 0);                      /* end of the array's children */
+        type_record(m, t, off);
+        return off;
+    }
+    if (t->kind == TY_STRUCT && t->complete &&
+        m->nopen < (int)(sizeof m->open / sizeof m->open[0])) {
+        /* members' types first, so the member DIEs below refer back */
+        m->open[m->nopen++] = t;
+        for (int i = 0; i < t->nmembers; i++)
+            if (t->members[i].name)
+                (void)ensure_type(b, m, t->members[i].ty);
+        m->nopen--;
+        int off = b->len;
+        db_uleb(b, t->tag ? (t->is_union ? AB_UNION : AB_STRUCT)
+                          : (t->is_union ? AB_UNION_ANON : AB_STRUCT_ANON));
+        if (t->tag) db_str(b, t->tag);
+        db_u32(b, (unsigned long)t->size);
+        for (int i = 0; i < t->nmembers; i++) {
+            struct member *mb = &t->members[i];
+            int mt = mb->name ? type_lookup(m, mb->ty->canon ? mb->ty->canon
+                                                             : mb->ty) : -1;
+            if (mt < 0) continue;          /* unnamed padding, or no DIE */
+            if (mb->is_bitfield) {
+                db_uleb(b, AB_MEMBER_BF);
+                db_str(b, mb->name);
+                db_u32(b, (unsigned long)mt);
+                db_u32(b, (unsigned long)(mb->off * 8 + mb->bit_off));
+                db_u8(b, mb->bit_width);
+            } else {
+                db_uleb(b, AB_MEMBER);
+                db_str(b, mb->name);
+                db_u32(b, (unsigned long)mt);
+                db_u32(b, (unsigned long)mb->off);
+            }
+        }
+        db_u8(b, 0);                      /* end of the members */
+        type_record(m, t, off);
+        for (int i = 0; i < m->nfix; i++)
+            if (m->fix[i].to == t) {
+                db_patch_u32(b, m->fix[i].at, (unsigned long)off);
+                m->fix[i].to = NULL;
+            }
         return off;
     }
     return -1;
@@ -319,7 +462,8 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
     /* Every variable's type, emitted up front as CU children so the
      * subprogram DIEs below can reference them (a DIE can't be emitted in the
      * middle of another DIE's child list). */
-    struct typemap tm = { 0, 0, 0, 0 };
+    struct typemap tm;
+    memset(&tm, 0, sizeof tm);
     for (int n = 0; n < iu->nfuncs; n++) {
         (void)ensure_type(b, &tm, iu->funcs[n].src->ret_ty);
         for (int v = 0; v < iu->funcs[n].ndbgvars; v++)
@@ -333,13 +477,16 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
 
         int rtoff = type_lookup(&tm, fn->src->ret_ty);
         db_uleb(b, rtoff >= 0 ? AB_SUBPROGRAM_T : AB_SUBPROGRAM);
-        db_str(b, fn->src->name);
+        db_str(b, fn->name);
         if (rtoff >= 0) db_u32(b, (unsigned long)rtoff);  /* return type */
         reloc(out, DWSEC_INFO, b->len, 8, DWTGT_TEXT, lo);
         db_u64(b, 0);                    /* low_pc */
         reloc(out, DWSEC_INFO, b->len, 8, DWTGT_TEXT, hi);
         db_u64(b, 0);                    /* high_pc */
-        db_uleb(b, 1); db_u8(b, DW_OP_reg6);  /* frame_base = rbp */
+        /* frame_base: the frame pointer, which both backends set in the
+         * prologue and never move (codegen's var_off is relative to it) */
+        db_uleb(b, 1);
+        db_u8(b, target_get() == TARGET_AARCH64 ? DW_OP_reg29 : DW_OP_reg6);
 
         for (int v = 0; v < fn->ndbgvars; v++) {
             struct ir_dbgvar *dv = &fn->dbgvars[v];
@@ -355,7 +502,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
     }
     db_u8(b, 0);                         /* end of the CU's children */
 
-    free(tm.k); free(tm.off);
+    free(tm.k); free(tm.off); free(tm.fix);
 
     unsigned long ulen = (unsigned long)(b->len - after_len);
     b->p[len_at + 0] = (unsigned char)ulen;

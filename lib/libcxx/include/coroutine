@@ -1,0 +1,235 @@
+/* <coroutine> — C++ [support.coroutine].
+ *
+ * The library half of a *language* feature. `co_await`, `co_yield` and
+ * `co_return` are compiled by EmbCC (src/cxx/coro.c), which turns the
+ * function into a heap frame, a ramp that returns to the caller, and a
+ * body that can be resumed and destroyed through that frame. But the
+ * compiler cannot do any of it without the names here: it looks up
+ * `std::coroutine_traits` to find the promise type and
+ * `std::coroutine_handle` to hand one back. A program with `co_await`
+ * and no `#include <coroutine>` does not compile, exactly as `<=>`
+ * needs `<compare>`.
+ *
+ * ---- what a coroutine_handle IS -----------------------------------------
+ *
+ * One pointer. Not a smart pointer, not an owner: a raw address of the
+ * frame, and copying one copies the address. `destroy()` frees the
+ * frame and every other handle to it is then dangling, which is why
+ * there is no reference count and why the standard makes it trivially
+ * copyable. Somebody has to own the coroutine, and that somebody is the
+ * return object the promise's `get_return_object()` produced — not this.
+ *
+ * ---- the frame layout ----------------------------------------------------
+ *
+ * An ABI between this header and src/cxx/emit.c, and it is written down
+ * here because neither file checks the other. The frame begins with two
+ * function pointers, resume then destroy; `done()` is "the resume
+ * pointer is null", which the final suspend sets. The promise sits
+ * after them, aligned. All four operations go through
+ * `__builtin_coro_*` rather than being written out, so the layout is
+ * stated in ONE place -- the compiler's -- and this header names it
+ * rather than copying it.
+ */
+#ifndef _LIBCXX_COROUTINE
+#define _LIBCXX_COROUTINE
+
+#include <cstddef>
+#include <type_traits>
+
+namespace std {
+
+/* ---- coroutine_traits ---------------------------------------------------
+ *
+ * How the compiler finds the promise type: from the coroutine's RETURN
+ * type and its parameter types. The default is `R::promise_type`, and
+ * the indirection exists so that a coroutine returning a type you do
+ * not own -- or one whose promise depends on an argument, as a member
+ * coroutine's does on its object -- can still be given one.
+ */
+template <class R, class... Args>
+struct coroutine_traits {
+    using promise_type = typename R::promise_type;
+};
+
+/* ---- coroutine_handle ---------------------------------------------------- */
+
+template <class P = void>
+struct coroutine_handle;
+
+template <>
+struct coroutine_handle<void> {
+    constexpr coroutine_handle() noexcept : __p(nullptr) {}
+    constexpr coroutine_handle(nullptr_t) noexcept : __p(nullptr) {}
+
+    coroutine_handle &operator=(nullptr_t) noexcept
+    { __p = nullptr; return *this; }
+
+    constexpr void *address() const noexcept { return __p; }
+
+    static constexpr coroutine_handle from_address(void *a) noexcept
+    {
+        coroutine_handle h;
+        h.__p = a;
+        return h;
+    }
+
+    /* A null handle is false; a handle to a finished coroutine is still
+     * TRUE, because the frame is still there and still has to be
+     * destroyed. `done()` is the question about the coroutine, this is
+     * the question about the handle, and confusing the two leaks. */
+    constexpr explicit operator bool() const noexcept
+    { return __p != nullptr; }
+
+    bool done() const { return __builtin_coro_done(__p); }
+
+    /* Resuming a coroutine that is done, or destroyed, is undefined --
+     * and it is undefined rather than checked because the check would
+     * cost a branch on every resumption of every coroutine, which is
+     * the operation the whole feature exists to make cheap. */
+    void resume() const { __builtin_coro_resume(__p); }
+    void operator()() const { resume(); }
+    void destroy() const { __builtin_coro_destroy(__p); }
+
+protected:
+    void *__p;
+};
+
+template <class P>
+struct coroutine_handle : coroutine_handle<void> {
+    constexpr coroutine_handle() noexcept {}
+    constexpr coroutine_handle(nullptr_t) noexcept {}
+
+    coroutine_handle &operator=(nullptr_t) noexcept
+    { this->__p = nullptr; return *this; }
+
+    static constexpr coroutine_handle from_address(void *a) noexcept
+    {
+        coroutine_handle h;
+        h.__p = a;
+        return h;
+    }
+
+    /* The promise lives at a fixed offset from the frame, and the
+     * offset depends only on the promise's ALIGNMENT -- the two
+     * function pointers come first, then padding. The compiler computes
+     * it; this passes the alignment and the direction. */
+    P &promise() const
+    {
+        return *static_cast<P *>(
+            __builtin_coro_promise(this->__p, (long)alignof(P), false));
+    }
+
+    /* The inverse, and the reason a promise can hand out a handle to
+     * its own coroutine: `get_return_object()` has nothing but `*this`
+     * to work from. */
+    static coroutine_handle from_promise(P &p)
+    {
+        return from_address(
+            __builtin_coro_promise((void *)&p, (long)alignof(P), true));
+    }
+
+    /* Converting to the type-erased handle is implicit and free -- it
+     * is the same pointer -- which is what lets await_suspend take a
+     * coroutine_handle<> and work for every promise type. */
+    constexpr operator coroutine_handle<void>() const noexcept
+    { return coroutine_handle<void>::from_address(this->__p); }
+};
+
+template <class P>
+constexpr bool operator==(coroutine_handle<P> a, coroutine_handle<P> b) noexcept
+{ return a.address() == b.address(); }
+template <class P>
+constexpr bool operator!=(coroutine_handle<P> a, coroutine_handle<P> b) noexcept
+{ return !(a == b); }
+template <class P>
+constexpr bool operator==(coroutine_handle<P> a, nullptr_t) noexcept
+{ return a.address() == nullptr; }
+template <class P>
+constexpr bool operator==(nullptr_t, coroutine_handle<P> a) noexcept
+{ return a.address() == nullptr; }
+template <class P>
+constexpr bool operator!=(coroutine_handle<P> a, nullptr_t) noexcept
+{ return a.address() != nullptr; }
+template <class P>
+constexpr bool operator!=(nullptr_t, coroutine_handle<P> a) noexcept
+{ return a.address() != nullptr; }
+
+/* ---- noop_coroutine -----------------------------------------------------
+ *
+ * A coroutine that never finishes and does nothing when resumed. It
+ * exists for symmetric transfer: an `await_suspend` that returns a
+ * handle transfers control to it as a TAIL CALL rather than returning
+ * and being re-entered, so a chain of coroutines resuming each other
+ * runs in constant stack. When there is nobody to transfer to, you
+ * still have to return a handle -- and this is the handle that means
+ * "stop here" without a branch at every site.
+ */
+struct noop_coroutine_promise {};
+
+template <>
+struct coroutine_handle<noop_coroutine_promise> : coroutine_handle<void> {
+    constexpr explicit operator bool() const noexcept { return true; }
+    constexpr bool done() const noexcept { return false; }
+    void operator()() const noexcept {}
+    void resume() const noexcept {}
+    void destroy() const noexcept {}
+    noop_coroutine_promise &promise() const noexcept
+    { return *static_cast<noop_coroutine_promise *>(this->__p); }
+
+private:
+    friend coroutine_handle<noop_coroutine_promise> noop_coroutine() noexcept;
+    coroutine_handle(void *a) noexcept { this->__p = a; }
+};
+
+using noop_coroutine_handle = coroutine_handle<noop_coroutine_promise>;
+
+inline noop_coroutine_handle noop_coroutine() noexcept
+{
+    /* A frame whose resume and destroy do nothing. It is a real frame
+     * because `done()` reads its first word and address() must not be
+     * null: the two function pointers are there and both are no-ops. */
+    static void (*__noop_frame[2])(void *) = {
+        [](void *) {}, [](void *) {}
+    };
+    return noop_coroutine_handle((void *)&__noop_frame);
+}
+
+/* ---- the trivial awaitables ---------------------------------------------
+ *
+ * Every `co_await e` asks three questions of the awaiter: is it ready,
+ * what to do if not, and what does the expression evaluate to. These
+ * two answer "yes, nothing, nothing" and "no, nothing, nothing", and
+ * between them they are most of what a promise's
+ * initial_suspend/final_suspend ever return.
+ *
+ * `final_suspend()` should return suspend_always in nearly every
+ * coroutine: suspending at the end leaves the frame alive so the caller
+ * can read the promise's result before destroying it. Returning
+ * suspend_never there destroys the frame as the coroutine ends, and the
+ * caller's `handle.promise()` then reads freed memory.
+ */
+struct suspend_never {
+    constexpr bool await_ready() const noexcept { return true; }
+    constexpr void await_suspend(coroutine_handle<>) const noexcept {}
+    constexpr void await_resume() const noexcept {}
+};
+
+struct suspend_always {
+    constexpr bool await_ready() const noexcept { return false; }
+    constexpr void await_suspend(coroutine_handle<>) const noexcept {}
+    constexpr void await_resume() const noexcept {}
+};
+
+/* ---- hash --------------------------------------------------------------- */
+
+template <class T> struct hash;
+
+template <class P>
+struct hash<coroutine_handle<P>> {
+    size_t operator()(const coroutine_handle<P> &h) const noexcept
+    { return (size_t)(unsigned long)h.address(); }
+};
+
+}  // namespace std
+
+#endif

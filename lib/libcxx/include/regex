@@ -1,0 +1,1450 @@
+/* <regex> — C++ [re].
+ *
+ * A pattern compiled once and matched many times. The grammar is the
+ * ECMAScript one the standard makes the default, and the matcher is a
+ * BACKTRACKER over a parsed tree rather than a finite automaton.
+ *
+ * That choice is worth stating plainly, because it is the one thing that
+ * can bite. A backtracker can take exponential time: `(a+)+b` against a
+ * string of *n* a's tries every way of splitting them, and that is
+ * 2^n ways. A Thompson NFA simulation runs in O(nm) and never does
+ * this -- but it cannot support BACKREFERENCES, because `(a*)\1`
+ * requires remembering what a group captured, which an automaton has no
+ * state for. The standard's grammar has backreferences, so an
+ * implementation of it is a backtracker, and every real one is. The
+ * defence is to know it: a pattern with nested unbounded quantifiers
+ * over overlapping alternatives is the shape to avoid.
+ *
+ * ---- the pieces ----------------------------------------------------------
+ *
+ * `basic_regex` holds the parsed tree. `match_results` holds, for each
+ * group, a `sub_match` -- a PAIR OF ITERATORS into the subject, not a
+ * copy. That is why a `smatch` must not outlive the string it matched,
+ * and why `regex_search(string("..."), m, re)` on a temporary is deleted
+ * in the standard: the match would refer to freed characters.
+ *
+ * ---- what is here --------------------------------------------------------
+ *
+ * Literals, `.`, character classes with ranges, negation and the class
+ * escapes, the anchors `^ $ \b \B`, groups and non-capturing `(?:)`,
+ * lookahead `(?=)` and `(?!)`, alternation, the quantifiers
+ * `* + ? {n} {n,} {n,m}` in greedy and lazy forms, and backreferences.
+ * `icase` and `multiline`; `regex_match`, `regex_search`,
+ * `regex_replace` with `$1`/`$&`/`$$` in the format string, and
+ * `regex_iterator` / `regex_token_iterator`.
+ *
+ * NOT here: the POSIX grammars (basic, extended, awk, grep), locales and
+ * collating names (`[[.a.]]`, `[[=a=]]`), `\u` escapes beyond one byte,
+ * and possessive quantifiers. Absent rather than half-written.
+ */
+#ifndef _LIBCXX_REGEX
+#define _LIBCXX_REGEX
+
+#include <cstddef>
+#include <iterator>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+namespace regex_constants {
+
+enum syntax_option_type {
+    ECMAScript = 0,
+    icase      = 1 << 0,
+    nosubs     = 1 << 1,
+    optimize   = 1 << 2,
+    collate    = 1 << 3,
+    multiline  = 1 << 4
+};
+
+constexpr syntax_option_type operator|(syntax_option_type a,
+                                       syntax_option_type b)
+{ return (syntax_option_type)((int)a | (int)b); }
+constexpr syntax_option_type operator&(syntax_option_type a,
+                                       syntax_option_type b)
+{ return (syntax_option_type)((int)a & (int)b); }
+
+enum match_flag_type {
+    match_default     = 0,
+    match_not_bol     = 1 << 0,
+    match_not_eol     = 1 << 1,
+    match_not_bow     = 1 << 2,
+    match_not_eow     = 1 << 3,
+    match_any         = 1 << 4,
+    match_not_null    = 1 << 5,
+    match_continuous  = 1 << 6,
+    match_prev_avail  = 1 << 7,
+    format_default    = 0,
+    format_sed        = 1 << 8,
+    format_no_copy    = 1 << 9,
+    format_first_only = 1 << 10
+};
+
+constexpr match_flag_type operator|(match_flag_type a, match_flag_type b)
+{ return (match_flag_type)((int)a | (int)b); }
+constexpr match_flag_type operator&(match_flag_type a, match_flag_type b)
+{ return (match_flag_type)((int)a & (int)b); }
+
+enum error_type {
+    error_collate, error_ctype, error_escape, error_backref, error_brack,
+    error_paren, error_brace, error_badbrace, error_range, error_space,
+    error_badrepeat, error_complexity, error_stack
+};
+
+}  // namespace regex_constants
+
+class regex_error : public runtime_error {
+public:
+    explicit regex_error(regex_constants::error_type c)
+        : runtime_error(__what(c)), __c(c) {}
+    regex_constants::error_type code() const { return __c; }
+
+private:
+    static const char *__what(regex_constants::error_type c)
+    {
+        using namespace regex_constants;
+        switch (c) {
+        case error_escape:    return "regex: a bad escape";
+        case error_backref:   return "regex: a backreference to a group "
+                                     "that does not exist";
+        case error_brack:     return "regex: an unmatched '['";
+        case error_paren:     return "regex: an unmatched '('";
+        case error_brace:     return "regex: an unmatched '{'";
+        case error_badbrace:  return "regex: a bad {n,m}";
+        case error_range:     return "regex: a bad range in [a-b]";
+        case error_badrepeat: return "regex: a quantifier with nothing "
+                                     "to repeat";
+        case error_complexity: return "regex: the match took too long";
+        default:              return "regex: a bad pattern";
+        }
+    }
+    regex_constants::error_type __c;
+};
+
+/* ---- the parsed pattern -------------------------------------------------
+ *
+ * One node type with a kind tag rather than a class hierarchy: the tree
+ * is walked by the matcher in one function, and a virtual call per node
+ * per backtrack step is the last thing this wants.
+ */
+namespace __re {
+
+enum node_kind {
+    N_CHAR,        /* one literal character */
+    N_ANY,         /* .  */
+    N_CLASS,       /* [...] */
+    N_SEQ,         /* a b c */
+    N_ALT,         /* a | b */
+    N_REP,         /* a{n,m}, greedy or lazy */
+    N_GROUP,       /* ( a ), capturing when index >= 0 */
+    N_BACKREF,     /* \1 */
+    N_BOL, N_EOL,  /* ^ $ */
+    N_WORDB, N_NWORDB,   /* \b \B */
+    N_LOOKAHEAD    /* (?= a ), negated when neg */
+};
+
+struct node {
+    node_kind k;
+    char ch = 0;
+    /* A class is a 256-bit set, built at parse time. Ranges, negation
+     * and the class escapes all collapse into it, so matching one
+     * character is a bit test however the class was written. */
+    unsigned char set[32] = {0};
+    vector<node *> kids;
+    int lo = 0, hi = 0;        /* N_REP: hi -1 means unbounded */
+    bool lazy = false;
+    bool neg = false;
+    int index = -1;            /* N_GROUP: its capture number; N_BACKREF */
+};
+
+inline void set_add(unsigned char *s, unsigned char c)
+{ s[c >> 3] |= (unsigned char)(1u << (c & 7)); }
+inline bool set_has(const unsigned char *s, unsigned char c)
+{ return (s[c >> 3] >> (c & 7)) & 1; }
+
+inline bool is_word(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+inline bool is_space_c(unsigned char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' ||
+           c == '\r';
+}
+inline unsigned char lower_c(unsigned char c)
+{ return c >= 'A' && c <= 'Z' ? (unsigned char)(c + 32) : c; }
+
+/* ---- the parser ---------------------------------------------------------
+ *
+ * Recursive descent over the ECMAScript grammar, three levels:
+ * alternation of sequences of quantified atoms.
+ */
+/* The compiled pattern, and who owns it. The nodes are allocated into
+ * one arena so the tree is freed in a loop rather than by a recursive
+ * destructor -- a deeply nested pattern would otherwise free itself by
+ * recursion as deep as it nests. basic_regex holds it through a
+ * shared_ptr, so copying a regex shares the tree instead of rebuilding
+ * or double-freeing it. */
+struct prog {
+    vector<node *> arena;
+    node *root = nullptr;
+    int ngroups = 1;
+    ~prog()
+    {
+        for (size_t i = 0; i < arena.size(); i++)
+            delete arena[i];
+    }
+};
+
+struct parser {
+    const char *p, *e;
+    prog *pr;
+    bool icase = false;
+
+    parser(const char *b, const char *en, prog *g, bool ic)
+        : p(b), e(en), pr(g), icase(ic) {}
+
+    [[noreturn]] static void fail(regex_constants::error_type c)
+    { throw regex_error(c); }
+
+    node *make(node_kind k)
+    {
+        node *n = new node();
+        n->k = k;
+        pr->arena.push_back(n);
+        return n;
+    }
+
+    bool eof() const { return p >= e; }
+    char peek() const { return p < e ? *p : 0; }
+
+    node *parse()
+    {
+        node *r = alternation();
+        if (!eof())
+            fail(regex_constants::error_paren);   /* a stray ')' */
+        return r;
+    }
+
+    node *alternation()
+    {
+        node *first = sequence();
+        if (eof() || peek() != '|')
+            return first;
+        node *alt = make(N_ALT);
+        alt->kids.push_back(first);
+        while (!eof() && peek() == '|') {
+            p++;
+            alt->kids.push_back(sequence());
+        }
+        return alt;
+    }
+
+    node *sequence()
+    {
+        node *s = make(N_SEQ);
+        while (!eof() && peek() != '|' && peek() != ')')
+            s->kids.push_back(quantified());
+        return s;
+    }
+
+    node *quantified()
+    {
+        node *a = atom();
+        while (!eof()) {
+            char c = peek();
+            int lo, hi;
+            if (c == '*')      { lo = 0; hi = -1; p++; }
+            else if (c == '+') { lo = 1; hi = -1; p++; }
+            else if (c == '?') { lo = 0; hi = 1;  p++; }
+            else if (c == '{' && brace_is_quantifier()) {
+                p++;
+                lo = number();
+                if (lo < 0)
+                    fail(regex_constants::error_badbrace);
+                if (!eof() && peek() == ',') {
+                    p++;
+                    hi = eof() || peek() == '}' ? -1 : number();
+                } else {
+                    hi = lo;
+                }
+                if (eof() || peek() != '}')
+                    fail(regex_constants::error_brace);
+                p++;
+                if (hi >= 0 && hi < lo)
+                    fail(regex_constants::error_badbrace);
+            } else {
+                break;
+            }
+            /* An anchor has nothing to repeat: `^*` is an error rather
+             * than a silent no-op. */
+            if (a->k == N_BOL || a->k == N_EOL || a->k == N_WORDB ||
+                a->k == N_NWORDB)
+                fail(regex_constants::error_badrepeat);
+            node *r = make(N_REP);
+            r->lo = lo;
+            r->hi = hi;
+            r->kids.push_back(a);
+            if (!eof() && peek() == '?') {   /* the lazy form */
+                r->lazy = true;
+                p++;
+            }
+            a = r;
+        }
+        return a;
+    }
+
+    /* `{` is only a quantifier when it really looks like one; ECMAScript
+     * treats a lone `{` as a literal, and patterns in the wild rely on
+     * that. */
+    bool brace_is_quantifier() const
+    {
+        const char *q = p + 1;
+        if (q >= e || *q < '0' || *q > '9')
+            return false;
+        while (q < e && *q >= '0' && *q <= '9')
+            q++;
+        if (q < e && *q == ',') {
+            q++;
+            while (q < e && *q >= '0' && *q <= '9')
+                q++;
+        }
+        return q < e && *q == '}';
+    }
+
+    int number()
+    {
+        if (eof() || peek() < '0' || peek() > '9')
+            return -1;
+        int v = 0;
+        while (!eof() && peek() >= '0' && peek() <= '9') {
+            if (v > 100000000)
+                fail(regex_constants::error_badbrace);
+            v = v * 10 + (*p++ - '0');
+        }
+        return v;
+    }
+
+    node *atom()
+    {
+        if (eof())
+            fail(regex_constants::error_badrepeat);
+        char c = *p;
+        if (c == '^') { p++; return make(N_BOL); }
+        if (c == '$') { p++; return make(N_EOL); }
+        if (c == '.') { p++; return make(N_ANY); }
+        if (c == '(') return group();
+        if (c == '[') return cclass();
+        if (c == ')') fail(regex_constants::error_paren);
+        if (c == '*' || c == '+' || c == '?')
+            fail(regex_constants::error_badrepeat);
+        if (c == '\\') return escape();
+        p++;
+        node *n = make(N_CHAR);
+        n->ch = c;
+        return n;
+    }
+
+    node *group()
+    {
+        p++;                                   /* past '(' */
+        node *g;
+        if (p + 1 < e && *p == '?' && (p[1] == ':' || p[1] == '=' ||
+                                       p[1] == '!')) {
+            char kind = p[1];
+            p += 2;
+            if (kind == ':') {
+                g = make(N_GROUP);
+                g->index = -1;                 /* non-capturing */
+            } else {
+                g = make(N_LOOKAHEAD);
+                g->neg = kind == '!';
+            }
+        } else {
+            g = make(N_GROUP);
+            g->index = pr->ngroups++;
+        }
+        g->kids.push_back(alternation());
+        if (eof() || peek() != ')')
+            fail(regex_constants::error_paren);
+        p++;
+        return g;
+    }
+
+    /* A class escape (\d, \w, \s and their negations) inside or outside
+     * a bracket expression: the same bits either way, which is why it is
+     * one function. Returns false if the escape is not a class. */
+    bool class_escape(char c, unsigned char *set)
+    {
+        switch (c) {
+        case 'd': case 'D':
+            for (int i = '0'; i <= '9'; i++)
+                set_add(set, (unsigned char)i);
+            break;
+        case 'w': case 'W':
+            for (int i = 0; i < 256; i++)
+                if (is_word((unsigned char)i))
+                    set_add(set, (unsigned char)i);
+            break;
+        case 's': case 'S':
+            for (int i = 0; i < 256; i++)
+                if (is_space_c((unsigned char)i))
+                    set_add(set, (unsigned char)i);
+            break;
+        default:
+            return false;
+        }
+        if (c == 'D' || c == 'W' || c == 'S')
+            for (int i = 0; i < 32; i++)
+                set[i] = (unsigned char)~set[i];
+        return true;
+    }
+
+    static int simple_escape(char c)
+    {
+        switch (c) {
+        case 'n': return '\n';
+        case 't': return '\t';
+        case 'r': return '\r';
+        case 'f': return '\f';
+        case 'v': return '\v';
+        case '0': return '\0';
+        case 'a': return '\a';
+        default:  return -1;
+        }
+    }
+
+    int hex_escape()
+    {
+        /* \xHH and \uHHHH; the latter is accepted only in the byte range
+         * because these strings are bytes. */
+        int n = *p == 'x' ? 2 : 4;
+        p++;
+        int v = 0;
+        for (int i = 0; i < n; i++) {
+            if (eof())
+                fail(regex_constants::error_escape);
+            char h = *p++;
+            int d = h >= '0' && h <= '9' ? h - '0'
+                  : h >= 'a' && h <= 'f' ? h - 'a' + 10
+                  : h >= 'A' && h <= 'F' ? h - 'A' + 10 : -1;
+            if (d < 0)
+                fail(regex_constants::error_escape);
+            v = v * 16 + d;
+        }
+        if (v > 255)
+            fail(regex_constants::error_escape);
+        return v;
+    }
+
+    node *escape()
+    {
+        p++;                                   /* past '\\' */
+        if (eof())
+            fail(regex_constants::error_escape);
+        char c = *p;
+        if (c == 'b') { p++; return make(N_WORDB); }
+        if (c == 'B') { p++; return make(N_NWORDB); }
+        if (c >= '1' && c <= '9') {
+            node *n = make(N_BACKREF);
+            n->index = 0;
+            while (!eof() && peek() >= '0' && peek() <= '9')
+                n->index = n->index * 10 + (*p++ - '0');
+            return n;
+        }
+        node *n = make(N_CLASS);
+        if (class_escape(c, n->set)) {
+            p++;
+            return n;
+        }
+        n->k = N_CHAR;
+        if (c == 'x' || c == 'u') {
+            n->ch = (char)hex_escape();
+            return n;
+        }
+        int s = simple_escape(c);
+        n->ch = s >= 0 ? (char)s : c;
+        p++;
+        return n;
+    }
+
+    node *cclass()
+    {
+        p++;                                   /* past '[' */
+        node *n = make(N_CLASS);
+        bool negate = false;
+        if (!eof() && peek() == '^') {
+            negate = true;
+            p++;
+        }
+        bool first = true;
+        while (!eof() && (peek() != ']' || first)) {
+            first = false;
+            int lo;
+            if (peek() == '\\') {
+                p++;
+                if (eof())
+                    fail(regex_constants::error_escape);
+                char c = *p;
+                unsigned char tmp[32] = {0};
+                if (class_escape(c, tmp)) {
+                    p++;
+                    for (int i = 0; i < 32; i++)
+                        n->set[i] |= tmp[i];
+                    continue;                  /* a class is not a range end */
+                }
+                if (c == 'x' || c == 'u') {
+                    lo = hex_escape();
+                } else {
+                    int s = simple_escape(c);
+                    lo = s >= 0 ? s : (unsigned char)c;
+                    p++;
+                }
+            } else {
+                lo = (unsigned char)*p++;
+            }
+            /* A '-' before ']' is a literal, which is why the lookahead
+             * checks for it: "[a-]" is 'a' and '-'. */
+            if (p + 1 < e && *p == '-' && p[1] != ']') {
+                p++;
+                int hi;
+                if (peek() == '\\') {
+                    p++;
+                    if (eof())
+                        fail(regex_constants::error_escape);
+                    char c = *p;
+                    if (c == 'x' || c == 'u') {
+                        hi = hex_escape();
+                    } else {
+                        int s = simple_escape(c);
+                        hi = s >= 0 ? s : (unsigned char)c;
+                        p++;
+                    }
+                } else {
+                    hi = (unsigned char)*p++;
+                }
+                if (hi < lo)
+                    fail(regex_constants::error_range);
+                for (int i = lo; i <= hi; i++)
+                    set_add(n->set, (unsigned char)i);
+            } else {
+                set_add(n->set, (unsigned char)lo);
+            }
+        }
+        if (eof())
+            fail(regex_constants::error_brack);
+        p++;                                   /* past ']' */
+        if (negate)
+            for (int i = 0; i < 32; i++)
+                n->set[i] = (unsigned char)~n->set[i];
+        return n;
+    }
+};
+
+}  // namespace __re
+
+/* ---- sub_match and match_results ---------------------------------------- */
+
+template <class BI>
+class sub_match : public pair<BI, BI> {
+public:
+    using value_type = typename iterator_traits<BI>::value_type;
+    using string_type = basic_string<value_type>;
+
+    bool matched = false;
+
+    ptrdiff_t length() const
+    { return matched ? this->second - this->first : 0; }
+    string_type str() const
+    { return matched ? string_type(this->first, this->second) : string_type(); }
+    operator string_type() const { return str(); }
+
+    int compare(const sub_match &o) const { return str().compare(o.str()); }
+    int compare(const string_type &s) const { return str().compare(s); }
+    int compare(const value_type *s) const { return str().compare(s); }
+};
+
+template <class BI>
+bool operator==(const sub_match<BI> &a, const sub_match<BI> &b)
+{ return a.compare(b) == 0; }
+template <class BI>
+bool operator!=(const sub_match<BI> &a, const sub_match<BI> &b)
+{ return !(a == b); }
+template <class BI>
+bool operator==(const sub_match<BI> &a, const char *b)
+{ return a.compare(b) == 0; }
+template <class BI>
+bool operator==(const char *a, const sub_match<BI> &b)
+{ return b.compare(a) == 0; }
+template <class BI>
+bool operator!=(const sub_match<BI> &a, const char *b) { return !(a == b); }
+template <class BI>
+bool operator==(const sub_match<BI> &a, const basic_string<char> &b)
+{ return a.compare(b) == 0; }
+template <class BI>
+bool operator==(const basic_string<char> &a, const sub_match<BI> &b)
+{ return b.compare(a) == 0; }
+
+template <class BI>
+class match_results {
+public:
+    using value_type = sub_match<BI>;
+    using char_type = typename iterator_traits<BI>::value_type;
+    using string_type = basic_string<char_type>;
+    using const_iterator = typename vector<value_type>::const_iterator;
+    using size_type = size_t;
+
+    bool ready() const { return __ready; }
+    bool empty() const { return __m.empty(); }
+    size_type size() const { return __m.size(); }
+
+    /* Index 0 is the WHOLE match and 1.. are the groups, which is why
+     * size() is one more than the number of groups and why a pattern
+     * with no groups still has a size of one. */
+    const value_type &operator[](size_type i) const
+    {
+        static const value_type unmatched{};
+        return i < __m.size() ? __m[i] : unmatched;
+    }
+    ptrdiff_t position(size_type i = 0) const
+    { return (*this)[i].first - __begin; }
+    ptrdiff_t length(size_type i = 0) const { return (*this)[i].length(); }
+    string_type str(size_type i = 0) const { return (*this)[i].str(); }
+
+    const value_type &prefix() const { return __prefix; }
+    const value_type &suffix() const { return __suffix; }
+
+    const_iterator begin() const { return __m.begin(); }
+    const_iterator end() const { return __m.end(); }
+    const_iterator cbegin() const { return __m.begin(); }
+    const_iterator cend() const { return __m.end(); }
+
+    /* Public because the algorithms below fill it in; not part of the
+     * standard's interface. */
+    vector<value_type> __m;
+    value_type __prefix{}, __suffix{};
+    BI __begin{};
+    bool __ready = false;
+
+    template <class Out>
+    Out format(Out out, const char_type *fmt_b, const char_type *fmt_e,
+               regex_constants::match_flag_type f =
+                   regex_constants::format_default) const
+    {
+        for (const char_type *q = fmt_b; q < fmt_e; ) {
+            if (*q != '$') {
+                *out++ = *q++;
+                continue;
+            }
+            q++;
+            if (q >= fmt_e) { *out++ = '$'; break; }
+            if (*q == '$')      { *out++ = '$'; q++; continue; }
+            if (*q == '&') {
+                string_type s = str(0);
+                for (size_t i = 0; i < s.size(); i++) *out++ = s[i];
+                q++;
+                continue;
+            }
+            if (*q == '`') {                   /* the prefix */
+                string_type s = __prefix.str();
+                for (size_t i = 0; i < s.size(); i++) *out++ = s[i];
+                q++;
+                continue;
+            }
+            if (*q == '\'') {                  /* the suffix */
+                string_type s = __suffix.str();
+                for (size_t i = 0; i < s.size(); i++) *out++ = s[i];
+                q++;
+                continue;
+            }
+            if (*q >= '0' && *q <= '9') {
+                /* Two digits at most, and only if the two-digit group
+                 * exists: "$12" is group 12 when there is one and group
+                 * 1 followed by '2' when there is not. */
+                size_t n = (size_t)(*q++ - '0');
+                if (q < fmt_e && *q >= '0' && *q <= '9') {
+                    size_t n2 = n * 10 + (size_t)(*q - '0');
+                    if (n2 < __m.size()) { n = n2; q++; }
+                }
+                string_type s = str(n);
+                for (size_t i = 0; i < s.size(); i++) *out++ = s[i];
+                continue;
+            }
+            *out++ = '$';
+            (void)f;
+        }
+        return out;
+    }
+};
+
+using cmatch = match_results<const char *>;
+using smatch = match_results<string::const_iterator>;
+using csub_match = sub_match<const char *>;
+using ssub_match = sub_match<string::const_iterator>;
+
+/* ---- basic_regex --------------------------------------------------------- */
+
+template <class C>
+class basic_regex {
+public:
+    using value_type = C;
+    using flag_type = regex_constants::syntax_option_type;
+
+    basic_regex() : __flags(regex_constants::ECMAScript) {}
+
+    explicit basic_regex(const C *s,
+                         flag_type f = regex_constants::ECMAScript)
+    { __compile(s, s + char_traits<C>::length(s), f); }
+
+    explicit basic_regex(const basic_string<C> &s,
+                         flag_type f = regex_constants::ECMAScript)
+    { __compile(s.data(), s.data() + s.size(), f); }
+
+    basic_regex(const C *b, const C *e,
+                flag_type f = regex_constants::ECMAScript)
+    { __compile(b, e, f); }
+
+    unsigned mark_count() const
+    { return __p ? (unsigned)(__p->ngroups - 1) : 0u; }
+    flag_type flags() const { return __flags; }
+
+    const __re::node *__tree() const { return __p ? __p->root : nullptr; }
+    int __groups() const { return __p ? __p->ngroups : 1; }
+    bool __icase() const { return (__flags & regex_constants::icase) != 0; }
+    bool __multiline() const
+    { return (__flags & regex_constants::multiline) != 0; }
+
+private:
+    void __compile(const C *b, const C *e, flag_type f)
+    {
+        __flags = f;
+        __p = shared_ptr<__re::prog>(new __re::prog());
+        __re::parser ps(b, e, __p.get(), (f & regex_constants::icase) != 0);
+        __p->root = ps.parse();
+    }
+
+    shared_ptr<__re::prog> __p;
+    flag_type __flags;
+};
+
+using regex = basic_regex<char>;
+
+
+/* ---- the matcher ---------------------------------------------------------
+ *
+ * Backtracking with an explicit CONTINUATION LIST: a linked stack of
+ * "what remains to be matched", built on the C stack as the walk
+ * descends. Each frame says what to do when the thing in front of it
+ * succeeds, so `a*b` backs off naturally -- the star tries the longest
+ * run, calls the continuation, and on failure gives a character back.
+ *
+ * Making the continuation explicit rather than a chain of closures is
+ * what lets a group's END and a repetition's NEXT ROUND be frames of
+ * their own. Those two are the awkward cases: a capture must be
+ * recorded when the group's body finishes AND undone if the match later
+ * fails past it, and a repetition must decide whether to go round again
+ * only once its body has matched -- neither fits "match this node".
+ */
+namespace __re {
+
+template <class BI>
+struct matcher {
+    BI sbegin, send;
+    bool icase = false, multiline = false;
+    regex_constants::match_flag_type mf = regex_constants::match_default;
+    vector<pair<BI, BI>> caps;
+    vector<char> capset;
+    long steps = 0;
+    /* regex_match wants the WHOLE subject, and that has to be part of
+     * the search rather than a test afterwards. `(a|ab)c*` against
+     * "abc" finds "a" + no c's first; checking the end after the fact
+     * reports failure, where the engine still had "ab" + "c" to try.
+     * The acceptance test belongs where backtracking can respond to
+     * it. */
+    bool anchor_end = false;
+
+    /* A hard cap. A backtracker's worst case is exponential -- `(a+)+b`
+     * against n a's tries every way of splitting them -- and an
+     * unbounded one turns a bad pattern into a hang. The standard has
+     * error_complexity for exactly this, so it is reported rather than
+     * suffered. */
+    static const long max_steps = 2000000;
+
+    enum ck { C_NODE, C_SEQ, C_GROUP_END, C_REP_ROUND };
+
+    struct cont {
+        ck kind;
+        const node *n;
+        int i;             /* C_SEQ: the child index; C_REP_ROUND: the
+                            * count INCLUDING the round just matched */
+        BI mark;           /* where the group or this round began */
+        const cont *up;
+    };
+
+    /* ---- the zero-width tests ------------------------------------- */
+
+    bool at_bol(BI i) const
+    {
+        if (i == sbegin)
+            return !(mf & regex_constants::match_not_bol);
+        if (!multiline)
+            return false;
+        BI q = i;
+        --q;
+        return *q == '\n';
+    }
+
+    bool at_eol(BI i) const
+    {
+        if (i == send)
+            return !(mf & regex_constants::match_not_eol);
+        return multiline && *i == '\n';
+    }
+
+    bool word_before(BI i) const
+    {
+        if (i == sbegin)
+            return false;
+        BI q = i;
+        --q;
+        return is_word((unsigned char)*q);
+    }
+    bool word_at(BI i) const
+    { return i != send && is_word((unsigned char)*i); }
+
+    bool eq(char a, char b) const
+    {
+        return icase ? lower_c((unsigned char)a) == lower_c((unsigned char)b)
+                     : a == b;
+    }
+
+    /* Case-insensitive class membership tests the other case too, rather
+     * than folding the set at parse time: folding would have to know
+     * which characters have cases, and this asks per character. */
+    bool in_set(const unsigned char *s, char c) const
+    {
+        if (set_has(s, (unsigned char)c))
+            return true;
+        if (!icase)
+            return false;
+        unsigned char u = (unsigned char)c;
+        unsigned char o = u >= 'a' && u <= 'z' ? (unsigned char)(u - 32)
+                        : u >= 'A' && u <= 'Z' ? (unsigned char)(u + 32) : u;
+        return o != u && set_has(s, o);
+    }
+
+    /* ---- the walk ---------------------------------------------------- */
+
+    BI accept_at{};
+
+    bool step()
+    {
+        if (++steps > max_steps)
+            throw regex_error(regex_constants::error_complexity);
+        return true;
+    }
+
+    bool run(const cont *k, BI i)
+    {
+        step();
+        if (!k) {
+            if (anchor_end && !(i == send))
+                return false;
+            accept_at = i;
+            return true;
+        }
+        switch (k->kind) {
+        case C_NODE:
+            return one(k->n, k->up, i);
+        case C_SEQ: {
+            if (k->i >= (int)k->n->kids.size())
+                return run(k->up, i);
+            cont rest{C_SEQ, k->n, k->i + 1, k->mark, k->up};
+            cont here{C_NODE, k->n->kids[(size_t)k->i], 0, k->mark, &rest};
+            return run(&here, i);
+        }
+        case C_GROUP_END: {
+            /* The body finished: record the capture, continue, and undo
+             * it if what follows fails. A group that matched and was
+             * then backtracked past must leave no trace, or `(a)|b`
+             * against "b" reports a capture of "a". */
+            size_t g = (size_t)k->n->index;
+            pair<BI, BI> save = caps[g];
+            char saved = capset[g];
+            caps[g] = pair<BI, BI>(k->mark, i);
+            capset[g] = 1;
+            if (run(k->up, i))
+                return true;
+            caps[g] = save;
+            capset[g] = saved;
+            return false;
+        }
+        case C_REP_ROUND: {
+            /* One round of the body has just matched, from k->mark to i.
+             * An EMPTY round stops the repetition: going round again
+             * would match nothing again, forever. That guard is what
+             * keeps `(a*)*` from hanging. */
+            if (i == k->mark)
+                return run(k->up, i);
+            return rep(k->n, k->up, i, k->i);
+        }
+        }
+        return false;
+    }
+
+    bool one(const node *n, const cont *k, BI i)
+    {
+        switch (n->k) {
+        case N_CHAR:
+            if (i == send || !eq(*i, n->ch))
+                return false;
+            { BI j = i; ++j; return run(k, j); }
+        case N_ANY:
+            /* `.` does not match a newline: the ECMAScript rule, and the
+             * one that makes a line-oriented pattern stay on its line. */
+            if (i == send || *i == '\n')
+                return false;
+            { BI j = i; ++j; return run(k, j); }
+        case N_CLASS:
+            if (i == send || !in_set(n->set, *i))
+                return false;
+            { BI j = i; ++j; return run(k, j); }
+        case N_BOL:    return at_bol(i) && run(k, i);
+        case N_EOL:    return at_eol(i) && run(k, i);
+        case N_WORDB:  return word_before(i) != word_at(i) && run(k, i);
+        case N_NWORDB: return word_before(i) == word_at(i) && run(k, i);
+        case N_SEQ: {
+            cont c{C_SEQ, n, 0, i, k};
+            return run(&c, i);
+        }
+        case N_ALT:
+            /* Leftmost alternative wins, and the WHOLE continuation is
+             * retried for each -- which is what makes `(a|ab)c` match
+             * "abc": the first alternative fails downstream and the
+             * second is tried from the same position. */
+            for (size_t a = 0; a < n->kids.size(); a++) {
+                cont c{C_NODE, n->kids[a], 0, i, k};
+                if (run(&c, i))
+                    return true;
+            }
+            return false;
+        case N_GROUP: {
+            if (n->index < 0) {                 /* (?: ) */
+                cont c{C_NODE, n->kids[0], 0, i, k};
+                return run(&c, i);
+            }
+            cont end{C_GROUP_END, n, 0, i, k};
+            cont body{C_NODE, n->kids[0], 0, i, &end};
+            return run(&body, i);
+        }
+        case N_LOOKAHEAD: {
+            /* Zero width: match the body from here with an EMPTY
+             * continuation and keep only the yes-or-no. A positive
+             * lookahead keeps what its body captured; a negative one
+             * cannot, because nothing matched. */
+            vector<pair<BI, BI>> savec = caps;
+            vector<char> saves = capset;
+            BI saved_at = accept_at;
+            /* A lookahead's body ends where it ends; the outer
+             * anchoring is not its business. */
+            bool saved_anchor = anchor_end;
+            anchor_end = false;
+            cont c{C_NODE, n->kids[0], 0, i, nullptr};
+            bool got = run(&c, i);
+            anchor_end = saved_anchor;
+            accept_at = saved_at;
+            if (n->neg) {
+                caps = savec;
+                capset = saves;
+                return !got && run(k, i);
+            }
+            if (!got) {
+                caps = savec;
+                capset = saves;
+                return false;
+            }
+            if (run(k, i))
+                return true;
+            caps = savec;
+            capset = saves;
+            return false;
+        }
+        case N_BACKREF: {
+            if (n->index <= 0 || (size_t)n->index >= caps.size())
+                throw regex_error(regex_constants::error_backref);
+            /* A group that has not matched yet matches the empty
+             * string, which is what ECMAScript says and is why
+             * `(a)?\1` matches "" rather than failing. */
+            if (!capset[(size_t)n->index])
+                return run(k, i);
+            BI j = i;
+            for (BI q = caps[(size_t)n->index].first;
+                 q != caps[(size_t)n->index].second; ++q) {
+                if (j == send || !eq(*j, *q))
+                    return false;
+                ++j;
+            }
+            return run(k, j);
+        }
+        case N_REP:
+            return rep(n, k, i, 0);
+        }
+        return false;
+    }
+
+    /* `count` rounds of the body have matched and the subject is at i. */
+    bool rep(const node *n, const cont *k, BI i, int count)
+    {
+        step();
+        bool more = n->hi < 0 || count < n->hi;
+        bool stop = count >= n->lo;
+
+        if (!n->lazy) {
+            /* Greedy: take another round first, and fall back to
+             * stopping only when the rest of the pattern cannot be
+             * satisfied with the longer one. */
+            if (more) {
+                cont round{C_REP_ROUND, n, count + 1, i, k};
+                cont body{C_NODE, n->kids[0], 0, i, &round};
+                if (run(&body, i))
+                    return true;
+            }
+            return stop && run(k, i);
+        }
+        /* Lazy: stop first. `<.+?>` against "<a><b>" matches "<a>"
+         * because of this line and nothing else. */
+        if (stop && run(k, i))
+            return true;
+        if (more) {
+            cont round{C_REP_ROUND, n, count + 1, i, k};
+            cont body{C_NODE, n->kids[0], 0, i, &round};
+            return run(&body, i);
+        }
+        return false;
+    }
+
+    /* One attempt, anchored at `from`. Returns the end of the match. */
+    bool match_at(const node *root, BI from, BI *end)
+    {
+        caps.assign(caps.size(), pair<BI, BI>(from, from));
+        capset.assign(capset.size(), 0);
+        cont c{C_NODE, root, 0, from, nullptr};
+        if (!run(&c, from))
+            return false;
+        *end = accept_at;
+        return true;
+    }
+};
+
+/* Fill m from a successful match of [from, end). */
+template <class BI, class M>
+void fill(M &m, const matcher<BI> &mt, BI from, BI end, BI sb, BI se)
+{
+    m.__m.clear();
+    m.__m.resize(mt.caps.size());
+    m.__m[0].first = from;
+    m.__m[0].second = end;
+    m.__m[0].matched = true;
+    for (size_t g = 1; g < mt.caps.size(); g++) {
+        m.__m[g].first = mt.caps[g].first;
+        m.__m[g].second = mt.caps[g].second;
+        m.__m[g].matched = mt.capset[g] != 0;
+    }
+    m.__prefix.first = sb;
+    m.__prefix.second = from;
+    m.__prefix.matched = sb != from;
+    m.__suffix.first = end;
+    m.__suffix.second = se;
+    m.__suffix.matched = end != se;
+    m.__begin = sb;
+    m.__ready = true;
+}
+
+template <class BI, class C>
+matcher<BI> setup(const basic_regex<C> &re, BI b, BI e,
+                  regex_constants::match_flag_type f)
+{
+    matcher<BI> mt;
+    mt.sbegin = b;
+    mt.send = e;
+    mt.icase = re.__icase();
+    mt.multiline = re.__multiline();
+    mt.mf = f;
+    mt.caps.resize((size_t)re.__groups());
+    mt.capset.resize((size_t)re.__groups());
+    return mt;
+}
+
+}  // namespace __re
+
+/* ---- regex_match --------------------------------------------------------
+ *
+ * The WHOLE subject, not part of it. This is the one everybody gets
+ * wrong the first time: `regex_match("hello world", regex("hello"))` is
+ * false, and `regex_search` of the same is true. Anchoring here rather
+ * than making the caller write `^...$` is the standard's choice and a
+ * good one -- the two questions are different often enough to deserve
+ * different names.
+ */
+template <class BI, class C>
+bool regex_match(BI b, BI e, match_results<BI> &m, const basic_regex<C> &re,
+                 regex_constants::match_flag_type f =
+                     regex_constants::match_default)
+{
+    m.__ready = false;
+    if (!re.__tree())
+        return false;
+    __re::matcher<BI> mt = __re::setup(re, b, e, f);
+    mt.anchor_end = true;
+    BI end;
+    if (!mt.match_at(re.__tree(), b, &end) || end != e)
+        return false;
+    __re::fill(m, mt, b, end, b, e);
+    return true;
+}
+
+template <class BI, class C>
+bool regex_match(BI b, BI e, const basic_regex<C> &re,
+                 regex_constants::match_flag_type f =
+                     regex_constants::match_default)
+{
+    match_results<BI> m;
+    return regex_match(b, e, m, re, f);
+}
+
+template <class C>
+bool regex_match(const C *s, match_results<const C *> &m,
+                 const basic_regex<C> &re,
+                 regex_constants::match_flag_type f =
+                     regex_constants::match_default)
+{ return regex_match(s, s + char_traits<C>::length(s), m, re, f); }
+
+template <class C>
+bool regex_match(const C *s, const basic_regex<C> &re,
+                 regex_constants::match_flag_type f =
+                     regex_constants::match_default)
+{ return regex_match(s, s + char_traits<C>::length(s), re, f); }
+
+template <class C>
+bool regex_match(const basic_string<C> &s,
+                 match_results<typename basic_string<C>::const_iterator> &m,
+                 const basic_regex<C> &re,
+                 regex_constants::match_flag_type f =
+                     regex_constants::match_default)
+{ return regex_match(s.begin(), s.end(), m, re, f); }
+
+template <class C>
+bool regex_match(const basic_string<C> &s, const basic_regex<C> &re,
+                 regex_constants::match_flag_type f =
+                     regex_constants::match_default)
+{ return regex_match(s.begin(), s.end(), re, f); }
+
+/* A match_results holds ITERATORS into the subject, so a match against a
+ * temporary string would refer to freed characters the moment the call
+ * returns. The standard deletes this overload rather than leaving the
+ * dangling to be discovered. */
+template <class C>
+bool regex_match(const basic_string<C> &&,
+                 match_results<typename basic_string<C>::const_iterator> &,
+                 const basic_regex<C> &,
+                 regex_constants::match_flag_type =
+                     regex_constants::match_default) = delete;
+
+/* ---- regex_search -------------------------------------------------------
+ *
+ * The leftmost match, and among those starting at the same place the one
+ * the pattern's own greediness picks. Tried position by position from
+ * the left, which is why "leftmost" is a property of the search and
+ * "longest" is not.
+ */
+template <class BI, class C>
+bool regex_search(BI b, BI e, match_results<BI> &m, const basic_regex<C> &re,
+                  regex_constants::match_flag_type f =
+                      regex_constants::match_default)
+{
+    m.__ready = false;
+    if (!re.__tree())
+        return false;
+    __re::matcher<BI> mt = __re::setup(re, b, e, f);
+    for (BI i = b;; ++i) {
+        BI end;
+        if (mt.match_at(re.__tree(), i, &end)) {
+            if (!(f & regex_constants::match_not_null) || end != i) {
+                __re::fill(m, mt, i, end, b, e);
+                return true;
+            }
+        }
+        /* match_continuous asks for a match at the start or none. */
+        if (f & regex_constants::match_continuous)
+            return false;
+        if (i == e)
+            return false;
+    }
+}
+
+template <class BI, class C>
+bool regex_search(BI b, BI e, const basic_regex<C> &re,
+                  regex_constants::match_flag_type f =
+                      regex_constants::match_default)
+{
+    match_results<BI> m;
+    return regex_search(b, e, m, re, f);
+}
+
+template <class C>
+bool regex_search(const C *s, match_results<const C *> &m,
+                  const basic_regex<C> &re,
+                  regex_constants::match_flag_type f =
+                      regex_constants::match_default)
+{ return regex_search(s, s + char_traits<C>::length(s), m, re, f); }
+
+template <class C>
+bool regex_search(const C *s, const basic_regex<C> &re,
+                  regex_constants::match_flag_type f =
+                      regex_constants::match_default)
+{ return regex_search(s, s + char_traits<C>::length(s), re, f); }
+
+template <class C>
+bool regex_search(const basic_string<C> &s,
+                  match_results<typename basic_string<C>::const_iterator> &m,
+                  const basic_regex<C> &re,
+                  regex_constants::match_flag_type f =
+                      regex_constants::match_default)
+{ return regex_search(s.begin(), s.end(), m, re, f); }
+
+template <class C>
+bool regex_search(const basic_string<C> &s, const basic_regex<C> &re,
+                  regex_constants::match_flag_type f =
+                      regex_constants::match_default)
+{ return regex_search(s.begin(), s.end(), re, f); }
+
+template <class C>
+bool regex_search(const basic_string<C> &&,
+                  match_results<typename basic_string<C>::const_iterator> &,
+                  const basic_regex<C> &,
+                  regex_constants::match_flag_type =
+                      regex_constants::match_default) = delete;
+
+/* ---- regex_replace ------------------------------------------------------ */
+
+template <class Out, class BI, class C>
+Out regex_replace(Out out, BI b, BI e, const basic_regex<C> &re,
+                  const basic_string<C> &fmt,
+                  regex_constants::match_flag_type f =
+                      regex_constants::match_default)
+{
+    /* The loop runs while a match is FOUND, including one at the very
+     * end of the subject: `x*` matches empty at every position, the
+     * last one included, so "abc" becomes "-a-b-c-" with four
+     * replacements and not three. A loop conditioned on `pos != e`
+     * stops one short. */
+    BI pos = b;
+    for (;;) {
+        match_results<BI> m;
+        if (!regex_search(pos, e, m, re, f))
+            break;
+        if (!(f & regex_constants::format_no_copy))
+            for (BI q = pos; q != m[0].first; ++q)
+                *out++ = *q;
+        out = m.format(out, fmt.data(), fmt.data() + fmt.size(), f);
+        BI next = m[0].second;
+        /* An empty match must still advance, or the loop never ends:
+         * copy one character and step past it. */
+        if (next == m[0].first) {
+            if (next == e) {
+                pos = next;
+                break;
+            }
+            if (!(f & regex_constants::format_no_copy))
+                *out++ = *next;
+            ++next;
+        }
+        pos = next;
+        if (f & regex_constants::format_first_only)
+            break;
+    }
+    if (!(f & regex_constants::format_no_copy))
+        for (BI q = pos; q != e; ++q)
+            *out++ = *q;
+    return out;
+}
+
+template <class C>
+basic_string<C> regex_replace(const basic_string<C> &s,
+                              const basic_regex<C> &re,
+                              const basic_string<C> &fmt,
+                              regex_constants::match_flag_type f =
+                                  regex_constants::match_default)
+{
+    basic_string<C> r;
+    regex_replace(back_inserter(r), s.begin(), s.end(), re, fmt, f);
+    return r;
+}
+
+template <class C>
+basic_string<C> regex_replace(const basic_string<C> &s,
+                              const basic_regex<C> &re, const C *fmt,
+                              regex_constants::match_flag_type f =
+                                  regex_constants::match_default)
+{ return regex_replace(s, re, basic_string<C>(fmt), f); }
+
+template <class C>
+basic_string<C> regex_replace(const C *s, const basic_regex<C> &re,
+                              const C *fmt,
+                              regex_constants::match_flag_type f =
+                                  regex_constants::match_default)
+{ return regex_replace(basic_string<C>(s), re, basic_string<C>(fmt), f); }
+
+/* ---- regex_iterator -----------------------------------------------------
+ *
+ * Every match in turn. The end iterator is the DEFAULT-CONSTRUCTED one,
+ * which is how every C++ range of an unknown length is spelled.
+ */
+template <class BI, class C = char>
+class regex_iterator {
+public:
+    using value_type = match_results<BI>;
+    using difference_type = ptrdiff_t;
+    using pointer = const value_type *;
+    using reference = const value_type &;
+    using iterator_category = forward_iterator_tag;
+
+    regex_iterator() : __re(nullptr), __end_reached(true) {}
+    regex_iterator(BI b, BI e, const basic_regex<C> &r,
+                   regex_constants::match_flag_type f =
+                       regex_constants::match_default)
+        : __b(b), __e(e), __pos(b), __re(&r), __f(f), __end_reached(false)
+    { __next(); }
+
+    bool operator==(const regex_iterator &o) const
+    {
+        if (__end_reached || o.__end_reached)
+            return __end_reached == o.__end_reached;
+        return __pos == o.__pos;
+    }
+    bool operator!=(const regex_iterator &o) const { return !(*this == o); }
+
+    reference operator*() const { return __m; }
+    pointer operator->() const { return &__m; }
+
+    regex_iterator &operator++() { __next(); return *this; }
+    regex_iterator operator++(int)
+    { regex_iterator t = *this; __next(); return t; }
+
+private:
+    void __next()
+    {
+        if (__end_reached)
+            return;
+        if (!regex_search(__pos, __e, __m, *__re, __f)) {
+            __end_reached = true;
+            return;
+        }
+        BI n = __m[0].second;
+        /* An empty match advances by one, or the iterator would return
+         * the same match forever. */
+        if (n == __m[0].first) {
+            if (n == __e) {
+                __pos = __e;
+                return;
+            }
+            ++n;
+        }
+        __pos = n;
+    }
+
+    BI __b{}, __e{}, __pos{};
+    const basic_regex<C> *__re;
+    regex_constants::match_flag_type __f = regex_constants::match_default;
+    match_results<BI> __m;
+    bool __end_reached;
+};
+
+using cregex_iterator = regex_iterator<const char *>;
+using sregex_iterator = regex_iterator<string::const_iterator>;
+
+/* ---- regex_token_iterator ------------------------------------------------
+ *
+ * The same walk, yielding a chosen sub-match of each match rather than
+ * the match. Index -1 means the text BETWEEN matches, which is what
+ * makes this a splitter: `regex_token_iterator(s.begin(), s.end(), re,
+ * -1)` is "split on re" and is the reason the class exists.
+ */
+template <class BI, class C = char>
+class regex_token_iterator {
+public:
+    using value_type = sub_match<BI>;
+    using difference_type = ptrdiff_t;
+    using pointer = const value_type *;
+    using reference = const value_type &;
+    using iterator_category = forward_iterator_tag;
+
+    regex_token_iterator() : __done(true) {}
+    regex_token_iterator(BI b, BI e, const basic_regex<C> &r, int sub = 0,
+                         regex_constants::match_flag_type f =
+                             regex_constants::match_default)
+        : __it(b, e, r, f), __sub(sub), __last(b), __end(e), __done(false)
+    { __next(); }
+
+    bool operator==(const regex_token_iterator &o) const
+    { return __done == o.__done && (__done || __cur.first == o.__cur.first); }
+    bool operator!=(const regex_token_iterator &o) const
+    { return !(*this == o); }
+
+    reference operator*() const { return __cur; }
+    pointer operator->() const { return &__cur; }
+
+    regex_token_iterator &operator++() { __next(); return *this; }
+    regex_token_iterator operator++(int)
+    { regex_token_iterator t = *this; __next(); return t; }
+
+private:
+    void __next()
+    {
+        if (__done)
+            return;
+        regex_iterator<BI, C> stop;
+        if (__it == stop) {
+            /* One trailing field after the last match, for -1: the text
+             * after the final separator, which "a,b," must still
+             * produce. */
+            if (__sub == -1 && !__tail_done) {
+                __tail_done = true;
+                __cur.first = __last;
+                __cur.second = __end;
+                __cur.matched = true;
+                return;
+            }
+            __done = true;
+            return;
+        }
+        if (__sub == -1) {
+            __cur.first = __last;
+            __cur.second = (*__it)[0].first;
+            __cur.matched = true;
+            __last = (*__it)[0].second;
+        } else {
+            __cur = (*__it)[(size_t)__sub];
+        }
+        ++__it;
+    }
+
+    regex_iterator<BI, C> __it;
+    int __sub = 0;
+    BI __last{}, __end{};
+    value_type __cur{};
+    bool __done;
+    bool __tail_done = false;
+};
+
+using cregex_token_iterator = regex_token_iterator<const char *>;
+using sregex_token_iterator = regex_token_iterator<string::const_iterator>;
+
+}  // namespace std
+
+#endif

@@ -1,4 +1,4 @@
-/* Front-end gaps found compiling the EmbLinkOS kernel (docs/todo.md K4-K9):
+/* Front-end gaps found compiling the EmbLinkOS kernel (docs/developer/todo.md K4-K9):
  * the full escape set, address-of an array object, and functions with more
  * than the old 12-parameter cap. gcc referees every value. */
 // expect-exit: 42

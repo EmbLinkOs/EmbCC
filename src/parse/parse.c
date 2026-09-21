@@ -1,3 +1,5 @@
+#include <setjmp.h>
+#include <stdarg.h>
 #include "parse.h"
 
 #include <stdlib.h>
@@ -5,29 +7,36 @@
 
 #include "../driver/util.h"
 #include "../lex/lex.h"
+#include "../sema/ldfloat.h"
 #include "../sema/type.h"
 
 /* Tags (struct/union/enum) live in their own namespace; typedef names
  * live in the ordinary one and must be known DURING parsing (the
  * classic C ambiguity), so both tables belong to the parser. */
-enum tag_kind { TAG_STRUCT, TAG_UNION, TAG_ENUM };
+/* (struct tagdef, struct typedefent and enum tag_kind live in ast.h: a
+ * tool that answers questions about a unit needs to walk them.) */
 
-struct tagdef {
-    const char *tag;
-    enum tag_kind kind;
-    struct type *ty;      /* struct/union node; NULL for enums */
-    struct tagdef *next;
-};
-
-struct typedefent {
-    const char *name;
-    struct type *ty;
-    struct typedefent *next;
+struct attrs { int packed; int aligned; int weak; int noreturn;
+               const char *section;
+               int sret; /* embcc_sret on a parameter (type.h sret_first) */
+               int nothrow;
+               /* format(archetype, string-index, first-to-check): 1 printf,
+                * 2 scanf, 0 none. This is how a function says "my nth
+                * argument is a format string" without the compiler
+                * hard-coding the names of the standard library. */
+               int fmt_kind, fmt_idx, fmt_first;
 };
 
 struct parser {
     struct lexer lx;
     struct unit *unit;
+    jmp_buf *recover;     /* where a syntax error resumes (NULL: it stops
+                           * the compile, as it did before recovery) */
+    int nerrors;          /* syntax errors reported in this parse */
+    int prev_line, prev_end_col;  /* just past the token before this one —
+                                   * where a missing ';' belongs */
+    int semi_line, semi_col;      /* where the last missing ';' was reported,
+                                   * so the same one cannot repeat */
     struct tagdef *tags;
     struct typedefent *typedefs;
     struct econst **econst_tail;
@@ -35,10 +44,41 @@ struct parser {
     int alignas_out;      /* alignment from a `_Alignas(...)` on the current
                            * declaration specifiers; read + reset where the
                            * declaration applies its alignment (like `aligned`) */
+    int vla_ok;           /* inside a function (its parameters or body) and
+                           * not in a struct body: a non-constant array size
+                           * makes a VLA rather than an error */
+    /* Where an attribute found in a pointer-declarator position goes.
+     * GCC accepts `extern void *__attribute__((weak)) f(void);` and
+     * applies `weak` to the DECLARATION -- there is nothing else in a
+     * declaration for it to mean. parse_stars has nowhere to put one,
+     * so it drops it here and the enclosing declaration takes it.
+     *
+     * The slot belongs to the PARSER rather than being a pointer to the
+     * declaration's own attrs, so that forgetting to turn it off cannot
+     * write through a dangling pointer into a dead stack frame. Where
+     * it is off, an attribute in that position is still refused,
+     * because then there really is nowhere for it to go. */
+    struct attrs attr_slot;
+    int attr_carry_on;
+    /* Where the last declarator's name token was, so a parameter can be
+     * pointed AT rather than at the function's line -- an editor renaming
+     * one has to edit the name, not the first column of the signature. */
+    int decl_name_line, decl_name_col;
+    int fn_plines[MAX_PARAMS], fn_pcols[MAX_PARAMS];
+    const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
+                           * function declarator inside parentheses
+                           * (`(*f(int a))[3]`) */
 };
 
 static struct token *cur(struct parser *ps) { return &ps->lx.tok; }
-static void advance(struct parser *ps) { lex_next(&ps->lx); }
+static void advance(struct parser *ps)
+{
+    /* Where the token being left off ends: the scanner sits just past it,
+     * which is where an omitted ';' would have gone. */
+    ps->prev_line = ps->lx.tok.line;
+    ps->prev_end_col = (int)(ps->lx.p - ps->lx.line_start) + 1;
+    lex_next(&ps->lx);
+}
 
 static struct tagdef *find_tag(struct parser *ps, const char *tag)
 {
@@ -56,10 +96,96 @@ static struct type *find_typedef(struct parser *ps, const char *name)
     return NULL;
 }
 
+/* A syntax error: recorded, then the parser resumes at the nearest recovery
+ * point — the enclosing statement, or the next external declaration — so one
+ * run reports every independent problem (docs/tools/diagnostics.md T2). Where no
+ * recovery point is set, it stops the compile, as every error once did. */
+static void parse_error_at(struct parser *ps, int line, int col,
+                           const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    diag_verror_at(ps->lx.file, line, col, fmt, ap);
+    va_end(ap);
+    ps->nerrors++;
+    if (ps->recover)
+        longjmp(*ps->recover, 1);
+    fatal_unwind();
+}
+
+/* Where parsing can start again after an error: past the next `;` at this
+ * brace depth, or at the `}` that ends the enclosing block (which the block
+ * loop consumes). `top` also consumes that `}`, since nothing encloses a
+ * declaration. At least one token is always consumed, so recovery cannot
+ * spin on the token it failed at. */
+static void resync(struct parser *ps, int top)
+{
+    int depth = 0;
+    if (cur(ps)->kind != TOK_EOF)
+        advance(ps);
+    for (;;) {
+        enum tok_kind k = cur(ps)->kind;
+        if (k == TOK_EOF)
+            return;
+        if (k == TOK_LBRACE) {
+            depth++;
+        } else if (k == TOK_RBRACE) {
+            if (depth == 0) {
+                if (top)
+                    advance(ps);
+                return;
+            }
+            depth--;
+        } else if (k == TOK_SEMI && depth == 0) {
+            advance(ps);
+            return;
+        }
+        advance(ps);
+    }
+}
+
+/* The same where the location is a declaration rather than a token, so
+ * there is no column to point at. */
+static void parse_error_line(struct parser *ps, int line, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    diag_verror_at(ps->lx.file, line, 0, fmt, ap);
+    va_end(ap);
+    ps->nerrors++;
+    if (ps->recover)
+        longjmp(*ps->recover, 1);
+    fatal_unwind();
+}
+
 static void expect(struct parser *ps, enum tok_kind kind, const char *what)
 {
-    if (cur(ps)->kind != kind)
-        diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col, "expected %s before %s",
+    if (cur(ps)->kind == kind) {
+        advance(ps);
+        return;
+    }
+    /* A missing ';' is the one syntax error whose fix is never in doubt:
+     * it goes at the end of what came before, and saying so is worth more
+     * than naming the token that tripped over it. */
+    if (kind == TOK_SEMI && ps->prev_line > 0 &&
+        !(ps->semi_line == cur(ps)->line && ps->semi_col == cur(ps)->col)) {
+        ps->semi_line = cur(ps)->line;
+        ps->semi_col = cur(ps)->col;
+        diag_error_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                      "expected %s before %s", what, tok_describe(cur(ps)));
+        diag_set_id("E0002");
+        diag_note_at(ps->lx.file, ps->prev_line, ps->prev_end_col,
+                     "insert ';' here");
+        diag_fixit_at(ps->lx.file, ps->prev_line, ps->prev_end_col,
+                      ps->prev_end_col, ";");
+        ps->nerrors++;
+        /* Carry on as if it were there, rather than resynchronising: the
+         * rest of the file parses, so a second missing ';' is reported too
+         * (and both are fixed at once). The position is remembered so the
+         * same one cannot be "inserted" twice and spin. */
+        return;
+    }
+    parse_error_at(ps, cur(ps)->line, cur(ps)->col, "expected %s before %s",
                    what, tok_describe(cur(ps)));
     advance(ps);
 }
@@ -77,8 +203,8 @@ static void reject_reserved(struct parser *ps, const char *name, int line, int c
          i < sizeof reserved_unsupported / sizeof reserved_unsupported[0];
          i++)
         if (strcmp(reserved_unsupported[i], name) == 0)
-            diag_at(ps->lx.file, line, col,
-                    "'%s' is not supported yet (see docs/ROADMAP.md M2)",
+            parse_error_at(ps, line, col,
+                    "'%s' is not supported yet (see docs/design/roadmap.md M2)",
                     name);
 }
 
@@ -87,11 +213,12 @@ static void reject_reserved(struct parser *ps, const char *name, int line, int c
 static int tok_is_type_start(enum tok_kind k)
 {
     return k == TOK_KW_INT || k == TOK_KW_CHAR || k == TOK_KW_SHORT ||
-           k == TOK_KW_LONG || k == TOK_KW_UNSIGNED ||
+           k == TOK_KW_LONG || k == TOK_KW_INT128 || k == TOK_KW_UNSIGNED ||
            k == TOK_KW_SIGNED || k == TOK_KW_VOID ||
            k == TOK_KW_STRUCT || k == TOK_KW_UNION || k == TOK_KW_ENUM ||
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
+           k == TOK_KW_COMPLEX ||
            k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC;
 }
 
@@ -128,93 +255,200 @@ static int at_type_start(struct parser *ps)
     if (tok_is_type_start(cur(ps)->kind))
         return 1;
     return cur(ps)->kind == TOK_IDENT &&
-           find_typedef(ps, cur(ps)->text) != NULL;
+           (find_typedef(ps, cur(ps)->text) != NULL ||
+            strcmp(cur(ps)->text, "__builtin_va_list") == 0 ||
+            strcmp(cur(ps)->text, "__int128_t") == 0 ||
+            strcmp(cur(ps)->text, "__uint128_t") == 0);
 }
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret);
+static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
+                                          const char **names);
+/* The GNU attributes EmbCC honors; everything else is parsed and dropped.
+ * section("name") is honored on file-scope variables and refused (never
+ * dropped) anywhere else — a silently-ignored section is a table the
+ * linker script's bracket symbols never find. */
+/* Match `name`, `__name`, or `__name__` against a base attribute name. */
+static int attr_is(const char *n, const char *base)
+{
+    if (strcmp(n, base) == 0)
+        return 1;
+    size_t bl = strlen(base);
+    return strncmp(n, "__", 2) == 0 &&
+           strncmp(n + 2, base, bl) == 0 &&
+           strcmp(n + 2 + bl, "__") == 0;
+}
+
+/* Consume a run of `__attribute__((...))`. packed / aligned(N) (struct
+ * layout) and weak (symbol binding) are recorded in `out`; every other
+ * attribute is skipped along with its balanced parenthesized arguments.
+ * Callers pass out=NULL where no attribute is meaningful (member/param). */
+static void parse_attributes(struct parser *ps, struct attrs *out)
+{
+    while (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+        advance(ps);
+        expect(ps, TOK_LPAREN, "'(' after __attribute__");
+        expect(ps, TOK_LPAREN, "a second '(' after __attribute__");
+        while (cur(ps)->kind != TOK_RPAREN && cur(ps)->kind != TOK_EOF) {
+            const char *name = cur(ps)->kind == TOK_IDENT ? cur(ps)->text
+                                                          : NULL;
+            advance(ps);
+            long arg = -1;
+            const char *sarg = NULL;
+            int aline = cur(ps)->line;
+            int fkind = 0;
+            long fidx = 0, ffirst = 0;
+            if (cur(ps)->kind == TOK_LPAREN) {
+                advance(ps);
+                if (name && attr_is(name, "format") &&
+                    cur(ps)->kind == TOK_IDENT) {
+                    /* Both arguments are 1-based and count the format
+                     * string itself, as GCC defines them. An archetype
+                     * this compiler does not check (strftime, strfmon)
+                     * leaves fkind 0 and the attribute is skipped like
+                     * any other. */
+                    const char *arch = cur(ps)->text;
+                    if (attr_is(arch, "printf") || attr_is(arch, "gnu_printf"))
+                        fkind = 1;
+                    else if (attr_is(arch, "scanf") ||
+                             attr_is(arch, "gnu_scanf"))
+                        fkind = 2;
+                    advance(ps);
+                    if (cur(ps)->kind == TOK_COMMA) {
+                        advance(ps);
+                        if (cur(ps)->kind == TOK_NUM) {
+                            fidx = cur(ps)->num;
+                            advance(ps);
+                        }
+                        if (cur(ps)->kind == TOK_COMMA) {
+                            advance(ps);
+                            if (cur(ps)->kind == TOK_NUM) {
+                                ffirst = cur(ps)->num;
+                                advance(ps);
+                            }
+                        }
+                    }
+                }
+                if (cur(ps)->kind == TOK_NUM)
+                    arg = cur(ps)->num;
+                else if (cur(ps)->kind == TOK_STR)
+                    sarg = cur(ps)->text;
+                int depth = 1;
+                while (depth > 0 && cur(ps)->kind != TOK_EOF) {
+                    if (cur(ps)->kind == TOK_LPAREN) depth++;
+                    else if (cur(ps)->kind == TOK_RPAREN) depth--;
+                    advance(ps);
+                }
+            }
+            if (name && out) {
+                if (attr_is(name, "packed")) out->packed = 1;
+                else if (attr_is(name, "weak")) out->weak = 1;
+                else if (attr_is(name, "noreturn")) out->noreturn = 1;
+                else if (attr_is(name, "nothrow")) out->nothrow = 1;
+                else if (attr_is(name, "embcc_sret")) out->sret = 1;
+                else if (attr_is(name, "aligned"))
+                    out->aligned = arg > 0 ? (int)arg : 16;
+                else if (attr_is(name, "format") && fkind && fidx > 0) {
+                    out->fmt_kind = fkind;
+                    out->fmt_idx = (int)fidx;
+                    out->fmt_first = (int)ffirst;
+                }
+                else if (attr_is(name, "section")) {
+                    if (!sarg || !*sarg)
+                        parse_error_line(ps, aline,
+                                   "section attribute needs a section "
+                                   "name string");
+                    out->section = sarg;
+                }
+            } else if (name && attr_is(name, "section")) {
+                parse_error_line(ps, aline,
+                           "section attribute is only supported on "
+                           "file-scope variables");
+            }
+            if (cur(ps)->kind == TOK_COMMA)
+                advance(ps);
+            else
+                break;
+        }
+        expect(ps, TOK_RPAREN, "')'");
+        expect(ps, TOK_RPAREN, "a second ')' to close __attribute__");
+    }
+}
+
 static struct type *parse_stars(struct parser *ps, struct type *t);
 static struct expr *parse_cond(struct parser *ps);
 static int size_fold(const struct expr *e, long *out);
 static struct type *ce_type(const struct expr *e);
 static struct type *parse_array_dims(struct parser *ps, struct type *t);
+static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
 static void parse_static_assert(struct parser *ps);
 static struct expr *parse_initializer(struct parser *ps);
 static struct stmt *parse_block(struct parser *ps);
 
-/* Declarator over a base type: leading stars, then either the function-
- * pointer form '( * [*...] [name] [dims] ) ( params )' or a plain
- * [name] [dims]. name_out is NULL when no name appeared (legal in
+/* Declarator over a base type (C11 6.7.6): pointers, then a name — or a
+ * parenthesized declarator — then array and function suffixes. The
+ * parenthesized one binds looser than the suffixes after it (`int
+ * (*fp)(void)`, `int (*pa)[4]`, `int (*arr[2])(void)`, `void
+ * (*signal(int, void (*)(int)))(int)`, `char (*f(void))[6]`): the
+ * suffixes are read first, on the base, then the declarator inside the
+ * parentheses over that type. A `(params)` right after a name is read here
+ * only inside parentheses — outside, callers handle a function declarator
+ * themselves; its parameter names (a definition needs them) are left in
+ * ps->fn_pnames. name_out is NULL when no name appeared (legal in
  * prototypes and abstract declarators). */
-static struct type *parse_declarator(struct parser *ps, struct type *base,
-                                     const char **name_out)
+static struct type *declarator(struct parser *ps, struct type *base,
+                               const char **name_out, int nested)
 {
     base = parse_stars(ps, base);
     *name_out = NULL;
     if (cur(ps)->kind == TOK_LPAREN) {
-        struct lexer save = ps->lx;
+        struct lexer open = ps->lx;
         advance(ps);
         if (cur(ps)->kind == TOK_STAR) {
+            /* past the parentheses to the suffixes */
+            int depth = 1;
+            while (depth > 0) {
+                if (cur(ps)->kind == TOK_EOF)
+                    parse_error_line(ps, open.tok.line,
+                               "unbalanced '(' in a declarator");
+                advance(ps);
+                if (cur(ps)->kind == TOK_LPAREN)
+                    depth++;
+                else if (cur(ps)->kind == TOK_RPAREN)
+                    depth--;
+            }
             advance(ps);
-            int extra = 0;
-            while (cur(ps)->kind == TOK_STAR) {
-                advance(ps);
-                extra++;
-            }
-            skip_quals(ps);
-            if (cur(ps)->kind == TOK_IDENT) {
-                *name_out = cur(ps)->text;
-                advance(ps);
-            }
-            int adims[4];
-            int nad = 0;
-            while (cur(ps)->kind == TOK_LBRACKET) {
-                advance(ps);
-                if (nad >= 4)
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
-                               "more than 4 array dimensions");
-                if (cur(ps)->kind == TOK_RBRACKET) {
-                    /* an omitted size: `(*arr[])(void)` — an incomplete
-                     * array, valid for an extern like crt0's brackets. */
-                    adims[nad++] = 0;
-                    advance(ps);
-                    continue;
-                }
-                int dline = cur(ps)->line;
-                struct expr *de = parse_cond(ps);
-                long dv;
-                if (!size_fold(de, &dv) || dv <= 0)
-                    diag_fatal(ps->lx.file, dline,
-                               "array size must be a positive constant "
-                               "expression");
-                adims[nad++] = (int)dv;
-                expect(ps, TOK_RBRACKET, "']'");
-            }
-            expect(ps, TOK_RPAREN, "')'");
-            /* What the parenthesized `(*name...)` refers to is decided by what
-             * follows: `(params)` a function pointer, `[dims]` a pointer to an
-             * array (`int (*p)[N]`), otherwise a plain parenthesized pointer. */
-            struct type *inner;
+            struct type *outer = base;
             if (cur(ps)->kind == TOK_LPAREN)
-                inner = parse_fn_params(ps, base);
+                outer = parse_fn_params(ps, base);
             else if (cur(ps)->kind == TOK_LBRACKET)
-                inner = parse_array_dims(ps, base);
-            else
-                inner = base;
-            struct type *t = ty_ptr(inner);
-            for (int i = 0; i < extra; i++)
-                t = ty_ptr(t);
-            for (int i = nad - 1; i >= 0; i--)
-                t = ty_array(t, adims[i]);
+                outer = parse_array_dims(ps, base);
+            struct lexer after = ps->lx;
+            ps->lx = open;
+            advance(ps);
+            struct type *t = declarator(ps, outer, name_out, 1);
+            expect(ps, TOK_RPAREN, "')'");
+            ps->lx = after;
             return t;
         }
-        ps->lx = save; /* not a function-pointer declarator */
+        ps->lx = open; /* not a parenthesized declarator */
     }
     if (cur(ps)->kind == TOK_IDENT) {
         *name_out = cur(ps)->text;
+        ps->decl_name_line = cur(ps)->line;
+        ps->decl_name_col = cur(ps)->col;
         advance(ps);
     }
+    if (nested && cur(ps)->kind == TOK_LPAREN)
+        return parse_fn_params_named(ps, base, ps->fn_pnames);
     return parse_array_dims(ps, base);
+}
+
+static struct type *parse_declarator(struct parser *ps, struct type *base,
+                                     const char **name_out)
+{
+    return declarator(ps, base, name_out, 0);
 }
 
 /* An abstract type name (a cast target, a sizeof operand): a declarator
@@ -227,11 +461,39 @@ static struct type *parse_type_name(struct parser *ps, struct type *base)
 }
 
 /* The '(params)' of a function TYPE (as in a function pointer). */
+/* Attributes before a parameter's type. Only embcc_sret means anything
+ * there — the C++ front-end's mark for the ABI's indirect-result pointer —
+ * and only on the first parameter. */
+static int param_sret_attr(struct parser *ps, int index)
+{
+    if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
+        return 0;
+    struct token *at = cur(ps);
+    struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+    parse_attributes(ps, &a);
+    if (a.sret && index != 0)
+        parse_error_at(ps, at->line, at->col,
+                "embcc_sret marks the first parameter only");
+    return a.sret;
+}
+
 static struct type *parse_fn_params(struct parser *ps, struct type *ret)
 {
+    /* Nor can a parameter carry one. */
+    ps->attr_carry_on = 0;
+
+    return parse_fn_params_named(ps, ret, NULL);
+}
+
+/* ... and the parameters' names into names[] (NULL where unnamed) */
+static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
+                                          const char **names)
+{
     expect(ps, TOK_LPAREN, "'('");
+    int saved_vla_ok = ps->vla_ok;
+    ps->vla_ok = 1;   /* prototype scope: `int a[n]`, `int a[*]` */
     struct type *pt[MAX_PARAMS];
-    int n = 0, varargs = 0;
+    int n = 0, varargs = 0, sret = 0;
 
     if (cur(ps)->kind == TOK_KW_VOID) {
         struct lexer save = ps->lx;
@@ -246,22 +508,31 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
                 advance(ps);
                 break;
             }
+            if (param_sret_attr(ps, n))
+                sret = 1;
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a parameter type before %s",
                            tok_describe(cur(ps)));
-            const char *dummy;
-            struct type *t = parse_declarator(ps, spec, &dummy);
+            const char *pname;
+            struct type *t = parse_declarator(ps, spec, &pname);
+            if (names && n < MAX_PARAMS) {
+                names[n] = pname;
+                if (names == ps->fn_pnames) {
+                    ps->fn_plines[n] = ps->decl_name_line;
+                    ps->fn_pcols[n] = ps->decl_name_col;
+                }
+            }
             if (t->kind == TY_ARRAY)
                 t = ty_ptr(t->pointee); /* C's adjustment */
             if (t->kind == TY_FUNC)
                 t = ty_ptr(t);
             if (t->kind == TY_VOID)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "a parameter cannot have type void");
             if (n >= MAX_PARAMS)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "too many parameters in a function type");
             pt[n++] = t;
             if (cur(ps)->kind != TOK_COMMA)
@@ -270,25 +541,40 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
         }
     }
     expect(ps, TOK_RPAREN, "')'");
-    return ty_func(ret, pt, n, varargs);
+    ps->vla_ok = saved_vla_ok;
+    struct type *ft = ty_func(ret, pt, n, varargs);
+    ft->sret_first = sret;
+    return ft;
 }
 
-static struct type *parse_struct_body(struct parser *ps, struct type *t);
+static struct type *parse_struct_body(struct parser *ps, struct type *t,
+                                      const struct attrs *lead);
 static void parse_enum_body(struct parser *ps);
 
 /* struct/union/enum specifier, after the keyword was consumed. */
 static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                                  int allow_body, int line)
 {
+    /* GNU C allows attributes right after the keyword —
+     * `struct __attribute__((packed)) { ... } x;` — as well as after the
+     * closing brace (parse_struct_body). Leading ones are collected here and
+     * applied to the body exactly as trailing ones are. Between the tag and
+     * the '{' is NOT a place gcc accepts one, so neither does EmbCC. */
+    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+    parse_attributes(ps, &lead);
     const char *tag = NULL;
     if (cur(ps)->kind == TOK_IDENT) {
         tag = cur(ps)->text;
         advance(ps);
     }
+    if (kind == TAG_ENUM && (lead.packed || lead.aligned))
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                "a packed or aligned enum is not supported (EmbCC's enums "
+                "are always int-sized)");
 
     if (cur(ps)->kind == TOK_LBRACE) {
         if (!allow_body)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "define %s at file scope (block-scope type "
                        "definitions are not supported)",
                        kind == TAG_ENUM ? "enums" : "structs/unions");
@@ -297,10 +583,10 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
             struct tagdef *td = find_tag(ps, tag);
             if (td) {
                 if (td->kind != kind)
-                    diag_fatal(ps->lx.file, line,
+                    parse_error_line(ps, line,
                                "'%s' is a different kind of tag", tag);
                 if (kind != TAG_ENUM && td->ty->complete)
-                    diag_fatal(ps->lx.file, line,
+                    parse_error_line(ps, line,
                                "redefinition of '%s'", tag);
                 t = td->ty;
             } else {
@@ -320,22 +606,22 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
             parse_enum_body(ps);
             return ty_base(TY_INT, 0);
         }
-        return parse_struct_body(ps, t);
+        return parse_struct_body(ps, t, &lead);
     }
 
     if (!tag)
-        diag_fatal(ps->lx.file, line, "%s needs a tag or a body",
+        parse_error_line(ps, line, "%s needs a tag or a body",
                    kind == TAG_ENUM ? "enum" :
                    kind == TAG_UNION ? "union" : "struct");
     struct tagdef *td = find_tag(ps, tag);
     if (td) {
         if (td->kind != kind)
-            diag_fatal(ps->lx.file, line,
+            parse_error_line(ps, line,
                        "'%s' is a different kind of tag", tag);
         return kind == TAG_ENUM ? ty_base(TY_INT, 0) : td->ty;
     }
     if (kind == TAG_ENUM)
-        diag_fatal(ps->lx.file, line, "unknown enum '%s'", tag);
+        parse_error_line(ps, line, "unknown enum '%s'", tag);
     /* Forward reference: an incomplete struct, fine behind a pointer */
     td = xcalloc(1, sizeof *td);
     td->tag = tag;
@@ -378,7 +664,7 @@ static void consume_alignas(struct parser *ps)
             struct expr *e = parse_cond(ps);
             long v;
             if (!size_fold(e, &v) || v <= 0)
-                diag_fatal(ps->lx.file, line,
+                parse_error_line(ps, line,
                            "_Alignas requires a positive constant alignment");
             a = (int)v;
         }
@@ -407,7 +693,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             struct expr *e = parse_cond(ps);
             t = ce_type(e);
             if (!t)
-                diag_fatal(ps->lx.file, line,
+                parse_error_line(ps, line,
                            "typeof of an unsupported expression");
         }
         expect(ps, TOK_RPAREN, "')' after typeof");
@@ -445,7 +731,14 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
          * (as some headers write it) resolves. */
         if (strcmp(cur(ps)->text, "__builtin_va_list") == 0) {
             advance(ps);
-            return ty_ptr(ty_base(TY_CHAR, 0));
+            return ty_ptr(ty_plain_char());
+        }
+        /* GCC's names for the 128-bit integers (typedefs it predeclares) */
+        if (strcmp(cur(ps)->text, "__int128_t") == 0 ||
+            strcmp(cur(ps)->text, "__uint128_t") == 0) {
+            int u = cur(ps)->text[2] == 'u';
+            advance(ps);
+            return ty_base(TY_INT128, u);
         }
         struct type *td = find_typedef(ps, cur(ps)->text);
         if (!td)
@@ -455,16 +748,18 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     }
     /* base specifiers in any order: unsigned long int, long unsigned... */
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
-    int nfloat = 0, ndouble = 0, nbool = 0;
+    int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0, n128 = 0;
     int any = 0;
     for (;;) {
         enum tok_kind k = cur(ps)->kind;
         if (k == TOK_KW_FLOAT) nfloat++;
+        else if (k == TOK_KW_COMPLEX) ncomplex++;
         else if (k == TOK_KW_BOOL) nbool++;
         else if (k == TOK_KW_DOUBLE) ndouble++;
         else if (k == TOK_KW_UNSIGNED) uns = 1;
         else if (k == TOK_KW_SIGNED) uns = 0;
         else if (k == TOK_KW_LONG) nlong++;
+        else if (k == TOK_KW_INT128) n128++;
         else if (k == TOK_KW_SHORT) nshort++;
         else if (k == TOK_KW_CHAR) nchar++;
         else if (k == TOK_KW_INT) nint++;
@@ -489,39 +784,126 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         return NULL;
     if (nbool) {
         if (any > 1)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "_Bool cannot combine with other specifiers");
         return ty_base(TY_BOOL, 0);
+    }
+    if (ncomplex) {
+        /* `T _Complex` for a floating T; a bare _Complex means double, as
+         * in gcc. The GNU integer complex types are not supported. */
+        if (ncomplex > 1 || uns != -1 || nchar || nshort || nint || nvoid ||
+            nbool || (nfloat && ndouble) || nlong > 1 || (nlong && nfloat))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "invalid _Complex type (only float, double and long "
+                       "double _Complex are supported)");
+        struct type *el = ty_base(nfloat ? TY_FLOAT
+                                  : nlong ? TY_LDOUBLE : TY_DOUBLE, 0);
+        return ty_complex(el);
     }
     if (nfloat || ndouble) {
         if (uns != -1 || nchar || nshort || nint || nvoid ||
             (nfloat && ndouble))
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "invalid type specifier combination");
-        /* 'long double' is accepted AS double — there is no 80-bit
-         * type here, and saying so beats pretending. */
+        if (nlong > 1 || (nlong && nfloat))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "invalid type specifier combination");
+        if (nlong)
+            return ty_base(TY_LDOUBLE, 0);
         return ty_base(nfloat ? TY_FLOAT : TY_DOUBLE, 0);
     }
     if (nvoid) {
         if (any > 1)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "void cannot combine with other specifiers");
         return ty_base(TY_VOID, 0);
     }
+    if (n128) {
+        if (n128 > 1 || nlong || nshort || nchar || nint || nvoid || nfloat ||
+            ndouble || nbool || ncomplex)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "invalid type specifier combination");
+        return ty_base(TY_INT128, uns == 1);
+    }
     if (nlong > 2 || (nshort && nlong) || (nchar && (nshort || nlong)) ||
         (nchar && nint))
-        diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                    "invalid type specifier combination");
     enum ty_kind kind = nchar ? TY_CHAR :
                         nshort ? TY_SHORT :
                         nlong ? TY_LONG : TY_INT;
+    /* `char` with no signed/unsigned is the target's plain char. */
+    if (kind == TY_CHAR && uns == -1)
+        return ty_plain_char();
     return ty_base(kind, uns == 1);
+}
+
+/* Fold whatever parse_stars dropped in the parser's slot into this
+ * declaration's attributes, and close the slot behind it. */
+static void take_carried(struct parser *ps, struct attrs *a)
+{
+    if (!ps->attr_carry_on)
+        return;
+    if (ps->attr_slot.weak)     a->weak = 1;
+    if (ps->attr_slot.noreturn) a->noreturn = 1;
+    if (ps->attr_slot.fmt_kind) {
+        a->fmt_kind = ps->attr_slot.fmt_kind;
+        a->fmt_idx = ps->attr_slot.fmt_idx;
+        a->fmt_first = ps->attr_slot.fmt_first;
+    }
+    if (ps->attr_slot.packed)   a->packed = 1;
+    if (ps->attr_slot.aligned > a->aligned)
+        a->aligned = ps->attr_slot.aligned;
+    if (ps->attr_slot.section && !a->section)
+        a->section = ps->attr_slot.section;
+    memset(&ps->attr_slot, 0, sizeof ps->attr_slot);
+    /* The slot stays OPEN: a declaration may parse its declarator
+     * twice -- once to see whether it is a function, then again after
+     * a rewind -- and closing it after the first pass would refuse the
+     * attribute on the second. It is closed where a context must
+     * refuse instead (below). */
 }
 
 static struct type *parse_stars(struct parser *ps, struct type *t)
 {
     for (;;) {
         skip_quals(ps); /* char * const p, const char *p, ... */
+        /* GCC also lets an attribute sit where a qualifier can:
+         * `typedef uint64_t __attribute__((may_alias)) word_t;`,
+         * `int * __attribute__((unused)) p`. The ones EmbCC ignores everywhere
+         * are ignored here too (may_alias is a no-op: the optimizer has no
+         * type-based alias analysis). The ones it HONOURS elsewhere change
+         * layout or linkage, and this position has nowhere to carry them, so
+         * they are refused rather than silently dropped. */
+        if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+            struct token *at_tok = cur(ps);
+            struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+            parse_attributes(ps, &a);
+            if (ps->attr_carry_on) {
+                /* The enclosing declaration will take them. */
+                if (a.weak)     ps->attr_slot.weak = 1;
+                if (a.noreturn) ps->attr_slot.noreturn = 1;
+                if (a.fmt_kind) {
+                    ps->attr_slot.fmt_kind = a.fmt_kind;
+                    ps->attr_slot.fmt_idx = a.fmt_idx;
+                    ps->attr_slot.fmt_first = a.fmt_first;
+                }
+                if (a.packed)   ps->attr_slot.packed = 1;
+                if (a.aligned > ps->attr_slot.aligned)
+                    ps->attr_slot.aligned = a.aligned;
+                if (a.section && !ps->attr_slot.section)
+                    ps->attr_slot.section = a.section;
+                continue;
+            }
+            if (a.packed || a.aligned || a.weak || a.noreturn)
+                parse_error_at(ps, at_tok->line, at_tok->col,
+                        "__attribute__((%s)) is not supported in this position "
+                        "(after a declarator it is; on a struct or union, put "
+                        "it right after the keyword or after the closing '}')",
+                        a.packed ? "packed" : a.aligned ? "aligned"
+                        : a.weak ? "weak" : "noreturn");
+            continue;
+        }
         if (cur(ps)->kind != TOK_STAR)
             return t;
         t = ty_ptr(t);
@@ -632,6 +1014,24 @@ static int size_fold(const struct expr *e, long *out)
     }
     case EXPR_CAST:
         return size_fold(e->rhs, out);
+    case EXPR_CALL:
+        /* __atomic_always_lock_free / __atomic_is_lock_free are integer
+         * constant expressions in gcc — `_Static_assert` uses them, and it
+         * is evaluated here, before sema folds the call (sema.c
+         * check_atomic_call answers the same way). */
+        if (e->lhs && e->lhs->kind == EXPR_VAR && e->nargs == 1 &&
+            strcmp(e->lhs->name, "__builtin_constant_p") == 0) {
+            *out = size_fold(e->args[0], &a);   /* sema answers the same */
+            return 1;
+        }
+        if (e->lhs && e->lhs->kind == EXPR_VAR && e->nargs == 2 &&
+            (strcmp(e->lhs->name, "__atomic_always_lock_free") == 0 ||
+             strcmp(e->lhs->name, "__atomic_is_lock_free") == 0) &&
+            size_fold(e->args[0], &a)) {
+            *out = a == 1 || a == 2 || a == 4 || a == 8;
+            return 1;
+        }
+        return 0;
     case EXPR_NEG:
         if (!size_fold(e->rhs, &a)) return 0;
         *out = -a;
@@ -644,7 +1044,31 @@ static int size_fold(const struct expr *e, long *out)
         if (!size_fold(e->rhs, &a)) return 0;
         *out = !a;
         return 1;
+    case EXPR_COND: {
+        /* `int buf[(N > 4) ? N : 4];` -- a constant conditional, which C11
+         * 6.6 admits like any other operator and which was the one piece
+         * missing here. Only the SELECTED arm has to be constant: the
+         * standard evaluates one branch, so `1 ? 1 : 1/0` is well-formed
+         * and folding both would reject it. */
+        long c;
+        if (!size_fold(e->args[0], &c))
+            return 0;
+        return size_fold(c ? e->args[1] : e->args[2], out);
+    }
     case EXPR_BINOP:
+        /* && and || short-circuit, so the right operand must neither be
+         * evaluated nor be required to fold when the left one decides the
+         * answer: `sizeof(long) > 8 && 1/0` is a constant expression whose
+         * value is 0. */
+        if (e->op == B_LAND || e->op == B_LOR) {
+            if (!size_fold(e->lhs, &a))
+                return 0;
+            if (e->op == B_LAND ? !a : a) { *out = e->op == B_LOR; return 1; }
+            if (!size_fold(e->rhs, &b))
+                return 0;
+            *out = !!b;
+            return 1;
+        }
         if (!size_fold(e->lhs, &a) || !size_fold(e->rhs, &b))
             return 0;
         switch (e->op) {
@@ -678,94 +1102,77 @@ static int size_fold(const struct expr *e, long *out)
 static struct type *parse_array_dims(struct parser *ps, struct type *t)
 {
     int dims[4];
+    struct expr *dexpr[4];   /* each dimension's expression (NULL for []) */
+    int dvar[4];             /* 1 = not a constant: a VLA dimension */
     int ndims = 0;
     while (cur(ps)->kind == TOK_LBRACKET) {
         advance(ps);
         int dim = 0; /* [] : legal for params (adjusts to a pointer);
                         elsewhere caught as an incomplete type */
-        if (cur(ps)->kind != TOK_RBRACKET) {
+        struct expr *de = NULL;
+        int var = 0;
+        if (cur(ps)->kind == TOK_STAR && ps->vla_ok) {
+            /* `[*]`: a VLA of unspecified size, prototype scope only (C99
+             * 6.7.5.2p4). Only its adjusted pointer type survives. */
+            struct lexer save = ps->lx;
+            advance(ps);
+            if (cur(ps)->kind == TOK_RBRACKET) {
+                de = new_expr(EXPR_NUM, cur(ps)->line, 0);
+                de->num = 1;
+                var = 1;
+            } else {
+                ps->lx = save;
+            }
+        }
+        if (!de && cur(ps)->kind != TOK_RBRACKET) {
             int dline = cur(ps)->line;
-            struct expr *de = parse_cond(ps);
+            de = parse_cond(ps);
             long dv;
-            if (!size_fold(de, &dv))
-                diag_fatal(ps->lx.file, dline,
-                           "array size must be a constant expression");
-            if (dv < 0)
-                diag_fatal(ps->lx.file, dline,
-                           "array size cannot be negative");
-            dim = (int)dv; /* 0 is the extern/flexible form */
+            if (!size_fold(de, &dv)) {
+                if (!ps->vla_ok)
+                    parse_error_line(ps, dline,
+                               "array size must be a constant expression "
+                               "here (a variable length array can only be "
+                               "a local variable or a parameter)");
+                var = 1;
+            } else {
+                if (dv < 0)
+                    parse_error_line(ps, dline,
+                               "array size cannot be negative");
+                dim = (int)dv; /* 0 is the extern/flexible form */
+            }
         }
         if (ndims >= 4)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "more than 4 array dimensions");
-        dims[ndims++] = dim;
+        dims[ndims] = dim;
+        dexpr[ndims] = de;
+        dvar[ndims] = var;
+        ndims++;
         expect(ps, TOK_RBRACKET, "']'");
     }
-    for (int i = ndims - 1; i >= 0; i--)
-        t = ty_array(t, dims[i]);
+    /* Innermost first. Once any dimension is variable, every dimension
+     * outside it is too — `int a[3][n]` is 3 rows of a run-time size — so
+     * each becomes a VLA node (with its constant as the length). */
+    for (int i = ndims - 1; i >= 0; i--) {
+        if (dvar[i] || (ty_is_vla(t) && dexpr[i]))
+            t = ty_vla(t, dexpr[i]);
+        else
+            t = ty_array(t, dims[i]);
+    }
     return t;
 }
 
-/* The GNU attributes EmbCC honors; everything else is parsed and dropped. */
-struct attrs { int packed; int aligned; int weak; int noreturn; };
-
-/* Match `name`, `__name`, or `__name__` against a base attribute name. */
-static int attr_is(const char *n, const char *base)
+static struct type *parse_struct_body(struct parser *ps, struct type *t,
+                                      const struct attrs *lead)
 {
-    if (strcmp(n, base) == 0)
-        return 1;
-    size_t bl = strlen(base);
-    return strncmp(n, "__", 2) == 0 &&
-           strncmp(n + 2, base, bl) == 0 &&
-           strcmp(n + 2 + bl, "__") == 0;
-}
+    /* A member's declarator has nowhere to carry an attribute found
+     * after a `*`, so inside a struct body the refusal stands. */
+    ps->attr_carry_on = 0;
 
-/* Consume a run of `__attribute__((...))`. packed / aligned(N) (struct
- * layout) and weak (symbol binding) are recorded in `out`; every other
- * attribute is skipped along with its balanced parenthesized arguments.
- * Callers pass out=NULL where no attribute is meaningful (member/param). */
-static void parse_attributes(struct parser *ps, struct attrs *out)
-{
-    while (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
-        advance(ps);
-        expect(ps, TOK_LPAREN, "'(' after __attribute__");
-        expect(ps, TOK_LPAREN, "a second '(' after __attribute__");
-        while (cur(ps)->kind != TOK_RPAREN && cur(ps)->kind != TOK_EOF) {
-            const char *name = cur(ps)->kind == TOK_IDENT ? cur(ps)->text
-                                                          : NULL;
-            advance(ps);
-            long arg = -1;
-            if (cur(ps)->kind == TOK_LPAREN) {
-                advance(ps);
-                if (cur(ps)->kind == TOK_NUM)
-                    arg = cur(ps)->num;
-                int depth = 1;
-                while (depth > 0 && cur(ps)->kind != TOK_EOF) {
-                    if (cur(ps)->kind == TOK_LPAREN) depth++;
-                    else if (cur(ps)->kind == TOK_RPAREN) depth--;
-                    advance(ps);
-                }
-            }
-            if (name && out) {
-                if (attr_is(name, "packed")) out->packed = 1;
-                else if (attr_is(name, "weak")) out->weak = 1;
-                else if (attr_is(name, "noreturn")) out->noreturn = 1;
-                else if (attr_is(name, "aligned"))
-                    out->aligned = arg > 0 ? (int)arg : 16;
-            }
-            if (cur(ps)->kind == TOK_COMMA)
-                advance(ps);
-            else
-                break;
-        }
-        expect(ps, TOK_RPAREN, "')'");
-        expect(ps, TOK_RPAREN, "a second ')' to close __attribute__");
-    }
-}
-
-static struct type *parse_struct_body(struct parser *ps, struct type *t)
-{
     expect(ps, TOK_LBRACE, "'{'");
+    int saved_vla_ok = ps->vla_ok;
+    ps->vla_ok = 0;   /* a member cannot be variably modified (6.7.2.1p9) */
     struct member *ms = NULL;
     int n = 0, cap = 0;
 
@@ -778,7 +1185,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t)
         /* allow_body: nested struct/union definitions are legal C */
         struct type *spec = parse_type_spec(ps, 1);
         if (!spec)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a member type before %s",
                        tok_describe(cur(ps)));
         for (;;) { /* declarators share the base: int a, *b, c[4]; */
@@ -792,30 +1199,30 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t)
             if (cur(ps)->kind == TOK_COLON) {
                 advance(ps);
                 if (!ty_is_integer(mty))
-                    diag_fatal(ps->lx.file, mline,
+                    parse_error_line(ps, mline,
                                "a bitfield must have integer type, not %s",
                                ty_name(mty));
                 struct expr *we = parse_cond(ps);
                 long wv;
                 if (!size_fold(we, &wv) || wv < 0)
-                    diag_fatal(ps->lx.file, mline,
+                    parse_error_line(ps, mline,
                                "a bitfield width must be a constant >= 0");
                 if (wv > 8 * (long)ty_size(mty))
-                    diag_fatal(ps->lx.file, mline,
+                    parse_error_line(ps, mline,
                                "bitfield '%s' width %ld exceeds its type %s",
                                mname ? mname : "<anon>", wv, ty_name(mty));
                 if (wv == 0 && mname)
-                    diag_fatal(ps->lx.file, mline,
+                    parse_error_line(ps, mline,
                                "a named bitfield '%s' cannot have width 0",
                                mname);
                 is_bf = 1;
                 bit_width = (int)wv;
             }
             if (mty->kind == TY_VOID)
-                diag_fatal(ps->lx.file, mline,
+                parse_error_line(ps, mline,
                            "a member cannot have type void");
             if (mty->kind == TY_FUNC)
-                diag_fatal(ps->lx.file, mline,
+                parse_error_line(ps, mline,
                            "a member cannot be a function — use a "
                            "function pointer");
             /* An anonymous struct/union member (`struct { ... };` with no
@@ -823,23 +1230,28 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t)
              * belonged to the enclosing type. A nameless non-aggregate is
              * still an error. */
             if (!mname && !is_bf && mty->kind != TY_STRUCT)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a member name before %s",
                            tok_describe(cur(ps)));
-            if (!is_bf && ty_size(mty) == 0)
-                diag_fatal(ps->lx.file, mline,
+            /* (an array of no elements — `T m[]`, C99's flexible array
+             * member, or GNU's `T m[0]` — takes no room: its elements are
+             * what follows the struct) */
+            if (!is_bf && ty_size(mty) == 0 &&
+                !(mty->kind == TY_ARRAY && mty->count == 0 && !mty->vla_len &&
+                  ty_size(mty->pointee) > 0))
+                parse_error_line(ps, mline,
                            "member '%s' has incomplete type %s",
                            mname, ty_name(mty));
             if (mname)
                 for (int i = 0; i < n; i++)
                     if (ms[i].name && strcmp(ms[i].name, mname) == 0)
-                        diag_fatal(ps->lx.file, mline,
+                        parse_error_line(ps, mline,
                                    "duplicate member '%s'", mname);
             if (n == cap) {
                 cap = cap ? cap * 2 : 8;
                 ms = xrealloc(ms, (size_t)cap * sizeof *ms);
             }
-            struct attrs mat = { 0, 0, 0, 0 };
+            struct attrs mat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
             parse_attributes(ps, &mat);  /* T buf[N] __attribute__((aligned(N))) */
             ms[n].name = mname;
             ms[n].ty = mty;
@@ -860,10 +1272,11 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t)
         expect(ps, TOK_SEMI, "';'");
     }
     advance(ps); /* '}' */
-    struct attrs at = { 0, 0, 0, 0 };
+    ps->vla_ok = saved_vla_ok;
+    struct attrs at = *lead;     /* struct __attribute__((packed)) {...} */
     parse_attributes(ps, &at);   /* struct {...} __attribute__((packed)) */
     if (n == 0)
-        diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                    "a struct/union needs at least one member");
     ty_struct_layout(t, ms, n, at.packed, at.aligned);
     return t;
@@ -876,7 +1289,7 @@ static void parse_enum_body(struct parser *ps)
 
     while (cur(ps)->kind != TOK_RBRACE) {
         if (cur(ps)->kind != TOK_IDENT)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected an enumerator name before %s",
                        tok_describe(cur(ps)));
         const char *name = cur(ps)->text;
@@ -884,21 +1297,16 @@ static void parse_enum_body(struct parser *ps)
         advance(ps);
         if (cur(ps)->kind == TOK_ASSIGN) {
             advance(ps);
-            int neg = 0;
-            if (cur(ps)->kind == TOK_MINUS) {
-                neg = 1;
-                advance(ps);
-            }
-            if (cur(ps)->kind != TOK_NUM)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
-                           "an enumerator value must be an integer "
-                           "literal for now");
-            val = neg ? -cur(ps)->num : cur(ps)->num;
-            advance(ps);
+            int vline = cur(ps)->line, vcol = cur(ps)->col;
+            struct expr *ve = parse_cond(ps);
+            if (!size_fold(ve, &val))
+                parse_error_at(ps, vline, vcol,
+                        "an enumerator value must be an integer constant "
+                        "expression");
         }
         for (struct econst *ec = ps->unit->econsts; ec; ec = ec->next)
             if (strcmp(ec->name, name) == 0)
-                diag_fatal(ps->lx.file, line,
+                parse_error_line(ps, line,
                            "duplicate enumerator '%s'", name);
         struct econst *ec = xcalloc(1, sizeof *ec);
         ec->name = name;
@@ -977,30 +1385,55 @@ static struct expr *parse_primary(struct parser *ps)
         e = new_expr(EXPR_FNUM, t->line, t->col);
         e->fnum = t->fnum;
         e->ty = ty_base(t->fnum_is_float ? TY_FLOAT : TY_DOUBLE, 0);
+        if (t->fnum_is_imag) {
+            e->imag = 1;
+            e->ty = ty_complex(ty_base(t->fnum_is_float ? TY_FLOAT
+                                       : t->fnum_is_ld ? TY_LDOUBLE
+                                                       : TY_DOUBLE, 0));
+        }
+        if (t->fnum_is_ld) {
+            if (!t->fnum_is_imag)
+                e->ty = ty_base(TY_LDOUBLE, 0);
+            e->ldv = ldf_from_text(t->text, ldf_target_fmt());
+            if (!e->ldv)
+                parse_error_line(ps, t->line,
+                           "malformed floating constant '%sL'", t->text);
+        }
         advance(ps);
         return e;
     case TOK_STR: {
         /* Adjacent string literals concatenate (C translation phase 6):
-         * "foo" "bar" is one literal "foobar". num counts the NUL, so
-         * each join drops the running string's terminator and appends
-         * the next literal's bytes (including its NUL). */
+         * "foo" "bar" is one literal "foobar". The DECODED elements are
+         * joined and encoded once, because the result's width is the widest
+         * prefix among the pieces — "a" L"b" is a wide literal, so the "a"
+         * must be re-encoded as UTF-32, not copied as a byte. */
         e = new_expr(EXPR_STR, t->line, t->col);
-        e->str_width = t->str_width;
-        size_t len = (size_t)t->num;
-        char *bytes = xmalloc(len);
-        memcpy(bytes, t->text, len);
-        advance(ps);
+        int line0 = t->line;   /* t is the current-token slot: it moves on */
+        int width = t->str_width, prefix = t->str_prefix;
+        size_t n = 0, cap = 0;
+        struct litch *lc = NULL;
         while (cur(ps)->kind == TOK_STR) {
-            size_t add = (size_t)cur(ps)->num;
-            char *nb = xmalloc(len - 1 + add);
-            memcpy(nb, bytes, len - 1);
-            memcpy(nb + len - 1, cur(ps)->text, add);
-            bytes = nb;
-            len = len - 1 + add;
+            struct token *st = cur(ps);
+            if (st->str_prefix) {
+                if (prefix && prefix != st->str_prefix)
+                    parse_error_at(ps, st->line, st->col,
+                            "concatenating %c\"\" and %c\"\" literals is not "
+                            "supported", prefix, st->str_prefix);
+                prefix = st->str_prefix;
+                width = st->str_width;
+            }
+            if (n + (size_t)st->nlit > cap) {
+                cap = (n + (size_t)st->nlit) * 2 + 8;
+                lc = xrealloc(lc, cap * sizeof *lc);
+            }
+            memcpy(lc + n, st->lit, (size_t)st->nlit * sizeof *lc);
+            n += (size_t)st->nlit;
             advance(ps);
         }
-        e->name = bytes;
-        e->num = (long)len;
+        e->str_width = width;
+        e->str_prefix = (char)prefix;
+        e->name = lit_encode(lc, (int)n, width, &e->num, ps->lx.file, line0);
+        free(lc);
         return e;
     }
     case TOK_LPAREN:
@@ -1020,6 +1453,21 @@ static struct expr *parse_primary(struct parser *ps)
         /* va_arg(ap, type) -> __builtin_va_arg((ap), type): a special form,
          * because its second argument is a TYPE, not an expression. lhs
          * holds ap; cast_ty holds the type read. */
+        if (strcmp(t->text, "__builtin_eh_typeid") == 0) {
+            /* the selector value of a catch type (EXPR_EHTYPEID) */
+            int line = t->line;
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'(' after __builtin_eh_typeid");
+            e = new_expr(EXPR_EHTYPEID, line, 0);
+            if (cur(ps)->kind == TOK_IDENT)
+                e->name = cur(ps)->text;
+            else if (!(cur(ps)->kind == TOK_NUM && cur(ps)->num == 0))
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                        "expected a typeinfo object or 0");
+            advance(ps);
+            expect(ps, TOK_RPAREN, "')' to close __builtin_eh_typeid");
+            return e;
+        }
         if (strcmp(t->text, "__builtin_va_arg") == 0) {
             int line = t->line;
             advance(ps);
@@ -1045,14 +1493,14 @@ static struct expr *parse_primary(struct parser *ps)
             long off = 0;
             for (;;) {
                 if (ty->kind != TY_STRUCT || !ty->complete)
-                    diag_fatal(ps->lx.file, line,
+                    parse_error_line(ps, line,
                                "offsetof needs a complete struct/union type");
                 if (cur(ps)->kind != TOK_IDENT)
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "expected a member name in offsetof");
                 struct member *m2 = ty_find_member(ty, cur(ps)->text);
                 if (!m2)
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "%s has no member '%s'", ty_name(ty),
                                cur(ps)->text);
                 off += m2->off;
@@ -1062,11 +1510,11 @@ static struct expr *parse_primary(struct parser *ps)
                     advance(ps);
                     long iv;
                     if (!size_fold(parse_cond(ps), &iv))
-                        diag_fatal(ps->lx.file, line,
+                        parse_error_line(ps, line,
                                    "offsetof array index must be constant");
                     expect(ps, TOK_RBRACKET, "']'");
                     if (ty->kind != TY_ARRAY)
-                        diag_fatal(ps->lx.file, line,
+                        parse_error_line(ps, line,
                                    "offsetof indexed a non-array member");
                     off += iv * ty_size(ty->pointee);
                     ty = ty->pointee;
@@ -1087,7 +1535,7 @@ static struct expr *parse_primary(struct parser *ps)
         return e;
     }
     default:
-        diag_at(ps->lx.file, t->line, t->col, "expected an expression, got %s",
+        parse_error_at(ps, t->line, t->col, "expected an expression, got %s",
                    tok_describe(t));
         return NULL;
     }
@@ -1121,7 +1569,7 @@ static struct expr *parse_postfix_ops(struct parser *ps, struct expr *e)
             if (cur(ps)->kind != TOK_RPAREN) {
                 for (;;) {
                     if (call->nargs >= MAX_PARAMS)
-                        diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                    "more than %d call arguments",
                                    MAX_PARAMS);
                     call->args[call->nargs++] = parse_expr(ps);
@@ -1148,7 +1596,7 @@ static struct expr *parse_postfix_ops(struct parser *ps, struct expr *e)
             int line = cur(ps)->line;
             advance(ps);
             if (cur(ps)->kind != TOK_IDENT)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a member name before %s",
                            tok_describe(cur(ps)));
             struct expr *m = new_expr(EXPR_MEMBER, line, e->col);
@@ -1215,7 +1663,7 @@ static struct expr *parse_unary(struct parser *ps)
          * label's code location, the target of a later `goto *expr`. */
         advance(ps);
         if (cur(ps)->kind != TOK_IDENT)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                     "expected a label name after '&&'");
         e = new_expr(EXPR_LABELADDR, t->line, t->col);
         e->name = cur(ps)->text;
@@ -1227,6 +1675,17 @@ static struct expr *parse_unary(struct parser *ps)
         int line = t->line;
         advance(ps);
         return incdec(ps, parse_unary(ps), line, 0, delta);
+    }
+    case TOK_KW_REAL:
+    case TOK_KW_IMAG: {
+        /* GNU __real__ x / __imag__ x: a complex's parts (lvalues when x is
+         * one); of a real x, x itself and 0 */
+        int line = t->line;
+        int imag = t->kind == TOK_KW_IMAG;
+        advance(ps);
+        e = new_expr(imag ? EXPR_IMAG : EXPR_REAL, line, 0);
+        e->rhs = parse_unary(ps);
+        return e;
     }
     case TOK_KW_SIZEOF: {
         int line = t->line;
@@ -1408,8 +1867,9 @@ static struct expr *parse_expr(struct parser *ps)
     if (k != TOK_ASSIGN && comp < 0)
         return e;
     if (e->kind != EXPR_VAR && e->kind != EXPR_DEREF &&
-        e->kind != EXPR_MEMBER)
-        diag_fatal(ps->lx.file, line,
+        e->kind != EXPR_MEMBER && e->kind != EXPR_REAL &&
+        e->kind != EXPR_IMAG)
+        parse_error_line(ps, line,
                    "assignment target must be a variable, *pointer, or "
                    "member");
     advance(ps);
@@ -1473,7 +1933,7 @@ static struct expr *parse_initializer(struct parser *ps)
     advance(ps);
     while (cur(ps)->kind != TOK_RBRACE) {
         if (cur(ps)->kind == TOK_EOF)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "unterminated initializer");
         /* A designator: struct field `.name =` or array element `[i] =`.
          * One level only (no `[i].f =` chains — no EmbCC source needs it). */
@@ -1484,14 +1944,14 @@ static struct expr *parse_initializer(struct parser *ps)
             advance(ps);
             struct expr *ie = parse_cond(ps);
             if (!size_fold(ie, &index) || index < 0)
-                diag_fatal(ps->lx.file, iline,
+                parse_error_line(ps, iline,
                            "an array designator [index] must be a constant "
                            ">= 0");
             if (cur(ps)->kind == TOK_ELLIPSIS) {  /* GNU range `[lo ... hi]` */
                 advance(ps);
                 struct expr *he = parse_cond(ps);
                 if (!size_fold(he, &index_hi) || index_hi < index)
-                    diag_fatal(ps->lx.file, iline,
+                    parse_error_line(ps, iline,
                                "an array range [lo ... hi] must have "
                                "constant hi >= lo");
             }
@@ -1500,7 +1960,7 @@ static struct expr *parse_initializer(struct parser *ps)
         } else if (cur(ps)->kind == TOK_DOT) {
             advance(ps);
             if (cur(ps)->kind != TOK_IDENT)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a field name after '.'");
             field = cur(ps)->text;
             advance(ps);
@@ -1535,14 +1995,28 @@ static struct stmt *parse_block(struct parser *ps)
 {
     struct stmt *s = new_stmt(STMT_BLOCK, cur(ps)->line, cur(ps)->col);
     expect(ps, TOK_LBRACE, "'{'");
-    struct stmt **tail = &s->body;
+    struct stmt **volatile tail = &s->body;
     while (cur(ps)->kind != TOK_RBRACE) {
-        if (cur(ps)->kind == TOK_EOF)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
-                       "unexpected end of file inside a block");
-        *tail = parse_stmt(ps, 1);
-        while (*tail) /* a declaration may be a chain: int a, b; */
-            tail = &(*tail)->next;
+        if (cur(ps)->kind == TOK_EOF) {
+            /* Reported once: recovery cannot make more tokens, so the
+             * block ends here whatever else was expected. */
+            diag_error_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                          "unexpected end of file inside a block");
+            ps->nerrors++;
+            return s;
+        }
+        jmp_buf jb, *save = ps->recover;
+        *tail = NULL;
+        ps->recover = &jb;
+        if (!setjmp(jb)) {
+            *tail = parse_stmt(ps, 1);
+            while (*tail) /* a declaration may be a chain: int a, b; */
+                tail = &(*tail)->next;
+        } else {
+            *tail = NULL;          /* half a statement is no statement */
+            resync(ps, 0);
+        }
+        ps->recover = save;
     }
     advance(ps); /* '}' */
     return s;
@@ -1553,7 +2027,7 @@ static struct stmt *parse_block(struct parser *ps)
 static char *parse_str_literal(struct parser *ps, const char *what)
 {
     if (cur(ps)->kind != TOK_STR)
-        diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col, "expected %s", what);
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col, "expected %s", what);
     struct token *t = cur(ps);
     size_t len = (size_t)t->num;            /* includes the NUL */
     char *bytes = xmalloc(len);
@@ -1587,7 +2061,7 @@ static void parse_asm_operands(struct parser *ps, struct asm_operand **out,
         if (cur(ps)->kind == TOK_LBRACKET) {  /* a `[name]` symbolic operand */
             advance(ps);
             if (cur(ps)->kind != TOK_IDENT)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a name in an asm `[name]` operand");
             op->name = cur(ps)->text;
             advance(ps);
@@ -1651,6 +2125,56 @@ static struct stmt *parse_asm_stmt(struct parser *ps)
     return s;
 }
 
+/* __builtin_eh_region { body } __builtin_eh_landing (exc, sel, action...)
+ * { pad } — EmbCC's own statement, written by the C++ lowering (D-013,
+ * CX5): a call in body that throws lands in pad, the exception pointer
+ * stored to exc and the selector to sel; actions are catch types
+ * (typeinfo objects, or 0 for any) and __eh_cleanup. */
+static struct stmt *parse_eh_region(struct parser *ps)
+{
+    struct token *t = cur(ps);
+    struct stmt *s = new_stmt(STMT_EHREGION, t->line, t->col);
+    advance(ps);
+    if (cur(ps)->kind != TOK_LBRACE)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                "expected '{' after __builtin_eh_region");
+    s->body = parse_stmt(ps, 1);
+    t = cur(ps);
+    if (t->kind != TOK_IDENT || strcmp(t->text, "__builtin_eh_landing") != 0)
+        parse_error_at(ps, t->line, t->col,
+                "expected __builtin_eh_landing after an exception region");
+    advance(ps);
+    expect(ps, TOK_LPAREN, "'(' after __builtin_eh_landing");
+    s->expr = parse_expr(ps);
+    expect(ps, TOK_COMMA, "',' after the exception pointer");
+    s->cond = parse_expr(ps);
+    int cap = 0;
+    while (cur(ps)->kind == TOK_COMMA) {
+        advance(ps);
+        t = cur(ps);
+        if (s->neh_acts == cap) {
+            cap = cap ? cap * 2 : 4;
+            s->eh_acts = xrealloc(s->eh_acts, (size_t)cap * sizeof *s->eh_acts);
+        }
+        struct eh_act *a = &s->eh_acts[s->neh_acts++];
+        memset(a, 0, sizeof *a);
+        if (t->kind == TOK_IDENT && strcmp(t->text, "__eh_cleanup") == 0)
+            a->cleanup = 1;
+        else if (t->kind == TOK_IDENT)
+            a->name = t->text;
+        else if (!(t->kind == TOK_NUM && t->num == 0))
+            parse_error_at(ps, t->line, t->col,
+                    "expected a typeinfo object, 0 or __eh_cleanup");
+        advance(ps);
+    }
+    expect(ps, TOK_RPAREN, "')' to close __builtin_eh_landing");
+    if (cur(ps)->kind != TOK_LBRACE)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                "expected '{' to begin the landing pad");
+    s->thn = parse_stmt(ps, 1);
+    return s;
+}
+
 static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
 {
     struct token *t = cur(ps);
@@ -1658,6 +2182,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
 
     if (t->kind == TOK_KW_ASM)
         return parse_asm_stmt(ps);
+    if (t->kind == TOK_IDENT && strcmp(t->text, "__builtin_eh_region") == 0)
+        return parse_eh_region(ps);
 
     /* A block-scope `_Static_assert`: checked now, emits nothing. */
     if (t->kind == TOK_KW_STATIC_ASSERT) {
@@ -1673,14 +2199,14 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
      * scoping -- fine, and the same trade-off tags/typedefs already make. */
     if (t->kind == TOK_KW_TYPEDEF || t->kind == TOK_KW_EXTERN) {
         if (!allow_decl)
-            diag_at(ps->lx.file, t->line, t->col,
+            parse_error_at(ps, t->line, t->col,
                        "a declaration cannot be the body of if/while/for; "
                        "wrap it in braces");
         int is_td = t->kind == TOK_KW_TYPEDEF;
         advance(ps);
         struct type *base = parse_type_spec(ps, 1);
         if (!base)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type after '%s'", is_td ? "typedef" : "extern");
         /* extern declarators become STMT_DECL nodes with is_extern set; sema
          * registers the unit global/function (appending to those lists at
@@ -1692,19 +2218,21 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 const char *tname;
                 struct type *tt = parse_declarator(ps, base, &tname);
                 if (!tname)
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "typedef needs a name, got %s", tok_describe(cur(ps)));
                 struct type *prev = find_typedef(ps, tname);
                 if (prev && !ty_equal(prev, tt))
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "redefinition of typedef '%s'", tname);
                 struct typedefent *te = xcalloc(1, sizeof *te);
                 te->name = tname; te->ty = tt;
                 te->next = ps->typedefs; ps->typedefs = te;
             } else {
-                struct type *dty = parse_stars(ps, base);
+                ps->attr_carry_on = 0;
+                ps->attr_carry_on = 0;
+            struct type *dty = parse_stars(ps, base);
                 if (cur(ps)->kind != TOK_IDENT)
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "expected a name before %s", tok_describe(cur(ps)));
                 const char *dname = cur(ps)->text;
                 int dline = cur(ps)->line;
@@ -1740,13 +2268,14 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         } else if (is_register) {
             advance(ps);
         }
-        while (cur(ps)->kind == TOK_KW_INLINE) /* accepted, ignored */
+        while (cur(ps)->kind == TOK_KW_INLINE ||   /* accepted, ignored */
+               cur(ps)->kind == TOK_KW_NORETURN)   /* on a local prototype */
             advance(ps);
         if ((t->kind == TOK_KW_STATIC || is_register) && !at_type_start(ps))
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type after the storage specifier");
         if (!allow_decl)
-            diag_at(ps->lx.file, t->line, t->col,
+            parse_error_at(ps, t->line, t->col,
                        "a declaration cannot be the body of if/while/for "
                        "(C99 forbids it too); wrap it in braces");
         /* allow_body=1: a block-scope struct/union/enum DEFINITION is legal C
@@ -1755,17 +2284,24 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * types real code uses here; a same-named tag in two scopes is the
          * documented limitation, not a miscompile. */
         struct type *base = parse_type_spec(ps, 1);
+        /* A declaration with no declarator: `enum { BAND = 64 };` or
+         * `struct tag { ... };` inside a function declares only the tag or
+         * the enumerators, which parse_type_spec has already registered. */
+        if (cur(ps)->kind == TOK_SEMI) {
+            advance(ps);
+            return new_stmt(STMT_BLOCK, t->line, t->col);   /* does nothing */
+        }
         struct stmt *head = NULL, **dtail = &head;
         for (;;) {
             s = new_stmt(STMT_DECL, t->line, t->col);
             const char *dname;
             s->dty = parse_declarator(ps, base, &dname);
             if (s->dty->kind == TY_VOID || s->dty->kind == TY_FUNC)
-                diag_at(ps->lx.file, t->line, t->col,
+                parse_error_at(ps, t->line, t->col,
                            "a variable cannot have type %s",
                            ty_name(s->dty));
             if (!dname)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a variable name before %s",
                            tok_describe(cur(ps)));
             s->name = dname;
@@ -1782,8 +2318,13 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * on a local declarator; aligned(N) raises the stack slot's
              * alignment (codegen rounds the frame offset). */
             {
-                struct attrs lat = { 0, 0, 0, 0 };
+                struct attrs lat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
                 parse_attributes(ps, &lat);
+                if (lat.section)
+                    parse_error_line(ps, s->line,
+                               "section attribute on block-scope '%s' is "
+                               "not supported — declare it at file scope",
+                               dname);
                 s->user_align = lat.aligned > ps->alignas_out
                                 ? lat.aligned : ps->alignas_out;
                 ps->alignas_out = 0;
@@ -1813,10 +2354,16 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * takes its size from the literal */
             /* an omitted array size is filled in by sema from the
              * initializer, so only an UNINITIALIZED one is incomplete */
-            if (ty_size(s->dty) == 0 && !s->expr)
-                diag_fatal(ps->lx.file, s->line,
-                           "'%s' has incomplete type %s", s->name,
-                           ty_name(s->dty));
+            if (ty_size(s->dty) == 0 && !s->expr && !ty_is_vla(s->dty)) {
+                diag_error_at(ps->lx.file, s->line, 0,
+                              "'%s' has incomplete type %s", s->name,
+                              ty_name(s->dty));
+                diag_set_id("E0005");
+                ps->nerrors++;
+                if (ps->recover)
+                    longjmp(*ps->recover, 1);
+                fatal_unwind();
+            }
             *dtail = s;
             dtail = &s->next;
             if (cur(ps)->kind == TOK_COMMA) {
@@ -1864,7 +2411,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             return s;
         }
         if (cur(ps)->kind != TOK_IDENT)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a label name after 'goto'");
         s->name = cur(ps)->text;
         advance(ps);
@@ -1883,7 +2430,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         s = new_stmt(STMT_IF, t->line, t->col);
         advance(ps);
         expect(ps, TOK_LPAREN, "'('");
-        s->cond = parse_expr(ps);
+        s->cond = parse_comma(ps);       /* an expression: commas too */
         expect(ps, TOK_RPAREN, "')'");
         s->thn = parse_controlled(ps);
         if (cur(ps)->kind == TOK_KW_ELSE) {
@@ -1895,7 +2442,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         s = new_stmt(STMT_WHILE, t->line, t->col);
         advance(ps);
         expect(ps, TOK_LPAREN, "'('");
-        s->cond = parse_expr(ps);
+        s->cond = parse_comma(ps);       /* an expression: commas too */
         expect(ps, TOK_RPAREN, "')'");
         s->body = parse_controlled(ps);
         return s;
@@ -1915,7 +2462,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             expect(ps, TOK_SEMI, "';'");
         }
         if (cur(ps)->kind != TOK_SEMI) /* NULL cond = forever; break exits */
-            s->cond = parse_expr(ps);
+            s->cond = parse_comma(ps);
         expect(ps, TOK_SEMI, "';'");
         if (cur(ps)->kind != TOK_RPAREN)
             s->step = parse_comma(ps);
@@ -1927,7 +2474,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         advance(ps);
         s->body = parse_controlled(ps);
         if (cur(ps)->kind != TOK_KW_WHILE)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected 'while' after a do-body, got %s",
                        tok_describe(cur(ps)));
         advance(ps);
@@ -1978,6 +2525,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
     case TOK_AMP:
     case TOK_PLUSPLUS:
     case TOK_MINUSMINUS:
+    case TOK_KW_REAL:   /* __real__ z = ...; */
+    case TOK_KW_IMAG:
         /* expression statement: assignment, call, or ++/-- */
         if (t->kind == TOK_IDENT)
             reject_reserved(ps, t->text, t->line, t->col);
@@ -1986,7 +2535,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         expect(ps, TOK_SEMI, "';'");
         return s;
     default:
-        diag_at(ps->lx.file, t->line, t->col,
+        parse_error_at(ps, t->line, t->col,
                    "expected a statement, got %s", tok_describe(t));
         return NULL;
     }
@@ -2008,7 +2557,7 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
     g->ty = ty;
 
     if (g->ty->kind == TY_VOID)
-        diag_fatal(ps->lx.file, line, "a variable cannot have type void");
+        parse_error_line(ps, line, "a variable cannot have type void");
     g->ty = parse_array_dims(ps, g->ty);
     int has_init = cur(ps)->kind == TOK_ASSIGN;
     /* `extern T x[];` is legal: the definition, and the size, live in
@@ -2017,12 +2566,12 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
     int size_from_init = g->ty->kind == TY_ARRAY && g->ty->count == 0 &&
                          has_init;
     if (ty_size(g->ty) == 0 && !is_extern && !size_from_init)
-        diag_fatal(ps->lx.file, line,
+        parse_error_line(ps, line,
                    "'%s' has incomplete type %s", name, ty_name(g->ty));
     if (has_init) {
         advance(ps);
         if (is_extern)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "'extern' with an initializer");
         if (g->ty->kind == TY_ARRAY || g->ty->kind == TY_STRUCT) {
             /* Aggregates (and any string/relocation content) are lowered
@@ -2039,7 +2588,7 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
                     g->ty = ty_array(g->ty->pointee,
                                      initlist_array_count(ie));
                 else
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "'%s' needs a brace or string initializer "
                                "to supply its size", name);
             }
@@ -2071,7 +2620,7 @@ static void parse_static_assert(struct parser *ps)
     struct expr *ce = parse_cond(ps);
     long v;
     if (!size_fold(ce, &v))
-        diag_fatal(ps->lx.file, line,
+        parse_error_line(ps, line,
                    "_Static_assert needs a constant integer expression");
     const char *msg = NULL;
     if (cur(ps)->kind == TOK_COMMA) {
@@ -2081,7 +2630,7 @@ static void parse_static_assert(struct parser *ps)
     expect(ps, TOK_RPAREN, "')' to close _Static_assert");
     expect(ps, TOK_SEMI, "';'");
     if (v == 0)
-        diag_fatal(ps->lx.file, line, "static assertion failed: %s",
+        parse_error_line(ps, line, "static assertion failed: %s",
                    msg ? msg : "(no message)");
 }
 
@@ -2096,7 +2645,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
 
     int is_static = 0, is_extern = 0;
-    struct attrs at = { 0, 0, 0, 0 };
+    struct attrs at = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
     ps->seq = seq;
 
     /* A file-scope `__asm__("...")` block (crt0's _start stub). Basic asm
@@ -2129,6 +2678,12 @@ static void parse_top(struct parser *ps, struct unit *u,
             advance(ps);
         } else if (cur(ps)->kind == TOK_KW_INLINE) {
             advance(ps);
+        } else if (cur(ps)->kind == TOK_KW_NORETURN) {
+            /* C11 §6.7.4: _Noreturn is a function specifier, and means
+             * exactly what __attribute__((noreturn)) means — so it lands in
+             * the same field and the flow analysis cannot tell them apart. */
+            at.noreturn = 1;
+            advance(ps);
         } else if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             parse_attributes(ps, &at); /* leading __attribute__((weak)) etc. */
         } else {
@@ -2137,23 +2692,23 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
     if (cur(ps)->kind == TOK_KW_TYPEDEF) {
         if (is_static || is_extern)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "typedef cannot be static or extern");
         advance(ps);
         struct type *tbase = parse_type_spec(ps, 1);
         if (!tbase)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type after 'typedef'");
         for (;;) {
             const char *tname;
             struct type *tt = parse_declarator(ps, tbase, &tname);
             if (!tname)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "typedef needs a name, got %s",
                            tok_describe(cur(ps)));
             struct type *prev = find_typedef(ps, tname);
             if (prev && !ty_equal(prev, tt))
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "redefinition of typedef '%s'", tname);
             /* identical redefinition: headers do it; harmless */
             struct typedefent *te = xcalloc(1, sizeof *te);
@@ -2174,7 +2729,7 @@ static void parse_top(struct parser *ps, struct unit *u,
         reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
     struct type *base = parse_type_spec(ps, 1);
     if (!base)
-        diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                    "expected a type before %s", tok_describe(cur(ps)));
     ps->alignas_out = 0;   /* a top-level object carries no over-alignment slot;
                             * drop any _Alignas so it can't leak into the next decl */
@@ -2183,10 +2738,28 @@ static void parse_top(struct parser *ps, struct unit *u,
         advance(ps);
         return;
     }
+    /* GCC lets an attribute sit between the declaration specifiers and
+     * the declarator -- `extern int __attribute__((weak)) f(void);` --
+     * and that position is where `weak`, `noreturn` and `section`
+     * naturally belong, because they are about the entity being
+     * declared rather than about a pointer in the middle of its type.
+     * Real headers write it this way, so it is read here rather than
+     * refused; parse_stars still refuses the ones that reach it after a
+     * `*`, where there is nothing to carry them. */
+    if (cur(ps)->kind == TOK_KW_ATTRIBUTE)
+        parse_attributes(ps, &at);
+    /* Open the slot for this declaration's declarators, including the
+     * rewind below: an attribute after a `*` belongs to what is being
+     * declared. */
+    memset(&ps->attr_slot, 0, sizeof ps->attr_slot);
+    ps->attr_carry_on = 1;
     struct lexer fork = ps->lx;
     struct type *ty = parse_stars(ps, base);
+    take_carried(ps, &at);
     const char *name = NULL;
     int line = cur(ps)->line;
+    struct func *f;
+    int saved_vla_ok;
     if (cur(ps)->kind == TOK_IDENT) {
         name = cur(ps)->text;
         advance(ps);
@@ -2194,16 +2767,47 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (!name || cur(ps)->kind != TOK_LPAREN) {
         /* not a function: rewind and parse global declarators */
         ps->lx = fork;
-        for (;;) {
+        for (int first = 1;; first = 0) {
             const char *gname;
             int gline = cur(ps)->line;
             struct type *gt = parse_declarator(ps, base, &gname);
+            take_carried(ps, &at);
             if (!gname)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a name before %s",
                            tok_describe(cur(ps)));
+            if (gt->kind == TY_FUNC && first) {
+                /* a function whose declarator is parenthesized: it
+                 * returns a pointer to a function or to an array
+                 * (`void (*signal(int, void (*)(int)))(int)`) */
+                f = xcalloc(1, sizeof *f);
+                f->is_static = is_static;
+                f->is_weak = at.weak;
+                f->is_noreturn = at.noreturn;
+    f->fmt_kind = at.fmt_kind;
+    f->fmt_idx = at.fmt_idx;
+    f->fmt_first = at.fmt_first;
+                f->is_nothrow = at.nothrow;
+                f->ret_ty = gt->ret;
+                f->name = name = gname;
+                f->file = ps->lx.file;
+                f->line = line = gline;
+                f->seq = seq;
+                f->nparams = gt->nptypes;
+                for (int i = 0; i < gt->nptypes; i++) {
+                    f->param_tys[i] = gt->ptypes[i];
+                    f->params[i] = ps->fn_pnames[i];
+                    f->param_lines[i] = ps->fn_plines[i];
+                    f->param_cols[i] = ps->fn_pcols[i];
+                }
+                f->is_varargs = gt->is_varargs;
+                f->sret_first = gt->sret_first;
+                saved_vla_ok = ps->vla_ok;
+                ps->vla_ok = 1;
+                goto fn_tail;
+            }
             if (gt->kind == TY_FUNC)
-                diag_fatal(ps->lx.file, gline,
+                parse_error_line(ps, gline,
                            "a variable cannot have a function type — "
                            "did you mean a function pointer (*)?");
             parse_attributes(ps, &at); /* int x __attribute__((weak)) = ... */
@@ -2211,6 +2815,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                                             is_static, is_extern);
             parse_attributes(ps, &at); /* trailing: T x[] __attribute__((weak)) */
             g->is_weak = at.weak;
+            g->section = at.section;
             g->seq = seq;
             g->def_seq = seq;
             **gtail = g;
@@ -2224,17 +2829,23 @@ static void parse_top(struct parser *ps, struct unit *u,
         return;
     }
 
-    struct func *f = xcalloc(1, sizeof *f);
+    f = xcalloc(1, sizeof *f);
     /* 'extern' on a function is the default linkage — accept, ignore */
     f->is_static = is_static;
     f->is_weak = at.weak;   /* leading __attribute__((weak)) */
     f->is_noreturn = at.noreturn;
+    f->fmt_kind = at.fmt_kind;
+    f->fmt_idx = at.fmt_idx;
+    f->fmt_first = at.fmt_first;
+    f->is_nothrow = at.nothrow;
     f->ret_ty = ty;
     f->name = name;
     f->file = ps->lx.file;
     f->line = line;
     f->seq = seq;
     advance(ps); /* '(' */
+    saved_vla_ok = ps->vla_ok;
+    ps->vla_ok = 1;   /* parameters and body: VLAs allowed */
 
     if (cur(ps)->kind == TOK_KW_VOID) {
         /* "(void)" means no parameters; "(void *x)" is a parameter */
@@ -2249,19 +2860,18 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (cur(ps)->kind != TOK_RPAREN) {
         for (;;) {
             if (cur(ps)->kind == TOK_ELLIPSIS) {
-                if (f->nparams == 0)
-                    diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
-                               "'...' needs at least one named "
-                               "parameter before it");
+                /* (C23, and C++'s f(...): no named parameter before) */
                 f->is_varargs = 1;
                 advance(ps);
                 break;
             }
+            if (param_sret_attr(ps, f->nparams))
+                f->sret_first = 1;
             if (cur(ps)->kind == TOK_IDENT)
                 reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a parameter type before %s",
                            tok_describe(cur(ps)));
             const char *pname;
@@ -2271,13 +2881,15 @@ static void parse_top(struct parser *ps, struct unit *u,
             if (pt->kind == TY_FUNC)
                 pt = ty_ptr(pt);
             if (pt->kind == TY_VOID)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "a parameter cannot have type void");
             if (f->nparams >= MAX_PARAMS)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "more than %d parameters", MAX_PARAMS);
             f->param_tys[f->nparams] = pt;
             f->params[f->nparams] = pname; /* NULL fine in prototypes */
+            f->param_lines[f->nparams] = pname ? ps->decl_name_line : 0;
+            f->param_cols[f->nparams] = pname ? ps->decl_name_col : 0;
             f->nparams++;
             if (cur(ps)->kind != TOK_COMMA)
                 break;
@@ -2286,9 +2898,22 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
     expect(ps, TOK_RPAREN, "')'");
 
+fn_tail:
     /* trailing attributes: void f(void) __attribute__((noreturn/weak)) */
     parse_attributes(ps, &at);
     f->is_weak = at.weak;
+    /* Trailing is GCC's usual spelling for these two -- `void die(void)
+     * __attribute__((noreturn));` -- and they were parsed here and then
+     * dropped, so only the leading form ever reached the func node. */
+    f->is_noreturn = at.noreturn;
+    f->fmt_kind = at.fmt_kind;
+    f->fmt_idx = at.fmt_idx;
+    f->fmt_first = at.fmt_first;
+    f->is_nothrow = at.nothrow;
+    if (at.section)
+        parse_error_line(ps, line,
+                   "section attribute on function '%s' is not supported — "
+                   "every function is emitted into .text", name);
 
     if (cur(ps)->kind == TOK_SEMI) {
         advance(ps); /* prototype */
@@ -2302,7 +2927,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             advance(ps);
             struct type *dty = parse_stars(ps, base);
             if (cur(ps)->kind != TOK_IDENT)
-                diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a name before %s", tok_describe(cur(ps)));
             const char *dname = cur(ps)->text;
             int dline = cur(ps)->line;
@@ -2323,6 +2948,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                     g->params[i] = NULL;  /* unnamed prototype parameters */
                 }
                 g->is_varargs = fty->is_varargs;
+                g->sret_first = fty->sret_first;
                 **ftail = g;
                 *ftail = &g->next;
             } else {
@@ -2333,6 +2959,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                                                 is_static, is_extern);
                 parse_attributes(ps, &at);
                 g->is_weak = at.weak;
+                g->section = at.section;
                 g->seq = seq;
                 g->def_seq = seq;
                 **gtail = g;
@@ -2340,25 +2967,33 @@ static void parse_top(struct parser *ps, struct unit *u,
             }
         }
         expect(ps, TOK_SEMI, "';'");
+        ps->vla_ok = saved_vla_ok;
         (void)u;
         return;
     } else {
         if (cur(ps)->kind != TOK_LBRACE)
-            diag_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected '{' or ';' before %s",
                        tok_describe(cur(ps)));
         for (int i = 0; i < f->nparams; i++)
             if (!f->params[i])
-                diag_fatal(ps->lx.file, f->line,
+                parse_error_line(ps, f->line,
                            "parameter %d of '%s' needs a name in a "
                            "definition", i + 1, f->name);
         struct stmt *blk = parse_block(ps);
         f->body = blk->body;
         f->defined = 1;
     }
+    ps->vla_ok = saved_vla_ok;
     **ftail = f;
     *ftail = &f->next;
 }
+
+/* Syntax errors of the last parse_unit: the driver stops before semantic
+ * analysis when there were any, since the tree is not whole. */
+static int g_parse_errors;
+
+int parse_error_count(void) { return g_parse_errors; }
 
 struct unit *parse_unit(const char *file, const char *src)
 {
@@ -2368,17 +3003,33 @@ struct unit *parse_unit(const char *file, const char *src)
 
     ps.unit = u;
     g_fold_unit = u;          /* size_fold resolves this unit's enum constants */
+    ps.recover = NULL;        /* no recovery point until a loop sets one */
+    ps.nerrors = 0;
+    ps.prev_line = 0;
+    ps.prev_end_col = 0;
+    ps.semi_line = ps.semi_col = -1;
     ps.tags = NULL;
     ps.typedefs = NULL;
     ps.econst_tail = &u->econsts;
     ps.seq = 0;
     ps.alignas_out = 0;
+    ps.vla_ok = 0;            /* file scope */
     lex_init(&ps.lx, file, src);
     struct func **ftail = &u->funcs;
     struct global **gtail = &u->globals;
-    int seq = 0;
-    while (cur(&ps)->kind != TOK_EOF)
-        parse_top(&ps, u, &ftail, &gtail, seq++);
+    volatile int seq = 0;      /* written between setjmp and longjmp */
+    while (cur(&ps)->kind != TOK_EOF) {
+        jmp_buf jb, *save = ps.recover;
+        ps.recover = &jb;
+        if (!setjmp(jb))
+            parse_top(&ps, u, &ftail, &gtail, seq++);
+        else
+            resync(&ps, 1);
+        ps.recover = save;
+    }
+    g_parse_errors = ps.nerrors;
+    u->tags = ps.tags;            /* what a tool needs to answer questions */
+    u->typedefs = ps.typedefs;
     /* A translation unit of only data (a table of globals, no functions) is
      * valid C — EmbCC's own predef macro table is exactly that. An entirely
      * empty unit is legal too (a header-only .c, a fully #if'd-out file);

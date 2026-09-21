@@ -1,0 +1,14 @@
+/* <clocale> — the C header's names, in namespace std as well as at
+ * global scope. See <locale.h> for why there is exactly one locale
+ * here and why saying so is better than pretending. */
+#ifndef _LIBCXX_CLOCALE
+#define _LIBCXX_CLOCALE
+#include <locale.h>
+
+namespace std {
+using ::lconv;
+using ::setlocale;
+using ::localeconv;
+}
+
+#endif

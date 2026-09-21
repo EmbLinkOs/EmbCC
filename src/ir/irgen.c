@@ -1,12 +1,17 @@
 #include "ir.h"
+#include "irgen_int.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "../arch/aarch64/asm.h"
 #include "../driver/util.h"
+#include "../sema/ldfloat.h"
 #include "../sema/sema.h"
 #include "../sema/type.h"
+#include "../arch/target.h"
 
 /* The source line currently being lowered. gen_stmt updates it as it walks
  * the statement list, and gen_func resets it per function; emit() stamps it
@@ -14,9 +19,98 @@
  * offsets back to source lines. irgen runs one function at a time, single
  * threaded, so a file-scope cursor is sound. Off (-g absent) it is simply
  * ignored — nothing reads ir_ins.line. */
+static int gen_expr_inner(struct ir_func *fn, struct expr *e);
+/* The unit being lowered: string and symbol interning are unit-scoped,
+ * and irgen is single-threaded (see the note on g_cur_line). */
+static struct ir_unit *cur_unit;
 static int g_cur_line;
+/* The column within that line, from the expression being lowered (R3). A
+ * statement-granular location is enough for a line table; a diagnostic or a
+ * remark about one operand inside a long expression is not. */
+static int g_cur_col;
+/* Set while lowering something the compiler invented rather than something
+ * the programmer wrote: the prologue, a landing pad, a temporary's cleanup.
+ * The verifier allows these to carry no location. */
+static int g_synth;
 
-static struct ir_ins *emit(struct ir_func *fn)
+/* ---- the symbol table (ir.h) ----
+ *
+ * Interned by name: two instructions naming the same function share one
+ * entry, so a textual IR can say `@memcpy` and a reader can resolve it
+ * without a parse tree. Linear search -- a unit mentions tens of symbols,
+ * not thousands, and a hash here would cost more than it saves.
+ */
+static int sym_intern(struct ir_unit *u, const char *name, int is_func,
+                      int defined, int is_weak, int is_varargs,
+                      int sret_first, int is_nothrow)
+{
+    if (!name)
+        return -1;
+    for (int i = 0; i < u->nsyms; i++)
+        if (!strcmp(u->syms[i].name, name) && u->syms[i].is_func == is_func)
+            return i;
+    if (u->nsyms == u->capsyms) {
+        u->capsyms = u->capsyms ? u->capsyms * 2 : 32;
+        u->syms = xrealloc(u->syms, (size_t)u->capsyms * sizeof *u->syms);
+    }
+    struct ir_sym *s = &u->syms[u->nsyms];
+    s->name = name;
+    s->is_func = is_func;
+    s->defined = defined;
+    s->is_weak = is_weak;
+    s->is_varargs = is_varargs;
+    s->sret_first = sret_first;
+    s->is_nothrow = is_nothrow;
+    return u->nsyms++;
+}
+
+int ir_sym_func(struct ir_unit *u, struct func *f)
+{
+    if (!f)
+        return -1;
+    return sym_intern(u, f->name, 1, f->has_defn, f->is_weak, f->is_varargs,
+                      f->sret_first, f->is_nothrow);
+}
+
+int ir_sym_global(struct ir_unit *u, struct global *g)
+{
+    if (!g)
+        return -1;
+    return sym_intern(u, g->name, 0, g->defined, g->is_weak, 0, 0, 0);
+}
+
+/* Recompute the per-slot descriptors from the function's types. Called at
+ * irgen, and again by the inliner after it extends the slot arrays -- the
+ * two must never disagree (ir.h). */
+void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
+{
+    /* The COUNT is passed, never read from `f`: the AST's nvars stopped
+     * being authoritative when ir_func took ownership of it, so sizing this
+     * array from f->nvars leaves it short of what the IR indexes after
+     * inlining -- reading past the end with no crash and no failing test,
+     * only quietly different code. The byte-identity check caught it; the
+     * suite did not. */
+    size_t n = (size_t)(nvars > 0 ? nvars : 1);
+    fn->locals = xrealloc(fn->locals, n * sizeof *fn->locals);
+    memset(fn->locals, 0, n * sizeof *fn->locals);
+    for (int i = 0; i < nvars; i++) {
+        struct type *t = f->var_tys[i];
+        struct ir_local *L = &fn->locals[i];
+        if (!t)
+            continue;
+        L->size = ty_size(t);
+        L->align = ty_align(t);
+        L->user_align = f->var_aligns ? f->var_aligns[i] : 0;
+        L->is_volatile = t->is_volatile;
+        L->is_ldouble = t->kind == TY_LDOUBLE;
+        L->is_int128 = t->kind == TY_INT128;
+        L->is_int_or_ptr = ty_is_integer(t) || t->kind == TY_PTR;
+        L->is_scalar_int_or_ptr =
+            L->is_int_or_ptr && (L->size == 4 || L->size == 8);
+    }
+}
+
+struct ir_ins *emit(struct ir_func *fn)
 {
     if (fn->nins == fn->cap) {
         fn->cap = fn->cap ? fn->cap * 2 : 16;
@@ -31,28 +125,38 @@ static struct ir_ins *emit(struct ir_func *fn)
     memset(i, 0, sizeof *i);
     i->op = IR_CONST;
     i->line = g_cur_line;
+    i->col = g_cur_col;
+    i->synth = g_synth;
     i->dst = i->a = i->b = -1;
     i->w = 4;
     i->size = 4;
     i->sign = 1;
     i->pred = B_ADD;
     i->label = -1;
+    i->callee_sym = i->glob_sym = -1;
     return i;
 }
 
-static int new_temp(struct ir_func *fn) { return fn->nvregs++; }
-static int new_label(struct ir_func *fn) { return fn->nlabels++; }
+int new_temp(struct ir_func *fn) { return fn->nvregs++; }
+int new_label(struct ir_func *fn) { return fn->nlabels++; }
 
-static int ty_w(const struct type *t) { return ty_wide(t) ? 8 : 4; }
+/* A value's width class: 4 or 8, and 16 for a long double — the only value
+ * wider than a register. Its temps get 16-byte slots, and every op that
+ * produces one says w = 16 (codegen sizes the slot from that). */
+static int ty_w(const struct type *t)
+{
+    if (t->kind == TY_LDOUBLE || t->kind == TY_INT128) return 16;
+    return ty_wide(t) ? 8 : 4;
+}
 
-static void emit_label(struct ir_func *fn, int label)
+void emit_label(struct ir_func *fn, int label)
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_LABEL;
     i->label = label;
 }
 
-static void emit_jmp(struct ir_func *fn, int label)
+void emit_jmp(struct ir_func *fn, int label)
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_JMP;
@@ -74,7 +178,7 @@ static int label_idx(struct ir_func *fn, const char *name, int line)
         if (strcmp(g_labels[i].name, name) == 0)
             return i;
     if (g_nlabels_used >= IRGEN_MAX_LABELS)
-        diag_fatal(fn->src->file, line, "too many labels in one function");
+        diag_fatal(fn->file, line, "too many labels in one function");
     g_labels[g_nlabels_used].name = name;
     g_labels[g_nlabels_used].label = new_label(fn);
     g_labels[g_nlabels_used].defined = 0;
@@ -82,7 +186,7 @@ static int label_idx(struct ir_func *fn, const char *name, int line)
     return g_nlabels_used++;
 }
 
-static void emit_brz(struct ir_func *fn, int v, int w, int label)
+void emit_brz(struct ir_func *fn, int v, int w, int label)
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_BRZ;
@@ -91,7 +195,7 @@ static void emit_brz(struct ir_func *fn, int v, int w, int label)
     i->label = label;
 }
 
-static void emit_brnz(struct ir_func *fn, int v, int w, int label)
+void emit_brnz(struct ir_func *fn, int v, int w, int label)
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_BRNZ;
@@ -103,8 +207,12 @@ static void emit_brnz(struct ir_func *fn, int v, int w, int label)
 /* A floating constant is just its BIT PATTERN moved into the slot: a
  * float temp's slot holds raw bits, so no xmm and no constant pool are
  * involved. Same reason loads and stores need no float path. */
+static int emit_ldconst(struct ir_func *fn, const struct ldf *v);
+
 static int emit_fconst(struct ir_func *fn, double d, int w)
 {
+    if (w == 16)                 /* long double: exact from the double */
+        return emit_ldconst(fn, ldf_from_double(d));
     long bits = 0;
     if (w == 8) {
         double v = d;
@@ -123,7 +231,7 @@ static int emit_fconst(struct ir_func *fn, double d, int w)
     return i->dst;
 }
 
-static int emit_const(struct ir_func *fn, long imm, int w)
+int emit_const(struct ir_func *fn, long imm, int w)
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_CONST;
@@ -134,7 +242,7 @@ static int emit_const(struct ir_func *fn, long imm, int w)
 }
 
 /* dst = a op b at width w; returns dst */
-static int emit_bin(struct ir_func *fn, enum ir_op op, int a, int b,
+int emit_bin(struct ir_func *fn, enum ir_op op, int a, int b,
                     int w, int sign)
 {
     struct ir_ins *i = emit(fn);
@@ -189,12 +297,13 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
     struct ir_ins *i = emit(fn);
     i->op = IR_GADDR;
     i->glob = g;
+    i->glob_sym = ir_sym_global(cur_unit, g);
     i->dst = new_temp(fn);
     return i->dst;
 }
 
 /* Typed load/store through an address temp. */
-static int emit_load(struct ir_func *fn, int addr, const struct type *t)
+int emit_load(struct ir_func *fn, int addr, const struct type *t)
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_LOAD;
@@ -207,7 +316,7 @@ static int emit_load(struct ir_func *fn, int addr, const struct type *t)
     return i->dst;
 }
 
-static void emit_store(struct ir_func *fn, int addr, int val,
+void emit_store(struct ir_func *fn, int addr, int val,
                        const struct type *t)
 {
     struct ir_ins *i = emit(fn);
@@ -218,7 +327,7 @@ static void emit_store(struct ir_func *fn, int addr, int val,
     i->vol = t->is_volatile;
 }
 
-static void emit_mov(struct ir_func *fn, int dst, int src)
+void emit_mov(struct ir_func *fn, int dst, int src)
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_MOV;
@@ -232,11 +341,137 @@ static void emit_mov(struct ir_func *fn, int dst, int src)
  * field to the top of the value class then back down — arithmetic for a
  * signed field so its sign bit fills — the classic two-shift extraction,
  * immune to neighbouring fields packed into the same unit. */
+/* a 32-bit value class zero-extended to 64 */
+static int zext64(struct ir_func *fn, int v)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = IR_EXT;
+    i->a = v;
+    i->size = 4;
+    i->sign = 0;
+    i->w = 8;
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+/* A packed struct's field across its unit (m->bf_bytes): its bytes read
+ * one at a time, as a 64-bit value with byte k at bits 8k. */
+static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
+{
+    struct type *u8 = ty_base(TY_CHAR, 1);
+    int raw = emit_const(fn, 0, 8);
+    for (int k = 0; k < m->bf_bytes && k < 8; k++) {
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+                  : addr;
+        int b = zext64(fn, emit_load(fn, a, u8));
+        if (k)
+            b = emit_bin(fn, IR_SHL, b, emit_const(fn, 8 * k, 4), 8, 0);
+        raw = emit_bin(fn, IR_OR, raw, b, 8, 0);
+    }
+    return raw;
+}
+
+/* A packed field across its unit that 8 bytes do not hold (a long long's
+ * at bit 1..7 of its first byte takes 9, an __int128's 16 or 17): worked
+ * in 128 bits — bytes [from, n) as one value, byte k at bit 8(k - from).
+ * A 17th byte, past what 128 bits hold, is read and merged apart. */
+static int bf_wide_bytes(struct ir_func *fn, int addr, int from, int n)
+{
+    struct type *u8 = ty_base(TY_CHAR, 1), *u128 = ty_base(TY_INT128, 1);
+    int raw = emit_const(fn, 0, 16);
+    for (int k = from; k < n; k++) {
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+                  : addr;
+        int b = gen_convert(fn, emit_load(fn, a, u8), u8, u128);
+        if (k > from)
+            b = emit_bin(fn, IR_SHL, b, emit_const(fn, 8 * (k - from), 4), 16,
+                         0);
+        raw = emit_bin(fn, IR_OR, raw, b, 16, 0);
+    }
+    return raw;
+}
+
+static int bf_wide_load(struct ir_func *fn, int addr, const struct member *m)
+{
+    const struct type *bt = m->ty;
+    int n = m->bf_bytes, off = m->bit_off, wd = m->bit_width;
+    int v = bf_wide_bytes(fn, addr, 0, n < 16 ? n : 16);
+    if (off)
+        v = emit_bin(fn, IR_SHR, v, emit_const(fn, off, 4), 16, 0);
+    if (n == 17) {                        /* (then off >= 1) */
+        int hi = bf_wide_bytes(fn, addr, 16, 17);
+        v = emit_bin(fn, IR_OR, v, emit_bin(fn, IR_SHL, hi,
+                                           emit_const(fn, 128 - off, 4), 16, 0),
+                     16, 0);
+    }
+    if (wd < 128) {
+        v = emit_bin(fn, IR_SHL, v, emit_const(fn, 128 - wd, 4), 16, 0);
+        v = emit_bin(fn, IR_SHR, v, emit_const(fn, 128 - wd, 4), 16,
+                     ty_signed_int(bt));
+    }
+    if (bt->kind == TY_INT128)
+        return v;
+    return gen_convert(fn, v, ty_base(TY_INT128, !ty_signed_int(bt)), bt);
+}
+
+static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
+                         int val)
+{
+    const struct type *bt = m->ty;
+    int n = m->bf_bytes, off = m->bit_off, wd = m->bit_width;
+    struct type *u8 = ty_base(TY_CHAR, 1), *u128 = ty_base(TY_INT128, 1);
+    int v = bt->kind == TY_INT128 ? val : gen_convert(fn, val, bt, u128);
+    int ones = emit_const(fn, -1, 16);
+    int fm = wd < 128 ? emit_bin(fn, IR_SHR, ones,
+                                 emit_const(fn, 128 - wd, 4), 16, 0)
+                      : ones;
+    v = emit_bin(fn, IR_AND, v, fm, 16, 0);
+    int lo = bf_wide_bytes(fn, addr, 0, n < 16 ? n : 16);
+    int pl = off ? emit_bin(fn, IR_SHL, fm, emit_const(fn, off, 4), 16, 0)
+                 : fm;
+    int nv = off ? emit_bin(fn, IR_SHL, v, emit_const(fn, off, 4), 16, 0) : v;
+    lo = emit_bin(fn, IR_OR, emit_bin(fn, IR_AND, lo,
+                                      emit_bin(fn, IR_XOR, pl, ones, 16, 0),
+                                      16, 0),
+                  nv, 16, 0);
+    for (int k = 0; k < n && k < 16; k++) {
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+                  : addr;
+        int b = k ? emit_bin(fn, IR_SHR, lo, emit_const(fn, 8 * k, 4), 16, 0)
+                  : lo;
+        emit_store(fn, a, gen_convert(fn, b, u128, u8), u8);
+    }
+    if (n == 17) {
+        int hi = bf_wide_bytes(fn, addr, 16, 17);
+        int sh = emit_const(fn, 128 - off, 4);
+        int hm = emit_bin(fn, IR_SHR, fm, sh, 16, 0);
+        hi = emit_bin(fn, IR_OR, emit_bin(fn, IR_AND, hi,
+                                          emit_bin(fn, IR_XOR, hm, ones, 16, 0),
+                                          16, 0),
+                      emit_bin(fn, IR_SHR, v, sh, 16, 0), 16, 0);
+        emit_store(fn, emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, 8), 8, 0),
+                   gen_convert(fn, hi, u128, u8), u8);
+    }
+    return bf_wide_load(fn, addr, m);
+}
+
 static int bf_load(struct ir_func *fn, int addr, const struct member *m)
 {
     const struct type *bt = m->ty;
-    int w = ty_wide(bt) ? 8 : 4;          /* value-class width, bytes */
+    int w = bt->kind == TY_INT128 ? 16 : ty_wide(bt) ? 8 : 4; /* class, bytes */
     int vb = w * 8;
+    if (m->bf_bytes > 8 || (m->bf_bytes && bt->kind == TY_INT128))
+        return bf_wide_load(fn, addr, m);
+    if (m->bf_bytes) {
+        /* the bytes, then the same two shifts in 64 bits */
+        int v = bf_bytes_load(fn, addr, m);
+        int lsh = 64 - m->bit_off - m->bit_width;
+        if (lsh)
+            v = emit_bin(fn, IR_SHL, v, emit_const(fn, lsh, 4), 8, 0);
+        v = emit_bin(fn, IR_SHR, v, emit_const(fn, 64 - m->bit_width, 4), 8,
+                     ty_signed_int(bt));
+        return v;                 /* (a 32-bit class reads the low half) */
+    }
     /* load the raw storage unit UNSIGNED, so no stray sign extension */
     int v = emit_load(fn, addr, ty_base(bt->kind, 1));
     int lsh = vb - m->bit_off - m->bit_width;
@@ -257,7 +492,55 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
 {
     const struct type *bt = m->ty;
     int w = ty_wide(bt) ? 8 : 4;
+    if (m->bf_bytes > 8 || (m->bf_bytes && bt->kind == TY_INT128))
+        return bf_wide_store(fn, addr, m, val);
+    if (m->bf_bytes) {
+        /* merge in 64 bits, then write each byte back */
+        unsigned long fmask = m->bit_width >= 64
+                            ? ~0UL : (((unsigned long)1 << m->bit_width) - 1);
+        unsigned long placed = fmask << m->bit_off;
+        int old = bf_bytes_load(fn, addr, m);
+        int v64 = w == 8 ? val : zext64(fn, val);
+        int cleared = emit_bin(fn, IR_AND, old,
+                               emit_const(fn, (long)~placed, 8), 8, 0);
+        int low = emit_bin(fn, IR_AND, v64, emit_const(fn, (long)fmask, 8),
+                           8, 0);
+        if (m->bit_off)
+            low = emit_bin(fn, IR_SHL, low, emit_const(fn, m->bit_off, 4), 8,
+                           0);
+        int merged = emit_bin(fn, IR_OR, cleared, low, 8, 0);
+        struct type *u8 = ty_base(TY_CHAR, 1);
+        for (int k = 0; k < m->bf_bytes && k < 8; k++) {
+            int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+                      : addr;
+            int b = k ? emit_bin(fn, IR_SHR, merged,
+                                 emit_const(fn, 8 * k, 4), 8, 0)
+                      : merged;
+            emit_store(fn, a, b, u8);
+        }
+        return bf_load(fn, addr, m);
+    }
     struct type *ut = ty_base(bt->kind, 1);
+    if (bt->kind == TY_INT128) {
+        /* the masks in 128 bits, from all ones: fmask = ~0 >> (128 - width) */
+        int ones = emit_const(fn, -1, 16);
+        int fm = m->bit_width < 128
+                 ? emit_bin(fn, IR_SHR, ones,
+                            emit_const(fn, 128 - m->bit_width, 4), 16, 0)
+                 : ones;
+        int pl = m->bit_off ? emit_bin(fn, IR_SHL, fm,
+                                       emit_const(fn, m->bit_off, 4), 16, 0)
+                            : fm;
+        int old = emit_load(fn, addr, ut);
+        int cleared = emit_bin(fn, IR_AND, old,
+                               emit_bin(fn, IR_XOR, pl, ones, 16, 0), 16, 0);
+        int low = emit_bin(fn, IR_AND, val, fm, 16, 0);
+        if (m->bit_off)
+            low = emit_bin(fn, IR_SHL, low, emit_const(fn, m->bit_off, 4), 16,
+                           0);
+        emit_store(fn, addr, emit_bin(fn, IR_OR, cleared, low, 16, 0), ut);
+        return bf_load(fn, addr, m);
+    }
     unsigned long fmask = m->bit_width >= 64
                         ? ~0UL : (((unsigned long)1 << m->bit_width) - 1);
     unsigned long placed = fmask << m->bit_off;
@@ -282,8 +565,10 @@ static void store_init_leaf(struct ir_func *fn, int at,
 {
     if (ie->bit_width) {
         struct member m;
+        memset(&m, 0, sizeof m);
         m.name = NULL; m.ty = ie->ty; m.off = 0;
         m.is_bitfield = 1; m.bit_off = ie->bit_off; m.bit_width = ie->bit_width;
+        m.bf_bytes = ie->bf_bytes;
         bf_store(fn, at, &m, v);
     } else if (ie->ty->kind == TY_STRUCT) {
         struct ir_ins *mm = emit(fn);
@@ -301,7 +586,7 @@ static int expr_is_bitfield(const struct expr *e)
     return e->kind == EXPR_MEMBER && e->memb && e->memb->is_bitfield;
 }
 
-static int emit_cmp(struct ir_func *fn, enum binop pred, int a, int b,
+int emit_cmp(struct ir_func *fn, enum binop pred, int a, int b,
                     int w, int sign)
 {
     struct ir_ins *i = emit(fn);
@@ -315,97 +600,89 @@ static int emit_cmp(struct ir_func *fn, enum binop pred, int a, int b,
     return i->dst;
 }
 
-static int gen_expr(struct ir_func *fn, struct expr *e);
+int gen_expr(struct ir_func *fn, struct expr *e);
 static int gen_complit(struct ir_func *fn, struct expr *e);
+int gen_convert(struct ir_func *fn, int v, const struct type *from,
+                       const struct type *to);
 struct loopctx;
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop);
 static int gen_stmtexpr(struct ir_func *fn, struct expr *e);
+int gen_expr(struct ir_func *fn, struct expr *e);
 
-/* va_arg(ap, T) for an INTEGER-class T (SysV). ap's value is a pointer to
- * a __va_list_tag { gp_offset u32, fp_offset u32, overflow_arg_area ptr,
- * reg_save_area ptr }. If gp_offset < 48 the argument sits in the register
- * save area at reg_save_area + gp_offset and gp_offset advances by 8;
- * otherwise it is next in the overflow area, which advances by 8. */
-static int gen_va_arg(struct ir_func *fn, struct expr *e)
+/* ---- variable length arrays ---- */
+
+/* sizeof t as a value: a VLA's from its size slot, anything else a constant */
+static int type_size_val(struct ir_func *fn, const struct type *t)
 {
-    struct type *rt = e->ty;
-    struct type *u32 = ty_base(TY_INT, 1);
-    struct type *ptr = ty_base(TY_LONG, 1); /* an 8-byte slot */
-    int ap = gen_expr(fn, e->lhs);          /* pointer to the tag */
+    if (ty_is_vla(t))
+        return emit_ldvar(fn, t->vla_size, ty_base(TY_LONG, 1));
+    return emit_const(fn, ty_size(t), 8);
+}
 
-    int a_ova = emit_bin(fn, IR_ADD, ap, emit_const(fn, 8, 8), 8, 1);
-    int a_rsa = emit_bin(fn, IR_ADD, ap, emit_const(fn, 16, 8), 8, 1);
+/* Compute the byte size of every VLA in a variably modified type, innermost
+ * first, into its slot — where the declaration (or type name) is reached, so
+ * a declaration in a loop re-reads its lengths each time round. */
+static void vla_eval(struct ir_func *fn, struct type *t)
+{
+    if (!t || (t->kind != TY_PTR && t->kind != TY_ARRAY))
+        return;
+    vla_eval(fn, t->pointee);
+    if (!ty_is_vla(t))
+        return;
+    int n = gen_expr(fn, t->vla_len);
+    int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), 8, 1);
+    emit_stvar(fn, t->vla_size, sz, ty_base(TY_LONG, 1));
+}
 
-    /* SSE class (float/double): the SysV register save area lays the eight xmm
-     * regs AFTER the six GP regs, so fp_offset (at ap+4) runs 48..176 in strides
-     * of 16 (each xmm slot is 16 bytes, of which we read the low 8 = a double).
-     * A variadic float arg is promoted to double, so the overflow slot is 8. */
-    if (ty_is_float(rt)) {
-        struct type *dbl = ty_base(TY_DOUBLE, 0);
-        int a_fp = emit_bin(fn, IR_ADD, ap, emit_const(fn, 4, 8), 8, 1);
-        int fp = emit_load(fn, a_fp, u32);      /* fp_offset (at ap+4) */
-        int in_reg = emit_cmp(fn, B_LT, fp, emit_const(fn, 176, 4), 4, 0);
-        int addr = new_temp(fn);
-        int l_over = new_label(fn), l_done = new_label(fn);
-        emit_brz(fn, in_reg, 4, l_over);        /* fp_offset >= 176 -> overflow */
-        /* register save area: addr = reg_save_area + fp_offset; fp_offset += 16 */
-        int rsa = emit_load(fn, a_rsa, ptr);
-        emit_mov(fn, addr, emit_bin(fn, IR_ADD, rsa, fp, 8, 1));
-        emit_store(fn, a_fp,
-                   emit_bin(fn, IR_ADD, fp, emit_const(fn, 16, 4), 4, 0), u32);
-        emit_jmp(fn, l_done);
-        /* overflow area: addr = overflow_arg_area; advance it by 8 */
-        emit_label(fn, l_over);
-        int ova = emit_load(fn, a_ova, ptr);
-        emit_mov(fn, addr, ova);
-        emit_store(fn, a_ova,
-                   emit_bin(fn, IR_ADD, ova, emit_const(fn, 8, 8), 8, 1), ptr);
-        emit_label(fn, l_done);
-        int v = emit_load(fn, addr, dbl);       /* the value is a promoted double */
-        if (rt->kind == TY_FLOAT) {             /* va_arg(ap,float): narrow it */
-            struct ir_ins *cv = emit(fn);
-            cv->op = IR_F2F; cv->a = v; cv->size = 8; cv->w = 4;
-            cv->dst = new_temp(fn);
-            return cv->dst;
-        }
-        return v;
+/* The VLA declarations whose scope encloses the statement being generated,
+ * outermost first: the slot the stack pointer was saved in just before each
+ * one's allocation, and the statements after it (its scope, for goto). */
+struct vla_scope { int sp_slot; struct stmt *decl; };
+static struct vla_scope g_vla[64];
+static int g_nvla;
+
+/* Leaving the scopes [depth, g_nvla): restore the stack pointer saved before
+ * the outermost of them, which releases all of them. Emits nothing when
+ * none is open. The textual scopes stay open — the caller pops them. */
+static void vla_release(struct ir_func *fn, int depth)
+{
+    if (g_nvla <= depth)
+        return;
+    int sp = emit_ldvar(fn, g_vla[depth].sp_slot, ty_base(TY_LONG, 1));
+    struct ir_ins *i = emit(fn);   /* operands first: emit() appends */
+    i->op = IR_SPRESTORE;
+    i->a = sp;
+}
+
+/* Is label `name` defined anywhere in statement list s (nested included)? */
+static int stmts_define_label(const struct stmt *s, const char *name)
+{
+    for (; s; s = s->next) {
+        if (s->kind == STMT_LABEL && strcmp(s->name, name) == 0)
+            return 1;
+        if (stmts_define_label(s->body, name) ||
+            stmts_define_label(s->thn, name) ||
+            stmts_define_label(s->els, name))
+            return 1;
     }
-
-    int gp = emit_load(fn, ap, u32);        /* gp_offset (at ap+0) */
-    int in_reg = emit_cmp(fn, B_LT, gp, emit_const(fn, 48, 4), 4, 0);
-
-    int addr = new_temp(fn);
-    int l_over = new_label(fn), l_done = new_label(fn);
-    emit_brz(fn, in_reg, 4, l_over);        /* gp_offset >= 48 -> overflow */
-
-    /* register save area: addr = reg_save_area + gp_offset; gp_offset += 8 */
-    int rsa = emit_load(fn, a_rsa, ptr);
-    emit_mov(fn, addr, emit_bin(fn, IR_ADD, rsa, gp, 8, 1));
-    emit_store(fn, ap, emit_bin(fn, IR_ADD, gp, emit_const(fn, 8, 4), 4, 0),
-               u32);
-    emit_jmp(fn, l_done);
-
-    /* overflow area: addr = overflow_arg_area; advance it by 8 */
-    emit_label(fn, l_over);
-    int ova = emit_load(fn, a_ova, ptr);
-    emit_mov(fn, addr, ova);
-    emit_store(fn, a_ova, emit_bin(fn, IR_ADD, ova, emit_const(fn, 8, 8),
-                                   8, 1), ptr);
-
-    emit_label(fn, l_done);
-    return emit_load(fn, addr, rt);
+    return 0;
 }
 
 /* The address of an lvalue (or of a struct-typed expression — struct
  * "values" are represented by their address, since sema bars them from
  * every value context). */
-static int gen_addr(struct ir_func *fn, struct expr *e)
+int gen_addr(struct ir_func *fn, struct expr *e)
 {
     switch (e->kind) {
     case EXPR_VAR:
         if (e->gref)
             return emit_gaddr(fn, e->gref);
+        if (ty_is_vla(e->undecayed ? e->undecayed : e->ty))
+            /* a VLA's slot holds the address of its storage */
+            return emit_ldvar(fn, e->var_index,
+                              ty_ptr(e->undecayed ? e->undecayed->pointee
+                                                  : e->ty->pointee));
         {
             struct ir_ins *i = emit(fn);
             i->op = IR_ADDR;
@@ -426,12 +703,16 @@ static int gen_addr(struct ir_func *fn, struct expr *e)
     case EXPR_COMPLIT:
         return gen_complit(fn, e);
     default:
-        fprintf(stderr, "embcc: internal: address of a non-lvalue\n");
-        exit(1);
+        /* a struct value that is no lvalue (a call's result, `?:`, a
+         * comma or an assignment): gen_expr's value is its address —
+         * `f().m` reads a member of it */
+        if (e->ty && e->ty->kind == TY_STRUCT)
+            return gen_expr(fn, e);
+        internal_error("address of a non-lvalue");
     }
 }
 
-static int gen_expr(struct ir_func *fn, struct expr *e);
+int gen_expr(struct ir_func *fn, struct expr *e);
 
 /* A compound literal `(type){ init }`: clear its synthesized slot, place the
  * flattened initializer leaves (zero-fill + last-write-wins, like a declared
@@ -463,7 +744,6 @@ static int gen_complit(struct ir_func *fn, struct expr *e)
 
 /* The unit being generated — for the string table. One compilation per
  * process, so a file-scope current-unit pointer is honest. */
-static struct ir_unit *cur_unit;
 
 /* Intern a string into the unit's .rodata pool, returning its index.
  * Deduping means a literal shared by code and a global initializer lands
@@ -490,6 +770,20 @@ int ir_intern_string(struct ir_unit *iu, const char *bytes, int len)
 static int intern_str(const char *bytes, int len)
 {
     return ir_intern_string(cur_unit, bytes, len);
+}
+
+/* A long double constant: 16 bytes in the target's format (x87 extended or
+ * binary128), too wide for IR_CONST's 64-bit immediate — so it lives in
+ * .rodata like a string and is loaded from there. */
+static int emit_ldconst(struct ir_func *fn, const struct ldf *v)
+{
+    char *b = xmalloc(16);
+    ldf_encode(v, ldf_target_fmt(), (unsigned char *)b);
+    struct ir_ins *i = emit(fn);
+    i->op = IR_STRADDR;
+    i->label = intern_str(b, 16);
+    i->dst = new_temp(fn);
+    return emit_load(fn, i->dst, ty_base(TY_LDOUBLE, 0));
 }
 
 /* !x and conditions want "is zero" — comparison against a zero of the
@@ -531,6 +825,20 @@ static int emit_tobool(struct ir_func *fn, int v, const struct type *from)
     return i->dst;
 }
 
+/* A value about to be TESTED (a condition, !, && or ||): a floating one is
+ * compared with 0.0 as a float — -0.0 is false, which its bit pattern is
+ * not, and a long double is too wide to test as bits at all. Returns the
+ * temp to branch on, and its width in *w. */
+static int truth(struct ir_func *fn, int v, const struct type *t, int *w)
+{
+    if (ty_is_float(t) || t->kind == TY_INT128) {   /* (no 16-byte branch) */
+        *w = 4;
+        return emit_tobool(fn, v, t);
+    }
+    *w = ty_w(t);
+    return v;
+}
+
 /* An I2F/F2I instruction, spelled out because unsigned-64 conversions build
  * several by hand. `a` is the source vreg. */
 static int emit_i2f(struct ir_func *fn, int a, int srcw, int dstw)
@@ -556,12 +864,15 @@ static int emit_f2i(struct ir_func *fn, int a, int srcw, int dstw)
  * avoids a double rounding. */
 static int gen_u64_to_float(struct ir_func *fn, int v, int tsize)
 {
+    /* In long double the halves and the sum are all exact (64-bit or wider
+     * significand), so compute there directly. */
+    int cw = tsize == 16 ? 16 : 8;
     int hi = emit_bin(fn, IR_SHR, v, emit_const(fn, 32, 4), 8, 0);      /* v >> 32 */
     int lo = emit_bin(fn, IR_AND, v, emit_const(fn, 0xffffffffL, 8), 8, 1);
-    int hd = emit_i2f(fn, hi, 8, 8);
-    int ld = emit_i2f(fn, lo, 8, 8);
-    int hs = emit_fbin(fn, IR_MUL, hd, emit_fconst(fn, 4294967296.0, 8), 8);
-    int res = emit_fbin(fn, IR_ADD, hs, ld, 8);
+    int hd = emit_i2f(fn, hi, 8, cw);
+    int ld = emit_i2f(fn, lo, 8, cw);
+    int hs = emit_fbin(fn, IR_MUL, hd, emit_fconst(fn, 4294967296.0, cw), cw);
+    int res = emit_fbin(fn, IR_ADD, hs, ld, cw);
     if (tsize == 4) {   /* narrow the exact double to float: one rounding */
         struct ir_ins *nf = emit(fn);
         nf->op = IR_F2F; nf->a = res; nf->size = 8; nf->w = 4;
@@ -598,7 +909,7 @@ static int gen_float_to_u64(struct ir_func *fn, int v, int fsize)
 /* Change a temp's representation between type classes: truncating to a
  * narrow type re-extends from its low bytes; widening extends per the
  * SOURCE's signedness. Free conversions return the same temp. */
-static int gen_convert(struct ir_func *fn, int v, const struct type *from,
+int gen_convert(struct ir_func *fn, int v, const struct type *from,
                        const struct type *to)
 {
     int fsize = ty_size(from), tsize = ty_size(to);
@@ -607,6 +918,40 @@ static int gen_convert(struct ir_func *fn, int v, const struct type *from,
     /* To _Bool is a normalize-to-0/1, not a truncation. */
     if (to->kind == TY_BOOL && from->kind != TY_BOOL)
         return emit_tobool(fn, v, from);
+
+    /* __int128 (w 16): to or from it, an IR_EXT at width 16 (extend) or
+     * from a 16-byte value (truncate), or an I2F/F2I of size/width 16 */
+    if (from->kind == TY_INT128 || to->kind == TY_INT128) {
+        struct ir_ins *i;
+        if (from->kind == TY_INT128 && to->kind == TY_INT128)
+            return v;
+        if (ty_is_float(to) || ty_is_float(from)) {
+            i = emit(fn);
+            i->op = ty_is_float(to) ? IR_I2F : IR_F2I;
+            i->a = v;
+            i->size = ty_is_float(to) ? 16 : fsize;
+            i->w = ty_is_float(to) ? tsize : 16;
+            i->sign = ty_is_float(to) ? !from->is_unsigned : !to->is_unsigned;
+            i->dst = new_temp(fn);
+            return i->dst;
+        }
+        i = emit(fn);
+        i->op = IR_EXT;
+        i->a = v;
+        if (to->kind == TY_INT128) {
+            /* extend: the source as its class holds it */
+            i->size = fw == 8 ? 8 : 4;
+            i->sign = fsize <= 2 ? 1 : ty_signed_int(from);
+            i->w = 16;
+        } else {
+            /* truncate: the low bytes, re-extended as the target */
+            i->size = tsize;
+            i->sign = ty_signed_int(to);
+            i->w = tw;
+        }
+        i->dst = new_temp(fn);
+        return i->dst;
+    }
 
     /* Floating conversions are real instructions, not reinterpretations
      * — the bit patterns have nothing in common. */
@@ -702,12 +1047,460 @@ static int gen_convert(struct ir_func *fn, int v, const struct type *from,
     return v;
 }
 
-static int gen_expr(struct ir_func *fn, struct expr *e)
+/* ---- GCC atomic builtins -------------------------------------------------
+ *
+ * One lowering for both targets, with the ordering differences made
+ * explicit. Every builtin is treated as seq_cst whatever its memory-order
+ * argument says — always correct, since a stronger order is always allowed —
+ * and the order arguments are not evaluated (they are constants in practice).
+ *
+ * x86-64 is TSO: an aligned load or store is already atomic and acquire /
+ * release, a locked read-modify-write is a full barrier, and only a seq_cst
+ * store needs a trailing mfence. aarch64 orders nothing by default, so it
+ * uses the fence-based mapping: a barrier after an atomic load (acquire),
+ * before and after an atomic store (release, then seq_cst), and codegen
+ * brackets each exclusive-access loop with barriers of its own.
+ */
+
+static int atomic_arm(void) { return target_get() == TARGET_AARCH64; }
+
+/* The machine exchange leaves a narrow result zero-extended; re-extend it as
+ * its type says — a signed char object holding -1 must read back as -1 — and
+ * for an OP_fetch result also truncate it to the object's width. */
+static int atomic_result(struct ir_func *fn, int v, const struct type *t)
+{
+    if (ty_size(t) >= 4)
+        return v;
+    struct ir_ins *x = emit(fn);
+    x->op = IR_EXT;
+    x->a = v;
+    x->size = ty_size(t);
+    x->sign = ty_signed_int(t);
+    x->w = ty_w(t);
+    x->dst = new_temp(fn);
+    return x->dst;
+}
+
+/* An atomic access is never merged with another or removed: vol says so to
+ * the optimizer (and changes nothing codegen emits). */
+static int atomic_load(struct ir_func *fn, int addr, const struct type *t)
+{
+    int v = emit_load(fn, addr, t);
+    fn->ins[fn->nins - 1].vol = 1;
+    if (atomic_arm())
+        emit(fn)->op = IR_FENCE;          /* acquire */
+    return v;
+}
+
+static void atomic_store(struct ir_func *fn, int addr, int val,
+                         const struct type *t)
+{
+    if (atomic_arm())
+        emit(fn)->op = IR_FENCE;          /* release */
+    emit_store(fn, addr, val, t);
+    fn->ins[fn->nins - 1].vol = 1;
+    emit(fn)->op = IR_FENCE;              /* seq_cst: published before what follows */
+}
+
+static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
+                      int val, const struct type *t)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = op;
+    i->a = addr;
+    i->b = val;
+    i->imm = opc;
+    i->size = ty_size(t);
+    i->w = ty_w(t);
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+/* The value argument, converted to the atomic object's type first — so
+ * __atomic_fetch_add(&some_long, -1, ...) adds -1, not 4294967295. */
+static int atomic_value(struct ir_func *fn, struct expr *arg,
+                        const struct type *t)
+{
+    return gen_convert(fn, gen_expr(fn, arg), arg->ty, t);
+}
+
+/* dst = the value *addr held, *addr = des if it was exp (IR_CAS16) */
+static int cas16(struct ir_func *fn, int addr, int exp, int des)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = IR_CAS16;
+    i->a = addr;
+    i->b = exp;
+    i->c = des;
+    i->size = 16;
+    i->w = 16;
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+/* *addr = f(old), atomically, by compare-and-swap until no one else wrote
+ * in between: f is `op` of old and val ('=' for val itself). Returns the
+ * old value; *nvp the one stored. */
+static int cas16_loop(struct ir_func *fn, int addr, int op, int val,
+                      const struct type *t, int *nvp)
+{
+    int cur = new_temp(fn);
+    emit_mov(fn, cur, emit_load(fn, addr, t));   /* a guess: the CAS checks */
+    int l_loop = new_label(fn), l_done = new_label(fn);
+    emit_label(fn, l_loop);
+    int nv;
+    switch (op) {
+    case '=': nv = val; break;
+    case '+': nv = emit_bin(fn, IR_ADD, cur, val, 16, 1); break;
+    case '-': nv = emit_bin(fn, IR_SUB, cur, val, 16, 1); break;
+    case '&': nv = emit_bin(fn, IR_AND, cur, val, 16, 0); break;
+    case '|': nv = emit_bin(fn, IR_OR, cur, val, 16, 0); break;
+    case '^': nv = emit_bin(fn, IR_XOR, cur, val, 16, 0); break;
+    default: {                                        /* nand */
+        struct ir_ins *n = emit(fn);
+        n->op = IR_BNOT;
+        n->a = emit_bin(fn, IR_AND, cur, val, 16, 0);
+        n->w = 16;
+        n->dst = new_temp(fn);
+        nv = n->dst;
+        break;
+    }
+    }
+    int seen = cas16(fn, addr, cur, nv);
+    emit_brnz(fn, emit_cmp(fn, B_EQ, seen, cur, 16, 0), 4, l_done);
+    emit_mov(fn, cur, seen);
+    emit_jmp(fn, l_loop);
+    emit_label(fn, l_done);
+    if (nvp)
+        *nvp = nv;
+    return cur;
+}
+
+/* The atomics of an __int128: a load is a compare-and-swap of 0 with 0
+ * (the value seen, whatever it is, and nothing changed); the rest loops */
+static int gen_atomic16(struct ir_func *fn, struct expr *e,
+                        enum atomic_kind ak, int op, const struct type *obj,
+                        int addr)
+{
+    int zero = emit_const(fn, 0, 16);
+    switch (ak) {
+    case AK_LOAD_N:
+        return cas16(fn, addr, zero, zero);
+    case AK_LOAD:
+        emit_store(fn, gen_expr(fn, e->args[1]), cas16(fn, addr, zero, zero),
+                   obj);
+        return -1;
+    case AK_STORE_N:
+        cas16_loop(fn, addr, '=', atomic_value(fn, e->args[1], obj), obj,
+                   NULL);
+        return -1;
+    case AK_STORE:
+        cas16_loop(fn, addr, '=', emit_load(fn, gen_expr(fn, e->args[1]), obj),
+                   obj, NULL);
+        return -1;
+    case AK_SYNC_LOCK_RELEASE:
+        cas16_loop(fn, addr, '=', zero, obj, NULL);
+        return -1;
+    case AK_EXCHANGE_N: case AK_SYNC_LOCK_TAS:
+        return cas16_loop(fn, addr, '=', atomic_value(fn, e->args[1], obj),
+                          obj, NULL);
+    case AK_EXCHANGE: {
+        int vp = gen_expr(fn, e->args[1]);
+        int rp = gen_expr(fn, e->args[2]);
+        emit_store(fn, rp, cas16_loop(fn, addr, '=', emit_load(fn, vp, obj),
+                                      obj, NULL), obj);
+        return -1;
+    }
+    case AK_FETCH_OP: case AK_OP_FETCH: {
+        int nv;
+        int old = cas16_loop(fn, addr, op, atomic_value(fn, e->args[1], obj),
+                             obj, &nv);
+        return ak == AK_FETCH_OP ? old : nv;
+    }
+    case AK_CMPXCHG_N: case AK_CMPXCHG: {
+        int ep = gen_expr(fn, e->args[1]);           /* &expected */
+        int des = ak == AK_CMPXCHG_N
+            ? atomic_value(fn, e->args[2], obj)
+            : emit_load(fn, gen_expr(fn, e->args[2]), obj);
+        int exp = emit_load(fn, ep, obj);
+        int seen = cas16(fn, addr, exp, des);
+        int ok = emit_cmp(fn, B_EQ, seen, exp, 16, 0);
+        int l_ok = new_label(fn);
+        emit_brnz(fn, ok, 4, l_ok);
+        emit_store(fn, ep, seen, obj);               /* *expected = seen */
+        emit_label(fn, l_ok);
+        return ok;
+    }
+    case AK_SYNC_VAL_CAS: case AK_SYNC_BOOL_CAS: {
+        int expv = atomic_value(fn, e->args[1], obj);
+        int old = cas16(fn, addr, expv, atomic_value(fn, e->args[2], obj));
+        return ak == AK_SYNC_VAL_CAS ? old
+                                     : emit_cmp(fn, B_EQ, old, expv, 16, 0);
+    }
+    default:
+        diag_fatal(fn->file, e->line, "internal: atomic kind %d", (int)ak);
+        return -1;
+    }
+}
+
+static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
+                      int op)
+{
+    if (ak == AK_THREAD_FENCE || ak == AK_SIGNAL_FENCE) {
+        /* A signal fence need only stop the compiler; a real barrier is
+         * stronger and so also correct. */
+        emit(fn)->op = IR_FENCE;
+        return -1;
+    }
+    const struct type *obj = e->args[0]->ty->pointee;
+    if (ak == AK_TEST_AND_SET || ak == AK_CLEAR)
+        obj = ty_base(TY_CHAR, 1);                    /* one byte, as gcc does */
+    /* The generic forms move BYTES -- their values travel by pointer --
+     * so the object may be a double or a small struct. Lower it as the
+     * unsigned integer of the same size and nothing below here has to
+     * know: the instruction is the same either way, and sema has
+     * already refused a size the machines cannot move at once. */
+    if (!ty_is_integer(obj) && obj->kind != TY_PTR) {
+        int sz = ty_size(obj);
+        obj = sz == 1  ? ty_base(TY_CHAR, 1)
+            : sz == 2  ? ty_base(TY_SHORT, 1)
+            : sz == 4  ? ty_base(TY_INT, 1)
+            : sz == 16 ? ty_base(TY_INT128, 1)
+                       : ty_base(TY_LONG, 1);
+    }
+    int w = ty_w(obj), sign = ty_signed_int(obj);
+    int addr = gen_expr(fn, e->args[0]);
+    if (ty_size(obj) == 16)
+        return gen_atomic16(fn, e, ak, op, obj, addr);
+
+    switch (ak) {
+    case AK_LOAD_N:
+        return atomic_load(fn, addr, obj);
+    case AK_STORE_N:
+        atomic_store(fn, addr, atomic_value(fn, e->args[1], obj), obj);
+        return -1;
+    case AK_SYNC_LOCK_RELEASE: case AK_CLEAR:
+        atomic_store(fn, addr, emit_const(fn, 0, w), obj);
+        return -1;
+    case AK_EXCHANGE_N: case AK_SYNC_LOCK_TAS: {
+        int val = atomic_value(fn, e->args[1], obj);
+        return atomic_result(fn, atomic_rmw(fn, IR_XCHG, 0, addr, val, obj),
+                             obj);
+    }
+    case AK_TEST_AND_SET: {
+        int old = atomic_rmw(fn, IR_XCHG, 0, addr, emit_const(fn, 1, 4), obj);
+        return emit_cmp(fn, B_NE, old, emit_const(fn, 0, 4), 4, 0);
+    }
+    case AK_FETCH_OP: case AK_OP_FETCH: {
+        int val = atomic_value(fn, e->args[1], obj);
+        int old;
+        if (op == '+' || op == '-') {
+            /* x86 has lock xadd for these; subtraction adds the negation */
+            int addend = op == '-'
+                ? emit_bin(fn, IR_SUB, emit_const(fn, 0, w), val, w, 1)
+                : val;
+            old = atomic_rmw(fn, IR_XADD, 0, addr, addend, obj);
+        } else {
+            old = atomic_rmw(fn, IR_ARMW, op, addr, val, obj);
+        }
+        if (ak == AK_FETCH_OP)
+            return atomic_result(fn, old, obj);
+        /* OP_fetch: the new value is the old one with the operation applied
+         * again — the same computation the atomic did, just not atomically,
+         * which is fine: it only rebuilds what was stored. */
+        int nv;
+        switch (op) {
+        case '+': nv = emit_bin(fn, IR_ADD, old, val, w, sign); break;
+        case '-': nv = emit_bin(fn, IR_SUB, old, val, w, sign); break;
+        case '&': nv = emit_bin(fn, IR_AND, old, val, w, sign); break;
+        case '|': nv = emit_bin(fn, IR_OR, old, val, w, sign); break;
+        case '^': nv = emit_bin(fn, IR_XOR, old, val, w, sign); break;
+        default: {                                   /* nand: ~(old & val) */
+            int a = emit_bin(fn, IR_AND, old, val, w, sign);
+            struct ir_ins *n = emit(fn);
+            n->op = IR_BNOT;
+            n->a = a;
+            n->w = w;
+            n->dst = new_temp(fn);
+            nv = n->dst;
+            break;
+        }
+        }
+        return atomic_result(fn, nv, obj);
+    }
+    case AK_CMPXCHG_N: case AK_CMPXCHG: {
+        int exp = gen_expr(fn, e->args[1]);          /* &expected */
+        int des = ak == AK_CMPXCHG_N
+            ? atomic_value(fn, e->args[2], obj)
+            : emit_load(fn, gen_expr(fn, e->args[2]), obj);  /* by pointer */
+        struct ir_ins *i = emit(fn);
+        i->op = IR_CMPXCHG;
+        i->a = addr;
+        i->b = exp;
+        i->c = des;
+        i->size = ty_size(obj);
+        i->w = w;
+        i->dst = new_temp(fn);
+        return i->dst;
+    }
+    case AK_LOAD: {                                   /* *ret = atomic *p */
+        int ret = gen_expr(fn, e->args[1]);
+        emit_store(fn, ret, atomic_load(fn, addr, obj), obj);
+        return -1;
+    }
+    case AK_STORE: {                                  /* atomic *p = *val */
+        int vp = gen_expr(fn, e->args[1]);
+        atomic_store(fn, addr, emit_load(fn, vp, obj), obj);
+        return -1;
+    }
+    case AK_EXCHANGE: {                               /* *ret = xchg(p, *val) */
+        int vp = gen_expr(fn, e->args[1]);
+        int rp = gen_expr(fn, e->args[2]);
+        int old = atomic_rmw(fn, IR_XCHG, 0, addr, emit_load(fn, vp, obj), obj);
+        emit_store(fn, rp, old, obj);
+        return -1;
+    }
+    case AK_SYNC_VAL_CAS: case AK_SYNC_BOOL_CAS: {
+        int expv = atomic_value(fn, e->args[1], obj);
+        int newv = atomic_value(fn, e->args[2], obj);
+        struct ir_ins *i = emit(fn);
+        i->op = IR_CAS;
+        i->a = addr;
+        i->b = expv;
+        i->c = newv;
+        i->size = ty_size(obj);
+        i->w = w;
+        i->dst = new_temp(fn);
+        int old = atomic_result(fn, i->dst, obj);
+        if (ak == AK_SYNC_VAL_CAS)
+            return old;
+        return emit_cmp(fn, B_EQ, old, expv, w, sign);
+    }
+    default:
+        diag_fatal(fn->file, e->line, "internal: atomic kind %d", (int)ak);
+        return -1;
+    }
+}
+
+/* ---- the GCC bit builtins ------------------------------------------------
+ *
+ * Built from ordinary integer ops rather than a target instruction: x86-64's
+ * popcnt is not baseline, a freestanding kernel links no libgcc to call
+ * __popcountdi2 in, and one lowering for both targets is one lowering to get
+ * right. Every form reduces to a population count:
+ *   popcount  the SWAR sequence (pairs, nibbles, bytes, then a multiply)
+ *   ctz(x)    popcount((x & -x) - 1)     — the bits below the lowest set one
+ *   clz(x)    bits - popcount(x smeared right)
+ *   ffs(x)    (x != 0) * (ctz(x) + 1)    — 0 for 0, as C's ffs defines it
+ *   parity    popcount & 1
+ *   clrsb(x)  clz(x ^ (x >> (bits-1))) - 1, the shift arithmetic
+ * ctz and clz of 0 are undefined in gcc; these give the bit width.
+ */
+static int bk(struct ir_func *fn, unsigned long v, int w)
+{
+    return emit_const(fn, (long)v, w);
+}
+
+static int bpopcount(struct ir_func *fn, int x, int w)
+{
+    unsigned long m1 = w == 8 ? 0x5555555555555555UL : 0x55555555UL;
+    unsigned long m2 = w == 8 ? 0x3333333333333333UL : 0x33333333UL;
+    unsigned long m4 = w == 8 ? 0x0F0F0F0F0F0F0F0FUL : 0x0F0F0F0FUL;
+    unsigned long h1 = w == 8 ? 0x0101010101010101UL : 0x01010101UL;
+    int t = emit_bin(fn, IR_AND, emit_bin(fn, IR_SHR, x, bk(fn, 1, w), w, 0),
+                     bk(fn, m1, w), w, 0);
+    x = emit_bin(fn, IR_SUB, x, t, w, 0);
+    t = emit_bin(fn, IR_AND, emit_bin(fn, IR_SHR, x, bk(fn, 2, w), w, 0),
+                 bk(fn, m2, w), w, 0);
+    x = emit_bin(fn, IR_ADD, emit_bin(fn, IR_AND, x, bk(fn, m2, w), w, 0), t,
+                 w, 0);
+    x = emit_bin(fn, IR_AND,
+                 emit_bin(fn, IR_ADD, x,
+                          emit_bin(fn, IR_SHR, x, bk(fn, 4, w), w, 0), w, 0),
+                 bk(fn, m4, w), w, 0);
+    x = emit_bin(fn, IR_MUL, x, bk(fn, h1, w), w, 0);
+    return emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)(w * 8 - 8), w), w, 0);
+}
+
+static int bctz(struct ir_func *fn, int x, int w)
+{
+    struct ir_ins *n = emit(fn);
+    n->op = IR_NEG;
+    n->a = x;
+    n->w = w;
+    n->dst = new_temp(fn);
+    int low = emit_bin(fn, IR_AND, x, n->dst, w, 0);           /* x & -x */
+    return bpopcount(fn, emit_bin(fn, IR_SUB, low, bk(fn, 1, w), w, 0), w);
+}
+
+static int bclz(struct ir_func *fn, int x, int w)
+{
+    for (int sh = 1; sh < w * 8; sh <<= 1)
+        x = emit_bin(fn, IR_OR, x, emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)sh, w),
+                                             w, 0), w, 0);
+    return emit_bin(fn, IR_SUB, bk(fn, (unsigned long)(w * 8), w),
+                    bpopcount(fn, x, w), w, 0);
+}
+
+static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int w)
+{
+    /* the operand as the unsigned int / unsigned long the builtin takes (ffs
+     * and clrsb take a signed one, which is the same bits) */
+    const struct type *ut = ty_base(w == 8 ? TY_LONG : TY_INT, 1);
+    int x = gen_convert(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, ut);
+    int r;
+    switch (kind) {
+    case 1: r = bctz(fn, x, w); break;
+    case 2: r = bclz(fn, x, w); break;
+    case 3: r = bpopcount(fn, x, w); break;
+    case 4: {
+        int nz = emit_cmp(fn, B_NE, x, bk(fn, 0, w), w, 0);
+        nz = gen_convert(fn, nz, ty_base(TY_INT, 0), ut);
+        r = emit_bin(fn, IR_MUL,
+                     emit_bin(fn, IR_ADD, bctz(fn, x, w), bk(fn, 1, w), w, 0),
+                     nz, w, 0);
+        break;
+    }
+    case 5: r = emit_bin(fn, IR_AND, bpopcount(fn, x, w), bk(fn, 1, w), w, 0); break;
+    default: {
+        int sign = emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)(w * 8 - 1), w), w, 1);
+        r = emit_bin(fn, IR_SUB, bclz(fn, emit_bin(fn, IR_XOR, x, sign, w, 0), w),
+                     bk(fn, 1, w), w, 0);
+        break;
+    }
+    }
+    return gen_convert(fn, r, ut, ty_base(TY_INT, 0));    /* the result is int */
+}
+
+static int eh_type_index(struct ir_func *fn, struct global *ti);
+
+int gen_expr(struct ir_func *fn, struct expr *e)
+{
+    /* Every instruction this expression lowers to is attributed to the
+     * expression, not to the statement containing it -- so `a[i] + b[j]`
+     * blames the right subscript. Saved and restored, because lowering
+     * recurses and the caller's position must survive it. */
+    int save_line = g_cur_line, save_col = g_cur_col;
+    if (e->line) {
+        g_cur_line = e->line;
+        g_cur_col = e->col;
+    }
+    int r = gen_expr_inner(fn, e);
+    g_cur_line = save_line;
+    g_cur_col = save_col;
+    return r;
+}
+
+static int gen_expr_inner(struct ir_func *fn, struct expr *e)
 {
     switch (e->kind) {
     case EXPR_NUM:
         return emit_const(fn, e->num, ty_w(e->ty));
+    case EXPR_EHTYPEID:          /* a catch type's selector: a constant */
+        return emit_const(fn, eh_type_index(fn, e->gref), 8);
     case EXPR_FNUM:
+        if (e->ty->kind == TY_LDOUBLE)
+            return emit_ldconst(fn, e->ldv ? e->ldv : ldf_from_double(e->fnum));
         return emit_fconst(fn, e->fnum, ty_size(e->ty));
     case EXPR_LABELADDR: {   /* &&label -> a void* to the label's code location */
         struct ir_ins *i = emit(fn);
@@ -717,19 +1510,10 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         return i->dst;
     }
     case EXPR_STR: {
+        /* The literal arrives encoded at its real width (lit_encode): num
+         * elements of str_width bytes each, NUL included. */
         int w = e->str_width ? e->str_width : 1;
-        if (w == 1) {
-            e->str_index = intern_str(e->name, (int)e->num);
-        } else {
-            /* Expand each source byte to a `w`-byte element, little-endian and
-             * zero-extended, so the .rodata holds a real wide string. */
-            int n = (int)e->num;
-            char *wide = xmalloc((size_t)n * (size_t)w);
-            memset(wide, 0, (size_t)n * (size_t)w);
-            for (int k = 0; k < n; k++)
-                wide[(size_t)k * w] = e->name[k];
-            e->str_index = intern_str(wide, n * w);
-        }
+        e->str_index = intern_str(e->name, (int)e->num * w);
         struct ir_ins *i = emit(fn);
         i->op = IR_STRADDR;
         i->label = e->str_index;
@@ -741,6 +1525,7 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             struct ir_ins *i = emit(fn);
             i->op = IR_FADDR;
             i->callee = e->fref;
+            i->callee_sym = ir_sym_func(cur_unit, e->fref);
             i->dst = new_temp(fn);
             return i->dst;
         }
@@ -792,6 +1577,7 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
     case EXPR_INCDEC: {
         struct type *t = e->ty;
         int scale = t->kind == TY_PTR ? ty_size(t->pointee) : 1;
+        int vla_step = t->kind == TY_PTR && ty_is_vla(t->pointee);
         int w = ty_w(t);
         int local = e->lhs->kind == EXPR_VAR && !e->lhs->gref;
         int is_bf = expr_is_bitfield(e->lhs);
@@ -806,8 +1592,16 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             save->a = cur;
             save->dst = old = new_temp(fn);
         }
-        int d = emit_const(fn, (long)e->delta * scale, w);
-        int sum = emit_bin(fn, IR_ADD, cur, d, w, 1);
+        int sum;
+        if (ty_is_float(t))   /* x++ adds 1.0 — not 1 to the bit pattern */
+            sum = emit_fbin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
+                            emit_fconst(fn, 1.0, ty_size(t)), ty_size(t));
+        else if (vla_step)   /* ++p over rows of a run-time size */
+            sum = emit_bin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
+                           type_size_val(fn, t->pointee), w, 1);
+        else
+            sum = emit_bin(fn, IR_ADD, cur,
+                           emit_const(fn, (long)e->delta * scale, w), w, 1);
         if (ty_size(t) <= 2 && !is_bf) {
             /* ++c on a char must wrap like a char, in the value too */
             struct ir_ins *i = emit(fn);
@@ -828,12 +1622,24 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         return e->is_post ? old : sum;
     }
     case EXPR_NOT: {
-        int v = gen_expr(fn, e->rhs);
-        return emit_isz(fn, v, ty_w(e->rhs->ty));
+        int w;
+        int v = truth(fn, gen_expr(fn, e->rhs), e->rhs->ty, &w);
+        return emit_isz(fn, v, w);
     }
     case EXPR_NEG:
     case EXPR_BNOT: {
         int v = gen_expr(fn, e->rhs);
+        if (e->kind == EXPR_NEG && e->ty->kind == TY_LDOUBLE) {
+            /* the sign bit of a 16-byte value: a float IR_NEG (fchs, or
+             * flipping bit 127) — exact for -0.0 and NaN like the XOR below */
+            struct ir_ins *i = emit(fn);
+            i->op = IR_NEG;
+            i->a = v;
+            i->w = 16;
+            i->flt = 1;
+            i->dst = new_temp(fn);
+            return i->dst;
+        }
         if (e->kind == EXPR_NEG && ty_is_float(e->ty)) {
             /* -x on a float flips the sign BIT: exact for -0.0 and for
              * NaN, which 0.0-x is not, and it needs no new instruction
@@ -876,13 +1682,27 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             return v; /* evaluated for its effect; the value is dropped */
         return gen_convert(fn, v, e->rhs->ty, e->ty);
     }
+    case EXPR_REAL:
+    case EXPR_IMAG:
+        break; /* sema lowered them to the parts; unreachable */
     case EXPR_SIZEOF:
+        /* only a VLA's survives sema: read its size slot, computing it
+         * first for a type name (sizeof(int[n])) */
+        if (e->cast_ty) {
+            vla_eval(fn, e->cast_ty);
+            return type_size_val(fn, e->cast_ty);
+        }
+        return type_size_val(fn, e->rhs->undecayed ? e->rhs->undecayed
+                                                   : e->rhs->ty);
     case EXPR_ALIGNOF:
         break; /* folded to EXPR_NUM by sema; unreachable */
     case EXPR_STMTEXPR:
         return gen_stmtexpr(fn, e);
     case EXPR_VA_ARG:
-        return gen_va_arg(fn, e);
+        if (target_get() != TARGET_AARCH64)
+            return irg_va_arg_sysv(fn, e);
+        return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
+                                                : irg_va_arg_aapcs(fn, e);
     case EXPR_BINOP: {
         struct type *lt = e->lhs->ty, *rt = e->rhs->ty;
 
@@ -894,12 +1714,13 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             int dst = new_temp(fn);
             int l_short = new_label(fn);
             int l_end = new_label(fn);
-            int a = gen_expr(fn, e->lhs);
-            int aw = ty_w(lt);
+            int aw;
+            int a = truth(fn, gen_expr(fn, e->lhs), lt, &aw);
             if (e->op == B_LAND) {
                 emit_brz(fn, a, aw, l_short);
-                int b = gen_expr(fn, e->rhs);
-                int nz = emit_isz(fn, b, ty_w(rt));
+                int bw;
+                int b = truth(fn, gen_expr(fn, e->rhs), rt, &bw);
+                int nz = emit_isz(fn, b, bw);
                 int one = emit_isz(fn, nz, 4); /* !!b */
                 struct ir_ins *m = emit(fn);
                 m->op = IR_MOV;
@@ -922,8 +1743,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
                 o->dst = dst;
                 emit_jmp(fn, l_end);
                 emit_label(fn, l_rhs);
-                int b = gen_expr(fn, e->rhs);
-                int nz = emit_isz(fn, b, ty_w(rt));
+                int bw;
+                int b = truth(fn, gen_expr(fn, e->rhs), rt, &bw);
+                int nz = emit_isz(fn, b, bw);
                 int one = emit_isz(fn, nz, 4); /* !!b */
                 struct ir_ins *m = emit(fn);
                 m->op = IR_MOV;
@@ -944,6 +1766,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
                 int a = gen_expr(fn, e->lhs);
                 int b = gen_expr(fn, e->rhs);
                 int diff = emit_bin(fn, IR_SUB, a, b, 8, 1);
+                if (ty_is_vla(lt->pointee))
+                    return emit_bin(fn, IR_DIV, diff,
+                                    type_size_val(fn, lt->pointee), 8, 1);
                 int size = ty_size(lt->pointee);
                 if (size <= 1)
                     return diff;
@@ -961,8 +1786,12 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
                     p = idx;
                     idx = t;
                 }
-                int size = ty_size((lp ? lt : rt)->pointee);
-                if (size > 1) {
+                struct type *pt = (lp ? lt : rt)->pointee;
+                int size = ty_size(pt);
+                if (ty_is_vla(pt))
+                    idx = emit_bin(fn, IR_MUL, idx, type_size_val(fn, pt),
+                                   8, 1);
+                else if (size > 1) {
                     int c = emit_const(fn, size, 8);
                     idx = emit_bin(fn, IR_MUL, idx, c, 8, 1);
                 }
@@ -1038,7 +1867,10 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         int res;
         if (lt->kind == TY_PTR) {
             int esz = ty_size(lt->pointee);
-            if (esz > 1) {
+            if (ty_is_vla(lt->pointee))
+                rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
+                              8, 1);
+            else if (esz > 1) {
                 int k = emit_const(fn, esz, 8);
                 rv = emit_bin(fn, IR_MUL, rv, k, 8, 1);
             }
@@ -1071,8 +1903,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         int dst = new_temp(fn);
         int l_else = new_label(fn);
         int l_end = new_label(fn);
-        int c = gen_expr(fn, e->args[0]);
-        emit_brz(fn, c, ty_w(e->args[0]->ty), l_else);
+        int cw;
+        int c = truth(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, &cw);
+        emit_brz(fn, c, cw, l_else);
         int a = gen_expr(fn, e->lhs);
         struct ir_ins *m1 = emit(fn);
         m1->op = IR_MOV;
@@ -1101,6 +1934,39 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         }
         if (e->name && strcmp(e->name, "__builtin_va_end") == 0)
             return -1;
+        /* va_copy(dst, src): copy the tag src points at into this call's
+         * hidden slot, then point dst at the copy — so each list advances
+         * independently, as C99 7.15.1.2 requires. */
+        if (e->name && strcmp(e->name, "__builtin_va_copy") == 0) {
+            struct ir_ins *ad = emit(fn);
+            ad->op = IR_ADDR;
+            ad->a = e->var_index;
+            ad->dst = new_temp(fn);
+            int tag = ad->dst;
+            int src = gen_expr(fn, e->args[1]);
+            struct ir_ins *c = emit(fn);
+            c->op = IR_MEMCPY;
+            c->a = tag;
+            c->b = src;
+            c->size = target_get() == TARGET_AARCH64 ? 32 : 24;
+            struct expr *d = e->args[0];
+            if (d->kind == EXPR_VAR && !d->gref)
+                emit_stvar(fn, d->var_index, tag, d->ty);
+            else
+                emit_store(fn, gen_addr(fn, d), tag, d->ty);
+            return -1;
+        }
+        if (e->name && strncmp(e->name, "__builtin_sqrt", 14) == 0) {
+            int v = gen_expr(fn, e->args[0]);
+            struct ir_ins *i = emit(fn);
+            i->op = IR_SQRT;
+            i->a = v;
+            i->flt = 1;
+            i->w = ty_size(e->ty);
+            i->size = ty_size(e->ty);
+            i->dst = new_temp(fn);
+            return i->dst;
+        }
         if (e->name && strncmp(e->name, "__builtin_bswap", 15) == 0) {
             int v = gen_expr(fn, e->args[0]);
             struct ir_ins *i = emit(fn);
@@ -1115,64 +1981,53 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             emit(fn)->op = IR_FENCE;
             return -1;
         }
-        if (e->name && strcmp(e->name, "__builtin_unreachable") == 0) {
+        if (e->name && strcmp(e->name, "__builtin_prefetch") == 0) {
+            for (int k = 0; k < e->nargs; k++)
+                gen_expr(fn, e->args[k]);          /* for side effects only */
+            return -1;
+        }
+        if (e->name && strncmp(e->name, "__builtin_", 10) == 0) {
+            int bw, bk = builtin_bitop(e->name + 10, &bw);
+            if (bk)
+                return gen_bitop(fn, e, bk, bw);
+        }
+        if (e->name && (strcmp(e->name, "__builtin_unreachable") == 0 ||
+                        strcmp(e->name, "__builtin_trap") == 0)) {
             emit(fn)->op = IR_UD2;
             return -1;
         }
-        if (e->name && strcmp(e->name, "__atomic_load_n") == 0) {
-            int addr = gen_expr(fn, e->args[0]);
-            return emit_load(fn, addr, e->ty);   /* aligned load is atomic */
+        if (e->name) {
+            int aop;
+            enum atomic_kind ak = atomic_builtin(e->name, &aop);
+            if (ak != AK_NONE)
+                return gen_atomic(fn, e, ak, aop);
         }
-        if (e->name && strcmp(e->name, "__atomic_store_n") == 0) {
-            int addr = gen_expr(fn, e->args[0]);
-            int val = gen_expr(fn, e->args[1]);
-            emit_store(fn, addr, val, e->args[0]->ty->pointee);
-            emit(fn)->op = IR_FENCE;             /* seq_cst: publish the store */
-            return -1;
+        if (e->name && strcmp(e->name, "__builtin_alloca") == 0) {
+            int size = gen_expr(fn, e->args[0]);
+            struct ir_ins *al = emit(fn);
+            al->op = IR_ALLOCA;
+            al->a = size;
+            al->dst = new_temp(fn);
+            fn->has_alloca = 1;
+            return al->dst;
         }
-        if (e->name && strcmp(e->name, "__atomic_exchange_n") == 0) {
-            int addr = gen_expr(fn, e->args[0]);
-            int val = gen_expr(fn, e->args[1]);
-            struct ir_ins *i = emit(fn);
-            i->op = IR_XCHG;
-            i->a = addr;
-            i->b = val;
-            i->size = ty_size(e->ty);
-            i->w = ty_w(e->ty);
-            i->dst = new_temp(fn);
-            return i->dst;
-        }
-        if (e->name && (strcmp(e->name, "__atomic_fetch_add") == 0 ||
-                        strcmp(e->name, "__atomic_fetch_sub") == 0)) {
-            int w = ty_w(e->ty);
-            int addr = gen_expr(fn, e->args[0]);
-            int val = gen_expr(fn, e->args[1]);
-            if (strcmp(e->name, "__atomic_fetch_sub") == 0)  /* add of -val */
-                val = emit_bin(fn, IR_SUB, emit_const(fn, 0, w), val, w, 1);
-            struct ir_ins *i = emit(fn);
-            i->op = IR_XADD;
-            i->a = addr;
-            i->b = val;
-            i->size = ty_size(e->ty);
-            i->w = w;
-            i->dst = new_temp(fn);
-            return i->dst;
-        }
-        if (e->name && strcmp(e->name, "__atomic_compare_exchange_n") == 0) {
-            /* evaluate the operands BEFORE emitting the instruction that
-             * consumes them (emit() reserves the slot in stream order) */
-            int obj = gen_expr(fn, e->args[0]);   /* the object pointer */
-            int exp = gen_expr(fn, e->args[1]);   /* &expected */
-            int des = gen_expr(fn, e->args[2]);   /* desired value */
-            struct ir_ins *i = emit(fn);
-            i->op = IR_CMPXCHG;
-            i->a = obj;
-            i->b = exp;
-            i->c = des;
-            i->size = ty_size(e->args[0]->ty->pointee);
-            i->w = ty_w(e->args[0]->ty->pointee);
-            i->dst = new_temp(fn);
-            return i->dst;
+        if (e->name && (strcmp(e->name, "__builtin_return_address") == 0 ||
+                        strcmp(e->name, "__builtin_frame_address") == 0)) {
+            /* Walk e->num saved frame pointers up the chain, then either
+             * stop (the frame address) or read the return address beside
+             * it — [fp] is the caller's fp and [fp+8] the return address,
+             * on both targets. */
+            struct ir_ins *fa = emit(fn);
+            fa->op = IR_FRAMEADDR;
+            fa->w = 8;
+            fa->dst = new_temp(fn);
+            int fp = fa->dst;
+            for (long k = 0; k < e->num; k++)
+                fp = emit_load(fn, fp, e->ty);
+            if (strcmp(e->name, "__builtin_frame_address") == 0)
+                return fp;
+            int at = emit_bin(fn, IR_ADD, fp, emit_const(fn, 8, 8), 8, 0);
+            return emit_load(fn, at, e->ty);
         }
         int args[MAX_PARAMS];
         int fptemp = -1;
@@ -1183,10 +2038,15 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
         struct ir_ins *i = emit(fn);
         i->op = IR_CALL;
         i->callee = e->callee;
+        i->callee_sym = ir_sym_func(cur_unit, e->callee);
         i->indirect = !e->callee;
         i->a = fptemp;
         i->call_varargs = e->callee ? e->callee->is_varargs
                                     : e->lhs->ty->pointee->is_varargs;
+        i->call_nfixed = e->callee ? e->callee->nparams
+                                   : e->lhs->ty->pointee->nptypes;
+        i->sret_first = e->callee ? e->callee->sret_first
+                                  : e->lhs->ty->pointee->sret_first;
         i->nargs = e->nargs;
 
         /* Classify every argument here, where the types still exist;
@@ -1195,16 +2055,26 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
          * function's frame reserves the widest such area. */
         int stk = 0;
         int ireg = 0, freg = 0;
-        /* a hidden return pointer consumes rdi before anything else */
+        /* a hidden return pointer consumes rdi before anything else —
+         * unless the struct comes back in x87 registers instead */
         if (e->ty->kind == TY_STRUCT) {
             enum arg_class rc[2];
-            if (ty_classify(e->ty, rc) == 0)
+            if (ty_classify(e->ty, rc) == 0 &&
+                (target_get() == TARGET_AARCH64 || !ty_x87_ret(e->ty)))
                 ireg = 1;
         }
         for (int k = 0; k < e->nargs; k++) {
             struct type *at = e->args[k]->ty;
             struct ir_arg *ar = &i->argv[k];
             ar->vreg = args[k];
+            ar->ty = at;
+            /* The ABI question answered here, not in the backend (§9.1). */
+            ar->hfa_size = 0;
+            ar->hfa_n = ty_hfa(at, &ar->hfa_size);
+            ar->byref = ty_aapcs64_byref(at);
+            ar->align = ty_align(at);
+            ar->is_float = ty_is_float(at);
+            ar->is_int128 = at->kind == TY_INT128;
             ar->is_struct = at->kind == TY_STRUCT;
             ar->size = ty_size(at);
             ar->nclass = ty_classify(at, ar->cls);
@@ -1224,7 +2094,9 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             }
             if (ar->nclass == 0 || ireg + ni > 6 || freg + nf > 8) {
                 ar->on_stack = 1;
-                stk = (stk + 7) & ~7;
+                /* a slot is aligned to the argument's own alignment, at
+                 * least 8 — 16 for a long double (SysV 3.2.3) */
+                stk = ty_align(at) > 8 ? (stk + 15) & ~15 : (stk + 7) & ~7;
                 ar->stk_off = stk;
                 stk += (ar->size + 7) & ~7;
             } else {
@@ -1236,14 +2108,20 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
             fn->outgoing_bytes = stk;
 
         if (e->ty->kind == TY_STRUCT) {
+            i->ret_x87 = target_get() == TARGET_AARCH64 ? 0
+                                                        : ty_x87_ret(e->ty);
             i->retsize = ty_size(e->ty);
+            i->rety = e->ty;
+            i->ret_hfa_size = 0;
+            i->ret_hfa_n = ty_hfa(e->ty, &i->ret_hfa_size);
+            i->ret_byref = ty_aapcs64_byref(e->ty);
             i->retnclass = ty_classify(e->ty, i->retcls);
             fn->scratch_bytes = (fn->scratch_bytes + 7) & ~7;
             i->scratch = fn->scratch_bytes;
             fn->scratch_bytes += (i->retsize + 7) & ~7;
         }
         i->flt = ty_is_float(e->ty);
-        i->w = i->flt ? ty_size(e->ty) : 8;
+        i->w = i->flt ? ty_size(e->ty) : e->ty->kind == TY_INT128 ? 16 : 8;
         i->dst = new_temp(fn);
         return i->dst;
     }
@@ -1251,884 +2129,120 @@ static int gen_expr(struct ir_func *fn, struct expr *e)
     return -1; /* unreachable; every kind returns above */
 }
 
-/* ---- small parse helpers for the inline-asm template ---- */
-
-static void a_ws(const char **p)
-{
-    while (**p == ' ' || **p == '\t')
-        (*p)++;
-}
-
-/* Read an operand reference — numbered `%N` or symbolic `%[name]` — and
- * return its register (opregs[the operand's index]). */
-static int a_opreg(const char **p, const int *opregs,
-                   const char *const *opnames, int nops,
-                   const char *file, int line, const char *tmpl)
-{
-    a_ws(p);
-    if (**p != '%')
-        diag_fatal(file, line, "asm: expected a %%N operand in \"%s\"", tmpl);
-    (*p)++;
-    if (**p == '[') {                       /* %[name] */
-        (*p)++;
-        const char *nm = *p;
-        while (**p && **p != ']')
-            (*p)++;
-        int len = (int)(*p - nm);
-        if (**p != ']')
-            diag_fatal(file, line, "asm: unterminated %%[name] in \"%s\"",
-                       tmpl);
-        (*p)++;
-        for (int i = 0; i < nops; i++)
-            if (opnames[i] && (int)strlen(opnames[i]) == len &&
-                strncmp(opnames[i], nm, (size_t)len) == 0)
-                return opregs[i];
-        diag_fatal(file, line, "asm: unknown operand %%[%.*s] in \"%s\"",
-                   len, nm, tmpl);
-    }
-    if (!(**p >= '0' && **p <= '9'))
-        diag_fatal(file, line, "asm: expected a %%N operand in \"%s\"", tmpl);
-    int idx = 0;
-    while (**p >= '0' && **p <= '9')
-        idx = idx * 10 + (*(*p)++ - '0');
-    if (idx >= nops)
-        diag_fatal(file, line, "asm operand %%%d out of range in \"%s\"",
-                   idx, tmpl);
-    return opregs[idx];
-}
-
-/* Read a control register `%%crN`, returning N. */
-static int a_creg(const char **p, const char *file, int line, const char *tmpl)
-{
-    a_ws(p);
-    if ((*p)[0] != '%' || (*p)[1] != '%' || (*p)[2] != 'c' || (*p)[3] != 'r')
-        diag_fatal(file, line, "asm: expected %%%%crN in \"%s\"", tmpl);
-    *p += 4;
-    int n = 0;
-    while (**p >= '0' && **p <= '9')
-        n = n * 10 + (*(*p)++ - '0');
-    return n;
-}
-
-static void a_comma(const char **p, const char *file, int line,
-                    const char *tmpl)
-{
-    a_ws(p);
-    if (**p != ',')
-        diag_fatal(file, line, "asm: expected ',' in \"%s\"", tmpl);
-    (*p)++;
-}
-
-/* Read a hard 64-bit GPR name `%%rax` .. `%%r15`, returning 0..15. */
-static int a_regname(const char **p, const char *file, int line,
-                     const char *tmpl)
-{
-    static const struct { const char *n; int r; } regs[] = {
-        { "rax", 0 }, { "rcx", 1 }, { "rdx", 2 }, { "rbx", 3 },
-        { "rsp", 4 }, { "rbp", 5 }, { "rsi", 6 }, { "rdi", 7 },
-        { "r8", 8 }, { "r9", 9 }, { "r10", 10 }, { "r11", 11 },
-        { "r12", 12 }, { "r13", 13 }, { "r14", 14 }, { "r15", 15 },
-    };
-    a_ws(p);
-    if ((*p)[0] != '%' || (*p)[1] != '%')
-        diag_fatal(file, line, "asm: expected a %%%%register in \"%s\"", tmpl);
-    const char *q = *p + 2;
-    /* longest match first (r15 before r1), and a name boundary after it */
-    int best = -1; size_t bestlen = 0;
-    for (unsigned i = 0; i < sizeof regs / sizeof regs[0]; i++) {
-        size_t l = strlen(regs[i].n);
-        char after = q[l];
-        if (strncmp(q, regs[i].n, l) == 0 && l > bestlen &&
-            !((after >= 'a' && after <= 'z') || (after >= '0' && after <= '9')))
-            { best = regs[i].r; bestlen = l; }
-    }
-    if (best < 0)
-        diag_fatal(file, line, "asm: unsupported register in \"%s\"", tmpl);
-    *p = q + bestlen;
-    return best;
-}
-
-static int asm_phys_reg(const char *nm, int len);   /* fwd: any-width mapper */
-
-/* Read a `%%reg` of ANY width (rax/eax/ax/al, r8/r8d/r8w/r8b, …), returning
- * its physical number 0..15. Unlike a_regname (64-bit spellings only) this is
- * for instructions whose operand size comes from a suffix, not the reg name
- * (the ALU ops' 'l'/'q' forms). */
-static int a_reg_any(const char **p, const char *file, int line,
-                     const char *tmpl)
-{
-    a_ws(p);
-    if ((*p)[0] != '%' || (*p)[1] != '%')
-        diag_fatal(file, line, "asm: expected a %%%%register in \"%s\"", tmpl);
-    const char *q = *p + 2;
-    const char *e = q;
-    while ((*e >= 'a' && *e <= 'z') || (*e >= '0' && *e <= '9')) e++;
-    int r = asm_phys_reg(q, (int)(e - q));
-    if (r < 0)
-        diag_fatal(file, line, "asm: unsupported register in \"%s\"", tmpl);
-    *p = e;
-    return r;
-}
-
-/* Read an immediate `$N` (decimal or 0x hex), returning its value. */
-static long a_imm(const char **p, const char *file, int line, const char *tmpl)
-{
-    a_ws(p);
-    if (**p != '$')
-        diag_fatal(file, line, "asm: expected an $immediate in \"%s\"", tmpl);
-    (*p)++;
-    int neg = 0;
-    if (**p == '-') { neg = 1; (*p)++; }
-    long v = 0;
-    int base = 10;
-    if ((*p)[0] == '0' && ((*p)[1] == 'x' || (*p)[1] == 'X')) {
-        base = 16; *p += 2;
-    }
-    for (;; (*p)++) {
-        int d;
-        if (**p >= '0' && **p <= '9') d = **p - '0';
-        else if (base == 16 && **p >= 'a' && **p <= 'f') d = **p - 'a' + 10;
-        else if (base == 16 && **p >= 'A' && **p <= 'F') d = **p - 'A' + 10;
-        else break;
-        v = v * base + d;
-    }
-    return neg ? -v : v;
-}
-
-/* Read a memory operand `(%N)`, returning the base register (opregs[N]). */
-static int a_memreg(const char **p, const int *opregs,
-                    const char *const *opnames, int nops,
-                    const char *file, int line, const char *tmpl)
-{
-    a_ws(p);
-    if (**p != '(')
-        diag_fatal(file, line, "asm: expected a `(%%N)` memory operand in "
-                   "\"%s\"", tmpl);
-    (*p)++;
-    int r = a_opreg(p, opregs, opnames, nops, file, line, tmpl);
-    a_ws(p);
-    if (**p != ')')
-        diag_fatal(file, line, "asm: unterminated `(%%N)` in \"%s\"", tmpl);
-    (*p)++;
-    if ((r & 7) == 4 || (r & 7) == 5)   /* rsp/rbp base needs SIB/disp */
-        diag_fatal(file, line, "asm: memory base %%rsp/%%rbp unsupported "
-                   "in \"%s\"", tmpl);
-    return r;
-}
-
-/* Is the operand at *p a memory reference (`disp(%base)` / `(%base)`) rather
- * than a register/immediate? True iff a '(' appears before the operand ends
- * — a %N, %%reg, or $imm never contains one. */
-static int a_is_mem(const char *p)
-{
-    while (*p == ' ' || *p == '\t') p++;
-    for (; *p && *p != ',' && *p != '\n' && *p != '\r' && *p != ';'; p++)
-        if (*p == '(') return 1;
-    return 0;
-}
-
-/* Parse `disp(%base)` (disp optional, decimal or 0x-hex, optional sign); base
- * is %N or %%regname. Returns the base register, displacement via *disp_out. */
-static int a_mem(const char **p, const int *opregs, const char *const *opnames,
-                 int nops, const char *file, int line, const char *tmpl,
-                 long *disp_out)
-{
-    a_ws(p);
-    long disp = 0;
-    if (**p != '(') {
-        int neg = 0;
-        if (**p == '-') { neg = 1; (*p)++; }
-        else if (**p == '+') (*p)++;
-        int base = 10;
-        if ((*p)[0] == '0' && ((*p)[1] == 'x' || (*p)[1] == 'X')) {
-            base = 16; *p += 2;
-        }
-        int got = 0;
-        for (;; (*p)++) {
-            int d;
-            if (**p >= '0' && **p <= '9') d = **p - '0';
-            else if (base == 16 && **p >= 'a' && **p <= 'f') d = **p - 'a' + 10;
-            else if (base == 16 && **p >= 'A' && **p <= 'F') d = **p - 'A' + 10;
-            else break;
-            disp = disp * base + d; got = 1;
-        }
-        if (!got)
-            diag_fatal(file, line, "asm: expected a displacement or `(` in "
-                       "\"%s\"", tmpl);
-        if (neg) disp = -disp;
-        a_ws(p);
-    }
-    if (**p != '(')
-        diag_fatal(file, line, "asm: expected `(%%base)` in \"%s\"", tmpl);
-    (*p)++;
-    a_ws(p);
-    int r = (**p == '%' && (*p)[1] == '%')
-          ? a_regname(p, file, line, tmpl)
-          : a_opreg(p, opregs, opnames, nops, file, line, tmpl);
-    a_ws(p);
-    if (**p != ')')
-        diag_fatal(file, line, "asm: unterminated `(%%base)` in \"%s\"", tmpl);
-    (*p)++;
-    *disp_out = disp;
-    return r;
-}
-
-/* Emit ModRM (+SIB +disp) for a memory operand [base+disp] with `reg_field`
- * (0..15; only its low 3 bits go in ModRM, the caller puts bit 3 in REX.R).
- * Handles rsp/r12 (needs a SIB) and rbp/r13 (has no disp-less form). Returns
- * the new code length. REX is emitted by the caller. */
-static int emit_mem_modrm(unsigned char *code, int n, int reg_field,
-                          int base, long disp)
-{
-    int b = base & 7;
-    int need_sib   = (b == 4);   /* rsp/r12: escape to SIB */
-    int force_disp = (b == 5);   /* rbp/r13: no mod=00 form, use disp8=0 */
-    int mod;
-    if (disp == 0 && !force_disp)          mod = 0;
-    else if (disp >= -128 && disp <= 127)  mod = 1;
-    else                                   mod = 2;
-    code[n++] = (unsigned char)((mod << 6) | ((reg_field & 7) << 3) |
-                                (need_sib ? 4 : b));
-    if (need_sib)   /* scale=0, index=none(4), base=b */
-        code[n++] = (unsigned char)((0 << 6) | (4 << 3) | b);
-    if (mod == 1)
-        code[n++] = (unsigned char)disp;
-    else if (mod == 2)
-        for (int i = 0; i < 4; i++)
-            code[n++] = (unsigned char)(disp >> (8 * i));
-    return n;
-}
-
-/* Match an ALU mnemonic (add/sub/and/or/xor/cmp, optional 'q'/'l' suffix).
- * On a hit fills *rr (the reg,reg opcode), *ext (the /digit for the $imm form)
- * and *w (1 = 64-bit REX.W, 0 = 32-bit) and returns 1; else returns 0. */
-static int asm_alu_lookup(const char *m, int mlen, int *rr, int *ext, int *w)
-{
-    static const struct { const char *n; int rr, ext; } alu[] = {
-        {"add",0x01,0}, {"or",0x09,1}, {"and",0x21,4},
-        {"sub",0x29,5}, {"xor",0x31,6}, {"cmp",0x39,7},
-    };
-    for (unsigned i = 0; i < sizeof alu / sizeof alu[0]; i++) {
-        int ln = (int)strlen(alu[i].n);
-        int width = -1;
-        if (mlen == ln && strncmp(m, alu[i].n, (size_t)ln) == 0)
-            width = 1;
-        else if (mlen == ln + 1 && strncmp(m, alu[i].n, (size_t)ln) == 0) {
-            if (m[ln] == 'q') width = 1;
-            else if (m[ln] == 'l') width = 0;
-        }
-        if (width < 0) continue;
-        *rr = alu[i].rr; *ext = alu[i].ext; *w = width;
-        return 1;
-    }
-    return 0;
-}
-
-/* Assemble an extended-asm template into machine bytes, now that every
- * operand has a register (opregs[N] is the register of %N — outputs first,
- * then inputs, as gcc numbers them). EmbCC has no general text assembler,
- * only the vocabulary real low-level C needs — the syscall trap plus the
- * kernel's hardware instructions (port I/O, control/segment/MSR access,
- * fences, TLB, descriptor tables). Anything else is refused loudly. */
-static void asm_assemble(struct ir_func *fn, struct stmt *s,
-                         const int *opregs, const char *const *opnames,
-                         int nops, struct ir_asm *ia)
-{
-    const char *file = fn->src->file;
-    int line = s->line;
-    const char *tmpl = s->asm_s->tmpl;
-    unsigned char *code = NULL;
-    int n = 0, cap = 0;
-    const char *p = tmpl;
-    /* local labels `N:` and the RIP-relative `leaq Nf(%rip)` sites that
-     * reference them — resolved within this block after assembling it. */
-    struct { int num, off; } labels[16]; int nlab = 0;
-    struct { int num, patch; } fixups[16]; int nfix = 0;
-
-    while (*p) {
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
-               *p == ';')
-            p++;
-        if (!*p)
-            break;
-        const char *m = p;
-        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' &&
-               *p != ';')
-            p++;
-        int mlen = (int)(p - m);
-        while (*p == ' ' || *p == '\t')
-            p++;
-
-        /* one operand reg for the instructions that take a %N */
-        int reg = -1;
-        int alu_rr = 0, alu_ext = 0, alu_w = 0;  /* filled by asm_alu_lookup */
-        if (*p == '%' && p[1] >= '0' && p[1] <= '9') {
-            p++;
-            int idx = 0;
-            while (*p >= '0' && *p <= '9')
-                idx = idx * 10 + (*p++ - '0');
-            if (idx >= nops)
-                diag_fatal(file, line,
-                           "asm operand %%%d out of range in \"%s\"",
-                           idx, tmpl);
-            reg = opregs[idx];
-        }
-
-        if (n + 16 > cap) {
-            cap = cap ? cap * 2 : 16;
-            code = xrealloc(code, (size_t)cap);
-        }
-        /* a local label `N:` — record its offset for a leaq to reference */
-        if (mlen >= 2 && m[mlen - 1] == ':' &&
-            m[0] >= '0' && m[0] <= '9') {
-            int num = 0;
-            for (int i = 0; i < mlen - 1; i++)
-                num = num * 10 + (m[i] - '0');
-            if (nlab < 16) { labels[nlab].num = num; labels[nlab].off = n;
-                             nlab++; }
-            continue;
-        }
-        if (mlen == 3 && strncmp(m, "int", 3) == 0) {
-            if (*p != '$')
-                diag_fatal(file, line, "asm 'int' wants $vector: \"%s\"",
-                           tmpl);
-            p++;
-            long imm = 0;
-            int base = 10;
-            if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-                base = 16;
-                p += 2;
-            }
-            for (; ; p++) {
-                int d;
-                if (*p >= '0' && *p <= '9') d = *p - '0';
-                else if (base == 16 && *p >= 'a' && *p <= 'f') d = *p - 'a' + 10;
-                else if (base == 16 && *p >= 'A' && *p <= 'F') d = *p - 'A' + 10;
-                else break;
-                imm = imm * base + d;
-            }
-            if (imm < 0 || imm > 255)
-                diag_fatal(file, line, "asm 'int' vector %ld out of range",
-                           imm);
-            code[n++] = 0xcd;
-            code[n++] = (unsigned char)imm;
-        } else if (mlen == 5 && strncmp(m, "cpuid", 5) == 0) {
-            code[n++] = 0x0f;
-            code[n++] = 0xa2;
-        } else if (mlen == 6 && strncmp(m, "rdrand", 6) == 0) {
-            if (reg < 0)
-                diag_fatal(file, line, "asm 'rdrand' wants %%N: \"%s\"", tmpl);
-            code[n++] = (unsigned char)(0x48 | (reg >= 8 ? 1 : 0)); /* REX.W(.B) */
-            code[n++] = 0x0f;
-            code[n++] = 0xc7;
-            code[n++] = (unsigned char)(0xf0 | (reg & 7));          /* /6 */
-        } else if (mlen == 4 && strncmp(m, "setc", 4) == 0) {
-            if (reg < 0)
-                diag_fatal(file, line, "asm 'setc' wants %%N: \"%s\"", tmpl);
-            if (reg >= 4)  /* REX to name spl/bpl/sil/dil or r8b.. as a byte */
-                code[n++] = (unsigned char)(0x40 | (reg >= 8 ? 1 : 0));
-            code[n++] = 0x0f;
-            code[n++] = 0x92;
-            code[n++] = (unsigned char)(0xc0 | (reg & 7));          /* /0 */
-        } else if (mlen == 6 && strncmp(m, "sqrts", 5) == 0 &&
-                   (m[5] == 'd' || m[5] == 's')) {
-            /* sqrtsd/sqrtss %src,%dst (AT&T order): F2/F3 0F 51 /r, both xmm.
-             * `reg` already holds the FIRST operand (%src); parse `,%dst`. */
-            int is_sd = m[5] == 'd';
-            if (reg < 16)
-                diag_fatal(file, line,
-                           "asm '%.*s' operands must be 'x' (xmm): \"%s\"",
-                           mlen, m, tmpl);
-            int src = reg;
-            if (*p != ',')
-                diag_fatal(file, line,
-                           "asm '%.*s' wants %%src,%%dst: \"%s\"", mlen, m, tmpl);
-            p++;
-            while (*p == ' ' || *p == '\t') p++;
-            if (*p != '%' || !(p[1] >= '0' && p[1] <= '9'))
-                diag_fatal(file, line,
-                           "asm '%.*s' destination must be %%N: \"%s\"",
-                           mlen, m, tmpl);
-            p++;
-            int idx2 = 0;
-            while (*p >= '0' && *p <= '9')
-                idx2 = idx2 * 10 + (*p++ - '0');
-            if (idx2 >= nops)
-                diag_fatal(file, line,
-                           "asm operand %%%d out of range in \"%s\"", idx2, tmpl);
-            int dst = opregs[idx2];
-            if (dst < 16)
-                diag_fatal(file, line,
-                           "asm '%.*s' destination must be 'x' (xmm): \"%s\"",
-                           mlen, m, tmpl);
-            int s = src - 16, d = dst - 16;
-            code[n++] = (unsigned char)(is_sd ? 0xf2 : 0xf3);
-            if (d >= 8 || s >= 8)     /* REX.R names dst>=8, REX.B names src>=8 */
-                code[n++] = (unsigned char)(0x40 | (d >= 8 ? 4 : 0) |
-                                            (s >= 8 ? 1 : 0));
-            code[n++] = 0x0f;
-            code[n++] = 0x51;
-            code[n++] = (unsigned char)(0xc0 | ((d & 7) << 3) | (s & 7));
-        }
-        /* ---- fixed-form instructions (no encoded operands) ---- */
-        else if (mlen == 3 && strncmp(m, "cli", 3) == 0) { code[n++] = 0xfa; }
-        else if (mlen == 3 && strncmp(m, "sti", 3) == 0) { code[n++] = 0xfb; }
-        else if (mlen == 3 && strncmp(m, "hlt", 3) == 0) { code[n++] = 0xf4; }
-        else if (mlen == 3 && strncmp(m, "nop", 3) == 0) { code[n++] = 0x90; }
-        else if (mlen == 5 && strncmp(m, "pause", 5) == 0) {
-            code[n++] = 0xf3; code[n++] = 0x90;
-        } else if (mlen == 6 && strncmp(m, "mfence", 6) == 0) {
-            code[n++] = 0x0f; code[n++] = 0xae; code[n++] = 0xf0;
-        } else if (mlen == 6 && strncmp(m, "lfence", 6) == 0) {
-            code[n++] = 0x0f; code[n++] = 0xae; code[n++] = 0xe8;
-        } else if (mlen == 6 && strncmp(m, "sfence", 6) == 0) {
-            code[n++] = 0x0f; code[n++] = 0xae; code[n++] = 0xf8;
-        } else if (mlen == 6 && strncmp(m, "wbinvd", 6) == 0) {
-            code[n++] = 0x0f; code[n++] = 0x09;
-        } else if (mlen == 5 && strncmp(m, "rdtsc", 5) == 0) {
-            code[n++] = 0x0f; code[n++] = 0x31;
-        } else if (mlen == 5 && strncmp(m, "rdmsr", 5) == 0) {
-            code[n++] = 0x0f; code[n++] = 0x32;
-        } else if (mlen == 5 && strncmp(m, "wrmsr", 5) == 0) {
-            code[n++] = 0x0f; code[n++] = 0x30;
-        } else if (mlen == 6 && strncmp(m, "fninit", 6) == 0) {
-            code[n++] = 0xdb; code[n++] = 0xe3;
-        } else if (mlen == 6 && strncmp(m, "pushfq", 6) == 0) {
-            code[n++] = 0x9c;
-        } else if (mlen == 5 && strncmp(m, "popfq", 5) == 0) {
-            code[n++] = 0x9d;
-        }
-        /* ---- port I/O: al/ax/eax with dx, both operands fixed by the
-         * constraints ("a" and "Nd"), so the opcode alone encodes it ---- */
-        else if (mlen == 4 && strncmp(m, "outb", 4) == 0) { code[n++] = 0xee; }
-        else if (mlen == 4 && strncmp(m, "outw", 4) == 0) {
-            code[n++] = 0x66; code[n++] = 0xef;
-        } else if (mlen == 4 && strncmp(m, "outl", 4) == 0) { code[n++] = 0xef; }
-        else if (mlen == 3 && strncmp(m, "inb", 3) == 0) { code[n++] = 0xec; }
-        else if (mlen == 3 && strncmp(m, "inw", 3) == 0) {
-            code[n++] = 0x66; code[n++] = 0xed;
-        } else if (mlen == 3 && strncmp(m, "inl", 3) == 0) { code[n++] = 0xed; }
-        /* ---- pop/push %N (64-bit; the `q` suffix is the same encoding) ---- */
-        else if ((mlen == 3 && strncmp(m, "pop", 3) == 0) ||
-                 (mlen == 4 && strncmp(m, "popq", 4) == 0)) {
-            if (reg < 0) {
-                a_ws(&p);
-                reg = (p[0] == '%' && p[1] == '%')
-                    ? a_regname(&p, file, line, tmpl)
-                    : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-            }
-            if (reg >= 8) code[n++] = 0x41;                /* REX.B */
-            code[n++] = (unsigned char)(0x58 | (reg & 7));
-        } else if ((mlen == 4 && strncmp(m, "push", 4) == 0) ||
-                   (mlen == 5 && strncmp(m, "pushq", 5) == 0)) {
-            a_ws(&p);
-            if (reg < 0 && p[0] == '$') {          /* push imm32 */
-                long imm = a_imm(&p, file, line, tmpl);
-                code[n++] = 0x68;
-                for (int b = 0; b < 4; b++)
-                    code[n++] = (unsigned char)(imm >> (8 * b));
-            } else {
-                if (reg < 0)
-                    reg = (p[0] == '%' && p[1] == '%')
-                        ? a_regname(&p, file, line, tmpl)
-                        : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-                if (reg >= 8) code[n++] = 0x41;
-                code[n++] = (unsigned char)(0x50 | (reg & 7));
-            }
-        }
-        else if (mlen == 5 && strncmp(m, "iretq", 5) == 0) {
-            code[n++] = 0x48; code[n++] = 0xcf;
-        } else if (mlen == 5 && strncmp(m, "lretq", 5) == 0) {
-            code[n++] = 0x48; code[n++] = 0xcb;
-        }
-        /* ---- leaq Nf(%%rip), %%reg : RIP-relative address of a local label ---- */
-        else if (mlen == 4 && strncmp(m, "leaq", 4) == 0) {
-            a_ws(&p);
-            if (!(*p >= '0' && *p <= '9'))
-                diag_fatal(file, line, "asm leaq expects a local label in "
-                           "\"%s\"", tmpl);
-            int num = 0;
-            while (*p >= '0' && *p <= '9') num = num * 10 + (*p++ - '0');
-            if (*p == 'f' || *p == 'b') p++;      /* forward/backward marker */
-            a_ws(&p);
-            if (strncmp(p, "(%%rip)", 7) != 0)
-                diag_fatal(file, line, "asm leaq expects `Nf(%%%%rip)` in "
-                           "\"%s\"", tmpl);
-            p += 7;
-            a_comma(&p, file, line, tmpl);
-            int dst = a_regname(&p, file, line, tmpl);
-            code[n++] = (unsigned char)(0x48 | (dst >= 8 ? 4 : 0));  /* REX.W[R] */
-            code[n++] = 0x8d;
-            code[n++] = (unsigned char)(0x05 | ((dst & 7) << 3));    /* rip+disp32 */
-            if (nfix < 16) { fixups[nfix].num = num; fixups[nfix].patch = n;
-                             nfix++; }
-            for (int b = 0; b < 4; b++) code[n++] = 0;   /* disp32 (patched) */
-        }
-        /* ---- str/ltr %N (task register; r/m16) ---- */
-        else if (mlen == 3 && strncmp(m, "str", 3) == 0) {
-            if (reg < 0) reg = a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-            if (reg >= 8) code[n++] = 0x41;
-            code[n++] = 0x0f; code[n++] = 0x00;
-            code[n++] = (unsigned char)(0xc8 | (reg & 7));   /* /1 */
-        } else if (mlen == 3 && strncmp(m, "ltr", 3) == 0) {
-            if (reg < 0) reg = a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-            if (reg >= 8) code[n++] = 0x41;
-            code[n++] = 0x0f; code[n++] = 0x00;
-            code[n++] = (unsigned char)(0xd8 | (reg & 7));   /* /3 */
-        }
-        /* ---- mov / movq: control registers, and reg/imm -> a GPR ---- */
-        else if ((mlen == 3 && strncmp(m, "mov", 3) == 0) ||
-                 (mlen == 4 && strncmp(m, "movq", 4) == 0) ||
-                 (mlen == 6 && strncmp(m, "movabs", 6) == 0)) {
-            /* segment-register / 16-bit accumulator forms the gdt trampoline
-             * uses: `mov %%ax, %%<seg>` and `mov $imm, %%ax`. */
-            static const char *const segs[] =
-                { "es", "cs", "ss", "ds", "fs", "gs" };
-            a_ws(&p);
-            if (reg < 0 && strncmp(p, "%%ax", 4) == 0) {
-                const char *q = p + 4;
-                a_ws(&q);
-                if (*q == ',') {
-                    q++; a_ws(&q);
-                    if (q[0] == '%' && q[1] == '%') {
-                        for (int si = 0; si < 6; si++)
-                            if (strncmp(q + 2, segs[si], 2) == 0) {
-                                code[n++] = 0x8e;   /* mov Sreg, r/m16 */
-                                code[n++] = (unsigned char)(0xc0 | (si << 3));
-                                p = q + 4;
-                                goto asm_next;
-                            }
-                    }
-                }
-            }
-            if (reg < 0 && p[0] == '$') {
-                const char *q = p;
-                long imm = a_imm(&q, file, line, tmpl);
-                a_ws(&q);
-                if (*q == ',') {
-                    q++;
-                    a_ws(&q);
-                    if (strncmp(q, "%%ax", 4) == 0) {   /* mov $imm16, %%ax */
-                        code[n++] = 0x66; code[n++] = 0xb8;
-                        code[n++] = (unsigned char)imm;
-                        code[n++] = (unsigned char)(imm >> 8);
-                        p = q + 4;
-                        goto asm_next;
-                    }
-                }
-            }
-            int src_reg = -1, src_imm_valid = 0;
-            long src_imm = 0;
-            /* --- source operand --- */
-            if (reg >= 0) {
-                src_reg = reg;                        /* pre-parsed %N */
-            } else {
-                a_ws(&p);
-                if (a_is_mem(p)) {                    /* mov disp(%base), %dst */
-                    long disp;
-                    int base = a_mem(&p, opregs, opnames, nops, file, line,
-                                     tmpl, &disp);
-                    a_comma(&p, file, line, tmpl);
-                    a_ws(&p);
-                    int dst = (p[0] == '%' && p[1] == '%')
-                            ? a_regname(&p, file, line, tmpl)
-                            : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-                    code[n++] = (unsigned char)(0x48 | (dst >= 8 ? 4 : 0) |
-                                                (base >= 8 ? 1 : 0));
-                    code[n++] = 0x8b;                 /* mov r64, r/m64 (load) */
-                    n = emit_mem_modrm(code, n, dst, base, disp);
-                    goto asm_next;
-                }
-                if (p[0] == '$') {
-                    src_imm = a_imm(&p, file, line, tmpl);
-                    src_imm_valid = 1;
-                } else if (p[0] == '%' && p[1] == '%' && p[2] == 'c' &&
-                           p[3] == 'r') {             /* mov %%crN, %reg */
-                    int cr = a_creg(&p, file, line, tmpl);
-                    a_comma(&p, file, line, tmpl);
-                    a_ws(&p);
-                    int gpr = (p[0] == '%' && p[1] == '%')
-                            ? a_regname(&p, file, line, tmpl)
-                            : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-                    int rex = 0x40 | (gpr >= 8) | (cr >= 8 ? 4 : 0);
-                    if (rex != 0x40) code[n++] = (unsigned char)rex;
-                    code[n++] = 0x0f; code[n++] = 0x20;
-                    code[n++] = (unsigned char)(0xc0 | ((cr & 7) << 3) |
-                                                (gpr & 7));
-                    goto asm_next;
-                } else if (p[0] == '%' && p[1] == '%') {
-                    src_reg = a_regname(&p, file, line, tmpl);
-                } else {
-                    src_reg = a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-                }
-            }
-            a_comma(&p, file, line, tmpl);
-            a_ws(&p);
-            /* --- destination: memory, a control register, or a GPR --- */
-            if (a_is_mem(p)) {                        /* mov %src, disp(%base) */
-                if (src_imm_valid)
-                    diag_fatal(file, line, "asm: mov $imm to memory unsupported "
-                               "in \"%s\"", tmpl);
-                long disp;
-                int base = a_mem(&p, opregs, opnames, nops, file, line, tmpl,
-                                 &disp);
-                code[n++] = (unsigned char)(0x48 | (src_reg >= 8 ? 4 : 0) |
-                                            (base >= 8 ? 1 : 0));
-                code[n++] = 0x89;                     /* mov r/m64, r64 (store) */
-                n = emit_mem_modrm(code, n, src_reg, base, disp);
-            } else if (p[0] == '%' && p[1] == '%' && p[2] == 'c' && p[3] == 'r') {
-                int cr = a_creg(&p, file, line, tmpl);      /* mov %reg,%%crN */
-                int rex = 0x40 | (src_reg >= 8) | (cr >= 8 ? 4 : 0);
-                if (rex != 0x40) code[n++] = (unsigned char)rex;
-                code[n++] = 0x0f; code[n++] = 0x22;
-                code[n++] = (unsigned char)(0xc0 | ((cr & 7) << 3) |
-                                            (src_reg & 7));
-            } else {
-                int dst = (p[0] == '%' && p[1] == '%')
-                        ? a_regname(&p, file, line, tmpl)
-                        : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-                if (src_imm_valid) {
-                    int wide = mlen == 6 ||                 /* movabs, or */
-                               src_imm > 0x7fffffffL ||     /* > imm32 */
-                               src_imm < -0x80000000L;
-                    if (wide) {                             /* movabs imm64 */
-                        code[n++] = (unsigned char)(0x48 | (dst >= 8));
-                        code[n++] = (unsigned char)(0xb8 | (dst & 7));
-                        for (int b = 0; b < 8; b++)
-                            code[n++] = (unsigned char)(src_imm >> (8 * b));
-                    } else {                                /* C7 /0 imm32 */
-                        code[n++] = (unsigned char)(0x48 | (dst >= 8));
-                        code[n++] = 0xc7;
-                        code[n++] = (unsigned char)(0xc0 | (dst & 7));
-                        for (int b = 0; b < 4; b++)
-                            code[n++] = (unsigned char)(src_imm >> (8 * b));
-                    }
-                } else {                                    /* mov reg,reg */
-                    int rex = 0x48 | (src_reg >= 8 ? 4 : 0) | (dst >= 8);
-                    code[n++] = (unsigned char)rex;
-                    code[n++] = 0x89;
-                    code[n++] = (unsigned char)(0xc0 | ((src_reg & 7) << 3) |
-                                                (dst & 7));
-                }
-            }
-            asm_next: ;
-        }
-        /* ---- ALU ops: add/sub/and/or/xor/cmp, `%src,%dst` or `$imm,%dst`.
-         * Suffix 'q' or none = 64-bit (REX.W); 'l' = 32-bit. Register operands
-         * only (no memory form yet — kernel inline asm doesn't need it). ---- */
-        else if (asm_alu_lookup(m, mlen, &alu_rr, &alu_ext, &alu_w)) {
-            a_ws(&p);
-            /* `reg` holds a leading %N already consumed by the top-level
-             * pre-parse; a $imm source leaves reg == -1. */
-            if (reg < 0 && p[0] == '$') {             /* op $imm, %dst */
-                long imm = a_imm(&p, file, line, tmpl);
-                a_comma(&p, file, line, tmpl);
-                a_ws(&p);
-                int dst = (p[0] == '%' && p[1] == '%')
-                        ? a_reg_any(&p, file, line, tmpl)
-                        : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-                int use8 = imm >= -128 && imm <= 127;
-                int rex = (alu_w ? 0x48 : 0x40) | (dst >= 8 ? 1 : 0);
-                if (alu_w || dst >= 8) code[n++] = (unsigned char)rex;
-                code[n++] = (unsigned char)(use8 ? 0x83 : 0x81);
-                code[n++] = (unsigned char)(0xc0 | (alu_ext << 3) | (dst & 7));
-                if (use8) code[n++] = (unsigned char)imm;
-                else for (int b = 0; b < 4; b++)
-                    code[n++] = (unsigned char)(imm >> (8 * b));
-            } else {                                  /* op %src, %dst */
-                int src = reg >= 0 ? reg
-                        : (p[0] == '%' && p[1] == '%')
-                        ? a_reg_any(&p, file, line, tmpl)
-                        : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-                a_comma(&p, file, line, tmpl);
-                a_ws(&p);
-                int dst = (p[0] == '%' && p[1] == '%')
-                        ? a_reg_any(&p, file, line, tmpl)
-                        : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-                int rex = (alu_w ? 0x48 : 0x40) | (src >= 8 ? 4 : 0) |
-                          (dst >= 8 ? 1 : 0);
-                if (alu_w || src >= 8 || dst >= 8)
-                    code[n++] = (unsigned char)rex;
-                code[n++] = (unsigned char)alu_rr;
-                code[n++] = (unsigned char)(0xc0 | ((src & 7) << 3) | (dst & 7));
-            }
-        }
-        /* ---- lgdt/lidt %N and invlpg (%N): a memory operand whose address
-         * is the register the "m"/"r" operand landed in ---- */
-        else if (mlen == 4 && strncmp(m, "lgdt", 4) == 0) {
-            int r = reg >= 0 ? reg
-                  : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-            if (r >= 8) code[n++] = 0x41;
-            code[n++] = 0x0f; code[n++] = 0x01;
-            code[n++] = (unsigned char)(0x10 | (r & 7));     /* /2 (%r) */
-        } else if (mlen == 4 && strncmp(m, "lidt", 4) == 0) {
-            int r = reg >= 0 ? reg
-                  : a_opreg(&p, opregs, opnames, nops, file, line, tmpl);
-            if (r >= 8) code[n++] = 0x41;
-            code[n++] = 0x0f; code[n++] = 0x01;
-            code[n++] = (unsigned char)(0x18 | (r & 7));     /* /3 (%r) */
-        } else if (mlen == 6 && strncmp(m, "invlpg", 6) == 0) {
-            int r = a_memreg(&p, opregs, opnames, nops, file, line, tmpl);
-            if (r >= 8) code[n++] = 0x41;
-            code[n++] = 0x0f; code[n++] = 0x01;
-            code[n++] = (unsigned char)(0x38 | (r & 7));     /* /7 (%r) */
-        }
-        /* ---- movdqa between xmm0 and memory (%N) ---- */
-        else if (mlen == 6 && strncmp(m, "movdqa", 6) == 0) {
-            a_ws(&p);
-            int to_mem = p[0] == '%' && p[1] == '%';   /* movdqa %%xmm0,(%N) */
-            int r;
-            if (to_mem) {
-                if (strncmp(p, "%%xmm0", 6) != 0)
-                    diag_fatal(file, line, "asm movdqa source must be "
-                               "%%%%xmm0 in \"%s\"", tmpl);
-                p += 6;
-                a_comma(&p, file, line, tmpl);
-                r = a_memreg(&p, opregs, opnames, nops, file, line, tmpl);
-            } else {                                   /* movdqa (%N),%%xmm0 */
-                r = a_memreg(&p, opregs, opnames, nops, file, line, tmpl);
-                a_comma(&p, file, line, tmpl);
-                a_ws(&p);
-                if (strncmp(p, "%%xmm0", 6) != 0)
-                    diag_fatal(file, line, "asm movdqa dest must be "
-                               "%%%%xmm0 in \"%s\"", tmpl);
-                p += 6;
-            }
-            code[n++] = 0x66;
-            if (r >= 8) code[n++] = 0x41;
-            code[n++] = 0x0f;
-            code[n++] = (unsigned char)(to_mem ? 0x7f : 0x6f);
-            code[n++] = (unsigned char)(r & 7);        /* mod00 reg=xmm0 rm=r */
-        } else {
-            diag_fatal(file, line,
-                       "asm instruction \"%.*s\" not supported", mlen, m);
-        }
-        /* discard any operand text this mnemonic did not itself consume
-         * (a fixed-form instruction leaves its %N,%N in place), up to the
-         * next instruction separator — a newline OR ';', since the kernel's
-         * multi-line templates separate with '\n' and have no ';'. */
-        while (*p && *p != ';' && *p != '\n' && *p != '\r')
-            p++;
-    }
-    /* resolve each leaq's RIP-relative displacement to its local label: the
-     * disp is relative to the END of the 4-byte field, and both label and
-     * site are inside this block. */
-    for (int i = 0; i < nfix; i++) {
-        int off = -1;
-        for (int j = 0; j < nlab; j++)
-            if (labels[j].num == fixups[i].num) off = labels[j].off;
-        if (off < 0)
-            diag_fatal(file, line, "asm: local label %d not defined in "
-                       "\"%s\"", fixups[i].num, tmpl);
-        int disp = off - (fixups[i].patch + 4);
-        for (int b = 0; b < 4; b++)
-            code[fixups[i].patch + b] = (unsigned char)(disp >> (8 * b));
-    }
-    ia->code = code;
-    ia->codelen = n;
-}
-
-/* Map a hard-register spelling (any width: rax/eax/ax/al/ah, r8/r8d/r8w/r8b,
- * …) of length `len` to its physical number 0..15, or -1 if it is not a GPR
- * (e.g. "cc", "memory", an xmm name). Used to EXCLUDE clobbered and
- * template-written registers from the operand allocator's free set. */
-static int asm_phys_reg(const char *nm, int len)
-{
-    static const struct { const char *n; int r; } regs[] = {
-        {"rax",0},{"eax",0},{"ax",0},{"al",0},{"ah",0},
-        {"rcx",1},{"ecx",1},{"cx",1},{"cl",1},{"ch",1},
-        {"rdx",2},{"edx",2},{"dx",2},{"dl",2},{"dh",2},
-        {"rbx",3},{"ebx",3},{"bx",3},{"bl",3},{"bh",3},
-        {"rsp",4},{"esp",4},{"sp",4},{"spl",4},
-        {"rbp",5},{"ebp",5},{"bp",5},{"bpl",5},
-        {"rsi",6},{"esi",6},{"si",6},{"sil",6},
-        {"rdi",7},{"edi",7},{"di",7},{"dil",7},
-        {"r8",8},{"r8d",8},{"r8w",8},{"r8b",8},
-        {"r9",9},{"r9d",9},{"r9w",9},{"r9b",9},
-        {"r10",10},{"r10d",10},{"r10w",10},{"r10b",10},
-        {"r11",11},{"r11d",11},{"r11w",11},{"r11b",11},
-        {"r12",12},{"r12d",12},{"r12w",12},{"r12b",12},
-        {"r13",13},{"r13d",13},{"r13w",13},{"r13b",13},
-        {"r14",14},{"r14d",14},{"r14w",14},{"r14b",14},
-        {"r15",15},{"r15d",15},{"r15w",15},{"r15b",15},
-    };
-    for (unsigned i = 0; i < sizeof regs / sizeof regs[0]; i++)
-        if ((int)strlen(regs[i].n) == len &&
-            strncmp(regs[i].n, nm, (size_t)len) == 0)
-            return regs[i].r;
-    return -1;
-}
-
-/* Mark every hard register the template writes/reads as `%%reg` as used, so an
- * allocatable operand is never assigned one the asm's own instructions touch.
- * Conservative on purpose (a read-only `%%reg` is excluded too) — always sound,
- * only ever shrinks the free set. This is what stops a "r" operand from landing
- * in, say, %%rsi when the template does `movq %N,%%rsi` (K12). */
-static void asm_mark_template_regs(const char *tmpl, int *used)
-{
-    for (const char *p = tmpl; *p; ) {
-        if (p[0] == '%' && p[1] == '%') {
-            p += 2;
-            const char *q = p;
-            while ((*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9')) q++;
-            int r = asm_phys_reg(p, (int)(q - p));
-            if (r >= 0) used[r] = 1;
-            p = q;
-        } else {
-            p++;
-        }
-    }
-}
-
-/* Assign a free register to an operand whose constraint is allocatable
- * (reg == -2). The pool prefers the low, byte-addressable registers so a
- * setc destination needs no REX. */
-static int asm_alloc_reg(int *used, const char *file, int line)
-{
-    static const int pool[] = { 0, 1, 2, 3, 6, 7, 8, 9, 10, 11 };
-    for (unsigned i = 0; i < sizeof pool / sizeof pool[0]; i++)
-        if (!used[pool[i]]) {
-            used[pool[i]] = 1;
-            return pool[i];
-        }
-    diag_fatal(file, line, "asm: out of registers for the operands");
-    return -1;
-}
-
-/* Assign a free XMM register to an 'x' (SSE) asm operand. XMM registers are
- * encoded as 16 + n (0..7 -> 16..23) so they share one operand-register space
- * with the GPRs (0..15); codegen and asm_assemble decode reg >= 16 as xmm. */
-static int asm_alloc_xmm(int *xused, const char *file, int line)
-{
-    for (int i = 0; i < 8; i++)
-        if (!xused[i]) { xused[i] = 1; return 16 + i; }
-    diag_fatal(file, line, "asm: out of xmm registers for the operands");
-    return -1;
-}
-
-/* Innermost enclosing loop's exit and continue targets; sema already
- * rejected break/continue outside any loop. */
 struct loopctx {
     int brk, cont;
+    int brk_vla, cont_vla;   /* g_nvla at each target: the VLA scopes a
+                              * break/continue leaves are those above it */
 };
+
+/* The exception region being generated (ir_func.eh), or -1. */
+static int g_eh_cur = -1;
+
+/* The selector a landing pad sees for catch type ti (NULL: catch-all):
+ * its 1-based place in the function's type table. */
+static int eh_type_index(struct ir_func *fn, struct global *ti)
+{
+    for (int i = 0; i < fn->neh_types; i++)
+        if (fn->eh_types[i] == ti)
+            return i + 1;
+    fn->eh_types = xrealloc(fn->eh_types, (size_t)(fn->neh_types + 1) *
+                                          sizeof *fn->eh_types);
+    fn->eh_types[fn->neh_types++] = ti;
+    return fn->neh_types;
+}
+
+static void gen_eh_region(struct ir_func *fn, struct stmt *s,
+                          const struct loopctx *loop)
+{
+    int r = fn->neh++;
+    fn->eh = xrealloc(fn->eh, (size_t)fn->neh * sizeof *fn->eh);
+    memset(&fn->eh[r], 0, sizeof fn->eh[r]);
+    fn->eh[r].parent = g_eh_cur;
+    fn->eh[r].acts = s->eh_acts;
+    fn->eh[r].nacts = s->neh_acts;
+    int lp = fn->eh[r].lp_label = new_label(fn);
+    int end = new_label(fn);
+    for (int i = 0; i < s->neh_acts; i++)
+        if (!s->eh_acts[i].cleanup)
+            eh_type_index(fn, s->eh_acts[i].ti);
+    int saved = g_eh_cur;
+    g_eh_cur = r;
+    fn->eh[r].lo = fn->nins;
+    gen_stmt(fn, s->body, loop);
+    fn->eh[r].hi = fn->nins;
+    g_eh_cur = saved;
+    emit_jmp(fn, end);
+    /* the landing pad: its calls are the enclosing region's */
+    emit_label(fn, lp);
+    struct ir_ins *i = emit(fn);
+    i->op = IR_LANDING;
+    i->dst = new_temp(fn);
+    i->b = new_temp(fn);
+    i->w = 8;
+    int exc = i->dst, sel = i->b;
+    emit_store(fn, gen_addr(fn, s->expr), exc, s->expr->ty);
+    emit_store(fn, gen_addr(fn, s->cond), sel, s->cond->ty);
+    gen_stmt(fn, s->thn, loop);
+    emit_label(fn, end);
+}
+
+void ir_add_csite(struct ir_func *fn, int start, int end, int region)
+{
+    if (fn->ncsites == fn->capcsites) {
+        fn->capcsites = fn->capcsites ? fn->capcsites * 2 : 16;
+        fn->csites = xrealloc(fn->csites,
+                              (size_t)fn->capcsites * sizeof *fn->csites);
+    }
+    fn->csites[fn->ncsites].start = start;
+    fn->csites[fn->ncsites].end = end;
+    fn->csites[fn->ncsites].region = region;
+    fn->ncsites++;
+}
+
+/* Each call's innermost region (regions are numbered outermost first) —
+ * a call that can throw: not of a nothrow function. When no call in any
+ * region can, the function has no landing pads after all (the pads'
+ * code is unreachable), and is compiled as any other. */
+static void mark_eh_calls(struct ir_func *fn)
+{
+    int any = 0;
+    for (int r = 0; r < fn->neh; r++)
+        for (int n = fn->eh[r].lo; n < fn->eh[r].hi; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_CALL ||
+                (!i->indirect && i->callee && i->callee->is_nothrow))
+                continue;
+            i->eh_region = r + 1;
+            any = 1;
+        }
+    if (!any)
+        fn->neh = 0;
+}
 
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop)
 {
     for (; s; s = s->next) {
-        if (s->line)
+        if (s->line) {
             g_cur_line = s->line;   /* -g: rows key off statement lines */
+            g_cur_col = s->col;
+        }
         switch (s->kind) {
         case STMT_BREAK:
+            vla_release(fn, loop->brk_vla);
             emit_jmp(fn, loop->brk);
             break;
         case STMT_CONTINUE:
+            vla_release(fn, loop->cont_vla);
             emit_jmp(fn, loop->cont);
+            break;
+        case STMT_EHREGION:
+            gen_eh_region(fn, s, loop);
             break;
         case STMT_LABEL: {
             int ix = label_idx(fn, s->name, s->line);
             if (g_labels[ix].defined)
-                diag_fatal(fn->src->file, s->line, "duplicate label '%s'",
+                diag_fatal(fn->file, s->line, "duplicate label '%s'",
                            s->name);
             g_labels[ix].defined = 1;
             emit_label(fn, g_labels[ix].label);
@@ -2142,6 +2256,13 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 i->op = IR_IGOTO;
                 i->a = v;
             } else {
+                /* leaving the scope of every VLA whose remaining statements
+                 * do not define the label: release from the outermost */
+                for (int k = 0; k < g_nvla; k++)
+                    if (!stmts_define_label(g_vla[k].decl->next, s->name)) {
+                        vla_release(fn, k);
+                        break;
+                    }
                 emit_jmp(fn, g_labels[label_idx(fn, s->name, s->line)].label);
             }
             break;
@@ -2150,6 +2271,32 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 break; /* block-scope extern: a declaration, emits no code */
             if (s->sglob)
                 break; /* a static local IS its global; no code here */
+            if (ty_is_vm(s->dty))
+                vla_eval(fn, s->dty);
+            if (ty_is_vla(s->dty)) {
+                /* save sp, carve the array off the stack, keep its address
+                 * in the variable's slot */
+                struct type *ul = ty_base(TY_LONG, 1);
+                struct ir_ins *sv = emit(fn);
+                sv->op = IR_SPSAVE;
+                sv->dst = new_temp(fn);
+                emit_stvar(fn, s->vla_sp, sv->dst, ul);
+                int size = type_size_val(fn, s->dty);
+                struct ir_ins *al = emit(fn);
+                al->op = IR_ALLOCA;
+                al->a = size;
+                al->dst = new_temp(fn);
+                emit_stvar(fn, s->var_index, al->dst, ty_ptr(s->dty->pointee));
+                fn->has_alloca = 1;
+                if (g_nvla == (int)(sizeof g_vla / sizeof g_vla[0]))
+                    diag_fatal(fn->file, s->line,
+                               "more than %d nested variable length arrays",
+                               (int)(sizeof g_vla / sizeof g_vla[0]));
+                g_vla[g_nvla].sp_slot = s->vla_sp;
+                g_vla[g_nvla].decl = s;
+                g_nvla++;
+                break;
+            }
             if (s->ninits) {
                 /* C zero-fills whatever the initializer does not
                  * mention, so clear the object first and then place
@@ -2196,73 +2343,13 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
         case STMT_EXPR:
             gen_expr(fn, s->expr); /* value discarded */
             break;
-        case STMT_ASM: {
-            struct asm_stmt *a = s->asm_s;
-            struct ir_asm *ia = xcalloc(1, sizeof *ia);
-            ia->nin = a->nin;
-            ia->nout = a->nout;
-            ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);
-            ia->out = xcalloc((size_t)(a->nout ? a->nout : 1),
-                              sizeof *ia->out);
-            /* Assign registers: fixed ones (from sema) reserve their slot;
-             * allocatable ones (-2) get a free register. Then %N substitution
-             * numbers outputs first, then inputs, exactly as gcc does. */
-            int used[16] = { 0 };
-            int xused[8] = { 0 };   /* xmm operands (reg 16..23) */
-            for (int i = 0; i < a->nout; i++) {
-                if (a->out[i].reg >= 16) xused[a->out[i].reg - 16] = 1;
-                else if (a->out[i].reg >= 0) used[a->out[i].reg] = 1;
-            }
-            for (int i = 0; i < a->nin; i++) {
-                if (a->in[i].reg >= 16) xused[a->in[i].reg - 16] = 1;
-                else if (a->in[i].reg >= 0) used[a->in[i].reg] = 1;
-            }
-            /* Exclude clobbered registers, and any hard register the template
-             * writes explicitly, from the allocatable pool (K12): otherwise an
-             * allocatable "r" operand can land in a register the asm destroys
-             * before it is used (e.g. %2 -> rdx while the template does
-             * `movq %6,%%rdx`), silently corrupting the operand. */
-            for (int i = 0; i < a->nclob; i++) {
-                int r = asm_phys_reg(a->clob[i], (int)strlen(a->clob[i]));
-                if (r >= 0) used[r] = 1;
-            }
-            asm_mark_template_regs(a->tmpl, used);
-            int opregs[2 * MAX_PARAMS], nops = 0;
-            const char *opnames[2 * MAX_PARAMS];
-            for (int i = 0; i < a->nout; i++) {
-                int r = a->out[i].reg;
-                if (r == -2)      r = asm_alloc_reg(used, fn->src->file, s->line);
-                else if (r == -3) r = asm_alloc_xmm(xused, fn->src->file, s->line);
-                ia->out[i].reg = r;
-                opnames[nops] = a->out[i].name;
-                opregs[nops++] = r;
-            }
-            for (int i = 0; i < a->nin; i++) {
-                int r = a->in[i].reg;
-                if (r == -2)      r = asm_alloc_reg(used, fn->src->file, s->line);
-                else if (r == -3) r = asm_alloc_xmm(xused, fn->src->file, s->line);
-                ia->in[i].reg = r;
-                opnames[nops] = a->in[i].name;
-                opregs[nops++] = r;
-            }
-            asm_assemble(fn, s, opregs, opnames, nops, ia);
-            /* An input carries its VALUE; an output the ADDRESS of its
-             * lvalue. An xmm ('x') input is moved with movss/movsd, so its
-             * size is the operand's own float width. */
-            for (int i = 0; i < a->nin; i++) {
-                ia->in[i].temp = gen_expr(fn, a->in[i].expr);
-                ia->in[i].size = ia->in[i].reg >= 16
-                               ? ty_size(a->in[i].expr->ty) : 8;
-            }
-            for (int i = 0; i < a->nout; i++) {
-                ia->out[i].temp = gen_addr(fn, a->out[i].expr);
-                ia->out[i].size = ty_size(a->out[i].expr->ty);
-            }
-            struct ir_ins *ins = emit(fn);
-            ins->op = IR_ASM;
-            ins->asm_ir = ia;
+        case STMT_ASM:
+            /* the template is assembled by the target's own vocabulary */
+            if (target_get() == TARGET_AARCH64)
+                irg_asm_arm64(fn, s);
+            else
+                irg_asm_x86(fn, s);
             break;
-        }
         case STMT_RETURN: {
             struct ir_ins *i;
             int v = s->expr ? gen_expr(fn, s->expr) : -1;
@@ -2282,8 +2369,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
         }
         case STMT_IF: {
             int l_else = new_label(fn);
-            int c = gen_expr(fn, s->cond);
-            emit_brz(fn, c, ty_w(s->cond->ty), l_else);
+            int cw;
+            int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+            emit_brz(fn, c, cw, l_else);
             gen_stmt(fn, s->thn, loop);
             if (s->els) {
                 int l_end = new_label(fn);
@@ -2303,11 +2391,13 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             int l_top = new_label(fn);
             lc.cont = new_label(fn);
             lc.brk = new_label(fn);
+            lc.brk_vla = lc.cont_vla = g_nvla;
             emit_label(fn, l_top);
             gen_stmt(fn, s->body, &lc);
             emit_label(fn, lc.cont);
-            int c = gen_expr(fn, s->cond);
-            emit_brnz(fn, c, ty_w(s->cond->ty), l_top);
+            int cw;
+            int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+            emit_brnz(fn, c, cw, l_top);
             emit_label(fn, lc.brk);
             break;
         }
@@ -2324,6 +2414,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             /* continue inside a switch belongs to the enclosing LOOP;
              * sema has already refused it when there is none. */
             lc.cont = loop ? loop->cont : -1;
+            lc.brk_vla = g_nvla;
+            lc.cont_vla = loop ? loop->cont_vla : 0;
 
             int v = gen_expr(fn, s->cond);
             int w = ty_w(s->cond->ty);
@@ -2360,9 +2452,11 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             struct loopctx lc;
             lc.cont = new_label(fn); /* while: continue re-tests */
             lc.brk = new_label(fn);
+            lc.brk_vla = lc.cont_vla = g_nvla;
             emit_label(fn, lc.cont);
-            int c = gen_expr(fn, s->cond);
-            emit_brz(fn, c, ty_w(s->cond->ty), lc.brk);
+            int cw;
+            int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+            emit_brz(fn, c, cw, lc.brk);
             gen_stmt(fn, s->body, &lc);
             emit_jmp(fn, lc.cont);
             emit_label(fn, lc.brk);
@@ -2374,14 +2468,20 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             struct loopctx lc;
             lc.cont = new_label(fn);
             lc.brk = new_label(fn);
+            int for_vla = g_nvla;
+            lc.brk_vla = lc.cont_vla = g_nvla;
             if (s->initdecl)
                 gen_stmt(fn, s->initdecl, &lc);
+            /* a VLA in the init-declaration lives across iterations: a
+             * break/continue does not release it; leaving the loop does */
+            lc.brk_vla = lc.cont_vla = g_nvla;
             if (s->init)
                 gen_expr(fn, s->init);
             emit_label(fn, l_cond);
             if (s->cond) { /* NULL = forever, left by break */
-                int c = gen_expr(fn, s->cond);
-                emit_brz(fn, c, ty_w(s->cond->ty), lc.brk);
+                int cw;
+                int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);
+                emit_brz(fn, c, cw, lc.brk);
             }
             gen_stmt(fn, s->body, &lc);
             emit_label(fn, lc.cont);
@@ -2389,6 +2489,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 gen_expr(fn, s->step);
             emit_jmp(fn, l_cond);
             emit_label(fn, lc.brk);
+            vla_release(fn, for_vla);
+            g_nvla = for_vla;
             break;
         }
         case STMT_BLOCK: {
@@ -2397,11 +2499,14 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
              * disjoint sibling blocks get disjoint ranges and may share a slot
              * (codegen). Static/extern decls have no frame slot — skip them. */
             int lo = fn->nins;
+            int depth = g_nvla;
             gen_stmt(fn, s->body, loop);
+            vla_release(fn, depth);   /* the block's VLAs end with it */
+            g_nvla = depth;
             int hi = fn->nins;
             for (struct stmt *c = s->body; c; c = c->next)
                 if (c->kind == STMT_DECL && !c->is_extern && !c->sglob &&
-                    c->var_index >= 0 && c->var_index < fn->src->nvars) {
+                    c->var_index >= 0 && c->var_index < fn->nvars) {
                     fn->var_scope_lo[c->var_index] = lo;
                     fn->var_scope_hi[c->var_index] = hi;
                 }
@@ -2417,7 +2522,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
  * rejected by sema, so a dummy loop context suffices for the prefix. */
 static int gen_stmtexpr(struct ir_func *fn, struct expr *e)
 {
-    static const struct loopctx none = { -1, -1 };
+    static const struct loopctx none = { -1, -1, 0, 0 };
     struct stmt *body = e->body->body;   /* the block's statement list */
     struct stmt *last = NULL, *prev = NULL;
     for (struct stmt *s = body; s; s = s->next) {
@@ -2425,22 +2530,26 @@ static int gen_stmtexpr(struct ir_func *fn, struct expr *e)
             prev = s;
         last = s;
     }
+    int depth = g_nvla;
     if (last && last != body) {          /* emit all but the last statement */
         prev->next = NULL;
         gen_stmt(fn, body, &none);
         prev->next = last;
     }
+    int v = -1;
     if (last && last->kind == STMT_EXPR && last->expr)
-        return gen_expr(fn, last->expr); /* the block's value */
-    if (last)
+        v = gen_expr(fn, last->expr);    /* the block's value */
+    else if (last)
         gen_stmt(fn, last, &none);       /* a non-value last statement */
-    return -1;
+    vla_release(fn, depth);              /* its VLAs end with it */
+    g_nvla = depth;
+    return v;
 }
 
 /* -g: record one source variable. Skips the unnamed (prototype params never
  * reach a definition, but be defensive) so the DWARF DIE always has a name. */
 static void add_dbgvar(struct ir_func *fn, const char *name, int vreg,
-                       int is_param, struct type *ty)
+                       int is_param, struct type *ty, int line, int col)
 {
     if (!name) return;
     if (fn->ndbgvars == fn->dbgvarcap) {
@@ -2453,6 +2562,8 @@ static void add_dbgvar(struct ir_func *fn, const char *name, int vreg,
     v->vreg = vreg;
     v->is_param = is_param;
     v->ty = ty;
+    v->line = line;
+    v->col = col;
 }
 
 /* -g: walk the body for block-scope locals. Each STMT_DECL owns a var slot
@@ -2468,11 +2579,15 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
                 break;
             if (!s->sglob)
                 add_dbgvar(fn, s->name, s->var_index, 0,
-                           fn->src->var_tys[s->var_index]);
+                           fn->src->var_tys[s->var_index], s->line, s->col);
             break;
         case STMT_IF:
             collect_locals(fn, s->thn);
             collect_locals(fn, s->els);
+            break;
+        case STMT_EHREGION:
+            collect_locals(fn, s->body);
+            collect_locals(fn, s->thn);
             break;
         case STMT_WHILE:
         case STMT_DO:
@@ -2495,12 +2610,54 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
 static void gen_func(struct ir_func *fn, struct func *f)
 {
     fn->src = f;
+    /* Copied, not referenced: see struct ir_func. */
+    fn->name = f->name;
+    fn->file = f->file;
+    fn->line = f->line;
+    fn->is_static = f->is_static;
+    fn->is_varargs = f->is_varargs;
+    fn->nparams = f->nparams;
+    fn->nvars = f->nvars;
+    /* The same for every frame slot, and for the return type. */
+    ir_locals_fill(fn, f, f->nvars);
+    {
+        struct type *rt = f->ret_ty;
+        fn->ret_abi.size = rt ? ty_size(rt) : 0;
+        fn->ret_abi.align = rt ? ty_align(rt) : 1;
+        fn->ret_abi.is_struct = rt && rt->kind == TY_STRUCT;
+        fn->ret_abi.is_float = rt && ty_is_float(rt);
+        fn->ret_abi.is_int128 = rt && rt->kind == TY_INT128;
+        fn->ret_abi.hfa_size = 0;
+        fn->ret_abi.hfa_n = ty_hfa(rt, &fn->ret_abi.hfa_size);
+        fn->ret_abi.byref = ty_aapcs64_byref(rt);
+        fn->ret_abi.ty = rt;
+    }
+    /* The ABI facts about each parameter, decided here where the types are
+     * still in hand. */
+    if (f->nparams > 0) {
+        fn->param_abi = xcalloc((size_t)f->nparams, sizeof *fn->param_abi);
+        for (int k = 0; k < f->nparams; k++) {
+            struct type *pt = f->param_tys[k];
+            struct ir_arg *a = &fn->param_abi[k];
+            a->vreg = k;
+            a->size = pt ? ty_size(pt) : 0;
+            a->align = pt ? ty_align(pt) : 1;
+            a->is_struct = pt && pt->kind == TY_STRUCT;
+            a->is_float = pt && ty_is_float(pt);
+            a->is_int128 = pt && pt->kind == TY_INT128;
+            a->hfa_size = 0;
+            a->hfa_n = ty_hfa(pt, &a->hfa_size);
+            a->byref = ty_aapcs64_byref(pt);
+            a->ty = pt;
+        }
+    }
     fn->nvregs = f->nvars; /* params + locals occupy [0, nvars) */
     g_cur_line = f->line;  /* prologue rows attribute to the definition */
     /* -g bookkeeping (harmless when -g is off — only the DWARF pass reads it):
      * parameters are vregs [0, nparams); locals come from the body. */
     for (int i = 0; i < f->nparams; i++)
-        add_dbgvar(fn, f->params[i], i, 1, f->param_tys[i]);
+        add_dbgvar(fn, f->params[i], i, 1, f->param_tys[i],
+                   f->param_lines[i], f->param_cols[i]);
     collect_locals(fn, f->body);
     /* Local scope ranges: default to the whole function ([0, +inf), narrowed to
      * the real end below) so any local not inside a nested block never coalesces
@@ -2514,14 +2671,34 @@ static void gen_func(struct ir_func *fn, struct func *f)
         }
     }
     g_nlabels_used = 0;                 /* labels are per-function */
+    g_nvla = 0;
+    if (f->has_vm_params)               /* `int a[n][m]`: its row size */
+        for (int i = 0; i < f->nparams; i++)
+            vla_eval(fn, f->param_tys[i]);
+    g_eh_cur = -1;
     gen_stmt(fn, f->body, NULL);
+    if (fn->neh)
+        mark_eh_calls(fn);
     for (int i = 0; i < f->nvars; i++)  /* clamp the un-narrowed default */
         if (fn->var_scope_hi[i] == 0x7fffffff)
             fn->var_scope_hi[i] = fn->nins;
     for (int i = 0; i < g_nlabels_used; i++)
         if (!g_labels[i].defined)
-            diag_fatal(fn->src->file, g_labels[i].line,
+            diag_fatal(fn->file, g_labels[i].line,
                        "label '%s' used but not defined", g_labels[i].name);
+    /* __int128 anywhere: a local, a parameter, the result, or an op */
+    fn->has_i128 = f->ret_ty && f->ret_ty->kind == TY_INT128;
+    for (int i = 0; i < f->nvars && !fn->has_i128; i++)
+        fn->has_i128 = f->var_tys && f->var_tys[i] &&
+                       f->var_tys[i]->kind == TY_INT128;
+    for (int n = 0; n < fn->nins && !fn->has_i128; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        fn->has_i128 = (!i->flt && i->w == 16 && i->op != IR_LOAD &&
+                        i->op != IR_LDVAR && i->op != IR_I2F &&
+                        i->op != IR_F2F) ||
+                       (i->op == IR_I2F && i->size == 16) ||
+                       (i->op == IR_F2I && i->w == 16);
+    }
 }
 
 struct ir_unit *irgen(struct unit *u)

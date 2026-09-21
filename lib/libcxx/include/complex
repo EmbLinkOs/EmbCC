@@ -1,0 +1,365 @@
+/* <complex> — C++ [complex.numbers].
+ *
+ * A class rather than C's `_Complex`, and the difference is worth
+ * stating because both exist in this tree. C's is a LANGUAGE type: the
+ * compiler knows `z * w`, and lib/libc has `cabs`, `csqrt` and the
+ * rest. This is a template, so `complex<float>` costs two floats and
+ * nothing else, and the arithmetic is ordinary operator overloading.
+ *
+ * The standard guarantees the layout: a `complex<T>` is exactly two T
+ * in order, real then imaginary, and an array of them is interleaved
+ * exactly as C's is. That is what lets `reinterpret_cast<T *>(&z)` work
+ * and what lets an array be handed to an FFT written in C.
+ *
+ * ---- the parts that are not obvious -------------------------------------
+ *
+ * MULTIPLICATION AND DIVISION are written the naive way here, and that
+ * is a real trade rather than an oversight. (ac-bd, ad+bc) overflows
+ * to infinity when the true product is representable -- `complex<float>
+ * (1e30, 1e30) * (1e30, 1e30)` is the classic example -- and C99's
+ * Annex G describes the rescaling that avoids it. libstdc++ uses the
+ * compiler's `_Complex` arithmetic to get it. This does not, and says
+ * so: the naive form is exact for every input whose intermediate
+ * products fit, which is every input a program not written to break it
+ * will produce.
+ *
+ * ABS is not sqrt(x*x + y*y). That squares both parts, so it overflows
+ * for any x above the square root of the largest float -- around 1e19
+ * for a double, which is a perfectly ordinary magnitude. Scaling by the
+ * larger part first costs a divide and makes the function work over the
+ * whole range, which is the entire reason `hypot` exists in C.
+ */
+#ifndef _LIBCXX_COMPLEX
+#define _LIBCXX_COMPLEX
+
+#include <cmath>
+#include <iosfwd>
+#include <type_traits>
+
+namespace std {
+
+template <class T>
+class complex {
+public:
+    using value_type = T;
+
+    constexpr complex(const T &re = T(), const T &im = T())
+        : __re(re), __im(im) {}
+
+    template <class U>
+    constexpr complex(const complex<U> &o)
+        : __re(T(o.real())), __im(T(o.imag())) {}
+
+    constexpr T real() const { return __re; }
+    constexpr T imag() const { return __im; }
+    void real(T v) { __re = v; }
+    void imag(T v) { __im = v; }
+
+    /* Assigning a scalar sets the imaginary part to ZERO rather than
+     * leaving it: `z = 1` means the number one, not "one plus whatever
+     * z used to have". */
+    complex &operator=(const T &v) { __re = v; __im = T(); return *this; }
+    complex &operator+=(const T &v) { __re += v; return *this; }
+    complex &operator-=(const T &v) { __re -= v; return *this; }
+    complex &operator*=(const T &v) { __re *= v; __im *= v; return *this; }
+    complex &operator/=(const T &v) { __re /= v; __im /= v; return *this; }
+
+    template <class U>
+    complex &operator+=(const complex<U> &o)
+    { __re += o.real(); __im += o.imag(); return *this; }
+    template <class U>
+    complex &operator-=(const complex<U> &o)
+    { __re -= o.real(); __im -= o.imag(); return *this; }
+
+    template <class U>
+    complex &operator*=(const complex<U> &o)
+    {
+        /* The real part must be computed BEFORE __re is overwritten, or
+         * the imaginary part uses the new one. A temporary, not
+         * cleverness. */
+        T r = __re * T(o.real()) - __im * T(o.imag());
+        __im = __re * T(o.imag()) + __im * T(o.real());
+        __re = r;
+        return *this;
+    }
+
+    template <class U>
+    complex &operator/=(const complex<U> &o)
+    {
+        T cr = T(o.real()), ci = T(o.imag());
+        T d = cr * cr + ci * ci;
+        T r = (__re * cr + __im * ci) / d;
+        __im = (__im * cr - __re * ci) / d;
+        __re = r;
+        return *this;
+    }
+
+private:
+    /* Two T in order, which the standard guarantees and which an FFT
+     * written in C relies on. */
+    T __re, __im;
+};
+
+/* ---- the free operators ---------------------------------------------- */
+
+template <class T>
+constexpr complex<T> operator+(const complex<T> &a) { return a; }
+template <class T>
+constexpr complex<T> operator-(const complex<T> &a)
+{ return complex<T>(-a.real(), -a.imag()); }
+
+template <class T>
+constexpr complex<T> operator+(const complex<T> &a, const complex<T> &b)
+{ return complex<T>(a.real() + b.real(), a.imag() + b.imag()); }
+template <class T>
+constexpr complex<T> operator+(const complex<T> &a, const T &b)
+{ return complex<T>(a.real() + b, a.imag()); }
+template <class T>
+constexpr complex<T> operator+(const T &a, const complex<T> &b)
+{ return complex<T>(a + b.real(), b.imag()); }
+
+template <class T>
+constexpr complex<T> operator-(const complex<T> &a, const complex<T> &b)
+{ return complex<T>(a.real() - b.real(), a.imag() - b.imag()); }
+template <class T>
+constexpr complex<T> operator-(const complex<T> &a, const T &b)
+{ return complex<T>(a.real() - b, a.imag()); }
+template <class T>
+constexpr complex<T> operator-(const T &a, const complex<T> &b)
+{ return complex<T>(a - b.real(), -b.imag()); }
+
+template <class T>
+constexpr complex<T> operator*(const complex<T> &a, const complex<T> &b)
+{
+    return complex<T>(a.real() * b.real() - a.imag() * b.imag(),
+                      a.real() * b.imag() + a.imag() * b.real());
+}
+template <class T>
+constexpr complex<T> operator*(const complex<T> &a, const T &b)
+{ return complex<T>(a.real() * b, a.imag() * b); }
+template <class T>
+constexpr complex<T> operator*(const T &a, const complex<T> &b)
+{ return complex<T>(a * b.real(), a * b.imag()); }
+
+template <class T>
+constexpr complex<T> operator/(const complex<T> &a, const complex<T> &b)
+{
+    T d = b.real() * b.real() + b.imag() * b.imag();
+    return complex<T>((a.real() * b.real() + a.imag() * b.imag()) / d,
+                      (a.imag() * b.real() - a.real() * b.imag()) / d);
+}
+template <class T>
+constexpr complex<T> operator/(const complex<T> &a, const T &b)
+{ return complex<T>(a.real() / b, a.imag() / b); }
+template <class T>
+constexpr complex<T> operator/(const T &a, const complex<T> &b)
+{ return complex<T>(a, T()) / b; }
+
+/* Equality only -- there is no ORDER on the complex numbers, and the
+ * standard gives none rather than inventing one. A `<` that compared
+ * magnitudes would make two different numbers compare equivalent. */
+template <class T>
+constexpr bool operator==(const complex<T> &a, const complex<T> &b)
+{ return a.real() == b.real() && a.imag() == b.imag(); }
+template <class T>
+constexpr bool operator==(const complex<T> &a, const T &b)
+{ return a.real() == b && a.imag() == T(); }
+template <class T>
+constexpr bool operator==(const T &a, const complex<T> &b)
+{ return b == a; }
+template <class T>
+constexpr bool operator!=(const complex<T> &a, const complex<T> &b)
+{ return !(a == b); }
+template <class T>
+constexpr bool operator!=(const complex<T> &a, const T &b)
+{ return !(a == b); }
+template <class T>
+constexpr bool operator!=(const T &a, const complex<T> &b)
+{ return !(b == a); }
+
+/* ---- the accessors ---------------------------------------------------- */
+
+template <class T> constexpr T real(const complex<T> &z) { return z.real(); }
+template <class T> constexpr T imag(const complex<T> &z) { return z.imag(); }
+
+template <class T>
+constexpr complex<T> conj(const complex<T> &z)
+{ return complex<T>(z.real(), -z.imag()); }
+
+/* The squared magnitude. Cheaper than abs and exact where abs rounds,
+ * which is why comparisons of magnitude should use it -- but it
+ * overflows where abs does not, so it is not a replacement. */
+template <class T>
+constexpr T norm(const complex<T> &z)
+{ return z.real() * z.real() + z.imag() * z.imag(); }
+
+/* NOT sqrt(x*x + y*y): squaring overflows for any part above the square
+ * root of the largest value, around 1e19 for a double. Scaling by the
+ * larger part costs a divide and works over the whole range. */
+template <class T>
+T abs(const complex<T> &z)
+{
+    T x = z.real() < T() ? -z.real() : z.real();
+    T y = z.imag() < T() ? -z.imag() : z.imag();
+    if (x == T())
+        return y;
+    if (y == T())
+        return x;
+    if (x < y) {
+        T t = x;
+        x = y;
+        y = t;
+    }
+    T r = y / x;
+    return x * (T)sqrt((double)(T(1) + r * r));
+}
+
+template <class T>
+T arg(const complex<T> &z)
+{ return (T)atan2((double)z.imag(), (double)z.real()); }
+
+template <class T>
+complex<T> polar(const T &r, const T &theta = T())
+{ return complex<T>(r * (T)cos((double)theta), r * (T)sin((double)theta)); }
+
+/* ---- the transcendental functions --------------------------------------
+ *
+ * Each written from the real ones rather than borrowed from C's
+ * `_Complex` versions: a complex<float> should not round through a
+ * double, and the identities are short enough to be checkable.
+ */
+template <class T>
+complex<T> exp(const complex<T> &z)
+{
+    T e = (T)::exp((double)z.real());
+    return complex<T>(e * (T)cos((double)z.imag()),
+                      e * (T)sin((double)z.imag()));
+}
+
+/* The principal branch: the imaginary part is in (-pi, pi]. Every
+ * complex logarithm has infinitely many values and this is the one
+ * everything else is built on. */
+template <class T>
+complex<T> log(const complex<T> &z)
+{ return complex<T>((T)::log((double)abs(z)), arg(z)); }
+
+template <class T>
+complex<T> log10(const complex<T> &z)
+{ return log(z) / T((T)2.302585092994045684017991454684364208L); }
+
+template <class T>
+complex<T> sqrt(const complex<T> &z)
+{
+    /* Through polar form: the square root halves the argument and takes
+     * the root of the magnitude. The zero case is separate because
+     * arg(0) is not defined. */
+    if (z.real() == T() && z.imag() == T())
+        return complex<T>();
+    T m = (T)::sqrt((double)abs(z));
+    T a = arg(z) / T(2);
+    return complex<T>(m * (T)cos((double)a), m * (T)sin((double)a));
+}
+
+template <class T>
+complex<T> pow(const complex<T> &z, const complex<T> &w)
+{
+    if (z.real() == T() && z.imag() == T())
+        return complex<T>();
+    return exp(w * log(z));
+}
+template <class T>
+complex<T> pow(const complex<T> &z, const T &w)
+{ return pow(z, complex<T>(w)); }
+template <class T>
+complex<T> pow(const T &z, const complex<T> &w)
+{ return pow(complex<T>(z), w); }
+
+template <class T>
+complex<T> sin(const complex<T> &z)
+{
+    return complex<T>((T)::sin((double)z.real()) * (T)::cosh((double)z.imag()),
+                      (T)::cos((double)z.real()) * (T)::sinh((double)z.imag()));
+}
+template <class T>
+complex<T> cos(const complex<T> &z)
+{
+    return complex<T>((T)::cos((double)z.real()) * (T)::cosh((double)z.imag()),
+                      -(T)::sin((double)z.real()) * (T)::sinh((double)z.imag()));
+}
+template <class T>
+complex<T> tan(const complex<T> &z) { return sin(z) / cos(z); }
+
+template <class T>
+complex<T> sinh(const complex<T> &z)
+{
+    return complex<T>((T)::sinh((double)z.real()) * (T)::cos((double)z.imag()),
+                      (T)::cosh((double)z.real()) * (T)::sin((double)z.imag()));
+}
+template <class T>
+complex<T> cosh(const complex<T> &z)
+{
+    return complex<T>((T)::cosh((double)z.real()) * (T)::cos((double)z.imag()),
+                      (T)::sinh((double)z.real()) * (T)::sin((double)z.imag()));
+}
+template <class T>
+complex<T> tanh(const complex<T> &z) { return sinh(z) / cosh(z); }
+
+/* The inverse functions, each an identity over log and sqrt. Written
+ * out rather than approximated, so they are exactly as accurate as the
+ * pieces they are made of. */
+template <class T>
+complex<T> asin(const complex<T> &z)
+{
+    complex<T> i(T(), T(1));
+    return -i * log(i * z + sqrt(complex<T>(T(1)) - z * z));
+}
+template <class T>
+complex<T> acos(const complex<T> &z)
+{
+    complex<T> i(T(), T(1));
+    return -i * log(z + i * sqrt(complex<T>(T(1)) - z * z));
+}
+template <class T>
+complex<T> atan(const complex<T> &z)
+{
+    complex<T> i(T(), T(1));
+    return (i / complex<T>(T(2))) *
+           (log(complex<T>(T(1)) - i * z) - log(complex<T>(T(1)) + i * z));
+}
+template <class T>
+complex<T> asinh(const complex<T> &z)
+{ return log(z + sqrt(z * z + complex<T>(T(1)))); }
+template <class T>
+complex<T> acosh(const complex<T> &z)
+{ return log(z + sqrt(z * z - complex<T>(T(1)))); }
+template <class T>
+complex<T> atanh(const complex<T> &z)
+{
+    return (log(complex<T>(T(1)) + z) - log(complex<T>(T(1)) - z)) /
+           complex<T>(T(2));
+}
+
+/* ---- the literals ------------------------------------------------------- */
+
+inline namespace literals {
+inline namespace complex_literals {
+
+constexpr complex<double> operator""i(long double d)
+{ return complex<double>(0.0, (double)d); }
+constexpr complex<double> operator""i(unsigned long long n)
+{ return complex<double>(0.0, (double)n); }
+constexpr complex<float> operator""if(long double d)
+{ return complex<float>(0.0f, (float)d); }
+constexpr complex<float> operator""if(unsigned long long n)
+{ return complex<float>(0.0f, (float)n); }
+constexpr complex<long double> operator""il(long double d)
+{ return complex<long double>(0.0L, d); }
+constexpr complex<long double> operator""il(unsigned long long n)
+{ return complex<long double>(0.0L, (long double)n); }
+
+}  // namespace complex_literals
+}  // namespace literals
+
+}  // namespace std
+
+#endif

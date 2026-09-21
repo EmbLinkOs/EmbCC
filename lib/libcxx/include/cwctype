@@ -1,0 +1,35 @@
+/* <cwctype> — the C header's names, in namespace std as well as at
+ * global scope. See <wctype.h>: in the "C" locale these classify
+ * exactly the basic execution character set and answer "no" above it,
+ * which is what the "C" locale MEANS rather than a shortcut. */
+#ifndef _LIBCXX_CWCTYPE
+#define _LIBCXX_CWCTYPE
+#include <wctype.h>
+
+namespace std {
+using ::wctype_t;
+using ::wctrans_t;
+using ::wint_t;
+
+using ::iswalnum;
+using ::iswalpha;
+using ::iswblank;
+using ::iswcntrl;
+using ::iswdigit;
+using ::iswgraph;
+using ::iswlower;
+using ::iswprint;
+using ::iswpunct;
+using ::iswspace;
+using ::iswupper;
+using ::iswxdigit;
+
+using ::towlower;
+using ::towupper;
+using ::wctype;
+using ::iswctype;
+using ::wctrans;
+using ::towctrans;
+}
+
+#endif

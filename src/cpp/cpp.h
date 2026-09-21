@@ -18,4 +18,30 @@
 char *cpp_process(const char *path, const char *src,
                   const char **incdirs, int nincdirs);
 
+/* A C++ unit: what __has_builtin answers (the C++ front-end's builtins,
+ * type traits included), and whether exceptions are on (__cpp_exceptions,
+ * __EXCEPTIONS). Set before cpp_process; C units leave them alone, and
+ * C's preprocessing does not change. */
+void cpp_set_cxx(int (*has_builtin)(const char *name), int exceptions);
+/* C++'s -std=: the year (1998, 2011, 2014, 2017, 2020, 2023, 2026) and
+ * whether c++NN rather than gnu++NN (__STRICT_ANSI__) */
+void cpp_set_cxx_std(int year, int strict);
+void cpp_set_cxx_char8(int on);             /* -fchar8_t */
+/* -DNAME[=VALUE] (undef 0) or -UNAME (undef 1), before cpp_process */
+void cpp_cmdline_define(const char *text, int undef);
+
+/* Keep going where a header cannot be found (a tool reading an editor's
+ * buffer; never the compiler). */
+void cpp_set_tolerant(int on);
+
+/* Which include directories are system ones (-isystem, the compiler's own):
+ * their headers are what -MM leaves out of the dependency list. `flags` is
+ * indexed as incdirs is, and must outlive the preprocessing. */
+void cpp_set_system_dirs(const int *flags, int n);
+
+/* The headers the last cpp_process opened, in order (-M and friends). */
+int cpp_dep_count(void);
+const char *cpp_dep_path(int i);
+int cpp_dep_is_system(int i);
+
 #endif

@@ -1,0 +1,5 @@
+/* <cfloat> — C++ [cfloat.syn]. */
+#ifndef _LIBCXX_CFLOAT
+#define _LIBCXX_CFLOAT
+#include <float.h>
+#endif

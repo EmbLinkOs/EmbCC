@@ -1,0 +1,1082 @@
+/* <ranges> — C++ [ranges].
+ *
+ * Two ideas, and the second is the one that matters.
+ *
+ * The first is that a RANGE is one object rather than two iterators.
+ * `sort(v)` instead of `sort(v.begin(), v.end())` removes a whole class
+ * of bug -- the mismatched pair, `sort(a.begin(), b.end())`, which
+ * compiles and is undefined -- and it composes, because a function can
+ * return a range and cannot return two iterators.
+ *
+ * The second is that a VIEW is lazy and owns nothing. `v | filter(odd)
+ * | transform(sq)` allocates nothing and touches no element until it is
+ * iterated, and then touches each exactly once, because the composition
+ * is a type, not a pipeline of containers. Writing the same thing with
+ * the classic algorithms means two intermediate vectors and two full
+ * passes. That is the difference this header exists for, and it is why
+ * a view must be cheap to copy: `filter_view` holds a reference to its
+ * source and a copy of its predicate, nothing else.
+ *
+ * ---- what is here ------------------------------------------------------
+ *
+ * The range concepts, `ranges::begin`/`end`/`size`/`data` and their
+ * associated types, `view_interface`, `subrange`, and the views that
+ * earn their keep: `all`, `iota`, `single`, `empty`, `filter`,
+ * `transform`, `take`, `take_while`, `drop`, `drop_while`, `reverse`,
+ * `common`, `elements`/`keys`/`values`, and `join`. Each composes with
+ * `|`, and the closure objects behind `|` are ordinary function objects
+ * rather than niebloids, which is the one place this is narrower than
+ * the standard: ADL is not blocked, so a user-defined `begin` found by
+ * argument-dependent lookup is not consulted. Every container here has
+ * members, so nothing in this tree notices.
+ *
+ * NOT here: the range algorithms (`ranges::sort` and friends) beyond the
+ * handful below, `istream_view`, `split`, `lazy_split`, and the C++23
+ * additions. What is absent is absent rather than half-written.
+ *
+ * ---- iterator categories ------------------------------------------------
+ *
+ * A view's iterator reports the WEAKEST category its source and its
+ * operation can support, and that is not pedantry. `filter_view` over a
+ * random-access source is only BIDIRECTIONAL, because you cannot jump
+ * n elements forward when you do not yet know which ones the predicate
+ * keeps; an iterator that claimed random access would make
+ * `std::advance` skip the wrong elements silently -- exactly the bug
+ * `deque`'s iterator had here once.
+ */
+#ifndef _LIBCXX_RANGES
+#define _LIBCXX_RANGES
+
+#include <algorithm>
+#include <compare>
+#include <concepts>
+#include <iterator>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+/* ---- begin / end / size / data ------------------------------------------
+ *
+ * Function objects rather than plain functions so they can be passed
+ * around and so `decltype(ranges::begin)` names something. A C array is
+ * handled by its own overload, which is what makes an array a range.
+ */
+namespace __detail {
+
+struct __begin_fn {
+    template <class T, size_t N>
+    constexpr T *operator()(T (&a)[N]) const noexcept { return a; }
+    template <class R>
+    constexpr auto operator()(R &&r) const -> decltype(r.begin())
+    { return r.begin(); }
+};
+
+struct __end_fn {
+    template <class T, size_t N>
+    constexpr T *operator()(T (&a)[N]) const noexcept { return a + N; }
+    template <class R>
+    constexpr auto operator()(R &&r) const -> decltype(r.end())
+    { return r.end(); }
+};
+
+struct __size_fn {
+    template <class T, size_t N>
+    constexpr size_t operator()(const T (&)[N]) const noexcept { return N; }
+    template <class R>
+    constexpr auto operator()(R &&r) const -> decltype(r.size())
+    { return r.size(); }
+};
+
+struct __data_fn {
+    template <class T, size_t N>
+    constexpr T *operator()(T (&a)[N]) const noexcept { return a; }
+    template <class R>
+    constexpr auto operator()(R &&r) const -> decltype(r.data())
+    { return r.data(); }
+};
+
+}  // namespace __detail
+
+inline constexpr __detail::__begin_fn begin{};
+inline constexpr __detail::__end_fn end{};
+inline constexpr __detail::__size_fn size{};
+inline constexpr __detail::__data_fn data{};
+
+/* ---- the associated types ----------------------------------------------- */
+
+template <class R>
+using iterator_t = decltype(ranges::begin(declval<R &>()));
+template <class R>
+using sentinel_t = decltype(ranges::end(declval<R &>()));
+template <class R>
+using range_difference_t = iter_difference_t<iterator_t<R>>;
+template <class R>
+using range_value_t = iter_value_t<iterator_t<R>>;
+template <class R>
+using range_reference_t = decltype(*declval<iterator_t<R> &>());
+
+/* ---- the range concepts -------------------------------------------------
+ *
+ * Each names exactly what an algorithm needs, which is why there are so
+ * many of them: an algorithm constrained on `input_range` works on a
+ * stream, one constrained on `random_access_range` does not, and the
+ * difference is checked where the call is written rather than found
+ * three templates down.
+ */
+template <class T>
+concept range = requires(T &t) {
+    ranges::begin(t);
+    ranges::end(t);
+};
+
+template <class T>
+concept sized_range = range<T> && requires(T &t) { ranges::size(t); };
+
+template <class R>
+concept input_range =
+    range<R> &&
+    derived_from<iter_category_t<iterator_t<R>>, input_iterator_tag>;
+template <class R>
+concept forward_range =
+    range<R> &&
+    derived_from<iter_category_t<iterator_t<R>>, forward_iterator_tag>;
+template <class R>
+concept bidirectional_range =
+    range<R> &&
+    derived_from<iter_category_t<iterator_t<R>>, bidirectional_iterator_tag>;
+template <class R>
+concept random_access_range =
+    range<R> &&
+    derived_from<iter_category_t<iterator_t<R>>, random_access_iterator_tag>;
+template <class R>
+concept contiguous_range =
+    random_access_range<R> && requires(R &r) { ranges::data(r); };
+
+/* A "common" range is one whose begin and end have the SAME type, which
+ * every classic algorithm assumes and which a view with a sentinel does
+ * not have. It is the property `views::common` exists to restore. */
+template <class R>
+concept common_range =
+    range<R> && is_same_v<iterator_t<R>, sentinel_t<R>>;
+
+/* ---- view_interface -----------------------------------------------------
+ *
+ * The members every view should have, written once in terms of the two
+ * every view must provide. CRTP rather than virtual: a view is copied
+ * constantly and must stay the size of its parts.
+ */
+struct view_base {};
+
+template <class D>
+class view_interface : public view_base {
+    constexpr D &__self() { return static_cast<D &>(*this); }
+    constexpr const D &__self() const { return static_cast<const D &>(*this); }
+
+public:
+    constexpr bool empty()
+    { return ranges::begin(__self()) == ranges::end(__self()); }
+    constexpr bool empty() const
+    { return ranges::begin(__self()) == ranges::end(__self()); }
+
+    constexpr explicit operator bool() { return !empty(); }
+    constexpr explicit operator bool() const { return !empty(); }
+
+    constexpr auto front() { return *ranges::begin(__self()); }
+    constexpr auto front() const { return *ranges::begin(__self()); }
+
+    constexpr auto size()
+    { return ranges::end(__self()) - ranges::begin(__self()); }
+    constexpr auto size() const
+    { return ranges::end(__self()) - ranges::begin(__self()); }
+
+    constexpr auto back()
+    { auto e = ranges::end(__self()); --e; return *e; }
+    constexpr auto back() const
+    { auto e = ranges::end(__self()); --e; return *e; }
+
+    /* A template on a defaulted parameter, not a plain member, and the
+     * reason is structural: view_interface is a BASE of the view, so it
+     * is instantiated while that view is still incomplete. Naming
+     * `range_difference_t<D>` in a plain signature would ask for D's
+     * iterator before D has a begin(). A template's signature is
+     * substituted when it is called, by which time D is complete. */
+    template <class DD = D>
+    constexpr auto operator[](range_difference_t<DD> n)
+    { return *(ranges::begin(__self()) + n); }
+    template <class DD = D>
+    constexpr auto operator[](range_difference_t<DD> n) const
+    { return *(ranges::begin(__self()) + n); }
+};
+
+template <class T>
+concept view = range<T> && is_base_of_v<view_base, remove_cvref_t<T>>;
+
+/* ---- subrange -----------------------------------------------------------
+ * An iterator pair, as a range. This is the adaptor that lets the two
+ * worlds meet: an algorithm that hands back a pair of iterators can hand
+ * back one of these instead and be piped into. */
+template <class I, class S = I>
+class subrange : public view_interface<subrange<I, S>> {
+public:
+    constexpr subrange() = default;
+    constexpr subrange(I b, S e) : __b(b), __e(e) {}
+    template <class R>
+    constexpr explicit subrange(R &&r)
+        : __b(ranges::begin(r)), __e(ranges::end(r)) {}
+
+    constexpr I begin() const { return __b; }
+    constexpr S end() const { return __e; }
+
+private:
+    I __b{};
+    S __e{};
+};
+
+/* ---- ref_view and views::all --------------------------------------------
+ *
+ * A view over a container the caller still owns. This is what makes
+ * `v | filter(...)` legal without copying v: the pipeline holds a
+ * POINTER to v, so it is cheap to copy and dangles if v dies first.
+ * That trade is the whole design, and it is why a view must never be
+ * stored longer than what it views.
+ */
+template <class R>
+class ref_view : public view_interface<ref_view<R>> {
+public:
+    constexpr ref_view(R &r) : __r(&r) {}
+    constexpr auto begin() const { return ranges::begin(*__r); }
+    constexpr auto end() const { return ranges::end(*__r); }
+    constexpr R &base() const { return *__r; }
+
+private:
+    R *__r;
+};
+
+namespace views {
+
+namespace __detail {
+struct __all_fn {
+    /* A view is already a view: pass it through by value. Anything else
+     * is wrapped by reference. */
+    template <class R>
+    constexpr auto operator()(R &&r) const
+    {
+        if constexpr (view<remove_cvref_t<R>>)
+            return static_cast<R &&>(r);
+        else
+            return ref_view<remove_reference_t<R>>(r);
+    }
+};
+}
+
+inline constexpr __detail::__all_fn all{};
+
+template <class R>
+using all_t = decltype(all(declval<R>()));
+
+}  // namespace views
+
+/* ---- the pipe -----------------------------------------------------------
+ *
+ * `r | a | b` is `b(a(r))`, and the machinery for it is one class: an
+ * adaptor with its arguments bound, plus an `operator|` that calls it.
+ * Composing two closures without a range makes a third closure, which
+ * is what lets `auto f = filter(odd) | transform(sq);` be a value.
+ */
+template <class F>
+struct __closure {
+    F __f;
+    constexpr explicit __closure(F f) : __f(f) {}
+    template <class R>
+    constexpr auto operator()(R &&r) const
+    { return __f(static_cast<R &&>(r)); }
+};
+
+template <class R, class F>
+constexpr auto operator|(R &&r, const __closure<F> &c)
+    -> decltype(c(static_cast<R &&>(r)))
+{ return c(static_cast<R &&>(r)); }
+
+template <class F, class G>
+constexpr auto operator|(const __closure<F> &f, const __closure<G> &g)
+{
+    return __closure([f, g](auto &&r) {
+        return g(f(static_cast<decltype(r)>(r)));
+    });
+}
+
+/* ---- iota_view ----------------------------------------------------------
+ *
+ * The one view with no source: it generates. Unbounded by default, which
+ * is why `views::iota(0)` must be piped into something that stops --
+ * and "unbounded" is a TYPE, not a flag. The bound shows up in the type
+ * of end(), so a runtime `bool bounded` cannot express it: end() would
+ * have to return an iterator either way, and the only iterator it could
+ * return for an unbounded range is one that compares equal to begin()
+ * and makes the range empty. That was this view's first bug.
+ */
+struct unreachable_sentinel_t {};
+inline constexpr unreachable_sentinel_t unreachable_sentinel{};
+
+template <class W, class B = unreachable_sentinel_t>
+class iota_view : public view_interface<iota_view<W, B>> {
+public:
+    class iterator {
+    public:
+        using iterator_category = input_iterator_tag;
+        using value_type = W;
+        using difference_type = ptrdiff_t;
+        using reference = W;
+        using pointer = void;
+
+        constexpr iterator() : __v() {}
+        constexpr explicit iterator(W v) : __v(v) {}
+        /* Dereferencing yields a VALUE, not a reference: there is no
+         * object to refer to. That is why iota is only an input range
+         * however random its arithmetic looks. */
+        constexpr W operator*() const { return __v; }
+        constexpr iterator &operator++() { ++__v; return *this; }
+        constexpr iterator operator++(int)
+        { iterator t = *this; ++__v; return t; }
+        constexpr iterator &operator--() { --__v; return *this; }
+        constexpr iterator operator+(difference_type n) const
+        { return iterator(W(__v + n)); }
+        constexpr iterator operator-(difference_type n) const
+        { return iterator(W(__v - n)); }
+        constexpr difference_type operator-(const iterator &o) const
+        { return (difference_type)(__v - o.__v); }
+        friend constexpr bool operator==(const iterator &a, const iterator &b)
+        { return a.__v == b.__v; }
+        friend constexpr bool operator!=(const iterator &a, const iterator &b)
+        { return !(a == b); }
+        /* Never equal, by construction: that is the whole of what an
+         * unbounded range's end means. */
+        friend constexpr bool operator==(const iterator &, unreachable_sentinel_t)
+        { return false; }
+        friend constexpr bool operator!=(const iterator &, unreachable_sentinel_t)
+        { return true; }
+        friend constexpr bool operator==(unreachable_sentinel_t, const iterator &)
+        { return false; }
+        friend constexpr bool operator!=(unreachable_sentinel_t, const iterator &)
+        { return true; }
+
+    private:
+        W __v;
+    };
+
+    constexpr explicit iota_view(W b) : __b(b), __e() {}
+    constexpr iota_view(W b, W e) : __b(b), __e(e) {}
+
+    constexpr iterator begin() const { return iterator(__b); }
+    constexpr auto end() const
+    {
+        if constexpr (is_same_v<B, unreachable_sentinel_t>)
+            return unreachable_sentinel;
+        else
+            return iterator(__e);
+    }
+
+private:
+    W __b, __e;
+};
+
+/* ---- single_view and empty_view ----------------------------------------- */
+
+template <class T>
+class single_view : public view_interface<single_view<T>> {
+public:
+    constexpr single_view() : __v() {}
+    constexpr explicit single_view(T v) : __v(v) {}
+    constexpr T *begin() { return &__v; }
+    constexpr const T *begin() const { return &__v; }
+    constexpr T *end() { return &__v + 1; }
+    constexpr const T *end() const { return &__v + 1; }
+    constexpr size_t size() const { return 1; }
+
+private:
+    T __v;
+};
+
+template <class T>
+class empty_view : public view_interface<empty_view<T>> {
+public:
+    constexpr T *begin() const { return nullptr; }
+    constexpr T *end() const { return nullptr; }
+    constexpr size_t size() const { return 0; }
+};
+
+/* ---- filter_view --------------------------------------------------------
+ *
+ * The iterator advances past everything the predicate rejects, so `++`
+ * is a loop and `*` is free. `begin()` must ALSO skip, or a range whose
+ * first element fails would start on it.
+ *
+ * Only bidirectional at best, whatever the source is: you cannot jump n
+ * kept elements ahead without looking at the ones in between.
+ */
+template <class V, class P>
+class filter_view : public view_interface<filter_view<V, P>> {
+    using __base_iter = iterator_t<V>;
+
+public:
+    class iterator {
+    public:
+        using iterator_category =
+            conditional_t<derived_from<iter_category_t<__base_iter>,
+                                       bidirectional_iterator_tag>,
+                          bidirectional_iterator_tag,
+                          iter_category_t<__base_iter>>;
+        using value_type = iter_value_t<__base_iter>;
+        using difference_type = iter_difference_t<__base_iter>;
+        using reference = decltype(*declval<__base_iter &>());
+        using pointer = void;
+
+        constexpr iterator() : __p(nullptr) {}
+        constexpr iterator(const filter_view *p, __base_iter i)
+            : __p(p), __i(i) {}
+
+        constexpr reference operator*() const { return *__i; }
+        constexpr iterator &operator++()
+        {
+            ++__i;
+            __skip();
+            return *this;
+        }
+        constexpr iterator operator++(int)
+        { iterator t = *this; ++*this; return t; }
+        constexpr iterator &operator--()
+        {
+            do { --__i; } while (!__p->__pred(*__i));
+            return *this;
+        }
+        constexpr iterator operator--(int)
+        { iterator t = *this; --*this; return t; }
+
+        friend constexpr bool operator==(const iterator &a, const iterator &b)
+        { return a.__i == b.__i; }
+        friend constexpr bool operator!=(const iterator &a, const iterator &b)
+        { return !(a == b); }
+
+        constexpr __base_iter base() const { return __i; }
+
+        constexpr void __skip()
+        {
+            while (__i != ranges::end(__p->__v) && !__p->__pred(*__i))
+                ++__i;
+        }
+
+    private:
+        const filter_view *__p;
+        __base_iter __i{};
+    };
+
+    constexpr filter_view(V v, P p) : __v(v), __p(p) {}
+
+    constexpr iterator begin() const
+    {
+        iterator it(this, ranges::begin(__v));
+        it.__skip();
+        return it;
+    }
+    constexpr iterator end() const
+    { return iterator(this, ranges::end(__v)); }
+
+    constexpr bool __pred(const range_reference_t<V> &x) const
+    { return __p(x); }
+
+private:
+    V __v;
+    P __p;
+};
+
+/* ---- transform_view -----------------------------------------------------
+ * Keeps its source's category exactly: applying f to element n costs the
+ * same as reaching element n, so nothing is lost. */
+template <class V, class F>
+class transform_view : public view_interface<transform_view<V, F>> {
+    using __base_iter = iterator_t<V>;
+
+public:
+    class iterator {
+    public:
+        using iterator_category = iter_category_t<__base_iter>;
+        using value_type =
+            remove_cvref_t<decltype(declval<const F &>()(
+                *declval<__base_iter &>()))>;
+        using difference_type = iter_difference_t<__base_iter>;
+        using reference = value_type;
+        using pointer = void;
+
+        constexpr iterator() : __p(nullptr) {}
+        constexpr iterator(const transform_view *p, __base_iter i)
+            : __p(p), __i(i) {}
+
+        /* A VALUE, not a reference: the transformed object does not
+         * exist anywhere to point at. */
+        constexpr reference operator*() const { return __p->__apply(*__i); }
+        constexpr iterator &operator++() { ++__i; return *this; }
+        constexpr iterator operator++(int)
+        { iterator t = *this; ++__i; return t; }
+        constexpr iterator &operator--() { --__i; return *this; }
+        constexpr iterator operator--(int)
+        { iterator t = *this; --__i; return t; }
+        constexpr iterator &operator+=(difference_type n)
+        { __i += n; return *this; }
+        constexpr iterator operator+(difference_type n) const
+        { return iterator(__p, __i + n); }
+        constexpr iterator operator-(difference_type n) const
+        { return iterator(__p, __i - n); }
+        constexpr difference_type operator-(const iterator &o) const
+        { return __i - o.__i; }
+        constexpr reference operator[](difference_type n) const
+        { return __p->__apply(__i[n]); }
+
+        friend constexpr bool operator==(const iterator &a, const iterator &b)
+        { return a.__i == b.__i; }
+        friend constexpr bool operator!=(const iterator &a, const iterator &b)
+        { return !(a == b); }
+        friend constexpr bool operator<(const iterator &a, const iterator &b)
+        { return a.__i < b.__i; }
+
+        constexpr __base_iter base() const { return __i; }
+
+    private:
+        const transform_view *__p;
+        __base_iter __i{};
+    };
+
+    constexpr transform_view(V v, F f) : __v(v), __f(f) {}
+
+    constexpr iterator begin() const
+    { return iterator(this, ranges::begin(__v)); }
+    constexpr iterator end() const
+    { return iterator(this, ranges::end(__v)); }
+
+    template <class X>
+    constexpr auto __apply(X &&x) const -> decltype(__f(static_cast<X &&>(x)))
+    { return __f(static_cast<X &&>(x)); }
+
+private:
+    V __v;
+    F __f;
+};
+
+/* ---- take_view / drop_view ----------------------------------------------
+ *
+ * take stops early, so it must NOT walk past its count on a non-sized
+ * source; drop skips at the front, which for a random-access source is
+ * one addition and for anything else is a loop. Both keep the source's
+ * category.
+ */
+template <class V>
+class take_view : public view_interface<take_view<V>> {
+public:
+    constexpr take_view(V v, range_difference_t<V> n) : __v(v), __n(n) {}
+
+    constexpr auto begin() const { return ranges::begin(__v); }
+    constexpr auto end() const
+    {
+        auto b = ranges::begin(__v);
+        auto e = ranges::end(__v);
+        /* Advance by n, but stop at the real end: taking 10 from a
+         * 3-element range is 3 elements, not undefined behaviour. */
+        for (range_difference_t<V> i = 0; i < __n && b != e; i++)
+            ++b;
+        return b;
+    }
+
+private:
+    V __v;
+    range_difference_t<V> __n;
+};
+
+template <class V>
+class drop_view : public view_interface<drop_view<V>> {
+public:
+    constexpr drop_view(V v, range_difference_t<V> n) : __v(v), __n(n) {}
+
+    constexpr auto begin() const
+    {
+        auto b = ranges::begin(__v);
+        auto e = ranges::end(__v);
+        for (range_difference_t<V> i = 0; i < __n && b != e; i++)
+            ++b;
+        return b;
+    }
+    constexpr auto end() const { return ranges::end(__v); }
+
+private:
+    V __v;
+    range_difference_t<V> __n;
+};
+
+/* ---- take_while_view / drop_while_view ---------------------------------- */
+
+template <class V, class P>
+class take_while_view : public view_interface<take_while_view<V, P>> {
+public:
+    constexpr take_while_view(V v, P p) : __v(v), __p(p) {}
+
+    constexpr auto begin() const { return ranges::begin(__v); }
+    constexpr auto end() const
+    {
+        auto b = ranges::begin(__v);
+        auto e = ranges::end(__v);
+        while (b != e && __p(*b))
+            ++b;
+        return b;
+    }
+
+private:
+    V __v;
+    P __p;
+};
+
+template <class V, class P>
+class drop_while_view : public view_interface<drop_while_view<V, P>> {
+public:
+    constexpr drop_while_view(V v, P p) : __v(v), __p(p) {}
+
+    constexpr auto begin() const
+    {
+        auto b = ranges::begin(__v);
+        auto e = ranges::end(__v);
+        while (b != e && __p(*b))
+            ++b;
+        return b;
+    }
+    constexpr auto end() const { return ranges::end(__v); }
+
+private:
+    V __v;
+    P __p;
+};
+
+/* ---- reverse_view -------------------------------------------------------
+ * Needs a COMMON bidirectional source, because reverse_iterator is built
+ * from an iterator and its end must be an iterator too. */
+template <class V>
+class reverse_view : public view_interface<reverse_view<V>> {
+public:
+    constexpr explicit reverse_view(V v) : __v(v) {}
+    constexpr auto begin() const
+    { return std::reverse_iterator<iterator_t<V>>(ranges::end(__v)); }
+    constexpr auto end() const
+    { return std::reverse_iterator<iterator_t<V>>(ranges::begin(__v)); }
+
+private:
+    V __v;
+};
+
+/* ---- elements_view ------------------------------------------------------
+ * The Nth member of each tuple-like element, which is what makes
+ * `m | views::keys` read as it does over a map. */
+template <class V, size_t N>
+class elements_view : public view_interface<elements_view<V, N>> {
+    using __base_iter = iterator_t<V>;
+
+public:
+    class iterator {
+    public:
+        using iterator_category = iter_category_t<__base_iter>;
+        using value_type = remove_cvref_t<decltype(
+            get<N>(*declval<__base_iter &>()))>;
+        using difference_type = iter_difference_t<__base_iter>;
+        using reference = decltype(get<N>(*declval<__base_iter &>()));
+        using pointer = void;
+
+        constexpr iterator() {}
+        constexpr explicit iterator(__base_iter i) : __i(i) {}
+        constexpr reference operator*() const { return get<N>(*__i); }
+        constexpr iterator &operator++() { ++__i; return *this; }
+        constexpr iterator operator++(int)
+        { iterator t = *this; ++__i; return t; }
+        constexpr iterator &operator--() { --__i; return *this; }
+        friend constexpr bool operator==(const iterator &a, const iterator &b)
+        { return a.__i == b.__i; }
+        friend constexpr bool operator!=(const iterator &a, const iterator &b)
+        { return !(a == b); }
+
+    private:
+        __base_iter __i{};
+    };
+
+    constexpr explicit elements_view(V v) : __v(v) {}
+    constexpr iterator begin() const { return iterator(ranges::begin(__v)); }
+    constexpr iterator end() const { return iterator(ranges::end(__v)); }
+
+private:
+    V __v;
+};
+
+/* ---- join_view ----------------------------------------------------------
+ * Flattens a range of ranges. The iterator holds BOTH positions and the
+ * outer one advances whenever the inner runs out -- including several
+ * times in a row, because an inner range may be empty. That loop is the
+ * whole of it and is the part a first attempt always gets wrong. */
+template <class V>
+class join_view : public view_interface<join_view<V>> {
+    using __outer = iterator_t<V>;
+    using __inner_range = range_reference_t<V>;
+    using __inner = iterator_t<remove_reference_t<__inner_range>>;
+
+public:
+    class iterator {
+    public:
+        using iterator_category = input_iterator_tag;
+        using value_type = iter_value_t<__inner>;
+        using difference_type = ptrdiff_t;
+        using reference = decltype(*declval<__inner &>());
+        using pointer = void;
+
+        constexpr iterator() : __v(nullptr) {}
+        constexpr iterator(const join_view *v, __outer o) : __v(v), __o(o)
+        { __settle(); }
+
+        constexpr reference operator*() const { return *__i; }
+        constexpr iterator &operator++()
+        {
+            ++__i;
+            if (__i == ranges::end(*__o)) {
+                ++__o;
+                __settle();
+            }
+            return *this;
+        }
+        constexpr iterator operator++(int)
+        { iterator t = *this; ++*this; return t; }
+
+        friend constexpr bool operator==(const iterator &a, const iterator &b)
+        {
+            if (a.__o != b.__o)
+                return false;
+            /* At the end there is no inner iterator to compare. */
+            return a.__at_end() || b.__at_end() ? a.__at_end() == b.__at_end()
+                                                : a.__i == b.__i;
+        }
+        friend constexpr bool operator!=(const iterator &a, const iterator &b)
+        { return !(a == b); }
+
+    private:
+        constexpr bool __at_end() const
+        { return __o == ranges::end(__v->__v); }
+
+        /* Walk the outer iterator forward until it points at a non-empty
+         * inner range, or off the end. */
+        constexpr void __settle()
+        {
+            while (__o != ranges::end(__v->__v)) {
+                __i = ranges::begin(*__o);
+                if (__i != ranges::end(*__o))
+                    return;
+                ++__o;
+            }
+        }
+
+        const join_view *__v;
+        __outer __o{};
+        __inner __i{};
+    };
+
+    constexpr explicit join_view(V v) : __v(v) {}
+    constexpr iterator begin() const
+    { return iterator(this, ranges::begin(__v)); }
+    constexpr iterator end() const
+    { return iterator(this, ranges::end(__v)); }
+
+private:
+    friend class iterator;
+    V __v;
+};
+
+/* ---- common_view --------------------------------------------------------
+ * Restores begin == end types so a classic algorithm can take it. Ours
+ * is the easy case: every view here is already common, so this is the
+ * identity, and it is written out rather than left missing because
+ * generic code names it. */
+template <class V>
+class common_view : public view_interface<common_view<V>> {
+public:
+    constexpr explicit common_view(V v) : __v(v) {}
+    constexpr auto begin() const { return ranges::begin(__v); }
+    constexpr auto end() const { return ranges::end(__v); }
+
+private:
+    V __v;
+};
+
+/* ---- the adaptor objects ------------------------------------------------ */
+
+namespace views {
+
+namespace __detail {
+
+/* The adaptors that take no arguments -- reverse, common, join, keys --
+ * are function objects, not closures, so `r | reverse` needs an
+ * operator| of its own. It has to live HERE, in the adaptors' own
+ * namespace: argument-dependent lookup considers the innermost
+ * namespace of each argument's type and not the ones enclosing it, so
+ * an operator| in std::ranges is found for a __closure (which lives
+ * there) and not for these. That is why `v | reverse` failed while
+ * `v | take(4) | reverse` worked -- the left operand of the second was
+ * itself a std::ranges type, which dragged the namespace in. */
+struct __pipeable {};
+
+template <class R, class F,
+          class = enable_if_t<is_base_of_v<__pipeable, remove_cvref_t<F>>>>
+constexpr auto operator|(R &&r, const F &f)
+    -> decltype(f(static_cast<R &&>(r)))
+{ return f(static_cast<R &&>(r)); }
+
+struct __filter_fn {
+    template <class R, class P>
+    constexpr auto operator()(R &&r, P p) const
+    {
+        return filter_view<all_t<R>, P>(all(static_cast<R &&>(r)), p);
+    }
+    template <class P>
+    constexpr auto operator()(P p) const
+    {
+        return __closure([p](auto &&r) {
+            using R = decltype(r);
+            return filter_view<all_t<R>, P>(all(static_cast<R &&>(r)), p);
+        });
+    }
+};
+
+struct __transform_fn {
+    template <class R, class F>
+    constexpr auto operator()(R &&r, F f) const
+    {
+        return transform_view<all_t<R>, F>(all(static_cast<R &&>(r)), f);
+    }
+    template <class F>
+    constexpr auto operator()(F f) const
+    {
+        return __closure([f](auto &&r) {
+            using R = decltype(r);
+            return transform_view<all_t<R>, F>(all(static_cast<R &&>(r)), f);
+        });
+    }
+};
+
+struct __take_fn {
+    template <class R>
+    constexpr auto operator()(R &&r, ptrdiff_t n) const
+    { return take_view<all_t<R>>(all(static_cast<R &&>(r)), n); }
+    constexpr auto operator()(ptrdiff_t n) const
+    {
+        return __closure([n](auto &&r) {
+            using R = decltype(r);
+            return take_view<all_t<R>>(all(static_cast<R &&>(r)), n);
+        });
+    }
+};
+
+struct __drop_fn {
+    template <class R>
+    constexpr auto operator()(R &&r, ptrdiff_t n) const
+    { return drop_view<all_t<R>>(all(static_cast<R &&>(r)), n); }
+    constexpr auto operator()(ptrdiff_t n) const
+    {
+        return __closure([n](auto &&r) {
+            using R = decltype(r);
+            return drop_view<all_t<R>>(all(static_cast<R &&>(r)), n);
+        });
+    }
+};
+
+struct __take_while_fn {
+    template <class R, class P>
+    constexpr auto operator()(R &&r, P p) const
+    {
+        return take_while_view<all_t<R>, P>(all(static_cast<R &&>(r)), p);
+    }
+    template <class P>
+    constexpr auto operator()(P p) const
+    {
+        return __closure([p](auto &&r) {
+            using R = decltype(r);
+            return take_while_view<all_t<R>, P>(all(static_cast<R &&>(r)), p);
+        });
+    }
+};
+
+struct __drop_while_fn {
+    template <class R, class P>
+    constexpr auto operator()(R &&r, P p) const
+    {
+        return drop_while_view<all_t<R>, P>(all(static_cast<R &&>(r)), p);
+    }
+    template <class P>
+    constexpr auto operator()(P p) const
+    {
+        return __closure([p](auto &&r) {
+            using R = decltype(r);
+            return drop_while_view<all_t<R>, P>(all(static_cast<R &&>(r)), p);
+        });
+    }
+};
+
+struct __reverse_fn : __pipeable {
+    template <class R>
+    constexpr auto operator()(R &&r) const
+    { return reverse_view<all_t<R>>(all(static_cast<R &&>(r))); }
+};
+
+struct __common_fn : __pipeable {
+    template <class R>
+    constexpr auto operator()(R &&r) const
+    { return common_view<all_t<R>>(all(static_cast<R &&>(r))); }
+};
+
+struct __join_fn : __pipeable {
+    template <class R>
+    constexpr auto operator()(R &&r) const
+    { return join_view<all_t<R>>(all(static_cast<R &&>(r))); }
+};
+
+template <size_t N>
+struct __elements_fn : __pipeable {
+    template <class R>
+    constexpr auto operator()(R &&r) const
+    { return elements_view<all_t<R>, N>(all(static_cast<R &&>(r))); }
+};
+
+struct __iota_fn {
+    template <class W>
+    constexpr auto operator()(W b) const
+    { return iota_view<W, unreachable_sentinel_t>(b); }
+    template <class W>
+    constexpr auto operator()(W b, W e) const
+    { return iota_view<W, W>(b, e); }
+};
+
+}  // namespace __detail
+
+inline constexpr __detail::__filter_fn filter{};
+inline constexpr __detail::__transform_fn transform{};
+inline constexpr __detail::__take_fn take{};
+inline constexpr __detail::__drop_fn drop{};
+inline constexpr __detail::__take_while_fn take_while{};
+inline constexpr __detail::__drop_while_fn drop_while{};
+inline constexpr __detail::__reverse_fn reverse{};
+inline constexpr __detail::__common_fn common{};
+inline constexpr __detail::__join_fn join{};
+inline constexpr __detail::__elements_fn<0> keys{};
+inline constexpr __detail::__elements_fn<1> values{};
+inline constexpr __detail::__iota_fn iota{};
+
+template <size_t N>
+inline constexpr __detail::__elements_fn<N> elements{};
+
+}  // namespace views
+
+/* ---- the few algorithms worth having in range form ---------------------- */
+
+template <class R, class F>
+constexpr F for_each(R &&r, F f)
+{
+    for (auto i = ranges::begin(r), e = ranges::end(r); i != e; ++i)
+        f(*i);
+    return f;
+}
+
+template <class R, class T>
+constexpr auto find(R &&r, const T &v)
+{
+    auto i = ranges::begin(r);
+    auto e = ranges::end(r);
+    for (; i != e; ++i)
+        if (*i == v)
+            break;
+    return i;
+}
+
+template <class R, class P>
+constexpr auto find_if(R &&r, P p)
+{
+    auto i = ranges::begin(r);
+    auto e = ranges::end(r);
+    for (; i != e; ++i)
+        if (p(*i))
+            break;
+    return i;
+}
+
+template <class R, class P>
+constexpr bool all_of(R &&r, P p)
+{
+    for (auto i = ranges::begin(r), e = ranges::end(r); i != e; ++i)
+        if (!p(*i))
+            return false;
+    return true;
+}
+
+template <class R, class P>
+constexpr bool any_of(R &&r, P p)
+{
+    for (auto i = ranges::begin(r), e = ranges::end(r); i != e; ++i)
+        if (p(*i))
+            return true;
+    return false;
+}
+
+template <class R, class P>
+constexpr bool none_of(R &&r, P p)
+{ return !ranges::any_of(static_cast<R &&>(r), p); }
+
+template <class R, class T>
+constexpr range_difference_t<R> count(R &&r, const T &v)
+{
+    range_difference_t<R> n = 0;
+    for (auto i = ranges::begin(r), e = ranges::end(r); i != e; ++i)
+        if (*i == v)
+            n++;
+    return n;
+}
+
+template <class R, class P>
+constexpr range_difference_t<R> count_if(R &&r, P p)
+{
+    range_difference_t<R> n = 0;
+    for (auto i = ranges::begin(r), e = ranges::end(r); i != e; ++i)
+        if (p(*i))
+            n++;
+    return n;
+}
+
+template <class R, class O>
+constexpr O copy(R &&r, O o)
+{
+    for (auto i = ranges::begin(r), e = ranges::end(r); i != e; ++i)
+        *o++ = *i;
+    return o;
+}
+
+template <class R>
+constexpr void sort(R &&r)
+{ std::sort(ranges::begin(r), ranges::end(r)); }
+
+template <class R, class C>
+constexpr void sort(R &&r, C c)
+{ std::sort(ranges::begin(r), ranges::end(r), c); }
+
+template <class R>
+constexpr auto distance(R &&r)
+{
+    range_difference_t<R> n = 0;
+    for (auto i = ranges::begin(r), e = ranges::end(r); i != e; ++i)
+        n++;
+    return n;
+}
+
+}  // namespace ranges
+
+namespace views = ranges::views;
+
+}  // namespace std
+
+#endif

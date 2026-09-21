@@ -1,0 +1,638 @@
+/* <string> — C++ [strings].
+ *
+ * The layout is {pointer, size, union{capacity, buffer}} and a short
+ * string lives in the buffer, with the pointer aimed at it. That is the
+ * SMALL STRING OPTIMISATION, and it is the reason this class is worth
+ * writing rather than wrapping a vector: most strings in most programs
+ * are short, and a short one here costs no allocation at all.
+ *
+ * "Is it short?" is `__p == __buf` -- a pointer comparison, not a stolen
+ * bit. Stealing the top bit of the capacity is one word smaller and is
+ * what libc++ does, but it depends on the byte order and on the capacity
+ * never needing that bit, and neither of those is worth a word here.
+ *
+ * The consequence to remember is that the object is SELF-REFERENTIAL when
+ * short, so copying or moving one cannot just copy the bytes: the
+ * pointer has to be re-aimed at the new object's own buffer. That is the
+ * mistake this design makes easy to make, so every such place says so.
+ */
+#ifndef _LIBCXX_STRING
+#define _LIBCXX_STRING
+
+#include <iosfwd>
+#include <cstddef>
+#include <cstring>
+#include <type_traits>
+#include <utility>
+#include <iterator>
+#include <memory>
+#include <initializer_list>
+
+namespace std {
+
+[[noreturn]] void __throw_string_out_of_range();
+[[noreturn]] void __throw_string_too_long();
+
+template <class C>
+struct char_traits;
+
+template <>
+struct char_traits<char> {
+    using char_type = char;
+    using int_type = int;
+
+    static constexpr void assign(char &a, const char &b) noexcept { a = b; }
+    static constexpr bool eq(char a, char b) noexcept { return a == b; }
+    /* Unsigned, because the ORDER of characters is defined on their
+     * values as unsigned char -- with a signed char, "é" would sort
+     * before "a". */
+    static constexpr bool lt(char a, char b) noexcept
+    { return (unsigned char)a < (unsigned char)b; }
+
+    static size_t length(const char *s) noexcept { return __builtin_strlen(s); }
+    static int compare(const char *a, const char *b, size_t n) noexcept
+    { return n == 0 ? 0 : __builtin_memcmp(a, b, n); }
+    static const char *find(const char *s, size_t n, const char &c) noexcept
+    { return n == 0 ? nullptr : (const char *)__builtin_memchr(s, c, n); }
+    static char *move(char *d, const char *s, size_t n) noexcept
+    { return n == 0 ? d : (char *)__builtin_memmove(d, s, n); }
+    static char *copy(char *d, const char *s, size_t n) noexcept
+    { return n == 0 ? d : (char *)__builtin_memcpy(d, s, n); }
+    static char *assign(char *d, size_t n, char c) noexcept
+    { return n == 0 ? d : (char *)__builtin_memset(d, c, n); }
+
+    static constexpr int_type eof() noexcept { return -1; }
+    static constexpr int_type to_int_type(char c) noexcept
+    { return (int_type)(unsigned char)c; }
+    static constexpr char to_char_type(int_type i) noexcept { return (char)i; }
+    static constexpr bool eq_int_type(int_type a, int_type b) noexcept
+    { return a == b; }
+    static constexpr int_type not_eof(int_type i) noexcept
+    { return i == eof() ? 0 : i; }
+};
+
+/* "string-view-like": a type that hands out C characters through
+ * data() and size(). [string.cons]/15 spells this out as "convertible
+ * to basic_string_view<C, T>", but <string> cannot ask that question:
+ * <string_view> includes THIS header, so basic_string_view is only
+ * ever incomplete here, and is_convertible to an incomplete type is
+ * not a question C++ allows. Asking for the two members instead needs
+ * no declaration at all and admits exactly the types that matter.
+ *
+ * A string is excluded because its own constructors handle it, and
+ * anything converting to const C* because `string s("x")` must go on
+ * choosing the pointer constructor. */
+template <class C, class V, class = void>
+struct __sv_like : false_type {};
+template <class C, class V>
+struct __sv_like<C, V,
+    void_t<decltype(static_cast<const C *>(declval<const V &>().data())),
+           decltype(declval<const V &>().size())>>
+    : bool_constant<!is_convertible<const V &, const C *>::value> {};
+
+template <class C, class T, class A>
+class basic_string {
+    using __atr = allocator_traits<A>;
+
+public:
+    using traits_type = T;
+    using value_type = C;
+    using allocator_type = A;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = C &;
+    using const_reference = const C &;
+    using pointer = C *;
+    using const_pointer = const C *;
+    using iterator = C *;
+    using const_iterator = const C *;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    static const size_type npos = (size_type)-1;
+
+    basic_string() noexcept : __a() { __init_short(0); }
+    explicit basic_string(const A &a) noexcept : __a(a) { __init_short(0); }
+
+    basic_string(const C *s) : __a() { __init_from(s, T::length(s)); }
+
+    /* From a string_view, or anything else shaped like one. Explicit,
+     * as the standard has it: a view does not own its characters, so
+     * making a string out of one is a copy worth writing down. */
+    template <class V, class = typename enable_if<
+        __sv_like<C, V>::value &&
+        !is_same<typename decay<V>::type, basic_string>::value>::type>
+    explicit basic_string(const V &v) : __a()
+    { __init_from(v.data(), v.size()); }
+
+    basic_string(const C *s, size_type n) : __a() { __init_from(s, n); }
+
+    basic_string(size_type n, C c) : __a()
+    {
+        __init_short(0);
+        __grow_to(n);
+        T::assign(__p, n, c);
+        __sz = n;
+        __p[n] = C();
+    }
+
+    basic_string(const basic_string &o) : __a()
+    { __init_from(o.__p, o.__sz); }
+
+    basic_string(const basic_string &o, size_type pos, size_type n = npos)
+        : __a()
+    {
+        if (pos > o.__sz)
+            __throw_string_out_of_range();
+        size_type k = n < o.__sz - pos ? n : o.__sz - pos;
+        __init_from(o.__p + pos, k);
+    }
+
+    /* A SHORT string cannot be stolen: its data lives inside `o`, so the
+     * bytes are copied and the new object points at its own buffer. Only
+     * a long one hands over its allocation. Copying the three words
+     * blindly is the bug this class invites -- the result would point
+     * into a dead object. */
+    basic_string(basic_string &&o) noexcept : __a(move(o.__a))
+    {
+        if (o.__is_short()) {
+            __init_short(o.__sz);
+            T::copy(__buf, o.__buf, o.__sz + 1);
+        } else {
+            __p = o.__p;
+            __sz = o.__sz;
+            __cap = o.__cap;
+            o.__init_short(0);
+        }
+    }
+
+    basic_string(initializer_list<C> l) : __a()
+    { __init_from(l.begin(), l.size()); }
+
+    template <class It, class = iter_value_t<It>>
+    basic_string(It first, It last) : __a()
+    {
+        __init_short(0);
+        for (; first != last; ++first)
+            push_back(*first);
+    }
+
+    ~basic_string() { __free(); }
+
+    basic_string &operator=(const basic_string &o)
+    {
+        if (this != addressof(o))
+            assign(o.__p, o.__sz);
+        return *this;
+    }
+
+    basic_string &operator=(basic_string &&o) noexcept
+    {
+        if (this != addressof(o)) {
+            __free();
+            if (o.__is_short()) {
+                __init_short(o.__sz);
+                T::copy(__buf, o.__buf, o.__sz + 1);
+            } else {
+                __p = o.__p; __sz = o.__sz; __cap = o.__cap;
+                o.__init_short(0);
+            }
+        }
+        return *this;
+    }
+
+    basic_string &operator=(const C *s) { return assign(s, T::length(s)); }
+    basic_string &operator=(C c) { return assign(&c, 1); }
+    basic_string &operator=(initializer_list<C> l)
+    { return assign(l.begin(), l.size()); }
+
+    basic_string &assign(const C *s, size_type n)
+    {
+        size_type off;
+        int inside = __offset_of(s, &off);
+        /* Keep the old contents when the source is our own, because
+         * __grow_to would otherwise discard the very characters being
+         * assigned from. */
+        __grow_to(n, inside);
+        const C *src = inside ? __p + off : s;
+        T::move(__p, src, n);
+        __sz = n;
+        __p[n] = C();
+        return *this;
+    }
+    basic_string &assign(const basic_string &o) { return assign(o.__p, o.__sz); }
+    basic_string &assign(const C *s) { return assign(s, T::length(s)); }
+    basic_string &assign(size_type n, C c)
+    { __grow_to(n); T::assign(__p, n, c); __sz = n; __p[n] = C(); return *this; }
+
+    allocator_type get_allocator() const noexcept { return __a; }
+
+    /* ---- access ---- */
+    reference at(size_type i)
+    { if (i >= __sz) __throw_string_out_of_range(); return __p[i]; }
+    const_reference at(size_type i) const
+    { if (i >= __sz) __throw_string_out_of_range(); return __p[i]; }
+    reference operator[](size_type i) { return __p[i]; }
+    const_reference operator[](size_type i) const { return __p[i]; }
+    reference front() { return __p[0]; }
+    const_reference front() const { return __p[0]; }
+    reference back() { return __p[__sz - 1]; }
+    const_reference back() const { return __p[__sz - 1]; }
+    const C *c_str() const noexcept { return __p; }
+    const C *data() const noexcept { return __p; }
+    C *data() noexcept { return __p; }
+
+    /* ---- iterators ---- */
+    iterator begin() noexcept { return __p; }
+    const_iterator begin() const noexcept { return __p; }
+    const_iterator cbegin() const noexcept { return __p; }
+    iterator end() noexcept { return __p + __sz; }
+    const_iterator end() const noexcept { return __p + __sz; }
+    const_iterator cend() const noexcept { return __p + __sz; }
+    reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+    const_reverse_iterator rbegin() const noexcept
+    { return const_reverse_iterator(end()); }
+    reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+    const_reverse_iterator rend() const noexcept
+    { return const_reverse_iterator(begin()); }
+
+    /* ---- capacity ---- */
+    bool empty() const noexcept { return __sz == 0; }
+    size_type size() const noexcept { return __sz; }
+    size_type length() const noexcept { return __sz; }
+    size_type capacity() const noexcept
+    { return __is_short() ? __short_cap : __cap; }
+    size_type max_size() const noexcept { return npos / 2; }
+    void reserve(size_type n) { if (n > capacity()) __grow_to(n, true); }
+    void shrink_to_fit() {}
+    void clear() noexcept { __sz = 0; __p[0] = C(); }
+
+    void resize(size_type n, C c = C())
+    {
+        if (n > __sz) { __grow_to(n, true); T::assign(__p + __sz, n - __sz, c); }
+        __sz = n;
+        __p[n] = C();
+    }
+
+    /* ---- modifiers ---- */
+    void push_back(C c)
+    {
+        __grow_to(__sz + 1, true);
+        __p[__sz++] = c;
+        __p[__sz] = C();
+    }
+
+    void pop_back() { --__sz; __p[__sz] = C(); }
+
+    basic_string &append(const C *s, size_type n)
+    {
+        if (n == 0)
+            return *this;
+        /* `s` may point into our OWN buffer -- `a += a` is the obvious
+         * case -- and __grow_to may replace that buffer and free it. So
+         * the source is remembered as an offset and re-derived after the
+         * growth; reading through the old pointer is a use-after-free
+         * that copies plausible-looking rubbish. */
+        size_type off;
+        int inside = __offset_of(s, &off);
+        __grow_to(__sz + n, true);
+        const C *src = inside ? __p + off : s;
+        T::move(__p + __sz, src, n);
+        __sz += n;
+        __p[__sz] = C();
+        return *this;
+    }
+    basic_string &append(const basic_string &o)
+    { return append(o.__p, o.__sz); }
+    basic_string &append(const C *s) { return append(s, T::length(s)); }
+    basic_string &append(size_type n, C c)
+    {
+        __grow_to(__sz + n, true);
+        T::assign(__p + __sz, n, c);
+        __sz += n;
+        __p[__sz] = C();
+        return *this;
+    }
+
+    basic_string &operator+=(const basic_string &o) { return append(o); }
+    basic_string &operator+=(const C *s) { return append(s); }
+    basic_string &operator+=(C c) { push_back(c); return *this; }
+    basic_string &operator+=(initializer_list<C> l)
+    { return append(l.begin(), l.size()); }
+
+    basic_string &insert(size_type pos, const C *s, size_type n)
+    {
+        if (pos > __sz)
+            __throw_string_out_of_range();
+        if (n == 0)
+            return *this;
+        size_type off;
+        int inside = __offset_of(s, &off);   /* same hazard as append */
+        __grow_to(__sz + n, true);
+        /* The tail is opened up first, so a source that lies after `pos`
+         * in our own buffer has already moved -- which is why the offset
+         * is adjusted rather than used as it was. */
+        T::move(__p + pos + n, __p + pos, __sz - pos);
+        const C *src = inside ? __p + (off >= pos ? off + n : off) : s;
+        T::move(__p + pos, src, n);
+        __sz += n;
+        __p[__sz] = C();
+        return *this;
+    }
+    basic_string &insert(size_type pos, const basic_string &o)
+    { return insert(pos, o.__p, o.__sz); }
+    basic_string &insert(size_type pos, const C *s)
+    { return insert(pos, s, T::length(s)); }
+
+    basic_string &erase(size_type pos = 0, size_type n = npos)
+    {
+        if (pos > __sz)
+            __throw_string_out_of_range();
+        size_type k = n < __sz - pos ? n : __sz - pos;
+        T::move(__p + pos, __p + pos + k, __sz - pos - k);
+        __sz -= k;
+        __p[__sz] = C();
+        return *this;
+    }
+
+    basic_string &replace(size_type pos, size_type n, const basic_string &o)
+    { erase(pos, n); return insert(pos, o); }
+
+    void swap(basic_string &o) noexcept
+    {
+        /* Not a three-word exchange: a short string's pointer aims into
+         * its own object, so swapping the pointers would leave each
+         * aimed at the other. Going through a move is correct once and
+         * costs nothing for the long case. */
+        basic_string t = move(*this);
+        *this = move(o);
+        o = move(t);
+    }
+
+    /* ---- searching ---- */
+    size_type find(const C *s, size_type pos, size_type n) const noexcept
+    {
+        if (n == 0)
+            return pos <= __sz ? pos : npos;
+        if (n > __sz)
+            return npos;
+        for (size_type i = pos; i + n <= __sz; i++)
+            if (T::compare(__p + i, s, n) == 0)
+                return i;
+        return npos;
+    }
+    size_type find(const basic_string &o, size_type pos = 0) const noexcept
+    { return find(o.__p, pos, o.__sz); }
+    size_type find(const C *s, size_type pos = 0) const noexcept
+    { return find(s, pos, T::length(s)); }
+    size_type find(C c, size_type pos = 0) const noexcept
+    {
+        for (size_type i = pos; i < __sz; i++)
+            if (T::eq(__p[i], c))
+                return i;
+        return npos;
+    }
+
+    size_type rfind(const C *s, size_type pos, size_type n) const noexcept
+    {
+        if (n > __sz)
+            return npos;
+        size_type last = __sz - n;
+        if (pos < last)
+            last = pos;
+        for (size_type i = last + 1; i-- > 0; )
+            if (T::compare(__p + i, s, n) == 0)
+                return i;
+        return npos;
+    }
+    size_type rfind(const basic_string &o, size_type pos = npos) const noexcept
+    { return rfind(o.__p, pos, o.__sz); }
+    size_type rfind(const C *s, size_type pos = npos) const noexcept
+    { return rfind(s, pos, T::length(s)); }
+    size_type rfind(C c, size_type pos = npos) const noexcept
+    {
+        if (__sz == 0)
+            return npos;
+        size_type i = pos < __sz - 1 ? pos : __sz - 1;
+        for (++i; i-- > 0; )
+            if (T::eq(__p[i], c))
+                return i;
+        return npos;
+    }
+
+    size_type find_first_of(const basic_string &o, size_type pos = 0) const
+    {
+        for (size_type i = pos; i < __sz; i++)
+            if (T::find(o.__p, o.__sz, __p[i]))
+                return i;
+        return npos;
+    }
+    size_type find_last_of(const basic_string &o, size_type pos = npos) const
+    {
+        if (__sz == 0)
+            return npos;
+        size_type i = pos < __sz - 1 ? pos : __sz - 1;
+        for (++i; i-- > 0; )
+            if (T::find(o.__p, o.__sz, __p[i]))
+                return i;
+        return npos;
+    }
+    size_type find_first_not_of(const basic_string &o, size_type pos = 0) const
+    {
+        for (size_type i = pos; i < __sz; i++)
+            if (!T::find(o.__p, o.__sz, __p[i]))
+                return i;
+        return npos;
+    }
+
+    basic_string substr(size_type pos = 0, size_type n = npos) const
+    {
+        if (pos > __sz)
+            __throw_string_out_of_range();
+        size_type k = n < __sz - pos ? n : __sz - pos;
+        return basic_string(__p + pos, k);
+    }
+
+    size_type copy(C *d, size_type n, size_type pos = 0) const
+    {
+        if (pos > __sz)
+            __throw_string_out_of_range();
+        size_type k = n < __sz - pos ? n : __sz - pos;
+        T::copy(d, __p + pos, k);
+        return k;
+    }
+
+    /* Compares the SHORTER length first and only then the sizes, so that
+     * "ab" < "abc" without reading past either. */
+    int compare(const basic_string &o) const noexcept
+    {
+        size_type n = __sz < o.__sz ? __sz : o.__sz;
+        int r = T::compare(__p, o.__p, n);
+        if (r != 0)
+            return r;
+        return __sz < o.__sz ? -1 : __sz > o.__sz ? 1 : 0;
+    }
+    int compare(const C *s) const noexcept
+    { return compare(basic_string(s)); }
+
+    bool starts_with(const C *s) const noexcept
+    {
+        size_type n = T::length(s);
+        return n <= __sz && T::compare(__p, s, n) == 0;
+    }
+    bool ends_with(const C *s) const noexcept
+    {
+        size_type n = T::length(s);
+        return n <= __sz && T::compare(__p + __sz - n, s, n) == 0;
+    }
+    bool contains(const C *s) const noexcept { return find(s) != npos; }
+
+private:
+    /* 16 bytes of buffer beside two words: 32 bytes in all, holding 15
+     * characters and their NUL without allocating. */
+    static const size_type __short_cap = 16 / sizeof(C) - 1;
+
+    C *__p;
+    size_type __sz;
+    union {
+        size_type __cap;
+        C __buf[16 / sizeof(C)];
+    };
+    A __a;
+
+    bool __is_short() const noexcept { return __p == __buf; }
+
+    /* Does `s` point into our own storage, and where? Every operation
+     * that takes a raw pointer and may reallocate has to ask. */
+    int __offset_of(const C *s, size_type *off) const noexcept
+    {
+        if (s < __p || s > __p + __sz)
+            return 0;
+        *off = (size_type)(s - __p);
+        return 1;
+    }
+
+    void __init_short(size_type n) noexcept
+    {
+        __p = __buf;
+        __sz = n;
+        __buf[n] = C();
+    }
+
+    void __init_from(const C *s, size_type n)
+    {
+        __init_short(0);
+        __grow_to(n);
+        T::copy(__p, s, n);
+        __sz = n;
+        __p[n] = C();
+    }
+
+    void __free() noexcept
+    {
+        if (!__is_short())
+            __atr::deallocate(__a, __p, __cap + 1);
+    }
+
+    /* Make room for n characters plus the NUL. `keep` preserves what is
+     * there, which append and push_back need and assign does not. */
+    void __grow_to(size_type n, bool keep = false)
+    {
+        if (n <= capacity())
+            return;
+        if (n > max_size())
+            __throw_string_too_long();
+        /* Doubling, for the same reason a vector doubles: otherwise
+         * building a string one character at a time is quadratic. */
+        size_type c = capacity() * 2;
+        if (c < n)
+            c = n;
+        C *np = __atr::allocate(__a, c + 1);
+        if (keep && __sz)
+            T::copy(np, __p, __sz);
+        np[keep ? __sz : 0] = C();
+        __free();
+        __p = np;
+        __cap = c;
+    }
+};
+
+using string = basic_string<char>;
+
+template <class C, class T, class A>
+const typename basic_string<C, T, A>::size_type basic_string<C, T, A>::npos;
+
+template <class C, class T, class A>
+basic_string<C, T, A> operator+(const basic_string<C, T, A> &a,
+                                const basic_string<C, T, A> &b)
+{ basic_string<C, T, A> r(a); r.append(b); return r; }
+template <class C, class T, class A>
+basic_string<C, T, A> operator+(const basic_string<C, T, A> &a, const C *b)
+{ basic_string<C, T, A> r(a); r.append(b); return r; }
+template <class C, class T, class A>
+basic_string<C, T, A> operator+(const C *a, const basic_string<C, T, A> &b)
+{ basic_string<C, T, A> r(a); r.append(b); return r; }
+template <class C, class T, class A>
+basic_string<C, T, A> operator+(const basic_string<C, T, A> &a, C b)
+{ basic_string<C, T, A> r(a); r.push_back(b); return r; }
+
+template <class C, class T, class A>
+bool operator==(const basic_string<C, T, A> &a, const basic_string<C, T, A> &b)
+{ return a.size() == b.size() && a.compare(b) == 0; }
+template <class C, class T, class A>
+bool operator!=(const basic_string<C, T, A> &a, const basic_string<C, T, A> &b)
+{ return !(a == b); }
+template <class C, class T, class A>
+bool operator<(const basic_string<C, T, A> &a, const basic_string<C, T, A> &b)
+{ return a.compare(b) < 0; }
+template <class C, class T, class A>
+bool operator>(const basic_string<C, T, A> &a, const basic_string<C, T, A> &b)
+{ return b < a; }
+template <class C, class T, class A>
+bool operator<=(const basic_string<C, T, A> &a, const basic_string<C, T, A> &b)
+{ return !(b < a); }
+template <class C, class T, class A>
+bool operator>=(const basic_string<C, T, A> &a, const basic_string<C, T, A> &b)
+{ return !(a < b); }
+
+template <class C, class T, class A>
+bool operator==(const basic_string<C, T, A> &a, const C *b)
+{ return a.compare(b) == 0; }
+template <class C, class T, class A>
+bool operator==(const C *a, const basic_string<C, T, A> &b)
+{ return b.compare(a) == 0; }
+template <class C, class T, class A>
+bool operator!=(const basic_string<C, T, A> &a, const C *b)
+{ return a.compare(b) != 0; }
+template <class C, class T, class A>
+bool operator!=(const C *a, const basic_string<C, T, A> &b)
+{ return b.compare(a) != 0; }
+
+template <class C, class T, class A>
+void swap(basic_string<C, T, A> &a, basic_string<C, T, A> &b) noexcept
+{ a.swap(b); }
+
+/* The numeric conversions, over the C library's -- which is where the
+ * hard parts (rounding, locale-free parsing, ERANGE) already live. */
+string to_string(int v);
+string to_string(long v);
+string to_string(long long v);
+string to_string(unsigned v);
+string to_string(unsigned long v);
+string to_string(unsigned long long v);
+string to_string(double v);
+string to_string(long double v);
+
+int stoi(const string &s, size_t *pos = nullptr, int base = 10);
+long stol(const string &s, size_t *pos = nullptr, int base = 10);
+long long stoll(const string &s, size_t *pos = nullptr, int base = 10);
+unsigned long stoul(const string &s, size_t *pos = nullptr, int base = 10);
+unsigned long long stoull(const string &s, size_t *pos = nullptr,
+                          int base = 10);
+float stof(const string &s, size_t *pos = nullptr);
+double stod(const string &s, size_t *pos = nullptr);
+long double stold(const string &s, size_t *pos = nullptr);
+
+}  // namespace std
+
+#endif

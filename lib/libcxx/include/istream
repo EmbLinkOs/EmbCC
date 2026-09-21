@@ -1,0 +1,272 @@
+/* <istream> — C++ [input.streams].
+ *
+ * The sentry does more work here than on the output side: it is what
+ * SKIPS LEADING WHITESPACE, once, before a formatted extraction -- which
+ * is why `in >> a >> b` works across lines without anyone writing a skip,
+ * and why `noskipws` changes every extraction by changing one flag the
+ * sentry reads.
+ *
+ * `getline` does not skip, and does not store the delimiter, and DOES
+ * consume it. Those three together are why mixing `>>` and `getline`
+ * leaves an empty line: the newline that ended the `>>` is still there
+ * for getline to find.
+ */
+#ifndef _LIBCXX_ISTREAM
+#define _LIBCXX_ISTREAM
+
+#include <iosfwd>
+#include <cstddef>
+#include <cctype>
+#include <cstdlib>
+#include <string>
+#include <ios>
+#include <streambuf>
+#include <ostream>
+
+namespace std {
+
+template <class C, class T>
+class basic_istream : public basic_ios<C, T> {
+    using base = basic_ios<C, T>;
+
+public:
+    using char_type = C;
+    using traits_type = T;
+    using int_type = typename T::int_type;
+
+    explicit basic_istream(basic_streambuf<C, T> *sb) : base(sb), __count(0) {}
+
+    class sentry {
+    public:
+        explicit sentry(basic_istream &is, bool noskip = false)
+            : __ok(false)
+        {
+            if (!is.good())
+                return;
+            if (!noskip && (is.flags() & ios_base::skipws)) {
+                for (;;) {
+                    int_type c = is.rdbuf()->sgetc();
+                    if (T::eq_int_type(c, T::eof())) {
+                        is.setstate(ios_base::eofbit);
+                        return;
+                    }
+                    if (!isspace((unsigned char)T::to_char_type(c)))
+                        break;
+                    is.rdbuf()->sbumpc();
+                }
+            }
+            __ok = true;
+        }
+        explicit operator bool() const { return __ok; }
+        sentry(const sentry &) = delete;
+        sentry &operator=(const sentry &) = delete;
+    private:
+        bool __ok;
+    };
+
+    int_type get()
+    {
+        int_type c = this->rdbuf()->sbumpc();
+        if (T::eq_int_type(c, T::eof())) this->setstate(ios_base::eofbit);
+        else __count = 1;
+        return c;
+    }
+
+    basic_istream &get(C &c)
+    {
+        int_type r = get();
+        if (!T::eq_int_type(r, T::eof())) c = T::to_char_type(r);
+        else this->setstate(ios_base::failbit);
+        return *this;
+    }
+
+    int_type peek()
+    {
+        int_type c = this->rdbuf()->sgetc();
+        if (T::eq_int_type(c, T::eof())) this->setstate(ios_base::eofbit);
+        return c;
+    }
+
+    basic_istream &unget()
+    {
+        if (T::eq_int_type(this->rdbuf()->sungetc(), T::eof()))
+            this->setstate(ios_base::failbit);
+        return *this;
+    }
+
+    basic_istream &read(C *s, streamsize n)
+    {
+        streamsize got = this->rdbuf()->sgetn(s, n);
+        __count = got;
+        if (got != n) this->setstate(ios_base::eofbit | ios_base::failbit);
+        return *this;
+    }
+
+    streamsize gcount() const { return __count; }
+
+    basic_istream &ignore(streamsize n = 1, int_type delim = T::eof())
+    {
+        for (streamsize i = 0; i < n; i++) {
+            int_type c = this->rdbuf()->sbumpc();
+            if (T::eq_int_type(c, T::eof()))
+            { this->setstate(ios_base::eofbit); break; }
+            if (!T::eq_int_type(delim, T::eof()) && T::eq_int_type(c, delim))
+                break;
+        }
+        return *this;
+    }
+
+    /* ---- the formatted extractors ---- */
+    basic_istream &operator>>(bool &v)
+    { long t; if (__get_signed(t)) v = t != 0; return *this; }
+    basic_istream &operator>>(short &v)
+    { long t; if (__get_signed(t)) v = (short)t; return *this; }
+    basic_istream &operator>>(int &v)
+    { long t; if (__get_signed(t)) v = (int)t; return *this; }
+    basic_istream &operator>>(long &v)
+    { long t; if (__get_signed(t)) v = t; return *this; }
+    basic_istream &operator>>(long long &v)
+    { long t; if (__get_signed(t)) v = t; return *this; }
+    basic_istream &operator>>(unsigned short &v)
+    { long t; if (__get_signed(t)) v = (unsigned short)t; return *this; }
+    basic_istream &operator>>(unsigned &v)
+    { long t; if (__get_signed(t)) v = (unsigned)t; return *this; }
+    basic_istream &operator>>(unsigned long &v)
+    { long t; if (__get_signed(t)) v = (unsigned long)t; return *this; }
+    basic_istream &operator>>(float &v)
+    { double t; if (__get_double(t)) v = (float)t; return *this; }
+    basic_istream &operator>>(double &v)
+    { double t; if (__get_double(t)) v = t; return *this; }
+
+    basic_istream &operator>>(basic_istream &(*f)(basic_istream &))
+    { return f(*this); }
+    basic_istream &operator>>(ios_base &(*f)(ios_base &))
+    { f(*this); return *this; }
+
+    /* Gathers the token the numeric extractors parse: everything up to
+     * the next whitespace, after the sentry has skipped the leading run. */
+    bool __token(char *buf, size_t cap)
+    {
+        sentry s(*this);
+        if (!s)
+        { this->setstate(ios_base::failbit); return false; }
+        size_t n = 0;
+        for (;;) {
+            int_type c = this->rdbuf()->sgetc();
+            if (T::eq_int_type(c, T::eof())) {
+                this->setstate(ios_base::eofbit);
+                break;
+            }
+            char ch = T::to_char_type(c);
+            if (isspace((unsigned char)ch))
+                break;
+            if (n + 1 < cap)
+                buf[n++] = ch;
+            this->rdbuf()->sbumpc();
+        }
+        buf[n] = 0;
+        if (n == 0) { this->setstate(ios_base::failbit); return false; }
+        return true;
+    }
+
+private:
+    streamsize __count;
+
+    bool __get_signed(long &out)
+    {
+        char buf[64];
+        if (!__token(buf, sizeof buf))
+            return false;
+        char *end;
+        int base = (this->flags() & ios_base::hex) ? 16
+                 : (this->flags() & ios_base::oct) ? 8 : 10;
+        long v = strtol(buf, &end, base);
+        /* The token was read but did not convert: that is failbit, and
+         * the value is left ALONE -- a caller's variable must not be
+         * changed by a failed extraction. */
+        if (end == buf) { this->setstate(ios_base::failbit); return false; }
+        out = v;
+        return true;
+    }
+
+    bool __get_double(double &out)
+    {
+        char buf[128];
+        if (!__token(buf, sizeof buf))
+            return false;
+        char *end;
+        double v = strtod(buf, &end);
+        if (end == buf) { this->setstate(ios_base::failbit); return false; }
+        out = v;
+        return true;
+    }
+};
+
+using istream = basic_istream<char>;
+
+template <class C, class T>
+basic_istream<C, T> &operator>>(basic_istream<C, T> &is, C &c)
+{
+    typename basic_istream<C, T>::sentry s(is);
+    if (s) is.get(c);
+    return is;
+}
+
+template <class C, class T, class A>
+basic_istream<C, T> &operator>>(basic_istream<C, T> &is,
+                                basic_string<C, T, A> &str)
+{
+    char buf[1024];
+    if (is.__token(buf, sizeof buf))
+        str = buf;
+    return is;
+}
+
+/* getline does NOT skip leading whitespace, does not store the
+ * delimiter, and DOES consume it -- which is why a `>>` followed by a
+ * getline reads an empty line: the newline the `>>` stopped at is still
+ * waiting. */
+template <class C, class T, class A>
+basic_istream<C, T> &getline(basic_istream<C, T> &is,
+                             basic_string<C, T, A> &str, C delim)
+{
+    str.clear();
+    bool any = false;
+    for (;;) {
+        typename T::int_type c = is.rdbuf()->sbumpc();
+        if (T::eq_int_type(c, T::eof())) {
+            is.setstate(ios_base::eofbit);
+            if (!any) is.setstate(ios_base::failbit);
+            break;
+        }
+        any = true;
+        C ch = T::to_char_type(c);
+        if (T::eq(ch, delim))
+            break;                 /* consumed, and not stored */
+        str.push_back(ch);
+    }
+    return is;
+}
+
+template <class C, class T, class A>
+basic_istream<C, T> &getline(basic_istream<C, T> &is,
+                             basic_string<C, T, A> &str)
+{ return getline(is, str, C('\n')); }
+
+template <class C, class T>
+basic_istream<C, T> &ws(basic_istream<C, T> &is)
+{
+    for (;;) {
+        typename T::int_type c = is.rdbuf()->sgetc();
+        if (T::eq_int_type(c, T::eof())) { is.setstate(ios_base::eofbit); break; }
+        if (!isspace((unsigned char)T::to_char_type(c))) break;
+        is.rdbuf()->sbumpc();
+    }
+    return is;
+}
+
+using iostream = basic_istream<char>;
+
+}  // namespace std
+
+#endif

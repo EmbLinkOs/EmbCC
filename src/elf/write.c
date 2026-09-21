@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../driver/util.h"
+#include "../platform/platform.h"
+
 /* Growable byte buffer, used for section payloads and string tables. */
 struct buf {
     unsigned char *p;
@@ -19,7 +22,7 @@ static void buf_append(struct buf *b, const void *data, size_t n)
         b->p = realloc(b->p, cap);
         if (!b->p) {
             fprintf(stderr, "embcc: out of memory\n");
-            exit(1);
+            fatal_unwind();
         }
         b->cap = cap;
     }
@@ -64,15 +67,17 @@ struct elfw {
     struct buf shstrtab; /* section names */
     struct rela_group relagrp[ELFW_MAX_RELA];
     int nrelagrp;
+    int machine;         /* e_machine, fixed at elfw_new */
 };
 
-struct elfw *elfw_new(void)
+struct elfw *elfw_new(int machine)
 {
     struct elfw *w = calloc(1, sizeof *w);
     if (!w) {
         fprintf(stderr, "embcc: out of memory\n");
-        exit(1);
+        fatal_unwind();
     }
+    w->machine = machine;
     /* Index 0 is reserved in every table it manages. */
     w->nsec = 1; /* SHT_NULL section */
     strtab_add(&w->strtab, "");
@@ -106,7 +111,7 @@ int elfw_add_section(struct elfw *w, const char *name, Elf64_Word type,
     if (w->nsec >= ELFW_MAX_SECTIONS) {
         fprintf(stderr, "embcc: elf writer: section limit (%d) reached\n",
                 ELFW_MAX_SECTIONS);
-        exit(1);
+        fatal_unwind();
     }
     struct section *s = &w->sec[w->nsec];
     memset(s, 0, sizeof *s);
@@ -130,7 +135,7 @@ int elfw_add_symbol(struct elfw *w, const char *name, Elf64_Addr value,
         fprintf(stderr,
                 "embcc: elf writer: local symbol '%s' added after globals\n",
                 name);
-        exit(1);
+        fatal_unwind();
     }
     if (!is_local)
         w->globals_started = 1;
@@ -171,7 +176,7 @@ void elfw_add_rela(struct elfw *w, int target_ndx, Elf64_Addr offset,
         if (w->nrelagrp >= ELFW_MAX_RELA) {
             fprintf(stderr, "embcc: elf writer: too many relocation "
                             "target sections (max %d)\n", ELFW_MAX_RELA);
-            exit(1);
+            fatal_unwind();
         }
         gp = &w->relagrp[w->nrelagrp++];
         memset(gp, 0, sizeof *gp);
@@ -247,7 +252,7 @@ int elfw_write(struct elfw *w, const char *path)
     eh.e_ident[EI_DATA] = ELFDATA2LSB;
     eh.e_ident[EI_VERSION] = EV_CURRENT;
     eh.e_type = ET_REL;
-    eh.e_machine = EM_X86_64;
+    eh.e_machine = (Elf64_Half)w->machine;
     eh.e_version = EV_CURRENT;
     eh.e_shoff = shoff;
     eh.e_ehsize = sizeof(Elf64_Ehdr);
@@ -255,32 +260,28 @@ int elfw_write(struct elfw *w, const char *path)
     eh.e_shnum = (Elf64_Half)w->nsec;
     eh.e_shstrndx = (Elf64_Half)shstr_ndx;
 
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        fprintf(stderr, "embcc: cannot open '%s' for writing\n", path);
-        return -1;
-    }
-    fwrite(&eh, sizeof eh, 1, f);
-    Elf64_Off pos = sizeof eh;
+    /* The image is assembled whole and handed to the platform layer as
+     * bytes (§16). It was streamed with padding loops before; the total
+     * size is already known here (shoff plus the section headers), so
+     * building it costs one allocation and removes the last place the
+     * object writer knew what a FILE* was. */
+    size_t total = (size_t)shoff + (size_t)w->nsec * sizeof(Elf64_Shdr);
+    unsigned char *img = xmalloc(total ? total : 1);
+    memset(img, 0, total);            /* the gaps ARE zero padding */
+    memcpy(img, &eh, sizeof eh);
     for (int i = 1; i < w->nsec; i++) {
         struct section *s = &w->sec[i];
         if (s->hdr.sh_type == SHT_NOBITS)
             continue;
-        while (pos < s->hdr.sh_offset) {
-            fputc(0, f);
-            pos++;
-        }
-        fwrite(s->data.p, 1, s->data.len, f);
-        pos += s->data.len;
-    }
-    while (pos < shoff) {
-        fputc(0, f);
-        pos++;
+        memcpy(img + s->hdr.sh_offset, s->data.p, s->data.len);
     }
     for (int i = 0; i < w->nsec; i++)
-        fwrite(&w->sec[i].hdr, sizeof(Elf64_Shdr), 1, f);
-    if (fclose(f) != 0) {
-        fprintf(stderr, "embcc: write error on '%s'\n", path);
+        memcpy(img + (size_t)shoff + (size_t)i * sizeof(Elf64_Shdr),
+               &w->sec[i].hdr, sizeof(Elf64_Shdr));
+    int rc = plat_write_file(path, img, total);
+    free(img);
+    if (rc != 0) {
+        fprintf(stderr, "embcc: cannot write '%s'\n", path);
         return -1;
     }
     return 0;

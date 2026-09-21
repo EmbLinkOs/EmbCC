@@ -7,23 +7,28 @@
 # and -O1 are unaffected by -O2 codegen, so this is purely the allocator's net.
 set -u
 echo "TEST-MARKER regalloc-O2"
+. "$(dirname "$0")/../lib.sh"
 
 EMBCC=${EMBCC:-./embcc}
-out_dir="tests/golden/out/regalloc-O2"
+out_dir="tests/golden/out/regalloc-O2-$ARCH"
 rm -rf "$out_dir"; mkdir -p "$out_dir"
 
 n=0
 for c in tests/exec/*.c; do
     [ -e "$c" ] || continue
     name=$(basename "$c" .c)
-    "$EMBCC" -O2 -c "$c" -o "$out_dir/$name.o" || {
+    pinned_elsewhere "$c" && continue
+    no_gcc_reference "$c" && continue
+    "$EMBCC" --target="$TARGET" -O2 -c "$c" -o "$out_dir/$name.o" || {
         echo "$name: embcc -O2 failed to compile"; exit 1; }
-    cc -no-pie -o "$out_dir/$name.embcc" "$out_dir/$name.o" || {
+    t_link "$out_dir/$name.embcc" "$out_dir/$name.o" || {
         echo "$name: link of -O2 object failed"; exit 1; }
-    cc -std=c99 -no-pie -o "$out_dir/$name.gcc" "$c" || {
-        echo "$name: not valid C99 (needed for the gcc reference)"; exit 1; }
-    out_a=$("$out_dir/$name.embcc"); a=$?
-    out_b=$("$out_dir/$name.gcc"); b=$?
+    t_gcc_c "$c" -std=c11 -o "$out_dir/$name.gcc.o" || {
+        echo "$name: not valid C11 (needed for the gcc reference)"; exit 1; }
+    t_link "$out_dir/$name.gcc" "$out_dir/$name.gcc.o" || {
+        echo "$name: link of the gcc object failed"; exit 1; }
+    out_a=$(t_run "$out_dir/$name.embcc"); a=$?
+    out_b=$(t_run "$out_dir/$name.gcc"); b=$?
     if [ "$a" -ne "$b" ]; then
         echo "$name: embcc -O2 exits $a, gcc exits $b — register-alloc miscompile"
         exit 1

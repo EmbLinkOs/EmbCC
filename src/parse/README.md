@@ -1,6 +1,6 @@
 # src/parse
 
-C → AST — ../../docs/ARCHITECTURE.md §2.
+C → AST — ../../docs/architecture/overview.md §2.
 
 Recursive descent over the C99 grammar plus the GNU extensions the kernel and
 newlib actually use.
@@ -20,8 +20,10 @@ array ranges `[a ... b]`) and compound literals.
 statement expressions (`({ ... })`).
 
 **GNU/C11 extras:** `__attribute__` (`packed`, `aligned`, `weak`, `noreturn`,
-`section`, `used`, …), `__builtin_*`, `typeof`, `__asm__` basic and extended,
-`_Static_assert`.
+and `section("name")` on file-scope variables — refused, never dropped, on a
+function or a local; other attributes such as `used` are parsed and ignored,
+which is safe because every defined global is emitted), `__builtin_*`,
+`typeof`, `__asm__` basic and extended, `_Static_assert`.
 
 Errors carry file, line and column so `../driver/util.c` can print a caret; the
 first error is fatal.

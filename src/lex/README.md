@@ -1,6 +1,6 @@
 # src/lex
 
-Tokens — ../../docs/ARCHITECTURE.md §2.
+Tokens — ../../docs/architecture/overview.md §2.
 
 The full C99 token set the rest of the compiler needs: identifiers and the
 keyword table (including C11 `_Alignof`/`_Alignas`/`_Atomic`/`_Static_assert`/

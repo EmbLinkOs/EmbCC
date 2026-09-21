@@ -4,11 +4,12 @@
 #include <string.h>
 
 #include "../driver/util.h"
+#include "../arch/target.h"
 
 /* [kind][is_unsigned] — TY_PTR/TY_ARRAY/TY_STRUCT handled separately.
  * Designated initializers so this table survives struct type growing.
  * _Bool is unsigned in both slots (it holds only 0 or 1). */
-static struct type bases[8][2] = {
+static struct type bases[10][2] = {
     { { .kind = TY_VOID }, { .kind = TY_VOID } },
     { { .kind = TY_BOOL, .is_unsigned = 1 },
       { .kind = TY_BOOL, .is_unsigned = 1 } },
@@ -18,7 +19,22 @@ static struct type bases[8][2] = {
     { { .kind = TY_LONG }, { .kind = TY_LONG, .is_unsigned = 1 } },
     { { .kind = TY_FLOAT }, { .kind = TY_FLOAT } },   /* never unsigned */
     { { .kind = TY_DOUBLE }, { .kind = TY_DOUBLE } },
+    /* long double: x87 80-bit extended in 16 bytes (x86-64), IEEE binary128
+     * (aarch64) — 16 bytes, 16-aligned, on both */
+    { { .kind = TY_LDOUBLE }, { .kind = TY_LDOUBLE } },
+    /* GNU __int128: two eightbytes, 16-aligned (both ABIs) */
+    { { .kind = TY_INT128 }, { .kind = TY_INT128, .is_unsigned = 1 } },
 };
+
+struct type *ty_plain_char(void)
+{
+    return ty_base(TY_CHAR, target_get() == TARGET_AARCH64);
+}
+
+struct type *ty_wchar(void)
+{
+    return ty_base(TY_INT, target_get() == TARGET_AARCH64);
+}
 
 struct type *ty_base(enum ty_kind kind, int is_unsigned)
 {
@@ -51,6 +67,30 @@ struct type *ty_array(struct type *elem, int count)
     t->pointee = elem;
     t->count = count;
     return t;
+}
+
+struct type *ty_vla(struct type *elem, struct expr *len)
+{
+    struct type *t = ty_array(elem, 0);
+    t->vla_len = len;
+    t->vla_size = -1;
+    return t;
+}
+
+int ty_is_vla(const struct type *t)
+{
+    return t && t->kind == TY_ARRAY && t->vla_len != NULL;
+}
+
+int ty_is_vm(const struct type *t)
+{
+    for (; t; t = t->pointee) {
+        if (ty_is_vla(t))
+            return 1;
+        if (t->kind != TY_PTR && t->kind != TY_ARRAY)
+            return 0;
+    }
+    return 0;
 }
 
 struct type *ty_func(struct type *ret, struct type **ptypes, int n,
@@ -91,6 +131,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
 
     for (int i = 0; i < n; i++) {
         struct member *m = &members[i];
+        m->bf_bytes = 0;          /* (members may come uncleared) */
         int ma = packed ? 1 : ty_align(m->ty);
         /* An explicit __attribute__((aligned(N))) on the member raises its
          * alignment (and, through `align` below, the struct's) — it overrides
@@ -119,6 +160,12 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
                     bitpos = (bitpos + unit - 1) / unit * unit;
                 m->off = (bitpos / unit) * ty_size(m->ty);
                 m->bit_off = bitpos - m->off * 8;
+                if (m->bit_off + m->bit_width > unit) {
+                    /* (packed: across its unit — bytes from its first) */
+                    m->off = bitpos / 8;
+                    m->bit_off = bitpos % 8;
+                    m->bf_bytes = (m->bit_off + m->bit_width + 7) / 8;
+                }
                 bitpos += m->bit_width;
             }
         } else {
@@ -164,6 +211,8 @@ int ty_size(const struct type *t)
     case TY_LONG: return 8;
     case TY_FLOAT: return 4;
     case TY_DOUBLE: return 8;
+    case TY_LDOUBLE: return 16;
+    case TY_INT128: return 16;
     case TY_PTR: return 8;
     case TY_ARRAY: return t->count * ty_size(t->pointee);
     case TY_STRUCT: return t->size; /* 0 while incomplete */
@@ -188,8 +237,9 @@ int ty_equal(const struct type *a, const struct type *b)
         return 0;
     if (a->kind == TY_PTR)
         return ty_equal(a->pointee, b->pointee);
-    if (a->kind == TY_ARRAY)
-        return a->count == b->count && ty_equal(a->pointee, b->pointee);
+    if (a->kind == TY_ARRAY)   /* a VLA is compatible with any length */
+        return (a->count == b->count || a->vla_len || b->vla_len) &&
+               ty_equal(a->pointee, b->pointee);
     if (a->kind == TY_STRUCT) {
         /* one node per tag: identity is equality — but a volatile copy points at
          * its original via `canon`, so compare canonical nodes. */
@@ -199,7 +249,7 @@ int ty_equal(const struct type *a, const struct type *b)
     }
     if (a->kind == TY_FUNC) {
         if (a->nptypes != b->nptypes || a->is_varargs != b->is_varargs ||
-            !ty_equal(a->ret, b->ret))
+            a->sret_first != b->sret_first || !ty_equal(a->ret, b->ret))
             return 0;
         for (int i = 0; i < a->nptypes; i++)
             if (!ty_equal(a->ptypes[i], b->ptypes[i]))
@@ -212,12 +262,14 @@ int ty_equal(const struct type *a, const struct type *b)
 int ty_is_integer(const struct type *t)
 {
     return t->kind == TY_BOOL || t->kind == TY_CHAR ||
-           t->kind == TY_SHORT || t->kind == TY_INT || t->kind == TY_LONG;
+           t->kind == TY_SHORT || t->kind == TY_INT || t->kind == TY_LONG ||
+           t->kind == TY_INT128;
 }
 
 int ty_is_float(const struct type *t)
 {
-    return t->kind == TY_FLOAT || t->kind == TY_DOUBLE;
+    return t->kind == TY_FLOAT || t->kind == TY_DOUBLE ||
+           t->kind == TY_LDOUBLE;
 }
 
 int ty_is_arith(const struct type *t)
@@ -281,8 +333,73 @@ static void classify_fields(const struct type *t, int off,
                 ty_is_float(t) ? CLASS_SSE : CLASS_INTEGER);
 }
 
+/* Does t contain a long double anywhere? */
+static int has_ldouble(const struct type *t)
+{
+    if (t->kind == TY_LDOUBLE) return 1;
+    if (t->kind == TY_ARRAY) return has_ldouble(t->pointee);
+    if (t->kind == TY_STRUCT)
+        for (int i = 0; i < t->nmembers; i++)
+            if (has_ldouble(t->members[i].ty)) return 1;
+    return 0;
+}
+
+static int only_ldouble(const struct type *t)
+{
+    if (t->kind == TY_LDOUBLE) return 1;
+    if (t->kind == TY_ARRAY) return t->count > 0 && only_ldouble(t->pointee);
+    if (t->kind != TY_STRUCT || t->nmembers == 0) return 0;
+    for (int i = 0; i < t->nmembers; i++)
+        if (!only_ldouble(t->members[i].ty)) return 0;
+    return 1;
+}
+
+int ty_x87_struct(const struct type *t)
+{
+    return t->kind == TY_STRUCT && ty_size(t) == 16 && only_ldouble(t);
+}
+
+int ty_x87_ret(const struct type *t)
+{
+    if (ty_x87_struct(t)) return 1;
+    if (t->kind == TY_STRUCT && t->is_complex && t->celem->kind == TY_LDOUBLE)
+        return 2;
+    return 0;
+}
+
+struct type *ty_complex(struct type *elem)
+{
+    static struct type *made[3];
+    int k = elem->kind == TY_FLOAT ? 0 : elem->kind == TY_DOUBLE ? 1 : 2;
+    if (made[k]) return made[k];
+    struct type *t = ty_struct(NULL, 0);
+    struct member *ms = xcalloc(2, sizeof *ms);
+    ms[0].name = "__real__";
+    ms[0].ty = elem;
+    ms[1].name = "__imag__";
+    ms[1].ty = elem;
+    ty_struct_layout(t, ms, 2, 0, 0);
+    t->is_complex = 1;
+    t->celem = elem;
+    made[k] = t;
+    return t;
+}
+
+int ty_is_complex(const struct type *t)
+{
+    return t && t->kind == TY_STRUCT && t->is_complex;
+}
+
 int ty_classify(const struct type *t, enum arg_class *classes)
 {
+    /* long double is X87 class; as an argument that means MEMORY, and a
+     * struct holding one is MEMORY too (SysV 3.2.3). */
+    if (has_ldouble(t))
+        return 0;
+    if (t->kind == TY_INT128) {         /* two INTEGER eightbytes */
+        classes[0] = classes[1] = CLASS_INTEGER;
+        return 2;
+    }
     if (t->kind != TY_STRUCT) {
         classes[0] = ty_is_float(t) ? CLASS_SSE : CLASS_INTEGER;
         return 1;
@@ -321,7 +438,7 @@ const char *ty_name(const struct type *t)
             stars++;
         } else {
             if (ndims < 4)
-                dims[ndims] = t->count;
+                dims[ndims] = t->vla_len ? -1 : t->count;   /* -1: [*] */
             ndims++;
         }
         t = t->pointee;
@@ -336,7 +453,17 @@ const char *ty_name(const struct type *t)
     case TY_LONG: base = t->is_unsigned ? "unsigned long" : "long"; break;
     case TY_FLOAT: base = "float"; break;
     case TY_DOUBLE: base = "double"; break;
+    case TY_LDOUBLE: base = "long double"; break;
+    case TY_INT128: base = t->is_unsigned ? "unsigned __int128" : "__int128";
+        break;
     case TY_STRUCT:
+        if (t->is_complex) {
+            snprintf(structbuf, sizeof structbuf, "%s _Complex",
+                     t->celem->kind == TY_FLOAT ? "float"
+                     : t->celem->kind == TY_DOUBLE ? "double" : "long double");
+            base = structbuf;
+            break;
+        }
         snprintf(structbuf, sizeof structbuf, "%s %s",
                  t->is_union ? "union" : "struct",
                  t->tag ? t->tag : "<anonymous>");
@@ -354,7 +481,72 @@ const char *ty_name(const struct type *t)
             buf[n++] = '*';
     }
     for (int i = 0; i < ndims && i < 4 && n < (int)bufsz - 16; i++)
-        n += snprintf(buf + n, bufsz - (size_t)n, "[%d]", dims[i]);
+        n += dims[i] < 0 ? snprintf(buf + n, bufsz - (size_t)n, "[*]")
+                         : snprintf(buf + n, bufsz - (size_t)n, "[%d]", dims[i]);
     buf[n] = 0;
     return buf;
 }
+
+/* ---- AAPCS64 aggregate classification ----
+ *
+ * A property of the TYPE under that ABI, asked by two places: the aarch64
+ * backend, and irgen, which records the answer on the instruction so the
+ * IR need not carry the type itself.
+ */
+static int hfa_walk(const struct type *t, int *esz)
+{
+    switch (t->kind) {
+    case TY_FLOAT:
+    case TY_DOUBLE:
+    case TY_LDOUBLE: {
+        int sz = ty_size(t);
+        if (*esz && *esz != sz)
+            return -1;
+        *esz = sz;
+        return 1;
+    }
+    case TY_ARRAY: {
+        if (t->count <= 0)
+            return -1;
+        int n = hfa_walk(t->pointee, esz);
+        return n < 0 ? -1 : n * t->count;
+    }
+    case TY_STRUCT: {
+        int n = 0;
+        for (int m = 0; m < t->nmembers; m++) {
+            const struct member *mb = &t->members[m];
+            if (mb->is_bitfield)
+                return -1;
+            int k = hfa_walk(mb->ty, esz);
+            if (k < 0)
+                return -1;
+            if (t->is_union) { if (k > n) n = k; }   /* the widest member */
+            else n += k;
+        }
+        return n;
+    }
+    default:
+        return -1;
+    }
+}
+
+int ty_hfa(const struct type *t, int *esz)
+{
+    if (!t || t->kind != TY_STRUCT)
+        return 0;
+    *esz = 0;
+    int n = hfa_walk(t, esz);
+    if (n < 1 || n > 4 || ty_size(t) != n * *esz)
+        return 0;
+    return n;
+}
+
+/* A composite larger than 16 bytes that is not an HFA is passed as a POINTER
+ * to a copy the caller makes (stage B.3), and returned through x8. */
+int ty_aapcs64_byref(const struct type *t)
+{
+    int esz;
+    return t && t->kind == TY_STRUCT && ty_size(t) > 16 && !ty_hfa(t, &esz);
+}
+
+

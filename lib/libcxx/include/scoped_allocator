@@ -1,0 +1,150 @@
+/* <scoped_allocator> — C++ [allocator.adaptor].
+ *
+ * The adaptor that makes an allocator REACH INSIDE the objects it
+ * allocates. The problem it solves is specific and real: a
+ * `vector<string>` built with a custom allocator allocates its buffer
+ * from that allocator and each string's characters from the DEFAULT
+ * one, because the string knows nothing about the vector's allocator.
+ * Put the whole vector in a memory pool and the strings are still on
+ * the heap.
+ *
+ * `scoped_allocator_adaptor<Outer, Inner...>` fixes that by using Outer
+ * for the container's own memory and passing Inner down to every
+ * element it constructs -- which works because the standard containers
+ * accept an allocator as a trailing constructor argument, and this
+ * detects that with `uses_allocator` and supplies it.
+ *
+ * It is a niche type and a fiddly one; it is here because generic code
+ * names it and because the uses-allocator protocol it implements is
+ * what <memory_resource> relies on.
+ */
+#ifndef _LIBCXX_SCOPED_ALLOCATOR
+#define _LIBCXX_SCOPED_ALLOCATOR
+
+#include <memory>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+/* Does T's constructor take an allocator? The standard's answer is "T
+ * says so by declaring allocator_type", and a container that does is
+ * one this adaptor can reach into. */
+template <class T, class A, class = void>
+struct uses_allocator : false_type {};
+
+template <class T, class A>
+struct uses_allocator<T, A, void_t<typename T::allocator_type>>
+    : is_convertible<A, typename T::allocator_type> {};
+
+template <class T, class A>
+inline constexpr bool uses_allocator_v = uses_allocator<T, A>::value;
+
+template <class Outer, class... Inner>
+class scoped_allocator_adaptor;
+
+template <class Outer>
+class scoped_allocator_adaptor<Outer> : public Outer {
+public:
+    using outer_allocator_type = Outer;
+    using inner_allocator_type = scoped_allocator_adaptor<Outer>;
+    using value_type = typename allocator_traits<Outer>::value_type;
+    using size_type = typename allocator_traits<Outer>::size_type;
+    using difference_type = typename allocator_traits<Outer>::difference_type;
+    using pointer = typename allocator_traits<Outer>::pointer;
+
+    template <class T>
+    struct rebind {
+        using other = scoped_allocator_adaptor<
+            typename allocator_traits<Outer>::template rebind_alloc<T>>;
+    };
+
+    scoped_allocator_adaptor() = default;
+    template <class O>
+    scoped_allocator_adaptor(O &&o) : Outer(static_cast<O &&>(o)) {}
+
+    Outer &outer_allocator() noexcept { return *this; }
+    const Outer &outer_allocator() const noexcept { return *this; }
+    /* With no inner allocator, the inner one is this: the element gets
+     * the same allocator the container used, which is the whole
+     * "scoped" behaviour in its simplest form. */
+    inner_allocator_type &inner_allocator() noexcept { return *this; }
+    const inner_allocator_type &inner_allocator() const noexcept
+    { return *this; }
+
+    /* The uses-allocator construction the adaptor exists for: if T can
+     * take an allocator, give it one; otherwise construct it plainly.
+     * Both forms are needed because most types are not containers. */
+    template <class T, class... A>
+    void construct(T *p, A &&...a)
+    {
+        if constexpr (uses_allocator_v<T, inner_allocator_type>)
+            ::new ((void *)p) T(static_cast<A &&>(a)..., inner_allocator());
+        else
+            ::new ((void *)p) T(static_cast<A &&>(a)...);
+    }
+
+    template <class T>
+    void destroy(T *p) { p->~T(); }
+};
+
+template <class Outer, class Next, class... Rest>
+class scoped_allocator_adaptor<Outer, Next, Rest...> : public Outer {
+public:
+    using outer_allocator_type = Outer;
+    using inner_allocator_type = scoped_allocator_adaptor<Next, Rest...>;
+    using value_type = typename allocator_traits<Outer>::value_type;
+    using size_type = typename allocator_traits<Outer>::size_type;
+    using difference_type = typename allocator_traits<Outer>::difference_type;
+    using pointer = typename allocator_traits<Outer>::pointer;
+
+    template <class T>
+    struct rebind {
+        using other = scoped_allocator_adaptor<
+            typename allocator_traits<Outer>::template rebind_alloc<T>,
+            Next, Rest...>;
+    };
+
+    scoped_allocator_adaptor() = default;
+    scoped_allocator_adaptor(const Outer &o, const Next &n, const Rest &...r)
+        : Outer(o), __inner(n, r...) {}
+
+    Outer &outer_allocator() noexcept { return *this; }
+    const Outer &outer_allocator() const noexcept { return *this; }
+    inner_allocator_type &inner_allocator() noexcept { return __inner; }
+    const inner_allocator_type &inner_allocator() const noexcept
+    { return __inner; }
+
+    /* The element gets the NEXT allocator in the list, not this one --
+     * which is what lets a vector<vector<string>> give a different
+     * allocator at each depth. */
+    template <class T, class... A>
+    void construct(T *p, A &&...a)
+    {
+        if constexpr (uses_allocator_v<T, inner_allocator_type>)
+            ::new ((void *)p) T(static_cast<A &&>(a)..., __inner);
+        else
+            ::new ((void *)p) T(static_cast<A &&>(a)...);
+    }
+
+    template <class T>
+    void destroy(T *p) { p->~T(); }
+
+private:
+    inner_allocator_type __inner;
+};
+
+template <class O1, class... I1, class O2, class... I2>
+bool operator==(const scoped_allocator_adaptor<O1, I1...> &a,
+                const scoped_allocator_adaptor<O2, I2...> &b)
+{ return a.outer_allocator() == b.outer_allocator(); }
+
+template <class O1, class... I1, class O2, class... I2>
+bool operator!=(const scoped_allocator_adaptor<O1, I1...> &a,
+                const scoped_allocator_adaptor<O2, I2...> &b)
+{ return !(a == b); }
+
+}  // namespace std
+
+#endif

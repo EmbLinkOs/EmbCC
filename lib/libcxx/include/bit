@@ -1,0 +1,209 @@
+/* <bit> — C++ [bit].
+ *
+ * The operations every machine has had for decades and C++ had no way
+ * to ask for. Counting leading zeros is one instruction on both targets
+ * here; written as a loop it is a loop, and no compiler reliably turns
+ * the loop back into the instruction. So every function below is the
+ * compiler's builtin, which lowers to `lzcnt`/`tzcnt`/`popcnt` on
+ * x86-64 and `clz`/`rbit`/`cnt` on aarch64.
+ *
+ * Two things here are not about speed at all.
+ *
+ * `bit_cast` is the ONLY defined way to reinterpret an object's bytes.
+ * `*(int *)&f` breaks the strict-aliasing rule and the optimizer is
+ * entitled to assume it never happens; a union is defined in C and
+ * merely conventional in C++; memcpy is defined but is not a constant
+ * expression. bit_cast is defined, constexpr, and says what it means.
+ *
+ * `endian` is a compile-time answer to a question that is usually asked
+ * at run time with a union and a cast. Both targets here are little-
+ * endian, and the enum says so from the compiler's own macros rather
+ * than from an assumption.
+ */
+#ifndef _LIBCXX_BIT
+#define _LIBCXX_BIT
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <type_traits>
+
+namespace std {
+
+/* ---- bit_cast ------------------------------------------------------------ */
+
+template <class To, class From>
+constexpr To bit_cast(const From &f) noexcept
+{
+    static_assert(sizeof(To) == sizeof(From),
+                  "bit_cast needs types of the same size");
+    static_assert(is_trivially_copyable_v<To> &&
+                  is_trivially_copyable_v<From>,
+                  "bit_cast needs trivially copyable types");
+    return __builtin_bit_cast(To, f);
+}
+
+/* ---- the byte-order enum -------------------------------------------------- */
+
+enum class endian {
+    little = __ORDER_LITTLE_ENDIAN__,
+    big    = __ORDER_BIG_ENDIAN__,
+    native = __BYTE_ORDER__
+};
+
+/* ---- byteswap (C++23, and wanted long before that) ------------------------ */
+
+template <class T>
+constexpr T byteswap(T v) noexcept
+{
+    static_assert(is_integral_v<T>, "byteswap wants an integer");
+    if constexpr (sizeof(T) == 1)
+        return v;
+    else if constexpr (sizeof(T) == 2)
+        return (T)__builtin_bswap16((unsigned short)v);
+    else if constexpr (sizeof(T) == 4)
+        return (T)__builtin_bswap32((unsigned)v);
+    else
+        return (T)__builtin_bswap64((unsigned long long)v);
+}
+
+namespace __detail {
+/* Every function below is defined for UNSIGNED integers only, and that
+ * is not fussiness: "the number of leading zeros" has no meaning for a
+ * negative number, and `1 << 31` on a signed int is undefined. The
+ * standard constrains them for the same reason. */
+template <class T>
+inline constexpr bool __uint =
+    is_unsigned_v<T> && is_integral_v<T> && !is_same_v<T, bool>;
+}
+
+/* ---- rotates -------------------------------------------------------------
+ *
+ * A rotate is NOT `(x << n) | (x >> (w - n))`: for n == 0 the second
+ * shift is by the full width, which is undefined behaviour, and the
+ * expression is the classic way to write a bug that only appears when
+ * the count happens to be zero. Masking the count to the width fixes it
+ * and is what the hardware does anyway.
+ */
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, T> rotl(T v, int n) noexcept
+{
+    const int w = (int)(sizeof(T) * 8);
+    int r = n % w;
+    if (r == 0)
+        return v;
+    if (r > 0)
+        return (T)((v << r) | (v >> (w - r)));
+    r = -r;
+    return (T)((v >> r) | (v << (w - r)));
+}
+
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, T> rotr(T v, int n) noexcept
+{
+    const int w = (int)(sizeof(T) * 8);
+    int r = n % w;
+    if (r == 0)
+        return v;
+    if (r > 0)
+        return (T)((v >> r) | (v << (w - r)));
+    r = -r;
+    return (T)((v << r) | (v >> (w - r)));
+}
+
+/* ---- counting -------------------------------------------------------------
+ *
+ * The builtins are undefined for zero -- `bsr` on an empty word leaves
+ * the destination unspecified on x86 -- so every wrapper handles zero
+ * itself. That is the whole difference between these and the raw
+ * builtins, and it is the difference that matters: a hash table sizing
+ * itself from `countl_zero(0)` would otherwise get garbage.
+ */
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, int> countl_zero(T v) noexcept
+{
+    constexpr int w = (int)(sizeof(T) * 8);
+    if (v == 0)
+        return w;
+    if constexpr (sizeof(T) <= sizeof(unsigned))
+        return __builtin_clz((unsigned)v) - (32 - w);
+    else if constexpr (sizeof(T) <= sizeof(unsigned long))
+        return __builtin_clzl((unsigned long)v) - (64 - w);
+    else
+        return __builtin_clzll((unsigned long long)v) - (64 - w);
+}
+
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, int> countr_zero(T v) noexcept
+{
+    constexpr int w = (int)(sizeof(T) * 8);
+    if (v == 0)
+        return w;
+    if constexpr (sizeof(T) <= sizeof(unsigned))
+        return __builtin_ctz((unsigned)v);
+    else if constexpr (sizeof(T) <= sizeof(unsigned long))
+        return __builtin_ctzl((unsigned long)v);
+    else
+        return __builtin_ctzll((unsigned long long)v);
+}
+
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, int> countl_one(T v) noexcept
+{ return countl_zero((T)~v); }
+
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, int> countr_one(T v) noexcept
+{ return countr_zero((T)~v); }
+
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, int> popcount(T v) noexcept
+{
+    if constexpr (sizeof(T) <= sizeof(unsigned))
+        return __builtin_popcount((unsigned)v);
+    else if constexpr (sizeof(T) <= sizeof(unsigned long))
+        return __builtin_popcountl((unsigned long)v);
+    else
+        return __builtin_popcountll((unsigned long long)v);
+}
+
+/* ---- powers of two ---------------------------------------------------------
+ *
+ * `has_single_bit` is the honest name for what everyone writes as
+ * `(x & (x - 1)) == 0` -- which is also true for zero, and zero is not
+ * a power of two. The standard's version gets that right and the
+ * one-liner usually does not.
+ */
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, bool> has_single_bit(T v) noexcept
+{ return v != 0 && (v & (T)(v - 1)) == 0; }
+
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, int> bit_width(T v) noexcept
+{ return (int)(sizeof(T) * 8) - countl_zero(v); }
+
+/* The smallest power of two not less than v. `bit_ceil(0)` is 1, which
+ * is what a container sizing itself wants: an empty table still needs
+ * one bucket. Overflowing it is undefined, so a caller near the top of
+ * the type has to check -- and the standard says so rather than wrap
+ * silently to zero. */
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, T> bit_ceil(T v) noexcept
+{
+    if (v <= 1)
+        return T(1);
+    return (T)(T(1) << bit_width((T)(v - 1)));
+}
+
+/* The largest power of two not greater than v; zero for zero, because
+ * there is no such power and zero is the only honest answer. */
+template <class T>
+constexpr enable_if_t<__detail::__uint<T>, T> bit_floor(T v) noexcept
+{
+    if (v == 0)
+        return T(0);
+    return (T)(T(1) << (bit_width(v) - 1));
+}
+
+}  // namespace std
+
+#endif

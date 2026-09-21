@@ -1,13 +1,15 @@
 #!/bin/sh
 # DWARF frame + locals (EMBDBG step 2). EmbCC -g now describes each function
-# and its parameters/locals: a DW_TAG_subprogram with frame_base = rbp, child
+# and its parameters/locals: a DW_TAG_subprogram with frame_base = the frame
+# pointer (rbp on x86-64, x29 on aarch64), child
 # formal_parameter/variable DIEs whose DW_AT_location is DW_OP_fbreg(slot), and
 # base_type/pointer_type DIEs for their types. Proven the honest way: gdb reads
 # the scope and types, AND the fbreg offset is cross-checked against the exact
 # stack slot codegen stores into — so a live debugger reads the right value.
 set -u
 echo "TEST-MARKER debug-locals"
-out=tests/golden/out/debug-locals
+. "$(dirname "$0")/../lib.sh"
+out=tests/golden/out/debug-locals-$ARCH
 rm -rf "$out"; mkdir -p "$out"
 
 cat > "$out/loc.c" <<'CEOF'
@@ -19,7 +21,7 @@ int compute(int a, int b)
     return sum + c + *p;
 }
 CEOF
-"$EMBCC" -g -c "$out/loc.c" -o "$out/loc.o" || { echo "embcc -g failed"; exit 1; }
+"$EMBCC" --target="$TARGET" -g -c "$out/loc.c" -o "$out/loc.o" || { echo "embcc -g failed"; exit 1; }
 
 info=$(readelf --debug-dump=info "$out/loc.o" 2>/dev/null)
 fail=0
@@ -53,15 +55,29 @@ fi
 # Cross-check ONE location against the slot codegen uses: DWARF must place a
 # variable exactly where the code stores it (else a debugger reads garbage).
 # 'sum = a + b' -> the add result is stored to sum's slot; the fbreg offset in
-# the DIE must equal that [rbp-N]. Extract sum's offset and the store target.
+# the DIE must name that slot. x86-64: a store to -N(%rbp). aarch64: slots are
+# sp-relative and sp sits the frame size below x29, so fbreg + frame size is
+# the [sp, #M] a 4-byte store targets. (tests/golden/debug-live.sh proves the
+# same thing on a running program.)
 sumoff=$(gdb -batch -nx "$out/loc.o" -ex "info scope compute" 2>/dev/null \
          | sed -n 's/.*Symbol sum .*offset 0+\(-*[0-9]*\).*/\1/p')
-if [ -n "$sumoff" ]; then
+if [ -z "$sumoff" ]; then
+    echo "cross-check: gdb gave no location for sum"; fail=1
+elif [ "$ARCH" = aarch64 ]; then
+    dis=$(aarch64-elf-objdump -d "$out/loc.o" 2>/dev/null)
+    fsz=$(printf '%s\n' "$dis" | sed -n 's/.*sub[[:space:]]*sp, sp, #\(0x[0-9a-f]*\).*/\1/p' | head -1)
+    m=$(( sumoff + fsz ))
+    if printf '%s\n' "$dis" | grep -qE "str[[:space:]]+w[0-9]+, \[sp, #$m\]"; then
+        echo "cross-check: sum's DWARF slot (fbreg $sumoff, frame $fsz) == its store site [sp, #$m]"
+    else
+        echo "cross-check FAILED: no 4-byte store to sum's slot [sp, #$m]"; fail=1
+    fi
+else
     hex=$(printf '0x%x' "$(( -sumoff ))")
     if objdump -d "$out/loc.o" 2>/dev/null | grep -qE "mov +%eax,-$hex\(%rbp\)"; then
         echo "cross-check: sum's DWARF slot (fbreg $sumoff) == its store site (-$hex(%rbp))"
     else
-        echo "cross-check WARN: could not confirm sum's store site at -$hex(%rbp)"
+        echo "cross-check FAILED: no store to sum's slot -$hex(%rbp)"; fail=1
     fi
 fi
 

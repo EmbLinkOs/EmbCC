@@ -1,0 +1,47 @@
+/* <cstdlib> — the C header's names, in namespace std as well as at
+ * global scope. C++ requires the std:: spellings; every real
+ * implementation also leaves the global ones, and code depends on it. */
+#ifndef _LIBCXX_CSTDLIB
+#define _LIBCXX_CSTDLIB
+#include <stdlib.h>
+
+namespace std {
+using ::size_t;
+using ::div_t;
+using ::ldiv_t;
+using ::lldiv_t;
+using ::abort;
+using ::atexit;
+using ::exit;
+using ::_Exit;
+using ::getenv;
+using ::system;
+using ::malloc;
+using ::calloc;
+using ::realloc;
+using ::free;
+using ::aligned_alloc;
+using ::atof;
+using ::atoi;
+using ::atol;
+using ::atoll;
+using ::strtod;
+using ::strtof;
+using ::strtold;
+using ::strtol;
+using ::strtoll;
+using ::strtoul;
+using ::strtoull;
+using ::rand;
+using ::srand;
+using ::qsort;
+using ::bsearch;
+using ::abs;
+using ::labs;
+using ::llabs;
+using ::div;
+using ::ldiv;
+using ::lldiv;
+}
+
+#endif

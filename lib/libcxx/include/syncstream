@@ -1,0 +1,181 @@
+/* <syncstream> — C++ [syncstream].
+ *
+ * The fix for interleaved output. Two threads writing to `std::cout`
+ * produce a mess not because the stream is unsynchronised -- it is --
+ * but because `cout << a << b << c` is THREE separate operations, and
+ * another thread may write between any two of them. Locking cout does
+ * not help either, unless every writer agrees to take the same lock
+ * around the whole expression, which is exactly the discipline nobody
+ * maintains.
+ *
+ * An `osyncstream` buffers everything and emits it in ONE write when it
+ * is destroyed or flushed. So the unit of atomicity becomes the
+ * statement, which is what the programmer meant all along, and no
+ * agreement between writers is needed: one thread's block cannot land
+ * inside another's because each block is a single transfer.
+ *
+ * ---- the emit happens on DESTRUCTION -------------------------------------
+ *
+ * `osyncstream(cout) << a << b << c;` works because the temporary dies
+ * at the end of the full expression. A named one holds its output until
+ * it goes out of scope, which is occasionally a surprise and is always
+ * what "atomic block" has to mean.
+ *
+ * The per-stream mutex is keyed on the wrapped STREAMBUF, so two
+ * osyncstreams over the same cout serialise against each other and two
+ * over different streams do not.
+ */
+#ifndef _LIBCXX_SYNCSTREAM
+#define _LIBCXX_SYNCSTREAM
+
+#include <iosfwd>
+#include <mutex>
+#include <ostream>
+#include <streambuf>
+#include <string>
+
+namespace std {
+
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_syncbuf : public basic_streambuf<C, T> {
+public:
+    using char_type = C;
+    using traits_type = T;
+    using allocator_type = A;
+    using streambuf_type = basic_streambuf<C, T>;
+
+    explicit basic_syncbuf(streambuf_type *obuf = nullptr)
+        : __wrapped(obuf), __emit_on_sync(false) {}
+
+    basic_syncbuf(basic_syncbuf &&o)
+        : __wrapped(o.__wrapped), __buf(static_cast<basic_string<C> &&>(o.__buf)),
+          __emit_on_sync(o.__emit_on_sync)
+    { o.__wrapped = nullptr; }
+
+    basic_syncbuf(const basic_syncbuf &) = delete;
+    basic_syncbuf &operator=(const basic_syncbuf &) = delete;
+
+    /* The destructor emits, and swallows any exception: it is a
+     * destructor, and letting one out during unwinding is terminate().
+     * A caller that needs to know whether the write succeeded calls
+     * emit() itself. */
+    ~basic_syncbuf()
+    {
+        try {
+            emit();
+        } catch (...) {
+        }
+    }
+
+    /* One transfer, under the mutex belonging to the WRAPPED buffer --
+     * so two syncbufs over the same cout serialise and two over
+     * different streams do not. */
+    bool emit()
+    {
+        if (!__wrapped || __buf.empty())
+            return __wrapped != nullptr;
+        lock_guard<mutex> g(__mutex_for(__wrapped));
+        streamsize n = __wrapped->sputn(__buf.data(),
+                                        (streamsize)__buf.size());
+        bool ok = n == (streamsize)__buf.size();
+        __buf.clear();
+        if (__emit_on_sync)
+            __wrapped->pubsync();
+        return ok;
+    }
+
+    streambuf_type *get_wrapped() const noexcept { return __wrapped; }
+    allocator_type get_allocator() const noexcept { return A(); }
+
+    /* Whether a flush of the stream also flushes the WRAPPED one. Off
+     * by default, because the point is to batch. */
+    void set_emit_on_sync(bool b) noexcept { __emit_on_sync = b; }
+
+protected:
+    /* Every character goes into the string; the wrapped buffer is not
+     * touched until emit(). That is the whole mechanism. */
+    typename T::int_type overflow(typename T::int_type c) override
+    {
+        if (!T::eq_int_type(c, T::eof()))
+            __buf.push_back(T::to_char_type(c));
+        return T::not_eof(c);
+    }
+
+    streamsize xsputn(const C *s, streamsize n) override
+    {
+        __buf.append(s, (size_t)n);
+        return n;
+    }
+
+    int sync() override
+    {
+        if (__emit_on_sync)
+            return emit() ? 0 : -1;
+        return 0;
+    }
+
+private:
+    /* One mutex per wrapped streambuf, found by address. A small fixed
+     * table rather than a map: the number of distinct output streams a
+     * program synchronises on is tiny, and a map here would need its
+     * own lock to protect it. */
+    static mutex &__mutex_for(streambuf_type *b)
+    {
+        static const int N = 8;
+        static streambuf_type *keys[N];
+        static mutex locks[N];
+        static mutex table;
+        lock_guard<mutex> g(table);
+        for (int i = 0; i < N; i++)
+            if (keys[i] == b)
+                return locks[i];
+        for (int i = 0; i < N; i++)
+            if (!keys[i]) {
+                keys[i] = b;
+                return locks[i];
+            }
+        /* More streams than slots: they share, which serialises more
+         * than necessary and is still correct. Correct-and-slower beats
+         * an unbounded table that needs a lock of its own. */
+        return locks[N - 1];
+    }
+
+    streambuf_type *__wrapped;
+    basic_string<C> __buf;
+    bool __emit_on_sync;
+};
+
+template <class C, class T = char_traits<C>, class A = allocator<C>>
+class basic_osyncstream : public basic_ostream<C, T> {
+public:
+    using char_type = C;
+    using traits_type = T;
+    using syncbuf_type = basic_syncbuf<C, T, A>;
+
+    explicit basic_osyncstream(basic_streambuf<C, T> *obuf)
+        : basic_ostream<C, T>(&__sb), __sb(obuf) {}
+
+    explicit basic_osyncstream(basic_ostream<C, T> &os)
+        : basic_ostream<C, T>(&__sb), __sb(os.rdbuf()) {}
+
+    basic_osyncstream(const basic_osyncstream &) = delete;
+    basic_osyncstream &operator=(const basic_osyncstream &) = delete;
+
+    ~basic_osyncstream() = default;
+
+    void emit() { __sb.emit(); }
+    basic_streambuf<C, T> *get_wrapped() const noexcept
+    { return __sb.get_wrapped(); }
+    syncbuf_type *rdbuf() const noexcept
+    { return const_cast<syncbuf_type *>(&__sb); }
+
+private:
+    syncbuf_type __sb;
+};
+
+using syncbuf = basic_syncbuf<char>;
+using osyncstream = basic_osyncstream<char>;
+
+}  // namespace std
+
+#endif

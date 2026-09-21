@@ -1,0 +1,70 @@
+/* <typeinfo> — C++ [typeinfo.syn].
+ *
+ * std::type_info's layout is fixed by the Itanium C++ ABI, not by this
+ * header: the compiler emits the objects (see src/cxx/emit.c) and the
+ * runtime must describe them the same way or `catch` matches the wrong
+ * type. The vtable pointer comes first, then the name.
+ */
+#ifndef _LIBCXX_TYPEINFO
+#define _LIBCXX_TYPEINFO
+
+#include <cstddef>
+#include <exception>
+
+namespace std {
+
+class type_info {
+public:
+    virtual ~type_info();
+
+    const char *name() const noexcept
+    { return __name[0] == '*' ? __name + 1 : __name; }
+
+    /* Two type_infos are the same type iff their names are. Comparing the
+     * POINTERS is the fast path and is correct for everything with
+     * external linkage, because the ABI makes those objects unique; the
+     * string compare is what makes it correct for the rest. A '*' prefix
+     * marks a name the ABI does NOT promise to be unique (an internal or
+     * unnamed type), and for those only pointer equality can be trusted --
+     * which is why the compare below refuses to look past it. */
+    bool operator==(const type_info &o) const noexcept
+    {
+        if (this == &o)
+            return true;
+        if (__name[0] == '*' || o.__name[0] == '*')
+            return false;
+        return __builtin_strcmp(__name, o.__name) == 0;
+    }
+    bool operator!=(const type_info &o) const noexcept
+    { return !(*this == o); }
+
+    bool before(const type_info &o) const noexcept
+    { return __builtin_strcmp(__name, o.__name) < 0; }
+
+    size_t hash_code() const noexcept;
+
+    type_info(const type_info &) = delete;
+    type_info &operator=(const type_info &) = delete;
+
+protected:
+    explicit type_info(const char *n) : __name(n) {}
+    const char *__name;
+};
+
+class bad_cast : public exception {
+public:
+    bad_cast() noexcept {}
+    ~bad_cast() noexcept override;
+    const char *what() const noexcept override;
+};
+
+class bad_typeid : public exception {
+public:
+    bad_typeid() noexcept {}
+    ~bad_typeid() noexcept override;
+    const char *what() const noexcept override;
+};
+
+}  // namespace std
+
+#endif

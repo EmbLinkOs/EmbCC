@@ -326,3 +326,24 @@ int main(void) { return 0; }' \
 check generic-no-match \
     'int main(void) { double d = 0; return _Generic(d, int: 1, long: 2); }' \
     "no _Generic association matches"
+# VLAs are local variables and parameters only (C99 6.7.5.2p2, 6.7.8p3)
+check vla-file-scope \
+    'int n = 3;
+int g[n];' \
+    "variable length array can only be a local variable or a parameter"
+check vla-struct-member \
+    'int f(int n) { struct s { int a[n]; } x; (void)x; return 0; }' \
+    "variable length array can only be a local variable or a parameter"
+check vla-static \
+    'int f(int n) { static int a[n]; return a[0]; }' \
+    "static 'a' cannot have a variably modified type (int\[\*\])"
+check vla-initialized \
+    'int f(int n) { int a[n] = { 1 }; return a[0]; }' \
+    "variable length array 'a' cannot be initialized"
+# the C99 complex types are floating; GNU's integer ones are refused
+check complex-int \
+    'int main(void) { _Complex int z; return 0; }' \
+    "only float, double and long double _Complex are supported"
+check imaginary-int \
+    'int main(void) { double _Complex z = 2i; return 0; }' \
+    "integer imaginary constant"

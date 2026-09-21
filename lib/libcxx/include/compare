@@ -1,0 +1,358 @@
+/* <compare> — C++ [cmp].
+ *
+ * The three comparison categories, and the one header the COMPILER
+ * needs: `a <=> b` on built-in types yields std::strong_ordering or
+ * std::partial_ordering by name, and a defaulted `operator<=>` cannot be
+ * written without them. That is why a program using <=> must include
+ * this even though it names nothing from it.
+ *
+ * The layout is fixed by that relationship. EmbCC writes the result as a
+ * SIGNED CHAR at the start of the object -- less -1, equivalent 0,
+ * greater 1, unordered -128 -- so the first member here must be exactly
+ * that, and the same encoding libstdc++ uses. It is an ABI between the
+ * compiler and this header, not an implementation detail.
+ *
+ * The three categories differ in what they PROMISE, not in what they
+ * can represent:
+ *
+ *   partial_ordering may answer "unordered" -- what floating point does
+ *     with a NaN, where a < b, a > b and a == b are all false.
+ *   weak_ordering never says unordered, but "equivalent" does not mean
+ *     interchangeable: two strings equal ignoring case are equivalent
+ *     and are still different strings.
+ *   strong_ordering's "equal" does mean interchangeable -- substituting
+ *     one for the other changes nothing observable.
+ *
+ * They convert in that direction only: strong to weak to partial. A
+ * weaker category cannot be strengthened, because the promise was never
+ * made.
+ */
+#ifndef _LIBCXX_COMPARE
+#define _LIBCXX_COMPARE
+
+#include <cstddef>
+#include <type_traits>
+
+namespace std {
+
+namespace __detail {
+/* Only a literal 0 can reach these comparisons: it converts to a null
+ * pointer and thence to this, where any other int does not convert at
+ * all. `o == 1` is therefore a compile error rather than a silent
+ * comparison against something meaningless. */
+struct __cmp_unspec {
+    constexpr __cmp_unspec(__cmp_unspec *) noexcept {}
+};
+
+enum class __ord : signed char { less = -1, equivalent = 0, greater = 1 };
+enum class __ncmp : signed char { unordered = -128 };
+}
+
+class partial_ordering {
+public:
+    /* First and only member: the compiler writes here directly. */
+    signed char _M_value;
+
+    constexpr explicit partial_ordering(__detail::__ord v) noexcept
+        : _M_value((signed char)v) {}
+    constexpr explicit partial_ordering(__detail::__ncmp v) noexcept
+        : _M_value((signed char)v) {}
+    constexpr partial_ordering() noexcept : _M_value(0) {}
+
+    static const partial_ordering less;
+    static const partial_ordering equivalent;
+    static const partial_ordering greater;
+    static const partial_ordering unordered;
+
+    friend constexpr bool operator==(partial_ordering v,
+                                     __detail::__cmp_unspec) noexcept
+    { return v._M_value == 0; }
+    friend constexpr bool operator==(partial_ordering a,
+                                     partial_ordering b) noexcept
+    { return a._M_value == b._M_value; }
+    friend constexpr bool operator<(partial_ordering v,
+                                    __detail::__cmp_unspec) noexcept
+    { return v._M_value == -1; }
+    friend constexpr bool operator>(partial_ordering v,
+                                    __detail::__cmp_unspec) noexcept
+    { return v._M_value == 1; }
+    friend constexpr bool operator<=(partial_ordering v,
+                                     __detail::__cmp_unspec) noexcept
+    { return v._M_value == -1 || v._M_value == 0; }
+    friend constexpr bool operator>=(partial_ordering v,
+                                     __detail::__cmp_unspec) noexcept
+    { return v._M_value == 1 || v._M_value == 0; }
+    friend constexpr bool operator<(__detail::__cmp_unspec,
+                                    partial_ordering v) noexcept
+    { return v._M_value == 1; }
+    friend constexpr bool operator>(__detail::__cmp_unspec,
+                                    partial_ordering v) noexcept
+    { return v._M_value == -1; }
+};
+
+inline constexpr partial_ordering
+partial_ordering::less(__detail::__ord::less);
+inline constexpr partial_ordering
+partial_ordering::equivalent(__detail::__ord::equivalent);
+inline constexpr partial_ordering
+partial_ordering::greater(__detail::__ord::greater);
+inline constexpr partial_ordering
+partial_ordering::unordered(__detail::__ncmp::unordered);
+
+class weak_ordering {
+public:
+    signed char _M_value;
+
+    constexpr explicit weak_ordering(__detail::__ord v) noexcept
+        : _M_value((signed char)v) {}
+    constexpr weak_ordering() noexcept : _M_value(0) {}
+
+    static const weak_ordering less;
+    static const weak_ordering equivalent;
+    static const weak_ordering greater;
+
+    /* Weakening is always allowed: a weak_ordering promises less than a
+     * strong one, and a partial one less again. */
+    constexpr operator partial_ordering() const noexcept
+    {
+        partial_ordering r;
+        r._M_value = _M_value;
+        return r;
+    }
+
+    friend constexpr bool operator==(weak_ordering v,
+                                     __detail::__cmp_unspec) noexcept
+    { return v._M_value == 0; }
+    friend constexpr bool operator==(weak_ordering a, weak_ordering b) noexcept
+    { return a._M_value == b._M_value; }
+    friend constexpr bool operator<(weak_ordering v,
+                                    __detail::__cmp_unspec) noexcept
+    { return v._M_value < 0; }
+    friend constexpr bool operator>(weak_ordering v,
+                                    __detail::__cmp_unspec) noexcept
+    { return v._M_value > 0; }
+    friend constexpr bool operator<=(weak_ordering v,
+                                     __detail::__cmp_unspec) noexcept
+    { return v._M_value <= 0; }
+    friend constexpr bool operator>=(weak_ordering v,
+                                     __detail::__cmp_unspec) noexcept
+    { return v._M_value >= 0; }
+};
+
+inline constexpr weak_ordering weak_ordering::less(__detail::__ord::less);
+inline constexpr weak_ordering
+weak_ordering::equivalent(__detail::__ord::equivalent);
+inline constexpr weak_ordering weak_ordering::greater(__detail::__ord::greater);
+
+class strong_ordering {
+public:
+    signed char _M_value;
+
+    constexpr explicit strong_ordering(__detail::__ord v) noexcept
+        : _M_value((signed char)v) {}
+    constexpr strong_ordering() noexcept : _M_value(0) {}
+
+    static const strong_ordering less;
+    static const strong_ordering equal;
+    static const strong_ordering equivalent;
+    static const strong_ordering greater;
+
+    constexpr operator partial_ordering() const noexcept
+    { partial_ordering r; r._M_value = _M_value; return r; }
+    constexpr operator weak_ordering() const noexcept
+    { weak_ordering r; r._M_value = _M_value; return r; }
+
+    friend constexpr bool operator==(strong_ordering v,
+                                     __detail::__cmp_unspec) noexcept
+    { return v._M_value == 0; }
+    friend constexpr bool operator==(strong_ordering a,
+                                     strong_ordering b) noexcept
+    { return a._M_value == b._M_value; }
+    friend constexpr bool operator<(strong_ordering v,
+                                    __detail::__cmp_unspec) noexcept
+    { return v._M_value < 0; }
+    friend constexpr bool operator>(strong_ordering v,
+                                    __detail::__cmp_unspec) noexcept
+    { return v._M_value > 0; }
+    friend constexpr bool operator<=(strong_ordering v,
+                                     __detail::__cmp_unspec) noexcept
+    { return v._M_value <= 0; }
+    friend constexpr bool operator>=(strong_ordering v,
+                                     __detail::__cmp_unspec) noexcept
+    { return v._M_value >= 0; }
+    friend constexpr bool operator<(__detail::__cmp_unspec,
+                                    strong_ordering v) noexcept
+    { return v._M_value > 0; }
+    friend constexpr bool operator>(__detail::__cmp_unspec,
+                                    strong_ordering v) noexcept
+    { return v._M_value < 0; }
+};
+
+inline constexpr strong_ordering strong_ordering::less(__detail::__ord::less);
+inline constexpr strong_ordering
+strong_ordering::equal(__detail::__ord::equivalent);
+inline constexpr strong_ordering
+strong_ordering::equivalent(__detail::__ord::equivalent);
+inline constexpr strong_ordering
+strong_ordering::greater(__detail::__ord::greater);
+
+/* The named comparison functions. is_eq and friends read better than
+ * `(a <=> b) == 0` and are the same thing. */
+constexpr bool is_eq(partial_ordering v) noexcept { return v == 0; }
+constexpr bool is_neq(partial_ordering v) noexcept { return !(v == 0); }
+constexpr bool is_lt(partial_ordering v) noexcept { return v < 0; }
+constexpr bool is_lteq(partial_ordering v) noexcept { return v <= 0; }
+constexpr bool is_gt(partial_ordering v) noexcept { return v > 0; }
+constexpr bool is_gteq(partial_ordering v) noexcept { return v >= 0; }
+
+template <class T, class U = T>
+struct compare_three_way_result {
+    using type = decltype(declval<const T &>() <=> declval<const U &>());
+};
+template <class T, class U = T>
+using compare_three_way_result_t =
+    typename compare_three_way_result<T, U>::type;
+
+/* ---- common_comparison_category ---------------------------------------
+ *
+ * The category of a comparison built out of several: a struct compared
+ * member by member is only as strong as its WEAKEST member. Fold over
+ * the pack taking the weaker of each pair, which is what the compiler
+ * does internally for a defaulted <=> and what a hand-written one needs
+ * to say out loud.
+ *
+ * A type that is not a comparison category at all -- a bool from a
+ * member with only ==, say -- makes the whole thing `void`, and the
+ * standard says so rather than erroring: the caller's constraint then
+ * fails cleanly instead of hard-erroring inside this trait.
+ */
+namespace __detail {
+template <class T> struct __cmp_rank { static constexpr int value = -1; };
+template <> struct __cmp_rank<strong_ordering> { static constexpr int value = 0; };
+template <> struct __cmp_rank<weak_ordering> { static constexpr int value = 1; };
+template <> struct __cmp_rank<partial_ordering> { static constexpr int value = 2; };
+
+template <int R> struct __cmp_of { using type = void; };
+template <> struct __cmp_of<0> { using type = strong_ordering; };
+template <> struct __cmp_of<1> { using type = weak_ordering; };
+template <> struct __cmp_of<2> { using type = partial_ordering; };
+
+template <class... T> struct __cmp_fold;
+template <> struct __cmp_fold<> { static constexpr int value = 0; };
+template <class H, class... R>
+struct __cmp_fold<H, R...> {
+    static constexpr int __h = __cmp_rank<H>::value;
+    static constexpr int __r = __cmp_fold<R...>::value;
+    /* -1 poisons: once any operand is not a category the answer is void
+     * however strong the rest are. */
+    static constexpr int value =
+        (__h < 0 || __r < 0) ? -1 : (__h > __r ? __h : __r);
+};
+}
+
+template <class... T>
+struct common_comparison_category {
+    using type =
+        typename __detail::__cmp_of<__detail::__cmp_fold<T...>::value>::type;
+};
+template <class... T>
+using common_comparison_category_t =
+    typename common_comparison_category<T...>::type;
+
+/* ---- compare_three_way ------------------------------------------------
+ *
+ * The function object, for the same reason std::less exists: an
+ * algorithm takes a comparator by value and cannot take an operator.
+ * Transparent (is_transparent), so a heterogeneous lookup works.
+ */
+struct compare_three_way {
+    template <class T, class U>
+    constexpr auto operator()(T &&a, U &&b) const
+        -> decltype(static_cast<T &&>(a) <=> static_cast<U &&>(b))
+    { return static_cast<T &&>(a) <=> static_cast<U &&>(b); }
+    using is_transparent = void;
+};
+
+/* ---- strong_order and friends -----------------------------------------
+ *
+ * The customization points. For every type here `a <=> b` already is the
+ * answer, so these forward to it; they exist so generic code can ask for
+ * a STRONG order from a type whose <=> is weaker (floating point), and
+ * on that the standard demands a total order over NaNs and signed zeros
+ * that our <=> does not give. Rather than pretend, these are defined for
+ * the cases that are honest and left undeclared for float -- a caller
+ * asking strong_order(double, double) gets a compile error naming the
+ * problem instead of a silent partial order wearing a strong type.
+ */
+inline constexpr struct __strong_order_fn {
+    template <class T>
+    constexpr strong_ordering operator()(const T &a, const T &b) const
+    { return a <=> b; }
+} strong_order{};
+
+inline constexpr struct __weak_order_fn {
+    template <class T>
+    constexpr weak_ordering operator()(const T &a, const T &b) const
+    { return a <=> b; }
+} weak_order{};
+
+inline constexpr struct __partial_order_fn {
+    template <class T>
+    constexpr partial_ordering operator()(const T &a, const T &b) const
+    { return a <=> b; }
+} partial_order{};
+
+/* ---- three_way_comparable [cmp.concept] -------------------------------
+ *
+ * "This type has a <=> whose category is at least as strong as Cat, and
+ * the relational operators it implies." Written here rather than in
+ * <concepts> because it is about these three classes.
+ */
+namespace __detail {
+/* is_same_v rather than std::same_as: same_as lives in <concepts>,
+ * which includes THIS header, and a header cycle is a worse price than
+ * the subsumption this gives up. */
+template <class T, class Cat>
+concept __compares_as = is_same_v<common_comparison_category_t<T, Cat>, Cat>;
+
+template <class T>
+concept __bool_test = requires(T &&t) {
+    static_cast<bool>(static_cast<T &&>(t));
+    static_cast<bool>(!static_cast<T &&>(t));
+};
+
+template <class T, class U>
+concept __partially_ordered =
+    requires(const remove_reference_t<T> &t, const remove_reference_t<U> &u) {
+        { t <  u } -> __bool_test;
+        { t >  u } -> __bool_test;
+        { t <= u } -> __bool_test;
+        { t >= u } -> __bool_test;
+        { u <  t } -> __bool_test;
+        { u >  t } -> __bool_test;
+        { u <= t } -> __bool_test;
+        { u >= t } -> __bool_test;
+    };
+}
+
+template <class T, class Cat = partial_ordering>
+concept three_way_comparable =
+    __detail::__partially_ordered<T, T> &&
+    requires(const remove_reference_t<T> &a, const remove_reference_t<T> &b) {
+        { a == b } -> __detail::__bool_test;
+        { a != b } -> __detail::__bool_test;
+        { a <=> b } -> __detail::__compares_as<Cat>;
+    };
+
+template <class T, class U, class Cat = partial_ordering>
+concept three_way_comparable_with =
+    three_way_comparable<T, Cat> && three_way_comparable<U, Cat> &&
+    __detail::__partially_ordered<T, U> &&
+    requires(const remove_reference_t<T> &t, const remove_reference_t<U> &u) {
+        { t <=> u } -> __detail::__compares_as<Cat>;
+        { u <=> t } -> __detail::__compares_as<Cat>;
+    };
+
+}  // namespace std
+
+#endif

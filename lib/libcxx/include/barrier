@@ -1,0 +1,121 @@
+/* <barrier> — C++ [thread.barrier].
+ *
+ * A latch that resets. N threads arrive; when the last one does, a
+ * completion function runs and then all N are released together and the
+ * barrier is ready for the next round. It is the loop-shaped
+ * counterpart of a latch: a simulation stepping in lockstep needs one
+ * per step, and creating a latch per step would be both slower and
+ * racy.
+ *
+ * ---- the phase, and why it exists -------------------------------------------
+ *
+ * The hard part of a resetting barrier is a thread that arrives at
+ * round N+1 while another is still leaving round N. If the state were
+ * only a counter, the fast thread's arrival would be indistinguishable
+ * from the slow thread's, and the slow one could be released a round
+ * early -- or wait for a round that has already passed.
+ *
+ * So the state carries a PHASE that increments each round, and a waiter
+ * waits for the phase to CHANGE rather than for a count to reach zero.
+ * `arrive()` returns the phase it belongs to, and `wait(token)` means
+ * "until that phase is over". A thread that arrives late then finds the
+ * phase already moved and returns immediately, which is correct.
+ */
+#ifndef _LIBCXX_BARRIER
+#define _LIBCXX_BARRIER
+
+#include <atomic>
+#include <cstddef>
+#include <limits>
+#include <type_traits>
+#include <utility>
+
+extern "C" {
+int __os_futex_wait(const volatile int *addr, int expected, long timeout_ns);
+int __os_futex_wake(const volatile int *addr, int count);
+void __os_thread_yield(void);
+}
+
+namespace std {
+
+/* The default completion: nothing. It is a type rather than a null
+ * pointer so the empty case costs no call and no branch. */
+struct __barrier_noop {
+    void operator()() const noexcept {}
+};
+
+template <class F = __barrier_noop>
+class barrier {
+public:
+    /* Opaque on purpose: a program that can do arithmetic on a phase
+     * can compute one that never arrives. */
+    class arrival_token {
+    public:
+        arrival_token() noexcept : __p(0) {}
+        explicit arrival_token(int p) noexcept : __p(p) {}
+        int __phase() const noexcept { return __p; }
+    private:
+        int __p;
+    };
+
+    static constexpr ptrdiff_t max() noexcept
+    { return numeric_limits<int>::max(); }
+
+    constexpr explicit barrier(ptrdiff_t expected, F f = F())
+        : __expected((int)expected), __left((int)expected), __phase(0),
+          __done(static_cast<F &&>(f)) {}
+
+    barrier(const barrier &) = delete;
+    barrier &operator=(const barrier &) = delete;
+
+    [[nodiscard]] arrival_token arrive(ptrdiff_t n = 1)
+    {
+        int p = __phase.load(memory_order_relaxed);
+        int prev = __left.fetch_sub((int)n, memory_order_acq_rel);
+        if (prev - (int)n <= 0) {
+            /* The last one in runs the completion BEFORE anybody is
+             * released -- that is the guarantee the completion exists
+             * for, and it is why it runs here and not in wait(). */
+            __done();
+            __left.store(__expected, memory_order_relaxed);
+            __phase.fetch_add(1, memory_order_release);
+            __os_futex_wake((const volatile int *)&__phase, -1);
+        }
+        return arrival_token(p);
+    }
+
+    void wait(arrival_token &&t) const
+    {
+        int p = t.__phase();
+        for (;;) {
+            int cur = __phase.load(memory_order_acquire);
+            /* The phase MOVED, not "the count is zero": a thread that
+             * arrives after the round ended sees this and returns at
+             * once rather than waiting for a round that is over. */
+            if (cur != p)
+                return;
+            if (__os_futex_wait((const volatile int *)&__phase, cur, -1) < 0)
+                __os_thread_yield();
+        }
+    }
+
+    void arrive_and_wait() { wait(arrive()); }
+
+    /* Leaving for good: the barrier shrinks, so the remaining threads
+     * are not left waiting for one that has gone. */
+    void arrive_and_drop()
+    {
+        __expected--;
+        arrive(1);
+    }
+
+private:
+    int __expected;
+    atomic<int> __left;
+    atomic<int> __phase;
+    F __done;
+};
+
+}  // namespace std
+
+#endif

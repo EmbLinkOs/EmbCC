@@ -1,0 +1,40 @@
+/* <stack> — C++ [stack]. A container adaptor over a deque. */
+#ifndef _LIBCXX_STACK
+#define _LIBCXX_STACK
+
+#include <cstddef>
+#include <utility>
+#include <deque>
+
+namespace std {
+
+template <class T, class C = deque<T>>
+class stack {
+public:
+    using value_type = T;
+    using size_type = size_t;
+    using container_type = C;
+
+    stack() = default;
+    explicit stack(const C &c) : __c(c) {}
+
+    bool empty() const { return __c.empty(); }
+    size_type size() const { return __c.size(); }
+    T &top() { return __c.back(); }
+    const T &top() const { return __c.back(); }
+    void push(const T &v) { __c.push_back(v); }
+    void push(T &&v) { __c.push_back(std::move(v)); }
+    template <class... A>
+    decltype(auto) emplace(A &&...a)
+    { return __c.emplace_back(forward<A>(a)...); }
+    /* Like queue::pop, it returns nothing: see there. */
+    void pop() { __c.pop_back(); }
+    void swap(stack &o) noexcept { __c.swap(o.__c); }
+
+protected:
+    C __c;
+};
+
+}  // namespace std
+
+#endif

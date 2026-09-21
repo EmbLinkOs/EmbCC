@@ -1,0 +1,119 @@
+/* <semaphore> — C++ [thread.sema].
+ *
+ * A counter you can wait on. Older and more general than a mutex, and
+ * worse at being a mutex: a semaphore has no OWNER, so nothing stops
+ * one thread releasing what another acquired, and nothing detects
+ * recursion. What it is good at is the thing a mutex cannot express --
+ * a resource with N of something, or one thread signalling another.
+ *
+ * `binary_semaphore` is `counting_semaphore<1>` and is NOT a mutex for
+ * that reason: it is a signal. The classic use is a producer releasing
+ * and a consumer acquiring, which is exactly the ownership transfer a
+ * mutex forbids.
+ *
+ * The count never goes below zero -- that is the whole definition. An
+ * acquire on zero sleeps; a release wakes one waiter per unit.
+ */
+#ifndef _LIBCXX_SEMAPHORE
+#define _LIBCXX_SEMAPHORE
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <limits>
+#include <mutex>
+
+extern "C" {
+int __os_futex_wait(const volatile int *addr, int expected, long timeout_ns);
+int __os_futex_wake(const volatile int *addr, int count);
+void __os_thread_yield(void);
+}
+
+namespace std {
+
+template <ptrdiff_t LeastMaxValue = numeric_limits<int>::max()>
+class counting_semaphore {
+public:
+    static constexpr ptrdiff_t max() noexcept { return LeastMaxValue; }
+
+    constexpr explicit counting_semaphore(ptrdiff_t desired)
+        : __n((int)desired) {}
+
+    counting_semaphore(const counting_semaphore &) = delete;
+    counting_semaphore &operator=(const counting_semaphore &) = delete;
+
+    void release(ptrdiff_t update = 1)
+    {
+        if (update <= 0)
+            return;
+        /* Release before waking, and with release ordering: whoever
+         * acquires next must see everything this thread did first. */
+        __n.fetch_add((int)update, memory_order_release);
+        __os_futex_wake(__word(), update == 1 ? 1 : (int)update);
+    }
+
+    void acquire()
+    {
+        for (;;) {
+            int c = __n.load(memory_order_relaxed);
+            if (c > 0) {
+                if (__n.compare_exchange_weak(c, c - 1, memory_order_acquire,
+                                              memory_order_relaxed))
+                    return;
+                continue;
+            }
+            /* Sleep only while it is still zero. Passing the value we
+             * read is what makes a release between the test and the
+             * sleep wake us immediately rather than be lost. */
+            if (__os_futex_wait(__word(), 0, -1) < 0)
+                __os_thread_yield();
+        }
+    }
+
+    bool try_acquire() noexcept
+    {
+        int c = __n.load(memory_order_relaxed);
+        while (c > 0)
+            if (__n.compare_exchange_weak(c, c - 1, memory_order_acquire,
+                                          memory_order_relaxed))
+                return true;
+        return false;
+    }
+
+    template <class R, class P>
+    bool try_acquire_for(const chrono::duration<R, P> &d)
+    {
+        auto deadline = chrono::steady_clock::now() + d;
+        for (;;) {
+            if (try_acquire())
+                return true;
+            /* Nothing can release it here: one last look, then give up.
+             * Polling a deadline against a clock that may not advance
+             * is how this used to hang. */
+            if (!__can_block())
+                return try_acquire();
+            auto now = chrono::steady_clock::now();
+            if (now >= deadline)
+                return false;
+            auto ns = chrono::duration_cast<chrono::nanoseconds>(
+                          deadline - now).count();
+            if (__os_futex_wait(__word(), 0, (long)ns) < 0)
+                __os_thread_yield();
+        }
+    }
+
+    template <class C, class D>
+    bool try_acquire_until(const chrono::time_point<C, D> &t)
+    { return try_acquire_for(t - C::now()); }
+
+private:
+    const volatile int *__word() const
+    { return (const volatile int *)&__n; }
+    atomic<int> __n;
+};
+
+using binary_semaphore = counting_semaphore<1>;
+
+}  // namespace std
+
+#endif

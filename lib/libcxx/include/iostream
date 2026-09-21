@@ -1,0 +1,105 @@
+/* <iostream> — C++ [iostream.objects].
+ *
+ * cin, cout, cerr and clog, over the C library's stdin/stdout/stderr.
+ *
+ * Sitting on FILE* rather than on the OS directly is deliberate: the C
+ * library already owns the buffering, and two buffers over one file
+ * descriptor interleave wrongly the moment a program mixes printf and
+ * cout. Sharing one means they cannot.
+ *
+ * The objects have STATIC STORAGE and must be usable from another
+ * translation unit's static constructor, which runs in an unspecified
+ * order relative to this one's. That is what std::ios_base::Init is for
+ * -- every <iostream> inclusion declares one, and the first to be
+ * constructed initialises the streams.
+ */
+#ifndef _LIBCXX_IOSTREAM
+#define _LIBCXX_IOSTREAM
+
+#include <cstdio>
+#include <ios>
+#include <streambuf>
+#include <ostream>
+#include <istream>
+#include <new>
+
+namespace std {
+
+/* A streambuf over a FILE *. The put side is unbuffered here -- one
+ * fputc per character -- because the FILE already buffers, and a second
+ * buffer would only add a place for output to be stranded. */
+class __filebuf : public basic_streambuf<char> {
+public:
+    explicit __filebuf(FILE *f) : __f(f) {}
+
+protected:
+    int_type overflow(int_type c) override
+    {
+        if (traits_type::eq_int_type(c, traits_type::eof()))
+            return traits_type::not_eof(c);
+        if (fputc((int)(unsigned char)c, __f) == EOF)
+            return traits_type::eof();
+        return c;
+    }
+
+    streamsize xsputn(const char *s, streamsize n) override
+    { return (streamsize)fwrite(s, 1, (size_t)n, __f); }
+
+    int_type underflow() override
+    {
+        if (gptr() == egptr()) {
+            int c = fgetc(__f);
+            if (c == EOF)
+                return traits_type::eof();
+            __one = (char)c;
+            setg(&__one, &__one, &__one + 1);
+        }
+        return traits_type::to_int_type(*gptr());
+    }
+
+    int_type pbackfail(int_type c) override
+    {
+        if (traits_type::eq_int_type(c, traits_type::eof()))
+            return traits_type::eof();
+        if (ungetc((int)(unsigned char)c, __f) == EOF)
+            return traits_type::eof();
+        return c;
+    }
+
+    int sync() override { return fflush(__f); }
+
+private:
+    FILE *__f;
+    char __one = 0;
+};
+
+namespace __detail {
+extern __filebuf __cin_buf;
+extern __filebuf __cout_buf;
+extern __filebuf __cerr_buf;
+}
+
+/* References, not objects: the objects live in raw storage in
+ * src/iostream.cc that is never destroyed. See there for why. */
+extern istream &cin;
+extern ostream &cout;
+extern ostream &cerr;
+extern ostream &clog;
+
+/* Every translation unit that includes <iostream> gets one of these, so
+ * the streams are alive before any other static constructor can use
+ * them -- whatever order the linker chose. The counter is what makes the
+ * second and later ones do nothing. */
+class __ios_init {
+public:
+    __ios_init();
+    ~__ios_init();
+private:
+    static int __count;
+};
+
+static __ios_init __ios_init_instance;
+
+}  // namespace std
+
+#endif

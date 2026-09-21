@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <stdio.h>
+
+#include "../driver/remark.h"
 #include "../driver/util.h"
 
 /* ---- op classification ---- */
@@ -24,9 +27,10 @@ static int writes_temp(enum ir_op op)
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
     case IR_NEG: case IR_BNOT: case IR_CMP:
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
-    case IR_FADDR: case IR_LOAD: case IR_EXT: case IR_BSWAP:
+    case IR_FADDR: case IR_LOAD: case IR_EXT: case IR_BSWAP: case IR_SQRT:
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_CALL: case IR_XCHG:
-    case IR_XADD: case IR_CMPXCHG:
+    case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_CAS16:
+    case IR_FRAMEADDR: case IR_ALLOCA: case IR_SPSAVE:
         return 1;
     default:
         return 0;
@@ -44,7 +48,7 @@ static int is_pure(enum ir_op op)
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
     case IR_NEG: case IR_BNOT: case IR_CMP:
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
-    case IR_FADDR: case IR_EXT: case IR_BSWAP:
+    case IR_FADDR: case IR_EXT: case IR_BSWAP: case IR_SQRT:
     case IR_I2F: case IR_F2I: case IR_F2F:
         return 1;
     default:
@@ -69,8 +73,10 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
     switch (i->op) {
     case IR_MOV: case IR_NEG: case IR_BNOT:
     case IR_I2F: case IR_F2I: case IR_F2F:
-    case IR_EXT: case IR_BSWAP: case IR_LDVAR: case IR_ADDR: case IR_LOAD:
+    case IR_EXT: case IR_BSWAP: case IR_SQRT:
+    case IR_LDVAR: case IR_ADDR: case IR_LOAD:
     case IR_MEMZERO: case IR_VA_START: case IR_STVAR:
+    case IR_ALLOCA: case IR_SPRESTORE:
         cb(&i->a, ctx);
         break;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
@@ -81,11 +87,11 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
             cb(&i->b, ctx);
         break;
     case IR_STORE: case IR_MEMCPY: case IR_XCHG:
-    case IR_XADD:
+    case IR_XADD: case IR_ARMW:
         cb(&i->a, ctx);
         cb(&i->b, ctx);
         break;
-    case IR_CMPXCHG:
+    case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
         cb(&i->a, ctx);
         cb(&i->b, ctx);
         cb(&i->c, ctx);
@@ -128,10 +134,32 @@ static void compute_defs(struct ir_func *fn, struct defs *d)
     for (int v = 0; v < fn->nvregs; v++)
         d->ins[v] = -1;
     /* a parameter is bound once at entry — count that as its definition */
-    int np = fn->src->nparams;
+    int np = fn->nparams;
     for (int v = 0; v < np && v < fn->nvregs; v++)
         d->cnt[v] = 1;
     for (int n = 0; n < fn->nins; n++) {
+        /* IR_LANDING is the one instruction with TWO destinations -- the
+         * exception pointer in dst and the selector in b, as the unwinder
+         * left them. def_target returns a single index and writes_temp is
+         * deliberately silent about it (an instruction in writes_temp is
+         * one LVN and GCSE may value-number, and two landing pads are not
+         * the same computation however identical they look). So its
+         * definitions are counted here, explicitly. Without this its
+         * results look undefined and DCE deletes the landing while
+         * keeping the stores that read what it produced. */
+        if (fn->ins[n].op == IR_LANDING) {
+            int o[2] = { fn->ins[n].dst, fn->ins[n].b };
+            for (int k = 0; k < 2; k++) {
+                int v = o[k];
+                if (v < 0 || v >= fn->nvregs)
+                    continue;
+                if (d->cnt[v]++ == 0)
+                    d->ins[v] = n;
+                else
+                    d->ins[v] = -1;
+            }
+            continue;
+        }
         int t = def_target(&fn->ins[n]);
         if (t < 0)
             continue;
@@ -393,7 +421,12 @@ static int writes_memory(enum ir_op op)
     switch (op) {
     case IR_STORE: case IR_STVAR: case IR_CALL: case IR_MEMCPY:
     case IR_MEMZERO: case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
-    case IR_ASM: case IR_VA_START:
+    case IR_ARMW: case IR_CAS: case IR_CAS16: case IR_ASM: case IR_VA_START:
+    /* A fence writes nothing, but a load cached from before it must not be
+     * reused after it: that reuse IS the reordering the fence forbids, and a
+     * loop polling a flag across __sync_synchronize() would spin on a stale
+     * value forever. */
+    case IR_FENCE:
         return 1;
     default:
         return 0;
@@ -441,7 +474,9 @@ static int vn_key(struct ir_ins *i, int memver, struct vn *k)
     case IR_CMP:
         k->a = i->a; k->b = i->b; k->w = i->w; k->sign = i->sign;
         k->pred = i->pred; return 1;
-    case IR_NEG: case IR_BNOT:
+    case IR_NEG: case IR_BNOT: case IR_SQRT:
+        /* `op` is already part of the key, so these three cannot
+         * collide with each other. */
         k->a = i->a; k->w = i->w; return 1;
     case IR_EXT:
         k->a = i->a; k->w = i->w; k->sign = i->sign; k->size = i->size; return 1;
@@ -590,7 +625,7 @@ static int pass_dce(struct ir_func *fn)
     }
     if (newpos) {
         newpos[fn->nins] = j;
-        for (int v = 0; v < fn->src->nvars; v++) {
+        for (int v = 0; v < fn->nvars; v++) {
             int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
             if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
             if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
@@ -782,6 +817,16 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
     int pi = -1;
     for (int k = 0; k < S->npred; k++) if (S->pred[k] == p) { pi = k; break; }
     if (pi < 0) return;
+    /* A phi copy runs on the EDGE from p, so it belongs to whatever ends p
+     * -- the branch or the fall-through's last instruction (R3). Going out
+     * of SSA is the compiler's own bookkeeping, but the copy still executes
+     * at a place the programmer wrote, and a line table with a hole here is
+     * a debugger stepping into nowhere. */
+    int eline = 0, ecol = 0;
+    if (bb[p].end > bb[p].start) {
+        eline = fn->ins[bb[p].end - 1].line;
+        ecol = fn->ins[bb[p].end - 1].col;
+    }
     /* A conflict — an incoming value that is another phi result of this block
      * (a swap, a self-referential loop phi) — needs read-all-then-write-all
      * through temps. The common case has none: emit direct copies, no temps. */
@@ -793,6 +838,7 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         for (int k = 0; k < S->nphi; k++) {
             struct ir_ins *mv = ib_push(nb);
             mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = S->phi_inc[pi][k];
+            mv->line = eline; mv->col = ecol; mv->synth = !eline;
         }
         return;
     }
@@ -801,10 +847,12 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         tmp[k] = fn->nvregs++;
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = tmp[k]; mv->a = S->phi_inc[pi][k];
+        mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     for (int k = 0; k < S->nphi; k++) {
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = tmp[k];
+        mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     free(tmp);
 }
@@ -824,36 +872,80 @@ static void mem2reg_free(struct bb *bb, int nbb, int **df, int *ndf, int *l2b,
     free(bb); free(df); free(ndf); free(l2b); free(order);
 }
 
+/* The name a local was written with. irgen records these unconditionally
+ * ("harmless when -g is off"), so a remark can name the variable the
+ * programmer knows rather than a slot number. */
+static const struct ir_dbgvar *local_var(const struct ir_func *fn, int L)
+{
+    for (int i = 0; i < fn->ndbgvars; i++)
+        if (fn->dbgvars[i].vreg == L && !fn->dbgvars[i].is_param)
+            return &fn->dbgvars[i];
+    return NULL;
+}
+
 static int pass_mem2reg(struct ir_func *fn)
 {
-    int nvars = fn->src->nvars;
+    int nvars = fn->nvars;
     if (nvars == 0 || fn->nins == 0)
         return 0;
 
     /* 1. Promotable locals: a scalar int/ptr of 4 or 8 bytes, never
-     * address-taken, every load full-width plain. */
-    int nparams = fn->src->nparams;
+     * address-taken, every load full-width plain.
+     *
+     * Each rejection keeps its OWN reason (R2): "why is this variable still
+     * on the stack" is the question this pass answers, and five different
+     * causes used to leave the same zero behind. */
+    int nparams = fn->nparams;
     char *ok = xmalloc((size_t)nvars);
+    const char **why = xcalloc((size_t)nvars, sizeof *why);
     for (int L = 0; L < nvars; L++) {
-        struct type *t = fn->src->var_tys[L];
+        const struct ir_local *Li = &fn->locals[L];
         /* Params are excluded: their value is live on entry (no defining IR
          * instruction), so SSA has no version to seed a read with. Only true
          * locals, always assigned before use, are promoted. */
-        ok[L] = L >= nparams && t &&
-                (ty_is_integer(t) || t->kind == TY_PTR) &&
-                (ty_size(t) == 4 || ty_size(t) == 8);
+        ok[L] = 1;
+        if (L < nparams)                        { ok[L] = 0; why[L] = "is-a-parameter"; }
+        else if (!Li->size)                     { ok[L] = 0; why[L] = "type-unknown"; }
+        else if (!Li->is_scalar_int_or_ptr && (Li->size == 4 || Li->size == 8))
+                                                { ok[L] = 0; why[L] = "not-a-scalar-integer-or-pointer"; }
+        else if (!Li->is_scalar_int_or_ptr)     { ok[L] = 0; why[L] = "not-4-or-8-bytes"; }
     }
     for (int L = 0; L < nvars; L++)
-        if (fn->src->var_tys[L] && fn->src->var_tys[L]->is_volatile)
+        if (ok[L] && fn->locals[L].is_volatile) {
             ok[L] = 0;                          /* volatile: every access must stay */
+            why[L] = "declared-volatile";
+        }
     for (int i = 0; i < fn->nins; i++) {
         struct ir_ins *in = &fn->ins[i];
-        if (in->op == IR_ADDR && in->a >= 0 && in->a < nvars) ok[in->a] = 0;
-        if (in->op == IR_LDVAR && in->a >= 0 && in->a < nvars &&
-            (in->vol || !m2r_plain(in->size, in->sign, in->w))) ok[in->a] = 0;
-        if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars && in->vol)
-            ok[in->dst] = 0;
+        if (in->op == IR_ADDR && in->a >= 0 && in->a < nvars && ok[in->a]) {
+            ok[in->a] = 0; why[in->a] = "address-is-taken";
+        }
+        if (in->op == IR_LDVAR && in->a >= 0 && in->a < nvars && ok[in->a] &&
+            (in->vol || !m2r_plain(in->size, in->sign, in->w))) {
+            ok[in->a] = 0;
+            why[in->a] = in->vol ? "read-is-volatile"
+                                 : "read-is-partial-or-extending";
+        }
+        if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars &&
+            in->vol && ok[in->dst]) {
+            ok[in->dst] = 0; why[in->dst] = "write-is-volatile";
+        }
     }
+    if (remarks_on())
+        for (int L = nparams; L < nvars; L++) {
+            const struct ir_dbgvar *v = local_var(fn, L);
+            if (!v || !v->name || v->name[0] == '<')  /* a compiler-invented name */
+                continue;
+            const char *file = fn->src ? fn->file : NULL;
+            int line = v->line ? v->line : (fn->src ? fn->line : 0);
+            if (ok[L])
+                remark_add("mem2reg", "promoted-to-register", v->name,
+                           "scalar-and-never-addressed", file, line, NULL);
+            else
+                remark_add("mem2reg", "kept-in-memory", v->name,
+                           why[L] ? why[L] : "unknown", file, line, NULL);
+        }
+    free(why);
     int nprom = 0;
     int *prom = xmalloc((size_t)nvars * sizeof *prom);     /* local -> prom idx */
     int *ploc = xmalloc((size_t)nvars * sizeof *ploc);     /* prom idx -> local */
@@ -977,7 +1069,12 @@ static int pass_mem2reg(struct ir_func *fn)
     for (int p = 0; p < nprom; p++) {   /* entry undef defs */
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_CONST; c->dst = undef[p]; c->imm = 0;
-        c->w = ty_size(fn->src->var_tys[ploc[p]]) == 8 ? 8 : 4;
+        c->w = fn->locals[ploc[p]].size == 8 ? 8 : 4;
+        /* The seed for a variable read before it is written: it stands for
+         * a value the program never produced, so it corresponds to no
+         * source construct at all. The §9.1 exception, marked so the
+         * verifier can tell it from a location a pass forgot to copy. */
+        c->synth = 1;
     }
     struct { int lbl, from, edge_pred; } *tramp = NULL; int ntramp = 0, ctramp = 0;
     for (int b = 0; b < nbb; b++) {
@@ -1025,17 +1122,25 @@ static int pass_mem2reg(struct ir_func *fn)
         if (lt != IR_JMP && lt != IR_RET && lt != IR_UD2) {
             struct ir_ins *r = ib_push(&nb);
             r->op = IR_RET; r->a = -1;
+            /* A cap so the trampolines below cannot be fallen into: it
+             * stands for no `return` the programmer wrote (R3, §9.1). */
+            r->synth = 1;
         }
     }
+    /* A trampoline block exists because SSA had to be undone on one edge.
+     * Its label and its jump are the compiler's own; the copies between
+     * them take the edge's location in emit_edge_copies. */
     for (int t = 0; t < ntramp; t++) {   /* trampoline blocks: label; copies; jmp */
         struct ir_ins *lb = ib_push(&nb);
         lb->op = IR_LABEL; lb->label = tramp[t].lbl;
+        lb->synth = 1;
         emit_edge_copies(&nb, bb, tramp[t].edge_pred, tramp[t].from, fn);
         struct ir_ins *jp = ib_push(&nb);
         int origlbl = -1;
         for (int i = bb[tramp[t].edge_pred].start; i < bb[tramp[t].edge_pred].end; i++)
             if (fn->ins[i].op == IR_LABEL) { origlbl = fn->ins[i].label; break; }
         jp->op = IR_JMP; jp->label = origlbl;
+        jp->synth = 1;
     }
     free(tramp);
 
@@ -1171,7 +1276,9 @@ static int lcse_kills_mem(enum ir_op op)
 {
     switch (op) {
     case IR_STORE: case IR_CALL: case IR_MEMCPY: case IR_MEMZERO:
-    case IR_XCHG: case IR_XADD: case IR_CMPXCHG: case IR_ASM: case IR_VA_START:
+    case IR_XCHG: case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS:
+    case IR_CAS16: case IR_ASM: case IR_VA_START:
+    case IR_FENCE:           /* a barrier: see writes_memory */
         return 1;
     default:
         return 0;
@@ -1180,7 +1287,7 @@ static int lcse_kills_mem(enum ir_op op)
 
 static int pass_loadcse(struct ir_func *fn)
 {
-    int nvars = fn->src->nvars;
+    int nvars = fn->nvars;
     if (fn->nins == 0)
         return 0;
     struct defs d;
@@ -1352,8 +1459,25 @@ static int pass_sccp(struct ir_func *fn)
         long v = fn->ins[d.ins[t->a]].imm;
         int taken = (t->op == IR_BRZ) ? (v == 0) : (v != 0);
         int want = taken ? 0 : 1;
-        if (want < bb[b].nsucc)      /* only if that edge actually exists */
+        if (want < bb[b].nsucc) {     /* only if that edge actually exists */
             live_only[b] = want;
+            /* A branch whose condition is a constant always goes the same
+             * way, which is worth saying out loud: it is as often a bug in
+             * the program as an optimization in the compiler.
+             *
+             * `taken` means the BRANCH jumps, not that the source condition
+             * was true -- for `if (c)` irgen emits `BRZ c -> else`, so a
+             * taken branch is a FALSE condition. Rather than guess at the
+             * source's polarity from the lowering, the remark states the IR
+             * fact, which is the one that is certainly true. */
+            remark_add("sccp",
+                       taken ? "branch-always-jumps" : "branch-never-jumps",
+                       fn->src ? fn->name : NULL,
+                       "condition-is-a-constant",
+                       fn->src ? fn->file : NULL, t->line,
+                       "the condition folded to %ld, so one arm is "
+                       "unreachable", v);
+        }
     }
 
     /* Reachability over the live edges only. */
@@ -1394,6 +1518,12 @@ static int pass_sccp(struct ir_func *fn)
                 struct ir_ins *j = ib_push(&nb);
                 j->op = IR_JMP; j->dst = -1; j->a = -1; j->b = -1;
                 j->label = fn->ins[bb[ls].start].label;
+                /* It replaces the branch that ended this block, so it is
+                 * that branch's `if` as far as the programmer is concerned
+                 * (R3) -- not a jump from nowhere. */
+                j->line = fn->ins[bb[b].end - 1].line;
+                j->col = fn->ins[bb[b].end - 1].col;
+                j->synth = fn->ins[bb[b].end - 1].synth;
             }
         } else {
             for (int n = bb[b].start; n < bb[b].end; n++)
@@ -1434,7 +1564,7 @@ static int sf_plain(int size, int sign, int w)
 
 static int pass_storefwd(struct ir_func *fn)
 {
-    int nvars = fn->src->nvars;
+    int nvars = fn->nvars;
     if (nvars == 0)
         return 0;
     char *taken = xcalloc((size_t)fn->nvregs, 1);
@@ -1569,8 +1699,17 @@ static void rmp_cb(int *p, void *ctx) { *p = vmap(ctx, *p); }
 static void remap_ins(struct ir_ins *in, struct rmp *r)
 {
     each_read(in, rmp_cb, r);
-    if (def_target(in) >= 0)
+    /* IR_LANDING's SECOND destination, for the same reason compute_defs
+     * has to name it: def_target reports one, and a landing pad left with
+     * the callee's numbering for its selector reads a vreg that does not
+     * exist in the caller. Inlining a `noexcept` function is enough to
+     * reach this -- its pad comes along with it. */
+    if (in->op == IR_LANDING) {
         in->dst = vmap(r, in->dst);
+        in->b = vmap(r, in->b);
+    } else if (def_target(in) >= 0) {
+        in->dst = vmap(r, in->dst);
+    }
     if (in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ ||
         in->op == IR_LABEL)
         in->label += r->lbase;
@@ -1588,28 +1727,56 @@ static struct ir_func *func_ir(struct ir_unit *iu, struct func *callee)
 /* Conservative eligibility: a real, small body; scalar-integer params and
  * return only (no varargs / struct / float); no inline asm, va_start, or a
  * struct-returning call in the body. */
-static int inlinable(struct ir_func *cf)
+/* Each refusal has its OWN reason code (R2). This function used to return 0
+ * from a dozen places and every one of them meant something different; by
+ * the time anyone asked why a function was not inlined, the twelve answers
+ * had collapsed into one. `*why` is the stable code, `*detail` the fact. */
+static int inlinable(struct ir_func *cf, const char **why, char *detail,
+                     size_t dcap)
 {
     struct func *c = cf->src;
-    if (c->is_varargs || cf->nins == 0 || cf->nins > INLINE_MAX_CALLEE)
+    *why = NULL;
+    if (detail && dcap)
+        detail[0] = 0;
+
+    if (c->is_varargs)       { *why = "callee-is-varargs";  return 0; }
+    if (cf->nins == 0)       { *why = "callee-not-defined-here"; return 0; }
+    if (cf->nins > INLINE_MAX_CALLEE) {
+        *why = "callee-too-large";
+        if (detail)
+            snprintf(detail, dcap, "%d instructions, budget %d",
+                     cf->nins, INLINE_MAX_CALLEE);
         return 0;
-    if (c->ret_ty->kind == TY_STRUCT || ty_is_float(c->ret_ty))
-        return 0;
-    for (int k = 0; k < c->nvars; k++)
+    }
+    if (cf->neh)             { *why = "callee-has-exception-regions"; return 0; }
+    if (c->ret_ty->kind == TY_STRUCT) { *why = "returns-a-struct"; return 0; }
+    if (ty_is_float(c->ret_ty))       { *why = "returns-floating-point"; return 0; }
+    for (int k = 0; k < cf->nvars; k++)
         if (c->var_tys[k] &&
-            (c->var_tys[k]->kind == TY_STRUCT || ty_is_float(c->var_tys[k])))
+            (c->var_tys[k]->kind == TY_STRUCT || ty_is_float(c->var_tys[k]))) {
+            *why = "callee-has-a-struct-or-float-local";
             return 0;
+        }
     for (int i = 0; i < cf->nins; i++) {
         const struct ir_ins *in = &cf->ins[i];
-        if (in->op == IR_ASM || in->op == IR_VA_START || in->flt)
-            return 0;
+        if (in->op == IR_ASM)      { *why = "callee-has-inline-asm"; return 0; }
+        if (in->op == IR_VA_START) { *why = "callee-uses-va_start"; return 0; }
+        if (in->flt)               { *why = "callee-computes-in-floating-point";
+                                     return 0; }
+        /* a VLA's allocation is released by the callee's own epilogue;
+         * inlined into a loop it would never be */
+        if (in->op == IR_ALLOCA)   { *why = "callee-has-a-vla"; return 0; }
         /* Computed goto: a label address / indirect jump can't be inlined —
          * the callee's label ids would need remapping into the caller, and the
          * caller then can't be optimized either (opt_func bails on it). */
-        if (in->op == IR_LABELADDR || in->op == IR_IGOTO)
+        if (in->op == IR_LABELADDR || in->op == IR_IGOTO) {
+            *why = "callee-uses-a-computed-goto";
             return 0;
-        if (in->op == IR_CALL && in->retsize)
+        }
+        if (in->op == IR_CALL && in->retsize) {
+            *why = "callee-calls-a-struct-returning-function";
             return 0;
+        }
     }
     return 1;
 }
@@ -1617,8 +1784,8 @@ static int inlinable(struct ir_func *cf)
 /* Splice the body of cf in place of the call at fn->ins[ci]. */
 static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
 {
-    int V = fn->src->nvars, N = fn->nvregs, L = fn->nlabels;
-    int v = cf->src->nvars, n = cf->nvregs, nparams = cf->src->nparams;
+    int V = fn->nvars, N = fn->nvregs, L = fn->nlabels;
+    int v = cf->nvars, n = cf->nvregs, nparams = cf->nparams;
 
     /* 1. Open room: shift the caller's temps up by v (locals stay put). */
     struct rmp shift = { 0, V, v, 0, 0 };
@@ -1632,13 +1799,20 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     /* 2. Build param stores + the remapped body + one exit label. */
     struct ir_ins *buf = xmalloc((size_t)(nparams + 2 * cf->nins + 1) * sizeof *buf);
     int m = 0;
+    /* Every instruction the inliner INVENTS still has a source location:
+     * the call it replaces (R3). A pass that builds an instruction from
+     * scratch and leaves line 0 puts a hole in the line table, and nothing
+     * downstream notices -- which is exactly what the verifier's location
+     * check now catches, and what it caught here. */
     for (int k = 0; k < nparams; k++) {
         struct ir_ins *s = &buf[m++];
         memset(s, 0, sizeof *s);
         s->op = IR_STVAR;
         s->dst = V + k;                  /* callee param -> caller local */
         s->a = call.argv[k].vreg;
-        s->size = ty_size(cf->src->var_tys[k]);
+        s->size = cf->locals[k].size;
+        s->line = call.line;             /* the argument was written there */
+        s->col = call.col;
     }
     struct rmp cm = { 1, V, N, v, L };
     for (int i = 0; i < cf->nins; i++) {
@@ -1649,11 +1823,15 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
                 struct ir_ins *mv = &buf[m++];
                 memset(mv, 0, sizeof *mv);
                 mv->op = IR_MOV; mv->dst = dst; mv->a = in.a;
+                mv->line = in.line;      /* the callee's `return` */
+                mv->col = in.col;
             }
             if (i != cf->nins - 1) {     /* the last RET falls into `after` */
                 struct ir_ins *jp = &buf[m++];
                 memset(jp, 0, sizeof *jp);
                 jp->op = IR_JMP; jp->label = after;
+                jp->line = in.line;
+                jp->col = in.col;
             }
         } else {
             buf[m++] = in;
@@ -1662,6 +1840,10 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     struct ir_ins *lb = &buf[m++];
     memset(lb, 0, sizeof *lb);
     lb->op = IR_LABEL; lb->label = after;
+    /* The join label belongs to no source construct: it exists only because
+     * the body was spliced in. This is the §9.1 exception, marked rather
+     * than left as an absent location the verifier cannot tell from a bug. */
+    lb->synth = 1;
 
     /* 3. Splice buf over the call. */
     int newn = fn->nins - 1 + m;
@@ -1683,6 +1865,12 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     for (int k = 0; k < v; k++) { vt[V + k] = cf->src->var_tys[k]; va[V + k] = cf->src->var_aligns[k]; }
     fn->src->var_tys = vt;
     fn->src->var_aligns = va;
+    /* Both representations grow together: the IR's per-slot descriptors are
+     * rebuilt from the types the inliner just extended. Letting them drift
+     * is exactly the split brain that miscompiled same-scope. The new count
+     * is `nv`; fn->nvars is not updated until the end of this function, and
+     * fn->src->nvars is stale by design. */
+    ir_locals_fill(fn, fn->src, nv);
 
     /* Scope ranges are instruction indices; the splice inserted (m-1) net at ci.
      * Shift every existing endpoint past ci, and scope the new callee locals to
@@ -1700,7 +1888,7 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
         free(fn->var_scope_lo); free(fn->var_scope_hi);
         fn->var_scope_lo = lo; fn->var_scope_hi = hi;
     }
-    fn->src->nvars = nv;
+    fn->nvars = nv;
 }
 
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
@@ -1710,7 +1898,8 @@ static void inline_unit(struct ir_unit *iu)
         struct ir_func *fn = &iu->funcs[f];
         int done = 0;
         for (;;) {
-            if (done >= INLINE_MAX_PER_FUNC || fn->nins > INLINE_MAX_CALLER)
+            if (done >= INLINE_MAX_PER_FUNC || fn->nins > INLINE_MAX_CALLER ||
+                fn->neh || fn->has_i128)
                 break;
             int ci = -1;
             struct ir_func *cf = NULL;
@@ -1720,14 +1909,109 @@ static void inline_unit(struct ir_unit *iu)
                     in->retsize)
                     continue;
                 struct ir_func *c = func_ir(iu, in->callee);
-                if (c && c != fn && inlinable(c)) { ci = i; cf = c; break; }
+                const char *why = NULL;
+                char detail[160] = "";
+                int ok = 0;
+                if (!c)
+                    why = "callee-not-defined-here";
+                else if (c == fn)
+                    why = "would-be-recursive";
+                else if (c->has_i128)
+                    why = "callee-computes-in-__int128";
+                else
+                    ok = inlinable(c, &why, detail, sizeof detail);
+                if (!ok) {
+                    remark_add("inline", "not-inlined", in->callee->name, why,
+                               fn->src ? fn->file : NULL, in->line,
+                               detail[0] ? "%s" : NULL, detail);
+                    continue;
+                }
+                ci = i;
+                cf = c;
+                break;
             }
             if (ci < 0)
                 break;
+            remark_add("inline", "inlined", cf->name, "small-enough",
+                       fn->src ? fn->file : NULL, fn->ins[ci].line,
+                       "%d instructions into %s, budget %d", cf->nins,
+                       fn->src ? fn->name : "?", INLINE_MAX_CALLEE);
             inline_call(fn, ci, cf);
             done++;
         }
     }
+}
+
+/* ---- the CFG, as a report (opt.h, vision §18) ----
+ *
+ * Built by build_cfg, the same function mem2reg, global CSE and SCCP use,
+ * so what this prints is the graph the passes reason about. Dominators are
+ * computed too, because "which block dominates which" is the question a
+ * mem2reg or a CSE bug always turns into.
+ */
+void opt_cfg_dump(struct outbuf *b, struct ir_func *fn)
+{
+    if (fn->nins == 0) {
+        ob_fmt(b, "function %s: no instructions\n", fn->name);
+        return;
+    }
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    int *order = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *order), norder;
+    compute_rpo(bb, nbb, order, &norder);
+    int reachable = norder == nbb;
+    if (reachable)
+        compute_idom(bb, order, norder);
+
+    ob_fmt(b, "function %s: %d blocks, %d instructions\n",
+           fn->name, nbb, fn->nins);
+    if (!reachable)
+        ob_fmt(b, "  (%d block%s unreachable: dominators not computed)\n",
+               nbb - norder, nbb - norder == 1 ? "" : "s");
+    for (int i = 0; i < nbb; i++) {
+        ob_fmt(b, "  B%-3d ins [%d,%d)", i, bb[i].start, bb[i].end);
+        /* The label a block carries, when it has one: it is what the
+         * instruction dump calls it, so the two can be read together. */
+        if (bb[i].end > bb[i].start && fn->ins[bb[i].start].op == IR_LABEL)
+            ob_fmt(b, " L%d", fn->ins[bb[i].start].label);
+        if (bb[i].end > bb[i].start) {
+            const struct ir_ins *t = &fn->ins[bb[i].end - 1];
+            ob_fmt(b, "  ends %s", ir_opname(t->op));
+            if (t->line)
+                ob_fmt(b, " (line %d)", t->line);
+        }
+        ob_str(b, "\n");
+        if (bb[i].npred) {
+            ob_str(b, "       from");
+            for (int k = 0; k < bb[i].npred; k++)
+                ob_fmt(b, " B%d", bb[i].pred[k]);
+            ob_str(b, "\n");
+        }
+        if (bb[i].nsucc) {
+            ob_str(b, "       to  ");
+            for (int k = 0; k < bb[i].nsucc; k++)
+                ob_fmt(b, " B%d", bb[i].succ[k]);
+            ob_str(b, "\n");
+        } else {
+            ob_str(b, "       to   (exit)\n");
+        }
+        if (reachable && bb[i].idom >= 0 && bb[i].idom != i)
+            ob_fmt(b, "       idom B%d\n", bb[i].idom);
+        /* A back edge is a successor that dominates this block: that is
+         * what makes it a loop, and it is worth naming. */
+        for (int k = 0; reachable && k < bb[i].nsucc; k++) {
+            int sdom = bb[i].succ[k], q = i;
+            while (q >= 0 && q != sdom)
+                q = bb[q].idom == q ? -1 : bb[q].idom;
+            if (q == sdom)
+                ob_fmt(b, "       back edge to B%d (a loop)\n", sdom);
+        }
+    }
+    free(order);
+    free(l2b);
+    for (int i = 0; i < nbb; i++)
+        free(bb[i].pred);
+    free(bb);
 }
 
 /* ---- driver ---- */
@@ -1755,26 +2039,48 @@ static void vrfy_read_cb(int *p, void *ctx)
         return;
     if (r < v->fn->nvregs && v->d->cnt[r] > 0)   /* a temp with a definition: fine */
         return;
-    diag_fatal(v->fn->src->file, 0,
+    diag_fatal(v->fn->file, 0,
         "internal: %s reads temp %%%d with no definition (after %s) — an optimizer "
-        "pass dropped a value that is still used", v->fn->src->name, r, v->tag);
+        "pass dropped a value that is still used", v->fn->name, r, v->tag);
 }
 static void verify_func(struct ir_func *fn, const char *tag)
 {
     struct defs d;
     compute_defs(fn, &d);
-    struct vrfy v = { &d, fn->src->nparams, fn->src->nvars, fn, tag };
+    struct vrfy v = { &d, fn->nparams, fn->nvars, fn, tag };
     for (int n = 0; n < fn->nins; n++)
         each_read(&fn->ins[n], vrfy_read_cb, &v);
     if (fn->var_scope_lo)
-        for (int i = 0; i < fn->src->nvars; i++) {
+        for (int i = 0; i < fn->nvars; i++) {
             int lo = fn->var_scope_lo[i], hi = fn->var_scope_hi[i];
             if (lo < 0 || lo > fn->nins || hi < lo || hi > fn->nins)
-                diag_fatal(fn->src->file, 0,
+                diag_fatal(fn->file, 0,
                     "internal: %s local %d has out-of-range scope [%d,%d] for nins=%d "
                     "(after %s) — a pass renumbered instructions without remapping "
-                    "var_scope", fn->src->name, i, lo, hi, fn->nins, tag);
+                    "var_scope", fn->name, i, lo, hi, fn->nins, tag);
         }
+
+    /* R3 / §9.1: "Every instruction carries a debug location. The verifier
+     * rejects instructions without one, except where explicitly marked
+     * compiler-synthesized."
+     *
+     * This is what stops provenance rotting quietly. A pass that builds a
+     * replacement instruction from scratch, instead of copying the one it
+     * replaces, drops the location -- and nothing downstream complains,
+     * because a line table with a hole still links. The verifier is the only
+     * place that can notice, and it runs after every optimizing compile
+     * under EMBCC_VERIFY (which the whole test suite sets).
+     */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->line || i->synth)
+            continue;
+        diag_fatal(fn->file, 0,
+            "internal: %s instruction %d (%s) has no source location after %s "
+            "— a pass built it without copying the location of what it "
+            "replaced; if it corresponds to no source construct, mark it "
+            "synth", fn->name, n, ir_opname(i->op), tag);
+    }
     free_defs(&d);
 }
 
@@ -1787,8 +2093,25 @@ static void opt_func(struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++)
         if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
             return;
+    /* Likewise exception regions: a landing pad is entered from every call
+     * of its region, edges the passes do not see (and its code, reached by
+     * no jump, would look dead).
+     *
+     * Only while a region EXISTS, though. mark_eh_calls() clears neh when
+     * no call in any region can actually throw -- true of every `noexcept`
+     * function that calls nothing, and of type_info::name() in our own C++
+     * runtime -- and then the pad really is ordinary unreachable code that
+     * the passes may optimize or drop. What used to make that unsafe was
+     * not the pad but the MODEL: IR_LANDING writes two temps and
+     * compute_defs only saw one, so DCE deleted the landing and kept the
+     * stores reading what it produced. compute_defs knows both now, so
+     * these functions are optimized again instead of being compiled at
+     * -O0 however the build was invoked. */
+    if (fn->neh)
+        return;
     int verify = getenv("EMBCC_VERIFY") != NULL;
     if (verify) verify_func(fn, "irgen");
+    int ins_before = fn->nins;
     if (g_mem2reg)
         pass_mem2reg(fn);         /* global mem2reg (subsumes store-forwarding) */
     /* Global load CSE is the expensive pass (CFG + an available-expressions
@@ -1823,6 +2146,14 @@ static void opt_func(struct ir_func *fn)
     if (pass_immfold(fn))
         pass_dce(fn);
     if (verify) verify_func(fn, "opt");
+
+    /* What the whole fixpoint came to, for this function. The per-pass
+     * decisions above answer "why"; this answers "did anything happen", and
+     * it is the number a person compares between two builds. */
+    if (remarks_on() && fn->src)
+        remark_add("opt", "optimized", fn->name, "fixpoint-reached",
+                   fn->file, fn->line,
+                   "%d instructions -> %d", ins_before, fn->nins);
 }
 
 void opt_run(struct ir_unit *iu, int level)
@@ -1836,5 +2167,6 @@ void opt_run(struct ir_unit *iu, int level)
     if (level >= 2)               /* inline before the per-function passes clean up */
         inline_unit(iu);
     for (int f = 0; f < iu->nfuncs; f++)
-        opt_func(&iu->funcs[f]);
+        if (!iu->funcs[f].has_i128)    /* (its folds are 64-bit) */
+            opt_func(&iu->funcs[f]);
 }

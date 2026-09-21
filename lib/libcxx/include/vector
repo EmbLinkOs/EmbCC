@@ -1,0 +1,418 @@
+/* <vector> — C++ [vector].
+ *
+ * Three pointers: where the elements start, where the constructed ones
+ * end, and where the storage ends. Everything else follows from those.
+ *
+ * The two things worth reading here are the growth policy and what
+ * happens when a constructor throws during reallocation, because those
+ * are what make a vector a vector rather than a resizable array.
+ */
+#ifndef _LIBCXX_VECTOR
+#define _LIBCXX_VECTOR
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <iterator>
+#include <memory>
+#include <initializer_list>
+
+namespace std {
+
+[[noreturn]] void __throw_vector_out_of_range();
+[[noreturn]] void __throw_vector_too_long();
+
+template <class T, class A = allocator<T>>
+class vector {
+    /* Not named `at`: this class also has a member function called at(),
+     * and a type alias cannot share a name with a member. */
+    using __atr = allocator_traits<A>;
+
+public:
+    using value_type = T;
+    using allocator_type = A;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using reference = T &;
+    using const_reference = const T &;
+    using pointer = T *;
+    using const_pointer = const T *;
+    using iterator = T *;
+    using const_iterator = const T *;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+    vector() noexcept : __b(nullptr), __e(nullptr), __cap(nullptr), __a() {}
+    explicit vector(const A &a) noexcept
+        : __b(nullptr), __e(nullptr), __cap(nullptr), __a(a) {}
+
+    explicit vector(size_type n, const A &a = A())
+        : __b(nullptr), __e(nullptr), __cap(nullptr), __a(a)
+    {
+        if (n) {
+            __alloc(n);
+            __e = uninitialized_value_construct_n(__b, n);
+        }
+    }
+
+    vector(size_type n, const T &v, const A &a = A())
+        : __b(nullptr), __e(nullptr), __cap(nullptr), __a(a)
+    {
+        if (n) {
+            __alloc(n);
+            uninitialized_fill(__b, __b + n, v);
+            __e = __b + n;
+        }
+    }
+
+    template <class It, class = iter_value_t<It>>
+    vector(It first, It last, const A &a = A())
+        : __b(nullptr), __e(nullptr), __cap(nullptr), __a(a)
+    {
+        for (; first != last; ++first)
+            push_back(*first);
+    }
+
+    vector(initializer_list<T> l, const A &a = A())
+        : __b(nullptr), __e(nullptr), __cap(nullptr), __a(a)
+    {
+        if (l.size()) {
+            __alloc(l.size());
+            __e = uninitialized_copy(l.begin(), l.end(), __b);
+        }
+    }
+
+    vector(const vector &o) : __b(nullptr), __e(nullptr), __cap(nullptr), __a()
+    {
+        size_type n = o.size();
+        if (n) {
+            __alloc(n);
+            __e = uninitialized_copy(o.__b, o.__e, __b);
+        }
+    }
+
+    /* Moving takes the other's three pointers and leaves it EMPTY but
+     * usable -- not merely unspecified. A moved-from vector that still
+     * pointed at the storage would free it twice. */
+    vector(vector &&o) noexcept
+        : __b(o.__b), __e(o.__e), __cap(o.__cap), __a(move(o.__a))
+    {
+        o.__b = o.__e = o.__cap = nullptr;
+    }
+
+    ~vector() { __destroy_all(); }
+
+    vector &operator=(const vector &o)
+    {
+        if (this != addressof(o))
+            assign(o.__b, o.__e);
+        return *this;
+    }
+
+    vector &operator=(vector &&o) noexcept
+    {
+        if (this != addressof(o)) {
+            __destroy_all();
+            __b = o.__b; __e = o.__e; __cap = o.__cap;
+            __a = move(o.__a);
+            o.__b = o.__e = o.__cap = nullptr;
+        }
+        return *this;
+    }
+
+    vector &operator=(initializer_list<T> l)
+    { assign(l.begin(), l.end()); return *this; }
+
+    void assign(size_type n, const T &v)
+    { clear(); reserve(n); for (size_type i = 0; i < n; i++) push_back(v); }
+
+    template <class It>
+    void assign(It first, It last)
+    { clear(); for (; first != last; ++first) push_back(*first); }
+
+    allocator_type get_allocator() const noexcept { return __a; }
+
+    /* ---- access ---- */
+    reference at(size_type i)
+    { if (i >= size()) __throw_vector_out_of_range(); return __b[i]; }
+    const_reference at(size_type i) const
+    { if (i >= size()) __throw_vector_out_of_range(); return __b[i]; }
+    reference operator[](size_type i) { return __b[i]; }
+    const_reference operator[](size_type i) const { return __b[i]; }
+    reference front() { return *__b; }
+    const_reference front() const { return *__b; }
+    reference back() { return __e[-1]; }
+    const_reference back() const { return __e[-1]; }
+    T *data() noexcept { return __b; }
+    const T *data() const noexcept { return __b; }
+
+    /* ---- iterators ---- */
+    iterator begin() noexcept { return __b; }
+    const_iterator begin() const noexcept { return __b; }
+    const_iterator cbegin() const noexcept { return __b; }
+    iterator end() noexcept { return __e; }
+    const_iterator end() const noexcept { return __e; }
+    const_iterator cend() const noexcept { return __e; }
+    reverse_iterator rbegin() noexcept { return reverse_iterator(__e); }
+    const_reverse_iterator rbegin() const noexcept
+    { return const_reverse_iterator(__e); }
+    reverse_iterator rend() noexcept { return reverse_iterator(__b); }
+    const_reverse_iterator rend() const noexcept
+    { return const_reverse_iterator(__b); }
+
+    /* ---- capacity ---- */
+    bool empty() const noexcept { return __b == __e; }
+    size_type size() const noexcept { return (size_type)(__e - __b); }
+    size_type capacity() const noexcept { return (size_type)(__cap - __b); }
+    size_type max_size() const noexcept { return __atr::max_size(__a); }
+
+    void reserve(size_type n)
+    {
+        if (n > max_size())
+            __throw_vector_too_long();
+        if (n > capacity())
+            __regrow(n);
+    }
+
+    void shrink_to_fit() { if (__e != __cap) __regrow(size()); }
+
+    /* ---- modifiers ---- */
+    void clear() noexcept { destroy(__b, __e); __e = __b; }
+
+    void push_back(const T &v)
+    {
+        if (__e == __cap)
+            __regrow(__next_cap());
+        construct_at(__e, v);
+        ++__e;
+    }
+
+    void push_back(T &&v)
+    {
+        if (__e == __cap)
+            __regrow(__next_cap());
+        construct_at(__e, move(v));
+        ++__e;
+    }
+
+    template <class... Args>
+    reference emplace_back(Args &&...args)
+    {
+        if (__e == __cap)
+            __regrow(__next_cap());
+        construct_at(__e, forward<Args>(args)...);
+        return *__e++;
+    }
+
+    void pop_back() { --__e; destroy_at(__e); }
+
+    void resize(size_type n)
+    {
+        if (n < size()) { destroy(__b + n, __e); __e = __b + n; }
+        else if (n > size()) {
+            reserve(n);
+            __e = uninitialized_value_construct_n(__e, n - size());
+        }
+    }
+
+    void resize(size_type n, const T &v)
+    {
+        if (n < size()) { destroy(__b + n, __e); __e = __b + n; }
+        else while (size() < n) push_back(v);
+    }
+
+    iterator insert(const_iterator pos, const T &v)
+    { return __insert_one(pos, v); }
+    iterator insert(const_iterator pos, T &&v)
+    { return __insert_one(pos, move(v)); }
+
+    template <class... Args>
+    iterator emplace(const_iterator pos, Args &&...args)
+    { return __insert_one(pos, T(forward<Args>(args)...)); }
+
+    iterator erase(const_iterator pos)
+    {
+        iterator p = __b + (pos - __b);
+        for (iterator q = p; q + 1 != __e; ++q)
+            *q = move(q[1]);
+        --__e;
+        destroy_at(__e);
+        return p;
+    }
+
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        iterator f = __b + (first - __b), l = __b + (last - __b);
+        if (f == l)
+            return f;
+        iterator q = f;
+        for (iterator s = l; s != __e; ++s, ++q)
+            *q = move(*s);
+        destroy(q, __e);
+        __e = q;
+        return f;
+    }
+
+    void swap(vector &o) noexcept
+    {
+        using std::swap;
+        swap(__b, o.__b); swap(__e, o.__e); swap(__cap, o.__cap);
+        swap(__a, o.__a);
+    }
+
+private:
+    T *__b, *__e, *__cap;
+    A __a;
+
+    void __alloc(size_type n)
+    {
+        __b = __atr::allocate(__a, n);
+        __e = __b;
+        __cap = __b + n;
+    }
+
+    void __destroy_all() noexcept
+    {
+        if (__b) {
+            destroy(__b, __e);
+            __atr::deallocate(__a, __b, capacity());
+        }
+    }
+
+    /* Doubling, so that n push_backs cost O(n) rather than O(n^2): each
+     * element is copied at most once per doubling and the total work is a
+     * geometric series. Growing by a constant instead is the classic way
+     * to turn a loop of appends quadratic. */
+    size_type __next_cap() const
+    {
+        size_type c = capacity();
+        if (c == 0)
+            return 1;
+        if (c > max_size() / 2)
+            return max_size();
+        return c * 2;
+    }
+
+    /* Move the elements to new storage of `n`, or COPY them if moving
+     * could throw.
+     *
+     * That choice is the whole of a vector's exception safety. If a move
+     * constructor throws halfway through relocating, the old buffer has
+     * already been hollowed out and there is nothing to roll back to --
+     * the vector is lost. Copying leaves the original intact, so a throw
+     * means the vector is exactly as it was. This is why a type wanting
+     * fast vector growth must mark its move constructor noexcept: it is
+     * not a hint, it is the difference between moving and copying here.
+     */
+    void __regrow(size_type n)
+    {
+        T *nb = __atr::allocate(__a, n);
+        size_type cnt = size();
+        T *ne = nb;
+        try {
+            if constexpr (is_nothrow_move_constructible_v<T> ||
+                          !is_copy_constructible_v<T>)
+                ne = uninitialized_move(__b, __e, nb);
+            else
+                ne = uninitialized_copy(__b, __e, nb);
+        } catch (...) {
+            __atr::deallocate(__a, nb, n);
+            throw;                  /* the vector is untouched */
+        }
+        __destroy_all();
+        __b = nb;
+        __e = ne;
+        __cap = nb + n;
+        (void)cnt;
+    }
+
+    template <class V>
+    iterator __insert_one(const_iterator pos, V &&v)
+    {
+        size_type at_i = (size_type)(pos - __b);
+        if (__e == __cap)
+            __regrow(__next_cap());          /* invalidates pos */
+        iterator p = __b + at_i;
+        if (p == __e) {
+            construct_at(__e, forward<V>(v));
+            ++__e;
+            return p;
+        }
+        /* The last element moves into raw storage; the rest shift by
+         * assignment. Doing it in one direction from the back is what
+         * keeps every slot either constructed or not, never both. */
+        construct_at(__e, move(__e[-1]));
+        ++__e;
+        for (iterator q = __e - 2; q != p; --q)
+            *q = move(q[-1]);
+        *p = forward<V>(v);
+        return p;
+    }
+};
+
+template <class It, class A = allocator<iter_value_t<It>>>
+vector(It, It, A = A()) -> vector<iter_value_t<It>, A>;
+
+template <class T, class A>
+bool operator==(const vector<T, A> &a, const vector<T, A> &b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); i++)
+        if (!(a[i] == b[i]))
+            return false;
+    return true;
+}
+template <class T, class A>
+bool operator!=(const vector<T, A> &a, const vector<T, A> &b)
+{ return !(a == b); }
+
+template <class T, class A>
+bool operator<(const vector<T, A> &a, const vector<T, A> &b)
+{
+    size_t n = a.size() < b.size() ? a.size() : b.size();
+    for (size_t i = 0; i < n; i++) {
+        if (a[i] < b[i]) return true;
+        if (b[i] < a[i]) return false;
+    }
+    return a.size() < b.size();
+}
+template <class T, class A>
+bool operator>(const vector<T, A> &a, const vector<T, A> &b) { return b < a; }
+template <class T, class A>
+bool operator<=(const vector<T, A> &a, const vector<T, A> &b)
+{ return !(b < a); }
+template <class T, class A>
+bool operator>=(const vector<T, A> &a, const vector<T, A> &b)
+{ return !(a < b); }
+
+template <class T, class A>
+void swap(vector<T, A> &a, vector<T, A> &b) noexcept { a.swap(b); }
+
+template <class T, class A, class U>
+size_t erase(vector<T, A> &v, const U &value)
+{
+    size_t before = v.size();
+    auto w = v.begin();
+    for (auto r = v.begin(); r != v.end(); ++r)
+        if (!(*r == value))
+            *w++ = move(*r);
+    v.erase(w, v.end());
+    return before - v.size();
+}
+
+template <class T, class A, class P>
+size_t erase_if(vector<T, A> &v, P pred)
+{
+    size_t before = v.size();
+    auto w = v.begin();
+    for (auto r = v.begin(); r != v.end(); ++r)
+        if (!pred(*r))
+            *w++ = move(*r);
+    v.erase(w, v.end());
+    return before - v.size();
+}
+
+}  // namespace std
+
+#endif

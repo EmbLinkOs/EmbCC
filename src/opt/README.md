@@ -3,7 +3,7 @@
 IR-level optimizer — per-function passes over EmbIR, run at `-O1` and above
 (`opt_run`), iterated to a fixpoint. Register allocation and stack-slot
 coalescing are **not** here — they need the frame/register model and live in
-`../codegen`. This module is purely IR→IR.
+the backends in `../arch/<arch>/codegen.c`. This module is purely IR→IR.
 
 Two families. The **local** passes are proven safe by EmbIR's single-assignment
 temporaries: a vreg with exactly one definition holds an invariant value, so no

@@ -1,0 +1,293 @@
+/* <shared_mutex> — C++ [thread.sharedmutex].
+ *
+ * A lock with two modes: many readers at once, or one writer alone. It
+ * pays for itself only when reads are both frequent and long; a
+ * shared lock is more expensive than a plain one -- it is a
+ * read-modify-write on a shared counter either way -- so for short
+ * critical sections a plain mutex wins even with many readers, because
+ * the cache line bounces the same amount and the code is simpler.
+ *
+ * ---- the state --------------------------------------------------------
+ *
+ * One 32-bit word:
+ *
+ *   bit 31        a writer holds it
+ *   bit 30        a writer is WAITING
+ *   bits 0..29    how many readers hold it
+ *
+ * The waiting bit is what keeps this from starving writers. Without it,
+ * a steady stream of readers can keep the count above zero forever and
+ * a writer never gets in -- which is not a theoretical problem, it is
+ * the normal behaviour of a naive reader-writer lock under load. With
+ * it, a would-be writer publishes its intent and new readers stand
+ * aside.
+ */
+#ifndef _LIBCXX_SHARED_MUTEX
+#define _LIBCXX_SHARED_MUTEX
+
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <system_error>
+
+extern "C" {
+int __os_futex_wait(const volatile int *addr, int expected, long timeout_ns);
+int __os_futex_wake(const volatile int *addr, int count);
+void __os_thread_yield(void);
+}
+
+namespace std {
+
+class shared_mutex {
+public:
+    constexpr shared_mutex() noexcept : __s(0) {}
+    ~shared_mutex() = default;
+    shared_mutex(const shared_mutex &) = delete;
+    shared_mutex &operator=(const shared_mutex &) = delete;
+
+    /* ---- exclusive ------------------------------------------------- */
+
+    void lock()
+    {
+        for (;;) {
+            unsigned v = __s.load(memory_order_relaxed);
+            if ((v & (__WRITER | __READERS)) == 0) {
+                if (__s.compare_exchange_weak(v, (v & ~__WAITING) | __WRITER,
+                                              memory_order_acquire,
+                                              memory_order_relaxed))
+                    return;
+                continue;
+            }
+            /* Announce the intent before sleeping: new readers will now
+             * stand aside, and the holder knows to wake somebody. */
+            if (!(v & __WAITING) &&
+                !__s.compare_exchange_weak(v, v | __WAITING,
+                                           memory_order_relaxed,
+                                           memory_order_relaxed))
+                continue;
+            if (__os_futex_wait(__word(), (int)(v | __WAITING), -1) < 0)
+                __os_thread_yield();
+        }
+    }
+
+    bool try_lock() noexcept
+    {
+        unsigned v = __s.load(memory_order_relaxed);
+        if ((v & (__WRITER | __READERS)) != 0)
+            return false;
+        return __s.compare_exchange_strong(v, (v & ~__WAITING) | __WRITER,
+                                           memory_order_acquire,
+                                           memory_order_relaxed);
+    }
+
+    void unlock() noexcept
+    {
+        /* Everything the writer did becomes visible to whoever acquires
+         * next, in either mode: release, then wake ALL -- a writer
+         * releasing may have several readers to let in, and waking one
+         * would serialise what the shared mode exists to parallelise. */
+        __s.fetch_and(~(__WRITER | __WAITING), memory_order_release);
+        __os_futex_wake(__word(), -1);
+    }
+
+    /* ---- shared ----------------------------------------------------- */
+
+    void lock_shared()
+    {
+        for (;;) {
+            unsigned v = __s.load(memory_order_relaxed);
+            /* A waiting writer blocks NEW readers. The ones already in
+             * finish; this is what bounds a writer's wait. */
+            if ((v & (__WRITER | __WAITING)) == 0 &&
+                (v & __READERS) != __READERS) {
+                if (__s.compare_exchange_weak(v, v + 1, memory_order_acquire,
+                                              memory_order_relaxed))
+                    return;
+                continue;
+            }
+            if (__os_futex_wait(__word(), (int)v, -1) < 0)
+                __os_thread_yield();
+        }
+    }
+
+    bool try_lock_shared() noexcept
+    {
+        unsigned v = __s.load(memory_order_relaxed);
+        if ((v & (__WRITER | __WAITING)) != 0 || (v & __READERS) == __READERS)
+            return false;
+        return __s.compare_exchange_strong(v, v + 1, memory_order_acquire,
+                                           memory_order_relaxed);
+    }
+
+    void unlock_shared() noexcept
+    {
+        unsigned prev = __s.fetch_sub(1, memory_order_release);
+        /* Only the LAST reader out wakes anybody: waking on every
+         * reader's exit would be a syscall per reader for a writer that
+         * still cannot get in. */
+        if ((prev & __READERS) == 1 && (prev & __WAITING))
+            __os_futex_wake(__word(), -1);
+    }
+
+private:
+    static constexpr unsigned __WRITER  = 1u << 31;
+    static constexpr unsigned __WAITING = 1u << 30;
+    static constexpr unsigned __READERS = (1u << 30) - 1;
+
+    const volatile int *__word() const
+    { return (const volatile int *)&__s; }
+
+    atomic<unsigned> __s;
+};
+
+/* A timed one is the same lock with a bounded wait. Sharing the
+ * implementation rather than copying it: the only difference is that
+ * the futex is given a timeout and the caller is told when it expired. */
+class shared_timed_mutex {
+public:
+    shared_timed_mutex() = default;
+    shared_timed_mutex(const shared_timed_mutex &) = delete;
+    shared_timed_mutex &operator=(const shared_timed_mutex &) = delete;
+
+    void lock() { __m.lock(); }
+    bool try_lock() noexcept { return __m.try_lock(); }
+    void unlock() noexcept { __m.unlock(); }
+    void lock_shared() { __m.lock_shared(); }
+    bool try_lock_shared() noexcept { return __m.try_lock_shared(); }
+    void unlock_shared() noexcept { __m.unlock_shared(); }
+
+    template <class R, class P>
+    bool try_lock_for(const chrono::duration<R, P> &d)
+    { return __spin(d, false); }
+    template <class R, class P>
+    bool try_lock_shared_for(const chrono::duration<R, P> &d)
+    { return __spin(d, true); }
+
+    template <class C, class D>
+    bool try_lock_until(const chrono::time_point<C, D> &t)
+    { return try_lock_for(t - C::now()); }
+    template <class C, class D>
+    bool try_lock_shared_until(const chrono::time_point<C, D> &t)
+    { return try_lock_shared_for(t - C::now()); }
+
+private:
+    template <class R, class P>
+    bool __spin(const chrono::duration<R, P> &d, bool shared)
+    {
+        auto deadline = chrono::steady_clock::now() + d;
+        for (;;) {
+            if (shared ? __m.try_lock_shared() : __m.try_lock())
+                return true;
+            /* Nobody else can release it here, and the clock may not be
+             * advancing: one attempt is the whole of a bounded wait. */
+            if (!__can_block())
+                return false;
+            if (chrono::steady_clock::now() >= deadline)
+                return false;
+            __os_thread_yield();
+        }
+    }
+
+    shared_mutex __m;
+};
+
+/* ---- shared_lock -----------------------------------------------------------
+ *
+ * unique_lock for the shared mode. It is a separate type rather than a
+ * flag because the two are different enough to be worth different
+ * names at the call site: seeing `shared_lock` says "this is a reader"
+ * without reading the body.
+ */
+template <class M>
+class shared_lock {
+public:
+    using mutex_type = M;
+
+    shared_lock() noexcept : __m(nullptr), __owns(false) {}
+    explicit shared_lock(M &m) : __m(&m), __owns(true) { __m->lock_shared(); }
+    shared_lock(M &m, defer_lock_t) noexcept : __m(&m), __owns(false) {}
+    shared_lock(M &m, try_to_lock_t) : __m(&m), __owns(m.try_lock_shared()) {}
+    shared_lock(M &m, adopt_lock_t) : __m(&m), __owns(true) {}
+
+    template <class R, class P>
+    shared_lock(M &m, const chrono::duration<R, P> &d)
+        : __m(&m), __owns(m.try_lock_shared_for(d)) {}
+
+    ~shared_lock()
+    {
+        if (__owns)
+            __m->unlock_shared();
+    }
+
+    shared_lock(const shared_lock &) = delete;
+    shared_lock &operator=(const shared_lock &) = delete;
+
+    shared_lock(shared_lock &&o) noexcept : __m(o.__m), __owns(o.__owns)
+    { o.__m = nullptr; o.__owns = false; }
+
+    shared_lock &operator=(shared_lock &&o) noexcept
+    {
+        if (this != &o) {
+            if (__owns)
+                __m->unlock_shared();
+            __m = o.__m;
+            __owns = o.__owns;
+            o.__m = nullptr;
+            o.__owns = false;
+        }
+        return *this;
+    }
+
+    void lock()
+    {
+        if (!__m || __owns)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "shared_lock::lock");
+        __m->lock_shared();
+        __owns = true;
+    }
+
+    bool try_lock()
+    {
+        if (!__m || __owns)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "shared_lock::try_lock");
+        __owns = __m->try_lock_shared();
+        return __owns;
+    }
+
+    void unlock()
+    {
+        if (!__owns)
+            throw system_error(make_error_code(errc::operation_not_permitted),
+                               "shared_lock::unlock when not locked");
+        __m->unlock_shared();
+        __owns = false;
+    }
+
+    void swap(shared_lock &o) noexcept
+    {
+        M *t = __m; __m = o.__m; o.__m = t;
+        bool b = __owns; __owns = o.__owns; o.__owns = b;
+    }
+
+    M *release() noexcept
+    {
+        M *r = __m;
+        __m = nullptr;
+        __owns = false;
+        return r;
+    }
+
+    bool owns_lock() const noexcept { return __owns; }
+    explicit operator bool() const noexcept { return __owns; }
+    M *mutex() const noexcept { return __m; }
+
+private:
+    M *__m;
+    bool __owns;
+};
+
+}  // namespace std
+
+#endif

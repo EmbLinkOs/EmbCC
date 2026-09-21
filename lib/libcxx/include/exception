@@ -1,0 +1,210 @@
+/* <exception> — C++ [exception.syn]. */
+#ifndef _LIBCXX_EXCEPTION
+#define _LIBCXX_EXCEPTION
+
+#include <cstddef>
+
+namespace std {
+
+/* The base of every standard exception. Its destructor is virtual and
+ * out-of-line on purpose: that makes THIS translation unit the home of the
+ * vtable and the typeinfo, so every catch(std::exception&) in the program
+ * compares against one object rather than one per unit. */
+class exception {
+public:
+    exception() noexcept {}
+    exception(const exception &) noexcept = default;
+    exception &operator=(const exception &) noexcept = default;
+    virtual ~exception() noexcept;
+    virtual const char *what() const noexcept;
+};
+
+class bad_exception : public exception {
+public:
+    bad_exception() noexcept {}
+    ~bad_exception() noexcept override;
+    const char *what() const noexcept override;
+};
+
+using terminate_handler = void (*)();
+terminate_handler set_terminate(terminate_handler h) noexcept;
+terminate_handler get_terminate() noexcept;
+[[noreturn]] void terminate() noexcept;
+
+int uncaught_exceptions() noexcept;
+
+/* ---- exception_ptr ---------------------------------------------------------
+ *
+ * An exception that outlives its handler. Without it an exception
+ * cannot cross a thread boundary at all: a worker's `throw` has no
+ * caller to propagate to, so the only way to report a failure back is
+ * to CAPTURE it here and rethrow it where somebody is waiting. That is
+ * exactly what std::future does, and it is why this type exists.
+ *
+ * It is a counted reference to the exception object itself -- not a
+ * copy. Copying one is an increment; the object is destroyed when the
+ * last holder lets go AND the last handler has finished. Both counts
+ * live in the runtime's __cxa_exception header (lib/libcxx/src/eh.cc),
+ * which is why the four functions below are ABI entry points rather
+ * than anything this header could write for itself.
+ */
+extern "C" {
+void *__cxa_current_primary_exception() noexcept;
+void __cxa_increment_exception_refcount(void *) noexcept;
+void __cxa_decrement_exception_refcount(void *) noexcept;
+[[noreturn]] void __cxa_rethrow_primary_exception(void *);
+void *__cxa_allocate_exception(__SIZE_TYPE__) noexcept;
+[[noreturn]] void __cxa_throw(void *, void *, void (*)(void *));
+}
+
+class exception_ptr {
+public:
+    exception_ptr() noexcept : __p(nullptr) {}
+    exception_ptr(decltype(nullptr)) noexcept : __p(nullptr) {}
+
+    exception_ptr(const exception_ptr &o) noexcept : __p(o.__p)
+    { __cxa_increment_exception_refcount(__p); }
+
+    exception_ptr(exception_ptr &&o) noexcept : __p(o.__p) { o.__p = nullptr; }
+
+    exception_ptr &operator=(const exception_ptr &o) noexcept
+    {
+        /* Increment BEFORE decrementing, so self-assignment of the last
+         * reference does not destroy what it is about to keep. */
+        void *q = o.__p;
+        __cxa_increment_exception_refcount(q);
+        __cxa_decrement_exception_refcount(__p);
+        __p = q;
+        return *this;
+    }
+
+    exception_ptr &operator=(exception_ptr &&o) noexcept
+    {
+        if (this != &o) {
+            __cxa_decrement_exception_refcount(__p);
+            __p = o.__p;
+            o.__p = nullptr;
+        }
+        return *this;
+    }
+
+    ~exception_ptr() { __cxa_decrement_exception_refcount(__p); }
+
+    explicit operator bool() const noexcept { return __p != nullptr; }
+
+    friend bool operator==(const exception_ptr &a,
+                           const exception_ptr &b) noexcept
+    { return a.__p == b.__p; }
+    friend bool operator!=(const exception_ptr &a,
+                           const exception_ptr &b) noexcept
+    { return a.__p != b.__p; }
+
+    void *__raw() const noexcept { return __p; }
+    static exception_ptr __adopt(void *p) noexcept
+    {
+        exception_ptr e;
+        e.__p = p;                 /* already counted by the caller */
+        return e;
+    }
+
+private:
+    void *__p;
+};
+
+/* Inside a handler this is the exception being handled; outside one it
+ * is null, and that is a useful answer rather than an error -- code
+ * that captures "whatever went wrong, if anything" can call it
+ * unconditionally. */
+inline exception_ptr current_exception() noexcept
+{ return exception_ptr::__adopt(__cxa_current_primary_exception()); }
+
+/* Throws the SAME exception object, not a copy: the type is preserved
+ * exactly, including a derived type caught as a base. A hand-rolled
+ * "store the message and throw a runtime_error" loses that, which is
+ * the reason this is worth having. */
+[[noreturn]] inline void rethrow_exception(exception_ptr p)
+{
+    __cxa_rethrow_primary_exception(p.__raw());
+    terminate();                   /* a null ptr: nothing to rethrow */
+}
+
+/* Capture an exception without throwing it first. Implemented by
+ * throwing and catching, because that is the only way to get the
+ * runtime to build an exception object with the right type_info -- and
+ * it is exactly what the standard describes. */
+template <class E>
+exception_ptr make_exception_ptr(E e) noexcept
+{
+    try {
+        throw e;
+    } catch (...) {
+        return current_exception();
+    }
+}
+
+/* ---- nested_exception -------------------------------------------------------
+ *
+ * "This failed, and here is what it was doing when it failed." A
+ * library catching a low-level error and throwing its own usually
+ * destroys the cause; throw_with_nested keeps both, and rethrow_if_nested
+ * walks down to it.
+ */
+class nested_exception {
+public:
+    nested_exception() noexcept : __p(current_exception()) {}
+    nested_exception(const nested_exception &) noexcept = default;
+    nested_exception &operator=(const nested_exception &) noexcept = default;
+    virtual ~nested_exception() = default;
+
+    [[noreturn]] void rethrow_nested() const
+    {
+        if (!__p)
+            terminate();
+        rethrow_exception(__p);
+    }
+    exception_ptr nested_ptr() const noexcept { return __p; }
+
+private:
+    exception_ptr __p;
+};
+
+namespace __detail {
+/* A local remove_cvref, so <exception> stays free of <type_traits>:
+ * this header is reached from the runtime itself and from every other
+ * header, and a dependency here is a dependency everywhere. */
+template <class T> struct __ncv { using type = T; };
+template <class T> struct __ncv<T &> { using type = T; };
+template <class T> struct __ncv<T &&> { using type = T; };
+template <class T> struct __ncv<const T> { using type = T; };
+template <class T> struct __ncv<const T &> { using type = T; };
+
+template <class T>
+struct __with_nested : T, nested_exception {
+    explicit __with_nested(const T &t) : T(t) {}
+};
+}
+
+/* The thrown object is BOTH the caller's type and a nested_exception,
+ * so a handler for the caller's type still catches it and a handler
+ * that knows about nesting can reach the cause. That double identity is
+ * why it is a class template deriving from T rather than a wrapper. */
+template <class T>
+[[noreturn]] void throw_with_nested(T &&t)
+{
+    using U = typename __detail::__ncv<T>::type;
+    throw __detail::__with_nested<U>(static_cast<const U &>(t));
+}
+
+template <class E>
+void rethrow_if_nested(const E &e)
+{
+    /* Only if it really is nested: dynamic_cast answers that at run
+     * time, which is the only place the answer exists. */
+    const nested_exception *n = dynamic_cast<const nested_exception *>(&e);
+    if (n && n->nested_ptr())
+        n->rethrow_nested();
+}
+
+}  // namespace std
+
+#endif

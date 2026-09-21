@@ -1,0 +1,739 @@
+/* <algorithm> — C++ [algorithms].
+ *
+ * Almost all of this is short and obvious. Two things are not, and they
+ * are the reason the header is worth reading:
+ *
+ *   `sort` is an INTROSORT. Plain quicksort is O(n log n) on average and
+ *   O(n^2) on inputs an adversary -- or an unlucky pattern, like
+ *   already-sorted data with a naive pivot -- can produce. The standard
+ *   requires O(n log n) in the WORST case, so the recursion depth is
+ *   counted and heapsort takes over when it grows past 2 log n. That is
+ *   the whole trick: quicksort's speed with heapsort's guarantee.
+ *
+ *   The binary searches require a PARTITIONED range, not a sorted one.
+ *   Sorted implies partitioned for the same comparator, which is why the
+ *   distinction is usually invisible -- and why passing a different
+ *   comparator than the one the range was sorted with gives a wrong
+ *   answer rather than a diagnostic.
+ */
+#ifndef _LIBCXX_ALGORITHM
+#define _LIBCXX_ALGORITHM
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <iterator>
+#include <functional>
+#include <initializer_list>
+
+namespace std {
+
+/* ---- min / max ---------------------------------------------------------
+ * Both return the FIRST argument when the two are equivalent
+ * ([alg.min.max]), which is why min is `b < a ? b : a` and not
+ * `a < b ? a : b` -- the latter returns the second on a tie. It looks
+ * like a detail and is not: algorithms built on these inherit their tie
+ * behaviour, and that is what decides whether a sort is stable. */
+template <class T>
+constexpr const T &min(const T &a, const T &b) { return b < a ? b : a; }
+template <class T, class C>
+constexpr const T &min(const T &a, const T &b, C cmp)
+{ return cmp(b, a) ? b : a; }
+template <class T>
+constexpr const T &max(const T &a, const T &b) { return a < b ? b : a; }
+template <class T, class C>
+constexpr const T &max(const T &a, const T &b, C cmp)
+{ return cmp(a, b) ? b : a; }
+
+template <class T>
+constexpr T min(initializer_list<T> l)
+{
+    const T *m = l.begin();
+    for (const T *p = l.begin() + 1; p != l.end(); ++p)
+        if (*p < *m) m = p;
+    return *m;
+}
+template <class T>
+constexpr T max(initializer_list<T> l)
+{
+    const T *m = l.begin();
+    for (const T *p = l.begin() + 1; p != l.end(); ++p)
+        if (*m < *p) m = p;
+    return *m;
+}
+
+template <class T>
+constexpr const T &clamp(const T &v, const T &lo, const T &hi)
+{ return v < lo ? lo : hi < v ? hi : v; }
+template <class T, class C>
+constexpr const T &clamp(const T &v, const T &lo, const T &hi, C cmp)
+{ return cmp(v, lo) ? lo : cmp(hi, v) ? hi : v; }
+
+template <class I, class C>
+constexpr I min_element(I first, I last, C cmp)
+{
+    if (first == last) return last;
+    I m = first;
+    for (++first; first != last; ++first)
+        if (cmp(*first, *m)) m = first;
+    return m;
+}
+template <class I>
+constexpr I min_element(I first, I last)
+{ return min_element(first, last, less<>{}); }
+
+template <class I, class C>
+constexpr I max_element(I first, I last, C cmp)
+{
+    if (first == last) return last;
+    I m = first;
+    for (++first; first != last; ++first)
+        /* Strictly greater, so an equal element does not displace the
+         * one already held: max_element returns the FIRST maximum, as
+         * [alg.min.max] requires. `cmp(*first, *m)` inverted would
+         * return the last, and no test of the VALUE would notice. */
+        if (cmp(*m, *first)) m = first;
+    return m;
+}
+template <class I>
+constexpr I max_element(I first, I last)
+{ return max_element(first, last, less<>{}); }
+
+template <class I, class C>
+constexpr pair<I, I> minmax_element(I first, I last, C cmp)
+{ return {min_element(first, last, cmp), max_element(first, last, cmp)}; }
+template <class I>
+constexpr pair<I, I> minmax_element(I first, I last)
+{ return minmax_element(first, last, less<>{}); }
+
+template <class T>
+constexpr pair<const T &, const T &> minmax(const T &a, const T &b)
+{ return b < a ? pair<const T &, const T &>(b, a)
+               : pair<const T &, const T &>(a, b); }
+
+/* Swapping through iterators, which is what every in-place algorithm
+ * below is written in terms of. Declared here because reverse, partition
+ * and the sorts all need it. */
+template <class I, class J>
+constexpr void iter_swap_(I a, J b)
+{ auto t = std::move(*a); *a = std::move(*b); *b = std::move(t); }
+
+template <class I, class J>
+constexpr void iter_swap(I a, J b) { iter_swap_(a, b); }
+
+/* ---- non-modifying ------------------------------------------------------ */
+
+template <class I, class F>
+constexpr F for_each(I first, I last, F f)
+{ for (; first != last; ++first) f(*first); return f; }
+
+template <class I, class P>
+constexpr I find_if(I first, I last, P pred)
+{ for (; first != last; ++first) if (pred(*first)) return first; return last; }
+
+template <class I, class P>
+constexpr I find_if_not(I first, I last, P pred)
+{ for (; first != last; ++first) if (!pred(*first)) return first; return last; }
+
+template <class I, class T>
+constexpr I find(I first, I last, const T &v)
+{ for (; first != last; ++first) if (*first == v) return first; return last; }
+
+template <class I, class P>
+constexpr bool all_of(I first, I last, P pred)
+{ return find_if_not(first, last, pred) == last; }
+template <class I, class P>
+constexpr bool any_of(I first, I last, P pred)
+{ return find_if(first, last, pred) != last; }
+template <class I, class P>
+constexpr bool none_of(I first, I last, P pred)
+{ return find_if(first, last, pred) == last; }
+
+template <class I, class T>
+constexpr iter_difference_t<I> count(I first, I last, const T &v)
+{
+    iter_difference_t<I> n = 0;
+    for (; first != last; ++first) if (*first == v) ++n;
+    return n;
+}
+template <class I, class P>
+constexpr iter_difference_t<I> count_if(I first, I last, P pred)
+{
+    iter_difference_t<I> n = 0;
+    for (; first != last; ++first) if (pred(*first)) ++n;
+    return n;
+}
+
+template <class I, class J, class P>
+constexpr pair<I, J> mismatch(I first, I last, J other, P eq)
+{
+    for (; first != last && eq(*first, *other); ++first, ++other) {}
+    return {first, other};
+}
+template <class I, class J>
+constexpr pair<I, J> mismatch(I first, I last, J other)
+{ return mismatch(first, last, other, equal_to<>{}); }
+
+template <class I, class J, class P>
+constexpr bool equal(I first, I last, J other, P eq)
+{
+    for (; first != last; ++first, ++other)
+        if (!eq(*first, *other)) return false;
+    return true;
+}
+template <class I, class J>
+constexpr bool equal(I first, I last, J other)
+{ return equal(first, last, other, equal_to<>{}); }
+
+/* The four-iterator form compares LENGTHS first, which the three-iterator
+ * one cannot: it has no way to know the second range is shorter and will
+ * read past its end. */
+template <class I, class J, class P>
+constexpr bool equal(I f1, I l1, J f2, J l2, P eq)
+{
+    for (; f1 != l1 && f2 != l2; ++f1, ++f2)
+        if (!eq(*f1, *f2)) return false;
+    return f1 == l1 && f2 == l2;
+}
+template <class I, class J>
+constexpr bool equal(I f1, I l1, J f2, J l2)
+{ return equal(f1, l1, f2, l2, equal_to<>{}); }
+
+template <class I, class J, class P>
+constexpr I search(I first, I last, J sf, J sl, P eq)
+{
+    if (sf == sl) return first;
+    for (;; ++first) {
+        I it = first;
+        for (J s = sf;; ++it, ++s) {
+            if (s == sl) return first;
+            if (it == last) return last;
+            if (!eq(*it, *s)) break;
+        }
+    }
+}
+template <class I, class J>
+constexpr I search(I first, I last, J sf, J sl)
+{ return search(first, last, sf, sl, equal_to<>{}); }
+
+template <class I, class J, class P>
+constexpr I find_first_of(I first, I last, J sf, J sl, P eq)
+{
+    for (; first != last; ++first)
+        for (J s = sf; s != sl; ++s)
+            if (eq(*first, *s)) return first;
+    return last;
+}
+template <class I, class J>
+constexpr I find_first_of(I first, I last, J sf, J sl)
+{ return find_first_of(first, last, sf, sl, equal_to<>{}); }
+
+template <class I, class P>
+constexpr I adjacent_find(I first, I last, P eq)
+{
+    if (first == last) return last;
+    I next = first;
+    for (++next; next != last; ++first, ++next)
+        if (eq(*first, *next)) return first;
+    return last;
+}
+template <class I>
+constexpr I adjacent_find(I first, I last)
+{ return adjacent_find(first, last, equal_to<>{}); }
+
+template <class I, class J, class C>
+constexpr bool lexicographical_compare(I f1, I l1, J f2, J l2, C cmp)
+{
+    for (; f1 != l1 && f2 != l2; ++f1, ++f2) {
+        if (cmp(*f1, *f2)) return true;
+        if (cmp(*f2, *f1)) return false;
+    }
+    return f1 == l1 && f2 != l2;        /* a prefix is less */
+}
+template <class I, class J>
+constexpr bool lexicographical_compare(I f1, I l1, J f2, J l2)
+{ return lexicographical_compare(f1, l1, f2, l2, less<>{}); }
+
+/* ---- modifying ---------------------------------------------------------- */
+
+template <class I, class O>
+constexpr O copy(I first, I last, O out)
+{ for (; first != last; ++first, ++out) *out = *first; return out; }
+
+template <class I, class O, class P>
+constexpr O copy_if(I first, I last, O out, P pred)
+{
+    for (; first != last; ++first)
+        if (pred(*first)) { *out = *first; ++out; }
+    return out;
+}
+
+template <class I, class O>
+constexpr O copy_n(I first, size_t n, O out)
+{ for (; n > 0; --n, ++first, ++out) *out = *first; return out; }
+
+/* Backwards, so that ranges which OVERLAP with the destination after the
+ * source copy correctly -- the case `copy` gets wrong. */
+template <class I, class O>
+constexpr O copy_backward(I first, I last, O out_last)
+{ while (first != last) *--out_last = *--last; return out_last; }
+
+template <class I, class O>
+constexpr O move(I first, I last, O out)
+{ for (; first != last; ++first, ++out) *out = std::move(*first); return out; }
+
+template <class I, class O>
+constexpr O move_backward(I first, I last, O out_last)
+{ while (first != last) *--out_last = std::move(*--last); return out_last; }
+
+template <class I, class T>
+constexpr void fill(I first, I last, const T &v)
+{ for (; first != last; ++first) *first = v; }
+
+template <class I, class T>
+constexpr I fill_n(I first, size_t n, const T &v)
+{ for (; n > 0; --n, ++first) *first = v; return first; }
+
+template <class I, class O, class F>
+constexpr O transform(I first, I last, O out, F f)
+{ for (; first != last; ++first, ++out) *out = f(*first); return out; }
+
+template <class I, class J, class O, class F>
+constexpr O transform(I f1, I l1, J f2, O out, F f)
+{ for (; f1 != l1; ++f1, ++f2, ++out) *out = f(*f1, *f2); return out; }
+
+template <class I, class F>
+constexpr void generate(I first, I last, F f)
+{ for (; first != last; ++first) *first = f(); }
+
+template <class I, class T>
+constexpr void replace(I first, I last, const T &old, const T &nw)
+{ for (; first != last; ++first) if (*first == old) *first = nw; }
+
+template <class I, class P, class T>
+constexpr void replace_if(I first, I last, P pred, const T &nw)
+{ for (; first != last; ++first) if (pred(*first)) *first = nw; }
+
+/* remove does NOT erase: it compacts the keepers to the front and returns
+ * the new end, leaving what is past it unspecified. The container still
+ * has to be told -- the erase-remove idiom -- because an algorithm that
+ * only has iterators cannot change a container's size. */
+template <class I, class P>
+constexpr I remove_if(I first, I last, P pred)
+{
+    first = find_if(first, last, pred);
+    if (first == last) return first;
+    I w = first;
+    for (++first; first != last; ++first)
+        if (!pred(*first)) { *w = std::move(*first); ++w; }
+    return w;
+}
+template <class I, class T>
+constexpr I remove(I first, I last, const T &v)
+{ return remove_if(first, last, [&](const auto &x) { return x == v; }); }
+
+template <class I, class O, class P>
+constexpr O remove_copy_if(I first, I last, O out, P pred)
+{
+    for (; first != last; ++first)
+        if (!pred(*first)) { *out = *first; ++out; }
+    return out;
+}
+
+/* Only ADJACENT duplicates, which is why unique is nearly always
+ * preceded by sort: on unsorted input it removes runs, not duplicates. */
+template <class I, class P>
+constexpr I unique(I first, I last, P eq)
+{
+    first = adjacent_find(first, last, eq);
+    if (first == last) return last;
+    I w = first;
+    for (++first; ++first != last; )
+        if (!eq(*w, *first)) *++w = std::move(*first);
+    return ++w;
+}
+template <class I>
+constexpr I unique(I first, I last) { return unique(first, last, equal_to<>{}); }
+
+template <class I>
+constexpr void reverse(I first, I last)
+{ while (first != last && first != --last) { iter_swap_(first, last); ++first; } }
+
+template <class I, class J>
+constexpr J swap_ranges(I f1, I l1, J f2)
+{ for (; f1 != l1; ++f1, ++f2) iter_swap_(f1, f2); return f2; }
+
+template <class I>
+constexpr I rotate(I first, I mid, I last)
+{
+    if (first == mid) return last;
+    if (mid == last) return first;
+    /* Three reversals: reverse each part, then the whole. O(n) and no
+     * extra storage, where the obvious rotate-by-one loop is O(n*k). */
+    reverse(first, mid);
+    reverse(mid, last);
+    reverse(first, last);
+    return first + (last - mid);
+}
+
+/* ---- partitioning -------------------------------------------------------- */
+
+template <class I, class P>
+constexpr bool is_partitioned(I first, I last, P pred)
+{
+    first = find_if_not(first, last, pred);
+    return find_if(first, last, pred) == last;
+}
+
+template <class I, class P>
+constexpr I partition(I first, I last, P pred)
+{
+    first = find_if_not(first, last, pred);
+    if (first == last) return first;
+    for (I it = next(first); it != last; ++it)
+        if (pred(*it)) { iter_swap_(first, it); ++first; }
+    return first;
+}
+
+template <class I, class P>
+constexpr I partition_point(I first, I last, P pred)
+{
+    auto n = distance(first, last);
+    while (n > 0) {
+        auto half = n / 2;
+        I mid = next(first, half);
+        if (pred(*mid)) { first = next(mid); n -= half + 1; }
+        else n = half;
+    }
+    return first;
+}
+
+/* ---- binary search ------------------------------------------------------
+ * Every one of these needs the range PARTITIONED with respect to the
+ * comparison, which a sorted range is. Handing them a different
+ * comparator than the range was sorted with is not an error anyone can
+ * detect -- it is simply a wrong answer. */
+template <class I, class T, class C>
+constexpr I lower_bound(I first, I last, const T &v, C cmp)
+{
+    auto n = distance(first, last);
+    while (n > 0) {
+        auto half = n / 2;
+        I mid = next(first, half);
+        if (cmp(*mid, v)) { first = next(mid); n -= half + 1; }
+        else n = half;
+    }
+    return first;
+}
+template <class I, class T>
+constexpr I lower_bound(I first, I last, const T &v)
+{ return lower_bound(first, last, v, less<>{}); }
+
+template <class I, class T, class C>
+constexpr I upper_bound(I first, I last, const T &v, C cmp)
+{
+    auto n = distance(first, last);
+    while (n > 0) {
+        auto half = n / 2;
+        I mid = next(first, half);
+        if (cmp(v, *mid)) n = half;
+        else { first = next(mid); n -= half + 1; }
+    }
+    return first;
+}
+template <class I, class T>
+constexpr I upper_bound(I first, I last, const T &v)
+{ return upper_bound(first, last, v, less<>{}); }
+
+template <class I, class T, class C>
+constexpr pair<I, I> equal_range(I first, I last, const T &v, C cmp)
+{ return {lower_bound(first, last, v, cmp), upper_bound(first, last, v, cmp)}; }
+template <class I, class T>
+constexpr pair<I, I> equal_range(I first, I last, const T &v)
+{ return equal_range(first, last, v, less<>{}); }
+
+/* Two comparisons, not one: `!(v < *it) && !(*it < v)` is equivalence
+ * under the comparator, which is what a sorted range guarantees --
+ * equality is not, and for a comparator that ignores some fields the two
+ * differ. */
+template <class I, class T, class C>
+constexpr bool binary_search(I first, I last, const T &v, C cmp)
+{
+    I it = lower_bound(first, last, v, cmp);
+    return it != last && !cmp(v, *it);
+}
+template <class I, class T>
+constexpr bool binary_search(I first, I last, const T &v)
+{ return binary_search(first, last, v, less<>{}); }
+
+/* ---- heaps --------------------------------------------------------------
+ * A max-heap in an array: the children of i are 2i+1 and 2i+2. This is
+ * what makes sort's worst-case fallback possible without extra storage.
+ */
+template <class I, class C>
+constexpr void __sift_down(I first, iter_difference_t<I> n,
+                           iter_difference_t<I> i, C cmp)
+{
+    for (;;) {
+        auto l = 2 * i + 1, r = l + 1, big = i;
+        if (l < n && cmp(first[big], first[l])) big = l;
+        if (r < n && cmp(first[big], first[r])) big = r;
+        if (big == i) return;
+        iter_swap_(first + i, first + big);
+        i = big;
+    }
+}
+
+template <class I, class C>
+constexpr void make_heap(I first, I last, C cmp)
+{
+    auto n = last - first;
+    for (auto i = n / 2; i-- > 0; )
+        __sift_down(first, n, i, cmp);
+}
+template <class I>
+constexpr void make_heap(I first, I last) { make_heap(first, last, less<>{}); }
+
+template <class I, class C>
+constexpr void push_heap(I first, I last, C cmp)
+{
+    auto i = (last - first) - 1;
+    while (i > 0) {
+        auto parent = (i - 1) / 2;
+        if (!cmp(first[parent], first[i])) break;
+        iter_swap_(first + parent, first + i);
+        i = parent;
+    }
+}
+template <class I>
+constexpr void push_heap(I first, I last) { push_heap(first, last, less<>{}); }
+
+template <class I, class C>
+constexpr void pop_heap(I first, I last, C cmp)
+{
+    if (last - first < 2) return;
+    iter_swap_(first, last - 1);
+    __sift_down(first, (last - first) - 1, 0, cmp);
+}
+template <class I>
+constexpr void pop_heap(I first, I last) { pop_heap(first, last, less<>{}); }
+
+template <class I, class C>
+constexpr void sort_heap(I first, I last, C cmp)
+{ for (; last - first > 1; --last) pop_heap(first, last, cmp); }
+template <class I>
+constexpr void sort_heap(I first, I last) { sort_heap(first, last, less<>{}); }
+
+template <class I, class C>
+constexpr bool is_heap(I first, I last, C cmp)
+{
+    auto n = last - first;
+    for (decltype(n) i = 1; i < n; i++)
+        if (cmp(first[(i - 1) / 2], first[i])) return false;
+    return true;
+}
+template <class I>
+constexpr bool is_heap(I first, I last) { return is_heap(first, last, less<>{}); }
+
+/* ---- sorting ------------------------------------------------------------- */
+
+template <class I, class C>
+constexpr bool is_sorted(I first, I last, C cmp)
+{
+    if (first == last) return true;
+    for (I next = std::next(first); next != last; ++first, ++next)
+        if (cmp(*next, *first)) return false;
+    return true;
+}
+template <class I>
+constexpr bool is_sorted(I first, I last) { return is_sorted(first, last, less<>{}); }
+
+template <class I, class C>
+constexpr void __insertion_sort(I first, I last, C cmp)
+{
+    for (I it = first; it != last; ++it)
+        for (I j = it; j != first && cmp(*j, j[-1]); --j)
+            iter_swap_(j, j - 1);
+}
+
+/* Median of three, so that an already-sorted range -- the input a naive
+ * "take the first element" pivot turns quadratic -- picks the middle. */
+template <class I, class C>
+constexpr I __median3(I a, I b, I c, C cmp)
+{
+    if (cmp(*a, *b)) {
+        if (cmp(*b, *c)) return b;
+        return cmp(*a, *c) ? c : a;
+    }
+    if (cmp(*a, *c)) return a;
+    return cmp(*b, *c) ? c : b;
+}
+
+template <class I, class C>
+constexpr void __introsort(I first, I last, int depth, C cmp)
+{
+    for (;;) {
+        auto n = last - first;
+        if (n < 16) { __insertion_sort(first, last, cmp); return; }
+        if (depth == 0) {
+            /* The guarantee: quicksort has degenerated, so finish in
+             * heapsort's worst-case O(n log n) rather than quicksort's
+             * O(n^2). */
+            make_heap(first, last, cmp);
+            sort_heap(first, last, cmp);
+            return;
+        }
+        --depth;
+        I m = __median3(first, first + n / 2, last - 1, cmp);
+        auto pivot = *m;
+        /* Hoare-style: both ends walk inward. The pivot is held BY VALUE
+         * because the element it names moves during the partition. */
+        I lo = first, hi = last - 1;
+        for (;;) {
+            while (cmp(*lo, pivot)) ++lo;
+            while (cmp(pivot, *hi)) --hi;
+            if (lo >= hi) break;
+            iter_swap_(lo, hi);
+            ++lo; --hi;
+        }
+        /* Recurse on the SMALLER side and loop on the larger, so the
+         * stack depth stays O(log n) whatever the input. */
+        if (hi + 1 - first < last - (hi + 1)) {
+            __introsort(first, hi + 1, depth, cmp);
+            first = hi + 1;
+        } else {
+            __introsort(hi + 1, last, depth, cmp);
+            last = hi + 1;
+        }
+    }
+}
+
+template <class I, class C>
+constexpr void sort(I first, I last, C cmp)
+{
+    auto n = last - first;
+    if (n < 2) return;
+    int depth = 0;
+    for (auto k = n; k > 0; k >>= 1)
+        depth++;
+    __introsort(first, last, 2 * depth, cmp);
+}
+template <class I>
+constexpr void sort(I first, I last) { sort(first, last, less<>{}); }
+
+template <class I, class J, class O, class C>
+constexpr O merge(I f1, I l1, J f2, J l2, O out, C cmp)
+{
+    for (; f1 != l1 && f2 != l2; ++out) {
+        /* `cmp(*f2, *f1)` and not `cmp(*f1, *f2)`: on a tie the FIRST
+         * range's element goes first, which is what makes a merge sort
+         * built on this stable. */
+        if (cmp(*f2, *f1)) { *out = *f2; ++f2; }
+        else { *out = *f1; ++f1; }
+    }
+    out = copy(f1, l1, out);
+    return copy(f2, l2, out);
+}
+template <class I, class J, class O>
+constexpr O merge(I f1, I l1, J f2, J l2, O out)
+{ return merge(f1, l1, f2, l2, out, less<>{}); }
+
+/* An in-place stable sort, by insertion. O(n^2) where the standard asks
+ * for O(n log^2 n) without extra memory -- honest about it rather than
+ * quietly calling sort() and losing stability, which is the one property
+ * a caller chose this function for. */
+template <class I, class C>
+constexpr void stable_sort(I first, I last, C cmp)
+{ __insertion_sort(first, last, cmp); }
+template <class I>
+constexpr void stable_sort(I first, I last)
+{ stable_sort(first, last, less<>{}); }
+
+template <class I, class C>
+constexpr void partial_sort(I first, I mid, I last, C cmp)
+{
+    if (mid == first) return;
+    make_heap(first, mid, cmp);
+    for (I it = mid; it != last; ++it)
+        if (cmp(*it, *first)) {
+            iter_swap_(first, it);
+            __sift_down(first, mid - first, 0, cmp);
+        }
+    sort_heap(first, mid, cmp);
+}
+template <class I>
+constexpr void partial_sort(I first, I mid, I last)
+{ partial_sort(first, mid, last, less<>{}); }
+
+template <class I, class C>
+constexpr void nth_element(I first, I nth, I last, C cmp)
+{
+    if (nth == last) return;
+    sort(first, last, cmp);        /* stronger than required, and correct */
+}
+template <class I>
+constexpr void nth_element(I first, I nth, I last)
+{ nth_element(first, nth, last, less<>{}); }
+
+/* ---- set operations on sorted ranges ------------------------------------- */
+
+template <class I, class J, class C>
+constexpr bool includes(I f1, I l1, J f2, J l2, C cmp)
+{
+    for (; f2 != l2; ++f1) {
+        if (f1 == l1 || cmp(*f2, *f1)) return false;
+        if (!cmp(*f1, *f2)) ++f2;
+    }
+    return true;
+}
+template <class I, class J>
+constexpr bool includes(I f1, I l1, J f2, J l2)
+{ return includes(f1, l1, f2, l2, less<>{}); }
+
+template <class I, class J, class O, class C>
+constexpr O set_union(I f1, I l1, J f2, J l2, O out, C cmp)
+{
+    for (; f1 != l1 && f2 != l2; ++out) {
+        if (cmp(*f1, *f2)) { *out = *f1; ++f1; }
+        else if (cmp(*f2, *f1)) { *out = *f2; ++f2; }
+        else { *out = *f1; ++f1; ++f2; }
+    }
+    out = copy(f1, l1, out);
+    return copy(f2, l2, out);
+}
+template <class I, class J, class O>
+constexpr O set_union(I f1, I l1, J f2, J l2, O out)
+{ return set_union(f1, l1, f2, l2, out, less<>{}); }
+
+template <class I, class J, class O, class C>
+constexpr O set_intersection(I f1, I l1, J f2, J l2, O out, C cmp)
+{
+    while (f1 != l1 && f2 != l2) {
+        if (cmp(*f1, *f2)) ++f1;
+        else if (cmp(*f2, *f1)) ++f2;
+        else { *out = *f1; ++out; ++f1; ++f2; }
+    }
+    return out;
+}
+template <class I, class J, class O>
+constexpr O set_intersection(I f1, I l1, J f2, J l2, O out)
+{ return set_intersection(f1, l1, f2, l2, out, less<>{}); }
+
+template <class I, class J, class O, class C>
+constexpr O set_difference(I f1, I l1, J f2, J l2, O out, C cmp)
+{
+    while (f1 != l1) {
+        if (f2 == l2) return copy(f1, l1, out);
+        if (cmp(*f1, *f2)) { *out = *f1; ++out; ++f1; }
+        else if (cmp(*f2, *f1)) ++f2;
+        else { ++f1; ++f2; }
+    }
+    return out;
+}
+template <class I, class J, class O>
+constexpr O set_difference(I f1, I l1, J f2, J l2, O out)
+{ return set_difference(f1, l1, f2, l2, out, less<>{}); }
+
+}  // namespace std
+
+#endif

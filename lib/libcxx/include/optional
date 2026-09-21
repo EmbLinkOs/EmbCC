@@ -1,0 +1,220 @@
+/* <optional> — C++ [optional].
+ *
+ * A T or nothing, with the T stored INSIDE the optional rather than
+ * behind a pointer -- no allocation, and the whole point. That means the
+ * storage must exist whether or not the value does, so it is raw bytes
+ * plus a flag, and every operation is responsible for constructing and
+ * destroying the T by hand.
+ *
+ * The consequence to keep in view: `*o` on a disengaged optional is
+ * undefined, and `value()` is the checked one. That asymmetry is
+ * deliberate and matches every other container here -- a checked
+ * dereference would make the type cost something in the case it exists
+ * to make free.
+ */
+#ifndef _LIBCXX_OPTIONAL
+#define _LIBCXX_OPTIONAL
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <memory>
+#include <exception>
+#include <new>
+
+namespace std {
+
+struct nullopt_t { explicit constexpr nullopt_t(int) {} };
+inline constexpr nullopt_t nullopt{0};
+
+class bad_optional_access : public exception {
+public:
+    bad_optional_access() noexcept {}
+    ~bad_optional_access() noexcept override;
+    const char *what() const noexcept override;
+};
+
+template <class T>
+class optional {
+public:
+    using value_type = T;
+
+    constexpr optional() noexcept : __has(false) {}
+    constexpr optional(nullopt_t) noexcept : __has(false) {}
+
+    optional(const optional &o) : __has(o.__has)
+    { if (__has) construct_at(__ptr(), *o.__ptr()); }
+
+    /* Moving does NOT disengage the source: [optional.ctor] says it is
+     * left engaged with a moved-from value. A version that cleared the
+     * flag would silently change `if (o)` after a move, which is exactly
+     * the kind of difference nobody tests for. */
+    optional(optional &&o) noexcept(is_nothrow_move_constructible_v<T>)
+        : __has(o.__has)
+    { if (__has) construct_at(__ptr(), std::move(*o.__ptr())); }
+
+    template <class U = T,
+              class = enable_if_t<!is_same_v<decay_t<U>, optional> &&
+                                  !is_same_v<decay_t<U>, nullopt_t> &&
+                                  is_constructible_v<T, U>>>
+    constexpr optional(U &&v) : __has(true)
+    { construct_at(__ptr(), forward<U>(v)); }
+
+    template <class... A>
+    constexpr explicit optional(in_place_t, A &&...a) : __has(true)
+    { construct_at(__ptr(), forward<A>(a)...); }
+
+    ~optional() { reset(); }
+
+    optional &operator=(nullopt_t) noexcept { reset(); return *this; }
+
+    optional &operator=(const optional &o)
+    {
+        if (this == addressof(o))
+            return *this;
+        /* Assign when BOTH hold a value, construct when only the source
+         * does: assignment on a live object is what the caller's type
+         * expects, and constructing over one would skip its destructor. */
+        if (__has && o.__has) *__ptr() = *o.__ptr();
+        else if (o.__has) { construct_at(__ptr(), *o.__ptr()); __has = true; }
+        else reset();
+        return *this;
+    }
+
+    optional &operator=(optional &&o)
+        noexcept(is_nothrow_move_constructible_v<T> &&
+                 is_nothrow_move_assignable_v<T>)
+    {
+        if (this == addressof(o))
+            return *this;
+        if (__has && o.__has) *__ptr() = std::move(*o.__ptr());
+        else if (o.__has)
+        { construct_at(__ptr(), std::move(*o.__ptr())); __has = true; }
+        else reset();
+        return *this;
+    }
+
+    template <class U = T,
+              class = enable_if_t<!is_same_v<decay_t<U>, optional>>>
+    optional &operator=(U &&v)
+    {
+        if (__has) *__ptr() = forward<U>(v);
+        else { construct_at(__ptr(), forward<U>(v)); __has = true; }
+        return *this;
+    }
+
+    constexpr bool has_value() const noexcept { return __has; }
+    constexpr explicit operator bool() const noexcept { return __has; }
+
+    /* Unchecked: the whole point of the type is that it costs nothing
+     * when the value is there. value() is the checked one. */
+    constexpr T &operator*() & { return *__ptr(); }
+    constexpr const T &operator*() const & { return *__ptr(); }
+    constexpr T &&operator*() && { return std::move(*__ptr()); }
+    constexpr T *operator->() { return __ptr(); }
+    constexpr const T *operator->() const { return __ptr(); }
+
+    constexpr T &value() &
+    { if (!__has) __throw_bad_optional(); return *__ptr(); }
+    constexpr const T &value() const &
+    { if (!__has) __throw_bad_optional(); return *__ptr(); }
+    constexpr T &&value() &&
+    { if (!__has) __throw_bad_optional(); return std::move(*__ptr()); }
+
+    template <class U>
+    constexpr T value_or(U &&d) const &
+    { return __has ? *__ptr() : static_cast<T>(forward<U>(d)); }
+    template <class U>
+    constexpr T value_or(U &&d) &&
+    { return __has ? std::move(*__ptr()) : static_cast<T>(forward<U>(d)); }
+
+    template <class... A>
+    T &emplace(A &&...a)
+    {
+        reset();
+        construct_at(__ptr(), forward<A>(a)...);
+        __has = true;
+        return *__ptr();
+    }
+
+    void reset() noexcept
+    {
+        if (__has) { destroy_at(__ptr()); __has = false; }
+    }
+
+    void swap(optional &o)
+    {
+        if (__has && o.__has) { using std::swap; swap(*__ptr(), *o.__ptr()); }
+        else if (__has) { o.emplace(std::move(*__ptr())); reset(); }
+        else if (o.__has) { emplace(std::move(*o.__ptr())); o.reset(); }
+    }
+
+private:
+    /* Raw storage, aligned for T: the T is constructed into it only while
+     * the optional is engaged. */
+    alignas(T) unsigned char __buf[sizeof(T)];
+    bool __has;
+
+    T *__ptr() noexcept { return reinterpret_cast<T *>(__buf); }
+    const T *__ptr() const noexcept
+    { return reinterpret_cast<const T *>(__buf); }
+
+    [[noreturn]] static void __throw_bad_optional();
+};
+
+template <class T>
+void optional<T>::__throw_bad_optional() { throw bad_optional_access(); }
+
+template <class T>
+constexpr optional<decay_t<T>> make_optional(T &&v)
+{ return optional<decay_t<T>>(forward<T>(v)); }
+template <class T, class... A>
+constexpr optional<T> make_optional(A &&...a)
+{ return optional<T>(in_place, forward<A>(a)...); }
+
+template <class T>
+void swap(optional<T> &a, optional<T> &b) { a.swap(b); }
+
+/* A disengaged optional compares LESS than any value, and two disengaged
+ * ones are equal -- so a container of optionals sorts with the empties
+ * first, which is the only ordering that is consistent. */
+template <class T, class U>
+constexpr bool operator==(const optional<T> &a, const optional<U> &b)
+{
+    if (a.has_value() != b.has_value()) return false;
+    return !a.has_value() || *a == *b;
+}
+template <class T, class U>
+constexpr bool operator!=(const optional<T> &a, const optional<U> &b)
+{ return !(a == b); }
+template <class T, class U>
+constexpr bool operator<(const optional<T> &a, const optional<U> &b)
+{
+    if (!b.has_value()) return false;
+    if (!a.has_value()) return true;
+    return *a < *b;
+}
+template <class T, class U>
+constexpr bool operator>(const optional<T> &a, const optional<U> &b)
+{ return b < a; }
+
+template <class T>
+constexpr bool operator==(const optional<T> &a, nullopt_t) noexcept
+{ return !a.has_value(); }
+template <class T>
+constexpr bool operator==(nullopt_t, const optional<T> &a) noexcept
+{ return !a.has_value(); }
+template <class T>
+constexpr bool operator!=(const optional<T> &a, nullopt_t) noexcept
+{ return a.has_value(); }
+
+template <class T, class U>
+constexpr bool operator==(const optional<T> &a, const U &v)
+{ return a.has_value() && *a == v; }
+template <class T, class U>
+constexpr bool operator==(const U &v, const optional<T> &a)
+{ return a.has_value() && *a == v; }
+
+}  // namespace std
+
+#endif

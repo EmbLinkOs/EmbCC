@@ -1,0 +1,458 @@
+/* <charconv> — C++ [charconv].
+ *
+ * Number to text and back, with none of the baggage. It is the answer
+ * to a question that had four bad answers before it:
+ *
+ *   sprintf       allocates nothing but consults the locale, so the
+ *                 decimal separator can be a comma and the output is
+ *                 not the same on every machine.
+ *   stringstream  allocates, consults the locale, and costs a stream.
+ *   strtol        sets errno, and distinguishing "no digits" from
+ *                 "converted zero" means clearing errno first and
+ *                 comparing pointers after.
+ *   stoi          allocates a std::string to parse from, and throws.
+ *
+ * These allocate nothing, throw nothing, consult no locale, and report
+ * failure in the return value. That is the whole design, and it is why
+ * they are the right thing in a parser, a serializer, or anywhere a
+ * hot loop turns numbers into bytes.
+ *
+ * ---- the return values -----------------------------------------------
+ *
+ * `to_chars_result` is {ptr, ec}. On success `ec` is zero and `ptr` is
+ * ONE PAST the last character written -- not a NUL terminator, because
+ * nothing is terminated. On failure `ec` is `value_too_large` and `ptr`
+ * is the END of the buffer, so a caller can retry with a bigger one.
+ *
+ * `from_chars_result` is {ptr, ec}. `ptr` is where parsing STOPPED,
+ * which is how a caller continues from there without searching. Two
+ * failures are distinguished and the distinction matters:
+ * `invalid_argument` means nothing was parsed at all and `ptr` is the
+ * start; `result_out_of_range` means the digits were valid and the
+ * value does not fit, and `ptr` is past them.
+ *
+ * ---- what is NOT here -------------------------------------------------
+ *
+ * The floating-point `to_chars` with no precision -- the shortest form
+ * that round-trips. That needs a Ryu- or Grisu-style algorithm; this
+ * uses printf's exact conversion (see docs/language/libc.md), which
+ * gives correctly rounded digits at a precision you ASK for and cannot
+ * find the shortest one for you. The fixed/scientific/general forms
+ * with an explicit precision are here and are exact.
+ * `__cpp_lib_to_chars` is therefore not defined in <version>.
+ */
+#ifndef _LIBCXX_CHARCONV
+#define _LIBCXX_CHARCONV
+
+#include <cerrno>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <system_error>
+#include <type_traits>
+
+namespace std {
+
+enum class chars_format {
+    scientific = 1,
+    fixed      = 2,
+    hex        = 4,
+    general    = fixed | scientific
+};
+
+constexpr chars_format operator|(chars_format a, chars_format b)
+{ return (chars_format)((int)a | (int)b); }
+constexpr chars_format operator&(chars_format a, chars_format b)
+{ return (chars_format)((int)a & (int)b); }
+
+struct to_chars_result {
+    char *ptr;
+    errc ec;
+    friend bool operator==(const to_chars_result &a,
+                           const to_chars_result &b) = default;
+};
+
+struct from_chars_result {
+    const char *ptr;
+    errc ec;
+    friend bool operator==(const from_chars_result &a,
+                           const from_chars_result &b) = default;
+};
+
+namespace __detail {
+
+inline int __digit_of(char c, int base)
+{
+    int d = c >= '0' && c <= '9' ? c - '0'
+          : c >= 'a' && c <= 'z' ? c - 'a' + 10
+          : c >= 'A' && c <= 'Z' ? c - 'A' + 10 : -1;
+    return d >= 0 && d < base ? d : -1;
+}
+
+/* Digits least significant first, then reversed in place. Writing them
+ * forward would need the length first, which means counting them
+ * twice. */
+inline int __digits(unsigned long long v, int base, char *out)
+{
+    int n = 0;
+    if (!v)
+        out[n++] = '0';
+    while (v) {
+        int d = (int)(v % (unsigned)base);
+        out[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+        v /= (unsigned)base;
+    }
+    for (int i = 0; i < n / 2; i++) {
+        char t = out[i];
+        out[i] = out[n - 1 - i];
+        out[n - 1 - i] = t;
+    }
+    return n;
+}
+
+}  // namespace __detail
+
+/* ---- to_chars, integers ---------------------------------------------- */
+
+template <class T>
+enable_if_t<is_integral_v<T> && !is_same_v<T, bool>, to_chars_result>
+to_chars(char *first, char *last, T value, int base = 10)
+{
+    if (base < 2 || base > 36)
+        return {last, errc::invalid_argument};
+
+    /* Negate in the UNSIGNED domain: -LLONG_MIN does not exist, and
+     * computing it is undefined rather than large. Only base 10 gets a
+     * sign at all -- the other bases print the VALUE, as the standard
+     * says, so to_chars(-1, 16) is "ffffffff" and not "-1". */
+    bool neg = false;
+    unsigned long long u;
+    if constexpr (is_signed_v<T>) {
+        if (value < 0 && base == 10) {
+            neg = true;
+            u = 0ULL - (unsigned long long)value;
+        } else {
+            u = (unsigned long long)(make_unsigned_t<T>)value;
+        }
+    } else {
+        u = (unsigned long long)value;
+    }
+
+    char buf[72];
+    int n = __detail::__digits(u, base, buf);
+    ptrdiff_t need = n + (neg ? 1 : 0);
+    /* Nothing is written when it does not fit: a partial number in the
+     * buffer would be a different number. */
+    if (last - first < need)
+        return {last, errc::value_too_large};
+    if (neg)
+        *first++ = '-';
+    memcpy(first, buf, (size_t)n);
+    return {first + n, errc()};
+}
+
+/* bool is excluded above and given its own overload, because
+ * to_chars(true) writing "true" would be a locale-ish decision and
+ * writing 1 is the only one the standard allows. */
+inline to_chars_result to_chars(char *first, char *last, bool value,
+                                int base = 10)
+{ return to_chars(first, last, (unsigned char)(value ? 1 : 0), base); }
+
+/* ---- from_chars, integers --------------------------------------------- */
+
+template <class T>
+enable_if_t<is_integral_v<T> && !is_same_v<T, bool>, from_chars_result>
+from_chars(const char *first, const char *last, T &value, int base = 10)
+{
+    if (base < 2 || base > 36)
+        return {first, errc::invalid_argument};
+
+    const char *p = first;
+    /* NO leading whitespace is skipped and NO '+' is accepted. strtol
+     * does both and from_chars deliberately does neither: a parser that
+     * silently swallows spaces cannot tell " 1" from "1", and one that
+     * accepts '+' disagrees with the format it was told to read. */
+    bool neg = false;
+    if constexpr (is_signed_v<T>) {
+        if (p != last && *p == '-') {
+            neg = true;
+            p++;
+        }
+    }
+
+    const char *digits = p;
+    unsigned long long acc = 0;
+    bool overflow = false;
+
+    /* The limit is computed from the TYPE, not from the accumulator:
+     * the most negative value of a signed type is one further from zero
+     * than the most positive, and rejecting it would make INT_MIN
+     * unparseable.
+     *
+     * Written as a CAST of -1 rather than `~(U)0`, because `~` promotes
+     * a narrow unsigned type to int first: `~(unsigned char)0` is the
+     * int -1, not 255, and dividing it by two gives zero. The limit for
+     * every narrow type was therefore zero, which made the overflow
+     * test compare against an enormous wrapped value and never fire --
+     * `from_chars("128", c)` for a signed char silently produced -128. */
+    constexpr unsigned long long __umax =
+        (unsigned long long)(make_unsigned_t<T>)-1;
+    unsigned long long limit;
+    if constexpr (is_signed_v<T>)
+        limit = neg ? __umax / 2 + 1 : __umax / 2;
+    else
+        limit = __umax;
+
+    for (; p != last; p++) {
+        int d = __detail::__digit_of(*p, base);
+        if (d < 0)
+            break;
+        if (!overflow) {
+            if (acc > (limit - (unsigned)d) / (unsigned)base)
+                overflow = true;
+            else
+                acc = acc * (unsigned)base + (unsigned)d;
+        }
+    }
+
+    if (p == digits)
+        return {first, errc::invalid_argument};   /* nothing parsed */
+    if (overflow)
+        /* The digits WERE valid, so ptr is past them: the caller can
+         * carry on reading the rest of its input even though this
+         * number did not fit. */
+        return {p, errc::result_out_of_range};
+
+    if constexpr (is_signed_v<T>)
+        value = neg ? (T)(0ULL - acc) : (T)acc;
+    else
+        value = (T)acc;
+    return {p, errc()};
+}
+
+inline from_chars_result from_chars(const char *first, const char *last,
+                                    bool &value, int base = 10)
+{
+    unsigned char u = 0;
+    from_chars_result r = from_chars(first, last, u, base);
+    if (r.ec == errc())
+        value = u != 0;
+    return r;
+}
+
+/* ---- to_chars, floating point ------------------------------------------
+ *
+ * Through snprintf, which is this project's own and is EXACTLY rounded
+ * (docs/language/libc.md). Borrowing it rather than writing a second
+ * decimal conversion is deliberate: a second copy of that arithmetic is
+ * a second thing to get wrong, and the digits would have to be the
+ * same anyway.
+ *
+ * snprintf writes a NUL and to_chars must not, so the conversion goes
+ * through a local buffer and is copied. The buffer is sized for the
+ * widest a double can be -- 1080 characters for %f of the smallest
+ * subnormal -- so nothing is truncated on the way.
+ */
+namespace __detail {
+
+inline to_chars_result __fp_chars(char *first, char *last, long double v,
+                                  char conv, int precision, bool have_prec,
+                                  bool is_long)
+{
+    char fmt[16];
+    int f = 0;
+    fmt[f++] = '%';
+    if (have_prec) {
+        fmt[f++] = '.';
+        fmt[f++] = '*';
+    }
+    if (is_long)
+        fmt[f++] = 'L';
+    fmt[f++] = conv;
+    fmt[f] = 0;
+
+    char buf[1200];
+    int n = have_prec
+          ? (is_long ? snprintf(buf, sizeof buf, fmt, precision, v)
+                     : snprintf(buf, sizeof buf, fmt, precision, (double)v))
+          : (is_long ? snprintf(buf, sizeof buf, fmt, v)
+                     : snprintf(buf, sizeof buf, fmt, (double)v));
+    if (n < 0 || n >= (int)sizeof buf)
+        return {last, errc::value_too_large};
+    if (last - first < n)
+        return {last, errc::value_too_large};
+    memcpy(first, buf, (size_t)n);
+    return {first + n, errc()};
+}
+
+inline char __conv_of(chars_format fmt, bool upper)
+{
+    if ((int)(fmt & chars_format::hex))
+        return upper ? 'A' : 'a';
+    if (fmt == chars_format::fixed)
+        return upper ? 'F' : 'f';
+    if (fmt == chars_format::scientific)
+        return upper ? 'E' : 'e';
+    return upper ? 'G' : 'g';
+}
+
+}  // namespace __detail
+
+inline to_chars_result to_chars(char *first, char *last, double value,
+                                chars_format fmt, int precision)
+{
+    return __detail::__fp_chars(first, last, (long double)value,
+                                __detail::__conv_of(fmt, false), precision,
+                                true, false);
+}
+
+inline to_chars_result to_chars(char *first, char *last, float value,
+                                chars_format fmt, int precision)
+{
+    return __detail::__fp_chars(first, last, (long double)value,
+                                __detail::__conv_of(fmt, false), precision,
+                                true, false);
+}
+
+inline to_chars_result to_chars(char *first, char *last, long double value,
+                                chars_format fmt, int precision)
+{
+    return __detail::__fp_chars(first, last, value,
+                                __detail::__conv_of(fmt, false), precision,
+                                true, true);
+}
+
+/* Without a precision the standard asks for the SHORTEST form that
+ * round-trips, which needs a Ryu- or Grisu-style algorithm. This gives
+ * seventeen significant digits through %g, which always round-trips a
+ * double and is usually a character or two longer than the shortest.
+ * Saying so is better than claiming the guarantee. */
+inline to_chars_result to_chars(char *first, char *last, double value,
+                                chars_format fmt)
+{
+    if ((int)(fmt & chars_format::hex))
+        return __detail::__fp_chars(first, last, (long double)value, 'a', 0,
+                                    false, false);
+    return __detail::__fp_chars(first, last, (long double)value,
+                                __detail::__conv_of(fmt, false), 17, true,
+                                false);
+}
+
+inline to_chars_result to_chars(char *first, char *last, double value)
+{ return to_chars(first, last, value, chars_format::general); }
+
+inline to_chars_result to_chars(char *first, char *last, float value)
+{ return to_chars(first, last, (double)value, chars_format::general); }
+
+inline to_chars_result to_chars(char *first, char *last, long double value)
+{
+    return __detail::__fp_chars(first, last, value, 'g', 21, true, true);
+}
+
+/* ---- from_chars, floating point ----------------------------------------
+ *
+ * Through strtod, which is this project's own, with the same reasoning
+ * as above. Two differences from strtod are enforced here rather than
+ * inherited, because from_chars promises them:
+ *
+ *   no leading whitespace and no '+', as for the integers;
+ *   `hex` means the input has NO "0x" prefix -- the caller said it is
+ *   hexadecimal, so the prefix would be redundant, and strtod requires
+ *   one. The prefix is supplied on the way in.
+ */
+namespace __detail {
+
+inline from_chars_result __fp_parse(const char *first, const char *last,
+                                    long double *out, chars_format fmt,
+                                    int width)
+{
+    if (first == last)
+        return {first, errc::invalid_argument};
+    /* Whitespace and '+' are the caller's business, not ours. */
+    if (*first == ' ' || *first == '\t' || *first == '\n' || *first == '+')
+        return {first, errc::invalid_argument};
+
+    char buf[512];
+    size_t n = 0;
+    bool hex = (int)(fmt & chars_format::hex) != 0;
+    if (hex) {
+        buf[n++] = '0';
+        buf[n++] = 'x';
+    }
+    for (const char *p = first; p != last && n + 1 < sizeof buf; p++)
+        buf[n++] = *p;
+    buf[n] = 0;
+
+    char *end = nullptr;
+    errno = 0;
+    long double v = strtold(buf, &end);
+    size_t used = end ? (size_t)(end - buf) : 0;
+    if (hex) {
+        /* The prefix this function supplied does not count as input the
+         * caller gave. */
+        if (used < 2)
+            return {first, errc::invalid_argument};
+        used -= 2;
+    }
+    if (used == 0)
+        return {first, errc::invalid_argument};
+
+    /* `fixed` forbids an exponent: "1e5" read as fixed is the number 1
+     * followed by "e5", not 100000. The scan stops where the caller's
+     * format says it should. */
+    if (fmt == chars_format::fixed) {
+        for (size_t i = 0; i < used; i++)
+            if (buf[i] == 'e' || buf[i] == 'E') {
+                used = i;
+                buf[i] = 0;
+                errno = 0;
+                v = strtold(buf, &end);
+                break;
+            }
+    }
+    if (errno == ERANGE)
+        return {first + used, errc::result_out_of_range};
+    (void)width;
+    *out = v;
+    return {first + used, errc()};
+}
+
+}  // namespace __detail
+
+inline from_chars_result from_chars(const char *first, const char *last,
+                                    double &value,
+                                    chars_format fmt = chars_format::general)
+{
+    long double v = 0;
+    from_chars_result r = __detail::__fp_parse(first, last, &v, fmt, 8);
+    if (r.ec == errc())
+        value = (double)v;
+    return r;
+}
+
+inline from_chars_result from_chars(const char *first, const char *last,
+                                    float &value,
+                                    chars_format fmt = chars_format::general)
+{
+    long double v = 0;
+    from_chars_result r = __detail::__fp_parse(first, last, &v, fmt, 4);
+    if (r.ec == errc())
+        value = (float)v;
+    return r;
+}
+
+inline from_chars_result from_chars(const char *first, const char *last,
+                                    long double &value,
+                                    chars_format fmt = chars_format::general)
+{
+    long double v = 0;
+    from_chars_result r = __detail::__fp_parse(first, last, &v, fmt, 16);
+    if (r.ec == errc())
+        value = v;
+    return r;
+}
+
+}  // namespace std
+
+#endif

@@ -7,9 +7,17 @@
 #include <string.h>
 
 #include "../driver/util.h"
+#include "../arch/target.h"
 
 void lex_init(struct lexer *lx, const char *file, const char *src)
 {
+    lex_init_mode(lx, file, src, 0);
+}
+
+void lex_init_mode(struct lexer *lx, const char *file, const char *src,
+                   int cxx)
+{
+    lx->cxx = cxx;
     lx->file = file;
     lx->src = src;
     lx->p = src;
@@ -22,7 +30,7 @@ static void skip_space_and_comments(struct lexer *lx)
 {
     for (;;) {
         while (*lx->p == ' ' || *lx->p == '\t' || *lx->p == '\r' ||
-               *lx->p == '\n') {
+               *lx->p == '\n' || *lx->p == '\f' || *lx->p == '\v') {
             if (*lx->p == '\n') {
                 lx->line++;
                 lx->line_start = lx->p + 1;
@@ -53,6 +61,43 @@ static void skip_space_and_comments(struct lexer *lx)
     }
 }
 
+/* C++'s additional keywords (lexer.cxx). `restrict` and `typeof` are not
+ * among them; the GNU `__restrict`/`__typeof__` spellings still are. */
+static const struct {
+    const char *word;
+    enum tok_kind kind;
+} cxx_keywords[] = {
+    { "class", TOK_CX_CLASS }, { "namespace", TOK_CX_NAMESPACE },
+    { "using", TOK_CX_USING }, { "template", TOK_CX_TEMPLATE },
+    { "typename", TOK_CX_TYPENAME }, { "public", TOK_CX_PUBLIC },
+    { "private", TOK_CX_PRIVATE }, { "protected", TOK_CX_PROTECTED },
+    { "virtual", TOK_CX_VIRTUAL }, { "friend", TOK_CX_FRIEND },
+    { "operator", TOK_CX_OPERATOR }, { "new", TOK_CX_NEW },
+    { "delete", TOK_CX_DELETE }, { "this", TOK_CX_THIS },
+    { "true", TOK_CX_TRUE }, { "false", TOK_CX_FALSE },
+    { "nullptr", TOK_CX_NULLPTR }, { "bool", TOK_CX_BOOL },
+    { "explicit", TOK_CX_EXPLICIT }, { "mutable", TOK_CX_MUTABLE },
+    { "constexpr", TOK_CX_CONSTEXPR }, { "consteval", TOK_CX_CONSTEVAL },
+    { "constinit", TOK_CX_CONSTINIT }, { "__constinit", TOK_CX_CONSTINIT },
+    { "decltype", TOK_CX_DECLTYPE },
+    { "__decltype", TOK_CX_DECLTYPE }, { "auto", TOK_CX_AUTO },
+    { "noexcept", TOK_CX_NOEXCEPT }, { "throw", TOK_CX_THROW },
+    { "try", TOK_CX_TRY }, { "catch", TOK_CX_CATCH },
+    { "typeid", TOK_CX_TYPEID }, { "static_cast", TOK_CX_STATIC_CAST },
+    { "dynamic_cast", TOK_CX_DYNAMIC_CAST },
+    { "const_cast", TOK_CX_CONST_CAST },
+    { "reinterpret_cast", TOK_CX_REINTERPRET_CAST },
+    { "wchar_t", TOK_CX_WCHAR_T }, { "char8_t", TOK_CX_CHAR8_T },
+    { "char16_t", TOK_CX_CHAR16_T }, { "char32_t", TOK_CX_CHAR32_T },
+    { "concept", TOK_CX_CONCEPT }, { "requires", TOK_CX_REQUIRES },
+    { "co_await", TOK_CX_CO_AWAIT }, { "co_yield", TOK_CX_CO_YIELD },
+    { "co_return", TOK_CX_CO_RETURN }, { "export", TOK_CX_EXPORT },
+    { "thread_local", TOK_CX_THREAD_LOCAL }, { "register", TOK_CX_REGISTER },
+    { "static_assert", TOK_KW_STATIC_ASSERT }, { "alignof", TOK_KW_ALIGNOF },
+    { "alignas", TOK_KW_ALIGNAS }, { "__restrict", TOK_KW_RESTRICT },
+    { "__restrict__", TOK_KW_RESTRICT },
+};
+
 static const struct {
     const char *word;
     enum tok_kind kind;
@@ -61,15 +106,24 @@ static const struct {
     { "char", TOK_KW_CHAR },
     { "short", TOK_KW_SHORT },
     { "long", TOK_KW_LONG },
+    { "__int128", TOK_KW_INT128 },
     { "float", TOK_KW_FLOAT },
     { "double", TOK_KW_DOUBLE },
     { "_Bool", TOK_KW_BOOL },
+    { "_Complex", TOK_KW_COMPLEX },
+    { "__complex__", TOK_KW_COMPLEX },
+    { "__complex", TOK_KW_COMPLEX },
+    { "__real__", TOK_KW_REAL },
+    { "__real", TOK_KW_REAL },
+    { "__imag__", TOK_KW_IMAG },
+    { "__imag", TOK_KW_IMAG },
     { "_Static_assert", TOK_KW_STATIC_ASSERT },
     { "_Generic", TOK_KW_GENERIC },
     { "_Alignof", TOK_KW_ALIGNOF },
     { "__alignof__", TOK_KW_ALIGNOF },
     { "__alignof", TOK_KW_ALIGNOF },
     { "_Alignas", TOK_KW_ALIGNAS },
+    { "_Noreturn", TOK_KW_NORETURN },
     { "typeof", TOK_KW_TYPEOF },
     { "__typeof__", TOK_KW_TYPEOF },
     { "__typeof", TOK_KW_TYPEOF },
@@ -88,9 +142,11 @@ static const struct {
     { "const", TOK_KW_CONST },
     { "volatile", TOK_KW_VOLATILE },
     { "__volatile__", TOK_KW_VOLATILE },
+    { "__volatile", TOK_KW_VOLATILE },
     { "restrict", TOK_KW_RESTRICT },
     { "asm", TOK_KW_ASM },
     { "__asm__", TOK_KW_ASM },
+    { "__asm", TOK_KW_ASM },          /* (newlib's aarch64 fenv.h) */
     { "inline", TOK_KW_INLINE },
     { "__inline", TOK_KW_INLINE },
     { "__inline__", TOK_KW_INLINE },
@@ -117,51 +173,374 @@ static int hex_val(int c)
     return -1;
 }
 
-/* Consume one backslash escape. On entry lx->p is at the character AFTER the
- * '\'; on return it is past the escape. Returns the byte value (0..255).
- * The full C set: simple escapes, GNU '\e', hex '\xH...', and octal '\NNN'. */
-static int scan_escape(struct lexer *lx)
+/* ---- literal elements ------------------------------------------------ */
+
+static int hex_digits(const char **p, int want, unsigned long *out)
 {
-    int c = (unsigned char)*lx->p;
-    switch (c) {
-    case 'n': lx->p++; return '\n';
-    case 't': lx->p++; return '\t';
-    case 'r': lx->p++; return '\r';
-    case 'a': lx->p++; return '\a';
-    case 'b': lx->p++; return '\b';
-    case 'f': lx->p++; return '\f';
-    case 'v': lx->p++; return '\v';
-    case 'e': lx->p++; return 27;      /* GNU extension: ESC */
-    case '\\': lx->p++; return '\\';
-    case '\'': lx->p++; return '\'';
-    case '"': lx->p++; return '"';
-    case '?': lx->p++; return '?';
+    unsigned long v = 0;
+    for (int i = 0; i < want; i++) {
+        int d = hex_val((unsigned char)**p);
+        if (d < 0)
+            return 0;
+        v = v * 16 + (unsigned long)d;
+        (*p)++;
+    }
+    *out = v;
+    return 1;
+}
+
+/* The escape after a backslash (*p just past it). */
+static struct litch decode_escape(const char **p, const char *file, int line)
+{
+    struct litch c = { 0, 1 };
+    int ch = (unsigned char)**p;
+    switch (ch) {
+    case 'n': (*p)++; c.v = '\n'; return c;
+    case 't': (*p)++; c.v = '\t'; return c;
+    case 'r': (*p)++; c.v = '\r'; return c;
+    case 'a': (*p)++; c.v = '\a'; return c;
+    case 'b': (*p)++; c.v = '\b'; return c;
+    case 'f': (*p)++; c.v = '\f'; return c;
+    case 'v': (*p)++; c.v = '\v'; return c;
+    case 'e': (*p)++; c.v = 27; return c;      /* GNU extension: ESC */
+    case '\\': (*p)++; c.v = '\\'; return c;
+    case '\'': (*p)++; c.v = '\''; return c;
+    case '"': (*p)++; c.v = '"'; return c;
+    case '?': (*p)++; c.v = '?'; return c;
     case 'x': {
-        lx->p++;
-        if (hex_val((unsigned char)*lx->p) < 0)
-            diag_fatal(lx->file, lx->line, "\\x used with no following "
-                       "hex digits");
-        int v = 0, d;
-        while ((d = hex_val((unsigned char)*lx->p)) >= 0) {
-            v = v * 16 + d;
-            lx->p++;
+        (*p)++;
+        if (hex_val((unsigned char)**p) < 0)
+            diag_fatal(file, line, "\\x used with no following hex digits");
+        /* Every digit belongs to the escape, however many: the VALUE is
+         * kept whole here and narrowed (with gcc's warning) only once the
+         * literal's unit width is known. */
+        unsigned long v = 0;
+        int d, big = 0;
+        while ((d = hex_val((unsigned char)**p)) >= 0) {
+            if (v >> 60)
+                big = 1;
+            v = v * 16 + (unsigned long)d;
+            (*p)++;
         }
-        return v & 0xff;
+        c.v = big ? ~0UL : v;
+        return c;
+    }
+    case 'u':
+    case 'U': {
+        /* A universal character name: exactly 4 or 8 hex digits naming a
+         * code point, which is ENCODED at the literal's width. */
+        int want = ch == 'u' ? 4 : 8;
+        (*p)++;
+        unsigned long v;
+        if (!hex_digits(p, want, &v))
+            diag_fatal(file, line, "\\%c needs %d hex digits", ch, want);
+        if (v >= 0xD800 && v <= 0xDFFF)
+            diag_fatal(file, line, "\\%c%0*lX is not a valid universal character "
+                       "(a UTF-16 surrogate)", ch, want, v);
+        if (v > 0x10FFFF)
+            diag_fatal(file, line, "\\%c%0*lX is outside the UCS codespace",
+                       ch, want, v);
+        c.v = v;
+        c.raw = 0;
+        return c;
     }
     default:
-        if (c >= '0' && c <= '7') {     /* octal, at most three digits */
-            int v = 0, i = 0;
-            while (i < 3 && *lx->p >= '0' && *lx->p <= '7') {
-                v = v * 8 + (*lx->p - '0');
-                lx->p++;
-                i++;
+        if (ch >= '0' && ch <= '7') {     /* octal, at most three digits */
+            unsigned long v = 0;
+            for (int i = 0; i < 3 && **p >= '0' && **p <= '7'; i++) {
+                v = v * 8 + (unsigned long)(**p - '0');
+                (*p)++;
             }
-            return v & 0xff;
+            c.v = v;
+            return c;
         }
-        diag_fatal(lx->file, lx->line,
-                   "unknown escape '\\%c' in a literal", c);
-        return 0;
+        diag_fatal(file, line, "unknown escape '\\%c' in a literal", ch);
+        return c;
     }
+}
+
+/* A source character: a code point decoded from UTF-8, or — for a byte that
+ * does not start a valid UTF-8 sequence — that byte, raw. */
+static struct litch decode_source(const char **p)
+{
+    const unsigned char *s = (const unsigned char *)*p;
+    struct litch c = { s[0], 0 };
+    int len = s[0] < 0x80 ? 1 : (s[0] & 0xE0) == 0xC0 ? 2
+            : (s[0] & 0xF0) == 0xE0 ? 3 : (s[0] & 0xF8) == 0xF0 ? 4 : 0;
+    if (len == 1) {
+        (*p)++;
+        return c;
+    }
+    if (len > 1) {
+        unsigned long v = s[0] & (0x7FU >> len);
+        int i;
+        for (i = 1; i < len && (s[i] & 0xC0) == 0x80; i++)
+            v = (v << 6) | (s[i] & 0x3F);
+        static const unsigned long min[] = { 0, 0, 0x80, 0x800, 0x10000 };
+        if (i == len && v >= min[len] && v <= 0x10FFFF &&
+            !(v >= 0xD800 && v <= 0xDFFF)) {
+            *p += len;
+            c.v = v;
+            return c;
+        }
+    }
+    (*p)++;                     /* not UTF-8: keep the byte itself */
+    c.raw = 1;
+    return c;
+}
+
+struct litch lit_decode(const char **p, int esc, const char *file, int line)
+{
+    return esc ? decode_escape(p, file, line) : decode_source(p);
+}
+
+char *lit_encode(const struct litch *lc, int n, int width, long *nunits,
+                 const char *file, int line)
+{
+    /* Worst case: four UTF-8 bytes, or two UTF-16 units, per element. */
+    unsigned char *out = xcalloc((size_t)(4 * n + 1), (size_t)width);
+    long u = 0;
+    unsigned long max = width == 4 ? 0xFFFFFFFFUL
+                      : width == 2 ? 0xFFFFUL : 0xFFUL;
+#define PUT(val)                                                            \
+    do {                                                                    \
+        unsigned long pv_ = (val);                                          \
+        for (int b_ = 0; b_ < width; b_++)                                  \
+            out[(size_t)u * (size_t)width + (size_t)b_] =                   \
+                (unsigned char)(pv_ >> (8 * b_));                           \
+        u++;                                                                \
+    } while (0)
+    for (int i = 0; i < n; i++) {
+        unsigned long v = lc[i].v;
+        if (lc[i].raw) {
+            if (v > max)
+                fprintf(stderr, "embcc: %s:%d: warning: escape sequence out "
+                        "of range for a %d-byte element; truncated, as gcc "
+                        "does\n", file, line, width);
+            PUT(v & max);
+        } else if (width == 1) {
+            if (v < 0x80) {
+                PUT(v);
+            } else if (v < 0x800) {
+                PUT(0xC0 | (v >> 6)); PUT(0x80 | (v & 0x3F));
+            } else if (v < 0x10000) {
+                PUT(0xE0 | (v >> 12)); PUT(0x80 | ((v >> 6) & 0x3F));
+                PUT(0x80 | (v & 0x3F));
+            } else {
+                PUT(0xF0 | (v >> 18)); PUT(0x80 | ((v >> 12) & 0x3F));
+                PUT(0x80 | ((v >> 6) & 0x3F)); PUT(0x80 | (v & 0x3F));
+            }
+        } else if (width == 2 && v > 0xFFFF) {
+            v -= 0x10000;                         /* a surrogate pair */
+            PUT(0xD800 | (v >> 10));
+            PUT(0xDC00 | (v & 0x3FF));
+        } else {
+            PUT(v);
+        }
+    }
+    PUT(0);
+#undef PUT
+    *nunits = u;
+    return (char *)out;
+}
+
+long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
+                    int line)
+{
+    *uns = 0;
+    if (pfx == 0) {
+        /* One byte, read as the target's plain char. A character that is
+         * more than one byte in UTF-8 would be gcc's multi-character constant,
+         * whose value is implementation-defined; refused rather than guessed. */
+        if (!c.raw && c.v > 0x7F)
+            diag_fatal(file, line, "character U+%04lX does not fit in one "
+                       "byte; write it as a wide constant (L'...')", c.v);
+        if (c.v > 0xFF)
+            fprintf(stderr, "embcc: %s:%d: warning: escape sequence out of "
+                    "range for a character constant; truncated, as gcc "
+                    "does\n", file, line);
+        unsigned long b = c.v & 0xFF;
+        if (target_get() == TARGET_AARCH64)
+            return (long)b;                        /* char is unsigned */
+        return b > 0x7F ? (long)b - 0x100 : (long)b;
+    }
+    if (pfx == 'u') {
+        if (!c.raw && c.v > 0xFFFF)
+            diag_fatal(file, line, "U+%04lX needs two UTF-16 code units and "
+                       "cannot be one u'' constant", c.v);
+        if (c.v > 0xFFFF)
+            fprintf(stderr, "embcc: %s:%d: warning: escape sequence out of "
+                    "range for char16_t; truncated, as gcc does\n", file, line);
+        return (long)(c.v & 0xFFFF);          /* char16_t promotes to int */
+    }
+    if (c.v > 0xFFFFFFFFUL)
+        fprintf(stderr, "embcc: %s:%d: warning: escape sequence out of range "
+                "for a 32-bit character; truncated, as gcc does\n", file, line);
+    unsigned long v = c.v & 0xFFFFFFFFUL;
+    if (pfx == 'U' || target_get() == TARGET_AARCH64) {
+        *uns = 1;                    /* char32_t, or aarch64's unsigned wchar_t */
+        return (long)v;
+    }
+    return v > 0x7FFFFFFFUL ? (long)v - 0x100000000L : (long)v;  /* int wchar_t */
+}
+
+/* A standard integer or floating suffix (C++)? */
+static int std_suffix(const char *s, int is_float)
+{
+    if (!*s)
+        return 1;
+    if (is_float)
+        return (s[0] == 'f' || s[0] == 'F' || s[0] == 'l' || s[0] == 'L') &&
+               !s[1];
+    int u = 0, l = 0, z = 0;
+    for (; *s; s++) {
+        if ((*s == 'u' || *s == 'U') && !u)
+            u = 1;
+        else if ((*s == 'l' || *s == 'L') && !l && !z) {
+            l = 1;
+            if (s[1] == s[0])
+                s++, l = 2;
+        } else if ((*s == 'z' || *s == 'Z') && !z && !l)
+            z = 1;
+        else
+            return 0;
+    }
+    return 1;
+}
+
+/* C++ numbers (lex_next's): 1 if lexed here — one with a separator, a
+ * binary one, or one with a user-defined suffix; 0 leaves the plain C
+ * forms to the C paths. */
+static int cxx_number(struct lexer *lx, struct token *t)
+{
+    const char *p = lx->p, *q = p;
+    /* the pp-number (5.9) */
+    while (isalnum((unsigned char)*q) || *q == '_' || *q == '.' ||
+           (*q == '\'' && (isalnum((unsigned char)q[1]) || q[1] == '_')) ||
+           ((*q == '+' || *q == '-') &&
+            (q[-1] == 'e' || q[-1] == 'E' || q[-1] == 'p' || q[-1] == 'P') &&
+            !(p[0] == '0' && (p[1] == 'x' || p[1] == 'X') &&
+              (q[-1] == 'e' || q[-1] == 'E'))))
+        q++;
+    size_t n = (size_t)(q - p);
+    char *buf = xmalloc(n + 1);
+    size_t k = 0;
+    int seps = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (p[i] == '\'')
+            seps = 1;
+        else
+            buf[k++] = p[i];
+    }
+    buf[k] = 0;
+    int hex = buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X');
+    int bin = buf[0] == '0' && (buf[1] == 'b' || buf[1] == 'B');
+    /* where the digits end: the suffix after */
+    const char *d = buf;
+    int is_float = 0;
+    if (hex) {
+        d += 2;
+        while (isxdigit((unsigned char)*d) || *d == '.')
+            is_float |= *d++ == '.';
+        if (*d == 'p' || *d == 'P') {
+            is_float = 1;
+            d++;
+            if (*d == '+' || *d == '-')
+                d++;
+            while (isdigit((unsigned char)*d))
+                d++;
+        }
+    } else if (bin) {
+        d += 2;
+        while (*d == '0' || *d == '1')
+            d++;
+    } else {
+        while (isdigit((unsigned char)*d) || *d == '.')
+            is_float |= *d++ == '.';
+        if ((*d == 'e' || *d == 'E') &&
+            (isdigit((unsigned char)d[1]) ||
+             ((d[1] == '+' || d[1] == '-') && isdigit((unsigned char)d[2])))) {
+            is_float = 1;
+            d++;
+            if (*d == '+' || *d == '-')
+                d++;
+            while (isdigit((unsigned char)*d))
+                d++;
+        }
+    }
+    const char *suf = d;
+    int ud = !std_suffix(suf, is_float);
+    if (!ud && !seps && !bin && !strchr(suf, 'z') && !strchr(suf, 'Z')) {
+        free(buf);
+        return 0;                       /* the C paths read it (not C++23's
+                                         * z and uz: size_t's) */
+    }
+    size_t dl = (size_t)(suf - buf);
+    char *digits = xmalloc(dl + 1);
+    memcpy(digits, buf, dl);
+    digits[dl] = 0;
+    if (ud) {
+        if (*suf != '_')
+            ; /* reserved for the standard library (10ms, 1.5i): allowed */
+        t->ud_suffix = xstrndup(suf, strlen(suf));
+        t->ud_spelling = digits;
+    }
+    /* the value, from the digits and a standard suffix */
+    if (is_float) {
+        char *fend;
+        t->kind = TOK_FNUM;
+        t->fnum = strtod(digits, &fend);
+        t->fnum_is_float = !ud && (*suf == 'f' || *suf == 'F');
+        t->fnum_is_ld = !ud && (*suf == 'l' || *suf == 'L');
+        t->fnum_is_imag = 0;
+        if (t->fnum_is_ld || ud)
+            t->text = digits;
+    } else {
+        unsigned long v = bin ? strtoul(digits + 2, NULL, 2)
+                              : strtoul(digits, NULL, 0);
+        int has_u = 0, has_l = 0;
+        t->num_llong = 0;
+        t->char_lit = 0;
+        if (!ud)
+            for (const char *s = suf; *s; s++) {
+                if (*s == 'u' || *s == 'U')
+                    has_u = 1;
+                else if (*s == 'l' || *s == 'L') {
+                    if (has_l)
+                        t->num_llong = 1;
+                    has_l = 1;
+                } else if (*s == 'z' || *s == 'Z')
+                    has_l = 1;          /* size_t's width */
+            }
+        t->kind = TOK_NUM;
+        t->num = (long)v;
+        t->num_long = has_l || v > (unsigned long)INT_MAX;
+        t->num_uns = has_u;
+        if ((hex || bin) && !has_u) {
+            if (v > (unsigned long)INT_MAX && v <= 0xffffffffUL) {
+                t->num_uns = 1;
+                t->num_long = has_l;
+            } else if (v > (unsigned long)LONG_MAX) {
+                t->num_uns = 1;
+            }
+        }
+    }
+    free(buf);
+    lx->p = q;
+    return 1;
+}
+
+/* C++: a user-defined suffix right after a string or character literal
+ * ("abc"_s, 'x'_c) */
+static void cxx_lit_suffix(struct lexer *lx, struct token *t)
+{
+    if (!lx->cxx || !(isalpha((unsigned char)*lx->p) || *lx->p == '_'))
+        return;
+    const char *q = lx->p;
+    while (isalnum((unsigned char)*q) || *q == '_')
+        q++;
+    t->ud_suffix = xstrndup(lx->p, (size_t)(q - lx->p));
+    lx->p = q;
 }
 
 void lex_next(struct lexer *lx)
@@ -174,11 +553,19 @@ void lex_next(struct lexer *lx)
     t->text = NULL;
     t->num = 0;
     t->str_width = 1;
+    t->str_prefix = 0;
+    t->ud_suffix = NULL;
+    t->ud_spelling = NULL;
+
+    t->lit = NULL;
+    t->nlit = 0;
 
     if (!*lx->p) {
         t->kind = TOK_EOF;
         return;
     }
+
+    int pfx = 0;   /* a literal's encoding prefix: 0, 'L', 'u' or 'U' */
 
     /* An encoding prefix on a string or char literal: L"" u8"" u"" U"" and
      * L'' u'' U''. Consume it and remember the element width; the '"' / '\''
@@ -188,6 +575,7 @@ void lex_next(struct lexer *lx)
     {
         const char *q = lx->p;
         int w = 0, adv = 0;
+        pfx = 0;
         if ((q[0] == 'L' || q[0] == 'U') && (q[1] == '"' || q[1] == '\'')) {
             w = 4; adv = 1;
         } else if (q[0] == 'u' && q[1] == '8' && q[2] == '"') {
@@ -197,9 +585,54 @@ void lex_next(struct lexer *lx)
         }
         if (adv) {
             lx->p += adv;
-            if (*lx->p == '"')
-                t->str_width = w;   /* a char constant ignores width (int value) */
+            /* u8 is plain char in C; C++20 makes it char8_t, marked '8' */
+            pfx = adv == 1 ? q[0] : lx->cxx ? '8' : 0;
+            if (*lx->p == '"') {
+                t->str_width = w;
+                t->str_prefix = (char)pfx;
+            }
         }
+    }
+
+    /* C++: a pp-number with digit separators (1'000) or a user-defined
+     * suffix (5_km, 1.5_m, 10ms), and binary literals: read from a
+     * cleaned copy, the suffix kept apart. */
+    if (lx->cxx && (isdigit((unsigned char)*lx->p) ||
+                    (*lx->p == '.' && isdigit((unsigned char)lx->p[1])))) {
+        if (cxx_number(lx, t))
+            return;
+    }
+    if (*lx->p == '0' && (lx->p[1] == 'b' || lx->p[1] == 'B') &&
+        (lx->p[2] == '0' || lx->p[2] == '1')) {
+        /* 0b101: a binary constant (GNU C, C23, C++14) */
+        const char *q = lx->p + 2;
+        unsigned long v = 0;
+        while (*q == '0' || *q == '1')
+            v = v << 1 | (unsigned long)(*q++ - '0');
+        int has_u = 0, has_l = 0;
+        t->num_llong = 0;
+        t->char_lit = 0;
+        while (*q == 'u' || *q == 'U' || *q == 'l' || *q == 'L') {
+            if (*q == 'u' || *q == 'U')
+                has_u = 1;
+            else if (has_l)
+                t->num_llong = 1;
+            else
+                has_l = 1;
+            q++;
+        }
+        if (isalnum((unsigned char)*q) || *q == '_' || *q == '.')
+            diag_fatal(lx->file, lx->line, "malformed binary constant");
+        t->kind = TOK_NUM;
+        t->num = (long)v;
+        t->num_long = has_l || v > (unsigned long)INT_MAX;
+        t->num_uns = has_u || (v > (unsigned long)INT_MAX &&
+                               v <= 0xffffffffUL && !has_l) ||
+                     v > (unsigned long)LONG_MAX;
+        if (!has_l && v > (unsigned long)INT_MAX && v <= 0xffffffffUL)
+            t->num_long = 0;
+        lx->p = q;
+        return;
     }
 
     /* A floating constant: digits with a '.', or an exponent, or the
@@ -239,12 +672,25 @@ void lex_next(struct lexer *lx)
             t->kind = TOK_FNUM;
             t->fnum = d;
             t->fnum_is_float = 0;
-            if (*fend == 'f' || *fend == 'F') {
-                t->fnum_is_float = 1;
-                fend++;
-            } else if (*fend == 'l' || *fend == 'L') {
-                /* long double is not a distinct type here; it is
-                 * double, and saying so beats pretending otherwise. */
+            t->fnum_is_ld = 0;
+            t->fnum_is_imag = 0;
+            char *numend = fend;
+            /* suffixes: at most one of f/l, and a GNU imaginary i/j on
+             * either side of it (1.0fi, 1.0if, 2.5i) */
+            for (;;) {
+                if ((*fend == 'i' || *fend == 'I' || *fend == 'j' ||
+                     *fend == 'J') && !t->fnum_is_imag) {
+                    t->fnum_is_imag = 1;
+                } else if ((*fend == 'f' || *fend == 'F') &&
+                           !t->fnum_is_float && !t->fnum_is_ld) {
+                    t->fnum_is_float = 1;
+                } else if ((*fend == 'l' || *fend == 'L') &&
+                           !t->fnum_is_float && !t->fnum_is_ld) {
+                    t->fnum_is_ld = 1;
+                    t->text = xstrndup(lx->p, (size_t)(numend - lx->p));
+                } else {
+                    break;
+                }
                 fend++;
             }
             if (isalnum((unsigned char)*fend) || *fend == '.')
@@ -261,13 +707,21 @@ void lex_next(struct lexer *lx)
                   (lx->p[1] == 'x' || lx->p[1] == 'X');
         unsigned long v = strtoul(lx->p, &end, 0);
         int has_u = 0, has_l = 0;
+        t->num_llong = 0;
+        t->char_lit = 0;
         while (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L') {
             if (*end == 'u' || *end == 'U')
                 has_u = 1;
+            else if (has_l)
+                t->num_llong = 1;     /* LL: long long (C++ keeps it apart) */
             else
                 has_l = 1;
             end++;
         }
+        if (*end == 'i' || *end == 'I' || *end == 'j' || *end == 'J')
+            diag_fatal(lx->file, lx->line,
+                       "an integer imaginary constant (GNU _Complex int) is "
+                       "not supported — write it as a floating one (2.0i)");
         if (isalnum((unsigned char)*end) || *end == '_' || *end == '.')
             diag_fatal(lx->file, lx->line,
                        "malformed integer constant");
@@ -297,7 +751,20 @@ void lex_next(struct lexer *lx)
         while (isalnum((unsigned char)*lx->p) || *lx->p == '_')
             lx->p++;
         size_t n = (size_t)(lx->p - start);
+        if (lx->cxx)
+            for (size_t i = 0; i < sizeof cxx_keywords / sizeof cxx_keywords[0];
+                 i++)
+                if (strlen(cxx_keywords[i].word) == n &&
+                    memcmp(cxx_keywords[i].word, start, n) == 0) {
+                    t->kind = cxx_keywords[i].kind;
+                    t->text = xstrndup(start, n);
+                    lx->p = start + n;
+                    return;
+                }
         for (size_t i = 0; i < sizeof keywords / sizeof keywords[0]; i++) {
+            if (lx->cxx && (strcmp(keywords[i].word, "restrict") == 0 ||
+                            strcmp(keywords[i].word, "typeof") == 0))
+                continue;        /* identifiers in C++ */
             if (strlen(keywords[i].word) == n &&
                 memcmp(keywords[i].word, start, n) == 0) {
                 t->kind = keywords[i].kind;
@@ -322,7 +789,10 @@ void lex_next(struct lexer *lx)
     case ';': t->kind = TOK_SEMI; break;
     case '~': t->kind = TOK_TILDE; break;
     case '?': t->kind = TOK_QUESTION; break;
-    case ':': t->kind = TOK_COLON; break;
+    case ':':
+        if (lx->cxx && lx->p[1] == ':') { t->kind = TOK_COLONCOLON; lx->p++; }
+        else t->kind = TOK_COLON;
+        break;
     case '+':
         if (lx->p[1] == '+') { t->kind = TOK_PLUSPLUS; lx->p++; }
         else if (lx->p[1] == '=') { t->kind = TOK_PLUSEQ; lx->p++; }
@@ -331,6 +801,9 @@ void lex_next(struct lexer *lx)
     case '-':
         if (lx->p[1] == '-') { t->kind = TOK_MINUSMINUS; lx->p++; }
         else if (lx->p[1] == '=') { t->kind = TOK_MINUSEQ; lx->p++; }
+        else if (lx->cxx && lx->p[1] == '>' && lx->p[2] == '*') {
+            t->kind = TOK_ARROWSTAR; lx->p += 2;
+        }
         else if (lx->p[1] == '>') { t->kind = TOK_ARROW; lx->p++; }
         else t->kind = TOK_MINUS;
         break;
@@ -375,6 +848,9 @@ void lex_next(struct lexer *lx)
         } else if (lx->p[1] == '<') {
             t->kind = TOK_SHL;
             lx->p++;
+        } else if (lx->cxx && lx->p[1] == '=' && lx->p[2] == '>') {
+            t->kind = TOK_SPACESHIP;
+            lx->p += 2;
         } else if (lx->p[1] == '=') {
             t->kind = TOK_LE;
             lx->p++;
@@ -428,61 +904,73 @@ void lex_next(struct lexer *lx)
     }
     case '\'': {
         lx->p++;
-        long v;
-        if (*lx->p == '\\') {
-            lx->p++;
-            v = scan_escape(lx);
-        } else if (*lx->p && *lx->p != '\'' && *lx->p != '\n') {
-            v = (unsigned char)*lx->p;
-            lx->p++;
+        struct litch c;
+        const char *q = lx->p;
+        if (*q == '\\') {
+            q++;
+            c = lit_decode(&q, 1, lx->file, lx->line);
+        } else if (*q && *q != '\'' && *q != '\n') {
+            c = lit_decode(&q, 0, lx->file, lx->line);
         } else {
             diag_fatal(lx->file, lx->line, "empty character constant");
             return;
         }
+        lx->p = q;
         if (*lx->p != '\'')
-            diag_fatal(lx->file, lx->line,
-                       "unterminated character constant");
-        t->kind = TOK_NUM; /* a char constant has type int in C */
-        t->num = v;
+            diag_fatal(lx->file, lx->line, *lx->p && *lx->p != '\n'
+                       ? "a character constant holds one character "
+                         "(multi-character constants are not supported)"
+                       : "unterminated character constant");
+        int uns;
+        t->kind = TOK_NUM; /* a character constant is an int (or wide) value */
+        t->num = lit_char_value(c, pfx, &uns, lx->file, lx->line);
         t->num_long = 0;
-        t->num_uns = 0;
-        break;
+        t->num_llong = 0;
+        t->num_uns = uns;
+        t->char_lit = 1;
+        t->str_prefix = (char)pfx;
+        lx->p++;
+        cxx_lit_suffix(lx, t);
+        return;
     }
     case '"': {
         lx->p++;
-        /* Worst case the literal shrinks (escapes), never grows. */
-        size_t cap = 0;
-        const char *scan = lx->p;
-        while (*scan && *scan != '"') {
-            if (*scan == '\\' && scan[1])
-                scan++;
-            scan++;
-            cap++;
-        }
-        char *bytes = xmalloc(cap + 1);
-        size_t n = 0;
-        while (*lx->p && *lx->p != '"' && *lx->p != '\n') {
-            char ch;
-            if (*lx->p == '\\') {
-                lx->p++;
-                ch = (char)scan_escape(lx);
-            } else {
-                ch = *lx->p++;
+        /* Decode the body into elements; encode at this literal's own width.
+         * The parser re-encodes when adjacent literals concatenate. */
+        size_t cap = 16;
+        int n = 0;
+        struct litch *lc = xmalloc(cap * sizeof *lc);
+        const char *q = lx->p;
+        while (*q && *q != '"' && *q != '\n') {
+            if ((size_t)n == cap) {
+                cap *= 2;
+                lc = xrealloc(lc, cap * sizeof *lc);
             }
-            bytes[n++] = ch;
+            if (*q == '\\') {
+                q++;
+                lc[n++] = lit_decode(&q, 1, lx->file, lx->line);
+            } else {
+                lc[n++] = lit_decode(&q, 0, lx->file, lx->line);
+            }
         }
+        lx->p = q;
         if (*lx->p != '"')
             diag_fatal(lx->file, lx->line, "unterminated string literal");
-        bytes[n] = 0;
         t->kind = TOK_STR;
-        t->text = bytes;
-        t->num = (long)n + 1; /* the NUL is part of the object */
-        break;
+        t->lit = lc;
+        t->nlit = n;
+        t->text = lit_encode(lc, n, t->str_width, &t->num, lx->file, lx->line);
+        lx->p++;
+        cxx_lit_suffix(lx, t);
+        return;
     }
     case '.':
         if (lx->p[1] == '.' && lx->p[2] == '.') {
             t->kind = TOK_ELLIPSIS;
             lx->p += 2;
+        } else if (lx->cxx && lx->p[1] == '*') {
+            t->kind = TOK_DOTSTAR;
+            lx->p++;
         } else {
             t->kind = TOK_DOT;
         }
@@ -512,9 +1000,13 @@ const char *tok_describe(const struct token *t)
     case TOK_KW_CHAR: return "'char'";
     case TOK_KW_SHORT: return "'short'";
     case TOK_KW_LONG: return "'long'";
+    case TOK_KW_INT128: return "'__int128'";
     case TOK_KW_FLOAT: return "'float'";
     case TOK_KW_DOUBLE: return "'double'";
     case TOK_KW_BOOL: return "'_Bool'";
+    case TOK_KW_COMPLEX: return "'_Complex'";
+    case TOK_KW_REAL: return "'__real__'";
+    case TOK_KW_IMAG: return "'__imag__'";
     case TOK_KW_STATIC_ASSERT: return "'_Static_assert'";
     case TOK_KW_GENERIC: return "'_Generic'";
     case TOK_KW_ALIGNOF: return "'_Alignof'";
@@ -537,6 +1029,7 @@ const char *tok_describe(const struct token *t)
     case TOK_KW_RESTRICT: return "'restrict'";
     case TOK_KW_ASM: return "'asm'";
     case TOK_KW_INLINE: return "'inline'";
+    case TOK_KW_NORETURN: return "'_Noreturn'";
     case TOK_KW_ATTRIBUTE: return "'__attribute__'";
     case TOK_DOT: return "'.'";
     case TOK_ARROW: return "'->'";
@@ -594,6 +1087,16 @@ const char *tok_describe(const struct token *t)
     case TOK_MINUSMINUS: return "'--'";
     case TOK_QUESTION: return "'?'";
     case TOK_COLON: return "':'";
+    case TOK_COLONCOLON: return "'::'";
+    case TOK_DOTSTAR: return "'.*'";
+    case TOK_ARROWSTAR: return "'->*'";
+    case TOK_SPACESHIP: return "'<=>'";
+    default:
+        break;
+    }
+    if (t->kind >= TOK_CX_CLASS && t->text) {     /* a C++ keyword */
+        snprintf(buf, sizeof buf, "'%s'", t->text);
+        return buf;
     }
     return "?";
 }

@@ -1,0 +1,283 @@
+/* <utility> — C++ [utility].
+ *
+ * move, forward, swap, pair, and the integer sequences. Small, and almost
+ * all of it is about saying precisely which reference kind you mean.
+ */
+#ifndef _LIBCXX_UTILITY
+#define _LIBCXX_UTILITY
+
+#include <cstddef>
+#include <type_traits>
+#include <initializer_list>
+
+namespace std {
+
+/* move is a CAST, not a move: it produces an rvalue reference so that
+ * overload resolution picks the move constructor. Nothing has been moved
+ * when it returns. */
+template <class T>
+constexpr remove_reference_t<T> &&move(T &&t) noexcept
+{
+    return static_cast<remove_reference_t<T> &&>(t);
+}
+
+/* Move only if moving cannot throw, otherwise copy. This is what makes a
+ * vector's reallocation exception-safe: if a move constructor can throw
+ * halfway through relocating the elements, the old buffer has already
+ * been damaged and there is nothing to roll back to. A copy leaves it
+ * intact. */
+template <class T>
+constexpr conditional_t<!is_nothrow_move_constructible_v<T> &&
+                        is_copy_constructible_v<T>,
+                        const T &, T &&>
+move_if_noexcept(T &t) noexcept
+{
+    return move(t);
+}
+
+/* forward preserves the value category its argument arrived with, which
+ * is the entire point of a forwarding reference. The two overloads are
+ * not redundant: the lvalue one takes remove_reference_t<T>&, so an
+ * explicit template argument is required and `forward(x)` does not
+ * compile -- deliberately, because forwarding without naming the type is
+ * always a bug. */
+template <class T>
+constexpr T &&forward(remove_reference_t<T> &t) noexcept
+{
+    return static_cast<T &&>(t);
+}
+
+template <class T>
+constexpr T &&forward(remove_reference_t<T> &&t) noexcept
+{
+    static_assert(!is_lvalue_reference_v<T>,
+                  "forward must not turn an rvalue into an lvalue");
+    return static_cast<T &&>(t);
+}
+
+template <class T>
+constexpr enable_if_t<is_move_constructible_v<T> && is_move_assignable_v<T>>
+swap(T &a, T &b) noexcept(is_nothrow_move_constructible_v<T> &&
+                          is_nothrow_move_assignable_v<T>)
+{
+    T tmp = move(a);
+    a = move(b);
+    b = move(tmp);
+}
+
+template <class T, size_t N>
+constexpr void swap(T (&a)[N], T (&b)[N]) noexcept(noexcept(swap(*a, *b)))
+{
+    for (size_t i = 0; i < N; i++)
+        swap(a[i], b[i]);
+}
+
+template <class T, class U = T>
+constexpr T exchange(T &obj, U &&v)
+{
+    T old = move(obj);
+    obj = static_cast<U &&>(v);
+    return old;
+}
+
+template <class T>
+constexpr add_const_t<T> &as_const(T &t) noexcept { return t; }
+template <class T> void as_const(const T &&) = delete;
+
+/* Comparing a signed and an unsigned integer with < is one of the oldest
+ * traps in C: the signed operand is converted, so -1 < 1u is false. These
+ * compare the MATHEMATICAL values, which is what the code meant. */
+template <class T, class U>
+constexpr bool cmp_equal(T t, U u) noexcept
+{
+    if constexpr (is_signed_v<T> == is_signed_v<U>)
+        return t == u;
+    else if constexpr (is_signed_v<T>)
+        return t >= 0 && make_unsigned_t<T>(t) == u;
+    else
+        return u >= 0 && t == make_unsigned_t<U>(u);
+}
+
+template <class T, class U>
+constexpr bool cmp_not_equal(T t, U u) noexcept { return !cmp_equal(t, u); }
+
+template <class T, class U>
+constexpr bool cmp_less(T t, U u) noexcept
+{
+    if constexpr (is_signed_v<T> == is_signed_v<U>)
+        return t < u;
+    else if constexpr (is_signed_v<T>)
+        return t < 0 || make_unsigned_t<T>(t) < u;
+    else
+        return u >= 0 && t < make_unsigned_t<U>(u);
+}
+
+template <class T, class U>
+constexpr bool cmp_greater(T t, U u) noexcept { return cmp_less(u, t); }
+template <class T, class U>
+constexpr bool cmp_less_equal(T t, U u) noexcept { return !cmp_less(u, t); }
+template <class T, class U>
+constexpr bool cmp_greater_equal(T t, U u) noexcept { return !cmp_less(t, u); }
+
+/* ---- pair -------------------------------------------------------------- */
+
+struct piecewise_construct_t { explicit piecewise_construct_t() = default; };
+inline constexpr piecewise_construct_t piecewise_construct{};
+
+template <class T1, class T2>
+struct pair {
+    using first_type = T1;
+    using second_type = T2;
+
+    T1 first;
+    T2 second;
+
+    constexpr pair() : first(), second() {}
+    constexpr pair(const T1 &a, const T2 &b) : first(a), second(b) {}
+
+    template <class U1 = T1, class U2 = T2>
+    constexpr pair(U1 &&a, U2 &&b)
+        : first(forward<U1>(a)), second(forward<U2>(b)) {}
+
+    template <class U1, class U2>
+    constexpr pair(const pair<U1, U2> &p) : first(p.first), second(p.second) {}
+    template <class U1, class U2>
+    constexpr pair(pair<U1, U2> &&p)
+        : first(forward<U1>(p.first)), second(forward<U2>(p.second)) {}
+
+    constexpr pair(const pair &) = default;
+    constexpr pair(pair &&) = default;
+    constexpr pair &operator=(const pair &) = default;
+    constexpr pair &operator=(pair &&) = default;
+
+    constexpr void swap(pair &o)
+        noexcept(is_nothrow_move_constructible_v<T1> &&
+                 is_nothrow_move_constructible_v<T2>)
+    {
+        using std::swap;
+        swap(first, o.first);
+        swap(second, o.second);
+    }
+};
+
+template <class T1, class T2>
+pair(T1, T2) -> pair<T1, T2>;
+
+template <class T1, class T2>
+constexpr pair<decay_t<T1>, decay_t<T2>> make_pair(T1 &&a, T2 &&b)
+{
+    return pair<decay_t<T1>, decay_t<T2>>(forward<T1>(a), forward<T2>(b));
+}
+
+template <class A, class B, class C, class D>
+constexpr bool operator==(const pair<A, B> &x, const pair<C, D> &y)
+{ return x.first == y.first && x.second == y.second; }
+template <class A, class B, class C, class D>
+constexpr bool operator!=(const pair<A, B> &x, const pair<C, D> &y)
+{ return !(x == y); }
+/* Lexicographic, and note the second comparison is guarded by BOTH
+ * directions of the first: `a.first < b.first` being false does not mean
+ * they are equal. */
+template <class A, class B, class C, class D>
+constexpr bool operator<(const pair<A, B> &x, const pair<C, D> &y)
+{
+    return x.first < y.first ||
+           (!(y.first < x.first) && x.second < y.second);
+}
+template <class A, class B, class C, class D>
+constexpr bool operator>(const pair<A, B> &x, const pair<C, D> &y)
+{ return y < x; }
+template <class A, class B, class C, class D>
+constexpr bool operator<=(const pair<A, B> &x, const pair<C, D> &y)
+{ return !(y < x); }
+template <class A, class B, class C, class D>
+constexpr bool operator>=(const pair<A, B> &x, const pair<C, D> &y)
+{ return !(x < y); }
+
+template <class T1, class T2>
+constexpr void swap(pair<T1, T2> &a, pair<T1, T2> &b) noexcept(noexcept(a.swap(b)))
+{ a.swap(b); }
+
+/* tuple_size / tuple_element for pair, which is what makes structured
+ * bindings (`auto [k, v] = p;`) work -- the language looks for exactly
+ * these names. */
+template <class T> struct tuple_size;
+template <size_t I, class T> struct tuple_element;
+
+template <class T1, class T2>
+struct tuple_size<pair<T1, T2>> : integral_constant<size_t, 2> {};
+template <class T1, class T2>
+struct tuple_element<0, pair<T1, T2>> { using type = T1; };
+template <class T1, class T2>
+struct tuple_element<1, pair<T1, T2>> { using type = T2; };
+template <size_t I, class T>
+using tuple_element_t = typename tuple_element<I, T>::type;
+
+template <size_t I, class T1, class T2>
+constexpr tuple_element_t<I, pair<T1, T2>> &get(pair<T1, T2> &p) noexcept
+{
+    static_assert(I < 2, "pair has two elements");
+    if constexpr (I == 0) return p.first; else return p.second;
+}
+template <size_t I, class T1, class T2>
+constexpr const tuple_element_t<I, pair<T1, T2>> &
+get(const pair<T1, T2> &p) noexcept
+{
+    static_assert(I < 2, "pair has two elements");
+    if constexpr (I == 0) return p.first; else return p.second;
+}
+template <size_t I, class T1, class T2>
+constexpr tuple_element_t<I, pair<T1, T2>> &&get(pair<T1, T2> &&p) noexcept
+{
+    static_assert(I < 2, "pair has two elements");
+    if constexpr (I == 0) return move(p.first); else return move(p.second);
+}
+
+/* ---- integer sequences -------------------------------------------------
+ * The compiler builds make_integer_sequence itself
+ * (__make_integer_seq/__integer_pack): generating 0..N-1 by template
+ * recursion costs O(N) instantiations and is why some builds are slow. */
+template <class T, T... I>
+struct integer_sequence {
+    using value_type = T;
+    static constexpr size_t size() noexcept { return sizeof...(I); }
+};
+
+template <size_t... I> using index_sequence = integer_sequence<size_t, I...>;
+
+namespace __detail {
+/* Without a compiler builtin, build it by doubling: N instantiations
+ * become log N. The naive one-at-a-time recursion is what makes heavy
+ * template code crawl. */
+template <class S1, class S2> struct __concat;
+template <class T, T... A, T... B>
+struct __concat<integer_sequence<T, A...>, integer_sequence<T, B...>> {
+    using type = integer_sequence<T, A..., (sizeof...(A) + B)...>;
+};
+template <class T, size_t N>
+struct __make_seq {
+    using type = typename __concat<typename __make_seq<T, N / 2>::type,
+                                   typename __make_seq<T, N - N / 2>::type>::type;
+};
+template <class T> struct __make_seq<T, 0> { using type = integer_sequence<T>; };
+template <class T> struct __make_seq<T, 1> { using type = integer_sequence<T, 0>; };
+}
+
+template <class T, T N>
+using make_integer_sequence =
+    typename __detail::__make_seq<T, static_cast<size_t>(N)>::type;
+template <size_t N> using make_index_sequence = make_integer_sequence<size_t, N>;
+template <class... T> using index_sequence_for = make_index_sequence<sizeof...(T)>;
+
+/* ---- in_place ----------------------------------------------------------- */
+
+struct in_place_t { explicit in_place_t() = default; };
+inline constexpr in_place_t in_place{};
+template <class T> struct in_place_type_t { explicit in_place_type_t() = default; };
+template <class T> inline constexpr in_place_type_t<T> in_place_type{};
+template <size_t I> struct in_place_index_t { explicit in_place_index_t() = default; };
+template <size_t I> inline constexpr in_place_index_t<I> in_place_index{};
+
+}  // namespace std
+
+#endif

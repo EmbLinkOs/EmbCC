@@ -1,0 +1,172 @@
+/* The target machine EmbCC emits for.
+ *
+ * EmbLinkOS is two architectures now (myos/docs/ARM64.md), so the compiler
+ * is too. One process compiles for one target, chosen by --target= and
+ * fixed before the front-end runs: there is no per-function or per-file
+ * switching, and nothing below reads the HOST architecture for any reason.
+ *
+ * Only the phases that genuinely differ consult this — the lexer, parser
+ * and most of sema are machine-neutral and must stay that way.
+ */
+#ifndef EMBCC_TARGET_TARGET_H
+#define EMBCC_TARGET_TARGET_H
+
+enum target_arch {
+    TARGET_X86_64 = 0,
+    TARGET_AARCH64 = 1
+};
+
+/* The operating system the emitted code will run ON, which is a
+ * different question from the architecture and was not asked at all
+ * until D-014. It decides the predefined macros real system headers
+ * branch on, the object format, the calling convention where they
+ * differ, and how a program starts.
+ *
+ * TGT_OS_NONE is the freestanding case -- `x86_64-elf` and
+ * `aarch64-elf`, bare metal and EmbLinkOS -- and stays the default, so
+ * every command line that worked before D-014 still means what it did.
+ */
+/* TGT_ rather than the TARGET_ prefix the architecture enum uses: Apple's
+ * clang predefines the whole TARGET_OS_* family itself (TargetConditionals),
+ * so TARGET_OS_LINUX is already an object-like macro on one of the hosts
+ * this compiler is built on, and the obvious spelling will not compile
+ * there. */
+enum target_os {
+    TGT_OS_NONE = 0,       /* freestanding, no OS at all: *-elf */
+    TGT_OS_EMBLINK,        /* EmbLinkOS -- the primary product target */
+    TGT_OS_LINUX,
+    TGT_OS_DARWIN,
+    TGT_OS_WINDOWS         /* MinGW flavour; MSVC is not scheduled */
+};
+
+/* The container the objects go in. Orthogonal to the architecture --
+ * x86-64 has worn all three -- which is why it is its own dimension
+ * rather than a property of either of the others. */
+enum target_fmt {
+    TGT_FMT_ELF = 0,
+    TGT_FMT_MACHO,
+    TGT_FMT_COFF
+};
+/* EMBX is deliberately not here. It is a LINK output -- `embld --embx`
+ * writes a native, capability-carrying image instead of an ELF
+ * executable (D-003) -- and the objects that go into it are ELF like
+ * any others. This enum is the container an OBJECT goes in, so EMBX
+ * would be a category error in it, and putting it here would make the
+ * compiler think it had a fourth object writer to build. */
+
+/* The selected target. Defaults to x86_64 so every existing command line
+ * keeps its meaning; --target= is the only thing that changes it. */
+enum target_arch target_get(void);
+void target_set(enum target_arch a);
+
+/* The other two dimensions. Both default to the freestanding ELF answer,
+ * so a caller that has never heard of them reads the world exactly as it
+ * was before D-014 -- which is why this went in as an addition rather
+ * than as a change to target_get()'s meaning. */
+enum target_os  target_os_get(void);
+enum target_fmt target_fmt_get(void);
+void target_os_set(enum target_os o);
+void target_fmt_set(enum target_fmt f);
+
+/* Is there an operating system under this target at all? True for
+ * EmbLinkOS as much as for Linux -- both have syscalls, a libc and a
+ * process to start. */
+int target_has_os(void);
+
+/* Is this a target whose libc, startup objects and linker belong to the
+ * PLATFORM rather than to us (D-014)?
+ *
+ * EmbLinkOS has an operating system and is still not "hosted" in this
+ * sense, and the distinction is the whole reason there are two
+ * predicates. On Linux the right answer is to use glibc's headers, crt1
+ * and ld, because they are there and they are what every other program
+ * links against. On EmbLinkOS the right answer is lib/libc over
+ * os/emblinkos/backend.c and EmbLD, because those ARE the platform's --
+ * we wrote them (D-009). Asking "does it have an OS" and getting back
+ * "then use the system toolchain" would send the primary product target
+ * looking for a glibc that does not exist. */
+int target_is_hosted(void);
+
+/* For diagnostics that must name the triple rather than guess at it. */
+const char *target_os_name(enum target_os o);
+const char *target_fmt_name(enum target_fmt f);
+
+/* Parses a full triple into all three dimensions. Returns 0 and leaves
+ * every output alone on anything it does not know, so the driver can
+ * refuse loudly rather than silently emit for the wrong machine (THE
+ * RULE) -- and "does not know" now includes a combination this compiler
+ * cannot yet write, which is why the table is explicit rather than
+ * assembled from parts. */
+int target_from_triple(const char *triple, enum target_arch *out,
+                       enum target_os *os, enum target_fmt *fmt);
+
+/* The canonical triple for a combination, for --version and diagnostics.
+ * Returns NULL for one that has no canonical name. */
+const char *target_triple_of(enum target_arch a, enum target_os o);
+
+/* The canonical triple of what is currently selected. */
+const char *target_triple_now(void);
+
+/* Every triple this compiler accepts, for --help and for the error
+ * message that lists them. Returns the count; name[i] is the i-th. */
+int target_triple_count(void);
+const char *target_triple_name(int i);
+
+/* Machine-neutral relocation kinds.
+ *
+ * Codegen records a KIND at each patch site and the driver turns
+ * (kind, target) into an ELF relocation type. The indirection exists
+ * because the same source-level act costs a different number of
+ * relocations per machine: taking a symbol's address is one RIP-relative
+ * `lea` on x86-64, but an `adrp`/`add` PAIR on aarch64 — two sites, two
+ * relocations, one address.
+ */
+enum reloc_kind {
+    RK_CALL,      /* direct call to a function symbol */
+    RK_PCREL32,   /* x86-64: the rel32 field of a RIP-relative lea */
+    RK_ADR_HI21,  /* aarch64: adrp's 21-bit page-relative field */
+    RK_ADD_LO12,  /* aarch64: the paired add's 12-bit in-page field */
+    RK_ABS64,     /* an absolute 64-bit pointer slot in .data */
+    RK_ABS32,     /* an absolute 32-bit field (DWARF section offsets) */
+    RK_DATA_PREL32, /* a 32-bit field holding target - its own address
+                   * (unwind tables' pointers) */
+    RK_GOT_PAGE,  /* aarch64: adrp to the page of the symbol's GOT slot */
+    RK_GOT_LO12   /* aarch64: the paired ldr's offset in that page — a
+                   * weak symbol's address (0 when it is undefined, which
+                   * adrp/add cannot give) */
+};
+
+/* The ELF relocation type for this kind on this target, or -1 if the kind
+ * does not apply to it (which is a codegen bug, not an input error).
+ * Mach-O and COFF have their own numbering; those mappings arrive with
+ * their writers, keyed on (kind, arch, format) as this is on (kind,
+ * arch). */
+int target_reloc_type(enum target_arch a, enum reloc_kind k);
+
+/* How a kind is spelled as a Mach-O relocation: the type, whether the
+ * field is PC-relative, and the log2 of its width. Returns 0 when the
+ * kind has no Mach-O spelling yet, which is a refusal the caller must
+ * make loudly rather than guess past.
+ *
+ * The ADDEND is the part that does not carry over and is the easiest
+ * thing here to get quietly wrong. ELF's RELA holds it explicitly, and
+ * target_reloc_addend() biases x86-64's PC-relative kinds by -4 because
+ * the field is measured from the END of the instruction. Mach-O has no
+ * addend field: the value sits in the patched word, and the linker
+ * already accounts for the instruction's length itself. Biasing it
+ * again would move every string reference four bytes -- so the Mach-O
+ * path uses the UNBIASED offset, and this comment is why.
+ */
+int target_macho_reloc(enum target_arch a, enum reloc_kind k,
+                       int *pcrel, int *length);
+
+/* The addend the kind carries. x86-64's PC-relative fields are measured
+ * from the END of the instruction, so they bias by -4; aarch64's are
+ * measured from the instruction itself and bias by 0. `bias` is the
+ * site-specific part (a string's offset into .rodata, say). */
+long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias);
+
+/* ELF e_machine. */
+int target_elf_machine(enum target_arch a);
+
+#endif

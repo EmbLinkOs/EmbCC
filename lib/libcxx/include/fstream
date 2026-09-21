@@ -1,0 +1,193 @@
+/* <fstream> — C++ [file.streams].
+ *
+ * A streambuf over a FILE *, and the streams that wrap it.
+ *
+ * Sitting on the C library rather than on open/read/write directly is
+ * the same decision <iostream> made, for the same reason: the FILE
+ * already buffers, and a second buffer over one descriptor means a
+ * program that mixes fprintf and an ofstream on the same file gets its
+ * output interleaved wrongly.
+ *
+ * The get side keeps a REAL window -- a buffer the base class's pointer
+ * bump runs inside -- because that is where a file stream's speed comes
+ * from. The put side does not: fwrite is already the block operation.
+ */
+#ifndef _LIBCXX_FSTREAM
+#define _LIBCXX_FSTREAM
+
+#include <iosfwd>
+#include <cstdio>
+#include <string>
+#include <ios>
+#include <streambuf>
+#include <ostream>
+#include <istream>
+
+namespace std {
+
+template <class C, class T>
+class basic_filebuf : public basic_streambuf<C, T> {
+    using base = basic_streambuf<C, T>;
+
+public:
+    using int_type = typename T::int_type;
+
+    basic_filebuf() : __f(nullptr), __owns(false) {}
+    ~basic_filebuf() override { close(); }
+
+    bool is_open() const { return __f != nullptr; }
+
+    basic_filebuf *open(const char *path, ios_base::openmode m)
+    {
+        if (__f)
+            return nullptr;
+        /* The mode string is the whole of what openmode means here, and
+         * getting it wrong is silent: "w" truncates, "a" cannot seek
+         * back, and the absence of "+" makes a read fail rather than
+         * error. */
+        const char *mode;
+        bool in = (m & ios_base::in) != 0, out = (m & ios_base::out) != 0;
+        bool app = (m & ios_base::app) != 0, trunc = (m & ios_base::trunc) != 0;
+        if (in && out) mode = trunc ? "w+" : app ? "a+" : "r+";
+        else if (out) mode = app ? "a" : "w";
+        else if (in) mode = "r";
+        else return nullptr;
+        __f = fopen(path, mode);
+        if (!__f)
+            return nullptr;
+        __owns = true;
+        this->setg(__buf, __buf, __buf);   /* an empty window to start */
+        return this;
+    }
+
+    basic_filebuf *close()
+    {
+        if (!__f)
+            return nullptr;
+        fflush(__f);
+        if (__owns)
+            fclose(__f);
+        __f = nullptr;
+        __owns = false;
+        return this;
+    }
+
+protected:
+    /* Refill the window in one read, so the base class's sbumpc costs a
+     * pointer bump for every character but the first of each block. */
+    int_type underflow() override
+    {
+        if (!__f)
+            return T::eof();
+        if (this->gptr() < this->egptr())
+            return T::to_int_type(*this->gptr());
+        size_t n = fread(__buf, 1, sizeof __buf, __f);
+        if (n == 0)
+            return T::eof();
+        this->setg(__buf, __buf, __buf + n);
+        return T::to_int_type(*this->gptr());
+    }
+
+    int_type pbackfail(int_type c) override
+    {
+        if (this->gptr() > this->eback()) {
+            this->gbump(-1);
+            if (!T::eq_int_type(c, T::eof()))
+                *this->gptr() = T::to_char_type(c);
+            return T::to_int_type(*this->gptr());
+        }
+        return T::eof();
+    }
+
+    int_type overflow(int_type c) override
+    {
+        if (!__f || T::eq_int_type(c, T::eof()))
+            return T::not_eof(c);
+        if (fputc((int)(unsigned char)c, __f) == EOF)
+            return T::eof();
+        return c;
+    }
+
+    streamsize xsputn(const C *s, streamsize n) override
+    {
+        if (!__f)
+            return 0;
+        return (streamsize)fwrite(s, 1, (size_t)n, __f);
+    }
+
+    int sync() override { return __f ? fflush(__f) : 0; }
+
+private:
+    FILE *__f;
+    bool __owns;
+    C __buf[4096];
+};
+
+using filebuf = basic_filebuf<char>;
+
+template <class C, class T>
+class basic_ofstream : public basic_ostream<C, T> {
+public:
+    basic_ofstream() : basic_ostream<C, T>(&__b) {}
+    explicit basic_ofstream(const char *path,
+                            ios_base::openmode m = ios_base::out)
+        : basic_ostream<C, T>(&__b)
+    { open(path, m); }
+    explicit basic_ofstream(const string &path,
+                            ios_base::openmode m = ios_base::out)
+        : basic_ostream<C, T>(&__b)
+    { open(path.c_str(), m); }
+
+    void open(const char *path, ios_base::openmode m = ios_base::out)
+    {
+        /* A failed open sets failbit rather than throwing, so that
+         * `if (!f)` is the test -- which is what every caller writes. */
+        if (!__b.open(path, m | ios_base::out))
+            this->setstate(ios_base::failbit);
+        else
+            this->clear();
+    }
+    bool is_open() const { return __b.is_open(); }
+    void close() { if (!__b.close()) this->setstate(ios_base::failbit); }
+    basic_filebuf<C, T> *rdbuf() const
+    { return const_cast<basic_filebuf<C, T> *>(&__b); }
+
+private:
+    basic_filebuf<C, T> __b;
+};
+
+template <class C, class T>
+class basic_ifstream : public basic_istream<C, T> {
+public:
+    basic_ifstream() : basic_istream<C, T>(&__b) {}
+    explicit basic_ifstream(const char *path,
+                            ios_base::openmode m = ios_base::in)
+        : basic_istream<C, T>(&__b)
+    { open(path, m); }
+    explicit basic_ifstream(const string &path,
+                            ios_base::openmode m = ios_base::in)
+        : basic_istream<C, T>(&__b)
+    { open(path.c_str(), m); }
+
+    void open(const char *path, ios_base::openmode m = ios_base::in)
+    {
+        if (!__b.open(path, m | ios_base::in))
+            this->setstate(ios_base::failbit);
+        else
+            this->clear();
+    }
+    bool is_open() const { return __b.is_open(); }
+    void close() { if (!__b.close()) this->setstate(ios_base::failbit); }
+    basic_filebuf<C, T> *rdbuf() const
+    { return const_cast<basic_filebuf<C, T> *>(&__b); }
+
+private:
+    basic_filebuf<C, T> __b;
+};
+
+using ofstream = basic_ofstream<char>;
+using ifstream = basic_ifstream<char>;
+
+}  // namespace std
+
+#endif

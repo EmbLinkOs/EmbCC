@@ -1,0 +1,8 @@
+/* <cerrno> — the C header's names, in namespace std as well as at
+ * global scope. C++ requires the std:: spellings; every real
+ * implementation also leaves the global ones, and code depends on it. */
+#ifndef _LIBCXX_CERRNO
+#define _LIBCXX_CERRNO
+#include <errno.h>
+
+#endif

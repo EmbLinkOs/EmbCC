@@ -1,0 +1,721 @@
+/* <format> — C++ [format].
+ *
+ * `printf` with the types put back. `printf("%d", x)` is a promise the
+ * compiler cannot keep: the format string says `int` and `x` is
+ * whatever it is, and when they disagree the result is undefined
+ * behaviour that usually looks like a plausible number. Here the
+ * replacement field says only *how* to print; *what* to print comes from
+ * the argument's own type, through a `formatter<T>` chosen by overload
+ * resolution. There is no `%d` to get wrong.
+ *
+ * The other half is that it is extensible in a way `printf` is not:
+ * a user type gets a `formatter<T>` specialization and then works
+ * everywhere format does, including inside another type's formatter.
+ * `operator<<` gives that too, but only into a stream, and at the cost
+ * of an ostream on the stack.
+ *
+ * ---- the shape of the implementation ----------------------------------
+ *
+ * Arguments are ERASED exactly once, into `basic_format_args`: a small
+ * array of {pointer, kind} pairs plus, for a user type, a pointer to a
+ * function that knows how to format it. This is why `format` is not one
+ * template instantiation per call site per argument pack -- the
+ * formatting loop is `vformat`, one non-template function, and the
+ * template part is only the erasure. That is the same reason `printf`
+ * is small and the reason iostreams are not.
+ *
+ * ---- what is here and what is not --------------------------------------
+ *
+ * The replacement-field grammar is complete: argument ids automatic and
+ * manual, fill and align, sign, `#`, `0`, width, precision, `L` parsed
+ * and ignored (there are no locales here), and the type characters for
+ * every fundamental type. Nested `{}` in width and precision work.
+ *
+ * NOT here: compile-time checking of the format string. `std::format`
+ * in C++20 takes a `format_string<Args...>` with a consteval
+ * constructor that parses the string and rejects a bad one at compile
+ * time. That needs the whole parser to be constant-evaluable against
+ * the argument types; ours checks at run time and throws
+ * `format_error`. It is the one place this header is weaker than the
+ * standard's rather than merely narrower, and it is said here rather
+ * than discovered.
+ */
+#ifndef _LIBCXX_FORMAT
+#define _LIBCXX_FORMAT
+
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+class format_error : public runtime_error {
+public:
+    explicit format_error(const char *w) : runtime_error(w) {}
+    explicit format_error(const string &w) : runtime_error(w) {}
+};
+
+/* ---- the parsed replacement field ------------------------------------ */
+
+struct __fmt_spec {
+    char fill = ' ';
+    char align = 0;          /* '<' '>' '^', or 0 for the type's default */
+    char sign = '-';         /* '-' '+' ' ' */
+    bool alt = false;        /* '#' */
+    bool zero = false;       /* '0' */
+    int width = -1;
+    int prec = -1;
+    char type = 0;
+};
+
+/* ---- the erased argument ---------------------------------------------- */
+
+class format_context;
+
+enum class __fmt_kind : unsigned char {
+    none, b, c, i, u, ll, ull, f, d, ld, cstr, sv, ptr, custom
+};
+
+struct __fmt_arg {
+    __fmt_kind k = __fmt_kind::none;
+    union {
+        bool b;
+        char c;
+        int i;
+        unsigned u;
+        long long ll;
+        unsigned long long ull;
+        float f;
+        double d;
+        long double ld;
+        const char *cstr;
+        const void *ptr;
+    };
+    string_view sv;
+    /* A user type: the value, and the one function that knows its type.
+     * This is the whole of the extension mechanism. */
+    const void *obj = nullptr;
+    void (*fmt)(const void *, const __fmt_spec &, string &) = nullptr;
+    __fmt_arg() : k(__fmt_kind::none), ll(0) {}
+};
+
+/* ---- number formatting ------------------------------------------------- */
+
+namespace __fmt {
+
+inline int __base_of(char t)
+{
+    switch (t) {
+    case 'b': case 'B': return 2;
+    case 'o': return 8;
+    case 'x': case 'X': return 16;
+    default: return 10;
+    }
+}
+
+/* Digits into a buffer, least significant first, then reversed. The
+ * value comes in ALREADY unsigned and already negated if it was
+ * negative: negating in the signed domain overflows for the most
+ * negative value, and `-INT_MIN` is undefined rather than large. */
+inline int __udigits(unsigned long long v, int base, bool upper, char *out)
+{
+    const char *lo = "0123456789abcdef", *hi = "0123456789ABCDEF";
+    const char *d = upper ? hi : lo;
+    int n = 0;
+    if (!v)
+        out[n++] = '0';
+    while (v) {
+        out[n++] = d[v % (unsigned)base];
+        v /= (unsigned)base;
+    }
+    for (int i = 0; i < n / 2; i++) {
+        char t = out[i];
+        out[i] = out[n - 1 - i];
+        out[n - 1 - i] = t;
+    }
+    return n;
+}
+
+inline void __pad(string &o, char c, int n)
+{
+    for (int i = 0; i < n; i++)
+        o.push_back(c);
+}
+
+/* Fill to the width, honouring the alignment. `body` is the text and
+ * `pre` the part that must stay left of any zero padding -- a sign and
+ * a `0x` cannot be pushed right of the zeros they precede. */
+inline void __put_aligned(string &o, const __fmt_spec &s, const char *pre,
+                          int npre, const char *body, int nbody,
+                          char default_align)
+{
+    int n = npre + nbody;
+    char al = s.align ? s.align : default_align;
+    int pad = s.width > n ? s.width - n : 0;
+
+    /* Zero padding is an alignment, not a fill: `{:08.2f}` of -1.5 is
+     * "-0001.50", with the sign OUTSIDE the zeros. An explicit align
+     * turns it off, which is what the standard says. */
+    if (s.zero && !s.align) {
+        o.append(pre, (size_t)npre);
+        __pad(o, '0', pad);
+        o.append(body, (size_t)nbody);
+        return;
+    }
+    if (al == '>')
+        __pad(o, s.fill, pad);
+    else if (al == '^')
+        __pad(o, s.fill, pad / 2);
+    o.append(pre, (size_t)npre);
+    o.append(body, (size_t)nbody);
+    if (al == '<')
+        __pad(o, s.fill, pad);
+    else if (al == '^')
+        __pad(o, s.fill, pad - pad / 2);
+}
+
+inline void __format_uint(unsigned long long v, bool neg,
+                          const __fmt_spec &s, string &o)
+{
+    char t = s.type ? s.type : 'd';
+    if (t == 'c') {
+        char ch = (char)v;
+        __put_aligned(o, s, "", 0, &ch, 1, '<');
+        return;
+    }
+    int base = __base_of(t);
+    bool upper = t == 'X' || t == 'B';
+    char buf[72];
+    int n = __udigits(v, base, upper, buf);
+    if (t == 'X')
+        for (int i = 0; i < n; i++)
+            if (buf[i] >= 'a' && buf[i] <= 'f')
+                buf[i] = (char)(buf[i] - 'a' + 'A');
+
+    char pre[4];
+    int np = 0;
+    if (neg)
+        pre[np++] = '-';
+    else if (s.sign == '+')
+        pre[np++] = '+';
+    else if (s.sign == ' ')
+        pre[np++] = ' ';
+    if (s.alt && base != 10) {
+        pre[np++] = '0';
+        pre[np++] = t == 'o' ? 'o' : t;
+    }
+    __put_aligned(o, s, pre, np, buf, n, '>');
+}
+
+inline void __format_int(long long v, const __fmt_spec &s, string &o)
+{
+    /* Negate in the UNSIGNED domain: -LLONG_MIN does not exist. */
+    unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v
+                                 : (unsigned long long)v;
+    __format_uint(u, v < 0, s, o);
+}
+
+/* Floating point goes through snprintf, which is our own (see
+ * lib/libc/src/stdio) and is where the correctly-rounded digits already
+ * live. Reimplementing Grisu here would duplicate that work to produce
+ * the same characters. The general form `g` with a precision is the one
+ * case format defines differently from printf -- it does not strip
+ * trailing zeros unless the type is `g` -- so the shortest-round-trip
+ * default is built rather than borrowed. */
+inline void __format_float(long double v, bool is_long, const __fmt_spec &s,
+                           string &o)
+{
+    char t = s.type;
+    char cv[8];
+    int nc = 0;
+    cv[nc++] = '%';
+    if (s.sign == '+')
+        cv[nc++] = '+';
+    else if (s.sign == ' ')
+        cv[nc++] = ' ';
+    if (s.alt)
+        cv[nc++] = '#';
+    cv[nc++] = '.';
+    cv[nc++] = '*';
+    char conv = 'g';
+    int prec = s.prec;
+    switch (t) {
+    case 'f': case 'F': conv = 'f'; if (prec < 0) prec = 6; break;
+    case 'e': case 'E': conv = (char)t; if (prec < 0) prec = 6; break;
+    case 'a': case 'A': conv = (char)t; if (prec < 0) prec = -2; break;
+    case 'g': case 'G': conv = (char)t; if (prec < 0) prec = 6; break;
+    default:
+        /* No type character: the shortest form that round-trips. 17
+         * significant digits always round-trip a double; %g then drops
+         * the trailing zeros, so 1.5 prints "1.5" and not "1.50000". */
+        conv = 'g';
+        if (prec < 0)
+            prec = 17;
+        break;
+    }
+    if (is_long)
+        cv[nc++] = 'L';
+    cv[nc++] = conv;
+    cv[nc] = 0;
+
+    char buf[512];
+    int n;
+    if (prec == -2) {                     /* %a with no precision */
+        char cv2[8];
+        int m = 0;
+        cv2[m++] = '%';
+        if (s.sign == '+') cv2[m++] = '+';
+        else if (s.sign == ' ') cv2[m++] = ' ';
+        if (is_long) cv2[m++] = 'L';
+        cv2[m++] = conv;
+        cv2[m] = 0;
+        n = is_long ? snprintf(buf, sizeof buf, cv2, v)
+                    : snprintf(buf, sizeof buf, cv2, (double)v);
+    } else {
+        n = is_long ? snprintf(buf, sizeof buf, cv, prec, v)
+                    : snprintf(buf, sizeof buf, cv, prec, (double)v);
+    }
+    if (n < 0)
+        n = 0;
+    if (n > (int)sizeof buf - 1)
+        n = (int)sizeof buf - 1;
+
+    /* A sign or a nan/inf must stay left of zero padding. */
+    int np = 0;
+    if (n && (buf[0] == '-' || buf[0] == '+' || buf[0] == ' '))
+        np = 1;
+    bool finite = true;
+    for (int i = np; i < n; i++)
+        if (buf[i] == 'n' || buf[i] == 'i' || buf[i] == 'N' || buf[i] == 'I')
+            finite = false;
+    __fmt_spec s2 = s;
+    if (!finite)
+        s2.zero = false;              /* "000-inf" is not a number */
+    __put_aligned(o, s2, buf, np, buf + np, n - np, '>');
+}
+
+inline void __format_str(const char *p, size_t len, const __fmt_spec &s,
+                         string &o)
+{
+    /* Precision TRUNCATES a string, which is the one thing `%.*s` and
+     * this agree on exactly. */
+    if (s.prec >= 0 && (size_t)s.prec < len)
+        len = (size_t)s.prec;
+    __put_aligned(o, s, "", 0, p, (int)len, '<');
+}
+
+inline void __format_ptr(const void *p, const __fmt_spec &s, string &o)
+{
+    char buf[40];
+    int n = __udigits((unsigned long long)(unsigned long)p, 16,
+                      s.type == 'P', buf);
+    const char *pre = s.type == 'P' ? "0X" : "0x";
+    __fmt_spec s2 = s;
+    s2.zero = false;
+    __put_aligned(o, s2, pre, 2, buf, n, '>');
+}
+
+inline void __format_bool(bool b, const __fmt_spec &s, string &o)
+{
+    /* `{:d}` of true is 1, not "true": the type character decides. */
+    if (s.type && s.type != 's') {
+        __format_uint(b ? 1 : 0, false, s, o);
+        return;
+    }
+    const char *t = b ? "true" : "false";
+    __format_str(t, b ? 4u : 5u, s, o);
+}
+
+}  // namespace __fmt
+
+/* ---- formatter<T> ------------------------------------------------------
+ *
+ * The customization point. A specialization for a user type needs only
+ * `format(const T &, const __fmt_spec &, string &)`; the spec has
+ * already been parsed, which is the difference from the standard's
+ * two-phase parse()/format() pair. The cost is that a user formatter
+ * cannot invent its own grammar; the gain is that the parser is one
+ * function rather than one per type.
+ */
+template <class T, class = void>
+struct formatter;
+
+#define _LIBCXX_FMT_INT(T)                                                   \
+    template <> struct formatter<T> {                                        \
+        static void format(T v, const __fmt_spec &s, string &o)              \
+        { __fmt::__format_int((long long)v, s, o); }                         \
+    };
+#define _LIBCXX_FMT_UINT(T)                                                  \
+    template <> struct formatter<T> {                                        \
+        static void format(T v, const __fmt_spec &s, string &o)              \
+        { __fmt::__format_uint((unsigned long long)v, false, s, o); }        \
+    };
+
+_LIBCXX_FMT_INT(signed char)
+_LIBCXX_FMT_INT(short)
+_LIBCXX_FMT_INT(int)
+_LIBCXX_FMT_INT(long)
+_LIBCXX_FMT_INT(long long)
+_LIBCXX_FMT_UINT(unsigned char)
+_LIBCXX_FMT_UINT(unsigned short)
+_LIBCXX_FMT_UINT(unsigned)
+_LIBCXX_FMT_UINT(unsigned long)
+_LIBCXX_FMT_UINT(unsigned long long)
+#undef _LIBCXX_FMT_INT
+#undef _LIBCXX_FMT_UINT
+
+/* A char formats as a CHARACTER by default and as a number with `d`;
+ * an int formats as a number by default and as a character with `c`.
+ * The default follows the type, which is the whole point of the
+ * design. */
+template <> struct formatter<char> {
+    static void format(char v, const __fmt_spec &s, string &o)
+    {
+        if (s.type && s.type != 'c') {
+            __fmt::__format_int((long long)v, s, o);
+            return;
+        }
+        __fmt::__put_aligned(o, s, "", 0, &v, 1, '<');
+    }
+};
+
+template <> struct formatter<bool> {
+    static void format(bool v, const __fmt_spec &s, string &o)
+    { __fmt::__format_bool(v, s, o); }
+};
+
+template <> struct formatter<float> {
+    static void format(float v, const __fmt_spec &s, string &o)
+    { __fmt::__format_float((long double)v, false, s, o); }
+};
+template <> struct formatter<double> {
+    static void format(double v, const __fmt_spec &s, string &o)
+    { __fmt::__format_float((long double)v, false, s, o); }
+};
+template <> struct formatter<long double> {
+    static void format(long double v, const __fmt_spec &s, string &o)
+    { __fmt::__format_float(v, true, s, o); }
+};
+
+template <> struct formatter<const char *> {
+    static void format(const char *v, const __fmt_spec &s, string &o)
+    { __fmt::__format_str(v ? v : "", v ? strlen(v) : 0u, s, o); }
+};
+template <> struct formatter<char *> : formatter<const char *> {};
+template <size_t N> struct formatter<char[N]> : formatter<const char *> {};
+
+template <> struct formatter<string> {
+    static void format(const string &v, const __fmt_spec &s, string &o)
+    { __fmt::__format_str(v.data(), v.size(), s, o); }
+};
+template <> struct formatter<string_view> {
+    static void format(string_view v, const __fmt_spec &s, string &o)
+    { __fmt::__format_str(v.data(), v.size(), s, o); }
+};
+
+template <class T>
+struct formatter<T *, enable_if_t<!is_same_v<remove_cv_t<T>, char>>> {
+    static void format(const void *v, const __fmt_spec &s, string &o)
+    { __fmt::__format_ptr(v, s, o); }
+};
+template <> struct formatter<nullptr_t> {
+    static void format(nullptr_t, const __fmt_spec &s, string &o)
+    { __fmt::__format_ptr(nullptr, s, o); }
+};
+
+/* ---- erasure ----------------------------------------------------------- */
+
+namespace __fmt {
+
+/* One thunk per user type, instantiated where the argument is passed
+ * and pointed at from the erased arg. This is the only template that
+ * survives into the formatting loop. */
+template <class T>
+void __custom_thunk(const void *p, const __fmt_spec &s, string &o)
+{ formatter<T>::format(*static_cast<const T *>(p), s, o); }
+
+inline __fmt_arg __make(bool v)       { __fmt_arg a; a.k = __fmt_kind::b;   a.b = v; return a; }
+inline __fmt_arg __make(char v)       { __fmt_arg a; a.k = __fmt_kind::c;   a.c = v; return a; }
+inline __fmt_arg __make(signed char v){ __fmt_arg a; a.k = __fmt_kind::i;   a.i = v; return a; }
+inline __fmt_arg __make(unsigned char v){ __fmt_arg a; a.k = __fmt_kind::u; a.u = v; return a; }
+inline __fmt_arg __make(short v)      { __fmt_arg a; a.k = __fmt_kind::i;   a.i = v; return a; }
+inline __fmt_arg __make(unsigned short v){ __fmt_arg a; a.k = __fmt_kind::u; a.u = v; return a; }
+inline __fmt_arg __make(int v)        { __fmt_arg a; a.k = __fmt_kind::i;   a.i = v; return a; }
+inline __fmt_arg __make(unsigned v)   { __fmt_arg a; a.k = __fmt_kind::u;   a.u = v; return a; }
+inline __fmt_arg __make(long v)       { __fmt_arg a; a.k = __fmt_kind::ll;  a.ll = v; return a; }
+inline __fmt_arg __make(unsigned long v){ __fmt_arg a; a.k = __fmt_kind::ull; a.ull = v; return a; }
+inline __fmt_arg __make(long long v)  { __fmt_arg a; a.k = __fmt_kind::ll;  a.ll = v; return a; }
+inline __fmt_arg __make(unsigned long long v){ __fmt_arg a; a.k = __fmt_kind::ull; a.ull = v; return a; }
+inline __fmt_arg __make(float v)      { __fmt_arg a; a.k = __fmt_kind::f;   a.f = v; return a; }
+inline __fmt_arg __make(double v)     { __fmt_arg a; a.k = __fmt_kind::d;   a.d = v; return a; }
+inline __fmt_arg __make(long double v){ __fmt_arg a; a.k = __fmt_kind::ld;  a.ld = v; return a; }
+inline __fmt_arg __make(const char *v){ __fmt_arg a; a.k = __fmt_kind::cstr; a.cstr = v ? v : ""; return a; }
+inline __fmt_arg __make(char *v)      { return __make((const char *)v); }
+inline __fmt_arg __make(nullptr_t)    { __fmt_arg a; a.k = __fmt_kind::ptr; a.ptr = nullptr; return a; }
+
+/* A string is erased as a VIEW, not copied: format does not outlive the
+ * call, so there is nothing to own. */
+inline __fmt_arg __make(const string &v)
+{ __fmt_arg a; a.k = __fmt_kind::sv; a.sv = string_view(v.data(), v.size()); return a; }
+inline __fmt_arg __make(string_view v)
+{ __fmt_arg a; a.k = __fmt_kind::sv; a.sv = v; return a; }
+
+template <class T>
+inline __fmt_arg __make(T *v)
+{ __fmt_arg a; a.k = __fmt_kind::ptr; a.ptr = v; return a; }
+
+/* The fallback: anything with a formatter<T>. It binds LAST because it
+ * is a template with the least specialized parameter, so an int still
+ * takes the int overload. */
+template <class T>
+inline __fmt_arg __make(const T &v)
+{
+    __fmt_arg a;
+    a.k = __fmt_kind::custom;
+    a.obj = &v;
+    a.fmt = &__custom_thunk<T>;
+    return a;
+}
+
+inline void __apply(const __fmt_arg &a, const __fmt_spec &s, string &o)
+{
+    switch (a.k) {
+    case __fmt_kind::b:    __format_bool(a.b, s, o); break;
+    case __fmt_kind::c:    formatter<char>::format(a.c, s, o); break;
+    case __fmt_kind::i:    __format_int(a.i, s, o); break;
+    case __fmt_kind::u:    __format_uint(a.u, false, s, o); break;
+    case __fmt_kind::ll:   __format_int(a.ll, s, o); break;
+    case __fmt_kind::ull:  __format_uint(a.ull, false, s, o); break;
+    case __fmt_kind::f:    __format_float((long double)a.f, false, s, o); break;
+    case __fmt_kind::d:    __format_float((long double)a.d, false, s, o); break;
+    case __fmt_kind::ld:   __format_float(a.ld, true, s, o); break;
+    case __fmt_kind::cstr: __format_str(a.cstr, strlen(a.cstr), s, o); break;
+    case __fmt_kind::sv:   __format_str(a.sv.data(), a.sv.size(), s, o); break;
+    case __fmt_kind::ptr:  __format_ptr(a.ptr, s, o); break;
+    case __fmt_kind::custom: a.fmt(a.obj, s, o); break;
+    default: throw format_error("argument not present");
+    }
+}
+
+/* An argument used as a width or precision must be a non-negative
+ * integer, and saying so here is what turns `format("{:{}}", x, -1)`
+ * into an exception rather than a cast to an enormous size_t. */
+inline int __as_count(const __fmt_arg &a)
+{
+    long long v;
+    switch (a.k) {
+    case __fmt_kind::i:   v = a.i; break;
+    case __fmt_kind::u:   v = (long long)a.u; break;
+    case __fmt_kind::ll:  v = a.ll; break;
+    case __fmt_kind::ull:
+        if (a.ull > 0x7fffffffULL)
+            throw format_error("width or precision out of range");
+        v = (long long)a.ull;
+        break;
+    default: throw format_error("width or precision is not an integer");
+    }
+    if (v < 0 || v > 0x7fffffff)
+        throw format_error("width or precision out of range");
+    return (int)v;
+}
+
+}  // namespace __fmt
+
+class format_args {
+public:
+    format_args() : __a(nullptr), __n(0) {}
+    format_args(const __fmt_arg *a, size_t n) : __a(a), __n(n) {}
+    const __fmt_arg &get(size_t i) const
+    {
+        if (i >= __n)
+            throw format_error("argument index out of range");
+        return __a[i];
+    }
+    size_t size() const { return __n; }
+private:
+    const __fmt_arg *__a;
+    size_t __n;
+};
+
+template <class... A>
+struct __fmt_store {
+    __fmt_arg __v[sizeof...(A) ? sizeof...(A) : 1];
+};
+
+template <class... A>
+inline __fmt_store<A...> make_format_args(const A &...a)
+{ return __fmt_store<A...>{{__fmt::__make(a)...}}; }
+
+/* ---- the parser and the loop ------------------------------------------- */
+
+inline string vformat(string_view f, format_args args)
+{
+    string out;
+    const char *p = f.data(), *e = p + f.size();
+    /* Automatic and manual indexing cannot be mixed, and the standard
+     * makes that an error rather than a silent choice: a string with
+     * both is almost always a half-finished edit. */
+    size_t next = 0;
+    int mode = 0;                     /* 0 unknown, 1 automatic, 2 manual */
+
+    auto take_int = [&](const char *&q) {
+        int v = 0;
+        bool any = false;
+        while (q < e && *q >= '0' && *q <= '9') {
+            if (v > 200000000)
+                throw format_error("number too large");
+            v = v * 10 + (*q - '0');
+            q++;
+            any = true;
+        }
+        return any ? v : -1;
+    };
+
+    auto arg_id = [&](const char *&q) -> size_t {
+        int id = take_int(q);
+        if (id >= 0) {
+            if (mode == 1)
+                throw format_error("cannot mix automatic and manual indexing");
+            mode = 2;
+            return (size_t)id;
+        }
+        if (mode == 2)
+            throw format_error("cannot mix automatic and manual indexing");
+        mode = 1;
+        return next++;
+    };
+
+    while (p < e) {
+        if (*p == '}') {
+            /* A lone `}` is an error; `}}` is one brace. */
+            if (p + 1 < e && p[1] == '}') {
+                out.push_back('}');
+                p += 2;
+                continue;
+            }
+            throw format_error("unmatched '}' in format string");
+        }
+        if (*p != '{') {
+            out.push_back(*p++);
+            continue;
+        }
+        if (p + 1 < e && p[1] == '{') {
+            out.push_back('{');
+            p += 2;
+            continue;
+        }
+        p++;                          /* past '{' */
+        size_t id = arg_id(p);
+        __fmt_spec s;
+        if (p < e && *p == ':') {
+            p++;
+            /* Fill and align. The fill is any character, so it is read
+             * by looking at the character AFTER it: `{:<<5}` fills with
+             * '<'. Testing the first character for an align first would
+             * read that as align-left with no fill. */
+            if (p + 1 < e && (p[1] == '<' || p[1] == '>' || p[1] == '^')) {
+                s.fill = *p;
+                s.align = p[1];
+                p += 2;
+            } else if (p < e && (*p == '<' || *p == '>' || *p == '^')) {
+                s.align = *p++;
+            }
+            if (p < e && (*p == '+' || *p == '-' || *p == ' '))
+                s.sign = *p++;
+            if (p < e && *p == '#') {
+                s.alt = true;
+                p++;
+            }
+            if (p < e && *p == '0') {
+                s.zero = true;
+                p++;
+            }
+            if (p < e && *p == '{') {          /* nested width */
+                p++;
+                size_t wid = arg_id(p);
+                if (p >= e || *p != '}')
+                    throw format_error("unmatched '{' in width");
+                p++;
+                s.width = __fmt::__as_count(args.get(wid));
+            } else {
+                int w = take_int(p);
+                if (w >= 0)
+                    s.width = w;
+            }
+            if (p < e && *p == '.') {
+                p++;
+                if (p < e && *p == '{') {      /* nested precision */
+                    p++;
+                    size_t pid = arg_id(p);
+                    if (p >= e || *p != '}')
+                        throw format_error("unmatched '{' in precision");
+                    p++;
+                    s.prec = __fmt::__as_count(args.get(pid));
+                } else {
+                    int pr = take_int(p);
+                    if (pr < 0)
+                        throw format_error("precision with no digits");
+                    s.prec = pr;
+                }
+            }
+            if (p < e && (*p == 'L' || *p == 'l'))
+                p++;                  /* locale-specific: there are none */
+            if (p < e && *p != '}')
+                s.type = *p++;
+        }
+        if (p >= e || *p != '}')
+            throw format_error("unmatched '{' in format string");
+        p++;
+        __fmt::__apply(args.get(id), s, out);
+    }
+    return out;
+}
+
+template <class... A>
+inline string format(string_view f, const A &...a)
+{
+    __fmt_store<A...> st = make_format_args(a...);
+    return vformat(f, format_args(st.__v, sizeof...(A)));
+}
+
+template <class Out, class... A>
+inline Out format_to(Out o, string_view f, const A &...a)
+{
+    string s = format(f, a...);
+    for (size_t i = 0; i < s.size(); i++)
+        *o++ = s[i];
+    return o;
+}
+
+template <class Out>
+struct format_to_n_result {
+    Out out;
+    ptrdiff_t size;
+};
+
+/* `size` is the size the WHOLE output would have had, not the number
+ * written -- which is how a caller learns that a buffer was too small,
+ * and the same convention snprintf uses. */
+template <class Out, class... A>
+inline format_to_n_result<Out> format_to_n(Out o, ptrdiff_t n, string_view f,
+                                           const A &...a)
+{
+    string s = format(f, a...);
+    ptrdiff_t k = (ptrdiff_t)s.size() < n ? (ptrdiff_t)s.size() : n;
+    for (ptrdiff_t i = 0; i < k; i++)
+        *o++ = s[(size_t)i];
+    return {o, (ptrdiff_t)s.size()};
+}
+
+template <class... A>
+inline size_t formatted_size(string_view f, const A &...a)
+{ return format(f, a...).size(); }
+
+}  // namespace std
+
+#endif

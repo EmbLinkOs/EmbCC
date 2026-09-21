@@ -1,0 +1,64 @@
+/* <typeindex> — C++ [type.index].
+ *
+ * A `type_info` you can put in a map. `type_info` itself cannot go in
+ * one: it is not copyable (there is exactly one per type, and copying
+ * it would make a second), and it has no `<` -- only `before`, which is
+ * a member with an unhelpful name and no hash.
+ *
+ * So this is a wrapper holding a POINTER to the one type_info, with the
+ * three things a container wants: copy, order, hash. It is one pointer
+ * and copying it is free, which is what makes
+ * `unordered_map<type_index, Factory>` -- the shape of every plugin
+ * registry -- practical.
+ */
+#ifndef _LIBCXX_TYPEINDEX
+#define _LIBCXX_TYPEINDEX
+
+#include <cstddef>
+#include <typeinfo>
+
+namespace std {
+
+class type_index {
+public:
+    /* By reference, and stored as a pointer: there is exactly one
+     * type_info per type and it lives forever, so the pointer can never
+     * dangle. */
+    type_index(const type_info &t) noexcept : __t(&t) {}
+
+    bool operator==(const type_index &o) const noexcept
+    { return *__t == *o.__t; }
+    bool operator!=(const type_index &o) const noexcept
+    { return *__t != *o.__t; }
+
+    /* The order is `before`'s, which is unspecified but CONSISTENT --
+     * that is all a map needs, and the standard promises no more. Two
+     * runs of the same program may order two types differently, so
+     * nothing may be persisted that depends on it. */
+    bool operator<(const type_index &o) const noexcept
+    { return __t->before(*o.__t); }
+    bool operator>(const type_index &o) const noexcept
+    { return o.__t->before(*__t); }
+    bool operator<=(const type_index &o) const noexcept
+    { return !o.__t->before(*__t); }
+    bool operator>=(const type_index &o) const noexcept
+    { return !__t->before(*o.__t); }
+
+    size_t hash_code() const noexcept { return __t->hash_code(); }
+    const char *name() const noexcept { return __t->name(); }
+
+private:
+    const type_info *__t;
+};
+
+template <class T> struct hash;
+
+template <>
+struct hash<type_index> {
+    size_t operator()(const type_index &t) const noexcept
+    { return t.hash_code(); }
+};
+
+}  // namespace std
+
+#endif

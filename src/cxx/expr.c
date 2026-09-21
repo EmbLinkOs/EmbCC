@@ -1,0 +1,5961 @@
+/* Expressions: parsed and typed together. Every operand's conversion is
+ * made explicit here (E_CAST, reference binding as an address, a
+ * temporary's materialization), so emit.c only spells the tree in C.
+ *
+ * Also here: implicit conversion sequences and their ranking — overload
+ * resolution (12.2) — and initialization (9.4), which declarations,
+ * arguments, returns and new-expressions all share. */
+#include "cxx.h"
+#include "../sema/w128.h"
+#include "../arch/target.h"
+
+#include <setjmp.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "../driver/util.h"
+
+static struct cexpr *parse_throw(void);
+
+/* Can evaluating e throw ([except.spec]: a potentially-throwing
+ * expression)? A throw, a call of a function not known not to, new, a
+ * dynamic_cast to a reference, typeid of a polymorphic glvalue. */
+static int expr_nothrow(struct cexpr *e)
+{
+    if (!e)
+        return 1;
+    switch (e->k) {
+    case E_THROW: case E_ICALL: case E_PMCALL: case E_STMTEXPR:
+        return 0;
+    case E_CALL: case E_CONSTRUCT:
+        if (e->fn && !func_nothrow(e->fn))
+            return 0;
+        break;
+    case E_NEW:
+        if (!func_nothrow(e->fn) || !expr_nothrow(e->init) ||
+            !expr_nothrow(e->count))
+            return 0;
+        break;
+    case E_DYNCAST:
+        if (e->zero)
+            return 0;
+        break;
+    case E_TYPEID:
+        if (e->na)
+            return 0;
+        break;
+    default:
+        break;
+    }
+    for (int i = 0; i < e->na; i++)
+        if (e->a && !expr_nothrow(e->a[i]))
+            return 0;
+    return expr_nothrow(e->obj);
+}
+
+struct cexpr *ex_new(enum cexpr_kind k, struct cty *t, int vc)
+{
+    struct cexpr *e = xcalloc(1, sizeof *e);
+    e->k = k;
+    e->t = t;
+    e->vc = vc;
+    e->line = cx_cur()->t.line;
+    e->col = cx_cur()->t.col;
+    e->file = cx_cur()->file;
+    return e;
+}
+
+struct cexpr *ex_int(long v, struct cty *t)
+{
+    struct cexpr *e = ex_new(E_INT, t, VC_PRVALUE);
+    e->ival = v;
+    return e;
+}
+
+static struct cexpr *ex1(enum cexpr_kind k, struct cty *t, int vc,
+                         struct cexpr *a0)
+{
+    struct cexpr *e = ex_new(k, t, vc);
+    e->a = xmalloc(sizeof *e->a);
+    e->a[0] = a0;
+    e->na = 1;
+    e->line = a0->line;
+    e->col = a0->col;
+    e->file = a0->file;
+    return e;
+}
+
+static struct cexpr *ex2(enum cexpr_kind k, struct cty *t, int vc,
+                         struct cexpr *a0, struct cexpr *a1)
+{
+    struct cexpr *e = ex_new(k, t, vc);
+    e->a = xmalloc(2 * sizeof *e->a);
+    e->a[0] = a0;
+    e->a[1] = a1;
+    e->na = 2;
+    e->line = a0->line;
+    e->col = a0->col;
+    e->file = a0->file;
+    return e;
+}
+
+static void ex_error(const struct cexpr *e, const char *fmt, ...)
+{
+    if (cx_sfinae)                  /* a substitution failure, not an error */
+        longjmp(*(jmp_buf *)cx_sfinae, 1);
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    /* Now that a cexpr carries one, the caret goes where the expression is
+     * (R3) instead of at column 0 -- which rendered as a bare line with no
+     * caret at all, for every C++ error in the compiler. */
+    diag_error_at(e && e->file ? e->file : cx_cur()->file,
+                  e ? e->line : cx_cur()->t.line,
+                  e ? e->col : cx_cur()->t.col, "%s", msg);
+    fatal_unwind();
+}
+
+struct cexpr *ex_cast(struct cexpr *e, struct cty *t)
+{
+    return ex1(E_CAST, t, VC_PRVALUE, e);
+}
+
+struct cexpr *ex_addr(struct cexpr *e)
+{
+    return ex1(E_ADDR, ct_ptr(e->t), VC_PRVALUE, e);
+}
+
+struct cexpr *ex_deref(struct cexpr *p)
+{
+    return ex1(E_DEREF, p->t->to, VC_LVALUE, p);
+}
+
+struct cexpr *ex_this(void)
+{
+    if (!cx_curfn || !cx_curfn->this_var)
+        cx_error(cx_cur(), "'this' is only available in a non-static "
+                           "member function");
+    struct cexpr *e = ex_new(E_THIS, cx_curfn->this_var->type, VC_PRVALUE);
+    return e;
+}
+
+static struct cexpr *materialize(struct cexpr *e)
+{
+    return ex1(E_TEMP, ct_unqual(e->t), VC_XVALUE, e);
+}
+
+struct cexpr *ex_materialize(struct cexpr *e)
+{
+    return materialize(e);
+}
+
+static int is_null_const(const struct cexpr *e)
+{
+    if (e->k == E_NULLPTR)
+        return 1;
+    if (e->k == E_INT && e->is_null_const)
+        return 1;
+    return 0;
+}
+
+static int is_bitfield(const struct cexpr *e)
+{
+    return e->k == E_MEMBER && e->field->bitwidth >= 0;
+}
+
+/* ---- constant evaluation ---- */
+
+static long truncate_to(long v, const struct cty *t)
+{
+    if (t->k == CT_BOOL)
+        return v != 0;
+    long sz = ct_size(t);
+    if (sz >= 8 || !ct_is_integer(t))
+        return v;
+    unsigned long mask = (1UL << (sz * 8)) - 1;
+    unsigned long u = (unsigned long)v & mask;
+    if (ct_is_signed(t) && (u >> (sz * 8 - 1)))
+        u |= ~mask;
+    return (long)u;
+}
+
+static int is128(const struct cty *t)
+{
+    return t && (t->k == CT_INT128 || t->k == CT_UINT128);
+}
+
+/* e, an integer constant, in 128 bits: its type's value, extended as the
+ * type is signed or not (an __int128's computed in two eightbytes) */
+static int fold128(struct cexpr *e, struct w128 *out)
+{
+    struct cty *t = e->t ? ct_unqual(e->t) : NULL;
+    if (!t || !ct_is_integer(t))
+        return 0;
+    if (!is128(t)) {
+        long v;
+        if (!expr_fold(e, &v))
+            return 0;
+        *out = w_from(v, ct_is_signed(t));
+        return 1;
+    }
+    struct w128 a, b;
+    int sign = t->k == CT_INT128;
+    switch (e->k) {
+    case E_INT:
+        *out = w_from(e->ival, 1);
+        return 1;
+    case E_VAR: {
+        static int depth;
+        struct cvar *v = e->var;
+        if (v->has_const) {
+            *out = w_from(v->const_val, 1);
+            return 1;
+        }
+        /* a const one whose value a long does not hold: its initializer */
+        if (!(v->type->q & CQ_CONST) || !v->init || depth > 32)
+            return 0;
+        depth++;
+        int ok = fold128(v->init, out);
+        depth--;
+        return ok;
+    }
+    case E_CAST:
+        return fold128(e->a[0], out);    /* (to the widest: the value) */
+    case E_UNARY:
+        if (!fold128(e->a[0], &a))
+            return 0;
+        switch (e->op) {
+        case TOK_MINUS: *out = w_neg(a); return 1;
+        case TOK_PLUS: *out = a; return 1;
+        case TOK_TILDE: *out = w_make(~a.lo, ~a.hi); return 1;
+        default: return 0;
+        }
+    case E_BINARY:
+        if (!fold128(e->a[0], &a) || !fold128(e->a[1], &b))
+            return 0;
+        switch (e->op) {
+        case TOK_PLUS: *out = w_add(a, b); return 1;
+        case TOK_MINUS: *out = w_add(a, w_neg(b)); return 1;
+        case TOK_STAR: *out = w_mul(a, b); return 1;
+        case TOK_SLASH: return w_div(a, b, sign, 0, out);
+        case TOK_PERCENT: return w_div(a, b, sign, 1, out);
+        case TOK_SHL: *out = w_shl(a, (int)b.lo); return 1;
+        case TOK_SHR: *out = w_shr(a, (int)b.lo, sign); return 1;
+        case TOK_AMP: *out = w_make(a.lo & b.lo, a.hi & b.hi); return 1;
+        case TOK_PIPE: *out = w_make(a.lo | b.lo, a.hi | b.hi); return 1;
+        case TOK_CARET: *out = w_make(a.lo ^ b.lo, a.hi ^ b.hi); return 1;
+        default: return 0;
+        }
+    case E_COND: {
+        long c;
+        if (!expr_fold(e->a[0], &c))
+            return 0;
+        return fold128(e->a[c ? 1 : 2], out);
+    }
+    default:
+        return 0;
+    }
+}
+
+int expr_fold(struct cexpr *e, long *out)
+{
+    long a, b, c;
+    if (is128(e->t)) {
+        /* an __int128's value: kept only when a long holds it (E_INT) */
+        struct w128 w;
+        if (!fold128(e, &w))
+            return 0;
+        int fits = e->t->k == CT_INT128
+                   ? w.hi == ((long)w.lo < 0 ? ~0UL : 0)
+                   : w.hi == 0 && (long)w.lo >= 0;
+        if (!fits)
+            return 0;
+        *out = (long)w.lo;
+        return 1;
+    }
+    if ((e->k == E_BINARY && e->a[0]->t && is128(ct_unqual(e->a[0]->t)) &&
+         e->op != TOK_ANDAND && e->op != TOK_OROR) ||
+        (e->k == E_CAST && is128(ct_unqual(e->a[0]->t)))) {
+        /* a comparison of __int128s, or one converted to a narrower type:
+         * computed in 128 bits */
+        struct w128 x, y;
+        if (!fold128(e->a[0], &x))
+            return 0;
+        if (e->k == E_CAST) {
+            if (!ct_is_integer(e->t))
+                return 0;
+            *out = truncate_to((long)x.lo, e->t);
+            return 1;
+        }
+        if (!fold128(e->a[1], &y))
+            return 0;
+        int sign = ct_unqual(e->a[0]->t)->k == CT_INT128;
+        int lt = sign ? w_slt(x, y) : w_ult(x, y);
+        int gt = sign ? w_slt(y, x) : w_ult(y, x);
+        switch (e->op) {
+        case TOK_EQEQ: *out = !lt && !gt; return 1;
+        case TOK_NEQ: *out = lt || gt; return 1;
+        case TOK_LT: *out = lt; return 1;
+        case TOK_GT: *out = gt; return 1;
+        case TOK_LE: *out = !gt; return 1;
+        case TOK_GE: *out = !lt; return 1;
+        default: return 0;
+        }
+    }
+    switch (e->k) {
+    case E_INT:
+        *out = e->ival;
+        return 1;
+    case E_NULLPTR:
+        *out = 0;
+        return 1;
+    case E_VAR:
+        if (e->var->has_const) {
+            *out = e->var->const_val;
+            return 1;
+        }
+        return 0;
+    case E_CAST:
+        if (!ct_is_integer(e->t) || !expr_fold(e->a[0], &a))
+            return 0;
+        if (!ct_is_integer(e->a[0]->t) && e->a[0]->t->k != CT_NULLPTR)
+            return 0;
+        *out = truncate_to(a, e->t);
+        return 1;
+    case E_UNARY:
+        if (!expr_fold(e->a[0], &a))
+            return 0;
+        switch (e->op) {
+        case TOK_MINUS: *out = truncate_to(-a, e->t); return 1;
+        case TOK_PLUS: *out = a; return 1;
+        case TOK_TILDE: *out = truncate_to(~a, e->t); return 1;
+        case TOK_BANG: *out = !a; return 1;
+        default: return 0;
+        }
+    case E_BINARY: {
+        if (e->op == TOK_ANDAND || e->op == TOK_OROR) {
+            if (!expr_fold(e->a[0], &a))
+                return 0;
+            if (e->op == TOK_ANDAND && !a) { *out = 0; return 1; }
+            if (e->op == TOK_OROR && a) { *out = 1; return 1; }
+            if (!expr_fold(e->a[1], &b))
+                return 0;
+            *out = b != 0;
+            return 1;
+        }
+        if (!ct_is_integer(e->a[0]->t) || !ct_is_integer(e->a[1]->t))
+            return 0;
+        if (!expr_fold(e->a[0], &a) || !expr_fold(e->a[1], &b))
+            return 0;
+        int uns = !ct_is_signed(e->a[0]->t);
+        unsigned long ua = (unsigned long)a, ub = (unsigned long)b;
+        long r;
+        switch (e->op) {
+        case TOK_PLUS: r = (long)(ua + ub); break;
+        case TOK_MINUS: r = (long)(ua - ub); break;
+        case TOK_STAR: r = (long)(ua * ub); break;
+        case TOK_SLASH:
+            if (!b) return 0;
+            r = uns ? (long)(ua / ub) : a / b;
+            break;
+        case TOK_PERCENT:
+            if (!b) return 0;
+            r = uns ? (long)(ua % ub) : a % b;
+            break;
+        case TOK_SHL: r = (long)(ua << (b & 63)); break;
+        case TOK_SHR: r = uns ? (long)(ua >> (b & 63)) : a >> (b & 63); break;
+        case TOK_AMP: r = a & b; break;
+        case TOK_PIPE: r = a | b; break;
+        case TOK_CARET: r = a ^ b; break;
+        case TOK_EQEQ: r = a == b; break;
+        case TOK_NEQ: r = a != b; break;
+        case TOK_LT: r = uns ? ua < ub : a < b; break;
+        case TOK_GT: r = uns ? ua > ub : a > b; break;
+        case TOK_LE: r = uns ? ua <= ub : a <= b; break;
+        case TOK_GE: r = uns ? ua >= ub : a >= b; break;
+        default: return 0;
+        }
+        *out = truncate_to(r, e->t);
+        return 1;
+    }
+    case E_COND:
+        if (!expr_fold(e->a[0], &c))
+            return 0;
+        return expr_fold(e->a[c ? 1 : 2], out);
+    default:
+        return 0;
+    }
+}
+
+/* A constant expression's value: folded, or else evaluated — calls of
+ * constexpr functions and all (consteval.c). */
+int expr_const(struct cexpr *e, long *out)
+{
+    return expr_fold(e, out) || cx_consteval_int(e, out);
+}
+
+/* ---- conversions ---- */
+
+struct cexpr *rvalue(struct cexpr *e)
+{
+    if (e->t->k == CT_ARRAY || e->t->k == CT_FUNC) {
+        if (e->k == E_OVL) {
+            if (e->fn->next)
+                ex_error(e, "'%s' is overloaded: which one is meant is "
+                            "unclear here", e->fn->name);
+            if (e->fn->cls && !e->fn->is_static)
+                ex_error(e, "a member function is called, or its address "
+                            "taken as &%s::%s", e->fn->cls->name,
+                         e->fn->name);
+            struct cexpr *f = ex_new(E_FUNC, e->fn->type, VC_LVALUE);
+            f->fn = e->fn;
+            f->line = e->line;
+            f->file = e->file;
+            e = f;
+        }
+        struct cexpr *d = xmalloc(sizeof *d);
+        *d = *e;
+        d->t = ct_decay(e->t);
+        d->vc = VC_PRVALUE;
+        return d;
+    }
+    if (e->vc == VC_PRVALUE || e->t->k == CT_CLASS)
+        return e;
+    struct cexpr *d = xmalloc(sizeof *d);
+    *d = *e;
+    d->t = ct_unqual(e->t);
+    d->vc = VC_PRVALUE;
+    return d;
+}
+
+enum { R_EXACT, R_PROMO, R_CONV, R_USER, R_ELLIPSIS, R_BAD };
+
+struct ics {
+    int rank;
+    int ptr_bool;             /* a pointer converted to bool */
+    int qual_adj;             /* a qualification conversion */
+    int is_ref;               /* a reference binding */
+    int binds_rvref;          /* ... of an rvalue reference to an rvalue */
+    unsigned ref_cv;          /* ... to this cv-qualified type */
+    struct cclass *base_to;   /* a derived-to-base conversion, to this */
+    int to_void_ptr;          /* a pointer converted to void * */
+    struct cfunc *user;       /* the user-defined conversion */
+    struct cclass *list_cls;  /* ... or, none named, the class a braced list
+                               * makes (an aggregate's, {}) */
+    int to_il;                /* a braced list to std::initializer_list */
+};
+
+/* ---- bases ---- */
+
+static int path_count(struct cclass *d, struct cclass *b)
+{
+    if (d == b)
+        return 1;
+    class_ensure(d);
+    if (d->nvbases) {
+        /* a virtual base is one subobject however it is reached */
+        struct cclass *vb;
+        long off;
+        return class_base_path(d, b, &vb, &off);
+    }
+    int n = 0;
+    for (int i = 0; i < d->nbases; i++)
+        n += path_count(d->bases[i].cls, b);
+    return n;
+}
+
+/* The offset of the (first) b subobject in d, or -1 (or reached through a
+ * virtual base: not fixed). */
+static long base_offset(struct cclass *d, struct cclass *b)
+{
+    if (d == b)
+        return 0;
+    if (d->nvbases) {
+        struct cclass *vb;
+        long off;
+        if (class_base_path(d, b, &vb, &off) != 1 || vb)
+            return -1;
+        return off;
+    }
+    for (int i = 0; i < d->nbases; i++) {
+        long o = base_offset(d->bases[i].cls, b);
+        if (o >= 0)
+            return d->bases[i].off + o;
+    }
+    return -1;
+}
+
+int class_derives(struct cclass *d, struct cclass *b, int *ambiguous)
+{
+    int n = path_count(d, b);
+    if (ambiguous)
+        *ambiguous = n > 1;
+    return n > 0;
+}
+
+/* d is a proper, unambiguous base-of relation away from b. */
+static int is_proper_base(struct cclass *d, struct cclass *b)
+{
+    return d != b && path_count(d, b) == 1;
+}
+
+static struct cexpr *shift_object(struct cexpr *e, struct cclass *to,
+                                  long off, int ptr)
+{
+    unsigned q = ptr ? e->t->to->q : e->t->q;
+    struct cty *bt = ct_qual(ct_class(to), q);
+    struct cexpr *r = ex_new(E_BASE, ptr ? ct_ptr(bt) : bt,
+                             ptr ? VC_PRVALUE : e->vc);
+    r->a = xmalloc(sizeof *r->a);
+    r->a[0] = e;
+    r->na = 1;
+    r->ival = off;
+    r->is_array = ptr;
+    r->line = e->line;
+    r->file = e->file;
+    return r;
+}
+
+/* The accessibility of a base is a question about a CONVERSION, not
+ * about the object adjustment that reaching an inherited member needs.
+ * to_base serves both, so the check cannot live inside it: naming a
+ * member through a derived object is governed by that MEMBER's access,
+ * and a using-declaration can make a protected base's member public in
+ * the derived class. libstdc++ does exactly that --
+ * `class vector : protected _Vector_base` with
+ * `using _Base::get_allocator;` in its public section -- and checking
+ * the base at every adjustment refuses it. So the check sits at the
+ * places where a D really becomes a B: the standard pointer and
+ * reference conversions, and the explicit casts. */
+static void base_conv_check(struct cexpr *e, struct cclass *d,
+                            struct cclass *b)
+{
+    if (!access_base_ok(d, b))
+        ex_error(e, "'%s' is an inaccessible base of '%s'",
+                 b->name ? b->name : "that class",
+                 d->name ? d->name : "that class");
+}
+
+struct cexpr *to_base(struct cexpr *e, struct cclass *b, int ptr)
+{
+    struct cclass *d = ptr ? e->t->to->cls : e->t->cls;
+    if (d == b)
+        return e;
+    int n = path_count(d, b);
+    if (n == 0)
+        ex_error(e, "'%s' is not a base of '%s'", b->name, d->name);
+    if (n > 1)
+        ex_error(e, "'%s' is an ambiguous base of '%s'", b->name, d->name);
+    if (d->nvbases) {
+        struct cclass *vb;
+        long off;
+        class_base_path(d, b, &vb, &off);
+        struct cexpr *r = shift_object(e, b, off, ptr);
+        if (vb)
+            r->vbindex = class_vbindex(d, vb);
+        return r;
+    }
+    return shift_object(e, b, base_offset(d, b), ptr);
+}
+
+/* The object (or pointer) of base class b converted to its derived d:
+ * static_cast's downcast. */
+static struct cexpr *to_derived(struct cexpr *e, struct cclass *d, int ptr)
+{
+    struct cclass *b = ptr ? e->t->to->cls : e->t->cls;
+    if (!is_proper_base(d, b))
+        ex_error(e, "'%s' is not an unambiguous base of '%s'", b->name,
+                 d->name);
+    if (base_offset(d, b) < 0)
+        ex_error(e, "'%s' is a virtual base of '%s': a cast down from it "
+                    "needs dynamic_cast", b->name, d->name);
+    return shift_object(e, d, -base_offset(d, b), ptr);
+}
+
+static struct ics ics_of(struct cexpr *e, struct cty *to);
+
+/* A pointer to member of base B as one of derived class t->cls: the
+ * base's offset added (not through a virtual base: no fixed offset). */
+static struct cexpr *mptr_to_derived(struct cexpr *e, struct cty *t)
+{
+    long off = base_offset(t->cls, e->t->cls);
+    if (off < 0)
+        ex_error(e, "'%s' converted to '%s' through a virtual base",
+                 ct_name(e->t), ct_name(t));
+    if (!off)
+        return ex_cast(e, t);
+    struct cexpr *r = ex1(E_MPCONV, ct_unqual(t), VC_PRVALUE, e);
+    r->ival = off;
+    return r;
+}
+
+static int is_integral_promotion(struct cty *from, struct cty *to)
+{
+    if (!ct_is_integer(from) || !ct_is_integer(to) || to->k == CT_ENUM)
+        return 0;
+    if (from->k == CT_ENUM && from->en->scoped)
+        return 0;
+    struct cty *p = ct_promote(from);
+    return p->k == to->k && from->k != to->k;
+}
+
+/* Of overload set e (or function e), the function of type ft — a
+ * template's specialization deduced from ft — or NULL (13.4). */
+static struct cfunc *ovl_pick(struct cexpr *e, struct cty *ft)
+{
+    for (struct cfunc *f = e->fn; f; f = e->k == E_OVL ? f->next : NULL) {
+        struct cfunc *g = f->alias_of ? f->alias_of : f;
+        if (g->cls && !g->is_static)
+            continue;
+        if (g->tmpl) {
+            struct ctarg *args;
+            int n;
+            if (!deduce_func_type(g->tmpl, e->targs, e->ntargs, ft, &args,
+                                  &n))
+                continue;
+            struct cfunc *inst = func_instance(g->tmpl, args, n);
+            if (inst && ct_same_unqual(inst->type, ft))
+                return inst;
+            continue;
+        }
+        if (ct_same_unqual(g->type, ft))
+            return g;
+    }
+    return NULL;
+}
+
+/* The standard conversion from e to the non-reference, non-class t. */
+static struct ics std_conv(struct cexpr *e, struct cty *to)
+{
+    struct ics r;
+    memset(&r, 0, sizeof r);
+    r.rank = R_BAD;
+    struct cty *tu = ct_unqual(to);
+    if (e->k == E_INITLIST && !e->t) {   /* (a typed one: its type's) */
+        if (e->na == 0) {
+            r.rank = R_EXACT;
+            return r;
+        }
+        if (e->na == 1 && e->a[0]->k != E_INITLIST)
+            return std_conv(e->a[0], to);
+        return r;
+    }
+    if (e->k == E_OVL && e->memptr) {
+        if (ct_is_pmf(tu))
+            for (struct cfunc *f = e->fn; f; f = f->next)
+                if (ct_same_unqual(f->type, tu->to)) {
+                    if (f->cls == tu->cls)
+                        r.rank = R_EXACT;
+                    else if (r.rank == R_BAD &&
+                             class_derives(tu->cls, f->cls, NULL))
+                        r.rank = R_CONV;   /* (to the derived class's) */
+                }
+        return r;
+    }
+    if (e->k == E_OVL || e->k == E_FUNC) {
+        struct cty *ft = tu->k == CT_PTR ? tu->to : NULL;
+        if (!ft || ft->k != CT_FUNC)
+            return r;
+        if (ovl_pick(e, ft))
+            r.rank = R_EXACT;
+        return r;
+    }
+    if (e->t->k == CT_CLASS)
+        return r;
+    struct cty *from = ct_unqual(ct_decay(e->t));
+    if (ct_same(from, tu)) {
+        r.rank = R_EXACT;
+        return r;
+    }
+    if (tu->k == CT_COMPLEX) {          /* a real or another complex */
+        if (from->k == CT_COMPLEX ||
+            (ct_is_arith(from) && !(from->k == CT_ENUM && from->en->scoped)))
+            r.rank = R_CONV;
+        return r;
+    }
+    if (tu->k == CT_BOOL) {
+        if ((ct_is_arith(from) && !(from->k == CT_ENUM && from->en->scoped)) ||
+            from->k == CT_COMPLEX) {
+            r.rank = R_CONV;
+        } else if (from->k == CT_PTR || from->k == CT_NULLPTR ||
+                   from->k == CT_MPTR) {
+            r.rank = R_CONV;
+            r.ptr_bool = 1;
+        }
+        return r;
+    }
+    if (tu->k == CT_MPTR) {
+        if (is_null_const(e) || from->k == CT_NULLPTR)
+            r.rank = R_CONV;
+        else if (from->k == CT_MPTR && from->cls == tu->cls &&
+                 ct_same_unqual(from->to, tu->to))
+            r.rank = R_EXACT;
+        else if (from->k == CT_MPTR && ct_same_unqual(from->to, tu->to)) {
+            /* B::* to D::*, B a base of D (7.3.13) */
+            int amb;
+            if (class_derives(tu->cls, from->cls, &amb) && !amb)
+                r.rank = R_CONV;
+        }
+        return r;
+    }
+    if (ct_is_arith(tu) && tu->k != CT_ENUM) {
+        if (ct_is_arith(from) && !(from->k == CT_ENUM && from->en->scoped)) {
+            if (is_integral_promotion(from, tu) ||
+                (from->k == CT_FLOAT && tu->k == CT_DOUBLE))
+                r.rank = R_PROMO;
+            else
+                r.rank = R_CONV;
+        }
+        return r;
+    }
+    if (tu->k == CT_PTR) {
+        if (is_null_const(e) || from->k == CT_NULLPTR) {
+            r.rank = R_CONV;
+            return r;
+        }
+        if (from->k != CT_PTR)
+            return r;
+        struct cty *pf = from->to, *pt = tu->to;
+        if ((pt->q & pf->q) != pf->q)
+            return r;                         /* would drop a qualifier */
+        if (ct_same_unqual(pf, pt)) {
+            r.rank = R_EXACT;
+            r.qual_adj = pt->q != pf->q;
+            return r;
+        }
+        /* T(*)[N] -> const T(*)[N]: an array's qualifiers are its
+         * elements' (T(*)[] -> const T(*)[]: span's compatibility test) */
+        if (pf->k == CT_ARRAY && pt->k == CT_ARRAY && pf->n == pt->n &&
+            ct_same_unqual(pf->to, pt->to) &&
+            (pt->to->q & pf->to->q) == pf->to->q) {
+            r.rank = R_EXACT;
+            r.qual_adj = pt->to->q != pf->to->q;
+            return r;
+        }
+        /* T** -> const T* const* and the like: one level deep */
+        if (pf->k == CT_PTR && pt->k == CT_PTR &&
+            ct_same_unqual(pf->to, pt->to) &&
+            (pt->to->q & pf->to->q) == pf->to->q &&
+            (pt->to->q == pf->to->q || (pt->q & CQ_CONST))) {
+            r.rank = R_EXACT;
+            r.qual_adj = 1;
+            return r;
+        }
+        if (pt->k == CT_VOID && pf->k != CT_FUNC) {
+            r.rank = R_CONV;
+            r.to_void_ptr = pf->k != CT_VOID;
+            return r;
+        }
+        if (pf->k == CT_CLASS && pt->k == CT_CLASS &&
+            is_proper_base(pf->cls, pt->cls)) {
+            r.rank = R_CONV;
+            r.base_to = pt->cls;
+        }
+        return r;
+    }
+    if (tu->k == CT_NULLPTR && is_null_const(e)) {
+        r.rank = R_CONV;
+        return r;
+    }
+    return r;
+}
+
+static struct cfunc *converting_ctor(struct cclass *c, struct cexpr *e,
+                                     int allow_explicit);
+static struct cfunc *conv_function(struct cexpr *e, struct cty *to,
+                                   int allow_explicit, struct ics *second);
+
+/* Set while a candidate's arguments may take only standard conversions
+ * (RS_NO_USER): no user-defined conversion is tried, so none recurses */
+static int no_user_conv;
+
+static struct ics ref_ics(struct cexpr *e, struct cty *rt)
+{
+    struct ics r;
+    memset(&r, 0, sizeof r);
+    r.rank = R_BAD;
+    struct cty *T = rt->to;
+    int rv = rt->k == CT_RREF;
+    int cref = (T->q & CQ_CONST) && !(T->q & CQ_VOLATILE);
+    if ((e->k == E_OVL || e->k == E_FUNC) && T->k == CT_FUNC) {
+        /* A named function is an LVALUE ([expr.prim.id]/1), so an rvalue
+         * reference cannot bind to it and the candidate is not viable.
+         * Without this both `T&` and `const T&&` are exact matches for
+         * `take(f)`, and the deleted `const T&&` guard that std::ref and
+         * std::cref use to reject temporaries wins -- so `std::ref` of a
+         * function is rejected as deleted. (A forwarding reference `T&&`
+         * is unaffected: deduction collapses it to an lvalue reference
+         * before it reaches here.) */
+        if (rv)
+            return r;
+        /* a function named, bound to a reference to its type: an exact
+         * match, as its address would be (bind_ref takes that) */
+        r = ics_of(e, ct_ptr(T));
+        r.is_ref = 1;
+        r.binds_rvref = rv;
+        r.ref_cv = T->q;
+        return r;
+    }
+    if (e->k == E_INITLIST || e->k == E_OVL || e->k == E_FUNC) {
+        if (!rv && !cref)
+            return r;             /* (a temporary would be bound) */
+        r = ics_of(e, ct_unqual(T));
+        r.is_ref = 1;
+        r.binds_rvref = rv;
+        r.ref_cv = T->q;
+        return r;
+    }
+    int related = ct_same_unqual(e->t, T);
+    int derived = !related && e->t->k == CT_CLASS && T->k == CT_CLASS &&
+                  is_proper_base(e->t->cls, T->cls);
+    if (derived) {
+        /* binding to a base: a derived-to-base Conversion (12.2.4.2) */
+        related = 1;
+        r.base_to = T->cls;
+    }
+    int compat = related && (T->q & e->t->q) == e->t->q;
+    if (!related && e->t->k == CT_ARRAY && T->k == CT_ARRAY &&
+        e->t->n == T->n && ct_same_unqual(e->t->to, T->to)) {
+        /* const T (&)[N] to a T[N]: an array's cv is its elements' */
+        related = 1;
+        compat = (T->to->q & e->t->to->q) == e->t->to->q;
+    }
+    int lv = e->vc == VC_LVALUE && !is_bitfield(e);
+    r.is_ref = 1;
+    r.ref_cv = T->q;
+    /* reference-related but not compatible (it would drop cv): no
+     * temporary is made — the binding is not viable (9.4.4) */
+    if (related && !compat && !is_bitfield(e))
+        return r;
+    int ok_rank = derived ? R_CONV : R_EXACT;
+    if (compat && !is_bitfield(e)) {
+        if (!rv && lv) {
+            r.rank = ok_rank;
+            return r;
+        }
+        if (rv && !lv) {
+            r.rank = ok_rank;
+            r.binds_rvref = 1;
+            return r;
+        }
+        if (!rv && cref && !lv) {
+            r.rank = ok_rank;
+            return r;
+        }
+        if (rv && lv)
+            return r;
+    }
+    if (!rv && !cref) {
+        /* [dcl.init.ref]/5.1.2, in the form overload resolution needs: a
+         * class with a conversion function whose result is a reference
+         * the parameter can bind to gives a USER-DEFINED conversion
+         * sequence. Without it, passing a reference_wrapper<int> to a
+         * function taking int& finds no viable candidate at all.
+         *
+         * ONLY for a non-const lvalue reference, which is the case that
+         * has no other path. The const-reference and rvalue-reference
+         * forms already reach the user-conversion fallback below, and
+         * answering here as well made those two equally ranked -- which
+         * turned `partial_ordering = strong_ordering` in libstdc++'s
+         * <tuple> from a working assignment into an ambiguity. */
+        if (!no_user_conv && e->t && e->t->k == CT_CLASS &&
+            conv_function(e, rt, 0, NULL)) {
+            r.rank = R_USER;
+            r.is_ref = 1;
+            r.binds_rvref = 0;
+            r.ref_cv = T->q;
+        }
+        return r;
+    }
+    if (compat && e->vc == VC_LVALUE && rv)
+        return r;
+    struct ics s = ics_of(e, ct_unqual(T));
+    if (s.rank == R_BAD)
+        return r;
+    s.is_ref = 1;
+    s.binds_rvref = rv;
+    s.ref_cv = T->q;
+    return s;
+}
+
+int expr_swap_no_user_conv(int v)
+{
+    int old = no_user_conv;
+    no_user_conv = v;
+    return old;
+}
+
+static struct ics ics_of(struct cexpr *e, struct cty *to)
+{
+    if (ct_is_ref(to))
+        return ref_ics(e, to);
+    struct ics r;
+    memset(&r, 0, sizeof r);
+    r.rank = R_BAD;
+    if (to->k == CT_CLASS) {
+        class_ensure(to->cls);      /* its constructors, its bases */
+        if (!(e->k == E_INITLIST && !e->t) && e->t && e->t->k == CT_CLASS &&
+            e->t->cls == to->cls) {
+            r.rank = R_EXACT;
+            return r;
+        }
+        if (!(e->k == E_INITLIST && !e->t) && e->t && e->t->k == CT_CLASS &&
+            is_proper_base(e->t->cls, to->cls)) {
+            r.rank = R_CONV;              /* slicing to a base */
+            r.base_to = to->cls;
+            return r;
+        }
+        if (e->k == E_INITLIST && !e->t) {
+            struct cty *X = ct_il_elem(to);
+            if (X) {
+                /* each element to X: the worst of those (12.2.4.2.6) */
+                r.rank = R_EXACT;
+                r.to_il = 1;
+                for (int i = 0; i < e->na; i++) {
+                    struct ics s = ics_of(e->a[i], X);
+                    if (s.rank == R_BAD) {
+                        r.rank = R_BAD;
+                        return r;
+                    }
+                    if (s.rank > r.rank)
+                        r.rank = s.rank;
+                }
+                if (r.rank == R_USER)
+                    r.rank = R_CONV;   /* no one conversion of the list */
+                return r;
+            }
+            if (to->cls->aggregate || e->na == 0) {
+                r.rank = R_USER;
+                r.list_cls = to->cls;
+                return r;
+            }
+            /* The initializer-list constructors first, the list their
+             * ONE argument, and only then every constructor with the
+             * elements as arguments (12.2.2.8) -- the order construct()
+             * already used. Scoring skipped the first step, so a nested
+             * list was only ever offered to the constructors element by
+             * element: `vector<vector<int>> v{{1, 2, 3}}` looked for a
+             * three-argument vector<int>, found none, and the whole
+             * outer call was reported as having no viable candidate.
+             * The initialization itself was right all along -- this
+             * rejected programs rather than miscompiling them, which is
+             * why `{{1, 2}}` worked (vector(n, value) happens to take
+             * two) and `{{1, 2, 3}}` did not. */
+            struct cfunc *f = resolve_ex(to->cls->ctors, NULL, &e, 1,
+                                         NULL, NULL, RS_IL_CTORS);
+            if (!f)
+                f = resolve(to->cls->ctors, NULL, e->a, e->na, NULL, NULL);
+            if (f) {
+                r.rank = R_USER;
+                r.user = f;
+            }
+            return r;
+        }
+        if (no_user_conv)
+            return r;
+        struct cfunc *f = converting_ctor(to->cls, e, 0);
+        if (!f && e->t && e->t->k == CT_CLASS)
+            f = conv_function(e, to, 0, NULL);
+        if (f) {
+            r.rank = R_USER;
+            r.user = f;
+        }
+        return r;
+    }
+    if (e->t && e->t->k == CT_CLASS && !(e->k == E_INITLIST && !e->t)) {
+        if (no_user_conv)
+            return r;
+        struct ics second;
+        struct cfunc *f = conv_function(e, to, 0, &second);
+        if (f) {
+            r = second;
+            r.rank = R_USER;
+            r.user = f;
+        }
+        return r;
+    }
+    return std_conv(e, to);
+}
+
+/* 1 if a is a better conversion than b, -1 if worse, 0 if neither. */
+static int ics_cmp(const struct ics *a, const struct ics *b)
+{
+    /* a list to std::initializer_list beats any other conversion of
+     * that list (12.2.4.3) */
+    if (a->to_il != b->to_il && a->rank != R_BAD && b->rank != R_BAD)
+        return a->to_il ? 1 : -1;
+    if (a->rank != b->rank)
+        return a->rank < b->rank ? 1 : -1;
+    if (a->rank == R_USER &&
+        (a->user != b->user ||
+         (!a->user && (!a->list_cls || a->list_cls != b->list_cls))))
+        return 0;     /* (the same conversion: its second part decides) */
+    if (a->ptr_bool != b->ptr_bool)
+        return a->ptr_bool ? -1 : 1;
+    /* B* to A* beats B* to void* (12.2.4.3) */
+    if (a->base_to && b->to_void_ptr)
+        return 1;
+    if (b->base_to && a->to_void_ptr)
+        return -1;
+    if (a->base_to && b->base_to && a->base_to != b->base_to) {
+        /* to a base that derives from the other's: the nearer is better */
+        if (is_proper_base(a->base_to, b->base_to))
+            return 1;
+        if (is_proper_base(b->base_to, a->base_to))
+            return -1;
+    }
+    if (a->is_ref && b->is_ref) {
+        if (a->binds_rvref != b->binds_rvref)
+            return a->binds_rvref ? 1 : -1;
+        if (a->ref_cv != b->ref_cv) {
+            if ((b->ref_cv & a->ref_cv) == a->ref_cv)
+                return 1;
+            if ((a->ref_cv & b->ref_cv) == b->ref_cv)
+                return -1;
+        }
+    }
+    if (a->qual_adj != b->qual_adj)
+        return a->qual_adj ? -1 : 1;
+    return 0;
+}
+
+/* A candidate being considered: its conversion per operand. In call form
+ * index 0 is the implicit object (when there is one) and i+1 argument i;
+ * in operator form index i is operand i, the left one being a member
+ * candidate's object. */
+struct cand {
+    struct cfunc *f;
+    struct ics *ics;
+    int n;
+    int has_obj;
+    int nparams;              /* the function's parameters the arguments
+                               * match (partial ordering compares them) */
+};
+
+static int cand_better(const struct cand *a, const struct cand *b)
+{
+    int better = 0;
+    int start = (a->has_obj && b->has_obj) ? 0 : 1;
+    for (int i = start; i < a->n && i < b->n; i++) {
+        int c = ics_cmp(&a->ics[i], &b->ics[i]);
+        if (c < 0)
+            return 0;
+        if (c > 0)
+            better = 1;
+    }
+    if (better)
+        return 1;
+    /* equal conversions: a non-template beats a template's
+     * specialization (12.2.4.3) */
+    if (!a->f->spec_of && b->f->spec_of)
+        return 1;
+    /* two templates' specializations: the more specialized template */
+    if (a->f->spec_of && b->f->spec_of && a->f->spec_of != b->f->spec_of &&
+        more_specialized(a->f->spec_of, b->f->spec_of,
+                         a->nparams < b->nparams ? a->nparams : b->nparams))
+        return 1;
+    /* ... as specialized: the more constrained (13.5.5) */
+    if (a->f->spec_of && b->f->spec_of && a->f->spec_of != b->f->spec_of &&
+        spec_more_constrained(a->f, b->f))
+        return 1;
+    /* two non-templates (an instance's members): one with constraints
+     * beats one without, which they subsume */
+    if (!a->f->spec_of && !b->f->spec_of && a->f->type->treq &&
+        !b->f->type->treq)
+        return 1;
+    return 0;
+}
+
+static const char *arg_types(struct cexpr **args, int na)
+{
+    static char buf[512];
+    size_t n = 0;
+    buf[0] = 0;
+    for (int i = 0; i < na && n < sizeof buf - 64; i++) {
+        const char *t = args[i]->k == E_INITLIST && !args[i]->t
+                        ? "{...}" : args[i]->k == E_OVL
+                        ? "<overloaded function>" : ct_name(args[i]->t);
+        n += (size_t)snprintf(buf + n, sizeof buf - n, "%s%s", i ? ", " : "",
+                              t);
+    }
+    return buf;
+}
+
+/* [over.match.funcs]/4: the implicit object parameter names the class
+ * the function is a member of -- EXCEPT that a base's member brought
+ * into a derived class by a using-declaration is treated as a member of
+ * the derived class.
+ *
+ * The exception is not a nicety. Without it, `d = 3` where
+ * `operator=(int)` came through a using-declaration is AMBIGUOUS against
+ * the implicit copy assignment: the first wants a derived-to-base
+ * conversion for its object and an exact match for its argument, the
+ * second the reverse, and neither is better in every argument. That is
+ * what made `std::atomic<int> a; a = 3;` fail to compile. */
+static struct cclass *object_class(struct cexpr *obj, struct cfunc *f)
+{
+    struct cclass *oc = obj->t->cls;
+    if (f->cls == oc || !f->name)
+        return f->cls;
+    struct csym *y = scope_find_here(oc->scope, f->name);
+    if (y && y->k == CS_FUNC)
+        for (struct cfunc *g = y->fns; g; g = g->next)
+            if (g->alias_of == f)
+                return oc;
+    return f->cls;
+}
+
+/* The implicit object parameter's conversion: `cv C&` (or && for an
+ * &&-qualified member) — which, unless &-qualified, an rvalue binds too. */
+static struct ics object_ics(struct cexpr *obj, struct cfunc *f)
+{
+    struct cty *ft = f->type;
+    struct cexpr lv = *obj;
+    if (ft->refq == 0)
+        lv.vc = VC_LVALUE;
+    struct cclass *pc = obj->t->k == CT_CLASS ? object_class(obj, f) : f->cls;
+    struct cty *self = ct_ref(ct_qual(ct_class(pc), ft->fq),
+                              ft->refq == 2);
+    if (obj->t->k != CT_CLASS || !class_derives(obj->t->cls, f->cls, NULL)) {
+        struct ics bad;
+        memset(&bad, 0, sizeof bad);
+        bad.rank = R_BAD;
+        return bad;
+    }
+    return ref_ics(&lv, self);
+}
+
+static int resolve_ambiguous;
+
+int expr_resolve_was_ambiguous(void)
+{
+    return resolve_ambiguous;
+}
+
+/* A call's explicit template arguments (f<int>(x)), for the template
+ * candidates of the next resolution. */
+static struct ctarg *cur_targs;
+static int cur_ntargs, cur_has_targs;
+
+/* The candidates with each function template replaced by its
+ * specialization for these arguments — or dropped, when deduction or
+ * substitution fails (13.10.3). */
+/* The object a member call is on (obj its address): an lvalue, or an
+ * xvalue for std::move(x).f() */
+static struct cexpr *object_lvalue(struct cexpr *obj)
+{
+    if (!obj)
+        return NULL;
+    struct cexpr *o = ex_deref(obj);
+    if (obj->obj_xvalue)
+        o->vc = VC_XVALUE;
+    return o;
+}
+
+static int instantiate_candidates(struct cfunc **fs, int nf,
+                                  struct cexpr *obj, struct cexpr **args,
+                                  int na, int opform, struct ctarg *expl,
+                                  int nexpl, int has_expl,
+                                  struct cfunc ***out)
+{
+    struct cfunc **r = xmalloc((size_t)(nf ? nf : 1) * sizeof *r);
+    int n = 0;
+    (void)obj;
+    for (int k = 0; k < nf; k++) {
+        struct cfunc *f = fs[k];
+        if (!f->tmpl) {
+            if (!has_expl)
+                r[n++] = f;
+            continue;
+        }
+        /* (a static operator() in operator form: the object is not an
+         * argument either, C++23) */
+        int member = f->cls && !f->is_ctor && (!f->is_static || opform);
+        struct cexpr **xa = opform && member ? args + 1 : args;
+        int nx = opform && member ? na - 1 : na;
+        if (f->tmpl->pattern && f->tmpl->pattern->type->xobj) {
+            /* an explicit object parameter: deduced from the object */
+            struct cexpr *o = opform ? args[0] : object_lvalue(obj);
+            if (!o)
+                continue;
+            xa = xmalloc((size_t)(nx + 1) * sizeof *xa);
+            xa[0] = o;
+            memcpy(xa + 1, opform ? args + 1 : args,
+                   (size_t)(opform ? na - 1 : na) * sizeof *xa);
+            nx = (opform ? na - 1 : na) + 1;
+        }
+        struct ctarg *targs;
+        int nt;
+        if (!deduce_call(f->tmpl, expl, nexpl, xa, nx, &targs, &nt))
+            continue;
+        struct cfunc *spec = func_instance(f->tmpl, targs, nt);
+        if (spec && f->inherited)       /* a base's constructor template */
+            spec = inherited_spec(f, spec);
+        if (spec)
+            r[n++] = spec;
+    }
+    *out = r;
+    return n;
+}
+
+/* an ambiguous call's error: with the two candidates neither better */
+static void ambiguous(const struct ctok *at, const char *what,
+                      struct cexpr **args, int na, struct cfunc *a,
+                      struct cfunc *b)
+{
+    if (cx_sfinae)
+        longjmp(*(jmp_buf *)cx_sfinae, 1);
+    diag_error_at(at ? at->file : "<c++>", at ? at->t.line : 0,
+                  at ? at->t.col : 0, "call to '%s(%s)' is ambiguous", what,
+                  arg_types(args, na));
+    struct cfunc *two[2] = { a, b };
+    for (int k = 0; k < 2; k++) {
+        struct cfunc *f = two[k];
+        struct cty *ft = f->type;
+        char buf[512];
+        size_t n = 0;
+        buf[0] = 0;
+        for (int i = 0; i < ft->np && n < sizeof buf - 64; i++)
+            n += (size_t)snprintf(buf + n, sizeof buf - n, "%s%s",
+                                  i ? ", " : "", ct_name(ft->params[i]));
+        diag_note_at(f->file ? f->file : "<c++>", f->line, 0,
+                     "candidate: %s%s(%s)%s", f->spec_of ? "(template) " : "",
+                     f->name, buf, f->is_explicit ? " explicit" : "");
+    }
+    cx_inst_notes();
+    fatal_unwind();
+}
+
+/* The best of the candidates fs[0..nf) for the arguments. In call form,
+ * obj (a pointer, or NULL) is the object member candidates are called
+ * on; in operator form (opform) args[0] is the left operand, a member
+ * candidate's object and a non-member's first argument. With `at` NULL
+ * it probes: NULL (resolve_ambiguous telling why) instead of an error. */
+static struct cfunc *best_of(struct cfunc **fs, int nf, struct cexpr *obj,
+                             struct cexpr **args, int na, int opform,
+                             const struct ctok *at, const char *what,
+                             int flags)
+{
+    /* this call's explicit template arguments, taken before anything
+     * (deduction, an instantiation) resolves another call */
+    struct ctarg *expl = cur_targs;
+    int nexpl = cur_ntargs, has_expl = cur_has_targs;
+    cur_targs = NULL;
+    cur_ntargs = cur_has_targs = 0;
+    int templ = 0;
+    for (int k = 0; k < nf; k++)
+        templ |= fs[k]->tmpl != NULL;
+    if (templ || has_expl) {
+        const char *w = what ? what : nf ? fs[0]->name : "?";
+        nf = instantiate_candidates(fs, nf, obj, args, na, opform, expl,
+                                    nexpl, has_expl, &fs);
+        what = w;
+    }
+    struct cand *cs = xcalloc((size_t)(nf ? nf : 1), sizeof *cs);
+    int nv = 0;
+    resolve_ambiguous = 0;
+    struct cexpr *objlv = obj ? ex_deref(obj) : NULL;
+    if (objlv && obj->obj_xvalue)
+        objlv->vc = VC_XVALUE;       /* std::move(x).f(): f() && */
+    for (int k = 0; k < nf; k++) {
+        struct cfunc *f = fs[k];
+        struct cty *ft = f->type;
+        int xo = ft->xobj;            /* params[0] the explicit object */
+        int member = f->cls && !f->is_ctor &&
+                     (!f->is_static || opform || xo);
+        int nx = opform && member ? na - 1 : na;    /* explicit arguments */
+        struct cexpr **xa = opform && member ? args + 1 : args;
+        if (nx + xo > ft->np && !ft->variadic)
+            continue;
+        if (nx + xo < ft->np && (!f->defargs || !f->defargs[nx + xo]))
+            continue;
+        if ((flags & RS_NO_EXPLICIT) && f->is_explicit)
+            continue;
+        if (member && !opform && !obj)
+            continue;
+        struct cand *c = &cs[nv];
+        c->f = f;
+        c->n = opform ? na : na + 1;
+        c->has_obj = opform || member;
+        c->nparams = nx;
+        c->ics = xcalloc((size_t)(c->n ? c->n : 1), sizeof *c->ics);
+        int ok = 1, base = opform ? 0 : 1;
+        if (xo) {
+            /* the object, converted to the explicit object parameter */
+            c->ics[0] = ics_of(opform ? args[0] : objlv, ft->params[0]);
+            ok = c->ics[0].rank != R_BAD;
+            base = 1;
+        } else if (member && f->is_static) {
+            c->ics[0].rank = R_EXACT;   /* the object: not converted */
+            base = 1;
+        } else if (member) {
+            c->ics[0] = object_ics(opform ? args[0] : objlv, f);
+            ok = c->ics[0].rank != R_BAD;
+            if (opform)
+                base = 1;
+        }
+        for (int i = 0; ok && i < nx; i++) {
+            struct ics *ic = &c->ics[base + i];
+            if (i + xo >= ft->np) {
+                ic->rank = R_ELLIPSIS;
+                continue;
+            }
+            int saved_nuc = no_user_conv;
+            if (flags & RS_NO_USER)
+                no_user_conv = 1;
+            *ic = ics_of(xa[i], ft->params[i + xo]);
+            no_user_conv = saved_nuc;
+            ok = ic->rank != R_BAD;
+            if ((flags & RS_NO_USER) && ic->rank == R_USER)
+                ok = 0;
+        }
+        if (ok)
+            nv++;
+    }
+    if (nv == 0) {
+        if (!at)
+            return NULL;
+        if (cx_sfinae)
+            longjmp(*(jmp_buf *)cx_sfinae, 1);
+        diag_error_at(at->file, at->t.line, at->t.col,
+                      "no matching function for call to '%s(%s)'",
+                      what ? what : nf ? fs[0]->name : "?",
+                      arg_types(args, na));
+        for (int k = 0; k < nf && k < 6; k++) {
+            struct cfunc *f = fs[k];
+            char buf[512];
+            size_t n = 0;
+            buf[0] = 0;
+            for (int i = 0; i < f->type->np && n < sizeof buf - 64; i++)
+                n += (size_t)snprintf(buf + n, sizeof buf - n, "%s%s",
+                                      i ? ", " : "",
+                                      ct_name(f->type->params[i]));
+            diag_note_at(f->file ? f->file : "<c++>", f->line, 0,
+                         "candidate: %s(%s)%s", f->name, buf,
+                         f->type->variadic ? " ..." : "");
+        }
+        if (nf == 0 && templ)
+            diag_note_at(at->file, at->t.line, at->t.col,
+                         "no template's arguments could be deduced");
+        cx_inst_notes();
+        fatal_unwind();
+    }
+    int best = 0;
+    for (int i = 1; i < nv; i++)
+        if (cand_better(&cs[i], &cs[best]))
+            best = i;
+    for (int i = 0; i < nv; i++) {
+        if (i == best)
+            continue;
+        if (!cand_better(&cs[best], &cs[i])) {
+            resolve_ambiguous = 1;
+            if (!at)
+                return NULL;
+            ambiguous(at, what ? what : fs[0]->name, args, na,
+                      cs[best].f, cs[i].f);
+        }
+    }
+    return cs[best].f;
+}
+
+/* ---- candidate sets ---- */
+
+struct fnset {
+    struct cfunc **f;
+    int n, cap;
+};
+
+static void set_add(struct fnset *s, struct cfunc *f)
+{
+    if (func_unsat(f))
+        return;                  /* its requires-clause says no */
+    if (f->alias_of)
+        f = f->alias_of;         /* (brought in by a using-declaration) */
+    for (int i = 0; i < s->n; i++)
+        if (s->f[i] == f)
+            return;
+    if (s->n == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 16;
+        s->f = xrealloc(s->f, (size_t)s->cap * sizeof *s->f);
+    }
+    s->f[s->n++] = f;
+}
+
+static void set_add_all(struct fnset *s, struct cfunc *chain)
+{
+    for (struct cfunc *f = chain; f; f = f->next)
+        set_add(s, f);
+}
+
+struct cfunc *resolve(struct cfunc *set, struct cexpr *obj,
+                      struct cexpr **args, int na, const struct ctok *at,
+                      const char *what)
+{
+    return resolve_ex(set, obj, args, na, at, what, 0);
+}
+
+struct cfunc *resolve_ex(struct cfunc *set, struct cexpr *obj,
+                         struct cexpr **args, int na, const struct ctok *at,
+                         const char *what, int flags)
+{
+    struct fnset fs = { NULL, 0, 0 };
+    set_add_all(&fs, set);
+    if (flags & RS_IL_CTORS) {
+        /* initializer-list constructors: a first parameter
+         * std::initializer_list<X> (or a reference to one), any other
+         * with a default */
+        int k = 0;
+        for (int i = 0; i < fs.n; i++) {
+            struct cfunc *f = fs.f[i];
+            struct cty *ft = f->type;
+            if (ft->np < 1 || !ct_il_param(ft->pdecl ? ft->pdecl[0]
+                                                     : ft->params[0]))
+                continue;
+            if (ft->np > 1 && !(f->defargs && f->defargs[1]) &&
+                !(ft->defargs && ft->defargs[1]) &&
+                !(ft->defarg_toks && ft->defarg_toks[1] >= 0))
+                continue;
+            fs.f[k++] = f;
+        }
+        fs.n = k;
+        if (!k)
+            return NULL;
+    }
+    return best_of(fs.f, fs.n, obj, args, na, 0, at, what,
+                   flags & ~RS_IL_CTORS);
+}
+
+/* The namespaces argument-dependent lookup searches for an argument of
+ * type t (6.5.4): a class's or enum's innermost enclosing namespace (and
+ * the namespace enclosing an inline one), looking through pointers,
+ * references, arrays, and a function type's parameters and result. */
+static void assoc_ns(struct cty *t, struct cscope **ns, int *n, int depth)
+{
+    if (!t || depth > 8)
+        return;
+    while (t->k == CT_PTR || ct_is_ref(t) || t->k == CT_ARRAY)
+        t = t->to;
+    struct cscope *s = NULL;
+    if (t->k == CT_CLASS) {
+        struct cclass *c = t->cls;
+        s = enclosing_ns(c->owner);
+        /* its bases' too, and a specialization's type arguments' (views::
+         * reverse | ...: operator| is its base _RangeAdaptorClosure's
+         * namespace's) */
+        if (c->complete)
+            for (int i = 0; i < c->nbases; i++)
+                assoc_ns(ct_class(c->bases[i].cls), ns, n, depth + 1);
+        for (int i = 0; i < c->ntargs; i++) {
+            struct ctarg *a = &c->targs[i];
+            if (a->is_pack) {
+                for (int k = 0; k < a->nelems; k++)
+                    if (a->elems[k].kind == TP_TYPE)
+                        assoc_ns(a->elems[k].type, ns, n, depth + 1);
+            } else if (a->kind == TP_TYPE) {
+                assoc_ns(a->type, ns, n, depth + 1);
+            }
+        }
+    } else if (t->k == CT_ENUM)
+        s = enclosing_ns(t->en->owner);
+    else if (t->k == CT_FUNC) {
+        assoc_ns(t->to, ns, n, depth + 1);
+        for (int i = 0; i < t->np; i++)
+            assoc_ns(t->params[i], ns, n, depth + 1);
+        return;
+    }
+    for (; s; s = s->is_inline ? s->parent : NULL) {
+        int have = 0;
+        for (int i = 0; i < *n; i++)
+            have |= ns[i] == s;
+        if (!have && *n < 32)
+            ns[(*n)++] = s;
+        if (!s->is_inline)
+            break;
+    }
+}
+
+static void adl(struct fnset *fs, const char *name, struct cexpr **args,
+                int na)
+{
+    struct cscope *ns[32];
+    int n = 0;
+    for (int i = 0; i < na; i++)
+        if (args[i]->t)
+            assoc_ns(args[i]->t, ns, &n, 0);
+    for (int i = 0; i < n; i++) {
+        struct csym *y = lookup_in_adl(ns[i], name);
+        if (y && y->k == CS_FUNC)
+            set_add_all(fs, y->fns);
+    }
+}
+
+/* An operator's or unqualified call's ordinary lookup, member functions
+ * ignored: the functions `name` in the nearest enclosing namespace or
+ * block scope declaring any. */
+static void nonmember_lookup(struct fnset *fs, const char *name)
+{
+    for (struct cscope *s = cx_scope; s; s = s->parent) {
+        if (s->k == SC_CLASS || s->k == SC_ENUM)
+            continue;
+        struct csym *y = lookup_in(s, name);
+        if (y) {
+            if (y->k == CS_FUNC)
+                set_add_all(fs, y->fns);
+            return;
+        }
+    }
+}
+
+/* A non-explicit (unless allowed) constructor of c taking e alone, found
+ * without user-defined conversions of its own. */
+static struct cfunc *converting_ctor(struct cclass *c, struct cexpr *e,
+                                     int allow_explicit)
+{
+    class_ensure(c);                /* an instance not yet instantiated */
+    if (!c->complete)
+        return NULL;
+    struct cfunc *found = NULL;
+    for (struct cfunc *g = c->ctors; g; g = g->next) {
+        struct cfunc *f = g;
+        if (f->is_explicit && !allow_explicit)
+            continue;
+        if (func_unsat(f))
+            continue;
+        if (f->tmpl) {
+            /* a constructor template: its specialization for e */
+            struct ctarg *targs;
+            int nt;
+            if (!deduce_call(f->tmpl, NULL, 0, &e, 1, &targs, &nt))
+                continue;
+            f = func_instance(f->tmpl, targs, nt);
+            if (!f || f->unsat || (f->is_explicit && !allow_explicit))
+                continue;
+        }
+        struct cty *ft = f->type;
+        if (ft->np < 1 && !ft->variadic)
+            continue;
+        if (ft->np > 1 && (!f->defargs || !f->defargs[1]))
+            continue;
+        struct cty *p = ft->params[0];
+        struct cty *pb = ct_strip_ref(p);
+        if (pb->k == CT_CLASS && pb->cls == c)
+            continue;                         /* a copy/move constructor */
+        struct ics s;
+        if (ct_is_ref(p)) {
+            s = ref_ics(e, p);
+        } else if (pb->k == CT_CLASS) {
+            /* by value: the argument's own class (a copy) or a derived
+             * one — not another user conversion */
+            memset(&s, 0, sizeof s);
+            s.rank = R_BAD;
+            if (!(e->k == E_INITLIST && !e->t) && e->t &&
+                e->t->k == CT_CLASS && (e->t->cls == pb->cls ||
+                                        is_proper_base(e->t->cls, pb->cls)))
+                s.rank = e->t->cls == pb->cls ? R_EXACT : R_CONV;
+        } else {
+            s = std_conv(e, p);
+        }
+        if (s.rank >= R_USER)
+            continue;
+        if (found)          /* (the copy constructor's argument: no
+                             * second user conversion, 12.2.4.2) */
+            return resolve_ex(c->ctors, NULL, &e, 1, NULL, NULL,
+                              RS_NO_USER |
+                              (allow_explicit ? 0 : RS_NO_EXPLICIT));
+        found = f;
+    }
+    return found;
+}
+
+/* The conversion function of e's class that takes e to `to` with a
+ * standard conversion after it (12.2.2.6, 12.2.2.7): the best one, or
+ * NULL (none, or two equally good). *second gets that conversion. */
+static struct cfunc *conv_function(struct cexpr *e, struct cty *to,
+                                   int allow_explicit, struct ics *second)
+{
+    struct cclass *c = e->t->cls;
+    class_ensure(c);
+    if (!c->complete)
+        return NULL;
+    struct cfunc *best = NULL;
+    struct ics bs;
+    int tie = 0;
+    memset(&bs, 0, sizeof bs);
+    /* the class's conversion functions, then its bases' (inherited, unless
+     * one to the same type hides them) */
+    struct cclass *cls[64];
+    int ncls = 0, done = 0;
+    cls[ncls++] = c;
+    while (done < ncls) {
+        struct cclass *k = cls[done++];
+        class_ensure(k);
+        for (int b = 0; b < k->nbases && ncls < 64; b++)
+            cls[ncls++] = k->bases[b].cls;
+    }
+    for (int ci = 0; ci < ncls; ci++)
+    for (struct csym *y = cls[ci]->scope->syms; y; y = y->next) {
+        if (y->k != CS_FUNC)
+            continue;
+        for (struct cfunc *f0 = y->fns; f0; f0 = f0->next) {
+            struct cfunc *f = f0;
+            if (!f->is_conv || (f->is_explicit && !allow_explicit) ||
+                func_unsat(f))
+                continue;
+            if (f->tmpl) {
+                /* a template: its specialization for `to`, if one */
+                struct ctarg *ta;
+                int nta;
+                if (!deduce_conv(f->tmpl, to, &ta, &nta) ||
+                    !(f = func_instance(f->tmpl, ta, nta)) || f->unsat)
+                    continue;
+            }
+            int hidden = 0;
+            for (int cj = 0; cj < ci && !hidden; cj++)
+                for (struct csym *z = cls[cj]->scope->syms; z && !hidden;
+                     z = z->next)
+                    if (z->k == CS_FUNC)
+                        for (struct cfunc *h = z->fns; h; h = h->next)
+                            if (h->is_conv &&
+                                ct_same(h->type->to, f->type->to))
+                                hidden = 1;
+            if (hidden)
+                continue;
+            if ((e->t->q & CQ_CONST) && !(f->type->fq & CQ_CONST))
+                continue;
+            struct cty *R = f->type->to;
+            struct cexpr r;
+            memset(&r, 0, sizeof r);
+            r.k = E_CALL;
+            r.t = ct_strip_ref(R);
+            r.vc = R->k == CT_LREF ? VC_LVALUE : R->k == CT_RREF
+                   ? VC_XVALUE : VC_PRVALUE;
+            struct ics s;
+            memset(&s, 0, sizeof s);
+            s.rank = R_BAD;
+            if (ct_is_ref(to))
+                s = ref_ics(&r, to);
+            else if (to->k == CT_CLASS)
+                s.rank = r.t->k == CT_CLASS && r.t->cls == to->cls
+                         ? R_EXACT : R_BAD;
+            else if (r.t->k != CT_CLASS)
+                s = std_conv(&r, to);
+            if (s.rank > R_CONV)
+                continue;
+            int cmp = best ? ics_cmp(&s, &bs) : 1;
+            /* as good: a non-template beats a template's specialization */
+            if (cmp == 0 && best->spec_of && !f->spec_of)
+                cmp = 1;
+            if (cmp > 0) {
+                best = f;
+                bs = s;
+                tie = 0;
+            } else if (cmp == 0 && !(f->spec_of && !best->spec_of)) {
+                tie = 1;
+            }
+        }
+    }
+    if (tie)
+        return NULL;
+    if (best && second)
+        *second = bs;
+    return best;
+}
+
+/* e (a class object) converted by one of its conversion functions to t:
+ * the call, then the standard conversion after it. */
+static struct cexpr *through_conv(struct cexpr *e, struct cty *t,
+                                  int allow_explicit, const char *ctx)
+{
+    struct cfunc *f = conv_function(e, t, allow_explicit, NULL);
+    if (!f)
+        ex_error(e, "no conversion from '%s' to '%s' in %s", ct_name(e->t),
+                 ct_name(t), ctx);
+    struct cexpr *obj = e->vc == VC_PRVALUE ? materialize(e) : e;
+    const struct ctok *at = cx_cur();
+    struct cexpr *call = make_call(f, ex_addr(obj), NULL, 0, at);
+    call->line = e->line;
+    call->file = e->file;
+    if (ct_is_ref(t))
+        return call;
+    return convert(call, t, ctx);
+}
+
+struct cexpr *class_conversion(struct cexpr *e, struct cclass *c)
+{
+    return class_conversion_ex(e, c, 0);
+}
+
+/* ... explicit conversion functions too (direct-initialization) */
+struct cexpr *class_conversion_ex(struct cexpr *e, struct cclass *c,
+                                  int allow_explicit)
+{
+    struct cfunc *f = conv_function(e, ct_class(c), allow_explicit, NULL);
+    if (!f)
+        return NULL;
+    struct cexpr *obj = e->vc == VC_PRVALUE ? materialize(e) : e;
+    struct cexpr *call = make_call(f, ex_addr(obj), NULL, 0, cx_cur());
+    call->line = e->line;
+    call->file = e->file;
+    return call;
+}
+
+struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx)
+{
+    if (e->k == E_INITLIST && !e->t)
+        return init_object(t, INIT_COPY_LIST, &e, 1, NULL);
+    if (t->k == CT_CLASS)
+        return init_object(t, INIT_COPY, &e, 1, NULL);
+    if (t->k == CT_VOID)
+        return ex_cast(e, ct_basic(CT_VOID));
+    if (e->k == E_OVL && e->memptr) {
+        if (ct_is_pmf(t))
+            for (struct cfunc *f = e->fn; f; f = f->next)
+                if ((f->cls == t->cls ||
+                     class_derives(t->cls, f->cls, NULL)) &&
+                    ct_same_unqual(f->type, t->to)) {
+                    struct cexpr *r = ex_new(E_MEMPTR,
+                                             ct_mptr(f->cls, t->to),
+                                             VC_PRVALUE);
+                    r->fn = f;
+                    if (!cx_unevaluated)
+                        f->called = 1;   /* (its body: made for this) */
+                    r->line = e->line;
+                    r->file = e->file;
+                    return f->cls == t->cls ? r
+                           : mptr_to_derived(r, ct_unqual(t));
+                }
+        ex_error(e, "no overload of '%s' converts to '%s' in %s",
+                 e->fn->name, ct_name(t), ctx);
+    }
+    if (e->k == E_OVL || (e->k == E_FUNC && t->k == CT_PTR)) {
+        struct cty *ft = t->k == CT_PTR ? t->to : NULL;
+        struct cfunc *f = ft && ft->k == CT_FUNC ? ovl_pick(e, ft) : NULL;
+        if (f) {
+            if (!cx_unevaluated)
+                func_ensure_body(f);
+            struct cexpr *r = ex_new(E_FUNC, ct_ptr(f->type), VC_PRVALUE);
+            r->fn = f;
+            r->line = e->line;
+            r->file = e->file;
+            return r;
+        }
+        ex_error(e, "no overload of '%s' converts to '%s' in %s",
+                 e->fn->name, ct_name(t), ctx);
+    }
+    if (e->t->k == CT_CLASS)
+        return through_conv(e, t, 0, ctx);
+    struct ics s = std_conv(e, t);
+    if (s.rank == R_BAD)
+        ex_error(e, "cannot convert '%s' to '%s' in %s", ct_name(e->t),
+                 ct_name(t), ctx);
+    e = rvalue(e);
+    struct cty *tu = ct_unqual(t);
+    if (ct_same(e->t, tu))
+        return e;
+    if (s.base_to && e->t->k == CT_PTR) {
+        base_conv_check(e, e->t->to->cls, s.base_to);
+        e = to_base(e, s.base_to, 1);
+        if (ct_same(e->t, tu))
+            return e;
+    }
+    if (tu->k == CT_MPTR && e->t->k == CT_MPTR && e->t->cls != tu->cls)
+        return mptr_to_derived(e, tu);
+    return ex_cast(e, tu);
+}
+
+struct cexpr *convert_bool(struct cexpr *e, const char *ctx)
+{
+    e = rvalue(e);
+    if (e->t->k == CT_CLASS)   /* contextually: explicit operator bool too */
+        return through_conv(e, ct_basic(CT_BOOL), 1, ctx);
+    if (e->t->k == CT_BOOL)
+        return e;
+    if (!ct_is_scalar(e->t))
+        ex_error(e, "'%s' used where a condition is required (%s)",
+                 ct_name(e->t), ctx);
+    return ex_cast(e, ct_basic(CT_BOOL));
+}
+
+/* &e for a reference: e's address, or a materialized temporary's. */
+struct cexpr *bind_ref(struct cexpr *e, struct cty *rt, const char *ctx)
+{
+    struct cty *T = rt->to;
+    int rv = rt->k == CT_RREF;
+    int cref = (T->q & CQ_CONST) && !(T->q & CQ_VOLATILE);
+    if (e->k == E_INITLIST && !e->t) {
+        if (!rv && !cref)
+            ex_error(e, "a braced list cannot bind to a non-const "
+                        "reference (%s)", ctx);
+        return ex_addr(materialize(init_object(ct_unqual(T), INIT_COPY_LIST,
+                                               &e, 1, NULL)));
+    }
+    if (e->k == E_OVL || e->k == E_FUNC) {
+        if (T->k == CT_FUNC)
+            return convert(e, ct_ptr(T), ctx);
+        /* const FP &: the function's address, a temporary bound */
+        if (!rv && !cref)
+            ex_error(e, "cannot bind '%s' to a reference to %s (%s)",
+                     e->fn->name, ct_name(T), ctx);
+        return ex_addr(materialize(convert(e, ct_unqual(T), ctx)));
+    }
+    if (e->t->k == CT_CLASS && T->k == CT_CLASS &&
+        is_proper_base(e->t->cls, T->cls) && e->vc != VC_PRVALUE) {
+        base_conv_check(e, e->t->cls, T->cls);
+        e = to_base(e, T->cls, 0);
+    }
+    int related = ct_same_unqual(e->t, T);
+    int compat = related && (T->q & e->t->q) == e->t->q;
+    if (!related && e->t->k == CT_ARRAY && T->k == CT_ARRAY &&
+        e->t->n == T->n && ct_same_unqual(e->t->to, T->to)) {
+        related = 1;                  /* const T (&)[N] to a T[N] */
+        compat = (T->to->q & e->t->to->q) == e->t->to->q;
+    }
+    if (related && !compat && !is_bitfield(e))
+        ex_error(e, "binding a reference to '%s' to a '%s' drops a qualifier "
+                    "(%s)", ct_name(T), ct_name(e->t), ctx);
+    if (compat && !is_bitfield(e)) {
+        if (!rv && e->vc == VC_LVALUE)
+            return ex_addr(e);
+        if (rv && e->vc == VC_LVALUE)
+            ex_error(e, "cannot bind an rvalue reference to an lvalue of "
+                        "type '%s' (%s)", ct_name(e->t), ctx);
+        if (!rv && !cref)
+            ex_error(e, "cannot bind a non-const lvalue reference of type "
+                        "'%s&' to an rvalue (%s)", ct_name(T), ctx);
+        if (e->vc == VC_XVALUE)
+            return ex_addr(e);
+        return ex_addr(materialize(e));
+    }
+    /* [dcl.init.ref]/5.1.2: a class with a conversion function whose
+     * result is a reference the target can bind to binds DIRECTLY to that
+     * result -- no temporary, and no const required. It is what makes
+     * std::reference_wrapper's `operator T&()` usable wherever a T& is
+     * wanted, which is the entire point of that type; without it
+     * `int &r = ref(x);` and every tuple<int&> built from one fail.
+     *
+     * Tried before the errors below, because those are about binding to
+     * the object itself and this does not bind to the object at all. */
+    if (e->t->k == CT_CLASS) {
+        struct cfunc *cf = conv_function(e, rt, 0, NULL);
+        if (cf) {
+            struct cexpr *obj = e->vc == VC_PRVALUE ? materialize(e) : e;
+            struct cexpr *call = make_call(cf, ex_addr(obj), NULL, 0,
+                                           cx_cur());
+            call->line = e->line;
+            call->file = e->file;
+            return ex_addr(call);
+        }
+    }
+    if (!rv && !cref)
+        ex_error(e, "cannot bind a reference of type '%s&' to a value of "
+                    "type '%s' (%s)", ct_name(T), ct_name(e->t), ctx);
+    if (compat && e->vc == VC_LVALUE && rv && !is_bitfield(e))
+        ex_error(e, "cannot bind an rvalue reference to an lvalue (%s)", ctx);
+    struct cexpr *v = convert(e, ct_unqual(T), ctx);
+    return ex_addr(materialize(v));
+}
+
+/* The value an argument passed through `...` takes: promoted, decayed. */
+static struct cexpr *vararg_promote(struct cexpr *e)
+{
+    if (e->k == E_OVL)
+        e = rvalue(e);
+    e = rvalue(e);
+    struct cty *t = e->t;
+    if (t->k == CT_CLASS) {
+        if (!t->cls->trivial_for_calls)
+            ex_error(e, "passing a non-trivially-copyable '%s' through "
+                        "'...'", ct_name(t));
+        return e;
+    }
+    if (t->k == CT_FLOAT)
+        return ex_cast(e, ct_basic(CT_DOUBLE));
+    if (t->k == CT_NULLPTR)
+        return ex_cast(e, ct_ptr(ct_basic(CT_VOID)));
+    if (ct_is_integer(t)) {
+        struct cty *p = ct_promote(t);
+        if (!ct_same(p, t))
+            return ex_cast(e, p);
+    }
+    return e;
+}
+
+static struct cexpr *convert_param(struct cexpr *arg, struct cty *p,
+                                   const struct ctok *at)
+{
+    if (ct_is_ref(p))
+        return bind_ref(arg, p, "an argument");
+    if (p->k == CT_CLASS) {
+        struct cexpr *v = init_object(p, arg->k == E_INITLIST && !arg->t
+                                         ? INIT_COPY_LIST : INIT_COPY,
+                                      &arg, 1, at);
+        /* Itanium: a class that is not trivially copyable is passed as
+         * the address of a temporary the caller builds — and destroys,
+         * at the end of the full-expression */
+        if (class_indirect(p))
+            return ex_addr(materialize(v));
+        return v;
+    }
+    return convert(arg, p, "an argument");
+}
+
+/* __builtin_source_location() at `at`: where it is, in which function
+ * (as g++ spells __PRETTY_FUNCTION__: `int main()`) — a pointer to a
+ * record laid out as std::source_location::__impl */
+static struct cexpr *source_location_at(const struct ctok *at)
+{
+    struct cexpr *e = ex_new(E_BUILTIN, ct_ptr(ct_qual(ct_basic(CT_VOID),
+                                                       CQ_CONST)),
+                             VC_PRVALUE);
+    e->name = "__builtin_source_location";
+    e->line = at ? at->t.line : 0;
+    e->col = at ? at->t.col : 0;
+    e->file = at ? at->file : "";
+    e->ival = at ? at->t.col : 0;
+    const char *fn = "";
+    struct cfunc *f = cx_curfn;
+    if (f && f->name && !f->lambda) {
+        const char *ps = "";
+        for (int i = 0; i < f->type->np; i++)
+            ps = cx_fmt("%s%s%s", ps, i ? ", " : "",
+                        ct_name(f->type->params[i]));
+        const char *qn = f->cls && f->cls->name
+                         ? cx_fmt("%s::%s", f->cls->name, f->name) : f->name;
+        fn = f->is_ctor || f->is_dtor
+             ? cx_fmt("%s(%s)", qn, ps)
+             : cx_fmt("%s%s %s(%s)", f->is_static && f->cls ? "static " : "",
+                      ct_name(f->type->to), qn, ps);
+    }
+    e->text = fn;
+    return e;
+}
+
+/* A default argument used at `at`: __builtin_source_location() in it
+ * (std::source_location::current() as a default) says where the call
+ * is — the tree copied along the way to each */
+static struct cexpr *default_at(struct cexpr *e, const struct ctok *at)
+{
+    if (!e)
+        return NULL;
+    if (e->k == E_BUILTIN && e->name &&
+        strcmp(e->name, "__builtin_source_location") == 0)
+        return source_location_at(at);
+    struct cexpr *r = e;
+    for (int i = 0; i < e->na; i++) {
+        struct cexpr *c = e->a ? default_at(e->a[i], at) : NULL;
+        if (c == (e->a ? e->a[i] : NULL))
+            continue;
+        if (r == e) {
+            r = xmalloc(sizeof *r);
+            *r = *e;
+            r->a = xmalloc((size_t)e->na * sizeof *r->a);
+            memcpy(r->a, e->a, (size_t)e->na * sizeof *r->a);
+        }
+        r->a[i] = c;
+    }
+    return r;
+}
+
+static int convert_args_ft(struct cty *ft, struct cexpr **defs,
+                           struct cexpr **args, int na,
+                           const struct ctok *at, struct cexpr ***out)
+{
+    int n = na > ft->np ? na : ft->np;
+    struct cexpr **o = xmalloc((size_t)(n ? n : 1) * sizeof *o);
+    for (int i = 0; i < n; i++) {
+        if (i >= ft->np) {
+            o[i] = vararg_promote(args[i]);
+            continue;
+        }
+        struct cexpr *a = i < na ? args[i] : defs ? defs[i] : NULL;
+        if (!a)
+            cx_error(at, "too few arguments");
+        if (i >= na)
+            a = default_at(defarg_read(a), at);  /* the caller's place */
+        o[i] = convert_param(a, ft->params[i], at);
+    }
+    *out = o;
+    return n;
+}
+
+int convert_args(struct cfunc *fn, struct cexpr **args, int na,
+                 const struct ctok *at, struct cexpr ***out)
+{
+    return convert_args_ft(fn->type, fn->defargs, args, na, at, out);
+}
+
+static struct cexpr *call_result(struct cty *ret)
+{
+    if (ret->k == CT_LREF)
+        return ex_new(E_CALL, ret->to, VC_LVALUE);
+    if (ret->k == CT_RREF)
+        return ex_new(E_CALL, ret->to, VC_XVALUE);
+    return ex_new(E_CALL, ret, VC_PRVALUE);
+}
+
+struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
+                        struct cexpr **args, int na, const struct ctok *at)
+{
+    /* Before alias_of is followed: a using-declaration REPLACES the
+     * access the member had in the base, and the alias is what carries
+     * the new one. Following it first and asking the original is how a
+     * protected member republished as public gets refused. */
+    if (fn->cls)
+        access_check_func(fn->cls, fn, fn->name, at);
+    if (fn->alias_of)
+        fn = fn->alias_of;
+    if (fn->type->xobj && obj) {
+        /* an explicit object parameter: the object its first argument */
+        struct cexpr **all = xmalloc((size_t)(na + 1) * sizeof *all);
+        all[0] = object_lvalue(obj);
+        memcpy(all + 1, args, (size_t)na * sizeof *args);
+        args = all;
+        na++;
+        obj = NULL;
+    }
+    if (fn->is_deleted)
+        cx_error(at, "use of deleted function '%s'", fn->name);
+    /* (the access check is above, before alias_of was followed) */
+    func_deduce_return(fn, at);
+    struct cty *ret = fn->type->to;
+    if (ret->k == CT_CLASS && !ct_is_complete(ret))
+        cx_error(at, "calling '%s', which returns incomplete '%s'", fn->name,
+                 ct_name(ret));
+    if ((fn->is_implicit || fn->is_defaulted) && !fn->defined) {
+        if (!fn->special && is_defaultable_cmp(fn))
+            define_defaulted_cmp(fn);
+        else
+            define_implicit(fn);
+    }
+    if (!cx_unevaluated)          /* (an unevaluated operand uses no body) */
+        func_ensure_body(fn);
+    struct cexpr **conv;
+    int n = convert_args(fn, args, na, at, &conv);
+    struct cexpr *e = call_result(ret);
+    e->fn = fn;
+    int member = fn->cls && !fn->is_static && !fn->is_ctor;
+    if (member && obj && obj->t->to->k == CT_CLASS &&
+        obj->t->to->cls != fn->cls)
+        obj = to_base(obj, fn->cls, 1);
+    if (member) {
+        if (!obj)
+            cx_error(at, "calling member function '%s' without an object",
+                     fn->name);
+        e->a = xmalloc((size_t)(n + 1) * sizeof *e->a);
+        e->a[0] = obj;
+        memcpy(e->a + 1, conv, (size_t)n * sizeof *conv);
+        e->na = n + 1;
+    } else {
+        e->a = conv;
+        e->na = n;
+    }
+    fn->used = 1;
+    if (!cx_unevaluated)
+        fn->called = 1;
+    return e;
+}
+
+/* operator new/delete for objects of type t: the class's own (unless
+ * `::new`), else the global one. */
+static struct cexpr *call_alloc_op(const char *name, struct cty *t,
+                                   int global, struct cexpr **args, int na,
+                                   const struct ctok *at)
+{
+    if (!global && t->k == CT_CLASS && ct_is_complete(t)) {
+        struct csym *y = scope_find_here(t->cls->scope, name);
+        if (y && y->k == CS_FUNC) {
+            struct cfunc *f = resolve(y->fns, NULL, args, na, NULL, name);
+            if (!f && na == 2 && strncmp(name, "operator delete", 15) == 0)
+                f = resolve(y->fns, NULL, args, 1, at, name);  /* unsized */
+            if (!f)
+                f = resolve(y->fns, NULL, args, na, at, name);
+            return make_call(f, NULL, args, f->type->np < na ? f->type->np
+                                                             : na, at);
+        }
+    }
+    return call_global_op(name, args, na, at);
+}
+
+/* std::align_val_t (from <new>): what over-aligned allocations pass
+ * (C++17); NULL when <new> is not included */
+static struct cty *align_val_type(void)
+{
+    struct csym *ns = scope_find_here(cx_global, "std");
+    struct csym *y = ns && ns->k == CS_NAMESPACE
+                     ? lookup_in(ns->ns, "align_val_t") : NULL;
+    return y && y->k == CS_ENUM ? y->type : NULL;
+}
+
+long over_alignment(struct cty *t)
+{
+    long al = ct_align(t);
+    return al > 16 && align_val_type() ? al : 0;   /* (the default new's) */
+}
+
+/* The allocation functions an allocation of t looks at: its class's (they
+ * hide the global ones), else the global ones */
+static struct cfunc *alloc_set(const char *name, struct cty *t, int global)
+{
+    if (!global && t->k == CT_CLASS && ct_is_complete(t)) {
+        struct csym *y = scope_find_here(t->cls->scope, name);
+        if (y && y->k == CS_FUNC)
+            return y->fns;
+    }
+    struct csym *y = lookup_in(cx_global, name);
+    return y && y->k == CS_FUNC ? y->fns : NULL;
+}
+
+struct cfunc *dealloc_fn(struct cty *t, int global, int arr, int sized)
+{
+    const char *name = arr ? "operator delete[]" : "operator delete";
+    struct cfunc *set = alloc_set(name, t, global);
+    if (!set)
+        cx_error(cx_cur(), "'%s' is not declared", name);
+    struct cexpr *vp = ex_new(E_NULLPTR, ct_ptr(ct_basic(CT_VOID)),
+                              VC_PRVALUE);
+    struct cexpr *sz = ex_int(0, ct_size_t());
+    long al = over_alignment(t);
+    struct cexpr *ae = al ? ex_int(al, align_val_type()) : NULL;
+    /* the aligned forms first (for an over-aligned t), then sized (when
+     * the size is known), then plain */
+    struct cexpr *tries[4][3] = { { vp, sz, ae }, { vp, ae, NULL },
+                                  { vp, sz, NULL }, { vp, NULL, NULL } };
+    int ns[4] = { 3, 2, 2, 1 };
+    for (int k = 0; k < 4; k++) {
+        if ((k < 2 && !al) || ((k == 0 || k == 2) && !sized))
+            continue;
+        struct cfunc *f = resolve(set, NULL, tries[k], ns[k], NULL, name);
+        if (f) {
+            if (f->alias_of)
+                f = f->alias_of;
+            if (f->is_deleted)
+                cx_error(cx_cur(), "use of deleted function '%s'", name);
+            f->used = 1;
+            return f;
+        }
+    }
+    struct cfunc *f = resolve(set, NULL, tries[3], 1, cx_cur(), name);
+    return f;
+}
+
+struct cexpr *call_delete_op(struct cclass *c, struct cexpr **args)
+{
+    return call_alloc_op("operator delete", ct_class(c), 0, args, 2,
+                         cx_cur());
+}
+
+struct cexpr *call_global_op(const char *name, struct cexpr **args, int na,
+                             const struct ctok *at)
+{
+    struct csym *y = lookup_in(cx_global, name);
+    if (!y || y->k != CS_FUNC)
+        cx_error(at, "'%s' is not declared", name);
+    struct cfunc *f = resolve(y->fns, NULL, args, na, at, name);
+    return make_call(f, NULL, args, na, at);
+}
+
+/* ---- initialization ---- */
+
+static int is_char_type(const struct cty *t)
+{
+    return t->k == CT_CHAR || t->k == CT_SCHAR || t->k == CT_UCHAR;
+}
+
+/* May the string literal s initialize an array of `elem`? */
+static int string_fits(const struct cexpr *s, const struct cty *elem)
+{
+    struct cty *st = s->t->to;
+    if (s->swidth == 1 && st->k == CT_CHAR)
+        return is_char_type(elem);
+    if (st->k == CT_CHAR8)
+        return elem->k == CT_CHAR8 || elem->k == CT_CHAR ||
+               elem->k == CT_UCHAR;
+    return ct_same_unqual(st, elem);
+}
+
+static struct cexpr *string_init(struct cty *t, struct cexpr *s,
+                                 const struct ctok *at)
+{
+    (void)at;
+    if (t->n >= 0 && s->slen - 1 > t->n)
+        ex_error(s, "initializer-string for '%s' is too long", ct_name(t));
+    struct cexpr *r = xmalloc(sizeof *r);
+    *r = *s;
+    r->t = t->n >= 0 ? t : ct_array(t->to, s->slen);
+    r->vc = VC_PRVALUE;
+    return r;
+}
+
+static int is_aggregate(const struct cty *t)
+{
+    return t->k == CT_ARRAY || (t->k == CT_CLASS && t->cls->aggregate);
+}
+
+static struct cexpr *aggregate_init(struct cty *t, struct cexpr **items,
+                                    int n, int *idx, const struct ctok *at);
+
+/* Initialize a t from the list's items at *idx: with brace elision, a
+ * subaggregate written without braces takes the items it needs. */
+static struct cexpr *init_from_items(struct cty *t, struct cexpr **items,
+                                     int n, int *idx, const struct ctok *at)
+{
+    struct cexpr *it = items[*idx];
+    int braced = it->k == E_INITLIST && !it->t;
+    if (!braced && is_aggregate(t) &&
+        !(t->k == CT_CLASS && it->t && it->t->k == CT_CLASS &&
+          it->t->cls == t->cls) &&
+        !(t->k == CT_ARRAY && it->k == E_STR && string_fits(it, t->to)))
+        return aggregate_init(t, items, n, idx, at);
+    (*idx)++;
+    if (ct_is_ref(t))
+        return bind_ref(braced && it->na == 1 ? it->a[0] : it, t,
+                        "an initializer");
+    return init_object(t, braced ? INIT_COPY_LIST : INIT_COPY, &it, 1, at);
+}
+
+/* The value a member or element takes when the list says nothing. */
+static struct cexpr *value_init_elem(struct cty *t, const struct ctok *at)
+{
+    if (t->k == CT_CLASS || t->k == CT_ARRAY)
+        return init_object(t, INIT_VALUE, NULL, 0, at);
+    return NULL;                              /* zero */
+}
+
+static struct cexpr *aggregate_init(struct cty *t, struct cexpr **items,
+                                    int n, int *idx, const struct ctok *at)
+{
+    struct cexpr *L = ex_new(E_INITLIST, t, VC_PRVALUE);
+    if (t->k == CT_ARRAY) {
+        int cap = t->n >= 0 ? (int)t->n : 8, k = 0;
+        struct cexpr **el = xcalloc((size_t)(cap ? cap : 1), sizeof *el);
+        while (*idx < n && (t->n < 0 || k < t->n)) {
+            if (k == cap) {
+                cap *= 2;
+                el = xrealloc(el, (size_t)cap * sizeof *el);
+            }
+            el[k++] = init_from_items(t->to, items, n, idx, at);
+        }
+        long cnt = t->n >= 0 ? t->n : k;
+        if (t->n < 0)
+            L->t = ct_array(t->to, cnt);
+        if (cnt > cap) {
+            el = xrealloc(el, (size_t)cnt * sizeof *el);
+            cap = (int)cnt;
+        }
+        for (long i = k; i < cnt; i++)
+            el[i] = value_init_elem(t->to, at);
+        L->a = el;
+        L->na = (int)cnt;
+        return L;
+    }
+    struct cclass *c = t->cls;
+    L->a = xcalloc((size_t)(c->nfields ? c->nfields : 1), sizeof *L->a);
+    L->na = c->nfields;
+    if (c->nbases) {
+        /* C++17: the bases first, in order, then the members (9.4.2) */
+        L->binit = xcalloc((size_t)c->nbases, sizeof *L->binit);
+        for (int i = 0; i < c->nbases; i++) {
+            struct cty *bt = ct_class(c->bases[i].cls);
+            L->binit[i] = *idx < n ? init_from_items(bt, items, n, idx, at)
+                                   : value_init_elem(bt, at);
+            if (L->binit[i] && L->binit[i]->k == E_CONSTRUCT)
+                L->binit[i]->baseobj = 1;
+        }
+    }
+    for (int i = 0; i < c->nfields; i++) {
+        struct cfield *fl = c->fields[i];
+        if (!fl->name)
+            continue;                         /* an unnamed bit-field */
+        if (c->is_union && i > 0)
+            break;
+        if (*idx >= n && fl->dflt_tok >= 0 && !fl->dflt)
+            field_parse_default(c, fl);
+        if (*idx < n) {
+            L->a[i] = init_from_items(fl->type, items, n, idx, at);
+        } else if (fl->dflt) {
+            L->a[i] = fl->dflt;
+        } else if (ct_is_ref(fl->type)) {
+            cx_error(at, "reference member '%s' is not initialized",
+                     fl->name);
+        } else {
+            L->a[i] = value_init_elem(fl->type, at);
+        }
+    }
+    return L;
+}
+
+struct cexpr *il_make(struct cty *ilt, struct cexpr *list,
+                      const struct ctok *at)
+{
+    struct cty *X = ct_il_elem(ilt);
+    struct cclass *c = ilt->cls;
+    class_ensure(c);
+    /* the backing array: const X[N], each element copy-initialized from
+     * its initializer (9.4.5) — stored as X[N], which C lets the
+     * elements be built in */
+    struct cty *arr = ct_array(ct_unqual(X), list->na);
+    struct cexpr *L = ex_new(E_INITLIST, arr, VC_PRVALUE);
+    L->na = list->na;
+    L->a = xcalloc((size_t)(list->na ? list->na : 1), sizeof *L->a);
+    for (int i = 0; i < list->na; i++) {
+        struct cexpr *el = list->a[i];
+        int braced = el->k == E_INITLIST && !el->t;
+        if (ct_is_ref(X))
+            ex_error(el, "an initializer_list of references");
+        L->a[i] = init_object(ct_unqual(X), braced ? INIT_COPY_LIST
+                                                    : INIT_COPY, &el, 1, at);
+    }
+    struct cexpr *first;
+    if (!list->na) {
+        first = ex_new(E_NULLPTR, ct_ptr(ct_qual(X, CQ_CONST)), VC_PRVALUE);
+    } else {
+        struct cexpr *store = il_backing_var(arr, L, at);
+        if (!store) {
+            store = ex_new(E_TEMP, arr, VC_LVALUE);
+            store->a = xmalloc(sizeof *store->a);
+            store->a[0] = L;
+            store->na = 1;
+        }
+        first = ex_cast(ex_addr(store), ct_ptr(ct_qual(X, CQ_CONST)));
+    }
+    /* the object: its pointer and length (libstdc++'s _M_array, _M_len —
+     * whatever their names, in that order) */
+    struct cexpr *o = ex_new(E_INITLIST, ilt, VC_PRVALUE);
+    o->na = c->nfields;
+    o->a = xcalloc((size_t)(c->nfields ? c->nfields : 1), sizeof *o->a);
+    int np = 0, nn = 0;
+    for (int i = 0; i < c->nfields; i++) {
+        struct cty *ft = c->fields[i]->type;
+        if (ft->k == CT_PTR && !np++)
+            o->a[i] = first;
+        else if (ct_is_integer(ft) && !nn++)
+            o->a[i] = ex_int(list->na, ft);
+    }
+    if (np != 1 || nn != 1 || c->nfields != 2)
+        cx_error(at, "std::initializer_list is not laid out as a pointer "
+                     "and a length");
+    return o;
+}
+
+/* {.a = x, .c{y}}: each member named in declaration order, the others
+ * from their default member initializers or value-initialized; a
+ * union's one member chosen (9.4.2) */
+static struct cexpr *designated_init(struct cty *t, struct cexpr *list,
+                                     const struct ctok *at)
+{
+    if (t->k != CT_CLASS || !t->cls->aggregate)
+        cx_error(at, "designated initializers for '%s', not an aggregate "
+                     "class", ct_name(t));
+    struct cclass *c = t->cls;
+    struct cexpr *L = ex_new(E_INITLIST, t, VC_PRVALUE);
+    L->a = xcalloc((size_t)(c->nfields ? c->nfields : 1), sizeof *L->a);
+    L->na = c->nfields;
+    if (c->nbases) {
+        L->binit = xcalloc((size_t)c->nbases, sizeof *L->binit);
+        for (int i = 0; i < c->nbases; i++)
+            L->binit[i] = value_init_elem(ct_class(c->bases[i].cls), at);
+    }
+    int k = 0, chosen = 0;
+    for (int i = 0; i < c->nfields; i++) {
+        struct cfield *fl = c->fields[i];
+        if (!fl->name)
+            continue;
+        if (k < list->na && strcmp(list->desig[k], fl->name) == 0) {
+            struct cexpr *it = list->a[k++];
+            int braced = it->k == E_INITLIST && !it->t;
+            if (c->is_union) {
+                /* the union's member: first in the C list emitted */
+                L->a[0] = NULL;
+                if (i != 0)
+                    cx_error(at, "a designated initializer of union '%s' "
+                                 "other than its first member is not "
+                                 "supported yet", ct_name(t));
+            }
+            L->a[i] = ct_is_ref(fl->type)
+                      ? bind_ref(braced && it->na == 1 ? it->a[0] : it,
+                                 fl->type, "an initializer")
+                      : init_object(fl->type, braced ? INIT_COPY_LIST
+                                                     : INIT_COPY, &it, 1, at);
+            chosen = 1;
+        } else if (c->is_union) {
+            continue;
+        } else if (fl->dflt || (fl->dflt_tok >= 0 &&
+                                (field_parse_default(c, fl), fl->dflt))) {
+            L->a[i] = fl->dflt;
+        } else if (ct_is_ref(fl->type)) {
+            cx_error(at, "reference member '%s' is not initialized",
+                     fl->name);
+        } else {
+            L->a[i] = value_init_elem(fl->type, at);
+        }
+    }
+    (void)chosen;
+    if (k < list->na) {
+        int known = 0;
+        for (int i = 0; i < c->nfields; i++)
+            known |= c->fields[i]->name &&
+                     strcmp(c->fields[i]->name, list->desig[k]) == 0;
+        cx_error(at, known ? "designator '.%s' out of the members' order"
+                           : "'%s' has no member '%s'",
+                 known ? list->desig[k] : ct_name(t), list->desig[k]);
+    }
+    return L;
+}
+
+struct cexpr *init_aggregate(struct cty *t, struct cexpr *list,
+                             const struct ctok *at)
+{
+    if (list->desig)
+        return designated_init(t, list, at);
+    int idx = 0;
+    struct cexpr *r = aggregate_init(t, list->a, list->na, &idx, at);
+    if (idx < list->na)
+        ex_error(list->a[idx], "too many initializers for '%s'", ct_name(t));
+    return r;
+}
+
+/* A scalar's value-initialization: zero — the null pointer for a
+ * pointer, the zero enumeration value for an enum */
+static struct cexpr *zero_of(struct cty *t)
+{
+    if (t->k == CT_ENUM)
+        return ex_int(0, ct_unqual(t));
+    struct cexpr *z = ex_int(0, ct_basic(CT_INT));
+    z->is_null_const = 1;
+    return convert(z, t, "value-initialization");
+}
+
+/* e direct-initializing a scalar of type t: a class's explicit conversion
+ * functions count too (9.4.1) */
+static struct cexpr *convert_direct(struct cexpr *e, struct cty *t)
+{
+    if (e->t && e->t->k == CT_CLASS && !(e->k == E_INITLIST && !e->t))
+        return through_conv(e, t, 1, "initialization");
+    return convert(e, t, "initialization");
+}
+
+struct cexpr *init_object(struct cty *t, enum init_form form,
+                          struct cexpr **args, int na, const struct ctok *at)
+{
+    if (!at)
+        at = cx_cur();
+    if (t->k == CT_CLASS)
+        return construct(t->cls, form, args, na, at);
+    if (t->k == CT_ARRAY) {
+        struct cty *el = t->to;
+        while (el->k == CT_ARRAY)
+            el = el->to;
+        if (form == INIT_DEFAULT) {
+            if (el->k == CT_CLASS &&
+                construct(el->cls, INIT_DEFAULT, NULL, 0, at)) {
+                struct cexpr *e = ex_new(E_CONSTRUCT, t, VC_PRVALUE);
+                e->init = construct(el->cls, INIT_DEFAULT, NULL, 0, at);
+                return e;
+            }
+            return NULL;
+        }
+        if (form == INIT_VALUE) {
+            struct cexpr none = { .k = E_INITLIST };
+            return init_aggregate(t, &none, at);
+        }
+        struct cexpr *a = na ? args[0] : NULL;
+        if (a && a->k == E_STR && (form == INIT_COPY || form == INIT_DIRECT) &&
+            string_fits(a, t->to))
+            return string_init(t, a, at);
+        if (a && a->k == E_INITLIST && !a->t) {
+            if (a->na == 1 && a->a[0]->k == E_STR &&
+                string_fits(a->a[0], t->to))
+                return string_init(t, a->a[0], at);
+            return init_aggregate(t, a, at);
+        }
+        cx_error(at, "an array of %s is initialized by a braced list",
+                 ct_name(t->to));
+    }
+    if (ct_is_ref(t))
+        cx_error(at, "internal: init_object on a reference");
+    if (t->k == CT_VOID)
+        cx_error(at, "an object of type void");
+    switch (form) {
+    case INIT_DEFAULT:
+        return NULL;
+    case INIT_VALUE:
+        return zero_of(t);
+    case INIT_COPY: case INIT_DIRECT:
+        if (na != 1)
+            cx_error(at, "a %s is initialized by one value", ct_name(t));
+        if (form == INIT_DIRECT)
+            return convert_direct(args[0], t);
+        return convert(args[0], t, "initialization");
+    case INIT_LIST: case INIT_COPY_LIST: {
+        struct cexpr *l = args[0];
+        if (l->na == 0)
+            return zero_of(t);
+        if (t->k == CT_COMPLEX && l->na == 2) {
+            /* { re, im } (GNU): a complex of its parts */
+            struct cexpr *e = ex_new(E_BUILTIN, ct_unqual(t), VC_PRVALUE);
+            e->name = "__cx_complex";
+            e->a = xmalloc(2 * sizeof *e->a);
+            e->a[0] = convert(l->a[0], t->to, "a complex's part");
+            e->a[1] = convert(l->a[1], t->to, "a complex's part");
+            e->na = 2;
+            return e;
+        }
+        if (l->na != 1)
+            ex_error(l, "too many initializers for '%s'", ct_name(t));
+        struct cexpr *a = l->a[0];
+        if (form == INIT_LIST && t->k == CT_ENUM && t->en->fixed &&
+            a->t && ct_is_integer(a->t) && a->t->k != CT_ENUM)
+            /* E{n}: an enumeration with a fixed underlying type from an
+             * integer (9.4.5) */
+            return ex_cast(rvalue(a), ct_unqual(t));
+        if (form == INIT_LIST)
+            return convert_direct(a, t);
+        return convert(a, t, "initialization");
+    }
+    }
+    return NULL;
+}
+
+/* An element of an expression list — an argument, an initializer: the
+ * expressions it gives appended to v[*n] (capacity *cap). A pattern ending
+ * in `...` gives one per element of the packs it names. */
+static void list_element(struct cexpr ***v, int *n, int *cap)
+{
+    struct csym *packs[8];
+    int ell;
+    int ex = expansion_at(0, packs, 8, &ell);
+    if (ex < 0)
+        cx_error(&cx_toks[ell], "'...' expands no parameter pack");
+    int reps = ex > 0 ? expansion_length(packs, ex) : 1;
+    int start = cx_pos;
+    for (int e = 0; e < reps; e++) {
+        cx_pos = start;
+        for (int k = 0; k < ex; k++)
+            pack_push(packs[k], e);
+        if (*n == *cap) {
+            *cap = *cap ? *cap * 2 : 8;
+            *v = xrealloc(*v, (size_t)*cap * sizeof **v);
+        }
+        (*v)[(*n)++] = cx_kind() == TOK_LBRACE ? parse_braced_list()
+                                               : expr_parse_assign();
+        if (ex > 0)
+            pack_pop(ex);
+    }
+    if (ex > 0) {
+        cx_pos = ell;
+        cx_expect(TOK_ELLIPSIS, "'...'");
+    }
+}
+
+static struct cexpr *braced_list(void);
+
+struct cexpr *parse_braced_list(void)
+{
+    int saved = cx_in_targs;              /* (X<T{a > b}>) */
+    cx_in_targs = 0;
+    struct cexpr *L = braced_list();
+    cx_in_targs = saved;
+    return L;
+}
+
+static struct cexpr *braced_list(void)
+{
+    struct cexpr *L = ex_new(E_INITLIST, NULL, VC_PRVALUE);
+    cx_expect(TOK_LBRACE, "'{'");
+    int cap = 0;
+    while (cx_kind() != TOK_RBRACE) {
+        if (cx_kind() == TOK_DOT && cx_kind_at(1) == TOK_IDENT) {
+            /* .name = x, .name{x}: a designated initializer (C++20) */
+            const char *name = cx_peek(1)->t.text;
+            cx_advance();
+            cx_advance();
+            if (L->na == cap) {
+                cap = cap ? cap * 2 : 4;
+                L->a = xrealloc(L->a, (size_t)cap * sizeof *L->a);
+            }
+            L->desig = xrealloc(L->desig, (size_t)cap * sizeof *L->desig);
+            L->desig[L->na] = name;
+            if (cx_kind() == TOK_LBRACE) {
+                L->a[L->na++] = parse_braced_list();
+            } else {
+                cx_expect(TOK_ASSIGN, "'=' or '{' after a designator");
+                L->a[L->na++] = cx_kind() == TOK_LBRACE ? parse_braced_list()
+                                                        : expr_parse_assign();
+            }
+        } else {
+            if (L->desig)
+                cx_error(cx_cur(), "an initializer list designates all its "
+                                   "elements or none");
+            list_element(&L->a, &L->na, &cap);
+        }
+        if (!cx_accept(TOK_COMMA))
+            break;
+    }
+    if (L->desig && L->na && !L->desig[0])
+        cx_error(cx_cur(), "an initializer list designates all its "
+                           "elements or none");
+    cx_expect(TOK_RBRACE, "'}' to close the initializer list");
+    return L;
+}
+
+/* ---- operators ---- */
+
+static void need_modifiable(struct cexpr *e, const char *what)
+{
+    if (e->vc != VC_LVALUE)
+        ex_error(e, "%s needs an lvalue", what);
+    if (e->t->q & CQ_CONST)
+        ex_error(e, "%s of a read-only '%s'", what, ct_name(e->t));
+    if (e->t->k == CT_ARRAY)
+        ex_error(e, "%s of an array", what);
+}
+
+static void no_class_operand(struct cexpr *e, const char *op)
+{
+    if (e->t && (e->t->k == CT_CLASS ||
+                 (e->k == E_INITLIST && !e->t)))
+        ex_error(e, "operator%s on a class: operator overloading is not "
+                    "supported yet (CX2)", op);
+}
+
+static int class_or_enum(const struct cexpr *e)
+{
+    return e->t && (e->t->k == CT_CLASS || e->t->k == CT_ENUM);
+}
+
+static const char *op_fn_name(int op)
+{
+    switch (op) {
+    case TOK_PLUS: return "operator+"; case TOK_MINUS: return "operator-";
+    case TOK_STAR: return "operator*"; case TOK_SLASH: return "operator/";
+    case TOK_PERCENT: return "operator%"; case TOK_AMP: return "operator&";
+    case TOK_PIPE: return "operator|"; case TOK_CARET: return "operator^";
+    case TOK_SHL: return "operator<<"; case TOK_SHR: return "operator>>";
+    case TOK_EQEQ: return "operator=="; case TOK_NEQ: return "operator!=";
+    case TOK_LT: return "operator<"; case TOK_GT: return "operator>";
+    case TOK_LE: return "operator<="; case TOK_GE: return "operator>=";
+    case TOK_ANDAND: return "operator&&"; case TOK_OROR: return "operator||";
+    case TOK_TILDE: return "operator~"; case TOK_BANG: return "operator!";
+    case TOK_ASSIGN: return "operator=";
+    case TOK_PLUSEQ: return "operator+="; case TOK_MINUSEQ: return "operator-=";
+    case TOK_STAREQ: return "operator*="; case TOK_SLASHEQ: return "operator/=";
+    case TOK_PERCENTEQ: return "operator%=";
+    case TOK_AMPEQ: return "operator&="; case TOK_PIPEEQ: return "operator|=";
+    case TOK_CARETEQ: return "operator^=";
+    case TOK_SHLEQ: return "operator<<="; case TOK_SHREQ: return "operator>>=";
+    case TOK_PLUSPLUS: return "operator++";
+    case TOK_MINUSMINUS: return "operator--";
+    case TOK_SPACESHIP: return "operator<=>";
+    case TOK_COMMA: return "operator,";
+    default: return NULL;
+    }
+}
+
+/* `a @ b` or `@a` with a class or enum operand: the operator function
+ * chosen among a's members and the non-members found by ordinary lookup
+ * and argument-dependent lookup (12.2.2.3) — or NULL when none is viable,
+ * and the built-in operator applies. */
+static struct cexpr *overloaded(const char *name, struct cexpr **args, int na,
+                                int member_only, const struct ctok *at)
+{
+    int any = 0;
+    for (int i = 0; i < na; i++)
+        any |= class_or_enum(args[i]);
+    if (!any || !name)
+        return NULL;
+    struct fnset fs = { NULL, 0, 0 };
+    struct cexpr *l = args[0];
+    if (l->t && l->t->k == CT_CLASS) {
+        if (!ct_is_complete(l->t))
+            ex_error(l, "'%s' on incomplete '%s'", name, ct_name(l->t));
+        /* (a member operator may be a base's: hash<string>'s operator()) */
+        struct csym *y = lookup_in(l->t->cls->scope, name);
+        if (y && y->k == CS_FUNC)
+            set_add_all(&fs, y->fns);
+    }
+    if (!member_only) {
+        nonmember_lookup(&fs, name);
+        adl(&fs, name, args, na);
+    }
+    if (!fs.n)
+        return NULL;
+    struct cfunc *f = best_of(fs.f, fs.n, NULL, args, na, 1, NULL, name, 0);
+    if (!f) {
+        if (resolve_ambiguous)
+            best_of(fs.f, fs.n, NULL, args, na, 1, at, name, 0);
+        return NULL;
+    }
+    if (f->cls && !f->is_static) {
+        if (f->is_deleted)
+            cx_error(at, "use of deleted function '%s'", f->name);
+        if ((f->is_implicit || f->is_defaulted) && f->trivial &&
+            (f->special == SP_COPY_ASSIGN || f->special == SP_MOVE_ASSIGN)) {
+            /* a trivial assignment is the struct's bytes */
+            need_modifiable(l, "assignment");
+            struct cexpr *r = args[1];
+            struct cty *lt = ct_unqual(l->t);
+            struct cexpr *v;
+            int amb = 0;
+            if (r->vc != VC_PRVALUE && r->t && r->t->k == CT_CLASS &&
+                (r->t->cls == lt->cls ||
+                 class_derives(r->t->cls, lt->cls, &amb)))
+                /* from an object: its bytes, not a copy of it (which
+                 * would be a temporary to destroy) */
+                v = r->t->cls == lt->cls ? r : to_base(r, lt->cls, 0);
+            else
+                v = init_object(lt, r->k == E_INITLIST && !r->t
+                                    ? INIT_COPY_LIST : INIT_COPY,
+                                &r, 1, at);
+            struct cexpr *e = ex2(E_ASSIGN, l->t, VC_LVALUE, l, v);
+            e->op = TOK_ASSIGN;
+            return e;
+        }
+        struct cexpr *obj = l->vc == VC_PRVALUE ? materialize(l) : l;
+        return make_call(f, ex_addr(obj), args + 1, na - 1, at);
+    }
+    if (f->cls && f->type->xobj)         /* the object its first argument */
+        return make_call(f, NULL, args, na, at);
+    if (f->cls && f->is_static)          /* a static operator(): no object */
+        return make_call(f, NULL, args + 1, na - 1, at);
+    return make_call(f, NULL, args, na, at);
+}
+
+/* The conversion functions to a scalar that c offers: its own, and --
+ * only if it declares none -- those it inherits. The two are separate
+ * passes rather than one walk because a derived class that re-declares
+ * a base's conversion would otherwise look like two candidates and be
+ * given up on, where the language says the derived one HIDES the
+ * base's. */
+static void scalar_convs(struct cclass *c, struct cfunc **only, int *n,
+                         int depth)
+{
+    if (depth > 16)
+        return;
+    int before = *n;
+    for (struct csym *y = c->scope->syms; y; y = y->next)
+        if (y->k == CS_FUNC)
+            for (struct cfunc *f = y->fns; f; f = f->next)
+                if (f->is_conv && !f->is_explicit &&
+                    ct_is_scalar(ct_strip_ref(f->type->to))) {
+                    *only = f;
+                    (*n)++;
+                }
+    if (*n != before)
+        return;
+    for (int i = 0; i < c->nbases; i++)
+        scalar_convs(c->bases[i].cls, only, n, depth + 1);
+}
+
+/* A class operand of a built-in operator, through its one non-explicit
+ * conversion function to a scalar — if it has exactly one. */
+static struct cexpr *class_to_builtin(struct cexpr *e)
+{
+    if (!e->t || e->t->k != CT_CLASS || !ct_is_complete(e->t))
+        return e;
+    struct cfunc *only = NULL;
+    int n = 0;
+    /* Bases included: an operator's built-in candidates are built from
+     * every conversion the operand has, and an inherited one is one of
+     * them. Without this, `a == 7` on a class whose `operator int()`
+     * came from a base found no candidate at all -- which is how
+     * std::atomic<int>, whose conversion lives in __atomic_base, was
+     * unusable in a comparison. */
+    scalar_convs(e->t->cls, &only, &n, 0);
+    if (n != 1)
+        return e;
+    return through_conv(e, ct_unqual(ct_strip_ref(only->type->to)), 0,
+                        "an operator");
+}
+
+static struct cty *arith_pair(struct cexpr **l, struct cexpr **r)
+{
+    struct cty *t = ct_arith_common((*l)->t, (*r)->t);
+    if (!ct_same((*l)->t, t))
+        *l = ex_cast(*l, t);
+    if (!ct_same((*r)->t, t))
+        *r = ex_cast(*r, t);
+    return t;
+}
+
+static int is_obj_ptr(const struct cty *t)
+{
+    return t->k == CT_PTR && t->to->k != CT_FUNC;
+}
+
+static struct cexpr *binop(int op, struct cexpr *l, struct cexpr *r)
+{
+    struct cexpr *e = ex2(E_BINARY, NULL, VC_PRVALUE, l, r);
+    e->op = op;
+    return e;
+}
+
+/* Compare pointers: bring both to one pointer type (the composite). */
+static void pointer_pair(struct cexpr **l, struct cexpr **r)
+{
+    struct cty *a = (*l)->t, *b = (*r)->t;
+    if (is_null_const(*r) || b->k == CT_NULLPTR) {
+        *r = ex_cast(*r, a);
+        return;
+    }
+    if (is_null_const(*l) || a->k == CT_NULLPTR) {
+        *l = ex_cast(*l, b);
+        return;
+    }
+    if (ct_same_unqual(a->to, b->to))
+        return;
+    if (a->to->k == CT_CLASS && b->to->k == CT_CLASS) {
+        if (is_proper_base(a->to->cls, b->to->cls)) {
+            *l = to_base(*l, b->to->cls, 1);
+            return;
+        }
+        if (is_proper_base(b->to->cls, a->to->cls)) {
+            *r = to_base(*r, a->to->cls, 1);
+            return;
+        }
+    }
+    if (a->to->k == CT_VOID) {
+        *r = ex_cast(*r, a);
+        return;
+    }
+    if (b->to->k == CT_VOID) {
+        *l = ex_cast(*l, b);
+        return;
+    }
+    ex_error(*l, "comparing distinct pointer types '%s' and '%s'",
+             ct_name(a), ct_name(b));
+}
+
+static int is_ptrish(const struct cexpr *e)
+{
+    return e->t->k == CT_PTR || e->t->k == CT_NULLPTR || is_null_const(e);
+}
+
+static struct cexpr *deref(struct cexpr *e);
+
+/* obj.*pm, p->*pm: the member pm names, of the object. A member
+ * function's is only for calling (call() takes it). */
+static struct cexpr *member_via_pointer(int op, struct cexpr *l,
+                                        struct cexpr *r)
+{
+    struct cexpr *obj = op == TOK_ARROWSTAR ? deref(l) : l;
+    r = rvalue(r);
+    if (r->t->k != CT_MPTR)
+        ex_error(r, "'%s' is not a pointer to member",
+                 ct_name(r->t));
+    int amb = 0;
+    if (obj->t->k != CT_CLASS ||
+        (obj->t->cls != r->t->cls &&
+         (!class_derives(obj->t->cls, r->t->cls, &amb) || amb)))
+        ex_error(obj, "'%s' has no members of '%s'", ct_name(obj->t),
+                 ct_name(r->t));
+    if (obj->t->cls != r->t->cls)
+        obj = to_base(obj, r->t->cls, 0);   /* the base it is a member of */
+    if (obj->vc == VC_PRVALUE)
+        obj = materialize(obj);
+    if (ct_is_pmf(r->t))
+        return ex2(E_PMEM, r->t->to, VC_PRVALUE, obj, r);
+    return ex2(E_PMEM, ct_qual(r->t->to, obj->t->q),
+               obj->vc == VC_LVALUE ? VC_LVALUE : VC_XVALUE, obj, r);
+}
+
+/* std::<name>, a comparison category class (<compare>) */
+static struct cty *cmp_category(const char *name, struct cexpr *at)
+{
+    struct csym *ns = scope_find_here(cx_global, "std");
+    struct csym *y = ns && ns->k == CS_NAMESPACE
+                     ? scope_find_here(ns->ns, name) : NULL;
+    if (!y || (y->k != CS_CLASS && y->k != CS_TYPEDEF) ||
+        y->type->k != CT_CLASS)
+        ex_error(at, "std::%s is not declared (#include <compare>)", name);
+    class_ensure(y->type->cls);
+    return y->type;
+}
+
+/* The built-in three-way comparison (7.6.8): arithmetic operands after
+ * the usual arithmetic conversions — std::partial_ordering if floating,
+ * else std::strong_ordering — or two pointers (strong_ordering). */
+static struct cexpr *three_way(struct cexpr *l, struct cexpr *r)
+{
+    l = rvalue(l);
+    r = rvalue(r);
+    struct cty *lt = l->t, *rt = r->t;
+    struct cexpr *e;
+    int partial = 0;
+    if (ct_is_arith(lt) && ct_is_arith(rt)) {
+        int ls = lt->k == CT_ENUM && lt->en->scoped;
+        int rs = rt->k == CT_ENUM && rt->en->scoped;
+        if ((ls || rs) && !ct_same_unqual(lt, rt))
+            ex_error(l, "comparing a scoped enum with another type");
+        if ((lt->k == CT_BOOL) != (rt->k == CT_BOOL))
+            ex_error(l, "'<=>' between bool and another type");
+        e = ex2(E_CMP3, NULL, VC_PRVALUE, l, r);
+        arith_pair(&e->a[0], &e->a[1]);
+        partial = ct_is_float(e->a[0]->t);
+    } else if (is_ptrish(l) && is_ptrish(r) &&
+               !(lt->k == CT_NULLPTR || rt->k == CT_NULLPTR)) {
+        pointer_pair(&l, &r);
+        e = ex2(E_CMP3, NULL, VC_PRVALUE, l, r);
+    } else {
+        ex_error(l, "invalid operands '%s' and '%s' to '<=>'", ct_name(lt),
+                 ct_name(rt));
+        return NULL;
+    }
+    e->t = cmp_category(partial ? "partial_ordering" : "strong_ordering", l);
+    e->ival = partial;
+    return e;
+}
+
+static struct cexpr *binary(int op, struct cexpr *l, struct cexpr *r);
+
+/* the literal 0 a rewritten comparison compares with (a null pointer
+ * constant, as <compare>'s __literal_zero wants) */
+struct cexpr *ex_literal_zero(void)
+{
+    struct cexpr *z = ex_int(0, ct_basic(CT_INT));
+    z->is_null_const = 1;
+    return z;
+}
+
+/* A comparison of class or enum operands with no operator for it: the
+ * C++20 rewritten candidates (12.2.2.3) — x @ y as (x <=> y) @ 0 or 0 @
+ * (y <=> x) for a relational @ (and x <=> y as 0 <=> (y <=> x)); x != y
+ * as !(x == y) or !(y == x); x == y as y == x. (Candidates written for
+ * the operator itself were preferred already.) NULL if none applies. */
+static struct cexpr *rewritten_cmp(int op, struct cexpr *l, struct cexpr *r)
+{
+    static int depth;
+    if (depth > 4)
+        return NULL;
+    const struct ctok *at = cx_cur();
+    struct cexpr *fwd[2] = { l, r }, *rev[2] = { r, l };
+    struct cexpr *o = NULL, *res = NULL;
+    depth++;
+    if (op == TOK_LT || op == TOK_GT || op == TOK_LE || op == TOK_GE ||
+        op == TOK_SPACESHIP) {
+        if (op != TOK_SPACESHIP &&
+            (o = overloaded("operator<=>", fwd, 2, 0, at)))
+            res = binary(op, o, ex_literal_zero());
+        else if ((o = overloaded("operator<=>", rev, 2, 0, at)))
+            res = binary(op, ex_literal_zero(), o);
+    } else if (op == TOK_EQEQ || op == TOK_NEQ) {
+        if (op == TOK_NEQ && (o = overloaded("operator==", fwd, 2, 0, at)))
+            res = o;
+        else if ((o = overloaded("operator==", rev, 2, 0, at)))
+            res = o;
+        if (res && op == TOK_NEQ) {
+            res = ex1(E_UNARY, ct_basic(CT_BOOL), VC_PRVALUE,
+                      convert_bool(res, "!="));
+            res->op = TOK_BANG;
+        }
+    }
+    depth--;
+    return res;
+}
+
+/* GNU complex arithmetic: + - * / and == != on complex operands (a real
+ * one converted), in the wider element type — as C computes them */
+static struct cexpr *complex_binary(int op, struct cexpr *l, struct cexpr *r)
+{
+    l = rvalue(l);
+    r = rvalue(r);
+    struct cty *le = l->t->k == CT_COMPLEX ? l->t->to : l->t;
+    struct cty *re = r->t->k == CT_COMPLEX ? r->t->to : r->t;
+    if (!ct_is_arith(le) || !ct_is_arith(re))
+        ex_error(l, "invalid operands '%s' and '%s' to a binary operator",
+                 ct_name(l->t), ct_name(r->t));
+    struct cty *el = ct_arith_common(ct_unqual(le), ct_unqual(re));
+    if (!ct_is_float(el))
+        el = ct_basic(CT_DOUBLE);
+    struct cty *ct = ct_complex(el);
+    if (!ct_same_unqual(l->t, ct))
+        l = ex_cast(l, ct);
+    if (!ct_same_unqual(r->t, ct))
+        r = ex_cast(r, ct);
+    struct cexpr *e = binop(op, l, r);
+    switch (op) {
+    case TOK_PLUS: case TOK_MINUS: case TOK_STAR: case TOK_SLASH:
+        e->t = ct;
+        return e;
+    case TOK_EQEQ: case TOK_NEQ:
+        e->t = ct_basic(CT_BOOL);
+        return e;
+    default:
+        ex_error(l, "invalid operator on complex operands");
+        return NULL;
+    }
+}
+
+/* __real__ e, __imag__ e (imag 1): a complex's part — of a real e, e
+ * itself and 0 (GNU) */
+static struct cexpr *complex_part(struct cexpr *e, int imag)
+{
+    if (!e->t || e->t->k != CT_COMPLEX) {
+        e = rvalue(e);
+        if (!ct_is_arith(e->t))
+            ex_error(e, "__real__/__imag__ of a '%s'", ct_name(e->t));
+        return imag ? ex_int(0, e->t) : e;
+    }
+    struct cexpr *p = ex1(E_CPART, ct_qual(e->t->to, e->t->q),
+                          e->vc == VC_LVALUE ? VC_LVALUE : VC_PRVALUE, e);
+    p->ival = imag;
+    return p;
+}
+
+static struct cexpr *binary(int op, struct cexpr *l, struct cexpr *r)
+{
+    if (op == TOK_DOTSTAR || op == TOK_ARROWSTAR)
+        return member_via_pointer(op, l, r);
+    if ((op == TOK_EQEQ || op == TOK_NEQ) &&
+        ((l->t && l->t->k == CT_MPTR) || (r->t && r->t->k == CT_MPTR))) {
+        struct cty *mt = ct_unqual(l->t->k == CT_MPTR ? l->t : r->t);
+        struct cexpr *e = binop(op, convert(l, mt, "a comparison"),
+                                convert(r, mt, "a comparison"));
+        e->t = ct_basic(CT_BOOL);
+        return e;
+    }
+    if (class_or_enum(l) || class_or_enum(r)) {
+        struct cexpr *args[2] = { l, r };
+        struct cexpr *o = overloaded(op_fn_name(op), args, 2, 0, cx_cur());
+        if (o)
+            return o;
+        if ((o = rewritten_cmp(op, l, r)))
+            return o;
+        l = class_to_builtin(l);
+        r = class_to_builtin(r);
+    }
+    const char *sp = "";
+    if (op == TOK_ANDAND || op == TOK_OROR) {  /* contextual bool: below */
+    } else {
+        no_class_operand(l, sp);
+        no_class_operand(r, sp);
+    }
+    if (op == TOK_ANDAND || op == TOK_OROR) {
+        struct cexpr *e = binop(op, convert_bool(l, "&&/||"),
+                                convert_bool(r, "&&/||"));
+        e->t = ct_basic(CT_BOOL);
+        return e;
+    }
+    if (op == TOK_SPACESHIP)
+        return three_way(l, r);
+    if ((l->t && l->t->k == CT_COMPLEX) || (r->t && r->t->k == CT_COMPLEX))
+        return complex_binary(op, l, r);
+    l = rvalue(l);
+    r = rvalue(r);
+    struct cty *lt = l->t, *rt = r->t;
+    int la = ct_is_arith(lt), ra = ct_is_arith(rt);
+    int lscoped = lt->k == CT_ENUM && lt->en->scoped;
+    int rscoped = rt->k == CT_ENUM && rt->en->scoped;
+    switch (op) {
+    case TOK_STAR: case TOK_SLASH: case TOK_PERCENT:
+    case TOK_AMP: case TOK_PIPE: case TOK_CARET: {
+        int integral = op != TOK_STAR && op != TOK_SLASH;
+        if (!la || !ra || lscoped || rscoped ||
+            (integral && (!ct_is_integer(lt) || !ct_is_integer(rt))))
+            ex_error(l, "invalid operands '%s' and '%s' to a binary "
+                        "operator", ct_name(lt), ct_name(rt));
+        struct cexpr *e = binop(op, l, r);
+        e->t = arith_pair(&e->a[0], &e->a[1]);
+        return e;
+    }
+    case TOK_PLUS: case TOK_MINUS: {
+        if (la && ra && !lscoped && !rscoped) {
+            struct cexpr *e = binop(op, l, r);
+            e->t = arith_pair(&e->a[0], &e->a[1]);
+            return e;
+        }
+        if (is_obj_ptr(lt) && ct_is_integer(rt) && !rscoped) {
+            struct cexpr *e = binop(op, l, r);
+            e->t = lt;
+            if (!ct_is_complete(lt->to) && lt->to->k != CT_VOID)
+                ex_error(l, "arithmetic on a pointer to incomplete %s",
+                         ct_name(lt->to));
+            return e;
+        }
+        if (op == TOK_PLUS && ct_is_integer(lt) && !lscoped &&
+            is_obj_ptr(rt)) {
+            struct cexpr *e = binop(op, l, r);
+            e->t = rt;
+            return e;
+        }
+        if (op == TOK_MINUS && is_obj_ptr(lt) && is_obj_ptr(rt)) {
+            if (!ct_same_unqual(lt->to, rt->to))
+                ex_error(l, "subtracting pointers to different types");
+            struct cexpr *e = binop(op, l, r);
+            e->t = ct_ptrdiff_t();
+            return e;
+        }
+        ex_error(l, "invalid operands '%s' and '%s' to %s", ct_name(lt),
+                 ct_name(rt), op == TOK_PLUS ? "+" : "-");
+        return NULL;
+    }
+    case TOK_SHL: case TOK_SHR: {
+        if (!ct_is_integer(lt) || !ct_is_integer(rt) || lscoped || rscoped)
+            ex_error(l, "invalid operands to a shift");
+        struct cty *pl = ct_promote(lt), *pr = ct_promote(rt);
+        if (!ct_same(pl, lt))
+            l = ex_cast(l, pl);
+        if (!ct_same(pr, rt))
+            r = ex_cast(r, pr);
+        struct cexpr *e = binop(op, l, r);
+        e->t = pl;
+        return e;
+    }
+    case TOK_EQEQ: case TOK_NEQ: case TOK_LT: case TOK_GT: case TOK_LE:
+    case TOK_GE: {
+        struct cexpr *e;
+        if (la && ra) {
+            if ((lscoped || rscoped) && !ct_same_unqual(lt, rt))
+                ex_error(l, "comparing a scoped enum with another type");
+            e = binop(op, l, r);
+            arith_pair(&e->a[0], &e->a[1]);
+        } else if (is_ptrish(l) && is_ptrish(r)) {
+            if (lt->k == CT_NULLPTR && rt->k == CT_NULLPTR) {
+                e = binop(op, ex_cast(l, ct_ptr(ct_basic(CT_VOID))),
+                          ex_cast(r, ct_ptr(ct_basic(CT_VOID))));
+            } else {
+                pointer_pair(&l, &r);
+                e = binop(op, l, r);
+            }
+        } else if ((lt->k == CT_PTR && ct_is_integer(rt) && !is_null_const(r))
+                   || (rt->k == CT_PTR && ct_is_integer(lt))) {
+            ex_error(l, "comparing a pointer with an integer");
+            return NULL;
+        } else {
+            ex_error(l, "invalid operands '%s' and '%s' to a comparison",
+                     ct_name(lt), ct_name(rt));
+            return NULL;
+        }
+        e->t = ct_basic(CT_BOOL);
+        return e;
+    }
+    default:
+        ex_error(l, "unsupported binary operator");
+        return NULL;
+    }
+}
+
+static struct cexpr *assign(int op, struct cexpr *l, struct cexpr *r)
+{
+    if (l->t->k == CT_CLASS || (class_or_enum(r) && op != TOK_ASSIGN) ||
+        (l->t->k == CT_ENUM && op != TOK_ASSIGN)) {
+        struct cexpr *args[2] = { l, r };
+        struct cexpr *o = overloaded(op_fn_name(op), args, 2,
+                                     op == TOK_ASSIGN, cx_cur());
+        if (o)
+            return o;
+        if (l->t->k == CT_CLASS)
+            ex_error(l, "no viable '%s' for '%s' and '%s'", op_fn_name(op),
+                     ct_name(l->t), r->k == E_INITLIST && !r->t ? "{...}"
+                     : ct_name(r->t));
+        r = class_to_builtin(r);
+    }
+    if (!(op == TOK_ASSIGN && r->t && r->t->k == CT_CLASS))
+        no_class_operand(r, "=");      /* (= converts a class: below) */
+    need_modifiable(l, "assignment");
+    struct cexpr *e;
+    if (op == TOK_ASSIGN) {
+        struct cexpr *v = r->k == E_INITLIST && !r->t
+                          ? init_object(ct_unqual(l->t), INIT_COPY_LIST, &r, 1,
+                                        NULL)
+                          : convert(r, ct_unqual(l->t), "assignment");
+        e = ex2(E_ASSIGN, l->t, VC_LVALUE, l, v);
+        e->op = op;
+        return e;
+    }
+    /* compound: the arithmetic as C does it (e.g. int += double
+     * computes in double), after checking the operands */
+    r = rvalue(r);
+    struct cexpr lr = *l;
+    lr.vc = VC_PRVALUE;
+    int bop;
+    switch (op) {
+    case TOK_PLUSEQ: bop = TOK_PLUS; break;
+    case TOK_MINUSEQ: bop = TOK_MINUS; break;
+    case TOK_STAREQ: bop = TOK_STAR; break;
+    case TOK_SLASHEQ: bop = TOK_SLASH; break;
+    case TOK_PERCENTEQ: bop = TOK_PERCENT; break;
+    case TOK_AMPEQ: bop = TOK_AMP; break;
+    case TOK_PIPEEQ: bop = TOK_PIPE; break;
+    case TOK_CARETEQ: bop = TOK_CARET; break;
+    case TOK_SHLEQ: bop = TOK_SHL; break;
+    default: bop = TOK_SHR; break;
+    }
+    struct cexpr *chk = binary(bop, &lr, r);
+    if (l->t->k == CT_ENUM)
+        ex_error(l, "compound assignment to an enum");
+    if (l->t->k == CT_PTR && bop != TOK_PLUS && bop != TOK_MINUS)
+        ex_error(l, "invalid compound assignment to a pointer");
+    (void)chk;
+    if (r->t->k == CT_ENUM || r->t->k == CT_BOOL)
+        r = ex_cast(r, ct_promote(r->t));
+    e = ex2(E_ASSIGN, l->t, VC_LVALUE, l, r);
+    e->op = bop;
+    return e;
+}
+
+static struct cexpr *incdec(struct cexpr *e, int delta, int post)
+{
+    if (class_or_enum(e)) {
+        /* postfix: operator++(int), with a dummy 0 */
+        struct cexpr *args[2] = { e, ex_int(0, ct_basic(CT_INT)) };
+        struct cexpr *o = overloaded(op_fn_name(delta > 0 ? TOK_PLUSPLUS
+                                                          : TOK_MINUSMINUS),
+                                     args, post ? 2 : 1, 0, cx_cur());
+        if (o)
+            return o;
+    }
+    no_class_operand(e, delta > 0 ? "++" : "--");
+    need_modifiable(e, delta > 0 ? "increment" : "decrement");
+    if (e->t->k == CT_BOOL)
+        ex_error(e, "%s of a bool", delta > 0 ? "increment" : "decrement");
+    if (!(ct_is_arith(e->t) && e->t->k != CT_ENUM) && !is_obj_ptr(e->t))
+        ex_error(e, "invalid operand '%s' to %s", ct_name(e->t),
+                 delta > 0 ? "++" : "--");
+    struct cexpr *r = ex1(E_INCDEC, post ? ct_unqual(e->t) : e->t,
+                          post ? VC_PRVALUE : VC_LVALUE, e);
+    r->ival = delta;
+    r->post = post;
+    return r;
+}
+
+static struct cexpr *unary(int op, struct cexpr *e)
+{
+    if (class_or_enum(e)) {
+        struct cexpr *o = overloaded(op_fn_name(op), &e, 1, 0, cx_cur());
+        if (o)
+            return o;
+        if (op != TOK_BANG)       /* ! converts contextually, below */
+            e = class_to_builtin(e);
+    }
+    if (op != TOK_BANG)
+        no_class_operand(e, op == TOK_MINUS ? "-" : op == TOK_PLUS ? "+"
+                        : op == TOK_TILDE ? "~" : "!");
+    if (op == TOK_BANG) {
+        struct cexpr *r = ex1(E_UNARY, ct_basic(CT_BOOL), VC_PRVALUE,
+                              convert_bool(e, "!"));
+        r->op = op;
+        return r;
+    }
+    e = rvalue(e);
+    if (op == TOK_PLUS && e->t->k == CT_PTR)
+        return e;
+    if (e->t->k == CT_COMPLEX && (op == TOK_PLUS || op == TOK_MINUS)) {
+        struct cexpr *r = ex1(E_UNARY, ct_unqual(e->t), VC_PRVALUE, e);
+        r->op = op;
+        return r;
+    }
+    if (!ct_is_arith(e->t) || (e->t->k == CT_ENUM && e->t->en->scoped) ||
+        (op == TOK_TILDE && !ct_is_integer(e->t)))
+        ex_error(e, "invalid operand '%s' to a unary operator",
+                 ct_name(e->t));
+    struct cty *t = ct_promote(e->t);
+    if (!ct_same(t, e->t))
+        e = ex_cast(e, t);
+    struct cexpr *r = ex1(E_UNARY, t, VC_PRVALUE, e);
+    r->op = op;
+    return r;
+}
+
+/* The BUILT-IN address-of: the object's real address, whatever the class
+ * may have said unary & should mean. __builtin_addressof is this, which
+ * is how std::addressof keeps working for a type that overloads the
+ * operator -- the one job addressof has. */
+static struct cexpr *address_of_builtin(struct cexpr *e)
+{
+    if (e->k == E_OVL) {
+        if (e->fn->next || e->fn->tmpl)
+            return e;       /* &f of an overload set: which one, the type
+                             * it converts to says (a parameter's) */
+        return rvalue(e);
+    }
+    if (e->t->k == CT_FUNC)
+        return rvalue(e);
+    if (e->vc != VC_LVALUE)
+        ex_error(e, "taking the address of an rvalue");
+    if (is_bitfield(e))
+        ex_error(e, "taking the address of a bit-field");
+    return ex_addr(e);
+}
+
+/* `&x` as written in source. A class may overload unary &
+ * ([over.oper]/3), and then this means whatever it says. Rare and widely
+ * discouraged, but not optional: a type that overloads it and a compiler
+ * that ignores the overload disagree silently about what `&x` evaluates
+ * to. Tried before the built-in, exactly as deref() tries operator*. */
+static struct cexpr *address_of(struct cexpr *e)
+{
+    /* Completeness first, and it is not a formality: `&x` on an
+     * INCOMPLETE class is perfectly legal -- libstdc++'s chrono does
+     * `&**this` on one -- and looking for an overload there requires the
+     * definition, which is exactly what there is not. An incomplete class
+     * can have no visible operator& anyway, so the built-in applies. */
+    if (class_or_enum(e) && ct_is_complete(e->t)) {
+        struct cexpr *o = overloaded("operator&", &e, 1, 0, cx_cur());
+        if (o)
+            return o;
+    }
+    return address_of_builtin(e);
+}
+
+static struct cexpr *deref(struct cexpr *e)
+{
+    if (class_or_enum(e)) {
+        struct cexpr *o = overloaded("operator*", &e, 1, 0, cx_cur());
+        if (o)
+            return o;
+    }
+    e = rvalue(e);
+    if (e->t->k != CT_PTR)
+        ex_error(e, "indirection through a non-pointer '%s'", ct_name(e->t));
+    if (e->t->to->k == CT_VOID)
+        ex_error(e, "indirection through 'void *'");
+    return ex_deref(e);
+}
+
+static struct cexpr *comma(struct cexpr *l, struct cexpr *r)
+{
+    return ex2(E_COMMA, r->t, r->vc, l, r);
+}
+
+static struct cexpr *conditional(struct cexpr *c, struct cexpr *a,
+                                 struct cexpr *b)
+{
+    c = convert_bool(c, "?:");
+    struct cty *at = a->t, *bt = b->t;
+    struct cexpr *e = ex_new(E_COND, NULL, VC_PRVALUE);
+    e->line = c->line;
+    e->col = c->col;
+    e->file = c->file;
+    e->a = xmalloc(3 * sizeof *e->a);
+    e->a[0] = c;
+    e->na = 3;
+    if (at->k == CT_VOID || bt->k == CT_VOID) {
+        if (at->k != bt->k)
+            ex_error(a, "one arm of ?: is void and the other is not");
+        e->a[1] = a;
+        e->a[2] = b;
+        e->t = ct_basic(CT_VOID);
+        return e;
+    }
+    if (a->vc == b->vc && a->vc != VC_PRVALUE && ct_same(at, bt) &&
+        !is_bitfield(a) && !is_bitfield(b)) {
+        e->a[1] = a;
+        e->a[2] = b;
+        e->t = at;
+        e->vc = a->vc;
+        return e;
+    }
+    if ((at->k == CT_CLASS || bt->k == CT_CLASS) &&
+        !(at->k == CT_CLASS && bt->k == CT_CLASS && at->cls == bt->cls)) {
+        /* [expr.cond]/4: operands of different types, a class among them
+         * — a derived and a base lvalue give the base lvalue; else each
+         * converted to the other's type, one way and one only */
+        if (a->vc == VC_LVALUE && b->vc == VC_LVALUE &&
+            at->k == CT_CLASS && bt->k == CT_CLASS) {
+            if (is_proper_base(at->cls, bt->cls) && (bt->q & at->q) == at->q)
+                return conditional(c, to_base(a, bt->cls, 0), b);
+            if (is_proper_base(bt->cls, at->cls) && (at->q & bt->q) == bt->q)
+                return conditional(c, a, to_base(b, at->cls, 0));
+        }
+        struct ics ab = ics_of(a, ct_unqual(bt)), ba = ics_of(b, ct_unqual(at));
+        if (at->k == CT_CLASS && bt->k == CT_CLASS) {
+            /* between a base and a derived class: to the base only */
+            if (is_proper_base(bt->cls, at->cls))
+                ab.rank = R_BAD;
+            if (is_proper_base(at->cls, bt->cls))
+                ba.rank = R_BAD;
+        }
+        if (ab.rank != R_BAD && ba.rank != R_BAD)
+            ex_error(a, "?: between '%s' and '%s' is ambiguous: each converts "
+                        "to the other", ct_name(at), ct_name(bt));
+        if (ab.rank == R_BAD && ba.rank == R_BAD)
+            ex_error(a, "incompatible operands '%s' and '%s' to ?:",
+                     ct_name(at), ct_name(bt));
+        if (ab.rank != R_BAD)
+            a = convert(a, ct_unqual(bt), "?:");
+        else
+            b = convert(b, ct_unqual(at), "?:");
+        at = a->t;
+        bt = b->t;
+    }
+    if (at->k == CT_CLASS || bt->k == CT_CLASS) {
+        struct cty *t = ct_unqual(at);
+        e->a[1] = init_object(t, INIT_COPY, &a, 1, NULL);
+        e->a[2] = init_object(t, INIT_COPY, &b, 1, NULL);
+        e->t = t;
+        return e;
+    }
+    a = rvalue(a);
+    b = rvalue(b);
+    at = a->t;
+    bt = b->t;
+    if (ct_is_arith(at) && ct_is_arith(bt)) {
+        if (ct_same(at, bt)) {
+            e->t = at;
+        } else {
+            e->t = arith_pair(&a, &b);
+        }
+    } else if ((at->k == CT_MPTR && (bt->k == CT_NULLPTR ||
+                                     is_null_const(b))) ||
+               (bt->k == CT_MPTR && (at->k == CT_NULLPTR ||
+                                     is_null_const(a)))) {
+        /* a pointer to member and nullptr: that pointer to member's type */
+        e->t = at->k == CT_MPTR ? at : bt;
+        if (at->k != CT_MPTR)
+            a = convert(a, e->t, "?:");
+        if (bt->k != CT_MPTR)
+            b = convert(b, e->t, "?:");
+    } else if (is_ptrish(a) && is_ptrish(b)) {
+        if (at->k == CT_NULLPTR && bt->k == CT_NULLPTR) {
+            e->t = at;
+        } else {
+            pointer_pair(&a, &b);
+            e->t = a->t->k == CT_PTR ? a->t : b->t;
+            if (!ct_same(a->t, e->t))
+                a = ex_cast(a, e->t);
+            if (!ct_same(b->t, e->t))
+                b = ex_cast(b, e->t);
+        }
+    } else if (ct_same_unqual(at, bt)) {
+        e->t = ct_unqual(at);
+    } else {
+        ex_error(a, "incompatible operands '%s' and '%s' to ?:", ct_name(at),
+                 ct_name(bt));
+    }
+    e->a[1] = a;
+    e->a[2] = b;
+    return e;
+}
+
+/* ---- casts ---- */
+
+enum { CAST_C, CAST_STATIC, CAST_REINTERPRET, CAST_CONST };
+
+static struct cexpr *cast_to(struct cty *t, struct cexpr *e, int kind,
+                             const struct ctok *at)
+{
+    if (ct_is_ref(t)) {
+        struct cty *T = t->to;
+        int vc = t->k == CT_LREF ? VC_LVALUE : VC_XVALUE;
+        if (e->vc == VC_PRVALUE || e->k == E_OVL) {
+            /* (const T&)rvalue, static_cast<T&&>(rvalue): a temporary */
+            if (kind != CAST_STATIC && kind != CAST_C)
+                cx_error(at, "casting an rvalue to a reference");
+            struct cexpr *r = ex_deref(bind_ref(e, t, "a cast"));
+            r->vc = vc;
+            return r;
+        }
+        if ((kind == CAST_STATIC || kind == CAST_C) &&
+            e->t->k == CT_CLASS && T->k == CT_CLASS && e->t->cls != T->cls &&
+            !is_proper_base(e->t->cls, T->cls) &&
+            !is_proper_base(T->cls, e->t->cls)) {
+            /* unrelated: T& initialized from it (a conversion function's
+             * result, bound — static_cast<const string_view&>(str)) */
+            struct cexpr *r = ex_deref(bind_ref(e, t, "a cast"));
+            r->vc = vc;
+            return r;
+        }
+        if ((kind == CAST_STATIC || kind == CAST_C) &&
+            e->t->k == CT_CLASS && T->k == CT_CLASS && e->t->cls != T->cls) {
+            struct cexpr *r;
+            if (is_proper_base(e->t->cls, T->cls)) {
+                base_conv_check(e, e->t->cls, T->cls);
+                r = to_base(e, T->cls, 0);
+            }
+            else
+                r = to_derived(e, T->cls, 0);
+            r->t = ct_qual(ct_class(T->cls), T->q);
+            r->vc = vc;
+            return r;
+        }
+        /* a glvalue reinterpreted as a T (static_cast<T&&>(x) is
+         * std::move) */
+        struct cexpr *r = ex1(E_CAST, T, vc, e);
+        r->lvcast = 1;
+        return r;
+    }
+    if (t->k == CT_VOID)
+        return ex_cast(e, t);
+    if (t->k == CT_CLASS)
+        return init_object(t, INIT_DIRECT, &e, 1, at);
+    if ((kind == CAST_C || kind == CAST_REINTERPRET) && t->k == CT_PTR &&
+        ((e->k == E_PMEM && e->t->k == CT_FUNC) ||
+         (e->k == E_MEMPTR && e->fn))) {
+        /* GNU's pointer-to-member-function conversions: a bound one's
+         * function (obj.*pmf), or a constant's (&C::f) */
+        struct cexpr *b = ex_new(E_BUILTIN, ct_ptr(ct_basic(CT_VOID)),
+                                 VC_PRVALUE);
+        if (e->k == E_PMEM) {
+            b->name = "__cx_bound_pmf";
+            b->a = xmalloc(2 * sizeof *b->a);
+            b->a[0] = ex_addr(e->a[0]);
+            b->a[1] = e->a[1];
+            b->na = 2;
+        } else {
+            b->name = "__cx_pmf_fn";
+            b->fn = e->fn;
+            if (!cx_unevaluated)
+                e->fn->called = 1;
+        }
+        b->line = at->t.line;
+        b->file = at->file;
+        return ex_cast(b, ct_unqual(t));
+    }
+    if (e->k == E_OVL)
+        return convert(e, t, "a cast");
+    e = rvalue(e);
+    struct cty *f = e->t;
+    if (f->k == CT_CLASS)
+        return through_conv(e, ct_unqual(t), 1, "a cast");
+    struct cty *tu = ct_unqual(t);
+    if (ct_same(f, tu))
+        return e;
+    if (kind == CAST_CONST && !(f->k == CT_PTR && tu->k == CT_PTR))
+        cx_error(at, "const_cast to a non-pointer type");
+    if ((kind == CAST_STATIC || kind == CAST_C) && f->k == CT_PTR &&
+        tu->k == CT_PTR && f->to->k == CT_CLASS && tu->to->k == CT_CLASS &&
+        f->to->cls != tu->to->cls) {
+        struct cclass *fc = f->to->cls, *tc = tu->to->cls;
+        struct cexpr *r = NULL;
+        if (is_proper_base(fc, tc)) {
+            base_conv_check(e, fc, tc);
+            r = to_base(e, tc, 1);
+        }
+        else if (is_proper_base(tc, fc))
+            r = to_derived(e, tc, 1);
+        if (r)
+            return ct_same(r->t, tu) ? r : ex_cast(r, tu);
+    }
+    if (kind == CAST_STATIC) {
+        /* the reverse of standard conversions, and enum <-> integer */
+        int ok = (ct_is_arith(f) && ct_is_arith(tu)) ||
+                 (f->k == CT_PTR && tu->k == CT_PTR &&
+                  (f->to->k == CT_VOID || tu->to->k == CT_VOID ||
+                   ct_same_unqual(f->to, tu->to))) ||
+                 (tu->k == CT_PTR && (is_null_const(e) ||
+                                      f->k == CT_NULLPTR)) ||
+                 (tu->k == CT_BOOL && ct_is_scalar(f));
+        if (!ok)
+            cx_error(at, "invalid static_cast from '%s' to '%s'", ct_name(f),
+                     ct_name(t));
+    }
+    if (kind == CAST_REINTERPRET && ct_is_arith(f) && ct_is_arith(tu))
+        cx_error(at, "reinterpret_cast between arithmetic types");
+    return ex_cast(e, tu);
+}
+
+/* std::type_info, which typeid's result is (from <typeinfo>). */
+static struct cty *type_info_type(const struct ctok *at)
+{
+    struct csym *std = lookup_in(cx_global, "std");
+    struct csym *y = std && std->k == CS_NAMESPACE
+                     ? lookup_in(std->ns, "type_info") : NULL;
+    if (!y || y->k != CS_CLASS)
+        cx_error(at, "typeid needs std::type_info: #include <typeinfo>");
+    return y->type;
+}
+
+/* dynamic_cast<T>(e) (7.6.1.7): to a base, a static conversion; else the
+ * run-time check libsupc++'s __dynamic_cast makes. */
+static struct cexpr *dynamic_cast_to(struct cty *t, struct cexpr *e,
+                                     const struct ctok *at)
+{
+    if (!cx_rtti)
+        cx_error(at, "dynamic_cast with -fno-rtti");
+    int ref = ct_is_ref(t);
+    struct cty *tt = ref ? t->to : ct_unqual(t)->k == CT_PTR ? t->to : NULL;
+    if (!tt || (tt->k != CT_CLASS && !(tt->k == CT_VOID && !ref)))
+        cx_error(at, "dynamic_cast to '%s': a pointer or reference to a "
+                     "class", ct_name(t));
+    struct cexpr *p;
+    if (ref) {
+        if (e->t->k != CT_CLASS || e->vc == VC_PRVALUE)
+            cx_error(at, "dynamic_cast to a reference needs a class glvalue");
+        p = ex_addr(e);
+    } else {
+        p = rvalue(e);
+        if (p->t->k != CT_PTR || p->t->to->k != CT_CLASS)
+            cx_error(at, "dynamic_cast of a non-pointer-to-class");
+    }
+    struct cclass *src = p->t->to->cls;
+    if (tt->k == CT_CLASS && class_derives(src, tt->cls, NULL)) {
+        base_conv_check(p, src, tt->cls);
+        struct cexpr *b = to_base(p, tt->cls, 1);
+        return ref ? ex_deref(b) : b;
+    }
+    if (!src->dynamic)
+        cx_error(at, "dynamic_cast from non-polymorphic '%s'", src->name);
+    struct cexpr *d = ex_new(E_DYNCAST, ct_ptr(ct_qual(tt, p->t->to->q)),
+                             VC_PRVALUE);
+    d->a = xmalloc(sizeof *d->a);
+    d->a[0] = p;
+    d->na = 1;
+    d->alloc_t = p->t->to;
+    d->is_array = tt->k == CT_VOID;
+    d->zero = ref;
+    /* the hint: src is a unique public base of the target at this offset
+     * (-1: unknown, -2: not a base at all) */
+    d->ival = -1;
+    if (tt->k == CT_CLASS) {
+        int amb;
+        if (class_derives(tt->cls, src, &amb) && !amb)
+            d->ival = base_offset(tt->cls, src);    /* -1 if virtual */
+        else if (!class_derives(tt->cls, src, NULL))
+            d->ival = -2;
+    }
+    return ref ? ex_deref(d) : d;
+}
+
+/* T(args) or T{args}: a functional cast, or constructing a T. */
+static struct cexpr *functional_cast(struct cty *t, const struct ctok *at)
+{
+    if (cx_kind() == TOK_LBRACE) {
+        struct cexpr *l = parse_braced_list();
+        struct cexpr *r = init_object(t, INIT_LIST, &l, 1, at);
+        if (!r)
+            r = init_object(t, INIT_VALUE, NULL, 0, at);
+        return r;
+    }
+    cx_expect(TOK_LPAREN, "'('");
+    struct cexpr **args = NULL;
+    int na = 0, cap = 0;
+    int saved = cx_in_targs;              /* (int(a >> b) in X<...>) */
+    cx_in_targs = 0;
+    while (cx_kind() != TOK_RPAREN) {
+        list_element(&args, &na, &cap);
+        if (!cx_accept(TOK_COMMA))
+            break;
+    }
+    cx_expect(TOK_RPAREN, "')'");
+    cx_in_targs = saved;
+    if (na == 0) {
+        if (t->k == CT_VOID)
+            return ex_cast(ex_int(0, ct_basic(CT_INT)), t);
+        return init_object(t, INIT_VALUE, NULL, 0, at);
+    }
+    if (na == 1 && t->k != CT_CLASS)
+        return cast_to(t, args[0], CAST_C, at);
+    if (t->k != CT_CLASS)
+        cx_error(at, "a %s is made from one value", ct_name(t));
+    return init_object(t, INIT_DIRECT, args, na, at);
+}
+
+/* C(args) or C{args}, C a class template: its arguments deduced from
+ * these (12.2.2.9), then a C<...> made of them */
+static struct cexpr *ctad_cast(struct ctemplate *tm, const struct ctok *at)
+{
+    if (cx_kind() == TOK_LBRACE) {
+        struct cexpr *l = parse_braced_list();
+        struct cty *t = ctad_deduce(tm, INIT_LIST, &l, 1, at);
+        struct cexpr *r = init_object(t, INIT_LIST, &l, 1, at);
+        return r ? r : init_object(t, INIT_VALUE, NULL, 0, at);
+    }
+    cx_expect(TOK_LPAREN, "'('");
+    struct cexpr **args = NULL;
+    int na = 0, cap = 0;
+    while (cx_kind() != TOK_RPAREN) {
+        list_element(&args, &na, &cap);
+        if (!cx_accept(TOK_COMMA))
+            break;
+    }
+    cx_expect(TOK_RPAREN, "')'");
+    struct cty *t = ctad_deduce(tm, na ? INIT_DIRECT : INIT_VALUE, args, na,
+                                at);
+    return na ? init_object(t, INIT_DIRECT, args, na, at)
+              : init_object(t, INIT_VALUE, NULL, 0, at);
+}
+
+/* At `(`: is a type-id inside (a cast) rather than an expression? */
+static int paren_type_id(void)
+{
+    int save = cx_pos;
+    cx_advance();
+    int r = 0;
+    if (!at_type_start())
+        goto out;
+    for (;;) {
+        enum tok_kind k = cx_kind();
+        int n;
+        if (k == TOK_KW_STRUCT || k == TOK_KW_UNION || k == TOK_CX_CLASS ||
+            k == TOK_KW_ENUM || k == TOK_CX_TYPENAME) {
+            cx_advance();
+            struct qname q = peek_qname();
+            cx_pos += q.fin + (cx_kind_at(q.fin) == TOK_IDENT);
+            continue;
+        }
+        if (k == TOK_CX_DECLTYPE || k == TOK_KW_TYPEOF) {
+            cx_advance();
+            if (cx_kind() == TOK_LPAREN)
+                cx_skip_balanced();
+            continue;
+        }
+        if (k == TOK_KW_ATTRIBUTE) {
+            cx_advance();
+            if (cx_kind() == TOK_LPAREN)
+                cx_skip_balanced();
+            continue;
+        }
+        if (k != TOK_IDENT && k != TOK_COLONCOLON && at_type_start()) {
+            cx_advance();
+            continue;
+        }
+        if ((k == TOK_IDENT || k == TOK_COLONCOLON) && peek_type_name(&n)) {
+            cx_skip_peek(n);
+            continue;
+        }
+        break;
+    }
+    switch (cx_kind()) {
+    case TOK_RPAREN: case TOK_STAR: case TOK_AMP: case TOK_ANDAND:
+    case TOK_LBRACKET: case TOK_KW_CONST: case TOK_KW_VOLATILE:
+        r = 1;
+        break;
+    case TOK_IDENT: case TOK_COLONCOLON: {
+        struct qname q = peek_qname();      /* int C::* */
+        r = !q.bad && q.scope && q.fin > 0 && cx_kind_at(q.fin) == TOK_STAR;
+        break;
+    }
+    case TOK_LPAREN: {
+        enum tok_kind k1 = cx_kind_at(1);
+        cx_advance();
+        r = k1 == TOK_STAR || k1 == TOK_AMP || k1 == TOK_RPAREN ||
+            k1 == TOK_ANDAND || at_type_start();
+        break;
+    }
+    default:
+        r = 0;
+    }
+out:
+    cx_pos = save;
+    return r;
+}
+
+/* ---- new and delete ---- */
+
+static struct cexpr *parse_cast(void);
+
+static struct cexpr *size_of(struct cty *t)
+{
+    return ex_int(ct_size(t), ct_size_t());
+}
+
+static int call_args(struct cexpr ***out);
+
+static struct cexpr *parse_new(const struct ctok *at, int global)
+{
+    cx_advance();                               /* new */
+    struct cexpr **place = NULL;
+    int nplace = 0, cap = 0;
+    (void)cap;
+    if (cx_kind() == TOK_LPAREN && !paren_type_id())
+        nplace = call_args(&place);       /* (packs expanded) */
+    struct cty *t;
+    struct cexpr *count = NULL;
+    if (cx_kind() == TOK_LPAREN) {
+        cx_advance();
+        t = parse_type_id();
+        cx_expect(TOK_RPAREN, "')'");
+    } else {
+        t = parse_new_type_id();
+        if (cx_kind() == TOK_LBRACKET) {
+            cx_advance();
+            count = expr_parse();
+            cx_expect(TOK_RBRACKET, "']'");
+            /* further bounds are constants: part of the element type */
+            long dims[8];
+            int nd = 0;
+            while (cx_kind() == TOK_LBRACKET && nd < 8) {
+                cx_advance();
+                dims[nd++] = expr_parse_const("an array bound");
+                cx_expect(TOK_RBRACKET, "']'");
+            }
+            while (nd > 0)
+                t = ct_array(t, dims[--nd]);
+        }
+    }
+    if (t->k == CT_ARRAY && !count) {
+        count = ex_int(t->n, ct_size_t());
+        t = t->to;
+    }
+    if (ct_is_ref(t) || t->k == CT_FUNC || t->k == CT_VOID)
+        cx_error(at, "cannot allocate a %s with new", ct_name(t));
+    if (!ct_is_complete(t))
+        cx_error(at, "new of incomplete type %s", ct_name(t));
+    /* the initializer */
+    enum init_form form = INIT_DEFAULT;
+    struct cexpr **args = NULL;
+    int na = 0;
+    if (cx_kind() == TOK_LPAREN) {
+        form = INIT_DIRECT;
+        na = call_args(&args);            /* (packs expanded) */
+        if (na == 0)
+            form = INIT_VALUE;
+    } else if (cx_kind() == TOK_LBRACE) {
+        form = INIT_LIST;
+        args = xmalloc(sizeof *args);
+        args[0] = parse_braced_list();
+        na = 1;
+        if (args[0]->na == 0)
+            form = INIT_VALUE;
+    }
+    struct cexpr *e = ex_new(E_NEW, ct_ptr(t), VC_PRVALUE);
+    e->line = at->t.line;
+    e->col = at->t.col;
+    e->file = at->file;
+    e->alloc_t = t;
+    e->is_array = count != NULL;
+    struct cty *elem = t;
+    while (elem->k == CT_ARRAY)
+        elem = elem->to;
+    if (count) {
+        if (form != INIT_DEFAULT && form != INIT_VALUE)
+            cx_error(at, "an initializer for new[] is not supported yet");
+        e->count = convert(count, ct_size_t(), "an array new's size");
+        e->init = init_object(t, form, NULL, 0, at);
+        if (elem->k == CT_CLASS && class_dtor(elem->cls))
+            e->cookie = ct_align(elem) > 8 ? ct_align(elem) : 8;
+    } else {
+        e->init = init_object(t, form, args, na, at);
+    }
+    /* operator new(size, placement...) */
+    struct cexpr **oa = xmalloc((size_t)(nplace + 1) * sizeof *oa);
+    if (count) {
+        struct cexpr *sz = binary(TOK_STAR, e->count, size_of(t));
+        if (e->cookie)
+            sz = binary(TOK_PLUS, sz, ex_int(e->cookie, ct_size_t()));
+        oa[0] = sz;
+    } else {
+        oa[0] = size_of(t);
+    }
+    for (int i = 0; i < nplace; i++)
+        oa[i + 1] = place[i];
+    const char *opname = count ? "operator new[]" : "operator new";
+    long al = over_alignment(elem);
+    if (al) {
+        /* over-aligned: operator new(size, align_val_t, placement...)
+         * when one is viable, else as any other (C++17, 7.6.2.8) */
+        struct cexpr **aa = xmalloc((size_t)(nplace + 2) * sizeof *aa);
+        aa[0] = oa[0];
+        aa[1] = ex_int(al, align_val_type());
+        for (int i = 0; i < nplace; i++)
+            aa[i + 2] = place[i];
+        struct cfunc *set = alloc_set(opname, elem, global);
+        if (set && resolve(set, NULL, aa, nplace + 2, NULL, opname)) {
+            oa = aa;
+            nplace++;
+        }
+    }
+    struct cexpr *call = call_alloc_op(opname, elem, global, oa, nplace + 1,
+                                       at);
+    e->fn = call->fn;
+    e->a = call->a;
+    e->na = call->na;
+    return e;
+}
+
+static struct cexpr *parse_delete(const struct ctok *at, int global)
+{
+    cx_advance();                               /* delete */
+    int arr = 0;
+    if (cx_kind() == TOK_LBRACKET && cx_kind_at(1) == TOK_RBRACKET) {
+        cx_advance();
+        cx_advance();
+        arr = 1;
+    }
+    struct cexpr *p = rvalue(parse_cast());
+    if (p->t->k != CT_PTR || p->t->to->k == CT_FUNC)
+        cx_error(at, "delete of a non-pointer '%s'", ct_name(p->t));
+    struct cty *t = p->t->to;
+    struct cexpr *e = ex_new(E_DELETE, ct_basic(CT_VOID), VC_PRVALUE);
+    e->line = at->t.line;
+    e->col = at->t.col;
+    e->file = at->file;
+    e->alloc_t = t;
+    e->is_array = arr;
+    if (t->k == CT_CLASS) {
+        if (!ct_is_complete(t))
+            cx_error(at, "delete of a pointer to incomplete '%s'",
+                     ct_name(t));
+        e->dtor = class_dtor(t->cls);
+        if (arr && e->dtor)
+            e->cookie = ct_align(t) > 8 ? ct_align(t) : 8;
+    }
+    /* g++ calls the sized forms where it knows the size, the aligned
+     * ones for an over-aligned type */
+    int sized = t->k != CT_VOID && (!arr || e->cookie);
+    e->fn = dealloc_fn(t, global, arr, sized);
+    e->ival = over_alignment(t);
+    e->a = xmalloc(sizeof *e->a);
+    e->a[0] = p;
+    e->na = 1;
+    return e;
+}
+
+/* ---- builtins ---- */
+
+static struct cty *builtin_type(const char *n);
+
+static const char *lib_sig(const char *n);
+
+/* __builtin_ia32_rdrand{16,32,64}_step, __builtin_ia32_rdseed_{hi,si,di}
+ * _step: the value's width in bits (0: not one of them) */
+int rdrand_width(const char *n)
+{
+    static const struct { const char *name; int w; } rd[] = {
+        { "ia32_rdrand16_step", 16 }, { "ia32_rdrand32_step", 32 },
+        { "ia32_rdrand64_step", 64 }, { "ia32_rdseed_hi_step", 16 },
+        { "ia32_rdseed_si_step", 32 }, { "ia32_rdseed_di_step", 64 },
+    };
+    for (size_t i = 0; i < sizeof rd / sizeof rd[0]; i++)
+        if (!strcmp(n, rd[i].name))
+            return rd[i].w;
+    return 0;
+}
+
+/* __builtin_powi[fl]: libgcc's __powi?f2 for the type (long double's
+ * the x87 format on x86-64, IEEE quad on aarch64) */
+static const char *powi_fn(const char *n)
+{
+    if (!strcmp(n, "powi"))
+        return "__powidf2";
+    if (!strcmp(n, "powif"))
+        return "__powisf2";
+    if (!strcmp(n, "powil"))
+        return target_get() == TARGET_AARCH64 ? "__powitf2" : "__powixf2";
+    return NULL;
+}
+
+int cxx_has_builtin(const char *name)
+{
+    if (strncmp(name, "__builtin_", 10) == 0) {
+        if (lib_sig(name + 10) || powi_fn(name + 10))
+            return 1;
+        if (rdrand_width(name + 10) || !strcmp(name + 10, "ia32_pause"))
+            return target_get() != TARGET_AARCH64;
+        static const char *const special[] = {
+            "offsetof", "is_constant_evaluated", "addressof", "launder",
+            "expect", "constant_p", "va_arg", "coro_done", "coro_resume",
+            "coro_destroy", "coro_promise", "source_location", "bit_cast",
+            "eh_return_data_regno", "extend_pointer",
+        };
+        const char *n = name + 10;
+        for (size_t i = 0; i < sizeof special / sizeof special[0]; i++)
+            if (strcmp(n, special[i]) == 0)
+                return 1;
+        if (!strcmp(n, "add_overflow") || !strcmp(n, "sub_overflow") ||
+            !strcmp(n, "mul_overflow"))
+            return 1;
+        return builtin_type(n) != NULL;
+    }
+    if (!strcmp(name, "__make_integer_seq"))
+        return 1;
+    return trait_known(name);
+}
+
+static struct cty *builtin_type(const char *n)
+{
+    static const char *const ints[] = {
+        "clz", "ctz", "popcount", "parity", "ffs", "clrsb", "clzl", "ctzl",
+        "popcountl", "parityl", "ffsl", "clzll", "ctzll", "popcountll",
+        "parityll", "ffsll", "abs", "constant_p", "isnan", "isinf",
+        "isfinite", "signbit", "isinf_sign", "memcmp", "strcmp", "strncmp",
+        "classify_type", "isgreater", "isless", "isunordered", "fpclassify",
+        "isnormal", "islessgreater", "isgreaterequal", "islessequal",
+    };
+    static const char *const voids[] = {
+        "unreachable", "trap", "va_start", "va_end", "va_copy", "prefetch",
+        "__clear_cache",
+    };
+    static const char *const ptrs[] = {
+        "memcpy", "memmove", "memset", "return_address", "frame_address",
+        "alloca", "extract_return_addr",
+    };
+    static const char *const flts[] = {
+        "huge_val", "inf", "nan", "nans", "fabs", "sqrt", "copysign",
+        "floor", "ceil", "trunc", "round", "fmin", "fmax", "fma", "ldexp",
+        "frexp", "logb", "scalbn", "nextafter", "fmod", "exp", "log",
+        "pow", "sin", "cos",
+    };
+    for (size_t i = 0; i < sizeof ints / sizeof ints[0]; i++)
+        if (strcmp(n, ints[i]) == 0)
+            return ct_basic(CT_INT);
+    for (size_t i = 0; i < sizeof voids / sizeof voids[0]; i++)
+        if (strcmp(n, voids[i]) == 0)
+            return ct_basic(CT_VOID);
+    for (size_t i = 0; i < sizeof ptrs / sizeof ptrs[0]; i++)
+        if (strcmp(n, ptrs[i]) == 0)
+            return ct_ptr(ct_basic(CT_VOID));
+    if (strcmp(n, "expect") == 0 || strcmp(n, "labs") == 0)
+        return ct_basic(CT_LONG);
+    if (strcmp(n, "llabs") == 0)
+        return ct_basic(CT_LLONG);
+    if (strcmp(n, "bswap16") == 0)
+        return ct_basic(CT_USHORT);
+    if (strcmp(n, "bswap32") == 0)
+        return ct_basic(CT_UINT);
+    if (strcmp(n, "bswap64") == 0)
+        return ct_basic(CT_ULONG);
+    if (strcmp(n, "strlen") == 0 || strcmp(n, "object_size") == 0)
+        return ct_size_t();
+    size_t l = strlen(n);
+    for (size_t i = 0; i < sizeof flts / sizeof flts[0]; i++) {
+        size_t fl = strlen(flts[i]);
+        if (strncmp(n, flts[i], fl) != 0)
+            continue;
+        if (l == fl)
+            return ct_basic(CT_DOUBLE);
+        if (l == fl + 1 && n[fl] == 'f')
+            return ct_basic(CT_FLOAT);
+        if (l == fl + 1 && n[fl] == 'l')
+            return ct_basic(CT_LDOUBLE);
+    }
+    return NULL;
+}
+
+static int call_args_rest(struct cexpr ***out);
+
+/* ( arguments ): the count, and the arguments in *out. */
+static int call_args(struct cexpr ***out)
+{
+    cx_expect(TOK_LPAREN, "'('");
+    return call_args_rest(out);
+}
+
+/* After `(`: arguments to the `)`. */
+int expr_call_args_rest(struct cexpr ***out)
+{
+    return call_args_rest(out);
+}
+
+static int call_args_rest(struct cexpr ***out)
+{
+    struct cexpr **args = NULL;
+    int na = 0, cap = 0;
+    int saved = cx_in_targs;
+    cx_in_targs = 0;
+    while (cx_kind() != TOK_RPAREN) {
+        list_element(&args, &na, &cap);
+        if (!cx_accept(TOK_COMMA))
+            break;
+    }
+    cx_expect(TOK_RPAREN, "')' to close the arguments");
+    cx_in_targs = saved;
+    *out = args;
+    return na;
+}
+
+/* ---- builtins that are library functions ----
+ * __builtin_memchr, __builtin_acosf, ... : the C function itself, called
+ * (EmbCC's C does not know them by their builtin names). Signatures: the
+ * return type then the parameters — v void, i int, l long, L long long,
+ * z size_t, d double, f float, e long double, P void *, C const void *,
+ * s char *, c const char *, h wchar_t, w wchar_t *, W const wchar_t *,
+ * I int *, D double *, F float *, E long double *, V va_list, . `...` */
+
+static struct cty *sig_type(char c)
+{
+    switch (c) {
+    case 'v': return ct_basic(CT_VOID);
+    case 'i': return ct_basic(CT_INT);
+    case 'l': return ct_basic(CT_LONG);
+    case 'L': return ct_basic(CT_LLONG);
+    case 'z': return ct_size_t();
+    case 'd': return ct_basic(CT_DOUBLE);
+    case 'f': return ct_basic(CT_FLOAT);
+    case 'e': return ct_basic(CT_LDOUBLE);
+    case 'P': return ct_ptr(ct_basic(CT_VOID));
+    case 'C': return ct_ptr(ct_qual(ct_basic(CT_VOID), CQ_CONST));
+    case 's': return ct_ptr(ct_basic(CT_CHAR));
+    case 'c': return ct_ptr(ct_qual(ct_basic(CT_CHAR), CQ_CONST));
+    case 'h': return ct_basic(CT_WCHAR);
+    case 'w': return ct_ptr(ct_basic(CT_WCHAR));
+    case 'W': return ct_ptr(ct_qual(ct_basic(CT_WCHAR), CQ_CONST));
+    case 'I': return ct_ptr(ct_basic(CT_INT));
+    case 'D': return ct_ptr(ct_basic(CT_DOUBLE));
+    case 'F': return ct_ptr(ct_basic(CT_FLOAT));
+    case 'E': return ct_ptr(ct_basic(CT_LDOUBLE));
+    case 'V': return ct_basic(CT_VALIST);
+    case 'q': return ct_complex(ct_basic(CT_FLOAT));
+    case 'Q': return ct_complex(ct_basic(CT_DOUBLE));
+    case 'R': return ct_complex(ct_basic(CT_LDOUBLE));
+    default: return NULL;
+    }
+}
+
+/* the signature of library builtin n (NULL: not one) */
+static const char *lib_sig(const char *n)
+{
+    static const struct { const char *name, *sig; } fns[] = {
+        { "memchr", "PCiz" }, { "memcmp", "iCCz" }, { "strchr", "sci" },
+        { "strrchr", "sci" }, { "strpbrk", "scc" }, { "strstr", "scc" },
+        { "strlen", "zc" }, { "strcmp", "icc" }, { "strncmp", "iccz" },
+        { "strcpy", "ssc" }, { "strncpy", "sscz" }, { "strcat", "ssc" },
+        { "strncat", "sscz" }, { "strspn", "zcc" }, { "strcspn", "zcc" },
+        { "wcslen", "zW" }, { "wmemchr", "wWhz" }, { "wmemcmp", "iWWz" },
+        { "wmemcpy", "wwWz" }, { "wmemmove", "wwWz" }, { "wmemset", "wwhz" },
+        { "vsnprintf", "iszcV" }, { "snprintf", "iszc." },
+        { "sprintf", "isc." }, { "vsprintf", "iscV" }, { "printf", "ic." },
+        { "puts", "ic" }, { "putchar", "ii" }, { "abort", "v" },
+        { "exit", "vi" }, { "malloc", "Pz" }, { "calloc", "Pzz" },
+        { "realloc", "PPz" }, { "free", "vP" }, { "abs", "ii" },
+        { "labs", "ll" }, { "llabs", "LL" }, { "alloca", "Pz" },
+        /* libgcc's, for __builtin_powi (x to an int power) */
+        { "__powidf2", "ddi" }, { "__powisf2", "ffi" },
+        { "__powixf2", "eei" }, { "__powitf2", "eei" },
+    };
+    for (size_t i = 0; i < sizeof fns / sizeof fns[0]; i++)
+        if (strcmp(fns[i].name, n) == 0)
+            return fns[i].sig;
+    /* libm: each in double, float (f) and long double (l) */
+    static const char *const unary[] = {
+        "acos", "asin", "atan", "ceil", "cos", "cosh", "exp", "fabs",
+        "floor", "log", "log10", "sin", "sinh", "sqrt", "tan", "tanh",
+        "acosh", "asinh", "atanh", "cbrt", "erf", "erfc", "exp2", "expm1",
+        "lgamma", "log1p", "log2", "logb", "nearbyint", "rint", "round",
+        "tgamma", "trunc",
+    };
+    static const char *const binary[] = {
+        "atan2", "fmod", "pow", "copysign", "fdim", "fmax", "fmin", "hypot",
+        "nextafter", "remainder",
+    };
+    static const struct { const char *name, *sig; } other[] = {
+        { "fma", "xxxx" }, { "frexp", "xxJ" }, { "ldexp", "xxi" },
+        { "modf", "xxX" }, { "scalbn", "xxi" }, { "scalbln", "xxl" },
+        { "ilogb", "ix" }, { "llrint", "Lx" }, { "llround", "Lx" },
+        { "lrint", "lx" }, { "lround", "lx" }, { "nexttoward", "xxe" },
+        { "remquo", "xxxJ" },
+    };
+    size_t len = strlen(n);
+    char suf = len > 1 && (n[len - 1] == 'f' || n[len - 1] == 'l')
+               ? n[len - 1] : 0;
+    for (int pass = 0; pass < 2; pass++) {
+        size_t bl = pass ? len - (suf != 0) : len;
+        char x = pass && suf ? (suf == 'f' ? 'f' : 'e') : 'd';
+        if (pass && !suf)
+            break;
+        char xp = x == 'f' ? 'F' : x == 'e' ? 'E' : 'D';
+        for (size_t i = 0; i < sizeof unary / sizeof unary[0]; i++)
+            if (strlen(unary[i]) == bl && !strncmp(unary[i], n, bl))
+                return cx_fmt("%c%c", x, x);
+        for (size_t i = 0; i < sizeof binary / sizeof binary[0]; i++)
+            if (strlen(binary[i]) == bl && !strncmp(binary[i], n, bl))
+                return cx_fmt("%c%c%c", x, x, x);
+        for (size_t i = 0; i < sizeof other / sizeof other[0]; i++)
+            if (strlen(other[i].name) == bl &&
+                !strncmp(other[i].name, n, bl)) {
+                char *sg = cx_strdup(other[i].sig);
+                for (char *q = sg; *q; q++)
+                    *q = *q == 'x' ? x : *q == 'X' ? xp : *q == 'J' ? 'I'
+                         : *q;
+                return sg;
+            }
+    }
+    /* <complex.h>'s: complex from complex (cpow of two), and cabs, carg,
+     * creal, cimag a real from a complex — f and l suffixed too */
+    static const char *const cunary[] = {
+        "cacos", "casin", "catan", "cacosh", "casinh", "catanh", "ccos",
+        "csin", "ctan", "ccosh", "csinh", "ctanh", "cexp", "clog", "csqrt",
+        "cproj", "conj",
+    };
+    static const char *const creal_of[] = { "cabs", "carg", "creal", "cimag" };
+    for (int pass = 0; pass < 2; pass++) {
+        size_t bl = pass ? len - (suf != 0) : len;
+        if (pass && !suf)
+            break;
+        char x = pass && suf ? (suf == 'f' ? 'f' : 'e') : 'd';
+        char z = x == 'f' ? 'q' : x == 'e' ? 'R' : 'Q';
+        for (size_t i = 0; i < sizeof cunary / sizeof cunary[0]; i++)
+            if (strlen(cunary[i]) == bl && !strncmp(cunary[i], n, bl))
+                return cx_fmt("%c%c", z, z);
+        for (size_t i = 0; i < sizeof creal_of / sizeof creal_of[0]; i++)
+            if (strlen(creal_of[i]) == bl && !strncmp(creal_of[i], n, bl))
+                return cx_fmt("%c%c", x, z);
+        if (bl == 4 && !strncmp(n, "cpow", 4))
+            return cx_fmt("%c%c%c", z, z, z);
+    }
+    return NULL;
+}
+
+/* the C function a library builtin is: as the unit declared it, or made */
+static struct cfunc *lib_builtin(const char *n)
+{
+    const char *sig = lib_sig(n);
+    if (!sig)
+        return NULL;
+    struct csym *y = scope_find_here(cx_global, n);
+    if (y && y->k == CS_FUNC)
+        for (struct cfunc *f = y->fns; f; f = f->next)
+            if (f->c_linkage && !f->tmpl)
+                return f->alias_of ? f->alias_of : f;
+    static struct { const char *name; struct cfunc *f; } made[128];
+    static int nmade;
+    for (int i = 0; i < nmade; i++)
+        if (strcmp(made[i].name, n) == 0)
+            return made[i].f;
+    int np = 0, variadic = 0;
+    struct cty *ps[8];
+    for (const char *q = sig + 1; *q && np < 8; q++) {
+        if (*q == '.')
+            variadic = 1;
+        else
+            ps[np++] = sig_type(*q);
+    }
+    struct cfunc *f = xcalloc(1, sizeof *f);
+    f->name = cx_strdup(n);
+    f->type = ct_func(sig_type(sig[0]), ps, np, variadic);
+    f->owner = cx_global;
+    f->c_linkage = 1;
+    f->vslot = -1;
+    f->body_tok = f->mi_tok = -1;
+    func_register(f);
+    if (nmade < 128) {
+        made[nmade].name = f->name;
+        made[nmade].f = f;
+        nmade++;
+    }
+    return f;
+}
+
+/* GNU's __atomic_* and __sync_* builtins, which EmbCC's C implements:
+ * typed here (the object's type is the first argument's pointee), passed
+ * on as they are. */
+static struct cexpr *parse_atomic(const char *name, const struct ctok *at)
+{
+    struct cexpr **args;
+    int na = call_args(&args);
+    for (int i = 0; i < na; i++)
+        args[i] = rvalue(args[i]);
+    struct cty *pt = na ? args[0]->t : NULL;
+    struct cty *T = pt && pt->k == CT_PTR ? ct_unqual(pt->to)
+                                          : ct_basic(CT_INT);
+    const char *n = name[2] == 'a' ? name + 9 : name + 7;
+    long sz;
+    if ((!strcmp(n, "always_lock_free") || !strcmp(n, "is_lock_free")) &&
+        na >= 1 && expr_const(args[0], &sz))
+        /* both targets: 1, 2, 4 and 8 bytes are lock-free (as g++ says) */
+        return ex_int(sz == 1 || sz == 2 || sz == 4 || sz == 8,
+                      ct_basic(CT_BOOL));
+    struct cty *rt;
+    if (!strcmp(n, "store_n") || !strcmp(n, "load") || !strcmp(n, "store") ||
+        !strcmp(n, "exchange") || !strcmp(n, "clear") ||
+        !strcmp(n, "thread_fence") || !strcmp(n, "signal_fence") ||
+        !strcmp(n, "lock_release") || !strcmp(n, "synchronize"))
+        rt = ct_basic(CT_VOID);
+    else if (!strcmp(n, "compare_exchange_n") ||
+             !strcmp(n, "compare_exchange") || !strcmp(n, "test_and_set") ||
+             !strcmp(n, "always_lock_free") || !strcmp(n, "is_lock_free") ||
+             !strcmp(n, "bool_compare_and_swap"))
+        rt = ct_basic(CT_BOOL);
+    else
+        rt = T;                   /* load_n, exchange_n, the fetch forms */
+    if (na >= 2 && T->k != CT_VOID &&
+        (!strcmp(n, "store_n") || !strcmp(n, "exchange_n") ||
+         strstr(n, "fetch") || !strcmp(n, "lock_test_and_set")))
+        args[1] = convert(args[1], ct_is_arith(T) ||
+                                   (T->k == CT_PTR && !strstr(n, "fetch"))
+                                   ? T : args[1]->t, name);
+    struct cexpr *e = ex_new(E_BUILTIN, rt, VC_PRVALUE);
+    e->name = name;
+    e->a = args;
+    e->na = na;
+    e->line = at->t.line;
+    e->col = at->t.col;
+    e->file = at->file;
+    return e;
+}
+
+static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
+{
+    const char *n = name + 10;
+    if (strcmp(n, "va_arg") == 0) {
+        cx_expect(TOK_LPAREN, "'('");
+        struct cexpr *ap = expr_parse_assign();
+        cx_expect(TOK_COMMA, "','");
+        struct cty *t = parse_type_id();
+        cx_expect(TOK_RPAREN, "')'");
+        struct cexpr *e = ex1(E_VAARG, ct_unqual(t), VC_PRVALUE, ap);
+        return e;
+    }
+    if (strcmp(n, "bit_cast") == 0) {
+        /* std::bit_cast: the SAME BYTES read as another type. It has to
+         * be a builtin and not a library function because every way of
+         * writing it in C++ is either undefined or not a constant
+         * expression -- `*(int *)&f` breaks strict aliasing and the
+         * optimizer may assume it never happens, a union is defined in
+         * C and merely conventional in C++, and memcpy is defined but
+         * cannot appear in a constant expression. */
+        cx_expect(TOK_LPAREN, "'('");
+        struct cty *t = parse_type_id();
+        cx_expect(TOK_COMMA, "','");
+        struct cexpr *v = rvalue(expr_parse_assign());
+        cx_expect(TOK_RPAREN, "')'");
+        struct cty *to = ct_unqual(t);
+        if (!ct_is_complete(to) || !ct_is_complete(v->t))
+            cx_error(at, "__builtin_bit_cast needs complete types");
+        if (ct_size(to) != ct_size(v->t))
+            cx_error(at, "__builtin_bit_cast between '%s' and '%s': they "
+                         "are %ld and %ld bytes",
+                     ct_name(v->t), ct_name(to), ct_size(v->t), ct_size(to));
+        struct cexpr *e = ex1(E_BUILTIN, to, VC_PRVALUE, v);
+        e->name = name;
+        return e;
+    }
+    if (strcmp(n, "offsetof") == 0) {
+        cx_expect(TOK_LPAREN, "'('");
+        struct cty *t = parse_type_id();
+        cx_expect(TOK_COMMA, "','");
+        long off = 0;
+        for (;;) {
+            if (t->k != CT_CLASS || cx_kind() != TOK_IDENT)
+                cx_error(at, "bad __builtin_offsetof");
+            struct cfield *fl = class_find_field(t->cls, cx_cur()->t.text);
+            if (!fl) {
+                /* a member of an anonymous member: through it */
+                struct csym *y = class_member(t->cls, cx_cur()->t.text);
+                if (y && y->k == CS_FIELD && y->nfpath) {
+                    for (int i = 0; i < y->nfpath; i++)
+                        off += y->fpath[i]->off;
+                    fl = y->field;
+                }
+            }
+            if (!fl)
+                cx_error(cx_cur(), "no member '%s' in '%s'", cx_cur()->t.text,
+                         ct_name(t));
+            cx_advance();
+            off += fl->off;
+            t = fl->type;
+            while (cx_kind() == TOK_LBRACKET) {
+                cx_advance();
+                long i = expr_parse_const("an index");
+                cx_expect(TOK_RBRACKET, "']'");
+                if (t->k != CT_ARRAY)
+                    cx_error(at, "indexing a non-array in offsetof");
+                t = t->to;
+                off += i * ct_size(t);
+            }
+            if (!cx_accept(TOK_DOT))
+                break;
+        }
+        cx_expect(TOK_RPAREN, "')'");
+        return ex_int(off, ct_size_t());
+    }
+    if (strcmp(n, "eh_return_data_regno") == 0) {
+        /* the DWARF registers a landing pad gets the exception object and
+         * selector in: 0 and 1 (rax and rdx; x0 and x1) */
+        cx_expect(TOK_LPAREN, "'('");
+        long v = expr_parse_const("a register index");
+        cx_expect(TOK_RPAREN, "')'");
+        return ex_int(v == 0 || v == 1 ? v : -1, ct_basic(CT_INT));
+    }
+    if (strcmp(n, "extend_pointer") == 0) {
+        /* a pointer as an unwinder word: LP64, the same bits */
+        cx_expect(TOK_LPAREN, "'('");
+        struct cexpr *p = rvalue(expr_parse_assign());
+        cx_expect(TOK_RPAREN, "')'");
+        return ex_cast(p, ct_basic(CT_ULONG));
+    }
+    if (strcmp(n, "source_location") == 0) {
+        cx_expect(TOK_LPAREN, "'('");
+        cx_expect(TOK_RPAREN, "')'");
+        return source_location_at(at);
+    }
+    if (strcmp(n, "is_constant_evaluated") == 0) {
+        /* true in a constant evaluation (consteval.c), false at run time */
+        cx_expect(TOK_LPAREN, "'('");
+        cx_expect(TOK_RPAREN, "')'");
+        struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_BOOL), VC_PRVALUE);
+        e->name = "__builtin_is_constant_evaluated";
+        return e;
+    }
+    struct cexpr **args;
+    int na = call_args(&args);
+    if (strcmp(n, "addressof") == 0 && na == 1)
+        return address_of_builtin(args[0]);
+    if (strcmp(n, "launder") == 0 && na == 1)
+        return rvalue(args[0]);
+    if (strcmp(n, "alloca") == 0 && na == 1) {
+        /* stack memory, EmbCC's C's own builtin (no alloca function) */
+        struct cexpr *e = ex_new(E_BUILTIN, ct_ptr(ct_basic(CT_VOID)),
+                                 VC_PRVALUE);
+        e->name = "__builtin_alloca";
+        e->a = xmalloc(sizeof *e->a);
+        e->a[0] = convert(args[0], ct_size_t(), "__builtin_alloca");
+        e->na = 1;
+        return e;
+    }
+    if (strcmp(n, "expect") == 0 && na == 2)
+        return convert(args[0], ct_basic(CT_LONG), "__builtin_expect");
+    if (strcmp(n, "constant_p") == 0 && na == 1) {
+        long v;
+        return ex_int(expr_const(args[0], &v), ct_basic(CT_INT));
+    }
+    if (strcmp(n, "object_size") == 0 && na == 2) {
+        long v = 0;
+        expr_const(args[1], &v);
+        return ex_int(v < 2 ? -1 : 0, ct_size_t());   /* not known */
+    }
+    if ((!strcmp(n, "add_overflow") || !strcmp(n, "sub_overflow") ||
+         !strcmp(n, "mul_overflow")) && na == 3) {
+        /* a op b stored in *r: whether it did not fit (emit.c writes it) */
+        struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_BOOL), VC_PRVALUE);
+        e->name = name;
+        e->a = xmalloc(3 * sizeof *e->a);
+        for (int i = 0; i < 3; i++)
+            e->a[i] = rvalue(args[i]);
+        e->na = 3;
+        if (e->a[2]->t->k != CT_PTR || !ct_is_integer(e->a[2]->t->to))
+            cx_error(at, "%s's third argument points at an integer", name);
+        return e;
+    }
+    if (!strcmp(n, "coro_done") || !strcmp(n, "coro_resume") ||
+        !strcmp(n, "coro_destroy") || !strcmp(n, "coro_promise")) {
+        /* std::coroutine_handle's: through the frame (emit.c) — a
+         * frame's address, and for the promise's its alignment and
+         * which way (from the promise's address to the frame's) */
+        struct cty *vp = ct_ptr(ct_basic(CT_VOID));
+        int prom = n[5] == 'p';
+        if (na != (prom ? 3 : 1))
+            cx_error(at, "wrong number of arguments to '%s'", name);
+        struct cty *rt = prom ? vp : ct_basic(strcmp(n, "coro_done") == 0
+                                              ? CT_BOOL : CT_VOID);
+        struct cexpr *e = ex_new(E_BUILTIN, rt, VC_PRVALUE);
+        e->name = name;
+        e->a = xmalloc(3 * sizeof *e->a);
+        e->a[0] = convert(args[0], vp, name);
+        if (prom) {
+            e->a[1] = convert(args[1], ct_basic(CT_LONG), name);
+            e->a[2] = convert_bool(args[2], name);
+        }
+        e->na = prom ? 3 : 1;
+        return e;
+    }
+    if (!strcmp(n, "ia32_pause")) {
+        /* the spin-wait hint: pause (emit.c) */
+        if (target_get() == TARGET_AARCH64)
+            cx_error(at, "'%s' is an x86 builtin", name);
+        struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_VOID), VC_PRVALUE);
+        e->name = name;
+        e->line = at->t.line;
+        e->col = at->t.col;
+        e->file = at->file;
+        return e;
+    }
+    if (rdrand_width(n)) {
+        /* x86's rdrand/rdseed: a random value stored, 1 when there was
+         * one (emit.c writes the instruction) */
+        if (target_get() == TARGET_AARCH64)
+            cx_error(at, "'%s' is an x86 builtin", name);
+        if (na != 1)
+            cx_error(at, "'%s' takes one pointer", name);
+        struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_INT), VC_PRVALUE);
+        e->name = name;
+        e->line = at->t.line;
+        e->col = at->t.col;
+        e->file = at->file;
+        e->a = xmalloc(sizeof *e->a);
+        e->a[0] = rvalue(args[0]);
+        e->na = 1;
+        if (e->a[0]->t->k != CT_PTR || !ct_is_integer(e->a[0]->t->to))
+            cx_error(at, "'%s' takes a pointer to an integer", name);
+        return e;
+    }
+    const char *powi = powi_fn(n);
+    if (powi)
+        n = powi;
+    struct cfunc *lf = strcmp(n, "memcpy") && strcmp(n, "memmove") &&
+                       strcmp(n, "memset") ? lib_builtin(n) : NULL;
+    if (lf)
+        return make_call(lf, NULL, args, na, at);
+    struct cty *t = builtin_type(n);
+    if (!t)
+        cx_error(at, "'%s' is not a supported builtin", name);
+    struct cexpr *e = ex_new(E_BUILTIN, t, VC_PRVALUE);
+    e->name = name;
+    e->line = at->t.line;
+    e->col = at->t.col;
+    e->file = at->file;
+    e->a = xmalloc((size_t)(na ? na : 1) * sizeof *e->a);
+    for (int i = 0; i < na; i++) {
+        struct cexpr *a = args[i];
+        if (strncmp(n, "va_", 3) == 0 && i == 0)
+            e->a[i] = a;                      /* the va_list itself */
+        else
+            e->a[i] = rvalue(a);
+        if (e->a[i]->t && e->a[i]->t->k == CT_CLASS)
+            cx_error(at, "a class passed to '%s'", name);
+    }
+    e->na = na;
+    return e;
+}
+
+/* ---- primary and postfix expressions ---- */
+
+static struct cexpr *member_of(struct cexpr *obj, struct cfield *fl);
+
+struct cexpr *ex_member(struct cexpr *obj, struct cfield *fl)
+{
+    return member_of(obj, fl);
+}
+
+/* field symbol y of obj's class: through the anonymous members it is
+ * in, if any */
+static struct cexpr *field_via(struct cexpr *obj, struct csym *y)
+{
+    for (int i = 0; i < y->nfpath; i++)
+        obj = member_of(obj, y->fpath[i]);
+    return member_of(obj, y->field);
+}
+
+static struct cexpr *member_of(struct cexpr *obj, struct cfield *fl)
+{
+    struct cexpr *e;
+    if (ct_is_ref(fl->type)) {
+        e = ex1(E_MEMBER, fl->type->to, VC_LVALUE, obj);
+    } else {
+        unsigned q = obj->t->q;
+        if (fl->is_mutable)
+            q &= ~(unsigned)CQ_CONST;
+        e = ex1(E_MEMBER, ct_qual(fl->type, q),
+                obj->vc == VC_LVALUE ? VC_LVALUE
+                : obj->vc == VC_XVALUE ? VC_XVALUE : VC_PRVALUE, obj);
+    }
+    e->field = fl;
+    return e;
+}
+
+/* The first function template in an overload set, if any. */
+static struct ctemplate *set_template(struct cfunc *set)
+{
+    for (struct cfunc *f = set; f; f = f->next)
+        if (f->tmpl)
+            return f->tmpl;
+    return NULL;
+}
+
+/* After a function template's name: `<args>` makes them explicit. */
+static void explicit_targs(struct cexpr *e)
+{
+    struct ctemplate *t = e->fn ? set_template(e->fn) : NULL;
+    if (!t || cx_kind() != TOK_LT)
+        return;
+    /* several templates whose parameters differ in kind (f<true> beside
+     * f<T>): the arguments read for none of them in particular, each
+     * candidate checking them */
+    for (struct cfunc *f = e->fn; f; f = f->next) {
+        struct ctemplate *u = f->alias_of ? f->alias_of->tmpl : f->tmpl;
+        if (u && u != t && (u->nparams < 1 || t->nparams < 1 ||
+                            u->params[0].kind != t->params[0].kind)) {
+            t = NULL;
+            break;
+        }
+    }
+    e->ntargs = parse_template_args(t, &e->targs);
+    e->has_targs = 1;
+}
+
+/* An unqualified or qualified name, looked up (after the name was read). */
+static struct cexpr *name_expr(struct csym *y, const char *name,
+                               const struct ctok *at)
+{
+    /* A name written without an object: `C::s`, or a member named from
+     * inside the class. Non-members carry CA_PUBLIC and cost nothing
+     * here. Functions are not checked at this point -- their access
+     * belongs to the overload, and make_call asks once resolution has
+     * chosen one. */
+    if (y->k != CS_FUNC && y->scope && y->scope->k == SC_CLASS)
+        access_check_sym(y->scope->cls, y, name, at);
+    switch (y->k) {
+    case CS_TEMPLATE: {
+        if (y->tmpl->kind == TK_CONCEPT && cx_kind() == TOK_LT) {
+            /* C<args>: true when they satisfy it */
+            struct ctarg *args;
+            int n = parse_template_args(y->tmpl, &args);
+            for (int i = 0; i < n; i++)
+                if (targ_is_dependent(&args[i]))
+                    return ex_int(0, ct_basic(CT_BOOL));   /* a pattern */
+            return ex_int(concept_satisfied(y->tmpl, args, n, at),
+                          ct_basic(CT_BOOL));
+        }
+        if (y->tmpl->kind == TK_CLASS && !y->tmpl->tparam &&
+            (cx_kind() == TOK_LPAREN || cx_kind() == TOK_LBRACE))
+            return ctad_cast(y->tmpl, at);    /* C(args): C's deduced */
+        if (y->tmpl->kind != TK_VAR || cx_kind() != TOK_LT)
+            cx_error(at, "template '%s' used without its arguments", name);
+        struct ctarg *args;
+        int n = parse_template_args(y->tmpl, &args);
+        struct cvar *v = var_instance(y->tmpl, args, n, at);
+        if (!v)
+            cx_error(at, "'%s' cannot be instantiated for these arguments",
+                     name);
+        struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
+        e->var = v;
+        e->line = at->t.line;
+        e->col = at->t.col;
+        e->file = at->file;
+        v->used = 1;
+        return e;
+    }
+    case CS_PACK:
+        cx_error(at, "parameter pack '%s' must be expanded with '...'", name);
+        return NULL;
+    case CS_VAR: {
+        struct cvar *v = y->var;
+        if (v->sb_var) {            /* a structured binding's name */
+            struct csym hidden = *y;
+            hidden.var = v->sb_var;
+            struct cexpr *base = name_expr(&hidden, v->sb_var->name, at);
+            if (v->sb_field)
+                return member_of(base, v->sb_field);
+            return deref(binary(TOK_PLUS, rvalue(base),
+                                ex_int(v->sb_index, ct_basic(CT_LONG))));
+        }
+        if (v->is_local && !v->is_static && v->fn != cx_curfn &&
+            !(v->fn == NULL)) {
+            struct cexpr *c = lambda_capture(v, at);   /* a lambda's */
+            if (c)
+                return c;
+            cx_error(at, "'%s' is a local of another function", name);
+        }
+        if (v->is_member_static && !v->defined)
+            member_var_from_outdef(v);
+        struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
+        e->var = v;
+        e->line = at->t.line;
+        e->col = at->t.col;
+        e->file = at->file;
+        v->used = 1;
+        return e;
+    }
+    case CS_FIELD: {
+        struct cclass *c = y->fcls ? y->fcls : y->scope->cls;
+        if (cx_curfn && cx_curfn->this_var &&
+            class_derives(cx_curfn->cls, c, NULL))
+            return field_via(to_base(ex_deref(ex_this()), c, 0), y);
+        if (c->closure) {             /* an enclosing lambda's capture */
+            struct cexpr *e = lambda_capture_member(c->closure, y->field, at);
+            if (e)
+                return e;
+        }
+        struct cexpr *t = cx_unevaluated ? NULL : lambda_this(at);
+        if (!t && cx_unevaluated) {
+            /* sizeof(m), decltype(m): an unevaluated operand may name a
+             * member without an object (7.5.5.1) — on a stand-in one */
+            struct cexpr *obj = ex_new(E_DEREF, ct_class(c), VC_LVALUE);
+            obj->a = xmalloc(sizeof *obj->a);
+            obj->a[0] = ex_int(0, ct_ptr(ct_class(c)));
+            obj->na = 1;
+            return field_via(obj, y);
+        }
+        if (!t || !class_derives(t->t->to->cls, c, NULL))
+            cx_error(at, "member '%s' used without an object", name);
+        return field_via(to_base(ex_deref(t), c, 0), y);
+    }
+    case CS_FUNC: {
+        struct cexpr *e = ex_new(E_OVL, y->fns->type, VC_LVALUE);
+        e->fn = y->fns;
+        e->name = name;
+        e->line = at->t.line;
+        e->col = at->t.col;
+        e->file = at->file;
+        /* (a block's using-declaration leaves ADL on, 6.5.4) */
+        e->adl = y->scope->k == SC_NAMESPACE ||
+                 (y->scope->k != SC_CLASS && y->fns && y->fns->alias_of);
+        if (y->scope->k == SC_CLASS && cx_curfn && cx_curfn->this_var &&
+            class_derives(cx_curfn->cls, y->scope->cls, NULL)) {
+            e->obj = ex_this();
+        } else if (y->scope->k == SC_CLASS && cx_curfn && cx_curfn->lambda &&
+                   !y->fns->is_static) {
+            /* the enclosing class's member function, in a lambda */
+            struct cexpr *t = lambda_this(at);
+            if (t && class_derives(t->t->to->cls, y->scope->cls, NULL))
+                e->obj = t;
+        }
+        explicit_targs(e);
+        return e;
+    }
+    case CS_ENUMERATOR: {
+        struct cexpr *e = ex_int(y->value, y->type);
+        e->line = at->t.line;
+        e->col = at->t.col;
+        e->file = at->file;
+        return e;
+    }
+    case CS_NAMESPACE:
+        cx_error(at, "namespace '%s' used as a value", name);
+        return NULL;
+    default:
+        cx_error(at, "type '%s' used as a value", name);
+        return NULL;
+    }
+}
+
+/* The value a name found by lookup stands for here. */
+struct cexpr *expr_parse_name_value(struct csym *y, const char *name,
+                                    const struct ctok *at)
+{
+    return name_expr(y, name, at);
+}
+
+/* A user-defined literal (5.13.9): a call of operator""suffix — given
+ * the literal's value (the cooked form: unsigned long long, long double,
+ * a character), its spelling (the raw form, const char *, or a literal
+ * operator template's char... arguments), or a string literal and its
+ * length. kind: 'i' integer, 'f' floating, 'c' character, 's' string. */
+static struct cexpr *udl_call(int kind, struct cexpr *lit,
+                              const char *spelling, const char *suffix,
+                              const struct ctok *at)
+{
+    const char *name = cx_fmt("operator\"\"%s", suffix);
+    struct csym *y = lookup(cx_scope, name);
+    if (!y || y->k != CS_FUNC)
+        cx_error(at, "no literal operator '%s' for this literal", name);
+    if (kind == 's') {
+        struct cexpr *args[2];
+        args[0] = lit;
+        args[1] = ex_int(lit->slen - 1, ct_size_t());
+        return expr_call_named(NULL, name, args, 2, at);
+    }
+    if (kind == 'c')
+        return expr_call_named(NULL, name, &lit, 1, at);
+    int cooked = 0, raw = 0, tmpl = 0;
+    for (struct cfunc *f = y->fns; f; f = f->next) {
+        if (f->tmpl) {
+            tmpl = 1;
+            continue;
+        }
+        if (f->type->np != 1)
+            continue;
+        struct cty *p = f->type->params[0];
+        if ((kind == 'i' && p->k == CT_ULLONG) ||
+            (kind == 'f' && p->k == CT_LDOUBLE))
+            cooked = 1;
+        if (p->k == CT_PTR && p->to->k == CT_CHAR)
+            raw = 1;
+    }
+    if (cooked) {
+        struct cexpr *a;
+        if (kind == 'i') {
+            a = ex_int(lit->ival, ct_basic(CT_ULLONG));
+        } else {
+            a = ex_new(E_FLT, ct_basic(CT_LDOUBLE), VC_PRVALUE);
+            a->fval = lit->fval;
+            a->text = spelling;
+        }
+        return expr_call_named(NULL, name, &a, 1, at);
+    }
+    size_t n = strlen(spelling);
+    if (raw) {
+        struct cexpr *str = ex_new(E_STR, ct_array(ct_qual(ct_basic(CT_CHAR),
+                                                           CQ_CONST),
+                                                   (long)n + 1), VC_LVALUE);
+        str->text = xstrndup(spelling, n);
+        str->slen = (long)n + 1;
+        str->swidth = 1;
+        return expr_call_named(NULL, name, &str, 1, at);
+    }
+    if (tmpl) {
+        /* template <char...> operator""X(): the characters as arguments */
+        struct ctarg *ta = xcalloc(n ? n : 1, sizeof *ta);
+        for (size_t i = 0; i < n; i++) {
+            ta[i].kind = TP_VALUE;
+            ta[i].value = (unsigned char)spelling[i];
+            ta[i].vtype = ct_basic(CT_CHAR);
+        }
+        return expr_call_named_targs(NULL, name, ta, (int)n, NULL, 0, at);
+    }
+    cx_error(at, "no literal operator '%s' takes this literal", name);
+    return NULL;
+}
+
+static struct cexpr *parse_string(void)
+{
+    const struct ctok *at = cx_cur();
+    int width = at->t.str_width, prefix = at->t.str_prefix;
+    size_t n = 0, cap = 0;
+    struct litch *lc = NULL;
+    const char *suffix = NULL;
+    while (cx_kind() == TOK_STR) {
+        struct token *st = &cx_cur()->t;
+        if (st->ud_suffix) {
+            if (suffix && strcmp(suffix, st->ud_suffix) != 0)
+                cx_error(cx_cur(), "concatenating string literals with "
+                                   "different suffixes");
+            suffix = st->ud_suffix;
+        }
+        if (st->str_prefix) {
+            if (prefix && prefix != st->str_prefix)
+                cx_error(cx_cur(), "concatenating differently-prefixed "
+                                   "string literals");
+            prefix = st->str_prefix;
+            width = st->str_width;
+        }
+        if (n + (size_t)st->nlit > cap) {
+            cap = (n + (size_t)st->nlit) * 2 + 8;
+            lc = xrealloc(lc, cap * sizeof *lc);
+        }
+        memcpy(lc + n, st->lit, (size_t)st->nlit * sizeof *lc);
+        n += (size_t)st->nlit;
+        cx_advance();
+    }
+    enum cty_kind ek = prefix == 'L' ? CT_WCHAR : prefix == 'u' ? CT_CHAR16
+                     : prefix == 'U' ? CT_CHAR32 : prefix == '8' ? CT_CHAR8
+                     : CT_CHAR;
+    long units;
+    char *bytes = lit_encode(lc, (int)n, width, &units, at->file, at->t.line);
+    free(lc);
+    struct cexpr *e = ex_new(E_STR, ct_array(ct_qual(ct_basic(ek), CQ_CONST),
+                                             units), VC_LVALUE);
+    e->text = bytes;
+    e->slen = units;
+    e->swidth = width;
+    e->line = at->t.line;
+    e->col = at->t.col;
+    e->file = at->file;
+    if (suffix)
+        return udl_call('s', e, NULL, suffix, at);
+    return e;
+}
+
+static struct cexpr *parse_postfix(struct cexpr *e);
+
+static int is_assign_op(enum tok_kind k);
+
+static int fold_op(enum tok_kind k)
+{
+    switch (k) {
+    case TOK_PLUS: case TOK_MINUS: case TOK_STAR: case TOK_SLASH:
+    case TOK_PERCENT: case TOK_CARET: case TOK_AMP: case TOK_PIPE:
+    case TOK_SHL: case TOK_SHR: case TOK_EQEQ: case TOK_NEQ: case TOK_LT:
+    case TOK_GT: case TOK_LE: case TOK_GE: case TOK_ANDAND: case TOK_OROR:
+    case TOK_COMMA:
+        return 1;
+    default:
+        return is_assign_op(k);
+    }
+}
+
+/* At `(`: a fold expression's `...` (13.7.4 / 7.5.6), else -1. */
+static int fold_at(void)
+{
+    int depth = 0;
+    for (int i = cx_pos + 1; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_EOF)
+            return -1;
+        if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
+            depth++;
+            continue;
+        }
+        if (k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE) {
+            if (depth-- == 0)
+                return -1;
+            continue;
+        }
+        if (depth || k != TOK_ELLIPSIS)
+            continue;
+        enum tok_kind prev = cx_toks[i - 1].t.kind;
+        enum tok_kind next = cx_toks[i + 1].t.kind;
+        if (i == cx_pos + 1 && fold_op(next))
+            return i;
+        if (fold_op(prev) && (next == TOK_RPAREN || next == prev))
+            return i;
+    }
+    return -1;
+}
+
+static struct cexpr *fold_apply(enum tok_kind op, struct cexpr *l,
+                                struct cexpr *r)
+{
+    if (op == TOK_COMMA)
+        return comma(l, r);
+    if (is_assign_op(op))
+        return assign(op, l, r);
+    return binary(op, l, r);
+}
+
+/* One operand of a fold, tokens from..to: a cast-expression. */
+static struct cexpr *fold_operand(int from, int to)
+{
+    cx_pos = from;
+    struct cexpr *e = parse_cast();
+    if (cx_pos != to)
+        cx_error(cx_cur(), "a fold expression's operand must be a "
+                           "cast-expression (parenthesize it)");
+    return e;
+}
+
+/* ( ... op E ), ( E op ... ), ( I op ... op E ), ( E op ... op I ): E
+ * once per element of the packs it names, joined by op to the left or
+ * right, around I if given. */
+static struct cexpr *parse_fold(int ell)
+{
+    const struct ctok *at = cx_cur();
+    int open = cx_pos, close = cx_pos;
+    cx_skip_balanced();
+    close = cx_pos - 1;
+    enum tok_kind op;
+    int left, e_from, e_to, i_from = -1, i_to = -1;
+    struct csym *packs[8];
+    if (ell == open + 1) {
+        op = cx_toks[ell + 1].t.kind;
+        left = 1;
+        e_from = ell + 2;
+        e_to = close;
+    } else {
+        op = cx_toks[ell - 1].t.kind;
+        if (cx_toks[ell + 1].t.kind == TOK_RPAREN) {
+            left = 0;
+            e_from = open + 1;
+            e_to = ell - 1;
+        } else if (packs_in(open + 1, ell - 1, packs, 8) > 0) {
+            left = 0;
+            e_from = open + 1;
+            e_to = ell - 1;
+            i_from = ell + 2;
+            i_to = close;
+        } else {
+            left = 1;
+            i_from = open + 1;
+            i_to = ell - 1;
+            e_from = ell + 2;
+            e_to = close;
+        }
+    }
+    int ex = packs_in(e_from, e_to, packs, 8);
+    if (ex <= 0)
+        cx_error(at, "a fold expression's operand names no parameter pack");
+    int len = expansion_length(packs, ex);
+    struct cexpr **el = xcalloc((size_t)(len + 1), sizeof *el);
+    for (int e = 0; e < len; e++) {
+        for (int k = 0; k < ex; k++)
+            pack_push(packs[k], e);
+        el[e] = fold_operand(e_from, e_to);
+        pack_pop(ex);
+    }
+    struct cexpr *acc = i_from >= 0 ? fold_operand(i_from, i_to) : NULL;
+    cx_pos = close + 1;
+    if (len == 0 && !acc) {
+        /* an empty unary fold: its operator's identity */
+        if (op == TOK_ANDAND || op == TOK_OROR)
+            return ex_int(op == TOK_ANDAND, ct_basic(CT_BOOL));
+        if (op == TOK_COMMA)
+            return ex_cast(ex_int(0, ct_basic(CT_INT)),
+                           ct_basic(CT_VOID));
+        cx_error(at, "a unary fold over '%s' of an empty pack",
+                 tok_describe(&cx_toks[ell - 1].t));
+    }
+    if (left) {
+        int i = 0;
+        if (!acc)
+            acc = el[i++];
+        for (; i < len; i++)
+            acc = fold_apply(op, acc, el[i]);
+    } else {
+        int i = len - 1;
+        if (!acc)
+            acc = el[i--];
+        for (; i >= 0; i--)
+            acc = fold_apply(op, el[i], acc);
+    }
+    return acc;
+}
+
+static struct cexpr *parse_primary(void)
+{
+    const struct ctok *at = cx_cur();
+    struct cexpr *e;
+    switch (cx_kind()) {
+    case TOK_NUM: {
+        const struct token *t = &at->t;
+        enum cty_kind k;
+        if (t->char_lit)
+            k = t->str_prefix == 'L' ? CT_WCHAR : t->str_prefix == 'u'
+                ? CT_CHAR16 : t->str_prefix == 'U' ? CT_CHAR32 : CT_CHAR;
+        else if (t->num_llong)
+            k = t->num_uns ? CT_ULLONG : CT_LLONG;
+        else if (t->num_long)
+            k = t->num_uns ? CT_ULONG : CT_LONG;
+        else
+            k = t->num_uns ? CT_UINT : CT_INT;
+        e = ex_int(t->num, ct_basic(k));
+        e->is_null_const = !t->char_lit && t->num == 0 && !t->ud_suffix;
+        cx_advance();
+        if (t->ud_suffix)
+            return udl_call(t->char_lit ? 'c' : 'i', e, t->ud_spelling,
+                            t->ud_suffix, at);
+        return e;
+    }
+    case TOK_FNUM: {
+        const struct token *t = &at->t;
+        if (t->fnum_is_imag)
+            cx_error(at, "imaginary constants are not supported in C++");
+        e = ex_new(E_FLT, ct_basic(t->fnum_is_ld ? CT_LDOUBLE
+                                   : t->fnum_is_float ? CT_FLOAT
+                                   : CT_DOUBLE), VC_PRVALUE);
+        e->fval = t->fnum;
+        e->text = t->text;
+        cx_advance();
+        if (t->ud_suffix)
+            return udl_call('f', e, t->ud_spelling, t->ud_suffix, at);
+        return e;
+    }
+    case TOK_STR:
+        return parse_string();
+    case TOK_CX_TRUE: case TOK_CX_FALSE:
+        e = ex_int(cx_kind() == TOK_CX_TRUE, ct_basic(CT_BOOL));
+        cx_advance();
+        return e;
+    case TOK_CX_NULLPTR:
+        e = ex_new(E_NULLPTR, ct_basic(CT_NULLPTR), VC_PRVALUE);
+        cx_advance();
+        return e;
+    case TOK_CX_THIS: {
+        cx_advance();
+        struct cexpr *t = cx_curfn && cx_curfn->lambda ? lambda_this(at)
+                                                       : NULL;
+        return t ? t : ex_this();
+    }
+    case TOK_LPAREN:
+        {
+            int ell = fold_at();
+            if (ell >= 0)
+                return parse_fold(ell);
+        }
+        if (cx_kind_at(1) == TOK_LBRACE) {
+            /* GNU statement expression */
+            cx_advance();
+            struct cstmt *b = parse_compound();
+            cx_expect(TOK_RPAREN, "')' to close a statement expression");
+            struct cstmt *last = b->body;
+            while (last && last->next)
+                last = last->next;
+            struct cty *t = last && last->k == S_EXPR ? last->e->t
+                                                      : ct_basic(CT_VOID);
+            if (t->k == CT_CLASS)
+                cx_error(at, "a statement expression of class type");
+            e = ex_new(E_STMTEXPR, ct_unqual(t), VC_PRVALUE);
+            e->body = b;
+            return e;
+        }
+        cx_advance();
+        {
+            int saved = cx_in_targs;
+            cx_in_targs = 0;
+            e = expr_parse();
+            cx_in_targs = saved;
+        }
+        cx_expect(TOK_RPAREN, "')'");
+        e->paren = 1;
+        return e;
+    case TOK_CX_STATIC_CAST: case TOK_CX_REINTERPRET_CAST:
+    case TOK_CX_CONST_CAST: case TOK_CX_DYNAMIC_CAST: {
+        enum tok_kind k = cx_kind();
+        cx_advance();
+        cx_expect(TOK_LT, "'<' after the cast");
+        struct cty *t = parse_type_id();
+        cx_expect(TOK_GT, "'>' after the cast's type");
+        cx_expect(TOK_LPAREN, "'('");
+        struct cexpr *x = expr_parse();
+        cx_expect(TOK_RPAREN, "')'");
+        if (k == TOK_CX_DYNAMIC_CAST)
+            return dynamic_cast_to(t, x, at);
+        return cast_to(t, x, k == TOK_CX_STATIC_CAST ? CAST_STATIC
+                             : k == TOK_CX_CONST_CAST ? CAST_CONST
+                             : CAST_REINTERPRET, at);
+    }
+    case TOK_CX_TYPEID: {
+        cx_advance();
+        if (cx_kind() != TOK_LPAREN)
+            cx_error(cx_cur(), "expected '(' after typeid");
+        int is_type = paren_type_id();
+        cx_advance();
+        struct cty *ti = type_info_type(at);
+        if (!cx_rtti)
+            cx_error(at, "typeid with -fno-rtti");
+        struct cexpr *e = ex_new(E_TYPEID, ct_qual(ti, CQ_CONST), VC_LVALUE);
+        if (is_type) {
+            e->alloc_t = ct_unqual(ct_strip_ref(parse_type_id()));
+        } else {
+            struct cexpr *x = expr_parse();
+            struct cty *xt = ct_unqual(x->t);
+            if (xt->k == CT_CLASS && xt->cls->dynamic && x->vc != VC_PRVALUE) {
+                e->a = xmalloc(sizeof *e->a);
+                e->a[0] = x;              /* its dynamic type, at run time */
+                e->na = 1;
+            }
+            e->alloc_t = xt;
+        }
+        cx_expect(TOK_RPAREN, "')'");
+        return e;
+    }
+    case TOK_CX_THROW:
+        return parse_throw();
+    case TOK_LBRACKET:
+        return parse_lambda();
+    case TOK_CX_REQUIRES:
+        return parse_requires_expr();
+    case TOK_IDENT: case TOK_COLONCOLON: case TOK_CX_OPERATOR: {
+        if (trait_at() && !trait_is_type(cx_cur()->t.text))
+            return parse_trait();
+        int n;
+        struct cty *t = peek_type_name(&n);
+        if (t && (cx_kind_at(n) == TOK_LPAREN || cx_kind_at(n) == TOK_LBRACE)) {
+            cx_skip_peek(n);
+            return functional_cast(t, at);
+        }
+        struct qname q = peek_qname();
+        if (q.bad)
+            cx_error(cx_peek(q.fin), "'%s' is not a namespace or class",
+                     cx_peek(q.fin)->t.text);
+        cx_pos += q.fin;
+        const char *name;
+        if (cx_kind() == TOK_CX_OPERATOR) {
+            struct cty *conv = NULL;
+            name = parse_operator_name(&conv);
+            if (conv)
+                cx_error(at, "conversion functions are not supported yet "
+                             "(CX2)");
+        } else if (cx_kind() == TOK_IDENT) {
+            name = cx_cur()->t.text;
+            cx_advance();
+        } else {
+            cx_error(cx_cur(), "expected a name");
+            return NULL;
+        }
+        class_lookup_ambiguous = 0;
+        struct csym *y = q.scope ? lookup_in(q.scope, name)
+                                 : lookup(cx_scope, name);
+        if (class_lookup_ambiguous)
+            cx_error(at, "'%s' is found in more than one base class", name);
+        if (y && q.scope && y->k == CS_FUNC) {
+            struct cexpr *o = name_expr(y, name, at);
+            o->nonvirt = 1;           /* C::f() calls C's f, not an override */
+            if (o->k == E_OVL)
+                o->adl = 0;           /* a qualified name: no ADL (6.5.4) */
+            return o;
+        }
+        if (!y) {
+            if (!q.scope && strncmp(name, "__builtin_", 10) == 0)
+                return parse_builtin(name, at);
+            if (!q.scope && cx_kind() == TOK_LPAREN &&
+                (strncmp(name, "__atomic_", 9) == 0 ||
+                 strncmp(name, "__sync_", 7) == 0))
+                return parse_atomic(name, at);
+            if (!q.scope && (strcmp(name, "__func__") == 0 ||
+                             strcmp(name, "__FUNCTION__") == 0 ||
+                             strcmp(name, "__PRETTY_FUNCTION__") == 0)) {
+                /* the function's name (__PRETTY_FUNCTION__ qualified by
+                 * its class), a string */
+                const char *fn = cx_curfn ? cx_curfn->name : "";
+                if (name[2] == 'P' && cx_curfn && cx_curfn->cls &&
+                    cx_curfn->cls->name)
+                    fn = cx_fmt("%s::%s", cx_curfn->cls->name, fn);
+                size_t len = strlen(fn);
+                e = ex_new(E_STR, ct_array(ct_qual(ct_basic(CT_CHAR),
+                                                   CQ_CONST),
+                                           (long)len + 1), VC_LVALUE);
+                e->text = xstrndup(fn, len);
+                e->slen = (long)len + 1;
+                e->swidth = 1;
+                e->line = at->t.line;
+                e->col = at->t.col;
+                e->file = at->file;
+                return e;
+            }
+            if (!q.scope && strcmp(name, "__null") == 0) {
+                e = ex_int(0, ct_basic(CT_LONG));
+                e->is_null_const = 1;
+                return e;
+            }
+            if (!q.scope && cx_kind() == TOK_LPAREN) {
+                /* only argument-dependent lookup can find it */
+                e = ex_new(E_OVL, ct_basic(CT_VOID), VC_LVALUE);
+                e->name = name;
+                e->adl = 1;
+                return e;
+            }
+            cx_error(at, "'%s' was not declared in this scope", name);
+        }
+        return name_expr(y, name, at);
+    }
+    default:
+        if (at_simple_type_kw()) {
+            struct cty *t = parse_simple_type_spec();
+            return functional_cast(t, at);
+        }
+        cx_error(at, "expected an expression before %s",
+                 tok_describe(&at->t));
+        return NULL;
+    }
+}
+
+static struct cexpr *call(struct cexpr *f, struct cexpr **args, int na,
+                          const struct ctok *at)
+{
+    if (f->k == E_OVL) {
+        struct fnset fs = { NULL, 0, 0 };
+        set_add_all(&fs, f->fn);
+        const char *name = f->fn ? f->fn->name : f->name;
+        if (f->adl)
+            adl(&fs, name, args, na);
+        if (!fs.n)
+            cx_error(at, "'%s' was not declared in this scope", name);
+        cur_targs = f->targs;
+        cur_ntargs = f->ntargs;
+        cur_has_targs = f->has_targs;
+        struct cfunc *fn = best_of(fs.f, fs.n, f->obj, args, na, 0, at, name,
+                                   0);
+        cur_has_targs = 0;
+        cur_ntargs = 0;
+        cur_targs = NULL;
+        struct cexpr *r = make_call(fn, fn->cls && (!fn->is_static ||
+                                                    fn->type->xobj)
+                                        ? f->obj : NULL, args, na, at);
+        r->nonvirt = f->nonvirt;
+        return r;
+    }
+    if (f->k == E_PMEM && f->t->k == CT_FUNC) {
+        /* (obj.*pmf)(args) */
+        struct cty *ft = f->t;
+        struct cexpr *obj = f->a[0];
+        if ((obj->t->q & CQ_CONST) && !(ft->fq & CQ_CONST))
+            cx_error(at, "calling a non-const member function through a "
+                         "pointer, on a const object");
+        if (na < ft->np || (na > ft->np && !ft->variadic))
+            cx_error(at, "wrong number of arguments to a pointer to member "
+                         "function");
+        struct cexpr **conv;
+        int n = convert_args_ft(ft, NULL, args, na, at, &conv);
+        struct cexpr *e = call_result(ft->to);
+        e->k = E_PMCALL;
+        e->line = at->t.line;
+        e->col = at->t.col;
+        e->file = at->file;
+        e->a = xmalloc((size_t)(n + 2) * sizeof *e->a);
+        e->a[0] = ex_addr(obj);
+        e->a[1] = f->a[1];
+        memcpy(e->a + 2, conv, (size_t)n * sizeof *conv);
+        e->na = n + 2;
+        return e;
+    }
+    if (f->t->k == CT_CLASS) {
+        struct cexpr **all = xmalloc((size_t)(na + 1) * sizeof *all);
+        all[0] = f;
+        memcpy(all + 1, args, (size_t)na * sizeof *args);
+        struct cexpr *o = overloaded("operator()", all, na + 1, 1, at);
+        if (!o) {
+            const char *on = cx_strdup(ct_name(f->t));  /* (one buffer) */
+            cx_error(at, "'%s' has no viable operator() for (%s)", on,
+                     arg_types(args, na));
+        }
+        return o;
+    }
+    struct cexpr *p = rvalue(f);
+    if (p->t->k != CT_PTR || p->t->to->k != CT_FUNC)
+        cx_error(at, "called object of type '%s' is not a function",
+                 ct_name(f->t));
+    struct cty *ft = p->t->to;
+    if (na < ft->np || (na > ft->np && !ft->variadic))
+        cx_error(at, "wrong number of arguments to a function pointer");
+    struct cexpr **conv;
+    int n = convert_args_ft(ft, NULL, args, na, at, &conv);
+    struct cexpr *e = call_result(ft->to);
+    e->k = E_ICALL;
+    e->line = at->t.line;
+    e->col = at->t.col;
+    e->file = at->file;
+    e->a = xmalloc((size_t)(n + 1) * sizeof *e->a);
+    e->a[0] = p;
+    memcpy(e->a + 1, conv, (size_t)n * sizeof *conv);
+    e->na = n + 1;
+    return e;
+}
+
+/* ---- building expressions (for lowerings: range-based for, ...) ---- */
+
+struct cexpr *expr_var(struct cvar *v)
+{
+    struct cexpr *e = ex_new(E_VAR, ct_strip_ref(v->type), VC_LVALUE);
+    e->var = v;
+    v->used = 1;
+    return e;
+}
+
+struct cexpr *expr_binary(int op, struct cexpr *l, struct cexpr *r)
+{
+    return binary(op, l, r);
+}
+
+struct cexpr *expr_preinc(struct cexpr *e)
+{
+    return incdec(e, 1, 0);
+}
+
+struct cexpr *expr_deref(struct cexpr *e)
+{
+    return deref(e);
+}
+
+/* obj.name(args) — or, obj NULL, name(args) found by unqualified and
+ * argument-dependent lookup. */
+struct cexpr *expr_call_named(struct cexpr *obj, const char *name,
+                              struct cexpr **args, int na,
+                              const struct ctok *at)
+{
+    return expr_call_named_targs(obj, name, NULL, 0, args, na, at);
+}
+
+/* ... with explicit template arguments (name<targs>(args)) */
+struct cexpr *expr_call_named_targs(struct cexpr *obj, const char *name,
+                                    struct ctarg *targs, int ntargs,
+                                    struct cexpr **args, int na,
+                                    const struct ctok *at)
+{
+    struct cexpr *f;
+    if (obj) {
+        struct cclass *c = obj->t->cls;
+        class_ensure(c);
+        struct csym *y = class_member(c, name);
+        if (!y || y->k != CS_FUNC)
+            cx_error(at, "'%s' has no member function '%s'", ct_name(obj->t),
+                     name);
+        if (obj->vc == VC_PRVALUE)
+            obj = materialize(obj);
+        f = ex_new(E_OVL, y->fns->type, VC_LVALUE);
+        f->fn = y->fns;
+        f->name = name;
+        f->obj = ex_addr(obj);
+        f->obj->obj_xvalue = obj->vc != VC_LVALUE;
+    } else {
+        struct csym *y = lookup(cx_scope, name);
+        f = ex_new(E_OVL, ct_basic(CT_VOID), VC_LVALUE);
+        f->name = name;
+        f->adl = 1;
+        if (y && y->k == CS_FUNC) {
+            f->fn = y->fns;
+            f->t = y->fns->type;
+            f->adl = y->scope->k == SC_NAMESPACE ||
+                     (y->scope->k != SC_CLASS && y->fns && y->fns->alias_of);
+        }
+    }
+    if (targs) {
+        f->targs = targs;
+        f->ntargs = ntargs;
+        f->has_targs = 1;
+    }
+    return call(f, args, na, at);
+}
+
+/* C::name(args): a static member function */
+struct cexpr *expr_call_static(struct cclass *c, const char *name,
+                               struct cexpr **args, int na,
+                               const struct ctok *at)
+{
+    class_ensure(c);
+    struct csym *y = class_member(c, name);
+    if (!y || y->k != CS_FUNC)
+        cx_error(at, "'%s' has no member function '%s'",
+                 c->name ? c->name : "class", name);
+    struct cexpr *f = ex_new(E_OVL, y->fns->type, VC_LVALUE);
+    f->fn = y->fns;
+    f->name = name;
+    return call(f, args, na, at);
+}
+
+struct cexpr *expr_operator_call(const char *name, struct cexpr **args,
+                                 int na, const struct ctok *at)
+{
+    return overloaded(name, args, na, 0, at);
+}
+
+/* x.~T(), p->~T() where the object is not of class type: a
+ * pseudo-destructor call — nothing but the object's evaluation. The
+ * cursor at `~` (or at `T::~T`). */
+static int pseudo_dtor_at(void)
+{
+    int i = 0;
+    while (cx_kind_at(i) == TOK_IDENT && cx_kind_at(i + 1) == TOK_COLONCOLON)
+        i += 2;
+    return cx_kind_at(i) == TOK_TILDE;
+}
+
+static struct cexpr *pseudo_dtor(struct cexpr *obj)
+{
+    while (cx_kind() != TOK_TILDE)
+        cx_advance();
+    cx_advance();
+    if (cx_kind() == TOK_CX_DECLTYPE) {
+        cx_advance();
+        cx_skip_balanced();
+    } else {
+        /* the type's name alone (T() would read as a function type) */
+        int n;
+        if (peek_type_name(&n))
+            cx_skip_peek(n);
+        else
+            while (cx_kind() != TOK_LPAREN && cx_kind() != TOK_EOF)
+                cx_advance();
+    }
+    cx_expect(TOK_LPAREN, "'('");
+    cx_expect(TOK_RPAREN, "')'");
+    return ex_cast(obj, ct_basic(CT_VOID));
+}
+
+static struct cexpr *member_access(struct cexpr *obj, int arrow,
+                                   const struct ctok *at)
+{
+    if (arrow && obj->t->k == CT_PTR && obj->t->to->k != CT_CLASS &&
+        pseudo_dtor_at())
+        return pseudo_dtor(rvalue(obj));
+    if (!arrow && obj->t->k != CT_CLASS && pseudo_dtor_at())
+        return pseudo_dtor(obj);
+    if (arrow) {
+        /* operator->, applied until it yields a pointer */
+        for (int depth = 0; obj->t->k == CT_CLASS; depth++) {
+            struct cexpr *o = overloaded("operator->", &obj, 1, 1, at);
+            if (!o || depth > 32)
+                cx_error(at, "'%s' has no operator->", ct_name(obj->t));
+            obj = o;
+        }
+        obj = rvalue(obj);
+        if (obj->t->k != CT_PTR || obj->t->to->k != CT_CLASS)
+            cx_error(at, "'->' on a non-pointer-to-class '%s'",
+                     ct_name(obj->t));
+        obj = ex_deref(obj);
+    }
+    if (obj->t->k != CT_CLASS)
+        cx_error(at, "request for a member of non-class type '%s'",
+                 ct_name(obj->t));
+    struct cclass *c = obj->t->cls;
+    class_ensure(c);
+    if (!c->complete && !c->defining)
+        cx_error(at, "member access into incomplete '%s'", ct_name(obj->t));
+    if (obj->vc == VC_PRVALUE)
+        obj = materialize(obj);
+    cx_accept(TOK_CX_TEMPLATE);          /* x.template f<T>() */
+    if (cx_kind() == TOK_TILDE) {
+        /* an explicit destructor call: p->~T(), p->~X<A>() */
+        cx_advance();
+        if (cx_kind() != TOK_IDENT)
+            cx_error(cx_cur(), "expected a class name after '~'");
+        int n;
+        if (cx_kind_at(1) == TOK_LT && peek_type_name(&n))
+            cx_skip_peek(n);
+        else
+            cx_advance();
+        cx_expect(TOK_LPAREN, "'('");
+        cx_expect(TOK_RPAREN, "')'");
+        struct cfunc *d = class_dtor(c);
+        if (!d)
+            return ex_cast(ex_int(0, ct_basic(CT_INT)), ct_basic(CT_VOID));
+        return make_call(d, ex_addr(obj), NULL, 0, at);
+    }
+    struct qname q = peek_qname();
+    struct cclass *in = c;              /* x.B::m looks in B */
+    int qualified = q.fin > 0;
+    if (qualified) {
+        if (q.bad || !q.scope || q.scope->k != SC_CLASS ||
+            !class_derives(c, q.scope->cls, NULL))
+            cx_error(at, "'%s' names no base of '%s'", tok_describe(&at->t),
+                     ct_name(obj->t));
+        in = q.scope->cls;
+        cx_pos += q.fin;
+    }
+    const char *name;
+    if (cx_kind() == TOK_CX_OPERATOR) {
+        struct cty *conv = NULL;
+        name = parse_operator_name(&conv);
+    } else {
+        if (cx_kind() != TOK_IDENT)
+            cx_error(cx_cur(), "expected a member name");
+        name = cx_cur()->t.text;
+        cx_advance();
+    }
+    class_lookup_ambiguous = 0;
+    struct csym *y = class_member(in, name);
+    if (!y)
+        cx_error(at, "'%s' has no member named '%s'", ct_name(obj->t), name);
+    if (class_lookup_ambiguous)
+        cx_error(at, "member '%s' is found in more than one base of '%s'",
+                 name, ct_name(obj->t));
+    switch (y->k) {
+    case CS_FIELD:
+        access_check_sym(in, y, name, at);
+        return field_via(to_base(obj, y->fcls ? y->fcls : y->scope->cls, 0),
+                         y);
+    case CS_VAR: {
+        access_check_sym(in, y, name, at);
+        if (y->var->is_member_static && !y->var->defined)
+            member_var_from_outdef(y->var);
+        struct cexpr *e = ex_new(E_VAR, ct_strip_ref(y->var->type),
+                                 VC_LVALUE);
+        e->var = y->var;
+        y->var->used = 1;
+        return e;
+    }
+    case CS_FUNC: {
+        if (!y->fns)
+            cx_error(at, "'%s' has no usable member function '%s'",
+                     ct_name(obj->t), name);
+        struct cexpr *e = ex_new(E_OVL, y->fns->type, VC_LVALUE);
+        e->fn = y->fns;
+        e->name = name;
+        e->obj = ex_addr(obj);
+        e->obj->obj_xvalue = obj->vc != VC_LVALUE;
+        e->nonvirt = qualified;
+        explicit_targs(e);
+        return e;
+    }
+    case CS_ENUMERATOR:
+        return ex_int(y->value, y->type);
+    default:
+        cx_error(at, "'%s' is not a data member or member function", name);
+        return NULL;
+    }
+}
+
+static struct cexpr *parse_postfix(struct cexpr *e)
+{
+    for (;;) {
+        const struct ctok *at = cx_cur();
+        switch (cx_kind()) {
+        case TOK_LBRACKET: {
+            if (cx_kind_at(1) == TOK_LBRACKET)
+                return e;
+            cx_advance();
+            struct cexpr *i = expr_parse();
+            cx_expect(TOK_RBRACKET, "']'");
+            if (e->t->k == CT_CLASS) {
+                struct cexpr *args[2] = { e, i };
+                struct cexpr *o = overloaded("operator[]", args, 2, 1, at);
+                if (!o)
+                    cx_error(at, "'%s' has no viable operator[]",
+                             ct_name(e->t));
+                e = o;
+                continue;
+            }
+            struct cexpr *a = rvalue(e), *b = rvalue(i);
+            if (b->t->k == CT_PTR && ct_is_integer(a->t)) {
+                struct cexpr *t = a;
+                a = b;
+                b = t;
+            }
+            if (!is_obj_ptr(a->t) || !ct_is_integer(b->t))
+                cx_error(at, "subscript of '%s' with '%s'", ct_name(e->t),
+                         ct_name(i->t));
+            e = ex_deref(binary(TOK_PLUS, a, b));
+            continue;
+        }
+        case TOK_LPAREN: {
+            struct cexpr **args;
+            int na = call_args(&args);
+            e = call(e, args, na, at);
+            continue;
+        }
+        case TOK_DOT: case TOK_ARROW: {
+            int arrow = cx_kind() == TOK_ARROW;
+            cx_advance();
+            e = member_access(e, arrow, at);
+            continue;
+        }
+        case TOK_PLUSPLUS: case TOK_MINUSMINUS:
+            e = incdec(e, cx_kind() == TOK_PLUSPLUS ? 1 : -1, 1);
+            cx_advance();
+            continue;
+        default:
+            return e;
+        }
+    }
+}
+
+/* After `&`: `C::m` naming a non-static member forms a pointer to it
+ * (7.6.2.2) — anything else (a static member, `&(C::m)`) is an ordinary
+ * address, NULL here. */
+static struct cexpr *member_pointer(void)
+{
+    if (cx_kind() != TOK_IDENT && cx_kind() != TOK_COLONCOLON)
+        return NULL;
+    struct qname q = peek_qname();
+    if (q.bad || !q.scope || q.scope->k != SC_CLASS || q.fin == 0)
+        return NULL;
+    struct cclass *c = q.scope->cls;
+    int save = cx_pos;
+    const struct ctok *at = cx_cur();
+    cx_pos += q.fin;
+    const char *name;
+    if (cx_kind() == TOK_IDENT) {
+        name = cx_cur()->t.text;
+        cx_advance();
+    } else if (cx_kind() == TOK_CX_OPERATOR) {
+        struct cty *conv = NULL;
+        name = parse_operator_name(&conv);
+    } else {
+        cx_pos = save;
+        return NULL;
+    }
+    /* (a base's member: a pointer to member of the base, 7.6.2.2) */
+    struct csym *y = class_member(c, name);
+    if (y && y->k == CS_FIELD) {
+        if (ct_is_ref(y->field->type))
+            cx_error(at, "a pointer to reference member '%s'", name);
+        if (y->field->bitwidth >= 0)
+            cx_error(at, "a pointer to bit-field '%s'", name);
+        struct cclass *of = y->fcls ? y->fcls
+                            : y->scope->k == SC_CLASS ? y->scope->cls : c;
+        struct cexpr *e = ex_new(E_MEMPTR, ct_mptr(of, y->field->type),
+                                 VC_PRVALUE);
+        e->field = y->field;
+        return e;
+    }
+    if (y && y->k == CS_FUNC) {
+        int stat = 0;
+        for (struct cfunc *f = y->fns; f; f = f->next)
+            stat |= f->is_static;
+        if (!stat) {
+            if (!y->fns->next) {
+                struct cclass *of = y->fns->cls ? y->fns->cls : c;
+                struct cexpr *e = ex_new(E_MEMPTR,
+                                         ct_mptr(of, y->fns->type),
+                                         VC_PRVALUE);
+                e->fn = y->fns;
+                if (!cx_unevaluated)
+                    y->fns->called = 1;  /* (its body: made for this) */
+                return e;
+            }
+            struct cexpr *e = ex_new(E_OVL, y->fns->type, VC_LVALUE);
+            e->fn = y->fns;
+            e->name = name;
+            e->memptr = 1;
+            return e;
+        }
+    }
+    cx_pos = save;
+    return NULL;
+}
+
+static struct cexpr *parse_unary(void)
+{
+    const struct ctok *at = cx_cur();
+    enum tok_kind k = cx_kind();
+    switch (k) {
+    case TOK_PLUSPLUS: case TOK_MINUSMINUS:
+        cx_advance();
+        return incdec(parse_cast(), k == TOK_PLUSPLUS ? 1 : -1, 0);
+    case TOK_AMP: {
+        cx_advance();
+        struct cexpr *m = member_pointer();
+        if (m)
+            return parse_postfix(m);
+        return address_of(parse_cast());
+    }
+    case TOK_STAR:
+        cx_advance();
+        return deref(parse_cast());
+    case TOK_PLUS: case TOK_MINUS: case TOK_TILDE: case TOK_BANG:
+        cx_advance();
+        return unary(k, parse_cast());
+    case TOK_KW_REAL: case TOK_KW_IMAG:
+        cx_advance();
+        return complex_part(parse_cast(), k == TOK_KW_IMAG);
+    case TOK_KW_SIZEOF: case TOK_KW_ALIGNOF: {
+        cx_advance();
+        if (k == TOK_KW_SIZEOF && cx_accept(TOK_ELLIPSIS)) {
+            /* sizeof...(pack): its length */
+            cx_expect(TOK_LPAREN, "'(' after 'sizeof...'");
+            const struct ctok *nt = cx_cur();
+            if (cx_kind() != TOK_IDENT)
+                cx_error(nt, "expected a parameter pack's name");
+            struct csym *y = lookup_raw(cx_scope, nt->t.text);
+            if (!y || y->k != CS_PACK)
+                cx_error(nt, "'%s' is not a parameter pack", nt->t.text);
+            cx_advance();
+            cx_expect(TOK_RPAREN, "')'");
+            return ex_int(pack_length(y), ct_size_t());
+        }
+        struct cty *t;
+        long member_align = 0;
+        if (cx_kind() == TOK_LPAREN && paren_type_id()) {
+            cx_advance();
+            t = parse_type_id();
+            cx_expect(TOK_RPAREN, "')'");
+        } else {
+            cx_unevaluated++;
+            struct cexpr *x = parse_unary();
+            cx_unevaluated--;
+            t = x->t;
+            if (k == TOK_KW_ALIGNOF && x->k == E_MEMBER && x->field) {
+                /* GNU __alignof__ of a member: as the member is aligned
+                 * (its attribute; a flexible array's elements) */
+                member_align = x->field->align_attr;
+                if (t->k == CT_ARRAY && t->n < 0)
+                    t = t->to;
+            }
+        }
+        t = ct_strip_ref(t);
+        if (t->k == CT_FUNC || (!ct_is_complete(t) && t->k != CT_VOID))
+            cx_error(at, "%s of incomplete type %s",
+                     k == TOK_KW_SIZEOF ? "sizeof" : "alignof", ct_name(t));
+        if (k == TOK_KW_SIZEOF && t->k == CT_ARRAY && t->vla)
+            cx_error(at, "sizeof a variable-length array is not supported");
+        long al = ct_align(t) > member_align ? ct_align(t) : member_align;
+        return ex_int(k == TOK_KW_SIZEOF ? ct_size(t) : al, ct_size_t());
+    }
+    case TOK_CX_NEW:
+        return parse_new(at, 0);
+    case TOK_CX_DELETE:
+        return parse_delete(at, 0);
+    case TOK_COLONCOLON:
+        if (cx_kind_at(1) == TOK_CX_NEW) {
+            cx_advance();
+            return parse_new(cx_cur(), 1);
+        }
+        if (cx_kind_at(1) == TOK_CX_DELETE) {
+            cx_advance();
+            return parse_delete(cx_cur(), 1);
+        }
+        break;
+    case TOK_CX_NOEXCEPT: {
+        /* noexcept(e): e (not evaluated) can throw nothing */
+        cx_advance();
+        cx_expect(TOK_LPAREN, "'(' after noexcept");
+        cx_unevaluated++;
+        struct cexpr *e = expr_parse();
+        cx_unevaluated--;
+        cx_expect(TOK_RPAREN, "')'");
+        return ex_int(expr_nothrow(e), ct_basic(CT_BOOL));
+    }
+    case TOK_ANDAND:
+        cx_error(at, "label addresses are not supported in C++");
+        return NULL;
+    case TOK_CX_CO_AWAIT:
+        cx_advance();
+        return coro_await(parse_cast(), 0, at);
+    default:
+        break;
+    }
+    return parse_postfix(parse_primary());
+}
+
+/* ( type-id ) at the cursor — the whole parenthesis a type (T() alone
+ * may begin an expression: (T()(a, b) || c) is not a cast) */
+static int cast_type_at(void)
+{
+    if (fold_at() >= 0)
+        return 0;          /* (A<Ts>::v && ...): a fold, not a cast */
+    if (!paren_type_id())
+        return 0;
+    int save = cx_pos, save_half = cx_half_gt;
+    jmp_buf jb;
+    void *saved = cx_sfinae;
+    struct parse_state *st = parse_save();
+    int ok = 0;
+    if (!setjmp(jb)) {
+        cx_sfinae = &jb;
+        cx_advance();
+        struct cty *t = parse_type_id();
+        /* (E()) is a value, never a cast to a function type */
+        ok = cx_kind() == TOK_RPAREN && t->k != CT_FUNC;
+        cx_sfinae = saved;
+        parse_restore(st);
+    } else {
+        parse_restore(st);
+        cx_sfinae = saved;
+    }
+    cx_pos = save;
+    cx_half_gt = save_half;
+    return ok;
+}
+
+static struct cexpr *parse_cast(void)
+{
+    if (cx_kind() == TOK_LPAREN && cx_kind_at(1) != TOK_LBRACE &&
+        cast_type_at()) {
+        const struct ctok *at = cx_cur();
+        cx_advance();
+        struct cty *t = parse_type_id();
+        cx_expect(TOK_RPAREN, "')' after the cast's type");
+        if (cx_kind() == TOK_LBRACE) {
+            /* (T){...}: a GNU compound literal, as T{...} */
+            struct cexpr *l = parse_braced_list();
+            struct cexpr *r = init_object(t, INIT_LIST, &l, 1, at);
+            if (!r)
+                r = init_object(t, INIT_VALUE, NULL, 0, at);
+            if (t->k == CT_ARRAY)
+                r = materialize(r);
+            return parse_postfix(r);
+        }
+        return cast_to(t, parse_cast(), CAST_C, at);
+    }
+    return parse_unary();
+}
+
+static int binprec(enum tok_kind k)
+{
+    if (cx_in_targs > 0 && (k == TOK_GT || k == TOK_SHR))
+        return 0;                 /* it closes the template arguments */
+    switch (k) {
+    case TOK_OROR: return 1;
+    case TOK_ANDAND: return 2;
+    case TOK_PIPE: return 3;
+    case TOK_CARET: return 4;
+    case TOK_AMP: return 5;
+    case TOK_EQEQ: case TOK_NEQ: return 6;
+    case TOK_LT: case TOK_GT: case TOK_LE: case TOK_GE: return 7;
+    case TOK_SPACESHIP: return 8;
+    case TOK_SHL: case TOK_SHR: return 9;
+    case TOK_PLUS: case TOK_MINUS: return 10;
+    case TOK_STAR: case TOK_SLASH: case TOK_PERCENT: return 11;
+    case TOK_DOTSTAR: case TOK_ARROWSTAR: return 12;
+    default: return 0;
+    }
+}
+
+static struct cexpr *parse_binary(int minprec)
+{
+    struct cexpr *l = parse_cast();
+    for (;;) {
+        enum tok_kind k = cx_kind();
+        int p = binprec(k);
+        if (!p || p < minprec)
+            return l;
+        cx_advance();
+        struct cexpr *r = parse_binary(p + 1);
+        l = binary(k, l, r);
+    }
+}
+
+struct cexpr *expr_assign(int op, struct cexpr *l, struct cexpr *r)
+{
+    return assign(op, l, r);
+}
+
+struct cexpr *expr_parse_cond(void)
+{
+    struct cexpr *c = parse_binary(1);
+    if (!cx_accept(TOK_QUESTION))
+        return c;
+    struct cexpr *a = expr_parse();
+    cx_expect(TOK_COLON, "':' in ?:");
+    struct cexpr *b = expr_parse_assign();
+    return conditional(c, a, b);
+}
+
+static int is_assign_op(enum tok_kind k)
+{
+    switch (k) {
+    case TOK_ASSIGN: case TOK_PLUSEQ: case TOK_MINUSEQ: case TOK_STAREQ:
+    case TOK_SLASHEQ: case TOK_PERCENTEQ: case TOK_AMPEQ: case TOK_PIPEEQ:
+    case TOK_CARETEQ: case TOK_SHLEQ: case TOK_SHREQ:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* throw [assignment-expression]: the exception object, of the operand's
+ * decayed, unqualified type, initialized from it (the object is
+ * __cxa_allocate_exception's); without one, a rethrow. */
+static struct cexpr *parse_throw(void)
+{
+    const struct ctok *at = cx_cur();
+    cx_advance();
+    if (!cx_exceptions)
+        cx_error(at, "'throw' with exceptions disabled (-fno-exceptions)");
+    struct cexpr *r = ex_new(E_THROW, ct_basic(CT_VOID), VC_PRVALUE);
+    r->line = at->t.line;
+    r->file = at->file;
+    enum tok_kind k = cx_kind();
+    if (k == TOK_SEMI || k == TOK_RPAREN || k == TOK_COMMA ||
+        k == TOK_COLON || k == TOK_RBRACKET || k == TOK_RBRACE)
+        return r;                            /* throw; */
+    struct cexpr *e = expr_parse_assign();
+    struct cty *t = ct_unqual(ct_decay(ct_strip_ref(e->t)));
+    if (t->k == CT_VOID || (t->k == CT_CLASS && !ct_is_complete(t)))
+        cx_error(at, "throwing an object of incomplete type '%s'",
+                 ct_name(t));
+    if (t->k == CT_CLASS && class_abstract(t->cls))
+        cx_error(at, "throwing an object of abstract class '%s'",
+                 ct_name(t));
+    r->alloc_t = t;
+    r->a = xmalloc(sizeof *r->a);
+    r->a[0] = init_object(t, INIT_COPY, &e, 1, at);
+    r->na = 1;
+    return r;
+}
+
+struct cexpr *expr_parse_assign(void)
+{
+    if (cx_kind() == TOK_CX_THROW)
+        return parse_throw();
+    if (cx_kind() == TOK_CX_CO_YIELD) {
+        const struct ctok *at = cx_cur();
+        cx_advance();
+        return coro_yield(cx_kind() == TOK_LBRACE ? parse_braced_list()
+                                                  : expr_parse_assign(), at);
+    }
+    struct cexpr *l = expr_parse_cond();
+    enum tok_kind k = cx_kind();
+    if (!is_assign_op(k))
+        return l;
+    cx_advance();
+    struct cexpr *r = cx_kind() == TOK_LBRACE ? parse_braced_list()
+                                              : expr_parse_assign();
+    return assign(k, l, r);
+}
+
+struct cexpr *expr_parse(void)
+{
+    struct cexpr *e = expr_parse_assign();
+    while (cx_accept(TOK_COMMA))
+        e = comma(e, expr_parse_assign());
+    return e;
+}
+
+long expr_parse_const(const char *what)
+{
+    return expr_parse_const_as(what, 0);
+}
+
+/* An array declarator's bound: a constant — or, where vla is given (a
+ * local's), any integer, *vla its value as a long (-1 returned). */
+long expr_parse_bound(struct cexpr **vla)
+{
+    const struct ctok *at = cx_cur();
+    struct cexpr *e = expr_parse_cond();
+    long v = 0;
+    if (ct_is_integer(e->t) && expr_const(e, &v))
+        return v;
+    if (!vla || !(ct_is_integer(e->t) || e->t->k == CT_ENUM))
+        cx_error(at, "an array bound is not an integral constant "
+                     "expression");
+    *vla = convert_param(e, ct_basic(CT_LONG), at);
+    return -1;
+}
+
+/* ... as_bool: contextually converted to bool (explicit(...), noexcept(...):
+ * a class constant through its constexpr conversion) */
+long expr_parse_const_as(const char *what, int as_bool)
+{
+    const struct ctok *at = cx_cur();
+    struct cexpr *e = expr_parse_cond();
+    if (as_bool && e->t && e->t->k == CT_CLASS)
+        e = convert_bool(e, what);
+    long v = 0;
+    if (!ct_is_integer(e->t) || !expr_const(e, &v))
+        cx_error(at, "%s is not an integral constant expression", what);
+    return v;
+}
+
+struct cexpr *expr_parse_binary(int minprec)
+{
+    return parse_binary(minprec);
+}
+
+int cx_expr_nothrow(struct cexpr *e)
+{
+    return e ? expr_nothrow(e) : 1;
+}

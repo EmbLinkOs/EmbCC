@@ -1,0 +1,77 @@
+/* <new> — C++ [new.syn].
+ *
+ * The allocation functions are declared here and defined in src/new.cc.
+ * They are NOT inline and never will be: the standard lets a program
+ * replace operator new, and a replaceable function that the compiler can
+ * see the body of is a function the compiler will inline and the linker
+ * will then fail to replace.
+ */
+#ifndef _LIBCXX_NEW
+#define _LIBCXX_NEW
+
+#include <cstddef>
+#include <exception>
+
+namespace std {
+
+class bad_alloc : public exception {
+public:
+    bad_alloc() noexcept;
+    ~bad_alloc() noexcept override;
+    const char *what() const noexcept override;
+};
+
+class bad_array_new_length : public bad_alloc {
+public:
+    bad_array_new_length() noexcept;
+    ~bad_array_new_length() noexcept override;
+    const char *what() const noexcept override;
+};
+
+struct nothrow_t { explicit nothrow_t() = default; };
+extern const nothrow_t nothrow;
+
+/* align_val_t is a scoped enum so an alignment cannot be passed where a
+ * size is expected -- the entire reason [new.delete.general] made it one. */
+enum class align_val_t : size_t {};
+
+using new_handler = void (*)();
+new_handler set_new_handler(new_handler h) noexcept;
+new_handler get_new_handler() noexcept;
+
+}  // namespace std
+
+void *operator new(std::size_t n);
+void *operator new[](std::size_t n);
+void *operator new(std::size_t n, const std::nothrow_t &) noexcept;
+void *operator new[](std::size_t n, const std::nothrow_t &) noexcept;
+void *operator new(std::size_t n, std::align_val_t a);
+void *operator new[](std::size_t n, std::align_val_t a);
+void *operator new(std::size_t n, std::align_val_t a,
+                   const std::nothrow_t &) noexcept;
+void *operator new[](std::size_t n, std::align_val_t a,
+                     const std::nothrow_t &) noexcept;
+
+void operator delete(void *p) noexcept;
+void operator delete[](void *p) noexcept;
+void operator delete(void *p, std::size_t n) noexcept;
+void operator delete[](void *p, std::size_t n) noexcept;
+void operator delete(void *p, const std::nothrow_t &) noexcept;
+void operator delete[](void *p, const std::nothrow_t &) noexcept;
+void operator delete(void *p, std::align_val_t a) noexcept;
+void operator delete[](void *p, std::align_val_t a) noexcept;
+void operator delete(void *p, std::size_t n, std::align_val_t a) noexcept;
+void operator delete[](void *p, std::size_t n, std::align_val_t a) noexcept;
+void operator delete(void *p, std::align_val_t a,
+                     const std::nothrow_t &) noexcept;
+void operator delete[](void *p, std::align_val_t a,
+                       const std::nothrow_t &) noexcept;
+
+/* Placement new: required to be inline and NOT replaceable, because the
+ * whole point is that it compiles to nothing. */
+inline void *operator new(std::size_t, void *p) noexcept { return p; }
+inline void *operator new[](std::size_t, void *p) noexcept { return p; }
+inline void operator delete(void *, void *) noexcept {}
+inline void operator delete[](void *, void *) noexcept {}
+
+#endif

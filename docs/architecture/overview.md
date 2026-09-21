@@ -1,0 +1,200 @@
+# Architecture
+
+*Originally a design record written before implementation, chosen to serve
+ROADMAP M1 (emit something the OS runs) and the constraints in TARGET_ABI.md.
+It has since been revised by contact with reality, which was always the
+intent — §3, §6 and §8 carry the revisions and say what changed. Keep doing
+that: when reality disagrees with this file, update it and note why in
+DECISIONS.md.*
+
+## 1. Shape: one binary, all phases in-process
+
+EmbCC is a **single self-contained program**: driver, preprocessor, parser,
+semantic analysis, codegen, assembler, and linker in one process.
+
+This is not a style preference — it is forced by the target. EmbLinkOS has
+**no `fork`/`exec`**, so a driver that spawns `cc1`/`as`/`ld` as separate
+programs (the gcc model) is structurally impossible to host. It is precisely why
+TCC could be ported and gcc never can. **EmbCC must be one process for the same
+reason, from the first commit.** A design that assumes sub-processes would have
+to be undone later.
+
+```
+source ──► lex ──► parse ──► sema ──► IR ──► codegen ──► object ──► link ──► ELF
+                                                     └── all in-process ──┘
+```
+
+**One process has a second consequence, and it took a refactor to honour it:
+a stage must not end the process.** If the phases cannot be isolated behind
+`fork`, then a backend that calls `exit()` from four frames down takes its
+host with it — and the host is not always `embcc`. It is also `embls`, which
+must keep serving, and one day an in-process build server. So the stages are
+libraries that *report and unwind*: `internal_error()` for an impossible
+state, `fatal_unwind()` where a diagnostic is already recorded, and a
+`setjmp` boundary that the driver installs and only the driver acts on
+(`src/driver/util.h`, vision R6). The single documented exception is
+out-of-memory, where building a diagnostic would itself allocate.
+
+## 2. Phases
+
+| Phase | Responsibility | Notes |
+|---|---|---|
+| **platform** | every host interaction: read a file, write a file, ask the environment | [`src/platform/`](../../src/platform/README.md). The bottom layer — nothing above it knows what a `FILE*` is. **No process API, ever**: §1 is why |
+| **driver** | argv, flags, deciding compile-vs-link, file discovery | Keep flags a *deliberate subset*; do not clone gcc's surface |
+| **lex** | tokens, including the preprocessor's needs | `embcc inspect tokens` |
+| **cpp** | `#include`, `#define`, conditionals | Needed early — the OS's headers are real newlib headers (see §5) |
+| **parse** | C → AST | The subset grew by need, not by standard-completeness; `todo.md` tracks what is left. `embcc inspect ast` |
+| **sema** | types, declarations, conversions, diagnostics | Where most "real compiler" work lives. `embcc inspect symbols` / `inspect types` (layout: offsets, bit-field positions, padding) |
+| **IR** | a small typed intermediate form | See §3. `embcc inspect ir` prints it ([`src/ir/irprint.c`](../../src/ir/irprint.c)) and reads it back ([`src/ir/irparse.c`](../../src/ir/irparse.c)): `embcc inspect ir foo.ir` round-trips, byte for byte |
+| **codegen** | IR → x86-64, System V AMD64 | See §4 |
+| **asm** | encode instructions to bytes | Integrated; no external assembler exists on-OS |
+| **as** | standalone NASM/Intel `.asm` → ELF object | `embas` / `embcc -c foo.asm`; byte-identical to nasm on the kernel corpus (A1) |
+| **opt** | IR→IR optimization at `-O1`/`-O2` | See §3; SSA is built on demand here, not carried in the IR |
+| **debug** | DWARF-4 line/frame/local emission for `-g` | Read back by EmbDBG (`tools/embdbg`) |
+| **link** | objects + archives → ET_EXEC ELF and EMBX | See §6 — the most target-specific part |
+
+## 3. IR: something honest and small
+
+**The decision, and it held:** a linear three-address IR over virtual
+registers, with explicit types (integers by width and signedness, pointers,
+aggregates by size/align). Correct-and-slow first — for a compiler that had
+never run a program, that was the right call, and the IR did not need replacing
+when the optimizer arrived.
+
+SSA, a pass manager and an optimizer were explicitly **not** planned for the
+early milestones. All three have since landed, deliberately and in that order of
+difficulty:
+
+- **`src/opt`** runs a local pass set (folding, strength reduction, value
+  numbering/CSE, copy propagation, DCE, immediate folding, store forwarding) and
+  a global one at `-O2` — function inlining, SCCP, dominator-scoped global CSE,
+  and redundant-load elimination.
+- **SSA is built on demand**, not carried in the IR: `pass_mem` constructs the
+  CFG, the dominator tree (Cooper-Harvey-Kennedy) and dominance frontiers,
+  inserts phis, renames, and destructs SSA back to copies. The IR stays the
+  honest linear form it started as; SSA is a lens the optimizer puts on it.
+- **`src/arch/x86_64/codegen.c`** carries register allocation
+  (Chaitin-Briggs), stack-slot coalescing and a residency cache.
+
+The single-assignment temporaries are still what make the *local* passes sound
+with no analysis at all — that property is why the cheap passes came first.
+
+## 4. Codegen: x86-64, System V AMD64
+
+- Integer args: `rdi, rsi, rdx, rcx, r8, r9`; returns in `rax`/`rdx`.
+- Floats in `xmm0–7`; return in `xmm0`.
+- 16-byte stack alignment at `call`.
+- **Explicit register constraints in inline asm are a first-class requirement**,
+  not a nicety: the OS's syscall header binds `r10`/`r8`/`r9` by name, and TCC's
+  inability to do so forced a `__TINYC__` workaround into the ABI header
+  (TARGET_ABI.md §3). EmbCC supports this properly — fixed-register extended asm
+  with the kernel's full vocabulary — so that workaround can die.
+- **Intrinsics:** when codegen would emit a libcall gcc inlines (`__floatundisf`
+  was the first), TARGET_ABI.md §7 governs — inline it in codegen (what we do)
+  rather than shipping a `libembcc1` runtime.
+
+## 5. The preprocessor is on the critical path
+
+EmbCC must consume **real newlib headers** (`/system/abi/include` on the OS).
+Those headers are not gentle: they select fixed-width types from the *full* GCC
+predefined-macro family and hard-`#error` when it is absent — this is what broke
+TCC until patch 0002 supplied 67 macros taken verbatim from
+`x86_64-elf-gcc -dM -E`.
+
+**Therefore:** EmbCC must predefine the complete x86-64 LP64 macro set
+(`__INT64_TYPE__`, `__INTPTR_TYPE__`, `__SIZEOF_*`, `__*_MAX__`, `__CHAR_BIT__`,
+…) from the beginning. Treat `x86_64-elf-gcc -dM -E </dev/null` as the reference
+list; do not hand-derive it. Getting this wrong does not degrade gracefully — the
+first real `#include <stdint.h>` fails outright.
+
+## 6. Linker: the most EmbLink-specific component
+
+The linker is where the target contract actually bites (TARGET_ABI.md §4). The
+non-negotiables, each learned from a TCC failure:
+
+- **Static links must not emit a PLT.** No resolver exists; PLT slots are
+  unbindable and the program dies at a wild jump with a valid-looking ELF.
+- **Static links must relocate their own GOT** if GOT-indirect access is emitted
+  at all — newlib's `errno`/`stderr` go through `_impure_ptr`, a GOTPCREL access.
+- **Weak undefined symbols bind to 0 at link time**, with no relocation emitted.
+- **Archive semantics must satisfy a shared object's undefined symbols** —
+  because there is no runtime libc, `libembk.so`'s libc imports must be pulled
+  into the executable from `-lc`/`-lm` and re-exported.
+- **Dynamic output:** `ET_EXEC` only (never PIE), classic `DT_HASH`, and
+  relocations confined to `RELATIVE/COPY/64/GLOB_DAT/JUMP_SLOT`.
+
+The staging that was chosen, and worked: **M1–M2 emitted relocatable objects
+only** and let the existing toolchain link them, validating codegen
+independently of linking; the linker was built for M3, when self-hosting
+demanded it.
+
+**EmbLD exists and does all of the above** (`src/link`, the `embld` tool). It
+links EmbCC itself and it links the EmbLinkOS kernel — including
+linker-defined end symbols and higher-half LMA (`p_paddr`) — and it emits the
+native **EMBX** container as well as ET_EXEC ELF. The PLT, GOT and weak-symbol
+facts above are each covered by a golden test rather than a comment.
+
+## 7. Source layout
+
+```
+src/
+  driver/     argv, flags, orchestration
+  lex/        tokens
+  cpp/        preprocessor
+  parse/      AST
+  sema/       types + checking + diagnostics (+ exact long double constants)
+  ir/         the intermediate form, and its target-neutral generation
+  opt/        IR-level optimizer (local + global passes, SSA on demand)
+  debug/      DWARF-4 emission for -g
+  elf/        shared ELF structures and the object writer
+  embx/       the EMBX container, byte-exact
+  link/       EmbLD — ELF reading, relocation, archives, EMBX output (x86-64)
+  arch/       everything that depends on the machine (D-012):
+    target.c    --target= and relocation kinds
+    backend.h   the contract each backend implements
+    code.c      the machine-code buffer
+    predef.c    which predefined-macro table (§5)
+    x86_64/     codegen (SysV, x87, register allocation), encoder, va_arg and
+                inline asm, file-scope asm, EmbAS, predefined macros
+    aarch64/    codegen (AAPCS64, libgcc binary128), encoder, va_arg and
+                inline asm, the inline-asm assembler, predefined macros
+tests/
+  exec/       programs compiled and RUN on every target (exec/<arch>/: one only)
+  compile/    programs that must compile (or must fail, with which diagnostic)
+  golden/     checks against gcc, gdb, nasm, objdump for every target
+              (golden/<arch>/: machine-specific)
+  harness/    the QEMU bare-metal harness per architecture
+```
+
+What each architecture supports is tabulated in
+[COMPATIBILITY.md](../language/compatibility.md).
+
+**Self-hosting constrains the source itself.** EmbCC compiles EmbCC, so its own
+code stays within the C subset it implements — no dependency on anything it
+cannot parse. Practically: plain C99, no sprawling third-party headers. This is
+no longer a periodic honest check but a hard gate: `tests/golden/x86_64/self-host.sh`
+and the on-OS `test embcc self` oracle fail the moment a source drifts outside
+the subset.
+
+## 8. Non-goals for the early milestones
+
+Stated so they were not accidentally attempted before a program ran: optimization
+passes, debug info (DWARF), C++, TLS/`__thread`, PIE/PIC output, cross-targets
+other than x86-64, and the kernel's freestanding mode (DECISIONS D-007).
+
+*Since the early milestones closed, three of these were done deliberately:*
+**optimization passes** (`-O1`/`-O2` — §3, `src/opt`/`src/arch`), **debug
+info** (`-g` emits DWARF-4 line/frame/locals, and EmbDBG reads it back), and the
+**kernel's freestanding mode** (`-mno-sse`, `-mcmodel=kernel` and friends — EmbCC
+compiles the whole EmbLinkOS kernel, which boots to the desktop).
+
+**C++**, the intended second language (D-008), is now under way (D-013,
+`docs/language/cpp-levels.md`): `src/cxx` lowers C++ to C for the pipeline above, milestone
+by milestone toward C++20 with libstdc++, and refuses what a later milestone
+brings by naming it.
+
+**Still out of scope, and refused loudly rather than faked:** TLS/`__thread`,
+PIE/PIC output, and targets beyond x86-64 and aarch64. The C language
+itself has no remaining gap on either target (VLAs, `long double` and
+`_Complex` closed in September 2026); the few refused seams are listed in
+`USAGE.md`.

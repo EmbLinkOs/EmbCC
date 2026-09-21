@@ -1,11 +1,13 @@
 #include "cpp.h"
+#include "../platform/platform.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../driver/util.h"
-#include "predef.h"
+#include "../lex/lex.h"
+#include "../arch/predef.h"
 
 #define MAX_MACRO_PARAMS 16
 #define MAX_INCLUDE_DEPTH 50
@@ -76,15 +78,14 @@ static void cerr(struct src *s, const char *msg, const char *arg)
     diag_fatal(s->file, s->line, "%s", msg);
 }
 
-/* A non-fatal preprocessor diagnostic (the compile continues). */
+/* A non-fatal preprocessor diagnostic (the compile continues) — through the
+ * engine, so -w, -Werror and the JSON format reach it too. */
 static void cwarn(struct src *s, const char *msg, const char *arg)
 {
-    fprintf(stderr, "embcc: %s:%d: warning: ", s->file, s->line);
     if (arg)
-        fprintf(stderr, msg, arg);
+        diag_warn_at(s->file, s->line, 0, msg, arg);
     else
-        fprintf(stderr, "%s", msg);
-    fprintf(stderr, "\n");
+        diag_warn_at(s->file, s->line, 0, "%s", msg);
 }
 
 static struct macro *find_macro(struct cpp *cpp, const char *name, size_t n)
@@ -305,6 +306,11 @@ static void expand_funclike(struct src *s, struct macro *m,
         exp[nargs] = xstrndup("", 0);
         nargs++;
     }
+    if (nargs == 0 && m->nparams == 1) {
+        raw[0] = xstrndup("", 0);    /* M(): one empty argument (C99) */
+        exp[0] = xstrndup("", 0);
+        nargs = 1;
+    }
     if (nargs != m->nparams)
         cerr(s, "wrong number of arguments to macro '%s'", m->name);
 
@@ -451,26 +457,31 @@ static long eval_primary(struct evalp *e)
         e->p++;
         return eval_primary(e);
     }
+    /* A character constant, optionally L/u/U-prefixed: decoded and valued
+     * by the SAME functions the lexer uses (lex.c), so #if agrees with the
+     * code it guards — including '\xFF' being -1 where char is signed. */
+    int cpfx = 0;
+    if ((*e->p == 'L' || *e->p == 'u' || *e->p == 'U') && e->p[1] == '\'') {
+        cpfx = *e->p;
+        e->p++;
+    }
     if (*e->p == '\'') {
         const char *q = e->p + 1;
-        long v;
+        struct litch c;
         if (*q == '\\') {
             q++;
-            switch (*q) {
-            case 'n': v = '\n'; break;
-            case 't': v = '\t'; break;
-            case 'r': v = '\r'; break;
-            case '0': v = 0; break;
-            default: v = (unsigned char)*q; break;
-            }
-            q++;
+            c = lit_decode(&q, 1, e->s->file, e->s->line);
+        } else if (*q && *q != '\'' && *q != '\n') {
+            c = lit_decode(&q, 0, e->s->file, e->s->line);
         } else {
-            v = (unsigned char)*q++;
+            cerr(e->s, "bad character constant in #if", NULL);
+            return 0;
         }
         if (*q != '\'')
             cerr(e->s, "bad character constant in #if", NULL);
         e->p = q + 1;
-        return v;
+        int uns;
+        return lit_char_value(c, cpfx, &uns, e->s->file, e->s->line);
     }
     if (*e->p >= '0' && *e->p <= '9') {
         char *end;
@@ -557,6 +568,255 @@ EVAL_LEVEL(eval_or_, eval_and, {
 
 static long eval_or(struct evalp *e) { return eval_or_(e); }
 
+static char *read_file_or_null(const char *path, long *len);
+
+/* ---- what the file depended on -------------------------------------------
+ *
+ * Every header actually opened, in order, each marked with whether it came
+ * from a system directory (-isystem, or the compiler's own include dir).
+ * -M writes them all as the make rule's prerequisites; -MM writes only the
+ * ones that are not system headers. */
+struct dep_ent { const char *path; int system; };
+static struct dep_ent *g_deps;
+static int g_ndeps, g_capdeps;
+static const int *g_sysdir;      /* per include directory: is it a system one */
+static int g_nsysdir;
+
+/* A tool (not the compiler) may ask to keep going where a header cannot be
+ * found: an editor's buffer often includes something the editor was not
+ * told how to find, and the rest of the file is still worth understanding.
+ * The compiler never sets this — a missing header there is an error. */
+static int g_tolerant;
+
+void cpp_set_tolerant(int on) { g_tolerant = on; }
+
+void cpp_set_system_dirs(const int *flags, int n)
+{
+    g_sysdir = flags;
+    g_nsysdir = n;
+}
+
+static int g_in_system;            /* the file being read is a system header */
+
+static void record_dep(const char *path, int incdir_idx)
+{
+    for (int i = 0; i < g_ndeps; i++)
+        if (strcmp(g_deps[i].path, path) == 0)
+            return;                    /* included twice, needed once */
+    if (g_ndeps == g_capdeps) {
+        g_capdeps = g_capdeps ? g_capdeps * 2 : 32;
+        g_deps = xrealloc(g_deps, (size_t)g_capdeps * sizeof *g_deps);
+    }
+    g_deps[g_ndeps].path = path;
+    /* A system header's own includes are system headers too: stdio.h finds
+     * _ansi.h beside itself, through no -isystem directory at all. */
+    g_deps[g_ndeps].system = g_in_system ||
+                             (incdir_idx >= 0 && incdir_idx < g_nsysdir &&
+                              g_sysdir && g_sysdir[incdir_idx]);
+    g_ndeps++;
+}
+
+int cpp_dep_count(void) { return g_ndeps; }
+const char *cpp_dep_path(int i) { return g_deps[i].path; }
+int cpp_dep_is_system(int i) { return g_deps[i].system; }
+static int (*cxx_has_builtin)(const char *name);
+static int cxx_exceptions;
+static int cxx_std = 2020, cxx_strict;
+
+void cpp_set_cxx(int (*has_builtin)(const char *name), int exceptions)
+{
+    cxx_has_builtin = has_builtin;
+    cxx_exceptions = exceptions;
+}
+
+static int cxx_char8;
+
+/* -D and -U, in command-line order */
+static struct { const char *text; int undef; } *cmdline_defs;
+static int ncmdline_defs;
+
+void cpp_cmdline_define(const char *text, int undef)
+{
+    cmdline_defs = xrealloc(cmdline_defs, (size_t)(ncmdline_defs + 1) *
+                                          sizeof *cmdline_defs);
+    cmdline_defs[ncmdline_defs].text = text;
+    cmdline_defs[ncmdline_defs].undef = undef;
+    ncmdline_defs++;
+}
+
+void cpp_set_cxx_std(int year, int strict)
+{
+    cxx_std = year;
+    cxx_strict = strict;
+}
+
+void cpp_set_cxx_char8(int on)
+{
+    cxx_char8 = on;
+}
+
+/* "NAME VALUEL", for define_macro */
+static const char *cx_macro_fmt(const char *name, long v)
+{
+    static char buf[128];
+    snprintf(buf, sizeof buf, "%s %ldL", name, v);
+    return buf;
+}
+
+/* C++'s (and GNU's) feature-test operators, which a #if may use, and
+ * which `defined` / #ifdef count as defined. */
+static int has_operator(const char *p, size_t n)
+{
+    static const char *const ops[] = {
+        "__has_include", "__has_include_next", "__has_builtin",
+        "__has_attribute", "__has_cpp_attribute", "__has_feature",
+        "__has_extension",
+    };
+    if (!predef_is_cxx())
+        return 0;
+    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++)
+        if (strlen(ops[i]) == n && !memcmp(ops[i], p, n))
+            return 1;
+    return 0;
+}
+
+/* The name inside an attribute test, its __x__ spelling reduced to x
+ * (and a gnu:: or __gnu__:: scope dropped). */
+static void attr_name(const char *p, size_t n, char *out, size_t cap)
+{
+    if (n > 5 && !memcmp(p, "gnu::", 5))
+        p += 5, n -= 5;
+    else if (n > 9 && !memcmp(p, "__gnu__::", 9))
+        p += 9, n -= 9;
+    if (n > 4 && !memcmp(p, "__", 2) && !memcmp(p + n - 2, "__", 2))
+        p += 2, n -= 4;
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, p, n);
+    out[n] = 0;
+}
+
+static int gnu_attribute(const char *a)
+{
+    /* those the C++ front-end honours or can safely ignore */
+    static const char *const ok[] = {
+        "aligned", "packed", "section", "weak", "used", "noreturn",
+        "unused", "deprecated", "always_inline", "noinline", "const",
+        "pure", "nothrow", "warn_unused_result", "format", "format_arg",
+        "nonnull", "returns_nonnull", "malloc", "cold", "hot",
+        "artificial", "gnu_inline", "alloc_size", "alloc_align",
+        "abi_tag", "visibility", "externally_visible", "leaf", "flatten",
+        "may_alias", "sentinel", "unavailable", "access", "noipa",
+        "no_sanitize", "no_sanitize_address", "nodiscard", "maybe_unused",
+        "fallthrough", "likely", "unlikely",
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++)
+        if (!strcmp(ok[i], a))
+            return 1;
+    return 0;
+}
+
+static long cpp_attribute(const char *a)
+{
+    static const struct { const char *name; long v; } std[] = {
+        { "nodiscard", 201907 }, { "maybe_unused", 201603 },
+        { "deprecated", 201309 }, { "fallthrough", 201910 },
+        { "likely", 201803 }, { "unlikely", 201803 },
+        { "noreturn", 200809 },
+    };
+    for (size_t i = 0; i < sizeof std / sizeof std[0]; i++)
+        if (!strcmp(std[i].name, a))
+            return std[i].v;
+    return 0;
+}
+
+static int include_exists(struct src *s, const char *fname, int angle,
+                          int is_next)
+{
+    char path[512];
+    long len;
+    char *text = NULL;
+    if (!angle && !is_next) {
+        const char *slash = strrchr(s->file, '/');
+        if (slash)
+            snprintf(path, sizeof path, "%.*s/%s", (int)(slash - s->file),
+                     s->file, fname);
+        else
+            snprintf(path, sizeof path, "%s", fname);
+        text = read_file_or_null(path, &len);
+    }
+    for (int i = is_next ? s->incdir_idx + 1 : 0;
+         !text && i < s->cpp->nincdirs; i++) {
+        snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], fname);
+        text = read_file_or_null(path, &len);
+    }
+    int found = text != NULL;
+    free(text);
+    return found;
+}
+
+/* At a feature-test operator's name (n chars at p): its value, the
+ * cursor moved past its parenthesized operand. */
+static long eval_has(struct src *s, const char *p, size_t n,
+                     const char **pp)
+{
+    const char *q = p + n;
+    while (*q == ' ' || *q == '\t')
+        q++;
+    if (*q != '(')
+        cerr(s, "expected '(' after a feature-test operator", NULL);
+    q++;
+    while (*q == ' ' || *q == '\t')
+        q++;
+    long v = 0;
+    if (n >= 13 && !memcmp(p, "__has_include", 13)) {
+        int angle = *q == '<';
+        if (!angle && *q != '"')
+            cerr(s, "__has_include needs a header name", NULL);
+        char close = angle ? '>' : '"';
+        const char *b = ++q;
+        while (*q && *q != close)
+            q++;
+        if (!*q)
+            cerr(s, "malformed __has_include", NULL);
+        char fname[256];
+        size_t fl = (size_t)(q - b) < sizeof fname - 1 ? (size_t)(q - b)
+                                                       : sizeof fname - 1;
+        memcpy(fname, b, fl);
+        fname[fl] = 0;
+        q++;
+        v = include_exists(s, fname, angle, n == 18);
+    } else {
+        const char *b = q;
+        while (is_idc(*q) || *q == ':')
+            q++;
+        size_t an = (size_t)(q - b);
+        char name[128];
+        if (n == 13 && !memcmp(p, "__has_builtin", 13)) {
+            if (an >= sizeof name)
+                an = sizeof name - 1;
+            memcpy(name, b, an);
+            name[an] = 0;
+            v = cxx_has_builtin ? cxx_has_builtin(name) : 0;
+        } else if (n == 15 && !memcmp(p, "__has_attribute", 15)) {
+            attr_name(b, an, name, sizeof name);
+            v = gnu_attribute(name);
+        } else if (n == 19 && !memcmp(p, "__has_cpp_attribute", 19)) {
+            int gnu = (an > 5 && !memcmp(b, "gnu::", 5)) ||
+                      (an > 9 && !memcmp(b, "__gnu__::", 9));
+            attr_name(b, an, name, sizeof name);
+            v = gnu ? gnu_attribute(name) : cpp_attribute(name);
+        }
+        /* __has_feature / __has_extension: clang's, 0 */
+    }
+    while (*q == ' ' || *q == '\t')
+        q++;
+    if (*q != ')')
+        cerr(s, "expected ')' after a feature-test operand", NULL);
+    *pp = q + 1;
+    return v;
+}
+
 /* Evaluates a #if line: replace defined(X)/defined X first, then
  * macro-expand, then parse the arithmetic. */
 static long eval_if(struct src *s, const char *line)
@@ -589,7 +849,8 @@ static long eval_if(struct src *s, const char *line)
                     idn++;
                 int have = find_macro(s->cpp, q, idn) != NULL ||
                            (idn == 8 && (!memcmp(q, "__FILE__", 8) ||
-                                         !memcmp(q, "__LINE__", 8)));
+                                         !memcmp(q, "__LINE__", 8))) ||
+                           has_operator(q, idn);
                 q += idn;
                 if (paren) {
                     while (*q == ' ' || *q == '\t')
@@ -602,6 +863,12 @@ static long eval_if(struct src *s, const char *line)
                 p = q;
                 continue;
             }
+            if (has_operator(p, n) && !find_macro(s->cpp, p, n)) {
+                char num[32];
+                snprintf(num, sizeof num, "%ldL", eval_has(s, p, n, &p));
+                tb_putn(&pre, num, strlen(num));
+                continue;
+            }
             tb_putn(&pre, p, n);
             p += n;
             continue;
@@ -612,6 +879,35 @@ static long eval_if(struct src *s, const char *line)
     struct tbuf ex = { 0, 0, 0 };
     expand_text(s, pre.p ? pre.p : "", &ex);
     free(pre.p);
+    if (predef_is_cxx() && ex.p) {
+        /* operators a macro's expansion produced
+         * (libstdc++'s _GLIBCXX_HAS_BUILTIN(B) is __has_builtin(B)) */
+        struct tbuf ex2 = { 0, 0, 0 };
+        const char *q = ex.p;
+        while (*q) {
+            if (*q == '\'' || *q == '"') {
+                q += copy_literal(q, &ex2);
+                continue;
+            }
+            if (is_id0(*q)) {
+                size_t n = 0;
+                while (is_idc(q[n]))
+                    n++;
+                if (has_operator(q, n)) {
+                    char num[32];
+                    snprintf(num, sizeof num, "%ldL", eval_has(s, q, n, &q));
+                    tb_putn(&ex2, num, strlen(num));
+                    continue;
+                }
+                tb_putn(&ex2, q, n);
+                q += n;
+                continue;
+            }
+            tb_putc(&ex2, *q++);
+        }
+        free(ex.p);
+        ex = ex2;
+    }
 
     struct evalp e;
     e.s = s;
@@ -678,6 +974,71 @@ static int needs_more_input(struct cpp *cpp, const char *text)
 
 /* ---- the line-oriented driver ---- */
 
+/* At `R"` (after an encoding prefix, if any, already copied): a C++ raw
+ * string literal, R"d(...)d". Its characters are the source's exactly —
+ * no splicing, no comments, no directives on its lines — so it is read
+ * here, whole, and written out as the ordinary literal it equals. */
+static int raw_string_at(struct src *s, const struct tbuf *out)
+{
+    if (!predef_is_cxx() || s->p[0] != 'R' || s->p[1] != '"')
+        return 0;
+    /* R alone, or after u8, u, U, L — not the end of another name */
+    size_t n = out->len;
+    const char *o = out->p;
+    size_t pre = n >= 2 && o[n - 2] == 'u' && o[n - 1] == '8' ? 2
+                 : n >= 1 && (o[n - 1] == 'u' || o[n - 1] == 'U' ||
+                              o[n - 1] == 'L') ? 1 : 0;
+    if (n > pre && is_idc(o[n - pre - 1]))
+        return 0;
+    if (pre == 0 && n > 0 && is_idc(o[n - 1]))
+        return 0;
+    return 1;
+}
+
+static void read_raw_string(struct src *s, struct tbuf *out, int *nl)
+{
+    const char *p = s->p + 2;
+    char delim[17];
+    size_t dn = 0;
+    while (*p && *p != '(') {
+        if (dn >= 16 || *p == ' ' || *p == ')' || *p == '\\' ||
+            *p == '\n')
+            cerr(s, "bad raw string delimiter", NULL);
+        delim[dn++] = *p++;
+    }
+    if (!*p)
+        cerr(s, "unterminated raw string", NULL);
+    delim[dn] = 0;
+    p++;
+    tb_putc(out, '"');
+    for (;;) {
+        if (!*p)
+            cerr(s, "unterminated raw string", NULL);
+        if (*p == ')' && !strncmp(p + 1, delim, dn) && p[1 + dn] == '"') {
+            p += dn + 2;
+            break;
+        }
+        unsigned char c = (unsigned char)*p++;
+        if (c == '\n') {
+            (*nl)++;
+            tb_puts(out, "\\n");
+        } else if (c == '\\' || c == '"') {
+            tb_putc(out, '\\');
+            tb_putc(out, (char)c);
+        } else if (c < 0x20 || c == 0x7F) {
+            char esc[8];
+            snprintf(esc, sizeof esc, "\\%03o", c);
+            tb_puts(out, esc);
+        } else if (c == '?') {
+            tb_puts(out, "\\?");             /* (no trigraph) */
+        } else {
+            tb_putc(out, (char)c);
+        }
+    }
+    tb_putc(out, '"');
+    s->p = p;
+}
+
 /* Reads one logical line (backslash-newline spliced, comments
  * stripped) from s into out. Returns 0 at EOF. Leaves s->line at the
  * FIRST line of the logical line; *nl gets the newline count. */
@@ -718,6 +1079,10 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
             tb_putc(out, ' ');
             continue;
         }
+        if (c == 'R' && raw_string_at(s, out)) {
+            read_raw_string(s, out, nl);
+            continue;
+        }
         if (c == '"' || c == '\'') {
             s->p += copy_literal(s->p, out);
             continue;
@@ -728,23 +1093,12 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
     return 1;
 }
 
+/* An #include's bytes, through the source provider -- so a language server
+ * compiling an unsaved buffer sees the headers as the editor has them too,
+ * not just the file it was asked about (platform.h, vision §7). */
 static char *read_file_or_null(const char *path, long *len)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return NULL;
-    fseek(f, 0, SEEK_END);
-    *len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = xmalloc((size_t)*len + 1);
-    if (fread(buf, 1, (size_t)*len, f) != (size_t)*len) {
-        fclose(f);
-        free(buf);
-        return NULL;
-    }
-    buf[*len] = 0;
-    fclose(f);
-    return buf;
+    return src_read(path, len);
 }
 
 static void process_file(struct cpp *cpp, const char *path,
@@ -802,15 +1156,26 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
         if (text)
             found_idx = i;
     }
-    if (!text)
+    if (!text) {
+        if (g_tolerant)
+            return;                  /* a tool asked to read on without it */
         cerr(s, is_next ? "cannot find a NEXT include file \"%s\""
                         : "cannot find include file \"%s\"", fname);
+    }
 
     s->cpp->depth++;
     {
         char *ipath = xstrndup(path, strlen(path));
         diag_register_source(ipath, text);   /* header errors show their lines */
+        record_dep(ipath, found_idx);        /* -M: what this file needed */
+        if (g_ndeps && g_deps[g_ndeps - 1].system &&
+            !strcmp(g_deps[g_ndeps - 1].path, ipath))
+            diag_mark_system(ipath);         /* its warnings are not ours */
+        int was = g_in_system;
+        g_in_system = g_ndeps && g_deps[g_ndeps - 1].system &&
+                      strcmp(g_deps[g_ndeps - 1].path, ipath) == 0;
         process_file(s->cpp, ipath, text, out, found_idx);
+        g_in_system = was;
     }
     s->cpp->depth--;
 }
@@ -958,7 +1323,8 @@ static void process_file(struct cpp *cpp, const char *path,
                         idn++;
                     if (!idn)
                         cerr(&s, "#ifdef needs a name", NULL);
-                    have = find_macro(cpp, arg, idn) != NULL;
+                    have = find_macro(cpp, arg, idn) != NULL ||
+                           has_operator(arg, idn);
                     if (DIR("ifndef"))
                         have = !have;
                 }
@@ -970,7 +1336,11 @@ static void process_file(struct cpp *cpp, const char *path,
                 cond[ncond++] = !live ? COND_DONE
                                       : eval_if(&s, arg) ? COND_LIVE
                                                          : COND_DEAD;
-            } else if (DIR("elif")) {
+            } else if (DIR("elif") ||
+                       ((DIR("elifdef") || DIR("elifndef")) &&
+                        !(predef_is_cxx() && cxx_strict && cxx_std < 2023))) {
+                /* (#elifdef/#elifndef: C23, C++23 — and GNU's before, as
+                 * g++ has them but for a strict -std=c++20) */
                 if (!ncond)
                     cerr(&s, "#elif without #if", NULL);
                 if (cond[ncond - 1] == COND_LIVE)
@@ -980,7 +1350,21 @@ static void process_file(struct cpp *cpp, const char *path,
                     for (int i = 0; i < ncond - 1; i++)
                         if (cond[i] != COND_LIVE)
                             outer_live = 0;
-                    if (outer_live && eval_if(&s, arg))
+                    int take = 0;
+                    if (outer_live && DIR("elif")) {
+                        take = eval_if(&s, arg);
+                    } else if (outer_live) {
+                        size_t idn = 0;
+                        while (is_idc(arg[idn]))
+                            idn++;
+                        if (!idn)
+                            cerr(&s, "#elifdef needs a name", NULL);
+                        take = find_macro(cpp, arg, idn) != NULL ||
+                               has_operator(arg, idn);
+                        if (DIR("elifndef"))
+                            take = !take;
+                    }
+                    if (take)
                         cond[ncond - 1] = COND_LIVE;
                 }
             } else if (DIR("else")) {
@@ -1013,10 +1397,32 @@ static void process_file(struct cpp *cpp, const char *path,
             } else if (DIR("error")) {
                 cerr(&s, "#error: %s", arg);
             } else if (DIR("warning")) {
-                fprintf(stderr, "embcc: %s:%d: warning: %s\n",
-                        s.file, startline, arg);
+                diag_warn_at(s.file, startline, 0, "#warning: %s", arg);
             } else if (DIR("pragma")) {
                 /* no pragmas mean anything to us yet */
+            } else if (DIR("line") || (dn > 0 && lp[0] >= '0' &&
+                                        lp[0] <= '9')) {
+                /* #line N ["file"], and GNU's linemarker # N "file" ...
+                 * (preprocessed input): the next line is N of file */
+                char *end;
+                const char *q = DIR("line") ? arg : lp;
+                long ln = strtol(q, &end, 10);
+                if (end == q || ln <= 0)
+                    cerr(&s, "#line needs a positive line number", NULL);
+                while (*end == ' ' || *end == '\t')
+                    end++;
+                if (*end == '"') {
+                    const char *e = strchr(end + 1, '"');
+                    if (!e)
+                        cerr(&s, "#line's file name is unterminated", NULL);
+                    s.file = path = xstrndup(end + 1, (size_t)(e - end - 1));
+                }
+                snprintf(marker, sizeof marker, "# %ld \"%s\"\n", ln, path);
+                tb_puts(out, marker);
+                for (int i = 1; i < nl; i++)
+                    tb_putc(out, '\n');
+                s.line = (int)ln + (nl > 1 ? nl - 1 : 0);
+                continue;
             } else if (dn == 0) {
                 /* '#' alone: the null directive */
             } else {
@@ -1055,13 +1461,16 @@ static void process_file(struct cpp *cpp, const char *path,
     free(lineb.p);
 }
 
-/* Loads the 348-entry predefined table (generated at M0 from
- * x86_64-elf-gcc -dM -E). Function-like entries carry their parameter
- * list in the name: "__INT64_C(c)". */
+/* Loads the selected target's predefined table (tools/gen-predef.sh).
+ * Function-like entries carry their parameter list in the name:
+ * "__INT64_C(c)", and — since gcc 16's aarch64 set includes the SME
+ * attribute helpers — variadic ones like "__arm_in(...)". */
 static void load_predefined(struct cpp *cpp)
 {
-    for (int i = 0; i < predef_macro_count; i++) {
-        const char *name = predef_macros[i].name;
+    int predef_count;
+    const struct predef_macro *predefs = predef_table(&predef_count);
+    for (int i = 0; i < predef_count; i++) {
+        const char *name = predefs[i].name;
         const char *paren = strchr(name, '(');
         struct macro *m = xcalloc(1, sizeof *m);
         if (paren) {
@@ -1069,9 +1478,28 @@ static void load_predefined(struct cpp *cpp)
             m->is_func = 1;
             const char *p = paren + 1;
             while (*p && *p != ')') {
+                if (m->nparams >= MAX_MACRO_PARAMS) {
+                    fprintf(stderr, "embcc: internal error: predefined macro "
+                                    "'%s' has too many parameters\n", name);
+                    fatal_unwind();
+                }
+                if (p[0] == '.' && p[1] == '.' && p[2] == '.') {
+                    m->is_varargs = 1;
+                    m->params[m->nparams++] = "__VA_ARGS__";
+                    p += 3;
+                    continue;
+                }
                 size_t n = 0;
                 while (is_idc(p[n]))
                     n++;
+                if (n == 0) {
+                    /* Not an identifier and not '...': advancing is the only
+                     * thing that matters here — a zero-length token would
+                     * otherwise spin, filling params[] until it overran it
+                     * (which is exactly what gcc 16's "__arm_in(...)" did). */
+                    p++;
+                    continue;
+                }
                 m->params[m->nparams++] = xstrndup(p, n);
                 p += n;
                 if (*p == ',')
@@ -1080,7 +1508,7 @@ static void load_predefined(struct cpp *cpp)
         } else {
             m->name = name;
         }
-        m->body = predef_macros[i].value;
+        m->body = predefs[i].value;
         m->builtin = 1;
         m->next = cpp->macros;
         cpp->macros = m;
@@ -1113,8 +1541,124 @@ char *cpp_process(const char *path, const char *src,
     define_macro(&boot, "__inline__");
     defining_builtins = 0;
     define_macro(&boot, "__STDC__ 1");
-    define_macro(&boot, "__STDC_VERSION__ 199901L");
+    if (!predef_is_cxx())      /* C++ has __cplusplus instead */
+        define_macro(&boot, "__STDC_VERSION__ 199901L");
     define_macro(&boot, "__STDC_HOSTED__ 1");
+    if (predef_is_cxx()) {
+        /* the C++ features EmbCC implements (docs/language/cpp-levels.md): each one
+         * from the standard g++ first defines it in, at the value g++
+         * gives that standard — no higher than what EmbCC does; those
+         * it does not do yet (consteval, aligned new, ...) are left
+         * undefined, so libstdc++ takes its paths without them.
+         * Values for C++98, 11, 14, 17 and 20 (on) — 0 undefined. */
+        static const struct { const char *name; long v[5]; } feats[] = {
+            { "__cpp_rtti", { 199711L, 199711L, 199711L, 199711L, 199711L } },
+            { "__cpp_aggregate_nsdmi", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_aggregate_paren_init", { 0, 0, 0, 0, 201902L } },
+            { "__cpp_alias_templates", { 0, 200704L, 200704L, 200704L, 200704L } },
+            { "__cpp_aligned_new", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_attributes", { 0, 200809L, 200809L, 200809L, 200809L } },
+            { "__cpp_binary_literals", { 201304L, 201304L, 201304L, 201304L, 201304L } },
+            { "__cpp_capture_star_this", { 0, 0, 0, 201603L, 201603L } },
+            { "__cpp_char8_t", { 0, 0, 0, 0, 202207L } },
+            { "__cpp_concepts", { 0, 0, 0, 0, 201907L } },
+            { "__cpp_conditional_explicit", { 0, 0, 0, 0, 201806L } },
+            { "__cpp_constexpr", { 0, 200704L, 201304L, 201603L, 201603L } },
+            { "__cpp_decltype", { 0, 200707L, 200707L, 200707L, 200707L } },
+            { "__cpp_constexpr_dynamic_alloc", { 0, 0, 0, 0, 201907L } },
+            { "__cpp_decltype_auto", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_deduction_guides", { 0, 0, 0, 201703L, 201703L } },
+            { "__cpp_delegating_constructors", { 0, 200604L, 200604L, 200604L, 200604L } },
+            { "__cpp_enumerator_attributes", { 0, 0, 0, 201411L, 201411L } },
+            { "__cpp_fold_expressions", { 0, 0, 0, 201603L, 201603L } },
+            { "__cpp_generic_lambdas", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_guaranteed_copy_elision", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_hex_float", { 201603L, 201603L, 201603L, 201603L, 201603L } },
+            { "__cpp_if_constexpr", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_impl_coroutine", { 0, 0, 0, 0, 201902L } },
+            { "__cpp_impl_three_way_comparison", { 0, 0, 0, 0, 201907L } },
+            { "__cpp_init_captures", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_initializer_lists", { 0, 200806L, 200806L, 200806L, 200806L } },
+            { "__cpp_inline_variables", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_lambdas", { 0, 200907L, 200907L, 200907L, 200907L } },
+            { "__cpp_namespace_attributes", { 0, 0, 0, 201411L, 201411L } },
+            { "__cpp_nested_namespace_definitions", { 0, 0, 0, 201411L, 201411L } },
+            { "__cpp_nsdmi", { 0, 200809L, 200809L, 200809L, 200809L } },
+            { "__cpp_range_based_for", { 0, 200907L, 200907L, 201603L, 201603L } },
+            { "__cpp_ref_qualifiers", { 0, 200710L, 200710L, 200710L, 200710L } },
+            { "__cpp_return_type_deduction", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_rvalue_references", { 0, 200610L, 200610L, 200610L, 200610L } },
+            { "__cpp_sized_deallocation", { 0, 0, 201309L, 201309L, 201309L } },
+            { "__cpp_static_assert", { 0, 200410L, 200410L, 201411L, 201411L } },
+            { "__cpp_structured_bindings", { 0, 0, 0, 201606L, 201606L } },
+            { "__cpp_threadsafe_static_init", { 200806L, 200806L, 200806L, 200806L, 200806L } },
+            { "__cpp_unicode_characters", { 0, 200704L, 200704L, 200704L, 200704L } },
+            { "__cpp_unicode_literals", { 0, 200710L, 200710L, 200710L, 200710L } },
+            { "__cpp_user_defined_literals", { 0, 200809L, 200809L, 200809L, 200809L } },
+            { "__cpp_using_enum", { 0, 0, 0, 0, 201907L } },
+            { "__cpp_variable_templates", { 0, 0, 201304L, 201304L, 201304L } },
+            { "__cpp_variadic_templates", { 0, 200704L, 200704L, 200704L, 200704L } },
+        };
+        int si = cxx_std >= 2020 ? 4 : cxx_std >= 2017 ? 3
+                 : cxx_std >= 2014 ? 2 : cxx_std >= 2011 ? 1 : 0;
+        for (size_t i = 0; i < sizeof feats / sizeof feats[0]; i++)
+            if (feats[i].v[si])
+                define_macro(&boot, cx_macro_fmt(feats[i].name,
+                                                 feats[i].v[si]));
+        define_macro(&boot, "__GNUG__ 16");
+        define_macro(&boot, "__VERSION__ \"16.2.0 (EmbCC)\"");
+        define_macro(&boot, "__GXX_RTTI 1");
+        /* the standard -std= names (g++'s value for C++26 drafts) */
+        undef_macro(&cpp, "__cplusplus", 11);
+        define_macro(&boot, cxx_std >= 2026 ? "__cplusplus 202400L"
+                            : cxx_std >= 2023 ? "__cplusplus 202302L"
+                            : cxx_std >= 2020 ? "__cplusplus 202002L"
+                            : cxx_std >= 2017 ? "__cplusplus 201703L"
+                            : cxx_std >= 2014 ? "__cplusplus 201402L"
+                            : cxx_std >= 2011 ? "__cplusplus 201103L"
+                            : "__cplusplus 199711L");
+        if (cxx_std < 2011)
+            undef_macro(&cpp, "__GXX_EXPERIMENTAL_CXX0X__", 26);
+        if (cxx_strict)
+            define_macro(&boot, "__STRICT_ANSI__ 1");
+        if (si >= 3)                            /* (aligned new: C++17) */
+            define_macro(&boot, "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 16");
+        if (cxx_char8 && si < 4)                /* -fchar8_t before C++20 */
+            define_macro(&boot, "__cpp_char8_t 202207L");
+        /* C++ units present as g++ to the headers: libstdc++ is GCC's
+         * own library, built against GCC's view of newlib (va_list,
+         * __func__, attributes); C units keep EmbCC's own identity */
+        define_macro(&boot, "__GNUC__ 16");
+        define_macro(&boot, "__GNUC_MINOR__ 2");
+        define_macro(&boot, "__GNUC_PATCHLEVEL__ 0");
+        define_macro(&boot, "__GNUC_STDC_INLINE__ 1");  /* (as g++) */
+        /* __int128, as g++ — libstdc++'s traits and limits take it as an
+         * integer type too, outside the strict modes */
+        define_macro(&boot, "__SIZEOF_INT128__ 16");
+        if (!cxx_strict) {
+            define_macro(&boot, "__GLIBCXX_TYPE_INT_N_0 __int128");
+            define_macro(&boot, "__GLIBCXX_BITSIZE_INT_N_0 128");
+        }
+        if (cxx_exceptions) {
+            define_macro(&boot, "__EXCEPTIONS 1");
+            define_macro(&boot, "__cpp_exceptions 199711L");
+        }
+    }
+    /* -DNAME[=VALUE] (VALUE 1 when absent), -UNAME, after the built-ins */
+    for (int i = 0; i < ncmdline_defs; i++) {
+        const char *t = cmdline_defs[i].text;
+        if (cmdline_defs[i].undef) {
+            undef_macro(&cpp, t, strlen(t));
+            continue;
+        }
+        const char *eq = strchr(t, '=');
+        size_t n = eq ? (size_t)(eq - t) : strlen(t);
+        char *line = xmalloc(n + (eq ? strlen(eq) : 2) + 2);
+        memcpy(line, t, n);
+        line[n] = ' ';
+        strcpy(line + n + 1, eq ? eq + 1 : "1");
+        define_macro(&boot, line);
+    }
 
     struct tbuf out = { 0, 0, 0 };
     process_file(&cpp, path, src, &out, -1);

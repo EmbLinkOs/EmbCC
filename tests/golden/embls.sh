@@ -1,0 +1,300 @@
+#!/bin/sh
+# embls, the language server (docs/tools/diagnostics.md T5): an editor's questions
+# answered by the compiler itself. The session below is a real LSP
+# conversation over stdio — initialize, didOpen, completion, hover,
+# definition, documentSymbol — and every answer is checked against what the
+# front end knows, not against a fixture.
+#
+# What makes the answers worth having: they come from EmbCC's own
+# preprocessor and parser, so the members offered after `.` are the members
+# the compiler sees, and the diagnostics shown as you type are the ones the
+# build will print.
+set -eu
+echo "TEST-MARKER embls"
+. "$(dirname "$0")/../lib.sh"
+
+command -v python3 >/dev/null 2>&1 || { echo "skipped: python3 absent"; exit 0; }
+EMBLS=${EMBLS:-./embls}
+[ -x "$EMBLS" ] || { echo "skipped: embls is not built (make embls)"; exit 0; }
+EMBCC=${EMBCC:-./embcc}
+out=tests/golden/out/embls
+rm -rf "$out"; mkdir -p "$out"
+
+cat > "$out/demo.c" << 'EOF'
+struct Point { int x; int y; char *label; };
+static int total;
+
+int distance2(struct Point a, struct Point b)
+{
+    int dx = a.x - b.x;
+    int dy = a.y - b.y;
+    return dx * dx + dy * dy;
+}
+
+int main(void)
+{
+    struct Point origin = { 0, 0, "origin" };
+    total = distance2(origin, origin);
+    return total;
+}
+EOF
+
+cat > "$out/demo.cc" << 'EOF2'
+struct Point {
+    int x;
+    int y;
+    int sum() const { return x + y; }
+};
+
+int scale(Point p, int factor)
+{
+    int base = p.sum();
+    return base * factor;
+}
+
+int main()
+{
+    Point origin{2, 3};
+    return scale(origin, 2) - 10;
+}
+EOF2
+
+cat > "$out/refs.c" << 'EOF'
+struct Point { int x; int y; };
+static int total;
+
+int scale(struct Point p, int n)
+{
+    int x = p.x * n;
+    total = total + x;
+    return x;
+}
+
+int other(int total)
+{
+    return total + 1;
+}
+
+int main(void)
+{
+    struct Point q = { 1, 2 };
+    /* total in a comment, and "total" in a string */
+    return scale(q, 3) + total;
+}
+EOF
+
+mkdir -p "$out/inc/sys"
+: > "$out/inc/alpha.h"; : > "$out/inc/beta.h"
+: > "$out/inc/notaheader.txt"; : > "$out/inc/sys/types.h"
+printf -- '-I%s/inc\n' "$(cd "$out" && pwd)" > "$out/compile_flags.txt"
+cat > "$out/inc.c" << 'EOF'
+#include <sys/
+int main(void) { return 0; }
+EOF
+
+cat > "$out/broken.c" << 'EOF'
+struct Point { int x; int y; };
+int area(struct Point p)
+{
+    int width = p.x;
+    int height = p.z;
+    return width * heigth;
+}
+EOF
+
+EMBCC_ABS=$(cd "$(dirname "$EMBCC")" && pwd)/$(basename "$EMBCC")
+EMBLS_ABS=$(cd "$(dirname "$EMBLS")" && pwd)/$(basename "$EMBLS")
+export EMBCC_ABS EMBLS_ABS
+
+python3 - "$out" << 'PY' || exit 1
+import json, os, subprocess, sys
+out = sys.argv[1]
+srv = subprocess.Popen([os.environ["EMBLS_ABS"]], stdin=subprocess.PIPE,
+                       stdout=subprocess.PIPE,
+                       env={**os.environ, "EMBLS_EMBCC": os.environ["EMBCC_ABS"]})
+
+def send(o):
+    b = json.dumps(o).encode()
+    srv.stdin.write(b"Content-Length: %d\r\n\r\n" % len(b) + b)
+    srv.stdin.flush()
+
+def recv():
+    hdr = b""
+    while b"\r\n\r\n" not in hdr:
+        c = srv.stdout.read(1)
+        if not c:
+            raise SystemExit("embls closed the connection")
+        hdr += c
+    n = int([l for l in hdr.decode().split("\r\n")
+             if l.lower().startswith("content-length")][0].split(":")[1])
+    return json.loads(srv.stdout.read(n))
+
+def open_doc(path):
+    uri = "file://" + os.path.abspath(path)
+    send({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+          "params": {"textDocument": {"uri": uri, "text": open(path).read()}}})
+    return uri, recv()["params"]["diagnostics"]
+
+def ask(method, uri, line, ch):
+    send({"jsonrpc": "2.0", "id": 7, "method": method,
+          "params": {"textDocument": {"uri": uri},
+                     "position": {"line": line, "character": ch}}})
+    return recv()["result"]
+
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+caps = recv()["result"]["capabilities"]
+for c in ("completionProvider", "hoverProvider", "definitionProvider",
+          "documentSymbolProvider"):
+    assert caps.get(c), ("missing capability", c)
+print("initialize: completion, hover, definition, symbols")
+
+# A file that compiles has nothing to say about it.
+uri, diags = open_doc(out + "/demo.c")
+assert diags == [], diags
+print("a correct file: no diagnostics")
+
+# Completion after `a.` is the struct's own members, in order, and nothing
+# else -- not locals, not keywords.
+items = [i["label"] for i in ask("textDocument/completion", uri, 5, 15)["items"]]
+assert items == ["x", "y", "label"], items
+details = {i["label"]: i["detail"]
+           for i in ask("textDocument/completion", uri, 5, 15)["items"]}
+assert details["label"] == "char *", details
+print("completion after `.`: %s (with types)" % ", ".join(items))
+
+# In a body: the function's own parameters and locals are offered, another
+# function's locals are not.
+labels = [i["label"] for i in ask("textDocument/completion", uri, 6, 8)["items"]]
+for want in ("a", "b", "dx", "dy", "distance2", "total", "struct"):
+    assert want in labels, (want, labels[:20])
+assert "origin" not in labels, "a local of main is offered inside distance2"
+print("completion in a body: parameters, locals, globals, keywords; "
+      "another function's locals stay out")
+
+# Hover and definition answer from the parse, not from the text.
+h = ask("textDocument/hover", uri, 13, 14)["contents"]["value"]
+assert "int distance2(struct Point a, struct Point b)" in h, h
+d = ask("textDocument/definition", uri, 13, 14)
+assert d["range"]["start"]["line"] == 3, d      # 0-based: the definition
+print("hover: the real signature;  definition: its line")
+
+syms = [s["name"] for s in ask("textDocument/documentSymbol", uri, 0, 0)]
+assert "distance2" in syms and "main" in syms and "total" in syms, syms
+print("documentSymbol: %s" % ", ".join(syms))
+
+# A file with two mistakes reports both, where they are, with the
+# suggestion under the second.
+uri2, diags2 = open_doc(out + "/broken.c")
+lines = sorted(d["range"]["start"]["line"] + 1 for d in diags2)
+assert lines == [5, 6], lines
+msgs = " ".join(d["message"] for d in diags2)
+assert "has no member 'z'" in msgs, msgs
+assert "'heigth' is not declared" in msgs, msgs
+assert "did you mean 'height'?" in msgs, msgs
+assert all(d["severity"] == 1 for d in diags2), diags2
+print("a broken file: both errors, at their lines, with the suggestion")
+
+# Completion still works there -- an editor is most useful while the file
+# is still wrong.
+items2 = [i["label"] for i in ask("textDocument/completion", uri2, 4, 19)["items"]]
+assert items2 == ["x", "y"], items2
+print("completion while the file is broken: %s" % ", ".join(items2))
+
+# C++ is indexed by the C++ front end, so the members offered after a `.`
+# are that class's own — data and the functions you can call, without the
+# ones the compiler generated for you.
+uri3, diags3 = open_doc(out + "/demo.cc")
+assert diags3 == [], diags3
+items3 = [i["label"] for i in ask("textDocument/completion", uri3, 8, 17)["items"]]
+assert items3 == ["x", "y", "sum"], items3
+h3 = ask("textDocument/hover", uri3, 15, 13)["contents"]["value"]
+assert "int scale(Point p, int factor)" in h3, h3
+d3 = ask("textDocument/definition", uri3, 15, 13)
+assert d3["range"]["start"]["line"] == 6, d3
+syms3 = [s["name"] for s in ask("textDocument/documentSymbol", uri3, 0, 0)]
+assert "scale" in syms3 and "sum" in syms3, syms3
+print("C++: members after `.` are %s; hover and definition from the C++ parse"
+      % ", ".join(items3))
+
+# --- find references: the parse knows a name from a lookalike ------------
+uri4, _ = open_doc(out + "/refs.c")
+
+def refs(line, ch, decl=True):
+    send({"jsonrpc": "2.0", "id": 8, "method": "textDocument/references",
+          "params": {"textDocument": {"uri": uri4},
+                     "position": {"line": line, "character": ch},
+                     "context": {"includeDeclaration": decl}}})
+    return sorted((r["range"]["start"]["line"] + 1,
+                   r["range"]["start"]["character"] + 1)
+                  for r in recv()["result"])
+
+# The global `total`: both uses on line 7, the one on line 20, its own
+# declaration -- and NOT the parameter of other(), NOT the word in the
+# comment, NOT the word inside the string literal.
+g = refs(6, 4)
+assert g == [(2, 1), (7, 5), (7, 13), (20, 26)], g
+print("references to the global 'total': %s" % g)
+
+# The parameter of other() has the same spelling and is a different thing.
+pr = refs(12, 11)
+assert pr == [(11, 15), (13, 12)], pr
+print("references to other()'s parameter 'total': %s -- a different name"
+      % pr)
+
+# A local `x` and the member `p.x` share a spelling too.
+lx = refs(5, 8)
+assert lx == [(6, 9), (7, 21), (8, 12)], lx
+assert (6, 15) not in lx, "p.x was counted as the local x"
+print("references to the local 'x': %s -- `p.x` stays out" % lx)
+
+# --- rename is that set, with a new spelling -----------------------------
+send({"jsonrpc": "2.0", "id": 9, "method": "textDocument/rename",
+      "params": {"textDocument": {"uri": uri4},
+                 "position": {"line": 3, "character": 30},
+                 "newName": "count"}})
+edits = list(recv()["result"]["changes"].values())[0]
+src = open(out + "/refs.c").read().split("\n")
+spans = sorted((e["range"]["start"]["line"], e["range"]["start"]["character"],
+                e["range"]["end"]["character"]) for e in edits)
+assert len(spans) == 2, spans
+for ln, a, b in spans:
+    assert src[ln][a:b] == "n", (ln, a, b, src[ln][a:b])
+print("renaming the parameter 'n' edits exactly the two 'n' tokens, "
+      "including its declaration")
+
+send({"jsonrpc": "2.0", "id": 10, "method": "textDocument/prepareRename",
+      "params": {"textDocument": {"uri": uri4},
+                 "position": {"line": 6, "character": 6}}})
+pr = recv()["result"]
+assert src[pr["start"]["line"]][pr["start"]["character"]:
+                                pr["end"]["character"]] == "total", pr
+print("prepareRename returns the identifier's own span")
+
+# --- signature help ------------------------------------------------------
+send({"jsonrpc": "2.0", "id": 11, "method": "textDocument/signatureHelp",
+      "params": {"textDocument": {"uri": uri4},
+                 "position": {"line": 19, "character": 20}}})
+sh = recv()["result"]
+sig = sh["signatures"][0]
+assert sig["label"] == "int scale(struct Point p, int n)", sig["label"]
+assert [p["label"] for p in sig["parameters"]] == \
+       ["struct Point p", "int n"], sig["parameters"]
+assert sh["activeParameter"] == 1, sh
+print("signature help inside scale(q, |): %s, on parameter %d"
+      % (sig["label"], sh["activeParameter"]))
+
+# --- #include completion, from the real search path ----------------------
+uri5, _ = open_doc(out + "/inc.c")
+send({"jsonrpc": "2.0", "id": 12, "method": "textDocument/completion",
+      "params": {"textDocument": {"uri": uri5},
+                 "position": {"line": 0, "character": 14}}})
+inc = sorted(i["label"] for i in recv()["result"]["items"])
+assert inc == ["types.h"], inc
+print("completion after `#include <sys/`: %s" % ", ".join(inc))
+
+send({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": {}})
+recv()
+send({"jsonrpc": "2.0", "method": "exit", "params": {}})
+srv.wait(timeout=10)
+PY
+echo "embls answered a whole session"

@@ -1,0 +1,251 @@
+/* <list> — C++ [list].
+ *
+ * A doubly-linked list with a SENTINEL node: `__end` is a real node whose
+ * next and prev close the ring. That is what makes every operation
+ * pointer-shuffling with no special case for "the list is empty" or
+ * "this is the first element" -- the cases that are otherwise half the
+ * code and all of the bugs.
+ *
+ * The reason to choose a list over a vector is not speed in general; it
+ * is that insertion and erasure anywhere are O(1) and invalidate NO
+ * iterator except one to the erased element. A vector gives neither.
+ */
+#ifndef _LIBCXX_LIST
+#define _LIBCXX_LIST
+
+#include <cstddef>
+#include <type_traits>
+#include <utility>
+#include <iterator>
+#include <memory>
+#include <initializer_list>
+
+namespace std {
+
+namespace __detail {
+struct __list_base { __list_base *next, *prev; };
+
+template <class T>
+struct __list_node : __list_base {
+    T value;
+    template <class... A>
+    explicit __list_node(A &&...a) : value(forward<A>(a)...) {}
+};
+}
+
+template <class T, class A = allocator<T>>
+class list {
+    using base = __detail::__list_base;
+    using node = __detail::__list_node<T>;
+
+public:
+    using value_type = T;
+    using size_type = size_t;
+    using reference = T &;
+    using const_reference = const T &;
+
+    class iterator {
+    public:
+        using iterator_category = bidirectional_iterator_tag;
+        using value_type = T;
+        using difference_type = ptrdiff_t;
+        using pointer = T *;
+        using reference = T &;
+
+        iterator() : __p(nullptr) {}
+        explicit iterator(base *p) : __p(p) {}
+        T &operator*() const { return static_cast<node *>(__p)->value; }
+        T *operator->() const
+        { return addressof(static_cast<node *>(__p)->value); }
+        iterator &operator++() { __p = __p->next; return *this; }
+        iterator operator++(int) { iterator t = *this; __p = __p->next; return t; }
+        iterator &operator--() { __p = __p->prev; return *this; }
+        iterator operator--(int) { iterator t = *this; __p = __p->prev; return t; }
+        bool operator==(const iterator &o) const { return __p == o.__p; }
+        bool operator!=(const iterator &o) const { return __p != o.__p; }
+        base *__ptr() const { return __p; }
+    private:
+        base *__p;
+    };
+
+    using const_iterator = iterator;
+
+    list() : __n(0) { __end.next = &__end; __end.prev = &__end; }
+    list(initializer_list<T> l) : list() { for (auto &v : l) push_back(v); }
+    list(size_type n, const T &v) : list()
+    { for (size_type i = 0; i < n; i++) push_back(v); }
+    template <class It> list(It f, It l) : list()
+    { for (; f != l; ++f) push_back(*f); }
+
+    list(const list &o) : list()
+    { for (auto it = o.begin(); it != o.end(); ++it) push_back(*it); }
+
+    list(list &&o) noexcept : __n(o.__n)
+    {
+        if (o.__n == 0) { __end.next = &__end; __end.prev = &__end; }
+        else {
+            /* The sentinel is a MEMBER, so it does not move with the
+             * nodes: the ring has to be re-closed around this object's
+             * own sentinel, and the old one emptied. */
+            __end.next = o.__end.next;
+            __end.prev = o.__end.prev;
+            __end.next->prev = &__end;
+            __end.prev->next = &__end;
+            o.__end.next = &o.__end;
+            o.__end.prev = &o.__end;
+            o.__n = 0;
+        }
+    }
+
+    ~list() { clear(); }
+
+    list &operator=(const list &o)
+    {
+        if (this != addressof(o)) {
+            clear();
+            for (auto it = o.begin(); it != o.end(); ++it) push_back(*it);
+        }
+        return *this;
+    }
+
+    list &operator=(list &&o) noexcept
+    {
+        if (this != addressof(o)) {
+            clear();
+            if (o.__n) {
+                __end.next = o.__end.next;
+                __end.prev = o.__end.prev;
+                __end.next->prev = &__end;
+                __end.prev->next = &__end;
+                o.__end.next = &o.__end;
+                o.__end.prev = &o.__end;
+            }
+            __n = o.__n;
+            o.__n = 0;
+        }
+        return *this;
+    }
+
+    iterator begin() const { return iterator(__end.next); }
+    iterator end() const { return iterator(const_cast<base *>(&__end)); }
+
+    bool empty() const noexcept { return __n == 0; }
+    size_type size() const noexcept { return __n; }
+
+    T &front() { return *begin(); }
+    const T &front() const { return *begin(); }
+    T &back() { return *iterator(__end.prev); }
+    const T &back() const { return *iterator(__end.prev); }
+
+    void clear() { while (__n) pop_back(); }
+
+    template <class... Args>
+    T &emplace_back(Args &&...args)
+    { return *__insert(end(), new node(forward<Args>(args)...)); }
+    template <class... Args>
+    T &emplace_front(Args &&...args)
+    { return *__insert(begin(), new node(forward<Args>(args)...)); }
+
+    void push_back(const T &v) { __insert(end(), new node(v)); }
+    void push_back(T &&v) { __insert(end(), new node(std::move(v))); }
+    void push_front(const T &v) { __insert(begin(), new node(v)); }
+    void push_front(T &&v) { __insert(begin(), new node(std::move(v))); }
+
+    void pop_back() { erase(iterator(__end.prev)); }
+    void pop_front() { erase(begin()); }
+
+    iterator insert(iterator pos, const T &v)
+    { return __insert(pos, new node(v)); }
+
+    iterator erase(iterator pos)
+    {
+        base *p = pos.__ptr();
+        base *nx = p->next;
+        p->prev->next = p->next;
+        p->next->prev = p->prev;
+        delete static_cast<node *>(p);
+        --__n;
+        return iterator(nx);
+    }
+
+    void remove(const T &v)
+    {
+        for (auto it = begin(); it != end(); )
+            if (*it == v) it = erase(it); else ++it;
+    }
+    template <class P>
+    void remove_if(P pred)
+    {
+        for (auto it = begin(); it != end(); )
+            if (pred(*it)) it = erase(it); else ++it;
+    }
+
+    void reverse() noexcept
+    {
+        base *p = &__end;
+        do {
+            base *nx = p->next;
+            base *t = p->next; p->next = p->prev; p->prev = t;
+            p = nx;
+        } while (p != &__end);
+    }
+
+    /* splice MOVES nodes between lists without copying or allocating --
+     * which is the operation a list exists for, and the one a vector
+     * cannot do at all. Every iterator into the moved range stays valid
+     * and now belongs to this list. */
+    void splice(iterator pos, list &o)
+    {
+        if (o.empty()) return;
+        base *first = o.__end.next, *last = o.__end.prev;
+        base *at = pos.__ptr();
+        first->prev = at->prev;
+        at->prev->next = first;
+        last->next = at;
+        at->prev = last;
+        __n += o.__n;
+        o.__end.next = &o.__end;
+        o.__end.prev = &o.__end;
+        o.__n = 0;
+    }
+
+    void swap(list &o) noexcept
+    {
+        list t = std::move(*this);
+        *this = std::move(o);
+        o = std::move(t);
+    }
+
+private:
+    base __end;
+    size_type __n;
+
+    iterator __insert(iterator pos, node *nn)
+    {
+        base *at = pos.__ptr();
+        nn->prev = at->prev;
+        nn->next = at;
+        at->prev->next = nn;
+        at->prev = nn;
+        ++__n;
+        return iterator(nn);
+    }
+};
+
+template <class T, class A>
+bool operator==(const list<T, A> &a, const list<T, A> &b)
+{
+    if (a.size() != b.size()) return false;
+    auto i = a.begin(); auto j = b.begin();
+    for (; i != a.end(); ++i, ++j) if (!(*i == *j)) return false;
+    return true;
+}
+template <class T, class A>
+bool operator!=(const list<T, A> &a, const list<T, A> &b) { return !(a == b); }
+
+template <class T, class A>
+void swap(list<T, A> &a, list<T, A> &b) noexcept { a.swap(b); }
+
+}  // namespace std
+
+#endif

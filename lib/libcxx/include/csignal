@@ -1,0 +1,19 @@
+/* <csignal> — the C header's names, in namespace std as well as at
+ * global scope.
+ *
+ * Worth repeating from <signal.h>: a handler may call only `abort`,
+ * `_Exit`, `quick_exit` and `signal` for its own signal, and may assign
+ * to a `volatile sig_atomic_t`. In C++ it also must not throw -- there
+ * is no frame to unwind to -- so the one safe pattern is still to set a
+ * flag and return. */
+#ifndef _LIBCXX_CSIGNAL
+#define _LIBCXX_CSIGNAL
+#include <signal.h>
+
+namespace std {
+using ::sig_atomic_t;
+using ::signal;
+using ::raise;
+}
+
+#endif

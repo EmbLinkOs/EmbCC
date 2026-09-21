@@ -10,6 +10,8 @@
 /embld
 /embdbg
 /embas
+/embls
+/embidx
 /embcc-stage1
 /embcc-stage2
 
@@ -24,3 +26,6 @@ compile_commands.json
 *.swp
 .DS_Store
 ref/
+
+# Debug bundles the macOS toolchain leaves beside each -g binary.
+*.dSYM/

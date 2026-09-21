@@ -12,6 +12,8 @@
 
 #include "../sema/type.h"
 
+struct ldf;   /* sema/ldfloat.h: an exact long double constant */
+
 /* MAX_PARAMS (the declaration/call arity cap) is defined in type.h, which
  * this header includes, so struct type's ptypes[] and the AST arrays here
  * stay the same size. */
@@ -21,7 +23,11 @@ enum expr_kind { EXPR_NUM, EXPR_FNUM, EXPR_STR, EXPR_VAR, EXPR_BINOP, EXPR_CALL,
                  EXPR_DEREF, EXPR_ADDR, EXPR_CAST, EXPR_SIZEOF, EXPR_ALIGNOF,
                  EXPR_MEMBER, EXPR_COND, EXPR_COMMA,
                  EXPR_COMPOUND, EXPR_INITLIST, EXPR_VA_ARG, EXPR_COMPLIT,
-                 EXPR_GENERIC, EXPR_STMTEXPR, EXPR_LABELADDR };
+                 EXPR_GENERIC, EXPR_STMTEXPR, EXPR_LABELADDR,
+                 EXPR_REAL, EXPR_IMAG,     /* GNU __real__ / __imag__ (rhs) */
+                 EXPR_EHTYPEID };  /* __builtin_eh_typeid(ti): the selector
+                                    * value a landing pad sees for catch
+                                    * type ti (name; 0 = catch-all) */
 
 struct stmt;   /* a statement expression `({ ... })` carries a block */
 
@@ -45,6 +51,10 @@ struct expr {
                              * decayed pointer (sizeof needs it) */
     long num;             /* EXPR_NUM; EXPR_STR: byte length incl NUL */
     double fnum;          /* EXPR_FNUM */
+    int imag;             /* EXPR_FNUM: a GNU imaginary constant — its type
+                           * is complex and its value 0 + fnum*i */
+    struct ldf *ldv;      /* EXPR_FNUM of type long double: its exact value
+                           * (sema/ldfloat.h); NULL means (long double)fnum */
     const char *name;     /* EXPR_VAR, EXPR_CALL, EXPR_INCDEC target;
                            * EXPR_STR: the bytes */
     int var_index;        /* EXPR_VAR/EXPR_INCDEC: slot; set by sema */
@@ -54,6 +64,7 @@ struct expr {
                            * decays to pointer-to-function (sema) */
     int str_index;        /* EXPR_STR: unit string table slot (irgen) */
     int str_width;        /* EXPR_STR: bytes/element (1 char, 2 char16, 4 wide) */
+    char str_prefix;      /* EXPR_STR: 'L' wchar_t, 'U' char32_t, 'u' char16_t */
     enum binop op;        /* EXPR_BINOP */
     struct expr *lhs, *rhs; /* BINOP + ASSIGN(lhs=target);
                              * NOT/NEG/BNOT/DEREF/ADDR/CAST use rhs only */
@@ -104,6 +115,7 @@ struct initelem {
     struct expr *e;
     int bit_off;
     int bit_width;
+    int bf_bytes;       /* a packed field across its unit: bytes it spans */
 };
 
 /* A relocation inside a static object's byte image: a pointer-typed slot
@@ -123,7 +135,19 @@ struct greloc {
 enum stmt_kind { STMT_RETURN, STMT_DECL, STMT_EXPR, STMT_IF, STMT_WHILE,
                  STMT_FOR, STMT_BLOCK, STMT_BREAK, STMT_CONTINUE,
                  STMT_DO, STMT_SWITCH, STMT_CASE, STMT_DEFAULT, STMT_ASM,
-                 STMT_LABEL, STMT_GOTO };
+                 STMT_LABEL, STMT_GOTO,
+                 STMT_EHREGION };  /* EmbCC's own, for C++'s lowering: calls
+                                    * in `body` that throw land in `thn` */
+
+/* An action of an exception region (STMT_EHREGION): a catch clause's type
+ * (the typeinfo object `name`; NULL: catch-all) or a cleanup. The landing
+ * pad runs for any of them; a region's calls inherit its enclosing
+ * regions' actions after their own. */
+struct eh_act {
+    int cleanup;
+    const char *name;
+    struct global *ti;    /* sema: the typeinfo object */
+};
 
 /* One operand of an extended-asm statement: a constraint string and the C
  * expression it binds. Output constraints begin with '=' (or '+') and name
@@ -135,7 +159,19 @@ struct asm_operand {
     const char *constraint;
     struct expr *expr;
     int reg;              /* the fixed register (0-15), resolved by sema */
+    /* aarch64: an 'i'/'n' operand whose value sema folded to a constant. It
+     * is substituted into the template as a literal — `.inst %0` needs the
+     * WORD, not a register holding it. reg is ASM_REG_IMM then. */
+    int is_imm;
+    long imm;
 };
+
+/* asm_operand.reg sentinels beyond -2 (allocatable) and -3 (an xmm). */
+#define ASM_REG_IMM     (-4)  /* aarch64: a folded immediate (is_imm) */
+#define ASM_REG_INVALID (-5)  /* the constraint means nothing on this target;
+                               * irgen refuses it only if the asm is actually
+                               * generated — gcc accepts x86 constraints inside
+                               * an unused static inline, and so must we */
 
 /* An extended-asm statement (VISION_LONGTERM: first-class fixed-register
  * constraints, so the syscall header's gcc branch compiles). The template
@@ -172,6 +208,9 @@ struct stmt {
     const char *asm_reg;  /* STMT_DECL: a register-asm binding, `register T
                            * x __asm__("r10")` — NULL for an ordinary local */
     int user_align;       /* STMT_DECL: __attribute__((aligned(N))); 0 = none */
+    int vla_sp;           /* STMT_DECL of a VLA (ty_is_vla(dty)): the hidden
+                           * slot the stack pointer is saved in just before
+                           * the allocation; restoring it releases the VLA */
     struct asm_stmt *asm_s; /* STMT_ASM */
     struct expr *expr;    /* RETURN/EXPR value; DECL initializer (or NULL) */
     struct expr *cond;    /* IF/WHILE/FOR */
@@ -186,6 +225,10 @@ struct stmt {
      * C's fallthrough means they cannot be nested nodes. */
     long cval;
     int label;            /* irgen: the marker's label id */
+    /* STMT_EHREGION: body the region, thn the landing pad; expr and cond
+     * the lvalues the exception pointer and the selector are stored to */
+    struct eh_act *eh_acts;
+    int neh_acts;
 };
 
 /* A file-scope variable. Like functions, later declarations merge into
@@ -207,6 +250,7 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    const char *section;  /* __attribute__((section("name"))), or NULL */
     int has_init;
     long init;            /* constant initializer value (scalar) */
     struct expr *init_expr; /* aggregate/relocatable initializer, lowered
@@ -221,6 +265,7 @@ struct global {
     int absorbed;         /* sema: merged into an earlier node */
     int used;
     int in_bss;           /* driver: zero-valued -> .bss, else .data */
+    int named;            /* driver: 1 + index into the named sections, or 0 */
     int off;              /* driver: offset inside its section */
     int sym_ndx;          /* driver: symbol index */
 };
@@ -233,10 +278,20 @@ struct func {
     int is_static;
     int is_weak;          /* __attribute__((weak)) */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
+    int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
+                           * (a call of it needs no landing pad) */
+    /* __attribute__((format(printf|scanf, idx, first))): 1 printf,
+     * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */
+    int fmt_kind, fmt_idx, fmt_first;
     int is_varargs;       /* declared with a trailing ", ..." */
+    int sret_first;       /* param 0 is the indirect-result pointer
+                           * (embcc_sret; type.h) */
     struct type *ret_ty;
     int nparams;
     const char *params[MAX_PARAMS]; /* names; NULL in unnamed prototypes */
+    /* where each name was written -- a tool that renames a parameter has
+     * to edit the name, not the function's first column */
+    int param_lines[MAX_PARAMS], param_cols[MAX_PARAMS];
     struct type *param_tys[MAX_PARAMS];
     struct type **var_tys;          /* sema: type of every var slot */
     int *var_aligns;                /* sema: __attribute__((aligned(N))) per
@@ -250,11 +305,21 @@ struct func {
     struct func *next;    /* unit list, source order */
 
     int nvars;            /* params + locals; set by sema */
+    int has_vm_params;    /* sema: a parameter's type is variably modified
+                           * (`int a[n][m]` -> int (*)[m]); irgen computes
+                           * those sizes at entry */
     int declared;         /* sema: declaration has been reached */
     int absorbed;         /* sema: merged into an earlier node — skip */
     int used;             /* sema: at least one call resolves here */
     /* codegen bookkeeping: position inside .text (defined funcs only) */
     int code_off, code_len;
+    /* ... and what its prologue did, for the unwind tables (debug/eh.c):
+     * where (offsets into its code) the frame record was pushed and the
+     * frame register set, and the callee-saved registers it stores in its
+     * frame (DWARF numbers; slots relative to the CFA) */
+    int cfi_push, cfi_frame, cfi_saved_at, cfi_nsaved;
+    int cfi_reg[8];
+    long cfi_off[8];
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
 };
 
@@ -295,13 +360,37 @@ struct topasm {
     struct topasm *next;
 };
 
+enum tag_kind { TAG_STRUCT, TAG_UNION, TAG_ENUM };
+
+struct tagdef {
+    const char *tag;
+    enum tag_kind kind;
+    struct type *ty;      /* struct/union node; NULL for enums */
+    struct tagdef *next;
+};
+
+struct typedefent {
+    const char *name;
+    struct type *ty;
+    struct typedefent *next;
+};
+
 struct unit {
     const char *file;
     struct func *funcs;
     struct global *globals;
     struct econst *econsts;
     struct topasm *topasm;
+    /* What the parser knew by the end: the struct/union/enum tags and the
+     * typedefs. Semantic analysis does not need them (types are resolved
+     * in the tree), but a tool that answers "what members does this have?"
+     * does — src/tools/embls. */
+    struct tagdef *tags;
+    struct typedefent *typedefs;
 };
+
+/* Syntax errors the last parse_unit reported (parse.c). */
+int parse_error_count(void);
 
 /* Element count an EXPR_INITLIST implies for an unsized array, honoring
  * `[i] =` designators (defined in parse.c, used there and in sema). */

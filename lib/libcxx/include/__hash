@@ -1,0 +1,372 @@
+/* The hash table behind <unordered_map> and <unordered_set>, and the
+ * std::hash specialisations they need.
+ *
+ * SEPARATE CHAINING -- an array of buckets, each a singly-linked list --
+ * rather than open addressing. The reason is the same one that decided
+ * the red-black tree: the containers promise that an iterator stays
+ * valid until its own element is erased, and that a reference to an
+ * element survives a rehash. Open addressing moves elements on insert,
+ * so it cannot keep either promise.
+ *
+ * Growth is by doubling when the load factor passes its limit, and a
+ * rehash RELINKS the nodes rather than reallocating them -- which is
+ * what makes the reference guarantee true.
+ */
+#ifndef _LIBCXX_HASH_TABLE
+#define _LIBCXX_HASH_TABLE
+
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+#include <utility>
+#include <iterator>
+#include <functional>
+#include <memory>
+#include <vector>
+#include <string>
+
+namespace std {
+
+/* std::hash. The integer specialisations are the IDENTITY, which is what
+ * every implementation does and is fine here because the bucket index is
+ * taken modulo a power of two after a mixing step -- without the mix,
+ * identity hashing on sequential keys would pile every one into the same
+ * few buckets. The mix lives in the table, not here, so a user's own
+ * hash gets it too. */
+template <class T> struct hash;
+
+#define _LIBCXX_HASH_INT(T)                                                  \
+template <> struct hash<T> {                                                 \
+    size_t operator()(T v) const noexcept { return (size_t)v; }              \
+}
+_LIBCXX_HASH_INT(bool);
+_LIBCXX_HASH_INT(char);
+_LIBCXX_HASH_INT(signed char);
+_LIBCXX_HASH_INT(unsigned char);
+_LIBCXX_HASH_INT(short);
+_LIBCXX_HASH_INT(unsigned short);
+_LIBCXX_HASH_INT(int);
+_LIBCXX_HASH_INT(unsigned int);
+_LIBCXX_HASH_INT(long);
+_LIBCXX_HASH_INT(unsigned long);
+_LIBCXX_HASH_INT(long long);
+_LIBCXX_HASH_INT(unsigned long long);
+#undef _LIBCXX_HASH_INT
+
+template <> struct hash<float> {
+    size_t operator()(float v) const noexcept
+    {
+        /* +0.0 and -0.0 compare EQUAL, so they must hash equally -- the
+         * one rule a float hash has to remember. */
+        if (v == 0.0f) return 0;
+        unsigned u;
+        __builtin_memcpy(&u, &v, sizeof u);
+        return (size_t)u;
+    }
+};
+template <> struct hash<double> {
+    size_t operator()(double v) const noexcept
+    {
+        if (v == 0.0) return 0;
+        unsigned long u;
+        __builtin_memcpy(&u, &v, sizeof u);
+        return (size_t)u;
+    }
+};
+
+template <class T> struct hash<T *> {
+    size_t operator()(T *p) const noexcept { return (size_t)(uintptr_t)p; }
+};
+
+/* FNV-1a over the bytes: short, no table, and good enough that the
+ * table's own mixing is not carrying it. */
+template <class C, class T, class A>
+struct hash<basic_string<C, T, A>> {
+    size_t operator()(const basic_string<C, T, A> &s) const noexcept
+    {
+        size_t h = 1469598103934665603UL;
+        for (size_t i = 0; i < s.size(); i++) {
+            h ^= (unsigned char)s[i];
+            h *= 1099511628211UL;
+        }
+        return h;
+    }
+};
+
+namespace __detail {
+
+template <class V>
+struct __hash_node {
+    __hash_node *next;
+    size_t hash;
+    V value;
+    template <class... A>
+    explicit __hash_node(size_t h, A &&...a)
+        : next(nullptr), hash(h), value(forward<A>(a)...) {}
+};
+
+/* Mixing, applied to whatever the hash function returned. std::hash on
+ * an integer is the identity, so without this, keys 0, 8, 16, ... in a
+ * table of 8 buckets would all land in bucket 0 and the table would
+ * degrade to one list. */
+inline size_t __hash_mix(size_t h)
+{
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdUL;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53UL;
+    h ^= h >> 33;
+    return h;
+}
+
+template <class V, class Key, class KeyOf, class Hash, class Eq, bool Multi>
+class __hash_table {
+public:
+    using node = __hash_node<V>;
+
+    class iterator {
+    public:
+        using iterator_category = forward_iterator_tag;
+        using value_type = V;
+        using difference_type = ptrdiff_t;
+        using pointer = V *;
+        using reference = V &;
+
+        iterator() : __n(nullptr), __b(nullptr), __i(0), __nb(0) {}
+        iterator(node *n, node **b, size_t i, size_t nb)
+            : __n(n), __b(b), __i(i), __nb(nb) {}
+
+        V &operator*() const { return __n->value; }
+        V *operator->() const { return addressof(__n->value); }
+
+        /* Walking off the end of a bucket means scanning forward for the
+         * next non-empty one, which is why iteration is O(buckets +
+         * elements) and not O(elements). */
+        iterator &operator++()
+        {
+            if (__n->next) { __n = __n->next; return *this; }
+            for (size_t k = __i + 1; k < __nb; k++)
+                if (__b[k]) { __n = __b[k]; __i = k; return *this; }
+            __n = nullptr;
+            return *this;
+        }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        bool operator==(const iterator &o) const { return __n == o.__n; }
+        bool operator!=(const iterator &o) const { return __n != o.__n; }
+
+        node *__node() const { return __n; }
+
+    private:
+        node *__n;
+        node **__b;
+        size_t __i, __nb;
+    };
+
+    using const_iterator = iterator;
+
+    __hash_table() : __b(nullptr), __nb(0), __n(0), __maxload(1.0f) {}
+
+    __hash_table(const __hash_table &o)
+        : __b(nullptr), __nb(0), __n(0), __maxload(o.__maxload),
+          __h(o.__h), __eq(o.__eq)
+    { for (auto it = o.begin(); it != o.end(); ++it) __insert_value(*it); }
+
+    __hash_table(__hash_table &&o) noexcept
+        : __b(o.__b), __nb(o.__nb), __n(o.__n), __maxload(o.__maxload),
+          __h(std::move(o.__h)), __eq(std::move(o.__eq))
+    { o.__b = nullptr; o.__nb = 0; o.__n = 0; }
+
+    ~__hash_table() { clear(); delete[] __b; }
+
+    __hash_table &operator=(const __hash_table &o)
+    {
+        if (this != addressof(o)) {
+            clear();
+            __h = o.__h; __eq = o.__eq; __maxload = o.__maxload;
+            for (auto it = o.begin(); it != o.end(); ++it) __insert_value(*it);
+        }
+        return *this;
+    }
+
+    __hash_table &operator=(__hash_table &&o) noexcept
+    {
+        if (this != addressof(o)) {
+            clear();
+            delete[] __b;
+            __b = o.__b; __nb = o.__nb; __n = o.__n;
+            __maxload = o.__maxload;
+            __h = std::move(o.__h); __eq = std::move(o.__eq);
+            o.__b = nullptr; o.__nb = 0; o.__n = 0;
+        }
+        return *this;
+    }
+
+    iterator begin() const
+    {
+        for (size_t k = 0; k < __nb; k++)
+            if (__b[k]) return iterator(__b[k], __b, k, __nb);
+        return end();
+    }
+    iterator end() const { return iterator(nullptr, __b, 0, __nb); }
+
+    bool empty() const noexcept { return __n == 0; }
+    size_t size() const noexcept { return __n; }
+    size_t bucket_count() const noexcept { return __nb; }
+    float load_factor() const noexcept
+    { return __nb ? (float)__n / (float)__nb : 0.0f; }
+    float max_load_factor() const noexcept { return __maxload; }
+    void max_load_factor(float f) { __maxload = f; }
+
+    void clear()
+    {
+        for (size_t k = 0; k < __nb; k++) {
+            node *p = __b[k];
+            while (p) { node *nx = p->next; delete p; p = nx; }
+            __b[k] = nullptr;
+        }
+        __n = 0;
+    }
+
+    template <class... A>
+    pair<iterator, bool> emplace(A &&...a)
+    {
+        node *nn = new node(0, forward<A>(a)...);
+        nn->hash = __hash_mix(__h(KeyOf()(nn->value)));
+        if (!Multi) {
+            iterator it = __find_hashed(KeyOf()(nn->value), nn->hash);
+            if (it != end()) { delete nn; return {it, false}; }
+        }
+        __rehash_if_needed(__n + 1);
+        size_t k = nn->hash & (__nb - 1);
+        nn->next = __b[k];
+        __b[k] = nn;
+        ++__n;
+        return {iterator(nn, __b, k, __nb), true};
+    }
+
+    iterator find(const Key &key) const
+    {
+        if (__nb == 0) return end();
+        return __find_hashed(key, __hash_mix(__h(key)));
+    }
+
+    size_t count(const Key &key) const
+    {
+        size_t c = 0;
+        if (__nb == 0) return 0;
+        size_t h = __hash_mix(__h(key));
+        for (node *p = __b[h & (__nb - 1)]; p; p = p->next)
+            if (p->hash == h && __eq(KeyOf()(p->value), key)) c++;
+        return c;
+    }
+
+    size_t erase(const Key &key)
+    {
+        if (__nb == 0) return 0;
+        size_t h = __hash_mix(__h(key));
+        size_t k = h & (__nb - 1);
+        node **link = &__b[k];
+        size_t c = 0;
+        while (*link) {
+            node *p = *link;
+            if (p->hash == h && __eq(KeyOf()(p->value), key)) {
+                *link = p->next;
+                delete p;
+                --__n;
+                c++;
+                if (!Multi) break;
+            } else {
+                link = &p->next;
+            }
+        }
+        return c;
+    }
+
+    iterator erase(iterator pos)
+    {
+        iterator nx = pos;
+        ++nx;
+        node *z = pos.__node();
+        size_t k = z->hash & (__nb - 1);
+        node **link = &__b[k];
+        while (*link && *link != z) link = &(*link)->next;
+        if (*link) { *link = z->next; delete z; --__n; }
+        return nx;
+    }
+
+    void reserve(size_t n) { __rehash_if_needed(n); }
+
+    void swap(__hash_table &o) noexcept
+    {
+        using std::swap;
+        swap(__b, o.__b); swap(__nb, o.__nb); swap(__n, o.__n);
+        swap(__maxload, o.__maxload); swap(__h, o.__h); swap(__eq, o.__eq);
+    }
+
+    /* For the tests: every element reachable from its own bucket, and
+     * the count consistent. A table that has lost a node to a bad rehash
+     * still answers most queries correctly. */
+    bool __check() const
+    {
+        size_t seen = 0;
+        for (size_t k = 0; k < __nb; k++)
+            for (node *p = __b[k]; p; p = p->next) {
+                if ((p->hash & (__nb - 1)) != k)
+                    return false;
+                seen++;
+            }
+        return seen == __n;
+    }
+
+private:
+    node **__b;
+    size_t __nb, __n;
+    float __maxload;
+    Hash __h;
+    Eq __eq;
+
+    iterator __find_hashed(const Key &key, size_t h) const
+    {
+        if (__nb == 0) return end();
+        size_t k = h & (__nb - 1);
+        for (node *p = __b[k]; p; p = p->next)
+            if (p->hash == h && __eq(KeyOf()(p->value), key))
+                return iterator(p, __b, k, __nb);
+        return end();
+    }
+
+    /* Doubling, and a power of two so the bucket index is a mask rather
+     * than a division -- which is why the hash is mixed first. */
+    void __rehash_if_needed(size_t want)
+    {
+        if (__nb && (float)want <= __maxload * (float)__nb)
+            return;
+        size_t nb = __nb ? __nb * 2 : 8;
+        while ((float)want > __maxload * (float)nb)
+            nb *= 2;
+        node **nbuf = new node *[nb]();
+        /* The nodes are RELINKED, not reallocated: that is what makes a
+         * reference to an element survive a rehash, which the container
+         * promises and open addressing cannot give. */
+        for (size_t k = 0; k < __nb; k++) {
+            node *p = __b[k];
+            while (p) {
+                node *nx = p->next;
+                size_t j = p->hash & (nb - 1);
+                p->next = nbuf[j];
+                nbuf[j] = p;
+                p = nx;
+            }
+        }
+        delete[] __b;
+        __b = nbuf;
+        __nb = nb;
+    }
+
+    void __insert_value(const V &v) { emplace(v); }
+};
+
+}  // namespace __detail
+}  // namespace std
+
+#endif
