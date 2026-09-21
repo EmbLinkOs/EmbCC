@@ -16,6 +16,12 @@
 /* (struct tagdef, struct typedefent and enum tag_kind live in ast.h: a
  * tool that answers questions about a unit needs to walk them.) */
 
+struct attrs { int packed; int aligned; int weak; int noreturn;
+               const char *section;
+               int sret; /* embcc_sret on a parameter (type.h sret_first) */
+               int nothrow;
+};
+
 struct parser {
     struct lexer lx;
     struct unit *unit;
@@ -36,6 +42,19 @@ struct parser {
     int vla_ok;           /* inside a function (its parameters or body) and
                            * not in a struct body: a non-constant array size
                            * makes a VLA rather than an error */
+    /* Where an attribute found in a pointer-declarator position goes.
+     * GCC accepts `extern void *__attribute__((weak)) f(void);` and
+     * applies `weak` to the DECLARATION -- there is nothing else in a
+     * declaration for it to mean. parse_stars has nowhere to put one,
+     * so it drops it here and the enclosing declaration takes it.
+     *
+     * The slot belongs to the PARSER rather than being a pointer to the
+     * declaration's own attrs, so that forgetting to turn it off cannot
+     * write through a dangling pointer into a dead stack frame. Where
+     * it is off, an attribute in that position is still refused,
+     * because then there really is nowhere for it to go. */
+    struct attrs attr_slot;
+    int attr_carry_on;
     /* Where the last declarator's name token was, so a parameter can be
      * pointed AT rather than at the function's line -- an editor renaming
      * one has to edit the name, not the first column of the signature. */
@@ -244,12 +263,6 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
  * section("name") is honored on file-scope variables and refused (never
  * dropped) anywhere else — a silently-ignored section is a table the
  * linker script's bracket symbols never find. */
-struct attrs { int packed; int aligned; int weak; int noreturn;
-               const char *section;
-               int sret; /* embcc_sret on a parameter (type.h sret_first) */
-               int nothrow;
-};
-
 /* Match `name`, `__name`, or `__name__` against a base attribute name. */
 static int attr_is(const char *n, const char *base)
 {
@@ -425,6 +438,9 @@ static int param_sret_attr(struct parser *ps, int index)
 
 static struct type *parse_fn_params(struct parser *ps, struct type *ret)
 {
+    /* Nor can a parameter carry one. */
+    ps->attr_carry_on = 0;
+
     return parse_fn_params_named(ps, ret, NULL);
 }
 
@@ -781,6 +797,27 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     return ty_base(kind, uns == 1);
 }
 
+/* Fold whatever parse_stars dropped in the parser's slot into this
+ * declaration's attributes, and close the slot behind it. */
+static void take_carried(struct parser *ps, struct attrs *a)
+{
+    if (!ps->attr_carry_on)
+        return;
+    if (ps->attr_slot.weak)     a->weak = 1;
+    if (ps->attr_slot.noreturn) a->noreturn = 1;
+    if (ps->attr_slot.packed)   a->packed = 1;
+    if (ps->attr_slot.aligned > a->aligned)
+        a->aligned = ps->attr_slot.aligned;
+    if (ps->attr_slot.section && !a->section)
+        a->section = ps->attr_slot.section;
+    memset(&ps->attr_slot, 0, sizeof ps->attr_slot);
+    /* The slot stays OPEN: a declaration may parse its declarator
+     * twice -- once to see whether it is a function, then again after
+     * a rewind -- and closing it after the first pass would refuse the
+     * attribute on the second. It is closed where a context must
+     * refuse instead (below). */
+}
+
 static struct type *parse_stars(struct parser *ps, struct type *t)
 {
     for (;;) {
@@ -796,6 +833,17 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
             struct token *at_tok = cur(ps);
             struct attrs a = { 0, 0, 0, 0, NULL, 0, 0 };
             parse_attributes(ps, &a);
+            if (ps->attr_carry_on) {
+                /* The enclosing declaration will take them. */
+                if (a.weak)     ps->attr_slot.weak = 1;
+                if (a.noreturn) ps->attr_slot.noreturn = 1;
+                if (a.packed)   ps->attr_slot.packed = 1;
+                if (a.aligned > ps->attr_slot.aligned)
+                    ps->attr_slot.aligned = a.aligned;
+                if (a.section && !ps->attr_slot.section)
+                    ps->attr_slot.section = a.section;
+                continue;
+            }
             if (a.packed || a.aligned || a.weak || a.noreturn)
                 parse_error_at(ps, at_tok->line, at_tok->col,
                         "__attribute__((%s)) is not supported in this position "
@@ -1067,6 +1115,10 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
 static struct type *parse_struct_body(struct parser *ps, struct type *t,
                                       const struct attrs *lead)
 {
+    /* A member's declarator has nowhere to carry an attribute found
+     * after a `*`, so inside a struct body the refusal stands. */
+    ps->attr_carry_on = 0;
+
     expect(ps, TOK_LBRACE, "'{'");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 0;   /* a member cannot be variably modified (6.7.2.1p9) */
@@ -2125,7 +2177,9 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 te->name = tname; te->ty = tt;
                 te->next = ps->typedefs; ps->typedefs = te;
             } else {
-                struct type *dty = parse_stars(ps, base);
+                ps->attr_carry_on = 0;
+                ps->attr_carry_on = 0;
+            struct type *dty = parse_stars(ps, base);
                 if (cur(ps)->kind != TOK_IDENT)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "expected a name before %s", tok_describe(cur(ps)));
@@ -2643,8 +2697,14 @@ static void parse_top(struct parser *ps, struct unit *u,
      * `*`, where there is nothing to carry them. */
     if (cur(ps)->kind == TOK_KW_ATTRIBUTE)
         parse_attributes(ps, &at);
+    /* Open the slot for this declaration's declarators, including the
+     * rewind below: an attribute after a `*` belongs to what is being
+     * declared. */
+    memset(&ps->attr_slot, 0, sizeof ps->attr_slot);
+    ps->attr_carry_on = 1;
     struct lexer fork = ps->lx;
     struct type *ty = parse_stars(ps, base);
+    take_carried(ps, &at);
     const char *name = NULL;
     int line = cur(ps)->line;
     struct func *f;
@@ -2660,6 +2720,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             const char *gname;
             int gline = cur(ps)->line;
             struct type *gt = parse_declarator(ps, base, &gname);
+            take_carried(ps, &at);
             if (!gname)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a name before %s",

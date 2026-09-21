@@ -12,6 +12,16 @@ typedef uint64_t __attribute__((may_alias)) word_t;
 /* after a pointer's star */
 static int *__attribute__((unused)) spare;
 
+/* between the specifiers and the NAME of a function, where a declaration
+ * is the only thing an attribute there can be about (posixlike/backend.c
+ * writes every optional seam primitive this way). Parsed and dropped,
+ * these would be ordinary undefined symbols and the link would fail;
+ * applied, they are weak, undefined, and therefore null -- so the
+ * branches below test that the attribute ARRIVED, not merely that it
+ * was tolerated. */
+extern int __attribute__((weak)) absent_prim(const char *);
+extern void *__attribute__((weak)) absent_ptr_prim(void);
+
 /* before the tag (gcc does NOT accept one between the tag and the '{') */
 struct __attribute__((packed)) before_tag { char c; int i; };
 /* after the body, the long-supported position, for contrast */
@@ -39,5 +49,7 @@ int main(void)
     word_t w = *(const word_t *)bytes;
     if ((w & 0xff) != 1 || (w >> 56) != 8) return 6;
     (void)spare;
+    if (absent_prim) return 7;
+    if (absent_ptr_prim) return 8;
     return 42;
 }
