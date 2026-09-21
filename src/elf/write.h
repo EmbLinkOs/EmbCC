@@ -30,6 +30,11 @@ int elfw_add_section(struct elfw *w, const char *name, Elf64_Word type,
  * (or SHN_UNDEF/SHN_ABS). Local symbols must be added before globals —
  * the gABI orders them that way, and the writer refuses rather than
  * silently reordering. */
+/* Set the visibility (st_other) of the symbol a previous
+ * elfw_add_symbol returned. Separate from the add so that the common
+ * case -- every symbol EmbCC has ever emitted -- keeps one call. */
+void elfw_symbol_visibility(struct elfw *w, int sym, int stv);
+
 int elfw_add_symbol(struct elfw *w, const char *name, Elf64_Addr value,
                     Elf64_Xword size, Elf64_Uchar info, Elf64_Half shndx);
 

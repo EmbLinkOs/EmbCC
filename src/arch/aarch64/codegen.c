@@ -1082,9 +1082,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * and ld says so rather than guessing: "target does not
              * have address". So the indirection is the rule there and
              * the exception elsewhere. */
+            struct gsite hi, lo;
+            if (i->glob->is_tls) {
+                /* Not an address in this image: an offset into a block
+                 * that is different for every thread. adrp names a page
+                 * of the program; this names the running thread. */
+                a64_mrs_tpidr(t, A64_ACC);
+                hi.patch_off = a64_add_hi12(t, A64_ACC, A64_ACC);
+                hi.glob = i->glob;
+                hi.kind = RK_TPREL_HI12;
+                PUSH(st->g, st->ng, st->capg, hi);
+                lo.patch_off = a64_add_lo12(t, A64_ACC, A64_ACC);
+                lo.glob = i->glob;
+                lo.kind = RK_TPREL_LO12;
+                PUSH(st->g, st->ng, st->capg, lo);
+                goto gaddr_done;
+            }
             int got = !i->glob->defined &&
                       (i->glob->is_weak || target_os_get() == TGT_OS_DARWIN);
-            struct gsite hi, lo;
             hi.patch_off = a64_adrp(t, A64_ACC);
             hi.glob = i->glob;
             hi.kind = got ? RK_GOT_PAGE : RK_ADR_HI21;
@@ -1098,6 +1113,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             lo.glob = i->glob;
             lo.kind = got ? RK_GOT_LO12 : RK_ADD_LO12;
             PUSH(st->g, st->ng, st->capg, lo);
+        gaddr_done:;
             st_slot(t, sd, i->dst, A64_ACC, 8);
             break;
         }

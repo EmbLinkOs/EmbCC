@@ -131,9 +131,17 @@ enum reloc_kind {
     RK_DATA_PREL32, /* a 32-bit field holding target - its own address
                    * (unwind tables' pointers) */
     RK_GOT_PAGE,  /* aarch64: adrp to the page of the symbol's GOT slot */
-    RK_GOT_LO12   /* aarch64: the paired ldr's offset in that page — a
+    RK_GOT_LO12,  /* aarch64: the paired ldr's offset in that page — a
                    * weak symbol's address (0 when it is undefined, which
                    * adrp/add cannot give) */
+    /* Local-exec thread-local storage: the object's offset from the
+     * thread pointer. The compiler cannot compute it -- it depends on
+     * how large the WHOLE program's thread block turns out to be, which
+     * only the linker knows -- so the field is left to a relocation
+     * exactly as an address would be. */
+    RK_TPOFF32,   /* x86-64: the disp32 of `lea off(%fs-base), reg` */
+    RK_TPREL_HI12,/* aarch64: the high add of the tprel pair */
+    RK_TPREL_LO12 /* aarch64: the low add of the tprel pair */
 };
 
 /* The ELF relocation type for this kind on this target, or -1 if the kind
@@ -157,6 +165,47 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k);
  * again would move every string reference four bytes -- so the Mach-O
  * path uses the UNBIASED offset, and this comment is why.
  */
+/* The COFF relocation type for this kind, or -1 where COFF has none.
+ * COFF carries no addend -- like Mach-O and unlike ELF -- so the caller
+ * writes it into the field being relocated. Its REL32 is also measured
+ * from the END of the instruction rather than from the field, which is
+ * what an x86 rel32 means anyway, so the -4 that ELF needs is absent
+ * and passing it on would displace every call by four bytes. */
+int target_coff_reloc(enum target_arch a, enum reloc_kind k);
+
+/* True where x86-64 uses the MICROSOFT x64 calling convention rather
+ * than System V's. This is a property of the OS, not of the
+ * architecture -- which is the whole reason D-011's "one architecture,
+ * one convention" does not hold any more and the question has to be
+ * asked by name.
+ *
+ * What differs, all of it (checked against clang --target=
+ * x86_64-windows-gnu, which is the referee tests/golden/win-abi.sh
+ * uses):
+ *
+ *   Four argument slots, rcx/rdx/r8/r9, and the index is SHARED with
+ *   the float registers -- f(int, double, int) is rcx, xmm1, r8, not
+ *   rcx, xmm0, rdx. A per-class counter is the single most likely way
+ *   to get this wrong, because it produces working code for every
+ *   argument list that is all one class.
+ *
+ *   The caller reserves 32 bytes of SHADOW SPACE below the return
+ *   address, which the callee may use to spill its register
+ *   arguments. So the first stack argument is at rbp+48, not rbp+16.
+ *
+ *   A struct is passed by value only when its size is exactly 1, 2, 4
+ *   or 8 bytes. Anything else goes BY REFERENCE, and the caller must
+ *   pass a pointer to a copy it made, because the callee may write to
+ *   it.
+ *
+ *   A variadic floating-point argument travels in its xmm register
+ *   AND in the integer register of the same slot, since the callee
+ *   does not know which to read.
+ *
+ *   rsi and rdi are CALLEE-saved.
+ */
+int target_win64_abi(void);
+
 int target_macho_reloc(enum target_arch a, enum reloc_kind k,
                        int *pcrel, int *length);
 

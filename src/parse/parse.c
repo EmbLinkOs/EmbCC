@@ -25,6 +25,19 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * argument is a format string" without the compiler
                 * hard-coding the names of the standard library. */
                int fmt_kind, fmt_idx, fmt_first;
+               /* constructor / destructor: run before main, or at exit.
+                * The function's address goes in .init_array/.fini_array
+                * and the startup code walks them. */
+               int ctor, dtor;
+               /* The hints EmbCC acts on. `used` keeps a symbol the
+                * compiler would otherwise drop; `unused` says not to
+                * warn about one; always_inline/noinline are the
+                * inliner's two overrides; deprecated and
+                * warn_unused_result are diagnostics the DECLARATION
+                * asks for. */
+               int used, unused, always_inline, noinline;
+               int deprecated, warn_unused_result;
+               const char *vis;      /* visibility("...") */
 };
 
 struct parser {
@@ -279,9 +292,138 @@ static int attr_is(const char *n, const char *base)
            strcmp(n + 2 + bl, "__") == 0;
 }
 
+/* ---- what EmbCC does with each attribute ---------------------------------
+ *
+ * Every attribute gets one of three answers, and the point of writing
+ * them in a table is that there is no fourth one -- "nobody looked".
+ * An attribute that is skipped because it was never considered is how
+ * __attribute__((constructor)) went unimplemented on a tree EmbCC
+ * compiles, with a function that had to run before main simply never
+ * running and nothing saying so.
+ *
+ *   HONOURED  recorded, and something acts on it.
+ *
+ *   REFUSED   it would change the code that has to be generated, and
+ *             EmbCC does not generate that code. Ignoring it produces a
+ *             program that compiles, links, runs and does something
+ *             else, so it is an error naming the attribute (THE RULE).
+ *
+ *   NOOP      accepted, and it genuinely does nothing HERE -- not
+ *             "not yet", but "there is nothing for it to turn off".
+ *             `may_alias` disables type-based alias analysis and EmbCC
+ *             has none, so its absence is already the conservative
+ *             answer; `no_sanitize` names sanitizers that do not exist.
+ *             Each entry says which.
+ *
+ * Anything not in the table is unknown, and is warned about under
+ * -Wattributes and then ignored -- GCC's behaviour, and the thing that
+ * would have caught the constructor bug on the day it was written.
+ */
+enum attr_disp { ATTR_HONOURED, ATTR_REFUSED, ATTR_NOOP };
+
+struct attr_entry {
+    const char *name;
+    enum attr_disp disp;
+    /* For REFUSED, what would go wrong; for NOOP, why there is nothing
+     * to do. Printed, so it has to be true. */
+    const char *why;
+};
+
+static const struct attr_entry attr_table[] = {
+    /* ---- honoured ---- */
+    { "packed",        ATTR_HONOURED, NULL },
+    { "aligned",       ATTR_HONOURED, NULL },
+    { "weak",          ATTR_HONOURED, NULL },
+    { "noreturn",      ATTR_HONOURED, NULL },
+    { "nothrow",       ATTR_HONOURED, NULL },
+    { "section",       ATTR_HONOURED, NULL },
+    { "format",        ATTR_HONOURED, NULL },
+    { "constructor",   ATTR_HONOURED, NULL },
+    { "destructor",    ATTR_HONOURED, NULL },
+    { "used",          ATTR_HONOURED, NULL },
+    { "unused",        ATTR_HONOURED, NULL },
+    { "visibility",    ATTR_HONOURED, NULL },
+    /* Honoured where the inliner runs, which is -O2: always_inline
+     * overrides the SIZE budget and nothing else, because every other
+     * reason the inliner declines is a thing it cannot do rather than
+     * a thing it chose against. `-fremarks` names whichever applied. */
+    { "always_inline", ATTR_HONOURED, NULL },
+    { "noinline",      ATTR_HONOURED, NULL },
+    { "deprecated",    ATTR_HONOURED, NULL },
+    { "warn_unused_result", ATTR_HONOURED, NULL },
+    { "embcc_sret",    ATTR_HONOURED, NULL },   /* EmbCC's own */
+
+    /* ---- refused ---- */
+    { "naked",     ATTR_REFUSED,
+      "the prologue the function says it must not have would be emitted "
+      "anyway, and its own asm would run on a frame it did not set up" },
+    { "interrupt", ATTR_REFUSED,
+      "the handler would return with an ordinary return instead of the "
+      "interrupt return the CPU needs, and without saving the registers" },
+    { "cleanup",   ATTR_REFUSED,
+      "the cleanup function would never run" },
+    { "ms_abi",    ATTR_REFUSED,
+      "the arguments would be passed in System V's registers" },
+    { "sysv_abi",  ATTR_REFUSED,
+      "the arguments would be passed in the other convention's registers" },
+
+    /* ---- no-ops, each for a stated reason ---- */
+    { "may_alias",  ATTR_NOOP,
+      "EmbCC does no type-based alias analysis, so not doing it is "
+      "already what this asks for" },
+    { "no_sanitize", ATTR_NOOP, "EmbCC has no sanitizers to turn off" },
+    { "no_sanitize_address", ATTR_NOOP, "EmbCC has no sanitizers" },
+    { "no_sanitize_undefined", ATTR_NOOP, "EmbCC has no sanitizers" },
+    { "no_instrument_function", ATTR_NOOP,
+      "EmbCC emits no instrumentation calls" },
+    { "hot",       ATTR_NOOP, "EmbCC does not reorder code by frequency" },
+    { "cold",      ATTR_NOOP, "EmbCC does not reorder code by frequency" },
+    { "flatten",   ATTR_NOOP,
+      "EmbCC's inliner works from the call site, not from a whole "
+      "function's subtree" },
+    { "pure",      ATTR_NOOP,
+      "EmbCC does not eliminate repeated calls, so knowing a call could "
+      "be eliminated buys nothing" },
+    { "const",     ATTR_NOOP, "as pure: no calls are eliminated" },
+    { "malloc",    ATTR_NOOP,
+      "it says the result aliases nothing, which only an alias analysis "
+      "could use" },
+    { "leaf",      ATTR_NOOP, "nothing here reasons across a call" },
+    { "artificial", ATTR_NOOP, "it marks a line for a debugger's stepping" },
+    { "gnu_inline", ATTR_NOOP, "EmbCC emits an inline function as an ordinary one" },
+    { "nonnull",   ATTR_NOOP, "EmbCC does not check argument values" },
+    { "returns_nonnull", ATTR_NOOP, "EmbCC does not track null-ness" },
+    { "alloc_size", ATTR_NOOP, "EmbCC has no object-size checking" },
+    { "alloc_align", ATTR_NOOP, "EmbCC has no object-size checking" },
+    { "sentinel",  ATTR_NOOP, "EmbCC does not check variadic terminators" },
+    { "fallthrough", ATTR_NOOP,
+      "EmbCC does not warn about a case falling through" },
+    { "optimize",  ATTR_NOOP,
+      "EmbCC's optimisation level is per compilation, not per function" },
+    /* This one belongs under REFUSED and is deliberately not there:
+     * newlib's headers put it on setjmp, so refusing it would stop a
+     * corpus this compiler is tested against from building at all.
+     * Ignoring it is only wrong above -O0, where a value kept in a
+     * register across the call could survive the second return.
+     * docs/developer/todo.md records that. */
+    { "returns_twice", ATTR_NOOP,
+      "refusing it would stop newlib's <setjmp.h> from compiling; see "
+      "docs/developer/todo.md" },
+};
+
+static const struct attr_entry *attr_lookup(const char *n)
+{
+    for (unsigned i = 0; i < sizeof attr_table / sizeof attr_table[0]; i++)
+        if (attr_is(n, attr_table[i].name))
+            return &attr_table[i];
+    return NULL;
+}
+
 /* Consume a run of `__attribute__((...))`. packed / aligned(N) (struct
- * layout) and weak (symbol binding) are recorded in `out`; every other
- * attribute is skipped along with its balanced parenthesized arguments.
+ * layout), weak (symbol binding) and constructor/destructor (static
+ * initialisation) are recorded in `out`; every other attribute is
+ * skipped along with its balanced parenthesized arguments, unless
+ * attr_unimplemented() says skipping it would be a lie.
  * Callers pass out=NULL where no attribute is meaningful (member/param). */
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
@@ -340,12 +482,58 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     advance(ps);
                 }
             }
+            if (name) {
+                const struct attr_entry *ae = attr_lookup(name);
+                if (!ae)
+                    diag_warn_opt(ps->lx.file, aline, 0, "attributes",
+                        "attribute '%s' is not one EmbCC knows, and is "
+                        "ignored", name);
+                else if (ae->disp == ATTR_REFUSED)
+                    parse_error_line(ps, aline,
+                        "__attribute__((%s)) is not supported: %s",
+                        name, ae->why);
+            }
             if (name && out) {
                 if (attr_is(name, "packed")) out->packed = 1;
                 else if (attr_is(name, "weak")) out->weak = 1;
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;
                 else if (attr_is(name, "nothrow")) out->nothrow = 1;
                 else if (attr_is(name, "embcc_sret")) out->sret = 1;
+                else if (attr_is(name, "used")) out->used = 1;
+                else if (attr_is(name, "unused")) out->unused = 1;
+                else if (attr_is(name, "always_inline")) out->always_inline = 1;
+                else if (attr_is(name, "noinline")) out->noinline = 1;
+                else if (attr_is(name, "deprecated")) out->deprecated = 1;
+                else if (attr_is(name, "warn_unused_result"))
+                    out->warn_unused_result = 1;
+                else if (attr_is(name, "visibility")) {
+                    /* The four ELF visibilities. Anything else is a
+                     * typo that would otherwise mean "default". */
+                    if (!sarg || (strcmp(sarg, "default") &&
+                                  strcmp(sarg, "hidden") &&
+                                  strcmp(sarg, "protected") &&
+                                  strcmp(sarg, "internal")))
+                        parse_error_line(ps, aline,
+                            "visibility attribute wants \"default\", "
+                            "\"hidden\", \"protected\" or \"internal\"");
+                    out->vis = sarg;
+                }
+                else if (attr_is(name, "constructor") ||
+                         attr_is(name, "destructor")) {
+                    /* A priority orders the array, and EmbCC emits one
+                     * .init_array in source order. Accepting the
+                     * argument and ignoring it would run them in the
+                     * wrong order, which is the whole point of writing
+                     * one -- so it is refused and the plain form is
+                     * not. */
+                    if (arg >= 0)
+                        parse_error_line(ps, aline,
+                            "__attribute__((%s(%ld))) is not supported: "
+                            "EmbCC emits one .init_array in source order "
+                            "and cannot honour a priority", name, arg);
+                    if (attr_is(name, "constructor")) out->ctor = 1;
+                    else out->dtor = 1;
+                }
                 else if (attr_is(name, "aligned"))
                     out->aligned = arg > 0 ? (int)arg : 16;
                 else if (attr_is(name, "format") && fkind && fidx > 0) {
@@ -469,7 +657,8 @@ static int param_sret_attr(struct parser *ps, int index)
     if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
         return 0;
     struct token *at = cur(ps);
-    struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+    struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                       0, 0, 0, 0, 0, 0, NULL };
     parse_attributes(ps, &a);
     if (a.sret && index != 0)
         parse_error_at(ps, at->line, at->col,
@@ -560,7 +749,8 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
      * closing brace (parse_struct_body). Leading ones are collected here and
      * applied to the body exactly as trailing ones are. Between the tag and
      * the '{' is NOT a place gcc accepts one, so neither does EmbCC. */
-    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                       0, 0, 0, 0, 0, 0, NULL };
     parse_attributes(ps, &lead);
     const char *tag = NULL;
     if (cur(ps)->kind == TOK_IDENT) {
@@ -877,7 +1067,8 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * they are refused rather than silently dropped. */
         if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             struct token *at_tok = cur(ps);
-            struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+            struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                       0, 0, 0, 0, 0, 0, NULL };
             parse_attributes(ps, &a);
             if (ps->attr_carry_on) {
                 /* The enclosing declaration will take them. */
@@ -1251,7 +1442,8 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                 cap = cap ? cap * 2 : 8;
                 ms = xrealloc(ms, (size_t)cap * sizeof *ms);
             }
-            struct attrs mat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+            struct attrs mat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                       0, 0, 0, 0, 0, 0, NULL };
             parse_attributes(ps, &mat);  /* T buf[N] __attribute__((aligned(N))) */
             ms[n].name = mname;
             ms[n].ty = mty;
@@ -2255,25 +2447,59 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         return s;
     }
 
+    /* A LEADING `__attribute__((...))` on a block-scope declaration:
+     * `__attribute__((unused)) int y;`. Only the trailing spelling was
+     * parsed before, so the leading one -- which is what a macro
+     * writes, because it has to come before a type it does not know --
+     * failed with "expected a statement". The attributes are merged
+     * with any trailing ones at the declarator below. */
+    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                          0, 0, 0, 0, 0, 0, NULL };
+    if (t->kind == TOK_KW_ATTRIBUTE) {
+        parse_attributes(ps, &lead);
+        t = cur(ps);
+    }
+
     /* `register` is otherwise an ignored storage hint, but it carries the
      * `register T x __asm__("r10")` binding EmbCC needs to place an asm 'r'
      * operand — so accept it as a qualifier before the type. */
     int is_register = t->kind == TOK_IDENT &&
                       strcmp(t->text, "register") == 0;
-    if (t->kind == TOK_KW_STATIC || is_register || at_type_start(ps)) {
-        int local_static = 0;
-        if (t->kind == TOK_KW_STATIC) {
-            local_static = 1;
+    if (t->kind == TOK_KW_STATIC || t->kind == TOK_KW_THREAD ||
+        is_register || at_type_start(ps)) {
+        int local_static = 0, local_tls = 0;
+        if (is_register)
             advance(ps);
-        } else if (is_register) {
+        /* `static __thread` and `__thread static` are the same
+         * declaration, so they are consumed in either order rather than
+         * one being spelled correctly and the other falling through to
+         * "expected a type" -- which is what used to happen, and what
+         * took the parser down a path that dereferenced nothing. */
+        while (cur(ps)->kind == TOK_KW_STATIC ||
+               cur(ps)->kind == TOK_KW_THREAD) {
+            if (cur(ps)->kind == TOK_KW_STATIC)
+                local_static = 1;
+            else
+                local_tls = 1;
             advance(ps);
         }
         while (cur(ps)->kind == TOK_KW_INLINE ||   /* accepted, ignored */
                cur(ps)->kind == TOK_KW_NORETURN)   /* on a local prototype */
             advance(ps);
-        if ((t->kind == TOK_KW_STATIC || is_register) && !at_type_start(ps))
+        if ((t->kind == TOK_KW_STATIC || t->kind == TOK_KW_THREAD ||
+             is_register) && !at_type_start(ps))
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type after the storage specifier");
+        /* C11 §6.7.1: at block scope _Thread_local must be accompanied
+         * by static or extern. Without one it would name an object with
+         * automatic storage that is also per-thread, which is two
+         * answers to the same question -- an automatic object is
+         * already private to the call. */
+        if (local_tls && !local_static)
+            parse_error_at(ps, t->line, t->col,
+                       "a block-scope __thread object must also be "
+                       "static: an automatic one is already private to "
+                       "the call");
         if (!allow_decl)
             parse_error_at(ps, t->line, t->col,
                        "a declaration cannot be the body of if/while/for "
@@ -2306,6 +2532,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                            tok_describe(cur(ps)));
             s->name = dname;
             s->is_static = local_static;
+            s->is_tls = local_tls;
             /* An optional `__asm__("reg")` register binding follows the
              * declarator: `register long r10 __asm__("r10") = a4;`. */
             if (cur(ps)->kind == TOK_KW_ASM) {
@@ -2318,15 +2545,19 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * on a local declarator; aligned(N) raises the stack slot's
              * alignment (codegen rounds the frame offset). */
             {
-                struct attrs lat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+                struct attrs lat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                       0, 0, 0, 0, 0, 0, NULL };
                 parse_attributes(ps, &lat);
                 if (lat.section)
                     parse_error_line(ps, s->line,
                                "section attribute on block-scope '%s' is "
                                "not supported — declare it at file scope",
                                dname);
+                if (lead.aligned > lat.aligned)
+                    lat.aligned = lead.aligned;
                 s->user_align = lat.aligned > ps->alignas_out
                                 ? lat.aligned : ps->alignas_out;
+                s->attr_unused = lat.unused || lead.unused;
                 ps->alignas_out = 0;
             }
             int was_array = s->dty->kind == TY_ARRAY;
@@ -2644,8 +2875,9 @@ static void parse_top(struct parser *ps, struct unit *u,
         return;
     }
 
-    int is_static = 0, is_extern = 0;
-    struct attrs at = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
+    int is_static = 0, is_extern = 0, is_tls = 0;
+    struct attrs at = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                       0, 0, 0, 0, 0, 0, NULL };
     ps->seq = seq;
 
     /* A file-scope `__asm__("...")` block (crt0's _start stub). Basic asm
@@ -2683,6 +2915,13 @@ static void parse_top(struct parser *ps, struct unit *u,
              * exactly what __attribute__((noreturn)) means — so it lands in
              * the same field and the flow analysis cannot tell them apart. */
             at.noreturn = 1;
+            advance(ps);
+        } else if (cur(ps)->kind == TOK_KW_THREAD) {
+            /* A storage class, not a qualifier: it changes which SECTION
+             * the object lands in and how its address is formed, not its
+             * type. `static __thread` and `extern __thread` are both
+             * legal and mean what they say. */
+            is_tls = 1;
             advance(ps);
         } else if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             parse_attributes(ps, &at); /* leading __attribute__((weak)) etc. */
@@ -2788,6 +3027,24 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_idx = at.fmt_idx;
     f->fmt_first = at.fmt_first;
                 f->is_nothrow = at.nothrow;
+    f->is_ctor = at.ctor;
+    f->is_dtor = at.dtor;
+    f->attr_used = at.used;
+    f->attr_unused = at.unused;
+    f->attr_always_inline = at.always_inline;
+    f->attr_noinline = at.noinline;
+    f->attr_deprecated = at.deprecated;
+    f->attr_warn_unused_result = at.warn_unused_result;
+    f->vis = at.vis;
+                f->is_ctor = at.ctor;
+                f->is_dtor = at.dtor;
+                f->attr_used = at.used;
+                f->attr_unused = at.unused;
+                f->attr_always_inline = at.always_inline;
+                f->attr_noinline = at.noinline;
+                f->attr_deprecated = at.deprecated;
+                f->attr_warn_unused_result = at.warn_unused_result;
+                f->vis = at.vis;
                 f->ret_ty = gt->ret;
                 f->name = name = gname;
                 f->file = ps->lx.file;
@@ -2815,6 +3072,11 @@ static void parse_top(struct parser *ps, struct unit *u,
                                             is_static, is_extern);
             parse_attributes(ps, &at); /* trailing: T x[] __attribute__((weak)) */
             g->is_weak = at.weak;
+            g->attr_used = at.used;
+            g->attr_unused = at.unused;
+            g->attr_deprecated = at.deprecated;
+            g->vis = at.vis;
+            g->is_tls = is_tls;
             g->section = at.section;
             g->seq = seq;
             g->def_seq = seq;
@@ -2838,6 +3100,15 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_idx = at.fmt_idx;
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
+    f->is_ctor = at.ctor;
+    f->is_dtor = at.dtor;
+    f->attr_used = at.used;
+    f->attr_unused = at.unused;
+    f->attr_always_inline = at.always_inline;
+    f->attr_noinline = at.noinline;
+    f->attr_deprecated = at.deprecated;
+    f->attr_warn_unused_result = at.warn_unused_result;
+    f->vis = at.vis;
     f->ret_ty = ty;
     f->name = name;
     f->file = ps->lx.file;
@@ -2910,6 +3181,15 @@ fn_tail:
     f->fmt_idx = at.fmt_idx;
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
+    f->is_ctor = at.ctor;
+    f->is_dtor = at.dtor;
+    f->attr_used = at.used;
+    f->attr_unused = at.unused;
+    f->attr_always_inline = at.always_inline;
+    f->attr_noinline = at.noinline;
+    f->attr_deprecated = at.deprecated;
+    f->attr_warn_unused_result = at.warn_unused_result;
+    f->vis = at.vis;
     if (at.section)
         parse_error_line(ps, line,
                    "section attribute on function '%s' is not supported — "
@@ -2959,6 +3239,11 @@ fn_tail:
                                                 is_static, is_extern);
                 parse_attributes(ps, &at);
                 g->is_weak = at.weak;
+                g->attr_used = at.used;
+                g->attr_unused = at.unused;
+                g->attr_deprecated = at.deprecated;
+                g->vis = at.vis;
+                g->is_tls = is_tls;
                 g->section = at.section;
                 g->seq = seq;
                 g->def_seq = seq;

@@ -55,6 +55,10 @@ void x86_lea_rax_slot(struct code *c, int disp);  /* lea rax,[rbp+disp] */
 int x86_lea_rax_rip(struct code *c);
 /* Same into an arbitrary register (for -O2 register-resident address temps). */
 int x86_lea_reg_rip(struct code *c, int reg);
+/* Local-exec TLS: read the thread pointer, then add the object's
+ * offset within the thread block (a relocation fills it). */
+void x86_mov_reg_fsbase(struct code *c, int reg);
+int  x86_add_reg_imm32_reloc(struct code *c, int reg);
 /* mov reg,imm — register-targeted x86_mov_eax_imm (same bytes when reg==rax). */
 void x86_mov_reg_imm(struct code *c, int reg, long imm, int w);
 void x86_zero_eax(struct code *c); /* xor eax,eax — al=0 for varargs calls */
@@ -117,6 +121,8 @@ void x86_cmp_rr(struct code *c, int a, int b, int w);         /* cmp a, b */
 void x86_div_rr(struct code *c, int src, int sign, int w);    /* [rdx:rax]/src */
 /* argument registers by index, for aggregates arriving in pieces */
 int  x86_argreg(int index);
+int  x86_nargregs(void);        /* 6 System V, 4 Microsoft x64 */
+int  x86_stack_arg_base(void);  /* rbp+16, or rbp+48 past shadow */
 void x86_not_eax(struct code *c, int w);
 void x86_neg_reg(struct code *c, int reg, int w);   /* neg reg, in place */
 void x86_not_reg(struct code *c, int reg, int w);   /* not reg, in place */

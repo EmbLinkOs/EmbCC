@@ -927,6 +927,82 @@ second list is what found the bugs. Checking a scanf field's pointee
 against a size reported `sscanf(s, "%s", buf)`, since %s takes a
 character BUFFER rather than a pointer to one object.
 
+## Attributes that were accepted and ignored (2026-09-21)
+
+An unknown `__attribute__` is skipped, which is the right default:
+`always_inline`, `pure`, `hot` and the rest are hints, and ignoring a
+hint is slower rather than wrong. But the same path was swallowing
+attributes that are **not** hints, and each produced a program that
+compiled, linked, ran, and did something else.
+
+`naked`, `interrupt`, `cleanup`, `ms_abi` and `sysv_abi` are now refused
+by name (`tests/compile/reject-unimplemented.sh`). `constructor` and
+`destructor` were found the same way and could not be refused —
+EmbLinkOS uses them in `user/lib/crt0.c` and `shell/tools/sysinfo.c`, so
+refusing would have broken a tree EmbCC compiles — so they are
+implemented instead: the function's address goes in a `SHT_INIT_ARRAY` /
+`SHT_FINI_ARRAY` section, and `tests/exec/ctors.c` asserts a value that
+is only right if they ran.
+
+**Every attribute now has a stated disposition** (`attr_table` in
+`src/parse/parse.c`): honoured, refused, or a no-op for a named reason.
+Anything not in the table is warned about under `-Wattributes` and then
+ignored, which is GCC's behaviour and the thing that would have caught
+the `constructor` bug the day it was written — the failure mode this
+replaces is not "we ignore attributes", it is "nobody decided".
+
+Newly honoured, with what acts on each: `used` (the symbol survives),
+`unused` (`-Wunused-*` stays quiet, in both the leading and trailing
+spelling — the leading one did not even parse on a local before),
+`visibility` (`st_other`), `always_inline`/`noinline` (the inliner, at
+-O2, with `-fremarks` naming which applied), `deprecated` and
+`warn_unused_result` (new warnings, each switchable by the name it
+prints). `always_inline` overrides the inliner's SIZE budget only: every
+other reason it declines is a thing it cannot do, not a thing it chose.
+
+Still outstanding in the same family:
+
+- **`returns_twice`** belongs on the refusal list and is not on it:
+  newlib's headers put it on `setjmp`, so refusing it would stop a
+  corpus this compiler is tested against from building at all. Ignoring
+  it is only wrong at -O1/-O2, where a value cached across a `setjmp`
+  could survive the second return.
+- **A `constructor` priority** is refused rather than ignored, because
+  one `.init_array` in source order cannot express it. GCC spells it
+  `.init_array.NNNNN` and lets the linker sort the sections.
+- **Darwin** refuses `constructor`/`destructor`: it wants
+  `__DATA,__mod_init_func`, which the Mach-O writer does not emit.
+
+## Linux: what the target does not do yet (2026-09-21)
+
+`--target=x86_64-linux-gnu` and `aarch64-linux-gnu` build a **static**
+image with our libc straight onto the kernel (D-014's amendment), and
+`tests/golden/linux.sh` boots a real kernel and runs it as PID 1 on both
+architectures. What that image cannot do:
+
+- **~~Threads~~ — done (2026-09-21).** `lib/libc/os/linux/thread.c`
+  implements create/join/detach/self over `clone(2)`, entered through a
+  per-architecture assembly stub. Join is the kernel's
+  `CLONE_CHILD_CLEARTID`, waited on with a **shared** futex because that
+  is what the kernel's own wake uses — a private wait there keys on
+  something the wake never touches and hangs forever. `std::thread`,
+  `std::mutex` and `std::atomic::wait` all run on a real kernel in
+  `tests/golden/linux.sh`. What is still missing is **thread-local
+  storage**: EmbCC has no `__thread`, so `CLONE_SETTLS` is unused,
+  `errno` is one variable for the whole process, and
+  `__os_thread_self()` scans a list instead of reading a register.
+- **Dynamic linking and PIE.** Static only: no GOT/PLT generation, no
+  `PT_INTERP`, no shared libraries. This is also why `embcc` still does
+  not invoke a linker itself on Linux — the golden test calls `ld`.
+- **The vDSO.** `__os_time` and `__os_clock_ns` enter the kernel on
+  every call. Reading the vDSO means parsing the auxiliary vector and an
+  ELF image in our own address space; `_start` currently walks past the
+  auxv without looking at it.
+- **A kernel floor of 4.11**, from `statx`. Chosen over `fstatat`
+  because `struct stat` has a different field ORDER on the two
+  architectures, so sharing one backend would have meant two structures
+  and no way to check either here.
+
 ## C++ exceptions on Darwin: a typeinfo from the wrong runtime (2026-09-21)
 
 `catch (...)` works, with cleanups: destructors run during unwinding

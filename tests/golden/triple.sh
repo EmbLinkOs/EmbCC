@@ -109,22 +109,53 @@ for f in darwin win; do
 done
 echo "__ELF__ follows the format, not the architecture"
 
-# 5. THE RULE. A target whose object writer does not exist is refused,
-#    by name, and writes nothing -- rather than quietly emitting ELF and
-#    calling it a COFF object. Darwin was on this list until its writer
-#    was built; that it had to be taken off is the check working.
-for t in x86_64-windows-gnu; do
-    rm -f "$out/o.o"
-    if "$EMBCC" --target="$t" -c "$out/t.c" -o "$out/o.o" 2> "$out/err.txt"; then
-        echo "FAIL: $t emitted an object it has no writer for"; exit 1
+# 5. THE RULE, now that every format HAS a writer.
+#
+#    This list used to be the triples with no object writer -- Darwin
+#    came off it when Mach-O landed, and Windows when COFF did. That it
+#    keeps emptying is the check working, so what it checks now is the
+#    same rule one level up: a CAPABILITY a target lacks is refused by
+#    name, rather than quietly given another platform's answer.
+#
+#    Each case is a real gap on Windows today, and each must name the
+#    thing it cannot do.
+rm -f "$out/o.o"
+"$EMBCC" --target=x86_64-windows-gnu -c "$out/t.c" -o "$out/o.o" \
+    2> "$out/err.txt" || {
+    echo "FAIL: x86_64-windows-gnu cannot emit an object, though the COFF
+writer exists:"; cat "$out/err.txt"; exit 1; }
+[ -s "$out/o.o" ] || { echo "FAIL: it wrote no object"; exit 1; }
+
+#    ...and the convention it does NOT implement is said out loud on
+#    every compile, because emitting System V argument passing under a
+#    Windows triple is exactly the silent fallback this rule forbids.
+grep -q 'Wwindows-abi' "$out/err.txt" || {
+    echo "FAIL: nothing warned that the calling convention is still"
+    echo "      System V:"; cat "$out/err.txt"; exit 1; }
+
+win_refuses() {                   # win_refuses SOURCE EXPECTED-TEXT
+    printf '%s\n' "$1" > "$out/w.c"
+    rm -f "$out/w.o"
+    if "$EMBCC" --target=x86_64-windows-gnu -c "$out/w.c" -o "$out/w.o" \
+           2> "$out/werr.txt"; then
+        echo "FAIL: a Windows target accepted something it cannot do:"
+        echo "      $1"; exit 1
     fi
-    grep -q "$t" "$out/err.txt" || {
-        echo "FAIL: the refusal does not name the triple:"
-        cat "$out/err.txt"; exit 1; }
-    [ -e "$out/o.o" ] && {
-        echo "FAIL: $t was refused but still wrote a file"; exit 1; }
-done
-echo "a format with no writer is refused by name, and writes no file"
+    grep -q "$2" "$out/werr.txt" || {
+        echo "FAIL: the refusal does not say why:"; cat "$out/werr.txt"
+        exit 1; }
+    [ -e "$out/w.o" ] && {
+        echo "FAIL: refused, and still wrote a file"; exit 1; }
+    return 0
+}
+win_refuses '__thread int x; int main(void){return x;}' \
+            '__thread is not supported for a Windows target'
+win_refuses '__attribute__((constructor)) static void c(void){}
+int main(void){return 0;}' \
+            'not supported for a Windows target'
+echo "every format has a writer now, so the rule is checked one level
+up: the capabilities Windows lacks each refuse by name, and the
+convention it has not got yet warns on every compile"
 
 # 6. ...and the parts that DO work for such a target keep working, which
 #    is why the triple is in the table before its writer exists: the

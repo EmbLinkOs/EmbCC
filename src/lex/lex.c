@@ -124,6 +124,10 @@ static const struct {
     { "__alignof", TOK_KW_ALIGNOF },
     { "_Alignas", TOK_KW_ALIGNAS },
     { "_Noreturn", TOK_KW_NORETURN },
+    /* One storage class under three spellings: GNU's, C11's and
+     * the one the C++ front end lowers `thread_local` to. */
+    { "__thread", TOK_KW_THREAD },
+    { "_Thread_local", TOK_KW_THREAD },
     { "typeof", TOK_KW_TYPEOF },
     { "__typeof__", TOK_KW_TYPEOF },
     { "__typeof", TOK_KW_TYPEOF },
@@ -1030,6 +1034,7 @@ const char *tok_describe(const struct token *t)
     case TOK_KW_ASM: return "'asm'";
     case TOK_KW_INLINE: return "'inline'";
     case TOK_KW_NORETURN: return "'_Noreturn'";
+    case TOK_KW_THREAD: return "'__thread'";
     case TOK_KW_ATTRIBUTE: return "'__attribute__'";
     case TOK_DOT: return "'.'";
     case TOK_ARROW: return "'->'";

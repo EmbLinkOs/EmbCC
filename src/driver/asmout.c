@@ -299,4 +299,32 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         }
         ob_fmt(b, "\t.size\t%s, %d\n", g->name, sz);
     }
+
+    /* __attribute__((constructor)) / ((destructor)). The object writer
+     * puts these in SHT_INIT_ARRAY / SHT_FINI_ARRAY sections, so `-S`
+     * has to as well: assembly that assembles into a DIFFERENT program
+     * from the one `-c` emits is the one thing this output may not be.
+     * A constructor missing here would not fail to build -- it would
+     * simply never run, which is the failure the attribute was
+     * implemented to end.
+     *
+     * "aw" and @init_array give the section the same flags and TYPE the
+     * writer uses; a linker gathers these by type, so @progbits here
+     * would lay the pointers out as ordinary data. */
+    static const char *const arr[2] = { ".init_array", ".fini_array" };
+    for (int pass = 0; pass < 2; pass++) {
+        int any = 0;
+        for (struct func *f = u->funcs; f; f = f->next) {
+            if (f->absorbed || !f->has_defn)
+                continue;
+            if (!(pass == 0 ? f->is_ctor : f->is_dtor))
+                continue;
+            if (!any) {
+                ob_fmt(b, "\n\t.section\t%s,\"aw\",@%s\n\t.align\t8\n",
+                       arr[pass], arr[pass] + 1);
+                any = 1;
+            }
+            ob_fmt(b, "\t.quad\t%s\n", f->name);
+        }
+    }
 }

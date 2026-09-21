@@ -641,6 +641,21 @@ static struct warn_opt g_warns[] = {
      * that disagrees with its arguments reads the wrong bytes off the
      * variadic tail, which nothing else in the language catches. */
     { "format",               0,  1,    0 },
+    /* An attribute EmbCC has never heard of is ignored, which is the
+     * right default -- but silently ignoring one is how
+     * __attribute__((constructor)) went unimplemented without anybody
+     * noticing. On by default, as GCC has it: the reader should be told
+     * that something they wrote had no effect. */
+    { "attributes",           1,  0,    0 },
+    /* GCC puts both of these on by default too, and for the same
+     * reason: the author of the declaration asked for the warning. */
+    { "deprecated-declarations", 1, 0,  0 },
+    { "unused-result",        1,  0,    0 },
+    /* On by default and hard to miss on purpose: a Windows object
+     * EmbCC builds today passes arguments the way System V does, and
+     * that is wrong against anything EmbCC did not compile. It goes
+     * away when the Microsoft x64 convention lands. */
+    { "windows-abi",          1,  0,    0 },
 };
 static const int g_nwarns = (int)(sizeof g_warns / sizeof g_warns[0]);
 

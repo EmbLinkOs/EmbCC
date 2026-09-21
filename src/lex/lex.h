@@ -50,6 +50,7 @@ enum tok_kind {
     TOK_KW_ASM,
     TOK_KW_INLINE,
     TOK_KW_NORETURN,
+    TOK_KW_THREAD,       /* __thread / _Thread_local / thread_local */
     TOK_KW_ATTRIBUTE,
     TOK_DOT,
     TOK_ARROW,

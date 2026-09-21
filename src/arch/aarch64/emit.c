@@ -443,6 +443,32 @@ int a64_add_lo12(struct code *c, int rd, int rn)
     return o;
 }
 
+/* ---- local-exec thread-local storage ----------------------------------
+ *
+ * `mrs rd, tpidr_el0` -- the thread pointer, readable from EL0 because
+ * that is what the register is for. (The x86-64 half of this has to
+ * load a self-pointer out of the block instead, because its FS base is
+ * not readable without a syscall.)
+ *
+ * TPIDR_EL0 is S3_3_C13_C0_2, and MRS encodes the system register in
+ * op0/op1/CRn/CRm/op2 -- which is the whole of the constant below.
+ */
+void a64_mrs_tpidr(struct code *c, int rd)
+{
+    a64_word(c, 0xD53BD040UL | (unsigned long)rd);
+}
+
+/* The high half of the offset: `add rd, rn, #imm12, lsl #12`. Two adds
+ * rather than one because a thread block can be larger than 4095 bytes
+ * and the immediate is twelve bits; the linker fills both fields and
+ * the pair covers 24 bits of offset. */
+int a64_add_hi12(struct code *c, int rd, int rn)
+{
+    int o = c->len;
+    a64_word(c, 0x91400000UL | ((unsigned long)rn << 5) | (unsigned long)rd);
+    return o;
+}
+
 /* ---- misc ----------------------------------------------------------- */
 
 void a64_dmb_ish(struct code *c) { a64_word(c, 0xD5033BBFUL); }

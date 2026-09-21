@@ -47,6 +47,12 @@ static int reg_num(const char *n)
 
 static int is_ws(char c) { return c == ' ' || c == '\t'; }
 
+static int is_alnum(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9');
+}
+
 /* In place: strip a trailing comment (# or /​* or ;) and surrounding
  * whitespace, and squeeze runs of whitespace to a single space so a line
  * splits on ' ' cleanly. Returns the cleaned string (same buffer). */
@@ -279,14 +285,44 @@ void topasm_assemble(struct topasm *ta, int mnemonics_ok)
              * unsigned so 0xff and 0xffffffff are written as given rather
              * than overflowing a signed long on the way in. */
             const char *p = l + 6;
+            int nth = 0;
             for (;;) {
                 char *end;
                 unsigned long v = strtoul(p, &end, 0);
-                if (end == p)
-                    diag_fatal(ta->file, ta->line,
-                               "asm data directive wants a number: \"%s\"", l);
+                if (end == p) {
+                    /* Not a number, so a symbol -- `.quad main`. This is
+                     * how an asm block names a symbol on a target whose
+                     * INSTRUCTIONS this file cannot encode: the address
+                     * becomes data, and the code beside it loads and
+                     * branches through it. Only .quad, because an address
+                     * is eight bytes and a truncated one would relocate
+                     * into whatever followed. */
+                    if (w != 8)
+                        diag_fatal(ta->file, ta->line,
+                                   "asm .byte/.long wants a number: \"%s\" "
+                                   "(a symbol's address is eight bytes, so "
+                                   "name it with .quad)", l);
+                    const char *s = p;
+                    while (*end && (is_alnum(*end) || *end == '_' ||
+                                    *end == '.' || *end == '$'))
+                        end++;
+                    if (end == s)
+                        diag_fatal(ta->file, ta->line,
+                                   "asm data directive wants a number or a "
+                                   "symbol: \"%s\"", l);
+                    ta->rels = xrealloc(ta->rels,
+                                        (size_t)(ta->nrels + 1)
+                                            * sizeof *ta->rels);
+                    ta->rels[ta->nrels].off = here + nth * w;
+                    ta->rels[ta->nrels].target = xstrndup(s, (size_t)(end - s));
+                    ta->rels[ta->nrels].addend = 0;
+                    ta->rels[ta->nrels].kind = ASMREL_ABS64;
+                    ta->nrels++;
+                    v = 0;                    /* the linker fills it in */
+                }
                 for (int b = 0; b < w; b++)
                     *c++ = (unsigned char)((v >> (8 * b)) & 0xff);
+                nth++;
                 while (is_ws(*end)) end++;
                 if (*end != ',')
                     break;
@@ -324,6 +360,7 @@ void topasm_assemble(struct topasm *ta, int mnemonics_ok)
             ta->rels[ta->nrels].off = here + 1; /* the rel32 field */
             ta->rels[ta->nrels].target = xstrndup(tgt, strlen(tgt));
             ta->rels[ta->nrels].addend = -4;
+            ta->rels[ta->nrels].kind = ASMREL_PC32;
             ta->nrels++;
         } else if (strncmp(l, "jmp ", 4) == 0) {
             const char *tgt = rest(l);

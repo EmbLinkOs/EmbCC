@@ -200,6 +200,8 @@ struct stmt {
     const char *name;     /* STMT_DECL */
     struct type *dty;     /* STMT_DECL: declared type */
     int is_static;        /* STMT_DECL: a static local -> its own global */
+    int is_tls;           /* STMT_DECL: `static __thread` -> a TLS global */
+    int attr_unused;      /* STMT_DECL: __attribute__((unused)) on it */
     int is_extern;        /* STMT_DECL: block-scope extern -> a unit global/func */
     struct initelem *inits; /* STMT_DECL: flattened aggregate init */
     int ninits;
@@ -250,6 +252,12 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    int attr_used, attr_unused, attr_deprecated;
+    const char *vis;      /* __attribute__((visibility("..."))) */
+    /* __thread / _Thread_local / thread_local: one instance per thread,
+     * in .tdata or .tbss rather than .data or .bss, and addressed off
+     * the thread pointer instead of off the program's own image. */
+    int is_tls;
     const char *section;  /* __attribute__((section("name"))), or NULL */
     int has_init;
     long init;            /* constant initializer value (scalar) */
@@ -280,6 +288,15 @@ struct func {
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
     int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
                            * (a call of it needs no landing pad) */
+    /* __attribute__((constructor)) / ((destructor)): its address goes in
+     * .init_array / .fini_array, and the startup code walks them. */
+    int is_ctor, is_dtor;
+    /* The hints EmbCC acts on: keep the symbol, do not warn that it is
+     * unused, force or forbid inlining, warn at each call, warn when a
+     * caller throws the result away. `vis` is an ELF visibility. */
+    int attr_used, attr_unused, attr_always_inline, attr_noinline;
+    int attr_deprecated, attr_warn_unused_result;
+    const char *vis;
     /* __attribute__((format(printf|scanf, idx, first))): 1 printf,
      * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */
     int fmt_kind, fmt_idx, fmt_first;
@@ -337,10 +354,22 @@ struct asmsym {
     int off;             /* offset within .text (filled at emission) */
     int is_global;       /* named by .global/.globl */
 };
+/* What the field at `off` is, which decides the relocation the driver
+ * emits for it. A call's displacement is relative to the instruction
+ * after it and is four bytes wide; a `.quad symbol` is the address
+ * itself, eight bytes, and is the only way an asm block on a target
+ * whose instructions EmbCC cannot encode can name a symbol at all --
+ * `_start` loads the C entry point out of one. */
+enum asmrel_kind {
+    ASMREL_PC32,         /* the rel32 of a call: R_X86_64_PLT32 */
+    ASMREL_ABS64,        /* a .quad naming a symbol: R_*_ABS64 */
+};
+
 struct asmrel {
-    int off;             /* offset within .text of the rel32 field */
-    const char *target;  /* symbol the call/jmp resolves to */
+    int off;             /* offset within .text of the field to fill */
+    const char *target;  /* symbol the call/jmp/.quad resolves to */
     long addend;
+    enum asmrel_kind kind;
 };
 
 /* A file-scope `__asm__("...")` block (crt0's _start stub, and its kind).

@@ -13,7 +13,10 @@ mkdir -p "$out_dir"
 check() { # name source expected-message-grep
     src="$out_dir/$1.c"
     printf '%s\n' "$2" > "$src"
-    if err=$("$EMBCC" -c "$src" -o "$out_dir/$1.o" 2>&1); then
+    # -Werror so that a case whose diagnostic is a WARNING still fails
+    # the compile: an attribute EmbCC does not know is warned about,
+    # not refused, and this file's whole shape is "it did not compile".
+    if err=$("$EMBCC" -Werror -c "$src" -o "$out_dir/$1.o" 2>&1); then
         echo "case $1: compiled instead of failing"
         exit 1
     fi
@@ -347,3 +350,41 @@ check complex-int \
 check imaginary-int \
     'int main(void) { double _Complex z = 2i; return 0; }' \
     "integer imaginary constant"
+
+# ---- attributes that change code generation ------------------------------
+#
+# An unknown attribute is SKIPPED, and that is right: always_inline,
+# pure, hot and the rest are hints, and ignoring a hint is slow rather
+# than wrong. These are not hints. Each changes the code that has to be
+# generated, so a program that asked for one and did not get it
+# compiles, links, runs, and does something else -- which is the one
+# outcome THE RULE forbids. Each was silently ignored until 2026-09-21.
+check attr-naked \
+    '__attribute__((naked)) void f(void) { __asm__("nop"); }' \
+    "attribute__((naked)) is not supported"
+check attr-interrupt \
+    '__attribute__((interrupt)) void f(void *p) { (void)p; }' \
+    "attribute__((interrupt)) is not supported"
+# The TRAILING spelling, which is the one EmbCC's declarator parser
+# reaches; the leading one is refused earlier as an unexpected token.
+check attr-cleanup \
+    'void c(int *p); int f(void) { int x __attribute__((cleanup(c))) = 1; return x; }' \
+    "attribute__((cleanup)) is not supported"
+check attr-ms-abi \
+    '__attribute__((ms_abi)) int f(int a, int b) { return a + b; }' \
+    "attribute__((ms_abi)) is not supported"
+# constructor/destructor ARE implemented -- but only without a priority,
+# which orders the array in a way one .init_array in source order cannot
+# express. Accepting the number and ignoring it would run them in the
+# wrong order, which is the entire reason for writing one.
+check attr-constructor-priority \
+    '__attribute__((constructor(101))) static void f(void) { }' \
+    "cannot honour a priority"
+
+# An attribute EmbCC has never heard of is warned about and ignored,
+# which is GCC's behaviour and the thing that would have caught
+# __attribute__((constructor)) going unimplemented. -Werror makes the
+# warning an error, which is what lets this file check it at all.
+check attr-unknown \
+    '__attribute__((no_such_attribute_anywhere)) int f(void) { return 0; }' \
+    "is not one EmbCC knows"

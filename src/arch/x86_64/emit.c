@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include "../../driver/util.h"
+#include "../target.h"
 
 /* REX.W when the 64-bit form is wanted */
 static void rexw(struct code *c, int w)
@@ -279,11 +280,34 @@ void x86_div_rr(struct code *c, int src, int sign, int w)
     code_byte(c, 0xc0 | ((sign ? 7 : 6) << 3) | (src & 7));
 }
 
+/* The integer argument registers, in order, for whichever convention
+ * this target uses. Microsoft x64 has FOUR and starts with rcx;
+ * System V has six and starts with rdi. x86_nargregs() is the limit
+ * that goes with the table, so a caller cannot use one without the
+ * other. */
 int x86_argreg(int index)
 {
-    static const int regs[6] = { REG_RDI, REG_RSI, REG_RDX, REG_RCX,
+    static const int sysv[6] = { REG_RDI, REG_RSI, REG_RDX, REG_RCX,
                                  8 /* r8 */, 9 /* r9 */ };
-    return regs[index];
+    static const int win64[4] = { REG_RCX, REG_RDX, 8 /* r8 */, 9 /* r9 */ };
+    if (target_win64_abi())
+        return index >= 0 && index < 4 ? win64[index] : win64[3];
+    return index >= 0 && index < 6 ? sysv[index] : sysv[5];
+}
+
+int x86_nargregs(void)
+{
+    return target_win64_abi() ? 4 : 6;
+}
+
+/* Where the first argument that did not fit a register sits, measured
+ * from rbp after the standard prologue. System V puts it straight
+ * above the return address; Microsoft x64 leaves 32 bytes of shadow
+ * space there for the callee to spill its four register arguments
+ * into, so the first stack argument is four words further up. */
+int x86_stack_arg_base(void)
+{
+    return target_win64_abi() ? 48 : 16;
 }
 
 void x86_prologue(struct code *c, int framesize)
@@ -307,23 +331,25 @@ void x86_epilogue(struct code *c)
     code_byte(c, 0xc3); /* ret */
 }
 
-/* SysV order rdi,rsi,rdx,rcx,r8,r9: {reg-field, needs REX.R/B} */
-static const struct { int reg, rex; } argregs[6] = {
-    { 7, 0 }, { 6, 0 }, { 2, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 }
-};
-
+/* These two used to carry a SECOND copy of the argument register
+ * order, as a table of {reg-field, needs REX.R}. That was one table
+ * too many the moment a target existed with a different order: changing
+ * x86_argreg alone left every call site still loading rdi and rsi.
+ * They derive both from x86_argreg now, so there is one answer. */
 void x86_store_arg(struct code *c, int argno, int disp)
 {
-    code_byte(c, argregs[argno].rex ? 0x4c : 0x48); /* REX.W (+R) */
+    int r = x86_argreg(argno);
+    code_byte(c, (r & 8) ? 0x4c : 0x48);   /* REX.W (+REX.R) */
     code_byte(c, 0x89); /* mov r/m64, r64 */
-    modrm_rbp(c, argregs[argno].reg, disp);
+    modrm_rbp(c, r & 7, disp);
 }
 
 void x86_load_arg(struct code *c, int argno, int disp)
 {
-    code_byte(c, argregs[argno].rex ? 0x4c : 0x48);
+    int r = x86_argreg(argno);
+    code_byte(c, (r & 8) ? 0x4c : 0x48);
     code_byte(c, 0x8b); /* mov r64, r/m64 */
-    modrm_rbp(c, argregs[argno].reg, disp);
+    modrm_rbp(c, r & 7, disp);
 }
 
 void x86_mov_eax_imm(struct code *c, long imm, int w)
@@ -744,6 +770,51 @@ int x86_lea_reg_rip(struct code *c, int reg)
     code_byte(c, 0x48 | ((reg & 8) ? 4 : 0));    /* REX.W (+REX.R) */
     code_byte(c, 0x8d);
     code_byte(c, 0x05 | ((reg & 7) << 3));        /* mod=00 reg rm=101 = RIP */
+    int off = c->len;
+    code_u32(c, 0);
+    return off;
+}
+
+/* ---- local-exec thread-local storage -------------------------------------
+ *
+ * Two instructions. The first asks the CPU where THIS thread's block
+ * is; the second adds the object's offset within it, which only the
+ * linker can know (it depends on how much thread-local data the whole
+ * program turned out to have) and so is left to a relocation.
+ *
+ * `mov %fs:0, reg` reads the word at offset 0 of the FS segment, which
+ * by the x86-64 TLS ABI is a self-pointer: the thread pointer holds its
+ * own address there precisely so a program can load it, since the FS
+ * BASE itself is not readable from user space without a syscall.
+ *
+ *   64 48 8b 04 25 00000000   mov %fs:0x0, %rax
+ *   ^  ^  ^  ^  ^  ^
+ *   |  |  |  |  |  the absolute address inside the segment: 0
+ *   |  |  |  |  SIB: no base, no index -> disp32 is the whole address
+ *   |  |  |  mod=00 reg=dst rm=100 (SIB follows)
+ *   |  |  opcode: mov r64, r/m64
+ *   |  REX.W (+REX.R for r8..r15)
+ *   the FS segment-override prefix
+ */
+void x86_mov_reg_fsbase(struct code *c, int reg)
+{
+    code_byte(c, 0x64);                          /* FS prefix */
+    code_byte(c, 0x48 | ((reg & 8) ? 4 : 0));    /* REX.W (+REX.R) */
+    code_byte(c, 0x8b);
+    code_byte(c, 0x04 | ((reg & 7) << 3));       /* mod=00 rm=100 (SIB) */
+    code_byte(c, 0x25);                          /* base=101 idx=100: disp32 */
+    code_u32(c, 0);
+}
+
+/* `add $imm32, reg`, with the immediate left for a relocation to fill.
+ * Returns the offset of that field. The offset is negative on x86-64 --
+ * the thread block sits BELOW the thread pointer -- which is why the
+ * field is a signed 32-bit add rather than anything narrower. */
+int x86_add_reg_imm32_reloc(struct code *c, int reg)
+{
+    code_byte(c, 0x48 | ((reg & 8) ? 1 : 0));    /* REX.W (+REX.B) */
+    code_byte(c, 0x81);
+    code_byte(c, 0xc0 | (reg & 7));              /* /0 = ADD */
     int off = c->len;
     code_u32(c, 0);
     return off;

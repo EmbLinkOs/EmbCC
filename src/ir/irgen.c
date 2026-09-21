@@ -772,6 +772,21 @@ static int intern_str(const char *bytes, int len)
     return ir_intern_string(cur_unit, bytes, len);
 }
 
+/* Microsoft x64: an aggregate rides in its register slot only at
+ * exactly 1, 2, 4 or 8 bytes; every other size travels BY REFERENCE,
+ * with a copy the caller makes. Asked once here so the caller's
+ * placement and the callee's reading cannot answer it differently --
+ * which they would, silently, for exactly the struct sizes nobody
+ * tests. */
+static int win64_byref(const struct type *t)
+{
+    int sz;
+    if (!t || t->kind != TY_STRUCT)
+        return 0;
+    sz = ty_size(t);
+    return !(sz == 1 || sz == 2 || sz == 4 || sz == 8);
+}
+
 /* A long double constant: 16 bytes in the target's format (x87 extended or
  * binary128), too wide for IR_CONST's 64-bit immediate — so it lives in
  * .rodata like a string and is loaded from there. */
@@ -2081,6 +2096,91 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             ar->stk_off = 0;
             ar->on_stack = 0;
 
+            if (target_win64_abi()) {
+                /* Microsoft x64: one SLOT per argument, four of them,
+                 * and the slot is the argument's POSITION. A double in
+                 * slot 1 travels in xmm1 while an integer in slot 1
+                 * travels in rdx -- the two classes share the numbering
+                 * instead of each counting its own, which is what makes
+                 * a per-class counter produce correct code for every
+                 * argument list that happens to be all one class and
+                 * wrong code for the first one that is not.
+                 *
+                 * `ireg` is that single counter here, and `freg` is
+                 * kept equal to it so the backend may read either.
+                 *
+                 * A struct rides in its slot only at exactly 1, 2, 4 or
+                 * 8 bytes. Anything else goes by reference, with a copy
+                 * the CALLER makes -- the callee may write to it. */
+                ar->byref = win64_byref(at);
+                /* Three things this convention needs that are not
+                 * written yet, each refused rather than passed the
+                 * System V way under a Windows triple:
+                 *
+                 *   A struct of any size but 1/2/4/8 travels by
+                 *   reference, with a copy the CALLER makes. Passing
+                 *   it in registers instead puts its first eight bytes
+                 *   where the callee expects a pointer.
+                 *
+                 *   __int128 and long double are handled here with rsi
+                 *   and rdi as scratch, and those are CALLEE-saved on
+                 *   Windows -- so the sequence would return to its
+                 *   caller with two of the caller's registers changed. */
+                if (ar->byref) {
+                    /* The copy is the caller's, in the caller's scratch
+                     * area -- 16-aligned, because a struct may contain
+                     * something that needs it and the callee is
+                     * entitled to assume the type's alignment. */
+                    fn->scratch_bytes = (fn->scratch_bytes + 15) & ~15;
+                    ar->copy_off = fn->scratch_bytes;
+                    fn->scratch_bytes += (ar->size + 15) & ~15;
+                }
+                /* Two types whose Windows answer is not a variation on
+                 * System V's, each refused with the reason that is
+                 * actually true -- a refusal that misstates why is a
+                 * smaller version of the same dishonesty as passing it
+                 * wrongly.
+                 *
+                 *   __int128 arithmetic is lowered to libgcc helper
+                 *   calls (__multi3, __floattidf) whose arguments this
+                 *   backend places in System V's registers. On Windows
+                 *   those helpers take Microsoft's, so the call would
+                 *   be wrong before the type ever is.
+                 *
+                 *   long double is 16 bytes on MinGW and travels BY
+                 *   REFERENCE, returned through a hidden pointer like a
+                 *   large aggregate. EmbCC passes it on the stack by
+                 *   value and returns it in st0, which is System V's
+                 *   answer to a different question. */
+                if (ar->is_int128)
+                    diag_fatal(fn->file, e->line,
+                               "passing __int128 is not supported for a "
+                               "Windows target yet: EmbCC lowers its "
+                               "arithmetic to libgcc helpers whose "
+                               "arguments it places in the System V "
+                               "registers");
+                if (at->kind == TY_LDOUBLE)
+                    diag_fatal(fn->file, e->line,
+                               "passing long double is not supported for "
+                               "a Windows target yet: there it travels by "
+                               "reference and returns through a hidden "
+                               "pointer, and EmbCC passes it on the stack "
+                               "by value");
+                if (ireg >= 4) {
+                    ar->on_stack = 1;
+                    /* Stack arguments begin ABOVE the 32 bytes of
+                     * shadow space the caller owes the callee, so the
+                     * outgoing area starts at 32 rather than 0. */
+                    if (stk < 32)
+                        stk = 32;
+                    ar->stk_off = stk;
+                    stk += 8;
+                }
+                ireg++;
+                freg = ireg;
+                continue;
+            }
+
             /* SysV: an argument goes on the stack when its class has no
              * registers left for ALL of its eightbytes — the decision is
              * made here so codegen only follows it, and the two cannot
@@ -2104,6 +2204,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 freg += nf;
             }
         }
+        /* Every Microsoft x64 call owes its callee 32 bytes of shadow
+         * space, whether or not any argument went on the stack -- the
+         * callee may spill its four register arguments there without
+         * asking. A call with two arguments reserves it too. */
+        if (target_win64_abi() && stk < 32)
+            stk = 32;
         if (stk > fn->outgoing_bytes)
             fn->outgoing_bytes = stk;
 
@@ -2632,6 +2738,34 @@ static void gen_func(struct ir_func *fn, struct func *f)
         fn->ret_abi.byref = ty_aapcs64_byref(rt);
         fn->ret_abi.ty = rt;
     }
+    /* The same two refusals as at a call site, on the SIGNATURE --
+     * because a function that merely takes or returns one of these
+     * needs the convention its caller will use, and no call inside it
+     * has to exist for that to matter. Checking only the call sites
+     * left `long double g(long double)` compiling silently with System
+     * V's answer. */
+    if (target_win64_abi()) {
+        for (int k = 0; k <= f->nparams; k++) {
+            struct type *t = k < f->nparams ? f->param_tys[k] : f->ret_ty;
+            if (!t)
+                continue;
+            if (t->kind == TY_INT128)
+                diag_fatal(f->file, f->line,
+                           "__int128 in the signature of '%s' is not "
+                           "supported for a Windows target yet: EmbCC "
+                           "lowers its arithmetic to libgcc helpers whose "
+                           "arguments it places in the System V registers",
+                           f->name);
+            if (t->kind == TY_LDOUBLE)
+                diag_fatal(f->file, f->line,
+                           "long double in the signature of '%s' is not "
+                           "supported for a Windows target yet: there it "
+                           "travels by reference and returns through a "
+                           "hidden pointer, and EmbCC passes it on the "
+                           "stack by value", f->name);
+        }
+    }
+
     /* The ABI facts about each parameter, decided here where the types are
      * still in hand. */
     if (f->nparams > 0) {
@@ -2647,7 +2781,8 @@ static void gen_func(struct ir_func *fn, struct func *f)
             a->is_int128 = pt && pt->kind == TY_INT128;
             a->hfa_size = 0;
             a->hfa_n = ty_hfa(pt, &a->hfa_size);
-            a->byref = ty_aapcs64_byref(pt);
+            a->byref = target_win64_abi() ? win64_byref(pt)
+                                          : ty_aapcs64_byref(pt);
             a->ty = pt;
         }
     }
