@@ -32,9 +32,20 @@ cat > "$out/a.c" << 'EOF'
 int use(void) { struct Point p = {1, 2}; return compute(p, shared); }
 EOF
 
-iface() { "$EMBCC" --emit-interfaces -I"$out" "$out/a.c" | grep -v '^;'; }
+# The INTERFACE facts only. The `file` lines beside them record what the
+# unit was derived from, and those hashes move on any text change at all
+# -- that is their job, and it is the opposite of the property every
+# comparison below is about. Mixing the two would make this file assert
+# that a comment changes nothing, when a comment changes a file hash by
+# design.
+iface() { "$EMBCC" --emit-interfaces -I"$out" "$out/a.c" |
+              grep -v '^;' | grep -v '^file '; }
+
+# ... and the derived-from facts on their own, which MUST move.
+derived() { "$EMBCC" --emit-interfaces -I"$out" "$out/a.c" | grep '^file '; }
 
 iface > "$out/base.txt"
+derived > "$out/derived1.txt"
 cat "$out/base.txt"
 
 # What it says about itself, and about what it compiled against.
@@ -65,6 +76,21 @@ diff "$out/base.txt" "$out/same.txt" > "$out/d1.txt" ||
       echo "FAIL: an edit that changes nothing observable moved a hash"; exit 1; }
 echo "unchanged by: a comment, reformatting, reordering declarations, and
 adding a declaration this unit does not use"
+
+# And the complement, which is what makes the line above worth anything:
+# the DERIVED-FROM hash of that header must have moved. If it had not,
+# the unit would never be re-examined, the interface hashes would never
+# be recomputed, and "unchanged" would be true only because nobody
+# looked.
+derived > "$out/derived2.txt"
+grep -q " $out/h.h\$" "$out/derived2.txt" ||
+    { echo "FAIL: the header is not recorded as an input"; exit 1; }
+if diff -q "$out/derived1.txt" "$out/derived2.txt" > /dev/null; then
+    echo "FAIL: the edited header's own hash did not move:"
+    cat "$out/derived2.txt"; exit 1
+fi
+echo "...while the header's derived-from hash DID move, which is what
+makes the unit get looked at again at all"
 
 # A function's BODY is not its interface. A caller cannot observe it, and
 # invalidating callers when a body changes is the rebuild storm this ends.

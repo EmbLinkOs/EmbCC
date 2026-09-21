@@ -42,6 +42,8 @@
  */
 #include "iface.h"
 
+#include "../cpp/cpp.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -246,10 +248,44 @@ static void reach_type(const struct type *t, struct seen *s, int depth)
     }
 }
 
+/* The content hash of a file, or 0 if it cannot be read. FNV-1a over the
+ * bytes, which is the same function the interface hashes use -- one hash
+ * in this file, so a reader has one thing to reimplement. */
+static unsigned long file_hash(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    unsigned long h = FNV_INIT;
+    int c;
+    while ((c = fgetc(f)) != EOF)
+        h = (h ^ (unsigned char)c) * 1099511628211UL;
+    fclose(f);
+    return h;
+}
+
 void iface_emit(struct outbuf *b, struct unit *u)
 {
     ob_str(b, "; EmbCC interfaces v1\n");
     ob_fmt(b, "; %s\n", u->file ? u->file : "");
+
+    /* WHAT THIS WAS DERIVED FROM: every file the preprocessor read, with
+     * the hash of its bytes. Vision §8.2 asks that each fact record its
+     * inputs, and without this the facts below are unanchored -- a reader
+     * could not tell whether they still describe the sources on disk.
+     *
+     * This is a different question from the hashes further down and both
+     * are needed. A file hash says "the text changed", which is what
+     * decides whether to RE-EXAMINE a unit; an interface hash says "what
+     * dependents observe changed", which is what decides whether to
+     * rebuild the units that use it. A comment added to a header moves
+     * the first and not the second, and that gap is the whole point. */
+    if (u->file)
+        ob_fmt(b, "file     %016lx %s\n", file_hash(u->file), u->file);
+    for (int i = 0; i < cpp_dep_count(); i++) {
+        const char *p = cpp_dep_path(i);
+        ob_fmt(b, "file     %016lx %s\n", file_hash(p), p);
+    }
 
     /* what this unit DEFINES */
     for (const struct func *f = u->funcs; f; f = f->next) {

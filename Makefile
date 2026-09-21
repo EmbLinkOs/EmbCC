@@ -77,7 +77,7 @@ SRCS := \
 
 OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
 
-all: embcc embread embld embas embls
+all: embcc embread embld embas embls embidx
 
 embcc: $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS)
@@ -133,6 +133,13 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/arch/aarch64/asm.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
+
+# embidx — the cross-TU index (vision 8.2). It links none of the
+# compiler: it runs `embcc --emit-interfaces` and stores what comes back,
+# so the TEXT is the contract between them and an external tool can take
+# the same input.
+embidx: tools/embidx/embidx.c
+	$(CC) $(CFLAGS) -o $@ tools/embidx/embidx.c
 
 # embread — the EMBX dumper/verifier (EMBX spec §9). A separate binary,
 # not part of embcc: it reads images, it does not compile. The EMBX

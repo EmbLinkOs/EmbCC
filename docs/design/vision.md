@@ -255,22 +255,40 @@ this document depends on most:
    carry: a parsed unit's `src` is NULL, so it can be printed, analysed and
    transformed, but not handed to the DWARF emitter. Text-in/text-out pass
    tests — §9.1's stated reason for wanting this — are now possible.
-3. **The project knowledge graph (§8.2) — the per-unit half exists.**
+3. **The project knowledge graph (§8.2) — built.**
    `embcc --emit-interfaces` gives every declaration a **USR** that survives
    unrelated edits and an **interface hash** over what dependents can
    observe — a function's signature but not its body, a struct's layout but
-   not its comments — and reports, per unit, what it *provides* and what it
-   *uses*. That is what §21 Level 2 asks for, and the golden tests both
-   directions: a comment, reformatting, reordering, an unused declaration
-   and a rewritten function body change **no** hash; a member added, a
-   parameter retyped, a global retyped or members reordered change exactly
-   one.
+   not its comments — and reports, per unit, what it was **derived from**
+   (every file it read, with the hash of its bytes), what it *provides* and
+   what it *uses*. The golden tests both directions: a comment,
+   reformatting, reordering, an unused declaration and a rewritten
+   function body change **no** interface hash; a member added, a parameter
+   retyped, a global retyped or members reordered change exactly one.
 
-   What is still missing is the **cross-TU** half: nothing stores these
-   across units or across builds, so there is no persistent index, no
-   invalidation graph, and no storage format (§32 open question 5).
-   `embcc diff` (§22) and project-wide refactoring (§24) need that; a build
-   system can use the per-unit output today.
+   `embidx` is the cross-TU half: a persistent, versioned, discardable
+   index over those facts. It exists because **two** hashes are needed and
+   the gap between them is the whole benefit — a *file* hash says the text
+   changed, which decides whether a unit is RE-EXAMINED; an *interface*
+   hash says what dependents observe changed, which decides whether it is
+   REBUILT. A comment in a shared header moves the first and not the
+   second, so `embidx stale` re-examines both units that include it and
+   rebuilds neither, where `-MD` rebuilds both. That is §21 Level 2, and
+   `tests/golden/index.sh` holds it as a fact rather than a claim.
+
+   It also answers what no single translation unit can. `embidx check`
+   compares the interface hashes every unit compiled against, so two units
+   that disagree about one struct — a header included under different
+   flags, or a declaration that drifted from its definition — are named
+   with both views, before a link that would have succeeded and a program
+   that would have been wrong. `embidx who` gives a declaration's
+   definition and every observer of it.
+
+   The format is line-oriented, sorted, versioned text, deterministic (R4)
+   so two builds' indexes can be compared with `diff`, and safely
+   discardable as §8.2 requires: delete it and `build` reconstructs it
+   byte-identically. `embcc diff` (§22) and project-wide refactoring (§24)
+   now have the store they needed; §32 open question 5 is answered for v1.
 4. **`SourceProvider` (§7, §16).** The frontend reads files directly; the
    language server works around it by writing the editor's buffer to a
    temporary file. Cancellation and incrementality (§7) are likewise absent —
@@ -423,7 +441,7 @@ Design requirements:
 - **Stable symbol identity.** Every entity has a USR that survives unrelated edits. Without this, incremental compilation, build history, and cross-build comparison cannot work.
 - **Semantic hashes.** Each declaration has an interface hash (what dependents observe: signature, layout, `inline` body if relevant) separate from an implementation hash. Incremental compilation compares interface hashes (§21).
 - **Explicit invalidation.** Every graph fact records what it was derived from, so an edit invalidates exactly the dependent facts.
-- **Storage format** is an open decision (§32). It MUST be versioned and MUST be safely discardable (always rebuildable from sources).
+- **Storage format**: versioned, sorted text (`embidx`; see §32 question 5). It is versioned and safely discardable — always rebuildable from sources, and byte-identical when rebuilt.
 
 Consumers: incremental builds, EmbCC-LS, navigation, refactoring, analyzers, "why" queries, documentation, architecture visualization, debugger.
 
@@ -846,7 +864,7 @@ them through this mapping instead.
 | **M3** self-hosting and EmbLinkOS | **Done** | `ROADMAP.md` M3. Stage-to-stage byte-identity is a standing test over sixteen sources, on the OS |
 | **M4** inspect, diagnostics, first "why" | **Half done, and the wrong half** | Diagnostics went far past the gate (stable IDs, JSON, `--explain`, fix-its, `--fix`, warning groups, a dataflow analysis, `embld --doctor`). `inspect`, `why` and the memory/stack reports have not started, because **no pass emits remarks** |
 | **M5** optimizer v1 | **Done as code, not as gate** | mem2reg, SCCP, DCE, CSE/GVN, inlining and a real register allocator all exist and a kernel boots at `-O0`/`-O1`/`-O2`. The gate also requires remarks covering every inlining decision, and differential testing at `-O2` against GCC at scale. Neither is in place |
-| **M6** language server and semantic incremental builds | **Language server done; the graph not started** | `embls` answers eight LSP methods from the real frontend. The project graph, USRs and interface hashes (§8.2) do not exist, so incremental builds are Level 1 |
+| **M6** language server and semantic incremental builds | **Done** | `embls` answers eight LSP methods from the real frontend. USRs, interface hashes and the cross-TU index (§8.2) exist: `embidx stale` is §21 Level 2 — a header edit that changes no observed interface rebuilds nothing |
 | **M7** second target and profiles | **Target done, profiles not** | AArch64 is first-class and the M2 gates pass on it with no optimizer changes — exactly the predicted outcome. Target profiles and budgets (§20.4) do not exist |
 | **M8** analysis | **Not started** | One dataflow warning exists; evidence grades, traces and the labeled corpus do not |
 | **M9** C++0 | **Overtaken** | See §12.2: C++0 through C++2 and much of C++3 are done, libstdc++ compiles, and C++ runs on EmbLinkOS |
@@ -961,7 +979,7 @@ To be resolved by ADR before the milestone that needs them:
 2. ~~Calling convention and data layout~~ — **answered: SysV AMD64 as-is** on x86-64, **AAPCS64** on AArch64, no deviation (§4, `docs/architecture/abi.md`).
 3. ~~Debug format~~ — **answered: DWARF-4**, emitted under `-g` and consumed by EmbDBG (§4).
 4. Is the Linux ELF test target acceptable as a permanent supported target, or test-only? — **still open**, but in practice it is permanent: it is how every test is refereed against GCC on both architectures.
-5. Project-graph storage: custom format, SQLite, or append-only log? — **M6**.
+5. Project-graph storage: custom format, SQLite, or append-only log? — **answered for v1**: line-oriented, sorted, versioned text (`embidx`, §8.2). Chosen because §8.2 requires the store be safely discardable and R4 requires determinism, and both are trivially checkable on text — two builds' indexes compare with `diff`, and a reader needs no program. A database becomes the right answer when the index stops fitting in memory or needs concurrent writers; neither is true yet.
 6. ~~Does C++ go beyond C++0?~~ — **answered: yes, C++20 with libstdc++** (D-013, §12.2). The justifying component exists: the OS's `cxxdemo`, with `<iostream>`, runs on EmbLinkOS. Non-goal 2 needs amending to match.
 7. ~~Second target~~ — **answered: AArch64**, and it is done. The bare-metal 32-bit case for §20 is still unmade, and is now the open part of this question: the backends assume LP64.
 8. Language-server latency targets and incremental-analysis granularity — **M6**.
