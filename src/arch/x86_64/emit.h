@@ -121,6 +121,8 @@ void x86_cmp_rr(struct code *c, int a, int b, int w);         /* cmp a, b */
 void x86_div_rr(struct code *c, int src, int sign, int w);    /* [rdx:rax]/src */
 /* argument registers by index, for aggregates arriving in pieces */
 int  x86_argreg(int index);
+int  x86_nargregs(void);        /* 6 System V, 4 Microsoft x64 */
+int  x86_stack_arg_base(void);  /* rbp+16, or rbp+48 past shadow */
 void x86_not_eax(struct code *c, int w);
 void x86_neg_reg(struct code *c, int reg, int w);   /* neg reg, in place */
 void x86_not_reg(struct code *c, int reg, int w);   /* not reg, in place */

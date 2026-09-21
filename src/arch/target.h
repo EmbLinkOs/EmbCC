@@ -173,6 +173,39 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k);
  * and passing it on would displace every call by four bytes. */
 int target_coff_reloc(enum target_arch a, enum reloc_kind k);
 
+/* True where x86-64 uses the MICROSOFT x64 calling convention rather
+ * than System V's. This is a property of the OS, not of the
+ * architecture -- which is the whole reason D-011's "one architecture,
+ * one convention" does not hold any more and the question has to be
+ * asked by name.
+ *
+ * What differs, all of it (checked against clang --target=
+ * x86_64-windows-gnu, which is the referee tests/golden/win-abi.sh
+ * uses):
+ *
+ *   Four argument slots, rcx/rdx/r8/r9, and the index is SHARED with
+ *   the float registers -- f(int, double, int) is rcx, xmm1, r8, not
+ *   rcx, xmm0, rdx. A per-class counter is the single most likely way
+ *   to get this wrong, because it produces working code for every
+ *   argument list that is all one class.
+ *
+ *   The caller reserves 32 bytes of SHADOW SPACE below the return
+ *   address, which the callee may use to spill its register
+ *   arguments. So the first stack argument is at rbp+48, not rbp+16.
+ *
+ *   A struct is passed by value only when its size is exactly 1, 2, 4
+ *   or 8 bytes. Anything else goes BY REFERENCE, and the caller must
+ *   pass a pointer to a copy it made, because the callee may write to
+ *   it.
+ *
+ *   A variadic floating-point argument travels in its xmm register
+ *   AND in the integer register of the same slot, since the callee
+ *   does not know which to read.
+ *
+ *   rsi and rdi are CALLEE-saved.
+ */
+int target_win64_abi(void);
+
 int target_macho_reloc(enum target_arch a, enum reloc_kind k,
                        int *pcrel, int *length);
 

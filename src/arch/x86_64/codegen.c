@@ -1871,11 +1871,39 @@ static void gen_func(struct ir_func *fn, struct code *text,
         if (ret_mem) {
             x86_store_arg(text, ireg++, sret_slot);
         }
-        int incoming = 16; /* saved rbp + return address */
+        /* System V puts the first stack argument straight above the
+         * return address; Microsoft x64 leaves 32 bytes of shadow space
+         * there for this function to spill its four register arguments
+         * into, so the first one that did not fit is four words higher. */
+        int incoming = x86_stack_arg_base();
         for (int i = 0; i < f->nparams; i++) {
             struct type *pt = f->param_tys[i];
             enum arg_class cls[2];
             int n = ty_classify(pt, cls);
+            if (target_win64_abi()) {
+                /* The caller placed this by POSITION, so the callee
+                 * reads it by position: `ireg` is the one slot counter
+                 * and the float registers share its numbering. Reading
+                 * with a separate float counter is the same mistake the
+                 * call site could make, and it looks correct until an
+                 * argument list mixes the two classes. */
+                int slot = ireg++;
+                freg = ireg;
+                if (slot >= 4) {
+                    x86_load_reg_mem(text, REG_RAX, REG_RBP, incoming, 8);
+                    x86_store_slot(text, sd[i], 8);
+                    incoming += 8;
+                } else if (ty_is_float(pt)) {
+                    x86_movs_store(text, slot, sd[i], ty_size(pt));
+                } else if (pmove && g_loc[i] >= 0) {
+                    pmv_src[npmv] = x86_argreg(slot);
+                    pmv_dst[npmv] = g_loc[i];
+                    npmv++; pmoved[i] = 1;
+                } else {
+                    x86_store_arg(text, slot, sd[i]);
+                }
+                continue;
+            }
             if (pt->kind == TY_INT128) {
                 /* two integer registers, or 16 aligned bytes of the stack */
                 if (ireg + 2 <= 6) {
@@ -2777,6 +2805,17 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     struct ir_arg *a = &i->argv[k];
                     if (a->on_stack)
                         continue;
+                    if (target_win64_abi()) {
+                        /* One slot per argument, whatever its class --
+                         * so a float still CONSUMES its integer
+                         * register rather than skipping it. */
+                        if (a->cls[0] != CLASS_SSE && in_reg(a->vreg)) {
+                            mvdest[nmv] = x86_argreg(pireg);
+                            mvsrc[nmv] = g_loc[a->vreg]; nmv++;
+                        }
+                        pireg++;
+                        continue;
+                    }
                     if (a->is_struct || a->nclass == 2) {
                         for (int q = 0; q < a->nclass; q++)
                             if (a->cls[q] != CLASS_SSE) pireg++;
@@ -2808,6 +2847,22 @@ static void gen_func(struct ir_func *fn, struct code *text,
                             x86_load_reg_mem(text, x86_argreg(ireg++),
                                              REG_RAX, q * 8, 8);
                     }
+                    continue;
+                }
+                if (target_win64_abi()) {
+                    /* One slot, shared: the float and the integer
+                     * register both carry the argument's POSITION. A
+                     * variadic float goes in BOTH, because the callee
+                     * has no prototype to tell it which to read. */
+                    if (a->cls[0] == CLASS_SSE) {
+                        x86_movs_load(text, ireg, sd[a->vreg], a->size);
+                        if (i->call_varargs)
+                            x86_load_arg(text, ireg, sd[a->vreg]);
+                    } else if (!in_reg(a->vreg)) {
+                        x86_load_arg(text, ireg, sd[a->vreg]);
+                    }
+                    ireg++;
+                    freg = ireg;
                     continue;
                 }
                 if (a->nclass == 2) {           /* an __int128 */

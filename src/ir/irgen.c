@@ -2081,6 +2081,68 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             ar->stk_off = 0;
             ar->on_stack = 0;
 
+            if (target_win64_abi()) {
+                /* Microsoft x64: one SLOT per argument, four of them,
+                 * and the slot is the argument's POSITION. A double in
+                 * slot 1 travels in xmm1 while an integer in slot 1
+                 * travels in rdx -- the two classes share the numbering
+                 * instead of each counting its own, which is what makes
+                 * a per-class counter produce correct code for every
+                 * argument list that happens to be all one class and
+                 * wrong code for the first one that is not.
+                 *
+                 * `ireg` is that single counter here, and `freg` is
+                 * kept equal to it so the backend may read either.
+                 *
+                 * A struct rides in its slot only at exactly 1, 2, 4 or
+                 * 8 bytes. Anything else goes by reference, with a copy
+                 * the CALLER makes -- the callee may write to it. */
+                int byval = !ar->is_struct || ar->size == 1 ||
+                            ar->size == 2 || ar->size == 4 ||
+                            ar->size == 8;
+                ar->byref = !byval;
+                /* Three things this convention needs that are not
+                 * written yet, each refused rather than passed the
+                 * System V way under a Windows triple:
+                 *
+                 *   A struct of any size but 1/2/4/8 travels by
+                 *   reference, with a copy the CALLER makes. Passing
+                 *   it in registers instead puts its first eight bytes
+                 *   where the callee expects a pointer.
+                 *
+                 *   __int128 and long double are handled here with rsi
+                 *   and rdi as scratch, and those are CALLEE-saved on
+                 *   Windows -- so the sequence would return to its
+                 *   caller with two of the caller's registers changed. */
+                if (ar->byref)
+                    diag_fatal(fn->file, e->line,
+                               "passing a %d-byte struct by value is not "
+                               "supported for a Windows target yet: the "
+                               "Microsoft x64 convention passes it by "
+                               "reference with a copy the caller makes, "
+                               "and EmbCC does not make that copy",
+                               ar->size);
+                if (ar->is_int128 || at->kind == TY_LDOUBLE)
+                    diag_fatal(fn->file, e->line,
+                               "passing %s is not supported for a Windows "
+                               "target yet: EmbCC lowers it through rsi "
+                               "and rdi, which are callee-saved there",
+                               ar->is_int128 ? "__int128" : "long double");
+                if (ireg >= 4) {
+                    ar->on_stack = 1;
+                    /* Stack arguments begin ABOVE the 32 bytes of
+                     * shadow space the caller owes the callee, so the
+                     * outgoing area starts at 32 rather than 0. */
+                    if (stk < 32)
+                        stk = 32;
+                    ar->stk_off = stk;
+                    stk += 8;
+                }
+                ireg++;
+                freg = ireg;
+                continue;
+            }
+
             /* SysV: an argument goes on the stack when its class has no
              * registers left for ALL of its eightbytes — the decision is
              * made here so codegen only follows it, and the two cannot
@@ -2104,6 +2166,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 freg += nf;
             }
         }
+        /* Every Microsoft x64 call owes its callee 32 bytes of shadow
+         * space, whether or not any argument went on the stack -- the
+         * callee may spill its four register arguments there without
+         * asking. A call with two arguments reserves it too. */
+        if (target_win64_abi() && stk < 32)
+            stk = 32;
         if (stk > fn->outgoing_bytes)
             fn->outgoing_bytes = stk;
 

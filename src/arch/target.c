@@ -170,6 +170,11 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
     }
 }
 
+int target_win64_abi(void)
+{
+    return g_arch == TARGET_X86_64 && g_os == TGT_OS_WINDOWS;
+}
+
 int target_coff_reloc(enum target_arch a, enum reloc_kind k)
 {
     /* Windows on aarch64 is not a triple EmbCC offers (D-014 puts MinGW
