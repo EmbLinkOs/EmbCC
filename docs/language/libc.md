@@ -49,6 +49,7 @@ deliberately, so every target gets the same behaviour and a fix lands once.
 | `<time.h>` | the calendar complete and exact; the clock is whatever the backend has |
 | `<setjmp.h>` | complete, per architecture |
 | `<assert.h>`, `<inttypes.h>` | complete |
+| `printf` family | complete, including `%a` and `long double` at its own width |
 | `scanf` family | complete, including `%[`, `%n`, `%a` and hex floats |
 | `<wchar.h>`, `<locale.h>`, `<signal.h>`, `<threads.h>` | **not yet** |
 
@@ -147,11 +148,41 @@ ties, subnormals, the extremes and four thousand random bit patterns —
 now matches a known-correct library byte for byte. The golden keeps the
 cases that used to fail.
 
-Two things are absent rather than wrong: `%a`, and `long double`, which
-narrows to a double before conversion — so `%Lf` of a value outside
-double's range prints `inf`. Doing that exactly needs a big integer
-fourteen times larger (5^16445 rather than 5^1074), paid on every call
-for a conversion nothing here makes.
+**`long double` is now converted at its own width**, over a big integer
+fifteen times larger (5^16494 rather than 5^1074) — and because that
+buffer is ~17KB it belongs to the *caller*, so each entry point declares
+its own and printing a plain double still costs what it always did.
+Before this, a long double narrowed to a double first, so `%Lf` of a
+value beyond double's range printed `inf` and the smallest one printed
+`0.000`. The largest x87 long double now writes out all **4933** of its
+integer digits; the fixed 512-byte output buffer that used to hold the
+result silently truncated any precision that overran it, which is why
+the digits are now streamed and only their *length* is computed up
+front.
+
+**`%a` is here too**, and it is the one conversion that needs no
+expansion at all: four bits of a binary significand are one hexadecimal
+digit, so the output is exact by construction and a value printed with
+`%a` carries every bit it had. A precision *rounds*, to nearest with
+ties to even — macOS's libc truncates here, which is how the tie cases
+below were found. C leaves the leading digit unspecified for a value
+that is not normalized; this shifts subnormals up so the exponent is
+always the true binary one and every non-zero value leads with a one,
+where glibc prints `0x0.0000000000001p-1022` instead.
+
+Reading one back is still narrower than writing one: `strtold` ignores
+its width and parses through a double, so `%La` does not yet round-trip
+above double's range. That is the mirror of the bug just fixed and is
+recorded in `docs/developer/todo.md`.
+
+The evidence: **117,819** conversions of doubles — every style at every
+precision, over ties, subnormals, the extremes and three thousand random
+bit patterns — are byte-identical to a known-correct library, and
+**2,997,615** `%a` roundings agree with an independent implementation of
+the rounding rule. The long double cases in `tests/golden/libc.sh` were
+computed in exact rational arithmetic rather than read off another
+library, since no library on the build host has an 80-bit long double to
+ask.
 
 ## The wide half, and three headers that reach the hardware
 

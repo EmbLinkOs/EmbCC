@@ -837,6 +837,70 @@ changing. `tss_create` and `thread_local` are absent for a different
 reason -- they need thread-local storage, which EmbCC does not have,
 and a key every thread shared would be a global under another name.
 
+## `strtold` parses through a double (2026-09-21)
+
+`conv()` in `lib/libc/src/stdlib/strtod.c` takes a `wide` flag and then
+says `(void)wide;` — `strtold` is `strtod` widened afterwards, and
+`parse_hex` returns `(long double)ldexp((double)v, bexp)`, narrowing the
+one path that could have been exact for free.
+
+This is the mirror of the printf gap closed below, and it matters for
+the same reason: `%La` now writes every bit a long double has, and
+reading one back loses them again above double's range. The hex path is
+the easy half — it is bit assembly, not decimal arithmetic — and needs
+only a 64-bit accumulator for x87, though 128 for an IEEE quad. The
+decimal path needs a big-integer decimal-to-binary at long double
+width, which is the same order of work as the printf side.
+
+## Closed: %a, and long double converted at its own width (2026-09-21)
+
+Both were listed in `docs/language/libc.md` as "absent rather than
+wrong". The long double one was the substantive half: a `long double`
+was cast to a `double` before conversion, so `%Lf` of anything beyond
+double's range printed `inf` and the smallest one printed `0.000`.
+
+The fix is a decomposition step. A double, an x87 80-bit extended and an
+IEEE quad differ only in their bit layout; once decomposed they are the
+same thing — an integer significand times a power of two — so
+`struct fpval` is what the conversion works on and everything below it
+is written once. The x87 is the one format that stores its leading bit
+explicitly, and the quad's significand spans both words, which is the
+whole of the difference.
+
+The big integer needed to grow fifteen-fold (5^16494 rather than
+5^1074), and sizing one buffer for the larger would have put ~17KB of
+stack on every printf of a double. So the limbs belong to the CALLER:
+`put_double` and `put_ldouble` each declare their own and pass them in.
+
+Two things fell out of it. The output was being built in a fixed
+512-byte buffer whose loops stopped at its end, so any precision that
+overran it was silently truncated — `%.700f` of a double was wrong
+before any long double was involved. The digits are now streamed and
+only the LENGTH is computed up front, which is what the width padding
+actually needs. And %g's style choice, which depends on the exponent
+after rounding, was rounding a full copy of the digit string to find
+out; it only ever needed the carry, so it now asks for that directly and
+the second buffer is gone.
+
+`%a` needs none of this machinery: four bits of a binary significand are
+one hexadecimal digit, so it is exact by construction. Its one real
+decision is rounding at a precision, which is ties-to-even in base
+sixteen — a tie being an exact eight with nothing after it.
+
+Verifying it needed three referees, because no single one covers the
+ground. The system libc refereed **117,819** double conversions, all
+byte-identical. It could NOT referee `%a` with a precision, because
+macOS truncates there rather than rounding — so **2,997,615** roundings
+were checked against an independent implementation of the rule, reading
+the exact digits from the default `%a` both agree on. And no library on
+the build host has an 80-bit long double at all, so those expectations
+were computed in exact rational arithmetic.
+
+Not covered: the IEEE quad path. Nothing currently runs this libc on
+aarch64 — `tests/golden/libc.sh` says so itself — so the 113-bit
+decomposition is compiled and type-checked but never executed. It
+inherits that gap rather than creating one.
+
 ## Closed: a rollback that restored a freed pointer (2026-09-21)
 
 `<filesystem>` would not compile: the compiler took SIGSEGV inside

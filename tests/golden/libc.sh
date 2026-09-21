@@ -641,6 +641,138 @@ echo "UTF-8 refusing overlong forms, surrogates and split sequences; the
 rounding mode reaching the hardware and changing arithmetic; every
 width C11 asks for, and nearbyint and remainder rounding ties to even"
 
+# ---- %a, and long double converted as exactly as a double -----------------
+cat > "$out/hexfp.c" << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
+
+static int fails;
+#define CHK(want, ...) do {                                             \
+        char b_[8192];                                                  \
+        snprintf(b_, sizeof b_, __VA_ARGS__);                           \
+        if (strcmp(b_, (want))) {                                       \
+            printf("FAIL line %d: got [%s] want [%s]\n",                \
+                   __LINE__, b_, (want));                               \
+            fails++;                                                    \
+        }                                                               \
+    } while (0)
+
+#if __LDBL_MANT_DIG__ == 64
+/* An x87 long double built from its bits, so the expected strings below
+ * are about the CONVERSION and not about how a decimal literal rounds.
+ * Every one of them was computed independently in exact rational
+ * arithmetic -- see the generator in the commit that added this. */
+static long double ld_of(unsigned long long m, unsigned be, int neg)
+{
+    unsigned char b[sizeof(long double)];
+    long double v;
+    unsigned se = (be & 0x7fffu) | (neg ? 0x8000u : 0u);
+    memset(b, 0, sizeof b);
+    for (int i = 0; i < 8; i++) b[i] = (unsigned char)(m >> (8 * i));
+    b[8] = (unsigned char)se;
+    b[9] = (unsigned char)(se >> 8);
+    memcpy(&v, b, sizeof v);
+    return v;
+}
+#endif
+
+int main(void)
+{
+    /* ---- %a: exact by construction, because four bits are one digit ---- */
+    CHK("0x1p+0",      "%a", 1.0);
+    CHK("0x0p+0",      "%a", 0.0);
+    CHK("-0x0p+0",     "%a", -0.0);
+    CHK("0x1p-1",      "%a", 0.5);
+    CHK("0x1.fep+7",   "%a", 255.0);
+    CHK("0X1.FEP+7",   "%A", 255.0);
+    CHK("0x1.8p+1",    "%a", 3.0);
+    /* The smallest subnormal. C leaves the leading digit unspecified for
+     * a value that is not normalized; this shifts it up, so the exponent
+     * is the true binary one and every non-zero value leads with 1. */
+    CHK("0x1p-1074",   "%a", 5e-324);
+    /* A precision ROUNDS, to nearest with ties to even -- it does not
+     * truncate, which is what macOS's libc does here. */
+    CHK("0x1.f0p+0",   "%.2a", 1.9375);
+    CHK("0x2p+0",      "%.0a", 1.9375);
+    CHK("0x1.fp+0",    "%.1a", 1.9375);   /* nothing dropped but zeros */
+    /* A real tie -- an exact eight with nothing after it -- resolved to
+     * EVEN in both directions. These two differ only in whether the
+     * last kept digit is odd, and they round opposite ways. */
+    CHK("0x1.4p+0",    "%.1a", 1.21875);  /* 0x1.38: 3 is odd  -> up   */
+    CHK("0x1.2p+0",    "%.1a", 1.15625);  /* 0x1.28: 2 is even -> down */
+    CHK("0x1.p+0",     "%#.0a", 1.0);
+    CHK("      0x1p+0", "%12a", 1.0);
+    CHK("0x1p+0      ", "%-12a", 1.0);
+    CHK("0x0000001p+0", "%012a", 1.0);    /* zeros go after the 0x */
+
+#if __LDBL_MANT_DIG__ == 64
+    /* ---- long double, converted rather than narrowed ------------------- */
+    long double one   = ld_of(0x8000000000000000ULL, 16383, 0);
+    long double tiny  = ld_of(0x0000000000000001ULL, 0,     0);
+    long double ldmax = ld_of(0xffffffffffffffffULL, 0x7ffe, 0);
+    long double ldmin = ld_of(0x8000000000000000ULL, 1,     0);
+    long double odd   = ld_of(0xcafebabedeadbeefULL, 16443, 0);
+    long double nhalf = ld_of(0xa000000000000000ULL, 16384, 1);
+
+    /* An x87's 64 significand bits split as one four-bit digit and
+     * fifteen more, which is why 1.0L reads 0x8p-3 and not 0x1p+0. */
+    CHK("0x8p-3",            "%La", one);
+    CHK("0x8.00000p-3",      "%.5La", one);
+    CHK("1.00000000000000000000e+00", "%.20Le", one);
+    CHK("1",                 "%.40Lg", one);
+
+    /* Below anything a double can hold: this used to print 0.000 and
+     * 0.00000000000000000000e+00, because the value was narrowed first. */
+    CHK("0x8p-16448",        "%La", tiny);
+    CHK("3.64519953188247460253e-4951", "%.20Le", tiny);
+    CHK("3.645199531882474602528405933619419816399e-4951", "%.40Lg", tiny);
+
+    /* Above anything a double can hold: this used to print inf. */
+    CHK("0xf.fffffffffffffffp+16380", "%La", ldmax);
+    CHK("0x1.00000p+16384",  "%.5La", ldmax);   /* the carry out of 0xf */
+    CHK("1.18973149535723176502e+4932", "%.20Le", ldmax);
+    CHK("1.189731495357231765021263853030970205169e+4932", "%.40Lg", ldmax);
+
+    CHK("0x8p-16385",        "%La", ldmin);
+    CHK("3.36210314311209350626e-4932", "%.20Le", ldmin);
+
+    CHK("0xc.afebabedeadbeefp+57", "%La", odd);
+    CHK("0xc.afebbp+57",     "%.5La", odd);
+    CHK("1.82841674608605385388e+18", "%.20Le", odd);
+    CHK("1828416746086053853.875",    "%.40Lg", odd);
+    CHK("1828416746086053853.875",    "%.3Lf",  odd);
+
+    CHK("-0xap-2",           "%La", nhalf);
+    CHK("-2.50000000000000000000e+00", "%.20Le", nhalf);
+    CHK("-2.5",              "%.40Lg", nhalf);
+
+    /* The largest long double written out in full: 4933 integer digits,
+     * every one of them determined, plus the three of the fraction. The
+     * fixed output buffer this replaced stopped at 512 characters. */
+    {
+        static char b[8192];
+        int n = snprintf(b, sizeof b, "%.3Lf", ldmax);
+        if (n != 4937 || strncmp(b, "118973149535", 12) ||
+            strcmp(b + 4925, "89770240.000")) {
+            printf("FAIL ldmax: n=%d head=%.12s tail=%s\n", n, b, b + 4925);
+            fails++;
+        }
+    }
+#endif
+
+    if (!fails)
+        printf("hexfp and long double: ok\n");
+    return fails ? 1 : 42;
+}
+EOF
+if build_run "$out/hexfp.c" -O1; then rc=0; else rc=$?; fi
+cat "$out/run.txt"
+[ "$rc" = 42 ] || { echo "FAIL: the %a / long double program exited $rc"; exit 1; }
+want_line "hexfp and long double: ok"
+echo "%a exact and correctly rounded, and long double converted at its own
+width -- the largest one printing all 4933 of its digits"
+
 # ---- the acceptance: the whole execution corpus ---------------------------
 ok=0; bad=0
 for f in tests/exec/*.c; do
