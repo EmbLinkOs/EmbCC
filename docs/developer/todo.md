@@ -944,6 +944,22 @@ implemented instead: the function's address goes in a `SHT_INIT_ARRAY` /
 `SHT_FINI_ARRAY` section, and `tests/exec/ctors.c` asserts a value that
 is only right if they ran.
 
+**Every attribute now has a stated disposition** (`attr_table` in
+`src/parse/parse.c`): honoured, refused, or a no-op for a named reason.
+Anything not in the table is warned about under `-Wattributes` and then
+ignored, which is GCC's behaviour and the thing that would have caught
+the `constructor` bug the day it was written — the failure mode this
+replaces is not "we ignore attributes", it is "nobody decided".
+
+Newly honoured, with what acts on each: `used` (the symbol survives),
+`unused` (`-Wunused-*` stays quiet, in both the leading and trailing
+spelling — the leading one did not even parse on a local before),
+`visibility` (`st_other`), `always_inline`/`noinline` (the inliner, at
+-O2, with `-fremarks` naming which applied), `deprecated` and
+`warn_unused_result` (new warnings, each switchable by the name it
+prints). `always_inline` overrides the inliner's SIZE budget only: every
+other reason it declines is a thing it cannot do, not a thing it chose.
+
 Still outstanding in the same family:
 
 - **`returns_twice`** belongs on the refusal list and is not on it:

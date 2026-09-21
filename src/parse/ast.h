@@ -201,6 +201,7 @@ struct stmt {
     struct type *dty;     /* STMT_DECL: declared type */
     int is_static;        /* STMT_DECL: a static local -> its own global */
     int is_tls;           /* STMT_DECL: `static __thread` -> a TLS global */
+    int attr_unused;      /* STMT_DECL: __attribute__((unused)) on it */
     int is_extern;        /* STMT_DECL: block-scope extern -> a unit global/func */
     struct initelem *inits; /* STMT_DECL: flattened aggregate init */
     int ninits;
@@ -251,6 +252,8 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    int attr_used, attr_unused, attr_deprecated;
+    const char *vis;      /* __attribute__((visibility("..."))) */
     /* __thread / _Thread_local / thread_local: one instance per thread,
      * in .tdata or .tbss rather than .data or .bss, and addressed off
      * the thread pointer instead of off the program's own image. */
@@ -288,6 +291,12 @@ struct func {
     /* __attribute__((constructor)) / ((destructor)): its address goes in
      * .init_array / .fini_array, and the startup code walks them. */
     int is_ctor, is_dtor;
+    /* The hints EmbCC acts on: keep the symbol, do not warn that it is
+     * unused, force or forbid inlining, warn at each call, warn when a
+     * caller throws the result away. `vis` is an ELF visibility. */
+    int attr_used, attr_unused, attr_always_inline, attr_noinline;
+    int attr_deprecated, attr_warn_unused_result;
+    const char *vis;
     /* __attribute__((format(printf|scanf, idx, first))): 1 printf,
      * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */
     int fmt_kind, fmt_idx, fmt_first;

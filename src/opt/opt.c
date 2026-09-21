@@ -1731,8 +1731,8 @@ static struct ir_func *func_ir(struct ir_unit *iu, struct func *callee)
  * from a dozen places and every one of them meant something different; by
  * the time anyone asked why a function was not inlined, the twelve answers
  * had collapsed into one. `*why` is the stable code, `*detail` the fact. */
-static int inlinable(struct ir_func *cf, const char **why, char *detail,
-                     size_t dcap)
+static int inlinable(struct ir_func *cf, int force, const char **why,
+                     char *detail, size_t dcap)
 {
     struct func *c = cf->src;
     *why = NULL;
@@ -1741,7 +1741,13 @@ static int inlinable(struct ir_func *cf, const char **why, char *detail,
 
     if (c->is_varargs)       { *why = "callee-is-varargs";  return 0; }
     if (cf->nins == 0)       { *why = "callee-not-defined-here"; return 0; }
-    if (cf->nins > INLINE_MAX_CALLEE) {
+    /* __attribute__((always_inline)) overrides the SIZE budget and
+     * nothing else. Every other test below is a thing this inliner
+     * cannot do rather than a thing it decided against -- forcing one
+     * would not inline the call, it would emit a wrong one. The remark
+     * still names whichever test refused, so a function marked
+     * always_inline that was not inlined says why. */
+    if (!force && cf->nins > INLINE_MAX_CALLEE) {
         *why = "callee-too-large";
         if (detail)
             snprintf(detail, dcap, "%d instructions, budget %d",
@@ -1918,8 +1924,11 @@ static void inline_unit(struct ir_unit *iu)
                     why = "would-be-recursive";
                 else if (c->has_i128)
                     why = "callee-computes-in-__int128";
+                else if (in->callee->attr_noinline)
+                    why = "callee-is-noinline";
                 else
-                    ok = inlinable(c, &why, detail, sizeof detail);
+                    ok = inlinable(c, in->callee->attr_always_inline,
+                                   &why, detail, sizeof detail);
                 if (!ok) {
                     remark_add("inline", "not-inlined", in->callee->name, why,
                                fn->src ? fn->file : NULL, in->line,
@@ -1932,7 +1941,9 @@ static void inline_unit(struct ir_unit *iu)
             }
             if (ci < 0)
                 break;
-            remark_add("inline", "inlined", cf->name, "small-enough",
+            remark_add("inline", "inlined", cf->name,
+                       fn->ins[ci].callee->attr_always_inline
+                           ? "always_inline" : "small-enough",
                        fn->src ? fn->file : NULL, fn->ins[ci].line,
                        "%d instructions into %s, budget %d", cf->nins,
                        fn->src ? fn->name : "?", INLINE_MAX_CALLEE);

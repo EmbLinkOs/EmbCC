@@ -209,6 +209,15 @@ typedef struct {
  * address. A TLS object marked STT_OBJECT would be relocated as though
  * it had one fixed location shared by every thread. */
 #define STT_TLS       6
+/* Symbol visibility, in st_other's low two bits. HIDDEN means the name
+ * is not visible to other components once linked -- the linker turns it
+ * into a local -- which is how a library keeps an interface private
+ * without giving up being able to call it across its own units. */
+#define STV_DEFAULT   0
+#define STV_INTERNAL  1
+#define STV_HIDDEN    2
+#define STV_PROTECTED 3
+
 #define ELF64_ST_INFO(bind, type) ((Elf64_Uchar)(((bind) << 4) | ((type) & 0xf)))
 
 #endif

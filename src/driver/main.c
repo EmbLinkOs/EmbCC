@@ -135,6 +135,17 @@ static void dump_predef(void)
  * NOT happen is an ELF file written for a Darwin target and named .o as
  * though it were right -- so this is the one place that says no, and it
  * says which triple and which format (THE RULE). */
+/* The four ELF visibilities, by the names the attribute uses. The
+ * parser has already refused anything else, so an unrecognised string
+ * cannot reach here. */
+static int stv_of(const char *v)
+{
+    if (!strcmp(v, "hidden"))    return STV_HIDDEN;
+    if (!strcmp(v, "internal"))  return STV_INTERNAL;
+    if (!strcmp(v, "protected")) return STV_PROTECTED;
+    return STV_DEFAULT;
+}
+
 static int object_format_ready(void)
 {
     if (target_fmt_get() == TGT_FMT_ELF)
@@ -471,7 +482,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * look dead, be dropped, and leave a relocation pointing at a
      * symbol that was never emitted. Being in .init_array IS the use. */
     for (struct func *f = u->funcs; f; f = f->next)
-        if (!f->absorbed && (f->is_ctor || f->is_dtor))
+        if (!f->absorbed && (f->is_ctor || f->is_dtor || f->attr_used))
+            /* __attribute__((used)) is the author saying to keep it
+             * although nothing here calls it -- a handler reached only
+             * from a table, or from assembly the compiler cannot see.
+             * Dropping it would link and then do nothing. */
             f->used = 1;
 
     remarks_enable(want_remarks || why_decision != NULL);
@@ -1270,6 +1285,17 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                       target_reloc_addend(ta, RK_CALL, 0));
     }
     free(ext);
+
+    /* __attribute__((visibility("hidden"))) and its three siblings.
+     * Applied after the symbols exist, because it modifies one rather
+     * than creating it -- and only where a visibility was asked for, so
+     * every other symbol keeps the writer's default of STV_DEFAULT. */
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && f->sym_ndx && f->vis)
+            elfw_symbol_visibility(w, f->sym_ndx, stv_of(f->vis));
+    for (struct global *g = u->globals; g; g = g->next)
+        if (!g->absorbed && g->sym_ndx && g->vis)
+            elfw_symbol_visibility(w, g->sym_ndx, stv_of(g->vis));
 
     /* Fill the constructor/destructor slots: each is the address of a
      * function of this unit, so each is an absolute 64-bit relocation

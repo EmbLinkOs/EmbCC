@@ -31,6 +31,7 @@ struct vardef {
     int active;         /* 0 once its block has closed */
     const char *asm_reg; /* a register-asm binding, else NULL */
     int user_align;     /* __attribute__((aligned(N))) on the local; 0 = none */
+    int unused_ok;      /* __attribute__((unused)): do not report it */
 };
 
 /* Block scoping without giving up unique frame slots: entries are never
@@ -160,6 +161,7 @@ static int scope_add(struct scope *sc, const char *name, struct type *ty,
     sc->vars[sc->n].col = 0;
     sc->vars[sc->n].asm_reg = NULL;
     sc->vars[sc->n].user_align = 0;
+    sc->vars[sc->n].unused_ok = 0;
     return sc->n++;
 }
 
@@ -1042,6 +1044,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->gref = g;
                 g->used = 1;
                 e->ty = g->ty;
+                if (g->attr_deprecated)
+                    diag_warn_opt(diag_file(u), e->line, e->col,
+                                  "deprecated-declarations",
+                                  "'%s' is deprecated", g->name);
             } else if (g) {
                 sema_error_at(u, e->line, e->col,
                            "'%s' is used before its declaration "
@@ -1057,6 +1063,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                "'%s' is used before its declaration",
                                e->name);
                 e->fref = fd;
+                if (fd->attr_deprecated)
+                    diag_warn_opt(diag_file(u), e->line, e->col,
+                                  "deprecated-declarations",
+                                  "'%s' is deprecated", fd->name);
                 fd->used = 1;
                 e->ty = ty_ptr(ty_func(fd->ret_ty, fd->param_tys,
                                        fd->nparams, fd->is_varargs));
@@ -2013,6 +2023,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                            "declare or define functions before their "
                            "callers", e->lhs->name);
             e->callee = callee;
+            /* The declaration asked for this warning, so it is on by
+             * default: the author of the interface is telling its
+             * callers to move, and a warning nobody sees moves nobody. */
+            if (callee->attr_deprecated)
+                diag_warn_opt(diag_file(u), e->line, e->col,
+                              "deprecated-declarations",
+                              "'%s' is deprecated", callee->name);
             callee->used = 1;
             ft = ty_func(callee->ret_ty, callee->param_tys,
                          callee->nparams, callee->is_varargs);
@@ -3157,6 +3174,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             sc->vars[s->var_index].col = s->col;
             sc->vars[s->var_index].asm_reg = s->asm_reg;
             sc->vars[s->var_index].user_align = s->user_align;
+            sc->vars[s->var_index].unused_ok = s->attr_unused;
             /* A static local has static storage, so a compound literal in its
              * initializer is an anonymous global, not a stack slot. */
             if (s->is_static)
@@ -3258,6 +3276,19 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             break;
         case STMT_EXPR:
             check_expr(u, f, sc, s->expr);
+            /* -Wunused-result: the whole statement is a call, and its
+             * value went nowhere. The attribute is the callee's author
+             * saying the result is the point -- a read() whose count is
+             * dropped, a realloc() whose new pointer is lost. A cast to
+             * void is the way to say it was meant, and that is not a
+             * STMT_EXPR of a call any more. */
+            if (s->expr && s->expr->kind == EXPR_CALL && s->expr->callee &&
+                s->expr->callee->attr_warn_unused_result)
+                diag_warn_opt(diag_file(u), s->expr->line, s->expr->col,
+                              "unused-result",
+                              "result of '%s' is discarded, and it is "
+                              "declared warn_unused_result",
+                              s->expr->callee->name);
             break;
         case STMT_ASM: {
             struct asm_stmt *a = s->asm_s;
@@ -3539,6 +3570,11 @@ static void check_func(struct unit *u, struct func *f)
          * the programmer's: reporting them would be reporting ourselves. */
         if (!strcmp(v->name, "this") || !strncmp(v->name, "__cx_", 5))
             continue;
+        /* __attribute__((unused)) is what a macro writes on a variable
+         * whose use depends on a configuration. Warning anyway would
+         * make the warning useless where it matters. */
+        if (v->unused_ok)
+            continue;
         if (v->is_param)
             diag_warn_opt(diag_file(u), v->line, v->col, "unused-parameter",
                           "unused parameter '%s'", v->name);
@@ -3753,6 +3789,11 @@ void sema_check(struct unit *u)
      * anywhere, so it is never reported.) */
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && f->is_static && !f->used &&
+            /* __attribute__((unused)) is the author saying they know;
+             * __attribute__((used)) says to keep it, which implies the
+             * same. Warning anyway would train the reader to ignore
+             * the warning. */
+            !f->attr_unused && !f->attr_used &&
             f->name && strcmp(f->name, "main") != 0)
             diag_warn_opt(f->file ? f->file : u->file, f->line, 0,
                           "unused-function", "unused function '%s'", f->name);

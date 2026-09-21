@@ -125,6 +125,17 @@ int elfw_add_section(struct elfw *w, const char *name, Elf64_Word type,
     return w->nsec++;
 }
 
+void elfw_symbol_visibility(struct elfw *w, int sym, int stv)
+{
+    /* The table is a byte buffer of Elf64_Sym, so the entry is reached
+     * by index rather than held as a pointer -- which is also why this
+     * takes the index elfw_add_symbol returned. */
+    if (sym <= 0 || sym >= w->nsym)
+        return;
+    Elf64_Sym *tab = (Elf64_Sym *)w->symtab.p;
+    tab[sym].st_other = (Elf64_Uchar)(stv & 3);
+}
+
 int elfw_add_symbol(struct elfw *w, const char *name, Elf64_Addr value,
                     Elf64_Xword size, Elf64_Uchar info, Elf64_Half shndx)
 {

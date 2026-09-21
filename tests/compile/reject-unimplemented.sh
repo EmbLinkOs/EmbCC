@@ -13,7 +13,10 @@ mkdir -p "$out_dir"
 check() { # name source expected-message-grep
     src="$out_dir/$1.c"
     printf '%s\n' "$2" > "$src"
-    if err=$("$EMBCC" -c "$src" -o "$out_dir/$1.o" 2>&1); then
+    # -Werror so that a case whose diagnostic is a WARNING still fails
+    # the compile: an attribute EmbCC does not know is warned about,
+    # not refused, and this file's whole shape is "it did not compile".
+    if err=$("$EMBCC" -Werror -c "$src" -o "$out_dir/$1.o" 2>&1); then
         echo "case $1: compiled instead of failing"
         exit 1
     fi
@@ -377,3 +380,11 @@ check attr-ms-abi \
 check attr-constructor-priority \
     '__attribute__((constructor(101))) static void f(void) { }' \
     "cannot honour a priority"
+
+# An attribute EmbCC has never heard of is warned about and ignored,
+# which is GCC's behaviour and the thing that would have caught
+# __attribute__((constructor)) going unimplemented. -Werror makes the
+# warning an error, which is what lets this file check it at all.
+check attr-unknown \
+    '__attribute__((no_such_attribute_anywhere)) int f(void) { return 0; }' \
+    "is not one EmbCC knows"
