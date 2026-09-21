@@ -45,9 +45,15 @@ static void print_version(void)
            "_Atomic and the atomic builtins, _Generic — plus the GNU "
            "extensions EmbLinkOS uses (statement expressions, typeof, "
            "computed goto, attributes, extended inline asm).\n");
-    printf("Targets (--target=): x86_64-elf (default; System V AMD64, "
+    printf("Targets (--target=): x86_64-elf (the default; System V AMD64, "
            "x87 long double) and aarch64-elf (AAPCS64, binary128 long "
-           "double through libgcc).\n");
+           "double) are the freestanding pair; each architecture also has "
+           "-emblink, -linux-gnu and -apple-darwin, and any unknown "
+           "--target lists every triple (D-014).\n");
+    printf("Hosted: Linux builds a STATIC image with no glibc under it "
+           "(lib/libc/os/linux issues syscalls; make libc-linux-x86_64), "
+           "macOS emits Mach-O objects the system linker accepts. Windows "
+           "has the triple and its macros, but no COFF writer yet.\n");
     printf("C++ (.cc/.cpp/.cxx/.C, or -x c++): in progress toward C++20 "
            "with libstdc++ (docs/language/cpp-levels.md) — namespaces, overloading, "
            "references, classes with constructors and destructors, "
@@ -693,6 +699,19 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                        "DWARF goes in a __DWARF segment this does not "
                        "write, and emitting the ELF layout under a Mach-O "
                        "name would be worse than refusing");
+        /* A file-scope asm block's BYTES reach __text below, but its
+         * labels and relocations are written by the ELF path further
+         * down and have no Mach-O counterpart yet. Leaving that alone
+         * would produce an object whose `_start` had no symbol and
+         * whose `.quad main` was eight zeroes -- machine code that
+         * links and jumps to address zero. So it is refused by name. */
+        for (struct topasm *tas = u->topasm; tas; tas = tas->next)
+            if (tas->nsyms || tas->nrels)
+                diag_fatal(tas->file, tas->line,
+                           "a file-scope asm block with labels or symbol "
+                           "references is not supported for a Darwin "
+                           "target yet: its bytes would be emitted but "
+                           "its symbols and relocations dropped");
         struct machow *mw = machow_new(
             ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
             ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
@@ -1149,9 +1168,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     }
     free(ext);
 
-    /* File-scope asm relocations (call start_c): PLT32 against the target,
-     * a function of this unit (already symboled and forced used above) or,
-     * failing that, a fresh UNDEF the linker resolves. */
+    /* File-scope asm relocations against the target: a function of this
+     * unit (already symboled and forced used above) or, failing that, a
+     * fresh UNDEF the linker resolves.
+     *
+     * A `call` carries the displacement of the instruction; a `.quad
+     * symbol` carries the address itself, and is the form `_start` uses
+     * on aarch64, where the block is data because the built-in
+     * assembler encodes no aarch64 instructions. So the relocation is
+     * chosen from the kind and the architecture rather than assumed to
+     * be a call. */
     for (struct topasm *ta = u->topasm; ta; ta = ta->next)
         for (int r = 0; r < ta->nrels; r++) {
             int sym = 0;
@@ -1165,9 +1191,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 sym = elfw_add_symbol(
                     w, ta->rels[r].target, 0, 0,
                     ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), SHN_UNDEF);
+            enum reloc_kind rk = ta->rels[r].kind == ASMREL_ABS64
+                                     ? RK_ABS64 : RK_CALL;
             elfw_add_rela(w, text_ndx,
                           (Elf64_Addr)(ta->text_off + ta->rels[r].off),
-                          sym, R_X86_64_PLT32, ta->rels[r].addend);
+                          sym, target_reloc_type(target_get(), rk),
+                          ta->rels[r].addend);
         }
 
     /* String addresses: PC32 against the .rodata section symbol.

@@ -579,7 +579,7 @@ independent things, and their costs differ by an order of magnitude:
 | calling convention | SysV — **have** | SysV / AAPCS64 — **have*** | **Microsoft x64** |
 | C++ exceptions | Itanium + DWARF — **have** | Itanium + DWARF — **have** | SEH, or DWARF via MinGW |
 | triple and predefines | — | — | — |
-| libc, startup, linking | glibc, crt1, `ld` | libSystem, `ld64` | UCRT or MinGW, `lld-link` |
+| libc, startup, linking | ~~glibc, crt1, `ld`~~ → **ours, static — have** | libSystem, `ld64` — **have** | UCRT or MinGW, `lld-link` |
 
 \* Apple's arm64 varargs differ from AAPCS64; a real but contained quirk.
 
@@ -683,6 +683,61 @@ already there, already correct, and already what every other program on
 the machine links against. Hosted targets use **the system's** headers,
 startup objects and libc. `lib/libc` remains what it is — the freestanding
 library for EmbLinkOS and bare metal — and neither replaces the other.
+
+### Amended: on Linux it is OUR libc, static, straight onto the kernel
+
+*(Added 2026-09-21, when the Linux target was built. The paragraph above
+is what was decided before writing it; this is what writing it changed,
+and the two are left side by side because the reasoning matters more
+than the conclusion.)*
+
+Linux does not use glibc. `lib/libc/os/linux/backend.c` issues syscalls,
+`lib/libc/os/linux/start.c` is the entry point, and the result is a
+**static** image containing our printf, our malloc and our strtod, with
+no glibc, no musl, no dynamic loader and no crt from anyone else. `nm -u`
+on it prints nothing.
+
+Four things pushed it there:
+
+1. **The seam is shaped for a kernel.** `lib/libc/os/backend.h` asks for
+   write, read, sbrk, a clock and exit. Those are syscalls. A backend
+   that forwarded `__os_write` to glibc's `write` would put our stdio
+   buffering on top of theirs and give the image two errno variables and
+   two heaps — and the seam exists precisely so that does not happen.
+2. **The "sit on the host libc" backend already exists.** That is what
+   `os/posixlike` is. Writing a second one of those for Linux would have
+   added a target and no capability; writing the other kind added the
+   first backend to reach a mainstream kernel directly, which is the
+   thing EmbLinkOS's backend could not prove generalises.
+3. **It removes the sysroot from the problem.** No distro headers, no
+   glibc symbol versioning, no version skew between the machine that
+   builds and the machine that runs. A static image built against a
+   syscall ABI runs on any kernel of that architecture.
+4. **It can be built where there is no glibc**, which is the machine this
+   was written on. The glibc path could not have been compiled at all
+   here, let alone checked.
+
+What it costs, stated plainly: no dynamic linking or PIE; no threads yet
+(`clone` needs a per-architecture assembly entry, and
+`__os_thread_create` returns ENOSYS rather than shipping one written
+blind); `statx` puts a floor of Linux 4.11 under the filesystem group;
+and the clocks enter the kernel because nothing reads the vDSO yet.
+
+This does **not** foreclose a glibc-hosted Linux mode. Because the
+difference is one file under `os/`, adding one later is a backend, not a
+redesign — and `os/posixlike` is most of it already.
+
+The catch this creates is that every number in that file belongs to the
+kernel and none of them can be checked against a header here. Two things
+answer it, and both are in `tests/golden/linux.sh`: on Linux it compiles
+our `syscall.h` together with the kernel's own headers and makes the
+compiler assert that every pair agrees, and everywhere else
+`tests/harness/linux/run.sh` boots a real kernel under QEMU and runs the
+image as PID 1. The second one is not a convenience. A hand-written
+syscall stub would implement the same numbers this backend calls and
+agree with them by construction; the first thing a real kernel said was
+that `O_DIRECTORY` is `0200000` on x86-64 and `040000` on aarch64, which
+the one hardcoded value had silently got wrong on one of the two.
 
 ### The system's linker, not EmbLD, to begin with
 

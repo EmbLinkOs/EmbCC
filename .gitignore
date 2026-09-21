@@ -18,6 +18,11 @@
 # test scratch
 /tests/**/out/
 *.log
+
+# Linux kernels for tests/harness/linux — ten megabytes of somebody else's
+# build, fetched rather than committed. tests/harness/linux/run.sh says
+# where to get one, and skips when there is none.
+/tests/harness/linux/vmlinuz-*
 *.tmp
 
 # editor / tooling

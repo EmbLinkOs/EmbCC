@@ -171,13 +171,14 @@ $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 # depends on them: without this a stale archive is silently what gets
 # tested, and a fix made in the library is reported as still broken (or,
 # worse, a break is reported as fixed).
-test: embcc embread embld embdbg embls libc-x86_64 libcxx-x86_64
+test: embcc embread embld embdbg embls libc-x86_64 libcxx-x86_64 \
+      libc-linux-x86_64
 	tests/run.sh
 
 # The aarch64 suite: compile for the second architecture and RUN the result
 # under qemu-system-aarch64 (tests/harness/aarch64). Separate from `test`
 # because it needs the cross newlib and QEMU, which `test` does not.
-test-arm64: embcc libc-aarch64 libcxx-aarch64
+test-arm64: embcc libc-aarch64 libcxx-aarch64 libc-linux-aarch64
 	tests/run.sh --target=aarch64-elf
 
 # The C++ suites wholly on EmbCC's library: libstdc++ and libsupc++ built
@@ -240,6 +241,46 @@ libc-emblinkos: embcc
 	    $(BUILD)/libc/emblinkos/*.o
 	@echo "libc: $(BUILD)/libc/emblinkos/libc.a"
 
+# Linux, which is the first target this library reaches with NO other C
+# library underneath it: lib/libc/os/linux/backend.c issues syscalls, so
+# a program linked against this archive needs no glibc, no musl and no
+# dynamic loader. That is also why there is a crt1.o here and not for
+# the targets above -- on those, somebody else supplied the entry point.
+#
+# crt1.o stays OUT of the archive on purpose. _start must be defined
+# exactly once in an image, and a definition that arrives by archive
+# member is a definition that arrives by accident.
+#   make libc-linux-x86_64   /   make libc-linux-aarch64
+LIBC_SRCS_LINUX := $(LIBC_SRCS_PORTABLE) lib/libc/os/linux/backend.c
+
+libc-linux-x86_64: embcc
+	@mkdir -p $(BUILD)/libc/linux-x86_64
+	@for f in $(LIBC_SRCS_LINUX); do \
+	    o=$(BUILD)/libc/linux-x86_64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
+	    ./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libc/linux-x86_64/libc.a
+	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/linux-x86_64/libc.a \
+	    $(BUILD)/libc/linux-x86_64/*.o
+	@./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) \
+	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-x86_64/crt1.o
+	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + crt1.o"
+
+libc-linux-aarch64: embcc
+	@mkdir -p $(BUILD)/libc/linux-aarch64
+	@for f in $(LIBC_SRCS_LINUX); do \
+	    o=$(BUILD)/libc/linux-aarch64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
+	    ./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libc/linux-aarch64/libc.a
+	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs \
+	    $(BUILD)/libc/linux-aarch64/libc.a $(BUILD)/libc/linux-aarch64/*.o
+	@./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) \
+	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-aarch64/crt1.o
+	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + crt1.o"
+
+libc-linux: libc-linux-x86_64 libc-linux-aarch64
+
 libc: libc-x86_64 libc-aarch64
 
 # ---- our C++ runtime (lib/libcxx) --------------------------------------
@@ -278,4 +319,5 @@ clean:
 	rm -rf $(BUILD) embcc embread embld embdbg embas embls
 
 .PHONY: all test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
-        libc-emblinkos libcxx libcxx-x86_64 libcxx-aarch64 clean
+        libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
+        libcxx libcxx-x86_64 libcxx-aarch64 clean

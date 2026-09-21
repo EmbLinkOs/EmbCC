@@ -927,6 +927,32 @@ second list is what found the bugs. Checking a scanf field's pointee
 against a size reported `sscanf(s, "%s", buf)`, since %s takes a
 character BUFFER rather than a pointer to one object.
 
+## Linux: what the target does not do yet (2026-09-21)
+
+`--target=x86_64-linux-gnu` and `aarch64-linux-gnu` build a **static**
+image with our libc straight onto the kernel (D-014's amendment), and
+`tests/golden/linux.sh` boots a real kernel and runs it as PID 1 on both
+architectures. What that image cannot do:
+
+- **Threads.** `__os_thread_create`, `_join` and `_detach` return
+  `ENOSYS`, so `std::thread`'s constructor throws a `system_error`
+  rather than starting anything. `clone(2)` returns into the child on a
+  fresh stack with no frame and no return address, so the entry has to
+  be per-architecture assembly; it was left out rather than written
+  blind. The futex half IS implemented, so everything above it is ready
+  for the day the stub lands.
+- **Dynamic linking and PIE.** Static only: no GOT/PLT generation, no
+  `PT_INTERP`, no shared libraries. This is also why `embcc` still does
+  not invoke a linker itself on Linux — the golden test calls `ld`.
+- **The vDSO.** `__os_time` and `__os_clock_ns` enter the kernel on
+  every call. Reading the vDSO means parsing the auxiliary vector and an
+  ELF image in our own address space; `_start` currently walks past the
+  auxv without looking at it.
+- **A kernel floor of 4.11**, from `statx`. Chosen over `fstatat`
+  because `struct stat` has a different field ORDER on the two
+  architectures, so sharing one backend would have meant two structures
+  and no way to check either here.
+
 ## C++ exceptions on Darwin: a typeinfo from the wrong runtime (2026-09-21)
 
 `catch (...)` works, with cleanups: destructors run during unwinding

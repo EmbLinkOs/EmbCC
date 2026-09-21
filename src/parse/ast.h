@@ -337,10 +337,22 @@ struct asmsym {
     int off;             /* offset within .text (filled at emission) */
     int is_global;       /* named by .global/.globl */
 };
+/* What the field at `off` is, which decides the relocation the driver
+ * emits for it. A call's displacement is relative to the instruction
+ * after it and is four bytes wide; a `.quad symbol` is the address
+ * itself, eight bytes, and is the only way an asm block on a target
+ * whose instructions EmbCC cannot encode can name a symbol at all --
+ * `_start` loads the C entry point out of one. */
+enum asmrel_kind {
+    ASMREL_PC32,         /* the rel32 of a call: R_X86_64_PLT32 */
+    ASMREL_ABS64,        /* a .quad naming a symbol: R_*_ABS64 */
+};
+
 struct asmrel {
-    int off;             /* offset within .text of the rel32 field */
-    const char *target;  /* symbol the call/jmp resolves to */
+    int off;             /* offset within .text of the field to fill */
+    const char *target;  /* symbol the call/jmp/.quad resolves to */
     long addend;
+    enum asmrel_kind kind;
 };
 
 /* A file-scope `__asm__("...")` block (crt0's _start stub, and its kind).
