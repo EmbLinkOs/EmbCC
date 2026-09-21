@@ -5934,8 +5934,17 @@ static struct cstmt *parse_stmt_or_none(void)
 
 struct parse_state {
     int pos, half, extern_c, pattern, in_targs, class_depth, uneval;
-    int npend, cappend, dependent_ok, packs, insts, no_user;
-    struct pending *pend;
+    /* npend and nothing else of the pending array. Saving the POINTER
+     * and the capacity as well -- which this did -- is a
+     * use-after-free waiting for a big enough speculative parse: if
+     * add_pending grows the array between the save and the restore,
+     * the old block is freed by the realloc and the restore puts the
+     * freed pointer back. The next add_pending then writes through it.
+     *
+     * The count alone is the right rollback. Entries past it are dead,
+     * and the buffer can only have grown, so the capacity is not part
+     * of the state being unwound. */
+    int npend, dependent_ok, packs, insts, no_user;
     struct cscope *scope;
     struct cfunc *curfn;
     struct cstmt *curblk;
@@ -5952,8 +5961,6 @@ struct parse_state *parse_save(void)
     st->in_targs = cx_in_targs;
     st->class_depth = class_depth;
     st->npend = npend;
-    st->cappend = cappend;
-    st->pend = pend;
     st->dependent_ok = dependent_type_ok;
     st->packs = pack_mark();
     st->insts = cx_inst_mark();
@@ -5977,8 +5984,6 @@ void parse_restore(struct parse_state *st)
     cx_in_targs = st->in_targs;
     class_depth = st->class_depth;
     npend = st->npend;
-    cappend = st->cappend;
-    pend = st->pend;
     dependent_type_ok = st->dependent_ok;
     pack_reset(st->packs);
     cx_scope = st->scope;
@@ -8209,6 +8214,15 @@ void class_define_from(struct cclass *c, int pos, enum tok_kind key,
     cx_pattern = 0;
     cx_in_targs = 0;
     class_depth = 0;
+    /* A fresh pending list: this body's delayed members are run by the
+     * parse_class_body below, and must not be confused with the ones
+     * the interrupted parse has already queued. The swap is explicit
+     * here rather than part of parse_save because only this caller
+     * wants it -- the other savers go on appending to the same array,
+     * and for them restoring a pointer that a realloc has since freed
+     * is a use-after-free. */
+    struct pending *opend = pend;
+    int onpend = npend, ocappend = cappend;
     pend = NULL;
     npend = cappend = 0;
     c->scope->parent = ps;
@@ -8216,6 +8230,9 @@ void class_define_from(struct cclass *c, int pos, enum tok_kind key,
     memset(&a, 0, sizeof a);
     parse_class_body(c, key, &a, cx_cur());
     parse_restore(st);
+    pend = opend;
+    npend = onpend;
+    cappend = ocappend;
     expr_swap_no_user_conv(nuc);
 }
 
