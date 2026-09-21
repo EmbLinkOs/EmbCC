@@ -225,6 +225,65 @@ and that is the real thing for a freestanding target, not a
 simplification. A backend that gains delivery calls `__raise_signal` and
 everything above it is already correct.
 
+## Every width, and two ties-to-even bugs
+
+`<tgmath.h>` is type-generic math: `sqrt(x)` calls `sqrtf`, `sqrt` or
+`sqrtl` depending on what `x` is, through `_Generic`. Writing it
+exposed a large hole — C11 requires **all three widths for every
+function** in `<math.h>`, and about sixty were missing. The hole was
+invisible until then, because a missing variant is only a compile error
+when something asks for it by width, and nothing had.
+
+The variants split into two kinds. The ones that **compute** a new value
+go through the double implementation: exact for `float`, and for `long
+double` a real loss — an 80-bit x87 long double has 64 mantissa bits and
+gets 53. That is stated rather than hidden. The ones that **move or
+inspect** a value — `truncl`, `floorl`, `roundl`, `fmodl`, `frexpl`,
+`modfl`, `ldexpl`, `fabsl`, `copysignl` — are written in long double
+throughout, because narrowing them would be a visible defect: `truncl`
+of a value with more than 53 significant bits must not lose them.
+
+Two functions were wrong, both in the same family as printf's old
+rounding:
+
+**`nearbyint` was `floor(x + 0.5)`,** which is `round()` under another
+name. Its entire job is to follow the *current rounding direction*, and
+the default is ties-to-even: `nearbyint(2.5)` is 2 and `round(2.5)` is
+3. It now reads `fegetround()` and honours all four modes — which is
+only possible because `<fenv.h>` exists.
+
+**`remainder` had no tie rule.** `fmod` truncates the quotient; IEEE's
+`remainder` rounds it to nearest with ties to **even**. `remainder(7, 2)`
+was 1 and must be −1, because the nearest multiple of 2 to 7 is 8. This
+is the case argument reduction depends on: reducing an angle by π/2
+lands on a tie at every odd multiple of π/4.
+
+The whole family was then diffed against a known-correct libm —
+`nearbyint`, `rint`, `round`, `remainder`, `remquo`, `llrint`, `fmod`
+across their interesting inputs — and matches byte for byte.
+
+## C's threads, over the same seam
+
+`<threads.h>` is built on the same eight OS primitives the C++
+`<mutex>` and `<thread>` use. One set, two spellings: a target that
+gains threads lights up both at once, and neither library knows which
+OS it is on.
+
+The locks are the three-state futex mutex described in
+`lib/libcxx/include/mutex`, so the uncontended path is one
+compare-exchange and never enters the kernel. Mutexes, condition
+variables and `call_once` work fully on a single-threaded target;
+`thrd_create` returns `thrd_error` rather than a thread that never runs
+or one that runs on the caller — the second deadlocks the first time
+anything joins from inside it.
+
+`tss_create` also fails honestly. Thread-specific storage needs
+thread-local storage underneath, which this compiler does not have, and
+a key that every thread shared would be a global under another name —
+with the failure invisible until two threads corrupted each other.
+`thread_local` is likewise left undefined rather than aliased to
+nothing.
+
 ## Math
 
 `src/math/fdlibm/` is Sun's fdlibm, kept **verbatim** (its notice preserved)

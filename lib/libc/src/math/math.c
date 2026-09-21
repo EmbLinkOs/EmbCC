@@ -10,6 +10,7 @@
  * through errno where C requires it and nowhere else.
  */
 #include <math.h>
+#include <fenv.h>
 #include <errno.h>
 #include <stdint.h>
 
@@ -85,7 +86,42 @@ double round(double x)
     /* Half away from zero — which is round(), not rint(). */
     return x >= 0 ? floor(x + 0.5) : ceil(x - 0.5);
 }
-double nearbyint(double x) { return x >= 0 ? floor(x + 0.5) : ceil(x - 0.5); }
+/* nearbyint and rint round according to the CURRENT rounding
+ * direction, and that is the whole difference from round(): round()
+ * always takes a tie AWAY from zero, and the default direction takes it
+ * to EVEN. So nearbyint(2.5) is 2 and round(2.5) is 3, and an
+ * implementation written as floor(x + 0.5) -- which this was -- is
+ * round() under another name. It is the same mistake printf's
+ * conversion used to make, and it drifts a column of half-integers
+ * upward in exactly the same way.
+ *
+ * rint differs from nearbyint only in that it may raise the inexact
+ * flag; neither raises it here, which the standard permits for
+ * nearbyint and tolerates for rint. */
+double nearbyint(double x)
+{
+    double t = trunc(x);
+    double d = x - t;
+    if (d == 0)
+        return x;
+    double a = d < 0 ? -d : d;
+    switch (fegetround()) {
+    case FE_DOWNWARD:   return x < 0 ? t - 1.0 : t;
+    case FE_UPWARD:     return x > 0 ? t + 1.0 : t;
+    case FE_TOWARDZERO: return t;
+    default: break;
+    }
+    if (a > 0.5)
+        return d < 0 ? t - 1.0 : t + 1.0;
+    if (a < 0.5)
+        return t;
+    /* A tie: the answer must be even. */
+    double half = t / 2.0;
+    if (half == trunc(half))
+        return t;
+    return d < 0 ? t - 1.0 : t + 1.0;
+}
+
 double rint(double x)      { return nearbyint(x); }
 long   lround(double x)    { return (long)round(x); }
 long long llround(double x){ return (long long)round(x); }
@@ -98,12 +134,30 @@ double modf(double x, double *ip)
     return x - i;
 }
 
+/* IEEE's remainder, which is not fmod's. fmod TRUNCATES the quotient;
+ * remainder rounds it to the NEAREST integer, ties to EVEN. So
+ * remainder(7, 2) is -1 and not 1 -- the nearest multiple of 2 to 7 is
+ * 8, not 6 -- and the two disagree for exactly the halfway cases, which
+ * is why both exist.
+ *
+ * The tie rule was missing here, and it is the case argument reduction
+ * depends on: reducing an angle by pi/2 lands on a tie whenever the
+ * angle is an odd multiple of pi/4. */
 double remainder(double x, double y)
 {
     double r = fmod(x, y);
-    double h = fabs(y) / 2;
-    if (r > h) r -= fabs(y);
-    else if (r < -h) r += fabs(y);
+    double ay = fabs(y);
+    double h = ay / 2;
+    double a = fabs(r);
+    if (a > h) {
+        r = r > 0 ? r - ay : r + ay;
+    } else if (a == h) {
+        /* Halfway between two multiples: take the EVEN one. */
+        double q = (x - r) / y;
+        double half = q / 2;
+        if (half != trunc(half))
+            r = r > 0 ? r - ay : r + ay;
+    }
     return r;
 }
 
@@ -219,9 +273,13 @@ float modff(float x, float *ip) { double d; float r = (float)modf((double)x, &d)
 #define LD1(n) long double n##l(long double x) { return (long double)n((double)x); }
 #define LD2(n) long double n##l(long double x, long double y) \
     { return (long double)n((double)x, (double)y); }
-LD1(sin) LD1(cos) LD1(tan) LD1(exp) LD1(log) LD1(sqrt) LD1(fabs)
-LD1(ceil) LD1(floor)
-LD2(pow) LD2(fmod)
+/* fabsl, ceill, floorl and fmodl are NOT here: they move or inspect a
+ * value rather than computing a new one, so they can be exact in long
+ * double and are written that way in widths.c. Narrowing them would be
+ * a visible defect -- truncl of a value with more than 53 significant
+ * bits must not lose them. */
+LD1(sin) LD1(cos) LD1(tan) LD1(exp) LD1(log) LD1(sqrt)
+LD2(pow)
 
 /* ---- ilogb / logb -------------------------------------------------------
  * The unbiased exponent of x: the e in x = m * 2^e with 1 <= |m| < 2.

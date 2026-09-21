@@ -71,6 +71,13 @@ double fmod(double, double), remainder(double, double), modf(double, double *);
 long   lround(double);
 long long llround(double);
 long   lrint(double);
+long long llrint(double);
+double scalbln(double, long);
+/* remquo gives the remainder AND the low bits of the quotient, which is
+ * what an argument reduction needs: knowing how many multiples of pi/2
+ * were removed decides which of sin/cos/-sin/-cos the answer is, and
+ * recovering it from the remainder alone is impossible. */
+double remquo(double, double, int *);
 
 /* manipulation */
 double fabs(double), copysign(double, double), nan(const char *);
@@ -79,23 +86,66 @@ double fma(double, double, double);
 double nextafter(double, double);
 double erf(double), erfc(double), tgamma(double), lgamma(double);
 
-/* the float forms C requires */
+/* The float forms. C11 requires all three widths for every function
+ * here, and <tgmath.h> makes the requirement visible: a type-generic
+ * `cbrt(x)` on a long double selects `cbrtl`, so a missing variant is a
+ * compile error rather than a quiet fallback. */
 float sinf(float), cosf(float), tanf(float);
 float asinf(float), acosf(float), atanf(float), atan2f(float, float);
 float sinhf(float), coshf(float), tanhf(float);
-float expf(float), exp2f(float), logf(float), log2f(float), log10f(float);
+float asinhf(float), acoshf(float), atanhf(float);
+float expf(float), exp2f(float), expm1f(float);
+float logf(float), log2f(float), log10f(float), log1pf(float);
 float powf(float, float), sqrtf(float), cbrtf(float), hypotf(float, float);
 float ceilf(float), floorf(float), truncf(float), roundf(float);
+float nearbyintf(float), rintf(float);
 float fabsf(float), copysignf(float, float), fmodf(float, float);
 float ldexpf(float, int), frexpf(float, int *), modff(float, float *);
 float fmaxf(float, float), fminf(float, float), fdimf(float, float);
+float scalbnf(float, int), scalblnf(float, long);
+float nextafterf(float, float), remainderf(float, float);
+float fmaf(float, float, float), remquof(float, float, int *);
+float erff(float), erfcf(float), tgammaf(float), lgammaf(float);
+long lrintf(float), lroundf(float);
+long long llrintf(float), llroundf(float);
 
-/* long double: this library computes in double and widens, which is exact
- * for every value a double can hold and honest about the rest. */
+/* long double. Most of these compute in DOUBLE and widen, which is
+ * exact for every value a double can hold and loses the extra mantissa
+ * bits an 80-bit x87 long double has -- so `sinl` is a double's answer
+ * in a wider type. That is stated rather than hidden, and it is what
+ * most C libraries do for the transcendental functions.
+ *
+ * The ones that are EXACT in long double are the ones that can be:
+ * fabsl, copysignl, ceill, floorl, truncl, roundl, fmaxl, fminl, fdiml,
+ * ldexpl, frexpl, modfl and scalbnl move or inspect the value without
+ * computing a new one, so they are written in long double throughout. */
 long double sinl(long double), cosl(long double), tanl(long double);
-long double expl(long double), logl(long double), sqrtl(long double);
-long double powl(long double, long double), fabsl(long double);
-long double ceill(long double), floorl(long double), fmodl(long double, long double);
+long double asinl(long double), acosl(long double), atanl(long double);
+long double atan2l(long double, long double);
+long double sinhl(long double), coshl(long double), tanhl(long double);
+long double asinhl(long double), acoshl(long double), atanhl(long double);
+long double expl(long double), exp2l(long double), expm1l(long double);
+long double logl(long double), log2l(long double), log10l(long double);
+long double log1pl(long double);
+long double powl(long double, long double), sqrtl(long double);
+long double cbrtl(long double), hypotl(long double, long double);
+long double fabsl(long double), copysignl(long double, long double);
+long double ceill(long double), floorl(long double), truncl(long double);
+long double roundl(long double), nearbyintl(long double), rintl(long double);
+long double fmodl(long double, long double);
+long double ldexpl(long double, int), frexpl(long double, int *);
+long double modfl(long double, long double *);
+long double fmaxl(long double, long double), fminl(long double, long double);
+long double fdiml(long double, long double);
+long double scalbnl(long double, int), scalblnl(long double, long);
+long double nextafterl(long double, long double);
+long double remainderl(long double, long double);
+long double fmal(long double, long double, long double);
+long double remquol(long double, long double, int *);
+long double erfl(long double), erfcl(long double);
+long double tgammal(long double), lgammal(long double);
+long lrintl(long double), lroundl(long double);
+long long llrintl(long double), llroundl(long double);
 
 #ifdef __cplusplus
 }
