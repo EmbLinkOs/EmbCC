@@ -126,8 +126,8 @@ int machow_add_section(struct machow *w, const char *segname,
     return ++w->nsect;              /* 1-based, as n_sect wants */
 }
 
-static int add_sym(struct machow *w, const char *name, int prefix,
-                   unsigned long long value, int sect, int ext)
+static int add_sym2(struct machow *w, const char *name, int prefix,
+                    unsigned long long value, int sect, int ext, int weak)
 {
     struct nlist_64 n;
     memset(&n, 0, sizeof n);
@@ -141,6 +141,10 @@ static int add_sym(struct machow *w, const char *name, int prefix,
     }
     n.n_type = (uint8_t)((sect ? N_SECT : N_UNDF) | (ext ? N_EXT : 0));
     n.n_sect = (uint8_t)sect;
+    /* Defined and undefined weakness are different bits: a definition
+     * that may be replaced, against a reference that may go unmet. */
+    if (weak)
+        n.n_desc = (uint16_t)(sect ? N_WEAK_DEF : N_WEAK_REF);
     n.n_value = sect ? w->sect[sect - 1].addr + value : 0;
     buf_append(&w->syms, &n, sizeof n);
     return ++w->nsyms;              /* 1-based: see write.h */
@@ -151,13 +155,19 @@ static int add_sym(struct machow *w, const char *name, int prefix,
 int machow_add_symbol(struct machow *w, const char *name,
                       unsigned long long value, int sect, int ext)
 {
-    return add_sym(w, name, 1, value, sect, ext);
+    return add_sym2(w, name, 1, value, sect, ext, 0);
+}
+
+int machow_add_symbol_weak(struct machow *w, const char *name,
+                           unsigned long long value, int sect, int ext)
+{
+    return add_sym2(w, name, 1, value, sect, ext, 1);
 }
 
 int machow_add_symbol_raw(struct machow *w, const char *name,
                           unsigned long long value, int sect, int ext)
 {
-    return add_sym(w, name, 0, value, sect, ext);
+    return add_sym2(w, name, 0, value, sect, ext, 0);
 }
 
 void machow_add_reloc(struct machow *w, int sect, unsigned long long offset,

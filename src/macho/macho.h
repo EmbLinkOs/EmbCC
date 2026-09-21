@@ -72,6 +72,12 @@
 #define N_ABS  0x2
 #define N_SECT 0xe
 
+/* n_desc bits. A weak REFERENCE is the one that matters for the seam's
+ * optional groups: ELF lets an undefined weak resolve to zero by
+ * default, and Mach-O only does so when the symbol says it is weak. */
+#define N_WEAK_REF 0x0040
+#define N_WEAK_DEF 0x0080
+
 /* aarch64 relocation types. */
 #define ARM64_RELOC_UNSIGNED           0
 #define ARM64_RELOC_SUBTRACTOR         1

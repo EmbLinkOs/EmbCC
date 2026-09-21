@@ -125,16 +125,70 @@ grep -qx 'a string through __const c=7 t2=30 sum=42' "$out/real.txt" || {
 echo "real C: strings, globals, a local call and Darwin's stack-passed
 varargs all correct, linked against libSystem"
 
-# 5. And what is NOT supported is refused rather than emitted wrong.
-printf '#include <stdarg.h>\nint s(int n, ...) { va_list a; va_start(a, n); int t = va_arg(a, int); va_end(a); return t; }\n' > "$out/va.c"
-if [ "$cpu" = arm64 ]; then
-    "$EMBCC" --target="$triple" -c "$out/va.c" -o "$out/va.o" \
-        2> "$out/va.log" && {
-        echo "FAIL: defining a variadic function was accepted, but va_arg"
-        echo "      still reads the AAPCS64 save area the caller no longer fills"
-        exit 1; }
-    grep -q 'variadic' "$out/va.log" || {
-        echo "FAIL: the refusal does not say what is wrong:"
-        cat "$out/va.log"; exit 1; }
-    echo "defining a variadic function is refused, not silently miscompiled"
-fi
+# 5. Darwin's va_arg. Its variadic arguments arrive on the stack, so
+#    the va_list is a plain pointer walking them -- no register save
+#    area, no 32-byte record. Defining a variadic function was refused
+#    until this worked, because the AAPCS64 walk would have read
+#    registers no caller fills.
+#
+#    Every type goes through a different path: an int takes eight
+#    bytes, a double arrives promoted, a pointer is read as itself, and
+#    the last line nests all three as arguments to a fourth.
+cat > "$out/va.c" << 'EOF'
+#include <stdarg.h>
+int printf(const char *, ...);
+static int isum(int n, ...)
+{
+    va_list a; va_start(a, n);
+    int t = 0; while (n--) t += va_arg(a, int);
+    va_end(a); return t;
+}
+static double dsum(int n, ...)
+{
+    va_list a; va_start(a, n);
+    double t = 0; while (n--) t += va_arg(a, double);
+    va_end(a); return t;
+}
+static const char *last(int n, ...)
+{
+    va_list a; va_start(a, n);
+    const char *s = 0; while (n--) s = va_arg(a, const char *);
+    va_end(a); return s;
+}
+int main(void)
+{
+    printf("i=%d d=%.2f s=%s\n", isum(5, 1, 2, 3, 4, 5),
+           dsum(3, 1.5, 2.25, 0.25), last(3, "a", "b", "z"));
+    return isum(3, 10, 20, 12);
+}
+EOF
+"$EMBCC" --target="$triple" -c "$out/va.c" -o "$out/va.o" 2> "$out/va.log" || {
+    echo "FAIL: embcc could not compile a variadic function for $triple:"
+    cat "$out/va.log"; exit 1; }
+cc -o "$out/va" "$out/va.o" 2>> "$out/va.log" || {
+    echo "FAIL: linking the variadic test:"; cat "$out/va.log"; exit 1; }
+set +e
+"$out/va" > "$out/va.txt" 2>&1
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: the variadic program exited $rc, wanted 42"
+                    cat "$out/va.txt"; exit 1; }
+grep -qx 'i=15 d=4.00 s=z' "$out/va.txt" || {
+    echo "FAIL: va_arg read the wrong values:"; cat "$out/va.txt"; exit 1; }
+echo "va_arg walks the stack as Darwin requires: ints, doubles and
+pointers, and a variadic call whose own arguments are variadic calls"
+
+# 6. And the frame says so. With every variadic argument on the stack
+#    there is nothing to save, so Darwin must NOT emit the sixteen
+#    register stores AAPCS64 opens a variadic function with. Compared
+#    against the same source built for the freestanding target, which
+#    must still have them.
+"$EMBCC" --target=aarch64-elf -c "$out/va.c" -o "$out/va-elf.o" 2>/dev/null
+d_size=$(wc -c < "$out/va.o")
+e_size=$(wc -c < "$out/va-elf.o")
+[ "$d_size" -lt "$e_size" ] || {
+    echo "FAIL: the Darwin object ($d_size) is not smaller than the"
+    echo "      freestanding one ($e_size) -- the register save area"
+    echo "      and its stores are probably still being emitted"
+    exit 1; }
+echo "and the register save area is gone: $d_size bytes against $e_size"

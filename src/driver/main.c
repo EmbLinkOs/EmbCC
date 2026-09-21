@@ -698,22 +698,6 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                        "exceptions are not supported for a Darwin target "
                        "yet: the unwind tables need SUBTRACTOR relocation "
                        "pairs this does not emit");
-        /* Calling a variadic function on Darwin works -- its arguments
-         * go on the stack, as Apple's arm64 requires. DEFINING one does
-         * not yet: va_arg still reads the AAPCS64 register save area,
-         * which now disagrees with what every caller writes. The two
-         * halves would agree only when our code called our code, which
-         * is the worst kind of wrong -- it passes every test that does
-         * not leave the building. */
-        if (ta == TARGET_AARCH64)
-            for (struct func *vf = u->funcs; vf; vf = vf->next)
-                if (!vf->absorbed && vf->has_defn && vf->is_varargs)
-                    diag_fatal(in, vf->line,
-                               "defining a variadic function is not "
-                               "supported for a Darwin arm64 target yet: "
-                               "its arguments arrive on the stack there, "
-                               "and va_arg still reads them from the "
-                               "register save area AAPCS64 uses");
         struct machow *mw = machow_new(
             ta == TARGET_AARCH64 ? CPU_TYPE_ARM64 : CPU_TYPE_X86_64,
             ta == TARGET_AARCH64 ? CPU_SUBTYPE_ARM64_ALL
@@ -772,9 +756,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
 
         for (struct func *f = u->funcs; f; f = f->next)
             if (!f->absorbed && f->has_defn && (!f->is_static || f->used))
-                f->sym_ndx = machow_add_symbol(mw, f->name,
-                                               (unsigned long long)f->code_off,
-                                               m_text, !f->is_static);
+                f->sym_ndx = (f->is_weak ? machow_add_symbol_weak
+                                         : machow_add_symbol)(
+                    mw, f->name, (unsigned long long)f->code_off,
+                    m_text, !f->is_static);
         for (struct global *g = u->globals; g; g = g->next)
             if (!g->absorbed && g->defined)
                 g->sym_ndx = machow_add_symbol(
@@ -784,13 +769,17 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     !g->is_static);
         for (struct global *g = u->globals; g; g = g->next)
             if (!g->absorbed && !g->defined && g->used)
-                g->sym_ndx = machow_add_symbol(mw, g->name, 0, 0, 1);
+                g->sym_ndx = (g->is_weak ? machow_add_symbol_weak
+                                         : machow_add_symbol)(
+                    mw, g->name, 0, 0, 1);
 
         int mpc = 0, mlen = 2, mt;
         for (int i = 0; i < next; i++) {
             struct func *callee = ext[i].callee;
             if (!callee->sym_ndx)
-                callee->sym_ndx = machow_add_symbol(mw, callee->name, 0, 0, 1);
+                callee->sym_ndx = (callee->is_weak ? machow_add_symbol_weak
+                                                  : machow_add_symbol)(
+                    mw, callee->name, 0, 0, 1);
             mt = target_macho_reloc(ta, RK_CALL, &mpc, &mlen);
             if (!mt)
                 diag_fatal(in, 0, "no Mach-O relocation for a call here");
@@ -828,7 +817,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         for (int i = 0; i < nfs; i++) {
             struct func *tf = fs[i].target;
             if (!tf->sym_ndx)
-                tf->sym_ndx = machow_add_symbol(mw, tf->name, 0, 0, 1);
+                tf->sym_ndx = (tf->is_weak ? machow_add_symbol_weak
+                                           : machow_add_symbol)(
+                    mw, tf->name, 0, 0, 1);
             mt = target_macho_reloc(ta, fs[i].kind, &mpc, &mlen);
             if (!mt)
                 diag_fatal(in, 0,
@@ -847,7 +838,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 long add;
                 if (ft) {
                     if (!ft->sym_ndx)
-                        ft->sym_ndx = machow_add_symbol(mw, ft->name, 0, 0, 1);
+                        ft->sym_ndx = (ft->is_weak ? machow_add_symbol_weak
+                                                   : machow_add_symbol)(
+                            mw, ft->name, 0, 0, 1);
                     sym = ft->sym_ndx;
                     add = g->relocs[i].addend;
                 } else if (g->relocs[i].gtarget) {

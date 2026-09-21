@@ -12,6 +12,7 @@
 #include "../../sema/sema.h"
 #include "../../sema/type.h"
 #include "asm.h"
+#include "../target.h"
 
 /* va_arg for AAPCS64. The record va_start fills (aarch64/codegen.c
  * IR_VA_START): __stack at +0, __gr_top +8, __vr_top +16, __gr_offs +24,
@@ -68,6 +69,63 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e)
     emit_label(fn, l_done);
 
     if (rt->kind == TY_LDOUBLE)     /* a whole v register's slot */
+        return emit_load(fn, addr, rt);
+    if (flt) {
+        int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));
+        if (rt->kind == TY_FLOAT) {
+            struct ir_ins *cv = emit(fn);
+            cv->op = IR_F2F; cv->a = v; cv->size = 8; cv->w = 4;
+            cv->dst = new_temp(fn);
+            return cv->dst;
+        }
+        return v;
+    }
+    return emit_load(fn, addr, rt);
+}
+
+
+/* va_arg on Darwin, which is a different ABI and a much smaller one.
+ *
+ * Apple passes every variadic argument on the STACK, so there is no
+ * register save area to walk and no 32-byte record to walk it with:
+ * `va_list` is literally a `char *` at the next argument. That is not a
+ * simplification we chose -- it is the platform's ABI, and the system's
+ * own vprintf reads a va_list that way, so anything else would be
+ * incompatible with every library on the machine.
+ *
+ * The consequence for this code is that the list has no indirection.
+ * AAPCS64's `ap` points AT a record and advancing it writes through
+ * that pointer; here `ap` IS the walking pointer, so advancing it means
+ * writing the va_list VARIABLE -- which is why this takes the
+ * variable's address where the AAPCS64 walk takes its value.
+ */
+int irg_va_arg_darwin(struct ir_func *fn, struct expr *e)
+{
+    struct type *rt = e->ty;
+    int flt = ty_is_float(rt);
+    struct type *ptr = ty_base(TY_LONG, 1);
+
+    int apa = gen_addr(fn, e->lhs);
+    int cur = emit_load(fn, apa, ptr);
+
+    /* Sixteen-byte types get a sixteen-byte slot, aligned; everything
+     * else is rounded up to eight, which is the whole of the layout. */
+    int wide = rt->kind == TY_LDOUBLE || rt->kind == TY_INT128;
+    if (wide)
+        cur = emit_bin(fn, IR_AND,
+                       emit_bin(fn, IR_ADD, cur, emit_const(fn, 15, 8), 8, 1),
+                       emit_const(fn, -16, 8), 8, 1);
+    int addr = new_temp(fn);
+    emit_mov(fn, addr, cur);
+
+    long size = ty_size(rt);
+    /* A variadic float arrives promoted to double, so it occupies eight
+     * bytes and is read as one. */
+    long step = wide ? 16 : (flt ? 8 : ((size + 7) & ~7L));
+    emit_store(fn, apa,
+               emit_bin(fn, IR_ADD, addr, emit_const(fn, step, 8), 8, 1), ptr);
+
+    if (rt->kind == TY_LDOUBLE)
         return emit_load(fn, addr, rt);
     if (flt) {
         int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));

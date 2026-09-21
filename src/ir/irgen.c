@@ -1699,8 +1699,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_STMTEXPR:
         return gen_stmtexpr(fn, e);
     case EXPR_VA_ARG:
-        return target_get() == TARGET_AARCH64 ? irg_va_arg_aapcs(fn, e)
-                                              : irg_va_arg_sysv(fn, e);
+        if (target_get() != TARGET_AARCH64)
+            return irg_va_arg_sysv(fn, e);
+        return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
+                                                : irg_va_arg_aapcs(fn, e);
     case EXPR_BINOP: {
         struct type *lt = e->lhs->ty, *rt = e->rhs->ty;
 

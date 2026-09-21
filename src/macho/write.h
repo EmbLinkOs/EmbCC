@@ -50,6 +50,12 @@ int machow_add_section(struct machow *w, const char *segname,
 int machow_add_symbol(struct machow *w, const char *name,
                       unsigned long long value, int sect, int ext);
 
+/* The same, marked weak. An undefined weak reference is allowed to stay
+ * unresolved and read as zero -- which is what the OS seam's optional
+ * groups are built on (lib/libc/os/backend.h). */
+int machow_add_symbol_weak(struct machow *w, const char *name,
+                           unsigned long long value, int sect, int ext);
+
 /* The same, with the name taken EXACTLY as given -- no underscore.
  * Assembler temporaries (`ltmp0`, the anchor a section-relative
  * reference relocates against) have no C name to prefix, and ld strips

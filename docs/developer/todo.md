@@ -927,6 +927,44 @@ second list is what found the bugs. Checking a scanf field's pointee
 against a size reported `sscanf(s, "%s", buf)`, since %s takes a
 character BUFFER rather than a pointer to one object.
 
+## Our libc on macOS: two things the OS seam did not anticipate (2026-09-21)
+
+`embcc --target=aarch64-apple-darwin` compiles all 63 libc sources, and
+a program linked against the resulting archive runs on macOS: printf,
+snprintf, the string functions and strtol all correct. Two things had
+to be worked around by hand to get there, and both are LIBC work rather
+than compiler work.
+
+**A weak undefined symbol cannot be left unresolved at static link
+time.** The seam's optional groups (threads, filesystem) are built on
+the ELF idiom: declare `fs_chdir` and friends weak, and a target that
+does not provide them reads them as zero. Mach-O marks the reference
+weak the same way -- our objects are byte-for-byte what clang produces,
+"(undefined) weak external" -- but ld still refuses to finish the link,
+and CLANG'S OWN OBJECT IS REFUSED THE SAME WAY. It is a platform rule,
+not a bug in the writer: on macOS a weak reference may go unmet only
+when it comes from a dylib that declares it weak_import.
+
+So the 25 hooks currently need `-Wl,-U,_name` apiece. The real answer
+is that macOS is a HOSTED platform with a real filesystem and real
+threads, so the optional groups should be implemented rather than left
+absent -- `lib/libc/os/darwin/backend.c`, binding them to the system's
+own chdir, chmod, opendir and pthreads. That is the honest shape, and
+it removes the question rather than answering it.
+
+**The platform's exit is not ours.** libSystem's crt1 calls main and
+then libSystem's exit, so the atexit handler our stdio registers to
+flush its buffers never runs: a program printed nothing and exited with
+the right status. An explicit fflush proves the output was correct all
+along. A Darwin backend has to arrange the flush -- either by owning
+the entry point or by registering with the platform's atexit rather
+than ours.
+
+Neither of these is reached by any test today, because the libc built
+for macOS is not built by `make`. That is the next piece: a darwin
+backend and a `libc-darwin` target, at which point both findings become
+checks instead of notes.
+
 ## `strtold` parses through a double (2026-09-21)
 
 `conv()` in `lib/libc/src/stdlib/strtod.c` takes a `wide` flag and then

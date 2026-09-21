@@ -290,7 +290,11 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
     }
 
     fr->gr_save = fr->vr_save = fr->va_tag = -1;
-    if (f->is_varargs) {
+    /* Darwin needs none of this. Its variadic arguments arrive on the
+     * stack, so there is nothing to save and nothing to record: its
+     * va_list is one pointer into the caller's frame. 224 bytes and
+     * sixteen stores per variadic function that would never be read. */
+    if (f->is_varargs && target_os_get() != TGT_OS_DARWIN) {
         running = (running + 15) & ~15L;
         fr->gr_save = running;              /* x0..x7 */
         running += 64;
@@ -824,7 +828,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * anything can disturb them: va_arg walks these areas later. Under
      * -mgeneral-regs-only (the kernel) the q registers are never touched —
      * gcc makes the same choice, and __vr_offs then says "none". */
-    if (f->is_varargs) {
+    if (f->is_varargs && fr.gr_save >= 0) {
         for (int r = 0; r < 8; r++)
             a64_str(t, r, FB, fr.gr_save + r * 8, 8);
         if (fr.vr_save >= 0)
@@ -1367,12 +1371,25 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             struct a64_cursor cu = { 0, 0, 0, 0 };
             struct a64_argplan pl;
             for (int p = 0; p < f->nparams; p++)
-                /* 0, 0: a function's DECLARED parameters are all named, so
-             * the Darwin variadic rule has nothing to act on here. What
-             * a variadic callee does with the rest is va_arg's problem,
-             * not this placement's. */
-            a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl,
-                          0, 0);
+                /* 0, 0: a function's DECLARED parameters are all named,
+                 * so the Darwin variadic rule has nothing to act on
+                 * here. What a variadic callee does with the rest is
+                 * va_arg's problem, not this placement's. */
+                a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl,
+                              0, 0);
+            if (target_os_get() == TGT_OS_DARWIN) {
+                /* Darwin's va_list is a `char *` at the next stack
+                 * argument and nothing else: every variadic argument
+                 * came on the stack, so there is no register save area
+                 * to point at and no record to hold the offsets into
+                 * it. This is the AAPCS64 __stack value, stored into
+                 * the va_list itself rather than into a record's first
+                 * word -- and it is the whole of va_start there. */
+                addr_of(t, A64_ACC, A64_FP, 16 + ((cu.nsaa + 7) & ~7L));
+                ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
+                a64_str(t, A64_ACC, A64_ADDR, 0, 8);
+                break;
+            }
             long tag = fr.va_tag;
             addr_of(t, A64_ACC, A64_FP, 16 + ((cu.nsaa + 7) & ~7L));
             a64_str(t, A64_ACC, FB, tag + 0, 8);
