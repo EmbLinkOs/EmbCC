@@ -731,10 +731,28 @@ static struct cty *decltype_of(struct cexpr *e)
 
 /* ... and decltype(auto): a placeholder its initializer (or a return)
  * gives decltype's type */
+static struct cty *parse_decltype_inner(void);
+
 static struct cty *parse_decltype(void)
 {
     cx_advance();
     cx_expect(TOK_LPAREN, "'(' after decltype");
+    /* Inside the parentheses a `>` is an OPERATOR, not the end of an
+     * enclosing template argument list -- `is_same_v<decltype(a > 2),
+     * bool>` is one argument and a comparison, not two arguments. The
+     * parentheses are what make it unambiguous, and clearing the flag
+     * is how that is said. Call arguments and casts already do this;
+     * decltype did not, so any comparison inside one was read as the
+     * list's closing bracket. */
+    int __saved_targs = cx_in_targs;
+    cx_in_targs = 0;
+    struct cty *__r = parse_decltype_inner();
+    cx_in_targs = __saved_targs;
+    return __r;
+}
+
+static struct cty *parse_decltype_inner(void)
+{
     if (cx_accept(TOK_CX_AUTO)) {
         cx_expect(TOK_RPAREN, "')' after decltype(auto");
         struct cty *t = xcalloc(1, sizeof *t);

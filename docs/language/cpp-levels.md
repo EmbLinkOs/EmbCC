@@ -531,7 +531,11 @@ candidates when no operator is written for a comparison: `x @ y` as `(x
 reversed (a synthesized 0 is a null pointer constant, as `<compare>`'s
 `__literal_zero` wants); defaulted `==` and `<=>` (bases then members;
 an `auto` `<=>` returns the weakest member category) and defaulted
-relational operators (through `<=>`); `__builtin_bit_cast(T, e)`, the
+relational operators (through `<=>`); a `>` inside `decltype`'s parentheses read as an OPERATOR rather than
+the closing bracket of an enclosing template argument list, so
+`is_same_v<decltype(a > 2), bool>` parses (call arguments and casts
+already cleared that state; decltype did not);
+`__builtin_bit_cast(T, e)`, the
 only defined way to reinterpret an object's bytes -- `*(int *)&f` breaks
 strict aliasing, a union is defined in C and merely conventional in
 C++, and memcpy cannot appear in a constant expression; a function

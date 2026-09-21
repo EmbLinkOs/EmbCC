@@ -718,6 +718,34 @@ member's own access in `struct csym`, and `class_derives`/`path_count` in
 current access context (the class whose member or friend is doing the
 naming) threaded through name lookup and the cast paths.
 
+## Closed: two ties-to-even bugs, and a `>` inside decltype (2026-09-21)
+
+All three found by writing headers, not by reading the compiler.
+
+**nearbyint was floor(x + 0.5)**, which is round() under another name.
+Its entire job is to follow the CURRENT rounding direction, and the
+default is ties to even: nearbyint(2.5) is 2 and round(2.5) is 3. Now
+reads fegetround() and honours all four modes -- which only became
+possible when <fenv.h> was written.
+
+**remainder had no tie rule.** fmod truncates the quotient; IEEE's
+remainder rounds it to nearest with ties to EVEN. remainder(7, 2) was 1
+and must be -1, because the nearest multiple of 2 to 7 is 8. This is
+the case argument reduction depends on: reducing an angle by pi/2 lands
+on a tie at every odd multiple of pi/4. The whole family now matches a
+known-correct libm byte for byte.
+
+**About sixty math variants were missing.** C11 requires all three
+widths for every function in <math.h>; the gap was invisible until
+<tgmath.h> made a missing one a compile error. The ones that MOVE or
+INSPECT a value are now written in long double throughout, because
+narrowing them loses exactly the bits a long double was chosen for.
+
+**A `>` inside decltype's parentheses was read as the closing angle
+bracket** of an enclosing template argument list, so
+`is_same_v<decltype(a > 2), bool>` did not parse. Call arguments and
+casts already cleared that state; decltype did not.
+
 ## Closed: the asm "m" constraint, both directions (2026-09-21)
 
 Found by writing `<fenv.h>`, which has to reach a hardware register and
@@ -796,12 +824,16 @@ of a workable size rather than only an integer or pointer (they pass by
 pointer and copy bytes, so `std::atomic<double>` works), and printf's
 floating conversion is exact — see `docs/language/libc.md`.
 
-The library grew with them: `<compare>`, `<concepts>`, `<any>`,
-`<format>`, `<ranges>`, `<atomic>` and `<regex>`, which takes
-`lib/libcxx/include` to 65 headers. Still missing on purpose:
-`<thread>`, `<mutex>` and atomic `wait`/`notify`, which must BLOCK and
-have no primitive to block on — `lib/libc/os/backend.h` has no futex —
-and would otherwise be spin loops wearing the right names.
+The library grew with them, and has kept growing: `lib/libcxx/include`
+is now 96 headers and `lib/libc/include` has every C11 header. The C++
+list is down to two, `<filesystem>` and `<locale>`.
+
+Still absent on purpose: atomic `wait`/`notify`, which must BLOCK. The
+futex PRIMITIVE now exists in the seam; only the two backends return
+ENOSYS, so a target with real threads lights it up without the library
+changing. `tss_create` and `thread_local` are absent for a different
+reason -- they need thread-local storage, which EmbCC does not have,
+and a key every thread shared would be a global under another name.
 
 ## Closed: dead landing pads, and long double objects (2026-09-20)
 
