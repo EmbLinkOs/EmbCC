@@ -690,33 +690,52 @@ designated) and **file-scope compound literals** (direct value, nested, and
 `&(T){...}` via an anonymous global). The remaining Tier-3 entries are
 integration notes, not compiler work.
 
-## C++ access control is not implemented (scoped 2026-09-20)
+## Closed: C++ access control (2026-09-21)
 
-This was first written up as a cast bug — `static_cast`/`dynamic_cast` to
-a **private** base is accepted where g++ says "'B' is an inaccessible base
-of 'D'". It is not a cast bug. `private` and `protected` are parsed and
-recorded (`CA_PRIVATE`, `struct cbase::access`) and then never enforced
-anywhere: reading a private data member of another class compiles too.
+The entry that stood here said it "wants to be done once, properly,
+with the existing corpus as the regression test -- not slipped in".
+That is what happened, and the corpus is what made it possible: it
+caught four wrong refusals that reading the code had not.
 
-That makes it a FEATURE, not a defect, and a deliberately different kind
-of work from the rest of this file. Every other entry here is about the
-compiler producing wrong code or rejecting valid code. Access control can
-only do the opposite — it exists to *reject* programs that compile today,
-and it cannot make a single working program work. The whole tree,
-libstdc++ and EmbLinkOS included, builds without it.
+Enforced at five places: a member named through an object, a member
+named without one (`C::s`), a member function once overload resolution
+has chosen it (access belongs to the OVERLOAD, not the name), a
+constructor where the construction is built, and the derived-to-base
+conversions. Friendship is recorded for classes, functions and class
+templates; `template <class U> friend class X;` befriends every
+instance, which is the shape shared_ptr and weak_ptr use to reach each
+other.
 
-So the risk runs the other way, and an incomplete implementation is worse
-than none: friends, nested classes, using-declarations that change access,
-protected access from a derived class, and the rule that a class may reach
-its own private bases are all part of it, and getting any of them wrong
-rejects correct code. It wants to be done once, properly, with the
-existing corpus as the regression test — not slipped in.
+The four the corpus caught:
 
-What exists to build on: `struct cbase::access` per base edge, the
-member's own access in `struct csym`, and `class_derives`/`path_count` in
-`src/cxx/expr.c` for the base walk. What is missing is the notion of a
-current access context (the class whose member or friend is doing the
-naming) threaded through name lookup and the cast paths.
+  - A using-declaration REPUBLISHES a base member at a new access.
+    libstdc++'s vector is `protected _Vector_base` with
+    `using _Base::get_allocator;` public, and internal_file_clock
+    republishes a protected _S_to_sys.
+  - A base's accessibility is about a CONVERSION, not about the object
+    adjustment that reaching an inherited member needs. to_base serves
+    both; checking there refuses the case above.
+  - A nested class is a member of its enclosing class and reaches its
+    privates, while being derived from nothing.
+  - Checks must not fire under SFINAE. An error there does not reach
+    anyone -- it unwinds and turns a viable overload into a non-viable
+    one. With them running, one test program's generated C differed by
+    5856 lines, compiled, and behaved differently. That is the one
+    failure mode a diagnostic-only feature must not have.
+
+-fno-access-control turns it off, as g++ spells it.
+tests/golden/cxx-access.sh: ten ill-formed programs refused with a
+located diagnostic and accepted again under the flag, twelve correct
+ones still compiling.
+
+Remaining, all missed diagnostics rather than wrong refusals: nothing
+is checked under SFINAE, so is_constructible answers as though
+everything were public; [class.protected]'s "through an object of the
+derived class" narrowing is not enforced; a member republished more
+permissively stops being checked everywhere, since overload resolution
+works on the original rather than the alias; a befriended function
+template or specialization makes its class befriend everything; and a
+nested type carries no access of its own.
 
 ## Closed: two ties-to-even bugs, and a `>` inside decltype (2026-09-21)
 

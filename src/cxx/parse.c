@@ -3906,7 +3906,7 @@ void field_parse_default(struct cclass *c, struct cfield *fl)
     cx_curfn = sf;
 }
 
-static void parse_using(void);
+static void parse_using(int access);
 static void parse_static_assert(void);
 
 static void parse_member(struct cclass *c, int *access)
@@ -3923,7 +3923,7 @@ static void parse_member(struct cclass *c, int *access)
         cx_advance();
         return;
     case TOK_CX_USING:
-        parse_using();
+        parse_using(*access);
         return;
     case TOK_KW_STATIC_ASSERT:
         parse_static_assert();
@@ -3942,6 +3942,13 @@ static void parse_member(struct cclass *c, int *access)
     parse_dspec(&ds);
     if (ds.is_friend && ds.type && cx_kind() == TOK_SEMI) {
         cx_advance();                           /* friend class X; */
+        if (ds.type->k == CT_CLASS && ds.type->cls)
+            access_add_friend_class(c, ds.type->cls);
+        else
+            /* `friend T;` with T a template parameter, and anything
+             * else this cannot resolve to one class: befriend
+             * everything rather than refuse what the program meant. */
+            c->befriends_all = 1;
         return;
     }
     if (cx_kind() == TOK_SEMI) {
@@ -3988,8 +3995,12 @@ static void parse_member(struct cclass *c, int *access)
             struct csym *y = scope_add(c->scope, CS_TYPEDEF, d.name);
             y->type = t;
         } else if (ds.is_friend && d.has_targs && cx_kind() != TOK_LBRACE) {
-            /* friend R f<args>(...);: a specialization befriended — access
-             * is not enforced, so nothing is declared */
+            /* friend R f<args>(...);: a specialization befriended.
+             * Nothing is declared for it, so there is no function node
+             * to match against later -- the class befriends everything
+             * instead, which grants more than it should and refuses
+             * nothing that is right. */
+            c->befriends_all = 1;
         } else if (t->k == CT_FUNC || ds.is_friend) {
             if (t->k != CT_FUNC)
                 cx_error(d.at, "a friend declaration names a function or "
@@ -4003,6 +4014,8 @@ static void parse_member(struct cclass *c, int *access)
                 target = d.qual ? d.qual : enclosing_ns(c->scope);
             struct cfunc *f = declare_function(&ds, &d, t, target);
             f->access = *access;
+            if (ds.is_friend)
+                access_add_friend_func(c, f);
             if (d.kind == DN_DTOR)
                 c->user_dtor = 1;
             if (cx_kind() == TOK_LBRACE || cx_kind() == TOK_COLON ||
@@ -4283,9 +4296,9 @@ void define_inherited_ctor(struct cfunc *f)
     cx_curblk = saveblk;
 }
 
-static void using_declarator(const struct ctok *at);
+static void using_declarator(const struct ctok *at, int access);
 
-static void parse_using(void)
+static void parse_using(int access)
 {
     const struct ctok *at = cx_cur();
     cx_advance();
@@ -4367,7 +4380,7 @@ static void parse_using(void)
             cx_pos = start;
             for (int k = 0; k < ex; k++)
                 pack_push(packs[k], e);
-            using_declarator(at);
+            using_declarator(at, access);
             if (ex > 0)
                 pack_pop(ex);
         }
@@ -4381,8 +4394,12 @@ static void parse_using(void)
     cx_expect(TOK_SEMI, "';'");
 }
 
-/* One using-declarator: [typename] A::name, what it names brought here */
-static void using_declarator(const struct ctok *at)
+/* One using-declarator: [typename] A::name, what it names brought here.
+ * `access` is the section it was written in, and it REPLACES what the
+ * member had in the base -- that is the point of writing one in a
+ * public section of a class with a protected base, which both
+ * libstdc++'s vector and its internal_file_clock do. */
+static void using_declarator(const struct ctok *at, int access)
 {
     cx_accept(TOK_CX_TYPENAME);
     struct qname q = peek_qname();
@@ -4445,9 +4462,26 @@ static void using_declarator(const struct ctok *at)
                 have |= g == orig || g->alias_of == orig;
             if (have)
                 continue;
+            /* Republishing LOOSENS the original's access and never
+             * tightens it. Overload resolution builds its candidate set
+             * out of originals -- set_add follows alias_of, so the
+             * alias never reaches the call -- and rather than disturb
+             * that for a check, the relaxation is recorded where the
+             * check will look.
+             *
+             * The cost is a missed diagnostic: after `using B::m;` in
+             * some derived class's public section, `B::m` is no longer
+             * refused anywhere. That is the direction this file errs
+             * in on purpose. libstdc++ does this twice in code that
+             * must compile -- vector republishes get_allocator from a
+             * protected base, and internal_file_clock republishes
+             * _S_to_sys -- and refusing either is not an option. */
+            if (access < orig->access)
+                orig->access = access;
             struct cfunc *a = xmalloc(sizeof *a);
             *a = *orig;
             a->alias_of = orig;
+            a->access = access;
             a->next = NULL;
             struct cfunc **tail = &mine->fns;
             while (*tail)
@@ -4463,6 +4497,7 @@ static void using_declarator(const struct ctok *at)
     y->hnext = hn;
     y->next = nx;
     y->scope = sc;
+    y->access = access;
     if (src->k == CS_FIELD && !y->fcls)    /* using Base::m; */
         y->fcls = src->scope->cls;
     /* a class brought in also keeps its tag */
@@ -4633,7 +4668,7 @@ static void parse_declaration(int toplevel, struct cstmt **out)
         }
         break;
     case TOK_CX_USING:
-        parse_using();
+        parse_using(CA_PUBLIC);
         return;
     case TOK_KW_EXTERN:
         if (cx_kind_at(1) == TOK_STR) {
@@ -5925,7 +5960,7 @@ static struct cstmt *parse_stmt_or_none(void)
     case TOK_CX_TRY:
         return parse_try(at);
     case TOK_CX_USING:
-        parse_using();
+        parse_using(CA_PUBLIC);
         return NULL;
     case TOK_KW_STATIC_ASSERT:
         parse_static_assert();
@@ -7566,15 +7601,35 @@ static void template_decl_rest(struct cclass *cls, int access,
         cx_advance();
         cx_expect(TOK_SEMI, "';' after a friend declaration");
         struct cscope *ns = enclosing_ns(home);
-        if (!q.scope && !lookup(ns, name)) {
+        struct csym *ey = q.scope ? NULL : lookup(ns, name);
+        if (!q.scope && !ey) {
             struct ctemplate *t = template_new(TK_CLASS, name, ns, ps, np);
             struct csym *y = scope_add(ns, CS_TEMPLATE, name);
             y->tmpl = t;
             t->key = TOK_CX_CLASS;
+            ey = y;
+        }
+        /* Record it: every instance of that template is a friend. A
+         * name that does not resolve to one leaves the class
+         * befriending everything, which grants too much and refuses
+         * nothing. */
+        if (cls) {
+            if (ey && ey->k == CS_TEMPLATE && ey->tmpl)
+                access_add_friend_template(cls, ey->tmpl);
+            else if (ey && ey->k == CS_CLASS && ey->type &&
+                     ey->type->k == CT_CLASS)
+                access_add_friend_class(cls, ey->type->cls);
+            else
+                cls->befriends_all = 1;
         }
         cx_scope = home;
         return;
     }
+    /* Any other friend under a template header -- a befriended function
+     * template, most often. There is no node yet to match an eventual
+     * instantiation against, so the class befriends everything. */
+    if (cls && cx_kind() == TOK_CX_FRIEND)
+        cls->befriends_all = 1;
     struct cguide *g = guide_at();
     if (g) {
         /* template<...> C(P...) -> C<A...>; */

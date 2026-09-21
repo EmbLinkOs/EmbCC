@@ -41,6 +41,7 @@ SRCS := \
 	src/cxx/traits.c \
 	src/cxx/concepts.c \
 	src/cxx/coro.c \
+	src/cxx/access.c \
 	src/cxx/mangle.c \
 	src/cxx/emit.c \
 	src/sema/sema.c \

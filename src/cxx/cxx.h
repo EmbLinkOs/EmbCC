@@ -824,6 +824,19 @@ struct cclass {
     struct cfunc *copy_assign;    /* user-declared operator=(const T&) */
     int user_copy_ctor, user_move_ctor, user_copy_assign, user_move_assign;
     int user_dtor;
+    /* Friendship, for access control. A friend declaration names a class
+     * or a function; neither list is inherited and neither is
+     * transitive, which is the whole of the rule. `befriends_all` is
+     * the escape hatch for the forms this compiler does not model
+     * precisely -- a befriended template, say -- where granting too
+     * much is the safe direction and refusing valid code is not. */
+    struct cclass **frcls;
+    int nfrcls, capfrcls;
+    struct ctemplate **frtmpl;   /* template<...> friend class X; */
+    int nfrtmpl, capfrtmpl;
+    struct cfunc **frfn;
+    int nfrfn, capfrfn;
+    int befriends_all;
     int user_ctors;           /* any constructor the user declared */
     int has_default_ctor;     /* some constructor takes no arguments */
     int trivial_assign;       /* copy/move assignment is a struct copy */
@@ -1129,6 +1142,24 @@ struct cexpr *to_base(struct cexpr *e, struct cclass *b, int ptr);
 /* The member `name` of class c, its bases searched when c has none;
  * class_lookup_ambiguous is set when two bases have different ones. */
 struct csym *class_member(struct cclass *c, const char *name);
+
+/* ---- access control (access.c) ---------------------------------------- */
+void access_add_friend_class(struct cclass *c, struct cclass *f);
+void access_add_friend_func(struct cclass *c, struct cfunc *f);
+void access_add_friend_template(struct cclass *c, struct ctemplate *t);
+/* Report `y`, a member of `home` reached by writing `name`, if the
+ * context naming it may not. `at` is where to point. */
+void access_check_sym(struct cclass *home, const struct csym *y,
+                      const char *name, const struct ctok *at);
+void access_check_func(struct cclass *home, const struct cfunc *f,
+                       const char *name, const struct ctok *at);
+void access_check_field(struct cclass *home, const struct cfield *fl,
+                        const char *name, const struct ctok *at);
+/* The base-class conversion from `d` to `b`: [class.access.base]. 1 if
+ * some path to it has every edge accessible from here. */
+int  access_base_ok(struct cclass *d, struct cclass *b);
+int  access_enabled(void);
+void access_set_enabled(int on);
 extern int class_lookup_ambiguous;
 /* ---- vtables (vtable.c) ---- */
 

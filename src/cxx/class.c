@@ -1203,6 +1203,11 @@ static struct cexpr *ctor_call(struct cclass *c, struct cfunc *f,
         cx_error(at, "use of deleted %s constructor of '%s'",
                  f->special == SP_COPY ? "copy" : f->special == SP_MOVE
                  ? "move" : "a", c->name ? c->name : "class");
+    /* Constructors do not reach make_call's check: a construction is
+     * built here rather than resolved as a call, so this is where a
+     * private one is refused. It is the mechanism behind every
+     * non-copyable type in the standard library. */
+    access_check_func(c, f, c->name ? c->name : "constructor", at);
     struct cexpr *e = ex_new(E_CONSTRUCT, ct_class(c), VC_PRVALUE);
     e->line = at->t.line;
     e->col = at->t.col;

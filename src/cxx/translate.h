@@ -11,6 +11,10 @@ char *cxx_translate(const char *file, const char *src);
 void cxx_set_exceptions(int on);
 void cxx_set_rtti(int on);
 
+/* -fno-access-control: private and protected parsed and recorded, as
+ * before, and not enforced (the default is on). */
+void access_set_enabled(int on);
+
 /* Errors the C++ front end reported (it recovers and keeps reading, as the
  * C one does): the driver stops before the C stage when there were any. */
 extern int cx_nerrors;

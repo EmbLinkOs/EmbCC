@@ -1085,6 +1085,59 @@ error (tests/golden/cxx-format-check.sh: EmbCC and g++ agree on which of
 tests/golden/cxx-reject.sh (runtime arguments, division by zero, throw,
 a non-constexpr call, a non-constant global).
 
+**Access control done** (September 2026). `private` and `protected` had
+been parsed and recorded for years and enforced nowhere: reading another
+class's private member compiled, and so did casting to a private base.
+It is enforced now, and it is a different kind of change from every
+other entry above — those make a valid program work, while this one can
+only make a program that compiles today stop compiling. It cannot fix a
+single bug in a running program.
+
+So the bias runs one way. Where the rule is clear it is applied; where
+the compiler cannot see enough to be sure, access is **granted**. A
+missed diagnostic is a feature not yet complete; a refusal of correct
+code is a compiler nobody can build with. The regression test is the
+corpus — libstdc++, this project's own 97 headers, the execution
+programs — and it earned its place, catching four wrong refusals that
+reading the code had not:
+
+- **A using-declaration republishes a base member at a new access.**
+  libstdc++'s `vector` is `protected _Vector_base` with
+  `using _Base::get_allocator;` in its public section, and its
+  `internal_file_clock` republishes a protected `_S_to_sys`. Refusing
+  either is not an option.
+- **A base's accessibility is a question about a *conversion*, not
+  about the object adjustment that reaching an inherited member needs.**
+  Both go through one function internally; checking there refuses the
+  case above.
+- **A nested class is a member of the class enclosing it**, so it
+  reaches its privates — and it is derived from nothing, which is why a
+  checker built on derivation alone rejects it.
+- **Checks must not fire inside SFINAE.** An error raised there does not
+  reach anyone: it unwinds, and silently turns a viable overload into a
+  non-viable one. With the checks running there, the generated C for one
+  test program differed by 5856 lines — instantiations simply missing —
+  and the program compiled and then behaved differently. A
+  diagnostic-only feature must not be able to do that.
+
+`-fno-access-control` turns it off, as g++ spells it.
+`tests/golden/cxx-access.sh` holds ten ill-formed programs that must be
+refused with a located diagnostic — and must compile again under that
+flag — and twelve correct ones that must still compile. The second list
+is the longer one on purpose: every entry in it refused a correct
+program at some point.
+
+Known gaps, all of them missed diagnostics rather than wrong refusals:
+access is not checked under SFINAE, so `is_constructible` still answers
+as though everything were public; `[class.protected]`'s narrowing (the
+access must be through an object of the derived class) is not enforced;
+a member republished more permissively by a using-declaration stops
+being checked everywhere, because overload resolution works on the
+original rather than the alias; a befriended function template or
+specialization makes its class befriend everything, there being no node
+to match an instantiation against; and a nested type carries no access
+of its own.
+
 Not yet (CX6): a generic lambda's conversion to a pointer to function;
 constexpr objects of class type are still initialized at run time (their
 values are known to the interpreter, not yet written as static data);

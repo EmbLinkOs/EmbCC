@@ -88,6 +88,7 @@ static void print_options(FILE *out)
       "  -D NAME[=VALUE], -U NAME  define and undefine macros\n"
       "  -include FILE          include it before the file\n"
       "  -fno-exceptions, -fno-rtti   C++ without them\n"
+      "  -fno-access-control          do not enforce private/protected\n"
       "\nthe target\n"
       "  --target=x86_64-elf|aarch64-elf\n"
       "  -dumpmachine           print that target\n"
@@ -1229,6 +1230,14 @@ int main(int argc, char **argv)
             if (mf) dep_file = argv[++i]; else dep_target = argv[++i];
         } else if (strcmp(argv[i], "-fno-exceptions") == 0) {
             want_exceptions = 0;
+        } else if (strcmp(argv[i], "-fno-access-control") == 0) {
+            /* GCC's spelling, and it means what it says: private and
+             * protected stop being enforced. Worth having for the same
+             * reason GCC has it -- a test that reaches into a class's
+             * internals, and a build bisecting a new diagnostic. */
+            access_set_enabled(0);
+        } else if (strcmp(argv[i], "-faccess-control") == 0) {
+            access_set_enabled(1);
         } else if (strcmp(argv[i], "-fno-stack-protector") == 0) {
             /* what EmbCC does: it emits no stack protection. The positive
              * forms are refused below rather than quietly ignored. */

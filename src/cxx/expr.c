@@ -520,6 +520,26 @@ static struct cexpr *shift_object(struct cexpr *e, struct cclass *to,
     return r;
 }
 
+/* The accessibility of a base is a question about a CONVERSION, not
+ * about the object adjustment that reaching an inherited member needs.
+ * to_base serves both, so the check cannot live inside it: naming a
+ * member through a derived object is governed by that MEMBER's access,
+ * and a using-declaration can make a protected base's member public in
+ * the derived class. libstdc++ does exactly that --
+ * `class vector : protected _Vector_base` with
+ * `using _Base::get_allocator;` in its public section -- and checking
+ * the base at every adjustment refuses it. So the check sits at the
+ * places where a D really becomes a B: the standard pointer and
+ * reference conversions, and the explicit casts. */
+static void base_conv_check(struct cexpr *e, struct cclass *d,
+                            struct cclass *b)
+{
+    if (!access_base_ok(d, b))
+        ex_error(e, "'%s' is an inaccessible base of '%s'",
+                 b->name ? b->name : "that class",
+                 d->name ? d->name : "that class");
+}
+
 struct cexpr *to_base(struct cexpr *e, struct cclass *b, int ptr)
 {
     struct cclass *d = ptr ? e->t->to->cls : e->t->cls;
@@ -1737,6 +1757,7 @@ struct cexpr *convert(struct cexpr *e, struct cty *t, const char *ctx)
     if (ct_same(e->t, tu))
         return e;
     if (s.base_to && e->t->k == CT_PTR) {
+        base_conv_check(e, e->t->to->cls, s.base_to);
         e = to_base(e, s.base_to, 1);
         if (ct_same(e->t, tu))
             return e;
@@ -1782,8 +1803,10 @@ struct cexpr *bind_ref(struct cexpr *e, struct cty *rt, const char *ctx)
         return ex_addr(materialize(convert(e, ct_unqual(T), ctx)));
     }
     if (e->t->k == CT_CLASS && T->k == CT_CLASS &&
-        is_proper_base(e->t->cls, T->cls) && e->vc != VC_PRVALUE)
+        is_proper_base(e->t->cls, T->cls) && e->vc != VC_PRVALUE) {
+        base_conv_check(e, e->t->cls, T->cls);
         e = to_base(e, T->cls, 0);
+    }
     int related = ct_same_unqual(e->t, T);
     int compat = related && (T->q & e->t->q) == e->t->q;
     if (!related && e->t->k == CT_ARRAY && T->k == CT_ARRAY &&
@@ -1977,6 +2000,12 @@ static struct cexpr *call_result(struct cty *ret)
 struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
                         struct cexpr **args, int na, const struct ctok *at)
 {
+    /* Before alias_of is followed: a using-declaration REPLACES the
+     * access the member had in the base, and the alias is what carries
+     * the new one. Following it first and asking the original is how a
+     * protected member republished as public gets refused. */
+    if (fn->cls)
+        access_check_func(fn->cls, fn, fn->name, at);
     if (fn->alias_of)
         fn = fn->alias_of;
     if (fn->type->xobj && obj) {
@@ -1990,6 +2019,7 @@ struct cexpr *make_call(struct cfunc *fn, struct cexpr *obj,
     }
     if (fn->is_deleted)
         cx_error(at, "use of deleted function '%s'", fn->name);
+    /* (the access check is above, before alias_of was followed) */
     func_deduce_return(fn, at);
     struct cty *ret = fn->type->to;
     if (ret->k == CT_CLASS && !ct_is_complete(ret))
@@ -3432,8 +3462,10 @@ static struct cexpr *cast_to(struct cty *t, struct cexpr *e, int kind,
         if ((kind == CAST_STATIC || kind == CAST_C) &&
             e->t->k == CT_CLASS && T->k == CT_CLASS && e->t->cls != T->cls) {
             struct cexpr *r;
-            if (is_proper_base(e->t->cls, T->cls))
+            if (is_proper_base(e->t->cls, T->cls)) {
+                base_conv_check(e, e->t->cls, T->cls);
                 r = to_base(e, T->cls, 0);
+            }
             else
                 r = to_derived(e, T->cls, 0);
             r->t = ct_qual(ct_class(T->cls), T->q);
@@ -3489,8 +3521,10 @@ static struct cexpr *cast_to(struct cty *t, struct cexpr *e, int kind,
         f->to->cls != tu->to->cls) {
         struct cclass *fc = f->to->cls, *tc = tu->to->cls;
         struct cexpr *r = NULL;
-        if (is_proper_base(fc, tc))
+        if (is_proper_base(fc, tc)) {
+            base_conv_check(e, fc, tc);
             r = to_base(e, tc, 1);
+        }
         else if (is_proper_base(tc, fc))
             r = to_derived(e, tc, 1);
         if (r)
@@ -3549,6 +3583,7 @@ static struct cexpr *dynamic_cast_to(struct cty *t, struct cexpr *e,
     }
     struct cclass *src = p->t->to->cls;
     if (tt->k == CT_CLASS && class_derives(src, tt->cls, NULL)) {
+        base_conv_check(p, src, tt->cls);
         struct cexpr *b = to_base(p, tt->cls, 1);
         return ref ? ex_deref(b) : b;
     }
@@ -4526,6 +4561,13 @@ static void explicit_targs(struct cexpr *e)
 static struct cexpr *name_expr(struct csym *y, const char *name,
                                const struct ctok *at)
 {
+    /* A name written without an object: `C::s`, or a member named from
+     * inside the class. Non-members carry CA_PUBLIC and cost nothing
+     * here. Functions are not checked at this point -- their access
+     * belongs to the overload, and make_call asks once resolution has
+     * chosen one. */
+    if (y->k != CS_FUNC && y->scope && y->scope->k == SC_CLASS)
+        access_check_sym(y->scope->cls, y, name, at);
     switch (y->k) {
     case CS_TEMPLATE: {
         if (y->tmpl->kind == TK_CONCEPT && cx_kind() == TOK_LT) {
@@ -5442,9 +5484,11 @@ static struct cexpr *member_access(struct cexpr *obj, int arrow,
                  name, ct_name(obj->t));
     switch (y->k) {
     case CS_FIELD:
+        access_check_sym(in, y, name, at);
         return field_via(to_base(obj, y->fcls ? y->fcls : y->scope->cls, 0),
                          y);
     case CS_VAR: {
+        access_check_sym(in, y, name, at);
         if (y->var->is_member_static && !y->var->defined)
             member_var_from_outdef(y->var);
         struct cexpr *e = ex_new(E_VAR, ct_strip_ref(y->var->type),
