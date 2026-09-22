@@ -1442,6 +1442,45 @@ Three things the test found or settled:
   checked by hand, one of them is -1e160 to 5e-18 -- which is the
   overflow avoidance Smith's method exists for.
 
+## Closed by analysis: -Wclobbered (2026-09-22)
+
+The report listed ten locals that gcc's `-Wclobbered` warns about.
+There is no gcc on this machine that can compile host code and clang
+does not implement the warning, so this was done the other way: by
+reading every `setjmp` in the tree against what the standard actually
+guarantees.
+
+C11 7.13.2.1p3 is narrower than the warning. Only an automatic,
+non-`volatile` local **that was changed between the setjmp and the
+longjmp** has an indeterminate value afterwards. One that was set
+before the `setjmp` and left alone keeps it. `-Wclobbered` does not
+make that distinction -- it is a register-allocation heuristic, and
+gcc's own documentation says it produces false positives.
+
+All eleven sites follow one shape: save the state (`cx_sfinae`,
+`parse_save()`, sometimes a token position) into locals BEFORE the
+`setjmp`, and read exactly those locals in the longjmp branch to put it
+back. Nothing a longjmp branch reads is written after the `setjmp`.
+`src/cxx/concepts.c` line 308 is the one place where locals (`n`,
+`args`) ARE written afterwards, and they are not read on the longjmp
+path -- the successful branch returns before reaching it.
+
+And the three places where a variable genuinely is written between the
+two and read after already carry `volatile`, which is the thing worth
+knowing: the rule was being applied where it matters.
+
+  - `src/parse/parse.c:2233` -- `struct stmt **volatile tail`, walked
+    down a statement chain after the setjmp and set to NULL in the
+    recovery branch.
+  - `src/parse/parse.c:3376` -- `volatile int seq`, whose comment
+    already says "written between setjmp and longjmp".
+  - `src/driver/main.c:473` -- `volatile int rc`.
+
+So: no `volatile` added, because adding it to quiet a warning nobody
+has read is how a real setjmp bug gets buried. If the gcc output names
+a site outside those eleven, it is worth a second look -- paste it and
+it gets one.
+
 ## Open: the aarch64 `long double` runtime, and the unwinder
 
 Two things the Linux target still cannot link, both for the same
@@ -1466,9 +1505,6 @@ symbol nobody has heard of.
 
 Still open from the same report, and not touched here:
 
-- **`-Wclobbered` on ten locals.** clang does not implement it, so the
-  gcc output is needed before deciding; sprinkling `volatile` to quiet
-  a warning nobody has read is how a real setjmp bug gets buried.
 
 ## Closed: a rollback that restored a freed pointer (2026-09-21)
 
