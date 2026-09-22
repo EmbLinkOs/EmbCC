@@ -1528,35 +1528,57 @@ subdirectory now.
 ## Partly closed: aarch64 register allocation (2026-09-22)
 
 The backend said `(void)regalloc;` -- every vreg in a stack slot, every
-operation through the accumulator. It now allocates, and what that
-bought is precise: **memory operations in a four-variable loop went
-from 43 to 14**, a 67% cut, with the instruction count unchanged at 59.
+operation through the accumulator. It allocates now, through the shared
+allocator, into x20-x26: callee-saved, saved in the prologue and
+described in the unwind tables.
 
-Unchanged, because the round-trip became a register move rather than
-disappearing: `ld_slot`/`st_slot` know about allocated vregs, so a
-value is read with `mov` instead of `ldr`, but the operations
-themselves still route through the accumulator. On hardware that is 29
-fewer memory accesses per call; under QEMU's TCG a load and a move cost
-the same, which is why the clock showed nothing and the instruction
-count is the honest number to quote.
+**Three bugs, all mine, and the third only found because the first two
+were.**
+
+- **The pool handed out registers the backend was already using.**
+  AAPCS64 says x9-x15 are caller-saved temporaries, so the first pool
+  was x12-x15 -- but this backend had already spent x9 as the
+  accumulator, x10 as the second operand, x11 as the address scratch,
+  x12 as a second scratch and x13/x14 for the atomics. A memcpy's
+  scratch and an allocated value took turns in the same register. The
+  ABI says which registers a CALLER may clobber; it does not say which
+  ones a particular backend has left.
+- **The eligibility rules were x86's capabilities written as properties
+  of the IR.** Lifted out of that backend, cases commented
+  "register-aware" -- a call's scalar arguments, a scalar return, a
+  memcpy's addresses -- were true of x86 and false here. `struct
+  ra_target` carries capability flags now. D-011 said to derive the
+  shared layer from two WORKING backends; this is the half that is easy
+  to skip.
+- **The prologue wrote incoming parameters straight to their stack
+  slots**, bypassing `st_slot`, so an allocated parameter's register
+  was never initialised. One line, and the reason `struct S s = mk(7,
+  35);` came back wrong.
+
+**And a process failure worth recording**, because it cost more than
+the bugs did. Three separate times the aarch64 suite was reported green
+when it was not: `make` piped into `head` can die of SIGPIPE before it
+finishes, and an A/B comparison built by patching a file and rebuilding
+silently reused the previous binary. Every before/after MEASUREMENT of
+this allocator in that period is therefore worthless and is withdrawn
+-- the "43 memory operations to 14" figure was read off a truncated
+disassembly and never reproduced. What is verified is correctness: a
+clean rebuild whose exit status was checked, then 193/193 on aarch64
+and the specific failures (`tests/exec/aapcs64.c`, `libcxx.sh`,
+`unwind.sh`) passing.
+
+The lesson is the one this project keeps relearning from the other
+side: a green result whose provenance is not checked is not a result.
+Check the exit status, never the grepped output.
 
 **What remains** is the operand-level step: teaching each operation to
 take its inputs from the allocated registers directly instead of
 loading them into the accumulator first. That is the threading of
 `in_reg()` through every case that makes the x86 backend twice the size
-of this one, and it is where the instruction count falls.
-
-**The pool is caller-saved only** (x12-x15), and that is a stopping
-point rather than an oversight. A callee-saved register has to be saved
-in the prologue AND described there, or an exception unwinding through
-the function restores the caller's copy from nowhere -- and `struct
-func` has room for eight such descriptions at one program point, which
-x19's frame-base save already shares. It costs nothing today: a value
-crossing a call may not take a caller-saved register, and on this
-backend a value crossing a call is almost always a call ARGUMENT, which
-is ineligible anyway. Compiled with x20-x28 available, a program that
-forces eight locals across a call referenced none of them. The two
-changes go together, and so does their CFI.
+of this one, and it is where the instruction count falls. The pool is
+seven registers because `struct func` holds eight CFI rules at one
+program point and x19's frame-base save shares them, so a loop with
+many simultaneously-live values still spills all of them.
 
 ## Closed: switch dispatch (2026-09-22)
 

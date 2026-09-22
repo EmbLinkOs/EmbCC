@@ -331,6 +331,14 @@ void x86_epilogue(struct code *c)
     code_byte(c, 0xc3); /* ret */
 }
 
+/* The frame teardown without the return: what a SIBLING call needs.
+ * After this, rsp points at the return address the caller pushed, so a
+ * plain `jmp` to the callee makes it return straight to that caller. */
+void x86_leave(struct code *c)
+{
+    code_byte(c, 0xc9); /* leave */
+}
+
 /* These two used to carry a SECOND copy of the argument register
  * order, as a table of {reg-field, needs REX.R}. That was one table
  * too many the moment a target existed with a different order: changing

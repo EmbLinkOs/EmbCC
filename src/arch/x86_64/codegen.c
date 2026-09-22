@@ -669,6 +669,10 @@ static int rc_vw, rc_zx;
  * Narrow (4-byte) register values keep their upper half zero, mirroring the
  * slot invariant, so an unsigned widen is a plain 64-bit read. */
 static int g_regalloc;        /* enabled only at -O2 */
+/* Sibling calls: on at -O2, with the register allocator, because both
+ * are about a frame being finished with and both are off at -O0 where
+ * a debugger wants every frame to still be there. */
+static int g_tailcalls;
 static const int *g_loc;      /* per-vreg physical register, or -1; NULL when off */
 
 static void cg_reset(void) { rc_vreg = -1; rc_zx = 0; }
@@ -1237,6 +1241,94 @@ static void gen_x87(struct code *text, const int *sd, struct ir_ins *i)
 
 #undef FLD_T
 #undef FSTP_T
+
+/* ---- sibling calls -------------------------------------------------------
+ *
+ * `return f(args);` need not build a frame on top of this one. If this
+ * frame is finished with -- nothing of it can still be referenced --
+ * then tearing it down BEFORE the call and jumping rather than calling
+ * leaves the callee returning straight to our caller. The stack stops
+ * growing, which is what makes a tail-recursive function a loop instead
+ * of an eventual overflow.
+ *
+ * The conditions are all about that "nothing of it can still be
+ * referenced", and each one below is a way for the frame to outlive the
+ * jump:
+ *
+ *   - an argument on the STACK would be written into the very frame
+ *     being torn down (the outgoing area overlaps it);
+ *   - ANY address-of in the function may have handed a local's address
+ *     to somebody, and after `leave` that address points at dead stack.
+ *     Conservative -- it refuses functions that pass an address
+ *     somewhere harmless -- and conservative is the only safe direction
+ *     here, because the failure is a callee reading a live-looking
+ *     pointer into a frame that no longer exists;
+ *   - a VLA moved the stack pointer, so `leave` does not restore it to
+ *     what the epilogue expects;
+ *   - a variadic caller has its register save area IN the frame;
+ *   - a landing pad is entered on an edge that has no frame at all by
+ *     then;
+ *   - a struct return goes through a hidden pointer into the caller's
+ *     buffer, which is a second thing to get right and is excluded
+ *     until it is;
+ *   - Win64 reserves shadow space in the caller's frame, which is the
+ *     same overlap problem in a different ABI.
+ *
+ * What is NOT a condition: the return TYPE. The callee leaves its value
+ * exactly where this function would have left it -- rax, xmm0, st0 --
+ * because they return the same type. That is the whole point of the
+ * transform, and it is why the IR_RET that follows is skipped rather
+ * than emitted. */
+static int tail_call_ok(struct ir_func *fn, int n)
+{
+    struct ir_ins *c = &fn->ins[n];
+    int k;
+
+    if (c->op != IR_CALL || c->indirect || !c->callee)
+        return 0;
+    if (c->retsize || fn->ret_abi.is_struct)
+        return 0;
+    if (fn->is_varargs || fn->has_alloca || fn->neh)
+        return 0;
+    if (target_win64_abi())
+        return 0;
+    for (k = 0; k < c->nargs; k++)
+        if (c->argv[k].on_stack || c->argv[k].byref)
+            return 0;
+    for (k = 0; k < fn->nins; k++)
+        if (fn->ins[k].op == IR_ADDR || fn->ins[k].op == IR_ALLOCA ||
+            fn->ins[k].op == IR_IGOTO || fn->ins[k].op == IR_LABELADDR)
+            return 0;
+    /* Follow the call's value forward to a RET of it.
+     *
+     * A `mov` that merely forwards the value is transparent, and so is
+     * a LABEL: the other path that joins there keeps its own frame and
+     * reaches that return the ordinary way, because only THIS path
+     * becomes a jump. The instructions between the call and the return
+     * simply become unreachable, which is what a jump does to whatever
+     * follows it.
+     *
+     * A `jmp` is where this stops. The return it reaches is somewhere
+     * else, and following a branch to decide whether a frame may be
+     * destroyed is a dataflow question rather than a peephole one. */
+    {
+        int val = c->dst;
+        int k;
+        for (k = n + 1; k < fn->nins; k++) {
+            struct ir_ins *r = &fn->ins[k];
+            if (r->op == IR_LABEL)
+                continue;
+            if (r->op == IR_MOV && r->a == val && r->dst >= 0) {
+                val = r->dst;
+                continue;
+            }
+            if (r->op == IR_RET)
+                return val >= 0 ? r->a == val : r->a < 0;
+            return 0;
+        }
+    }
+    return 0;
+}
 
 static void gen_func(struct ir_func *fn, struct code *text,
                      struct sites *st)
@@ -2260,6 +2352,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * pointers take rdi..r9, floats take xmm0..7. */
             cg_reset();     /* a call clobbers every caller-saved register */
             int ireg = 0, freg = 0;
+            int is_tail = g_tailcalls && tail_call_ok(fn, n);
 
             /* Microsoft x64: an aggregate whose size is not exactly 1,
              * 2, 4 or 8 bytes travels BY REFERENCE, and the copy is the
@@ -2456,6 +2549,36 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     x86_mov_al_imm(text, freg);
                 else
                     x86_zero_eax(text);
+            }
+            if (is_tail) {
+                /* The frame is finished with: restore what the prologue
+                 * saved, tear it down, and JUMP. The callee returns to
+                 * our caller, whose return address `leave` has just left
+                 * at the top of the stack.
+                 *
+                 * The order matters. Arguments are already in their
+                 * registers, and those are caller-saved -- restoring
+                 * callee-saved ones cannot disturb them. Doing it the
+                 * other way round would restore over an argument. */
+                for (int k = 0; k < nsave; k++)
+                    x86_load_reg_mem(text, used_callee[k], REG_RBP,
+                                     save_base + k * 8, 8);
+                x86_leave(text);
+                int patch = x86_jmp_rel32(text);
+                if (i->callee->has_defn) {
+                    struct callsite cs;
+                    cs.patch_off = patch;
+                    cs.target = i->callee;
+                    PUSH(st->call, st->ncall, st->capcall, cs);
+                } else {
+                    struct extcall ec;
+                    ec.patch_off = patch;
+                    ec.callee = i->callee;
+                    PUSH(st->ext, st->next, st->capext, ec);
+                }
+                break;    /* whatever follows is now unreachable, and
+                           * a join label after it is still entered by
+                           * the path that did not take this jump */
             }
             if (i->indirect) {
                 x86_call_r11(text);
@@ -2780,6 +2903,7 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
      * the store-then-reload round-trips). -O0/-O1 are unchanged (regalloc off),
      * so their output stays byte-identical. */
     g_regalloc = regalloc;
+    g_tailcalls = regalloc;   /* same switch: both are -O2 */
     g_regcache = optimize;
     g_opt_frames = optimize;
     g_no_sse = no_sse;

@@ -68,30 +68,30 @@ static int g_fb = A64_SP;
  *
  * Caller-saved first, so a short-lived value takes one and costs no
  * prologue save at all. */
-#define A64_NPOOL 4
-static const int A64_POOL[A64_NPOOL] = { 12, 13, 14, 15 };
+#define A64_NPOOL 7
+static const int A64_POOL[A64_NPOOL] = { 20, 21, 22, 23, 24, 25, 26 };
 
-/* CALLER-SAVED ONLY, x12-x15, and that is a deliberate stopping point
- * rather than an oversight.
+/* CALLEE-SAVED ONLY, x20-x26, saved in the prologue and described in
+ * the unwind tables. Both halves of that are required and the second is
+ * the one that is easy to forget: an exception unwinding through this
+ * function has to restore the caller's copy, and it can only do that
+ * from a CFI rule. `struct func` holds eight such rules at one program
+ * point, and x19's frame-base save shares them, so seven is the bound.
  *
- * A callee-saved register would have to be saved in the prologue and
- * DESCRIBED there, or an exception unwinding through this function
- * restores the caller's copy from nowhere -- and `struct func` has room
- * for eight such descriptions at one program point, which x19's
- * frame-base save already shares. So the pool and the unwind tables are
- * one decision, not two.
+ * Nothing caller-saved is in the pool, and that is not a preference --
+ * there is almost nothing left. AAPCS64 gives x9-x15 as temporaries and
+ * this backend has already spent six of them: x9 is the accumulator,
+ * x10 the second operand, x11 the address scratch, x12 a second scratch
+ * for big offsets and indirect targets, and x13/x14 the atomics' extra
+ * registers. That leaves x15.
  *
- * It costs nothing today. A value that crosses a call may not live in a
- * caller-saved register, and on this backend a value that crosses a
- * call is almost always a call ARGUMENT, which is ineligible anyway
- * (see A64_RA's capability flags). So the callee-saved half of the pool
- * would sit unused: compiled with x20-x28 available, a program that
- * forces eight locals across a call still references none of them.
- *
- * The two go together. Teaching this backend to read a call's arguments
- * out of a register is what makes values that cross calls eligible, and
- * that is the same change that makes callee-saved registers worth
- * having -- and it is the point at which their CFI has to be written. */
+ * Which is how the first version of this pool was wrong. It read
+ * "x9-x15 are caller-saved temporaries" off the ABI and handed out
+ * x12, x13 and x14 -- registers the backend was already using -- so a
+ * memcpy's scratch and an allocated value took turns in the same
+ * register. `struct S s = mk(7, 35);` came back holding the address of
+ * its own copy loop. The ABI says which registers a CALLER may clobber;
+ * it does not say which ones a particular backend has left. */
 
 static int a64_callee_saved(int reg) { return reg >= 19 && reg <= 28; }
 
@@ -925,15 +925,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                                     used_callee, &nsave);
     }
     long *sd = layout_frame(fn, &fr);
-    /* Nothing to save: the pool is caller-saved only, so `nsave` is
-     * always zero and the prologue is untouched. The variable stays
-     * because ra_allocate fills it, and a nonzero value would mean the
-     * pool had grown without its unwind tables. */
+    /* Room for the callee-saved registers the allocator took. Eight
+     * bytes each, rounded to sixteen: AAPCS64 wants sp 16-aligned at
+     * every instruction boundary, not merely at a call. */
+    long save_base = fr.size;
     if (nsave)
-        diag_fatal(NULL, 0,
-                   "internal: the allocator took a callee-saved register, "
-                   "which this prologue does not save and these unwind "
-                   "tables do not describe");
+        fr.size += ((nsave * 8) + 15) & ~15L;
 
     /* -g: each source variable's slot relative to the DWARF frame base,
      * x29. The prologue leaves sp (and x19, which pins it in a function
@@ -953,11 +950,23 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     f->cfi_push = 4;
     f->cfi_frame = 8;
     f->cfi_nsaved = 0;
+    /* The allocator's callee-saved registers, saved FIRST so that every
+     * save in this prologue is complete by one program point -- the
+     * unwind tables carry a single "and here they are all saved"
+     * offset, and x19's save below joins the same list. */
+    for (int k = 0; k < nsave; k++) {
+        a64_str(t, used_callee[k], A64_SP, save_base + k * 8, 8);
+        f->cfi_reg[f->cfi_nsaved] = used_callee[k];
+        f->cfi_off[f->cfi_nsaved] = save_base + k * 8 - fr.size - 16;
+        f->cfi_nsaved++;
+    }
+    if (nsave)
+        f->cfi_saved_at = t->len - f->code_off;
     if (fn->has_alloca) {
         a64_str(t, A64_FBREG, A64_SP, fr.fb_save, 8);
-        f->cfi_nsaved = 1;
-        f->cfi_reg[0] = 19;
-        f->cfi_off[0] = fr.fb_save - fr.size - 16;  /* the CFA is x29+16 */
+        f->cfi_reg[f->cfi_nsaved] = 19;
+        f->cfi_off[f->cfi_nsaved] = fr.fb_save - fr.size - 16; /* CFA = x29+16 */
+        f->cfi_nsaved++;
         f->cfi_saved_at = t->len - f->code_off;
         a64_add_imm(t, A64_FBREG, A64_SP, 0, 8);     /* mov x19, sp */
         g_fb = A64_FBREG;
@@ -1008,7 +1017,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                     for (int q = 0; q < pl.nreg; q++)
                         a64_str(t, pl.reg + q, FB, sd[p] + q * 8, 8);
                 else
-                    a64_str(t, pl.reg, FB, sd[p], pl.size > 8 ? 8 : pl.size);
+                    /* st_slot, not a64_str: an ALLOCATED parameter's
+                     * home is a register, and writing its stack slot
+                     * would leave that register holding whatever the
+                     * caller left there. This one line was the whole
+                     * bug -- `struct S s = mk(7, 35)` came back wrong
+                     * because mk's two parameters were allocated and
+                     * never arrived. */
+                    st_slot(t, sd, p, pl.reg, pl.size > 8 ? 8 : pl.size);
             } else if (pl.is_struct || pl.size == 16) {  /* or a long double */
                 addr_of(t, A64_ADDR, FB, sd[p]);
                 addr_of(t, A64_TMP, A64_FP, 16 + pl.stk_off);
@@ -1757,6 +1773,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * wherever the last allocation left it: x29 knows where the frame
      * record is, and x19 is restored from the pinned frame first. */
     int epi = t->len;
+    for (int k = 0; k < nsave; k++)
+        a64_ldr(t, used_callee[k], FB, save_base + k * 8, 8, 0, 8);
     if (fn->has_alloca) {
         a64_ldr(t, A64_FBREG, A64_FBREG, fr.fb_save, 8, 0, 8);
         a64_word(t, 0x910003BFUL);                   /* mov sp, x29 */

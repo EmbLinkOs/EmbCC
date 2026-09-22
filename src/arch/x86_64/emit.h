@@ -18,6 +18,7 @@
  * so rsp stays 16-aligned at calls). epilogue: leave; ret. */
 void x86_prologue(struct code *c, int framesize);
 void x86_epilogue(struct code *c);
+void x86_leave(struct code *c);
 
 /* SysV integer argument registers, index 0..5 = rdi,rsi,rdx,rcx,r8,r9.
  * Always full 64-bit moves: narrower argument types occupy the low
