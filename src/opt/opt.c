@@ -2451,7 +2451,12 @@ static int vec_rewrite_runtime(struct ir_func *fn, struct defs *d,
 
     int vi = fn->nvregs++, vin = fn->nvregs++, nvec = fn->nvregs++;
     int kmask = fn->nvregs++, kzero = fn->nvregs++, kstep = fn->nvregs++;
-    int tv = fn->nvregs++, t3 = fn->nvregs++;
+    /* The guard's compare and the latch's compare are DIFFERENT values
+     * of the same expression, one before the loop and one at the end of
+     * each iteration, so they need different temps. Sharing one made it
+     * doubly assigned, and every later pass that asks "where was this
+     * defined" -- strength reduction among them -- gave up on the loop. */
+    int tg = fn->nvregs++, tv = fn->nvregs++, t3 = fn->nvregs++;
     int vacc = -1, vzero = -1, redtmp = -1;
     if (L->red_acc >= 0) {
         vzero = fn->nvregs++; vacc = fn->nvregs++; redtmp = fn->nvregs++;
@@ -2511,7 +2516,17 @@ static int vec_rewrite_runtime(struct ir_func *fn, struct defs *d,
             { EM(k); k->op = IR_AND; k->dst = nvec; k->a = L->bound_reg;
               k->b = kmask; k->w = iw; k->sign = isign; }
             { EM(k); k->op = IR_MOV; k->dst = vi; k->a = kzero; k->w = iw; }
-            { EM(k); k->op = IR_JMP; k->label = Lvc; }
+            /* Guarded and bottom-tested, not top-tested with a jump in.
+             * One branch an iteration rather than two, for the reason
+             * rotation exists -- and, less obviously, it is what makes
+             * this a NATURAL loop: entering at the test would mean the
+             * header does not dominate the latch, and every later pass
+             * that reasons about loops (strength reduction above all)
+             * would decline to touch it. */
+            { EM(k); k->op = IR_CMP; k->dst = tg; k->a = vi; k->b = nvec;
+              k->w = iw; k->sign = isign; k->pred = B_LT; }
+            { EM(k); k->op = IR_BRZ; k->a = tg; k->label = Lvc;
+              k->w = fn->ins[L->hi - 1].w; }
             { EM(k); k->op = IR_LABEL; k->label = Lvb; }
 
             /* ---- the body, lane-wise, indexed by vi ---- */
@@ -2596,11 +2611,11 @@ static int vec_rewrite_runtime(struct ir_func *fn, struct defs *d,
             { EM(k); k->op = IR_ADD; k->dst = vin; k->a = vi; k->b = kstep;
               k->w = iw; k->sign = isign; }
             { EM(k); k->op = IR_MOV; k->dst = vi; k->a = vin; k->w = iw; }
-            { EM(k); k->op = IR_LABEL; k->label = Lvc; }
             { EM(k); k->op = IR_CMP; k->dst = tv; k->a = vi; k->b = nvec;
               k->w = iw; k->sign = isign; k->pred = B_LT; }
             { EM(k); k->op = IR_BRNZ; k->a = tv; k->label = Lvb;
               k->w = fn->ins[L->hi - 1].w; }
+            { EM(k); k->op = IR_LABEL; k->label = Lvc; }   /* past the vectors */
             if (L->red_acc >= 0) {
                 { EM(r); r->op = IR_VREDADD; r->dst = redtmp; r->a = vacc;
                   r->size = L->esize; r->w = fn->ins[L->red_add].w; }
@@ -2817,63 +2832,6 @@ static int vectorize_one(struct ir_func *fn)
         if (!ok || !L.esize || nmem == 0) {
             VDBG("h=%d memory refs: ok=%d esize=%d n=%d\n", h, ok, L.esize, nmem);
             free(vec); continue; }
-        /* ---- a sum reduction ----------------------------------------
-         *
-         * `s += a[i]` carries a value ACROSS iterations, which nothing
-         * else here is allowed to do. It is vectorizable anyway because
-         * addition is associative: keep VF running sums, one per lane,
-         * and add them together once the loop is done. The lanes are
-         * summed in a different order than the source says, which for
-         * integers changes nothing (it would for floats, which is why
-         * this is integer-only and why gcc needs -ffast-math for them).
-         *
-         * The shape is the induction variable's, one value over: a phi
-         * temp copied at the latch from something the body computed. */
-        L.red_acc = L.red_next = L.red_add = L.red_copy = L.red_vec = -1;
-        for (int n = L.lo; n < L.hi && ok; n++) {
-            struct ir_ins *i = &fn->ins[n];
-            if (i->op != IR_MOV || i->dst == L.iv || i->dst < 0)
-                continue;
-            int acc = i->dst, nxt = i->a;
-            if (nxt < 0 || nxt >= fn->nvregs || d.cnt[nxt] != 1)
-                continue;
-            int an = d.ins[nxt];
-            if (an < L.lo || an >= L.hi)
-                continue;
-            struct ir_ins *ad = &fn->ins[an];
-            long junk;
-            if (ad->op != IR_ADD || const_b(fn, &d, ad, &junk))
-                continue;
-            int other = ad->a == acc ? ad->b : ad->b == acc ? ad->a : -1;
-            if (other < 0 || other >= fn->nvregs || !vec[other])
-                continue;
-            if (ad->w != L.esize || ad->flt)
-                continue;               /* a widening sum needs more */
-            if (L.red_acc >= 0) { ok = 0; break; }   /* one is enough */
-            L.red_acc = acc; L.red_next = nxt; L.red_add = an;
-            L.red_copy = n;  L.red_vec = other;
-        }
-        if (!ok) { VDBG("h=%d more than one reduction\n", h); free(vec); continue; }
-        if (L.red_acc >= 0) {
-            /* The accumulator may be read after the loop -- that is the
-             * point of it -- but inside, only by its own sum. Anything
-             * else reading a partial total would see one lane's share. */
-            for (int n = L.lo; n < L.hi && ok; n++) {
-                if (n == L.red_add || n == L.red_copy)
-                    continue;
-                if (ins_reads(&fn->ins[n], L.red_acc) ||
-                    ins_reads(&fn->ins[n], L.red_next))
-                    ok = 0;
-            }
-            for (int n = 0; n < fn->nins && ok; n++)
-                if ((n < L.lo || n >= L.hi) && ins_reads(&fn->ins[n], L.red_next))
-                    ok = 0;             /* the partial sum must not escape */
-            if (!ok) {
-                VDBG("h=%d the accumulator is read elsewhere\n", h);
-                free(vec); continue;
-            }
-        }
-
         L.vf = VEC_BYTES / L.esize;
         if (L.bound_reg < 0 && L.bound % L.vf != 0) {
             VDBG("h=%d trip %ld not a multiple of %d\n", h, L.bound, L.vf);
@@ -2890,6 +2848,16 @@ static int vectorize_one(struct ir_func *fn)
                     n == L.step_ins || n == L.copy_ins || n == L.cmp_ins ||
                     i->op == IR_LABEL || i->op == IR_JMP ||
                     i->op == IR_BRNZ || i->op == IR_BRZ)
+                    continue;
+                /* A move into a multiply-assigned temp is a phi copy --
+                 * mem2reg's way of carrying a value round the loop. It
+                 * has no lane-wise form and refusing it here would
+                 * refuse every reduction before the detector below has
+                 * had a chance to claim it. Left alone: if the detector
+                 * does not claim it, the escape check refuses it, which
+                 * is the same answer arrived at properly. */
+                if (i->op == IR_MOV && i->dst >= 0 && i->dst < fn->nvregs &&
+                    d.cnt[i->dst] == 2)
                     continue;
                 struct opnds o;
                 value_opnds(i, &o);
@@ -2935,6 +2903,76 @@ static int vectorize_one(struct ir_func *fn)
             }
         }
         if (!ok) { VDBG("h=%d body not lane-wise\n", h); free(vec); continue; }
+
+        /* ---- a sum reduction ----------------------------------------
+         *
+         * `s += a[i]` carries a value ACROSS iterations, which nothing
+         * else here is allowed to do. It is vectorizable anyway because
+         * addition is associative: keep VF running sums, one per lane,
+         * and add them together once the loop is done. The lanes are
+         * summed in a different order than the source says, which for
+         * integers changes nothing (it would for floats, which is why
+         * this is integer-only and why gcc needs -ffast-math for them).
+         *
+         * The shape is the induction variable's, one value over: a phi
+         * temp copied at the latch from something the body computed.
+         *
+         * This runs AFTER the vectorness fixpoint, not before: the value
+         * being added is often computed rather than loaded -- `s += a[i]
+         * * 2` adds a shift of a load -- and before the fixpoint only a
+         * bare load is marked, so a reduction over anything at all was
+         * missed and the whole loop refused as "not lane-wise". */
+        L.red_acc = L.red_next = L.red_add = L.red_copy = L.red_vec = -1;
+        for (int n = L.lo; n < L.hi && ok; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_MOV || i->dst == L.iv || i->dst < 0)
+                continue;
+            int acc = i->dst, nxt = i->a;
+            if (nxt < 0 || nxt >= fn->nvregs || d.cnt[nxt] != 1 || !vec[nxt])
+                continue;
+            int an = d.ins[nxt];
+            if (an < L.lo || an >= L.hi)
+                continue;
+            struct ir_ins *ad = &fn->ins[an];
+            long junk;
+            if (ad->op != IR_ADD || const_b(fn, &d, ad, &junk))
+                continue;
+            int other = ad->a == acc ? ad->b : ad->b == acc ? ad->a : -1;
+            if (other < 0 || other >= fn->nvregs || !vec[other])
+                continue;
+            if (ad->w != L.esize || ad->flt)
+                continue;               /* a widening sum needs more */
+            if (L.red_acc >= 0) { ok = 0; break; }   /* one is enough */
+            L.red_acc = acc; L.red_next = nxt; L.red_add = an;
+            L.red_copy = n;  L.red_vec = other;
+            /* The running total is NOT a vector value -- it is a scalar
+             * carried across iterations that happens to be computed
+             * from one. Unmarking it is what stops the escape check
+             * below from refusing the phi copy that carries it. */
+            vec[nxt] = 0;
+        }
+        if (!ok) { VDBG("h=%d more than one reduction\n", h); free(vec); continue; }
+        if (L.red_acc >= 0) {
+            /* The accumulator may be read after the loop -- that is the
+             * point of it -- but inside, only by its own sum. Anything
+             * else reading a partial total would see one lane's share. */
+            for (int n = L.lo; n < L.hi && ok; n++) {
+                if (n == L.red_add || n == L.red_copy)
+                    continue;
+                if (ins_reads(&fn->ins[n], L.red_acc) ||
+                    ins_reads(&fn->ins[n], L.red_next))
+                    ok = 0;
+            }
+            for (int n = 0; n < fn->nins && ok; n++)
+                if ((n < L.lo || n >= L.hi) && ins_reads(&fn->ins[n], L.red_next))
+                    ok = 0;             /* the partial sum must not escape */
+            if (!ok) {
+                VDBG("h=%d the accumulator is read elsewhere\n", h);
+                free(vec); continue;
+            }
+        }
+
+
         /* Every store's VALUE must be a vector too.
          *
          * Without this, `a[i] = i` became a vstore of the induction
@@ -3249,6 +3287,311 @@ static int pass_vectorize(struct ir_func *fn)
 {
     int changed = 0, guard = 0;
     while (guard++ < 32 && vectorize_one(fn))
+        changed = 1;
+    return changed;
+}
+
+
+/* ==== induction-variable strength reduction (-O2) =========================== *
+ *
+ * `a[i]` costs three instructions an iteration that have nothing to do
+ * with a[i]: widen i, shift it by the element size, add the base. The
+ * value they compute is base + i*scale, which changes by scale*step
+ * every iteration -- so it can be an induction variable of its own,
+ * walked by one add, instead of being rebuilt from i each time.
+ *
+ *      ext  t1, i           p = base                 (preheader)
+ *      shl  t2, t1, #2      ...
+ *      add  t3, base, t2        load [p]
+ *      load [t3]            p = p + 4                (latch)
+ *
+ * The chain then has no users and DCE takes it, so three instructions
+ * become one. It is the oldest loop optimization there is and it
+ * applies to every array loop, vectorized or not: in a vectorized loop
+ * the index steps by VF, so the pointer steps by 16 and the saving is
+ * the same.
+ *
+ * ---- why this runs last ----
+ *
+ * It DESTROYS the shape the vectorizer matches on. addr_of_iv looks for
+ * exactly `add(base, shl(ext(i), k))`, and a loop whose addressing has
+ * already been reduced to a walking pointer does not have it. So this
+ * runs once, after the loop passes have converged, and never inside
+ * their round -- otherwise it would race the vectorizer for the same
+ * loops and win, and the lanes would be lost to save an add.
+ *
+ * ---- what may be reduced ----
+ *
+ * The value must be linear in the induction variable with a
+ * loop-invariant base, and -- the part that is easy to forget -- it must
+ * not be read after the loop. The new pointer ends one step PAST where
+ * the old chain last computed, because it is incremented at the latch
+ * like the induction variable itself, so a use outside the loop would
+ * see base + n*scale where the chain would have given base + (n-1)*scale.
+ */
+
+/* Is `v` the value base + iv*scale, with base invariant? Fills base and
+ * scale. The chain is irgen's: an optional widening of the index, a
+ * shift by the log of the element size, and an add. */
+static int linear_in_iv(struct ir_func *fn, struct defs *d, int lo, int hi,
+                        int v, int iv, int *base_out, long *scale_out)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    int an = d->ins[v];
+    if (an < lo || an >= hi || fn->ins[an].op != IR_ADD)
+        return 0;
+    struct ir_ins *add = &fn->ins[an];
+    for (int side = 0; side < 2; side++) {
+        int base = side ? add->b : add->a;
+        int idx  = side ? add->a : add->b;
+        if (base < 0 || base >= fn->nvregs || d->cnt[base] != 1)
+            continue;
+        int bd = d->ins[base];
+        if (bd >= lo && bd < hi)
+            continue;                    /* the base must not move */
+        if (idx < 0 || idx >= fn->nvregs || d->cnt[idx] != 1)
+            continue;
+        int sn = d->ins[idx];
+        if (sn < lo || sn >= hi || fn->ins[sn].op != IR_SHL)
+            continue;
+        long sh;
+        if (!const_b(fn, d, &fn->ins[sn], &sh) || sh < 0 || sh > 60)
+            continue;
+        int x = fn->ins[sn].a;
+        if (x >= 0 && x < fn->nvregs && d->cnt[x] == 1) {
+            int xn = d->ins[x];
+            if (xn >= lo && xn < hi && fn->ins[xn].op == IR_EXT)
+                x = fn->ins[xn].a;
+        }
+        if (x != iv)
+            continue;
+        *base_out = base;
+        *scale_out = 1L << sh;
+        return 1;
+    }
+    return 0;
+}
+
+static int ivsr_one(struct ir_func *fn)
+{
+    if (fn->nins == 0)
+        return 0;
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    int *order = xmalloc((size_t)nbb * sizeof *order), norder;
+    compute_rpo(bb, nbb, order, &norder);
+    if (norder != nbb) {
+        free(order); free(l2b);
+        for (int i = 0; i < nbb; i++) free(bb[i].pred);
+        free(bb); return 0;
+    }
+    compute_idom(bb, order, norder);
+    struct defs d;
+    compute_defs(fn, &d);
+    char *in = xmalloc((size_t)nbb);
+    int done = 0;
+
+    for (int oi = norder - 1; oi >= 0 && !done; oi--) {
+        int h = order[oi];
+        if (h == 0 || bb[h].end <= bb[h].start ||
+            fn->ins[bb[h].start].op != IR_LABEL)
+            continue;
+        int Lh = fn->ins[bb[h].start].label;
+        int latch = -1, nback = 0;
+        for (int p = 0; p < nbb; p++)
+            for (int k = 0; k < bb[p].nsucc; k++)
+                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
+                    latch = p; nback++;
+                }
+        if (nback != 1 || bb[latch].end <= bb[latch].start)
+            continue;
+        struct ir_ins *br = &fn->ins[bb[latch].end - 1];
+        if (br->op != IR_BRNZ || br->label != Lh)
+            continue;
+        memset(in, 0, (size_t)nbb);
+        loop_body(bb, nbb, h, latch, in);
+        int lo = bb[h].start, hi = bb[latch].end, ok = 1;
+        for (int b = 0; b < nbb && ok; b++)
+            if (in[b] != (bb[b].start >= lo && bb[b].end <= hi))
+                ok = 0;
+        if (!ok)
+            continue;
+
+        /* the induction variable and its step, as the vectorizer finds them */
+        int copy_ins = -1;
+        for (int n = lo; n < hi; n++)
+            if (fn->ins[n].op == IR_MOV && fn->ins[n].dst >= 0 &&
+                d.cnt[fn->ins[n].dst] == 2) {
+                int nxt = fn->ins[n].a;
+                if (nxt < 0 || nxt >= fn->nvregs || d.cnt[nxt] != 1)
+                    continue;
+                int sn = d.ins[nxt];
+                if (sn < lo || sn >= hi || fn->ins[sn].op != IR_ADD)
+                    continue;
+                long st;
+                if (fn->ins[sn].a != fn->ins[n].dst ||
+                    !const_b(fn, &d, &fn->ins[sn], &st))
+                    continue;
+                copy_ins = n;
+                break;
+            }
+        if (copy_ins < 0)
+            continue;
+        int iv = fn->ins[copy_ins].dst;
+        int step_ins = d.ins[fn->ins[copy_ins].a];
+        long step = 0;
+        (void)const_b(fn, &d, &fn->ins[step_ins], &step);
+        if (step <= 0)
+            continue;
+
+        /* Where the walk happens: immediately before the compare that
+         * feeds the back branch, which is AFTER every phi copy in the
+         * latch.
+         *
+         * Putting it next to `i += 1` looked natural and was wrong. The
+         * phi copies sit after the step -- `p = mov <the address>` among
+         * them -- so the pointer had already moved on by the time one
+         * was taken, and `p = &a[i]` came out as &a[i+1]. The answer
+         * differed at -O2 and nowhere else. */
+        int inc_at = -1;
+        if (br->a >= 0 && br->a < fn->nvregs && d.cnt[br->a] == 1)
+            inc_at = d.ins[br->a];
+        if (inc_at <= lo || inc_at >= hi) {
+            VDBG("ivsr h=%d no compare to insert before (br->a=%d cnt=%d"
+                 " inc_at=%d lo=%d hi=%d)\n", h, br->a,
+                 br->a >= 0 && br->a < fn->nvregs ? d.cnt[br->a] : -1,
+                 inc_at, lo, hi);
+            continue;
+        }
+
+        /* the induction variable must start at a known place, because
+         * the new pointer has to be initialised to match it */
+        int init_zero = 1;
+        for (int n = 0; n < fn->nins && init_zero; n++) {
+            if (n >= lo && n < hi)
+                continue;
+            struct ir_ins *i = &fn->ins[n];
+            if (def_target(i) != iv)
+                continue;
+            if (!(i->op == IR_MOV && i->a >= 0 && i->a < fn->nvregs &&
+                  d.cnt[i->a] == 1 && d.ins[i->a] >= 0 &&
+                  fn->ins[d.ins[i->a]].op == IR_CONST &&
+                  fn->ins[d.ins[i->a]].imm == 0))
+                init_zero = 0;
+        }
+        if (!init_zero)
+            continue;
+
+        /* every candidate: an address computed from the index, whose
+         * value nothing outside the loop reads */
+        int cand[16], cbase[16], nc = 0;
+        long cscale[16];
+        for (int n = lo; n < hi && nc < 16; n++) {
+            int t = def_target(&fn->ins[n]);
+            int base; long scale;
+            if (t < 0 || fn->ins[n].op != IR_ADD)
+                continue;
+            if (!linear_in_iv(fn, &d, lo, hi, t, iv, &base, &scale))
+                continue;
+            int escapes = 0;
+            for (int m = 0; m < fn->nins && !escapes; m++)
+                if ((m < lo || m >= hi) && ins_reads(&fn->ins[m], t))
+                    escapes = 1;
+            if (escapes)
+                continue;
+            int dup = 0;
+            for (int k = 0; k < nc; k++)
+                if (cand[k] == t) dup = 1;
+            if (dup)
+                continue;
+            cand[nc] = t; cbase[nc] = base; cscale[nc] = scale; nc++;
+        }
+        if (nc == 0)
+            continue;
+
+        /* ---- rewrite: a pointer per candidate ---- */
+        int ptr[16], delta[16];
+        for (int k = 0; k < nc; k++) {
+            ptr[k] = fn->nvregs++;
+            delta[k] = fn->nvregs++;
+        }
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        for (int n = 0; n < fn->nins; n++) {
+            if (n == lo) {
+                for (int k = 0; k < nc; k++) {
+                    struct ir_ins *c = ib_push(&nb);
+                    c->op = IR_CONST; c->dst = delta[k];
+                    c->w = 8; c->imm = cscale[k] * step;
+                    c->line = fn->ins[cand[k] >= 0 ? d.ins[cand[k]] : n].line;
+                    c->synth = 1;
+                    struct ir_ins *m = ib_push(&nb);
+                    m->op = IR_MOV; m->dst = ptr[k]; m->a = cbase[k];
+                    m->w = 8;
+                    m->line = c->line; m->synth = 1;
+                }
+            }
+            if (n == inc_at) {          /* walk each pointer, after the copies */
+                for (int k = 0; k < nc; k++) {
+                    struct ir_ins *a2 = ib_push(&nb);
+                    a2->op = IR_ADD; a2->dst = ptr[k]; a2->a = ptr[k];
+                    a2->b = delta[k]; a2->w = 8;
+                    a2->line = fn->ins[n].line; a2->synth = 1;
+                }
+            }
+            if (newpos) newpos[n] = nb.n;
+            /* the chain's add disappears; its users read the pointer */
+            int skip = 0;
+            for (int k = 0; k < nc; k++)
+                if (def_target(&fn->ins[n]) == cand[k] && n >= lo && n < hi)
+                    skip = 1;
+            if (skip)
+                continue;
+            struct ir_ins *o = ib_push(&nb);
+            *o = fn->ins[n];
+            for (int k = 0; k < nc; k++) {
+                struct lcopy lc;
+                int *tbl = xmalloc((size_t)fn->nvregs * sizeof *tbl);
+                for (int v = 0; v < fn->nvregs; v++) tbl[v] = -1;
+                tbl[cand[k]] = ptr[k];
+                lc.cp = tbl; lc.nv = fn->nvregs; lc.n = 0;
+                each_read(o, lcopy_cb, &lc);
+                free(tbl);
+            }
+
+        }
+        if (newpos) {
+            newpos[fn->nins] = nb.n;
+            for (int v = 0; v < fn->nvars; v++) {
+                int l2 = fn->var_scope_lo[v], h2 = fn->var_scope_hi[v];
+                if (l2 >= 0 && l2 <= fn->nins) fn->var_scope_lo[v] = newpos[l2];
+                if (h2 >= 0 && h2 <= fn->nins) fn->var_scope_hi[v] = newpos[h2];
+            }
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        if (remarks_on() && fn->src)
+            remark_add("opt", "strength-reduced", fn->name, "ivsr/address",
+                       fn->file, fn->line,
+                       "%d address%s walked instead of recomputed",
+                       nc, nc == 1 ? "" : "es");
+        done = 1;
+    }
+
+    free(in); free_defs(&d);
+    free(order); free(l2b);
+    for (int i = 0; i < nbb; i++) free(bb[i].pred);
+    free(bb);
+    return done;
+}
+
+static int pass_ivsr(struct ir_func *fn)
+{
+    int changed = 0, guard = 0;
+    while (guard++ < 32 && ivsr_one(fn))
         changed = 1;
     return changed;
 }
@@ -4011,6 +4354,15 @@ static void opt_func(struct ir_func *fn)
             pass_dce(fn);
             outer = 1;
         }
+    }
+    /* Strength reduction runs ONCE, after the loop passes have settled,
+     * because it destroys the addressing shape the vectorizer matches
+     * on: a loop already walking a pointer no longer looks like
+     * base + i*scale. Inside the round it would race the vectorizer for
+     * the same loops and win, trading four lanes for one add. */
+    if (g_licm && pass_ivsr(fn)) {
+        pass_copyprop_local(fn);
+        pass_dce(fn);
     }
     /* After the fixpoint: fold constant operands into immediates, then DCE the
      * CONSTs that leaves unreferenced. Kept out of the fixpoint so the earlier

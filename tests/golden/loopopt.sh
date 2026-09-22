@@ -77,7 +77,29 @@ ncmp=$(grep -c 'cmp\.' "$out/ir.txt" || true)
     cat "$out/ir.txt"; exit 1; }
 echo "value numbering: guard and bottom test are both computed ($ncmp compares)"
 
-# ---- 4. and it all still runs ------------------------------------------
+# ---- 4. strength reduction: the address is walked, not rebuilt ---------
+#
+# `a[i]` costs three instructions an iteration that have nothing to do
+# with a[i]: widen i, shift by the element size, add the base. The value
+# changes by a constant every iteration, so it can be walked by one add.
+cat > "$out/sr.c" <<'EOF'
+int a[4096];
+int f(int n) { int s = 0; for (int i = 0; i < n; i++) s += a[i]; return s; }
+EOF
+"$EMBCC" --target=x86_64-linux-gnu -O2 -fremarks -c "$out/sr.c" -o /dev/null \
+    2> "$out/sr.txt" || { echo "FAIL: could not compile"; cat "$out/sr.txt"
+                          exit 1; }
+grep -q 'ivsr/address' "$out/sr.txt" || {
+    echo "FAIL: the address is still recomputed from the index each"
+    echo "      iteration:"; cat "$out/sr.txt"; exit 1; }
+echo "strength reduction: the address is walked by one add"
+
+# The pointer is walked at the END of the latch, after every phi copy.
+# Next to `i += 1` looked natural and was wrong: the copies sit after
+# the step, so `p = &a[i]` took the pointer AFTER it had moved on and
+# came out as &a[i+1]. Checked by running it, below.
+
+# ---- 5. and it all still runs ------------------------------------------
 #
 # The IR checks above say a transform fired; this says it was right. The
 # answers come from gcc, and every loop here is one the passes rewrite:
@@ -129,6 +151,17 @@ static long with_continue(long n)
     return s;
 }
 
+/* An address taken FROM the walked pointer inside the loop and kept
+ * after it. The copy happens among the phi copies in the latch, so it
+ * catches a pointer that was incremented too early: this returned the
+ * element one past the right one when the walk sat next to `i += 1`. */
+static long addr_escapes(long n)
+{
+    long *p = 0, buf[64], i;
+    for (i = 0; i < n && i < 64; i++) { p = &buf[i]; *p = i * 3; }
+    return p ? *p * 1000 + (p - buf) : -1;
+}
+
 /* A loop whose body writes through a pointer: the load of *p may not be
  * hoisted, because the store can alias it. */
 static long aliasing(long *p, long n)
@@ -154,6 +187,9 @@ int main(void)
     h = h * 31 + (unsigned long)two_carried(20);
     h = h * 31 + (unsigned long)with_continue(25);
     h = h * 31 + (unsigned long)aliasing(buf, 12);
+    for (long k = 0; k <= 9; k++)
+        h = h * 31 + (unsigned long)addr_escapes(k);
+    h = h * 31 + (unsigned long)addr_escapes(40);
     printf("%lu\n", h);
     return 42;
 }
