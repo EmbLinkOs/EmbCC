@@ -25,6 +25,7 @@ SRCS := \
 	src/driver/asmout.c \
 	src/driver/iface.c \
 	src/driver/explain.c \
+	src/driver/paths.c \
 	src/lex/lex.c \
 	src/cpp/cpp.c \
 	src/parse/parse.c \
@@ -284,6 +285,79 @@ libc-linux-aarch64: embcc
 
 libc-linux: libc-linux-x86_64 libc-linux-aarch64
 
+# ---- installation ------------------------------------------------------
+#
+# EmbCC finds its own files relative to the binary (src/driver/paths.c),
+# so nothing here is compiled in and the result can be moved afterwards
+# or unpacked anywhere. PREFIX is where it will LIVE; DESTDIR is where
+# to stage it now, which is what a package build sets and what the
+# golden test uses.
+#
+# The version comes out of src/driver/version.h rather than being
+# written again here: the directory this creates and the directory the
+# compiler looks in have to be the same one, and two copies of a
+# version string are two chances to ship an upgrade that reads the old
+# version's headers.
+PREFIX  ?= /usr/local
+DESTDIR ?=
+VERSION := $(shell sed -n 's/.*EMBCC_VERSION "\(.*\)".*/\1/p' \
+                   src/driver/version.h)
+LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
+
+# Each installed target directory, and where the build put its pieces.
+# The triples are what --target= accepts, so `ls` next to a failure
+# answers "is that target installed?" directly.
+# Split in two on purpose. `install` is what a person runs and builds
+# what it needs first; `install-files` only COPIES, and is what
+# tests/golden/install.sh uses -- a test that ran the first would be a
+# test that rebuilds the compiler while the rest of the suite is using
+# it, which is the one thing the suite must never do to itself.
+install: all libc libcxx libc-linux libcxx-linux-x86_64 \
+         libcxx-linux-aarch64 install-files
+
+install-files:
+	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
+	@mkdir -p $(DESTDIR)$(PREFIX)/bin
+	@for t in embcc embld embas embread embdbg embls embidx; do \
+	    cp $$t $(DESTDIR)$(PREFIX)/bin/$$t; \
+	    chmod 755 $(DESTDIR)$(PREFIX)/bin/$$t; \
+	done
+	@mkdir -p $(LIBROOT)/include $(LIBROOT)/include/c++ \
+	          $(LIBROOT)/freestanding
+	@cp -R lib/libc/include/. $(LIBROOT)/include/
+	@cp -R lib/libcxx/include/. $(LIBROOT)/include/c++/
+	@cp -R include/. $(LIBROOT)/freestanding/
+	@for pair in "x86_64-elf:x86_64" "aarch64-elf:aarch64" \
+	             "x86_64-linux-gnu:linux-x86_64" \
+	             "aarch64-linux-gnu:linux-aarch64"; do \
+	    triple=$${pair%%:*}; dir=$${pair#*:}; \
+	    mkdir -p $(LIBROOT)/$$triple; \
+	    for f in libc.a crt1.o; do \
+	        [ -f $(BUILD)/libc/$$dir/$$f ] && \
+	            cp $(BUILD)/libc/$$dir/$$f $(LIBROOT)/$$triple/$$f; \
+	    done; \
+	    [ -f $(BUILD)/libcxx/$$dir/libcxx.a ] && \
+	        cp $(BUILD)/libcxx/$$dir/libcxx.a $(LIBROOT)/$$triple/libcxx.a; \
+	    case $$triple in *-linux-gnu) \
+	        cp lib/libc/os/linux/link.ld $(LIBROOT)/$$triple/link.ld ;; \
+	    esac; \
+	    true; \
+	done
+	@echo "installed: $(DESTDIR)$(PREFIX)/bin/embcc"
+	@echo "           $(LIBROOT)/"
+	@echo "check it with: $(DESTDIR)$(PREFIX)/bin/embcc --print-search-dirs"
+
+# Removes exactly what install wrote, and the versioned directory with
+# it -- never $(PREFIX)/lib/embcc itself, which may hold another version.
+uninstall:
+	@for t in embcc embld embas embread embdbg embls embidx; do \
+	    rm -f $(DESTDIR)$(PREFIX)/bin/$$t; \
+	done
+	@rm -rf $(LIBROOT)
+	@echo "removed EmbCC $(VERSION) from $(DESTDIR)$(PREFIX)"
+
+libc-linux-all: libc-linux libcxx-linux-x86_64 libcxx-linux-aarch64
+
 libc: libc-x86_64 libc-aarch64
 
 # ---- our C++ runtime (lib/libcxx) --------------------------------------
@@ -349,4 +423,5 @@ clean:
 .PHONY: all test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
         libcxx libcxx-x86_64 libcxx-aarch64 \
-        libcxx-linux-x86_64 libcxx-linux-aarch64 clean
+        libcxx-linux-x86_64 libcxx-linux-aarch64 \
+        install install-files uninstall libc-linux-all clean

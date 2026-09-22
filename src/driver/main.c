@@ -35,7 +35,8 @@
 #include "util.h"
 #include "../platform/platform.h"
 
-#define EMBCC_VERSION "1.0.0-m2.complete"
+#include "version.h"
+#include "paths.h"
 
 static void print_version(void)
 {
@@ -59,9 +60,15 @@ static void print_version(void)
            "with libstdc++ (docs/language/cpp-levels.md) — namespaces, overloading, "
            "references, classes with constructors and destructors, "
            "new/delete, lowered through C to either target.\n");
+    printf("Installed or not: EmbCC finds its headers and per-target "
+           "libraries relative to its own binary, so <stdio.h> works with "
+           "no -I from a build tree or an unpacked tarball alike; "
+           "--print-search-dirs says which it found (make install "
+           "PREFIX=...).\n");
     printf("Also: the preprocessor (-E), -O0..-O2, -g (DWARF), embas "
            "(NASM-syntax .asm, x86-64) and embld (the linker, x86-64 ELF "
-           "and EMBX). Not yet: __thread, PIE, embld for aarch64 — "
+           "and EMBX). __thread and thread_local work on the ELF targets. "
+           "Not yet: PIE, dynamic linking, embld for aarch64 — "
            "see docs/language/compatibility.md.\n");
 }
 
@@ -71,7 +78,8 @@ static void print_usage(FILE *out)
             "usage: embcc [-E] -c FILE.c|FILE.cc|FILE.asm [-o FILE.o]\n"
             "             [--target=x86_64-elf|aarch64-elf] [-x c|c++]\n"
             "             [-std=...] [--emit-c]\n"
-            "             [-I DIR]... [-isystem DIR]... [-g] [-O0|-O1|-O2]\n"
+            "             [-I DIR]... [-isystem DIR]... [-nostdinc] [-g]\n"
+            "             [-O0|-O1|-O2]\n"
             "             [-mno-sse] [-mno-red-zone] [-mcmodel=kernel] ...\n"
             "       embcc --version | --dump-predef"
             " | --emit-empty-object FILE\n");
@@ -93,6 +101,8 @@ static void print_options(FILE *out)
       "  -x c|c++               treat the input as this language\n"
       "  -std=...               accepted; EmbCC has one dialect per language\n"
       "  -I DIR, -isystem DIR   header search paths\n"
+      "  -nostdinc              do not search EmbCC's own headers\n"
+      "  --print-search-dirs    where EmbCC found its own files\n"
       "  -D NAME[=VALUE], -U NAME  define and undefine macros\n"
       "  -include FILE          include it before the file\n"
       "  -fno-exceptions, -fno-rtti   C++ without them\n"
@@ -227,6 +237,10 @@ static int nincdirs;
  * byte-for-byte as before, which is what keeps the M3 self-host fixed point
  * (self-host builds without -g). */
 static int want_debug;
+
+/* -nostdinc: do not add EmbCC's own header directories. A freestanding
+ * build that supplies its own headers needs to be able to say so. */
+static int no_stdinc;
 
 /* -O level. 0 (the default) runs no optimizer, so output is byte-for-byte
  * as before — the property the self-host fixed point rests on. */
@@ -365,6 +379,20 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     predef_set_cxx(lang_cxx);
     if (lang_cxx)
         cpp_set_cxx(cxx_has_builtin, want_exceptions);
+    /* EmbCC's own headers, AFTER every -I the caller gave: a project
+     * that ships its own <stdio.h> must win, or nothing we install can
+     * ever be overridden. They are added here rather than at option
+     * parsing so that -nostdinc and the -I order both stay simple, and
+     * they are marked system so a warning inside them is not the
+     * caller's problem. */
+    if (!no_stdinc) {
+        int ndef = 0;
+        const char *const *def = paths_default_includes(&ndef);
+        for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = def[k];
+        }
+    }
     cpp_set_system_dirs(incdir_sys, nincdirs);
     char *pp = cpp_process(in, src, incdirs, nincdirs);
     if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
@@ -2105,6 +2133,11 @@ int main(int argc, char **argv)
                 return 1;
             }
             incdirs[nincdirs++] = dir;
+        } else if (strcmp(argv[i], "-nostdinc") == 0) {
+            no_stdinc = 1;
+        } else if (strcmp(argv[i], "--print-search-dirs") == 0) {
+            paths_print_search_dirs();
+            return 0;
         } else if (strncmp(argv[i], "-isystem", 8) == 0) {
             /* A system-include directory: searched as an -I one, but marked,
              * so -MM can leave its headers out of the dependency list. */

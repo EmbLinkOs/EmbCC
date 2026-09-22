@@ -51,6 +51,26 @@ int plat_file_exists(const char *path);
  */
 const char *plat_getenv(const char *name);
 
+/* ---- where this program is ----
+ *
+ * The absolute path of the running executable, or NULL where the host
+ * cannot say. An installed compiler needs this to find the files that
+ * were installed beside it -- its headers, its per-target libraries,
+ * its linker script -- without a prefix baked in at build time, which
+ * is what makes an unpacked tarball work from any directory and what
+ * lets the same binary run from the build tree.
+ *
+ * This is a question about the file system, not a process API: it asks
+ * where a file IS, not to run one. The rule above -- that EmbLinkOS has
+ * no fork/exec and this layer must never grow a process API -- is
+ * untouched, and on a host with no answer this returns NULL and the
+ * caller falls back to the paths it was given.
+ *
+ * The returned string is owned by the platform layer and lives until
+ * the process exits; callers must not free it.
+ */
+const char *plat_self_path(void);
+
 /* ---- the source provider (§7) ----
  *
  * `src_read` is how the frontend — and only the frontend — obtains source

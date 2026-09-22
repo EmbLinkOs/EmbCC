@@ -216,8 +216,14 @@ check typedef-redef \
 typedef long T;
 int main(void) { T v = 1; return (int)v; }' \
     "redefinition of typedef"
+# <stdio.h> used to be the case here, because EmbCC shipped no headers
+# and found nothing without a -I. It ships them now and finds them
+# relative to its own binary (src/driver/paths.c), so the header that
+# must not resolve has to be one that genuinely does not exist. What is
+# being checked is unchanged: a missing include is an error NAMING the
+# file, not a silently empty translation unit.
 check angle-include-no-path \
-    '#include <stdio.h>
+    '#include <no_such_header_exists_anywhere.h>
 int main(void) { return 0; }' \
     "cannot find include file"
 check float-modulo \
