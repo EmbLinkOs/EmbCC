@@ -137,8 +137,39 @@ static int insn_len(struct topasm *ta, const char *l, int mnemonics_ok)
     int w = data_width(l);
     if (w)
         return w * data_count(l);
-    if (l[0] == '.')
-        return 0;                                 /* directive */
+    if (l[0] == '.') {
+        /* A directive that contributes no bytes -- but only the ones
+         * this assembler actually understands. Anything else is
+         * REFUSED rather than skipped.
+         *
+         * Skipping was the old behaviour and it is the quiet kind of
+         * wrong: `.word 0xa9005013` (the aarch64 spelling of a 4-byte
+         * datum, where this understands `.long`) contributed nothing,
+         * the label after it still got a symbol, and the object linked
+         * with a global function whose body was zero bytes long. The
+         * unwinder's register-capture stub was empty and the first call
+         * to it jumped into whatever followed. */
+        static const char *const ok[] = {
+            ".text", ".data", ".rodata", ".bss", ".section",
+            ".global", ".globl", ".local", ".weak", ".hidden",
+            ".type", ".size", ".align", ".balign", ".p2align",
+            ".pushsection", ".popsection", ".previous", ".file", ".loc",
+            ".cfi_startproc", ".cfi_endproc", ".cfi_def_cfa",
+            ".cfi_def_cfa_offset", ".cfi_def_cfa_register",
+            ".cfi_offset", ".cfi_restore", ".cfi_sections", NULL
+        };
+        int i;
+        size_t dl = strcspn(l, " \t");
+        for (i = 0; ok[i]; i++)
+            if (strlen(ok[i]) == dl && strncmp(l, ok[i], dl) == 0)
+                return 0;
+        diag_fatal(ta->file, ta->line,
+                   "file-scope asm directive not supported: \"%.*s\". "
+                   "EmbCC's assembler emits data with .byte/.long/.quad; "
+                   "an unknown directive would contribute no bytes and "
+                   "leave the label pointing at whatever came next",
+                   (int)dl, l);
+    }
     size_t n = strlen(l);
     if (n && l[n - 1] == ':')
         return 0;                                 /* label */

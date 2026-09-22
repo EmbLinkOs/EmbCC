@@ -1525,18 +1525,64 @@ complex routines instead of libgcc's -- and the comparison reported
 something with itself. The runtime objects build into their own
 subdirectory now.
 
-## Open: the unwinder
+## Closed: the unwinder (2026-09-22)
 
-One thing the Linux target still cannot link, and it is a project
-rather than a file.
+`lib/rt/unwind.c`: a DWARF CFI interpreter and the Itanium ABI's
+level-1 API, on both architectures. `embcc prog.cc -o prog` now
+compiles, links and runs a C++ program that throws, with no flags --
+the driver finds libcxx.a and librt.a beside libc.a the way it already
+found crt1.o.
 
-**The unwinder** (`_Unwind_*`), plus `.eh_frame_hdr` in the link script
-and a way to find it at run time. A DWARF CFI interpreter that gets a
-corner wrong does not fail visibly -- it unwinds into the wrong frame
--- so it lands only against a real differential oracle. Until then C++
-exceptions do not link on Linux; `-fno-exceptions` does, and
-`src/link/link.c` says which is which at the link rather than printing
-an undefined symbol nobody has heard of.
+The tables are located through the bracket symbols `__eh_frame_start`
+and `__eh_frame_end`, which EmbLD already defined for any orphan
+section whose name is an identifier and which the Linux link script now
+defines too. A static image therefore needs no `.eh_frame_hdr` search
+table and no `dl_iterate_phdr`; the FDEs are scanned linearly, which is
+O(n) per frame and correct for every layout, where a binary search over
+an unsorted table is neither.
+
+Refused rather than approximated: `DW_CFA_def_cfa_expression` and its
+two siblings. gcc emits them where the CFA is not a register plus a
+constant -- a function using alloca, a signal trampoline -- and an
+unwinder that guesses at a rule it cannot evaluate jumps to an address
+it invented.
+
+THE ORACLE, which took a detour worth recording. libgcc's unwinder
+cannot simply be linked into the static image: it finds its tables
+through a `__register_frame_info` that a crtbegin normally calls, and
+ours does not, so it links and then finds nothing. But the BARE-METAL
+harness already runs C++ exceptions on libgcc's unwinder, because
+`tests/harness/crt.c` registers the tables by hand. So
+`tests/golden/unwind.sh` builds one source twice -- freestanding, run
+on the bare-metal harness where libgcc unwinds it, and Linux, where
+lib/rt does -- with the same compiler, the same C++ runtime and the
+same libc. The unwinder is the only difference, and the two print 78
+identical lines over ten cases.
+
+Three things had to change under it, and each was a real gap:
+
+- **C had no unwind tables.** EmbCC emitted `.eh_frame` for C++ only.
+  An exception unwinds through whatever frames lie between throw and
+  catch, some of which are C -- a callback, a libc routine, and above
+  all the unwinder's OWN frames, which it has to step out of before it
+  can reach anything. Without those the walk stopped at the first one
+  and every throw was a terminate. Now on by default for hosted ELF
+  targets, as gcc is, and still off for freestanding, where the tables
+  are pure size.
+- **An unknown file-scope asm directive was silently skipped.**
+  `.word 0xa9005013` -- the aarch64 spelling of a 4-byte datum, where
+  EmbCC's mini-assembler understands `.long` -- contributed no bytes,
+  while the label after it still got a symbol. The object linked with a
+  global function whose body was zero bytes, and the first call to it
+  jumped into whatever followed. Unknown directives are refused now;
+  the ones that legitimately contribute nothing are a list.
+- **A symbol defined by file-scope asm and called from C got two
+  entries** in the object, one defined and one undefined, because the
+  "every called external needs an UNDEF" pass did not know the asm
+  block had defined it. A linker resolving the undefined one reported
+  `__uw_capture` missing from the object that defines it. C calling a
+  routine written in asm is how setjmp and a register capture are
+  built, so this is the normal case.
 
 Still open from the same report, and not touched here:
 

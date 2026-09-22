@@ -47,7 +47,15 @@ SECTIONS
     /* Unwind tables, for C++ exceptions. Read-only, so they belong with
      * the text segment rather than the data one. */
     .eh_frame : {
+        /* The unwinder finds its tables through these. EmbLD defines a
+         * __<name>_start / __<name>_end pair for any orphan section
+         * whose name is an identifier, so the in-process link needs no
+         * help -- but this script is what the OTHER linker uses, and
+         * GNU ld invents no such symbols. Without them lib/rt/unwind.c
+         * has nowhere to look and every `throw` is a terminate. */
+        __eh_frame_start = .;
         *(.eh_frame)
+        __eh_frame_end = .;
     }
     .gcc_except_table : {
         *(.gcc_except_table .gcc_except_table.*)

@@ -748,21 +748,22 @@ static void define_end_symbols(struct linker *l, Elf64_Addr image_end)
     define_linker_symbol(l, "__kernel_end", image_end);
 }
 
-/* Two whole libraries EmbCC does not have, and whose absence shows up
- * here — at the link, as a bare undefined name — rather than at the
- * compile that caused it.
+/* Two libraries whose absence shows up HERE — at the link, as a bare
+ * undefined name — rather than at the compile that caused it.
  *
  * The compiler runtime (libgcc's `__muldi3` family) is what a backend
  * calls when an operation has no instruction: 128-bit multiply and
- * divide, the shifts under them, complex multiplication. The unwinder
+ * divide, the shifts under them, complex multiplication, and on
+ * aarch64 every `long double` operation there is. The unwinder
  * (`_Unwind_*`) is what `throw` uses to walk back up the stack. Both
- * exist on macOS and on EmbLinkOS, where the platform supplies them.
- * The Linux target supplies neither, because it links against nothing
- * but our own libc (D-014).
+ * exist on macOS and on EmbLinkOS because the platform supplies them,
+ * and both are now `lib/rt` on the Linux targets.
  *
- * "undefined symbol '__multi3'" is true and useless. Naming the family
- * turns it into the one sentence that identifies the gap. Returns the
- * note, or NULL for an ordinary undefined symbol. */
+ * So these notes no longer say "missing": they say what the routine IS
+ * and where it comes from, because a program that reaches one of them
+ * has almost always lost librt.a off its link line. "undefined symbol
+ * '__multi3'" is true and useless either way. Returns the note, or NULL
+ * for an ordinary undefined symbol. */
 static int ends_with(const char *s, const char *suf)
 {
     size_t n = strlen(s), m = strlen(suf);
@@ -787,10 +788,10 @@ static const char *missing_runtime_note(const char *name)
         strcmp(name, "__deregister_frame_info") == 0 ||
         strcmp(name, "dl_iterate_phdr") == 0)
         return "this is the stack unwinder, which C++ exceptions need. "
-               "EmbCC has no unwinder of its own and this target links "
-               "against no system one, so `throw` cannot be linked here "
-               "(D-014). Compile with -fno-exceptions, or use the "
-               "EmbLinkOS or macOS target";
+               "EmbCC has one (lib/rt/unwind.c, in librt.a), so this "
+               "usually means librt.a is not on the link line -- the "
+               "driver puts it there by itself, and a hand-written link "
+               "has to name it after libc.a";
     if (strncmp(name, "__", 2) != 0)
         return NULL;
     /* The conversion families are named by their two TYPES rather than
@@ -802,20 +803,19 @@ static const char *missing_runtime_note(const char *name)
         strncmp(name, "__trunc", 7) == 0 || strncmp(name, "__extend", 8) == 0)
         return "this is a compiler-runtime conversion between a "
                "floating-point type and an integer one, or between two "
-               "floating-point widths. lib/rt has the x86-64 set; what "
-               "is missing on aarch64 is everything involving `long "
-               "double`, which is IEEE binary128 there and has no "
-               "instruction behind it, so it needs a soft-float "
-               "implementation this toolchain does not have yet (D-014)";
+               "floating-point widths — including every aarch64 `long "
+               "double` operation, which is IEEE binary128 in software "
+               "there. EmbCC ships these in librt.a (lib/rt); a link "
+               "that reaches this note is usually one that left it out";
     for (i = 0; rt_suffix[i]; i++)
         if (ends_with(name, rt_suffix[i]))
             return "this is a compiler-runtime helper (libgcc's "
                    "__muldi3 family) — the routine a backend calls for "
                    "an operation the machine has no instruction for, "
-                   "such as 128-bit multiply or divide. EmbCC does not "
-                   "ship one and this target links against no system "
-                   "one (D-014), so __int128 arithmetic beyond add and "
-                   "subtract cannot be linked here";
+                   "such as 128-bit multiply or divide. EmbCC ships "
+                   "these in librt.a (lib/rt); the driver puts it on "
+                   "the link line by itself, and a hand-written link "
+                   "has to name it after libc.a";
     return NULL;
 }
 

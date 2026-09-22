@@ -50,6 +50,7 @@ on aarch64 it is IEEE binary128 with no instruction behind it, so even
 | `complex.c` | `__mulsc3`/`__muldc3`/`__divsc3`/`__divdc3` |
 | `ldouble.c` | the x87 128-bit conversions (x86-64), and complex `long double` for both |
 | `softtf.c` | IEEE binary128 from the bits up (aarch64) |
+| `unwind.c` | the DWARF CFI interpreter and the `_Unwind_*` API |
 
 `softtf.c` is the largest of them and the one under the most pressure
 from the rule above: it implements `long double` for a machine that has
@@ -57,11 +58,21 @@ no instruction for it, so it may not use `long double` for anything but
 the parameter and return types the ABI requires. It is checked against
 libgcc's own soft-float over 5362 lines and matches all of them.
 
+`unwind.c` is here for the same reason as the rest: the compiler emits
+a call to `_Unwind_Resume` in every landing pad it generates, so it is
+a routine the backend calls even though a programmer never writes it.
+It finds its tables through the linker's bracket symbols, refuses the
+DWARF-expression CFA rules it cannot evaluate rather than guessing, and
+is checked against libgcc's unwinder over a program whose output says
+what happened -- see `tests/golden/unwind.sh` for why libgcc had to be
+reached through the bare-metal harness to serve as that oracle.
+
 ## What is NOT here
 
-The **unwinder** (`_Unwind_*`) is not a compiler runtime in this sense
-and is not here either; see D-014's second amendment for why it is the
-harder half and what it would take.
+`.eh_frame_hdr`, the sorted search table a dynamic loader uses to find
+an FDE quickly. The linear scan is O(n) per frame, which is fine for a
+static image and wrong to replace with a binary search until something
+sorts the table.
 
 ## How it is checked
 

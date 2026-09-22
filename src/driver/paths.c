@@ -151,16 +151,24 @@ int paths_target_file(const char *triple, const char *name,
         return 0;
     if (g_kind == 1)
         snprintf(p, sizeof p, "%s/%s/%s", g_lib, triple, name);
-    else
+    else {
         /* The build tree keeps these where make put them, under names
          * that predate any install layout. Translating here is what
-         * lets the same driver code serve both. */
-        snprintf(p, sizeof p, "%s/build/libc/%s/%s", g_lib,
-                 strncmp(triple, "x86_64-linux", 12) == 0 ? "linux-x86_64"
-                 : strncmp(triple, "aarch64-linux", 13) == 0 ? "linux-aarch64"
-                 : strncmp(triple, "aarch64", 7) == 0 ? "aarch64"
-                 : "x86_64",
-                 name);
+         * lets the same driver code serve both.
+         *
+         * The C++ runtime lives under build/libcxx rather than
+         * build/libc, because it is built by a different rule for a
+         * different set of targets. An install puts them side by side,
+         * so only this branch has to know. */
+        const char *dir =
+            strncmp(triple, "x86_64-linux", 12) == 0 ? "linux-x86_64"
+            : strncmp(triple, "aarch64-linux", 13) == 0 ? "linux-aarch64"
+            : strncmp(triple, "aarch64", 7) == 0 ? "aarch64"
+            : "x86_64";
+        snprintf(p, sizeof p, "%s/build/%s/%s/%s", g_lib,
+                 strcmp(name, "libcxx.a") == 0 ? "libcxx" : "libc",
+                 dir, name);
+    }
     if (!plat_file_exists(p))
         return 0;
     snprintf(out, cap, "%s", p);

@@ -1199,6 +1199,30 @@ static struct type *ce_type(const struct expr *e)
         struct type *t = ce_type(e->rhs);
         return t && t->kind == TY_PTR ? t->pointee : NULL;
     }
+    case EXPR_BINOP: {
+        /* Pointer arithmetic: `a + n` has the pointer's type.
+         *
+         * This is how `sizeof a[0]` arrives, because `a[i]` is built as
+         * `*(a + i)` -- so without this case the commonest length idiom
+         * in C, `sizeof(a) / sizeof(a[0])`, does not fold, and an array
+         * size written that way is rejected as "not a constant
+         * expression". gcc accepts it, and so does every C since C89.
+         *
+         * An array operand decays here, which is what makes the
+         * dereference above find the ELEMENT type rather than the array
+         * type again. */
+        struct type *lt, *rt, *t;
+        if (e->op != B_ADD && e->op != B_SUB)
+            return NULL;
+        lt = ce_type(e->lhs);
+        rt = e->op == B_ADD ? ce_type(e->rhs) : NULL;
+        t = lt && (lt->kind == TY_PTR || lt->kind == TY_ARRAY) ? lt
+          : rt && (rt->kind == TY_PTR || rt->kind == TY_ARRAY) ? rt
+          : NULL;
+        if (!t)
+            return NULL;
+        return t->kind == TY_ARRAY ? ty_ptr(t->pointee) : t;
+    }
     case EXPR_MEMBER: {
         struct type *bt = ce_type(e->lhs);
         if (!bt)

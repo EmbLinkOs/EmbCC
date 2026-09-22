@@ -812,6 +812,31 @@ target that revealed them. So:
    first (small, testable against gcc's libgcc output value by value),
    the unwinder second and only against a real differential oracle.
 
+*(Both done, 2026-09-22, and the ordering held. `lib/rt` is the
+compiler runtime -- a separate archive from libc, because libc
+implements what a program asks for by name and nothing in a program
+ever writes `__multi3` -- and `lib/rt/unwind.c` is the unwinder. The
+Linux targets now link every routine their backends can emit, and
+`embcc prog.cc -o prog` compiles, links and runs a C++ program that
+throws, with no flags.*
+
+*The unwinder's oracle is the part worth recording, because getting one
+took a detour. libgcc's unwinder cannot simply be linked into a static
+image of ours: it finds its tables through a `__register_frame_info`
+that a crtbegin normally calls, and ours does not, so it links and then
+finds nothing. But the bare-metal harness already runs C++ exceptions
+on libgcc's unwinder, because `tests/harness/crt.c` registers the
+tables by hand -- which is what a bare-metal image has to do. So one
+source is built twice, freestanding and Linux, with the same compiler,
+the same C++ runtime and the same libc; the unwinder is the only
+difference, and the two print 78 identical lines over ten exception
+cases.*
+
+*Refused rather than approximated, in the same spirit as the rest:
+`DW_CFA_def_cfa_expression` and its siblings, which gcc emits where the
+CFA is not a register plus a constant. An unwinder that guesses at a
+rule it cannot evaluate jumps to an address it invented.)*
+
 *(Done, 2026-09-22, for the first of the two. `lib/rt` is the compiler
 runtime, a separate archive from libc because it is a different job --
 libc implements what a program asks for by name and nothing in a program

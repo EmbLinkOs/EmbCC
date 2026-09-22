@@ -385,6 +385,9 @@ static int compile_unit(const char *in, const char *out, int pp_only);
  *   the object  just compiled, into a temporary next to the output
  *   libc.a      an ARCHIVE, so only the members actually referenced
  *               are pulled in
+ *   libcxx.a    the C++ runtime, for a C++ source: operator new, the
+ *               __cxa_* layer, the personality routine and the type
+ *               information a `catch` matches against
  *   librt.a     the compiler runtime (lib/rt) where the target has one:
  *               the routines the BACKEND calls for operations the
  *               machine has no instruction for. After libc, because an
@@ -428,9 +431,25 @@ static int compile_and_link(const char *in, const char *out)
     const char *inputs[8];
     int n = 0;
     const char *triple = target_triple_now();
-    char crt1[1024], libc[1024], librt[1024];
+    char crt1[1024], libc[1024], librt[1024], libcxx[1024];
     int have_crt1 = paths_target_file(triple, "crt1.o", crt1, sizeof crt1);
     int have_libc = paths_target_file(triple, "libc.a", libc, sizeof libc);
+    /* The C++ runtime, for a C++ source. Before libc, because it calls
+     * into it -- operator new is malloc, and a thrown std::string
+     * formats through the C library -- and an archive is searched
+     * once. */
+    int have_cxx = lang_cxx &&
+                   paths_target_file(triple, "libcxx.a", libcxx,
+                                     sizeof libcxx);
+    if (lang_cxx && !have_cxx) {
+        fprintf(stderr,
+                "embcc: error: no libcxx.a for %s -- a C++ program needs "
+                "the C++ runtime, and this target's is not built or not "
+                "installed\n", triple);
+        fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
+        remove(obj);
+        return 1;
+    }
     /* The compiler runtime, if this target has one. Not an error when
      * absent: a target that links somebody else's libgcc has no librt
      * of ours, and one that needs a routine it does not have gets a
@@ -452,6 +471,8 @@ static int compile_and_link(const char *in, const char *out)
     if (have_crt1)
         inputs[n++] = crt1;
     inputs[n++] = obj;
+    if (have_cxx)
+        inputs[n++] = libcxx;
     if (have_libc)
         inputs[n++] = libc;
     /* librt AFTER libc: an archive is searched once, in order, and a
@@ -850,8 +871,25 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         dwarf_emit(iu, in, &dw);
     struct eh_out eh;
     memset(&eh, 0, sizeof eh);
+    /* Unwind tables: asked for, or C++, or a HOSTED target.
+     *
+     * The last one is the gcc default and it is not a preference. An
+     * exception unwinds through whatever frames lie between the throw
+     * and the catch, and some of them are C -- qsort's comparison
+     * callback, a libc routine that calls back, and above all the
+     * unwinder's OWN frames, which are C and which the walk has to step
+     * out of before it can reach anything else. Without a table for
+     * those the walk stops at the first one and every throw becomes
+     * std::terminate, which is precisely what happened when lib/rt's
+     * unwinder was first run.
+     *
+     * Freestanding targets keep the old default of off: there is
+     * nothing to unwind into on a kernel's stack, and the tables are
+     * pure size there. */
     int unwind = want_unwind > 0 ||
-                 (lang_cxx && (want_unwind < 0 || want_exceptions));
+                 (lang_cxx && (want_unwind < 0 || want_exceptions)) ||
+                 (want_unwind < 0 && target_is_hosted() &&
+                  target_fmt_get() == TGT_FMT_ELF);
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
@@ -1637,15 +1675,34 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                              : g->in_bss ? bss_ndx : data_ndx));
     /* File-scope asm's .global labels (_start): global functions at their
      * .text offset. Local labels stay internal — the assembler already
-     * resolved jumps to them into rel32s. */
+     * resolved jumps to them into rel32s.
+     *
+     * The index is written back onto any DECLARATION of the same name,
+     * and that is not bookkeeping: the passes below add one UNDEF
+     * symbol per called-but-undefined function, and without this they
+     * did it for these too. The object then held both a definition and
+     * an undefined reference for one name, and a linker resolving the
+     * undefined one reported `__uw_capture` missing from an object that
+     * defines it. C code calling a routine written in file-scope asm is
+     * exactly how a libc's setjmp and an unwinder's register capture are
+     * built, so it is the normal case rather than an exotic one. */
     for (struct topasm *ta = u->topasm; ta; ta = ta->next)
         for (int k = 0; k < ta->nsyms; k++)
-            if (ta->syms[k].is_global)
-                elfw_add_symbol(
+            if (ta->syms[k].is_global) {
+                int ndx = elfw_add_symbol(
                     w, ta->syms[k].name,
                     (Elf64_Addr)(ta->text_off + ta->syms[k].off), 0,
                     ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
                     (Elf64_Half)text_ndx);
+                for (struct func *f = u->funcs; f; f = f->next)
+                    if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
+                        strcmp(f->name, ta->syms[k].name) == 0)
+                        f->sym_ndx = ndx;
+                for (struct global *g = u->globals; g; g = g->next)
+                    if (!g->absorbed && !g->defined && !g->sym_ndx &&
+                        strcmp(g->name, ta->syms[k].name) == 0)
+                        g->sym_ndx = ndx;
+            }
 
     /* extern-declared, used, never defined: the linker's problem */
     for (struct global *g = u->globals; g; g = g->next)
