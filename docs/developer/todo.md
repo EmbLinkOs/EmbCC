@@ -1525,6 +1525,41 @@ complex routines instead of libgcc's -- and the comparison reported
 something with itself. The runtime objects build into their own
 subdirectory now.
 
+## Closed: switch dispatch (2026-09-22)
+
+A switch emitted one equality compare per case, in source order, so
+dispatching to the last of N cases executed N comparisons. For the
+shapes switches actually take -- an interpreter's opcode, a state
+machine, a token kind -- that is the hot path of the whole program.
+
+It is a balanced binary decision tree over the sorted case values now:
+O(log n) compares instead of O(n). Measured on a 64-case switch
+dispatching to its last case, on a real kernel: **0.383s to 0.084s, 4.6
+times faster**, with MORE static instructions (80 compares against 65)
+and a far shorter path -- which is the trade a tree makes and the
+reason a static instruction count is the wrong thing to look at.
+
+`tests/exec/switch.c` covers the shapes that break such a lowering, and
+they are not the obvious ones: values either side of the SIGNED
+boundary in an unsigned switch (0x7fffffff next to 0x80000000, where a
+signed comparison puts them in the wrong halves of the tree and the
+search never reaches one of them), sparse and dense, fall-through, a
+default in the middle, and a 64-bit switch at both ends of its range.
+The result is a hash of every dispatch, so one wrong answer anywhere
+changes it, and gcc computes the same number.
+
+**Not a jump table**, and the reason is in the code rather than left as
+an omission: any indirect jump in this backend -- `IR_IGOTO`,
+`IR_LABELADDR` -- turns OFF the register allocator and the RAX
+residency cache for the whole function, because a computed goto's
+targets are unknown and the liveness those passes need cannot be
+computed. A jump table's targets are perfectly well known, so the real
+fix is a multi-way terminator that names them and a liveness pass that
+reads them (`src/arch/*/codegen.c`, the successor computation, is where
+it would go). Until that exists, lowering a switch through the
+computed-goto machinery would buy O(1) dispatch and pay for it with
+every register in the function.
+
 ## Closed: the unwinder (2026-09-22)
 
 `lib/rt/unwind.c`: a DWARF CFI interpreter and the Itanium ABI's

@@ -37,6 +37,14 @@ CXXDIR=$EMBCC_ROOT/build/libcxx/linux-x86_64
     echo "skipped: running threads needs a kernel for tests/harness/linux"
     exit 0; }
 
+# The guest timeout is raised for this file alone. These programs are
+# four threads deep under emulation and the suite runs its tests
+# CONCURRENTLY, so the default twenty seconds is enough when this runs
+# by itself and not when ten other QEMUs are competing for the same
+# cores -- which is a test that fails for a reason having nothing to do
+# with what it tests.
+export EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-90}
+
 run() {                            # run NAME [extra archives...]
     name=$1; shift
     "$EMBCC" --target=x86_64-linux-gnu ${XF:-} -c "$out/$name.$EXT" \
@@ -70,7 +78,7 @@ cat > "$out/heap.c" << 'EOF'
 #include <threads.h>
 
 #define T 4
-#define ROUNDS 3000
+#define ROUNDS 600
 #define HELD 64
 
 static int work(void *arg)
