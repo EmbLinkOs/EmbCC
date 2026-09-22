@@ -39,7 +39,7 @@ took target-specific work, or that a reader might doubt.
 | Variable-length arrays (incl. parameters, `sizeof`, release on `break`/`continue`/`goto`) | ✓ | ✓ |
 | `long double` arithmetic, conversions, exact constants | ✓ x87 | ✓ libgcc soft-float |
 | `_Complex` arithmetic (`*`, `/` through libgcc, Annex G) | ✓ | ✓ |
-| `__int128` arithmetic (`+ - & \| ^ ~`, comparisons inline; `* / % << >>` and float conversions through libgcc -- which the **Linux target does not have**, so those operations compile there and do not LINK; see D-014), bit-fields (packed too), static initializers, `__atomic_*`/`__sync_*` inline and lock-free (gcc calls libatomic); not optimized | ✓ `lock cmpxchg16b` | ✓ `ldxp`/`stxp` |
+| `__int128` arithmetic (`+ - & \| ^ ~`, comparisons inline; `* / % << >>` and float conversions through a compiler runtime -- `lib/rt` on the Linux targets, libgcc elsewhere), bit-fields (packed too), static initializers, `__atomic_*`/`__sync_*` inline and lock-free (gcc calls libatomic); not optimized | ✓ `lock cmpxchg16b` | ✓ `ldxp`/`stxp` |
 | Variadic functions, `va_arg` (incl. `double`, `long double`, `__int128`), `va_copy` | ✓ | ✓ |
 | `_Atomic`, `__atomic_*`, `__sync_*` | ✓ `lock`-prefixed | ✓ `ldxr`/`stxr` + barriers |
 | Statement expressions, `typeof`, computed `goto`, `__real__`/`__imag__`, imaginary constants | ✓ | ✓ |

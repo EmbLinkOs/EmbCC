@@ -385,6 +385,10 @@ static int compile_unit(const char *in, const char *out, int pp_only);
  *   the object  just compiled, into a temporary next to the output
  *   libc.a      an ARCHIVE, so only the members actually referenced
  *               are pulled in
+ *   librt.a     the compiler runtime (lib/rt) where the target has one:
+ *               the routines the BACKEND calls for operations the
+ *               machine has no instruction for. After libc, because an
+ *               archive is searched once and libc calls into it
  *
  * A hosted target needs all three; a freestanding one has no crt1 and
  * no libc to offer and links only what it was given, which is what
@@ -424,9 +428,15 @@ static int compile_and_link(const char *in, const char *out)
     const char *inputs[8];
     int n = 0;
     const char *triple = target_triple_now();
-    char crt1[1024], libc[1024];
+    char crt1[1024], libc[1024], librt[1024];
     int have_crt1 = paths_target_file(triple, "crt1.o", crt1, sizeof crt1);
     int have_libc = paths_target_file(triple, "libc.a", libc, sizeof libc);
+    /* The compiler runtime, if this target has one. Not an error when
+     * absent: a target that links somebody else's libgcc has no librt
+     * of ours, and one that needs a routine it does not have gets a
+     * link error naming the routine (src/link/link.c explains those by
+     * family). */
+    int have_rt = paths_target_file(triple, "librt.a", librt, sizeof librt);
     /* A hosted target whose library is not installed cannot be linked,
      * and saying which file is missing is the difference between a
      * fixable message and fifty undefined symbols. */
@@ -444,6 +454,11 @@ static int compile_and_link(const char *in, const char *out)
     inputs[n++] = obj;
     if (have_libc)
         inputs[n++] = libc;
+    /* librt AFTER libc: an archive is searched once, in order, and a
+     * libc routine can call into the runtime -- printing a 128-bit
+     * value divides by ten -- while nothing in the runtime calls libc. */
+    if (have_rt)
+        inputs[n++] = librt;
 
     struct link_opts lo;
     memset(&lo, 0, sizeof lo);

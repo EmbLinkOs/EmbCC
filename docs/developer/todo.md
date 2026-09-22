@@ -1402,15 +1402,67 @@ printing lines whose fields must all agree, the `futex_wake(-1)`
 contract with the sleepers actually asleep, and four threads reaching
 one function-local static with a slow initialiser.
 
-## Open: the runtime libraries the Linux target does not have
+## Closed: the compiler runtime (2026-09-22)
 
-See D-014's second amendment. The compiler runtime (`__multi3` and its
-family) is small and testable against libgcc value by value; the
-unwinder is not, and a DWARF CFI interpreter that gets a corner wrong
-does not fail visibly. Neither is written. Until they are, the Linux
-target runs C but not `__int128` multiply/divide and not C++
-exceptions, and `src/link/link.c` says so by name at the link rather
-than printing an undefined symbol nobody has heard of.
+`lib/rt`, a separate archive from libc because it is a different job:
+libc implements what a program asks for by name, and nothing in a
+program ever writes `__multi3`. The driver puts `librt.a` on the link
+line after `libc.a`, the way it already found `crt1.o`, so
+`embcc prog.c -o prog` links `__int128` multiply and divide with no
+flags -- which is the gap D-014's second amendment named.
+
+The constraint that shaped it: none of these routines may use the
+operation it implements. `__multi3` cannot multiply two `__int128`s,
+because that is a call to `__multi3`. So a 128-bit value is only ever
+split and rejoined through a union and everything between is 64-bit
+arithmetic the machine really has. Same reason `ldouble.c` is x86-64
+only -- there `long double` is x87 and the hardware does it.
+
+Checked against two oracles in `tests/golden/rt.sh`: the integer half
+byte-identical to the host's own runtime over 4343 lines, the complex
+half against gcc's libgcc (multiply byte-identical on all 10683 lines
+including every one of the 2401 combinations of zero, infinity and NaN;
+division within one ulp, which is all C requires once the special
+values, also identical, are right).
+
+Three things the test found or settled:
+
+- **`aligned_alloc`'s saturating conversion** was going through the
+  unsigned path and negating, which turned +1.7e308 into -1 and
+  -1.7e308 into +1. It saturates at the signed extremes now.
+- **A division by zero with an infinite numerator** returned NaN for
+  one part, because the general formula computes `inf * 0` before the
+  Annex G recovery pass can see it. The zero denominator is decided
+  first now, and all 2401 special-value divisions match libgcc.
+- **"Agrees with a compiler" is not one property.** clang's compiler-rt
+  uses a different complex-division algorithm and differs from libgcc
+  on 605 of the same lines. The oracle worth having is the
+  implementation whose NAMES are being used, which is libgcc. And in 68
+  lines libgcc returns NaN where Smith's method returns the value --
+  checked by hand, one of them is -1e160 to 5e-18 -- which is the
+  overflow avoidance Smith's method exists for.
+
+## Open: the aarch64 `long double` runtime, and the unwinder
+
+Two things the Linux target still cannot link, both for the same
+reason: each is a project rather than a file, and each fails in a way
+nothing casual sees.
+
+- **`__addtf3`, `__multc3`, `__fixtfti`, `__floattitf` and their
+  neighbours,** on aarch64 only. There `long double` is IEEE binary128
+  with no instruction behind it, so this is a soft-float
+  implementation. x86-64 Linux links every runtime routine its backend
+  can emit; aarch64 Linux links all of them except those seven.
+- **The unwinder** (`_Unwind_*`), plus `.eh_frame_hdr` in the link
+  script and a `dl_iterate_phdr` for the tables. A DWARF CFI
+  interpreter that gets a corner wrong does not fail visibly -- it
+  unwinds into the wrong frame -- so it lands only against a real
+  differential oracle. Until then C++ exceptions do not link on Linux;
+  `-fno-exceptions` does.
+
+`src/link/link.c` names both families at the link, with what the
+routine is and which targets have it, rather than printing an undefined
+symbol nobody has heard of.
 
 Still open from the same report, and not touched here:
 

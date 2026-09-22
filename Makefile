@@ -300,6 +300,17 @@ libc-emblinkos: embcc
 LIBC_SRCS_LINUX := $(LIBC_SRCS_PORTABLE) lib/libc/os/linux/backend.c \
                    lib/libc/os/linux/thread.c lib/libc/os/linux/tls.c
 
+# lib/rt -- the COMPILER runtime, which is a different library from the C
+# one: libc implements what a program asks for by name, and no program
+# ever writes __multi3. It is a separate archive so the freestanding
+# targets, which link somebody else's libgcc, are not given two
+# definitions of the same routine.
+#
+# It ships as librt.a beside libc.a, and the driver puts it on the link
+# line AFTER libc, because a libc routine can call into it (a printf of
+# a 128-bit value) and an archive is searched once.
+RT_SRCS := $(wildcard lib/rt/*.c)
+
 libc-linux-x86_64: embcc
 	@mkdir -p $(BUILD)/libc/linux-x86_64
 	@for f in $(LIBC_SRCS_LINUX); do \
@@ -311,7 +322,14 @@ libc-linux-x86_64: embcc
 	    $(BUILD)/libc/linux-x86_64/*.o
 	@./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-x86_64/crt1.o
-	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + crt1.o"
+	@for f in $(RT_SRCS); do \
+	    o=$(BUILD)/libc/linux-x86_64/rt_$$(basename $$f .c).o; \
+	    ./embcc --target=x86_64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libc/linux-x86_64/librt.a
+	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/linux-x86_64/librt.a \
+	    $(BUILD)/libc/linux-x86_64/rt_*.o
+	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + crt1.o"
 
 libc-linux-aarch64: embcc
 	@mkdir -p $(BUILD)/libc/linux-aarch64
@@ -324,7 +342,14 @@ libc-linux-aarch64: embcc
 	    $(BUILD)/libc/linux-aarch64/libc.a $(BUILD)/libc/linux-aarch64/*.o
 	@./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-aarch64/crt1.o
-	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + crt1.o"
+	@for f in $(RT_SRCS); do \
+	    o=$(BUILD)/libc/linux-aarch64/rt_$$(basename $$f .c).o; \
+	    ./embcc --target=aarch64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libc/linux-aarch64/librt.a
+	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs \
+	    $(BUILD)/libc/linux-aarch64/librt.a $(BUILD)/libc/linux-aarch64/rt_*.o
+	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + crt1.o"
 
 libc-linux: libc-linux-x86_64 libc-linux-aarch64
 
@@ -375,7 +400,7 @@ install-files:
 	             "aarch64-linux-gnu:linux-aarch64"; do \
 	    triple=$${pair%%:*}; dir=$${pair#*:}; \
 	    mkdir -p $(LIBROOT)/$$triple; \
-	    for f in libc.a crt1.o; do \
+	    for f in libc.a librt.a crt1.o; do \
 	        [ -f $(BUILD)/libc/$$dir/$$f ] && \
 	            cp $(BUILD)/libc/$$dir/$$f $(LIBROOT)/$$triple/$$f; \
 	    done; \

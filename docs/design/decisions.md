@@ -812,6 +812,43 @@ target that revealed them. So:
    first (small, testable against gcc's libgcc output value by value),
    the unwinder second and only against a real differential oracle.
 
+*(Done, 2026-09-22, for the first of the two. `lib/rt` is the compiler
+runtime, a separate archive from libc because it is a different job --
+libc implements what a program asks for by name and nothing in a program
+ever writes `__multi3`. The driver puts `librt.a` on the link line after
+`libc.a` the way it already found `crt1.o`, so `embcc prog.c -o prog`
+links `__int128` multiply and divide with no flags.*
+
+*What it holds: the 128-bit integer operations and the three shifts; the
+conversions between 128-bit integers and float and double; the complex
+multiply and divide that C99 Annex G requires to be library routines;
+and, on x86-64 only, the same two at x87 width. The constraint that
+shapes all of it is that none of these routines may use the operation it
+implements -- `__multi3` cannot multiply two `__int128`s -- so a 128-bit
+value is only ever split and rejoined through a union and everything
+between is 64-bit arithmetic.*
+
+*What it does NOT hold, and why: the aarch64 `long double` family
+(`__addtf3`, `__multc3`, `__fixtfti` and neighbours). There `long
+double` is IEEE binary128 with no instruction behind it, so this is a
+soft-float implementation rather than a file, and a soft-float that gets
+a corner wrong fails in the last bit where nothing casual sees it. Same
+judgement as the unwinder, at a smaller scale. x86-64 Linux now links
+every runtime routine its backend can emit; aarch64 Linux links all of
+them except those seven.*
+
+*Checked in `tests/golden/rt.sh` against two oracles: the integer half
+byte-identical to the host's own runtime over 4343 lines, and the
+complex half against gcc's libgcc -- byte-identical for multiply on all
+10683 lines including every one of the 2401 combinations of zero,
+infinity and NaN, and for division within one ulp, which is all C
+requires once the special values (also identical) are right. Writing
+that test settled a question worth recording: clang's compiler-rt uses a
+different algorithm and differs from libgcc on 605 of the same lines, so
+"agrees with a compiler" is not one property but several, and the one
+worth having is agreement with the implementation whose NAMES are being
+used.)*
+
 The general lesson, recorded because it has now happened twice in this
 ADR: *a self-sufficiency claim is only as strong as the program it was
 measured on.* `hello.c` exercises none of the paths that call into a

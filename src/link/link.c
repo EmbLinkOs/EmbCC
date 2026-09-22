@@ -793,6 +793,20 @@ static const char *missing_runtime_note(const char *name)
                "EmbLinkOS or macOS target";
     if (strncmp(name, "__", 2) != 0)
         return NULL;
+    /* The conversion families are named by their two TYPES rather than
+     * by a fixed suffix -- __fixtfti, __floatuntitf -- so they are
+     * matched by prefix. Without this they fell through to a bare
+     * undefined symbol, which is the message this whole function
+     * exists to replace. */
+    if (strncmp(name, "__fix", 5) == 0 || strncmp(name, "__float", 7) == 0 ||
+        strncmp(name, "__trunc", 7) == 0 || strncmp(name, "__extend", 8) == 0)
+        return "this is a compiler-runtime conversion between a "
+               "floating-point type and an integer one, or between two "
+               "floating-point widths. lib/rt has the x86-64 set; what "
+               "is missing on aarch64 is everything involving `long "
+               "double`, which is IEEE binary128 there and has no "
+               "instruction behind it, so it needs a soft-float "
+               "implementation this toolchain does not have yet (D-014)";
     for (i = 0; rt_suffix[i]; i++)
         if (ends_with(name, rt_suffix[i]))
             return "this is a compiler-runtime helper (libgcc's "
