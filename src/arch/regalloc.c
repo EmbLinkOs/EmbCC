@@ -265,21 +265,26 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
         case IR_FRAMEADDR:
             OPAQUE(in->dst); break;                        /* a raw-slot result */
         case IR_MEMCPY: case IR_MEMZERO:
-            /* addresses are register-aware (used directly as the copy/zero base);
-             * only the operands are addresses, so nothing here is opaque now. */
+            /* The operands are ADDRESSES, used as the copy base. A
+             * backend that takes them from a register leaves nothing
+             * opaque here; one that reads the slot needs them there. */
+            if (!t->memcpy_addr_in_reg) { OPAQUE(in->a); OPAQUE(in->b); }
             break;
         case IR_RET:
-            /* a scalar return is register-aware; a struct/float one reads its
-             * slot raw, so its operand must stay in memory. */
-            if (fn->ret_abi.is_struct || in->flt)
+            /* A struct or float return reads its slot raw on every
+             * backend; a scalar one only where the backend can take it
+             * from a register. */
+            if (fn->ret_abi.is_struct || in->flt || !t->ret_scalar_in_reg)
                 OPAQUE(in->a);
             break;
         case IR_CALL:
-            /* A scalar-INTEGER argument is register-aware (moved straight into
-             * its arg register / stack slot); a struct or float (SSE) argument
-             * still loads its slot raw, so it must stay in memory. */
+            /* A struct or float (SSE) argument loads its slot raw
+             * everywhere. A scalar-integer one is moved straight into
+             * its argument register only by a backend that knows how. */
             for (int k = 0; k < in->nargs; k++)
-                if (in->argv[k].is_struct || in->argv[k].cls[0] == CLASS_SSE)
+                if (in->argv[k].is_struct ||
+                    in->argv[k].cls[0] == CLASS_SSE ||
+                    !t->call_int_arg_in_reg)
                     OPAQUE(in->argv[k].vreg);
             if (in->flt || in->retsize) OPAQUE(in->dst);  /* float/struct ret */
             break;

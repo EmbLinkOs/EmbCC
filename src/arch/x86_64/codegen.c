@@ -237,7 +237,9 @@ static const struct ra_target X86_RA = {
     LEAF_POOL, NLEAF,
     VARIADIC_POOL, NVARIADIC,
     is_callee_saved,
-    ldvar_plain
+    ldvar_plain,
+    1, 1, 1        /* this backend reads call arguments, scalar returns
+                    * and memcpy addresses straight out of a register */
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----

@@ -1525,6 +1525,39 @@ complex routines instead of libgcc's -- and the comparison reported
 something with itself. The runtime objects build into their own
 subdirectory now.
 
+## Partly closed: aarch64 register allocation (2026-09-22)
+
+The backend said `(void)regalloc;` -- every vreg in a stack slot, every
+operation through the accumulator. It now allocates, and what that
+bought is precise: **memory operations in a four-variable loop went
+from 43 to 14**, a 67% cut, with the instruction count unchanged at 59.
+
+Unchanged, because the round-trip became a register move rather than
+disappearing: `ld_slot`/`st_slot` know about allocated vregs, so a
+value is read with `mov` instead of `ldr`, but the operations
+themselves still route through the accumulator. On hardware that is 29
+fewer memory accesses per call; under QEMU's TCG a load and a move cost
+the same, which is why the clock showed nothing and the instruction
+count is the honest number to quote.
+
+**What remains** is the operand-level step: teaching each operation to
+take its inputs from the allocated registers directly instead of
+loading them into the accumulator first. That is the threading of
+`in_reg()` through every case that makes the x86 backend twice the size
+of this one, and it is where the instruction count falls.
+
+**The pool is caller-saved only** (x12-x15), and that is a stopping
+point rather than an oversight. A callee-saved register has to be saved
+in the prologue AND described there, or an exception unwinding through
+the function restores the caller's copy from nowhere -- and `struct
+func` has room for eight such descriptions at one program point, which
+x19's frame-base save already shares. It costs nothing today: a value
+crossing a call may not take a caller-saved register, and on this
+backend a value crossing a call is almost always a call ARGUMENT, which
+is ineligible anyway. Compiled with x20-x28 available, a program that
+forces eight locals across a call referenced none of them. The two
+changes go together, and so does their CFI.
+
 ## Closed: switch dispatch (2026-09-22)
 
 A switch emitted one equality compare per case, in source order, so

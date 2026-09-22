@@ -24,6 +24,7 @@
  * case for is a diag_fatal naming it, never a quiet miscompile.
  */
 #include "../backend.h"
+#include "../regalloc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,7 @@
 
 /* -mgeneral-regs-only / -mno-sse: the FP registers are off limits. */
 static int g_no_fp;
+static int g_a64_regalloc;      /* -O2 register allocation is on */
 
 /* The register frame slots are addressed from: sp, except in a function
  * whose sp moves at run time (a VLA's IR_ALLOCA), where the prologue pins
@@ -42,6 +44,85 @@ static int g_no_fp;
 #define A64_FBREG 19
 static int g_fb = A64_SP;
 #define FB g_fb
+
+/* ---- register allocation (src/arch/regalloc.c) -------------------------
+ *
+ * This backend began as the naive one: every vreg in a stack slot, every
+ * operation through the accumulator. That is what `(void)regalloc;` said
+ * for as long as there was no allocator to hand it to -- D-011 chose to
+ * rebuild rather than share, and "prove it first" applied to a second
+ * backend as much as it did to the first.
+ *
+ * The allocator is shared now, lifted out of the x86 backend unchanged,
+ * so what remains here is the machine's own description and the two
+ * places a value is read and written.
+ *
+ * The pool leaves out more than AAPCS64 does, and each omission is a
+ * register this backend already spends: x9/x10/x11 are the accumulator,
+ * the second operand and the address scratch; x19 pins the frame base in
+ * a function with a VLA; x16/x17 are the linker's veneer scratch and x18
+ * is the platform register, neither of which a compiler may assume is
+ * still there across a call. x0-x8 are arguments and the indirect
+ * result. What is left is x12-x15, caller-saved and free, and x20-x28,
+ * callee-saved and therefore saved in the prologue when used.
+ *
+ * Caller-saved first, so a short-lived value takes one and costs no
+ * prologue save at all. */
+#define A64_NPOOL 4
+static const int A64_POOL[A64_NPOOL] = { 12, 13, 14, 15 };
+
+/* CALLER-SAVED ONLY, x12-x15, and that is a deliberate stopping point
+ * rather than an oversight.
+ *
+ * A callee-saved register would have to be saved in the prologue and
+ * DESCRIBED there, or an exception unwinding through this function
+ * restores the caller's copy from nowhere -- and `struct func` has room
+ * for eight such descriptions at one program point, which x19's
+ * frame-base save already shares. So the pool and the unwind tables are
+ * one decision, not two.
+ *
+ * It costs nothing today. A value that crosses a call may not live in a
+ * caller-saved register, and on this backend a value that crosses a
+ * call is almost always a call ARGUMENT, which is ineligible anyway
+ * (see A64_RA's capability flags). So the callee-saved half of the pool
+ * would sit unused: compiled with x20-x28 available, a program that
+ * forces eight locals across a call still references none of them.
+ *
+ * The two go together. Teaching this backend to read a call's arguments
+ * out of a register is what makes values that cross calls eligible, and
+ * that is the same change that makes callee-saved registers worth
+ * having -- and it is the point at which their CFI has to be written. */
+
+static int a64_callee_saved(int reg) { return reg >= 19 && reg <= 28; }
+
+/* A load that needs no extension is a plain move, so the value may stay
+ * where it is: `ldr w` already zero-extends into the 64-bit register, so
+ * only a SIGNED narrowing widen has to emit anything. */
+static int a64_ldvar_plain(int size, int sign, int w)
+{
+    return size == 8 || (size == 4 && !(sign && w == 8));
+}
+
+static const struct ra_target A64_RA = {
+    A64_POOL, A64_NPOOL,
+    NULL, 0,                              /* a variadic prologue spills
+                                           * x0-x7, none of which is in
+                                           * the pool, so the pool is the
+                                           * same one */
+    a64_callee_saved,
+    a64_ldvar_plain,
+    0, 0, 0        /* this backend still reads a call's arguments, a
+                    * return value and a memcpy's addresses from their
+                    * slots, so those values have to stay there */
+};
+
+/* Where each vreg lives: a register, or -1 for its stack slot. NULL when
+ * the function is not allocated at all. */
+static int *g_a64_loc;
+static int a64_in_reg(int v)
+{
+    return g_a64_loc && v >= 0 && g_a64_loc[v] >= 0;
+}
 
 /* long double (binary128): the vregs holding one (codegen.h
  * cg_wide_vregs) — each gets a 16-aligned 16-byte slot. */
@@ -345,17 +426,47 @@ static void align16(struct code *t)
         a64_word(t, 0xD503201FUL);       /* nop */
 }
 
-/* Load vreg's slot into `reg`, extending per size/sign into a w-wide value. */
+/* Load vreg into `reg`, extending per size/sign into a w-wide value.
+ *
+ * An ALLOCATED vreg is already in a register, so this is a move rather
+ * than a load -- and the extension still has to happen, because the
+ * caller asked for a w-wide value and the register holds whatever the
+ * last store put there. A plain-width move (a64_ldvar_plain's question,
+ * asked here of the same size/sign/width) needs no extension at all,
+ * and a move to the register it already occupies needs nothing. */
 static void ld_slot(struct code *t, const long *sd, int vreg, int reg,
                     int size, int sign, int w)
 {
+    if (a64_in_reg(vreg)) {
+        int src = g_a64_loc[vreg];
+        if (size == 8 || (size == 4 && !sign && w <= 4)) {
+            if (src != reg)
+                a64_mov_reg(t, reg, src, 8);
+        } else {
+            a64_extend(t, reg, src, size, sign, w);
+        }
+        return;
+    }
     a64_ldr(t, reg, FB, sd[vreg], size, sign, w);
 }
 
-/* Store `reg`'s low `size` bytes into vreg's slot. */
+/* Store `reg`'s low `size` bytes into vreg. */
 static void st_slot(struct code *t, const long *sd, int vreg, int reg,
                     int size)
 {
+    if (a64_in_reg(vreg)) {
+        int dst = g_a64_loc[vreg];
+        /* The register keeps the value at its natural width; a narrower
+         * store leaves the high bits of the DESTINATION as they were in
+         * a slot, so they are cleared here to match. */
+        if (size >= 8) {
+            if (dst != reg)
+                a64_mov_reg(t, dst, reg, 8);
+        } else {
+            a64_extend(t, dst, reg, size, 0, 8);
+        }
+        return;
+    }
     a64_str(t, reg, FB, sd[vreg], size);
 }
 
@@ -793,8 +904,36 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     struct func *f = fn->src;
 
     struct a64_frame fr;
+    int used_callee[A64_NPOOL], nsave = 0;
+
     g_a64_wide = cg_wide_vregs(fn);
+    /* An indirect jump makes liveness unsound -- a computed goto's
+     * targets are unknown, so a value's live range cannot be computed --
+     * and the x86 backend refuses to allocate such a function for the
+     * same reason. So does a landing pad, which is entered on a
+     * control-flow edge the dataflow does not see. */
+    g_a64_loc = NULL;
+    if (g_a64_regalloc && !fn->neh) {
+        int cgoto = 0, n;
+        for (n = 0; n < fn->nins; n++)
+            if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR) {
+                cgoto = 1;
+                break;
+            }
+        if (!cgoto)
+            g_a64_loc = ra_allocate(fn, &A64_RA, g_a64_wide,
+                                    used_callee, &nsave);
+    }
     long *sd = layout_frame(fn, &fr);
+    /* Nothing to save: the pool is caller-saved only, so `nsave` is
+     * always zero and the prologue is untouched. The variable stays
+     * because ra_allocate fills it, and a nonzero value would mean the
+     * pool had grown without its unwind tables. */
+    if (nsave)
+        diag_fatal(NULL, 0,
+                   "internal: the allocator took a callee-saved register, "
+                   "which this prologue does not save and these unwind "
+                   "tables do not describe");
 
     /* -g: each source variable's slot relative to the DWARF frame base,
      * x29. The prologue leaves sp (and x19, which pins it in a function
@@ -1628,6 +1767,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     g_fb = A64_SP;
     free(g_a64_wide);
     g_a64_wide = NULL;
+    free(g_a64_loc);
+    g_a64_loc = NULL;
 
     for (int k = 0; k < nret; k++)
         a64_patch_b26(t, retfix[k], epi);
@@ -1662,7 +1803,7 @@ void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
     (void)optimize;   /* the IR arrives already optimized; this backend has
                        * no level-dependent output of its own yet */
     g_no_fp = no_sse;
-    (void)regalloc;
+    g_a64_regalloc = regalloc;
 
     struct a64_sites st;
     st.call = NULL; st.ncall = st.capcall = 0;

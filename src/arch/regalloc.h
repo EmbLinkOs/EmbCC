@@ -58,6 +58,30 @@ struct ra_target {
      * register and the load disappear? Purely a property of the
      * machine's load instructions. */
     int (*ldvar_plain)(int size, int sign, int w);
+
+    /* ---- what the BACKEND can read out of a register ------------------
+     *
+     * These are not properties of the IR. They are things a particular
+     * backend has been taught to do, and a backend that has not been
+     * taught reads the value from its stack slot -- so the allocator
+     * must leave it there.
+     *
+     * The distinction cost a miscompile to learn. The allocator was
+     * lifted out of the x86 backend with these cases commented
+     * "register-aware", which was true OF THAT BACKEND, and the flags
+     * did not exist because there was only one. Handed to aarch64,
+     * which reads a call's arguments and a memcpy's addresses straight
+     * from their slots, it allocated values that were then read from
+     * memory that nothing had written -- and tests/exec/aapcs64.c
+     * returned 1 instead of 42.
+     *
+     * D-011 anticipated the shape of this: derive the shared layer from
+     * two WORKING backends rather than one. A capability the second
+     * backend lacks has to be sayable, or the shared layer is the first
+     * backend wearing a hat. */
+    int call_int_arg_in_reg;   /* a scalar-integer call argument */
+    int ret_scalar_in_reg;     /* a scalar return value */
+    int memcpy_addr_in_reg;    /* IR_MEMCPY / IR_MEMZERO address operands */
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that
