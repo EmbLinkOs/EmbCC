@@ -273,8 +273,20 @@ int __os_futex_wait(const volatile int *addr, int expected, long timeout_ns)
 
 int __os_futex_wake(const volatile int *addr, int count)
 {
+    /* The seam says -1 means "all of them". The kernel's FUTEX_WAKE
+     * takes a COUNT and stops when it has woken that many, so a
+     * negative one wakes nobody -- its loop condition is `woken <
+     * nr_wake`, false from the start. It does not fail; it returns 0,
+     * and the waiters sleep forever.
+     *
+     * That is what happened. Two of four threads waiting on a C++
+     * function-local static were never woken, and the program hung with
+     * no error anywhere. The EmbLinkOS backend had translated it all
+     * along (`count < 0 ? 0x7FFFFFFF`), which is what the contract in
+     * backend.h asks of every backend. */
     return (int)ret(lsys3(LSYS_futex, (long)addr,
-                          LFUTEX_WAKE | LFUTEX_PRIVATE, count));
+                          LFUTEX_WAKE | LFUTEX_PRIVATE,
+                          count < 0 ? 0x7FFFFFFF : count));
 }
 
 /* ---- the filesystem -------------------------------------------------------

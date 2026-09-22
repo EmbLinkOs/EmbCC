@@ -89,7 +89,14 @@ int  thrd_equal(thrd_t a, thrd_t b);
 thrd_t thrd_current(void);
 int  thrd_sleep(const struct timespec *duration, struct timespec *remaining);
 void thrd_yield(void);
+/* `_Noreturn` is C's spelling and `[[noreturn]]` is C++'s, and this
+ * header is included from both -- <assert.h> makes the same split for
+ * the same reason. */
+#ifdef __cplusplus
+[[noreturn]] void thrd_exit(int res);
+#else
 _Noreturn void thrd_exit(int res);
+#endif
 int  thrd_detach(thrd_t thr);
 int  thrd_join(thrd_t thr, int *res);
 

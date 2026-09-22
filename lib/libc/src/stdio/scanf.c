@@ -10,8 +10,14 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-static int get_file(void *ctx) { return fgetc((FILE *)ctx); }
-static void unget_file(void *ctx, int c) { ungetc(c, (FILE *)ctx); }
+/* Unlocked, because vfscanf below holds the stream's lock for the whole
+ * conversion: a scanf that another thread can take characters out of the
+ * middle of reads a different input than the one that was there. */
+static int get_file(void *ctx) { return __getc_unlocked((FILE *)ctx); }
+static void unget_file(void *ctx, int c)
+{
+    __ungetc_unlocked(c, (FILE *)ctx);
+}
 
 /* A string behaves as a stream that ends at its NUL. The cursor may step
  * back exactly once, which is all the engine asks for. */
@@ -32,7 +38,11 @@ static void unget_str(void *ctx, int c)
 
 int vfscanf(FILE *restrict f, const char *restrict fmt, va_list ap)
 {
-    return __vscan(get_file, unget_file, f, fmt, ap);
+    if (!f) return EOF;
+    __flockfile(f);
+    int r = __vscan(get_file, unget_file, f, fmt, ap);
+    __funlockfile(f);
+    return r;
 }
 
 int vscanf(const char *restrict fmt, va_list ap)

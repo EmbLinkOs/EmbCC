@@ -1335,6 +1335,73 @@ their edges. Then the SHAPE of the cost -- four times the allocations
 must not cost sixteen times the time -- which is the property no
 correctness test could have noticed.
 
+## Closed: the library was not thread-safe, and three bugs under that (2026-09-22)
+
+Threads landed before the library was ready for them. Reproduced first,
+on a real kernel: one thread allocating in a loop is fine and exits 42;
+TWO threads kill it, with no output at all. Four was the report; two was
+enough.
+
+Three pieces of shared state, three fixes, one mechanism:
+
+- **The heap.** One lock over the block lists
+  (`lib/libc/src/internal/lock.{h,c}`), taken at the public entry points
+  and not by the internals, which call each other. The uncontended cost
+  is a single compare-exchange -- 40000 allocations went from 0.0268s to
+  0.0316s -- which is what makes it acceptable on the targets that have
+  one thread.
+- **stdio.** A lock per `FILE`, held for the WHOLE call, with unlocked
+  halves (`__putc_unlocked` and friends) for the internals. `puts` is
+  the argument for the shape: it writes a string and then a newline, and
+  two separate locks would let another thread put a line between them.
+  printf and scanf hold it across the entire conversion, `perror` across
+  all four of its writes, `rewind` across the seek and the clear.
+- **The C++ one-shot latch.** `__cxa_guard_acquire` now blocks on the
+  guard's own word instead of assuming one thread, which is what
+  [stmt.dcl]/4 requires: a thread arriving during an initialisation
+  WAITS for it, rather than skipping or repeating it.
+
+The mutex is built on the futex seam rather than an OS mutex, for the
+reason `backend.h` gives: a mutex primitive pushes fairness and
+recursion policy into every backend, while a word a thread can sleep on
+is enough to build one here, once. Three states, so an uncontended lock
+and unlock are one atomic instruction each and no syscall; on a target
+with no futex the wait degrades to a yield, which is correct precisely
+there because such a target has no threads to contend.
+
+Three real bugs came out of the test, and all three were in code that
+looked finished:
+
+- **`__os_futex_wake(addr, -1)` woke NOBODY on Linux.** The seam says
+  -1 means "all of them"; the backend handed it straight to the kernel,
+  whose FUTEX_WAKE stops once it has woken `count`, so a negative one
+  wakes none and returns 0 rather than an error. Two of four threads
+  waiting on a static were never woken and the program hung with nothing
+  to show. The EmbLinkOS backend beside it had translated the value all
+  along -- the contract was being honoured by one implementation and not
+  the other, which is the shape a seam exists to prevent. `backend.h`
+  now says so at the declaration, and the test fails without the fix.
+- **The guard used `thread_local`, and most targets have no TLS.** The
+  bare-metal harnesses never set up a thread pointer, so a single
+  `__thread int` there is a fault -- checked directly, and it is. The
+  first version of the guard crashed every C++ program on the
+  freestanding targets. Ownership now lives in a small global table with
+  a test-and-set around it; if it ever fills, recursion stops being
+  DETECTED while the initialisation still happens exactly once, which is
+  the right thing to lose.
+- **`<threads.h>` was not C++-safe.** `_Noreturn void thrd_exit(int)`,
+  where `<assert.h>` had made the `[[noreturn]]` split for C++ long ago.
+  Worth recording that EmbCC was checked here and is right: g++ rejects
+  `_Noreturn` in C++ exactly as EmbCC does, and only clang++ accepts it.
+  The header was the bug.
+
+`tests/golden/threadsafe.sh` runs all four on a real kernel, because
+that is the only place the concurrency is real: four threads on the
+heap each claiming their blocks and reading them back, four threads
+printing lines whose fields must all agree, the `futex_wake(-1)`
+contract with the sleepers actually asleep, and four threads reaching
+one function-local static with a slow initialiser.
+
 ## Open: the runtime libraries the Linux target does not have
 
 See D-014's second amendment. The compiler runtime (`__multi3` and its
@@ -1347,10 +1414,6 @@ than printing an undefined symbol nobody has heard of.
 
 Still open from the same report, and not touched here:
 
-- **The libc is not thread-safe.** malloc/free from four threads
-  segfaults; stdio has no locks; libcxx's static-initialization guards
-  assume one thread. The threads are real now, which is exactly why
-  this matters.
 - **`-Wclobbered` on ten locals.** clang does not implement it, so the
   gcc output is needed before deciding; sprinkling `volatile` to quiet
   a warning nobody has read is how a real setjmp bug gets buried.

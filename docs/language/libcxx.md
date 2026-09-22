@@ -825,11 +825,26 @@ C++ programs with virtual dispatch, RTTI, `dynamic_cast`, static locals,
 **no `libsupc++` and no newlib**, on x86-64 and aarch64, unchanged between
 them.
 
-Not yet here: `std::exception_ptr` and `std::nested_exception`, thread-safe
-guards (the runtime is single-threaded throughout, and the ABI routes
-every initialisation through `__cxa_guard_*` precisely so that becomes a
-change to one file), and `__cxa_vec_*` (the compiler lowers array
-new/delete itself and does not call them).
+The **static-initialisation guards are thread-safe** (2026-09-22). The
+prediction above held: the ABI routes every initialisation through
+`__cxa_guard_*`, and making a thread that arrives during one WAIT for it
+-- [stmt.dcl]/4, which says "waits", not "may skip" -- was a change to
+that one file. It blocks on a word inside the guard itself, through the
+same futex seam everything else here uses.
+
+Two constraints shaped it. Recursion into an initialiser still has to be
+told apart from another thread's contention, so the guard keeps
+detecting it and trapping rather than deadlocking; and the ownership
+that makes that possible lives in a small global table rather than in
+`thread_local`, because **most targets this library runs on have no TLS
+runtime at all** -- a bare-metal image never sets up a thread pointer,
+so a single `__thread int` there is a fault. The first version used
+`thread_local` and crashed every C++ program on the freestanding
+targets, which `tests/golden/libcxx.sh` caught at once.
+
+Not yet here: `std::exception_ptr` and `std::nested_exception`, and
+`__cxa_vec_*` (the compiler lowers array new/delete itself and does not
+call them).
 
 The **standard library** above this is now 97 headers — every one the
 standard lists except `<locale>`, which is left out deliberately: it is

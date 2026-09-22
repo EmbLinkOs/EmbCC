@@ -72,6 +72,22 @@ tidy 1 makes that bug visible on the first run instead of after a port.
 - **Heapsort for `qsort`.** C does not forbid quadratic behaviour, but a
   library sort is exactly where an adversarial input arrives. Heapsort is
   n log n on every input and needs no scratch memory.
+- **The library's own state is locked.** `malloc`'s block lists and each
+  `FILE`'s buffer are shared mutable state, and threads arrived after
+  both were written: two threads in `malloc` corrupted the free list
+  (which fails LATER, in an unrelated allocation), and two in `printf`
+  interleaved inside a line. There is one lock
+  (`lib/libc/src/internal/lock.h`), built on the futex seam rather than
+  on an OS mutex, for the reason `backend.h` gives — a mutex primitive
+  pushes fairness and recursion policy into every backend, while a word
+  a thread can sleep on is enough to build one here, once. One lock for
+  the heap; one per stream, held for the WHOLE call, so `puts` cannot
+  have another thread's line land between its string and its newline.
+  Uncontended it is a single compare-exchange and no syscall, which is
+  what makes it acceptable on the targets that have one thread; where
+  there is no futex it degrades to a yield, which is correct precisely
+  there because such a target has no threads to contend.
+  `tests/golden/threadsafe.sh` runs it on a real kernel.
 - **First-fit with coalescing for `malloc`, over an explicit free list.**
   Small enough to read in one sitting and to reason about when a target
   misbehaves. Nothing outside `malloc.c` knows the shape, so a better

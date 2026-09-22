@@ -37,6 +37,23 @@
 #include <errno.h>
 
 #include "../../os/backend.h"
+#include "../internal/lock.h"
+
+/* One lock for the whole heap.
+ *
+ * The block lists are global, so two threads in malloc at once splice
+ * the same node twice and the free list stops being a list. It does not
+ * fail there: it fails later, in an unrelated allocation, which is why
+ * "malloc segfaults with four threads" was the report. Two threads was
+ * enough to kill it; one was fine.
+ *
+ * One lock and not a per-size-class arena, for the same reason the
+ * allocator is first-fit: correct on every target before fast on any.
+ * The uncontended cost is a single compare-exchange (see lock.h), which
+ * is what makes this acceptable on the targets that have one thread.
+ * Nothing outside this file knows there is a lock, so an arena later is
+ * still a local change. */
+static __lock_t heap_lock = LOCK_INIT;
 
 /* Every block is aligned for any type: max_align_t's alignment, which on
  * both targets is 16 (long double / __int128). */
@@ -155,7 +172,13 @@ static void split(struct blk *b, size_t want)
     flist_push(rest);
 }
 
-void *malloc(size_t n)
+/* The body of malloc, with the heap lock already held. The public
+ * entry points below take the lock once and call these, because they
+ * call each other -- realloc allocates and frees, aligned_alloc
+ * allocates and then splices -- and a lock taken twice by one thread is
+ * a deadlock. Keeping the recursion inside and the lock outside is the
+ * simplest arrangement that cannot do that. */
+static void *do_malloc(size_t n)
 {
     if (n == 0)
         n = 1;                 /* a unique address, as C allows and callers expect */
@@ -183,7 +206,7 @@ void *malloc(size_t n)
     return (unsigned char *)b + HDR;
 }
 
-void free(void *p)
+static void do_free(void *p)
 {
     if (!p)
         return;                /* free(NULL) is defined and does nothing */
@@ -215,6 +238,21 @@ void free(void *p)
     }
 }
 
+void *malloc(size_t n)
+{
+    __lock(&heap_lock);
+    void *p = do_malloc(n);
+    __unlock(&heap_lock);
+    return p;
+}
+
+void free(void *p)
+{
+    __lock(&heap_lock);
+    do_free(p);
+    __unlock(&heap_lock);
+}
+
 void *calloc(size_t n, size_t size)
 {
     /* The multiplication is the whole point of calloc's signature: a
@@ -230,11 +268,11 @@ void *calloc(size_t n, size_t size)
     return p;
 }
 
-void *realloc(void *p, size_t n)
+static void *do_realloc(void *p, size_t n)
 {
     if (!p)
-        return malloc(n);
-    if (n == 0) { free(p); return NULL; }
+        return do_malloc(n);
+    if (n == 0) { do_free(p); return NULL; }
     struct blk *b = (struct blk *)((unsigned char *)p - HDR);
     size_t want = ALIGN_UP(n);
     if (want < n) {
@@ -261,18 +299,26 @@ void *realloc(void *p, size_t n)
         return p;
     }
     size_t had = BSIZE(b);
-    void *q = malloc(n);
+    void *q = do_malloc(n);
     if (!q)
         return NULL;
     memcpy(q, p, had < n ? had : n);
-    free(p);
+    do_free(p);
     return q;
 }
 
-void *aligned_alloc(size_t align, size_t n)
+void *realloc(void *p, size_t n)
+{
+    __lock(&heap_lock);
+    void *q = do_realloc(p, n);
+    __unlock(&heap_lock);
+    return q;
+}
+
+static void *do_aligned_alloc(size_t align, size_t n)
 {
     if (align <= ALIGN)
-        return malloc(n);          /* every block is already this aligned */
+        return do_malloc(n);       /* every block is already this aligned */
 
     /* Over-allocate, then SPLICE A REAL HEADER in front of the aligned
      * address and give the leading fragment back to the free list.
@@ -287,7 +333,7 @@ void *aligned_alloc(size_t align, size_t n)
         return NULL;
     }
     size_t want = ALIGN_UP(n);
-    void *raw = malloc(want + align + HDR);
+    void *raw = do_malloc(want + align + HDR);
     if (!raw)
         return NULL;
     struct blk *b = (struct blk *)((unsigned char *)raw - HDR);
@@ -328,4 +374,12 @@ void *aligned_alloc(size_t align, size_t n)
     SET_BLK(b, lead - HDR, 1);     /* the fragment before it, back to the list */
     flist_push(b);
     return (void *)a;
+}
+
+void *aligned_alloc(size_t align, size_t n)
+{
+    __lock(&heap_lock);
+    void *p = do_aligned_alloc(align, n);
+    __unlock(&heap_lock);
+    return p;
 }
