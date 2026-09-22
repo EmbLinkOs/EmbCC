@@ -310,10 +310,18 @@ int x86_stack_arg_base(void)
     return target_win64_abi() ? 48 : 16;
 }
 
-void x86_prologue(struct code *c, int framesize)
+void x86_prologue(struct code *c, int framesize, int frameless)
 {
     if (framesize % 16 != 0) {
         internal_error("frame size %d not 16-aligned", framesize);
+    }
+    if (frameless) {
+        /* A leaf with nothing in its frame: no record to push, and rsp
+         * never moves, so the caller's CFA rule holds throughout. */
+        if (framesize != 0)
+            internal_error("frameless function wants a %d-byte frame",
+                           framesize);
+        return;
     }
     code_byte(c, 0x55);                     /* push rbp */
     code_byte(c, 0x48); code_byte(c, 0x89); /* mov rbp, rsp */
@@ -325,9 +333,10 @@ void x86_prologue(struct code *c, int framesize)
     }
 }
 
-void x86_epilogue(struct code *c)
+void x86_epilogue(struct code *c, int frameless)
 {
-    code_byte(c, 0xc9); /* leave */
+    if (!frameless)
+        code_byte(c, 0xc9); /* leave */
     code_byte(c, 0xc3); /* ret */
 }
 

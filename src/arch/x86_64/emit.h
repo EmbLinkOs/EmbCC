@@ -16,8 +16,8 @@
 
 /* prologue: push rbp; mov rbp,rsp; sub rsp,framesize (multiple of 16
  * so rsp stays 16-aligned at calls). epilogue: leave; ret. */
-void x86_prologue(struct code *c, int framesize);
-void x86_epilogue(struct code *c);
+void x86_prologue(struct code *c, int framesize, int frameless);
+void x86_epilogue(struct code *c, int frameless);
 void x86_leave(struct code *c);
 
 /* SysV integer argument registers, index 0..5 = rdi,rsi,rdx,rcx,r8,r9.

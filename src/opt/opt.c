@@ -157,6 +157,27 @@ static void value_opnds(struct ir_ins *i, struct opnds *o)
     each_read(i, opnd_cb, o);
 }
 
+/* Does this instruction read vreg `v` as a value? Asked directly rather
+ * than through value_opnds, because a call has as many operands as it
+ * has arguments and the question is still answerable -- refusing to
+ * answer it for anything with a call in it would give up on most
+ * functions worth optimizing. */
+struct findv { int v, found; };
+static void findv_cb(int *p, void *ctx)
+{
+    struct findv *f = ctx;
+    if (*p == f->v)
+        f->found = 1;
+}
+static int ins_reads(struct ir_ins *i, int v)
+{
+    if (i->op == IR_LDVAR || i->op == IR_ADDR)
+        return 0;                    /* a frame slot, not a value operand */
+    struct findv f = { v, 0 };
+    each_read(i, findv_cb, &f);
+    return f.found;
+}
+
 /* ---- def analysis ---- */
 
 struct defs {
@@ -575,38 +596,69 @@ static int vn_stable(struct ir_func *fn, const struct defs *d, struct ir_ins *i)
     return 1;
 }
 
+/* Drop every entry that mentions vreg `t`, because something just gave
+ * `t` a new value and the entries naming it describe the old one.
+ *
+ * This is what a block-local table can do that a dominator-scoped one
+ * cannot: the pass walks straight-line code, so "has an operand been
+ * reassigned since" is answered by having watched. It is also why LVN
+ * does not need vn_stable's blanket refusal of multiply-assigned vregs,
+ * which would throw away most of a loop body -- `arr[i]` reads `i`, and
+ * an induction variable is assigned on every incoming edge. */
+static int vn_kill(struct vn *tab, int ntab, int t)
+{
+    int j = 0;
+    for (int x = 0; x < ntab; x++)
+        if (tab[x].a != t && tab[x].b != t && tab[x].result != t)
+            tab[j++] = tab[x];
+    return j;
+}
+
 static int pass_lvn(struct ir_func *fn)
 {
     int changed = 0, memver = 0;
     struct vn *tab = NULL;
     int ntab = 0, cap = 0;
-    struct defs d;
-    compute_defs(fn, &d);
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         enum ir_op op0 = i->op;
         if (op0 == IR_LABEL) { ntab = 0; continue; }   /* block boundary */
         struct vn k;
-        if (i->dst >= 0 && vn_stable(fn, &d, i) && vn_key(i, memver, &k)) {
+        if (i->dst >= 0 && vn_key(i, memver, &k)) {
             int hit = -1;
             for (int t = 0; t < ntab; t++)
                 if (vn_eq(&tab[t], &k)) { hit = tab[t].result; break; }
             if (hit >= 0 && hit != i->dst) {
                 to_mov(i, hit);
                 changed = 1;
+                op0 = IR_MOV;      /* what it is NOW, for the kill below */
             } else if (hit < 0) {
+                ntab = vn_kill(tab, ntab, i->dst);
                 if (ntab == cap) {
                     cap = cap ? cap * 2 : 32;
                     tab = xrealloc(tab, (size_t)cap * sizeof *tab);
                 }
                 k.result = i->dst;
                 tab[ntab++] = k;
+                if (writes_memory(op0))
+                    memver++;
+                continue;
             }
+        }
+        /* Anything else that assigns a vreg -- a call's result, a store
+         * to a slot, an instruction with no key at all -- invalidates
+         * what named it. Inline asm and a landing pad write temps that
+         * def_target cannot report, so they clear the table outright. */
+        if (op0 == IR_ASM || op0 == IR_LANDING) {
+            ntab = 0;
+        } else {
+            int t = def_target(i);
+            if (t >= 0)
+                ntab = vn_kill(tab, ntab, t);
         }
         if (writes_memory(op0))
             memver++;
     }
-    free_defs(&d);
     free(tab);
     return changed;
 }
@@ -2026,12 +2078,8 @@ static int rotate_one(struct ir_func *fn)
             for (int m = 0; m < fn->nins && ok; m++) {
                 if (m >= bb[h].start && m < bb[h].end)
                     continue;
-                struct opnds o;
-                value_opnds(&fn->ins[m], &o);
-                if (fn->ins[m].op == IR_CALL || fn->ins[m].op == IR_ASM ||
-                    o.over) { o.n = 0; ok = 0; break; }
-                for (int q = 0; q < o.n; q++)
-                    if (o.v[q] == t) { ok = 0; break; }
+                if (ins_reads(&fn->ins[m], t))
+                    ok = 0;
             }
         }
         if (!ok) { free(in); continue; }

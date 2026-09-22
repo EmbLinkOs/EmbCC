@@ -412,10 +412,43 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
 /* Frame layout: variables first (their slots coalesced by scope), then a
  * coalesced pool of 8-byte temporary slots (K13). Returns the per-vreg
  * displacement table (caller frees). */
+/* A local the allocator put in a register, whose slot therefore holds
+ * nothing. Every read of such a local goes through in_reg(), so the slot
+ * is dead storage -- and a function whose locals are ALL like this needs
+ * no frame at all, which is what makes the leaf prologue below possible.
+ *
+ * The conditions are deliberately narrower than "in a register": an
+ * aggregate is addressed as memory whatever the allocator thinks, an
+ * address that escapes has to point at something, and a variadic
+ * function's prologue writes the argument file to the frame. The
+ * allocator already refuses most of these; the check does not rely on
+ * that, because a slot that turns out to be live reads as garbage rather
+ * than failing, and the whole point is that nothing quietly reads it. */
+static int slot_dead(struct ir_func *fn, const int *loc, int v)
+{
+    struct func *f = fn->src;
+    if (!loc || loc[v] < 0 || f->is_varargs || fn->has_alloca || g_want_debug)
+        return 0;
+    const struct type *t = f->var_tys[v];
+    if (t->kind == TY_STRUCT || t->kind == TY_ARRAY || ty_size(t) > 8 ||
+        ty_is_float(t))
+        return 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a == v)
+            return 0;
+    return 1;
+}
+
+/* What a dead slot's displacement is set to. It is never addressed -- so
+ * if it ever is, this makes that a fault at the first access instead of
+ * a silent read of whatever the frame happens to hold there. THE RULE,
+ * applied to an offset. */
+#define DEAD_SLOT_OFF (-0x40000000)
+
 static int *layout_frame(struct ir_func *fn, int *frame_out,
                          int *scratch_base_out, int *sret_slot_out,
                          int *va_save_out, int *va_tag_out,
-                         int nsave, int *save_base_out)
+                         int nsave, int *save_base_out, const int *loc)
 {
     struct func *f = fn->src;
     int *disp = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1)
@@ -449,6 +482,8 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
     int *salign = xcalloc((size_t)(nls ? nls : 1), sizeof *salign);
     for (int i = 0; i < fn->nvars; i++) {
         int s = lslot[i];
+        if (slot_dead(fn, loc, i))
+            continue;               /* it lives in a register; size nothing */
         int sz = (ty_size(f->var_tys[i]) + 7) & ~7;
         if (sz > ssize[s]) ssize[s] = sz;
         /* Alignment of a local's stack slot: the greater of its type's natural
@@ -462,6 +497,10 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
     }
     int *soff = xmalloc((size_t)(nls ? nls : 1) * sizeof *soff);
     for (int s = 0; s < nls; s++) {
+        if (ssize[s] == 0) {        /* every local in it lives in a register */
+            soff[s] = DEAD_SLOT_OFF;
+            continue;
+        }
         running += ssize[s];
         /* rbp is 16-aligned on entry, so rounding `running` up to N makes the
          * slot base rbp-running N-aligned for N <= 16; a larger request would
@@ -478,7 +517,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         soff[s] = -running;
     }
     for (int i = 0; i < fn->nvars; i++)
-        disp[i] = soff[lslot[i]];
+        disp[i] = slot_dead(fn, loc, i) ? DEAD_SLOT_OFF : soff[lslot[i]];
     free(lslot); free(ssize); free(salign); free(soff);
     /* Temporaries share a coalesced pool of 8-byte slots (K13) instead of one
      * slot each — the temp region is `npool` slots wide, not (nvregs-nvars). */
@@ -1376,7 +1415,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     }
     int save_base;
     int *sd = layout_frame(fn, &frame, &scratch_base, &sret_slot,
-                           &va_save, &va_tag, nsave, &save_base);
+                           &va_save, &va_tag, nsave, &save_base, loc);
     /* Set by the parameter pass below, read by IR_VA_START: how many
      * named arguments the integer and SSE register files hold, and the
      * rbp offset of the first stack-passed argument (the overflow area). */
@@ -1401,11 +1440,50 @@ static void gen_func(struct ir_func *fn, struct code *text,
             fn->var_off[v] = sd[v];
     }
 
+    /* ---- can this function do without a frame entirely? ----------------
+     *
+     * `push rbp; mov rsp,rbp; ...; leave` is four instructions a leaf
+     * that touches no stack does not need, and a two-line function pays
+     * them in full -- opaque_add was nine instructions where gcc emits
+     * two. With the slot elision above, such a function's frame is 0, so
+     * nothing is left to point at.
+     *
+     * Everything here is a way rbp could still be read. A call needs the
+     * stack aligned (the entry rsp is 8 mod 16 without the push); alloca
+     * and va_start move or read it; -g describes locals as fbreg
+     * offsets; asm, __builtin_frame_address and the stack-save builtins
+     * may name it outright. Parameters are the subtle one: a stack-passed
+     * argument is read from [rbp+N], so the frame pointer is needed to
+     * find it. Rather than re-derive which parameters those are -- the
+     * ABI classifier already does that, and a second copy of it is a
+     * second thing to get wrong -- the test is that they plainly fit in
+     * registers: four or fewer, each an ordinary integer or pointer.
+     * That is the SysV and the Win64 rule at once. */
+    int frameless = g_regalloc && frame == 0 && nsave == 0 &&
+                    !fn->has_alloca && !f->is_varargs && !g_want_debug &&
+                    sret_slot == 0 && f->nparams <= 4;
+    for (int n = 0; n < fn->nins && frameless; n++)
+        switch (fn->ins[n].op) {
+        case IR_CALL: case IR_ASM: case IR_ALLOCA: case IR_VA_START:
+        case IR_FRAMEADDR: case IR_SPSAVE: case IR_SPRESTORE:
+            frameless = 0;
+            break;
+        default:
+            break;
+        }
+    for (int p = 0; p < f->nparams && frameless; p++) {
+        struct type *pt = f->param_tys[p];
+        if (!pt || pt->kind == TY_STRUCT || pt->kind == TY_ARRAY ||
+            pt->kind == TY_INT128 || ty_is_float(pt) || ty_size(pt) > 8)
+            frameless = 0;
+    }
+
     code_align(text, 16, 0x90);
     f->code_off = text->len;
 
-    x86_prologue(text, frame);
+    x86_prologue(text, frame, frameless);
     /* for the unwind tables: push rbp ends at +1, mov rbp,rsp at +4 */
+    f->cfi_frameless = frameless;
     f->cfi_push = 1;
     f->cfi_frame = 4;
     /* -O2: preserve the callee-saved registers the allocator uses (this
@@ -1504,8 +1582,14 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     continue;
                 }
                 if (slot >= 4) {
-                    x86_load_reg_mem(text, REG_RAX, REG_RBP, incoming, 8);
-                    x86_store_slot(text, sd[i], 8);
+                    if (pmove && g_loc[i] >= 0) {       /* as SysV, above */
+                        x86_load_reg_mem(text, g_loc[i], REG_RBP, incoming,
+                                         ty_size(pt));
+                        pmoved[i] = 1;
+                    } else {
+                        x86_load_reg_mem(text, REG_RAX, REG_RBP, incoming, 8);
+                        x86_store_slot(text, sd[i], 8);
+                    }
                     incoming += 8;
                 } else if (ty_is_float(pt)) {
                     x86_movs_store(text, slot, sd[i], ty_size(pt));
@@ -1552,8 +1636,20 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * nonexistent register (argregs[6]). */
                 int in_reg = ty_is_float(pt) ? (freg < 8) : (ireg < 6);
                 if (!in_reg) {
-                    x86_load_reg_mem(text, REG_RAX, REG_RBP, incoming, 8);
-                    x86_store_slot(text, sd[i], 8);
+                    /* Straight into its allocated register where it has
+                     * one. Going by way of the home slot -- store here,
+                     * reload in the materialisation loop below -- is two
+                     * instructions for nothing, and it is the only
+                     * reason a stack-passed parameter's slot has to
+                     * exist at all. */
+                    if (pmove && g_loc[i] >= 0) {
+                        x86_load_reg_mem(text, g_loc[i], REG_RBP, incoming,
+                                         ty_size(pt));
+                        pmoved[i] = 1;
+                    } else {
+                        x86_load_reg_mem(text, REG_RAX, REG_RBP, incoming, 8);
+                        x86_store_slot(text, sd[i], 8);
+                    }
                     incoming += 8;
                 } else if (ty_is_float(pt)) {
                     x86_movs_store(text, freg++, sd[i], ty_size(pt));
@@ -2815,7 +2911,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 for (int k = 0; k < nsave; k++)         /* -O2: restore callee regs */
                     x86_load_reg_mem(text, used_callee[k], REG_RBP,
                                      save_base + k * 8, 8);
-                x86_epilogue(text);
+                x86_epilogue(text, frameless);
             }
             break;
         case IR_LANDING:
@@ -2854,7 +2950,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     if (shared_epi || !(g_regalloc && last_terminates)) {
         for (int k = 0; k < nsave; k++)                 /* -O2: restore callee regs */
             x86_load_reg_mem(text, used_callee[k], REG_RBP, save_base + k * 8, 8);
-        x86_epilogue(text);
+        x86_epilogue(text, frameless);
     }
     for (int e = 0; e < nepi; e++) {                    /* patch shared-return jumps */
         int from = epi_patch[e] + 4;

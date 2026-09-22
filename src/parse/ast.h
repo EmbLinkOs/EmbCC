@@ -340,6 +340,11 @@ struct func {
      * frame register set, and the callee-saved registers it stores in its
      * frame (DWARF numbers; slots relative to the CFA) */
     int cfi_push, cfi_frame, cfi_saved_at, cfi_nsaved;
+    /* No frame record at all: a leaf that needs no frame pushes no rbp
+     * and never moves rsp, so the CIE's opening rule -- CFA is rsp+8,
+     * return address at CFA-8 -- holds for the whole function and the
+     * FDE carries no instructions. */
+    int cfi_frameless;
     int cfi_reg[8];
     long cfi_off[8];
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
