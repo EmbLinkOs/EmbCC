@@ -1,4 +1,4 @@
-/* malloc — a first-fit free list over a break-grown heap.
+/* malloc — first fit over an explicit free list, on a break-grown heap.
  *
  * Why this and not something cleverer: the allocator a C library ships has
  * to be correct on every target before it is fast on any, and a first-fit
@@ -7,9 +7,30 @@
  * about the IR — correct and small first; the shape does not prevent a
  * better one later, because nothing outside this file knows the shape.
  *
- * Blocks carry a header with their size and a free flag. Adjacent free
- * blocks coalesce on free, which is what keeps a long-running program from
- * sawing its heap into unusable crumbs.
+ * That judgement stands. What did not is the FIRST version's data
+ * structure, which had one list — every block, in address order — and
+ * searched it from the head on every malloc. A program that allocates and
+ * does not free (a compiler parsing a file is exactly that) puts every
+ * live block ahead of every free one, so each malloc walked all of them:
+ * quadratic, and measurably so. 2000 allocations took 0.055s, 4000 took
+ * 0.199s, 8000 took 0.791s, 16000 took 3.281s — four times the work for
+ * twice the blocks, every step — and 60000 did not finish inside a
+ * twenty-second timeout. The host's libc does the same 60000 in 0.002s.
+ *
+ * So there are TWO lists over the same blocks, which is the classic shape:
+ *
+ *   - the ADDRESS list (`prev`, `next`), every block in address order. It
+ *     exists only for coalescing, which is a question about neighbours;
+ *     making it doubly linked is what lets free() join a block to the one
+ *     BEFORE it without scanning from the head.
+ *   - the FREE list (`fprev`, `fnext`), only free blocks, unordered.
+ *     malloc walks this one, so the cost of an allocation depends on how
+ *     many blocks are FREE, not on how many exist.
+ *
+ * The free list's links live in the PAYLOAD of free blocks, which is by
+ * definition not in use, so the header does not grow to carry them: it is
+ * still 32 bytes, the same as when it held one link and a flag. The flag
+ * moved into the low bit of `size`, which is always a multiple of 16.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -23,17 +44,64 @@
 #define ALIGN_UP(n) (((n) + (ALIGN - 1)) & ~(ALIGN - 1))
 
 struct blk {
-    size_t size;            /* payload bytes, not counting this header */
-    struct blk *next;       /* address order, so coalescing is a neighbour test */
-    int free;
+    size_t size;            /* payload bytes | FREE — see below */
+    struct blk *prev;       /* address order, so coalescing is a neighbour test */
+    struct blk *next;
 };
+
+/* Payload sizes are always rounded up to 16, so the low bit of `size` is
+ * always zero and is free to carry the flag. aligned_alloc's spliced
+ * headers keep that true: every size it computes is a difference of
+ * 16-aligned addresses. */
+#define FREE_BIT   1UL
+#define BSIZE(b)   ((b)->size & ~FREE_BIT)
+#define BFREE(b)   ((int)((b)->size & FREE_BIT))
+#define SET_BLK(b, n, f) ((b)->size = (size_t)(n) | ((f) ? FREE_BIT : 0))
 
 #define HDR ALIGN_UP(sizeof(struct blk))
 
-static struct blk *g_head;
+/* The free-list links, in the payload. A block's payload is at least
+ * ALIGN (16) bytes — malloc(0) is rounded to 1 and then up to 16, and
+ * split() refuses to leave a remainder smaller than that — so there is
+ * always room for two pointers. */
+struct fnode { struct blk *fprev, *fnext; };
+#define FN(b) ((struct fnode *)((unsigned char *)(b) + HDR))
+
+static struct blk *g_head;     /* address order: first block */
+static struct blk *g_tail;     /* ... and last, so grow() does not scan */
+static struct blk *g_free;     /* the free list: unordered */
+
+static void flist_push(struct blk *b)
+{
+    FN(b)->fprev = NULL;
+    FN(b)->fnext = g_free;
+    if (g_free)
+        FN(g_free)->fprev = b;
+    g_free = b;
+}
+
+static void flist_remove(struct blk *b)
+{
+    struct blk *pv = FN(b)->fprev, *nx = FN(b)->fnext;
+    if (pv)
+        FN(pv)->fnext = nx;
+    else
+        g_free = nx;
+    if (nx)
+        FN(nx)->fprev = pv;
+}
+
+/* Is `b` immediately followed in memory by `n`? Two blocks can be
+ * adjacent in the address list and still have a gap, because grow() may
+ * get a break extension that does not abut the previous one. */
+static int abuts(struct blk *b, struct blk *n)
+{
+    return n && (unsigned char *)b + HDR + BSIZE(b) == (unsigned char *)n;
+}
 
 /* Ask the OS for at least `need` more bytes, in chunks so that a program
- * doing many small allocations does not make one syscall each. */
+ * doing many small allocations does not make one syscall each. The block
+ * comes back FREE and on the free list, like any other free block. */
 static struct blk *grow(size_t need)
 {
     size_t chunk = ALIGN_UP(need + HDR);
@@ -45,39 +113,46 @@ static struct blk *grow(size_t need)
         return NULL;
     }
     struct blk *b = p;
-    b->size = chunk - HDR;
+    SET_BLK(b, chunk - HDR, 1);
+    b->prev = g_tail;
     b->next = NULL;
-    b->free = 1;
-    if (!g_head) {
+    if (g_tail)
+        g_tail->next = b;
+    else
         g_head = b;
-    } else {
-        struct blk *t = g_head;
-        while (t->next) t = t->next;
-        t->next = b;
-        /* The new block may abut the last one: join them rather than leave
-         * a seam no later coalesce can cross. */
-        if ((unsigned char *)t + HDR + t->size == (unsigned char *)b &&
-            t->free) {
-            t->size += HDR + b->size;
-            t->next = b->next;
-            return t;
-        }
+    g_tail = b;
+    /* The new chunk may abut the last block: join them rather than leave
+     * a seam no later coalesce can cross. */
+    if (b->prev && BFREE(b->prev) && abuts(b->prev, b)) {
+        struct blk *t = b->prev;
+        SET_BLK(t, BSIZE(t) + HDR + BSIZE(b), 1);
+        t->next = b->next;          /* NULL: b was the tail */
+        g_tail = t;
+        return t;                   /* already on the free list */
     }
+    flist_push(b);
     return b;
 }
 
+/* Cut `want` bytes off the front of `b`, which is NOT on the free list.
+ * The remainder becomes a free block of its own. */
 static void split(struct blk *b, size_t want)
 {
     /* Only worth splitting if the remainder can hold a header and enough
      * payload to be handed out; otherwise the tail is left as slack. */
-    if (b->size < want + HDR + ALIGN)
+    if (BSIZE(b) < want + HDR + ALIGN)
         return;
     struct blk *rest = (struct blk *)((unsigned char *)b + HDR + want);
-    rest->size = b->size - want - HDR;
-    rest->free = 1;
+    SET_BLK(rest, BSIZE(b) - want - HDR, 1);
+    rest->prev = b;
     rest->next = b->next;
-    b->size = want;
+    if (b->next)
+        b->next->prev = rest;
+    else
+        g_tail = rest;
     b->next = rest;
+    SET_BLK(b, want, BFREE(b));
+    flist_push(rest);
 }
 
 void *malloc(size_t n)
@@ -89,17 +164,22 @@ void *malloc(size_t n)
         errno = ENOMEM;
         return NULL;
     }
-    for (struct blk *b = g_head; b; b = b->next)
-        if (b->free && b->size >= want) {
+    /* Only free blocks are walked. This is the whole fix: the list a
+     * long-running allocating program grows is the list of LIVE blocks,
+     * and that list is not this one. */
+    for (struct blk *b = g_free; b; b = FN(b)->fnext)
+        if (BSIZE(b) >= want) {
+            flist_remove(b);
+            SET_BLK(b, BSIZE(b), 0);
             split(b, want);
-            b->free = 0;
             return (unsigned char *)b + HDR;
         }
     struct blk *b = grow(want);
     if (!b)
         return NULL;
+    flist_remove(b);
+    SET_BLK(b, BSIZE(b), 0);
     split(b, want);
-    b->free = 0;
     return (unsigned char *)b + HDR;
 }
 
@@ -108,22 +188,31 @@ void free(void *p)
     if (!p)
         return;                /* free(NULL) is defined and does nothing */
     struct blk *b = (struct blk *)((unsigned char *)p - HDR);
-    b->free = 1;
-    /* Coalesce forward across every free neighbour, then let the next free
-     * of an earlier block join this one. A single forward pass is enough
-     * because the list is in address order. */
-    while (b->next && b->next->free &&
-           (unsigned char *)b + HDR + b->size == (unsigned char *)b->next) {
-        b->size += HDR + b->next->size;
-        b->next = b->next->next;
+    SET_BLK(b, BSIZE(b), 1);
+    flist_push(b);
+    /* Coalesce forward, then backward. Both are O(1) now: the address
+     * list is doubly linked, so the block BEFORE this one is `b->prev`
+     * rather than the end of a scan from the head. */
+    struct blk *nx = b->next;
+    if (nx && BFREE(nx) && abuts(b, nx)) {
+        flist_remove(nx);
+        SET_BLK(b, BSIZE(b) + HDR + BSIZE(nx), 1);
+        b->next = nx->next;
+        if (nx->next)
+            nx->next->prev = b;
+        else
+            g_tail = b;
     }
-    for (struct blk *t = g_head; t && t != b; t = t->next)
-        if (t->free && t->next == b &&
-            (unsigned char *)t + HDR + t->size == (unsigned char *)b) {
-            t->size += HDR + b->size;
-            t->next = b->next;
-            break;
-        }
+    struct blk *pv = b->prev;
+    if (pv && BFREE(pv) && abuts(pv, b)) {
+        flist_remove(b);
+        SET_BLK(pv, BSIZE(pv) + HDR + BSIZE(b), 1);
+        pv->next = b->next;
+        if (b->next)
+            b->next->prev = pv;
+        else
+            g_tail = pv;
+    }
 }
 
 void *calloc(size_t n, size_t size)
@@ -148,24 +237,34 @@ void *realloc(void *p, size_t n)
     if (n == 0) { free(p); return NULL; }
     struct blk *b = (struct blk *)((unsigned char *)p - HDR);
     size_t want = ALIGN_UP(n);
-    if (b->size >= want) {
+    if (want < n) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    if (BSIZE(b) >= want) {
         split(b, want);
         return p;
     }
     /* Grow in place when the next block is free and adjacent — which is the
      * common case for a buffer that is being appended to. */
-    if (b->next && b->next->free &&
-        (unsigned char *)b + HDR + b->size == (unsigned char *)b->next &&
-        b->size + HDR + b->next->size >= want) {
-        b->size += HDR + b->next->size;
-        b->next = b->next->next;
+    struct blk *nx = b->next;
+    if (nx && BFREE(nx) && abuts(b, nx) &&
+        BSIZE(b) + HDR + BSIZE(nx) >= want) {
+        flist_remove(nx);
+        SET_BLK(b, BSIZE(b) + HDR + BSIZE(nx), 0);
+        b->next = nx->next;
+        if (nx->next)
+            nx->next->prev = b;
+        else
+            g_tail = b;
         split(b, want);
         return p;
     }
+    size_t had = BSIZE(b);
     void *q = malloc(n);
     if (!q)
         return NULL;
-    memcpy(q, p, b->size < n ? b->size : n);
+    memcpy(q, p, had < n ? had : n);
     free(p);
     return q;
 }
@@ -183,6 +282,10 @@ void *aligned_alloc(size_t align, size_t n)
      * free() finds its header at p - HDR. C requires aligned_alloc'd memory
      * to be freed with plain free(), so there must be exactly one kind of
      * block and this has to be one of them. */
+    if (align & (align - 1)) {     /* not a power of two: no such alignment */
+        errno = EINVAL;
+        return NULL;
+    }
     size_t want = ALIGN_UP(n);
     void *raw = malloc(want + align + HDR);
     if (!raw)
@@ -191,16 +294,38 @@ void *aligned_alloc(size_t align, size_t n)
     size_t a = ((size_t)raw + align - 1) & ~(align - 1);
     if (a == (size_t)raw)
         return raw;
-    while (a - (size_t)raw < HDR)  /* leave room for the new header */
+    /* The leading fragment must be a REAL block, not just a gap: room
+     * for its header AND for a payload of at least ALIGN.
+     *
+     * `HDR` alone was the old condition, and it left a fragment with a
+     * zero-byte payload whenever the aligned address landed exactly HDR
+     * past `raw` -- reachable for any align of 64 or more. That was
+     * survivable when a free block held nothing in its payload. It is
+     * not now: the free-list links live there, so pushing a zero-payload
+     * block wrote sixteen bytes straight through the next block's
+     * header. tests/golden/malloc.sh found it as "aligned_alloc block
+     * damaged".
+     *
+     * `a - raw` is already a multiple of ALIGN (raw is ALIGN-aligned and
+     * `align` is a larger power of two), so the fragment's payload is a
+     * whole number of ALIGN units, which the FREE bit in `size` also
+     * depends on. The over-allocation above covers the extra step: the
+     * worst case is `align + HDR`, and malloc was asked for
+     * `want + align + HDR`. */
+    while (a - (size_t)raw < HDR + ALIGN)
         a += align;
 
     struct blk *nb = (struct blk *)(a - HDR);
     size_t lead = (size_t)((unsigned char *)nb - (unsigned char *)b);
-    nb->size = b->size - lead;
-    nb->free = 0;
+    SET_BLK(nb, BSIZE(b) - lead, 0);
+    nb->prev = b;
     nb->next = b->next;
-    b->size = lead - HDR;          /* the fragment before it, back to the list */
-    b->free = 1;
+    if (b->next)
+        b->next->prev = nb;
+    else
+        g_tail = nb;
     b->next = nb;
+    SET_BLK(b, lead - HDR, 1);     /* the fragment before it, back to the list */
+    flist_push(b);
     return (void *)a;
 }

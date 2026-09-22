@@ -72,9 +72,19 @@ tidy 1 makes that bug visible on the first run instead of after a port.
 - **Heapsort for `qsort`.** C does not forbid quadratic behaviour, but a
   library sort is exactly where an adversarial input arrives. Heapsort is
   n log n on every input and needs no scratch memory.
-- **First-fit with coalescing for `malloc`.** Small enough to read in one
-  sitting and to reason about when a target misbehaves. Nothing outside
-  `malloc.c` knows the shape, so a better allocator is a local change.
+- **First-fit with coalescing for `malloc`, over an explicit free list.**
+  Small enough to read in one sitting and to reason about when a target
+  misbehaves. Nothing outside `malloc.c` knows the shape, so a better
+  allocator is a local change -- which is what the free list was: the
+  first version had ONE list, every block in address order, searched from
+  the head on every `malloc`, and a program that allocates without
+  freeing (a compiler parsing a file) walked every live block on every
+  call. It was quadratic and measured so. There are two lists now: the
+  address list, doubly linked, for coalescing; and the free list, which
+  is the only one an allocation walks. Its links live in the payload of
+  free blocks, so the header did not grow. See
+  `tests/golden/malloc.sh`, which checks the SHAPE of the cost and not
+  a timing number, because a number rots.
 - **One formatting engine.** Every `printf` variant is `__vformat` with a
   different sink. Writing it twice is how `%zu` ends up working in one and
   not the other.

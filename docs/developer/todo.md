@@ -1282,6 +1282,59 @@ test in the parallel run is executing. The Makefile now has a
 `$(BUILD)/embcc` target that links inside the object directory, so with
 `BUILD=` pointing somewhere private the build is entirely its own.
 
+## Closed: malloc was quadratic, and what fixing it exposed (2026-09-22)
+
+Measured before touching it, on the Linux target: 2000 allocations
+0.055s, 4000 0.199s, 8000 0.791s, 16000 3.281s -- four times the work
+for twice the blocks, every step -- and 60000 did not finish inside the
+harness's twenty-second timeout. The host's libc does the same 60000 in
+0.002s. A compiler parsing a file allocates and does not free, so this
+is exactly the program that suffers.
+
+The cause was one list. Every block lived on a single address-ordered
+list and `malloc` searched it from the head, so a program with many
+live blocks and few free ones walked all the live ones on every call.
+`free` was the same shape backwards: it scanned from the head to find
+the block BEFORE the one being freed.
+
+Now there are two lists over the same blocks. The address list carries
+`prev` as well as `next`, which exists only for coalescing and makes
+that an O(1) neighbour test in both directions. The free list holds
+only free blocks, and `malloc` walks that one -- so an allocation costs
+what the free list costs, not what the heap costs. The free list's
+links live in the payload of free blocks, which is by definition not in
+use, so the header did not grow: still 32 bytes, with the free flag
+moved into the low bit of `size` (always a multiple of 16).
+
+After: 60000 allocations in 0.045s, and the ratio for 4x the
+allocations is 3.3 rather than 16.
+
+Two real bugs came out of writing the test first:
+
+- **`aligned_alloc` could build a zero-payload block.** It spliced a
+  header in front of the aligned address and gave the leading fragment
+  back, requiring only that the fragment have room for its header. For
+  any alignment of 64 or more the aligned address can land exactly HDR
+  past the payload start, leaving a fragment with nothing in it. That
+  was survivable while a free block's payload held nothing; with the
+  free-list links there it wrote sixteen bytes through the next block's
+  header. The fragment now needs a header AND a full ALIGN of payload,
+  which the existing over-allocation already covers.
+- **A test was reading freed memory.** `array.cc` saved `e.what()`
+  inside a handler and checked it after. The message buffer is
+  reference-counted and the exception object dies when the handler
+  exits, so the pointer dangled -- and the check passed only because the
+  old allocator left the bytes alone. It reads what() inside the
+  handler now.
+
+`tests/golden/malloc.sh` covers both halves. Correctness first, because
+an allocator that is fast and wrong is worse than the one it replaced:
+no two live allocations overlap, contents survive rounds of scattered
+frees and reallocations, and realloc/calloc/aligned_alloc behave at
+their edges. Then the SHAPE of the cost -- four times the allocations
+must not cost sixteen times the time -- which is the property no
+correctness test could have noticed.
+
 ## Open: the runtime libraries the Linux target does not have
 
 See D-014's second amendment. The compiler runtime (`__multi3` and its
@@ -1298,9 +1351,6 @@ Still open from the same report, and not touched here:
   segfaults; stdio has no locks; libcxx's static-initialization guards
   assume one thread. The threads are real now, which is exactly why
   this matters.
-- **malloc is O(n) per call.** stage1 takes 88 seconds on
-  `src/cxx/parse.c` against 0.4 for gcc on glibc. That is a free-list
-  scan, not a compiler problem.
 - **`-Wclobbered` on ten locals.** clang does not implement it, so the
   gcc output is needed before deciding; sprinkling `volatile` to quiet
   a warning nobody has read is how a real setjmp bug gets buried.
