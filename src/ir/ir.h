@@ -99,6 +99,32 @@ enum ir_op {
     IR_LANDING,   /* a landing pad's entry (exception regions): dst = the
                    * exception pointer, b = the selector — what the unwinder
                    * left in rax/rdx (x0/x1) */
+
+    /* ---- vectors ----------------------------------------------------
+     *
+     * One width, 128 bits, because that is what SSE2 and NEON both have
+     * without asking: every x86-64 has SSE2 and every aarch64 has
+     * Advanced SIMD, so a vector op needs no feature test and no
+     * run-time dispatch. Wider (AVX) would.
+     *
+     * `size` is the ELEMENT width in bytes, so the lane count is
+     * 16/size — a vector of four ints has size 4. A vector temp is 16
+     * bytes and lives in a 16-byte slot, marked in the backend's `wide`
+     * map exactly as a long double is, which also keeps it away from the
+     * integer register allocator. */
+    IR_VLOAD,  /* dst = the 16 bytes at *(temp a)      (size: element) */
+    IR_VSTORE, /* the 16 bytes at *(temp a) = b        (size: element) */
+    IR_VBIN,   /* dst = a OP b, lane by lane           (size: element;
+                * OP in `imm`: '+' '-' '&' '|' '^', or '<' shl and '>'
+                * shr, whose count is a CONSTANT in `c` and whose `sign`
+                * picks arithmetic over logical. There is no '*': a
+                * packed 32-bit multiply is SSE4.1, so the vectorizer
+                * turns a multiply by a constant into shifts and adds
+                * and refuses the rest.) */
+    IR_VSPLAT, /* dst = every lane set to scalar a     (size: element) */
+    IR_VREDADD,/* dst = the sum of a's lanes           (size: element;
+                * w: the scalar result's width) */
+
     IR_OPCOUNT    /* not an opcode: the table size, so print and parse can
                    * agree on how many there are */
 };

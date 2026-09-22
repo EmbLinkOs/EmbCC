@@ -161,3 +161,17 @@ void x86_mov_r11_slot(struct code *c, int disp);
 void x86_call_r11(struct code *c);
 
 #endif
+
+/* 128-bit vectors (SSE2; see emit.c for why nothing above it) */
+void x86_vload_base(struct code *c, int xmm, int base, int disp);
+void x86_vstore_base(struct code *c, int base, int disp, int xmm);
+void x86_vload_slot(struct code *c, int xmm, int disp);
+void x86_vstore_slot(struct code *c, int disp, int xmm);
+void x86_vbin_slot(struct code *c, int xmm, int op, int esize, int disp);
+void x86_vshift_imm(struct code *c, int xmm, int left, int arith, int esize,
+                    int imm);
+void x86_vmov_rr(struct code *c, int dst, int src);
+void x86_vshufd(struct code *c, int dst, int src, int imm);
+void x86_vmov_xmm_reg(struct code *c, int xmm, int reg, int w);
+void x86_vmov_reg_xmm(struct code *c, int reg, int xmm, int w);
+void x86_vbin_rr(struct code *c, int dst, int src, int op, int esize);

@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 
+#include "../arch/target.h"
 #include "../driver/remark.h"
 #include "../driver/util.h"
 
@@ -31,6 +32,8 @@ static int writes_temp(enum ir_op op)
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_CALL: case IR_XCHG:
     case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_CAS16:
     case IR_FRAMEADDR: case IR_ALLOCA: case IR_SPSAVE:
+    /* A vector result is a temp like any other, 16 bytes wide. */
+    case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VREDADD:
         return 1;
     default:
         return 0;
@@ -102,8 +105,24 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
         break;
     case IR_STORE: case IR_MEMCPY: case IR_XCHG:
     case IR_XADD: case IR_ARMW:
+    case IR_VSTORE:
         cb(&i->a, ctx);
         cb(&i->b, ctx);
+        break;
+    case IR_VBIN:
+        cb(&i->a, ctx);
+        /* A lane-wise shift's count is a constant in `c`, so there is
+         * no second vreg and `b` is -1. Reporting it anyway had DCE
+         * counting a use of vreg -1 and incrementing the word BEFORE
+         * its array -- which faults only when that word happens to sit
+         * on an unmapped page, so it showed up as a compiler crash in
+         * four of seventy-two parallel builds and never once on its
+         * own. */
+        if (i->b >= 0)
+            cb(&i->b, ctx);
+        break;
+    case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD:
+        cb(&i->a, ctx);
         break;
     case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
         cb(&i->a, ctx);
@@ -133,6 +152,13 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
         break;   /* CONST, STRADDR, GADDR, FADDR, LABEL, JMP: no reads */
     }
 }
+
+/* Counting uses is the one visitor that WRITES through an operand
+ * index, so it is the one that turns a bad index into corruption rather
+ * than a wrong answer. It carries the array's length and checks.
+ * each_read's contract is that every index it reports is a real vreg;
+ * this is the backstop for when that stops being true, which it did. */
+struct ucount { int *use, n; };
 
 /* The vregs an instruction reads AS VALUES. LDVAR and ADDR are left out
  * on purpose: their `a` is a frame slot (see each_read), which is not a
@@ -359,8 +385,9 @@ static int pass_fold(struct ir_func *fn)
     compute_defs(fn, &d);
     /* use counts, for the single-use check strength reduction needs */
     int *use = xcalloc((size_t)fn->nvregs, sizeof *use);
+    struct ucount uc = { use, fn->nvregs };
     for (int n = 0; n < fn->nins; n++)
-        each_read(&fn->ins[n], count_cb, use);
+        each_read(&fn->ins[n], count_cb, &uc);
     int changed = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
@@ -480,6 +507,7 @@ static int writes_memory(enum ir_op op)
     case IR_STORE: case IR_STVAR: case IR_CALL: case IR_MEMCPY:
     case IR_MEMZERO: case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
     case IR_ARMW: case IR_CAS: case IR_CAS16: case IR_ASM: case IR_VA_START:
+    case IR_VSTORE:
     /* A fence writes nothing, but a load cached from before it must not be
      * reused after it: that reuse IS the reordering the fence forbids, and a
      * loop polling a flag across __sync_synchronize() would spin on a stale
@@ -706,15 +734,17 @@ static int pass_copyprop(struct ir_func *fn)
 
 static void count_cb(int *p, void *ctx)
 {
-    int *use = ctx;
-    use[*p]++;
+    struct ucount *u = ctx;
+    if (*p >= 0 && *p < u->n)
+        u->use[*p]++;
 }
 
 static int pass_dce(struct ir_func *fn)
 {
     int *use = xcalloc((size_t)fn->nvregs, sizeof *use);
+    struct ucount uc = { use, fn->nvregs };
     for (int n = 0; n < fn->nins; n++)
-        each_read(&fn->ins[n], count_cb, use);
+        each_read(&fn->ins[n], count_cb, &uc);
     /* Removing instructions renumbers the ones that follow. fn->var_scope_lo/hi
      * (irgen-stamped instruction indices, read by codegen's coalesce_locals to
      * decide which address-taken locals may share a stack slot) must move with
@@ -2181,6 +2211,554 @@ static int pass_rotate(struct ir_func *fn)
     return changed;
 }
 
+/* ==== automatic vectorization (-O2) ========================================= *
+ *
+ * `for (i = 0; i < 4096; i++) a[i] = a[i] * 3 + 1;` does one element at
+ * a time where the machine will do four. Both targets have 128-bit SIMD
+ * in their base instruction set -- SSE2 is part of x86-64, Advanced SIMD
+ * part of aarch64 -- so four ints an iteration needs no feature test.
+ *
+ * ---- the shape of the transform ------------------------------------------
+ *
+ * The usual construction is a vector loop over floor(n/VF)*VF followed by
+ * a scalar loop for the remainder, which is two loops, a new block, and
+ * an induction variable that has to start where the other stopped. This
+ * does none of that. It only vectorizes a loop whose trip count is a
+ * CONSTANT multiple of the vector factor, and then the whole transform
+ * is local to the existing loop:
+ *
+ *   - the induction step becomes VF instead of 1
+ *   - each scalar op becomes its lane-wise equivalent
+ *
+ * and nothing else moves. The address is already `base + i * esize`, so
+ * stepping i by 4 steps the address by 16 on its own; the existing test
+ * `i < 4096` already stops after 1024 iterations of four. No remainder,
+ * no second loop, no new blocks, and the guard that decides whether the
+ * loop runs at all is untouched.
+ *
+ * That is a real restriction -- `i < n` for a runtime n is not covered --
+ * but it is the whole of the risk budget spent on the part that pays:
+ * fixed-size array loops are common, and a vectorizer that quietly gets
+ * the remainder wrong is a wrong answer in the most ordinary code there
+ * is. The general trip count is the next step, not this one.
+ *
+ * ---- what may be vectorized ----------------------------------------------
+ *
+ * Every memory reference must be `global + i * esize` at the same i and
+ * the same scale, so lane k of every reference is element i+k of its
+ * array: there is no cross-lane dependence to get wrong, and two
+ * distinct globals cannot overlap. A base that came from a pointer could
+ * alias something and is refused. Every value is then either loaded,
+ * loop-invariant (broadcast once, before the loop), or computed from
+ * those by an op SSE2 and NEON both have lane-wise.
+ *
+ * Multiplication is the interesting refusal. A packed 32-bit multiply is
+ * SSE4.1, not SSE2, so a multiply by a constant is decomposed into
+ * shifts and adds -- `x * 3` is `(x << 1) + x` -- and a multiply by
+ * anything else is simply not vectorized. gcc does the same
+ * decomposition here for the same reason. */
+
+#define VEC_BYTES 16
+
+/* One loop's worth of what the recognizer found. */
+struct vecloop {
+    int iv;            /* the induction variable's phi temp */
+    int step_ins;      /* `next = iv + 1` */
+    int copy_ins;      /* `iv = mov next` */
+    int cmp_ins;       /* `c = cmp lt iv, #bound` */
+    long bound;        /* the trip count, a constant */
+    int esize, vf;
+    int lo, hi;        /* the loop's instruction range, [lo, hi) */
+    int header;        /* its first block */
+};
+
+/* Operand b as a constant, whether it has been folded into the
+ * instruction or is still a CONST temp. pass_immfold runs after the
+ * fixpoint this pass sits in, so inside the pipeline it is always the
+ * latter -- which is not what the printed IR shows, because that is
+ * printed after the fold. Reading only imm_b here found nothing at all. */
+static int const_b(struct ir_func *fn, struct defs *d, struct ir_ins *i,
+                   long *out)
+{
+    if (i->imm_b) { *out = i->imm; return 1; }
+    int v = i->b;
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    int n = d->ins[v];
+    if (n < 0 || fn->ins[n].op != IR_CONST)
+        return 0;
+    *out = fn->ins[n].imm;
+    return 1;
+}
+
+/* Is `v` defined outside [lo, hi)? A loop-invariant operand, which a
+ * vector op reaches by broadcasting it once before the loop. */
+static int defined_outside(struct ir_func *fn, struct defs *d, int v,
+                           int lo, int hi)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    int def = d->ins[v];
+    return def < 0 || def < lo || def >= hi;   /* < 0: a parameter */
+}
+
+/* Does the address in temp `p` read `base + iv * scale`, with base a
+ * global's address defined outside the loop? Returns the base temp, or
+ * -1. The chain irgen builds is add(gaddr, shl(ext(iv), log2 scale)),
+ * with the ext absent when the index is already 64-bit. */
+static int addr_of_iv(struct ir_func *fn, struct defs *d, struct vecloop *L,
+                      int p, int scale)
+{
+    if (p < 0 || p >= fn->nvregs || d->cnt[p] != 1)
+        return -1;
+    int an = d->ins[p];
+    if (an < 0 || fn->ins[an].op != IR_ADD)
+        return -1;
+    struct ir_ins *add = &fn->ins[an];
+    /* Either operand may be the base; the other is the scaled index. */
+    for (int side = 0; side < 2; side++) {
+        int base = side ? add->b : add->a;
+        int idx  = side ? add->a : add->b;
+        if (base < 0 || base >= fn->nvregs || d->cnt[base] != 1)
+            continue;
+        int bd = d->ins[base];
+        /* A global's address is the same every iteration wherever the
+         * instruction sits, so it need not have been hoisted -- and a
+         * global is the only base we accept, because a pointer could
+         * alias another reference and a vector store would then write
+         * lanes the scalar loop would have read. */
+        if (bd < 0 || fn->ins[bd].op != IR_GADDR)
+            continue;
+        if (idx < 0 || idx >= fn->nvregs || d->cnt[idx] != 1)
+            continue;
+        int sn = d->ins[idx];
+        long sh;
+        if (sn < 0 || fn->ins[sn].op != IR_SHL ||
+            !const_b(fn, d, &fn->ins[sn], &sh) || sh < 0 || sh > 6)
+            continue;
+        if ((1L << sh) != scale)
+            continue;
+        int x = fn->ins[sn].a;
+        if (x >= 0 && x < fn->nvregs && d->cnt[x] == 1) {
+            int xn = d->ins[x];
+            if (xn >= 0 && fn->ins[xn].op == IR_EXT)
+                x = fn->ins[xn].a;   /* the widened index */
+        }
+        if (x == L->iv)
+            return base;
+    }
+    return -1;
+}
+
+/* The lane-wise opcode character for a scalar op, or 0 for one SSE2 and
+ * NEON do not both have. */
+static int vec_op_char(enum ir_op op)
+{
+    switch (op) {
+    case IR_ADD: return '+';
+    case IR_SUB: return '-';
+    case IR_AND: return '&';
+    case IR_OR:  return '|';
+    case IR_XOR: return '^';
+    case IR_SHL: return '<';
+    case IR_SHR: return '>';
+    default:     return 0;
+    }
+}
+
+#define VDBG(...) do { if (getenv("EMBCC_VECDEBUG")) \
+        fprintf(stderr, "vec: " __VA_ARGS__); } while (0)
+
+static int vectorize_one(struct ir_func *fn)
+{
+    if (fn->nins == 0)
+        return 0;
+    VDBG("considering %s\n", fn->name);
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    int *order = xmalloc((size_t)nbb * sizeof *order), norder;
+    compute_rpo(bb, nbb, order, &norder);
+    if (norder != nbb) {
+        free(order); free(l2b);
+        for (int i = 0; i < nbb; i++) free(bb[i].pred);
+        free(bb); return 0;
+    }
+    compute_idom(bb, order, norder);
+    struct defs d;
+    compute_defs(fn, &d);
+    char *in = xmalloc((size_t)nbb);
+    int done = 0;
+
+    for (int oi = norder - 1; oi >= 0 && !done; oi--) {
+        int h = order[oi];
+        if (h == 0 || bb[h].end <= bb[h].start ||
+            fn->ins[bb[h].start].op != IR_LABEL)
+            continue;
+        int Lh = fn->ins[bb[h].start].label;
+
+        /* One back edge, from a latch that branches to the header --
+         * the rotated shape, which is the only one whose test is at the
+         * bottom where the step is. */
+        int latch = -1, nback = 0;
+        for (int p = 0; p < nbb; p++)
+            for (int k = 0; k < bb[p].nsucc; k++)
+                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
+                    latch = p; nback++;
+                }
+        if (nback != 1 || bb[latch].end <= bb[latch].start)
+            continue;
+        struct ir_ins *br = &fn->ins[bb[latch].end - 1];
+        if (br->op != IR_BRNZ || br->label != Lh)
+            { VDBG("h=%d not a rotated latch\n", h); continue; }
+
+        memset(in, 0, (size_t)nbb);
+        loop_body(bb, nbb, h, latch, in);
+        /* The loop must be one contiguous run of instructions, so the
+         * body can be read and rewritten as a straight line. */
+        struct vecloop L;
+        L.lo = bb[h].start; L.hi = bb[latch].end; L.header = h;
+        int ok = 1;
+        for (int b = 0; b < nbb && ok; b++)
+            if (in[b] != (bb[b].start >= L.lo && bb[b].end <= L.hi))
+                ok = 0;
+        if (!ok)
+            { VDBG("h=%d loop not contiguous\n", h); continue; }
+
+        /* The test: `c = cmp lt iv, #bound`, feeding the back branch. */
+        int cn = (br->a >= 0 && br->a < fn->nvregs && d.cnt[br->a] == 1)
+                 ? d.ins[br->a] : -1;
+        if (cn < L.lo || cn >= L.hi)
+            continue;
+        struct ir_ins *cmp = &fn->ins[cn];
+        if (cmp->op != IR_CMP || cmp->pred != B_LT || !cmp->sign ||
+            !const_b(fn, &d, cmp, &L.bound))
+            { VDBG("h=%d test is not `cmp lt iv, #k`\n", h); continue; }
+        L.cmp_ins = cn;
+        L.iv = cmp->a;
+        if (L.bound <= 0 || L.iv < 0 || L.iv >= fn->nvregs)
+            { VDBG("h=%d bad bound\n", h); continue; }
+
+        /* `iv = mov next` and `next = iv + 1`, both in the loop. */
+        L.copy_ins = L.step_ins = -1;
+        for (int n = L.lo; n < L.hi; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_MOV && i->dst == L.iv)
+                L.copy_ins = n;
+        }
+        if (L.copy_ins < 0)
+            { VDBG("h=%d no phi copy for iv %d\n", h, L.iv); continue; }
+        int next = fn->ins[L.copy_ins].a;
+        if (next < 0 || next >= fn->nvregs || d.cnt[next] != 1)
+            continue;
+        L.step_ins = d.ins[next];
+        if (L.step_ins < L.lo || L.step_ins >= L.hi)
+            { VDBG("h=%d step outside loop\n", h); continue; }
+        struct ir_ins *st = &fn->ins[L.step_ins];
+        long stepk;
+        if (st->op != IR_ADD || st->a != L.iv ||
+            !const_b(fn, &d, st, &stepk) || stepk != 1)
+            { VDBG("h=%d step is not +1\n", h); continue; }
+
+        /* It has to start at zero, or lane k is not element i+k. The
+         * other definition of the phi temp is the one before the loop. */
+        int init_ok = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            if (n >= L.lo && n < L.hi)
+                continue;
+            struct ir_ins *i = &fn->ins[n];
+            if (def_target(i) != L.iv)
+                continue;
+            if (i->op == IR_MOV && i->a >= 0 && i->a < fn->nvregs &&
+                d.cnt[i->a] == 1 && d.ins[i->a] >= 0 &&
+                fn->ins[d.ins[i->a]].op == IR_CONST &&
+                fn->ins[d.ins[i->a]].imm == 0)
+                init_ok = 1;
+            else if (i->op == IR_CONST && i->imm == 0)
+                init_ok = 1;
+            else
+                { init_ok = 0; break; }
+        }
+        if (!init_ok)
+            { VDBG("h=%d iv does not start at 0\n", h); continue; }
+
+        /* ---- classify the body -------------------------------------
+         *
+         * vec[v] marks a temp that becomes a vector. Loads seed it and
+         * arithmetic spreads it; anything else reading a vector temp,
+         * or any op that is not lane-wise, refuses the loop. */
+        char *vec = xcalloc((size_t)fn->nvregs, 1);
+        L.esize = 0;
+        int nmem = 0;
+        for (int n = L.lo; n < L.hi && ok; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_LOAD && i->op != IR_STORE)
+                continue;
+            if (i->vol || (i->size != 4 && i->size != 8)) { ok = 0; break; }
+            if (L.esize && i->size != L.esize) { ok = 0; break; }
+            L.esize = i->size;
+            if (addr_of_iv(fn, &d, &L, i->a, i->size) < 0) { ok = 0; break; }
+            if (i->op == IR_LOAD)
+                vec[i->dst] = 1;
+            nmem++;
+        }
+        if (!ok || !L.esize || nmem == 0) {
+            VDBG("h=%d memory refs: ok=%d esize=%d n=%d\n", h, ok, L.esize, nmem);
+            free(vec); continue; }
+        L.vf = VEC_BYTES / L.esize;
+        if (L.bound % L.vf != 0) {
+            VDBG("h=%d trip %ld not a multiple of %d\n", h, L.bound, L.vf);
+            free(vec); continue; }
+
+        /* Spread vectorness to a fixpoint, and refuse anything that
+         * cannot carry it. */
+        for (int again = 1; again && ok; ) {
+            again = 0;
+            for (int n = L.lo; n < L.hi && ok; n++) {
+                struct ir_ins *i = &fn->ins[n];
+                if (i->op == IR_LOAD || i->op == IR_STORE ||
+                    n == L.step_ins || n == L.copy_ins || n == L.cmp_ins ||
+                    i->op == IR_LABEL || i->op == IR_JMP ||
+                    i->op == IR_BRNZ || i->op == IR_BRZ)
+                    continue;
+                struct opnds o;
+                value_opnds(i, &o);
+                int any = 0;
+                for (int k = 0; k < o.n; k++)
+                    if (o.v[k] >= 0 && o.v[k] < fn->nvregs && vec[o.v[k]])
+                        any = 1;
+                if (!any)
+                    continue;               /* wholly scalar: it may stay */
+                int t = def_target(i);
+                /* A multiply by a constant becomes shifts and adds; any
+                 * other multiply, and anything not lane-wise, stops us. */
+                int c = vec_op_char(i->op);
+                long kb;
+                int hask = const_b(fn, &d, i, &kb);
+                if (i->op == IR_MUL) {
+                    /* only powers of two and (2^k)+1, which is one shift
+                     * and one add -- the rest is not worth a chain, and
+                     * a packed 32-bit multiply is not SSE2 anyway */
+                    if (!hask || kb <= 0) { ok = 0; break; }
+                    int p2 = (kb & (kb - 1)) == 0;
+                    int p2p1 = ((kb - 1) & (kb - 2)) == 0 && kb >= 3;
+                    if (!p2 && !p2p1) { ok = 0; break; }
+                } else if (!c) {
+                    ok = 0; break;
+                } else if ((i->op == IR_SHL || i->op == IR_SHR) && !hask) {
+                    ok = 0; break;          /* a per-lane shift count */
+                } else if (i->op == IR_SHR && i->sign && L.esize == 8) {
+                    /* SSE2 has no psraq. Refused HERE rather than at
+                     * emission: the backend's refusal is a loud internal
+                     * error, and a loop we simply do not vectorize is
+                     * not an error at all. */
+                    ok = 0; break;
+                } else if (!hask && i->b >= 0 && i->b < fn->nvregs &&
+                           !vec[i->b] &&
+                           !defined_outside(fn, &d, i->b, L.lo, L.hi)) {
+                    ok = 0; break;          /* a scalar that varies per lane */
+                }
+                if (t < 0 || t >= fn->nvregs) { ok = 0; break; }
+                if (i->w != L.esize && i->op != IR_SHL && i->op != IR_SHR)
+                    { ok = 0; break; }      /* a widening op changes lanes */
+                if (!vec[t]) { vec[t] = 1; again = 1; }
+            }
+        }
+        if (!ok) { VDBG("h=%d body not lane-wise\n", h); free(vec); continue; }
+        /* Every store's VALUE must be a vector too.
+         *
+         * Without this, `a[i] = i` became a vstore of the induction
+         * variable's eight-byte slot read as sixteen, and the array
+         * filled with garbage -- the loop after it then computed
+         * 0 * 3 + 1 for every element and the answer was 64 where it
+         * should have been 6112. A scalar stored here is one of two
+         * things and only one of them is safe: a loop-invariant value,
+         * which every lane could share, or something that varies with i
+         * like the index itself, which no single lane value can stand
+         * for. Telling them apart is worth doing; until it is, neither
+         * is vectorized. */
+        for (int n = L.lo; n < L.hi && ok; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_STORE)
+                continue;
+            if (i->b < 0 || i->b >= fn->nvregs || !vec[i->b])
+                ok = 0;
+        }
+        if (!ok) {
+            VDBG("h=%d a store's value is not lane-wise\n", h);
+            free(vec); continue;
+        }
+        /* A value that becomes a vector may only be read by something
+         * that also becomes one: a lane-wise op inside the loop, or the
+         * store that consumes it. Anything else -- a use after the loop,
+         * a scalar op inside it -- would read sixteen bytes as eight. */
+        for (int n = 0; n < fn->nins && ok; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            int inside = n >= L.lo && n < L.hi;
+            int t = def_target(i);
+            int consumer = inside && (i->op == IR_STORE ||
+                                      (t >= 0 && t < fn->nvregs && vec[t]));
+            if (consumer)
+                continue;
+            for (int v = 0; v < fn->nvregs && ok; v++)
+                if (vec[v] && ins_reads(i, v))
+                    ok = 0;
+        }
+        if (!ok) { VDBG("h=%d a vector value escapes\n", h); free(vec); continue; }
+
+        /* ---- rewrite ------------------------------------------------ */
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        int vfk = fn->nvregs++;      /* the new induction step, VF */
+        for (int n = 0; n < fn->nins; n++) {
+            if (n == L.lo) {
+                struct ir_ins *k = ib_push(&nb);
+                k->op = IR_CONST; k->dst = vfk;
+                k->w = fn->ins[L.step_ins].w; k->imm = L.vf;
+                k->line = fn->ins[L.step_ins].line;
+                k->col = fn->ins[L.step_ins].col;
+                /* Before the header label: broadcast every constant the
+                 * body needs, once. The back edge jumps past this, the
+                 * same way it jumps past a hoisted expression. */
+                for (int m = L.lo; m < L.hi; m++) {
+                    struct ir_ins *s = &fn->ins[m];
+                    int t = def_target(s);
+                    long kb;
+                    if (t < 0 || t >= fn->nvregs || !vec[t])
+                        continue;
+                    if (s->op == IR_SHL || s->op == IR_SHR || s->op == IR_MUL)
+                        continue;           /* folded into the lane op */
+                    if (!const_b(fn, &d, s, &kb))
+                        continue;           /* both operands are vectors */
+                    struct ir_ins *k = ib_push(&nb);
+                    k->op = IR_CONST; k->dst = fn->nvregs;
+                    k->w = L.esize; k->imm = kb;
+                    k->line = s->line; k->col = s->col;
+                    struct ir_ins *sp = ib_push(&nb);
+                    sp->op = IR_VSPLAT; sp->dst = fn->nvregs + 1;
+                    sp->a = fn->nvregs; sp->size = L.esize;
+                    sp->line = s->line; sp->col = s->col;
+                    s->c = fn->nvregs + 1;  /* remember the splat for below */
+                    fn->nvregs += 2;
+                }
+            }
+            if (newpos) newpos[n] = nb.n;
+            struct ir_ins *i = &fn->ins[n];
+            if (n < L.lo || n >= L.hi) { *ib_push(&nb) = *i; continue; }
+
+            if (n == L.step_ins) {          /* i += VF, not i += 1 */
+                struct ir_ins *s = ib_push(&nb);
+                *s = *i;
+                /* Through a CONST temp, not imm_b: pass_immfold runs
+                 * after this and the passes before it are documented
+                 * never to reason about the folded form. */
+                s->imm_b = 0; s->imm = 0; s->b = vfk;
+                continue;
+            }
+            int t = def_target(i);
+            if (i->op == IR_LOAD && t >= 0 && vec[t]) {
+                struct ir_ins *v = ib_push(&nb);
+                memset(v, 0, sizeof *v);
+                v->op = IR_VLOAD; v->dst = t; v->a = i->a;
+                v->size = L.esize; v->w = 8;
+                v->line = i->line; v->col = i->col;
+                continue;
+            }
+            if (i->op == IR_STORE) {
+                struct ir_ins *v = ib_push(&nb);
+                memset(v, 0, sizeof *v);
+                v->op = IR_VSTORE; v->a = i->a; v->b = i->b; v->dst = -1;
+                v->size = L.esize; v->w = 8;
+                v->line = i->line; v->col = i->col;
+                continue;
+            }
+            if (t >= 0 && t < fn->nvregs && vec[t]) {
+                int c = vec_op_char(i->op);
+                if (i->op == IR_MUL) {
+                    long m = 0;
+                    (void)const_b(fn, &d, i, &m);
+                    if ((m & (m - 1)) == 0) {          /* a power of two */
+                        int sh = 0;
+                        while ((1L << sh) < m) sh++;
+                        struct ir_ins *v = ib_push(&nb);
+                        memset(v, 0, sizeof *v);
+                        v->op = IR_VBIN; v->dst = t; v->a = i->a;
+                        v->b = -1; v->imm = '<'; v->c = sh;
+                        v->size = L.esize; v->w = 8;
+                        v->line = i->line; v->col = i->col;
+                    } else {                            /* (1 << k) + 1 */
+                        int sh = 0;
+                        while ((1L << sh) < m - 1) sh++;
+                        int tmp = fn->nvregs++;
+                        struct ir_ins *v = ib_push(&nb);
+                        memset(v, 0, sizeof *v);
+                        v->op = IR_VBIN; v->dst = tmp; v->a = i->a;
+                        v->b = -1; v->imm = '<'; v->c = sh;
+                        v->size = L.esize; v->w = 8;
+                        v->line = i->line; v->col = i->col;
+                        struct ir_ins *w = ib_push(&nb);
+                        memset(w, 0, sizeof *w);
+                        w->op = IR_VBIN; w->dst = t; w->a = tmp; w->b = i->a;
+                        w->imm = '+'; w->size = L.esize; w->w = 8;
+                        w->line = i->line; w->col = i->col;
+                    }
+                    continue;
+                }
+                struct ir_ins *v = ib_push(&nb);
+                memset(v, 0, sizeof *v);
+                v->op = IR_VBIN; v->dst = t; v->a = i->a;
+                v->size = L.esize; v->w = 8;
+                v->imm = c;
+                v->line = i->line; v->col = i->col;
+                long kb;
+                int hask = const_b(fn, &d, i, &kb);
+                if ((c == '<' || c == '>') && hask) {
+                    v->b = -1; v->c = (int)kb; v->sign = i->sign;
+                } else if (hask) {
+                    v->b = i->c;              /* the splat made above */
+                } else {
+                    v->b = i->b;
+                }
+                continue;
+            }
+            *ib_push(&nb) = *i;
+        }
+        if (newpos) {
+            newpos[fn->nins] = nb.n;
+            for (int v = 0; v < fn->nvars; v++) {
+                int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+                if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+                if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+            }
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        free(vec);
+        if (remarks_on() && fn->src)
+            remark_add("opt", "vectorized", fn->name, "vec/constant-trip-count",
+                       fn->file, fn->line,
+                       "%d lanes of %d bytes, %ld iterations -> %ld",
+                       L.vf, L.esize, L.bound, L.bound / L.vf);
+        done = 1;
+    }
+
+    free(in);
+    free_defs(&d);
+    free(order); free(l2b);
+    for (int i = 0; i < nbb; i++) free(bb[i].pred);
+    free(bb);
+    return done;
+}
+
+static int pass_vectorize(struct ir_func *fn)
+{
+    int changed = 0, guard = 0;
+    while (guard++ < 32 && vectorize_one(fn))
+        changed = 1;
+    return changed;
+}
+
 /* ---- conditional constant propagation (the reachability half of SCCP) ----
  *
  * A conditional branch whose condition is a known constant has one live edge.
@@ -2790,6 +3368,7 @@ static int g_gcse;      /* -O2: dominator-scoped global CSE inside the fixpoint 
 static int g_loadcse;   /* -O2: global redundant-load elimination (avail. exprs) */
 static int g_sccp;      /* -O2: const-branch resolution + unreachable-block drop */
 static int g_licm;      /* -O2: hoist loop-invariant computation to a preheader */
+static int g_vec;       /* -O2: lane-wise loops, where the backend has them */
 
 /* ---- IR verifier (opt-in via EMBCC_VERIFY) --------------------------------
  * A cheap post-optimization sanity net for the two invariants a silent
@@ -2929,6 +3508,15 @@ static void opt_func(struct ir_func *fn)
             pass_dce(fn);
             outer = 1;
         }
+        /* Vectorizing LAST of the loop passes, because it depends on
+         * all of them: rotation for the single-block bottom-tested
+         * shape, and LICM for the address base -- until the `gaddr` is
+         * hoisted out, every memory reference looks like it is indexed
+         * off something that changes, and nothing vectorizes. */
+        if (g_vec && pass_vectorize(fn)) {
+            pass_dce(fn);
+            outer = 1;
+        }
     }
     /* After the fixpoint: fold constant operands into immediates, then DCE the
      * CONSTs that leaves unreferenced. Kept out of the fixpoint so the earlier
@@ -2953,6 +3541,10 @@ void opt_run(struct ir_unit *iu, int level)
     g_mem2reg = level >= 2;       /* SSA mem2reg: promote scalar locals to temps */
     g_gcse = level >= 2;          /* global CSE across the dominator tree */
     g_licm = level >= 2;          /* hoist loop-invariant code to a preheader */
+    /* Vectorization is x86-64 for now: the aarch64 backend refuses the
+     * vector opcodes loudly (diag_fatal) rather than emitting something
+     * it has not been taught, so the pass must not hand it any. */
+    g_vec = level >= 2 && target_get() == TARGET_X86_64;
     g_loadcse = level >= 2;       /* global redundant-load elimination */
     g_sccp = level >= 2;          /* conditional constant propagation */
     if (level >= 2)               /* inline before the per-function passes clean up */

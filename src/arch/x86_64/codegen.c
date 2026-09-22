@@ -270,6 +270,11 @@ static int wide_def(const struct ir_ins *i)
         return !i->flt && i->w == 16;
     case IR_CAS16:
         return 1;
+    /* A vector result is 16 bytes, so it wants the same 16-aligned slot
+     * a long double gets and the same exclusion from the integer
+     * register allocator. `wide` is already exactly that map. */
+    case IR_VLOAD: case IR_VBIN: case IR_VSPLAT:
+        return 1;
     default:
         return 0;
     }
@@ -617,11 +622,13 @@ static void count_vreg_uses(struct ir_func *fn, int *cnt)
         case IR_ADDR: case IR_STVAR: case IR_VA_START:
         case IR_RET: case IR_BRZ: case IR_BRNZ:
         case IR_ALLOCA: case IR_SPRESTORE:
+        case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD:
             UZ(s->a); break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
         case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
         case IR_XCHG: case IR_XADD: case IR_ARMW:
+        case IR_VSTORE: case IR_VBIN:
             UZ(s->a); UZ(s->b); break;
         case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
             UZ(s->a); UZ(s->b); UZ(s->c); break;
@@ -714,7 +721,42 @@ static int g_regalloc;        /* enabled only at -O2 */
 static int g_tailcalls;
 static const int *g_loc;      /* per-vreg physical register, or -1; NULL when off */
 
-static void cg_reset(void) { rc_vreg = -1; rc_zx = 0; }
+/* Which VECTOR temp xmm0 currently holds, or -1. The same idea as the
+ * RAX residency cache above, and it matters more: every vector op works
+ * in xmm0 against 16-byte slots, so without it a four-instruction loop
+ * body spends eight movdqa shuttling values it already had. */
+static int vrc_vreg = -1;
+
+static void cg_reset(void) { rc_vreg = -1; rc_zx = 0; vrc_vreg = -1; }
+
+/* Does this instruction read vector temp `v` FROM XMM0 -- as opposed to
+ * from its slot?
+ *
+ * The distinction is the whole correctness of the cache. A packed ALU op
+ * takes its first operand in the register and its second as a MEMORY
+ * operand, so a value read as operand b has to be in its slot however
+ * recently it was computed. Answering "does it read v" instead of "does
+ * it read v in the register" skipped the store for a value the very next
+ * instruction then read from the slot, and the answer changed. */
+static int vec_reads_xmm(const struct ir_ins *i, int v)
+{
+    switch (i->op) {
+    case IR_VBIN:    return i->a == v && i->b != v;
+    case IR_VSTORE:  return i->b == v;
+    case IR_VREDADD: return i->a == v;
+    default:         return 0;
+    }
+}
+
+/* May a vector result stay in xmm0 instead of going out to its slot?
+ * Only when the very next instruction is the single use it has -- then
+ * nothing else can ever read the slot, and nothing can come between. */
+static int vec_keep(struct ir_func *fn, int n, const int *usecnt, int dst)
+{
+    if (dst < 0 || !usecnt || usecnt[dst] != 1 || n + 1 >= fn->nins)
+        return 0;
+    return vec_reads_xmm(&fn->ins[n + 1], dst);
+}
 
 static int in_reg(int vreg) { return g_regalloc && g_loc && g_loc[vreg] >= 0; }
 
@@ -1740,6 +1782,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int *epi_patch = NULL, nepi = 0, capepi = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        /* What xmm0 held coming in. Cleared by default, so any op that
+         * is not one of the vector cases below invalidates it simply by
+         * not setting it again. */
+        int vrc_in = vrc_vreg;
+        vrc_vreg = -1;
         int ins_start = text->len;
         /* -g: a row where the source line changes. text->len is the .text
          * offset this instruction's code begins at (the switch below emits
@@ -1779,6 +1826,85 @@ static void gen_func(struct ir_func *fn, struct code *text,
             diag_fatal(fn->file, i->line,
                        "floating point needs SSE, which -mno-sse forbids");
         switch (i->op) {
+        /* ---- 128-bit vectors -------------------------------------------
+         *
+         * Every one works in xmm0 against 16-byte frame slots, which is
+         * the shape the scalar float path already has. A vector temp is
+         * `wide`, so it has a 16-aligned slot of its own and the integer
+         * allocator never sees it -- which is what makes "operate in
+         * xmm0, spill to the slot" correct without a second allocator. */
+        case IR_VLOAD: {
+            int base;
+            cg_reset();
+            if (in_reg(i->a)) {
+                base = g_loc[i->a];
+            } else {
+                cg_load(text, sd, i->a, 8, 0, 8);
+                base = REG_RAX;
+            }
+            x86_vload_base(text, 0, base, 0);
+            rc_vreg = -1;
+            if (!vec_keep(fn, n, usecnt, i->dst))
+                x86_vstore_slot(text, sd[i->dst], 0);
+            vrc_vreg = i->dst;   /* still in xmm0, stored or not */
+            break;
+        }
+        case IR_VSTORE: {
+            int base;
+            /* The ADDRESS first when the value is already in xmm0, so
+             * loading it cannot be what evicts the value. */
+            if (vrc_in != i->b)
+                x86_vload_slot(text, 0, sd[i->b]);
+            if (in_reg(i->a)) {
+                base = g_loc[i->a];
+            } else {
+                cg_load(text, sd, i->a, 8, 0, 8);
+                base = REG_RAX;
+            }
+            x86_vstore_base(text, base, 0, 0);
+            rc_vreg = -1;
+            vrc_vreg = i->b;     /* the stored value is still in xmm0 */
+            break;
+        }
+        case IR_VBIN:
+            if (vrc_in != i->a)
+                x86_vload_slot(text, 0, sd[i->a]);
+            if (i->imm == '<' || i->imm == '>')
+                x86_vshift_imm(text, 0, i->imm == '<', i->sign, i->size,
+                               i->c);
+            else
+                x86_vbin_slot(text, 0, (int)i->imm, i->size, sd[i->b]);
+            if (!vec_keep(fn, n, usecnt, i->dst))
+                x86_vstore_slot(text, sd[i->dst], 0);
+            vrc_vreg = i->dst;
+            break;
+        case IR_VSPLAT:
+            cg_reset();
+            cg_load(text, sd, i->a, i->size, 0, i->size == 8 ? 8 : 4);
+            x86_vmov_xmm_reg(text, 0, REG_RAX, i->size == 8 ? 8 : 4);
+            /* 0x00 repeats lane 0 across all four; 0x44 repeats the low
+             * QUADword, which is the same thing at eight bytes a lane. */
+            x86_vshufd(text, 0, 0, i->size == 8 ? 0x44 : 0x00);
+            rc_vreg = -1;
+            if (!vec_keep(fn, n, usecnt, i->dst))
+                x86_vstore_slot(text, sd[i->dst], 0);
+            vrc_vreg = i->dst;
+            break;
+        case IR_VREDADD:
+            /* Fold the vector against a permuted copy of itself, halving
+             * the live lanes each time, until lane 0 holds the sum. */
+            cg_reset();
+            if (vrc_in != i->a)
+                x86_vload_slot(text, 0, sd[i->a]);
+            x86_vshufd(text, 1, 0, 0x4e);          /* swap the 64-bit halves */
+            x86_vbin_rr(text, 0, 1, '+', i->size);
+            if (i->size == 4) {
+                x86_vshufd(text, 1, 0, 0xb1);      /* and the 32-bit pairs */
+                x86_vbin_rr(text, 0, 1, '+', 4);
+            }
+            x86_vmov_reg_xmm(text, REG_RAX, 0, i->size == 8 ? 8 : 4);
+            cg_store(text, sd, i->dst, i->w);
+            break;
         case IR_CONST:
             /* Register-resident dest: materialise the constant straight in its
              * register (`xor D,D` for zero, else `mov $imm,D`), no RAX detour and

@@ -37,6 +37,11 @@ int ra_ins_def(const struct ir_ins *in)
     case IR_STVAR:            /* the local written */
     case IR_CALL:             /* always stores a (possibly-unused) result temp */
     case IR_LABELADDR:        /* dst = &&label */
+    /* A vector result is a 16-byte value in a slot, never a register the
+     * integer allocator hands out -- but it IS a definition, and
+     * liveness has to know that or the temp it overwrites looks live
+     * across it. */
+    case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VREDADD:
         return in->dst;
     default:
         return -1;            /* STORE, RET, LABEL, JMP, branches, MEMCPY, ... */
@@ -82,11 +87,14 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
         case IR_SQRT:
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
         case IR_ADDR:
+        case IR_VLOAD:            /* the ADDRESS read, an integer temp */
+        case IR_VSPLAT: case IR_VREDADD:
             USE(s->a); break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
         case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
         case IR_XCHG: case IR_XADD: case IR_ARMW:
+        case IR_VSTORE: case IR_VBIN:
             USE(s->a); USE(s->b); break;
         case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
             USE(s->a); USE(s->b); USE(s->c); break;

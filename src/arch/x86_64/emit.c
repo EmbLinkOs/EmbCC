@@ -1270,3 +1270,160 @@ void x86_call_r11(struct code *c)
     code_byte(c, 0xff); /* call r/m64: /2 */
     code_byte(c, 0xd3);
 }
+
+/* ---- 128-bit vectors (SSE2) ----------------------------------------------
+ *
+ * SSE2 and nothing above it, because every x86-64 has SSE2 by
+ * definition: a vector instruction here needs no feature test, no
+ * run-time dispatch and no fallback path. That is also why there is no
+ * packed 32-bit multiply below -- `pmulld` is SSE4.1, and the
+ * vectorizer turns a multiply by a constant into shifts and adds rather
+ * than emit an instruction an old machine would fault on.
+ *
+ * A vector temp lives in a 16-byte frame slot (the `wide` map, as a long
+ * double does), and every operation works in xmm0 against a slot, which
+ * is the same shape the scalar float path already uses. */
+
+/* movdqu xmm, [base+disp] / movdqu [base+disp], xmm. Unaligned, because
+ * the address comes from the program (&a[i] for any i), not from us. */
+void x86_vload_base(struct code *c, int xmm, int base, int disp)
+{
+    code_byte(c, 0xf3);
+    rex_rb(c, 0, xmm, base);
+    code_byte(c, 0x0f); code_byte(c, 0x6f);
+    modrm_base(c, xmm, base, disp);
+}
+
+void x86_vstore_base(struct code *c, int base, int disp, int xmm)
+{
+    code_byte(c, 0xf3);
+    rex_rb(c, 0, xmm, base);
+    code_byte(c, 0x0f); code_byte(c, 0x7f);
+    modrm_base(c, xmm, base, disp);
+}
+
+/* The same against a frame slot, which we align to 16, so movdqa. */
+void x86_vload_slot(struct code *c, int xmm, int disp)
+{
+    code_byte(c, 0x66);
+    code_byte(c, 0x0f); code_byte(c, 0x6f);
+    modrm_rbp(c, xmm, disp);
+}
+
+void x86_vstore_slot(struct code *c, int disp, int xmm)
+{
+    code_byte(c, 0x66);
+    code_byte(c, 0x0f); code_byte(c, 0x7f);
+    modrm_rbp(c, xmm, disp);
+}
+
+/* xmm <op>= [rbp+disp], lane by lane at `esize` bytes. */
+void x86_vbin_slot(struct code *c, int xmm, int op, int esize, int disp)
+{
+    int opcode;
+    switch (op) {
+    case '+':
+        opcode = esize == 1 ? 0xfc : esize == 2 ? 0xfd
+               : esize == 4 ? 0xfe : 0xd4;          /* paddb/w/d/q */
+        break;
+    case '-':
+        opcode = esize == 1 ? 0xf8 : esize == 2 ? 0xf9
+               : esize == 4 ? 0xfa : 0xfb;          /* psubb/w/d/q */
+        break;
+    case '&': opcode = 0xdb; break;                 /* pand */
+    case '|': opcode = 0xeb; break;                 /* por */
+    case '^': opcode = 0xef; break;                 /* pxor */
+    default:
+        internal_error("no SSE2 packed encoding for '%c'", op);
+    }
+    code_byte(c, 0x66);
+    code_byte(c, 0x0f); code_byte(c, (unsigned)opcode);
+    modrm_rbp(c, xmm, disp);
+}
+
+/* xmm <<= imm / >>= imm, lane by lane. `arith` picks psra over psrl;
+ * SSE2 has no arithmetic 64-bit shift, so the vectorizer does not ask. */
+void x86_vshift_imm(struct code *c, int xmm, int left, int arith, int esize,
+                    int imm)
+{
+    int grp = esize == 2 ? 0x71 : esize == 4 ? 0x72 : 0x73;
+    int ext = left ? 6 : arith ? 4 : 2;
+    /* Only a RIGHT shift can be arithmetic; `arith` says nothing about a
+     * left one, and reading it there refused a perfectly good psllq. */
+    if (!left && arith && esize == 8)
+        internal_error("SSE2 has no arithmetic 64-bit packed shift");
+    if (esize != 2 && esize != 4 && esize != 8)
+        internal_error("no packed shift for %d-byte lanes", esize);
+    code_byte(c, 0x66);
+    if (xmm & 8) code_byte(c, 0x41);
+    code_byte(c, 0x0f); code_byte(c, (unsigned)grp);
+    code_byte(c, (unsigned)(0xc0 | (ext << 3) | (xmm & 7)));
+    code_byte(c, (unsigned)(imm & 0xff));
+}
+
+/* xmm = xmm register-to-register (movdqa xmm, xmm). */
+void x86_vmov_rr(struct code *c, int dst, int src)
+{
+    code_byte(c, 0x66);
+    if ((dst & 8) || (src & 8))
+        code_byte(c, (unsigned)(0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0)));
+    code_byte(c, 0x0f); code_byte(c, 0x6f);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
+}
+
+/* pshufd xmm_dst, xmm_src, imm8 -- the lane permute both the splat and
+ * the reduction are built from. */
+void x86_vshufd(struct code *c, int dst, int src, int imm)
+{
+    code_byte(c, 0x66);
+    if ((dst & 8) || (src & 8))
+        code_byte(c, (unsigned)(0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0)));
+    code_byte(c, 0x0f); code_byte(c, 0x70);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
+    code_byte(c, (unsigned)(imm & 0xff));
+}
+
+/* movd/movq xmm, r  and  movd/movq r, xmm. */
+void x86_vmov_xmm_reg(struct code *c, int xmm, int reg, int w)
+{
+    code_byte(c, 0x66);
+    rex_rb(c, w == 8 ? 1 : 0, xmm, reg);
+    code_byte(c, 0x0f); code_byte(c, 0x6e);
+    code_byte(c, (unsigned)(0xc0 | ((xmm & 7) << 3) | (reg & 7)));
+}
+
+void x86_vmov_reg_xmm(struct code *c, int reg, int xmm, int w)
+{
+    code_byte(c, 0x66);
+    rex_rb(c, w == 8 ? 1 : 0, xmm, reg);
+    code_byte(c, 0x0f); code_byte(c, 0x7e);
+    code_byte(c, (unsigned)(0xc0 | ((xmm & 7) << 3) | (reg & 7)));
+}
+
+/* The register-to-register form of the packed ALU, which the horizontal
+ * reduction needs: it folds a vector against a permuted copy of itself,
+ * and the copy is in a register, not a slot. */
+void x86_vbin_rr(struct code *c, int dst, int src, int op, int esize)
+{
+    int opcode;
+    switch (op) {
+    case '+':
+        opcode = esize == 1 ? 0xfc : esize == 2 ? 0xfd
+               : esize == 4 ? 0xfe : 0xd4;
+        break;
+    case '-':
+        opcode = esize == 1 ? 0xf8 : esize == 2 ? 0xf9
+               : esize == 4 ? 0xfa : 0xfb;
+        break;
+    case '&': opcode = 0xdb; break;
+    case '|': opcode = 0xeb; break;
+    case '^': opcode = 0xef; break;
+    default:
+        internal_error("no SSE2 packed encoding for '%c'", op);
+    }
+    code_byte(c, 0x66);
+    if ((dst & 8) || (src & 8))
+        code_byte(c, (unsigned)(0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0)));
+    code_byte(c, 0x0f); code_byte(c, (unsigned)opcode);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
+}
