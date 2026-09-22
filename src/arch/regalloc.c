@@ -42,6 +42,7 @@ int ra_ins_def(const struct ir_ins *in)
      * liveness has to know that or the temp it overwrites looks live
      * across it. */
     case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VREDADD:
+    case IR_VWIDEN:
         return in->dst;
     default:
         return -1;            /* STORE, RET, LABEL, JMP, branches, MEMCPY, ... */
@@ -88,7 +89,7 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
         case IR_ADDR:
         case IR_VLOAD:            /* the ADDRESS read, an integer temp */
-        case IR_VSPLAT: case IR_VREDADD:
+        case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
             USE(s->a); break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:

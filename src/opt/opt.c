@@ -34,6 +34,7 @@ static int writes_temp(enum ir_op op)
     case IR_FRAMEADDR: case IR_ALLOCA: case IR_SPSAVE:
     /* A vector result is a temp like any other, 16 bytes wide. */
     case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VREDADD:
+    case IR_VWIDEN:
         return 1;
     default:
         return 0;
@@ -121,7 +122,7 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
         if (i->b >= 0)
             cb(&i->b, ctx);
         break;
-    case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD:
+    case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
         cb(&i->a, ctx);
         break;
     case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
@@ -2276,6 +2277,8 @@ struct vecloop {
     int red_add;       /* `next = acc + <a vector>` */
     int red_copy;      /* `acc = mov next`, the phi copy at the latch */
     int red_vec;       /* the vector operand being summed */
+    int red_ext;       /* a widening sum: the IR_EXT between load and add,
+                        * and then red_vec is the NARROW vector it reads */
     int lo, hi;        /* the loop's instruction range, [lo, hi) */
     int header;        /* its first block */
 };
@@ -2859,6 +2862,14 @@ static int vectorize_one(struct ir_func *fn)
                 if (i->op == IR_MOV && i->dst >= 0 && i->dst < fn->nvregs &&
                     d.cnt[i->dst] == 2)
                     continue;
+                /* Likewise a widening of a vector: it has no single
+                 * lane-wise form -- four narrow lanes become two wide
+                 * ones, so one of these is TWO vectors -- and the
+                 * reduction detector is what knows whether that is
+                 * wanted. Refusing it here refused every `long s +=
+                 * a[i]` over an int array before anything looked. */
+                if (i->op == IR_EXT)
+                    continue;
                 struct opnds o;
                 value_opnds(i, &o);
                 int any = 0;
@@ -2923,12 +2934,17 @@ static int vectorize_one(struct ir_func *fn)
          * bare load is marked, so a reduction over anything at all was
          * missed and the whole loop refused as "not lane-wise". */
         L.red_acc = L.red_next = L.red_add = L.red_copy = L.red_vec = -1;
+        L.red_ext = -1;
         for (int n = L.lo; n < L.hi && ok; n++) {
             struct ir_ins *i = &fn->ins[n];
             if (i->op != IR_MOV || i->dst == L.iv || i->dst < 0)
                 continue;
             int acc = i->dst, nxt = i->a;
-            if (nxt < 0 || nxt >= fn->nvregs || d.cnt[nxt] != 1 || !vec[nxt])
+            /* Not `vec[nxt]`: in a WIDENING sum neither the extension
+             * nor the add is marked (the fixpoint skips the extension
+             * on purpose), so the condition that matters is on the
+             * operand being summed, checked below. */
+            if (nxt < 0 || nxt >= fn->nvregs || d.cnt[nxt] != 1)
                 continue;
             int an = d.ins[nxt];
             if (an < L.lo || an >= L.hi)
@@ -2938,13 +2954,36 @@ static int vectorize_one(struct ir_func *fn)
             if (ad->op != IR_ADD || const_b(fn, &d, ad, &junk))
                 continue;
             int other = ad->a == acc ? ad->b : ad->b == acc ? ad->a : -1;
-            if (other < 0 || other >= fn->nvregs || !vec[other])
+            if (other < 0 || other >= fn->nvregs)
                 continue;
-            if (ad->w != L.esize || ad->flt)
-                continue;               /* a widening sum needs more */
+            int widen_ext = -1, rvec = other;
+            if (ad->flt)
+                continue;
+            if (ad->w == L.esize) {
+                if (!vec[other])
+                    continue;           /* summing something that is not a
+                                         * vector at all */
+            } else {
+                /* A widening sum: `long s += a[i]` over an int array.
+                 * The operand is an EXT of the loaded vector, and the
+                 * accumulator is twice the element width. */
+                if (ad->w != 2 * L.esize || L.esize != 4)
+                    continue;
+                if (other < 0 || other >= fn->nvregs || d.cnt[other] != 1)
+                    continue;
+                int en = d.ins[other];
+                if (en < L.lo || en >= L.hi || fn->ins[en].op != IR_EXT)
+                    continue;
+                if (fn->ins[en].size != L.esize || fn->ins[en].w != ad->w)
+                    continue;
+                int src = fn->ins[en].a;
+                if (src < 0 || src >= fn->nvregs || !vec[src])
+                    continue;
+                widen_ext = en; rvec = src;
+            }
             if (L.red_acc >= 0) { ok = 0; break; }   /* one is enough */
             L.red_acc = acc; L.red_next = nxt; L.red_add = an;
-            L.red_copy = n;  L.red_vec = other;
+            L.red_copy = n;  L.red_vec = rvec; L.red_ext = widen_ext;
             /* The running total is NOT a vector value -- it is a scalar
              * carried across iterations that happens to be computed
              * from one. Unmarking it is what stops the escape check
@@ -2962,6 +3001,12 @@ static int vectorize_one(struct ir_func *fn)
                 if (ins_reads(&fn->ins[n], L.red_acc) ||
                     ins_reads(&fn->ins[n], L.red_next))
                     ok = 0;
+            }
+            if (L.red_ext >= 0) {
+                int w = def_target(&fn->ins[L.red_ext]);
+                for (int n = 0; n < fn->nins && ok; n++)
+                    if (n != L.red_add && ins_reads(&fn->ins[n], w))
+                        ok = 0;     /* the widened value feeds only the sum */
             }
             for (int n = 0; n < fn->nins && ok; n++)
                 if ((n < L.lo || n >= L.hi) && ins_reads(&fn->ins[n], L.red_next))
@@ -3043,8 +3088,11 @@ static int vectorize_one(struct ir_func *fn)
             if (t < 0 || t >= fn->nvregs || t == L.iv || t == L.red_acc)
                 continue;
             for (int m = 0; m < fn->nins && ok; m++)
-                if ((m < L.lo || m >= L.hi) && ins_reads(&fn->ins[m], t))
+                if ((m < L.lo || m >= L.hi) && ins_reads(&fn->ins[m], t)) {
+                    VDBG("h=%d temp %%%d (def at %d) read at %d; iv=%%%d"
+                         " acc=%%%d\n", h, t, n, m, L.iv, L.red_acc);
                     ok = 0;
+                }
         }
         if (!ok) {
             VDBG("h=%d a value escapes the loop\n", h);
@@ -3060,6 +3108,7 @@ static int vectorize_one(struct ir_func *fn)
             int inside = n >= L.lo && n < L.hi;
             int t = def_target(i);
             int consumer = inside && (i->op == IR_STORE || n == L.red_add ||
+                                      n == L.red_ext ||
                                       (t >= 0 && t < fn->nvregs && vec[t]));
             if (consumer)
                 continue;
@@ -3070,6 +3119,10 @@ static int vectorize_one(struct ir_func *fn)
         if (!ok) { VDBG("h=%d a vector value escapes\n", h); free(vec); continue; }
 
         /* ---- rewrite ------------------------------------------------ */
+        if (L.bound_reg >= 0 && L.red_ext >= 0) {
+            VDBG("h=%d a widening sum with a runtime count\n", h);
+            free(vec); continue;        /* the copy path does not widen */
+        }
         if (L.bound_reg >= 0) {
             /* A runtime count needs a remainder, so the loop is copied
              * rather than rewritten in place. */
@@ -3091,9 +3144,16 @@ static int vectorize_one(struct ir_func *fn)
         int *newpos = fn->var_scope_lo
             ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
         int vfk = fn->nvregs++;      /* the new induction step, VF */
-        int vacc = -1, vzero = -1, redtmp = -1;
+        int vacc = -1, vzero = -1, redtmp = -1, vacc2 = -1, wlo = -1, whi = -1;
+        int wsize = L.esize;            /* the accumulator's lane width */
         if (L.red_acc >= 0) {
             vzero = fn->nvregs++; vacc = fn->nvregs++; redtmp = fn->nvregs++;
+            if (L.red_ext >= 0) {
+                /* A widening sum needs TWO accumulators: one load's four
+                 * narrow lanes become two wide ones twice over. */
+                vacc2 = fn->nvregs++; wlo = fn->nvregs++; whi = fn->nvregs++;
+                wsize = L.esize * 2;
+            }
         }
         for (int n = 0; n < fn->nins; n++) {
             if (n == L.lo) {
@@ -3110,14 +3170,19 @@ static int vectorize_one(struct ir_func *fn)
                      * re-zeroed on every pass of the outer one. */
                     struct ir_ins *z = ib_push(&nb);
                     z->op = IR_CONST; z->dst = vzero;
-                    z->w = L.esize; z->imm = 0;
+                    z->w = wsize; z->imm = 0;
                     z->line = fn->ins[L.red_add].line;
                     z->col = fn->ins[L.red_add].col;
                     struct ir_ins *sp = ib_push(&nb);
                     sp->op = IR_VSPLAT; sp->dst = vacc; sp->a = vzero;
-                    sp->size = L.esize; sp->w = 8;
-                    sp->line = fn->ins[L.red_add].line;
-                    sp->col = fn->ins[L.red_add].col;
+                    sp->size = wsize; sp->w = 8;
+                    sp->line = z->line; sp->col = z->col;
+                    if (vacc2 >= 0) {
+                        struct ir_ins *s2 = ib_push(&nb);
+                        s2->op = IR_VSPLAT; s2->dst = vacc2; s2->a = vzero;
+                        s2->size = wsize; s2->w = 8;
+                        s2->line = z->line; s2->col = z->col;
+                    }
                 }
                 /* Before the header label: broadcast every constant the
                  * body needs, once. The back edge jumps past this, the
@@ -3150,11 +3215,38 @@ static int vectorize_one(struct ir_func *fn)
 
             if (n == L.red_copy)
                 continue;               /* the scalar carry is gone */
+            if (n == L.red_ext)
+                continue;   /* emitted with the add, so each half goes
+                             * straight from xmm0 into its accumulator
+                             * instead of out to a slot and back */
             if (n == L.red_add) {       /* vacc += the loaded vector */
+                if (vacc2 >= 0) {
+                    /* widen a half, add it, then the other: each value
+                     * is consumed by the instruction after it. */
+                    for (int half = 0; half < 2; half++) {
+                        struct ir_ins *w2 = ib_push(&nb);
+                        memset(w2, 0, sizeof *w2);
+                        w2->op = IR_VWIDEN; w2->dst = half ? whi : wlo;
+                        w2->a = L.red_vec; w2->c = half;
+                        w2->size = L.esize;
+                        w2->sign = fn->ins[L.red_ext].sign; w2->w = 8;
+                        w2->line = i->line; w2->col = i->col;
+                        struct ir_ins *v2 = ib_push(&nb);
+                        memset(v2, 0, sizeof *v2);
+                        v2->op = IR_VBIN;
+                        v2->dst = half ? vacc2 : vacc;
+                        v2->a = half ? vacc2 : vacc;
+                        v2->b = half ? whi : wlo;
+                        v2->imm = '+'; v2->size = wsize; v2->w = 8;
+                        v2->line = i->line; v2->col = i->col;
+                    }
+                    continue;
+                }
                 struct ir_ins *v = ib_push(&nb);
                 memset(v, 0, sizeof *v);
-                v->op = IR_VBIN; v->dst = vacc; v->a = vacc; v->b = L.red_vec;
-                v->imm = '+'; v->size = L.esize; v->w = 8;
+                v->op = IR_VBIN; v->dst = vacc; v->a = vacc;
+                v->b = L.red_vec;
+                v->imm = '+'; v->size = wsize; v->w = 8;
                 v->line = i->line; v->col = i->col;
                 continue;
             }
@@ -3239,10 +3331,18 @@ static int vectorize_one(struct ir_func *fn)
                  * follows, so it runs on the way out of the loop and is
                  * skipped by the guard's jump straight to the exit --
                  * the preheader trick, mirrored. */
+                if (vacc2 >= 0) {       /* the two halves, added lane-wise */
+                    struct ir_ins *c2 = ib_push(&nb);
+                    memset(c2, 0, sizeof *c2);
+                    c2->op = IR_VBIN; c2->dst = vacc; c2->a = vacc;
+                    c2->b = vacc2; c2->imm = '+'; c2->size = wsize; c2->w = 8;
+                    c2->line = fn->ins[L.red_add].line;
+                    c2->col = fn->ins[L.red_add].col;
+                }
                 struct ir_ins *r = ib_push(&nb);
                 memset(r, 0, sizeof *r);
                 r->op = IR_VREDADD; r->dst = redtmp; r->a = vacc;
-                r->size = L.esize; r->w = fn->ins[L.red_add].w;
+                r->size = wsize; r->w = fn->ins[L.red_add].w;
                 r->line = fn->ins[L.red_add].line;
                 r->col = fn->ins[L.red_add].col;
                 struct ir_ins *ad = ib_push(&nb);

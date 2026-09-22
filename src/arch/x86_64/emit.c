@@ -1427,3 +1427,25 @@ void x86_vbin_rr(struct code *c, int dst, int src, int op, int esize)
     code_byte(c, 0x0f); code_byte(c, (unsigned)opcode);
     code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
 }
+
+/* punpck{l,h}{bw,wd,dq}: interleave the low (or high) half of two
+ * vectors' lanes. With the second operand holding each lane's extension
+ * bits -- all sign bits, or all zero -- this is how SSE2 widens: four
+ * int32 lanes become two int64 ones, a half at a time. SSE4.1's
+ * pmovsxdq would do it in one instruction, and is not SSE2. */
+void x86_vunpck(struct code *c, int dst, int src, int high, int esize)
+{
+    int opcode;
+    switch (esize) {
+    case 1: opcode = high ? 0x68 : 0x60; break;   /* punpck?bw */
+    case 2: opcode = high ? 0x69 : 0x61; break;   /* punpck?wd */
+    case 4: opcode = high ? 0x6a : 0x62; break;   /* punpck?dq */
+    default:
+        internal_error("no packed unpack for %d-byte lanes", esize);
+    }
+    code_byte(c, 0x66);
+    if ((dst & 8) || (src & 8))
+        code_byte(c, (unsigned)(0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0)));
+    code_byte(c, 0x0f); code_byte(c, (unsigned)opcode);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
+}

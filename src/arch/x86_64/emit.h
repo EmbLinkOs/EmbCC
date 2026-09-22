@@ -175,3 +175,4 @@ void x86_vshufd(struct code *c, int dst, int src, int imm);
 void x86_vmov_xmm_reg(struct code *c, int xmm, int reg, int w);
 void x86_vmov_reg_xmm(struct code *c, int reg, int xmm, int w);
 void x86_vbin_rr(struct code *c, int dst, int src, int op, int esize);
+void x86_vunpck(struct code *c, int dst, int src, int high, int esize);

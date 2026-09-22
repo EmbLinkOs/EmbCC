@@ -73,6 +73,7 @@ const char *ir_opname(enum ir_op op)
         [IR_LANDING] = "landing",
         [IR_VLOAD] = "vload",   [IR_VSTORE] = "vstore", [IR_VBIN] = "vbin",
         [IR_VSPLAT] = "vsplat", [IR_VREDADD] = "vredadd",
+        [IR_VWIDEN] = "vwiden",
     };
     if ((int)op < 0 || (int)op >= IR_OPCOUNT || !n[op])
         return "op?";
@@ -326,6 +327,11 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
     case IR_VREDADD:
         ob_fmt(b, "%%%d = vredadd.%dx%d %%%d", i->dst, 16 / i->size,
                i->size, i->a);
+        break;
+    case IR_VWIDEN:
+        ob_fmt(b, "%%%d = vwiden.%s.%dx%d%s %%%d", i->dst,
+               i->c ? "hi" : "lo", 16 / i->size, i->size,
+               i->sign ? "s" : "", i->a);
         break;
     case IR_VA_START:
         ob_fmt(b, "va_start [%%%d]", i->a);

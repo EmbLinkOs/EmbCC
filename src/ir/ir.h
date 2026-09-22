@@ -124,6 +124,12 @@ enum ir_op {
     IR_VSPLAT, /* dst = every lane set to scalar a     (size: element) */
     IR_VREDADD,/* dst = the sum of a's lanes           (size: element;
                 * w: the scalar result's width) */
+    IR_VWIDEN, /* dst = half of a's lanes, each widened to twice its
+                * size   (size: the SOURCE element width; `c`: 0 the low
+                * half, 1 the high; `sign`: sign- rather than
+                * zero-extend). Four int32 lanes become two int64 ones,
+                * which is why it takes a half at a time -- and why a
+                * widening sum needs two accumulators. */
 
     IR_OPCOUNT    /* not an opcode: the table size, so print and parse can
                    * agree on how many there are */

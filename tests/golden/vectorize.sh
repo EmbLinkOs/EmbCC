@@ -51,15 +51,18 @@ void f4(void) { for (int i = 0; i < 512;  i++) c[i] = c[i] * 8 - 5; }
 void f5(void) { for (int i = 0; i < 1024; i++) a[i] = (a[i] & 0xff) | 0x300; }
 int  f6(void) { int s = 0; for (int i = 0; i < 1024; i++) s += a[i]; return s; }
 long f7(void) { long s = 0; for (int i = 0; i < 512; i++) s += c[i]; return s; }
+/* A WIDENING sum: four int32 lanes accumulating into two int64 ones,
+ * which SSE2 reaches by unpacking each half against its sign bits. */
+long f8(void) { long s = 0; for (int i = 0; i < 1024; i++) s += a[i]; return s; }
 EOF
 n=$(nvec "$out/yes.c")
-[ "$n" = 7 ] || { echo "FAIL: 7 loops should vectorize, $n did:"
+[ "$n" = 8 ] || { echo "FAIL: 8 loops should vectorize, $n did:"
                   cat "$out/r.txt"; exit 1; }
 r=$(grep -c 'sum reduction' "$out/r.txt" || true)
-[ "$r" = 2 ] || { echo "FAIL: 2 of them are sum reductions, $r were"
+[ "$r" = 3 ] || { echo "FAIL: 3 of them are sum reductions, $r were"
                   cat "$out/r.txt"; exit 1; }
-echo "seven loop shapes vectorize: multiply-add, two arrays, shift-xor,
-64-bit lanes, mask-or, and two sum reductions"
+echo "eight loop shapes vectorize: multiply-add, two arrays, shift-xor,
+64-bit lanes, mask-or, and three sum reductions including a widening one"
 
 # ---- 2. and not on the shapes it must refuse ---------------------------
 refuse() {                      # refuse NAME BODY WHY
@@ -108,9 +111,6 @@ refuse "per-lane shift" \
 refuse "backwards" \
   'void f(void) { for (int i = 1024; i > 0; i--) a[i-1] = a[i-1] + 1; }' \
   "the induction variable does not start at zero and count up"
-refuse "widening reduction" \
-  'long f(void) { long s = 0; for (int i = 0; i < 1024; i++) s += a[i]; return s; }' \
-  "a long accumulator over an int array needs unpacking, which is not built"
 refuse "product reduction" \
   'int f(void) { int s = 1; for (int i = 0; i < 1024; i++) s *= a[i]; return s; }' \
   "there is no packed 32-bit multiply in SSE2"
@@ -120,12 +120,12 @@ refuse "accumulator read inside" \
 refuse "strided" \
   'void f(void) { for (int i = 0; i < 512; i++) a[i*2] = a[i*2] + 1; }' \
   "lane k is not element i+k when the stride is two"
-echo "fifteen shapes are refused, each for a reason that would be a wrong
+echo "fourteen shapes are refused, each for a reason that would be a wrong
 answer: an odd trip count, a stored index, a stored constant, a divide,
-a general multiply, a per-lane shift, a widening reduction, a product
-reduction, an accumulator read inside the loop, a countdown, a stride of
-two, two pointer bases that could overlap, a call, an escaping value,
-and a volatile access"
+a general multiply, a per-lane shift, a product reduction, an
+accumulator read inside the loop, a countdown, a stride of two, two
+pointer bases that could overlap, a call, an escaping value, and a
+volatile access"
 
 # ---- 3. a runtime trip count, and a pointer base -----------------------
 #
@@ -190,6 +190,13 @@ int main(void)
     { int s = -991; for (int i = 0; i < 1024; i++) s += b[i] & 0xfff;
       h = h * 31 + (unsigned)s; }
     { long s = 5;   for (int i = 0; i < 512; i++)  s += c[i];
+      h = h * 31 + (unsigned long)s; }
+    /* Widening sums. The values straddle the 32-bit range so a sum kept
+     * in int lanes would wrap where a long one must not, and the signs
+     * alternate so a zero-extend where a sign-extend belongs shows up. */
+    { long s = 0; for (int i = 0; i < 1024; i++) s += a[i];
+      h = h * 31 + (unsigned long)s; }
+    { long s = -7; for (int i = 0; i < 1024; i++) s += b[i];
       h = h * 31 + (unsigned long)s; }
     /* Runtime counts, every edge around a multiple of four, at three
      * starting offsets so the vector accesses are not all aligned. */

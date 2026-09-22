@@ -273,7 +273,7 @@ static int wide_def(const struct ir_ins *i)
     /* A vector result is 16 bytes, so it wants the same 16-aligned slot
      * a long double gets and the same exclusion from the integer
      * register allocator. `wide` is already exactly that map. */
-    case IR_VLOAD: case IR_VBIN: case IR_VSPLAT:
+    case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VWIDEN:
         return 1;
     default:
         return 0;
@@ -622,7 +622,7 @@ static void count_vreg_uses(struct ir_func *fn, int *cnt)
         case IR_ADDR: case IR_STVAR: case IR_VA_START:
         case IR_RET: case IR_BRZ: case IR_BRNZ:
         case IR_ALLOCA: case IR_SPRESTORE:
-        case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD:
+        case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
             UZ(s->a); break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
@@ -727,7 +727,17 @@ static const int *g_loc;      /* per-vreg physical register, or -1; NULL when of
  * body spends eight movdqa shuttling values it already had. */
 static int vrc_vreg = -1;
 
-static void cg_reset(void) { rc_vreg = -1; rc_zx = 0; vrc_vreg = -1; }
+/* Which vector xmm2/xmm3 hold the source and extension bits OF. Widening
+ * takes one half at a time, so the same vector is widened twice in a
+ * row; without this each half reloaded it and recomputed the sign bits,
+ * which is four instructions of the eleven. */
+static int vw_src = -1;
+
+static void cg_reset(void) { rc_vreg = -1; rc_zx = 0; vrc_vreg = -1;
+                             vw_src = -1; }
+
+static const int *g_vacc;         /* per-vreg xmm register, or -1 */
+static int vacc_of(int v) { return g_vacc && v >= 0 ? g_vacc[v] : -1; }
 
 /* Does this instruction read vector temp `v` FROM XMM0 -- as opposed to
  * from its slot?
@@ -741,11 +751,117 @@ static void cg_reset(void) { rc_vreg = -1; rc_zx = 0; vrc_vreg = -1; }
 static int vec_reads_xmm(const struct ir_ins *i, int v)
 {
     switch (i->op) {
-    case IR_VBIN:    return i->a == v && i->b != v;
+    case IR_VBIN:
+        /* An accumulator update takes its OTHER operand from xmm0 when
+         * it is sitting there, because the accumulator itself is in a
+         * register and the add can be register-to-register. */
+        if (i->a == i->dst && vacc_of(i->dst) >= 0)
+            return i->b == v;
+        return i->a == v && i->b != v;
     case IR_VSTORE:  return i->b == v;
-    case IR_VREDADD: return i->a == v;
+    case IR_VREDADD: case IR_VWIDEN: return i->a == v;
     default:         return 0;
     }
+}
+
+/* ---- vector accumulators in registers -------------------------------
+ *
+ * Everything else here works in xmm0 against 16-byte slots, which is
+ * fine for a chain of values that die immediately. An ACCUMULATOR does
+ * not: it is written in the preheader and updated every iteration, so
+ * it crosses the back edge, so it cannot stay in xmm0 -- and the update
+ * costs a load, an add and a store where it should cost an add.
+ *
+ * A widening sum needs two of them at once, and paid so much for it
+ * that vectorizing `long s += a[i]` came out SLOWER than the scalar
+ * loop: 0.440 against 0.255. Eight movdqa an iteration shuttling values
+ * the registers already held.
+ *
+ * So an accumulator gets a register of its own for the whole function.
+ * It is recognisable without any analysis: every definition is either
+ * the splat that zeroes it or an add INTO ITSELF, and every read is one
+ * of those adds or the final fold. A temp shaped like that never needs
+ * to be anywhere but its register. xmm0 and xmm1 stay scratch; there
+ * are four accumulators' worth after them, which is more than the
+ * vectorizer builds. */
+/* xmm0/xmm1 are scratch, xmm2/xmm3 hold the widening cache below, and
+ * accumulators take xmm4 upward. */
+#define VACC_FIRST 4
+#define VACC_N     4
+#define VW_SRC     2      /* the vector being widened */
+#define VW_SIGN    3      /* and its lanes' extension bits */
+
+static int *vacc_regs(struct ir_func *fn)
+{
+    int nv = fn->nvregs ? fn->nvregs : 1;
+    int *reg = xmalloc((size_t)nv * sizeof *reg);
+    char *bad = xcalloc((size_t)nv, 1);
+    for (int v = 0; v < nv; v++)
+        reg[v] = -1;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        int t = i->dst;
+        /* a definition that is not "zero it" or "add into itself" */
+        if (t >= 0 && t < nv && i->op != IR_VSPLAT &&
+            !(i->op == IR_VBIN && i->a == t))
+            bad[t] = 1;
+        /* a read that is not one of those adds or the fold */
+        switch (i->op) {
+        case IR_VBIN:
+            /* Operand b is normally a memory operand, which would mean
+             * the value had to be in its slot -- but a register-resident
+             * one is emitted register-to-register instead, so being read
+             * here does not disqualify it. Operand a does, unless it is
+             * the accumulator updating itself. */
+            if (i->a >= 0 && i->a < nv && i->a != t) bad[i->a] = 1;
+            break;
+        case IR_VREDADD:
+            break;                       /* reading it to fold is fine */
+        default:
+            /* Anything else that so much as mentions it disqualifies it:
+             * the register is the value's only home, so a use this does
+             * not understand would read a stale slot. */
+            if (i->a >= 0 && i->a < nv) bad[i->a] = 1;
+            if (i->b >= 0 && i->b < nv) bad[i->b] = 1;
+            if (i->c >= 0 && i->c < nv) bad[i->c] = 1;
+            if (i->op == IR_CALL)
+                for (int k = 0; k < i->nargs; k++)
+                    if (i->argv[k].vreg >= 0 && i->argv[k].vreg < nv)
+                        bad[i->argv[k].vreg] = 1;
+            if (i->op == IR_ASM && i->asm_ir) {
+                for (int k = 0; k < i->asm_ir->nin; k++)
+                    if (i->asm_ir->in[k].temp >= 0 &&
+                        i->asm_ir->in[k].temp < nv)
+                        bad[i->asm_ir->in[k].temp] = 1;
+                for (int k = 0; k < i->asm_ir->nout; k++)
+                    if (i->asm_ir->out[k].temp >= 0 &&
+                        i->asm_ir->out[k].temp < nv)
+                        bad[i->asm_ir->out[k].temp] = 1;
+            }
+            break;
+        }
+    }
+    int next = VACC_FIRST, any = 0;
+    for (int n = 0; n < fn->nins && next < VACC_FIRST + VACC_N; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_VSPLAT || i->dst < 0 || i->dst >= nv)
+            continue;
+        if (bad[i->dst] || reg[i->dst] >= 0)
+            continue;
+        /* it must actually be accumulated into, or it is just a splat */
+        int updated = 0;
+        for (int m = 0; m < fn->nins; m++)
+            if (fn->ins[m].op == IR_VBIN && fn->ins[m].dst == i->dst &&
+                fn->ins[m].a == i->dst)
+                updated = 1;
+        if (!updated)
+            continue;
+        reg[i->dst] = next++;
+        any = 1;
+    }
+    free(bad);
+    if (!any) { free(reg); return NULL; }
+    return reg;
 }
 
 /* May a vector result stay in xmm0 instead of going out to its slot?
@@ -1441,6 +1557,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
     if (g_has_cgoto) { g_regalloc = 0; g_regcache = 0; }
     if (fn->has_i128) { g_regalloc = 0; g_regcache = 0; }   /* (gen_i128) */
     g_wide = cg_wide_vregs(fn);
+    int *vacc = vacc_regs(fn);
+    g_vacc = vacc;
 
     /* -O2: allocate eligible vregs to callee-saved registers first, so the
      * frame can reserve a save slot for each register the allocator uses.
@@ -1786,7 +1904,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * is not one of the vector cases below invalidates it simply by
          * not setting it again. */
         int vrc_in = vrc_vreg;
+        int vw_in = vw_src;
         vrc_vreg = -1;
+        vw_src = -1;
         int ins_start = text->len;
         /* -g: a row where the source line changes. text->len is the .text
          * offset this instruction's code begins at (the switch below emits
@@ -1834,6 +1954,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * allocator never sees it -- which is what makes "operate in
          * xmm0, spill to the slot" correct without a second allocator. */
         case IR_VLOAD: {
+            vw_src = vw_in;   /* xmm2/xmm3 untouched by this */
             int base;
             cg_reset();
             if (in_reg(i->a)) {
@@ -1850,6 +1971,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         }
         case IR_VSTORE: {
+            vw_src = vw_in;   /* xmm2/xmm3 untouched by this */
             int base;
             /* The ADDRESS first when the value is already in xmm0, so
              * loading it cannot be what evicts the value. */
@@ -1867,11 +1989,30 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         }
         case IR_VBIN:
-            if (vrc_in != i->a)
+            vw_src = vw_in;   /* xmm2/xmm3 untouched by this */
+            if (vacc_of(i->dst) >= 0 && i->a == i->dst) {
+                /* acc OP= b, in place: no load, no store. */
+                int R = vacc_of(i->dst), Rb = vacc_of(i->b);
+                if (i->imm == '<' || i->imm == '>')
+                    x86_vshift_imm(text, R, i->imm == '<', i->sign, i->size,
+                                   i->c);
+                else if (Rb >= 0)
+                    x86_vbin_rr(text, R, Rb, (int)i->imm, i->size);
+                else if (vrc_in == i->b)
+                    x86_vbin_rr(text, R, 0, (int)i->imm, i->size);
+                else
+                    x86_vbin_slot(text, R, (int)i->imm, i->size, sd[i->b]);
+                break;
+            }
+            if (vacc_of(i->a) >= 0)
+                x86_vmov_rr(text, 0, vacc_of(i->a));
+            else if (vrc_in != i->a)
                 x86_vload_slot(text, 0, sd[i->a]);
             if (i->imm == '<' || i->imm == '>')
                 x86_vshift_imm(text, 0, i->imm == '<', i->sign, i->size,
                                i->c);
+            else if (vacc_of(i->b) >= 0)
+                x86_vbin_rr(text, 0, vacc_of(i->b), (int)i->imm, i->size);
             else
                 x86_vbin_slot(text, 0, (int)i->imm, i->size, sd[i->b]);
             if (!vec_keep(fn, n, usecnt, i->dst))
@@ -1879,6 +2020,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             vrc_vreg = i->dst;
             break;
         case IR_VSPLAT:
+            vw_src = vw_in;   /* xmm2/xmm3 untouched by this */
             cg_reset();
             cg_load(text, sd, i->a, i->size, 0, i->size == 8 ? 8 : 4);
             x86_vmov_xmm_reg(text, 0, REG_RAX, i->size == 8 ? 8 : 4);
@@ -1886,15 +2028,55 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * QUADword, which is the same thing at eight bytes a lane. */
             x86_vshufd(text, 0, 0, i->size == 8 ? 0x44 : 0x00);
             rc_vreg = -1;
+            if (vacc_of(i->dst) >= 0) {
+                x86_vmov_rr(text, vacc_of(i->dst), 0);
+            } else {
+                if (!vec_keep(fn, n, usecnt, i->dst))
+                    x86_vstore_slot(text, sd[i->dst], 0);
+                vrc_vreg = i->dst;
+            }
+            break;
+        case IR_VWIDEN:
+            /* One half of the lanes, each widened. The extension bits
+             * go in xmm1 -- all sign bits for a signed source, all zero
+             * for unsigned -- and the unpack interleaves them with the
+             * data, so lane k becomes [value, extension] which IS the
+             * wider value. The source is destroyed in xmm0, so the
+             * other half reloads it from its slot; that is why a
+             * widening load has two uses and never stays resident. */
+            if (vw_in != i->a) {
+                /* Fetch the source once and derive its extension bits
+                 * once; the other half reuses both. */
+                if (vacc_of(i->a) >= 0)
+                    x86_vmov_rr(text, VW_SRC, vacc_of(i->a));
+                else if (vrc_in == i->a)
+                    x86_vmov_rr(text, VW_SRC, 0);
+                else
+                    x86_vload_slot(text, VW_SRC, sd[i->a]);
+                if (i->sign) {
+                    x86_vmov_rr(text, VW_SIGN, VW_SRC);
+                    x86_vshift_imm(text, VW_SIGN, 0, 1, i->size,
+                                   i->size * 8 - 1);
+                } else {
+                    x86_vbin_rr(text, VW_SIGN, VW_SIGN, '^', i->size);
+                }
+            }
+            x86_vmov_rr(text, 0, VW_SRC);
+            x86_vunpck(text, 0, VW_SIGN, i->c, i->size);
+            vw_src = i->a;
+            rc_vreg = -1;
             if (!vec_keep(fn, n, usecnt, i->dst))
                 x86_vstore_slot(text, sd[i->dst], 0);
             vrc_vreg = i->dst;
             break;
         case IR_VREDADD:
+            vw_src = vw_in;
             /* Fold the vector against a permuted copy of itself, halving
              * the live lanes each time, until lane 0 holds the sum. */
             cg_reset();
-            if (vrc_in != i->a)
+            if (vacc_of(i->a) >= 0)
+                x86_vmov_rr(text, 0, vacc_of(i->a));
+            else if (vrc_in != i->a)
                 x86_vload_slot(text, 0, sd[i->a]);
             x86_vshufd(text, 1, 0, 0x4e);          /* swap the 64-bit halves */
             x86_vbin_rr(text, 0, 1, '+', i->size);
@@ -3102,6 +3284,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     free(sd);
     free(loc);
     free(usecnt);
+    free(vacc); g_vacc = NULL;
     g_loc = NULL;
     free(g_wide);
     g_wide = NULL;
