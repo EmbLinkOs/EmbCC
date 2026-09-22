@@ -49,12 +49,17 @@ void f2(void) { for (int i = 0; i < 1024; i++) a[i] = a[i] + b[i]; }
 void f3(void) { for (int i = 0; i < 1024; i++) b[i] = (b[i] << 2) ^ 0x1234; }
 void f4(void) { for (int i = 0; i < 512;  i++) c[i] = c[i] * 8 - 5; }
 void f5(void) { for (int i = 0; i < 1024; i++) a[i] = (a[i] & 0xff) | 0x300; }
+int  f6(void) { int s = 0; for (int i = 0; i < 1024; i++) s += a[i]; return s; }
+long f7(void) { long s = 0; for (int i = 0; i < 512; i++) s += c[i]; return s; }
 EOF
 n=$(nvec "$out/yes.c")
-[ "$n" = 5 ] || { echo "FAIL: 5 loops should vectorize, $n did:"
+[ "$n" = 7 ] || { echo "FAIL: 7 loops should vectorize, $n did:"
                   cat "$out/r.txt"; exit 1; }
-echo "five loop shapes vectorize: multiply-add, two arrays, shift-xor,
-64-bit lanes, and mask-or"
+r=$(grep -c 'sum reduction' "$out/r.txt" || true)
+[ "$r" = 2 ] || { echo "FAIL: 2 of them are sum reductions, $r were"
+                  cat "$out/r.txt"; exit 1; }
+echo "seven loop shapes vectorize: multiply-add, two arrays, shift-xor,
+64-bit lanes, mask-or, and two sum reductions"
 
 # ---- 2. and not on the shapes it must refuse ---------------------------
 refuse() {                      # refuse NAME BODY WHY
@@ -97,13 +102,23 @@ refuse "per-lane shift" \
 refuse "backwards" \
   'void f(void) { for (int i = 1024; i > 0; i--) a[i-1] = a[i-1] + 1; }' \
   "the induction variable does not start at zero and count up"
+refuse "widening reduction" \
+  'long f(void) { long s = 0; for (int i = 0; i < 1024; i++) s += a[i]; return s; }' \
+  "a long accumulator over an int array needs unpacking, which is not built"
+refuse "product reduction" \
+  'int f(void) { int s = 1; for (int i = 0; i < 1024; i++) s *= a[i]; return s; }' \
+  "there is no packed 32-bit multiply in SSE2"
+refuse "accumulator read inside" \
+  'int f(void) { int s = 0; for (int i = 0; i < 1024; i++) { s += a[i]; b[i] = s; } return s; }' \
+  "a partial total would be one lane's share, not the running sum"
 refuse "strided" \
   'void f(void) { for (int i = 0; i < 512; i++) a[i*2] = a[i*2] + 1; }' \
   "lane k is not element i+k when the stride is two"
-echo "eleven shapes are refused, each for a reason that would be a wrong
+echo "fourteen shapes are refused, each for a reason that would be a wrong
 answer: an odd trip count, a runtime bound, a pointer base, a stored
 index, a stored constant, a call, a divide, a general multiply, a
-per-lane shift, a countdown, and a stride of two"
+per-lane shift, a widening reduction, a product reduction, an
+accumulator read inside the loop, a countdown, and a stride of two"
 
 # ---- 3. the answers ----------------------------------------------------
 LIBDIR=$EMBCC_ROOT/build/libc/linux-x86_64
@@ -135,6 +150,20 @@ int main(void)
     for (int i = 0; i < 512; i++)  c[i] = c[i] * 8 + 5;
     for (int i = 0; i < 512; i++)  c[i] = c[i] >> 1;   /* unsigned-safe? signed */
     for (int i = 0; i < 1023; i++) odd[i] = odd[i] * 2 + 1;   /* must stay scalar */
+
+    /* Reductions: a zero start, a non-zero start, 64-bit lanes, and one
+     * nested so the inner accumulator is re-zeroed on every outer pass. */
+    { int s = 0;    for (int i = 0; i < 1024; i++) s += a[i];
+      h = h * 31 + (unsigned)s; }
+    { int s = -991; for (int i = 0; i < 1024; i++) s += b[i] & 0xfff;
+      h = h * 31 + (unsigned)s; }
+    { long s = 5;   for (int i = 0; i < 512; i++)  s += c[i];
+      h = h * 31 + (unsigned long)s; }
+    for (int k = 0; k < 3; k++) {
+        int t = 0;
+        for (int i = 0; i < 1024; i++) t += a[i] + k;
+        h = h * 31 + (unsigned)t;
+    }
 
     for (int i = 0; i < 1024; i++) h = h * 31 + (unsigned)a[i];
     for (int i = 0; i < 1024; i++) h = h * 31 + (unsigned)b[i];
@@ -184,9 +213,10 @@ if command -v "$GCC" > /dev/null 2>&1; then
     [ "$(cat "$out/g.out")" = "$prev" ] || {
         echo "FAIL: gcc answers $(cat "$out/g.out"), embcc answers $prev"
         exit 1; }
-    echo "nine vectorized loops and one that must not be agree with gcc and
-across -O0/-O1/-O2, with the guard words either side of every array
-still intact"
+    echo "nine elementwise loops, six reductions (one nested, so its
+accumulator is re-zeroed each outer pass) and one loop that must not
+vectorize agree with gcc and across -O0/-O1/-O2, with the guard words
+either side of every array still intact"
 else
     echo "the answers agree across -O0/-O1/-O2 (no $GCC to compare)"
 fi

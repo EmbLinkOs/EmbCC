@@ -2268,6 +2268,13 @@ struct vecloop {
     int cmp_ins;       /* `c = cmp lt iv, #bound` */
     long bound;        /* the trip count, a constant */
     int esize, vf;
+    /* A sum reduction (`s += a[i]`), or red_acc == -1. The accumulator
+     * becomes VF partial sums, folded to one after the loop. */
+    int red_acc;       /* the accumulator's phi temp */
+    int red_next;      /* what the loop body adds into it */
+    int red_add;       /* `next = acc + <a vector>` */
+    int red_copy;      /* `acc = mov next`, the phi copy at the latch */
+    int red_vec;       /* the vector operand being summed */
     int lo, hi;        /* the loop's instruction range, [lo, hi) */
     int header;        /* its first block */
 };
@@ -2504,6 +2511,63 @@ static int vectorize_one(struct ir_func *fn)
         if (!ok || !L.esize || nmem == 0) {
             VDBG("h=%d memory refs: ok=%d esize=%d n=%d\n", h, ok, L.esize, nmem);
             free(vec); continue; }
+        /* ---- a sum reduction ----------------------------------------
+         *
+         * `s += a[i]` carries a value ACROSS iterations, which nothing
+         * else here is allowed to do. It is vectorizable anyway because
+         * addition is associative: keep VF running sums, one per lane,
+         * and add them together once the loop is done. The lanes are
+         * summed in a different order than the source says, which for
+         * integers changes nothing (it would for floats, which is why
+         * this is integer-only and why gcc needs -ffast-math for them).
+         *
+         * The shape is the induction variable's, one value over: a phi
+         * temp copied at the latch from something the body computed. */
+        L.red_acc = L.red_next = L.red_add = L.red_copy = L.red_vec = -1;
+        for (int n = L.lo; n < L.hi && ok; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_MOV || i->dst == L.iv || i->dst < 0)
+                continue;
+            int acc = i->dst, nxt = i->a;
+            if (nxt < 0 || nxt >= fn->nvregs || d.cnt[nxt] != 1)
+                continue;
+            int an = d.ins[nxt];
+            if (an < L.lo || an >= L.hi)
+                continue;
+            struct ir_ins *ad = &fn->ins[an];
+            long junk;
+            if (ad->op != IR_ADD || const_b(fn, &d, ad, &junk))
+                continue;
+            int other = ad->a == acc ? ad->b : ad->b == acc ? ad->a : -1;
+            if (other < 0 || other >= fn->nvregs || !vec[other])
+                continue;
+            if (ad->w != L.esize || ad->flt)
+                continue;               /* a widening sum needs more */
+            if (L.red_acc >= 0) { ok = 0; break; }   /* one is enough */
+            L.red_acc = acc; L.red_next = nxt; L.red_add = an;
+            L.red_copy = n;  L.red_vec = other;
+        }
+        if (!ok) { VDBG("h=%d more than one reduction\n", h); free(vec); continue; }
+        if (L.red_acc >= 0) {
+            /* The accumulator may be read after the loop -- that is the
+             * point of it -- but inside, only by its own sum. Anything
+             * else reading a partial total would see one lane's share. */
+            for (int n = L.lo; n < L.hi && ok; n++) {
+                if (n == L.red_add || n == L.red_copy)
+                    continue;
+                if (ins_reads(&fn->ins[n], L.red_acc) ||
+                    ins_reads(&fn->ins[n], L.red_next))
+                    ok = 0;
+            }
+            for (int n = 0; n < fn->nins && ok; n++)
+                if ((n < L.lo || n >= L.hi) && ins_reads(&fn->ins[n], L.red_next))
+                    ok = 0;             /* the partial sum must not escape */
+            if (!ok) {
+                VDBG("h=%d the accumulator is read elsewhere\n", h);
+                free(vec); continue;
+            }
+        }
+
         L.vf = VEC_BYTES / L.esize;
         if (L.bound % L.vf != 0) {
             VDBG("h=%d trip %ld not a multiple of %d\n", h, L.bound, L.vf);
@@ -2516,6 +2580,7 @@ static int vectorize_one(struct ir_func *fn)
             for (int n = L.lo; n < L.hi && ok; n++) {
                 struct ir_ins *i = &fn->ins[n];
                 if (i->op == IR_LOAD || i->op == IR_STORE ||
+                    n == L.red_add || n == L.red_copy ||
                     n == L.step_ins || n == L.copy_ins || n == L.cmp_ins ||
                     i->op == IR_LABEL || i->op == IR_JMP ||
                     i->op == IR_BRNZ || i->op == IR_BRZ)
@@ -2595,7 +2660,7 @@ static int vectorize_one(struct ir_func *fn)
             struct ir_ins *i = &fn->ins[n];
             int inside = n >= L.lo && n < L.hi;
             int t = def_target(i);
-            int consumer = inside && (i->op == IR_STORE ||
+            int consumer = inside && (i->op == IR_STORE || n == L.red_add ||
                                       (t >= 0 && t < fn->nvregs && vec[t]));
             if (consumer)
                 continue;
@@ -2610,6 +2675,10 @@ static int vectorize_one(struct ir_func *fn)
         int *newpos = fn->var_scope_lo
             ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
         int vfk = fn->nvregs++;      /* the new induction step, VF */
+        int vacc = -1, vzero = -1, redtmp = -1;
+        if (L.red_acc >= 0) {
+            vzero = fn->nvregs++; vacc = fn->nvregs++; redtmp = fn->nvregs++;
+        }
         for (int n = 0; n < fn->nins; n++) {
             if (n == L.lo) {
                 struct ir_ins *k = ib_push(&nb);
@@ -2617,6 +2686,23 @@ static int vectorize_one(struct ir_func *fn)
                 k->w = fn->ins[L.step_ins].w; k->imm = L.vf;
                 k->line = fn->ins[L.step_ins].line;
                 k->col = fn->ins[L.step_ins].col;
+                if (L.red_acc >= 0) {
+                    /* Every lane starts at zero, HERE and not before the
+                     * guard: the preheader runs exactly when the loop is
+                     * entered, so a loop that runs zero times leaves the
+                     * scalar accumulator alone -- and an inner loop is
+                     * re-zeroed on every pass of the outer one. */
+                    struct ir_ins *z = ib_push(&nb);
+                    z->op = IR_CONST; z->dst = vzero;
+                    z->w = L.esize; z->imm = 0;
+                    z->line = fn->ins[L.red_add].line;
+                    z->col = fn->ins[L.red_add].col;
+                    struct ir_ins *sp = ib_push(&nb);
+                    sp->op = IR_VSPLAT; sp->dst = vacc; sp->a = vzero;
+                    sp->size = L.esize; sp->w = 8;
+                    sp->line = fn->ins[L.red_add].line;
+                    sp->col = fn->ins[L.red_add].col;
+                }
                 /* Before the header label: broadcast every constant the
                  * body needs, once. The back edge jumps past this, the
                  * same way it jumps past a hoisted expression. */
@@ -2646,6 +2732,16 @@ static int vectorize_one(struct ir_func *fn)
             struct ir_ins *i = &fn->ins[n];
             if (n < L.lo || n >= L.hi) { *ib_push(&nb) = *i; continue; }
 
+            if (n == L.red_copy)
+                continue;               /* the scalar carry is gone */
+            if (n == L.red_add) {       /* vacc += the loaded vector */
+                struct ir_ins *v = ib_push(&nb);
+                memset(v, 0, sizeof *v);
+                v->op = IR_VBIN; v->dst = vacc; v->a = vacc; v->b = L.red_vec;
+                v->imm = '+'; v->size = L.esize; v->w = 8;
+                v->line = i->line; v->col = i->col;
+                continue;
+            }
             if (n == L.step_ins) {          /* i += VF, not i += 1 */
                 struct ir_ins *s = ib_push(&nb);
                 *s = *i;
@@ -2722,6 +2818,25 @@ static int vectorize_one(struct ir_func *fn)
                 continue;
             }
             *ib_push(&nb) = *i;
+            if (L.red_acc >= 0 && n == L.hi - 1) {
+                /* Right AFTER the back branch and before whatever label
+                 * follows, so it runs on the way out of the loop and is
+                 * skipped by the guard's jump straight to the exit --
+                 * the preheader trick, mirrored. */
+                struct ir_ins *r = ib_push(&nb);
+                memset(r, 0, sizeof *r);
+                r->op = IR_VREDADD; r->dst = redtmp; r->a = vacc;
+                r->size = L.esize; r->w = fn->ins[L.red_add].w;
+                r->line = fn->ins[L.red_add].line;
+                r->col = fn->ins[L.red_add].col;
+                struct ir_ins *ad = ib_push(&nb);
+                memset(ad, 0, sizeof *ad);
+                ad->op = IR_ADD; ad->dst = L.red_acc; ad->a = L.red_acc;
+                ad->b = redtmp; ad->w = fn->ins[L.red_add].w;
+                ad->sign = fn->ins[L.red_add].sign;
+                ad->line = fn->ins[L.red_add].line;
+                ad->col = fn->ins[L.red_add].col;
+            }
         }
         if (newpos) {
             newpos[fn->nins] = nb.n;
@@ -2738,8 +2853,9 @@ static int vectorize_one(struct ir_func *fn)
         if (remarks_on() && fn->src)
             remark_add("opt", "vectorized", fn->name, "vec/constant-trip-count",
                        fn->file, fn->line,
-                       "%d lanes of %d bytes, %ld iterations -> %ld",
-                       L.vf, L.esize, L.bound, L.bound / L.vf);
+                       "%d lanes of %d bytes, %ld iterations -> %ld%s",
+                       L.vf, L.esize, L.bound, L.bound / L.vf,
+                       L.red_acc >= 0 ? " (a sum reduction)" : "");
         done = 1;
     }
 
