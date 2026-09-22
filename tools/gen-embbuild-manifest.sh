@@ -36,6 +36,11 @@ ABI=/system/abi
 # copy went stale the moment the aarch64 backend added sources.
 SRCS=$(make -pn 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
 [ -n "$SRCS" ] || { echo "gen-embbuild-manifest: cannot read SRCS from the Makefile" >&2; exit 1; }
+# ...and the one unit that is not under src/ (see the Makefile), read
+# the same way rather than restated, for the same reason.
+SRCS_TOOLCORE=$(make -pn 2>/dev/null | sed -n 's/^SRCS_TOOLCORE := //p' | head -1)
+TOOLCORE_CFLAGS=$(make -pn 2>/dev/null | \
+                  sed -n 's/^TOOLCORE_CFLAGS := //p' | head -1)
 
 # Map a host path to its on-OS path — or to nothing. A path under none of the
 # three roots is a HOST artifact of the dependency scan (macOS clang adds its
@@ -45,6 +50,11 @@ mappath() {
     case "$1" in
         include/*)        echo "$INCEMB/${1#include/}" ;;
         src/*)            echo "$SRCROOT/${1#src/}" ;;
+        # The units outside src/: the EMBX hash and .embdbg writer that
+        # src/link/link.c calls. They keep their tools/ path under the
+        # source root, so the mapping reverses unambiguously -- the
+        # host runner (tools/embbuild-run.sh) turns it back. */
+        tools/*)          echo "$SRCROOT/tools/${1#tools/}" ;;
         "$NEWLIB_INC"/*)  echo "$INCABI/${1#"$NEWLIB_INC"/}" ;;
         *)                : ;;
     esac
@@ -69,8 +79,11 @@ printf '# embld links it, all from /data/src on the metal.\n\n'
 printf 'project: embcc\n\n'
 
 objs=""
-for src in $SRCS; do
-    rel=${src#src/}
+for src in $SRCS $SRCS_TOOLCORE; do
+    case $src in
+        tools/*) rel=${src#tools/}; extra=$TOOLCORE_CFLAGS ;;
+        *)       rel=${src#src/};   extra= ;;
+    esac
     obj=$(echo "$rel" | tr / _); obj=${obj%.c}.o
 
     # Header closure: cc -MM, strip the `target:` and line-continuations, then
@@ -89,8 +102,9 @@ for src in $SRCS; do
     printf 'name: %s\n' "$obj"
     printf 'kind: compile\n'
     printf 'inputs: %s\n' "$inputs"
-    printf 'args: /data/apps/embcc/embcc.elf -c -I%s -I%s %s -o %s/%s\n' \
-           "$INCEMB" "$INCABI" "$(mappath "$src")" "$OUTDIR" "$obj"
+    printf 'args: /data/apps/embcc/embcc.elf -c -I%s -I%s%s %s -o %s/%s\n' \
+           "$INCEMB" "$INCABI" "${extra:+ $extra}" \
+           "$(mappath "$src")" "$OUTDIR" "$obj"
     printf 'output: %s/%s\n\n' "$OUTDIR" "$obj"
     objs="$objs $OUTDIR/$obj"
 done

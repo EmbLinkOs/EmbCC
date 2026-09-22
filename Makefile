@@ -26,6 +26,8 @@ SRCS := \
 	src/driver/iface.c \
 	src/driver/explain.c \
 	src/driver/paths.c \
+	src/link/link.c \
+	src/embx/embx.c \
 	src/lex/lex.c \
 	src/cpp/cpp.c \
 	src/parse/parse.c \
@@ -80,10 +82,25 @@ SRCS := \
 
 OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
 
+# One unit that is not under src/. src/link/link.c writes the EMBX
+# image hash and the .embdbg sidecar through the SAME reader the embdbg
+# tool uses -- R1, one implementation -- so every build that links the
+# link library needs it: the driver (which links in-process now), the
+# EmbBuild manifest, and the self-host. It is listed separately because
+# the OBJS rule maps src/%.c and because it is compiled without its CLI
+# main, which the driver already has.
+SRCS_TOOLCORE := tools/embdbg/embdbg.c
+TOOLCORE_CFLAGS := -DEMBDBG_NO_MAIN -Wno-unused-function
+EMBDBG_CORE := $(BUILD)/embdbg_core.o
+
+$(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
+
 all: embcc embread embld embas embls embidx
 
-embcc: $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $(OBJS)
+embcc: $(OBJS) $(EMBDBG_CORE)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
 
 # embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
 # the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)
@@ -173,6 +190,23 @@ $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 # depends on them: without this a stale archive is silently what gets
 # tested, and a fix made in the library is reported as still broken (or,
 # worse, a break is reported as fixed).
+# The fast loop: every program in tests/exec and tests/cxx, compiled,
+# linked and RUN -- 217 of them in about 27 seconds. It skips the
+# goldens, which is where the time goes: three of them recompile the
+# whole corpus a second time with gcc and diff the results, and one
+# builds GCC's libstdc++ from source.
+#
+# This is what to run while changing something. It catches essentially
+# every codegen and front-end regression, because those show up as a
+# program printing the wrong answer -- which is what it checks.
+#
+# It is NOT a substitute for `make test` before a commit. What it does
+# not check is exactly what the goldens exist for: that the answers
+# agree with gcc's, that -S and -c build the same program, that the
+# object format is what the platform's tools expect.
+check: embcc libc-x86_64 libcxx-x86_64
+	tests/run.sh --exec-only
+
 test: embcc embread embld embdbg embls libc-x86_64 libcxx-x86_64 \
       libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
@@ -420,7 +454,7 @@ libcxx: libcxx-x86_64 libcxx-aarch64
 clean:
 	rm -rf $(BUILD) embcc embread embld embdbg embas embls
 
-.PHONY: all test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
+.PHONY: all check test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
         libcxx libcxx-x86_64 libcxx-aarch64 \
         libcxx-linux-x86_64 libcxx-linux-aarch64 \

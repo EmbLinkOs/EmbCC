@@ -97,25 +97,63 @@ fi
 
 [ "$EXEC_ONLY" = 1 ] && sh_tests=""
 
+# The shell tests run CONCURRENTLY, and are reported in list order.
+#
+# Each one writes only into its own tests/golden/out/<name> directory,
+# so nothing but this loop was ever serialising them -- and serially
+# they were most of the suite's wall time: 380 seconds on a
+# ten-core machine, of which the 217-program corpus was 27.
+#
+# Two properties are kept. The REPORT is in the order the list was
+# built, whatever order the tests finish in, so a run is diffable
+# against another run (R4 in the small). And each test's output is
+# captured whole, so a failure still prints exactly what it printed.
+#
+# EMBCC_JOBS overrides the width; 1 restores the old serial behaviour,
+# which is what to use when a test's own output is being debugged.
+jobs=${EMBCC_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/embcc-run.XXXXXX")
+export EMBCC_RUN_DIR=$run_dir
+n_sh=0
+: > "$run_dir/list"
 for t in $sh_tests; do
     [ -e "$t" ] || continue
+    n_sh=$((n_sh + 1))
+    printf '%s %s\n' "$n_sh" "$t" >> "$run_dir/list"
+    printf '%s\n' "$t" > "$run_dir/$n_sh.name"
+done
+
+# xargs -P, not a batch-and-wait loop: `wait -n` is not POSIX and
+# /bin/sh here is too old for it, and waiting for a whole BATCH costs
+# its slowest member every time -- with one test at 74 seconds that was
+# most of the saving. xargs keeps every slot busy instead, so the wall
+# time is the longer of (total / jobs) and the single slowest test.
+[ "$n_sh" -gt 0 ] && xargs -P "$jobs" -n 2 sh -c \
+    'sh "$1" > "$EMBCC_RUN_DIR/$0.out" 2>&1; echo $? > "$EMBCC_RUN_DIR/$0.rc"' \
+    < "$run_dir/list"
+
+i=0
+while [ $i -lt $n_sh ]; do
+    i=$((i + 1))
+    t=$(cat "$run_dir/$i.name")
     name=$(basename "$t" .sh)
-    out=$(sh "$t" 2>&1)
-    status=$?
-    if [ $status -eq 0 ] && printf '%s\n' "$out" | grep -q "TEST-MARKER $name" &&
+    out=$(cat "$run_dir/$i.out" 2>/dev/null)
+    status=$(cat "$run_dir/$i.rc" 2>/dev/null || echo 1)
+    if [ "$status" -eq 0 ] && printf '%s\n' "$out" | grep -q "TEST-MARKER $name" &&
        printf '%s\n' "$out" | grep -q '^skipped:'; then
         # A test that could not run here proves nothing, so it is not counted
         # as a pass — on a host missing its prerequisites it says why.
         echo "SKIP $t ($(printf '%s\n' "$out" | grep -m1 '^skipped:' | cut -c10-))"
         skip=$((skip + 1))
-    elif [ $status -eq 0 ] && printf '%s\n' "$out" | grep -q "TEST-MARKER $name"; then
+    elif [ "$status" -eq 0 ] && printf '%s\n' "$out" | grep -q "TEST-MARKER $name"; then
         ok "$t"
-    elif [ $status -eq 0 ]; then
+    elif [ "$status" -eq 0 ]; then
         bad "$t" "exit 0 but marker 'TEST-MARKER $name' missing — did it run?" "$out"
     else
         bad "$t" "exit $status" "$out"
     fi
 done
+rm -rf "$run_dir"
 
 # tests/exec/*.c run on every target; tests/exec/<arch>/*.c on that one only
 for c in tests/exec/*.c tests/exec/${TARGET%-elf}/*.c; do

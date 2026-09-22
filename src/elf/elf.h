@@ -158,6 +158,10 @@ typedef struct {
 /* p_type */
 #define PT_NULL       0
 #define PT_LOAD       1
+/* The thread-block template. Not loaded as itself -- its bytes are part
+ * of a PT_LOAD -- but DESCRIBED, so a runtime can find them and give
+ * each thread a private copy. */
+#define PT_TLS        7
 
 /* p_flags */
 #define PF_X          0x1

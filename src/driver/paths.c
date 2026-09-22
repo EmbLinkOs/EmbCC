@@ -142,12 +142,13 @@ const char *const *paths_default_includes(int *n)
     return v;
 }
 
-const char *paths_target_file(const char *triple, const char *name)
+int paths_target_file(const char *triple, const char *name,
+                      char *out, size_t cap)
 {
-    static char p[MAXP];
+    char p[MAXP];
     resolve();
     if (!g_lib[0] || !triple || !name)
-        return NULL;
+        return 0;
     if (g_kind == 1)
         snprintf(p, sizeof p, "%s/%s/%s", g_lib, triple, name);
     else
@@ -160,7 +161,10 @@ const char *paths_target_file(const char *triple, const char *name)
                  : strncmp(triple, "aarch64", 7) == 0 ? "aarch64"
                  : "x86_64",
                  name);
-    return plat_file_exists(p) ? p : NULL;
+    if (!plat_file_exists(p))
+        return 0;
+    snprintf(out, cap, "%s", p);
+    return 1;
 }
 
 void paths_print_search_dirs(void)

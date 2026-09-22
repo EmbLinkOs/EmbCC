@@ -32,6 +32,13 @@ done
 # target, and nothing noticed because the test was skipping.
 SRCS=$(make -pn 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
 [ -n "$SRCS" ] || { echo "could not read SRCS from the Makefile"; exit 1; }
+# The one unit that is not under src/: the EMBX hash and .embdbg writer
+# src/link/link.c calls, which the driver needs now that it links
+# in-process. Read from the Makefile for the same reason SRCS is -- a
+# hand-kept second copy goes stale the moment the list changes.
+TOOLCORE=$(make -pn 2>/dev/null | sed -n 's/^SRCS_TOOLCORE := //p' | head -1)
+TOOLCORE_FLAGS=$(make -pn 2>/dev/null | \
+                 sed -n 's/^TOOLCORE_CFLAGS := //p' | head -1)
 INCS="-I include -I $NEWLIB_INC"
 
 out=tests/golden/out/self-host
@@ -43,6 +50,12 @@ for f in $SRCS; do
     o="$out/$(echo "$f" | tr / _).o"
     "$EMBCC" -c "$f" $INCS -o "$o" || {
         echo "EmbCC failed to compile its own source: $f"; exit 1; }
+    n=$((n + 1))
+done
+for f in $TOOLCORE; do
+    o="$out/src_$(echo "$f" | tr / _).o"   # src_ so the link glob finds it
+    "$EMBCC" -c "$f" $INCS $TOOLCORE_FLAGS -o "$o" || {
+        echo "EmbCC failed to compile $f"; exit 1; }
     n=$((n + 1))
 done
 echo "EmbCC compiled all $n of its own sources"

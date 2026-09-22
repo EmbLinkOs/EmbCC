@@ -37,6 +37,7 @@
 
 #include "version.h"
 #include "paths.h"
+#include "../link/link.h"
 
 static void print_version(void)
 {
@@ -357,6 +358,88 @@ static void write_deps(const char *in, const char *obj)
  * four frames down. The same libraries inside a language server install
  * their own boundary and keep serving. */
 static int compile_unit(const char *in, const char *out, int pp_only);
+
+/* `embcc prog.c -o prog`: compile, then link, in ONE process.
+ *
+ * A library, not a subprocess. The platform seam has no process API and
+ * must never grow one -- EmbLinkOS has no fork/exec, and a driver that
+ * spawned `ld` could not be hosted on the target at all
+ * (ARCHITECTURE §1). src/link/link.c has always been written as a
+ * library for exactly this, and this is where it gets used.
+ *
+ * What goes into the link, in the order a linker resolves:
+ *
+ *   crt1.o      the entry point, which calls main and leaves through
+ *               exit() -- found beside the compiler by paths.c
+ *   the object  just compiled, into a temporary next to the output
+ *   libc.a      an ARCHIVE, so only the members actually referenced
+ *               are pulled in
+ *
+ * A hosted target needs all three; a freestanding one has no crt1 and
+ * no libc to offer and links only what it was given, which is what
+ * `--target=x86_64-elf` has always meant.
+ */
+static int compile(const char *in, const char *out, int pp_only);
+
+static int compile_and_link(const char *in, const char *out)
+{
+    /* EmbLD reads x86-64 ELF. Every other combination is refused by
+     * name rather than by producing an image for the wrong machine:
+     * a linker that quietly emitted x86-64 for an aarch64 object would
+     * be the exact failure THE RULE exists to prevent. */
+    if (target_get() != TARGET_X86_64 || target_fmt_get() != TGT_FMT_ELF) {
+        fprintf(stderr,
+                "embcc: error: cannot link for %s: the integrated linker "
+                "reads x86-64 ELF, and this needs %s\n",
+                target_triple_now(),
+                target_fmt_get() != TGT_FMT_ELF
+                    ? target_fmt_name(target_fmt_get()) : "aarch64");
+        fprintf(stderr,
+                "embcc: compile with -c and link with a toolchain for it\n");
+        return 1;
+    }
+
+    const char *exe = out ? out : "a.out";
+    /* The temporary lives beside the output, not in /tmp: a build that
+     * cannot write next to its own output has a problem worth seeing,
+     * and this keeps the whole operation inside one directory. */
+    char obj[1024];
+    snprintf(obj, sizeof obj, "%s.embcc-tmp.o", exe);
+
+    int rc = compile(in, obj, 0);
+    if (rc != 0)
+        return rc;
+
+    const char *inputs[8];
+    int n = 0;
+    const char *triple = target_triple_now();
+    char crt1[1024], libc[1024];
+    int have_crt1 = paths_target_file(triple, "crt1.o", crt1, sizeof crt1);
+    int have_libc = paths_target_file(triple, "libc.a", libc, sizeof libc);
+    /* A hosted target whose library is not installed cannot be linked,
+     * and saying which file is missing is the difference between a
+     * fixable message and fifty undefined symbols. */
+    if (target_is_hosted() && (!have_crt1 || !have_libc)) {
+        fprintf(stderr,
+                "embcc: error: no %s for %s -- the target's library is "
+                "not built or not installed\n",
+                !have_crt1 ? "crt1.o" : "libc.a", triple);
+        fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
+        remove(obj);
+        return 1;
+    }
+    if (have_crt1)
+        inputs[n++] = crt1;
+    inputs[n++] = obj;
+    if (have_libc)
+        inputs[n++] = libc;
+
+    struct link_opts lo;
+    memset(&lo, 0, sizeof lo);
+    rc = embld_link(inputs, n, exe, &lo);
+    remove(obj);
+    return rc;
+}
 
 static int compile(const char *in, const char *out, int pp_only)
 {
@@ -2272,13 +2355,8 @@ int main(int argc, char **argv)
      * is nothing to link: they imply -c, as they do in GCC. */
     if (syntax_only)
         compile_mode = 1;
-    if (!compile_mode) {
-        fprintf(stderr,
-                "embcc: error: cannot link '%s': the integrated linker is "
-                "M3 (see docs/design/roadmap.md) — compile with -c and link with "
-                "the existing toolchain\n", input);
-        return 1;
-    }
+    if (!compile_mode)
+        return done(compile_and_link(input, output));
     /* A report goes to stdout unless the caller named a file; an object
      * gets the default name. */
     if ((want_iface || want_asm) && !output)

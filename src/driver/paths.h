@@ -44,6 +44,8 @@
 #ifndef EMBCC_DRIVER_PATHS_H
 #define EMBCC_DRIVER_PATHS_H
 
+#include <stddef.h>
+
 /* The directory holding this compiler's support files -- the versioned
  * directory when installed, the source root in a build tree, or NULL
  * when neither could be found (a binary carried away from its files).
@@ -57,11 +59,18 @@ const char *paths_lib_dir(void);
  * win over ours, or a program cannot override anything we ship. */
 const char *const *paths_default_includes(int *n);
 
-/* A per-target support file: paths_target_file("x86_64-linux-gnu",
- * "libc.a") and so on. Returns NULL when the file is not there, so a
- * caller can say which one is missing rather than reporting a link
- * failure fifty lines later. The string is owned here. */
-const char *paths_target_file(const char *triple, const char *name);
+/* A per-target support file -- paths_target_file("x86_64-linux-gnu",
+ * "crt1.o", buf, sizeof buf). 1 when it is there, 0 when it is not, so
+ * a caller can say WHICH file is missing rather than reporting a link
+ * failure fifty undefined symbols later.
+ *
+ * The caller supplies the buffer on purpose. This returned a pointer to
+ * a static one first, and the very first caller asked for two files in
+ * a row -- which made both names the second file, so crt1.o was never
+ * linked and the image had no _start. A function whose natural use is
+ * its misuse is the function's fault. */
+int paths_target_file(const char *triple, const char *name,
+                      char *out, size_t cap);
 
 /* `--print-search-dirs`: what the compiler decided, in the form a
  * person can check against `ls`. A search path that cannot be inspected
