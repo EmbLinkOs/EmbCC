@@ -2266,7 +2266,8 @@ struct vecloop {
     int step_ins;      /* `next = iv + 1` */
     int copy_ins;      /* `iv = mov next` */
     int cmp_ins;       /* `c = cmp lt iv, #bound` */
-    long bound;        /* the trip count, a constant */
+    long bound;        /* the trip count, when bound_reg < 0 */
+    int bound_reg;     /* or the temp holding it, for a runtime count */
     int esize, vf;
     /* A sum reduction (`s += a[i]`), or red_acc == -1. The accumulator
      * becomes VF partial sums, folded to one after the loop. */
@@ -2328,14 +2329,14 @@ static int addr_of_iv(struct ir_func *fn, struct defs *d, struct vecloop *L,
         int idx  = side ? add->a : add->b;
         if (base < 0 || base >= fn->nvregs || d->cnt[base] != 1)
             continue;
+        /* Loop-invariant is all that is asked HERE; whether the bases
+         * can alias each other is decided once, over all of them, by
+         * the caller. A global's address qualifies wherever the
+         * instruction sits, since it is the same every iteration. */
         int bd = d->ins[base];
-        /* A global's address is the same every iteration wherever the
-         * instruction sits, so it need not have been hoisted -- and a
-         * global is the only base we accept, because a pointer could
-         * alias another reference and a vector store would then write
-         * lanes the scalar loop would have read. */
-        if (bd < 0 || fn->ins[bd].op != IR_GADDR)
-            continue;
+        if (bd >= 0 && (bd >= L->lo && bd < L->hi) &&
+            fn->ins[bd].op != IR_GADDR)
+            continue;               /* computed inside the loop */
         if (idx < 0 || idx >= fn->nvregs || d->cnt[idx] != 1)
             continue;
         int sn = d->ins[idx];
@@ -2375,6 +2376,267 @@ static int vec_op_char(enum ir_op op)
 
 #define VDBG(...) do { if (getenv("EMBCC_VECDEBUG")) \
         fprintf(stderr, "vec: " __VA_ARGS__); } while (0)
+
+
+/* Remap the vregs an instruction READS, for the copied vector body. */
+struct vremap { const int *map; int n; };
+static void vremap_cb(int *p, void *ctx)
+{
+    struct vremap *r = ctx;
+    if (*p >= 0 && *p < r->n && r->map[*p] >= 0)
+        *p = r->map[*p];
+}
+
+/* Build one lane-wise instruction from a scalar one, into `v`.
+ * `a`/`b` are the operands already remapped; `splat` is the broadcast of
+ * b when b was a constant, or -1. Returns 0 if the op has no lane-wise
+ * form, which the recognizer should already have refused. */
+static int vec_build(struct ir_ins *v, const struct ir_ins *src, int dst,
+                     int a, int b, int splat, long kb, int hask, int esize)
+{
+    memset(v, 0, sizeof *v);
+    v->op = IR_VBIN; v->dst = dst; v->a = a;
+    v->size = esize; v->w = 8;
+    v->line = src->line; v->col = src->col;
+    int c = vec_op_char(src->op);
+    if (!c)
+        return 0;
+    v->imm = c;
+    if ((c == '<' || c == '>') && hask) {
+        v->b = -1; v->c = (int)kb; v->sign = src->sign;
+    } else if (hask) {
+        v->b = splat;
+    } else {
+        v->b = b;
+    }
+    return 1;
+}
+
+/* Vectorize a loop whose trip count is only known at run time.
+ *
+ * The constant-count path above rewrites the loop in place, which it can
+ * because the count is known to divide evenly. Here it does not, so the
+ * loop is preceded by a VECTOR COPY of itself that runs over the whole
+ * vectors, and the original is left to finish the remainder:
+ *
+ *       guard: if (0 >= n) goto done          <- already there
+ *       nvec = n & ~(VF-1)                    <- n >= 1 by the guard
+ *       vi = 0
+ *       goto vcond
+ *   vbody:  <the body, lane-wise, indexed by vi>
+ *       vi += VF
+ *   vcond:  if (vi < nvec) goto vbody
+ *       <fold the reduction, if any>
+ *       i = nvec
+ *       if (i >= n) goto skip                 <- no remainder
+ *       <the original loop, unchanged>
+ *   skip:
+ *
+ * The guard means n >= 1 here, which is what makes `n & ~(VF-1)`
+ * non-negative without a clamp -- for a negative n it would be negative,
+ * the vector loop would be skipped, and the remainder would then start
+ * at a negative index. The second test is needed because the first one
+ * has already been passed: entering the original loop's body with
+ * i == n would run it once too often.
+ *
+ * A reduction folds BETWEEN the two loops, so the remainder carries on
+ * adding into an accumulator that already holds the vector part. */
+static int vec_rewrite_runtime(struct ir_func *fn, struct defs *d,
+                               struct vecloop *L, char *vec)
+{
+    int nv0 = fn->nvregs;
+    int *map = xmalloc((size_t)nv0 * sizeof *map);
+    for (int v = 0; v < nv0; v++)
+        map[v] = -1;
+
+    int vi = fn->nvregs++, vin = fn->nvregs++, nvec = fn->nvregs++;
+    int kmask = fn->nvregs++, kzero = fn->nvregs++, kstep = fn->nvregs++;
+    int tv = fn->nvregs++, t3 = fn->nvregs++;
+    int vacc = -1, vzero = -1, redtmp = -1;
+    if (L->red_acc >= 0) {
+        vzero = fn->nvregs++; vacc = fn->nvregs++; redtmp = fn->nvregs++;
+    }
+    int Lvb = fn->nlabels++, Lvc = fn->nlabels++, Lskip = fn->nlabels++;
+    int iw = fn->ins[L->cmp_ins].w, isign = fn->ins[L->cmp_ins].sign;
+
+    map[L->iv] = vi;
+    for (int n = L->lo; n < L->hi; n++) {
+        if (n == L->step_ins || n == L->copy_ins || n == L->cmp_ins ||
+            n == L->red_copy || n == L->red_add)
+            continue;
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_LABEL || i->op == IR_JMP ||
+            i->op == IR_BRZ || i->op == IR_BRNZ)
+            continue;
+        int t = def_target(i);
+        if (t >= 0 && t < nv0 && map[t] < 0)
+            map[t] = fn->nvregs++;
+    }
+
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+#define EM(V) struct ir_ins *V = ib_push(&nb); \
+              V->line = fn->ins[L->cmp_ins].line; \
+              V->col = fn->ins[L->cmp_ins].col; V->synth = 1
+    for (int n = 0; n < fn->nins; n++) {
+        if (n == L->lo) {
+            { EM(k); k->op = IR_CONST; k->dst = kzero; k->w = iw; }
+            { EM(k); k->op = IR_CONST; k->dst = kstep; k->w = iw;
+              k->imm = L->vf; }
+            { EM(k); k->op = IR_CONST; k->dst = kmask; k->w = iw;
+              k->imm = -(long)L->vf; }        /* ~(VF-1), VF a power of two */
+            /* broadcasts of the constants the body adds lane-wise */
+            for (int m = L->lo; m < L->hi; m++) {
+                struct ir_ins *src = &fn->ins[m];
+                int t = def_target(src);
+                long kb;
+                if (t < 0 || t >= nv0 || !vec[t] || m == L->red_add)
+                    continue;
+                if (src->op == IR_SHL || src->op == IR_SHR ||
+                    src->op == IR_MUL || !const_b(fn, d, src, &kb))
+                    continue;
+                { EM(k); k->op = IR_CONST; k->dst = fn->nvregs;
+                  k->w = L->esize; k->imm = kb; }
+                { EM(sp); sp->op = IR_VSPLAT; sp->dst = fn->nvregs + 1;
+                  sp->a = fn->nvregs; sp->size = L->esize; sp->w = 8; }
+                src->c = fn->nvregs + 1;
+                fn->nvregs += 2;
+            }
+            if (L->red_acc >= 0) {
+                { EM(z); z->op = IR_CONST; z->dst = vzero; z->w = L->esize; }
+                { EM(sp); sp->op = IR_VSPLAT; sp->dst = vacc; sp->a = vzero;
+                  sp->size = L->esize; sp->w = 8; }
+            }
+            { EM(k); k->op = IR_AND; k->dst = nvec; k->a = L->bound_reg;
+              k->b = kmask; k->w = iw; k->sign = isign; }
+            { EM(k); k->op = IR_MOV; k->dst = vi; k->a = kzero; k->w = iw; }
+            { EM(k); k->op = IR_JMP; k->label = Lvc; }
+            { EM(k); k->op = IR_LABEL; k->label = Lvb; }
+
+            /* ---- the body, lane-wise, indexed by vi ---- */
+            for (int m = L->lo; m < L->hi; m++) {
+                struct ir_ins *src = &fn->ins[m];
+                if (m == L->step_ins || m == L->copy_ins || m == L->cmp_ins ||
+                    m == L->red_copy || src->op == IR_LABEL ||
+                    src->op == IR_JMP || src->op == IR_BRZ ||
+                    src->op == IR_BRNZ)
+                    continue;
+                int t = def_target(src);
+                int nt = t >= 0 && t < nv0 && map[t] >= 0 ? map[t] : t;
+                int ra = src->a >= 0 && src->a < nv0 && map[src->a] >= 0
+                         ? map[src->a] : src->a;
+                int rb = src->b >= 0 && src->b < nv0 && map[src->b] >= 0
+                         ? map[src->b] : src->b;
+                if (m == L->red_add) {
+                    int rv = L->red_vec < nv0 && map[L->red_vec] >= 0
+                             ? map[L->red_vec] : L->red_vec;
+                    EM(v); v->op = IR_VBIN; v->dst = vacc; v->a = vacc;
+                    v->b = rv; v->imm = '+'; v->size = L->esize; v->w = 8;
+                    v->line = src->line; v->col = src->col; v->synth = 0;
+                    continue;
+                }
+                if (src->op == IR_LOAD && t >= 0 && t < nv0 && vec[t]) {
+                    EM(v); v->op = IR_VLOAD; v->dst = nt; v->a = ra;
+                    v->size = L->esize; v->w = 8;
+                    v->line = src->line; v->col = src->col; v->synth = 0;
+                    continue;
+                }
+                if (src->op == IR_STORE) {
+                    EM(v); v->op = IR_VSTORE; v->dst = -1; v->a = ra;
+                    v->b = rb; v->size = L->esize; v->w = 8;
+                    v->line = src->line; v->col = src->col; v->synth = 0;
+                    continue;
+                }
+                if (t >= 0 && t < nv0 && vec[t]) {
+                    long kb = 0;
+                    int hask = const_b(fn, d, src, &kb);
+                    if (src->op == IR_MUL) {
+                        int sh = 0;
+                        long mlt = kb;
+                        int p2 = (mlt & (mlt - 1)) == 0;
+                        while ((1L << sh) < (p2 ? mlt : mlt - 1)) sh++;
+                        if (p2) {
+                            EM(v); v->op = IR_VBIN; v->dst = nt; v->a = ra;
+                            v->b = -1; v->imm = '<'; v->c = sh;
+                            v->size = L->esize; v->w = 8;
+                            v->line = src->line; v->col = src->col;
+                            v->synth = 0;
+                        } else {
+                            int tmp = fn->nvregs++;
+                            { EM(v); v->op = IR_VBIN; v->dst = tmp; v->a = ra;
+                              v->b = -1; v->imm = '<'; v->c = sh;
+                              v->size = L->esize; v->w = 8;
+                              v->line = src->line; v->col = src->col;
+                              v->synth = 0; }
+                            { EM(w2); w2->op = IR_VBIN; w2->dst = nt;
+                              w2->a = tmp; w2->b = ra; w2->imm = '+';
+                              w2->size = L->esize; w2->w = 8;
+                              w2->line = src->line; w2->col = src->col;
+                              w2->synth = 0; }
+                        }
+                        continue;
+                    }
+                    EM(v);
+                    if (!vec_build(v, src, nt, ra, rb, src->c, kb, hask,
+                                   L->esize)) {
+                        free(map); free(nb.p); free(newpos);
+                        return 0;       /* the recognizer let one through */
+                    }
+                    continue;
+                }
+                /* the address chain and anything else scalar: copied
+                 * with its operands pointed at the vector index */
+                EM(v); *v = *src; v->synth = 0;
+                struct vremap r = { map, nv0 };
+                each_read(v, vremap_cb, &r);
+                if (t >= 0)
+                    v->dst = nt;
+            }
+            { EM(k); k->op = IR_ADD; k->dst = vin; k->a = vi; k->b = kstep;
+              k->w = iw; k->sign = isign; }
+            { EM(k); k->op = IR_MOV; k->dst = vi; k->a = vin; k->w = iw; }
+            { EM(k); k->op = IR_LABEL; k->label = Lvc; }
+            { EM(k); k->op = IR_CMP; k->dst = tv; k->a = vi; k->b = nvec;
+              k->w = iw; k->sign = isign; k->pred = B_LT; }
+            { EM(k); k->op = IR_BRNZ; k->a = tv; k->label = Lvb;
+              k->w = fn->ins[L->hi - 1].w; }
+            if (L->red_acc >= 0) {
+                { EM(r); r->op = IR_VREDADD; r->dst = redtmp; r->a = vacc;
+                  r->size = L->esize; r->w = fn->ins[L->red_add].w; }
+                { EM(a2); a2->op = IR_ADD; a2->dst = L->red_acc;
+                  a2->a = L->red_acc; a2->b = redtmp;
+                  a2->w = fn->ins[L->red_add].w;
+                  a2->sign = fn->ins[L->red_add].sign; }
+            }
+            { EM(k); k->op = IR_MOV; k->dst = L->iv; k->a = nvec; k->w = iw; }
+            { EM(k); k->op = IR_CMP; k->dst = t3; k->a = L->iv;
+              k->b = L->bound_reg; k->w = iw; k->sign = isign;
+              k->pred = B_LT; }
+            { EM(k); k->op = IR_BRZ; k->a = t3; k->label = Lskip;
+              k->w = fn->ins[L->hi - 1].w; }
+        }
+        if (newpos) newpos[n] = nb.n;
+        *ib_push(&nb) = fn->ins[n];         /* the scalar loop, unchanged */
+        if (n == L->hi - 1) {
+            EM(k); k->op = IR_LABEL; k->label = Lskip;
+        }
+    }
+#undef EM
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free(map);
+    return 1;
+}
 
 static int vectorize_one(struct ir_func *fn)
 {
@@ -2437,13 +2699,23 @@ static int vectorize_one(struct ir_func *fn)
         if (cn < L.lo || cn >= L.hi)
             continue;
         struct ir_ins *cmp = &fn->ins[cn];
-        if (cmp->op != IR_CMP || cmp->pred != B_LT || !cmp->sign ||
-            !const_b(fn, &d, cmp, &L.bound))
-            { VDBG("h=%d test is not `cmp lt iv, #k`\n", h); continue; }
+        if (cmp->op != IR_CMP || cmp->pred != B_LT || !cmp->sign)
+            { VDBG("h=%d test is not `cmp lt iv, ...`\n", h); continue; }
         L.cmp_ins = cn;
         L.iv = cmp->a;
-        if (L.bound <= 0 || L.iv < 0 || L.iv >= fn->nvregs)
-            { VDBG("h=%d bad bound\n", h); continue; }
+        L.bound = 0; L.bound_reg = -1;
+        if (!const_b(fn, &d, cmp, &L.bound)) {
+            /* A runtime trip count. The bound itself must not change
+             * inside the loop, or "how many whole vectors fit" is not a
+             * question with one answer. */
+            L.bound_reg = cmp->b;
+            if (!defined_outside(fn, &d, L.bound_reg, L.lo, L.hi))
+                { VDBG("h=%d the bound is not invariant\n", h); continue; }
+        } else if (L.bound <= 0) {
+            VDBG("h=%d bad bound\n", h); continue;
+        }
+        if (L.iv < 0 || L.iv >= fn->nvregs)
+            { VDBG("h=%d bad iv\n", h); continue; }
 
         /* `iv = mov next` and `next = iv + 1`, both in the loop. */
         L.copy_ins = L.step_ins = -1;
@@ -2495,7 +2767,7 @@ static int vectorize_one(struct ir_func *fn)
          * or any op that is not lane-wise, refuses the loop. */
         char *vec = xcalloc((size_t)fn->nvregs, 1);
         L.esize = 0;
-        int nmem = 0;
+        int nmem = 0, nbase = 0, bases[8];
         for (int n = L.lo; n < L.hi && ok; n++) {
             struct ir_ins *i = &fn->ins[n];
             if (i->op != IR_LOAD && i->op != IR_STORE)
@@ -2503,10 +2775,44 @@ static int vectorize_one(struct ir_func *fn)
             if (i->vol || (i->size != 4 && i->size != 8)) { ok = 0; break; }
             if (L.esize && i->size != L.esize) { ok = 0; break; }
             L.esize = i->size;
-            if (addr_of_iv(fn, &d, &L, i->a, i->size) < 0) { ok = 0; break; }
+            int base = addr_of_iv(fn, &d, &L, i->a, i->size);
+            if (base < 0) { ok = 0; break; }
+            int seen = 0;
+            for (int k = 0; k < nbase; k++)
+                if (bases[k] == base) seen = 1;
+            if (!seen) {
+                if (nbase == (int)(sizeof bases / sizeof bases[0]))
+                    { ok = 0; break; }
+                bases[nbase++] = base;
+            }
             if (i->op == IR_LOAD)
                 vec[i->dst] = 1;
             nmem++;
+        }
+        /* ---- can the bases alias each other? ------------------------
+         *
+         * Two distinct globals cannot overlap, so any number of those is
+         * fine. A pointer could point anywhere, so more than one of them
+         * -- or one of them beside a global -- would need a run-time
+         * check that the ranges are disjoint, which is not built. But
+         * ONE base, whatever it is, cannot alias itself: every reference
+         * is then the same address at the same index, so lane k is
+         * element i+k of the one array, read and written by the same
+         * lane. That single case is most of what real code does
+         * (`for (i...) p[i] = p[i] * 2`), and it is safe with no check
+         * at all. */
+        if (ok && nbase > 0) {
+            int all_global = 1;
+            for (int k = 0; k < nbase; k++) {
+                int bd = d.ins[bases[k]];
+                if (bd < 0 || fn->ins[bd].op != IR_GADDR)
+                    all_global = 0;
+            }
+            if (!all_global && nbase > 1) {
+                VDBG("h=%d %d bases, not all globals: they may alias\n",
+                     h, nbase);
+                ok = 0;
+            }
         }
         if (!ok || !L.esize || nmem == 0) {
             VDBG("h=%d memory refs: ok=%d esize=%d n=%d\n", h, ok, L.esize, nmem);
@@ -2569,7 +2875,7 @@ static int vectorize_one(struct ir_func *fn)
         }
 
         L.vf = VEC_BYTES / L.esize;
-        if (L.bound % L.vf != 0) {
+        if (L.bound_reg < 0 && L.bound % L.vf != 0) {
             VDBG("h=%d trip %ld not a multiple of %d\n", h, L.bound, L.vf);
             free(vec); continue; }
 
@@ -2652,6 +2958,61 @@ static int vectorize_one(struct ir_func *fn)
             VDBG("h=%d a store's value is not lane-wise\n", h);
             free(vec); continue;
         }
+        /* ---- nothing may happen a quarter as often ------------------
+         *
+         * The vector loop runs the body once per VF elements, so ANY
+         * instruction in it that is not part of the lane-wise work
+         * happens a quarter as many times. A call is the obvious one --
+         * `for (...) { a[i]++; g(); }` vectorized and called g() 256
+         * times instead of 1024, which is a wrong answer with nothing
+         * wrong-looking about it -- but so is a volatile access, a
+         * fence, an atomic, or a store to anything but the arrays being
+         * walked.
+         *
+         * The rule is therefore positive rather than a list of banned
+         * opcodes: every instruction here is either the loop's own
+         * control, one of the memory references already checked to be
+         * base + i*esize, the reduction, or something PURE. is_pure is
+         * exactly "no side effect and cannot fault", which is the
+         * property needed -- a pure value computed a quarter as often
+         * is only a wasted computation, not a changed program. */
+        for (int n = L.lo; n < L.hi && ok; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (n == L.step_ins || n == L.copy_ins || n == L.cmp_ins ||
+                n == L.red_add || n == L.red_copy || n == L.hi - 1)
+                continue;
+            if (i->op == IR_LABEL || i->op == IR_LOAD || i->op == IR_STORE)
+                continue;               /* the references, already checked */
+            if (!is_pure(i->op) || i->vol)
+                ok = 0;
+        }
+        if (!ok) {
+            VDBG("h=%d the body does something a quarter as often\n", h);
+            free(vec); continue;
+        }
+
+        /* ---- and nothing may carry a value out of it ----------------
+         *
+         * A pure computation is safe to run fewer times only if nobody
+         * reads the result afterwards. `m = i` inside the loop leaves m
+         * at the last VECTOR index, not the last one -- and in the
+         * runtime form, where the remainder loop may not run at all, it
+         * leaves the original temp never written. The induction
+         * variable is the exception: it ends at the trip count either
+         * way. The accumulator is the other, and it is folded by hand. */
+        for (int n = L.lo; n < L.hi && ok; n++) {
+            int t = def_target(&fn->ins[n]);
+            if (t < 0 || t >= fn->nvregs || t == L.iv || t == L.red_acc)
+                continue;
+            for (int m = 0; m < fn->nins && ok; m++)
+                if ((m < L.lo || m >= L.hi) && ins_reads(&fn->ins[m], t))
+                    ok = 0;
+        }
+        if (!ok) {
+            VDBG("h=%d a value escapes the loop\n", h);
+            free(vec); continue;
+        }
+
         /* A value that becomes a vector may only be read by something
          * that also becomes one: a lane-wise op inside the loop, or the
          * store that consumes it. Anything else -- a use after the loop,
@@ -2671,6 +3032,23 @@ static int vectorize_one(struct ir_func *fn)
         if (!ok) { VDBG("h=%d a vector value escapes\n", h); free(vec); continue; }
 
         /* ---- rewrite ------------------------------------------------ */
+        if (L.bound_reg >= 0) {
+            /* A runtime count needs a remainder, so the loop is copied
+             * rather than rewritten in place. */
+            if (!vec_rewrite_runtime(fn, &d, &L, vec)) {
+                VDBG("h=%d the runtime rewrite refused\n", h);
+                free(vec); continue;
+            }
+            free(vec);
+            if (remarks_on() && fn->src)
+                remark_add("opt", "vectorized", fn->name,
+                           "vec/runtime-trip-count", fn->file, fn->line,
+                           "%d lanes of %d bytes, with a scalar remainder%s",
+                           L.vf, L.esize,
+                           L.red_acc >= 0 ? " (a sum reduction)" : "");
+            done = 1;
+            continue;
+        }
         struct ibuf nb = { 0, 0, 0 };
         int *newpos = fn->var_scope_lo
             ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;

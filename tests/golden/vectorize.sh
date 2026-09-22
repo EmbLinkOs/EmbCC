@@ -32,12 +32,12 @@ rm -rf "$out"; mkdir -p "$out"
 [ "$ARCH" = x86_64 ] || {
     echo "skipped: vectorization is x86-64 (SSE2) so far"; exit 0; }
 
-# nvec SRC -> how many loops vectorized
+# nvec SRC -> how many loops vectorized (either trip-count form)
 nvec() {
     "$EMBCC" --target=x86_64-linux-gnu -O2 -fremarks -c "$1" -o /dev/null \
         2> "$out/r.txt" || { echo "FAIL: could not compile $1:"
                              cat "$out/r.txt"; exit 1; }
-    grep -c 'vec/constant-trip-count' "$out/r.txt" || true
+    grep -c 'vec/' "$out/r.txt" || true
 }
 
 # ---- 1. it fires on the shape it is meant to ---------------------------
@@ -75,12 +75,18 @@ EOF
 refuse "odd trip count" \
   'void f(void) { for (int i = 0; i < 1023; i++) a[i] = a[i] + 1; }' \
   "1023 is not a multiple of four, so the last vector would run past the end"
-refuse "runtime bound" \
-  'void f(int n) { for (int i = 0; i < n; i++) a[i] = a[i] + 1; }' \
-  "the trip count is not known, so there is no remainder handling"
-refuse "pointer base" \
-  'void f(int *p) { for (int i = 0; i < 1024; i++) p[i] = p[i] + 1; }' \
-  "p could alias anything, including a[]"
+refuse "two pointer bases" \
+  'void f(int *p, int *q, int n) { for (int i = 0; i < n; i++) p[i] = q[i] + 1; }' \
+  "p and q could overlap, and no run-time range check is emitted"
+refuse "a call in the body" \
+  'void f(void) { for (int i = 0; i < 1024; i++) { a[i] = a[i] + 1; g(0); } }' \
+  "the call would happen a quarter as many times"
+refuse "a value escaping" \
+  'int f(void) { int m = 0; for (int i = 0; i < 1024; i++) { a[i] = a[i] + 1; m = i; } return m; }' \
+  "m would hold the last VECTOR index, not the last index"
+refuse "a volatile access" \
+  'void f(volatile int *v) { for (int i = 0; i < 1024; i++) { a[i] = a[i] + 1; *v = i; } }' \
+  "a volatile store must happen exactly as often as written"
 refuse "stores the index" \
   'void f(void) { for (int i = 0; i < 1024; i++) a[i] = i; }' \
   "the stored value differs in every lane"
@@ -114,13 +120,39 @@ refuse "accumulator read inside" \
 refuse "strided" \
   'void f(void) { for (int i = 0; i < 512; i++) a[i*2] = a[i*2] + 1; }' \
   "lane k is not element i+k when the stride is two"
-echo "fourteen shapes are refused, each for a reason that would be a wrong
-answer: an odd trip count, a runtime bound, a pointer base, a stored
-index, a stored constant, a call, a divide, a general multiply, a
-per-lane shift, a widening reduction, a product reduction, an
-accumulator read inside the loop, a countdown, and a stride of two"
+echo "fifteen shapes are refused, each for a reason that would be a wrong
+answer: an odd trip count, a stored index, a stored constant, a divide,
+a general multiply, a per-lane shift, a widening reduction, a product
+reduction, an accumulator read inside the loop, a countdown, a stride of
+two, two pointer bases that could overlap, a call, an escaping value,
+and a volatile access"
 
-# ---- 3. the answers ----------------------------------------------------
+# ---- 3. a runtime trip count, and a pointer base -----------------------
+#
+# A count known only at run time needs a vector loop over the whole
+# vectors and the original loop for the remainder. The edges around a
+# multiple of four are where a remainder goes wrong, so every count from
+# -2 to 37 is checked, at three different starting offsets so the vector
+# loads are not all 16-aligned.
+#
+# The pointer base is allowed only because there is exactly ONE of them:
+# a pointer cannot alias itself, so every reference is the same address
+# at the same index. Two of them would need a run-time range check.
+cat > "$out/rt.c" <<'EOF'
+void scale(int *p, int n) { for (int i = 0; i < n; i++) p[i] = p[i] * 3 + 1; }
+int  tot(int *p, int n) { int s = 0; for (int i = 0; i < n; i++) s += p[i]; return s; }
+void gscale(int n) { for (int i = 0; i < n; i++) a[i] = a[i] ^ 0x5a; }
+EOF
+printf 'int a[4096];\n' | cat - "$out/rt.c" > "$out/rt2.c"
+n=$(nvec "$out/rt2.c")
+[ "$n" = 3 ] || { echo "FAIL: 3 runtime-count loops should vectorize, $n did:"
+                  cat "$out/r.txt"; exit 1; }
+grep -q 'vec/runtime-trip-count' "$out/r.txt" || {
+    echo "FAIL: none of them used the runtime form"; exit 1; }
+echo "a runtime trip count vectorizes with a scalar remainder, over a
+pointer base and a global alike"
+
+# ---- 4. the answers ----------------------------------------------------
 LIBDIR=$EMBCC_ROOT/build/libc/linux-x86_64
 [ -f "$LIBDIR/libc.a" ] || { echo "skipped the run: no libc"; exit 0; }
 "$EMBCC_ROOT/tests/harness/linux/run.sh" x86_64 --check > /dev/null 2>&1 || {
@@ -159,6 +191,18 @@ int main(void)
       h = h * 31 + (unsigned)s; }
     { long s = 5;   for (int i = 0; i < 512; i++)  s += c[i];
       h = h * 31 + (unsigned long)s; }
+    /* Runtime counts, every edge around a multiple of four, at three
+     * starting offsets so the vector accesses are not all aligned. */
+    for (int n = -2; n <= 37; n++) {
+        for (int i = 0; i < 1024; i++) a[i] = i - 11;
+        for (int off = 0; off < 3; off++) {
+            int *p = a + off;
+            for (int i = 0; i < n; i++) p[i] = p[i] * 3 + 1;
+            { int s = 0; for (int i = 0; i < n; i++) s += p[i];
+              h = h * 31 + (unsigned)s; }
+        }
+        for (int i = 0; i < 1024; i++) h = h * 31 + (unsigned)a[i];
+    }
     for (int k = 0; k < 3; k++) {
         int t = 0;
         for (int i = 0; i < 1024; i++) t += a[i] + k;
