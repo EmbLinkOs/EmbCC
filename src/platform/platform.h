@@ -51,6 +51,18 @@ int plat_file_exists(const char *path);
  */
 const char *plat_getenv(const char *name);
 
+/* ---- the console ----
+ *
+ * Whether diagnostics are going to a terminal, which is what decides
+ * automatic colour. 0 where they are not, and where the host has no
+ * such notion at all -- a build log should not receive escape codes.
+ *
+ * It is here rather than an isatty() call in the diagnostics code for
+ * the reason this whole layer exists: nothing above it may know what
+ * kind of host it is running on (§5.1), and <unistd.h> is exactly that
+ * knowledge. EmbLinkOS has no unistd.h. */
+int plat_stderr_is_terminal(void);
+
 /* ---- where this program is ----
  *
  * The absolute path of the running executable, or NULL where the host

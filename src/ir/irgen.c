@@ -445,12 +445,15 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
         int hi = bf_wide_bytes(fn, addr, 16, 17);
         int sh = emit_const(fn, 128 - off, 4);
         int hm = emit_bin(fn, IR_SHR, fm, sh, 16, 0);
-        hi = emit_bin(fn, IR_OR, emit_bin(fn, IR_AND, hi,
-                                          emit_bin(fn, IR_XOR, hm, ones, 16, 0),
-                                          16, 0),
-                      emit_bin(fn, IR_SHR, v, sh, 16, 0), 16, 0);
-        emit_store(fn, emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, 8), 8, 0),
-                   gen_convert(fn, hi, u128, u8), u8);
+        /* Both operands emit, so both are sequenced first (see
+         * gen_float_to_u64 for why). */
+        int keep = emit_bin(fn, IR_AND, hi,
+                            emit_bin(fn, IR_XOR, hm, ones, 16, 0), 16, 0);
+        int put = emit_bin(fn, IR_SHR, v, sh, 16, 0);
+        hi = emit_bin(fn, IR_OR, keep, put, 16, 0);
+        int at = emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, 8), 8, 0);
+        int val = gen_convert(fn, hi, u128, u8);
+        emit_store(fn, at, val, u8);
     }
     return bf_wide_load(fn, addr, m);
 }
@@ -911,8 +914,21 @@ static int gen_float_to_u64(struct ir_func *fn, int v, int fsize)
     emit_brz(fn, cmp->dst, 4, l_small);                          /* v < 2^63 -> direct */
     /* v >= 2^63: (u64)(v - 2^63) with the sign bit flipped back on */
     int vm = emit_fbin(fn, IR_SUB, v, two63, fsize);
-    int big = emit_bin(fn, IR_XOR, emit_f2i(fn, vm, fsize, 8),
-                       emit_const(fn, (long)1 << 63, 8), 8, 0);
+    /* Each operand is emitted into its OWN statement before the
+     * combining call. C leaves the evaluation order of sibling
+     * arguments unspecified, and both of these append to the
+     * instruction list -- so written as arguments they produced a
+     * different instruction ORDER depending on which compiler built
+     * EmbCC, and the self-host fixed point cannot exist when the
+     * output depends on that.
+     *
+     * The constant is the sign bit. `(long)1 << 63` shifts into the
+     * sign bit of a signed type, which C99 6.5.7p4 leaves undefined;
+     * shifting the unsigned value and converting is defined, and the
+     * conversion is implementation-defined rather than undefined. */
+    int trunc = emit_f2i(fn, vm, fsize, 8);
+    int sign = emit_const(fn, (long)(1ULL << 63), 8);
+    int big = emit_bin(fn, IR_XOR, trunc, sign, 8, 0);
     emit_mov(fn, res, big);
     emit_jmp(fn, l_done);
     emit_label(fn, l_small);

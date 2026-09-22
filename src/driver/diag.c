@@ -19,7 +19,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>   /* isatty — auto colour when stderr is a terminal */
+/* isatty lives behind the platform layer: nothing above it may know
+ * what kind of host this is, and EmbLinkOS has no <unistd.h>. */
+#include "../platform/platform.h"
 
 /* ---- source registry -------------------------------------------------------
  *
@@ -287,7 +289,7 @@ static struct diag *new_diag(int level, const char *file, int line, int col,
 static const char *cc(const char *code)
 {
     if (g_color < 0)
-        g_color = isatty(2) ? 1 : 0;
+        g_color = plat_stderr_is_terminal() ? 1 : 0;
     return g_color ? code : "";
 }
 
@@ -707,6 +709,13 @@ void diag_set_werror(int on)     { g_werror = on; }
 void diag_set_no_warnings(int on){ g_no_warnings = on; }
 void diag_set_parseable_fixits(int on) { g_parseable_fixits = on; }
 int  diag_error_count(void)      { return g_errors; }
+/* How many warnings were REPORTED -- not to be confused with
+ * diag_warning_count() above, which is how many warning OPTIONS exist
+ * (for --help-warnings). This counter was incremented and never
+ * readable, which a strict compiler notices
+ * (-Wunused-but-set-global): a count nothing can ask for is not being
+ * kept, only written. */
+int  diag_warnings_reported(void) { return g_warnings; }
 
 /* The id of the diagnostic just raised, for `embcc --explain`. */
 void diag_set_id(const char *id)

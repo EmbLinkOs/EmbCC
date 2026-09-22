@@ -252,6 +252,11 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    /* __attribute__((aligned(N))) / _Alignas(N) on the object itself,
+     * 0 when none. NOT the same as its type's alignment, and it was
+     * silently dropped: a page table declared aligned(4096) was laid
+     * out at the type's alignment and placed wherever that allowed. */
+    int user_align;
     int attr_used, attr_unused, attr_deprecated;
     const char *vis;      /* __attribute__((visibility("..."))) */
     /* __thread / _Thread_local / thread_local: one instance per thread,

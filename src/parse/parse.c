@@ -593,7 +593,20 @@ static struct type *declarator(struct parser *ps, struct type *base,
     if (cur(ps)->kind == TOK_LPAREN) {
         struct lexer open = ps->lx;
         advance(ps);
-        if (cur(ps)->kind == TOK_STAR) {
+        /* `(` starts a parenthesized declarator when what follows could
+         * begin one. A star always could (`int (*fp)(void)`), and that
+         * was the only case handled -- but so can a plain NAME, and
+         * `int (f)(int);` is the redundantly-parenthesized spelling the
+         * standard allows and real headers use, most often because a
+         * macro of the same name has to be suppressed: `(isdigit)(c)`.
+         * It was rejected outright with "expected a name before '('".
+         *
+         * The name must not be a typedef name, because then the
+         * parentheses are a parameter list instead -- `int (size_t)` is
+         * a function type, not a variable called size_t. That one token
+         * of lookahead is the whole difference between the two. */
+        if (cur(ps)->kind == TOK_STAR ||
+            (cur(ps)->kind == TOK_IDENT && !at_type_start(ps))) {
             /* past the parentheses to the suffixes */
             int depth = 1;
             while (depth > 0) {
@@ -608,9 +621,23 @@ static struct type *declarator(struct parser *ps, struct type *base,
             }
             advance(ps);
             struct type *outer = base;
-            if (cur(ps)->kind == TOK_LPAREN)
-                outer = parse_fn_params(ps, base);
-            else if (cur(ps)->kind == TOK_LBRACKET)
+            /* The suffix's parameter names are captured, because
+             * `int (f)(int x) { … }` is a DEFINITION and the body needs
+             * `x`. They go into a LOCAL array, never straight into
+             * ps->fn_pnames: that array is shared by every declarator
+             * being parsed, and a parameter can itself be a
+             * parenthesized declarator. Writing it here directly made
+             * `void (*signal(int sig, void (*handler)(int)))(int)` lose
+             * `sig` -- the inner `(int)` of `handler` overwrote slot 0
+             * while the outer parameter list was still filling it. */
+            const char *pn[MAX_PARAMS];
+            int have_pn = 0;
+            if (cur(ps)->kind == TOK_LPAREN) {
+                for (int pi = 0; pi < MAX_PARAMS; pi++)
+                    pn[pi] = NULL;
+                outer = parse_fn_params_named(ps, base, pn);
+                have_pn = 1;
+            } else if (cur(ps)->kind == TOK_LBRACKET)
                 outer = parse_array_dims(ps, base);
             struct lexer after = ps->lx;
             ps->lx = open;
@@ -618,6 +645,22 @@ static struct type *declarator(struct parser *ps, struct type *base,
             struct type *t = declarator(ps, outer, name_out, 1);
             expect(ps, TOK_RPAREN, "')'");
             ps->lx = after;
+            /* Publish them only when the parentheses held a bare name,
+             * so this suffix IS the declared function's parameter list.
+             * `t == outer` says exactly that: anything else -- a star, a
+             * nested function declarator, an array -- derived a new type
+             * inside, and then ps->fn_pnames already holds whatever that
+             * derivation set, which is the right answer. The positions
+             * are not recovered; they drive a caret, and this spelling
+             * is rare enough that a column is worth less than not
+             * corrupting a sibling's name. */
+            if (have_pn && t == outer) {
+                for (int pi = 0; pi < MAX_PARAMS; pi++) {
+                    ps->fn_pnames[pi] = pn[pi];
+                    ps->fn_plines[pi] = 0;
+                    ps->fn_pcols[pi] = 0;
+                }
+            }
             return t;
         }
         ps->lx = open; /* not a parenthesized declarator */
@@ -2475,8 +2518,22 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * one being spelled correctly and the other falling through to
          * "expected a type" -- which is what used to happen, and what
          * took the parser down a path that dereferenced nothing. */
+        /* `_Alignas` is a declaration specifier too (C11 §6.7), and the
+         * standard lets the specifiers come in any order -- so
+         * `_Alignas(16) static char a[1];` is as valid as
+         * `static _Alignas(16) char a[1];`. Only the second worked:
+         * parse_type_spec consumes an `_Alignas` it meets, but it does
+         * not know `static`, so when the alignment came FIRST it ate the
+         * alignment, stopped at `static` having seen no type specifier,
+         * and returned NULL -- which the caller dereferenced. A crash,
+         * from a declaration the standard spells out. */
         while (cur(ps)->kind == TOK_KW_STATIC ||
-               cur(ps)->kind == TOK_KW_THREAD) {
+               cur(ps)->kind == TOK_KW_THREAD ||
+               cur(ps)->kind == TOK_KW_ALIGNAS) {
+            if (cur(ps)->kind == TOK_KW_ALIGNAS) {
+                consume_alignas(ps);       /* accumulates ps->alignas_out */
+                continue;
+            }
             if (cur(ps)->kind == TOK_KW_STATIC)
                 local_static = 1;
             else
@@ -2510,6 +2567,14 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * types real code uses here; a same-named tag in two scopes is the
          * documented limitation, not a miscompile. */
         struct type *base = parse_type_spec(ps, 1);
+        /* No type specifier at all. Implicit int is not C99 and guessing
+         * one here would compile a declaration nobody wrote; the old
+         * behaviour was worse still, since every use below dereferences
+         * this. Say what is missing and stop. */
+        if (!base)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "expected a type in this declaration, found %s",
+                       tok_describe(cur(ps)));
         /* A declaration with no declarator: `enum { BAND = 64 };` or
          * `struct tag { ... };` inside a function declares only the tag or
          * the enumerators, which parse_type_spec has already registered. */
@@ -3075,6 +3140,8 @@ static void parse_top(struct parser *ps, struct unit *u,
             g->attr_used = at.used;
             g->attr_unused = at.unused;
             g->attr_deprecated = at.deprecated;
+            g->user_align = at.aligned > ps->alignas_out
+                            ? at.aligned : ps->alignas_out;
             g->vis = at.vis;
             g->is_tls = is_tls;
             g->section = at.section;
@@ -3242,6 +3309,10 @@ fn_tail:
                 g->attr_used = at.used;
                 g->attr_unused = at.unused;
                 g->attr_deprecated = at.deprecated;
+                g->user_align = at.aligned > ps->alignas_out
+                                ? at.aligned : ps->alignas_out;
+            g->user_align = at.aligned > ps->alignas_out
+                            ? at.aligned : ps->alignas_out;
                 g->vis = at.vis;
                 g->is_tls = is_tls;
                 g->section = at.section;

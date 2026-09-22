@@ -53,7 +53,7 @@ The differentiator is not any single feature. It is that **the compiler records 
 
 Stating what EmbCC will not do is what keeps the vision achievable.
 
-1. **~~Not a drop-in replacement for GCC/Clang on all platforms.~~** *Superseded 2026-09-21 by ADR **D-014**, which is the ADR this clause named.* Targeting macOS, Linux and Windows is now a goal, and the aim is a **hosted toolchain** — objects that link, programs that run, the standard libraries working — not format coverage. The non-goal that survives is narrower: **MSVC ABI compatibility is not scheduled** (Windows means MinGW first, because our C++ runtime is Itanium and MSVC's scheme shares nothing with it), and EmbLD is not taught Mach-O or PE — hosted targets invoke the system linker, as gcc and clang do.
+1. **~~Not a drop-in replacement for GCC/Clang on all platforms.~~** *Superseded 2026-09-21 by ADR **D-014**, which is the ADR this clause named.* Targeting macOS, Linux and Windows is now a goal, and the aim is a **hosted toolchain** — objects that link, programs that run, the standard libraries working — not format coverage. The non-goal that survives is narrower: **MSVC ABI compatibility is not scheduled** (Windows means MinGW first, because our C++ runtime is Itanium and MSVC's scheme shares nothing with it), and EmbLD is not taught Mach-O or PE — on those two, hosted targets invoke the system linker, as gcc and clang do. *(Refined 2026-09-22: Linux turned out to be the exception. EmbLD already reads and writes x86-64 ELF, so rather than depend on the host's `ld`, EmbCC links the Linux target itself, statically, against its own libc — which is why the Linux target needs no glibc and no system toolchain at all. The rule as stated holds for the two formats EmbLD does not speak.)*
 2. **~~No full modern C++ in the foreseeable plan.~~** *Superseded in v0.3 — see §12.2.* C++ is still delivered in explicit subsets (§12), but the target is C++20 with libstdc++ on both architectures (D-013), and C++0 through C++2 plus much of C++3 are built. The non-goal that survives is narrower: **modules are not scheduled**, and conformance is measured against g++ agreement on a test corpus, not claimed in the abstract.
 3. **No soundness claims from the security analyzer** unless an analysis is formally sound for a stated subset. Findings are evidence-graded (§23), not proofs.
 4. **`embcc` does not build projects.** Project orchestration belongs to EmbBuild. `embcc` compiles translation units and answers questions (§17).
@@ -102,8 +102,8 @@ names where to verify it.
 | Debug info emitted, and what EmbDBG consumes | **DWARF-4** line, frame and local information under `-g`. **EmbDBG** (`tools/embdbg/`) reads it back: symbolize, backtrace, disassemble, inspect locals, analyse a kernel crash dump, a TUI — no gdb in the loop. Aggregate type DIEs are the remaining producer gap. This answers open question 3. |
 | Which parts of EmbLinkOS / emlibc it compiles today | **All of both** — and emlibc is now a 200-line *backend* of EmbCC's own C library rather than a separate one (§11, `docs/language/libc.md`). The kernel: 89 C units via `embcc`, 6 `.asm` via `embas`, linked by `embld` — no gcc, no nasm, no `ld` — booting to the desktop behaviourally identical to the gcc build, at `-O0`, `-O1` and `-O2`. **emlibc**, including real `fdlibm` floating point (38 units), compiled on the OS and self-hosting. Plus **libstdc++** (193/193 objects on both targets). |
 | Status of the KM1 self-build milestone | **Host half done.** `tools/gen-kernel-manifest.sh` generates a 96-target EmbBuild manifest and `tests/golden/x86_64/embbuild-kernel.sh` (opt-in, `EMBCC_KM1=1`) walks it to a higher-half `kernel.elf` that boots in QEMU. KM2/KM3 stay OS-side. |
-| Existing test suite and pass rate | 65 golden scripts plus per-target execution corpora: **195/195 on x86_64, 170/170 on AArch64**, run by `make test` / `make test-arm64`. Both are release gates; `EMBCC_VERIFY=1` runs the IR verifier after every optimizing compile for the whole suite. |
-| Which hosts it currently runs on | **macOS arm64** (primary development), **Linux x86_64** (CI/test), and **EmbLinkOS x86_64** — where it compiles and links its own sixteen sources into a byte-identical `embcc`. |
+| Existing test suite and pass rate | 87 golden scripts plus per-target execution corpora: **220/220 on x86_64, 190/190 on AArch64** (2026-09-22), run by `make test` / `make test-arm64`. Both are release gates; `EMBCC_VERIFY=1` runs the IR verifier after every optimizing compile for the whole suite. A third entry point, `make check`, is the ~30-second subset used while working; it is not a gate. |
+| Which hosts it currently runs on | **macOS arm64** (primary development), **Linux x86_64** (CI/test), and **EmbLinkOS x86_64** — where it compiles and links its own sources into a byte-identical `embcc`. (Sixteen sources when that was last measured on the metal; the set the host half compiles is **63** as of 2026-09-22.) |
 
 ## 4.1 Evolve or rebuild — ADR-0000
 
@@ -117,9 +117,12 @@ Either way, the existing compiler is an asset: it is the first differential-test
 **Resolved (v0.3): evolve.** EmbCC already separates parsing, semantic
 analysis, IR generation and code generation (§4), so the first branch applies.
 There is no stage-0 compiler and none is needed: EmbCC is its own bootstrap
-oracle, and the fixed point — the compiler compiling its own sixteen sources
-to byte-identical objects, on EmbLinkOS — is a standing test rather than a
-milestone that was passed once.
+oracle, and the fixed point — the compiler compiling its own sources to
+byte-identical objects, on EmbLinkOS — is a standing test rather than a
+milestone that was passed once. The host half (EmbCC compiles all 63 of its
+sources, every object byte-identical across runs, EmbLD links them into a
+fully-resolved image) runs in `make test`; the stage1==stage2 comparison
+itself needs the OS, because stage1 is linked for the EmbLinkOS syscall ABI.
 
 ## 4.2 What has since been built
 
@@ -133,7 +136,7 @@ wish list. Every claim here has a test named for it.
 | **R1** don't duplicate compiler knowledge | **Held.** `embls`, the language server, does not re-implement anything: it forks a child that runs EmbCC's own preprocessor and parser (C, or the C++ front end by suffix) and indexes what they built. Its diagnostics are `embcc -fsyntax-only -fdiagnostics-format=json`. There is one parser. |
 | **R2** record decisions where they are made | **Largely held (v0.3).** `src/driver/remark.c` is the API; `inline`, `mem2reg`, `sccp`, the optimizer's per-function summary and the x86-64 register allocator are producers. `-fremarks[=json]` prints them; `embcc why <decision> [subject]` queries them (§19). Still silent: local and global CSE, DCE, copy propagation, load elimination and store forwarding — they run inside a fixpoint where `changed` doubles as loop control, so counting them means restructuring the loop, and the per-function `opt` summary covers their aggregate effect until then. |
 | **R3** preserve provenance | **Held for the C and C++ front ends and EmbIR (v0.3).** Every AST node, every `cexpr` and every IR instruction carries line *and* column; `struct ir_dbgvar` carries the declaration's position, so a diagnostic about a variable points at the variable. **The verifier enforces it** (§9.1): an instruction with no location and no `synth` mark fails the compile under `EMBCC_VERIFY`, which the whole suite sets. Turning it on found five passes silently dropping locations — see §4.3. What is still not covered: the machine instruction and the emitted byte (§14's chain ends at EmbIR), and `-g` variable location lists under optimization. |
-| **R4** deterministic output | **Held, and it is the strongest test in the project.** The self-host fixed point is byte-identical objects across host and OS, sixteen sources, checked every release. |
+| **R4** deterministic output | **Held, and it is the strongest test in the project.** The self-host fixed point is byte-identical objects across host and OS, checked every release — sixteen sources at the last on-OS run, 63 in the host half today. A second property the fixed point needs, and that nothing tested until 2026-09-22, is that EmbCC's output does not depend on which compiler built EmbCC; `tests/golden/host-agnostic.sh` now checks it, after three unspecified-order expressions in irgen were found to break it. |
 | **R5** don't couple the compiler to EmbLinkOS | **Held.** Nothing in `src/` includes an EmbLinkOS header. |
 | **R6** stages are libraries with contracts | **Held structurally** — `embld`, `embas`, `embdbg`, `embls` and `embcc` are thin drivers over the same libraries, which is why the language server can exist at all. **Not held for dump formats**: there is no `embcc inspect`, and no stage has a textual round-trip form (§4.3). |
 
@@ -322,11 +325,11 @@ Host and target are independent everywhere in the code. No `#ifdef __APPLE__` in
 |---|---|---|---|
 | `x86_64-elf` / `x86_64-emblink` | ELF, EMBX | Primary product target | **Done.** Builds and boots the EmbLinkOS kernel; EMBX emitted by EmbLD. Since D-014 `x86_64-emblink` is a triple in its own right (`__emblink__`), not a synonym for freestanding |
 | `x86_64-linux-gnu` | ELF | Test target: conformance and differential suites against GCC | **Done.** Every test runs against `x86_64-elf-gcc` 16.2 under QEMU (natively where the host is x86-64 Linux) |
-| `aarch64-elf` / `aarch64-emblink` | ELF, EMBX | Second architecture | **Done, early.** `aarch64-emblink` likewise. Own backend and AAPCS64; 170/170 its own suite; referee `aarch64-elf-gcc` 16.2 under QEMU `virt` |
+| `aarch64-elf` / `aarch64-emblink` | ELF, EMBX | Second architecture | **Done, early.** `aarch64-emblink` likewise. Own backend and AAPCS64; 190/190 its own suite; referee `aarch64-elf-gcc` 16.2 under QEMU `virt` |
 | `thumbv7em-none-eabi` / `riscv32-none-elf` | ELF | Bare-metal embedded (where memory/stack budgets matter most) | Later. Note both are 32-bit: the backends assume LP64 today |
-| `x86_64-linux-gnu`, `aarch64-linux-gnu` | ELF | Hosted Linux | **Planned first (D-014).** Three of its five rows exist — ELF, SysV, Itanium/DWARF EH; the gap is the triple, dynamic linking and the system libc |
-| `*-darwin` | Mach-O | Hosted macOS | Planned (D-014). Adds exactly one new thing: a second object format |
-| `x86_64-windows-gnu` | PE/COFF | Hosted Windows, MinGW | Planned (D-014), last. A format, the Microsoft x64 convention, and an unwinder — three new things at once |
+| `x86_64-linux-gnu`, `aarch64-linux-gnu` | ELF | Hosted Linux | **Done, statically (D-014).** Not by linking against glibc: EmbCC's own libc issues raw syscalls (`lib/libc/os/linux`), EmbLD links the static image, and it has **run on a real 6.12 kernel** on both architectures — threads (`clone`), TLS (local-exec, both variants), the filesystem. Still missing: dynamic linking, and the compiler runtime and unwinder, so `__int128` division and C++ exceptions do not link here |
+| `*-darwin` | Mach-O | Hosted macOS | **Done (D-014).** A second object format, which is all it needed; the system linker takes the objects and the programs run natively. Apple's varargs rule (everything on the stack) is the one ABI difference |
+| `x86_64-windows-gnu` | PE/COFF | Hosted Windows, MinGW | **Object format and ABI done; nothing has run (D-014).** COFF objects, the Microsoft x64 convention checked instruction-by-instruction against clang. The third of the three new things — the unwinder — is not written, and there is no libc for it |
 | `*-windows-msvc` | PE/COFF | MSVC ABI | Not scheduled — a second C++ runtime (D-014) |
 
 The Linux ELF test target is deliberate: it lets thousands of test programs be compiled by EmbCC and GCC, run, and compared on a normal CI machine. Without it, differential testing depends on booting EmbLinkOS.
@@ -338,7 +341,7 @@ The Linux ELF test target is deliberate: it lets thousands of test programs be c
 | macOS arm64 | Primary development host | **Done** |
 | Linux x86_64 | CI and test host | **Done** |
 | Windows x86_64 | Portability check, and a target host (D-014) | Later |
-| EmbLinkOS x86_64 | Self-hosting | **Done.** Compiles and links its own sixteen sources on the metal, byte-identical to the host build |
+| EmbLinkOS x86_64 | Self-hosting | **Done.** Compiles and links its own sources on the metal, byte-identical to the host build (sixteen at that measurement; 63 today) |
 
 ---
 
@@ -864,7 +867,7 @@ them through this mapping instead.
 | **M0** baseline and decisions | **Done** (v0.3) | §4 filled; ADR-0000 resolved to *evolve*; open questions 2, 3 and 4 answered below |
 | **M1** C frontend library | **Done, and past its gate** | The gate was "EmbLinkOS + emlibc + EmbCC parse and type-check with zero false errors". All three are not merely parsed but *compiled and run*. Error recovery, structured diagnostics and a `SourceProvider`-less language server landed in `docs/tools/diagnostics.md` T1–T5. Still missing from the gate: `inspect tokens\|pp\|ast\|types`, and 24-hour fuzzing |
 | **M2** EmbIR v1 and x86-64 backend | **Done, except the IR's own contract** | Codegen, inline asm, ELF and EMBX, DWARF line tables: done. The **verifier** exists (`EMBCC_VERIFY=1`). The **textual form** and the **remark API** — both §9.1 MUSTs — do not (§4.3) |
-| **M3** self-hosting and EmbLinkOS | **Done** | `ROADMAP.md` M3. Stage-to-stage byte-identity is a standing test over sixteen sources, on the OS |
+| **M3** self-hosting and EmbLinkOS | **Done** | `ROADMAP.md` M3. Stage-to-stage byte-identity is a standing test on the OS (sixteen sources at its last run there; the host half covers all 63) |
 | **M4** inspect, diagnostics, first "why" | **Half done, and the wrong half** | Diagnostics went far past the gate (stable IDs, JSON, `--explain`, fix-its, `--fix`, warning groups, a dataflow analysis, `embld --doctor`). `inspect`, `why` and the memory/stack reports have not started, because **no pass emits remarks** |
 | **M5** optimizer v1 | **Done as code, not as gate** | mem2reg, SCCP, DCE, CSE/GVN, inlining and a real register allocator all exist and a kernel boots at `-O0`/`-O1`/`-O2`. The gate also requires remarks covering every inlining decision, and differential testing at `-O2` against GCC at scale. Neither is in place |
 | **M6** language server and semantic incremental builds | **Done** | `embls` answers eight LSP methods from the real frontend. USRs, interface hashes and the cross-TU index (§8.2) exist: `embidx stale` is §21 Level 2 — a header edit that changes no observed interface rebuilds nothing |

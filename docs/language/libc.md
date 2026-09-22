@@ -51,7 +51,9 @@ deliberately, so every target gets the same behaviour and a fix lands once.
 | `<assert.h>`, `<inttypes.h>` | complete |
 | `printf` family | complete, including `%a` and `long double` at its own width |
 | `scanf` family | complete, including `%[`, `%n`, `%a` and hex floats |
-| `<wchar.h>`, `<locale.h>`, `<signal.h>`, `<threads.h>` | **not yet** |
+| `<wchar.h>`, `<wctype.h>`, `<uchar.h>` | complete (the substance is UTF-8 conversion — see below) |
+| `<threads.h>` | complete on the eight OS primitives the C++ library uses |
+| `<locale.h>`, `<signal.h>` | **not yet** |
 
 **The acceptance test is the execution corpus.** All **90** x86-64 programs
 in `tests/exec` compile, link and run against this library with **no newlib

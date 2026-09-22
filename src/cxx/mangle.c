@@ -51,7 +51,11 @@ static void put_source(struct mbuf *m, const char *id)
         put(m, u);
         return;
     }
-    char b[16];
+    /* Twenty digits is the widest a 64-bit size_t prints, plus a NUL.
+     * Sixteen was short enough for gcc to prove the result could be
+     * truncated (-Wformat-truncation) -- and a truncated LENGTH in a
+     * mangled name is a name that demangles to something else. */
+    char b[24];
     snprintf(b, sizeof b, "%zu", strlen(id));
     put(m, b);
     put(m, id);

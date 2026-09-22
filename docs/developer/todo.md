@@ -987,13 +987,21 @@ architectures. What that image cannot do:
   is what the kernel's own wake uses — a private wait there keys on
   something the wake never touches and hangs forever. `std::thread`,
   `std::mutex` and `std::atomic::wait` all run on a real kernel in
-  `tests/golden/linux.sh`. What is still missing is **thread-local
-  storage**: EmbCC has no `__thread`, so `CLONE_SETTLS` is unused,
-  `errno` is one variable for the whole process, and
-  `__os_thread_self()` scans a list instead of reading a register.
+  `tests/golden/linux.sh`. Thread-local storage followed (2026-09-22):
+  `CLONE_SETTLS` installs each thread's block, `errno` is per-thread
+  where a runtime sets a thread pointer up, and `__os_thread_self()` is
+  a thread-local load rather than a list scan.
 - **Dynamic linking and PIE.** Static only: no GOT/PLT generation, no
-  `PT_INTERP`, no shared libraries. This is also why `embcc` still does
-  not invoke a linker itself on Linux — the golden test calls `ld`.
+  `PT_INTERP`, no shared libraries.
+- **No compiler runtime and no unwinder.** This is the gap between
+  "the image has no undefined symbols" and "the target is
+  self-sufficient", and only the first was ever checked. A program
+  using `__int128` needs `__multi3`, `__ashlti3`, `__lshrti3`; complex
+  arithmetic needs `__mulxc3`/`__muldc3`; `pow` on doubles needs
+  `__powidf2`; and C++ exceptions need `_Unwind_*`, which also needs
+  `.eh_frame_hdr` in the link script and a `dl_iterate_phdr` or
+  `_dl_find_object` for the unwinder to find it. None of those exist,
+  so those programs do not link on the static Linux target.
 - **The vDSO.** `__os_time` and `__os_clock_ns` enter the kernel on
   every call. Reading the vDSO means parsing the auxiliary vector and an
   ELF image in our own address space; `_start` currently walks past the
@@ -1156,6 +1164,83 @@ Not covered: the IEEE quad path. Nothing currently runs this libc on
 aarch64 — `tests/golden/libc.sh` says so itself — so the 113-bit
 decomposition is compiled and type-checked but never executed. It
 inherits that gap rather than creating one.
+
+## Closed: three declarations the standard allows (2026-09-22)
+
+From an external defect report. Each one is a spelling C permits, that
+real code uses, and that EmbCC rejected -- two of them by crashing.
+`tests/exec/declarators.c` runs all three on both targets and is
+differentially checked against gcc.
+
+**A parenthesized declarator, `int (f)(int);`.** C11 6.7.6 lets a
+declarator be parenthesized anywhere; a header does it to suppress a
+function-like macro of the same name, which is why `(isdigit)(c)` is
+written that way. The parser entered its parenthesized-declarator path
+only when a `*` followed the `(`, so the pointer spelling worked and the
+plain one was "expected a name before '('". The DEFINITION was worse:
+the parameter list after the parentheses was parsed by a path that
+discards parameter names, so the body compiled against whatever the
+previous declaration had left in the shared name array -- a stale
+pointer, and a segfault.
+
+The first fix for that was wrong in an instructive way. Writing the
+names straight into `ps->fn_pnames` looks obviously right and broke
+`void (*signal(int sig, void (*handler)(int)))(int)`: a parameter can
+itself be a parenthesized declarator, so parsing `handler`'s own
+`(int)` overwrote slot 0 while the outer parameter list was still
+filling it, and the real libc's signal() stopped compiling. The array
+is shared by every declarator in flight, so the suffix's names go into
+a local array and are published only when the parentheses held a bare
+name -- `t == outer`, which says nothing was derived inside.
+
+**`_Alignas` before the storage class.** C11 6.7 makes declaration
+specifiers unordered, so `_Alignas(16) static char a[1];` is the same
+declaration as `static _Alignas(16) char a[1];`. Only the second
+parsed. The first crashed: the type-specifier parser consumed the
+alignment, met `static` where a type belonged, returned NULL, and the
+caller dereferenced it. Two fixes, because the crash hid a second bug
+behind it -- once it parsed, the alignment was still DROPPED on the way
+from the block-scope declaration to the global a static local becomes,
+so the declaration was accepted and then not done. `parse_stmt` now
+takes `_Alignas` among the storage specifiers, sema carries
+`user_align` across the promotion, and a NULL from `parse_type_spec` is
+a diagnostic rather than a dereference.
+
+**The address of an element of an array of arrays, in a static
+initializer.** `int *row = &g[1][0];`. Since `a[i]` is built as
+`*(a + i)`, this arrives as `&*(*(g+1) + 0)`, and the constant-address
+resolver had no case for a dereference whose result is an array -- one
+that loads nothing, because an array lvalue decays straight back to the
+address just computed. A table of rows naming its own first element was
+rejected as "not a constant". The same decay one level in, `&st.b[2]`,
+needed the member case as well.
+
+## Open: the runtime libraries the Linux target does not have
+
+See D-014's second amendment. The compiler runtime (`__multi3` and its
+family) is small and testable against libgcc value by value; the
+unwinder is not, and a DWARF CFI interpreter that gets a corner wrong
+does not fail visibly. Neither is written. Until they are, the Linux
+target runs C but not `__int128` multiply/divide and not C++
+exceptions, and `src/link/link.c` says so by name at the link rather
+than printing an undefined symbol nobody has heard of.
+
+Still open from the same report, and not touched here:
+
+- **The libc is not thread-safe.** malloc/free from four threads
+  segfaults; stdio has no locks; libcxx's static-initialization guards
+  assume one thread. The threads are real now, which is exactly why
+  this matters.
+- **`std::cerr` used before initialization**, and `alignas(ostream)` on
+  the `__*_store` objects ignored. Worth checking first: whether the
+  bare-metal harness maps page zero, which would hide every null
+  dereference in the whole exec corpus.
+- **malloc is O(n) per call.** stage1 takes 88 seconds on
+  `src/cxx/parse.c` against 0.4 for gcc on glibc. That is a free-list
+  scan, not a compiler problem.
+- **`-Wclobbered` on ten locals.** clang does not implement it, so the
+  gcc output is needed before deciding; sprinkling `volatile` to quiet
+  a warning nobody has read is how a real setjmp bug gets buried.
 
 ## Closed: a rollback that restored a freed pointer (2026-09-21)
 

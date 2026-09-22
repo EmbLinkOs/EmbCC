@@ -748,6 +748,63 @@ static void define_end_symbols(struct linker *l, Elf64_Addr image_end)
     define_linker_symbol(l, "__kernel_end", image_end);
 }
 
+/* Two whole libraries EmbCC does not have, and whose absence shows up
+ * here — at the link, as a bare undefined name — rather than at the
+ * compile that caused it.
+ *
+ * The compiler runtime (libgcc's `__muldi3` family) is what a backend
+ * calls when an operation has no instruction: 128-bit multiply and
+ * divide, the shifts under them, complex multiplication. The unwinder
+ * (`_Unwind_*`) is what `throw` uses to walk back up the stack. Both
+ * exist on macOS and on EmbLinkOS, where the platform supplies them.
+ * The Linux target supplies neither, because it links against nothing
+ * but our own libc (D-014).
+ *
+ * "undefined symbol '__multi3'" is true and useless. Naming the family
+ * turns it into the one sentence that identifies the gap. Returns the
+ * note, or NULL for an ordinary undefined symbol. */
+static int ends_with(const char *s, const char *suf)
+{
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && strcmp(s + n - m, suf) == 0;
+}
+
+static const char *missing_runtime_note(const char *name)
+{
+    static const char *const rt_suffix[] = {
+        "ti3", "ti2", "di3", "di2", "si3", "si2",     /* integer */
+        "sf2", "df2", "xf2", "tf2",                   /* conversions */
+        "sc3", "dc3", "xc3", "tc3",                   /* complex */
+        "sf3", "df3", "xf3", "tf3", NULL
+    };
+    int i;
+
+    if (name[0] != '_')
+        return NULL;
+    if (strncmp(name, "_Unwind_", 8) == 0 ||
+        strcmp(name, "__gxx_personality_v0") == 0 ||
+        strcmp(name, "__register_frame_info") == 0 ||
+        strcmp(name, "__deregister_frame_info") == 0 ||
+        strcmp(name, "dl_iterate_phdr") == 0)
+        return "this is the stack unwinder, which C++ exceptions need. "
+               "EmbCC has no unwinder of its own and this target links "
+               "against no system one, so `throw` cannot be linked here "
+               "(D-014). Compile with -fno-exceptions, or use the "
+               "EmbLinkOS or macOS target";
+    if (strncmp(name, "__", 2) != 0)
+        return NULL;
+    for (i = 0; rt_suffix[i]; i++)
+        if (ends_with(name, rt_suffix[i]))
+            return "this is a compiler-runtime helper (libgcc's "
+                   "__muldi3 family) — the routine a backend calls for "
+                   "an operation the machine has no instruction for, "
+                   "such as 128-bit multiply or divide. EmbCC does not "
+                   "ship one and this target links against no system "
+                   "one (D-014), so __int128 arithmetic beyond add and "
+                   "subtract cannot be linked here";
+    return NULL;
+}
+
 /* The absolute vaddr of a symbol referenced by a relocation. Undefined
  * weak binds to 0 (TARGET_ABI §4a). A strong undefined is a hard error:
  * the static link has no resolver to defer to. */
@@ -774,6 +831,12 @@ static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
     if (ELF64_ST_BIND(sy->st_info) == STB_WEAK) {
         *is_undef_weak = 1;
         return 0;
+    }
+    {
+        const char *note = missing_runtime_note(name);
+        if (note)
+            die("undefined symbol '%s' (referenced by %s)\n  note: %s",
+                name, o->name, note);
     }
     die("undefined symbol '%s' (referenced by %s)", name, o->name);
     return 0;

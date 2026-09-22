@@ -306,7 +306,14 @@ else
  * asked to prove that every number we wrote down is the number the
  * kernel actually uses. Nothing is printed on success: a _Static_assert
  * that holds produces no code, and one that does not stops the build
- * naming the pair that disagreed. */
+ * naming the pair that disagreed.
+ *
+ * _GNU_SOURCE first: glibc hides O_DIRECTORY and the *at flags behind
+ * it, and without it this file did not compile at all -- which is how
+ * a check that had never run could look like a check that passed.
+ * backend.h next: the __OS_O_* names compared below are the SEAM's,
+ * not the kernel's, and nothing here declared them. */
+#define _GNU_SOURCE 1
 #include <asm/unistd.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -314,6 +321,7 @@ else
 #include <linux/futex.h>
 #include <asm/ioctls.h>
 #include <stddef.h>
+#include "../backend.h"
 #include "syscall.h"
 
 #define SAME(ours, theirs) \

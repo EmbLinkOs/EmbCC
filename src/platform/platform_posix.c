@@ -20,11 +20,15 @@
  *
  * __APPLE__ / __linux__ inside THIS file is what the seam is for --
  * the rule is that no file above it may ask. */
+#include <unistd.h>            /* isatty, readlink */
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
-#elif defined(__linux__)
-#include <unistd.h>
 #endif
+
+int plat_stderr_is_terminal(void)
+{
+    return isatty(2);
+}
 
 const char *plat_self_path(void)
 {

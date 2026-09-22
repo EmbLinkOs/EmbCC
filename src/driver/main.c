@@ -54,9 +54,11 @@ static void print_version(void)
            "-emblink, -linux-gnu and -apple-darwin, and any unknown "
            "--target lists every triple (D-014).\n");
     printf("Hosted: Linux builds a STATIC image with no glibc under it "
-           "(lib/libc/os/linux issues syscalls; make libc-linux-x86_64), "
-           "macOS emits Mach-O objects the system linker accepts. Windows "
-           "has the triple and its macros, but no COFF writer yet.\n");
+           "(lib/libc/os/linux issues syscalls; make libc-linux-x86_64) and "
+           "it has run on a real kernel; macOS emits Mach-O objects the "
+           "system linker accepts. Windows emits COFF objects in the "
+           "Microsoft x64 convention, but nothing has been executed there "
+           "yet and there is no libc for it.\n");
     printf("C++ (.cc/.cpp/.cxx/.C, or -x c++): in progress toward C++20 "
            "with libstdc++ (docs/language/cpp-levels.md) — namespaces, overloading, "
            "references, classes with constructors and destructors, "
@@ -156,6 +158,15 @@ static int stv_of(const char *v)
     if (!strcmp(v, "internal"))  return STV_INTERNAL;
     if (!strcmp(v, "protected")) return STV_PROTECTED;
     return STV_DEFAULT;
+}
+
+/* Mach-O's section alignment is a power-of-two EXPONENT. */
+static int log2_align(int a)
+{
+    int n = 0;
+    while ((1 << n) < a && n < 14)
+        n++;
+    return n;
 }
 
 static int object_format_ready(void)
@@ -672,6 +683,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                    char *buf; } named[64];
     int nnamed = 0;
     int data_len = 0, bss_len = 0;
+    /* The alignment each output section must claim: the strictest of
+     * anything placed in it. Emitting a fixed number here was silent
+     * and wrong -- an object declared aligned(4096) was laid out
+     * correctly WITHIN the section and then the linker was told the
+     * section only needed 8, so it placed it wherever that allowed and
+     * the object came out misaligned. Nothing failed; the address was
+     * simply not what was asked for. */
+    int data_align = 1, bss_align = 1;
     /* Thread-local objects get their own pair. The offsets recorded for
      * them are within the THREAD BLOCK, not within this image: the
      * linker gathers every .tdata/.tbss into PT_TLS, and each thread
@@ -680,7 +699,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->defined)
             continue;
+        /* The object's own alignment is the stricter of its type's and
+         * what it asked for with aligned(N) / _Alignas(N). */
         int align = ty_align(g->ty);
+        if (g->user_align > align)
+            align = g->user_align;
         g->in_bss = !g->has_init;
         g->named = 0;
         int *len = g->in_bss ? &bss_len : &data_len;
@@ -729,6 +752,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         *len = (*len + align - 1) & ~(align - 1);
         g->off = *len;
         *len += ty_size(g->ty);
+        if (!g->is_tls && !g->section) {
+            int *sa = g->in_bss ? &bss_align : &data_align;
+            if (align > *sa)
+                *sa = align;
+        }
     }
     for (int k = 0; k < nnamed; k++)
         if (!named[k].nobits && named[k].len)
@@ -947,12 +975,17 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         if (rodata)
             m_rodata = machow_add_section(mw, "__TEXT", "__const", S_REGULAR,
                                           rodata, iu->rodata_len, 0);
+        /* Mach-O records the alignment as a LOG2, so the same number
+         * that is 4096 in ELF is 12 here -- and a fixed 3 (eight bytes)
+         * discarded whatever an object had asked for. */
         if (data_len)
             m_data = machow_add_section(mw, "__DATA", "__data", S_REGULAR,
-                                        data, (unsigned long long)data_len, 3);
+                                        data, (unsigned long long)data_len,
+                                        log2_align(data_align));
         if (bss_len)
             m_bss = machow_add_section(mw, "__DATA", "__bss", S_ZEROFILL,
-                                       NULL, (unsigned long long)bss_len, 3);
+                                       NULL, (unsigned long long)bss_len,
+                                       log2_align(bss_align));
         for (int k = 0; k < nnamed; k++)
             named[k].ndx = machow_add_section(
                 mw, "__DATA", named[k].name,
@@ -1320,13 +1353,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                        IMAGE_SCN_CNT_INITIALIZED_DATA |
                                        IMAGE_SCN_MEM_READ |
                                        IMAGE_SCN_MEM_WRITE,
-                                       data, (unsigned)data_len, 8);
+                                       data, (unsigned)data_len, data_align);
         if (bss_len)
             c_bss = coffw_add_section(cw, ".bss",
                                       IMAGE_SCN_CNT_UNINITIALIZED_DATA |
                                       IMAGE_SCN_MEM_READ |
                                       IMAGE_SCN_MEM_WRITE,
-                                      NULL, (unsigned)bss_len, 8);
+                                      NULL, (unsigned)bss_len, bss_align);
 
         /* 3. symbols. .rdata gets a section symbol, because a string's
          * address is relocated against the SECTION rather than against
@@ -1435,18 +1468,22 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                     text.p, (Elf64_Xword)text.len, 16);
     int rodata_ndx = 0;
     if (rodata)
+        /* 16, not 1: .rodata holds string literals (which need 1) and
+         * also long double and 128-bit constants, which do not. */
         rodata_ndx = elfw_add_section(w, ".rodata", SHT_PROGBITS,
                                       SHF_ALLOC, rodata,
-                                      (Elf64_Xword)iu->rodata_len, 1);
+                                      (Elf64_Xword)iu->rodata_len, 16);
     int data_ndx = 0, bss_ndx = 0;
     if (data_len)
         data_ndx = elfw_add_section(w, ".data", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_WRITE, data,
-                                    (Elf64_Xword)data_len, 8);
+                                    (Elf64_Xword)data_len,
+                                    (Elf64_Xword)data_align);
     if (bss_len)
         bss_ndx = elfw_add_section(w, ".bss", SHT_NOBITS,
                                    SHF_ALLOC | SHF_WRITE, NULL,
-                                   (Elf64_Xword)bss_len, 8);
+                                   (Elf64_Xword)bss_len,
+                                   (Elf64_Xword)bss_align);
     /* The thread-block template. SHF_TLS is the whole difference: with
      * it the linker puts these in PT_TLS and every thread gets its own
      * copy; without it they would be one shared object, which is the

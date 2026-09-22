@@ -484,8 +484,12 @@ static int cxx_number(struct lexer *lx, struct token *t)
     memcpy(digits, buf, dl);
     digits[dl] = 0;
     if (ud) {
-        if (*suf != '_')
-            ; /* reserved for the standard library (10ms, 1.5i): allowed */
+        if (*suf != '_') {
+            /* A suffix not starting with '_' is reserved for the
+             * standard library (10ms, 1.5i) and is allowed here. An
+             * empty statement said this before, which gcc reads as a
+             * probable missing body (-Wempty-body). */
+        }
         t->ud_suffix = xstrndup(suf, strlen(suf));
         t->ud_spelling = digits;
     }
