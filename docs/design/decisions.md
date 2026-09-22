@@ -502,6 +502,26 @@ and `-O2`, and the whole ARM kernel) found 293 of 293 identical.
 D-011's reopen condition — the layout makes that sharing a later, visible
 step (a `src/arch/` file both use) rather than a precondition.
 
+*(That step was taken on 2026-09-22, and the reopen condition is what
+justified it. `src/arch/regalloc.c` is the register allocator, lifted
+out of `src/arch/x86_64/codegen.c` unchanged: real backward liveness, a
+precise interference graph, Chaitin-Briggs simplify ordering and
+colouring with move-coalescing preferences. A machine now supplies a
+`struct ra_target` — which registers may be handed out and in what
+order, which survive a call, whether a narrow load is a plain move —
+and nothing else.*
+
+*The discipline was D-012's own: a pure move, verified by comparing
+EMITTED BYTES rather than test results. `tools/x86-identity.sh` found
+808 objects byte-identical and none different, which says nothing
+changed at all, where a green suite would only say nothing it covers
+changed.*
+
+*Derived from a WORKING backend, as D-011 asked, rather than invented
+for a second one: the allocator had been in service on x86-64 for a
+while before it was made shareable, so the shape is one that already
+earned its keep.)*
+
 ## D-013 — C++: **C++20 and libstdc++, on both architectures, lowered through C**
 
 **Decided (2026-09-18).** D-008's "C, then C++" becomes concrete. The
