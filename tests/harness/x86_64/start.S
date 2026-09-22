@@ -45,6 +45,31 @@ _start:
     cmp     $512, %ecx
     jne     1b
 
+    /* ... except the FIRST 2 MiB, which is split into 4 KiB pages so
+     * that the one at address 0 can be left absent.
+     *
+     * A harness that identity-maps from zero makes a null dereference
+     * succeed: `*(int *)0 = 1` writes, reads back, and the test passes.
+     * That is not a hypothetical -- it means no test in tests/exec or
+     * tests/cxx could ever detect one, on the target where most of them
+     * run. With this page gone the store faults, and with no IDT the
+     * fault escalates to a triple fault, which -no-reboot turns into
+     * QEMU exiting and run.sh reports as 125, "the guest crashed".
+     *
+     * Only the first page goes: the image is linked at 1 MiB and
+     * everything else in the low 2 MiB stays mapped exactly as before. */
+    mov     $pt0, %eax
+    or      $0x3, %eax                 /* a TABLE pointer, not a 2 MiB page */
+    mov     %eax, pd
+    mov     $1, %ecx                   /* entry 0 stays zero: NULL is absent */
+3:  mov     %ecx, %eax
+    shl     $12, %eax
+    or      $0x3, %eax                 /* present | writable */
+    mov     %eax, pt0(,%ecx,8)
+    inc     %ecx
+    cmp     $512, %ecx
+    jne     3b
+
     mov     $pml4, %eax
     mov     %eax, %cr3
     mov     %cr4, %eax
@@ -110,3 +135,4 @@ gdt_ptr:
 pml4:   .fill 4096, 1, 0
 pdpt:   .fill 4096, 1, 0
 pd:     .fill 4096, 1, 0
+pt0:    .fill 4096, 1, 0               /* the first 2 MiB, 4 KiB at a time */

@@ -1215,6 +1215,73 @@ address just computed. A table of rows naming its own first element was
 rejected as "not a constant". The same decay one level in, `&st.b[2]`,
 needed the member case as well.
 
+## Closed: std::cerr before initialization, and the harness that hid it (2026-09-22)
+
+Two defects, and the second is why the first survived a green suite.
+
+**The harness mapped address zero.** Both bare-metal harnesses did:
+x86-64 identity-mapped the low 1 GiB with 2 MiB pages, aarch64 mapped
+the whole first gigabyte as one Device block "for virt's MMIO window",
+which nothing in the harness touches because all its I/O is
+semihosting. A bare-metal image has no kernel to object, so
+`*(int *)0 = 1` wrote, read back, and the program carried on. No test
+in `tests/exec` or `tests/cxx` could detect a null dereference, on
+either target, and none ever had.
+
+x86-64 now splits the first 2 MiB into 4 KiB pages with entry 0 absent
+(the image is at 1 MiB, so nothing else moves); aarch64 leaves
+level-1 entry 0 invalid. aarch64 also got what it had never had: an
+exception vector table. `VBAR_EL1` was zero, so any trap spun on an
+unmapped vector page until the 20-second timeout, and an alignment
+abort, an illegal instruction and a null dereference were all "the test
+hung". `harness_fault` prints ESR, FAR and ELR and exits 125, which the
+runner already reads as "the guest crashed".
+
+**And with the page gone, `tests/golden/libcxx-std.sh` failed at once.**
+The fault was in `std::__ios_init::__ios_init` with CR2 = 0, on the
+instruction that loads `std::cerr`. `cerr` is declared
+
+    ostream &cerr = *reinterpret_cast<ostream *>(__cerr_store);
+
+which is a constant address -- but the initializer is an LVALUE cast, and
+`c_const` answered "not constant" for any lvalue cast without looking,
+so the assignment went into `.init_array` and `cerr` lived in `.bss`.
+Every translation unit that includes `<iostream>` has its own
+`__ios_init`, whose constructor calls `cerr.setf(unitbuf)`, and
+`.init_array` entries from different units run in an unspecified order.
+The unit that ran first stored through a null `cerr`. The real
+libstdc++ has no such window precisely because its stream references
+are statically initialized.
+
+The fix is in `addr_const`/`c_const`: an lvalue cast renames storage
+rather than moving it, so its ADDRESS is as constant as the operand's --
+which is the right question, because a reference lowers to a pointer.
+`addr_const` also learned `*(T *)x` for a constant pointer and `p + n`
+for a constant n, both of which the same test then found.
+
+Making those initializers static exposed an ordering bug behind it: the
+C++ emitter writes definitions from a worklist, so a `static` object was
+written only when something asked for it -- after the thing that asked.
+While every such initializer was dynamic that never showed. Referenced
+statics now get a tentative definition in the forward-declaration pass,
+carrying their `section` and `aligned` attributes, since alignment
+belongs to the object and not to the initializer.
+
+`tests/golden/static-init.sh` covers all of it on both targets: that a
+unit whose initializers are all constant addresses emits no
+`__cx_global_init` at all, that each reference lands in `.data` with a
+relocation rather than in `.bss`, that a static can be named before it
+is defined and keep its `alignas`, and -- the one that matters most --
+that a null dereference still faults.
+
+**And a race in the suite, found by the same runs.** An aarch64 run
+failed in `cxx-libsupcxx.sh` with "embcc: No such file or directory".
+`host-agnostic.sh` builds EmbCC twice with two host compilers, and the
+Makefile's `embcc` target writes `./embcc` -- the binary every other
+test in the parallel run is executing. The Makefile now has a
+`$(BUILD)/embcc` target that links inside the object directory, so with
+`BUILD=` pointing somewhere private the build is entirely its own.
+
 ## Open: the runtime libraries the Linux target does not have
 
 See D-014's second amendment. The compiler runtime (`__multi3` and its
@@ -1231,10 +1298,6 @@ Still open from the same report, and not touched here:
   segfaults; stdio has no locks; libcxx's static-initialization guards
   assume one thread. The threads are real now, which is exactly why
   this matters.
-- **`std::cerr` used before initialization**, and `alignas(ostream)` on
-  the `__*_store` objects ignored. Worth checking first: whether the
-  bare-metal harness maps page zero, which would hide every null
-  dereference in the whole exec corpus.
 - **malloc is O(n) per call.** stage1 takes 88 seconds on
   `src/cxx/parse.c` against 0.4 for gcc on glibc. That is a free-list
   scan, not a compiler problem.

@@ -102,6 +102,15 @@ all: embcc embread embld embas embls embidx
 embcc: $(OBJS) $(EMBDBG_CORE)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
 
+# The same compiler, linked INSIDE the object directory rather than at
+# ./embcc. tests/golden/host-agnostic.sh builds EmbCC twice, with two
+# different host compilers, and it runs in parallel with every other
+# test -- so it must not replace the ./embcc those tests are running.
+# With BUILD= pointing somewhere private, this target is entirely its
+# own: `make CC=clang BUILD=/tmp/x /tmp/x/embcc`.
+$(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
+
 # embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
 # the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)
 # the compiler uses produces, so the toolchain owns the whole build (drops nasm).

@@ -76,20 +76,19 @@ else
   depend on its host compiler"
 fi
 
-# Two builds, each into its own object directory so neither disturbs the
-# tree's own build.
+# Two builds, each into its own object directory, and each LINKED there
+# too -- $(BUILD)/embcc, not ./embcc. That matters: this test runs
+# concurrently with every other one, and the Makefile's plain `embcc`
+# target writes the binary the rest of the suite is running. It did, and
+# an aarch64 run failed with "embcc: No such file or directory" from a
+# test that had nothing to do with this one.
 for n in 1 2; do
     eval "c=\$cc$n"
-    ( cd "$EMBCC_ROOT" && make CC="$c" BUILD="$out/b$n" \
-        "$out/embcc$n" ) > "$out/build$n.log" 2>&1 || {
-        # The Makefile's embcc target writes ./embcc, so build it and
-        # move it rather than fighting the rule.
-        ( cd "$EMBCC_ROOT" && make CC="$c" BUILD="$out/b$n" embcc ) \
-            > "$out/build$n.log" 2>&1 && cp "$EMBCC_ROOT/embcc" \
-            "$out/embcc$n"; } || {
+    ( cd "$EMBCC_ROOT" && make CC="$c" BUILD="$out/b$n" "$out/b$n/embcc" ) \
+        > "$out/build$n.log" 2>&1 || {
         echo "FAIL: could not build EmbCC with $c:"
         tail -15 "$out/build$n.log"; exit 1; }
-    [ -f "$out/embcc$n" ] || cp "$EMBCC_ROOT/embcc" "$out/embcc$n"
+    cp "$out/b$n/embcc" "$out/embcc$n"
 done
 
 # The corpus: every exec test, which is the widest body of C in the tree
