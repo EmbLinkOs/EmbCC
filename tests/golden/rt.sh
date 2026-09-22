@@ -29,7 +29,86 @@ EMBCC=${EMBCC:-$EMBCC_ROOT/embcc}
 out=$EMBCC_ROOT/tests/golden/out/rt
 rm -rf "$out"; mkdir -p "$out"
 
-[ "$ARCH" = x86_64 ] || { echo "skipped: the runtime harness here is x86-64"
+# ---- aarch64: binary128, against libgcc's soft-float --------------------
+#
+# A different half of the same library, so it lives in the same test.
+# On aarch64 `long double` is IEEE binary128 and the machine has no
+# instruction for ANY of it -- not the arithmetic, not the comparisons,
+# not the conversions -- so `lib/rt/softtf.c` implements the format from
+# the bits up. That is the kind of code where being nearly right is
+# indistinguishable from being right until somebody's subnormal arrives,
+# so it is compared against libgcc's implementation of the same format,
+# operation by operation, over a corpus built out of the edges: the
+# boundary between normal and subnormal, values one ulp apart, the
+# largest finite, ties that decide a rounding, and every combination of
+# zero, infinity and NaN.
+if [ "$ARCH" = aarch64 ]; then
+    LIBDIR=$EMBCC_ROOT/build/libc/linux-aarch64
+    [ -f "$LIBDIR/librt.a" ] || {
+        echo "skipped: no $LIBDIR/librt.a (make libc-linux-aarch64)"
+        exit 0; }
+    "$EMBCC_ROOT/tests/harness/linux/run.sh" aarch64 --check > /dev/null 2>&1 || {
+        echo "skipped: running it needs a kernel for tests/harness/linux"
+        exit 0; }
+    GCC=${EMBCC_AARCH64_GCC:-aarch64-elf-gcc}
+    command -v "$GCC" > /dev/null 2>&1 || {
+        echo "skipped: no $GCC to be the reference"; exit 0; }
+    LIBGCC=$("$GCC" -print-libgcc-file-name 2>/dev/null || echo "")
+    [ -f "$LIBGCC" ] || { echo "skipped: no libgcc.a"; exit 0; }
+    LD=${EMBCC_AARCH64_LD:-aarch64-elf-ld}
+    TSRC=$EMBCC_ROOT/tests/golden/rt/rttf.c
+
+    "$GCC" -O1 -c "$TSRC" -I"$EMBCC_ROOT/lib/libc/include" -o "$out/ref.o" \
+        2> "$out/ref-cc.log" || {
+        echo "skipped: $GCC will not build the corpus:"
+        head -5 "$out/ref-cc.log"; exit 0; }
+    #  libgcc LAST: it is what supplies the soft-float the reference is
+    #  meant to use, and our librt defines the same names.
+    "$LD" -static -o "$out/ref" "$LIBDIR/crt1.o" "$out/ref.o" \
+        "$LIBDIR/libc.a" "$LIBGCC" 2> "$out/ref-ld.log" || {
+        echo "FAIL: linking the gcc reference:"; cat "$out/ref-ld.log"
+        exit 1; }
+    set +e
+    "$EMBCC_ROOT/tests/harness/linux/run.sh" aarch64 "$out/ref" \
+        > "$out/ref.txt" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" = 42 ] || { echo "FAIL: the reference exited $rc"
+                        tail -5 "$out/ref.txt"; exit 1; }
+
+    "$EMBCC" --target=aarch64-linux-gnu -O1 -c "$TSRC" \
+        -I"$EMBCC_ROOT/lib/libc/include" -o "$out/ours.o" \
+        2> "$out/ours-cc.log" || {
+        echo "FAIL: embcc could not build the corpus:"
+        cat "$out/ours-cc.log"; exit 1; }
+    "$LD" -static -o "$out/ours" "$LIBDIR/crt1.o" "$out/ours.o" \
+        "$LIBDIR/libc.a" "$LIBDIR/librt.a" 2> "$out/ours-ld.log" || {
+        echo "FAIL: linking ours:"; cat "$out/ours-ld.log"
+        echo "      an undefined __addtf3 here means lib/rt/softtf.c did"
+        echo "      not make it into librt.a"
+        exit 1; }
+    set +e
+    "$EMBCC_ROOT/tests/harness/linux/run.sh" aarch64 "$out/ours" \
+        > "$out/ours.txt" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" = 42 ] || { echo "FAIL: our build exited $rc"
+                        tail -5 "$out/ours.txt"; exit 1; }
+
+    if ! diff -u "$out/ref.txt" "$out/ours.txt" > "$out/diff.txt"; then
+        echo "FAIL: binary128 disagrees with libgcc's soft-float:"
+        head -20 "$out/diff.txt"
+        echo "      ($(grep -c '^-' "$out/diff.txt") of $(wc -l < "$out/ref.txt") lines)"
+        exit 1
+    fi
+    echo "binary128: $(wc -l < "$out/ref.txt" | tr -d ' ') lines identical to
+libgcc's soft-float -- add, subtract, multiply, divide and all six
+comparisons over 1024 ordered pairs, and every conversion to and from
+float, double, 64-bit and 128-bit integers"
+    exit 0
+fi
+
+[ "$ARCH" = x86_64 ] || { echo "skipped: no runtime reference for $ARCH"
                           exit 0; }
 LIBDIR=$EMBCC_ROOT/build/libc/linux-x86_64
 [ -f "$LIBDIR/librt.a" ] || {

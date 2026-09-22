@@ -1,23 +1,21 @@
-/* 128-bit integers and x87 long double, and complex long double.
+/* `long double`: the 128-bit conversions, and complex.
  *
- * x86-64 ONLY, and the guard below is not caution -- it is the whole
- * reason this is a separate file. `long double` means two different
- * types on the two targets EmbCC has:
+ * `long double` means two different types on the two targets EmbCC has,
+ * and this file is split down that line:
  *
- *   x86-64   the x87 80-bit format: a 64-bit mantissa, done in
- *            HARDWARE, so the routines here are a few instructions of
- *            ordinary arithmetic.
- *   aarch64  IEEE binary128: a 113-bit mantissa with no instruction
- *            behind it, so even `a + b` is a call to __addtf3 and a
- *            file like this one would need a soft-float implementation
- *            underneath it before it could compile at all.
+ *   x86-64   the x87 80-bit format, a 64-bit mantissa the HARDWARE
+ *            does. The conversions below are a few instructions of
+ *            ordinary arithmetic, and they are guarded because there is
+ *            no 80-bit type on the other machine to write them for.
+ *   aarch64  IEEE binary128, a 113-bit mantissa with no instruction
+ *            behind it. Its arithmetic and conversions are softtf.c,
+ *            and the conversions here would be a second, worse copy.
  *
- * So the `tf` half of the runtime is not here. It is not forgotten
- * either: `docs/developer/todo.md` records that aarch64-linux has no
- * long double runtime, and a program that needs one gets an undefined
- * symbol that `src/link/link.c` explains by name.
+ * The COMPLEX half is built for both, because it needs no conversions:
+ * it is arithmetic on `long double`, which one machine does in hardware
+ * and the other does through softtf.c. Only the symbol name differs.
  *
- * What makes the x86-64 versions short is that a 64-bit integer fits
+ * What makes the x86-64 conversions short is that a 64-bit integer fits
  * EXACTLY in an x87 mantissa, so splitting a 128-bit value in half and
  * converting the halves separately loses nothing: each conversion is
  * exact, the scaling by 2^64 is an exponent adjustment, and the single
@@ -89,12 +87,26 @@ s128 __fixxfti(long double a)
     return w.s;
 }
 
+#endif   /* __x86_64__ : the conversions above are x87's */
+
 /* ---- complex long double -------------------------------------------------
  *
- * The same two algorithms as complex.c, at the third width. They are
- * written out rather than shared through a macro because there are only
- * two of them and a macro that expands to a hundred lines is harder to
- * read than the lines. See complex.c for why each step is there. */
+ * The same two algorithms as complex.c, at the third width -- and this
+ * half is built for BOTH targets, because it needs no conversions: it
+ * is arithmetic on `long double`, which x86-64 does in hardware and
+ * aarch64 does through softtf.c. Only the NAME differs, because libgcc
+ * names these after the mode and the two machines' long double is not
+ * the same mode: `xf` is x87's 80-bit, `tf` is IEEE binary128.
+ *
+ * See complex.c for why each step is there. */
+#ifdef __x86_64__
+#define CMUL __mulxc3
+#define CDIV __divxc3
+#else
+#define CMUL __multc3
+#define CDIV __divtc3
+#endif
+
 static int is_nan_l(long double x) { return x != x; }
 static int is_inf_l(long double x)
 {
@@ -111,8 +123,8 @@ static long double copysign_l(long double m, long double s)
     return a;
 }
 
-long double _Complex __mulxc3(long double a, long double b,
-                              long double c, long double d)
+long double _Complex CMUL(long double a, long double b,
+                          long double c, long double d)
 {
     long double ac = a * c, bd = b * d, ad = a * d, bc = b * c;
     long double re = ac - bd, im = ad + bc;
@@ -153,8 +165,8 @@ long double _Complex __mulxc3(long double a, long double b,
     return z;
 }
 
-long double _Complex __divxc3(long double a, long double b,
-                              long double c, long double d)
+long double _Complex CDIV(long double a, long double b,
+                          long double c, long double d)
 {
     long double re, im, denom, ratio;
     long double _Complex z;
@@ -196,10 +208,3 @@ long double _Complex __divxc3(long double a, long double b,
     __imag__ z = im;
     return z;
 }
-
-#else
-
-/* aarch64: nothing here, and an empty translation unit is not C. */
-typedef int embcc_rt_ldouble_is_x86_only;
-
-#endif

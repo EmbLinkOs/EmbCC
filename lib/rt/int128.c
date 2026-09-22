@@ -18,29 +18,11 @@
  * off the top of the result -- so the only full 64x64->128 product
  * needed is al*bl, and that one is done in four 32-bit pieces because
  * neither the C language nor this library may assume a wider type. */
-static u64 mul64_hi(u64 a, u64 b, u64 *lo_out)
-{
-    u64 al = a & 0xFFFFFFFFULL, ah = a >> 32;
-    u64 bl = b & 0xFFFFFFFFULL, bh = b >> 32;
-
-    u64 ll = al * bl;
-    u64 lh = al * bh;
-    u64 hl = ah * bl;
-    u64 hh = ah * bh;
-
-    /* The two middle products each straddle bit 32, so they are added
-     * in with a carry out of the low half rather than simply shifted. */
-    u64 mid = (ll >> 32) + (lh & 0xFFFFFFFFULL) + (hl & 0xFFFFFFFFULL);
-
-    *lo_out = (ll & 0xFFFFFFFFULL) | (mid << 32);
-    return hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
-}
-
 u128 __multi3(u128 a, u128 b)
 {
     u64 al = lo64(a), ah = hi64(a);
     u64 bl = lo64(b), bh = hi64(b);
-    u64 lo, hi = mul64_hi(al, bl, &lo);
+    u64 lo, hi = rt_mul64(al, bl, &lo);
 
     hi += ah * bl + al * bh;       /* the cross terms, low 64 bits only */
     return mk(hi, lo);

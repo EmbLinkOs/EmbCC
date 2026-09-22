@@ -1481,27 +1481,62 @@ has read is how a real setjmp bug gets buried. If the gcc output names
 a site outside those eleven, it is worth a second look -- paste it and
 it gets one.
 
-## Open: the aarch64 `long double` runtime, and the unwinder
+## Closed: binary128 in software (2026-09-22)
 
-Two things the Linux target still cannot link, both for the same
-reason: each is a project rather than a file, and each fails in a way
-nothing casual sees.
+`lib/rt/softtf.c`. On aarch64 `long double` is IEEE binary128 and the
+machine has no instruction for any of it -- not the arithmetic, not the
+comparisons, not the conversions -- so every one of the 22 symbols the
+backend can emit is implemented from the bits up: add, subtract,
+multiply, divide, the six comparisons, and conversions to and from
+float, double, 32- and 64-bit integers and `__int128`.
 
-- **`__addtf3`, `__multc3`, `__fixtfti`, `__floattitf` and their
-  neighbours,** on aarch64 only. There `long double` is IEEE binary128
-  with no instruction behind it, so this is a soft-float
-  implementation. x86-64 Linux links every runtime routine its backend
-  can emit; aarch64 Linux links all of them except those seven.
-- **The unwinder** (`_Unwind_*`), plus `.eh_frame_hdr` in the link
-  script and a `dl_iterate_phdr` for the tables. A DWARF CFI
-  interpreter that gets a corner wrong does not fail visibly -- it
-  unwinds into the wrong frame -- so it lands only against a real
-  differential oracle. Until then C++ exceptions do not link on Linux;
-  `-fno-exceptions` does.
+Same rule as the rest of the library, one level harder: it may not use
+the type it implements. Every routine takes and returns `long double`,
+because the ABI passes a binary128 in a v register and the parameters
+have to match, but the value goes through a union to its bits on the
+way in and back on the way out, and nothing between is a floating-point
+operation. One `a * b` here would be a call to `__multf3`, which is
+this file.
 
-`src/link/link.c` names both families at the link, with what the
-routine is and which targets have it, rather than printing an undefined
-symbol nobody has heard of.
+It matches **libgcc's soft-float on all 5362 lines** of
+`tests/golden/rt/rttf.c`: 1024 ordered pairs of 32 values chosen at the
+edges -- the boundary between normal and subnormal, values one ulp
+apart, the largest finite, ties that decide a rounding, infinities and
+NaNs -- plus every conversion both ways. aarch64 Linux now links every
+runtime routine its backend can emit, as x86-64 already did.
+
+Two bugs the corpus found, both invisible to a smaller test:
+
+- **The multiply folded away 125 bits** of a 226-bit product when only
+  109 were spare. Not a rounding error -- the low bits were discarded
+  before anything could round with them, so `1 * (1 + 1ulp)` came back
+  as `1 + 8192ulp` while the exponent stayed right.
+- **The divide's exponent was one too large**, because the loop tests
+  before shifting and so yields the integer part first. Every quotient
+  was exactly half of what it should be, which `1 / 1 == 0.5` says more
+  plainly than any reasoning about shift counts.
+
+And one build bug, which is the more interesting of the three:
+`libc.a` was archived from `*.o` in a directory the runtime objects
+were also written into, so on any REBUILD it swallowed them. The effect
+was that the gcc reference, linked against our libc, picked up OUR
+complex routines instead of libgcc's -- and the comparison reported
+10683 of 10683 identical. A test passing because it was comparing
+something with itself. The runtime objects build into their own
+subdirectory now.
+
+## Open: the unwinder
+
+One thing the Linux target still cannot link, and it is a project
+rather than a file.
+
+**The unwinder** (`_Unwind_*`), plus `.eh_frame_hdr` in the link script
+and a way to find it at run time. A DWARF CFI interpreter that gets a
+corner wrong does not fail visibly -- it unwinds into the wrong frame
+-- so it lands only against a real differential oracle. Until then C++
+exceptions do not link on Linux; `-fno-exceptions` does, and
+`src/link/link.c` says which is which at the link rather than printing
+an undefined symbol nobody has heard of.
 
 Still open from the same report, and not touched here:
 

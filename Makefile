@@ -322,13 +322,14 @@ libc-linux-x86_64: embcc
 	    $(BUILD)/libc/linux-x86_64/*.o
 	@./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-x86_64/crt1.o
+	@mkdir -p $(BUILD)/libc/linux-x86_64/rt
 	@for f in $(RT_SRCS); do \
-	    o=$(BUILD)/libc/linux-x86_64/rt_$$(basename $$f .c).o; \
+	    o=$(BUILD)/libc/linux-x86_64/rt/$$(basename $$f .c).o; \
 	    ./embcc --target=x86_64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-x86_64/librt.a
 	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/linux-x86_64/librt.a \
-	    $(BUILD)/libc/linux-x86_64/rt_*.o
+	    $(BUILD)/libc/linux-x86_64/rt/*.o
 	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + crt1.o"
 
 libc-linux-aarch64: embcc
@@ -342,13 +343,14 @@ libc-linux-aarch64: embcc
 	    $(BUILD)/libc/linux-aarch64/libc.a $(BUILD)/libc/linux-aarch64/*.o
 	@./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-aarch64/crt1.o
+	@mkdir -p $(BUILD)/libc/linux-aarch64/rt
 	@for f in $(RT_SRCS); do \
-	    o=$(BUILD)/libc/linux-aarch64/rt_$$(basename $$f .c).o; \
+	    o=$(BUILD)/libc/linux-aarch64/rt/$$(basename $$f .c).o; \
 	    ./embcc --target=aarch64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-aarch64/librt.a
 	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs \
-	    $(BUILD)/libc/linux-aarch64/librt.a $(BUILD)/libc/linux-aarch64/rt_*.o
+	    $(BUILD)/libc/linux-aarch64/librt.a $(BUILD)/libc/linux-aarch64/rt/*.o
 	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + crt1.o"
 
 libc-linux: libc-linux-x86_64 libc-linux-aarch64

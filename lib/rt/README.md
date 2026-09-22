@@ -48,17 +48,16 @@ on aarch64 it is IEEE binary128 with no instruction behind it, so even
 | `int128.c` | multiply, divide, remainder, the three shifts, negate |
 | `fp128.c` | 128-bit integers ↔ `float` and `double` |
 | `complex.c` | `__mulsc3`/`__muldc3`/`__divsc3`/`__divdc3` |
-| `ldouble.c` | the x87 versions of the last two, x86-64 only |
+| `ldouble.c` | the x87 128-bit conversions (x86-64), and complex `long double` for both |
+| `softtf.c` | IEEE binary128 from the bits up (aarch64) |
+
+`softtf.c` is the largest of them and the one under the most pressure
+from the rule above: it implements `long double` for a machine that has
+no instruction for it, so it may not use `long double` for anything but
+the parameter and return types the ABI requires. It is checked against
+libgcc's own soft-float over 5362 lines and matches all of them.
 
 ## What is NOT here
-
-The **aarch64 `long double`** family: `__addtf3`, `__multc3`,
-`__fixtfti`, `__floattitf` and their neighbours. IEEE binary128 needs a
-soft-float implementation, which is a project rather than a file, and
-writing one badly is worse than not having it — the failures are
-last-bit ones that no casual test sees. A program that needs one gets an
-undefined symbol that `src/link/link.c` explains by name rather than a
-bare `__addtf3`.
 
 The **unwinder** (`_Unwind_*`) is not a compiler runtime in this sense
 and is not here either; see D-014's second amendment for why it is the

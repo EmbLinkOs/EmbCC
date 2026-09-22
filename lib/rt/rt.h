@@ -44,4 +44,25 @@ static inline u128 mk(u64 hi, u64 lo)
 static inline u64 hi64(u128 x) { union w128 w; w.u = x; return w.h.hi; }
 static inline u64 lo64(u128 x) { union w128 w; w.u = x; return w.h.lo; }
 
+/* 64 x 64 -> 128, in four 32-bit pieces.
+ *
+ * The one primitive the whole library is built on, and the reason it is
+ * written out rather than done in `u128` is the rule in the comment
+ * above: a 128-bit multiply IS __multi3, so the routine that implements
+ * __multi3 cannot use one. Shared because the soft-float needs it too --
+ * a binary128 significand is 113 bits, so multiplying two of them is
+ * four of these. */
+static inline u64 rt_mul64(u64 a, u64 b, u64 *lo_out)
+{
+    u64 al = a & 0xFFFFFFFFULL, ah = a >> 32;
+    u64 bl = b & 0xFFFFFFFFULL, bh = b >> 32;
+    u64 ll = al * bl, lh = al * bh, hl = ah * bl, hh = ah * bh;
+    /* The two middle products each straddle bit 32, so they are added
+     * in with a carry out of the low half rather than simply shifted. */
+    u64 mid = (ll >> 32) + (lh & 0xFFFFFFFFULL) + (hl & 0xFFFFFFFFULL);
+
+    *lo_out = (ll & 0xFFFFFFFFULL) | (mid << 32);
+    return hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+}
+
 #endif
