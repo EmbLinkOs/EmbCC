@@ -333,6 +333,20 @@ struct func {
     int declared;         /* sema: declaration has been reached */
     int absorbed;         /* sema: merged into an earlier node — skip */
     int used;             /* sema: at least one call resolves here */
+    /* ---- inferred, not declared ------------------------------------
+     *
+     * What the optimizer worked out about this function from its body,
+     * as opposed to what the author wrote. Both are conservative: false
+     * means "not known to be", never "known not to be".
+     *
+     * `reads_memory` is the one that pays. A call is otherwise assumed
+     * to write anything, so every cached load dies at every call site
+     * and every store before one must stay. A function that touches no
+     * memory the caller can see frees all of that. */
+    int inf_no_write;     /* writes no memory the caller can observe */
+    int inf_no_read;      /* ... and reads none either: its result is a
+                           * function of its arguments alone, so two calls
+                           * with the same arguments give the same answer */
     int is_root;          /* reachable from OUTSIDE the call graph: named
                            * by top-level asm, a constructor or destructor
                            * (.init_array is the use), or
