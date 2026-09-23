@@ -343,12 +343,17 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
      * slot is sized to its largest occupant and aligned to the strictest one. */
     int nls = 0;
     int *lslot = coalesce_locals(fn, &nls);
+    /* A local no instruction names needs no stack, whether or not it
+     * could live in a register: the other half of slot_dead's question,
+     * and what SROA leaves behind once a split aggregate is mentioned
+     * nowhere (regalloc.h). */
+    char *lref = ra_locals_referenced(fn, g_want_debug);
     int *ssize = xcalloc((size_t)(nls ? nls : 1), sizeof *ssize);
     int *salign = xcalloc((size_t)(nls ? nls : 1), sizeof *salign);
     for (int i = 0; i < fn->nvars; i++) {
         int s = lslot[i];
-        if (slot_dead(fn, loc, i))
-            continue;               /* it lives in a register; size nothing */
+        if (!lref[i] || slot_dead(fn, loc, i))
+            continue;               /* in a register, or named nowhere at all */
         int sz = (ty_size(f->var_tys[i]) + 7) & ~7;
         if (sz > ssize[s]) ssize[s] = sz;
         /* Alignment of a local's stack slot: the greater of its type's natural
@@ -382,8 +387,9 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         soff[s] = -running;
     }
     for (int i = 0; i < fn->nvars; i++)
-        disp[i] = slot_dead(fn, loc, i) ? DEAD_SLOT_OFF : soff[lslot[i]];
-    free(lslot); free(ssize); free(salign); free(soff);
+        disp[i] = !lref[i] || slot_dead(fn, loc, i) ? DEAD_SLOT_OFF
+                                                    : soff[lslot[i]];
+    free(lslot); free(lref); free(ssize); free(salign); free(soff);
     /* Temporaries share a coalesced pool of 8-byte slots (K13) instead of one
      * slot each — the temp region is `npool` slots wide, not (nvregs-nvars). */
     int npool = 0;

@@ -329,7 +329,15 @@ struct a64_frame {
     long fb_save;           /* -1, or where the caller's x19 is kept */
 };
 
-static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
+/* The offset a slot nothing names is given. A gigabyte above the frame
+ * base is not a frame; an access that reaches it faults on the spot
+ * rather than reading whatever the stack happens to hold there. THE
+ * RULE, applied to an offset -- x86-64's DEAD_SLOT_OFF is the same
+ * idea from the other side of rbp. */
+#define A64_DEAD_SLOT 0x40000000L
+
+static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
+                          int want_debug)
 {
     struct func *f = fn->src;
     long *disp = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *disp);
@@ -388,7 +396,16 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
         running += 32;
     }
 
+    /* A local no instruction names any more needs no stack (regalloc.h):
+     * SROA leaves exactly that behind once a split aggregate is
+     * mentioned nowhere, and it would otherwise keep its full size on
+     * the frame for the rest of the function. */
+    char *lref = ra_locals_referenced(fn, want_debug);
     for (int v = 0; v < fn->nvars; v++) {
+        if (!lref[v]) {
+            disp[v] = A64_DEAD_SLOT;
+            continue;
+        }
         int al = f->var_aligns ? f->var_aligns[v] : 0;
         int tal = ty_align(f->var_tys[v]);
         if (tal > al) al = tal;
@@ -402,6 +419,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
         disp[v] = running;
         running += (ty_size(f->var_tys[v]) + 7) & ~7;
     }
+    free(lref);
 
     /* Temps share a coalesced pool of eight-byte slots (D-011's shared
      * ra_coalesce_temps, the same one x86-64 uses) rather than taking
@@ -945,7 +963,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             g_a64_loc = ra_allocate(fn, &A64_RA, g_a64_wide,
                                     used_callee, &nsave);
     }
-    long *sd = layout_frame(fn, &fr);
+    long *sd = layout_frame(fn, &fr, want_debug);
     /* Room for the callee-saved registers the allocator took. Eight
      * bytes each, rounded to sixteen: AAPCS64 wants sp 16-aligned at
      * every instruction boundary, not merely at a call. */

@@ -575,6 +575,29 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
  * What a backend supplies is the three things it knows and this does
  * not: which vregs live in registers (those need no slot at all), and
  * the two policy questions below. */
+/* Which locals the code still names (regalloc.h). */
+char *ra_locals_referenced(const struct ir_func *fn, int want_debug)
+{
+    size_t n = (size_t)(fn->nvars > 0 ? fn->nvars : 1);
+    char *r = xcalloc(n, 1);
+    if (want_debug || fn->has_alloca || (fn->src && fn->src->is_varargs)) {
+        memset(r, 1, n);
+        return r;
+    }
+    for (int i = 0; i < fn->nparams && i < fn->nvars; i++)
+        r[i] = 1;
+    /* IR_LDVAR's and IR_ADDR's `a` and IR_STVAR's `dst` are the only
+     * operands anywhere in EmbIR that name a frame slot. */
+    for (int i = 0; i < fn->nins; i++) {
+        const struct ir_ins *in = &fn->ins[i];
+        int v = in->op == IR_ADDR || in->op == IR_LDVAR ? in->a
+              : in->op == IR_STVAR                      ? in->dst : -1;
+        if (v >= 0 && v < fn->nvars)
+            r[v] = 1;
+    }
+    return r;
+}
+
 int *ra_coalesce_temps(struct ir_func *fn, int nvars,
                        const struct ra_slots *o, int *npool_out)
 {

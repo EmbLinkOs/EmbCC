@@ -132,6 +132,25 @@ struct ra_slots {
 int *ra_coalesce_temps(struct ir_func *fn, int nvars,
                        const struct ra_slots *o, int *npool_out);
 
+/* Which LOCALS any instruction still names — one byte per slot, 1 when
+ * the frame must hold it. A local nothing names needs no stack at all,
+ * and SROA leaves exactly that behind: once every field access has
+ * become a read or write of the scalars an aggregate was split into,
+ * the aggregate itself is mentioned nowhere, and it would otherwise
+ * keep its full size on the frame for the rest of the function.
+ *
+ * `want_debug` makes every slot referenced: -g hands the debugger an
+ * address for each variable by name, whether the code reads it or not.
+ * So do a varargs function (a va_list walks the incoming area) and an
+ * alloca (it moves the stack out from under the layout), both read from
+ * `fn`. Parameters always count: the PROLOGUE writes them, and that
+ * store is not in the IR to be found here.
+ *
+ * Shared because it reads only the IR -- the two backends had the same
+ * eight lines, and two copies of "which slots matter" are two chances
+ * to disagree about one. The caller frees. */
+char *ra_locals_referenced(const struct ir_func *fn, int want_debug);
+
 /* The vreg an instruction WRITES, or -1. In the shared layer because
  * liveness is: it has to agree with what the backends actually store,
  * and one copy is how it stays agreed. */
