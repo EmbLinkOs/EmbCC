@@ -1,8 +1,11 @@
 /* GNU computed goto: &&label yields a void* to a code location, and `goto *p`
- * jumps to it. The optimizer bails on functions that use it (an indirect jump
- * makes the CFG imprecise), and codegen keeps them in the memory model (no
- * regalloc, no slot coalescing) — so `keep` below, live ACROSS the indirect
- * jumps, must survive. Refereed against gcc; run at -O0/-O1/-O2. */
+ * jumps to it. The CFG models the edges -- an indirect jump reaches every
+ * label whose address is taken -- so the optimizer runs here like anywhere
+ * else, except for the passes that put an instruction ON AN EDGE: there is no
+ * block between `goto *p` and its target to put one in. Codegen still keeps
+ * these functions in the memory model (no regalloc, no slot coalescing), so
+ * `keep` below, live ACROSS the indirect jumps, must survive. Refereed against
+ * gcc; run at -O0/-O1/-O2. */
 // expect-exit: 42
 
 /* A tiny threaded-code dispatcher: each "op" jumps directly to the next. */

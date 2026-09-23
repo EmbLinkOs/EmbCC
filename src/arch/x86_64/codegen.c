@@ -488,7 +488,7 @@ static void count_vreg_uses(struct ir_func *fn, int *cnt)
         case IR_SQRT:
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
         case IR_ADDR: case IR_STVAR: case IR_VA_START:
-        case IR_RET: case IR_BRZ: case IR_BRNZ:
+        case IR_RET: case IR_BRZ: case IR_BRNZ: case IR_IGOTO:
         case IR_ALLOCA: case IR_SPRESTORE:
         case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
             UZ(s->a); break;

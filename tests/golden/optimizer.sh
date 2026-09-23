@@ -129,4 +129,35 @@ twice=$(awk '
     cat "$out/cfg.ir"; exit 1; }
 echo "no branch asks a question the branch above it has answered"
 
+# 6. And a computed goto does not turn the optimizer off.
+#
+# It used to: an indirect jump reaches any address-taken label, those
+# edges were not in the CFG, so the blocks those labels open looked
+# unreachable and the passes that delete unreachable code deleted the
+# program. The edges are modelled now. What still stands aside is the
+# passes that put an instruction ON AN EDGE -- there is no block between
+# `goto *p` and its target to put one in -- and everything else runs.
+cat > "$out/cgoto.c" <<'EOF'
+int dispatch(int start, int n)
+{
+    void *ops[2] = { &&STEP, &&DONE };
+    int acc = 0, i = 0;
+    goto *ops[start];
+STEP:  acc += 2 * 3;          /* foldable, inside a computed-goto function */
+       i++;
+       goto *ops[i < n ? 0 : 1];
+DONE:  return acc;
+}
+EOF
+"$EMBCC" inspect ir --target="$TARGET" -O2 "$out/cgoto.c" > "$out/cgoto.ir"     2>/dev/null || { echo "FAIL: could not dump the computed-goto IR"; exit 1; }
+grep -q 'igoto' "$out/cgoto.ir" || {
+    echo "FAIL: no indirect jump in the IR, so this is not testing it:"
+    cat "$out/cgoto.ir"; exit 1; }
+if grep -qE 'mul' "$out/cgoto.ir"; then
+    echo "FAIL: '2 * 3' survives as a multiply, so the optimizer is still"
+    echo "      switched off for a function with a computed goto:"
+    cat "$out/cgoto.ir"; exit 1
+fi
+echo "a function with a computed goto is optimized, not skipped"
+
 echo "optimizer acceptance passed"

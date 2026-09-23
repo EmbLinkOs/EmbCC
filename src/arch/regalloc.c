@@ -103,6 +103,7 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
         case IR_ALLOCA: case IR_SPRESTORE:
             USE(s->a); break;
         case IR_RET: case IR_BRZ: case IR_BRNZ:
+        case IR_IGOTO:            /* `goto *p` reads p */
             USE(s->a); break;
         case IR_CALL:
             if (s->indirect) USE(s->a);

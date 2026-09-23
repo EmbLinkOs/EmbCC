@@ -43,6 +43,12 @@ static int writes_temp(enum ir_op op)
     case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_CAS16:
     case IR_FRAMEADDR: case IR_ALLOCA: case IR_SPSAVE:
     case IR_SELECT:
+    /* `dst = &&label` defines dst. It was missing here for as long as
+     * the optimizer skipped every function that used one, which meant
+     * nothing counted it as a definition -- so the verifier reported
+     * the jump that read it as reading a temp nothing writes, and was
+     * right. */
+    case IR_LABELADDR:
     /* A vector result is a temp like any other, 16 bytes wide. */
     case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VREDADD:
     case IR_VWIDEN:
@@ -66,6 +72,7 @@ static int is_pure(enum ir_op op)
     case IR_FADDR: case IR_EXT: case IR_BSWAP: case IR_SQRT:
     case IR_I2F: case IR_F2I: case IR_F2F:
     case IR_SELECT:        /* both arms are values; it cannot trap */
+    case IR_LABELADDR:     /* the address of a label is a constant */
         return 1;
     default:
         return 0;
@@ -107,6 +114,13 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
     case IR_LDVAR: case IR_ADDR: case IR_LOAD:
     case IR_MEMZERO: case IR_VA_START: case IR_STVAR:
     case IR_ALLOCA: case IR_SPRESTORE:
+    /* `goto *p` reads p. It was missing here, and could not be noticed
+     * while every function using one was skipped by the optimizer
+     * whole: dead-code elimination saw no reader, dropped the load of
+     * the label address, and left the jump reading a temp nothing
+     * writes. Every visitor built on each_read -- the use counts, the
+     * inliner's remap, the verifier -- was blind to it the same way. */
+    case IR_IGOTO:
         cb(&i->a, ctx);
         break;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
@@ -951,7 +965,10 @@ static int pass_dce(struct ir_func *fn)
 
 struct bb {
     int start, end;                 /* instruction range [start, end) */
-    int succ[2], nsucc;
+    /* Successors. Two would do for every branch this IR has -- except
+     * the indirect one: `goto *p` reaches any label whose address was
+     * taken, which is as many as the function has. */
+    int *succ, nsucc, capsucc;
     int *pred, npred;
     int idom, rpo;                  /* immediate dominator; reverse-postorder # */
     int *phi_local, *phi_res, nphi; /* phi(local) -> result temp, per block */
@@ -1138,6 +1155,24 @@ static int pass_reassoc(struct ir_func *fn)
     return 1;
 }
 
+static void bb_add_succ(struct bb *b, int t)
+{
+    for (int k = 0; k < b->nsucc; k++)
+        if (b->succ[k] == t)
+            return;                 /* an edge once is an edge */
+    if (b->nsucc == b->capsucc) {
+        b->capsucc = b->capsucc ? b->capsucc * 2 : 2;
+        b->succ = xrealloc(b->succ, (size_t)b->capsucc * sizeof *b->succ);
+    }
+    b->succ[b->nsucc++] = t;
+}
+
+static void free_cfg(struct bb *bb, int nbb)
+{
+    for (int i = 0; i < nbb; i++) { free(bb[i].pred); free(bb[i].succ); }
+    free(bb);
+}
+
 static void bb_add_pred(struct bb *b, int p)
 {
     for (int i = 0; i < b->npred; i++)
@@ -1156,7 +1191,7 @@ static struct bb *build_cfg(struct ir_func *fn, int *nbb_out, int **l2b_out)
         enum ir_op op = fn->ins[i].op;
         if (op == IR_LABEL) lead[i] = 1;
         if ((op == IR_JMP || op == IR_BRZ || op == IR_BRNZ ||
-             op == IR_RET || op == IR_UD2) && i + 1 < N)
+             op == IR_RET || op == IR_UD2 || op == IR_IGOTO) && i + 1 < N)
             lead[i + 1] = 1;
     }
     int nbb = 0;
@@ -1174,20 +1209,41 @@ static struct bb *build_cfg(struct ir_func *fn, int *nbb_out, int **l2b_out)
         if (bb[i].end > bb[i].start && fn->ins[bb[i].start].op == IR_LABEL)
             l2b[fn->ins[bb[i].start].label] = i;
 
+    /* Which labels a computed goto could land on: the ones something
+     * takes the address of. Nothing else can be the target of `goto *p`
+     * -- the value has to have come from a `&&label` somewhere in this
+     * function, because that is the only thing that produces one. */
+    char *taken_lbl = NULL;
+    for (int i = 0; i < N; i++)
+        if (fn->ins[i].op == IR_LABELADDR && fn->ins[i].label >= 0 &&
+            fn->ins[i].label < fn->nlabels) {
+            if (!taken_lbl)
+                taken_lbl = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1);
+            taken_lbl[fn->ins[i].label] = 1;
+        }
+
     for (int i = 0; i < nbb; i++) {
         enum ir_op op = bb[i].end > bb[i].start ? fn->ins[bb[i].end - 1].op : IR_UD2;
         int L = bb[i].end > bb[i].start ? fn->ins[bb[i].end - 1].label : -1;
         if (op == IR_RET || op == IR_UD2) {
             /* no successors */
         } else if (op == IR_JMP) {
-            if (l2b[L] >= 0) bb[i].succ[bb[i].nsucc++] = l2b[L];
+            if (l2b[L] >= 0) bb_add_succ(&bb[i], l2b[L]);
         } else if (op == IR_BRZ || op == IR_BRNZ) {
-            if (l2b[L] >= 0) bb[i].succ[bb[i].nsucc++] = l2b[L];
-            if (i + 1 < nbb) bb[i].succ[bb[i].nsucc++] = i + 1;
+            if (l2b[L] >= 0) bb_add_succ(&bb[i], l2b[L]);
+            if (i + 1 < nbb) bb_add_succ(&bb[i], i + 1);
+        } else if (op == IR_IGOTO) {
+            /* An edge to every address-taken label. Without these the
+             * blocks they open look unreachable, and the passes that
+             * DELETE unreachable code delete the program. */
+            for (int l = 0; taken_lbl && l < fn->nlabels; l++)
+                if (taken_lbl[l] && l2b[l] >= 0)
+                    bb_add_succ(&bb[i], l2b[l]);
         } else if (i + 1 < nbb) {
-            bb[i].succ[bb[i].nsucc++] = i + 1;
+            bb_add_succ(&bb[i], i + 1);
         }
     }
+    free(taken_lbl);
     for (int i = 0; i < nbb; i++)
         for (int k = 0; k < bb[i].nsucc; k++)
             bb_add_pred(&bb[bb[i].succ[k]], i);
@@ -1328,7 +1384,7 @@ static void mem2reg_free(struct bb *bb, int nbb, int **df, int *ndf, int *l2b,
                          int *order)
 {
     for (int i = 0; i < nbb; i++) {
-        free(bb[i].pred);
+        free(bb[i].pred); free(bb[i].succ);
         free(bb[i].phi_local); free(bb[i].phi_res);
         if (bb[i].phi_inc) {
             for (int k = 0; k < bb[i].npred; k++) free(bb[i].phi_inc[k]);
@@ -1439,8 +1495,7 @@ static int pass_mem2reg(struct ir_func *fn)
     compute_rpo(bb, nbb, order, &norder);
     if (norder != nbb) {   /* unreachable blocks: bail rather than mis-dominate */
         free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); free(prom); free(ploc); return 0;
+        free_cfg(bb, nbb); free(prom); free(ploc); return 0;
     }
     compute_idom(bb, order, norder);
     int **df = xcalloc((size_t)nbb, sizeof *df);
@@ -1690,8 +1745,7 @@ static int pass_gcse(struct ir_func *fn)
     compute_rpo(bb, nbb, order, &norder);
     if (norder != nbb) {   /* unreachable blocks: dominance is not total, bail */
         free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); return 0;
+        free_cfg(bb, nbb); return 0;
     }
     compute_idom(bb, order, norder);
     struct defs dfs;
@@ -1742,8 +1796,7 @@ static int pass_gcse(struct ir_func *fn)
     free(tab); free(dstk); free(mark); free(entered);
     free_defs(&dfs);
     free(order); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
     return changed;
 }
 
@@ -2245,8 +2298,7 @@ static int ifconv_one(struct ir_func *fn)
     }
 
     free_defs(&d); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
     return done;
 }
 
@@ -2847,8 +2899,7 @@ static int pass_dse(struct ir_func *fn)
     }
 
     free(dead); free(sa); free(ssz); free(taken); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb); free_defs(&d);
+    free_cfg(bb, nbb); free_defs(&d);
     return changed;
 }
 
@@ -2926,8 +2977,7 @@ static int pass_loadcse(struct ir_func *fn)
     compute_rpo(bb, nbb, order, &norder);
     if (norder != nbb) {
         free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); free_defs(&d); return 0;
+        free_cfg(bb, nbb); free_defs(&d); return 0;
     }
 
     char *taken = xcalloc((size_t)(nvars ? nvars : 1), 1);
@@ -2963,8 +3013,7 @@ static int pass_loadcse(struct ir_func *fn)
     }
     if (nk == 0) {
         free(order); free(l2b); free(taken); free(keyidx); free(keys);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); free_defs(&d); return 0;
+        free_cfg(bb, nbb); free_defs(&d); return 0;
     }
     /* is_mem[k]: a LOAD or an address-taken local's LDVAR (killed by any write).
      * A non-address-taken local's LDVAR is killed only by a store to that local. */
@@ -3058,8 +3107,7 @@ static int pass_loadcse(struct ir_func *fn)
 
     free(order); free(l2b); free(taken); free(keyidx); free(keys);
     free(is_mem); free(kbase); free(aout); free(ain); free(s);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb); free_defs(&d);
+    free_cfg(bb, nbb); free_defs(&d);
     return changed;
 }
 
@@ -3148,8 +3196,7 @@ static int pass_copyprop_local(struct ir_func *fn)
     }
     free_defs(&d);
     free(cp); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
     return changed;
 }
 
@@ -3248,8 +3295,7 @@ static int licm_one(struct ir_func *fn)
     compute_rpo(bb, nbb, order, &norder);
     if (norder != nbb) {       /* unreachable blocks: dominance is partial */
         free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); return 0;
+        free_cfg(bb, nbb); return 0;
     }
     compute_idom(bb, order, norder);
 
@@ -3467,8 +3513,7 @@ static int licm_one(struct ir_func *fn)
     free(hoist); free(stored); free(inv); free(inl_ins); free(in);
     free_defs(&d); free(addr_taken);
     free(order); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
     return done;
 }
 
@@ -3527,8 +3572,7 @@ static int rotate_one(struct ir_func *fn)
     compute_rpo(bb, nbb, order, &norder);
     if (norder != nbb) {
         free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); return 0;
+        free_cfg(bb, nbb); return 0;
     }
     compute_idom(bb, order, norder);
 
@@ -3688,8 +3732,7 @@ static int rotate_one(struct ir_func *fn)
     }
 
     free(order); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
     return done;
 }
 
@@ -4158,8 +4201,7 @@ static int idiom_one(struct ir_func *fn)
     compute_rpo(bb, nbb, order, &norder);
     if (norder != nbb) {
         free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); return 0;
+        free_cfg(bb, nbb); return 0;
     }
     compute_idom(bb, order, norder);
     struct defs d;
@@ -4334,8 +4376,7 @@ static int idiom_one(struct ir_func *fn)
     }
 
     free(in); free_defs(&d); free(order); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
     return done;
 }
 
@@ -4377,8 +4418,7 @@ static int vectorize_one(struct ir_func *fn)
     compute_rpo(bb, nbb, order, &norder);
     if (norder != nbb) {
         free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); return 0;
+        free_cfg(bb, nbb); return 0;
     }
     compute_idom(bb, order, norder);
     struct defs d;
@@ -5103,8 +5143,7 @@ static int vectorize_one(struct ir_func *fn)
     free(in);
     free_defs(&d);
     free(order); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
     return done;
 }
 
@@ -5208,8 +5247,7 @@ static int ivsr_one(struct ir_func *fn)
     compute_rpo(bb, nbb, order, &norder);
     if (norder != nbb) {
         free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); return 0;
+        free_cfg(bb, nbb); return 0;
     }
     compute_idom(bb, order, norder);
     struct defs d;
@@ -5496,8 +5534,7 @@ static int ivsr_one(struct ir_func *fn)
 
     free(in); free_defs(&d);
     free(order); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
     return done;
 }
 
@@ -5755,8 +5792,7 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
     compute_rpo(bb, nbb, order, &norder);
     if (norder != nbb) {           /* unreachable blocks: do not mis-dominate */
         free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb);
+        free_cfg(bb, nbb);
         return 0;
     }
     compute_idom(bb, order, norder);
@@ -5769,8 +5805,7 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
     free(in);
     if (!nbody) {
         free_defs(&d); free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb);
+        free_cfg(bb, nbb);
         return 0;
     }
 
@@ -5782,8 +5817,7 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
         U /= 2;
     if (U < 2) {
         free_defs(&d); free(order); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb);
+        free_cfg(bb, nbb);
         return 0;
     }
 
@@ -5914,8 +5948,7 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
     free(fn->ins);
     fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
     free_defs(&d); free(order); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
     if (L.Lh >= 0 && L.Lh < nseen)
         seen[L.Lh] = 1;
     if (remarks_on() && fn->src)
@@ -6019,8 +6052,7 @@ static int pass_sccp(struct ir_func *fn)
         if (!reach[b] || live_only[b] >= 0) { work = 1; break; }
     if (!work) {
         free(live_only); free(reach); free(wl); free(l2b);
-        for (int i = 0; i < nbb; i++) free(bb[i].pred);
-        free(bb); free_defs(&d);
+        free_cfg(bb, nbb); free_defs(&d);
         return 0;
     }
 
@@ -6062,8 +6094,7 @@ static int pass_sccp(struct ir_func *fn)
     }
 
     free(live_only); free(reach); free(wl); free(l2b);
-    for (int i = 0; i < nbb; i++) free(bb[i].pred);
-    free(bb); free_defs(&d);
+    free_cfg(bb, nbb); free_defs(&d);
     return 1;
 }
 
@@ -7034,9 +7065,7 @@ void opt_cfg_dump(struct outbuf *b, struct ir_func *fn)
     }
     free(order);
     free(l2b);
-    for (int i = 0; i < nbb; i++)
-        free(bb[i].pred);
-    free(bb);
+    free_cfg(bb, nbb);
 }
 
 /* ---- driver ---- */
@@ -7215,21 +7244,49 @@ static void opt_func(struct ir_func *fn)
      * missing edge cannot make them wrong. A landing pad starts with a
      * label, so it is its own block to all of them. So the function is
      * optimized LOCALLY rather than not at all. */
-    /* Computed goto still bails OUTRIGHT, and the difference from
-     * exceptions is worth stating. A landing pad is a block with an
-     * edge nothing recorded; the local passes never needed that edge,
-     * so they are right without it. An indirect jump is worse: it can
-     * land on any address-taken label, so a value live across it must
-     * stay in memory, and tests/exec/computed-goto.c says so in its
-     * first paragraph -- codegen keeps these functions in the memory
-     * model for that reason. Running even the local passes here
-     * returned the wrong answer at -O1 and -O2, and no single one of
-     * them was responsible, so the exclusion stays until the CFG can
-     * model the edges rather than until a pass is blamed. */
-    for (int n = 0; n < fn->nins; n++)
-        if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
-            return;
+    /* Computed goto used to bail OUTRIGHT, and the reason was recorded
+     * as a condition on when it could stop: "the exclusion stays until
+     * the CFG can model the edges rather than until a pass is blamed".
+     * build_cfg models them now -- an indirect jump gets an edge to
+     * every label whose address is taken, which is the complete set of
+     * places it can land, because `&&label` is the only thing that
+     * produces such a value.
+     *
+     * What was actually going wrong is worth naming, because it was not
+     * the local passes. Without those edges the blocks those labels
+     * open have no predecessor, so they are UNREACHABLE -- and the two
+     * passes that delete unreachable code deleted the program. With the
+     * edges they are reachable, dominance is right, and the function is
+     * optimized like any other. Codegen still keeps it in the memory
+     * model (no register allocation), because a value live across an
+     * indirect jump is a separate question and that is where it is
+     * answered. */
     int cfg_ok = !fn->neh;
+    /* What still has to stand aside is every pass that puts an
+     * instruction ON AN EDGE. `goto *p` goes to the label and there is
+     * no block between them to intercept, so an edge out of one cannot
+     * be split -- and a preheader written just after the jump is not on
+     * any path at all, which is exactly what happened: LICM hoisted
+     * four instructions into one, and the pass that drops unreachable
+     * code dropped it, uses and all.
+     *
+     * So: mem2reg (phi copies go on edges), the loop passes (a
+     * preheader is an edge), if-conversion and unrolling (both open new
+     * blocks). What is left -- folding, value numbering local and
+     * global, copy propagation, store forwarding, load elimination,
+     * dead stores, constant branches, dead code, SROA, magic division,
+     * CFG cleanup -- reasons about the blocks that are there and needs
+     * no new ones. That is most of the optimizer, where before it was
+     * none of it.
+     *
+     * It is also the right answer for the code that uses this: a
+     * threaded-code dispatcher keeps its state where every arm can
+     * reach it, and tests/exec/computed-goto.c says so in its first
+     * paragraph -- a value live across the jump stays in memory. */
+    int has_igoto = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_IGOTO) { has_igoto = 1; break; }
+    int edge_ok = cfg_ok && !has_igoto;   /* may a pass split an edge? */
     /* Likewise exception regions: a landing pad is entered from every call
      * of its region, edges the passes do not see (and its code, reached by
      * no jump, would look dead).
@@ -7254,16 +7311,16 @@ static void opt_func(struct ir_func *fn)
     /* Before everything: the loop it makes is then an ordinary loop to
      * mem2reg, LICM, rotation and strength reduction, which is most of
      * why it is worth doing at all. */
-    if (g_tailrec && cfg_ok)
+    if (g_tailrec && edge_ok)
         pass_tailrec(fn);
     if (g_divmagic)
         pass_divmagic(fn);
     /* Before mem2reg, and needing no CFG of its own: it only renames
      * memory, and what it renames is what mem2reg then finds. */
-    int sroa_twice = g_sroa && g_mem2reg && cfg_ok;
+    int sroa_twice = g_sroa && g_mem2reg && cfg_ok && !has_igoto;
     if (g_sroa)
         pass_sroa(fn, !sroa_twice);
-    if (g_mem2reg && cfg_ok)
+    if (g_mem2reg && cfg_ok && !has_igoto)
         pass_mem2reg(fn);         /* global mem2reg (subsumes store-forwarding) */
     /* And a second look at the aggregates, now that mem2reg has run.
      * `int *p = &s.x; ... *p` hides the object behind a pointer
@@ -7315,7 +7372,7 @@ static void opt_func(struct ir_func *fn)
         /* Rotation first: it merges the header into the body, so the
          * block-local passes in the next round see one block where they
          * saw two. */
-        if (g_licm && cfg_ok && pass_rotate(fn)) {
+        if (g_licm && edge_ok && pass_rotate(fn)) {
             pass_copyprop_local(fn);
             pass_dce(fn);
             outer = 1;
@@ -7325,7 +7382,7 @@ static void opt_func(struct ir_func *fn)
          * might hold is gone. Rounding again matters -- a hoisted
          * expression is a new candidate for folding and CSE in the
          * preheader, and what those leave can expose the next hoist. */
-        if (g_licm && cfg_ok && pass_licm(fn)) {
+        if (g_licm && edge_ok && pass_licm(fn)) {
             pass_copyprop(fn);
             pass_dce(fn);
             outer = 1;
@@ -7337,11 +7394,11 @@ static void opt_func(struct ir_func *fn)
          * off something that changes, and nothing vectorizes. */
         /* Before vectorizing: a copy or clear loop turned into one
          * operation beats four lanes of the same loop. */
-        if (g_idiom && cfg_ok && pass_idiom(fn)) {
+        if (g_idiom && edge_ok && pass_idiom(fn)) {
             pass_dce(fn);
             outer = 1;
         }
-        if (g_vec && cfg_ok && pass_vectorize(fn)) {
+        if (g_vec && edge_ok && pass_vectorize(fn)) {
             pass_dce(fn);
             outer = 1;
         }
@@ -7354,11 +7411,11 @@ static void opt_func(struct ir_func *fn)
     /* If-conversion after the loop passes: the shape it matches is what
      * phi destruction leaves, and rotation/LICM must have finished
      * moving blocks around before the diamond is the real one. */
-    if (g_ifconv && cfg_ok && pass_ifconv(fn)) {
+    if (g_ifconv && edge_ok && pass_ifconv(fn)) {
         pass_copyprop_local(fn);
         pass_dce(fn);
     }
-    if (g_licm && cfg_ok && pass_ivsr(fn)) {
+    if (g_licm && edge_ok && pass_ivsr(fn)) {
         pass_copyprop_local(fn);
         pass_dce(fn);
     }
@@ -7368,7 +7425,7 @@ static void opt_func(struct ir_func *fn)
      * What follows it is the block-local work -- folding, value
      * numbering, copy propagation -- which is most of what the copies
      * are for. */
-    if (g_unroll && cfg_ok && pass_unroll(fn)) {
+    if (g_unroll && edge_ok && pass_unroll(fn)) {
         int changed = 1, g2 = 0;
         while (changed && g2++ < 100) {
             changed = 0;
