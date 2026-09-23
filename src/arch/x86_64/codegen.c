@@ -2675,8 +2675,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
             if (i->op == IR_JMP) {
                 patch = x86_jmp_rel32(text);
             } else {
-                cg_load(text, sd, i->a, i->w, 0, i->w);
-                x86_test_eax(text, i->w);
+                /* A register-resident condition is tested where it
+                 * lives. The detour through RAX was a move and a test
+                 * where one test does, on the single hottest pair of
+                 * instructions a loop has. */
+                if (in_reg(i->a))
+                    x86_test_rr(text, g_loc[i->a], g_loc[i->a], i->w);
+                else {
+                    cg_load(text, sd, i->a, i->w, 0, i->w);
+                    x86_test_eax(text, i->w);
+                }
                 patch = i->op == IR_BRZ ? x86_jz_rel32(text)
                                         : x86_jnz_rel32(text);
             }

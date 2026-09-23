@@ -3576,12 +3576,23 @@ static int rotate_one(struct ir_func *fn)
         if (!in[body] || in[texit]) { free(in); continue; }
 
         /* Every instruction between the label and the branch is copied,
-         * so each must be safe to run twice and must define a temp read
-         * only here. */
+         * so each must define a temp read only here -- and must be one
+         * that may appear twice.
+         *
+         * A LOAD may. It is not `is_pure` (it can fault, so nothing may
+         * SPECULATE one), but rotation speculates nothing: the header's
+         * computation runs once in the guard and once per latch, which
+         * for N iterations is the N+1 times the header itself ran, in
+         * the same order and at the same points. Refusing it refused
+         * `while (*p) p++;` -- every string walk, every list walk --
+         * which then paid two branches an iteration for the life of the
+         * program. Volatile is still refused: the ACCESS is the effect
+         * there, and moving one is not a thing to do on this argument. */
         int ok = 1;
         for (int n = bb[h].start + 1; n < bb[h].end - 1 && ok; n++) {
             struct ir_ins *i = &fn->ins[n];
-            if (!is_pure(i->op) || i->vol) { ok = 0; break; }
+            if (!(is_pure(i->op) || i->op == IR_LOAD) || i->vol)
+                { ok = 0; break; }
             int t = def_target(i);
             if (t < fn->nvars || t >= fn->nvregs) { ok = 0; break; }
             for (int m = 0; m < fn->nins && ok; m++) {
