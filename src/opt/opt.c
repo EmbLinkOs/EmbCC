@@ -786,12 +786,79 @@ static void count_cb(int *p, void *ctx)
         u->use[*p]++;
 }
 
+/* Mark a temp live, counting how many were newly so. */
+struct mark { char *live; int n, added; };
+static void mark_cb(int *p, void *ctx)
+{
+    struct mark *m = ctx;
+    if (*p >= 0 && *p < m->n && !m->live[*p]) { m->live[*p] = 1; m->added++; }
+}
+
+/* ---- dead code, by marking what is live rather than counting uses ----
+ *
+ * Counting uses cannot remove a CYCLE. `i = i + 1` feeding `i = mov
+ * next` feeding the add again is two instructions that each have a use
+ * -- each other -- so a use count never reaches zero for either, and a
+ * loop counter nothing reads survives for the life of the function.
+ * That is the ordinary shape left behind whenever a loop's test stops
+ * naming its own induction variable, which is exactly what the test
+ * replacement in `ivsr_one` does.
+ *
+ * So liveness is computed the other way round: an instruction is live
+ * when its EFFECT is not its result -- a store, a branch, a label, a
+ * return, a call that can be observed -- or when something live reads
+ * what it defines. Everything else is dead, cycles included, because a
+ * cycle no live instruction reaches is never marked.
+ *
+ * IR_STVAR's "result" is a frame slot, and a slot is read by an LDVAR
+ * or an ADDR, both of which each_read reports -- so the same rule
+ * covers dead stores to a local with no remaining readers. A volatile
+ * one is live regardless: the access itself is the effect. */
 static int pass_dce(struct ir_func *fn)
 {
-    int *use = xcalloc((size_t)fn->nvregs, sizeof *use);
-    struct ucount uc = { use, fn->nvregs };
-    for (int n = 0; n < fn->nins; n++)
-        each_read(&fn->ins[n], count_cb, &uc);
+    int nins = fn->nins, nvr = fn->nvregs;
+    if (nins == 0)
+        return 0;
+    char *live_ins = xcalloc((size_t)nins, 1);
+    char *live_t = xcalloc((size_t)(nvr ? nvr : 1), 1);
+    for (int n = 0; n < nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_STVAR) {
+            if (i->vol)
+                live_ins[n] = 1;
+            continue;                 /* otherwise its slot decides */
+        }
+        /* A call that touches no memory and cannot throw does nothing
+         * but produce a value, so it lives or dies with that value. */
+        if (i->op == IR_CALL && !i->indirect && i->callee &&
+            i->callee->inf_no_read && i->callee->inf_no_write &&
+            i->callee->is_nothrow && def_target(i) >= 0)
+            continue;
+        if (is_pure(i->op) && def_target(i) >= 0)
+            continue;
+        live_ins[n] = 1;
+    }
+    for (int again = 1; again; ) {
+        again = 0;
+        for (int n = 0; n < nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (!live_ins[n]) {
+                int t = def_target(i);
+                /* IR_LANDING writes a second temp, in `b`: either one
+                 * being live keeps the pad. */
+                int second = i->op == IR_LANDING ? i->b : -1;
+                if (!((t >= 0 && t < nvr && live_t[t]) ||
+                      (second >= 0 && second < nvr && live_t[second])))
+                    continue;
+                live_ins[n] = 1;
+                again = 1;
+            }
+            struct mark m = { live_t, nvr, 0 };
+            each_read(i, mark_cb, &m);
+            if (m.added)
+                again = 1;
+        }
+    }
     /* Removing instructions renumbers the ones that follow. fn->var_scope_lo/hi
      * (irgen-stamped instruction indices, read by codegen's coalesce_locals to
      * decide which address-taken locals may share a stack slot) must move with
@@ -805,35 +872,13 @@ static int pass_dce(struct ir_func *fn)
     int changed = 0, j = 0;
     for (int n = 0; n < fn->nins; n++) {
         if (newpos) newpos[n] = j;
-        struct ir_ins *i = &fn->ins[n];
-        int t = def_target(i);
-        if (is_pure(i->op) && t >= 0 && use[t] == 0) {
+        if (!live_ins[n]) {
             changed = 1;
             g_did.dce++;
-            continue;   /* drop it */
-        }
-        /* A call that touches no memory and whose result nothing reads
-         * does nothing at all. Only when it cannot throw either -- an
-         * exception is an effect the IR does not otherwise model. */
-        if (i->op == IR_CALL && !i->indirect && i->callee &&
-            i->callee->inf_no_read && i->callee->inf_no_write &&
-            i->callee->is_nothrow && t >= 0 && use[t] == 0) {
-            changed = 1;
-            g_did.dce++;
-            continue;
-        }
-        /* Dead store: a non-volatile STVAR to a local nothing ever reads (no
-         * LDVAR and no address-of, so use[dst] == 0) has no effect — drop it.
-         * This is what clears an inlined parameter once store-forwarding has
-         * rewritten its loads to the argument. */
-        if (i->op == IR_STVAR && !i->vol && i->dst >= 0 &&
-            i->dst < fn->nvregs && use[i->dst] == 0) {
-            changed = 1;
-            g_did.dce++;
-            continue;
+            continue;   /* nothing live reaches what it computes */
         }
         if (j != n)
-            fn->ins[j] = *i;
+            fn->ins[j] = fn->ins[n];
         j++;
     }
     if (newpos) {
@@ -846,7 +891,7 @@ static int pass_dce(struct ir_func *fn)
         free(newpos);
     }
     fn->nins = j;
-    free(use);
+    free(live_ins); free(live_t);
     return changed;
 }
 
@@ -4975,6 +5020,61 @@ static int ivsr_one(struct ir_func *fn)
         if (nc == 0)
             continue;
 
+        /* ---- and then the loop can stop counting ----------------------
+         *
+         * The test `i < bound` and the pointer `p = base + i*scale` are
+         * about the same iterations, so the test can be made about the
+         * POINTER instead: p walks from base in steps of scale*step and
+         * reaches base + T*scale*step exactly when i reaches T*step,
+         * where T = ceil(bound/step) is the trip count. `!=` rather than
+         * `<` because p hits that value exactly -- it steps by a fixed
+         * amount from a fixed start -- which also keeps the question
+         * away from whether a pointer compare is signed.
+         *
+         * What it buys is the counter: once nothing reads i, `i += step`
+         * and the copy that carries it are a cycle that no live
+         * instruction reaches, and the marking dead-code pass takes
+         * both. Two instructions an iteration, and one live value fewer
+         * across the whole loop. Measured on the vectorized copy loop of
+         * tests/bench/kernels.c memory_stream: ten instructions an
+         * iteration down to eight, which is gcc's nine.
+         *
+         * Only for a CONSTANT bound, because T is otherwise a division
+         * by step in the preheader, and only when the index is dead
+         * outside the loop, because otherwise the counter stays and the
+         * two extra instructions here are all that happens. */
+        int lftr_lim = -1, lftr_k = -1, lftr_iv = -1;
+        long lftr_off = 0;
+        {
+            struct ir_ins *cmpi = &fn->ins[inc_at];
+            long bound = 0;
+            long scale = cscale[0], dv = scale * step;
+            if (cmpi->op == IR_CMP && cmpi->pred == B_LT &&
+                cmpi->sign && !cmpi->flt && cmpi->a == iv &&
+                const_b(fn, &d, cmpi, &bound) &&
+                bound > 0 && bound <= (1L << 40) &&
+                scale > 0 && scale <= (1L << 20) && step <= (1L << 20)) {
+                long T = (bound + step - 1) / step;
+                if (T > 0 && dv > 0 && T <= (1L << 40) / dv) {
+                    lftr_off = T * dv;
+                    lftr_k = fn->nvregs++;
+                    lftr_lim = fn->nvregs++;
+                    /* The index gets a NAME OF ITS OWN inside the loop.
+                     * It has two definitions -- the one before the loop
+                     * and the copy at the latch -- and the loop's GUARD
+                     * reads it, which is a use no amount of rewriting
+                     * inside the loop removes. One vreg with a live read
+                     * keeps every definition of it, so the latch copy
+                     * would survive and the counter with it. Split in
+                     * two and the guard keeps the value it was always
+                     * reading (the one from before the loop) while the
+                     * loop's copy becomes a cycle nothing outside can
+                     * reach. */
+                    lftr_iv = fn->nvregs++;
+                }
+            }
+        }
+
         /* ---- rewrite: a pointer per candidate ---- */
         int ptr[16], delta[16];
         for (int k = 0; k < nc; k++) {
@@ -4997,6 +5097,20 @@ static int ivsr_one(struct ir_func *fn)
                     m->w = 8;
                     m->line = c->line; m->synth = 1;
                 }
+                if (lftr_lim >= 0) {
+                    struct ir_ins *c = ib_push(&nb);
+                    c->op = IR_CONST; c->dst = lftr_k; c->w = 8;
+                    c->imm = lftr_off;
+                    c->line = fn->ins[inc_at].line; c->synth = 1;
+                    struct ir_ins *a3 = ib_push(&nb);
+                    a3->op = IR_ADD; a3->dst = lftr_lim; a3->a = cbase[0];
+                    a3->b = lftr_k; a3->w = 8;
+                    a3->line = fn->ins[inc_at].line; a3->synth = 1;
+                    struct ir_ins *m2 = ib_push(&nb);
+                    m2->op = IR_MOV; m2->dst = lftr_iv; m2->a = iv;
+                    m2->w = fn->ins[copy_ins].w ? fn->ins[copy_ins].w : 8;
+                    m2->line = fn->ins[inc_at].line; m2->synth = 1;
+                }
             }
             if (n == inc_at) {          /* walk each pointer, after the copies */
                 for (int k = 0; k < nc; k++) {
@@ -5014,6 +5128,13 @@ static int ivsr_one(struct ir_func *fn)
                     skip = 1;
             if (skip)
                 continue;
+            if (lftr_lim >= 0 && n == inc_at) {
+                struct ir_ins *o = ib_push(&nb);
+                *o = fn->ins[n];
+                o->pred = B_NE; o->a = ptr[0]; o->b = lftr_lim;
+                o->w = 8; o->sign = 0; o->imm_b = 0; o->imm = 0;
+                continue;
+            }
             struct ir_ins *o = ib_push(&nb);
             *o = fn->ins[n];
             for (int k = 0; k < nc; k++) {
@@ -5024,6 +5145,18 @@ static int ivsr_one(struct ir_func *fn)
                 lc.cp = tbl; lc.nv = fn->nvregs; lc.n = 0;
                 each_read(o, lcopy_cb, &lc);
                 free(tbl);
+            }
+            /* Inside the loop, the index goes by its own name. */
+            if (lftr_iv >= 0 && n >= lo && n < hi) {
+                struct lcopy lc;
+                int *tbl = xmalloc((size_t)fn->nvregs * sizeof *tbl);
+                for (int v = 0; v < fn->nvregs; v++) tbl[v] = -1;
+                tbl[iv] = lftr_iv;
+                lc.cp = tbl; lc.nv = fn->nvregs; lc.n = 0;
+                each_read(o, lcopy_cb, &lc);
+                free(tbl);
+                if (def_target(o) == iv)
+                    o->dst = lftr_iv;
             }
 
         }

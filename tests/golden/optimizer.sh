@@ -52,4 +52,36 @@ for c in tests/exec/*.c; do
     n=$((n + 1))
 done
 echo "-O1 preserved semantics across all $n exec programs"
+
+# 4. Dead code that is a CYCLE.
+#
+# An accumulator nothing reads is two instructions that feed each other
+# -- `next = acc * 31 + i` and `acc = next` -- so each has a use, a use
+# count never reaches zero for either, and dead-code elimination that
+# counts uses leaves the pair there for the life of the function.
+# Liveness is therefore computed by MARKING what is reachable from an
+# effect, and a cycle no effect reaches is marked by nothing.
+#
+# The loop itself stays: its counter feeds the test, and deleting a loop
+# needs a termination argument this compiler does not have. What must go
+# is the multiply, which is the whole of the dead work.
+cat > "$out/cycle.c" <<'EOF'
+int f(int n)
+{
+    int dead = 0;
+    for (int i = 0; i < n; i++)
+        dead = dead * 31 + i;      /* nothing ever reads `dead` */
+    return n;
+}
+EOF
+"$EMBCC" inspect ir --target="$TARGET" -O2 "$out/cycle.c" > "$out/cycle.ir" \
+    2>/dev/null || { echo "FAIL: could not dump the dead-cycle IR"; exit 1; }
+if grep -q 'mul' "$out/cycle.ir"; then
+    echo "FAIL: the multiply of an accumulator nothing reads survives."
+    echo "      It feeds only the copy that feeds it back, so a use"
+    echo "      count cannot remove it:"
+    cat "$out/cycle.ir"; exit 1
+fi
+echo "an accumulator that feeds only itself is removed, cycle and all"
+
 echo "optimizer acceptance passed"

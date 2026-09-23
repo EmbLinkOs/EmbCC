@@ -745,13 +745,47 @@ static int *vacc_regs(struct ir_func *fn)
 }
 
 /* May a vector result stay in xmm0 instead of going out to its slot?
- * Only when the very next instruction is the single use it has -- then
- * nothing else can ever read the slot, and nothing can come between. */
+ *
+ * Two ways. The first is that the very next instruction is the single
+ * use it has -- then nothing else can ever read the slot, and nothing
+ * can come between.
+ *
+ * The second is a WIDENING source. A widen reads its operand twice, low
+ * half then high half, so it has two uses and the rule above refuses
+ * it; but the first widen takes the value straight out of xmm0 and puts
+ * it in the xmm2/xmm3 cache, and the second reads it THERE. The slot is
+ * written and never read -- a movdqa in the middle of every iteration
+ * of a widening sum, for nothing. So: every reader is a widen of it,
+ * the first is the next instruction, and nothing between them clears
+ * the cache. */
 static int vec_keep(struct ir_func *fn, int n, const int *usecnt, int dst)
 {
-    if (dst < 0 || !usecnt || usecnt[dst] != 1 || n + 1 >= fn->nins)
+    if (dst < 0 || !usecnt || n + 1 >= fn->nins)
         return 0;
-    return vec_reads_xmm(&fn->ins[n + 1], dst);
+    if (usecnt[dst] == 1)
+        return vec_reads_xmm(&fn->ins[n + 1], dst);
+    if (fn->ins[n + 1].op != IR_VWIDEN || fn->ins[n + 1].a != dst)
+        return 0;
+    int seen = 0;
+    for (int m = n + 1; m < fn->nins && seen < usecnt[dst]; m++) {
+        struct ir_ins *i = &fn->ins[m];
+        if (i->op == IR_VWIDEN) {
+            if (i->a != dst)
+                return 0;               /* a different source evicts it */
+            seen++;
+            continue;
+        }
+        switch (i->op) {                /* these leave xmm2/xmm3 alone */
+        case IR_VLOAD: case IR_VSTORE: case IR_VBIN:
+        case IR_VSPLAT: case IR_VREDADD:
+            break;
+        default:
+            return 0;                   /* anything else resets vw_src */
+        }
+        if (i->a == dst || i->b == dst || i->c == dst)
+            return 0;                   /* a reader that is not a widen */
+    }
+    return seen == usecnt[dst];
 }
 
 static int in_reg(int vreg) { return g_regalloc && g_loc && g_loc[vreg] >= 0; }

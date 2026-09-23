@@ -109,6 +109,39 @@ echo "strength reduction: the address is walked by one add"
 # the step, so `p = &a[i]` took the pointer AFTER it had moved on and
 # came out as &a[i+1]. Checked by running it, below.
 
+# ---- 4b. and then the loop stops counting ------------------------------
+#
+# Once the address is walked, the index exists only to be compared. The
+# test is made about the POINTER instead -- it reaches a fixed limit
+# exactly -- and the counter becomes an add and a copy that feed only
+# each other. That is a CYCLE: every instruction in it has a use, so a
+# use count never reaches zero and dead-code elimination that counts
+# uses leaves it there forever. Marking what is live removes it.
+cat > "$out/lftr.c" <<'EOF'
+int a[4096];
+int f(void) { int s = 0; for (int i = 0; i < 4096; i++) s += a[i]; return s; }
+EOF
+ir "$out/lftr.c"
+# the latch test must not name a value the loop increments by one
+back=$(grep -E 'brnz.* -> L[0-9]+' "$out/ir.txt" | tail -1 |
+       sed 's/.*brnz[^ ]* %\([0-9]*\).*/\1/')
+[ -n "$back" ] || { echo "FAIL: no bottom test in the IR"; cat "$out/ir.txt"
+                    exit 1; }
+tst=$(grep -E "^  %$back = cmp" "$out/ir.txt" | head -1)
+[ -n "$tst" ] || { echo "FAIL: the bottom branch reads %$back, which no"
+                   echo "      compare defines:"; cat "$out/ir.txt"; exit 1; }
+case $tst in
+*"#4096"*) echo "FAIL: the loop still counts to 4096 rather than walking to"
+           echo "      the end of the array:"; cat "$out/ir.txt"; exit 1;;
+esac
+echo "the loop's test walks the pointer to a limit, not the index to a bound"
+# and the counter it kept is gone: one add of #1 per iteration, no more
+nadd1=$(grep -cE 'add\.[0-9]+s? %[0-9]+, #1([^0-9]|$)' "$out/ir.txt" || true)
+[ "$nadd1" = 0 ] || {
+    echo "FAIL: $nadd1 increment(s) of one survive, so the dead counter"
+    echo "      cycle was not removed:"; cat "$out/ir.txt"; exit 1; }
+echo "and the counter it kept -- a dead cycle -- is gone"
+
 # ---- 5. and it all still runs ------------------------------------------
 #
 # The IR checks above say a transform fired; this says it was right. The
