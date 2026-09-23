@@ -2337,12 +2337,76 @@ static int pass_cfgclean(struct ir_func *fn)
         }
     }
 
+    /* A second branch on a condition the one above it already decided.
+     * Control reaches it only by falling out of the first, so the
+     * condition is known there: the same test cannot fire twice, and
+     * the opposite test cannot fail. Nothing can jump between them --
+     * there is no label -- which is the whole of the argument.
+     *
+     * Unrolling makes these on purpose: its entry test repeats the
+     * loop's own guard, because the block it opens is the target of a
+     * back edge and the guard runs once. Threading a jump makes them
+     * too. */
+    char *dead = xcalloc((size_t)fn->nins, 1);
+    {
+        int last_cond = -1;
+        enum ir_op last_op = IR_JMP;
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_LABEL) { last_cond = -1; continue; }
+            int t = def_target(i);
+            if (t >= 0 && t == last_cond)
+                last_cond = -1;                 /* a different value now */
+            if (i->op != IR_BRZ && i->op != IR_BRNZ)
+                continue;
+            if (last_cond >= 0 && i->a == last_cond) {
+                if (i->op == last_op) {
+                    dead[n] = 1;                /* it cannot fire */
+                    changed = 1;
+                    continue;                   /* and decides nothing */
+                }
+                i->op = IR_JMP; i->a = -1;      /* it cannot fail */
+                changed = 1;
+                last_cond = -1;
+                continue;
+            }
+            last_cond = i->a; last_op = i->op;
+        }
+    }
+
+    /* A label nothing can jump to is not a block boundary, it is only
+     * pretending to be one -- and every block-local pass stops at it:
+     * value numbering, copy propagation, store forwarding and dead-
+     * store elimination all reason between labels, so one that no
+     * branch names splits a straight line into two for nothing. The
+     * loop passes leave these behind by the handful (rotation's old
+     * header, a latch that was once its own block), and threading a
+     * jump above makes more of them on the spot.
+     *
+     * A landing pad's label IS named, by the exception region rather
+     * than by a branch, and the unwinder is what jumps to it. */
+    char *reached = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1);
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if ((i->op == IR_JMP || i->op == IR_BRZ || i->op == IR_BRNZ ||
+             i->op == IR_LABELADDR) &&
+            i->label >= 0 && i->label < fn->nlabels)
+            reached[i->label] = 1;
+    }
+    for (int e = 0; e < fn->neh; e++)
+        if (fn->eh[e].lp_label >= 0 && fn->eh[e].lp_label < fn->nlabels)
+            reached[fn->eh[e].lp_label] = 1;
+
     /* Drop a jump to the label that immediately follows it, and any
      * instruction that can never be reached: after an unconditional
      * transfer, until the next label. */
-    char *dead = xcalloc((size_t)fn->nins, 1);
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_LABEL && i->label >= 0 && i->label < fn->nlabels &&
+            !reached[i->label]) {
+            dead[n] = 1;
+            continue;
+        }
         if (i->op == IR_JMP) {
             int m = n + 1;
             while (m < fn->nins && fn->ins[m].op == IR_LABEL) {
@@ -2384,7 +2448,7 @@ static int pass_cfgclean(struct ir_func *fn)
         changed = 1;
     }
     g_did.cfgclean += changed;
-    free(dead); free(at); free(fwd);
+    free(dead); free(reached); free(at); free(fwd);
     return changed;
 }
 
@@ -7305,6 +7369,13 @@ static void opt_func(struct ir_func *fn)
             changed |= pass_copyprop(fn);
             changed |= pass_copyprop_local(fn);
             changed |= pass_dce(fn);
+            /* The unrolled block opens with a test the loop's own guard
+             * has just made -- it has to, because that block is the
+             * target of a back edge and the guard runs once -- so on
+             * the way IN it is a branch whose answer is already known.
+             * This is what notices. */
+            if (g_cfgclean)
+                changed |= pass_cfgclean(fn);
         }
     }
     /* After the fixpoint: fold constant operands into immediates, then DCE the

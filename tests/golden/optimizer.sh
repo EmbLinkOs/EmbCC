@@ -84,4 +84,49 @@ if grep -q 'mul' "$out/cycle.ir"; then
 fi
 echo "an accumulator that feeds only itself is removed, cycle and all"
 
+# 5. Blocks that are not blocks, and branches that are not branches.
+#
+# A label nothing can jump to is not a block boundary, it is only
+# pretending to be one -- and every block-local pass stops at it. Value
+# numbering, copy propagation, store forwarding and dead-store
+# elimination all reason between labels, so one no branch names splits a
+# straight line in two for nothing. The loop passes leave these behind
+# by the handful.
+#
+# And a second branch on a condition the one above it already decided
+# cannot fire: control reaches it only by falling out of the first, and
+# with no label between them nothing can jump in to make that untrue.
+cat > "$out/cfg.c" <<'EOF'
+int g[64];
+long sum(long n)   { long s = 0; for (long i = 0; i < n; i++) s += i & 7; return s; }
+long walk(int n)   { long s = 0; for (int i = 0; i < n; i++) s += g[i]; return s; }
+int  pick(int a, int b) { int r; if (a > b) r = a - b; else r = b - a; return r * 2; }
+EOF
+"$EMBCC" inspect ir --target="$TARGET" -O2 "$out/cfg.c" > "$out/cfg.ir" \
+    2>/dev/null || { echo "FAIL: could not dump the CFG-cleanup IR"; exit 1; }
+orphan=$(awk '
+    /^  *(jmp|brz|brnz)/ { for (i = 1; i <= NF; i++)
+                               if ($i ~ /^L[0-9]+$/) used[$i] = 1 }
+    /^L[0-9]+:/ { l = $1; sub(":", "", l); defd[l] = 1 }
+    END { for (l in defd) if (!(l in used)) print l }
+' "$out/cfg.ir")
+[ -z "$orphan" ] || {
+    echo "FAIL: label(s) $orphan are defined and never jumped to, so they"
+    echo "      split a straight line into two blocks for nothing:"
+    cat "$out/cfg.ir"; exit 1; }
+echo "every label left is one something can jump to"
+
+twice=$(awk '
+    /^L[0-9]+:/ { prev = ""; next }
+    /^  *br(z|nz)/ { c = $2; sub(/^[^%]*/, "", c); sub(/[ \t].*/, "", c)
+                     if (c != "" && c == prev) { print NR; exit }
+                     prev = c; next }
+    { prev = prev }
+' "$out/cfg.ir")
+[ -z "$twice" ] || {
+    echo "FAIL: two branches in a row test the same value (IR line $twice)."
+    echo "      The second cannot fire -- nothing can jump between them:"
+    cat "$out/cfg.ir"; exit 1; }
+echo "no branch asks a question the branch above it has answered"
+
 echo "optimizer acceptance passed"
