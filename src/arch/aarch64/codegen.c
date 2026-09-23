@@ -36,6 +36,7 @@
 /* -mgeneral-regs-only / -mno-sse: the FP registers are off limits. */
 static int g_no_fp;
 static int g_a64_regalloc;      /* -O2 register allocation is on */
+static int g_a64_opt_frames;    /* -O1+: a never-referenced temp takes no slot */
 
 /* The register frame slots are addressed from: sp, except in a function
  * whose sp moves at run time (a VLA's IR_ALLOCA), where the prologue pins
@@ -402,17 +403,37 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr)
         running += (ty_size(f->var_tys[v]) + 7) & ~7;
     }
 
+    /* Temps share a coalesced pool of eight-byte slots (D-011's shared
+     * ra_coalesce_temps, the same one x86-64 uses) rather than taking
+     * one each. Two temps whose live ranges do not overlap can sit in
+     * the same eight bytes, and after mem2reg has split a variable into
+     * SSA versions most of them do not overlap at all.
+     *
+     * A sixteen-byte temp -- a long double, an __int128, a vector --
+     * keeps its own aligned slot outside the pool, because the pool's
+     * slots are eight. */
     running = (running + 7) & ~7L;
+    int has_cgoto = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
+            has_cgoto = 1;
+    struct ra_slots so = { g_a64_loc, g_a64_opt_frames, has_cgoto };
+    int npool = 0;
+    int *tslot = ra_coalesce_temps(fn, fn->nvars, &so, &npool);
+    long temp_base = running;
     for (int t = fn->nvars; t < fn->nvregs; t++) {
+        int k = t - fn->nvars;
+        if (!tslot || tslot[k] < 0) { disp[t] = temp_base; continue; }
+        disp[t] = temp_base + (long)tslot[k] * 8;
+    }
+    running = temp_base + (long)npool * 8;
+    free(tslot);
+    for (int t = fn->nvars; t < fn->nvregs; t++)
         if (g_a64_wide && g_a64_wide[t]) {
             running = (running + 15) & ~15L;
             disp[t] = running;
             running += 16;
-            continue;
         }
-        disp[t] = running;
-        running += 8;
-    }
 
     fr->size = (int)((running + 15) & ~15L);
     return disp;
@@ -1836,6 +1857,7 @@ void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
                        * no level-dependent output of its own yet */
     g_no_fp = no_sse;
     g_a64_regalloc = regalloc;
+    g_a64_opt_frames = optimize;
 
     struct a64_sites st;
     st.call = NULL; st.ncall = st.capcall = 0;

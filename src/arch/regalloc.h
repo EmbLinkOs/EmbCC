@@ -109,6 +109,29 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first, int *last,
                                  unsigned long **livein_out, int **defv_out,
                                  int *words_out);
 
+/* What a backend knows about slot assignment that this layer does not. */
+struct ra_slots {
+    /* Per-vreg physical register, or NULL when the allocator is off. A
+     * vreg with one never touches memory, so it needs no slot -- which
+     * is also what keeps mem2reg's SSA-version inflation out of the
+     * frame. */
+    const int *loc;
+    /* Drop the slot of a temp that appears in NO instruction. Common
+     * once immediate-folding detaches a CONST and dead-code removal
+     * takes its definition; a throwaway eight bytes each inflates the
+     * frame for nothing. Off at -O0, where the layout must not move. */
+    int opt_frames;
+    /* An indirect jump reaches any address-taken label, so a live range
+     * measured by appearance is not a live range. No coalescing then. */
+    int has_cgoto;
+};
+
+/* Assign each temp of `fn` a slot index in a shared pool, or -1 for one
+ * that needs no slot. Returns a malloc'd array indexed by (vreg -
+ * nvars), and fills *npool_out with how many slots the pool needs. */
+int *ra_coalesce_temps(struct ir_func *fn, int nvars,
+                       const struct ra_slots *o, int *npool_out);
+
 /* The vreg an instruction WRITES, or -1. In the shared layer because
  * liveness is: it has to agree with what the backends actually store,
  * and one copy is how it stays agreed. */

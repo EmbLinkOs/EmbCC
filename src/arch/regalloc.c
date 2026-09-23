@@ -557,3 +557,159 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
 }
 
 #undef OPAQUE
+
+/* ==== temp-slot coalescing, shared (D-011) =================================
+ *
+ * Two temps whose live ranges do not overlap can share one frame slot.
+ * The x86-64 backend has done this since it was written; aarch64 gave
+ * every temp its own eight bytes, which on a function the optimizer has
+ * inflated with SSA versions is a frame several times larger than it
+ * needs to be -- and on a recursive kernel function, a stack overflow.
+ *
+ * D-011 said what justifies lifting: a real algorithm duplicated
+ * between two WORKING backends. This is that, and the check is that the
+ * x86 objects come out byte-identical after the move -- tools/
+ * x86-identity.sh compares emitted bytes, so "nothing changed" is a
+ * statement about the code and not about the tests.
+ *
+ * What a backend supplies is the three things it knows and this does
+ * not: which vregs live in registers (those need no slot at all), and
+ * the two policy questions below. */
+int *ra_coalesce_temps(struct ir_func *fn, int nvars,
+                       const struct ra_slots *o, int *npool_out)
+{
+    int nins = fn->nins, nvr = fn->nvregs;
+    int ntemp = nvr - nvars;
+    *npool_out = 0;
+    if (ntemp <= 0)
+        return NULL;
+
+    /* basic-block id per instruction: a new block begins at a label and after
+     * any branch/jump/return/ud2. */
+    int *blk = xmalloc((size_t)(nins ? nins : 1) * sizeof *blk);
+    int b = 0;
+    for (int i = 0; i < nins; i++) {
+        enum ir_op op = fn->ins[i].op;
+        if (op == IR_LABEL) b++;
+        blk[i] = b;
+        if (op == IR_JMP || op == IR_BRZ || op == IR_BRNZ ||
+            op == IR_RET || op == IR_UD2)
+            b++;
+    }
+
+    /* [first,last] instruction index over every appearance of each temp. */
+    int *first = xmalloc((size_t)ntemp * sizeof *first);
+    int *last  = xmalloc((size_t)ntemp * sizeof *last);
+    for (int k = 0; k < ntemp; k++) { first[k] = -1; last[k] = -1; }
+    for (int i = 0; i < nins; i++) {
+        struct ir_ins *in = &fn->ins[i];
+        int vs[4]; int nv = 0;
+        vs[nv++] = in->dst; vs[nv++] = in->a; vs[nv++] = in->b; vs[nv++] = in->c;
+        for (int j = 0; j < nv; j++) {
+            int v = vs[j];
+            if (v >= nvars && v < nvr) {
+                int k = v - nvars;
+                if (first[k] < 0) first[k] = i;
+                last[k] = i;
+            }
+        }
+        if (in->op == IR_CALL)
+            for (int a = 0; a < in->nargs; a++) {
+                int v = in->argv[a].vreg;
+                if (v >= nvars && v < nvr) {
+                    int k = v - nvars;
+                    if (first[k] < 0) first[k] = i;
+                    last[k] = i;
+                }
+            }
+        if (in->op == IR_ASM && in->asm_ir) {
+            struct ir_asm *ia = in->asm_ir;
+            for (int a = 0; a < ia->nin; a++) {
+                int v = ia->in[a].temp;
+                if (v >= nvars && v < nvr) {
+                    int k = v - nvars;
+                    if (first[k] < 0) first[k] = i;
+                    last[k] = i;
+                }
+            }
+            for (int a = 0; a < ia->nout; a++) {
+                int v = ia->out[a].temp;
+                if (v >= nvars && v < nvr) {
+                    int k = v - nvars;
+                    if (first[k] < 0) first[k] = i;
+                    last[k] = i;
+                }
+            }
+        }
+    }
+
+    /* order temps by first-appearance (ties by temp index), via buckets keyed
+     * on the first index — O(nins+ntemp) and deterministic. Never-appearing
+     * temps bucket at `nins`. */
+    int *head = xmalloc((size_t)(nins + 1) * sizeof *head);
+    for (int i = 0; i <= nins; i++) head[i] = -1;
+    int *nxt = xmalloc((size_t)ntemp * sizeof *nxt);
+    for (int k = ntemp - 1; k >= 0; k--) {
+        int fi = first[k] < 0 ? nins : first[k];
+        nxt[k] = head[fi]; head[fi] = k;
+    }
+
+    /* linear scan: reuse a freed pool index for a coalescable temp once its
+     * previous occupant is dead; a non-coalescable temp takes a fresh index it
+     * never gives back. */
+    int *slot = xmalloc((size_t)ntemp * sizeof *slot);
+    int *freelist = xmalloc((size_t)ntemp * sizeof *freelist);
+    int *act_last = xmalloc((size_t)ntemp * sizeof *act_last);
+    int *act_idx  = xmalloc((size_t)ntemp * sizeof *act_idx);
+    int nfree = 0, nact = 0, pool = 0;
+    for (int i = 0; i <= nins; i++) {
+        for (int k = head[i]; k >= 0; k = nxt[k]) {
+            /* A register-resident temp (-O2 regalloc) never touches memory, so
+             * it needs no stack slot — skip it, keeping the frame to the temps
+             * that actually spill. (This also caps mem2reg's SSA-temp inflation:
+             * the extra versions live in registers, not the frame.) */
+            if (o->loc && o->loc[k + nvars] >= 0) {
+                slot[k] = -1;
+                continue;
+            }
+            if (first[k] < 0) {          /* never referenced: no slot needed */
+                /* A temp that appears in no instruction is dead — nothing ever
+                 * loads or stores it, so it needs no frame slot. This is common
+                 * once the optimizer's immediate-fold detaches a CONST and DCE
+                 * drops its defining instruction, leaving the temp unreferenced;
+                 * giving each one an 8-byte throwaway slot inflates the frame for
+                 * nothing, and a recursive kernel function (path walk, tree
+                 * sweep) then overflows the kernel stack. Gated to optimizing
+                 * builds so -O0 stays byte-identical (its throwaway layout is
+                 * unchanged, which the self-host fixed point relies on). */
+                slot[k] = o->opt_frames ? -1 : pool++;
+                continue;
+            }
+            int coalescable = (blk[first[k]] == blk[last[k]]) && !o->has_cgoto;
+            /* expire actives dead before this temp is defined */
+            for (int a = 0; a < nact; ) {
+                if (act_last[a] < first[k]) {
+                    freelist[nfree++] = act_idx[a];
+                    act_last[a] = act_last[nact - 1];
+                    act_idx[a]  = act_idx[nact - 1];
+                    nact--;
+                } else {
+                    a++;
+                }
+            }
+            int idx = (coalescable && nfree > 0) ? freelist[--nfree] : pool++;
+            slot[k] = idx;
+            if (coalescable) {
+                act_last[nact] = last[k];
+                act_idx[nact]  = idx;
+                nact++;
+            }
+        }
+    }
+    *npool_out = pool;
+
+    free(blk); free(first); free(last); free(head); free(nxt);
+    free(freelist); free(act_last); free(act_idx);
+    return slot;
+}
+

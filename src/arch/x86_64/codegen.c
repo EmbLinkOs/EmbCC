@@ -45,147 +45,7 @@ static int g_want_debug;
 static int g_regalloc;          /* defined below; -O2 register allocation is on */
 static const int *g_loc;        /* per-vreg physical register at -O2, or -1 */
 static int g_opt_frames;        /* -O1+: dead temps take no stack slot (frame shrink) */
-static int g_has_cgoto;         /* function has a computed goto: liveness is
-                                 * imprecise -> no regalloc / no slot coalescing */
-
-static int *coalesce_temps(struct ir_func *fn, int nvars, int *npool_out)
-{
-    int nins = fn->nins, nvr = fn->nvregs;
-    int ntemp = nvr - nvars;
-    *npool_out = 0;
-    if (ntemp <= 0)
-        return NULL;
-
-    /* basic-block id per instruction: a new block begins at a label and after
-     * any branch/jump/return/ud2. */
-    int *blk = xmalloc((size_t)(nins ? nins : 1) * sizeof *blk);
-    int b = 0;
-    for (int i = 0; i < nins; i++) {
-        enum ir_op op = fn->ins[i].op;
-        if (op == IR_LABEL) b++;
-        blk[i] = b;
-        if (op == IR_JMP || op == IR_BRZ || op == IR_BRNZ ||
-            op == IR_RET || op == IR_UD2)
-            b++;
-    }
-
-    /* [first,last] instruction index over every appearance of each temp. */
-    int *first = xmalloc((size_t)ntemp * sizeof *first);
-    int *last  = xmalloc((size_t)ntemp * sizeof *last);
-    for (int k = 0; k < ntemp; k++) { first[k] = -1; last[k] = -1; }
-    for (int i = 0; i < nins; i++) {
-        struct ir_ins *in = &fn->ins[i];
-        int vs[4]; int nv = 0;
-        vs[nv++] = in->dst; vs[nv++] = in->a; vs[nv++] = in->b; vs[nv++] = in->c;
-        for (int j = 0; j < nv; j++) {
-            int v = vs[j];
-            if (v >= nvars && v < nvr) {
-                int k = v - nvars;
-                if (first[k] < 0) first[k] = i;
-                last[k] = i;
-            }
-        }
-        if (in->op == IR_CALL)
-            for (int a = 0; a < in->nargs; a++) {
-                int v = in->argv[a].vreg;
-                if (v >= nvars && v < nvr) {
-                    int k = v - nvars;
-                    if (first[k] < 0) first[k] = i;
-                    last[k] = i;
-                }
-            }
-        if (in->op == IR_ASM && in->asm_ir) {
-            struct ir_asm *ia = in->asm_ir;
-            for (int a = 0; a < ia->nin; a++) {
-                int v = ia->in[a].temp;
-                if (v >= nvars && v < nvr) {
-                    int k = v - nvars;
-                    if (first[k] < 0) first[k] = i;
-                    last[k] = i;
-                }
-            }
-            for (int a = 0; a < ia->nout; a++) {
-                int v = ia->out[a].temp;
-                if (v >= nvars && v < nvr) {
-                    int k = v - nvars;
-                    if (first[k] < 0) first[k] = i;
-                    last[k] = i;
-                }
-            }
-        }
-    }
-
-    /* order temps by first-appearance (ties by temp index), via buckets keyed
-     * on the first index — O(nins+ntemp) and deterministic. Never-appearing
-     * temps bucket at `nins`. */
-    int *head = xmalloc((size_t)(nins + 1) * sizeof *head);
-    for (int i = 0; i <= nins; i++) head[i] = -1;
-    int *nxt = xmalloc((size_t)ntemp * sizeof *nxt);
-    for (int k = ntemp - 1; k >= 0; k--) {
-        int fi = first[k] < 0 ? nins : first[k];
-        nxt[k] = head[fi]; head[fi] = k;
-    }
-
-    /* linear scan: reuse a freed pool index for a coalescable temp once its
-     * previous occupant is dead; a non-coalescable temp takes a fresh index it
-     * never gives back. */
-    int *slot = xmalloc((size_t)ntemp * sizeof *slot);
-    int *freelist = xmalloc((size_t)ntemp * sizeof *freelist);
-    int *act_last = xmalloc((size_t)ntemp * sizeof *act_last);
-    int *act_idx  = xmalloc((size_t)ntemp * sizeof *act_idx);
-    int nfree = 0, nact = 0, pool = 0;
-    for (int i = 0; i <= nins; i++) {
-        for (int k = head[i]; k >= 0; k = nxt[k]) {
-            /* A register-resident temp (-O2 regalloc) never touches memory, so
-             * it needs no stack slot — skip it, keeping the frame to the temps
-             * that actually spill. (This also caps mem2reg's SSA-temp inflation:
-             * the extra versions live in registers, not the frame.) */
-            if (g_regalloc && g_loc && g_loc[k + nvars] >= 0) {
-                slot[k] = -1;
-                continue;
-            }
-            if (first[k] < 0) {          /* never referenced: no slot needed */
-                /* A temp that appears in no instruction is dead — nothing ever
-                 * loads or stores it, so it needs no frame slot. This is common
-                 * once the optimizer's immediate-fold detaches a CONST and DCE
-                 * drops its defining instruction, leaving the temp unreferenced;
-                 * giving each one an 8-byte throwaway slot inflates the frame for
-                 * nothing, and a recursive kernel function (path walk, tree
-                 * sweep) then overflows the kernel stack. Gated to optimizing
-                 * builds so -O0 stays byte-identical (its throwaway layout is
-                 * unchanged, which the self-host fixed point relies on). */
-                slot[k] = g_opt_frames ? -1 : pool++;
-                continue;
-            }
-            int coalescable = (blk[first[k]] == blk[last[k]]) && !g_has_cgoto;
-            /* expire actives dead before this temp is defined */
-            for (int a = 0; a < nact; ) {
-                if (act_last[a] < first[k]) {
-                    freelist[nfree++] = act_idx[a];
-                    act_last[a] = act_last[nact - 1];
-                    act_idx[a]  = act_idx[nact - 1];
-                    nact--;
-                } else {
-                    a++;
-                }
-            }
-            int idx = (coalescable && nfree > 0) ? freelist[--nfree] : pool++;
-            slot[k] = idx;
-            if (coalescable) {
-                act_last[nact] = last[k];
-                act_idx[nact]  = idx;
-                nact++;
-            }
-        }
-    }
-    *npool_out = pool;
-
-    free(blk); free(first); free(last); free(head); free(nxt);
-    free(freelist); free(act_last); free(act_idx);
-    return slot;
-}
-
-/* ---- -O2 register allocation ----
+static int g_has_cgoto;         /* ---- -O2 register allocation ----
  *
  * Assign eligible vregs to callee-saved registers via linear scan over
  * [first,last] appearance intervals — a sound over-approximation of liveness
@@ -527,7 +387,9 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
     /* Temporaries share a coalesced pool of 8-byte slots (K13) instead of one
      * slot each — the temp region is `npool` slots wide, not (nvregs-nvars). */
     int npool = 0;
-    int *tslot = coalesce_temps(fn, fn->nvars, &npool);
+    struct ra_slots so = { g_regalloc ? g_loc : NULL, g_opt_frames,
+                           g_has_cgoto };
+    int *tslot = ra_coalesce_temps(fn, fn->nvars, &so, &npool);
     int temp_base = running;
     for (int t = fn->nvars; t < fn->nvregs; t++)
         disp[t] = -(temp_base + (tslot[t - fn->nvars] + 1) * 8);
