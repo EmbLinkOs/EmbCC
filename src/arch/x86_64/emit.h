@@ -176,3 +176,8 @@ void x86_vmov_xmm_reg(struct code *c, int xmm, int reg, int w);
 void x86_vmov_reg_xmm(struct code *c, int reg, int xmm, int w);
 void x86_vbin_rr(struct code *c, int dst, int src, int op, int esize);
 void x86_vunpck(struct code *c, int dst, int src, int high, int esize);
+
+/* conditional move: the branchless half of a select */
+void x86_test_rr(struct code *c, int a, int b, int w);
+void x86_cmovne_slot(struct code *c, int reg, int disp, int w);
+void x86_cmovne_rr(struct code *c, int dst, int src, int w);

@@ -124,6 +124,12 @@ enum ir_op {
     IR_VSPLAT, /* dst = every lane set to scalar a     (size: element) */
     IR_VREDADD,/* dst = the sum of a's lanes           (size: element;
                 * w: the scalar result's width) */
+    IR_SELECT, /* dst = a ? b : c      (w, sign)
+                * Both targets have this without a branch -- cmov on
+                * x86-64, csel on aarch64 -- and neither emitted it. The
+                * arms are VALUES, already computed: a select evaluates
+                * both, so the pass that builds one must refuse anything
+                * that could fault or have an effect. */
     IR_VWIDEN, /* dst = half of a's lanes, each widened to twice its
                 * size   (size: the SOURCE element width; `c`: 0 the low
                 * half, 1 the high; `sign`: sign- rather than

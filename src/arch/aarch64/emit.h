@@ -79,6 +79,7 @@ void a64_rev(struct code *c, int rd, int rn, int size);
 /* ---- compare -------------------------------------------------------- */
 void a64_cmp_reg(struct code *c, int rn, int rm, int w);
 void a64_cset(struct code *c, int rd, int cond);
+void a64_csel(struct code *c, int rd, int rn, int rm, int cond, int w);
 
 /* ---- extension ------------------------------------------------------ */
 /* rd = rn re-extended from `size` bytes, signed or not, into a `w`-wide

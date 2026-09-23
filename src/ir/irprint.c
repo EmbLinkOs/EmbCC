@@ -73,7 +73,7 @@ const char *ir_opname(enum ir_op op)
         [IR_LANDING] = "landing",
         [IR_VLOAD] = "vload",   [IR_VSTORE] = "vstore", [IR_VBIN] = "vbin",
         [IR_VSPLAT] = "vsplat", [IR_VREDADD] = "vredadd",
-        [IR_VWIDEN] = "vwiden",
+        [IR_VWIDEN] = "vwiden", [IR_SELECT] = "select",
     };
     if ((int)op < 0 || (int)op >= IR_OPCOUNT || !n[op])
         return "op?";
@@ -299,39 +299,44 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
     case IR_LANDING:
         ob_fmt(b, "%%%d, %%%d = landing", i->dst, i->b);
         break;
-    /* Vectors print their ELEMENT width and lane count -- `vbin.4x4s +`
-     * is four signed four-byte lanes -- because 16 bytes is the one
-     * thing about them that never varies and the lane shape is what a
-     * reader is actually checking. */
+    /* Vectors print on the ordinary `.w:size` form, with the element
+     * width as `size` -- the lane count is 16/size and adding a second
+     * spelling only gave the parser something else to learn. §9.1 wants
+     * print and parse to give back identical IR, so every opcode has to
+     * be taught to both, and the vector ones were taught to neither
+     * until tests/golden/ir-roundtrip.sh was pointed at a file that
+     * actually vectorizes. */
     case IR_VLOAD:
-        ob_fmt(b, "%%%d = vload.%dx%d [%%%d]", i->dst, 16 / i->size,
-               i->size, i->a);
+        ob_fmt(b, "%%%d = vload", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " [%%%d]", i->a);
         break;
     case IR_VSTORE:
-        ob_fmt(b, "vstore.%dx%d [%%%d], %%%d", 16 / i->size, i->size,
-               i->a, i->b);
+        ob_str(b, "vstore"); memsuffix(b, i, 1);
+        ob_fmt(b, " [%%%d], %%%d", i->a, i->b);
         break;
     case IR_VBIN:
-        ob_fmt(b, "%%%d = vbin.%dx%d%s %c %%%d, ", i->dst, 16 / i->size,
-               i->size, i->sign ? "s" : "", (char)i->imm, i->a);
-        /* A shift's count is a constant in `c`, not a second vector. */
+        ob_fmt(b, "%%%d = vbin", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " %c %%%d, ", (char)i->imm, i->a);
         if (i->imm == '<' || i->imm == '>')
-            ob_fmt(b, "#%d", i->c);
+            ob_fmt(b, "#%d", i->c);        /* a shift count, not a vector */
         else
             ob_fmt(b, "%%%d", i->b);
         break;
     case IR_VSPLAT:
-        ob_fmt(b, "%%%d = vsplat.%dx%d %%%d", i->dst, 16 / i->size,
-               i->size, i->a);
+        ob_fmt(b, "%%%d = vsplat", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " %%%d", i->a);
         break;
     case IR_VREDADD:
-        ob_fmt(b, "%%%d = vredadd.%dx%d %%%d", i->dst, 16 / i->size,
-               i->size, i->a);
+        ob_fmt(b, "%%%d = vredadd", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " %%%d", i->a);
         break;
     case IR_VWIDEN:
-        ob_fmt(b, "%%%d = vwiden.%s.%dx%d%s %%%d", i->dst,
-               i->c ? "hi" : "lo", 16 / i->size, i->size,
-               i->sign ? "s" : "", i->a);
+        ob_fmt(b, "%%%d = vwiden", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " %s %%%d", i->c ? "hi" : "lo", i->a);
+        break;
+    case IR_SELECT:
+        ob_fmt(b, "%%%d = select", i->dst); suffix(b, i, 1);
+        ob_fmt(b, " %%%d ? %%%d : %%%d", i->a, i->b, i->c);
         break;
     case IR_VA_START:
         ob_fmt(b, "va_start [%%%d]", i->a);

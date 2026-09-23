@@ -226,6 +226,20 @@ void a64_cset(struct code *c, int rd, int cond)
     a64_word(c, 0x9A9F07E0UL | (inv << 12) | (unsigned long)rd);
 }
 
+/* CSEL Rd, Rn, Rm, cond -- Rd = cond ? Rn : Rm, with no branch. The
+ * whole point of a select: both arms are already values, so there is
+ * nothing to mispredict.
+ *
+ *   sf 0 0 11010100 Rm cond 0 0 Rn Rd
+ */
+void a64_csel(struct code *c, int rd, int rn, int rm, int cond, int w)
+{
+    unsigned long sf = w == 8 ? 1UL << 31 : 0;
+    a64_word(c, 0x1A800000UL | sf | ((unsigned long)rm << 16) |
+                ((unsigned long)cond << 12) | ((unsigned long)rn << 5) |
+                (unsigned long)rd);
+}
+
 /* ---- extension ------------------------------------------------------ */
 
 void a64_extend(struct code *c, int rd, int rn, int size, int sign, int w)

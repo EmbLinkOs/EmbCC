@@ -23,7 +23,8 @@
  * output. One line per function, at the end, answers the question
  * anyone actually asks -- "did anything happen, and what" -- and is
  * comparable between two builds. */
-static struct { long lvn, gcse, dce, copy, loadcse, dse, divmagic; } g_did;
+static struct { long lvn, gcse, dce, copy, loadcse, dse, divmagic,
+                ifconv, cfgclean, tailrec; } g_did;
 
 /* ---- op classification ---- */
 
@@ -41,6 +42,7 @@ static int writes_temp(enum ir_op op)
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_CALL: case IR_XCHG:
     case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_CAS16:
     case IR_FRAMEADDR: case IR_ALLOCA: case IR_SPSAVE:
+    case IR_SELECT:
     /* A vector result is a temp like any other, 16 bytes wide. */
     case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VREDADD:
     case IR_VWIDEN:
@@ -63,6 +65,7 @@ static int is_pure(enum ir_op op)
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
     case IR_FADDR: case IR_EXT: case IR_BSWAP: case IR_SQRT:
     case IR_I2F: case IR_F2I: case IR_F2F:
+    case IR_SELECT:        /* both arms are values; it cannot trap */
         return 1;
     default:
         return 0;
@@ -134,7 +137,7 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
     case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
         cb(&i->a, ctx);
         break;
-    case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
+    case IR_CMPXCHG: case IR_CAS: case IR_CAS16: case IR_SELECT:
         cb(&i->a, ctx);
         cb(&i->b, ctx);
         cb(&i->c, ctx);
@@ -1829,6 +1832,453 @@ static int pass_divmagic(struct ir_func *fn)
     free_defs(&d);
     g_did.divmagic++;
     return changed;
+}
+
+
+/* ---- if-conversion -------------------------------------------------
+ *
+ * A branch whose two arms each compute one value and join is a select,
+ * and both targets have one without a branch: cmov on x86-64, csel on
+ * aarch64. Neither backend emitted either.
+ *
+ *      %5 = cmp gt %3, %4              %5 = cmp gt %3, %4
+ *      brz %5 -> L0                    %2 = select %5 ? %3 : %4
+ *      %2 = mov %3
+ *      jmp L1
+ *   L0: %2 = mov %4
+ *   L1:
+ *
+ * That exact shape is what mem2reg's phi destruction leaves behind for
+ * `c ? a : b` and for `if (c) x = a; else x = b;`, so it is worth
+ * recognising narrowly rather than generally.
+ *
+ * ---- what makes it safe, and what makes it worth it ----
+ *
+ * A select EVALUATES BOTH ARMS. That is the correctness constraint, not
+ * a heuristic: neither arm may fault or have an effect, or a branch
+ * that was protecting one of them stops protecting it. A load behind a
+ * null check is the classic way to get this wrong, which is why only
+ * arms that are already VALUES -- a move of something computed before
+ * the branch -- are taken here.
+ *
+ * And it is only a win when the branch was unpredictable. Replacing a
+ * well-predicted branch with a data dependency is slower, which is why
+ * this fires on one move per arm and not on a long body: a two-value
+ * choice is exactly the case where the branch buys nothing. */
+/* How wide the value in `v` actually is.
+ *
+ * NOT the width on the move that copies it: mem2reg's phi copies carry
+ * the width of the VARIABLE they came from, which for `long x = c ? a :
+ * b` is 4 on a move of an 8-byte value. Codegen copies the whole slot
+ * either way, so the branch form is right and the select form -- which
+ * turns the width into a cmov operand size -- moved half the value. */
+static int sel_width(struct ir_func *fn, struct defs *d, int v)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    int n = d->ins[v];
+    if (n < 0)
+        return 8;                       /* a parameter, full width */
+    int w = fn->ins[n].w;
+    return w == 4 || w == 8 ? w : 0;
+}
+
+static int ifconv_one(struct ir_func *fn)
+{
+    if (fn->nins == 0)
+        return 0;
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    struct defs d;
+    compute_defs(fn, &d);
+    int done = 0;
+
+    for (int b = 0; b < nbb && !done; b++) {
+        if (bb[b].end - bb[b].start < 1)
+            continue;
+        struct ir_ins *br = &fn->ins[bb[b].end - 1];
+        if ((br->op != IR_BRZ && br->op != IR_BRNZ) || br->a < 0)
+            continue;
+        /* The taken arm is the labelled block; the other is the next
+         * one. For brz the labelled arm runs when the condition is
+         * FALSE, which is what decides the order of the select. */
+        int els = l2b[br->label], thn = b + 1;
+        if (els < 0 || thn >= nbb || els == thn || els <= b)
+            continue;
+        /* The two arms must be the branch's own, and adjacent.
+         *
+         * Neither was checked at first and both are miscompiles. If
+         * anything else jumps to the else label, deleting that block
+         * removes a target something still reaches for; and if any
+         * block sits BETWEEN the two arms, deleting only the arms
+         * leaves it running unconditionally. The second one is what
+         * made an -O2 answer differ here. */
+        if (els != thn + 1)
+            continue;
+        if (bb[thn].npred != 1 || bb[els].npred != 1)
+            continue;
+        if (bb[thn].pred[0] != b || bb[els].pred[0] != b)
+            continue;
+        /* then: exactly `dst = mov v` and a jump past the else */
+        if (bb[thn].end - bb[thn].start != 2)
+            continue;
+        struct ir_ins *tm = &fn->ins[bb[thn].start];
+        struct ir_ins *tj = &fn->ins[bb[thn].start + 1];
+        if (tm->op != IR_MOV || tm->dst < 0 || tm->a < 0 || tm->vol)
+            continue;
+        if (tj->op != IR_JMP)
+            continue;
+        /* else: a label and the same one move, falling through to the
+         * block the then-arm jumps to */
+        if (bb[els].end - bb[els].start != 2)
+            continue;
+        if (fn->ins[bb[els].start].op != IR_LABEL)
+            continue;
+        struct ir_ins *em = &fn->ins[bb[els].start + 1];
+        if (em->op != IR_MOV || em->dst != tm->dst || em->a < 0 || em->vol)
+            continue;
+        if (els + 1 >= nbb || l2b[tj->label] != els + 1)
+            continue;
+        if (tm->flt || em->flt)
+            continue;           /* a float select wants its own move */
+        int wt = sel_width(fn, &d, tm->a), we = sel_width(fn, &d, em->a);
+        if (!wt || wt != we)
+            continue;
+
+        /* Rewrite: the branch becomes the select, and both arms go. */
+        int dst = tm->dst;
+        int vtrue  = br->op == IR_BRZ ? tm->a : em->a;
+        int vfalse = br->op == IR_BRZ ? em->a : tm->a;
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        int lo_t = bb[thn].start, hi_t = bb[thn].end;
+        int lo_e = bb[els].start, hi_e = bb[els].end;
+        for (int n = 0; n < fn->nins; n++) {
+            if (newpos) newpos[n] = nb.n;
+            if (n == bb[b].end - 1) {           /* the branch */
+                struct ir_ins *sel = ib_push(&nb);
+                sel->op = IR_SELECT; sel->dst = dst;
+                sel->a = br->a; sel->b = vtrue; sel->c = vfalse;
+                sel->w = wt; sel->sign = tm->sign;
+                sel->line = br->line; sel->col = br->col;
+                continue;
+            }
+            if ((n >= lo_t && n < hi_t) || (n >= lo_e && n < hi_e))
+                continue;                       /* both arms */
+            *ib_push(&nb) = fn->ins[n];
+        }
+        if (newpos) {
+            newpos[fn->nins] = nb.n;
+            for (int v = 0; v < fn->nvars; v++) {
+                int l2 = fn->var_scope_lo[v], h2 = fn->var_scope_hi[v];
+                if (l2 >= 0 && l2 <= fn->nins) fn->var_scope_lo[v] = newpos[l2];
+                if (h2 >= 0 && h2 <= fn->nins) fn->var_scope_hi[v] = newpos[h2];
+            }
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        g_did.ifconv++;
+        done = 1;
+    }
+
+    free_defs(&d); free(l2b);
+    for (int i = 0; i < nbb; i++) free(bb[i].pred);
+    free(bb);
+    return done;
+}
+
+static int pass_ifconv(struct ir_func *fn)
+{
+    int changed = 0, guard = 0;
+    while (guard++ < 64 && ifconv_one(fn))
+        changed = 1;
+    return changed;
+}
+
+
+/* ---- CFG cleanup: jump threading and block merging -----------------
+ *
+ * Three shapes that irgen and the loop passes leave behind, none of
+ * which any existing pass removes:
+ *
+ *   A jump to a jump. `goto L1` where L1 holds only `goto L2` should go
+ *   straight to L2. Rotation and if-conversion both create these when
+ *   they delete the block in between.
+ *
+ *   A branch whose two arms are the same label. After SCCP folds one
+ *   side of a condition the two edges can converge, and the branch is
+ *   then a jump -- but the condition is still computed and tested.
+ *
+ *   A jump to the very next instruction, which is nothing at all.
+ *
+ * They are worth removing for their own sake and because every pass
+ * that reasons about blocks gets a smaller graph: a label with no
+ * remaining jumps to it stops splitting a block, so the block-local
+ * passes see more at once. */
+static int pass_cfgclean(struct ir_func *fn)
+{
+    if (fn->nins == 0 || fn->nlabels == 0)
+        return 0;
+    int changed = 0;
+
+    /* Where each label sits, and whether the block it opens is nothing
+     * but an unconditional jump elsewhere. */
+    int *at = xmalloc((size_t)fn->nlabels * sizeof *at);
+    int *fwd = xmalloc((size_t)fn->nlabels * sizeof *fwd);
+    for (int l = 0; l < fn->nlabels; l++) { at[l] = -1; fwd[l] = -1; }
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < fn->nlabels)
+            at[fn->ins[n].label] = n;
+    for (int l = 0; l < fn->nlabels; l++) {
+        int n = at[l];
+        if (n < 0) continue;
+        /* skip any further labels on the same spot */
+        while (n + 1 < fn->nins && fn->ins[n + 1].op == IR_LABEL) n++;
+        if (n + 1 < fn->nins && fn->ins[n + 1].op == IR_JMP)
+            fwd[l] = fn->ins[n + 1].label;
+    }
+    /* Follow the chains, with a bound: `L: goto L` is a real loop and
+     * must not be collapsed into itself. */
+    for (int l = 0; l < fn->nlabels; l++) {
+        int t = fwd[l], hops = 0;
+        while (t >= 0 && t < fn->nlabels && fwd[t] >= 0 && fwd[t] != t &&
+               hops++ < 16)
+            t = fwd[t];
+        fwd[l] = t;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_JMP && i->op != IR_BRZ && i->op != IR_BRNZ)
+            continue;
+        int l = i->label;
+        if (l < 0 || l >= fn->nlabels || fwd[l] < 0 || fwd[l] == l)
+            continue;
+        i->label = fwd[l];
+        changed = 1;
+    }
+
+    /* A conditional branch whose taken target is the fall-through is a
+     * jump; so is one whose two arms are the same label. */
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_BRZ && i->op != IR_BRNZ)
+            continue;
+        int m = n + 1;
+        while (m < fn->nins && fn->ins[m].op == IR_LABEL) {
+            if (fn->ins[m].label == i->label) {
+                i->op = IR_JMP; i->a = -1; changed = 1;
+                break;
+            }
+            m++;
+        }
+    }
+
+    /* Drop a jump to the label that immediately follows it, and any
+     * instruction that can never be reached: after an unconditional
+     * transfer, until the next label. */
+    char *dead = xcalloc((size_t)fn->nins, 1);
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_JMP) {
+            int m = n + 1;
+            while (m < fn->nins && fn->ins[m].op == IR_LABEL) {
+                if (fn->ins[m].label == i->label) { dead[n] = 1; break; }
+                m++;
+            }
+        }
+        if ((i->op == IR_JMP && !dead[n]) || i->op == IR_RET ||
+            i->op == IR_UD2) {
+            for (int m = n + 1; m < fn->nins; m++) {
+                if (fn->ins[m].op == IR_LABEL)
+                    break;
+                dead[m] = 1;
+            }
+        }
+    }
+    int ndead = 0;
+    for (int n = 0; n < fn->nins; n++) ndead += dead[n];
+    if (ndead) {
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        int j = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            if (newpos) newpos[n] = j;
+            if (dead[n]) continue;
+            if (j != n) fn->ins[j] = fn->ins[n];
+            j++;
+        }
+        if (newpos) {
+            newpos[fn->nins] = j;
+            for (int v = 0; v < fn->nvars; v++) {
+                int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+                if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+                if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+            }
+            free(newpos);
+        }
+        fn->nins = j;
+        changed = 1;
+    }
+    g_did.cfgclean += changed;
+    free(dead); free(at); free(fwd);
+    return changed;
+}
+
+
+/* ---- tail recursion into a loop -------------------------------------
+ *
+ * `return f(args)` where f is the function itself does not need a call
+ * at all: assign the parameters and jump back to the top. Sibling calls
+ * already stop the stack growing for this shape on x86-64, but a jump
+ * is cheaper still -- no argument marshalling through the ABI
+ * registers, no return address, and the body becomes a real loop that
+ * LICM, rotation and strength reduction can then work on. That last
+ * part is most of the value: a recursive function is opaque to every
+ * loop pass, and a loop is not.
+ *
+ * The rewrite is the obvious one, and the ORDER inside it is the whole
+ * correctness question:
+ *
+ *      f(a, b):                  f(a, b):
+ *        ...                   L: ...
+ *        return f(x, y)          t0 = x; t1 = y      <- read all
+ *                                a = t0; b = t1      <- then write all
+ *                                goto L
+ *
+ * Read-all-then-write-all, because `return f(b, a)` swaps its arguments
+ * and assigning them one at a time would give f(b, b).
+ *
+ * Refused when a parameter's address escapes: the recursive call gets a
+ * fresh frame and this does not, so anything holding a pointer to a
+ * parameter would see it change underneath. */
+/* Is the call at `n` a tail call to this function, and if so how much
+ * of what follows belongs to it?
+ *
+ * The result rarely flows straight into the `ret`. irgen forwards it
+ * through the temp the expression was assigned to, and the `ret` itself
+ * usually sits after a LABEL that the other arm of the conditional also
+ * jumps to:
+ *
+ *      %15 = call @self(...)
+ *      %2  = mov %15          <- ours to delete
+ *   L1:                       <- shared: the other arm jumps here
+ *      ret %2                 <- shared: must stay
+ *
+ * So the forwarding moves before the next label are ours, and anything
+ * from the label on is not. Fills *ndel with how many instructions
+ * after the call to drop. */
+static int tailrec_at(struct ir_func *fn, struct func *f, int n, int np,
+                      int *ndel)
+{
+    struct ir_ins *c = &fn->ins[n];
+    if (c->op != IR_CALL || c->indirect || c->callee != f ||
+        c->nargs != np || c->retsize || c->call_varargs || c->dst < 0)
+        return 0;
+    for (int k = 0; k < np; k++)
+        if (c->argv[k].is_struct || c->argv[k].on_stack ||
+            c->argv[k].is_float || c->argv[k].is_int128 || c->argv[k].byref)
+            return 0;
+    int cur = c->dst, j = n + 1, del = 0;
+    while (j < fn->nins && fn->ins[j].op == IR_MOV &&
+           fn->ins[j].a == cur && fn->ins[j].dst >= 0 && !fn->ins[j].vol) {
+        cur = fn->ins[j].dst; j++; del++;
+    }
+    int k = j;
+    while (k < fn->nins && fn->ins[k].op == IR_LABEL)
+        k++;
+    if (k >= fn->nins || fn->ins[k].op != IR_RET || fn->ins[k].a != cur)
+        return 0;
+    /* Nothing may read the forwarded value except that return -- if the
+     * other arm's path also reads it, it reads ITS own value, and the
+     * label between us means we cannot tell the two apart. */
+    for (int m = 0; m < fn->nins; m++) {
+        if (m > n && m <= k)
+            continue;
+        if (ins_reads(&fn->ins[m], cur))
+            return 0;
+    }
+    *ndel = del;
+    return 1;
+}
+
+static int pass_tailrec(struct ir_func *fn)
+{
+    struct func *f = fn->src;
+    if (!f || fn->nins == 0 || fn->is_varargs || fn->has_alloca || fn->neh)
+        return 0;
+    int np = fn->nparams;
+    if (np > MAX_PARAMS)
+        return 0;
+
+    /* A parameter whose address is taken cannot be reassigned here. */
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a >= 0 &&
+            fn->ins[n].a < np)
+            return 0;
+
+    int found = 0, junk;
+    for (int n = 0; n < fn->nins; n++)
+        if (tailrec_at(fn, f, n, np, &junk)) { found = 1; break; }
+    if (!found)
+        return 0;
+
+    int Ltop = fn->nlabels++;
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    int changed = 0;
+    {   /* the loop's head, before anything the body does */
+        struct ir_ins *l = ib_push(&nb);
+        l->op = IR_LABEL; l->label = Ltop; l->synth = 1;
+        l->line = fn->line;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        if (newpos) newpos[n] = nb.n;
+        struct ir_ins *c = &fn->ins[n];
+        int ndel = 0;
+        if (tailrec_at(fn, f, n, np, &ndel)) {
+            int argv[MAX_PARAMS], tmp[MAX_PARAMS];
+            for (int k = 0; k < np; k++)
+                argv[k] = c->argv[k].vreg;
+            for (int k = 0; k < np; k++) {          /* read all */
+                tmp[k] = fn->nvregs++;
+                struct ir_ins *m = ib_push(&nb);
+                m->op = IR_MOV; m->dst = tmp[k]; m->a = argv[k];
+                m->w = fn->locals[k].size == 8 ? 8 : 4;
+                m->line = c->line; m->col = c->col; m->synth = 1;
+            }
+            for (int k = 0; k < np; k++) {          /* then write all */
+                struct ir_ins *st = ib_push(&nb);
+                st->op = IR_STVAR; st->dst = k; st->a = tmp[k];
+                st->size = fn->locals[k].size;
+                st->line = c->line; st->col = c->col; st->synth = 1;
+            }
+            struct ir_ins *j = ib_push(&nb);
+            j->op = IR_JMP; j->label = Ltop;
+            j->line = c->line; j->col = c->col; j->synth = 1;
+            n += ndel;                  /* the forwarding moves go too */
+            changed = 1;
+            continue;
+        }
+        *ib_push(&nb) = *c;
+    }
+    if (!changed) { free(nb.p); free(newpos); fn->nlabels--; return 0; }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    g_did.tailrec++;
+    return 1;
 }
 
 /* ---- dead store elimination ----------------------------------------
@@ -4884,6 +5334,9 @@ static struct passflag g_pass[] = {
     { "inline",    0, 0 },   /* splice a small callee into its caller */
     { "dse",       0, 0 },   /* drop a store a later one overwrites */
     { "div-magic", 0, 0 },   /* divide by a constant without dividing */
+    { "if-convert",0, 0 },   /* a two-way choice without a branch */
+    { "cfg-clean", 0, 0 },   /* thread jumps, drop unreachable code */
+    { "tail-recursion", 0, 0 }, /* a self tail call becomes a loop */
 };
 #define NPASS ((int)(sizeof g_pass / sizeof g_pass[0]))
 #define P_MEM2REG 0
@@ -4895,6 +5348,10 @@ static struct passflag g_pass[] = {
 #define P_INLINE  6
 #define P_DSE     7
 #define P_DIVMAGIC 8
+#define P_IFCONV   9
+#define P_CFGCLEAN 10
+#define P_TAILREC  11
+
 
 int opt_set_pass(const char *name, int on)
 {
@@ -4931,6 +5388,9 @@ static void pass_default(int idx, int on)
 #define g_vec     (g_pass[P_VEC].on)
 #define g_dse     (g_pass[P_DSE].on)
 #define g_divmagic (g_pass[P_DIVMAGIC].on)
+#define g_ifconv   (g_pass[P_IFCONV].on)
+#define g_cfgclean (g_pass[P_CFGCLEAN].on)
+#define g_tailrec  (g_pass[P_TAILREC].on)
 
 /* ---- IR verifier (opt-in via EMBCC_VERIFY) --------------------------------
  * A cheap post-optimization sanity net for the two invariants a silent
@@ -5058,6 +5518,11 @@ static void opt_func(struct ir_func *fn)
     /* Before the fixpoint: what it emits -- a multiply, some shifts and
      * an add -- is ordinary arithmetic the other passes then fold,
      * value-number and strength-reduce like any other. */
+    /* Before everything: the loop it makes is then an ordinary loop to
+     * mem2reg, LICM, rotation and strength reduction, which is most of
+     * why it is worth doing at all. */
+    if (g_tailrec && cfg_ok)
+        pass_tailrec(fn);
     if (g_divmagic)
         pass_divmagic(fn);
     if (g_mem2reg && cfg_ok)
@@ -5086,6 +5551,8 @@ static void opt_func(struct ir_func *fn)
             changed |= pass_copyprop_local(fn);  /* the phi copies the global
                                                   * one cannot touch */
             changed |= pass_dce(fn);
+            if (g_cfgclean)
+                changed |= pass_cfgclean(fn);
             if (g_dse && cfg_ok)
                 changed |= pass_dse(fn);
         }
@@ -5127,6 +5594,13 @@ static void opt_func(struct ir_func *fn)
      * on: a loop already walking a pointer no longer looks like
      * base + i*scale. Inside the round it would race the vectorizer for
      * the same loops and win, trading four lanes for one add. */
+    /* If-conversion after the loop passes: the shape it matches is what
+     * phi destruction leaves, and rotation/LICM must have finished
+     * moving blocks around before the diamond is the real one. */
+    if (g_ifconv && cfg_ok && pass_ifconv(fn)) {
+        pass_copyprop_local(fn);
+        pass_dce(fn);
+    }
     if (g_licm && cfg_ok && pass_ivsr(fn)) {
         pass_copyprop_local(fn);
         pass_dce(fn);
@@ -5148,13 +5622,14 @@ static void opt_func(struct ir_func *fn)
         /* The passes that had been silent. One line, only when they did
          * something, because most functions give every count as zero. */
         if (g_did.lvn || g_did.gcse || g_did.dce || g_did.copy ||
-            g_did.loadcse || g_did.dse)
+            g_did.loadcse || g_did.dse || g_did.ifconv)
             remark_add("opt", "rewrote", fn->name, "pass-counts",
                        fn->file, fn->line,
                        "%ld cse, %ld global cse, %ld load reuse, "
-                       "%ld copies propagated, %ld dead, %ld dead stores",
+                       "%ld copies propagated, %ld dead, %ld dead stores, "
+                       "%ld selects",
                        g_did.lvn, g_did.gcse, g_did.loadcse, g_did.copy,
-                       g_did.dce, g_did.dse);
+                       g_did.dce, g_did.dse, g_did.ifconv);
     }
 }
 
@@ -5196,6 +5671,9 @@ void opt_run(struct ir_unit *iu, int level)
      * the divide's setup on these targets as well as faster, so -Os
      * keeps it. */
     pass_default(P_DIVMAGIC, level >= 2);
+    pass_default(P_IFCONV, level >= 2);   /* cmov on x86-64, csel on aarch64 */
+    pass_default(P_CFGCLEAN, level >= 1);  /* smaller and simpler at any level */
+    pass_default(P_TAILREC, level >= 2);
     if (g_pass[P_INLINE].on)      /* inline before the per-function passes clean up */
         inline_unit(iu);
     /* Every function, including one computing with __int128. The folds

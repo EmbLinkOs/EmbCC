@@ -473,6 +473,48 @@ static void parse_ins(struct p *p, char *first, const char *rest)
             in->sret_first = has_flag(rest, "sret");
             break;
         }
+        case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD: {
+            char *w0 = word(p);
+            in->a = *w0 == '[' ? addr_operand(p, w0) : vreg(p, w0);
+            break;
+        }
+        case IR_VWIDEN: {
+            char *h = word(p);              /* "lo" or "hi" */
+            in->c = h && h[0] == 'h';
+            in->a = vreg(p, word(p));
+            break;
+        }
+        case IR_VBIN: {
+            char *op = word(p);             /* the lane-wise operator */
+            in->imm = (unsigned char)op[0];
+            char *wa = word(p);
+            size_t al = strlen(wa);
+            if (al && wa[al - 1] == ',') wa[al - 1] = 0;
+            in->a = vreg(p, wa);
+            char *wb = word(p);
+            if (wb && *wb == '#') { in->c = atoi(wb + 1); in->b = -1; }
+            else                  in->b = vreg(p, wb);
+            break;
+        }
+        case IR_SELECT: {
+            /* `%d = select.W %c ? %a : %b` -- the condition, then the
+             * two arms, with the punctuation the printer put between
+             * them. §9.1 wants print and parse to give back identical
+             * IR, so a new opcode has to be taught to BOTH; this one
+             * was not, and tests/golden/ir-roundtrip.sh said so. */
+            char *w0 = word(p);
+            in->a = vreg(p, w0);
+            char *q = word(p);              /* "?" */
+            (void)q;
+            char *w1 = word(p);
+            size_t l1 = strlen(w1);
+            if (l1 && w1[l1 - 1] == ':') w1[l1 - 1] = 0;
+            in->b = vreg(p, w1);
+            char *w2 = word(p);
+            if (w2 && *w2 == ':') w2 = word(p);
+            in->c = vreg(p, w2);
+            break;
+        }
         default:
             /* An opcode whose operand syntax this parser does not know is
              * refused by NAME, so the message says which one to teach it. */
@@ -501,7 +543,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
         in->a = vreg(p, word(p));
         break;
     }
-    case IR_STORE: {
+    case IR_STORE: case IR_VSTORE: {
         char *wa = word(p);
         wa[strlen(wa) - 1] = 0;
         in->a = addr_operand(p, wa);

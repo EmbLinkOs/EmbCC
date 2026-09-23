@@ -630,7 +630,7 @@ static void count_vreg_uses(struct ir_func *fn, int *cnt)
         case IR_XCHG: case IR_XADD: case IR_ARMW:
         case IR_VSTORE: case IR_VBIN:
             UZ(s->a); UZ(s->b); break;
-        case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
+        case IR_CMPXCHG: case IR_CAS: case IR_CAS16: case IR_SELECT:
             UZ(s->a); UZ(s->b); UZ(s->c); break;
         case IR_CALL:
             if (s->indirect) UZ(s->a);
@@ -2036,6 +2036,26 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 vrc_vreg = i->dst;
             }
             break;
+        case IR_SELECT: {
+            /* else -> RAX, condition -> RCX, then cmov the `then` arm
+             * over it. RAX is loaded FIRST because `mov` leaves the
+             * flags alone while `test` sets them, and the cmov reads
+             * what the test set. */
+            cg_reset();
+            int w = i->w ? i->w : 8;
+            cg_load(text, sd, i->c, w, i->sign, w);
+            int cr = in_reg(i->a) ? g_loc[i->a] : REG_RCX;
+            if (!in_reg(i->a))
+                cg_load_rcx(text, sd, i->a, 4);
+            x86_test_rr(text, cr, cr, 4);
+            if (in_reg(i->b))
+                x86_cmovne_rr(text, REG_RAX, g_loc[i->b], w);
+            else
+                x86_cmovne_slot(text, REG_RAX, sd[i->b], w);
+            rc_vreg = -1;
+            cg_store(text, sd, i->dst, w);
+            break;
+        }
         case IR_VWIDEN:
             /* One half of the lanes, each widened. The extension bits
              * go in xmm1 -- all sign bits for a signed source, all zero

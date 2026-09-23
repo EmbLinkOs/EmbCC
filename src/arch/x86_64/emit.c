@@ -1449,3 +1449,28 @@ void x86_vunpck(struct code *c, int dst, int src, int high, int esize)
     code_byte(c, 0x0f); code_byte(c, (unsigned)opcode);
     code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
 }
+
+/* test reg, reg -- set ZF from a value without changing it. */
+void x86_test_rr(struct code *c, int a, int b, int w)
+{
+    rex_rb(c, w == 8 ? 1 : 0, b, a);
+    code_byte(c, 0x85);
+    code_byte(c, (unsigned)(0xc0 | ((b & 7) << 3) | (a & 7)));
+}
+
+/* cmovne reg, [rbp+disp] -- take the slot's value only if ZF is clear.
+ * The whole point of a select: no branch, so no misprediction, and both
+ * sides were already computed. */
+void x86_cmovne_slot(struct code *c, int reg, int disp, int w)
+{
+    rex_rb(c, w == 8 ? 1 : 0, reg, REG_RBP);
+    code_byte(c, 0x0f); code_byte(c, 0x45);
+    modrm_rbp(c, reg, disp);
+}
+
+void x86_cmovne_rr(struct code *c, int dst, int src, int w)
+{
+    rex_rb(c, w == 8 ? 1 : 0, dst, src);
+    code_byte(c, 0x0f); code_byte(c, 0x45);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
+}

@@ -1353,6 +1353,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             break;
         }
 
+        case IR_SELECT: {
+            /* csel: the condition into ACC, the two arms into TMP and
+             * SCR, and the choice without a branch. Both arms are
+             * already values -- the pass that built this refused
+             * anything that could fault -- so there is nothing to
+             * guard. NE, because the condition is a 0/1 truth value. */
+            ld_slot(t, sd, i->a, A64_ACC, 4, 0, 4);
+            ld_slot(t, sd, i->b, A64_TMP, i->w, i->sign, i->w);
+            ld_slot(t, sd, i->c, A64_SCR, i->w, i->sign, i->w);
+            a64_cmp_reg(t, A64_ACC, A64_ZR, 4);
+            a64_csel(t, A64_ACC, A64_TMP, A64_SCR, A64_NE, i->w);
+            st_slot(t, sd, i->dst, A64_ACC, i->w);
+            break;
+        }
         case IR_BRZ: case IR_BRNZ: {
             ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
             struct a64_fix fx;
