@@ -733,6 +733,18 @@ static int vrc_vreg = -1;
  * which is four instructions of the eleven. */
 static int vw_src = -1;
 
+/* A shift left whose only purpose is to scale an index for the very
+ * next address computation. x86 addressing already has the scale -- the
+ * SIB byte holds 1, 2, 4 or 8 -- so the shift need not be an
+ * instruction at all. It is recognised at the shift, which is emitted
+ * as nothing, and consumed at the add below.
+ *
+ * Deferred rather than looked back at, because instructions are emitted
+ * in order: by the time the add is reached the shift has already gone
+ * out, and undoing that is not possible. */
+static int fold_idx = -1;         /* the unshifted index, or -1 */
+static int fold_scale = 1;
+
 static void cg_reset(void) { rc_vreg = -1; rc_zx = 0; vrc_vreg = -1;
                              vw_src = -1; }
 
@@ -1905,8 +1917,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * not setting it again. */
         int vrc_in = vrc_vreg;
         int vw_in = vw_src;
+        int fold_in = fold_idx;
         vrc_vreg = -1;
         vw_src = -1;
+        fold_idx = -1;      /* only the instruction right after may use it */
         int ins_start = text->len;
         /* -g: a row where the source line changes. text->len is the .text
          * offset this instruction's code begins at (the switch below emits
@@ -2178,6 +2192,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 (i->imm_b ? 1 : in_reg(i->b))) {
                 struct ir_ins *nx = &fn->ins[n + 1];
                 int base = g_loc[i->a], index = i->imm_b ? 0 : g_loc[i->b];
+                int scale = 1;
+                if (!i->imm_b && fold_in >= 0) {
+                    index = g_loc[fold_in];     /* the shift we skipped */
+                    scale = fold_scale;
+                }
                 /* a 16-byte (long double) access is gen_x87's, never fused */
                 if (x87_ins(nx)) {
                     /* fall through to materialise the address */
@@ -2186,7 +2205,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         x86_load_basedisp_rax(text, base, (int)i->imm,
                                               nx->size, nx->sign, nx->w);
                     else
-                        x86_load_baseindex_rax(text, base, index, 1,
+                        x86_load_baseindex_rax(text, base, index, scale,
                                                nx->size, nx->sign, nx->w);
                     cg_store(text, sd, nx->dst, nx->w);
                     n++;                           /* consume the fused load */
@@ -2198,7 +2217,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     if (i->imm_b)
                         x86_store_basedisp_rax(text, base, (int)i->imm, nx->size);
                     else
-                        x86_store_baseindex_rax(text, base, index, 1, nx->size);
+                        x86_store_baseindex_rax(text, base, index, scale, nx->size);
                     n++;                           /* consume the fused store */
                     break;
                 }
@@ -2302,6 +2321,25 @@ static void gen_func(struct ir_func *fn, struct code *text,
             cg_store(text, sd, i->dst, i->w);
             break;
         case IR_SHL:
+            /* `shl idx, #k` feeding an `add base, .` that feeds a
+             * memory access: the whole shift becomes the SIB scale. */
+            if (g_regcache && usecnt && i->imm_b && !i->flt &&
+                i->imm >= 1 && i->imm <= 3 && i->dst >= 0 &&
+                usecnt[i->dst] == 1 && in_reg(i->a) &&
+                n + 2 < fn->nins) {
+                struct ir_ins *ad = &fn->ins[n + 1];
+                struct ir_ins *mem = &fn->ins[n + 2];
+                if (ad->op == IR_ADD && !ad->flt && !ad->imm_b &&
+                    ad->b == i->dst && in_reg(ad->a) && ad->dst >= 0 &&
+                    usecnt[ad->dst] == 1 && !x87_ins(mem) &&
+                    ((mem->op == IR_LOAD && mem->a == ad->dst) ||
+                     (mem->op == IR_STORE && mem->a == ad->dst))) {
+                    fold_idx = i->a;
+                    fold_scale = 1 << (int)i->imm;
+                    break;              /* emitted as nothing */
+                }
+            }
+            /* fall through to the ordinary shift */
         case IR_SHR: {
             int skind = i->op == IR_SHL ? '<' : i->sign ? '>' : 'u';
             /* Constant shift count folded to an immediate: `shift $k, dst` with
