@@ -370,6 +370,14 @@ static int fold_bin(enum ir_op op, long A, long B, int w, int sign,
     return 1;
 }
 
+/* Combine `(x INNER c1) OUTER c2` into one `x OP c` -- the arithmetic of
+ * reassociation, with no IR in it so the cases can be read at once.
+ * Everything is computed unsigned and normalised to the width, because
+ * a signed overflow here is undefined and the machine's answer is the
+ * one the program will see either way. */
+static int reassoc_fold(enum ir_op outer, enum ir_op inner, long c1, long c2,
+                        int w, enum ir_op *op_out, long *c_out);
+
 /* Fold an IR_EXT of a constant: keep `size` low bytes, then sign/zero-extend. */
 static long fold_ext(long A, int size, int sign, int w)
 {
@@ -470,6 +478,37 @@ static int pass_fold(struct ir_func *fn)
                 changed = 1;
             }
             continue;
+        }
+        /* Both operands the SAME value. None of these needs to know
+         * anything about what the value is, which is what makes them
+         * safe at any width and either signedness -- and `i->flt` is
+         * already excluded above, so no NaN can make `x == x` false. */
+        if (!i->imm_b && i->a >= 0 && i->a == i->b) {
+            switch (i->op) {
+            case IR_SUB: case IR_XOR:
+                to_const(i, 0); changed = 1; continue;
+            case IR_AND: case IR_OR:
+                to_mov(i, i->a); changed = 1; continue;
+            case IR_CMP:
+                to_const(i, i->pred == B_EQ || i->pred == B_LE ||
+                            i->pred == B_GE);
+                changed = 1; continue;
+            default:
+                break;
+            }
+        }
+        /* The constant goes on the RIGHT, and otherwise the lower vreg
+         * does. Value numbering keys an operation on its operands in
+         * order, so `1 + x` and `x + 1` were two different values of the
+         * same expression and neither ever matched the other. */
+        if (!i->imm_b && i->a >= 0 && i->b >= 0 &&
+            (i->op == IR_ADD || i->op == IR_MUL || i->op == IR_AND ||
+             i->op == IR_OR  || i->op == IR_XOR) &&
+            ((ka && !kb) || (ka == kb && i->a > i->b))) {
+            int t = i->a; i->a = i->b; i->b = t;
+            t = ka; ka = kb; kb = t;
+            long v = A; A = B; B = v;
+            changed = 1;
         }
         /* one-operand algebraic identities (valid for any width/signedness) */
         switch (i->op) {
@@ -930,6 +969,173 @@ static struct ir_ins *ib_push(struct ibuf *b)
     struct ir_ins *i = &b->p[b->n++];
     memset(i, 0, sizeof *i);
     return i;
+}
+
+/* ==== reassociation ========================================================
+ *
+ * `(x + 1) + 1` is two adds, and the second waits for the first. `x + 2`
+ * is one add that waits for nothing, and it is the same value. Both
+ * forms are everywhere: address arithmetic builds them, and unrolling
+ * builds four in a row out of one `i++` -- a dependency chain four deep
+ * through what ought to be four independent increments.
+ *
+ * Only a CONSTANT is moved. Reassociating two variables is where such a
+ * pass starts costing more than it returns: it changes which values are
+ * live across which points, and without a cost model that is a guess.
+ * The case here is unambiguous -- an operation with a constant whose
+ * other operand is the same kind of operation with a constant -- and it
+ * is the one the rest of the pipeline actually produces.
+ *
+ * The inner operation is NOT required to die. When something else reads
+ * it, it stays and the only thing that changes is that THIS instruction
+ * no longer waits for it; when nothing does, the marking dead-code pass
+ * takes it. Either way the chain is one shorter.
+ */
+static int reassoc_fold(enum ir_op outer, enum ir_op inner, long c1, long c2,
+                        int w, enum ir_op *op_out, long *c_out)
+{
+    unsigned long a = (unsigned long)c1, b = (unsigned long)c2;
+    int bits = w * 8;
+    switch (outer) {
+    case IR_ADD:                                   /* (x ± c1) + c2 */
+        if (inner == IR_ADD) { *op_out = IR_ADD; *c_out = norm((long)(a + b), w); return 1; }
+        if (inner == IR_SUB) { *op_out = IR_ADD; *c_out = norm((long)(b - a), w); return 1; }
+        return 0;
+    case IR_SUB:                                   /* (x ± c1) - c2 */
+        if (inner == IR_ADD) { *op_out = IR_ADD; *c_out = norm((long)(a - b), w); return 1; }
+        if (inner == IR_SUB) { *op_out = IR_SUB; *c_out = norm((long)(a + b), w); return 1; }
+        return 0;
+    case IR_MUL:
+        if (inner == IR_MUL) { *op_out = IR_MUL; *c_out = norm((long)(a * b), w); return 1; }
+        return 0;
+    case IR_AND:
+        if (inner == IR_AND) { *op_out = IR_AND; *c_out = norm((long)(a & b), w); return 1; }
+        return 0;
+    case IR_OR:
+        if (inner == IR_OR)  { *op_out = IR_OR;  *c_out = norm((long)(a | b), w); return 1; }
+        return 0;
+    case IR_XOR:
+        if (inner == IR_XOR) { *op_out = IR_XOR; *c_out = norm((long)(a ^ b), w); return 1; }
+        return 0;
+    /* Two shifts are one shift of the sum only while the sum still fits:
+     * past the width the answer is zero (or all sign bits), which is a
+     * different instruction and not this pass's business. */
+    case IR_SHL:
+        if (inner == IR_SHL && c1 >= 0 && c2 >= 0 && c1 + c2 < bits) {
+            *op_out = IR_SHL; *c_out = c1 + c2; return 1;
+        }
+        return 0;
+    case IR_SHR:
+        if (inner == IR_SHR && c1 >= 0 && c2 >= 0 && c1 + c2 < bits) {
+            *op_out = IR_SHR; *c_out = c1 + c2; return 1;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+/* Read an instruction as `x OP c`: the vreg and the constant, in that
+ * order. A commutative op takes its constant from either side; SUB,
+ * SHL and SHR only from the right, because `c - x` and `c << x` are not
+ * this shape at all. */
+static int as_op_const(struct ir_func *fn, struct defs *d, struct ir_ins *i,
+                       int *x, long *c)
+{
+    if (i->flt || i->w == 16 || i->imm_b)
+        return 0;
+    long A, B;
+    int ka = get_const(fn, d, i->a, &A), kb = get_const(fn, d, i->b, &B);
+    switch (i->op) {
+    case IR_ADD: case IR_MUL: case IR_AND: case IR_OR: case IR_XOR:
+        if (kb && !ka) { *x = i->a; *c = B; return 1; }
+        if (ka && !kb) { *x = i->b; *c = A; return 1; }
+        return 0;
+    case IR_SUB: case IR_SHL: case IR_SHR:
+        if (kb && !ka) { *x = i->a; *c = B; return 1; }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int pass_reassoc(struct ir_func *fn)
+{
+    if (fn->nins == 0)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    /* Decided first, applied second: the rewrite inserts a constant
+     * before each instruction it changes, so the indices everything is
+     * reasoned about move as soon as one is emitted. */
+    enum ir_op *nop = xmalloc((size_t)fn->nins * sizeof *nop);
+    int *nx = xmalloc((size_t)fn->nins * sizeof *nx);
+    long *nc = xmalloc((size_t)fn->nins * sizeof *nc);
+    char *doit = xcalloc((size_t)fn->nins, 1);
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        int xo; long c2;
+        if (!as_op_const(fn, &d, i, &xo, &c2))
+            continue;
+        if (xo < 0 || xo >= fn->nvregs || d.cnt[xo] != 1)
+            continue;
+        int in = d.ins[xo];
+        if (in < 0 || in >= fn->nins)
+            continue;
+        struct ir_ins *inner = &fn->ins[in];
+        if (inner->w != i->w)
+            continue;
+        /* Two shifts of different KINDS are not one shift: an arithmetic
+         * shift after a logical one keeps different bits. */
+        if ((i->op == IR_SHR || i->op == IR_SHL) && inner->sign != i->sign)
+            continue;
+        int xi; long c1;
+        if (!as_op_const(fn, &d, inner, &xi, &c1))
+            continue;
+        if (!reassoc_fold(i->op, inner->op, c1, c2, i->w, &nop[n], &nc[n]))
+            continue;
+        nx[n] = xi;
+        doit[n] = 1;
+        any = 1;
+    }
+    if (!any) {
+        free(nop); free(nx); free(nc); free(doit); free_defs(&d);
+        return 0;
+    }
+
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        if (newpos) newpos[n] = nb.n;
+        if (doit[n]) {
+            int k = fn->nvregs++;
+            struct ir_ins *c = ib_push(&nb);
+            c->op = IR_CONST; c->dst = k; c->imm = nc[n]; c->w = fn->ins[n].w;
+            c->line = fn->ins[n].line; c->col = fn->ins[n].col;
+            c->synth = fn->ins[n].line ? 0 : 1;
+            struct ir_ins *o = ib_push(&nb);
+            *o = fn->ins[n];
+            o->op = nop[n]; o->a = nx[n]; o->b = k;
+            o->imm_b = 0; o->imm = 0;
+            continue;
+        }
+        *ib_push(&nb) = fn->ins[n];
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free(nop); free(nx); free(nc); free(doit); free_defs(&d);
+    return 1;
 }
 
 static void bb_add_pred(struct bb *b, int p)
@@ -4066,6 +4272,25 @@ static int pass_idiom(struct ir_func *fn)
     return changed;
 }
 
+/* Is `i` (defining t) a reduction's add -- `next = acc + v`, with a phi
+ * copy `acc = mov next` inside the loop closing the circle? */
+static int vec_self_accum(struct ir_func *fn, struct defs *d, int lo, int hi,
+                          const struct ir_ins *i, int t)
+{
+    if (i->op != IR_ADD || t < 0 || t >= fn->nvregs)
+        return 0;
+    for (int n = lo; n < hi; n++) {
+        const struct ir_ins *m = &fn->ins[n];
+        if (m->op != IR_MOV || m->a != t)
+            continue;
+        if (m->dst < 0 || m->dst >= fn->nvregs || d->cnt[m->dst] != 2)
+            continue;
+        if (m->dst == i->a || m->dst == i->b)
+            return 1;
+    }
+    return 0;
+}
+
 static int vectorize_one(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -4279,6 +4504,21 @@ static int vectorize_one(struct ir_func *fn)
                  * wanted. Refusing it here refused every `long s +=
                  * a[i]` over an int array before anything looked. */
                 if (i->op == IR_EXT)
+                    continue;
+                /* And a self-accumulating add -- `next = acc + v` with
+                 * `acc = mov next` closing the circle -- is a REDUCTION,
+                 * which the detector below is what judges. It has no
+                 * lane-wise form of its own: the accumulator is a scalar
+                 * carried round the loop, not sixteen bytes.
+                 *
+                 * Which side the accumulator lands on is not fixed.
+                 * `s += v` and `s = v + s` are one expression, and the
+                 * canonical operand order may put either first -- so
+                 * this asks about the SHAPE rather than about operand b,
+                 * which is what the test below used to stand in for and
+                 * what stopped working the day the order was made
+                 * canonical. */
+                if (vec_self_accum(fn, &d, L.lo, L.hi, i, def_target(i)))
                     continue;
                 struct opnds o;
                 value_opnds(i, &o);
@@ -6971,6 +7211,10 @@ static void opt_func(struct ir_func *fn)
             changed = 0;
             changed |= pass_storefwd(fn); /* forward local stores to loads (mem2reg-lite) */
             changed |= pass_fold(fn);
+            /* After folding, so the constants it just exposed are the
+             * ones this moves, and before value numbering, so what it
+             * leaves is what CSE sees. */
+            changed |= pass_reassoc(fn);
             changed |= pass_lvn(fn);      /* CSE: reuse identical computations */
             if (g_gcse && cfg_ok)
                 changed |= pass_gcse(fn); /* CSE across the dominator tree */
@@ -7054,6 +7298,9 @@ static void opt_func(struct ir_func *fn)
         while (changed && g2++ < 100) {
             changed = 0;
             changed |= pass_fold(fn);
+            /* The copies are a chain of `i+1` on `i+1` on `i+1`, which
+             * is the shape this turns into four independent adds. */
+            changed |= pass_reassoc(fn);
             changed |= pass_lvn(fn);
             changed |= pass_copyprop(fn);
             changed |= pass_copyprop_local(fn);
