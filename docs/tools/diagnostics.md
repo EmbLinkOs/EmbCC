@@ -523,6 +523,7 @@ no reason":
 | `inline` | `inlined` / `not-inlined`, with the reason out of twelve and the size that settled it |
 | `mem2reg` | `promoted-to-register` / `kept-in-memory` **per variable**, at that variable's own declaration line |
 | `sroa` | `split-into-scalars` / `kept-whole` **per aggregate**, with the reason it is still one object |
+| `unroll` | `unrolled`: how many copies of a body, and how long the body was |
 | `sccp` | `branch-always-jumps` / `branch-never-jumps` when a condition folds to a constant |
 | `opt` | `optimized`: what the whole fixpoint came to, as instructions before → after |
 | `regalloc` | `spilled-to-stack`: how many values missed a register, out of how many, against how many registers exist |

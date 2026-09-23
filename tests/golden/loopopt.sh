@@ -59,8 +59,18 @@ echo "LICM: the invariant multiply is out of the loop body"
 # A rotated loop ends with a conditional branch to its own top. An
 # unrotated one ends with `jmp` to a header that branches out, which is
 # two branches an iteration.
-grep -q 'jmp L' "$out/ir.txt" && {
-    echo "FAIL: the loop still jumps back to a top-tested header:"
+#
+# The thing to look for is a BACKWARD jmp -- one whose label is defined
+# above it. A forward one is not a loop at all, and unrolling emits one
+# to leave its block; banning every `jmp` was the shorter test and it
+# stopped meaning what it said.
+back_jmp=$(awk '
+    /^L[0-9]+:/ { sub(":", "", $1); seen[$1] = 1; next }
+    /jmp L[0-9]+/ { for (i = 1; i <= NF; i++)
+                        if ($i ~ /^L[0-9]+$/ && seen[$i]) { print $i; exit } }
+' "$out/ir.txt")
+[ -z "$back_jmp" ] || {
+    echo "FAIL: the loop still jumps back to a top-tested header ($back_jmp):"
     cat "$out/ir.txt"; exit 1; }
 echo "rotation: the loop is bottom-tested -- one branch an iteration"
 
