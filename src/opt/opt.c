@@ -23,7 +23,7 @@
  * output. One line per function, at the end, answers the question
  * anyone actually asks -- "did anything happen, and what" -- and is
  * comparable between two builds. */
-static struct { long lvn, gcse, dce, copy, loadcse; } g_did;
+static struct { long lvn, gcse, dce, copy, loadcse, dse, divmagic; } g_did;
 
 /* ---- op classification ---- */
 
@@ -269,6 +269,26 @@ static void free_defs(struct defs *d)
     free(d->cnt);
     free(d->ins);
 }
+
+/* Operand b as a constant, whether it has been folded into the
+ * instruction or is still a CONST temp. pass_immfold runs after the
+ * fixpoint this pass sits in, so inside the pipeline it is always the
+ * latter -- which is not what the printed IR shows, because that is
+ * printed after the fold. Reading only imm_b here found nothing at all. */
+static int const_b(struct ir_func *fn, struct defs *d, struct ir_ins *i,
+                   long *out)
+{
+    if (i->imm_b) { *out = i->imm; return 1; }
+    int v = i->b;
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    int n = d->ins[v];
+    if (n < 0 || fn->ins[n].op != IR_CONST)
+        return 0;
+    *out = fn->ins[n].imm;
+    return 1;
+}
+
 
 /* If vreg v holds an integer constant (single-def IR_CONST, not an SSE
  * bit-pattern), return 1 and its value. */
@@ -1463,6 +1483,486 @@ static int pass_gcse(struct ir_func *fn)
     return changed;
 }
 
+
+/* ==== alias analysis ======================================================== *
+ *
+ * "Can these two memory references be the same bytes?" Every pass that
+ * moves, reuses or deletes a memory operation needs the answer, and
+ * until now there was none: pass_loadcse's kill model is "a store to a
+ * non-address-taken local kills that local's LDVARs; anything else
+ * kills every LOAD and every address-taken local's LDVAR". One store
+ * through one pointer invalidated every cached load in the function.
+ *
+ * What makes a cheap answer possible is C's object model. A pointer
+ * derived from one object does not point into another, so if two
+ * references are based on DIFFERENT objects they cannot overlap --
+ * whatever indexing happened in between. So the question becomes "what
+ * object is this address based on", which is a walk back through the
+ * address arithmetic:
+ *
+ *      %5 = gaddr @arr          <- the object
+ *      %9 = shl %i, #2
+ *      %10 = add %5, %9         <- still @arr
+ *      load [%10]
+ *
+ * Three answers are possible: a named global, a numbered frame slot, or
+ * unknown. The useful part is the last rule below -- an unknown pointer
+ * cannot reach a slot whose address was never taken, because there is
+ * no way for the program to have obtained one.
+ *
+ * What this deliberately does NOT do: type-based aliasing (EmbIR does
+ * not carry the type of a load), `restrict`, and field sensitivity.
+ * Those want metadata on the reference, which is the next step rather
+ * than this one. */
+
+enum mem_kind { MEM_UNKNOWN, MEM_GLOBAL, MEM_SLOT };
+
+struct memref {
+    enum mem_kind kind;
+    int id;                  /* MEM_GLOBAL: the symbol; MEM_SLOT: the var */
+};
+
+/* The object an address is based on, or MEM_UNKNOWN. Walks back through
+ * the arithmetic irgen builds for `a[i]` and `p->f`, which by C's rules
+ * cannot leave the object it started from. */
+static struct memref mem_base(struct ir_func *fn, struct defs *d, int addr)
+{
+    struct memref r = { MEM_UNKNOWN, -1 };
+    for (int hop = 0; hop < 8; hop++) {         /* a chain, not a cycle */
+        if (addr < 0 || addr >= fn->nvregs || d->cnt[addr] != 1)
+            return r;
+        int n = d->ins[addr];
+        if (n < 0)
+            return r;                           /* a parameter: unknown */
+        struct ir_ins *i = &fn->ins[n];
+        switch (i->op) {
+        case IR_GADDR:
+            r.kind = MEM_GLOBAL; r.id = i->glob_sym; return r;
+        case IR_ADDR:
+            r.kind = MEM_SLOT; r.id = i->a; return r;
+        case IR_MOV:
+            addr = i->a; continue;
+        case IR_ADD: case IR_SUB: {
+            /* base + offset, either way round. Only one side can be a
+             * base; if both resolve, the answer is not decidable here. */
+            struct memref A = { MEM_UNKNOWN, -1 };
+            if (i->a >= 0) {
+                int an = i->a < fn->nvregs && d->cnt[i->a] == 1 ? d->ins[i->a] : -1;
+                if (an >= 0 && (fn->ins[an].op == IR_GADDR ||
+                                fn->ins[an].op == IR_ADDR ||
+                                fn->ins[an].op == IR_MOV ||
+                                fn->ins[an].op == IR_ADD))
+                    A = mem_base(fn, d, i->a);
+            }
+            if (A.kind != MEM_UNKNOWN)
+                return A;
+            if (i->op == IR_SUB || i->imm_b)
+                return r;                       /* offset - base is not a base */
+            addr = i->b; continue;
+        }
+        default:
+            return r;
+        }
+    }
+    return r;
+}
+
+/* Can a reference based on `a` and one based on `b` be the same bytes? */
+static int may_alias(struct memref a, struct memref b, const char *taken,
+                     int nvars)
+{
+    if (a.kind == MEM_GLOBAL && b.kind == MEM_GLOBAL)
+        return a.id == b.id;            /* two globals do not overlap */
+    if (a.kind == MEM_SLOT && b.kind == MEM_SLOT)
+        return a.id == b.id;            /* nor two frame slots */
+    if ((a.kind == MEM_GLOBAL && b.kind == MEM_SLOT) ||
+        (a.kind == MEM_SLOT && b.kind == MEM_GLOBAL))
+        return 0;                       /* nor a global and a slot */
+    /* One of them is unknown. It can be anything the program could have
+     * taken the address of -- which a slot whose address was never
+     * taken is not. */
+    struct memref k = a.kind == MEM_UNKNOWN ? b : a;
+    if (k.kind == MEM_SLOT && k.id >= 0 && k.id < nvars && !taken[k.id])
+        return 0;
+    return 1;
+}
+
+
+
+/* ---- division by a constant ----------------------------------------
+ *
+ * `x / 3` is a hardware divide, which is twenty to forty cycles where
+ * almost everything else is one. It does not have to be: for any
+ * constant d there is a multiplier M and a shift s with
+ * x / d == (x * M) >> s for every x in range, which is Hacker's Delight
+ * chapter 10 and what every other compiler emits.
+ *
+ * Only 32-bit divisions are done here, and that is what makes it cheap:
+ * the algorithm needs the HIGH half of a 32x32 multiply, which is the
+ * low half of a 64x64 one -- an operation EmbIR already has. A 64-bit
+ * division would need a 128-bit multiply, which on these targets is a
+ * call into lib/rt and slower than the divide it replaced.
+ *
+ * Powers of two were already handled above, unsigned only, by turning
+ * the divide into a shift. Signed powers of two need a bias first
+ * (rounding toward zero, not toward minus infinity), which is why they
+ * were left out; they fall into the general path here. */
+
+/* The unsigned magic: q = mulhu(x, M), with one correction step when
+ * `add` is set. */
+struct magicu { unsigned long m; int add, s; };
+static struct magicu magic_u32(unsigned long d)
+{
+    struct magicu r = { 0, 0, 0 };
+    int p = 31;
+    unsigned long nc = 0xFFFFFFFFUL - (0xFFFFFFFFUL - d + 1) % d;
+    unsigned long q1 = 0x80000000UL / nc, r1 = 0x80000000UL - q1 * nc;
+    unsigned long q2 = 0x7FFFFFFFUL / d,  r2 = 0x7FFFFFFFUL - q2 * d;
+    /* Assigned in the do-while body below, which always runs before the
+     * condition reads it -- but EmbCC's own -Wmaybe-uninitialized does
+     * not model do-while and warns. Initialising costs nothing (the
+     * store is dead and DSE removes it) and keeps the compiler's source
+     * clean under its own warnings, which tests/golden/warnings-uninit
+     * asserts. The analysis gap is real and is its own piece of work. */
+    unsigned long delta = 0;
+    do {
+        p++;
+        if (r1 >= nc - r1) { q1 = 2 * q1 + 1; r1 = 2 * r1 - nc; }
+        else               { q1 = 2 * q1;     r1 = 2 * r1; }
+        if (r2 + 1 >= d - r2) {
+            if (q2 >= 0x7FFFFFFFUL) r.add = 1;
+            q2 = 2 * q2 + 1; r2 = 2 * r2 + 1 - d;
+        } else {
+            if (q2 >= 0x80000000UL) r.add = 1;
+            q2 = 2 * q2; r2 = 2 * r2 + 1;
+        }
+        delta = d - 1 - r2;
+    } while (p < 64 && (q1 < delta || (q1 == delta && r1 == 0)));
+    r.m = (q2 + 1) & 0xFFFFFFFFUL;
+    r.s = p - 32;
+    return r;
+}
+
+/* The signed magic: q = mulhs(x, M), then a correction for the sign. */
+struct magics { long m; int s; };
+static struct magics magic_s32(long d)
+{
+    struct magics r = { 0, 0 };
+    unsigned long ad = (unsigned long)(d < 0 ? -d : d);
+    unsigned long t = 0x80000000UL + ((unsigned long)d >> 31 & 1);
+    unsigned long anc = t - 1 - t % ad;
+    int p = 31;
+    unsigned long q1 = 0x80000000UL / anc, r1 = 0x80000000UL - q1 * anc;
+    unsigned long q2 = 0x80000000UL / ad,  r2 = 0x80000000UL - q2 * ad;
+    unsigned long delta = 0;        /* see magic_u32 on do-while */
+    do {
+        p++;
+        q1 = 2 * q1; r1 = 2 * r1;
+        if (r1 >= anc) { q1++; r1 -= anc; }
+        q2 = 2 * q2; r2 = 2 * r2;
+        if (r2 >= ad) { q2++; r2 -= ad; }
+        delta = ad - r2;
+    } while (q1 < delta || (q1 == delta && r1 == 0));
+    long m = (long)(int)(q2 + 1);
+    r.m = d < 0 ? -m : m;
+    r.s = p - 32;
+    return r;
+}
+
+static int log2_pow2_l(unsigned long v)
+{
+    int k = 0;
+    if (!v || (v & (v - 1))) return -1;
+    while (v > 1) { v >>= 1; k++; }
+    return k;
+}
+
+/* Emitting through functions rather than macros, deliberately.
+ *
+ * These were comma-expression macros, and nesting one inside another --
+ * OP(IR_SHR, t, K(32, 4), ...) -- is a buffer-overrun waiting to
+ * happen: the macro takes its instruction pointer from ib_push FIRST,
+ * then evaluates the argument, which pushes again and may reallocate.
+ * The pointer is then dangling and the field writes land in freed
+ * memory. It showed up as `shr has no source location`, because the
+ * line was written to the wrong instruction.
+ *
+ * A function argument is fully evaluated before the call begins, so the
+ * inner push completes and the outer one takes a fresh pointer. Same
+ * expression, no aliasing. */
+static int dm_const(struct ibuf *nb, struct ir_func *fn, long v, int w,
+                    const struct ir_ins *src)
+{
+    int t = fn->nvregs++;
+    struct ir_ins *p = ib_push(nb);
+    p->op = IR_CONST; p->dst = t; p->w = w; p->imm = v;
+    p->line = src->line; p->col = src->col; p->synth = 1;
+    return t;
+}
+
+static int dm_op(struct ibuf *nb, struct ir_func *fn, enum ir_op o,
+                 int a, int b, int w, int sg, int size,
+                 const struct ir_ins *src)
+{
+    int t = fn->nvregs++;
+    struct ir_ins *p = ib_push(nb);
+    p->op = o; p->dst = t; p->a = a; p->b = b;
+    p->w = w; p->sign = sg; p->size = size;
+    p->line = src->line; p->col = src->col; p->synth = 1;
+    return t;
+}
+
+/* Replace 32-bit `x / C` and `x % C` with a multiply and shifts. */
+static int pass_divmagic(struct ir_func *fn)
+{
+    if (fn->nins == 0)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    int changed = 0;
+
+
+    for (int n = 0; n < fn->nins; n++) {
+        if (newpos) newpos[n] = nb.n;
+        struct ir_ins *src = &fn->ins[n];
+        long D;
+        if ((src->op != IR_DIV && src->op != IR_MOD) || src->flt ||
+            src->w != 4 || src->dst < 0 || !const_b(fn, &d, src, &D) ||
+            D == 0 || D == 1 || D == -1) {
+            *ib_push(&nb) = *src;
+            continue;
+        }
+        int is_mod = src->op == IR_MOD, sg = src->sign, x = src->a;
+        /* An unsigned power of two is already a shift by the time this
+         * runs; a signed one is not, and its bias is cheaper than a
+         * multiply, so take it here. */
+        int q;
+        if (sg && log2_pow2_l((unsigned long)(D < 0 ? -D : D)) >= 0) {
+            int sh = log2_pow2_l((unsigned long)(D < 0 ? -D : D));
+            /* q = (x + ((x >> 31) >>u (32 - sh))) >> sh */
+            int t1 = dm_op(&nb, fn, IR_SHR, x, dm_const(&nb, fn, 31, 4, src),
+                           4, 1, 0, src);
+            int t2 = sh == 0 ? t1
+                   : dm_op(&nb, fn, IR_SHR, t1,
+                           dm_const(&nb, fn, 32 - sh, 4, src), 4, 0, 0, src);
+            int t3 = dm_op(&nb, fn, IR_ADD, x, t2, 4, 1, 0, src);
+            q = sh == 0 ? t3
+              : dm_op(&nb, fn, IR_SHR, t3, dm_const(&nb, fn, sh, 4, src),
+                      4, 1, 0, src);
+            if (D < 0)
+                q = dm_op(&nb, fn, IR_SUB, dm_const(&nb, fn, 0, 4, src), q,
+                          4, 1, 0, src);
+        } else if (sg) {
+            struct magics mg = magic_s32(D);
+            int xe = dm_op(&nb, fn, IR_EXT, x, -1, 8, 1, 4, src);
+            int hi = dm_op(&nb, fn, IR_MUL, xe,
+                           dm_const(&nb, fn, mg.m, 8, src), 8, 1, 0, src);
+            int t3 = dm_op(&nb, fn, IR_SHR, hi,
+                           dm_const(&nb, fn, 32, 8, src), 8, 1, 0, src);
+            if (D > 0 && mg.m < 0)
+                t3 = dm_op(&nb, fn, IR_ADD, t3, x, 4, 1, 0, src);
+            else if (D < 0 && mg.m > 0)
+                t3 = dm_op(&nb, fn, IR_SUB, t3, x, 4, 1, 0, src);
+            int t4 = mg.s ? dm_op(&nb, fn, IR_SHR, t3,
+                                  dm_const(&nb, fn, mg.s, 4, src), 4, 1, 0, src)
+                          : t3;
+            int t5 = dm_op(&nb, fn, IR_SHR, t4,
+                           dm_const(&nb, fn, 31, 4, src), 4, 0, 0, src);
+            q = dm_op(&nb, fn, IR_ADD, t4, t5, 4, 1, 0, src);
+        } else {
+            struct magicu mg = magic_u32((unsigned long)D & 0xFFFFFFFFUL);
+            int xe = dm_op(&nb, fn, IR_EXT, x, -1, 8, 0, 4, src);
+            int hi = dm_op(&nb, fn, IR_MUL, xe,
+                           dm_const(&nb, fn, (long)mg.m, 8, src), 8, 0, 0, src);
+            int t3 = dm_op(&nb, fn, IR_SHR, hi,
+                           dm_const(&nb, fn, 32, 8, src), 8, 0, 0, src);
+            if (!mg.add) {
+                q = mg.s ? dm_op(&nb, fn, IR_SHR, t3,
+                                 dm_const(&nb, fn, mg.s, 4, src), 4, 0, 0, src)
+                         : t3;
+            } else {
+                int t4 = dm_op(&nb, fn, IR_SUB, x, t3, 4, 0, 0, src);
+                int t5 = dm_op(&nb, fn, IR_SHR, t4,
+                               dm_const(&nb, fn, 1, 4, src), 4, 0, 0, src);
+                int t6 = dm_op(&nb, fn, IR_ADD, t5, t3, 4, 0, 0, src);
+                q = mg.s > 1 ? dm_op(&nb, fn, IR_SHR, t6,
+                                     dm_const(&nb, fn, mg.s - 1, 4, src),
+                                     4, 0, 0, src)
+                             : t6;
+            }
+        }
+        /* The remainder needs q*D first, and THAT pushes instructions --
+         * so nothing may be pushed for the result until after it.
+         * Pushing the result slot early and filling it later left a
+         * zeroed instruction in the buffer, which reads as IR_CONST
+         * writing vreg 0 with no source location: a parameter
+         * overwritten, and tests/golden/provenance.sh saw the hole. */
+        int mq = is_mod ? dm_op(&nb, fn, IR_MUL, q,
+                                dm_const(&nb, fn, D, 4, src), 4, sg, 0, src)
+                        : -1;
+        struct ir_ins *out = ib_push(&nb);
+        memset(out, 0, sizeof *out);
+        if (is_mod) {
+            out->op = IR_SUB; out->a = x; out->b = mq;
+        } else {
+            out->op = IR_MOV; out->a = q; out->b = -1;
+        }
+        out->dst = src->dst; out->w = 4; out->sign = sg;
+        out->line = src->line; out->col = src->col;
+        changed = 1;
+    }
+    if (!changed) { free(nb.p); free(newpos); free_defs(&d); return 0; }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free_defs(&d);
+    g_did.divmagic++;
+    return changed;
+}
+
+/* ---- dead store elimination ----------------------------------------
+ *
+ * The inverse of store forwarding: a store whose value nothing reads
+ * because a later store to the same bytes comes first.
+ *
+ *      p->x = 1;        <- dead
+ *      p->x = 2;
+ *
+ * DCE already drops a store to a local that is never read AT ALL. This
+ * is the other case, and it needs the alias analysis above: between the
+ * two stores there must be no read that could see the first one, and
+ * "could see" is exactly may_alias.
+ *
+ * Block-local and backward. Block-local because a store dead on one
+ * path out of a block is not dead on another, and proving otherwise
+ * wants the available-expressions machinery load elimination has --
+ * this is the cheap half. Backward because "is there a later store"
+ * is the question, and walking backward makes it "have I already seen
+ * one".
+ *
+ * Two stores kill each other only when they are to the SAME address
+ * temp at the same width. That is must-alias, not may-alias: a wrong
+ * answer here deletes a write the program made. */
+static int pass_dse(struct ir_func *fn)
+{
+    if (fn->nins == 0)
+        return 0;
+    int nvars = fn->nvars;
+    struct defs d;
+    compute_defs(fn, &d);
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+
+    char *taken = xcalloc((size_t)(nvars ? nvars : 1), 1);
+    for (int i = 0; i < fn->nins; i++)
+        if (fn->ins[i].op == IR_ADDR && fn->ins[i].a >= 0 &&
+            fn->ins[i].a < nvars)
+            taken[fn->ins[i].a] = 1;
+
+    char *dead = xcalloc((size_t)fn->nins, 1);
+    /* Stores seen later in this block, as (address temp, width). A slot
+     * store records its var with a negative marker so the two kinds
+     * share one list. */
+    int *sa = xmalloc((size_t)fn->nins * sizeof *sa);
+    int *ssz = xmalloc((size_t)fn->nins * sizeof *ssz);
+    int changed = 0;
+
+    for (int b = 0; b < nbb; b++) {
+        int ns = 0;
+        for (int i = bb[b].end - 1; i >= bb[b].start; i--) {
+            struct ir_ins *ins = &fn->ins[i];
+            if (ins->op == IR_STORE && !ins->vol && ins->a >= 0 &&
+                ins->a < fn->nvregs && d.cnt[ins->a] == 1) {
+                int killed = 0;
+                for (int k = 0; k < ns; k++)
+                    if (sa[k] == ins->a && ssz[k] == ins->size) { killed = 1; break; }
+                if (killed) { dead[i] = 1; changed = 1; continue; }
+                sa[ns] = ins->a; ssz[ns] = ins->size; ns++;
+                continue;
+            }
+            if (ins->op == IR_STVAR && !ins->vol && ins->dst >= 0 &&
+                ins->dst < nvars && !taken[ins->dst]) {
+                int killed = 0;
+                for (int k = 0; k < ns; k++)
+                    if (sa[k] == -1 - ins->dst && ssz[k] == ins->size) { killed = 1; break; }
+                if (killed) { dead[i] = 1; changed = 1; continue; }
+                sa[ns] = -1 - ins->dst; ssz[ns] = ins->size; ns++;
+                continue;
+            }
+            /* A read that could see one of them un-kills it. A call,
+             * inline asm, an atomic or a fence could see anything. */
+            struct memref r = { MEM_UNKNOWN, -1 };
+            int reads = 0, everything = 0;
+            switch (ins->op) {
+            case IR_LOAD:
+                r = mem_base(fn, &d, ins->a); reads = 1; break;
+            case IR_LDVAR:
+                r.kind = MEM_SLOT; r.id = ins->a; reads = 1; break;
+            case IR_MEMCPY:
+                r = mem_base(fn, &d, ins->b); reads = 1; break;
+            case IR_STORE: case IR_STVAR:
+                reads = 0; everything = 1; break;   /* volatile or unkeyed */
+            case IR_CALL: case IR_ASM: case IR_VA_START: case IR_FENCE:
+            case IR_XCHG: case IR_XADD: case IR_CMPXCHG: case IR_ARMW:
+            case IR_CAS: case IR_CAS16: case IR_MEMZERO: case IR_ALLOCA:
+                everything = 1; break;
+            default:
+                break;
+            }
+            if (everything) { ns = 0; continue; }
+            if (!reads)
+                continue;
+            int j = 0;
+            for (int k = 0; k < ns; k++) {
+                struct memref w;
+                if (sa[k] < 0) { w.kind = MEM_SLOT; w.id = -1 - sa[k]; }
+                else w = mem_base(fn, &d, sa[k]);
+                if (!may_alias(w, r, taken, nvars)) { sa[j] = sa[k]; ssz[j] = ssz[k]; j++; }
+            }
+            ns = j;
+        }
+    }
+
+    if (changed) {
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        int j = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            if (newpos) newpos[n] = j;
+            if (dead[n]) continue;
+            if (j != n) fn->ins[j] = fn->ins[n];
+            j++;
+        }
+        if (newpos) {
+            newpos[fn->nins] = j;
+            for (int v = 0; v < fn->nvars; v++) {
+                int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+                if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+                if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+            }
+            free(newpos);
+        }
+        g_did.dse += fn->nins - j;
+        fn->nins = j;
+    }
+
+    free(dead); free(sa); free(ssz); free(taken); free(l2b);
+    for (int i = 0; i < nbb; i++) free(bb[i].pred);
+    free(bb); free_defs(&d);
+    return changed;
+}
+
 /* ---- global redundant-load elimination (available-expressions) ------------ *
  *
  * pass_gcse leaves memory reads (LDVAR/LOAD) to the block-local pass_lvn: their
@@ -1494,6 +1994,30 @@ static int lcse_kills_mem(enum ir_op op)
         return 1;
     default:
         return 0;
+    }
+}
+
+/* Drop the cached loads a write could reach. A store names an object,
+ * so only the keys that may alias it go; a call, inline asm, an atomic
+ * or a fence names nothing, so everything reachable goes. */
+static void lcse_kill(int *s, int nk, const char *is_mem,
+                      const struct memref *kbase, struct ir_ins *ins,
+                      struct ir_func *fn, struct defs *d, const char *taken,
+                      int nvars)
+{
+    struct memref w = { MEM_UNKNOWN, -1 };
+    int named = 0;
+    if (ins->op == IR_STORE || ins->op == IR_MEMCPY ||
+        ins->op == IR_MEMZERO) {
+        w = mem_base(fn, d, ins->a);
+        named = w.kind != MEM_UNKNOWN;
+    }
+    for (int k = 0; k < nk; k++) {
+        if (!is_mem[k])
+            continue;
+        if (named && !may_alias(w, kbase[k], taken, nvars))
+            continue;
+        s[k] = -1;
     }
 }
 
@@ -1557,6 +2081,18 @@ static int pass_loadcse(struct ir_func *fn)
         is_mem[k] = keys[k].op == IR_LOAD ||
                     (keys[k].op == IR_LDVAR && taken[keys[k].a]);
 
+    /* What object each cached load reads, so a write can kill only the
+     * ones it could actually reach. Without this a single store through
+     * a pointer dropped every cached load in the function. */
+    struct memref *kbase = xmalloc((size_t)(nk ? nk : 1) * sizeof *kbase);
+    for (int k = 0; k < nk; k++) {
+        if (keys[k].op == IR_LDVAR) {
+            kbase[k].kind = MEM_SLOT; kbase[k].id = keys[k].a;
+        } else {
+            kbase[k] = mem_base(fn, &d, keys[k].a);
+        }
+    }
+
     /* Dataflow. avail[b][k]: -2 top (init), -1 not available, >=0 the temp. */
     int *aout = xmalloc((size_t)nbb * (size_t)nk * sizeof *aout);
     int *ain  = xmalloc((size_t)nbb * (size_t)nk * sizeof *ain);
@@ -1592,7 +2128,7 @@ static int pass_loadcse(struct ir_func *fn)
                             (taken[ins->dst] && is_mem[k]))
                             s[k] = -1;
                 } else if (lcse_kills_mem(ins->op)) {
-                    for (int k = 0; k < nk; k++) if (is_mem[k]) s[k] = -1;
+                    lcse_kill(s, nk, is_mem, kbase, ins, fn, &d, taken, nvars);
                 }
                 int k = keyidx[i];
                 if (k >= 0 && s[k] < 0) s[k] = ins->dst;   /* first def of the value */
@@ -1616,7 +2152,7 @@ static int pass_loadcse(struct ir_func *fn)
                         (taken[ins->dst] && is_mem[k]))
                         s[k] = -1;
             } else if (lcse_kills_mem(ins->op)) {
-                for (int k = 0; k < nk; k++) if (is_mem[k]) s[k] = -1;
+                lcse_kill(s, nk, is_mem, kbase, ins, fn, &d, taken, nvars);
             }
             int k = keyidx[i];
             if (k < 0) continue;
@@ -1629,7 +2165,7 @@ static int pass_loadcse(struct ir_func *fn)
     }
 
     free(order); free(l2b); free(taken); free(keyidx); free(keys);
-    free(is_mem); free(aout); free(ain); free(s);
+    free(is_mem); free(kbase); free(aout); free(ain); free(s);
     for (int i = 0; i < nbb; i++) free(bb[i].pred);
     free(bb); free_defs(&d);
     return changed;
@@ -2332,25 +2868,6 @@ struct vecloop {
     int lo, hi;        /* the loop's instruction range, [lo, hi) */
     int header;        /* its first block */
 };
-
-/* Operand b as a constant, whether it has been folded into the
- * instruction or is still a CONST temp. pass_immfold runs after the
- * fixpoint this pass sits in, so inside the pipeline it is always the
- * latter -- which is not what the printed IR shows, because that is
- * printed after the fold. Reading only imm_b here found nothing at all. */
-static int const_b(struct ir_func *fn, struct defs *d, struct ir_ins *i,
-                   long *out)
-{
-    if (i->imm_b) { *out = i->imm; return 1; }
-    int v = i->b;
-    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
-        return 0;
-    int n = d->ins[v];
-    if (n < 0 || fn->ins[n].op != IR_CONST)
-        return 0;
-    *out = fn->ins[n].imm;
-    return 1;
-}
 
 /* Is `v` defined outside [lo, hi)? A loop-invariant operand, which a
  * vector op reaches by broadcasting it once before the loop. */
@@ -4365,6 +4882,8 @@ static struct passflag g_pass[] = {
     { "licm",      0, 0 },   /* loop invariants, rotation, strength reduction */
     { "vectorize", 0, 0 },   /* lane-wise loops, where the backend has them */
     { "inline",    0, 0 },   /* splice a small callee into its caller */
+    { "dse",       0, 0 },   /* drop a store a later one overwrites */
+    { "div-magic", 0, 0 },   /* divide by a constant without dividing */
 };
 #define NPASS ((int)(sizeof g_pass / sizeof g_pass[0]))
 #define P_MEM2REG 0
@@ -4374,6 +4893,8 @@ static struct passflag g_pass[] = {
 #define P_LICM    4
 #define P_VEC     5
 #define P_INLINE  6
+#define P_DSE     7
+#define P_DIVMAGIC 8
 
 int opt_set_pass(const char *name, int on)
 {
@@ -4408,6 +4929,8 @@ static void pass_default(int idx, int on)
 #define g_sccp    (g_pass[P_SCCP].on)
 #define g_licm    (g_pass[P_LICM].on)
 #define g_vec     (g_pass[P_VEC].on)
+#define g_dse     (g_pass[P_DSE].on)
+#define g_divmagic (g_pass[P_DIVMAGIC].on)
 
 /* ---- IR verifier (opt-in via EMBCC_VERIFY) --------------------------------
  * A cheap post-optimization sanity net for the two invariants a silent
@@ -4532,6 +5055,11 @@ static void opt_func(struct ir_func *fn)
     if (verify) verify_func(fn, "irgen");
     int ins_before = fn->nins;
     memset(&g_did, 0, sizeof g_did);
+    /* Before the fixpoint: what it emits -- a multiply, some shifts and
+     * an add -- is ordinary arithmetic the other passes then fold,
+     * value-number and strength-reduce like any other. */
+    if (g_divmagic)
+        pass_divmagic(fn);
     if (g_mem2reg && cfg_ok)
         pass_mem2reg(fn);         /* global mem2reg (subsumes store-forwarding) */
     /* Global load CSE is the expensive pass (CFG + an available-expressions
@@ -4558,6 +5086,8 @@ static void opt_func(struct ir_func *fn)
             changed |= pass_copyprop_local(fn);  /* the phi copies the global
                                                   * one cannot touch */
             changed |= pass_dce(fn);
+            if (g_dse && cfg_ok)
+                changed |= pass_dse(fn);
         }
         if (g_loadcse && cfg_ok && pass_loadcse(fn)) {   /* reuse loads redundant on every path */
             pass_copyprop(fn);
@@ -4618,13 +5148,13 @@ static void opt_func(struct ir_func *fn)
         /* The passes that had been silent. One line, only when they did
          * something, because most functions give every count as zero. */
         if (g_did.lvn || g_did.gcse || g_did.dce || g_did.copy ||
-            g_did.loadcse)
+            g_did.loadcse || g_did.dse)
             remark_add("opt", "rewrote", fn->name, "pass-counts",
                        fn->file, fn->line,
                        "%ld cse, %ld global cse, %ld load reuse, "
-                       "%ld copies propagated, %ld dead",
+                       "%ld copies propagated, %ld dead, %ld dead stores",
                        g_did.lvn, g_did.gcse, g_did.loadcse, g_did.copy,
-                       g_did.dce);
+                       g_did.dce, g_did.dse);
     }
 }
 
@@ -4661,6 +5191,11 @@ void opt_run(struct ir_unit *iu, int level)
     pass_default(P_LOADCSE, level >= 2);
     pass_default(P_SCCP,    level >= 2);
     pass_default(P_INLINE,  level >= 2);
+    pass_default(P_DSE,     level >= 2);
+    /* A multiply and two shifts in place of a divide is smaller than
+     * the divide's setup on these targets as well as faster, so -Os
+     * keeps it. */
+    pass_default(P_DIVMAGIC, level >= 2);
     if (g_pass[P_INLINE].on)      /* inline before the per-function passes clean up */
         inline_unit(iu);
     /* Every function, including one computing with __int128. The folds
