@@ -641,7 +641,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             for (struct func *f = u->funcs; f; f = f->next)
                 if (!f->absorbed &&
                     strcmp(f->name, ta->rels[r].target) == 0)
-                    f->used = 1;
+                    f->used = f->is_root = 1;
     }
 
     /* A constructor is called by the startup code, not by this unit, so
@@ -654,11 +654,84 @@ static int compile_unit(const char *in, const char *out, int pp_only)
              * although nothing here calls it -- a handler reached only
              * from a table, or from assembly the compiler cannot see.
              * Dropping it would link and then do nothing. */
-            f->used = 1;
+            f->used = f->is_root = 1;
 
     remarks_enable(want_remarks || why_decision != NULL);
     struct ir_unit *iu = irgen(u);
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
+
+    /* ---- what is still reachable -------------------------------------
+     *
+     * A `static` function nothing calls is already dropped, but `used`
+     * has meant "some call resolved here", which is not the same
+     * question: a static called only from another dead static was
+     * called, so it was kept, and so was everything IT called. One
+     * unreferenced helper kept a whole private subtree alive.
+     *
+     * Reachability answers it properly. The roots are the things the
+     * world outside this unit can reach -- anything not static, a
+     * constructor or destructor (.init_array is the use), an
+     * __attribute__((used)), and any target named by top-level asm,
+     * which was marked above. Everything else is kept only if a
+     * reachable function calls it or takes its address.
+     *
+     * Run after the optimizer on purpose: inlining absorbs callees and
+     * dead-code elimination removes calls, so the call graph here is
+     * the one that will actually be emitted rather than the one the
+     * source described. */
+    if (opt_level >= 1) {
+        int nf = iu->nfuncs;
+        char *reach = xcalloc((size_t)(nf ? nf : 1), 1);
+        int *work = xmalloc((size_t)(nf ? nf : 1) * sizeof *work);
+        int nw = 0;
+        /* A function whose ADDRESS sits in a static initializer is
+         * reached from data, not from code: a vtable entry, a handler
+         * table, a designated initializer holding a function pointer.
+         * Nothing in any function body mentions it, so the IR scan
+         * below never sees it -- and dropping it leaves the relocation
+         * in .data pointing at a symbol that was never emitted, which
+         * is a link error rather than a wrong answer. */
+        for (struct global *g = u->globals; g; g = g->next)
+            for (int r = 0; r < g->nrelocs; r++)
+                if (g->relocs[r].ftarget)
+                    g->relocs[r].ftarget->is_root = 1;
+        for (int k = 0; k < nf; k++) {
+            struct func *f = iu->funcs[k].src;
+            if (!f || f->absorbed || !f->has_defn)
+                continue;
+            if (!f->is_static || f->is_root)
+                { reach[k] = 1; work[nw++] = k; }
+        }
+        while (nw) {
+            struct ir_func *fn = &iu->funcs[work[--nw]];
+            for (int n = 0; n < fn->nins; n++) {
+                struct ir_ins *i = &fn->ins[n];
+                struct func *t = NULL;
+                if (i->op == IR_CALL && !i->indirect) t = i->callee;
+                else if (i->op == IR_FADDR)           t = i->callee;
+                if (!t)
+                    continue;
+                for (int k = 0; k < nf; k++)
+                    if (iu->funcs[k].src == t && !reach[k]) {
+                        reach[k] = 1; work[nw++] = k;
+                        break;
+                    }
+            }
+        }
+        for (int k = 0; k < nf; k++) {
+            struct func *f = iu->funcs[k].src;
+            if (!f || f->absorbed || !f->has_defn || !f->is_static)
+                continue;
+            if (!reach[k] && f->used) {
+                f->used = 0;               /* kept only by a dead caller */
+                if (want_remarks)
+                    remark_add("opt", "dropped", f->name, "unreachable",
+                               f->file, f->line,
+                               "no reachable caller after optimization");
+            }
+        }
+        free(reach); free(work);
+    }
 
     /* A question was asked (§19): answer it and stop. The remarks exist
      * because the passes have run; rendering here means the answer is a

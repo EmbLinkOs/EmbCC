@@ -333,6 +333,12 @@ struct func {
     int declared;         /* sema: declaration has been reached */
     int absorbed;         /* sema: merged into an earlier node — skip */
     int used;             /* sema: at least one call resolves here */
+    int is_root;          /* reachable from OUTSIDE the call graph: named
+                           * by top-level asm, a constructor or destructor
+                           * (.init_array is the use), or
+                           * __attribute__((used)). "used" cannot say this
+                           * -- it means only that some call resolved here,
+                           * and that call may itself be dead. */
     /* codegen bookkeeping: position inside .text (defined funcs only) */
     int code_off, code_len;
     /* ... and what its prologue did, for the unwind tables (debug/eh.c):
