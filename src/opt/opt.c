@@ -6231,6 +6231,39 @@ static int pass_immfold(struct ir_func *fn)
  * an STVAR of each argument; every RET becomes `MOV result` + a jump to one
  * shared label after the inlined body. Gated to -O2, so -O0/-O1 are untouched. */
 
+/* ---- the budget is flat, and that was measured -----------------------
+ *
+ * A flat instruction budget looks like the wrong question. What inlining
+ * trades is the callee's body against the CALL -- the argument moves,
+ * the call, the return -- and that is not a constant, so a cost model
+ * ought to beat a number. Three were tried, each a fact already in the
+ * IR rather than a guess, and all three made the code BIGGER:
+ *
+ *   Credit for the call removed (2 + one per argument), and credit for
+ *   a CONSTANT argument the callee will fold around (4 each):
+ *     lib/libc + lib/libcxx objects, x86-64  472912 -> 474096
+ *                                   aarch64  661208 -> 664816
+ *   The constant credit alone changed x86-64 by nothing at all and
+ *   aarch64 by +384: an argument that is a literal rarely decides a
+ *   budget, because the functions it would let in are not near it.
+ *
+ *   A budget of 200 for the SOLE caller of a static function nothing
+ *   else can reach -- where the body is moved rather than copied, so
+ *   dead-function elimination takes the original and the unit should
+ *   get smaller however big it was:
+ *     objects, x86-64  472912 -> 474864
+ *              aarch64 661208 -> 667824
+ *   and tests/bench/kernels.c memory_stream 0.22 -> 0.287, because that
+ *   kernel IS a static function with one caller: its loop nest moved
+ *   into main, and a bigger function allocates worse. The size the
+ *   original would have freed is smaller than what the caller then
+ *   spends on spills.
+ *
+ * So the number stays, and this is what it is doing there. A cost model
+ * that beats it wants something these three did not have -- how HOT the
+ * call is (section 4's profile work), or a real estimate of what the
+ * caller's register pressure will do -- not more arithmetic on facts
+ * already available here. */
 #define INLINE_MAX_CALLEE 24     /* instruction budget for an inline candidate */
 #define INLINE_MAX_CALLER 800    /* stop expanding a caller past this many ins */
 #define INLINE_MAX_PER_FUNC 64   /* and cap inlines per caller, for termination */
