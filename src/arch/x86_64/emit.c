@@ -1230,6 +1230,37 @@ int x86_jmp_rel32(struct code *c)
     return off;
 }
 
+/* The two-byte forms. A displacement that fits in a signed byte reaches
+ * most of what a function branches to, and costs four bytes less every
+ * time -- `74 cb` against `0f 84 cd`. Which branches may use one is not
+ * knowable while emitting, because it depends on where everything else
+ * lands; codegen decides by emitting the function more than once (see
+ * the relaxation loop in codegen.c) and these are what it emits when it
+ * has decided yes. */
+int x86_jz_rel8(struct code *c)
+{
+    code_byte(c, 0x74);
+    int off = c->len;
+    code_byte(c, 0);
+    return off;
+}
+
+int x86_jnz_rel8(struct code *c)
+{
+    code_byte(c, 0x75);
+    int off = c->len;
+    code_byte(c, 0);
+    return off;
+}
+
+int x86_jmp_rel8(struct code *c)
+{
+    code_byte(c, 0xeb);
+    int off = c->len;
+    code_byte(c, 0);
+    return off;
+}
+
 /* jmp *reg  (FF /4) — the indirect jump a GNU computed goto lowers to. */
 void x86_jmp_reg(struct code *c, int reg)
 {
@@ -1246,6 +1277,15 @@ int x86_jcc_rel32(struct code *c, int setcc)
     code_byte(c, 0x80 | (setcc & 0x0f));
     int off = c->len;
     code_u32(c, 0);
+    return off;
+}
+
+/* The two-byte conditional: `7x cb` where the near form is `0f 8x cd`. */
+int x86_jcc_rel8(struct code *c, int setcc)
+{
+    code_byte(c, 0x70 | (setcc & 0x0f));
+    int off = c->len;
+    code_byte(c, 0);
     return off;
 }
 

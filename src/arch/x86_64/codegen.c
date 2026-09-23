@@ -536,7 +536,44 @@ static int cc_for(enum binop pred, int sign)
 struct brsite {
     int patch_off;
     int label;
+    int size;       /* 1 or 4: the width of the displacement field */
+    int ord;        /* this branch's number in the function, or -1 for
+                     * something that is not a branch at all (the `lea`
+                     * of a label's address, which is always 32-bit) */
 };
+
+/* ---- branch relaxation ----------------------------------------------
+ *
+ * `74 cb` reaches 127 bytes and costs two; `0f 84 cd` reaches anywhere
+ * and costs six. Most branches in a function reach their target in a
+ * byte, and emitting every one of them long cost about a tenth of all
+ * the code EmbCC produced -- 10138 bytes of the 112796 in lib/libc,
+ * counted from the objects.
+ *
+ * Which ones fit is not knowable while emitting, because it depends on
+ * where everything after them lands, and that depends on which of THOSE
+ * are short. So the function is emitted more than once. The first
+ * attempt assumes every branch is short; any that turns out not to
+ * reach is marked long and the function is emitted again. The marking
+ * only ever goes short -> long, so the layout only grows and the loop
+ * terminates -- at worst once per branch, in practice after one or two
+ * rounds.
+ *
+ * Starting optimistic is what makes it tight. From all-long, a branch
+ * is only ever shortened when it already fits at the LONG layout, and
+ * shortening it does not bring its neighbours into range on the same
+ * pass; from all-short, everything that can possibly fit does. */
+static unsigned char *g_short;    /* per branch ordinal: emit the short form */
+static int g_nshort;
+static int g_brord;               /* the next ordinal, while emitting */
+static int g_grew;                /* a short branch did not reach */
+
+/* Take the next branch ordinal and say whether it may be short. */
+static int br_short(void)
+{
+    int ord = g_brord++;
+    return g_short && ord < g_nshort && g_short[ord];
+}
 
 /* g_want_debug (the -g flag) is declared near the top of the file — it is read
  * by coalesce_locals, which appears before this point. */
@@ -2318,7 +2355,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 /* BRNZ jumps when the comparison is true; BRZ when it is false. */
                 enum binop jp = br->op == IR_BRNZ ? i->pred
                                                   : negate_pred(i->pred);
-                int patch = x86_jcc_rel32(text, cc_for(jp, i->sign));
+                int ord = g_brord;
+                int sh = br_short();
+                int patch = sh ? x86_jcc_rel8(text, cc_for(jp, i->sign))
+                               : x86_jcc_rel32(text, cc_for(jp, i->sign));
                 cg_reset();                       /* control splits here */
                 if (nbrs == capbrs) {
                     capbrs = capbrs ? capbrs * 2 : 16;
@@ -2326,6 +2366,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 }
                 brs[nbrs].patch_off = patch;
                 brs[nbrs].label = br->label;
+                brs[nbrs].size = sh ? 1 : 4;
+                brs[nbrs].ord = ord;
                 nbrs++;
                 n++;                              /* consume the fused branch */
                 break;
@@ -2672,8 +2714,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_BRZ:
         case IR_BRNZ: {
             int patch;
+            int ord = g_brord;
+            int sh;
             if (i->op == IR_JMP) {
-                patch = x86_jmp_rel32(text);
+                sh = br_short();
+                patch = sh ? x86_jmp_rel8(text) : x86_jmp_rel32(text);
             } else {
                 /* A register-resident condition is tested where it
                  * lives. The detour through RAX was a move and a test
@@ -2685,8 +2730,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     cg_load(text, sd, i->a, i->w, 0, i->w);
                     x86_test_eax(text, i->w);
                 }
-                patch = i->op == IR_BRZ ? x86_jz_rel32(text)
-                                        : x86_jnz_rel32(text);
+                sh = br_short();
+                patch = i->op == IR_BRZ
+                    ? (sh ? x86_jz_rel8(text)  : x86_jz_rel32(text))
+                    : (sh ? x86_jnz_rel8(text) : x86_jnz_rel32(text));
             }
             cg_reset();      /* control splits: don't carry RAX across */
             if (nbrs == capbrs) {
@@ -2695,6 +2742,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
             }
             brs[nbrs].patch_off = patch;
             brs[nbrs].label = i->label;
+            brs[nbrs].size = sh ? 1 : 4;
+            brs[nbrs].ord = ord;
             nbrs++;
             break;
         }
@@ -2709,6 +2758,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
             }
             brs[nbrs].patch_off = patch;
             brs[nbrs].label = i->label;
+            brs[nbrs].size = 4;       /* a `lea`, not a branch */
+            brs[nbrs].ord = -1;
             nbrs++;
             cg_store(text, sd, i->dst, 8);
             break;
@@ -3243,9 +3294,23 @@ static void gen_func(struct ir_func *fn, struct code *text,
             internal_error("label %d in '%s' was never placed",
                            brs[n].label, f->name);
         }
-        int from = brs[n].patch_off + 4;
+        int from = brs[n].patch_off + brs[n].size;
+        long rel = (long)target - from;
+        if (brs[n].size == 1) {
+            if (rel < -128 || rel > 127) {
+                /* It does not reach. This whole layout is about to be
+                 * thrown away and the function emitted again with this
+                 * branch long -- so do not patch, and say so. */
+                g_grew = 1;
+                if (brs[n].ord >= 0 && brs[n].ord < g_nshort)
+                    g_short[brs[n].ord] = 0;
+                continue;
+            }
+            text->p[brs[n].patch_off] = (unsigned char)(rel & 0xff);
+            continue;
+        }
         code_patch32(text, brs[n].patch_off,
-                     (unsigned long)(unsigned int)(target - from));
+                     (unsigned long)(unsigned int)(int)rel);
     }
     free(brs);
     free(label_off);
@@ -3281,8 +3346,36 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
     g_opt_frames = optimize;
     g_no_sse = no_sse;
 
-    for (int n = 0; n < iu->nfuncs; n++)
-        gen_func(&iu->funcs[n], text, &st);
+    for (int n = 0; n < iu->nfuncs; n++) {
+        struct ir_func *fn = &iu->funcs[n];
+        /* Emit the function, shortening every branch that reaches (see
+         * `struct brsite`). Everything gen_func appends to outside
+         * `text` is rewound with it, so each attempt starts exactly
+         * where the last one did. */
+        int text0 = text->len;
+        int ncall0 = st.ncall, next0 = st.next, nstr0 = st.nstr;
+        int ng0 = st.ng, nf0 = st.nf;
+        g_nshort = fn->nins + 1;
+        g_short = xmalloc((size_t)g_nshort);
+        memset(g_short, 1, (size_t)g_nshort);
+        for (int round = 0; ; round++) {
+            text->len = text0;
+            st.ncall = ncall0; st.next = next0; st.nstr = nstr0;
+            st.ng = ng0; st.nf = nf0;
+            fn->nlines = 0;
+            fn->ncsites = 0;
+            free(fn->var_off); fn->var_off = NULL;
+            g_brord = 0; g_grew = 0;
+            /* A round per branch is the bound; past that something is
+             * wrong, and all-long is the answer that always works. */
+            if (round >= 12)
+                memset(g_short, 0, (size_t)g_nshort);
+            gen_func(fn, text, &st);
+            if (!g_grew)
+                break;
+        }
+        free(g_short); g_short = NULL; g_nshort = 0;
+    }
 
     /* All targets are placed now; resolve the intra-unit calls.
      * rel32 is relative to the end of the call instruction. */
