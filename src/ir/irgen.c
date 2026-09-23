@@ -107,6 +107,8 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         L->is_int_or_ptr = ty_is_integer(t) || t->kind == TY_PTR;
         L->is_scalar_int_or_ptr =
             L->is_int_or_ptr && (L->size == 4 || L->size == 8);
+        L->is_scalar_float = ty_is_float(t) && !L->is_ldouble &&
+                             (L->size == 4 || L->size == 8);
     }
 }
 

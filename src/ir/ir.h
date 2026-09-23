@@ -312,6 +312,8 @@ struct ir_local {
     int is_int128;
     int is_int_or_ptr;       /* an integer or a pointer, any width */
     int is_scalar_int_or_ptr; /* ... and 4 or 8 bytes: mem2reg's test */
+    int is_scalar_float;     /* a float or double (NOT long double, which
+                              * lives in x87 and is 16 bytes here) */
 };
 
 struct ir_func {

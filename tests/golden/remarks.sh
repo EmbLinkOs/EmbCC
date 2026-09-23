@@ -122,13 +122,13 @@ int f(int n)
 EOF
 "$EMBCC" why kept-in-memory "$out/m.c" -O2 > "$out/mem.txt" 2>&1
 sed "s|$out/||" "$out/mem.txt"
-for pair in "vol:declared-volatile" "addressed:address-is-taken"             "agg:not-a-scalar-integer-or-pointer"; do
+for pair in "vol:declared-volatile" "addressed:address-is-taken"             "agg:not-a-scalar-integer-pointer-or-float"; do
     v=${pair%%:*}; r=${pair#*:}
     grep -q "^$v " "$out/mem.txt" || { echo "FAIL: no remark for $v"; exit 1; }
 done
 grep -q "because declared-volatile" "$out/mem.txt" || { echo "FAIL: volatile"; exit 1; }
 grep -q "because address-is-taken" "$out/mem.txt" || { echo "FAIL: &x"; exit 1; }
-grep -q "because not-a-scalar-integer-or-pointer" "$out/mem.txt" ||
+grep -q "because not-a-scalar-integer-pointer-or-float" "$out/mem.txt" ||
     { echo "FAIL: aggregate"; exit 1; }
 # Each names the variable's OWN declaration line, not the function's.
 grep -q "^vol (.*m\.c:7)" "$out/mem.txt" ||

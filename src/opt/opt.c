@@ -16,6 +16,15 @@
 #include "../driver/remark.h"
 #include "../driver/util.h"
 
+/* What the quiet passes did, counted per function.
+ *
+ * CSE, dead code, copy propagation and load elimination each run many
+ * times inside the fixpoint, so a remark per rewrite would bury the
+ * output. One line per function, at the end, answers the question
+ * anyone actually asks -- "did anything happen, and what" -- and is
+ * comparable between two builds. */
+static struct { long lvn, gcse, dce, copy, loadcse; } g_did;
+
 /* ---- op classification ---- */
 
 /* Writes a fresh temporary as dst. IR_STVAR writes a LOCAL slot and is
@@ -394,6 +403,13 @@ static int pass_fold(struct ir_func *fn)
         struct ir_ins *i = &fn->ins[n];
         if (i->flt)
             continue;   /* never fold an SSE op as an integer */
+        /* Nor an __int128 one as a long. `imm` is 64 bits and norm()
+         * truncates anything that is not width 8, so a 128-bit constant
+         * cannot even be held here, let alone folded. Skipping these is
+         * what lets the REST of the pipeline run on a function that
+         * computes with __int128, which used to be excluded whole. */
+        if (i->w == 16)
+            continue;
         long A, B;
         int ka = get_const(fn, &d, i->a, &A);
         int kb = get_const(fn, &d, i->b, &B);
@@ -552,6 +568,10 @@ static int vn_key(struct ir_ins *i, int memver, struct vn *k)
     k->op = i->op; k->a = -1; k->b = -1;
     if (i->flt)
         return 0;
+    /* An __int128 constant's key would be its low half only, so two
+     * different ones would number the same. */
+    if (i->w == 16)
+        return 0;
     switch (i->op) {
     case IR_CONST:               /* same literal -> one temp, so uses of it CSE */
         k->imm = i->imm; k->w = i->w; return 1;
@@ -660,6 +680,7 @@ static int pass_lvn(struct ir_func *fn)
             if (hit >= 0 && hit != i->dst) {
                 to_mov(i, hit);
                 changed = 1;
+                g_did.lvn++;
                 op0 = IR_MOV;      /* what it is NOW, for the kill below */
             } else if (hit < 0) {
                 ntab = vn_kill(tab, ntab, i->dst);
@@ -724,8 +745,10 @@ static int pass_copyprop(struct ir_func *fn)
         struct repl r = { i->dst, i->a, 0 };
         for (int m = 0; m < fn->nins; m++)
             each_read(&fn->ins[m], repl_cb, &r);
-        if (r.n)
+        if (r.n) {
             changed = 1;   /* the MOV is now dead; DCE removes it */
+            g_did.copy += r.n;
+        }
     }
     free_defs(&d);
     return changed;
@@ -763,6 +786,7 @@ static int pass_dce(struct ir_func *fn)
         int t = def_target(i);
         if (is_pure(i->op) && t >= 0 && use[t] == 0) {
             changed = 1;
+            g_did.dce++;
             continue;   /* drop it */
         }
         /* Dead store: a non-volatile STVAR to a local nothing ever reads (no
@@ -772,6 +796,7 @@ static int pass_dce(struct ir_func *fn)
         if (i->op == IR_STVAR && !i->vol && i->dst >= 0 &&
             i->dst < fn->nvregs && use[i->dst] == 0) {
             changed = 1;
+            g_did.dce++;
             continue;
         }
         if (j != n)
@@ -993,6 +1018,7 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         for (int k = 0; k < S->nphi; k++) {
             struct ir_ins *mv = ib_push(nb);
             mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = S->phi_inc[pi][k];
+            mv->w = fn->locals[S->phi_local[k]].size == 8 ? 8 : 4;
             mv->line = eline; mv->col = ecol; mv->synth = !eline;
         }
         return;
@@ -1002,11 +1028,13 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         tmp[k] = fn->nvregs++;
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = tmp[k]; mv->a = S->phi_inc[pi][k];
+        mv->w = fn->locals[S->phi_local[k]].size == 8 ? 8 : 4;
         mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     for (int k = 0; k < S->nphi; k++) {
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = tmp[k];
+        mv->w = fn->locals[S->phi_local[k]].size == 8 ? 8 : 4;
         mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     free(tmp);
@@ -1059,11 +1087,22 @@ static int pass_mem2reg(struct ir_func *fn)
          * instruction), so SSA has no version to seed a read with. Only true
          * locals, always assigned before use, are promoted. */
         ok[L] = 1;
+        /* A float or double promotes too. The temp it becomes is still
+         * read by SSE instructions, which take their operand from a
+         * slot, and the register allocator marks anything a float op
+         * touches as ineligible -- so it does not end up in a register
+         * and nothing about codegen changes. What IS gained is that
+         * folding, value numbering and copy propagation can finally see
+         * through it: a double loaded twice becomes one load, and a
+         * value carried across a branch stops being a store and a
+         * reload. 188 locals in lib/libc and lib/libcxx were refused
+         * here for being neither an integer nor a pointer. */
+        int promotable = Li->is_scalar_int_or_ptr || Li->is_scalar_float;
         if (L < nparams)                        { ok[L] = 0; why[L] = "is-a-parameter"; }
         else if (!Li->size)                     { ok[L] = 0; why[L] = "type-unknown"; }
-        else if (!Li->is_scalar_int_or_ptr && (Li->size == 4 || Li->size == 8))
-                                                { ok[L] = 0; why[L] = "not-a-scalar-integer-or-pointer"; }
-        else if (!Li->is_scalar_int_or_ptr)     { ok[L] = 0; why[L] = "not-4-or-8-bytes"; }
+        else if (!promotable && (Li->size == 4 || Li->size == 8))
+                                                { ok[L] = 0; why[L] = "not-a-scalar-integer-pointer-or-float"; }
+        else if (!promotable)                   { ok[L] = 0; why[L] = "not-4-or-8-bytes"; }
     }
     for (int L = 0; L < nvars; L++)
         if (ok[L] && fn->locals[L].is_volatile) {
@@ -1189,7 +1228,16 @@ static int pass_mem2reg(struct ir_func *fn)
                 struct ir_ins *in = &fn->ins[i];
                 if (in->op == IR_LDVAR && in->a >= 0 && in->a < nvars && prom[in->a] >= 0) {
                     int pidx = prom[in->a];
+                    int fw = in->size == 8 ? 8 : 4;
+                    int was_float = in->flt;
                     in->op = IR_MOV; in->a = stk[pidx][sp[pidx]-1]; in->b = -1;
+                    if (was_float) {
+                        /* A copy of the BITS, at the variable's width.
+                         * Left as a float move it would go through the
+                         * SSE path, which loads from a slot the temp no
+                         * longer has. */
+                        in->flt = 0; in->sign = 0; in->size = 0; in->w = fw;
+                    }
                 } else if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars && prom[in->dst] >= 0) {
                     int pidx = prom[in->dst];
                     if (sp[pidx] == scap[pidx]) { scap[pidx]*=2; stk[pidx]=xrealloc(stk[pidx],(size_t)scap[pidx]*sizeof(int)); }
@@ -1393,7 +1441,7 @@ static int pass_gcse(struct ir_func *fn)
                 for (int t = 0; t < ntab; t++)
                     if (vn_eq(&tab[t], &k)) { hit = tab[t].result; break; }
                 if (hit >= 0 && hit != i->dst) {
-                    to_mov(i, hit); changed = 1;
+                    to_mov(i, hit); changed = 1; g_did.gcse++;
                 } else if (hit < 0) {
                     if (ntab == captab) { captab = captab ? captab * 2 : 64;
                         tab = xrealloc(tab, (size_t)captab * sizeof *tab); }
@@ -1573,7 +1621,7 @@ static int pass_loadcse(struct ir_func *fn)
             int k = keyidx[i];
             if (k < 0) continue;
             if (s[k] >= 0 && s[k] != ins->dst) {
-                to_mov(ins, s[k]); changed = 1;            /* redundant reload */
+                to_mov(ins, s[k]); changed = 1; g_did.loadcse++;  /* redundant reload */
             } else if (s[k] < 0) {
                 s[k] = ins->dst;
             }
@@ -1644,8 +1692,10 @@ static int pass_copyprop_local(struct ir_func *fn)
             }
             struct lcopy c = { cp, fn->nvregs, 0 };
             each_read(i, lcopy_cb, &c);
-            if (c.n)
+            if (c.n) {
                 changed = 1;
+                g_did.copy += c.n;
+            }
             int t = def_target(i);
             if (t >= 0 && t < fn->nvregs) {
                 cp[t] = -1;                  /* it is a new value now */
@@ -3903,8 +3953,8 @@ static int pass_immfold(struct ir_func *fn)
     int changed = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
-        if (i->flt || i->imm_b)
-            continue;
+        if (i->flt || i->imm_b || i->w == 16)
+            continue;           /* see pass_fold on the 128-bit width */
         long A, B;
         int commutative;
         /* Shifts fold only their count (b), and only a valid small one — the
@@ -4300,12 +4350,64 @@ void opt_cfg_dump(struct outbuf *b, struct ir_func *fn)
 
 /* ---- driver ---- */
 
-static int g_mem2reg;   /* -O2: promote locals to SSA before the fixpoint */
-static int g_gcse;      /* -O2: dominator-scoped global CSE inside the fixpoint */
-static int g_loadcse;   /* -O2: global redundant-load elimination (avail. exprs) */
-static int g_sccp;      /* -O2: const-branch resolution + unreachable-block drop */
-static int g_licm;      /* -O2: hoist loop-invariant computation to a preheader */
-static int g_vec;       /* -O2: lane-wise loops, where the backend has them */
+/* ---- the passes, by name -------------------------------------------
+ *
+ * One table so that -f<name>/-fno-<name>, the -O levels and --help all
+ * read the same list, and a pass added without a name here is visibly
+ * missing rather than silently unnameable. `forced` records that a flag
+ * spoke, so the level does not overwrite what it asked for. */
+struct passflag { const char *name; int on; int forced; };
+static struct passflag g_pass[] = {
+    { "mem2reg",   0, 0 },   /* promote locals to SSA before the fixpoint */
+    { "gcse",      0, 0 },   /* dominator-scoped global CSE */
+    { "load-cse",  0, 0 },   /* global redundant-load elimination */
+    { "sccp",      0, 0 },   /* const-branch resolution + dead-block drop */
+    { "licm",      0, 0 },   /* loop invariants, rotation, strength reduction */
+    { "vectorize", 0, 0 },   /* lane-wise loops, where the backend has them */
+    { "inline",    0, 0 },   /* splice a small callee into its caller */
+};
+#define NPASS ((int)(sizeof g_pass / sizeof g_pass[0]))
+#define P_MEM2REG 0
+#define P_GCSE    1
+#define P_LOADCSE 2
+#define P_SCCP    3
+#define P_LICM    4
+#define P_VEC     5
+#define P_INLINE  6
+
+int opt_set_pass(const char *name, int on)
+{
+    for (int i = 0; i < NPASS; i++)
+        if (!strcmp(g_pass[i].name, name)) {
+            g_pass[i].on = on;
+            g_pass[i].forced = 1;
+            return 1;
+        }
+    return 0;
+}
+
+int opt_pass_names(const char *const **names)
+{
+    static const char *n[NPASS];
+    for (int i = 0; i < NPASS; i++)
+        n[i] = g_pass[i].name;
+    *names = n;
+    return NPASS;
+}
+
+/* Set by the level, unless a flag already spoke for this pass. */
+static void pass_default(int idx, int on)
+{
+    if (!g_pass[idx].forced)
+        g_pass[idx].on = on;
+}
+
+#define g_mem2reg (g_pass[P_MEM2REG].on)
+#define g_gcse    (g_pass[P_GCSE].on)
+#define g_loadcse (g_pass[P_LOADCSE].on)
+#define g_sccp    (g_pass[P_SCCP].on)
+#define g_licm    (g_pass[P_LICM].on)
+#define g_vec     (g_pass[P_VEC].on)
 
 /* ---- IR verifier (opt-in via EMBCC_VERIFY) --------------------------------
  * A cheap post-optimization sanity net for the two invariants a silent
@@ -4372,13 +4474,46 @@ static void verify_func(struct ir_func *fn, const char *tag)
 
 static void opt_func(struct ir_func *fn)
 {
-    /* Computed goto (`goto *p`) makes the CFG imprecise — an indirect jump can
-     * reach any address-taken label — which the dominance/liveness passes are
-     * not built to model. Such functions are rare; leave them unoptimized
-     * (still correct, memory-model codegen) rather than risk a mis-analysis. */
+    /* ---- functions the CFG cannot be trusted for -------------------
+     *
+     * Two shapes leave this analysis short of the truth:
+     *
+     *   Computed goto. An indirect jump can reach any address-taken
+     *   label, and build_cfg does not model that, so dominance and
+     *   liveness are both wrong.
+     *
+     *   An exception region. A landing pad is entered from EVERY call
+     *   in its region -- edges nothing here records -- so the pad looks
+     *   unreachable and a value live only on the exception path looks
+     *   dead.
+     *
+     * Both used to return outright, leaving the whole function at -O0
+     * however the build was invoked. For exceptions that is most of a
+     * C++ program: across lib/libcxx, 316 of 609 functions got no
+     * optimization at all, including every one of the loop passes.
+     *
+     * They do not need to. The passes that reason about CONTROL FLOW
+     * are the ones that cannot be trusted here; the ones that work
+     * within a block -- folding, value numbering, copy propagation,
+     * store forwarding, dead code -- reason only between labels, and a
+     * missing edge cannot make them wrong. A landing pad starts with a
+     * label, so it is its own block to all of them. So the function is
+     * optimized LOCALLY rather than not at all. */
+    /* Computed goto still bails OUTRIGHT, and the difference from
+     * exceptions is worth stating. A landing pad is a block with an
+     * edge nothing recorded; the local passes never needed that edge,
+     * so they are right without it. An indirect jump is worse: it can
+     * land on any address-taken label, so a value live across it must
+     * stay in memory, and tests/exec/computed-goto.c says so in its
+     * first paragraph -- codegen keeps these functions in the memory
+     * model for that reason. Running even the local passes here
+     * returned the wrong answer at -O1 and -O2, and no single one of
+     * them was responsible, so the exclusion stays until the CFG can
+     * model the edges rather than until a pass is blamed. */
     for (int n = 0; n < fn->nins; n++)
         if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
             return;
+    int cfg_ok = !fn->neh;
     /* Likewise exception regions: a landing pad is entered from every call
      * of its region, edges the passes do not see (and its code, reached by
      * no jump, would look dead).
@@ -4393,12 +4528,11 @@ static void opt_func(struct ir_func *fn)
      * stores reading what it produced. compute_defs knows both now, so
      * these functions are optimized again instead of being compiled at
      * -O0 however the build was invoked. */
-    if (fn->neh)
-        return;
     int verify = getenv("EMBCC_VERIFY") != NULL;
     if (verify) verify_func(fn, "irgen");
     int ins_before = fn->nins;
-    if (g_mem2reg)
+    memset(&g_did, 0, sizeof g_did);
+    if (g_mem2reg && cfg_ok)
         pass_mem2reg(fn);         /* global mem2reg (subsumes store-forwarding) */
     /* Global load CSE is the expensive pass (CFG + an available-expressions
      * dataflow), so it runs ONCE per outer round instead of on every inner
@@ -4413,16 +4547,19 @@ static void opt_func(struct ir_func *fn)
             changed |= pass_storefwd(fn); /* forward local stores to loads (mem2reg-lite) */
             changed |= pass_fold(fn);
             changed |= pass_lvn(fn);      /* CSE: reuse identical computations */
-            if (g_gcse)
+            if (g_gcse && cfg_ok)
                 changed |= pass_gcse(fn); /* CSE across the dominator tree */
-            if (g_sccp)
+            /* SCCP is the one that must stay off without a trustworthy
+             * CFG even though it builds its own: it DELETES blocks it
+             * finds unreachable, and a landing pad is exactly that. */
+            if (g_sccp && cfg_ok)
                 changed |= pass_sccp(fn); /* resolve const branches, drop dead blocks */
             changed |= pass_copyprop(fn);
             changed |= pass_copyprop_local(fn);  /* the phi copies the global
                                                   * one cannot touch */
             changed |= pass_dce(fn);
         }
-        if (g_loadcse && pass_loadcse(fn)) {   /* reuse loads redundant on every path */
+        if (g_loadcse && cfg_ok && pass_loadcse(fn)) {   /* reuse loads redundant on every path */
             pass_copyprop(fn);
             pass_dce(fn);
             outer = 1;
@@ -4430,7 +4567,7 @@ static void opt_func(struct ir_func *fn)
         /* Rotation first: it merges the header into the body, so the
          * block-local passes in the next round see one block where they
          * saw two. */
-        if (g_licm && pass_rotate(fn)) {
+        if (g_licm && cfg_ok && pass_rotate(fn)) {
             pass_copyprop_local(fn);
             pass_dce(fn);
             outer = 1;
@@ -4440,7 +4577,7 @@ static void opt_func(struct ir_func *fn)
          * might hold is gone. Rounding again matters -- a hoisted
          * expression is a new candidate for folding and CSE in the
          * preheader, and what those leave can expose the next hoist. */
-        if (g_licm && pass_licm(fn)) {
+        if (g_licm && cfg_ok && pass_licm(fn)) {
             pass_copyprop(fn);
             pass_dce(fn);
             outer = 1;
@@ -4450,7 +4587,7 @@ static void opt_func(struct ir_func *fn)
          * shape, and LICM for the address base -- until the `gaddr` is
          * hoisted out, every memory reference looks like it is indexed
          * off something that changes, and nothing vectorizes. */
-        if (g_vec && pass_vectorize(fn)) {
+        if (g_vec && cfg_ok && pass_vectorize(fn)) {
             pass_dce(fn);
             outer = 1;
         }
@@ -4460,7 +4597,7 @@ static void opt_func(struct ir_func *fn)
      * on: a loop already walking a pointer no longer looks like
      * base + i*scale. Inside the round it would race the vectorizer for
      * the same loops and win, trading four lanes for one add. */
-    if (g_licm && pass_ivsr(fn)) {
+    if (g_licm && cfg_ok && pass_ivsr(fn)) {
         pass_copyprop_local(fn);
         pass_dce(fn);
     }
@@ -4474,28 +4611,63 @@ static void opt_func(struct ir_func *fn)
     /* What the whole fixpoint came to, for this function. The per-pass
      * decisions above answer "why"; this answers "did anything happen", and
      * it is the number a person compares between two builds. */
-    if (remarks_on() && fn->src)
+    if (remarks_on() && fn->src) {
         remark_add("opt", "optimized", fn->name, "fixpoint-reached",
                    fn->file, fn->line,
                    "%d instructions -> %d", ins_before, fn->nins);
+        /* The passes that had been silent. One line, only when they did
+         * something, because most functions give every count as zero. */
+        if (g_did.lvn || g_did.gcse || g_did.dce || g_did.copy ||
+            g_did.loadcse)
+            remark_add("opt", "rewrote", fn->name, "pass-counts",
+                       fn->file, fn->line,
+                       "%ld cse, %ld global cse, %ld load reuse, "
+                       "%ld copies propagated, %ld dead",
+                       g_did.lvn, g_did.gcse, g_did.loadcse, g_did.copy,
+                       g_did.dce);
+    }
 }
 
+/* -Os is level 2 without vectorization, which is the one pass here that
+ * reliably adds code: a vector loop beside the scalar one, plus the
+ * remainder test.
+ *
+ * Inlining is NOT disabled, which is worth writing down because the
+ * obvious guess was wrong. Turning it off made the benchmark's object
+ * file grow from 3959 bytes to 7340 -- inlining a static function that
+ * has one caller lets the original be deleted, so refusing to inline
+ * keeps two copies of it. Until there is a cost model that can tell
+ * that case from a body copied into twenty call sites (section 4's
+ * work), inlining everything it already inlines is the smaller answer.
+ *
+ * Everything else -- folding, value numbering, dead code, loop
+ * invariants, strength reduction -- makes code smaller as well as
+ * faster, which is why -Os is level 2 and not level 1. */
 void opt_run(struct ir_unit *iu, int level)
 {
+    int size = level == OPT_SIZE;
+    if (size)
+        level = 2;
     if (level < 1)
         return;
-    g_mem2reg = level >= 2;       /* SSA mem2reg: promote scalar locals to temps */
-    g_gcse = level >= 2;          /* global CSE across the dominator tree */
-    g_licm = level >= 2;          /* hoist loop-invariant code to a preheader */
+    pass_default(P_MEM2REG, level >= 2);
+    pass_default(P_GCSE,    level >= 2);
+    pass_default(P_LICM,    level >= 2);
     /* Vectorization is x86-64 for now: the aarch64 backend refuses the
      * vector opcodes loudly (diag_fatal) rather than emitting something
      * it has not been taught, so the pass must not hand it any. */
-    g_vec = level >= 2 && target_get() == TARGET_X86_64;
-    g_loadcse = level >= 2;       /* global redundant-load elimination */
-    g_sccp = level >= 2;          /* conditional constant propagation */
-    if (level >= 2)               /* inline before the per-function passes clean up */
+    pass_default(P_VEC,     level >= 2 && !size &&
+                            target_get() == TARGET_X86_64);
+    pass_default(P_LOADCSE, level >= 2);
+    pass_default(P_SCCP,    level >= 2);
+    pass_default(P_INLINE,  level >= 2);
+    if (g_pass[P_INLINE].on)      /* inline before the per-function passes clean up */
         inline_unit(iu);
+    /* Every function, including one computing with __int128. The folds
+     * that are 64-bit refuse a 128-bit width individually now (see
+     * pass_fold), which is a great deal narrower than refusing the
+     * function: everything else -- value numbering, copy propagation,
+     * dead code, and all of the loop passes -- works on it unchanged. */
     for (int f = 0; f < iu->nfuncs; f++)
-        if (!iu->funcs[f].has_i128)    /* (its folds are 64-bit) */
-            opt_func(&iu->funcs[f]);
+        opt_func(&iu->funcs[f]);
 }

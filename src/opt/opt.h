@@ -16,9 +16,36 @@
 
 #include "../ir/ir.h"
 
+/* The level -Os asks for: level 2 without the passes that trade size
+ * for speed. Spelled as a level so the driver has one path. */
+#define OPT_SIZE (-2)
+
 /* Optimize every function of the unit in place at the given level
- * (0 = none, >=1 = the local passes). */
+ * (0 = none, >=1 = the local passes, 2 = the global and loop passes,
+ * 3 = 2 plus the ones that trade size for speed). */
 void opt_run(struct ir_unit *iu, int level);
+
+/* ---- turning one pass off ------------------------------------------
+ *
+ * `-fno-<name>` / `-f<name>`, as gcc spells it. Two reasons this earns
+ * its place rather than being a debugging convenience:
+ *
+ *   A wrong answer at -O2 is a question about WHICH pass, and the only
+ *   way to ask it was to patch the compiler and rebuild. Hunting the
+ *   computed-goto miscompile took a hand-rolled env var and five builds
+ *   where it should have taken five command lines.
+ *
+ *   And a pass that is a pessimization on some code needs a way to be
+ *   turned off by whoever is compiling, not only by whoever is writing
+ *   the compiler.
+ *
+ * Returns 0 if the name is not a pass. `-Os` and -O levels set the
+ * defaults; an explicit flag overrides whatever the level chose. */
+int opt_set_pass(const char *name, int on);
+
+/* Every pass name, for --help and for an error message that can list
+ * them. Returns the count; names[] is static. */
+int opt_pass_names(const char *const **names);
 
 /* ---- the control-flow graph, for `embcc inspect cfg` (§18) ----
  *

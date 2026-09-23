@@ -535,7 +535,7 @@ answers, and five different causes used to leave the same zero behind:
     addressed (prog.c:8): kept-in-memory
       because address-is-taken
     agg (prog.c:9): kept-in-memory
-      because not-a-scalar-integer-or-pointer
+      because not-a-scalar-integer-pointer-or-float
 
 Each points at its own declaration line, which needed `struct ir_dbgvar` to
 carry one — R3 work that fell out of R2, because a remark about a variable

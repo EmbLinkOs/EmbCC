@@ -108,6 +108,8 @@ static void print_options(FILE *out)
       "  --print-search-dirs    where EmbCC found its own files\n"
       "  -D NAME[=VALUE], -U NAME  define and undefine macros\n"
       "  -include FILE          include it before the file\n"
+      "  -O0/-O1/-O2/-O3/-Os          optimization level (-Os: no size growth)\n"
+      "  -f<pass>, -fno-<pass>        turn one optimizer pass on or off\n"
       "  -fno-exceptions, -fno-rtti   C++ without them\n"
       "  -fno-access-control          do not enforce private/protected\n"
       "\nthe target\n"
@@ -257,6 +259,12 @@ static int no_stdinc;
 /* -O level. 0 (the default) runs no optimizer, so output is byte-for-byte
  * as before — the property the self-host fixed point rests on. */
 static int opt_level;
+/* -Os: the optimizer wants to know (it drops vectorization), and
+ * codegen must NOT -- it reads opt_level for register allocation and
+ * tail calls, and a negative level turned both off, which made -Os
+ * emit nearly twice the code of -O2. So the size request travels
+ * separately and opt_level stays an ordinary number. */
+static int opt_for_size;
 
 /* -mno-sse: never emit an SSE/xmm instruction (no varargs xmm spill, no SSE
  * struct/float lowering). A kernel built before it enables CR4.OSFXSR needs
@@ -650,7 +658,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
 
     remarks_enable(want_remarks || why_decision != NULL);
     struct ir_unit *iu = irgen(u);
-    opt_run(iu, opt_level);
+    opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
 
     /* A question was asked (§19): answer it and stop. The remarks exist
      * because the passes have run; rendering here means the answer is a
@@ -2280,11 +2288,13 @@ int main(int argc, char **argv)
              * vocabulary still compiles. */
             diag_enable_warning(argv[i] + 2, 1);
         } else if (strncmp(argv[i], "-O", 2) == 0) {
-            /* -O / -O1 / -O2 / -O3 enable the optimizer (one level for now);
-             * -O0 turns it off. Anything else after -O is an error. */
+            /* -O/-O1, -O2, -O3 and -Os. -O0 turns the optimizer off,
+             * which is what keeps the self-host fixed point. */
             const char *lvl = argv[i] + 2;
             if (lvl[0] == '\0')
                 opt_level = 1;
+            else if (lvl[0] == 's' && lvl[1] == '\0')
+                { opt_level = 2; opt_for_size = 1; }
             else if (lvl[1] == '\0' && lvl[0] >= '0' && lvl[0] <= '9')
                 opt_level = lvl[0] - '0';
             else {
@@ -2292,6 +2302,12 @@ int main(int argc, char **argv)
                         argv[i]);
                 return 1;
             }
+        } else if (strncmp(argv[i], "-fno-", 5) == 0 &&
+                   opt_set_pass(argv[i] + 5, 0)) {
+            /* a named pass, off */
+        } else if (strncmp(argv[i], "-f", 2) == 0 && argv[i][2] &&
+                   opt_set_pass(argv[i] + 2, 1)) {
+            /* a named pass, on -- so a single pass can be tried at -O1 */
         } else if (strcmp(argv[i], "-mno-sse") == 0 ||
                    strcmp(argv[i], "-mno-sse2") == 0 ||
                    strcmp(argv[i], "-mgeneral-regs-only") == 0) {
