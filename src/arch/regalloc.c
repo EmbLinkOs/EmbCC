@@ -57,6 +57,78 @@ int ra_ins_def(const struct ir_ins *in)
  * the per-instruction live-IN and live-OUT bitsets (each nins*words) and the def
  * vreg per instruction (all malloc'd, caller frees), and *words_out. Returns
  * NULL bitsets (and leaves the outputs NULL) for an empty function. */
+/* Every vreg this instruction READS, once each.
+ *
+ * There were two copies of this switch -- the liveness scan below and
+ * the x86 backend's count_vreg_uses -- and a third was about to be
+ * written for aarch64. They are a hand-maintained list over an enum that
+ * grows, which is the shape of thing that drifts silently: an op whose
+ * operand one copy forgets is an operand nothing thinks is live. So
+ * there is one, and the callers differ only in what they do with each
+ * vreg. */
+void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
+                 void *ctx)
+{
+#define U(v) do { int _v = (v); if (_v >= 0) cb(_v, ctx); } while (0)
+    switch (s->op) {
+    case IR_MOV: case IR_NEG: case IR_BNOT: case IR_EXT: case IR_BSWAP:
+    case IR_SQRT:
+    case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
+    case IR_ADDR:
+    case IR_STVAR: case IR_VA_START:
+    case IR_ALLOCA: case IR_SPRESTORE:
+    case IR_RET: case IR_BRZ: case IR_BRNZ:
+    case IR_IGOTO:            /* `goto *p` reads p */
+    case IR_VLOAD:            /* the ADDRESS read, an integer temp */
+    case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
+        U(s->a); break;
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
+    case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+    case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
+    case IR_XCHG: case IR_XADD: case IR_ARMW:
+    case IR_VSTORE: case IR_VBIN:
+        U(s->a); U(s->b); break;
+    case IR_CMPXCHG: case IR_CAS: case IR_CAS16: case IR_SELECT:
+        U(s->a); U(s->b); U(s->c); break;
+    case IR_CALL:
+        if (s->indirect) U(s->a);
+        for (int k = 0; k < s->nargs; k++) U(s->argv[k].vreg);
+        break;
+    case IR_ASM:
+        if (s->asm_ir) {
+            for (int k = 0; k < s->asm_ir->nin; k++) U(s->asm_ir->in[k].temp);
+            for (int k = 0; k < s->asm_ir->nout; k++) U(s->asm_ir->out[k].temp);
+        }
+        break;
+    default: break;   /* CONST/STRADDR/GADDR/FADDR/LABEL/JMP/FENCE/UD2 */
+    }
+#undef U
+}
+
+struct ra_ucnt { int *cnt; int n; };
+static void ra_ucnt_cb(int v, void *ctx)
+{
+    struct ra_ucnt *u = ctx;
+    if (v < u->n) u->cnt[v]++;
+}
+
+void ra_count_vreg_uses(const struct ir_func *fn, int *cnt)
+{
+    struct ra_ucnt u = { cnt, fn->nvregs };
+    for (int v = 0; v < fn->nvregs; v++) cnt[v] = 0;
+    for (int i = 0; i < fn->nins; i++)
+        ra_each_use(&fn->ins[i], ra_ucnt_cb, &u);
+}
+
+/* The liveness scan's use of ra_each_use: set this instruction's bit. */
+struct ra_useset { unsigned long *use; int words, nvr, i; };
+static void ra_useset_cb(int v, void *ctx)
+{
+    struct ra_useset *u = ctx;
+    if (v < u->nvr)
+        u->use[(size_t)u->i * u->words + (v >> 6)] |= 1UL << (v & 63);
+}
+
 unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
                                              int *last, unsigned long **livein_out,
                                              int **defv_out, int *words_out)
@@ -77,46 +149,12 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
     for (int i = 0; i < nins; i++)
         if (fn->ins[i].op == IR_LABEL) labelidx[fn->ins[i].label] = i;
 
-#define USE(v) do { int _v = (v); if (_v >= 0 && _v < nvr)                   \
-                        use[(size_t)i * words + (_v >> 6)] |= 1UL << (_v & 63); \
-                  } while (0)
+    struct ra_useset us = { use, words, nvr, 0 };
     for (int i = 0; i < nins; i++) {
         struct ir_ins *s = &fn->ins[i];
         defv[i] = ra_ins_def(s);
-        switch (s->op) {
-        case IR_MOV: case IR_NEG: case IR_BNOT: case IR_EXT: case IR_BSWAP:
-        case IR_SQRT:
-        case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
-        case IR_ADDR:
-        case IR_VLOAD:            /* the ADDRESS read, an integer temp */
-        case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
-            USE(s->a); break;
-        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
-        case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
-        case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
-        case IR_XCHG: case IR_XADD: case IR_ARMW:
-        case IR_VSTORE: case IR_VBIN:
-            USE(s->a); USE(s->b); break;
-        case IR_CMPXCHG: case IR_CAS: case IR_CAS16: case IR_SELECT:
-            USE(s->a); USE(s->b); USE(s->c); break;
-        case IR_STVAR: case IR_VA_START:
-        case IR_ALLOCA: case IR_SPRESTORE:
-            USE(s->a); break;
-        case IR_RET: case IR_BRZ: case IR_BRNZ:
-        case IR_IGOTO:            /* `goto *p` reads p */
-            USE(s->a); break;
-        case IR_CALL:
-            if (s->indirect) USE(s->a);
-            for (int k = 0; k < s->nargs; k++) USE(s->argv[k].vreg);
-            break;
-        case IR_ASM:
-            if (s->asm_ir) {
-                for (int k = 0; k < s->asm_ir->nin; k++) USE(s->asm_ir->in[k].temp);
-                for (int k = 0; k < s->asm_ir->nout; k++) USE(s->asm_ir->out[k].temp);
-            }
-            break;
-        default: break;   /* CONST/STRADDR/GADDR/FADDR/LABEL/JMP/FENCE/UD2 */
-        }
+        us.i = i;
+        ra_each_use(s, ra_useset_cb, &us);
     }
 #undef USE
 

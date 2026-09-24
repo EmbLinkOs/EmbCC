@@ -172,6 +172,14 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
  * Shared because it reads only the IR -- the two backends had the same
  * eight lines, and two copies of "which slots matter" are two chances
  * to disagree about one. The caller frees. */
+/* Every vreg an instruction reads, once each -- one switch over the
+ * operand shapes, so there is one place to add an op to. */
+void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
+                 void *ctx);
+
+/* How many times each vreg is read; `cnt` holds fn->nvregs entries. */
+void ra_count_vreg_uses(const struct ir_func *fn, int *cnt);
+
 char *ra_locals_referenced(const struct ir_func *fn, int want_debug);
 
 /* Does local `v` need a stack slot at all, given the allocation `loc`?

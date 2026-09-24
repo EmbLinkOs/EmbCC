@@ -458,44 +458,6 @@ static enum binop negate_pred(enum binop p)
  * per instruction it is read in), mirroring the liveness USE enumeration. Used
  * to prove a comparison result feeds nothing but the branch that follows it, so
  * the two can fuse into a single `cmp; jcc`. cnt has fn->nvregs entries. */
-static void count_vreg_uses(struct ir_func *fn, int *cnt)
-{
-    for (int v = 0; v < fn->nvregs; v++) cnt[v] = 0;
-#define UZ(x) do { int _v=(x); if (_v>=0 && _v<fn->nvregs) cnt[_v]++; } while (0)
-    for (int i = 0; i < fn->nins; i++) {
-        struct ir_ins *s = &fn->ins[i];
-        switch (s->op) {
-        case IR_MOV: case IR_NEG: case IR_BNOT: case IR_EXT: case IR_BSWAP:
-        case IR_SQRT:
-        case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
-        case IR_ADDR: case IR_STVAR: case IR_VA_START:
-        case IR_RET: case IR_BRZ: case IR_BRNZ: case IR_IGOTO:
-        case IR_ALLOCA: case IR_SPRESTORE:
-        case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
-            UZ(s->a); break;
-        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
-        case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
-        case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
-        case IR_XCHG: case IR_XADD: case IR_ARMW:
-        case IR_VSTORE: case IR_VBIN:
-            UZ(s->a); UZ(s->b); break;
-        case IR_CMPXCHG: case IR_CAS: case IR_CAS16: case IR_SELECT:
-            UZ(s->a); UZ(s->b); UZ(s->c); break;
-        case IR_CALL:
-            if (s->indirect) UZ(s->a);
-            for (int k = 0; k < s->nargs; k++) UZ(s->argv[k].vreg);
-            break;
-        case IR_ASM:
-            if (s->asm_ir) {
-                for (int k = 0; k < s->asm_ir->nin; k++) UZ(s->asm_ir->in[k].temp);
-                for (int k = 0; k < s->asm_ir->nout; k++) UZ(s->asm_ir->out[k].temp);
-            }
-            break;
-        default: break;
-        }
-    }
-#undef UZ
-}
 
 static int cc_for(enum binop pred, int sign)
 {
@@ -1844,7 +1806,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * the next branch). Built once; freed after the loop. */
     int *usecnt = fn->nvregs
         ? xmalloc((size_t)fn->nvregs * sizeof *usecnt) : (int *)0;
-    if (usecnt) count_vreg_uses(fn, usecnt);
+    if (usecnt) ra_count_vreg_uses(fn, usecnt);
     /* -O2: with two or more returns each inlining the full callee-restore
      * sequence, route them through ONE shared epilogue instead — each return
      * loads its value then `jmp`s to it. Worth the jmp only when there is more

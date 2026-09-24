@@ -602,6 +602,36 @@ static void st_slot(struct code *t, const long *sd, int vreg, int reg,
     a64_str(t, reg, FB, sd[vreg], size);
 }
 
+/* Does this comparison exist only to be branched on?
+ *
+ * `if (a < b)` lowers to a compare that produces a 0/1 value and a
+ * branch that tests it against zero, which on this machine is
+ *
+ *     cmp  w0, w1
+ *     cset x2, lt
+ *     cbz  w2, L
+ *
+ * where `cmp w0, w1; b.ge L` says the same thing. The condition codes
+ * are already in NZCV; materialising them into a register and testing
+ * that register is a round trip. gcc emits 119 csets over this corpus
+ * where this backend emitted 3140.
+ *
+ * The two instructions have to be ADJACENT -- anything between them
+ * could write NZCV -- and the branch has to be the comparison's only
+ * reader, or the value is wanted for itself. A label cannot fall
+ * between them either: a label is an instruction here, so requiring the
+ * branch at n+1 already says so, and nothing can jump into the middle
+ * of the pair. */
+static int cmp_feeds_branch(struct ir_func *fn, int n, const int *usecnt)
+{
+    struct ir_ins *c = &fn->ins[n];
+    if (n + 1 >= fn->nins || c->dst < 0 || c->dst >= fn->nvregs)
+        return 0;
+    struct ir_ins *b = &fn->ins[n + 1];
+    return (b->op == IR_BRZ || b->op == IR_BRNZ) && b->a == c->dst &&
+           usecnt[c->dst] == 1;
+}
+
 /* ---- operating where the value already is -----------------------------
  *
  * `ld_slot` and `st_slot` answer "put this vreg in THAT register", which
@@ -1367,6 +1397,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     int last_code = fn->nins - 1;
     while (last_code >= 0 && fn->ins[last_code].op == IR_LABEL)
         last_code--;
+    /* A comparison that only feeds the next branch leaves its condition
+     * here instead of in a register; the branch picks it up. -1 when
+     * there is none, which is every other instruction. */
+    int *usecnt = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *usecnt);
+    ra_count_vreg_uses(fn, usecnt);
+    int fused_cc = -1;
 
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
@@ -1520,6 +1556,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 int cc = i->pred == B_EQ ? A64_EQ : i->pred == B_NE ? A64_NE
                        : i->pred == B_LT ? A64_MI : i->pred == B_LE ? A64_LS
                        : i->pred == B_GT ? A64_GT : A64_GE;
+                if (cmp_feeds_branch(fn, n, usecnt)) { fused_cc = cc; break; }
                 int d = wr(i->dst, A64_ACC);
                 a64_cset(t, d, cc);
                 wrote(t, sd, i->dst, d);
@@ -1529,9 +1566,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 /* cset writes the destination only after cmp has read
                  * both operands, so the destination may be one of them. */
                 int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
-                int d = wr(i->dst, A64_ACC);
+                int cc = cond_for(i->pred, i->sign);
                 a64_cmp_reg(t, ra, rb, i->w);
-                a64_cset(t, d, cond_for(i->pred, i->sign));
+                if (cmp_feeds_branch(fn, n, usecnt)) { fused_cc = cc; break; }
+                int d = wr(i->dst, A64_ACC);
+                a64_cset(t, d, cc);
                 wrote(t, sd, i->dst, d);
             }
             break;
@@ -1737,9 +1776,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             break;
         }
         case IR_BRZ: case IR_BRNZ: {
-            int rc = rd(t, sd, i->a, A64_ACC);
             struct a64_fix fx;
-            fx.at = a64_cbz(t, rc, i->op == IR_BRNZ, i->w);
+            if (fused_cc >= 0) {
+                /* BRNZ branches when the comparison was true, BRZ when
+                 * it was false -- and a condition code's inverse is its
+                 * low bit flipped. */
+                fx.at = a64_bcond(t, i->op == IR_BRZ ? (fused_cc ^ 1)
+                                                     : fused_cc);
+                fused_cc = -1;
+            } else {
+                int rc = rd(t, sd, i->a, A64_ACC);
+                fx.at = a64_cbz(t, rc, i->op == IR_BRNZ, i->w);
+            }
             fx.label = i->label; fx.kind = FIX_B19;
             PUSH(fix, nfix, capfix, fx);
             break;
@@ -2212,6 +2260,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     for (int r = 0; r < fn->neh; r++)      /* where each landing pad is */
         fn->eh[r].lp_off = loff[fn->eh[r].lp_label] - f->code_off;
     f->code_len = t->len - f->code_off;
+    free(usecnt);
     free(loff); free(fix); free(retfix); free(sd);
 }
 
