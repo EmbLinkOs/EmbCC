@@ -2674,14 +2674,72 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     else
                         x86_ucomis_mem(text, sd[other], i->w);
                 }
-                if (i->pred == B_EQ || i->pred == B_NE)
-                    x86_set_float_eq(text, i->pred == B_NE);
-                else
-                    x86_setcc_eax(text,
-                                  cc_for(i->pred == B_LT ? B_GT :
-                                         i->pred == B_LE ? B_GE : i->pred,
-                                         0));
-                cg_store(text, sd, i->dst, 4);   /* the 0/1 result is an int */
+                /* ...and fuse it into the branch that solely consumes
+                 * it, the way the integer compare below already is.
+                 * `__divsc3` spent 99 of its 443 instructions on
+                 * test/movzbl/sete materialising conditions it then
+                 * immediately branched on; gcc spends none.
+                 *
+                 * Only the ORDERED predicates. ucomis sets CF on an
+                 * unordered compare, so ja/jae are false for a NaN in
+                 * either direction, which is what C asks for. Equality
+                 * is the awkward one -- it has to consult PF as well,
+                 * so `==` is two branches and a label -- and is left to
+                 * the setcc path. */
+                int fused = 0;
+                if (g_regcache && usecnt && n + 1 < fn->nins &&
+                    (fn->ins[n + 1].op == IR_BRZ ||
+                     fn->ins[n + 1].op == IR_BRNZ) &&
+                    fn->ins[n + 1].a == i->dst && usecnt[i->dst] == 1) {
+                    struct ir_ins *br = &fn->ins[n + 1];
+                    int eq = i->pred == B_EQ || i->pred == B_NE;
+                    /* Equality has to consult PF as well, because
+                     * ucomis sets ZF=PF=CF for an unordered pair. Two of
+                     * the four cases come out as "unordered OR not
+                     * equal", which is two jumps to the same label:
+                     * `!=` taken, and `==` NOT taken. The other two want
+                     * "ordered AND equal", which needs a label of its
+                     * own to jump over -- those keep the setcc. */
+                    int two = eq && ((i->pred == B_NE) ==
+                                     (br->op == IR_BRNZ));
+                    if (!eq || two) {
+                        enum binop p = i->pred == B_LT ? B_GT
+                                     : i->pred == B_LE ? B_GE : i->pred;
+                        if (br->op == IR_BRZ && !eq) p = negate_pred(p);
+                        int ord = g_brord, sh = br_short();
+                        int ccs[2], ncc = 0;
+                        if (two) { ccs[ncc++] = 0x9a;    /* jp  */
+                                   ccs[ncc++] = 0x95; }  /* jne */
+                        else ccs[ncc++] = cc_for(p, 0);
+                        for (int q = 0; q < ncc; q++) {
+                            int patch = sh ? x86_jcc_rel8(text, ccs[q])
+                                           : x86_jcc_rel32(text, ccs[q]);
+                            if (nbrs == capbrs) {
+                                capbrs = capbrs ? capbrs * 2 : 16;
+                                brs = xrealloc(brs, (size_t)capbrs *
+                                                    sizeof *brs);
+                            }
+                            brs[nbrs].patch_off = patch;
+                            brs[nbrs].label = br->label;
+                            brs[nbrs].size = sh ? 1 : 4;
+                            brs[nbrs].ord = ord;
+                            nbrs++;
+                        }
+                        cg_reset();
+                        n++;                   /* consume the fused branch */
+                        fused = 1;
+                    }
+                }
+                if (!fused) {
+                    if (i->pred == B_EQ || i->pred == B_NE)
+                        x86_set_float_eq(text, i->pred == B_NE);
+                    else
+                        x86_setcc_eax(text,
+                                      cc_for(i->pred == B_LT ? B_GT :
+                                             i->pred == B_LE ? B_GE : i->pred,
+                                             0));
+                    cg_store(text, sd, i->dst, 4); /* the 0/1 result is an int */
+                }
                 break;
             }
             /* Fuse an integer comparison into the branch that solely consumes
