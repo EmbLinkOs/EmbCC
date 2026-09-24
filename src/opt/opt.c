@@ -624,6 +624,11 @@ struct vn {
     void *ptr;                 /* GADDR glob / FADDR callee */
     int label;                 /* STRADDR string index */
     int memver;                /* LDVAR / LOAD only */
+    /* An operand that is a LITERAL, keyed by its value rather than by
+     * the temp holding it (gcse_key_consts). `has` distinguishes "the
+     * constant -1" from "no operand", both of which leave a/b at -1. */
+    long ca, cb;
+    char has_ca, has_cb;
     int result;                /* the temp holding this value */
 };
 
@@ -632,7 +637,9 @@ static int vn_eq(const struct vn *x, const struct vn *y)
     return x->op == y->op && x->a == y->a && x->b == y->b && x->w == y->w &&
            x->sign == y->sign && x->size == y->size && x->pred == y->pred &&
            x->imm == y->imm && x->ptr == y->ptr && x->label == y->label &&
-           x->memver == y->memver;
+           x->memver == y->memver &&
+           x->has_ca == y->has_ca && x->has_cb == y->has_cb &&
+           (!x->has_ca || x->ca == y->ca) && (!x->has_cb || x->cb == y->cb);
 }
 
 /* Build the value key for a CSE-able instruction; returns 0 if it is not one
@@ -1735,6 +1742,28 @@ static int gcse_numberable(enum ir_op op)
     }
 }
 
+/* Key a constant operand by its VALUE.
+ *
+ * IR_CONST is deliberately not numbered by this pass -- rematerialising
+ * a literal costs less than keeping one live across a dominated region
+ * -- so two blocks that each need `-2` hold it in two different temps.
+ * Keyed by temp, `x & -2` in one block and `x & -2` in another were two
+ * different values and never matched, which was very nearly ALL of what
+ * this pass was missing: over lib/libc and lib/libcxx it found 3
+ * redundant expressions, and 97 once an operand could be a literal.
+ *
+ * What gets kept live is still only the RESULT -- the arithmetic the
+ * policy above calls the profitable case. The constant temp is left
+ * where it was and dies with the instruction that read it. */
+static void gcse_key_consts(struct ir_func *fn, struct defs *d, struct vn *k)
+{
+    long v;
+    if (k->a >= 0 && get_const(fn, d, k->a, &v))
+        { k->a = -1; k->ca = v; k->has_ca = 1; }
+    if (k->b >= 0 && get_const(fn, d, k->b, &v))
+        { k->b = -1; k->cb = v; k->has_cb = 1; }
+}
+
 static int pass_gcse(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -1775,6 +1804,7 @@ static int pass_gcse(struct ir_func *fn)
                 if (i->dst < 0 || !gcse_numberable(i->op) ||
                     !vn_stable(fn, &dfs, i) || !vn_key(i, 0, &k))
                     continue;
+                gcse_key_consts(fn, &dfs, &k);
                 int hit = -1;
                 for (int t = 0; t < ntab; t++)
                     if (vn_eq(&tab[t], &k)) { hit = tab[t].result; break; }

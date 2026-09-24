@@ -74,6 +74,32 @@ nadd=$(grep -cE '^  %[0-9]+ = add\.[0-9]+s? %[0-9]+, #1' "$out/ir.txt" || true)
     cat "$out/ir.txt"; exit 1; }
 echo "'1 + x' and 'x + 1' are one value"
 
+# ---- 3b. a constant operand does not hide a redundant expression -------
+#
+# Global CSE keys an expression on its operands, and a LITERAL is not
+# numbered by that pass -- rematerialising one costs less than keeping
+# it live -- so two blocks that each need `-2` hold it in two different
+# temps. Keyed by temp, `x & -2` in one block and `x & -2` in another
+# were two different values and never matched. Keyed by VALUE they do,
+# which is very nearly all of what that pass had been missing.
+cat > "$out/gcse.c" <<'EOF'
+void sink(long);
+void f(long a, long w)
+{
+    if ((a & -2) < w) return;
+    sink((a & -2) - w);
+}
+EOF
+n=$("$EMBCC" --target=x86_64-linux-gnu -O2 -fremarks -c "$out/gcse.c" \
+      -o /dev/null 2>&1 | sed -n 's/.*, \([0-9]*\) global cse.*/\1/p' |
+    awk '{s+=$1} END {print s+0}')
+[ "$n" -ge 1 ] || {
+    echo "FAIL: '(a & -2)' computed in two blocks was not recognised as one"
+    echo "      value -- the constant is keyed by the temp holding it, not"
+    echo "      by what it is."
+    exit 1; }
+echo "an expression with a literal operand is one value across blocks"
+
 # ---- 4. and all of it still computes the same thing --------------------
 #
 # The IR checks above say a rewrite fired. This says it was right, at

@@ -2554,19 +2554,34 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_load_mem_rax(text, i->size, i->sign, i->w);
             cg_store(text, sd, i->dst, i->w);
             break;
-        case IR_STORE:
+        case IR_STORE: {
             /* Address already in a register (mirrors IR_LOAD): store straight to
              * [reg], skipping the slot->rcx load — which is what lets the address
              * temp be register-allocated at all (its OPAQUE marking is dropped). */
+            /* And the VALUE the same way. A register-resident one was
+             * moved to RAX and stored from there -- two instructions
+             * where `mov %rN,(%rM)` is one, on every store of a value
+             * the allocator had already placed. RAX is left alone,
+             * which also leaves its residency cache standing: a store
+             * cannot change what RAX holds, because what RAX caches is
+             * a temp or a register-resident local, and neither of those
+             * is reachable through a pointer. */
+            int vreg = in_reg(i->b) ? g_loc[i->b] : REG_RAX;
             if (in_reg(i->a)) {
-                cg_load(text, sd, i->b, 8, 0, 8);           /* the value -> rax */
-                x86_store_mem_reg(text, g_loc[i->a], 0, REG_RAX, i->size);
+                if (vreg == REG_RAX)
+                    cg_load(text, sd, i->b, 8, 0, 8);       /* the value -> rax */
+                x86_store_mem_reg(text, g_loc[i->a], 0, vreg, i->size);
                 break;
             }
             x86_mov_rcx_slot(text, sd[i->a]);       /* the address -> rcx */
-            cg_load(text, sd, i->b, 8, 0, 8);       /* the value -> rax */
-            x86_store_mem_rcx(text, i->size);
+            if (vreg == REG_RAX) {
+                cg_load(text, sd, i->b, 8, 0, 8);   /* the value -> rax */
+                x86_store_mem_rcx(text, i->size);
+                break;
+            }
+            x86_store_mem_reg(text, REG_RCX, 0, vreg, i->size);
             break;
+        }
         case IR_EXT:
             /* re-extend from the low `size` bytes of the temp's slot */
             if (in_reg(i->dst)) {
