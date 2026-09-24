@@ -175,11 +175,13 @@ static const struct ra_target A64_RA = {
     A64_POOL_VA, A64_NPOOL_VA,
     a64_callee_saved,
     a64_ldvar_plain,
-    0, 1, 0,       /* a scalar return goes out through ld_slot, which
-                    * takes it from a register when it has one. A call's
-                    * arguments and a memcpy's addresses are still read
-                    * from their slots, so those values have to stay
-                    * there. */
+    1, 1, 0,       /* a scalar-integer call argument is moved into its
+                    * argument register from wherever it lives, as part
+                    * of the parallel move above. A scalar return goes
+                    * out through ld_slot, which
+                    * takes it from a register when it has one. A
+                    * memcpy's addresses are still read from their
+                    * slots, so those values have to stay there. */
     a64_op_calls_helper
 };
 
@@ -1834,6 +1836,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             int amv_dst[MAX_PARAMS], amv_src[MAX_PARAMS], namv = 0;
             for (int k = 0; k < i->nargs; k++) {
                 int v = i->argv[k].vreg;
+                if (pl[k].where == AP_X && !pl[k].byref && !pl[k].is_struct &&
+                    pl[k].nreg != 2 && a64_in_reg(v)) {
+                    amv_dst[namv] = pl[k].reg;
+                    amv_src[namv] = g_a64_loc[v];
+                    namv++;
+                }
+            }
+            /* FIRST, because it is the only thing here that READS a home,
+             * and a home may be an argument register something else is
+             * about to write. Everything below reads memory or sp. */
+            if (namv)
+                a64_parallel_move(t, amv_dst, amv_src, namv, A64_SCR);
+            for (int k = 0; k < i->nargs; k++) {
+                int v = i->argv[k].vreg;
                 if (pl[k].where == AP_V) {
                     if (pl[k].is_struct) {
                         ld_slot(t, sd, v, A64_ADDR, 8, 0, 8);
@@ -1853,17 +1869,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                     } else if (pl[k].nreg == 2) {         /* an __int128 */
                         a64_ldr(t, pl[k].reg, FB, sd[v], 8, 0, 8);
                         a64_ldr(t, pl[k].reg + 1, FB, sd[v] + 8, 8, 0, 8);
-                    } else if (a64_in_reg(v)) {
-                        amv_dst[namv] = pl[k].reg;
-                        amv_src[namv] = g_a64_loc[v];
-                        namv++;
-                    } else {
+                    } else if (!a64_in_reg(v)) {
                         ld_slot(t, sd, v, pl[k].reg, 8, 0, 8);
-                    }
+                    }                    /* else: the move above did it */
                 }
             }
-            if (namv)
-                a64_parallel_move(t, amv_dst, amv_src, namv, A64_SCR);
             /* A large composite return: the callee writes it to our scratch
              * through x8. */
             /* Precomputed by irgen (§9.1): the IR carries the ABI answer,
