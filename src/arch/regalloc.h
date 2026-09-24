@@ -148,8 +148,13 @@ int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
                     const char *wide, const char *fltmap,
                     int *used_out, int *nused_out);
 
+/* `fltmap` (cg_float_vregs, may be NULL) is what keeps the two classes
+ * apart: a value it names belongs to the FP allocation and must not be
+ * given a general register as well, or the two halves of codegen each
+ * believe their own answer about where it is. */
 int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
-                 const char *wide, int *used_out, int *nused_out);
+                 const char *wide, const char *fltmap,
+                 int *used_out, int *nused_out);
 
 /* Backward liveness over the IR: fills first[v]/last[v] with the range
  * vreg v is live over -- a sound over-approximation that SPANS loop

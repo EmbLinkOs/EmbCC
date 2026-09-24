@@ -1773,12 +1773,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
     if (g_regalloc && !g_has_cgoto) {
         const struct ra_target *rt = x86_has_atomic(fn) ? &X86_RA_ATOMIC
                                                         : &X86_RA;
-        loc = ra_allocate(fn, rt, g_wide, used_callee, &nsave);
-        g_loc = loc;
-        /* The float class, from the same liveness and the same
-         * colourer. Its pool is caller-saved throughout, so it reports
-         * nothing to save. */
+        /* The float map FIRST: the integer allocation needs it to leave
+         * those values alone. */
         g_flt = cg_float_vregs(fn);
+        loc = ra_allocate(fn, rt, g_wide, g_flt, used_callee, &nsave);
+        g_loc = loc;
         {
             int fsave[NX86_FPOOL], nfsave = 0;
             g_floc = ra_allocate_fp(fn, rt, g_wide, g_flt,

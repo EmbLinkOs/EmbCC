@@ -1370,13 +1370,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         if (!cgoto) {
             const struct ra_target *rt = a64_has_atomic(fn) ? &A64_RA_ATOMIC
                                                             : &A64_RA;
-            g_a64_loc = ra_allocate(fn, rt, g_a64_wide, used_callee, &nsave);
-            /* The float class, from the same liveness and the same
-             * colourer. Its pool is caller-saved throughout, so it
-             * reports no registers to save and `nfsave` is always 0 --
-             * it is passed only because ra_allocate_class wants
-             * somewhere to put an answer. */
+            /* The float map first: the integer allocation needs it to
+             * leave those values alone. Its own pool is caller-saved
+             * throughout, so it reports no registers to save and
+             * `nfsave` is always 0 -- passed only because
+             * ra_allocate_class wants somewhere to put an answer. */
             g_a64_flt = cg_float_vregs(fn);
+            g_a64_loc = ra_allocate(fn, rt, g_a64_wide, g_a64_flt,
+                                    used_callee, &nsave);
             int fsave[A64_NFPOOL], nfsave = 0;
             g_a64_floc = ra_allocate_fp(fn, rt, g_a64_wide, g_a64_flt,
                                         fsave, &nfsave);

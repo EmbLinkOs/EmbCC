@@ -11,6 +11,7 @@
  * `struct ra_target` instead of being file-scope constants of one
  * backend.
  */
+#include <stdio.h>
 #include "regalloc.h"
 
 #include <stdlib.h>
@@ -225,6 +226,13 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
 /* mark vreg v ineligible (used at an opaque site) */
 #define OPAQUE(v) do { int _v = (v); if (_v >= 0 && _v < nvr) elig[_v] = 0; } while (0)
 
+/* Union-find over the interference graph's nodes, for coalescing. */
+static int ra_find(int *alias, int x)
+{
+    while (alias[x] != x) { alias[x] = alias[alias[x]]; x = alias[x]; }
+    return x;
+}
+
 /* Both register classes go through one body. What differs is which
  * values are eligible, which pool they are coloured from, and which of
  * those registers a call preserves -- everything after that (liveness,
@@ -239,9 +247,10 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                               int *used_out, int *nused_out);
 
 int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
-                 const char *g_wide, int *used_out, int *nused_out)
+                 const char *g_wide, const char *fltmap,
+                 int *used_out, int *nused_out)
 {
-    return ra_allocate_class(fn, t, g_wide, NULL, 0, used_out, nused_out);
+    return ra_allocate_class(fn, t, g_wide, fltmap, 0, used_out, nused_out);
 }
 
 /* The floating-point half. `fltmap` says which vregs are in this class;
@@ -523,6 +532,123 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         }
     }
 
+    /* ---- coalescing ---------------------------------------------------
+     *
+     * A preference is not a promise. `pref` asks the colourer to give a
+     * copy's two ends the same register and it obliges when one is
+     * free, which over lib/libc and lib/libcxx leaves 8132
+     * register-to-register moves on x86-64 against gcc's 2721. The
+     * moves that survive are the ones where the partner's colour was
+     * taken -- and the way to not lose those is to stop treating the
+     * two ends as two nodes.
+     *
+     * So: where a copy's ends do not interfere, MERGE them. They then
+     * cannot be coloured differently and the move is gone before the
+     * colourer ever runs.
+     *
+     * Conservatively, by Briggs' test -- merge only when the combined
+     * node has fewer than NP neighbours of significant degree, so the
+     * merge cannot turn a colourable graph into an uncolourable one.
+     * Aggressive coalescing would trade moves for spills, and a spill
+     * here is a value in memory for its whole life. */
+    int *alias = xmalloc((size_t)(E ? E : 1) * sizeof *alias);
+    char *absorbed = xcalloc((size_t)(E ? E : 1), 1);
+    /* Per-NODE facts, because a merged node answers for all its members:
+     * if any of them crosses a call the register must survive one, and
+     * any ABI wish one of them had is the node's. */
+    char *xcross = xcalloc((size_t)(E ? E : 1), 1);
+    int *ehint = xmalloc((size_t)(E ? E : 1) * sizeof *ehint);
+    for (int e = 0; e < E; e++) {
+        alias[e] = e;
+        xcross[e] = crosses[eidx[e]];
+        ehint[e] = hint[eidx[e]];
+    }
+    if (adj) {
+        int *deg = xmalloc((size_t)E * sizeof *deg);
+        for (int e = 0; e < E; e++) {
+            int d = 0;
+            unsigned long *row = adj + (size_t)e * ew;
+            for (int w = 0; w < ew; w++) {
+                unsigned long b = row[w];
+                while (b) { d++; b &= b - 1; }
+            }
+            deg[e] = d;
+        }
+        for (int i = 0; i < nins; i++) {
+            struct ir_ins *in = &fn->ins[i];
+            /* Only a copy that moves the WHOLE value. `pref` may ask
+             * for the same register on a narrowing one because it is
+             * only asking -- if the colourer says no, the move is still
+             * emitted and still truncates. Coalescing does not ask, so a
+             * narrowing copy between two merged vregs becomes a move
+             * from a register to itself, which truncates nothing and
+             * leaves the high bits of the old value in place. That is
+             * what `format("{:.2f}", 3.14159)` was reading. */
+            /* Only a copy that moves the WHOLE value: `pref` may ask
+             * for the same register on a narrowing one because it is
+             * only asking, and if the colourer says no the move is
+             * still emitted and still truncates. Coalescing does not
+             * ask, so a narrowing copy between merged vregs would
+             * become a move from a register to itself and truncate
+             * nothing. */
+            if (in->op != IR_MOV &&
+                !(in->op == IR_LDVAR &&
+                  t->ldvar_plain(in->size, in->sign, in->w)) &&
+                !(in->op == IR_STVAR && in->size >= 8))
+                continue;
+            int d = in->dst, a = in->a;
+            if (d < 0 || d >= nvr || a < 0 || a >= nvr) continue;
+            if (eof[d] < 0 || eof[a] < 0) continue;
+            int x = ra_find(alias, eof[d]), y = ra_find(alias, eof[a]);
+            if (x == y) continue;
+            if (adj[(size_t)x * ew + (y >> 6)] & (1UL << (y & 63))) continue;
+            /* Briggs: the union's neighbours of degree >= NP must be
+             * fewer than NP. */
+            int high = 0;
+            for (int w = 0; w < ew && high < NP; w++) {
+                unsigned long b = adj[(size_t)x * ew + w] |
+                                  adj[(size_t)y * ew + w];
+                while (b) {
+                    int bit = 0; unsigned long tt = b;
+                    while (!(tt & 1)) { tt >>= 1; bit++; }
+                    int ne = w * 64 + bit;
+                    if (ne != x && ne != y && !absorbed[ne] && deg[ne] >= NP)
+                        high++;
+                    b &= b - 1;
+                }
+            }
+            if (high >= NP) continue;
+            /* merge y into x */
+            for (int w = 0; w < ew; w++) {
+                unsigned long b = adj[(size_t)y * ew + w];
+                while (b) {
+                    int bit = 0; unsigned long tt = b;
+                    while (!(tt & 1)) { tt >>= 1; bit++; }
+                    int ne = w * 64 + bit;
+                    adj[(size_t)ne * ew + (y >> 6)] &= ~(1UL << (y & 63));
+                    if (ne != x) {
+                        adj[(size_t)x * ew + (ne >> 6)] |= 1UL << (ne & 63);
+                        adj[(size_t)ne * ew + (x >> 6)] |= 1UL << (x & 63);
+                    }
+                    b &= b - 1;
+                }
+                adj[(size_t)y * ew + w] = 0;
+            }
+            alias[y] = x;
+            absorbed[y] = 1;
+            xcross[x] |= xcross[y];
+            if (ehint[x] < 0) ehint[x] = ehint[y];
+            int d2 = 0;
+            for (int w = 0; w < ew; w++) {
+                unsigned long b = adj[(size_t)x * ew + w];
+                while (b) { d2++; b &= b - 1; }
+            }
+            deg[x] = d2;
+            deg[y] = 0;
+        }
+        free(deg);
+    }
+
     /* Chaitin-Briggs simplify order. Repeatedly remove a node of degree < NCALLEE
      * (trivially colourable) onto a stack; when none remains, remove the highest-
      * degree node as an OPTIMISTIC spill candidate. Colouring then pops the stack
@@ -530,6 +656,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * fewer values actually spill than a fixed first-appearance order gives.
      * Deterministic: ties broken by the lowest eligible index. */
     int *order = xmalloc((size_t)(E ? E : 1) * sizeof *order);
+    int norder = 0;                  /* < E once coalescing absorbed nodes */
     {
         int *deg = xmalloc((size_t)(E ? E : 1) * sizeof *deg);
         for (int e = 0; e < E; e++) {
@@ -546,10 +673,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         for (int cnt = 0; cnt < E; cnt++) {
             int pick = -1;
             for (int e = 0; e < E; e++)          /* a trivially-colourable node */
-                if (!gone[e] && deg[e] < NP) { pick = e; break; }
+                if (!gone[e] && !absorbed[e] && deg[e] < NP) { pick = e; break; }
             if (pick < 0)                        /* else the most-constrained one */
                 for (int e = 0; e < E; e++)
-                    if (!gone[e] && (pick < 0 || deg[e] > deg[pick])) pick = e;
+                    if (!gone[e] && !absorbed[e] &&
+                        (pick < 0 || deg[e] > deg[pick])) pick = e;
+            if (pick < 0) break;                 /* only absorbed nodes left */
             gone[pick] = 1;
             order[sp++] = pick;                  /* push */
             unsigned long *row = adj + (size_t)pick * ew;
@@ -564,8 +693,9 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                 }
             }
         }
-        for (int i = 0; i < E / 2; i++) {        /* pop order = reverse of push */
-            int t = order[i]; order[i] = order[E - 1 - i]; order[E - 1 - i] = t;
+        norder = sp;
+        for (int i = 0; i < sp / 2; i++) {       /* pop order = reverse of push */
+            int t = order[i]; order[i] = order[sp - 1 - i]; order[sp - 1 - i] = t;
         }
         free(deg); free(gone);
     }
@@ -573,8 +703,9 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     int reg_used[RA_MAXPOOL];
     int nspill = 0;
     for (int k = 0; k < NP; k++) reg_used[k] = 0;
-    for (int oi = 0; oi < E; oi++) {
+    for (int oi = 0; oi < norder; oi++) {
         int e = order[oi];
+        if (e < 0 || absorbed[e]) continue;
         int taken = 0;                        /* bitmask of neighbour registers */
         unsigned long *row = adj + (size_t)e * ew;
         for (int w = 0; w < ew; w++) {
@@ -592,7 +723,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         }
         /* A value that crosses a call may not take a caller-saved register: the
          * call clobbers them, so forbid them here (leaving callee-saved/spill). */
-        if (crosses[eidx[e]])
+        if (xcross[e])
             for (int k = 0; k < NP; k++)
                 if (!callee_saved(POOL[k])) taken |= 1 << k;
         /* preferred colours: registers a colored, non-interfering move-partner
@@ -614,9 +745,9 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             }
         }
         /* ...and the one the ABI would like, on the same terms */
-        if (hint[eidx[e]] >= 0)
+        if (ehint[e] >= 0)
             for (int k = 0; k < NP; k++)
-                if (POOL[k] == hint[eidx[e]] && !(taken & (1 << k)))
+                if (POOL[k] == ehint[e] && !(taken & (1 << k)))
                     want |= 1 << k;
         int pick = -1;
         for (int k = 0; k < NP; k++)                  /* a free preferred reg */
@@ -627,6 +758,14 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         if (pick >= 0) { loc[eidx[e]] = POOL[pick]; reg_used[pick] = 1; }
         else nspill++;               /* no colour: this value lives in memory */
     }
+    /* A coalesced vreg has no node of its own any more: it takes the
+     * colour of the one it was merged into, which is the whole point --
+     * the copy between them is now a move from a register to itself. */
+    for (int v = 0; v < nvr; v++)
+        if (eof[v] >= 0) {
+            int r = ra_find(alias, eof[v]);
+            if (r != eof[v]) loc[v] = loc[eidx[r]];
+        }
     /* Why a value ended up in memory is the other question people ask of an
      * optimizer, and the answer is a property of the whole function -- how
      * many values were live at once against how many registers exist -- not
@@ -663,7 +802,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         if (reg_used[k] && callee_saved(POOL[k])) used_out[nu++] = POOL[k];
     *nused_out = nu;
 
-    free(hint);
+    free(hint); free(alias); free(absorbed); free(xcross); free(ehint);
     free(first); free(last); free(elig); free(crosses);
     free(eof); free(eidx); free(adj); free(pref);
     free(members); free(order);
