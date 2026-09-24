@@ -14,8 +14,23 @@ static void rexw(struct code *c, int w)
 }
 
 /* ModRM for [rbp+disp]: rm=101 with mod=01 (disp8) or mod=10 (disp32). */
+/* A slot nothing should touch: a local the allocator put in a register,
+ * a temp that appears nowhere, a value with an FP home. layout_frame
+ * gives each this displacement, and every rbp-relative access goes
+ * through here -- so a lowering path that does not know the value has
+ * moved fails loudly instead of reading whatever the frame holds. */
+#define X86_DEAD_SLOT (-0x40000000)
+static void no_dead_slot(int disp)
+{
+    if (disp == X86_DEAD_SLOT)
+        internal_error("a value was read from a stack slot it does not have "
+                       "-- it lives in a register, and some lowering path "
+                       "does not know that");
+}
+
 static void modrm_rbp(struct code *c, int reg, int disp)
 {
+    no_dead_slot(disp);
     if (disp >= -128 && disp <= 127) {
         code_byte(c, 0x45 | (reg << 3));
         code_byte(c, disp & 0xff);
@@ -30,6 +45,7 @@ static void modrm_rbp(struct code *c, int reg, int disp)
  * RIP-relative), so both take an explicit displacement. */
 static void modrm_base(struct code *c, int reg, int base, int disp)
 {
+    if (base == 5) no_dead_slot(disp);        /* rbp: a frame access */
     int rm = base & 7;
     int mod;
 
@@ -1162,6 +1178,19 @@ void x86_ucomis_mem(struct code *c, int disp, int w)
     modrm_rbp(c, 0, disp);
 }
 
+/* ucomis xmm, xmm -- the register form, for a second operand that has an
+ * FP home rather than a slot. */
+void x86_ucomis_reg(struct code *c, int a, int b, int w)
+{
+    if (w == 8)
+        code_byte(c, 0x66);
+    if (a >= 8 || b >= 8)
+        code_byte(c, 0x40 | ((a >= 8) << 2) | (b >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x2e);
+    code_byte(c, 0xc0 | ((a & 7) << 3) | (b & 7));
+}
+
 /* setcc + zero-extend into an ARBITRARY register (register-targeted
  * x86_setcc_eax; identical bytes when reg == rax). Writes reg's low byte then
  * movzx-widens it in place -- RAX is never touched. Valid for the -O2 register
@@ -1223,6 +1252,39 @@ void x86_cvts2s(struct code *c, int disp, int srcw)
     code_byte(c, 0x0f);
     code_byte(c, 0x5a); /* cvtss2sd / cvtsd2ss */
     modrm_rbp(c, 0, disp);
+}
+
+/* The register forms of the three conversions, for a value that has an
+ * FP home rather than a slot. Each writes xmm0 or rax exactly as its
+ * memory sibling does; only where the OPERAND comes from changes. */
+void x86_cvtsi2s_reg(struct code *c, int src, int srcw, int dstw)
+{
+    sse_prefix(c, dstw);
+    if (srcw == 8 || src >= 8)
+        code_byte(c, 0x40 | ((srcw == 8) << 3) | (src >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x2a);
+    code_byte(c, 0xc0 | (src & 7));          /* reg = xmm0 */
+}
+
+void x86_cvtts2si_reg(struct code *c, int src, int srcw, int dstw)
+{
+    sse_prefix(c, srcw);
+    if (dstw == 8 || src >= 8)
+        code_byte(c, 0x40 | ((dstw == 8) << 3) | (src >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x2c);
+    code_byte(c, 0xc0 | (src & 7));          /* reg = rax */
+}
+
+void x86_cvts2s_reg(struct code *c, int src, int srcw)
+{
+    sse_prefix(c, srcw);
+    if (src >= 8)
+        code_byte(c, 0x41);
+    code_byte(c, 0x0f);
+    code_byte(c, 0x5a);
+    code_byte(c, 0xc0 | (src & 7));          /* reg = xmm0 */
 }
 
 void x86_mov_al_imm(struct code *c, int v)

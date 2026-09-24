@@ -172,6 +172,11 @@ struct ra_slots {
      * is also what keeps mem2reg's SSA-version inflation out of the
      * frame. */
     const int *loc;
+    /* The same, for the floating-point class. A value with an FP home
+     * touches memory no more than one with a general-register home, and
+     * a slot reserved behind it is a slot nothing else can use. NULL
+     * when the target has no FP pool. */
+    const int *floc;
     /* Drop the slot of a temp that appears in NO instruction. Common
      * once immediate-folding detaches a CONST and dead-code removal
      * takes its definition; a throwaway eight bytes each inflates the
@@ -219,8 +224,8 @@ char *ra_locals_referenced(const struct ir_func *fn, int want_debug);
  * Lifted here once BOTH backends wanted it (D-011): x86-64 had carried
  * it alone, and the aarch64 frame was paying for a slot behind every
  * value the allocator had already put in a register. */
-int ra_slot_dead(const struct ir_func *fn, const int *loc, int v,
-                 int want_debug);
+int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
+                 int v, int want_debug);
 
 /* The vreg an instruction WRITES, or -1. In the shared layer because
  * liveness is: it has to agree with what the backends actually store,

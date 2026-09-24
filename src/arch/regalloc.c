@@ -703,15 +703,19 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
  * allocator already refuses most of these; the check does not rely on
  * that, because a slot that turns out to be live reads as garbage rather
  * than failing, and the whole point is that nothing quietly reads it. */
-int ra_slot_dead(const struct ir_func *fn, const int *loc, int v,
-                 int want_debug)
+int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
+                 int v, int want_debug)
 {
     const struct func *f = fn->src;
-    if (!loc || loc[v] < 0 || f->is_varargs || fn->has_alloca || want_debug)
+    int in_gp = loc && loc[v] >= 0, in_fp = floc && floc[v] >= 0;
+    if ((!in_gp && !in_fp) || f->is_varargs || fn->has_alloca || want_debug)
         return 0;
     const struct type *t = f->var_tys[v];
-    if (t->kind == TY_STRUCT || t->kind == TY_ARRAY || ty_size(t) > 8 ||
-        ty_is_float(t))
+    if (t->kind == TY_STRUCT || t->kind == TY_ARRAY || ty_size(t) > 8)
+        return 0;
+    /* A float local is fine when it is the FLOAT class that holds it --
+     * and never when the integer one claims to, which it cannot. */
+    if (ty_is_float(t) ? !in_fp : !in_gp)
         return 0;
     for (int n = 0; n < fn->nins; n++)
         if (fn->ins[n].op == IR_ADDR && fn->ins[n].a == v)
@@ -834,7 +838,8 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
              * it needs no stack slot — skip it, keeping the frame to the temps
              * that actually spill. (This also caps mem2reg's SSA-temp inflation:
              * the extra versions live in registers, not the frame.) */
-            if (o->loc && o->loc[k + nvars] >= 0) {
+            if ((o->loc && o->loc[k + nvars] >= 0) ||
+                (o->floc && o->floc[k + nvars] >= 0)) {
                 slot[k] = -1;
                 continue;
             }

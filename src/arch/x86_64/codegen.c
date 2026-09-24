@@ -105,7 +105,7 @@ static int is_callee_saved(int reg);
  * callee-saved and would each need a sixteen-byte save and an unwind
  * rule, which is work this does not do yet -- so that ABI gets no FP
  * pool at all rather than a wrong one. */
-#define X86_FP_ALLOC 0    /* see the note below */
+#define X86_FP_ALLOC 1    /* see the note below */
 #define NX86_FPOOL 8
 static const int X86_FPOOL[NX86_FPOOL] = { 8, 9, 10, 11, 12, 13, 14, 15 };
 static int x86_fp_callee_saved(int reg) { (void)reg; return 0; }
@@ -207,12 +207,26 @@ char *cg_wide_vregs(struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++)
         if (wide_def(&fn->ins[n]) && fn->ins[n].dst >= 0)
             w[fn->ins[n].dst] = any = 1;
+    /* A sixteen-byte value carries its width through every COPY, not
+     * just IR_MOV: `ldvar`/`stvar` of one are equally a copy, and
+     * gen_x87 lowers all three the same way. Missing those left a vreg
+     * that a 16-byte copy WRITES looking like an ordinary eight-byte
+     * temp -- so the allocator was free to put it in a register and the
+     * copy wrote sixteen bytes over whatever slot it had been given
+     * instead. lib/libc/src/math/widths.c does exactly that. */
     for (int changed = any; changed; ) {
         changed = 0;
         for (int n = 0; n < fn->nins; n++) {
             struct ir_ins *i = &fn->ins[n];
-            if (i->op == IR_MOV && i->a >= 0 && w[i->a] && !w[i->dst])
-                w[i->dst] = changed = 1;
+            int a, d;
+            switch (i->op) {
+            case IR_MOV: case IR_LDVAR: case IR_STVAR:
+                a = i->a; d = i->dst; break;
+            default: continue;
+            }
+            if (a < 0 || d < 0 || a >= nv || d >= nv) continue;
+            if (w[a] && !w[d]) { w[d] = 1; changed = 1; }
+            if (w[d] && !w[a]) { w[a] = 1; changed = 1; }
         }
     }
     if (!any) { free(w); return NULL; }
@@ -299,7 +313,15 @@ char *cg_float_vregs(struct ir_func *fn)
         switch (i->op) {
         case IR_I2F:  BAD(i->a);   break;         /* integer in */
         case IR_F2I:  BAD(i->dst); break;         /* integer out */
-        case IR_F2F: case IR_SQRT: break;
+        case IR_F2F:
+            /* A conversion with a LONG DOUBLE on either side goes
+             * through the x87 unit, which loads and stores memory and
+             * nothing else -- so the float/double side of it has to be
+             * in a slot for x87 to reach. tests/exec/long-double.c:
+             * `(double)(one + tiny)`. */
+            if (i->w == 16 || i->size == 16) { BAD(i->dst); BAD(i->a); }
+            break;
+        case IR_SQRT: break;
         case IR_MOV: case IR_LDVAR: case IR_STVAR: break;   /* copies */
         case IR_LOAD:  BAD(i->a);   break;        /* the address */
         case IR_STORE: BAD(i->a);   break;        /* the address */
@@ -513,7 +535,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
     int *salign = xcalloc((size_t)(nls ? nls : 1), sizeof *salign);
     for (int i = 0; i < fn->nvars; i++) {
         int s = lslot[i];
-        if (!lref[i] || ra_slot_dead(fn, loc, i, g_want_debug))
+        if (!lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_want_debug))
             continue;               /* in a register, or named nowhere at all */
         int sz = (ty_size(f->var_tys[i]) + 7) & ~7;
         if (sz > ssize[s]) ssize[s] = sz;
@@ -548,18 +570,27 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         soff[s] = -running;
     }
     for (int i = 0; i < fn->nvars; i++)
-        disp[i] = !lref[i] || ra_slot_dead(fn, loc, i, g_want_debug) ? DEAD_SLOT_OFF
+        disp[i] = !lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_want_debug) ? DEAD_SLOT_OFF
                                                     : soff[lslot[i]];
+    /* A value with an FP home has no slot either, and saying so out loud
+     * is how the paths that do not know about the class get found. */
+    for (int i = 0; i < fn->nvregs; i++)
+        if (g_floc && g_floc[i] >= 0) disp[i] = DEAD_SLOT_OFF;
     free(lslot); free(lref); free(ssize); free(salign); free(soff);
     /* Temporaries share a coalesced pool of 8-byte slots (K13) instead of one
      * slot each — the temp region is `npool` slots wide, not (nvregs-nvars). */
     int npool = 0;
-    struct ra_slots so = { g_regalloc ? g_loc : NULL, g_opt_frames,
-                           g_has_cgoto };
+    struct ra_slots so = { g_regalloc ? g_loc : NULL, g_floc,
+                           g_opt_frames, g_has_cgoto };
     int *tslot = ra_coalesce_temps(fn, fn->nvars, &so, &npool);
     int temp_base = running;
-    for (int t = fn->nvars; t < fn->nvregs; t++)
-        disp[t] = -(temp_base + (tslot[t - fn->nvars] + 1) * 8);
+    for (int t = fn->nvars; t < fn->nvregs; t++) {
+        int k = tslot[t - fn->nvars];
+        /* No slot means no slot: giving every slotless temp the same
+         * real address made a lowering path that still touched one look
+         * harmless. It is not, and this is how it says so. */
+        disp[t] = k < 0 ? DEAD_SLOT_OFF : -(temp_base + (k + 1) * 8);
+    }
     running = temp_base + npool * 8;
     free(tslot);
     /* a long double temp: its own 16-aligned 16-byte slot, outside the pool */
@@ -2586,7 +2617,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 cg_reset();
                 int swap = i->pred == B_LT || i->pred == B_LE;
                 x86_fld(text, sd, swap ? i->b : i->a, 0, i->w);
-                x86_ucomis_mem(text, sd[swap ? i->a : i->b], i->w);
+                {
+                    int other = swap ? i->a : i->b;
+                    if (in_freg(other))
+                        x86_ucomis_reg(text, 0, g_floc[other], i->w);
+                    else
+                        x86_ucomis_mem(text, sd[other], i->w);
+                }
                 if (i->pred == B_EQ || i->pred == B_NE)
                     x86_set_float_eq(text, i->pred == B_NE);
                 else
@@ -2641,17 +2678,25 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         case IR_I2F:
             cg_reset();
+            /* the SOURCE is an integer here, so only the result is in
+              * the float class -- no register form is needed for it */
             x86_cvtsi2s(text, sd[i->a], i->size, i->w);
             x86_fst(text, sd, i->dst, 0, i->w);
             break;
         case IR_F2I:
             cg_reset();
-            x86_cvtts2si(text, sd[i->a], i->size, i->w);
+            if (in_freg(i->a))
+                x86_cvtts2si_reg(text, g_floc[i->a], i->size, i->w);
+            else
+                x86_cvtts2si(text, sd[i->a], i->size, i->w);
             cg_store(text, sd, i->dst, i->w);
             break;
         case IR_F2F:
             cg_reset();
-            x86_cvts2s(text, sd[i->a], i->size);
+            if (in_freg(i->a))
+                x86_cvts2s_reg(text, g_floc[i->a], i->size);
+            else
+                x86_cvts2s(text, sd[i->a], i->size);
             x86_fst(text, sd, i->dst, 0, i->w);
             break;
         case IR_LDVAR:

@@ -534,7 +534,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
          * take it from that register, so the eight bytes behind it were
          * being reserved and never touched: `add3` carried a 64-byte
          * frame for three parameters that never left x20-x22. */
-        if (!lref[v] || ra_slot_dead(fn, g_a64_loc, v, want_debug)) {
+        if (!lref[v] || ra_slot_dead(fn, g_a64_loc, g_a64_floc, v, want_debug)) {
             disp[v] = A64_DEAD_SLOT;
             continue;
         }
@@ -567,7 +567,8 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
     for (int n = 0; n < fn->nins; n++)
         if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
             has_cgoto = 1;
-    struct ra_slots so = { g_a64_loc, g_a64_opt_frames, has_cgoto };
+    struct ra_slots so = { g_a64_loc, g_a64_floc, g_a64_opt_frames,
+                           has_cgoto };
     int npool = 0;
     int *tslot = ra_coalesce_temps(fn, fn->nvars, &so, &npool);
     long temp_base = running;

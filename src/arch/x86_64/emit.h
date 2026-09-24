@@ -85,12 +85,16 @@ void x86_sse_alu_mem(struct code *c, int op, int dst, int disp, int w);
 void x86_sse_alu_reg(struct code *c, int op, int dst, int src, int w);
 void x86_movs_reg(struct code *c, int dst, int src);
 void x86_ucomis_mem(struct code *c, int disp, int w);
+void x86_ucomis_reg(struct code *c, int a, int b, int w);
 /* setcc pair for float == and != : ordered equality is "equal AND not
  * unordered", because a NaN compares equal to nothing, itself included. */
 void x86_set_float_eq(struct code *c, int ne);
 void x86_cvtsi2s(struct code *c, int disp, int srcw, int dstw);
 void x86_cvtts2si(struct code *c, int disp, int srcw, int dstw);
 void x86_cvts2s(struct code *c, int disp, int srcw);
+void x86_cvtsi2s_reg(struct code *c, int src, int srcw, int dstw);
+void x86_cvtts2si_reg(struct code *c, int src, int srcw, int dstw);
+void x86_cvts2s_reg(struct code *c, int src, int srcw);
 void x86_mov_al_imm(struct code *c, int v); /* varargs: xmm count in al */
 
 /* ---- general [base+disp] addressing, for struct traffic ----------
