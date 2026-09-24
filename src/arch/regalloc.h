@@ -118,6 +118,19 @@ struct ra_target {
      * return -- which is otherwise emitted whatever the allocator
      * chooses. */
     void (*abi_hints)(const struct ir_func *fn, int *hint);
+
+    /* The FLOATING-POINT register class, for a backend that has one.
+     * Every float and double otherwise lives in a stack slot: over
+     * lib/libc that was 2836 values, half of everything this allocator
+     * left in memory, and 6383 of the memory instructions emitted --
+     * 97% of all the floating-point memory traffic, none of it the
+     * program's own.
+     *
+     * NULL (or a zero count) means the backend has not got one yet and
+     * ra_allocate_fp returns nothing, which is what it did before. */
+    const int *fp_pool;
+    int nfp_pool;
+    int (*is_fp_callee_saved)(int reg);
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that
@@ -128,6 +141,13 @@ struct ra_target {
  * callee-saved registers the function actually took (so the prologue
  * knows what to save) and `*nused_out` with how many. The caller frees
  * the array. */
+/* The floating-point half of the same question: which vregs from
+ * `fltmap` (cg_float_vregs) get an FP register. NULL when the target has
+ * no FP pool. The caller frees the array. */
+int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
+                    const char *wide, const char *fltmap,
+                    int *used_out, int *nused_out);
+
 int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                  const char *wide, int *used_out, int *nused_out);
 

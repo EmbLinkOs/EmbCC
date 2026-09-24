@@ -112,7 +112,11 @@ static const struct ra_target X86_RA = {
                     * result and for a return -- and none of rdi/rsi/rax
                     * is in this backend's pool, so a hint naming one
                     * would never match. That changes if the pool ever
-                    * grows to them. */
+                    * grows to them. */,
+    NULL, 0, NULL  /* No FP class here yet. The SSE registers are the
+                    * obvious pool, and xmm0/xmm1 are this backend's
+                    * scratch the way v16/v17 are aarch64's, so xmm2-15
+                    * is what it would be. */
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----
@@ -172,6 +176,137 @@ char *cg_wide_vregs(struct ir_func *fn)
                 w[i->dst] = changed = 1;
         }
     }
+    if (!any) { free(w); return NULL; }
+    return w;
+}
+
+/* The vregs that hold a FLOATING-POINT value -- a float or a double, not
+ * a long double, which is x87 or a 16-byte slot and is `wide` instead.
+ *
+ * Float-ness is not written on every instruction that carries one. An
+ * op that COMPUTES in floating point says so (ir_ins::flt), and a
+ * conversion says which side is which, but a `ldvar` of a double, a
+ * `mov` joining the arms of a `?:`, and a `load` through a pointer all
+ * look exactly like their integer selves. So this starts from the
+ * places float-ness IS stated and closes over the copies, the same
+ * fixpoint cg_wide_vregs does and for the same reason.
+ *
+ * A compare is the one op whose operands and result disagree: it reads
+ * two floats and produces a 0/1 integer. */
+char *cg_float_vregs(struct ir_func *fn)
+{
+    int nv = fn->nvregs ? fn->nvregs : 1;
+    char *w = xcalloc((size_t)nv, 1);
+    char *wide = cg_wide_vregs(fn);
+    int any = 0;
+#define MARK(v) do { int _v=(v); if (_v>=0 && _v<nv && !w[_v]) { w[_v]=1; any=1; } } while (0)
+    for (int v = 0; v < fn->nvars; v++)
+        if (fn->locals[v].is_scalar_float) MARK(v);
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->flt) {
+            if (i->op == IR_CMP) { MARK(i->a); MARK(i->b); }
+            else { MARK(i->dst); MARK(i->a); MARK(i->b); }
+        }
+        switch (i->op) {
+        case IR_I2F:  MARK(i->dst); break;
+        case IR_F2I:  MARK(i->a);   break;
+        case IR_F2F:  MARK(i->dst); MARK(i->a); break;
+        case IR_SQRT: MARK(i->dst); MARK(i->a); break;
+        default: break;
+        }
+    }
+    for (int changed = any; changed; ) {
+        changed = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            int a = -1, d = -1;
+            switch (i->op) {
+            case IR_MOV:   a = i->a; d = i->dst; break;
+            case IR_LDVAR: a = i->a; d = i->dst; break;
+            case IR_STVAR: a = i->a; d = i->dst; break;
+            default: break;
+            }
+            if (a < 0 || d < 0 || a >= nv || d >= nv) continue;
+            /* a copy carries float-ness both ways */
+            if (w[a] && !w[d]) { w[d] = 1; changed = 1; }
+            if (w[d] && !w[a]) { w[a] = 1; changed = 1; }
+        }
+    }
+    /* ---- and now take back everything an INTEGER op touches --------
+     *
+     * Float-ness is not a property of a value here, it is a property of
+     * each USE, and the two disagree more often than the arithmetic
+     * suggests. A floating-point constant is an ordinary `const` of its
+     * bit pattern -- `const.8s 4602678819172646912` is 0.5 -- and
+     * negating a double is an integer XOR of the sign bit, not `fneg`.
+     * A value reaching either of those has to be in a general register
+     * when it gets there.
+     *
+     * So the mark above is only a candidate, and this is the whitelist:
+     * a value stays in this class only if EVERY instruction that touches
+     * it treats it as floating point. Anything else takes it back, and
+     * the taking-back travels through the copies for the same reason the
+     * marking did -- both ends of a `mov` are one value and cannot be in
+     * two classes. */
+    char *bad = xcalloc((size_t)nv, 1);
+#define BAD(v) do { int _v=(v); if (_v>=0 && _v<nv) bad[_v]=1; } while (0)
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->flt) {
+            if (i->op == IR_CMP) BAD(i->dst);     /* a 0/1 integer */
+            continue;                             /* operands are float */
+        }
+        switch (i->op) {
+        case IR_I2F:  BAD(i->a);   break;         /* integer in */
+        case IR_F2I:  BAD(i->dst); break;         /* integer out */
+        case IR_F2F: case IR_SQRT: break;
+        case IR_MOV: case IR_LDVAR: case IR_STVAR: break;   /* copies */
+        case IR_LOAD:  BAD(i->a);   break;        /* the address */
+        case IR_STORE: BAD(i->a);   break;        /* the address */
+        case IR_RET:   break;
+        case IR_CALL:
+            if (i->indirect) BAD(i->a);
+            for (int k = 0; k < i->nargs; k++)
+                if (i->argv[k].cls[0] != CLASS_SSE) BAD(i->argv[k].vreg);
+            if (!i->flt) BAD(i->dst);
+            break;
+        default:
+            /* every other op is integer in and integer out */
+            BAD(i->dst); BAD(i->a); BAD(i->b); BAD(i->c);
+            break;
+        }
+    }
+#undef BAD
+    for (int changed = 1; changed; ) {
+        changed = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            int a, d;
+            switch (i->op) {
+            case IR_MOV: case IR_LDVAR: case IR_STVAR:
+                a = i->a; d = i->dst; break;
+            default: continue;
+            }
+            if (a < 0 || d < 0 || a >= nv || d >= nv) continue;
+            if (bad[a] && !bad[d]) { bad[d] = 1; changed = 1; }
+            if (bad[d] && !bad[a]) { bad[a] = 1; changed = 1; }
+        }
+    }
+    any = 0;
+    for (int v = 0; v < nv; v++) {
+        if (bad[v]) w[v] = 0;
+        if (w[v]) any = 1;
+    }
+    free(bad);
+
+    /* A long double is not this class: it is sixteen bytes and has its
+     * own slot. Whatever marked one, unmark it. */
+    if (wide)
+        for (int v = 0; v < nv; v++)
+            if (wide[v]) w[v] = 0;
+    free(wide);
+#undef MARK
     if (!any) { free(w); return NULL; }
     return w;
 }

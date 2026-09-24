@@ -156,6 +156,24 @@ static int a64_op_calls_helper(const struct ir_ins *i)
     return a64_i128_ins(i) || a64_ld_ins(i);
 }
 
+/* The FLOATING-POINT pool: v18-v31.
+ *
+ * AAPCS64 makes v0-v7 the argument and result registers and saves the
+ * low 64 bits of v8-v15 across a call; v16-v31 are the caller's to
+ * lose. This backend already spends v16 and v17 as the float
+ * accumulator and second operand, so v18 upward is what is left -- and
+ * being caller-saved they need no prologue store and no CFI rule, the
+ * same reason x13-x15 lead the integer pool.
+ *
+ * Fourteen registers where there were none. Every float and double in
+ * this corpus lived in a stack slot before: 6383 of the memory
+ * instructions emitted were floating-point spill traffic, against
+ * gcc's 969. */
+#define A64_NFPOOL 14
+static const int A64_FPOOL[A64_NFPOOL] = { 18, 19, 20, 21, 22, 23, 24,
+                                           25, 26, 27, 28, 29, 30, 31 };
+static int a64_fp_callee_saved(int reg) { (void)reg; return 0; }
+
 /* Is x13/x14 spoken for? They are the atomics' scratch and nothing
  * else's, so only a function containing one has to give them up. */
 static int a64_has_atomic(const struct ir_func *fn)
@@ -186,7 +204,8 @@ static const struct ra_target A64_RA = {
                     * memcpy's addresses are still read from their
                     * slots, so those values have to stay there. */
     a64_op_calls_helper,
-    a64_abi_hints
+    a64_abi_hints,
+    A64_FPOOL, A64_NFPOOL, a64_fp_callee_saved
 };
 
 static const struct ra_target A64_RA_ATOMIC = {
@@ -200,7 +219,8 @@ static const struct ra_target A64_RA_ATOMIC = {
                     * from their slots, so those values have to stay
                     * there. */
     a64_op_calls_helper,
-    a64_abi_hints
+    a64_abi_hints,
+    A64_FPOOL, A64_NFPOOL, a64_fp_callee_saved
 };
 
 /* Where each vreg lives: a register, or -1 for its stack slot. NULL when
@@ -214,6 +234,27 @@ static int a64_in_reg(int v)
 /* long double (binary128): the vregs holding one (codegen.h
  * cg_wide_vregs) — each gets a 16-aligned 16-byte slot. */
 static char *g_a64_wide;
+
+/* The float/double vregs (cg_float_vregs) and where the allocator put
+ * each: a v register, or -1 for its stack slot. */
+static char *g_a64_flt;
+static int *g_a64_floc;
+static int a64_in_freg(int v)
+{
+    return g_a64_floc && v >= 0 && g_a64_floc[v] >= 0;
+}
+
+/* Is this vreg a float or a double?
+ *
+ * It matters at the ops that MOVE a value without computing on it --
+ * ldvar, stvar, mov, load, store. None of them carries ir_ins::flt,
+ * because a copy of eight bytes is a copy of eight bytes, so they are
+ * lowered by the integer path -- which would write the stack slot of a
+ * value whose home is a v register, and leave the two disagreeing. */
+static int a64_is_flt(int v)
+{
+    return g_a64_flt && v >= 0 && g_a64_flt[v];
+}
 
 /* ---- site accumulation ---------------------------------------------- */
 
@@ -587,6 +628,70 @@ static void ld_slot(struct code *t, const long *sd, int vreg, int reg,
     a64_ldr(t, reg, FB, sd[vreg], size, sign, w);
 }
 
+/* The floating-point pair of ld_slot/st_slot: a value with an FP home
+ * is moved, not loaded. Every site that touches a float vreg's slot
+ * goes through these two, because an FP home and a slot are the same
+ * value and only one of them is current -- a site that read the slot
+ * directly would read whatever the last spill left there.
+ *
+ * A long double is not in this class (cg_float_vregs excludes what
+ * cg_wide_vregs claimed), so its sixteen-byte slot still loads raw. */
+static void fld_slot(struct code *t, const long *sd, int vreg, int reg, int w)
+{
+    if (a64_in_freg(vreg)) {
+        if (g_a64_floc[vreg] != reg)
+            a64_fmov_reg(t, reg, g_a64_floc[vreg], w);
+        return;
+    }
+    a64_fldr(t, reg, FB, sd[vreg], w);
+}
+
+static void fst_slot(struct code *t, const long *sd, int vreg, int reg, int w)
+{
+    if (a64_in_freg(vreg)) {
+        if (g_a64_floc[vreg] != reg)
+            a64_fmov_reg(t, g_a64_floc[vreg], reg, w);
+        return;
+    }
+    a64_fstr(t, reg, FB, sd[vreg], w);
+}
+
+/* ...and the same "operate where the value already is" question for the
+ * floating-point class: which v register a value can be READ from,
+ * which one a result may be COMPUTED in, and the store back when that
+ * was the scratch. v16/v17 are the scratch and are in no pool. */
+static int frd(struct code *t, const long *sd, int v, int scratch, int w)
+{
+    if (a64_in_freg(v))
+        return g_a64_floc[v];
+    a64_fldr(t, scratch, FB, sd[v], w);
+    return scratch;
+}
+
+static int fwr(int v, int scratch)
+{
+    return a64_in_freg(v) ? g_a64_floc[v] : scratch;
+}
+
+static void fwrote(struct code *t, const long *sd, int v, int reg, int w)
+{
+    if (!a64_in_freg(v))
+        a64_fstr(t, reg, FB, sd[v], w);
+}
+
+/* A float value copied from one place to another: one fmov when both
+ * ends have homes, and none at all when it is the same register. */
+static void fmove(struct code *t, const long *sd, int dst, int src, int w)
+{
+    int r = frd(t, sd, src, A64_FACC, w);
+    if (a64_in_freg(dst)) {
+        if (g_a64_floc[dst] != r)
+            a64_fmov_reg(t, g_a64_floc[dst], r, w);
+        return;
+    }
+    a64_fstr(t, r, FB, sd[dst], w);
+}
+
 /* Store `reg`'s low `size` bytes into vreg. */
 static void st_slot(struct code *t, const long *sd, int vreg, int reg,
                     int size)
@@ -863,10 +968,11 @@ static void emit_zero(struct code *t, int dst, int size)
  * slot at the operation's own width. */
 static void fbin(struct code *t, const long *sd, struct ir_ins *i, int op)
 {
-    a64_fldr(t, A64_FACC, FB, sd[i->a], i->w);
-    a64_fldr(t, A64_FTMP, FB, sd[i->b], i->w);
-    a64_falu(t, op, A64_FACC, A64_FACC, A64_FTMP, i->w);
-    a64_fstr(t, A64_FACC, FB, sd[i->dst], i->w);
+    int ra = frd(t, sd, i->a, A64_FACC, i->w);
+    int rb = frd(t, sd, i->b, A64_FTMP, i->w);
+    int d = fwr(i->dst, A64_FACC);
+    a64_falu(t, op, d, ra, rb, i->w);
+    fwrote(t, sd, i->dst, d, i->w);
 }
 
 /* The condition code for an IR comparison predicate. */
@@ -964,12 +1070,12 @@ static void gen_a64_ld(struct code *t, const long *sd, struct ir_ins *i,
         emit_copy(t, A64_ADDR, A64_TMP, 16);
         break;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
-        a64_fldr(t, 0, FB, sd[i->a], 16);
-        a64_fldr(t, 1, FB, sd[i->b], 16);
+        fld_slot(t, sd, i->a, 0, 16);
+        fld_slot(t, sd, i->b, 1, 16);
         call_helper(t, st, i->op == IR_ADD ? "__addtf3" : i->op == IR_SUB
                                ? "__subtf3" : i->op == IR_MUL ? "__multf3"
                                : "__divtf3");
-        a64_fstr(t, 0, FB, sd[i->dst], 16);
+        fst_slot(t, sd, i->dst, 0, 16);
         break;
     case IR_NEG:              /* flip bit 127: exact for -0.0 and NaN */
         ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
@@ -988,8 +1094,8 @@ static void gen_a64_ld(struct code *t, const long *sd, struct ir_ins *i,
                         ? "__netf2" : i->pred == B_LT ? "__lttf2"
                         : i->pred == B_LE ? "__letf2" : i->pred == B_GT
                         ? "__gttf2" : "__getf2";
-        a64_fldr(t, 0, FB, sd[i->a], 16);
-        a64_fldr(t, 1, FB, sd[i->b], 16);
+        fld_slot(t, sd, i->a, 0, 16);
+        fld_slot(t, sd, i->b, 1, 16);
         call_helper(t, st, h);
         a64_cmp_reg(t, 0, A64_ZR, 4);
         a64_cset(t, A64_ACC, cond_for(i->pred, 1));
@@ -999,23 +1105,23 @@ static void gen_a64_ld(struct code *t, const long *sd, struct ir_ins *i,
     case IR_I2F:              /* any integer, sign-extended to 64 bits */
         ld_slot(t, sd, i->a, 0, i->size, 1, 8);
         call_helper(t, st, "__floatditf");
-        a64_fstr(t, 0, FB, sd[i->dst], 16);
+        fst_slot(t, sd, i->dst, 0, 16);
         break;
     case IR_F2I:              /* truncates toward zero, to 64 bits */
-        a64_fldr(t, 0, FB, sd[i->a], 16);
+        fld_slot(t, sd, i->a, 0, 16);
         call_helper(t, st, "__fixtfdi");
         st_slot(t, sd, i->dst, 0, 8);
         break;
     case IR_F2F:
         if (i->w == 16) {     /* float/double -> long double: exact */
-            a64_fldr(t, 0, FB, sd[i->a], i->size);
+            fld_slot(t, sd, i->a, 0, i->size);
             call_helper(t, st, i->size == 4 ? "__extendsftf2"
                                             : "__extenddftf2");
-            a64_fstr(t, 0, FB, sd[i->dst], 16);
+            fst_slot(t, sd, i->dst, 0, 16);
         } else {              /* long double -> float/double: rounds */
-            a64_fldr(t, 0, FB, sd[i->a], 16);
+            fld_slot(t, sd, i->a, 0, 16);
             call_helper(t, st, i->w == 4 ? "__trunctfsf2" : "__trunctfdf2");
-            a64_fstr(t, 0, FB, sd[i->dst], i->w);
+            fst_slot(t, sd, i->dst, 0, i->w);
         }
         break;
     default:
@@ -1219,10 +1325,10 @@ static void gen_a64_i128(struct code *t, const long *sd, struct ir_ins *i,
                            : i->w == 8 ? (i->sign ? "__floattidf"
                                                   : "__floatuntidf")
                            : (i->sign ? "__floattitf" : "__floatuntitf"));
-        a64_fstr(t, 0, FB, d, i->w);
+        fst_slot(t, sd, i->dst, 0, i->w);
         break;
     case IR_F2I:
-        a64_fldr(t, 0, FB, sd[i->a], i->size);
+        fld_slot(t, sd, i->a, 0, i->size);
         call_helper(t, st, i->size == 4 ? (i->sign ? "__fixsfti"
                                                    : "__fixunssfti")
                            : i->size == 8 ? (i->sign ? "__fixdfti"
@@ -1251,6 +1357,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * same reason. So does a landing pad, which is entered on a
      * control-flow edge the dataflow does not see. */
     g_a64_loc = NULL;
+    g_a64_floc = NULL;
+    g_a64_flt = NULL;
     if (g_a64_regalloc && !fn->neh) {
         int cgoto = 0, n;
         for (n = 0; n < fn->nins; n++)
@@ -1258,11 +1366,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 cgoto = 1;
                 break;
             }
-        if (!cgoto)
-            g_a64_loc = ra_allocate(fn,
-                                    a64_has_atomic(fn) ? &A64_RA_ATOMIC
-                                                       : &A64_RA,
-                                    g_a64_wide, used_callee, &nsave);
+        if (!cgoto) {
+            const struct ra_target *rt = a64_has_atomic(fn) ? &A64_RA_ATOMIC
+                                                            : &A64_RA;
+            g_a64_loc = ra_allocate(fn, rt, g_a64_wide, used_callee, &nsave);
+            /* The float class, from the same liveness and the same
+             * colourer. Its pool is caller-saved throughout, so it
+             * reports no registers to save and `nfsave` is always 0 --
+             * it is passed only because ra_allocate_class wants
+             * somewhere to put an answer. */
+            g_a64_flt = cg_float_vregs(fn);
+            int fsave[A64_NFPOOL], nfsave = 0;
+            g_a64_floc = ra_allocate_fp(fn, rt, g_a64_wide, g_a64_flt,
+                                        fsave, &nfsave);
+            (void)nfsave;
+        }
     }
     long *sd = layout_frame(fn, &fr, want_debug);
     /* Room for the callee-saved registers the allocator took. Eight
@@ -1364,8 +1482,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             if (on_stack != pass)
                 continue;                  /* the other pass owns this one */
             if (pl.where == AP_V) {
-                for (int q = 0; q < pl.nreg; q++)
-                    a64_fstr(t, pl.reg + q, FB, sd[p] + q * pl.esz, pl.esz);
+                if (pl.nreg == 1)
+                    fst_slot(t, sd, p, pl.reg, pl.esz);
+                else
+                    for (int q = 0; q < pl.nreg; q++)
+                        a64_fstr(t, pl.reg + q, FB, sd[p] + q * pl.esz,
+                                 pl.esz);
             } else if (pl.byref) {
                 /* A pointer to the caller's copy: take our own, so the
                  * parameter's address is an ordinary local. */
@@ -1495,6 +1617,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_MOV: {
+            if (a64_is_flt(i->dst) || a64_is_flt(i->a)) {
+                fmove(t, sd, i->dst, i->a, i->w);
+                break;
+            }
             int src = rd(t, sd, i->a, A64_ACC);
             if (a64_in_reg(i->dst)) {
                 int d = g_a64_loc[i->dst];
@@ -1579,16 +1705,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_SQRT:
-            a64_fldr(t, A64_FACC, FB, sd[i->a], i->w);
+            fld_slot(t, sd, i->a, A64_FACC, i->w);
             a64_fsqrt(t, A64_FACC, A64_FACC, i->w);
-            a64_fstr(t, A64_FACC, FB, sd[i->dst], i->w);
+            fst_slot(t, sd, i->dst, A64_FACC, i->w);
             break;
 
         case IR_NEG:
             if (i->flt) {
-                a64_fldr(t, A64_FACC, FB, sd[i->a], i->w);
+                fld_slot(t, sd, i->a, A64_FACC, i->w);
                 a64_fneg(t, A64_FACC, A64_FACC, i->w);
-                a64_fstr(t, A64_FACC, FB, sd[i->dst], i->w);
+                fst_slot(t, sd, i->dst, A64_FACC, i->w);
                 break;
             }
             ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
@@ -1609,9 +1735,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                  * than lt/le: lt tests N!=V and would read TRUE on a NaN,
                  * where C requires every ordered comparison against NaN to
                  * be false. eq/ne/gt/ge already fall out correctly. */
-                a64_fldr(t, A64_FACC, FB, sd[i->a], i->w);
-                a64_fldr(t, A64_FTMP, FB, sd[i->b], i->w);
-                a64_fcmp(t, A64_FACC, A64_FTMP, i->w);
+                a64_fcmp(t, frd(t, sd, i->a, A64_FACC, i->w),
+                            frd(t, sd, i->b, A64_FTMP, i->w), i->w);
                 int cc = i->pred == B_EQ ? A64_EQ : i->pred == B_NE ? A64_NE
                        : i->pred == B_LT ? A64_MI : i->pred == B_LE ? A64_LS
                        : i->pred == B_GT ? A64_GT : A64_GE;
@@ -1636,6 +1761,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             break;
 
         case IR_LDVAR: {
+            if (a64_is_flt(i->dst) || a64_is_flt(i->a)) {
+                fmove(t, sd, i->dst, i->a, i->size);
+                break;
+            }
             int d = wr(i->dst, A64_ACC);
             if (a64_in_reg(i->a)) {
                 int src = g_a64_loc[i->a];
@@ -1652,6 +1781,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_STVAR: {
+            if (a64_is_flt(i->dst) || a64_is_flt(i->a)) {
+                fmove(t, sd, i->dst, i->a, i->size);
+                break;
+            }
             int src = rd(t, sd, i->a, A64_ACC);
             if (a64_in_reg(i->dst)) {
                 int d = g_a64_loc[i->dst];
@@ -1760,6 +1893,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_LOAD: {
+            if (a64_is_flt(i->dst)) {
+                int fa = rd(t, sd, i->a, A64_ADDR);
+                a64_fldr(t, A64_FACC, fa, 0, i->size);
+                fst_slot(t, sd, i->dst, A64_FACC, i->size);
+                break;
+            }
             int addr = rd(t, sd, i->a, A64_ADDR);
             int d = wr(i->dst, A64_ACC);
             a64_ldr(t, d, addr, 0, i->size, i->sign, i->w);
@@ -1768,6 +1907,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_STORE: {
+            if (a64_is_flt(i->b)) {
+                int fa = rd(t, sd, i->a, A64_ADDR);
+                fld_slot(t, sd, i->b, A64_FACC, i->size);
+                a64_fstr(t, A64_FACC, fa, 0, i->size);
+                break;
+            }
             int addr = rd(t, sd, i->a, A64_ADDR);
             int val = rd(t, sd, i->b, A64_ACC);
             a64_str(t, val, addr, 0, i->size);
@@ -1858,7 +2003,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 struct type *rt = f->ret_ty;
                 int esz, nh = a64_hfa(rt, &esz);
                 if (i->flt) {
-                    a64_fldr(t, 0, FB, sd[i->a], i->w);
+                    fld_slot(t, sd, i->a, 0, i->w);
                 } else if (nh) {
                     /* an HFA comes back one member per v register */
                     ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
@@ -1965,7 +2110,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                             a64_fldr(t, pl[k].reg + q, A64_ADDR,
                                      q * pl[k].esz, pl[k].esz);
                     } else {
-                        a64_fldr(t, pl[k].reg, FB, sd[v], pl[k].esz);
+                        fld_slot(t, sd, v, pl[k].reg, pl[k].esz);
                     }
                 } else if (pl[k].where == AP_X) {
                     if (pl[k].byref) {
@@ -2021,7 +2166,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 }
                 st_slot(t, sd, i->dst, A64_ADDR, 8);
             } else if (i->flt) {
-                a64_fstr(t, 0, FB, sd[i->dst], i->w);
+                fst_slot(t, sd, i->dst, 0, i->w);
             } else if (i->w == 16) {                      /* x0:x1 */
                 a64_str(t, 0, FB, sd[i->dst], 8);
                 a64_str(t, 1, FB, sd[i->dst] + 8, 8);
@@ -2036,7 +2181,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             int iw = i->size >= 8 ? 8 : 4;
             ld_slot(t, sd, i->a, A64_ACC, i->size, i->sign, iw);
             a64_cvt_i2f(t, A64_FACC, A64_ACC, i->sign, iw, i->w);
-            a64_fstr(t, A64_FACC, FB, sd[i->dst], i->w);
+            fst_slot(t, sd, i->dst, A64_FACC, i->w);
             break;
         }
         case IR_F2I: {
@@ -2044,15 +2189,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * SSE, aarch64 has a native unsigned form, so the u64 case needs
              * no fixup sequence. */
             int iw = i->w >= 8 ? 8 : 4;
-            a64_fldr(t, A64_FACC, FB, sd[i->a], i->size);
+            fld_slot(t, sd, i->a, A64_FACC, i->size);
             a64_cvt_f2i(t, A64_ACC, A64_FACC, i->sign, iw, i->size);
             st_slot(t, sd, i->dst, A64_ACC, 8);
             break;
         }
         case IR_F2F:
-            a64_fldr(t, A64_FACC, FB, sd[i->a], i->size);
+            fld_slot(t, sd, i->a, A64_FACC, i->size);
             a64_fcvt(t, A64_FACC, A64_FACC, i->size, i->w);
-            a64_fstr(t, A64_FACC, FB, sd[i->dst], i->w);
+            fst_slot(t, sd, i->dst, A64_FACC, i->w);
             break;
         case IR_VA_START: {
             /* AAPCS64's va_list record, 32 bytes:
@@ -2301,6 +2446,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     g_a64_wide = NULL;
     free(g_a64_loc);
     g_a64_loc = NULL;
+    free(g_a64_flt);
+    g_a64_flt = NULL;
+    free(g_a64_floc);
+    g_a64_floc = NULL;
 
     for (int k = 0; k < nret; k++)
         a64_patch_b26(t, retfix[k], epi);

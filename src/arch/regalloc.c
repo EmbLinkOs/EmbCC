@@ -225,8 +225,40 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
 /* mark vreg v ineligible (used at an opaque site) */
 #define OPAQUE(v) do { int _v = (v); if (_v >= 0 && _v < nvr) elig[_v] = 0; } while (0)
 
+/* Both register classes go through one body. What differs is which
+ * values are eligible, which pool they are coloured from, and which of
+ * those registers a call preserves -- everything after that (liveness,
+ * interference, the colouring itself) is the same question asked of a
+ * different set. Keeping it one function is deliberate: two copies of a
+ * graph colourer would drift exactly the way the operand switches did.
+ *
+ * `fltmap` is cg_float_vregs: NULL for the integer pass, and for the
+ * float pass the vregs that hold a float or a double. */
+static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
+                              const char *g_wide, const char *fltmap, int fp,
+                              int *used_out, int *nused_out);
+
 int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                  const char *g_wide, int *used_out, int *nused_out)
+{
+    return ra_allocate_class(fn, t, g_wide, NULL, 0, used_out, nused_out);
+}
+
+/* The floating-point half. `fltmap` says which vregs are in this class;
+ * a backend without an fp_pool gets nothing back. */
+int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
+                    const char *g_wide, const char *fltmap,
+                    int *used_out, int *nused_out)
+{
+    *nused_out = 0;
+    if (!t->fp_pool || !t->nfp_pool || !fltmap)
+        return NULL;
+    return ra_allocate_class(fn, t, g_wide, fltmap, 1, used_out, nused_out);
+}
+
+static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
+                              const char *g_wide, const char *fltmap, int fp,
+                              int *used_out, int *nused_out)
 {
     int nins = fn->nins, nvr = fn->nvregs;
     int nvars = fn->nvars;
@@ -240,10 +272,12 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
      * leaf, having no calls, is never masked). A variadic function reserves the
      * argument register file, so it drops r8/r9. */
     int variadic = fn->is_varargs;
-    const int *POOL = variadic && t->pool_varargs ? t->pool_varargs
-                                                  : t->pool;
-    int NP = variadic && t->pool_varargs ? t->npool_varargs
-                                          : t->npool;
+    const int *POOL = fp ? t->fp_pool
+                   : variadic && t->pool_varargs ? t->pool_varargs : t->pool;
+    int NP = fp ? t->nfp_pool
+               : variadic && t->pool_varargs ? t->npool_varargs : t->npool;
+    int (*callee_saved)(int) = fp && t->is_fp_callee_saved
+                             ? t->is_fp_callee_saved : t->is_callee_saved;
 
     int *hint = xmalloc((size_t)nvr * sizeof *hint);
     for (int v = 0; v < nvr; v++) hint[v] = -1;
@@ -287,6 +321,11 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
         }
     }
     for (int v = 0; v < nvr; v++) {
+        if (fp) {
+            /* this class is exactly the values cg_float_vregs found */
+            elig[v] = fltmap[v] != 0;
+            continue;
+        }
         if (v >= nvars) {
             elig[v] = 1;                          /* a temp */
         } else {
@@ -303,12 +342,21 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
     for (int v = 0; v < nvr; v++)
         if (g_wide && g_wide[v])
             elig[v] = 0;
+    /* ...and a value belongs to ONE class. Without this the integer pass
+     * would hand a GPR to a double and the float pass an FP register to
+     * the same vreg, and the two halves of codegen would each believe
+     * their own answer. */
+    if (!fp && fltmap)
+        for (int v = 0; v < nvr; v++)
+            if (fltmap[v]) elig[v] = 0;
 
     for (int i = 0; i < nins; i++) {
         struct ir_ins *in = &fn->ins[i];
         int is_float = in->flt || in->op == IR_I2F || in->op == IR_F2I ||
                        in->op == IR_F2F;
-        if (is_float) { OPAQUE(in->dst); OPAQUE(in->a); OPAQUE(in->b); }
+        /* On the integer pass a float operand is somebody else's: it has
+         * no GPR home. On the float pass it is the whole point. */
+        if (is_float && !fp) { OPAQUE(in->dst); OPAQUE(in->a); OPAQUE(in->b); }
         switch (in->op) {
         case IR_ADDR:      OPAQUE(in->a); break;          /* address-taken */
         /* IR_STORE's address is register-aware now (codegen stores to [reg]),
@@ -330,7 +378,8 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
             /* A struct or float return reads its slot raw on every
              * backend; a scalar one only where the backend can take it
              * from a register. */
-            if (fn->ret_abi.is_struct || in->flt || !t->ret_scalar_in_reg)
+            if (fn->ret_abi.is_struct ||
+                (in->flt ? !fp : !t->ret_scalar_in_reg))
                 OPAQUE(in->a);
             break;
         case IR_CALL:
@@ -351,10 +400,11 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
              * its argument register only by a backend that knows how. */
             for (int k = 0; k < in->nargs; k++)
                 if (in->argv[k].is_struct ||
-                    in->argv[k].cls[0] == CLASS_SSE ||
-                    !t->call_int_arg_in_reg)
+                    (in->argv[k].cls[0] == CLASS_SSE
+                         ? !fp : !t->call_int_arg_in_reg))
                     OPAQUE(in->argv[k].vreg);
-            if (in->flt || in->retsize) OPAQUE(in->dst);  /* float/struct ret */
+            if (in->retsize || (in->flt ? !fp : 0))
+                OPAQUE(in->dst);                     /* float/struct result */
             break;
         case IR_ASM:
             if (in->asm_ir) {
@@ -544,7 +594,7 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
          * call clobbers them, so forbid them here (leaving callee-saved/spill). */
         if (crosses[eidx[e]])
             for (int k = 0; k < NP; k++)
-                if (!t->is_callee_saved(POOL[k])) taken |= 1 << k;
+                if (!callee_saved(POOL[k])) taken |= 1 << k;
         /* preferred colours: registers a colored, non-interfering move-partner
          * already holds (and that are still free) */
         int want = 0;
@@ -610,7 +660,7 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
     /* Only the callee-saved registers actually used need a prologue save. */
     int nu = 0;
     for (int k = 0; k < NP; k++)
-        if (reg_used[k] && t->is_callee_saved(POOL[k])) used_out[nu++] = POOL[k];
+        if (reg_used[k] && callee_saved(POOL[k])) used_out[nu++] = POOL[k];
     *nused_out = nu;
 
     free(hint);
