@@ -133,6 +133,11 @@ void x86_movs_load_base(struct code *c, int xmm, int base, int disp,
                         int w)
 {
     code_byte(c, w == 4 ? 0xf3 : 0xf2);
+    /* modrm_base masks both fields to three bits and leaves the fourth
+     * to REX, which nothing here used to need: every caller named an
+     * xmm below 8 and a base below 8. The FP pool is xmm8-15. */
+    if (xmm >= 8 || base >= 8)
+        code_byte(c, 0x40 | ((xmm >= 8) << 2) | (base >= 8));
     code_byte(c, 0x0f);
     code_byte(c, 0x10);
     modrm_base(c, xmm, base, disp);
@@ -142,6 +147,8 @@ void x86_movs_store_base(struct code *c, int base, int disp, int xmm,
                          int w)
 {
     code_byte(c, w == 4 ? 0xf3 : 0xf2);
+    if (xmm >= 8 || base >= 8)
+        code_byte(c, 0x40 | ((xmm >= 8) << 2) | (base >= 8));
     code_byte(c, 0x0f);
     code_byte(c, 0x11);
     modrm_base(c, xmm, base, disp);
@@ -1068,25 +1075,69 @@ static void sse_prefix(struct code *c, int w)
     code_byte(c, w == 4 ? 0xf3 : 0xf2);
 }
 
+/* REX.R for an xmm register above 7. The SSE prefix is a legacy one and
+ * comes first; REX has to sit immediately before the 0x0F escape. Until
+ * the FP pool existed nothing here named a register above xmm7, so these
+ * emitters simply did not write one. */
+static void sse_rex_r(struct code *c, int xmm)
+{
+    if (xmm >= 8)
+        code_byte(c, 0x44);
+}
+
 void x86_movs_load(struct code *c, int xmm, int disp, int w)
 {
     sse_prefix(c, w);
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f);
     code_byte(c, 0x10); /* movss/movsd xmm, m */
-    modrm_rbp(c, xmm, disp);
+    modrm_rbp(c, xmm & 7, disp);
+}
+
+/* movaps xmm, xmm -- a whole-register copy, which is what a scalar move
+ * between registers costs anyway and has no false dependency on the
+ * destination's upper half the way movss/movsd does. */
+void x86_movs_reg(struct code *c, int dst, int src)
+{
+    if (dst >= 8 || src >= 8)
+        code_byte(c, 0x40 | ((dst >= 8) << 2) | (src >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x28);
+    code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
+}
+
+/* The register form of the scalar ALU ops: `addsd dst, src`. */
+void x86_sse_alu_reg(struct code *c, int op, int dst, int src, int w)
+{
+    sse_prefix(c, w);
+    if (dst >= 8 || src >= 8)
+        code_byte(c, 0x40 | ((dst >= 8) << 2) | (src >= 8));
+    code_byte(c, 0x0f);
+    switch (op) {
+    case '+': code_byte(c, 0x58); break;
+    case '-': code_byte(c, 0x5c); break;
+    case '*': code_byte(c, 0x59); break;
+    case '/': code_byte(c, 0x5e); break;
+    case 'q': code_byte(c, 0x51); break;
+    default:
+        internal_error("no SSE encoding for '%c'", op);
+    }
+    code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
 }
 
 void x86_movs_store(struct code *c, int xmm, int disp, int w)
 {
     sse_prefix(c, w);
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f);
     code_byte(c, 0x11); /* movss/movsd m, xmm */
-    modrm_rbp(c, xmm, disp);
+    modrm_rbp(c, xmm & 7, disp);
 }
 
-void x86_sse_alu_mem(struct code *c, int op, int disp, int w)
+void x86_sse_alu_mem(struct code *c, int op, int dst, int disp, int w)
 {
     sse_prefix(c, w);
+    sse_rex_r(c, dst);
     code_byte(c, 0x0f);
     switch (op) {
     case '+': code_byte(c, 0x58); break; /* addss/addsd */
@@ -1099,7 +1150,7 @@ void x86_sse_alu_mem(struct code *c, int op, int disp, int w)
     default:
         internal_error("no SSE encoding for '%c'", op);
     }
-    modrm_rbp(c, 0, disp); /* always xmm0 */
+    modrm_rbp(c, dst & 7, disp);
 }
 
 void x86_ucomis_mem(struct code *c, int disp, int w)

@@ -81,7 +81,9 @@ void x86_neg_eax(struct code *c, int w);
  * at all: only the ARITHMETIC has to reach xmm. */
 void x86_movs_load(struct code *c, int xmm, int disp, int w);
 void x86_movs_store(struct code *c, int xmm, int disp, int w);
-void x86_sse_alu_mem(struct code *c, int op, int disp, int w); /* + - * / */
+void x86_sse_alu_mem(struct code *c, int op, int dst, int disp, int w);
+void x86_sse_alu_reg(struct code *c, int op, int dst, int src, int w);
+void x86_movs_reg(struct code *c, int dst, int src);
 void x86_ucomis_mem(struct code *c, int disp, int w);
 /* setcc pair for float == and != : ordered equality is "equal AND not
  * unordered", because a NaN compares equal to nothing, itself included. */
