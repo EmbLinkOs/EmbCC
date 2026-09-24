@@ -211,6 +211,17 @@ void a64_rev(struct code *c, int rd, int rn, int size)
 
 /* ---- compare -------------------------------------------------------- */
 
+/* CMP Rn, #imm -- SUBS ZR, Rn, #imm, and CMN (ADDS ZR) for a negative
+ * one, which compares against it just as well. 0 when the immediate
+ * does not fit the twelve-bit field, and the caller falls back to a
+ * register. */
+int a64_cmp_imm(struct code *c, int rn, long imm, int w)
+{
+    if (imm < 0)
+        return addsub_imm(c, 0x31000000UL, 31, rn, -imm, w);   /* CMN */
+    return addsub_imm(c, 0x71000000UL, 31, rn, imm, w);        /* CMP */
+}
+
 void a64_cmp_reg(struct code *c, int rn, int rm, int w)
 {
     /* CMP is SUBS ZR, Rn, Rm. */

@@ -26,6 +26,7 @@
 #include "../backend.h"
 #include "../regalloc.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -707,6 +708,15 @@ static void wrote_n(struct code *t, const long *sd, int vreg, int reg,
 {
     if (!a64_in_reg(vreg))
         a64_str(t, reg, FB, sd[vreg], size);
+}
+
+/* The optimizer's folded constant, at this instruction's width. It is
+ * stored as a long; at w == 4 only the low word is the value, and a
+ * negative one has to read as negative or a `sub` becomes a `add` of
+ * four billion. */
+static long imm_at_w(const struct ir_ins *i)
+{
+    return i->w == 4 ? (long)(int)i->imm : i->imm;
 }
 
 /* Operand b as a register to read, folding the optimizer's immediate. */
@@ -1474,6 +1484,25 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             }
             int op = i->op == IR_ADD ? '+' : i->op == IR_SUB ? '-'
                    : i->op == IR_AND ? '&' : i->op == IR_OR  ? '|' : '^';
+            /* `add x9, x9, #4` rather than `mov x10, #4; add x9, x9,
+             * x10`. Both instructions go, not one: the constant never
+             * needs a register. Only add and subtract here -- the
+             * bitwise ops take a logical immediate, which is a
+             * different and much fussier encoding. */
+            if (i->imm_b && (i->op == IR_ADD || i->op == IR_SUB)) {
+                int ra2 = rd(t, sd, i->a, A64_ACC);
+                int d2 = wr(i->dst, A64_ACC);
+                long v = imm_at_w(i);
+                /* -v on the most negative long is undefined, and a
+                 * subtract of it is not encodable anyway. */
+                if (v != LONG_MIN &&
+                    a64_add_imm(t, d2, ra2, i->op == IR_SUB ? -v : v, i->w)) {
+                    wrote(t, sd, i->dst, d2);
+                    break;
+                }
+                /* not encodable: fall through to the register form,
+                 * which re-reads `a` -- free, it is already in ra2 */
+            }
             int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
             int d = wr(i->dst, A64_ACC);
             a64_alu_reg(t, op, d, ra, rb, i->w);
@@ -1565,9 +1594,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             else {
                 /* cset writes the destination only after cmp has read
                  * both operands, so the destination may be one of them. */
-                int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
+                int ra = rd(t, sd, i->a, A64_ACC);
                 int cc = cond_for(i->pred, i->sign);
-                a64_cmp_reg(t, ra, rb, i->w);
+                if (!i->imm_b || !a64_cmp_imm(t, ra, imm_at_w(i), i->w))
+                    a64_cmp_reg(t, ra, rd_b(t, sd, i), i->w);
                 if (cmp_feeds_branch(fn, n, usecnt)) { fused_cc = cc; break; }
                 int d = wr(i->dst, A64_ACC);
                 a64_cset(t, d, cc);
