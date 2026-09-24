@@ -472,6 +472,17 @@ static int pass_fold(struct ir_func *fn)
             if (ka) {
                 to_const(i, fold_ext(A, i->size, i->sign, i->w));
                 changed = 1;
+            } else if (i->size >= i->w) {
+                /* An extension to a width the value already fills does
+                 * nothing: `ext.4:4s` asks for the low four bytes
+                 * sign-extended to four bytes, which is what it was
+                 * handed. irgen emits these for every `int` operand of
+                 * an `int` operation, so they are not rare -- four in a
+                 * two-parameter comparison -- and each one costs an
+                 * instruction on aarch64 (`asr w, w, #0`) that the x86
+                 * backend was already folding into its addressing. */
+                to_mov(i, i->a);
+                changed = 1;
             }
             continue;
         }

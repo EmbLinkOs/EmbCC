@@ -478,7 +478,14 @@ static void ld_slot(struct code *t, const long *sd, int vreg, int reg,
 {
     if (a64_in_reg(vreg)) {
         int src = g_a64_loc[vreg];
-        if (size == 8 || (size == 4 && !sign && w <= 4)) {
+        /* a64_ldvar_plain is the allocator's own question -- "is this
+         * narrow read just a move" -- and it has to be asked with that
+         * one function, not a second copy of the rule. A copy here said
+         * a SIGNED four-byte read at four-byte width still needed
+         * sign-extending, where the allocator had already called it
+         * plain: every `int` parameter read cost an `asr w, w, #0` that
+         * extends a value into the width it already has. */
+        if (a64_ldvar_plain(size, sign, w)) {
             if (src != reg)
                 a64_mov_reg(t, reg, src, 8);
         } else {
@@ -507,6 +514,93 @@ static void st_slot(struct code *t, const long *sd, int vreg, int reg,
         return;
     }
     a64_str(t, reg, FB, sd[vreg], size);
+}
+
+/* ---- operating where the value already is -----------------------------
+ *
+ * `ld_slot` and `st_slot` answer "put this vreg in THAT register", which
+ * is the right question for a site that needs a particular register --
+ * an argument, a return value, the address of a copy. For ordinary
+ * arithmetic it is the wrong one, because it forces a round trip that
+ * the allocator already made unnecessary:
+ *
+ *     mov x9, x20         a's home is x20 already
+ *     mov x10, x21        b's home is x21 already
+ *     add x9, x9, x10
+ *     mov x21, x9         and the result belongs in x21
+ *
+ * where one `add x21, x20, x21` does the whole thing. `add3` -- three
+ * parameters, two adds -- came to 31 instructions against gcc's three,
+ * and nearly all of the difference was this.
+ *
+ * So the three below ask the other question. `rd` says which register a
+ * value can be READ from, loading into the scratch only when there is no
+ * home to read. `wr` says which register a result may be COMPUTED in,
+ * and `wrote` writes it back if that register was the scratch. The pool
+ * (x20-x26) and the scratch registers (x9-x14) are disjoint, so a home
+ * register can never be the one an operand was loaded into.
+ *
+ * `wr` is only safe for a value computed by a SINGLE instruction, which
+ * reads its operands and writes its destination at once. A sequence that
+ * writes the destination before its last read -- IR_MOD's divide and
+ * msub -- would clobber an operand still to come, so those keep the
+ * accumulator and the explicit store. */
+static int rd(struct code *t, const long *sd, int vreg, int scratch)
+{
+    if (a64_in_reg(vreg))
+        return g_a64_loc[vreg];
+    a64_ldr(t, scratch, FB, sd[vreg], 8, 0, 8);
+    return scratch;
+}
+
+static int wr(int vreg, int scratch)
+{
+    return a64_in_reg(vreg) ? g_a64_loc[vreg] : scratch;
+}
+
+static void wrote(struct code *t, const long *sd, int vreg, int reg)
+{
+    if (!a64_in_reg(vreg))
+        a64_str(t, reg, FB, sd[vreg], 8);
+}
+
+/* `rd` at a requested width. A resident vreg whose register already
+ * holds the value at that width is read where it is; anything else goes
+ * through the scratch, extended exactly as ld_slot would have. The
+ * plain-width test is ld_slot's own, so this never widens what that
+ * would have left alone. */
+static int rd_ext(struct code *t, const long *sd, int vreg, int scratch,
+                  int size, int sign, int w)
+{
+    if (a64_in_reg(vreg)) {
+        int src = g_a64_loc[vreg];
+        if (a64_ldvar_plain(size, sign, w))
+            return src;
+        a64_extend(t, scratch, src, size, sign, w);
+        return scratch;
+    }
+    a64_ldr(t, scratch, FB, sd[vreg], size, sign, w);
+    return scratch;
+}
+
+/* `wrote` for a result narrower than a word: a vreg with no home gets
+ * `size` bytes, never eight, because the slot beside it is somebody
+ * else's. */
+static void wrote_n(struct code *t, const long *sd, int vreg, int reg,
+                    int size)
+{
+    if (!a64_in_reg(vreg))
+        a64_str(t, reg, FB, sd[vreg], size);
+}
+
+/* Operand b as a register to read, folding the optimizer's immediate. */
+static int rd_b(struct code *t, const long *sd, struct ir_ins *i)
+{
+    if (i->imm_b) {
+        a64_mov_imm(t, A64_TMP, i->imm, i->w);
+        return A64_TMP;
+    }
+    return rd(t, sd, i->b, A64_TMP);
 }
 
 /* Materialise operand b into A64_TMP, whether it is a vreg or a folded
@@ -1128,15 +1222,23 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         switch (i->op) {
-        case IR_CONST:
-            a64_mov_imm(t, A64_ACC, i->imm, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+        case IR_CONST: {
+            int d = wr(i->dst, A64_ACC);
+            a64_mov_imm(t, d, i->imm, i->w);
+            wrote(t, sd, i->dst, d);
             break;
+        }
 
-        case IR_MOV:
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+        case IR_MOV: {
+            int src = rd(t, sd, i->a, A64_ACC);
+            if (a64_in_reg(i->dst)) {
+                int d = g_a64_loc[i->dst];
+                if (d != src) a64_mov_reg(t, d, src, 8);
+            } else {
+                a64_str(t, src, FB, sd[i->dst], 8);
+            }
             break;
+        }
 
         case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR: {
             if (i->flt) {
@@ -1147,27 +1249,31 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             }
             int op = i->op == IR_ADD ? '+' : i->op == IR_SUB ? '-'
                    : i->op == IR_AND ? '&' : i->op == IR_OR  ? '|' : '^';
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
-            operand_b(t, sd, i);
-            a64_alu_reg(t, op, A64_ACC, A64_ACC, A64_TMP, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+            int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
+            int d = wr(i->dst, A64_ACC);
+            a64_alu_reg(t, op, d, ra, rb, i->w);
+            wrote(t, sd, i->dst, d);
             break;
         }
 
         case IR_MUL:
             if (i->flt) { fbin(t, sd, i, '*'); break; }
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
-            operand_b(t, sd, i);
-            a64_mul(t, A64_ACC, A64_ACC, A64_TMP, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+            else {
+                int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
+                int d = wr(i->dst, A64_ACC);
+                a64_mul(t, d, ra, rb, i->w);
+                wrote(t, sd, i->dst, d);
+            }
             break;
 
         case IR_DIV:
             if (i->flt) { fbin(t, sd, i, '/'); break; }
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
-            operand_b(t, sd, i);
-            a64_div(t, A64_ACC, A64_ACC, A64_TMP, i->sign, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+            else {
+                int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
+                int d = wr(i->dst, A64_ACC);
+                a64_div(t, d, ra, rb, i->sign, i->w);
+                wrote(t, sd, i->dst, d);
+            }
             break;
 
         case IR_MOD:
@@ -1179,13 +1285,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             st_slot(t, sd, i->dst, A64_ACC, 8);
             break;
 
-        case IR_SHL: case IR_SHR:
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
-            operand_b(t, sd, i);
+        case IR_SHL: case IR_SHR: {
+            int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
+            int d = wr(i->dst, A64_ACC);
             a64_shift_reg(t, i->op == IR_SHL ? '<' : (i->sign ? '>' : 'u'),
-                          A64_ACC, A64_ACC, A64_TMP, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+                          d, ra, rb, i->w);
+            wrote(t, sd, i->dst, d);
             break;
+        }
 
         case IR_SQRT:
             a64_fldr(t, A64_FACC, FB, sd[i->a], i->w);
@@ -1224,31 +1331,59 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 int cc = i->pred == B_EQ ? A64_EQ : i->pred == B_NE ? A64_NE
                        : i->pred == B_LT ? A64_MI : i->pred == B_LE ? A64_LS
                        : i->pred == B_GT ? A64_GT : A64_GE;
-                a64_cset(t, A64_ACC, cc);
-                st_slot(t, sd, i->dst, A64_ACC, 8);
+                int d = wr(i->dst, A64_ACC);
+                a64_cset(t, d, cc);
+                wrote(t, sd, i->dst, d);
                 break;
             }
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
-            operand_b(t, sd, i);
-            a64_cmp_reg(t, A64_ACC, A64_TMP, i->w);
-            a64_cset(t, A64_ACC, cond_for(i->pred, i->sign));
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+            else {
+                /* cset writes the destination only after cmp has read
+                 * both operands, so the destination may be one of them. */
+                int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
+                int d = wr(i->dst, A64_ACC);
+                a64_cmp_reg(t, ra, rb, i->w);
+                a64_cset(t, d, cond_for(i->pred, i->sign));
+                wrote(t, sd, i->dst, d);
+            }
             break;
 
-        case IR_LDVAR:
-            ld_slot(t, sd, i->a, A64_ACC, i->size, i->sign, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+        case IR_LDVAR: {
+            int d = wr(i->dst, A64_ACC);
+            if (a64_in_reg(i->a)) {
+                int src = g_a64_loc[i->a];
+                if (a64_ldvar_plain(i->size, i->sign, i->w)) {
+                    if (d != src) a64_mov_reg(t, d, src, 8);
+                } else {
+                    a64_extend(t, d, src, i->size, i->sign, i->w);
+                }
+            } else {
+                a64_ldr(t, d, FB, sd[i->a], i->size, i->sign, i->w);
+            }
+            wrote(t, sd, i->dst, d);
             break;
+        }
 
-        case IR_STVAR:
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
-            st_slot(t, sd, i->dst, A64_ACC, i->size);
+        case IR_STVAR: {
+            int src = rd(t, sd, i->a, A64_ACC);
+            if (a64_in_reg(i->dst)) {
+                int d = g_a64_loc[i->dst];
+                if (i->size >= 8) {
+                    if (d != src) a64_mov_reg(t, d, src, 8);
+                } else {
+                    a64_extend(t, d, src, i->size, 0, 8);
+                }
+            } else {
+                a64_str(t, src, FB, sd[i->dst], i->size);
+            }
             break;
+        }
 
-        case IR_ADDR:
-            addr_of(t, A64_ACC, FB, sd[i->a]);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+        case IR_ADDR: {
+            int d = wr(i->dst, A64_ACC);
+            addr_of(t, d, FB, sd[i->a]);
+            wrote(t, sd, i->dst, d);
             break;
+        }
 
         case IR_STRADDR: {
             struct strsite hi, lo;
@@ -1336,23 +1471,28 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             break;
         }
 
-        case IR_LOAD:
-            ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
-            a64_ldr(t, A64_ACC, A64_ADDR, 0, i->size, i->sign, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+        case IR_LOAD: {
+            int addr = rd(t, sd, i->a, A64_ADDR);
+            int d = wr(i->dst, A64_ACC);
+            a64_ldr(t, d, addr, 0, i->size, i->sign, i->w);
+            wrote(t, sd, i->dst, d);
             break;
+        }
 
-        case IR_STORE:
-            ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
-            ld_slot(t, sd, i->b, A64_ACC, 8, 0, 8);
-            a64_str(t, A64_ACC, A64_ADDR, 0, i->size);
+        case IR_STORE: {
+            int addr = rd(t, sd, i->a, A64_ADDR);
+            int val = rd(t, sd, i->b, A64_ACC);
+            a64_str(t, val, addr, 0, i->size);
             break;
+        }
 
-        case IR_EXT:
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
-            a64_extend(t, A64_ACC, A64_ACC, i->size, i->sign, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+        case IR_EXT: {
+            int src = rd(t, sd, i->a, A64_ACC);
+            int d = wr(i->dst, A64_ACC);
+            a64_extend(t, d, src, i->size, i->sign, i->w);
+            wrote(t, sd, i->dst, d);
             break;
+        }
 
         case IR_BSWAP:
             ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
@@ -1398,18 +1538,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * already values -- the pass that built this refused
              * anything that could fault -- so there is nothing to
              * guard. NE, because the condition is a 0/1 truth value. */
-            ld_slot(t, sd, i->a, A64_ACC, 4, 0, 4);
-            ld_slot(t, sd, i->b, A64_TMP, i->w, i->sign, i->w);
-            ld_slot(t, sd, i->c, A64_SCR, i->w, i->sign, i->w);
-            a64_cmp_reg(t, A64_ACC, A64_ZR, 4);
-            a64_csel(t, A64_ACC, A64_TMP, A64_SCR, A64_NE, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, i->w);
+            int rc = rd_ext(t, sd, i->a, A64_ACC, 4, 0, 4);
+            int rb = rd_ext(t, sd, i->b, A64_TMP, i->w, i->sign, i->w);
+            int rs = rd_ext(t, sd, i->c, A64_SCR, i->w, i->sign, i->w);
+            a64_cmp_reg(t, rc, A64_ZR, 4);
+            int d = wr(i->dst, A64_ACC);
+            a64_csel(t, d, rb, rs, A64_NE, i->w);
+            wrote_n(t, sd, i->dst, d, i->w);
             break;
         }
         case IR_BRZ: case IR_BRNZ: {
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
+            int rc = rd(t, sd, i->a, A64_ACC);
             struct a64_fix fx;
-            fx.at = a64_cbz(t, A64_ACC, i->op == IR_BRNZ, i->w);
+            fx.at = a64_cbz(t, rc, i->op == IR_BRNZ, i->w);
             fx.label = i->label; fx.kind = FIX_B19;
             PUSH(fix, nfix, capfix, fx);
             break;
