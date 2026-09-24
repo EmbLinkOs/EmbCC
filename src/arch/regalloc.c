@@ -226,7 +226,11 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
      * in r8/r9 without clobbering. A leaf has no calls, so `crosses` stays 0. */
     char *crosses = xcalloc((size_t)(nvr ? nvr : 1), 1);
     for (int i = 0; i < nins; i++) {
-        if (fn->ins[i].op != IR_CALL)
+        /* ...and a call the IR does not spell IR_CALL: a backend that
+         * lowers some op to a runtime helper says so here, or its
+         * caller-saved registers are not safe (regalloc.h). */
+        if (fn->ins[i].op != IR_CALL &&
+            !(t->op_calls_helper && t->op_calls_helper(&fn->ins[i])))
             continue;
         unsigned long *lo = liveout + (size_t)i * lwords;
         for (int w = 0; w < lwords; w++) {

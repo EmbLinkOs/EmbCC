@@ -69,8 +69,13 @@ static int g_fb = A64_SP;
  *
  * Caller-saved first, so a short-lived value takes one and costs no
  * prologue save at all. */
-#define A64_NPOOL 7
-static const int A64_POOL[A64_NPOOL] = { 20, 21, 22, 23, 24, 25, 26 };
+#define A64_NPOOL 10
+static const int A64_POOL[A64_NPOOL] = { 13, 14, 15, 20, 21, 22, 23,
+                                         24, 25, 26 };
+/* The same list without x13 and x14, for a function that has an atomic
+ * op in it -- see the note below. */
+#define A64_NPOOL_AT 8
+static const int A64_POOL_AT[A64_NPOOL_AT] = { 15, 20, 21, 22, 23, 24, 25, 26 };
 
 /* CALLEE-SAVED ONLY, x20-x26, saved in the prologue and described in
  * the unwind tables. Both halves of that are required and the second is
@@ -86,32 +91,25 @@ static const int A64_POOL[A64_NPOOL] = { 20, 21, 22, 23, 24, 25, 26 };
  * for big offsets and indirect targets, and x13/x14 the atomics' extra
  * registers. That leaves x15.
  *
- * x15 DOES NOT GO IN THIS POOL YET, and the reason is not about x15.
+ * x13, x14 and x15 go in, and FIRST, because they are caller-saved: a
+ * short-lived value prefers one and skips the prologue save entirely.
+ * They cost no CFI rule either -- ra_allocate reports only CALLEE-saved
+ * registers in `used_out` -- so the eight-rule bound above is untouched.
  *
- * Seven registers is why 43.8% of the instructions this backend emits
- * for lib/libc touch memory, against gcc's 21.6%, so adding one was
- * worth trying. It miscompiles tests/exec/complex.c: a data abort at
- * 0x10, from
+ * x13 and x14 are the atomics' extra registers and nothing else's, so
+ * they are available to any function that has no atomic op. That is not
+ * a question the shared allocator needs to learn: the backend simply
+ * hands ra_allocate a different ra_target (A64_RA_ATOMIC) for the
+ * functions that do.
  *
- *     add x15, sp, #0x8f0      the address of a local
- *     ...
- *     bl  __divtf3             a long double divide
- *     ...
- *     add x15, x15, #16        x15 is now whatever the helper left
- *
- * A caller-saved register is sound only for a value that does not cross
- * a call, and the shared allocator enforces exactly that -- for the
- * calls it can SEE. `__divtf3` is not one of them: long double
- * arithmetic, its comparisons and its conversions lower to runtime
- * helpers HERE, in codegen, with no IR_CALL anywhere in the IR the
- * allocator scanned. The same goes for __int128 divide and remainder.
- *
- * So the allocator's `crosses` mask is a lie in any function that uses
- * one, and today nothing notices only because every pool register is
- * callee-saved. Making an op that lowers to a helper say so -- a
- * ra_target question, the way call_int_arg_in_reg is one -- is what has
- * to come first; then x15 goes in, and x13/x14 behind it in any
- * function with no atomic op, taking the pool from seven to ten.
+ * It could not go in until the allocator was told about the calls this
+ * file makes without an IR_CALL. Long double arithmetic becomes
+ * __addtf3 and friends, __int128 divide becomes __divti3, and a value
+ * live across one looked to `crosses` like a value that crossed
+ * nothing -- so the first attempt at this produced a data abort at 0x10
+ * in tests/exec/complex.c, an address computed before a `bl __divtf3`
+ * and used after it. a64_op_calls_helper is the answer, and x13/x14 can
+ * follow once a function with no atomic op can say so.
  *
  * Which is how the first version of this pool was wrong. It read
  * "x9-x15 are caller-saved temporaries" off the ABI and handed out
@@ -131,6 +129,35 @@ static int a64_ldvar_plain(int size, int sign, int w)
     return size == 8 || (size == 4 && !(sign && w == 8));
 }
 
+/* The two dispatchers below handle every instruction whose operands are
+ * sixteen bytes, and SOME of their arms call a libgcc helper: long
+ * double arithmetic and its conversions, __int128 multiply, divide,
+ * remainder and shifts. This answers for the whole of both, not just
+ * the calling arms -- being wrong in the other direction costs one
+ * register on one value, and being wrong in this direction costs a
+ * clobbered address (regalloc.h). */
+static int a64_ld_ins(const struct ir_ins *i);
+static int a64_i128_ins(const struct ir_ins *i);
+static int a64_op_calls_helper(const struct ir_ins *i)
+{
+    return a64_i128_ins(i) || a64_ld_ins(i);
+}
+
+/* Is x13/x14 spoken for? They are the atomics' scratch and nothing
+ * else's, so only a function containing one has to give them up. */
+static int a64_has_atomic(const struct ir_func *fn)
+{
+    for (int n = 0; n < fn->nins; n++)
+        switch (fn->ins[n].op) {
+        case IR_XCHG: case IR_XADD: case IR_ARMW:
+        case IR_CAS: case IR_CAS16: case IR_CMPXCHG:
+            return 1;
+        default:
+            break;
+        }
+    return 0;
+}
+
 static const struct ra_target A64_RA = {
     A64_POOL, A64_NPOOL,
     NULL, 0,                              /* a variadic prologue spills
@@ -139,11 +166,28 @@ static const struct ra_target A64_RA = {
                                            * same one */
     a64_callee_saved,
     a64_ldvar_plain,
-    0, 1, 0        /* a scalar return goes out through ld_slot, which
+    0, 1, 0,       /* a scalar return goes out through ld_slot, which
                     * takes it from a register when it has one. A call's
                     * arguments and a memcpy's addresses are still read
                     * from their slots, so those values have to stay
                     * there. */
+    a64_op_calls_helper
+};
+
+static const struct ra_target A64_RA_ATOMIC = {
+    A64_POOL_AT, A64_NPOOL_AT,
+    NULL, 0,                              /* a variadic prologue spills
+                                           * x0-x7, none of which is in
+                                           * the pool, so the pool is the
+                                           * same one */
+    a64_callee_saved,
+    a64_ldvar_plain,
+    0, 1, 0,       /* a scalar return goes out through ld_slot, which
+                    * takes it from a register when it has one. A call's
+                    * arguments and a memcpy's addresses are still read
+                    * from their slots, so those values have to stay
+                    * there. */
+    a64_op_calls_helper
 };
 
 /* Where each vreg lives: a register, or -1 for its stack slot. NULL when
@@ -1088,8 +1132,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 break;
             }
         if (!cgoto)
-            g_a64_loc = ra_allocate(fn, &A64_RA, g_a64_wide,
-                                    used_callee, &nsave);
+            g_a64_loc = ra_allocate(fn,
+                                    a64_has_atomic(fn) ? &A64_RA_ATOMIC
+                                                       : &A64_RA,
+                                    g_a64_wide, used_callee, &nsave);
     }
     long *sd = layout_frame(fn, &fr, want_debug);
     /* Room for the callee-saved registers the allocator took. Eight

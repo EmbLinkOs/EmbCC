@@ -82,6 +82,24 @@ struct ra_target {
     int call_int_arg_in_reg;   /* a scalar-integer call argument */
     int ret_scalar_in_reg;     /* a scalar return value */
     int memcpy_addr_in_reg;    /* IR_MEMCPY / IR_MEMZERO address operands */
+
+    /* Does this instruction lower to a runtime-helper CALL that the IR
+     * does not show as one? May be NULL for a backend with none.
+     *
+     * `crosses` is built by finding IR_CALL, which is every call the IR
+     * knows about and not every call the machine makes. Long double
+     * arithmetic on aarch64 becomes __addtf3 and friends, and __int128
+     * divide becomes __divti3, both emitted in codegen with no IR_CALL
+     * anywhere -- so a value live across one looked to the allocator
+     * like a value that crossed nothing, and was free to take a
+     * CALLER-saved register the helper then clobbered.
+     *
+     * That was invisible only because every register in the aarch64
+     * pool happened to be callee-saved. Putting x15 in it produced a
+     * data abort at 0x10 in tests/exec/complex.c: an address computed
+     * before a `bl __divtf3` and used after it. Answering this question
+     * is what makes a caller-saved pool sound. */
+    int (*op_calls_helper)(const struct ir_ins *i);
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that

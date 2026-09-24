@@ -98,8 +98,15 @@ static const struct ra_target X86_RA = {
     VARIADIC_POOL, NVARIADIC,
     is_callee_saved,
     ldvar_plain,
-    1, 1, 1        /* this backend reads call arguments, scalar returns
+    1, 1, 1,       /* this backend reads call arguments, scalar returns
                     * and memcpy addresses straight out of a register */
+    NULL           /* No op here lowers to a helper call behind the
+                    * allocator's back. __int128 does call libgcc, but a
+                    * function containing one is kept out of the
+                    * allocator entirely (fn->has_i128, below), and long
+                    * double is the x87 unit rather than a call. If that
+                    * blunt refusal is ever traded for the precise rule,
+                    * i128_ins is what belongs here. */
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----
