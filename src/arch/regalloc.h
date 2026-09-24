@@ -34,8 +34,13 @@
 
 /* The most registers any target here offers the allocator. Sizes the
  * per-colour arrays; a literal because EmbCC's own subset does not fold
- * a sizeof/sizeof there. */
-#define RA_MAXPOOL 16
+ * a sizeof/sizeof there. It also bounds the `taken`/`want` bitmasks in
+ * colouring, which are plain ints -- so this may grow to 31 and no
+ * further without widening those.
+ *
+ * Eighteen is what aarch64 asks for: x13-x15, the eight argument
+ * registers, and x20-x26. */
+#define RA_MAXPOOL 24
 
 struct ra_target {
     /* The pool a normal function draws from, preferred first: put the

@@ -69,13 +69,25 @@ static int g_fb = A64_SP;
  *
  * Caller-saved first, so a short-lived value takes one and costs no
  * prologue save at all. */
-#define A64_NPOOL 10
-static const int A64_POOL[A64_NPOOL] = { 13, 14, 15, 20, 21, 22, 23,
-                                         24, 25, 26 };
+#define A64_NPOOL 18
+static const int A64_POOL[A64_NPOOL] = { 13, 14, 15,           /* free */
+                                         0, 1, 2, 3, 4, 5, 6, 7, /* args */
+                                         20, 21, 22, 23, 24, 25, 26 };
 /* The same list without x13 and x14, for a function that has an atomic
  * op in it -- see the note below. */
-#define A64_NPOOL_AT 8
-static const int A64_POOL_AT[A64_NPOOL_AT] = { 15, 20, 21, 22, 23, 24, 25, 26 };
+#define A64_NPOOL_AT 16
+static const int A64_POOL_AT[A64_NPOOL_AT] = { 15,
+                                               0, 1, 2, 3, 4, 5, 6, 7,
+                                               20, 21, 22, 23, 24, 25, 26 };
+/* A VARIADIC function's pools: the argument registers are dropped,
+ * because its prologue spills x0-x7 to the register-save area that
+ * va_arg reads. Everything else is unchanged. */
+#define A64_NPOOL_VA 10
+static const int A64_POOL_VA[A64_NPOOL_VA] = { 13, 14, 15, 20, 21, 22,
+                                               23, 24, 25, 26 };
+#define A64_NPOOL_VA_AT 8
+static const int A64_POOL_VA_AT[A64_NPOOL_VA_AT] = { 15, 20, 21, 22, 23,
+                                                     24, 25, 26 };
 
 /* CALLEE-SAVED ONLY, x20-x26, saved in the prologue and described in
  * the unwind tables. Both halves of that are required and the second is
@@ -160,10 +172,7 @@ static int a64_has_atomic(const struct ir_func *fn)
 
 static const struct ra_target A64_RA = {
     A64_POOL, A64_NPOOL,
-    NULL, 0,                              /* a variadic prologue spills
-                                           * x0-x7, none of which is in
-                                           * the pool, so the pool is the
-                                           * same one */
+    A64_POOL_VA, A64_NPOOL_VA,
     a64_callee_saved,
     a64_ldvar_plain,
     0, 1, 0,       /* a scalar return goes out through ld_slot, which
@@ -176,10 +185,7 @@ static const struct ra_target A64_RA = {
 
 static const struct ra_target A64_RA_ATOMIC = {
     A64_POOL_AT, A64_NPOOL_AT,
-    NULL, 0,                              /* a variadic prologue spills
-                                           * x0-x7, none of which is in
-                                           * the pool, so the pool is the
-                                           * same one */
+    A64_POOL_VA_AT, A64_NPOOL_VA_AT,
     a64_callee_saved,
     a64_ldvar_plain,
     0, 1, 0,       /* a scalar return goes out through ld_slot, which
@@ -689,6 +695,55 @@ static void operand_b(struct code *t, const long *sd, struct ir_ins *i)
         a64_mov_imm(t, A64_TMP, i->imm, i->w);
     else
         ld_slot(t, sd, i->b, A64_TMP, 8, 0, 8);
+}
+
+/* ---- moving a whole set of registers at once -------------------------
+ *
+ * Homing the parameters, and setting up a call's arguments, are both
+ * "put these values in those registers" -- and doing that one move at a
+ * time is only safe while the sources and the destinations are disjoint
+ * sets. They are today, because every allocatable register (x13-x15,
+ * x20-x26) is one AAPCS64 never passes an argument in. The moment x0-x7
+ * become allocatable that stops being true: `mov x0, x3` followed by
+ * `mov x3, x1` is fine, and `mov x0, x3` followed by `mov x1, x0` is a
+ * parameter delivered twice and another one lost.
+ *
+ * So emit the set as a unit: repeatedly take any move whose destination
+ * is nobody else's remaining source, and when only cycles are left,
+ * break one by parking its destination in the scratch. x12 is that
+ * scratch and is in no pool.
+ *
+ * This is the x86 backend's emit_reg_parallel_move, which has wanted a
+ * second caller for a while; once this one has run in anger the pair
+ * should be lifted (D-011). */
+static void a64_parallel_move(struct code *t, int *dst, int *src, int n,
+                              int scratch)
+{
+    char done[MAX_PARAMS];
+    int remaining = 0;
+    for (int i = 0; i < n; i++) {
+        done[i] = (dst[i] == src[i]);        /* an identity move is a no-op */
+        if (!done[i]) remaining++;
+    }
+    while (remaining > 0) {
+        int progressed = 0;
+        for (int i = 0; i < n; i++) {
+            if (done[i]) continue;
+            int blocked = 0;
+            for (int j = 0; j < n; j++)
+                if (!done[j] && j != i && src[j] == dst[i]) { blocked = 1; break; }
+            if (blocked) continue;
+            a64_mov_reg(t, dst[i], src[i], 8);
+            done[i] = 1; remaining--; progressed = 1;
+        }
+        if (progressed)
+            continue;
+        int c = -1;                          /* only cycles left: break one */
+        for (int i = 0; i < n; i++) if (!done[i]) { c = i; break; }
+        a64_mov_reg(t, scratch, dst[c], 8);
+        for (int j = 0; j < n; j++)
+            if (!done[j] && src[j] == dst[c]) src[j] = scratch;
+    }
 }
 
 /* dst = src + off, where src may be sp. */
@@ -1201,9 +1256,29 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * Arguments on the caller's stack sit above this frame: x29 points at
      * the saved x29/x30 pair, so the caller's area begins at x29+16. */
     {
-        struct a64_cursor cu = { 0, 0, 0, 0 };
+        struct a64_cursor cu;
+        /* A parameter whose home is a register is delivered by a move
+         * from the register it arrived in, and those moves go out as a
+         * SET (a64_parallel_move): a home may be an argument register
+         * that another parameter has not been read out of yet. The
+         * narrowing ones are re-extended afterwards, in place on the
+         * home, which reads and writes only that register and so cannot
+         * disturb the rest. */
+        int pmv_dst[MAX_PARAMS], pmv_src[MAX_PARAMS], npmv = 0;
+        int pext_reg[MAX_PARAMS], pext_size[MAX_PARAMS], npext = 0;
         if (fr.sret >= 0)
             a64_str(t, A64_SRET, FB, fr.sret, 8);
+        /* Two passes, because everything that READS an incoming
+         * argument register has to happen before anything WRITES one,
+         * and a home may now be an argument register. Pass one takes
+         * every parameter that arrived in a register: the composites go
+         * straight to memory, the scalars are collected for the move
+         * below. Pass two takes the ones that arrived on the stack --
+         * they read the caller's frame and write their homes, which is
+         * only safe once the move has emptied those registers. Getting
+         * this backwards cost `many(1..14)` six of its arguments. */
+        for (int pass = 0; pass < 2; pass++) {
+        cu.ngrn = 0; cu.nsrn = 0; cu.nsaa = 0; cu.byref_bytes = 0;
         for (int p = 0; p < f->nparams; p++) {
             struct a64_argplan pl;
             /* 0, 0: a function's DECLARED parameters are all named, so
@@ -1212,6 +1287,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * not this placement's. */
             a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl,
                           0, 0);
+            int on_stack = (pl.where != AP_V && pl.where != AP_X && !pl.byref)
+                        || (pl.byref && pl.where == AP_STACK);
+            if (on_stack != pass)
+                continue;                  /* the other pass owns this one */
             if (pl.where == AP_V) {
                 for (int q = 0; q < pl.nreg; q++)
                     a64_fstr(t, pl.reg + q, FB, sd[p] + q * pl.esz, pl.esz);
@@ -1237,7 +1316,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                      * bug -- `struct S s = mk(7, 35)` came back wrong
                      * because mk's two parameters were allocated and
                      * never arrived. */
-                    st_slot(t, sd, p, pl.reg, pl.size > 8 ? 8 : pl.size);
+                {
+                    int psz = pl.size > 8 ? 8 : pl.size;
+                    if (a64_in_reg(p)) {
+                        pmv_dst[npmv] = g_a64_loc[p];
+                        pmv_src[npmv] = pl.reg;
+                        npmv++;
+                        if (psz < 8) {
+                            pext_reg[npext] = g_a64_loc[p];
+                            pext_size[npext] = psz;
+                            npext++;
+                        }
+                    } else {
+                        st_slot(t, sd, p, pl.reg, psz);
+                    }
+                }
             } else if (pl.is_struct || pl.size == 16) {  /* or a long double */
                 addr_of(t, A64_ADDR, FB, sd[p]);
                 addr_of(t, A64_TMP, A64_FP, 16 + pl.stk_off);
@@ -1246,6 +1339,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 a64_ldr(t, A64_ACC, A64_FP, 16 + pl.stk_off, 8, 0, 8);
                 st_slot(t, sd, p, A64_ACC, pl.size > 8 ? 8 : pl.size);
             }
+        }
+        if (pass == 0) {
+            if (npmv)
+                a64_parallel_move(t, pmv_dst, pmv_src, npmv, A64_SCR);
+            for (int k = 0; k < npext; k++)
+                a64_extend(t, pext_reg[k], pext_reg[k], pext_size[k], 0, 8);
+        }
         }
     }
 
@@ -1725,6 +1825,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             }
             /* 3. Register arguments, in order; each writes only its own
              * register, so no shuffle is needed. */
+            /* A scalar argument already in a register is moved, and
+             * those moves go out as a SET: once x0-x7 are allocatable a
+             * source can be an argument register another argument has
+             * not been written to yet. Everything else -- a struct, a
+             * float, an __int128, a by-reference copy, a value in its
+             * slot -- is loaded from memory and cannot collide. */
+            int amv_dst[MAX_PARAMS], amv_src[MAX_PARAMS], namv = 0;
             for (int k = 0; k < i->nargs; k++) {
                 int v = i->argv[k].vreg;
                 if (pl[k].where == AP_V) {
@@ -1746,11 +1853,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                     } else if (pl[k].nreg == 2) {         /* an __int128 */
                         a64_ldr(t, pl[k].reg, FB, sd[v], 8, 0, 8);
                         a64_ldr(t, pl[k].reg + 1, FB, sd[v] + 8, 8, 0, 8);
+                    } else if (a64_in_reg(v)) {
+                        amv_dst[namv] = pl[k].reg;
+                        amv_src[namv] = g_a64_loc[v];
+                        namv++;
                     } else {
                         ld_slot(t, sd, v, pl[k].reg, 8, 0, 8);
                     }
                 }
             }
+            if (namv)
+                a64_parallel_move(t, amv_dst, amv_src, namv, A64_SCR);
             /* A large composite return: the callee writes it to our scratch
              * through x8. */
             /* Precomputed by irgen (§9.1): the IR carries the ABI answer,
