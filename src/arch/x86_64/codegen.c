@@ -81,8 +81,37 @@ static const int VARIADIC_POOL[NVARIADIC] = { 10, 11, 3 /*rbx*/, 12, 13, 14, 15 
  * move would clobber a source still held there) — enforced by the `crosses` /
  * `is_arg` masks in colouring. A leaf function has neither constraint, so it
  * gets all nine freely. NLEAF sizes the allocator's per-colour arrays. */
-#define NLEAF 9
-static const int LEAF_POOL[NLEAF] = { 8, 9, 10, 11, 3 /*rbx*/, 12, 13, 14, 15 };
+#define NLEAF 10
+static const int LEAF_POOL[NLEAF] = { 8, 9, 10, 11, 6 /*rsi*/,
+                                      3 /*rbx*/, 12, 13, 14, 15 };
+/* rdi is NOT here, and it was tried. It is argument register zero AND
+ * the hidden pointer a struct return travels through, so it is written
+ * at more call sites than any other -- and <format>, whose every result
+ * is a std::string, failed every floating-point case with it in.
+ * Emitting the sret `lea` after the parallel move (below) fixes one of
+ * those writes and is kept for when the rest are found; it is not
+ * enough on its own. */
+/* ...without rsi, for a function that has an atomic in it: IR_CMPXCHG
+ * parks `&expected` there across the compare-exchange. rdi stays,
+ * because nothing outside the __int128 lowering uses it -- and a
+ * function containing an __int128 is kept out of the allocator
+ * entirely. */
+#define NLEAF_AT 9
+static const int LEAF_POOL_AT[NLEAF_AT] = { 8, 9, 10, 11,
+                                            3 /*rbx*/, 12, 13, 14, 15 };
+
+static int x86_has_atomic(const struct ir_func *fn)
+{
+    for (int n = 0; n < fn->nins; n++)
+        switch (fn->ins[n].op) {
+        case IR_XCHG: case IR_XADD: case IR_ARMW:
+        case IR_CAS: case IR_CAS16: case IR_CMPXCHG:
+            return 1;
+        default:
+            break;
+        }
+    return 0;
+}
 
 /* Does a register need callee-save preservation (rbx, r12..r15)? r8..r11 are
  * caller-saved — free to clobber, so no prologue slot. */
@@ -130,6 +159,28 @@ static int x86_fp_callee_saved(int reg) { (void)reg; return 0; }
 
 static const struct ra_target X86_RA = {
     LEAF_POOL, NLEAF,
+    VARIADIC_POOL, NVARIADIC,
+    is_callee_saved,
+    ldvar_plain,
+    1, 1, 1,       /* this backend reads call arguments, scalar returns
+                    * and memcpy addresses straight out of a register */
+    NULL           /* No op here lowers to a helper call behind the
+                    * allocator's back. __int128 does call libgcc, but a
+                    * function containing one is kept out of the
+                    * allocator entirely (fn->has_i128, below), and long
+                    * double is the x87 unit rather than a call. If that
+                    * blunt refusal is ever traded for the precise rule,
+                    * i128_ins is what belongs here. */,
+    NULL           /* No ABI hints yet. The same three boundaries exist
+                    * here -- a parameter's register, rax for a call's
+                    * result and for a return -- and none of rdi/rsi/rax
+                    * is in this backend's pool, so a hint naming one
+                    * would never match. That changes if the pool ever
+                    * grows to them. */,
+    X86_FPOOL, NX86_FPOOL, x86_fp_callee_saved
+};
+static const struct ra_target X86_RA_ATOMIC = {
+    LEAF_POOL_AT, NLEAF_AT,
     VARIADIC_POOL, NVARIADIC,
     is_callee_saved,
     ldvar_plain,
@@ -1720,7 +1771,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int used_callee[NCALLEE], nsave = 0;
     int *loc = NULL;
     if (g_regalloc && !g_has_cgoto) {
-        loc = ra_allocate(fn, &X86_RA, g_wide, used_callee, &nsave);
+        const struct ra_target *rt = x86_has_atomic(fn) ? &X86_RA_ATOMIC
+                                                        : &X86_RA;
+        loc = ra_allocate(fn, rt, g_wide, used_callee, &nsave);
         g_loc = loc;
         /* The float class, from the same liveness and the same
          * colourer. Its pool is caller-saved throughout, so it reports
@@ -1728,7 +1781,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
         g_flt = cg_float_vregs(fn);
         {
             int fsave[NX86_FPOOL], nfsave = 0;
-            g_floc = ra_allocate_fp(fn, &X86_RA, g_wide, g_flt,
+            g_floc = ra_allocate_fp(fn, rt, g_wide, g_flt,
                                     fsave, &nfsave);
             (void)nfsave;
             /* ...and thrown away again until the slot question above is
@@ -3182,9 +3235,15 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * register Windows does not read and left rcx holding the
              * first real argument, so the callee wrote its result
              * through whatever that happened to be. */
+            int sret_lea = 0;
             if (i->retsize && i->retnclass == 0 && !i->ret_x87) {
-                x86_lea_reg_slot(text, x86_argreg(0),
-                                 scratch_base + i->scratch);
+                /* Recorded, not emitted: this writes argument register
+                 * zero, and the parallel move below still has to READ
+                 * the registers its sources live in -- one of which can
+                 * be that one now that rdi is allocatable. Emitting it
+                 * here cost every float in <format>, whose result is a
+                 * std::string and so travels through this pointer. */
+                sret_lea = 1;
                 ireg++;
                 /* Only Microsoft x64 keeps the two counters in step --
                  * the hidden pointer consumes SLOT zero there, so the
@@ -3242,6 +3301,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 }
             }
             emit_reg_parallel_move(text, mvdest, mvsrc, nmv, REG_RAX);
+            if (sret_lea)                 /* now that nothing reads rdi */
+                x86_lea_reg_slot(text, x86_argreg(0),
+                                 scratch_base + i->scratch);
             for (int k = 0; k < i->nargs; k++) {
                 struct ir_arg *a = &i->argv[k];
                 if (a->on_stack)
