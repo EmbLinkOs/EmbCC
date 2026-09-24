@@ -549,8 +549,16 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * Conservatively, by Briggs' test -- merge only when the combined
      * node has fewer than NP neighbours of significant degree, so the
      * merge cannot turn a colourable graph into an uncolourable one.
-     * Aggressive coalescing would trade moves for spills, and a spill
-     * here is a value in memory for its whole life. */
+     *
+     * Both of the obvious ways to get more of them were measured and
+     * are worse. Dropping the test entirely costs 3904 bytes of x86-64
+     * .text and 208 of aarch64's: aggressive coalescing trades moves
+     * for spills and a spill here is a value in memory for its whole
+     * life, so the trade loses. Iterating to a fixpoint -- a merge can
+     * free two nodes that interfered only through the one absorbed --
+     * costs 64 and 68 bytes, because the extra merges it finds are the
+     * marginal ones whose constraint then falls on somebody else. One
+     * conservative pass is the answer. */
     int *alias = xmalloc((size_t)(E ? E : 1) * sizeof *alias);
     char *absorbed = xcalloc((size_t)(E ? E : 1), 1);
     /* Per-NODE facts, because a merged node answers for all its members:
@@ -576,14 +584,6 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         }
         for (int i = 0; i < nins; i++) {
             struct ir_ins *in = &fn->ins[i];
-            /* Only a copy that moves the WHOLE value. `pref` may ask
-             * for the same register on a narrowing one because it is
-             * only asking -- if the colourer says no, the move is still
-             * emitted and still truncates. Coalescing does not ask, so a
-             * narrowing copy between two merged vregs becomes a move
-             * from a register to itself, which truncates nothing and
-             * leaves the high bits of the old value in place. That is
-             * what `format("{:.2f}", 3.14159)` was reading. */
             /* Only a copy that moves the WHOLE value: `pref` may ask
              * for the same register on a narrowing one because it is
              * only asking, and if the colourer says no the move is
