@@ -86,6 +86,33 @@ static const int A64_POOL[A64_NPOOL] = { 20, 21, 22, 23, 24, 25, 26 };
  * for big offsets and indirect targets, and x13/x14 the atomics' extra
  * registers. That leaves x15.
  *
+ * x15 DOES NOT GO IN THIS POOL YET, and the reason is not about x15.
+ *
+ * Seven registers is why 43.8% of the instructions this backend emits
+ * for lib/libc touch memory, against gcc's 21.6%, so adding one was
+ * worth trying. It miscompiles tests/exec/complex.c: a data abort at
+ * 0x10, from
+ *
+ *     add x15, sp, #0x8f0      the address of a local
+ *     ...
+ *     bl  __divtf3             a long double divide
+ *     ...
+ *     add x15, x15, #16        x15 is now whatever the helper left
+ *
+ * A caller-saved register is sound only for a value that does not cross
+ * a call, and the shared allocator enforces exactly that -- for the
+ * calls it can SEE. `__divtf3` is not one of them: long double
+ * arithmetic, its comparisons and its conversions lower to runtime
+ * helpers HERE, in codegen, with no IR_CALL anywhere in the IR the
+ * allocator scanned. The same goes for __int128 divide and remainder.
+ *
+ * So the allocator's `crosses` mask is a lie in any function that uses
+ * one, and today nothing notices only because every pool register is
+ * callee-saved. Making an op that lowers to a helper say so -- a
+ * ra_target question, the way call_int_arg_in_reg is one -- is what has
+ * to come first; then x15 goes in, and x13/x14 behind it in any
+ * function with no atomic op, taking the pool from seven to ten.
+ *
  * Which is how the first version of this pool was wrong. It read
  * "x9-x15 are caller-saved temporaries" off the ABI and handed out
  * x12, x13 and x14 -- registers the backend was already using -- so a
