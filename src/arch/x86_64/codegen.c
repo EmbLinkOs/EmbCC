@@ -1636,6 +1636,22 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * arg registers are already spilled to the save area). */
     int pmove = g_regalloc && g_loc && !g_want_debug && !f->is_varargs;
     int pmv_src[MAX_PARAMS], pmv_dst[MAX_PARAMS], npmv = 0;
+    /* A STACK-passed parameter whose home is a register is loaded after
+     * the shuffle below, not during the loop that collects it.
+     *
+     * Its home may be an ARGUMENT register -- r8 and r9 are both in the
+     * allocator's pool -- and until the shuffle runs, the argument
+     * registers still hold the parameters that arrived in them. Loading
+     * into r9 during the loop destroyed the sixth parameter before the
+     * shuffle read it, in any function with a seventh that the allocator
+     * homed there. The loop's own comment already relied on this: "params
+     * reach their allocated registers only in the parallel move that runs
+     * after this loop" was true of every other path and not of this one.
+     *
+     * These are not part of the permutation -- their source is memory --
+     * so they need no cycle breaking, only to come after it. */
+    int pstk_dst[MAX_PARAMS], pstk_off[MAX_PARAMS], pstk_sz[MAX_PARAMS];
+    int npstk = 0;
     char pmoved[MAX_PARAMS];
     for (int p = 0; p < MAX_PARAMS; p++) pmoved[p] = 0;
     {   /* The same two-file split, in reverse. A hidden return pointer
@@ -1694,9 +1710,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 }
                 if (slot >= 4) {
                     if (pmove && g_loc[i] >= 0) {       /* as SysV, above */
-                        x86_load_reg_mem(text, g_loc[i], REG_RBP, incoming,
-                                         ty_size(pt));
-                        pmoved[i] = 1;
+                        pstk_dst[npstk] = g_loc[i];
+                        pstk_off[npstk] = incoming;
+                        pstk_sz[npstk] = ty_size(pt);
+                        npstk++; pmoved[i] = 1;
                     } else {
                         x86_load_reg_mem(text, REG_RAX, REG_RBP, incoming, 8);
                         x86_store_slot(text, sd[i], 8);
@@ -1754,9 +1771,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
                      * reason a stack-passed parameter's slot has to
                      * exist at all. */
                     if (pmove && g_loc[i] >= 0) {
-                        x86_load_reg_mem(text, g_loc[i], REG_RBP, incoming,
-                                         ty_size(pt));
-                        pmoved[i] = 1;
+                        pstk_dst[npstk] = g_loc[i];
+                        pstk_off[npstk] = incoming;
+                        pstk_sz[npstk] = ty_size(pt);
+                        npstk++; pmoved[i] = 1;
                     } else {
                         x86_load_reg_mem(text, REG_RAX, REG_RBP, incoming, 8);
                         x86_store_slot(text, sd[i], 8);
@@ -1813,6 +1831,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * once (handles the r8/r9 overlap and any cycle via RAX, which is free
          * here and never an arg or allocated register). */
         if (npmv) emit_reg_parallel_move(text, pmv_dst, pmv_src, npmv, REG_RAX);
+        /* and only now the stack-passed ones, whose homes may be the
+         * argument registers the shuffle has just finished reading */
+        for (int k = 0; k < npstk; k++)
+            x86_load_reg_mem(text, pstk_dst[k], REG_RBP, pstk_off[k],
+                             pstk_sz[k]);
         va_named_int = ireg;
         va_named_sse = freg;
         va_overflow = incoming;
