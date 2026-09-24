@@ -525,7 +525,7 @@ no reason":
 | `sroa` | `split-into-scalars` / `kept-whole` **per aggregate**, with the reason it is still one object |
 | `unroll` | `unrolled`: how many copies of a body, and how long the body was |
 | `sccp` | `branch-always-jumps` / `branch-never-jumps` when a condition folds to a constant |
-| `opt` | `optimized`: what the whole fixpoint came to, as instructions before → after |
+| `opt` | `optimized`: what the whole fixpoint came to, as instructions before → after; `rewrote`: one line of counts for the passes that are otherwise silent — value numbering, global CSE, load reuse, copies, dead code, dead stores, selects, partial redundancies |
 | `regalloc` | `spilled-to-stack`: how many values missed a register, out of how many, against how many registers exist |
 
 **"Why is my variable still on the stack?"** is the question `mem2reg`

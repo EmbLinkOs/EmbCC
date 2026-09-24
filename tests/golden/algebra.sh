@@ -82,6 +82,13 @@ echo "'1 + x' and 'x + 1' are one value"
 # temps. Keyed by temp, `x & -2` in one block and `x & -2` in another
 # were two different values and never matched. Keyed by VALUE they do,
 # which is very nearly all of what that pass had been missing.
+#
+# Built with -fno-pre, because partial redundancy elimination keys
+# constants the same way and runs first in the round, so with it on this
+# redundancy is gone before global CSE is asked again and the count
+# below reads zero. The emitted code is identical either way -- what
+# moves is which pass gets the credit -- and the claim under test here
+# is about global CSE's keying, so the other pass is held out of it.
 cat > "$out/gcse.c" <<'EOF'
 void sink(long);
 void f(long a, long w)
@@ -90,7 +97,7 @@ void f(long a, long w)
     sink((a & -2) - w);
 }
 EOF
-n=$("$EMBCC" --target=x86_64-linux-gnu -O2 -fremarks -c "$out/gcse.c" \
+n=$("$EMBCC" --target=x86_64-linux-gnu -O2 -fno-pre -fremarks -c "$out/gcse.c" \
       -o /dev/null 2>&1 | sed -n 's/.*, \([0-9]*\) global cse.*/\1/p' |
     awk '{s+=$1} END {print s+0}')
 [ "$n" -ge 1 ] || {
