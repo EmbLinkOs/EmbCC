@@ -171,6 +171,8 @@ static int a64_has_atomic(const struct ir_func *fn)
     return 0;
 }
 
+static void a64_abi_hints(const struct ir_func *fn, int *hint);
+
 static const struct ra_target A64_RA = {
     A64_POOL, A64_NPOOL,
     A64_POOL_VA, A64_NPOOL_VA,
@@ -183,7 +185,8 @@ static const struct ra_target A64_RA = {
                     * takes it from a register when it has one. A
                     * memcpy's addresses are still read from their
                     * slots, so those values have to stay there. */
-    a64_op_calls_helper
+    a64_op_calls_helper,
+    a64_abi_hints
 };
 
 static const struct ra_target A64_RA_ATOMIC = {
@@ -196,7 +199,8 @@ static const struct ra_target A64_RA_ATOMIC = {
                     * arguments and a memcpy's addresses are still read
                     * from their slots, so those values have to stay
                     * there. */
-    a64_op_calls_helper
+    a64_op_calls_helper,
+    a64_abi_hints
 };
 
 /* Where each vreg lives: a register, or -1 for its stack slot. NULL when
@@ -737,6 +741,32 @@ static void operand_b(struct code *t, const long *sd, struct ir_ins *i)
         a64_mov_imm(t, A64_TMP, i->imm, i->w);
     else
         ld_slot(t, sd, i->b, A64_TMP, 8, 0, 8);
+}
+
+/* Where AAPCS64 would put each value if it had the choice. A parameter
+ * arrives in a register and is moved to its home; a call's result comes
+ * back in x0 and is moved out; a returned value is moved into x0. Each
+ * of those moves disappears when the home IS that register, and the
+ * allocator will use one if it is free. */
+static void a64_abi_hints(const struct ir_func *fn, int *hint)
+{
+    struct func *f = fn->src;
+    struct a64_cursor cu = { 0, 0, 0, 0 };
+    for (int p = 0; f && p < f->nparams && p < fn->nvregs; p++) {
+        struct a64_argplan pl;
+        a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl, 0, 0);
+        if (pl.where == AP_X && !pl.byref && !pl.is_struct && pl.nreg == 1)
+            hint[p] = pl.reg;
+    }
+    for (int i = 0; i < fn->nins; i++) {
+        const struct ir_ins *s = &fn->ins[i];
+        if (s->op == IR_CALL && !s->flt && !s->retsize &&
+            s->dst >= 0 && s->dst < fn->nvregs)
+            hint[s->dst] = 0;
+        else if (s->op == IR_RET && !s->flt &&
+                 s->a >= 0 && s->a < fn->nvregs)
+            hint[s->a] = 0;
+    }
 }
 
 /* ---- moving a whole set of registers at once -------------------------

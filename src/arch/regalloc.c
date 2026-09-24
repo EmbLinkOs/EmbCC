@@ -245,6 +245,10 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
     int NP = variadic && t->pool_varargs ? t->npool_varargs
                                           : t->npool;
 
+    int *hint = xmalloc((size_t)nvr * sizeof *hint);
+    for (int v = 0; v < nvr; v++) hint[v] = -1;
+    if (t->abi_hints) t->abi_hints(fn, hint);
+
     int *first = xmalloc((size_t)nvr * sizeof *first);
     int *last  = xmalloc((size_t)nvr * sizeof *last);
     char *elig = xmalloc((size_t)nvr);
@@ -330,6 +334,18 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                 OPAQUE(in->a);
             break;
         case IR_CALL:
+            /* An INDIRECT call's target has to survive the argument
+             * setup, and the argument setup writes the argument
+             * registers -- so a target sitting in one is read after it
+             * has been overwritten. Backends load the target last,
+             * because that used to be safe: no pool held an argument
+             * register. tests/exec/nested-decl.c is what says otherwise
+             * now, with `mov x0, x14; mov x1, x13; mov x11, x0; blr x11`
+             * calling whatever argument 0 happened to be.
+             *
+             * Keeping it in memory costs one load at an indirect call
+             * and needs no backend to get an ordering right. */
+            if (in->indirect) OPAQUE(in->a);
             /* A struct or float (SSE) argument loads its slot raw
              * everywhere. A scalar-integer one is moved straight into
              * its argument register only by a backend that knows how. */
@@ -547,6 +563,11 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                 bits &= bits - 1;
             }
         }
+        /* ...and the one the ABI would like, on the same terms */
+        if (hint[eidx[e]] >= 0)
+            for (int k = 0; k < NP; k++)
+                if (POOL[k] == hint[eidx[e]] && !(taken & (1 << k)))
+                    want |= 1 << k;
         int pick = -1;
         for (int k = 0; k < NP; k++)                  /* a free preferred reg */
             if ((want & (1 << k)) && !(taken & (1 << k))) { pick = k; break; }
@@ -592,6 +613,7 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
         if (reg_used[k] && t->is_callee_saved(POOL[k])) used_out[nu++] = POOL[k];
     *nused_out = nu;
 
+    free(hint);
     free(first); free(last); free(elig); free(crosses);
     free(eof); free(eidx); free(adj); free(pref);
     free(members); free(order);

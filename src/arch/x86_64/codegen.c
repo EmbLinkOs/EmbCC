@@ -106,7 +106,13 @@ static const struct ra_target X86_RA = {
                     * allocator entirely (fn->has_i128, below), and long
                     * double is the x87 unit rather than a call. If that
                     * blunt refusal is ever traded for the precise rule,
-                    * i128_ins is what belongs here. */
+                    * i128_ins is what belongs here. */,
+    NULL           /* No ABI hints yet. The same three boundaries exist
+                    * here -- a parameter's register, rax for a call's
+                    * result and for a return -- and none of rdi/rsi/rax
+                    * is in this backend's pool, so a hint naming one
+                    * would never match. That changes if the pool ever
+                    * grows to them. */
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----

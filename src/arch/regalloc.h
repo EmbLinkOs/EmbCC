@@ -105,6 +105,19 @@ struct ra_target {
      * before a `bl __divtf3` and used after it. Answering this question
      * is what makes a caller-saved pool sound. */
     int (*op_calls_helper)(const struct ir_ins *i);
+
+    /* The register the ABI would like each vreg to be in, or -1: a
+     * parameter in the one it arrives in, a call's result and a
+     * returned value in the return register. Filled once per function
+     * into an array of fn->nvregs; may be NULL.
+     *
+     * These are HINTS, tried before the free list and dropped when the
+     * register is taken, exactly like the preference a move partner
+     * already gives. What they buy is the move at each of those
+     * boundaries -- `mov x13, x0` after a call, `mov x0, x13` before a
+     * return -- which is otherwise emitted whatever the allocator
+     * chooses. */
+    void (*abi_hints)(const struct ir_func *fn, int *hint);
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that
