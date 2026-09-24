@@ -96,31 +96,16 @@ static const int LEAF_POOL[NLEAF] = { 8, 9, 10, 11, 6 /*rsi*/,
  * because nothing outside the __int128 lowering uses it -- and a
  * function containing an __int128 is kept out of the allocator
  * entirely. */
+/* ...and with rdx, for a function that neither divides nor has an
+ * atomic in it. */
+#define NLEAF_RDX 11
+static const int LEAF_POOL_RDX[NLEAF_RDX] = { 8, 9, 10, 11, 6 /*rsi*/,
+                                              2 /*rdx*/, 3 /*rbx*/,
+                                              12, 13, 14, 15 };
+
 #define NLEAF_AT 9
 static const int LEAF_POOL_AT[NLEAF_AT] = { 8, 9, 10, 11,
                                             3 /*rbx*/, 12, 13, 14, 15 };
-
-static int x86_has_atomic(const struct ir_func *fn)
-{
-    for (int n = 0; n < fn->nins; n++)
-        switch (fn->ins[n].op) {
-        case IR_XCHG: case IR_XADD: case IR_ARMW:
-        case IR_CAS: case IR_CAS16: case IR_CMPXCHG:
-            return 1;
-        default:
-            break;
-        }
-    return 0;
-}
-
-/* Does a register need callee-save preservation (rbx, r12..r15)? r8..r11 are
- * caller-saved — free to clobber, so no prologue slot. */
-/* The x86-64 side of the shared allocator (src/arch/regalloc.c). What
- * a machine has to say for itself is small: which registers may be
- * handed out and in what order, which survive a call, and whether a
- * narrow load is a plain move. */
-static int ldvar_plain(int size, int sign, int w);
-static int is_callee_saved(int reg);
 
 /* The FLOATING-POINT pool: xmm8-15.
  *
@@ -139,27 +124,63 @@ static int is_callee_saved(int reg);
 static const int X86_FPOOL[NX86_FPOOL] = { 8, 9, 10, 11, 12, 13, 14, 15 };
 static int x86_fp_callee_saved(int reg) { (void)reg; return 0; }
 
-/* NOT YET WIRED INTO X86_RA, and the reason is a slot, not a register.
+/* What this function reserves, beyond what the machine does.
  *
- * Everything else here is ready: the emitters reach xmm8-15, the float
- * sites go through x86_fld/x86_fst, the ALU operates where the value is,
- * and the address-generation fusion knows to leave a float value alone.
- * With the pool on, tests/exec/complex.c fails one check, and what the
- * bisect says is this: a vreg with an xmm home stops writing its stack
- * slot -- correctly -- and a DIFFERENT vreg then reads that same slot
- * and finds nothing. ra_coalesce_temps hands two temps one slot when
- * their live ranges do not overlap, and it is told about the integer
- * allocation (ra_slots::loc) but not about this one, so a float home
- * does not make its slot free the way an integer home does.
+ *   an atomic  -- IR_CMPXCHG parks `&expected` in rsi across the
+ *                 compare-exchange, and rdx holds `desired`;
+ *   a divide   -- idiv writes the rdx:rax pair, whatever the operands;
+ *   variadic   -- the prologue spills the six integer argument
+ *                 registers to the save area va_arg reads.
  *
- * The fix is to tell it, which means threading the float allocation into
- * ra_slots -- and aarch64 wants the same, since its frames still carry a
- * slot behind every value now living in v18-v31. Until then this stays
- * off: a wrong answer is not worth 4.6%. */
+ * rdx is in the pool for everything else, which is most functions: it
+ * appears in 1.5% of the instructions this backend emits. */
+static int x86_reserves(const struct ir_func *fn, int *div)
+{
+    int at = 0;
+    *div = 0;
+    for (int n = 0; n < fn->nins; n++)
+        switch (fn->ins[n].op) {
+        case IR_XCHG: case IR_XADD: case IR_ARMW:
+        case IR_CAS: case IR_CAS16: case IR_CMPXCHG:
+            at = 1; break;
+        case IR_DIV: case IR_MOD:
+            if (!fn->ins[n].flt) *div = 1;
+            break;
+        default:
+            break;
+        }
+    return at;
+}
+
+static const int *x86_pool_for(const struct ir_func *fn, int *n)
+{
+    int div, at = x86_reserves(fn, &div);
+    if (fn->is_varargs) { *n = NVARIADIC; return VARIADIC_POOL; }
+    if (at)             { *n = NLEAF_AT;  return LEAF_POOL_AT; }
+    if (div)            { *n = NLEAF;     return LEAF_POOL; }
+    *n = NLEAF_RDX;     return LEAF_POOL_RDX;
+}
+
+static const int *x86_fp_pool_for(const struct ir_func *fn, int *n)
+{
+    (void)fn;
+    *n = X86_FP_ALLOC ? NX86_FPOOL : 0;
+    return X86_FPOOL;
+}
+
+/* Does a register need callee-save preservation (rbx, r12..r15)? r8..r11 are
+ * caller-saved — free to clobber, so no prologue slot. */
+/* The x86-64 side of the shared allocator (src/arch/regalloc.c). What
+ * a machine has to say for itself is small: which registers may be
+ * handed out and in what order, which survive a call, and whether a
+ * narrow load is a plain move. */
+static int ldvar_plain(int size, int sign, int w);
+static int is_callee_saved(int reg);
+
+
 
 static const struct ra_target X86_RA = {
-    LEAF_POOL, NLEAF,
-    VARIADIC_POOL, NVARIADIC,
+    x86_pool_for,
     is_callee_saved,
     ldvar_plain,
     1, 1, 1,       /* this backend reads call arguments, scalar returns
@@ -177,29 +198,7 @@ static const struct ra_target X86_RA = {
                     * is in this backend's pool, so a hint naming one
                     * would never match. That changes if the pool ever
                     * grows to them. */,
-    X86_FPOOL, NX86_FPOOL, x86_fp_callee_saved
-};
-static const struct ra_target X86_RA_ATOMIC = {
-    LEAF_POOL_AT, NLEAF_AT,
-    VARIADIC_POOL, NVARIADIC,
-    is_callee_saved,
-    ldvar_plain,
-    1, 1, 1,       /* this backend reads call arguments, scalar returns
-                    * and memcpy addresses straight out of a register */
-    NULL           /* No op here lowers to a helper call behind the
-                    * allocator's back. __int128 does call libgcc, but a
-                    * function containing one is kept out of the
-                    * allocator entirely (fn->has_i128, below), and long
-                    * double is the x87 unit rather than a call. If that
-                    * blunt refusal is ever traded for the precise rule,
-                    * i128_ins is what belongs here. */,
-    NULL           /* No ABI hints yet. The same three boundaries exist
-                    * here -- a parameter's register, rax for a call's
-                    * result and for a return -- and none of rdi/rsi/rax
-                    * is in this backend's pool, so a hint naming one
-                    * would never match. That changes if the pool ever
-                    * grows to them. */,
-    X86_FPOOL, NX86_FPOOL, x86_fp_callee_saved
+    x86_fp_pool_for, x86_fp_callee_saved
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----
@@ -1771,8 +1770,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int used_callee[NCALLEE], nsave = 0;
     int *loc = NULL;
     if (g_regalloc && !g_has_cgoto) {
-        const struct ra_target *rt = x86_has_atomic(fn) ? &X86_RA_ATOMIC
-                                                        : &X86_RA;
+        const struct ra_target *rt = &X86_RA;
         /* The float map FIRST: the integer allocation needs it to leave
          * those values alone. */
         g_flt = cg_float_vregs(fn);

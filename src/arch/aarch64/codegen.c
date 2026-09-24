@@ -191,9 +191,30 @@ static int a64_has_atomic(const struct ir_func *fn)
 
 static void a64_abi_hints(const struct ir_func *fn, int *hint);
 
+/* What this function reserves beyond what the machine does: an atomic
+ * op needs x13/x14 as its own scratch, and a variadic prologue spills
+ * x0-x7 to the register-save area va_arg reads. Everything else gets
+ * all eighteen. */
+static const int *a64_pool_for(const struct ir_func *fn, int *n)
+{
+    int at = a64_has_atomic(fn);
+    if (fn->is_varargs) {
+        *n = at ? A64_NPOOL_VA_AT : A64_NPOOL_VA;
+        return at ? A64_POOL_VA_AT : A64_POOL_VA;
+    }
+    *n = at ? A64_NPOOL_AT : A64_NPOOL;
+    return at ? A64_POOL_AT : A64_POOL;
+}
+
+static const int *a64_fp_pool_for(const struct ir_func *fn, int *n)
+{
+    (void)fn;
+    *n = A64_NFPOOL;
+    return A64_FPOOL;
+}
+
 static const struct ra_target A64_RA = {
-    A64_POOL, A64_NPOOL,
-    A64_POOL_VA, A64_NPOOL_VA,
+    a64_pool_for,
     a64_callee_saved,
     a64_ldvar_plain,
     1, 1, 0,       /* a scalar-integer call argument is moved into its
@@ -205,23 +226,9 @@ static const struct ra_target A64_RA = {
                     * slots, so those values have to stay there. */
     a64_op_calls_helper,
     a64_abi_hints,
-    A64_FPOOL, A64_NFPOOL, a64_fp_callee_saved
+    a64_fp_pool_for, a64_fp_callee_saved
 };
 
-static const struct ra_target A64_RA_ATOMIC = {
-    A64_POOL_AT, A64_NPOOL_AT,
-    A64_POOL_VA_AT, A64_NPOOL_VA_AT,
-    a64_callee_saved,
-    a64_ldvar_plain,
-    0, 1, 0,       /* a scalar return goes out through ld_slot, which
-                    * takes it from a register when it has one. A call's
-                    * arguments and a memcpy's addresses are still read
-                    * from their slots, so those values have to stay
-                    * there. */
-    a64_op_calls_helper,
-    a64_abi_hints,
-    A64_FPOOL, A64_NFPOOL, a64_fp_callee_saved
-};
 
 /* Where each vreg lives: a register, or -1 for its stack slot. NULL when
  * the function is not allocated at all. */
@@ -1368,8 +1375,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 break;
             }
         if (!cgoto) {
-            const struct ra_target *rt = a64_has_atomic(fn) ? &A64_RA_ATOMIC
-                                                            : &A64_RA;
+            const struct ra_target *rt = &A64_RA;
             /* The float map first: the integer allocation needs it to
              * leave those values alone. Its own pool is caller-saved
              * throughout, so it reports no registers to save and

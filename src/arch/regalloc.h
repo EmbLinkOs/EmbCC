@@ -43,16 +43,17 @@
 #define RA_MAXPOOL 24
 
 struct ra_target {
-    /* The pool a normal function draws from, preferred first: put the
-     * caller-saved registers first so a short-lived value takes one and
-     * skips the prologue save. */
-    const int *pool;
-    int npool;
-    /* And a variadic function's, which is smaller: a variadic prologue
-     * spills the argument register file, so those registers are not
-     * available. NULL means "the same as pool". */
-    const int *pool_varargs;
-    int npool_varargs;
+    /* Which registers this function may use, in preference order, and
+     * how many. A callback rather than a table because the answer is a
+     * property of the FUNCTION, not just the machine: a variadic one
+     * reserves its argument file, one with an atomic reserves whatever
+     * the atomic lowering needs, one that divides reserves the pair the
+     * divide instruction writes. Four static tables would be sixteen as
+     * soon as a fifth condition appeared.
+     *
+     * Preference order matters: put the caller-saved registers first so
+     * a short-lived value takes one and skips the prologue save. */
+    const int *(*pool_for)(const struct ir_func *fn, int *n);
 
     /* Does this register survive a call? A value whose live range
      * crosses a call may only take one that does. */
@@ -128,8 +129,7 @@ struct ra_target {
      *
      * NULL (or a zero count) means the backend has not got one yet and
      * ra_allocate_fp returns nothing, which is what it did before. */
-    const int *fp_pool;
-    int nfp_pool;
+    const int *(*fp_pool_for)(const struct ir_func *fn, int *n);
     int (*is_fp_callee_saved)(int reg);
 };
 

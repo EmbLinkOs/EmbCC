@@ -260,7 +260,8 @@ int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
                     int *used_out, int *nused_out)
 {
     *nused_out = 0;
-    if (!t->fp_pool || !t->nfp_pool || !fltmap)
+    int probe = 0;
+    if (!t->fp_pool_for || !fltmap || !t->fp_pool_for(fn, &probe) || !probe)
         return NULL;
     return ra_allocate_class(fn, t, g_wide, fltmap, 1, used_out, nused_out);
 }
@@ -276,15 +277,8 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     *nused_out = 0;
     if (nvr == 0) return loc;
 
-    /* Non-variadic functions get the full nine-register pool; caller-saved
-     * registers in it are then masked per value by `crosses`/`is_arg` below (a
-     * leaf, having no calls, is never masked). A variadic function reserves the
-     * argument register file, so it drops r8/r9. */
-    int variadic = fn->is_varargs;
-    const int *POOL = fp ? t->fp_pool
-                   : variadic && t->pool_varargs ? t->pool_varargs : t->pool;
-    int NP = fp ? t->nfp_pool
-               : variadic && t->pool_varargs ? t->npool_varargs : t->npool;
+    int NP = 0;
+    const int *POOL = fp ? t->fp_pool_for(fn, &NP) : t->pool_for(fn, &NP);
     int (*callee_saved)(int) = fp && t->is_fp_callee_saved
                              ? t->is_fp_callee_saved : t->is_callee_saved;
 
