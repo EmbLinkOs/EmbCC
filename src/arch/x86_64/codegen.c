@@ -277,32 +277,6 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
 /* Frame layout: variables first (their slots coalesced by scope), then a
  * coalesced pool of 8-byte temporary slots (K13). Returns the per-vreg
  * displacement table (caller frees). */
-/* A local the allocator put in a register, whose slot therefore holds
- * nothing. Every read of such a local goes through in_reg(), so the slot
- * is dead storage -- and a function whose locals are ALL like this needs
- * no frame at all, which is what makes the leaf prologue below possible.
- *
- * The conditions are deliberately narrower than "in a register": an
- * aggregate is addressed as memory whatever the allocator thinks, an
- * address that escapes has to point at something, and a variadic
- * function's prologue writes the argument file to the frame. The
- * allocator already refuses most of these; the check does not rely on
- * that, because a slot that turns out to be live reads as garbage rather
- * than failing, and the whole point is that nothing quietly reads it. */
-static int slot_dead(struct ir_func *fn, const int *loc, int v)
-{
-    struct func *f = fn->src;
-    if (!loc || loc[v] < 0 || f->is_varargs || fn->has_alloca || g_want_debug)
-        return 0;
-    const struct type *t = f->var_tys[v];
-    if (t->kind == TY_STRUCT || t->kind == TY_ARRAY || ty_size(t) > 8 ||
-        ty_is_float(t))
-        return 0;
-    for (int n = 0; n < fn->nins; n++)
-        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a == v)
-            return 0;
-    return 1;
-}
 
 /* What a dead slot's displacement is set to. It is never addressed -- so
  * if it ever is, this makes that a fault at the first access instead of
@@ -352,7 +326,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
     int *salign = xcalloc((size_t)(nls ? nls : 1), sizeof *salign);
     for (int i = 0; i < fn->nvars; i++) {
         int s = lslot[i];
-        if (!lref[i] || slot_dead(fn, loc, i))
+        if (!lref[i] || ra_slot_dead(fn, loc, i, g_want_debug))
             continue;               /* in a register, or named nowhere at all */
         int sz = (ty_size(f->var_tys[i]) + 7) & ~7;
         if (sz > ssize[s]) ssize[s] = sz;
@@ -387,7 +361,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         soff[s] = -running;
     }
     for (int i = 0; i < fn->nvars; i++)
-        disp[i] = !lref[i] || slot_dead(fn, loc, i) ? DEAD_SLOT_OFF
+        disp[i] = !lref[i] || ra_slot_dead(fn, loc, i, g_want_debug) ? DEAD_SLOT_OFF
                                                     : soff[lslot[i]];
     free(lslot); free(lref); free(ssize); free(salign); free(soff);
     /* Temporaries share a coalesced pool of 8-byte slots (K13) instead of one

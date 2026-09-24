@@ -112,9 +112,11 @@ static const struct ra_target A64_RA = {
                                            * same one */
     a64_callee_saved,
     a64_ldvar_plain,
-    0, 0, 0        /* this backend still reads a call's arguments, a
-                    * return value and a memcpy's addresses from their
-                    * slots, so those values have to stay there */
+    0, 1, 0        /* a scalar return goes out through ld_slot, which
+                    * takes it from a register when it has one. A call's
+                    * arguments and a memcpy's addresses are still read
+                    * from their slots, so those values have to stay
+                    * there. */
 };
 
 /* Where each vreg lives: a register, or -1 for its stack slot. NULL when
@@ -402,7 +404,12 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
      * the frame for the rest of the function. */
     char *lref = ra_locals_referenced(fn, want_debug);
     for (int v = 0; v < fn->nvars; v++) {
-        if (!lref[v]) {
+        /* ...and one the allocator put in a REGISTER needs none either.
+         * Every read of such a local now goes through ld_slot/rd, which
+         * take it from that register, so the eight bytes behind it were
+         * being reserved and never touched: `add3` carried a 64-byte
+         * frame for three parameters that never left x20-x22. */
+        if (!lref[v] || ra_slot_dead(fn, g_a64_loc, v, want_debug)) {
             disp[v] = A64_DEAD_SLOT;
             continue;
         }
@@ -1178,6 +1185,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     /* Every `return` jumps to the single epilogue at the end. */
     int *retfix = NULL;
     int nret = 0, capret = 0;
+    /* The last instruction that emits anything. A `return` there needs
+     * no branch to the epilogue: the epilogue starts at the next word.
+     * Trailing labels emit nothing, so they do not count -- and a branch
+     * to one lands on the epilogue either way. */
+    int last_code = fn->nins - 1;
+    while (last_code >= 0 && fn->ins[last_code].op == IR_LABEL)
+        last_code--;
 
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
@@ -1588,9 +1602,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                     ld_slot(t, sd, i->a, 0, 8, 0, 8);
                 }
             }
-            struct a64_fix fx;
-            fx.at = a64_b(t); fx.label = -1; fx.kind = FIX_B26;
-            PUSH(retfix, nret, capret, fx.at);
+            if (n != last_code) {
+                struct a64_fix fx;
+                fx.at = a64_b(t); fx.label = -1; fx.kind = FIX_B26;
+                PUSH(retfix, nret, capret, fx.at);
+            }
             break;
         }
 

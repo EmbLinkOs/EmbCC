@@ -151,6 +151,13 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
  * to disagree about one. The caller frees. */
 char *ra_locals_referenced(const struct ir_func *fn, int want_debug);
 
+/* Does local `v` need a stack slot at all, given the allocation `loc`?
+ * Lifted here once BOTH backends wanted it (D-011): x86-64 had carried
+ * it alone, and the aarch64 frame was paying for a slot behind every
+ * value the allocator had already put in a register. */
+int ra_slot_dead(const struct ir_func *fn, const int *loc, int v,
+                 int want_debug);
+
 /* The vreg an instruction WRITES, or -1. In the shared layer because
  * liveness is: it has to agree with what the backends actually store,
  * and one copy is how it stays agreed. */

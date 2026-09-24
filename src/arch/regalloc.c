@@ -577,6 +577,34 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
  * not: which vregs live in registers (those need no slot at all), and
  * the two policy questions below. */
 /* Which locals the code still names (regalloc.h). */
+/* A local the allocator put in a register, whose slot therefore holds
+ * nothing. Every read of such a local goes through in_reg(), so the slot
+ * is dead storage -- and a function whose locals are ALL like this needs
+ * no frame at all, which is what makes the leaf prologue below possible.
+ *
+ * The conditions are deliberately narrower than "in a register": an
+ * aggregate is addressed as memory whatever the allocator thinks, an
+ * address that escapes has to point at something, and a variadic
+ * function's prologue writes the argument file to the frame. The
+ * allocator already refuses most of these; the check does not rely on
+ * that, because a slot that turns out to be live reads as garbage rather
+ * than failing, and the whole point is that nothing quietly reads it. */
+int ra_slot_dead(const struct ir_func *fn, const int *loc, int v,
+                 int want_debug)
+{
+    const struct func *f = fn->src;
+    if (!loc || loc[v] < 0 || f->is_varargs || fn->has_alloca || want_debug)
+        return 0;
+    const struct type *t = f->var_tys[v];
+    if (t->kind == TY_STRUCT || t->kind == TY_ARRAY || ty_size(t) > 8 ||
+        ty_is_float(t))
+        return 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a == v)
+            return 0;
+    return 1;
+}
+
 char *ra_locals_referenced(const struct ir_func *fn, int want_debug)
 {
     size_t n = (size_t)(fn->nvars > 0 ? fn->nvars : 1);
