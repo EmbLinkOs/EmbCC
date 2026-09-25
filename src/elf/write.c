@@ -68,6 +68,11 @@ struct elfw {
     struct rela_group relagrp[ELFW_MAX_RELA];
     int nrelagrp;
     int machine;         /* e_machine, fixed at elfw_new */
+    /* ELFCLASS32 rather than 64. A property of the MACHINE, so it is
+     * decided here once and never passed in: ARMv7-M objects are 32-bit
+     * and everything else this compiler writes is not. */
+    int elf32;
+    Elf64_Word eflags;   /* e_flags: the EABI version on ARM, 0 elsewhere */
 };
 
 struct elfw *elfw_new(int machine)
@@ -78,6 +83,10 @@ struct elfw *elfw_new(int machine)
         fatal_unwind();
     }
     w->machine = machine;
+    if (machine == EM_ARM) {
+        w->elf32 = 1;
+        w->eflags = EF_ARM_EABI_VER5;
+    }
     /* Index 0 is reserved in every table it manages. */
     w->nsec = 1; /* SHT_NULL section */
     strtab_add(&w->strtab, "");
@@ -234,16 +243,60 @@ int elfw_write(struct elfw *w, const char *path)
 
     w->sec[symtab_ndx].hdr.sh_link = (Elf64_Word)strtab_ndx;
     w->sec[symtab_ndx].hdr.sh_info = (Elf64_Word)w->nlocal;
-    w->sec[symtab_ndx].hdr.sh_entsize = sizeof(Elf64_Sym);
+    w->sec[symtab_ndx].hdr.sh_entsize =
+        w->elf32 ? sizeof(Elf32_Sym) : sizeof(Elf64_Sym);
     for (int i = 0; i < w->nrelagrp; i++) {
         struct rela_group *gp = &w->relagrp[i];
         w->sec[gp->sec_ndx].hdr.sh_link = (Elf64_Word)symtab_ndx;
         w->sec[gp->sec_ndx].hdr.sh_info = (Elf64_Word)gp->target;
-        w->sec[gp->sec_ndx].hdr.sh_entsize = sizeof(Elf64_Rela);
+        w->sec[gp->sec_ndx].hdr.sh_entsize =
+            w->elf32 ? sizeof(Elf32_Rela) : sizeof(Elf64_Rela);
+    }
+
+    /* The symbol table and the relocation tables were built as arrays of
+     * the 64-bit structures; on a 32-bit target they are rewritten in
+     * place as the narrower ones before anything is laid out, because
+     * every offset below is computed from the sizes they end up. Field
+     * by field, since Elf32_Sym is not Elf64_Sym with shorter members --
+     * it puts st_value and st_size before st_info rather than after. */
+    if (w->elf32) {
+        struct section *sy = &w->sec[symtab_ndx];
+        Elf64_Sym *in = (Elf64_Sym *)sy->data.p;
+        int n = (int)(sy->data.len / sizeof(Elf64_Sym));
+        Elf32_Sym *out = xmalloc((size_t)(n ? n : 1) * sizeof *out);
+        for (int k = 0; k < n; k++) {
+            out[k].st_name  = in[k].st_name;
+            out[k].st_value = (Elf32_Addr)in[k].st_value;
+            out[k].st_size  = (Elf32_Word)in[k].st_size;
+            out[k].st_info  = in[k].st_info;
+            out[k].st_other = in[k].st_other;
+            out[k].st_shndx = in[k].st_shndx;
+        }
+        free(sy->data.p);
+        sy->data.p = (unsigned char *)out;
+        sy->data.len = sy->data.cap = (size_t)n * sizeof *out;
+        sy->hdr.sh_size = sy->data.len;
+
+        for (int i = 0; i < w->nrelagrp; i++) {
+            struct section *rs = &w->sec[w->relagrp[i].sec_ndx];
+            Elf64_Rela *ri = (Elf64_Rela *)rs->data.p;
+            int m = (int)(rs->data.len / sizeof(Elf64_Rela));
+            Elf32_Rela *ro = xmalloc((size_t)(m ? m : 1) * sizeof *ro);
+            for (int k = 0; k < m; k++) {
+                ro[k].r_offset = (Elf32_Addr)ri[k].r_offset;
+                ro[k].r_info = ELF32_R_INFO(ELF64_R_SYM(ri[k].r_info),
+                                            ELF64_R_TYPE(ri[k].r_info));
+                ro[k].r_addend = (int)ri[k].r_addend;
+            }
+            free(rs->data.p);
+            rs->data.p = (unsigned char *)ro;
+            rs->data.len = rs->data.cap = (size_t)m * sizeof *ro;
+            rs->hdr.sh_size = rs->data.len;
+        }
     }
 
     /* Lay out: ehdr, section payloads, then the section header table. */
-    Elf64_Off off = sizeof(Elf64_Ehdr);
+    Elf64_Off off = w->elf32 ? sizeof(Elf32_Ehdr) : sizeof(Elf64_Ehdr);
     for (int i = 1; i < w->nsec; i++) {
         struct section *s = &w->sec[i];
         off = align_up(off, s->hdr.sh_addralign);
@@ -251,23 +304,27 @@ int elfw_write(struct elfw *w, const char *path)
         if (s->hdr.sh_type != SHT_NOBITS)
             off += s->hdr.sh_size;
     }
-    Elf64_Off shoff = align_up(off, 8);
+    Elf64_Off shoff = align_up(off, w->elf32 ? 4 : 8);
 
+    Elf64_Word shentsize = w->elf32 ? (Elf64_Word)sizeof(Elf32_Shdr)
+                                    : (Elf64_Word)sizeof(Elf64_Shdr);
     Elf64_Ehdr eh;
     memset(&eh, 0, sizeof eh);
     eh.e_ident[EI_MAG0] = ELFMAG0;
     eh.e_ident[EI_MAG1] = ELFMAG1;
     eh.e_ident[EI_MAG2] = ELFMAG2;
     eh.e_ident[EI_MAG3] = ELFMAG3;
-    eh.e_ident[EI_CLASS] = ELFCLASS64;
+    eh.e_ident[EI_CLASS] = w->elf32 ? ELFCLASS32 : ELFCLASS64;
     eh.e_ident[EI_DATA] = ELFDATA2LSB;
     eh.e_ident[EI_VERSION] = EV_CURRENT;
     eh.e_type = ET_REL;
     eh.e_machine = (Elf64_Half)w->machine;
     eh.e_version = EV_CURRENT;
     eh.e_shoff = shoff;
-    eh.e_ehsize = sizeof(Elf64_Ehdr);
-    eh.e_shentsize = sizeof(Elf64_Shdr);
+    eh.e_flags = w->eflags;
+    eh.e_ehsize = (Elf64_Half)(w->elf32 ? sizeof(Elf32_Ehdr)
+                                        : sizeof(Elf64_Ehdr));
+    eh.e_shentsize = (Elf64_Half)shentsize;
     eh.e_shnum = (Elf64_Half)w->nsec;
     eh.e_shstrndx = (Elf64_Half)shstr_ndx;
 
@@ -276,19 +333,52 @@ int elfw_write(struct elfw *w, const char *path)
      * size is already known here (shoff plus the section headers), so
      * building it costs one allocation and removes the last place the
      * object writer knew what a FILE* was. */
-    size_t total = (size_t)shoff + (size_t)w->nsec * sizeof(Elf64_Shdr);
+    size_t total = (size_t)shoff + (size_t)w->nsec * shentsize;
     unsigned char *img = xmalloc(total ? total : 1);
     memset(img, 0, total);            /* the gaps ARE zero padding */
-    memcpy(img, &eh, sizeof eh);
+    if (w->elf32) {
+        Elf32_Ehdr e32;
+        memset(&e32, 0, sizeof e32);
+        memcpy(e32.e_ident, eh.e_ident, EI_NIDENT);
+        e32.e_type = eh.e_type;
+        e32.e_machine = eh.e_machine;
+        e32.e_version = eh.e_version;
+        e32.e_shoff = (Elf32_Off)eh.e_shoff;
+        e32.e_flags = eh.e_flags;
+        e32.e_ehsize = eh.e_ehsize;
+        e32.e_shentsize = eh.e_shentsize;
+        e32.e_shnum = eh.e_shnum;
+        e32.e_shstrndx = eh.e_shstrndx;
+        memcpy(img, &e32, sizeof e32);
+    } else {
+        memcpy(img, &eh, sizeof eh);
+    }
     for (int i = 1; i < w->nsec; i++) {
         struct section *s = &w->sec[i];
         if (s->hdr.sh_type == SHT_NOBITS)
             continue;
         memcpy(img + s->hdr.sh_offset, s->data.p, s->data.len);
     }
-    for (int i = 0; i < w->nsec; i++)
-        memcpy(img + (size_t)shoff + (size_t)i * sizeof(Elf64_Shdr),
-               &w->sec[i].hdr, sizeof(Elf64_Shdr));
+    for (int i = 0; i < w->nsec; i++) {
+        unsigned char *at = img + (size_t)shoff + (size_t)i * shentsize;
+        if (w->elf32) {
+            const Elf64_Shdr *h = &w->sec[i].hdr;
+            Elf32_Shdr h32;
+            h32.sh_name = h->sh_name;
+            h32.sh_type = h->sh_type;
+            h32.sh_flags = (Elf32_Word)h->sh_flags;
+            h32.sh_addr = (Elf32_Addr)h->sh_addr;
+            h32.sh_offset = (Elf32_Off)h->sh_offset;
+            h32.sh_size = (Elf32_Word)h->sh_size;
+            h32.sh_link = h->sh_link;
+            h32.sh_info = h->sh_info;
+            h32.sh_addralign = (Elf32_Word)h->sh_addralign;
+            h32.sh_entsize = (Elf32_Word)h->sh_entsize;
+            memcpy(at, &h32, sizeof h32);
+        } else {
+            memcpy(at, &w->sec[i].hdr, sizeof(Elf64_Shdr));
+        }
+    }
     int rc = plat_write_file(path, img, total);
     free(img);
     if (rc != 0) {

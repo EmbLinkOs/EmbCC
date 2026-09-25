@@ -172,7 +172,16 @@ enum reloc_kind {
      * exactly as an address would be. */
     RK_TPOFF32,   /* x86-64: the disp32 of `lea off(%fs-base), reg` */
     RK_TPREL_HI12,/* aarch64: the high add of the tprel pair */
-    RK_TPREL_LO12 /* aarch64: the low add of the tprel pair */
+    RK_TPREL_LO12,/* aarch64: the low add of the tprel pair */
+    /* ARMv7-M takes a symbol's address in two halves, like aarch64's
+     * adrp/add pair and for the same reason: no 32-bit instruction
+     * carries a 32-bit operand. `movw` takes the low halfword and
+     * `movt` the high one, and each is its own relocation because each
+     * patches a different instruction. _NC on the low half — it
+     * legitimately drops the bits the high half carries, so a checked
+     * form would reject every address above 65535. */
+    RK_THM_MOVW,
+    RK_THM_MOVT
 };
 
 /* The ELF relocation type for this kind on this target, or -1 if the kind

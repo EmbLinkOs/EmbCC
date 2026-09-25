@@ -64,6 +64,17 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
 /* The same lowering for aarch64 (AAPCS64). Same signature, same site
  * lists, so the driver picks one on --target= and nothing downstream
  * knows which machine produced the image. */
+/* And for ARMv7-M (Thumb-2, AAPCS32). Same signature again — a third
+ * machine the driver picks on --target= and nothing downstream knows
+ * about. This one refuses far more than it emits; see the header of
+ * src/arch/thumb/codegen.c for what and why. */
+void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
+                        struct extcall **ext, int *next,
+                        struct strsite **strs, int *nstrs,
+                        struct gsite **gs, int *ngs,
+                        struct fsite **fs, int *nfs, int want_debug,
+                        int optimize, int no_sse, int regalloc);
+
 void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,

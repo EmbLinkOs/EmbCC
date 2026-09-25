@@ -950,9 +950,55 @@ that assumption is what makes Windows C++ affordable at all.
 
 ## D-015 — A third architecture: **ARMv7-M (Cortex-M)**, and the first 32-bit target
 
-**Decided:** 2026-09-25. **Status:** the front end is in — the triple, the
-data model, the predefined macros, the ELF machine and relocations. There is
-no Thumb-2 backend yet, and `-c` for this target refuses loudly.
+**Decided:** 2026-09-25. **Status:** the front end and a first backend are
+in — the triple, the data model, the predefined macros, ELF32 objects, and
+Thumb-2 code for the 32-bit scalar language. What it cannot lower it
+refuses by name.
+
+**2026-09-25, later:** the backend landed for the 32-bit scalar subset.
+`src/arch/thumb/emit.c` encodes Thumb-2 and `src/arch/thumb/codegen.c`
+lowers to it, naively — every vreg in a stack slot, every operation
+through r12 — which is where both other backends started and what D-005's
+"prove it first" asks of a third. An object is ELF32 now: the ELF writer
+builds every object in the 64-bit structures and converts at the one
+place that serialises them, because a second set threaded through the
+writer would be a second set of places to get a field order wrong.
+
+Three things about this target had to be found rather than assumed, and
+each is the kind that links cleanly and faults at run time:
+
+  * a Thumb function symbol's `st_value` carries BIT 0 SET, which is not
+    part of the address — it tells `blx` which instruction set to switch
+    to, and an object that leaves it clear branches into ARM state on the
+    first indirect call;
+  * `$t` mapping symbols say where Thumb code begins, and a consumer that
+    finds none disassembles the section as ARM;
+  * `e_flags` must carry EF_ARM_EABI_VER5, which is 0 on an object that
+    forgot it.
+
+And one thing about the IR: **`fn->outgoing_bytes` is the SysV answer.**
+SysV has six integer argument registers and AAPCS32 has four, so a
+six-argument call reserves nothing there and needs eight bytes. The
+Thumb backend computes its own outgoing area; believing the IR's number
+compiles, links, and writes the fifth argument over the first local.
+
+Making the front end ILP32 turned up three more places where 8 meant
+"pointer" and now says so: the address arithmetic in irgen, the walking
+pointers strength reduction creates, and a call's result width — which
+is the RETURN REGISTER's width, not the type's, and that register is four
+bytes here.
+
+**What it does not do yet, all refused by name:** 64-bit integers (which
+need a legalisation pass splitting w == 8 into register pairs before the
+backend sees it — packed bitfields ride on this, since irgen assembles
+them in a 64-bit accumulator), floating point (ARMv7-M has no FPU, so
+every operation is an `__aeabi_*` call), aggregates by value, varargs,
+atomics, inline asm, VLAs, computed goto, exceptions and `-g`. There is
+also no register allocator here yet and no linker for the target, so
+nothing has been RUN: tests/golden/thumb-codegen.sh checks that the
+object is the shape an ARM toolchain expects and that no byte of .text
+disassembles as `<unknown>`, which is what a wrong encoding looks like.
+
 
 EmbLinkOS is meant to carry embedded tooling, and a compiler for embedded
 systems that stops at 64-bit application cores is not one. `thumbv7m-none-eabi`

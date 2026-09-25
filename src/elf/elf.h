@@ -79,6 +79,76 @@ typedef struct {
     Elf64_Xword p_align;
 } Elf64_Phdr;
 
+/* The 32-bit forms. EmbCC builds every object in the 64-bit structures
+ * above and converts at the one place that serialises them
+ * (elf/write.c), because a second set of structures threaded through the
+ * writer would be a second set of places to get a field order wrong. A
+ * 32-bit target is ARMv7-M today (D-015); nothing else here is ILP32.
+ *
+ * The layouts are NOT the 64-bit ones with narrower fields: Elf32_Sym
+ * puts st_value and st_size BEFORE st_info, where Elf64_Sym puts them
+ * after. Copying field by field is the only safe way across. */
+typedef unsigned char  Elf32_Uchar;
+typedef unsigned short Elf32_Half;
+typedef unsigned int   Elf32_Word;
+typedef unsigned int   Elf32_Addr;
+typedef unsigned int   Elf32_Off;
+
+typedef struct {
+    Elf32_Uchar e_ident[EI_NIDENT];
+    Elf32_Half  e_type;
+    Elf32_Half  e_machine;
+    Elf32_Word  e_version;
+    Elf32_Addr  e_entry;
+    Elf32_Off   e_phoff;
+    Elf32_Off   e_shoff;
+    Elf32_Word  e_flags;
+    Elf32_Half  e_ehsize;
+    Elf32_Half  e_phentsize;
+    Elf32_Half  e_phnum;
+    Elf32_Half  e_shentsize;
+    Elf32_Half  e_shnum;
+    Elf32_Half  e_shstrndx;
+} Elf32_Ehdr;
+
+typedef struct {
+    Elf32_Word sh_name;
+    Elf32_Word sh_type;
+    Elf32_Word sh_flags;
+    Elf32_Addr sh_addr;
+    Elf32_Off  sh_offset;
+    Elf32_Word sh_size;
+    Elf32_Word sh_link;
+    Elf32_Word sh_info;
+    Elf32_Word sh_addralign;
+    Elf32_Word sh_entsize;
+} Elf32_Shdr;
+
+typedef struct {
+    Elf32_Word  st_name;
+    Elf32_Addr  st_value;
+    Elf32_Word  st_size;
+    Elf32_Uchar st_info;
+    Elf32_Uchar st_other;
+    Elf32_Half  st_shndx;
+} Elf32_Sym;
+
+typedef struct {
+    Elf32_Addr r_offset;
+    Elf32_Word r_info;
+    int        r_addend;
+} Elf32_Rela;
+
+#define ELF32_R_INFO(sym, type) \
+    (((Elf32_Word)(sym) << 8) | ((Elf32_Word)(type) & 0xff))
+
+#define ELFCLASS32 1
+
+/* EF_ARM_EABI_VER5 — the EABI version in e_flags, which every ARM
+ * consumer checks and which is 0 on an object that forgot it. Read off
+ * llvm-mc's own output for a thumbv7m object rather than remembered. */
+#define EF_ARM_EABI_VER5 0x05000000
+
 #define ELF64_R_INFO(sym, type) \
     (((Elf64_Xword)(sym) << 32) | ((Elf64_Xword)(type) & 0xffffffff))
 #define ELF64_R_SYM(info)  ((Elf64_Word)((info) >> 32))
@@ -142,6 +212,11 @@ typedef struct {
 #define R_ARM_ABS32      2
 #define R_ARM_REL32      3
 #define R_ARM_THM_CALL  10
+/* The movw/movt pair that materialises a symbol's address in Thumb
+ * state. _NC on the low half: it drops the bits movt carries, so the
+ * checking variant would reject every address above 65535. */
+#define R_ARM_THM_MOVW_ABS_NC 47
+#define R_ARM_THM_MOVT_ABS    48
 
 /* e_ident indices and values */
 #define EI_MAG0       0

@@ -376,6 +376,21 @@ static void write_deps(const char *in, const char *obj)
  * here -- by returning 1 -- rather than letting a backend call exit() from
  * four frames down. The same libraries inside a language server install
  * their own boundary and keep serving. */
+/* A defined function's st_value.
+ *
+ * On ARM the low bit of a function symbol's value is not part of the
+ * address: it says the symbol names THUMB code, and every `bx`/`blx` to
+ * it reads that bit to decide which instruction set to switch to. A
+ * Cortex-M executes nothing but Thumb, so it is always set — and an
+ * object that leaves it clear links without complaint and branches into
+ * ARM state on the first indirect call, where the processor faults.
+ * Checked against llvm-mc's own output, which gives `f` at offset 0 a
+ * st_value of 1. */
+static long fn_sym_value(enum target_arch a, long code_off)
+{
+    return a == TARGET_THUMB ? code_off | 1 : code_off;
+}
+
 static int compile_unit(const char *in, const char *out, int pp_only);
 
 /* `embcc prog.c -o prog`: compile, then link, in ONE process.
@@ -805,16 +820,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * object full of x86 instructions under an EM_ARM header, which is
      * the exact failure mode a default case is supposed to prevent.
      * Refuse here, by name, and say what does work today. */
-    if (ta == TARGET_THUMB) {
-        fprintf(stderr,
-                "embcc: %s: error: --target=%s has no code generator yet; "
-                "the front end accepts this target (-E, -fsyntax-only and "
-                "--dump-predef all work) but nothing can emit Thumb-2 "
-                "instructions\n",
-                in, target_triple_now());
-        return 1;
-    }
-    if (ta == TARGET_AARCH64)
+    if (ta == TARGET_THUMB)
+        codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                           opt_level >= 2);
+    else if (ta == TARGET_AARCH64)
         codegen_unit_arm64(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                            opt_level >= 2);
@@ -1738,6 +1748,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     int text_sym = elfw_add_symbol(w, "", 0, 0,
                     ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
                     (Elf64_Half)text_ndx);
+    /* ARM's MAPPING SYMBOLS. `$t` at an offset says "Thumb instructions
+     * start here", `$a` says ARM and `$d` says data; a consumer that
+     * finds none assumes ARM state and disassembles Thumb as garbage,
+     * and the linker uses them to decide where an interworking veneer
+     * may go. One at offset zero is the whole story for a Cortex-M
+     * object, which is Thumb from end to end. */
+    if (ta == TARGET_THUMB)
+        elfw_add_symbol(w, "$t", 0, 0,
+                        ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
+                        (Elf64_Half)text_ndx);
     int rodata_sym = 0;
     if (rodata)
         rodata_sym = elfw_add_symbol(w, "", 0, 0,
@@ -1758,7 +1778,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && f->is_static && f->used)
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)f->code_off,
+                w, f->name, (Elf64_Addr)fn_sym_value(ta, f->code_off),
                 (Elf64_Xword)f->code_len,
                 ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
                 (Elf64_Half)text_ndx);
@@ -1774,7 +1794,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && !f->is_static)
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)f->code_off,
+                w, f->name, (Elf64_Addr)fn_sym_value(ta, f->code_off),
                 (Elf64_Xword)f->code_len,
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
                 (Elf64_Half)text_ndx);
@@ -1953,9 +1973,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 sym = rodata_sym;
                 add = g->relocs[i].str_off + g->relocs[i].addend;
             }
+            /* A pointer in .data is as wide as a pointer: eight bytes
+             * on LP64 and four on ARMv7-M, where asking for ABS64 would
+             * get -1 back from a table that has no such relocation. */
             elfw_add_rela(w, g->named ? named[g->named - 1].ndx : data_ndx,
-                          (Elf64_Addr)(g->off + g->relocs[i].off),
-                          sym, target_reloc_type(ta, RK_ABS64), add);
+                          (Elf64_Addr)(g->off + g->relocs[i].off), sym,
+                          target_reloc_type(ta, target_ptr_size() == 8
+                                                ? RK_ABS64 : RK_ABS32),
+                          add);
         }
     }
 

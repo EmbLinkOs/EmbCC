@@ -65,15 +65,22 @@ grep -q "__int128 does not exist on this target" "$tmp/i128.err" || {
     echo "__int128 failed for the wrong reason:"; cat "$tmp/i128.err"; exit 1; }
 echo "__int128 is refused by name"
 
-# 5. THE RULE: no backend means no object, said out loud.
+# 5. The backend exists and writes a real object. What it EMITS is
+#    tests/golden/thumb-codegen.sh's subject; this only checks that the
+#    target is wired end to end, so a break in the driver's dispatch
+#    fails here rather than in a longer test.
 printf 'int add(int a, int b) { return a + b; }\n' > "$tmp/add.c"
-if "$EMBCC" --target="$T" -c "$tmp/add.c" -o "$tmp/add.o" 2>"$tmp/add.err"; then
-    echo "an object was produced for a target with no code generator"; exit 1
-fi
-grep -q "has no code generator yet" "$tmp/add.err" || {
-    echo "-c failed for the wrong reason:"; cat "$tmp/add.err"; exit 1; }
-[ ! -s "$tmp/add.o" ] || { echo "a refused compile still wrote an object"; exit 1; }
-echo "-c refuses loudly and writes nothing"
+"$EMBCC" --target="$T" -c "$tmp/add.c" -o "$tmp/add.o" || {
+    echo "-c did not produce an object for $T"; exit 1; }
+[ -s "$tmp/add.o" ] || { echo "-c wrote an empty object"; exit 1; }
+# ELFCLASS32 is byte 4 of e_ident, and EM_ARM (40) is the little-endian
+# halfword at 18 — read here rather than through readelf, so this test
+# needs no toolchain at all.
+cls=$(od -An -tu1 -j4 -N1 "$tmp/add.o" | tr -d ' ')
+mach=$(od -An -tu1 -j18 -N1 "$tmp/add.o" | tr -d ' ')
+[ "$cls" = 1 ] || { echo "the object is ELFCLASS$cls, not ELFCLASS32"; exit 1; }
+[ "$mach" = 40 ] || { echo "e_machine is $mach, not EM_ARM (40)"; exit 1; }
+echo "-c writes an ELF32 EM_ARM object"
 
 # 6. What DOES work today works: preprocessing and checking.
 "$EMBCC" --target="$T" -E "$tmp/add.c" > /dev/null || {

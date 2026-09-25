@@ -13,6 +13,14 @@
 #include <stdio.h>
 
 #include "../arch/target.h"
+
+/* The width of a POINTER as an IR operation's `w`. Strength reduction
+ * rewrites an indexed access into a walking pointer and increments it
+ * every iteration; those increments are pointer arithmetic, and saying 8
+ * made them 64-bit operations on a machine with 32-bit registers. The
+ * other 8s in this file are 16-byte vector lanes and mean something
+ * else. */
+#define PTRW (target_ptr_size())
 #include "../driver/remark.h"
 #include "../driver/util.h"
 
@@ -6224,26 +6232,26 @@ static int ivsr_one(struct ir_func *fn)
                 for (int k = 0; k < nc; k++) {
                     struct ir_ins *c = ib_push(&nb);
                     c->op = IR_CONST; c->dst = delta[k];
-                    c->w = 8; c->imm = cscale[k] * step;
+                    c->w = PTRW; c->imm = cscale[k] * step;
                     c->line = fn->ins[cand[k] >= 0 ? d.ins[cand[k]] : n].line;
                     c->synth = 1;
                     struct ir_ins *m = ib_push(&nb);
                     m->op = IR_MOV; m->dst = ptr[k]; m->a = cbase[k];
-                    m->w = 8;
+                    m->w = PTRW;
                     m->line = c->line; m->synth = 1;
                 }
                 if (lftr_lim >= 0) {
                     struct ir_ins *c = ib_push(&nb);
-                    c->op = IR_CONST; c->dst = lftr_k; c->w = 8;
+                    c->op = IR_CONST; c->dst = lftr_k; c->w = PTRW;
                     c->imm = lftr_off;
                     c->line = fn->ins[inc_at].line; c->synth = 1;
                     struct ir_ins *a3 = ib_push(&nb);
                     a3->op = IR_ADD; a3->dst = lftr_lim; a3->a = cbase[0];
-                    a3->b = lftr_k; a3->w = 8;
+                    a3->b = lftr_k; a3->w = PTRW;
                     a3->line = fn->ins[inc_at].line; a3->synth = 1;
                     struct ir_ins *m2 = ib_push(&nb);
                     m2->op = IR_MOV; m2->dst = lftr_iv; m2->a = iv;
-                    m2->w = fn->ins[copy_ins].w ? fn->ins[copy_ins].w : 8;
+                    m2->w = fn->ins[copy_ins].w ? fn->ins[copy_ins].w : PTRW;
                     m2->line = fn->ins[inc_at].line; m2->synth = 1;
                 }
             }
@@ -6251,7 +6259,7 @@ static int ivsr_one(struct ir_func *fn)
                 for (int k = 0; k < nc; k++) {
                     struct ir_ins *a2 = ib_push(&nb);
                     a2->op = IR_ADD; a2->dst = ptr[k]; a2->a = ptr[k];
-                    a2->b = delta[k]; a2->w = 8;
+                    a2->b = delta[k]; a2->w = PTRW;
                     a2->line = fn->ins[n].line; a2->synth = 1;
                 }
             }
@@ -6267,7 +6275,7 @@ static int ivsr_one(struct ir_func *fn)
                 struct ir_ins *o = ib_push(&nb);
                 *o = fn->ins[n];
                 o->pred = B_NE; o->a = ptr[0]; o->b = lftr_lim;
-                o->w = 8; o->sign = 0; o->imm_b = 0; o->imm = 0;
+                o->w = PTRW; o->sign = 0; o->imm_b = 0; o->imm = 0;
                 continue;
             }
             struct ir_ins *o = ib_push(&nb);

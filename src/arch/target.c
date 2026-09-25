@@ -194,6 +194,8 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_CALL:        return R_ARM_THM_CALL;
         case RK_ABS32:       return R_ARM_ABS32;
         case RK_DATA_PREL32: return R_ARM_REL32;
+        case RK_THM_MOVW:    return R_ARM_THM_MOVW_ABS_NC;
+        case RK_THM_MOVT:    return R_ARM_THM_MOVT_ABS;
         /* No ABS64: a 32-bit target has no 64-bit address to relocate,
          * and asking for one is a bug upstream rather than a kind this
          * table is merely missing. */

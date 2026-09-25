@@ -13,6 +13,18 @@
 #include "../sema/type.h"
 #include "../arch/target.h"
 
+/* The width of an ADDRESS, as an IR operation's `w`.
+ *
+ * This used to be the literal 8 at every site that did arithmetic on a
+ * pointer -- a member offset, an array index scaled by its element size,
+ * the difference of two pointers -- which was right while every target
+ * was LP64 and is a 64-bit operation on a machine with 32-bit registers
+ * otherwise. The sites that are genuinely 64-bit (assembling a bitfield's
+ * storage unit, the software float conversions) still say 8, and this
+ * says only "as wide as a pointer", so the two cannot be confused for
+ * each other again. */
+#define AW (target_ptr_size())
+
 /* The source line currently being lowered. gen_stmt updates it as it walks
  * the statement list, and gen_func resets it per function; emit() stamps it
  * onto every instruction so the -g line table in codegen can map .text
@@ -363,7 +375,7 @@ static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
     struct type *u8 = ty_base(TY_CHAR, 1);
     int raw = emit_const(fn, 0, 8);
     for (int k = 0; k < m->bf_bytes && k < 8; k++) {
-        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                   : addr;
         int b = zext64(fn, emit_load(fn, a, u8));
         if (k)
@@ -382,7 +394,7 @@ static int bf_wide_bytes(struct ir_func *fn, int addr, int from, int n)
     struct type *u8 = ty_base(TY_CHAR, 1), *u128 = ty_base(TY_INT128, 1);
     int raw = emit_const(fn, 0, 16);
     for (int k = from; k < n; k++) {
-        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                   : addr;
         int b = gen_convert(fn, emit_load(fn, a, u8), u8, u128);
         if (k > from)
@@ -437,7 +449,7 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
                                       16, 0),
                   nv, 16, 0);
     for (int k = 0; k < n && k < 16; k++) {
-        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                   : addr;
         int b = k ? emit_bin(fn, IR_SHR, lo, emit_const(fn, 8 * k, 4), 16, 0)
                   : lo;
@@ -453,7 +465,7 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
                             emit_bin(fn, IR_XOR, hm, ones, 16, 0), 16, 0);
         int put = emit_bin(fn, IR_SHR, v, sh, 16, 0);
         hi = emit_bin(fn, IR_OR, keep, put, 16, 0);
-        int at = emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, 8), 8, 0);
+        int at = emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, AW), AW, 0);
         int val = gen_convert(fn, hi, u128, u8);
         emit_store(fn, at, val, u8);
     }
@@ -516,7 +528,7 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
         int merged = emit_bin(fn, IR_OR, cleared, low, 8, 0);
         struct type *u8 = ty_base(TY_CHAR, 1);
         for (int k = 0; k < m->bf_bytes && k < 8; k++) {
-            int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+            int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                       : addr;
             int b = k ? emit_bin(fn, IR_SHR, merged,
                                  emit_const(fn, 8 * k, 4), 8, 0)
@@ -622,7 +634,7 @@ static int type_size_val(struct ir_func *fn, const struct type *t)
 {
     if (ty_is_vla(t))
         return emit_ldvar(fn, t->vla_size, ty_base(TY_LONG, 1));
-    return emit_const(fn, ty_size(t), 8);
+    return emit_const(fn, ty_size(t), AW);
 }
 
 /* Compute the byte size of every VLA in a variably modified type, innermost
@@ -636,7 +648,7 @@ static void vla_eval(struct ir_func *fn, struct type *t)
     if (!ty_is_vla(t))
         return;
     int n = gen_expr(fn, t->vla_len);
-    int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), 8, 1);
+    int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), AW, 1);
     emit_stvar(fn, t->vla_size, sz, ty_base(TY_LONG, 1));
 }
 
@@ -702,8 +714,8 @@ int gen_addr(struct ir_func *fn, struct expr *e)
                                : gen_addr(fn, e->lhs);
         if (e->memb->off == 0)
             return base;
-        int off = emit_const(fn, e->memb->off, 8);
-        return emit_bin(fn, IR_ADD, base, off, 8, 1);
+        int off = emit_const(fn, e->memb->off, AW);
+        return emit_bin(fn, IR_ADD, base, off, AW, 1);
     }
     case EXPR_COMPLIT:
         return gen_complit(fn, e);
@@ -739,8 +751,8 @@ static int gen_complit(struct ir_func *fn, struct expr *e)
         int v = gen_expr(fn, e->inits[k].e);
         int at = base;
         if (e->inits[k].off) {
-            int o = emit_const(fn, e->inits[k].off, 8);
-            at = emit_bin(fn, IR_ADD, base, o, 8, 1);
+            int o = emit_const(fn, e->inits[k].off, AW);
+            at = emit_bin(fn, IR_ADD, base, o, AW, 1);
         }
         store_init_leaf(fn, at, &e->inits[k], v);
     }
@@ -1798,15 +1810,15 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                  * mirror of the IR_MUL scaling on the ptr+int path. */
                 int a = gen_expr(fn, e->lhs);
                 int b = gen_expr(fn, e->rhs);
-                int diff = emit_bin(fn, IR_SUB, a, b, 8, 1);
+                int diff = emit_bin(fn, IR_SUB, a, b, AW, 1);
                 if (ty_is_vla(lt->pointee))
                     return emit_bin(fn, IR_DIV, diff,
-                                    type_size_val(fn, lt->pointee), 8, 1);
+                                    type_size_val(fn, lt->pointee), AW, 1);
                 int size = ty_size(lt->pointee);
                 if (size <= 1)
                     return diff;
-                int c = emit_const(fn, size, 8);
-                return emit_bin(fn, IR_DIV, diff, c, 8, 1);
+                int c = emit_const(fn, size, AW);
+                return emit_bin(fn, IR_DIV, diff, c, AW, 1);
             }
             if (lp || rp) {
                 /* ptr +/- int: scale the (already long) index */
@@ -1823,13 +1835,13 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 int size = ty_size(pt);
                 if (ty_is_vla(pt))
                     idx = emit_bin(fn, IR_MUL, idx, type_size_val(fn, pt),
-                                   8, 1);
+                                   AW, 1);
                 else if (size > 1) {
-                    int c = emit_const(fn, size, 8);
-                    idx = emit_bin(fn, IR_MUL, idx, c, 8, 1);
+                    int c = emit_const(fn, size, AW);
+                    idx = emit_bin(fn, IR_MUL, idx, c, AW, 1);
                 }
                 return emit_bin(fn, e->op == B_ADD ? IR_ADD : IR_SUB,
-                                p, idx, 8, 1);
+                                p, idx, AW, 1);
             }
             /* plain arithmetic */
             int a = gen_expr(fn, e->lhs);
@@ -1904,8 +1916,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
                               8, 1);
             else if (esz > 1) {
-                int k = emit_const(fn, esz, 8);
-                rv = emit_bin(fn, IR_MUL, rv, k, 8, 1);
+                int k = emit_const(fn, esz, AW);
+                rv = emit_bin(fn, IR_MUL, rv, k, AW, 1);
             }
             res = emit_bin(fn, e->op == B_ADD ? IR_ADD : IR_SUB, cur, rv,
                            8, 1);
@@ -2059,7 +2071,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 fp = emit_load(fn, fp, e->ty);
             if (strcmp(e->name, "__builtin_frame_address") == 0)
                 return fp;
-            int at = emit_bin(fn, IR_ADD, fp, emit_const(fn, 8, 8), 8, 0);
+            int at = emit_bin(fn, IR_ADD, fp,
+                              emit_const(fn, AW, AW), AW, 0);
             return emit_load(fn, at, e->ty);
         }
         int args[MAX_PARAMS];
@@ -2245,7 +2258,16 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             fn->scratch_bytes += (i->retsize + 7) & ~7;
         }
         i->flt = ty_is_float(e->ty);
-        i->w = i->flt ? ty_size(e->ty) : e->ty->kind == TY_INT128 ? 16 : 8;
+        /* An integer result comes back in the whole RETURN REGISTER, so
+         * the width here is the register's and not the type's: an `int`
+         * returned on x86-64 arrives in rax and codegen reads all of
+         * it. That register is four bytes on ILP32, where saying 8
+         * would ask a 32-bit machine for a value it has nowhere to
+         * put; a type that genuinely needs eight still gets it. */
+        i->w = i->flt ? ty_size(e->ty)
+             : e->ty->kind == TY_INT128 ? 16
+             : ty_w(e->ty) > target_ptr_size() ? ty_w(e->ty)
+             : target_ptr_size();
         i->dst = new_temp(fn);
         return i->dst;
     }
@@ -2519,8 +2541,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                     int v = gen_expr(fn, s->inits[k].e);
                     int at = base;
                     if (s->inits[k].off) {
-                        int o = emit_const(fn, s->inits[k].off, 8);
-                        at = emit_bin(fn, IR_ADD, base, o, 8, 1);
+                        int o = emit_const(fn, s->inits[k].off, AW);
+                        at = emit_bin(fn, IR_ADD, base, o, AW, 1);
                     }
                     store_init_leaf(fn, at, &s->inits[k], v);
                 }
