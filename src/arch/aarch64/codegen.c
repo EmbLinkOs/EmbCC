@@ -983,13 +983,38 @@ static void addr_of(struct code *t, int dst, int base, long off)
     }
 }
 
+/* Can a q-register access reach this frame offset? Non-negative, a
+ * multiple of sixteen, and within the 12-bit scaled immediate. */
+static int q_off_ok(long off)
+{
+    return off >= 0 && off % 16 == 0 && off / 16 <= 0xfff;
+}
+
 /* Copy `size` bytes from [src] to [dst]. Unrolled: struct copies in real
  * code are small, and an unrolled copy needs no spare register for a
  * counter. A very large aggregate therefore costs a long instruction run
- * — a bulk-copy loop is a later optimisation, not a correctness gap. */
+ * -- a bulk-copy loop is a later optimisation, not a correctness gap.
+ *
+ * Sixteen at a time through a q register where there are sixteen to
+ * take: one ldr/str pair instead of two, for every long double, every
+ * __int128 and every struct assignment. Across lib/libc and lib/libcxx
+ * that is 2739 eight-byte copy pairs, 849 of which are exactly two
+ * chunks -- a 16-byte value moving from one slot to another.
+ *
+ * v16 is the FP scratch and is in no pool, so nothing live can be in
+ * it; the offsets a q access takes must be non-negative and a multiple
+ * of sixteen, which stepping from zero by sixteen makes them. Under
+ * -mgeneral-regs-only there is no q register to use -- a kernel built
+ * that way must not touch the FPU at all -- so the eightbyte loop
+ * stays as the fallback. */
 static void emit_copy(struct code *t, int dst, int src, int size)
 {
     int off = 0;
+    if (!g_no_fp)
+        for (; size - off >= 16 && q_off_ok(off); off += 16) {
+            a64_ldr_q(t, A64_FACC, src, off);
+            a64_str_q(t, A64_FACC, dst, off);
+        }
     while (off < size) {
         int chunk = size - off >= 8 ? 8 : size - off >= 4 ? 4
                   : size - off >= 2 ? 2 : 1;
@@ -1112,6 +1137,15 @@ static void gen_a64_ld(struct code *t, const long *sd, struct ir_ins *i,
         emit_copy(t, A64_ADDR, A64_TMP, 16);
         break;
     case IR_LDVAR: case IR_STVAR: case IR_MOV:
+        /* Both ends are frame slots, so the q access can name the frame
+         * base itself: two instructions rather than two `add`s and a
+         * copy. A 16-byte local is 16-aligned, which is what a q offset
+         * needs; anything outside the encoding forms the addresses. */
+        if (!g_no_fp && q_off_ok(sd[i->dst]) && q_off_ok(sd[i->a])) {
+            a64_ldr_q(t, A64_FACC, FB, sd[i->a]);
+            a64_str_q(t, A64_FACC, FB, sd[i->dst]);
+            break;
+        }
         addr_of(t, A64_ADDR, FB, sd[i->dst]);
         addr_of(t, A64_TMP, FB, sd[i->a]);
         emit_copy(t, A64_ADDR, A64_TMP, 16);

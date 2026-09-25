@@ -1362,10 +1362,24 @@ static void emit_reg_parallel_move(struct code *text, int *dest, int *src,
     }
 }
 
-/* Copy 16 bytes [sbase+soff] -> [dbase+doff] through rax (neither base may
- * be rax). */
+/* Copy 16 bytes [sbase+soff] -> [dbase+doff].
+ *
+ * One xmm register carries all sixteen, so this is two instructions
+ * rather than four and touches neither rax nor its residency cache.
+ * xmm7 is the scratch: the allocator's FP pool is xmm8-15 and every
+ * other float path here uses xmm0, so nothing live can be in it.
+ *
+ * Under -mno-sse there is no such register -- a kernel built that way
+ * must not touch the FPU -- so the two-eightbytes-through-rax form
+ * stays as the fallback, and there neither base may be rax. */
+#define COPY16_XMM 7
 static void copy16(struct code *text, int dbase, int doff, int sbase, int soff)
 {
+    if (!g_no_sse) {
+        x86_mov128_load(text, COPY16_XMM, sbase, soff);
+        x86_mov128_store(text, dbase, doff, COPY16_XMM);
+        return;
+    }
     for (int q = 0; q < 16; q += 8) {
         x86_load_reg_mem(text, REG_RAX, sbase, soff + q, 8);
         x86_store_mem_reg(text, dbase, doff + q, REG_RAX, 8);

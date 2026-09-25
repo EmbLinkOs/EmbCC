@@ -1543,6 +1543,37 @@ void x86_vstore_base(struct code *c, int base, int disp, int xmm)
 }
 
 /* The same against a frame slot, which we align to 16, so movdqa. */
+/* movdqu xmm, [base+disp] / movdqu [base+disp], xmm -- all sixteen
+ * bytes in one instruction, against any base register.
+ *
+ * This is what a 16-byte COPY is: a long double, an __int128 or a
+ * vector moving from one place to another. Doing it as two loads and
+ * two stores through rax was four instructions and about twenty-two
+ * bytes; this is two and thirteen, and it leaves rax (and its residency
+ * cache) alone.
+ *
+ * UNALIGNED, because only some of the addresses involved are known to
+ * be 16-aligned: a 16-byte slot is, and a pointer a program handed us
+ * is not. On every processor this compiler targets movdqu against an
+ * aligned address costs what movdqa would. */
+void x86_mov128_load(struct code *c, int xmm, int base, int disp)
+{
+    code_byte(c, 0xf3);
+    { int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+      if (rex != 0x40) code_byte(c, rex); }
+    code_byte(c, 0x0f); code_byte(c, 0x6f);
+    modrm_base(c, xmm, base, disp);
+}
+
+void x86_mov128_store(struct code *c, int base, int disp, int xmm)
+{
+    code_byte(c, 0xf3);
+    { int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+      if (rex != 0x40) code_byte(c, rex); }
+    code_byte(c, 0x0f); code_byte(c, 0x7f);
+    modrm_base(c, xmm, base, disp);
+}
+
 void x86_vload_slot(struct code *c, int xmm, int disp)
 {
     code_byte(c, 0x66);
