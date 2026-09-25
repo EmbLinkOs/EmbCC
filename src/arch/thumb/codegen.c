@@ -38,6 +38,7 @@
 
 #include "emit.h"
 #include "../backend.h"
+#include "../regalloc.h"
 #include "../target.h"
 #include "../../driver/util.h"
 
@@ -63,7 +64,80 @@
  * — and because r9 then costs nothing and is a fourth scratch if this
  * file ever wants one. */
 #define SAVE_MASK ((1u << 9) | (1u << T_ADDR) | (1u << T_TMP) | (1u << T_LR))
-#define SAVE_BYTES 16
+
+static int mask_bytes(unsigned m)
+{
+    int n = 0;
+    while (m) { n += (int)(m & 1); m >>= 1; }
+    return n * 4;
+}
+
+/* ---- the register allocator's view of this machine -------------------
+ *
+ * The pool is r0-r8. r9-r12 stay out of it as scratch: r12 is the ABI's
+ * own and the other three are what a 64-bit operation needs to hold
+ * both halves of both operands at once, since the allocator has no
+ * notion of a register PAIR and leaves every eight-byte value in
+ * memory.
+ *
+ * Order: the caller-saved r0-r3 first, so a short-lived value takes one
+ * and the prologue saves nothing for it, and because they are LOW —
+ * every Thumb instruction naming a register above r7 is four bytes
+ * where the 16-bit form would be two. Then r4-r7, low but callee-saved.
+ * r8 last: callee-saved AND high, the worst of both, and worth having
+ * only when the pressure is real.
+ */
+#define T_NPOOL 9
+static const int T_POOL[T_NPOOL] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+
+static const int *t_pool_for(const struct ir_func *fn, int *n)
+{
+    (void)fn;
+    *n = T_NPOOL;
+    return T_POOL;
+}
+
+static int t_callee_saved(int reg) { return reg >= 4 && reg <= 11; }
+
+/* Is `dst = load(local)` a plain move here? Only at the full width: a
+ * narrower load sign- or zero-extends, which is an operation and not a
+ * copy, so the two values cannot share a register. */
+static int t_ldvar_plain(int size, int sign, int w)
+{
+    (void)sign;
+    return size == 4 && w == 4;
+}
+
+/* Which instructions become a CALL that the IR does not show as one.
+ * Everything floating point, and the 64-bit divides — a value live
+ * across one of these may not sit in a caller-saved register. */
+static int t_op_calls_helper(const struct ir_ins *i)
+{
+    if (i->flt)
+        return i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
+               i->op == IR_DIV || i->op == IR_CMP;
+    if (i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F)
+        return 1;
+    return (i->op == IR_DIV || i->op == IR_MOD) && i->w == 8;
+}
+
+static void t_abi_hints(const struct ir_func *fn, int *hint);
+
+static const struct ra_target T_RA = {
+    t_pool_for,
+    t_callee_saved,
+    t_ldvar_plain,
+    1,            /* a scalar call argument can come from a register */
+    1,            /* ... and so can a returned value */
+    1,            /* ... and a memcpy's addresses */
+    t_op_calls_helper,
+    0,            /* Thumb-2's wide forms are three-operand */
+    t_abi_hints,
+    0, 0          /* no floating-point class: soft float, in core regs */
+};
+
+/* -O2 and above: the register allocator is on. */
+static int g_t_regalloc;
 
 struct t_sites {
     struct { int patch_off; struct func *target; } *call;
@@ -85,17 +159,25 @@ struct t_fn {
      * as i->w everywhere -- a compare of two 64-bit values has w == 8
      * and produces a one-or-zero that is four bytes wide. */
     char *wide;
+    /* Per vreg: the register the allocator gave it, or -1 for one that
+     * lives in its slot. NULL when allocation is off (-O0 and -O1). */
+    int *loc;
     struct code *t;
     struct t_sites *st;
     long *slot;          /* per-vreg byte offset from sp, -1 for none */
     long frame;          /* total bytes sp moves down by */
     long scratch_at;     /* where fn->scratch_bytes begins */
     long sret_slot;      /* where the hidden result pointer is kept, or -1 */
+    /* Four words for STAGING a call's register arguments, used only
+     * when one of them is sourced from a register that another one's
+     * destination would overwrite. See the call lowering. */
+    long argsave;
     /* A variadic function's REGISTER SAVE AREA: where the prologue
      * spilled r0-r3 so that one pointer walks from them into the
      * caller's stack arguments. -1 when the function is not variadic. */
     long va_regsave;
     long va_first;       /* ... and the offset of the first UNNAMED one */
+    unsigned save_mask;  /* what the prologue pushed */
     int *label_off;      /* per label id, or -1 while unseen */
     struct { int at; int label; int cond; } *fix;
     int nfix, capfix;
@@ -187,20 +269,34 @@ static char *wide64_map(struct ir_func *fn)
         again = 0;
         for (int n = 0; n < fn->nins; n++) {
             const struct ir_ins *i = &fn->ins[n];
-            int src;
-            if (i->dst < 0 || i->dst >= fn->nvregs || w[i->dst])
+            int ends[3], ne = 0, any = 0;
+            if (i->dst < 0 || i->dst >= fn->nvregs)
                 continue;
-            if (i->op == IR_MOV)
-                src = i->a >= 0 && i->a < fn->nvregs && w[i->a];
-            else if (i->op == IR_SELECT)
-                src = (i->b >= 0 && i->b < fn->nvregs && w[i->b]) ||
-                      (i->c >= 0 && i->c < fn->nvregs && w[i->c]);
-            else
+            if (i->op == IR_MOV) {
+                ends[ne++] = i->dst;
+                if (i->a >= 0 && i->a < fn->nvregs) ends[ne++] = i->a;
+            } else if (i->op == IR_SELECT) {
+                ends[ne++] = i->dst;
+                if (i->b >= 0 && i->b < fn->nvregs) ends[ne++] = i->b;
+                if (i->c >= 0 && i->c < fn->nvregs) ends[ne++] = i->c;
+            } else {
                 continue;
-            if (src) {
-                w[i->dst] = 1;
-                again = 1;
             }
+            /* BOTH ways, and across all three ends of a select. A copy
+             * has to agree with itself about how wide it is: a `?:`
+             * whose arms are an eight-byte value and a four-byte
+             * constant had the merge copying eight bytes out of a slot
+             * the constant never used, because the constant had been
+             * given a register instead. */
+            for (int k = 0; k < ne; k++)
+                any |= w[ends[k]];
+            if (!any)
+                continue;
+            for (int k = 0; k < ne; k++)
+                if (!w[ends[k]]) {
+                    w[ends[k]] = 1;
+                    again = 1;
+                }
         }
     }
     return w;
@@ -339,6 +435,9 @@ static void layout(struct t_fn *F)
      * address to write it to in r0, and must still have it at the
      * return — which may be many calls later, and r0 survives none of
      * them. It lives on the frame. */
+    off = (off + 3) & ~3L;
+    F->argsave = off;
+    off += 16;
     F->sret_slot = -1;
     if (fn_sret_bytes(fn)) {
         off = (off + 3) & ~3L;
@@ -356,16 +455,44 @@ static void layout(struct t_fn *F)
 /* Load vreg v into `reg`. Every value lives in memory in this backend,
  * so this is always a load — which is the naive part, and the part a
  * register allocator replaces. */
-static void rd(struct t_fn *F, int v, int reg)
+/* Read vreg v and say which register now holds it.
+ *
+ * A value the allocator gave a register is ALREADY there and `scratch`
+ * is not touched; one that lives in its slot is loaded into `scratch`.
+ * Every caller therefore uses the RETURNED register and not the one it
+ * offered — which is the whole of what makes the allocator visible in
+ * this file. */
+static int rd(struct t_fn *F, int v, int scratch)
 {
-    if (!t_ldst_imm(F->t, reg, T_SP, F->slot[v], 4, 0, 0)) {
-        t_mov_imm(F->t, reg, F->slot[v], 0);
-        t_ldst_reg(F->t, reg, T_SP, reg, 0, 4, 0, 0);
+    if (F->loc && F->loc[v] >= 0)
+        return F->loc[v];
+    if (!t_ldst_imm(F->t, scratch, T_SP, F->slot[v], 4, 0, 0)) {
+        t_mov_imm(F->t, scratch, F->slot[v], 0);
+        t_ldst_reg(F->t, scratch, T_SP, scratch, 0, 4, 0, 0);
     }
+    return scratch;
 }
 
-static void wr(struct t_fn *F, int v, int reg)
+/* Where to WRITE vreg v: its own register if it has one, else the
+ * scratch the caller offers. Pair every use with wrote(). */
+static int wr(struct t_fn *F, int v, int scratch)
 {
+    if (v >= 0 && F->loc && F->loc[v] >= 0)
+        return F->loc[v];
+    return scratch;
+}
+
+/* ... and commit it: a value with a register of its own is already
+ * where it belongs, and one without goes to its slot. */
+static void wrote(struct t_fn *F, int v, int reg)
+{
+    if (v < 0)
+        return;
+    if (F->loc && F->loc[v] >= 0) {
+        if (F->loc[v] != reg)
+            t_mov_reg(F->t, F->loc[v], reg);
+        return;
+    }
     if (F->slot[v] < 0)
         return;
     if (!t_ldst_imm(F->t, reg, T_SP, F->slot[v], 4, 0, 1)) {
@@ -378,8 +505,20 @@ static void wr(struct t_fn *F, int v, int reg)
     }
 }
 
+/* The old shape, for the places that genuinely want a value IN a named
+ * register: an argument register before a call, r0 at a return. */
+static void rd_into(struct t_fn *F, int v, int reg)
+{
+    int r = rd(F, v, reg);
+    if (r != reg)
+        t_mov_reg(F->t, reg, r);
+}
+
 /* A 64-bit value's two halves, little-endian: the low word at the slot
  * and the high word four bytes above it. */
+/* A 64-bit value is never in a register: the allocator has no notion of
+ * a PAIR, so wide64_map's vregs are handed to it as ineligible and
+ * these two always go through the slot. */
 static void rd64(struct t_fn *F, int v, int lo, int hi)
 {
     if (!t_ldst_imm(F->t, lo, T_SP, F->slot[v], 4, 0, 0) ||
@@ -424,18 +563,13 @@ static void operand_b64(struct t_fn *F, const struct ir_ins *i, int lo, int hi)
  * 101255427 at -O1 — the index shift had folded its `#2` and the
  * backend shifted by a stale word instead. So every binary operation
  * asks HERE, and none of them reads i->b directly. */
-static void operand_b(struct t_fn *F, const struct ir_ins *i, int reg)
+static int operand_b(struct t_fn *F, const struct ir_ins *i, int scratch)
 {
-    if (i->imm_b)
-        t_mov_imm(F->t, reg, (long)i->imm, 0);
-    else
-        rd(F, i->b, reg);
-}
-
-/* The address of a local's slot, into `reg`. */
-static void addr_of_slot(struct t_fn *F, int v, int reg)
-{
-    t_add_sp(F->t, reg, F->slot[v]);
+    if (i->imm_b) {
+        t_mov_imm(F->t, scratch, (long)i->imm, 0);
+        return scratch;
+    }
+    return rd(F, i->b, scratch);
 }
 
 /* ---- branches ------------------------------------------------------- */
@@ -605,7 +739,7 @@ static int fp_arg(struct t_fn *F, int v, int w, int reg)
         rd64(F, v, reg, reg + 1);
         return 2;
     }
-    rd(F, v, reg);
+    rd_into(F, v, reg);
     return 1;
 }
 
@@ -614,7 +748,7 @@ static void fp_result(struct t_fn *F, int dst, int w)
     if (dst < 0)
         return;
     if (w == 8) wr64(F, dst, T_R0, T_R1);
-    else        wr(F, dst, T_R0);
+    else        wrote(F, dst, T_R0);
 }
 
 /* ---- comparisons ---------------------------------------------------- */
@@ -629,6 +763,37 @@ static int cond_for(enum binop pred, int sign)
     case B_GT: return sign ? T_GT : T_HI;
     case B_GE: return sign ? T_GE : T_CS;
     default:   return T_AL;
+    }
+}
+
+/* The register the ABI would like each value to be in. Hints, tried
+ * before the free list and dropped when the register is taken — what
+ * they buy is the move at each boundary: `mov r4, r0` at the top of a
+ * function and `mov r0, r4` before its return, which is otherwise
+ * emitted whatever the allocator chose. */
+static void t_abi_hints(const struct ir_func *fn, int *hint)
+{
+    struct argplace pl;
+    int ncrn = 0;
+    long stk = 0;
+
+    if (fn->ret_abi.is_struct && sret_bytes(fn->ret_abi.size))
+        ncrn = 1;
+    for (int k = 0; k < fn->nparams && k < fn->nvregs; k++) {
+        place_arg(fn->param_abi[k].size, arg_align(&fn->param_abi[k]),
+                  &ncrn, &stk, &pl);
+        /* Only a one-register scalar: a pair is not allocated at all,
+         * and a composite lives in its slot. */
+        if (pl.nreg == 1 && !pl.nstk && !fn->param_abi[k].is_struct)
+            hint[k] = pl.reg;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_CALL && i->dst >= 0 && i->dst < fn->nvregs &&
+            !i->retsize)
+            hint[i->dst] = T_R0;           /* a result arrives in r0 */
+        else if (i->op == IR_RET && i->a >= 0 && i->a < fn->nvregs)
+            hint[i->a] = T_R0;             /* ... and leaves from it */
     }
 }
 
@@ -813,7 +978,7 @@ static int gen_ins64(struct t_fn *F, int n)
         if (i->imm_b)
             shift64_imm(F, op, i->sign, (long)i->imm);
         else {
-            rd(F, i->b, B_LO);
+            rd_into(F, i->b, B_LO);
             shift64_var(F, op, i->sign);
         }
         wr64(F, i->dst, A_LO, A_HI);
@@ -824,7 +989,7 @@ static int gen_ins64(struct t_fn *F, int n)
         /* Widening to 64 bits: the low word is the source, extended to
          * 32 first if it was narrower, and the high word is zero or the
          * sign. */
-        rd(F, i->a, A_LO);
+        rd_into(F, i->a, A_LO);
         if (i->size < 4)
             t_ext(t, A_LO, A_LO, i->size, i->sign);
         if (i->sign)
@@ -864,7 +1029,7 @@ static int gen_ins64(struct t_fn *F, int n)
         }
         return 1;
     case IR_LOAD:
-        rd(F, i->a, B_LO);
+        rd_into(F, i->a, B_LO);
         if (i->size == 8) {
             t_ldst_imm(t, A_LO, B_LO, 0, 4, 0, 0);
             t_ldst_imm(t, A_HI, B_LO, 4, 4, 0, 0);
@@ -876,7 +1041,7 @@ static int gen_ins64(struct t_fn *F, int n)
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     case IR_STORE:
-        rd(F, i->a, B_LO);
+        rd_into(F, i->a, B_LO);
         rd64(F, i->b, A_LO, A_HI);
         t_ldst_imm(t, A_LO, B_LO, 0, i->size == 8 ? 4 : i->size, 0, 1);
         if (i->size == 8)
@@ -884,7 +1049,7 @@ static int gen_ins64(struct t_fn *F, int n)
         return 1;
 
     case IR_SELECT:
-        rd(F, i->a, B_LO);
+        rd_into(F, i->a, B_LO);
         t_cmp_imm(t, B_LO, 0);
         {
             int take_c = t_bcond(t, T_EQ);
@@ -979,10 +1144,10 @@ static void gen_ins(struct t_fn *F, int n)
                 t_alu_reg(t, T_OP_EOR, A_HI, A_HI, B_LO, 0);
                 wr64(F, i->dst, A_LO, A_HI);
             } else {
-                rd(F, i->a, T_ACC);
+                int a = rd(F, i->a, T_ACC), d = wr(F, i->dst, T_ACC);
                 t_mov_imm(t, T_TMP, 0x80000000L, 0);
-                t_alu_reg(t, T_OP_EOR, T_ACC, T_ACC, T_TMP, 0);
-                wr(F, i->dst, T_ACC);
+                t_alu_reg(t, T_OP_EOR, d, a, T_TMP, 0);
+                wrote(F, i->dst, d);
             }
             return;
         }
@@ -993,13 +1158,16 @@ static void gen_ins(struct t_fn *F, int n)
             call_helper(F, fp_cmp_name(i->pred, i->w));
             t_cmp_imm(t, T_R0, 0);
             cond = cond_for(i->pred, 1);      /* the helper's signed answer */
-            t_mov_imm(t, T_ACC, 1, 0);
             {
-                int over = t_bcond(t, cond);
-                t_mov_imm(t, T_ACC, 0, 0);
-                t_patch_bcond(t, over, t->len);
+                int d = wr(F, i->dst, T_ACC);
+                t_mov_imm(t, d, 1, 0);
+                {
+                    int over = t_bcond(t, cond);
+                    t_mov_imm(t, d, 0, 0);
+                    t_patch_bcond(t, over, t->len);
+                }
+                wrote(F, i->dst, d);
             }
-            wr(F, i->dst, T_ACC);
             return;
         }
         if (i->op == IR_SQRT)
@@ -1020,7 +1188,14 @@ static void gen_ins(struct t_fn *F, int n)
      * which is built from each value's defining instruction, is what
      * knows -- so each op asks about the value it actually touches. */
     {
-        int wide = i->w == 8;
+        /* From the MAP, not from i->w: the map is what sized the slot
+         * and what the allocator was told to leave alone, so it is the
+         * only answer the two can agree on. A four-byte constant that
+         * shares a `?:` with an eight-byte value is in the map, and
+         * writing it as four bytes would leave the high half of its
+         * slot unwritten for the merge to copy. */
+        int def = ra_ins_def(i);
+        int wide = def >= 0 && def < fn->nvregs ? F->wide[def] : i->w == 8;
         switch (i->op) {
         /* A float value being MOVED is an integer of its own width. */
         case IR_STVAR: wide = i->size == 8 || F->wide[i->a]; break;
@@ -1078,14 +1253,17 @@ static void gen_ins(struct t_fn *F, int n)
             return;
         jump_to(F, i->label);
         return;
-    case IR_CONST:
-        t_mov_imm(t, T_ACC, (long)i->imm, 0);
-        wr(F, i->dst, T_ACC);
+    case IR_CONST: {
+        int d = wr(F, i->dst, T_ACC);
+        t_mov_imm(t, d, (long)i->imm, 0);
+        wrote(F, i->dst, d);
         return;
-    case IR_MOV:
-        rd(F, i->a, T_ACC);
-        wr(F, i->dst, T_ACC);
+    }
+    case IR_MOV: {
+        int a = rd(F, i->a, T_ACC);
+        wrote(F, i->dst, a);
         return;
+    }
 
     case IR_ADD: case IR_SUB: case IR_MUL:
     case IR_AND: case IR_OR:  case IR_XOR: {
@@ -1099,96 +1277,109 @@ static void gen_ins(struct t_fn *F, int n)
                : i->op == IR_OR  ? T_OP_ORR
                : i->op == IR_XOR ? T_OP_EOR
                : 0;                          /* IR_MUL: not an ALU op */
-        rd(F, i->a, T_ACC);
+        int a = rd(F, i->a, T_ACC), b, d;
         if (i->imm_b && i->op != IR_MUL) {
+            d = wr(F, i->dst, T_ACC);
             /* addw/subw reach any 0..4095 where the modified immediate
              * reaches only what it can rotate into place, and almost
              * every constant folded here is a small offset. */
             if ((i->op == IR_ADD || i->op == IR_SUB) &&
                 i->imm >= 0 && i->imm <= 4095) {
-                if (i->op == IR_ADD) t_addw(t, T_ACC, T_ACC, i->imm);
-                else                 t_subw(t, T_ACC, T_ACC, i->imm);
-            } else if (!t_alu_imm(t, op, T_ACC, T_ACC, i->imm, 0)) {
-                operand_b(F, i, T_TMP);
-                t_alu_reg(t, op, T_ACC, T_ACC, T_TMP, 0);
+                if (i->op == IR_ADD) t_addw(t, d, a, i->imm);
+                else                 t_subw(t, d, a, i->imm);
+            } else if (!t_alu_imm(t, op, d, a, i->imm, 0)) {
+                b = operand_b(F, i, T_TMP);
+                t_alu_reg(t, op, d, a, b, 0);
             }
-            wr(F, i->dst, T_ACC);
+            wrote(F, i->dst, d);
             return;
         }
-        operand_b(F, i, T_TMP);
+        b = operand_b(F, i, T_TMP);
+        d = wr(F, i->dst, T_ACC);
         if (i->op == IR_MUL)
-            t_mul(t, T_ACC, T_ACC, T_TMP);
+            t_mul(t, d, a, b);
         else
-            t_alu_reg(t, op, T_ACC, T_ACC, T_TMP, 0);
-        wr(F, i->dst, T_ACC);
+            t_alu_reg(t, op, d, a, b, 0);
+        wrote(F, i->dst, d);
         return;
     }
-    case IR_DIV: case IR_MOD:
-        rd(F, i->a, T_ACC);
-        operand_b(F, i, T_TMP);
-        t_div(t, T_ADDR, T_ACC, T_TMP, i->sign);
+    case IR_DIV: case IR_MOD: {
+        int a = rd(F, i->a, T_ACC), b = operand_b(F, i, T_TMP);
+        int q = i->op == IR_MOD ? T_ADDR : wr(F, i->dst, T_ADDR);
+        t_div(t, q, a, b, i->sign);
         if (i->op == IR_MOD) {
             /* There is no remainder instruction: r = a - (a / b) * b,
              * which `mls` does in one. */
-            t_mls(t, T_ACC, T_ADDR, T_TMP, T_ACC);
-            wr(F, i->dst, T_ACC);
+            int d = wr(F, i->dst, T_ACC);
+            t_mls(t, d, q, b, a);
+            wrote(F, i->dst, d);
         } else {
-            wr(F, i->dst, T_ADDR);
+            wrote(F, i->dst, q);
         }
-        return;
-    case IR_SHL: case IR_SHR: {
-        int sh = i->op == IR_SHL ? T_SH_LSL : i->sign ? T_SH_ASR : T_SH_LSR;
-        rd(F, i->a, T_ACC);
-        if (i->imm_b && i->imm >= 0 && i->imm < 32) {
-            t_shift_imm(t, sh, T_ACC, T_ACC, (int)i->imm, 0);
-        } else {
-            operand_b(F, i, T_TMP);
-            t_shift_reg(t, sh, T_ACC, T_ACC, T_TMP, 0);
-        }
-        wr(F, i->dst, T_ACC);
         return;
     }
-    case IR_NEG:
-        rd(F, i->a, T_ACC);
-        t_alu_imm(t, T_OP_RSB, T_ACC, T_ACC, 0, 0);
-        wr(F, i->dst, T_ACC);
+    case IR_SHL: case IR_SHR: {
+        int sh = i->op == IR_SHL ? T_SH_LSL : i->sign ? T_SH_ASR : T_SH_LSR;
+        int a = rd(F, i->a, T_ACC), d;
+        if (i->imm_b && i->imm >= 0 && i->imm < 32) {
+            d = wr(F, i->dst, T_ACC);
+            t_shift_imm(t, sh, d, a, (int)i->imm, 0);
+        } else {
+            int b = operand_b(F, i, T_TMP);
+            d = wr(F, i->dst, T_ACC);
+            t_shift_reg(t, sh, d, a, b, 0);
+        }
+        wrote(F, i->dst, d);
         return;
-    case IR_BNOT:
-        rd(F, i->a, T_ACC);
-        t_mvn_reg(t, T_ACC, T_ACC, 0);
-        wr(F, i->dst, T_ACC);
+    }
+    case IR_NEG: {
+        int a = rd(F, i->a, T_ACC), d = wr(F, i->dst, T_ACC);
+        t_alu_imm(t, T_OP_RSB, d, a, 0, 0);
+        wrote(F, i->dst, d);
         return;
+    }
+    case IR_BNOT: {
+        int a = rd(F, i->a, T_ACC), d = wr(F, i->dst, T_ACC);
+        t_mvn_reg(t, d, a, 0);
+        wrote(F, i->dst, d);
+        return;
+    }
 
     case IR_CMP: {
         int cond = cond_for(i->pred, i->sign);
         if (i->w == 8) {
+            int d;
             cond = cmp64(F, i, i->pred, i->sign);
-            t_mov_imm(t, T_ACC, 1, 0);
+            d = wr(F, i->dst, T_ACC);
+            t_mov_imm(t, d, 1, 0);
             {
                 int over = t_bcond(t, cond);
-                t_mov_imm(t, T_ACC, 0, 0);
+                t_mov_imm(t, d, 0, 0);
                 t_patch_bcond(t, over, t->len);
             }
-            wr(F, i->dst, T_ACC);
+            wrote(F, i->dst, d);
             return;
         }
-        rd(F, i->a, T_ACC);
+        {
+        int a = rd(F, i->a, T_ACC), d;
         if (i->imm_b && ((i->imm >= 0 && i->imm <= 255) || t_imm_ok(i->imm))) {
-            t_cmp_imm(t, T_ACC, i->imm);
+            t_cmp_imm(t, a, i->imm);
         } else {
-            operand_b(F, i, T_TMP);
-            t_cmp_reg(t, T_ACC, T_TMP);
+            int b = operand_b(F, i, T_TMP);
+            t_cmp_reg(t, a, b);
         }
         /* 0 or 1, without an IT block: set it, then jump over the
          * clear. Two instructions either way, and no flag-liveness
          * question to get wrong. */
-        t_mov_imm(t, T_ACC, 1, 0);
+        d = wr(F, i->dst, T_ACC);
+        t_mov_imm(t, d, 1, 0);
         {
             int over = t_bcond(t, cond);
-            t_mov_imm(t, T_ACC, 0, 0);
+            t_mov_imm(t, d, 0, 0);
             t_patch_bcond(t, over, t->len);
         }
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
+        }
         return;
     }
     case IR_SELECT: {
@@ -1196,19 +1387,24 @@ static void gen_ins(struct t_fn *F, int n)
          * block, but both arms here are already-computed VALUES sitting
          * in slots, so this is two loads and a branch over one of them —
          * which needs no flag-liveness reasoning and is the same size. */
-        rd(F, i->a, T_ACC);
-        t_cmp_imm(t, T_ACC, 0);
         {
-            int take_c = t_bcond(t, T_EQ);
-            rd(F, i->b, T_ACC);
+            int c = rd(F, i->a, T_TMP);
+            int d = wr(F, i->dst, T_ACC), v;
+            t_cmp_imm(t, c, 0);
             {
-                int done = t_b(t);
-                t_patch_bcond(t, take_c, t->len);
-                rd(F, i->c, T_ACC);
-                t_patch_b(t, done, t->len);
+                int take_c = t_bcond(t, T_EQ);
+                v = rd(F, i->b, T_ACC);
+                if (v != d) t_mov_reg(t, d, v);
+                {
+                    int done = t_b(t);
+                    t_patch_bcond(t, take_c, t->len);
+                    v = rd(F, i->c, T_ACC);
+                    if (v != d) t_mov_reg(t, d, v);
+                    t_patch_b(t, done, t->len);
+                }
             }
+            wrote(F, i->dst, d);
         }
-        wr(F, i->dst, T_ACC);
         return;
     }
     case IR_BRZ: case IR_BRNZ:
@@ -1217,88 +1413,125 @@ static void gen_ins(struct t_fn *F, int n)
             t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
             t_cmp_imm(t, A_LO, 0);
         } else {
-            rd(F, i->a, T_ACC);
-            t_cmp_imm(t, T_ACC, 0);
+            int a = rd(F, i->a, T_ACC);
+            t_cmp_imm(t, a, 0);
         }
         jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
         return;
 
-    case IR_LDVAR:
+    case IR_LDVAR: {
+        int d;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit local");
-        if (!t_ldst_imm(t, T_ACC, T_SP, F->slot[i->a], i->size, i->sign, 0)) {
+        /* A local the allocator kept in a register has no slot to read:
+         * the load IS that register, and at full width it is not even a
+         * move. */
+        if (F->loc && i->a < fn->nvars && F->loc[i->a] >= 0) {
+            if (t_ldvar_plain(i->size, i->sign, i->w)) {
+                wrote(F, i->dst, F->loc[i->a]);
+            } else {
+                d = wr(F, i->dst, T_ACC);
+                t_ext(t, d, F->loc[i->a], i->size, i->sign);
+                wrote(F, i->dst, d);
+            }
+            return;
+        }
+        d = wr(F, i->dst, T_ACC);
+        if (!t_ldst_imm(t, d, T_SP, F->slot[i->a], i->size, i->sign, 0)) {
             t_add_sp(t, T_ADDR, F->slot[i->a]);
-            t_ldst_imm(t, T_ACC, T_ADDR, 0, i->size, i->sign, 0);
+            t_ldst_imm(t, d, T_ADDR, 0, i->size, i->sign, 0);
         }
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
         return;
-    case IR_STVAR:
+    }
+    case IR_STVAR: {
+        int a;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit local");
-        rd(F, i->a, T_ACC);
-        if (!t_ldst_imm(t, T_ACC, T_SP, F->slot[i->dst], i->size, 0, 1)) {
+        a = rd(F, i->a, T_ACC);
+        if (F->loc && i->dst < fn->nvars && F->loc[i->dst] >= 0) {
+            if (i->size < 4)        t_ext(t, F->loc[i->dst], a, i->size, 0);
+            else if (F->loc[i->dst] != a) t_mov_reg(t, F->loc[i->dst], a);
+            return;
+        }
+        if (!t_ldst_imm(t, a, T_SP, F->slot[i->dst], i->size, 0, 1)) {
             t_add_sp(t, T_ADDR, F->slot[i->dst]);
-            t_ldst_imm(t, T_ACC, T_ADDR, 0, i->size, 0, 1);
+            t_ldst_imm(t, a, T_ADDR, 0, i->size, 0, 1);
         }
         return;
-    case IR_LOAD:
+    }
+    case IR_LOAD: {
+        int pr, d;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit load");
-        rd(F, i->a, T_ADDR);
-        t_ldst_imm(t, T_ACC, T_ADDR, 0, i->size, i->sign, 0);
-        wr(F, i->dst, T_ACC);
+        pr = rd(F, i->a, T_ADDR);
+        d = wr(F, i->dst, T_ACC);
+        t_ldst_imm(t, d, pr, 0, i->size, i->sign, 0);
+        wrote(F, i->dst, d);
         return;
-    case IR_STORE:
+    }
+    case IR_STORE: {
+        int pr, v;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit store");
-        rd(F, i->a, T_ADDR);
-        rd(F, i->b, T_ACC);
-        t_ldst_imm(t, T_ACC, T_ADDR, 0, i->size, 0, 1);
+        pr = rd(F, i->a, T_ADDR);
+        v = rd(F, i->b, T_ACC);
+        t_ldst_imm(t, v, pr, 0, i->size, 0, 1);
         return;
-    case IR_EXT:
-        rd(F, i->a, T_ACC);
-        if (i->size < 4)
-            t_ext(t, T_ACC, T_ACC, i->size, i->sign);
-        wr(F, i->dst, T_ACC);
+    }
+    case IR_EXT: {
+        int a = rd(F, i->a, T_ACC), d = wr(F, i->dst, T_ACC);
+        if (i->size < 4)   t_ext(t, d, a, i->size, i->sign);
+        else if (d != a)   t_mov_reg(t, d, a);
+        wrote(F, i->dst, d);
         return;
+    }
 
-    case IR_ADDR:
-        addr_of_slot(F, i->a, T_ACC);
-        wr(F, i->dst, T_ACC);
+    case IR_ADDR: {
+        int d = wr(F, i->dst, T_ACC);
+        t_add_sp(t, d, F->slot[i->a]);
+        wrote(F, i->dst, d);
         return;
-    case IR_STRADDR:
-        note_str(F->st, t_mov_addr(t, T_ACC, 0), i->label, RK_THM_MOVW);
+    }
+    case IR_STRADDR: {
+        int d = wr(F, i->dst, T_ACC);
+        note_str(F->st, t_mov_addr(t, d, 0), i->label, RK_THM_MOVW);
         note_str(F->st, t->len - 4, i->label, RK_THM_MOVT);
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
         return;
-    case IR_GADDR:
-        note_glob(F->st, t_mov_addr(t, T_ACC, 0), i->glob, RK_THM_MOVW);
+    }
+    case IR_GADDR: {
+        int d = wr(F, i->dst, T_ACC);
+        note_glob(F->st, t_mov_addr(t, d, 0), i->glob, RK_THM_MOVW);
         note_glob(F->st, t->len - 4, i->glob, RK_THM_MOVT);
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
         return;
-    case IR_FADDR:
-        note_fn(F->st, t_mov_addr(t, T_ACC, 0), i->callee, RK_THM_MOVW);
+    }
+    case IR_FADDR: {
+        int d = wr(F, i->dst, T_ACC);
+        note_fn(F->st, t_mov_addr(t, d, 0), i->callee, RK_THM_MOVW);
         note_fn(F->st, t->len - 4, i->callee, RK_THM_MOVT);
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
         return;
+    }
 
     case IR_MEMCPY: case IR_MEMZERO: {
         /* A byte loop, unrolled to words where the size allows. Small
          * and obviously right; a tuned copy is a later question. */
         long size = i->size, k;
-        rd(F, i->a, T_ADDR);
+        int dp = rd(F, i->a, T_ADDR);
         if (i->op == IR_MEMCPY) {
-            rd(F, i->b, T_TMP);
+            int sp2 = rd(F, i->b, T_TMP);
             for (k = 0; k + 4 <= size; k += 4) {
-                t_ldst_imm(t, T_ACC, T_TMP, k, 4, 0, 0);
-                t_ldst_imm(t, T_ACC, T_ADDR, k, 4, 0, 1);
+                t_ldst_imm(t, T_ACC, sp2, k, 4, 0, 0);
+                t_ldst_imm(t, T_ACC, dp, k, 4, 0, 1);
             }
             for (; k < size; k++) {
-                t_ldst_imm(t, T_ACC, T_TMP, k, 1, 0, 0);
-                t_ldst_imm(t, T_ACC, T_ADDR, k, 1, 0, 1);
+                t_ldst_imm(t, T_ACC, sp2, k, 1, 0, 0);
+                t_ldst_imm(t, T_ACC, dp, k, 1, 0, 1);
             }
         } else {
             t_mov_imm(t, T_ACC, 0, 0);
             for (k = 0; k + 4 <= size; k += 4)
-                t_ldst_imm(t, T_ACC, T_ADDR, k, 4, 0, 1);
+                t_ldst_imm(t, T_ACC, dp, k, 4, 0, 1);
             for (; k < size; k++)
-                t_ldst_imm(t, T_ACC, T_ADDR, k, 1, 0, 1);
+                t_ldst_imm(t, T_ACC, dp, k, 1, 0, 1);
         }
         return;
     }
@@ -1317,6 +1550,8 @@ static void gen_ins(struct t_fn *F, int n)
         struct argplace pl[MAX_PARAMS];
         if (sret)
             ncrn = 1;
+        if (i->indirect)
+            rd_into(F, i->a, T_ACC);       /* see the blx below */
         for (int k = 0; k < i->nargs; k++) {
             struct ir_arg *a = &i->argv[k];
             /* A struct of floats needs no special case either: the
@@ -1332,7 +1567,7 @@ static void gen_ins(struct t_fn *F, int n)
             /* A composite's vreg holds its ADDRESS; a scalar's holds
              * the value, and a scalar never splits. */
             if (a->is_struct) {
-                rd(F, a->vreg, T_ADDR);
+                int sa = rd(F, a->vreg, T_ADDR);
                 for (int q = 0; q < pl[k].nstk; q++) {
                     long off = (long)(pl[k].nreg + q) * 4;
                     int last = off + 4 > a->size;
@@ -1341,13 +1576,13 @@ static void gen_ins(struct t_fn *F, int n)
                      * object would be a load nothing put there. */
                     if (last && (a->size & 3)) {
                         for (long b = off; b < a->size; b++) {
-                            t_ldst_imm(t, T_ACC, T_ADDR, b, 1, 0, 0);
+                            t_ldst_imm(t, T_ACC, sa, b, 1, 0, 0);
                             t_ldst_imm(t, T_ACC, T_SP,
                                        pl[k].stk + (long)q * 4 + (b - off),
                                        1, 0, 1);
                         }
                     } else {
-                        t_ldst_imm(t, T_ACC, T_ADDR, off, 4, 0, 0);
+                        t_ldst_imm(t, T_ACC, sa, off, 4, 0, 0);
                         t_ldst_imm(t, T_ACC, T_SP, pl[k].stk + (long)q * 4,
                                    4, 0, 1);
                     }
@@ -1357,8 +1592,72 @@ static void gen_ins(struct t_fn *F, int n)
                 t_ldst_imm(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
                 t_ldst_imm(t, T_TMP, T_SP, pl[k].stk + 4, 4, 0, 1);
             } else {
-                rd(F, a->vreg, T_ACC);
-                t_ldst_imm(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
+                int v = rd(F, a->vreg, T_ACC);
+                t_ldst_imm(t, v, T_SP, pl[k].stk, 4, 0, 1);
+            }
+        }
+        /* Whether any argument's VALUE lives in a register that another
+         * argument's destination is about to overwrite. Loading r0-r3
+         * in order is fine until that happens — and then it silently
+         * destroys the later argument, which is how `unpack(d2u(y),
+         * &b)` came to be handed a pointer that y's own low word had
+         * already overwritten.
+         *
+         * When it does happen the values go through a staging area on
+         * the frame first. A parallel move would be smaller; this is
+         * four words and a few instructions in the rare case, and it
+         * cannot be got wrong. */
+        {
+            int clash = 0;
+            for (int k = 0; k < i->nargs && !clash; k++) {
+                int src;
+                if (!pl[k].nreg || !F->loc)
+                    continue;
+                src = F->loc[i->argv[k].vreg];
+                if (src < 0 || src > 3)
+                    continue;
+                /* Anything in r0-r3 that is not already exactly where
+                 * it belongs. Broader than strictly necessary, and
+                 * deliberately so: the precise test is "is this
+                 * register some OTHER argument's destination", and
+                 * getting that subtly wrong is a miscompile that only
+                 * shows up when the allocator happens to choose that
+                 * register. The staging costs a few instructions in a
+                 * case that is not common. */
+                if (!(pl[k].nreg == 1 && src == pl[k].reg))
+                    clash = 1;
+            }
+            if (clash) {
+                long at = F->argsave;
+                for (int k = 0; k < i->nargs; k++) {
+                    struct ir_arg *a = &i->argv[k];
+                    if (!pl[k].nreg)
+                        continue;
+                    if (a->is_struct) {
+                        int sa = rd(F, a->vreg, T_ADDR);
+                        for (int q = 0; q < pl[k].nreg; q++) {
+                            t_ldst_imm(t, T_ACC, sa, (long)q * 4, 4, 0, 0);
+                            t_ldst_imm(t, T_ACC, T_SP,
+                                       at + (long)(pl[k].reg + q) * 4,
+                                       4, 0, 1);
+                        }
+                    } else if (a->size > 4) {
+                        rd64(F, a->vreg, T_ACC, T_TMP);
+                        t_ldst_imm(t, T_ACC, T_SP,
+                                   at + (long)pl[k].reg * 4, 4, 0, 1);
+                        t_ldst_imm(t, T_TMP, T_SP,
+                                   at + (long)(pl[k].reg + 1) * 4, 4, 0, 1);
+                    } else {
+                        int v = rd(F, a->vreg, T_ACC);
+                        t_ldst_imm(t, v, T_SP,
+                                   at + (long)pl[k].reg * 4, 4, 0, 1);
+                    }
+                }
+                for (int k = 0; k < i->nargs; k++)
+                    for (int q = 0; q < pl[k].nreg; q++)
+                        t_ldst_imm(t, pl[k].reg + q, T_SP,
+                                   at + (long)(pl[k].reg + q) * 4, 4, 0, 0);
+                goto args_done;
             }
         }
         for (int k = 0; k < i->nargs; k++) {
@@ -1366,7 +1665,7 @@ static void gen_ins(struct t_fn *F, int n)
             if (!pl[k].nreg)
                 continue;
             if (a->is_struct) {
-                rd(F, a->vreg, T_ADDR);
+                int sa = rd(F, a->vreg, T_ADDR);
                 for (int q = 0; q < pl[k].nreg; q++) {
                     long off = (long)q * 4;
                     if (off + 4 > a->size && (a->size & 3)) {
@@ -1376,26 +1675,29 @@ static void gen_ins(struct t_fn *F, int n)
                         for (long b = a->size - 1; b >= off; b--) {
                             t_shift_imm(t, T_SH_LSL, pl[k].reg + q,
                                         pl[k].reg + q, 8, 0);
-                            t_ldst_imm(t, T_ACC, T_ADDR, b, 1, 0, 0);
+                            t_ldst_imm(t, T_ACC, sa, b, 1, 0, 0);
                             t_alu_reg(t, T_OP_ORR, pl[k].reg + q,
                                       pl[k].reg + q, T_ACC, 0);
                         }
                     } else {
-                        t_ldst_imm(t, pl[k].reg + q, T_ADDR, off, 4, 0, 0);
+                        t_ldst_imm(t, pl[k].reg + q, sa, off, 4, 0, 0);
                     }
                 }
             } else if (a->size > 4) {
                 rd64(F, a->vreg, pl[k].reg, pl[k].reg + 1);
             } else {
-                rd(F, a->vreg, pl[k].reg);
+                rd_into(F, a->vreg, pl[k].reg);
             }
         }
+    args_done:
         /* The hidden result pointer goes in LAST, so nothing above can
          * have used r0 as a scratch after it was set. */
         if (sret)
             t_add_sp(t, T_R0, F->scratch_at + i->scratch);
         if (i->indirect) {
-            rd(F, i->a, T_ACC);
+            /* Into r12 BEFORE the arguments, not after: the target may
+             * itself live in r0-r3, which the argument setup above has
+             * just overwritten. r12 is nobody's argument. */
             t_blx(t, T_ACC);
         } else if (i->callee->has_defn) {
             note_call(F->st, t_bl(t), i->callee);
@@ -1413,12 +1715,15 @@ static void gen_ins(struct t_fn *F, int n)
                     t_add_sp(t, T_ADDR, F->scratch_at + i->scratch);
                     t_ldst_imm(t, T_R0, T_ADDR, 0, i->retsize, 0, 1);
                 }
-                t_add_sp(t, T_ACC, F->scratch_at + i->scratch);
-                wr(F, i->dst, T_ACC);
+                {
+                    int d = wr(F, i->dst, T_ACC);
+                    t_add_sp(t, d, F->scratch_at + i->scratch);
+                    wrote(F, i->dst, d);
+                }
             } else if (F->wide[i->dst]) {
                 wr64(F, i->dst, T_R0, T_R1);
             } else {
-                wr(F, i->dst, T_R0);
+                wrote(F, i->dst, T_R0);
             }
         }
         return;
@@ -1431,7 +1736,7 @@ static void gen_ins(struct t_fn *F, int n)
              * copied to the buffer the caller named, whose address is
              * also what r0 must hold at the return. */
             long n = fn->ret_abi.size;
-            rd(F, i->a, T_ADDR);
+            rd_into(F, i->a, T_ADDR);
             if (F->sret_slot >= 0) {
                 long k;
                 t_ldst_imm(t, T_TMP, T_SP, F->sret_slot, 4, 0, 0);
@@ -1458,7 +1763,7 @@ static void gen_ins(struct t_fn *F, int n)
              * `long long` goes home in r0 with its high half left
              * behind. The wide map is the one place that knows. */
             if (F->wide[i->a]) rd64(F, i->a, T_R0, T_R1);
-            else               rd(F, i->a, T_R0);
+            else               rd_into(F, i->a, T_R0);
         }
         /* Every return leaves through the epilogue at the end of the
          * function, so there is one place that knows the frame size --
@@ -1500,11 +1805,11 @@ static void gen_ins(struct t_fn *F, int n)
             if (F->wide[i->a]) {
                 rd64(F, i->a, T_R0, T_R1);
             } else {
-                rd(F, i->a, T_R0);
+                rd_into(F, i->a, T_R0);
                 t_mov_imm(t, T_R1, 0, 0);
             }
         } else {
-            rd(F, i->a, T_R0);
+            rd_into(F, i->a, T_R0);
         }
         call_helper(F, i->size == 8
                     ? (i->sign ? (i->w == 8 ? "__floatdidf" : "__floatdisf")
@@ -1523,14 +1828,14 @@ static void gen_ins(struct t_fn *F, int n)
                     : (i->w == 8 ? (i->sign ? "__fixsfdi" : "__fixunssfdi")
                                  : (i->sign ? "__fixsfsi" : "__fixunssfsi")));
         if (i->w == 8) wr64(F, i->dst, T_R0, T_R1);
-        else           wr(F, i->dst, T_R0);
+        else           wrote(F, i->dst, T_R0);
         return;
     }
     case IR_F2F:
         if (i->size == i->w) {          /* nothing to convert */
             if (i->w == 8) { rd64(F, i->a, A_LO, A_HI);
                              wr64(F, i->dst, A_LO, A_HI); }
-            else           { rd(F, i->a, T_ACC); wr(F, i->dst, T_ACC); }
+            else           { wrote(F, i->dst, rd(F, i->a, T_ACC)); }
             return;
         }
         fp_arg(F, i->a, i->size, T_R0);
@@ -1547,9 +1852,11 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_VA_START:
         /* `a` holds the ADDRESS of the va_list, which on this ABI is a
          * bare pointer at the next argument. */
-        rd(F, i->a, T_ADDR);
-        t_add_sp(t, T_ACC, F->va_first);
-        t_ldst_imm(t, T_ACC, T_ADDR, 0, 4, 0, 1);
+        {
+            int ap = rd(F, i->a, T_ADDR);
+            t_add_sp(t, T_ACC, F->va_first);
+            t_ldst_imm(t, T_ACC, ap, 0, 4, 0, 1);
+        }
         return;
     case IR_ALLOCA: case IR_SPSAVE: case IR_SPRESTORE:
         t_refuse(fn, i, "a variable-length array");
@@ -1577,11 +1884,31 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     struct func *f = fn->src;
     struct t_fn F;
     int push_at, i;
+    int used_callee[T_NPOOL], nsave = 0;
+    int param_clash = 0;
 
     F.fn = fn; F.t = t; F.st = st;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
     F.va_regsave = F.va_first = -1;
+    F.loc = NULL;
+    /* -O2 and above. A computed goto makes liveness unsound — its
+     * targets are unknown, so a value's live range cannot be computed —
+     * and a landing pad is entered on an edge the dataflow does not
+     * see, so both turn allocation off exactly as the other backends
+     * do. `wide` is handed over as the ineligible set: the allocator
+     * has no notion of a register PAIR, so every eight-byte value stays
+     * in its slot. */
+    if (g_t_regalloc && !fn->neh) {
+        int cgoto = 0;
+        for (i = 0; i < fn->nins; i++)
+            if (fn->ins[i].op == IR_IGOTO || fn->ins[i].op == IR_LABELADDR) {
+                cgoto = 1;
+                break;
+            }
+        if (!cgoto)
+            F.loc = ra_allocate(fn, &T_RA, F.wide, NULL, used_callee, &nsave);
+    }
     layout(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -1606,7 +1933,26 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
      * that: a variadic argument is placed exactly like a named one. */
     if (fn->is_varargs)
         t_push(t, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
-    push_at = t_push(t, SAVE_MASK);
+    {
+        /* The callee-saved registers the allocator handed out join the
+         * fixed mask. Patched rather than computed first, because the
+         * 32-bit push is a fixed four bytes whatever the mask holds. */
+        unsigned mask = SAVE_MASK;
+        for (i = 0; i < nsave; i++)
+            if (t_callee_saved(used_callee[i]))
+                mask |= 1u << used_callee[i];
+        /* sp stays eight-aligned: an odd number of pushed words would
+         * leave it four off, which AAPCS forbids at a call. */
+        {
+            int cnt = 0;
+            unsigned m = mask;
+            while (m) { cnt += m & 1; m >>= 1; }
+            if (cnt & 1)
+                mask |= 1u << 8;        /* r8, the spare callee-saved one */
+        }
+        F.save_mask = mask;
+    }
+    push_at = t_push(t, F.save_mask);
     if (F.frame)
         t_sp_adjust(t, F.frame, 1);
 
@@ -1617,7 +1963,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
         struct argplace pl;
         int ncrn = 0;
         long stk = 0;
-        long base = F.frame + SAVE_BYTES;   /* the caller's outgoing area */
+        long base = F.frame + mask_bytes(F.save_mask);  /* the caller's */
         if (fn->is_varargs) {
             F.va_regsave = base;            /* r0-r3, four words */
             base += 16;                     /* ... then the stack ones */
@@ -1626,10 +1972,56 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
             t_ldst_imm(t, T_R0, T_SP, F.sret_slot, 4, 0, 1);
             ncrn = 1;
         }
+        /* Does moving any parameter into its allocated register destroy
+         * another parameter's incoming one? */
+        if (F.loc) {
+            int nc = ncrn;
+            long st2 = 0;
+            struct argplace p2;
+            int dst[MAX_PARAMS], ndst = 0;
+            for (i = 0; i < fn->nparams; i++) {
+                struct ir_arg *a = &fn->param_abi[i];
+                place_arg(a->size, arg_align(a), &nc, &st2, &p2);
+                if (!a->is_struct && a->size <= 4 && p2.nreg == 1 &&
+                    F.loc[i] >= 0 && F.loc[i] != p2.reg)
+                    dst[ndst++] = F.loc[i];
+            }
+            nc = ncrn; st2 = 0;
+            for (i = 0; i < fn->nparams && !param_clash; i++) {
+                struct ir_arg *a = &fn->param_abi[i];
+                place_arg(a->size, arg_align(a), &nc, &st2, &p2);
+                for (int q = 0; q < ndst; q++)
+                    if (dst[q] >= p2.reg && dst[q] < p2.reg + p2.nreg &&
+                        !(p2.nreg == 1 && F.loc[i] == dst[q]))
+                        param_clash = 1;
+            }
+        }
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
             place_arg(a->size, arg_align(a), &ncrn, &stk, &pl);
-            /* Every parameter lands in its own local's slot, which is
+            /* A scalar the allocator gave a register of its own goes
+             * THERE and not to a slot — the body will read the
+             * register, and a slot nothing wrote would hand it
+             * whatever the frame happened to contain.
+             *
+             * Directly only when the move cannot destroy a LATER
+             * parameter's incoming register. `round_pack(int sign, int
+             * exp, u64 sig)` had sign allocated to r2, and `mov r2, r0`
+             * at the top of the function overwrote the low half of
+             * `sig`, which arrives in r2:r3. When that can happen every
+             * parameter goes through its slot first, which costs a load
+             * and cannot be got wrong. */
+            if (F.loc && !a->is_struct && a->size <= 4 &&
+                F.loc[i] >= 0 && !param_clash) {
+                if (pl.nreg == 1) {
+                    if (F.loc[i] != pl.reg)
+                        t_mov_reg(t, F.loc[i], pl.reg);
+                } else {
+                    t_ldst_imm(t, F.loc[i], T_SP, base + pl.stk, 4, 0, 0);
+                }
+                continue;
+            }
+            /* Otherwise it lands in its own local's slot, which is
              * where the body reads it. A composite's slot IS the
              * composite, so the words go straight into it. */
             for (int q = 0; q < pl.nreg; q++) {
@@ -1653,6 +2045,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
                 }
             }
         }
+        /* Every incoming register is now safely in a slot, so the ones
+         * the allocator wants in registers can be read back without
+         * destroying anything. */
+        if (param_clash && F.loc)
+            for (i = 0; i < fn->nparams; i++)
+                if (!fn->param_abi[i].is_struct &&
+                    fn->param_abi[i].size <= 4 && F.loc[i] >= 0)
+                    t_ldst_imm(t, F.loc[i], T_SP, F.slot[i], 4, 0, 0);
         /* Where the first UNNAMED argument sits — which is simply where
          * the named ones stopped. The save area and the caller's stack
          * arguments are contiguous, so one expression covers both
@@ -1673,11 +2073,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
         /* Return through lr rather than popping into pc: the four words
          * of register save area sit above the saved registers and have
          * to come off too, and `pop {..., pc}` would jump before that. */
-        t_pop(t, SAVE_MASK);
+        t_pop(t, F.save_mask);
         t_sp_adjust(t, 16, 0);
         t_bx(t, T_LR);
     } else {
-        t_pop(t, (SAVE_MASK & ~(1u << T_LR)) | (1u << T_PC));
+        t_pop(t, (F.save_mask & ~(1u << T_LR)) | (1u << T_PC));
     }
 
     for (i = 0; i < F.nfix; i++) {
@@ -1696,7 +2096,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     f->code_len = t->len - f->code_off;
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved. */
-    f->stack_bytes = (int)(F.frame + SAVE_BYTES);
+    f->stack_bytes = (int)(F.frame + mask_bytes(F.save_mask) +
+                           (fn->is_varargs ? 16 : 0));
     (void)push_at;
     free(F.slot);
     free(F.label_off);
@@ -1711,7 +2112,8 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
                         struct fsite **fs, int *nfs, int want_debug,
                         int optimize, int no_sse, int regalloc)
 {
-    (void)optimize; (void)no_sse; (void)regalloc;
+    (void)optimize; (void)no_sse;
+    g_t_regalloc = regalloc && !getenv("EMBCC_NO_RA");
     if (want_debug) {
         fprintf(stderr, "embcc: error: -g is not supported for ARMv7-M yet "
                         "(the DWARF frame description would be a guess)\n");
