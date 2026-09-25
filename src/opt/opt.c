@@ -6932,6 +6932,107 @@ static int pass_storefwd(struct ir_func *fn)
     return changed;
 }
 
+/* ---- sinking a constant to the use that wants it ----------------------
+ *
+ * A literal has no operands and no side effects, so where it is
+ * MATERIALISED is free to choose -- and the choice costs a register for
+ * however long the value is live. irgen and the loop passes leave
+ * plenty of them a long way from the one instruction that reads them:
+ * 464 of the 2242 constants across lib/libc and lib/libcxx have a
+ * single use more than one instruction later, 116 of them more than
+ * eight. 186 of the 828 values the x86-64 allocator spills are
+ * constants, which is a slot and a reload for something a `mov $imm`
+ * reproduces in one instruction wherever it is wanted.
+ *
+ * So one of these with exactly one use moves to just before it. Always
+ * sound, in the strong sense: nothing it depends on can have changed,
+ * because it depends on nothing -- the same holds for the address of a
+ * local, a global, a string or a function, so those move too (75 and 63
+ * of the spilled values are an `addr` and a `straddr`). It cannot move to a place the use does
+ * not reach, because that place is where the use is.
+ *
+ * Only forward. A use EARLIER in the instruction stream is the far side
+ * of a back edge, and moving the definition after it would leave the
+ * first iteration reading nothing.
+ */
+/* each_read's callback for "which instruction reads this vreg": the
+ * FIRST one wins, which is the only one when the use count is 1. */
+struct sink_at_ctx { int *at; int nv; int n; };
+static void sink_at_cb(int *p, void *ctx)
+{
+    struct sink_at_ctx *s = ctx;
+    if (*p >= 0 && *p < s->nv && s->at[*p] < 0) s->at[*p] = s->n;
+}
+
+static int pass_sinkconst(struct ir_func *fn)
+{
+    int nv = fn->nvregs;
+    if (nv == 0 || fn->nins == 0)
+        return 0;
+    int *use = xcalloc((size_t)nv, sizeof *use);
+    struct ucount uc = { use, nv };
+    for (int n = 0; n < fn->nins; n++)
+        each_read(&fn->ins[n], count_cb, &uc);
+
+    struct defs d;
+    compute_defs(fn, &d);
+
+    /* The one instruction that reads each vreg, found in a single pass:
+     * `use[] == 1` above already says there is exactly one. */
+    int *at = xmalloc((size_t)nv * sizeof *at);
+    for (int v = 0; v < nv; v++) at[v] = -1;
+    struct sink_at_ctx sa = { at, nv, 0 };
+    for (int n = 0; n < fn->nins; n++) {
+        sa.n = n;
+        each_read(&fn->ins[n], sink_at_cb, &sa);
+    }
+
+    /* where each sinkable constant wants to go */
+    int *to = xmalloc((size_t)fn->nins * sizeof *to);
+    for (int n = 0; n < fn->nins; n++) to[n] = -1;
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        /* Every op here materialises a value out of nothing: a
+         * literal, or the address of a local, a global, a string or a
+         * function. None reads a vreg, so none can be invalidated by
+         * what it moves past. */
+        switch (i->op) {
+        case IR_CONST: case IR_ADDR: case IR_GADDR:
+        case IR_STRADDR: case IR_FADDR:
+            break;
+        default:
+            continue;
+        }
+        if (i->dst < 0 || i->dst >= nv)
+            continue;
+        if (use[i->dst] != 1 || d.cnt[i->dst] != 1)
+            continue;
+        if (at[i->dst] > n + 1) { to[n] = at[i->dst]; any = 1; }
+    }
+    free(at);
+    if (!any) { free(use); free(to); free_defs(&d); return 0; }
+
+    /* Rebuild in one pass: `head[m]` chains the constants that want to
+     * land just before instruction m, in their original order. */
+    int *head = xmalloc((size_t)fn->nins * sizeof *head);
+    int *next = xmalloc((size_t)fn->nins * sizeof *next);
+    for (int n = 0; n < fn->nins; n++) { head[n] = -1; next[n] = -1; }
+    for (int n = fn->nins - 1; n >= 0; n--)
+        if (to[n] >= 0) { next[n] = head[to[n]]; head[to[n]] = n; }
+    struct ibuf nb = { 0, 0, 0 };
+    for (int n = 0; n < fn->nins; n++) {
+        for (int k = head[n]; k >= 0; k = next[k])
+            *ib_push(&nb) = fn->ins[k];
+        if (to[n] < 0) *ib_push(&nb) = fn->ins[n];
+    }
+    free(head); free(next);
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free(use); free(to); free_defs(&d);
+    return 1;
+}
+
 /* ---- immediate-operand folding ---- */
 
 /* x86 ALU/compare immediates are imm32 (sign-extended to 64). A value outside
@@ -8343,6 +8444,15 @@ static void opt_func(struct ir_func *fn)
      * passes never reason about the imm_b form. */
     if (pass_immfold(fn))
         pass_dce(fn);
+    /* ...and only now put each surviving literal where it is wanted.
+     *
+     * AFTER the fixpoint, not inside it, for the same reason immfold is:
+     * this decides where a value is MATERIALISED, not what it is, so
+     * every pass that reasons about the instruction order should have
+     * finished first. Inside the round it also never settled -- folding
+     * and value numbering kept producing literals for it to move and it
+     * kept reporting a change, which put format.c at six minutes. */
+    pass_sinkconst(fn);
     if (verify) verify_func(fn, "opt");
 
     /* What the whole fixpoint came to, for this function. The per-pass
