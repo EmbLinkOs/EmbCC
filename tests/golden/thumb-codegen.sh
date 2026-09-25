@@ -152,7 +152,7 @@ refuses() {
         echo "$1 failed, but not with the backend's own refusal:"
         cat "$out/no.err"; exit 1; }
 }
-refuses "floating point"    'double f(double a, double b){return a*b;}'
+refuses "a long double"     'long double f(long double a){return a*a;}'
 refuses "a variadic function" '
 #include <stdarg.h>
 int f(int n, ...){ va_list ap; va_start(ap, n); return n; }'
@@ -160,7 +160,7 @@ refuses "an aggregate argument" '
 struct big { int a, b, c; };
 int g(struct big);
 int f(struct big b){ return g(b); }'
-echo "floating point, varargs and aggregates each refuse by name"
+echo "long double, varargs and aggregates each refuse by name"
 
 # And what it NO LONGER refuses: 64-bit integers, which the backend
 # carries in register pairs. Checked here as well as in thumb-exec.sh
@@ -175,3 +175,18 @@ for opt in -O0 -O2; do
         echo "$opt: a 64-bit lowering does not decode"; exit 1; }
 done
 echo "64-bit integers compile at -O0 and -O2"
+
+# Floating point is a CALL on this machine, not an instruction: every
+# operation goes to lib/rt/softfp.c under libgcc's names.
+printf '%s\n' 'double f(double a, double b){ return a*b + a/b - a; }
+float g(float a, int n){ return a * (float)n; }
+int h(double a, double b){ return a < b; }' > "$out/fp.c"
+"$EMBCC" --target=$T -O1 -c "$out/fp.c" -o "$out/fp.o" || {
+    echo "floating point no longer compiles"; exit 1; }
+"$RE" -r "$out/fp.o" > "$out/fprel.txt"
+for h in __muldf3 __divdf3 __subdf3 __mulsf3 __ltdf2 __floatsisf; do
+    grep -q "$h" "$out/fprel.txt" || {
+        echo "expected a call to $h and found none:"; cat "$out/fprel.txt"
+        exit 1; }
+done
+echo "floating point lowers to the soft-float runtime"

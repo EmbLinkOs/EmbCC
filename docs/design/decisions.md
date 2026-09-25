@@ -1047,7 +1047,44 @@ divide where EmbCC emits `__divdi3` — a routine that returns quotient
 and remainder in four registers at once and therefore cannot be written
 in C, so the two cannot share a runtime.
 
-**What it does not do yet, all refused by name:** floating point (ARMv7-M has no FPU, so
+**2026-09-25, floating point:** `float` and `double` work, and the
+results are BIT-IDENTICAL to hardware. ARMv7-M has no FPU, so every
+operation is a call into `lib/rt/softfp.c` under libgcc's names, and
+AAPCS's soft-float variant passes the operands in the core registers —
+which means the IR's existing integer paths already carry the value and
+only the arithmetic needed lowering.
+
+Only binary64 is implemented. A binary32 operation widens both operands,
+does it in binary64, and rounds back, which gives the SAME answer as
+computing in binary32 directly because 53 significand bits is at least
+2p+2 for p = 24 (Figueroa). One core, half the code, and no double
+rounding to reason about.
+
+Three bugs, and what each says:
+
+  * the backend's wide map skipped every `flt` instruction — a leftover
+    from when floats were refused — so a double-returning call got a
+    four-byte slot and the next temporary landed on its high word.
+    `__addsf3` added the wrong numbers while every routine it called was
+    exact.
+  * irgen converts an `unsigned int` to floating point by asking for a
+    SIGNED 64-bit conversion, on the grounds that "a 32-bit operation
+    zero-extends its result into the eight-byte slot". True of a
+    register write on both other targets; false of a four-byte stack
+    slot, where the next four bytes are another temporary.
+  * `__extendsfdf2` derived a denormal's exponent from SIGBIT and got
+    -94 where the answer is -126 and nothing else.
+
+The reference is the host again, and the comparison is of BIT PATTERNS:
+a result that prints the same to fifteen digits can still be a rounding
+off. The core is additionally swept against 400,000 random bit patterns
+on the host, which is where the denormals, the huge exponents and the
+near-cancellations that no hand-written list contains actually live.
+NaN payloads are compared by CLASS rather than bit-for-bit, because
+which payload and which sign a NaN carries out of an operation is
+unspecified and x86 and ARM already disagree.
+
+**What it does not do yet, all refused by name:** `long double` (ARMv7-M has no FPU, so
 every operation is an `__aeabi_*` call), aggregates by value, varargs,
 atomics, inline asm, VLAs, computed goto, exceptions and `-g`. There is
 also no register allocator here yet and no linker for the target, so

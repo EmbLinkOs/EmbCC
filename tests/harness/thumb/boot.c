@@ -32,9 +32,25 @@ void reset(void)
     for (d = &__bss_start; d < &__bss_end; )
         *d++ = 0;
     main();
-    /* Nothing to return to: the reset handler IS the bottom of the
-     * call stack. The harness stops the machine on a timeout, having
-     * already read the output. */
+    /* Stop the machine.
+     *
+     * A Cortex-M has no way to say "exit" — the reset handler IS the
+     * bottom of the call stack. Semihosting would do it, but that takes
+     * a `bkpt`, which is assembly this compiler cannot emit yet. So the
+     * image faults ON PURPOSE: this vector table has two entries and no
+     * HardFault handler, so the fault escalates, the processor locks
+     * up, and QEMU stops and returns. The alternative is spinning until
+     * the harness's timeout fires, which costs the suite the full
+     * timeout for every image that WORKED.
+     *
+     * Everything the test reads has already been printed by the time
+     * this runs, and run.sh judges the output rather than the status.
+     *
+     * __builtin_trap() rather than a write to some address that ought
+     * to be invalid: on a Cortex-M almost every address answers,
+     * including zero, where the vector table is. `udf #0` is
+     * architecturally undefined and always faults. */
+    __builtin_trap();
     for (;;)
         ;
 }

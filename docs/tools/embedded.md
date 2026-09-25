@@ -105,9 +105,6 @@ be linked in beside EmbCC's.
 Each of these stops the compile with a message naming the construct and
 the IR operation behind it, rather than emitting something plausible:
 
-- **Floating point.** ARMv7-M's base profile has no FPU, so every
-  operation is a call into `__aeabi_fadd` and its family — a lowering
-  that does not exist yet.
 - Aggregates passed or returned **by value**, variadic functions,
   atomics, inline assembly, VLAs, computed `goto`, C++ exceptions, `-g`.
 
@@ -138,6 +135,34 @@ needs it must bring its own.
 Bitfields depend on this — the front end assembles a field's storage
 unit in a 64-bit accumulator — so they work now too, including
 `volatile` ones, which is how a peripheral's registers are written.
+
+## Floating point
+
+`float` and `double` work. ARMv7-M's base profile has no FPU, so every
+operation is a **call** into `lib/rt/softfp.c`, under libgcc's names
+(`__adddf3`, `__mulsf3`, `__ltdf2`, `__floatsidf`, …). Compile that file
+for the target and link it in beside `int64.c`:
+
+```
+embcc --target=thumbv7m-none-eabi -Os -c lib/rt/softfp.c -o softfp.o
+```
+
+The results are **bit-identical** to hardware — the same IEEE answers a
+desktop gives, checked that way rather than to a few digits. Only
+binary64 is implemented; a `float` operation is done by widening both
+operands, doing it in binary64, and rounding back, which gives the same
+answer as computing in binary32 directly because 53 significand bits is
+at least 2p+2 for p = 24.
+
+It is not fast. Expect a few hundred cycles for a double multiply where
+an M4F with `-mfpu` would take one, and prefer `float` to `double` where
+the precision allows — `float` still goes through binary64 here, but the
+values are smaller and the conversions cheap. Hardware floating point on
+Cortex-M4F and M7 is not supported yet.
+
+`long double` is refused: it is 8 bytes on this ABI (the same as
+`double`), and the 16-byte formats the other targets use do not exist
+here.
 
 ## Sizing the stack
 
@@ -184,6 +209,11 @@ the address with its Thumb bit already set.
 - `tests/golden/thumb-encoding.sh` disassembles every instruction the
   encoder can produce and diffs it against what each call was meant to
   emit, plus all 4093 distinct modified immediates.
+- `tests/golden/thumb-float.c` prints IEEE results as BIT PATTERNS and
+  requires them to equal the host's, which does the same arithmetic in
+  hardware — so a rounding that is off by one unit in the last place
+  fails. The soft-float core is also checked on the host against 400,000
+  random bit patterns.
 - `tests/golden/thumb-exec.sh` compiles a program covering structs,
   arrays, `switch`, recursion, function pointers, bitfields, bit
   manipulation and signed and unsigned division, links it with `embld`,

@@ -35,8 +35,11 @@ rm -rf "$out"; mkdir -p "$out"
 # The harness itself is built by EmbCC — the startup is C, because a
 # Cortex-M fetches its initial SP and PC from the vector table in
 # hardware and needs no assembler to begin.
+# Into this test's OWN output directory: tests/run.sh runs the golden
+# tests concurrently, and each may only write inside its own.
+export EMBCC_THUMB_HARNESS="$PWD/$out"
 for f in boot io; do
-    "$EMBCC" --target=$T -c "$H/$f.c" -o "$H/$f.o" || {
+    "$EMBCC" --target=$T -c "$H/$f.c" -o "$out/$f.o" || {
         echo "the harness does not compile for $T"; exit 1; }
 done
 
@@ -105,5 +108,37 @@ for opt in -O0 -O1 -O2 -Os; do
     fi
 done
 echo "thumb-int64: 64-bit arithmetic agrees with the host at four levels"
+
+# Floating point, the same way and for the same reason: IEEE arithmetic
+# has one answer, and the host's hardware gives it in one instruction
+# where this target gives it in a call into lib/rt/softfp.c. Results are
+# compared as BIT PATTERNS, so a rounding that is off by one ulp fails.
+"$EMBCC" --target=$T -Os -c lib/rt/softfp.c -o "$out/softfp.o" || {
+    echo "the soft-float runtime does not compile for $T"; exit 1; }
+cc -std=c99 -w -o "$out/hostfp" tests/golden/thumb-float.c \
+   tests/harness/thumb/hostio.c || {
+    echo "the float program does not compile for the host"; exit 1; }
+"$out/hostfp" > "$out/float-ref.txt" || {
+    echo "the float program failed on the host"; exit 1; }
+
+for opt in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T $opt -c tests/golden/thumb-float.c \
+             -o "$out/fp$opt.o" || {
+        echo "$opt: the float program does not compile"; exit 1; }
+    sh "$H/link.sh" "$out/fp$opt.elf" "$out/fp$opt.o" "$out/softfp.o" \
+       "$out/int64.o" || {
+        echo "$opt: embld could not link the float image"; exit 1; }
+    sh "$H/run.sh" "$out/fp$opt.elf" > "$out/fp$opt.txt" 2>&1
+    grep -q '==END==' "$out/fp$opt.txt" || {
+        echo "$opt: the float image did not reach the end of main:"
+        sed -n '1,10p' "$out/fp$opt.txt"; exit 1; }
+    if ! diff -u "$out/float-ref.txt" "$out/fp$opt.txt" > "$out/fp$opt.diff"
+    then
+        echo "floating point at $opt does not agree with the host:"
+        head -20 "$out/fp$opt.diff"
+        exit 1
+    fi
+done
+echo "thumb-float: IEEE results are bit-identical to the host at four levels"
 
 echo "ARMv7-M images build with embld and run on $QEMU"

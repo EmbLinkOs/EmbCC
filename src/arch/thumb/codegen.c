@@ -129,7 +129,14 @@ static char *wide64_map(struct ir_func *fn)
     char *w = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), 1);
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
-        if (i->flt || i->w != 8 || i->dst < 0 || i->dst >= fn->nvregs)
+        /* `flt` is NOT a reason to skip: a double is eight bytes and a
+         * register pair exactly as a long long is, and the slot it
+         * needs is the same size. Skipping them here (from when floats
+         * were refused outright) gave every double-returning call a
+         * four-byte slot, and the next temporary landed on its high
+         * word — which is how __addsf3 came to add the wrong numbers
+         * while every routine it called was exact. */
+        if (i->w != 8 || i->dst < 0 || i->dst >= fn->nvregs)
             continue;
         switch (i->op) {
         case IR_CONST: case IR_MOV:
@@ -138,6 +145,10 @@ static char *wide64_map(struct ir_func *fn)
         case IR_NEG: case IR_BNOT:
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT:
+        /* The conversions' `w` is their RESULT's width too: a double
+         * out of I2F, and the 64-bit intermediate F2I goes through so
+         * that an unsigned int lands right. */
+        case IR_I2F: case IR_F2I: case IR_F2F:
             w[i->dst] = 1;
             break;
         default:
@@ -148,7 +159,8 @@ static char *wide64_map(struct ir_func *fn)
      * instruction has been seen to define it yet: the prologue writes a
      * parameter into its slot before the body runs. */
     for (int v = 0; v < fn->nvars && v < fn->nvregs; v++)
-        if (fn->locals[v].size == 8 && fn->locals[v].is_int_or_ptr)
+        if (fn->locals[v].size == 8 &&
+            (fn->locals[v].is_int_or_ptr || fn->locals[v].is_scalar_float))
             w[v] = 1;
 
     /* Then propagate through COPIES, to a fixpoint.
@@ -455,27 +467,97 @@ static void note_fn(struct t_sites *st, int at, struct func *target,
     st->nf++;
 }
 
-/* A call to a runtime routine the IR does not show as one — the 64-bit
- * divides. The callee is interned in the unit so the driver emits an
- * UNDEF symbol and a relocation for it, exactly as for any other
- * external call. */
+/* A call to a runtime routine the IR does not show as one: the 64-bit
+ * divides, and every floating-point operation. The callee is interned
+ * so the driver emits one UNDEF symbol and a relocation per name,
+ * exactly as for any other external call.
+ *
+ * Interned by NAME rather than from a fixed table, because there are
+ * forty of these once soft float is counted and a table would be a
+ * second place to keep the list. */
+static struct func **g_helpers;
+static int g_nhelpers, g_caphelpers;
+
 static void call_helper(struct t_fn *F, const char *name)
 {
-    static struct func *made[4];
-    static const char *const names[4] = {
-        "__divdi3", "__udivdi3", "__moddi3", "__umoddi3" };
-    int k;
-    for (k = 0; k < 4; k++)
-        if (strcmp(names[k], name) == 0)
+    struct func *h = NULL;
+    for (int k = 0; k < g_nhelpers; k++)
+        if (strcmp(g_helpers[k]->name, name) == 0) {
+            h = g_helpers[k];
             break;
-    if (!made[k]) {
-        struct func *h = xcalloc(1, sizeof *h);
-        h->name = names[k];
+        }
+    if (!h) {
+        h = xcalloc(1, sizeof *h);
+        h->name = name;
         h->declared = 1;
         h->used = 1;
-        made[k] = h;
+        if (g_nhelpers == g_caphelpers) {
+            g_caphelpers = g_caphelpers ? g_caphelpers * 2 : 16;
+            g_helpers = xrealloc(g_helpers,
+                                 (size_t)g_caphelpers * sizeof *g_helpers);
+        }
+        g_helpers[g_nhelpers++] = h;
     }
-    note_ext(F->st, t_bl(F->t), made[k]);
+    note_ext(F->st, t_bl(F->t), h);
+}
+
+/* ---- floating point, which this machine has none of -----------------
+ *
+ * ARMv7-M's base profile has no FPU: every operation is a call, and
+ * AAPCS's soft-float variant passes the operands in the CORE registers
+ * — a float in one and a double in a pair — so the value never needs to
+ * be anything but bits, and the integer paths above already carry it.
+ *
+ * The names are libgcc's. clang and gcc emit the __aeabi_* spellings
+ * for this target, which are the same functions under other names; a
+ * program that links a real libgcc gets both.
+ */
+static const char *fp_binop_name(enum ir_op op, int w)
+{
+    switch (op) {
+    case IR_ADD: return w == 8 ? "__adddf3" : "__addsf3";
+    case IR_SUB: return w == 8 ? "__subdf3" : "__subsf3";
+    case IR_MUL: return w == 8 ? "__muldf3" : "__mulsf3";
+    case IR_DIV: return w == 8 ? "__divdf3" : "__divsf3";
+    default:     return NULL;
+    }
+}
+
+/* The comparison helpers return an INT whose sign answers the question:
+ * __ltdf2 is negative when a < b, __gtdf2 positive when a > b, and
+ * __eqdf2 zero when they are equal. Unordered makes each of them answer
+ * the way that renders the predicate false, which is what NaN must do —
+ * except for `!=`, where __nedf2's nonzero is the right answer. */
+static const char *fp_cmp_name(enum binop pred, int w)
+{
+    switch (pred) {
+    case B_EQ: return w == 8 ? "__eqdf2" : "__eqsf2";
+    case B_NE: return w == 8 ? "__nedf2" : "__nesf2";
+    case B_LT: return w == 8 ? "__ltdf2" : "__ltsf2";
+    case B_LE: return w == 8 ? "__ledf2" : "__lesf2";
+    case B_GT: return w == 8 ? "__gtdf2" : "__gtsf2";
+    default:   return w == 8 ? "__gedf2" : "__gesf2";   /* B_GE */
+    }
+}
+
+/* Read a floating operand into the argument registers starting at
+ * `reg`, and say how many it took. */
+static int fp_arg(struct t_fn *F, int v, int w, int reg)
+{
+    if (w == 8) {
+        rd64(F, v, reg, reg + 1);
+        return 2;
+    }
+    rd(F, v, reg);
+    return 1;
+}
+
+static void fp_result(struct t_fn *F, int dst, int w)
+{
+    if (dst < 0)
+        return;
+    if (w == 8) wr64(F, dst, T_R0, T_R1);
+    else        wr(F, dst, T_R0);
 }
 
 /* ---- comparisons ---------------------------------------------------- */
@@ -807,11 +889,68 @@ static void gen_ins(struct t_fn *F, int n)
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
 
-    /* The refusals, checked once and by name. `w` of 8 or 16 is a value
-     * wider than a register; `flt` is the missing soft-float lowering. */
-    if (i->flt)
-        t_refuse(fn, i, "floating point (ARMv7-M has no FPU: this needs the "
-                        "__aeabi soft-float calls)");
+    /* Floating point is a CALL on this machine, not an instruction.
+     * Only the arithmetic is flagged: the IR already carries a float
+     * value as plain bits of its own width, so loads, stores, moves and
+     * constants go through the integer paths below untouched. */
+    if (i->flt && (i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
+                   i->op == IR_DIV || i->op == IR_MOD || i->op == IR_NEG ||
+                   i->op == IR_CMP || i->op == IR_SQRT)) {
+        /* Only the ARITHMETIC. `flt` is set on a return, a move and a
+         * call too, and those carry the value as the bits it already
+         * is — the integer paths below move exactly the right number of
+         * them. */
+        const char *name = fp_binop_name(i->op, i->w);
+        if (i->w != 4 && i->w != 8)
+            t_refuse(fn, i, "a long double (ARMv7-M has no 16-byte float)");
+        if (name) {
+            int n = fp_arg(F, i->a, i->w, T_R0);
+            if (i->imm_b)
+                t_refuse(fn, i, "a folded floating-point immediate");
+            fp_arg(F, i->b, i->w, n);
+            call_helper(F, name);
+            fp_result(F, i->dst, i->w);
+            return;
+        }
+        if (i->op == IR_NEG) {
+            /* The sign bit, flipped. A call would be correct and this
+             * is two instructions -- and unlike a subtraction from zero
+             * it is right for -0.0 and for a NaN. */
+            if (i->w == 8) {
+                rd64(F, i->a, A_LO, A_HI);
+                t_mov_imm(t, B_LO, 0x80000000L, 0);
+                t_alu_reg(t, T_OP_EOR, A_HI, A_HI, B_LO, 0);
+                wr64(F, i->dst, A_LO, A_HI);
+            } else {
+                rd(F, i->a, T_ACC);
+                t_mov_imm(t, T_TMP, 0x80000000L, 0);
+                t_alu_reg(t, T_OP_EOR, T_ACC, T_ACC, T_TMP, 0);
+                wr(F, i->dst, T_ACC);
+            }
+            return;
+        }
+        if (i->op == IR_CMP) {
+            int n = fp_arg(F, i->a, i->w, T_R0);
+            int cond;
+            fp_arg(F, i->b, i->w, n);
+            call_helper(F, fp_cmp_name(i->pred, i->w));
+            t_cmp_imm(t, T_R0, 0);
+            cond = cond_for(i->pred, 1);      /* the helper's signed answer */
+            t_mov_imm(t, T_ACC, 1, 0);
+            {
+                int over = t_bcond(t, cond);
+                t_mov_imm(t, T_ACC, 0, 0);
+                t_patch_bcond(t, over, t->len);
+            }
+            wr(F, i->dst, T_ACC);
+            return;
+        }
+        if (i->op == IR_SQRT)
+            t_refuse(fn, i, "__builtin_sqrt (it is a libm routine here, not "
+                            "an instruction)");
+        t_refuse(fn, i, "this floating-point operation");
+    }
+
     if (i->w > 8)
         t_refuse(fn, i, "a 128-bit value");
     /* Whether this instruction works on a 64-bit value.
@@ -826,6 +965,7 @@ static void gen_ins(struct t_fn *F, int n)
     {
         int wide = i->w == 8;
         switch (i->op) {
+        /* A float value being MOVED is an integer of its own width. */
         case IR_STVAR: wide = i->size == 8 || F->wide[i->a]; break;
         case IR_STORE: wide = i->size == 8 || F->wide[i->b]; break;
         case IR_LDVAR:
@@ -840,7 +980,11 @@ static void gen_ins(struct t_fn *F, int n)
         default: break;
         }
         if (wide && i->op != IR_CMP && i->op != IR_BRZ &&
-            i->op != IR_BRNZ && i->op != IR_CALL && i->op != IR_RET) {
+            i->op != IR_BRNZ && i->op != IR_CALL && i->op != IR_RET &&
+            /* The conversions are calls with their own cases, and their
+             * operand and result widths differ — gen_ins64 would read
+             * the wrong one. */
+            i->op != IR_I2F && i->op != IR_F2I && i->op != IR_F2F) {
             if (i->op == IR_DIV || i->op == IR_MOD) {
                 /* No instruction divides 64 by 64 here, so it is a call
                  * — lib/rt/int64.c, under libgcc's names so an object
@@ -1114,8 +1258,9 @@ static void gen_ins(struct t_fn *F, int n)
             int wide = a->size > 4;
             if (a->is_struct)
                 t_refuse(fn, i, "an aggregate passed by value");
-            if (a->is_float)
-                t_refuse(fn, i, "a floating-point argument");
+            /* A float argument needs no special case: AAPCS's
+             * soft-float variant puts it in the core registers, which
+             * is where a->size already says to put it. */
             if (place_arg(a->size, &ncrn, &stk, &reg)) {
                 if (wide) rd64(F, a->vreg, reg, reg + 1);
                 else      rd(F, a->vreg, reg);
@@ -1165,9 +1310,13 @@ static void gen_ins(struct t_fn *F, int n)
         return;
 
     case IR_UD2:
-        /* `udf #0`, the permanently undefined instruction. */
-        t_mov_imm(t, T_ACC, 0, 0);
-        t_ldst_imm(t, T_ACC, T_ACC, 0, 4, 0, 0);
+        /* `udf #0` (0xde00): PERMANENTLY UNDEFINED, which is what this
+         * op means. A load from address zero was standing in for it and
+         * is not the same thing at all — on a Cortex-M address zero is
+         * the vector table and the load succeeds, so a
+         * __builtin_unreachable() that was reached carried on. */
+        code_byte(t, 0x00);
+        code_byte(t, 0xde);
         return;
     case IR_FENCE:
         /* dmb sy — a full data barrier. */
@@ -1175,8 +1324,62 @@ static void gen_ins(struct t_fn *F, int n)
         code_byte(t, 0x5f); code_byte(t, 0x8f);
         return;
 
-    case IR_I2F: case IR_F2I: case IR_F2F: case IR_SQRT:
-        t_refuse(fn, i, "a floating-point conversion");
+    /* The conversions, which carry no `flt` of their own: `size` is the
+     * source's width and `w` the destination's. */
+    case IR_I2F: {
+        /* size/sign describe the integer source, w the float result.
+         *
+         * irgen converts an `unsigned int` by asking for a SIGNED
+         * 64-bit conversion of it, on the grounds that "a 32-bit
+         * operation zero-extends its result into the eight-byte slot".
+         * That is true of a register write on both other targets and
+         * false of a four-byte stack slot here, where the next four
+         * bytes are another temporary — so the zero extension is done
+         * explicitly, which is what that comment meant all along. */
+        if (i->size == 8) {
+            if (F->wide[i->a]) {
+                rd64(F, i->a, T_R0, T_R1);
+            } else {
+                rd(F, i->a, T_R0);
+                t_mov_imm(t, T_R1, 0, 0);
+            }
+        } else {
+            rd(F, i->a, T_R0);
+        }
+        call_helper(F, i->size == 8
+                    ? (i->sign ? (i->w == 8 ? "__floatdidf" : "__floatdisf")
+                               : (i->w == 8 ? "__floatundidf" : "__floatundisf"))
+                    : (i->sign ? (i->w == 8 ? "__floatsidf" : "__floatsisf")
+                               : (i->w == 8 ? "__floatunsidf" : "__floatunsisf")));
+        fp_result(F, i->dst, i->w);
+        return;
+    }
+    case IR_F2I: {
+        /* size is the float source's width, w/sign the integer result. */
+        fp_arg(F, i->a, i->size, T_R0);
+        call_helper(F, i->size == 8
+                    ? (i->w == 8 ? (i->sign ? "__fixdfdi" : "__fixunsdfdi")
+                                 : (i->sign ? "__fixdfsi" : "__fixunsdfsi"))
+                    : (i->w == 8 ? (i->sign ? "__fixsfdi" : "__fixunssfdi")
+                                 : (i->sign ? "__fixsfsi" : "__fixunssfsi")));
+        if (i->w == 8) wr64(F, i->dst, T_R0, T_R1);
+        else           wr(F, i->dst, T_R0);
+        return;
+    }
+    case IR_F2F:
+        if (i->size == i->w) {          /* nothing to convert */
+            if (i->w == 8) { rd64(F, i->a, A_LO, A_HI);
+                             wr64(F, i->dst, A_LO, A_HI); }
+            else           { rd(F, i->a, T_ACC); wr(F, i->dst, T_ACC); }
+            return;
+        }
+        fp_arg(F, i->a, i->size, T_R0);
+        call_helper(F, i->size == 4 ? "__extendsfdf2" : "__truncdfsf2");
+        fp_result(F, i->dst, i->w);
+        return;
+    case IR_SQRT:
+        t_refuse(fn, i, "__builtin_sqrt (a libm routine here, not an "
+                        "instruction)");
         return;
     case IR_ASM:
         t_refuse(fn, i, "inline assembly");
@@ -1249,8 +1452,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
             int wide = a->size > 4;
-            if (a->is_struct || a->is_float)
-                t_refuse(fn, NULL, "an aggregate or floating-point parameter");
+            if (a->is_struct)
+                t_refuse(fn, NULL, "an aggregate parameter");
             if (place_arg(a->size, &ncrn, &stk, &reg)) {
                 if (wide) wr64(&F, i, reg, reg + 1);
                 else if (!t_ldst_imm(t, reg, T_SP, F.slot[i], 4, 0, 1)) {
