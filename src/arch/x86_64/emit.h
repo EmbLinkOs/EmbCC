@@ -128,6 +128,9 @@ void x86_store_mem_reg(struct code *c, int base, int disp, int src, int size);
 void x86_movs_load_base(struct code *c, int xmm, int base, int disp, int w);
 void x86_movs_store_base(struct code *c, int base, int disp, int xmm, int w);
 void x86_lea_reg_slot(struct code *c, int dst, int disp); /* lea r,[rbp+d] */
+void x86_lea_reg_basedisp(struct code *c, int dst, int base, int disp, int w);
+void x86_lea_reg_baseindex(struct code *c, int dst, int base, int index,
+                           int scale, int w);
 void x86_mov_reg_reg(struct code *c, int dst, int src);   /* 64-bit */
 /* register-register forms for the -O2 register allocator (values live in
  * callee-saved regs, not memory). All operate on register NUMBERS 0..15. */

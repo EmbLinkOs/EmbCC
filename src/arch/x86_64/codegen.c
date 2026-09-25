@@ -2976,6 +2976,27 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                     if (in_reg(i->dst) && in_reg(i->a)) {
                         int D = g_loc[i->dst], A = g_loc[i->a];
+                        /* `d = a + k` with d != a is one `lea`, not a
+                         * copy and an add -- x86's only three-address
+                         * arithmetic, and the commonest shape the
+                         * coalescer fails to merge: 286 sites across
+                         * lib/libc and lib/libcxx.
+                         *
+                         * At width 4 too. A `lea` with a 32-bit
+                         * DESTINATION computes the address in 64 bits
+                         * and truncates, zero-extending into the full
+                         * register -- which is exactly what a 32-bit
+                         * `add` does, so the narrow-value invariant
+                         * holds either way. `sub` reaches it as an add
+                         * of the negated constant, which is how the
+                         * optimizer already writes most of them. */
+                        long k = i->op == IR_SUB ? -i->imm : i->imm;
+                        if (D != A && (i->op == IR_ADD || i->op == IR_SUB) &&
+                            (i->w == 4 || i->w == 8) &&
+                            k >= -2147483647L - 1 && k <= 2147483647L) {
+                            x86_lea_reg_basedisp(text, D, A, (int)k, i->w);
+                            break;
+                        }
                         if (D != A)
                             x86_mov_rr_w(text, D, A, i->w);
                         x86_alu_reg_imm(text, aop, D, i->imm, i->w);
@@ -2999,6 +3020,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         x86_alu_rr(text, aop, D, B, i->w);
                         break;
                     } else if (D != B) {
+                        /* the same three-address trick for `d = a + b` */
+                        if (i->op == IR_ADD && (i->w == 4 || i->w == 8)) {
+                            x86_lea_reg_baseindex(text, D, A, B, 1, i->w);
+                            break;
+                        }
                         x86_mov_rr_w(text, D, A, i->w);
                         x86_alu_rr(text, aop, D, B, i->w);
                         break;

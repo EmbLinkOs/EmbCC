@@ -611,6 +611,28 @@ void x86_load_reg_baseindex(struct code *c, int dst, int base, int index,
     }
 }
 
+/* lea dst, [base + disp] and lea dst, [base + index<<scale] -- x86's
+ * three-address adder. `mov a,d; add $k,d` and `mov a,d; add b,d` are
+ * each one instruction here, and neither touches the flags. */
+void x86_lea_reg_basedisp(struct code *c, int dst, int base, int disp, int w)
+{
+    int rex = 0x40 | ((w == 8) << 3) | ((dst & 8) ? 4 : 0) |
+              ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x8d);
+    modrm_base(c, dst, base, disp);
+}
+
+void x86_lea_reg_baseindex(struct code *c, int dst, int base, int index,
+                           int scale, int w)
+{
+    int rex = 0x40 | ((w == 8) << 3) | ((dst & 8) ? 4 : 0) |
+              ((index & 8) ? 2 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x8d);
+    modrm_baseindex0(c, dst, base, index, scale);
+}
+
 void x86_load_baseindex_rax(struct code *c, int base, int index, int scale,
                             int size, int sign, int w)
 {
