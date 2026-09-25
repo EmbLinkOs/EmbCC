@@ -408,6 +408,12 @@ void x86_push_reg(struct code *c, int reg)
     code_byte(c, 0x50 | (reg & 7));
 }
 
+void x86_pop_reg(struct code *c, int reg)
+{
+    if (reg & 8) code_byte(c, 0x41);
+    code_byte(c, 0x58 | (reg & 7));
+}
+
 void x86_epilogue(struct code *c, int frameless)
 {
     if (!frameless)

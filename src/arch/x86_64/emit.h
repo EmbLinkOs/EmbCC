@@ -24,6 +24,7 @@ extern const char *x86_lowering_op;
 void x86_prologue(struct code *c, int framesize, int frameless);
 void x86_sub_rsp(struct code *c, int bytes);
 void x86_push_reg(struct code *c, int reg);
+void x86_pop_reg(struct code *c, int reg);
 void x86_epilogue(struct code *c, int frameless);
 void x86_leave(struct code *c);
 

@@ -2132,6 +2132,29 @@ static struct afold afold_build(struct ir_func *fn, const int *sd)
     return r;
 }
 
+/* Put the callee-saved registers back.
+ *
+ * They were PUSHED, in reverse slot order, so they are a contiguous run
+ * ending at rbp -- point rsp at the bottom of it and pop them in slot
+ * order. One `lea` plus a byte a register, against four or five a
+ * register for the loads. Worth it from two registers up; for one, the
+ * load is shorter than the `lea` that would set up the pop.
+ *
+ * After the pops rsp is rbp again, which is what the `leave` that
+ * follows assumes anyway -- so the caller's epilogue is unchanged. */
+static void restore_callee(struct code *text, const int *used_callee,
+                           int nsave, int save_base)
+{
+    if (nsave >= 2) {
+        x86_lea_reg_slot(text, REG_RSP, save_base);
+        for (int k = 0; k < nsave; k++)
+            x86_pop_reg(text, used_callee[k]);
+        return;
+    }
+    for (int k = 0; k < nsave; k++)
+        x86_load_reg_mem(text, used_callee[k], REG_RBP, save_base + k * 8, 8);
+}
+
 static void gen_func(struct ir_func *fn, struct code *text,
                      struct sites *st)
 {
@@ -4007,9 +4030,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * registers, and those are caller-saved -- restoring
                  * callee-saved ones cannot disturb them. Doing it the
                  * other way round would restore over an argument. */
-                for (int k = 0; k < nsave; k++)
-                    x86_load_reg_mem(text, used_callee[k], REG_RBP,
-                                     save_base + k * 8, 8);
+                restore_callee(text, used_callee, nsave, save_base);
                 x86_leave(text);
                 int patch = x86_jmp_rel32(text);
                 if (i->callee->has_defn) {
@@ -4261,9 +4282,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 }
                 epi_patch[nepi++] = p;
             } else {
-                for (int k = 0; k < nsave; k++)         /* -O2: restore callee regs */
-                    x86_load_reg_mem(text, used_callee[k], REG_RBP,
-                                     save_base + k * 8, 8);
+                restore_callee(text, used_callee, nsave, save_base);
                 x86_epilogue(text, frameless);
             }
             break;
@@ -4301,8 +4320,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * target) OR when control can fall off the end (a void function). */
     int epi_off = text->len;
     if (shared_epi || !(g_regalloc && last_terminates)) {
-        for (int k = 0; k < nsave; k++)                 /* -O2: restore callee regs */
-            x86_load_reg_mem(text, used_callee[k], REG_RBP, save_base + k * 8, 8);
+        restore_callee(text, used_callee, nsave, save_base);
         x86_epilogue(text, frameless);
     }
     for (int e = 0; e < nepi; e++) {                    /* patch shared-return jumps */
