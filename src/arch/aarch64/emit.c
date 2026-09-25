@@ -559,6 +559,14 @@ static void fdp1(struct code *c, unsigned long opcode, int vd, int vn,
                 ((unsigned long)vn << 5) | (unsigned long)vd);
 }
 
+/* FMOV Dd, Xn / FMOV Sd, Wn -- a bit pattern in a general register
+ * becoming a floating-point value, with no trip through memory. */
+void a64_fmov_from_gpr(struct code *c, int vd, int rn, int w)
+{
+    unsigned long base = w == 8 ? 0x9E670000UL : 0x1E270000UL;
+    a64_word(c, base | ((unsigned long)rn << 5) | (unsigned long)vd);
+}
+
 void a64_fmov_reg(struct code *c, int vd, int vn, int w)
 {
     if (vd == vn)

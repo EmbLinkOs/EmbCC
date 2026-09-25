@@ -144,6 +144,7 @@ void a64_falu(struct code *c, int op, int vd, int vn, int vm, int w);
 void a64_fsqrt(struct code *c, int vd, int vn, int w);
 void a64_fneg(struct code *c, int vd, int vn, int w);
 void a64_fmov_reg(struct code *c, int vd, int vn, int w);
+void a64_fmov_from_gpr(struct code *c, int vd, int rn, int w);
 void a64_fcmp(struct code *c, int vn, int vm, int w);
 /* int -> float: rn is a general register of width `iw`, vd an FP register
  * of width `fw`; `sign` picks scvtf over ucvtf. */

@@ -1634,6 +1634,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
         switch (i->op) {
         case IR_CONST: {
+            /* A float constant is this same integer const of the value's
+             * bit pattern; only the destination's class says so. With a
+             * v-register home, build the bits in the accumulator and
+             * fmov them across. Spilled, the integer path below writes
+             * the same slot for less. */
+            if (a64_in_freg(i->dst)) {
+                a64_mov_imm(t, A64_ACC, i->imm, i->w);
+                a64_fmov_from_gpr(t, g_a64_floc[i->dst], A64_ACC,
+                                  i->w == 8 ? 8 : 4);
+                break;
+            }
             int d = wr(i->dst, A64_ACC);
             a64_mov_imm(t, d, i->imm, i->w);
             wrote(t, sd, i->dst, d);

@@ -541,39 +541,46 @@ static void modrm_baseindex0(struct code *c, int reg, int base, int index,
 /* Load into rax from [base + index*scale] (scale 1/2/4/8), same extension matrix
  * as x86_load_mem_rax — folds an address computation into the load. REX.X/REX.B
  * carry high index/base registers. */
-void x86_load_baseindex_rax(struct code *c, int base, int index, int scale,
-                            int size, int sign, int w)
+void x86_load_reg_baseindex(struct code *c, int dst, int base, int index,
+                            int scale, int size, int sign, int w)
 {
-    int rexXB = ((index & 8) ? 2 : 0) | ((base & 8) ? 1 : 0);
+    int rexRXB = ((dst & 8) ? 4 : 0) | ((index & 8) ? 2 : 0) |
+                 ((base & 8) ? 1 : 0);
     switch (size) {
     case 1:
     case 2: {
-        int rex = 0x40 | (w == 8 ? 8 : 0) | rexXB;
+        int rex = 0x40 | (w == 8 ? 8 : 0) | rexRXB;
         if (rex != 0x40) code_byte(c, rex);
         code_byte(c, 0x0f);
         code_byte(c, size == 1 ? (sign ? 0xbe : 0xb6) : (sign ? 0xbf : 0xb7));
-        modrm_baseindex0(c, 0, base, index, scale);
+        modrm_baseindex0(c, dst, base, index, scale);
         break;
     }
     case 4:
         if (w == 8 && sign) {
-            code_byte(c, 0x48 | rexXB);
+            code_byte(c, 0x48 | rexRXB);
             code_byte(c, 0x63);
         } else {
-            int rex = 0x40 | rexXB;
+            int rex = 0x40 | rexRXB;
             if (rex != 0x40) code_byte(c, rex);
             code_byte(c, 0x8b);
         }
-        modrm_baseindex0(c, 0, base, index, scale);
+        modrm_baseindex0(c, dst, base, index, scale);
         break;
     case 8:
-        code_byte(c, 0x48 | rexXB);
+        code_byte(c, 0x48 | rexRXB);
         code_byte(c, 0x8b);
-        modrm_baseindex0(c, 0, base, index, scale);
+        modrm_baseindex0(c, dst, base, index, scale);
         break;
     default:
         internal_error("bad load size %d", size);
     }
+}
+
+void x86_load_baseindex_rax(struct code *c, int base, int index, int scale,
+                            int size, int sign, int w)
+{
+    x86_load_reg_baseindex(c, 0, base, index, scale, size, sign, w);
 }
 
 /* Load into rax from [base + disp], same extension matrix as x86_load_mem_rax —
@@ -751,32 +758,75 @@ void x86_store_mem_rcx(struct code *c, int size)
 
 /* Store rax to [base + disp] (a struct-field store, `p->m = x`), sized. reg
  * field is rax(0); modrm_base carries disp and the rsp/r12 SIB case. */
-void x86_store_basedisp_rax(struct code *c, int base, int disp, int size)
+/* A byte store names the SOURCE in the reg field, and without a REX
+ * prefix registers 4..7 there mean %ah..%bh rather than %spl..%dil. So
+ * the byte forms emit REX whenever the source is one of those, even when
+ * it carries no bits. */
+void x86_store_basedisp_reg(struct code *c, int base, int disp, int src,
+                            int size)
 {
-    int rexb = (base & 8) ? 1 : 0;
+    int rexRB = ((src & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
     switch (size) {
-    case 1: if (rexb) code_byte(c, 0x41);        code_byte(c, 0x88); break;
-    case 2: code_byte(c, 0x66); if (rexb) code_byte(c, 0x41); code_byte(c, 0x89); break;
-    case 4: if (rexb) code_byte(c, 0x41);        code_byte(c, 0x89); break;
-    case 8: code_byte(c, 0x48 | rexb);           code_byte(c, 0x89); break;
+    case 1:
+        if (rexRB || src >= 4) code_byte(c, 0x40 | rexRB);
+        code_byte(c, 0x88);
+        break;
+    case 2:
+        code_byte(c, 0x66);
+        if (rexRB) code_byte(c, 0x40 | rexRB);
+        code_byte(c, 0x89);
+        break;
+    case 4:
+        if (rexRB) code_byte(c, 0x40 | rexRB);
+        code_byte(c, 0x89);
+        break;
+    case 8:
+        code_byte(c, 0x48 | rexRB);
+        code_byte(c, 0x89);
+        break;
     default: internal_error("bad store size %d", size);
     }
-    modrm_base(c, 0, base, disp);
+    modrm_base(c, src, base, disp);
+}
+
+void x86_store_basedisp_rax(struct code *c, int base, int disp, int size)
+{
+    x86_store_basedisp_reg(c, base, disp, 0, size);
 }
 
 /* Store rax to [base + index*scale] (an array-element store, `p[i] = x`). */
+void x86_store_baseindex_reg(struct code *c, int base, int index, int scale,
+                             int src, int size)
+{
+    int rexRXB = ((src & 8) ? 4 : 0) | ((index & 8) ? 2 : 0) |
+                 ((base & 8) ? 1 : 0);
+    switch (size) {
+    case 1:
+        if (rexRXB || src >= 4) code_byte(c, 0x40 | rexRXB);
+        code_byte(c, 0x88);
+        break;
+    case 2:
+        code_byte(c, 0x66);
+        if (rexRXB) code_byte(c, 0x40 | rexRXB);
+        code_byte(c, 0x89);
+        break;
+    case 4:
+        if (rexRXB) code_byte(c, 0x40 | rexRXB);
+        code_byte(c, 0x89);
+        break;
+    case 8:
+        code_byte(c, 0x48 | rexRXB);
+        code_byte(c, 0x89);
+        break;
+    default: internal_error("bad store size %d", size);
+    }
+    modrm_baseindex0(c, src, base, index, scale);
+}
+
 void x86_store_baseindex_rax(struct code *c, int base, int index, int scale,
                              int size)
 {
-    int rexXB = ((index & 8) ? 2 : 0) | ((base & 8) ? 1 : 0);
-    switch (size) {
-    case 1: if (rexXB) code_byte(c, 0x40 | rexXB);        code_byte(c, 0x88); break;
-    case 2: code_byte(c, 0x66); if (rexXB) code_byte(c, 0x40 | rexXB); code_byte(c, 0x89); break;
-    case 4: if (rexXB) code_byte(c, 0x40 | rexXB);        code_byte(c, 0x89); break;
-    case 8: code_byte(c, 0x48 | rexXB);                   code_byte(c, 0x89); break;
-    default: internal_error("bad store size %d", size);
-    }
-    modrm_baseindex0(c, 0, base, index, scale);
+    x86_store_baseindex_reg(c, base, index, scale, 0, size);
 }
 
 void x86_mov_rcx_slot(struct code *c, int disp)
@@ -1113,6 +1163,19 @@ void x86_movs_load(struct code *c, int xmm, int disp, int w)
 /* movaps xmm, xmm -- a whole-register copy, which is what a scalar move
  * between registers costs anyway and has no false dependency on the
  * destination's upper half the way movss/movsd does. */
+/* movq xmm, r64 / movd xmm, r32 -- the only way a bit pattern in a
+ * general register becomes a floating-point value without going through
+ * memory. A float CONSTANT is exactly that: the IR holds its bits. */
+void x86_movq_xmm_gpr(struct code *c, int xmm, int gpr, int w)
+{
+    code_byte(c, 0x66);
+    if (w == 8 || xmm >= 8 || gpr >= 8)
+        code_byte(c, 0x40 | ((w == 8) << 3) | ((xmm >= 8) << 2) | (gpr >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x6e);
+    code_byte(c, 0xc0 | ((xmm & 7) << 3) | (gpr & 7));
+}
+
 void x86_movs_reg(struct code *c, int dst, int src)
 {
     if (dst >= 8 || src >= 8)

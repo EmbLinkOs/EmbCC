@@ -161,6 +161,15 @@ static const int *x86_pool_for(const struct ir_func *fn, int *n)
     *n = NLEAF_RDX;     return LEAF_POOL_RDX;
 }
 
+/* rdi was tried AGAIN, under the narrowest condition that could be
+ * stated -- not variadic, not returning a struct, no call returning
+ * one, no __int128 -- so the struct-return pointer the note above
+ * blames could never collide. It is correct and it is worthless: 177898
+ * bytes of .text against 177849 without it, and 1081 spilled values
+ * against 1072. A twelfth register does not help, because the functions
+ * that spill are not short by one: strftime spills 45 of 303. Left out
+ * rather than carried for nothing. */
+
 static const int *x86_fp_pool_for(const struct ir_func *fn, int *n)
 {
     (void)fn;
@@ -361,6 +370,15 @@ char *cg_float_vregs(struct ir_func *fn)
             continue;                             /* operands are float */
         }
         switch (i->op) {
+        case IR_CONST:
+            /* A constant is whatever its consumer needs it to be. The
+             * bits of 0.5 are `const.8s 4602678819172646912` and nothing
+             * says float, so the default below took it out of the class
+             * -- and the taking-back travels through the copies, so one
+             * literal put every value reachable from it in memory, in
+             * BOTH classes. An op that wants it as an integer still
+             * BADs it by its own rule, so the whitelist stays sound. */
+            break;
         case IR_I2F:  BAD(i->a);   break;         /* integer in */
         case IR_F2I:  BAD(i->dst); break;         /* integer out */
         case IR_F2F:
@@ -2362,6 +2380,22 @@ static void gen_func(struct ir_func *fn, struct code *text,
             cg_store(text, sd, i->dst, i->w);
             break;
         case IR_CONST:
+            /* A FLOAT constant is an ordinary integer const of the value's
+             * bit pattern -- `0.5` is `const.8s 4602678819172646912`, and
+             * nothing in the IR says float but the class its destination
+             * belongs to. When that destination has an xmm home, put the
+             * bits in a general register and move them across; the slot
+             * is the traffic the class exists to remove. A float-classed
+             * dest that was SPILLED still falls through to the integer
+             * path below, which writes the same slot in one instruction
+             * instead of three. */
+            if (in_freg(i->dst)) {
+                int D = g_floc[i->dst];
+                cg_reset();
+                x86_mov_eax_imm(text, i->imm, i->w);
+                x86_movq_xmm_gpr(text, D, REG_RAX, i->w == 8 ? 8 : 4);
+                break;
+            }
             /* Register-resident dest: materialise the constant straight in its
              * register (`xor D,D` for zero, else `mov $imm,D`), no RAX detour and
              * no store. RAX is untouched, so a value cached there survives. */
@@ -2468,23 +2502,38 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     (nx->op == IR_STORE && is_flt(nx->b))) {
                     /* fall through to materialise the address */
                 } else if (nx->op == IR_LOAD && nx->a == i->dst) {
+                    /* Straight into the value's own register when it has
+                     * one. Landing in RAX and moving from there was a
+                     * second instruction for every fused load, and the
+                     * fusion fires on nearly every field access. */
+                    int D = in_reg(nx->dst) ? g_loc[nx->dst] : REG_RAX;
                     if (i->imm_b)
-                        x86_load_basedisp_rax(text, base, (int)i->imm,
+                        x86_load_reg_basedisp(text, D, base, (int)i->imm,
                                               nx->size, nx->sign, nx->w);
                     else
-                        x86_load_baseindex_rax(text, base, index, scale,
+                        x86_load_reg_baseindex(text, D, base, index, scale,
                                                nx->size, nx->sign, nx->w);
-                    cg_store(text, sd, nx->dst, nx->w);
+                    if (D == REG_RAX) cg_store(text, sd, nx->dst, nx->w);
+                    else              cg_reset();
                     n++;                           /* consume the fused load */
                     break;
                 } else if (nx->op == IR_STORE && nx->a == i->dst) {
-                    /* value -> rax (rax never aliases base/index), then store
-                     * through the folded address. */
-                    cg_load(text, sd, nx->b, 8, 0, 8);
+                    /* Straight out of the value's own register when it has
+                     * one; otherwise through RAX, which never aliases the
+                     * base or the index. */
+                    int Sv;
+                    if (in_reg(nx->b)) {
+                        Sv = g_loc[nx->b];
+                    } else {
+                        cg_load(text, sd, nx->b, 8, 0, 8);
+                        Sv = REG_RAX;
+                    }
                     if (i->imm_b)
-                        x86_store_basedisp_rax(text, base, (int)i->imm, nx->size);
+                        x86_store_basedisp_reg(text, base, (int)i->imm, Sv,
+                                               nx->size);
                     else
-                        x86_store_baseindex_rax(text, base, index, scale, nx->size);
+                        x86_store_baseindex_reg(text, base, index, scale, Sv,
+                                                nx->size);
                     n++;                           /* consume the fused store */
                     break;
                 }
