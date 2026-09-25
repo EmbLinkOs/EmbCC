@@ -1020,10 +1020,34 @@ puts every call one halfword early.
 clang produces for the same source through the same linker on the same
 board — at -O0, -O1, -O2 and -Os.
 
-**What it does not do yet, all refused by name:** 64-bit integers (which
-need a legalisation pass splitting w == 8 into register pairs before the
-backend sees it — packed bitfields ride on this, since irgen assembles
-them in a 64-bit accumulator), floating point (ARMv7-M has no FPU, so
+**2026-09-25, later again:** 64-bit integers landed, in the BACKEND
+rather than as a legalisation pass over the IR. The IR has no carry:
+expressing `adds`/`adcs` in EmbIR would take a compare and a branch per
+addition, and adding carry-carrying opcodes would put two operations
+into the shared operand switches that only one target ever emits, which
+is how an opcode rots. A 64-bit value is an eight-byte slot and a
+register pair; divide and remainder are the only calls, into
+`lib/rt/int64.c` under libgcc's names. Bitfields work as a consequence,
+since irgen assembles a field's storage unit in a 64-bit accumulator.
+
+Two things in the SHARED front end were wrong and had been invisible
+while every register was 64 bits. `arith_common` returned
+`ty_base(TY_LONG, uns)` for the wide case, which is a silent NARROWING
+where `long` is four bytes: `a + b` on two long longs came out as a
+32-bit add. And the two merge MOVs a `?:` emits carried no width at all,
+so `neg ? -q : q` returned half of a long long — which is how
+`__divdi3` came back carrying its own dividend's high word. The backend
+also propagates width through copies to a fixpoint, because a MOV is
+not required to carry one and several do not.
+
+The other lesson is about the reference. For 64-bit arithmetic it is the
+HOST compiler, not clang for thumbv7m: `long long` has one answer
+whatever the register width, and clang emits `__aeabi_ldivmod` for a
+divide where EmbCC emits `__divdi3` — a routine that returns quotient
+and remainder in four registers at once and therefore cannot be written
+in C, so the two cannot share a runtime.
+
+**What it does not do yet, all refused by name:** floating point (ARMv7-M has no FPU, so
 every operation is an `__aeabi_*` call), aggregates by value, varargs,
 atomics, inline asm, VLAs, computed goto, exceptions and `-g`. There is
 also no register allocator here yet and no linker for the target, so

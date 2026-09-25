@@ -90,6 +90,16 @@ int main(void)
       buf[n] = 0;
       for (int i = 0; i < n; i++) writec(buf[i]);
       nl(); }
+    /* Bitfields, which are how a peripheral's registers are written —
+     * and which ride on the 64-bit lowering, since the front end
+     * assembles a field's storage unit in a 64-bit accumulator. */
+    { struct ctl { unsigned en:1, mode:3, prio:4, chan:5, rsv:19; } c;
+      struct wide { unsigned a:12, b:12, e:8; } w;
+      c.en = 1; c.mode = 5; c.prio = 9; c.chan = 27; c.rsv = 0;
+      putn(c.en); putn(c.mode); putn(c.prio); putn(c.chan);
+      w.a = 4000; w.b = 3000; w.e = 200;
+      putn(w.a); putn(w.b); putn(w.e); nl(); }
+
     puts_("==END==\n");
     return 0;
 }

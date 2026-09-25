@@ -105,9 +105,6 @@ be linked in beside EmbCC's.
 Each of these stops the compile with a message naming the construct and
 the IR operation behind it, rather than emitting something plausible:
 
-- **64-bit integers.** `long long`, `uint64_t`, and packed bitfields
-  (which the front end assembles in a 64-bit accumulator). This needs a
-  pass that splits 64-bit operations into register pairs.
 - **Floating point.** ARMv7-M's base profile has no FPU, so every
   operation is a call into `__aeabi_fadd` and its family — a lowering
   that does not exist yet.
@@ -120,15 +117,40 @@ larger than clang's. Optimisation levels work and are worth using —
 `-Os` and `-O2` both run the full optimizer — but the win is in the IR,
 not in register assignment.
 
+## 64-bit integers
+
+`long long` and `uint64_t` work, in register pairs. Add, subtract,
+multiply, the bitwise operations, negation, the shifts and the
+comparisons are all inline; **divide and remainder are a call** into
+`lib/rt/int64.c`, under libgcc's names (`__divdi3`, `__udivdi3`,
+`__moddi3`, `__umoddi3`). Compile that file for the target and link it
+in, or link a libgcc that provides them:
+
+```
+embcc --target=thumbv7m-none-eabi -Os -c lib/rt/int64.c -o int64.o
+```
+
+Objects from another ARM toolchain call `__aeabi_ldivmod` instead, which
+returns its quotient and remainder in four registers at once and so
+cannot be written in C. EmbCC does not provide that one; an object that
+needs it must bring its own.
+
+Bitfields depend on this — the front end assembles a field's storage
+unit in a 64-bit accumulator — so they work now too, including
+`volatile` ones, which is how a peripheral's registers are written.
+
 ## What proves it
 
 - `tests/golden/thumb-encoding.sh` disassembles every instruction the
   encoder can produce and diffs it against what each call was meant to
   emit, plus all 4093 distinct modified immediates.
 - `tests/golden/thumb-exec.sh` compiles a program covering structs,
-  arrays, `switch`, recursion, function pointers, bit manipulation and
-  signed and unsigned division, links it with `embld`, runs it on QEMU's
-  Cortex-M3, and requires the output to match what `clang` produces for
-  the same source through the same linker and the same board.
+  arrays, `switch`, recursion, function pointers, bitfields, bit
+  manipulation and signed and unsigned division, links it with `embld`,
+  runs it on QEMU's Cortex-M3, and requires the output to match what
+  `clang` produces for the same source through the same linker and the
+  same board. It then does the same for a 64-bit program, against the
+  HOST compiler — `long long` arithmetic has one answer whatever the
+  register width.
 - `tests/golden/thumb-target.sh` checks the data model, and checks that
   the same assertions fail on x86-64.

@@ -1951,11 +1951,18 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int cw;
         int c = truth(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, &cw);
         emit_brz(fn, c, cw, l_else);
+        /* The two merges carry the conditional's OWN width. They were
+         * emitted with none, which cost nothing while a register held
+         * any scalar and is half a `long long` on a 32-bit machine. */
+        int mw = ty_is_float(e->ty) ? ty_size(e->ty) : ty_w(e->ty);
+        int mflt = ty_is_float(e->ty) && e->ty->kind != TY_LDOUBLE;
         int a = gen_expr(fn, e->lhs);
         struct ir_ins *m1 = emit(fn);
         m1->op = IR_MOV;
         m1->a = a;
         m1->dst = dst;
+        m1->w = mw;
+        m1->flt = mflt;
         emit_jmp(fn, l_end);
         emit_label(fn, l_else);
         int b = gen_expr(fn, e->rhs);
@@ -1963,6 +1970,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         m2->op = IR_MOV;
         m2->a = b;
         m2->dst = dst;
+        m2->w = mw;
+        m2->flt = mflt;
         emit_label(fn, l_end);
         return dst;
     }

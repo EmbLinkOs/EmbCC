@@ -152,7 +152,6 @@ refuses() {
         echo "$1 failed, but not with the backend's own refusal:"
         cat "$out/no.err"; exit 1; }
 }
-refuses "64-bit arithmetic" 'long long f(long long a, long long b){return a+b;}'
 refuses "floating point"    'double f(double a, double b){return a*b;}'
 refuses "a variadic function" '
 #include <stdarg.h>
@@ -161,4 +160,18 @@ refuses "an aggregate argument" '
 struct big { int a, b, c; };
 int g(struct big);
 int f(struct big b){ return g(b); }'
-echo "64-bit, floating point, varargs and aggregates each refuse by name"
+echo "floating point, varargs and aggregates each refuse by name"
+
+# And what it NO LONGER refuses: 64-bit integers, which the backend
+# carries in register pairs. Checked here as well as in thumb-exec.sh
+# so the compile path is covered even where QEMU is not installed.
+printf '%s\n' 'long long f(long long a, long long b){ return a*b - (a>>3) + (a<b); }
+unsigned long long g(unsigned long long a){ return a / 1000ULL; }' > "$out/ll.c"
+for opt in -O0 -O2; do
+    "$EMBCC" --target=$T $opt -c "$out/ll.c" -o "$out/ll.o" || {
+        echo "$opt: 64-bit arithmetic no longer compiles"; exit 1; }
+    "$OD" -d --triple=thumbv7m "$out/ll.o" > "$out/lldis.txt"
+    grep -q "$out/lldis.txt" -e unknown && {
+        echo "$opt: a 64-bit lowering does not decode"; exit 1; }
+done
+echo "64-bit integers compile at -O0 and -O2"

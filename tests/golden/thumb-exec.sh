@@ -73,4 +73,37 @@ for src in tests/golden/thumb-stress.c; do
     echo "$base: EmbCC agrees with $CLANG at -O0, -O1, -O2 and -Os"
 done
 
+# 64-bit integers are checked against the HOST rather than against
+# clang. `long long` arithmetic has one answer whatever the register
+# width, so the machine this suite runs on is as good a reference — and
+# a better one here, because clang for thumbv7m emits __aeabi_ldivmod
+# for a 64-bit divide where EmbCC emits __divdi3, and the two cannot
+# share a runtime.
+"$EMBCC" --target=$T -Os -c lib/rt/int64.c -o "$out/int64.o" || {
+    echo "the 64-bit runtime does not compile for $T"; exit 1; }
+cc -std=c99 -w -o "$out/host64" tests/golden/thumb-int64.c \
+   tests/harness/thumb/hostio.c || {
+    echo "the 64-bit program does not compile for the host"; exit 1; }
+"$out/host64" > "$out/int64-ref.txt" || {
+    echo "the 64-bit program failed on the host"; exit 1; }
+
+for opt in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T $opt -c tests/golden/thumb-int64.c \
+             -o "$out/i64$opt.o" || {
+        echo "$opt: the 64-bit program does not compile"; exit 1; }
+    sh "$H/link.sh" "$out/i64$opt.elf" "$out/i64$opt.o" "$out/int64.o" || {
+        echo "$opt: embld could not link the 64-bit image"; exit 1; }
+    sh "$H/run.sh" "$out/i64$opt.elf" > "$out/i64$opt.txt" 2>&1
+    grep -q '==END==' "$out/i64$opt.txt" || {
+        echo "$opt: the 64-bit image did not reach the end of main:"
+        sed -n '1,10p' "$out/i64$opt.txt"; exit 1; }
+    if ! diff -u "$out/int64-ref.txt" "$out/i64$opt.txt" > "$out/i64$opt.diff"
+    then
+        echo "64-bit arithmetic at $opt does not agree with the host:"
+        head -20 "$out/i64$opt.diff"
+        exit 1
+    fi
+done
+echo "thumb-int64: 64-bit arithmetic agrees with the host at four levels"
+
 echo "ARMv7-M images build with embld and run on $QEMU"

@@ -41,10 +41,22 @@
 #include "../target.h"
 #include "../../driver/util.h"
 
-/* A third scratch: r10, alongside T_ACC (r12) and T_TMP (r11). All three
- * are saved in the prologue except r12, which the ABI already makes
- * caller-saved. */
+/* Four scratch registers, which is what a 64-bit binary operation needs:
+ * both halves of each operand at once. r12 is the ABI's own scratch and
+ * needs no saving; r9, r10 and r11 are callee-saved and the prologue
+ * pays for them.
+ *
+ * The naming is by ROLE rather than by number because the 64-bit
+ * lowerings read as pairs: A_LO/A_HI hold the left operand and
+ * B_LO/B_HI the right, and the 32-bit paths keep using T_ACC, T_TMP and
+ * T_ADDR for the same registers. */
 #define T_ADDR 10
+#define T_SCR   9
+
+#define A_LO T_ACC      /* r12 */
+#define A_HI T_TMP      /* r11 */
+#define B_LO T_ADDR     /* r10 */
+#define B_HI T_SCR      /* r9  */
 
 /* The registers the prologue saves. Four, not three, because AAPCS32
  * wants sp eight-byte aligned and `push` of an odd count would break it
@@ -67,6 +79,12 @@ struct t_sites {
  * slots are and what is still unpatched — is in one place. */
 struct t_fn {
     struct ir_func *fn;
+    /* Per vreg: 1 when it holds a 64-bit integer, which on a 32-bit
+     * machine is an eight-byte slot and a REGISTER PAIR. Built from the
+     * width of each value's DEFINING instruction, which is not the same
+     * as i->w everywhere -- a compare of two 64-bit values has w == 8
+     * and produces a one-or-zero that is four bytes wide. */
+    char *wide;
     struct code *t;
     struct t_sites *st;
     long *slot;          /* per-vreg byte offset from sp, -1 for none */
@@ -98,6 +116,77 @@ static void t_refuse(const struct ir_func *fn, const struct ir_ins *i,
     exit(1);
 }
 
+/* Which vregs hold a 64-bit integer.
+ *
+ * By the WIDTH OF THE RESULT, which is `i->w` for the value-producing
+ * operations and four for the rest however wide their operands are:
+ * IR_CMP at w == 8 compares two 64-bit values and yields a 0 or a 1,
+ * and IR_ADDR yields a pointer whatever it points at. Getting that
+ * backwards gives the result an eight-byte slot and reads four bytes of
+ * neighbouring temp as its high half. */
+static char *wide64_map(struct ir_func *fn)
+{
+    char *w = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), 1);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->flt || i->w != 8 || i->dst < 0 || i->dst >= fn->nvregs)
+            continue;
+        switch (i->op) {
+        case IR_CONST: case IR_MOV:
+        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
+        case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+        case IR_NEG: case IR_BNOT:
+        case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
+        case IR_SELECT:
+            w[i->dst] = 1;
+            break;
+        default:
+            break;
+        }
+    }
+    /* A local declared eight bytes wide is one too, whether or not any
+     * instruction has been seen to define it yet: the prologue writes a
+     * parameter into its slot before the body runs. */
+    for (int v = 0; v < fn->nvars && v < fn->nvregs; v++)
+        if (fn->locals[v].size == 8 && fn->locals[v].is_int_or_ptr)
+            w[v] = 1;
+
+    /* Then propagate through COPIES, to a fixpoint.
+     *
+     * A MOV is not required to carry a width and often does not: the
+     * merge of a `?:`'s two arms is emitted with an operand and a
+     * destination and nothing else, which cost nothing while every
+     * register was 64 bits wide. Reading `w` there says four, and
+     * `neg ? -q : q` returned half of a long long -- with the other
+     * half being whatever the destination's neighbour held, which is
+     * how __divdi3 came back carrying its own dividend's high word.
+     *
+     * So the width of a copy is the width of what it copies, and a
+     * chain of them (or one around a loop) settles here rather than
+     * being asked instruction by instruction. */
+    for (int again = 1; again; ) {
+        again = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            int src;
+            if (i->dst < 0 || i->dst >= fn->nvregs || w[i->dst])
+                continue;
+            if (i->op == IR_MOV)
+                src = i->a >= 0 && i->a < fn->nvregs && w[i->a];
+            else if (i->op == IR_SELECT)
+                src = (i->b >= 0 && i->b < fn->nvregs && w[i->b]) ||
+                      (i->c >= 0 && i->c < fn->nvregs && w[i->c]);
+            else
+                continue;
+            if (src) {
+                w[i->dst] = 1;
+                again = 1;
+            }
+        }
+    }
+    return w;
+}
+
 /* ---- frame ---------------------------------------------------------- */
 
 /* One slot per vreg: the locals in declaration order at their own sizes,
@@ -112,17 +201,48 @@ static void t_refuse(const struct ir_func *fn, const struct ir_ins *i,
  * nothing there and needs eight bytes here. Believing the IR's number
  * would put the fifth and sixth arguments on top of this function's
  * first local — which compiles, links, and returns the wrong answer. */
+/* AAPCS32 placement, shared by a call's arguments and a function's own
+ * parameters so the two cannot disagree. Returns 1 when the argument
+ * goes in registers, filling *reg with the first of them; otherwise 0,
+ * with *stk holding its offset in the outgoing area. `ncrn` and `stk`
+ * carry the running state.
+ *
+ * An eight-byte scalar is EIGHT-ALIGNED, which means the register
+ * number is rounded up to even before it is taken -- and that in turn
+ * means such an argument never splits across r3 and the stack, because
+ * rounding leaves either two registers or none. */
+static int place_arg(int size, int *ncrn, long *stk, int *reg)
+{
+    int words = size > 4 ? 2 : 1;
+    if (words == 2)
+        *ncrn = (*ncrn + 1) & ~1;
+    if (*ncrn + words <= 4) {
+        *reg = *ncrn;
+        *ncrn += words;
+        return 1;
+    }
+    *ncrn = 4;
+    if (words == 2)
+        *stk = (*stk + 7) & ~7L;
+    *reg = -1;
+    return 0;
+}
+
 static long outgoing_area(const struct ir_func *fn)
 {
     long most = 0;
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
-        long need;
-        if (i->op != IR_CALL || i->nargs <= 4)
+        int ncrn = 0, reg;
+        long stk = 0;
+        if (i->op != IR_CALL)
             continue;
-        need = (long)(i->nargs - 4) * 4;
-        if (need > most)
-            most = need;
+        for (int k = 0; k < i->nargs; k++) {
+            if (!place_arg(i->argv[k].size, &ncrn, &stk, &reg))
+                stk += i->argv[k].size > 4 ? 8 : 4;
+        }
+        if (stk > most)
+            most = stk;
     }
     return (most + 7) & ~7L;
 }
@@ -146,9 +266,14 @@ static void layout(struct t_fn *F)
         off += size;
     }
     for (int v = fn->nvars; v < fn->nvregs; v++) {
-        off = (off + 3) & ~3L;
+        /* Eight-byte values are eight-ALIGNED as well as eight wide:
+         * AAPCS32 aligns `long long` to 8, and a pair straddling that
+         * boundary would be legal but slower and would break `ldrd` if
+         * this ever emits one. */
+        int size = F->wide[v] ? 8 : 4;
+        off = (off + size - 1) & ~(long)(size - 1);
         F->slot[v] = off;
-        off += 4;
+        off += size;
     }
     off += fn->scratch_bytes;
     /* Eight, not four: AAPCS32 requires sp to be eight-byte aligned at
@@ -181,6 +306,42 @@ static void wr(struct t_fn *F, int v, int reg)
         t_mov_imm(F->t, a, F->slot[v], 0);
         t_alu_reg(F->t, T_OP_ADD, a, T_SP, a, 0);
         t_ldst_imm(F->t, reg, a, 0, 4, 0, 1);
+    }
+}
+
+/* A 64-bit value's two halves, little-endian: the low word at the slot
+ * and the high word four bytes above it. */
+static void rd64(struct t_fn *F, int v, int lo, int hi)
+{
+    if (!t_ldst_imm(F->t, lo, T_SP, F->slot[v], 4, 0, 0) ||
+        !t_ldst_imm(F->t, hi, T_SP, F->slot[v] + 4, 4, 0, 0)) {
+        t_add_sp(F->t, hi, F->slot[v]);
+        t_ldst_imm(F->t, lo, hi, 0, 4, 0, 0);
+        t_ldst_imm(F->t, hi, hi, 4, 4, 0, 0);
+    }
+}
+
+static void wr64(struct t_fn *F, int v, int lo, int hi)
+{
+    if (F->slot[v] < 0)
+        return;
+    if (!t_ldst_imm(F->t, lo, T_SP, F->slot[v], 4, 0, 1) ||
+        !t_ldst_imm(F->t, hi, T_SP, F->slot[v] + 4, 4, 0, 1)) {
+        int a = (lo == T_SCR || hi == T_SCR) ? T_ADDR : T_SCR;
+        t_add_sp(F->t, a, F->slot[v]);
+        t_ldst_imm(F->t, lo, a, 0, 4, 0, 1);
+        t_ldst_imm(F->t, hi, a, 4, 4, 0, 1);
+    }
+}
+
+/* The second operand of a 64-bit binary operation, immediate or not. */
+static void operand_b64(struct t_fn *F, const struct ir_ins *i, int lo, int hi)
+{
+    if (i->imm_b) {
+        t_mov_imm(F->t, lo, (long)(i->imm & 0xffffffffL), 0);
+        t_mov_imm(F->t, hi, (long)((i->imm >> 32) & 0xffffffffL), 0);
+    } else {
+        rd64(F, i->b, lo, hi);
     }
 }
 
@@ -294,6 +455,29 @@ static void note_fn(struct t_sites *st, int at, struct func *target,
     st->nf++;
 }
 
+/* A call to a runtime routine the IR does not show as one — the 64-bit
+ * divides. The callee is interned in the unit so the driver emits an
+ * UNDEF symbol and a relocation for it, exactly as for any other
+ * external call. */
+static void call_helper(struct t_fn *F, const char *name)
+{
+    static struct func *made[4];
+    static const char *const names[4] = {
+        "__divdi3", "__udivdi3", "__moddi3", "__umoddi3" };
+    int k;
+    for (k = 0; k < 4; k++)
+        if (strcmp(names[k], name) == 0)
+            break;
+    if (!made[k]) {
+        struct func *h = xcalloc(1, sizeof *h);
+        h->name = names[k];
+        h->declared = 1;
+        h->used = 1;
+        made[k] = h;
+    }
+    note_ext(F->st, t_bl(F->t), made[k]);
+}
+
 /* ---- comparisons ---------------------------------------------------- */
 
 static int cond_for(enum binop pred, int sign)
@@ -309,6 +493,312 @@ static int cond_for(enum binop pred, int sign)
     }
 }
 
+/* ---- 64-bit integers ------------------------------------------------
+ *
+ * A 32-bit machine carries one in a REGISTER PAIR and an eight-byte
+ * slot, low word first. Everything below works in A_LO/A_HI and
+ * B_LO/B_HI and writes its result back through wr64.
+ *
+ * Done here rather than as a legalisation pass over the IR because the
+ * IR has no carry: expressing `adds`/`adcs` in EmbIR would take a
+ * compare and a branch per addition, and adding carry-carrying opcodes
+ * would put two operations into the shared operand switches that only
+ * one target ever emits -- which is precisely how an opcode rots.
+ */
+
+/* A shift of a 64-bit value by a variable amount, branching on whether
+ * the count reaches into the high word. The branchless form ARM code
+ * usually uses needs two more registers than this backend has spare;
+ * this one needs none, and a shift is not the hot path on a Cortex-M.
+ *
+ * Counts of 32 and above fall out of the second arm, and a count of
+ * zero out of the first: ARM's register shifts take the low byte of the
+ * count and produce zero (or the sign, for ASR) at 32 and above, so
+ * `alo >> (32 - 0)` contributes nothing exactly as it should. */
+static void shift64_var(struct t_fn *F, int op, int sign)
+{
+    struct code *t = F->t;
+    int big, done;
+    t_cmp_imm(t, B_LO, 32);
+    big = t_bcond(t, T_GE);
+    if (op == T_SH_LSL) {
+        t_shift_reg(t, T_SH_LSL, A_HI, A_HI, B_LO, 0);
+        t_alu_imm(t, T_OP_RSB, B_HI, B_LO, 32, 0);
+        t_shift_reg(t, T_SH_LSR, B_HI, A_LO, B_HI, 0);
+        t_alu_reg(t, T_OP_ORR, A_HI, A_HI, B_HI, 0);
+        t_shift_reg(t, T_SH_LSL, A_LO, A_LO, B_LO, 0);
+    } else {
+        /* The LOW word always shifts LOGICALLY, whatever the shift is:
+         * only the high word carries the sign. An arithmetic shift here
+         * smears bit 31 of the low word across the bits the high word
+         * is about to supply -- 0x1234567890abcdef >> 8 came back as
+         * 0x00123456ff90abcd. */
+        t_shift_reg(t, T_SH_LSR, A_LO, A_LO, B_LO, 0);
+        t_alu_imm(t, T_OP_RSB, B_HI, B_LO, 32, 0);
+        t_shift_reg(t, T_SH_LSL, B_HI, A_HI, B_HI, 0);
+        t_alu_reg(t, T_OP_ORR, A_LO, A_LO, B_HI, 0);
+        t_shift_reg(t, op, A_HI, A_HI, B_LO, 0);
+    }
+    done = t_b(t);
+    t_patch_bcond(t, big, t->len);
+    t_alu_imm(t, T_OP_SUB, B_HI, B_LO, 32, 0);
+    if (op == T_SH_LSL) {
+        t_shift_reg(t, T_SH_LSL, A_HI, A_LO, B_HI, 0);
+        t_mov_imm(t, A_LO, 0, 0);
+    } else {
+        t_shift_reg(t, op, A_LO, A_HI, B_HI, 0);
+        if (sign)
+            t_shift_imm(t, T_SH_ASR, A_HI, A_HI, 31, 0);
+        else
+            t_mov_imm(t, A_HI, 0, 0);
+    }
+    t_patch_b(t, done, t->len);
+}
+
+/* The same by a constant, where which arm applies is already known. */
+static void shift64_imm(struct t_fn *F, int op, int sign, long n)
+{
+    struct code *t = F->t;
+    if (n <= 0)
+        return;
+    if (n >= 64)
+        n = op == T_SH_ASR ? 63 : 64;
+    if (op == T_SH_LSL) {
+        if (n >= 32) {
+            if (n > 32) t_shift_imm(t, T_SH_LSL, A_LO, A_LO, (int)(n - 32), 0);
+            t_mov_reg(t, A_HI, A_LO);
+            t_mov_imm(t, A_LO, 0, 0);
+        } else {
+            t_shift_imm(t, T_SH_LSL, A_HI, A_HI, (int)n, 0);
+            t_shift_imm(t, T_SH_LSR, B_HI, A_LO, (int)(32 - n), 0);
+            t_alu_reg(t, T_OP_ORR, A_HI, A_HI, B_HI, 0);
+            t_shift_imm(t, T_SH_LSL, A_LO, A_LO, (int)n, 0);
+        }
+        return;
+    }
+    if (n >= 32) {
+        if (n > 32) t_shift_imm(t, op, A_HI, A_HI, (int)(n - 32), 0);
+        t_mov_reg(t, A_LO, A_HI);
+        if (sign)
+            t_shift_imm(t, T_SH_ASR, A_HI, A_HI, 31, 0);
+        else
+            t_mov_imm(t, A_HI, 0, 0);
+        return;
+    }
+    t_shift_imm(t, T_SH_LSR, A_LO, A_LO, (int)n, 0);   /* always logical */
+    t_shift_imm(t, T_SH_LSL, B_HI, A_HI, (int)(32 - n), 0);
+    t_alu_reg(t, T_OP_ORR, A_LO, A_LO, B_HI, 0);
+    t_shift_imm(t, op, A_HI, A_HI, (int)n, 0);
+}
+
+/* Lower one 64-bit instruction. Returns 0 for one this does not handle,
+ * which the caller then refuses by name. */
+static int gen_ins64(struct t_fn *F, int n)
+{
+    struct ir_func *fn = F->fn;
+    struct ir_ins *i = &fn->ins[n];
+    struct code *t = F->t;
+
+    switch (i->op) {
+    case IR_CONST:
+        t_mov_imm(t, A_LO, (long)(i->imm & 0xffffffffL), 0);
+        t_mov_imm(t, A_HI, (long)((i->imm >> 32) & 0xffffffffL), 0);
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+    case IR_MOV:
+        rd64(F, i->a, A_LO, A_HI);
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+
+    case IR_ADD: case IR_SUB:
+        rd64(F, i->a, A_LO, A_HI);
+        operand_b64(F, i, B_LO, B_HI);
+        /* The carry must survive from one instruction to the next, so
+         * nothing may come between them -- which is why both operands
+         * are fully in registers before either is emitted. */
+        if (i->op == IR_ADD) {
+            t_alu_reg(t, T_OP_ADD, A_LO, A_LO, B_LO, 1);
+            t_alu_reg(t, T_OP_ADC, A_HI, A_HI, B_HI, 1);
+        } else {
+            t_alu_reg(t, T_OP_SUB, A_LO, A_LO, B_LO, 1);
+            t_alu_reg(t, T_OP_SBC, A_HI, A_HI, B_HI, 1);
+        }
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+
+    case IR_AND: case IR_OR: case IR_XOR: {
+        int op = i->op == IR_AND ? T_OP_AND
+               : i->op == IR_OR  ? T_OP_ORR : T_OP_EOR;
+        rd64(F, i->a, A_LO, A_HI);
+        operand_b64(F, i, B_LO, B_HI);
+        t_alu_reg(t, op, A_LO, A_LO, B_LO, 0);
+        t_alu_reg(t, op, A_HI, A_HI, B_HI, 0);
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+    }
+
+    case IR_BNOT:
+        rd64(F, i->a, A_LO, A_HI);
+        t_mvn_reg(t, A_LO, A_LO, 0);
+        t_mvn_reg(t, A_HI, A_HI, 0);
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+
+    case IR_NEG:
+        /* 0 - a. `rsbs` leaves C clear exactly when the low word
+         * borrowed, and `sbc` from zero is the high half. */
+        rd64(F, i->a, A_LO, A_HI);
+        t_mov_imm(t, B_LO, 0, 0);
+        t_alu_imm(t, T_OP_RSB, A_LO, A_LO, 0, 1);
+        t_alu_reg(t, T_OP_SBC, A_HI, B_LO, A_HI, 0);
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+
+    case IR_MUL:
+        /* (a_hi:a_lo) * (b_hi:b_lo), keeping 64 bits: the two cross
+         * products contribute only to the high word, and the low
+         * product's carry comes out of umull's own high half. */
+        rd64(F, i->a, A_LO, A_HI);
+        operand_b64(F, i, B_LO, B_HI);
+        t_mul(t, B_HI, A_LO, B_HI);              /* a_lo * b_hi */
+        t_mla(t, B_HI, A_HI, B_LO, B_HI);        /* += a_hi * b_lo */
+        t_mull(t, A_LO, A_HI, A_LO, B_LO, 0);    /* a_lo * b_lo */
+        t_alu_reg(t, T_OP_ADD, A_HI, A_HI, B_HI, 0);
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+
+    case IR_SHL: case IR_SHR: {
+        int op = i->op == IR_SHL ? T_SH_LSL
+               : i->sign ? T_SH_ASR : T_SH_LSR;
+        rd64(F, i->a, A_LO, A_HI);
+        if (i->imm_b)
+            shift64_imm(F, op, i->sign, (long)i->imm);
+        else {
+            rd(F, i->b, B_LO);
+            shift64_var(F, op, i->sign);
+        }
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+    }
+
+    case IR_EXT:
+        /* Widening to 64 bits: the low word is the source, extended to
+         * 32 first if it was narrower, and the high word is zero or the
+         * sign. */
+        rd(F, i->a, A_LO);
+        if (i->size < 4)
+            t_ext(t, A_LO, A_LO, i->size, i->sign);
+        if (i->sign)
+            t_shift_imm(t, T_SH_ASR, A_HI, A_LO, 31, 0);
+        else
+            t_mov_imm(t, A_HI, 0, 0);
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+
+    /* A 64-bit RESULT from a narrower access is a load plus an
+     * extension: `long long x = *(int *)p` reads four bytes and fills
+     * the high word from the sign. rd64 on a four-byte slot would read
+     * the neighbouring temp as the high half. */
+    case IR_LDVAR:
+        if (i->size == 8) {
+            rd64(F, i->a, A_LO, A_HI);
+        } else {
+            if (!t_ldst_imm(t, A_LO, T_SP, F->slot[i->a], i->size, i->sign,
+                            0)) {
+                t_add_sp(t, B_LO, F->slot[i->a]);
+                t_ldst_imm(t, A_LO, B_LO, 0, i->size, i->sign, 0);
+            }
+            if (i->sign) t_shift_imm(t, T_SH_ASR, A_HI, A_LO, 31, 0);
+            else         t_mov_imm(t, A_HI, 0, 0);
+        }
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+    case IR_STVAR:
+        rd64(F, i->a, A_LO, A_HI);
+        if (i->size == 8) {
+            wr64(F, i->dst, A_LO, A_HI);
+        } else {                       /* a truncating store */
+            if (!t_ldst_imm(t, A_LO, T_SP, F->slot[i->dst], i->size, 0, 1)) {
+                t_add_sp(t, B_LO, F->slot[i->dst]);
+                t_ldst_imm(t, A_LO, B_LO, 0, i->size, 0, 1);
+            }
+        }
+        return 1;
+    case IR_LOAD:
+        rd(F, i->a, B_LO);
+        if (i->size == 8) {
+            t_ldst_imm(t, A_LO, B_LO, 0, 4, 0, 0);
+            t_ldst_imm(t, A_HI, B_LO, 4, 4, 0, 0);
+        } else {
+            t_ldst_imm(t, A_LO, B_LO, 0, i->size, i->sign, 0);
+            if (i->sign) t_shift_imm(t, T_SH_ASR, A_HI, A_LO, 31, 0);
+            else         t_mov_imm(t, A_HI, 0, 0);
+        }
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+    case IR_STORE:
+        rd(F, i->a, B_LO);
+        rd64(F, i->b, A_LO, A_HI);
+        t_ldst_imm(t, A_LO, B_LO, 0, i->size == 8 ? 4 : i->size, 0, 1);
+        if (i->size == 8)
+            t_ldst_imm(t, A_HI, B_LO, 4, 4, 0, 1);
+        return 1;
+
+    case IR_SELECT:
+        rd(F, i->a, B_LO);
+        t_cmp_imm(t, B_LO, 0);
+        {
+            int take_c = t_bcond(t, T_EQ);
+            rd64(F, i->b, A_LO, A_HI);
+            {
+                int done = t_b(t);
+                t_patch_bcond(t, take_c, t->len);
+                rd64(F, i->c, A_LO, A_HI);
+                t_patch_b(t, done, t->len);
+            }
+        }
+        wr64(F, i->dst, A_LO, A_HI);
+        return 1;
+
+    default:
+        return 0;
+    }
+}
+
+/* A 64-bit comparison, leaving the flags for `cond`. Returns the
+ * condition to branch on, which is not always the one the predicate
+ * names: there is no way to read "greater than" out of a subtraction's
+ * flags directly, so the operands are swapped and the mirrored
+ * predicate used instead. */
+static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
+                 int sign)
+{
+    struct code *t = F->t;
+    int swap = pred == B_GT || pred == B_LE;
+    if (swap) {
+        operand_b64(F, i, A_LO, A_HI);
+        rd64(F, i->a, B_LO, B_HI);
+        pred = pred == B_GT ? B_LT : B_GE;
+    } else {
+        rd64(F, i->a, A_LO, A_HI);
+        operand_b64(F, i, B_LO, B_HI);
+    }
+    if (pred == B_EQ || pred == B_NE) {
+        /* Equality needs both halves, and `sbcs` only reports Z for the
+         * high one -- so the difference of each half is folded together
+         * and tested against zero. */
+        t_alu_reg(t, T_OP_EOR, A_LO, A_LO, B_LO, 0);
+        t_alu_reg(t, T_OP_EOR, A_HI, A_HI, B_HI, 0);
+        t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
+        t_cmp_imm(t, A_LO, 0);
+        return pred == B_EQ ? T_EQ : T_NE;
+    }
+    t_alu_reg(t, T_OP_SUB, A_LO, A_LO, B_LO, 1);
+    t_alu_reg(t, T_OP_SBC, A_HI, A_HI, B_HI, 1);
+    if (pred == B_LT) return sign ? T_LT : T_CC;
+    return sign ? T_GE : T_CS;             /* B_GE */
+}
+
 /* ---- one instruction ------------------------------------------------ */
 
 static void gen_ins(struct t_fn *F, int n)
@@ -322,10 +812,57 @@ static void gen_ins(struct t_fn *F, int n)
     if (i->flt)
         t_refuse(fn, i, "floating point (ARMv7-M has no FPU: this needs the "
                         "__aeabi soft-float calls)");
-    if (i->w > 4 && i->op != IR_LDVAR && i->op != IR_STVAR &&
-        i->op != IR_LOAD && i->op != IR_STORE)
-        t_refuse(fn, i, "a value wider than 32 bits (long long needs the "
-                        "register-pair legalisation)");
+    if (i->w > 8)
+        t_refuse(fn, i, "a 128-bit value");
+    /* Whether this instruction works on a 64-bit value.
+     *
+     * NOT `i->w == 8` everywhere: the width field is the OPERATION's,
+     * and several instructions do not set it at all. IR_STVAR and
+     * IR_STORE carry a `size` and no `w`, so asking `w` about them
+     * says four and stores half of a `long long`; IR_RET carries
+     * neither and would send one home in r0 alone. The wide map,
+     * which is built from each value's defining instruction, is what
+     * knows -- so each op asks about the value it actually touches. */
+    {
+        int wide = i->w == 8;
+        switch (i->op) {
+        case IR_STVAR: wide = i->size == 8 || F->wide[i->a]; break;
+        case IR_STORE: wide = i->size == 8 || F->wide[i->b]; break;
+        case IR_LDVAR:
+        case IR_LOAD:  wide = i->dst >= 0 && F->wide[i->dst]; break;
+        /* A copy is as wide as what it copies, and IR_MOV is the one
+         * instruction that routinely carries no width at all. */
+        case IR_MOV:
+        case IR_SELECT:
+            wide = (i->dst >= 0 && F->wide[i->dst]) ||
+                   (i->op == IR_MOV && i->a >= 0 && F->wide[i->a]);
+            break;
+        default: break;
+        }
+        if (wide && i->op != IR_CMP && i->op != IR_BRZ &&
+            i->op != IR_BRNZ && i->op != IR_CALL && i->op != IR_RET) {
+            if (i->op == IR_DIV || i->op == IR_MOD) {
+                /* No instruction divides 64 by 64 here, so it is a call
+                 * — lib/rt/int64.c, under libgcc's names so an object
+                 * of ours links beside one of theirs. Both operands are
+                 * eight bytes, which AAPCS32 puts in r0:r1 and r2:r3,
+                 * and the result comes back in r0:r1. */
+                rd64(F, i->a, T_R0, T_R1);
+                operand_b64(F, i, T_R2, T_R3);
+                call_helper(F, i->op == IR_DIV
+                            ? (i->sign ? "__divdi3" : "__udivdi3")
+                            : (i->sign ? "__moddi3" : "__umoddi3"));
+                wr64(F, i->dst, T_R0, T_R1);
+                return;
+            }
+            if (gen_ins64(F, n))
+                return;
+            t_refuse(fn, i, "this operation at 64 bits");
+        }
+        if (wide && (i->op == IR_CMP || i->op == IR_BRZ ||
+                     i->op == IR_BRNZ))
+            i->w = 8;      /* the cases below read `w` to pick the pair */
+    }
 
     switch (i->op) {
     case IR_LABEL:
@@ -423,6 +960,17 @@ static void gen_ins(struct t_fn *F, int n)
 
     case IR_CMP: {
         int cond = cond_for(i->pred, i->sign);
+        if (i->w == 8) {
+            cond = cmp64(F, i, i->pred, i->sign);
+            t_mov_imm(t, T_ACC, 1, 0);
+            {
+                int over = t_bcond(t, cond);
+                t_mov_imm(t, T_ACC, 0, 0);
+                t_patch_bcond(t, over, t->len);
+            }
+            wr(F, i->dst, T_ACC);
+            return;
+        }
         rd(F, i->a, T_ACC);
         if (i->imm_b && ((i->imm >= 0 && i->imm <= 255) || t_imm_ok(i->imm))) {
             t_cmp_imm(t, T_ACC, i->imm);
@@ -463,8 +1011,14 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_BRZ: case IR_BRNZ:
-        rd(F, i->a, T_ACC);
-        t_cmp_imm(t, T_ACC, 0);
+        if (i->w == 8) {
+            rd64(F, i->a, A_LO, A_HI);
+            t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
+            t_cmp_imm(t, A_LO, 0);
+        } else {
+            rd(F, i->a, T_ACC);
+            t_cmp_imm(t, T_ACC, 0);
+        }
         jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
         return;
 
@@ -553,17 +1107,23 @@ static void gen_ins(struct t_fn *F, int n)
          * slots from sp. An eight-byte argument would round the register
          * number up to even and take two — refused above with everything
          * else 64-bit, so the placement here stays the simple one. */
-        int ncrn = 0;
+        int ncrn = 0, reg;
         long stk = 0;
         for (int k = 0; k < i->nargs; k++) {
             struct ir_arg *a = &i->argv[k];
+            int wide = a->size > 4;
             if (a->is_struct)
                 t_refuse(fn, i, "an aggregate passed by value");
             if (a->is_float)
                 t_refuse(fn, i, "a floating-point argument");
-            if (ncrn < 4) {
-                rd(F, a->vreg, ncrn);
-                ncrn++;
+            if (place_arg(a->size, &ncrn, &stk, &reg)) {
+                if (wide) rd64(F, a->vreg, reg, reg + 1);
+                else      rd(F, a->vreg, reg);
+            } else if (wide) {
+                rd64(F, a->vreg, T_ACC, T_TMP);
+                t_ldst_imm(t, T_ACC, T_SP, stk, 4, 0, 1);
+                t_ldst_imm(t, T_TMP, T_SP, stk + 4, 4, 0, 1);
+                stk += 8;
             } else {
                 rd(F, a->vreg, T_ACC);
                 t_ldst_imm(t, T_ACC, T_SP, stk, 4, 0, 1);
@@ -580,14 +1140,22 @@ static void gen_ins(struct t_fn *F, int n)
         } else {
             note_ext(F->st, t_bl(t), i->callee);
         }
-        if (i->dst >= 0)
-            wr(F, i->dst, T_R0);
+        if (i->dst >= 0) {
+            if (F->wide[i->dst]) wr64(F, i->dst, T_R0, T_R1);
+            else                 wr(F, i->dst, T_R0);
+        }
         return;
     }
 
     case IR_RET:
-        if (i->a >= 0)
-            rd(F, i->a, T_R0);
+        if (i->a >= 0) {
+            /* From the VALUE's width, not the instruction's: IR_RET
+             * carries no `w` at all, so asking it returns zero and a
+             * `long long` goes home in r0 with its high half left
+             * behind. The wide map is the one place that knows. */
+            if (F->wide[i->a]) rd64(F, i->a, T_R0, T_R1);
+            else               rd(F, i->a, T_R0);
+        }
         /* Every return leaves through the epilogue at the end of the
          * function, so there is one place that knows the frame size --
          * except the LAST instruction, which the epilogue already
@@ -648,6 +1216,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
 
     F.fn = fn; F.t = t; F.st = st;
     F.fix = NULL; F.nfix = F.capfix = 0;
+    F.wide = wide64_map(fn);
     layout(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -658,7 +1227,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
 
     /* A Thumb function must start on a halfword, and four keeps the
      * literal loads and the disassembly tidy. */
-    code_align(t, 4, 0xbf);
+    /* Pad with halfword NOPs (bf00), not with a repeated 0xbf: that
+     * byte pairs into 0xbfbf, which is an `itttt` — harmless, since
+     * nothing branches there, but it makes every disassembly of the gap
+     * between two functions look like a condition block. */
+    while (t->len & 3)
+        t_nop(t);
     f->code_off = t->len;
 
     push_at = t_push(t, SAVE_MASK);
@@ -669,25 +1243,32 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
      * registers; the prologue writes each to its slot, which is what
      * every later reference reads. */
     {
-        int ncrn = 0;
-        long caller = F.frame + SAVE_BYTES;
+        int ncrn = 0, reg;
+        long stk = 0;
+        long base = F.frame + SAVE_BYTES;   /* the caller's outgoing area */
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
+            int wide = a->size > 4;
             if (a->is_struct || a->is_float)
                 t_refuse(fn, NULL, "an aggregate or floating-point parameter");
-            if (ncrn < 4) {
-                if (!t_ldst_imm(t, ncrn, T_SP, F.slot[i], 4, 0, 1)) {
+            if (place_arg(a->size, &ncrn, &stk, &reg)) {
+                if (wide) wr64(&F, i, reg, reg + 1);
+                else if (!t_ldst_imm(t, reg, T_SP, F.slot[i], 4, 0, 1)) {
                     t_add_sp(t, T_ADDR, F.slot[i]);
-                    t_ldst_imm(t, ncrn, T_ADDR, 0, 4, 0, 1);
+                    t_ldst_imm(t, reg, T_ADDR, 0, 4, 0, 1);
                 }
-                ncrn++;
             } else {
-                t_ldst_imm(t, T_ACC, T_SP, caller, 4, 0, 0);
-                caller += 4;
-                if (!t_ldst_imm(t, T_ACC, T_SP, F.slot[i], 4, 0, 1)) {
+                /* On the stack, where the caller left it: above this
+                 * frame and above the registers the prologue saved. */
+                t_ldst_imm(t, T_ACC, T_SP, base + stk, 4, 0, 0);
+                if (wide)
+                    t_ldst_imm(t, T_TMP, T_SP, base + stk + 4, 4, 0, 0);
+                if (wide) wr64(&F, i, T_ACC, T_TMP);
+                else if (!t_ldst_imm(t, T_ACC, T_SP, F.slot[i], 4, 0, 1)) {
                     t_add_sp(t, T_ADDR, F.slot[i]);
                     t_ldst_imm(t, T_ACC, T_ADDR, 0, 4, 0, 1);
                 }
+                stk += wide ? 8 : 4;
             }
         }
     }
@@ -719,6 +1300,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     free(F.slot);
     free(F.label_off);
     free(F.fix);
+    free(F.wide);
 }
 
 void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
