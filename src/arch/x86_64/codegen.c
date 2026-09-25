@@ -2306,6 +2306,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * every displacement in the frame is unchanged, because the pushes
      * and the smaller `sub` move rsp by exactly what the `sub` alone
      * moved it by before. */
+    /* -fstack-usage: everything below the caller's rsp — the return
+     * address, the saved rbp where there is one, and the frame. */
+    f->stack_bytes = (int)(frame + 8 + (frameless ? 0 : 8));
     x86_prologue(text, frameless ? frame : 0, frameless);
     /* for the unwind tables: push rbp ends at +1, mov rbp,rsp at +4 */
     f->cfi_frameless = frameless;

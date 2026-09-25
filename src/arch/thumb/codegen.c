@@ -1296,6 +1296,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     }
 
     f->code_len = t->len - f->code_off;
+    /* What -fstack-usage reports: the registers the prologue pushed
+     * plus everything sub sp reserved. */
+    f->stack_bytes = (int)(F.frame + SAVE_BYTES);
     (void)push_at;
     free(F.slot);
     free(F.label_off);

@@ -355,6 +355,14 @@ struct func {
                            * and that call may itself be dead. */
     /* codegen bookkeeping: position inside .text (defined funcs only) */
     int code_off, code_len;
+    /* How many bytes of stack this function's own frame takes — the
+     * prologue's saved registers plus its locals, temporaries and
+     * outgoing-argument area, and NOT what it calls. `-fstack-usage`
+     * reports it, which is how a microcontroller's stack gets sized:
+     * there is no guard page and no growth, so the deepest path has to
+     * be added up by hand and has to fit. Filled by whichever backend
+     * knows; 0 where one does not. */
+    int stack_bytes;
     /* ... and what its prologue did, for the unwind tables (debug/eh.c):
      * where (offsets into its code) the frame record was pushed and the
      * frame register set, and the callee-saved registers it stores in its

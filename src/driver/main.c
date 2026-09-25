@@ -110,6 +110,7 @@ static void print_options(FILE *out)
       "  -include FILE          include it before the file\n"
       "  -O0/-O1/-O2/-O3/-Os          optimization level (-Os: no size growth)\n"
       "  -f<pass>, -fno-<pass>        turn one optimizer pass on or off\n"
+      "  -fstack-usage                write FILE.su: each function's frame\n"
       "  -fno-exceptions, -fno-rtti   C++ without them\n"
       "  -fno-access-control          do not enforce private/protected\n"
       "\nthe target\n"
@@ -251,6 +252,12 @@ static int nincdirs;
  * byte-for-byte as before, which is what keeps the M3 self-host fixed point
  * (self-host builds without -g). */
 static int want_debug;
+/* -fstack-usage: write FILE.su beside the object, one line per function,
+ * in gcc's format (`file:line:name<TAB>bytes<TAB>qualifier`) so the
+ * tools that already read those files read these. It is the number a
+ * microcontroller's stack has to be sized from, since there is no guard
+ * page to catch an overflow and nothing to grow into. */
+static int want_stack_usage;
 
 /* -nostdinc: do not add EmbCC's own header directories. A freestanding
  * build that supplies its own headers needs to be able to say so. */
@@ -832,6 +839,33 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                      &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                      opt_level >= 2);
+
+    /* -fstack-usage: the frame each function ended up with, beside the
+     * object. Written here, after codegen, because that is when the
+     * number exists -- the frame is not known until the temporaries and
+     * the outgoing-argument area have been laid out. */
+    if (want_stack_usage) {
+        struct outbuf sub = { NULL, 0, 0 };
+        char *sup = xmalloc(strlen(out) + 4);
+        const char *dot;
+        /* Only functions that got code. One the inliner absorbed, or
+         * that reachability dropped, still has a definition in the AST
+         * and no frame — reporting it as zero would read as "this one
+         * uses no stack" rather than "this one is not here". */
+        for (struct func *fn = u->funcs; fn; fn = fn->next)
+            if (!fn->absorbed && fn->has_defn && fn->code_len > 0)
+                ob_fmt(&sub, "%s:%d:%s\t%d\tstatic\n",
+                       in, fn->line, fn->name, fn->stack_bytes);
+        strcpy(sup, out);
+        dot = strrchr(sup, '.');
+        strcpy((char *)(dot && !strchr(dot, '/') ? dot : sup + strlen(sup)),
+               ".su");
+        if (plat_write_file(sup, (const unsigned char *)(sub.p ? sub.p : ""),
+                            sub.n) != 0)
+            fprintf(stderr, "embcc: cannot write '%s'\n", sup);
+        free(sup);
+        ob_free(&sub);
+    }
 
     /* Lay out the defined globals: initialized -> .data, zero -> .bss,
      * each aligned to its (element) size. A section("name") global goes to
@@ -2336,6 +2370,8 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-S") == 0) {
             want_asm = 1;
             compile_mode = 1;      /* like -c: no link */
+        } else if (strcmp(argv[i], "-fstack-usage") == 0) {
+            want_stack_usage = 1;
         } else if (strcmp(argv[i], "-fsyntax-only") == 0) {
             syntax_only = 1;
         } else if (strcmp(argv[i], "-fremarks") == 0) {

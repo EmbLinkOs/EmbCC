@@ -358,9 +358,19 @@ static const struct attr_entry attr_table[] = {
     { "naked",     ATTR_REFUSED,
       "the prologue the function says it must not have would be emitted "
       "anyway, and its own asm would run on a frame it did not set up" },
+    /* Refused on x86-64 and aarch64, and a NO-OP on ARMv7-M, which is
+     * the one machine where an interrupt handler is an ordinary
+     * function. The Cortex-M stacks r0-r3, r12, lr, pc and xPSR itself
+     * on exception entry and puts EXC_RETURN in lr, so a normal
+     * prologue saves the rest and a normal `bx lr` IS the interrupt
+     * return. Nothing has to be emitted differently; the attribute has
+     * to be ACCEPTED, because every CMSIS header writes it. The
+     * dispatch below makes the exception, so the reason stays written
+     * here next to the attribute it belongs to. */
     { "interrupt", ATTR_REFUSED,
       "the handler would return with an ordinary return instead of the "
-      "interrupt return the CPU needs, and without saving the registers" },
+      "interrupt return the CPU needs, and without saving the registers "
+      "(on ARMv7-M it needs neither, and is accepted)" },
     { "cleanup",   ATTR_REFUSED,
       "the cleanup function would never run" },
     { "ms_abi",    ATTR_REFUSED,
@@ -489,7 +499,9 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     diag_warn_opt(ps->lx.file, aline, 0, "attributes",
                         "attribute '%s' is not one EmbCC knows, and is "
                         "ignored", name);
-                else if (ae->disp == ATTR_REFUSED)
+                else if (ae->disp == ATTR_REFUSED &&
+                         !(attr_is(name, "interrupt") &&
+                           target_get() == TARGET_THUMB))
                     parse_error_line(ps, aline,
                         "__attribute__((%s)) is not supported: %s",
                         name, ae->why);

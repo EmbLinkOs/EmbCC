@@ -139,6 +139,46 @@ Bitfields depend on this — the front end assembles a field's storage
 unit in a 64-bit accumulator — so they work now too, including
 `volatile` ones, which is how a peripheral's registers are written.
 
+## Sizing the stack
+
+There is no guard page on a microcontroller and nothing to grow into, so
+the deepest call path has to be added up ahead of time and has to fit.
+`-fstack-usage` writes `FILE.su` beside the object in gcc's format —
+`file:line:function`, a tab, the frame in bytes, a tab, `static` — so
+the tools that already read those files read these:
+
+```
+embcc --target=thumbv7m-none-eabi -Os -fstack-usage -c main.c -o main.o
+```
+
+The number is that function's OWN frame: the registers its prologue
+pushes plus its locals, temporaries and outgoing arguments. It does not
+include what the function calls; combining the two is what a call-graph
+tool does with these files, and `embcc inspect callgraph` prints the
+graph.
+
+Expect large numbers for now — every value lives in a stack slot until
+this target has a register allocator, and the same function that takes
+80 bytes on x86-64 can take ten times that here.
+
+## Interrupt handlers
+
+`__attribute__((interrupt))` is accepted, and needs nothing:
+
+```c
+__attribute__((interrupt)) void SysTick_Handler(void) { ticks++; }
+```
+
+The Cortex-M stacks r0-r3, r12, lr, pc and xPSR itself on exception
+entry and leaves EXC_RETURN in lr, so an ordinary prologue saves the
+rest and an ordinary `bx lr` **is** the interrupt return. That is why
+the attribute is a no-op here and an error on x86-64 and aarch64, where
+a handler really would need code no C function emits.
+
+Point the vector table at the handler the same way as at the reset
+handler — an entry in the `.vectors` array — and the linker fills in
+the address with its Thumb bit already set.
+
 ## What proves it
 
 - `tests/golden/thumb-encoding.sh` disassembles every instruction the

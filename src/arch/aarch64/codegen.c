@@ -1662,6 +1662,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     align16(t);
     f->code_off = t->len;
 
+    /* -fstack-usage: the frame plus the 16-byte record the prologue
+     * pushes (x29 and x30). */
+    f->stack_bytes = (int)(fr.size + 16);
     a64_prologue(t, fr.size);
     /* for the unwind tables: stp x29, x30 ends at +4, mov x29, sp at +8 */
     f->cfi_push = 4;
