@@ -1512,6 +1512,94 @@ static void gen_a64_i128(struct code *t, const long *sd, struct ir_ins *i,
     }
 }
 
+/* Folding a LOCAL's address into the access that uses it -- the
+ * x86-64 backend's afold_build, with `add xN, x29, #off` in place of
+ * `lea` and the same argument: 256 of the 570 `addr` results across
+ * lib/libc and lib/libcxx never reach anything but a load or a store,
+ * and each one is an instruction the addressing mode already does.
+ *
+ * Emitting nothing for the address chain is only safe because the
+ * analysis demands that nothing else reads it, and the uses it allows
+ * are exactly the four lowering paths below that know about the fold.
+ * Anything else -- a call, a comparison, an asm operand, a 16-byte
+ * access with its own lowering -- marks the root unfoldable.
+ *
+ * The x86-64 and aarch64 copies should be lifted once both have run in
+ * anger (D-011); they are the same analysis over the same IR, and only
+ * the four sites that consume the answer differ. */
+struct a64_afold { char *ok; long *disp; };
+static struct a64_afold g_a64_afold;
+static int a64_afolded(int v)
+{
+    return g_a64_afold.ok && v >= 0 && g_a64_afold.ok[v];
+}
+
+static struct a64_afold a64_afold_build(struct ir_func *fn, const long *sd)
+{
+    struct a64_afold r = { NULL, NULL };
+    int nv = fn->nvregs;
+    if (nv == 0) return r;
+    char *isb = xcalloc((size_t)nv, 1);
+    int *root = xmalloc((size_t)nv * sizeof *root);
+    long *disp = xmalloc((size_t)nv * sizeof *disp);
+    for (int v = 0; v < nv; v++) root[v] = -1;
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_ADDR && i->dst >= 0 && i->dst < nv &&
+            i->a >= 0 && i->a < fn->nvars) {
+            root[i->dst] = i->dst; disp[i->dst] = sd[i->a];
+            isb[i->dst] = 1; any = 1;
+        } else if (i->op == IR_ADD && i->imm_b && i->dst >= 0 && i->dst < nv &&
+                   i->a >= 0 && i->a < nv && isb[i->a]) {
+            root[i->dst] = root[i->a];
+            disp[i->dst] = disp[i->a] + i->imm;
+            isb[i->dst] = 1;
+        }
+    }
+    if (!any) { free(isb); free(root); free(disp); return r; }
+    char *bad = xcalloc((size_t)nv, 1);
+#define A64_UNFOLD(v) do { int _v=(v); if (_v>=0 && _v<nv && isb[_v]) \
+                               bad[root[_v]] = 1; } while (0)
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        int plain = !a64_ld_ins(i) && !(g_a64_wide && i->dst >= 0 &&
+                                        i->dst < nv && g_a64_wide[i->dst]);
+        if (plain && (i->op == IR_LOAD || i->op == IR_STORE)) {
+            if (i->op == IR_STORE) {
+                A64_UNFOLD(i->b);
+                if (g_a64_wide && i->b >= 0 && i->b < nv && g_a64_wide[i->b])
+                    A64_UNFOLD(i->a);      /* a 16-byte store is emit_copy's */
+            }
+            A64_UNFOLD(i->c);
+            continue;
+        }
+        if (i->op == IR_ADD && i->imm_b && i->dst >= 0 && i->dst < nv &&
+            isb[i->dst])
+            continue;
+        if (i->op == IR_ADDR)
+            continue;
+        A64_UNFOLD(i->a); A64_UNFOLD(i->b); A64_UNFOLD(i->c);
+        if (i->op == IR_CALL)
+            for (int k = 0; k < i->nargs; k++) A64_UNFOLD(i->argv[k].vreg);
+        if (i->op == IR_ASM && i->asm_ir) {
+            for (int k = 0; k < i->asm_ir->nin; k++)
+                A64_UNFOLD(i->asm_ir->in[k].temp);
+            for (int k = 0; k < i->asm_ir->nout; k++)
+                A64_UNFOLD(i->asm_ir->out[k].temp);
+        }
+    }
+#undef A64_UNFOLD
+    char *ok = xcalloc((size_t)nv, 1);
+    int used = 0;
+    for (int v = 0; v < nv; v++)
+        if (isb[v] && !bad[root[v]]) { ok[v] = 1; used = 1; }
+    free(isb); free(root); free(bad);
+    if (!used) { free(ok); free(disp); return r; }
+    r.ok = ok; r.disp = disp;
+    return r;
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                      int want_debug)
 {
@@ -1553,6 +1641,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
     }
     long *sd = layout_frame(fn, &fr, want_debug);
+    g_a64_afold = a64_afold_build(fn, sd);
     /* Room for the callee-saved registers the allocator took. Eight
      * bytes each, rounded to sixteen: AAPCS64 wants sp 16-aligned at
      * every instruction boundary, not merely at a call. */
@@ -1791,6 +1880,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             gen_a64_ld(t, sd, i, st);
             continue;
         }
+        /* Pure address arithmetic on a local, folded into every access
+         * that uses it: emit nothing. Before the switch, for the same
+         * reason the x86-64 backend does it there. */
+        if ((i->op == IR_ADDR || (i->op == IR_ADD && i->imm_b)) &&
+            a64_afolded(i->dst))
+            continue;
 
         switch (i->op) {
         case IR_CONST: {
@@ -2088,29 +2183,33 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_LOAD: {
+            int fold = a64_afolded(i->a);
+            long foff = fold ? g_a64_afold.disp[i->a] : 0;
             if (a64_is_flt(i->dst)) {
-                int fa = rd(t, sd, i->a, A64_ADDR);
-                a64_fldr(t, A64_FACC, fa, 0, i->size);
+                int fa = fold ? FB : rd(t, sd, i->a, A64_ADDR);
+                a64_fldr(t, A64_FACC, fa, foff, i->size);
                 fst_slot(t, sd, i->dst, A64_FACC, i->size);
                 break;
             }
-            int addr = rd(t, sd, i->a, A64_ADDR);
+            int addr = fold ? FB : rd(t, sd, i->a, A64_ADDR);
             int d = wr(i->dst, A64_ACC);
-            a64_ldr(t, d, addr, 0, i->size, i->sign, i->w);
+            a64_ldr(t, d, addr, foff, i->size, i->sign, i->w);
             wrote(t, sd, i->dst, d);
             break;
         }
 
         case IR_STORE: {
+            int fold = a64_afolded(i->a);
+            long foff = fold ? g_a64_afold.disp[i->a] : 0;
             if (a64_is_flt(i->b)) {
-                int fa = rd(t, sd, i->a, A64_ADDR);
+                int fa = fold ? FB : rd(t, sd, i->a, A64_ADDR);
                 fld_slot(t, sd, i->b, A64_FACC, i->size);
-                a64_fstr(t, A64_FACC, fa, 0, i->size);
+                a64_fstr(t, A64_FACC, fa, foff, i->size);
                 break;
             }
-            int addr = rd(t, sd, i->a, A64_ADDR);
+            int addr = fold ? FB : rd(t, sd, i->a, A64_ADDR);
             int val = rd(t, sd, i->b, A64_ACC);
-            a64_str(t, val, addr, 0, i->size);
+            a64_str(t, val, addr, foff, i->size);
             break;
         }
 
@@ -2683,6 +2782,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         fn->eh[r].lp_off = loff[fn->eh[r].lp_label] - f->code_off;
     f->code_len = t->len - f->code_off;
     free(usecnt);
+    free(g_a64_afold.ok); free(g_a64_afold.disp);
+    g_a64_afold.ok = NULL; g_a64_afold.disp = NULL;
     free(loff); free(fix); free(retfix); free(sd);
 }
 
