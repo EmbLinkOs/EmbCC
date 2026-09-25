@@ -13,6 +13,7 @@
  */
 #include "regalloc.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -223,7 +224,26 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
 }
 
 /* mark vreg v ineligible (used at an opaque site) */
-#define OPAQUE(v) do { int _v = (v); if (_v >= 0 && _v < nvr) elig[_v] = 0; } while (0)
+/* Why a value is not eligible, for the -fremarks-style accounting that
+ * EMBCC_RA_WHY prints: "which values are in memory, and on whose rule"
+ * is the question every size investigation in this backend starts from,
+ * and it used to be answered by reading the switch below and guessing. */
+static const char **g_ra_why;      /* NULL unless EMBCC_RA_WHY is set */
+static int g_ra_why_n;
+
+struct ra_touch { int *n; int nvr; };
+static void ra_touch_cb(int v, void *ctx)
+{
+    struct ra_touch *t = ctx;
+    if (v >= 0 && v < t->nvr) t->n[v]++;
+}
+
+#define OPAQUE_R(v, r) do { int _v = (v); \
+    if (_v >= 0 && _v < nvr) { \
+        if (elig[_v] && g_ra_why && _v < g_ra_why_n) g_ra_why[_v] = (r); \
+        elig[_v] = 0; \
+    } } while (0)
+#define OPAQUE(v) OPAQUE_R(v, ir_opname(in->op))
 
 /* Union-find over the interference graph's nodes, for coalescing. */
 static int ra_find(int *alias, int x)
@@ -285,6 +305,18 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     for (int v = 0; v < nvr; v++) hint[v] = -1;
     if (t->abi_hints) t->abi_hints(fn, hint);
 
+    /* EMBCC_RA_WHY=1: account for every value that does NOT get a
+     * register, by the rule that excluded it, weighted by how many
+     * instructions touch it -- which is how many memory accesses the
+     * exclusion costs. One line per function on stderr. */
+    const char **why = NULL;
+    if (!fp && getenv("EMBCC_RA_WHY")) {
+        why = xcalloc((size_t)nvr, sizeof *why);
+        g_ra_why = why; g_ra_why_n = nvr;
+    } else {
+        g_ra_why = NULL; g_ra_why_n = 0;
+    }
+
     int *first = xmalloc((size_t)nvr * sizeof *first);
     int *last  = xmalloc((size_t)nvr * sizeof *last);
     char *elig = xmalloc((size_t)nvr);
@@ -337,20 +369,30 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
              * narrow write keeps the low bytes, a read movsx/movzx-extends. */
             elig[v] = L->is_int_or_ptr &&
                       (sz == 1 || sz == 2 || sz == 4 || sz == 8);
+            if (!elig[v] && g_ra_why && v < g_ra_why_n)
+                g_ra_why[v] = L->is_int_or_ptr ? "local-odd-size"
+                                               : "local-not-scalar";
         }
     }
 
     /* a long double lives in its 16-byte slot, never a register */
     for (int v = 0; v < nvr; v++)
-        if (g_wide && g_wide[v])
+        if (g_wide && g_wide[v]) {
+            if (elig[v] && g_ra_why && v < g_ra_why_n)
+                g_ra_why[v] = "16-byte";
             elig[v] = 0;
+        }
     /* ...and a value belongs to ONE class. Without this the integer pass
      * would hand a GPR to a double and the float pass an FP register to
      * the same vreg, and the two halves of codegen would each believe
      * their own answer. */
     if (!fp && fltmap)
         for (int v = 0; v < nvr; v++)
-            if (fltmap[v]) elig[v] = 0;
+            if (fltmap[v]) {
+                if (elig[v] && g_ra_why && v < g_ra_why_n)
+                    g_ra_why[v] = "float-class";
+                elig[v] = 0;
+            }
 
     for (int i = 0; i < nins; i++) {
         struct ir_ins *in = &fn->ins[i];
@@ -426,8 +468,11 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     for (int i = 0; i < nins; i++)
         if (fn->ins[i].op == IR_ASM)
             for (int v = 0; v < nvr; v++)
-                if (elig[v] && first[v] >= 0 && first[v] <= i && i <= last[v])
+                if (elig[v] && first[v] >= 0 && first[v] <= i && i <= last[v]) {
+                    if (g_ra_why && v < g_ra_why_n)
+                        g_ra_why[v] = "live-across-asm";
                     elig[v] = 0;
+                }
     for (int v = 0; v < nvr; v++)
         if (first[v] < 0) elig[v] = 0;
 
@@ -436,6 +481,24 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * live and so interfere pairwise. This is tighter than interval overlap —
      * two vregs whose ranges overlap but are never live at the same point don't
      * interfere, and a result may reuse a dying operand's register. */
+    if (why) {
+        int *touch = xcalloc((size_t)nvr, sizeof *touch);
+        struct ra_touch tc = { touch, nvr };
+        for (int i = 0; i < nins; i++) {
+            ra_each_use(&fn->ins[i], ra_touch_cb, &tc);
+            int d = ra_ins_def(&fn->ins[i]);
+            if (d >= 0 && d < nvr) touch[d]++;
+        }
+        for (int v = 0; v < nvr; v++) {
+            if (elig[v] || first[v] < 0) continue;
+            fprintf(stderr, "ra-why %s %s %d\n",
+                    fn->src && fn->name ? fn->name : "?",
+                    why[v] ? why[v] : "no-rule", touch[v]);
+        }
+        free(touch); free(why);
+        g_ra_why = NULL; g_ra_why_n = 0;
+    }
+
     int *eof = xmalloc((size_t)nvr * sizeof *eof);   /* vreg -> eligible index */
     int E = 0;
     for (int v = 0; v < nvr; v++) eof[v] = elig[v] ? E++ : -1;
@@ -778,6 +841,9 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * optimizer, and the answer is a property of the whole function -- how
      * many values were live at once against how many registers exist -- not
      * of any one value. So it is reported once, with both numbers. */
+    if (nspill && getenv("EMBCC_RA_WHY"))
+        fprintf(stderr, "ra-spill %s %s %d of %d eligible, pool %d\n",
+                fp ? "fp" : "int", fn->name ? fn->name : "?", nspill, E, NP);
     if (nspill && remarks_on())
         remark_add("regalloc", "spilled-to-stack",
                    fn->src ? fn->name : NULL, "no-register-free",
