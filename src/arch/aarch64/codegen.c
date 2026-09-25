@@ -70,25 +70,37 @@ static int g_fb = A64_SP;
  *
  * Caller-saved first, so a short-lived value takes one and costs no
  * prologue save at all. */
-#define A64_NPOOL 18
+#define A64_NPOOL 20
 static const int A64_POOL[A64_NPOOL] = { 13, 14, 15,           /* free */
                                          0, 1, 2, 3, 4, 5, 6, 7, /* args */
-                                         20, 21, 22, 23, 24, 25, 26 };
+                                         20, 21, 22, 23, 24, 25, 26, 27, 28 };
+/* ...and with x19, which is only spoken for in a function that has an
+ * alloca in it: there it pins the frame base, because sp has moved and
+ * the slots still have to be reachable. Everywhere else it is an
+ * ordinary callee-saved register, and callee-saved is what a value
+ * crossing a call needs -- AAPCS64 gives ten of them (x19-x28) and this
+ * backend was using seven. */
+#define A64_NPOOL_X19 21
+static const int A64_POOL_X19[A64_NPOOL_X19] = { 13, 14, 15,
+                                                 0, 1, 2, 3, 4, 5, 6, 7,
+                                                 19, 20, 21, 22, 23, 24,
+                                                 25, 26, 27, 28 };
 /* The same list without x13 and x14, for a function that has an atomic
  * op in it -- see the note below. */
-#define A64_NPOOL_AT 16
+#define A64_NPOOL_AT 18
 static const int A64_POOL_AT[A64_NPOOL_AT] = { 15,
                                                0, 1, 2, 3, 4, 5, 6, 7,
-                                               20, 21, 22, 23, 24, 25, 26 };
+                                               20, 21, 22, 23, 24, 25, 26,
+                                               27, 28 };
 /* A VARIADIC function's pools: the argument registers are dropped,
  * because its prologue spills x0-x7 to the register-save area that
  * va_arg reads. Everything else is unchanged. */
-#define A64_NPOOL_VA 10
+#define A64_NPOOL_VA 12
 static const int A64_POOL_VA[A64_NPOOL_VA] = { 13, 14, 15, 20, 21, 22,
-                                               23, 24, 25, 26 };
-#define A64_NPOOL_VA_AT 8
+                                               23, 24, 25, 26, 27, 28 };
+#define A64_NPOOL_VA_AT 10
 static const int A64_POOL_VA_AT[A64_NPOOL_VA_AT] = { 15, 20, 21, 22, 23,
-                                                     24, 25, 26 };
+                                                     24, 25, 26, 27, 28 };
 
 /* CALLEE-SAVED ONLY, x20-x26, saved in the prologue and described in
  * the unwind tables. Both halves of that are required and the second is
@@ -202,8 +214,9 @@ static const int *a64_pool_for(const struct ir_func *fn, int *n)
         *n = at ? A64_NPOOL_VA_AT : A64_NPOOL_VA;
         return at ? A64_POOL_VA_AT : A64_POOL_VA;
     }
-    *n = at ? A64_NPOOL_AT : A64_NPOOL;
-    return at ? A64_POOL_AT : A64_POOL;
+    if (at)              { *n = A64_NPOOL_AT;  return A64_POOL_AT; }
+    if (fn->has_alloca)  { *n = A64_NPOOL;     return A64_POOL; }
+    *n = A64_NPOOL_X19;  return A64_POOL_X19;
 }
 
 static const int *a64_fp_pool_for(const struct ir_func *fn, int *n)
@@ -1359,7 +1372,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     struct func *f = fn->src;
 
     struct a64_frame fr;
-    int used_callee[A64_NPOOL], nsave = 0;
+    int used_callee[A64_NPOOL_X19], nsave = 0;
 
     g_a64_wide = cg_wide_vregs(fn);
     /* An indirect jump makes liveness unsound -- a computed goto's

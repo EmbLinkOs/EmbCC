@@ -11,7 +11,6 @@
  * `struct ra_target` instead of being file-scope constants of one
  * backend.
  */
-#include <stdio.h>
 #include "regalloc.h"
 
 #include <stdlib.h>

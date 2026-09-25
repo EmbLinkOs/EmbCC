@@ -365,8 +365,8 @@ struct func {
      * return address at CFA-8 -- holds for the whole function and the
      * FDE carries no instructions. */
     int cfi_frameless;
-    int cfi_reg[8];
-    long cfi_off[8];
+    int cfi_reg[16];
+    long cfi_off[16];
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
 };
 
