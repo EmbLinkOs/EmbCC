@@ -1984,6 +1984,36 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                     break;
                 }
             }
+            /* An ADD whose sole use is the very next access's ADDRESS
+             * is that access's register offset: `ldr xt, [xn, xm]`
+             * needs no address to have been computed. 155 sites across
+             * lib/libc and lib/libcxx. */
+            if (i->op == IR_ADD && !i->imm_b && i->dst >= 0 &&
+                usecnt[i->dst] == 1 && n + 1 < fn->nins && i->w == 8) {
+                struct ir_ins *nx = &fn->ins[n + 1];
+                int isld = nx->op == IR_LOAD && nx->a == i->dst &&
+                           !a64_is_flt(nx->dst);
+                int isst = nx->op == IR_STORE && nx->a == i->dst &&
+                           !a64_is_flt(nx->b);
+                if ((isld || isst) && !a64_ld_ins(nx) && !a64_i128_ins(nx) &&
+                    !(g_a64_wide && nx->dst >= 0 && nx->dst < fn->nvregs &&
+                      g_a64_wide[nx->dst])) {
+                    int rn = rd(t, sd, i->a, A64_ADDR);
+                    int rm = rd(t, sd, i->b, A64_TMP);
+                    int ok;
+                    if (isld) {
+                        int d2 = wr(nx->dst, A64_ACC);
+                        ok = a64_ldst_reg(t, 0, d2, rn, rm, 0, nx->size,
+                                          nx->sign, nx->w);
+                        if (ok) wrote(t, sd, nx->dst, d2);
+                    } else {
+                        int v = rd(t, sd, nx->b, A64_ACC);
+                        ok = a64_ldst_reg(t, 1, v, rn, rm, 0, nx->size, 0,
+                                          nx->w);
+                    }
+                    if (ok) { n++; break; }
+                }
+            }
             int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
             int d = wr(i->dst, A64_ACC);
             a64_alu_reg(t, op, d, ra, rb, i->w);
@@ -2037,6 +2067,41 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 if (aop && !nx->flt && !nx->imm_b && nx->b == i->dst &&
                     nx->a != i->dst && nx->w == i->w &&
                     !a64_ld_ins(nx) && !a64_i128_ins(nx)) {
+                    /* ...and when that add is itself only an ADDRESS
+                     * for the access after it, and the shift is exactly
+                     * log2 of the access size, the whole of
+                     * `base + (index << k)` is the access's own
+                     * operand: `ldr xt, [xn, xm, lsl #k]`. Three
+                     * instructions become one. */
+                    if (aop == '+' && kind == '<' && nx->op == IR_ADD &&
+                        nx->dst >= 0 && usecnt[nx->dst] == 1 &&
+                        n + 2 < fn->nins && nx->w == 8) {
+                        struct ir_ins *ax = &fn->ins[n + 2];
+                        int isld = ax->op == IR_LOAD && ax->a == nx->dst &&
+                                   !a64_is_flt(ax->dst);
+                        int isst = ax->op == IR_STORE && ax->a == nx->dst &&
+                                   !a64_is_flt(ax->b);
+                        if ((isld || isst) && !a64_ld_ins(ax) &&
+                            !a64_i128_ins(ax) &&
+                            (1 << i->imm) == ax->size &&
+                            !(g_a64_wide && ax->dst >= 0 &&
+                              ax->dst < fn->nvregs && g_a64_wide[ax->dst])) {
+                            int rm2 = rd(t, sd, i->a, A64_TMP);
+                            int rn2 = rd(t, sd, nx->a, A64_ADDR);
+                            int ok2;
+                            if (isld) {
+                                int d3 = wr(ax->dst, A64_ACC);
+                                ok2 = a64_ldst_reg(t, 0, d3, rn2, rm2, 1,
+                                                   ax->size, ax->sign, ax->w);
+                                if (ok2) wrote(t, sd, ax->dst, d3);
+                            } else {
+                                int v3 = rd(t, sd, ax->b, A64_ACC);
+                                ok2 = a64_ldst_reg(t, 1, v3, rn2, rm2, 1,
+                                                   ax->size, 0, ax->w);
+                            }
+                            if (ok2) { n += 2; break; }
+                        }
+                    }
                     int rx = rd(t, sd, i->a, A64_TMP);
                     int ra = rd(t, sd, nx->a, A64_ACC);
                     int d = wr(nx->dst, A64_ACC);

@@ -279,6 +279,7 @@ int a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w)
  * across lib/libc and lib/libcxx.
  *
  * Returns 0 when the value is not one of them, having emitted nothing. */
+
 int a64_fmov_imm(struct code *c, int vd, unsigned long bits, int w)
 {
     unsigned long sign, exp, mant, imm8, b;
@@ -539,6 +540,34 @@ static void ldst(struct code *c, int rt, int rn, long off, int size,
     else
         a64_alu_reg(c, '+', A64_SCR, rn, A64_SCR, 8);
     a64_word(c, base | ((unsigned long)A64_SCR << 5) | (unsigned long)rt);
+}
+
+/* LDR / STR with a REGISTER offset: `ldr xt, [xn, xm, lsl #k]`.
+ *
+ * The index may be shifted by exactly log2 of the access size or not at
+ * all -- that is the single S bit, not a field -- which is all array
+ * indexing ever wants. It saves the `add` that would otherwise compute
+ * the address: 155 sites across lib/libc and lib/libcxx.
+ *
+ * `scaled` asks for the log2(size) shift. Returns 0 for a size this
+ * form does not have. */
+int a64_ldst_reg(struct code *c, int store, int rt, int rn, int rm,
+                 int scaled, int size, int sign, int w)
+{
+    if (size != 1 && size != 2 && size != 4 && size != 8)
+        return 0;
+    /* The size and opc fields are ldst_base's, not a second copy of the
+     * rule: restating it is how `int a[i]` came out as opc=3 at size 4,
+     * which is the unallocated encoding that comment warns about --
+     * objdump prints `.inst ... undefined` and the CPU traps. Only the
+     * addressing part differs, so only that is rebuilt here. */
+    unsigned long b = ldst_base(size, !store, sign, w);
+    unsigned long sz = (b >> 30) & 3, opc = (b >> 22) & 3;
+    a64_word(c, (sz << 30) | 0x38200800UL | (opc << 22) |
+                ((unsigned long)rm << 16) | (3UL << 13) |
+                ((unsigned long)(scaled != 0) << 12) |
+                ((unsigned long)rn << 5) | (unsigned long)rt);
+    return 1;
 }
 
 void a64_ldr(struct code *c, int rt, int rn, long off,
