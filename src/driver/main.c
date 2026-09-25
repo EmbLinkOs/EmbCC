@@ -730,6 +730,24 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                "no reachable caller after optimization");
             }
         }
+        /* ...and actually drop them. Clearing `used` was not enough:
+         * irgen decides what goes in the unit BEFORE the optimizer
+         * runs, and codegen emits whatever is in the unit. So a static
+         * function that inlining absorbed, or whose only caller the
+         * optimizer deleted, was still being assembled into .text with
+         * nothing left to call it. Compacting here is the one place
+         * both backends see. */
+        int keep = 0;
+        for (int k = 0; k < nf; k++) {
+            struct func *f = iu->funcs[k].src;
+            int drop = f && f->is_static && !reach[k] && !f->used &&
+                       strcmp(f->name, "main") != 0;
+            if (!drop) {
+                if (keep != k) iu->funcs[keep] = iu->funcs[k];
+                keep++;
+            }
+        }
+        iu->nfuncs = keep;
         free(reach); free(work);
     }
 

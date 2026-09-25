@@ -504,6 +504,59 @@ static int pass_fold(struct ir_func *fn)
             }
             continue;
         }
+        /* A COMPARISON OF A COMPARISON. `!!x` is `(x == 0) == 0`, and
+         * `(a == b) && (b == c)` re-tests its own result twice more --
+         * and each of those retests is a `sete`, a `movzbl` and a
+         * `test` on x86 before the one that matters. The inner result is
+         * 0 or 1 by construction, so comparing it with zero is the inner
+         * comparison itself, negated (`== 0`) or as it stands (`!= 0`).
+         *
+         * The outer width and signedness fall away with the outer
+         * comparison: a 0/1 value compares the same at every width, and
+         * the inner comparison keeps its own. 687 sites across lib/libc
+         * and lib/libcxx, 417 of them the `sete movzbl test sete` that
+         * `!!` and `&&` leave behind. */
+        if (i->op == IR_CMP && !i->flt && kb && B == 0 &&
+            (i->pred == B_EQ || i->pred == B_NE) && i->a >= 0 &&
+            d.cnt[i->a] == 1 && d.ins[i->a] >= 0) {
+            struct ir_ins *in = &fn->ins[d.ins[i->a]];
+            if (in->op == IR_CMP && in->w != 16) {
+                if (i->pred == B_NE) {
+                    /* Any comparison's result is already 0 or 1, so
+                     * `!= 0` is that value -- true of a FLOAT compare
+                     * too, which is why this branch has no `flt` test. */
+                    to_mov(i, i->a);
+                    changed = 1;
+                    continue;
+                }
+                /* Negating the sense is the part that is not always
+                 * sound: over floats `!(a < b)` is NOT `a >= b`, because
+                 * an unordered pair makes both false. tests/golden/rt.sh
+                 * and complex.c in regalloc-O2.sh both said so. */
+                if (!in->flt) {
+                    static const enum binop neg[] = {
+                        [B_EQ] = B_NE, [B_NE] = B_EQ, [B_LT] = B_GE,
+                        [B_LE] = B_GT, [B_GT] = B_LE, [B_GE] = B_LT,
+                    };
+                    /* `i` IS fn->ins[n], so everything worth keeping
+                     * comes off it BEFORE the copy overwrites it. The
+                     * inner comparison's OWN width and signedness come
+                     * with it: `w` on an IR_CMP is what its operands are
+                     * compared at, not what its 0/1 result is read at,
+                     * and carrying the outer's 4 into a compare of two
+                     * longs truncated both of them. */
+                    int dst = i->dst;
+                    int line = i->line, col = i->col;
+                    enum binop np = neg[in->pred];
+                    *i = *in;                   /* the inner comparison... */
+                    i->pred = np;               /* ...with the sense flipped */
+                    i->dst = dst;
+                    i->line = line; i->col = col;
+                    changed = 1;
+                    continue;
+                }
+            }
+        }
         /* Both operands the SAME value. None of these needs to know
          * anything about what the value is, which is what makes them
          * safe at any width and either signedness -- and `i->flt` is
@@ -1441,9 +1494,18 @@ static int pass_mem2reg(struct ir_func *fn)
     const char **why = xcalloc((size_t)nvars, sizeof *why);
     for (int L = 0; L < nvars; L++) {
         const struct ir_local *Li = &fn->locals[L];
-        /* Params are excluded: their value is live on entry (no defining IR
-         * instruction), so SSA has no version to seed a read with. Only true
-         * locals, always assigned before use, are promoted. */
+        /* A PARAMETER promotes too. It used to be excluded for having
+         * no defining instruction to seed its first read with -- but it
+         * does have one, outside the IR: the prologue, which writes the
+         * incoming value into the parameter's own home. Slots and temps
+         * share one numbering (vreg L IS local L), so that home is a
+         * vreg like any other and the seed is simply L itself. Every
+         * read of a parameter that is never assigned then becomes a
+         * direct use of the incoming value and the read disappears --
+         * 1692 of the 2584 ldvars across lib/libc and lib/libcxx, with
+         * only 173 stvars naming a parameter at all. What is really
+         * gained is downstream: value numbering, PRE, LICM and strength
+         * reduction all used to stop at a parameter read. */
         ok[L] = 1;
         /* A float or double promotes too. The temp it becomes is still
          * read by SSE instructions, which take their operand from a
@@ -1456,8 +1518,7 @@ static int pass_mem2reg(struct ir_func *fn)
          * reload. 188 locals in lib/libc and lib/libcxx were refused
          * here for being neither an integer nor a pointer. */
         int promotable = Li->is_scalar_int_or_ptr || Li->is_scalar_float;
-        if (L < nparams)                        { ok[L] = 0; why[L] = "is-a-parameter"; }
-        else if (!Li->size)                     { ok[L] = 0; why[L] = "type-unknown"; }
+        if (!Li->size)                          { ok[L] = 0; why[L] = "type-unknown"; }
         else if (!promotable && (Li->size == 4 || Li->size == 8))
                                                 { ok[L] = 0; why[L] = "not-a-scalar-integer-pointer-or-float"; }
         else if (!promotable)                   { ok[L] = 0; why[L] = "not-4-or-8-bytes"; }
@@ -1484,7 +1545,7 @@ static int pass_mem2reg(struct ir_func *fn)
         }
     }
     if (remarks_on())
-        for (int L = nparams; L < nvars; L++) {
+        for (int L = 0; L < nvars; L++) {
             const struct ir_dbgvar *v = local_var(fn, L);
             if (!v || !v->name || v->name[0] == '<')  /* a compiler-invented name */
                 continue;
@@ -1516,6 +1577,37 @@ static int pass_mem2reg(struct ir_func *fn)
         free_cfg(bb, nbb); free(prom); free(ploc); return 0;
     }
     compute_idom(bb, order, norder);
+
+    /* A phi in the ENTRY block has nowhere to take the function's
+     * incoming value from: the entry is not a block, so the only
+     * predecessor such a phi has is the back edge that made block 0 a
+     * loop header. For an ordinary local that is harmless -- its entry
+     * version stands for a read before any write, which is undefined
+     * anyway -- and for a PARAMETER it is fatal, because that version is
+     * the argument the caller passed.
+     *
+     * pass_tailrec makes exactly this shape: it turns the recursion into
+     * a loop whose header is the function's first instruction. With
+     * parameters promotable, `sum_to(n, acc)` became `brz %6 -> L2`
+     * around an empty body -- three million tail calls that never
+     * returned. So where block 0 has a predecessor, parameters stay in
+     * memory and the locals promote as before. */
+    if (bb[0].npred > 0 && nparams > 0) {
+        int keep = 0;
+        for (int p = 0; p < nprom; p++) {
+            if (ploc[p] < nparams) continue;
+            ploc[keep] = ploc[p];
+            keep++;
+        }
+        for (int L = 0; L < nvars; L++) prom[L] = -1;
+        for (int p = 0; p < keep; p++) prom[ploc[p]] = p;
+        nprom = keep;
+        if (nprom == 0) {
+            free(order); free(l2b); free_cfg(bb, nbb);
+            free(prom); free(ploc); return 0;
+        }
+    }
+
     int **df = xcalloc((size_t)nbb, sizeof *df);
     int *ndf = xcalloc((size_t)nbb, sizeof *ndf);
     compute_df(bb, nbb, df, ndf);
@@ -1561,7 +1653,11 @@ static int pass_mem2reg(struct ir_func *fn)
     int *sp = xcalloc((size_t)nprom, sizeof *sp);
     int *scap = xcalloc((size_t)nprom, sizeof *scap);
     for (int p = 0; p < nprom; p++) {
-        undef[p] = fn->nvregs++;
+        /* A parameter's entry version is its own vreg -- the prologue
+         * put the incoming value there. Everything else starts at a
+         * fresh temp defined to zero below, standing for a read of a
+         * variable the program never wrote. */
+        undef[p] = ploc[p] < nparams ? ploc[p] : fn->nvregs++;
         stk[p] = xmalloc(sizeof(int) * 8); scap[p] = 8;
         stk[p][sp[p]++] = undef[p];
     }
@@ -1627,6 +1723,8 @@ static int pass_mem2reg(struct ir_func *fn)
     /* 5. Rebuild the linear IR out of SSA. */
     struct ibuf nb = { 0, 0, 0 };
     for (int p = 0; p < nprom; p++) {   /* entry undef defs */
+        if (ploc[p] < nparams)
+            continue;                   /* the prologue defined it */
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_CONST; c->dst = undef[p]; c->imm = 0;
         c->w = fn->locals[ploc[p]].size == 8 ? 8 : 4;
@@ -6921,6 +7019,7 @@ static int pass_immfold(struct ir_func *fn)
  * caller's register pressure will do -- not more arithmetic on facts
  * already available here. */
 #define INLINE_MAX_CALLEE 24     /* instruction budget for an inline candidate */
+#define INLINE_SOLE_CALLEE 200   /* ...and for a body that MOVES (sole_static_caller) */   /* ...and for a body that MOVES (sole_static_caller) */
 #define INLINE_MAX_CALLER 800    /* stop expanding a caller past this many ins */
 #define INLINE_MAX_PER_FUNC 64   /* and cap inlines per caller, for termination */
 
@@ -6971,7 +7070,7 @@ static struct ir_func *func_ir(struct ir_unit *iu, struct func *callee)
  * from a dozen places and every one of them meant something different; by
  * the time anyone asked why a function was not inlined, the twelve answers
  * had collapsed into one. `*why` is the stable code, `*detail` the fact. */
-static int inlinable(struct ir_func *cf, int force, const char **why,
+static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
                      char *detail, size_t dcap)
 {
     struct func *c = cf->src;
@@ -6987,7 +7086,8 @@ static int inlinable(struct ir_func *cf, int force, const char **why,
      * would not inline the call, it would emit a wrong one. The remark
      * still names whichever test refused, so a function marked
      * always_inline that was not inlined says why. */
-    if (!force && cf->nins > INLINE_MAX_CALLEE) {
+    if (!force && cf->nins > INLINE_MAX_CALLEE &&
+        !(sole && cf->nins <= INLINE_SOLE_CALLEE)) {
         *why = "callee-too-large";
         if (detail)
             snprintf(detail, dcap, "%d instructions, budget %d",
@@ -7137,6 +7237,31 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     fn->nvars = nv;
 }
 
+/* How many calls in the whole unit name this function, and does its
+ * address escape? A STATIC function nothing takes the address of and
+ * exactly one call names is a body that will be MOVED rather than
+ * copied: once the call is gone, dead-function elimination takes the
+ * original, so the unit cannot grow by more than the call it removed.
+ * The size budget is the wrong question for that one. */
+static int sole_static_caller(struct ir_unit *iu, struct func *c)
+{
+    if (!c || !c->is_static)
+        return 0;
+    int calls = 0;
+    for (int f = 0; f < iu->nfuncs; f++) {
+        struct ir_func *fn = &iu->funcs[f];
+        for (int i = 0; i < fn->nins; i++) {
+            struct ir_ins *in = &fn->ins[i];
+            if (in->op == IR_FADDR && in->callee == c)
+                return 0;                 /* the address escapes */
+            if (in->op == IR_CALL && !in->indirect && in->callee == c &&
+                ++calls > 1)
+                return 0;
+        }
+    }
+    return calls == 1;
+}
+
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
 static void inline_unit(struct ir_unit *iu)
 {
@@ -7168,6 +7293,7 @@ static void inline_unit(struct ir_unit *iu)
                     why = "callee-is-noinline";
                 else
                     ok = inlinable(c, in->callee->attr_always_inline,
+                                   sole_static_caller(iu, in->callee),
                                    &why, detail, sizeof detail);
                 if (!ok) {
                     remark_add("inline", "not-inlined", in->callee->name, why,
