@@ -2036,6 +2036,102 @@ static int tail_call_ok(struct ir_func *fn, int n)
     return 0;
 }
 
+/* Folding a LOCAL's address into the access that uses it.
+ *
+ * `&s.field` lowers to `addr s`, `add #off`, then a load or a store
+ * through the result -- three instructions where the machine has an
+ * addressing mode that does it in one: the frame base is a register
+ * already and the offset is a constant already. 256 of the 570 `addr`
+ * results across lib/libc and lib/libcxx never reach anything BUT a
+ * load or a store (600 accesses between them), and every one of those
+ * is a `lea` and usually an `add` for nothing.
+ *
+ * So each address vreg gets a displacement, computed once per function
+ * from the slot table, and the accesses use rbp+disp directly. The
+ * `addr` and the `add` then emit nothing at all -- which is only safe
+ * because the analysis demands that NOTHING ELSE reads them. The set of
+ * uses it allows is exactly the set of lowering paths below that know
+ * about the fold; anything else, including an address that reaches a
+ * call, a comparison or a 16-byte access with its own lowering, marks
+ * the root unfoldable and everything derived from it stays as it was.
+ *
+ * Returns NULL when nothing is foldable. `disp[v]` is meaningful only
+ * where `ok[v]`. */
+struct afold { char *ok; int *disp; };
+static struct afold g_afold;
+static int afolded(int v) { return g_afold.ok && v >= 0 && g_afold.ok[v]; }
+
+static void afold_free(struct afold *a) { free(a->ok); free(a->disp); }
+
+static struct afold afold_build(struct ir_func *fn, const int *sd)
+{
+    struct afold r = { NULL, NULL };
+    int nv = fn->nvregs;
+    if (nv == 0) return r;
+    char *isb = xcalloc((size_t)nv, 1);     /* derived from some `addr` */
+    int *root = xmalloc((size_t)nv * sizeof *root);
+    int *disp = xmalloc((size_t)nv * sizeof *disp);
+    for (int v = 0; v < nv; v++) root[v] = -1;
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_ADDR && i->dst >= 0 && i->dst < nv &&
+            i->a >= 0 && i->a < fn->nvars && sd[i->a] != DEAD_SLOT_OFF) {
+            root[i->dst] = i->dst; disp[i->dst] = sd[i->a];
+            isb[i->dst] = 1; any = 1;
+        } else if (i->op == IR_ADD && i->imm_b && i->dst >= 0 && i->dst < nv &&
+                   i->a >= 0 && i->a < nv && isb[i->a]) {
+            root[i->dst] = root[i->a];
+            disp[i->dst] = disp[i->a] + (int)i->imm;
+            isb[i->dst] = 1;
+        }
+    }
+    if (!any) { free(isb); free(root); free(disp); return r; }
+
+    /* Every use must be one the lowering below folds. */
+    char *bad = xcalloc((size_t)nv, 1);
+#define UNFOLD(v) do { int _v=(v); if (_v>=0 && _v<nv && isb[_v]) \
+                           bad[root[_v]] = 1; } while (0)
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        /* a 16-byte or vector access has its own lowering and is not
+         * one of the four sites below */
+        int plain = !i128_ins(i) && !x87_ins(i);
+        if (plain && (i->op == IR_LOAD || i->op == IR_STORE)) {
+            if (i->op == IR_STORE) UNFOLD(i->b);
+            UNFOLD(i->c);
+            continue;                        /* `a` is the folded address */
+        }
+        if (i->op == IR_ADD && i->imm_b && i->dst >= 0 && i->dst < nv &&
+            isb[i->dst])
+            continue;                        /* the offset chain itself */
+        if (i->op == IR_ADDR)
+            continue;
+        UNFOLD(i->a); UNFOLD(i->b); UNFOLD(i->c);
+        if (i->op == IR_CALL)
+            for (int k = 0; k < i->nargs; k++) UNFOLD(i->argv[k].vreg);
+        /* An asm operand is named nowhere near `a`/`b`/`c`, and the
+         * lowering loads every one of them from its slot. Missing these
+         * is what crashed asm-clobber.c, asm-inout.c and asm-mem-alu.c
+         * the first time this ran. */
+        if (i->op == IR_ASM && i->asm_ir) {
+            for (int k = 0; k < i->asm_ir->nin; k++)
+                UNFOLD(i->asm_ir->in[k].temp);
+            for (int k = 0; k < i->asm_ir->nout; k++)
+                UNFOLD(i->asm_ir->out[k].temp);
+        }
+    }
+#undef UNFOLD
+    char *ok = xcalloc((size_t)nv, 1);
+    int used = 0;
+    for (int v = 0; v < nv; v++)
+        if (isb[v] && !bad[root[v]]) { ok[v] = 1; used = 1; }
+    free(isb); free(root); free(bad);
+    if (!used) { free(ok); free(disp); return r; }
+    r.ok = ok; r.disp = disp;
+    return r;
+}
+
 static void gen_func(struct ir_func *fn, struct code *text,
                      struct sites *st)
 {
@@ -2457,6 +2553,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_load_reg_mem(text, g_loc[p], REG_RBP, sd[p], psz);
         }
 
+    g_afold = afold_build(fn, sd);
     rc_nvars = fn->nvars;
     cg_reset();
     /* Use counts drive comparison/branch fusion below (a compare feeding only
@@ -2522,6 +2619,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
                          i->op == IR_F2F))
             diag_fatal(fn->file, i->line,
                        "floating point needs SSE, which -mno-sse forbids");
+        /* Pure address arithmetic on a local, folded into every access
+         * that uses it: emit nothing at all. This has to happen BEFORE
+         * the switch, because the ALU case would otherwise reach the
+         * address-generation fusion below, which consumes the following
+         * access itself and reads the base out of a register the fold
+         * has just decided not to materialise. tests/exec/aapcs64.c
+         * found that within the hour. */
+        if ((i->op == IR_ADDR || (i->op == IR_ADD && i->imm_b)) &&
+            afolded(i->dst))
+            continue;
         switch (i->op) {
         /* ---- 128-bit vectors -------------------------------------------
          *
@@ -3286,9 +3393,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
         }
         case IR_LOAD:
             if (is_flt(i->dst)) {
-                int b = addr_reg(text, sd, i->a);
                 int d = x86_fwr(i->dst, X86_FSCR);
-                x86_movs_load_base(text, d, b, 0, i->size);
+                if (afolded(i->a))
+                    x86_movs_load(text, d, g_afold.disp[i->a], i->size);
+                else
+                    x86_movs_load_base(text, d, addr_reg(text, sd, i->a), 0,
+                                       i->size);
                 x86_fwrote(text, sd, i->dst, d, i->size);
                 break;
             }
@@ -3297,6 +3407,15 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * wholly untouched — cache preserved) or staged into RAX as the base
              * (RAX still holds that address afterward, so its cache entry stays
              * valid — the load reads [rax], it does not overwrite rax). */
+            /* The address folded into rbp+disp: no base register at all. */
+            if (afolded(i->a)) {
+                int D = in_reg(i->dst) ? g_loc[i->dst] : REG_RAX;
+                x86_load_reg_basedisp(text, D, REG_RBP, g_afold.disp[i->a],
+                                      i->size, i->sign, i->w);
+                if (D == REG_RAX) cg_store(text, sd, i->dst, i->w);
+                else              cg_reset();
+                break;
+            }
             if (in_reg(i->dst)) {
                 if (in_reg(i->a)) {
                     x86_load_base_reg(text, g_loc[i->dst], g_loc[i->a],
@@ -3322,9 +3441,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         case IR_STORE: {
             if (is_flt(i->b)) {
-                int b = addr_reg(text, sd, i->a);
                 int v = x86_frd(text, sd, i->b, X86_FSCR, i->size);
-                x86_movs_store_base(text, b, 0, v, i->size);
+                if (afolded(i->a))
+                    x86_movs_store(text, v, g_afold.disp[i->a], i->size);
+                else
+                    x86_movs_store_base(text, addr_reg(text, sd, i->a), 0, v,
+                                        i->size);
                 break;
             }
             /* Address already in a register (mirrors IR_LOAD): store straight to
@@ -3339,6 +3461,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * a temp or a register-resident local, and neither of those
              * is reachable through a pointer. */
             int vreg = in_reg(i->b) ? g_loc[i->b] : REG_RAX;
+            if (afolded(i->a)) {
+                if (vreg == REG_RAX)
+                    cg_load(text, sd, i->b, 8, 0, 8);
+                x86_store_mem_reg(text, REG_RBP, g_afold.disp[i->a], vreg,
+                                  i->size);
+                break;
+            }
             if (in_reg(i->a)) {
                 if (vreg == REG_RAX)
                     cg_load(text, sd, i->b, 8, 0, 8);       /* the value -> rax */
@@ -4174,6 +4303,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
     }
     free(brs);
     free(label_off);
+    afold_free(&g_afold);
+    g_afold.ok = NULL; g_afold.disp = NULL;
     free(sd);
     free(loc);
     free(usecnt);
