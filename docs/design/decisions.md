@@ -1124,6 +1124,37 @@ The cross-compiled pairing covers these too: the caller and the callee
 are built by different compilers and the register save area has to line
 up with where the other one left the arguments.
 
+**2026-09-26, the register allocator — attempted and NOT landed.** Every
+value still lives in a stack slot, which makes this backend about 5.3x
+clang's code size over the test corpus. Wiring the shared allocator in
+(`src/arch/regalloc.c` already has the `ra_target` seam) is the obvious
+next step and was tried; it is on the `thumb-regalloc-wip` branch, and
+it is NOT on this one because it does not pass `thumb-float` at -O2 and
+a half-correct allocator is worse than none.
+
+Four hazards it turned up, all real and all worth having written down
+before the next attempt:
+
+  * **The call's argument setup is a PARALLEL MOVE.** Loading r0-r3 in
+    order destroys a later argument whose value happens to live in an
+    earlier one's destination — `unpack(d2u(y), &b)` was handed a
+    pointer that y's own low word had overwritten.
+  * **So is the prologue's.** `round_pack(int sign, int exp, u64 sig)`
+    had `sign` allocated to r2, and `mov r2, r0` at the top of the
+    function destroyed the low half of `sig`, which arrives in r2:r3.
+  * **An indirect call's target must be read BEFORE the arguments**, and
+    into a register that is not one of them.
+  * **A copy's two ends must agree about their WIDTH.** A `?:` whose
+    arms are an eight-byte value and a four-byte constant had the merge
+    copying eight bytes out of a slot the constant never used, because
+    the constant had been given a register instead. The width map has to
+    propagate both ways through IR_MOV and IR_SELECT, and the backend
+    has to decide 64-bitness from that map rather than from `i->w`.
+
+The first three are one problem wearing three hats, and the next attempt
+should start by writing the parallel move rather than by special-casing
+each site.
+
 **What it does not do yet, all refused by name:** `long double` (ARMv7-M has no FPU, so
 every operation is an `__aeabi_*` call), aggregates by value, varargs,
 atomics, inline asm, VLAs, computed goto, exceptions and `-g`. There is
