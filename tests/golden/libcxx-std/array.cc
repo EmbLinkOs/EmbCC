@@ -45,13 +45,22 @@ int main()
     CHECK(z.begin() == z.end());
     CHECK(z.data() == nullptr);
 
-    /* at() checks and operator[] does not: that is the whole difference. */
-    int caught = 0;
-    const char *msg = "";
+    /* at() checks and operator[] does not: that is the whole difference.
+     *
+     * what()'s pointer is read INSIDE the handler, and only a copy of
+     * what it said outlives it. The exception object is destroyed when
+     * the handler exits, and the message buffer is reference-counted, so
+     * the pointer dangles from that moment. This test used to keep it
+     * and read it afterwards; it passed because the freed bytes happened
+     * to still hold the string. They no longer do -- the allocator's
+     * free list threads its links through the payload of a free block --
+     * and the check failed the day that changed, which is the only
+     * reason anyone looked. */
+    int caught = 0, msg_ok = 0;
     try { (void)a.at(9); }
-    catch (const out_of_range &e) { caught = 1; msg = e.what(); }
+    catch (const out_of_range &e) { caught = 1; msg_ok = e.what()[0] == 'a'; }
     CHECK(caught == 1);
-    CHECK(msg[0] == 'a');                     /* "array::at: ..." */
+    CHECK(msg_ok == 1);                       /* "array::at: ..." */
 
     /* Catching by VALUE copies the exception, and that copy must not
      * throw -- a copy constructor that allocates during unwinding is

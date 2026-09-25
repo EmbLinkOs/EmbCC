@@ -16,8 +16,17 @@
 
 /* prologue: push rbp; mov rbp,rsp; sub rsp,framesize (multiple of 16
  * so rsp stays 16-aligned at calls). epilogue: leave; ret. */
-void x86_prologue(struct code *c, int framesize);
-void x86_epilogue(struct code *c);
+/* Which IR operation the backend is lowering, for the dead-slot guard's
+ * message. Its instruction loop sets it; the guard reads it only when
+ * it fires. */
+extern const char *x86_lowering_op;
+
+void x86_prologue(struct code *c, int framesize, int frameless);
+void x86_sub_rsp(struct code *c, int bytes);
+void x86_push_reg(struct code *c, int reg);
+void x86_pop_reg(struct code *c, int reg);
+void x86_epilogue(struct code *c, int frameless);
+void x86_leave(struct code *c);
 
 /* SysV integer argument registers, index 0..5 = rdi,rsi,rdx,rcx,r8,r9.
  * Always full 64-bit moves: narrower argument types occupy the low
@@ -43,6 +52,12 @@ void x86_load_baseindex_rax(struct code *c, int base, int index, int scale,
                             int size, int sign, int w); /* rax = *(base+index*scale) */
 void x86_load_basedisp_rax(struct code *c, int base, int disp,
                            int size, int sign, int w); /* rax = *(base+disp) */
+void x86_load_reg_baseindex(struct code *c, int dst, int base, int index,
+                            int scale, int size, int sign, int w);
+void x86_store_basedisp_reg(struct code *c, int base, int disp, int src,
+                            int size);
+void x86_store_baseindex_reg(struct code *c, int base, int index, int scale,
+                             int src, int size);
 void x86_load_reg_basedisp(struct code *c, int dst, int base, int disp,
                            int size, int sign, int w); /* dst = *(base+disp) */
 void x86_store_basedisp_rax(struct code *c, int base, int disp, int size); /* *(base+disp)=rax */
@@ -80,14 +95,21 @@ void x86_neg_eax(struct code *c, int w);
  * at all: only the ARITHMETIC has to reach xmm. */
 void x86_movs_load(struct code *c, int xmm, int disp, int w);
 void x86_movs_store(struct code *c, int xmm, int disp, int w);
-void x86_sse_alu_mem(struct code *c, int op, int disp, int w); /* + - * / */
-void x86_ucomis_mem(struct code *c, int disp, int w);
+void x86_sse_alu_mem(struct code *c, int op, int dst, int disp, int w);
+void x86_sse_alu_reg(struct code *c, int op, int dst, int src, int w);
+void x86_movs_reg(struct code *c, int dst, int src);
+void x86_movq_xmm_gpr(struct code *c, int xmm, int gpr, int w);
+void x86_ucomis_mem(struct code *c, int xmm, int disp, int w);
+void x86_ucomis_reg(struct code *c, int a, int b, int w);
 /* setcc pair for float == and != : ordered equality is "equal AND not
  * unordered", because a NaN compares equal to nothing, itself included. */
 void x86_set_float_eq(struct code *c, int ne);
-void x86_cvtsi2s(struct code *c, int disp, int srcw, int dstw);
+void x86_cvtsi2s(struct code *c, int xmm, int disp, int srcw, int dstw);
 void x86_cvtts2si(struct code *c, int disp, int srcw, int dstw);
-void x86_cvts2s(struct code *c, int disp, int srcw);
+void x86_cvts2s(struct code *c, int xmm, int disp, int srcw);
+void x86_cvtsi2s_reg(struct code *c, int dst, int src, int srcw, int dstw);
+void x86_cvtts2si_reg(struct code *c, int src, int srcw, int dstw);
+void x86_cvts2s_reg(struct code *c, int dst, int src, int srcw);
 void x86_mov_al_imm(struct code *c, int v); /* varargs: xmm count in al */
 
 /* ---- general [base+disp] addressing, for struct traffic ----------
@@ -109,6 +131,9 @@ void x86_store_mem_reg(struct code *c, int base, int disp, int src, int size);
 void x86_movs_load_base(struct code *c, int xmm, int base, int disp, int w);
 void x86_movs_store_base(struct code *c, int base, int disp, int xmm, int w);
 void x86_lea_reg_slot(struct code *c, int dst, int disp); /* lea r,[rbp+d] */
+void x86_lea_reg_basedisp(struct code *c, int dst, int base, int disp, int w);
+void x86_lea_reg_baseindex(struct code *c, int dst, int base, int index,
+                           int scale, int w);
 void x86_mov_reg_reg(struct code *c, int dst, int src);   /* 64-bit */
 /* register-register forms for the -O2 register allocator (values live in
  * callee-saved regs, not memory). All operate on register NUMBERS 0..15. */
@@ -145,6 +170,10 @@ void x86_test_eax(struct code *c, int w);
 int x86_jz_rel32(struct code *c);
 int x86_jnz_rel32(struct code *c);
 int x86_jmp_rel32(struct code *c);
+int x86_jz_rel8(struct code *c);
+int x86_jnz_rel8(struct code *c);
+int x86_jmp_rel8(struct code *c);
+int x86_jcc_rel8(struct code *c, int setcc);
 void x86_jmp_reg(struct code *c, int reg);        /* jmp *reg (computed goto) */
 int x86_jcc_rel32(struct code *c, int setcc); /* setcc cond byte (0x9x) -> Jcc rel32 */
 void x86_alu_reg_imm(struct code *c, int op, int reg, long imm, int w); /* reg OP= imm ('c'=cmp) */
@@ -160,3 +189,25 @@ void x86_mov_r11_slot(struct code *c, int disp);
 void x86_call_r11(struct code *c);
 
 #endif
+
+/* 128-bit vectors (SSE2; see emit.c for why nothing above it) */
+void x86_vload_base(struct code *c, int xmm, int base, int disp);
+void x86_vstore_base(struct code *c, int base, int disp, int xmm);
+void x86_mov128_load(struct code *c, int xmm, int base, int disp);
+void x86_mov128_store(struct code *c, int base, int disp, int xmm);
+void x86_vload_slot(struct code *c, int xmm, int disp);
+void x86_vstore_slot(struct code *c, int disp, int xmm);
+void x86_vbin_slot(struct code *c, int xmm, int op, int esize, int disp);
+void x86_vshift_imm(struct code *c, int xmm, int left, int arith, int esize,
+                    int imm);
+void x86_vmov_rr(struct code *c, int dst, int src);
+void x86_vshufd(struct code *c, int dst, int src, int imm);
+void x86_vmov_xmm_reg(struct code *c, int xmm, int reg, int w);
+void x86_vmov_reg_xmm(struct code *c, int reg, int xmm, int w);
+void x86_vbin_rr(struct code *c, int dst, int src, int op, int esize);
+void x86_vunpck(struct code *c, int dst, int src, int high, int esize);
+
+/* conditional move: the branchless half of a select */
+void x86_test_rr(struct code *c, int a, int b, int w);
+void x86_cmovne_slot(struct code *c, int reg, int disp, int w);
+void x86_cmovne_rr(struct code *c, int dst, int src, int w);

@@ -157,6 +157,16 @@ static unsigned align_bits(int align)
     case 16: return IMAGE_SCN_ALIGN_16BYTES;
     case 32: return IMAGE_SCN_ALIGN_32BYTES;
     case 64: return IMAGE_SCN_ALIGN_64BYTES;
+    /* Up to 8192, which is where the encoding stops. A page-aligned
+     * object is an ordinary thing to declare and 64 was not enough --
+     * anything stricter used to reach the refusal below. */
+    case 128:  return IMAGE_SCN_ALIGN_128BYTES;
+    case 256:  return IMAGE_SCN_ALIGN_256BYTES;
+    case 512:  return IMAGE_SCN_ALIGN_512BYTES;
+    case 1024: return IMAGE_SCN_ALIGN_1024BYTES;
+    case 2048: return IMAGE_SCN_ALIGN_2048BYTES;
+    case 4096: return IMAGE_SCN_ALIGN_4096BYTES;
+    case 8192: return IMAGE_SCN_ALIGN_8192BYTES;
     default:
         fprintf(stderr, "embcc: coff writer: no encoding for %d-byte "
                         "alignment\n", align);

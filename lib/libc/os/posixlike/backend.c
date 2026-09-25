@@ -164,6 +164,11 @@ int __os_futex_wait(const volatile int *addr, int expected, long timeout_ns)
     return futex_wait(addr, expected, timeout_ns);
 }
 
+/* Pass-through, so the supplied function owns the contract -- including
+ * that a NEGATIVE count means "wake all of them" and not "wake none".
+ * The Linux backend handed that straight to the kernel, whose FUTEX_WAKE
+ * stops once it has woken `count`, and a program waiting on a C++
+ * function-local static hung with nothing to show for it. */
 int __os_futex_wake(const volatile int *addr, int count)
 {
     if (!futex_wake) {

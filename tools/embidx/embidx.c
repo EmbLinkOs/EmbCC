@@ -40,6 +40,13 @@
  * be compared with diff. A binary format would be smaller and would make
  * every question about it need this program.
  */
+/* popen/fdopen are POSIX, not C99, and this is built with -std=c99.
+ * Without the feature macro glibc's headers hide them, the call is
+ * implicitly declared as returning int, and the FILE * is TRUNCATED to
+ * 32 bits -- which crashes on the first use. macOS hid the bug by
+ * exposing them regardless. Must precede every include. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

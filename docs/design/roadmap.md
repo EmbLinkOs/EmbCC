@@ -5,13 +5,25 @@ a thing is not done when it compiles — it is done when a test exercises the
 invariant. Milestones are ordered by what they *prove*, not by how much code
 they contain.*
 
-**Current position (2026-09-08): M0–M3 closed; M4's host half done, its OS half
+**Current position (2026-09-22): M0–M3 closed; M4's host half done, its OS half
 the one named milestone still open.** Past the milestones the compiler has grown
 a real optimizer, caret diagnostics, debug info with its own debugger, a
 standalone assembler — and, the result none of the milestones named, **it builds
 and boots the EmbLinkOS kernel with no gcc, no nasm and no `ld` in the loop**
 (89 C units via `embcc`, 6 `.asm` via `embas`, linked by `embld`, booting to the
-desktop behaviourally identical to the gcc build).
+desktop behaviourally identical to the gcc build — the unit count is the one
+`tools/gen-kernel-manifest.sh` produced on 2026-08-30; it is derived from the
+kernel's own sources, so it moves when the kernel does).
+
+**Since that line was first written**, the compiler also acquired three hosted
+targets. Linux is the complete one: its own libc on raw syscalls, threads and
+TLS, statically linked by EmbLD, **run on a real 6.12 kernel**. macOS emits
+Mach-O the system linker accepts, natively. Windows emits COFF in the Microsoft
+x64 convention, checked instruction-by-instruction against clang, but **nothing
+has executed there** and it has no libc — see [D-014](decisions.md). EmbCC also
+installs (`make install PREFIX=…`) and finds its own headers and per-target
+libraries relative to its binary, and the driver links in one process, so
+`embcc prog.c -o prog` is a whole command now.
 
 **Since M3 — the axes the milestones did not name:**
 
@@ -38,7 +50,10 @@ desktop behaviourally identical to the gcc build).
   underlines, "did you mean?", and notes for previous declarations and macro
   expansions.
 
-- **The fixed point still holds, now over sixteen sources.** The optimizer
+- **The fixed point still holds, now over sixteen sources** (sixteen when this
+  was written; the self-host set is read from the Makefile's `SRCS` and stands
+  at **63** on 2026-09-22 — the C++ front end alone is sixteen of them).
+  The optimizer
   (`src/opt/opt.c`), the DWARF emitter (`src/debug/dwarf.c`) and the assembler
   (`src/arch/x86_64/as.c`) each joined the compiler, so the self-host source set grew
   12 → 16; `test embcc self` is **16/16 byte-identical on the OS**.
@@ -93,7 +108,7 @@ stay OS-side.
 
 ---
 
-**M3 — how it closed (2026-07-24; twelve sources at the time, sixteen now):**
+**M3 — how it closed (2026-07-24; twelve sources at the time, 63 now):**
 The self-built compiler (`embcc.elf`,
 itself compiled by EmbCC and linked by EmbLD) was staged to EmbLinkOS and,
 under the kernel `test embcc self` oracle, **recompiled all twelve of its

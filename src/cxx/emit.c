@@ -2062,7 +2062,24 @@ static int addr_const(struct cexpr *e)
                    (p->a[0]->k == E_VAR || p->a[0]->k == E_STR ||
                     p->a[0]->k == E_MEMBER) && addr_const(p->a[0]);
         }
-        return 0;
+        /* `*(T *)x` -- a dereference whose pointer is itself an address
+         * constant names a fixed object, at that address. */
+        return (p->k == E_CAST || p->k == E_VAR || p->k == E_STR) &&
+               p->t && p->t->k == CT_PTR && addr_const(p);
+    }
+    case E_CAST:
+        /* An lvalue cast RENAMES storage; it does not move it.
+         * `reinterpret_cast<T &>(x)` and `*(T *)&x` are the same bytes
+         * as x, so the address is exactly as constant as x's. A value
+         * cast of an address constant -- `(T *)arr` -- is one too. */
+        return addr_const(e->a[0]);
+    case E_BINARY: {
+        /* `p + n` for a constant n: an address constant displaced by a
+         * constant, which the linker computes as an addend. */
+        long v;
+        return e->t && e->t->k == CT_PTR &&
+               (e->op == TOK_PLUS || e->op == TOK_MINUS) &&
+               expr_fold(e->a[1], &v) && addr_const(e->a[0]);
     }
     default:
         return 0;
@@ -2095,7 +2112,21 @@ static int c_const(struct cexpr *e)
         return 1;
     case E_CAST:
         if (e->lvcast)
-            return 0;
+            /* An lvalue cast is not a value: what gets emitted for it
+             * is an ADDRESS, because that is how a reference lowers.
+             * So the question is whether the address is constant, not
+             * whether the object is.
+             *
+             * Answering 0 here is what put `std::cerr` in .init_array.
+             * It is declared `ostream &cerr = *(ostream *)__cerr_store;`
+             * -- a constant address -- and every translation unit that
+             * includes <iostream> has its own __ios_init whose
+             * constructor writes to cerr. With cerr dynamically
+             * initialized, a unit whose .init_array entry ran first
+             * found it still null. The real libstdc++ has no such
+             * window precisely because its stream references are
+             * statically initialized, and now neither do we. */
+            return addr_const(e);
         if (e->t->k == CT_MPTR)
             return e->a[0]->k != E_CALL && c_const(e->a[0]);
         if (e->t->k == CT_PTR || e->t->k == CT_BOOL)
@@ -4388,6 +4419,32 @@ char *cx_emit_unit(void)
         if (v->refd && !v->is_static)
             sb_printf(&out, "extern %s%s;\n", v->is_tls ? "__thread " : "",
                       cdecl(v->type, v->cname));
+        /* A static one cannot be `extern`, but it still has to be
+         * NAMEABLE before the first definition that mentions it. The
+         * definitions are emitted by a worklist, so a static object is
+         * written only once something asks for it -- which is after the
+         * thing that asked. That was invisible while every such
+         * initializer was dynamic; making constant-address references
+         * static (see c_const) turned it into "'store' is used before
+         * its declaration".
+         *
+         * A file-scope declaration with no initializer is a tentative
+         * definition in C, and a tentative definition followed by a
+         * real one is the same object -- so this reserves the name and
+         * the later definition fills it in. The attributes go on both,
+         * because alignment is part of the object and not of the
+         * initializer. */
+        else if (v->refd && v->is_static && !v->is_tls) {
+            struct sb at = { 0, 0, 0 };
+            if (v->section)
+                sb_printf(&at, " __attribute__((section(\"%s\")))",
+                          v->section);
+            if (v->align_attr)
+                sb_printf(&at, " __attribute__((aligned(%ld)))",
+                          v->align_attr);
+            sb_printf(&out, "static %s%s;\n", cdecl(v->type, v->cname),
+                      sb_str(&at));
+        }
     }
     sb_put(&out, sb_str(&out_vars));
     sb_put(&out, sb_str(&out_code));

@@ -252,6 +252,11 @@ struct global {
     int is_static;
     int is_extern;        /* THIS declaration was 'extern' */
     int is_weak;          /* __attribute__((weak)) */
+    /* __attribute__((aligned(N))) / _Alignas(N) on the object itself,
+     * 0 when none. NOT the same as its type's alignment, and it was
+     * silently dropped: a page table declared aligned(4096) was laid
+     * out at the type's alignment and placed wherever that allowed. */
+    int user_align;
     int attr_used, attr_unused, attr_deprecated;
     const char *vis;      /* __attribute__((visibility("..."))) */
     /* __thread / _Thread_local / thread_local: one instance per thread,
@@ -328,6 +333,26 @@ struct func {
     int declared;         /* sema: declaration has been reached */
     int absorbed;         /* sema: merged into an earlier node — skip */
     int used;             /* sema: at least one call resolves here */
+    /* ---- inferred, not declared ------------------------------------
+     *
+     * What the optimizer worked out about this function from its body,
+     * as opposed to what the author wrote. Both are conservative: false
+     * means "not known to be", never "known not to be".
+     *
+     * `reads_memory` is the one that pays. A call is otherwise assumed
+     * to write anything, so every cached load dies at every call site
+     * and every store before one must stay. A function that touches no
+     * memory the caller can see frees all of that. */
+    int inf_no_write;     /* writes no memory the caller can observe */
+    int inf_no_read;      /* ... and reads none either: its result is a
+                           * function of its arguments alone, so two calls
+                           * with the same arguments give the same answer */
+    int is_root;          /* reachable from OUTSIDE the call graph: named
+                           * by top-level asm, a constructor or destructor
+                           * (.init_array is the use), or
+                           * __attribute__((used)). "used" cannot say this
+                           * -- it means only that some call resolved here,
+                           * and that call may itself be dead. */
     /* codegen bookkeeping: position inside .text (defined funcs only) */
     int code_off, code_len;
     /* ... and what its prologue did, for the unwind tables (debug/eh.c):
@@ -335,8 +360,13 @@ struct func {
      * frame register set, and the callee-saved registers it stores in its
      * frame (DWARF numbers; slots relative to the CFA) */
     int cfi_push, cfi_frame, cfi_saved_at, cfi_nsaved;
-    int cfi_reg[8];
-    long cfi_off[8];
+    /* No frame record at all: a leaf that needs no frame pushes no rbp
+     * and never moves rsp, so the CIE's opening rule -- CFA is rsp+8,
+     * return address at CFA-8 -- holds for the whole function and the
+     * FDE carries no instructions. */
+    int cfi_frameless;
+    int cfi_reg[16];
+    long cfi_off[16];
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
 };
 

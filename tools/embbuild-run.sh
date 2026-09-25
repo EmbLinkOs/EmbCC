@@ -47,6 +47,9 @@ maphost() {
         /system/abi/crt0.o)         p="$CRT0" ;;
         /system/abi/syscalls.o)     p="$SYSCALLS" ;;
         /system/abi/libc.a)         p="$LIBC" ;;
+        # tools/ before src/: the toolcore unit keeps its own prefix so
+        # the two map back to different places.
+        /data/src/embcc/tools/*)    p="$HOST/tools/${p#/data/src/embcc/tools/}" ;;
         /data/src/embcc/*)          p="$HOST/src/${p#/data/src/embcc/}" ;;
         /data/build/out/embcc/*)    p="$STAGE/${p#/data/build/out/embcc/}" ;;
         /data/build/out/embcc)      p="$STAGE" ;;

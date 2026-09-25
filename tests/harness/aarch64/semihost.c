@@ -153,3 +153,41 @@ void _exit(int code)
     for (;;)
         ;
 }
+
+/* Every unexpected trap arrives here, from the vector table start.S
+ * installs. Before there was one, VBAR_EL1 stayed zero and a fault
+ * spun on the vector page until the 20-second timeout killed QEMU --
+ * so a null dereference, an alignment abort and an illegal instruction
+ * were all "the test hung", with nothing said about which.
+ *
+ * printf is not available: it is newlib's, it allocates, and whatever
+ * went wrong may be why. This writes the three registers by hand and
+ * exits 125, the code tests/run.sh already reads as "the guest crashed
+ * or reset before exiting". ESR names the class (0x25 = data abort,
+ * 0x22 = misaligned PC, 0x18 = a trapped system instruction), FAR is
+ * the address that could not be accessed, and ELR is the instruction
+ * that tried. */
+void harness_fault(unsigned long esr, unsigned long far, unsigned long elr)
+{
+    static const char hex[] = "0123456789abcdef";
+    char line[] = "harness: fault esr=0x................"
+                  " far=0x................"
+                  " elr=0x................\n";
+    unsigned long v[3];
+    int at[3], i, j;
+
+    v[0] = esr; v[1] = far; v[2] = elr;
+    at[0] = 21; at[1] = 44; at[2] = 67;          /* after each "0x" */
+    for (i = 0; i < 3; i++)
+        for (j = 0; j < 16; j++)
+            line[at[i] + j] = hex[(v[i] >> (60 - 4 * j)) & 0xf];
+    write(2, line, sizeof line - 1);
+    if ((esr >> 26) == 0x24 || (esr >> 26) == 0x25) {
+        static const char note[] =
+            "harness: a data abort -- a load or store to an address that "
+            "is not mapped.\n  A null dereference looks exactly like "
+            "this: far is at or near zero.\n";
+        write(2, note, sizeof note - 1);
+    }
+    _exit(125);
+}

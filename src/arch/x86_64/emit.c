@@ -14,8 +14,33 @@ static void rexw(struct code *c, int w)
 }
 
 /* ModRM for [rbp+disp]: rm=101 with mod=01 (disp8) or mod=10 (disp32). */
+/* A slot nothing should touch: a local the allocator put in a register,
+ * a temp that appears nowhere, a value with an FP home. layout_frame
+ * gives each this displacement, and every rbp-relative access goes
+ * through here -- so a lowering path that does not know the value has
+ * moved fails loudly instead of reading whatever the frame holds. */
+#define X86_DEAD_SLOT (-0x40000000)
+/* Which IR operation the backend is lowering. It sets this to the
+ * operation's name -- a static string, so the cost is one pointer store
+ * per instruction -- and the guard below reads it only when it fires.
+ *
+ * It is worth the store. "Some lowering path does not know that" sent
+ * three separate investigations reading the whole switch; naming `stvar`
+ * pointed at the one case in a line. The operands are not named here
+ * because this file encodes instructions and knows nothing of the IR. */
+const char *x86_lowering_op = "?";
+
+static void no_dead_slot(int disp)
+{
+    if (disp == X86_DEAD_SLOT)
+        internal_error("a value was read from a stack slot it does not have "
+                       "-- it lives in a register, and the lowering of `%s` "
+                       "does not know that", x86_lowering_op);
+}
+
 static void modrm_rbp(struct code *c, int reg, int disp)
 {
+    no_dead_slot(disp);
     if (disp >= -128 && disp <= 127) {
         code_byte(c, 0x45 | (reg << 3));
         code_byte(c, disp & 0xff);
@@ -30,6 +55,7 @@ static void modrm_rbp(struct code *c, int reg, int disp)
  * RIP-relative), so both take an explicit displacement. */
 static void modrm_base(struct code *c, int reg, int base, int disp)
 {
+    if (base == 5) no_dead_slot(disp);        /* rbp: a frame access */
     int rm = base & 7;
     int mod;
 
@@ -53,6 +79,30 @@ static void rex_rb(struct code *c, int w64, int reg, int base)
     int rex = 0x40 | (w64 ? 8 : 0) | ((reg & 8) ? 4 : 0) |
               ((base & 8) ? 1 : 0);
     if (rex != 0x40)
+        code_byte(c, rex);
+}
+
+/* REX for a form that names an 8-BIT REGISTER.
+ *
+ * Register numbers 4..7 in a byte operand mean %ah %ch %dh %bh unless a
+ * REX prefix is present, and %spl %bpl %sil %dil when one is -- so a
+ * byte form with such an operand needs REX even when it carries no
+ * bits. It never came up while the integer pool was {r8..r15, rbx,
+ * rdx}: all of those are either REX-extended already or directly
+ * addressable as al/bl/cl/dl. It came up the moment an ABI hint put a
+ * `char` PARAMETER in rsi -- `movzbl %sil,%ebx` assembled as
+ * `movzbl %dh,%ebx`, and lib/libcxx's read_encoded then dispatched
+ * every DWARF encoding as absptr, so a throw never found its handler
+ * (tests/golden/unwind.sh, libcxx.sh, libcxx-std.sh).
+ *
+ * `byte_reg` and `byte_rm` say which of the two operands is the
+ * 8-bit one. */
+static void rex_rb8(struct code *c, int w64, int reg, int base,
+                    int byte_reg, int byte_rm)
+{
+    int rex = 0x40 | (w64 ? 8 : 0) | ((reg & 8) ? 4 : 0) |
+              ((base & 8) ? 1 : 0);
+    if (rex != 0x40 || (byte_reg && reg >= 4) || (byte_rm && base >= 4))
         code_byte(c, rex);
 }
 
@@ -107,7 +157,7 @@ void x86_store_mem_reg(struct code *c, int base, int disp, int src,
 {
     switch (size) {
     case 1:
-        rex_rb(c, 0, src, base);
+        rex_rb8(c, 0, src, base, 1, 0);
         code_byte(c, 0x88);
         break;
     case 2:
@@ -133,6 +183,11 @@ void x86_movs_load_base(struct code *c, int xmm, int base, int disp,
                         int w)
 {
     code_byte(c, w == 4 ? 0xf3 : 0xf2);
+    /* modrm_base masks both fields to three bits and leaves the fourth
+     * to REX, which nothing here used to need: every caller named an
+     * xmm below 8 and a base below 8. The FP pool is xmm8-15. */
+    if (xmm >= 8 || base >= 8)
+        code_byte(c, 0x40 | ((xmm >= 8) << 2) | (base >= 8));
     code_byte(c, 0x0f);
     code_byte(c, 0x10);
     modrm_base(c, xmm, base, disp);
@@ -142,6 +197,8 @@ void x86_movs_store_base(struct code *c, int base, int disp, int xmm,
                          int w)
 {
     code_byte(c, w == 4 ? 0xf3 : 0xf2);
+    if (xmm >= 8 || base >= 8)
+        code_byte(c, 0x40 | ((xmm >= 8) << 2) | (base >= 8));
     code_byte(c, 0x0f);
     code_byte(c, 0x11);
     modrm_base(c, xmm, base, disp);
@@ -183,7 +240,7 @@ void x86_movsxd_rr(struct code *c, int dst, int src)
  * the reg-reg twin of x86_load_slot's narrow cases. */
 void x86_movx_rr(struct code *c, int dst, int src, int size, int sign, int w)
 {
-    rex_rb(c, w == 8, dst, src);
+    rex_rb8(c, w == 8, dst, src, 0, size == 1);
     code_byte(c, 0x0f);
     if (size == 1)
         code_byte(c, sign ? 0xbe : 0xb6); /* movsx/movzx r, r/m8 */
@@ -310,25 +367,66 @@ int x86_stack_arg_base(void)
     return target_win64_abi() ? 48 : 16;
 }
 
-void x86_prologue(struct code *c, int framesize)
+void x86_prologue(struct code *c, int framesize, int frameless)
 {
     if (framesize % 16 != 0) {
         internal_error("frame size %d not 16-aligned", framesize);
     }
+    if (frameless) {
+        /* A leaf with nothing in its frame: no record to push, and rsp
+         * never moves, so the caller's CFA rule holds throughout. */
+        if (framesize != 0)
+            internal_error("frameless function wants a %d-byte frame",
+                           framesize);
+        return;
+    }
     code_byte(c, 0x55);                     /* push rbp */
     code_byte(c, 0x48); code_byte(c, 0x89); /* mov rbp, rsp */
     code_byte(c, 0xe5);
-    if (framesize > 0) {
-        code_byte(c, 0x48); code_byte(c, 0x81); /* sub rsp, imm32 */
-        code_byte(c, 0xec);
-        code_u32(c, (unsigned long)framesize);
-    }
+    x86_sub_rsp(c, framesize);
 }
 
-void x86_epilogue(struct code *c)
+/* The frame reservation on its own, so the callee-saved registers can
+ * be PUSHED between the frame record and it. A push is one byte (two
+ * for r8-r15) where storing the register to its slot is four or five,
+ * and the slots are the top of the frame already -- pushing them in
+ * reverse slot order lands each exactly where the epilogue reads it,
+ * so nothing else in the layout moves. */
+void x86_sub_rsp(struct code *c, int bytes)
+{
+    if (bytes <= 0)
+        return;
+    code_byte(c, 0x48); code_byte(c, 0x81);   /* sub rsp, imm32 */
+    code_byte(c, 0xec);
+    code_u32(c, (unsigned long)bytes);
+}
+
+/* push/pop a 64-bit register: one byte, or two for r8-r15. */
+void x86_push_reg(struct code *c, int reg)
+{
+    if (reg & 8) code_byte(c, 0x41);
+    code_byte(c, 0x50 | (reg & 7));
+}
+
+void x86_pop_reg(struct code *c, int reg)
+{
+    if (reg & 8) code_byte(c, 0x41);
+    code_byte(c, 0x58 | (reg & 7));
+}
+
+void x86_epilogue(struct code *c, int frameless)
+{
+    if (!frameless)
+        code_byte(c, 0xc9); /* leave */
+    code_byte(c, 0xc3); /* ret */
+}
+
+/* The frame teardown without the return: what a SIBLING call needs.
+ * After this, rsp points at the return address the caller pushed, so a
+ * plain `jmp` to the callee makes it return straight to that caller. */
+void x86_leave(struct code *c)
 {
     code_byte(c, 0xc9); /* leave */
-    code_byte(c, 0xc3); /* ret */
 }
 
 /* These two used to carry a SECOND copy of the argument register
@@ -501,39 +599,68 @@ static void modrm_baseindex0(struct code *c, int reg, int base, int index,
 /* Load into rax from [base + index*scale] (scale 1/2/4/8), same extension matrix
  * as x86_load_mem_rax — folds an address computation into the load. REX.X/REX.B
  * carry high index/base registers. */
-void x86_load_baseindex_rax(struct code *c, int base, int index, int scale,
-                            int size, int sign, int w)
+void x86_load_reg_baseindex(struct code *c, int dst, int base, int index,
+                            int scale, int size, int sign, int w)
 {
-    int rexXB = ((index & 8) ? 2 : 0) | ((base & 8) ? 1 : 0);
+    int rexRXB = ((dst & 8) ? 4 : 0) | ((index & 8) ? 2 : 0) |
+                 ((base & 8) ? 1 : 0);
     switch (size) {
     case 1:
     case 2: {
-        int rex = 0x40 | (w == 8 ? 8 : 0) | rexXB;
+        int rex = 0x40 | (w == 8 ? 8 : 0) | rexRXB;
         if (rex != 0x40) code_byte(c, rex);
         code_byte(c, 0x0f);
         code_byte(c, size == 1 ? (sign ? 0xbe : 0xb6) : (sign ? 0xbf : 0xb7));
-        modrm_baseindex0(c, 0, base, index, scale);
+        modrm_baseindex0(c, dst, base, index, scale);
         break;
     }
     case 4:
         if (w == 8 && sign) {
-            code_byte(c, 0x48 | rexXB);
+            code_byte(c, 0x48 | rexRXB);
             code_byte(c, 0x63);
         } else {
-            int rex = 0x40 | rexXB;
+            int rex = 0x40 | rexRXB;
             if (rex != 0x40) code_byte(c, rex);
             code_byte(c, 0x8b);
         }
-        modrm_baseindex0(c, 0, base, index, scale);
+        modrm_baseindex0(c, dst, base, index, scale);
         break;
     case 8:
-        code_byte(c, 0x48 | rexXB);
+        code_byte(c, 0x48 | rexRXB);
         code_byte(c, 0x8b);
-        modrm_baseindex0(c, 0, base, index, scale);
+        modrm_baseindex0(c, dst, base, index, scale);
         break;
     default:
         internal_error("bad load size %d", size);
     }
+}
+
+/* lea dst, [base + disp] and lea dst, [base + index<<scale] -- x86's
+ * three-address adder. `mov a,d; add $k,d` and `mov a,d; add b,d` are
+ * each one instruction here, and neither touches the flags. */
+void x86_lea_reg_basedisp(struct code *c, int dst, int base, int disp, int w)
+{
+    int rex = 0x40 | ((w == 8) << 3) | ((dst & 8) ? 4 : 0) |
+              ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x8d);
+    modrm_base(c, dst, base, disp);
+}
+
+void x86_lea_reg_baseindex(struct code *c, int dst, int base, int index,
+                           int scale, int w)
+{
+    int rex = 0x40 | ((w == 8) << 3) | ((dst & 8) ? 4 : 0) |
+              ((index & 8) ? 2 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, 0x8d);
+    modrm_baseindex0(c, dst, base, index, scale);
+}
+
+void x86_load_baseindex_rax(struct code *c, int base, int index, int scale,
+                            int size, int sign, int w)
+{
+    x86_load_reg_baseindex(c, 0, base, index, scale, size, sign, w);
 }
 
 /* Load into rax from [base + disp], same extension matrix as x86_load_mem_rax —
@@ -711,32 +838,75 @@ void x86_store_mem_rcx(struct code *c, int size)
 
 /* Store rax to [base + disp] (a struct-field store, `p->m = x`), sized. reg
  * field is rax(0); modrm_base carries disp and the rsp/r12 SIB case. */
-void x86_store_basedisp_rax(struct code *c, int base, int disp, int size)
+/* A byte store names the SOURCE in the reg field, and without a REX
+ * prefix registers 4..7 there mean %ah..%bh rather than %spl..%dil. So
+ * the byte forms emit REX whenever the source is one of those, even when
+ * it carries no bits. */
+void x86_store_basedisp_reg(struct code *c, int base, int disp, int src,
+                            int size)
 {
-    int rexb = (base & 8) ? 1 : 0;
+    int rexRB = ((src & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
     switch (size) {
-    case 1: if (rexb) code_byte(c, 0x41);        code_byte(c, 0x88); break;
-    case 2: code_byte(c, 0x66); if (rexb) code_byte(c, 0x41); code_byte(c, 0x89); break;
-    case 4: if (rexb) code_byte(c, 0x41);        code_byte(c, 0x89); break;
-    case 8: code_byte(c, 0x48 | rexb);           code_byte(c, 0x89); break;
+    case 1:
+        if (rexRB || src >= 4) code_byte(c, 0x40 | rexRB);
+        code_byte(c, 0x88);
+        break;
+    case 2:
+        code_byte(c, 0x66);
+        if (rexRB) code_byte(c, 0x40 | rexRB);
+        code_byte(c, 0x89);
+        break;
+    case 4:
+        if (rexRB) code_byte(c, 0x40 | rexRB);
+        code_byte(c, 0x89);
+        break;
+    case 8:
+        code_byte(c, 0x48 | rexRB);
+        code_byte(c, 0x89);
+        break;
     default: internal_error("bad store size %d", size);
     }
-    modrm_base(c, 0, base, disp);
+    modrm_base(c, src, base, disp);
+}
+
+void x86_store_basedisp_rax(struct code *c, int base, int disp, int size)
+{
+    x86_store_basedisp_reg(c, base, disp, 0, size);
 }
 
 /* Store rax to [base + index*scale] (an array-element store, `p[i] = x`). */
+void x86_store_baseindex_reg(struct code *c, int base, int index, int scale,
+                             int src, int size)
+{
+    int rexRXB = ((src & 8) ? 4 : 0) | ((index & 8) ? 2 : 0) |
+                 ((base & 8) ? 1 : 0);
+    switch (size) {
+    case 1:
+        if (rexRXB || src >= 4) code_byte(c, 0x40 | rexRXB);
+        code_byte(c, 0x88);
+        break;
+    case 2:
+        code_byte(c, 0x66);
+        if (rexRXB) code_byte(c, 0x40 | rexRXB);
+        code_byte(c, 0x89);
+        break;
+    case 4:
+        if (rexRXB) code_byte(c, 0x40 | rexRXB);
+        code_byte(c, 0x89);
+        break;
+    case 8:
+        code_byte(c, 0x48 | rexRXB);
+        code_byte(c, 0x89);
+        break;
+    default: internal_error("bad store size %d", size);
+    }
+    modrm_baseindex0(c, src, base, index, scale);
+}
+
 void x86_store_baseindex_rax(struct code *c, int base, int index, int scale,
                              int size)
 {
-    int rexXB = ((index & 8) ? 2 : 0) | ((base & 8) ? 1 : 0);
-    switch (size) {
-    case 1: if (rexXB) code_byte(c, 0x40 | rexXB);        code_byte(c, 0x88); break;
-    case 2: code_byte(c, 0x66); if (rexXB) code_byte(c, 0x40 | rexXB); code_byte(c, 0x89); break;
-    case 4: if (rexXB) code_byte(c, 0x40 | rexXB);        code_byte(c, 0x89); break;
-    case 8: code_byte(c, 0x48 | rexXB);                   code_byte(c, 0x89); break;
-    default: internal_error("bad store size %d", size);
-    }
-    modrm_baseindex0(c, 0, base, index, scale);
+    x86_store_baseindex_reg(c, base, index, scale, 0, size);
 }
 
 void x86_mov_rcx_slot(struct code *c, int disp)
@@ -1051,25 +1221,82 @@ static void sse_prefix(struct code *c, int w)
     code_byte(c, w == 4 ? 0xf3 : 0xf2);
 }
 
+/* REX.R for an xmm register above 7. The SSE prefix is a legacy one and
+ * comes first; REX has to sit immediately before the 0x0F escape. Until
+ * the FP pool existed nothing here named a register above xmm7, so these
+ * emitters simply did not write one. */
+static void sse_rex_r(struct code *c, int xmm)
+{
+    if (xmm >= 8)
+        code_byte(c, 0x44);
+}
+
 void x86_movs_load(struct code *c, int xmm, int disp, int w)
 {
     sse_prefix(c, w);
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f);
     code_byte(c, 0x10); /* movss/movsd xmm, m */
-    modrm_rbp(c, xmm, disp);
+    modrm_rbp(c, xmm & 7, disp);
+}
+
+/* movaps xmm, xmm -- a whole-register copy, which is what a scalar move
+ * between registers costs anyway and has no false dependency on the
+ * destination's upper half the way movss/movsd does. */
+/* movq xmm, r64 / movd xmm, r32 -- the only way a bit pattern in a
+ * general register becomes a floating-point value without going through
+ * memory. A float CONSTANT is exactly that: the IR holds its bits. */
+void x86_movq_xmm_gpr(struct code *c, int xmm, int gpr, int w)
+{
+    code_byte(c, 0x66);
+    if (w == 8 || xmm >= 8 || gpr >= 8)
+        code_byte(c, 0x40 | ((w == 8) << 3) | ((xmm >= 8) << 2) | (gpr >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x6e);
+    code_byte(c, 0xc0 | ((xmm & 7) << 3) | (gpr & 7));
+}
+
+void x86_movs_reg(struct code *c, int dst, int src)
+{
+    if (dst >= 8 || src >= 8)
+        code_byte(c, 0x40 | ((dst >= 8) << 2) | (src >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x28);
+    code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
+}
+
+/* The register form of the scalar ALU ops: `addsd dst, src`. */
+void x86_sse_alu_reg(struct code *c, int op, int dst, int src, int w)
+{
+    sse_prefix(c, w);
+    if (dst >= 8 || src >= 8)
+        code_byte(c, 0x40 | ((dst >= 8) << 2) | (src >= 8));
+    code_byte(c, 0x0f);
+    switch (op) {
+    case '+': code_byte(c, 0x58); break;
+    case '-': code_byte(c, 0x5c); break;
+    case '*': code_byte(c, 0x59); break;
+    case '/': code_byte(c, 0x5e); break;
+    case 'q': code_byte(c, 0x51); break;
+    default:
+        internal_error("no SSE encoding for '%c'", op);
+    }
+    code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
 }
 
 void x86_movs_store(struct code *c, int xmm, int disp, int w)
 {
     sse_prefix(c, w);
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f);
     code_byte(c, 0x11); /* movss/movsd m, xmm */
-    modrm_rbp(c, xmm, disp);
+    modrm_rbp(c, xmm & 7, disp);
 }
 
-void x86_sse_alu_mem(struct code *c, int op, int disp, int w)
+void x86_sse_alu_mem(struct code *c, int op, int dst, int disp, int w)
 {
     sse_prefix(c, w);
+    sse_rex_r(c, dst);
     code_byte(c, 0x0f);
     switch (op) {
     case '+': code_byte(c, 0x58); break; /* addss/addsd */
@@ -1082,32 +1309,46 @@ void x86_sse_alu_mem(struct code *c, int op, int disp, int w)
     default:
         internal_error("no SSE encoding for '%c'", op);
     }
-    modrm_rbp(c, 0, disp); /* always xmm0 */
+    modrm_rbp(c, dst & 7, disp);
 }
 
-void x86_ucomis_mem(struct code *c, int disp, int w)
+void x86_ucomis_mem(struct code *c, int xmm, int disp, int w)
 {
     if (w == 8)
         code_byte(c, 0x66); /* ucomisd */
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f);
     code_byte(c, 0x2e);
-    modrm_rbp(c, 0, disp);
+    modrm_rbp(c, xmm & 7, disp);
+}
+
+/* ucomis xmm, xmm -- the register form, for a second operand that has an
+ * FP home rather than a slot. */
+void x86_ucomis_reg(struct code *c, int a, int b, int w)
+{
+    if (w == 8)
+        code_byte(c, 0x66);
+    if (a >= 8 || b >= 8)
+        code_byte(c, 0x40 | ((a >= 8) << 2) | (b >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x2e);
+    code_byte(c, 0xc0 | ((a & 7) << 3) | (b & 7));
 }
 
 /* setcc + zero-extend into an ARBITRARY register (register-targeted
  * x86_setcc_eax; identical bytes when reg == rax). Writes reg's low byte then
- * movzx-widens it in place -- RAX is never touched. Valid for the -O2 register
- * pool {r8..r15, rbx}: rbx maps to the directly-addressable bl and r8..r15 use
- * REX.B, so the ah/ch/dh/bh aliasing trap (rm 4..7 with no REX) never arises. */
+ * movzx-widens it in place -- RAX is never touched.
+ *
+ * Both halves name reg as an 8-bit operand, so both go through rex_rb8:
+ * the note there is what this used to say could never happen. */
 void x86_setcc_reg(struct code *c, int cc, int reg)
 {
-    if (reg & 8) code_byte(c, 0x41);          /* REX.B: setcc r8b..r15b */
+    rex_rb8(c, 0, 0, reg, 0, 1);               /* setcc r/m8 */
     code_byte(c, 0x0f);
-    code_byte(c, cc);                          /* setcc r/m8 */
+    code_byte(c, cc);
     code_byte(c, 0xc0 | (reg & 7));
-    { int rex = 0x40 | ((reg & 8) ? 5 : 0);   /* REX.R|REX.B when extended */
-      if (rex != 0x40) code_byte(c, rex); }
-    code_byte(c, 0x0f);                        /* movzx reg32, reg8 */
+    rex_rb8(c, 0, reg, reg, 0, 1);             /* movzx reg32, reg8 */
+    code_byte(c, 0x0f);
     code_byte(c, 0xb6);
     code_byte(c, 0xc0 | ((reg & 7) << 3) | (reg & 7));
 }
@@ -1129,14 +1370,18 @@ void x86_set_float_eq(struct code *c, int ne)
     code_byte(c, 0xc0);
 }
 
-void x86_cvtsi2s(struct code *c, int disp, int srcw, int dstw)
+/* These four used to name xmm0 in the reg field with no way to say
+ * otherwise, which was fine while xmm0 was the scratch. It is a pool
+ * register now, so each takes the register explicitly -- and REX.R with
+ * it, because the scratch is no longer below eight. */
+void x86_cvtsi2s(struct code *c, int xmm, int disp, int srcw, int dstw)
 {
     sse_prefix(c, dstw);
-    if (srcw == 8)
-        code_byte(c, 0x48); /* REX.W: 64-bit integer source */
+    if (srcw == 8 || xmm >= 8)
+        code_byte(c, 0x40 | ((srcw == 8) << 3) | ((xmm >= 8) ? 4 : 0));
     code_byte(c, 0x0f);
-    code_byte(c, 0x2a); /* cvtsi2ss/cvtsi2sd xmm0, r/m */
-    modrm_rbp(c, 0, disp);
+    code_byte(c, 0x2a); /* cvtsi2ss/cvtsi2sd xmm, r/m */
+    modrm_rbp(c, xmm & 7, disp);
 }
 
 void x86_cvtts2si(struct code *c, int disp, int srcw, int dstw)
@@ -1146,15 +1391,52 @@ void x86_cvtts2si(struct code *c, int disp, int srcw, int dstw)
         code_byte(c, 0x48); /* REX.W: 64-bit integer destination */
     code_byte(c, 0x0f);
     code_byte(c, 0x2c); /* cvttss2si/cvttsd2si rax, xmm/m (truncating) */
-    modrm_rbp(c, 0, disp);
+    modrm_rbp(c, 0, disp);   /* the DESTINATION is rax, a GPR */
 }
 
-void x86_cvts2s(struct code *c, int disp, int srcw)
+void x86_cvts2s(struct code *c, int xmm, int disp, int srcw)
 {
     sse_prefix(c, srcw);
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f);
     code_byte(c, 0x5a); /* cvtss2sd / cvtsd2ss */
-    modrm_rbp(c, 0, disp);
+    modrm_rbp(c, xmm & 7, disp);
+}
+
+/* The register forms of the three conversions, for a value that has an
+ * FP home rather than a slot. The two with a FLOAT destination take it
+ * explicitly, because xmm0 is a pool register now; the one that writes
+ * rax still names it implicitly. Each behaves exactly as its
+ * memory sibling does; only where the OPERAND comes from changes. */
+void x86_cvtsi2s_reg(struct code *c, int dst, int src, int srcw, int dstw)
+{
+    sse_prefix(c, dstw);
+    if (srcw == 8 || src >= 8 || dst >= 8)
+        code_byte(c, 0x40 | ((srcw == 8) << 3) | ((dst >= 8) ? 4 : 0) |
+                     (src >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x2a);
+    code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
+}
+
+void x86_cvtts2si_reg(struct code *c, int src, int srcw, int dstw)
+{
+    sse_prefix(c, srcw);
+    if (dstw == 8 || src >= 8)
+        code_byte(c, 0x40 | ((dstw == 8) << 3) | (src >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x2c);
+    code_byte(c, 0xc0 | (src & 7));          /* reg = rax */
+}
+
+void x86_cvts2s_reg(struct code *c, int dst, int src, int srcw)
+{
+    sse_prefix(c, srcw);
+    { int rex = 0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0);
+      if (rex != 0x40) code_byte(c, rex); }
+    code_byte(c, 0x0f);
+    code_byte(c, 0x5a);
+    code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
 }
 
 void x86_mov_al_imm(struct code *c, int v)
@@ -1213,6 +1495,37 @@ int x86_jmp_rel32(struct code *c)
     return off;
 }
 
+/* The two-byte forms. A displacement that fits in a signed byte reaches
+ * most of what a function branches to, and costs four bytes less every
+ * time -- `74 cb` against `0f 84 cd`. Which branches may use one is not
+ * knowable while emitting, because it depends on where everything else
+ * lands; codegen decides by emitting the function more than once (see
+ * the relaxation loop in codegen.c) and these are what it emits when it
+ * has decided yes. */
+int x86_jz_rel8(struct code *c)
+{
+    code_byte(c, 0x74);
+    int off = c->len;
+    code_byte(c, 0);
+    return off;
+}
+
+int x86_jnz_rel8(struct code *c)
+{
+    code_byte(c, 0x75);
+    int off = c->len;
+    code_byte(c, 0);
+    return off;
+}
+
+int x86_jmp_rel8(struct code *c)
+{
+    code_byte(c, 0xeb);
+    int off = c->len;
+    code_byte(c, 0);
+    return off;
+}
+
 /* jmp *reg  (FF /4) — the indirect jump a GNU computed goto lowers to. */
 void x86_jmp_reg(struct code *c, int reg)
 {
@@ -1229,6 +1542,15 @@ int x86_jcc_rel32(struct code *c, int setcc)
     code_byte(c, 0x80 | (setcc & 0x0f));
     int off = c->len;
     code_u32(c, 0);
+    return off;
+}
+
+/* The two-byte conditional: `7x cb` where the near form is `0f 8x cd`. */
+int x86_jcc_rel8(struct code *c, int setcc)
+{
+    code_byte(c, 0x70 | (setcc & 0x0f));
+    int off = c->len;
+    code_byte(c, 0);
     return off;
 }
 
@@ -1252,4 +1574,249 @@ void x86_call_r11(struct code *c)
     code_byte(c, 0x41); /* REX.B */
     code_byte(c, 0xff); /* call r/m64: /2 */
     code_byte(c, 0xd3);
+}
+
+/* ---- 128-bit vectors (SSE2) ----------------------------------------------
+ *
+ * SSE2 and nothing above it, because every x86-64 has SSE2 by
+ * definition: a vector instruction here needs no feature test, no
+ * run-time dispatch and no fallback path. That is also why there is no
+ * packed 32-bit multiply below -- `pmulld` is SSE4.1, and the
+ * vectorizer turns a multiply by a constant into shifts and adds rather
+ * than emit an instruction an old machine would fault on.
+ *
+ * A vector temp lives in a 16-byte frame slot (the `wide` map, as a long
+ * double does), and every operation works in xmm0 against a slot, which
+ * is the same shape the scalar float path already uses. */
+
+/* movdqu xmm, [base+disp] / movdqu [base+disp], xmm. Unaligned, because
+ * the address comes from the program (&a[i] for any i), not from us. */
+void x86_vload_base(struct code *c, int xmm, int base, int disp)
+{
+    code_byte(c, 0xf3);
+    rex_rb(c, 0, xmm, base);
+    code_byte(c, 0x0f); code_byte(c, 0x6f);
+    modrm_base(c, xmm, base, disp);
+}
+
+void x86_vstore_base(struct code *c, int base, int disp, int xmm)
+{
+    code_byte(c, 0xf3);
+    rex_rb(c, 0, xmm, base);
+    code_byte(c, 0x0f); code_byte(c, 0x7f);
+    modrm_base(c, xmm, base, disp);
+}
+
+/* The same against a frame slot, which we align to 16, so movdqa. */
+/* movdqu xmm, [base+disp] / movdqu [base+disp], xmm -- all sixteen
+ * bytes in one instruction, against any base register.
+ *
+ * This is what a 16-byte COPY is: a long double, an __int128 or a
+ * vector moving from one place to another. Doing it as two loads and
+ * two stores through rax was four instructions and about twenty-two
+ * bytes; this is two and thirteen, and it leaves rax (and its residency
+ * cache) alone.
+ *
+ * UNALIGNED, because only some of the addresses involved are known to
+ * be 16-aligned: a 16-byte slot is, and a pointer a program handed us
+ * is not. On every processor this compiler targets movdqu against an
+ * aligned address costs what movdqa would. */
+void x86_mov128_load(struct code *c, int xmm, int base, int disp)
+{
+    code_byte(c, 0xf3);
+    { int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+      if (rex != 0x40) code_byte(c, rex); }
+    code_byte(c, 0x0f); code_byte(c, 0x6f);
+    modrm_base(c, xmm, base, disp);
+}
+
+void x86_mov128_store(struct code *c, int base, int disp, int xmm)
+{
+    code_byte(c, 0xf3);
+    { int rex = 0x40 | ((xmm & 8) ? 4 : 0) | ((base & 8) ? 1 : 0);
+      if (rex != 0x40) code_byte(c, rex); }
+    code_byte(c, 0x0f); code_byte(c, 0x7f);
+    modrm_base(c, xmm, base, disp);
+}
+
+/* The three packed forms with a MEMORY operand. Their register-operand
+ * twins have always emitted REX.R for xmm8-15; these did not, because
+ * the vector registers used to be xmm0-7 and the question never arose.
+ * Moving the FP pool to xmm0-7 pushed the vector accumulators up to
+ * xmm8-11, and without the prefix every one of them assembled as
+ * xmm0-3 -- silently, and only the vectorize and unroll tests could
+ * tell. */
+void x86_vload_slot(struct code *c, int xmm, int disp)
+{
+    code_byte(c, 0x66);
+    sse_rex_r(c, xmm);
+    code_byte(c, 0x0f); code_byte(c, 0x6f);
+    modrm_rbp(c, xmm & 7, disp);
+}
+
+void x86_vstore_slot(struct code *c, int disp, int xmm)
+{
+    code_byte(c, 0x66);
+    sse_rex_r(c, xmm);
+    code_byte(c, 0x0f); code_byte(c, 0x7f);
+    modrm_rbp(c, xmm & 7, disp);
+}
+
+/* xmm <op>= [rbp+disp], lane by lane at `esize` bytes. */
+void x86_vbin_slot(struct code *c, int xmm, int op, int esize, int disp)
+{
+    int opcode;
+    switch (op) {
+    case '+':
+        opcode = esize == 1 ? 0xfc : esize == 2 ? 0xfd
+               : esize == 4 ? 0xfe : 0xd4;          /* paddb/w/d/q */
+        break;
+    case '-':
+        opcode = esize == 1 ? 0xf8 : esize == 2 ? 0xf9
+               : esize == 4 ? 0xfa : 0xfb;          /* psubb/w/d/q */
+        break;
+    case '&': opcode = 0xdb; break;                 /* pand */
+    case '|': opcode = 0xeb; break;                 /* por */
+    case '^': opcode = 0xef; break;                 /* pxor */
+    default:
+        internal_error("no SSE2 packed encoding for '%c'", op);
+    }
+    code_byte(c, 0x66);
+    sse_rex_r(c, xmm);
+    code_byte(c, 0x0f); code_byte(c, (unsigned)opcode);
+    modrm_rbp(c, xmm & 7, disp);
+}
+
+/* xmm <<= imm / >>= imm, lane by lane. `arith` picks psra over psrl;
+ * SSE2 has no arithmetic 64-bit shift, so the vectorizer does not ask. */
+void x86_vshift_imm(struct code *c, int xmm, int left, int arith, int esize,
+                    int imm)
+{
+    int grp = esize == 2 ? 0x71 : esize == 4 ? 0x72 : 0x73;
+    int ext = left ? 6 : arith ? 4 : 2;
+    /* Only a RIGHT shift can be arithmetic; `arith` says nothing about a
+     * left one, and reading it there refused a perfectly good psllq. */
+    if (!left && arith && esize == 8)
+        internal_error("SSE2 has no arithmetic 64-bit packed shift");
+    if (esize != 2 && esize != 4 && esize != 8)
+        internal_error("no packed shift for %d-byte lanes", esize);
+    code_byte(c, 0x66);
+    if (xmm & 8) code_byte(c, 0x41);
+    code_byte(c, 0x0f); code_byte(c, (unsigned)grp);
+    code_byte(c, (unsigned)(0xc0 | (ext << 3) | (xmm & 7)));
+    code_byte(c, (unsigned)(imm & 0xff));
+}
+
+/* xmm = xmm register-to-register (movdqa xmm, xmm). */
+void x86_vmov_rr(struct code *c, int dst, int src)
+{
+    code_byte(c, 0x66);
+    if ((dst & 8) || (src & 8))
+        code_byte(c, (unsigned)(0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0)));
+    code_byte(c, 0x0f); code_byte(c, 0x6f);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
+}
+
+/* pshufd xmm_dst, xmm_src, imm8 -- the lane permute both the splat and
+ * the reduction are built from. */
+void x86_vshufd(struct code *c, int dst, int src, int imm)
+{
+    code_byte(c, 0x66);
+    if ((dst & 8) || (src & 8))
+        code_byte(c, (unsigned)(0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0)));
+    code_byte(c, 0x0f); code_byte(c, 0x70);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
+    code_byte(c, (unsigned)(imm & 0xff));
+}
+
+/* movd/movq xmm, r  and  movd/movq r, xmm. */
+void x86_vmov_xmm_reg(struct code *c, int xmm, int reg, int w)
+{
+    code_byte(c, 0x66);
+    rex_rb(c, w == 8 ? 1 : 0, xmm, reg);
+    code_byte(c, 0x0f); code_byte(c, 0x6e);
+    code_byte(c, (unsigned)(0xc0 | ((xmm & 7) << 3) | (reg & 7)));
+}
+
+void x86_vmov_reg_xmm(struct code *c, int reg, int xmm, int w)
+{
+    code_byte(c, 0x66);
+    rex_rb(c, w == 8 ? 1 : 0, xmm, reg);
+    code_byte(c, 0x0f); code_byte(c, 0x7e);
+    code_byte(c, (unsigned)(0xc0 | ((xmm & 7) << 3) | (reg & 7)));
+}
+
+/* The register-to-register form of the packed ALU, which the horizontal
+ * reduction needs: it folds a vector against a permuted copy of itself,
+ * and the copy is in a register, not a slot. */
+void x86_vbin_rr(struct code *c, int dst, int src, int op, int esize)
+{
+    int opcode;
+    switch (op) {
+    case '+':
+        opcode = esize == 1 ? 0xfc : esize == 2 ? 0xfd
+               : esize == 4 ? 0xfe : 0xd4;
+        break;
+    case '-':
+        opcode = esize == 1 ? 0xf8 : esize == 2 ? 0xf9
+               : esize == 4 ? 0xfa : 0xfb;
+        break;
+    case '&': opcode = 0xdb; break;
+    case '|': opcode = 0xeb; break;
+    case '^': opcode = 0xef; break;
+    default:
+        internal_error("no SSE2 packed encoding for '%c'", op);
+    }
+    code_byte(c, 0x66);
+    if ((dst & 8) || (src & 8))
+        code_byte(c, (unsigned)(0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0)));
+    code_byte(c, 0x0f); code_byte(c, (unsigned)opcode);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
+}
+
+/* punpck{l,h}{bw,wd,dq}: interleave the low (or high) half of two
+ * vectors' lanes. With the second operand holding each lane's extension
+ * bits -- all sign bits, or all zero -- this is how SSE2 widens: four
+ * int32 lanes become two int64 ones, a half at a time. SSE4.1's
+ * pmovsxdq would do it in one instruction, and is not SSE2. */
+void x86_vunpck(struct code *c, int dst, int src, int high, int esize)
+{
+    int opcode;
+    switch (esize) {
+    case 1: opcode = high ? 0x68 : 0x60; break;   /* punpck?bw */
+    case 2: opcode = high ? 0x69 : 0x61; break;   /* punpck?wd */
+    case 4: opcode = high ? 0x6a : 0x62; break;   /* punpck?dq */
+    default:
+        internal_error("no packed unpack for %d-byte lanes", esize);
+    }
+    code_byte(c, 0x66);
+    if ((dst & 8) || (src & 8))
+        code_byte(c, (unsigned)(0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0)));
+    code_byte(c, 0x0f); code_byte(c, (unsigned)opcode);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
+}
+
+/* test reg, reg -- set ZF from a value without changing it. */
+void x86_test_rr(struct code *c, int a, int b, int w)
+{
+    rex_rb(c, w == 8 ? 1 : 0, b, a);
+    code_byte(c, 0x85);
+    code_byte(c, (unsigned)(0xc0 | ((b & 7) << 3) | (a & 7)));
+}
+
+/* cmovne reg, [rbp+disp] -- take the slot's value only if ZF is clear.
+ * The whole point of a select: no branch, so no misprediction, and both
+ * sides were already computed. */
+void x86_cmovne_slot(struct code *c, int reg, int disp, int w)
+{
+    rex_rb(c, w == 8 ? 1 : 0, reg, REG_RBP);
+    code_byte(c, 0x0f); code_byte(c, 0x45);
+    modrm_rbp(c, reg, disp);
+}
+
+void x86_cmovne_rr(struct code *c, int dst, int src, int w)
+{
+    rex_rb(c, w == 8 ? 1 : 0, dst, src);
+    code_byte(c, 0x0f); code_byte(c, 0x45);
+    code_byte(c, (unsigned)(0xc0 | ((dst & 7) << 3) | (src & 7)));
 }

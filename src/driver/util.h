@@ -65,6 +65,8 @@ void diag_set_warn_system(int on);
 void diag_enable_warning(const char *name, int on);   /* -Wname / -Wno-name */
 void diag_enable_group(int wall, int wextra);         /* -Wall / -Wextra */
 int diag_warning_count(void);                         /* for --help */
+/* How many warnings were REPORTED (the one above counts OPTIONS). */
+int diag_warnings_reported(void);
 const char *diag_warning_name(int i);
 int diag_warning_group(int i);                        /* 0 none, 1 all, 2 extra */
 

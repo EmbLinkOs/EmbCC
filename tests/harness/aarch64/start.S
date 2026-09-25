@@ -12,6 +12,17 @@ _start:
     ldr     x0, =__stack_top
     mov     sp, x0
 
+    /* 0. Exception vectors, first, so that everything after this point
+     * reports instead of hanging. VBAR_EL1 is zero at reset and the
+     * vector page is not mapped, so ANY trap -- a null dereference, an
+     * alignment abort, an illegal instruction -- used to spin until the
+     * 20-second timeout killed QEMU, and the whole diagnosis was "the
+     * test hung". harness_fault prints ESR, FAR and ELR and exits 125,
+     * which tests/run.sh already reads as "the guest crashed". */
+    ldr     x0, =__vectors
+    msr     vbar_el1, x0
+    isb
+
     /* 1. FP/SIMD. Every FP and SIMD instruction traps at reset
      * (CPACR_EL1.FPEN = 0b00), and newlib's memcpy/memset/printf all use q
      * registers. Without this the first one faults to a VBAR_EL1 that is
@@ -39,15 +50,22 @@ _start:
      * caches on, which is the difference between a test suite that takes
      * seconds and one that takes minutes.
      *
-     * The map is flat: 1 GiB blocks in a single level-1 table, entry 0
-     * Device (virt's MMIO window -- UART, GIC, virtio), entries 1..7 Normal
-     * write-back over the 7 GiB of address space where RAM can appear. */
+     * The map is flat: 1 GiB blocks in a single level-1 table, entries
+     * 1..7 Normal write-back over the 7 GiB of address space where RAM
+     * can appear, and entry 0 deliberately absent (below). */
     ldr     x0, =__pgtable
 
-    /* entry 0: PA 0, Device-nGnRnE (AttrIndx 0), AF, execute-never. */
-    movz    x1, #0x0401
-    movk    x1, #0x0060, lsl #48
-    str     x1, [x0]
+    /* entry 0: LEFT INVALID, so the low 1 GiB -- address zero above
+     * all -- is not mapped and a null dereference takes a data abort.
+     *
+     * It used to map PA 0 as Device memory "for virt's MMIO window",
+     * which nothing here ever touches: every byte of I/O in this
+     * harness goes through semihosting (`hlt #0xf000`), and the image
+     * is loaded at 0x40080000, in entry 1. What the mapping did do was
+     * make `*(int *)0 = 1` succeed -- a Device write, discarded, read
+     * back as whatever the flash held -- so no test on this target
+     * could detect a null dereference. .bss zeroed the table above, so
+     * leaving the entry alone is leaving it invalid. */
 
     /* entries 1..7: Normal WB (AttrIndx 1), inner-shareable, AF, block. */
     movz    x5, #0x0705
@@ -89,3 +107,30 @@ _start:
      * startup does not require them. */
     bl      __harness_main          /* ../crt.c: constructors, main, exit */
 4:  b       4b
+
+/* The vector table. AArch64 wants sixteen entries of 0x80 bytes at a
+ * 2 KiB-aligned address: four exception kinds (synchronous, IRQ, FIQ,
+ * SError) for each of four origins (current EL with SP0, current EL
+ * with SPx, lower EL in aarch64, lower EL in aarch32). Nothing here
+ * takes interrupts and nothing runs at a lower EL, so all sixteen go
+ * to the same place -- the point is not to handle anything, it is to
+ * have somewhere to land that can say what happened. */
+    .section .text, "ax"
+    .align 11
+    .global __vectors
+__vectors:
+    .rept 16
+    .align 7
+    b       __fault
+    .endr
+
+__fault:
+    /* The faulting stack may be the reason we are here, so start from a
+     * known-good one. Nothing returns from this. */
+    mrs     x0, esr_el1
+    mrs     x1, far_el1
+    mrs     x2, elr_el1
+    ldr     x3, =__stack_top
+    mov     sp, x3
+    bl      harness_fault
+5:  b       5b

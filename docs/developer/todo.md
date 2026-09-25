@@ -987,13 +987,21 @@ architectures. What that image cannot do:
   is what the kernel's own wake uses — a private wait there keys on
   something the wake never touches and hangs forever. `std::thread`,
   `std::mutex` and `std::atomic::wait` all run on a real kernel in
-  `tests/golden/linux.sh`. What is still missing is **thread-local
-  storage**: EmbCC has no `__thread`, so `CLONE_SETTLS` is unused,
-  `errno` is one variable for the whole process, and
-  `__os_thread_self()` scans a list instead of reading a register.
+  `tests/golden/linux.sh`. Thread-local storage followed (2026-09-22):
+  `CLONE_SETTLS` installs each thread's block, `errno` is per-thread
+  where a runtime sets a thread pointer up, and `__os_thread_self()` is
+  a thread-local load rather than a list scan.
 - **Dynamic linking and PIE.** Static only: no GOT/PLT generation, no
-  `PT_INTERP`, no shared libraries. This is also why `embcc` still does
-  not invoke a linker itself on Linux — the golden test calls `ld`.
+  `PT_INTERP`, no shared libraries.
+- **No compiler runtime and no unwinder.** This is the gap between
+  "the image has no undefined symbols" and "the target is
+  self-sufficient", and only the first was ever checked. A program
+  using `__int128` needs `__multi3`, `__ashlti3`, `__lshrti3`; complex
+  arithmetic needs `__mulxc3`/`__muldc3`; `pow` on doubles needs
+  `__powidf2`; and C++ exceptions need `_Unwind_*`, which also needs
+  `.eh_frame_hdr` in the link script and a `dl_iterate_phdr` or
+  `_dl_find_object` for the unwinder to find it. None of those exist,
+  so those programs do not link on the static Linux target.
 - **The vDSO.** `__os_time` and `__os_clock_ns` enter the kernel on
   every call. Reading the vDSO means parsing the auxiliary vector and an
   ELF image in our own address space; `_start` currently walks past the
@@ -1156,6 +1164,518 @@ Not covered: the IEEE quad path. Nothing currently runs this libc on
 aarch64 — `tests/golden/libc.sh` says so itself — so the 113-bit
 decomposition is compiled and type-checked but never executed. It
 inherits that gap rather than creating one.
+
+## Closed: three declarations the standard allows (2026-09-22)
+
+From an external defect report. Each one is a spelling C permits, that
+real code uses, and that EmbCC rejected -- two of them by crashing.
+`tests/exec/declarators.c` runs all three on both targets and is
+differentially checked against gcc.
+
+**A parenthesized declarator, `int (f)(int);`.** C11 6.7.6 lets a
+declarator be parenthesized anywhere; a header does it to suppress a
+function-like macro of the same name, which is why `(isdigit)(c)` is
+written that way. The parser entered its parenthesized-declarator path
+only when a `*` followed the `(`, so the pointer spelling worked and the
+plain one was "expected a name before '('". The DEFINITION was worse:
+the parameter list after the parentheses was parsed by a path that
+discards parameter names, so the body compiled against whatever the
+previous declaration had left in the shared name array -- a stale
+pointer, and a segfault.
+
+The first fix for that was wrong in an instructive way. Writing the
+names straight into `ps->fn_pnames` looks obviously right and broke
+`void (*signal(int sig, void (*handler)(int)))(int)`: a parameter can
+itself be a parenthesized declarator, so parsing `handler`'s own
+`(int)` overwrote slot 0 while the outer parameter list was still
+filling it, and the real libc's signal() stopped compiling. The array
+is shared by every declarator in flight, so the suffix's names go into
+a local array and are published only when the parentheses held a bare
+name -- `t == outer`, which says nothing was derived inside.
+
+**`_Alignas` before the storage class.** C11 6.7 makes declaration
+specifiers unordered, so `_Alignas(16) static char a[1];` is the same
+declaration as `static _Alignas(16) char a[1];`. Only the second
+parsed. The first crashed: the type-specifier parser consumed the
+alignment, met `static` where a type belonged, returned NULL, and the
+caller dereferenced it. Two fixes, because the crash hid a second bug
+behind it -- once it parsed, the alignment was still DROPPED on the way
+from the block-scope declaration to the global a static local becomes,
+so the declaration was accepted and then not done. `parse_stmt` now
+takes `_Alignas` among the storage specifiers, sema carries
+`user_align` across the promotion, and a NULL from `parse_type_spec` is
+a diagnostic rather than a dereference.
+
+**The address of an element of an array of arrays, in a static
+initializer.** `int *row = &g[1][0];`. Since `a[i]` is built as
+`*(a + i)`, this arrives as `&*(*(g+1) + 0)`, and the constant-address
+resolver had no case for a dereference whose result is an array -- one
+that loads nothing, because an array lvalue decays straight back to the
+address just computed. A table of rows naming its own first element was
+rejected as "not a constant". The same decay one level in, `&st.b[2]`,
+needed the member case as well.
+
+## Closed: std::cerr before initialization, and the harness that hid it (2026-09-22)
+
+Two defects, and the second is why the first survived a green suite.
+
+**The harness mapped address zero.** Both bare-metal harnesses did:
+x86-64 identity-mapped the low 1 GiB with 2 MiB pages, aarch64 mapped
+the whole first gigabyte as one Device block "for virt's MMIO window",
+which nothing in the harness touches because all its I/O is
+semihosting. A bare-metal image has no kernel to object, so
+`*(int *)0 = 1` wrote, read back, and the program carried on. No test
+in `tests/exec` or `tests/cxx` could detect a null dereference, on
+either target, and none ever had.
+
+x86-64 now splits the first 2 MiB into 4 KiB pages with entry 0 absent
+(the image is at 1 MiB, so nothing else moves); aarch64 leaves
+level-1 entry 0 invalid. aarch64 also got what it had never had: an
+exception vector table. `VBAR_EL1` was zero, so any trap spun on an
+unmapped vector page until the 20-second timeout, and an alignment
+abort, an illegal instruction and a null dereference were all "the test
+hung". `harness_fault` prints ESR, FAR and ELR and exits 125, which the
+runner already reads as "the guest crashed".
+
+**And with the page gone, `tests/golden/libcxx-std.sh` failed at once.**
+The fault was in `std::__ios_init::__ios_init` with CR2 = 0, on the
+instruction that loads `std::cerr`. `cerr` is declared
+
+    ostream &cerr = *reinterpret_cast<ostream *>(__cerr_store);
+
+which is a constant address -- but the initializer is an LVALUE cast, and
+`c_const` answered "not constant" for any lvalue cast without looking,
+so the assignment went into `.init_array` and `cerr` lived in `.bss`.
+Every translation unit that includes `<iostream>` has its own
+`__ios_init`, whose constructor calls `cerr.setf(unitbuf)`, and
+`.init_array` entries from different units run in an unspecified order.
+The unit that ran first stored through a null `cerr`. The real
+libstdc++ has no such window precisely because its stream references
+are statically initialized.
+
+The fix is in `addr_const`/`c_const`: an lvalue cast renames storage
+rather than moving it, so its ADDRESS is as constant as the operand's --
+which is the right question, because a reference lowers to a pointer.
+`addr_const` also learned `*(T *)x` for a constant pointer and `p + n`
+for a constant n, both of which the same test then found.
+
+Making those initializers static exposed an ordering bug behind it: the
+C++ emitter writes definitions from a worklist, so a `static` object was
+written only when something asked for it -- after the thing that asked.
+While every such initializer was dynamic that never showed. Referenced
+statics now get a tentative definition in the forward-declaration pass,
+carrying their `section` and `aligned` attributes, since alignment
+belongs to the object and not to the initializer.
+
+`tests/golden/static-init.sh` covers all of it on both targets: that a
+unit whose initializers are all constant addresses emits no
+`__cx_global_init` at all, that each reference lands in `.data` with a
+relocation rather than in `.bss`, that a static can be named before it
+is defined and keep its `alignas`, and -- the one that matters most --
+that a null dereference still faults.
+
+**And a race in the suite, found by the same runs.** An aarch64 run
+failed in `cxx-libsupcxx.sh` with "embcc: No such file or directory".
+`host-agnostic.sh` builds EmbCC twice with two host compilers, and the
+Makefile's `embcc` target writes `./embcc` -- the binary every other
+test in the parallel run is executing. The Makefile now has a
+`$(BUILD)/embcc` target that links inside the object directory, so with
+`BUILD=` pointing somewhere private the build is entirely its own.
+
+## Closed: malloc was quadratic, and what fixing it exposed (2026-09-22)
+
+Measured before touching it, on the Linux target: 2000 allocations
+0.055s, 4000 0.199s, 8000 0.791s, 16000 3.281s -- four times the work
+for twice the blocks, every step -- and 60000 did not finish inside the
+harness's twenty-second timeout. The host's libc does the same 60000 in
+0.002s. A compiler parsing a file allocates and does not free, so this
+is exactly the program that suffers.
+
+The cause was one list. Every block lived on a single address-ordered
+list and `malloc` searched it from the head, so a program with many
+live blocks and few free ones walked all the live ones on every call.
+`free` was the same shape backwards: it scanned from the head to find
+the block BEFORE the one being freed.
+
+Now there are two lists over the same blocks. The address list carries
+`prev` as well as `next`, which exists only for coalescing and makes
+that an O(1) neighbour test in both directions. The free list holds
+only free blocks, and `malloc` walks that one -- so an allocation costs
+what the free list costs, not what the heap costs. The free list's
+links live in the payload of free blocks, which is by definition not in
+use, so the header did not grow: still 32 bytes, with the free flag
+moved into the low bit of `size` (always a multiple of 16).
+
+After: 60000 allocations in 0.045s, and the ratio for 4x the
+allocations is 3.3 rather than 16.
+
+Two real bugs came out of writing the test first:
+
+- **`aligned_alloc` could build a zero-payload block.** It spliced a
+  header in front of the aligned address and gave the leading fragment
+  back, requiring only that the fragment have room for its header. For
+  any alignment of 64 or more the aligned address can land exactly HDR
+  past the payload start, leaving a fragment with nothing in it. That
+  was survivable while a free block's payload held nothing; with the
+  free-list links there it wrote sixteen bytes through the next block's
+  header. The fragment now needs a header AND a full ALIGN of payload,
+  which the existing over-allocation already covers.
+- **A test was reading freed memory.** `array.cc` saved `e.what()`
+  inside a handler and checked it after. The message buffer is
+  reference-counted and the exception object dies when the handler
+  exits, so the pointer dangled -- and the check passed only because the
+  old allocator left the bytes alone. It reads what() inside the
+  handler now.
+
+`tests/golden/malloc.sh` covers both halves. Correctness first, because
+an allocator that is fast and wrong is worse than the one it replaced:
+no two live allocations overlap, contents survive rounds of scattered
+frees and reallocations, and realloc/calloc/aligned_alloc behave at
+their edges. Then the SHAPE of the cost -- four times the allocations
+must not cost sixteen times the time -- which is the property no
+correctness test could have noticed.
+
+## Closed: the library was not thread-safe, and three bugs under that (2026-09-22)
+
+Threads landed before the library was ready for them. Reproduced first,
+on a real kernel: one thread allocating in a loop is fine and exits 42;
+TWO threads kill it, with no output at all. Four was the report; two was
+enough.
+
+Three pieces of shared state, three fixes, one mechanism:
+
+- **The heap.** One lock over the block lists
+  (`lib/libc/src/internal/lock.{h,c}`), taken at the public entry points
+  and not by the internals, which call each other. The uncontended cost
+  is a single compare-exchange -- 40000 allocations went from 0.0268s to
+  0.0316s -- which is what makes it acceptable on the targets that have
+  one thread.
+- **stdio.** A lock per `FILE`, held for the WHOLE call, with unlocked
+  halves (`__putc_unlocked` and friends) for the internals. `puts` is
+  the argument for the shape: it writes a string and then a newline, and
+  two separate locks would let another thread put a line between them.
+  printf and scanf hold it across the entire conversion, `perror` across
+  all four of its writes, `rewind` across the seek and the clear.
+- **The C++ one-shot latch.** `__cxa_guard_acquire` now blocks on the
+  guard's own word instead of assuming one thread, which is what
+  [stmt.dcl]/4 requires: a thread arriving during an initialisation
+  WAITS for it, rather than skipping or repeating it.
+
+The mutex is built on the futex seam rather than an OS mutex, for the
+reason `backend.h` gives: a mutex primitive pushes fairness and
+recursion policy into every backend, while a word a thread can sleep on
+is enough to build one here, once. Three states, so an uncontended lock
+and unlock are one atomic instruction each and no syscall; on a target
+with no futex the wait degrades to a yield, which is correct precisely
+there because such a target has no threads to contend.
+
+Three real bugs came out of the test, and all three were in code that
+looked finished:
+
+- **`__os_futex_wake(addr, -1)` woke NOBODY on Linux.** The seam says
+  -1 means "all of them"; the backend handed it straight to the kernel,
+  whose FUTEX_WAKE stops once it has woken `count`, so a negative one
+  wakes none and returns 0 rather than an error. Two of four threads
+  waiting on a static were never woken and the program hung with nothing
+  to show. The EmbLinkOS backend beside it had translated the value all
+  along -- the contract was being honoured by one implementation and not
+  the other, which is the shape a seam exists to prevent. `backend.h`
+  now says so at the declaration, and the test fails without the fix.
+- **The guard used `thread_local`, and most targets have no TLS.** The
+  bare-metal harnesses never set up a thread pointer, so a single
+  `__thread int` there is a fault -- checked directly, and it is. The
+  first version of the guard crashed every C++ program on the
+  freestanding targets. Ownership now lives in a small global table with
+  a test-and-set around it; if it ever fills, recursion stops being
+  DETECTED while the initialisation still happens exactly once, which is
+  the right thing to lose.
+- **`<threads.h>` was not C++-safe.** `_Noreturn void thrd_exit(int)`,
+  where `<assert.h>` had made the `[[noreturn]]` split for C++ long ago.
+  Worth recording that EmbCC was checked here and is right: g++ rejects
+  `_Noreturn` in C++ exactly as EmbCC does, and only clang++ accepts it.
+  The header was the bug.
+
+`tests/golden/threadsafe.sh` runs all four on a real kernel, because
+that is the only place the concurrency is real: four threads on the
+heap each claiming their blocks and reading them back, four threads
+printing lines whose fields must all agree, the `futex_wake(-1)`
+contract with the sleepers actually asleep, and four threads reaching
+one function-local static with a slow initialiser.
+
+## Closed: the compiler runtime (2026-09-22)
+
+`lib/rt`, a separate archive from libc because it is a different job:
+libc implements what a program asks for by name, and nothing in a
+program ever writes `__multi3`. The driver puts `librt.a` on the link
+line after `libc.a`, the way it already found `crt1.o`, so
+`embcc prog.c -o prog` links `__int128` multiply and divide with no
+flags -- which is the gap D-014's second amendment named.
+
+The constraint that shaped it: none of these routines may use the
+operation it implements. `__multi3` cannot multiply two `__int128`s,
+because that is a call to `__multi3`. So a 128-bit value is only ever
+split and rejoined through a union and everything between is 64-bit
+arithmetic the machine really has. Same reason `ldouble.c` is x86-64
+only -- there `long double` is x87 and the hardware does it.
+
+Checked against two oracles in `tests/golden/rt.sh`: the integer half
+byte-identical to the host's own runtime over 4343 lines, the complex
+half against gcc's libgcc (multiply byte-identical on all 10683 lines
+including every one of the 2401 combinations of zero, infinity and NaN;
+division within one ulp, which is all C requires once the special
+values, also identical, are right).
+
+Three things the test found or settled:
+
+- **`aligned_alloc`'s saturating conversion** was going through the
+  unsigned path and negating, which turned +1.7e308 into -1 and
+  -1.7e308 into +1. It saturates at the signed extremes now.
+- **A division by zero with an infinite numerator** returned NaN for
+  one part, because the general formula computes `inf * 0` before the
+  Annex G recovery pass can see it. The zero denominator is decided
+  first now, and all 2401 special-value divisions match libgcc.
+- **"Agrees with a compiler" is not one property.** clang's compiler-rt
+  uses a different complex-division algorithm and differs from libgcc
+  on 605 of the same lines. The oracle worth having is the
+  implementation whose NAMES are being used, which is libgcc. And in 68
+  lines libgcc returns NaN where Smith's method returns the value --
+  checked by hand, one of them is -1e160 to 5e-18 -- which is the
+  overflow avoidance Smith's method exists for.
+
+## Closed by analysis: -Wclobbered (2026-09-22)
+
+The report listed ten locals that gcc's `-Wclobbered` warns about.
+There is no gcc on this machine that can compile host code and clang
+does not implement the warning, so this was done the other way: by
+reading every `setjmp` in the tree against what the standard actually
+guarantees.
+
+C11 7.13.2.1p3 is narrower than the warning. Only an automatic,
+non-`volatile` local **that was changed between the setjmp and the
+longjmp** has an indeterminate value afterwards. One that was set
+before the `setjmp` and left alone keeps it. `-Wclobbered` does not
+make that distinction -- it is a register-allocation heuristic, and
+gcc's own documentation says it produces false positives.
+
+All eleven sites follow one shape: save the state (`cx_sfinae`,
+`parse_save()`, sometimes a token position) into locals BEFORE the
+`setjmp`, and read exactly those locals in the longjmp branch to put it
+back. Nothing a longjmp branch reads is written after the `setjmp`.
+`src/cxx/concepts.c` line 308 is the one place where locals (`n`,
+`args`) ARE written afterwards, and they are not read on the longjmp
+path -- the successful branch returns before reaching it.
+
+And the three places where a variable genuinely is written between the
+two and read after already carry `volatile`, which is the thing worth
+knowing: the rule was being applied where it matters.
+
+  - `src/parse/parse.c:2233` -- `struct stmt **volatile tail`, walked
+    down a statement chain after the setjmp and set to NULL in the
+    recovery branch.
+  - `src/parse/parse.c:3376` -- `volatile int seq`, whose comment
+    already says "written between setjmp and longjmp".
+  - `src/driver/main.c:473` -- `volatile int rc`.
+
+So: no `volatile` added, because adding it to quiet a warning nobody
+has read is how a real setjmp bug gets buried. If the gcc output names
+a site outside those eleven, it is worth a second look -- paste it and
+it gets one.
+
+## Closed: binary128 in software (2026-09-22)
+
+`lib/rt/softtf.c`. On aarch64 `long double` is IEEE binary128 and the
+machine has no instruction for any of it -- not the arithmetic, not the
+comparisons, not the conversions -- so every one of the 22 symbols the
+backend can emit is implemented from the bits up: add, subtract,
+multiply, divide, the six comparisons, and conversions to and from
+float, double, 32- and 64-bit integers and `__int128`.
+
+Same rule as the rest of the library, one level harder: it may not use
+the type it implements. Every routine takes and returns `long double`,
+because the ABI passes a binary128 in a v register and the parameters
+have to match, but the value goes through a union to its bits on the
+way in and back on the way out, and nothing between is a floating-point
+operation. One `a * b` here would be a call to `__multf3`, which is
+this file.
+
+It matches **libgcc's soft-float on all 5362 lines** of
+`tests/golden/rt/rttf.c`: 1024 ordered pairs of 32 values chosen at the
+edges -- the boundary between normal and subnormal, values one ulp
+apart, the largest finite, ties that decide a rounding, infinities and
+NaNs -- plus every conversion both ways. aarch64 Linux now links every
+runtime routine its backend can emit, as x86-64 already did.
+
+Two bugs the corpus found, both invisible to a smaller test:
+
+- **The multiply folded away 125 bits** of a 226-bit product when only
+  109 were spare. Not a rounding error -- the low bits were discarded
+  before anything could round with them, so `1 * (1 + 1ulp)` came back
+  as `1 + 8192ulp` while the exponent stayed right.
+- **The divide's exponent was one too large**, because the loop tests
+  before shifting and so yields the integer part first. Every quotient
+  was exactly half of what it should be, which `1 / 1 == 0.5` says more
+  plainly than any reasoning about shift counts.
+
+And one build bug, which is the more interesting of the three:
+`libc.a` was archived from `*.o` in a directory the runtime objects
+were also written into, so on any REBUILD it swallowed them. The effect
+was that the gcc reference, linked against our libc, picked up OUR
+complex routines instead of libgcc's -- and the comparison reported
+10683 of 10683 identical. A test passing because it was comparing
+something with itself. The runtime objects build into their own
+subdirectory now.
+
+## Partly closed: aarch64 register allocation (2026-09-22)
+
+The backend said `(void)regalloc;` -- every vreg in a stack slot, every
+operation through the accumulator. It allocates now, through the shared
+allocator, into x20-x26: callee-saved, saved in the prologue and
+described in the unwind tables.
+
+**Three bugs, all mine, and the third only found because the first two
+were.**
+
+- **The pool handed out registers the backend was already using.**
+  AAPCS64 says x9-x15 are caller-saved temporaries, so the first pool
+  was x12-x15 -- but this backend had already spent x9 as the
+  accumulator, x10 as the second operand, x11 as the address scratch,
+  x12 as a second scratch and x13/x14 for the atomics. A memcpy's
+  scratch and an allocated value took turns in the same register. The
+  ABI says which registers a CALLER may clobber; it does not say which
+  ones a particular backend has left.
+- **The eligibility rules were x86's capabilities written as properties
+  of the IR.** Lifted out of that backend, cases commented
+  "register-aware" -- a call's scalar arguments, a scalar return, a
+  memcpy's addresses -- were true of x86 and false here. `struct
+  ra_target` carries capability flags now. D-011 said to derive the
+  shared layer from two WORKING backends; this is the half that is easy
+  to skip.
+- **The prologue wrote incoming parameters straight to their stack
+  slots**, bypassing `st_slot`, so an allocated parameter's register
+  was never initialised. One line, and the reason `struct S s = mk(7,
+  35);` came back wrong.
+
+**And a process failure worth recording**, because it cost more than
+the bugs did. Three separate times the aarch64 suite was reported green
+when it was not: `make` piped into `head` can die of SIGPIPE before it
+finishes, and an A/B comparison built by patching a file and rebuilding
+silently reused the previous binary. Every before/after MEASUREMENT of
+this allocator in that period is therefore worthless and is withdrawn
+-- the "43 memory operations to 14" figure was read off a truncated
+disassembly and never reproduced. What is verified is correctness: a
+clean rebuild whose exit status was checked, then 193/193 on aarch64
+and the specific failures (`tests/exec/aapcs64.c`, `libcxx.sh`,
+`unwind.sh`) passing.
+
+The lesson is the one this project keeps relearning from the other
+side: a green result whose provenance is not checked is not a result.
+Check the exit status, never the grepped output.
+
+**What remains** is the operand-level step: teaching each operation to
+take its inputs from the allocated registers directly instead of
+loading them into the accumulator first. That is the threading of
+`in_reg()` through every case that makes the x86 backend twice the size
+of this one, and it is where the instruction count falls. The pool is
+seven registers because `struct func` holds eight CFI rules at one
+program point and x19's frame-base save shares them, so a loop with
+many simultaneously-live values still spills all of them.
+
+## Closed: switch dispatch (2026-09-22)
+
+A switch emitted one equality compare per case, in source order, so
+dispatching to the last of N cases executed N comparisons. For the
+shapes switches actually take -- an interpreter's opcode, a state
+machine, a token kind -- that is the hot path of the whole program.
+
+It is a balanced binary decision tree over the sorted case values now:
+O(log n) compares instead of O(n). Measured on a 64-case switch
+dispatching to its last case, on a real kernel: **0.383s to 0.084s, 4.6
+times faster**, with MORE static instructions (80 compares against 65)
+and a far shorter path -- which is the trade a tree makes and the
+reason a static instruction count is the wrong thing to look at.
+
+`tests/exec/switch.c` covers the shapes that break such a lowering, and
+they are not the obvious ones: values either side of the SIGNED
+boundary in an unsigned switch (0x7fffffff next to 0x80000000, where a
+signed comparison puts them in the wrong halves of the tree and the
+search never reaches one of them), sparse and dense, fall-through, a
+default in the middle, and a 64-bit switch at both ends of its range.
+The result is a hash of every dispatch, so one wrong answer anywhere
+changes it, and gcc computes the same number.
+
+**Not a jump table**, and the reason is in the code rather than left as
+an omission: any indirect jump in this backend -- `IR_IGOTO`,
+`IR_LABELADDR` -- turns OFF the register allocator and the RAX
+residency cache for the whole function, because a computed goto's
+targets are unknown and the liveness those passes need cannot be
+computed. A jump table's targets are perfectly well known, so the real
+fix is a multi-way terminator that names them and a liveness pass that
+reads them (`src/arch/*/codegen.c`, the successor computation, is where
+it would go). Until that exists, lowering a switch through the
+computed-goto machinery would buy O(1) dispatch and pay for it with
+every register in the function.
+
+## Closed: the unwinder (2026-09-22)
+
+`lib/rt/unwind.c`: a DWARF CFI interpreter and the Itanium ABI's
+level-1 API, on both architectures. `embcc prog.cc -o prog` now
+compiles, links and runs a C++ program that throws, with no flags --
+the driver finds libcxx.a and librt.a beside libc.a the way it already
+found crt1.o.
+
+The tables are located through the bracket symbols `__eh_frame_start`
+and `__eh_frame_end`, which EmbLD already defined for any orphan
+section whose name is an identifier and which the Linux link script now
+defines too. A static image therefore needs no `.eh_frame_hdr` search
+table and no `dl_iterate_phdr`; the FDEs are scanned linearly, which is
+O(n) per frame and correct for every layout, where a binary search over
+an unsorted table is neither.
+
+Refused rather than approximated: `DW_CFA_def_cfa_expression` and its
+two siblings. gcc emits them where the CFA is not a register plus a
+constant -- a function using alloca, a signal trampoline -- and an
+unwinder that guesses at a rule it cannot evaluate jumps to an address
+it invented.
+
+THE ORACLE, which took a detour worth recording. libgcc's unwinder
+cannot simply be linked into the static image: it finds its tables
+through a `__register_frame_info` that a crtbegin normally calls, and
+ours does not, so it links and then finds nothing. But the BARE-METAL
+harness already runs C++ exceptions on libgcc's unwinder, because
+`tests/harness/crt.c` registers the tables by hand. So
+`tests/golden/unwind.sh` builds one source twice -- freestanding, run
+on the bare-metal harness where libgcc unwinds it, and Linux, where
+lib/rt does -- with the same compiler, the same C++ runtime and the
+same libc. The unwinder is the only difference, and the two print 78
+identical lines over ten cases.
+
+Three things had to change under it, and each was a real gap:
+
+- **C had no unwind tables.** EmbCC emitted `.eh_frame` for C++ only.
+  An exception unwinds through whatever frames lie between throw and
+  catch, some of which are C -- a callback, a libc routine, and above
+  all the unwinder's OWN frames, which it has to step out of before it
+  can reach anything. Without those the walk stopped at the first one
+  and every throw was a terminate. Now on by default for hosted ELF
+  targets, as gcc is, and still off for freestanding, where the tables
+  are pure size.
+- **An unknown file-scope asm directive was silently skipped.**
+  `.word 0xa9005013` -- the aarch64 spelling of a 4-byte datum, where
+  EmbCC's mini-assembler understands `.long` -- contributed no bytes,
+  while the label after it still got a symbol. The object linked with a
+  global function whose body was zero bytes, and the first call to it
+  jumped into whatever followed. Unknown directives are refused now;
+  the ones that legitimately contribute nothing are a list.
+- **A symbol defined by file-scope asm and called from C got two
+  entries** in the object, one defined and one undefined, because the
+  "every called external needs an UNDEF" pass did not know the asm
+  block had defined it. A linker resolving the undefined one reported
+  `__uw_capture` missing from the object that defines it. C calling a
+  routine written in asm is how setjmp and a register capture are
+  built, so this is the normal case.
+
+Still open from the same report, and not touched here:
+
 
 ## Closed: a rollback that restored a freed pointer (2026-09-21)
 

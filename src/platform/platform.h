@@ -51,6 +51,38 @@ int plat_file_exists(const char *path);
  */
 const char *plat_getenv(const char *name);
 
+/* ---- the console ----
+ *
+ * Whether diagnostics are going to a terminal, which is what decides
+ * automatic colour. 0 where they are not, and where the host has no
+ * such notion at all -- a build log should not receive escape codes.
+ *
+ * It is here rather than an isatty() call in the diagnostics code for
+ * the reason this whole layer exists: nothing above it may know what
+ * kind of host it is running on (§5.1), and <unistd.h> is exactly that
+ * knowledge. EmbLinkOS has no unistd.h. */
+int plat_stderr_is_terminal(void);
+
+/* ---- where this program is ----
+ *
+ * The absolute path of the running executable, or NULL where the host
+ * cannot say. An installed compiler needs this to find the files that
+ * were installed beside it -- its headers, its per-target libraries,
+ * its linker script -- without a prefix baked in at build time, which
+ * is what makes an unpacked tarball work from any directory and what
+ * lets the same binary run from the build tree.
+ *
+ * This is a question about the file system, not a process API: it asks
+ * where a file IS, not to run one. The rule above -- that EmbLinkOS has
+ * no fork/exec and this layer must never grow a process API -- is
+ * untouched, and on a host with no answer this returns NULL and the
+ * caller falls back to the paths it was given.
+ *
+ * The returned string is owned by the platform layer and lives until
+ * the process exits; callers must not free it.
+ */
+const char *plat_self_path(void);
+
 /* ---- the source provider (§7) ----
  *
  * `src_read` is how the frontend — and only the frontend — obtains source

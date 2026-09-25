@@ -397,6 +397,16 @@ front-end work both targets share (`__atomic_*` above all) plus `va_start`.
 the corrected large-composite rule landed; **all 131 C files of the ARM
 kernel compile**, and `make test-arm64` passes in full.
 
+*(Paths, 2026-09-22: every file this record names moved when **D-012** put
+each architecture in its own directory, three days after this was decided.
+`src/target/` → `src/arch/target.c`, `src/asm/emit_arm64.c` →
+`src/arch/aarch64/emit.c`, `src/codegen/codegen_arm64.c` →
+`src/arch/aarch64/codegen.c`, `src/asm/asm_arm64.c` →
+`src/arch/aarch64/asm.c`, and `codegen.c` → `src/arch/x86_64/codegen.c`.
+The names are left as they were written — an ADR records what was decided,
+not where the code sits today — but a reader following them to the tree
+would find nothing, so the mapping is here.)*
+
 EmbLinkOS is two architectures now. `myos/docs/ARM64.md` closed its A0–A9
 campaign: the whole shared kernel links and runs on aarch64 under QEMU `virt`,
 four cores, the real syscall table, the full 52-program userland — built by
@@ -492,6 +502,26 @@ and `-O2`, and the whole ARM kernel) found 293 of 293 identical.
 D-011's reopen condition — the layout makes that sharing a later, visible
 step (a `src/arch/` file both use) rather than a precondition.
 
+*(That step was taken on 2026-09-22, and the reopen condition is what
+justified it. `src/arch/regalloc.c` is the register allocator, lifted
+out of `src/arch/x86_64/codegen.c` unchanged: real backward liveness, a
+precise interference graph, Chaitin-Briggs simplify ordering and
+colouring with move-coalescing preferences. A machine now supplies a
+`struct ra_target` — which registers may be handed out and in what
+order, which survive a call, whether a narrow load is a plain move —
+and nothing else.*
+
+*The discipline was D-012's own: a pure move, verified by comparing
+EMITTED BYTES rather than test results. `tools/x86-identity.sh` found
+808 objects byte-identical and none different, which says nothing
+changed at all, where a green suite would only say nothing it covers
+changed.*
+
+*Derived from a WORKING backend, as D-011 asked, rather than invented
+for a second one: the allocator had been in service on x86-64 for a
+while before it was made shareable, so the shape is one that already
+earned its keep.)*
+
 ## D-013 — C++: **C++20 and libstdc++, on both architectures, lowered through C**
 
 **Decided (2026-09-18).** D-008's "C, then C++" becomes concrete. The
@@ -551,8 +581,24 @@ on the OS).
 
 ## D-014 — **Host operating systems as targets**: Linux, macOS, Windows
 
-**Decided:** 2026-09-21 (design; no code yet). **Status:** the ADR the
-vision's first non-goal named. Supersedes that non-goal.
+**Decided:** 2026-09-21 (design). **Status:** implemented, 2026-09-21/22
+— all three object writers exist and two of the three targets run.
+Supersedes the vision's first non-goal, which this ADR was written to
+replace.
+
+| | object format | ABI | runs |
+|---|---|---|---|
+| Linux | ELF — **done** | System V — **done** | **yes**, on a real kernel |
+| macOS | Mach-O — **done** | SysV / AAPCS64 + Apple varargs — **done** | **yes**, native |
+| Windows | COFF — **done** | Microsoft x64 — **done** | **no**: nothing has executed |
+
+What each still refuses, by name rather than by guessing: `-g` on both
+new targets, C++ exceptions and `__thread` and constructors on Windows,
+`__thread` on Darwin, and `__int128`/`long double` in a Windows
+signature. Darwin's typed `catch` is broken (todo.md). And the Linux
+target has no compiler runtime and no unwinder, so `__int128` and C++
+exceptions do not LINK there — see the amendment below, which states
+what "self-sufficient" was and was not checked to mean.
 
 `docs/design/vision.md` Non-goals §1 said it plainly: *"EmbCC does not aim
 to produce Mach-O or PE/COFF binaries for macOS/Windows **until an ADR says
@@ -695,7 +741,10 @@ Linux does not use glibc. `lib/libc/os/linux/backend.c` issues syscalls,
 `lib/libc/os/linux/start.c` is the entry point, and the result is a
 **static** image containing our printf, our malloc and our strtod, with
 no glibc, no musl, no dynamic loader and no crt from anyone else. `nm -u`
-on it prints nothing.
+on it prints nothing — *for the programs it was tried on. That sentence
+was written after checking `hello.c`, and it is not a property of the
+target; see the second amendment below, which is about the programs where
+it is false.*
 
 Four things pushed it there:
 
@@ -717,11 +766,14 @@ Four things pushed it there:
    was written on. The glibc path could not have been compiled at all
    here, let alone checked.
 
-What it costs, stated plainly: no dynamic linking or PIE; no threads yet
-(`clone` needs a per-architecture assembly entry, and
+What it costs, stated plainly: no dynamic linking or PIE; `statx` puts a
+floor of Linux 4.11 under the filesystem group; and the clocks enter the
+kernel because nothing reads the vDSO yet. *(Threads were on this list —
+"`clone` needs a per-architecture assembly entry, and
 `__os_thread_create` returns ENOSYS rather than shipping one written
-blind); `statx` puts a floor of Linux 4.11 under the filesystem group;
-and the clocks enter the kernel because nothing reads the vDSO yet.
+blind" — and landed on 2026-09-21, with TLS: `lib/libc/os/linux/thread.c`
+and `tls.c`. The entry stubs were not written blind in the end; they are
+assembled by a real assembler and read back as bytes.)*
 
 This does **not** foreclose a glibc-hosted Linux mode. Because the
 difference is one file under `os/`, adding one later is a backend, not a
@@ -739,6 +791,115 @@ agree with them by construction; the first thing a real kernel said was
 that `O_DIRECTORY` is `0200000` on x86-64 and `040000` on aarch64, which
 the one hardcoded value had silently got wrong on one of the two.
 
+### Amended again: "self-sufficient" was measured on the wrong program
+
+*(Added 2026-09-22.)* The claim above — that the Linux image needs
+nothing — was checked against `hello.c` and generalised. It does not
+generalise. Two libraries are missing, and both of them are libraries the
+platform supplies everywhere else, which is exactly why their absence was
+invisible:
+
+- **The compiler runtime.** `__multi3`, `__ashlti3`, `__lshrti3`,
+  `__mulxc3`, `__muldc3`, `__powidf2` — the routines a backend calls for
+  operations the machine has no instruction for. `__int128` multiply or
+  divide, and complex multiplication, emit a call to one of these.
+- **The unwinder.** `_Unwind_RaiseException` and its family, plus the
+  `.eh_frame_hdr` section and `dl_iterate_phdr` used to find tables. C++
+  `throw` emits a call to one of these.
+
+On macOS these come from the system (`libSystem`, `libgcc_s`); on
+EmbLinkOS from the ported toolchain. The Linux target, by deciding to
+link against nothing, decided to link against these too — without
+noticing, because nothing in the test suite compiled `__int128` division
+or a `throw` *for Linux*.
+
+**Decided: scope the claim down, do not ship the libraries yet.** Writing
+a compiler runtime is a day's work and writing an unwinder is not; a
+DWARF CFI interpreter that gets a corner wrong does not fail visibly, it
+unwinds into the wrong frame. Neither belongs in the same change as the
+target that revealed them. So:
+
+1. **The claim is narrowed wherever it appears** — here, in the target
+   matrix, in `--version` and in the roadmap. Linux runs C. It does not
+   run `__int128` multiply/divide or C++ exceptions.
+2. **The failure is made legible.** It surfaces at the link as an
+   undefined symbol, which names a routine nobody has heard of.
+   `missing_runtime_note()` in `src/link/link.c` recognises both families
+   by name and prints what the routine is, why it is missing and which
+   targets have it. A gap you can read is a different thing from a gap
+   that looks like a linker bug.
+3. **Shipping them is its own work**, in this order: the integer runtime
+   first (small, testable against gcc's libgcc output value by value),
+   the unwinder second and only against a real differential oracle.
+
+*(Both done, 2026-09-22, and the ordering held. `lib/rt` is the
+compiler runtime -- a separate archive from libc, because libc
+implements what a program asks for by name and nothing in a program
+ever writes `__multi3` -- and `lib/rt/unwind.c` is the unwinder. The
+Linux targets now link every routine their backends can emit, and
+`embcc prog.cc -o prog` compiles, links and runs a C++ program that
+throws, with no flags.*
+
+*The unwinder's oracle is the part worth recording, because getting one
+took a detour. libgcc's unwinder cannot simply be linked into a static
+image of ours: it finds its tables through a `__register_frame_info`
+that a crtbegin normally calls, and ours does not, so it links and then
+finds nothing. But the bare-metal harness already runs C++ exceptions
+on libgcc's unwinder, because `tests/harness/crt.c` registers the
+tables by hand -- which is what a bare-metal image has to do. So one
+source is built twice, freestanding and Linux, with the same compiler,
+the same C++ runtime and the same libc; the unwinder is the only
+difference, and the two print 78 identical lines over ten exception
+cases.*
+
+*Refused rather than approximated, in the same spirit as the rest:
+`DW_CFA_def_cfa_expression` and its siblings, which gcc emits where the
+CFA is not a register plus a constant. An unwinder that guesses at a
+rule it cannot evaluate jumps to an address it invented.)*
+
+*(Done, 2026-09-22, for the first of the two. `lib/rt` is the compiler
+runtime, a separate archive from libc because it is a different job --
+libc implements what a program asks for by name and nothing in a program
+ever writes `__multi3`. The driver puts `librt.a` on the link line after
+`libc.a` the way it already found `crt1.o`, so `embcc prog.c -o prog`
+links `__int128` multiply and divide with no flags.*
+
+*What it holds: the 128-bit integer operations and the three shifts; the
+conversions between 128-bit integers and float and double; the complex
+multiply and divide that C99 Annex G requires to be library routines;
+and, on x86-64 only, the same two at x87 width. The constraint that
+shapes all of it is that none of these routines may use the operation it
+implements -- `__multi3` cannot multiply two `__int128`s -- so a 128-bit
+value is only ever split and rejoined through a union and everything
+between is 64-bit arithmetic.*
+
+*What it does NOT hold, and why: the aarch64 `long double` family
+(`__addtf3`, `__multc3`, `__fixtfti` and neighbours). There `long
+double` is IEEE binary128 with no instruction behind it, so this is a
+soft-float implementation rather than a file, and a soft-float that gets
+a corner wrong fails in the last bit where nothing casual sees it. Same
+judgement as the unwinder, at a smaller scale. x86-64 Linux now links
+every runtime routine its backend can emit; aarch64 Linux links all of
+them except those seven.*
+
+*Checked in `tests/golden/rt.sh` against two oracles: the integer half
+byte-identical to the host's own runtime over 4343 lines, and the
+complex half against gcc's libgcc -- byte-identical for multiply on all
+10683 lines including every one of the 2401 combinations of zero,
+infinity and NaN, and for division within one ulp, which is all C
+requires once the special values (also identical) are right. Writing
+that test settled a question worth recording: clang's compiler-rt uses a
+different algorithm and differs from libgcc on 605 of the same lines, so
+"agrees with a compiler" is not one property but several, and the one
+worth having is agreement with the implementation whose NAMES are being
+used.)*
+
+The general lesson, recorded because it has now happened twice in this
+ADR: *a self-sufficiency claim is only as strong as the program it was
+measured on.* `hello.c` exercises none of the paths that call into a
+runtime library, and a target that has never compiled `__int128` cannot
+discover that it has no `__multi3`.
+
 ### The system's linker, not EmbLD, to begin with
 
 EmbLD emits ET_EXEC ELF and EMBX. Teaching it Mach-O and PE is a second
@@ -747,6 +908,13 @@ linker project, and it is not on the path to a running program: `ld`,
 The driver invokes the system linker for hosted targets, as gcc and clang
 do. Owning the link for hosted platforms is a later decision, made against
 a working toolchain rather than instead of one.
+
+*(Amended 2026-09-21: Linux is the exception, and it is the exception for
+a reason that does not extend to the other two. EmbLD already reads and
+writes x86-64 ELF — that is its native format, not a port — so linking
+the Linux target cost nothing, and it is what makes an image with no
+glibc under it possible at all: a system `ld` would have wanted a
+sysroot. macOS and Windows still use `ld64` and `lld-link`.)*
 
 ### What is refused loudly rather than emitted wrong (THE RULE)
 

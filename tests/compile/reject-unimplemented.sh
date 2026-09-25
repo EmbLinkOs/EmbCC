@@ -216,8 +216,14 @@ check typedef-redef \
 typedef long T;
 int main(void) { T v = 1; return (int)v; }' \
     "redefinition of typedef"
+# <stdio.h> used to be the case here, because EmbCC shipped no headers
+# and found nothing without a -I. It ships them now and finds them
+# relative to its own binary (src/driver/paths.c), so the header that
+# must not resolve has to be one that genuinely does not exist. What is
+# being checked is unchanged: a missing include is an error NAMING the
+# file, not a silently empty translation unit.
 check angle-include-no-path \
-    '#include <stdio.h>
+    '#include <no_such_header_exists_anywhere.h>
 int main(void) { return 0; }' \
     "cannot find include file"
 check float-modulo \
@@ -284,14 +290,22 @@ check assign-to-literal \
     "assignment target must be a variable"
 
 # And without -c: linking does not exist until M3.
+# `embcc prog.c -o prog` used to be refused outright -- the integrated
+# linker was M3 and had not arrived. It links in-process now, so that
+# case graduated out of this file, which is what the header above says
+# happens. What is left is the part still refused, and it is refused
+# for a reason that will not go away by itself: EmbLD reads x86-64 ELF,
+# and an image for another machine is not something it can quietly
+# approximate.
 printf 'int main(void) { return 0; }\n' > "$out_dir/nolink.c"
-if err=$("$EMBCC" "$out_dir/nolink.c" 2>&1); then
-    echo "case nolink: exited 0 but embcc cannot link"
+if err=$("$EMBCC" --target=aarch64-elf "$out_dir/nolink.c" \
+         -o "$out_dir/nolink.bin" 2>&1); then
+    echo "case nolink: linked for a machine the linker cannot read"
     exit 1
 fi
-echo "$err" | grep -q "linker is M3" || {
+echo "$err" | grep -q "integrated linker reads x86-64 ELF" || {
     echo "case nolink: wrong diagnostic:"; echo "$err"; exit 1; }
-echo "case nolink: refused with a diagnostic"
+echo "case nolink: linking for another machine is refused by name"
 check asm-bad-constraint \
     'int main(void) { int x; __asm__("int $0x80" : "=t"(x)); return x; }' \
     "is not supported"

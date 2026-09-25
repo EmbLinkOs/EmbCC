@@ -27,6 +27,16 @@ int     strncmp(const char *a, const char *b, size_t n);
 char   *strchr(const char *s, int c);
 char   *strrchr(const char *s, int c);
 char   *strstr(const char *hay, const char *needle);
+/* The rest of C11 §7.24's search and token set. These were absent
+ * because nothing in this tree had needed them -- the header above says
+ * "grow it as needed" -- and what needed them was the compiler linking
+ * its own debug-info reader. A declaration missing here is not a link
+ * error: it is a call compiled against a guess at the signature. */
+size_t  strcspn(const char *s, const char *reject);
+size_t  strspn(const char *s, const char *accept);
+char   *strpbrk(const char *s, const char *accept);
+char   *strtok(char *s, const char *sep);
+char   *strerror(int errnum);
 
 #ifdef __cplusplus
 }

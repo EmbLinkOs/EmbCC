@@ -57,6 +57,13 @@ enum seg { SEG_TEXT, SEG_DATA };
  * (NOBITS, the memsz tail). */
 enum osec {
     OSEC_TEXT, OSEC_RODATA,               /* text segment (R+X) */
+    /* The thread block, first in the data segment. These are not data
+     * every thread shares: they are the TEMPLATE each thread's private
+     * copy is made from, and PT_TLS is what says so. They are placed
+     * like ordinary sections so the image holds their bytes, and the
+     * addresses a program uses for them are OFFSETS from a thread
+     * pointer, computed in the TPOFF relocation below. */
+    OSEC_TDATA, OSEC_TBSS,
     OSEC_INIT_ARRAY, OSEC_FINI_ARRAY,     /* data segment (R+W) */
     OSEC_CTORS, OSEC_DTORS,
     OSEC_DATA, OSEC_BSS,
@@ -119,6 +126,12 @@ struct archive {
 };
 
 struct linker {
+    /* The thread block, for the TPOFF relocations: where it starts in
+     * the image, and its aligned size -- which is what an offset is
+     * measured back from, because x86-64 puts the block below the
+     * thread pointer. */
+    Elf64_Addr tls_start;
+    Elf64_Xword tls_size;
     struct object **objs;
     int nobj, capobj;
     struct insec *insecs;
@@ -285,8 +298,15 @@ static void collect_sections(struct linker *l, struct object *o)
         s->align = sh->sh_addralign ? sh->sh_addralign : 1;
         s->is_bss = sh->sh_type == SHT_NOBITS;
         s->data = s->is_bss ? NULL : o->buf + sh->sh_offset;
-        s->osec = classify_osec(s->name, sh->sh_flags & SHF_WRITE,
-                                s->is_bss);
+        /* SHF_TLS decides this, not the name. A .tbss is SHT_NOBITS,
+         * so classifying by name and type alone would file it under
+         * .bss -- where every thread would SHARE it, which is the
+         * opposite of what a thread-local is. */
+        if (sh->sh_flags & SHF_TLS)
+            s->osec = s->is_bss ? OSEC_TBSS : OSEC_TDATA;
+        else
+            s->osec = classify_osec(s->name, sh->sh_flags & SHF_WRITE,
+                                    s->is_bss);
         if (s->osec < 0)
             s->osec = orphan_osec(l, s->name, !!(sh->sh_flags & SHF_WRITE));
         /* text segment: executable OR read-only allocatable (.rodata);
@@ -559,7 +579,9 @@ static void place_osec(struct linker *l, int os, Elf64_Addr *va,
 static void layout(struct linker *l, struct osec_bound *b,
                    Elf64_Addr *text_start, Elf64_Xword *text_size,
                    Elf64_Addr *data_start, Elf64_Xword *data_filesz,
-                   Elf64_Xword *data_memsz)
+                   Elf64_Xword *data_memsz,
+                   Elf64_Addr *tls_start, Elf64_Xword *tls_filesz,
+                   Elf64_Xword *tls_memsz, Elf64_Xword *tls_align)
 {
     Elf64_Addr va = l->base;
 
@@ -573,6 +595,33 @@ static void layout(struct linker *l, struct osec_bound *b,
 
     va = align_up(va, PAGE);           /* W^X boundary */
     *data_start = va;
+
+    /* The thread block first in the data segment, and contiguous: the
+     * template is copied as one run, so .tbss has to follow .tdata with
+     * nothing between them.
+     *
+     * .tbss occupies no FILE space -- it is the zero tail of the
+     * template -- so the file-backed part of the data segment must not
+     * count it. That is why tls_filesz stops at the end of .tdata while
+     * the location counter carries on: laying .tbss out as ordinary
+     * NOBITS in the middle of the segment would leave a hole in the
+     * file that everything after it was addressed past. */
+    *tls_align = 1;
+    for (int i = 0; i < l->nsec; i++)
+        if ((l->insecs[i].osec == OSEC_TDATA ||
+             l->insecs[i].osec == OSEC_TBSS) &&
+            l->insecs[i].align > *tls_align)
+            *tls_align = l->insecs[i].align;
+    va = align_up(va, *tls_align);
+    *tls_start = va;
+    place_osec(l, OSEC_TDATA, &va, b);
+    *tls_filesz = va - *tls_start;
+    place_osec(l, OSEC_TBSS, &va, b);
+    *tls_memsz = va - *tls_start;
+    /* Everything after the template is addressed from where the FILE
+     * bytes end, because .tbss contributed none. */
+    va = *tls_start + *tls_filesz;
+
     place_osec(l, OSEC_INIT_ARRAY, &va, b);
     place_osec(l, OSEC_FINI_ARRAY, &va, b);
     place_osec(l, OSEC_CTORS, &va, b);
@@ -699,6 +748,77 @@ static void define_end_symbols(struct linker *l, Elf64_Addr image_end)
     define_linker_symbol(l, "__kernel_end", image_end);
 }
 
+/* Two libraries whose absence shows up HERE — at the link, as a bare
+ * undefined name — rather than at the compile that caused it.
+ *
+ * The compiler runtime (libgcc's `__muldi3` family) is what a backend
+ * calls when an operation has no instruction: 128-bit multiply and
+ * divide, the shifts under them, complex multiplication, and on
+ * aarch64 every `long double` operation there is. The unwinder
+ * (`_Unwind_*`) is what `throw` uses to walk back up the stack. Both
+ * exist on macOS and on EmbLinkOS because the platform supplies them,
+ * and both are now `lib/rt` on the Linux targets.
+ *
+ * So these notes no longer say "missing": they say what the routine IS
+ * and where it comes from, because a program that reaches one of them
+ * has almost always lost librt.a off its link line. "undefined symbol
+ * '__multi3'" is true and useless either way. Returns the note, or NULL
+ * for an ordinary undefined symbol. */
+static int ends_with(const char *s, const char *suf)
+{
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && strcmp(s + n - m, suf) == 0;
+}
+
+static const char *missing_runtime_note(const char *name)
+{
+    static const char *const rt_suffix[] = {
+        "ti3", "ti2", "di3", "di2", "si3", "si2",     /* integer */
+        "sf2", "df2", "xf2", "tf2",                   /* conversions */
+        "sc3", "dc3", "xc3", "tc3",                   /* complex */
+        "sf3", "df3", "xf3", "tf3", NULL
+    };
+    int i;
+
+    if (name[0] != '_')
+        return NULL;
+    if (strncmp(name, "_Unwind_", 8) == 0 ||
+        strcmp(name, "__gxx_personality_v0") == 0 ||
+        strcmp(name, "__register_frame_info") == 0 ||
+        strcmp(name, "__deregister_frame_info") == 0 ||
+        strcmp(name, "dl_iterate_phdr") == 0)
+        return "this is the stack unwinder, which C++ exceptions need. "
+               "EmbCC has one (lib/rt/unwind.c, in librt.a), so this "
+               "usually means librt.a is not on the link line -- the "
+               "driver puts it there by itself, and a hand-written link "
+               "has to name it after libc.a";
+    if (strncmp(name, "__", 2) != 0)
+        return NULL;
+    /* The conversion families are named by their two TYPES rather than
+     * by a fixed suffix -- __fixtfti, __floatuntitf -- so they are
+     * matched by prefix. Without this they fell through to a bare
+     * undefined symbol, which is the message this whole function
+     * exists to replace. */
+    if (strncmp(name, "__fix", 5) == 0 || strncmp(name, "__float", 7) == 0 ||
+        strncmp(name, "__trunc", 7) == 0 || strncmp(name, "__extend", 8) == 0)
+        return "this is a compiler-runtime conversion between a "
+               "floating-point type and an integer one, or between two "
+               "floating-point widths — including every aarch64 `long "
+               "double` operation, which is IEEE binary128 in software "
+               "there. EmbCC ships these in librt.a (lib/rt); a link "
+               "that reaches this note is usually one that left it out";
+    for (i = 0; rt_suffix[i]; i++)
+        if (ends_with(name, rt_suffix[i]))
+            return "this is a compiler-runtime helper (libgcc's "
+                   "__muldi3 family) — the routine a backend calls for "
+                   "an operation the machine has no instruction for, "
+                   "such as 128-bit multiply or divide. EmbCC ships "
+                   "these in librt.a (lib/rt); the driver puts it on "
+                   "the link line by itself, and a hand-written link "
+                   "has to name it after libc.a";
+    return NULL;
+}
+
 /* The absolute vaddr of a symbol referenced by a relocation. Undefined
  * weak binds to 0 (TARGET_ABI §4a). A strong undefined is a hard error:
  * the static link has no resolver to defer to. */
@@ -725,6 +845,12 @@ static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
     if (ELF64_ST_BIND(sy->st_info) == STB_WEAK) {
         *is_undef_weak = 1;
         return 0;
+    }
+    {
+        const char *note = missing_runtime_note(name);
+        if (note)
+            die("undefined symbol '%s' (referenced by %s)\n  note: %s",
+                name, o->name, note);
     }
     die("undefined symbol '%s' (referenced by %s)", name, o->name);
     return 0;
@@ -788,6 +914,26 @@ static void apply_relocs(struct linker *l, struct object *o)
                 put64(loc, (unsigned long long)((long long)S + A -
                                                 (long long)P));
                 break;
+            case R_X86_64_TPOFF32:
+                /* Local-exec thread-local storage. S is the symbol's
+                 * address in the TEMPLATE, so S - tls_start is its
+                 * offset within the block, and the value the program
+                 * needs is that offset minus the block's size -- a
+                 * negative number, because the block sits below the
+                 * thread pointer.
+                 *
+                 * A symbol with no thread block to belong to means an
+                 * object was compiled with __thread and linked into an
+                 * image that has no PT_TLS, which cannot be patched
+                 * into something meaningful. */
+                if (!l->tls_size)
+                    die("%s: a thread-local relocation, but the image "
+                        "has no thread block -- was a __thread object "
+                        "linked without its .tdata/.tbss?", o->name);
+                put32(loc, (unsigned int)(long)((long long)S + A -
+                                                (long long)l->tls_start -
+                                                (long long)l->tls_size));
+                break;
             default:
                 die("%s: unsupported relocation type %u (this is the "
                     "next linker increment, not a bug in your program)",
@@ -803,14 +949,37 @@ static void write_exec(struct linker *l, const char *out,
                        Elf64_Addr entry,
                        Elf64_Addr text_start, Elf64_Xword text_size,
                        Elf64_Addr data_start, Elf64_Xword data_filesz,
-                       Elf64_Xword data_memsz)
+                       Elf64_Xword data_memsz,
+                       Elf64_Addr tls_start, Elf64_Xword tls_filesz,
+                       Elf64_Xword tls_memsz, Elf64_Xword tls_align)
 {
+    /* A third program header when the image has a thread block, and
+     * with it a second requirement that is easy to miss and fatal to
+     * get wrong: the PROGRAM HEADERS THEMSELVES must be inside the
+     * first loadable segment.
+     *
+     * The kernel tells a program where its headers are through AT_PHDR,
+     * and can only do that if some PT_LOAD covers the file offset they
+     * sit at. When none does it passes zero, and a program that needed
+     * them -- which here means any program with a thread-local, since
+     * PT_TLS is how the runtime finds its template -- gets nothing,
+     * sets no thread pointer, and faults near address zero on its first
+     * access. Nothing fails at link time and nothing fails at load
+     * time.
+     *
+     * So an image WITH a thread block starts its first segment at file
+     * offset 0, covering the headers. An image without one keeps the
+     * layout it has always had, because EmbLinkOS's loader has been
+     * reading that layout since before this existed and nothing here
+     * needs to change for it. */
+    int ntls = tls_memsz ? 1 : 0;
+    int nph = 2 + ntls;
     /* File layout: ehdr, 2 phdrs, then the text bytes at a file offset
      * congruent to their vaddr mod PAGE, then the data bytes likewise.
      * The kernel loader maps PT_LOAD by (offset, vaddr, filesz, memsz);
      * keeping offset ≡ vaddr (mod PAGE) is what lets it map file pages
      * directly. */
-    Elf64_Off hdrs = sizeof(Elf64_Ehdr) + 2 * sizeof(Elf64_Phdr);
+    Elf64_Off hdrs = sizeof(Elf64_Ehdr) + (Elf64_Off)nph * sizeof(Elf64_Phdr);
 
     Elf64_Off text_off = hdrs;
     /* keep text_off ≡ text_start (mod PAGE) */
@@ -838,16 +1007,27 @@ static void write_exec(struct linker *l, const char *out,
     eh->e_phoff = sizeof(Elf64_Ehdr);
     eh->e_ehsize = sizeof(Elf64_Ehdr);
     eh->e_phentsize = sizeof(Elf64_Phdr);
-    eh->e_phnum = 2;
+    eh->e_phnum = (Elf64_Half)nph;
 
     Elf64_Phdr *ph = (Elf64_Phdr *)(img + sizeof(Elf64_Ehdr));
     ph[0].p_type = PT_LOAD;
     ph[0].p_flags = PF_R | PF_X;
-    ph[0].p_offset = text_off;
-    ph[0].p_vaddr = text_start;
-    ph[0].p_paddr = text_start - l->lma_offset;   /* L2: LMA (higher-half kernel) */
-    ph[0].p_filesz = text_size;
-    ph[0].p_memsz = text_size;
+    if (ntls) {
+        /* From file offset 0, so the headers are mapped and AT_PHDR is
+         * real. The segment therefore begins text_off bytes before the
+         * text does. */
+        ph[0].p_offset = 0;
+        ph[0].p_vaddr = text_start - text_off;
+        ph[0].p_paddr = (text_start - text_off) - l->lma_offset;
+        ph[0].p_filesz = text_off + text_size;
+        ph[0].p_memsz = text_off + text_size;
+    } else {
+        ph[0].p_offset = text_off;
+        ph[0].p_vaddr = text_start;
+        ph[0].p_paddr = text_start - l->lma_offset; /* L2: higher-half */
+        ph[0].p_filesz = text_size;
+        ph[0].p_memsz = text_size;
+    }
     ph[0].p_align = PAGE;
     ph[1].p_type = PT_LOAD;
     ph[1].p_flags = PF_R | PF_W;
@@ -857,6 +1037,21 @@ static void write_exec(struct linker *l, const char *out,
     ph[1].p_filesz = data_filesz;
     ph[1].p_memsz = data_memsz;       /* memsz > filesz = the .bss tail */
     ph[1].p_align = PAGE;
+
+    /* The template, described rather than loaded twice: its bytes are
+     * already inside the data segment above, and this header says which
+     * of them they are. memsz exceeds filesz by the .tbss tail, which
+     * each thread zeroes rather than copies. */
+    if (ntls) {
+        ph[2].p_type = PT_TLS;
+        ph[2].p_flags = PF_R;
+        ph[2].p_offset = data_off + (tls_start - data_start);
+        ph[2].p_vaddr = tls_start;
+        ph[2].p_paddr = tls_start - l->lma_offset;
+        ph[2].p_filesz = tls_filesz;
+        ph[2].p_memsz = tls_memsz;
+        ph[2].p_align = tls_align;
+    }
 
     /* copy each allocated, file-backed section to its place */
     for (int i = 0; i < l->nsec; i++) {
@@ -1066,8 +1261,19 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     Elf64_Xword text_size, data_filesz, data_memsz;
     struct osec_bound bounds[OSEC_COUNT + MAX_ORPHANS];
     memset(bounds, 0, sizeof bounds);
+    Elf64_Addr tls_start = 0;
+    Elf64_Xword tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     layout(&l, bounds, &text_start, &text_size, &data_start, &data_filesz,
-           &data_memsz);
+           &data_memsz, &tls_start, &tls_filesz, &tls_memsz, &tls_align);
+    /* What a TPOFF relocation is measured against. x86-64 puts the
+     * thread block BELOW the thread pointer, so an object at offset k
+     * within the block is at tp - (aligned size) + k, and every such
+     * relocation is negative. The runtime
+     * (lib/libc/os/linux/tls.c) lays memory out to match, and rounds
+     * to this same alignment -- rounding either side differently moves
+     * the whole block and every access reads past its own variable. */
+    l.tls_start = tls_start;
+    l.tls_size = align_up(tls_memsz, tls_align);
     finalize_symbols(&l);
     define_brackets(&l, bounds);
     define_orphan_brackets(&l, bounds);
@@ -1085,7 +1291,8 @@ int embld_link(const char **inputs, int ninputs, const char *out,
                   data_start, data_filesz, data_memsz);
     } else {
         write_exec(&l, out, e->value, text_start, text_size,
-                   data_start, data_filesz, data_memsz);
+                   data_start, data_filesz, data_memsz,
+                   tls_start, tls_filesz, tls_memsz, tls_align);
         emit_embdbg(&l, out);   /* a .embdbg sidecar if any input carries -g info */
     }
     return 0;

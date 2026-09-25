@@ -136,7 +136,16 @@ int  __os_sleep_ns(long ns);
 int  __os_futex_wait(const volatile int *addr, int expected, long timeout_ns);
 
 /* Wake up to `count` waiters on addr (-1: all of them). The number
- * woken, or -1 with errno. */
+ * woken, or -1 with errno.
+ *
+ * A backend must TRANSLATE the -1; it is this seam's spelling, not any
+ * kernel's. Linux's FUTEX_WAKE takes a count and stops when it has
+ * woken that many, so handing it a negative one wakes nobody -- and
+ * returns 0 rather than an error, so the caller learns nothing and its
+ * waiters sleep forever. Every broadcast in the C++ library is this
+ * call (condition_variable::notify_all, atomic::notify_all, latch,
+ * barrier, the static-initialisation guard), so getting it wrong
+ * silently hangs all of them. tests/golden/threadsafe.sh checks it. */
 int  __os_futex_wake(const volatile int *addr, int count);
 
 /* ---- the filesystem --------------------------------------------------------

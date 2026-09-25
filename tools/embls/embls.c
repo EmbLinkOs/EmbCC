@@ -26,6 +26,13 @@
  * code unit in the protocol; this counts bytes, which agree for ASCII
  * sources and are off by the multi-byte characters in a line otherwise.
  */
+/* popen/fdopen are POSIX, not C99, and this is built with -std=c99.
+ * Without the feature macro glibc's headers hide them, the call is
+ * implicitly declared as returning int, and the FILE * is TRUNCATED to
+ * 32 bits -- which crashes on the first use. macOS hid the bug by
+ * exposing them regardless. Must precede every include. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -34,6 +41,9 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <string.h>
+/* strncasecmp is POSIX and lives here, not in <string.h>. With the
+ * feature macro above it is declared; without the header it is not. */
+#include <strings.h>
 #include <sys/wait.h>
 #include <unistd.h>
 

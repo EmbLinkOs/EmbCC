@@ -57,7 +57,11 @@ line and column on every instruction that has one"
 [ "$(grep -c 'ldvar' "$out/O0.txt")" -ge 6 ] ||
     { echo "FAIL: expected stack traffic at -O0"; exit 1; }
 o0=$(grep -c 'ldvar' "$out/O0.txt")
-o2=$(grep -c 'ldvar' "$out/O2.txt")
+# `|| true`: grep -c exits 1 when the count is ZERO, and zero is the
+# answer this asserts is possible -- with parameters promotable there is
+# no stack traffic left in p.c at -O2 at all. Without it `set -e` ended
+# the test, silently, at its most successful result.
+o2=$(grep -c 'ldvar' "$out/O2.txt" || true)
 [ "$o2" -lt "$o0" ] ||
     { echo "FAIL: -O2 did not reduce stack traffic ($o0 -> $o2)"; exit 1; }
 echo "mem2reg is visible: ldvar $o0 -> $o2"

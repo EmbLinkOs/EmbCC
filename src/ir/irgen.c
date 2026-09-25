@@ -107,6 +107,8 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         L->is_int_or_ptr = ty_is_integer(t) || t->kind == TY_PTR;
         L->is_scalar_int_or_ptr =
             L->is_int_or_ptr && (L->size == 4 || L->size == 8);
+        L->is_scalar_float = ty_is_float(t) && !L->is_ldouble &&
+                             (L->size == 4 || L->size == 8);
     }
 }
 
@@ -445,12 +447,15 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
         int hi = bf_wide_bytes(fn, addr, 16, 17);
         int sh = emit_const(fn, 128 - off, 4);
         int hm = emit_bin(fn, IR_SHR, fm, sh, 16, 0);
-        hi = emit_bin(fn, IR_OR, emit_bin(fn, IR_AND, hi,
-                                          emit_bin(fn, IR_XOR, hm, ones, 16, 0),
-                                          16, 0),
-                      emit_bin(fn, IR_SHR, v, sh, 16, 0), 16, 0);
-        emit_store(fn, emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, 8), 8, 0),
-                   gen_convert(fn, hi, u128, u8), u8);
+        /* Both operands emit, so both are sequenced first (see
+         * gen_float_to_u64 for why). */
+        int keep = emit_bin(fn, IR_AND, hi,
+                            emit_bin(fn, IR_XOR, hm, ones, 16, 0), 16, 0);
+        int put = emit_bin(fn, IR_SHR, v, sh, 16, 0);
+        hi = emit_bin(fn, IR_OR, keep, put, 16, 0);
+        int at = emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, 8), 8, 0);
+        int val = gen_convert(fn, hi, u128, u8);
+        emit_store(fn, at, val, u8);
     }
     return bf_wide_load(fn, addr, m);
 }
@@ -911,8 +916,21 @@ static int gen_float_to_u64(struct ir_func *fn, int v, int fsize)
     emit_brz(fn, cmp->dst, 4, l_small);                          /* v < 2^63 -> direct */
     /* v >= 2^63: (u64)(v - 2^63) with the sign bit flipped back on */
     int vm = emit_fbin(fn, IR_SUB, v, two63, fsize);
-    int big = emit_bin(fn, IR_XOR, emit_f2i(fn, vm, fsize, 8),
-                       emit_const(fn, (long)1 << 63, 8), 8, 0);
+    /* Each operand is emitted into its OWN statement before the
+     * combining call. C leaves the evaluation order of sibling
+     * arguments unspecified, and both of these append to the
+     * instruction list -- so written as arguments they produced a
+     * different instruction ORDER depending on which compiler built
+     * EmbCC, and the self-host fixed point cannot exist when the
+     * output depends on that.
+     *
+     * The constant is the sign bit. `(long)1 << 63` shifts into the
+     * sign bit of a signed type, which C99 6.5.7p4 leaves undefined;
+     * shifting the unsigned value and converting is defined, and the
+     * conversion is implementation-defined rather than undefined. */
+    int trunc = emit_f2i(fn, vm, fsize, 8);
+    int sign = emit_const(fn, (long)(1ULL << 63), 8);
+    int big = emit_bin(fn, IR_XOR, trunc, sign, 8, 0);
     emit_mov(fn, res, big);
     emit_jmp(fn, l_done);
     emit_label(fn, l_small);
@@ -2325,6 +2343,87 @@ static void mark_eh_calls(struct ir_func *fn)
         fn->neh = 0;
 }
 
+/* ---- switch: a decision tree, not a chain -------------------------------
+ *
+ * A switch used to emit one equality compare per case, in source order,
+ * so dispatching to the last of N cases executed N comparisons. For the
+ * shapes switches actually take -- an interpreter's opcode, a state
+ * machine, a token kind -- that is the hot path of the whole program.
+ *
+ * This emits a balanced binary decision tree over the SORTED case
+ * values instead: O(log n) compares rather than O(n). Ten cases go from
+ * ten comparisons to about four, a hundred from a hundred to about
+ * seven.
+ *
+ * Not a jump table, and the reason belongs here rather than in a list
+ * of omissions. A table needs an indirect jump, and in this backend any
+ * indirect jump (IR_IGOTO, IR_LABELADDR) turns OFF the register
+ * allocator and the RAX residency cache for the WHOLE function --
+ * because a computed goto's targets are unknown, so the liveness those
+ * passes need cannot be computed. A jump table's targets are perfectly
+ * well known, so the real fix is a multi-way terminator that names them
+ * and a liveness pass that reads them. Until that exists, lowering a
+ * switch through the computed-goto machinery would buy O(1) dispatch
+ * and pay for it with every register in the function. A tree costs
+ * nothing and is strictly better than what was here.
+ *
+ * Below a handful of cases the chain wins -- no tree, no extra labels,
+ * and the first compare usually hits -- so a leaf is a chain.
+ */
+static void switch_case_eq(struct ir_func *fn, int v, int w, int sign,
+                           long val, int label)
+{
+    int k = emit_const(fn, val, w);
+    struct ir_ins *i = emit(fn);
+    i->op = IR_CMP;
+    i->pred = B_EQ;
+    i->a = v;
+    i->b = k;
+    i->w = w;
+    i->sign = sign;
+    i->dst = new_temp(fn);
+    emit_brnz(fn, i->dst, 4, label);
+}
+
+/* cs[lo..hi] are sorted by value. Emits code that lands on the right
+ * case label, or on `dflt` when nothing matches. */
+static void switch_tree(struct ir_func *fn, int v, int w, int sign,
+                        struct stmt **cs, int lo, int hi, int dflt)
+{
+    int mid, right, i;
+
+    if (lo > hi) {
+        emit_jmp(fn, dflt);
+        return;
+    }
+    if (hi - lo < 4) {                 /* a leaf: the chain is cheaper */
+        for (i = lo; i <= hi; i++)
+            switch_case_eq(fn, v, w, sign, cs[i]->cval, cs[i]->label);
+        emit_jmp(fn, dflt);
+        return;
+    }
+    mid = lo + (hi - lo) / 2;
+    right = new_label(fn);
+    /* Equality first, because a hit there ends the search; then one
+     * comparison decides which half the rest of it is in. */
+    switch_case_eq(fn, v, w, sign, cs[mid]->cval, cs[mid]->label);
+    {
+        int k = emit_const(fn, cs[mid]->cval, w);
+        struct ir_ins *c = emit(fn);
+        c->op = IR_CMP;
+        c->pred = B_GT;
+        c->a = v;
+        c->b = k;
+        c->w = w;
+        c->sign = sign;
+        c->dst = new_temp(fn);
+        emit_brnz(fn, c->dst, 4, right);
+    }
+    switch_tree(fn, v, w, sign, cs, lo, mid - 1, dflt);
+    emit_label(fn, right);
+    switch_tree(fn, v, w, sign, cs, mid + 1, hi, dflt);
+}
+
 static void gen_stmt(struct ir_func *fn, struct stmt *s,
                      const struct loopctx *loop)
 {
@@ -2512,9 +2611,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             emit_label(fn, s->label);
             break;
         case STMT_SWITCH: {
-            /* A compare-and-branch chain: correct and slow, the house
-             * rule (ARCHITECTURE §3). A jump table is an OPTIMIZATION
-             * and belongs to the optimizer era, not here. */
+            /* A balanced decision tree over the case values: see
+             * switch_tree above, including why it is not a jump table. */
             struct loopctx lc;
             lc.brk = new_label(fn);
             /* continue inside a switch belongs to the enclosing LOOP;
@@ -2529,27 +2627,48 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             struct stmt *list = switch_stmts(s->body);
             int dflt = -1;
 
+            /* Every case gets its label first, because the tree below
+             * visits them in VALUE order and the bodies are emitted in
+             * source order. */
+            int ncase = 0;
             for (struct stmt *c = list; c; c = c->next) {
                 if (c->kind == STMT_DEFAULT) {
                     c->label = new_label(fn);
                     dflt = c->label;
-                    continue;
+                } else if (c->kind == STMT_CASE) {
+                    c->label = new_label(fn);
+                    ncase++;
                 }
-                if (c->kind != STMT_CASE)
-                    continue;
-                c->label = new_label(fn);
-                int k = emit_const(fn, c->cval, w);
-                struct ir_ins *i = emit(fn);
-                i->op = IR_CMP;
-                i->pred = B_EQ;
-                i->a = v;
-                i->b = k;
-                i->w = w;
-                i->sign = sign;
-                i->dst = new_temp(fn);
-                emit_brnz(fn, i->dst, 4, c->label);
             }
-            emit_jmp(fn, dflt >= 0 ? dflt : lc.brk);
+            if (ncase) {
+                struct stmt **cs = xmalloc((size_t)ncase * sizeof *cs);
+                int n = 0;
+                for (struct stmt *c = list; c; c = c->next)
+                    if (c->kind == STMT_CASE)
+                        cs[n++] = c;
+                /* Insertion sort by value: the case list of a real
+                 * switch is short, and a stable order keeps the emitted
+                 * code the same from run to run (R4). Duplicate values
+                 * cannot occur -- sema refuses them -- so no tie-break
+                 * is needed. */
+                for (int a1 = 1; a1 < n; a1++) {
+                    struct stmt *t = cs[a1];
+                    int b1 = a1 - 1;
+                    while (b1 >= 0 &&
+                           (sign ? cs[b1]->cval > t->cval
+                                 : (unsigned long)cs[b1]->cval >
+                                   (unsigned long)t->cval)) {
+                        cs[b1 + 1] = cs[b1];
+                        b1--;
+                    }
+                    cs[b1 + 1] = t;
+                }
+                switch_tree(fn, v, w, sign, cs, 0, n - 1,
+                            dflt >= 0 ? dflt : lc.brk);
+                free(cs);
+            } else {
+                emit_jmp(fn, dflt >= 0 ? dflt : lc.brk);
+            }
             gen_stmt(fn, list, &lc); /* fallthrough is just: no jumps */
             emit_label(fn, lc.brk);
             break;

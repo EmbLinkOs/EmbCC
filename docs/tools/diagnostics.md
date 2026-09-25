@@ -522,8 +522,10 @@ no reason":
 |---|---|
 | `inline` | `inlined` / `not-inlined`, with the reason out of twelve and the size that settled it |
 | `mem2reg` | `promoted-to-register` / `kept-in-memory` **per variable**, at that variable's own declaration line |
+| `sroa` | `split-into-scalars` / `kept-whole` **per aggregate**, with the reason it is still one object |
+| `unroll` | `unrolled`: how many copies of a body, and how long the body was |
 | `sccp` | `branch-always-jumps` / `branch-never-jumps` when a condition folds to a constant |
-| `opt` | `optimized`: what the whole fixpoint came to, as instructions before → after |
+| `opt` | `optimized`: what the whole fixpoint came to, as instructions before → after; `rewrote`: one line of counts for the passes that are otherwise silent — value numbering, global CSE, load reuse, copies, dead code, dead stores, selects, partial redundancies |
 | `regalloc` | `spilled-to-stack`: how many values missed a register, out of how many, against how many registers exist |
 
 **"Why is my variable still on the stack?"** is the question `mem2reg`
@@ -535,11 +537,26 @@ answers, and five different causes used to leave the same zero behind:
     addressed (prog.c:8): kept-in-memory
       because address-is-taken
     agg (prog.c:9): kept-in-memory
-      because not-a-scalar-integer-or-pointer
+      because not-a-scalar-integer-pointer-or-float
 
 Each points at its own declaration line, which needed `struct ir_dbgvar` to
 carry one — R3 work that fell out of R2, because a remark about a variable
 has to point at the variable and not at the function containing it.
+
+The last of those has a follow-up question — *an aggregate cannot be
+promoted, so is it at least being taken apart?* — and `sroa` answers it in
+the same shape, one line per object with the reason it is still one:
+
+    $ embcc why kept-whole prog.c -O2
+    punned (prog.c:14): kept-whole
+      because two-accesses-overlap-at-different-widths
+    leaks (prog.c:22): kept-whole
+      because address-escapes
+
+"Overlap at different widths" is the union read as a `double` and as two
+`int`s; "address escapes" is the address reaching a callee, a global or
+anything else that could keep it. Neither is a missed optimization — split
+either one and the program writes a value and reads a different one.
 
 **A remark states the fact it is sure of.** SCCP knows a branch folded; it
 does *not* know whether the programmer's condition was true, because `if (c)`

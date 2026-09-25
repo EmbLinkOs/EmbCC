@@ -4,11 +4,14 @@
 
 #include <string.h>
 
+/* The caller holds the stream's lock for the whole conversion, so this
+ * uses the unlocked write. Locking per chunk instead would let two
+ * threads' output interleave inside one printf, which is the failure
+ * the per-stream lock exists to prevent -- and would take the lock once
+ * per character besides. */
 static void sink_file(void *ctx, const char *s, size_t n)
 {
-    FILE *f = ctx;
-    for (size_t i = 0; i < n; i++)
-        fputc((unsigned char)s[i], f);
+    __fwrite_unlocked(s, 1, n, (FILE *)ctx);
 }
 
 struct buf_sink { char *p; size_t cap, n; };
@@ -25,7 +28,11 @@ static void sink_buf(void *ctx, const char *s, size_t n)
 
 int vfprintf(FILE *restrict f, const char *restrict fmt, va_list ap)
 {
-    return __vformat(sink_file, f, fmt, ap);
+    if (!f) return -1;
+    __flockfile(f);
+    int r = __vformat(sink_file, f, fmt, ap);
+    __funlockfile(f);
+    return r;
 }
 
 int vprintf(const char *restrict fmt, va_list ap)

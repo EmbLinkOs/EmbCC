@@ -35,7 +35,9 @@
 #include "util.h"
 #include "../platform/platform.h"
 
-#define EMBCC_VERSION "1.0.0-m2.complete"
+#include "version.h"
+#include "paths.h"
+#include "../link/link.h"
 
 static void print_version(void)
 {
@@ -52,16 +54,24 @@ static void print_version(void)
            "-emblink, -linux-gnu and -apple-darwin, and any unknown "
            "--target lists every triple (D-014).\n");
     printf("Hosted: Linux builds a STATIC image with no glibc under it "
-           "(lib/libc/os/linux issues syscalls; make libc-linux-x86_64), "
-           "macOS emits Mach-O objects the system linker accepts. Windows "
-           "has the triple and its macros, but no COFF writer yet.\n");
+           "(lib/libc/os/linux issues syscalls; make libc-linux-x86_64) and "
+           "it has run on a real kernel; macOS emits Mach-O objects the "
+           "system linker accepts. Windows emits COFF objects in the "
+           "Microsoft x64 convention, but nothing has been executed there "
+           "yet and there is no libc for it.\n");
     printf("C++ (.cc/.cpp/.cxx/.C, or -x c++): in progress toward C++20 "
            "with libstdc++ (docs/language/cpp-levels.md) — namespaces, overloading, "
            "references, classes with constructors and destructors, "
            "new/delete, lowered through C to either target.\n");
+    printf("Installed or not: EmbCC finds its headers and per-target "
+           "libraries relative to its own binary, so <stdio.h> works with "
+           "no -I from a build tree or an unpacked tarball alike; "
+           "--print-search-dirs says which it found (make install "
+           "PREFIX=...).\n");
     printf("Also: the preprocessor (-E), -O0..-O2, -g (DWARF), embas "
            "(NASM-syntax .asm, x86-64) and embld (the linker, x86-64 ELF "
-           "and EMBX). Not yet: __thread, PIE, embld for aarch64 — "
+           "and EMBX). __thread and thread_local work on the ELF targets. "
+           "Not yet: PIE, dynamic linking, embld for aarch64 — "
            "see docs/language/compatibility.md.\n");
 }
 
@@ -71,7 +81,8 @@ static void print_usage(FILE *out)
             "usage: embcc [-E] -c FILE.c|FILE.cc|FILE.asm [-o FILE.o]\n"
             "             [--target=x86_64-elf|aarch64-elf] [-x c|c++]\n"
             "             [-std=...] [--emit-c]\n"
-            "             [-I DIR]... [-isystem DIR]... [-g] [-O0|-O1|-O2]\n"
+            "             [-I DIR]... [-isystem DIR]... [-nostdinc] [-g]\n"
+            "             [-O0|-O1|-O2]\n"
             "             [-mno-sse] [-mno-red-zone] [-mcmodel=kernel] ...\n"
             "       embcc --version | --dump-predef"
             " | --emit-empty-object FILE\n");
@@ -93,8 +104,12 @@ static void print_options(FILE *out)
       "  -x c|c++               treat the input as this language\n"
       "  -std=...               accepted; EmbCC has one dialect per language\n"
       "  -I DIR, -isystem DIR   header search paths\n"
+      "  -nostdinc              do not search EmbCC's own headers\n"
+      "  --print-search-dirs    where EmbCC found its own files\n"
       "  -D NAME[=VALUE], -U NAME  define and undefine macros\n"
       "  -include FILE          include it before the file\n"
+      "  -O0/-O1/-O2/-O3/-Os          optimization level (-Os: no size growth)\n"
+      "  -f<pass>, -fno-<pass>        turn one optimizer pass on or off\n"
       "  -fno-exceptions, -fno-rtti   C++ without them\n"
       "  -fno-access-control          do not enforce private/protected\n"
       "\nthe target\n"
@@ -145,6 +160,15 @@ static int stv_of(const char *v)
     if (!strcmp(v, "internal"))  return STV_INTERNAL;
     if (!strcmp(v, "protected")) return STV_PROTECTED;
     return STV_DEFAULT;
+}
+
+/* Mach-O's section alignment is a power-of-two EXPONENT. */
+static int log2_align(int a)
+{
+    int n = 0;
+    while ((1 << n) < a && n < 14)
+        n++;
+    return n;
 }
 
 static int object_format_ready(void)
@@ -228,9 +252,19 @@ static int nincdirs;
  * (self-host builds without -g). */
 static int want_debug;
 
+/* -nostdinc: do not add EmbCC's own header directories. A freestanding
+ * build that supplies its own headers needs to be able to say so. */
+static int no_stdinc;
+
 /* -O level. 0 (the default) runs no optimizer, so output is byte-for-byte
  * as before — the property the self-host fixed point rests on. */
 static int opt_level;
+/* -Os: the optimizer wants to know (it drops vectorization), and
+ * codegen must NOT -- it reads opt_level for register allocation and
+ * tail calls, and a negative level turned both off, which made -Os
+ * emit nearly twice the code of -O2. So the size request travels
+ * separately and opt_level stays an ordinary number. */
+static int opt_for_size;
 
 /* -mno-sse: never emit an SSE/xmm instruction (no varargs xmm spill, no SSE
  * struct/float lowering). A kernel built before it enables CR4.OSFXSR needs
@@ -344,6 +378,124 @@ static void write_deps(const char *in, const char *obj)
  * their own boundary and keep serving. */
 static int compile_unit(const char *in, const char *out, int pp_only);
 
+/* `embcc prog.c -o prog`: compile, then link, in ONE process.
+ *
+ * A library, not a subprocess. The platform seam has no process API and
+ * must never grow one -- EmbLinkOS has no fork/exec, and a driver that
+ * spawned `ld` could not be hosted on the target at all
+ * (ARCHITECTURE §1). src/link/link.c has always been written as a
+ * library for exactly this, and this is where it gets used.
+ *
+ * What goes into the link, in the order a linker resolves:
+ *
+ *   crt1.o      the entry point, which calls main and leaves through
+ *               exit() -- found beside the compiler by paths.c
+ *   the object  just compiled, into a temporary next to the output
+ *   libc.a      an ARCHIVE, so only the members actually referenced
+ *               are pulled in
+ *   libcxx.a    the C++ runtime, for a C++ source: operator new, the
+ *               __cxa_* layer, the personality routine and the type
+ *               information a `catch` matches against
+ *   librt.a     the compiler runtime (lib/rt) where the target has one:
+ *               the routines the BACKEND calls for operations the
+ *               machine has no instruction for. After libc, because an
+ *               archive is searched once and libc calls into it
+ *
+ * A hosted target needs all three; a freestanding one has no crt1 and
+ * no libc to offer and links only what it was given, which is what
+ * `--target=x86_64-elf` has always meant.
+ */
+static int compile(const char *in, const char *out, int pp_only);
+
+static int compile_and_link(const char *in, const char *out)
+{
+    /* EmbLD reads x86-64 ELF. Every other combination is refused by
+     * name rather than by producing an image for the wrong machine:
+     * a linker that quietly emitted x86-64 for an aarch64 object would
+     * be the exact failure THE RULE exists to prevent. */
+    if (target_get() != TARGET_X86_64 || target_fmt_get() != TGT_FMT_ELF) {
+        fprintf(stderr,
+                "embcc: error: cannot link for %s: the integrated linker "
+                "reads x86-64 ELF, and this needs %s\n",
+                target_triple_now(),
+                target_fmt_get() != TGT_FMT_ELF
+                    ? target_fmt_name(target_fmt_get()) : "aarch64");
+        fprintf(stderr,
+                "embcc: compile with -c and link with a toolchain for it\n");
+        return 1;
+    }
+
+    const char *exe = out ? out : "a.out";
+    /* The temporary lives beside the output, not in /tmp: a build that
+     * cannot write next to its own output has a problem worth seeing,
+     * and this keeps the whole operation inside one directory. */
+    char obj[1024];
+    snprintf(obj, sizeof obj, "%s.embcc-tmp.o", exe);
+
+    int rc = compile(in, obj, 0);
+    if (rc != 0)
+        return rc;
+
+    const char *inputs[8];
+    int n = 0;
+    const char *triple = target_triple_now();
+    char crt1[1024], libc[1024], librt[1024], libcxx[1024];
+    int have_crt1 = paths_target_file(triple, "crt1.o", crt1, sizeof crt1);
+    int have_libc = paths_target_file(triple, "libc.a", libc, sizeof libc);
+    /* The C++ runtime, for a C++ source. Before libc, because it calls
+     * into it -- operator new is malloc, and a thrown std::string
+     * formats through the C library -- and an archive is searched
+     * once. */
+    int have_cxx = lang_cxx &&
+                   paths_target_file(triple, "libcxx.a", libcxx,
+                                     sizeof libcxx);
+    if (lang_cxx && !have_cxx) {
+        fprintf(stderr,
+                "embcc: error: no libcxx.a for %s -- a C++ program needs "
+                "the C++ runtime, and this target's is not built or not "
+                "installed\n", triple);
+        fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
+        remove(obj);
+        return 1;
+    }
+    /* The compiler runtime, if this target has one. Not an error when
+     * absent: a target that links somebody else's libgcc has no librt
+     * of ours, and one that needs a routine it does not have gets a
+     * link error naming the routine (src/link/link.c explains those by
+     * family). */
+    int have_rt = paths_target_file(triple, "librt.a", librt, sizeof librt);
+    /* A hosted target whose library is not installed cannot be linked,
+     * and saying which file is missing is the difference between a
+     * fixable message and fifty undefined symbols. */
+    if (target_is_hosted() && (!have_crt1 || !have_libc)) {
+        fprintf(stderr,
+                "embcc: error: no %s for %s -- the target's library is "
+                "not built or not installed\n",
+                !have_crt1 ? "crt1.o" : "libc.a", triple);
+        fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
+        remove(obj);
+        return 1;
+    }
+    if (have_crt1)
+        inputs[n++] = crt1;
+    inputs[n++] = obj;
+    if (have_cxx)
+        inputs[n++] = libcxx;
+    if (have_libc)
+        inputs[n++] = libc;
+    /* librt AFTER libc: an archive is searched once, in order, and a
+     * libc routine can call into the runtime -- printing a 128-bit
+     * value divides by ten -- while nothing in the runtime calls libc. */
+    if (have_rt)
+        inputs[n++] = librt;
+
+    struct link_opts lo;
+    memset(&lo, 0, sizeof lo);
+    rc = embld_link(inputs, n, exe, &lo);
+    remove(obj);
+    return rc;
+}
+
 static int compile(const char *in, const char *out, int pp_only)
 {
     jmp_buf boundary;
@@ -365,6 +517,20 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     predef_set_cxx(lang_cxx);
     if (lang_cxx)
         cpp_set_cxx(cxx_has_builtin, want_exceptions);
+    /* EmbCC's own headers, AFTER every -I the caller gave: a project
+     * that ships its own <stdio.h> must win, or nothing we install can
+     * ever be overridden. They are added here rather than at option
+     * parsing so that -nostdinc and the -I order both stay simple, and
+     * they are marked system so a warning inside them is not the
+     * caller's problem. */
+    if (!no_stdinc) {
+        int ndef = 0;
+        const char *const *def = paths_default_includes(&ndef);
+        for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = def[k];
+        }
+    }
     cpp_set_system_dirs(incdir_sys, nincdirs);
     char *pp = cpp_process(in, src, incdirs, nincdirs);
     if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
@@ -475,7 +641,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             for (struct func *f = u->funcs; f; f = f->next)
                 if (!f->absorbed &&
                     strcmp(f->name, ta->rels[r].target) == 0)
-                    f->used = 1;
+                    f->used = f->is_root = 1;
     }
 
     /* A constructor is called by the startup code, not by this unit, so
@@ -488,11 +654,102 @@ static int compile_unit(const char *in, const char *out, int pp_only)
              * although nothing here calls it -- a handler reached only
              * from a table, or from assembly the compiler cannot see.
              * Dropping it would link and then do nothing. */
-            f->used = 1;
+            f->used = f->is_root = 1;
 
     remarks_enable(want_remarks || why_decision != NULL);
     struct ir_unit *iu = irgen(u);
-    opt_run(iu, opt_level);
+    opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
+
+    /* ---- what is still reachable -------------------------------------
+     *
+     * A `static` function nothing calls is already dropped, but `used`
+     * has meant "some call resolved here", which is not the same
+     * question: a static called only from another dead static was
+     * called, so it was kept, and so was everything IT called. One
+     * unreferenced helper kept a whole private subtree alive.
+     *
+     * Reachability answers it properly. The roots are the things the
+     * world outside this unit can reach -- anything not static, a
+     * constructor or destructor (.init_array is the use), an
+     * __attribute__((used)), and any target named by top-level asm,
+     * which was marked above. Everything else is kept only if a
+     * reachable function calls it or takes its address.
+     *
+     * Run after the optimizer on purpose: inlining absorbs callees and
+     * dead-code elimination removes calls, so the call graph here is
+     * the one that will actually be emitted rather than the one the
+     * source described. */
+    if (opt_level >= 1) {
+        int nf = iu->nfuncs;
+        char *reach = xcalloc((size_t)(nf ? nf : 1), 1);
+        int *work = xmalloc((size_t)(nf ? nf : 1) * sizeof *work);
+        int nw = 0;
+        /* A function whose ADDRESS sits in a static initializer is
+         * reached from data, not from code: a vtable entry, a handler
+         * table, a designated initializer holding a function pointer.
+         * Nothing in any function body mentions it, so the IR scan
+         * below never sees it -- and dropping it leaves the relocation
+         * in .data pointing at a symbol that was never emitted, which
+         * is a link error rather than a wrong answer. */
+        for (struct global *g = u->globals; g; g = g->next)
+            for (int r = 0; r < g->nrelocs; r++)
+                if (g->relocs[r].ftarget)
+                    g->relocs[r].ftarget->is_root = 1;
+        for (int k = 0; k < nf; k++) {
+            struct func *f = iu->funcs[k].src;
+            if (!f || f->absorbed || !f->has_defn)
+                continue;
+            if (!f->is_static || f->is_root)
+                { reach[k] = 1; work[nw++] = k; }
+        }
+        while (nw) {
+            struct ir_func *fn = &iu->funcs[work[--nw]];
+            for (int n = 0; n < fn->nins; n++) {
+                struct ir_ins *i = &fn->ins[n];
+                struct func *t = NULL;
+                if (i->op == IR_CALL && !i->indirect) t = i->callee;
+                else if (i->op == IR_FADDR)           t = i->callee;
+                if (!t)
+                    continue;
+                for (int k = 0; k < nf; k++)
+                    if (iu->funcs[k].src == t && !reach[k]) {
+                        reach[k] = 1; work[nw++] = k;
+                        break;
+                    }
+            }
+        }
+        for (int k = 0; k < nf; k++) {
+            struct func *f = iu->funcs[k].src;
+            if (!f || f->absorbed || !f->has_defn || !f->is_static)
+                continue;
+            if (!reach[k] && f->used) {
+                f->used = 0;               /* kept only by a dead caller */
+                if (want_remarks)
+                    remark_add("opt", "dropped", f->name, "unreachable",
+                               f->file, f->line,
+                               "no reachable caller after optimization");
+            }
+        }
+        /* ...and actually drop them. Clearing `used` was not enough:
+         * irgen decides what goes in the unit BEFORE the optimizer
+         * runs, and codegen emits whatever is in the unit. So a static
+         * function that inlining absorbed, or whose only caller the
+         * optimizer deleted, was still being assembled into .text with
+         * nothing left to call it. Compacting here is the one place
+         * both backends see. */
+        int keep = 0;
+        for (int k = 0; k < nf; k++) {
+            struct func *f = iu->funcs[k].src;
+            int drop = f && f->is_static && !reach[k] && !f->used &&
+                       strcmp(f->name, "main") != 0;
+            if (!drop) {
+                if (keep != k) iu->funcs[keep] = iu->funcs[k];
+                keep++;
+            }
+        }
+        iu->nfuncs = keep;
+        free(reach); free(work);
+    }
 
     /* A question was asked (§19): answer it and stop. The remarks exist
      * because the passes have run; rendering here means the answer is a
@@ -561,6 +818,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                    char *buf; } named[64];
     int nnamed = 0;
     int data_len = 0, bss_len = 0;
+    /* The alignment each output section must claim: the strictest of
+     * anything placed in it. Emitting a fixed number here was silent
+     * and wrong -- an object declared aligned(4096) was laid out
+     * correctly WITHIN the section and then the linker was told the
+     * section only needed 8, so it placed it wherever that allowed and
+     * the object came out misaligned. Nothing failed; the address was
+     * simply not what was asked for. */
+    int data_align = 1, bss_align = 1;
     /* Thread-local objects get their own pair. The offsets recorded for
      * them are within the THREAD BLOCK, not within this image: the
      * linker gathers every .tdata/.tbss into PT_TLS, and each thread
@@ -569,7 +834,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->defined)
             continue;
+        /* The object's own alignment is the stricter of its type's and
+         * what it asked for with aligned(N) / _Alignas(N). */
         int align = ty_align(g->ty);
+        if (g->user_align > align)
+            align = g->user_align;
         g->in_bss = !g->has_init;
         g->named = 0;
         int *len = g->in_bss ? &bss_len : &data_len;
@@ -618,6 +887,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         *len = (*len + align - 1) & ~(align - 1);
         g->off = *len;
         *len += ty_size(g->ty);
+        if (!g->is_tls && !g->section) {
+            int *sa = g->in_bss ? &bss_align : &data_align;
+            if (align > *sa)
+                *sa = align;
+        }
     }
     for (int k = 0; k < nnamed; k++)
         if (!named[k].nobits && named[k].len)
@@ -696,8 +970,25 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         dwarf_emit(iu, in, &dw);
     struct eh_out eh;
     memset(&eh, 0, sizeof eh);
+    /* Unwind tables: asked for, or C++, or a HOSTED target.
+     *
+     * The last one is the gcc default and it is not a preference. An
+     * exception unwinds through whatever frames lie between the throw
+     * and the catch, and some of them are C -- qsort's comparison
+     * callback, a libc routine that calls back, and above all the
+     * unwinder's OWN frames, which are C and which the walk has to step
+     * out of before it can reach anything else. Without a table for
+     * those the walk stops at the first one and every throw becomes
+     * std::terminate, which is precisely what happened when lib/rt's
+     * unwinder was first run.
+     *
+     * Freestanding targets keep the old default of off: there is
+     * nothing to unwind into on a kernel's stack, and the tables are
+     * pure size there. */
     int unwind = want_unwind > 0 ||
-                 (lang_cxx && (want_unwind < 0 || want_exceptions));
+                 (lang_cxx && (want_unwind < 0 || want_exceptions)) ||
+                 (want_unwind < 0 && target_is_hosted() &&
+                  target_fmt_get() == TGT_FMT_ELF);
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
@@ -836,12 +1127,17 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         if (rodata)
             m_rodata = machow_add_section(mw, "__TEXT", "__const", S_REGULAR,
                                           rodata, iu->rodata_len, 0);
+        /* Mach-O records the alignment as a LOG2, so the same number
+         * that is 4096 in ELF is 12 here -- and a fixed 3 (eight bytes)
+         * discarded whatever an object had asked for. */
         if (data_len)
             m_data = machow_add_section(mw, "__DATA", "__data", S_REGULAR,
-                                        data, (unsigned long long)data_len, 3);
+                                        data, (unsigned long long)data_len,
+                                        log2_align(data_align));
         if (bss_len)
             m_bss = machow_add_section(mw, "__DATA", "__bss", S_ZEROFILL,
-                                       NULL, (unsigned long long)bss_len, 3);
+                                       NULL, (unsigned long long)bss_len,
+                                       log2_align(bss_align));
         for (int k = 0; k < nnamed; k++)
             named[k].ndx = machow_add_section(
                 mw, "__DATA", named[k].name,
@@ -1209,13 +1505,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                        IMAGE_SCN_CNT_INITIALIZED_DATA |
                                        IMAGE_SCN_MEM_READ |
                                        IMAGE_SCN_MEM_WRITE,
-                                       data, (unsigned)data_len, 8);
+                                       data, (unsigned)data_len, data_align);
         if (bss_len)
             c_bss = coffw_add_section(cw, ".bss",
                                       IMAGE_SCN_CNT_UNINITIALIZED_DATA |
                                       IMAGE_SCN_MEM_READ |
                                       IMAGE_SCN_MEM_WRITE,
-                                      NULL, (unsigned)bss_len, 8);
+                                      NULL, (unsigned)bss_len, bss_align);
 
         /* 3. symbols. .rdata gets a section symbol, because a string's
          * address is relocated against the SECTION rather than against
@@ -1324,18 +1620,22 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                     text.p, (Elf64_Xword)text.len, 16);
     int rodata_ndx = 0;
     if (rodata)
+        /* 16, not 1: .rodata holds string literals (which need 1) and
+         * also long double and 128-bit constants, which do not. */
         rodata_ndx = elfw_add_section(w, ".rodata", SHT_PROGBITS,
                                       SHF_ALLOC, rodata,
-                                      (Elf64_Xword)iu->rodata_len, 1);
+                                      (Elf64_Xword)iu->rodata_len, 16);
     int data_ndx = 0, bss_ndx = 0;
     if (data_len)
         data_ndx = elfw_add_section(w, ".data", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_WRITE, data,
-                                    (Elf64_Xword)data_len, 8);
+                                    (Elf64_Xword)data_len,
+                                    (Elf64_Xword)data_align);
     if (bss_len)
         bss_ndx = elfw_add_section(w, ".bss", SHT_NOBITS,
                                    SHF_ALLOC | SHF_WRITE, NULL,
-                                   (Elf64_Xword)bss_len, 8);
+                                   (Elf64_Xword)bss_len,
+                                   (Elf64_Xword)bss_align);
     /* The thread-block template. SHF_TLS is the whole difference: with
      * it the linker puts these in PT_TLS and every thread gets its own
      * copy; without it they would be one shared object, which is the
@@ -1474,15 +1774,34 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                              : g->in_bss ? bss_ndx : data_ndx));
     /* File-scope asm's .global labels (_start): global functions at their
      * .text offset. Local labels stay internal — the assembler already
-     * resolved jumps to them into rel32s. */
+     * resolved jumps to them into rel32s.
+     *
+     * The index is written back onto any DECLARATION of the same name,
+     * and that is not bookkeeping: the passes below add one UNDEF
+     * symbol per called-but-undefined function, and without this they
+     * did it for these too. The object then held both a definition and
+     * an undefined reference for one name, and a linker resolving the
+     * undefined one reported `__uw_capture` missing from an object that
+     * defines it. C code calling a routine written in file-scope asm is
+     * exactly how a libc's setjmp and an unwinder's register capture are
+     * built, so it is the normal case rather than an exotic one. */
     for (struct topasm *ta = u->topasm; ta; ta = ta->next)
         for (int k = 0; k < ta->nsyms; k++)
-            if (ta->syms[k].is_global)
-                elfw_add_symbol(
+            if (ta->syms[k].is_global) {
+                int ndx = elfw_add_symbol(
                     w, ta->syms[k].name,
                     (Elf64_Addr)(ta->text_off + ta->syms[k].off), 0,
                     ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
                     (Elf64_Half)text_ndx);
+                for (struct func *f = u->funcs; f; f = f->next)
+                    if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
+                        strcmp(f->name, ta->syms[k].name) == 0)
+                        f->sym_ndx = ndx;
+                for (struct global *g = u->globals; g; g = g->next)
+                    if (!g->absorbed && !g->defined && !g->sym_ndx &&
+                        strcmp(g->name, ta->syms[k].name) == 0)
+                        g->sym_ndx = ndx;
+            }
 
     /* extern-declared, used, never defined: the linker's problem */
     for (struct global *g = u->globals; g; g = g->next)
@@ -2060,11 +2379,13 @@ int main(int argc, char **argv)
              * vocabulary still compiles. */
             diag_enable_warning(argv[i] + 2, 1);
         } else if (strncmp(argv[i], "-O", 2) == 0) {
-            /* -O / -O1 / -O2 / -O3 enable the optimizer (one level for now);
-             * -O0 turns it off. Anything else after -O is an error. */
+            /* -O/-O1, -O2, -O3 and -Os. -O0 turns the optimizer off,
+             * which is what keeps the self-host fixed point. */
             const char *lvl = argv[i] + 2;
             if (lvl[0] == '\0')
                 opt_level = 1;
+            else if (lvl[0] == 's' && lvl[1] == '\0')
+                { opt_level = 2; opt_for_size = 1; }
             else if (lvl[1] == '\0' && lvl[0] >= '0' && lvl[0] <= '9')
                 opt_level = lvl[0] - '0';
             else {
@@ -2072,6 +2393,12 @@ int main(int argc, char **argv)
                         argv[i]);
                 return 1;
             }
+        } else if (strncmp(argv[i], "-fno-", 5) == 0 &&
+                   opt_set_pass(argv[i] + 5, 0)) {
+            /* a named pass, off */
+        } else if (strncmp(argv[i], "-f", 2) == 0 && argv[i][2] &&
+                   opt_set_pass(argv[i] + 2, 1)) {
+            /* a named pass, on -- so a single pass can be tried at -O1 */
         } else if (strcmp(argv[i], "-mno-sse") == 0 ||
                    strcmp(argv[i], "-mno-sse2") == 0 ||
                    strcmp(argv[i], "-mgeneral-regs-only") == 0) {
@@ -2105,6 +2432,11 @@ int main(int argc, char **argv)
                 return 1;
             }
             incdirs[nincdirs++] = dir;
+        } else if (strcmp(argv[i], "-nostdinc") == 0) {
+            no_stdinc = 1;
+        } else if (strcmp(argv[i], "--print-search-dirs") == 0) {
+            paths_print_search_dirs();
+            return 0;
         } else if (strncmp(argv[i], "-isystem", 8) == 0) {
             /* A system-include directory: searched as an -I one, but marked,
              * so -MM can leave its headers out of the dependency list. */
@@ -2239,13 +2571,8 @@ int main(int argc, char **argv)
      * is nothing to link: they imply -c, as they do in GCC. */
     if (syntax_only)
         compile_mode = 1;
-    if (!compile_mode) {
-        fprintf(stderr,
-                "embcc: error: cannot link '%s': the integrated linker is "
-                "M3 (see docs/design/roadmap.md) — compile with -c and link with "
-                "the existing toolchain\n", input);
-        return 1;
-    }
+    if (!compile_mode)
+        return done(compile_and_link(input, output));
     /* A report goes to stdout unless the caller named a file; an object
      * gets the default name. */
     if ((want_iface || want_asm) && !output)

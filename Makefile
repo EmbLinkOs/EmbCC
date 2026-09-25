@@ -25,6 +25,9 @@ SRCS := \
 	src/driver/asmout.c \
 	src/driver/iface.c \
 	src/driver/explain.c \
+	src/driver/paths.c \
+	src/link/link.c \
+	src/embx/embx.c \
 	src/lex/lex.c \
 	src/cpp/cpp.c \
 	src/parse/parse.c \
@@ -59,7 +62,7 @@ SRCS := \
 	src/elf/write.c \
 	src/macho/write.c \
 	src/coff/write.c \
-	src/arch/target.c \
+	src/arch/target.c src/arch/regalloc.c \
 	src/arch/code.c \
 	src/arch/predef.c \
 	src/arch/x86_64/irgen.c \
@@ -79,10 +82,34 @@ SRCS := \
 
 OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
 
+# One unit that is not under src/. src/link/link.c writes the EMBX
+# image hash and the .embdbg sidecar through the SAME reader the embdbg
+# tool uses -- R1, one implementation -- so every build that links the
+# link library needs it: the driver (which links in-process now), the
+# EmbBuild manifest, and the self-host. It is listed separately because
+# the OBJS rule maps src/%.c and because it is compiled without its CLI
+# main, which the driver already has.
+SRCS_TOOLCORE := tools/embdbg/embdbg.c
+TOOLCORE_CFLAGS := -DEMBDBG_NO_MAIN -Wno-unused-function
+EMBDBG_CORE := $(BUILD)/embdbg_core.o
+
+$(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
+
 all: embcc embread embld embas embls embidx
 
-embcc: $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $(OBJS)
+embcc: $(OBJS) $(EMBDBG_CORE)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
+
+# The same compiler, linked INSIDE the object directory rather than at
+# ./embcc. tests/golden/host-agnostic.sh builds EmbCC twice, with two
+# different host compilers, and it runs in parallel with every other
+# test -- so it must not replace the ./embcc those tests are running.
+# With BUILD= pointing somewhere private, this target is entirely its
+# own: `make CC=clang BUILD=/tmp/x /tmp/x/embcc`.
+$(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
 
 # embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
 # the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)
@@ -128,7 +155,8 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
-             src/arch/code.c src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
+             src/arch/code.c src/arch/regalloc.c \
+             src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
              src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
@@ -172,6 +200,23 @@ $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 # depends on them: without this a stale archive is silently what gets
 # tested, and a fix made in the library is reported as still broken (or,
 # worse, a break is reported as fixed).
+# The fast loop: every program in tests/exec and tests/cxx, compiled,
+# linked and RUN -- 217 of them in about 27 seconds. It skips the
+# goldens, which is where the time goes: three of them recompile the
+# whole corpus a second time with gcc and diff the results, and one
+# builds GCC's libstdc++ from source.
+#
+# This is what to run while changing something. It catches essentially
+# every codegen and front-end regression, because those show up as a
+# program printing the wrong answer -- which is what it checks.
+#
+# It is NOT a substitute for `make test` before a commit. What it does
+# not check is exactly what the goldens exist for: that the answers
+# agree with gcc's, that -S and -c build the same program, that the
+# object format is what the platform's tools expect.
+check: embcc libc-x86_64 libcxx-x86_64
+	tests/run.sh --exec-only
+
 test: embcc embread embld embdbg embls libc-x86_64 libcxx-x86_64 \
       libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
@@ -256,6 +301,17 @@ libc-emblinkos: embcc
 LIBC_SRCS_LINUX := $(LIBC_SRCS_PORTABLE) lib/libc/os/linux/backend.c \
                    lib/libc/os/linux/thread.c lib/libc/os/linux/tls.c
 
+# lib/rt -- the COMPILER runtime, which is a different library from the C
+# one: libc implements what a program asks for by name, and no program
+# ever writes __multi3. It is a separate archive so the freestanding
+# targets, which link somebody else's libgcc, are not given two
+# definitions of the same routine.
+#
+# It ships as librt.a beside libc.a, and the driver puts it on the link
+# line AFTER libc, because a libc routine can call into it (a printf of
+# a 128-bit value) and an archive is searched once.
+RT_SRCS := $(wildcard lib/rt/*.c)
+
 libc-linux-x86_64: embcc
 	@mkdir -p $(BUILD)/libc/linux-x86_64
 	@for f in $(LIBC_SRCS_LINUX); do \
@@ -267,7 +323,15 @@ libc-linux-x86_64: embcc
 	    $(BUILD)/libc/linux-x86_64/*.o
 	@./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-x86_64/crt1.o
-	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + crt1.o"
+	@mkdir -p $(BUILD)/libc/linux-x86_64/rt
+	@for f in $(RT_SRCS); do \
+	    o=$(BUILD)/libc/linux-x86_64/rt/$$(basename $$f .c).o; \
+	    ./embcc --target=x86_64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libc/linux-x86_64/librt.a
+	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/linux-x86_64/librt.a \
+	    $(BUILD)/libc/linux-x86_64/rt/*.o
+	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + crt1.o"
 
 libc-linux-aarch64: embcc
 	@mkdir -p $(BUILD)/libc/linux-aarch64
@@ -280,9 +344,90 @@ libc-linux-aarch64: embcc
 	    $(BUILD)/libc/linux-aarch64/libc.a $(BUILD)/libc/linux-aarch64/*.o
 	@./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-aarch64/crt1.o
-	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + crt1.o"
+	@mkdir -p $(BUILD)/libc/linux-aarch64/rt
+	@for f in $(RT_SRCS); do \
+	    o=$(BUILD)/libc/linux-aarch64/rt/$$(basename $$f .c).o; \
+	    ./embcc --target=aarch64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
+	done
+	@rm -f $(BUILD)/libc/linux-aarch64/librt.a
+	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs \
+	    $(BUILD)/libc/linux-aarch64/librt.a $(BUILD)/libc/linux-aarch64/rt/*.o
+	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + crt1.o"
 
 libc-linux: libc-linux-x86_64 libc-linux-aarch64
+
+# ---- installation ------------------------------------------------------
+#
+# EmbCC finds its own files relative to the binary (src/driver/paths.c),
+# so nothing here is compiled in and the result can be moved afterwards
+# or unpacked anywhere. PREFIX is where it will LIVE; DESTDIR is where
+# to stage it now, which is what a package build sets and what the
+# golden test uses.
+#
+# The version comes out of src/driver/version.h rather than being
+# written again here: the directory this creates and the directory the
+# compiler looks in have to be the same one, and two copies of a
+# version string are two chances to ship an upgrade that reads the old
+# version's headers.
+PREFIX  ?= /usr/local
+DESTDIR ?=
+VERSION := $(shell sed -n 's/.*EMBCC_VERSION "\(.*\)".*/\1/p' \
+                   src/driver/version.h)
+LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
+
+# Each installed target directory, and where the build put its pieces.
+# The triples are what --target= accepts, so `ls` next to a failure
+# answers "is that target installed?" directly.
+# Split in two on purpose. `install` is what a person runs and builds
+# what it needs first; `install-files` only COPIES, and is what
+# tests/golden/install.sh uses -- a test that ran the first would be a
+# test that rebuilds the compiler while the rest of the suite is using
+# it, which is the one thing the suite must never do to itself.
+install: all libc libcxx libc-linux libcxx-linux-x86_64 \
+         libcxx-linux-aarch64 install-files
+
+install-files:
+	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
+	@mkdir -p $(DESTDIR)$(PREFIX)/bin
+	@for t in embcc embld embas embread embdbg embls embidx; do \
+	    cp $$t $(DESTDIR)$(PREFIX)/bin/$$t; \
+	    chmod 755 $(DESTDIR)$(PREFIX)/bin/$$t; \
+	done
+	@mkdir -p $(LIBROOT)/include $(LIBROOT)/include/c++ \
+	          $(LIBROOT)/freestanding
+	@cp -R lib/libc/include/. $(LIBROOT)/include/
+	@cp -R lib/libcxx/include/. $(LIBROOT)/include/c++/
+	@cp -R include/. $(LIBROOT)/freestanding/
+	@for pair in "x86_64-elf:x86_64" "aarch64-elf:aarch64" \
+	             "x86_64-linux-gnu:linux-x86_64" \
+	             "aarch64-linux-gnu:linux-aarch64"; do \
+	    triple=$${pair%%:*}; dir=$${pair#*:}; \
+	    mkdir -p $(LIBROOT)/$$triple; \
+	    for f in libc.a librt.a crt1.o; do \
+	        [ -f $(BUILD)/libc/$$dir/$$f ] && \
+	            cp $(BUILD)/libc/$$dir/$$f $(LIBROOT)/$$triple/$$f; \
+	    done; \
+	    [ -f $(BUILD)/libcxx/$$dir/libcxx.a ] && \
+	        cp $(BUILD)/libcxx/$$dir/libcxx.a $(LIBROOT)/$$triple/libcxx.a; \
+	    case $$triple in *-linux-gnu) \
+	        cp lib/libc/os/linux/link.ld $(LIBROOT)/$$triple/link.ld ;; \
+	    esac; \
+	    true; \
+	done
+	@echo "installed: $(DESTDIR)$(PREFIX)/bin/embcc"
+	@echo "           $(LIBROOT)/"
+	@echo "check it with: $(DESTDIR)$(PREFIX)/bin/embcc --print-search-dirs"
+
+# Removes exactly what install wrote, and the versioned directory with
+# it -- never $(PREFIX)/lib/embcc itself, which may hold another version.
+uninstall:
+	@for t in embcc embld embas embread embdbg embls embidx; do \
+	    rm -f $(DESTDIR)$(PREFIX)/bin/$$t; \
+	done
+	@rm -rf $(LIBROOT)
+	@echo "removed EmbCC $(VERSION) from $(DESTDIR)$(PREFIX)"
+
+libc-linux-all: libc-linux libcxx-linux-x86_64 libcxx-linux-aarch64
 
 libc: libc-x86_64 libc-aarch64
 
@@ -346,7 +491,8 @@ libcxx: libcxx-x86_64 libcxx-aarch64
 clean:
 	rm -rf $(BUILD) embcc embread embld embdbg embas embls
 
-.PHONY: all test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
+.PHONY: all check test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
         libcxx libcxx-x86_64 libcxx-aarch64 \
-        libcxx-linux-x86_64 libcxx-linux-aarch64 clean
+        libcxx-linux-x86_64 libcxx-linux-aarch64 \
+        install install-files uninstall libc-linux-all clean

@@ -1,0 +1,249 @@
+/* Register allocation, shared between the backends.
+ *
+ * D-011 said what would justify this: "the two backends start
+ * duplicating real algorithms — a register allocator written twice is
+ * the signal that the shared layer is in the wrong place, and the
+ * answer then is to lift the machine-independent half out of
+ * codegen.c, deriving the shared shape from two WORKING backends
+ * rather than inventing it from one."
+ *
+ * That is what this is. The x86-64 backend's allocator had been
+ * running for a while and aarch64 had none, so rather than write a
+ * second one the working one was lifted. Nothing about it changed in
+ * the move -- `tools/x86-identity.sh` was the check, and it compares
+ * emitted BYTES rather than test results, so "nothing changed" is a
+ * statement about the objects and not about the suite.
+ *
+ * ---- what is machine-independent, and what is not -------------------------
+ *
+ * The algorithm is: real backward liveness over the IR (spanning loop
+ * back-edges, which an appearance interval does not), a precise
+ * interference graph, Chaitin-Briggs simplify ordering, and colouring
+ * with move-coalescing preferences. None of that knows what a register
+ * is; it works in the IR and in indices.
+ *
+ * What a machine supplies is a `struct ra_target`: which registers may
+ * be handed out and in what order of preference, which of them survive
+ * a call, and whether a narrow load is a plain move on that machine.
+ * Everything else the allocator needs it reads from the IR.
+ */
+#ifndef EMBCC_REGALLOC_H
+#define EMBCC_REGALLOC_H
+
+#include "../ir/ir.h"
+
+/* The most registers any target here offers the allocator. Sizes the
+ * per-colour arrays; a literal because EmbCC's own subset does not fold
+ * a sizeof/sizeof there. It also bounds the `taken`/`want` bitmasks in
+ * colouring, which are plain ints -- so this may grow to 31 and no
+ * further without widening those.
+ *
+ * Eighteen is what aarch64 asks for: x13-x15, the eight argument
+ * registers, and x20-x26. */
+#define RA_MAXPOOL 24
+
+struct ra_target {
+    /* Which registers this function may use, in preference order, and
+     * how many. A callback rather than a table because the answer is a
+     * property of the FUNCTION, not just the machine: a variadic one
+     * reserves its argument file, one with an atomic reserves whatever
+     * the atomic lowering needs, one that divides reserves the pair the
+     * divide instruction writes. Four static tables would be sixteen as
+     * soon as a fifth condition appeared.
+     *
+     * Preference order matters: put the caller-saved registers first so
+     * a short-lived value takes one and skips the prologue save. */
+    const int *(*pool_for)(const struct ir_func *fn, int *n);
+
+    /* Does this register survive a call? A value whose live range
+     * crosses a call may only take one that does. */
+    int (*is_callee_saved)(int reg);
+
+    /* Is `dst = load(local)` a plain register move on this machine --
+     * no sign- or zero-extension emitted -- so the two may share a
+     * register and the load disappear? Purely a property of the
+     * machine's load instructions. */
+    int (*ldvar_plain)(int size, int sign, int w);
+
+    /* ---- what the BACKEND can read out of a register ------------------
+     *
+     * These are not properties of the IR. They are things a particular
+     * backend has been taught to do, and a backend that has not been
+     * taught reads the value from its stack slot -- so the allocator
+     * must leave it there.
+     *
+     * The distinction cost a miscompile to learn. The allocator was
+     * lifted out of the x86 backend with these cases commented
+     * "register-aware", which was true OF THAT BACKEND, and the flags
+     * did not exist because there was only one. Handed to aarch64,
+     * which reads a call's arguments and a memcpy's addresses straight
+     * from their slots, it allocated values that were then read from
+     * memory that nothing had written -- and tests/exec/aapcs64.c
+     * returned 1 instead of 42.
+     *
+     * D-011 anticipated the shape of this: derive the shared layer from
+     * two WORKING backends rather than one. A capability the second
+     * backend lacks has to be sayable, or the shared layer is the first
+     * backend wearing a hat. */
+    int call_int_arg_in_reg;   /* a scalar-integer call argument */
+    int ret_scalar_in_reg;     /* a scalar return value */
+    int memcpy_addr_in_reg;    /* IR_MEMCPY / IR_MEMZERO address operands */
+
+    /* Does this instruction lower to a runtime-helper CALL that the IR
+     * does not show as one? May be NULL for a backend with none.
+     *
+     * `crosses` is built by finding IR_CALL, which is every call the IR
+     * knows about and not every call the machine makes. Long double
+     * arithmetic on aarch64 becomes __addtf3 and friends, and __int128
+     * divide becomes __divti3, both emitted in codegen with no IR_CALL
+     * anywhere -- so a value live across one looked to the allocator
+     * like a value that crossed nothing, and was free to take a
+     * CALLER-saved register the helper then clobbered.
+     *
+     * That was invisible only because every register in the aarch64
+     * pool happened to be callee-saved. Putting x15 in it produced a
+     * data abort at 0x10 in tests/exec/complex.c: an address computed
+     * before a `bl __divtf3` and used after it. Answering this question
+     * is what makes a caller-saved pool sound. */
+    int (*op_calls_helper)(const struct ir_ins *i);
+
+    /* Does `d = a op b` write its destination OVER its first operand?
+     * A two-operand machine (x86-64, and its SSE too) computes it as
+     * `d = a; d op= b`, so d and a want one register and the move is
+     * the price of not getting it -- worth coalescing for. A
+     * three-operand one (aarch64) needs no move either way, and forcing
+     * d and a together only constrains the colourer: it costs 880 bytes
+     * there and saves 2545 here. */
+    int alu_dst_is_lhs;
+
+    /* The register the ABI would like each vreg to be in, or -1: a
+     * parameter in the one it arrives in, a call's result and a
+     * returned value in the return register. Filled once per function
+     * into an array of fn->nvregs; may be NULL.
+     *
+     * These are HINTS, tried before the free list and dropped when the
+     * register is taken, exactly like the preference a move partner
+     * already gives. What they buy is the move at each of those
+     * boundaries -- `mov x13, x0` after a call, `mov x0, x13` before a
+     * return -- which is otherwise emitted whatever the allocator
+     * chooses. */
+    void (*abi_hints)(const struct ir_func *fn, int *hint);
+
+    /* The FLOATING-POINT register class, for a backend that has one.
+     * Every float and double otherwise lives in a stack slot: over
+     * lib/libc that was 2836 values, half of everything this allocator
+     * left in memory, and 6383 of the memory instructions emitted --
+     * 97% of all the floating-point memory traffic, none of it the
+     * program's own.
+     *
+     * NULL (or a zero count) means the backend has not got one yet and
+     * ra_allocate_fp returns nothing, which is what it did before. */
+    const int *(*fp_pool_for)(const struct ir_func *fn, int *n);
+    int (*is_fp_callee_saved)(int reg);
+};
+
+/* Assign a register to every eligible vreg of `fn`, or -1 for one that
+ * stays in memory. `wide` (may be NULL) marks vregs holding a value too
+ * large for a register -- a long double -- which are never eligible.
+ *
+ * Returns a malloc'd array indexed by vreg; fills `used_out` with the
+ * callee-saved registers the function actually took (so the prologue
+ * knows what to save) and `*nused_out` with how many. The caller frees
+ * the array. */
+/* The floating-point half of the same question: which vregs from
+ * `fltmap` (cg_float_vregs) get an FP register. NULL when the target has
+ * no FP pool. The caller frees the array. */
+int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
+                    const char *wide, const char *fltmap,
+                    int *used_out, int *nused_out);
+
+/* `fltmap` (cg_float_vregs, may be NULL) is what keeps the two classes
+ * apart: a value it names belongs to the FP allocation and must not be
+ * given a general register as well, or the two halves of codegen each
+ * believe their own answer about where it is. */
+int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
+                 const char *wide, const char *fltmap,
+                 int *used_out, int *nused_out);
+
+/* Backward liveness over the IR: fills first[v]/last[v] with the range
+ * vreg v is live over -- a sound over-approximation that SPANS loop
+ * back-edges, where a naive first/last-appearance interval does not and
+ * would let a loop-carried value's register be clobbered mid-loop. Also
+ * returns the per-instruction live-in and live-out bitsets and the def
+ * vreg per instruction, which the interference graph needs.
+ *
+ * Shared because slot coalescing wants the same ranges the allocator
+ * does, and two copies of a dataflow are two chances to disagree about
+ * a back-edge. Everything is malloc'd; the caller frees. */
+unsigned long *ra_live_intervals(struct ir_func *fn, int *first, int *last,
+                                 unsigned long **livein_out, int **defv_out,
+                                 int *words_out);
+
+/* What a backend knows about slot assignment that this layer does not. */
+struct ra_slots {
+    /* Per-vreg physical register, or NULL when the allocator is off. A
+     * vreg with one never touches memory, so it needs no slot -- which
+     * is also what keeps mem2reg's SSA-version inflation out of the
+     * frame. */
+    const int *loc;
+    /* The same, for the floating-point class. A value with an FP home
+     * touches memory no more than one with a general-register home, and
+     * a slot reserved behind it is a slot nothing else can use. NULL
+     * when the target has no FP pool. */
+    const int *floc;
+    /* Drop the slot of a temp that appears in NO instruction. Common
+     * once immediate-folding detaches a CONST and dead-code removal
+     * takes its definition; a throwaway eight bytes each inflates the
+     * frame for nothing. Off at -O0, where the layout must not move. */
+    int opt_frames;
+    /* An indirect jump reaches any address-taken label, so a live range
+     * measured by appearance is not a live range. No coalescing then. */
+    int has_cgoto;
+};
+
+/* Assign each temp of `fn` a slot index in a shared pool, or -1 for one
+ * that needs no slot. Returns a malloc'd array indexed by (vreg -
+ * nvars), and fills *npool_out with how many slots the pool needs. */
+int *ra_coalesce_temps(struct ir_func *fn, int nvars,
+                       const struct ra_slots *o, int *npool_out);
+
+/* Which LOCALS any instruction still names — one byte per slot, 1 when
+ * the frame must hold it. A local nothing names needs no stack at all,
+ * and SROA leaves exactly that behind: once every field access has
+ * become a read or write of the scalars an aggregate was split into,
+ * the aggregate itself is mentioned nowhere, and it would otherwise
+ * keep its full size on the frame for the rest of the function.
+ *
+ * `want_debug` makes every slot referenced: -g hands the debugger an
+ * address for each variable by name, whether the code reads it or not.
+ * So do a varargs function (a va_list walks the incoming area) and an
+ * alloca (it moves the stack out from under the layout), both read from
+ * `fn`. Parameters always count: the PROLOGUE writes them, and that
+ * store is not in the IR to be found here.
+ *
+ * Shared because it reads only the IR -- the two backends had the same
+ * eight lines, and two copies of "which slots matter" are two chances
+ * to disagree about one. The caller frees. */
+/* Every vreg an instruction reads, once each -- one switch over the
+ * operand shapes, so there is one place to add an op to. */
+void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
+                 void *ctx);
+
+/* How many times each vreg is read; `cnt` holds fn->nvregs entries. */
+void ra_count_vreg_uses(const struct ir_func *fn, int *cnt);
+
+char *ra_locals_referenced(const struct ir_func *fn, int want_debug);
+
+/* Does local `v` need a stack slot at all, given the allocation `loc`?
+ * Lifted here once BOTH backends wanted it (D-011): x86-64 had carried
+ * it alone, and the aarch64 frame was paying for a slot behind every
+ * value the allocator had already put in a register. */
+int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
+                 int v, int want_debug);
+
+/* The vreg an instruction WRITES, or -1. In the shared layer because
+ * liveness is: it has to agree with what the backends actually store,
+ * and one copy is how it stays agreed. */
+int ra_ins_def(const struct ir_ins *in);
+
+#endif

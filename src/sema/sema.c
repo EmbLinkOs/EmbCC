@@ -2497,6 +2497,37 @@ static int resolve_addr(struct expr *e, struct global **gt,
         return 0;
     if (e->kind == EXPR_VAR && e->gref) { *gt = e->gref; return 1; }
     if (e->kind == EXPR_VAR && e->fref) { *ft = e->fref; return 1; }
+    /* A dereference whose RESULT is an array loads nothing: an array
+     * lvalue decays straight back to the address the subscript just
+     * computed, so `*(g+1)` IS `g+1` here.
+     *
+     * This is not an exotic case. `a[i]` is built as `*(a + i)`, so a
+     * second subscript on an array of arrays -- `&g[1][0]`, the way a
+     * table of rows names its first element -- arrives as
+     * `&*(*(g+1) + 0)`. The `&*x` rule below stripped the outer pair,
+     * the addition asked about `*(g+1)`, nothing answered, and a
+     * perfectly ordinary static initializer was rejected as "not a
+     * constant".
+     *
+     * The test is `undecayed`, not `ty`: check_expr has already
+     * rewritten the node's type to the decayed pointer and parked the
+     * array type there, so by the time this runs no EXPR_DEREF has
+     * array type any more. */
+    if (e->kind == EXPR_DEREF && e->undecayed &&
+        e->undecayed->kind == TY_ARRAY)
+        return resolve_addr(e->rhs, gt, ft, add);
+    /* The same decay, one level in: an array MEMBER used as a value
+     * (`&st.b[2]`, which is `&*(st.b + 2)`) is the address of the
+     * member. The `&` case below already knows how to take a member's
+     * address, so ask it -- with a stack node, because there is no `&`
+     * in the source to point at. */
+    if (e->kind == EXPR_MEMBER && e->memb && e->undecayed &&
+        e->undecayed->kind == TY_ARRAY) {
+        struct expr addr = { 0 };
+        addr.kind = EXPR_ADDR;
+        addr.rhs = e;
+        return resolve_addr(&addr, gt, ft, add);
+    }
     if (e->kind == EXPR_BINOP && (e->op == B_ADD || e->op == B_SUB)) {
         int esz = e->ty && e->ty->kind == TY_PTR
                 ? ty_size(e->ty->pointee) : 1;
@@ -3218,6 +3249,15 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                  * object per thread -- the scope decides who can NAME
                  * it, not how many there are. */
                 g->is_tls = s->is_tls;
+                /* And its alignment. The parser records `_Alignas(64)`
+                 * or `aligned(64)` on a block-scope declarator in
+                 * s->user_align, where it raises a STACK SLOT -- but a
+                 * static local has no stack slot, and this promotion
+                 * used to drop the field on the way to the global. The
+                 * declaration was accepted, the object landed at
+                 * whatever alignment .bss happened to have, and nothing
+                 * said so. */
+                g->user_align = s->user_align;
                 g->defined = 1;
                 g->used = 1;
                 /* Aggregates arrive pre-flattened in s->inits; a scalar's

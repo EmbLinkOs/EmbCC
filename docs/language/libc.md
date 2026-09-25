@@ -51,7 +51,9 @@ deliberately, so every target gets the same behaviour and a fix lands once.
 | `<assert.h>`, `<inttypes.h>` | complete |
 | `printf` family | complete, including `%a` and `long double` at its own width |
 | `scanf` family | complete, including `%[`, `%n`, `%a` and hex floats |
-| `<wchar.h>`, `<locale.h>`, `<signal.h>`, `<threads.h>` | **not yet** |
+| `<wchar.h>`, `<wctype.h>`, `<uchar.h>` | complete (the substance is UTF-8 conversion — see below) |
+| `<threads.h>` | complete on the eight OS primitives the C++ library uses |
+| `<locale.h>`, `<signal.h>` | **not yet** |
 
 **The acceptance test is the execution corpus.** All **90** x86-64 programs
 in `tests/exec` compile, link and run against this library with **no newlib
@@ -70,9 +72,35 @@ tidy 1 makes that bug visible on the first run instead of after a port.
 - **Heapsort for `qsort`.** C does not forbid quadratic behaviour, but a
   library sort is exactly where an adversarial input arrives. Heapsort is
   n log n on every input and needs no scratch memory.
-- **First-fit with coalescing for `malloc`.** Small enough to read in one
-  sitting and to reason about when a target misbehaves. Nothing outside
-  `malloc.c` knows the shape, so a better allocator is a local change.
+- **The library's own state is locked.** `malloc`'s block lists and each
+  `FILE`'s buffer are shared mutable state, and threads arrived after
+  both were written: two threads in `malloc` corrupted the free list
+  (which fails LATER, in an unrelated allocation), and two in `printf`
+  interleaved inside a line. There is one lock
+  (`lib/libc/src/internal/lock.h`), built on the futex seam rather than
+  on an OS mutex, for the reason `backend.h` gives — a mutex primitive
+  pushes fairness and recursion policy into every backend, while a word
+  a thread can sleep on is enough to build one here, once. One lock for
+  the heap; one per stream, held for the WHOLE call, so `puts` cannot
+  have another thread's line land between its string and its newline.
+  Uncontended it is a single compare-exchange and no syscall, which is
+  what makes it acceptable on the targets that have one thread; where
+  there is no futex it degrades to a yield, which is correct precisely
+  there because such a target has no threads to contend.
+  `tests/golden/threadsafe.sh` runs it on a real kernel.
+- **First-fit with coalescing for `malloc`, over an explicit free list.**
+  Small enough to read in one sitting and to reason about when a target
+  misbehaves. Nothing outside `malloc.c` knows the shape, so a better
+  allocator is a local change -- which is what the free list was: the
+  first version had ONE list, every block in address order, searched from
+  the head on every `malloc`, and a program that allocates without
+  freeing (a compiler parsing a file) walked every live block on every
+  call. It was quadratic and measured so. There are two lists now: the
+  address list, doubly linked, for coalescing; and the free list, which
+  is the only one an allocation walks. Its links live in the payload of
+  free blocks, so the header did not grow. See
+  `tests/golden/malloc.sh`, which checks the SHAPE of the cost and not
+  a timing number, because a number rots.
 - **One formatting engine.** Every `printf` variant is `__vformat` with a
   different sink. Writing it twice is how `%zu` ends up working in one and
   not the other.

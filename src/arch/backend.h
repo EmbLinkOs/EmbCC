@@ -14,6 +14,10 @@
 struct ir_func;
 char *cg_wide_vregs(struct ir_func *fn);
 
+/* The vregs holding a float or a double (never a long double), for a
+ * backend that gives them their own register class. NULL when none. */
+char *cg_float_vregs(struct ir_func *fn);
+
 struct extcall {
     int patch_off;        /* offset of the rel32 field in .text */
     struct func *callee;  /* canonical, !has_defn */

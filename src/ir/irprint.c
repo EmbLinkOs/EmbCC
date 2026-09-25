@@ -32,21 +32,50 @@
 #include "../parse/ast.h"
 #include "../sema/type.h"
 
-/* An operation's mnemonic. Table-driven so the printer cannot drift from the
- * enum: a new opcode without a name here prints as `op<N>`, visibly wrong,
- * rather than silently as its neighbour. */
+/* An operation's mnemonic.
+ *
+ * Indexed BY OPCODE rather than written in order. The list used to be
+ * positional, with the comment that a new opcode without a name here
+ * would print as `op<N>` and so be visibly wrong -- which is true only
+ * of one appended at the END. IR_SQRT was inserted in the middle and its
+ * name appended at the bottom, so every opcode from IR_SQRT on took its
+ * neighbour's name: `__builtin_sqrt` printed as `fence`, a real fence
+ * printed as `ud2`, and ir_op_from_name -- which irparse.c reads --
+ * mapped all of them one place wrong, so the IR text format did not
+ * round-trip. Nothing caught it because both directions used the one
+ * wrong table and agreed with each other.
+ *
+ * A designated initializer cannot drift: the name is written against the
+ * opcode, so inserting an opcode anywhere leaves the rest in place, and
+ * one with no name here is a NULL that reads as `op?`. */
 const char *ir_opname(enum ir_op op)
 {
-    static const char *const n[] = {
-        "const", "mov", "add", "sub", "mul", "div", "mod", "and", "or",
-        "xor", "shl", "shr", "neg", "bnot", "cmp", "ldvar", "stvar", "addr",
-        "straddr", "gaddr", "faddr", "load", "store", "ext", "i2f", "f2i",
-        "f2f", "call", "ret", "label", "jmp", "memcpy", "memzero", "brz",
-        "brnz", "va_start", "bswap", "fence", "ud2", "xchg", "xadd",
-        "cmpxchg", "asm", "labeladdr", "igoto", "armw", "cas", "cas16",
-        "frameaddr", "alloca", "spsave", "sprestore", "landing", "sqrt",
+    static const char *const n[IR_OPCOUNT] = {
+        [IR_CONST] = "const",   [IR_MOV] = "mov",       [IR_ADD] = "add",
+        [IR_SUB] = "sub",       [IR_MUL] = "mul",       [IR_DIV] = "div",
+        [IR_MOD] = "mod",       [IR_AND] = "and",       [IR_OR] = "or",
+        [IR_XOR] = "xor",       [IR_SHL] = "shl",       [IR_SHR] = "shr",
+        [IR_NEG] = "neg",       [IR_BNOT] = "bnot",     [IR_CMP] = "cmp",
+        [IR_LDVAR] = "ldvar",   [IR_STVAR] = "stvar",   [IR_ADDR] = "addr",
+        [IR_STRADDR] = "straddr", [IR_GADDR] = "gaddr", [IR_FADDR] = "faddr",
+        [IR_LOAD] = "load",     [IR_STORE] = "store",   [IR_EXT] = "ext",
+        [IR_I2F] = "i2f",       [IR_F2I] = "f2i",       [IR_F2F] = "f2f",
+        [IR_CALL] = "call",     [IR_RET] = "ret",       [IR_LABEL] = "label",
+        [IR_JMP] = "jmp",       [IR_MEMCPY] = "memcpy", [IR_MEMZERO] = "memzero",
+        [IR_BRZ] = "brz",       [IR_BRNZ] = "brnz",     [IR_VA_START] = "va_start",
+        [IR_BSWAP] = "bswap",   [IR_SQRT] = "sqrt",     [IR_FENCE] = "fence",
+        [IR_UD2] = "ud2",       [IR_XCHG] = "xchg",     [IR_XADD] = "xadd",
+        [IR_CMPXCHG] = "cmpxchg", [IR_ASM] = "asm",
+        [IR_LABELADDR] = "labeladdr", [IR_IGOTO] = "igoto",
+        [IR_ARMW] = "armw",     [IR_CAS] = "cas",       [IR_CAS16] = "cas16",
+        [IR_FRAMEADDR] = "frameaddr", [IR_ALLOCA] = "alloca",
+        [IR_SPSAVE] = "spsave", [IR_SPRESTORE] = "sprestore",
+        [IR_LANDING] = "landing",
+        [IR_VLOAD] = "vload",   [IR_VSTORE] = "vstore", [IR_VBIN] = "vbin",
+        [IR_VSPLAT] = "vsplat", [IR_VREDADD] = "vredadd",
+        [IR_VWIDEN] = "vwiden", [IR_SELECT] = "select",
     };
-    if ((int)op < 0 || (size_t)op >= sizeof n / sizeof n[0])
+    if ((int)op < 0 || (int)op >= IR_OPCOUNT || !n[op])
         return "op?";
     return n[op];
 }
@@ -269,6 +298,45 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         break;
     case IR_LANDING:
         ob_fmt(b, "%%%d, %%%d = landing", i->dst, i->b);
+        break;
+    /* Vectors print on the ordinary `.w:size` form, with the element
+     * width as `size` -- the lane count is 16/size and adding a second
+     * spelling only gave the parser something else to learn. §9.1 wants
+     * print and parse to give back identical IR, so every opcode has to
+     * be taught to both, and the vector ones were taught to neither
+     * until tests/golden/ir-roundtrip.sh was pointed at a file that
+     * actually vectorizes. */
+    case IR_VLOAD:
+        ob_fmt(b, "%%%d = vload", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " [%%%d]", i->a);
+        break;
+    case IR_VSTORE:
+        ob_str(b, "vstore"); memsuffix(b, i, 1);
+        ob_fmt(b, " [%%%d], %%%d", i->a, i->b);
+        break;
+    case IR_VBIN:
+        ob_fmt(b, "%%%d = vbin", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " %c %%%d, ", (char)i->imm, i->a);
+        if (i->imm == '<' || i->imm == '>')
+            ob_fmt(b, "#%d", i->c);        /* a shift count, not a vector */
+        else
+            ob_fmt(b, "%%%d", i->b);
+        break;
+    case IR_VSPLAT:
+        ob_fmt(b, "%%%d = vsplat", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " %%%d", i->a);
+        break;
+    case IR_VREDADD:
+        ob_fmt(b, "%%%d = vredadd", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " %%%d", i->a);
+        break;
+    case IR_VWIDEN:
+        ob_fmt(b, "%%%d = vwiden", i->dst); memsuffix(b, i, 1);
+        ob_fmt(b, " %s %%%d", i->c ? "hi" : "lo", i->a);
+        break;
+    case IR_SELECT:
+        ob_fmt(b, "%%%d = select", i->dst); suffix(b, i, 1);
+        ob_fmt(b, " %%%d ? %%%d : %%%d", i->a, i->b, i->c);
         break;
     case IR_VA_START:
         ob_fmt(b, "va_start [%%%d]", i->a);

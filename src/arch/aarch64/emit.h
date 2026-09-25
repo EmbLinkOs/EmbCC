@@ -62,9 +62,18 @@ void a64_mov_imm(struct code *c, int rd, long imm, int w);
  * Refuses (returns 0) an immediate neither form can hold; callers that may
  * exceed it materialise the value instead. */
 int  a64_add_imm(struct code *c, int rd, int rn, long imm, int w);
+int  a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w);
+int  a64_shift_imm(struct code *c, int op, int rd, int rn, int shift, int w);
+int  a64_ldst_reg(struct code *c, int store, int rt, int rn, int rm,
+                  int scaled, int size, int sign, int w);
+int  a64_fmov_imm(struct code *c, int vd, unsigned long bits, int w);
+int  a64_stp(struct code *c, int rt, int rt2, int rn, long off);
+int  a64_ldp(struct code *c, int rt, int rt2, int rn, long off);
 int  a64_sub_imm(struct code *c, int rd, int rn, long imm, int w);
 /* op: '+' '-' '&' '|' '^' */
 void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w);
+void a64_alu_reg_shifted(struct code *c, int op, int rd, int rn, int rm,
+                         int kind, int amount, int w);
 void a64_mul(struct code *c, int rd, int rn, int rm, int w);
 void a64_div(struct code *c, int rd, int rn, int rm, int sign, int w);
 /* rd = ra - rn*rm — the second half of a remainder. */
@@ -77,8 +86,10 @@ void a64_mvn(struct code *c, int rd, int rm, int w);
 void a64_rev(struct code *c, int rd, int rn, int size);
 
 /* ---- compare -------------------------------------------------------- */
+int  a64_cmp_imm(struct code *c, int rn, long imm, int w);
 void a64_cmp_reg(struct code *c, int rn, int rm, int w);
 void a64_cset(struct code *c, int rd, int cond);
+void a64_csel(struct code *c, int rd, int rn, int rm, int cond, int w);
 
 /* ---- extension ------------------------------------------------------ */
 /* rd = rn re-extended from `size` bytes, signed or not, into a `w`-wide
@@ -142,6 +153,7 @@ void a64_falu(struct code *c, int op, int vd, int vn, int vm, int w);
 void a64_fsqrt(struct code *c, int vd, int vn, int w);
 void a64_fneg(struct code *c, int vd, int vn, int w);
 void a64_fmov_reg(struct code *c, int vd, int vn, int w);
+void a64_fmov_from_gpr(struct code *c, int vd, int rn, int w);
 void a64_fcmp(struct code *c, int vn, int vm, int w);
 /* int -> float: rn is a general register of width `iw`, vd an FP register
  * of width `fw`; `sign` picks scvtf over ucvtf. */

@@ -38,8 +38,40 @@ same machine EmbLinkOS's own aarch64 kernel targets. About 25 ms per test.
   underscore-prefixed ones.
 - `aarch64/link.sh` — links one embcc object into a runnable image.
 
+- `aarch64/start.S`'s vector table and `harness_fault` — sixteen entries
+  that all land in one place, and a handler that prints `ESR`, `FAR` and
+  `ELR` and exits 125. Before it existed `VBAR_EL1` stayed zero, so every
+  trap spun on an unmapped vector page until the twenty-second timeout
+  killed QEMU, and a null dereference, an alignment abort and an illegal
+  instruction were all reported as "the test hung".
+
 Everything here is built with `aarch64-elf-gcc`. It is scaffolding, not the
 thing under test: only the object under test came from `embcc`.
+
+## Address zero is not mapped, on purpose
+
+Both bare-metal harnesses used to map page zero, and a bare-metal image
+has no kernel to object: `*(int *)0 = 1` simply wrote, read back, and the
+test passed. On x86-64 the low 1 GiB was identity-mapped with 2 MiB
+pages; on aarch64 the whole first gigabyte was one Device block "for
+virt's MMIO window", which nothing here ever touches because all I/O goes
+through semihosting.
+
+So **no test in `tests/exec` or `tests/cxx` could detect a null
+dereference**, on either target. That is not a theoretical gap: it hid a
+real one. `std::cerr` was dynamically initialized, every translation unit
+including `<iostream>` runs its own `__ios_init` constructor, and the one
+that ran first stored through a `cerr` that was still null. The suite was
+green. Unmapping the page turned it into `tests/golden/libcxx-std.sh`
+failing on the spot.
+
+x86-64 now splits the first 2 MiB into 4 KiB pages and leaves entry 0
+absent — the image is linked at 1 MiB, so nothing else changes. The fault
+escalates to a triple fault with no IDT installed, `-no-reboot` turns that
+into QEMU exiting, and `run.sh` reports 125. aarch64 leaves level-1 entry
+0 invalid, which the vector table above turns into a printed `ESR`/`FAR`
+and the same 125. `tests/golden/static-init.sh` checks that a null
+dereference still faults, so this cannot quietly come back.
 
 ## `linux/` — the one that boots somebody else's kernel
 

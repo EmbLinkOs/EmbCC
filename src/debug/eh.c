@@ -324,6 +324,12 @@ void eh_emit(struct ir_unit *iu, int arm64, struct eh_out *out)
             uleb(b, 0);
         }
         int at = 0;
+        if (f->cfi_frameless) {
+            /* Nothing to say: the CIE's opening rule already describes
+             * this function from entry to return. */
+            close_entry(b, fde);
+            continue;
+        }
         /* the frame record pushed: the CFA 16 above the stack pointer,
          * the caller's frame pointer (and on aarch64 x30) below it */
         advance(b, &at, f->cfi_push, code_align);

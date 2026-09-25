@@ -133,9 +133,18 @@ int a64_sub_imm(struct code *c, int rd, int rn, long imm, int w)
     return addsub_imm(c, 0x51000000UL, rd, rn, imm, w);
 }
 
-void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w)
+/* ...with the second operand SHIFTED, which is what the "(shifted
+ * register)" in the names above has always meant and what the shift
+ * field at bits 22-23 and 10-15 is for. `x + (y << 3)` is one
+ * instruction here, and it is how array indexing comes out: 179 sites
+ * across lib/libc and lib/libcxx where a shift by a constant feeds an
+ * add or a subtract and is read nowhere else.
+ *
+ * kind: '<' LSL, 'u' LSR, '>' ASR. */
+void a64_alu_reg_shifted(struct code *c, int op, int rd, int rn, int rm,
+                         int kind, int amount, int w)
 {
-    unsigned long base;
+    unsigned long base, sh;
     switch (op) {
     case '+': base = 0x0B000000UL; break;   /* ADD  (shifted register) */
     case '-': base = 0x4B000000UL; break;   /* SUB  */
@@ -144,8 +153,201 @@ void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w)
     case '^': base = 0x4A000000UL; break;   /* EOR  */
     default: bad("alu op", op); return;
     }
-    a64_word(c, base | sf(w) | ((unsigned long)rm << 16) |
+    switch (kind) {
+    case '<': sh = 0; break;
+    case 'u': sh = 1; break;
+    case '>': sh = 2; break;
+    default: bad("shift kind", kind); return;
+    }
+    a64_word(c, base | sf(w) | (sh << 22) |
+                ((unsigned long)rm << 16) |
+                ((unsigned long)amount << 10) |
                 ((unsigned long)rn << 5) | (unsigned long)rd);
+}
+
+void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w)
+{
+    a64_alu_reg_shifted(c, op, rd, rn, rm, '<', 0, w);
+}
+
+/* AND / ORR / EOR with a LOGICAL IMMEDIATE.
+ *
+ * AArch64 has no 12-bit immediate for the bitwise ops the way it does
+ * for add and subtract. What it has instead is better for the masks
+ * programs actually write: a "bitmask immediate" is any value that is a
+ * repeating run of ones, rotated -- 0xff, 0xffff, 0x7fffffff,
+ * 0xfffff000, 0x5555555555555555 and so on. Every one of the 339
+ * and/or/xor immediates across lib/libc and lib/libcxx encodes, and
+ * each was costing a `mov` (up to four of them for a wide constant)
+ * and a register.
+ *
+ * The field is N:immr:imms. immr is the rotation; imms carries both the
+ * element size and the length of the run, in a unary prefix:
+ * 0b1nnnnnn for a 64-bit element (with N=1), 0b00nnnnn for 32, 0b10nnnn
+ * for 16, 0b110nnn for 8, 0b1110nn for 4, 0b11110n for 2. The rotation
+ * is found by trying all of them, which is at most 64 tries and is what
+ * the encoding means.
+ *
+ * Returns 0 when the value is not a bitmask immediate, having emitted
+ * nothing, so the caller can fall back to materialising it. */
+static int a64_bitmask_imm(unsigned long imm, int w, unsigned long *field)
+{
+    int bits = w == 8 ? 64 : 32;
+    if (bits == 32) {
+        imm &= 0xffffffffUL;
+        imm |= imm << 32;                    /* the encoding is 64-bit */
+    }
+    if (imm == 0 || imm == ~0UL)
+        return 0;                            /* neither is encodable */
+    /* the smallest element the value is a repetition of */
+    int size = 64;
+    while (size > 2) {
+        int half = size >> 1;
+        unsigned long mask = (half == 64) ? ~0UL : ((1UL << half) - 1);
+        if ((imm & mask) != ((imm >> half) & mask))
+            break;
+        size = half;
+    }
+    unsigned long mask = (size == 64) ? ~0UL : ((1UL << size) - 1);
+    unsigned long elem = imm & mask;
+    if (elem == 0 || elem == mask)
+        return 0;
+    if (bits == 32 && size == 64)
+        return 0;                            /* N must be 0 at 32 bits */
+    for (int rot = 0; rot < size; rot++) {
+        unsigned long r = rot == 0 ? elem
+                        : ((elem >> rot) | (elem << (size - rot))) & mask;
+        int n = 0;
+        for (unsigned long b = r; b; b &= b - 1) n++;
+        unsigned long ones = (n == 64) ? ~0UL : ((1UL << n) - 1);
+        if (r != ones)
+            continue;
+        unsigned long imms = ((~((unsigned long)size - 1) << 1) & 0x3f) |
+                             (unsigned long)(n - 1);
+        /* immr rotates the CONTIGUOUS form into the value, and `rot`
+         * above rotates the value into the contiguous form -- the two
+         * are inverses, which the assembler's own encoding of
+         * `and w0,w1,#0xfffff` said plainly. */
+        unsigned long immr = (unsigned long)((size - rot) % size);
+        *field = ((unsigned long)(size == 64) << 22) |
+                 (immr << 16) | (imms << 10);
+        return 1;
+    }
+    return 0;
+}
+
+int a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w)
+{
+    unsigned long field, base;
+    if (!a64_bitmask_imm((unsigned long)imm, w, &field))
+        return 0;
+    switch (op) {
+    case '&': base = 0x12000000UL; break;    /* AND (immediate) */
+    case '|': base = 0x32000000UL; break;    /* ORR */
+    case '^': base = 0x52000000UL; break;    /* EOR */
+    default: return 0;
+    }
+    a64_word(c, base | sf(w) | field |
+                ((unsigned long)rn << 5) | (unsigned long)rd);
+    return 1;
+}
+
+/* LSL / LSR / ASR by a constant. All three are aliases of the bitfield
+ * moves, which is why they are not in a64_shift_reg: UBFM with the
+ * rotation and width picked for the direction, SBFM for the arithmetic
+ * right shift. A shift count is a constant far more often than not, and
+ * each one was `mov` into a register first. */
+/* STP / LDP: two 64-bit registers in one instruction.
+ *
+ * The callee-saved registers the allocator takes were being saved and
+ * restored one at a time -- 793 stores and 794 loads across lib/libc
+ * and lib/libcxx, where gcc does the same work in 475 paired
+ * instructions. They sit at consecutive eight-byte offsets, which is
+ * exactly what the paired form wants.
+ *
+ * The offset is a signed 7-bit immediate scaled by eight, so
+ * -512..504; outside that the caller keeps the single form. */
+/* FMOV (scalar, immediate): a float constant with no memory and no
+ * general register on the way.
+ *
+ * The 8-bit field is a:b:c:d:e:f:g:h and the value it names is
+ * sign a, exponent (for a double) `~b` followed by eight copies of `b`
+ * then `cd`, mantissa `efgh` followed by forty-eight zeros. So a
+ * double encodes exactly when its low 48 mantissa bits are zero and its
+ * exponent is one of the eight around 1.0 -- which covers 0.5, 1, 1.5,
+ * 2, 3, 4, 8, 16 and their negatives, and 116 of the float constants
+ * across lib/libc and lib/libcxx.
+ *
+ * Returns 0 when the value is not one of them, having emitted nothing. */
+
+int a64_fmov_imm(struct code *c, int vd, unsigned long bits, int w)
+{
+    unsigned long sign, exp, mant, imm8, b;
+    if (w == 8) {
+        if (bits & ((1UL << 48) - 1))
+            return 0;
+        sign = (bits >> 63) & 1;
+        exp  = (bits >> 52) & 0x7ff;
+        mant = (bits >> 48) & 0xf;
+        if (exp < 0x3fc || exp > 0x403)
+            return 0;
+        b = exp <= 0x3ff;
+    } else {
+        unsigned long v = bits & 0xffffffffUL;
+        if (v & ((1UL << 19) - 1))
+            return 0;
+        sign = (v >> 31) & 1;
+        exp  = (v >> 23) & 0xff;
+        mant = (v >> 19) & 0xf;
+        if (exp < 0x7c || exp > 0x83)
+            return 0;
+        b = exp <= 0x7f;
+    }
+    imm8 = (sign << 7) | (b << 6) | ((exp & 3) << 4) | mant;
+    a64_word(c, 0x1E201000UL | ((unsigned long)(w == 8) << 22) |
+                (imm8 << 13) | (unsigned long)vd);
+    return 1;
+}
+
+int a64_stp(struct code *c, int rt, int rt2, int rn, long off)
+{
+    if (off % 8 || off < -512 || off > 504)
+        return 0;
+    a64_word(c, 0xA9000000UL | (((unsigned long)(off / 8) & 0x7f) << 15) |
+                ((unsigned long)rt2 << 10) | ((unsigned long)rn << 5) |
+                (unsigned long)rt);
+    return 1;
+}
+
+int a64_ldp(struct code *c, int rt, int rt2, int rn, long off)
+{
+    if (off % 8 || off < -512 || off > 504)
+        return 0;
+    a64_word(c, 0xA9400000UL | (((unsigned long)(off / 8) & 0x7f) << 15) |
+                ((unsigned long)rt2 << 10) | ((unsigned long)rn << 5) |
+                (unsigned long)rt);
+    return 1;
+}
+
+int a64_shift_imm(struct code *c, int op, int rd, int rn, int shift, int w)
+{
+    int bits = w == 8 ? 64 : 32;
+    unsigned long immr, imms, base;
+    if (shift < 0 || shift >= bits)
+        return 0;
+    if (op == '<') {                              /* LSL: UBFM */
+        immr = (unsigned long)((bits - shift) % bits);
+        imms = (unsigned long)(bits - 1 - shift);
+        base = 0x53000000UL;
+    } else {                                      /* LSR / ASR */
+        immr = (unsigned long)shift;
+        imms = (unsigned long)(bits - 1);
+        base = op == '>' ? 0x13000000UL : 0x53000000UL;  /* SBFM / UBFM */
+    }
+    if (w == 8) base |= 0x80400000UL;             /* sf=1 and N=1 */
+    a64_word(c, base | (immr << 16) | (imms << 10) |
+                ((unsigned long)rn << 5) | (unsigned long)rd);
+    return 1;
 }
 
 void a64_mul(struct code *c, int rd, int rn, int rm, int w)
@@ -211,6 +413,17 @@ void a64_rev(struct code *c, int rd, int rn, int size)
 
 /* ---- compare -------------------------------------------------------- */
 
+/* CMP Rn, #imm -- SUBS ZR, Rn, #imm, and CMN (ADDS ZR) for a negative
+ * one, which compares against it just as well. 0 when the immediate
+ * does not fit the twelve-bit field, and the caller falls back to a
+ * register. */
+int a64_cmp_imm(struct code *c, int rn, long imm, int w)
+{
+    if (imm < 0)
+        return addsub_imm(c, 0x31000000UL, 31, rn, -imm, w);   /* CMN */
+    return addsub_imm(c, 0x71000000UL, 31, rn, imm, w);        /* CMP */
+}
+
 void a64_cmp_reg(struct code *c, int rn, int rm, int w)
 {
     /* CMP is SUBS ZR, Rn, Rm. */
@@ -224,6 +437,20 @@ void a64_cset(struct code *c, int rd, int cond)
      * the low bit of the condition field. */
     unsigned long inv = (unsigned long)(cond ^ 1);
     a64_word(c, 0x9A9F07E0UL | (inv << 12) | (unsigned long)rd);
+}
+
+/* CSEL Rd, Rn, Rm, cond -- Rd = cond ? Rn : Rm, with no branch. The
+ * whole point of a select: both arms are already values, so there is
+ * nothing to mispredict.
+ *
+ *   sf 0 0 11010100 Rm cond 0 0 Rn Rd
+ */
+void a64_csel(struct code *c, int rd, int rn, int rm, int cond, int w)
+{
+    unsigned long sf = w == 8 ? 1UL << 31 : 0;
+    a64_word(c, 0x1A800000UL | sf | ((unsigned long)rm << 16) |
+                ((unsigned long)cond << 12) | ((unsigned long)rn << 5) |
+                (unsigned long)rd);
 }
 
 /* ---- extension ------------------------------------------------------ */
@@ -313,6 +540,34 @@ static void ldst(struct code *c, int rt, int rn, long off, int size,
     else
         a64_alu_reg(c, '+', A64_SCR, rn, A64_SCR, 8);
     a64_word(c, base | ((unsigned long)A64_SCR << 5) | (unsigned long)rt);
+}
+
+/* LDR / STR with a REGISTER offset: `ldr xt, [xn, xm, lsl #k]`.
+ *
+ * The index may be shifted by exactly log2 of the access size or not at
+ * all -- that is the single S bit, not a field -- which is all array
+ * indexing ever wants. It saves the `add` that would otherwise compute
+ * the address: 155 sites across lib/libc and lib/libcxx.
+ *
+ * `scaled` asks for the log2(size) shift. Returns 0 for a size this
+ * form does not have. */
+int a64_ldst_reg(struct code *c, int store, int rt, int rn, int rm,
+                 int scaled, int size, int sign, int w)
+{
+    if (size != 1 && size != 2 && size != 4 && size != 8)
+        return 0;
+    /* The size and opc fields are ldst_base's, not a second copy of the
+     * rule: restating it is how `int a[i]` came out as opc=3 at size 4,
+     * which is the unallocated encoding that comment warns about --
+     * objdump prints `.inst ... undefined` and the CPU traps. Only the
+     * addressing part differs, so only that is rebuilt here. */
+    unsigned long b = ldst_base(size, !store, sign, w);
+    unsigned long sz = (b >> 30) & 3, opc = (b >> 22) & 3;
+    a64_word(c, (sz << 30) | 0x38200800UL | (opc << 22) |
+                ((unsigned long)rm << 16) | (3UL << 13) |
+                ((unsigned long)(scaled != 0) << 12) |
+                ((unsigned long)rn << 5) | (unsigned long)rt);
+    return 1;
 }
 
 void a64_ldr(struct code *c, int rt, int rn, long off,
@@ -532,6 +787,14 @@ static void fdp1(struct code *c, unsigned long opcode, int vd, int vn,
 {
     a64_word(c, 0x1E200000UL | type | (opcode << 15) | (0x10UL << 10) |
                 ((unsigned long)vn << 5) | (unsigned long)vd);
+}
+
+/* FMOV Dd, Xn / FMOV Sd, Wn -- a bit pattern in a general register
+ * becoming a floating-point value, with no trip through memory. */
+void a64_fmov_from_gpr(struct code *c, int vd, int rn, int w)
+{
+    unsigned long base = w == 8 ? 0x9E670000UL : 0x1E270000UL;
+    a64_word(c, base | ((unsigned long)rn << 5) | (unsigned long)vd);
 }
 
 void a64_fmov_reg(struct code *c, int vd, int vn, int w)
