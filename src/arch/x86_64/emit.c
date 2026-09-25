@@ -1256,13 +1256,14 @@ void x86_sse_alu_mem(struct code *c, int op, int dst, int disp, int w)
     modrm_rbp(c, dst & 7, disp);
 }
 
-void x86_ucomis_mem(struct code *c, int disp, int w)
+void x86_ucomis_mem(struct code *c, int xmm, int disp, int w)
 {
     if (w == 8)
         code_byte(c, 0x66); /* ucomisd */
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f);
     code_byte(c, 0x2e);
-    modrm_rbp(c, 0, disp);
+    modrm_rbp(c, xmm & 7, disp);
 }
 
 /* ucomis xmm, xmm -- the register form, for a second operand that has an
@@ -1313,14 +1314,18 @@ void x86_set_float_eq(struct code *c, int ne)
     code_byte(c, 0xc0);
 }
 
-void x86_cvtsi2s(struct code *c, int disp, int srcw, int dstw)
+/* These four used to name xmm0 in the reg field with no way to say
+ * otherwise, which was fine while xmm0 was the scratch. It is a pool
+ * register now, so each takes the register explicitly -- and REX.R with
+ * it, because the scratch is no longer below eight. */
+void x86_cvtsi2s(struct code *c, int xmm, int disp, int srcw, int dstw)
 {
     sse_prefix(c, dstw);
-    if (srcw == 8)
-        code_byte(c, 0x48); /* REX.W: 64-bit integer source */
+    if (srcw == 8 || xmm >= 8)
+        code_byte(c, 0x40 | ((srcw == 8) << 3) | ((xmm >= 8) ? 4 : 0));
     code_byte(c, 0x0f);
-    code_byte(c, 0x2a); /* cvtsi2ss/cvtsi2sd xmm0, r/m */
-    modrm_rbp(c, 0, disp);
+    code_byte(c, 0x2a); /* cvtsi2ss/cvtsi2sd xmm, r/m */
+    modrm_rbp(c, xmm & 7, disp);
 }
 
 void x86_cvtts2si(struct code *c, int disp, int srcw, int dstw)
@@ -1330,28 +1335,32 @@ void x86_cvtts2si(struct code *c, int disp, int srcw, int dstw)
         code_byte(c, 0x48); /* REX.W: 64-bit integer destination */
     code_byte(c, 0x0f);
     code_byte(c, 0x2c); /* cvttss2si/cvttsd2si rax, xmm/m (truncating) */
-    modrm_rbp(c, 0, disp);
+    modrm_rbp(c, 0, disp);   /* the DESTINATION is rax, a GPR */
 }
 
-void x86_cvts2s(struct code *c, int disp, int srcw)
+void x86_cvts2s(struct code *c, int xmm, int disp, int srcw)
 {
     sse_prefix(c, srcw);
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f);
     code_byte(c, 0x5a); /* cvtss2sd / cvtsd2ss */
-    modrm_rbp(c, 0, disp);
+    modrm_rbp(c, xmm & 7, disp);
 }
 
 /* The register forms of the three conversions, for a value that has an
- * FP home rather than a slot. Each writes xmm0 or rax exactly as its
+ * FP home rather than a slot. The two with a FLOAT destination take it
+ * explicitly, because xmm0 is a pool register now; the one that writes
+ * rax still names it implicitly. Each behaves exactly as its
  * memory sibling does; only where the OPERAND comes from changes. */
-void x86_cvtsi2s_reg(struct code *c, int src, int srcw, int dstw)
+void x86_cvtsi2s_reg(struct code *c, int dst, int src, int srcw, int dstw)
 {
     sse_prefix(c, dstw);
-    if (srcw == 8 || src >= 8)
-        code_byte(c, 0x40 | ((srcw == 8) << 3) | (src >= 8));
+    if (srcw == 8 || src >= 8 || dst >= 8)
+        code_byte(c, 0x40 | ((srcw == 8) << 3) | ((dst >= 8) ? 4 : 0) |
+                     (src >= 8));
     code_byte(c, 0x0f);
     code_byte(c, 0x2a);
-    code_byte(c, 0xc0 | (src & 7));          /* reg = xmm0 */
+    code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
 }
 
 void x86_cvtts2si_reg(struct code *c, int src, int srcw, int dstw)
@@ -1364,14 +1373,14 @@ void x86_cvtts2si_reg(struct code *c, int src, int srcw, int dstw)
     code_byte(c, 0xc0 | (src & 7));          /* reg = rax */
 }
 
-void x86_cvts2s_reg(struct code *c, int src, int srcw)
+void x86_cvts2s_reg(struct code *c, int dst, int src, int srcw)
 {
     sse_prefix(c, srcw);
-    if (src >= 8)
-        code_byte(c, 0x41);
+    { int rex = 0x40 | ((dst & 8) ? 4 : 0) | ((src & 8) ? 1 : 0);
+      if (rex != 0x40) code_byte(c, rex); }
     code_byte(c, 0x0f);
     code_byte(c, 0x5a);
-    code_byte(c, 0xc0 | (src & 7));          /* reg = xmm0 */
+    code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
 }
 
 void x86_mov_al_imm(struct code *c, int v)
@@ -1574,18 +1583,27 @@ void x86_mov128_store(struct code *c, int base, int disp, int xmm)
     modrm_base(c, xmm, base, disp);
 }
 
+/* The three packed forms with a MEMORY operand. Their register-operand
+ * twins have always emitted REX.R for xmm8-15; these did not, because
+ * the vector registers used to be xmm0-7 and the question never arose.
+ * Moving the FP pool to xmm0-7 pushed the vector accumulators up to
+ * xmm8-11, and without the prefix every one of them assembled as
+ * xmm0-3 -- silently, and only the vectorize and unroll tests could
+ * tell. */
 void x86_vload_slot(struct code *c, int xmm, int disp)
 {
     code_byte(c, 0x66);
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f); code_byte(c, 0x6f);
-    modrm_rbp(c, xmm, disp);
+    modrm_rbp(c, xmm & 7, disp);
 }
 
 void x86_vstore_slot(struct code *c, int disp, int xmm)
 {
     code_byte(c, 0x66);
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f); code_byte(c, 0x7f);
-    modrm_rbp(c, xmm, disp);
+    modrm_rbp(c, xmm & 7, disp);
 }
 
 /* xmm <op>= [rbp+disp], lane by lane at `esize` bytes. */
@@ -1608,8 +1626,9 @@ void x86_vbin_slot(struct code *c, int xmm, int op, int esize, int disp)
         internal_error("no SSE2 packed encoding for '%c'", op);
     }
     code_byte(c, 0x66);
+    sse_rex_r(c, xmm);
     code_byte(c, 0x0f); code_byte(c, (unsigned)opcode);
-    modrm_rbp(c, xmm, disp);
+    modrm_rbp(c, xmm & 7, disp);
 }
 
 /* xmm <<= imm / >>= imm, lane by lane. `arith` picks psra over psrl;

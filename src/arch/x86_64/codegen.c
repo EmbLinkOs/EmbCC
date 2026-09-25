@@ -120,8 +120,32 @@ static const int LEAF_POOL_AT[NLEAF_AT] = { 8, 9, 10, 11,
  * rule, which is work this does not do yet -- so that ABI gets no FP
  * pool at all rather than a wrong one. */
 #define X86_FP_ALLOC 1    /* see the note below */
-#define NX86_FPOOL 8
-static const int X86_FPOOL[NX86_FPOOL] = { 8, 9, 10, 11, 12, 13, 14, 15 };
+#define NX86_FPOOL 7
+static const int X86_FPOOL[NX86_FPOOL] = { 0, 1, 2, 3, 4, 5, 6 };
+
+/* The fixed FP registers, which are now the TOP of the file rather than
+ * the bottom.
+ *
+ * The pool used to be xmm8-15 on the reasoning that the eight above the
+ * argument file are nobody else's. That is true, and it is exactly
+ * wrong: because they are nobody else's, a value in one is never where
+ * the ABI wants it. Every float parameter arrived in xmm0-7 and was
+ * copied up; every float result was copied back down. 1409 of the 1535
+ * register-to-register movaps across lib/libc and lib/libcxx crossed
+ * that boundary, and 1353 of them were xmm0 alone.
+ *
+ * So the pool is xmm0-7 -- the same eight registers, in the place the
+ * ABI already puts things -- and the scratch roles move up out of the
+ * way. Nothing here is callee-saved either way (System V preserves none
+ * of the sixteen), so no prologue save or CFI rule changes. */
+/* ...and the scratch is xmm7, not one of the high eight, because every
+ * SSE instruction naming a register above seven carries a REX byte it
+ * would not otherwise need. The scratch appears in 757 of the
+ * register-to-register moves this backend emits, so putting it up there
+ * gave back 757 bytes of the 2750 the swap had won. Seven pool
+ * registers and a cheap scratch beat eight and an expensive one. */
+#define X86_FSCR   7      /* the float scratch: every fld/fst path */
+#define X86_FSCR2  15     /* a second, for the vector reduce only */
 static int x86_fp_callee_saved(int reg) { (void)reg; return 0; }
 
 /* What this function reserves, beyond what the machine does.
@@ -261,7 +285,7 @@ static void x86_abi_hints(const struct ir_func *fn, int *hint)
     if (!f || target_win64_abi() || f->is_varargs)
         return;
     enum arg_class rcls[2];
-    int ireg = 0;
+    int ireg = 0, freg = 0;
     /* A hidden return pointer consumes rdi before any real parameter. */
     if (f->ret_ty->kind == TY_STRUCT && ty_classify(f->ret_ty, rcls) == 0 &&
         !ty_x87_ret(f->ret_ty))
@@ -276,12 +300,29 @@ static void x86_abi_hints(const struct ir_func *fn, int *hint)
             if (ireg + 2 <= 6) ireg += 2;
             continue;                    /* a pair, and never allocated */
         }
-        if (ty_is_float(pt))
-            continue;                    /* the FP class has its own pool,
-                                          * and its own counter, which
-                                          * nothing here reads */
+        if (ty_is_float(pt)) {
+            /* The FP pool IS xmm0-7 now, so a float parameter can stay
+             * in the register it arrived in -- which is the whole point
+             * of moving it there. The allocator reads one `hint` array
+             * for both classes and a value belongs to exactly one, so a
+             * 3 meaning xmm3 here cannot be mistaken for rbx. */
+            if (freg < NX86_FPOOL)
+                hint[i] = freg;
+            freg++;
+            continue;
+        }
         if (ireg < 6)
             hint[i] = x86_argreg(ireg++);
+    }
+    /* A float RESULT, returned or received, is xmm0's. */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        if (in->op == IR_CALL && in->flt && in->w != 16 && !in->retsize &&
+            in->dst >= 0 && in->dst < fn->nvregs)
+            hint[in->dst] = 0;
+        else if (in->op == IR_RET && in->flt && in->w != 16 &&
+                 in->a >= 0 && in->a < fn->nvregs)
+            hint[in->a] = 0;
     }
 
 
@@ -302,17 +343,23 @@ static void x86_abi_hints(const struct ir_func *fn, int *hint)
         if (in->op != IR_CALL)
             continue;
         int ireg2 = in->retsize ? 1 : 0;       /* sret consumes rdi */
+        int freg2 = 0;
         for (int k = 0; k < in->nargs; k++) {
             const struct ir_arg *a = &in->argv[k];
             if (a->on_stack)
                 continue;
             if (a->is_struct || a->nclass == 2) {
                 for (int q = 0; q < a->nclass; q++)
-                    if (a->cls[q] != CLASS_SSE) ireg2++;
+                    if (a->cls[q] == CLASS_SSE) freg2++; else ireg2++;
                 continue;
             }
-            if (a->cls[0] == CLASS_SSE)
-                continue;                      /* the FP class's own file */
+            if (a->cls[0] == CLASS_SSE) {
+                if (freg2 < NX86_FPOOL && a->vreg >= 0 &&
+                    a->vreg < fn->nvregs)
+                    hint[a->vreg] = freg2;
+                freg2++;
+                continue;
+            }
             if (ireg2 < 6 && a->vreg >= 0 && a->vreg < fn->nvregs)
                 hint[a->vreg] = x86_argreg(ireg2);
             ireg2++;
@@ -1061,10 +1108,10 @@ static int vec_reads_xmm(const struct ir_ins *i, int v)
  * vectorizer builds. */
 /* xmm0/xmm1 are scratch, xmm2/xmm3 hold the widening cache below, and
  * accumulators take xmm4 upward. */
-#define VACC_FIRST 4
+#define VACC_FIRST 8      /* the vector accumulators: xmm8-11 */
 #define VACC_N     4
-#define VW_SRC     2      /* the vector being widened */
-#define VW_SIGN    3      /* and its lanes' extension bits */
+#define VW_SRC     12     /* the vector being widened */
+#define VW_SIGN    13     /* and its lanes' extension bits */
 
 static int *vacc_regs(struct ir_func *fn)
 {
@@ -1332,6 +1379,46 @@ static void cg_icmp_flags(struct code *text, const int *sd, struct ir_ins *i)
  * cycles remain, break one by parking its dest in `scratch` (a register outside
  * every src and dest — rax at a call site) and pointing its readers there. Used
  * to shuffle call arguments among rdi..r9 when some already sit in r8/r9. */
+/* The same permutation, in the FLOAT file.
+ *
+ * It did not exist while the FP pool was xmm8-15: sources (the argument
+ * registers xmm0-7) and destinations (the pool) were disjoint sets, so
+ * one move at a time was always safe. With the pool AT xmm0-7 they are
+ * the same eight registers and `movaps xmm0,xmm3` followed by
+ * `movaps xmm3,xmm1` delivers one argument twice and loses another.
+ *
+ * X86_FSCR breaks a cycle: it is in no pool, so parking a value there
+ * costs nothing live. */
+static void emit_fp_parallel_move(struct code *text, int *dest, int *src,
+                                  int n)
+{
+    char done[16];
+    int remaining = 0;
+    for (int i = 0; i < n; i++) {
+        done[i] = (dest[i] == src[i]);
+        if (!done[i]) remaining++;
+    }
+    while (remaining > 0) {
+        int progressed = 0;
+        for (int i = 0; i < n; i++) {
+            if (done[i]) continue;
+            int blocked = 0;
+            for (int j = 0; j < n; j++)
+                if (!done[j] && j != i && src[j] == dest[i]) { blocked = 1; break; }
+            if (blocked) continue;
+            x86_movs_reg(text, dest[i], src[i]);
+            done[i] = 1; remaining--; progressed = 1;
+        }
+        if (progressed)
+            continue;
+        int c = -1;
+        for (int i = 0; i < n; i++) if (!done[i]) { c = i; break; }
+        x86_movs_reg(text, X86_FSCR, dest[c]);
+        for (int j = 0; j < n; j++)
+            if (!done[j] && src[j] == dest[c]) src[j] = X86_FSCR;
+    }
+}
+
 static void emit_reg_parallel_move(struct code *text, int *dest, int *src,
                                    int n, int scratch)
 {
@@ -1366,13 +1453,16 @@ static void emit_reg_parallel_move(struct code *text, int *dest, int *src,
  *
  * One xmm register carries all sixteen, so this is two instructions
  * rather than four and touches neither rax nor its residency cache.
- * xmm7 is the scratch: the allocator's FP pool is xmm8-15 and every
- * other float path here uses xmm0, so nothing live can be in it.
+ * The float scratch carries it -- the same register every other float
+ * path here uses, which holds nothing across an IR instruction, and
+ * this copy IS one. (It was xmm7 for a few hours, which is a VECTOR
+ * ACCUMULATOR: live across a whole loop, so a struct copy in that loop
+ * would have eaten it.)
  *
  * Under -mno-sse there is no such register -- a kernel built that way
  * must not touch the FPU -- so the two-eightbytes-through-rax form
  * stays as the fallback, and there neither base may be rax. */
-#define COPY16_XMM 7
+#define COPY16_XMM X86_FSCR
 static void copy16(struct code *text, int dbase, int doff, int sbase, int soff)
 {
     if (!g_no_sse) {
@@ -1436,7 +1526,7 @@ static void x86_fwrote(struct code *text, const int *sd, int v, int xmm, int w)
 /* A float value copied from one place to another. */
 static void x86_fmove(struct code *text, const int *sd, int dst, int src, int w)
 {
-    int r = x86_frd(text, sd, src, 0, w);
+    int r = x86_frd(text, sd, src, X86_FSCR, w);
     if (in_freg(dst)) {
         if (g_floc[dst] != r) x86_movs_reg(text, g_floc[dst], r);
         return;
@@ -1683,7 +1773,7 @@ static void gen_i128(struct code *text, const int *sd, struct ir_ins *i,
         if (i->w == 16)
             x86_x87_mem(text, 0xDB, 7, REG_RBP, d);        /* fstp tword */
         else
-            x86_fst(text, sd, i->dst, 0, i->w);
+            x86_fst(text, sd, i->dst, 0, i->w);   /* libgcc returns xmm0 */
         break;
     }
     case IR_F2I: {
@@ -1700,7 +1790,7 @@ static void gen_i128(struct code *text, const int *sd, struct ir_ins *i,
             x86_call_helper(text, st, h);
             x86_alu_reg_imm(text, '+', REG_RSP, 16, 8);
         } else {
-            x86_fld(text, sd, i->a, 0, i->size);
+            x86_fld(text, sd, i->a, 0, i->size);  /* libgcc reads xmm0 */
             x86_call_helper(text, st, h);
         }
         st8(text, d, REG_RAX);
@@ -2098,6 +2188,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * so they need no cycle breaking, only to come after it. */
     int pstk_dst[MAX_PARAMS], pstk_off[MAX_PARAMS], pstk_sz[MAX_PARAMS];
     int npstk = 0;
+    int fmv_dst[16], fmv_src[16], nfmv = 0;   /* the float half */
     char pmoved[MAX_PARAMS];
     for (int p = 0; p < MAX_PARAMS; p++) pmoved[p] = 0;
     {   /* The same two-file split, in reverse. A hidden return pointer
@@ -2227,7 +2318,20 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                     incoming += 8;
                 } else if (ty_is_float(pt)) {
-                    x86_fst(text, sd, i, freg++, ty_size(pt));
+                    /* A float parameter whose home is an xmm register
+                     * joins the FP permutation below: with the pool at
+                     * xmm0-7 its source and some other parameter's
+                     * destination are the same register file. One that
+                     * lives in memory is stored here and now, which
+                     * only READS an argument register and so cannot
+                     * disturb the permutation. */
+                    if (in_freg(i)) {
+                        fmv_dst[nfmv] = g_floc[i];
+                        fmv_src[nfmv] = freg++;
+                        nfmv++;
+                    } else {
+                        x86_fst(text, sd, i, freg++, ty_size(pt));
+                    }
                 } else if (pmove && g_loc[i] >= 0) {
                     pmv_src[npmv] = x86_argreg(ireg++);   /* arg reg -> its own */
                     pmv_dst[npmv] = g_loc[i];             /* allocated register */
@@ -2277,6 +2381,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * once (handles the r8/r9 overlap and any cycle via RAX, which is free
          * here and never an arg or allocated register). */
         if (npmv) emit_reg_parallel_move(text, pmv_dst, pmv_src, npmv, REG_RAX);
+        if (nfmv) emit_fp_parallel_move(text, fmv_dst, fmv_src, nfmv);
         /* and only now the stack-passed ones, whose homes may be the
          * argument registers the shuffle has just finished reading */
         for (int k = 0; k < npstk; k++)
@@ -2385,10 +2490,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 cg_load(text, sd, i->a, 8, 0, 8);
                 base = REG_RAX;
             }
-            x86_vload_base(text, 0, base, 0);
+            x86_vload_base(text, X86_FSCR, base, 0);
             rc_vreg = -1;
             if (!vec_keep(fn, n, usecnt, i->dst))
-                x86_vstore_slot(text, sd[i->dst], 0);
+                x86_vstore_slot(text, sd[i->dst], X86_FSCR);
             vrc_vreg = i->dst;   /* still in xmm0, stored or not */
             break;
         }
@@ -2398,14 +2503,14 @@ static void gen_func(struct ir_func *fn, struct code *text,
             /* The ADDRESS first when the value is already in xmm0, so
              * loading it cannot be what evicts the value. */
             if (vrc_in != i->b)
-                x86_vload_slot(text, 0, sd[i->b]);
+                x86_vload_slot(text, X86_FSCR, sd[i->b]);
             if (in_reg(i->a)) {
                 base = g_loc[i->a];
             } else {
                 cg_load(text, sd, i->a, 8, 0, 8);
                 base = REG_RAX;
             }
-            x86_vstore_base(text, base, 0, 0);
+            x86_vstore_base(text, base, 0, X86_FSCR);
             rc_vreg = -1;
             vrc_vreg = i->b;     /* the stored value is still in xmm0 */
             break;
@@ -2421,40 +2526,40 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 else if (Rb >= 0)
                     x86_vbin_rr(text, R, Rb, (int)i->imm, i->size);
                 else if (vrc_in == i->b)
-                    x86_vbin_rr(text, R, 0, (int)i->imm, i->size);
+                    x86_vbin_rr(text, R, X86_FSCR, (int)i->imm, i->size);
                 else
                     x86_vbin_slot(text, R, (int)i->imm, i->size, sd[i->b]);
                 break;
             }
             if (vacc_of(i->a) >= 0)
-                x86_vmov_rr(text, 0, vacc_of(i->a));
+                x86_vmov_rr(text, X86_FSCR, vacc_of(i->a));
             else if (vrc_in != i->a)
-                x86_vload_slot(text, 0, sd[i->a]);
+                x86_vload_slot(text, X86_FSCR, sd[i->a]);
             if (i->imm == '<' || i->imm == '>')
-                x86_vshift_imm(text, 0, i->imm == '<', i->sign, i->size,
+                x86_vshift_imm(text, X86_FSCR, i->imm == '<', i->sign, i->size,
                                i->c);
             else if (vacc_of(i->b) >= 0)
-                x86_vbin_rr(text, 0, vacc_of(i->b), (int)i->imm, i->size);
+                x86_vbin_rr(text, X86_FSCR, vacc_of(i->b), (int)i->imm, i->size);
             else
-                x86_vbin_slot(text, 0, (int)i->imm, i->size, sd[i->b]);
+                x86_vbin_slot(text, X86_FSCR, (int)i->imm, i->size, sd[i->b]);
             if (!vec_keep(fn, n, usecnt, i->dst))
-                x86_vstore_slot(text, sd[i->dst], 0);
+                x86_vstore_slot(text, sd[i->dst], X86_FSCR);
             vrc_vreg = i->dst;
             break;
         case IR_VSPLAT:
             vw_src = vw_in;   /* xmm2/xmm3 untouched by this */
             cg_reset();
             cg_load(text, sd, i->a, i->size, 0, i->size == 8 ? 8 : 4);
-            x86_vmov_xmm_reg(text, 0, REG_RAX, i->size == 8 ? 8 : 4);
+            x86_vmov_xmm_reg(text, X86_FSCR, REG_RAX, i->size == 8 ? 8 : 4);
             /* 0x00 repeats lane 0 across all four; 0x44 repeats the low
              * QUADword, which is the same thing at eight bytes a lane. */
-            x86_vshufd(text, 0, 0, i->size == 8 ? 0x44 : 0x00);
+            x86_vshufd(text, X86_FSCR, X86_FSCR, i->size == 8 ? 0x44 : 0x00);
             rc_vreg = -1;
             if (vacc_of(i->dst) >= 0) {
-                x86_vmov_rr(text, vacc_of(i->dst), 0);
+                x86_vmov_rr(text, vacc_of(i->dst), X86_FSCR);
             } else {
                 if (!vec_keep(fn, n, usecnt, i->dst))
-                    x86_vstore_slot(text, sd[i->dst], 0);
+                    x86_vstore_slot(text, sd[i->dst], X86_FSCR);
                 vrc_vreg = i->dst;
             }
             break;
@@ -2492,7 +2597,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 if (vacc_of(i->a) >= 0)
                     x86_vmov_rr(text, VW_SRC, vacc_of(i->a));
                 else if (vrc_in == i->a)
-                    x86_vmov_rr(text, VW_SRC, 0);
+                    x86_vmov_rr(text, VW_SRC, X86_FSCR);
                 else
                     x86_vload_slot(text, VW_SRC, sd[i->a]);
                 if (i->sign) {
@@ -2503,12 +2608,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     x86_vbin_rr(text, VW_SIGN, VW_SIGN, '^', i->size);
                 }
             }
-            x86_vmov_rr(text, 0, VW_SRC);
-            x86_vunpck(text, 0, VW_SIGN, i->c, i->size);
+            x86_vmov_rr(text, X86_FSCR, VW_SRC);
+            x86_vunpck(text, X86_FSCR, VW_SIGN, i->c, i->size);
             vw_src = i->a;
             rc_vreg = -1;
             if (!vec_keep(fn, n, usecnt, i->dst))
-                x86_vstore_slot(text, sd[i->dst], 0);
+                x86_vstore_slot(text, sd[i->dst], X86_FSCR);
             vrc_vreg = i->dst;
             break;
         case IR_VREDADD:
@@ -2517,16 +2622,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * the live lanes each time, until lane 0 holds the sum. */
             cg_reset();
             if (vacc_of(i->a) >= 0)
-                x86_vmov_rr(text, 0, vacc_of(i->a));
+                x86_vmov_rr(text, X86_FSCR, vacc_of(i->a));
             else if (vrc_in != i->a)
-                x86_vload_slot(text, 0, sd[i->a]);
-            x86_vshufd(text, 1, 0, 0x4e);          /* swap the 64-bit halves */
-            x86_vbin_rr(text, 0, 1, '+', i->size);
+                x86_vload_slot(text, X86_FSCR, sd[i->a]);
+            x86_vshufd(text, X86_FSCR2, X86_FSCR, 0x4e);          /* swap the 64-bit halves */
+            x86_vbin_rr(text, X86_FSCR, X86_FSCR2, '+', i->size);
             if (i->size == 4) {
-                x86_vshufd(text, 1, 0, 0xb1);      /* and the 32-bit pairs */
-                x86_vbin_rr(text, 0, 1, '+', 4);
+                x86_vshufd(text, X86_FSCR2, X86_FSCR, 0xb1);      /* and the 32-bit pairs */
+                x86_vbin_rr(text, X86_FSCR, X86_FSCR2, '+', 4);
             }
-            x86_vmov_reg_xmm(text, REG_RAX, 0, i->size == 8 ? 8 : 4);
+            x86_vmov_reg_xmm(text, REG_RAX, X86_FSCR, i->size == 8 ? 8 : 4);
             cg_store(text, sd, i->dst, i->w);
             break;
         case IR_CONST:
@@ -2612,9 +2717,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * `a` into it would destroy `b` before it is read. When
                  * that happens the op runs in the scratch instead and
                  * the result is moved home afterwards. */
-                int home = x86_fwr(i->dst, 0), d = home;
+                int home = x86_fwr(i->dst, X86_FSCR), d = home;
                 if (in_freg(i->b) && g_floc[i->b] == d && i->a != i->b)
-                    d = 0;
+                    d = X86_FSCR;
                 x86_fld(text, sd, i->a, d, i->w);
                 if (in_freg(i->b))
                     x86_sse_alu_reg(text, fop, d, g_floc[i->b], i->w);
@@ -2762,7 +2867,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * iterating. */
             cg_reset();
             {
-                int d = x86_fwr(i->dst, 0);
+                int d = x86_fwr(i->dst, X86_FSCR);
                 if (in_freg(i->a))
                     x86_sse_alu_reg(text, 'q', d, g_floc[i->a], i->w);
                 else
@@ -2775,9 +2880,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
             if (i->flt) { /* only DIV is ever float; MOD is integers */
                 cg_reset();
                 {
-                    int home = x86_fwr(i->dst, 0), d = home;
+                    int home = x86_fwr(i->dst, X86_FSCR), d = home;
                     if (in_freg(i->b) && g_floc[i->b] == d && i->a != i->b)
-                        d = 0;                    /* see IR_ADD above */
+                        d = X86_FSCR;             /* see IR_ADD above */
                     x86_fld(text, sd, i->a, d, i->w);
                     if (in_freg(i->b))
                         x86_sse_alu_reg(text, '/', d, g_floc[i->b], i->w);
@@ -2872,13 +2977,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * in every direction. */
                 cg_reset();
                 int swap = i->pred == B_LT || i->pred == B_LE;
-                x86_fld(text, sd, swap ? i->b : i->a, 0, i->w);
+                x86_fld(text, sd, swap ? i->b : i->a, X86_FSCR, i->w);
                 {
                     int other = swap ? i->a : i->b;
                     if (in_freg(other))
-                        x86_ucomis_reg(text, 0, g_floc[other], i->w);
+                        x86_ucomis_reg(text, X86_FSCR, g_floc[other], i->w);
                     else
-                        x86_ucomis_mem(text, sd[other], i->w);
+                        x86_ucomis_mem(text, X86_FSCR, sd[other], i->w);
                 }
                 /* ...and fuse it into the branch that solely consumes
                  * it, the way the integer compare below already is.
@@ -2990,13 +3095,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_setcc_eax(text, cc_for(i->pred, i->sign));
             cg_store(text, sd, i->dst, 4);        /* the 0/1 result is an int */
             break;
-        case IR_I2F:
+        case IR_I2F: {
             cg_reset();
             /* the SOURCE is an integer here, so only the result is in
-              * the float class -- no register form is needed for it */
-            x86_cvtsi2s(text, sd[i->a], i->size, i->w);
-            x86_fst(text, sd, i->dst, 0, i->w);
+             * the float class -- and it converts straight into that
+             * value's own register when it has one */
+            int fd = x86_fwr(i->dst, X86_FSCR);
+            x86_cvtsi2s(text, fd, sd[i->a], i->size, i->w);
+            x86_fwrote(text, sd, i->dst, fd, i->w);
             break;
+        }
         case IR_F2I:
             cg_reset();
             if (in_freg(i->a))
@@ -3005,14 +3113,18 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_cvtts2si(text, sd[i->a], i->size, i->w);
             cg_store(text, sd, i->dst, i->w);
             break;
-        case IR_F2F:
+        case IR_F2F: {
+            /* Convert straight into the destination's own register when
+             * it has one -- cvtss2sd names both ends now. */
             cg_reset();
+            int fd = x86_fwr(i->dst, X86_FSCR);
             if (in_freg(i->a))
-                x86_cvts2s_reg(text, g_floc[i->a], i->size);
+                x86_cvts2s_reg(text, fd, g_floc[i->a], i->size);
             else
-                x86_cvts2s(text, sd[i->a], i->size);
-            x86_fst(text, sd, i->dst, 0, i->w);
+                x86_cvts2s(text, fd, sd[i->a], i->size);
+            x86_fwrote(text, sd, i->dst, fd, i->w);
             break;
+        }
         case IR_LDVAR:
             if (is_flt(i->dst) || is_flt(i->a)) {
                 cg_reset(); x86_fmove(text, sd, i->dst, i->a, i->size); break;
@@ -3125,7 +3237,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_LOAD:
             if (is_flt(i->dst)) {
                 int b = addr_reg(text, sd, i->a);
-                int d = x86_fwr(i->dst, 0);
+                int d = x86_fwr(i->dst, X86_FSCR);
                 x86_movs_load_base(text, d, b, 0, i->size);
                 x86_fwrote(text, sd, i->dst, d, i->size);
                 break;
@@ -3161,7 +3273,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_STORE: {
             if (is_flt(i->b)) {
                 int b = addr_reg(text, sd, i->a);
-                int v = x86_frd(text, sd, i->b, 0, i->size);
+                int v = x86_frd(text, sd, i->b, X86_FSCR, i->size);
                 x86_movs_store_base(text, b, 0, v, i->size);
                 break;
             }
@@ -3579,6 +3691,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     mvdest[nmv] = 11 /*r11*/; mvsrc[nmv] = g_loc[i->a]; nmv++;
                 }
             }
+            int afmv_dst[16], afmv_src[16], nafmv = 0;
+            int afld_reg[16], afld_v[16], afld_sz[16], nafld = 0;
             emit_reg_parallel_move(text, mvdest, mvsrc, nmv, REG_RAX);
             if (sret_lea)                 /* now that nothing reads rdi */
                 x86_lea_reg_slot(text, x86_argreg(0),
@@ -3629,13 +3743,32 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 if (a->nclass == 2) {           /* an __int128 */
                     x86_load_arg(text, ireg++, sd[a->vreg]);
                     x86_load_arg(text, ireg++, sd[a->vreg] + 8);
-                } else if (a->cls[0] == CLASS_SSE)
-                    x86_fld(text, sd, a->vreg, freg++, a->size);
-                else if (in_reg(a->vreg))
+                } else if (a->cls[0] == CLASS_SSE) {
+                    /* Same story as the integer file: with the FP pool
+                     * AT xmm0-7, an argument's source register and
+                     * another argument's destination are drawn from one
+                     * set, so the register-resident ones go out as a
+                     * PERMUTATION. The memory-resident ones are loaded
+                     * after it, into argument registers the permutation
+                     * has finished reading. */
+                    if (in_freg(a->vreg)) {
+                        afmv_dst[nafmv] = freg++;
+                        afmv_src[nafmv] = g_floc[a->vreg];
+                        nafmv++;
+                    } else {
+                        afld_reg[nafld] = freg++;
+                        afld_v[nafld] = a->vreg;
+                        afld_sz[nafld] = a->size;
+                        nafld++;
+                    }
+                } else if (in_reg(a->vreg))
                     ireg++;              /* already placed by the parallel move */
                 else
                     x86_load_arg(text, ireg++, sd[a->vreg]);
             }
+            if (nafmv) emit_fp_parallel_move(text, afmv_dst, afmv_src, nafmv);
+            for (int k = 0; k < nafld; k++)
+                x86_fld(text, sd, afld_v[k], afld_reg[k], afld_sz[k]);
             if (i->indirect && !in_reg(i->a))
                 x86_mov_r11_slot(text, sd[i->a]);   /* in-reg case done above */
             /* al = the number of VECTOR registers used. Zero was right
@@ -3730,7 +3863,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_store_mem_reg(text, REG_RBP, sd[i->dst], REG_RAX, 8);
                 x86_store_mem_reg(text, REG_RBP, sd[i->dst] + 8, REG_RDX, 8);
             } else if (i->flt)
-                x86_fst(text, sd, i->dst, 0, i->w);   /* stays reset */
+                x86_fst(text, sd, i->dst, 0, i->w);   /* xmm0: the ABI's */
             else
                 cg_store(text, sd, i->dst, i->w);
             break;
@@ -3895,6 +4028,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
             } else if (i->a >= 0 && i->flt && i->w == 16) {
                 x86_x87_mem(text, 0xDB, 5, REG_RBP, sd[i->a]);   /* -> st0 */
             } else if (i->a >= 0 && i->flt) {
+                /* xmm0 because System V says so, not because it is the
+                 * scratch -- it is a pool register now. */
                 x86_fld(text, sd, i->a, 0, i->w);
             } else if (i->a >= 0) {
                 if (in_reg(i->a))                       /* register-resident value */

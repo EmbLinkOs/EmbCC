@@ -570,9 +570,15 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             (op == IR_LDVAR && t->ldvar_plain(in->size, in->sign, in->w))) {
             partner[np++] = in->a;
         } else if (op == IR_ADD || op == IR_SUB || op == IR_MUL ||
-                   op == IR_AND || op == IR_OR || op == IR_XOR ||
-                   op == IR_SHL || op == IR_SHR) {
+                   op == IR_DIV || op == IR_AND || op == IR_OR ||
+                   op == IR_XOR || op == IR_SHL || op == IR_SHR) {
             partner[np++] = in->a;                       /* dst prefers a */
+            /* DIVIDE is here for the two-operand SSE form (`divsd d,b`
+             * means `d /= b`), which the coalescer below has always
+             * known about while this bias did not. It does not commute,
+             * so only operand a is preferred -- and on the integer side
+             * idiv's operands are fixed in rax:rdx, so a preference for
+             * a pool register changes nothing there either way. */
             int commut = op == IR_ADD || op == IR_MUL || op == IR_AND ||
                          op == IR_OR || op == IR_XOR;
             if (commut && !in->imm_b) partner[np++] = in->b;

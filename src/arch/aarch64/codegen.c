@@ -181,9 +181,18 @@ static int a64_op_calls_helper(const struct ir_ins *i)
  * this corpus lived in a stack slot before: 6383 of the memory
  * instructions emitted were floating-point spill traffic, against
  * gcc's 969. */
-#define A64_NFPOOL 14
+/* v0-v7 lead it, because those are where AAPCS64 already puts a float
+ * parameter, a float argument and a float result: a value that stays in
+ * the register it arrived in costs no fmov at all. With the pool
+ * starting at v18 every one of them was copied up and back -- 724 of
+ * the register-to-register fmovs across lib/libc and lib/libcxx crossed
+ * that boundary, 662 of them v0 alone. v8-v15 stay out (AAPCS64
+ * preserves their low halves, so each would need a save and an unwind
+ * rule) and v16/v17 stay the scratch pair. */
+#define A64_NFPOOL 22
 static const int A64_FPOOL[A64_NFPOOL] = { 18, 19, 20, 21, 22, 23, 24,
-                                           25, 26, 27, 28, 29, 30, 31 };
+                                           25, 26, 27, 28, 29, 30, 31,
+                                           0, 1, 2, 3, 4, 5, 6, 7 };
 static int a64_fp_callee_saved(int reg) { (void)reg; return 0; }
 
 /* Is x13/x14 spoken for? They are the atomics' scratch and nothing
@@ -886,13 +895,22 @@ static void a64_abi_hints(const struct ir_func *fn, int *hint)
         a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl, 0, 0);
         if (pl.where == AP_X && !pl.byref && !pl.is_struct && pl.nreg == 1)
             hint[p] = pl.reg;
+        /* ...and a scalar float parameter, now that v0-v7 are in the
+         * pool. One `hint` array serves both classes and a value
+         * belongs to exactly one, so a 3 meaning v3 here cannot be
+         * taken for x3. */
+        else if (pl.where == AP_V && !pl.byref && !pl.is_struct &&
+                 pl.nreg == 1)
+            hint[p] = pl.reg;
     }
     for (int i = 0; i < fn->nins; i++) {
         const struct ir_ins *s = &fn->ins[i];
-        if (s->op == IR_CALL && !s->flt && !s->retsize &&
+        /* x0 for an integer result, v0 for a float one -- and both are
+         * register zero, which is why this reads the same either way. */
+        if (s->op == IR_CALL && !s->retsize && s->w != 16 &&
             s->dst >= 0 && s->dst < fn->nvregs)
             hint[s->dst] = 0;
-        else if (s->op == IR_RET && !s->flt &&
+        else if (s->op == IR_RET && s->w != 16 &&
                  s->a >= 0 && s->a < fn->nvregs)
             hint[s->a] = 0;
     }
@@ -913,8 +931,8 @@ static void a64_abi_hints(const struct ir_func *fn, int *hint)
             struct a64_argplan pl;
             a64_place_arg(&s->argv[k], k, s->sret_first, &cu, &pl,
                           s->call_varargs, s->call_nfixed);
-            if (pl.where == AP_X && !pl.byref && !pl.is_struct &&
-                pl.nreg == 1 && s->argv[k].vreg >= 0 &&
+            if ((pl.where == AP_X || pl.where == AP_V) && !pl.byref &&
+                !pl.is_struct && pl.nreg == 1 && s->argv[k].vreg >= 0 &&
                 s->argv[k].vreg < fn->nvregs)
                 hint[s->argv[k].vreg] = pl.reg;
         }
@@ -940,6 +958,37 @@ static void a64_abi_hints(const struct ir_func *fn, int *hint)
  * This is the x86 backend's emit_reg_parallel_move, which has wanted a
  * second caller for a while; once this one has run in anger the pair
  * should be lifted (D-011). */
+/* The same permutation in the FP file. It was not needed while the pool
+ * started at v18: sources (v0-v7) and destinations were disjoint. */
+static void a64_fp_parallel_move(struct code *t, int *dst, int *src, int n)
+{
+    char done[MAX_PARAMS];
+    int remaining = 0;
+    for (int i = 0; i < n; i++) {
+        done[i] = (dst[i] == src[i]);
+        if (!done[i]) remaining++;
+    }
+    while (remaining > 0) {
+        int progressed = 0;
+        for (int i = 0; i < n; i++) {
+            if (done[i]) continue;
+            int blocked = 0;
+            for (int j = 0; j < n; j++)
+                if (!done[j] && j != i && src[j] == dst[i]) { blocked = 1; break; }
+            if (blocked) continue;
+            a64_fmov_reg(t, dst[i], src[i], 8);
+            done[i] = 1; remaining--; progressed = 1;
+        }
+        if (progressed)
+            continue;
+        int c = -1;
+        for (int i = 0; i < n; i++) if (!done[i]) { c = i; break; }
+        a64_fmov_reg(t, A64_FTMP, dst[c], 8);
+        for (int j = 0; j < n; j++)
+            if (!done[j] && src[j] == dst[c]) src[j] = A64_FTMP;
+    }
+}
+
 static void a64_parallel_move(struct code *t, int *dst, int *src, int n,
                               int scratch)
 {
@@ -1536,6 +1585,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
          * home, which reads and writes only that register and so cannot
          * disturb the rest. */
         int pmv_dst[MAX_PARAMS], pmv_src[MAX_PARAMS], npmv = 0;
+        int pfmv_dst[MAX_PARAMS], pfmv_src[MAX_PARAMS], npfmv = 0;
         int pext_reg[MAX_PARAMS], pext_size[MAX_PARAMS], npext = 0;
         if (fr.sret >= 0)
             a64_str(t, A64_SRET, FB, fr.sret, 8);
@@ -1563,12 +1613,23 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             if (on_stack != pass)
                 continue;                  /* the other pass owns this one */
             if (pl.where == AP_V) {
-                if (pl.nreg == 1)
+                /* A scalar float parameter whose home is a v register
+                 * joins the permutation below: with v0-v7 in the pool,
+                 * its source is some other parameter's destination. One
+                 * that lives in memory is stored here, which only READS
+                 * an argument register. An HFA occupies several and is
+                 * always stored. */
+                if (pl.nreg == 1 && a64_in_freg(p)) {
+                    pfmv_dst[npfmv] = g_a64_floc[p];
+                    pfmv_src[npfmv] = pl.reg;
+                    npfmv++;
+                } else if (pl.nreg == 1) {
                     fst_slot(t, sd, p, pl.reg, pl.esz);
-                else
+                } else {
                     for (int q = 0; q < pl.nreg; q++)
                         a64_fstr(t, pl.reg + q, FB, sd[p] + q * pl.esz,
                                  pl.esz);
+                }
             } else if (pl.byref) {
                 /* A pointer to the caller's copy: take our own, so the
                  * parameter's address is an ordinary local. */
@@ -1618,6 +1679,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         if (pass == 0) {
             if (npmv)
                 a64_parallel_move(t, pmv_dst, pmv_src, npmv, A64_SCR);
+            if (npfmv)
+                a64_fp_parallel_move(t, pfmv_dst, pfmv_src, npfmv);
             for (int k = 0; k < npext; k++)
                 a64_extend(t, pext_reg[k], pext_reg[k], pext_size[k], 0, 8);
         }
@@ -2193,6 +2256,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * about to write. Everything below reads memory or sp. */
             if (namv)
                 a64_parallel_move(t, amv_dst, amv_src, namv, A64_SCR);
+            /* The float arguments already in a v register go out as a
+             * PERMUTATION, for the same reason the integer ones do: with
+             * v0-v7 in the pool an argument's source and another's
+             * destination are the same register. Everything read from
+             * MEMORY is loaded after it, into registers the permutation
+             * has finished with. */
+            int afmv_dst[MAX_PARAMS], afmv_src[MAX_PARAMS], nafmv = 0;
+            for (int k = 0; k < i->nargs; k++) {
+                int v = i->argv[k].vreg;
+                if (pl[k].where == AP_V && !pl[k].is_struct &&
+                    a64_in_freg(v)) {
+                    afmv_dst[nafmv] = pl[k].reg;
+                    afmv_src[nafmv] = g_a64_floc[v];
+                    nafmv++;
+                }
+            }
+            if (nafmv)
+                a64_fp_parallel_move(t, afmv_dst, afmv_src, nafmv);
             for (int k = 0; k < i->nargs; k++) {
                 int v = i->argv[k].vreg;
                 if (pl[k].where == AP_V) {
@@ -2201,7 +2282,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                         for (int q = 0; q < pl[k].nreg; q++)
                             a64_fldr(t, pl[k].reg + q, A64_ADDR,
                                      q * pl[k].esz, pl[k].esz);
-                    } else {
+                    } else if (!a64_in_freg(v)) {
                         fld_slot(t, sd, v, pl[k].reg, pl[k].esz);
                     }
                 } else if (pl[k].where == AP_X) {
