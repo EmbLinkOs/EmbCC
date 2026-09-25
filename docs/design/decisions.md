@@ -1106,6 +1106,24 @@ long` treated r0 as a buffer address and read its first parameter out of
 r1. Only a COMPOSITE returns in memory; eight bytes of scalar come back
 in r0:r1.
 
+**2026-09-26, varargs:** `printf`-shaped functions work. AAPCS32 passes
+a variadic argument exactly as it passes a named one, so a `va_list` is
+a bare pointer at the next one — the Darwin shape, and the opposite of
+SysV's and AAPCS64's, which point AT a record. The prologue's half is
+that a variadic function pushes r0-r3 immediately BELOW the caller's
+stack arguments, so a single pointer walks from the registers into them
+and `va_start` is one address computation.
+
+Two consequences. `va_copy` is a pointer assignment: copying the 24
+bytes SysV's tag needs would copy the ARGUMENTS, and both lists would
+then walk a snapshot. And a variadic function returns through `lr`
+rather than popping into `pc`, because the save area sits above the
+saved registers and has to come off first.
+
+The cross-compiled pairing covers these too: the caller and the callee
+are built by different compilers and the register save area has to line
+up with where the other one left the arguments.
+
 **What it does not do yet, all refused by name:** `long double` (ARMv7-M has no FPU, so
 every operation is an `__aeabi_*` call), aggregates by value, varargs,
 atomics, inline asm, VLAs, computed goto, exceptions and `-g`. There is

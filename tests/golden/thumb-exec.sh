@@ -164,6 +164,28 @@ for opt in -O0 -O1 -O2 -Os; do
 done
 echo "thumb-aggregate: by-value structs agree with the host at four levels"
 
+# Variadic functions, against the host.
+cc -std=c99 -w -o "$out/hostva" tests/golden/thumb-varargs.c \
+   tests/harness/thumb/hostio.c || {
+    echo "the varargs program does not compile for the host"; exit 1; }
+"$out/hostva" > "$out/va-ref.txt" || {
+    echo "the varargs program failed on the host"; exit 1; }
+for opt in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T $opt -c tests/golden/thumb-varargs.c \
+             -o "$out/va$opt.o" || {
+        echo "$opt: the varargs program does not compile"; exit 1; }
+    sh "$H/link.sh" "$out/va$opt.elf" "$out/va$opt.o" "$out/softfp.o" \
+       "$out/int64.o" || { echo "$opt: could not link"; exit 1; }
+    sh "$H/run.sh" "$out/va$opt.elf" > "$out/va$opt.txt" 2>&1
+    grep -q '==END==' "$out/va$opt.txt" || {
+        echo "$opt: the varargs image did not finish:"
+        sed -n '1,10p' "$out/va$opt.txt"; exit 1; }
+    diff -u "$out/va-ref.txt" "$out/va$opt.txt" > "$out/va$opt.diff" || {
+        echo "varargs at $opt do not agree with the host:"
+        head -20 "$out/va$opt.diff"; exit 1; }
+done
+echo "thumb-varargs: variadic calls agree with the host at four levels"
+
 # And the question the host cannot answer: are they passed the way
 # ANOTHER ARM toolchain passes them? The caller and the callee are
 # compiled by different compilers, in both directions, and linked

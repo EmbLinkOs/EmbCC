@@ -24,3 +24,9 @@ int split(int a, int b, int c, struct s8 s, struct s12 t);
 /* An eight-byte SCALAR, which rounds the register number up to even
  * where a four-aligned composite does not. */
 long long mix64(int a, long long b, int c, struct s8 s);
+
+/* Variadic, where the ABI question is whether the callee's register
+ * save area lines up with where the caller left the arguments. */
+int vsum(int n, ...);
+long long vmix(int n, ...);
+int vafter4(int a, int b, int c, int d, ...);

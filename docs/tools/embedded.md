@@ -105,8 +105,8 @@ be linked in beside EmbCC's.
 Each of these stops the compile with a message naming the construct and
 the IR operation behind it, rather than emitting something plausible:
 
-- Variadic functions, atomics, inline assembly, VLAs, computed `goto`,
-  C++ exceptions, `-g`.
+- Atomics, inline assembly, VLAs, computed `goto`, C++ exceptions,
+  `-g`.
 
 There is also no register allocator for this target yet: every value
 lives in a stack slot, so the code is correct and roughly three times
@@ -177,6 +177,15 @@ to the VFP variant, not to this one.
 `tests/golden/thumb-exec.sh` links a clang-compiled callee against an
 EmbCC-compiled caller and back again, so this is checked against another
 toolchain and not only against itself.
+
+## Variadic functions
+
+`printf`-shaped functions work. AAPCS32 passes a variadic argument
+exactly as it passes a named one, so a `va_list` is a bare `char *` at
+the next argument; the prologue of a variadic function spills r0-r3
+immediately below the caller's stack arguments so that one pointer walks
+from the registers straight into them. `va_copy` is a pointer
+assignment here, not a record copy.
 
 ## Sizing the stack
 

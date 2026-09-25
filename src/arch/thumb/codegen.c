@@ -91,6 +91,11 @@ struct t_fn {
     long frame;          /* total bytes sp moves down by */
     long scratch_at;     /* where fn->scratch_bytes begins */
     long sret_slot;      /* where the hidden result pointer is kept, or -1 */
+    /* A variadic function's REGISTER SAVE AREA: where the prologue
+     * spilled r0-r3 so that one pointer walks from them into the
+     * caller's stack arguments. -1 when the function is not variadic. */
+    long va_regsave;
+    long va_first;       /* ... and the offset of the first UNNAMED one */
     int *label_off;      /* per label id, or -1 while unseen */
     struct { int at; int label; int cond; } *fix;
     int nfix, capfix;
@@ -1540,7 +1545,11 @@ static void gen_ins(struct t_fn *F, int n)
         t_refuse(fn, i, "inline assembly");
         return;
     case IR_VA_START:
-        t_refuse(fn, i, "a variadic function");
+        /* `a` holds the ADDRESS of the va_list, which on this ABI is a
+         * bare pointer at the next argument. */
+        rd(F, i->a, T_ADDR);
+        t_add_sp(t, T_ACC, F->va_first);
+        t_ldst_imm(t, T_ACC, T_ADDR, 0, 4, 0, 1);
         return;
     case IR_ALLOCA: case IR_SPSAVE: case IR_SPRESTORE:
         t_refuse(fn, i, "a variable-length array");
@@ -1569,12 +1578,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     struct t_fn F;
     int push_at, i;
 
-    if (fn->is_varargs)
-        t_refuse(fn, NULL, "a variadic function");
-
     F.fn = fn; F.t = t; F.st = st;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
+    F.va_regsave = F.va_first = -1;
     layout(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -1593,6 +1600,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
         t_nop(t);
     f->code_off = t->len;
 
+    /* The register save area goes down FIRST, so it lands immediately
+     * below the caller's stack arguments and a single pointer walks
+     * from r0's copy straight into them. AAPCS32 needs no more than
+     * that: a variadic argument is placed exactly like a named one. */
+    if (fn->is_varargs)
+        t_push(t, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
     push_at = t_push(t, SAVE_MASK);
     if (F.frame)
         t_sp_adjust(t, F.frame, 1);
@@ -1605,6 +1618,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
         int ncrn = 0;
         long stk = 0;
         long base = F.frame + SAVE_BYTES;   /* the caller's outgoing area */
+        if (fn->is_varargs) {
+            F.va_regsave = base;            /* r0-r3, four words */
+            base += 16;                     /* ... then the stack ones */
+        }
         if (F.sret_slot >= 0) {
             t_ldst_imm(t, T_R0, T_SP, F.sret_slot, 4, 0, 1);
             ncrn = 1;
@@ -1636,6 +1653,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
                 }
             }
         }
+        /* Where the first UNNAMED argument sits — which is simply where
+         * the named ones stopped. The save area and the caller's stack
+         * arguments are contiguous, so one expression covers both
+         * cases: below four named words it is inside the save area, and
+         * at four it is exactly its end, which is the stack. */
+        if (fn->is_varargs)
+            F.va_first = F.va_regsave + (long)ncrn * 4 + stk;
     }
 
     for (i = 0; i < fn->nins; i++)
@@ -1645,7 +1669,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     F.label_off[fn->nlabels] = t->len;
     if (F.frame)
         t_sp_adjust(t, F.frame, 0);
-    t_pop(t, (SAVE_MASK & ~(1u << T_LR)) | (1u << T_PC));
+    if (fn->is_varargs) {
+        /* Return through lr rather than popping into pc: the four words
+         * of register save area sit above the saved registers and have
+         * to come off too, and `pop {..., pc}` would jump before that. */
+        t_pop(t, SAVE_MASK);
+        t_sp_adjust(t, 16, 0);
+        t_bx(t, T_LR);
+    } else {
+        t_pop(t, (SAVE_MASK & ~(1u << T_LR)) | (1u << T_PC));
+    }
 
     for (i = 0; i < F.nfix; i++) {
         int target = F.label_off[F.fix[i].label];

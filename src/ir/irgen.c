@@ -1744,6 +1744,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_STMTEXPR:
         return gen_stmtexpr(fn, e);
     case EXPR_VA_ARG:
+        if (target_get() == TARGET_THUMB)
+            return irg_va_arg_thumb(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -1992,6 +1994,18 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
          * hidden slot, then point dst at the copy — so each list advances
          * independently, as C99 7.15.1.2 requires. */
         if (e->name && strcmp(e->name, "__builtin_va_copy") == 0) {
+            /* Where a va_list is a bare POINTER at the next argument —
+             * AAPCS32 — there is no tag to copy and the copy is the
+             * assignment. Copying 24 bytes from it would copy the
+             * ARGUMENTS, and advancing either list would then walk a
+             * snapshot of them. */
+            if (target_get() == TARGET_THUMB) {
+                struct type *ptr = ty_base(TY_INT, 1);
+                int dsta = gen_addr(fn, e->args[0]);
+                int src = gen_expr(fn, e->args[1]);
+                emit_store(fn, dsta, src, ptr);
+                return -1;
+            }
             struct ir_ins *ad = emit(fn);
             ad->op = IR_ADDR;
             ad->a = e->var_index;

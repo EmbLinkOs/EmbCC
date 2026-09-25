@@ -153,10 +153,7 @@ refuses() {
         cat "$out/no.err"; exit 1; }
 }
 refuses "a long double"     'long double f(long double a){return a*a;}'
-refuses "a variadic function" '
-#include <stdarg.h>
-int f(int n, ...){ va_list ap; va_start(ap, n); return n; }'
-echo "long double and varargs refuse by name"
+echo "long double refuses by name"
 
 # And what it NO LONGER refuses: 64-bit integers, which the backend
 # carries in register pairs. Checked here as well as in thumb-exec.sh
@@ -196,3 +193,14 @@ int d(int p,int q,int r, struct s8 s){ return p+q+r+s.a+s.b; }' > "$out/ag.c"
 "$EMBCC" --target=$T -O1 -c "$out/ag.c" -o "$out/ag.o" || {
     echo "aggregates by value no longer compile"; exit 1; }
 echo "aggregates by value compile"
+
+# Variadic functions: the prologue spills r0-r3 below the caller's
+# stack arguments so one pointer walks from the registers into them.
+printf '%s\n' '#include <stdarg.h>
+int f(int n, ...){ va_list ap; int t=0; va_start(ap,n);
+  for(int i=0;i<n;i++) t+=va_arg(ap,int); va_end(ap); return t; }
+double g(int n, ...){ va_list ap; va_start(ap,n);
+  double d = va_arg(ap,double); va_end(ap); return d; }' > "$out/va.c"
+"$EMBCC" --target=$T -O1 -I include -c "$out/va.c" -o "$out/va.o" || {
+    echo "variadic functions no longer compile"; exit 1; }
+echo "variadic functions compile"

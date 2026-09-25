@@ -6,4 +6,7 @@ int main(void){
   { struct s8 s={1,2}; struct s12 t={3,4,5}; putn(split(6,7,8,s,t)); }
   { struct s8 s={2,3}; long long r = mix64(1, 1000000000000LL, 4, s);
     putn((long)(unsigned)r); putn((long)(unsigned)(r >> 32)); }
+  putn(vsum(5,1,2,3,4,5)); putn(vsum(1,42)); putn(vafter4(1,2,3,4,50,600));
+  { long long v = vmix(4, 1, 100000000000LL, 2, 200000000000LL);
+    putn((long)(unsigned)v); putn((long)(unsigned)(v >> 32)); }
   puts_("\n==END==\n"); return 0; }

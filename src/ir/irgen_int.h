@@ -35,6 +35,8 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e);
 /* Darwin arm64: every variadic argument is on the stack, so the
  * list is the walking pointer itself (aarch64/irgen.c). */
 int irg_va_arg_darwin(struct ir_func *fn, struct expr *e);
+/* AAPCS32, where a va_list is a bare pointer at the next argument. */
+int irg_va_arg_thumb(struct ir_func *fn, struct expr *e);
 /* extended asm: assign operand registers and assemble the template with
  * the target's own inline-asm vocabulary, then emit IR_ASM */
 void irg_asm_x86(struct ir_func *fn, struct stmt *s);
