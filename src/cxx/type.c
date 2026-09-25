@@ -289,8 +289,8 @@ int ct_is_complete(const struct cty *t)
 int ct_is_signed(const struct cty *t)
 {
     switch (t->k) {
-    case CT_CHAR:  return target_get() != TARGET_AARCH64;
-    case CT_WCHAR: return target_get() != TARGET_AARCH64;
+    case CT_CHAR:  return !target_char_unsigned();
+    case CT_WCHAR: return !target_wchar_unsigned();
     case CT_SCHAR: case CT_SHORT: case CT_INT: case CT_LONG: case CT_LLONG:
     case CT_INT128:
         return 1;

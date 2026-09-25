@@ -671,8 +671,17 @@ static struct func *cx_helper(int div, struct type *T)
     static struct func *made[8];
     const char *name;
     int k = (T->kind == TY_FLOAT ? 0 : T->kind == TY_DOUBLE ? 1 : 2) * 2 + div;
-    if (T->kind == TY_LDOUBLE && target_get() == TARGET_AARCH64)
-        k = 6 + div;
+    /* Which long-double helper depends on the FORMAT, which is why this
+     * asks ldf_target_fmt() and not the architecture. x87 keeps the
+     * `x` pair, binary128 takes the `t` pair, and a target whose long
+     * double is a plain double (AAPCS32) uses the ordinary `d` pair --
+     * calling __multc3 there would pass 8 bytes to a routine reading
+     * 16. */
+    if (T->kind == TY_LDOUBLE) {
+        enum ldf_fmt lf = ldf_target_fmt();
+        if (lf == LDF_QUAD)        k = 6 + div;
+        else if (lf == LDF_DOUBLE) k = 2 + div;
+    }
     static const char *const names[8] = {
         "__mulsc3", "__divsc3", "__muldc3", "__divdc3",
         "__mulxc3", "__divxc3", "__multc3", "__divtc3" };

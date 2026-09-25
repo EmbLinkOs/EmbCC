@@ -44,6 +44,14 @@ struct member {
 struct type {
     enum ty_kind kind;
     int is_unsigned;        /* integers only */
+    /* TY_LONG spelled `long long`. C has two distinct 64-bit-capable
+     * integer types and this compiler had one kind for both, which cost
+     * nothing while every target was LP64 and they were the same size.
+     * On an ILP32 target they are not: `long` is four bytes and
+     * `long long` is eight, so the spelling has to survive into the
+     * type. ty_equal() deliberately IGNORES this -- see the note
+     * there. */
+    int is_llong;
     int is_volatile;        /* `volatile`-qualified: every access must happen and
                              * must not be CSE'd/removed (MMIO). Set on the
                              * ACCESSED type — the pointee of a volatile pointer,
@@ -98,6 +106,14 @@ struct type *ty_base(enum ty_kind kind, int is_unsigned);
  * unsigned char: it IS one of the two, chosen per target. */
 struct type *ty_plain_char(void);
 struct type *ty_wchar(void);
+/* `long long` / `unsigned long long`: eight bytes on every target. */
+struct type *ty_llong(int is_unsigned);
+/* The integer type that is exactly `size` bytes wide, or NULL if the
+ * target has none. Callers that want "the unsigned type of width w"
+ * must ask this rather than assuming w == 8 means long: on ILP32 it
+ * means long long, and on a target without __int128 there is no
+ * answer at 16 and the caller has to cope with NULL. */
+struct type *ty_int_of_size(int size, int is_unsigned);
 /* A copy of `t` marked `volatile` (or t itself if already). Base types are
  * interned singletons, so this returns a fresh non-interned node — safe because
  * nothing compares types by pointer identity (ty_equal compares fields). */

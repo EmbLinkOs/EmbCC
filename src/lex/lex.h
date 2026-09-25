@@ -175,8 +175,10 @@ struct token {
     struct litch *lit; /* TOK_STR: the decoded elements, for concatenation */
     int nlit;
     int num_long;  /* TOK_NUM: type is long (L suffix or magnitude) */
-    int num_llong; /* TOK_NUM: an LL suffix (long long — the same width as
-                    * long, but a distinct type to C++'s overloading) */
+    int num_llong; /* TOK_NUM: `long long` — an LL suffix, or a magnitude
+                    * that does not fit the target's `long`. The same
+                    * width as long on LP64 and twice it on ILP32; a
+                    * distinct type to C++'s overloading either way. */
     int char_lit;  /* TOK_NUM from a character constant; str_prefix holds its
                     * encoding prefix (C++ types 'a' as char, not int) */
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */

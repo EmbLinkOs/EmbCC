@@ -26,14 +26,42 @@ static struct type bases[10][2] = {
     { { .kind = TY_INT128 }, { .kind = TY_INT128, .is_unsigned = 1 } },
 };
 
+/* `long long`, which shares TY_LONG's kind and differs only in width on
+ * a target where long is not already eight bytes. Its own rows because
+ * ty_base() hands out pointers INTO the table above and every caller
+ * compares those pointers by identity. */
+static struct type llongs[2] = {
+    { .kind = TY_LONG, .is_llong = 1 },
+    { .kind = TY_LONG, .is_llong = 1, .is_unsigned = 1 },
+};
+
 struct type *ty_plain_char(void)
 {
-    return ty_base(TY_CHAR, target_get() == TARGET_AARCH64);
+    return ty_base(TY_CHAR, target_char_unsigned());
 }
 
 struct type *ty_wchar(void)
 {
-    return ty_base(TY_INT, target_get() == TARGET_AARCH64);
+    return ty_base(TY_INT, target_wchar_unsigned());
+}
+
+struct type *ty_llong(int is_unsigned)
+{
+    return &llongs[is_unsigned ? 1 : 0];
+}
+
+struct type *ty_int_of_size(int size, int is_unsigned)
+{
+    switch (size) {
+    case 1:  return ty_base(TY_CHAR, is_unsigned);
+    case 2:  return ty_base(TY_SHORT, is_unsigned);
+    case 4:  return ty_base(TY_INT, is_unsigned);
+    case 8:  return target_long_size() == 8 ? ty_base(TY_LONG, is_unsigned)
+                                            : ty_llong(is_unsigned);
+    case 16: return target_has_int128() ? ty_base(TY_INT128, is_unsigned)
+                                        : NULL;
+    default: return NULL;
+    }
 }
 
 struct type *ty_base(enum ty_kind kind, int is_unsigned)
@@ -208,12 +236,12 @@ int ty_size(const struct type *t)
     case TY_CHAR: return 1;
     case TY_SHORT: return 2;
     case TY_INT: return 4;
-    case TY_LONG: return 8;
+    case TY_LONG: return t->is_llong ? 8 : target_long_size();
     case TY_FLOAT: return 4;
     case TY_DOUBLE: return 8;
-    case TY_LDOUBLE: return 16;
+    case TY_LDOUBLE: return target_ldouble_size();
     case TY_INT128: return 16;
-    case TY_PTR: return 8;
+    case TY_PTR: return target_ptr_size();
     case TY_ARRAY: return t->count * ty_size(t->pointee);
     case TY_STRUCT: return t->size; /* 0 while incomplete */
     case TY_FUNC: break;            /* no size; only pointers to it */
@@ -234,6 +262,20 @@ int ty_align(const struct type *t)
 int ty_equal(const struct type *a, const struct type *b)
 {
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned)
+        return 0;
+    /* `long` against `long long`. C says they are distinct types
+     * whatever the target, but this compiler has always let them
+     * interchange and on LP64 nothing could go wrong: the sizes agree,
+     * so the only cost was a diagnostic it did not give. Tightening
+     * that everywhere is a separate change with its own fallout, and
+     * mixing it into the one that adds a 32-bit target would put a pile
+     * of new errors between a real regression and a bisect.
+     *
+     * So the distinction is enforced exactly where it is unsound to
+     * ignore: when the two spellings are different WIDTHS, as they are
+     * on ILP32, where taking a `long long *` to a `long` reads eight
+     * bytes out of a four-byte object. */
+    if (a->is_llong != b->is_llong && ty_size(a) != ty_size(b))
         return 0;
     if (a->kind == TY_PTR)
         return ty_equal(a->pointee, b->pointee);
@@ -283,11 +325,14 @@ int ty_is_scalar(const struct type *t)
 }
 
 /* 64-bit value class. Floats have their own register file, so this
- * answers width only — never "which register bank". */
+ * answers width only — never "which register bank".
+ *
+ * By size rather than by kind, because on ILP32 a `long` and a pointer
+ * are four bytes and a `long long` is eight; the kinds no longer
+ * partition the way they did when both targets were LP64. */
 int ty_wide(const struct type *t)
 {
-    return t->kind == TY_LONG || t->kind == TY_PTR ||
-           t->kind == TY_DOUBLE;
+    return ty_is_scalar(t) && ty_size(t) == 8;
 }
 
 int ty_signed_int(const struct type *t)
@@ -450,7 +495,11 @@ const char *ty_name(const struct type *t)
     case TY_CHAR: base = t->is_unsigned ? "unsigned char" : "char"; break;
     case TY_SHORT: base = t->is_unsigned ? "unsigned short" : "short"; break;
     case TY_INT: base = t->is_unsigned ? "unsigned int" : "int"; break;
-    case TY_LONG: base = t->is_unsigned ? "unsigned long" : "long"; break;
+    case TY_LONG:
+        base = t->is_llong ? (t->is_unsigned ? "unsigned long long"
+                                             : "long long")
+                           : (t->is_unsigned ? "unsigned long" : "long");
+        break;
     case TY_FLOAT: base = "float"; break;
     case TY_DOUBLE: base = "double"; break;
     case TY_LDOUBLE: base = "long double"; break;

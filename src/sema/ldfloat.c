@@ -234,6 +234,14 @@ static struct fmtinfo finfo(enum ldf_fmt f)
 
 enum ldf_fmt ldf_target_fmt(void)
 {
+    /* By the SIZE the target gives long double, not by which target it
+     * is: the two 16-byte formats differ from each other, but a target
+     * whose long double is eight bytes has said the whole answer
+     * already -- there is only one 8-byte format, and AAPCS32 uses it.
+     * A long double that is a double is the normal case on 32-bit ARM,
+     * not a degenerate one. */
+    if (target_ldouble_size() == 8)
+        return LDF_DOUBLE;
     return target_get() == TARGET_AARCH64 ? LDF_QUAD : LDF_X87;
 }
 

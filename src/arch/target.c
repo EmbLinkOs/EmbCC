@@ -18,6 +18,32 @@ enum target_fmt target_fmt_get(void) { return g_fmt; }
 void target_os_set(enum target_os o)   { g_os = o; }
 void target_fmt_set(enum target_fmt f) { g_fmt = f; }
 
+/* The data model. One table rather than a switch per question, so a
+ * new architecture is one row and the compiler will not build until
+ * every column of it is filled in. */
+static const struct data_model {
+    int ptr, lng, ldbl, char_uns, wchar_uns, int128;
+} g_model[] = {
+    /* x86-64 System V: LP64, signed char, x87 long double in 16 bytes */
+    [TARGET_X86_64]  = { 8, 8, 16, 0, 0, 1 },
+    /* AAPCS64: LP64, UNSIGNED char and wchar_t, binary128 long double */
+    [TARGET_AARCH64] = { 8, 8, 16, 1, 1, 1 },
+    /* AAPCS (32-bit, EABI): ILP32, unsigned char and wchar_t, and a
+     * long double that is an ordinary IEEE double -- checked against
+     * clang -target thumbv7m-none-eabi -dM, which gives
+     * __SIZEOF_LONG_DOUBLE__ 8 and __LDBL_MANT_DIG__ 53. long long
+     * stays 8, and is 8-ALIGNED, which is where a 32-bit ABI most
+     * often surprises: __BIGGEST_ALIGNMENT__ is 8, not 4. */
+    [TARGET_THUMB]   = { 4, 4,  8, 1, 1, 0 },
+};
+
+int target_ptr_size(void)       { return g_model[g_arch].ptr; }
+int target_long_size(void)      { return g_model[g_arch].lng; }
+int target_ldouble_size(void)   { return g_model[g_arch].ldbl; }
+int target_char_unsigned(void)  { return g_model[g_arch].char_uns; }
+int target_wchar_unsigned(void) { return g_model[g_arch].wchar_uns; }
+int target_has_int128(void)     { return g_model[g_arch].int128; }
+
 int target_has_os(void) { return g_os != TGT_OS_NONE; }
 
 int target_is_hosted(void)
@@ -74,6 +100,23 @@ static const struct triple {
     { "aarch64",           TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0 },
     { "arm64",             TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0 },
     { "aarch64-none-elf",  TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0 },
+
+    /* ARMv7-M, the Cortex-M line. Freestanding is the only thing it can
+     * be: a microcontroller has no operating system under the code, so
+     * there is no `thumbv7m-linux` row to add later and no hosted
+     * spelling of this target that would mean anything. `-none-eabi` is
+     * the canonical name because that is what every other toolchain
+     * calls it and what a project's existing --target= string will say.
+     *
+     * v7em (Cortex-M4/M7) is the same instruction set plus DSP and an
+     * optional FPU; it is accepted as a name now and will differ from
+     * v7m only once -mfpu selects hardware floating point. */
+    { "thumbv7m-none-eabi", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   1 },
+    { "thumbv7m",           TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
+    { "thumbv7em-none-eabi",TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
+    { "thumbv7em",          TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
+    { "armv7m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
+    { "arm-none-eabi",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
 
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
@@ -133,11 +176,30 @@ const char *target_triple_name(int i)
 
 int target_elf_machine(enum target_arch a)
 {
-    return a == TARGET_AARCH64 ? EM_AARCH64 : EM_X86_64;
+    switch (a) {
+    case TARGET_AARCH64: return EM_AARCH64;
+    case TARGET_THUMB:   return EM_ARM;
+    default:             return EM_X86_64;
+    }
 }
 
 int target_reloc_type(enum target_arch a, enum reloc_kind k)
 {
+    if (a == TARGET_THUMB) {
+        switch (k) {
+        /* THM_CALL, not CALL: the caller is in Thumb state, so the
+         * field is the split 11+11 offset a `bl` encodes there and not
+         * the ARM-state 24-bit one. A linker told CALL would patch the
+         * wrong bits of the right instruction. */
+        case RK_CALL:        return R_ARM_THM_CALL;
+        case RK_ABS32:       return R_ARM_ABS32;
+        case RK_DATA_PREL32: return R_ARM_REL32;
+        /* No ABS64: a 32-bit target has no 64-bit address to relocate,
+         * and asking for one is a bug upstream rather than a kind this
+         * table is merely missing. */
+        default:             return -1;
+        }
+    }
     if (a == TARGET_AARCH64) {
         switch (k) {
         /* CALL26, not JUMP26: the field is the same, but CALL26 is what a
@@ -195,6 +257,8 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
                        int *pcrel, int *length)
 {
     int t = 0, pc = 0, len = 2;
+    if (a == TARGET_THUMB)
+        return 0;         /* no Mach-O on a microcontroller, ever */
     if (a == TARGET_AARCH64) {
         switch (k) {
         case RK_CALL:     t = ARM64_RELOC_BRANCH26;  pc = 1; break;
@@ -227,8 +291,8 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
 
 long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 {
-    if (a == TARGET_AARCH64)
-        return bias;              /* aarch64 fields are relative to the
+    if (a == TARGET_AARCH64 || a == TARGET_THUMB)
+        return bias;              /* ARM fields are relative to the
                                    * instruction, so no end-of-insn bias */
     switch (k) {
     case RK_CALL:

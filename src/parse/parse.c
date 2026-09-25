@@ -8,6 +8,7 @@
 #include "../driver/util.h"
 #include "../lex/lex.h"
 #include "../sema/ldfloat.h"
+#include "../arch/target.h"
 #include "../sema/type.h"
 
 /* Tags (struct/union/enum) live in their own namespace; typedef names
@@ -1056,6 +1057,15 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             ndouble || nbool || ncomplex)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "invalid type specifier combination");
+        /* THE RULE: a target without the type says so, rather than
+         * accepting the declaration and leaving a 16-byte value for a
+         * backend with no register pair to put it in. 32-bit ARM has
+         * no __int128 and libgcc's 32-bit multilib has none of the
+         * __*ti3 routines that would carry one. */
+        if (!target_has_int128())
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "__int128 does not exist on this target "
+                       "(it needs 64-bit registers; use long long)");
         return ty_base(TY_INT128, uns == 1);
     }
     if (nlong > 2 || (nshort && nlong) || (nchar && (nshort || nlong)) ||
@@ -1068,6 +1078,8 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     /* `char` with no signed/unsigned is the target's plain char. */
     if (kind == TY_CHAR && uns == -1)
         return ty_plain_char();
+    if (nlong == 2)                        /* `long long` is its own type */
+        return ty_llong(uns == 1);
     return ty_base(kind, uns == 1);
 }
 
@@ -1637,7 +1649,9 @@ static struct expr *parse_primary(struct parser *ps)
     case TOK_NUM:
         e = new_expr(EXPR_NUM, t->line, t->col);
         e->num = t->num;
-        e->ty = ty_base(t->num_long ? TY_LONG : TY_INT, t->num_uns);
+        e->ty = t->num_llong ? ty_llong(t->num_uns)
+                             : ty_base(t->num_long ? TY_LONG : TY_INT,
+                                       t->num_uns);
         advance(ps);
         return e;
     case TOK_FNUM:

@@ -130,6 +130,19 @@ typedef struct {
  * its own output rather than remembered. */
 #define R_AARCH64_TLSLE_ADD_TPREL_LO12_NC 551
 
+/* ARM 32-bit (ELF for the Arm Architecture, §4.6.1.2). Only the three
+ * a Cortex-M object needs so far.
+ *
+ * THM_CALL rather than CALL is the one to get right: the Cortex-M
+ * executes Thumb and only Thumb, so every call site is a 32-bit Thumb
+ * `bl` whose displacement is split across two halfwords with the sign
+ * bit reused twice (J1/J2). R_ARM_CALL names the ARM-state instruction
+ * at the same address, and a linker handed it would rewrite four bytes
+ * that mean something else entirely. */
+#define R_ARM_ABS32      2
+#define R_ARM_REL32      3
+#define R_ARM_THM_CALL  10
+
 /* e_ident indices and values */
 #define EI_MAG0       0
 #define EI_MAG1       1
@@ -154,6 +167,7 @@ typedef struct {
 
 #define EM_X86_64     62
 #define EM_AARCH64   183
+#define EM_ARM        40
 
 /* p_type */
 #define PT_NULL       0

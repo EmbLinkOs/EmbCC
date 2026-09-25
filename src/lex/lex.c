@@ -364,8 +364,8 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
                     "range for a character constant; truncated, as gcc "
                     "does\n", file, line);
         unsigned long b = c.v & 0xFF;
-        if (target_get() == TARGET_AARCH64)
-            return (long)b;                        /* char is unsigned */
+        if (target_char_unsigned())
+            return (long)b;
         return b > 0x7F ? (long)b - 0x100 : (long)b;
     }
     if (pfx == 'u') {
@@ -381,14 +381,31 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
         fprintf(stderr, "embcc: %s:%d: warning: escape sequence out of range "
                 "for a 32-bit character; truncated, as gcc does\n", file, line);
     unsigned long v = c.v & 0xFFFFFFFFUL;
-    if (pfx == 'U' || target_get() == TARGET_AARCH64) {
-        *uns = 1;                    /* char32_t, or aarch64's unsigned wchar_t */
+    if (pfx == 'U' || target_wchar_unsigned()) {
+        *uns = 1;                    /* char32_t, or an unsigned wchar_t */
         return (long)v;
     }
     return v > 0x7FFFFFFFUL ? (long)v - 0x100000000L : (long)v;  /* int wchar_t */
 }
 
 /* A standard integer or floating suffix (C++)? */
+/* C's integer-constant ladder stops at the first type that holds the
+ * value, and on ILP32 `long` runs out four bytes early: 4294967296 is a
+ * `long` on LP64 and a `long long` on a Cortex-M. Each of the three
+ * literal forms below types itself for a 64-bit long first; this is the
+ * single place that knows the target's may be narrower, so there is one
+ * rule to get right rather than three copies of it. */
+static void num_fit_target(struct token *t, unsigned long v)
+{
+    if (target_long_size() >= 8)
+        return;
+    unsigned long lmax = 0x7fffffffUL;
+    if (v > (t->num_uns ? lmax * 2 + 1 : lmax))
+        t->num_llong = 1;
+    if (t->num_llong)
+        t->num_long = 1;
+}
+
 static int std_suffix(const char *s, int is_float)
 {
     if (!*s)
@@ -532,6 +549,7 @@ static int cxx_number(struct lexer *lx, struct token *t)
                 t->num_uns = 1;
             }
         }
+        num_fit_target(t, v);
     }
     free(buf);
     lx->p = q;
@@ -639,6 +657,7 @@ void lex_next(struct lexer *lx)
                      v > (unsigned long)LONG_MAX;
         if (!has_l && v > (unsigned long)INT_MAX && v <= 0xffffffffUL)
             t->num_long = 0;
+        num_fit_target(t, v);
         lx->p = q;
         return;
     }
@@ -750,6 +769,7 @@ void lex_next(struct lexer *lx)
         if (!hex && !has_u && !has_l && v > (unsigned long)LONG_MAX)
             diag_fatal(lx->file, lx->line,
                        "integer constant out of range for long");
+        num_fit_target(t, v);
         lx->p = end;
         return;
     }

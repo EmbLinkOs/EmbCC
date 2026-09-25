@@ -16,19 +16,29 @@ int predef_is_cxx(void) { return g_cxx; }
 static const struct predef_macro *arch_table(int *count)
 {
     if (g_cxx) {
-        if (target_get() == TARGET_AARCH64) {
+        switch (target_get()) {
+        case TARGET_AARCH64:
             *count = predef_macro_count_cxx_aarch64;
             return predef_macros_cxx_aarch64;
+        case TARGET_THUMB:
+            *count = predef_macro_count_cxx_thumb;
+            return predef_macros_cxx_thumb;
+        default:
+            *count = predef_macro_count_cxx_x86_64;
+            return predef_macros_cxx_x86_64;
         }
-        *count = predef_macro_count_cxx_x86_64;
-        return predef_macros_cxx_x86_64;
     }
-    if (target_get() == TARGET_AARCH64) {
+    switch (target_get()) {
+    case TARGET_AARCH64:
         *count = predef_macro_count_aarch64;
         return predef_macros_aarch64;
+    case TARGET_THUMB:
+        *count = predef_macro_count_thumb;
+        return predef_macros_thumb;
+    default:
+        *count = predef_macro_count_x86_64;
+        return predef_macros_x86_64;
     }
-    *count = predef_macro_count_x86_64;
-    return predef_macros_x86_64;
 }
 
 /* What an operating system adds on top of its architecture's table

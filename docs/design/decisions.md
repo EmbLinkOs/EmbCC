@@ -947,3 +947,77 @@ if the parser or sema acquire OS knowledge, the seam is in the wrong
 place, and the answer is to move it rather than to spread it. Also if
 MinGW's Itanium EH turns out not to work on Windows in practice, since
 that assumption is what makes Windows C++ affordable at all.
+
+## D-015 — A third architecture: **ARMv7-M (Cortex-M)**, and the first 32-bit target
+
+**Decided:** 2026-09-25. **Status:** the front end is in — the triple, the
+data model, the predefined macros, the ELF machine and relocations. There is
+no Thumb-2 backend yet, and `-c` for this target refuses loudly.
+
+EmbLinkOS is meant to carry embedded tooling, and a compiler for embedded
+systems that stops at 64-bit application cores is not one. `thumbv7m-none-eabi`
+is the Cortex-M line — M3, M4, M7 — which executes Thumb-2 and nothing else.
+It is the first target here with no operating system underneath it by
+construction: there is no `thumbv7m-linux` row to add later, and no hosted
+spelling of this target that would mean anything.
+
+**The interesting part is not the third backend, it is the first ILP32
+target.** x86-64 and aarch64 are both LP64 and their data models differ in
+exactly two places — whether plain `char` is signed and which 16-byte format
+`long double` uses. So `target_get() == TARGET_AARCH64` had become a
+serviceable stand-in for half a dozen different questions, asked at 35 sites
+across the lexer, sema, the C++ front end and the debug writer. Every one of
+those would have taken the x86-64 answer for a target that is not aarch64,
+silently, and most of them would have been wrong.
+
+They are now separate questions with names: `target_ptr_size`,
+`target_long_size`, `target_ldouble_size`, `target_char_unsigned`,
+`target_wchar_unsigned`, `target_has_int128`, each a column of one table in
+`src/arch/target.c`. A fourth architecture is a row, and the compiler will not
+build until every column of it is filled in — which is the property the
+`== TARGET_AARCH64` test did not have.
+
+**`long long` became a type of its own.** It had been folded into `TY_LONG`,
+which cost nothing while every target was LP64 and they were the same width.
+On ILP32 they are four bytes and eight. The spelling now survives into the
+type (`type.is_llong`), the three integer-literal paths in the lexer promote
+past a 32-bit `long` when the magnitude needs it, and `ty_int_of_size()` is
+how a caller asks for "the integer type eight bytes wide" instead of assuming
+that means `long`.
+
+`ty_equal()` deliberately still lets `long` and `long long` interchange where
+they are the same width. Making them distinct everywhere is correct C and a
+separate change with its own fallout; mixing it into the one that adds a
+32-bit target would have put a pile of new diagnostics between a real
+regression and a bisect. It IS enforced where ignoring it is unsound — when
+the two spellings are different widths, as they are here.
+
+**The predefined-macro table comes from clang, not gcc.** `tools/gen-predef.sh`
+has always taken a target's table from a production compiler's own `-dM -E`
+rather than deriving it by hand (ARCHITECTURE.md §5), and that discipline is
+what matters, not which compiler. clang carries every target in one binary
+where `arm-none-eabi-gcc` is a separate toolchain download; the generated
+file's header records which one it was, and `EMBCC_REF_GCC_THUMB` switches it
+to a real cross gcc. `__clang__` and `__llvm__` joined the exclusion list for
+the same reason `__GNUC__` was already on it.
+
+**What is refused loudly rather than emitted wrong** (THE RULE): the whole
+back end. `--target=thumbv7m-none-eabi -c` says there is no code generator and
+stops, because handing the unit to the x86-64 backend on the grounds that it
+is "not aarch64" would write an object full of x86 instructions under an
+EM_ARM header — the exact failure a default case exists to prevent. `__int128`
+is refused by name in the parser, since a 32-bit target has no register pair
+to carry one and libgcc's 32-bit multilib has none of the `__*ti3` routines.
+
+**What the backend will have to face that neither existing one did:** a Thumb
+16-bit data-processing instruction always sets the flags. `and r0, r1` is four
+bytes; `ands r0, r1` is two. So on this target small code and flag liveness
+are the same problem, and the plan is to emit the 32-bit `.w` forms first —
+uniform, flag-preserving, correct — then narrow where the flags are provably
+dead and the registers are low, measuring against `clang -target
+thumbv7m-none-eabi -Os` the way the other two are measured against gcc.
+
+**Reopen if:** a fourth data model appears that the table cannot express —
+a target where `int` is not 4 bytes, or one with a 16-bit `char` — at which
+point the columns are the wrong shape and the sizes belong in the table
+wholesale rather than as exceptions to a fixed set.

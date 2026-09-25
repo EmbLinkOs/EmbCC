@@ -13,7 +13,12 @@
 
 enum target_arch {
     TARGET_X86_64 = 0,
-    TARGET_AARCH64 = 1
+    TARGET_AARCH64 = 1,
+    /* ARMv7-M: Cortex-M3/M4/M7, which execute Thumb-2 and nothing else.
+     * Named for the instruction set rather than the architecture family
+     * because that is the part the backend encodes, and because there is
+     * no A-profile ARM32 target here to be confused with. */
+    TARGET_THUMB = 2
 };
 
 /* The operating system the emitted code will run ON, which is a
@@ -53,6 +58,32 @@ enum target_fmt {
  * any others. This enum is the container an OBJECT goes in, so EMBX
  * would be a category error in it, and putting it here would make the
  * compiler think it had a fourth object writer to build. */
+
+/* The DATA MODEL: how wide each type is, and which of the ones C leaves
+ * to the implementation are signed.
+ *
+ * These are functions rather than a `== TARGET_AARCH64` test at each
+ * site because for two targets they did not have to be. x86-64 and
+ * aarch64 are both LP64 and differ in exactly two of these, so "is it
+ * aarch64?" was a serviceable stand-in for "is char unsigned?" and for
+ * "is long double binary128?" at once. ARMv7-M answers them
+ * independently -- it is ILP32, its char is unsigned like aarch64's,
+ * and its long double is a plain double -- so each question now has to
+ * be asked by name. A new target that gets one of these wrong should
+ * fail to compile a _Static_assert, not silently inherit x86-64's
+ * answer because it is not aarch64.
+ */
+int target_ptr_size(void);        /* 8 on LP64, 4 on ILP32 */
+int target_long_size(void);       /* likewise; long long is always 8 */
+int target_ldouble_size(void);    /* 16, or 8 where it is just a double */
+int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
+int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
+
+/* Whether __int128 exists at all. It does not on a 32-bit target: the
+ * type needs a register pair per half and libgcc's __divti3 family is
+ * not in the 32-bit multilib, so the front-end refuses it by name
+ * rather than lowering something no backend can carry. */
+int target_has_int128(void);
 
 /* The selected target. Defaults to x86_64 so every existing command line
  * keeps its meaning; --target= is the only thing that changes it. */
