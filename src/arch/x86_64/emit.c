@@ -72,6 +72,30 @@ static void rex_rb(struct code *c, int w64, int reg, int base)
         code_byte(c, rex);
 }
 
+/* REX for a form that names an 8-BIT REGISTER.
+ *
+ * Register numbers 4..7 in a byte operand mean %ah %ch %dh %bh unless a
+ * REX prefix is present, and %spl %bpl %sil %dil when one is -- so a
+ * byte form with such an operand needs REX even when it carries no
+ * bits. It never came up while the integer pool was {r8..r15, rbx,
+ * rdx}: all of those are either REX-extended already or directly
+ * addressable as al/bl/cl/dl. It came up the moment an ABI hint put a
+ * `char` PARAMETER in rsi -- `movzbl %sil,%ebx` assembled as
+ * `movzbl %dh,%ebx`, and lib/libcxx's read_encoded then dispatched
+ * every DWARF encoding as absptr, so a throw never found its handler
+ * (tests/golden/unwind.sh, libcxx.sh, libcxx-std.sh).
+ *
+ * `byte_reg` and `byte_rm` say which of the two operands is the
+ * 8-bit one. */
+static void rex_rb8(struct code *c, int w64, int reg, int base,
+                    int byte_reg, int byte_rm)
+{
+    int rex = 0x40 | (w64 ? 8 : 0) | ((reg & 8) ? 4 : 0) |
+              ((base & 8) ? 1 : 0);
+    if (rex != 0x40 || (byte_reg && reg >= 4) || (byte_rm && base >= 4))
+        code_byte(c, rex);
+}
+
 /* An x87 memory instruction: `opcode /ext` against [base+disp] — fld/fstp
  * of a tword (DB /5, /7), qword (DD /0, /3) or dword (D9 /0, /3), fild
  * qword (DF /5), fistp qword (DF /7), fnstcw/fldcw (D9 /7, /5). */
@@ -123,7 +147,7 @@ void x86_store_mem_reg(struct code *c, int base, int disp, int src,
 {
     switch (size) {
     case 1:
-        rex_rb(c, 0, src, base);
+        rex_rb8(c, 0, src, base, 1, 0);
         code_byte(c, 0x88);
         break;
     case 2:
@@ -206,7 +230,7 @@ void x86_movsxd_rr(struct code *c, int dst, int src)
  * the reg-reg twin of x86_load_slot's narrow cases. */
 void x86_movx_rr(struct code *c, int dst, int src, int size, int sign, int w)
 {
-    rex_rb(c, w == 8, dst, src);
+    rex_rb8(c, w == 8, dst, src, 0, size == 1);
     code_byte(c, 0x0f);
     if (size == 1)
         code_byte(c, sign ? 0xbe : 0xb6); /* movsx/movzx r, r/m8 */
@@ -1256,18 +1280,18 @@ void x86_ucomis_reg(struct code *c, int a, int b, int w)
 
 /* setcc + zero-extend into an ARBITRARY register (register-targeted
  * x86_setcc_eax; identical bytes when reg == rax). Writes reg's low byte then
- * movzx-widens it in place -- RAX is never touched. Valid for the -O2 register
- * pool {r8..r15, rbx}: rbx maps to the directly-addressable bl and r8..r15 use
- * REX.B, so the ah/ch/dh/bh aliasing trap (rm 4..7 with no REX) never arises. */
+ * movzx-widens it in place -- RAX is never touched.
+ *
+ * Both halves name reg as an 8-bit operand, so both go through rex_rb8:
+ * the note there is what this used to say could never happen. */
 void x86_setcc_reg(struct code *c, int cc, int reg)
 {
-    if (reg & 8) code_byte(c, 0x41);          /* REX.B: setcc r8b..r15b */
+    rex_rb8(c, 0, 0, reg, 0, 1);               /* setcc r/m8 */
     code_byte(c, 0x0f);
-    code_byte(c, cc);                          /* setcc r/m8 */
+    code_byte(c, cc);
     code_byte(c, 0xc0 | (reg & 7));
-    { int rex = 0x40 | ((reg & 8) ? 5 : 0);   /* REX.R|REX.B when extended */
-      if (rex != 0x40) code_byte(c, rex); }
-    code_byte(c, 0x0f);                        /* movzx reg32, reg8 */
+    rex_rb8(c, 0, reg, reg, 0, 1);             /* movzx reg32, reg8 */
+    code_byte(c, 0x0f);
     code_byte(c, 0xb6);
     code_byte(c, 0xc0 | ((reg & 7) << 3) | (reg & 7));
 }

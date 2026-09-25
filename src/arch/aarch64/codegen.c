@@ -896,6 +896,29 @@ static void a64_abi_hints(const struct ir_func *fn, int *hint)
                  s->a >= 0 && s->a < fn->nvregs)
             hint[s->a] = 0;
     }
+    /* ...and a call's ARGUMENTS, which is the same boundary once more:
+     * step 3 of the call lowering moves each scalar argument into its
+     * register, and that move is an identity when the value already
+     * lives there. Placement comes from a64_place_arg, the one answer
+     * the call site itself uses, so no second copy of AAPCS64 is stated
+     * here. A value that is an argument to two calls at different
+     * positions takes the later hint; being right at one of the two is
+     * better than at neither. */
+    for (int i = 0; i < fn->nins; i++) {
+        const struct ir_ins *s = &fn->ins[i];
+        if (s->op != IR_CALL)
+            continue;
+        struct a64_cursor cu = { 0, 0, 0, 0 };
+        for (int k = 0; k < s->nargs; k++) {
+            struct a64_argplan pl;
+            a64_place_arg(&s->argv[k], k, s->sret_first, &cu, &pl,
+                          s->call_varargs, s->call_nfixed);
+            if (pl.where == AP_X && !pl.byref && !pl.is_struct &&
+                pl.nreg == 1 && s->argv[k].vreg >= 0 &&
+                s->argv[k].vreg < fn->nvregs)
+                hint[s->argv[k].vreg] = pl.reg;
+        }
+    }
 }
 
 /* ---- moving a whole set of registers at once -------------------------

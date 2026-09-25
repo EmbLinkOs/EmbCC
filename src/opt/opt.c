@@ -1567,6 +1567,44 @@ static int pass_mem2reg(struct ir_func *fn)
     free(ok);
     if (nprom == 0) { free(prom); free(ploc); return 0; }
 
+    /* The ENTRY BLOCK must not be a join. It is one whenever the
+     * function's first instruction is a label something branches back
+     * to -- a `while` at the top of a function, and every tail call
+     * pass_tailrec turned into a loop. Such a block has exactly ONE
+     * predecessor, the back edge, because the function entry is not a
+     * block; compute_df skips it for having npred < 2, no phi is placed,
+     * and the value assigned round the loop is silently dropped. For a
+     * local that is unreachable in a defined program (nothing could have
+     * initialised it before a loop that starts at instruction zero), and
+     * for a PARAMETER it is the argument the caller passed:
+     * `sum_to(n, acc)` came out as a branch around an empty body, three
+     * million tail calls that never returned.
+     *
+     * One explicit jump gives the entry a block of its own, and the
+     * header two predecessors and a phi. pass_cfgclean takes the jump
+     * out again afterwards -- it goes to the very next instruction. */
+    if (fn->nins > 0 && fn->ins[0].op == IR_LABEL) {
+        int L0 = fn->ins[0].label, reached = 0;
+        for (int i = 1; i < fn->nins && !reached; i++) {
+            enum ir_op op = fn->ins[i].op;
+            if ((op == IR_JMP || op == IR_BRZ || op == IR_BRNZ) &&
+                fn->ins[i].label == L0)
+                reached = 1;
+        }
+        if (reached) {
+            struct ibuf eb = { 0, 0, 0 };
+            struct ir_ins *j = ib_push(&eb);
+            j->op = IR_JMP; j->label = L0;
+            j->dst = -1; j->a = -1; j->b = -1;
+            j->line = fn->ins[0].line; j->col = fn->ins[0].col;
+            j->synth = 1;
+            for (int i = 0; i < fn->nins; i++)
+                *ib_push(&eb) = fn->ins[i];
+            free(fn->ins);
+            fn->ins = eb.p; fn->nins = eb.n; fn->cap = eb.cap;
+        }
+    }
+
     /* 2. CFG + dominance. */
     int nbb, *l2b;
     struct bb *bb = build_cfg(fn, &nbb, &l2b);
@@ -1577,36 +1615,6 @@ static int pass_mem2reg(struct ir_func *fn)
         free_cfg(bb, nbb); free(prom); free(ploc); return 0;
     }
     compute_idom(bb, order, norder);
-
-    /* A phi in the ENTRY block has nowhere to take the function's
-     * incoming value from: the entry is not a block, so the only
-     * predecessor such a phi has is the back edge that made block 0 a
-     * loop header. For an ordinary local that is harmless -- its entry
-     * version stands for a read before any write, which is undefined
-     * anyway -- and for a PARAMETER it is fatal, because that version is
-     * the argument the caller passed.
-     *
-     * pass_tailrec makes exactly this shape: it turns the recursion into
-     * a loop whose header is the function's first instruction. With
-     * parameters promotable, `sum_to(n, acc)` became `brz %6 -> L2`
-     * around an empty body -- three million tail calls that never
-     * returned. So where block 0 has a predecessor, parameters stay in
-     * memory and the locals promote as before. */
-    if (bb[0].npred > 0 && nparams > 0) {
-        int keep = 0;
-        for (int p = 0; p < nprom; p++) {
-            if (ploc[p] < nparams) continue;
-            ploc[keep] = ploc[p];
-            keep++;
-        }
-        for (int L = 0; L < nvars; L++) prom[L] = -1;
-        for (int p = 0; p < keep; p++) prom[ploc[p]] = p;
-        nprom = keep;
-        if (nprom == 0) {
-            free(order); free(l2b); free_cfg(bb, nbb);
-            free(prom); free(ploc); return 0;
-        }
-    }
 
     int **df = xcalloc((size_t)nbb, sizeof *df);
     int *ndf = xcalloc((size_t)nbb, sizeof *ndf);
@@ -1732,6 +1740,26 @@ static int pass_mem2reg(struct ir_func *fn)
          * a value the program never produced, so it corresponds to no
          * source construct at all. The §9.1 exception, marked so the
          * verifier can tell it from a location a pass forgot to copy. */
+        c->synth = 1;
+    }
+    /* A phi in the ENTRY block has no edge to take the function's
+     * incoming value from: the entry is not a block, so the only
+     * predecessor such a phi has is the back edge that made block 0 a
+     * loop header -- which is every function whose first instruction is
+     * a loop's label, and every tail call pass_tailrec turned into one.
+     *
+     * The value is supplied HERE instead, as the copy it is, ahead of
+     * block 0's own label so the back edge jumps past it. For a
+     * parameter that value is the parameter; for anything else it is the
+     * undef seed above. Without it `sum_to(n, acc)` came out as a branch
+     * around an empty body: three million tail calls that never
+     * returned. */
+    for (int k = 0; k < bb[0].nphi; k++) {
+        int pidx = prom[bb[0].phi_local[k]];
+        struct ir_ins *c = ib_push(&nb);
+        c->op = IR_MOV; c->dst = bb[0].phi_res[k];
+        c->a = undef[pidx]; c->b = -1;
+        c->w = fn->locals[ploc[pidx]].size == 8 ? 8 : 4;
         c->synth = 1;
     }
     struct { int lbl, from, edge_pred; } *tramp = NULL; int ntramp = 0, ctramp = 0;

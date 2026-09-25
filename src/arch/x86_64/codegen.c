@@ -152,13 +152,61 @@ static int x86_reserves(const struct ir_func *fn, int *div)
     return at;
 }
 
+/* May this function have rdi as well?
+ *
+ * The note below records rdi being tried twice and dropped twice. The
+ * second time it was correct and worthless -- but that was before
+ * x86_abi_hints existed, so the allocator had no reason to put
+ * PARAMETER ZERO there and rdi was just a twelfth register for a
+ * function that was short of five. With the hint it is the register the
+ * commonest parameter in the corpus already arrives in.
+ *
+ * The condition is the same one: not variadic (the prologue spills the
+ * argument file to the save area), not returning a struct and no call
+ * returning one (the hidden sret pointer is rdi and travels outside the
+ * argument sequence, which the allocator does not model), and no
+ * __int128 (gen_i128 loads rdi raw). */
+static int i128_ins(const struct ir_ins *i);
+
+static int x86_wants_rdi(const struct ir_func *fn)
+{
+    if (fn->is_varargs || fn->ret_abi.is_struct)
+        return 0;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        if (in->op == IR_CALL && in->retsize)
+            return 0;
+        if (i128_ins(in))
+            return 0;
+    }
+    return 1;
+}
+
+/* The chosen table with rdi appended -- composed rather than tabulated,
+ * because four base pools times two is eight tables to keep in step and
+ * the allocator only looks at one at a time. */
+static int x86_pool_buf[RA_MAXPOOL];
+
 static const int *x86_pool_for(const struct ir_func *fn, int *n)
 {
     int div, at = x86_reserves(fn, &div);
-    if (fn->is_varargs) { *n = NVARIADIC; return VARIADIC_POOL; }
-    if (at)             { *n = NLEAF_AT;  return LEAF_POOL_AT; }
-    if (div)            { *n = NLEAF;     return LEAF_POOL; }
-    *n = NLEAF_RDX;     return LEAF_POOL_RDX;
+    const int *base;
+    int nb;
+    if (fn->is_varargs) { nb = NVARIADIC; base = VARIADIC_POOL; }
+    else if (at)        { nb = NLEAF_AT;  base = LEAF_POOL_AT; }
+    else if (div)       { nb = NLEAF;     base = LEAF_POOL; }
+    else                { nb = NLEAF_RDX; base = LEAF_POOL_RDX; }
+    if (!x86_wants_rdi(fn)) { *n = nb; return base; }
+    /* After the caller-saved ones already there (it is caller-saved too,
+     * so it needs no prologue save) and before the callee-saved five. */
+    int k = 0, o = 0;
+    while (k < nb && (base[k] == 8 || base[k] == 9 || base[k] == 10 ||
+                      base[k] == 11 || base[k] == 6 || base[k] == 2))
+        x86_pool_buf[o++] = base[k++];
+    x86_pool_buf[o++] = REG_RDI;
+    while (k < nb) x86_pool_buf[o++] = base[k++];
+    *n = o;
+    return x86_pool_buf;
 }
 
 /* rdi was tried AGAIN, under the narrowest condition that could be
@@ -187,6 +235,91 @@ static int ldvar_plain(int size, int sign, int w);
 static int is_callee_saved(int reg);
 static int i128_ins(const struct ir_ins *i);
 
+/* Where System V would put each parameter if it had the choice.
+ *
+ * A parameter arrives in an argument register and the prologue's
+ * parallel move takes it to its allocated home; that move is an
+ * identity, and vanishes, when the home IS the register it arrived in.
+ * Without this every function opened with `mov %rsi,%r10` and the rest
+ * of its argument list.
+ *
+ * The walk has to track System V's two register files exactly as the
+ * prologue does, or a hint lands on the wrong parameter. Rather than
+ * restate the whole classification, it models the cases it is sure of
+ * and STOPS at the first one it is not: a struct, whose eightbytes need
+ * ty_classify, ends the walk. A hint is only a bias, so stopping early
+ * costs a move rather than correctness -- but a hint derived from a
+ * counter that has drifted would cost a move at every later parameter,
+ * which is worse than none.
+ *
+ * Only System V. Win64 places by position with the files sharing one
+ * counter, and its four argument registers include rcx, which is not in
+ * any pool here. */
+static void x86_abi_hints(const struct ir_func *fn, int *hint)
+{
+    struct func *f = fn->src;
+    if (!f || target_win64_abi() || f->is_varargs)
+        return;
+    enum arg_class rcls[2];
+    int ireg = 0;
+    /* A hidden return pointer consumes rdi before any real parameter. */
+    if (f->ret_ty->kind == TY_STRUCT && ty_classify(f->ret_ty, rcls) == 0 &&
+        !ty_x87_ret(f->ret_ty))
+        ireg++;
+    for (int i = 0; i < f->nparams && i < fn->nvregs; i++) {
+        struct type *pt = f->param_tys[i];
+        if (pt->kind == TY_STRUCT)
+            return;                      /* eightbytes: not modelled here */
+        if (pt->kind == TY_LDOUBLE)
+            continue;                    /* x87 class: always on the stack */
+        if (pt->kind == TY_INT128) {
+            if (ireg + 2 <= 6) ireg += 2;
+            continue;                    /* a pair, and never allocated */
+        }
+        if (ty_is_float(pt))
+            continue;                    /* the FP class has its own pool,
+                                          * and its own counter, which
+                                          * nothing here reads */
+        if (ireg < 6)
+            hint[i] = x86_argreg(ireg++);
+    }
+
+
+    /* ...and the other two boundaries, which are the same question asked
+     * of a CALL. An integer argument is moved into its argument register
+     * by the parallel move at the call site, and that move is an
+     * identity when the value already lives there. A value that is an
+     * argument to two calls at different positions gets the later
+     * hint -- a hint is a bias, and being right at one of the two sites
+     * is better than at neither.
+     *
+     * Nothing hints rax. A returned value and a call's result both want
+     * it, and rax is the scratch every lowering path in this backend
+     * uses; it is in no pool, so the hint would be dropped anyway. That
+     * is the 227 `mov %rX,%rax` before a `ret` that remain. */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        if (in->op != IR_CALL)
+            continue;
+        int ireg2 = in->retsize ? 1 : 0;       /* sret consumes rdi */
+        for (int k = 0; k < in->nargs; k++) {
+            const struct ir_arg *a = &in->argv[k];
+            if (a->on_stack)
+                continue;
+            if (a->is_struct || a->nclass == 2) {
+                for (int q = 0; q < a->nclass; q++)
+                    if (a->cls[q] != CLASS_SSE) ireg2++;
+                continue;
+            }
+            if (a->cls[0] == CLASS_SSE)
+                continue;                      /* the FP class's own file */
+            if (ireg2 < 6 && a->vreg >= 0 && a->vreg < fn->nvregs)
+                hint[a->vreg] = x86_argreg(ireg2);
+            ireg2++;
+        }
+    }
+}
+
 
 
 static const struct ra_target X86_RA = {
@@ -201,7 +334,10 @@ static const struct ra_target X86_RA = {
                     * is what let the blunt refusal below go. */
     1,             /* two-operand ALU: `addsd d, b` means `d += b`, so d
                     * and a want one register -- worth coalescing. */
-    NULL           /* No ABI hints yet. The same three boundaries exist
+    x86_abi_hints  /* ...and where SysV would put each value if it had
+                    * the choice. The old note below said the same three
+                    * boundaries exist here as on aarch64 and were not
+                    * yet described; they are, for parameters.
                     * here -- a parameter's register, rax for a call's
                     * result and for a return -- and none of rdi/rsi/rax
                     * is in this backend's pool, so a hint naming one
@@ -3297,8 +3433,18 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                 }
 
-            /* MEMORY-class aggregates go to the outgoing area first,
-             * while rax/rcx/rdx are still free to copy with. */
+            /* MEMORY-class aggregates go to the outgoing area first.
+             *
+             * The scratch for that copy has to be a register the
+             * ALLOCATOR never hands out, not merely one the argument
+             * sequence has not reached yet. This said "rax/rcx/rdx are
+             * still free" and used rdx, which stopped being true when
+             * rdx joined the pool: `mem(g, 1, 2, 3, 4)` materialised 3
+             * into rdx and then the struct copy used rdx as its source
+             * pointer and lost it (tests/exec/struct-param-scalars.c).
+             * It took an ABI hint to make the allocator choose rdx here
+             * reliably, but nothing stopped it choosing rdx before.
+             * rax and rcx are in no pool; those two are the scratch. */
             for (int k = 0; k < i->nargs; k++) {
                 struct ir_arg *a = &i->argv[k];
                 if (!a->on_stack)
@@ -3326,14 +3472,22 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                     continue;
                 }
-                x86_load_slot(text, sd[a->vreg], 8, 0, 8);
-                x86_mov_reg_reg(text, REG_RDX, REG_RAX); /* src */
                 int sz = a->size;
                 for (int off = 0; off < sz; ) {
                     int chunk = sz - off;
                     chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4
                           : chunk >= 2 ? 2 : 1;
-                    x86_load_reg_mem(text, REG_RAX, REG_RDX, off, chunk);
+                    /* The source address is re-read for each chunk
+                     * rather than parked in a second register, because
+                     * there is no second register to park it in: rax is
+                     * the only GPR no pool contains, and rcx is the one
+                     * this backend's shifts, atomics and struct copies
+                     * all reach for. Three instructions an eightbyte
+                     * instead of two, on an argument class the corpus
+                     * uses eleven times -- and never the wrong
+                     * register. */
+                    x86_load_slot(text, sd[a->vreg], 8, 0, 8);
+                    x86_load_reg_mem(text, REG_RAX, REG_RAX, off, chunk);
                     x86_store_mem_reg(text, REG_RSP,
                                       a->stk_off + off, REG_RAX, chunk);
                     off += chunk;
