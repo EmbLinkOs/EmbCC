@@ -2484,6 +2484,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
         vw_src = -1;
         fold_idx = -1;      /* only the instruction right after may use it */
         int ins_start = text->len;
+        x86_lowering_op = ir_opname(i->op);   /* for the dead-slot guard */
         /* -g: a row where the source line changes. text->len is the .text
          * offset this instruction's code begins at (the switch below emits
          * it). Multiple IR ops from one statement share a line and collapse

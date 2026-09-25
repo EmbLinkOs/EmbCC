@@ -27,7 +27,11 @@ int variadic(int n, ...)
     va_end(ap);
     return r;
 }
-double fp(double x) { return x * 2.0; }
+/* A float callee is inlined now, so the third refusal here is a
+ * parameter an ABI does not pass as a value: the inliner binds one with
+ * `stvar local, argvreg`, and for a struct that vreg is an ADDRESS. */
+struct pair { long a, b; };
+long aggregate(struct pair p) { return p.a + p.b; }
 int big(int n)
 {
     int t = 0;
@@ -37,14 +41,16 @@ int big(int n)
 }
 int caller(int n)
 {
-    return small(n, 1) + variadic(n, 2) + (int)fp((double)n) + big(n);
+    struct pair pr = { n, 1 };
+    return small(n, 1) + variadic(n, 2) + (int)aggregate(pr) + big(n);
 }
 EOF
 
 # ---- one cause, one reason ------------------------------------------------
 "$EMBCC" why not-inlined "$out/p.c" -O2 > "$out/why.txt" 2>&1
 sed "s|$out/||" "$out/why.txt"
-for pair in "variadic:callee-is-varargs" "fp:returns-floating-point" \
+for pair in "variadic:callee-is-varargs" \
+            "aggregate:parameter-is-not-a-simple-scalar" \
             "big:callee-too-large"; do
     fn=${pair%%:*}; reason=${pair#*:}
     grep -q "^$fn " "$out/why.txt" || { echo "FAIL: no remark for $fn"; exit 1; }

@@ -20,12 +20,22 @@ static void rexw(struct code *c, int w)
  * through here -- so a lowering path that does not know the value has
  * moved fails loudly instead of reading whatever the frame holds. */
 #define X86_DEAD_SLOT (-0x40000000)
+/* Which IR operation the backend is lowering. It sets this to the
+ * operation's name -- a static string, so the cost is one pointer store
+ * per instruction -- and the guard below reads it only when it fires.
+ *
+ * It is worth the store. "Some lowering path does not know that" sent
+ * three separate investigations reading the whole switch; naming `stvar`
+ * pointed at the one case in a line. The operands are not named here
+ * because this file encodes instructions and knows nothing of the IR. */
+const char *x86_lowering_op = "?";
+
 static void no_dead_slot(int disp)
 {
     if (disp == X86_DEAD_SLOT)
         internal_error("a value was read from a stack slot it does not have "
-                       "-- it lives in a register, and some lowering path "
-                       "does not know that");
+                       "-- it lives in a register, and the lowering of `%s` "
+                       "does not know that", x86_lowering_op);
 }
 
 static void modrm_rbp(struct code *c, int reg, int disp)

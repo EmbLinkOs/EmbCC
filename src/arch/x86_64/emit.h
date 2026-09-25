@@ -16,6 +16,11 @@
 
 /* prologue: push rbp; mov rbp,rsp; sub rsp,framesize (multiple of 16
  * so rsp stays 16-aligned at calls). epilogue: leave; ret. */
+/* Which IR operation the backend is lowering, for the dead-slot guard's
+ * message. Its instruction loop sets it; the guard reads it only when
+ * it fires. */
+extern const char *x86_lowering_op;
+
 void x86_prologue(struct code *c, int framesize, int frameless);
 void x86_epilogue(struct code *c, int frameless);
 void x86_leave(struct code *c);

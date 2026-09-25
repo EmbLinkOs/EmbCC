@@ -7124,19 +7124,55 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
     }
     if (cf->neh)             { *why = "callee-has-exception-regions"; return 0; }
     if (c->ret_ty->kind == TY_STRUCT) { *why = "returns-a-struct"; return 0; }
-    if (ty_is_float(c->ret_ty))       { *why = "returns-floating-point"; return 0; }
-    for (int k = 0; k < cf->nvars; k++)
-        if (c->var_tys[k] &&
-            (c->var_tys[k]->kind == TY_STRUCT || ty_is_float(c->var_tys[k]))) {
-            *why = "callee-has-a-struct-or-float-local";
+    /* FLOATS used to be refused here too -- a float return and a float
+     * local, 82 and 117 call sites across lib/libc and lib/libcxx
+     * against the 218 that were inlined. The reason was that a float
+     * had no register to live in, so the inliner's parameter STVARs and
+     * its result MOV were memory traffic the call had not been paying;
+     * with the float register class and a float pool those are ordinary
+     * copies that mem2reg and the allocator see through like any other.
+     *
+     * lib/rt/complex.c is what this is for: __muldc3 called is_nan_d,
+     * is_inf_d and copysign_d thirty-four times, and every product was
+     * live across one, so every product was in memory. gcc's __muldc3
+     * touches the stack not once. */
+    /* A PARAMETER is bound by `stvar local, argvreg`, which is only the
+     * value when the argument vreg IS the value. For anything an ABI
+     * passes some other way -- a struct or a _Complex (the vreg is its
+     * ADDRESS), a long double (the x87 stack), an __int128 (a register
+     * pair) -- that store copies the wrong bytes from the wrong place.
+     * `clog` is what says so: its callee took a `_Complex double`, the
+     * caller had `%3 = addr v0`, and the splice produced
+     * `stvar:16 v1, %3` -- sixteen bytes read out of an eight-byte
+     * pointer's slot.
+     *
+     * So a parameter has to be a scalar that fits one vreg. A non-
+     * parameter local has no such constraint: the metadata copy below
+     * carries its type and alignment, ir_locals_fill rebuilds the
+     * descriptors, and SROA looks at it in the caller exactly as it
+     * would have in the callee -- which is what lets is_inf_d's
+     * `union { double d; u64 u; }` come across. */
+    for (int k = 0; k < cf->nparams && k < cf->nvars; k++) {
+        struct type *pt = c->var_tys[k];
+        if (!pt || ty_size(pt) > 8 || ty_is_complex(pt) ||
+            !(ty_is_integer(pt) || pt->kind == TY_PTR || ty_is_float(pt))) {
+            *why = "parameter-is-not-a-simple-scalar";
             return 0;
         }
+    }
+    if (ty_is_complex(c->ret_ty) || c->ret_ty->kind == TY_LDOUBLE ||
+        c->ret_ty->kind == TY_INT128) {
+        *why = "returns-a-value-wider-than-a-vreg";
+        return 0;
+    }
     for (int i = 0; i < cf->nins; i++) {
         const struct ir_ins *in = &cf->ins[i];
         if (in->op == IR_ASM)      { *why = "callee-has-inline-asm"; return 0; }
         if (in->op == IR_VA_START) { *why = "callee-uses-va_start"; return 0; }
-        if (in->flt)               { *why = "callee-computes-in-floating-point";
-                                     return 0; }
+        /* `in->flt` used to refuse the callee outright. Floating-point
+         * arithmetic is ordinary arithmetic to this pass -- it renames
+         * vregs and splices instructions -- and the values it produces
+         * now have a register class and a pool to live in. */
         /* a VLA's allocation is released by the callee's own epilogue;
          * inlined into a loop it would never be */
         if (in->op == IR_ALLOCA)   { *why = "callee-has-a-vla"; return 0; }
