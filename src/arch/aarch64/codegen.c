@@ -1907,9 +1907,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * fmov them across. Spilled, the integer path below writes
              * the same slot for less. */
             if (a64_in_freg(i->dst)) {
+                int fd = g_a64_floc[i->dst];
+                /* The bits of a float constant are sometimes an fmov
+                 * immediate -- 0.5, 1, 1.5, 2, 3, 4, 8, 16 and their
+                 * negatives -- and then there is no general register in
+                 * it at all. */
+                if (a64_fmov_imm(t, fd, (unsigned long)i->imm,
+                                 i->w == 8 ? 8 : 4))
+                    break;
                 a64_mov_imm(t, A64_ACC, i->imm, i->w);
-                a64_fmov_from_gpr(t, g_a64_floc[i->dst], A64_ACC,
-                                  i->w == 8 ? 8 : 4);
+                a64_fmov_from_gpr(t, fd, A64_ACC, i->w == 8 ? 8 : 4);
                 break;
             }
             int d = wr(i->dst, A64_ACC);
@@ -2015,6 +2022,31 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
         case IR_SHL: case IR_SHR: {
             int kind = i->op == IR_SHL ? '<' : (i->sign ? '>' : 'u');
+            /* A shift by a constant whose SOLE use is the very next
+             * instruction's second operand is that instruction's shift
+             * field: `add xd, xn, xm, lsl #k` is one instruction, and
+             * it is how array indexing comes out. 179 sites across
+             * lib/libc and lib/libcxx. */
+            if (i->imm_b && i->dst >= 0 && usecnt[i->dst] == 1 &&
+                n + 1 < fn->nins && i->imm >= 0 &&
+                i->imm < (i->w == 8 ? 64 : 32)) {
+                struct ir_ins *nx = &fn->ins[n + 1];
+                int aop = nx->op == IR_ADD ? '+' : nx->op == IR_SUB ? '-'
+                        : nx->op == IR_AND ? '&' : nx->op == IR_OR ? '|'
+                        : nx->op == IR_XOR ? '^' : 0;
+                if (aop && !nx->flt && !nx->imm_b && nx->b == i->dst &&
+                    nx->a != i->dst && nx->w == i->w &&
+                    !a64_ld_ins(nx) && !a64_i128_ins(nx)) {
+                    int rx = rd(t, sd, i->a, A64_TMP);
+                    int ra = rd(t, sd, nx->a, A64_ACC);
+                    int d = wr(nx->dst, A64_ACC);
+                    a64_alu_reg_shifted(t, aop, d, ra, rx, kind,
+                                        (int)i->imm, i->w);
+                    wrote(t, sd, nx->dst, d);
+                    n++;                 /* the fused operation */
+                    break;
+                }
+            }
             /* A constant count is the bitfield-move alias, with no
              * register to materialise it in. */
             if (i->imm_b) {

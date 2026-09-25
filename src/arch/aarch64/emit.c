@@ -133,9 +133,18 @@ int a64_sub_imm(struct code *c, int rd, int rn, long imm, int w)
     return addsub_imm(c, 0x51000000UL, rd, rn, imm, w);
 }
 
-void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w)
+/* ...with the second operand SHIFTED, which is what the "(shifted
+ * register)" in the names above has always meant and what the shift
+ * field at bits 22-23 and 10-15 is for. `x + (y << 3)` is one
+ * instruction here, and it is how array indexing comes out: 179 sites
+ * across lib/libc and lib/libcxx where a shift by a constant feeds an
+ * add or a subtract and is read nowhere else.
+ *
+ * kind: '<' LSL, 'u' LSR, '>' ASR. */
+void a64_alu_reg_shifted(struct code *c, int op, int rd, int rn, int rm,
+                         int kind, int amount, int w)
 {
-    unsigned long base;
+    unsigned long base, sh;
     switch (op) {
     case '+': base = 0x0B000000UL; break;   /* ADD  (shifted register) */
     case '-': base = 0x4B000000UL; break;   /* SUB  */
@@ -144,8 +153,21 @@ void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w)
     case '^': base = 0x4A000000UL; break;   /* EOR  */
     default: bad("alu op", op); return;
     }
-    a64_word(c, base | sf(w) | ((unsigned long)rm << 16) |
+    switch (kind) {
+    case '<': sh = 0; break;
+    case 'u': sh = 1; break;
+    case '>': sh = 2; break;
+    default: bad("shift kind", kind); return;
+    }
+    a64_word(c, base | sf(w) | (sh << 22) |
+                ((unsigned long)rm << 16) |
+                ((unsigned long)amount << 10) |
                 ((unsigned long)rn << 5) | (unsigned long)rd);
+}
+
+void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w)
+{
+    a64_alu_reg_shifted(c, op, rd, rn, rm, '<', 0, w);
 }
 
 /* AND / ORR / EOR with a LOGICAL IMMEDIATE.
@@ -245,6 +267,47 @@ int a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w)
  *
  * The offset is a signed 7-bit immediate scaled by eight, so
  * -512..504; outside that the caller keeps the single form. */
+/* FMOV (scalar, immediate): a float constant with no memory and no
+ * general register on the way.
+ *
+ * The 8-bit field is a:b:c:d:e:f:g:h and the value it names is
+ * sign a, exponent (for a double) `~b` followed by eight copies of `b`
+ * then `cd`, mantissa `efgh` followed by forty-eight zeros. So a
+ * double encodes exactly when its low 48 mantissa bits are zero and its
+ * exponent is one of the eight around 1.0 -- which covers 0.5, 1, 1.5,
+ * 2, 3, 4, 8, 16 and their negatives, and 116 of the float constants
+ * across lib/libc and lib/libcxx.
+ *
+ * Returns 0 when the value is not one of them, having emitted nothing. */
+int a64_fmov_imm(struct code *c, int vd, unsigned long bits, int w)
+{
+    unsigned long sign, exp, mant, imm8, b;
+    if (w == 8) {
+        if (bits & ((1UL << 48) - 1))
+            return 0;
+        sign = (bits >> 63) & 1;
+        exp  = (bits >> 52) & 0x7ff;
+        mant = (bits >> 48) & 0xf;
+        if (exp < 0x3fc || exp > 0x403)
+            return 0;
+        b = exp <= 0x3ff;
+    } else {
+        unsigned long v = bits & 0xffffffffUL;
+        if (v & ((1UL << 19) - 1))
+            return 0;
+        sign = (v >> 31) & 1;
+        exp  = (v >> 23) & 0xff;
+        mant = (v >> 19) & 0xf;
+        if (exp < 0x7c || exp > 0x83)
+            return 0;
+        b = exp <= 0x7f;
+    }
+    imm8 = (sign << 7) | (b << 6) | ((exp & 3) << 4) | mant;
+    a64_word(c, 0x1E201000UL | ((unsigned long)(w == 8) << 22) |
+                (imm8 << 13) | (unsigned long)vd);
+    return 1;
+}
+
 int a64_stp(struct code *c, int rt, int rt2, int rn, long off)
 {
     if (off % 8 || off < -512 || off > 504)

@@ -64,11 +64,14 @@ void a64_mov_imm(struct code *c, int rd, long imm, int w);
 int  a64_add_imm(struct code *c, int rd, int rn, long imm, int w);
 int  a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w);
 int  a64_shift_imm(struct code *c, int op, int rd, int rn, int shift, int w);
+int  a64_fmov_imm(struct code *c, int vd, unsigned long bits, int w);
 int  a64_stp(struct code *c, int rt, int rt2, int rn, long off);
 int  a64_ldp(struct code *c, int rt, int rt2, int rn, long off);
 int  a64_sub_imm(struct code *c, int rd, int rn, long imm, int w);
 /* op: '+' '-' '&' '|' '^' */
 void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w);
+void a64_alu_reg_shifted(struct code *c, int op, int rd, int rn, int rm,
+                         int kind, int amount, int w);
 void a64_mul(struct code *c, int rd, int rn, int rm, int w);
 void a64_div(struct code *c, int rd, int rn, int rm, int sign, int w);
 /* rd = ra - rn*rm — the second half of a remainder. */
