@@ -618,6 +618,42 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
             running += 16;
         }
 
+    /* ...and a COPY of a 16-byte value need not have a slot of its own.
+     *
+     * The x86-64 backend's note applies here word for word: where the
+     * SOURCE can never change again -- one definition in the function, a
+     * parameter's being the prologue's, and its address never taken --
+     * the two ends can BE the same slot and the copy is nothing. The
+     * walk is forward, so a copy of a copy lands on the original. */
+    if (g_a64_wide && g_a64_regalloc) {
+        int nv = fn->nvregs;
+        int *nwrite = xcalloc((size_t)(nv ? nv : 1), sizeof *nwrite);
+        char *taken = xcalloc((size_t)(nv ? nv : 1), 1);
+        for (int v = 0; v < fn->nparams && v < nv; v++)
+            nwrite[v]++;
+        for (int i = 0; i < fn->nins; i++) {
+            struct ir_ins *in = &fn->ins[i];
+            int d = in->op == IR_STVAR ? in->dst : ra_ins_def(in);
+            if (d >= 0 && d < nv) nwrite[d]++;
+            if (in->op == IR_ADDR && in->a >= 0 && in->a < nv)
+                taken[in->a] = 1;
+        }
+        for (int i = 0; i < fn->nins; i++) {
+            struct ir_ins *in = &fn->ins[i];
+            if (in->op != IR_MOV && in->op != IR_LDVAR)
+                continue;
+            int d = in->dst, a = in->a;
+            if (d < 0 || d >= nv || a < 0 || a >= nv) continue;
+            if (!g_a64_wide[d] || !g_a64_wide[a]) continue;
+            if (in->op == IR_LDVAR && in->size != 16) continue;
+            if (nwrite[d] != 1 || nwrite[a] != 1) continue;
+            if (taken[a] || taken[d]) continue;
+            if (want_debug && d < fn->nvars) continue;   /* its DWARF home */
+            disp[d] = disp[a];
+        }
+        free(nwrite); free(taken);
+    }
+
     fr->size = (int)((running + 15) & ~15L);
     return disp;
 }
@@ -1059,6 +1095,8 @@ static int q_off_ok(long off)
 static void emit_copy(struct code *t, int dst, int src, int size)
 {
     int off = 0;
+    if (dst == src)
+        return;                  /* the two ends share a slot */
     if (!g_no_fp)
         for (; size - off >= 16 && q_off_ok(off); off += 16) {
             a64_ldr_q(t, A64_FACC, src, off);
@@ -1190,6 +1228,8 @@ static void gen_a64_ld(struct code *t, const long *sd, struct ir_ins *i,
          * base itself: two instructions rather than two `add`s and a
          * copy. A 16-byte local is 16-aligned, which is what a q offset
          * needs; anything outside the encoding forms the addresses. */
+        if (sd[i->dst] == sd[i->a])
+            break;               /* the two ends share a slot */
         if (!g_no_fp && q_off_ok(sd[i->dst]) && q_off_ok(sd[i->a])) {
             a64_ldr_q(t, A64_FACC, FB, sd[i->a]);
             a64_str_q(t, A64_FACC, FB, sd[i->dst]);

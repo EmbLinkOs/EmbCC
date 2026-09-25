@@ -850,6 +850,53 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
             running = (running + 16 + 15) & ~15;
             disp[t] = -running;
         }
+    /* ...and then a COPY of one need not have a slot of its own at all.
+     *
+     * A 16-byte value never gets a register, so `%d = ldvar v` and
+     * `%d = mov %s` are lowered as sixteen bytes moved from one slot to
+     * another -- 433 such copies across lib/libc and lib/libcxx, two
+     * instructions each. Where the SOURCE can never change again, the
+     * two ends can simply BE the same slot and the copy is nothing at
+     * all: copy16 sees equal addresses and emits none.
+     *
+     * "Can never change again" is the whole condition, and it is read
+     * conservatively: the source must have exactly one definition in the
+     * function (a parameter's is the prologue's, counted here) and its
+     * address must never be taken, so no store through a pointer can
+     * reach it either. The destination must likewise be written only by
+     * this copy. Walking forward makes it transitive -- a copy of a copy
+     * lands on the original's slot -- because a definition precedes
+     * every use. */
+    if (g_wide && !g_has_cgoto) {
+        int nv = fn->nvregs;
+        int *nwrite = xcalloc((size_t)(nv ? nv : 1), sizeof *nwrite);
+        char *taken = xcalloc((size_t)(nv ? nv : 1), 1);
+        for (int v = 0; v < fn->nparams && v < nv; v++)
+            nwrite[v]++;                       /* the prologue writes it */
+        for (int i = 0; i < fn->nins; i++) {
+            struct ir_ins *in = &fn->ins[i];
+            int d = in->op == IR_STVAR ? in->dst : ra_ins_def(in);
+            if (d >= 0 && d < nv) nwrite[d]++;
+            if (in->op == IR_ADDR && in->a >= 0 && in->a < nv)
+                taken[in->a] = 1;
+        }
+        for (int i = 0; i < fn->nins; i++) {
+            struct ir_ins *in = &fn->ins[i];
+            if (in->op != IR_MOV && in->op != IR_LDVAR)
+                continue;
+            int d = in->dst, a = in->a;
+            if (d < 0 || d >= nv || a < 0 || a >= nv) continue;
+            if (!g_wide[d] || !g_wide[a]) continue;
+            if (in->op == IR_LDVAR && in->size != 16) continue;
+            if (nwrite[d] != 1 || nwrite[a] != 1) continue;
+            if (taken[a] || taken[d]) continue;
+            if (disp[a] == DEAD_SLOT_OFF || disp[d] == DEAD_SLOT_OFF)
+                continue;
+            if (g_want_debug && d < fn->nvars) continue;  /* its DWARF home */
+            disp[d] = disp[a];
+        }
+        free(nwrite); free(taken);
+    }
     /* struct-return temporaries sit above the outgoing area */
     running += fn->scratch_bytes;
     *scratch_base_out = -running;
@@ -1465,6 +1512,8 @@ static void emit_reg_parallel_move(struct code *text, int *dest, int *src,
 #define COPY16_XMM X86_FSCR
 static void copy16(struct code *text, int dbase, int doff, int sbase, int soff)
 {
+    if (dbase == sbase && doff == soff)
+        return;                  /* the two ends share a slot: nothing to do */
     if (!g_no_sse) {
         x86_mov128_load(text, COPY16_XMM, sbase, soff);
         x86_mov128_store(text, dbase, doff, COPY16_XMM);
