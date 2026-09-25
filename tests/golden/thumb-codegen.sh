@@ -156,11 +156,7 @@ refuses "a long double"     'long double f(long double a){return a*a;}'
 refuses "a variadic function" '
 #include <stdarg.h>
 int f(int n, ...){ va_list ap; va_start(ap, n); return n; }'
-refuses "an aggregate argument" '
-struct big { int a, b, c; };
-int g(struct big);
-int f(struct big b){ return g(b); }'
-echo "long double, varargs and aggregates each refuse by name"
+echo "long double and varargs refuse by name"
 
 # And what it NO LONGER refuses: 64-bit integers, which the backend
 # carries in register pairs. Checked here as well as in thumb-exec.sh
@@ -190,3 +186,13 @@ for h in __muldf3 __divdf3 __subdf3 __mulsf3 __ltdf2 __floatsisf; do
         exit 1; }
 done
 echo "floating point lowers to the soft-float runtime"
+
+# Aggregates by value, in every shape AAPCS32 treats differently.
+printf '%s\n' 'struct s1{char a;}; struct s8{int a,b;}; struct s20{int v[5];};
+struct s1 a(struct s1 x){ return x; }
+struct s8 b(struct s8 x){ return x; }
+struct s20 c(struct s20 x){ return x; }
+int d(int p,int q,int r, struct s8 s){ return p+q+r+s.a+s.b; }' > "$out/ag.c"
+"$EMBCC" --target=$T -O1 -c "$out/ag.c" -o "$out/ag.o" || {
+    echo "aggregates by value no longer compile"; exit 1; }
+echo "aggregates by value compile"

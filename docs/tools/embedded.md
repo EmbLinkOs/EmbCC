@@ -105,8 +105,8 @@ be linked in beside EmbCC's.
 Each of these stops the compile with a message naming the construct and
 the IR operation behind it, rather than emitting something plausible:
 
-- Aggregates passed or returned **by value**, variadic functions,
-  atomics, inline assembly, VLAs, computed `goto`, C++ exceptions, `-g`.
+- Variadic functions, atomics, inline assembly, VLAs, computed `goto`,
+  C++ exceptions, `-g`.
 
 There is also no register allocator for this target yet: every value
 lives in a stack slot, so the code is correct and roughly three times
@@ -163,6 +163,20 @@ Cortex-M4F and M7 is not supported yet.
 `long double` is refused: it is 8 bytes on this ABI (the same as
 `double`), and the 16-byte formats the other targets use do not exist
 here.
+
+## Aggregates
+
+Structs pass and return by value, the way AAPCS32 says and the way
+another ARM toolchain does it: a composite of four bytes or fewer comes
+back in r0 and a larger one through a hidden pointer the caller
+supplies; arguments fill the core registers and then the stack, and a
+composite may be **split** across r3 and the stack. A struct of floats
+is an ordinary composite here — the homogeneous-aggregate rule belongs
+to the VFP variant, not to this one.
+
+`tests/golden/thumb-exec.sh` links a clang-compiled callee against an
+EmbCC-compiled caller and back again, so this is checked against another
+toolchain and not only against itself.
 
 ## Sizing the stack
 

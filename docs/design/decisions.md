@@ -1084,6 +1084,28 @@ NaN payloads are compared by CLASS rather than bit-for-bit, because
 which payload and which sign a NaN carries out of an operation is
 unspecified and x86 and ARM already disagree.
 
+**2026-09-26, aggregates:** structs pass and return by value, and the
+check is against another TOOLCHAIN rather than against the host: the
+caller and the callee are compiled by different compilers, in both
+directions, and linked together, so a disagreement about which register
+a composite starts in shows up as a wrong number rather than as nothing.
+
+AAPCS32 differs from AAPCS64 in ways the IR's SysV classification does
+not carry, so the backend places arguments itself. A composite of four
+bytes or fewer returns in r0 and a larger one through a hidden pointer
+in r0 — which shifts the real arguments to r1. A composite may be SPLIT
+across r3 and the stack; an eight-byte SCALAR may not, because its
+alignment rounds the register number up to even first and that leaves
+two registers or none. And the base standard has no
+homogeneous-aggregate rule at all: a struct of floats is an ordinary
+composite, where AAPCS64 would put it in v registers.
+
+The bug worth recording: the callee decided it had a hidden result
+pointer from the return's SIZE, so every function returning a `long
+long` treated r0 as a buffer address and read its first parameter out of
+r1. Only a COMPOSITE returns in memory; eight bytes of scalar come back
+in r0:r1.
+
 **What it does not do yet, all refused by name:** `long double` (ARMv7-M has no FPU, so
 every operation is an `__aeabi_*` call), aggregates by value, varargs,
 atomics, inline asm, VLAs, computed goto, exceptions and `-g`. There is

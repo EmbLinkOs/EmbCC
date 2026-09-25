@@ -89,6 +89,8 @@ struct t_fn {
     struct t_sites *st;
     long *slot;          /* per-vreg byte offset from sp, -1 for none */
     long frame;          /* total bytes sp moves down by */
+    long scratch_at;     /* where fn->scratch_bytes begins */
+    long sret_slot;      /* where the hidden result pointer is kept, or -1 */
     int *label_off;      /* per label id, or -1 while unseen */
     struct { int at; int label; int cond; } *fix;
     int nfix, capfix;
@@ -213,31 +215,68 @@ static char *wide64_map(struct ir_func *fn)
  * nothing there and needs eight bytes here. Believing the IR's number
  * would put the fifth and sixth arguments on top of this function's
  * first local — which compiles, links, and returns the wrong answer. */
-/* AAPCS32 placement, shared by a call's arguments and a function's own
- * parameters so the two cannot disagree. Returns 1 when the argument
- * goes in registers, filling *reg with the first of them; otherwise 0,
- * with *stk holding its offset in the outgoing area. `ncrn` and `stk`
- * carry the running state.
+/* AAPCS32 argument placement, shared by a call's arguments and a
+ * function's own parameters so the two cannot disagree.
  *
- * An eight-byte scalar is EIGHT-ALIGNED, which means the register
- * number is rounded up to even before it is taken -- and that in turn
- * means such an argument never splits across r3 and the stack, because
- * rounding leaves either two registers or none. */
-static int place_arg(int size, int *ncrn, long *stk, int *reg)
+ * Fills `p` with where the argument goes: `nreg` words starting at
+ * register `reg`, then `nstk` words at offset `stk` in the outgoing
+ * area. A COMPOSITE may be both at once — with three words already
+ * placed and a two-word struct to pass, r3 takes its first word and the
+ * stack its second. Checked against clang for this triple, which is
+ * where the splitting was confirmed rather than assumed.
+ *
+ * `align` is the type's, and only 8 matters: it rounds the register
+ * number up to even, and the stack offset with it. A `long long` is
+ * therefore never split, because rounding leaves two registers or none. */
+struct argplace { int reg, nreg, nstk; long stk; };
+
+static void place_arg(int size, int align, int *ncrn, long *stk,
+                      struct argplace *p)
 {
-    int words = size > 4 ? 2 : 1;
-    if (words == 2)
+    int words = (size + 3) / 4;
+
+    if (align >= 8) {
         *ncrn = (*ncrn + 1) & ~1;
-    if (*ncrn + words <= 4) {
-        *reg = *ncrn;
-        *ncrn += words;
-        return 1;
-    }
-    *ncrn = 4;
-    if (words == 2)
         *stk = (*stk + 7) & ~7L;
-    *reg = -1;
-    return 0;
+    }
+    p->reg = *ncrn;
+    p->nreg = *ncrn < 4 ? (words < 4 - *ncrn ? words : 4 - *ncrn) : 0;
+    p->nstk = words - p->nreg;
+    p->stk = *stk;
+    *ncrn += p->nreg;
+    if (p->nstk) {
+        *ncrn = 4;                     /* nothing may back-fill past a split */
+        *stk += (long)p->nstk * 4;
+    }
+}
+
+/* Does a call return its result through a hidden pointer? AAPCS32
+ * returns a COMPOSITE of four bytes or fewer in r0 and a larger one in
+ * memory, with the caller's buffer address passed as an implicit FIRST
+ * argument in r0 — so the real arguments start at r1.
+ *
+ * Only a composite. A `long long` is eight bytes and comes back in
+ * r0:r1 like any other scalar; asking about size alone made every
+ * 64-bit-returning function treat r0 as a buffer address and read its
+ * first parameter out of r1. */
+static int sret_bytes(int retsize) { return retsize > 4 ? retsize : 0; }
+
+static int fn_sret_bytes(const struct ir_func *fn)
+{
+    return fn->ret_abi.is_struct ? sret_bytes(fn->ret_abi.size) : 0;
+}
+
+/* What an argument's alignment is for placement purposes. A composite
+ * carries its own; a SCALAR does not, and an eight-byte one is
+ * eight-aligned — which is what rounds the register number up to even.
+ * Asking only composites (an earlier shape of this) put `long long` in
+ * whichever register came next, so f(int, long long, ...) passed it in
+ * r1:r2 where every other toolchain passes it in r2:r3. */
+static int arg_align(const struct ir_arg *a)
+{
+    if (a->is_struct)
+        return a->align ? a->align : 4;
+    return a->size > 4 ? 8 : 4;
 }
 
 static long outgoing_area(const struct ir_func *fn)
@@ -245,14 +284,16 @@ static long outgoing_area(const struct ir_func *fn)
     long most = 0;
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
-        int ncrn = 0, reg;
+        struct argplace pl;
+        int ncrn = 0;
         long stk = 0;
         if (i->op != IR_CALL)
             continue;
-        for (int k = 0; k < i->nargs; k++) {
-            if (!place_arg(i->argv[k].size, &ncrn, &stk, &reg))
-                stk += i->argv[k].size > 4 ? 8 : 4;
-        }
+        if (sret_bytes(i->retsize))
+            ncrn = 1;                  /* r0 holds the result's address */
+        for (int k = 0; k < i->nargs; k++)
+            place_arg(i->argv[k].size, arg_align(&i->argv[k]),
+                      &ncrn, &stk, &pl);
         if (stk > most)
             most = stk;
     }
@@ -287,7 +328,18 @@ static void layout(struct t_fn *F)
         F->slot[v] = off;
         off += size;
     }
-    off += fn->scratch_bytes;
+    F->scratch_at = (off + 7) & ~7L;
+    off = F->scratch_at + fn->scratch_bytes;
+    /* A function that returns a composite in memory is handed the
+     * address to write it to in r0, and must still have it at the
+     * return — which may be many calls later, and r0 survives none of
+     * them. It lives on the frame. */
+    F->sret_slot = -1;
+    if (fn_sret_bytes(fn)) {
+        off = (off + 3) & ~3L;
+        F->sret_slot = off;
+        off += 4;
+    }
     /* Eight, not four: AAPCS32 requires sp to be eight-byte aligned at
      * every public interface, and the push above already moved it by a
      * multiple of eight. */
@@ -1251,32 +1303,92 @@ static void gen_ins(struct t_fn *F, int n)
          * slots from sp. An eight-byte argument would round the register
          * number up to even and take two — refused above with everything
          * else 64-bit, so the placement here stays the simple one. */
-        int ncrn = 0, reg;
+        int ncrn = 0;
         long stk = 0;
+        long sret = sret_bytes(i->retsize);
+        /* The STACK words first, then the registers: writing a stack
+         * argument needs a scratch, and by the time r0-r3 are loaded
+         * there is none left that is not already an argument. */
+        struct argplace pl[MAX_PARAMS];
+        if (sret)
+            ncrn = 1;
         for (int k = 0; k < i->nargs; k++) {
             struct ir_arg *a = &i->argv[k];
-            int wide = a->size > 4;
-            if (a->is_struct)
-                t_refuse(fn, i, "an aggregate passed by value");
-            /* A float argument needs no special case: AAPCS's
-             * soft-float variant puts it in the core registers, which
-             * is where a->size already says to put it. */
-            if (place_arg(a->size, &ncrn, &stk, &reg)) {
-                if (wide) rd64(F, a->vreg, reg, reg + 1);
-                else      rd(F, a->vreg, reg);
-            } else if (wide) {
+            /* A struct of floats needs no special case either: the
+             * base AAPCS standard has no homogeneous-aggregate rule —
+             * that is the VFP variant's — so it travels in core
+             * registers like any other composite. */
+            place_arg(a->size, arg_align(a), &ncrn, &stk, &pl[k]);
+        }
+        for (int k = 0; k < i->nargs; k++) {
+            struct ir_arg *a = &i->argv[k];
+            if (!pl[k].nstk)
+                continue;
+            /* A composite's vreg holds its ADDRESS; a scalar's holds
+             * the value, and a scalar never splits. */
+            if (a->is_struct) {
+                rd(F, a->vreg, T_ADDR);
+                for (int q = 0; q < pl[k].nstk; q++) {
+                    long off = (long)(pl[k].nreg + q) * 4;
+                    int last = off + 4 > a->size;
+                    /* The tail of an odd-sized struct is copied byte by
+                     * byte: reading a whole word past the end of the
+                     * object would be a load nothing put there. */
+                    if (last && (a->size & 3)) {
+                        for (long b = off; b < a->size; b++) {
+                            t_ldst_imm(t, T_ACC, T_ADDR, b, 1, 0, 0);
+                            t_ldst_imm(t, T_ACC, T_SP,
+                                       pl[k].stk + (long)q * 4 + (b - off),
+                                       1, 0, 1);
+                        }
+                    } else {
+                        t_ldst_imm(t, T_ACC, T_ADDR, off, 4, 0, 0);
+                        t_ldst_imm(t, T_ACC, T_SP, pl[k].stk + (long)q * 4,
+                                   4, 0, 1);
+                    }
+                }
+            } else if (a->size > 4) {
                 rd64(F, a->vreg, T_ACC, T_TMP);
-                t_ldst_imm(t, T_ACC, T_SP, stk, 4, 0, 1);
-                t_ldst_imm(t, T_TMP, T_SP, stk + 4, 4, 0, 1);
-                stk += 8;
+                t_ldst_imm(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
+                t_ldst_imm(t, T_TMP, T_SP, pl[k].stk + 4, 4, 0, 1);
             } else {
                 rd(F, a->vreg, T_ACC);
-                t_ldst_imm(t, T_ACC, T_SP, stk, 4, 0, 1);
-                stk += 4;
+                t_ldst_imm(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
             }
         }
-        if (i->retsize && i->retnclass == 0)
-            t_refuse(fn, i, "a call returning an aggregate in memory");
+        for (int k = 0; k < i->nargs; k++) {
+            struct ir_arg *a = &i->argv[k];
+            if (!pl[k].nreg)
+                continue;
+            if (a->is_struct) {
+                rd(F, a->vreg, T_ADDR);
+                for (int q = 0; q < pl[k].nreg; q++) {
+                    long off = (long)q * 4;
+                    if (off + 4 > a->size && (a->size & 3)) {
+                        /* The last, partial word: assembled byte by
+                         * byte into its register. */
+                        t_mov_imm(t, pl[k].reg + q, 0, 0);
+                        for (long b = a->size - 1; b >= off; b--) {
+                            t_shift_imm(t, T_SH_LSL, pl[k].reg + q,
+                                        pl[k].reg + q, 8, 0);
+                            t_ldst_imm(t, T_ACC, T_ADDR, b, 1, 0, 0);
+                            t_alu_reg(t, T_OP_ORR, pl[k].reg + q,
+                                      pl[k].reg + q, T_ACC, 0);
+                        }
+                    } else {
+                        t_ldst_imm(t, pl[k].reg + q, T_ADDR, off, 4, 0, 0);
+                    }
+                }
+            } else if (a->size > 4) {
+                rd64(F, a->vreg, pl[k].reg, pl[k].reg + 1);
+            } else {
+                rd(F, a->vreg, pl[k].reg);
+            }
+        }
+        /* The hidden result pointer goes in LAST, so nothing above can
+         * have used r0 as a scratch after it was set. */
+        if (sret)
+            t_add_sp(t, T_R0, F->scratch_at + i->scratch);
         if (i->indirect) {
             rd(F, i->a, T_ACC);
             t_blx(t, T_ACC);
@@ -1286,13 +1398,55 @@ static void gen_ins(struct t_fn *F, int n)
             note_ext(F->st, t_bl(t), i->callee);
         }
         if (i->dst >= 0) {
-            if (F->wide[i->dst]) wr64(F, i->dst, T_R0, T_R1);
-            else                 wr(F, i->dst, T_R0);
+            if (i->retsize) {
+                /* dst receives the scratch's ADDRESS, which is the
+                 * contract irgen shares with the other backends. A
+                 * four-byte composite came back in r0 and has to be
+                 * stored there first; a larger one the callee already
+                 * wrote through the pointer. */
+                if (!sret_bytes(i->retsize)) {
+                    t_add_sp(t, T_ADDR, F->scratch_at + i->scratch);
+                    t_ldst_imm(t, T_R0, T_ADDR, 0, i->retsize, 0, 1);
+                }
+                t_add_sp(t, T_ACC, F->scratch_at + i->scratch);
+                wr(F, i->dst, T_ACC);
+            } else if (F->wide[i->dst]) {
+                wr64(F, i->dst, T_R0, T_R1);
+            } else {
+                wr(F, i->dst, T_R0);
+            }
         }
         return;
     }
 
     case IR_RET:
+        if (i->a >= 0 && fn->ret_abi.size && fn->ret_abi.is_struct) {
+            /* `a` holds the ADDRESS of the composite being returned.
+             * Four bytes or fewer come back in r0; anything larger is
+             * copied to the buffer the caller named, whose address is
+             * also what r0 must hold at the return. */
+            long n = fn->ret_abi.size;
+            rd(F, i->a, T_ADDR);
+            if (F->sret_slot >= 0) {
+                long k;
+                t_ldst_imm(t, T_TMP, T_SP, F->sret_slot, 4, 0, 0);
+                for (k = 0; k + 4 <= n; k += 4) {
+                    t_ldst_imm(t, T_ACC, T_ADDR, k, 4, 0, 0);
+                    t_ldst_imm(t, T_ACC, T_TMP, k, 4, 0, 1);
+                }
+                for (; k < n; k++) {
+                    t_ldst_imm(t, T_ACC, T_ADDR, k, 1, 0, 0);
+                    t_ldst_imm(t, T_ACC, T_TMP, k, 1, 0, 1);
+                }
+                t_mov_reg(t, T_R0, T_TMP);
+            } else {
+                /* Four bytes or fewer, in r0. A three-byte composite is
+                 * read as a word: it is at least four-byte aligned and
+                 * the high byte is padding the caller ignores. */
+                t_ldst_imm(t, T_R0, T_ADDR, 0, n == 3 ? 4 : (int)n, 0, 0);
+            }
+            goto ret_epilogue;
+        }
         if (i->a >= 0) {
             /* From the VALUE's width, not the instruction's: IR_RET
              * carries no `w` at all, so asking it returns zero and a
@@ -1305,6 +1459,7 @@ static void gen_ins(struct t_fn *F, int n)
          * function, so there is one place that knows the frame size --
          * except the LAST instruction, which the epilogue already
          * follows. */
+    ret_epilogue:
         if (n + 1 < fn->nins)
             jump_to(F, fn->nlabels);
         return;
@@ -1446,32 +1601,39 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
      * registers; the prologue writes each to its slot, which is what
      * every later reference reads. */
     {
-        int ncrn = 0, reg;
+        struct argplace pl;
+        int ncrn = 0;
         long stk = 0;
         long base = F.frame + SAVE_BYTES;   /* the caller's outgoing area */
+        if (F.sret_slot >= 0) {
+            t_ldst_imm(t, T_R0, T_SP, F.sret_slot, 4, 0, 1);
+            ncrn = 1;
+        }
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
-            int wide = a->size > 4;
-            if (a->is_struct)
-                t_refuse(fn, NULL, "an aggregate parameter");
-            if (place_arg(a->size, &ncrn, &stk, &reg)) {
-                if (wide) wr64(&F, i, reg, reg + 1);
-                else if (!t_ldst_imm(t, reg, T_SP, F.slot[i], 4, 0, 1)) {
-                    t_add_sp(t, T_ADDR, F.slot[i]);
-                    t_ldst_imm(t, reg, T_ADDR, 0, 4, 0, 1);
+            place_arg(a->size, arg_align(a), &ncrn, &stk, &pl);
+            /* Every parameter lands in its own local's slot, which is
+             * where the body reads it. A composite's slot IS the
+             * composite, so the words go straight into it. */
+            for (int q = 0; q < pl.nreg; q++) {
+                long off = F.slot[i] + (long)q * 4;
+                int wid = (long)(q + 1) * 4 > a->size ? (a->size & 3) : 4;
+                if (wid == 3) wid = 4;       /* a three-byte tail: store 4 */
+                if (!t_ldst_imm(t, pl.reg + q, T_SP, off, wid == 4 ? 4 : wid,
+                                0, 1)) {
+                    t_add_sp(t, T_ADDR, off);
+                    t_ldst_imm(t, pl.reg + q, T_ADDR, 0, wid == 4 ? 4 : wid,
+                               0, 1);
                 }
-            } else {
-                /* On the stack, where the caller left it: above this
-                 * frame and above the registers the prologue saved. */
-                t_ldst_imm(t, T_ACC, T_SP, base + stk, 4, 0, 0);
-                if (wide)
-                    t_ldst_imm(t, T_TMP, T_SP, base + stk + 4, 4, 0, 0);
-                if (wide) wr64(&F, i, T_ACC, T_TMP);
-                else if (!t_ldst_imm(t, T_ACC, T_SP, F.slot[i], 4, 0, 1)) {
-                    t_add_sp(t, T_ADDR, F.slot[i]);
+            }
+            for (int q = 0; q < pl.nstk; q++) {
+                long src = base + pl.stk + (long)q * 4;
+                long dst = F.slot[i] + (long)(pl.nreg + q) * 4;
+                t_ldst_imm(t, T_ACC, T_SP, src, 4, 0, 0);
+                if (!t_ldst_imm(t, T_ACC, T_SP, dst, 4, 0, 1)) {
+                    t_add_sp(t, T_ADDR, dst);
                     t_ldst_imm(t, T_ACC, T_ADDR, 0, 4, 0, 1);
                 }
-                stk += wide ? 8 : 4;
             }
         }
     }

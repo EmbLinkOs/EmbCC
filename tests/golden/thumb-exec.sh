@@ -141,4 +141,67 @@ for opt in -O0 -O1 -O2 -Os; do
 done
 echo "thumb-float: IEEE results are bit-identical to the host at four levels"
 
+# Aggregates by value, against the host — what a struct's members add
+# up to does not depend on the machine.
+cc -std=c99 -w -o "$out/hostagg" tests/golden/thumb-aggregate.c \
+   tests/harness/thumb/hostio.c || {
+    echo "the aggregate program does not compile for the host"; exit 1; }
+"$out/hostagg" > "$out/agg-ref.txt" || {
+    echo "the aggregate program failed on the host"; exit 1; }
+for opt in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T $opt -c tests/golden/thumb-aggregate.c \
+             -o "$out/ag$opt.o" || {
+        echo "$opt: the aggregate program does not compile"; exit 1; }
+    sh "$H/link.sh" "$out/ag$opt.elf" "$out/ag$opt.o" "$out/softfp.o" \
+       "$out/int64.o" || { echo "$opt: could not link"; exit 1; }
+    sh "$H/run.sh" "$out/ag$opt.elf" > "$out/ag$opt.txt" 2>&1
+    grep -q '==END==' "$out/ag$opt.txt" || {
+        echo "$opt: the aggregate image did not finish:"
+        sed -n '1,10p' "$out/ag$opt.txt"; exit 1; }
+    diff -u "$out/agg-ref.txt" "$out/ag$opt.txt" > "$out/ag$opt.diff" || {
+        echo "aggregates at $opt do not agree with the host:"
+        head -20 "$out/ag$opt.diff"; exit 1; }
+done
+echo "thumb-aggregate: by-value structs agree with the host at four levels"
+
+# And the question the host cannot answer: are they passed the way
+# ANOTHER ARM toolchain passes them? The caller and the callee are
+# compiled by different compilers, in both directions, and linked
+# together — so a disagreement about which register a composite starts
+# in shows up as a wrong number rather than as nothing at all.
+abi_pair() {                    # abi_pair CALLER CALLEE TAG
+    for side in caller callee; do
+        eval "cc_$side=\$$( [ $side = caller ] && echo 1 || echo 2 )"
+    done
+    for side in caller callee; do
+        eval "which=\$cc_$side"
+        if [ "$which" = clang ]; then
+            "$CLANG" -target $T -ffreestanding -O1 -I tests/golden \
+                -c "tests/golden/thumb-abi-$side.c" -o "$out/$3-$side.o" || \
+                { echo "$3: clang could not compile the $side"; return 1; }
+        else
+            "$EMBCC" --target=$T -O1 -I tests/golden \
+                -c "tests/golden/thumb-abi-$side.c" -o "$out/$3-$side.o" || \
+                { echo "$3: EmbCC could not compile the $side"; return 1; }
+        fi
+    done
+    sh "$H/link.sh" "$out/$3.elf" "$out/$3-caller.o" "$out/$3-callee.o" \
+       "$out/int64.o" || { echo "$3: could not link"; return 1; }
+    sh "$H/run.sh" "$out/$3.elf" > "$out/$3.txt" 2>&1
+    grep -q '==END==' "$out/$3.txt" || {
+        echo "$3: the image did not finish:"; sed -n '1,6p' "$out/$3.txt"
+        return 1; }
+    return 0
+}
+abi_pair embcc embcc ee || exit 1
+abi_pair embcc clang ec || exit 1
+abi_pair clang embcc ce || exit 1
+abi_pair clang clang cc || exit 1
+for tag in ec ce cc; do
+    diff -u "$out/ee.txt" "$out/$tag.txt" > "$out/$tag.abidiff" || {
+        echo "the $tag pairing disagrees with EmbCC calling itself:"
+        head -12 "$out/$tag.abidiff"; exit 1; }
+done
+echo "thumb-abi: EmbCC and clang call each other's aggregates identically"
+
 echo "ARMv7-M images build with embld and run on $QEMU"
