@@ -79,6 +79,7 @@ SRCS := \
 	src/arch/aarch64/asm.c \
 	src/arch/aarch64/predef.c \
 	src/arch/aarch64/predef_cxx.c \
+	src/arch/thumb/emit.c \
 	src/arch/thumb/predef.c \
 	src/arch/thumb/predef_cxx.c
 
