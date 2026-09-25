@@ -176,6 +176,7 @@ static const int *x86_fp_pool_for(const struct ir_func *fn, int *n)
  * narrow load is a plain move. */
 static int ldvar_plain(int size, int sign, int w);
 static int is_callee_saved(int reg);
+static int i128_ins(const struct ir_ins *i);
 
 
 
@@ -185,13 +186,10 @@ static const struct ra_target X86_RA = {
     ldvar_plain,
     1, 1, 1,       /* this backend reads call arguments, scalar returns
                     * and memcpy addresses straight out of a register */
-    NULL           /* No op here lowers to a helper call behind the
-                    * allocator's back. __int128 does call libgcc, but a
-                    * function containing one is kept out of the
-                    * allocator entirely (fn->has_i128, below), and long
-                    * double is the x87 unit rather than a call. If that
-                    * blunt refusal is ever traded for the precise rule,
-                    * i128_ins is what belongs here. */,
+    i128_ins       /* __int128 multiply, divide, remainder, shift and
+                    * the float conversions are libgcc's, emitted here
+                    * with no IR_CALL for `crosses` to find. Saying so
+                    * is what let the blunt refusal below go. */,
     NULL           /* No ABI hints yet. The same three boundaries exist
                     * here -- a parameter's register, rax for a call's
                     * result and for a return -- and none of rdi/rsi/rax
@@ -1757,7 +1755,14 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * register). Restored at the single exit so other functions are unaffected. */
     int saved_regalloc = g_regalloc, saved_regcache = g_regcache;
     if (g_has_cgoto) { g_regalloc = 0; g_regcache = 0; }
-    if (fn->has_i128) { g_regalloc = 0; g_regcache = 0; }   /* (gen_i128) */
+    /* A function with an __int128 in it used to be kept out of the
+     * allocator ENTIRELY, because gen_i128's helper calls clobber the
+     * caller-saved registers and nothing told `crosses` about them.
+     * op_calls_helper tells it now, so only the 128-bit values
+     * themselves stay in memory -- they are `wide`, and were never
+     * eligible -- and every ordinary value in the function gets a
+     * register like any other. lib/rt/int128.c was 1445 instructions
+     * against gcc's 394 with the refusal in place. */
     g_wide = cg_wide_vregs(fn);
     int *vacc = vacc_regs(fn);
     g_vacc = vacc;
