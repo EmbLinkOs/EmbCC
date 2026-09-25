@@ -62,6 +62,8 @@ void a64_mov_imm(struct code *c, int rd, long imm, int w);
  * Refuses (returns 0) an immediate neither form can hold; callers that may
  * exceed it materialise the value instead. */
 int  a64_add_imm(struct code *c, int rd, int rn, long imm, int w);
+int  a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w);
+int  a64_shift_imm(struct code *c, int op, int rd, int rn, int shift, int w);
 int  a64_sub_imm(struct code *c, int rd, int rn, long imm, int w);
 /* op: '+' '-' '&' '|' '^' */
 void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w);

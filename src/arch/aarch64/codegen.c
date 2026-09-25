@@ -1949,6 +1949,22 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 /* not encodable: fall through to the register form,
                  * which re-reads `a` -- free, it is already in ra2 */
             }
+            /* ...and the bitwise ops take a LOGICAL immediate, which
+             * the note above called fussier and left alone. It is
+             * fussier, and it is also exactly the shape masks come in:
+             * every one of the 339 and/or/xor immediates across
+             * lib/libc and lib/libcxx encodes, and each was costing a
+             * `mov` -- up to four instructions for a wide constant --
+             * and a register to hold it. */
+            if (i->imm_b &&
+                (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR)) {
+                int ra2 = rd(t, sd, i->a, A64_ACC);
+                int d2 = wr(i->dst, A64_ACC);
+                if (a64_logical_imm(t, op, d2, ra2, imm_at_w(i), i->w)) {
+                    wrote(t, sd, i->dst, d2);
+                    break;
+                }
+            }
             int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
             int d = wr(i->dst, A64_ACC);
             a64_alu_reg(t, op, d, ra, rb, i->w);
@@ -1986,10 +2002,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             break;
 
         case IR_SHL: case IR_SHR: {
+            int kind = i->op == IR_SHL ? '<' : (i->sign ? '>' : 'u');
+            /* A constant count is the bitfield-move alias, with no
+             * register to materialise it in. */
+            if (i->imm_b) {
+                int ra2 = rd(t, sd, i->a, A64_ACC);
+                int d2 = wr(i->dst, A64_ACC);
+                if (a64_shift_imm(t, kind, d2, ra2, (int)i->imm, i->w)) {
+                    wrote(t, sd, i->dst, d2);
+                    break;
+                }
+            }
             int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
             int d = wr(i->dst, A64_ACC);
-            a64_shift_reg(t, i->op == IR_SHL ? '<' : (i->sign ? '>' : 'u'),
-                          d, ra, rb, i->w);
+            a64_shift_reg(t, kind, d, ra, rb, i->w);
             wrote(t, sd, i->dst, d);
             break;
         }

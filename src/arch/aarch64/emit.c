@@ -148,6 +148,114 @@ void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w)
                 ((unsigned long)rn << 5) | (unsigned long)rd);
 }
 
+/* AND / ORR / EOR with a LOGICAL IMMEDIATE.
+ *
+ * AArch64 has no 12-bit immediate for the bitwise ops the way it does
+ * for add and subtract. What it has instead is better for the masks
+ * programs actually write: a "bitmask immediate" is any value that is a
+ * repeating run of ones, rotated -- 0xff, 0xffff, 0x7fffffff,
+ * 0xfffff000, 0x5555555555555555 and so on. Every one of the 339
+ * and/or/xor immediates across lib/libc and lib/libcxx encodes, and
+ * each was costing a `mov` (up to four of them for a wide constant)
+ * and a register.
+ *
+ * The field is N:immr:imms. immr is the rotation; imms carries both the
+ * element size and the length of the run, in a unary prefix:
+ * 0b1nnnnnn for a 64-bit element (with N=1), 0b00nnnnn for 32, 0b10nnnn
+ * for 16, 0b110nnn for 8, 0b1110nn for 4, 0b11110n for 2. The rotation
+ * is found by trying all of them, which is at most 64 tries and is what
+ * the encoding means.
+ *
+ * Returns 0 when the value is not a bitmask immediate, having emitted
+ * nothing, so the caller can fall back to materialising it. */
+static int a64_bitmask_imm(unsigned long imm, int w, unsigned long *field)
+{
+    int bits = w == 8 ? 64 : 32;
+    if (bits == 32) {
+        imm &= 0xffffffffUL;
+        imm |= imm << 32;                    /* the encoding is 64-bit */
+    }
+    if (imm == 0 || imm == ~0UL)
+        return 0;                            /* neither is encodable */
+    /* the smallest element the value is a repetition of */
+    int size = 64;
+    while (size > 2) {
+        int half = size >> 1;
+        unsigned long mask = (half == 64) ? ~0UL : ((1UL << half) - 1);
+        if ((imm & mask) != ((imm >> half) & mask))
+            break;
+        size = half;
+    }
+    unsigned long mask = (size == 64) ? ~0UL : ((1UL << size) - 1);
+    unsigned long elem = imm & mask;
+    if (elem == 0 || elem == mask)
+        return 0;
+    if (bits == 32 && size == 64)
+        return 0;                            /* N must be 0 at 32 bits */
+    for (int rot = 0; rot < size; rot++) {
+        unsigned long r = rot == 0 ? elem
+                        : ((elem >> rot) | (elem << (size - rot))) & mask;
+        int n = 0;
+        for (unsigned long b = r; b; b &= b - 1) n++;
+        unsigned long ones = (n == 64) ? ~0UL : ((1UL << n) - 1);
+        if (r != ones)
+            continue;
+        unsigned long imms = ((~((unsigned long)size - 1) << 1) & 0x3f) |
+                             (unsigned long)(n - 1);
+        /* immr rotates the CONTIGUOUS form into the value, and `rot`
+         * above rotates the value into the contiguous form -- the two
+         * are inverses, which the assembler's own encoding of
+         * `and w0,w1,#0xfffff` said plainly. */
+        unsigned long immr = (unsigned long)((size - rot) % size);
+        *field = ((unsigned long)(size == 64) << 22) |
+                 (immr << 16) | (imms << 10);
+        return 1;
+    }
+    return 0;
+}
+
+int a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w)
+{
+    unsigned long field, base;
+    if (!a64_bitmask_imm((unsigned long)imm, w, &field))
+        return 0;
+    switch (op) {
+    case '&': base = 0x12000000UL; break;    /* AND (immediate) */
+    case '|': base = 0x32000000UL; break;    /* ORR */
+    case '^': base = 0x52000000UL; break;    /* EOR */
+    default: return 0;
+    }
+    a64_word(c, base | sf(w) | field |
+                ((unsigned long)rn << 5) | (unsigned long)rd);
+    return 1;
+}
+
+/* LSL / LSR / ASR by a constant. All three are aliases of the bitfield
+ * moves, which is why they are not in a64_shift_reg: UBFM with the
+ * rotation and width picked for the direction, SBFM for the arithmetic
+ * right shift. A shift count is a constant far more often than not, and
+ * each one was `mov` into a register first. */
+int a64_shift_imm(struct code *c, int op, int rd, int rn, int shift, int w)
+{
+    int bits = w == 8 ? 64 : 32;
+    unsigned long immr, imms, base;
+    if (shift < 0 || shift >= bits)
+        return 0;
+    if (op == '<') {                              /* LSL: UBFM */
+        immr = (unsigned long)((bits - shift) % bits);
+        imms = (unsigned long)(bits - 1 - shift);
+        base = 0x53000000UL;
+    } else {                                      /* LSR / ASR */
+        immr = (unsigned long)shift;
+        imms = (unsigned long)(bits - 1);
+        base = op == '>' ? 0x13000000UL : 0x53000000UL;  /* SBFM / UBFM */
+    }
+    if (w == 8) base |= 0x80400000UL;             /* sf=1 and N=1 */
+    a64_word(c, base | (immr << 16) | (imms << 10) |
+                ((unsigned long)rn << 5) | (unsigned long)rd);
+    return 1;
+}
+
 void a64_mul(struct code *c, int rd, int rn, int rm, int w)
 {
     /* MUL is MADD Rd, Rn, Rm, ZR. */
