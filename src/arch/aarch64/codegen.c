@@ -225,6 +225,9 @@ static const struct ra_target A64_RA = {
                     * memcpy's addresses are still read from their
                     * slots, so those values have to stay there. */
     a64_op_calls_helper,
+    0,             /* three-operand ALU: `fadd d, a, b` needs no move,
+                    * so forcing d and a together only constrains the
+                    * colourer -- measured at +880 bytes. */
     a64_abi_hints,
     a64_fp_pool_for, a64_fp_callee_saved
 };

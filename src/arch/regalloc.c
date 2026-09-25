@@ -585,7 +585,22 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
              * ask, so a narrowing copy between merged vregs would
              * become a move from a register to itself and truncate
              * nothing. */
-            if (in->op != IR_MOV &&
+            int alu = 0;
+            switch (in->op) {
+            case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+            case IR_AND: case IR_OR: case IR_XOR:
+            case IR_SHL: case IR_SHR:
+                /* A two-operand machine computes `d = a op b` as
+                 * `d = a; d op= b`, so d and a want the same register
+                 * and the move is the price of not getting it. They can
+                 * only share one when a dies here -- which is exactly
+                 * what "they do not interfere" means. x86-64's SSE is
+                 * two-operand too, and __ieee754_atan2 was paying 49
+                 * movaps for it. */
+                alu = t->alu_dst_is_lhs; break;
+            default: break;
+            }
+            if (!alu && in->op != IR_MOV &&
                 !(in->op == IR_LDVAR &&
                   t->ldvar_plain(in->size, in->sign, in->w)) &&
                 !(in->op == IR_STVAR && in->size >= 8))

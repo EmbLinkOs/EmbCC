@@ -107,6 +107,15 @@ struct ra_target {
      * is what makes a caller-saved pool sound. */
     int (*op_calls_helper)(const struct ir_ins *i);
 
+    /* Does `d = a op b` write its destination OVER its first operand?
+     * A two-operand machine (x86-64, and its SSE too) computes it as
+     * `d = a; d op= b`, so d and a want one register and the move is
+     * the price of not getting it -- worth coalescing for. A
+     * three-operand one (aarch64) needs no move either way, and forcing
+     * d and a together only constrains the colourer: it costs 880 bytes
+     * there and saves 2545 here. */
+    int alu_dst_is_lhs;
+
     /* The register the ABI would like each vreg to be in, or -1: a
      * parameter in the one it arrives in, a call's result and a
      * returned value in the return register. Filled once per function

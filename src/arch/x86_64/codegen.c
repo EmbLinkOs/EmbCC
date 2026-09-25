@@ -186,10 +186,12 @@ static const struct ra_target X86_RA = {
     ldvar_plain,
     1, 1, 1,       /* this backend reads call arguments, scalar returns
                     * and memcpy addresses straight out of a register */
-    i128_ins       /* __int128 multiply, divide, remainder, shift and
+    i128_ins,      /* __int128 multiply, divide, remainder, shift and
                     * the float conversions are libgcc's, emitted here
                     * with no IR_CALL for `crosses` to find. Saying so
-                    * is what let the blunt refusal below go. */,
+                    * is what let the blunt refusal below go. */
+    1,             /* two-operand ALU: `addsd d, b` means `d += b`, so d
+                    * and a want one register -- worth coalescing. */
     NULL           /* No ABI hints yet. The same three boundaries exist
                     * here -- a parameter's register, rax for a call's
                     * result and for a return -- and none of rdi/rsi/rax
