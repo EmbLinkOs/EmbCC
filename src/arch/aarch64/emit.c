@@ -235,6 +235,36 @@ int a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w)
  * rotation and width picked for the direction, SBFM for the arithmetic
  * right shift. A shift count is a constant far more often than not, and
  * each one was `mov` into a register first. */
+/* STP / LDP: two 64-bit registers in one instruction.
+ *
+ * The callee-saved registers the allocator takes were being saved and
+ * restored one at a time -- 793 stores and 794 loads across lib/libc
+ * and lib/libcxx, where gcc does the same work in 475 paired
+ * instructions. They sit at consecutive eight-byte offsets, which is
+ * exactly what the paired form wants.
+ *
+ * The offset is a signed 7-bit immediate scaled by eight, so
+ * -512..504; outside that the caller keeps the single form. */
+int a64_stp(struct code *c, int rt, int rt2, int rn, long off)
+{
+    if (off % 8 || off < -512 || off > 504)
+        return 0;
+    a64_word(c, 0xA9000000UL | (((unsigned long)(off / 8) & 0x7f) << 15) |
+                ((unsigned long)rt2 << 10) | ((unsigned long)rn << 5) |
+                (unsigned long)rt);
+    return 1;
+}
+
+int a64_ldp(struct code *c, int rt, int rt2, int rn, long off)
+{
+    if (off % 8 || off < -512 || off > 504)
+        return 0;
+    a64_word(c, 0xA9400000UL | (((unsigned long)(off / 8) & 0x7f) << 15) |
+                ((unsigned long)rt2 << 10) | ((unsigned long)rn << 5) |
+                (unsigned long)rt);
+    return 1;
+}
+
 int a64_shift_imm(struct code *c, int op, int rd, int rn, int shift, int w)
 {
     int bits = w == 8 ? 64 : 32;

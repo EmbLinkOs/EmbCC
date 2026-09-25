@@ -383,11 +383,29 @@ void x86_prologue(struct code *c, int framesize, int frameless)
     code_byte(c, 0x55);                     /* push rbp */
     code_byte(c, 0x48); code_byte(c, 0x89); /* mov rbp, rsp */
     code_byte(c, 0xe5);
-    if (framesize > 0) {
-        code_byte(c, 0x48); code_byte(c, 0x81); /* sub rsp, imm32 */
-        code_byte(c, 0xec);
-        code_u32(c, (unsigned long)framesize);
-    }
+    x86_sub_rsp(c, framesize);
+}
+
+/* The frame reservation on its own, so the callee-saved registers can
+ * be PUSHED between the frame record and it. A push is one byte (two
+ * for r8-r15) where storing the register to its slot is four or five,
+ * and the slots are the top of the frame already -- pushing them in
+ * reverse slot order lands each exactly where the epilogue reads it,
+ * so nothing else in the layout moves. */
+void x86_sub_rsp(struct code *c, int bytes)
+{
+    if (bytes <= 0)
+        return;
+    code_byte(c, 0x48); code_byte(c, 0x81);   /* sub rsp, imm32 */
+    code_byte(c, 0xec);
+    code_u32(c, (unsigned long)bytes);
+}
+
+/* push/pop a 64-bit register: one byte, or two for r8-r15. */
+void x86_push_reg(struct code *c, int reg)
+{
+    if (reg & 8) code_byte(c, 0x41);
+    code_byte(c, 0x50 | (reg & 7));
 }
 
 void x86_epilogue(struct code *c, int frameless)

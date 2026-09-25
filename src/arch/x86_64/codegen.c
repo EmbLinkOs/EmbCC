@@ -2273,15 +2273,26 @@ static void gen_func(struct ir_func *fn, struct code *text,
     code_align(text, 16, 0x90);
     f->code_off = text->len;
 
-    x86_prologue(text, frame, frameless);
+    /* The frame record, then the callee-saved registers, then the rest
+     * of the frame. They go out as PUSHES: the save area is the top of
+     * the frame (layout_frame puts it first, so slot k is at
+     * rbp-(nsave-k)*8), which is exactly where pushing them in reverse
+     * slot order lands them. One byte each, or two above r8, against
+     * four or five for `mov %reg,disp(%rbp)` -- 627 of those across
+     * lib/libc and lib/libcxx. The epilogue still reads the slots, and
+     * every displacement in the frame is unchanged, because the pushes
+     * and the smaller `sub` move rsp by exactly what the `sub` alone
+     * moved it by before. */
+    x86_prologue(text, frameless ? frame : 0, frameless);
     /* for the unwind tables: push rbp ends at +1, mov rbp,rsp at +4 */
     f->cfi_frameless = frameless;
     f->cfi_push = 1;
     f->cfi_frame = 4;
-    /* -O2: preserve the callee-saved registers the allocator uses (this
-     * function is responsible for them across its own body and its callers). */
-    for (int k = 0; k < nsave; k++)
-        x86_store_mem_reg(text, REG_RBP, save_base + k * 8, used_callee[k], 8);
+    if (!frameless) {
+        for (int k = nsave - 1; k >= 0; k--)
+            x86_push_reg(text, used_callee[k]);
+        x86_sub_rsp(text, frame - nsave * 8);
+    }
     f->cfi_nsaved = nsave;
     for (int k = 0; k < nsave; k++) {
         /* DWARF numbers the registers rax rdx rcx rbx rsi rdi rbp rsp */

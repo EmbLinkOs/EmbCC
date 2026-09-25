@@ -1672,10 +1672,22 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * unwind tables carry a single "and here they are all saved"
      * offset, and x19's save below joins the same list. */
     for (int k = 0; k < nsave; k++) {
-        a64_str(t, used_callee[k], A64_SP, save_base + k * 8, 8);
-        f->cfi_reg[f->cfi_nsaved] = used_callee[k];
-        f->cfi_off[f->cfi_nsaved] = save_base + k * 8 - fr.size - 16;
-        f->cfi_nsaved++;
+        /* Two at a time where two are left and the offset reaches: the
+         * slots are consecutive eightbytes, which is exactly what the
+         * paired form takes. The CFI still records each register with
+         * its own offset -- the unwinder restores registers, not
+         * instructions. */
+        int pair = k + 1 < nsave &&
+                   a64_stp(t, used_callee[k], used_callee[k + 1], A64_SP,
+                           save_base + k * 8);
+        if (!pair)
+            a64_str(t, used_callee[k], A64_SP, save_base + k * 8, 8);
+        for (int q = 0; q <= pair; q++) {
+            f->cfi_reg[f->cfi_nsaved] = used_callee[k + q];
+            f->cfi_off[f->cfi_nsaved] = save_base + (k + q) * 8 - fr.size - 16;
+            f->cfi_nsaved++;
+        }
+        k += pair;
     }
     if (nsave)
         f->cfi_saved_at = t->len - f->code_off;
@@ -2770,8 +2782,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * wherever the last allocation left it: x29 knows where the frame
      * record is, and x19 is restored from the pinned frame first. */
     int epi = t->len;
-    for (int k = 0; k < nsave; k++)
-        a64_ldr(t, used_callee[k], FB, save_base + k * 8, 8, 0, 8);
+    for (int k = 0; k < nsave; k++) {
+        int pair = k + 1 < nsave &&
+                   a64_ldp(t, used_callee[k], used_callee[k + 1], FB,
+                           save_base + k * 8);
+        if (!pair)
+            a64_ldr(t, used_callee[k], FB, save_base + k * 8, 8, 0, 8);
+        k += pair;
+    }
     if (fn->has_alloca) {
         a64_ldr(t, A64_FBREG, A64_FBREG, fr.fb_save, 8, 0, 8);
         a64_word(t, 0x910003BFUL);                   /* mov sp, x29 */
