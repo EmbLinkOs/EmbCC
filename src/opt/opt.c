@@ -2209,6 +2209,16 @@ static int pass_divmagic(struct ir_func *fn)
 {
     if (fn->nins == 0)
         return 0;
+    /* The transform replaces a 32-bit divide with a 64-bit multiply and
+     * takes the high half, which needs a machine with 64-bit registers.
+     * On ARMv7-M it would need a legalisation pass to become the umull
+     * the hardware actually has -- and it would be a LOSS there anyway:
+     * the Cortex-M3 and up have `sdiv` and `udiv` in hardware, two bytes
+     * each, where the magic sequence is a multiply, a shift and a
+     * correction. So it is off where a pointer is four bytes, and the
+     * divide stays a divide. */
+    if (target_ptr_size() < 8)
+        return 0;
     struct defs d;
     compute_defs(fn, &d);
     struct ibuf nb = { 0, 0, 0 };

@@ -78,6 +78,26 @@ for opt in -O0 -O1 -O2 -Os; do
 done
 echo "the sample compiles at four optimisation levels and every instruction decodes"
 
+# The wider program: structs, two-dimensional arrays, switch, recursion,
+# a function pointer, do/while with break and continue, bit counting,
+# signed and unsigned division and modulo, and string traversal. Its
+# OUTPUT was checked against clang's for the same source, running both on
+# QEMU's Cortex-M3 — which is where the opcode table that turned `and`
+# into `eor` was caught. Without a linker in the tree that comparison
+# cannot run here yet, so what this checks is that it still compiles and
+# still decodes.
+for opt in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T $opt -c tests/golden/thumb-stress.c \
+             -o "$out/stress$opt.o" || {
+        echo "$opt: the stress program does not compile"; exit 1; }
+    "$OD" -d --triple=thumbv7m "$out/stress$opt.o" > "$out/sdis$opt.txt"
+    bad=$(grep -c "unknown\|<invalid>" "$out/sdis$opt.txt" || true)
+    [ "$bad" = 0 ] || {
+        echo "$opt: $bad instructions of the stress program do not decode"
+        exit 1; }
+done
+echo "the stress program compiles and decodes at four levels too"
+
 # The object's shape, which is what a linker checks before anything else.
 "$RE" -h "$out/prog-O2.o" > "$out/hdr.txt"
 grep -q "Class:  *ELF32" "$out/hdr.txt" || {

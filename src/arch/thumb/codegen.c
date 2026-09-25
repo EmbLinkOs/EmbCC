@@ -184,6 +184,24 @@ static void wr(struct t_fn *F, int v, int reg)
     }
 }
 
+/* An instruction's SECOND operand, into `reg`.
+ *
+ * `b` is not always a vreg: the optimizer's immediate-fold pass moves a
+ * constant into `imm` and sets `imm_b`, after which `b` holds nothing
+ * and reading it as a vreg loads whatever happens to occupy that slot.
+ * The IR header lists that as an ADD/SUB/AND/OR/XOR/CMP flag; it is set
+ * on SHL, SHR and MUL too, which is how `t += p[i]` came out as
+ * 101255427 at -O1 — the index shift had folded its `#2` and the
+ * backend shifted by a stale word instead. So every binary operation
+ * asks HERE, and none of them reads i->b directly. */
+static void operand_b(struct t_fn *F, const struct ir_ins *i, int reg)
+{
+    if (i->imm_b)
+        t_mov_imm(F->t, reg, (long)i->imm, 0);
+    else
+        rd(F, i->b, reg);
+}
+
 /* The address of a local's slot, into `reg`. */
 static void addr_of_slot(struct t_fn *F, int v, int reg)
 {
@@ -333,20 +351,43 @@ static void gen_ins(struct t_fn *F, int n)
 
     case IR_ADD: case IR_SUB: case IR_MUL:
     case IR_AND: case IR_OR:  case IR_XOR: {
-        static const int alu[] = { T_OP_ADD, T_OP_SUB, 0,
-                                   T_OP_AND, T_OP_ORR, T_OP_EOR };
+        /* A switch and not a table indexed by (i->op - IR_ADD): IR_DIV
+         * and IR_MOD sit between IR_MUL and IR_AND, so a six-entry table
+         * turns `and` into `eor` and reads past its end for `or` and
+         * `xor`. It compiled, it ran, and `v & 1` came back as v & ~1. */
+        int op = i->op == IR_ADD ? T_OP_ADD
+               : i->op == IR_SUB ? T_OP_SUB
+               : i->op == IR_AND ? T_OP_AND
+               : i->op == IR_OR  ? T_OP_ORR
+               : i->op == IR_XOR ? T_OP_EOR
+               : 0;                          /* IR_MUL: not an ALU op */
         rd(F, i->a, T_ACC);
-        rd(F, i->b, T_TMP);
+        if (i->imm_b && i->op != IR_MUL) {
+            /* addw/subw reach any 0..4095 where the modified immediate
+             * reaches only what it can rotate into place, and almost
+             * every constant folded here is a small offset. */
+            if ((i->op == IR_ADD || i->op == IR_SUB) &&
+                i->imm >= 0 && i->imm <= 4095) {
+                if (i->op == IR_ADD) t_addw(t, T_ACC, T_ACC, i->imm);
+                else                 t_subw(t, T_ACC, T_ACC, i->imm);
+            } else if (!t_alu_imm(t, op, T_ACC, T_ACC, i->imm, 0)) {
+                operand_b(F, i, T_TMP);
+                t_alu_reg(t, op, T_ACC, T_ACC, T_TMP, 0);
+            }
+            wr(F, i->dst, T_ACC);
+            return;
+        }
+        operand_b(F, i, T_TMP);
         if (i->op == IR_MUL)
             t_mul(t, T_ACC, T_ACC, T_TMP);
         else
-            t_alu_reg(t, alu[i->op - IR_ADD], T_ACC, T_ACC, T_TMP, 0);
+            t_alu_reg(t, op, T_ACC, T_ACC, T_TMP, 0);
         wr(F, i->dst, T_ACC);
         return;
     }
     case IR_DIV: case IR_MOD:
         rd(F, i->a, T_ACC);
-        rd(F, i->b, T_TMP);
+        operand_b(F, i, T_TMP);
         t_div(t, T_ADDR, T_ACC, T_TMP, i->sign);
         if (i->op == IR_MOD) {
             /* There is no remainder instruction: r = a - (a / b) * b,
@@ -357,14 +398,18 @@ static void gen_ins(struct t_fn *F, int n)
             wr(F, i->dst, T_ADDR);
         }
         return;
-    case IR_SHL: case IR_SHR:
+    case IR_SHL: case IR_SHR: {
+        int sh = i->op == IR_SHL ? T_SH_LSL : i->sign ? T_SH_ASR : T_SH_LSR;
         rd(F, i->a, T_ACC);
-        rd(F, i->b, T_TMP);
-        t_shift_reg(t, i->op == IR_SHL ? T_SH_LSL
-                                       : i->sign ? T_SH_ASR : T_SH_LSR,
-                    T_ACC, T_ACC, T_TMP, 0);
+        if (i->imm_b && i->imm >= 0 && i->imm < 32) {
+            t_shift_imm(t, sh, T_ACC, T_ACC, (int)i->imm, 0);
+        } else {
+            operand_b(F, i, T_TMP);
+            t_shift_reg(t, sh, T_ACC, T_ACC, T_TMP, 0);
+        }
         wr(F, i->dst, T_ACC);
         return;
+    }
     case IR_NEG:
         rd(F, i->a, T_ACC);
         t_alu_imm(t, T_OP_RSB, T_ACC, T_ACC, 0, 0);
@@ -379,8 +424,12 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_CMP: {
         int cond = cond_for(i->pred, i->sign);
         rd(F, i->a, T_ACC);
-        rd(F, i->b, T_TMP);
-        t_cmp_reg(t, T_ACC, T_TMP);
+        if (i->imm_b && ((i->imm >= 0 && i->imm <= 255) || t_imm_ok(i->imm))) {
+            t_cmp_imm(t, T_ACC, i->imm);
+        } else {
+            operand_b(F, i, T_TMP);
+            t_cmp_reg(t, T_ACC, T_TMP);
+        }
         /* 0 or 1, without an IT block: set it, then jump over the
          * clear. Two instructions either way, and no flag-liveness
          * question to get wrong. */
@@ -389,6 +438,26 @@ static void gen_ins(struct t_fn *F, int n)
             int over = t_bcond(t, cond);
             t_mov_imm(t, T_ACC, 0, 0);
             t_patch_bcond(t, over, t->len);
+        }
+        wr(F, i->dst, T_ACC);
+        return;
+    }
+    case IR_SELECT: {
+        /* dst = a ? b : c. Thumb has conditional execution through an IT
+         * block, but both arms here are already-computed VALUES sitting
+         * in slots, so this is two loads and a branch over one of them —
+         * which needs no flag-liveness reasoning and is the same size. */
+        rd(F, i->a, T_ACC);
+        t_cmp_imm(t, T_ACC, 0);
+        {
+            int take_c = t_bcond(t, T_EQ);
+            rd(F, i->b, T_ACC);
+            {
+                int done = t_b(t);
+                t_patch_bcond(t, take_c, t->len);
+                rd(F, i->c, T_ACC);
+                t_patch_b(t, done, t->len);
+            }
         }
         wr(F, i->dst, T_ACC);
         return;
@@ -503,7 +572,7 @@ static void gen_ins(struct t_fn *F, int n)
         }
         if (i->retsize && i->retnclass == 0)
             t_refuse(fn, i, "a call returning an aggregate in memory");
-        if (i->a >= 0 && !i->callee) {
+        if (i->indirect) {
             rd(F, i->a, T_ACC);
             t_blx(t, T_ACC);
         } else if (i->callee->has_defn) {
