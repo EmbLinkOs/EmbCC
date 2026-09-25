@@ -43,6 +43,7 @@ int main(int argc, char **argv)
                                        : (++i < argc ? argv[i] : NULL);
             if (!v) { fprintf(stderr, "embld: -Ttext needs an address\n"); return 2; }
             opts.base = strtoul(v, NULL, 0);
+            opts.have_base = 1;        /* `-Ttext 0` is a real request */
         } else if (strncmp(argv[i], "--lma-offset", 12) == 0) {
             /* L2: p_paddr = p_vaddr - OFFSET, for a higher-half kernel (OFFSET =
              * KERNEL_VIRTUAL_BASE). Accepts --lma-offset=HEX or a separate arg. */
@@ -50,6 +51,17 @@ int main(int argc, char **argv)
                           : (++i < argc ? argv[i] : NULL);
             if (!v) { fprintf(stderr, "embld: --lma-offset needs a value\n"); return 2; }
             opts.lma_offset = strtoull(v, NULL, 0);
+        } else if (strncmp(argv[i], "-Tdata", 6) == 0) {
+            /* A FIRMWARE layout: the writable segment is addressed at
+             * this address (RAM) and stored right after the text
+             * (flash), and the linker provides __data_load /
+             * __data_start / __data_end / __bss_start / __bss_end so a
+             * plain C startup can copy and zero. Spelled -Tdata because
+             * that is what every other linker calls it. */
+            const char *v = argv[i][6] ? argv[i] + 6
+                                       : (++i < argc ? argv[i] : NULL);
+            if (!v) { fprintf(stderr, "embld: -Tdata needs an address\n"); return 2; }
+            opts.data_base = strtoul(v, NULL, 0);
         } else if (strcmp(argv[i], "--embx") == 0) {
             opts.emit_embx = 1;            /* write a native EMBX, not ELF */
         } else if (strcmp(argv[i], "--cap") == 0) {

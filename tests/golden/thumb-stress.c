@@ -1,12 +1,13 @@
+/* The ARMv7-M exercise program (D-015): everything the backend claims to
+ * lower, printed, so that what it computes can be compared against what
+ * clang computes for the same source on the same emulated board.
+ *
+ * Output goes through tests/harness/thumb/io.c — the lm3s6965's UART —
+ * and the run ends with a sentinel, because a bare-metal image has no
+ * way to exit and the harness judges it by what it printed. */
 extern void writec(int c);
-static void putn(long v)
-{
-    char b[16]; int n = 0;
-    if (v < 0) { writec('-'); v = -v; }
-    do { b[n++] = (char)('0' + (int)(v - (v / 10) * 10)); v /= 10; } while (v);
-    while (n) writec(b[--n]);
-    writec(' ');
-}
+extern void puts_(const char *s);
+extern void putn(long v);
 static void nl(void) { writec('\n'); }
 
 struct pt { int x, y; short tag; unsigned char f; };
@@ -89,5 +90,6 @@ int main(void)
       buf[n] = 0;
       for (int i = 0; i < n; i++) writec(buf[i]);
       nl(); }
+    puts_("==END==\n");
     return 0;
 }

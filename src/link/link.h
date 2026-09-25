@@ -17,13 +17,31 @@
 
 struct link_opts {
     const char *entry;      /* entry symbol; NULL = "_start" */
-    unsigned long base;     /* text load address; 0 = 0x400000 (TARGET_ABI) */
+    unsigned long base;     /* text load address; see have_base */
+    /* Whether `base` was given. A separate flag because ZERO is a real
+     * address on a microcontroller -- flash starts there, and the reset
+     * vector the processor fetches is the word at 0 -- so "0 means the
+     * default" would make the one base a firmware image needs the one
+     * it cannot ask for. */
+    int have_base;
     int emit_embx;          /* 1 = write a native EMBX binary instead of ELF */
     unsigned long long caps;/* EMBX capability bitmask (bit == cap_id); 0 = none */
     /* L2: physical load address (p_paddr) = vaddr - lma_offset, for a
      * higher-half kernel whose LMA is its VMA minus KERNEL_VIRTUAL_BASE.
      * 0 = p_paddr == p_vaddr (the ordinary case). */
     unsigned long long lma_offset;
+    /* A FIRMWARE layout: the writable segment is ADDRESSED here (SRAM)
+     * but STORED immediately after the text in the image (flash), which
+     * is what a microcontroller needs and what `lma_offset` above
+     * cannot say -- that one shifts every segment by the same amount,
+     * and here the two differ. 0 keeps the contiguous layout every
+     * hosted target has always had.
+     *
+     * The linker then provides __data_load, __data_start, __data_end,
+     * __bss_start and __bss_end, which is everything a startup routine
+     * needs to copy .data out of flash and zero .bss -- so the startup
+     * can be ordinary C with no linker script to keep in step. */
+    unsigned long data_base;
 };
 
 /* Links inputs[0..n) into an ET_EXEC at `out`. Inputs are object files

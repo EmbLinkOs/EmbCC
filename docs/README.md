@@ -55,6 +55,7 @@ gap is visible.
 |---|---|
 | [embcc.md](tools/embcc.md) | the driver: options, targets, what it accepts |
 | [diagnostics.md](tools/diagnostics.md) | diagnostics, `--explain`, fix-its, warnings, remarks, the language server, `embld --doctor` |
+| [embedded.md](tools/embedded.md) | building Cortex-M firmware: the target, the startup, the link |
 | [embdbg.md](tools/embdbg.md) | the debugger's requirements and what it consumes |
 
 ## developer/

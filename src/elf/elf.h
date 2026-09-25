@@ -139,6 +139,32 @@ typedef struct {
     int        r_addend;
 } Elf32_Rela;
 
+/* The implicit-addend form, which the ARM EABI specifies and every ARM
+ * toolchain therefore emits: the addend lives IN the field being
+ * patched, in whatever shape that field has. */
+typedef struct {
+    Elf32_Addr r_offset;
+    Elf32_Word r_info;
+} Elf32_Rel;
+
+typedef struct {
+    Elf64_Addr  r_offset;
+    Elf64_Xword r_info;
+} Elf64_Rel;
+
+/* Not Elf64_Phdr with narrower members either: p_flags is the SECOND
+ * field there and the LAST one here. */
+typedef struct {
+    Elf32_Word p_type;
+    Elf32_Off  p_offset;
+    Elf32_Addr p_vaddr;
+    Elf32_Addr p_paddr;
+    Elf32_Word p_filesz;
+    Elf32_Word p_memsz;
+    Elf32_Word p_flags;
+    Elf32_Word p_align;
+} Elf32_Phdr;
+
 #define ELF32_R_INFO(sym, type) \
     (((Elf32_Word)(sym) << 8) | ((Elf32_Word)(type) & 0xff))
 
@@ -217,6 +243,12 @@ typedef struct {
  * checking variant would reject every address above 65535. */
 #define R_ARM_THM_MOVW_ABS_NC 47
 #define R_ARM_THM_MOVT_ABS    48
+/* The same field as THM_CALL in a `b.w` rather than a `bl`; an
+ * assembler emits it for a tail branch to another section. */
+#define R_ARM_THM_JUMP24      30
+/* The exception index table's self-relative pointer: 31 bits of signed
+ * offset, the top bit reserved to say what the entry holds. */
+#define R_ARM_PREL31          42
 
 /* e_ident indices and values */
 #define EI_MAG0       0
@@ -264,6 +296,10 @@ typedef struct {
 #define SHT_STRTAB    3
 #define SHT_RELA      4
 #define SHT_NOBITS    8
+/* The implicit-addend relocation section. Not a legacy form: the ARM
+ * EABI specifies it, so every ARM object holds .rel.text rather than
+ * .rela.text. */
+#define SHT_REL       9
 /* Arrays of function pointers the startup code walks before main and at
  * exit. Their TYPE is what says so -- a linker gathers sections by type
  * here, not by name -- so a .init_array emitted as SHT_PROGBITS would

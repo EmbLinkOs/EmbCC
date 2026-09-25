@@ -988,6 +988,38 @@ pointers strength reduction creates, and a call's result width — which
 is the RETURN REGISTER's width, not the type's, and that register is four
 bytes here.
 
+**2026-09-25, later still:** the toolchain closed. `embld` reads and
+writes ELF32 ARM, so a firmware image is built end to end by EmbCC's own
+compiler and linker — no `arm-none-eabi-*` anywhere, and no assembler,
+because a Cortex-M fetches its initial SP and PC from the vector table
+in hardware and its startup is therefore ordinary C.
+
+Three things the linker had to learn. `.vectors` is an output section of
+its own placed AHEAD of `.text`, since the processor does not look the
+table up but reads address zero. `-Tdata` is a FIRMWARE layout, where
+the writable segment is addressed in RAM and stored after the text in
+flash — which `lma_offset` could not express, because that shifts every
+segment by one constant and here the two differ; the linker then
+provides `__data_load`/`__data_start`/`__data_end`/`__bss_start` so the
+startup needs no linker script to stay in step with. And `-Ttext 0` is a
+real request: zero is where flash begins, so "0 means the default" made
+the one base this target needs the one it could not ask for.
+
+The fourth is the one that mattered: **the ARM EABI specifies `SHT_REL`**,
+so every object a real ARM toolchain produces carries `.rel.text` and
+not `.rela.text`. A linker that skips those relocates nothing, links
+without complaint, and produces an image that does nothing at all —
+which is exactly what happened to the first clang-built reference. With
+it, the implicit addend: the field of an unresolved `bl` is a branch to
+ITSELF (`f7ff fffe`, displacement −4), because the displacement is
+measured from P+4 and the ABI's addend from P. Taking that −4 literally
+puts every call one halfword early.
+
+`tests/golden/thumb-exec.sh` is now the real test: EmbCC compiles,
+`embld` links, QEMU's Cortex-M3 runs, and the output must equal what
+clang produces for the same source through the same linker on the same
+board — at -O0, -O1, -O2 and -Os.
+
 **What it does not do yet, all refused by name:** 64-bit integers (which
 need a legalisation pass splitting w == 8 into register pairs before the
 backend sees it — packed bitfields ride on this, since irgen assembles
