@@ -18,8 +18,21 @@ enum target_arch {
      * Named for the instruction set rather than the architecture family
      * because that is the part the backend encodes, and because there is
      * no A-profile ARM32 target here to be confused with. */
-    TARGET_THUMB = 2
+    TARGET_THUMB = 2,
+    /* RISC-V, as two targets rather than one: the instruction set is
+     * nearly the same at both widths and ONE backend serves them
+     * (src/arch/riscv/, parameterised by XLEN), but the DATA MODEL is
+     * not, and that is what this enum keys. RV32 is ILP32 and RV64 is
+     * LP64, and a single value could not answer for both. */
+    TARGET_RISCV32 = 3,
+    TARGET_RISCV64 = 4
 };
+
+/* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
+ * 64-bit targets. The RISC-V backend is written once against this,
+ * because an `add` is an `add` at either width and only the loads, the
+ * shifts and the W-suffixed forms differ. */
+int target_xlen(void);
 
 /* The operating system the emitted code will run ON, which is a
  * different question from the architecture and was not asked at all

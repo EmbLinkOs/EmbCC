@@ -275,6 +275,7 @@ typedef struct {
 #define EM_X86_64     62
 #define EM_AARCH64   183
 #define EM_ARM        40
+#define EM_RISCV     243
 
 /* p_type */
 #define PT_NULL       0

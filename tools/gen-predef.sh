@@ -7,18 +7,28 @@
 # the build (and eventual self-hosting) does not depend on the cross
 # toolchain.
 #
-# usage: gen-predef.sh [x86_64|aarch64|thumb]        regenerate (default: all)
-#        gen-predef.sh --reference x86_64|aarch64|thumb
-#                                                    print the filtered table
+# usage: gen-predef.sh [ARCH]                        regenerate (default: all)
+#        gen-predef.sh --reference ARCH               print the filtered table
 #                                                    (what tests/golden/predef.sh
 #                                                    compares --dump-predef with)
 #
-# `thumb` (ARMv7-M, Cortex-M) is taken from CLANG rather than gcc, because
-# clang carries every target in one binary and `arm-none-eabi-gcc` is a
-# separate toolchain download. It is the same kind of source -- a
-# production compiler's own answer for the triple, read off rather than
-# reasoned out -- and the generated file's header says which one it was.
-# Set EMBCC_REF_GCC_THUMB to use a real arm-none-eabi-gcc instead.
+#   ARCH is one of: x86_64 aarch64 thumb riscv32 riscv64
+#
+# The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
+# widths -- are taken from CLANG rather than gcc, because clang carries
+# every target in one binary where each of arm-none-eabi-gcc and
+# riscv64-elf-gcc is a separate toolchain download. It is the same kind of
+# source -- a production compiler's own answer for the triple, read off
+# rather than reasoned out -- and the generated file's header says which
+# one it was. Set EMBCC_REF_GCC_THUMB / _RISCV32 / _RISCV64 to use a real
+# cross gcc instead.
+#
+# riscv32 and riscv64 are asked for SEPARATELY, and with an explicit
+# -march/-mabi, because the two differ in far more than __riscv_xlen: the
+# type widths, the atomic lock-free set, and the C library's int-fast
+# choices all move. `-march=rv32im` also pins what is being claimed -- the
+# default rv32imafdc would define __riscv_flen, and EmbCC has no hardware
+# float for the target (THE RULE).
 #
 # Excluded, each for THE RULE (claim only what is present):
 #   __GNUC*__, __VERSION__   EmbCC is not gcc; defining these would switch
@@ -28,18 +38,23 @@
 #   __BITINT_MAXWIDTH__      gcc 14+ advertises C23 _BitInt with it; EmbCC
 #                            has no _BitInt, so a header testing it must not
 #                            be told otherwise.
+#   __riscv_v_intrinsic      clang defines it for plain rv32im/rv64im, with
+#                            no __riscv_v beside it -- the version of a
+#                            vector intrinsics API for a vector unit that
+#                            is not in the -march. EmbCC has no vectors at
+#                            any width, so it is the same overclaim.
 set -eu
 
 # __clang__/__llvm__ join the list for the same reason __GNUC__ is on it:
 # EmbCC is not clang either, and a header that believes it is will take a
 # path built on builtins this compiler does not have.
-EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm__)'
+EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm__|__riscv_v_intrinsic)'
 
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb) eval "echo \${$gccvar:-clang}" ;;
-        *)     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
+        thumb|riscv32|riscv64) eval "echo \${$gccvar:-clang}" ;;
+        *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
 
@@ -47,9 +62,13 @@ refgcc() {
 # already specific to it. Empty for a cross gcc, which knows only one.
 refflags() {
     case "$1" in
-        thumb) [ -n "${EMBCC_REF_GCC_THUMB:-}" ] || \
-                   echo "-target thumbv7m-none-eabi -ffreestanding" ;;
-        *)     ;;
+        thumb)   [ -n "${EMBCC_REF_GCC_THUMB:-}" ] || \
+                     echo "-target thumbv7m-none-eabi -ffreestanding" ;;
+        riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
+                     echo "-target riscv32-unknown-elf -march=rv32im -mabi=ilp32 -ffreestanding" ;;
+        riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
+                     echo "-target riscv64-unknown-elf -march=rv64im -mabi=lp64 -ffreestanding" ;;
+        *)       ;;
     esac
 }
 
@@ -72,8 +91,8 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb) refgcc "$1" | sed 's/clang$/clang++/' ;;
-        *)     refgcc "$1" | sed 's/gcc$/g++/' ;;
+        thumb|riscv32|riscv64) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
 
@@ -84,11 +103,11 @@ reference_cxx() {
 }
 
 if [ "${1:-}" = --reference ]; then
-    reference "${2:?usage: gen-predef.sh --reference x86_64|aarch64|thumb}"
+    reference "${2:?usage: gen-predef.sh --reference ARCH}"
     exit 0
 fi
 if [ "${1:-}" = --reference-cxx ]; then
-    reference_cxx "${2:?usage: gen-predef.sh --reference-cxx x86_64|aarch64|thumb}"
+    reference_cxx "${2:?usage: gen-predef.sh --reference-cxx ARCH}"
     exit 0
 fi
 
@@ -148,6 +167,8 @@ case "${1:-both}" in
     x86_64)  gen x86_64 ;;
     aarch64) gen aarch64 ;;
     thumb)   gen thumb ;;
-    both|all) gen x86_64; gen aarch64; gen thumb ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb]" >&2; exit 1 ;;
+    riscv32) gen riscv32 ;;
+    riscv64) gen riscv64 ;;
+    both|all) gen x86_64; gen aarch64; gen thumb; gen riscv32; gen riscv64 ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|riscv32|riscv64]" >&2; exit 1 ;;
 esac

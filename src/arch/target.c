@@ -35,9 +35,16 @@ static const struct data_model {
      * stays 8, and is 8-ALIGNED, which is where a 32-bit ABI most
      * often surprises: __BIGGEST_ALIGNMENT__ is 8, not 4. */
     [TARGET_THUMB]   = { 4, 4,  8, 1, 1, 0 },
+    /* The RISC-V psABI. Unsigned char like the ARM ones, but a SIGNED
+     * wchar_t -- which is why those are two columns and not one -- and
+     * a binary128 long double at both widths. Read off
+     * `clang -target riscv{32,64}-unknown-elf -dM`. */
+    [TARGET_RISCV32] = { 4, 4, 16, 1, 0, 0 },
+    [TARGET_RISCV64] = { 8, 8, 16, 1, 0, 1 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
+int target_xlen(void)           { return g_model[g_arch].ptr; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_ldouble_size(void)   { return g_model[g_arch].ldbl; }
 int target_char_unsigned(void)  { return g_model[g_arch].char_uns; }
@@ -118,6 +125,20 @@ static const struct triple {
     { "armv7m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
     { "arm-none-eabi",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
 
+    /* RISC-V, bare metal. `-unknown-elf` is the spelling the reference
+     * toolchains use and the one a project's existing --target= string
+     * will say; the short forms are accepted because everyone writes
+     * them. Freestanding only for now, as ARMv7-M is: a hosted RISC-V
+     * needs an OS underneath and EmbLinkOS does not run there yet. */
+    { "riscv32-unknown-elf", TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   1 },
+    { "riscv32",             TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
+    { "riscv32-elf",         TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
+    { "rv32",                TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
+    { "riscv64-unknown-elf", TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   1 },
+    { "riscv64",             TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
+    { "riscv64-elf",         TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
+    { "rv64",                TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
+
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
      * time, which is why the format column says ELF and not EMBX. */
@@ -179,6 +200,8 @@ int target_elf_machine(enum target_arch a)
     switch (a) {
     case TARGET_AARCH64: return EM_AARCH64;
     case TARGET_THUMB:   return EM_ARM;
+    case TARGET_RISCV32:
+    case TARGET_RISCV64: return EM_RISCV;
     default:             return EM_X86_64;
     }
 }

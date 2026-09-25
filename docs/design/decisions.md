@@ -1231,3 +1231,61 @@ thumbv7m-none-eabi -Os` the way the other two are measured against gcc.
 a target where `int` is not 4 bytes, or one with a 16-bit `char` — at which
 point the columns are the wrong shape and the sizes belong in the table
 wholesale rather than as exceptions to a fixed set.
+
+---
+
+## D-016 — RISC-V, as **two targets and one backend**
+
+**Decided:** 2026-09-26. **Status:** the front end is in for both widths —
+the triples, the data models, the predefined macros, the `long double`
+format. There is no code generator yet, and `-c` refuses by name.
+
+RV32 and RV64 are two entries in `enum target_arch` and not one entry with
+a width knob beside it, because the enum keys the DATA MODEL and the two
+data models genuinely differ: RV32 is ILP32, RV64 is LP64, `__int128`
+exists only at the wider one. A single value could not answer
+`target_ptr_size()` for both, and every place that asks would have to ask
+something else as well.
+
+The instruction set does not differ nearly as much, so when the backend
+lands it will be ONE directory (`src/arch/riscv/`) parameterised by
+`target_xlen()`, not two. That is the opposite of D-012's per-architecture
+split and deliberately so: D-012 separates ISAs, and these two are the
+same ISA at two widths — `add` and `addw` differ by a bit, the register
+file and the calling convention are the same shape, and two copies would
+drift. `src/arch/riscv32/` and `src/arch/riscv64/` hold only what really
+is per-target: the generated macro tables.
+
+**Why the macro tables are generated twice** rather than once with
+`__riscv_xlen` patched: the widths disagree about far more than the
+pointer. The `int_fast*` types, the lock-free atomic set and
+`__SIZEOF_INT128__` all move, and a generated file has no business being
+hand-edited into a parameterised one (ARCHITECTURE.md §5). They come from
+clang, as ARMv7-M's does and for the same reason — clang carries every
+target in one binary — and with an explicit `-march=rv32im -mabi=ilp32`.
+The `-march` is not a detail: the default `rv32imafdc` would define
+`__riscv_flen` and claim a hardware FPU this compiler cannot emit for
+(THE RULE). One macro is filtered out on top of that, `__riscv_v_intrinsic`,
+which clang defines for plain `rv32im` with no `__riscv_v` beside it — the
+version of a vector intrinsics API for a vector unit that is not in the
+`-march`.
+
+Two front-end facts this target settled:
+
+  * **`wchar_t` is SIGNED here and `char` is unsigned.** That combination
+    is why those are two columns in `src/arch/target.c` and not one; every
+    target before this one had them agree.
+  * **`long double` is IEEE binary128, and x87 is the exception.**
+    `ldf_target_fmt()` used to name the targets that were ordinary and let
+    x86-64 fall through; it now asks for the odd one out. Written the old
+    way, both RISC-V widths would have silently folded `long double` in the
+    80-bit x87 format while advertising `__LDBL_MANT_DIG__ 113`.
+
+`-dumpmachine` was a chain of ternaries — a second list of targets to keep
+in step with the real one, and it had already fallen behind: it printed
+`x86_64-elf` for ARMv7-M. It reads `target_triple_now()` now, so the table
+that parses a triple is the table that prints it.
+
+**Reopen if:** the backend turns out to want separate directories after all
+— most likely if RV32 and RV64 end up needing different lowering for
+64-bit integers, which is where the widths stop being the same machine.

@@ -7,9 +7,13 @@
  * That is also why the tables come from different compiler versions: each
  * is taken from the compiler EmbLinkOS actually builds that architecture
  * with, and the aarch64 side is pinned to 16.2.0 (myos ARM64.md §2.8).
- * The ARMv7-M table comes from CLANG rather than gcc (D-015): clang
- * carries every target in one binary, where arm-none-eabi-gcc is a
- * separate toolchain download. Like the gcc ones it is pinned to the
+ * The ARMv7-M and RISC-V tables come from CLANG rather than gcc (D-015,
+ * D-016): clang carries every target in one binary, where each of
+ * arm-none-eabi-gcc and riscv64-elf-gcc is a separate toolchain download.
+ * RISC-V is TWO tables and not one parameterised by __riscv_xlen: the
+ * widths disagree about more than the pointer -- the int-fast types, the
+ * lock-free atomic set and __SIZEOF_INT128__ all move -- and a generated
+ * file has no business being edited into a parameterised one. Like the gcc ones it is pinned to the
  * version that generated it -- the file's own header says which -- and
  * tests/golden/predef.sh compares against whatever is on PATH, so a
  * different clang will show up there as a handful of added macros
@@ -43,6 +47,14 @@ extern const struct predef_macro predef_macros_thumb[];
 extern const int predef_macro_count_thumb;
 extern const struct predef_macro predef_macros_cxx_thumb[];
 extern const int predef_macro_count_cxx_thumb;
+extern const struct predef_macro predef_macros_riscv32[];
+extern const int predef_macro_count_riscv32;
+extern const struct predef_macro predef_macros_cxx_riscv32[];
+extern const int predef_macro_count_cxx_riscv32;
+extern const struct predef_macro predef_macros_riscv64[];
+extern const int predef_macro_count_riscv64;
+extern const struct predef_macro predef_macros_cxx_riscv64[];
+extern const int predef_macro_count_cxx_riscv64;
 
 /* The language being compiled: 0 C, 1 C++ (its own table — __cplusplus and
  * friends). Set by the driver before preprocessing. */

@@ -820,13 +820,24 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     struct fsite *fs;
     int next, nstrs, ngs, nfs;
     enum target_arch ta = target_get();
-    /* THE RULE. The ARMv7-M front end is complete -- the type model,
-     * the predefined macros and the object format are all in place --
-     * but there is no Thumb-2 backend behind it yet. Handing this unit
-     * to the x86-64 one because it is "not aarch64" would write an
-     * object full of x86 instructions under an EM_ARM header, which is
+    /* THE RULE. The RISC-V front end is complete -- the type model, the
+     * predefined macros and the object format are all in place -- but
+     * there is no backend behind it yet. Handing this unit to the x86-64
+     * one because it is "not aarch64 and not thumb" would write an
+     * object full of x86 instructions under an EM_RISCV header, which is
      * the exact failure mode a default case is supposed to prevent.
-     * Refuse here, by name, and say what does work today. */
+     * Refuse here, by name, and say what does work today. (ARMv7-M stood
+     * in this same block for one commit; the backend below it is what
+     * replaced this text for that target.) */
+    if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64) {
+        fprintf(stderr,
+                "embcc: %s: error: --target=%s has no code generator yet; "
+                "the front end accepts this target (-E, -fsyntax-only and "
+                "--dump-predef all work) but nothing can emit RISC-V "
+                "instructions\n",
+                in, target_triple_now());
+        return 1;
+    }
     if (ta == TARGET_THUMB)
         codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
@@ -2281,10 +2292,11 @@ int main(int argc, char **argv)
         if (strncmp(argv[i], "--explain=", 10) == 0)
             return explain_print(argv[i] + 10);
         if (strcmp(argv[i], "-dumpmachine") == 0) {
-            printf("%s\n",
-                   target_get() == TARGET_AARCH64 ? "aarch64-elf" :
-                   target_get() == TARGET_THUMB   ? "thumbv7m-none-eabi"
-                                                  : "x86_64-elf");
+            /* The canonical spelling of whatever --target= chose, from
+             * the one table that knows them. A chain of ternaries here
+             * was a second list to keep in step, and it silently
+             * printed x86_64-elf for every target added after it. */
+            printf("%s\n", target_triple_now());
             return 0;
         }
         if (strcmp(argv[i], "--dump-predef") == 0) {

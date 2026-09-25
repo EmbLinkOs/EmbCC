@@ -23,6 +23,12 @@ static const struct predef_macro *arch_table(int *count)
         case TARGET_THUMB:
             *count = predef_macro_count_cxx_thumb;
             return predef_macros_cxx_thumb;
+        case TARGET_RISCV32:
+            *count = predef_macro_count_cxx_riscv32;
+            return predef_macros_cxx_riscv32;
+        case TARGET_RISCV64:
+            *count = predef_macro_count_cxx_riscv64;
+            return predef_macros_cxx_riscv64;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -35,6 +41,12 @@ static const struct predef_macro *arch_table(int *count)
     case TARGET_THUMB:
         *count = predef_macro_count_thumb;
         return predef_macros_thumb;
+    case TARGET_RISCV32:
+        *count = predef_macro_count_riscv32;
+        return predef_macros_riscv32;
+    case TARGET_RISCV64:
+        *count = predef_macro_count_riscv64;
+        return predef_macros_riscv64;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;

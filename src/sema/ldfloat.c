@@ -242,7 +242,11 @@ enum ldf_fmt ldf_target_fmt(void)
      * not a degenerate one. */
     if (target_ldouble_size() == 8)
         return LDF_DOUBLE;
-    return target_get() == TARGET_AARCH64 ? LDF_QUAD : LDF_X87;
+    /* x87's 80-bit extended is the EXCEPTION, not the rule: it is
+     * x86-64's and nobody else's. aarch64 and both RISC-V widths use
+     * IEEE binary128, so the test asks for the odd one out rather than
+     * naming each target that is ordinary. */
+    return target_get() == TARGET_X86_64 ? LDF_X87 : LDF_QUAD;
 }
 
 static struct ldf *mk(int kind, int neg)
