@@ -3710,6 +3710,32 @@ static void gen_func(struct ir_func *fn, struct code *text,
             label_off[i->label] = text->len;
             break;
         case IR_JMP:
+            /* A jump whose target label is the next thing EMITTED is
+             * the instruction after it. 143 of them across lib/libc and
+             * lib/libcxx -- the optimizer's CFG cleanup threads jumps
+             * between blocks, and these are the ones where the block in
+             * between turns out to occupy no bytes: other labels, and
+             * copies whose two ends the allocator gave one register. */
+            {
+                int m = n + 1;
+                while (m < fn->nins) {
+                    struct ir_ins *x = &fn->ins[m];
+                    if (x->op == IR_LABEL) {
+                        if (x->label == i->label) break;
+                        m++; continue;
+                    }
+                    if (x->op == IR_MOV && x->dst < 0) { m++; continue; }
+                    if ((x->op == IR_MOV || x->op == IR_LDVAR ||
+                         x->op == IR_STVAR) &&
+                        in_reg(x->dst) && in_reg(x->a) &&
+                        g_loc[x->dst] == g_loc[x->a]) { m++; continue; }
+                    break;
+                }
+                if (m < fn->nins && fn->ins[m].op == IR_LABEL &&
+                    fn->ins[m].label == i->label)
+                    break;
+            }
+            /* fall through */
         case IR_BRZ:
         case IR_BRNZ: {
             int patch;

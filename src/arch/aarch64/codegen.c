@@ -2323,6 +2323,28 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             break;
 
         case IR_JMP: {
+            /* A jump whose target label is the next thing EMITTED is
+             * the instruction after it -- see the x86-64 backend's
+             * note for what can lie between and occupy no bytes. */
+            {
+                int m = n + 1;
+                while (m < fn->nins) {
+                    struct ir_ins *x = &fn->ins[m];
+                    if (x->op == IR_LABEL) {
+                        if (x->label == i->label) break;
+                        m++; continue;
+                    }
+                    if (x->op == IR_MOV && x->dst < 0) { m++; continue; }
+                    if ((x->op == IR_MOV || x->op == IR_LDVAR ||
+                         x->op == IR_STVAR) &&
+                        a64_in_reg(x->dst) && a64_in_reg(x->a) &&
+                        g_a64_loc[x->dst] == g_a64_loc[x->a]) { m++; continue; }
+                    break;
+                }
+                if (m < fn->nins && fn->ins[m].op == IR_LABEL &&
+                    fn->ins[m].label == i->label)
+                    break;
+            }
             struct a64_fix fx;
             fx.at = a64_b(t); fx.label = i->label; fx.kind = FIX_B26;
             PUSH(fix, nfix, capfix, fx);
