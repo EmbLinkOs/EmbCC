@@ -169,23 +169,35 @@ grep -q "__int128 does not exist on this target" "$tmp/i128.err" || {
     echo "RV32: the table advertises an __int128 the front end refuses"; exit 1; }
 echo "__int128 is present at RV64, refused by name at RV32, and the table agrees"
 
-# 6. THE RULE. There is no code generator, so -c must say so and write
-#    nothing. Handing the unit to the x86-64 backend because it is
-#    "not aarch64 and not thumb" is the failure this guards.
+# 6. The backend exists and writes a real object at each width. What it
+#    EMITS is riscv-encoding.sh's and riscv-exec.sh's subject; this only
+#    checks that the target is wired end to end, so a break in the
+#    driver's dispatch fails here rather than in a longer test.
+#
+#    The CLASS is the point of doing it twice. EM_RISCV is one number for
+#    both widths, so the ELF writer cannot decide 32-against-64 from the
+#    machine as it did for every target before this -- it asks the
+#    target's pointer size. An object that came out ELF64 for RV32 would
+#    be read by nothing.
 printf 'int add(int a, int b) { return a + b; }\n' > "$tmp/add.c"
-for t in "$R32" "$R64"; do
+for pair in "$R32 1" "$R64 2"; do
+    set -- $pair
     rm -f "$tmp/add.o"
-    if "$EMBCC" --target="$t" -c "$tmp/add.c" -o "$tmp/add.o" 2>"$tmp/cg.err"; then
-        echo "$t: -c produced an object and there is no backend for it"; exit 1
-    fi
-    grep -q "has no code generator yet" "$tmp/cg.err" || {
-        echo "$t: -c failed for the wrong reason:"; cat "$tmp/cg.err"; exit 1; }
-    grep -q -- "--target=$t" "$tmp/cg.err" || {
-        echo "$t: the refusal does not name the target:"; cat "$tmp/cg.err"; exit 1; }
-    [ ! -s "$tmp/add.o" ] || {
-        echo "$t: -c refused and left an object behind anyway"; exit 1; }
+    "$EMBCC" --target="$1" -c "$tmp/add.c" -o "$tmp/add.o" || {
+        echo "$1: -c did not produce an object"; exit 1; }
+    [ -s "$tmp/add.o" ] || { echo "$1: -c wrote an empty object"; exit 1; }
+    # ELFCLASS is byte 4 of e_ident, and e_machine is the little-endian
+    # halfword at 18 -- EM_RISCV is 243, which fits in the low byte. Read
+    # here rather than through readelf, so this test needs no toolchain.
+    cls=$(od -An -tu1 -j4 -N1 "$tmp/add.o" | tr -d ' ')
+    mlo=$(od -An -tu1 -j18 -N1 "$tmp/add.o" | tr -d ' ')
+    mhi=$(od -An -tu1 -j19 -N1 "$tmp/add.o" | tr -d ' ')
+    [ "$cls" = "$2" ] || {
+        echo "$1: the object is ELFCLASS$cls, not ELFCLASS$2"; exit 1; }
+    [ "$mlo" = 243 ] && [ "$mhi" = 0 ] || {
+        echo "$1: e_machine is $mlo/$mhi, not EM_RISCV (243)"; exit 1; }
 done
-echo "-c refuses by name on both widths and writes nothing"
+echo "-c writes an ELF32 and an ELF64 EM_RISCV object"
 
 # 7. What DOES work today works.
 for t in "$R32" "$R64"; do

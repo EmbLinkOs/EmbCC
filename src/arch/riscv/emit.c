@@ -282,27 +282,43 @@ void rv_muldiv(struct code *c, int op, int rd, int rs1, int rs2, int w)
 
 /* ---- memory ---------------------------------------------------------- */
 
-void rv_load(struct code *c, int rd, int rs1, int off, int size, int sign)
+/* The loads are where the two widths differ in what EXISTS, not merely
+ * in what they mean, so this takes xlen and checks rather than trusting
+ * the caller. `lwu` and `ld` are RV64-only; at RV32 a four-byte load IS
+ * the whole register, so there is no unsigned form to ask for and `lw`
+ * is the answer for both signednesses. Emitting `lwu` at RV32 assembles
+ * into a real 32-bit word and traps as an illegal instruction the first
+ * time a struct argument is copied. */
+void rv_load(struct code *c, int rd, int rs1, int off, int size, int sign,
+             int xlen)
 {
     int f3;
     switch (size) {
     case 1: f3 = sign ? 0 : 4; break;
     case 2: f3 = sign ? 1 : 5; break;
-    case 4: f3 = sign ? 2 : 6; break;   /* lwu is RV64-only; lw at RV32 */
-    case 8: f3 = 3; break;
+    case 4: f3 = (sign || xlen == 32) ? 2 : 6; break;
+    case 8:
+        if (xlen != 64)
+            internal_error("riscv: there is no eight-byte load at RV32");
+        f3 = 3;
+        break;
     default: internal_error("riscv: no %d-byte load", size);
     }
     code_u32(c, rv_enc_i(OP_LOAD, rd, f3, rs1, off));
 }
 
-void rv_store(struct code *c, int rs2, int rs1, int off, int size)
+void rv_store(struct code *c, int rs2, int rs1, int off, int size, int xlen)
 {
     int f3;
     switch (size) {
     case 1: f3 = 0; break;
     case 2: f3 = 1; break;
     case 4: f3 = 2; break;
-    case 8: f3 = 3; break;
+    case 8:
+        if (xlen != 64)
+            internal_error("riscv: there is no eight-byte store at RV32");
+        f3 = 3;
+        break;
     default: internal_error("riscv: no %d-byte store", size);
     }
     code_u32(c, rv_enc_s(OP_STORE, f3, rs1, rs2, off));

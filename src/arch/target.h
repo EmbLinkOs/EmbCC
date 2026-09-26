@@ -32,6 +32,10 @@ enum target_arch {
  * 64-bit targets. The RISC-V backend is written once against this,
  * because an `add` is an `add` at either width and only the loads, the
  * shifts and the W-suffixed forms differ. */
+/* The register width IN BITS: 32 or 64. RISC-V's own name for it, and
+ * the number __riscv_xlen carries. target_ptr_size() is the same fact in
+ * bytes; this exists because the backend's arithmetic reads more clearly
+ * against the name the ISA manual uses. */
 int target_xlen(void);
 
 /* The operating system the emitted code will run ON, which is a
@@ -194,7 +198,38 @@ enum reloc_kind {
      * legitimately drops the bits the high half carries, so a checked
      * form would reject every address above 65535. */
     RK_THM_MOVW,
-    RK_THM_MOVT
+    RK_THM_MOVT,
+    /* RISC-V takes a symbol's address in two halves as well, and the
+     * split is arithmetic rather than bitwise: `auipc` supplies bits
+     * 31:12 of a PC-RELATIVE displacement and the paired `addi` a
+     * SIGN-EXTENDED low 12. So the high half is not simply the top bits
+     * -- when bit 11 is set the low half contributes -4096..-1 and the
+     * high half must be one larger. Every RISC-V toolchain has that
+     * +0x800 and every one that omits it is wrong by 4096 for half of
+     * all addresses. The linker does the rounding, because only the
+     * linker knows the address.
+     *
+     * PC-RELATIVE and not absolute, which is not a preference: `lui`
+     * SIGN-EXTENDS bit 31, so at RV64 the absolute pair can reach
+     * 0..0x7fffffff and 0xffffffff80000000..-1 and nothing between.
+     * A firmware image at 0x80000000 -- which is where QEMU's `virt`
+     * board and most RISC-V hardware put RAM -- is in the gap, and
+     * every address it materialised came out sign-extended and faulted
+     * on first use. auipc has no such hole and is position-independent
+     * besides, so it is used at BOTH widths rather than keeping a
+     * second code model alive for RV32 alone.
+     *
+     * The LO12 half's relocation names the AUIPC, not the target: the
+     * psABI resolves it by looking up the high half's own relocation at
+     * the address its symbol gives. The driver emits it against the
+     * .text section symbol with the auipc's offset as the addend, which
+     * is how an assembler's `.Lpcrel_hi0` label resolves too. */
+    RK_RISCV_PCREL_HI20,
+    RK_RISCV_PCREL_LO12_I,
+    /* A call is `auipc ra, 0` + `jalr ra`, and ONE relocation at the
+     * auipc patches BOTH -- which is why there is no separate kind for
+     * the jalr. That is the ABI's own shape, not a convenience here. */
+    RK_RISCV_CALL
 };
 
 /* The ELF relocation type for this kind on this target, or -1 if the kind

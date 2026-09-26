@@ -6,6 +6,7 @@
 
 #include "../driver/util.h"
 #include "../platform/platform.h"
+#include "../arch/target.h"
 
 /* Growable byte buffer, used for section payloads and string tables. */
 struct buf {
@@ -68,9 +69,11 @@ struct elfw {
     struct rela_group relagrp[ELFW_MAX_RELA];
     int nrelagrp;
     int machine;         /* e_machine, fixed at elfw_new */
-    /* ELFCLASS32 rather than 64. A property of the MACHINE, so it is
-     * decided here once and never passed in: ARMv7-M objects are 32-bit
-     * and everything else this compiler writes is not. */
+    /* ELFCLASS32 rather than 64. Decided here once and never passed in.
+     * It used to be read off the MACHINE alone -- ARMv7-M is 32-bit and
+     * everything else was not -- and RISC-V broke that: EM_RISCV is both
+     * widths under one number, so the class comes from the target's
+     * pointer size and the machine only says which target. */
     int elf32;
     Elf64_Word eflags;   /* e_flags: the EABI version on ARM, 0 elsewhere */
 };
@@ -83,10 +86,14 @@ struct elfw *elfw_new(int machine)
         fatal_unwind();
     }
     w->machine = machine;
-    if (machine == EM_ARM) {
-        w->elf32 = 1;
+    w->elf32 = target_ptr_size() == 4;
+    if (machine == EM_ARM)
         w->eflags = EF_ARM_EABI_VER5;
-    }
+    /* RISC-V's e_flags stay 0, and that is a statement rather than an
+     * omission: bit 0 is EF_RISCV_RVC (this emits no compressed
+     * instructions) and bits 2:1 are the float ABI, whose 0 means SOFT.
+     * An object built -march=rv32imafd would have to set them, and a
+     * linker refuses to combine objects whose float ABIs disagree. */
     /* Index 0 is reserved in every table it manages. */
     w->nsec = 1; /* SHT_NULL section */
     strtab_add(&w->strtab, "");

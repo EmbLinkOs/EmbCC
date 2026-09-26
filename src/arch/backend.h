@@ -75,6 +75,16 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
                         struct fsite **fs, int *nfs, int want_debug,
                         int optimize, int no_sse, int regalloc);
 
+/* And for RISC-V -- ONE function for RV32 and RV64 alike, which reads
+ * target_xlen() to know which. The other three backends are one per
+ * machine; these two widths are one machine, and D-016 says why. */
+void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
+                        struct extcall **ext, int *next,
+                        struct strsite **strs, int *nstrs,
+                        struct gsite **gs, int *ngs,
+                        struct fsite **fs, int *nfs, int want_debug,
+                        int optimize, int no_sse, int regalloc);
+
 void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,

@@ -87,7 +87,7 @@ echo "the sample compiles at four optimisation levels and every instruction deco
 # cannot run here yet, so what this checks is that it still compiles and
 # still decodes.
 for opt in -O0 -O1 -O2 -Os; do
-    "$EMBCC" --target=$T $opt -c tests/golden/thumb-stress.c \
+    "$EMBCC" --target=$T $opt -c tests/golden/embedded-stress.c \
              -o "$out/stress$opt.o" || {
         echo "$opt: the stress program does not compile"; exit 1; }
     "$OD" -d --triple=thumbv7m "$out/stress$opt.o" > "$out/sdis$opt.txt"

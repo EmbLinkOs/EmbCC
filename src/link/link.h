@@ -42,6 +42,25 @@ struct link_opts {
      * needs to copy .data out of flash and zero .bss -- so the startup
      * can be ordinary C with no linker script to keep in step. */
     unsigned long data_base;
+    /* RISC-V: the initial stack pointer, and an entry STUB to set it.
+     *
+     * A Cortex-M needs nothing like this -- the processor fetches its
+     * initial sp from the first word of the image, which is why the
+     * ARMv7-M harness is pure C with no assembler anywhere. RISC-V has
+     * no such mechanism: every register is zero at reset, and the first
+     * function's prologue subtracts from a stack pointer of 0 and
+     * faults. Someone has to put four instructions in front of the
+     * entry point, and C cannot write sp.
+     *
+     * So the linker does, from the same encoder the compiler uses
+     * (src/arch/riscv/emit.c) rather than from four hex constants. It
+     * is the software half of what the other target gets in hardware,
+     * and it keeps a firmware image buildable by this toolchain alone.
+     * Given, the ELF entry becomes the stub and the stub jumps to
+     * `entry`; not given, nothing is emitted and the entry is the
+     * symbol as before. */
+    unsigned long stack_top;
+    int have_stack;
 };
 
 /* Links inputs[0..n) into an ET_EXEC at `out`. Inputs are object files

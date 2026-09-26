@@ -1,12 +1,16 @@
 # Building firmware with EmbCC
 
-EmbCC targets ARM Cortex-M (ARMv7-M, Thumb-2) alongside x86-64 and
-aarch64, and `embld` links the result into a firmware image. No other
-toolchain is involved: no `arm-none-eabi-gcc`, no `ld`, no linker script,
-and — because of how a Cortex-M starts — no assembler.
+EmbCC targets ARM Cortex-M (ARMv7-M, Thumb-2) and RISC-V (RV32IM and
+RV64IM) alongside x86-64 and aarch64, and `embld` links the result into a
+firmware image. No other toolchain is involved: no `arm-none-eabi-gcc`,
+no `riscv64-elf-gcc`, no `ld`, no linker script, and no assembler.
 
-This is an early target. Read [what it cannot do](#what-it-cannot-do-yet)
-before planning around it.
+Most of this page is written for Cortex-M, which came first.
+[RISC-V](#risc-v) says what differs; everything not mentioned there is
+the same.
+
+These are early targets. Read [what they cannot do](#what-it-cannot-do-yet)
+before planning around them.
 
 ## The target
 
@@ -228,12 +232,89 @@ Point the vector table at the handler the same way as at the reset
 handler — an entry in the `.vectors` array — and the linker fills in
 the address with its Thumb bit already set.
 
+## RISC-V
+
+```
+embcc --target=riscv32-unknown-elf -Os -c main.c -o main.o
+embcc --target=riscv64-unknown-elf -Os -c main.c -o main.o
+```
+
+Accepted spellings: the canonical two above, plus `riscv32`/`riscv64`,
+`riscv32-elf`/`riscv64-elf`, and `rv32`/`rv64`. Both are freestanding,
+soft-float (`-march=rv32im`/`rv64im`: no F, no D, no C, no A), and use
+the **medany** code model.
+
+### What differs from Cortex-M
+
+| | riscv32 | riscv64 | thumbv7m |
+|---|---|---|---|
+| `void *`, `long` | 4 | 8 | 4 |
+| `long double` | 16 (IEEE binary128) | 16 | 8 (a double) |
+| plain `char` | unsigned | unsigned | unsigned |
+| `wchar_t` | **signed** `int` | **signed** `int` | `unsigned int` |
+| `__int128` | no | **yes** | no |
+
+`long double` has the right size and format and the front end folds it
+correctly, but there is no binary128 ARITHMETIC yet: an operation on one
+is refused by name rather than lowered.
+
+### Starting up
+
+This is the one place RISC-V needs something a Cortex-M does not. Every
+register is zero at reset and there is no vector table for the hardware
+to read an initial stack pointer out of — and C cannot write `sp`. So
+`embld` emits four instructions in front of the entry point:
+
+```
+embld -e _start -Ttext 0x80000000 -Tstack 0x80800000 boot.o main.o -o fw.elf
+```
+
+`-Tstack` is what asks for them; they set `sp` and jump to `-e`'s symbol,
+and they come from the same encoder the compiler uses rather than from
+four hex constants. Without it, the first function's prologue subtracts
+from a stack pointer of zero and faults. It is refused on the other
+targets, which do not need it.
+
+The rest is the same: `.data` brackets (`__data_load`, `__data_start`,
+`__data_end`, `__bss_start`, `__bss_end`) for a plain C startup, and
+`-Tdata` for a flash-to-RAM layout when the two are in different places.
+A `virt`-style image loaded wholly into RAM needs no `-Tdata`.
+
+`tests/harness/riscv/` is a complete working example: a startup, a
+16550A UART driver, and a linker invocation, all in C.
+
+### Running it
+
+QEMU's `virt` board, which is what the test suite uses:
+
+```
+qemu-system-riscv64 -M virt -bios none -nographic -m 8 -kernel fw.elf
+```
+
+`-bios none` matters: without it QEMU loads OpenSBI first, prints a
+banner and hands control over in supervisor mode. The board's UART is at
+`0x10000000` and its SiFive test device at `0x100000`, where writing
+`0x5555` exits QEMU — so unlike a Cortex-M image, a RISC-V one can stop
+cleanly and the runner can believe its exit status.
+
 ## What proves it
 
+- `tests/golden/riscv-encoding.sh` round-trips every encoder through
+  `llvm-mc --disassemble` at both widths, checks `rv_li`'s constant
+  sequences by EXECUTING them over 40,000 values, and requires all
+  twelve of the encoder's range checks to fire.
+- `tests/golden/riscv-exec.sh` runs the five shared programs
+  (`tests/golden/embedded-*.c`) at RV32 **and** RV64, at -O0, -O1, -O2
+  and -Os — the stress program against `clang` for the same triple, the
+  rest against the host. Running both widths is the point: three of the
+  bugs found while writing the backend passed at one width and failed at
+  the other.
+- `tests/golden/riscv-target.sh` checks both data models, and checks that
+  each fails on the other width.
 - `tests/golden/thumb-encoding.sh` disassembles every instruction the
   encoder can produce and diffs it against what each call was meant to
   emit, plus all 4093 distinct modified immediates.
-- `tests/golden/thumb-float.c` prints IEEE results as BIT PATTERNS and
+- `tests/golden/embedded-float.c` prints IEEE results as BIT PATTERNS and
   requires them to equal the host's, which does the same arithmetic in
   hardware — so a rounding that is off by one unit in the last place
   fails. The soft-float core is also checked on the host against 400,000

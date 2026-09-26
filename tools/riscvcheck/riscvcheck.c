@@ -141,24 +141,24 @@ static void encodings(int xlen)
     /* Loads and stores. The negative offset is the one that matters: the
      * S-type immediate is split across two fields and a sign bit put in
      * the wrong one gives a store 4064 bytes away that still assembles. */
-    expect("lb a0, 4(sp)");    rv_load(&C, RV_A0, RV_SP, 4, 1, 1);
-    expect("lbu a0, 4(sp)");   rv_load(&C, RV_A0, RV_SP, 4, 1, 0);
-    expect("lh a0, 4(sp)");    rv_load(&C, RV_A0, RV_SP, 4, 2, 1);
-    expect("lhu a0, 4(sp)");   rv_load(&C, RV_A0, RV_SP, 4, 2, 0);
-    expect("lw a0, -4(sp)");   rv_load(&C, RV_A0, RV_SP, -4, 4, 1);
-    expect("lw a0, 2047(sp)"); rv_load(&C, RV_A0, RV_SP, 2047, 4, 1);
-    expect("lw a0, -2048(sp)"); rv_load(&C, RV_A0, RV_SP, -2048, 4, 1);
-    expect("sb a0, 4(sp)");    rv_store(&C, RV_A0, RV_SP, 4, 1);
-    expect("sh a0, 4(sp)");    rv_store(&C, RV_A0, RV_SP, 4, 2);
-    expect("sw a0, -4(sp)");   rv_store(&C, RV_A0, RV_SP, -4, 4);
-    expect("sw a0, 2047(sp)"); rv_store(&C, RV_A0, RV_SP, 2047, 4);
-    expect("sw a0, -2048(sp)"); rv_store(&C, RV_A0, RV_SP, -2048, 4);
+    expect("lb a0, 4(sp)");    rv_load(&C, RV_A0, RV_SP, 4, 1, 1, xlen);
+    expect("lbu a0, 4(sp)");   rv_load(&C, RV_A0, RV_SP, 4, 1, 0, xlen);
+    expect("lh a0, 4(sp)");    rv_load(&C, RV_A0, RV_SP, 4, 2, 1, xlen);
+    expect("lhu a0, 4(sp)");   rv_load(&C, RV_A0, RV_SP, 4, 2, 0, xlen);
+    expect("lw a0, -4(sp)");   rv_load(&C, RV_A0, RV_SP, -4, 4, 1, xlen);
+    expect("lw a0, 2047(sp)"); rv_load(&C, RV_A0, RV_SP, 2047, 4, 1, xlen);
+    expect("lw a0, -2048(sp)"); rv_load(&C, RV_A0, RV_SP, -2048, 4, 1, xlen);
+    expect("sb a0, 4(sp)");    rv_store(&C, RV_A0, RV_SP, 4, 1, xlen);
+    expect("sh a0, 4(sp)");    rv_store(&C, RV_A0, RV_SP, 4, 2, xlen);
+    expect("sw a0, -4(sp)");   rv_store(&C, RV_A0, RV_SP, -4, 4, xlen);
+    expect("sw a0, 2047(sp)"); rv_store(&C, RV_A0, RV_SP, 2047, 4, xlen);
+    expect("sw a0, -2048(sp)"); rv_store(&C, RV_A0, RV_SP, -2048, 4, xlen);
     if (xlen == 64) {
-        expect("lwu a0, 4(sp)");  rv_load(&C, RV_A0, RV_SP, 4, 4, 0);
-        expect("ld a0, 8(sp)");   rv_load(&C, RV_A0, RV_SP, 8, 8, 1);
-        expect("ld a0, -8(sp)");  rv_load(&C, RV_A0, RV_SP, -8, 8, 1);
-        expect("sd a0, 8(sp)");   rv_store(&C, RV_A0, RV_SP, 8, 8);
-        expect("sd a0, -8(sp)");  rv_store(&C, RV_A0, RV_SP, -8, 8);
+        expect("lwu a0, 4(sp)");  rv_load(&C, RV_A0, RV_SP, 4, 4, 0, xlen);
+        expect("ld a0, 8(sp)");   rv_load(&C, RV_A0, RV_SP, 8, 8, 1, xlen);
+        expect("ld a0, -8(sp)");  rv_load(&C, RV_A0, RV_SP, -8, 8, 1, xlen);
+        expect("sd a0, 8(sp)");   rv_store(&C, RV_A0, RV_SP, 8, 8, xlen);
+        expect("sd a0, -8(sp)");  rv_store(&C, RV_A0, RV_SP, -8, 8, xlen);
     }
 
     /* Control flow. The placeholders are emitted and then patched to a
@@ -314,7 +314,7 @@ static int sweep_li(int xlen)
  *
  * `--refuse list` prints how many there are, so adding one without adding
  * its case fails the test rather than going unnoticed. */
-#define NREFUSE 10
+#define NREFUSE 12
 static void refuse(int n)
 {
     struct code c = { 0, 0, 0 };
@@ -323,12 +323,17 @@ static void refuse(int n)
     case 1: rv_shift_imm(&c, RV_SLL, RV_A0, RV_A1, 64, 0, 64); break;
     case 2: rv_shift_imm(&c, RV_SLL, RV_A0, RV_A1, 32, 1, 64); break;
     case 3: rv_alu_imm(&c, RV_ADD, RV_A0, RV_A1, 2048, 0); break;
-    case 4: rv_store(&c, RV_A0, RV_SP, -2049, 4); break;
+    case 4: rv_store(&c, RV_A0, RV_SP, -2049, 4, 32); break;
     case 5: rv_alu_imm(&c, RV_SUB, RV_A0, RV_A1, 1, 0); break;
     case 6: rv_alu_imm(&c, RV_SLL, RV_A0, RV_A1, 1, 0); break;
     case 7: rv_alu(&c, RV_AND, RV_A0, RV_A1, RV_A2, 1); break;
     case 8: rv_li(&c, RV_A0, 0x100000000LL, 32); break;
-    case 9: rv_load(&c, RV_A0, RV_SP, 0, 3, 1); break;
+    case 9: rv_load(&c, RV_A0, RV_SP, 0, 3, 1, 32); break;
+    /* `ld`/`sd` and `lwu` are RV64-only, and at RV32 they assemble into
+     * real 32-bit words that trap as illegal instructions the first time
+     * a struct argument is copied -- which is how it was found. */
+    case 10: rv_load(&c, RV_A0, RV_SP, 0, 8, 1, 32); break;
+    case 11: rv_store(&c, RV_A0, RV_SP, 0, 8, 32); break;
     default: printf("no refusal %d\n", n); exit(2);
     }
     printf("refusal %d did not fire; %d bytes were emitted\n", n, c.len);

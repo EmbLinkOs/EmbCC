@@ -21,6 +21,7 @@
 #include "../driver/util.h"
 #include "../elf/elf.h"
 #include "../embx/embx.h"
+#include "../arch/riscv/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -156,6 +157,14 @@ struct linker {
     int narch, caparch;
     Elf64_Addr base;
     const char *entry;
+    /* RISC-V: what each PCREL_HI20 computed, keyed by the auipc's
+     * address, for the low half that pairs with it. */
+    struct { Elf64_Addr at; long long val; } *pcrel;
+    int npcrel, cappcrel;
+    Elf64_Addr stack_top;      /* RISC-V: the entry stub's sp, 0 = no stub */
+    int stub_sec;              /* the stub's insecs index, or -1 */
+    unsigned char *stub;       /* its bytes, written after layout */
+    long stub_size;
     Elf64_Addr lma_offset;     /* L2: p_paddr = p_vaddr - this (0 = paddr==vaddr) */
     Elf64_Addr data_base;      /* firmware: the writable segment's VMA (0 = off) */
     Elf64_Addr data_lma;       /* ... and where its bytes are STORED */
@@ -237,9 +246,10 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         Elf32_Ehdr *e32 = (Elf32_Ehdr *)buf;
         if (e32->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
-        if (e32->e_machine != EM_ARM)
+        if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV)
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM) "
-                "is supported", name, (unsigned)e32->e_machine);
+                "and RV32 (EM_RISCV) are supported", name,
+                (unsigned)e32->e_machine);
         o->machine = e32->e_machine;
         o->nsh = e32->e_shnum;
         if ((long)e32->e_shoff + (long)o->nsh * (long)sizeof(Elf32_Shdr) > len)
@@ -268,8 +278,9 @@ static struct object *parse_object(const char *name, unsigned char *buf,
     } else {
         if (eh->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
-        if (eh->e_machine != EM_X86_64)
-            die("%s: not x86-64", name);
+        if (eh->e_machine != EM_X86_64 && eh->e_machine != EM_RISCV)
+            die("%s: a 64-bit object for machine %u; only x86-64 and RV64 "
+                "(EM_RISCV) are supported", name, (unsigned)eh->e_machine);
         o->machine = eh->e_machine;
         o->eh = eh;
         o->nsh = eh->e_shnum;
@@ -404,6 +415,66 @@ static void collect_sections(struct linker *l, struct object *o)
         o->sec_out[i] = l->nsec;
         l->nsec++;
     }
+}
+
+/* The RISC-V entry stub: set sp, then jump to the real entry.
+ *
+ * Registered as an ordinary input section in the .vectors group, which
+ * already sorts AHEAD of .text (it is where a Cortex-M's vector table
+ * goes), so the stub lands at the image base and the bytes travel
+ * through the same path as everything else. The instructions are filled
+ * in after layout, when the entry's address exists.
+ *
+ * The jump is `auipc`+`jalr` rather than a bare `jal`, which reaches 1MB
+ * where this reaches 2GB -- and a fixed eight bytes means the layout does
+ * not depend on how far the entry turns out to be. The sp materialisation
+ * in front of it is however long rv_li needs for THAT address, which is
+ * known before layout because it is a constant from the command line. */
+static void add_entry_stub(struct linker *l)
+{
+    int xlen = l->elf32 ? 32 : 64;
+    long size = rv_li_len((long long)l->stack_top, xlen) + 8;
+
+    if (l->nsec == l->capsec) {
+        l->capsec = l->capsec ? l->capsec * 2 : 64;
+        l->insecs = xrealloc(l->insecs,
+                             (size_t)l->capsec * sizeof *l->insecs);
+    }
+    l->stub = xcalloc((size_t)size, 1);
+    l->stub_size = size;
+    struct insec *s = &l->insecs[l->nsec];
+    memset(s, 0, sizeof *s);
+    s->obj = NULL;              /* synthetic: apply_relocs never sees it */
+    s->shndx = -1;
+    s->name = ".start";
+    s->size = (Elf64_Xword)size;
+    s->align = 4;
+    s->data = l->stub;
+    s->osec = OSEC_VECTORS;
+    s->seg = SEG_TEXT;
+    l->stub_sec = l->nsec;
+    l->nsec++;
+}
+
+static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
+{
+    struct code c = { l->stub, 0, (int)l->stub_size };
+    struct insec *s = &l->insecs[l->stub_sec];
+    int xlen = l->elf32 ? 32 : 64;
+    /* The auipc sits just before the jalr, at the end of the stub. */
+    Elf64_Addr auipc_at = s->vaddr + (Elf64_Addr)l->stub_size - 8;
+    long long d = (long long)entry - (long long)auipc_at;
+
+    if (d < -(1LL << 31) || d >= (1LL << 31))
+        die("the entry symbol is more than 2GB from the image base");
+    /* rv_li and not a hand-rolled lui/addi: at RV64 `lui` sign-extends
+     * bit 31, so the pair cannot produce 0x80800000 -- it produces
+     * 0xffffffff80800000, and the first push faulted on an address that
+     * looked almost right. rv_li knows to build the wider value. */
+    rv_li(&c, RV_SP, (long long)l->stack_top, xlen);
+    rv_auipc(&c, RV_T0, (long)(((d + 0x800) >> 12) & 0xfffff));
+    /* jalr with rd = zero is a tail jump: nothing returns to the stub. */
+    rv_jalr(&c, RV_ZERO, RV_T0, (int)(((d & 0xfff) ^ 0x800) - 0x800));
 }
 
 static void add_symbols(struct linker *l, struct object *o);
@@ -697,6 +768,13 @@ static void layout(struct linker *l, struct osec_bound *b,
         va = l->data_base;
     } else {
         va = align_up(va, PAGE);       /* W^X boundary */
+        /* Stored WHERE IT IS ADDRESSED, which is the ordinary case and
+         * has to be said rather than left at zero: __data_load is a real
+         * symbol in every link, and a startup that copies .data from it
+         * -- which is the same startup a firmware build uses -- read
+         * from address 0 and hung. Equal brackets make that copy a
+         * correct no-op instead. */
+        l->data_lma = va;
     }
     *data_start = va;
 
@@ -960,7 +1038,11 @@ static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
             return sy->st_value;
         int out = o->sec_out[sy->st_shndx];
         if (out < 0)
-            die("%s: local symbol in a non-allocated section", o->name);
+            die("%s: local symbol '%s' is in section %u (%s), which is not "
+                "allocated and so has no address to relocate against",
+                o->name, name && *name ? name : "<unnamed>",
+                (unsigned)sy->st_shndx,
+                o->shstr + o->shdrs[sy->st_shndx].sh_name);
         return l->insecs[out].vaddr + sy->st_value;
     }
 
@@ -1031,6 +1113,158 @@ static void patch_thm_b24(struct object *o, unsigned char *loc, long long off)
      * (0xd000 bl, 0x9000 b.w); it is kept, not rewritten. */
     put16(loc + 2, (get16(loc + 2) & 0xd000u) | (j1 << 13) | (j2 << 11) |
                    (unsigned)(v & 0x7ff));
+}
+
+static unsigned int get32loc(const unsigned char *p);
+
+/* ---- RISC-V relocations -------------------------------------------------
+ *
+ * Four shapes, and only one of them is an ordinary field.
+ *
+ * HI20/LO12 are a pair in ARITHMETIC, not in bits: `lui` supplies bits
+ * 31:12 and the paired instruction a SIGN-EXTENDED low 12, so when bit 11
+ * of the address is set the low half contributes -4096..-1 and the high
+ * half must be one larger. That is the +0x800 below, and it is the single
+ * most-repeated bug in RISC-V toolchains: without it every address whose
+ * bit 11 is set comes out 4096 too low, which is half of them.
+ *
+ * CALL patches TWO instructions from ONE relocation -- the `auipc` it
+ * sits on and the `jalr` four bytes later -- and the same rounding
+ * applies, with the displacement measured from the auipc.
+ *
+ * LO12_S is the same twelve bits as LO12_I in an S-type instruction,
+ * where the field is split across bits 31:25 and 11:7 so that rs1 and rs2
+ * keep the places they have in every other format.
+ *
+ * RELAX carries no value: it marks a site a linker MAY shorten. Optional,
+ * so ignoring it is correct, and this does.
+ */
+static long rv_hi20(long long v) { return (long)(((v + 0x800) >> 12) & 0xfffff); }
+static int  rv_lo12(long long v) { return (int)(((v & 0xfff) ^ 0x800) - 0x800); }
+
+static void rv_put_u(unsigned char *loc, long hi)
+{
+    /* Only the imm field; the opcode and rd stay as the compiler wrote
+     * them, so a relocation cannot quietly turn a `lui` into an `auipc`. */
+    put32(loc, (get32loc(loc) & 0x00000fffU) |
+               ((unsigned int)hi << 12));
+}
+
+static void rv_put_i(unsigned char *loc, int lo)
+{
+    put32(loc, (get32loc(loc) & 0x000fffffU) |
+               (((unsigned int)lo & 0xfffU) << 20));
+}
+
+static void rv_put_s(unsigned char *loc, int lo)
+{
+    unsigned int u = (unsigned int)lo & 0xfffU;
+    put32(loc, (get32loc(loc) & 0x01fff07fU) |
+               ((u & 0x1fU) << 7) | ((u >> 5) << 25));
+}
+
+/* Every PCREL_HI20 this link has resolved, by the address of its auipc.
+ * The low halves are looked up here rather than recomputed, because the
+ * two must agree about the rounding and only the high one saw the whole
+ * displacement. A linear scan: there are a handful per function and the
+ * lookup is once per pair. */
+static void note_pcrel_hi(struct linker *l, Elf64_Addr at, long long val)
+{
+    if (l->npcrel == l->cappcrel) {
+        l->cappcrel = l->cappcrel ? l->cappcrel * 2 : 64;
+        l->pcrel = xrealloc(l->pcrel, (size_t)l->cappcrel * sizeof *l->pcrel);
+    }
+    l->pcrel[l->npcrel].at = at;
+    l->pcrel[l->npcrel].val = val;
+    l->npcrel++;
+}
+
+static long long find_pcrel_hi(struct linker *l, struct object *o,
+                               Elf64_Addr at)
+{
+    for (int i = l->npcrel - 1; i >= 0; i--)
+        if (l->pcrel[i].at == at)
+            return l->pcrel[i].val;
+    die("%s: a RISC-V PCREL_LO12 relocation names 0x%llx, where no "
+        "PCREL_HI20 was relocated; the two halves of an address must be "
+        "emitted as a pair", o->name, (unsigned long long)at);
+    return 0;
+}
+
+static void apply_riscv(struct linker *l, struct object *o, unsigned type,
+                        unsigned char *loc, Elf64_Addr S, long long A,
+                        Elf64_Addr P)
+{
+    long long V = (long long)S + A;
+    switch (type) {
+    case R_RISCV_32:
+        put32(loc, (unsigned int)V);
+        return;
+    case R_RISCV_64:
+        put64(loc, (unsigned long long)V);
+        return;
+    case R_RISCV_HI20:
+        rv_put_u(loc, rv_hi20(V));
+        return;
+    case R_RISCV_LO12_I:
+        rv_put_i(loc, rv_lo12(V));
+        return;
+    case R_RISCV_LO12_S:
+        rv_put_s(loc, rv_lo12(V));
+        return;
+    case R_RISCV_PCREL_HI20:
+        /* Recorded as well as written: the low half that pairs with it
+         * has to take the low twelve bits of THIS displacement, not of
+         * the address, or the two disagree about the +0x800 rounding
+         * and the result is 4096 out for half of all symbols. */
+        note_pcrel_hi(l, P, V - (long long)P);
+        rv_put_u(loc, rv_hi20(V - (long long)P));
+        return;
+    case R_RISCV_PCREL_LO12_I:
+    case R_RISCV_PCREL_LO12_S: {
+        /* S + A is the address of the AUIPC, not of the target: the
+         * psABI resolves this relocation by looking up the high half's
+         * own relocation there. */
+        long long d = find_pcrel_hi(l, o, (Elf64_Addr)V);
+        if (type == R_RISCV_PCREL_LO12_I) rv_put_i(loc, rv_lo12(d));
+        else                              rv_put_s(loc, rv_lo12(d));
+        return;
+    }
+    case R_RISCV_BRANCH:
+    case R_RISCV_JAL: {
+        /* An ordinary displacement, but in the two SCRAMBLED formats:
+         * B-type stores bits (12, 10:5, 4:1, 11) and J-type
+         * (20, 10:1, 11, 19:12), so the field is rebuilt by the same
+         * encoder the compiler uses rather than shifted into place here.
+         * EmbCC's own branches never reach this -- they are resolved
+         * inside the function that emits them -- but clang's do, from a
+         * `.L0` label in another section. */
+        long long d = V - (long long)P;
+        unsigned int keep = get32loc(loc);
+        if (type == R_RISCV_BRANCH)
+            put32(loc, (keep & ~0xfe000f80U) |
+                       (unsigned int)rv_enc_b(0, 0, 0, 0, (int)d));
+        else
+            put32(loc, (keep & ~0xfffff000U) |
+                       (unsigned int)rv_enc_j(0, 0, (int)d));
+        return;
+    }
+    case R_RISCV_CALL:
+    case R_RISCV_CALL_PLT: {
+        long long d = V - (long long)P;
+        if (d < -(1LL << 31) || d >= (1LL << 31))
+            die("%s: a RISC-V call is more than 2GB away; auipc/jalr "
+                "cannot reach it and this linker mints no stubs", o->name);
+        rv_put_u(loc, rv_hi20(d));
+        rv_put_i(loc + 4, rv_lo12(d));
+        return;
+    }
+    case R_RISCV_RELAX:
+        return;                 /* a hint; relaxation is optional */
+    default:
+        die("%s: unsupported RISC-V relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
 }
 
 static unsigned int get32loc(const unsigned char *p)
@@ -1124,11 +1358,25 @@ static void apply_relocs(struct linker *l, struct object *o)
                 symi = ELF64_R_SYM(r64->r_info);
                 A = r64->r_addend;
             }
+            /* R_RISCV_RELAX carries no symbol -- its index is 0, the
+             * null entry -- so it has to be recognised BEFORE the symbol
+             * is resolved. It is a hint that the site may be shortened,
+             * relaxation is optional, and this linker does not do it.
+             * R_RISCV_ALIGN is the same shape: it marks NOP padding that
+             * a relaxing linker may shrink, and one that moves nothing
+             * leaves the alignment the assembler already arranged. */
+            if (o->machine == EM_RISCV &&
+                (type == R_RISCV_RELAX || type == R_RISCV_ALIGN))
+                continue;
             int uw;
             Elf64_Addr S = reloc_symval(l, o, symi, &uw);
             Elf64_Addr P = ts->vaddr + r_offset;      /* patch site vaddr */
             unsigned char *loc = base + r_offset;
 
+            if (o->machine == EM_RISCV) {
+                apply_riscv(l, o, type, loc, S, A, P);
+                continue;
+            }
             if (o->elf32) {
                 /* SHT_REL keeps the addend IN the field, in whatever
                  * shape that field has -- a word for the data
@@ -1341,6 +1589,9 @@ static void write_exec(struct linker *l, const char *out,
      * the symbol; the ELF entry must too, or the processor starts in
      * ARM state and faults on the first instruction. */
     eh->e_entry = entry;
+    /* RISC-V's e_flags stay 0: bit 0 is EF_RISCV_RVC (nothing here emits
+     * compressed instructions) and bits 2:1 are the float ABI, whose 0
+     * means SOFT. */
     eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5 : 0;
     eh->e_phoff = ehsz;
     eh->e_ehsize = (Elf64_Half)ehsz;
@@ -1616,6 +1867,8 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     l.entry = (opts && opts->entry) ? opts->entry : "_start";
     l.lma_offset = (opts) ? opts->lma_offset : 0;
     l.data_base = (opts) ? opts->data_base : 0;
+    l.stack_top = (opts && opts->have_stack) ? opts->stack_top : 0;
+    l.stub_sec = -1;
 
     /* Explicit objects are always linked; archives are stashed and their
      * members pulled on demand (left-to-right, as a linker does — so an
@@ -1634,6 +1887,19 @@ int embld_link(const char **inputs, int ninputs, const char *out,
      * reach back into an earlier archive (the --start-group behaviour,
      * always on: correct over order-sensitive). */
     pull_archives(&l);
+
+    /* The entry stub goes in before layout so it gets an address like
+     * any other section, and is FILLED after, when the entry symbol has
+     * one. Refused on a machine that does not need it rather than
+     * silently ignored: -Tstack on ARM would mean the caller believes
+     * something about the image that is not true. */
+    if (opts && opts->have_stack) {
+        if (l.machine != EM_RISCV)
+            die("-Tstack is a RISC-V option: every other target here "
+                "starts with a stack pointer already set (a Cortex-M "
+                "reads its own from the vector table)");
+        add_entry_stub(&l);
+    }
 
     Elf64_Addr text_start, data_start;
     Elf64_Xword text_size, data_filesz, data_memsz;
@@ -1662,6 +1928,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     if (!e || !e->defined)
         die("entry symbol '%s' is undefined", l.entry);
 
+    if (l.stub_sec >= 0)
+        fill_entry_stub(&l, e->value);
+
     for (int i = 0; i < l.nobj; i++)
         apply_relocs(&l, l.objs[i]);
 
@@ -1669,7 +1938,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         emit_embx(&l, out, opts->caps, e->value, text_start, text_size,
                   data_start, data_filesz, data_memsz);
     } else {
-        write_exec(&l, out, e->value, text_start, text_size,
+        write_exec(&l, out,
+                   l.stub_sec >= 0 ? l.insecs[l.stub_sec].vaddr : e->value,
+                   text_start, text_size,
                    data_start, data_filesz, data_memsz,
                    tls_start, tls_filesz, tls_memsz, tls_align);
         emit_embdbg(&l, out);   /* a .embdbg sidecar if any input carries -g info */

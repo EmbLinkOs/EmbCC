@@ -44,7 +44,11 @@ static const struct data_model {
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
-int target_xlen(void)           { return g_model[g_arch].ptr; }
+/* XLEN is RISC-V's own name for the register width IN BITS -- 32 or 64,
+ * the number in `rv32`/`rv64` and in __riscv_xlen. Returning the pointer
+ * column directly would give BYTES, and the backend that divided it by 8
+ * to get bytes got 1 and made every value a byte wide. */
+int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_ldouble_size(void)   { return g_model[g_arch].ldbl; }
 int target_char_unsigned(void)  { return g_model[g_arch].char_uns; }
@@ -225,6 +229,23 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         default:             return -1;
         }
     }
+    if (a == TARGET_RISCV32 || a == TARGET_RISCV64) {
+        switch (k) {
+        /* One relocation for the auipc/jalr PAIR: the linker patches
+         * both from this one site. _PLT rather than plain CALL because
+         * that is what every RISC-V toolchain emits and what a linker
+         * with a PLT needs; one without treats them alike. */
+        case RK_CALL:        return R_RISCV_CALL_PLT;
+        case RK_RISCV_PCREL_HI20:   return R_RISCV_PCREL_HI20;
+        case RK_RISCV_PCREL_LO12_I: return R_RISCV_PCREL_LO12_I;
+        case RK_ABS32:       return R_RISCV_32;
+        /* ABS64 only at RV64: a 32-bit target has no 64-bit address to
+         * relocate, and asking for one is a bug upstream rather than a
+         * kind this table merely lacks. */
+        case RK_ABS64:       return a == TARGET_RISCV64 ? R_RISCV_64 : -1;
+        default:             return -1;
+        }
+    }
     if (a == TARGET_AARCH64) {
         switch (k) {
         /* CALL26, not JUMP26: the field is the same, but CALL26 is what a
@@ -316,9 +337,14 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
 
 long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 {
-    if (a == TARGET_AARCH64 || a == TARGET_THUMB)
-        return bias;              /* ARM fields are relative to the
-                                   * instruction, so no end-of-insn bias */
+    if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
+        a == TARGET_RISCV32 || a == TARGET_RISCV64)
+        return bias;              /* ARM and RISC-V fields are relative to
+                                   * the instruction itself, so no
+                                   * end-of-instruction bias. On RISC-V
+                                   * that is the `auipc`, which is where
+                                   * the relocation sits and where the pc
+                                   * it adds to is measured from. */
     switch (k) {
     case RK_CALL:
     case RK_PCREL32:

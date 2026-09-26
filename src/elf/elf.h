@@ -250,6 +250,52 @@ typedef struct {
  * offset, the top bit reserved to say what the entry holds. */
 #define R_ARM_PREL31          42
 
+/* RISC-V relocations (psABI), the ones an object from this compiler
+ * needs.
+ *
+ * R_RISCV_CALL patches a PAIR -- the `auipc` it sits on and the `jalr`
+ * four bytes later -- which is unlike every other relocation here and is
+ * the ABI's own shape. _PLT is the same thing through a PLT where one
+ * exists; a static image has none, and the two are interchangeable for
+ * a linker that resolves the symbol itself.
+ *
+ * HI20 and LO12 are a PAIR in arithmetic rather than in bits: the low
+ * half is SIGN-EXTENDED when the instruction adds it, so the linker must
+ * compute the high half as (V + 0x800) >> 12. LO12_I and LO12_S are the
+ * same 12 bits in two instruction formats -- S-type splits the field
+ * across bits 31:25 and 11:7 so rs1 and rs2 keep their places.
+ *
+ * The PCREL_ forms are the ones this compiler emits, because `lui`
+ * sign-extends bit 31 and the absolute pair therefore cannot name an
+ * RV64 address between 0x80000000 and 0xffffffff7fffffff -- which is
+ * where a firmware image lives. PCREL_LO12's SYMBOL is the AUIPC, not
+ * the target: the linker looks up the high half's relocation at that
+ * address and takes the low twelve bits of what IT computed. The
+ * absolute HI20/LO12 numbers are here because an object from another
+ * toolchain may carry them and the linker reads those too.
+ *
+ * R_RISCV_RELAX carries no value: it marks a site the linker MAY shorten
+ * (a call that turns out to be in range of a single `jal`). Relaxation
+ * is optional, so a linker that ignores it is correct -- embld does. */
+#define R_RISCV_32        1
+#define R_RISCV_64        2
+#define R_RISCV_BRANCH   16
+#define R_RISCV_JAL      17
+#define R_RISCV_CALL     18
+#define R_RISCV_CALL_PLT 19
+#define R_RISCV_PCREL_HI20   23
+#define R_RISCV_PCREL_LO12_I 24
+#define R_RISCV_PCREL_LO12_S 25
+#define R_RISCV_HI20     26
+#define R_RISCV_LO12_I   27
+#define R_RISCV_LO12_S   28
+#define R_RISCV_RELAX    51
+/* Padding a relaxing linker may shrink. Like RELAX it carries no symbol,
+ * and like RELAX it is safe to ignore: the assembler already emitted the
+ * NOPs that make the alignment hold, and a linker that moves nothing
+ * cannot invalidate it. */
+#define R_RISCV_ALIGN    43
+
 /* e_ident indices and values */
 #define EI_MAG0       0
 #define EI_MAG1       1

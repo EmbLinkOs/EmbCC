@@ -1286,6 +1286,81 @@ in step with the real one, and it had already fallen behind: it printed
 `x86_64-elf` for ARMv7-M. It reads `target_triple_now()` now, so the table
 that parses a triple is the table that prints it.
 
-**Reopen if:** the backend turns out to want separate directories after all
-— most likely if RV32 and RV64 end up needing different lowering for
+**2026-09-26, later:** the backend landed, for both widths at once, and
+one directory was the right call — `src/arch/riscv/` is a single
+`codegen.c` reading `target_xlen()`, and the width shows up in three
+places rather than everywhere: a `long long` is a register pair at RV32
+and a register at RV64, a 32-bit operation at RV64 must use the `w`
+instruction forms to keep its result sign-extended, and `ld`/`sd`/`lwu`
+do not exist at RV32.
+
+Running everything TWICE is what the suite is for, not a doubling of it.
+Three of the bugs below passed at one width and failed at the other.
+
+**The one that decided the code model.** `lui` SIGN-EXTENDS bit 31, so
+the absolute `lui`+`addi` pair cannot name an RV64 address between
+0x80000000 and 0xffffffff7fffffff — and a firmware image lives at
+0x80000000, which is where QEMU's `virt` board and most RISC-V hardware
+put RAM. Every global's address came out sign-extended and the first
+store through one faulted. The answer is PC-relative `auipc`+`addi` at
+BOTH widths (what `-mcmodel=medany` gives), which has no hole and is
+position-independent besides; clang needs the same flag to build the
+reference. The low half's relocation names the AUIPC rather than the
+target, because the two halves must agree about the +0x800 rounding and
+only the high one saw the whole displacement.
+
+**The stack pointer, which C cannot write.** A Cortex-M fetches its
+initial sp from the first word of the image, which is why the ARMv7-M
+harness is pure C. RISC-V has nothing equivalent — every register is
+zero at reset — so `embld -Tstack ADDR` emits the four instructions that
+set sp and jump to the entry, from the same encoder the compiler uses.
+That is the software half of what the other target gets in hardware, and
+it keeps a firmware image buildable by this toolchain alone.
+
+Four more, each of which compiled, linked and ran:
+
+  * **`target_xlen()` returned BYTES.** XLEN is the ISA manual's name for
+    the register width in BITS; the backend divided by 8 to get bytes,
+    got 1, and made every value one byte wide.
+  * **`place_arg` numbers argument registers 0..7, and a0 is x10.** On
+    ARM the index and the register number coincide; here the index was
+    used directly, so a function read its second parameter out of `ra`.
+  * **the far-offset scratch was chosen, not reserved.** For a frame
+    deeper than 2047 bytes the address register was "whichever scratch is
+    not the one being moved", which picked B_LO while loading B_HI — so
+    reading the high half of a register pair destroyed the low half. Only
+    functions with enough locals hit it, so every small test passed.
+  * **irgen converts an `unsigned int` by asking for a SIGNED 64-bit
+    conversion**, relying on "a 32-bit operation zero-extends its result
+    into the eight-byte slot". True of a register write on x86-64 and
+    aarch64; false at RV32, where the slot is four bytes, and false at
+    RV64, where a slot load sign-extends. `(float)(unsigned)k` came back
+    as a constant 4.7e18 whatever k was. The Thumb backend had already
+    found and written this down; the note is what made it a ten-minute
+    fix rather than an hour.
+
+Two things outside the backend turned out to be wrong for everyone, not
+just for RISC-V:
+
+  * **`__data_load` was 0 unless `-Tdata` was given.** It is a real symbol
+    in every link, and the startup that copies `.data` from it — the same
+    startup a firmware build uses — read from address 0. It is now equal
+    to `__data_start` when the two are the same place, which makes the
+    copy a correct no-op.
+  * **`lib/rt/softfp.c` was guarded on POINTER WIDTH.** RV64 is a 64-bit
+    machine with no FPU under `-march=rv64im`, and the guard compiled the
+    whole file away. It now asks whether the target has hardware floating
+    point, which is the actual question.
+
+**Still to check:** `va_copy` special-cases the targets whose `va_list` is
+a bare pointer, and RISC-V is now among them. Darwin's arm64 has a
+bare-pointer `va_list` too (`irg_va_arg_darwin`) and is NOT in that list,
+so it appears to copy 32 bytes of arguments where it should copy a
+pointer. Nothing here exercises that target, so it is written down rather
+than changed blind.
+
+**Reopen if:** the backend turns out to want separate directories after
+all — most likely if RV32 and RV64 end up needing different lowering for
 64-bit integers, which is where the widths stop being the same machine.
+It did not happen for this increment: the register-pair code is the only
+RV32-only part, and it is one clearly-marked block.

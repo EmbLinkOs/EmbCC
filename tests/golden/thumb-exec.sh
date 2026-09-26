@@ -11,6 +11,12 @@
 # how the image was built. It is the same discipline as
 # agrees-with-gcc.sh, on a machine where nothing else here runs.
 #
+# The PROGRAMS are tests/golden/embedded-*.c, shared with the RISC-V
+# suite -- they are ordinary C and name no machine, so the same five
+# exercise both backends. A bug in one that the other does not have
+# shows up as one suite failing on a program the other passes, which is
+# a much sharper signal than two separate programs drifting apart.
+#
 # Every wrong answer this backend has produced was found this way and by
 # nothing else: an `and` emitted as `eor`, a folded immediate read as a
 # register, and a fifth argument written over the first local all
@@ -54,7 +60,7 @@ run_image() {           # run_image OBJ TAG -> $out/TAG.txt
     return 0
 }
 
-for src in tests/golden/thumb-stress.c; do
+for src in tests/golden/embedded-stress.c; do
     base=$(basename "$src" .c)
 
     # The reference: the same source, the same linker, the same board.
@@ -84,14 +90,14 @@ done
 # share a runtime.
 "$EMBCC" --target=$T -Os -c lib/rt/int64.c -o "$out/int64.o" || {
     echo "the 64-bit runtime does not compile for $T"; exit 1; }
-cc -std=c99 -w -o "$out/host64" tests/golden/thumb-int64.c \
+cc -std=c99 -w -o "$out/host64" tests/golden/embedded-int64.c \
    tests/harness/thumb/hostio.c || {
     echo "the 64-bit program does not compile for the host"; exit 1; }
 "$out/host64" > "$out/int64-ref.txt" || {
     echo "the 64-bit program failed on the host"; exit 1; }
 
 for opt in -O0 -O1 -O2 -Os; do
-    "$EMBCC" --target=$T $opt -c tests/golden/thumb-int64.c \
+    "$EMBCC" --target=$T $opt -c tests/golden/embedded-int64.c \
              -o "$out/i64$opt.o" || {
         echo "$opt: the 64-bit program does not compile"; exit 1; }
     sh "$H/link.sh" "$out/i64$opt.elf" "$out/i64$opt.o" "$out/int64.o" || {
@@ -115,14 +121,14 @@ echo "thumb-int64: 64-bit arithmetic agrees with the host at four levels"
 # compared as BIT PATTERNS, so a rounding that is off by one ulp fails.
 "$EMBCC" --target=$T -Os -c lib/rt/softfp.c -o "$out/softfp.o" || {
     echo "the soft-float runtime does not compile for $T"; exit 1; }
-cc -std=c99 -w -o "$out/hostfp" tests/golden/thumb-float.c \
+cc -std=c99 -w -o "$out/hostfp" tests/golden/embedded-float.c \
    tests/harness/thumb/hostio.c || {
     echo "the float program does not compile for the host"; exit 1; }
 "$out/hostfp" > "$out/float-ref.txt" || {
     echo "the float program failed on the host"; exit 1; }
 
 for opt in -O0 -O1 -O2 -Os; do
-    "$EMBCC" --target=$T $opt -c tests/golden/thumb-float.c \
+    "$EMBCC" --target=$T $opt -c tests/golden/embedded-float.c \
              -o "$out/fp$opt.o" || {
         echo "$opt: the float program does not compile"; exit 1; }
     sh "$H/link.sh" "$out/fp$opt.elf" "$out/fp$opt.o" "$out/softfp.o" \
@@ -143,13 +149,13 @@ echo "thumb-float: IEEE results are bit-identical to the host at four levels"
 
 # Aggregates by value, against the host — what a struct's members add
 # up to does not depend on the machine.
-cc -std=c99 -w -o "$out/hostagg" tests/golden/thumb-aggregate.c \
+cc -std=c99 -w -o "$out/hostagg" tests/golden/embedded-aggregate.c \
    tests/harness/thumb/hostio.c || {
     echo "the aggregate program does not compile for the host"; exit 1; }
 "$out/hostagg" > "$out/agg-ref.txt" || {
     echo "the aggregate program failed on the host"; exit 1; }
 for opt in -O0 -O1 -O2 -Os; do
-    "$EMBCC" --target=$T $opt -c tests/golden/thumb-aggregate.c \
+    "$EMBCC" --target=$T $opt -c tests/golden/embedded-aggregate.c \
              -o "$out/ag$opt.o" || {
         echo "$opt: the aggregate program does not compile"; exit 1; }
     sh "$H/link.sh" "$out/ag$opt.elf" "$out/ag$opt.o" "$out/softfp.o" \
@@ -165,13 +171,13 @@ done
 echo "thumb-aggregate: by-value structs agree with the host at four levels"
 
 # Variadic functions, against the host.
-cc -std=c99 -w -o "$out/hostva" tests/golden/thumb-varargs.c \
+cc -std=c99 -w -o "$out/hostva" tests/golden/embedded-varargs.c \
    tests/harness/thumb/hostio.c || {
     echo "the varargs program does not compile for the host"; exit 1; }
 "$out/hostva" > "$out/va-ref.txt" || {
     echo "the varargs program failed on the host"; exit 1; }
 for opt in -O0 -O1 -O2 -Os; do
-    "$EMBCC" --target=$T $opt -c tests/golden/thumb-varargs.c \
+    "$EMBCC" --target=$T $opt -c tests/golden/embedded-varargs.c \
              -o "$out/va$opt.o" || {
         echo "$opt: the varargs program does not compile"; exit 1; }
     sh "$H/link.sh" "$out/va$opt.elf" "$out/va$opt.o" "$out/softfp.o" \

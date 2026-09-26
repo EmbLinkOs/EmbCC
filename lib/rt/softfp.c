@@ -26,7 +26,21 @@
  * other way round, or for a format only a few bits wider.
  */
 
-#if __SIZEOF_POINTER__ < 8
+/* WHICH TARGETS NEED THIS is not a question about pointer width, which
+ * is what this used to ask. RV64 is a 64-bit machine with no hardware
+ * floating point at all under -march=rv64im, and the pointer-size test
+ * compiled the whole file away there -- the link then failed on
+ * __gtdf2, which is the good outcome and only because nothing silently
+ * substituted anything.
+ *
+ * The right question is whether the target HAS an FPU, and each
+ * architecture spells its answer differently: RISC-V defines
+ * __riscv_float_abi_soft when it has none, and ARM defines __SOFTFP__
+ * (or simply leaves __ARM_FP undefined) for the same. x86-64 and
+ * AArch64 always have hardware floating point, so neither macro is
+ * defined there and the file is empty, as before. */
+#if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
+    (defined(__arm__) && !defined(__ARM_FP))
 
 typedef unsigned int u32;
 typedef unsigned long long u64;

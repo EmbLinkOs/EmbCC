@@ -820,25 +820,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     struct fsite *fs;
     int next, nstrs, ngs, nfs;
     enum target_arch ta = target_get();
-    /* THE RULE. The RISC-V front end is complete -- the type model, the
-     * predefined macros and the object format are all in place -- but
-     * there is no backend behind it yet. Handing this unit to the x86-64
-     * one because it is "not aarch64 and not thumb" would write an
-     * object full of x86 instructions under an EM_RISCV header, which is
-     * the exact failure mode a default case is supposed to prevent.
-     * Refuse here, by name, and say what does work today. (ARMv7-M stood
-     * in this same block for one commit; the backend below it is what
-     * replaced this text for that target.) */
-    if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64) {
-        fprintf(stderr,
-                "embcc: %s: error: --target=%s has no code generator yet; "
-                "the front end accepts this target (-E, -fsyntax-only and "
-                "--dump-predef all work) but nothing can emit RISC-V "
-                "instructions\n",
-                in, target_triple_now());
-        return 1;
-    }
-    if (ta == TARGET_THUMB)
+    /* Which machine. Four backends behind this and five targets: RISC-V
+     * is ONE code generator for both widths, because the instruction set
+     * is the same at both and only the data model differs (D-016). */
+    if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64)
+        codegen_unit_riscv(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                           opt_level >= 2);
+    else if (ta == TARGET_THUMB)
         codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                            opt_level >= 2);
@@ -1973,21 +1962,42 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                           ta->rels[r].addend);
         }
 
+    /* RISC-V's low half names the AUIPC, not the target.
+     *
+     * R_RISCV_PCREL_LO12_I is resolved by looking up the HIGH half's
+     * relocation at the address its symbol gives, and taking the low
+     * twelve bits of what THAT computed -- because the two halves have
+     * to agree about the +0x800 rounding, and only the high one knows
+     * the whole displacement. An assembler spells that with a local
+     * `.Lpcrel_hi0` label on the auipc; here the .text section symbol
+     * plus the auipc's offset resolves to the same address, and the
+     * auipc is always the instruction four bytes before. */
+    int riscv = ta == TARGET_RISCV32 || ta == TARGET_RISCV64;
+
     /* String addresses: PC32 against the .rodata section symbol.
      * addend = target offset - 4, because rel32 is measured from the
      * end of the instruction, four bytes past r_offset. */
-    for (int i = 0; i < nstrs; i++)
-        elfw_add_rela(w, text_ndx, (Elf64_Addr)strs[i].patch_off, rodata_sym,
+    for (int i = 0; i < nstrs; i++) {
+        int lo = riscv && strs[i].kind == RK_RISCV_PCREL_LO12_I;
+        elfw_add_rela(w, text_ndx, (Elf64_Addr)strs[i].patch_off,
+                      lo ? text_sym : rodata_sym,
                       target_reloc_type(ta, strs[i].kind),
-                      target_reloc_addend(ta, strs[i].kind, strs[i].str_off));
+                      lo ? strs[i].patch_off - 4
+                         : target_reloc_addend(ta, strs[i].kind,
+                                               strs[i].str_off));
+    }
     free(strs);
 
     /* Global-variable addresses: PC32 against the global's own symbol
      * (defined or UNDEF alike — the linker fills in either way). */
-    for (int i = 0; i < ngs; i++)
+    for (int i = 0; i < ngs; i++) {
+        int lo = riscv && gs[i].kind == RK_RISCV_PCREL_LO12_I;
         elfw_add_rela(w, text_ndx, (Elf64_Addr)gs[i].patch_off,
-                      gs[i].glob->sym_ndx, target_reloc_type(ta, gs[i].kind),
-                      target_reloc_addend(ta, gs[i].kind, 0));
+                      lo ? text_sym : gs[i].glob->sym_ndx,
+                      target_reloc_type(ta, gs[i].kind),
+                      lo ? gs[i].patch_off - 4
+                         : target_reloc_addend(ta, gs[i].kind, 0));
+    }
     free(gs);
 
     /* Pointer slots in .data initialized by an address: an absolute 64-bit
@@ -2038,9 +2048,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 w, tf->name, 0, 0,
                 ELF64_ST_INFO(tf->is_weak ? STB_WEAK : STB_GLOBAL,
                               STT_NOTYPE), SHN_UNDEF);
-        elfw_add_rela(w, text_ndx, (Elf64_Addr)fs[i].patch_off, tf->sym_ndx,
+        int lo = riscv && fs[i].kind == RK_RISCV_PCREL_LO12_I;
+        elfw_add_rela(w, text_ndx, (Elf64_Addr)fs[i].patch_off,
+                      lo ? text_sym : tf->sym_ndx,
                       target_reloc_type(ta, fs[i].kind),
-                      target_reloc_addend(ta, fs[i].kind, 0));
+                      lo ? fs[i].patch_off - 4
+                         : target_reloc_addend(ta, fs[i].kind, 0));
     }
     free(fs);
 

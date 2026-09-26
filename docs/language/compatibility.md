@@ -34,19 +34,28 @@ design decision recording what was found and a golden suite holding it:
 | `long double` | IS a `double` (8 bytes) | IEEE binary128 | IEEE binary128 |
 | `char` / `wchar_t` | unsigned / unsigned | unsigned / **signed** | unsigned / **signed** |
 | `__int128` | ✗ refused by name | ✗ refused by name | ✓ |
-| Source | [`src/arch/thumb/`](../../src/arch/thumb/) | macro tables only | macro tables only |
-| Code generator | ✓ | not yet — `-c` refuses by name | not yet — `-c` refuses by name |
-| Linker (`embld`) | ✓ ELF32, firmware layout, `.vectors` | not yet | not yet |
-| Reference compiler | `clang -target thumbv7m-none-eabi` | `clang … -march=rv32im -mabi=ilp32` | `clang … -march=rv64im -mabi=lp64` |
-| Tests run on | QEMU `-M lm3s6965evb -cpu cortex-m3` | — | — |
+| Code model | absolute (`movw`/`movt`) | PC-relative (`auipc`) | PC-relative (`auipc`) |
+| Source | [`src/arch/thumb/`](../../src/arch/thumb/) | [`src/arch/riscv/`](../../src/arch/riscv/) — one backend, both widths | same |
+| Code generator | ✓ | ✓ | ✓ |
+| Linker (`embld`) | ✓ ELF32, firmware layout, `.vectors` | ✓ ELF32, `-Tstack` entry stub | ✓ ELF64, `-Tstack` entry stub |
+| Reference compiler | `clang -target thumbv7m-none-eabi` | `clang … -march=rv32im -mabi=ilp32 -mcmodel=medany` | `clang … -march=rv64im -mabi=lp64 -mcmodel=medany` |
+| Tests run on | QEMU `-M lm3s6965evb -cpu cortex-m3` | QEMU `-M virt` (riscv32) | QEMU `-M virt` (riscv64) |
 | Decision | [D-015](../design/decisions.md) | [D-016](../design/decisions.md) | [D-016](../design/decisions.md) |
-| Suites | `thumb-{target,encoding,codegen,exec}.sh` | `riscv-target.sh` | `riscv-target.sh` |
+| Suites | `thumb-{target,encoding,codegen,exec}.sh` | `riscv-{target,encoding,exec}.sh` | same |
 
-What ARMv7-M does **not** have: a register allocator (its code is about
-5.3x clang's), inline assembly, hardware floating point for M4F/M7,
-atomics, VLAs, computed goto, C++ exceptions, and `-g`. What it does have
-is 64-bit integers, soft binary64/binary32, aggregates by value, varargs,
-interrupt handlers and `-fstack-usage`.
+All three have: 64-bit integers, soft binary64/binary32, aggregates by
+value, varargs, and `-fstack-usage`. ARMv7-M additionally accepts
+`__attribute__((interrupt))`.
+
+None of them has: a register allocator (ARMv7-M's code is about 5.3x
+clang's), inline assembly, atomics, VLAs, computed goto, C++ exceptions,
+`-g`, or hardware floating point — `long double` arithmetic is refused
+on RISC-V rather than lowered, though its SIZE and FORMAT are right.
+
+The five exercise programs `tests/golden/embedded-*.c` are shared by the
+ARMv7-M and RISC-V suites: ordinary C that names no machine, run on both
+backends at -O0, -O1, -O2 and -Os. A bug in one that the other does not
+have shows up as one suite failing on a program the other passes.
 
 ## Types
 

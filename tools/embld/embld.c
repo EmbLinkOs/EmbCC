@@ -5,7 +5,7 @@
  * fork/exec); this binary exists for host-side development and testing,
  * the way `embread` gives the ELF writer a testable front door.
  *
- * usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR]
+ * usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]
  *              [--embx [--cap NAME]...] INPUT.o|INPUT.a ...
  *        embld --doctor INPUT.o|INPUT.a ...
  *
@@ -62,6 +62,18 @@ int main(int argc, char **argv)
                                        : (++i < argc ? argv[i] : NULL);
             if (!v) { fprintf(stderr, "embld: -Tdata needs an address\n"); return 2; }
             opts.data_base = strtoul(v, NULL, 0);
+        } else if (strncmp(argv[i], "-Tstack", 7) == 0) {
+            /* RISC-V only: the initial stack pointer, and with it a
+             * four-instruction entry stub that sets sp and jumps to the
+             * entry symbol. A Cortex-M gets this from its hardware --
+             * the processor reads sp out of the first word of the image
+             * -- and RISC-V has nothing equivalent, so without it the
+             * first prologue subtracts from a stack pointer of zero. */
+            const char *v = argv[i][7] ? argv[i] + 7
+                                       : (++i < argc ? argv[i] : NULL);
+            if (!v) { fprintf(stderr, "embld: -Tstack needs an address\n"); return 2; }
+            opts.stack_top = strtoul(v, NULL, 0);
+            opts.have_stack = 1;
         } else if (strcmp(argv[i], "--embx") == 0) {
             opts.emit_embx = 1;            /* write a native EMBX, not ELF */
         } else if (strcmp(argv[i], "--cap") == 0) {
@@ -80,7 +92,7 @@ int main(int argc, char **argv)
         }
     }
     if (!ninputs) {
-        fprintf(stderr, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR]\n"
+        fprintf(stderr, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]\n"
                         "             [--embx [--cap NAME]...] INPUT.o|INPUT.a ...\n"
                         "       embld --doctor INPUT.o|INPUT.a ...   "
                         "(why the link fails)\n");

@@ -118,11 +118,15 @@ void rv_muldiv(struct code *c, int op, int rd, int rs1, int rs2, int w);
 /* ---- memory ---------------------------------------------------------- */
 
 /* rd = *(rs1 + off), sized and signed. `size` is 1/2/4/8 and `sign` says
- * whether a narrow load sign-extends; an 8-byte access is RV64 only. The
- * offset is a 12-bit signed field, and a frame deeper than 2047 bytes goes
- * through a scratch in the codegen, not here. */
-void rv_load(struct code *c, int rd, int rs1, int off, int size, int sign);
-void rv_store(struct code *c, int rs2, int rs1, int off, int size);
+ * whether a narrow load sign-extends. These take xlen because the two
+ * widths differ in what EXISTS here and not just in what it means: `ld`,
+ * `sd` and `lwu` are RV64-only, and at RV32 a four-byte load is the whole
+ * register and has no unsigned form. The offset is a 12-bit signed field;
+ * a frame deeper than 2047 bytes goes through a scratch in the codegen,
+ * not here. */
+void rv_load(struct code *c, int rd, int rs1, int off, int size, int sign,
+             int xlen);
+void rv_store(struct code *c, int rs2, int rs1, int off, int size, int xlen);
 
 /* ---- control flow ----------------------------------------------------- */
 
