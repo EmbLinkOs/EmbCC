@@ -377,3 +377,244 @@ Ranked by (blocked work) ÷ (effort), not by size of the gap:
 Everything after that — PIC/PIE, LTO, PGO, the remaining 347 warnings,
 more architectures — is real but is not what is currently stopping
 anybody.
+
+---
+
+# Part II — structure, optimization, targets, architecture
+
+Part I audited the compiler's SURFACE: what it accepts. That is the
+wrong half to stop at. This part audits how it is BUILT, what it
+actually optimises, and which machines it can really serve.
+
+## The correction Part I needs
+
+Part I reported 1.39× Clang and called it good. That number is at
+`-O2`, and at `-O2` **Clang grows code** — it inlines and unrolls for
+speed. For anything embedded the level that matters is `-Os`, and there
+the picture changes:
+
+| level | EmbCC | Clang | ratio |
+|---|---|---|---|
+| `-O0` | 376,009 | 114,489 | 3.28× |
+| `-O1` | 246,385 | 84,223 | 2.92× |
+| `-O2` | 134,858 | 96,407 | **1.39×** |
+| `-Os` | 134,010 | 63,387 | **2.11×** |
+
+Same 69 real files, x86-64, `.text` bytes. Read the last two rows
+together:
+
+**`-Os` is `-O2` under a different name.** EmbCC goes from 134,858 to
+134,010 — six tenths of one percent. Clang goes from 96,407 to 63,387 —
+thirty-four percent. EmbCC accepts `-Os`, reports it, and does almost
+nothing with it.
+
+For a compiler whose stated audience is firmware on parts measured in
+kilobytes, that is the single most valuable missing thing in this entire
+document. 1.39× was the flattering framing; 2.11× is the honest one.
+
+## Target gaps
+
+Every target against Clang on the same real corpus, at `-Os`:
+
+| target | EmbCC | Clang | ratio |
+|---|---|---|---|
+| `x86_64-elf` | 134,010 | 63,387 | 2.11× |
+| `aarch64-elf` | 143,576 | 71,536 | 2.00× |
+| `riscv64-unknown-elf` | 135,664 | 42,090 | 3.22× |
+| `riscv32-unknown-elf` | 157,204 | 44,764 | 3.51× |
+| `thumbv7m-none-eabi` | 141,668 | 36,408 | **3.89×** |
+
+The two embedded families, the ones the recent work was for, are the
+worst — and they are the ones where size is not a preference but a
+budget.
+
+### RISC-V has no compressed instructions, and that is most of its gap
+
+Clang's default `-march` for `riscv32-unknown-elf` is **`rv32imac`**.
+EmbCC emits `rv32im`. Holding everything else equal:
+
+| | `.text` | vs EmbCC |
+|---|---|---|
+| EmbCC `rv32im` | 157,204 | — |
+| Clang `rv32imac` (its default) | 44,764 | 3.51× |
+| Clang `rv32im` (compressed off) | 62,808 | 2.50× |
+
+**The C extension alone is 28.8% of Clang's code size.** It is 16-bit
+encodings for the common register/immediate forms — the highest
+size-per-effort item available on this target, and it does not need any
+new optimisation, only new encodings in `src/arch/riscv/emit.c` and a
+selector that prefers them.
+
+### The RISC-V predefined macros claim the wrong code model
+
+```
+$ ./embcc --target=riscv32-unknown-elf --dump-predef | grep cmodel
+#define __riscv_cmodel_medlow 1
+```
+
+The backend emits **medany** — PC-relative `auipc`, chosen deliberately
+because `lui` sign-extends bit 31 and cannot name the addresses RV64
+needs (D-016). `src/arch/riscv32/predef.c:361` says medlow. Code that
+tests this macro to decide how to take an address will choose the wrong
+sequence. It is a one-line fix and a real miscompile source.
+
+### Machines that are missing, ranked by who would notice
+
+| Gap | Who it locks out |
+|---|---|
+| **Thumb-1 / ARMv6-M** | Cortex-M0 and M0+ — the most shipped MCU core there is |
+| **Hardware FP** | M4F, M7, and RISC-V F/D. Everything is soft float today |
+| **`-march=` / `-mcpu=` at all** | there is no way to ASK for any of the above |
+| ARMv8-M | anything with TrustZone-M |
+| Xtensa | the entire ESP32 family |
+| AVR, MSP430 | 8- and 16-bit MCU work |
+
+The first three are one theme: EmbCC has one fixed ISA per target and no
+vocabulary for saying which chip. That is the structural reason
+compressed RISC-V, Thumb-1 and hardware FP cannot be added as options
+today — there is nowhere to put the option.
+
+## Structural gaps — the shape of the toolchain
+
+### There is no assembler for any embedded target
+
+```
+$ ./embcc --target=riscv32-unknown-elf -c start.S -o start.o
+embcc: error: unknown argument 'start.S'
+```
+
+`.s` and `.S` are not input types at all. The only standalone assembler
+is `embas`, which is **NASM syntax, x86-64 only**. Firmware startup —
+the reset vector, the stack setup before `main`, a context switch — is
+hand-written assembly in every real project, and here it can only be
+written as inline asm inside a C function.
+
+The per-target `asm.c` files exist and work, but they are reachable only
+through `__asm__` in C. Wiring them to a `.S` input is mostly plumbing.
+
+### `-S` prints the x86 disassembler's output for non-x86 targets
+
+```
+$ ./embcc --target=riscv32-unknown-elf -S t.c -o -
+f:
+	.byte	0x13,0x01	# adc    (%rcx),%eax
+```
+
+That comment is the **x86-64 disassembler** run over RISC-V bytes. The
+guard at `src/driver/main.c:1081` refuses `-S` for aarch64 only:
+
+```c
+if (ta == TARGET_AARCH64)
+    diag_fatal(in, 0, "-S is x86-64 only: there is no aarch64 disassembler "
+                      "here, and emitting text that is not the object would "
+                      "be worse than refusing");
+```
+
+Thumb and both RISC-V targets were added after that line and fall
+through it. The comment states the principle exactly and the code now
+does the opposite for three of five targets. This is a THE RULE
+violation with a two-line fix, and it should be fixed before anything
+else in this document.
+
+Note also that `-S` never emits real assembly on any target: it emits
+`.byte` directives with a disassembly comment. There is no assembly
+printer, only an encoder.
+
+### Archiving is still binutils
+
+`Makefile:301` and friends shell out to `x86_64-elf-ar` and
+`aarch64-elf-ar`. There is no `ar` for thumb or RISC-V at all, so the
+embedded targets cannot produce a static library with this toolchain.
+A1 in `todo.md` called owning the build done at the assembler; archiving
+was not part of it.
+
+### Self-hosting is x86-64 only
+
+`tests/golden/x86_64/self-host.sh` is the only one. The fixed point is a
+real achievement and it covers one of five targets.
+
+## Architectural gaps — how the compiler is built
+
+### EmbIR is not SSA, and SSA lasts for one pass
+
+`src/ir/ir.h` still opens with "Still no SSA and no passes — that
+revision comes with the optimizer". The optimizer arrived; the revision
+did not. What actually happens is narrower: `mem2reg` builds the CFG,
+the dominator tree (Cooper-Harvey-Kennedy), dominance frontiers, inserts
+phis, renames — and then **destructs SSA immediately**, realising each
+phi as copies on its incoming edges. Every other pass runs on linear,
+non-SSA three-address code.
+
+The cost is visible in the source: `build_cfg` is called **16 times** in
+`opt.c`. Each pass re-derives the control flow and the dataflow it
+needs, because the IR does not carry them. In LLVM the IR is SSA from
+the front end to register allocation, which is why GVN, SCCP, LICM and
+jump threading there are both cheap and precise — a def is a single
+value with a known set of uses, permanently.
+
+This is the deepest item in this document and the one least suited to an
+afternoon. It is also the one that would make the next ten passes easier
+to write than the last ten were.
+
+### There is no machine-IR level
+
+The driver says so itself, at `main.c:2260`: "the separate machine-IR
+level of the design (vision §9.2) does not exist". IR lowers straight to
+encoded bytes. Four things follow, and all four showed up independently
+elsewhere in this audit:
+
+- **No instruction scheduling**, anywhere. Confirmed absent. On an
+  in-order dual-issue core — Cortex-M7, most RISC-V microcontrollers —
+  that is real cycles.
+- **No machine-level peephole** across instruction boundaries, and no
+  size-aware selection, which is part of why `-Os` does nothing and why
+  Thumb's 16-bit encodings are under-used.
+- **`-S` cannot print assembly**, only bytes plus a comment.
+- **Each backend hand-writes its own assembler** for inline asm, because
+  there is no shared MC layer to assemble against.
+
+### Inlining is the only interprocedural transform
+
+No argument promotion, no dead-argument elimination, no global
+constant merging, no IPA constant propagation, no attribute inference
+(`readnone`/`readonly`, which is what lets a caller keep values in
+registers across a call). Everything else is within one function.
+
+### What is genuinely good, so nobody "fixes" it
+
+- **The register allocator** is a proper Chaitin-Briggs graph colourer:
+  real live ranges across back-edges, an interference graph, coalescing
+  by union-find, optimistic spilling, ABI hints. It is shared across all
+  five targets. This is not a gap.
+- **Alias analysis exists** (`opt.c:1979`), with type-based aliasing
+  deliberately excluded and the reason written down.
+- **The inliner** has sensible budgets and a sole-caller path.
+- **Dependency generation** (`-M` and its whole family) is complete.
+
+## Revised order
+
+Part I's list was right about the surface and wrong about the weighting.
+Merged and re-ranked:
+
+1. **Fix `-S` on thumb and RISC-V** — two lines; it currently prints
+   x86 mnemonics next to RISC-V instructions.
+2. **Fix `__riscv_cmodel_medlow`** — one line; the macro contradicts the
+   backend.
+3. **`__has_include` / `__has_builtin` / `__has_attribute`** — unblocks
+   modern headers wholesale.
+4. **`__attribute__` on a `typedef`** — a few lines of declarator grammar.
+5. **`typeof` on parameters** — one function; unblocks every kernel macro.
+6. **RISC-V compressed instructions** — 28.8% of code size, measured. No
+   new optimisation needed, only encodings and a selector that prefers
+   them.
+7. **Make `-Os` mean something** — it is currently `-O2`. Start with
+   size-aware selection and not inlining/unrolling at `-Os`.
+8. **`.S` input for every target** — the per-target assemblers already
+   exist; this is plumbing, and firmware cannot ship without it.
+9. **`-g` on the embedded targets** — last step to source-level firmware
+   debugging.
+10. **`-march=`/`-mcpu=`** — the vocabulary that Thumb-1, hardware FP and
+    RISC-V extensions all need before they can exist.
+11. The Part I driver-option set, `_Pragma`, the missing builtins.
+12. **SSA as the IR's actual form** — the deep one. Not an afternoon, and
+    the thing that makes everything after it cheaper.
