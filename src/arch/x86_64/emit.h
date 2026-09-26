@@ -99,6 +99,7 @@ void x86_sse_alu_mem(struct code *c, int op, int dst, int disp, int w);
 void x86_sse_alu_reg(struct code *c, int op, int dst, int src, int w);
 void x86_movs_reg(struct code *c, int dst, int src);
 void x86_movq_xmm_gpr(struct code *c, int xmm, int gpr, int w);
+void x86_movq_gpr_xmm(struct code *c, int gpr, int xmm, int w);
 void x86_ucomis_mem(struct code *c, int xmm, int disp, int w);
 void x86_ucomis_reg(struct code *c, int a, int b, int w);
 /* setcc pair for float == and != : ordered equality is "equal AND not

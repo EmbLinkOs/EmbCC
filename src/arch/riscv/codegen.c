@@ -288,7 +288,7 @@ static char *wide_map(struct ir_func *fn)
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT: case IR_BSWAP:
         /* The conversions' `w` is their RESULT's width too. */
-        case IR_I2F: case IR_F2I: case IR_F2F:
+        case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
             w[i->dst] = 1;
             break;
         default:
@@ -1192,6 +1192,10 @@ static int gen_ins64(struct rv_fn *F, int n)
         rv_li(t, A_HI, (long long)((i->imm >> 32) & 0xffffffffL), 32);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
+    /* This target has no floating-point register file: a double
+     * already lives in a general register pair, so reinterpreting
+     * its bits is a copy and nothing else. */
+    case IR_BITCAST:
     case IR_MOV:
         rd64(F, i->a, A_LO, A_HI);
         wr64(F, i->dst, A_LO, A_HI);
@@ -1663,6 +1667,8 @@ static void gen_ins(struct rv_fn *F, int n)
         wrote(F, i->dst, d);
         return;
     }
+    /* Soft float -- see the 64-bit arm. */
+    case IR_BITCAST:
     case IR_MOV: {
         int src = rdr(F, i->a, ACC);
         int d = wreg(F, i->dst, ACC);

@@ -2021,6 +2021,61 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                             "__builtin_sqrt");
                 break;
             }
+            /* fabs and copysign: same float type in, same out. The
+             * sign bit is the only thing either touches, so neither
+             * rounds and neither can raise an exception -- which is why
+             * they are folded here rather than called. */
+            else if (strcmp(bn, "fabs") == 0 || strcmp(bn, "fabsf") == 0 ||
+                     strcmp(bn, "fabsl") == 0 ||
+                     strcmp(bn, "copysign") == 0 ||
+                     strcmp(bn, "copysignf") == 0 ||
+                     strcmp(bn, "copysignl") == 0) {
+                int two = bn[0] == 'c';
+                size_t n = strlen(bn);
+                char sfx = bn[n - 1];
+                int want = two ? 2 : 1;
+                if (e->nargs != want)
+                    sema_error_at(u, e->line, e->col, "%s takes %d argument%s",
+                               e->lhs->name, want, want == 1 ? "" : "s");
+                for (int k = 0; k < e->nargs; k++)
+                    check_expr(u, f, sc, e->args[k]);
+                e->name = e->lhs->name;
+                e->ty = ty_base(sfx == 'f' ? TY_FLOAT :
+                                sfx == 'l' ? TY_LDOUBLE : TY_DOUBLE, 0);
+                for (int k = 0; k < e->nargs; k++)
+                    e->args[k] = convert_assign(u, e->args[k], e->ty,
+                                                e->lhs->name);
+                break;
+            }
+            /* The classification predicates. Each returns `int` and takes
+             * one float of ANY type -- there is no suffixed spelling to
+             * pick the width, so the argument's own type decides, exactly
+             * as <math.h>'s macros do. */
+            else if (strcmp(bn, "signbit") == 0 ||
+                     strcmp(bn, "signbitf") == 0 ||
+                     strcmp(bn, "signbitl") == 0 ||
+                     strcmp(bn, "isnan") == 0 || strcmp(bn, "isinf") == 0 ||
+                     strcmp(bn, "isinf_sign") == 0 ||
+                     strcmp(bn, "isfinite") == 0 ||
+                     strcmp(bn, "isnormal") == 0) {
+                if (e->nargs != 1)
+                    sema_error_at(u, e->line, e->col, "%s takes one argument",
+                               e->lhs->name);
+                check_expr(u, f, sc, e->args[0]);
+                if (e->nargs == 1 && !ty_is_float(e->args[0]->ty))
+                    /* An integer here is nearly always a missing cast or
+                     * the wrong variable, and answering for its
+                     * *converted* value would hide that. */
+                    sema_error_at(u, e->line, e->col,
+                               "%s takes a floating-point argument",
+                               e->lhs->name);
+                e->name = e->lhs->name;
+                /* SIGNED int: isinf_sign answers -1 for a negative
+                 * infinity, and an unsigned type turned that into
+                 * 4294967295 the moment it widened to a long. */
+                e->ty = ty_base(TY_INT, 0);
+                break;
+            }
             /* the value IS the first argument; the hint is discarded */
             else if (strcmp(bn, "expect") == 0 ||
                      strcmp(bn, "expect_with_probability") == 0 ||
@@ -2237,7 +2292,10 @@ static int const_fold(const struct expr *e, long *out)
         long c;
         if (!const_fold(e->args[0], &c))
             return 0;
-        return const_fold(c ? e->args[1] : e->args[2], out);
+        /* args[0] is the condition; the two ARMS are lhs and rhs.
+         * Reading them out of args[] indexed past its one element
+         * segfaulted on every constant `?:` in an array size. */
+        return const_fold(c ? e->lhs : e->rhs, out);
     }
     case EXPR_BINOP:
         /* && and || short-circuit, so the right operand must neither be
@@ -2888,6 +2946,13 @@ static const char *const g_named_builtins[] = {
     "object_size", "dynamic_object_size",
     "offsetof", "prefetch",
     "sqrt", "sqrtf", "sqrtl",
+    /* The IEEE-754 bit family. Every one of these is integer
+     * arithmetic on the representation once the bits are in a general
+     * register, so they cost no call and no libm. */
+    "fabs", "fabsf", "fabsl",
+    "copysign", "copysignf", "copysignl",
+    "signbit", "signbitf", "signbitl",
+    "isnan", "isinf", "isinf_sign", "isfinite", "isnormal",
     "trap", "unreachable",
     "va_arg", "va_copy", "va_end", "va_start",
     "add_overflow", "sub_overflow", "mul_overflow",

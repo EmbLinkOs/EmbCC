@@ -396,6 +396,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
             break;
         }
         case IR_EXT: case IR_I2F: case IR_F2I: case IR_F2F:
+        case IR_BITCAST:
             in->a = vreg(p, word(p));
             break;
         case IR_ALLOCA:

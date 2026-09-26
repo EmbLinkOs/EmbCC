@@ -1603,7 +1603,10 @@ static int size_fold(const struct expr *e, long *out)
         long c;
         if (!size_fold(e->args[0], &c))
             return 0;
-        return size_fold(c ? e->args[1] : e->args[2], out);
+        /* args[0] is the condition; the two ARMS are lhs and rhs.
+         * Reading them out of args[] indexed past its one element
+         * segfaulted on every constant `?:` in an array size. */
+        return size_fold(c ? e->lhs : e->rhs, out);
     }
     case EXPR_BINOP:
         /* && and || short-circuit, so the right operand must neither be
@@ -2744,6 +2747,29 @@ static struct stmt *parse_asm_stmt(struct parser *ps)
         a->is_volatile = 1;
         advance(ps);
     }
+    /* `asm goto` is refused BY NAME rather than half-supported,
+     * because the two things it needs are both places a silent
+     * miscompile would come from:
+     *
+     *  - the template BRANCHES to a label whose offset is not known
+     *    when the statement is assembled, so the inline assembler
+     *    would have to emit a placeholder and have it patched when
+     *    the label is placed -- per backend.
+     *  - the optimizer's CFG would need edges from the asm to every
+     *    listed label. Without them a target label looks unreachable
+     *    and its code can be deleted, or a value live across the jump
+     *    can have its register reused.
+     *
+     * Accepting the syntax and ignoring either is worse than not
+     * accepting it, so this says what is missing instead of failing
+     * with "expected '(' after asm". */
+    if (cur(ps)->kind == TOK_KW_GOTO)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                   "`asm goto` is not supported: its template branches to a "
+                   "label, which needs a patchable placeholder in each "
+                   "backend's inline assembler and CFG edges the optimizer "
+                   "honours. Use a normal asm that sets a value and branch "
+                   "on that");
     expect(ps, TOK_LPAREN, "'(' after asm");
     a->tmpl = parse_str_literal(ps, "an asm template string");
     if (cur(ps)->kind == TOK_COLON) {

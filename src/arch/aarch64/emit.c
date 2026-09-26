@@ -797,6 +797,16 @@ void a64_fmov_from_gpr(struct code *c, int vd, int rn, int w)
     a64_word(c, base | ((unsigned long)rn << 5) | (unsigned long)vd);
 }
 
+/* FMOV Xd, Dn / FMOV Wd, Sn -- the reverse of the above. In the
+ * floating-point/integer conversion encoding the direction is one bit of
+ * the `opcode` field (rmode=00, opcode 110 reads the FP register, 111
+ * writes it), so this is the same word with bit 16 clear. */
+void a64_fmov_to_gpr(struct code *c, int rd, int vn, int w)
+{
+    unsigned long base = w == 8 ? 0x9E660000UL : 0x1E260000UL;
+    a64_word(c, base | ((unsigned long)vn << 5) | (unsigned long)rd);
+}
+
 void a64_fmov_reg(struct code *c, int vd, int vn, int w)
 {
     if (vd == vn)

@@ -30,7 +30,8 @@ int ra_ins_def(const struct ir_ins *in)
     case IR_DIV: case IR_MOD: case IR_AND: case IR_OR: case IR_XOR:
     case IR_NEG: case IR_BNOT: case IR_CMP: case IR_LDVAR: case IR_ADDR:
     case IR_STRADDR: case IR_GADDR: case IR_FADDR: case IR_LOAD: case IR_EXT:
-    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BSWAP: case IR_SQRT:
+    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
+    case IR_BSWAP: case IR_SQRT:
     case IR_SHL:
     case IR_SHR: case IR_XCHG: case IR_XADD: case IR_CMPXCHG:
     case IR_ARMW: case IR_CAS: case IR_CAS16: case IR_FRAMEADDR:
@@ -74,7 +75,8 @@ void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
     switch (s->op) {
     case IR_MOV: case IR_NEG: case IR_BNOT: case IR_EXT: case IR_BSWAP:
     case IR_SQRT:
-    case IR_I2F: case IR_F2I: case IR_F2F: case IR_LOAD: case IR_LDVAR:
+    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
+    case IR_LOAD: case IR_LDVAR:
     case IR_ADDR:
     case IR_STVAR: case IR_VA_START:
     case IR_ALLOCA: case IR_SPRESTORE:

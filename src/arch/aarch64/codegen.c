@@ -2671,6 +2671,34 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             a64_fcvt(t, A64_FACC, A64_FACC, i->size, i->w);
             fst_slot(t, sd, i->dst, A64_FACC, i->w);
             break;
+        case IR_BITCAST:
+            /* fmov between the register files. `sign` says which side is
+             * the integer; the bits do not change, so there is no
+             * conversion and no rounding mode to get wrong.
+             *
+             * The float end goes through fmov only when it is really in
+             * the float class. cg_float_vregs hands a value back to the
+             * integer file as soon as one use reads it as an integer --
+             * `float r = fabsf(x); memcpy(&b, &r, 4)` does -- and then
+             * both ends are integers and the bits are already in place,
+             * so this is a plain move. Asking fld_slot instead would
+             * read the value's SLOT, which a register-resident value
+             * does not keep current; on x86-64 the frame guard catches
+             * that, and here it would just load whatever was left. */
+            if (i->sign) {
+                if (a64_in_freg(i->a))
+                    a64_fmov_to_gpr(t, A64_ACC, g_a64_floc[i->a], i->w);
+                else
+                    ld_slot(t, sd, i->a, A64_ACC, i->size, 0, i->w);
+                st_slot(t, sd, i->dst, A64_ACC, i->w);
+            } else {
+                ld_slot(t, sd, i->a, A64_ACC, i->size, 0, i->size);
+                if (a64_in_freg(i->dst))
+                    a64_fmov_from_gpr(t, g_a64_floc[i->dst], A64_ACC, i->w);
+                else
+                    st_slot(t, sd, i->dst, A64_ACC, i->w);
+            }
+            break;
         case IR_VA_START: {
             /* AAPCS64's va_list record, 32 bytes:
              *   +0  __stack    the next variadic argument on the stack

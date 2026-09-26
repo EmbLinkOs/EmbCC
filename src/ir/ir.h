@@ -48,6 +48,20 @@ enum ir_op {
     IR_I2F,   /* dst = (float)a       (size,sign: int src; w: float dst) */
     IR_F2I,   /* dst = (int)a         (size: float src; w,sign: int dst) */
     IR_F2F,   /* dst = (float)a       (size: src width; w: dst width) */
+    /* dst = the BITS of a, reinterpreted at the same width.
+     * size and w are both that width; sign is 1 when the destination is
+     * an INTEGER (float bits out) and 0 when it is a float (bits in).
+     *
+     * This is one op rather than a builtin-per-operation because every
+     * IEEE-754 predicate is integer arithmetic once the bits are in a
+     * GPR: fabs is an AND, copysign an AND/OR pair, signbit a shift,
+     * isnan and isinf comparisons against the exponent field. gcc and
+     * clang each carry a separate optab for all of them; here they are
+     * ordinary IR the existing optimizer already folds, and only the
+     * move between the register files is target code. On the soft-float
+     * targets (ARMv7-M, RISC-V) even that is a plain move, because the
+     * float was already in a GPR. */
+    IR_BITCAST,
     IR_CALL,  /* dst = callee(args...); indirect: target fp in a */
     IR_RET,   /* return a (a == -1: void return) */
     IR_LABEL, /* label: (id in `label`) */

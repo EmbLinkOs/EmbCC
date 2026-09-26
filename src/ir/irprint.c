@@ -60,6 +60,7 @@ const char *ir_opname(enum ir_op op)
         [IR_STRADDR] = "straddr", [IR_GADDR] = "gaddr", [IR_FADDR] = "faddr",
         [IR_LOAD] = "load",     [IR_STORE] = "store",   [IR_EXT] = "ext",
         [IR_I2F] = "i2f",       [IR_F2I] = "f2i",       [IR_F2F] = "f2f",
+    [IR_BITCAST] = "bitcast",
         [IR_CALL] = "call",     [IR_RET] = "ret",       [IR_LABEL] = "label",
         [IR_JMP] = "jmp",       [IR_MEMCPY] = "memcpy", [IR_MEMZERO] = "memzero",
         [IR_BRZ] = "brz",       [IR_BRNZ] = "brnz",     [IR_VA_START] = "va_start",
@@ -227,7 +228,7 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         ob_fmt(b, "%%%d = ext", i->dst); memsuffix(b, i, 1);
         ob_fmt(b, " %%%d", i->a);
         break;
-    case IR_I2F: case IR_F2I: case IR_F2F:
+    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
         ob_fmt(b, "%%%d = %s", i->dst, ir_opname(i->op)); memsuffix(b, i, 1);
         ob_fmt(b, " %%%d", i->a);
         break;

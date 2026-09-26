@@ -618,6 +618,77 @@ int emit_cmp(struct ir_func *fn, enum binop pred, int a, int b,
 }
 
 int gen_expr(struct ir_func *fn, struct expr *e);
+
+
+/* ---- the IEEE-754 bit builtins -----------------------------------------
+ *
+ * fabs, copysign, signbit and the isnan/isinf/isfinite/isnormal family are
+ * all the same job: look at the exponent and sign fields of the
+ * representation. Done in floating point they need either a library call
+ * or a per-builtin instruction pattern in every backend, and two of them
+ * cannot be done in floating point AT ALL without getting a corner wrong
+ * -- `x < 0 ? -x : x` returns -0.0 for fabs(-0.0) and leaves a NaN's sign
+ * set, and `x != x` is the only float-only spelling of isnan.
+ *
+ * So the bits go into a general register once (IR_BITCAST, the single
+ * target-specific instruction in all of this) and everything after it is
+ * ordinary integer IR the existing optimizer already constant-folds,
+ * coalesces and allocates. That is the whole reason IR_BITCAST is one op
+ * instead of nine: gcc and clang each carry a separate optab entry per
+ * builtin per target, and adding a tenth predicate there is a change in
+ * every backend. Here it is a change in this one function.
+ */
+static int fb_bits(struct ir_func *fn, struct expr *arg, int *w)
+{
+    *w = ty_size(arg->ty);
+    int v = gen_expr(fn, arg);
+    struct ir_ins *i = emit(fn);
+    i->op = IR_BITCAST;
+    i->a = v;
+    i->size = *w;
+    i->w = *w;
+    i->sign = 1;                      /* an integer comes out */
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+static int fb_float(struct ir_func *fn, int bits, int w)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = IR_BITCAST;
+    i->a = bits;
+    i->size = w;
+    i->w = w;
+    i->sign = 0;                      /* a float comes out */
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+/* The three fields of an IEEE binary32/binary64, as masks at that width. */
+static long fb_signmask(int w) { return w == 4 ? (long)0x80000000L
+                                               : (long)0x8000000000000000UL; }
+static long fb_absmask(int w)  { return w == 4 ? (long)0x7fffffffL
+                                               : (long)0x7fffffffffffffffL; }
+static long fb_expmask(int w)  { return w == 4 ? (long)0x7f800000L
+                                               : (long)0x7ff0000000000000L; }
+
+/* The names lowered above. Kept next to them so a name added to one is
+ * a compile error in the other rather than a silent call to libm. */
+static int fb_is_bit_builtin(const char *n)
+{
+    static const char *const v[] = {
+        "fabs", "fabsf", "fabsl", "copysign", "copysignf", "copysignl",
+        "signbit", "signbitf", "signbitl",
+        "isnan", "isinf", "isinf_sign", "isfinite", "isnormal",
+    };
+    if (strncmp(n, "__builtin_", 10) != 0)
+        return 0;
+    for (unsigned k = 0; k < sizeof v / sizeof v[0]; k++)
+        if (strcmp(n + 10, v[k]) == 0)
+            return 1;
+    return 0;
+}
+
 static int gen_complit(struct ir_func *fn, struct expr *e);
 int gen_convert(struct ir_func *fn, int v, const struct type *from,
                        const struct type *to);
@@ -2146,6 +2217,75 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             else
                 emit_store(fn, gen_addr(fn, d), tag, d->ty);
             return -1;
+        }
+        if (e->name && fb_is_bit_builtin(e->name)) {
+            const char *bn = e->name + 10;
+            int w = ty_size(e->args[0]->ty);
+            if (w != 4 && w != 8)
+                /* A 16-byte long double is either x87's 80-bit format or
+                 * IEEE binary128, and its sign bit is in the tenth or the
+                 * sixteenth byte -- past what one register holds. Saying
+                 * so beats answering for the wrong bits. */
+                diag_fatal(fn->file, e->line,
+                           "%s on a %d-byte long double is not supported: its "
+                           "sign and exponent fields do not fit one register, "
+                           "which is how the other widths are done",
+                           e->name, w);
+            int iw = w;
+            int b = fb_bits(fn, e->args[0], &iw);
+            long am = fb_absmask(w), sm = fb_signmask(w), em = fb_expmask(w);
+            int mag = 0;
+            if (strncmp(bn, "fabs", 4) == 0)
+                return fb_float(fn,
+                    emit_bin(fn, IR_AND, b, emit_const(fn, am, w), w, 0), w);
+            if (strncmp(bn, "copysign", 8) == 0) {
+                int w2 = w;
+                int b2 = fb_bits(fn, e->args[1], &w2);
+                return fb_float(fn,
+                    emit_bin(fn, IR_OR,
+                        emit_bin(fn, IR_AND, b, emit_const(fn, am, w), w, 0),
+                        emit_bin(fn, IR_AND, b2, emit_const(fn, sm, w), w, 0),
+                        w, 0), w);
+            }
+            if (strncmp(bn, "signbit", 7) == 0)
+                return gen_convert(fn,
+                    emit_bin(fn, IR_SHR, b, emit_const(fn, w * 8 - 1, w),
+                             w, 0),
+                    ty_int_of_size(w, 0), e->ty);
+            /* The predicates all read the magnitude -- the value with its
+             * sign cleared -- against the exponent field's all-ones. */
+            mag = emit_bin(fn, IR_AND, b, emit_const(fn, am, w), w, 0);
+            if (strcmp(bn, "isnan") == 0)          /* magnitude above inf */
+                return emit_cmp(fn, B_GT, mag, emit_const(fn, em, w), w, 0);
+            if (strcmp(bn, "isinf") == 0)
+                return emit_cmp(fn, B_EQ, mag, emit_const(fn, em, w), w, 0);
+            if (strcmp(bn, "isfinite") == 0)
+                return emit_cmp(fn, B_LT, mag, emit_const(fn, em, w), w, 0);
+            if (strcmp(bn, "isnormal") == 0) {
+                /* Normal iff the exponent field is neither all zeroes
+                 * (zero and the subnormals) nor all ones (inf and NaN). */
+                int ex = emit_bin(fn, IR_AND, b, emit_const(fn, em, w), w, 0);
+                return emit_bin(fn, IR_AND,
+                    emit_cmp(fn, B_NE, ex, emit_const(fn, 0, w), w, 0),
+                    emit_cmp(fn, B_NE, ex, emit_const(fn, em, w), w, 0),
+                    ty_w(e->ty), 1);
+            }
+            /* isinf_sign: 1, -1 or 0, so the caller learns WHICH infinity
+             * without a second test. */
+            {
+                int inf = emit_cmp(fn, B_EQ, mag, emit_const(fn, em, w), w, 0);
+                int neg = emit_bin(fn, IR_SHR, b,
+                                   emit_const(fn, w * 8 - 1, w), w, 0);
+                int sgn = emit_bin(fn, IR_SUB,
+                                   emit_const(fn, 1, 4),
+                                   emit_bin(fn, IR_SHL,
+                                            gen_convert(fn, neg,
+                                                        ty_int_of_size(w, 0),
+                                                        e->ty),
+                                            emit_const(fn, 1, 4), 4, 1),
+                                   4, 1);
+                return emit_bin(fn, IR_MUL, inf, sgn, 4, 1);
+            }
         }
         if (e->name && strncmp(e->name, "__builtin_sqrt", 14) == 0) {
             int v = gen_expr(fn, e->args[0]);

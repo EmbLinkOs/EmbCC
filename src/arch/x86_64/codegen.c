@@ -506,6 +506,11 @@ char *cg_float_vregs(struct ir_func *fn)
         switch (i->op) {
         case IR_I2F:  MARK(i->dst); break;
         case IR_F2I:  MARK(i->a);   break;
+        /* A bitcast has a float on exactly one side: `sign` says
+         * which, so only that side joins the float class. */
+        case IR_BITCAST:
+            if (i->sign) MARK(i->a); else MARK(i->dst);
+            break;
         case IR_F2F:  MARK(i->dst); MARK(i->a); break;
         case IR_SQRT: MARK(i->dst); MARK(i->a); break;
         default: break;
@@ -564,6 +569,9 @@ char *cg_float_vregs(struct ir_func *fn)
             break;
         case IR_I2F:  BAD(i->a);   break;         /* integer in */
         case IR_F2I:  BAD(i->dst); break;         /* integer out */
+        case IR_BITCAST:
+            if (i->sign) BAD(i->dst); else BAD(i->a);
+            break;
         case IR_F2F:
             /* A conversion with a LONG DOUBLE on either side goes
              * through the x87 unit, which loads and stores memory and
@@ -1101,6 +1109,39 @@ static int vw_src = -1;
  * out, and undoing that is not possible. */
 static int fold_idx = -1;         /* the unshifted index, or -1 */
 static int fold_scale = 1;
+
+/* May an address computation feeding `mem` be folded into that access's
+ * addressing mode?
+ *
+ * Both halves of the fusion have to agree, because they are two
+ * instructions apart: `shl idx, #k` is emitted as NOTHING on the promise
+ * that the `add` two instructions later will fold it into a SIB scale,
+ * and if the add then decides not to fold, the shift is simply gone.
+ *
+ * That is exactly what happened. The shift asked only `!x87_ins(mem)`
+ * while the add also refused a float-class load or store, so
+ * `double *p; p[i]` -- the most ordinary indexed float access there is
+ * -- dropped its `shlq $3` and read byte i instead of byte 8i. It
+ * survived every test in the tree because the caller usually inlines the
+ * function and the inlined copy takes a different path; it shows up the
+ * moment the access is out of line.
+ *
+ * So the question is asked once, here, and both sites call it. */
+static int is_flt(int v);
+static int x87_ins(const struct ir_ins *i);
+static int addr_fold_ok(const struct ir_ins *mem)
+{
+    if (x87_ins(mem))
+        return 0;                       /* long double is gen_x87's */
+    /* A float-class value's home is an xmm register, and the fused paths
+     * write the slot (cg_store) instead. tests/exec/complex.c caught
+     * that end of it. */
+    if (mem->op == IR_LOAD)
+        return !is_flt(mem->dst);
+    if (mem->op == IR_STORE)
+        return !is_flt(mem->b);
+    return 1;
+}
 
 static void cg_reset(void) { rc_vreg = -1; rc_zx = 0; vrc_vreg = -1;
                              vw_src = -1; }
@@ -2946,9 +2987,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * tests/exec/complex.c caught it: `scalef` loaded the
                  * imaginary part into eax and then multiplied whatever
                  * was still in xmm8, which was the real part's product. */
-                if (x87_ins(nx) ||
-                    (nx->op == IR_LOAD && is_flt(nx->dst)) ||
-                    (nx->op == IR_STORE && is_flt(nx->b))) {
+                if (!addr_fold_ok(nx)) {
                     /* fall through to materialise the address */
                 } else if (nx->op == IR_LOAD && nx->a == i->dst) {
                     /* Straight into the value's own register when it has
@@ -3137,7 +3176,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 struct ir_ins *mem = &fn->ins[n + 2];
                 if (ad->op == IR_ADD && !ad->flt && !ad->imm_b &&
                     ad->b == i->dst && in_reg(ad->a) && ad->dst >= 0 &&
-                    usecnt[ad->dst] == 1 && !x87_ins(mem) &&
+                    usecnt[ad->dst] == 1 && addr_fold_ok(mem) &&
                     ((mem->op == IR_LOAD && mem->a == ad->dst) ||
                      (mem->op == IR_STORE && mem->a == ad->dst))) {
                     fold_idx = i->a;
@@ -3331,6 +3370,38 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_cvtts2si_reg(text, g_floc[i->a], i->size, i->w);
             else
                 x86_cvtts2si(text, sd[i->a], i->size, i->w);
+            cg_store(text, sd, i->dst, i->w);
+            break;
+        case IR_BITCAST:
+            /* movq/movd between the register files -- the ONE instruction
+             * that is target-specific about fabs, copysign, signbit and
+             * the isnan/isinf family. Everything else those builtins do
+             * is integer arithmetic the optimizer already knows.
+             *
+             * But only when the float side is ACTUALLY in the float
+             * class. The whitelist above hands a value to the integer
+             * file as soon as one use treats it as an integer, and a
+             * bitcast's own use does not count -- `float r = fabsf(x);
+             * memcpy(&b, &r, 4)` reads r as four bytes and takes it
+             * back. When that has happened both ends are integers and
+             * the bits are already where they belong, so this emits a
+             * plain move, or nothing at all. That is the whole reason to
+             * ask in_freg rather than assume: the earlier version read
+             * the float's slot, which a register-resident value does not
+             * have, and the frame guard said so. */
+            cg_reset();
+            if (i->sign) {                        /* float bits -> integer */
+                if (in_freg(i->a))
+                    x86_movq_gpr_xmm(text, REG_RAX, g_floc[i->a], i->w);
+                else
+                    cg_load(text, sd, i->a, i->size, 0, i->w);
+            } else {                              /* integer bits -> float */
+                cg_load(text, sd, i->a, i->size, 0, i->size);
+                if (in_freg(i->dst)) {
+                    x86_movq_xmm_gpr(text, g_floc[i->dst], REG_RAX, i->w);
+                    break;
+                }
+            }
             cg_store(text, sd, i->dst, i->w);
             break;
         case IR_F2F: {

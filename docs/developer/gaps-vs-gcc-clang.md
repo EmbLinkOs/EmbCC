@@ -206,7 +206,8 @@ Missing:
 | `__builtin_types_compatible_p` | kernel macro staple, pairs with `_Generic` |
 | `__builtin_choose_expr` | the other half of that pair |
 | `__builtin_object_size` | `_FORTIFY_SOURCE` is built on it |
-| `__builtin_fabs` `copysign` `signbit` `isinf` `fma` | math headers call these directly |
+| ~~`__builtin_fabs` `copysign` `signbit` `isnan` `isinf` `isfinite` `isnormal` `isinf_sign`~~ | **DONE**, all four targets, four -O levels |
+| `__builtin_fma` | still missing: it is arithmetic, not a bit test, so it needs hardware FMA or a libm call |
 | `__builtin_LINE` `FILE` `FUNCTION` | logging/assert macros |
 | `__builtin_memcmp` `strlen` | already have memcpy/memset/memmove |
 | `__builtin_setjmp` `clear_cache` | |
@@ -277,7 +278,7 @@ Recognised and working: `noreturn` `packed` `aligned` `weak` `used`
 | `__label__` | error |
 | `__auto_type` | error |
 | vector extensions | no typedef attribute, and `vector_size` is dropped |
-| `asm goto` | error |
+| `asm goto` | refused by name, with the two missing pieces stated |
 | case ranges `case 1 ... 5:` | error |
 | `__VA_OPT__` | error |
 | `_Float16`, `__float128` | error |
@@ -291,7 +292,48 @@ structs.
 
 `asm goto` is worth singling out: the Linux kernel's static-key
 infrastructure is built on it, and EmbCC's stated target is an OS
-kernel.
+kernel. It is now REFUSED BY NAME rather than failing with a confusing
+parse error, and the message says what it needs, because the two missing
+pieces are each a place a silent miscompile would come from:
+
+1. The template BRANCHES to a label whose offset is not known when the
+   statement is assembled. Every backend's inline assembler would have
+   to emit a placeholder and have it patched when the label is placed.
+2. The optimizer's CFG needs an edge from the asm to each listed label.
+   Without them a target label looks unreachable and its code can be
+   deleted, or a value live across the jump can have its register
+   reused.
+
+Accepting the syntax while doing neither is worse than not accepting it.
+
+### The IEEE-754 bit builtins, and why they are one IR op
+
+`fabs`, `copysign`, `signbit` and the `isnan`/`isinf`/`isfinite`/
+`isnormal`/`isinf_sign` family are all the same job -- reading the sign
+and exponent fields of the representation -- and two of them cannot be
+done in floating point at all without getting a corner wrong:
+`x < 0 ? -x : x` returns `-0.0` for `fabs(-0.0)` and leaves a NaN's sign
+set.
+
+GCC and Clang each carry a separate optab entry per builtin per target,
+so adding a predicate is a change in every backend. EmbCC adds ONE op,
+`IR_BITCAST` -- the move between the register files -- and everything
+after it is ordinary integer IR the existing optimizer already folds:
+
+```
+%5 = bitcast.8:8s %0              ; the bits into a general register
+%6 = const.8s 9223372036854775807
+%7 = and.8 %5, %6
+%8 = bitcast.8:8 %7
+```
+
+On the soft-float targets (ARMv7-M, RISC-V) even that op is a plain
+move, because the double was already in a general register. A tenth
+predicate is a change in one function.
+
+The one part not done: a 16-byte `long double`, whose sign bit is in its
+tenth or sixteenth byte, past what a register holds. That is refused by
+name.
 
 ---
 

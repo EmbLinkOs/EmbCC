@@ -1256,6 +1256,20 @@ void x86_movq_xmm_gpr(struct code *c, int xmm, int gpr, int w)
     code_byte(c, 0xc0 | ((xmm & 7) << 3) | (gpr & 7));
 }
 
+/* movq r64, xmm / movd r32, xmm -- the same instruction the other way.
+ * Only the opcode byte differs (0x7e against 0x6e); the ModRM still puts
+ * the XMM register in the reg field and the general one in rm, so this
+ * shares every field with the encoder above rather than restating it. */
+void x86_movq_gpr_xmm(struct code *c, int gpr, int xmm, int w)
+{
+    code_byte(c, 0x66);
+    if (w == 8 || xmm >= 8 || gpr >= 8)
+        code_byte(c, 0x40 | ((w == 8) << 3) | ((xmm >= 8) << 2) | (gpr >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x7e);
+    code_byte(c, 0xc0 | ((xmm & 7) << 3) | (gpr & 7));
+}
+
 void x86_movs_reg(struct code *c, int dst, int src)
 {
     if (dst >= 8 || src >= 8)
