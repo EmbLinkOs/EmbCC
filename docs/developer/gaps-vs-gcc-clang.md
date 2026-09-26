@@ -425,14 +425,39 @@ Every target against Clang on the same real corpus, at `-Os`:
 
 | target | EmbCC | Clang | ratio |
 |---|---|---|---|
-| `x86_64-elf` | 134,010 | 63,387 | 2.11× |
 | `aarch64-elf` | 143,576 | 71,536 | 2.00× |
-| `riscv64-unknown-elf` | 113,710 | 42,090 | 2.70× *(was 3.22×)* |
-| `riscv32-unknown-elf` | 132,676 | 44,764 | 2.96× *(was 3.51×)* |
-| `thumbv7m-none-eabi` | 141,668 | 36,408 | **3.89×** |
+| `x86_64-elf` | 134,010 | 63,387 | 2.11× |
+| `riscv64-unknown-elf` | 108,384 | 42,090 | 2.57× *(was 3.22×)* |
+| `riscv32-unknown-elf` | 127,686 | 44,764 | 2.85× *(was 3.51×)* |
+| `thumbv7m-none-eabi` | 111,442 | 36,408 | 3.06× *(was 3.89×)* |
 
-*The two RISC-V rows improved when the C extension landed (`f550d42`):
-15.6% off RV32 and 16.2% off RV64. Thumb is now the worst target.*
+*All three embedded targets improved: the C extension (`f550d42`),
+reading operands where the allocator put them (`fa9621b`), and fusing
+a comparison with the branch that reads it (`c544750`).*
+
+### What `-Os` turned out to be
+
+Part II called `-Os` "the most valuable missing thing", on the grounds
+that it sat 0.6% below `-O2` while Clang's sits 34% below its own. That
+diagnosis was wrong, and the measurement that corrected it is worth
+keeping.
+
+`-Os` already drops vectorisation and unrolling, and an instruction
+histogram says why that cannot be the story: on this corpus EmbCC
+emitted **43,215** ARMv7-M instructions where Clang emitted **13,147**.
+A 3.3× *count* gap. The 16-bit encoding share — the thing that looked
+like the problem — was 36% against 62%, which cannot explain 3.3×.
+
+So the gap was never pass selection. It was that the backend routed
+every value through a scratch register even when the allocator had
+given it one, and materialised 0 or 1 for every comparison before
+testing it. Both are fixed above; the count is now 38,875 and falling.
+
+One real `-Os` finding did come out of it: turning inlining **off**
+makes this corpus 1.3% smaller, which is the opposite of the benchmark
+result recorded in `opt.c`. Both can be true — sole-caller inlining
+deletes the original, multi-caller inlining copies it — and it is the
+case for a cost model rather than a single switch.
 
 The two embedded families, the ones the recent work was for, are the
 worst — and they are the ones where size is not a preference but a
