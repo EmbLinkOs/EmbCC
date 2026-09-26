@@ -554,13 +554,34 @@ instructions in every function:
   them. `int f(int a,int b){return a+b;}` had a 24-byte frame for two
   values that were both in registers.
 
-Still to do there, and worth about as much again: the prologue pushes
-`{r9, r10, r11, lr}` in every function, including a leaf that touches
-none of them. The mask is patched after the body, so the touched set
-IS known in time -- but `SAVE_BYTES` feeds the stack-parameter offsets,
-which are computed before the body runs. Making it exact needs either
-a two-pass emit or patchable parameter offsets, and it moves stack
-offsets, so it belongs in its own change.
+The prologue's unconditional `push {r9, r10, r11, lr}` looks like the
+next thing to fix and, MEASURED, is not. Instrumenting the point where
+each scratch register is named, over the same 366 functions:
+
+| | functions | share |
+|---|---|---|
+| r9 never named | 195 | 53% |
+| r10 never named | 137 | 37% |
+| r11 never named | 194 | 53% |
+| none of the three | 113 | 31% |
+| ...and a leaf (so `lr` is free too) | 7 | 2% |
+| ...and a zero frame as well | 3 | 0.8% |
+
+The push is emitted before the body, so only its MASK can be patched
+afterwards, not the instruction itself. A narrower mask is still one
+`push` and one `pop`, and pushing fewer registers moves `sp` less, so
+every stack-parameter offset would have to move with it. The push only
+DISAPPEARS when the mask is empty, which needs the answer before the
+body runs -- and that case is three functions in 366.
+
+So the instruction-count saving is under 1%, not the "about as much
+again" an earlier draft of this section guessed. What a conditional
+push would buy is memory traffic (cycles) and a smaller frame, not
+size. It is not worth moving stack offsets for, which is the
+highest-consequence thing in this backend.
+
+The measurement cost twenty minutes and stopped a day of risky work,
+which is the whole argument for doing it first.
 
 ### What `-Os` turned out to be
 
