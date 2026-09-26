@@ -1192,3 +1192,16 @@ int ra_parallel_move(const int *dst, const int *src, int n, int scratch,
     }
     return nout;
 }
+
+/* See regalloc.h: under -g the embedded backends keep every source
+ * variable in its frame slot, so the location expression that names
+ * the slot is the truth. Temporaries are untouched -- they have no
+ * name and no DW_TAG_variable, so nothing describes them. */
+char *ra_debug_pin_vars(const struct ir_func *fn)
+{
+    int n = fn->nvregs ? fn->nvregs : 1;
+    char *m = xcalloc((size_t)n, 1);
+    for (int v = 0; v < fn->nvars && v < fn->nvregs; v++)
+        m[v] = 1;
+    return m;
+}

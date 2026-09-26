@@ -89,6 +89,7 @@ struct t_fn {
      * instructions for every `if` without it. */
     int *usecnt;
     int skip_next;
+    int want_debug;
     /* Per vreg: 1 when it holds a 64-bit integer, which on a 32-bit
      * machine is an eight-byte slot and a REGISTER PAIR. Built from the
      * width of each value's DEFINING instruction, which is not the same
@@ -1132,6 +1133,26 @@ static void gen_ins(struct t_fn *F, int n)
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
 
+    /* -g: a line-table row wherever the source line changes, as the
+     * x86-64 and aarch64 backends record them. t->len is where this
+     * instruction's code begins. */
+    if (F->want_debug && i->line) {
+        struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
+                                          : (struct ir_line *)0;
+        if (last && last->off == t->len) {
+            last->line = i->line;
+        } else if (!last || last->line != i->line) {
+            if (fn->nlines == fn->linecap) {
+                fn->linecap = fn->linecap ? fn->linecap * 2 : 8;
+                fn->lines = xrealloc(fn->lines, (size_t)fn->linecap *
+                                     sizeof *fn->lines);
+            }
+            fn->lines[fn->nlines].off = t->len;
+            fn->lines[fn->nlines].line = i->line;
+            fn->nlines++;
+        }
+    }
+
     /* Floating point is a CALL on this machine, not an instruction.
      * Only the arithmetic is flagged: the IR already carries a float
      * value as plain bits of its own width, so loads, stores, moves and
@@ -1899,7 +1920,8 @@ static void gen_ins(struct t_fn *F, int n)
 
 /* ---- one function --------------------------------------------------- */
 
-static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
+static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
+                     int want_debug)
 {
     struct func *f = fn->src;
     struct t_fn F;
@@ -1911,6 +1933,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
      * segfault this caused at -O0, where the allocator does not run. */
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
+    F.want_debug = want_debug;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
     F.va_regsave = F.va_first = -1;
@@ -1929,8 +1952,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
          *
          * fltmap NULL: ARMv7-M's base profile has no FPU, so a float
          * lives in a core register and must stay eligible for this pool. */
-        F.loc = ra_allocate(fn, &THUMB_RA, F.wide, NULL,
+        /* Under -g every source variable stays in its frame slot, so
+         * the DW_AT_location naming that slot is true. A variable in a
+         * register needs a location list to describe, which is the
+         * larger feature; this is exact. */
+        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
+        F.loc = ra_allocate(fn, &THUMB_RA, F.wide, pin,
                             F.used_callee, &F.nsave);
+        free(pin);
         /* Read counts for comparison/branch fusion. Only with the
          * allocator on: without it every value round-trips through a
          * slot and the branch reads the slot, so nothing is saved and
@@ -1975,6 +2004,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
      * between two functions look like a condition block. */
     while (t->len & 3)
         t_nop(t);
+    /* -g: each source variable's slot, which IS its offset from the
+     * DWARF frame base -- sp, because this backend keeps no frame
+     * pointer (see src/debug/dwarf.c). */
+    if (want_debug) {
+        int nv = fn->nvars ? fn->nvars : 1;
+        fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
+        for (int v = 0; v < fn->nvars; v++)
+            fn->var_off[v] = (int)F.slot[v];
+    }
     f->code_off = t->len;
 
     /* The register save area goes down FIRST, so it lands immediately
@@ -2178,11 +2216,6 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
 {
     (void)optimize; (void)no_sse;
     g_t_regalloc = regalloc;
-    if (want_debug) {
-        fprintf(stderr, "embcc: error: -g is not supported for ARMv7-M yet "
-                        "(the DWARF frame description would be a guess)\n");
-        exit(1);
-    }
 
     struct t_sites st;
     st.call = NULL; st.ncall = st.capcall = 0;
@@ -2192,7 +2225,7 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
     st.f = NULL;    st.nf = st.capf = 0;
 
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func(&iu->funcs[n], text, &st);
+        gen_func(&iu->funcs[n], text, &st, want_debug);
 
     for (int n = 0; n < st.ncall; n++)
         t_patch_bl(text, st.call[n].patch_off, st.call[n].target->code_off);

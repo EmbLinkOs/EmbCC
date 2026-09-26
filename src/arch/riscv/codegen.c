@@ -88,6 +88,7 @@ struct rv_fn {
      * skip_next tells the dispatch loop the branch is already out. */
     int *usecnt;
     int skip_next;
+    int want_debug;
     struct ir_func *fn;
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when the allocator did not run (-O0/-O1),
@@ -1502,6 +1503,28 @@ static void gen_ins(struct rv_fn *F, int n)
     struct ir_func *fn = F->fn;
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
+
+    /* -g: a line-table row wherever the source line changes, as the
+     * other backends record them. t->len is where this instruction's
+     * code begins. */
+    if (F->want_debug && F->fn->ins[n].line) {
+        struct ir_func *dfn = F->fn;
+        long line = dfn->ins[n].line;
+        struct ir_line *last = dfn->nlines ? &dfn->lines[dfn->nlines - 1]
+                                           : (struct ir_line *)0;
+        if (last && last->off == t->len) {
+            last->line = line;
+        } else if (!last || last->line != line) {
+            if (dfn->nlines == dfn->linecap) {
+                dfn->linecap = dfn->linecap ? dfn->linecap * 2 : 8;
+                dfn->lines = xrealloc(dfn->lines, (size_t)dfn->linecap *
+                                      sizeof *dfn->lines);
+            }
+            dfn->lines[dfn->nlines].off = t->len;
+            dfn->lines[dfn->nlines].line = line;
+            dfn->nlines++;
+        }
+    }
     int wordop;
 
     /* Floating point is a CALL here, not an instruction. Only the
@@ -2173,7 +2196,7 @@ static int param_reg(struct rv_fn *F, const struct argplace *pl, int q)
 /* ---- one function --------------------------------------------------------- */
 
 static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
-                     int xlen)
+                     int xlen, int want_debug)
 {
     struct func *f = fn->src;
     struct rv_fn F;
@@ -2185,6 +2208,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * version of this change did before the memset went in. */
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
+    F.want_debug = want_debug;
     F.xlen = xlen; F.w = xlen / 8;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide_map(fn);
@@ -2213,8 +2237,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
          * ordinary integer register and must stay ELIGIBLE for the
          * integer pool. Passing the map would exclude every float from
          * both classes and leave it with nowhere to live. */
-        F.loc = ra_allocate(fn, &RISCV_RA, xlen == 32 ? F.wide : NULL, NULL,
+        /* Under -g a source variable stays in its frame slot, so the
+         * DW_AT_location naming that slot is true (see regalloc.h). */
+        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
+        F.loc = ra_allocate(fn, &RISCV_RA, xlen == 32 ? F.wide : NULL, pin,
                             F.used_callee, &F.nsave);
+        free(pin);
         /* Read counts for comparison/branch fusion, with the allocator
          * on: without it every value goes through a slot and the
          * branch reads the slot, so "the only reader" would not hold. */
@@ -2260,6 +2288,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         rv_cunimp(t);
     while (t->len & 3)
         rv_unimp(t);
+    /* -g: each source variable's slot, which IS its offset from the
+     * DWARF frame base -- sp, because this backend keeps no frame
+     * pointer (src/debug/dwarf.c). */
+    if (want_debug) {
+        int nv = fn->nvars ? fn->nvars : 1;
+        fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
+        for (int v = 0; v < fn->nvars; v++)
+            fn->var_off[v] = (int)F.slot[v];
+    }
     f->code_off = t->len;
 
     /* The prologue. `addi sp, sp, -frame` reaches 2047 bytes; a larger
@@ -2505,15 +2542,10 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
      * with it. */
     rv_set_compress(1, xlen);
     g_rv_regalloc = regalloc;
-    if (want_debug) {
-        fprintf(stderr, "embcc: error: -g is not supported for RISC-V yet "
-                        "(the DWARF frame description would be a guess)\n");
-        exit(1);
-    }
     memset(&st, 0, sizeof st);
 
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func(&iu->funcs[n], text, &st, xlen);
+        gen_func(&iu->funcs[n], text, &st, xlen, want_debug);
 
     /* Intra-unit calls, now that every function has a place. The auipc
      * and the jalr are patched together: the auipc adds the HI20 of the

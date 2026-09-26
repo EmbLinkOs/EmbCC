@@ -157,10 +157,18 @@ int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
                     const char *wide, const char *fltmap,
                     int *used_out, int *nused_out);
 
-/* `fltmap` (cg_float_vregs, may be NULL) is what keeps the two classes
- * apart: a value it names belongs to the FP allocation and must not be
- * given a general register as well, or the two halves of codegen each
- * believe their own answer about where it is. */
+/* `fltmap` (may be NULL) names vregs that must NOT be given a general
+ * register. Its first use was keeping the two register classes apart --
+ * a value belonging to the FP allocation must not also get a general
+ * one, or the two halves of codegen each believe their own answer about
+ * where it is (cg_float_vregs) -- but the contract is just that, and
+ * the reason is the caller's.
+ *
+ * The embedded backends pass a map of SOURCE VARIABLES under -g, so a
+ * variable stays in its frame slot and the DW_AT_location that names
+ * that slot is true. Describing a variable that lives in a register
+ * needs a location list, which is the larger feature; pinning it to
+ * memory is exact, and -g is where the trade belongs. */
 int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                  const char *wide, const char *fltmap,
                  int *used_out, int *nused_out);
@@ -178,6 +186,10 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
 unsigned long *ra_live_intervals(struct ir_func *fn, int *first, int *last,
                                  unsigned long **livein_out, int **defv_out,
                                  int *words_out);
+
+/* A map of the function's source variables, for the -g pinning above.
+ * malloc'd, one byte per vreg; the caller frees. */
+char *ra_debug_pin_vars(const struct ir_func *fn);
 
 /* What a backend knows about slot assignment that this layer does not. */
 struct ra_slots {
