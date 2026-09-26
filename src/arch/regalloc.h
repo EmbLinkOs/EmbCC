@@ -246,4 +246,48 @@ int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
  * and one copy is how it stays agreed. */
 int ra_ins_def(const struct ir_ins *in);
 
+/* ---- a PARALLEL MOVE ------------------------------------------------------
+ *
+ * "Put these values in these registers, all at once." Three places in a
+ * register-allocating backend ask exactly that, and none of them is a
+ * sequence of independent moves:
+ *
+ *   * a CALL's argument setup -- the value for a0 may be sitting in the
+ *     register a2 is about to be given;
+ *   * a PROLOGUE's parameter placement -- the same thing in reverse,
+ *     writing incoming argument registers into wherever the allocator
+ *     put each parameter;
+ *   * an INDIRECT call's target, which has to be read out before the
+ *     arguments overwrite whatever holds it.
+ *
+ * Done naively, `mov a0, a2; mov a2, a0` loses a2. Done in the wrong
+ * order, a2's old value is gone before a0 wanted it. And a cycle
+ * (a0<-a1, a1<-a0, a swap) cannot be done in any order at all without a
+ * third register.
+ *
+ * So this orders them: emit any move whose DESTINATION nothing still
+ * needs to read, repeatedly; when only cycles are left, break one by
+ * copying a value to `scratch` and rewriting the move that wanted it.
+ * The result is a sequence that is safe to execute top to bottom.
+ *
+ * It is here, in the shared layer, BEFORE a second backend needed it --
+ * which is the opposite of how D-011 says to lift things, and
+ * deliberately. The first attempt at this (the parked branch
+ * `thumb-regalloc-wip`) got three separate bugs out of three sites
+ * open-coding the same ordering, and Thumb and RISC-V both need it. One
+ * routine that is right once is worth more than the rule about waiting
+ * for the second copy.
+ *
+ * `dst[i] <- src[i]`, n pairs, register numbers. Writes the ordered
+ * result into out_dst/out_src (at most `max` entries, and n+1 is always
+ * enough: at most one extra move per cycle broken, and a cycle of length
+ * k costs k+1 moves for k pairs). Pairs with dst == src are dropped.
+ * Returns how many moves to emit, or -1 if `max` is too small or a
+ * destination appears twice (which is a caller bug, not a cycle).
+ *
+ * `scratch` must be a register that is not any dst and holds nothing
+ * live. It is only touched when there is a cycle to break. */
+int ra_parallel_move(const int *dst, const int *src, int n, int scratch,
+                     int *out_dst, int *out_src, int max);
+
 #endif

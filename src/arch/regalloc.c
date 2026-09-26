@@ -1103,3 +1103,92 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
     return slot;
 }
 
+
+/* ---- a parallel move ----------------------------------------------------
+ *
+ * The algorithm is the standard one and the whole of it is the ordering.
+ * Think of the pairs as a graph with an edge src -> dst: each dst has
+ * exactly one incoming edge (a caller that gives two is a bug, and this
+ * says so rather than emitting something plausible), and a register may
+ * be the source of several.
+ *
+ * A move is SAFE to emit now when its destination is not still needed as
+ * somebody's source -- writing it destroys nothing anybody is waiting
+ * for. Emitting it removes that pair, which may make another safe. What
+ * remains when nothing is safe is entirely cycles, because every node
+ * left has its destination read by someone. Break one cycle by lifting a
+ * value into `scratch` and pointing the pair that wanted it at scratch
+ * instead; that node's destination is now read by nobody, and the chain
+ * unwinds.
+ *
+ * regalloc.h says why this lives here before two backends asked for it.
+ */
+int ra_parallel_move(const int *dst, const int *src, int n, int scratch,
+                     int *out_dst, int *out_src, int max)
+{
+    int d[RA_MAXPOOL * 2], s[RA_MAXPOOL * 2];
+    int pending[RA_MAXPOOL * 2];
+    int m = 0, nout = 0;
+
+    if (n > (int)(sizeof d / sizeof d[0]))
+        return -1;
+    /* Drop the moves that are already in place, and reject a repeated
+     * destination: two values cannot both end up in one register, and
+     * an ordering cannot rescue that. */
+    for (int i = 0; i < n; i++) {
+        if (dst[i] == src[i])
+            continue;
+        for (int k = 0; k < m; k++)
+            if (d[k] == dst[i])
+                return -1;
+        d[m] = dst[i];
+        s[m] = src[i];
+        pending[m] = 1;
+        m++;
+    }
+
+    int left = m;
+    while (left > 0) {
+        int moved = 0;
+        for (int i = 0; i < m; i++) {
+            if (!pending[i])
+                continue;
+            /* Is d[i] still needed as a source by any pending move? */
+            int needed = 0;
+            for (int k = 0; k < m; k++)
+                if (pending[k] && k != i && s[k] == d[i]) {
+                    needed = 1;
+                    break;
+                }
+            if (needed)
+                continue;
+            if (nout >= max)
+                return -1;
+            out_dst[nout] = d[i];
+            out_src[nout] = s[i];
+            nout++;
+            pending[i] = 0;
+            left--;
+            moved = 1;
+        }
+        if (moved)
+            continue;
+        /* Only cycles remain. Lift one node's SOURCE into scratch and
+         * make whoever reads that register read scratch instead -- so
+         * the node whose destination it was becomes emittable. */
+        for (int i = 0; i < m; i++) {
+            if (!pending[i])
+                continue;
+            if (nout >= max)
+                return -1;
+            out_dst[nout] = scratch;
+            out_src[nout] = d[i];
+            nout++;
+            for (int k = 0; k < m; k++)
+                if (pending[k] && s[k] == d[i])
+                    s[k] = scratch;
+            break;
+        }
+    }
+    return nout;
+}
