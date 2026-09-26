@@ -2038,9 +2038,56 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     }
 
-    case IR_ASM:
-        rv_refuse(F, i, "inline assembly");
+    case IR_ASM: {
+        /* Extended asm, assembled in irgen (riscv/irgen.c irg_asm_riscv)
+         * against the vocabulary in riscv/asm.c. This only has to place
+         * the operands and splice the bytes.
+         *
+         * Nothing is live in a REGISTER across an asm, and that is not an
+         * assumption -- the shared allocator excludes every vreg whose
+         * range spans an IR_ASM ("live-across-asm"), because the clobber
+         * set is not visible to it. So the operands' registers may be
+         * loaded freely and no clobber needs saving. */
+        struct ir_asm *ia = i->asm_ir;
+        int used[32] = { 0 };
+        /* An address scratch that is no operand's register. t6 is left
+         * out because a far slot access borrows it internally. */
+        static const int scr_pool[] = {
+            RV_T0, RV_T1, RV_T2, RV_T3, RV_T4, RV_T5,
+            RV_A0, RV_A1, RV_A2, RV_A3, RV_A4, RV_A5, RV_A6, RV_A7
+        };
+        int scr = -1;
+        for (int k = 0; k < ia->nin; k++) used[ia->in[k].reg] = 1;
+        for (int k = 0; k < ia->nout; k++) used[ia->out[k].reg] = 1;
+        for (unsigned k = 0; k < sizeof scr_pool / sizeof scr_pool[0]; k++)
+            if (!used[scr_pool[k]]) { scr = scr_pool[k]; break; }
+        if (scr < 0 && ia->nout > 0)
+            rv_refuse(F, i, "an asm with no scratch register left around it");
+        for (int k = 0; k < ia->nout; k++)
+            if (!ia->out[k].mem && ia->out[k].size > F->w)
+                rv_refuse(F, i, "an asm output wider than a register");
+        /* A "+" output starts with the lvalue's CURRENT value. */
+        for (int k = 0; k < ia->nout; k++) {
+            if (!ia->out[k].inout || ia->out[k].mem)
+                continue;
+            rd(F, ia->out[k].temp, scr);
+            rv_load(t, ia->out[k].reg, scr, 0, ia->out[k].size, 0, F->xlen);
+        }
+        for (int k = 0; k < ia->nin; k++)
+            rd(F, ia->in[k].temp, ia->in[k].reg);
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        for (int k = 0; k < ia->nout; k++) {
+            /* An "m" output was written BY the template, through the
+             * address this register holds; storing the register over it
+             * would destroy what the asm produced. */
+            if (ia->out[k].mem)
+                continue;
+            rd(F, ia->out[k].temp, scr);
+            rv_store(t, ia->out[k].reg, scr, 0, ia->out[k].size, F->xlen);
+        }
         return;
+    }
     case IR_XCHG: case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS:
         rv_refuse(F, i, "an atomic operation (this configuration has no A "
                         "extension)");

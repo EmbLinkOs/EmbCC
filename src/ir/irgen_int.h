@@ -42,5 +42,6 @@ int irg_va_arg_riscv(struct ir_func *fn, struct expr *e);
  * the target's own inline-asm vocabulary, then emit IR_ASM */
 void irg_asm_x86(struct ir_func *fn, struct stmt *s);
 void irg_asm_arm64(struct ir_func *fn, struct stmt *s);
+void irg_asm_riscv(struct ir_func *fn, struct stmt *s);
 
 #endif

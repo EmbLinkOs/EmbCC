@@ -147,14 +147,26 @@ static int li_emit(struct code *c, int rd, long long v, int xlen, int emit)
         int n = 4;
         if (emit) code_u32(c, rv_enc_u(OP_LUI, rd, hi20_of(v)));
         if (lo) {
-            /* ADDIW at RV64 and ADDI at RV32, and they are not the same
-             * instruction -- addiw does not exist at RV32 at all. At RV64
-             * it is required: `lui` sign-extends bit 31 into the top half,
-             * so lui(0x80000)+addi(-1) for 0x7fffffff leaves
-             * 0xffffffff7fffffff. addiw re-narrows the sum to 32 bits and
-             * sign-extends it, which is the answer. */
+            /* ADDI or ADDIW, and the choice is not cosmetic.
+             *
+             * `lui` SIGN-EXTENDS bit 31. When the high half's top bit is
+             * set the register holds a negative 64-bit value, and a plain
+             * `addi` leaves it negative -- lui(0x80000)+addi(-1) for
+             * 0x7fffffff gives 0xffffffff7fffffff. `addiw` re-narrows the
+             * sum to 32 bits and sign-extends it, which is the answer.
+             *
+             * When that bit is CLEAR no sign extension happened and
+             * `addi` is exact. Both are correct there, and `addi` is what
+             * every RISC-V assembler emits -- which matters because
+             * tests/golden/riscv-asm.sh compares these bytes against
+             * llvm-mc's, and a difference that is only a preference is
+             * one somebody has to re-explain every time they read it.
+             *
+             * addiw does not exist at RV32, so there the question does
+             * not arise. */
+            int narrow = xlen == 64 && (hi20_of(v) & 0x80000) != 0;
             if (emit)
-                code_u32(c, rv_enc_i(xlen == 64 ? OP_IMM32 : OP_IMM,
+                code_u32(c, rv_enc_i(narrow ? OP_IMM32 : OP_IMM,
                                      rd, 0, rd, lo));
             n += 4;
         }
