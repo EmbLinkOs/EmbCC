@@ -220,7 +220,10 @@ static void expect(struct parser *ps, enum tok_kind kind, const char *what)
  * them here turns "'struct' is not declared" into an honest "not
  * supported yet". Grows emptier as M2 proceeds. */
 static const char *const reserved_unsupported[] = {
-    "auto", "goto", "register",
+    /* `auto` left: C23 gives it a meaning (type inference) and the
+     * declaration parser handles it, so rejecting it here would
+     * shadow that. The C89 storage class is skipped there too. */
+    "goto", "register",
 };
 
 static void reject_reserved(struct parser *ps, const char *name, int line, int col)
@@ -250,7 +253,7 @@ static int tok_is_type_start(enum tok_kind k)
             * type -- the type comes from the initializer, and the
             * declaration parser handles it before reaching
             * parse_type_spec. */
-           k == TOK_KW_AUTOTYPE;
+           k == TOK_KW_AUTOTYPE || k == TOK_KW_TYPEOF_UNQUAL;
 }
 
 /* const/restrict are accepted and IGNORED (no const-correctness enforcement).
@@ -287,6 +290,12 @@ static int at_type_start(struct parser *ps)
         return 1;
     return cur(ps)->kind == TOK_IDENT &&
            (find_typedef(ps, cur(ps)->text) != NULL ||
+            /* C23 `auto`, which begins a declaration although it names
+             * no type -- the type comes from the initializer. It
+             * lexes as an identifier in C, and is reserved, so no
+             * variable can be called that. */
+            strcmp(cur(ps)->text, "auto") == 0 ||
+            strcmp(cur(ps)->text, "constexpr") == 0 ||
             strcmp(cur(ps)->text, "__builtin_va_list") == 0 ||
             strcmp(cur(ps)->text, "__int128_t") == 0 ||
             strcmp(cur(ps)->text, "__uint128_t") == 0);
@@ -453,16 +462,86 @@ static const struct attr_entry *attr_lookup(const char *n)
  * skipped along with its balanced parenthesized arguments, unless
  * attr_unimplemented() says skipping it would be a lie.
  * Callers pass out=NULL where no attribute is meaningful (member/param). */
+/* Does an attribute start here, in either spelling? parse_attributes
+ * returns at once when one does not, so a guard only needs to be right
+ * about `[[`, whose first token is also a subscript's. */
+static int at_attribute(struct parser *ps)
+{
+    if (cur(ps)->kind == TOK_KW_ATTRIBUTE)
+        return 1;
+    if (cur(ps)->kind == TOK_LBRACKET) {
+        struct lexer save = ps->lx;
+        int two;
+        advance(ps);
+        two = cur(ps)->kind == TOK_LBRACKET;
+        ps->lx = save;
+        return two;
+    }
+    return 0;
+}
+
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
-    while (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
-        advance(ps);
-        expect(ps, TOK_LPAREN, "'(' after __attribute__");
-        expect(ps, TOK_LPAREN, "a second '(' after __attribute__");
-        while (cur(ps)->kind != TOK_RPAREN && cur(ps)->kind != TOK_EOF) {
+    /* Two spellings, one body. C23 writes `[[noreturn]]` where GNU
+     * writes `__attribute__((noreturn))`, and a `[[gnu::x]]` scope
+     * names a GNU attribute directly. Sharing the parse means an
+     * attribute cannot be honoured in one spelling and dropped in the
+     * other, which is what two code paths would eventually give. */
+    for (;;) {
+        int c23 = 0;
+        if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'(' after __attribute__");
+            expect(ps, TOK_LPAREN, "a second '(' after __attribute__");
+        } else if (cur(ps)->kind == TOK_LBRACKET) {
+            /* One `[` is a subscript or an array bound; two in a row
+             * is a C23 attribute. No peek helper here, so: look, and
+             * put it back when it was not. */
+            struct lexer bsave = ps->lx;
+            advance(ps);
+            if (cur(ps)->kind != TOK_LBRACKET) {
+                ps->lx = bsave;
+                break;
+            }
+            c23 = 1;
+            advance(ps);
+        } else {
+            break;
+        }
+        while (cur(ps)->kind != (c23 ? TOK_RBRACKET : TOK_RPAREN) &&
+               cur(ps)->kind != TOK_EOF) {
             const char *name = cur(ps)->kind == TOK_IDENT ? cur(ps)->text
                                                           : NULL;
             advance(ps);
+            if (c23) {
+                /* `gnu::packed` and friends: the scope is dropped and
+                 * the name used as written. An unknown scope is left
+                 * to the ignore path below, as an unknown name is. */
+                if (cur(ps)->kind == TOK_COLONCOLON) {
+                    advance(ps);
+                    name = cur(ps)->kind == TOK_IDENT ? cur(ps)->text : NULL;
+                    advance(ps);
+                } else if (cur(ps)->kind == TOK_COLON) {
+                    struct lexer csave = ps->lx;
+                    advance(ps);
+                    if (cur(ps)->kind == TOK_COLON) {
+                        advance(ps);
+                        name = cur(ps)->kind == TOK_IDENT ? cur(ps)->text
+                                                          : NULL;
+                        advance(ps);
+                    } else {
+                        ps->lx = csave;
+                    }
+                }
+                /* The standard names that are spelled differently from
+                 * their GNU equivalents. The rest coincide. */
+                if (name && strcmp(name, "maybe_unused") == 0)
+                    name = "unused";
+                else if (name && strcmp(name, "nodiscard") == 0)
+                    name = "warn_unused_result";
+                else if (name && strcmp(name, "_Noreturn") == 0)
+                    name = "noreturn";
+            }
             long arg = -1;
             const char *sarg = NULL;
             int aline = cur(ps)->line;
@@ -588,8 +667,13 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             else
                 break;
         }
-        expect(ps, TOK_RPAREN, "')'");
-        expect(ps, TOK_RPAREN, "a second ')' to close __attribute__");
+        if (c23) {
+            expect(ps, TOK_RBRACKET, "']' to close [[...]]");
+            expect(ps, TOK_RBRACKET, "a second ']' to close [[...]]");
+        } else {
+            expect(ps, TOK_RPAREN, "')'");
+            expect(ps, TOK_RPAREN, "a second ')' to close __attribute__");
+        }
     }
 }
 
@@ -811,6 +895,13 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
             }
             if (param_sret_attr(ps, n))
                 sret = 1;
+            /* A parameter may carry attributes too:
+             * `int f([[maybe_unused]] int x)`. */
+            if (at_attribute(ps)) {
+                struct attrs pat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, NULL };
+                parse_attributes(ps, &pat);
+            }
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -874,6 +965,36 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                 "a packed or aligned enum is not supported (EmbCC's enums "
                 "are always int-sized)");
 
+    /* C23 `enum e : type` -- a FIXED underlying type, which is the
+     * standard's answer to the -fshort-enums question: instead of a
+     * flag that silently changes every enum, the declaration says.
+     * The enum then IS that type, which is exactly what this parser
+     * can express, since an enum here is already just its underlying
+     * integer type. */
+    if (kind == TAG_ENUM && cur(ps)->kind == TOK_COLON) {
+        struct type *under;
+        advance(ps);
+        under = parse_type_name(ps, parse_type_spec(ps, 0));
+        if (!under || !ty_is_integer(under))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "an enum's underlying type must be an integer type");
+        if (cur(ps)->kind == TOK_LBRACE) {
+            if (!allow_body)
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "define enums at file scope");
+            parse_enum_body(ps);
+        }
+        if (tag && !find_tag(ps, tag)) {
+            struct tagdef *td = xcalloc(1, sizeof *td);
+            td->tag = tag;
+            td->kind = kind;
+            td->ty = under;
+            td->next = ps->tags;
+            ps->tags = td;
+        }
+        return under;
+    }
+
     if (cur(ps)->kind == TOK_LBRACE) {
         if (!allow_body)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -920,7 +1041,11 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
         if (td->kind != kind)
             parse_error_line(ps, line,
                        "'%s' is a different kind of tag", tag);
-        return kind == TAG_ENUM ? ty_base(TY_INT, 0) : td->ty;
+        /* An enum is `int` unless it was declared with a C23 fixed
+         * underlying type, which the tag records. */
+        if (kind == TAG_ENUM)
+            return td->ty ? td->ty : ty_base(TY_INT, 0);
+        return td->ty;
     }
     if (kind == TAG_ENUM)
         parse_error_line(ps, line, "unknown enum '%s'", tag);
@@ -984,7 +1109,9 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
      * evaluated, like sizeof) or a type-name. The expression's type is resolved
      * with ce_type: a variable, a deref, a `.`/`->` member, a cast — the shapes
      * kernel macros (min/max, container_of helpers) use. */
-    if (cur(ps)->kind == TOK_KW_TYPEOF) {
+    if (cur(ps)->kind == TOK_KW_TYPEOF ||
+        cur(ps)->kind == TOK_KW_TYPEOF_UNQUAL) {
+        int unqual = cur(ps)->kind == TOK_KW_TYPEOF_UNQUAL;
         int line = cur(ps)->line;
         advance(ps);
         expect(ps, TOK_LPAREN, "'(' after typeof");
@@ -999,6 +1126,11 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                            "typeof of an unsupported expression");
         }
         expect(ps, TOK_RPAREN, "')' after typeof");
+        /* C23's typeof_unqual gives the type without its qualifiers.
+         * A volatile type here is a COPY whose ->canon points at the
+         * unqualified original, so stripping is following that. */
+        if (unqual && t && t->canon)
+            t = t->canon;
         return t;
     }
     /* `_Atomic(type)` atomic-type-specifier — mapped to a volatile type. */
@@ -1188,7 +1320,7 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * type-based alias analysis). The ones it HONOURS elsewhere change
          * layout or linkage, and this position has nowhere to carry them, so
          * they are refused rather than silently dropped. */
-        if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+        if (at_attribute(ps)) {
             struct token *at_tok = cur(ps);
             struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
                        0, 0, 0, 0, 0, 0, NULL };
@@ -1802,6 +1934,19 @@ static struct expr *parse_primary(struct parser *ps)
                                        t->num_uns);
         advance(ps);
         return e;
+    case TOK_KW_NULLPTR: {
+        /* C23 nullptr. Modelled as the null pointer constant `(void*)0`
+         * rather than as a distinct nullptr_t: everything a program
+         * does with it -- initialise a pointer, compare, pass -- is
+         * what a null pointer constant already does here, and the
+         * distinct type exists mainly for C++ overload resolution,
+         * which C has none of. */
+        struct expr *np = new_expr(EXPR_NUM, t->line, t->col);
+        advance(ps);
+        np->num = 0;
+        np->ty = ty_ptr(ty_base(TY_VOID, 0));
+        return np;
+    }
     case TOK_FNUM:
         e = new_expr(EXPR_FNUM, t->line, t->col);
         e->fnum = t->fnum;
@@ -2773,7 +2918,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
      * with any trailing ones at the declarator below. */
     struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
                           0, 0, 0, 0, 0, 0, NULL };
-    if (t->kind == TOK_KW_ATTRIBUTE) {
+    if (at_attribute(ps)) {
         parse_attributes(ps, &lead);
         t = cur(ps);
     }
@@ -2842,12 +2987,90 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * makes it cheap here: parse the name, parse the initializer,
          * and ask ce_type -- the same parse-time typing typeof uses,
          * so the two agree by construction. */
+        /* C23 `constexpr int k = 5;` -- a named constant, usable
+         * wherever an integer constant expression is. EmbCC folds a
+         * const-qualified local's initializer through the same table
+         * typeof and sizeof use, so the whole of it is: record the
+         * value under the name. A non-constant initializer is
+         * refused, which is what makes it constexpr and not const. */
+        if (cur(ps)->kind == TOK_IDENT &&
+            strcmp(cur(ps)->text, "constexpr") == 0) {
+            struct lexer ksave = ps->lx;
+            advance(ps);
+            if (!at_type_start(ps)) {
+                ps->lx = ksave;   /* a variable called constexpr: not C23 */
+            } else {
+                int kline = cur(ps)->line;
+                struct type *kb = parse_type_spec(ps, 1);
+                const char *kname;
+                struct type *kt;
+                long kv;
+                if (!kb)
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                               "constexpr needs a type");
+                kt = parse_declarator(ps, kb, &kname);
+                if (!kname)
+                    parse_error_line(ps, kline, "constexpr needs a name");
+                if (cur(ps)->kind != TOK_ASSIGN)
+                    parse_error_line(ps, kline,
+                               "constexpr '%s' needs an initializer",
+                               kname);
+                advance(ps);
+                {
+                    struct expr *kinit = parse_cond(ps);
+                    expect(ps, TOK_SEMI, "';'");
+                    if (!size_fold(kinit, &kv))
+                        parse_error_line(ps, kline,
+                                   "constexpr '%s' needs a constant "
+                                   "initializer; this one is not one",
+                                   kname);
+                    /* Registered as an enumerator is: a name with a
+                     * value, which size_fold and the expression
+                     * parser already resolve. */
+                    {
+                        struct econst *kc = xcalloc(1, sizeof *kc);
+                        kc->name = kname;
+                        kc->val = kv;
+                        kc->seq = ps->seq;
+                        *ps->econst_tail = kc;
+                        ps->econst_tail = &kc->next;
+                    }
+                    fold_local_add(kname, kt);
+                }
+                return new_stmt(STMT_BLOCK, kline, 0);   /* declares only */
+            }
+        }
+        /* C23 spells __auto_type `auto`, reusing the storage-class
+         * keyword that meant nothing. The two are distinguished by
+         * what follows: `auto x = e;` infers, `auto int x;` is the
+         * C89 storage class and is simply skipped. In C mode `auto`
+         * lexes as an identifier here. */
+        if (cur(ps)->kind == TOK_IDENT && strcmp(cur(ps)->text, "auto") == 0) {
+            struct lexer asave = ps->lx;
+            struct token atok = *cur(ps);
+            advance(ps);
+            if (cur(ps)->kind == TOK_IDENT && !at_type_start(ps)) {
+                struct lexer nsave = ps->lx;
+                advance(ps);
+                if (cur(ps)->kind == TOK_ASSIGN) {
+                    ps->lx = nsave;          /* back to the name */
+                    goto auto_infer;
+                }
+                ps->lx = nsave;
+            }
+            /* the C89 storage class: nothing to do with it */
+            if (at_type_start(ps))
+                goto after_auto_kw;
+            ps->lx = asave;
+            (void)atok;
+        }
         if (cur(ps)->kind == TOK_KW_AUTOTYPE) {
+            advance(ps);
+        auto_infer:;
             int aline = cur(ps)->line;
             const char *aname;
             struct expr *init;
             struct type *at;
-            advance(ps);
             if (cur(ps)->kind != TOK_IDENT)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "__auto_type needs a plain variable name");
@@ -2879,6 +3102,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             fold_local_add(aname, at);
             return s;
         }
+    after_auto_kw:;
         /* allow_body=1: a block-scope struct/union/enum DEFINITION is legal C
          * (`union { double d; uint64_t u; } v;` inside a function). Tags share
          * the one flat tag namespace EmbCC keeps -- fine for the anonymous
@@ -3349,7 +3573,7 @@ static void parse_top(struct parser *ps, struct unit *u,
              * legal and mean what they say. */
             is_tls = 1;
             advance(ps);
-        } else if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+        } else if (at_attribute(ps)) {
             parse_attributes(ps, &at); /* leading __attribute__((weak)) etc. */
         } else {
             break;
@@ -3375,7 +3599,7 @@ static void parse_top(struct parser *ps, struct unit *u,
          * __attribute__((vector_size)) looked like a vector problem. */
         struct attrs tdat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
                               0, 0, 0, 0, 0, 0, NULL };
-        if (cur(ps)->kind == TOK_KW_ATTRIBUTE)
+        if (at_attribute(ps))
             parse_attributes(ps, &tdat);
         struct type *tbase = parse_type_spec(ps, 1);
         if (!tbase)
@@ -3389,7 +3613,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                            "typedef needs a name, got %s",
                            tok_describe(cur(ps)));
             struct attrs tdone = tdat;
-            if (cur(ps)->kind == TOK_KW_ATTRIBUTE)
+            if (at_attribute(ps))
                 parse_attributes(ps, &tdone);
             /* An alignment on the NAME cannot be honoured: struct type
              * has no per-type alignment override, so the typedef would
@@ -3446,7 +3670,7 @@ static void parse_top(struct parser *ps, struct unit *u,
      * Real headers write it this way, so it is read here rather than
      * refused; parse_stars still refuses the ones that reach it after a
      * `*`, where there is nothing to carry them. */
-    if (cur(ps)->kind == TOK_KW_ATTRIBUTE)
+    if (at_attribute(ps))
         parse_attributes(ps, &at);
     /* Open the slot for this declaration's declarators, including the
      * rewind below: an attribute after a `*` belongs to what is being
@@ -3603,6 +3827,13 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->sret_first = 1;
             if (cur(ps)->kind == TOK_IDENT)
                 reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
+            /* A parameter may carry attributes too:
+             * `int f([[maybe_unused]] int x)`. */
+            if (at_attribute(ps)) {
+                struct attrs pat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, NULL };
+                parse_attributes(ps, &pat);
+            }
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,

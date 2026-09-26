@@ -134,6 +134,12 @@ static const struct {
      * keyword so an ordinary variable of that name cannot
      * shadow it. */
     { "__auto_type", TOK_KW_AUTOTYPE },
+    /* C23 spells the same thing `typeof_unqual`, minus the
+     * qualifiers; the parser strips them. */
+    { "typeof_unqual", TOK_KW_TYPEOF_UNQUAL },
+    /* C23's null pointer constant. A keyword so it cannot be shadowed
+     * by a variable of that name, which is what the standard says. */
+    { "nullptr", TOK_KW_NULLPTR },
     { "__typeof__", TOK_KW_TYPEOF },
     { "__typeof", TOK_KW_TYPEOF },
     { "_Atomic", TOK_KW_ATOMIC },

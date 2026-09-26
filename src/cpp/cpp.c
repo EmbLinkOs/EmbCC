@@ -1160,6 +1160,85 @@ static char *read_file_or_null(const char *path, long *len)
 static void process_file(struct cpp *cpp, const char *path,
                          const char *src, struct tbuf *out, int incdir_idx);
 
+/* C23 `#embed "file"` -- the file's BYTES as a comma-separated list of
+ * integers, which is what the directive is defined to expand to. It
+ * goes where an initializer list's contents go:
+ *
+ *     static const unsigned char logo[] = {
+ *     #embed "logo.bin"
+ *     };
+ *
+ * The alternative every project uses today is a build step that turns
+ * a binary into a .c file, so this removes a generator rather than
+ * adding a feature.
+ *
+ * The parameters the standard allows (limit, prefix, suffix,
+ * if_empty) are refused by name rather than ignored: ignoring `limit`
+ * would embed the whole file where a prefix of it was asked for.
+ */
+static void do_embed(struct src *s, const char *arg, struct tbuf *out)
+{
+    char fname[256];
+    char path[512];
+    const char *p = arg;
+    char *data = NULL;
+    long len = 0;
+    int angle;
+
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p != '"' && *p != '<') {
+        cerr(s, "#embed needs a file name", NULL);
+        return;
+    }
+    angle = *p == '<';
+    {
+        char close = angle ? '>' : '"';
+        size_t n = 0;
+        p++;
+        while (p[n] && p[n] != close && n < sizeof fname - 1)
+            n++;
+        if (p[n] != close) {
+            cerr(s, "malformed #embed", NULL);
+            return;
+        }
+        memcpy(fname, p, n);
+        fname[n] = 0;
+        p += n + 1;
+    }
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p)
+        cerr(s, "#embed parameters (limit, prefix, suffix, if_empty) are "
+                "not supported; ignoring one would embed the wrong bytes",
+             NULL);
+
+    if (!angle) {
+        const char *slash = strrchr(s->file, '/');
+        if (slash)
+            snprintf(path, sizeof path, "%.*s/%s",
+                     (int)(slash - s->file), s->file, fname);
+        else
+            snprintf(path, sizeof path, "%s", fname);
+        data = read_file_or_null(path, &len);
+    }
+    for (int i = 0; !data && i < s->cpp->nincdirs; i++) {
+        snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], fname);
+        data = read_file_or_null(path, &len);
+    }
+    if (!data) {
+        cerr(s, "cannot find the file to embed: \"%s\"", fname);
+        return;
+    }
+    for (long i = 0; i < len; i++) {
+        char num[8];
+        int k = snprintf(num, sizeof num, "%s%u", i ? "," : "",
+                         (unsigned)(unsigned char)data[i]);
+        tb_putn(out, num, (size_t)k);
+    }
+    free(data);
+}
+
 static void do_include(struct src *s, const char *arg, struct tbuf *out,
                        int is_next)
 {
@@ -1450,6 +1529,8 @@ static void process_file(struct cpp *cpp, const char *path,
                          s.line, path);
                 tb_puts(out, marker);
                 continue;
+            } else if (DIR("embed")) {
+                do_embed(&s, arg, out);
             } else if (DIR("error")) {
                 cerr(&s, "#error: %s", arg);
             } else if (DIR("warning")) {
