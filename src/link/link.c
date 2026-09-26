@@ -45,6 +45,12 @@ struct object {
     int local_syms;           /* sh_info of the symtab: [0,local) are LOCAL */
     /* per input section: index into insecs[], or -1 if not laid out */
     int *sec_out;
+    /* Non-allocated .debug_* sections: which merged section each input
+     * section joined (index into l->dbgsecs, or -1) and at what offset
+     * within it. Kept beside sec_out because a relocation names an
+     * input section index and has to reach one or the other. */
+    int *dbg_sec;
+    long *dbg_off;
     /* ELFCLASS32 input (ARMv7-M, D-015). The headers and the symbol
      * table are CONVERTED into the 64-bit structures above at parse
      * time, so nothing downstream of parse_object knows: only the
@@ -141,7 +147,18 @@ struct archive {
     int nmembers;
 };
 
+/* One merged .debug_* section. */
+struct dbgsec {
+    const char *name;
+    unsigned char *data;
+    long len, cap;
+    int shndx;              /* its index in the output, filled at write */
+};
+
 struct linker {
+    struct dbgsec *dbgsecs;
+    int ndbg, capdbg;
+    int keep_debug;         /* any input carried DWARF worth keeping */
     /* The thread block, for the TPOFF relocations: where it starts in
      * the image, and its aligned size -- which is what an offset is
      * measured back from, because x86-64 puts the block below the
@@ -292,8 +309,13 @@ static struct object *parse_object(const char *name, unsigned char *buf,
     }
     o->shstr = (const char *)(buf + o->shdrs[o->eh->e_shstrndx].sh_offset);
     o->sec_out = xmalloc((size_t)o->nsh * sizeof(int));
-    for (int i = 0; i < o->nsh; i++)
+    o->dbg_sec = xmalloc((size_t)o->nsh * sizeof(int));
+    o->dbg_off = xmalloc((size_t)o->nsh * sizeof(long));
+    for (int i = 0; i < o->nsh; i++) {
         o->sec_out[i] = -1;
+        o->dbg_sec[i] = -1;
+        o->dbg_off[i] = 0;
+    }
 
     /* find the symbol table */
     for (int i = 0; i < o->nsh; i++) {
@@ -369,6 +391,53 @@ static int orphan_osec(struct linker *l, const char *name, int writable)
     return OSEC_COUNT + l->norphan++;
 }
 
+/* ---- debug sections ---------------------------------------------------
+ *
+ * DWARF is not SHF_ALLOC: it occupies no memory in the running image
+ * and has no address. It was therefore dropped entirely, and the
+ * linked file carried no .debug_* at all -- so `-g` produced correct
+ * objects and an executable no debugger could open. EmbLD wrote its
+ * own .embdbg sidecar instead, which embdbg reads and gdb does not.
+ *
+ * Merging them is simpler here than it is in general, because EmbCC's
+ * DWARF writer expresses every cross-reference AS A RELOCATION: a
+ * CU's abbrev offset and its stmt_list are absolute relocations
+ * against the .debug_abbrev and .debug_line section symbols, and its
+ * low_pc/high_pc against .text. So concatenating the sections and
+ * resolving those relocations against each object's own contribution
+ * rebases everything -- there is no DWARF-aware fixup to write.
+ */
+static int dbgsec_for(struct linker *l, const char *name)
+{
+    for (int i = 0; i < l->ndbg; i++)
+        if (strcmp(l->dbgsecs[i].name, name) == 0)
+            return i;
+    if (l->ndbg == l->capdbg) {
+        l->capdbg = l->capdbg ? l->capdbg * 2 : 8;
+        l->dbgsecs = xrealloc(l->dbgsecs,
+                              (size_t)l->capdbg * sizeof *l->dbgsecs);
+    }
+    {
+        struct dbgsec *d = &l->dbgsecs[l->ndbg];
+        memset(d, 0, sizeof *d);
+        d->name = name;
+        return l->ndbg++;
+    }
+}
+
+static void dbg_append(struct dbgsec *d, const unsigned char *p, long n)
+{
+    if (d->len + n > d->cap) {
+        d->cap = (d->len + n) * 2 + 256;
+        d->data = xrealloc(d->data, (size_t)d->cap);
+    }
+    if (p)
+        memcpy(d->data + d->len, p, (size_t)n);
+    else
+        memset(d->data + d->len, 0, (size_t)n);
+    d->len += n;
+}
+
 /* Collect the object's SHF_ALLOC sections into the global insec list and
  * record where each landed (sec_out), so relocations and symbols can map
  * a (object, section) back to its output placement. */
@@ -376,8 +445,21 @@ static void collect_sections(struct linker *l, struct object *o)
 {
     for (int i = 0; i < o->nsh; i++) {
         Elf64_Shdr *sh = sh_at(o, i);
-        if (!(sh->sh_flags & SHF_ALLOC))
+        if (!(sh->sh_flags & SHF_ALLOC)) {
+            /* Not allocated, but DWARF still has to reach the output.
+             * Concatenated per name; the offset this object's piece
+             * landed at is what its relocations resolve against. */
+            const char *nm = o->shstr + sh->sh_name;
+            if (l->keep_debug && sh->sh_type == SHT_PROGBITS &&
+                strncmp(nm, ".debug_", 7) == 0 && sh->sh_size) {
+                int d = dbgsec_for(l, nm);
+                o->dbg_sec[i] = d;
+                o->dbg_off[i] = l->dbgsecs[d].len;
+                dbg_append(&l->dbgsecs[d], o->buf + sh->sh_offset,
+                           (long)sh->sh_size);
+            }
             continue;
+        }
         if (l->nsec == l->capsec) {
             l->capsec = l->capsec ? l->capsec * 2 : 64;
             l->insecs = xrealloc(l->insecs,
@@ -1048,12 +1130,23 @@ static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
         if (sy->st_shndx == SHN_ABS)
             return sy->st_value;
         int out = o->sec_out[sy->st_shndx];
-        if (out < 0)
+        if (out < 0) {
+            /* A DWARF section symbol. It has no ADDRESS -- the section
+             * is not allocated -- but it does have a position in the
+             * merged section, and that is what the reference means: a
+             * CU's abbrev offset and its stmt_list are offsets into
+             * .debug_abbrev and .debug_line, expressed as relocations
+             * against those section symbols. Resolving them to this
+             * object's own contribution is the whole of what merging
+             * DWARF takes. */
+            if (o->dbg_sec[sy->st_shndx] >= 0)
+                return (Elf64_Addr)o->dbg_off[sy->st_shndx] + sy->st_value;
             die("%s: local symbol '%s' is in section %u (%s), which is not "
                 "allocated and so has no address to relocate against",
                 o->name, name && *name ? name : "<unnamed>",
                 (unsigned)sy->st_shndx,
                 o->shstr + o->shdrs[sy->st_shndx].sh_name);
+        }
         return l->insecs[out].vaddr + sy->st_value;
     }
 
@@ -1339,14 +1432,21 @@ static void apply_relocs(struct linker *l, struct object *o)
                              : (isrel ? (int)sizeof(Elf64_Rel)
                                       : (int)sizeof(Elf64_Rela));
         int target = (int)rsh->sh_info;         /* section being relocated */
-        if (o->sec_out[target] < 0)
-            continue; /* relocations for a non-allocated section (debug) */
-        struct insec *ts = &l->insecs[o->sec_out[target]];
-        if (ts->is_bss)
+        int dtgt = o->dbg_sec[target];
+        if (o->sec_out[target] < 0 && dtgt < 0)
+            continue; /* a non-allocated section nothing kept */
+        struct insec *ts = dtgt >= 0 ? (struct insec *)0
+                                     : &l->insecs[o->sec_out[target]];
+        if (ts && ts->is_bss)
             continue;
         /* the output bytes to patch live in the object's own buffer; we
          * patch there, then copy the section into the image at write. */
-        unsigned char *base = o->buf + sh_at(o, target)->sh_offset;
+        /* A DWARF section was already copied into its merged buffer, so
+         * that is where its fields are patched; everything else is
+         * patched in the object's own buffer and copied at write. */
+        unsigned char *base = dtgt >= 0
+            ? l->dbgsecs[dtgt].data + o->dbg_off[target]
+            : o->buf + sh_at(o, target)->sh_offset;
         unsigned char *rbytes = o->buf + rsh->sh_offset;
         int n = (int)(rsh->sh_size / (Elf64_Xword)relsz);
 
@@ -1381,7 +1481,9 @@ static void apply_relocs(struct linker *l, struct object *o)
                 continue;
             int uw;
             Elf64_Addr S = reloc_symval(l, o, symi, &uw);
-            Elf64_Addr P = ts->vaddr + r_offset;      /* patch site vaddr */
+            /* A debug section has no address; every relocation into
+             * one is absolute, so there is no P to compute. */
+            Elf64_Addr P = ts ? ts->vaddr + r_offset : 0;
             unsigned char *loc = base + r_offset;
 
             if (o->machine == EM_RISCV) {
@@ -1635,6 +1737,11 @@ static void write_exec(struct linker *l, const char *out,
     /* [0] NULL  [1] .text  ([2] .data)  .symtab  .strtab  .shstrtab */
     int sh_text = 1, sh_data = have_data ? 2 : 0;
     int sh_symtab = have_data ? 3 : 2;
+    /* The merged .debug_* sections go between .text/.data and the
+     * symbol table: they are not allocated, so they take no address
+     * and sit only in the file. */
+    int sh_dbg0 = sh_symtab;
+    sh_symtab += l->ndbg;
     int sh_strtab = sh_symtab + 1, sh_shstr = sh_symtab + 2;
     int nsh = sh_shstr + 1;
 
@@ -1651,11 +1758,23 @@ static void write_exec(struct linker *l, const char *out,
     Elf64_Word n_symtab = (Elf64_Word)ltab_add(&shstr, ".symtab");
     Elf64_Word n_strtab = (Elf64_Word)ltab_add(&shstr, ".strtab");
     Elf64_Word n_shstr = (Elf64_Word)ltab_add(&shstr, ".shstrtab");
+    Elf64_Word *n_dbg = l->ndbg
+        ? xmalloc((size_t)l->ndbg * sizeof *n_dbg) : (Elf64_Word *)0;
+    for (int i = 0; i < l->ndbg; i++)
+        n_dbg[i] = (Elf64_Word)ltab_add(&shstr, l->dbgsecs[i].name);
 
     Elf64_Xword symentsz = l->elf32 ? sizeof(Elf32_Sym) : sizeof(Elf64_Sym);
     Elf64_Xword shentsz  = l->elf32 ? sizeof(Elf32_Shdr) : sizeof(Elf64_Shdr);
 
-    Elf64_Off sym_off = align_up(data_off + data_filesz, 8);
+    Elf64_Off dbg_off0 = align_up(data_off + data_filesz, 8);
+    Elf64_Off dbg_total = 0;
+    Elf64_Off *dbg_at = l->ndbg
+        ? xmalloc((size_t)l->ndbg * sizeof *dbg_at) : (Elf64_Off *)0;
+    for (int i = 0; i < l->ndbg; i++) {
+        dbg_at[i] = dbg_off0 + dbg_total;
+        dbg_total += (Elf64_Off)l->dbgsecs[i].len;
+    }
+    Elf64_Off sym_off = align_up(dbg_off0 + dbg_total, 8);
     Elf64_Off symsz = (Elf64_Xword)(nsy + 1) * symentsz;   /* +1: the null */
     Elf64_Off str_off = sym_off + symsz;
     Elf64_Off shstr_off = str_off + symstr.len;
@@ -1820,8 +1939,11 @@ static void write_exec(struct linker *l, const char *out,
     {
         /* Built as the 64-bit shape and narrowed at the one place that
          * serialises it, exactly as the headers above are. */
-        Elf64_Shdr sh[6];
-        memset(sh, 0, sizeof sh);
+        /* nsh entries, not a fixed six: the merged DWARF sections
+         * added as many headers as there are distinct .debug_* names,
+         * and writing past a six-element array is how that first
+         * showed up -- as an image with no debug sections in it. */
+        Elf64_Shdr *sh = xcalloc((size_t)nsh, sizeof *sh);
         sh[sh_text].sh_name = n_text;
         sh[sh_text].sh_type = SHT_PROGBITS;
         sh[sh_text].sh_flags = SHF_ALLOC | SHF_EXECINSTR;
@@ -1837,6 +1959,18 @@ static void write_exec(struct linker *l, const char *out,
             sh[sh_data].sh_offset = data_off;
             sh[sh_data].sh_size = data_filesz;
             sh[sh_data].sh_addralign = 4;
+        }
+        /* The merged DWARF. No SHF_ALLOC and no address: it is in the
+         * file for a debugger and nowhere in the running image. */
+        for (int i = 0; i < l->ndbg; i++) {
+            sh[sh_dbg0 + i].sh_name = n_dbg[i];
+            sh[sh_dbg0 + i].sh_type = SHT_PROGBITS;
+            sh[sh_dbg0 + i].sh_flags = 0;
+            sh[sh_dbg0 + i].sh_offset = dbg_at[i];
+            sh[sh_dbg0 + i].sh_size = (Elf64_Xword)l->dbgsecs[i].len;
+            sh[sh_dbg0 + i].sh_addralign = 1;
+            memcpy(img + dbg_at[i], l->dbgsecs[i].data,
+                   (size_t)l->dbgsecs[i].len);
         }
         sh[sh_symtab].sh_name = n_symtab;
         sh[sh_symtab].sh_type = SHT_SYMTAB;
@@ -1875,6 +2009,7 @@ static void write_exec(struct linker *l, const char *out,
                 memcpy(img + sh_off + (size_t)i * shentsz, &sh[i], sizeof sh[i]);
             }
         }
+        free(sh);
     }
     if (l->elf32) {
         Elf32_Ehdr *e = (Elf32_Ehdr *)img;
@@ -2063,6 +2198,10 @@ int embld_link(const char **inputs, int ninputs, const char *out,
 {
     struct linker l;
     memset(&l, 0, sizeof l);
+    /* Carry DWARF into the image. A build without -g has no .debug_*
+     * to collect, so this costs nothing there; with -g it is the
+     * difference between an executable gdb can open and one it cannot. */
+    l.keep_debug = 1;
     l.base = (opts && (opts->base || opts->have_base)) ? opts->base
                                                        : DEFAULT_BASE;
     l.entry = (opts && opts->entry) ? opts->entry : "_start";
