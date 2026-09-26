@@ -375,18 +375,17 @@ Ranked by (blocked work) ÷ (effort), not by size of the gap:
    accept-and-honour, a few accept-and-ignore-with-a-reason.
 5. **`-include`, `-imacros`, `-iquote`, `-idirafter`** — and fix the
    help text either way.
-6. ~~**`-g` on thumb / rv32 / rv64**~~ — **DONE** (`b273078`). The frame
-   base is `sp + 0`, exact because sp does not move for the life of the
-   body. The OBJECTS carry correct DWARF; the LINKED image does not,
-   because `embld` keeps only `SHF_ALLOC` sections and writes an
-   `.embdbg` sidecar — merging `.debug_info` across objects and
-   rebasing every CU's abbrev and line-program offsets is a linker
-   feature of its own, and is what now stands between this and a gdb
-   session.
-7. **`__builtin_types_compatible_p` + `__builtin_choose_expr`** — a pair,
-   small, high header-compatibility value.
-8. **Refuse what is not understood**: bad `-O`, unknown `-W`, unknown
-   `-std=`. Cheap, and it is what this project says it believes.
+6. ~~**`-g` on thumb / rv32 / rv64**~~ — **DONE** (`b273078`), and so
+   is the linker half (`801ba98`). The frame base is `sp + 0`, exact
+   because sp does not move for the life of the body, and EmbLD now
+   merges `.debug_*` across objects — which needed no DWARF-aware
+   fixup, because EmbCC's writer expresses every cross-reference as a
+   relocation against a section symbol. **gdb breaks by source line on
+   a QEMU guest, reads the arguments and prints a struct local.**
+7. ~~**`__builtin_types_compatible_p` + `__builtin_choose_expr`**~~ —
+   **DONE** (`b0ee1dc`), with the rest of the GNU C batch.
+8. ~~**Refuse what is not understood**~~ — **DONE** (`51c6f7a`).
+
 9. **Multiple inputs and a real link driver** (`-l`, `-L`, `.o` inputs,
    default crt).
 10. **`-fsanitize=undefined` with trap-on-error** — the highest-value
