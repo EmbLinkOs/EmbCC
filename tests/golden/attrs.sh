@@ -116,3 +116,97 @@ n=$(grep -c 'unused-result' "$out/d.log" || true)
     echo "FAIL: -Wno- did not silence them:"; cat "$out/d2.log"; exit 1; }
 echo "deprecated and warn_unused_result fire at the use, stay silent
 where the use is correct, and each is switched off by the name it prints"
+
+# ---- every attribute has a DECIDED disposition ------------------------
+# Fifteen attributes used to fall through to "is not one EmbCC knows, and
+# is ignored". That is the right answer for one nobody has heard of, and
+# the wrong one for `vector_size` or `mode`, which change the type: the
+# program then computes something else and says so in one line of a
+# build log. Each is now refused by name, or a no-op with a reason, or
+# accepted with the loss stated. The test is that NONE of them still
+# reaches the unknown-attribute path.
+#
+# Note the `if ... then rc=0; else rc=$?; fi` shape: this file runs under
+# `set -e`, so a plain `cmd; rc=$?` would abort at the first refusal --
+# which is every second line here.
+cat > "$out/known.txt" <<'EOF'
+vector_size(16)|refuse
+mode(DI)|refuse
+transparent_union|refuse
+target("sse4.2")|refuse
+weakref("other")|refuse
+ifunc("pick")|refuse
+counted_by(n)|quiet
+access(read_only, 1)|quiet
+copy(other)|quiet
+noclone|quiet
+noipa|quiet
+designated_init|quiet
+assume_aligned(8)|quiet
+tls_model("global-dynamic")|quiet
+error("boom")|warn
+warning("hmm")|warn
+EOF
+while IFS='|' read -r spec want; do
+    [ -n "$spec" ] || continue
+    nm=${spec%%(*}
+    printf 'int __attribute__((%s)) thing;\n' "$spec" > "$out/k.c"
+    if "$EMBCC" --target="$TARGET" -Wattributes -fsyntax-only "$out/k.c" \
+         > "$out/k.log" 2>&1
+    then rc=0; else rc=1; fi
+    if grep -q 'is not one EmbCC knows' "$out/k.log"; then
+        echo "FAIL: $nm still falls through to the unknown-attribute path"
+        exit 1
+    fi
+    case "$want" in
+    refuse)
+        if [ "$rc" = 0 ]; then
+            echo "FAIL: $nm was accepted, and it changes results"; exit 1
+        fi
+        grep -q 'is not supported' "$out/k.log" || {
+            echo "FAIL: $nm's refusal does not say it is unsupported:"
+            cat "$out/k.log"; exit 1; }
+        ;;
+    quiet)
+        if [ "$rc" != 0 ]; then
+            echo "FAIL: $nm was refused, and it is a no-op:"
+            cat "$out/k.log"; exit 1
+        fi
+        if [ -s "$out/k.log" ]; then
+            echo "FAIL: $nm warned, and it is a no-op:"
+            cat "$out/k.log"; exit 1
+        fi
+        ;;
+    warn)
+        # Accepted -- refusing would break a header that never calls it --
+        # but the build-time check it asks for will not happen, so that is
+        # said once, where it is written, and is silenceable.
+        if [ "$rc" != 0 ]; then
+            echo "FAIL: $nm was refused, and should only warn:"
+            cat "$out/k.log"; exit 1
+        fi
+        grep -q 'accepted but does nothing here' "$out/k.log" || {
+            echo "FAIL: $nm did not say what is lost:"
+            cat "$out/k.log"; exit 1; }
+        "$EMBCC" --target="$TARGET" -Wno-attributes -fsyntax-only \
+            "$out/k.c" > "$out/k2.log" 2>&1
+        if [ -s "$out/k2.log" ]; then
+            echo "FAIL: -Wno-attributes did not silence $nm"; exit 1
+        fi
+        ;;
+    esac
+done < "$out/known.txt"
+echo "sixteen attributes that used to be dropped now each have a stated
+disposition: six refused by name, eight silent no-ops, two accepted with
+the loss named"
+
+# An attribute nobody has decided about still warns -- the path all
+# sixteen just left. Without this the loop above could pass for the
+# wrong reason.
+printf 'int __attribute__((no_such_attribute_here)) z;\n' > "$out/u.c"
+"$EMBCC" --target="$TARGET" -Wattributes -fsyntax-only "$out/u.c" \
+    > "$out/u.log" 2>&1
+grep -q 'is not one EmbCC knows' "$out/u.log" || {
+    echo "FAIL: an unknown attribute no longer warns:"; cat "$out/u.log"
+    exit 1; }
+echo "and an attribute nobody has decided about still warns"

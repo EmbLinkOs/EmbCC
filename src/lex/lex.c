@@ -109,6 +109,18 @@ static const struct {
     { "__int128", TOK_KW_INT128 },
     { "float", TOK_KW_FLOAT },
     { "double", TOK_KW_DOUBLE },
+    /* C23's interchange float types. _Float32 and _Float64 ARE float and
+     * double on every target here -- both are IEEE binary32/binary64 --
+     * so they lex to the same keyword and need nothing else. The two
+     * that are not an existing type get their own tokens, because
+     * whether they exist is a question about the TARGET and has to be
+     * asked where the target is known. */
+    { "_Float32", TOK_KW_FLOAT },
+    { "_Float64", TOK_KW_DOUBLE },
+    { "_Float128", TOK_KW_FLOAT128 },
+    { "__float128", TOK_KW_FLOAT128 },
+    { "_Float16", TOK_KW_FLOAT16 },
+    { "__fp16", TOK_KW_FLOAT16 },
     { "_Bool", TOK_KW_BOOL },
     { "_Complex", TOK_KW_COMPLEX },
     { "__complex__", TOK_KW_COMPLEX },

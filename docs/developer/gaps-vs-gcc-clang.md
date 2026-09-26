@@ -236,39 +236,52 @@ vector-typedef in existence has this shape — which is the real reason the
 This is a contained parser gap and is probably the cheapest item in this
 whole document.
 
-### Attributes: 30 recognised, 15 parsed and dropped, 3 refused by name
+### Attributes: every one now has a decided disposition
 
-An unknown attribute warns (`-Wattributes`, "is not one EmbCC knows, and
-is ignored") rather than erroring, which is correct GCC behaviour — but
-it means **an attribute that changes layout or codegen is ignored with
-only a warning**. These are in that category:
+**DONE.** Fifteen attributes used to fall through to `-Wattributes`
+("is not one EmbCC knows, and is ignored"). That is the right answer for
+an attribute nobody has heard of. It is the wrong one for `vector_size`
+or `mode`, which change the type: the program then computes something
+else and says so in one line of a build log.
 
-`vector_size` `mode` `transparent_union` `counted_by` `target`
-`tls_model` `weakref` `ifunc` `access` `copy` `error` `noclone` `noipa`
-`designated_init` `assume_aligned`
+Each now has one of four dispositions, and the table in
+`src/parse/parse.c` states the reason next to the name.
 
-`vector_size` and `mode` are the two that change results rather than
-hints. On a plain declaration they warn and leave the type alone:
+Refused by name, because ignoring them changes results:
 
-```c
-__attribute__((vector_size(16))) int g;
-_Static_assert(sizeof(g) == 4, "");   /* passes -- still a scalar int */
-```
+| Attribute | What would go wrong |
+|---|---|
+| `vector_size` | the type would stay a scalar |
+| `mode` | the declaration would keep its written width |
+| `transparent_union` | the union would be passed as a union, not as its first member |
+| `target` | the function would be compiled for the wrong instruction set |
+| `weakref` | a missing target would fail to link instead of being null |
+| `ifunc` | calls would go to the resolver, not to what it picks |
 
-A warning is a diagnostic, so this is not a THE RULE violation outright.
-But `-Wattributes` is one line in a build log, and the code that follows
-computes the wrong thing. Both belong in the refuse-by-name set until
-they work.
+Silent no-ops, because what they ask for is already true here or only
+affects a diagnostic EmbCC does not issue: `counted_by`, `access`,
+`copy`, `noclone`, `noipa`, `designated_init`, `assume_aligned`,
+`tls_model`. Warning on each of these would be noise -- a kernel puts
+`cold` on half its functions.
 
-Refused by name (the honest kind of missing): `cleanup`, `naked`,
-`interrupt`. The last two are firmware staples.
+Accepted with the loss named (`ATTR_WARNED`, added for exactly this):
+`error` and `warning`. GCC makes a CALL to such a function a compile
+error unless the optimizer removes the call, so the diagnostic has to
+wait until after optimisation and EmbCC issues its own before then.
+Refusing the attribute would break any header that declares such a
+function without calling it; ignoring it in silence means a
+`BUILD_BUG_ON` written with it passes. So it is accepted, the loss is
+stated once where it is written, and `-Wno-attributes` silences it.
 
-Recognised and working: `noreturn` `packed` `aligned` `weak` `used`
-`unused` `deprecated` `constructor` `destructor` `format` `pure` `const`
-`may_alias` `warn_unused_result` `always_inline` `noinline` `hot` `cold`
-`nonnull` `returns_nonnull` `malloc` `alloc_size` `returns_twice`
-`flatten` `nothrow` `leaf` `sentinel` `gnu_inline` `optimize`
-`no_sanitize` `section` `visibility`.
+Still refused by name from before: `cleanup`, `naked`, `interrupt`
+(a no-op on ARMv7-M, where an interrupt handler is an ordinary
+function), `ms_abi`, `sysv_abi`.
+
+`vector_size` is the one worth revisiting. EmbCC has vector IR
+(`IR_VLOAD`, `IR_VBIN`, `IR_VSPLAT`, `IR_VREDADD`, `IR_VWIDEN`) but it
+comes from the auto-vectorizer and only the x86-64 backend lowers it, so
+a user-level vector TYPE needs front-end type support plus three more
+backends. That is a feature, not a parser gap.
 
 ### Language features absent
 

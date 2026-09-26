@@ -270,7 +270,10 @@ $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 check: embcc libc-x86_64 libcxx-x86_64
 	tests/run.sh --exec-only
 
-test: embcc embread embld embdbg embls libc-x86_64 libcxx-x86_64 \
+# embas belongs here too: tests/golden/x86_64/assembler.sh runs it, and
+# without it in this list the suite passes from a dirty tree and fails
+# from a clean one -- which is the wrong way round.
+test: embcc embread embld embdbg embls embas libc-x86_64 libcxx-x86_64 \
       libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 

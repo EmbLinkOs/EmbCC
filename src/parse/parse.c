@@ -247,6 +247,7 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_STRUCT || k == TOK_KW_UNION || k == TOK_KW_ENUM ||
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
+           k == TOK_KW_FLOAT128 || k == TOK_KW_FLOAT16 ||
            k == TOK_KW_COMPLEX ||
            k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC ||
            /* __auto_type begins a declaration even though it names no
@@ -346,7 +347,20 @@ static int attr_is(const char *n, const char *base)
  * -Wattributes and then ignored -- GCC's behaviour, and the thing that
  * would have caught the constructor bug on the day it was written.
  */
-enum attr_disp { ATTR_HONOURED, ATTR_REFUSED, ATTR_NOOP };
+/* HONOURED: acted on. REFUSED: the program would compute something
+ * else, so it fails by name (THE RULE). NOOP: there is genuinely
+ * nothing to do, because what it asks for is already true here or only
+ * affects a diagnostic EmbCC does not issue -- accepted in silence,
+ * since warning on every `cold` in a kernel is noise.
+ *
+ * WARNED is the fourth case, and it exists because two attributes fit
+ * none of the others: ignoring them is not a miscompile, so refusing
+ * the declaration would be wrong, but it does LOSE something the
+ * program asked for. __attribute__((error("..."))) is the kernel's
+ * BUILD_BUG_ON: the build is supposed to fail, and silently succeeding
+ * is the opposite of what it asked for. So the attribute is accepted
+ * and the loss is stated, once, where it is written. */
+enum attr_disp { ATTR_HONOURED, ATTR_REFUSED, ATTR_NOOP, ATTR_WARNED };
 
 struct attr_entry {
     const char *name;
@@ -437,6 +451,69 @@ static const struct attr_entry attr_table[] = {
       "EmbCC does not warn about a case falling through" },
     { "optimize",  ATTR_NOOP,
       "EmbCC's optimisation level is per compilation, not per function" },
+    /* ---- the ones that were parsed and DROPPED ----
+     *
+     * Every attribute below used to fall through to "is not one EmbCC
+     * knows, and is ignored", which is a -Wattributes warning and one
+     * line in a build log. That is the right answer for an attribute
+     * nobody here has heard of. It is the WRONG answer for one that
+     * changes layout, the ABI, or which code runs, because the program
+     * then computes something else and says so only in passing. Each is
+     * now either refused by name or a no-op with a reason. */
+
+    { "vector_size", ATTR_REFUSED,
+      "the type would stay a scalar: EmbCC's vector IR comes from the "
+      "auto-vectorizer and only x86-64 lowers it, so a vector TYPE has "
+      "no representation in the front end or on three of four targets" },
+    { "mode",        ATTR_REFUSED,
+      "the declaration would keep its written type, so a typedef that "
+      "asks for a specific width would silently get another" },
+    { "transparent_union", ATTR_REFUSED,
+      "the union would be passed as a union rather than as its first "
+      "member, which is a different calling convention" },
+    { "target",      ATTR_REFUSED,
+      "EmbCC selects its instruction set per compilation; a function "
+      "asking for another would be compiled for the wrong one" },
+    { "weakref",     ATTR_REFUSED,
+      "the symbol would be emitted as an ordinary reference, so a "
+      "missing target would fail to link instead of being null" },
+    { "ifunc",       ATTR_REFUSED,
+      "the resolver would never run and calls would go to it rather "
+      "than to the implementation it picks" },
+
+    { "counted_by",  ATTR_NOOP,
+      "it tells __builtin_dynamic_object_size the length of a flexible "
+      "array member, and EmbCC has no object-size checking to tell" },
+    { "access",      ATTR_NOOP,
+      "it describes how a function reads and writes through a pointer "
+      "argument, for warnings EmbCC does not issue" },
+    { "copy",        ATTR_NOOP,
+      "it copies another declaration's attributes, and the ones worth "
+      "copying are already recorded on the declaration itself" },
+    /* Accepted, but the check they ask for will not happen -- see
+     * ATTR_WARNED. A BUILD_BUG_ON written with these passes here. */
+    { "error",       ATTR_WARNED,
+      "it makes a CALL to this function a compile error unless the "
+      "optimizer removes the call, so the diagnostic has to wait until "
+      "after optimisation and EmbCC issues its own before then; a "
+      "build-time assertion written with it will not fire" },
+    { "warning",     ATTR_WARNED,
+      "as error: the diagnostic would have to wait until after "
+      "optimisation, so the warning it asks for will not appear" },
+    { "noclone",     ATTR_NOOP, "EmbCC never clones a function" },
+    { "noipa",       ATTR_NOOP,
+      "EmbCC's only interprocedural pass is the inliner, which "
+      "always_inline and noinline already control" },
+    { "designated_init", ATTR_NOOP,
+      "it asks for a warning when a struct of this type is initialised "
+      "positionally; the layout is unaffected" },
+    { "assume_aligned", ATTR_NOOP,
+      "it promises a returned pointer's alignment, which only a pass "
+      "that widens accesses could use" },
+    { "tls_model",   ATTR_NOOP,
+      "EmbCC emits one thread-local model and the linker resolves it; "
+      "asking for a different one cannot make it emit another" },
+
     /* This one belongs under REFUSED and is deliberately not there:
      * newlib's headers put it on setjmp, so refusing it would stop a
      * corpus this compiler is tested against from building at all.
@@ -601,6 +678,10 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     parse_error_line(ps, aline,
                         "__attribute__((%s)) is not supported: %s",
                         name, ae->why);
+                else if (ae->disp == ATTR_WARNED)
+                    diag_warn_opt(ps->lx.file, aline, 0, "attributes",
+                        "__attribute__((%s)) is accepted but does nothing "
+                        "here: %s", name, ae->why);
             }
             if (name && out) {
                 if (attr_is(name, "packed")) out->packed = 1;
@@ -1183,6 +1264,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
     /* base specifiers in any order: unsigned long int, long unsigned... */
     int uns = -1, nlong = 0, nshort = 0, nchar = 0, nint = 0, nvoid = 0;
     int nfloat = 0, ndouble = 0, nbool = 0, ncomplex = 0, n128 = 0;
+    int nf128 = 0, nf16 = 0;
     int any = 0;
     for (;;) {
         enum tok_kind k = cur(ps)->kind;
@@ -1194,6 +1276,8 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         else if (k == TOK_KW_SIGNED) uns = 0;
         else if (k == TOK_KW_LONG) nlong++;
         else if (k == TOK_KW_INT128) n128++;
+        else if (k == TOK_KW_FLOAT128) nf128++;
+        else if (k == TOK_KW_FLOAT16) nf16++;
         else if (k == TOK_KW_SHORT) nshort++;
         else if (k == TOK_KW_CHAR) nchar++;
         else if (k == TOK_KW_INT) nint++;
@@ -1233,6 +1317,43 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         struct type *el = ty_base(nfloat ? TY_FLOAT
                                   : nlong ? TY_LDOUBLE : TY_DOUBLE, 0);
         return ty_complex(el);
+    }
+    if (nf16) {
+        /* binary16 is a WIDTH this compiler does not have. Adding it is
+         * a new TY_ kind through ty_size, ty_align, the usual arithmetic
+         * conversions, the IR's three float conversions and all four
+         * backends, plus __extendhfsf2/__truncsfhf2 on the soft-float
+         * ones -- not a spelling. Saying so beats storing it as a float
+         * and silently giving 24 bits of mantissa where the program
+         * asked for 11 (THE RULE). */
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                   "_Float16/__fp16 is not supported: EmbCC has no 16-bit "
+                   "floating-point type, and widening it to `float` would "
+                   "give 24 bits of mantissa where the program asked for 11");
+    }
+    if (nf128) {
+        if (any > 1)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Float128 cannot combine with other specifiers");
+        /* Where `long double` IS IEEE binary128 this is that type, bit
+         * for bit and helper for helper -- aarch64 and RISC-V, whose
+         * psABIs both say so. On x86-64 `long double` is x87's 80-bit
+         * extended in a 16-byte slot, a DIFFERENT format with a
+         * different exponent range and an explicit integer bit, so the
+         * two are not interchangeable and the soft-quad helpers
+         * (__addtf3 and the rest) have no caller in that backend. On
+         * ARMv7-M `long double` is plain double. Both are refused by
+         * name rather than quietly substituted. */
+        if (target_get() == TARGET_X86_64)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Float128 is not supported on x86-64: `long double` "
+                       "here is x87's 80-bit extended format, not IEEE "
+                       "binary128, so it is not the same type");
+        if (ty_size(ty_base(TY_LDOUBLE, 0)) != 16)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Float128 is not supported on this target: it has no "
+                       "128-bit floating-point type");
+        return ty_base(TY_LDOUBLE, 0);
     }
     if (nfloat || ndouble) {
         if (uns != -1 || nchar || nshort || nint || nvoid ||
@@ -1412,6 +1533,23 @@ static struct type *ce_type(const struct expr *e)
         return e->ty;
     case EXPR_VAR:
         return fold_var_type(e->name);
+    case EXPR_STR: {
+        /* char[n+1], not char * -- sizeof("abc") is 4 -- so the caller
+         * that wants the DECAYED type (a _Generic controlling
+         * expression) does that conversion itself. `num` is the byte
+         * length including the NUL and `str_width` the bytes per
+         * element, so the two give the count for a wide literal as well
+         * as a plain one. */
+        /* Only the plain byte literal, whose element is `char` and
+         * whose `num` is its length including the NUL. A prefixed one
+         * (L"", u"", U"") is left unanswered rather than guessed:
+         * reconstructing its element count from num and str_width here
+         * got u"ab" wrong and L"ab" zero, and a wrong sizeof is worse
+         * than the NULL this pass already returned for all of them. */
+        if (e->str_width > 1 || e->str_prefix)
+            return NULL;
+        return ty_array(ty_base(TY_CHAR, 0), (int)e->num);
+    }
     case EXPR_CAST:
         return e->cast_ty;
     case EXPR_COND: {
@@ -1594,6 +1732,36 @@ static int size_fold(const struct expr *e, long *out)
         if (!size_fold(e->rhs, &a)) return 0;
         *out = !a;
         return 1;
+    case EXPR_GENERIC: {
+        /* `_Static_assert(_Generic(x, int: 1, default: 0), "")` -- sema
+         * resolves a _Generic by BECOMING the selected expression, but a
+         * static assertion is folded here, before sema runs, so this has
+         * to make the same selection itself. ce_type is the same type
+         * this pass uses for sizeof, so the two agree by construction.
+         *
+         * The controlling expression is not evaluated (C11 6.5.1.1), so
+         * only its TYPE is needed and an operand this pass cannot type
+         * simply does not fold. */
+        struct type *ct = ce_type(e->lhs);
+        struct expr *chosen = NULL, *deflt = NULL;
+        if (!ct)
+            return 0;
+        /* The controlling expression undergoes lvalue conversion, so an
+         * array matches `char *` and not `char[4]` -- which is the whole
+         * reason `_Generic("s", char *: ...)` works. ce_type answers
+         * with the ARRAY, because its other caller is sizeof and must. */
+        if (ct->kind == TY_ARRAY)
+            ct = ty_ptr(ct->pointee);
+        else if (ct->kind == TY_FUNC)
+            ct = ty_ptr(ct);
+        for (int i = 0; i < e->ngen; i++) {
+            if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
+            if (ty_equal(ct, e->gtypes[i])) { chosen = e->gexprs[i]; break; }
+        }
+        if (!chosen)
+            chosen = deflt;
+        return chosen ? size_fold(chosen, out) : 0;
+    }
     case EXPR_COND: {
         /* `int buf[(N > 4) ? N : 4];` -- a constant conditional, which C11
          * 6.6 admits like any other operator and which was the one piece
