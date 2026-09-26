@@ -157,19 +157,27 @@ static int rv_callee_saved(int r)
 
 /* Is `dst = load(local)` a plain move here -- no extension emitted?
  *
- * Only at the full register width. It is tempting to say that a
- * four-byte SIGNED read at RV64 is plain too, since the ABI's invariant
- * is that a register holds the sign-extension of its 32-bit value -- but
- * a local that lives in a register is written by IR_STVAR, and a
- * NARROWING store there zero-extends (it cannot know the local's
- * signedness). The two rules have to agree, and the pair that agrees is
- * "narrow stores zero-extend, narrow loads always extend explicitly".
- * The other pair would read an unsigned local as a negative number. */
+ * At the full register width, always. And at RV64, a four-byte SIGNED
+ * read at four-byte width, which is most of what integer code does.
+ *
+ * That second one is only sound because IR_STVAR below SIGN-extends a
+ * four-byte store rather than zero-extending it -- the two rules have
+ * to agree about what a register holding a narrow local contains, and
+ * this is the pair that makes the common case free on both sides.
+ *
+ * What makes the choice safe either way is that only the low `size`
+ * bytes carry the value: an UNSIGNED read still emits its own
+ * slli/srli and gets the right answer whatever the upper bits were.
+ * The extension form on the store decides only which reads are free,
+ * never which are correct. Storing sign-extended is also the ABI's own
+ * invariant for a 32-bit value in a 64-bit register, so a parameter
+ * arriving in a0 already satisfies it. */
 static int rv_ldvar_plain(int size, int sign, int w)
 {
     int wb = target_ptr_size();
-    (void)sign;
-    return size == wb && w == wb;
+    if (size == wb && w == wb)
+        return 1;
+    return target_xlen() == 64 && size == 4 && sign && w == 4;
 }
 
 /* Which instructions become a CALL the IR does not show as one. A value
@@ -199,14 +207,18 @@ static const struct ra_target RISCV_RA = {
     rv_pool_for,
     rv_callee_saved,
     rv_ldvar_plain,
-    /* The three capability flags stay 0 for now: this backend still
-     * reads a call's arguments, a returned value and a memcpy's
-     * addresses out of their stack slots, so the allocator must leave
-     * them there. Turning each on is a change to the code that reads
-     * them, and they go on ONE AT A TIME -- the parked ARMv7-M attempt
-     * turned all three on in the same commit as the allocator itself
-     * and had four bugs interacting with no way to tell them apart. */
-    0, 0, 0,
+    /* A scalar call argument may come from a register (see gen_call's
+     * set_args: the setup is a PARALLEL MOVE, and the allocator keeps
+     * struct arguments in memory regardless, so only the scalars need
+     * ordering). A returned value and a memcpy's addresses may too --
+     * each is a single destination, or two that are non-argument
+     * scratches, so neither can destroy the other's source.
+     *
+     * They went on one at a time, each with the full matrix. The parked
+     * ARMv7-M attempt turned all three on in the same commit as the
+     * allocator itself and had four bugs interacting with no way to
+     * tell them apart. */
+    1, 1, 1,
     rv_op_calls_helper,
     0,            /* RISC-V is three-operand: d = a op b needs no copy */
     NULL,         /* ABI hints: a later increment */
@@ -1364,6 +1376,30 @@ static void gen_call(struct rv_fn *F, int n)
             st_sp(F, SCR, pl[k].stk, F->w);
         }
     }
+    /* The SCALAR register arguments, all at once. This is the third of
+     * the three sites regalloc.h names: the value for a0 may be sitting
+     * in the register a2 is about to be given, and placing them in
+     * order loses it.
+     *
+     * It runs BEFORE the struct arguments below, which also write
+     * argument registers -- a struct's words landing in a2 would
+     * destroy a scalar's source before the move had read it. The other
+     * direction cannot happen: the allocator keeps every struct
+     * argument's address in memory whatever this flag says. */
+    {
+        int sd_[MAX_PARAMS], sv_[MAX_PARAMS], ns_ = 0;
+        for (int k = 0; k < i->nargs; k++) {
+            struct ir_arg *a = &i->argv[k];
+            if (!pl[k].nreg || pl[k].byref || a->is_struct ||
+                a->size > F->w)
+                continue;
+            sd_[ns_] = argreg(pl[k].reg);
+            sv_[ns_] = a->vreg;
+            ns_++;
+        }
+        if (ns_)
+            set_args(F, sd_, sv_, ns_);
+    }
     for (int k = 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
         if (!pl[k].nreg)
@@ -1395,9 +1431,8 @@ static void gen_call(struct rv_fn *F, int n)
                 rd64(F, a->vreg, argreg(pl[k].reg), argreg(pl[k].reg + 1));
             else
                 ld_sp(F, argreg(pl[k].reg), F->slot[a->vreg], 4, 1); /* low */
-        } else {
-            rd(F, a->vreg, argreg(pl[k].reg));
         }
+        /* a plain scalar: already placed by the parallel move above */
     }
     /* The hidden result pointer goes in LAST, so nothing above can have
      * used a0 as a scratch after it was set. */
@@ -1762,13 +1797,16 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_STVAR: {
         int src = rdr(F, i->a, ACC);
         if (in_reg(F, i->dst)) {
-            /* A narrowing store ZERO-extends: the register now holds
-             * the whole local, and only its low `size` bytes are the
-             * value. rv_ldvar_plain is written to match. */
+            /* A narrowing store SIGN-extends, which rv_ldvar_plain is
+             * written to match: it is what makes a signed four-byte
+             * read free at RV64, and it is the ABI's own invariant for
+             * a 32-bit value in a 64-bit register. Only the low `size`
+             * bytes carry the value, so an unsigned read still extends
+             * for itself and is right regardless. */
             if (i->size >= F->w) {
                 if (F->loc[i->dst] != src) rv_mv(t, F->loc[i->dst], src);
             } else {
-                ext_reg(F, F->loc[i->dst], src, i->size, 0);
+                ext_reg(F, F->loc[i->dst], src, i->size, 1);
             }
         } else {
             st_sp(F, src, F->slot[i->dst], i->size);
