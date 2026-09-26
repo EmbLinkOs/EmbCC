@@ -123,9 +123,15 @@ Probed by compiling a translation unit with each flag:
 | Machine | `-march=` `-mtune=` `-mavx2` `-msse4.2` `-mfpu=` `-mthumb` |
 | Ergonomics | `-v` `-save-temps` `-pipe` `-pedantic` `-ansi` `-pg` |
 
-`-fshort-enums` deserves a line of its own: it is the **ARM EABI
-default**, so any ARM code that assumes it is already compiling wrong
-against EmbCC's enums, silently.
+`-fshort-enums` deserved a line of its own and got the wrong one. The
+first draft said it is "the ARM EABI default, so ARM code is already
+compiling wrong" — **that is false against the reference used here**.
+Clang gives `sizeof(enum) == 4` for `thumbv7m-none-eabi`; it is
+`arm-none-eabi-gcc` that defaults to short enums. So EmbCC agrees with
+clang and differs from GCC, which is a compatibility question and not
+a silent miscompile. It is refused by name now, because enums are
+`int` here and a struct holding one really would be laid out
+differently.
 
 Also: GCC spells it `-print-search-dirs`, EmbCC spells it
 `--print-search-dirs`. Accept both.

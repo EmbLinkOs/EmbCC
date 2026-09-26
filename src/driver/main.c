@@ -2424,11 +2424,75 @@ int main(int argc, char **argv)
                     return 1;
                 }
                 cpp_set_cxx_std(year, strict);
+                /* The MACROS follow the year -- libstdc++ picks its
+                 * code by them -- but the language EmbCC parses is
+                 * C++20 whatever was asked. A lambda under -std=c++98
+                 * compiles, which is worth saying once rather than
+                 * letting a build believe it checked. */
+                if (year < 2020)
+                    fprintf(stderr, "embcc: warning: %s sets the standard "
+                                    "macros but is not enforced; EmbCC "
+                                    "parses C++20 and will accept newer "
+                                    "constructs\n", argv[i]);
+            } else {
+                /* A C standard. EmbCC has ONE C dialect -- C11 with the
+                 * GNU extensions -- and says so rather than nodding:
+                 * `-std=c89` used to be accepted and then compile
+                 * `for (int i = ...)` happily, which is a build
+                 * believing it checked something it did not. An
+                 * unknown name is refused outright. */
+                static const char *const known[] = {
+                    "c89", "c90", "iso9899:1990", "gnu89", "gnu90",
+                    "c99", "c9x", "iso9899:1999", "gnu99", "gnu9x",
+                    "c11", "c1x", "iso9899:2011", "gnu11", "gnu1x",
+                    "c17", "c18", "iso9899:2017", "gnu17", "gnu18",
+                    "c23", "c2x", "gnu23", "gnu2x"
+                };
+                int ok = 0;
+                for (size_t k = 0; k < sizeof known / sizeof known[0]; k++)
+                    if (strcmp(v, known[k]) == 0) { ok = 1; break; }
+                if (!ok) {
+                    fprintf(stderr, "embcc: error: unknown standard '%s'\n",
+                            argv[i]);
+                    return 1;
+                }
+                if (strncmp(v, "c1", 2) != 0 && strncmp(v, "gnu1", 4) != 0 &&
+                    strcmp(v, "iso9899:2011") != 0 &&
+                    strcmp(v, "iso9899:2017") != 0 &&
+                    strncmp(v, "c2", 2) != 0 && strncmp(v, "gnu2", 4) != 0 &&
+                    strcmp(v, "c17") != 0 && strcmp(v, "c18") != 0)
+                    fprintf(stderr, "embcc: warning: %s is accepted but not "
+                                    "enforced; EmbCC has one C dialect, C11 "
+                                    "with the GNU extensions, and will "
+                                    "compile newer constructs anyway\n",
+                            argv[i]);
             }
         } else if (strcmp(argv[i], "--emit-c") == 0) {
             emit_c_only = 1;
         } else if (strcmp(argv[i], "-E") == 0) {
             pp_only = 1;
+        } else if (strcmp(argv[i], "-ggdb") == 0 ||
+                   strcmp(argv[i], "-g1") == 0 ||
+                   strcmp(argv[i], "-g2") == 0 ||
+                   strcmp(argv[i], "-g3") == 0 ||
+                   strcmp(argv[i], "-gdwarf") == 0 ||
+                   strcmp(argv[i], "-gdwarf-2") == 0 ||
+                   strcmp(argv[i], "-gdwarf-3") == 0 ||
+                   strcmp(argv[i], "-gdwarf-4") == 0) {
+            /* All of these mean -g here. EmbCC emits one kind of debug
+             * information -- DWARF 4 -- so a level or a version that
+             * asks for no more than that is simply -g. A version it
+             * does NOT emit is refused below rather than quietly
+             * downgraded: a build that asked for DWARF 5 and got 4
+             * would find out from its debugger. */
+            want_debug = 1;
+        } else if (strncmp(argv[i], "-gdwarf-", 8) == 0 ||
+                   strcmp(argv[i], "-gsplit-dwarf") == 0 ||
+                   strcmp(argv[i], "-gz") == 0) {
+            fprintf(stderr, "embcc: error: %s is not supported; EmbCC "
+                            "emits DWARF 4, uncompressed and in one "
+                            "piece\n", argv[i]);
+            return 1;
         } else if (strcmp(argv[i], "-g") == 0) {
             want_debug = 1;
         } else if (strcmp(argv[i], "-funwind-tables") == 0 ||
@@ -2539,7 +2603,17 @@ int main(int argc, char **argv)
             /* -Wname turns one on; a name EmbCC does not have is accepted
              * and ignored, so a build that passes GCC's whole warning
              * vocabulary still compiles. */
-            diag_enable_warning(argv[i] + 2, 1);
+            /* An unknown warning name is reported, not swallowed.
+             * Every -W... used to be accepted in silence, so a build
+             * turning on -Wcast-align and passing clean had learned
+             * nothing -- and a TYPO in a warning name was invisible.
+             * A warning rather than an error, which is what GCC does,
+             * because a build should not stop over a diagnostic it
+             * asked for and this compiler does not have. */
+            if (!diag_enable_warning(argv[i] + 2, 1))
+                fprintf(stderr, "embcc: warning: %s is not a warning EmbCC "
+                                "has, so it turns nothing on "
+                                "(--help-warnings lists them)\n", argv[i]);
         } else if (strncmp(argv[i], "-O", 2) == 0) {
             /* -O/-O1, -O2, -O3 and -Os. -O0 turns the optimizer off,
              * which is what keeps the self-host fixed point. */
@@ -2548,19 +2622,117 @@ int main(int argc, char **argv)
                 opt_level = 1;
             else if (lvl[0] == 's' && lvl[1] == '\0')
                 { opt_level = 2; opt_for_size = 1; }
-            else if (lvl[1] == '\0' && lvl[0] >= '0' && lvl[0] <= '9')
+            else if (lvl[1] == '\0' && lvl[0] >= '0' && lvl[0] <= '3')
                 opt_level = lvl[0] - '0';
+            else if (lvl[0] == 'z' && lvl[1] == '\0')
+                { opt_level = 2; opt_for_size = 1; }   /* -Oz is -Os here */
             else {
                 fprintf(stderr, "embcc: unknown optimization flag '%s'\n",
                         argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "-fsigned-char") == 0 ||
+                   strcmp(argv[i], "-funsigned-char") == 0) {
+            /* Plain `char`'s signedness. Each target has a default
+             * (src/arch/target.c) and this overrides it, as it does
+             * everywhere else -- code that memcmp's its way through a
+             * buffer of `char` gets a different answer either way, so
+             * a build that asks has to be obeyed. */
+            {
+                int uns = argv[i][2] == 'u';
+                target_set_char_signed(uns);
+                /* The MACRO has to move with the type. It comes from
+                 * the per-target predefined table, which knows only
+                 * the default, so a header testing __CHAR_UNSIGNED__
+                 * would otherwise contradict the compiler that reads
+                 * it -- and that header is usually deciding whether
+                 * to sign-extend by hand. */
+                cpp_cmdline_define(uns ? "__CHAR_UNSIGNED__=1"
+                                       : "__CHAR_UNSIGNED__", !uns);
+            }
+        } else if (strcmp(argv[i], "-ffreestanding") == 0 ||
+                   strcmp(argv[i], "-fno-builtin") == 0 ||
+                   strcmp(argv[i], "-fno-strict-aliasing") == 0 ||
+                   strcmp(argv[i], "-fstrict-aliasing") == 0 ||
+                   strcmp(argv[i], "-fwrapv") == 0 ||
+                   strcmp(argv[i], "-fno-common") == 0 ||
+                   strcmp(argv[i], "-fno-plt") == 0 ||
+                   strcmp(argv[i], "-fomit-frame-pointer") == 0 ||
+                   strcmp(argv[i], "-fno-omit-frame-pointer") == 0) {
+            /* Accepted because EmbCC ALREADY behaves this way, not
+             * because the flag is ignored:
+             *
+             *   -ffreestanding      it has no hosted assumptions to drop
+             *   -fno-builtin        it recognises no library name as a
+             *                       builtin; only __builtin_ ones
+             *   -f[no-]strict-aliasing  its alias analysis is not
+             *                       type-based (src/opt/opt.c), so the
+             *                       permissive answer is the only one
+             *                       it gives
+             *   -fwrapv             signed overflow wraps; nothing here
+             *                       optimises on the assumption it cannot
+             *   -fno-common         a tentative definition is already
+             *                       emitted into .bss, not a common block
+             *   -f[no-]omit-frame-pointer  x86-64 and aarch64 always keep
+             *                       one, ARMv7-M and RISC-V never do
+             *
+             * The opposite spellings are NOT accepted, because those
+             * would be promises: see the refusals below. */
+        } else if (strcmp(argv[i], "-ffunction-sections") == 0 ||
+                   strcmp(argv[i], "-fdata-sections") == 0) {
+            /* Accepted and not yet done. It costs nothing to be wrong
+             * about -- the objects are correct, --gc-sections simply
+             * has nothing to collect -- and refusing would stop builds
+             * that pass it out of habit. Said in --help rather than
+             * silently. */
         } else if (strncmp(argv[i], "-fno-", 5) == 0 &&
                    opt_set_pass(argv[i] + 5, 0)) {
             /* a named pass, off */
         } else if (strncmp(argv[i], "-f", 2) == 0 && argv[i][2] &&
                    opt_set_pass(argv[i] + 2, 1)) {
             /* a named pass, on -- so a single pass can be tried at -O1 */
+        } else if (strncmp(argv[i], "-fsanitize", 10) == 0 ||
+                   strncmp(argv[i], "-fprofile", 9) == 0 ||
+                   strcmp(argv[i], "-fcoverage-mapping") == 0 ||
+                   strcmp(argv[i], "--coverage") == 0 ||
+                   strcmp(argv[i], "-pg") == 0 ||
+                   strcmp(argv[i], "-flto") == 0 ||
+                   strcmp(argv[i], "-fPIC") == 0 ||
+                   strcmp(argv[i], "-fpic") == 0 ||
+                   strcmp(argv[i], "-fPIE") == 0 ||
+                   strcmp(argv[i], "-fpie") == 0 ||
+                   strcmp(argv[i], "-fshort-enums") == 0 ||
+                   strcmp(argv[i], "-fstack-clash-protection") == 0 ||
+                   strncmp(argv[i], "-fcf-protection", 15) == 0) {
+            /* Refused BY NAME, every one. These do not describe a
+             * preference the compiler may decline -- each is a promise
+             * about the code, and accepting one while emitting
+             * ordinary code hands back an object that links and then
+             * does the wrong thing:
+             *
+             *   -fsanitize=  no checks would be inserted
+             *   -fprofile-*, --coverage, -pg  no counters
+             *   -flto        no bitcode, so a whole-program link is a
+             *                plain one and the sizes mislead
+             *   -fPIC/-fpie  the code is position DEPENDENT; a shared
+             *                object built from it would relocate wrong
+             *   -fshort-enums  enums are `int` here, so a struct
+             *                holding one is laid out differently --
+             *                which is an ABI difference, not a size
+             *                preference. (Note clang does NOT default
+             *                to this on ARM; arm-none-eabi-gcc does.)
+             *   -fstack-clash-protection, -fcf-protection  no probes,
+             *                no landing pads
+             */
+            fprintf(stderr, "embcc: error: %s is not supported; EmbCC "
+                            "would emit ordinary code and the flag's "
+                            "promise would not hold\n", argv[i]);
+            return 1;
+        } else if (strcmp(argv[i], "-shared") == 0 ||
+                   strcmp(argv[i], "-static-pie") == 0) {
+            fprintf(stderr, "embcc: error: %s needs position-independent "
+                            "code, which EmbCC does not emit\n", argv[i]);
+            return 1;
         } else if (strcmp(argv[i], "-mno-sse") == 0 ||
                    strcmp(argv[i], "-mno-sse2") == 0 ||
                    strcmp(argv[i], "-mgeneral-regs-only") == 0) {

@@ -62,7 +62,8 @@ int diag_warning_enabled(const char *name);
  * -Wsystem-headers. */
 void diag_mark_system(const char *file);
 void diag_set_warn_system(int on);
-void diag_enable_warning(const char *name, int on);   /* -Wname / -Wno-name */
+int diag_enable_warning(const char *name, int on);    /* -Wname / -Wno-name;
+                                                       * 0 = no such warning */
 void diag_enable_group(int wall, int wextra);         /* -Wall / -Wextra */
 int diag_warning_count(void);                         /* for --help */
 /* How many warnings were REPORTED (the one above counts OPTIONS). */

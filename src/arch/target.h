@@ -94,6 +94,12 @@ int target_ptr_size(void);        /* 8 on LP64, 4 on ILP32 */
 int target_long_size(void);       /* likewise; long long is always 8 */
 int target_ldouble_size(void);    /* 16, or 8 where it is just a double */
 int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
+
+/* -fsigned-char / -funsigned-char. Each target has a default and this
+ * overrides it for the whole compile; -1 restores the default. It is
+ * not a preference -- a buffer of plain `char` compares differently
+ * either way -- so a build that asks is obeyed. */
+void target_set_char_signed(int unsigned_char);
 int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
 
 /* Whether __int128 exists at all. It does not on a 32-bit target: the

@@ -127,7 +127,18 @@ int target_ptr_size(void)       { return g_model[g_arch].ptr; }
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_ldouble_size(void)   { return g_model[g_arch].ldbl; }
-int target_char_unsigned(void)  { return g_model[g_arch].char_uns; }
+static int g_char_uns_override = -1;
+
+void target_set_char_signed(int unsigned_char)
+{
+    g_char_uns_override = unsigned_char;
+}
+
+int target_char_unsigned(void)
+{
+    return g_char_uns_override >= 0 ? g_char_uns_override
+                                    : g_model[g_arch].char_uns;
+}
 int target_wchar_unsigned(void) { return g_model[g_arch].wchar_uns; }
 int target_has_int128(void)     { return g_model[g_arch].int128; }
 

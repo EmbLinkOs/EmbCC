@@ -677,11 +677,17 @@ int diag_warning_enabled(const char *name)
 
 /* -Wname / -Wno-name. An unknown name is accepted and ignored: a build
  * that passes GCC's whole warning vocabulary must still compile. */
-void diag_enable_warning(const char *name, int on)
+/* Returns 1 when `name` is a warning this compiler has. The caller
+ * reports a miss: every -W... used to be accepted in silence, which
+ * made a typo invisible and made "-Wall -Wextra -Werror passes" mean
+ * far less than it looks. */
+int diag_enable_warning(const char *name, int on)
 {
     struct warn_opt *w = warn_find(name);
-    if (w)
-        w->on = on;
+    if (!w)
+        return 0;
+    w->on = on;
+    return 1;
 }
 
 /* -Wall / -Wextra: the groups, as GCC draws them. */
