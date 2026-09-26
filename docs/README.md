@@ -64,6 +64,7 @@ gap is visible.
 |---|---|
 | [selfhost-on-os.md](developer/selfhost-on-os.md) | building EmbCC with EmbCC, on EmbLinkOS |
 | [todo.md](developer/todo.md) | the running list of known gaps |
+| [gaps-vs-gcc-clang.md](developer/gaps-vs-gcc-clang.md) | where EmbCC stands against GCC and Clang, probed rather than guessed |
 
 Testing is documented with the tests: [tests/README.md](../tests/README.md).
 

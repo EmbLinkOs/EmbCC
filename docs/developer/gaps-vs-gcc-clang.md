@@ -1,0 +1,379 @@
+# What EmbCC still lacks, measured against GCC and Clang
+
+**Audit date:** 2026-09-26. **Method:** GCC trunk (`gcc-mirror/gcc`) and
+`llvm/llvm-project` were cloned locally and their own tables read — GCC's
+`gcc/common.opt` and `gcc/c-family/c.opt` (1129 front-end options),
+Clang's `clang/include/clang/Options/Options.td`, `Builtins.td`,
+`Attr.td`, and LLVM's `PassBuilderPipelines.cpp`. Every claim below was
+then **probed against the built `./embcc`**, not inferred from reading
+EmbCC's source. Where a probe contradicted a reading of the code, the
+probe won; two of the findings in the first draft were wrong that way
+and are corrected here.
+
+This file complements `todo.md`, which is a corpus audit (does real C
+compile at all). This one asks a different question: where does EmbCC
+sit against the two compilers it will be compared to.
+
+---
+
+## The headline: the gap is not code quality
+
+Measured on this tree's own real sources — `lib/libc` and `lib/rt`, 69
+files that both compilers accept:
+
+| | `.text` bytes, `-O2` |
+|---|---|
+| EmbCC | 134,858 |
+| Clang | 96,407 |
+| **ratio** | **1.39× Clang** |
+
+On `tests/exec/*.c` the same measurement says 7.58×, and that number is
+worthless: those are toy programs whose `main` Clang constant-folds to a
+single `return`. **Measure on real code.** 1.39× is the honest figure,
+and for a from-scratch compiler it is a good one.
+
+EmbCC also has more optimizer than its reputation here suggests: a real
+inliner with budgets (`INLINE_MAX_CALLEE` 24, `INLINE_SOLE_CALLEE` 200),
+sixteen toggleable passes — `mem2reg gcse load-cse sccp licm vectorize
+inline dse div-magic if-convert cfg-clean tail-recursion idiom sroa
+unroll pre` — plus always-on fold, LVN, copy propagation, DCE,
+reassociation, loop rotation, IV strength reduction, store forwarding
+and immediate folding. A probe of `static inline` through two levels
+inlines completely and leaves five instructions with no calls, which is
+what Clang does with the same input.
+
+The C++ front end is likewise further along than a "from scratch"
+compiler suggests. Probed working: lambdas (including generic),
+`constexpr`/`consteval`, concepts, coroutines, `<ranges>`, structured
+bindings, `if constexpr`, fold expressions, `operator<=>`, exceptions,
+RTTI and `dynamic_cast`.
+
+**So the gap is elsewhere: in the driver surface, in the preprocessor
+features that headers depend on, and in whole subsystems that were never
+started.** Those are below, in priority order.
+
+---
+
+## Tier 0 — EmbCC cannot be dropped into an existing build
+
+This is the highest-leverage tier by a wide margin. Every item is small
+on its own; together they are the difference between "a compiler" and "a
+compiler you can point at someone else's Makefile".
+
+### The `__has_*` family does not exist — and the defensive form is a hard error
+
+```c
+#if defined(__has_include) && __has_include(<foo.h>)
+```
+
+is the pattern every portable header written since about 2015 uses, and
+it **fails to compile**: `error: trailing junk in #if expression`.
+`__has_include`, `__has_builtin`, `__has_attribute`, `__has_feature` and
+`__has_c_attribute` are all undefined, so the identifier becomes `0` and
+the preprocessor then chokes on `(<foo.h>)`.
+
+That is worse than the feature merely being absent. An absent feature
+lets the guarded fallback run; this one turns a header that was written
+*defensively* into a compile error. It is the single biggest interop
+blocker found in this audit.
+
+GCC and Clang both special-case these in the `#if` grammar. EmbCC must
+too — the parse has to recognise the call form even when the answer is
+"no".
+
+### `_Pragma` does not exist
+
+`_Pragma("GCC diagnostic ignored ...")` inside a macro is how headers
+suppress warnings at their own definition sites. EmbCC handles `#pragma`
+as a directive (`once`, `pack`, `GCC diagnostic` all work) but not the
+operator form, so any macro that carries a pragma is a syntax error.
+
+### `-include` is documented in `--help` and rejected by the driver
+
+```
+$ ./embcc -include pre.h -fsyntax-only x.c
+embcc: error: unknown argument '-include'
+```
+
+`src/driver/main.c:122` promises `-include FILE  include it before the
+file`. There is no pre-include machinery anywhere in `src/`. A help text
+that names a flag the compiler refuses is the same class of thing THE
+RULE exists to prevent, pointed at the user instead of at codegen. Fix
+it or delete the line.
+
+### Options a real build passes, all rejected
+
+Probed by compiling a translation unit with each flag:
+
+| Group | Rejected |
+|---|---|
+| Freestanding / kernel | `-ffreestanding` `-fno-builtin` `-fno-strict-aliasing` `-fwrapv` `-ftrapv` |
+| Embedded link shaping | `-ffunction-sections` `-fdata-sections` `-fshort-enums` |
+| Char / enum signedness | `-fsigned-char` `-funsigned-char` |
+| Position independence | `-fPIC` `-fpic` `-fpie` `-fPIE` |
+| Link driver | `-shared` `-static` `-nostdlib` `-nostartfiles` `-nodefaultlibs` `-l` `-L` |
+| Preprocessor paths | `-imacros` `-iquote` `-idirafter` `-undef` |
+| Debug | `-gdwarf-4` `-gdwarf-5` `-g3` `-ggdb` `-gsplit-dwarf` |
+| Machine | `-march=` `-mtune=` `-mavx2` `-msse4.2` `-mfpu=` `-mthumb` |
+| Ergonomics | `-v` `-save-temps` `-pipe` `-pedantic` `-ansi` `-pg` |
+
+`-fshort-enums` deserves a line of its own: it is the **ARM EABI
+default**, so any ARM code that assumes it is already compiling wrong
+against EmbCC's enums, silently.
+
+Also: GCC spells it `-print-search-dirs`, EmbCC spells it
+`--print-search-dirs`. Accept both.
+
+### One input file at a time, and no link driver
+
+```
+$ ./embcc -c a.c b.c
+embcc: error: more than one input file (M1: one file at a time)
+$ ./embcc a.c -o prog
+embld: entry symbol '_start' is undefined
+```
+
+`embcc a.c -o prog` does reach `embld`, so the plumbing exists — what is
+missing is default startup objects and libraries for a hosted target,
+plus accepting `.o` inputs and `-l`/`-L`. `cc *.c -o prog`, the most
+common compiler invocation in the world, does not work.
+
+---
+
+## Tier 1 — front-end holes that real code hits
+
+### `typeof` fails on a function parameter
+
+This is the most surprising finding in the audit, because the comment
+above the implementation claims the opposite.
+
+```c
+int x; typeof(x) y;                      /* OK */
+int f(void){int a=1; typeof(a) b=a;}     /* OK */
+int f(int a){typeof(a) b=a;}             /* error: typeof of an unsupported expression */
+int f(int a){typeof(a+1) b=0;}           /* error */
+typeof(f()) y;                           /* error */
+```
+
+The parameter case is the *only* shape that matters, because it is the
+shape `min()`, `max()` and `container_of()` expand into.
+
+**Root cause, located:** `typeof` is resolved in the parser, by
+`ce_type` (`src/parse/parse.c:1215`) reading a shadow symbol table
+`g_fold_locals` (`:1185`) that exists for folding `sizeof(expr)`.
+Function parameters are never pushed into that table — only block-scope
+locals and file-scope globals are — so `fold_var_type` returns NULL and
+the parser reports the expression as unsupported. `ce_type` also handles
+only five expression kinds (var, cast, deref, member, pointer
+arithmetic), which is why `a+1` and `f()` fail even for a local.
+
+Two fixes, in increasing order of correctness:
+
+1. **Contained:** push the parameter names and types into
+   `g_fold_locals` when a function body opens (they are already captured
+   in `ps->fn_pnames`). Fixes the common case; leaves `typeof(a+1)`
+   broken.
+2. **Right:** resolve `typeof` in sema, where real scopes and the real
+   type rules live, rather than in a parse-time approximation of them.
+   The parse-time table is a duplicate of a thing sema already has, and
+   duplicates drift — this gap *is* that drift.
+
+### Builtins that are missing
+
+Present and working (probed): the whole bit-twiddling family
+(`clz`/`ctz`/`popcount`/`parity`/`ffs` and the `ll` variants), `bswap16`/`32`,
+`assume_aligned`, `expect`, `unreachable`, `trap`, the overflow
+builtins, `alloca`, and — notably solid — **all of the atomics**:
+`__atomic_load_n`, `store_n`, `exchange_n`, `compare_exchange_n`,
+`fetch_add`, `thread_fence`, and the `__sync_*` legacy family.
+
+Missing:
+
+| Builtin | Why it matters |
+|---|---|
+| `__builtin_types_compatible_p` | kernel macro staple, pairs with `_Generic` |
+| `__builtin_choose_expr` | the other half of that pair |
+| `__builtin_object_size` | `_FORTIFY_SOURCE` is built on it |
+| `__builtin_fabs` `copysign` `signbit` `isinf` `fma` | math headers call these directly |
+| `__builtin_LINE` `FILE` `FUNCTION` | logging/assert macros |
+| `__builtin_memcmp` `strlen` | already have memcpy/memset/memmove |
+| `__builtin_setjmp` `clear_cache` | |
+| `__builtin_shufflevector` | needs vectors first |
+| `__c11_atomic_*` | `_Atomic` works; Clang's spelling does not |
+
+### `__attribute__` is not parsed on a `typedef`, in either position
+
+```c
+typedef int i __attribute__((aligned(16)));   /* error: expected ';' before '__attribute__' */
+typedef __attribute__((aligned(16))) int i;   /* error: expected a type after 'typedef' */
+
+int g __attribute__((aligned(16)));           /* OK */
+void f(void) __attribute__((noreturn));       /* OK */
+struct s { int a; } __attribute__((packed));  /* OK */
+typedef struct { int a; } __attribute__((packed)) s;  /* OK */
+```
+
+So the attribute grammar covers variables, functions and struct
+definitions but not a typedef NAME. `typedef int i
+__attribute__((aligned(16)))` is an ordinary idiom, and every
+vector-typedef in existence has this shape — which is the real reason the
+`vector_size` probe fails, rather than anything to do with vectors.
+
+This is a contained parser gap and is probably the cheapest item in this
+whole document.
+
+### Attributes: 30 recognised, 15 parsed and dropped, 3 refused by name
+
+An unknown attribute warns (`-Wattributes`, "is not one EmbCC knows, and
+is ignored") rather than erroring, which is correct GCC behaviour — but
+it means **an attribute that changes layout or codegen is ignored with
+only a warning**. These are in that category:
+
+`vector_size` `mode` `transparent_union` `counted_by` `target`
+`tls_model` `weakref` `ifunc` `access` `copy` `error` `noclone` `noipa`
+`designated_init` `assume_aligned`
+
+`vector_size` and `mode` are the two that change results rather than
+hints. On a plain declaration they warn and leave the type alone:
+
+```c
+__attribute__((vector_size(16))) int g;
+_Static_assert(sizeof(g) == 4, "");   /* passes -- still a scalar int */
+```
+
+A warning is a diagnostic, so this is not a THE RULE violation outright.
+But `-Wattributes` is one line in a build log, and the code that follows
+computes the wrong thing. Both belong in the refuse-by-name set until
+they work.
+
+Refused by name (the honest kind of missing): `cleanup`, `naked`,
+`interrupt`. The last two are firmware staples.
+
+Recognised and working: `noreturn` `packed` `aligned` `weak` `used`
+`unused` `deprecated` `constructor` `destructor` `format` `pure` `const`
+`may_alias` `warn_unused_result` `always_inline` `noinline` `hot` `cold`
+`nonnull` `returns_nonnull` `malloc` `alloc_size` `returns_twice`
+`flatten` `nothrow` `leaf` `sentinel` `gnu_inline` `optimize`
+`no_sanitize` `section` `visibility`.
+
+### Language features absent
+
+| Feature | Status |
+|---|---|
+| nested functions | error |
+| `__label__` | error |
+| `__auto_type` | error |
+| vector extensions | no typedef attribute, and `vector_size` is dropped |
+| `asm goto` | error |
+| case ranges `case 1 ... 5:` | error |
+| `__VA_OPT__` | error |
+| `_Float16`, `__float128` | error |
+| **C23:** `constexpr` `auto` `nullptr` `[[attr]]` `enum : type` `typeof_unqual` `#embed` | all error |
+| C++ modules | refused by name |
+
+Working, for the record: computed goto, VLAs, statement expressions,
+`_Complex`, `_Generic`, `__int128`, designated initialisers, compound
+literals, `__thread`, flexible and zero-length arrays, anonymous
+structs.
+
+`asm goto` is worth singling out: the Linux kernel's static-key
+infrastructure is built on it, and EmbCC's stated target is an OS
+kernel.
+
+---
+
+## Tier 2 — subsystems that do not exist
+
+| Subsystem | GCC/Clang | EmbCC |
+|---|---|---|
+| Warnings | 359 `-W` flags (GCC front end alone) | **12**, and every other `-W…` is silently swallowed |
+| PIC / PIE | yes | none — so no shared libraries, no ASLR |
+| LTO | yes | none |
+| Sanitizers | ASan, UBSan, TSan, MSan | none |
+| Coverage / PGO | `-fprofile-*`, `-pg`, `--coverage` | none |
+| Architectures | GCC 79 target dirs, LLVM 62 | 5 (34 triple spellings) |
+| `-g` on embedded | yes | **refused on thumb, rv32, rv64** |
+| DWARF | v5, full | v4, 3 sections |
+
+Two deserve expanding.
+
+**UBSan is the one to want first.** Not ASan — on a microcontroller
+there is no shadow memory to spare. But `-fsanitize=undefined` with
+`-fsanitize-trap=all` costs a `brk`/`ebreak` on each check and catches
+exactly the class of bug that is hardest to find on a board with no
+debugger attached: signed overflow, shift past width, null deref,
+misaligned access. For EmbCC's actual audience this is worth more than
+LTO.
+
+**Twelve warnings is the number to be uncomfortable about.** EmbCC
+implements `-Wunused-variable/-parameter/-function`, `-Wshadow`,
+`-Wsign-compare`, `-Wuninitialized`, `-Wmaybe-uninitialized`,
+`-Wformat`, `-Wattributes`, `-Wdeprecated-declarations`,
+`-Wunused-result`, `-Wwindows-abi`. Everything else a build passes —
+`-Wstrict-prototypes`, `-Wmissing-prototypes`, `-Wcast-align`,
+`-Wconversion`, `-Wnull-dereference`, `-Warray-bounds`, `-Wswitch` — is
+accepted and does nothing. A project that turns on `-Wall -Wextra
+-Werror` and builds clean under EmbCC has learned almost nothing.
+
+**DWARF detail.** EmbCC emits `.debug_info`, `.debug_abbrev`,
+`.debug_line` and gets structs, members, pointers, variables and
+formal parameters right. Against Clang on the same input it is missing
+`DW_TAG_enumeration_type`, `DW_TAG_enumerator`, `DW_TAG_typedef` and
+`DW_TAG_lexical_block` — so an enum prints as an integer in a debugger,
+a typedef'd type shows its underlying name, and block-scoped locals are
+not scoped.
+
+---
+
+## Tier 3 — silent acceptance, which this project calls a bug
+
+THE RULE says refuse loudly rather than emit wrong. These all accept
+quietly:
+
+- `-O9` — accepted.
+- `-Wcompletely-made-up` — accepted. Any `-W…` is.
+- `-std=c89` with a C99 `for(int i…)` — accepted.
+- `-std=c++98` with a C++11 lambda — **accepted**, and compiled as
+  C++20. `--version` says "EmbCC has one dialect per language", which is
+  a defensible position, but then `-std=` should say so rather than
+  nod.
+- `-include` — documented, rejected.
+
+Each of these is a small lie the compiler tells a build system, and each
+one costs somebody an afternoon eventually.
+
+---
+
+## Suggested order
+
+Ranked by (blocked work) ÷ (effort), not by size of the gap:
+
+1. **`__has_include` / `__has_builtin` / `__has_attribute`** — one
+   change in the `#if` expression parser; unblocks modern headers
+   wholesale.
+1b. **`__attribute__` on a `typedef`** — a few lines of declarator
+   grammar; the cheapest item here.
+2. **`typeof` on parameters** — push `ps->fn_pnames` into
+   `g_fold_locals`; one function, unblocks every kernel macro.
+3. **`_Pragma`** — preprocessor operator, contained.
+4. **The freestanding/embedded option set** — `-ffreestanding`,
+   `-fno-builtin`, `-ffunction-sections`, `-fdata-sections`,
+   `-fshort-enums`, `-fsigned-char`/`-funsigned-char`, `-fwrapv`. Mostly
+   accept-and-honour, a few accept-and-ignore-with-a-reason.
+5. **`-include`, `-imacros`, `-iquote`, `-idirafter`** — and fix the
+   help text either way.
+6. **`-g` on thumb / rv32 / rv64** — the DWARF writer exists and works
+   on two targets; this is the last thing between EmbCC and source-level
+   firmware debugging, which is the whole point of the embedded work.
+7. **`__builtin_types_compatible_p` + `__builtin_choose_expr`** — a pair,
+   small, high header-compatibility value.
+8. **Refuse what is not understood**: bad `-O`, unknown `-W`, unknown
+   `-std=`. Cheap, and it is what this project says it believes.
+9. **Multiple inputs and a real link driver** (`-l`, `-L`, `.o` inputs,
+   default crt).
+10. **`-fsanitize=undefined` with trap-on-error** — the highest-value
+    new subsystem for this compiler's actual audience.
+
+Everything after that — PIC/PIE, LTO, PGO, the remaining 347 warnings,
+more architectures — is real but is not what is currently stopping
+anybody.

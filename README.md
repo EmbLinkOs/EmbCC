@@ -127,6 +127,7 @@ it deliberately differs.
 | [docs/tools/embcc.md](docs/tools/embcc.md) | The `embcc`/`embas`/`embld`/`embdbg` CLI reference |
 | [tests/harness/](tests/harness/) | The aarch64 proving ground: a bare-metal QEMU `virt` image with an ARM-semihosting syscall floor, so compiled code is RUN on the architecture it was compiled for |
 | [docs/developer/todo.md](docs/developer/todo.md) | The evidence-backed completeness audit: what C we do not yet compile, ranked by a real corpus |
+| [docs/developer/gaps-vs-gcc-clang.md](docs/developer/gaps-vs-gcc-clang.md) | Where we stand against GCC and Clang, measured against their own option and builtin tables. 1.39x Clang's code size on real sources; the gap is the driver surface, not codegen |
 | [docs/design/workplan.md](docs/design/workplan.md) | The team's three streams (core, linker, proving ground), what each is working on now, and the process that keeps them off each other's critical path |
 | [docs/tools/embdbg.md](docs/tools/embdbg.md) | Producer-side debug-info requirements + the DWARF-bridge decision (D-010); the byte format & kernel contract live OS-side in `myos/docs/EMBDBG_Specification.md` |
 | [src/embx/embx.h](src/embx/embx.h) | The EMBX container, byte-exact — mirrors the kernel's loader header; written by EmbLD, read by `embread` |
