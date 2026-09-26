@@ -1586,14 +1586,20 @@ static void gen_ins(struct rv_fn *F, int n)
             return;
         jump_to(F, i->label);
         return;
-    case IR_CONST:
-        rv_li(t, ACC, imm_val(F, i), F->xlen);
-        wr(F, i->dst, ACC);
+    case IR_CONST: {
+        int d = wreg(F, i->dst, ACC);
+        rv_li(t, d, imm_val(F, i), F->xlen);
+        wrote(F, i->dst, d);
         return;
-    case IR_MOV:
-        rd(F, i->a, ACC);
-        wr(F, i->dst, ACC);
+    }
+    case IR_MOV: {
+        int src = rdr(F, i->a, ACC);
+        int d = wreg(F, i->dst, ACC);
+        if (src != d)
+            rv_mv(t, d, src);
+        wrote(F, i->dst, d);
         return;
+    }
 
     case IR_ADD: case IR_SUB: case IR_MUL:
     case IR_AND: case IR_OR:  case IR_XOR: {
@@ -1639,37 +1645,49 @@ static void gen_ins(struct rv_fn *F, int n)
         wrote(F, i->dst, rd_);
         return;
     }
-    case IR_DIV: case IR_MOD:
-        rd(F, i->a, ACC);
-        operand_b(F, i, TMP);
+    case IR_DIV: case IR_MOD: {
+        int ra_ = rdr(F, i->a, ACC);
+        int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+        int d;
+        if (rb_ == TMP) operand_b(F, i, TMP);
+        d = wreg(F, i->dst, ACC);
         rv_muldiv(t, i->op == IR_DIV ? (i->sign ? RV_DIV : RV_DIVU)
                                      : (i->sign ? RV_REM : RV_REMU),
-                  ACC, ACC, TMP, wordop);
-        wr(F, i->dst, ACC);
+                  d, ra_, rb_, wordop);
+        wrote(F, i->dst, d);
         return;
+    }
     case IR_SHL: case IR_SHR: {
         int op = i->op == IR_SHL ? RV_SLL : i->sign ? RV_SRA : RV_SRL;
         int bits = wordop ? 32 : F->xlen;
-        rd(F, i->a, ACC);
+        int ra_ = rdr(F, i->a, ACC);
+        int d;
         if (i->imm_b && i->imm >= 0 && i->imm < bits) {
-            rv_shift_imm(t, op, ACC, ACC, (int)i->imm, wordop, F->xlen);
+            d = wreg(F, i->dst, ACC);
+            rv_shift_imm(t, op, d, ra_, (int)i->imm, wordop, F->xlen);
         } else {
-            operand_b(F, i, TMP);
-            rv_alu(t, op, ACC, ACC, TMP, wordop);
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            if (rb_ == TMP) operand_b(F, i, TMP);
+            d = wreg(F, i->dst, ACC);
+            rv_alu(t, op, d, ra_, rb_, wordop);
         }
-        wr(F, i->dst, ACC);
+        wrote(F, i->dst, d);
         return;
     }
-    case IR_NEG:
-        rd(F, i->a, ACC);
-        rv_alu(t, RV_SUB, ACC, RV_ZERO, ACC, wordop);
-        wr(F, i->dst, ACC);
+    case IR_NEG: {
+        int ra_ = rdr(F, i->a, ACC);
+        int d = wreg(F, i->dst, ACC);
+        rv_alu(t, RV_SUB, d, RV_ZERO, ra_, wordop);
+        wrote(F, i->dst, d);
         return;
-    case IR_BNOT:
-        rd(F, i->a, ACC);
-        rv_alu_imm(t, RV_XOR, ACC, ACC, -1, 0);
-        wr(F, i->dst, ACC);
+    }
+    case IR_BNOT: {
+        int ra_ = rdr(F, i->a, ACC);
+        int d = wreg(F, i->dst, ACC);
+        rv_alu_imm(t, RV_XOR, d, ra_, -1, 0);
+        wrote(F, i->dst, d);
         return;
+    }
 
     case IR_CMP:
         if (i->w == 8 && F->xlen == 32) {
@@ -1677,37 +1695,50 @@ static void gen_ins(struct rv_fn *F, int n)
             wr(F, i->dst, ACC);
             return;
         }
-        rd(F, i->a, ACC);
-        operand_b(F, i, TMP);
-        cmp_to_reg(F, i->pred, i->sign, ACC, TMP, ACC);
-        wr(F, i->dst, ACC);
+        {
+            /* cmp_to_reg writes its destination before it has finished
+             * reading -- `xor d, a, b` then `sltu d, d, 1` -- but only
+             * the FIRST instruction reads a and b, so d may safely be
+             * either of them. */
+            int ra_ = rdr(F, i->a, ACC);
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            int d;
+            if (rb_ == TMP) operand_b(F, i, TMP);
+            d = wreg(F, i->dst, ACC);
+            cmp_to_reg(F, i->pred, i->sign, ra_, rb_, d);
+            wrote(F, i->dst, d);
+        }
         return;
 
     case IR_SELECT: {
         /* dst = a ? b : c. Both arms are already-computed VALUES in
          * slots, so this is two loads and a branch over one of them. */
         int take_c, done;
-        rd(F, i->a, SCR);
-        take_c = rv_b_placeholder(t, RV_BEQ, SCR, RV_ZERO);
-        rd(F, i->b, ACC);
+        int cond = rdr(F, i->a, SCR);
+        int d = wreg(F, i->dst, ACC);
+        take_c = rv_b_placeholder(t, RV_BEQ, cond, RV_ZERO);
+        rd(F, i->b, d);
         done = rv_j_placeholder(t, RV_ZERO);
         rv_patch_b(t, take_c, t->len);
-        rd(F, i->c, ACC);
+        rd(F, i->c, d);
         rv_patch_j(t, done, t->len);
-        wr(F, i->dst, ACC);
+        wrote(F, i->dst, d);
         return;
     }
 
-    case IR_BRZ: case IR_BRNZ:
+    case IR_BRZ: case IR_BRNZ: {
+        int r;
         if (i->w == 8 && F->xlen == 32) {
             rd64(F, i->a, A_LO, A_HI);
             rv_alu(t, RV_OR, A_LO, A_LO, A_HI, 0);
+            r = A_LO;
         } else {
-            rd(F, i->a, A_LO);
+            r = rdr(F, i->a, A_LO);
         }
-        branch_if(F, i->op == IR_BRZ ? RV_BEQ : RV_BNE, A_LO, RV_ZERO,
+        branch_if(F, i->op == IR_BRZ ? RV_BEQ : RV_BNE, r, RV_ZERO,
                   i->label);
         return;
+    }
 
     /* A LOCAL may live in a register too, and these two are the only
      * places that name its slot directly -- so they are the two that
@@ -1744,26 +1775,33 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         return;
     }
-    case IR_LOAD:
-        rd(F, i->a, ADDR);
-        rv_load(t, ACC, ADDR, 0, i->size, i->sign, F->xlen);
-        wr(F, i->dst, ACC);
+    case IR_LOAD: {
+        int addr = rdr(F, i->a, ADDR);
+        int d = wreg(F, i->dst, ACC);
+        rv_load(t, d, addr, 0, i->size, i->sign, F->xlen);
+        wrote(F, i->dst, d);
         return;
-    case IR_STORE:
-        rd(F, i->a, ADDR);
-        rd(F, i->b, ACC);
-        rv_store(t, ACC, ADDR, 0, i->size, F->xlen);
+    }
+    case IR_STORE: {
+        int addr = rdr(F, i->a, ADDR);
+        int val = rdr(F, i->b, ACC);
+        rv_store(t, val, addr, 0, i->size, F->xlen);
         return;
-    case IR_EXT:
-        rd(F, i->a, ACC);
-        ext_reg(F, ACC, ACC, i->size, i->sign);
-        wr(F, i->dst, ACC);
+    }
+    case IR_EXT: {
+        int ra_ = rdr(F, i->a, ACC);
+        int d = wreg(F, i->dst, ACC);
+        ext_reg(F, d, ra_, i->size, i->sign);
+        wrote(F, i->dst, d);
         return;
+    }
 
-    case IR_ADDR:
-        addr_sp(F, ACC, F->slot[i->a]);
-        wr(F, i->dst, ACC);
+    case IR_ADDR: {
+        int d = wreg(F, i->dst, ACC);
+        addr_sp(F, d, F->slot[i->a]);
+        wrote(F, i->dst, d);
         return;
+    }
     /* A symbol's address takes TWO instructions and two relocations, as
      * on aarch64 and for the same reason: no instruction carries a whole
      * address. `auipc` supplies bits 31:12 of a PC-relative displacement
