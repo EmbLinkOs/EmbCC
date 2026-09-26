@@ -60,7 +60,13 @@ This is the highest-leverage tier by a wide margin. Every item is small
 on its own; together they are the difference between "a compiler" and "a
 compiler you can point at someone else's Makefile".
 
-### The `__has_*` family does not exist — and the defensive form is a hard error
+### ~~The `__has_*` family does not exist~~ — FIXED, and the cause was one line
+
+*Landed. Kept here because the shape of the bug is worth remembering.*
+
+The whole mechanism existed and was gated on one line in
+`src/cpp/cpp.c`: `if (!predef_is_cxx()) return 0;`. It had been built
+for libstdc++ and C never got it. What follows is what C saw.
 
 ```c
 #if defined(__has_include) && __has_include(<foo.h>)
@@ -182,8 +188,8 @@ Two fixes, in increasing order of correctness:
 
 Present and working (probed): the whole bit-twiddling family
 (`clz`/`ctz`/`popcount`/`parity`/`ffs` and the `ll` variants), `bswap16`/`32`,
-`assume_aligned`, `expect`, `unreachable`, `trap`, the overflow
-builtins, `alloca`, and — notably solid — **all of the atomics**:
+`assume_aligned`, `expect`, `unreachable`, `trap`,
+`alloca`, and — notably solid — **all of the atomics**:
 `__atomic_load_n`, `store_n`, `exchange_n`, `compare_exchange_n`,
 `fetch_add`, `thread_fence`, and the `__sync_*` legacy family.
 
@@ -198,6 +204,7 @@ Missing:
 | `__builtin_LINE` `FILE` `FUNCTION` | logging/assert macros |
 | `__builtin_memcmp` `strlen` | already have memcpy/memset/memmove |
 | `__builtin_setjmp` `clear_cache` | |
+| `__builtin_add/sub/mul_overflow` | **C++ only** — C says "is not declared" |
 | `__builtin_shufflevector` | needs vectors first |
 | `__c11_atomic_*` | `_Atomic` works; Clang's spelling does not |
 

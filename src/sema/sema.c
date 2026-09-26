@@ -2770,6 +2770,68 @@ static int asm_reg_by_name(const char *n)
     return -1;
 }
 
+/* The builtins sema lowers by name, one strcmp at a time. Kept beside
+ * sema_has_builtin so the two are read together; the golden test scans
+ * the dispatch and fails if a name appears there and not here. */
+static const char *const g_named_builtins[] = {
+    "alloca", "alloca_with_align", "assume_aligned",
+    "bswap16", "bswap32", "bswap64",
+    "constant_p", "expect", "expect_with_probability",
+    "frame_address", "return_address",
+    "huge_val", "huge_valf", "huge_vall",
+    "inf", "inff", "infl", "nan", "nanf", "nanl",
+    "memcpy", "memmove", "memset",
+    "offsetof", "prefetch",
+    "sqrt", "sqrtf", "sqrtl",
+    "trap", "unreachable",
+    "va_arg", "va_copy", "va_end", "va_start",
+    /* NOT the overflow builtins. __builtin_add_overflow and its two
+     * siblings exist in the C++ front end (src/cxx/expr.c) and not in
+     * this one, so C code calling them gets "is not declared". The
+     * drift test caught that -- it was listed here first, from a grep
+     * of the tree that found the C++ implementation. Add them back
+     * when sema lowers them. */
+};
+
+int sema_has_builtin(const char *name)
+{
+    int dummy_op;
+
+    if (!name)
+        return 0;
+    /* The atomic builtins carry their own full names (__atomic_*,
+     * __sync_*), so they are asked before the __builtin_ prefix. */
+    if (atomic_builtin(name, &dummy_op) != AK_NONE)
+        return 1;
+    if (strcmp(name, "__sync_synchronize") == 0)
+        return 1;
+    if (strncmp(name, "__builtin_", 10) != 0)
+        return 0;
+    {
+        const char *bn = name + 10;
+        if (builtin_bitop(bn, NULL) != 0)
+            return 1;
+        for (size_t i = 0;
+             i < sizeof g_named_builtins / sizeof g_named_builtins[0]; i++)
+            if (strcmp(bn, g_named_builtins[i]) == 0)
+                return 1;
+    }
+    return 0;
+}
+
+/* Every name sema_has_builtin answers for by list, so the golden test
+ * can walk them without re-deriving the table. */
+int sema_named_builtin_count(void)
+{
+    return (int)(sizeof g_named_builtins / sizeof g_named_builtins[0]);
+}
+
+const char *sema_named_builtin(int i)
+{
+    return i >= 0 && i < sema_named_builtin_count() ? g_named_builtins[i]
+                                                    : NULL;
+}
+
 int builtin_bitop(const char *bn, int *width)
 {
     static const char *const ops[] = { "ctz", "clz", "popcount", "ffs",

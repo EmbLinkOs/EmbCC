@@ -8,6 +8,7 @@
 #include "../driver/util.h"
 #include "../lex/lex.h"
 #include "../arch/predef.h"
+#include "../sema/sema.h"
 
 #define MAX_MACRO_PARAMS 16
 #define MAX_INCLUDE_DEPTH 50
@@ -665,18 +666,36 @@ static const char *cx_macro_fmt(const char *name, long v)
 
 /* C++'s (and GNU's) feature-test operators, which a #if may use, and
  * which `defined` / #ifdef count as defined. */
+/* The feature-test operators, which are also `defined` for the sake of
+ * the guarded spelling every portable header uses:
+ *
+ *     #if defined(__has_include) && __has_include(<foo.h>)
+ *
+ * With the name undefined that is not a graceful fallback -- it is a
+ * SYNTAX ERROR, because the identifier becomes 0 and the expression
+ * parser then meets `0 (<foo.h>)`. So a header written defensively
+ * failed to compile, which is strictly worse than the feature being
+ * absent. Clang and GCC both register these as builtin macros for the
+ * same reason.
+ *
+ * This whole mechanism already existed and was gated on
+ * `if (!predef_is_cxx()) return 0;` -- it was built for libstdc++ and
+ * C never got it. The gate is gone; what remains is the one split that
+ * is real: __has_cpp_attribute exists only in C++ and __has_c_attribute
+ * only in C, which is what both reference compilers do. */
 static int has_operator(const char *p, size_t n)
 {
     static const char *const ops[] = {
         "__has_include", "__has_include_next", "__has_builtin",
-        "__has_attribute", "__has_cpp_attribute", "__has_feature",
-        "__has_extension",
+        "__has_attribute", "__has_feature", "__has_extension",
     };
-    if (!predef_is_cxx())
-        return 0;
     for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++)
         if (strlen(ops[i]) == n && !memcmp(ops[i], p, n))
             return 1;
+    if (n == 19 && !memcmp("__has_cpp_attribute", p, n))
+        return predef_is_cxx();
+    if (n == 17 && !memcmp("__has_c_attribute", p, n))
+        return !predef_is_cxx();
     return 0;
 }
 
@@ -797,7 +816,14 @@ static long eval_has(struct src *s, const char *p, size_t n,
                 an = sizeof name - 1;
             memcpy(name, b, an);
             name[an] = 0;
-            v = cxx_has_builtin ? cxx_has_builtin(name) : 0;
+            /* In C++ the C++ front end owns the builtin set; in C the
+             * C front end does. Answering 0 in C -- which is what
+             * happened while this was C++-only -- would have been a
+             * LIE about a compiler that implements __builtin_clz and
+             * forty others. */
+            v = predef_is_cxx()
+                    ? (cxx_has_builtin ? cxx_has_builtin(name) : 0)
+                    : sema_has_builtin(name);
         } else if (n == 15 && !memcmp(p, "__has_attribute", 15)) {
             attr_name(b, an, name, sizeof name);
             v = gnu_attribute(name);
@@ -806,8 +832,38 @@ static long eval_has(struct src *s, const char *p, size_t n,
                       (an > 9 && !memcmp(b, "__gnu__::", 9));
             attr_name(b, an, name, sizeof name);
             v = gnu ? gnu_attribute(name) : cpp_attribute(name);
+        } else if (n == 17 && !memcmp(p, "__has_c_attribute", 17)) {
+            /* Deliberately 0 for everything, and correct today: this
+             * asks about the C23 `[[...]]` form, which EmbCC's parser
+             * does not accept at all. When [[attr]] lands, this must
+             * answer from the same table that parses it -- answering
+             * yes before then would make a header write syntax the
+             * compiler rejects. */
+            v = 0;
+        } else if ((n == 13 && !memcmp(p, "__has_feature", 13)) ||
+                   (n == 15 && !memcmp(p, "__has_extension", 15))) {
+            /* Clang's feature names. Only the ones EmbCC really has are
+             * claimed; the rest answer 0, which costs a header its fast
+             * path and never costs correctness. __has_extension is a
+             * superset of __has_feature in clang, and the two agree
+             * here because nothing below is a non-standard extension
+             * of a standard feature. */
+            static const char *const feats[] = {
+                "c_static_assert", "c_generic_selections", "c_atomic",
+                "c_alignas", "c_alignof", "c_thread_local",
+                "tls", "attribute_deprecated_with_message",
+                "enumerator_attributes", "attribute_unavailable_with_message",
+            };
+            if (an >= sizeof name)
+                an = sizeof name - 1;
+            memcpy(name, b, an);
+            name[an] = 0;
+            for (size_t i = 0; i < sizeof feats / sizeof feats[0]; i++)
+                if (strcmp(name, feats[i]) == 0) {
+                    v = 1;
+                    break;
+                }
         }
-        /* __has_feature / __has_extension: clang's, 0 */
     }
     while (*q == ' ' || *q == '\t')
         q++;

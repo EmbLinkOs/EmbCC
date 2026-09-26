@@ -94,6 +94,11 @@ echo "== builtins ======================================================"
 p "__builtin_clz"        'int f(unsigned x){return __builtin_clz(x);}'
 p "__builtin_popcountll" 'int f(unsigned long long x){return __builtin_popcountll(x);}'
 p "__builtin_bswap32"    'unsigned f(unsigned x){return __builtin_bswap32(x);}'
+# C++-only, which a grep of the tree does not tell you: the C front end
+# says "is not declared". Probing beats grepping, and this pair is the
+# reason that sentence is in the audit.
+p "__builtin_add_overflow (C)" 'int f(int a,int b,int*r){return __builtin_add_overflow(a,b,r);}'
+p "__builtin_mul_overflow (C)" 'int f(int a,int b,int*r){return __builtin_mul_overflow(a,b,r);}'
 p "__builtin_types_compatible_p" 'int f(void){return __builtin_types_compatible_p(int,long);}'
 p "__builtin_choose_expr" 'int f(void){return __builtin_choose_expr(1,2,3);}'
 p "__builtin_object_size" 'unsigned long f(void*p){return __builtin_object_size(p,0);}'
