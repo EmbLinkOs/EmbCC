@@ -32,6 +32,7 @@ enum tok_kind {
     TOK_KW_ALIGNOF,
     TOK_KW_ALIGNAS,
     TOK_KW_TYPEOF,
+    TOK_KW_AUTOTYPE,
     TOK_KW_ATOMIC,
     TOK_KW_UNSIGNED,
     TOK_KW_SIGNED,

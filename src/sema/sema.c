@@ -209,12 +209,43 @@ static void implicit_mem_decl(struct unit *u, const char *name)
     fd->file = u->file;
     fd->seq = -1;
     fd->declared = 1;
-    fd->ret_ty = ty_ptr(ty_base(TY_VOID, 0));
-    fd->nparams = 3;
-    fd->param_tys[0] = ty_ptr(ty_base(TY_VOID, 0));
-    fd->param_tys[1] = strcmp(name, "memset") == 0 ? ty_base(TY_INT, 0)
-                                                   : ty_ptr(ty_base(TY_VOID, 0));
-    fd->param_tys[2] = ty_base(TY_LONG, 1);            /* size_t */
+    /* The real prototype, per function. One shape for all of them --
+     * which is what this was when only memcpy/memmove/memset used it --
+     * gives memcmp and strlen a `void *` return, and `int c = memcmp(..)`
+     * then fails to convert. The signatures are C's. */
+    {
+        struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+        struct type *cp = ty_ptr(ty_base(TY_CHAR, target_char_unsigned()));
+        struct type *sz = ty_int_of_size(target_ptr_size(), 1);
+        struct type *in = ty_base(TY_INT, 0);
+        int cmp = strcmp(name, "memcmp") == 0 || strcmp(name, "strcmp") == 0 ||
+                  strcmp(name, "strncmp") == 0;
+        int str = name[0] == 's';
+        fd->ret_ty = cmp ? in
+                   : strcmp(name, "strlen") == 0 ? sz
+                   : str ? cp : vp;
+        if (strcmp(name, "strlen") == 0) {
+            fd->nparams = 1;
+            fd->param_tys[0] = cp;
+        } else if (strcmp(name, "strcmp") == 0 ||
+                   strcmp(name, "strcpy") == 0 ||
+                   strcmp(name, "strcat") == 0) {
+            fd->nparams = 2;
+            fd->param_tys[0] = cp;
+            fd->param_tys[1] = cp;
+        } else if (strcmp(name, "strchr") == 0) {
+            fd->nparams = 2;
+            fd->param_tys[0] = cp;
+            fd->param_tys[1] = in;
+        } else {
+            fd->nparams = 3;
+            fd->param_tys[0] = str ? cp : vp;
+            fd->param_tys[1] = (strcmp(name, "memset") == 0 ||
+                                strcmp(name, "memchr") == 0) ? in
+                             : str ? cp : vp;
+            fd->param_tys[2] = sz;
+        }
+    }
     struct func **pp = &u->funcs;
     while (*pp)
         pp = &(*pp)->next;
@@ -1338,6 +1369,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         struct stmt *last = NULL;
         for (struct stmt *s = e->body->body; s; s = s->next)
             last = s;
+        /* A LABELLED last statement still has the value of the
+         * statement it labels: `({ ...; done: r; })` is r. That shape
+         * is not incidental -- it is what every __label__ macro looks
+         * like, since the label is there to be jumped to from inside
+         * and the value follows it. STMT_LABEL carries the labelled
+         * statement in `body`, so unwrap as many as are stacked. */
+        while (last && last->kind == STMT_LABEL && last->body)
+            last = last->body;
         e->ty = (last && last->kind == STMT_EXPR && last->expr)
               ? last->expr->ty : ty_base(TY_VOID, 0);
         break;
@@ -1880,9 +1919,79 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * reserved name -- rename and let the ordinary call path resolve
              * them (the program must declare/provide them). */
             if (strcmp(bn, "memcpy") == 0 || strcmp(bn, "memmove") == 0 ||
-                strcmp(bn, "memset") == 0) {
+                strcmp(bn, "memset") == 0 || strcmp(bn, "memcmp") == 0 ||
+                strcmp(bn, "memchr") == 0 || strcmp(bn, "strlen") == 0 ||
+                strcmp(bn, "strcmp") == 0 || strcmp(bn, "strncmp") == 0 ||
+                strcmp(bn, "strcpy") == 0 || strcmp(bn, "strncpy") == 0 ||
+                strcmp(bn, "strcat") == 0 || strcmp(bn, "strchr") == 0) {
+                /* The library function under its own name. memcpy,
+                 * memmove and memset additionally have IR of their own
+                 * that irgen may pick; the rest become ordinary calls,
+                 * which is what __builtin_ asks for -- a name the
+                 * compiler is allowed to know, not necessarily one it
+                 * open-codes. */
                 e->lhs->name = bn;   /* fall through to normal call handling */
                 implicit_mem_decl(u, bn);
+            }
+            /* __builtin_object_size(p, type): how many bytes are
+             * reachable through p. EmbCC does no object-size analysis,
+             * and the ANSWER FOR "UNKNOWN" IS DEFINED: (size_t)-1 for
+             * types 0 and 1, 0 for 2 and 3. Returning it is correct --
+             * _FORTIFY_SOURCE reads exactly this and disables the
+             * check -- where refusing would break every header that
+             * uses it. */
+            else if (strcmp(bn, "object_size") == 0 ||
+                     strcmp(bn, "dynamic_object_size") == 0) {
+                long which = 0;
+                if (e->nargs != 2)
+                    sema_error_at(u, e->line, e->col,
+                            "%s takes a pointer and a type", e->lhs->name);
+                for (int k = 0; k < e->nargs; k++)
+                    check_expr(u, f, sc, e->args[k]);
+                if (e->args[1]->kind == EXPR_NUM)
+                    which = e->args[1]->num;
+                /* The obvious cases are worth answering, because they
+                 * are the ones _FORTIFY_SOURCE can actually use: a
+                 * named array, and the address of an object. Anything
+                 * else gets the DEFINED "unknown" -- (size_t)-1 for
+                 * types 0 and 1, 0 for 2 and 3 -- which is not a
+                 * failure but the answer the interface has for "I do
+                 * not know", and is what disables the check. */
+                {
+                    struct expr *a0 = e->args[0];
+                    long known = -1;
+                    while (a0->kind == EXPR_CAST && a0->rhs)
+                        a0 = a0->rhs;
+                    if (a0->ty && a0->ty->kind == TY_ARRAY &&
+                        a0->ty->count > 0)
+                        known = ty_size(a0->ty);
+                    else if (a0->kind == EXPR_ADDR && a0->rhs &&
+                             a0->rhs->kind == EXPR_VAR &&
+                             a0->rhs->ty &&
+                             a0->rhs->ty->kind != TY_FUNC &&
+                             /* NOT a pointer-typed operand: an ARRAY
+                              * has already decayed to one by here, so
+                              * `&arr` would answer the size of a
+                              * pointer (8) instead of the array (16).
+                              * Excluding it loses the genuine
+                              * `&some_pointer` case, which is a
+                              * missing answer rather than a wrong
+                              * one. */
+                             a0->rhs->ty->kind != TY_PTR &&
+                             ty_size(a0->rhs->ty) > 0)
+                        known = ty_size(a0->rhs->ty);
+                    /* Deliberately NOT `&a[i]` or `p + n`: the answer
+                     * there is the bytes REMAINING from that point,
+                     * and returning the element's size instead (which
+                     * a first version did) is worse than saying
+                     * nothing -- _FORTIFY_SOURCE would reject a write
+                     * that fits. Unknown is a correct answer; a small
+                     * one is not. */
+                    e->kind = EXPR_NUM;
+                    e->num = known >= 0 ? known : ((which & 2) ? 0 : -1);
+                }
+                e->ty = ty_int_of_size(target_ptr_size(), 1);
+                break;
             }
             /* byte swaps -> a single instruction; the result is the argument's
              * width as an unsigned integer. */
@@ -2774,7 +2883,9 @@ static const char *const g_named_builtins[] = {
     "frame_address", "return_address",
     "huge_val", "huge_valf", "huge_vall",
     "inf", "inff", "infl", "nan", "nanf", "nanl",
-    "memcpy", "memmove", "memset",
+    "memcpy", "memmove", "memset", "memcmp", "memchr",
+    "strlen", "strcmp", "strncmp", "strcpy", "strncpy", "strcat", "strchr",
+    "object_size", "dynamic_object_size",
     "offsetof", "prefetch",
     "sqrt", "sqrtf", "sqrtl",
     "trap", "unreachable",

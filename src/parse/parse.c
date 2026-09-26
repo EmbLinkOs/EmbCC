@@ -3,6 +3,7 @@
 #include "parse.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "../driver/util.h"
@@ -42,6 +43,17 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
 };
 
 struct parser {
+    /* GNU `__label__ n;`: a label LOCAL to the enclosing block, so a
+     * macro that declares one can be expanded twice in a function
+     * without the second `n:` being a duplicate. That is the only
+     * reason the extension exists. Labels here are resolved by NAME,
+     * so the scoping is a rename: each declaration maps `n` to a
+     * unique spelling for the depth it was declared at, and the
+     * mapping is dropped when that block ends. */
+    struct { const char *from; const char *to; int depth; } lmap[64];
+    int nlmap;
+    int blkdepth;
+    int lseq;
     struct lexer lx;
     struct unit *unit;
     jmp_buf *recover;     /* where a syntax error resumes (NULL: it stops
@@ -233,7 +245,12 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
            k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_BOOL ||
            k == TOK_KW_COMPLEX ||
-           k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC;
+           k == TOK_KW_ALIGNAS || k == TOK_KW_TYPEOF || k == TOK_KW_ATOMIC ||
+           /* __auto_type begins a declaration even though it names no
+            * type -- the type comes from the initializer, and the
+            * declaration parser handles it before reaching
+            * parse_type_spec. */
+           k == TOK_KW_AUTOTYPE;
 }
 
 /* const/restrict are accepted and IGNORED (no const-correctness enforcement).
@@ -585,6 +602,45 @@ static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
 static void parse_static_assert(struct parser *ps);
 static struct expr *parse_initializer(struct parser *ps);
+/* The spelling a label name has in the innermost block that declared
+ * it with __label__, or the name itself. */
+static const char *label_map(struct parser *ps, const char *n)
+{
+    for (int i = ps->nlmap - 1; i >= 0; i--)
+        if (strcmp(ps->lmap[i].from, n) == 0)
+            return ps->lmap[i].to;
+    return n;
+}
+
+/* `__label__ a, b;` -- accepted where a statement may start. */
+static void parse_label_decl(struct parser *ps)
+{
+    advance(ps);                         /* __label__ */
+    for (;;) {
+        if (cur(ps)->kind != TOK_IDENT)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "__label__ needs a label name");
+        if (ps->nlmap >= (int)(sizeof ps->lmap / sizeof ps->lmap[0]))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "too many __label__ declarations in one function");
+        {
+            char buf[128];
+            int k = ps->nlmap++;
+            /* `$` cannot appear in a C identifier the source wrote, so
+             * the renamed label cannot collide with a real one. */
+            snprintf(buf, sizeof buf, "%s$L%d", cur(ps)->text, ps->lseq++);
+            ps->lmap[k].from = cur(ps)->text;
+            ps->lmap[k].to = xstrndup(buf, strlen(buf));
+            ps->lmap[k].depth = ps->blkdepth;
+        }
+        advance(ps);
+        if (cur(ps)->kind != TOK_COMMA)
+            break;
+        advance(ps);
+    }
+    expect(ps, TOK_SEMI, "';' after __label__");
+}
+
 static struct stmt *parse_block(struct parser *ps);
 
 /* Declarator over a base type (C11 6.7.6): pointers, then a name — or a
@@ -1241,7 +1297,18 @@ static struct type *ce_type(const struct expr *e)
     }
     case EXPR_DEREF: {
         struct type *t = ce_type(e->rhs);
-        return t && t->kind == TY_PTR ? t->pointee : NULL;
+        if (!t) return NULL;
+        /* Dereferencing an ARRAY gives its element: `*a` is a[0], and
+         * the array decays before the indirection. */
+        if (t->kind == TY_ARRAY) return t->pointee;
+        return t->kind == TY_PTR ? t->pointee : NULL;
+    }
+    case EXPR_ADDR: {
+        /* `&x` is a pointer to x's type, and to the ELEMENT type when
+         * x is an array -- `&a` where a is `int[4]` is `int (*)[4]`,
+         * which this models as a pointer to the array. */
+        struct type *t = ce_type(e->rhs);
+        return t ? ty_ptr(t) : NULL;
     }
     case EXPR_BINOP: {
         /* Pointer arithmetic: `a + n` has the pointer's type.
@@ -1833,6 +1900,87 @@ static struct expr *parse_primary(struct parser *ps)
             expect(ps, TOK_RPAREN, "')' to close __builtin_va_arg");
             return e;
         }
+        /* __builtin_types_compatible_p(T1, T2) — 1 when the two types
+         * are compatible, folded here to an integer constant so it can
+         * sit in a _Static_assert or an array size. Together with
+         * __builtin_choose_expr below it is how C code dispatched on a
+         * type before _Generic existed, and kernel headers still use
+         * the pair. */
+        if (strcmp(t->text, "__builtin_types_compatible_p") == 0) {
+            int line = t->line;
+            struct type *a, *b;
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'(' after __builtin_types_compatible_p");
+            a = parse_type_name(ps, parse_type_spec(ps, 0));
+            expect(ps, TOK_COMMA, "',' between the two types");
+            b = parse_type_name(ps, parse_type_spec(ps, 0));
+            expect(ps, TOK_RPAREN, "')'");
+            e = new_expr(EXPR_NUM, line, 0);
+            /* Qualifiers do not take part: gcc compares the unqualified
+             * types, so `const int` and `int` are compatible. */
+            e->num = ty_equal(a->canon ? a->canon : a,
+                              b->canon ? b->canon : b) ? 1 : 0;
+            e->ty = ty_base(TY_INT, 0);
+            return e;
+        }
+        /* __builtin_choose_expr(const, a, b) — the arm the constant
+         * selects, with the OTHER one never type-checked. That is the
+         * whole point of it: the arm not taken is routinely nonsense
+         * for the type in hand, which is why _Generic was added and
+         * why `?:` cannot stand in for it. */
+        if (strcmp(t->text, "__builtin_choose_expr") == 0) {
+            int line = t->line;
+            struct expr *c, *a, *b;
+            long v;
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'(' after __builtin_choose_expr");
+            c = parse_cond(ps);
+            if (!size_fold(c, &v))
+                parse_error_line(ps, line,
+                           "__builtin_choose_expr needs a constant condition");
+            expect(ps, TOK_COMMA, "',' after the condition");
+            a = parse_cond(ps);
+            expect(ps, TOK_COMMA, "',' between the two arms");
+            b = parse_cond(ps);
+            expect(ps, TOK_RPAREN, "')'");
+            return v ? a : b;
+        }
+        /* __builtin_LINE / FILE / FUNCTION: what a logging or assert
+         * macro wants without __LINE__'s habit of expanding at the
+         * wrong place. Folded here, to the position of the call. */
+        if (strcmp(t->text, "__builtin_LINE") == 0) {
+            int line = t->line;
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'(' after __builtin_LINE");
+            expect(ps, TOK_RPAREN, "')'");
+            e = new_expr(EXPR_NUM, line, 0);
+            e->num = line;
+            e->ty = ty_base(TY_INT, 0);
+            return e;
+        }
+        /* __builtin_FILE only. __builtin_FUNCTION would want the
+         * enclosing function's name, which this parser does not carry
+         * at expression level -- and guessing "" would be worse than
+         * refusing, because a log line would silently lose its
+         * function. It falls through to the ordinary undeclared-name
+         * error, which names it. */
+        if (strcmp(t->text, "__builtin_FILE") == 0) {
+            int line = t->line;
+            const char *w = ps->lx.file;
+            advance(ps);
+            expect(ps, TOK_LPAREN, "'('");
+            expect(ps, TOK_RPAREN, "')'");
+            e = new_expr(EXPR_STR, line, 0);
+            /* Shaped exactly as a literal is: the bytes in `name`, the
+             * element COUNT (NUL included) in `num`, and one byte per
+             * element. irgen interns it like any other string. */
+            e->name = w ? w : "";
+            e->num = (long)strlen(e->name) + 1;
+            e->str_width = 1;
+            e->ty = ty_array(ty_base(TY_CHAR, target_char_unsigned()),
+                             (int)e->num);
+            return e;
+        }
         /* __builtin_offsetof(type, member-designator) — the byte offset of a
          * member, folded to a size_t constant right here so it is usable in an
          * integer-constant-expression (a _Static_assert, an array size). The
@@ -2348,6 +2496,8 @@ static struct stmt *parse_controlled(struct parser *ps)
 static struct stmt *parse_block(struct parser *ps)
 {
     struct stmt *s = new_stmt(STMT_BLOCK, cur(ps)->line, cur(ps)->col);
+    int lmark = ps->nlmap;
+    ps->blkdepth++;
     expect(ps, TOK_LBRACE, "'{'");
     struct stmt **volatile tail = &s->body;
     while (cur(ps)->kind != TOK_RBRACE) {
@@ -2357,6 +2507,8 @@ static struct stmt *parse_block(struct parser *ps)
             diag_error_at(ps->lx.file, cur(ps)->line, cur(ps)->col,
                           "unexpected end of file inside a block");
             ps->nerrors++;
+            ps->nlmap = lmark;
+            ps->blkdepth--;
             return s;
         }
         jmp_buf jb, *save = ps->recover;
@@ -2373,6 +2525,10 @@ static struct stmt *parse_block(struct parser *ps)
         ps->recover = save;
     }
     advance(ps); /* '}' */
+    /* The block's __label__ names go out of scope with it, so the same
+     * macro expanded again in this function gets fresh ones. */
+    ps->nlmap = lmark;
+    ps->blkdepth--;
     return s;
 }
 
@@ -2680,6 +2836,49 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             parse_error_at(ps, t->line, t->col,
                        "a declaration cannot be the body of if/while/for "
                        "(C99 forbids it too); wrap it in braces");
+        /* `__auto_type name = expr;` -- the declared type is the
+         * initializer's. GCC constrains it hard (a plain identifier,
+         * an initializer required, one declarator) and that is what
+         * makes it cheap here: parse the name, parse the initializer,
+         * and ask ce_type -- the same parse-time typing typeof uses,
+         * so the two agree by construction. */
+        if (cur(ps)->kind == TOK_KW_AUTOTYPE) {
+            int aline = cur(ps)->line;
+            const char *aname;
+            struct expr *init;
+            struct type *at;
+            advance(ps);
+            if (cur(ps)->kind != TOK_IDENT)
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "__auto_type needs a plain variable name");
+            aname = cur(ps)->text;
+            advance(ps);
+            if (cur(ps)->kind != TOK_ASSIGN)
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "__auto_type needs an initializer: there is "
+                           "nothing else to take the type from");
+            advance(ps);
+            init = parse_cond(ps);
+            at = ce_type(init);
+            if (!at)
+                parse_error_line(ps, aline,
+                           "__auto_type cannot see the type of this "
+                           "initializer");
+            /* An array decays and a function designator becomes a
+             * pointer, as they do in any initialization. */
+            if (at->kind == TY_ARRAY)
+                at = ty_ptr(at->pointee);
+            expect(ps, TOK_SEMI, "';'");
+            s = new_stmt(STMT_DECL, aline, 0);
+            s->dty = at;
+            s->name = aname;
+            /* `expr` is a declaration's INITIALIZER; `init` is the
+             * for-loop's first clause. Setting the wrong one compiled
+             * fine and left the variable zero. */
+            s->expr = init;
+            fold_local_add(aname, at);
+            return s;
+        }
         /* allow_body=1: a block-scope struct/union/enum DEFINITION is legal C
          * (`union { double d; uint64_t u; } v;` inside a function). Tags share
          * the one flat tag namespace EmbCC keeps -- fine for the anonymous
@@ -2794,6 +2993,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
     /* A label: `IDENT ':'` prefixes a statement (a goto target). Peek one
      * token past the identifier; if it is ':' this is a label, else restore
      * and fall through to the expression-statement path. */
+    if (t->kind == TOK_IDENT && strcmp(t->text, "__label__") == 0) {
+        parse_label_decl(ps);
+        return new_stmt(STMT_BLOCK, t->line, t->col);   /* declares only */
+    }
     if (t->kind == TOK_IDENT) {
         const char *lname = t->text;
         int lline = t->line;
@@ -2802,7 +3005,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         if (cur(ps)->kind == TOK_COLON) {
             advance(ps);                       /* consume ':' */
             s = new_stmt(STMT_LABEL, lline, 0);
-            s->name = lname;
+            s->name = label_map(ps, lname);
             s->body = parse_stmt(ps, allow_decl);
             return s;
         }
@@ -2828,7 +3031,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         if (cur(ps)->kind != TOK_IDENT)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a label name after 'goto'");
-        s->name = cur(ps)->text;
+        s->name = label_map(ps, cur(ps)->text);
         advance(ps);
         expect(ps, TOK_SEMI, "';'");
         return s;
@@ -2912,6 +3115,45 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         s = new_stmt(STMT_CASE, t->line, t->col);
         advance(ps);
         s->expr = parse_cond(ps); /* folded to a constant by sema */
+        /* GNU case ranges: `case 1 ... 5:` is five case labels on one
+         * statement. They are emitted as five consecutive MARKERS,
+         * which needs nothing from sema or irgen -- consecutive
+         * markers with no statement between them already fall through
+         * to the same code, because that is what C's fallthrough is.
+         * The alternative, teaching the switch's binary search about
+         * intervals, would change a structure that is right.
+         *
+         * Bounded, because `case 0 ... 1000000:` would otherwise
+         * expand to a million nodes: past the cap it is refused with
+         * the count, rather than appearing to hang. */
+        if (cur(ps)->kind == TOK_ELLIPSIS) {
+            int line = cur(ps)->line;
+            long lo = 0, hi = 0;
+            struct expr *hie;
+            struct stmt *tail = s;
+            advance(ps);
+            hie = parse_cond(ps);
+            if (!size_fold(s->expr, &lo) || !size_fold(hie, &hi))
+                parse_error_line(ps, line,
+                           "a case range needs two constant bounds");
+            if (hi < lo)
+                parse_error_line(ps, line,
+                           "case range %ld ... %ld runs backwards", lo, hi);
+            if (hi - lo > 1023)
+                parse_error_line(ps, line,
+                           "case range %ld ... %ld covers %ld values; EmbCC "
+                           "expands a range into one label per value and "
+                           "caps that at 1024", lo, hi, hi - lo + 1);
+            for (long v = lo + 1; v <= hi; v++) {
+                struct stmt *c = new_stmt(STMT_CASE, line, 0);
+                struct expr *k = new_expr(EXPR_NUM, line, 0);
+                k->num = v;
+                k->ty = ty_base(TY_INT, 0);
+                c->expr = k;
+                tail->next = c;
+                tail = c;
+            }
+        }
         expect(ps, TOK_COLON, "':'");
         return s;
     case TOK_KW_DEFAULT:
@@ -3527,6 +3769,11 @@ struct unit *parse_unit(const char *file, const char *src)
     struct unit *u = xcalloc(1, sizeof *u);
     u->file = file;
 
+    /* Zeroed first. The struct is filled field by field below, and a
+     * field added later is a field some path reads uninitialised --
+     * nlmap and lseq (the __label__ rename map) were exactly that, and
+     * the parser walked a garbage table on the first `goto` it saw. */
+    memset(&ps, 0, sizeof ps);
     ps.unit = u;
     g_fold_unit = u;          /* size_fold resolves this unit's enum constants */
     ps.recover = NULL;        /* no recovery point until a loop sets one */

@@ -1455,7 +1455,27 @@ static void process_file(struct cpp *cpp, const char *path,
             } else if (DIR("warning")) {
                 diag_warn_at(s.file, startline, 0, "#warning: %s", arg);
             } else if (DIR("pragma")) {
-                /* no pragmas mean anything to us yet */
+                /* Most pragmas mean nothing here and dropping them is
+                 * right. `pack` is not one of those: it changes
+                 * STRUCT LAYOUT, and being ignored meant a struct the
+                 * programmer packed came out padded -- silently, and
+                 * differently from every other compiler. That is the
+                 * failure THE RULE exists for, so it is refused by
+                 * name with the spelling that does work.
+                 *
+                 * Implementing it needs the pragma to reach the
+                 * parser, which means a token for it; the preprocessor
+                 * hands the parser text and a `#` line is not text the
+                 * parser reads. __attribute__((packed)) already goes
+                 * through the same ty_struct_layout flag. */
+                const char *pa = arg;
+                while (*pa == ' ' || *pa == '\t') pa++;
+                if (strncmp(pa, "pack", 4) == 0 &&
+                    (pa[4] == '(' || pa[4] == ' ' || pa[4] == '\t'))
+                    cerr(&s, "#pragma pack is not supported: it would change "
+                             "the layout and EmbCC would ignore it. Use "
+                             "__attribute__((packed)) on the struct, which "
+                             "this compiler honours", NULL);
             } else if (DIR("line") || (dn > 0 && lp[0] >= '0' &&
                                         lp[0] <= '9')) {
                 /* #line N ["file"], and GNU's linemarker # N "file" ...
@@ -1506,7 +1526,91 @@ static void process_file(struct cpp *cpp, const char *path,
                 nl += more_nl;
             }
             s.line = startline;
-            expand_text(&s, lineb.p ? lineb.p : "", out);
+            {
+                struct tbuf expb = { 0, 0, 0 };
+                expand_text(&s, lineb.p ? lineb.p : "", &expb);
+                if (!expb.p) tb_putc(&expb, '\0'), expb.len = 0;
+                /* Expanded into a buffer of its own first, because
+                 * _Pragma usually ARRIVES from a macro -- that is the
+                 * whole reason the operator exists -- so stripping it
+                 * out of the source line would never see it.
+                 *
+                 * _Pragma("...") is the operator spelling of #pragma,
+                 * and exists so a MACRO can carry one -- which is how
+                 * headers suppress a warning at their own definition
+                 * site. It is destringized and treated exactly as the
+                 * directive above: refused when it is `pack`, and
+                 * removed otherwise, because that is what this
+                 * preprocessor does with a pragma it does not act on.
+                 * Leaving it in the text would reach the parser as an
+                 * undeclared function call. */
+                char *lp2 = expb.p;
+                while (lp2 && *lp2) {
+                    char *q;
+                    char *close;
+                    /* Skip string and character literals. `_Pragma`
+                     * appears inside them in real source -- this
+                     * file's own text is the first example -- and
+                     * rewriting one corrupts the program. Also
+                     * require a whole identifier, so `my_Pragma` is
+                     * left alone. */
+                    if (*lp2 == '"' || *lp2 == '\'') {
+                        int qc = *lp2++;
+                        while (*lp2 && *lp2 != qc) {
+                            if (*lp2 == '\\' && lp2[1]) lp2++;
+                            lp2++;
+                        }
+                        if (*lp2) lp2++;
+                        continue;
+                    }
+                    if (strncmp(lp2, "_Pragma", 7) != 0 ||
+                        (lp2 != expb.p && (is_idc((unsigned char)lp2[-1]))) ||
+                        is_idc((unsigned char)lp2[7])) {
+                        lp2++;
+                        continue;
+                    }
+                    q = lp2 + 7;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (*q != '(') { lp2 += 7; continue; }
+                    q++;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (*q != '"') {
+                        cerr(&s, "_Pragma needs a string literal", NULL);
+                        break;
+                    }
+                    {
+                        char *b = ++q;
+                        while (*q && *q != '"') {
+                            if (*q == '\\' && q[1]) q++;
+                            q++;
+                        }
+                        if (*q != '"') {
+                            cerr(&s, "unterminated _Pragma string", NULL);
+                            break;
+                        }
+                        {
+                            const char *pb = b;
+                            while (pb < q && (*pb == ' ' || *pb == '\t')) pb++;
+                            if ((size_t)(q - pb) >= 4 &&
+                                strncmp(pb, "pack", 4) == 0)
+                                cerr(&s, "_Pragma(\"pack...\") is not "
+                                         "supported: it would change the "
+                                         "layout and EmbCC would ignore it. "
+                                         "Use __attribute__((packed))", NULL);
+                        }
+                        close = q + 1;
+                        while (*close == ' ' || *close == '\t') close++;
+                        if (*close != ')') {
+                            cerr(&s, "_Pragma needs a closing ')'", NULL);
+                            break;
+                        }
+                        close++;
+                        memmove(lp2, close, strlen(close) + 1);
+                    }
+                }
+                tb_putn(out, expb.p ? expb.p : "", expb.p ? strlen(expb.p) : 0);
+                free(expb.p);
+            }
         }
         for (int i = 0; i < nl; i++)
             tb_putc(out, '\n');

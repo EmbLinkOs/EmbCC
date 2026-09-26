@@ -129,6 +129,11 @@ static const struct {
     { "__thread", TOK_KW_THREAD },
     { "_Thread_local", TOK_KW_THREAD },
     { "typeof", TOK_KW_TYPEOF },
+    /* __auto_type: "the type of my initializer". The parser
+     * handles it where a local declaration starts; it is a
+     * keyword so an ordinary variable of that name cannot
+     * shadow it. */
+    { "__auto_type", TOK_KW_AUTOTYPE },
     { "__typeof__", TOK_KW_TYPEOF },
     { "__typeof", TOK_KW_TYPEOF },
     { "_Atomic", TOK_KW_ATOMIC },

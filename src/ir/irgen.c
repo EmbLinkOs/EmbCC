@@ -2940,6 +2940,20 @@ static int gen_stmtexpr(struct ir_func *fn, struct expr *e)
         prev->next = last;
     }
     int v = -1;
+    /* A LABELLED last statement still has the value of what it labels
+     * -- `({ ...; done: r; })` is r, which is the shape every
+     * __label__ macro takes. The labels are emitted first so a `goto`
+     * from inside the block still reaches them, then the labelled
+     * expression provides the value. sema types it the same way. */
+    while (last && last->kind == STMT_LABEL && last->body) {
+        int ix = label_idx(fn, last->name, last->line);
+        if (g_labels[ix].defined)
+            diag_fatal(fn->file, last->line, "duplicate label '%s'",
+                       last->name);
+        g_labels[ix].defined = 1;
+        emit_label(fn, g_labels[ix].label);
+        last = last->body;
+    }
     if (last && last->kind == STMT_EXPR && last->expr)
         v = gen_expr(fn, last->expr);    /* the block's value */
     else if (last)
