@@ -38,6 +38,7 @@
 
 #include "emit.h"
 #include "../backend.h"
+#include "../regalloc.h"
 #include "../target.h"
 #include "../../driver/util.h"
 
@@ -99,7 +100,89 @@ struct t_fn {
     int *label_off;      /* per label id, or -1 while unseen */
     struct { int at; int label; int cond; } *fix;
     int nfix, capfix;
+    /* Per vreg: the register the allocator gave it, or -1 for one that
+     * stays in memory. NULL when it did not run (-O0/-O1). */
+    int *loc;
+    int used_callee[RA_MAXPOOL];
+    int nsave;           /* how many of those it took */
+    long save_at;        /* where the prologue spilled them */
 };
+
+/* ---- the register allocator's view of this machine ---------------------
+ *
+ * Nine registers, and that is the whole of AAPCS32's generosity: r0-r3
+ * are the argument file and r4-r8 the callee-saved part this file does
+ * not already need. r9-r12 are kept as scratch, because the slot paths
+ * still have to land a value somewhere and a 64-bit value needs FOUR of
+ * them at once (A_LO/A_HI/B_LO/B_HI).
+ *
+ * Compare RISC-V, which had seven registers spare after the same
+ * reservations. Here the parallel move's cycle-breaking scratch comes
+ * out of a file that is already fully committed, which is why the
+ * prologue's push mask is patched after the body rather than decided
+ * before it.
+ *
+ * Caller-saved first, as regalloc.h asks: a short-lived value takes r0-r3
+ * and the prologue never grows for it.
+ */
+#define T_NPOOL 9
+static const int T_POOL[T_NPOOL] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+/* Without the argument file, for a variadic function: its prologue
+ * pushes r0-r3 and `va_arg` walks them, so those four are not the
+ * allocator's to give. */
+static const int T_POOL_VA[5] = { 4, 5, 6, 7, 8 };
+
+static const int *t_pool_for(const struct ir_func *fn, int *n)
+{
+    if (fn->is_varargs) {
+        *n = 5;
+        return T_POOL_VA;
+    }
+    *n = T_NPOOL;
+    return T_POOL;
+}
+
+static int t_callee_saved(int reg) { return reg >= 4 && reg <= 11; }
+
+/* Is `dst = load(local)` a plain move here? Only at the full width: a
+ * narrower load sign- or zero-extends, which is an operation and not a
+ * copy, so the two values cannot share a register. */
+static int t_ldvar_plain(int size, int sign, int w)
+{
+    (void)sign;
+    return size == 4 && w == 4;
+}
+
+/* Which instructions become a CALL the IR does not show as one.
+ * Everything floating point -- ARMv7-M's base profile has no FPU -- and
+ * the 64-bit divides. A value live across one of these may not sit in a
+ * caller-saved register. */
+static int t_op_calls_helper(const struct ir_ins *i)
+{
+    if (i->flt)
+        return i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
+               i->op == IR_DIV || i->op == IR_CMP;
+    if (i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F)
+        return 1;
+    return (i->op == IR_DIV || i->op == IR_MOD) && i->w == 8;
+}
+
+static const struct ra_target THUMB_RA = {
+    t_pool_for,
+    t_callee_saved,
+    t_ldvar_plain,
+    /* The three capability flags start at 0, as they did on RISC-V: this
+     * backend still reads a call's arguments, a returned value and a
+     * memcpy's addresses out of their slots. They go on one at a time. */
+    0, 0, 0,
+    t_op_calls_helper,
+    0,            /* Thumb-2's wide forms are three-operand */
+    NULL,         /* ABI hints: later */
+    NULL, NULL    /* no FP class -- soft float, in the core registers */
+};
+
+/* -O2 and -Os: the allocator is on. */
+static int g_t_regalloc;
 
 /* ---- refusal -------------------------------------------------------- */
 
@@ -190,11 +273,29 @@ static char *wide64_map(struct ir_func *fn)
             int src;
             if (i->dst < 0 || i->dst >= fn->nvregs || w[i->dst])
                 continue;
+            /* ...but only a copy that does not SAY four bytes. A
+             * narrowing `mov.4s` from an eight-byte value takes its low
+             * word, and marking the destination wide for it makes the
+             * other arm of the same `?:` -- a four-byte value that may
+             * now hold a REGISTER -- get read as a pair out of a slot
+             * nothing wrote. Harmless while everything is in memory;
+             * a miscompile once the allocator runs. */
+            /* ...but only a copy that does not SAY four bytes. A
+             * narrowing `mov.4s` from an eight-byte value takes its low
+             * word, and marking the destination wide for it makes the
+             * other arm of the same `?:` -- a four-byte value that may
+             * now hold a REGISTER -- read as a pair out of a slot
+             * nothing wrote. `fits(d) ? (int)d : 0` is exactly that
+             * shape. Harmless while everything is in memory; a
+             * miscompile once the allocator runs. A width-less MOV still
+             * propagates: w == 0 is "unknown", not "four". */
             if (i->op == IR_MOV)
-                src = i->a >= 0 && i->a < fn->nvregs && w[i->a];
+                src = i->w != 4 &&
+                      i->a >= 0 && i->a < fn->nvregs && w[i->a];
             else if (i->op == IR_SELECT)
-                src = (i->b >= 0 && i->b < fn->nvregs && w[i->b]) ||
-                      (i->c >= 0 && i->c < fn->nvregs && w[i->c]);
+                src = i->w != 4 &&
+                      ((i->b >= 0 && i->b < fn->nvregs && w[i->b]) ||
+                       (i->c >= 0 && i->c < fn->nvregs && w[i->c]));
             else
                 continue;
             if (src) {
@@ -356,16 +457,51 @@ static void layout(struct t_fn *F)
 /* Load vreg v into `reg`. Every value lives in memory in this backend,
  * so this is always a load — which is the naive part, and the part a
  * register allocator replaces. */
+/* Does the allocator have this vreg in a register? */
+static int in_reg(const struct t_fn *F, int v)
+{
+    return F->loc && v >= 0 && F->loc[v] >= 0;
+}
+
+/* Get vreg v into exactly `reg` -- a load without the allocator, a MOVE
+ * with it, nothing at all when it is already there. Keeping that
+ * contract is what leaves every existing call site correct; the ones
+ * that decide code size use the trio below and skip the move. */
 static void rd(struct t_fn *F, int v, int reg)
 {
+    if (in_reg(F, v)) {
+        if (F->loc[v] != reg)
+            t_mov_reg(F->t, reg, F->loc[v]);
+        return;
+    }
     if (!t_ldst_imm(F->t, reg, T_SP, F->slot[v], 4, 0, 0)) {
         t_mov_imm(F->t, reg, F->slot[v], 0);
         t_ldst_reg(F->t, reg, T_SP, reg, 0, 4, 0, 0);
     }
 }
 
+/* `rdr` says where a value already IS; `wreg` where to compute a result;
+ * `wrote` commits it only if that was a scratch. */
+static int rdr(struct t_fn *F, int v, int scratch)
+{
+    if (in_reg(F, v))
+        return F->loc[v];
+    rd(F, v, scratch);
+    return scratch;
+}
+
+static int wreg(struct t_fn *F, int v, int scratch)
+{
+    return in_reg(F, v) ? F->loc[v] : scratch;
+}
+
 static void wr(struct t_fn *F, int v, int reg)
 {
+    if (in_reg(F, v)) {
+        if (F->loc[v] != reg)
+            t_mov_reg(F->t, F->loc[v], reg);
+        return;
+    }
     if (F->slot[v] < 0)
         return;
     if (!t_ldst_imm(F->t, reg, T_SP, F->slot[v], 4, 0, 1)) {
@@ -376,6 +512,11 @@ static void wr(struct t_fn *F, int v, int reg)
         t_alu_reg(F->t, T_OP_ADD, a, T_SP, a, 0);
         t_ldst_imm(F->t, reg, a, 0, 4, 0, 1);
     }
+}
+
+static void wrote(struct t_fn *F, int v, int reg)
+{
+    wr(F, v, reg);      /* wr already does the right thing either way */
 }
 
 /* A 64-bit value's two halves, little-endian: the low word at the slot
@@ -607,6 +748,42 @@ static int fp_arg(struct t_fn *F, int v, int w, int reg)
     }
     rd(F, v, reg);
     return 1;
+}
+
+/* Both operands of a two-argument helper, as a PARALLEL MOVE.
+ *
+ * A soft-float helper is not an IR_CALL, so nothing marks its operands
+ * and the allocator is free to put them in registers -- and then
+ * `__ltdf2(a, b)` with a in r1 and b in r0 does `mov r0, r1` and loses b
+ * before reading it. An eight-byte operand is a PAIR and never
+ * allocated, so that case keeps its loads.
+ *
+ * T_SCR breaks a cycle: r9 is scratch and holds nothing of its own. */
+static void fp_args2(struct t_fn *F, const struct ir_ins *i)
+{
+    if (i->w == 8) {
+        rd64(F, i->a, T_R0, T_R1);
+        rd64(F, i->b, T_R2, T_R3);
+        return;
+    }
+    {
+        int pd[2], ps[2], npm = 0;
+        if (in_reg(F, i->a)) { pd[npm] = T_R0; ps[npm] = F->loc[i->a]; npm++; }
+        if (in_reg(F, i->b)) { pd[npm] = T_R1; ps[npm] = F->loc[i->b]; npm++; }
+        if (npm) {
+            int od[8], os[8];
+            int m = ra_parallel_move(pd, ps, npm, T_SCR, od, os, 8);
+            if (m < 0)
+                internal_error("thumb: a helper's argument setup is not a "
+                               "well-formed move");
+            for (int k = 0; k < m; k++)
+                t_mov_reg(F->t, od[k], os[k]);
+        }
+        /* The loads come after: they only WRITE argument registers, so
+         * nothing still needs the old contents of one. */
+        if (!in_reg(F, i->a)) rd(F, i->a, T_R0);
+        if (!in_reg(F, i->b)) rd(F, i->b, T_R1);
+    }
 }
 
 static void fp_result(struct t_fn *F, int dst, int w)
@@ -961,10 +1138,9 @@ static void gen_ins(struct t_fn *F, int n)
         if (i->w != 4 && i->w != 8)
             t_refuse(fn, i, "a long double (ARMv7-M has no 16-byte float)");
         if (name) {
-            int n = fp_arg(F, i->a, i->w, T_R0);
             if (i->imm_b)
                 t_refuse(fn, i, "a folded floating-point immediate");
-            fp_arg(F, i->b, i->w, n);
+            fp_args2(F, i);
             call_helper(F, name);
             fp_result(F, i->dst, i->w);
             return;
@@ -987,9 +1163,8 @@ static void gen_ins(struct t_fn *F, int n)
             return;
         }
         if (i->op == IR_CMP) {
-            int n = fp_arg(F, i->a, i->w, T_R0);
             int cond;
-            fp_arg(F, i->b, i->w, n);
+            fp_args2(F, i);
             call_helper(F, fp_cmp_name(i->pred, i->w));
             t_cmp_imm(t, T_R0, 0);
             cond = cond_for(i->pred, 1);      /* the helper's signed answer */
@@ -1031,8 +1206,12 @@ static void gen_ins(struct t_fn *F, int n)
          * instruction that routinely carries no width at all. */
         case IR_MOV:
         case IR_SELECT:
-            wide = (i->dst >= 0 && F->wide[i->dst]) ||
-                   (i->op == IR_MOV && i->a >= 0 && F->wide[i->a]);
+            /* The same rule as the map's propagation, and it has to BE
+             * the same rule: a copy that says four bytes copies four,
+             * whatever the width of what it reads. */
+            wide = i->w != 4 &&
+                   ((i->dst >= 0 && F->wide[i->dst]) ||
+                    (i->op == IR_MOV && i->a >= 0 && F->wide[i->a]));
             break;
         default: break;
         }
@@ -1099,28 +1278,36 @@ static void gen_ins(struct t_fn *F, int n)
                : i->op == IR_OR  ? T_OP_ORR
                : i->op == IR_XOR ? T_OP_EOR
                : 0;                          /* IR_MUL: not an ALU op */
-        rd(F, i->a, T_ACC);
+        int ra_ = rdr(F, i->a, T_ACC);
+        int d = wreg(F, i->dst, T_ACC);
         if (i->imm_b && i->op != IR_MUL) {
             /* addw/subw reach any 0..4095 where the modified immediate
              * reaches only what it can rotate into place, and almost
              * every constant folded here is a small offset. */
             if ((i->op == IR_ADD || i->op == IR_SUB) &&
                 i->imm >= 0 && i->imm <= 4095) {
-                if (i->op == IR_ADD) t_addw(t, T_ACC, T_ACC, i->imm);
-                else                 t_subw(t, T_ACC, T_ACC, i->imm);
-            } else if (!t_alu_imm(t, op, T_ACC, T_ACC, i->imm, 0)) {
-                operand_b(F, i, T_TMP);
-                t_alu_reg(t, op, T_ACC, T_ACC, T_TMP, 0);
+                if (i->op == IR_ADD) t_addw(t, d, ra_, i->imm);
+                else                 t_subw(t, d, ra_, i->imm);
+            } else if (!t_alu_imm(t, op, d, ra_, i->imm, 0)) {
+                int rb_ = (!in_reg(F, i->b)) ? T_TMP : F->loc[i->b];
+                if (rb_ == T_TMP) operand_b(F, i, T_TMP);
+                t_alu_reg(t, op, d, ra_, rb_, 0);
             }
-            wr(F, i->dst, T_ACC);
+            wrote(F, i->dst, d);
             return;
         }
-        operand_b(F, i, T_TMP);
-        if (i->op == IR_MUL)
-            t_mul(t, T_ACC, T_ACC, T_TMP);
-        else
-            t_alu_reg(t, op, T_ACC, T_ACC, T_TMP, 0);
-        wr(F, i->dst, T_ACC);
+        {
+            /* The second operand is pinned to a scratch unless it is
+             * already in a register, so a load of it cannot land in the
+             * destination before the operation reads it. */
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? T_TMP : F->loc[i->b];
+            if (rb_ == T_TMP) operand_b(F, i, T_TMP);
+            if (i->op == IR_MUL)
+                t_mul(t, d, ra_, rb_);
+            else
+                t_alu_reg(t, op, d, ra_, rb_, 0);
+        }
+        wrote(F, i->dst, d);
         return;
     }
     case IR_DIV: case IR_MOD:
@@ -1223,22 +1410,49 @@ static void gen_ins(struct t_fn *F, int n)
         jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
         return;
 
-    case IR_LDVAR:
+    /* A LOCAL may live in a register too, and these are the only two
+     * places that name its slot directly -- so they are the two that
+     * have to ask. Reading the slot of an allocated local reads whatever
+     * the frame happened to hold. */
+    case IR_LDVAR: {
+        int d;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit local");
-        if (!t_ldst_imm(t, T_ACC, T_SP, F->slot[i->a], i->size, i->sign, 0)) {
+        d = wreg(F, i->dst, T_ACC);
+        if (in_reg(F, i->a)) {
+            if (t_ldvar_plain(i->size, i->sign, i->w)) {
+                if (d != F->loc[i->a]) t_mov_reg(t, d, F->loc[i->a]);
+            } else {
+                t_ext(t, d, F->loc[i->a], i->size, i->sign);
+            }
+        } else if (!t_ldst_imm(t, d, T_SP, F->slot[i->a], i->size,
+                               i->sign, 0)) {
             t_add_sp(t, T_ADDR, F->slot[i->a]);
-            t_ldst_imm(t, T_ACC, T_ADDR, 0, i->size, i->sign, 0);
+            t_ldst_imm(t, d, T_ADDR, 0, i->size, i->sign, 0);
         }
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
         return;
-    case IR_STVAR:
+    }
+    case IR_STVAR: {
+        int src;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit local");
-        rd(F, i->a, T_ACC);
-        if (!t_ldst_imm(t, T_ACC, T_SP, F->slot[i->dst], i->size, 0, 1)) {
+        src = rdr(F, i->a, T_ACC);
+        if (in_reg(F, i->dst)) {
+            /* A narrowing store extends, because the register now holds
+             * the whole local and only its low `size` bytes are the
+             * value. Zero-extending is what t_ldvar_plain is written to
+             * match: it calls a narrow read an operation, so every read
+             * extends for itself and is right either way. */
+            if (i->size >= 4) {
+                if (F->loc[i->dst] != src) t_mov_reg(t, F->loc[i->dst], src);
+            } else {
+                t_ext(t, F->loc[i->dst], src, i->size, 0);
+            }
+        } else if (!t_ldst_imm(t, src, T_SP, F->slot[i->dst], i->size, 0, 1)) {
             t_add_sp(t, T_ADDR, F->slot[i->dst]);
-            t_ldst_imm(t, T_ACC, T_ADDR, 0, i->size, 0, 1);
+            t_ldst_imm(t, src, T_ADDR, 0, i->size, 0, 1);
         }
         return;
+    }
     case IR_LOAD:
         if (i->w > 4) t_refuse(fn, i, "a 64-bit load");
         rd(F, i->a, T_ADDR);
@@ -1582,6 +1796,43 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
     F.va_regsave = F.va_first = -1;
+    F.loc = NULL; F.nsave = 0; F.save_at = 0;
+    if (g_t_regalloc) {
+        /* nsave is what the allocator REPORTS it took, and the prologue
+         * pushes exactly that -- so the two must be computed together.
+         * The EMBCC_T_RA_MAX gate below therefore has to clear nsave as
+         * well as loc, or the pushes stay and every stack parameter is
+         * read from the wrong offset with nothing in a register to show
+         * for it. */
+        /* `wide` here DOES mean "never eligible": this is a 32-bit
+         * machine throughout, so an eight-byte value needs a register
+         * pair and the allocator hands out one. (RISC-V had to pass NULL
+         * at RV64, where the same map means the opposite thing.)
+         *
+         * fltmap NULL: ARMv7-M's base profile has no FPU, so a float
+         * lives in a core register and must stay eligible for this pool. */
+        F.loc = ra_allocate(fn, &THUMB_RA, F.wide, NULL,
+                            F.used_callee, &F.nsave);
+        {
+            const char *lim = getenv("EMBCC_T_RA_MAX");
+            if (lim) {
+                int n = atoi(lim);
+                int keep = 0;
+                for (int v = n; v < fn->nvregs; v++)
+                    F.loc[v] = -1;
+                /* Keep only the saved registers still in use, so the
+                 * gate really is "allocate less" and not "push registers
+                 * for nothing". */
+                for (int k = 0; k < F.nsave; k++) {
+                    int used = 0;
+                    for (int v = 0; v < fn->nvregs; v++)
+                        if (F.loc[v] == F.used_callee[k]) { used = 1; break; }
+                    if (used) F.used_callee[keep++] = F.used_callee[k];
+                }
+                F.nsave = keep;
+            }
+        }
+    }
     layout(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -1607,6 +1858,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     if (fn->is_varargs)
         t_push(t, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
     push_at = t_push(t, SAVE_MASK);
+    /* The mask is PATCHED at the end with whatever callee-saved
+     * registers the allocator turned out to take: a `push` encodes them
+     * as a bitmask, so growing the set costs no extra instruction, and
+     * emitting the push before the body is what lets the frame layout be
+     * decided first. This is what t_patch_push exists for. */
     if (F.frame)
         t_sp_adjust(t, F.frame, 1);
 
@@ -1617,7 +1873,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
         struct argplace pl;
         int ncrn = 0;
         long stk = 0;
-        long base = F.frame + SAVE_BYTES;   /* the caller's outgoing area */
+        /* The caller's outgoing area, above everything this prologue
+         * pushed. SAVE_BYTES is the four fixed registers; the
+         * allocator's callee-saved ones are pushed by the SAME
+         * instruction (a mask costs no extra push) and move sp down
+         * just as far -- so leaving them out of this sum reads every
+         * stack parameter four bytes too low per register taken, which
+         * is a miscompile in any function with more arguments than the
+         * register file holds. */
+        long base = F.frame + SAVE_BYTES + (long)F.nsave * 4;
+        int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
+        int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
+        int npstk = 0;
         if (fn->is_varargs) {
             F.va_regsave = base;            /* r0-r3, four words */
             base += 16;                     /* ... then the stack ones */
@@ -1629,8 +1896,42 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
             place_arg(a->size, arg_align(a), &ncrn, &stk, &pl);
-            /* Every parameter lands in its own local's slot, which is
-             * where the body reads it. A composite's slot IS the
+            /* A parameter the allocator put in a REGISTER is one edge of
+             * a PARALLEL MOVE, deferred until every parameter has been
+             * placed: writing it here would destroy an incoming argument
+             * another parameter has not read yet. This is the second of
+             * the three sites regalloc.h names, and leaving it out is
+             * what made vreg 0 alone enough to break the suite -- the
+             * prologue stored the parameter to a slot nothing read.
+             *
+             * Only a SCALAR in one register: a pair is never allocated,
+             * and a composite's slot IS the composite. */
+            if (pl.nreg == 1 && pl.nstk == 0 && !a->is_struct &&
+                a->size <= 4 && in_reg(&F, i)) {
+                pmv_dst[npmv] = F.loc[i];
+                pmv_src[npmv] = pl.reg;
+                npmv++;
+                continue;
+            }
+            /* A scalar arriving ON THE STACK that the allocator put in a
+             * register: a LOAD into it, deferred with the moves because
+             * it writes a register another parameter may still be read
+             * from.
+             *
+             * Easy to miss, and missing it is a miscompile rather than a
+             * pessimisation: udivmod64(u64 a, u64 b, u64 *q, u64 *r) has
+             * two eight-byte arguments, so r0-r3 are spent and `q`
+             * arrives on the stack. The slot got written, every read went
+             * to the register, and the register held b's high word. */
+            if (pl.nreg == 0 && pl.nstk == 1 && !a->is_struct &&
+                a->size <= 4 && in_reg(&F, i)) {
+                pstk_reg[npstk] = F.loc[i];
+                pstk_off[npstk] = base + pl.stk;
+                npstk++;
+                continue;
+            }
+            /* Every other parameter lands in its own local's slot, which
+             * is where the body reads it. A composite's slot IS the
              * composite, so the words go straight into it. */
             for (int q = 0; q < pl.nreg; q++) {
                 long off = F.slot[i] + (long)q * 4;
@@ -1653,6 +1954,28 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
                 }
             }
         }
+        /* The parallel move, now that every parameter has been placed.
+         * T_SCR (r9) breaks a cycle: it is scratch, the prologue has
+         * already saved it, and it holds nothing of its own yet. */
+        if (npmv) {
+            int od[RA_MAXPOOL * 2], os[RA_MAXPOOL * 2];
+            int n = ra_parallel_move(pmv_dst, pmv_src, npmv, T_SCR, od, os,
+                                     (int)(sizeof od / sizeof od[0]));
+            if (n < 0)
+                internal_error("thumb: %s: the prologue's parameter "
+                               "placement is not a well-formed move",
+                               fn->name);
+            for (int k = 0; k < n; k++)
+                t_mov_reg(t, od[k], os[k]);
+        }
+        /* Then the loads: they only WRITE, so by now nothing still needs
+         * the old contents of an argument register. */
+        for (int k = 0; k < npstk; k++)
+            if (!t_ldst_imm(t, pstk_reg[k], T_SP, pstk_off[k], 4, 0, 0)) {
+                t_add_sp(t, T_ADDR, pstk_off[k]);
+                t_ldst_imm(t, pstk_reg[k], T_ADDR, 0, 4, 0, 0);
+            }
+
         /* Where the first UNNAMED argument sits — which is simply where
          * the named ones stopped. The save area and the caller's stack
          * arguments are contiguous, so one expression covers both
@@ -1669,15 +1992,25 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     F.label_off[fn->nlabels] = t->len;
     if (F.frame)
         t_sp_adjust(t, F.frame, 0);
-    if (fn->is_varargs) {
-        /* Return through lr rather than popping into pc: the four words
-         * of register save area sit above the saved registers and have
-         * to come off too, and `pop {..., pc}` would jump before that. */
-        t_pop(t, SAVE_MASK);
-        t_sp_adjust(t, 16, 0);
-        t_bx(t, T_LR);
-    } else {
-        t_pop(t, (SAVE_MASK & ~(1u << T_LR)) | (1u << T_PC));
+    {
+        /* The same set the prologue pushed: SAVE_MASK plus whatever
+         * callee-saved registers the allocator took. Built here and
+         * patched into the push below, so the two cannot disagree. */
+        unsigned mask = SAVE_MASK;
+        for (int k = 0; k < F.nsave; k++)
+            mask |= 1u << F.used_callee[k];
+        t_patch_push(t, push_at, mask);
+        if (fn->is_varargs) {
+            /* Return through lr rather than popping into pc: the four
+             * words of register save area sit above the saved registers
+             * and have to come off too, and `pop {..., pc}` would jump
+             * before that. */
+            t_pop(t, mask);
+            t_sp_adjust(t, 16, 0);
+            t_bx(t, T_LR);
+        } else {
+            t_pop(t, (mask & ~(1u << T_LR)) | (1u << T_PC));
+        }
     }
 
     for (i = 0; i < F.nfix; i++) {
@@ -1696,12 +2029,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     f->code_len = t->len - f->code_off;
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved. */
-    f->stack_bytes = (int)(F.frame + SAVE_BYTES);
-    (void)push_at;
+    f->stack_bytes = (int)(F.frame + SAVE_BYTES + F.nsave * 4);
     free(F.slot);
     free(F.label_off);
     free(F.fix);
     free(F.wide);
+    free(F.loc);
 }
 
 void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
@@ -1711,7 +2044,8 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
                         struct fsite **fs, int *nfs, int want_debug,
                         int optimize, int no_sse, int regalloc)
 {
-    (void)optimize; (void)no_sse; (void)regalloc;
+    (void)optimize; (void)no_sse;
+    g_t_regalloc = regalloc;
     if (want_debug) {
         fprintf(stderr, "embcc: error: -g is not supported for ARMv7-M yet "
                         "(the DWARF frame description would be a guess)\n");
