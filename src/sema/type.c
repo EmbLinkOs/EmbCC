@@ -598,4 +598,60 @@ int ty_aapcs64_byref(const struct type *t)
     return t && t->kind == TY_STRUCT && ty_size(t) > 16 && !ty_hfa(t, &esz);
 }
 
+/* ---- the usual conversions -------------------------------------------
+ * Moved here from sema.c unchanged. They are pure functions of types,
+ * and the parser needs ty_arith_common for `typeof(a - b)`. */
+
+struct type *ty_promote(struct type *t)
+{
+    if (t->kind == TY_CHAR || t->kind == TY_SHORT)
+        return ty_base(TY_INT, 0);
+    return t;
+}
+
+/* Usual arithmetic conversions. On LP64 the ranks that matter are
+ * int(32) and long(64), and long represents every unsigned int, so a
+ * mixed int/long keeps the long's signedness.
+ *
+ * On ILP32 there are THREE: int(32), long(32) and long long(64). The
+ * width test below still separates 64 from 32, but the answer at 64
+ * has to be `long long` and not `long`, and two 32-bit operands one of
+ * which is a `long` give a `long`. Returning ty_base(TY_LONG) at the
+ * wide branch was right while long was always eight bytes and is a
+ * silent NARROWING where it is four: `a + b` on two long longs came out
+ * as a 32-bit add. */
+struct type *ty_arith_common(struct type *a, struct type *b)
+{
+    /* Floating types outrank every integer, and long double > double >
+     * float — the usual arithmetic conversions, floating half first. */
+    if (a->kind == TY_LDOUBLE || b->kind == TY_LDOUBLE)
+        return ty_base(TY_LDOUBLE, 0);
+    if (a->kind == TY_DOUBLE || b->kind == TY_DOUBLE)
+        return ty_base(TY_DOUBLE, 0);
+    if (a->kind == TY_FLOAT || b->kind == TY_FLOAT)
+        return ty_base(TY_FLOAT, 0);
+    a = ty_promote(a);
+    b = ty_promote(b);
+    int qa = a->kind == TY_INT128, qb = b->kind == TY_INT128;
+    if (qa || qb)       /* __int128 outranks long, holds all its values */
+        return ty_base(TY_INT128, qa && qb ? a->is_unsigned || b->is_unsigned
+                                           : (qa ? a : b)->is_unsigned);
+    int wa = ty_wide(a), wb = ty_wide(b);
+    if (wa || wb) {
+        int uns;
+        if (wa && wb)
+            uns = a->is_unsigned || b->is_unsigned;
+        else
+            uns = (wa ? a : b)->is_unsigned;
+        return ty_int_of_size(8, uns);
+    }
+    if (a->kind == TY_LONG || b->kind == TY_LONG) {
+        /* Only reachable on ILP32, where a `long` is not wide. */
+        int la = a->kind == TY_LONG, lb = b->kind == TY_LONG;
+        return ty_base(TY_LONG, la && lb
+                                ? a->is_unsigned || b->is_unsigned
+                                : (la ? a : b)->is_unsigned);
+    }
+    return ty_base(TY_INT, a->is_unsigned || b->is_unsigned);
+}
 

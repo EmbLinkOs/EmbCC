@@ -1215,10 +1215,30 @@ static struct type *fold_var_type(const char *name)
 static struct type *ce_type(const struct expr *e)
 {
     switch (e->kind) {
+    case EXPR_NUM:
+    case EXPR_FNUM:
+        /* A literal is typed by the parser already, suffixes and all
+         * (`2` is int, `2UL` unsigned long, `2.0f` float), so this is
+         * the authoritative answer rather than a reconstruction.
+         * Without it `typeof(2)` failed, and so did MIN(2, 5). */
+        return e->ty;
     case EXPR_VAR:
         return fold_var_type(e->name);
     case EXPR_CAST:
         return e->cast_ty;
+    case EXPR_COND: {
+        /* `a ? b : c` -- the two arms, under the usual arithmetic
+         * conversions. The `1 ? (p) : (typeof(...)*)0` shape inside
+         * container_of goes through here. */
+        /* The CONDITION is args[0]; the two arms are lhs and rhs. */
+        struct type *at = ce_type(e->lhs);
+        struct type *bt = ce_type(e->rhs);
+        if (!at || !bt)
+            return NULL;
+        if (ty_is_arith(at) && ty_is_arith(bt))
+            return ty_arith_common(at, bt);
+        return at;
+    }
     case EXPR_DEREF: {
         struct type *t = ce_type(e->rhs);
         return t && t->kind == TY_PTR ? t->pointee : NULL;
@@ -1236,16 +1256,65 @@ static struct type *ce_type(const struct expr *e)
          * dereference above find the ELEMENT type rather than the array
          * type again. */
         struct type *lt, *rt, *t;
-        if (e->op != B_ADD && e->op != B_SUB)
-            return NULL;
         lt = ce_type(e->lhs);
-        rt = e->op == B_ADD ? ce_type(e->rhs) : NULL;
-        t = lt && (lt->kind == TY_PTR || lt->kind == TY_ARRAY) ? lt
-          : rt && (rt->kind == TY_PTR || rt->kind == TY_ARRAY) ? rt
-          : NULL;
-        if (!t)
-            return NULL;
-        return t->kind == TY_ARRAY ? ty_ptr(t->pointee) : t;
+        rt = ce_type(e->rhs);
+        if (e->op == B_ADD || e->op == B_SUB) {
+            int lp = lt && (lt->kind == TY_PTR || lt->kind == TY_ARRAY);
+            int rp = rt && (rt->kind == TY_PTR || rt->kind == TY_ARRAY);
+            /* `p - q` between two pointers is ptrdiff_t, and it is
+             * tested BEFORE the pointer-plus-integer case: the left
+             * operand is a pointer in both, so checking that first
+             * answered `int *` for a difference and the variable
+             * declared from `typeof(end - start)` held a pointer. */
+            if (e->op == B_SUB && lp && rp)
+                return ty_int_of_size(target_ptr_size(), 0);
+            t = lp ? lt : (e->op == B_ADD && rp) ? rt : NULL;
+            if (t)
+                return t->kind == TY_ARRAY ? ty_ptr(t->pointee) : t;
+        }
+        /* Everything else arithmetic: the usual arithmetic conversions,
+         * through the SAME function sema uses (ty_arith_common), so
+         * `typeof(a - b)` cannot disagree with the type the expression
+         * actually gets. This is what MIN(b.hi - b.lo, cap) needs --
+         * kernel macros take typeof of an expression far more often
+         * than of a bare name.
+         *
+         * The comparison and logical operators are `int` in C whatever
+         * their operands were. */
+        switch (e->op) {
+        case B_EQ: case B_NE: case B_LT: case B_GT: case B_LE: case B_GE:
+        case B_LAND: case B_LOR:
+            return ty_base(TY_INT, 0);
+        case B_SHL: case B_SHR:
+            /* The shift's type is the PROMOTED LEFT operand alone; the
+             * right operand does not participate. */
+            return lt && ty_is_arith(lt) ? ty_promote(lt) : NULL;
+        default:
+            break;
+        }
+        if (lt && rt && ty_is_arith(lt) && ty_is_arith(rt))
+            return ty_arith_common(lt, rt);
+        return NULL;
+    }
+    case EXPR_CALL: {
+        /* `typeof(f())` is f's return type. The callee has to be a
+         * plain name whose declaration this unit has already seen --
+         * which at parse time is the only case that can be answered,
+         * and is the one macros use. A call through a function POINTER
+         * goes through the pointee below. */
+        struct type *ft = NULL;
+        if (e->lhs && e->lhs->kind == EXPR_VAR && e->lhs->name) {
+            for (struct func *fn = g_fold_unit ? g_fold_unit->funcs : NULL;
+                 fn; fn = fn->next)
+                if (fn->name && strcmp(fn->name, e->lhs->name) == 0)
+                    return fn->ret_ty;
+            ft = fold_var_type(e->lhs->name);
+        } else if (e->lhs) {
+            ft = ce_type(e->lhs);
+        }
+        if (ft && ft->kind == TY_PTR)
+            ft = ft->pointee;
+        return ft && ft->kind == TY_FUNC ? ft->ret : NULL;
     }
     case EXPR_MEMBER: {
         struct type *bt = ce_type(e->lhs);
@@ -3049,6 +3118,23 @@ static void parse_top(struct parser *ps, struct unit *u,
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "typedef cannot be static or extern");
         advance(ps);
+        /* A typedef takes attributes in both of the places a plain
+         * declaration does, and took them in NEITHER:
+         *
+         *     typedef __attribute__((aligned(16))) int i;   before the type
+         *     typedef int i __attribute__((aligned(16)));   after the name
+         *
+         * Both were syntax errors -- "expected a type after 'typedef'"
+         * and "expected ';' before '__attribute__'" -- although the
+         * same attribute on a variable, a function or a struct
+         * definition has always worked. It is a hole in the grammar
+         * rather than a decision, and every vector typedef in
+         * existence has the second shape, which is why
+         * __attribute__((vector_size)) looked like a vector problem. */
+        struct attrs tdat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
+                              0, 0, 0, 0, 0, 0, NULL };
+        if (cur(ps)->kind == TOK_KW_ATTRIBUTE)
+            parse_attributes(ps, &tdat);
         struct type *tbase = parse_type_spec(ps, 1);
         if (!tbase)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -3060,6 +3146,24 @@ static void parse_top(struct parser *ps, struct unit *u,
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "typedef needs a name, got %s",
                            tok_describe(cur(ps)));
+            struct attrs tdone = tdat;
+            if (cur(ps)->kind == TOK_KW_ATTRIBUTE)
+                parse_attributes(ps, &tdone);
+            /* An alignment on the NAME cannot be honoured: struct type
+             * has no per-type alignment override, so the typedef would
+             * silently name a type of ordinary alignment and a DMA
+             * buffer declared through it would sit wherever it landed.
+             * Refuse by name (THE RULE) rather than misalign quietly.
+             * A struct or union that carries its own aligned/packed is
+             * unaffected -- that is applied where the struct is
+             * defined, and reaches this typedef through the type. */
+            if (tdone.aligned && tdone.aligned > ty_align(tt))
+                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "__attribute__((aligned(%d))) on a typedef is not "
+                           "supported: EmbCC carries alignment on objects and "
+                           "on struct definitions, not on a type name; put it "
+                           "on the declaration that uses '%s'",
+                           tdone.aligned, tname);
             struct type *prev = find_typedef(ps, tname);
             if (prev && !ty_equal(prev, tt))
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -3386,6 +3490,22 @@ fn_tail:
                 parse_error_line(ps, f->line,
                            "parameter %d of '%s' needs a name in a "
                            "definition", i + 1, f->name);
+        /* The parameters join the fold table before the body is read.
+         *
+         * That table is what `typeof(x)` and `sizeof(x)` resolve names
+         * through at parse time, and it held block-scope locals and
+         * file-scope globals and nothing else -- so
+         *
+         *     int f(int a) { typeof(a) b = a; ... }
+         *
+         * failed with "typeof of an unsupported expression" while the
+         * same line one scope deeper worked. A parameter is the shape
+         * that matters: min(), max() and container_of() all expand to
+         * typeof of a macro argument, which in a function is almost
+         * always a parameter. parse_top clears the table per
+         * declaration, so these are scoped to this function. */
+        for (int i = 0; i < f->nparams; i++)
+            fold_local_add(f->params[i], f->param_tys[i]);
         struct stmt *blk = parse_block(ps);
         f->body = blk->body;
         f->defined = 1;

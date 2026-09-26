@@ -166,8 +166,12 @@ p "attr on a variable"      'int g __attribute__((aligned(16)));'
 p "attr on a function"      'void f(void) __attribute__((noreturn));'
 p "attr on a struct def"    'struct s { int a; } __attribute__((packed));'
 p "attr on a typedef'd struct" 'typedef struct { int a; } __attribute__((packed)) s;'
-p "attr AFTER a typedef name" 'typedef int i __attribute__((aligned(16)));'
-p "attr BEFORE a typedef type" 'typedef __attribute__((aligned(16))) int i;'
+p "attr AFTER a typedef name" 'typedef int i __attribute__((may_alias));'
+p "attr BEFORE a typedef type" 'typedef __attribute__((may_alias)) int i;'
+# aligned() on a typedef is refused ON PURPOSE: struct type has no
+# per-type alignment, so accepting it would put a DMA buffer wherever
+# it landed. A NO here is the correct answer until that field exists.
+p "aligned() on a typedef (refused by design)" 'typedef int i __attribute__((aligned(16)));'
 
 echo "== driver options a real build passes ============================"
 for f in -ffreestanding -fno-builtin -ffunction-sections -fdata-sections \

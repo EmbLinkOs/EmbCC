@@ -272,12 +272,13 @@ static struct expr *mk_cast(struct expr *inner, struct type *to)
 
 /* C's integer promotions: everything narrower than int becomes int
  * (all narrow values fit, so the promoted type is always signed). */
-static struct type *promote(struct type *t)
-{
-    if (t->kind == TY_CHAR || t->kind == TY_SHORT)
-        return ty_base(TY_INT, 0);
-    return t;
-}
+/* promote() and arith_common() live in src/sema/type.c now, as
+ * ty_promote() and ty_arith_common(). They are pure operations on
+ * types, and the PARSER needs the second one: `typeof(a - b)` has to
+ * apply the usual arithmetic conversions, and a second copy of these
+ * rules in parse.c would be a copy that drifts. These two names stay
+ * so the rest of this file reads unchanged. */
+static struct type *promote(struct type *t) { return ty_promote(t); }
 
 /* The DEFAULT ARGUMENT promotions, which are the integer promotions
  * PLUS float -> double. Distinct from promote() on purpose: a variadic
@@ -290,50 +291,9 @@ static struct type *default_arg_promote(struct type *t)
     return promote(t);
 }
 
-/* Usual arithmetic conversions. On LP64 the ranks that matter are
- * int(32) and long(64), and long represents every unsigned int, so a
- * mixed int/long keeps the long's signedness.
- *
- * On ILP32 there are THREE: int(32), long(32) and long long(64). The
- * width test below still separates 64 from 32, but the answer at 64
- * has to be `long long` and not `long`, and two 32-bit operands one of
- * which is a `long` give a `long`. Returning ty_base(TY_LONG) at the
- * wide branch was right while long was always eight bytes and is a
- * silent NARROWING where it is four: `a + b` on two long longs came out
- * as a 32-bit add. */
 static struct type *arith_common(struct type *a, struct type *b)
 {
-    /* Floating types outrank every integer, and long double > double >
-     * float — the usual arithmetic conversions, floating half first. */
-    if (a->kind == TY_LDOUBLE || b->kind == TY_LDOUBLE)
-        return ty_base(TY_LDOUBLE, 0);
-    if (a->kind == TY_DOUBLE || b->kind == TY_DOUBLE)
-        return ty_base(TY_DOUBLE, 0);
-    if (a->kind == TY_FLOAT || b->kind == TY_FLOAT)
-        return ty_base(TY_FLOAT, 0);
-    a = promote(a);
-    b = promote(b);
-    int qa = a->kind == TY_INT128, qb = b->kind == TY_INT128;
-    if (qa || qb)       /* __int128 outranks long, holds all its values */
-        return ty_base(TY_INT128, qa && qb ? a->is_unsigned || b->is_unsigned
-                                           : (qa ? a : b)->is_unsigned);
-    int wa = ty_wide(a), wb = ty_wide(b);
-    if (wa || wb) {
-        int uns;
-        if (wa && wb)
-            uns = a->is_unsigned || b->is_unsigned;
-        else
-            uns = (wa ? a : b)->is_unsigned;
-        return ty_int_of_size(8, uns);
-    }
-    if (a->kind == TY_LONG || b->kind == TY_LONG) {
-        /* Only reachable on ILP32, where a `long` is not wide. */
-        int la = a->kind == TY_LONG, lb = b->kind == TY_LONG;
-        return ty_base(TY_LONG, la && lb
-                                ? a->is_unsigned || b->is_unsigned
-                                : (la ? a : b)->is_unsigned);
-    }
-    return ty_base(TY_INT, a->is_unsigned || b->is_unsigned);
+    return ty_arith_common(a, b);
 }
 
 static void need_scalar(struct unit *u, struct expr *e, const char *what)

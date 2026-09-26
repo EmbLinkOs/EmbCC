@@ -163,6 +163,13 @@ int ty_equal(const struct type *a, const struct type *b);
 int ty_is_integer(const struct type *t);
 int ty_is_float(const struct type *t);
 int ty_is_arith(const struct type *t);   /* integer or floating */
+
+/* The integer promotions, and the usual arithmetic conversions.
+ * Public because the PARSER needs the second one: typeof(a - b) is
+ * the type those rules give, and a second copy of them in parse.c
+ * would be a copy that drifts from the one sema uses. */
+struct type *ty_promote(struct type *t);
+struct type *ty_arith_common(struct type *a, struct type *b);
 int ty_is_scalar(const struct type *t);     /* integer or pointer */
 int ty_wide(const struct type *t);          /* 1 = 64-bit value class */
 int ty_signed_int(const struct type *t);    /* signed integer? */
