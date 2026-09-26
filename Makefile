@@ -200,9 +200,10 @@ embread: tools/embread/embread.c src/embx/embx.c src/embx/embx.h
 # embdbg reads the x86-64 decoder from src/arch/x86_64 (disasm.c) rather
 # than carrying its own: the compiler needs it for -S, and one decoder is
 # the same discipline as one encoder (R1).
-embdbg: tools/embdbg/embdbg.c src/elf/elf.h src/arch/x86_64/disasm.c \
-        src/arch/x86_64/disasm.h
-	$(CC) $(CFLAGS) -o $@ tools/embdbg/embdbg.c src/arch/x86_64/disasm.c
+embdbg: tools/embdbg/embdbg.c tools/embdbg/remote.c tools/embdbg/remote.h \
+        src/elf/elf.h src/arch/x86_64/disasm.c src/arch/x86_64/disasm.h
+	$(CC) $(CFLAGS) -o $@ tools/embdbg/embdbg.c tools/embdbg/remote.c \
+	    src/arch/x86_64/disasm.c
 
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)

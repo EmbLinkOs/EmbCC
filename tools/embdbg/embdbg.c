@@ -35,6 +35,9 @@
 #endif
 
 #include "../../src/elf/elf.h"
+#ifndef EMBDBG_NO_MAIN
+#include "remote.h"       /* the live target: a GDB remote protocol client */
+#endif
 
 /* DWARF line-program opcodes we decode. */
 #define DW_LNS_copy             0x01
@@ -143,16 +146,52 @@ static struct sec *find_sec(struct img *m, const char *name)
     return NULL;
 }
 
+/* ELFCLASS32, which the embedded targets are. Read field by field into
+ * the 64-bit shapes the rest of this file uses, because Elf32_Shdr and
+ * Elf32_Sym are not their 64-bit namesakes narrowed -- Elf32_Sym puts
+ * st_value and st_size BEFORE st_info, where Elf64_Sym puts them after.
+ * The linker does the same conversion at its own input boundary. */
+static int img_is32(struct img *m) { return m->b[4] == ELFCLASS32; }
+
 static void load_sections(struct img *m)
 {
-    Elf64_Ehdr *e = (Elf64_Ehdr *)m->b;
-    if (m->len < (long)sizeof *e || memcmp(e->e_ident, "\177ELF", 4) != 0)
+    if (m->len < 20 || memcmp(m->b, "\177ELF", 4) != 0)
         die("not an ELF file");
-    Elf64_Shdr *sh = (Elf64_Shdr *)(m->b + e->e_shoff);
-    int n = e->e_shnum;
-    const char *shstr = (const char *)(m->b + sh[e->e_shstrndx].sh_offset);
+    int n, shstrndx;
+    unsigned long shoff;
+    if (img_is32(m)) {
+        Elf32_Ehdr *e = (Elf32_Ehdr *)m->b;
+        shoff = e->e_shoff; n = e->e_shnum; shstrndx = e->e_shstrndx;
+    } else {
+        Elf64_Ehdr *e = (Elf64_Ehdr *)m->b;
+        shoff = (unsigned long)e->e_shoff; n = e->e_shnum;
+        shstrndx = e->e_shstrndx;
+    }
+    if (n == 0) {
+        /* A stripped image: no sections at all. Say so where it will be
+         * read, rather than crashing on a null string table. */
+        m->nsec = 0;
+        return;
+    }
     m->nsec = n;
     m->sec = calloc((size_t)n, sizeof *m->sec);
+    if (img_is32(m)) {
+        Elf32_Shdr *sh = (Elf32_Shdr *)(m->b + shoff);
+        const char *shstr = (const char *)(m->b + sh[shstrndx].sh_offset);
+        for (int i = 0; i < n; i++) {
+            m->sec[i].name = shstr + sh[i].sh_name;
+            m->sec[i].data = m->b + sh[i].sh_offset;
+            m->sec[i].size = sh[i].sh_size;
+            m->sec[i].off = sh[i].sh_offset;
+            m->sec[i].type = sh[i].sh_type;
+            m->sec[i].link = sh[i].sh_link;
+            m->sec[i].info = sh[i].sh_info;
+            m->sec[i].entsize = sh[i].sh_entsize;
+        }
+        return;
+    }
+    Elf64_Shdr *sh = (Elf64_Shdr *)(m->b + shoff);
+    const char *shstr = (const char *)(m->b + sh[shstrndx].sh_offset);
     for (int i = 0; i < n; i++) {
         m->sec[i].name = shstr + sh[i].sh_name;
         m->sec[i].data = m->b + sh[i].sh_offset;
@@ -165,20 +204,58 @@ static void load_sections(struct img *m)
     }
 }
 
+/* What DW_AT_frame_base names on this machine. EmbCC's DWARF makes every
+ * location a DW_OP_fbreg offset from the frame base, and printing it as
+ * `rbp` was true of the only target that existed when the printer was
+ * written. It is `x29` on aarch64, `r7` on ARM and `s0` on RISC-V, and a
+ * debugger that says rbp on a Cortex-M is telling the reader to look at
+ * a register the machine does not have. */
+static const char *frame_base_name(struct img *m)
+{
+    Elf64_Ehdr *e = (Elf64_Ehdr *)m->b;
+    switch (e->e_machine) {
+    case 183: return "x29";     /* EM_AARCH64 */
+    case 40:  return "r7";      /* EM_ARM */
+    case 243: return "s0";      /* EM_RISCV */
+    default:  return "rbp";
+    }
+}
+
 static void load_funcs(struct img *m)
 {
     struct sec *st = find_sec(m, ".symtab");
     if (!st) return;
     struct sec *strt = &m->sec[st->link];
-    Elf64_Sym *sym = (Elf64_Sym *)st->data;
-    int n = (int)(st->size / sizeof *sym);
+    int wide = !img_is32(m);
+    int entsz = wide ? (int)sizeof(Elf64_Sym) : (int)sizeof(Elf32_Sym);
+    int n = (int)(st->size / (unsigned long)entsz);
     m->fn = calloc((size_t)n, sizeof *m->fn);
     for (int i = 0; i < n; i++) {
-        if (ELF64_ST_TYPE(sym[i].st_info) != STT_FUNC || sym[i].st_size == 0)
+        const char *name;
+        unsigned long value, size;
+        unsigned char info;
+        if (wide) {
+            Elf64_Sym *sy = &((Elf64_Sym *)st->data)[i];
+            name = (const char *)strt->data + sy->st_name;
+            value = (unsigned long)sy->st_value;
+            size = (unsigned long)sy->st_size;
+            info = sy->st_info;
+        } else {
+            Elf32_Sym *sy = &((Elf32_Sym *)st->data)[i];
+            name = (const char *)strt->data + sy->st_name;
+            value = sy->st_value;
+            size = sy->st_size;
+            info = sy->st_info;
+        }
+        if (ELF64_ST_TYPE(info) != STT_FUNC || size == 0)
             continue;
-        m->fn[m->nfn].name = (const char *)strt->data + sym[i].st_name;
-        m->fn[m->nfn].addr = sym[i].st_value + (unsigned long)g_addr_bias;
-        m->fn[m->nfn].size = sym[i].st_size;
+        /* A Thumb function symbol's st_value carries the interworking
+         * bit, which is not part of the address: leaving it on puts
+         * every function one byte past where it is and no pc ever falls
+         * inside one. */
+        m->fn[m->nfn].name = name;
+        m->fn[m->nfn].addr = (value & ~1UL) + (unsigned long)g_addr_bias;
+        m->fn[m->nfn].size = size;
         m->nfn++;
     }
 }
@@ -570,9 +647,10 @@ static void list_vars(struct img *m, const struct dfunc *d)
 {
     for (int i = 0; i < d->nvars; i++) {
         struct dvar *v = &d->vars[i];
-        printf("    %-5s %-14s %-8s @ rbp%+ld\n",
+        printf("    %-5s %-14s %-8s @ %s%+ld\n",
                v->is_param ? "param" : "local",
-               type_name(m, v->type_off), v->name, v->fbreg);
+               type_name(m, v->type_off), v->name,
+               frame_base_name(m), v->fbreg);
     }
 }
 
@@ -1251,9 +1329,10 @@ static int build_detail(struct img *m, const struct dfunc *d,
     if (n < maxlines) snprintf(lines[n++], 256, "%d variable(s):", d->nvars);
     for (int v = 0; v < d->nvars && n < maxlines; v++) {
         struct dvar *dv = &d->vars[v];
-        snprintf(lines[n++], 256, "  %-5s %-12s %-8s @ rbp%+ld",
+        snprintf(lines[n++], 256, "  %-5s %-12s %-8s @ %s%+ld",
                  dv->is_param ? "param" : "local",
-                 type_name(m, dv->type_off), dv->name, dv->fbreg);
+                 type_name(m, dv->type_off), dv->name,
+                 frame_base_name(m), dv->fbreg);
     }
     return n;
 }
@@ -1575,6 +1654,328 @@ static void cmd_tui(struct img *m, int argc, char **argv)
 }
 #endif /* EMBDBG_NO_MAIN — interactive TUI */
 
+#ifndef EMBDBG_NO_MAIN
+/* ===================================================================== *
+ * LIVE DEBUGGING, over the GDB remote serial protocol.
+ *
+ * Everything above this point reads a file. This drives a RUNNING
+ * target through a stub -- QEMU's `-gdb tcp::PORT`, or OpenOCD's over
+ * JTAG/SWD to a real chip -- and hands what it reads to exactly the
+ * same symbolizer, line table and variable lists. That is the point of
+ * doing it here rather than writing a second debugger: `where` on a
+ * live Cortex-M prints what `where ADDR` prints on a crash dump,
+ * because it IS the same function underneath.
+ *
+ * docs/tools/embdbg.md §4 parked live debugging behind the EmbLinkOS
+ * kernel's own contract, which was right for a process running on
+ * EmbLinkOS and is not the only live target this compiler has any
+ * more. tools/embdbg/remote.c's header argues that at length.
+ *
+ * The session reads commands from stdin, one per line, so a script is
+ * a heredoc and the golden test is an ordinary diff. There is no
+ * readline and no raw mode here; the TUI above already owns that.
+ * ===================================================================== */
+
+struct bp { unsigned long addr; int len; int active; };
+
+struct live {
+    struct rsp r;
+    struct img *m;
+    const struct rsp_regdef *tab;
+    const char *arch;
+    int wb;                       /* bytes in a register */
+    struct bp bp[64];
+    int nbp;
+    int running;                  /* 0 once the target has exited */
+};
+
+/* Which register table, from the ELF the symbols came out of -- not
+ * from a flag, because the two cannot then disagree. */
+static const char *live_arch(struct img *m, int *wb)
+{
+    Elf64_Ehdr *e = (Elf64_Ehdr *)m->b;
+    int cls32 = e->e_ident[4] == 1;
+    *wb = cls32 ? 4 : 8;
+    switch (e->e_machine) {
+    case 183: return "aarch64";          /* EM_AARCH64 */
+    case 40:  return "arm";              /* EM_ARM */
+    case 243: return cls32 ? "riscv32" : "riscv64";
+    default:  return "x86_64";
+    }
+}
+
+static int live_pc(struct live *L, unsigned long *pc)
+{
+    unsigned long long v;
+    if (rsp_read_regs(&L->r) < 0) return -1;
+    if (rsp_reg(&L->r, L->tab, rsp_pc_name(L->arch), &v) < 0) return -1;
+    *pc = (unsigned long)v;
+    return 0;
+}
+
+/* Resolve a breakpoint location: a function name, FILE:LINE, or *ADDR.
+ * A function's name resolves PAST ITS PROLOGUE where the line table can
+ * say where that is -- the second row inside the function -- because a
+ * breakpoint on the entry address stops before the frame exists and
+ * every local reads as garbage. */
+static int resolve_loc(struct img *m, const char *spec, unsigned long *out)
+{
+    if (spec[0] == '*') { *out = strtoul(spec + 1, NULL, 0); return 0; }
+
+    const char *colon = strrchr(spec, ':');
+    if (colon && colon[1] >= '0' && colon[1] <= '9') {
+        int want = atoi(colon + 1);
+        size_t flen = (size_t)(colon - spec);
+        for (int i = 0; i < m->nrows; i++) {
+            if (m->rows[i].end || m->rows[i].line != want) continue;
+            const char *f = file_name(m, m->rows[i].file);
+            size_t n = strlen(f);
+            /* Match on the tail, so `live.c:12` finds `out/live.c`. */
+            if (n >= flen && strncmp(f + n - flen, spec, flen) == 0) {
+                *out = m->rows[i].addr;
+                return 0;
+            }
+        }
+        return -1;
+    }
+    for (int i = 0; i < m->nfn; i++) {
+        if (strcmp(m->fn[i].name, spec) != 0) continue;
+        unsigned long lo = m->fn[i].addr, hi = lo + m->fn[i].size;
+        unsigned long best = lo;
+        /* The first row strictly after the entry is the body. */
+        for (int k = 0; k < m->nrows; k++)
+            if (!m->rows[k].end && m->rows[k].addr > lo &&
+                m->rows[k].addr < hi &&
+                (best == lo || m->rows[k].addr < best))
+                best = m->rows[k].addr;
+        *out = best;
+        return 0;
+    }
+    return -1;
+}
+
+static void live_where(struct live *L)
+{
+    unsigned long pc;
+    if (live_pc(L, &pc) < 0) { printf("embdbg: cannot read the pc\n"); return; }
+    printf("stopped at 0x%lx  ", pc);
+    print_loc(L->m, pc);
+    printf("\n");
+    const struct row *r = line_at(L->m, pc);
+    if (r) print_source(file_name(L->m, r->file), r->line, 2);
+    const struct dfunc *d = dfunc_at(L->m, pc);
+    if (d && d->nvars) {
+        printf("  in %s — %d variable(s) in scope:\n", d->name, d->nvars);
+        list_vars(L->m, d);
+    }
+}
+
+/* One source-line step: single-step instructions until the line table
+ * says the line changed. Bounded, because a step that leaves the code
+ * with line info would otherwise run to the end of the program one
+ * instruction at a time. */
+static void live_step_line(struct live *L)
+{
+    unsigned long pc;
+    if (live_pc(L, &pc) < 0) return;
+    const struct row *start = line_at(L->m, pc);
+    int startline = start ? start->line : -1;
+    for (int n = 0; n < 20000; n++) {
+        int sig = 0;
+        if (rsp_step(&L->r, &sig) < 0 || sig < 0) { L->running = 0; return; }
+        if (live_pc(L, &pc) < 0) return;
+        const struct row *r = line_at(L->m, pc);
+        if (!r) continue;
+        if (r->line != startline) return;
+    }
+    printf("embdbg: 20000 instructions without reaching another source line\n");
+}
+
+static void live_regs(struct live *L)
+{
+    if (rsp_read_regs(&L->r) < 0) { printf("embdbg: cannot read registers\n"); return; }
+    int col = 0;
+    for (const struct rsp_regdef *d = L->tab; d->name; d++) {
+        unsigned long long v;
+        if (rsp_reg(&L->r, L->tab, d->name, &v) < 0) continue;
+        printf("%-5s %0*llx%s", d->name, d->size * 2, v,
+               (++col % 4) ? "  " : "\n");
+    }
+    if (col % 4) printf("\n");
+}
+
+/* A backtrace, as far as this target honestly allows.
+ *
+ * Frame 0 is always the pc. Beyond it, x86-64 has a frame-pointer chain
+ * this can walk -- the same one the crash analyser walks. The embedded
+ * backends address everything from sp and set up NO frame pointer, so
+ * there is nothing to walk there: the return-address register is frame
+ * 1 and is only right before the prologue has spilled it, which is said
+ * rather than glossed over. Proper unwinding needs .debug_frame, which
+ * -g does not emit for those targets yet. */
+static void live_bt(struct live *L)
+{
+    unsigned long pc;
+    unsigned long long fp, ra;
+    if (live_pc(L, &pc) < 0) return;
+    printf("  #0  0x%lx  ", pc); print_loc(L->m, pc); printf("\n");
+
+    if (strcmp(L->arch, "x86_64") != 0) {
+        if (rsp_reg(&L->r, L->tab, strcmp(L->arch, "arm") == 0 ? "lr" : "ra",
+                    &ra) == 0 && ra) {
+            /* An ARM return address carries the interworking bit, which
+             * is not part of the address: leaving it on reports every
+             * caller one byte past the instruction it will return to. */
+            unsigned long a = (unsigned long)ra;
+            if (strcmp(L->arch, "arm") == 0) a &= ~1UL;
+            printf("  #1  0x%lx  ", a); print_loc(L->m, a);
+            printf("   (from the return-address register)\n");
+        }
+        printf("  (no deeper: this backend keeps no frame pointer and -g\n"
+               "   emits no .debug_frame for it yet)\n");
+        return;
+    }
+    if (rsp_reg(&L->r, L->tab, rsp_fp_name(L->arch), &fp) < 0) return;
+    for (int n = 1; n < 32 && fp; n++) {
+        unsigned char w[16];
+        unsigned long long next = 0, retn = 0;
+        if (rsp_read_mem(&L->r, fp, w, 16) < 16) break;
+        for (int i = 7; i >= 0; i--) next = (next << 8) | w[i];
+        for (int i = 15; i >= 8; i--) retn = (retn << 8) | w[i];
+        if (!retn) break;
+        printf("  #%-2d 0x%llx  ", n, retn);
+        print_loc(L->m, (unsigned long)retn);
+        printf("\n");
+        if (next <= fp) break;           /* a chain must grow upward */
+        fp = next;
+    }
+}
+
+static void live_mem(struct live *L, const char *as, const char *ls)
+{
+    unsigned long addr = strtoul(as, NULL, 0);
+    int len = ls ? atoi(ls) : 32;
+    unsigned char buf[512];
+    if (len < 1) len = 1;
+    if (len > (int)sizeof buf) len = (int)sizeof buf;
+    int got = rsp_read_mem(&L->r, addr, buf, len);
+    if (got <= 0) { printf("embdbg: cannot read 0x%lx\n", addr); return; }
+    for (int i = 0; i < got; i += 16) {
+        printf("  %08lx ", addr + (unsigned)i);
+        for (int k = 0; k < 16 && i + k < got; k++) printf(" %02x", buf[i + k]);
+        printf("\n");
+    }
+}
+
+static void cmd_remote(struct img *m, int argc, char **argv)
+{
+    struct live L;
+    char host[128] = "localhost";
+    const char *port = "1234";
+    char line[512];
+
+    if (argc < 1) die("remote needs HOST:PORT or PORT");
+    {
+        const char *spec = argv[0], *c = strrchr(spec, ':');
+        if (c) {
+            size_t n = (size_t)(c - spec);
+            if (n >= sizeof host) n = sizeof host - 1;
+            memcpy(host, spec, n); host[n] = 0;
+            port = c + 1;
+        } else {
+            port = spec;                 /* a bare port means localhost */
+        }
+    }
+    memset(&L, 0, sizeof L);
+    L.m = m;
+    L.arch = live_arch(m, &L.wb);
+    L.tab = rsp_regs_for(L.arch);
+    L.running = 1;
+    if (rsp_connect(&L.r, host, port) < 0) {
+        fprintf(stderr, "embdbg: cannot reach a gdb stub at %s:%s\n",
+                host, port);
+        exit(1);
+    }
+    printf("connected to %s:%s — %s target\n", host, port, L.arch);
+    {
+        int sig = 0;
+        rsp_halt_reason(&L.r, &sig);
+    }
+    live_where(&L);
+
+    while (fgets(line, sizeof line, stdin)) {
+        char cmd[64] = "", a1[256] = "", a2[64] = "";
+        int nf = sscanf(line, "%63s %255s %63s", cmd, a1, a2);
+        if (nf < 1 || cmd[0] == '#') continue;
+
+        if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) break;
+        if (!strcmp(cmd, "where") || !strcmp(cmd, "w")) { live_where(&L); continue; }
+        if (!strcmp(cmd, "regs")) { live_regs(&L); continue; }
+        if (!strcmp(cmd, "bt")) { live_bt(&L); continue; }
+        if (!strcmp(cmd, "mem")) {
+            if (nf < 2) printf("embdbg: mem needs an address\n");
+            else live_mem(&L, a1, nf >= 3 ? a2 : NULL);
+            continue;
+        }
+        if (!strcmp(cmd, "break") || !strcmp(cmd, "b")) {
+            unsigned long addr;
+            if (nf < 2) { printf("embdbg: break needs FUNC, FILE:LINE or *ADDR\n"); continue; }
+            if (resolve_loc(m, a1, &addr) < 0) {
+                printf("embdbg: cannot resolve '%s'\n", a1);
+                continue;
+            }
+            /* The length is the instruction the stub replaces. Four is
+             * right for aarch64 and RISC-V, two for Thumb, and one is
+             * what a variable-length machine wants. */
+            int blen = !strcmp(L.arch, "x86_64") ? 1
+                     : !strcmp(L.arch, "arm")    ? 2 : 4;
+            int rc = rsp_break(&L.r, addr, blen, 1);
+            if (rc == -2) { printf("embdbg: this stub has no software breakpoints\n"); continue; }
+            if (rc < 0)   { printf("embdbg: the stub refused a breakpoint at 0x%lx\n", addr); continue; }
+            if (L.nbp < (int)(sizeof L.bp / sizeof L.bp[0])) {
+                L.bp[L.nbp].addr = addr; L.bp[L.nbp].len = blen;
+                L.bp[L.nbp].active = 1; L.nbp++;
+            }
+            printf("breakpoint %d at 0x%lx  ", L.nbp, addr);
+            print_loc(m, addr);
+            printf("\n");
+            continue;
+        }
+        if (!strcmp(cmd, "delete")) {
+            for (int i = 0; i < L.nbp; i++)
+                if (L.bp[i].active) {
+                    rsp_break(&L.r, L.bp[i].addr, L.bp[i].len, 0);
+                    L.bp[i].active = 0;
+                }
+            printf("all breakpoints removed\n");
+            continue;
+        }
+        if (!strcmp(cmd, "continue") || !strcmp(cmd, "c") ||
+            !strcmp(cmd, "step") || !strcmp(cmd, "s") ||
+            !strcmp(cmd, "stepi") || !strcmp(cmd, "si")) {
+            if (!L.running) { printf("the target has exited\n"); continue; }
+            int sig = 0;
+            if (!strcmp(cmd, "continue") || !strcmp(cmd, "c")) {
+                if (rsp_cont(&L.r, &sig) < 0) { printf("embdbg: lost the target\n"); break; }
+            } else if (!strcmp(cmd, "stepi") || !strcmp(cmd, "si")) {
+                if (rsp_step(&L.r, &sig) < 0) { printf("embdbg: lost the target\n"); break; }
+            } else {
+                live_step_line(&L);
+                if (L.running) live_where(&L);
+                continue;
+            }
+            if (sig < 0) { printf("the target exited\n"); L.running = 0; continue; }
+            live_where(&L);
+            continue;
+        }
+        printf("embdbg: unknown command '%s' "
+               "(break continue step stepi where bt regs mem delete quit)\n",
+               cmd);
+    }
+    rsp_close(&L.r);
+}
+#endif /* EMBDBG_NO_MAIN — live debugging */
+
 /* Parse one relocatable object's DWARF into a fresh model, biasing every code
  * address by `bias` (its final .text vaddr) so a .o's .text-relative addresses
  * come out absolute. */
@@ -1745,6 +2146,9 @@ int main(int argc, char **argv)
             "       embdbg FILE crash REPORT        analyze a kernel fault dump\n"
             "       embdbg FILE tui [CRASH]         rich multi-panel TUI (source/asm/regs/vars/\n"
             "                                       stack); pass a crash dump for live regs+stack\n"
+            "       embdbg FILE remote [HOST:]PORT  debug a RUNNING target through a gdb stub\n"
+            "                                       (QEMU -gdb tcp::PORT, or OpenOCD over SWD/JTAG);\n"
+            "                                       reads commands from stdin\n"
             "       embdbg FILE.o emit OUT.embdbg   convert DWARF -> native .embdbg\n"
             "   FILE may be an ELF (reads DWARF) or a .embdbg (reads it natively).\n");
         return 1;
@@ -1789,6 +2193,7 @@ int main(int argc, char **argv)
     else if (strcmp(cmd, "disassemble") == 0) cmd_disassemble(&m, argc - 3, argv + 3);
     else if (strcmp(cmd, "crash") == 0)     cmd_crash(&m, argc - 3, argv + 3);
     else if (strcmp(cmd, "tui") == 0)       cmd_tui(&m, argc - 3, argv + 3);
+    else if (strcmp(cmd, "remote") == 0)    cmd_remote(&m, argc - 3, argv + 3);
     else { fprintf(stderr, "embdbg: unknown command '%s'\n", cmd); return 1; }
     return 0;
 }

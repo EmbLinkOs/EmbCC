@@ -297,8 +297,47 @@ banner and hands control over in supervisor mode. The board's UART is at
 `0x5555` exits QEMU — so unlike a Cortex-M image, a RISC-V one can stop
 cleanly and the runner can believe its exit status.
 
+## Debugging a running board
+
+EmbDBG speaks the GDB remote serial protocol, so it drives whatever is on
+the other end of a stub — QEMU, or OpenOCD over SWD/JTAG to a real chip:
+
+```
+qemu-system-riscv64 -M virt -bios none -nographic -m 8 -kernel fw.elf -S -gdb tcp::3333 &
+embdbg fw.elf remote :3333
+```
+
+It reads commands from stdin, so a session is a script:
+
+```
+break compute          # by function, FILE:LINE, or *0xADDR
+continue
+where                  # symbolized pc, source context, locals in scope
+regs                   # by ABI name — a0..a7/s0 on RISC-V, r0..r12/sp/lr/pc on ARM
+bt
+mem 0x80001000 64
+step                   # one SOURCE line (stepi for one instruction)
+quit
+```
+
+For OpenOCD, point it at the same thing: `embdbg fw.elf remote :3333` against
+whatever port `gdb_port` is configured for.
+
+What works without `-g`: breakpoints by function name, registers, memory,
+frame 0 and the caller from the return-address register. `-g` is still
+refused on these backends, so source lines and locals need a host target
+for now.
+
+Note that `embld` keeps a **symbol table** in the image (outside every
+`PT_LOAD`, so it costs no flash). That is what makes `break compute`
+resolvable, and it also gives `llvm-objdump -d` real function names.
+
 ## What proves it
 
+- `tests/golden/embdbg-remote.sh` starts QEMU with its gdb stub on RV64,
+  RV32 and ARMv7-M, connects EmbDBG's own client, breaks on a function by
+  name, and requires the argument registers to hold what the caller
+  passed — which is what pins the per-architecture register layout.
 - `tests/golden/riscv-encoding.sh` round-trips every encoder through
   `llvm-mc --disassemble` at both widths, checks `rv_li`'s constant
   sequences by EXECUTING them over 40,000 values, and requires all

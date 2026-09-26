@@ -119,6 +119,7 @@ struct symbol {
     int defined;
     int weak;
     int common;                /* a tentative (COMMON) definition */
+    int type;                  /* STT_FUNC/STT_OBJECT/..., from the input */
     Elf64_Xword size;          /* for COMMON: the size to reserve */
     Elf64_Xword align;         /* for COMMON */
 };
@@ -700,6 +701,16 @@ static void add_symbols(struct linker *l, struct object *o)
         g->weak = weak;
         g->obj = o;
         g->value = sy->st_value;
+        /* The SIZE travels too, and not only for COMMON as it used to:
+         * a debugger filters the symbol table on STT_FUNC with a nonzero
+         * size, so a linked image whose functions all had size 0 was one
+         * EmbDBG could see no functions in. */
+        g->size = sy->st_size;
+        /* And the TYPE, from the input rather than inferred from which
+         * segment it landed in: a `const void *vectors[]` in .vectors is
+         * in the text segment and is not a function, and a debugger that
+         * is told it is will try to disassemble a table of addresses. */
+        g->type = ELF64_ST_TYPE(sy->st_info);
         g->insec = (sy->st_shndx == SHN_ABS) ? -1
                                              : o->sec_out[sy->st_shndx];
     }
@@ -1510,6 +1521,31 @@ static void apply_relocs(struct linker *l, struct object *o)
 
 /* ---- output ---- */
 
+/* A string table for the executable's own .strtab/.shstrtab. Small and
+ * local: the object writer has its own, and threading that one through
+ * the linker would couple two files that otherwise share nothing. */
+struct ltab { char *p; long len, cap; };
+
+static long ltab_add(struct ltab *t, const char *s)
+{
+    long n = (long)strlen(s) + 1, at;
+    if (!t->p) {                       /* index 0 is always the empty name */
+        t->cap = 256;
+        t->p = xmalloc((size_t)t->cap);
+        t->p[0] = 0;
+        t->len = 1;
+    }
+    if (!*s) return 0;
+    while (t->len + n > t->cap) {
+        t->cap *= 2;
+        t->p = xrealloc(t->p, (size_t)t->cap);
+    }
+    at = t->len;
+    memcpy(t->p + at, s, (size_t)n);
+    t->len += n;
+    return at;
+}
+
 static void write_exec(struct linker *l, const char *out,
                        Elf64_Addr entry,
                        Elf64_Addr text_start, Elf64_Xword text_size,
@@ -1563,7 +1599,69 @@ static void write_exec(struct linker *l, const char *out,
         ? align_up(data_off, 4)
         : align_up(data_off, pagesz) + (data_start & (pagesz - 1));
 
-    Elf64_Off total = data_off + data_filesz;
+    /* ---- a SYMBOL TABLE in the executable -----------------------------
+     *
+     * Not loaded -- the section headers and the two string tables sit
+     * outside every PT_LOAD, so a firmware image copied to flash is the
+     * segments and none of this. It costs file size and no bytes on the
+     * board, which is why every linker keeps it unless asked not to.
+     *
+     * It is here because without it a linked image is anonymous: EmbDBG
+     * could symbolize a .o and not the firmware built from it, so
+     * `embdbg fw.elf remote :1234` had nothing to say about where the
+     * target had stopped. llvm-objdump gains the same names.
+     */
+    struct { const char *name; Elf64_Addr val; Elf64_Xword size;
+             int text; int type; } *sy;
+    int nsy = 0;
+    sy = xmalloc((size_t)(l->nsym + 1) * sizeof *sy);
+    for (int i = 0; i < l->nsym; i++) {
+        struct symbol *sm = &l->syms[i];
+        if (!sm->defined || !sm->name || !*sm->name)
+            continue;
+        sy[nsy].name = sm->name;
+        sy[nsy].val = sm->value;
+        sy[nsy].size = sm->size;
+        /* STT_FUNC for anything defined in the text segment: it is what
+         * a debugger filters on, and a symbol with no size is skipped
+         * there, so the size has to travel too. */
+        sy[nsy].text = sm->insec >= 0 && l->insecs[sm->insec].seg == SEG_TEXT;
+        sy[nsy].type = sm->type ? sm->type
+                     : (sy[nsy].text ? STT_FUNC : STT_OBJECT);
+        nsy++;
+    }
+
+    int have_data = data_filesz > 0;
+    /* [0] NULL  [1] .text  ([2] .data)  .symtab  .strtab  .shstrtab */
+    int sh_text = 1, sh_data = have_data ? 2 : 0;
+    int sh_symtab = have_data ? 3 : 2;
+    int sh_strtab = sh_symtab + 1, sh_shstr = sh_symtab + 2;
+    int nsh = sh_shstr + 1;
+
+    struct ltab symstr, shstr;
+    memset(&symstr, 0, sizeof symstr);
+    memset(&shstr, 0, sizeof shstr);
+    ltab_add(&symstr, "");
+    ltab_add(&shstr, "");
+    Elf64_Word *symname = xmalloc((size_t)(nsy + 1) * sizeof *symname);
+    for (int i = 0; i < nsy; i++)
+        symname[i] = (Elf64_Word)ltab_add(&symstr, sy[i].name);
+    Elf64_Word n_text = (Elf64_Word)ltab_add(&shstr, ".text");
+    Elf64_Word n_data = have_data ? (Elf64_Word)ltab_add(&shstr, ".data") : 0;
+    Elf64_Word n_symtab = (Elf64_Word)ltab_add(&shstr, ".symtab");
+    Elf64_Word n_strtab = (Elf64_Word)ltab_add(&shstr, ".strtab");
+    Elf64_Word n_shstr = (Elf64_Word)ltab_add(&shstr, ".shstrtab");
+
+    Elf64_Xword symentsz = l->elf32 ? sizeof(Elf32_Sym) : sizeof(Elf64_Sym);
+    Elf64_Xword shentsz  = l->elf32 ? sizeof(Elf32_Shdr) : sizeof(Elf64_Shdr);
+
+    Elf64_Off sym_off = align_up(data_off + data_filesz, 8);
+    Elf64_Off symsz = (Elf64_Xword)(nsy + 1) * symentsz;   /* +1: the null */
+    Elf64_Off str_off = sym_off + symsz;
+    Elf64_Off shstr_off = str_off + symstr.len;
+    Elf64_Off sh_off = align_up(shstr_off + shstr.len, 8);
+
+    Elf64_Off total = sh_off + (Elf64_Off)nsh * shentsz;
     unsigned char *img = xcalloc(1, (size_t)total);
 
     /* Built as the 64-bit structures and written as whichever class the
@@ -1689,6 +1787,109 @@ static void write_exec(struct linker *l, const char *out,
         Elf64_Addr segva = (s->seg == SEG_TEXT) ? text_start : data_start;
         memcpy(img + base + (s->vaddr - segva), s->data, (size_t)s->size);
     }
+
+    /* ---- the symbol table and the section headers --------------------- */
+    memcpy(img + str_off, symstr.p, (size_t)symstr.len);
+    memcpy(img + shstr_off, shstr.p, (size_t)shstr.len);
+    for (int i = 0; i < nsy; i++) {
+        /* Index 0 is the reserved null entry, already zeroed. */
+        Elf64_Half shndx = (Elf64_Half)(sy[i].text ? sh_text
+                                        : (have_data ? sh_data : sh_text));
+        unsigned char info = (unsigned char)ELF64_ST_INFO(STB_GLOBAL,
+                                                          sy[i].type);
+        if (l->elf32) {
+            Elf32_Sym e;
+            memset(&e, 0, sizeof e);
+            e.st_name = symname[i];
+            e.st_value = (Elf32_Addr)sy[i].val;
+            e.st_size = (Elf32_Word)sy[i].size;
+            e.st_info = info;
+            e.st_shndx = shndx;
+            memcpy(img + sym_off + (size_t)(i + 1) * symentsz, &e, sizeof e);
+        } else {
+            Elf64_Sym e;
+            memset(&e, 0, sizeof e);
+            e.st_name = symname[i];
+            e.st_value = sy[i].val;
+            e.st_size = sy[i].size;
+            e.st_info = info;
+            e.st_shndx = shndx;
+            memcpy(img + sym_off + (size_t)(i + 1) * symentsz, &e, sizeof e);
+        }
+    }
+    {
+        /* Built as the 64-bit shape and narrowed at the one place that
+         * serialises it, exactly as the headers above are. */
+        Elf64_Shdr sh[6];
+        memset(sh, 0, sizeof sh);
+        sh[sh_text].sh_name = n_text;
+        sh[sh_text].sh_type = SHT_PROGBITS;
+        sh[sh_text].sh_flags = SHF_ALLOC | SHF_EXECINSTR;
+        sh[sh_text].sh_addr = text_start;
+        sh[sh_text].sh_offset = text_off;
+        sh[sh_text].sh_size = text_size;
+        sh[sh_text].sh_addralign = 4;
+        if (have_data) {
+            sh[sh_data].sh_name = n_data;
+            sh[sh_data].sh_type = SHT_PROGBITS;
+            sh[sh_data].sh_flags = SHF_ALLOC | SHF_WRITE;
+            sh[sh_data].sh_addr = data_start;
+            sh[sh_data].sh_offset = data_off;
+            sh[sh_data].sh_size = data_filesz;
+            sh[sh_data].sh_addralign = 4;
+        }
+        sh[sh_symtab].sh_name = n_symtab;
+        sh[sh_symtab].sh_type = SHT_SYMTAB;
+        sh[sh_symtab].sh_offset = sym_off;
+        sh[sh_symtab].sh_size = symsz;
+        sh[sh_symtab].sh_link = (Elf64_Word)sh_strtab;
+        sh[sh_symtab].sh_info = 1;     /* one local: the null entry */
+        sh[sh_symtab].sh_addralign = 8;
+        sh[sh_symtab].sh_entsize = symentsz;
+        sh[sh_strtab].sh_name = n_strtab;
+        sh[sh_strtab].sh_type = SHT_STRTAB;
+        sh[sh_strtab].sh_offset = str_off;
+        sh[sh_strtab].sh_size = (Elf64_Xword)symstr.len;
+        sh[sh_strtab].sh_addralign = 1;
+        sh[sh_shstr].sh_name = n_shstr;
+        sh[sh_shstr].sh_type = SHT_STRTAB;
+        sh[sh_shstr].sh_offset = shstr_off;
+        sh[sh_shstr].sh_size = (Elf64_Xword)shstr.len;
+        sh[sh_shstr].sh_addralign = 1;
+        for (int i = 0; i < nsh; i++) {
+            if (l->elf32) {
+                Elf32_Shdr s32;
+                memset(&s32, 0, sizeof s32);
+                s32.sh_name = sh[i].sh_name;
+                s32.sh_type = sh[i].sh_type;
+                s32.sh_flags = (Elf32_Word)sh[i].sh_flags;
+                s32.sh_addr = (Elf32_Addr)sh[i].sh_addr;
+                s32.sh_offset = (Elf32_Off)sh[i].sh_offset;
+                s32.sh_size = (Elf32_Word)sh[i].sh_size;
+                s32.sh_link = sh[i].sh_link;
+                s32.sh_info = sh[i].sh_info;
+                s32.sh_addralign = (Elf32_Word)sh[i].sh_addralign;
+                s32.sh_entsize = (Elf32_Word)sh[i].sh_entsize;
+                memcpy(img + sh_off + (size_t)i * shentsz, &s32, sizeof s32);
+            } else {
+                memcpy(img + sh_off + (size_t)i * shentsz, &sh[i], sizeof sh[i]);
+            }
+        }
+    }
+    if (l->elf32) {
+        Elf32_Ehdr *e = (Elf32_Ehdr *)img;
+        e->e_shoff = (Elf32_Off)sh_off;
+        e->e_shentsize = (Elf32_Half)shentsz;
+        e->e_shnum = (Elf32_Half)nsh;
+        e->e_shstrndx = (Elf32_Half)sh_shstr;
+    } else {
+        Elf64_Ehdr *e = (Elf64_Ehdr *)img;
+        e->e_shoff = sh_off;
+        e->e_shentsize = (Elf64_Half)shentsz;
+        e->e_shnum = (Elf64_Half)nsh;
+        e->e_shstrndx = (Elf64_Half)sh_shstr;
+    }
+    free(sy); free(symname); free(symstr.p); free(shstr.p);
 
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
