@@ -2084,18 +2084,30 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.wide = wide_map(fn);
     F.loc = NULL; F.nsave = 0;
     if (g_rv_regalloc) {
-        /* `wide` excludes the values needing a REGISTER PAIR, which at
-         * RV32 is every eight-byte one: the allocator hands out one
-         * register and a pair is not one. At RV64 that map is empty and
-         * everything is eligible -- which is why the win is larger
-         * there, and RV64 is where the slot-based code was worst.
+        /* `wide` means two different things and they must not be
+         * confused, which they were:
+         *
+         *   to this FILE it means "needs a register PAIR", which at
+         *   RV32 is every eight-byte value and at RV64 is nothing;
+         *
+         *   to ra_allocate it means "too large for a register, never
+         *   eligible".
+         *
+         * The map is built at both widths because the conversions need
+         * to tell a genuinely 64-bit source from a widened 32-bit one.
+         * Handing that same map to the allocator at RV64 marked every
+         * pointer and every `long` ineligible, and the backend emitted
+         * 294 memory operations where RV32 emitted 41 -- the whole
+         * reason RV64 stayed at 3.5x clang while RV32 reached 1.7x. An
+         * eight-byte value fits an eight-byte register: at RV64 nothing
+         * is ineligible on width grounds.
          *
          * fltmap is NULL, not cg_float_vregs: this target has no
          * floating-point register class, so a float lives in an
          * ordinary integer register and must stay ELIGIBLE for the
          * integer pool. Passing the map would exclude every float from
          * both classes and leave it with nowhere to live. */
-        F.loc = ra_allocate(fn, &RISCV_RA, F.wide, NULL,
+        F.loc = ra_allocate(fn, &RISCV_RA, xlen == 32 ? F.wide : NULL, NULL,
                             F.used_callee, &F.nsave);
         /* A BISECTION HANDLE. EMBCC_RV_RA_MAX=N leaves only the first N
          * vregs in registers and sends the rest back to memory, which
