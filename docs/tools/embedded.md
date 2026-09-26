@@ -109,14 +109,11 @@ be linked in beside EmbCC's.
 Each of these stops the compile with a message naming the construct and
 the IR operation behind it, rather than emitting something plausible:
 
-- Atomics, inline assembly, VLAs, computed `goto`, C++ exceptions,
-  `-g`.
+- Atomics, VLAs, computed `goto`, C++ exceptions, `-g`.
 
-There is also no register allocator for this target yet: every value
-lives in a stack slot, so the code is correct and roughly three times
-larger than clang's. Optimisation levels work and are worth using —
-`-Os` and `-O2` both run the full optimizer — but the win is in the IR,
-not in register assignment.
+Inline assembly DOES work now on both embedded targets — see
+[inline assembly](#inline-assembly) below — and so does register
+allocation at `-O2` and `-Os`.
 
 ## 64-bit integers
 
@@ -209,10 +206,11 @@ include what the function calls; combining the two is what a call-graph
 tool does with these files, and `embcc inspect callgraph` prints the
 graph.
 
-Expect large numbers for now — every value lives in a stack slot until
-this target has a register allocator, and the same function that takes
-80 bytes on x86-64 can take ten times that here. Code size is about
-5.3x clang's for the same sources, for the same reason.
+These are smaller than they were: the register allocator runs at `-O2`
+and `-Os`, so a value with a short enough live range never reaches the
+frame at all. Code size against clang on the same sources is about 3.7x
+for ARMv7-M and 1.7x for both RISC-V widths — down from 5.4x and
+5.4x/7.1x before the allocator.
 
 ## Interrupt handlers
 
@@ -331,6 +329,53 @@ for now.
 Note that `embld` keeps a **symbol table** in the image (outside every
 `PT_LOAD`, so it costs no flash). That is what makes `break compute`
 resolvable, and it also gives `llvm-objdump -d` real function names.
+
+## Inline assembly
+
+`asm()` works on both embedded targets. The vocabulary is what a program
+reaches inline assembly FOR and cannot say in C, rather than a general
+assembler:
+
+| | ARMv7-M | RISC-V |
+|---|---|---|
+| special registers | `mrs`/`msr` over all 14 (PRIMASK, BASEPRI, CONTROL, MSP, PSP, …) | `csrr`/`csrw`/`csrs`/`csrc` and the `csrr*` forms, over the machine and supervisor CSRs |
+| interrupt masking | `cpsid`/`cpsie i,f` | via `csrc`/`csrs mstatus` |
+| barriers | `dsb`, `dmb`, `isb` | `fence`, `fence.i` |
+| waiting | `wfi`, `wfe`, `sev`, `yield` | `wfi` |
+| returning from a trap | — | `mret`, `sret` |
+| atomics' primitives | `ldrex`/`strex` | — (no A extension under `-march=rv32im`) |
+| plus | the arithmetic, shifts, loads and stores a hand-written sequence mixes in | the same |
+
+```c
+static unsigned enter_critical(void)          /* Cortex-M */
+{
+    unsigned prev;
+    __asm__ volatile("mrs %0, primask" : "=r"(prev));
+    __asm__ volatile("cpsid i" ::: "memory");
+    return prev;
+}
+
+static unsigned long hartid(void)             /* RISC-V */
+{
+    unsigned long v;
+    __asm__ volatile("csrr %0, mhartid" : "=r"(v));
+    return v;
+}
+```
+
+Operand constraints are gcc's: `"r"`, `"m"`, `"i"`, `"="`, `"+"`,
+`%0`/`%[name]`, and a clobber list. Two things are refused rather than
+guessed at, both for the same reason:
+
+- **An instruction outside the vocabulary**, by name. A hand-written
+  assembler that guesses is worse than one that stops.
+- **A callee-saved register**, in a clobber list or named in the
+  template. EmbCC saves nothing around an asm, so writing `r5` on
+  ARMv7-M or `s2` on RISC-V would corrupt the caller silently.
+
+A `.w`/`.n` suffix on an ARM mnemonic is accepted and ignored: the
+encoder already chooses the width, and honouring the suffix would mean
+a second width policy that could disagree with the first.
 
 ## What proves it
 

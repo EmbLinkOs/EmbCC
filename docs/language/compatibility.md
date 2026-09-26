@@ -47,10 +47,14 @@ All three have: 64-bit integers, soft binary64/binary32, aggregates by
 value, varargs, and `-fstack-usage`. ARMv7-M additionally accepts
 `__attribute__((interrupt))`.
 
-None of them has: a register allocator (ARMv7-M's code is about 5.3x
-clang's), inline assembly, atomics, VLAs, computed goto, C++ exceptions,
-`-g`, or hardware floating point — `long double` arithmetic is refused
-on RISC-V rather than lowered, though its SIZE and FORMAT are right.
+All three also have a **register allocator** (at `-O2` and `-Os`) and
+**inline assembly**. Code size against clang on the same sources is
+about 3.7x for ARMv7-M and 1.7x for both RISC-V widths, down from 5.4x
+and 5.4x/7.1x when every value lived in a stack slot.
+
+None of them has: atomics, VLAs, computed goto, C++ exceptions, `-g`,
+or hardware floating point — `long double` arithmetic is refused on
+RISC-V rather than lowered, though its SIZE and FORMAT are right.
 
 The five exercise programs `tests/golden/embedded-*.c` are shared by the
 ARMv7-M and RISC-V suites: ordinary C that names no machine, run on both

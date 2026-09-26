@@ -1124,16 +1124,19 @@ The cross-compiled pairing covers these too: the caller and the callee
 are built by different compilers and the register save area has to line
 up with where the other one left the arguments.
 
-**2026-09-26, the register allocator — attempted and NOT landed.** Every
-value still lives in a stack slot, which makes this backend about 5.3x
-clang's code size over the test corpus. Wiring the shared allocator in
-(`src/arch/regalloc.c` already has the `ra_target` seam) is the obvious
-next step and was tried; it is on the `thumb-regalloc-wip` branch, and
-it is NOT on this one because it does not pass `thumb-float` at -O2 and
-a half-correct allocator is worse than none.
+**2026-09-26, the register allocator — LANDED, on the second attempt.**
+ARMv7-M is 3.7x clang now rather than 5.4x, and RISC-V, which went
+through the same sequence first, reached 1.7x at both widths.
 
-Four hazards it turned up, all real and all worth having written down
-before the next attempt:
+The first attempt is still on `thumb-regalloc-wip` and still fails
+`thumb-float` at -O2. What made the difference was not persistence but
+ORDER: `ra_parallel_move` was written and proven over 3910 shapes BEFORE
+anything used it, and the three sites below then had one routine to call
+instead of three open-codings of the same ordering. Two of the four
+hazards were fixed in shared code and never had to be found twice.
+
+The hazards, as the first attempt recorded them, with what each turned
+out to be:
 
   * **The call's argument setup is a PARALLEL MOVE.** Loading r0-r3 in
     order destroys a later argument whose value happens to live in an
@@ -1151,17 +1154,45 @@ before the next attempt:
     propagate both ways through IR_MOV and IR_SELECT, and the backend
     has to decide 64-bitness from that map rather than from `i->w`.
 
-The first three are one problem wearing three hats, and the next attempt
-should start by writing the parallel move rather than by special-casing
-each site.
+The first three were one problem wearing three hats, and the second
+attempt started by writing the parallel move — which is what made it a
+morning's work rather than a session's. The THIRD turned out to be
+solved in the shared layer all along: `ra_allocate` pins an indirect
+call's target to memory itself, because the clobber set is not visible
+to it. The FOURTH needed one change, and in one direction rather than
+two: a copy is as wide as it SAYS, so `mov.4s` from an eight-byte value
+takes its low word and does not make its destination wide. A width-less
+copy still propagates.
 
-**What it does not do yet, all refused by name:** `long double` (ARMv7-M has no FPU, so
-every operation is an `__aeabi_*` call), aggregates by value, varargs,
-atomics, inline asm, VLAs, computed goto, exceptions and `-g`. There is
-also no register allocator here yet and no linker for the target, so
-nothing has been RUN: tests/golden/thumb-codegen.sh checks that the
-object is the shape an ARM toolchain expects and that no byte of .text
-disassembles as `<unknown>`, which is what a wrong encoding looks like.
+Two hazards the first attempt did NOT record, both found the second
+time:
+
+  * **A soft-float helper is not an `IR_CALL`.** `call_int_arg_in_reg`
+    keeps a real call's arguments in memory, but `__ltdf2(a, b)` has no
+    IR_CALL, so its operands are ordinary values the allocator puts in
+    registers — and the setup then does `mov r0, r1` and loses b before
+    reading it. On a target with no FPU that is EVERY float operation,
+    and it is almost certainly what failed `thumb-float` on the branch.
+  * **The frame moves when the allocator takes a callee-saved
+    register.** They go in the same `push` as the fixed four — a mask
+    costs no extra instruction — so sp drops four bytes further per
+    register, and `base`, which locates the caller's stack arguments,
+    has to know. A stack-arriving parameter that the allocator gave a
+    register also has to be LOADED into it; `udivmod64(u64, u64, u64 *,
+    u64 *)` spends r0-r3 on its first two arguments, so `q` arrives on
+    the stack.
+
+**2026-09-26, inline assembly.** `asm()` works here now, with the CMSIS
+core set: mrs/msr over all fourteen special registers, cpsid/cpsie, the
+barriers, the wait hints, ldrex/strex, and the arithmetic a
+hand-written sequence mixes in. Thirty instructions went into emit.c
+first so thumbcheck round-trips them, and tests/golden/thumb-asm.sh
+compares the whole vocabulary against llvm-mc — which caught `adds`
+mapped onto `add` with the flag bit clear, an instruction that
+assembles, runs, and takes the wrong branch.
+
+**What it still does not do, all refused by name:** atomics, VLAs,
+computed goto, exceptions and `-g`.
 
 
 EmbLinkOS is meant to carry embedded tooling, and a compiler for embedded
@@ -1359,8 +1390,52 @@ so it appears to copy 32 bytes of arguments where it should copy a
 pointer. Nothing here exercises that target, so it is written down rather
 than changed blind.
 
+**2026-09-26, later still: the register allocator, and inline assembly.**
+Both widths reached 1.7x clang, from 5.4x and 7.1x. The sequence that
+worked, and the order matters more than any of the steps:
+
+  1. `ra_parallel_move` in the shared layer, PROVEN over 3910 shapes
+     before anything used it — because the three sites that need it
+     (a call's arguments, a prologue's parameters, an indirect call's
+     target) had produced three separate bugs when each open-coded the
+     ordering on ARMv7-M.
+  2. The allocator on with all three capability flags at 0, so calls,
+     returns and memcpy still read from slots. Correctness first.
+  3. The straight-line operations converted to compute in the allocated
+     register rather than through a scratch.
+  4. The flags on, one at a time, full matrix each.
+
+The three bugs on the way, each found by a technique the ARMv7-M
+write-up had recorded rather than by guessing: a soft-float helper's
+arguments are a parallel move the IR cannot see (there is no IR_CALL, so
+nothing marks its operands); a copy is as wide as it SAYS; and a
+variadic function's named parameters come from the spill area, not from
+their argument registers.
+
+And one that was mine alone: **`wide` means two different things.** To
+the backend it is "needs a register PAIR"; to `ra_allocate` it is "too
+large for any register". Identical at RV32 and OPPOSITE at RV64, where
+passing the same map marked every pointer ineligible — 294 memory
+operations against RV32's 41 for the same source. The map had once been
+built only at RV32, which made the conflation harmless; the guard came
+off so the float conversions could use it, and the comment asserting
+"at RV64 that map is empty" was true when written and false by the time
+it mattered.
+
+Inline assembly landed with it: the CSR instructions, the fences and the
+system instructions, all encoded through `emit.c` so compiled code and
+inline asm cannot disagree, and all compared against llvm-mc. That
+comparison caught a bare `fence` emitted as `fence rw, rw` — which
+orders memory but not device I/O, so a barrier written around an MMIO
+register would not have ordered it — and four CSRs that exist only at
+RV32. The vocabulary is derived from the privileged ISA rather than
+MEASURED from a corpus, as aarch64's was from the ARM kernel's 67
+templates; `asm.h` says so, and says to prune it when RISC-V code exists
+here to measure.
+
 **Reopen if:** the backend turns out to want separate directories after
 all — most likely if RV32 and RV64 end up needing different lowering for
 64-bit integers, which is where the widths stop being the same machine.
-It did not happen for this increment: the register-pair code is the only
-RV32-only part, and it is one clearly-marked block.
+It has not happened: the register-pair code is still the only RV32-only
+part, and the allocator's one width-dependent line (whether `wide`
+reaches `ra_allocate`) is marked as such.
