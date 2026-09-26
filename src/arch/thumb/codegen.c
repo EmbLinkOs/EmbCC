@@ -1257,14 +1257,28 @@ static void gen_ins(struct t_fn *F, int n)
             return;
         jump_to(F, i->label);
         return;
-    case IR_CONST:
-        t_mov_imm(t, T_ACC, (long)i->imm, 0);
-        wr(F, i->dst, T_ACC);
+    case IR_CONST: {
+        /* Build the constant in the destination's OWN register when it
+         * has one. Going through T_ACC and copying cost two extra
+         * instructions on the commonest operation there is, and the
+         * copy out of a high scratch cannot use a 16-bit encoding. */
+        int d = wreg(F, i->dst, T_ACC);
+        t_mov_imm(t, d, (long)i->imm, 0);
+        wrote(F, i->dst, d);
         return;
-    case IR_MOV:
-        rd(F, i->a, T_ACC);
-        wr(F, i->dst, T_ACC);
+    }
+    case IR_MOV: {
+        /* Source register to destination register, with no detour. This
+         * was `rd(a, ACC); wr(dst, ACC)`, which emitted
+         *     mov r12, r2
+         *     mov r2, r12
+         * for a copy between two allocated registers -- two
+         * instructions that together do nothing, on every move in the
+         * program. */
+        int srcr = rdr(F, i->a, T_ACC);
+        wr(F, i->dst, srcr);
         return;
+    }
 
     case IR_ADD: case IR_SUB: case IR_MUL:
     case IR_AND: case IR_OR:  case IR_XOR: {
@@ -1325,26 +1339,31 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     case IR_SHL: case IR_SHR: {
         int sh = i->op == IR_SHL ? T_SH_LSL : i->sign ? T_SH_ASR : T_SH_LSR;
-        rd(F, i->a, T_ACC);
+        int sa = rdr(F, i->a, T_ACC);
+        int d = wreg(F, i->dst, T_ACC);
         if (i->imm_b && i->imm >= 0 && i->imm < 32) {
-            t_shift_imm(t, sh, T_ACC, T_ACC, (int)i->imm, 0);
+            t_shift_imm(t, sh, d, sa, (int)i->imm, 0);
         } else {
             operand_b(F, i, T_TMP);
-            t_shift_reg(t, sh, T_ACC, T_ACC, T_TMP, 0);
+            t_shift_reg(t, sh, d, sa, T_TMP, 0);
         }
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
         return;
     }
-    case IR_NEG:
-        rd(F, i->a, T_ACC);
-        t_alu_imm(t, T_OP_RSB, T_ACC, T_ACC, 0, 0);
-        wr(F, i->dst, T_ACC);
+    case IR_NEG: {
+        int sa = rdr(F, i->a, T_ACC);
+        int d = wreg(F, i->dst, T_ACC);
+        t_alu_imm(t, T_OP_RSB, d, sa, 0, 0);
+        wrote(F, i->dst, d);
         return;
-    case IR_BNOT:
-        rd(F, i->a, T_ACC);
-        t_mvn_reg(t, T_ACC, T_ACC, 0);
-        wr(F, i->dst, T_ACC);
+    }
+    case IR_BNOT: {
+        int sa = rdr(F, i->a, T_ACC);
+        int d = wreg(F, i->dst, T_ACC);
+        t_mvn_reg(t, d, sa, 0);
+        wrote(F, i->dst, d);
         return;
+    }
 
     case IR_CMP: {
         int cond = cond_for(i->pred, i->sign);
@@ -1359,12 +1378,16 @@ static void gen_ins(struct t_fn *F, int n)
             wr(F, i->dst, T_ACC);
             return;
         }
-        rd(F, i->a, T_ACC);
+        {
+        /* The comparison reads its left operand where it already is;
+         * only the 0/1 result needs a register of its own. */
+        int sa = rdr(F, i->a, T_ACC);
         if (i->imm_b && ((i->imm >= 0 && i->imm <= 255) || t_imm_ok(i->imm))) {
-            t_cmp_imm(t, T_ACC, i->imm);
+            t_cmp_imm(t, sa, i->imm);
         } else {
             operand_b(F, i, T_TMP);
-            t_cmp_reg(t, T_ACC, T_TMP);
+            t_cmp_reg(t, sa, T_TMP);
+        }
         }
         /* 0 or 1, without an IT block: set it, then jump over the
          * clear. Two instructions either way, and no flag-liveness
@@ -1453,29 +1476,44 @@ static void gen_ins(struct t_fn *F, int n)
         }
         return;
     }
-    case IR_LOAD:
+    case IR_LOAD: {
+        /* `ldr rd, [rn]` with rd == rn is legal, so the destination
+         * may share the address's register; nothing has to be kept
+         * apart here. */
+        int an = rdr(F, i->a, T_ADDR);
+        int d = wreg(F, i->dst, T_ACC);
         if (i->w > 4) t_refuse(fn, i, "a 64-bit load");
-        rd(F, i->a, T_ADDR);
-        t_ldst_imm(t, T_ACC, T_ADDR, 0, i->size, i->sign, 0);
-        wr(F, i->dst, T_ACC);
+        t_ldst_imm(t, d, an, 0, i->size, i->sign, 0);
+        wrote(F, i->dst, d);
         return;
-    case IR_STORE:
+    }
+    case IR_STORE: {
+        int an, vr;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit store");
-        rd(F, i->a, T_ADDR);
-        rd(F, i->b, T_ACC);
-        t_ldst_imm(t, T_ACC, T_ADDR, 0, i->size, 0, 1);
+        an = rdr(F, i->a, T_ADDR);
+        /* The value must not land in the register the address is in
+         * when that register is the scratch -- rdr would overwrite it. */
+        vr = rdr(F, i->b, an == T_ACC ? T_TMP : T_ACC);
+        t_ldst_imm(t, vr, an, 0, i->size, 0, 1);
         return;
-    case IR_EXT:
-        rd(F, i->a, T_ACC);
+    }
+    case IR_EXT: {
+        int sa = rdr(F, i->a, T_ACC);
+        int d = wreg(F, i->dst, T_ACC);
         if (i->size < 4)
-            t_ext(t, T_ACC, T_ACC, i->size, i->sign);
-        wr(F, i->dst, T_ACC);
+            t_ext(t, d, sa, i->size, i->sign);
+        else if (d != sa)
+            t_mov_reg(t, d, sa);
+        wrote(F, i->dst, d);
         return;
+    }
 
-    case IR_ADDR:
-        addr_of_slot(F, i->a, T_ACC);
-        wr(F, i->dst, T_ACC);
+    case IR_ADDR: {
+        int d = wreg(F, i->dst, T_ACC);
+        addr_of_slot(F, i->a, d);
+        wrote(F, i->dst, d);
         return;
+    }
     case IR_STRADDR:
         note_str(F->st, t_mov_addr(t, T_ACC, 0), i->label, RK_THM_MOVW);
         note_str(F->st, t->len - 4, i->label, RK_THM_MOVT);
