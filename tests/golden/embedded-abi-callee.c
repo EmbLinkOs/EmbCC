@@ -1,5 +1,5 @@
 #include <stdarg.h>
-#include "thumb-abi.h"
+#include "embedded-abi.h"
 struct s1  m1(char a){ struct s1 r; r.a=a; return r; }
 struct s3  m3(int k){ struct s3 r; r.a=(char)k; r.b=(char)(k+1); r.c=(char)(k+2); return r; }
 struct s8  m8(int a,int b){ struct s8 r; r.a=a; r.b=b; return r; }

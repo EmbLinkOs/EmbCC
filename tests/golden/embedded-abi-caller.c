@@ -1,4 +1,4 @@
-#include "thumb-abi.h"
+#include "embedded-abi.h"
 extern void writec(int c); extern void puts_(const char *s); extern void putn(long v);
 int main(void){
   putn(u1(m1(7))); putn(u3(m3(1))); putn(u8(m8(3,4)));

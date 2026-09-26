@@ -177,6 +177,48 @@ for x in 32 64; do
         done
         echo "rv$x $prog: agrees with the host at four levels"
     done
+
+    # 5. The ABI, against clang ACROSS THE CALL. Every check above
+    #    compiles both sides with the same compiler, so a backend that
+    #    read the psABI consistently wrong would agree with itself all
+    #    the way through. This links an EmbCC-compiled caller against a
+    #    clang-compiled callee and the other way round, and requires all
+    #    four pairings to print the same thing.
+    #
+    #    It is where the rules that differ from AAPCS32 are actually
+    #    tested: a fixed 2*XLEN scalar in an odd register pair, a
+    #    variadic one in an even pair, an aggregate packed by bytes, one
+    #    passed by reference, and a variadic callee's register save area
+    #    lining up with where the caller left the arguments.
+    abi_pair() {            # abi_pair CALLER-CC CALLEE-CC TAG
+        for side in caller callee; do
+            eval "cc=\$$([ $side = caller ] && echo 1 || echo 2)"
+            if [ "$cc" = clang ]; then
+                "$CLANG" -target $T -march=$MARCH -mabi=$MABI \
+                    -mcmodel=medany -ffreestanding -O1 -I tests/golden \
+                    -c "tests/golden/embedded-abi-$side.c" \
+                    -o "$out/$3$x-$side.o" || {
+                    echo "$3: clang could not compile the $side"; return 1; }
+            else
+                "$EMBCC" --target=$T -O1 -I tests/golden \
+                    -c "tests/golden/embedded-abi-$side.c" \
+                    -o "$out/$3$x-$side.o" || {
+                    echo "$3: EmbCC could not compile the $side"; return 1; }
+            fi
+        done
+        run_image "$3$x" "$out/$3$x-caller.o" "$out/$3$x-callee.o" \
+                  "$out/int64$x.o"
+    }
+    abi_pair embcc embcc ee || exit 1
+    abi_pair embcc clang ec || exit 1
+    abi_pair clang embcc ce || exit 1
+    abi_pair clang clang cc || exit 1
+    for tag in ec ce cc; do
+        diff -u "$out/ee$x.txt" "$out/$tag$x.txt" > "$out/$tag$x.abidiff" || {
+            echo "rv$x: the $tag pairing disagrees with EmbCC calling itself:"
+            head -12 "$out/$tag$x.abidiff"; exit 1; }
+    done
+    echo "rv$x abi: EmbCC and clang call each other's aggregates identically"
 done
 
 [ "$any" = 1 ] || { echo "SKIP: no qemu-system-riscv32/64 found"; exit 0; }

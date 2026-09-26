@@ -205,11 +205,11 @@ abi_pair() {                    # abi_pair CALLER CALLEE TAG
         eval "which=\$cc_$side"
         if [ "$which" = clang ]; then
             "$CLANG" -target $T -ffreestanding -O1 -I tests/golden \
-                -c "tests/golden/thumb-abi-$side.c" -o "$out/$3-$side.o" || \
+                -c "tests/golden/embedded-abi-$side.c" -o "$out/$3-$side.o" || \
                 { echo "$3: clang could not compile the $side"; return 1; }
         else
             "$EMBCC" --target=$T -O1 -I tests/golden \
-                -c "tests/golden/thumb-abi-$side.c" -o "$out/$3-$side.o" || \
+                -c "tests/golden/embedded-abi-$side.c" -o "$out/$3-$side.o" || \
                 { echo "$3: EmbCC could not compile the $side"; return 1; }
         fi
     done
@@ -230,6 +230,6 @@ for tag in ec ce cc; do
         echo "the $tag pairing disagrees with EmbCC calling itself:"
         head -12 "$out/$tag.abidiff"; exit 1; }
 done
-echo "thumb-abi: EmbCC and clang call each other's aggregates identically"
+echo "embedded-abi: EmbCC and clang call each other's aggregates identically"
 
 echo "ARMv7-M images build with embld and run on $QEMU"
