@@ -39,6 +39,7 @@
 #include "emit.h"
 
 #include "../backend.h"
+#include "../regalloc.h"
 #include "../target.h"
 #include "../../driver/util.h"
 
@@ -80,6 +81,13 @@ struct rv_sites {
 
 struct rv_fn {
     struct ir_func *fn;
+    /* Per vreg: the register the allocator gave it, or -1 for one that
+     * stays in memory. NULL when the allocator did not run (-O0/-O1),
+     * which is what makes every helper below fall back to the slot
+     * path the backend had before it existed. */
+    int *loc;
+    int used_callee[RA_MAXPOOL];  /* the callee-saved ones it took */
+    int nsave;
     struct code *t;
     struct rv_sites *st;
     int xlen;            /* 32 or 64 */
@@ -91,12 +99,122 @@ struct rv_fn {
     long byref_at;       /* where the by-reference argument copies go */
     long sret_slot;      /* where the hidden result pointer is kept, or -1 */
     long ra_slot;        /* where the return address is saved */
+    long save_at;        /* ... and the allocator's callee-saved ones */
     long va_regsave;     /* a variadic function's a0-a7 spill area, or -1 */
     long va_first;       /* ... and the offset of the first UNNAMED one */
     int *label_off;      /* per label id, or -1 while unseen */
     struct { int at; int label; } *fix;
     int nfix, capfix;
 };
+
+/* ---- the register allocator's view of this machine ---------------------
+ *
+ * RISC-V hands the allocator more registers than either of the other
+ * embedded targets could dream of: eight argument registers, seven
+ * temporaries and twelve saved ones. Six are held back as scratch
+ * because the slot paths still need somewhere to land a value, and t3
+ * is the only temporary left over.
+ *
+ * Caller-saved FIRST in the preference order, which is what regalloc.h
+ * asks for: a short-lived value takes one and the prologue never has to
+ * save it.
+ */
+#define RV_NPOOL 20
+static const int RV_POOL[RV_NPOOL] = {
+    /* caller-saved: a0-a7, then the one spare temporary */
+    RV_A0, RV_A1, RV_A2, RV_A3, RV_A4, RV_A5, RV_A6, RV_A7, RV_T3,
+    /* callee-saved: s1, s2-s11. s0 is left out -- it is the frame
+     * pointer by convention and DWARF names it as the frame base, and
+     * a register the debugger believes in is not one to hand out. */
+    RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4, RV_S2 + 5,
+    RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
+};
+/* The same list with the argument file removed, for a variadic
+ * function: its prologue spills a0-a7 into the register save area and
+ * `va_arg` walks them, so those eight are not the allocator's to give.
+ */
+static const int RV_POOL_VA[RV_NPOOL - 8] = {
+    RV_T3,
+    RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4, RV_S2 + 5,
+    RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
+};
+
+static const int *rv_pool_for(const struct ir_func *fn, int *n)
+{
+    if (fn->is_varargs) {
+        *n = RV_NPOOL - 8;
+        return RV_POOL_VA;
+    }
+    *n = RV_NPOOL;
+    return RV_POOL;
+}
+
+/* s0-s11: x8, x9 and x18-x27. */
+static int rv_callee_saved(int r)
+{
+    return r == RV_FP || r == RV_S1 || (r >= RV_S2 && r <= RV_S2 + 9);
+}
+
+/* Is `dst = load(local)` a plain move here -- no extension emitted?
+ *
+ * Only at the full register width. It is tempting to say that a
+ * four-byte SIGNED read at RV64 is plain too, since the ABI's invariant
+ * is that a register holds the sign-extension of its 32-bit value -- but
+ * a local that lives in a register is written by IR_STVAR, and a
+ * NARROWING store there zero-extends (it cannot know the local's
+ * signedness). The two rules have to agree, and the pair that agrees is
+ * "narrow stores zero-extend, narrow loads always extend explicitly".
+ * The other pair would read an unsigned local as a negative number. */
+static int rv_ldvar_plain(int size, int sign, int w)
+{
+    int wb = target_ptr_size();
+    (void)sign;
+    return size == wb && w == wb;
+}
+
+/* Which instructions become a CALL the IR does not show as one. A value
+ * live across one of these may not sit in a caller-saved register.
+ *
+ * On this target that is nearly all of floating point: there is no F and
+ * no D extension under -march=rv32im/rv64im, so every arithmetic
+ * operation on a float or a double is a libgcc call. Answering this
+ * wrong is invisible until a float program is optimized, which is
+ * exactly where the parked ARMv7-M attempt went wrong. */
+static int rv_op_calls_helper(const struct ir_ins *i)
+{
+    if (i->flt)
+        return i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
+               i->op == IR_DIV || i->op == IR_CMP;
+    if (i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F)
+        return 1;
+    /* A 64-bit divide is __divdi3 at RV32 and a single instruction at
+     * RV64 -- the same IR operation, a call on one width and not the
+     * other, which is the sort of thing one backend for two machines
+     * has to keep asking rather than deciding once. */
+    return target_xlen() == 32 && (i->op == IR_DIV || i->op == IR_MOD) &&
+           i->w == 8;
+}
+
+static const struct ra_target RISCV_RA = {
+    rv_pool_for,
+    rv_callee_saved,
+    rv_ldvar_plain,
+    /* The three capability flags stay 0 for now: this backend still
+     * reads a call's arguments, a returned value and a memcpy's
+     * addresses out of their stack slots, so the allocator must leave
+     * them there. Turning each on is a change to the code that reads
+     * them, and they go on ONE AT A TIME -- the parked ARMv7-M attempt
+     * turned all three on in the same commit as the allocator itself
+     * and had four bugs interacting with no way to tell them apart. */
+    0, 0, 0,
+    rv_op_calls_helper,
+    0,            /* RISC-V is three-operand: d = a op b needs no copy */
+    NULL,         /* ABI hints: a later increment */
+    NULL, NULL    /* no FP class -- soft float lives in the core registers */
+};
+
+/* -O2 and -Os: the allocator is on. */
+static int g_rv_regalloc;
 
 /* ---- refusal ---------------------------------------------------------- */
 
@@ -177,11 +295,27 @@ static char *wide_map(struct ir_func *fn)
             int src;
             if (i->dst < 0 || i->dst >= fn->nvregs || w[i->dst])
                 continue;
+            /* ...but only a copy that does not SAY four bytes.
+             *
+             * `%d = mov.4s %s` with an eight-byte %s is a narrowing
+             * copy -- it takes the low word -- and marking %d wide for
+             * it makes the other arm of the same `?:` an eight-byte
+             * read of a four-byte value. That is harmless while
+             * everything lives in memory and the high word is merely
+             * garbage nobody reads; it is a miscompile the moment the
+             * four-byte arm gets a REGISTER, because then the slot the
+             * pair is read from was never written at all.
+             *
+             * `fits(d) ? (int)d : 0` is exactly that shape, and it is
+             * what this cost to find. A width-less MOV still
+             * propagates: w == 0 is "unknown", not "four". */
             if (i->op == IR_MOV)
-                src = i->a >= 0 && i->a < fn->nvregs && w[i->a];
+                src = i->w != 4 &&
+                      i->a >= 0 && i->a < fn->nvregs && w[i->a];
             else if (i->op == IR_SELECT)
-                src = (i->b >= 0 && i->b < fn->nvregs && w[i->b]) ||
-                      (i->c >= 0 && i->c < fn->nvregs && w[i->c]);
+                src = i->w != 4 &&
+                      ((i->b >= 0 && i->b < fn->nvregs && w[i->b]) ||
+                       (i->c >= 0 && i->c < fn->nvregs && w[i->c]));
             else
                 continue;
             if (src) {
@@ -372,7 +506,7 @@ static void layout(struct rv_fn *F)
      * stack ones. Whatever padding the alignment needs lands below them,
      * where nothing depends on it. */
     {
-        long need = off + F->w
+        long need = off + F->w + (long)F->nsave * F->w
                   + (fn->is_varargs ? (long)RV_NARGREG * F->w : 0);
         F->frame = (need + STACK_ALIGN - 1) & ~(long)(STACK_ALIGN - 1);
         if (fn->is_varargs) {
@@ -382,6 +516,11 @@ static void layout(struct rv_fn *F)
             F->va_regsave = -1;
             F->ra_slot = F->frame - F->w;
         }
+        /* The callee-saved registers the allocator took, just below the
+         * return address. Only the ones it REPORTS: a function that
+         * needed none pays for none, which is what makes the
+         * caller-saved-first preference order worth having. */
+        F->save_at = F->ra_slot - (long)F->nsave * F->w;
     }
     F->va_first = -1;
 }
@@ -426,16 +565,75 @@ static void addr_sp(struct rv_fn *F, int reg, long off)
     rv_alu(F->t, RV_ADD, reg, RV_SP, reg, 0);
 }
 
-/* Load vreg v into `reg`. Every value lives in memory here, so this is
- * always a load -- the naive part, and the part a register allocator
- * replaces. */
+/* Does the allocator have this vreg in a register? */
+static int in_reg(const struct rv_fn *F, int v)
+{
+    return F->loc && v >= 0 && F->loc[v] >= 0;
+}
+
+/* Get vreg v into `reg`, whatever it takes.
+ *
+ * Without the allocator every value lives in memory and this is always
+ * a load -- the naive part this whole file was built on. With it, a
+ * value already in a register is a MOVE, and one already in the
+ * register asked for is nothing at all.
+ *
+ * Keeping the "ends up in exactly `reg`" contract is what let the
+ * allocator land without rewriting a hundred call sites at once: every
+ * one of them stays correct, and the ones that decide code size are
+ * converted to rdr/wreg below, which skip the move entirely. */
 static void rd(struct rv_fn *F, int v, int reg)
 {
+    if (in_reg(F, v)) {
+        if (F->loc[v] != reg)
+            rv_mv(F->t, reg, F->loc[v]);
+        return;
+    }
     ld_sp(F, reg, F->slot[v], F->w, 1);
 }
 
 static void wr(struct rv_fn *F, int v, int reg)
 {
+    if (in_reg(F, v)) {
+        if (F->loc[v] != reg)
+            rv_mv(F->t, F->loc[v], reg);
+        return;
+    }
+    if (F->slot[v] < 0)
+        return;
+    st_sp(F, reg, F->slot[v], F->w);
+}
+
+/* The three that skip the move.
+ *
+ * `rdr` says where a value IS -- its own register, or `scratch` after a
+ * load -- so an operation reads it in place. `wreg` says where to
+ * compute a result, and `wrote` commits it if that was a scratch. For
+ * an allocated a, b and dst the trio turns four instructions into one:
+ *
+ *   ld t0,(a); ld t1,(b); add t0,t0,t1; sd t0,(d)  ->  add rD, rA, rB
+ *
+ * which is the whole point of an allocator on this target. */
+static int rdr(struct rv_fn *F, int v, int scratch)
+{
+    if (in_reg(F, v))
+        return F->loc[v];
+    ld_sp(F, scratch, F->slot[v], F->w, 1);
+    return scratch;
+}
+
+static int wreg(struct rv_fn *F, int v, int scratch)
+{
+    return in_reg(F, v) ? F->loc[v] : scratch;
+}
+
+static void wrote(struct rv_fn *F, int v, int reg)
+{
+    if (in_reg(F, v)) {
+        if (F->loc[v] != reg)
+            rv_mv(F->t, F->loc[v], reg);
+        return;
+    }
     if (F->slot[v] < 0)
         return;
     st_sp(F, reg, F->slot[v], F->w);
@@ -697,16 +895,63 @@ static const char *fp_cmp_name(enum binop pred, int w)
     }
 }
 
-/* Read a floating operand into the argument registers starting at `reg`,
- * and say how many it took. A double is ONE register at RV64. */
-static int fp_arg(struct rv_fn *F, int v, int w, int reg)
+/* Put `n` vregs into the argument registers a HELPER expects, all at
+ * once.
+ *
+ * This is the first of the three sites regalloc.h names, and on this
+ * target it bites where the IR cannot see it. `call_int_arg_in_reg` is
+ * 0, so the allocator leaves an IR_CALL's arguments in memory and that
+ * setup is a sequence of loads with no ordering problem. A SOFT-FLOAT
+ * HELPER is not an IR_CALL: nothing marks its operands, so they are
+ * ordinary values the allocator is free to put in registers -- and then
+ * `__ltdf2(a, b)` with a in a1 and b in a0 does `mv a0, a1` and loses b
+ * before reading it.
+ *
+ * That is what `fits(d)` compiled to at -O2, and it is why the parked
+ * ARMv7-M attempt failed thumb-float and nothing else. */
+static void set_args(struct rv_fn *F, const int *dstreg, const int *vreg,
+                     int n)
 {
-    if (w == 8 && F->xlen == 32) {
-        rd64(F, v, reg, reg + 1);
-        return 2;
+    int pd[RA_MAXPOOL], ps[RA_MAXPOOL], npm = 0;
+
+    for (int k = 0; k < n; k++)
+        if (in_reg(F, vreg[k])) {
+            pd[npm] = dstreg[k];
+            ps[npm] = F->loc[vreg[k]];
+            npm++;
+        }
+    if (npm) {
+        int od[RA_MAXPOOL * 2], os[RA_MAXPOOL * 2];
+        int m = ra_parallel_move(pd, ps, npm, SCR, od, os,
+                                 (int)(sizeof od / sizeof od[0]));
+        if (m < 0)
+            internal_error("riscv: a helper's argument setup is not a "
+                           "well-formed move");
+        for (int k = 0; k < m; k++)
+            rv_mv(F->t, od[k], os[k]);
     }
-    rd(F, v, reg);
-    return 1;
+    /* The loads come after: they only WRITE argument registers, so by
+     * now nothing still needs the old contents of one. */
+    for (int k = 0; k < n; k++)
+        if (!in_reg(F, vreg[k]))
+            ld_sp(F, dstreg[k], F->slot[vreg[k]], F->w, 1);
+}
+
+/* Both operands of a two-argument helper. A pair at RV32 is never
+ * allocated, so that case keeps the straightforward loads. */
+static void fp_args2(struct rv_fn *F, const struct ir_ins *i)
+{
+    if (i->w == 8 && F->xlen == 32) {
+        rd64(F, i->a, RV_A0, RV_A1);
+        rd64(F, i->b, RV_A2, RV_A3);
+        return;
+    }
+    {
+        int dstreg[2], vreg[2];
+        dstreg[0] = RV_A0; vreg[0] = i->a;
+        dstreg[1] = RV_A1; vreg[1] = i->b;
+        set_args(F, dstreg, vreg, 2);
+    }
 }
 
 static void fp_result(struct rv_fn *F, int dst, int w)
@@ -1222,10 +1467,9 @@ static void gen_ins(struct rv_fn *F, int n)
         if (i->w != 4 && i->w != 8)
             rv_refuse(F, i, "a long double (no binary128 arithmetic yet)");
         if (name) {
-            int used = fp_arg(F, i->a, i->w, RV_A0);
             if (i->imm_b)
                 rv_refuse(F, i, "a folded floating-point immediate");
-            fp_arg(F, i->b, i->w, RV_A0 + used);
+            fp_args2(F, i);
             call_helper(F, name);
             fp_result(F, i->dst, i->w);
             return;
@@ -1250,8 +1494,7 @@ static void gen_ins(struct rv_fn *F, int n)
             return;
         }
         if (i->op == IR_CMP) {
-            int used = fp_arg(F, i->a, i->w, RV_A0);
-            fp_arg(F, i->b, i->w, RV_A0 + used);
+            fp_args2(F, i);
             call_helper(F, fp_cmp_name(i->pred, i->w));
             rv_mv(t, TMP, RV_A0);
             cmp_to_reg(F, i->pred, 1, TMP, RV_ZERO, ACC);
@@ -1284,8 +1527,12 @@ static void gen_ins(struct rv_fn *F, int n)
         case IR_LOAD:  wide = i->dst >= 0 && F->wide[i->dst]; break;
         case IR_MOV:
         case IR_SELECT:
-            wide = (i->dst >= 0 && F->wide[i->dst]) ||
-                   (i->op == IR_MOV && i->a >= 0 && F->wide[i->a]);
+            /* The same rule as the map's propagation, and it has to be
+             * the same rule: a copy that says four bytes copies four,
+             * whatever the width of what it reads. */
+            wide = i->w != 4 &&
+                   ((i->dst >= 0 && F->wide[i->dst]) ||
+                    (i->op == IR_MOV && i->a >= 0 && F->wide[i->a]));
             break;
         default: break;
         }
@@ -1361,7 +1608,8 @@ static void gen_ins(struct rv_fn *F, int n)
                : i->op == IR_XOR ? RV_XOR
                : -1;                           /* IR_MUL: not an ALU op */
         int logical = i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR;
-        rd(F, i->a, ACC);
+        int ra_ = rdr(F, i->a, ACC);
+        int rd_ = wreg(F, i->dst, ACC);
         if (i->imm_b && i->op != IR_MUL) {
             /* The immediate forms take a SIGNED 12-bit value, and `sub`
              * has none -- a folded subtraction adds the negative. -(-2048)
@@ -1370,18 +1618,25 @@ static void gen_ins(struct rv_fn *F, int n)
             long long v = imm_val(F, i);
             if (i->op == IR_SUB) v = -v;
             if (rv_fits(v, 12)) {
-                rv_alu_imm(t, i->op == IR_SUB ? RV_ADD : op, ACC, ACC,
+                rv_alu_imm(t, i->op == IR_SUB ? RV_ADD : op, rd_, ra_,
                            (int)v, logical ? 0 : wordop);
-                wr(F, i->dst, ACC);
+                wrote(F, i->dst, rd_);
                 return;
             }
         }
-        operand_b(F, i, TMP);
-        if (i->op == IR_MUL)
-            rv_muldiv(t, RV_MUL, ACC, ACC, TMP, wordop);
-        else
-            rv_alu(t, op, ACC, ACC, TMP, logical ? 0 : wordop);
-        wr(F, i->dst, ACC);
+        {
+            /* The second operand may not land in the destination: a
+             * three-operand machine reads both before it writes, but
+             * only within ONE instruction, and `rd_` may be the
+             * register `rb_` was about to be loaded into. */
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            if (rb_ == TMP) operand_b(F, i, TMP);
+            if (i->op == IR_MUL)
+                rv_muldiv(t, RV_MUL, rd_, ra_, rb_, wordop);
+            else
+                rv_alu(t, op, rd_, ra_, rb_, logical ? 0 : wordop);
+        }
+        wrote(F, i->dst, rd_);
         return;
     }
     case IR_DIV: case IR_MOD:
@@ -1454,14 +1709,41 @@ static void gen_ins(struct rv_fn *F, int n)
                   i->label);
         return;
 
-    case IR_LDVAR:
-        ld_sp(F, ACC, F->slot[i->a], i->size, i->sign);
-        wr(F, i->dst, ACC);
+    /* A LOCAL may live in a register too, and these two are the only
+     * places that name its slot directly -- so they are the two that
+     * have to ask. Reading the slot of an allocated local is reading
+     * whatever the frame happened to hold: it is what turned a switch
+     * returning 100/200/300 into one returning 200 every time. */
+    case IR_LDVAR: {
+        int d = wreg(F, i->dst, ACC);
+        if (in_reg(F, i->a)) {
+            if (rv_ldvar_plain(i->size, i->sign, i->w)) {
+                if (d != F->loc[i->a]) rv_mv(t, d, F->loc[i->a]);
+            } else {
+                ext_reg(F, d, F->loc[i->a], i->size, i->sign);
+            }
+        } else {
+            ld_sp(F, d, F->slot[i->a], i->size, i->sign);
+        }
+        wrote(F, i->dst, d);
         return;
-    case IR_STVAR:
-        rd(F, i->a, ACC);
-        st_sp(F, ACC, F->slot[i->dst], i->size);
+    }
+    case IR_STVAR: {
+        int src = rdr(F, i->a, ACC);
+        if (in_reg(F, i->dst)) {
+            /* A narrowing store ZERO-extends: the register now holds
+             * the whole local, and only its low `size` bytes are the
+             * value. rv_ldvar_plain is written to match. */
+            if (i->size >= F->w) {
+                if (F->loc[i->dst] != src) rv_mv(t, F->loc[i->dst], src);
+            } else {
+                ext_reg(F, F->loc[i->dst], src, i->size, 0);
+            }
+        } else {
+            st_sp(F, src, F->slot[i->dst], i->size);
+        }
         return;
+    }
     case IR_LOAD:
         rd(F, i->a, ADDR);
         rv_load(t, ACC, ADDR, 0, i->size, i->sign, F->xlen);
@@ -1724,6 +2006,40 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.xlen = xlen; F.w = xlen / 8;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide_map(fn);
+    F.loc = NULL; F.nsave = 0;
+    if (g_rv_regalloc) {
+        /* `wide` excludes the values needing a REGISTER PAIR, which at
+         * RV32 is every eight-byte one: the allocator hands out one
+         * register and a pair is not one. At RV64 that map is empty and
+         * everything is eligible -- which is why the win is larger
+         * there, and RV64 is where the slot-based code was worst.
+         *
+         * fltmap is NULL, not cg_float_vregs: this target has no
+         * floating-point register class, so a float lives in an
+         * ordinary integer register and must stay ELIGIBLE for the
+         * integer pool. Passing the map would exclude every float from
+         * both classes and leave it with nowhere to live. */
+        F.loc = ra_allocate(fn, &RISCV_RA, F.wide, NULL,
+                            F.used_callee, &F.nsave);
+        /* A BISECTION HANDLE. EMBCC_RV_RA_MAX=N leaves only the first N
+         * vregs in registers and sends the rest back to memory, which
+         * is always a correct thing to do -- so a miscompile that
+         * survives at N and vanishes at N-1 names the value whose
+         * allocation is wrong.
+         *
+         * It is here rather than in a scratch patch because finding the
+         * one bad value in a function with two hundred of them is the
+         * recurring cost of this work, and the alternative is
+         * re-deriving the trick each time. */
+        {
+            const char *lim = getenv("EMBCC_RV_RA_MAX");
+            if (lim) {
+                int n = atoi(lim);
+                for (int v = n; v < fn->nvregs; v++)
+                    F.loc[v] = -1;
+            }
+        }
+    }
     layout(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -1748,6 +2064,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         }
     }
     st_sp(&F, RV_RA, F.ra_slot, F.w);
+    for (i = 0; i < F.nsave; i++)
+        st_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w);
 
     /* A variadic function spills EVERY argument register, named ones
      * included: the named ones are read out of the spill below, and the
@@ -1764,6 +2082,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         int narg = 0;
         long stk = 0;
         long base = F.frame;       /* the caller's outgoing area */
+        int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
+        int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
+        int npstk = 0;
         if (F.sret_slot >= 0) {
             st_sp(&F, argreg(0), F.sret_slot, F.w);
             narg = 1;
@@ -1799,7 +2120,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
              * slot holding whatever the frame had. */
             if (!a->is_struct) {
                 if (a->size > F.w) {
-                    /* RV32's register pair: two words, low first. */
+                    /* RV32's register pair: two words, low first. A
+                     * pair is never allocated (the `wide` map excludes
+                     * it), so both halves go to the slot. */
                     for (int q = 0; q < pl.nreg; q++)
                         st_sp(&F, param_reg(&F, &pl, q),
                               F.slot[i] + (long)q * F.w, F.w);
@@ -1808,8 +2131,45 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                         st_sp(&F, SCR,
                               F.slot[i] + (long)(pl.nreg + q) * F.w, F.w);
                     }
+                } else if (pl.nreg && in_reg(&F, i) && !fn->is_varargs) {
+                    /* ALLOCATED, and arriving in a register: this is
+                     * one edge of a PARALLEL MOVE, deferred until every
+                     * parameter has been placed. Writing it here would
+                     * destroy an incoming argument another parameter
+                     * has not read yet -- which is the second of the
+                     * three sites regalloc.h names, and the second bug
+                     * the parked ARMv7-M attempt got from open-coding
+                     * the ordering. */
+                    pmv_dst[npmv] = F.loc[i];
+                    pmv_src[npmv] = argreg(pl.reg);
+                    npmv++;
+                } else if (pl.nreg && in_reg(&F, i)) {
+                    /* A VARIADIC function's named parameters do not
+                     * come from their argument registers: the prologue
+                     * has already spilled all eight, and param_reg
+                     * reads them back out of the save area. So this is
+                     * a LOAD, not a move -- feeding param_reg's scratch
+                     * into the parallel move as a source gave every
+                     * parameter the same register and read `d` as 10.
+                     *
+                     * Loading into the allocated register is safe here
+                     * because rv_pool_for hands a variadic function no
+                     * argument register at all, so nothing being loaded
+                     * can land on a source still to be read. */
+                    pstk_reg[npstk] = F.loc[i];
+                    pstk_off[npstk] = F.va_regsave + (long)pl.reg * F.w;
+                    npstk++;
                 } else if (pl.nreg) {
                     st_sp(&F, param_reg(&F, &pl, 0), F.slot[i], F.w);
+                } else if (in_reg(&F, i)) {
+                    /* On the stack, and allocated: a load straight into
+                     * its register. Loads address off sp and so cannot
+                     * disturb an incoming argument register -- but it
+                     * could WRITE one another parameter still needs, so
+                     * it waits for the parallel move too. */
+                    pstk_reg[npstk] = F.loc[i];
+                    pstk_off[npstk] = base + pl.stk;
+                    npstk++;
                 } else {
                     ld_sp(&F, SCR, base + pl.stk, F.w, 1);
                     st_sp(&F, SCR, F.slot[i], F.w);
@@ -1846,6 +2206,25 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                 }
             }
         }
+        /* The parallel move, now that every parameter has been placed:
+         * the register-to-register edges first, in an order that
+         * destroys nothing, and then the loads -- which only WRITE
+         * argument registers, so by then no incoming one is still
+         * wanted. SCR breaks a cycle and holds nothing of its own. */
+        if (npmv) {
+            int od[RA_MAXPOOL * 2], os[RA_MAXPOOL * 2];
+            int n = ra_parallel_move(pmv_dst, pmv_src, npmv, SCR, od, os,
+                                     (int)(sizeof od / sizeof od[0]));
+            if (n < 0)
+                internal_error("riscv: %s: the prologue's parameter "
+                               "placement is not a well-formed move",
+                               fn->name);
+            for (int k = 0; k < n; k++)
+                rv_mv(t, od[k], os[k]);
+        }
+        for (int k = 0; k < npstk; k++)
+            ld_sp(&F, pstk_reg[k], pstk_off[k], F.w, 1);
+
         /* Where the first UNNAMED argument sits -- simply where the named
          * ones stopped. The save area and the caller's stack arguments
          * are contiguous, so one expression covers both cases: below
@@ -1860,6 +2239,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
 
     /* The epilogue. */
     F.label_off[fn->nlabels] = t->len;
+    for (i = 0; i < F.nsave; i++)
+        ld_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w, 1);
     ld_sp(&F, RV_RA, F.ra_slot, F.w, 1);
     if (F.frame) {
         if (rv_fits(F.frame, 12)) {
@@ -1885,6 +2266,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.label_off);
     free(F.fix);
     free(F.wide);
+    free(F.loc);
 }
 
 void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
@@ -1897,7 +2279,8 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     struct rv_sites st;
     int xlen = target_xlen();
 
-    (void)optimize; (void)no_sse; (void)regalloc;
+    (void)optimize; (void)no_sse;
+    g_rv_regalloc = regalloc;
     if (want_debug) {
         fprintf(stderr, "embcc: error: -g is not supported for RISC-V yet "
                         "(the DWARF frame description would be a guess)\n");
