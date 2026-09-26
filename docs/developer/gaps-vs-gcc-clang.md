@@ -603,14 +603,24 @@ registers across a call). Everything else is within one function.
 Part I's list was right about the surface and wrong about the weighting.
 Merged and re-ranked:
 
-1. **Fix `-S` on thumb and RISC-V** — two lines; it currently prints
-   x86 mnemonics next to RISC-V instructions.
-2. **Fix `__riscv_cmodel_medlow`** — one line; the macro contradicts the
-   backend.
-3. **`__has_include` / `__has_builtin` / `__has_attribute`** — unblocks
-   modern headers wholesale.
-4. **`__attribute__` on a `typedef`** — a few lines of declarator grammar.
-5. **`typeof` on parameters** — one function; unblocks every kernel macro.
+1. ~~**Fix `-S` on thumb and RISC-V**~~ — **DONE** (`796cd86`). Went
+   further than a refusal: `-S` now works on all five targets, with
+   per-target instruction lengths and relocation names, and
+   `tests/golden/asmout-roundtrip.sh` requires the emitted text to
+   reassemble to a byte-identical `.text` everywhere. `-o -` writing a
+   literal file named `-` was fixed in the same commit.
+2. ~~**Fix `__riscv_cmodel_medlow`**~~ — **DONE** (`796cd86`), in the
+   generator rather than the generated file.
+3. ~~**`__has_include` / `__has_builtin` / `__has_attribute`**~~ —
+   **DONE** (`b32297a`). The entire mechanism already existed behind
+   `if (!predef_is_cxx()) return 0;`. `__has_builtin` now answers from
+   sema, deriving the bit and atomic families from the same predicates
+   the dispatch uses, with a golden test that reads the dispatch and
+   requires agreement.
+4. ~~**`__attribute__` on a `typedef`**~~ — **DONE** (`de00ab2`), both
+   positions; `aligned()` refused by name rather than silently dropped.
+5. ~~**`typeof` on parameters**~~ — **DONE** (`de00ab2`), plus literals,
+   arithmetic, comparisons, shifts, `p - q`, `?:` and calls.
 6. **RISC-V compressed instructions** — 28.8% of code size, measured. No
    new optimisation needed, only encodings and a selector that prefers
    them.
