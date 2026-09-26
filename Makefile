@@ -84,6 +84,7 @@ SRCS := \
 	src/arch/thumb/codegen.c \
 	src/arch/thumb/predef.c \
 	src/arch/thumb/predef_cxx.c \
+	src/arch/riscv/emit.c \
 	src/arch/riscv32/predef.c \
 	src/arch/riscv32/predef_cxx.c \
 	src/arch/riscv64/predef.c \
