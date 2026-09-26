@@ -38,6 +38,15 @@
 #   __BITINT_MAXWIDTH__      gcc 14+ advertises C23 _BitInt with it; EmbCC
 #                            has no _BitInt, so a header testing it must not
 #                            be told otherwise.
+# The `c` in -march=rv32imc/rv64imc is the compressed extension, which
+# the backend now emits (src/arch/riscv/emit.c rv_compress). It is asked
+# for here so __riscv_c and __riscv_compressed are defined, because code
+# that tests them and gets the wrong answer picks the wrong instruction
+# sizes -- a hand-written trampoline, a vector table, anything that
+# counts bytes. NOT `a`: EmbCC lowers the atomic builtins without
+# lr/sc, so claiming the A extension would be claiming instructions it
+# never emits.
+#
 # -mcmodel=medany is asked for explicitly, and is not a detail either.
 # Clang defaults to medlow and then defines __riscv_cmodel_medlow, but
 # the backend emits MEDANY at both widths -- PC-relative auipc, because
@@ -73,9 +82,9 @@ refflags() {
         thumb)   [ -n "${EMBCC_REF_GCC_THUMB:-}" ] || \
                      echo "-target thumbv7m-none-eabi -ffreestanding" ;;
         riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
-                     echo "-target riscv32-unknown-elf -march=rv32im -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
+                     echo "-target riscv32-unknown-elf -march=rv32imc -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
         riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
-                     echo "-target riscv64-unknown-elf -march=rv64im -mabi=lp64 -mcmodel=medany -ffreestanding" ;;
+                     echo "-target riscv64-unknown-elf -march=rv64imc -mabi=lp64 -mcmodel=medany -ffreestanding" ;;
         *)       ;;
     esac
 }

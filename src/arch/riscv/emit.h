@@ -86,6 +86,32 @@ void rv_li(struct code *c, int rd, long long v, int xlen);
  * needs the size before it commits to a branch distance. */
 int rv_li_len(long long v, int xlen);
 
+/* The C extension, derived rather than restated: given a canonical
+ * 32-bit encoding, the 16-bit form that denotes exactly the same
+ * instruction, or 0 when there is none (0 is a defined ILLEGAL
+ * compressed encoding, so it cannot be mistaken for an answer).
+ *
+ * Compression happens at one chokepoint rather than in the selector,
+ * so it cannot disagree with the long form it came from -- see the
+ * note above the implementation. tools/riscvcheck --c32/--c64 checks
+ * every form against llvm-mc, which compresses on its own. */
+unsigned rv_compress(unsigned long w, int xlen);
+
+/* Every RISC-V instruction becomes bytes here, so this is where the
+ * compressed form is substituted. rv_set_compress() turns it on for a
+ * target that has the C extension, and OFF around the three sequences
+ * that measure a distance in bytes instead of recording an offset --
+ * see the note above rv_w's implementation. */
+void rv_w(struct code *c, unsigned long w);
+void rv_cunimp(struct code *c);   /* two bytes, and it traps */
+
+/* auipc rd,0 ; addi rd,rd,0 -- a PC-relative address's two halves,
+ * both left for relocation, and never compressed (addi rd,rd,0 is
+ * c.mv). Returns the auipc's offset; the addi is at +4. */
+int rv_pcrel_pair(struct code *c, int rd);
+void rv_set_compress(int on, int xlen);
+int  rv_compress_enabled(void);
+
 /* ---- arithmetic and logic ------------------------------------------- */
 
 /* The operations, numbered by their funct3 where that is unique and by a

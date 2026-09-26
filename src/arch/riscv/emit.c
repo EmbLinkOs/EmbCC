@@ -109,19 +109,326 @@ unsigned long rv_enc_j(int op, int rd, int imm)
 
 /* ---- moves and constants -------------------------------------------- */
 
+/* ---- the C extension: compressing what was already encoded ----------
+ *
+ * Every RISC-V instruction this backend emits passes through rv_w(),
+ * so compression happens in ONE place: take the canonical 32-bit
+ * encoding, ask whether a 16-bit form denotes exactly the same thing,
+ * and emit that instead.
+ *
+ * That is deliberately not how GCC and LLVM do it. There a compressed
+ * instruction is a separate definition the selector may choose, or a
+ * later relaxation pass over a stream. Both mean two descriptions of
+ * one instruction, and this file's whole argument (see the header) is
+ * that a second description is a second chance to be wrong. Deriving
+ * the short form FROM the long one cannot disagree with it: if the
+ * decode below is wrong, the referee catches it on the instruction
+ * itself rather than on some path the selector happens to take.
+ *
+ * What is deliberately NOT compressed:
+ *
+ *   branches and jumps -- their displacement is patched in later
+ *     (rv_patch_b / rv_patch_j), so the word passing through here
+ *     carries a placeholder, and a decision made on a placeholder is
+ *     not a decision. c.j and c.beqz are left on the table.
+ *   anything inside a no-compress region -- three sequences measure a
+ *     distance in bytes rather than recording an offset (the skip in
+ *     codegen.c, the auipc/jalr call pair, and the linker's entry
+ *     stub sized by rv_li_len). Shortening an instruction under them
+ *     moves their target.
+ *
+ * Returns the 16-bit encoding, or 0 -- which is not a valid compressed
+ * instruction (it is a defined illegal encoding), so it doubles as
+ * "no short form".
+ */
+
+/* x8..x15 are the eight registers the three-bit fields can name. */
+static int creg(int r) { return r >= 8 && r <= 15 ? r - 8 : -1; }
+
+static unsigned cr_ca(unsigned op, unsigned f6, int rd_, unsigned f2, int rs2_)
+{
+    return op | ((unsigned)rs2_ << 2) | (f2 << 5) | ((unsigned)rd_ << 7) |
+           (f6 << 10);
+}
+
+unsigned rv_compress(unsigned long w, int xlen)
+{
+    unsigned op    = (unsigned)(w & 0x7f);
+    int rd         = (int)((w >> 7) & 0x1f);
+    unsigned f3    = (unsigned)((w >> 12) & 7);
+    int rs1        = (int)((w >> 15) & 0x1f);
+    int rs2        = (int)((w >> 20) & 0x1f);
+    unsigned f7    = (unsigned)((w >> 25) & 0x7f);
+    /* Both immediates are TWELVE bits and must be sign-extended from
+     * bit 11 by hand. `(long)w >> 20` does not do it: w holds a
+     * zero-extended 32-bit word, so the arithmetic shift has only
+     * zeros above it and -32 arrives as 4064. Every negative immediate
+     * then failed the range test and nothing with one was ever
+     * compressed -- which is a missed encoding rather than a wrong
+     * one, and so invisible to anything but a referee that sweeps the
+     * operand space. */
+    int immi       = (int)((w >> 20) & 0xfff);                 /* I */
+    if (immi & 0x800) immi -= 0x1000;
+    int imms       = (int)((((w >> 25) & 0x7f) << 5) | ((w >> 7) & 0x1f));
+    if (imms & 0x800) imms -= 0x1000;                          /* S */
+    int rdc = creg(rd), rs1c = creg(rs1), rs2c = creg(rs2);
+
+    switch (op) {
+    case 0x13:                                                 /* OP_IMM */
+        if (f3 == 0) {                                         /* addi */
+            if (rd == 0 && rs1 == 0 && immi == 0)
+                return 0x0001;                                 /* c.nop */
+            if (rd != 0 && rs1 == rd && immi != 0 && immi >= -32 && immi < 32)
+                return 0x0001u | ((unsigned)(immi & 0x1f) << 2) |
+                       ((unsigned)rd << 7) | ((unsigned)(immi < 0) << 12);
+            if (rd != 0 && rs1 == 0 && immi >= -32 && immi < 32)
+                return 0x4001u | ((unsigned)(immi & 0x1f) << 2) |
+                       ((unsigned)rd << 7) | ((unsigned)(immi < 0) << 12);
+            /* c.mv. This backend spells a register move `addi rd, rs, 0`
+             * (rv_mv), not `add rd, zero, rs`, so the C2 form has to be
+             * reached from the OP_IMM side as well as the OP side --
+             * eleven of the referee's thirteen first misses were this
+             * one instruction. rs1 != 0 keeps it clear of c.jr, which
+             * shares the opcode and differs by having a zero rs2. */
+            if (rd != 0 && rs1 != 0 && immi == 0)
+                return 0x8002u | ((unsigned)rs1 << 2) | ((unsigned)rd << 7);
+            if (rd == 2 && rs1 == 2 && immi != 0 && (immi & 15) == 0 &&
+                immi >= -512 && immi < 512) {                  /* c.addi16sp */
+                unsigned i = (unsigned)immi;
+                return 0x6101u |
+                       (((i >> 5) & 1) << 2) | (((i >> 7) & 3) << 3) |
+                       (((i >> 6) & 1) << 5) | (((i >> 4) & 1) << 6) |
+                       (((i >> 9) & 1) << 12);
+            }
+            if (rdc >= 0 && rs1 == 2 && immi > 0 && immi < 1024 &&
+                (immi & 3) == 0) {                             /* c.addi4spn */
+                unsigned i = (unsigned)immi;
+                return 0x0000u | ((unsigned)rdc << 2) |
+                       (((i >> 3) & 1) << 5) | (((i >> 2) & 1) << 6) |
+                       (((i >> 6) & 0xf) << 7) | (((i >> 4) & 3) << 11);
+            }
+        }
+        if (f3 == 7 && rdc >= 0 && rs1 == rd && immi >= -32 && immi < 32)
+            return 0x8801u | ((unsigned)(immi & 0x1f) << 2) |
+                   ((unsigned)rdc << 7) | ((unsigned)(immi < 0) << 12);   /* c.andi */
+        if (f3 == 1 && rd != 0 && rs1 == rd && f7 <= 1) {       /* slli */
+            int sh = (int)((w >> 20) & (xlen == 64 ? 0x3f : 0x1f));
+            if (sh != 0 && (xlen == 64 || sh < 32))
+                return 0x0002u | ((unsigned)(sh & 0x1f) << 2) |
+                       ((unsigned)rd << 7) | ((unsigned)((sh >> 5) & 1) << 12);
+        }
+        if (f3 == 5 && rdc >= 0 && rs1 == rd) {                 /* srli/srai */
+            int sh = (int)((w >> 20) & (xlen == 64 ? 0x3f : 0x1f));
+            unsigned kind = (f7 & 0x20) ? 1u : 0u;              /* srai */
+            if (sh != 0 && (xlen == 64 || sh < 32))
+                return 0x8001u | ((unsigned)(sh & 0x1f) << 2) |
+                       ((unsigned)rdc << 7) | (kind << 10) |
+                       ((unsigned)((sh >> 5) & 1) << 12);
+        }
+        return 0;
+
+    case 0x1b:                                                  /* OP_IMM32 */
+        /* c.addiw exists only at RV64, and unlike c.addi it permits a
+         * zero immediate (addiw rd,rd,0 is the canonical sext.w). */
+        if (xlen == 64 && f3 == 0 && rd != 0 && rs1 == rd &&
+            immi >= -32 && immi < 32)
+            return 0x2001u | ((unsigned)(immi & 0x1f) << 2) |
+                   ((unsigned)rd << 7) | ((unsigned)(immi < 0) << 12);
+        /* `addiw rd, x0, imm` is c.li, not c.addiw: with a source of
+         * x0 the 32-bit result's sign extension is the value itself
+         * for anything the six-bit field can hold, so the two are the
+         * same instruction. sext.w rd, x0 -- addiw rd, x0, 0 -- is the
+         * common way in. */
+        if (xlen == 64 && f3 == 0 && rd != 0 && rs1 == 0 &&
+            immi >= -32 && immi < 32)
+            return 0x4001u | ((unsigned)(immi & 0x1f) << 2) |
+                   ((unsigned)rd << 7) | ((unsigned)(immi < 0) << 12);
+        return 0;
+
+    case 0x37: {                                                /* lui */
+        int hi = (int)(w >> 12) & 0xfffff;
+        int s = (hi & 0x80000) ? hi - 0x100000 : hi;
+        if (rd != 0 && rd != 2 && s != 0 && s >= -32 && s < 32)
+            return 0x6001u | ((unsigned)(s & 0x1f) << 2) |
+                   ((unsigned)rd << 7) | ((unsigned)(s < 0) << 12);
+        return 0;
+    }
+
+    case 0x33:                                                  /* OP */
+        if (f3 == 0 && f7 == 0) {                               /* add */
+            if (rd != 0 && rs1 == 0 && rs2 != 0)
+                return 0x8002u | ((unsigned)rs2 << 2) | ((unsigned)rd << 7);
+            /* `add rd, rs1, x0` is a move too -- addition is
+             * commutative and x0 is the zero, so either operand may be
+             * the one that vanishes. Missing this side cost twelve
+             * instructions in the sweep. */
+            if (rd != 0 && rs2 == 0 && rs1 != 0)
+                return 0x8002u | ((unsigned)rs1 << 2) | ((unsigned)rd << 7);
+            if (rd != 0 && rs1 == rd && rs2 != 0)
+                return 0x9002u | ((unsigned)rs2 << 2) | ((unsigned)rd << 7);
+        }
+        if (rdc >= 0 && rs2c >= 0 && rs1 == rd) {
+            if (f3 == 0 && f7 == 0x20) return cr_ca(0x8001u, 0x23, rdc, 0, rs2c);
+            if (f3 == 4 && f7 == 0)    return cr_ca(0x8001u, 0x23, rdc, 1, rs2c);
+            if (f3 == 6 && f7 == 0)    return cr_ca(0x8001u, 0x23, rdc, 2, rs2c);
+            if (f3 == 7 && f7 == 0)    return cr_ca(0x8001u, 0x23, rdc, 3, rs2c);
+        }
+        return 0;
+
+    case 0x3b:                                                  /* OP32 */
+        if (xlen == 64 && rdc >= 0 && rs2c >= 0 && rs1 == rd && f3 == 0) {
+            if (f7 == 0x20) return cr_ca(0x9001u, 0x27, rdc, 0, rs2c);
+            if (f7 == 0)    return cr_ca(0x9001u, 0x27, rdc, 1, rs2c);
+        }
+        return 0;
+
+    case 0x03:                                                  /* LOAD */
+        if (f3 == 2) {                                          /* lw */
+            if (rd != 0 && rs1 == 2 && immi >= 0 && immi < 256 &&
+                (immi & 3) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x4002u | (((i >> 6) & 3) << 2) | (((i >> 2) & 7) << 4) |
+                       (((i >> 5) & 1) << 12) | ((unsigned)rd << 7);
+            }
+            if (rdc >= 0 && rs1c >= 0 && immi >= 0 && immi < 128 &&
+                (immi & 3) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x4000u | ((unsigned)rdc << 2) | (((i >> 6) & 1) << 5) |
+                       (((i >> 2) & 1) << 6) | ((unsigned)rs1c << 7) |
+                       (((i >> 3) & 7) << 10);
+            }
+        }
+        if (f3 == 3 && xlen == 64) {                            /* ld */
+            if (rd != 0 && rs1 == 2 && immi >= 0 && immi < 512 &&
+                (immi & 7) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x6002u | (((i >> 6) & 7) << 2) | (((i >> 3) & 3) << 5) |
+                       (((i >> 5) & 1) << 12) | ((unsigned)rd << 7);
+            }
+            if (rdc >= 0 && rs1c >= 0 && immi >= 0 && immi < 256 &&
+                (immi & 7) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x6000u | ((unsigned)rdc << 2) | (((i >> 6) & 3) << 5) |
+                       ((unsigned)rs1c << 7) | (((i >> 3) & 7) << 10);
+            }
+        }
+        return 0;
+
+    case 0x23:                                                  /* STORE */
+        if (f3 == 2) {                                          /* sw */
+            if (rs1 == 2 && imms >= 0 && imms < 256 && (imms & 3) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xc002u | ((unsigned)rs2 << 2) | (((i >> 6) & 3) << 7) |
+                       (((i >> 2) & 0xf) << 9);
+            }
+            if (rs1c >= 0 && rs2c >= 0 && imms >= 0 && imms < 128 &&
+                (imms & 3) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xc000u | ((unsigned)rs2c << 2) | (((i >> 6) & 1) << 5) |
+                       (((i >> 2) & 1) << 6) | ((unsigned)rs1c << 7) |
+                       (((i >> 3) & 7) << 10);
+            }
+        }
+        if (f3 == 3 && xlen == 64) {                            /* sd */
+            if (rs1 == 2 && imms >= 0 && imms < 512 && (imms & 7) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xe002u | ((unsigned)rs2 << 2) | (((i >> 6) & 7) << 7) |
+                       (((i >> 3) & 7) << 10);
+            }
+            if (rs1c >= 0 && rs2c >= 0 && imms >= 0 && imms < 256 &&
+                (imms & 7) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xe000u | ((unsigned)rs2c << 2) | (((i >> 6) & 3) << 5) |
+                       ((unsigned)rs1c << 7) | (((i >> 3) & 7) << 10);
+            }
+        }
+        return 0;
+
+    case 0x67:                                                  /* JALR */
+        /* c.jr / c.jalr, only with a zero displacement. `ret` is
+         * jalr x0, 0(ra) and becomes c.jr ra, which is two bytes off
+         * every function in the program. */
+        if (f3 == 0 && immi == 0 && rs1 != 0) {
+            if (rd == 0) return 0x8002u | ((unsigned)rs1 << 7);
+            if (rd == 1) return 0x9002u | ((unsigned)rs1 << 7);
+        }
+        return 0;
+
+    case 0x73:                                                  /* SYSTEM */
+        /* c.ebreak. `unimp` is deliberately NOT compressed: the 32-bit
+         * form this backend emits is a real trapping instruction,
+         * where the assembler's `unimp` pseudo becomes the two-byte
+         * all-zero ILLEGAL encoding. Both trap; they are not the same
+         * instruction, and this file's job is to preserve the one that
+         * was encoded. */
+        if (w == 0x00100073UL)
+            return 0x9002u;
+        return 0;
+
+    default:
+        return 0;
+    }
+}
+
+/* Compression is ON for a target that has the C extension and OFF
+ * inside the three sequences that measure a distance in bytes rather
+ * than recording an offset:
+ *
+ *   codegen.c's `rv_patch_b(F->t, at, at + 8)`, which skips a jump
+ *   codegen.c's auipc/jalr call pair, patched at `at + 4`
+ *   link.c's entry stub, sized by rv_li_len()
+ *
+ * A shorter instruction under any of them moves its target. The flag
+ * is a global because compilation is single-threaded and the
+ * alternative -- threading it through every encoder -- would put it in
+ * forty signatures to be read by three callers.
+ */
+static int g_rvc = 0;        /* compress? */
+static int g_rvc_xlen = 64;  /* ...and for which width */
+
+/* The width comes WITH the switch rather than from target_xlen():
+ * this file has no current-width global by design (see the header),
+ * and embld links it without the target layer at all. */
+void rv_set_compress(int on, int xlen)
+{
+    g_rvc = on;
+    g_rvc_xlen = xlen;
+}
+int rv_compress_enabled(void) { return g_rvc; }
+
+/* c.unimp -- the all-zero compressed encoding, which the ISA defines as
+ * illegal so it traps. Two bytes, for padding a function to alignment
+ * when a compressed instruction has left an odd halfword. Emitted
+ * directly: it IS the short form, so it must not be handed to the
+ * compressor. */
+void rv_cunimp(struct code *c) { code_u16(c, 0x0000); }
+
+/* The one place a RISC-V instruction becomes bytes. */
+void rv_w(struct code *c, unsigned long w)
+{
+    if (g_rvc) {
+        unsigned s = rv_compress(w, g_rvc_xlen);
+        if (s) {
+            code_u16(c, s);
+            return;
+        }
+    }
+    code_u32(c, w);
+}
+
 void rv_mv(struct code *c, int rd, int rs)
 {
-    code_u32(c, rv_enc_i(OP_IMM, rd, 0, rs, 0));
+    rv_w(c, rv_enc_i(OP_IMM, rd, 0, rs, 0));
 }
 
 void rv_lui(struct code *c, int rd, long hi20)
 {
-    code_u32(c, rv_enc_u(OP_LUI, rd, hi20));
+    rv_w(c, rv_enc_u(OP_LUI, rd, hi20));
 }
 
 void rv_auipc(struct code *c, int rd, long hi20)
 {
-    code_u32(c, rv_enc_u(OP_AUIPC, rd, hi20));
+    rv_w(c, rv_enc_u(OP_AUIPC, rd, hi20));
 }
 
 /* THE +0x800. `lui`/`auipc` supply bits 31:12 and the instruction beside
@@ -139,13 +446,13 @@ static int lo12_of(long long v) { return (int)(((v & 0xfff) ^ 0x800) - 0x800); }
 static int li_emit(struct code *c, int rd, long long v, int xlen, int emit)
 {
     if (rv_fits(v, 12)) {
-        if (emit) code_u32(c, rv_enc_i(OP_IMM, rd, 0, RV_ZERO, (int)v));
+        if (emit) rv_w(c, rv_enc_i(OP_IMM, rd, 0, RV_ZERO, (int)v));
         return 4;
     }
     if (rv_fits(v, 32)) {
         int lo = lo12_of(v);
         int n = 4;
-        if (emit) code_u32(c, rv_enc_u(OP_LUI, rd, hi20_of(v)));
+        if (emit) rv_w(c, rv_enc_u(OP_LUI, rd, hi20_of(v)));
         if (lo) {
             /* ADDI or ADDIW, and the choice is not cosmetic.
              *
@@ -166,7 +473,7 @@ static int li_emit(struct code *c, int rd, long long v, int xlen, int emit)
              * not arise. */
             int narrow = xlen == 64 && (hi20_of(v) & 0x80000) != 0;
             if (emit)
-                code_u32(c, rv_enc_i(narrow ? OP_IMM32 : OP_IMM,
+                rv_w(c, rv_enc_i(narrow ? OP_IMM32 : OP_IMM,
                                      rd, 0, rd, lo));
             n += 4;
         }
@@ -175,10 +482,10 @@ static int li_emit(struct code *c, int rd, long long v, int xlen, int emit)
     int lo = lo12_of(v);
     long long hi = (v - lo) >> 12;
     int n = li_emit(c, rd, hi, xlen, emit);
-    if (emit) code_u32(c, rv_enc_r(OP_IMM, rd, 1, rd, 12, 0)); /* slli rd,rd,12 */
+    if (emit) rv_w(c, rv_enc_r(OP_IMM, rd, 1, rd, 12, 0)); /* slli rd,rd,12 */
     n += 4;
     if (lo) {
-        if (emit) code_u32(c, rv_enc_i(OP_IMM, rd, 0, rd, lo));
+        if (emit) rv_w(c, rv_enc_i(OP_IMM, rd, 0, rd, lo));
         n += 4;
     }
     return n;
@@ -238,7 +545,7 @@ void rv_alu(struct code *c, int op, int rd, int rs1, int rs2, int w)
         internal_error("riscv: alu op %d is not one of the ten", op);
     if (w && !has_word_form(op))
         internal_error("riscv: alu op %d has no 32-bit form", op);
-    code_u32(c, rv_enc_r(w ? OP_OP32 : OP_OP, rd, alu_enc[op].f3, rs1, rs2,
+    rv_w(c, rv_enc_r(w ? OP_OP32 : OP_OP, rd, alu_enc[op].f3, rs1, rs2,
                          alu_enc[op].alt ? 0x20 : 0));
 }
 
@@ -253,7 +560,7 @@ void rv_alu_imm(struct code *c, int op, int rd, int rs1, int imm, int w)
         internal_error("riscv: alu op %d is not one of the ten", op);
     if (w && !has_word_form(op))
         internal_error("riscv: alu op %d has no 32-bit form", op);
-    code_u32(c, rv_enc_i(w ? OP_IMM32 : OP_IMM, rd, alu_enc[op].f3, rs1, imm));
+    rv_w(c, rv_enc_i(w ? OP_IMM32 : OP_IMM, rd, alu_enc[op].f3, rs1, imm));
 }
 
 /* A shift immediate is NOT a signed 12-bit field. It is a shift AMOUNT in
@@ -273,7 +580,7 @@ void rv_shift_imm(struct code *c, int op, int rd, int rs1, int amt,
     int bits = (xlen == 64 && !w) ? 6 : 5;
     if (amt < 0 || amt >= (1 << bits))
         internal_error("riscv: shift amount %d is not 0..%d here", amt, (1 << bits) - 1);
-    code_u32(c, rv_enc_r(w ? OP_IMM32 : OP_IMM, rd, alu_enc[op].f3, rs1,
+    rv_w(c, rv_enc_r(w ? OP_IMM32 : OP_IMM, rd, alu_enc[op].f3, rs1,
                          amt & 0x1f,
                          (alu_enc[op].alt ? 0x20 : 0) | ((amt >> 5) & 1)));
 }
@@ -289,7 +596,7 @@ void rv_muldiv(struct code *c, int op, int rd, int rs1, int rs2, int w)
         internal_error("riscv: muldiv op %d is not one of the eight", op);
     if (w && (op == RV_MULH || op == RV_MULHSU || op == RV_MULHU))
         internal_error("riscv: the high-half multiplies have no 32-bit form");
-    code_u32(c, rv_enc_r(w ? OP_OP32 : OP_OP, rd, muldiv_f3[op], rs1, rs2, 1));
+    rv_w(c, rv_enc_r(w ? OP_OP32 : OP_OP, rd, muldiv_f3[op], rs1, rs2, 1));
 }
 
 /* ---- memory ---------------------------------------------------------- */
@@ -316,7 +623,7 @@ void rv_load(struct code *c, int rd, int rs1, int off, int size, int sign,
         break;
     default: internal_error("riscv: no %d-byte load", size);
     }
-    code_u32(c, rv_enc_i(OP_LOAD, rd, f3, rs1, off));
+    rv_w(c, rv_enc_i(OP_LOAD, rd, f3, rs1, off));
 }
 
 void rv_store(struct code *c, int rs2, int rs1, int off, int size, int xlen)
@@ -333,15 +640,22 @@ void rv_store(struct code *c, int rs2, int rs1, int off, int size, int xlen)
         break;
     default: internal_error("riscv: no %d-byte store", size);
     }
-    code_u32(c, rv_enc_s(OP_STORE, f3, rs1, rs2, off));
+    rv_w(c, rv_enc_s(OP_STORE, f3, rs1, rs2, off));
 }
 
 /* ---- control flow ----------------------------------------------------- */
 
 int rv_b_placeholder(struct code *c, int cond, int rs1, int rs2)
 {
+    /* No compression here: a branch whose displacement is patched later. A decision made on a
+     * placeholder is not a decision, and the patch sites
+     * address these by a fixed distance. */
+    int save_rvc = g_rvc;
+    g_rvc = 0;
+
     int at = c->len;
-    code_u32(c, rv_enc_b(OP_BRANCH, cond, rs1, rs2, 0));
+    rv_w(c, rv_enc_b(OP_BRANCH, cond, rs1, rs2, 0));
+    g_rvc = save_rvc;
     return at;
 }
 
@@ -359,8 +673,15 @@ void rv_patch_b(struct code *c, int at, int target)
 
 int rv_j_placeholder(struct code *c, int rd)
 {
+    /* No compression here: a jump whose displacement is patched later. A decision made on a
+     * placeholder is not a decision, and the patch sites
+     * address these by a fixed distance. */
+    int save_rvc = g_rvc;
+    g_rvc = 0;
+
     int at = c->len;
-    code_u32(c, rv_enc_j(OP_JAL, rd, 0));
+    rv_w(c, rv_enc_j(OP_JAL, rd, 0));
+    g_rvc = save_rvc;
     return at;
 }
 
@@ -376,16 +697,45 @@ void rv_patch_j(struct code *c, int at, int target)
 
 void rv_jalr(struct code *c, int rd, int rs1, int off)
 {
-    code_u32(c, rv_enc_i(OP_JALR, rd, 0, rs1, off));
+    rv_w(c, rv_enc_i(OP_JALR, rd, 0, rs1, off));
 }
 
 void rv_ret(struct code *c) { rv_jalr(c, RV_ZERO, RV_RA, 0); }
 
+/* auipc rd, 0 ; addi rd, rd, 0 -- the two halves of a PC-relative
+ * address, both immediates left for a relocation. Returns the offset of
+ * the auipc; the addi is four bytes after it.
+ *
+ * Never compressed, and that is the whole reason this is a function
+ * rather than two calls at each site: `addi rd, rd, 0` IS c.mv, so the
+ * placeholder compressed itself into a register move and the
+ * relocation then wrote its low half over the next instruction. Three
+ * sites emitted this pair by hand and all three broke the moment the C
+ * extension was switched on.
+ */
+int rv_pcrel_pair(struct code *c, int rd)
+{
+    int save_rvc = g_rvc;
+    int at = c->len;
+    g_rvc = 0;
+    rv_auipc(c, rd, 0);
+    rv_alu_imm(c, RV_ADD, rd, rd, 0, 0);
+    g_rvc = save_rvc;
+    return at;
+}
+
 int rv_call_placeholder(struct code *c)
 {
+    /* No compression here: the auipc/jalr pair, patched at at+0 and at+4. A decision made on a
+     * placeholder is not a decision, and the patch sites
+     * address these by a fixed distance. */
+    int save_rvc = g_rvc;
+    g_rvc = 0;
+
     int at = c->len;
-    code_u32(c, rv_enc_u(OP_AUIPC, RV_RA, 0));
-    code_u32(c, rv_enc_i(OP_JALR, RV_RA, 0, RV_RA, 0));
+    rv_w(c, rv_enc_u(OP_AUIPC, RV_RA, 0));
+    rv_w(c, rv_enc_i(OP_JALR, RV_RA, 0, RV_RA, 0));
+    g_rvc = save_rvc;
     return at;
 }
 
@@ -410,10 +760,10 @@ static unsigned long enc_csr(int f3, int rd, int rs1, unsigned csr)
  * what llvm-objdump prints back. */
 void rv_unimp(struct code *c)
 {
-    code_u32(c, enc_csr(1, RV_ZERO, RV_ZERO, 0xc00));
+    rv_w(c, enc_csr(1, RV_ZERO, RV_ZERO, 0xc00));
 }
 
 void rv_ebreak(struct code *c)
 {
-    code_u32(c, enc_csr(0, RV_ZERO, RV_ZERO, 1));
+    rv_w(c, enc_csr(0, RV_ZERO, RV_ZERO, 1));
 }

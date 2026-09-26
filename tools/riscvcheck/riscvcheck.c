@@ -340,9 +340,101 @@ static void refuse(int n)
     exit(1);
 }
 
+/* --csweep32 / --csweep64: the compressed forms over a WIDE operand
+ * space, not just the instructions the corpus above happens to use.
+ *
+ * The bit layouts that are easy to get wrong are the scattered
+ * immediates -- c.lw's offset is bits 5:3 and 2 and 6 in three
+ * separate places, c.addi16sp's is in five -- and a corpus of a
+ * hundred instructions exercises almost none of that space. So: walk
+ * registers and offsets across their boundaries, write the 32-bit
+ * words as hex on stderr and the compressed bytes on stdout, and let
+ * the shell round-trip the hex through llvm-mc (disassemble without
+ * +c, reassemble WITH it, which compresses on its own) and compare.
+ *
+ * No expectation text is written by hand anywhere in this mode, so
+ * the corpus can be as large as it likes. */
+static void csweep_one(unsigned long w, int xlen)
+{
+    unsigned c = rv_compress(w, xlen);
+    fprintf(stderr, "0x%02lx 0x%02lx 0x%02lx 0x%02lx\n",
+            w & 0xff, (w >> 8) & 0xff, (w >> 16) & 0xff, (w >> 24) & 0xff);
+    if (c) {
+        putchar((int)(c & 0xff));
+        putchar((int)((c >> 8) & 0xff));
+    } else {
+        for (int k = 0; k < 4; k++)
+            putchar((int)((w >> (8 * k)) & 0xff));
+    }
+}
+
+static int csweep(int xlen)
+{
+    static const int regs[] = { 0, 1, 2, 5, 7, 8, 9, 10, 13, 15, 16, 28, 31 };
+    static const int imms[] = { -2048, -513, -512, -33, -32, -16, -1, 0, 1,
+                                4, 15, 16, 31, 32, 63, 255, 256, 496, 2047 };
+    const int NR = (int)(sizeof regs / sizeof regs[0]);
+    const int NI = (int)(sizeof imms / sizeof imms[0]);
+
+    for (int a = 0; a < NR; a++)
+        for (int b = 0; b < NR; b++)
+            for (int i = 0; i < NI; i++) {
+                int rd = regs[a], rs = regs[b], im = imms[i];
+                /* addi / andi / slli / srli / srai, and addiw at RV64 */
+                csweep_one(rv_enc_i(0x13, rd, 0, rs, im), xlen);
+                csweep_one(rv_enc_i(0x13, rd, 7, rs, im), xlen);
+                if (xlen == 64)
+                    csweep_one(rv_enc_i(0x1b, rd, 0, rs, im), xlen);
+                /* Shifts are built by hand rather than through
+                 * rv_enc_r: at RV64 a shift amount reaches 63 and the
+                 * field it sits in is six bits, which the register
+                 * packer correctly refuses to be handed. */
+                int sh = im & (xlen == 64 ? 0x3f : 0x1f);
+                unsigned long base = 0x13u | ((unsigned long)rd << 7) |
+                                     ((unsigned long)rs << 15) |
+                                     ((unsigned long)sh << 20);
+                csweep_one(base | (1UL << 12), xlen);               /* slli */
+                csweep_one(base | (5UL << 12), xlen);               /* srli */
+                csweep_one(base | (5UL << 12) | (0x20UL << 25), xlen); /* srai */
+                /* loads and stores, where the scattered offsets live */
+                if (im >= 0) {
+                    csweep_one(rv_enc_i(0x03, rd, 2, rs, im), xlen);
+                    csweep_one(rv_enc_s(0x23, 2, rs, rd, im), xlen);
+                    if (xlen == 64) {
+                        csweep_one(rv_enc_i(0x03, rd, 3, rs, im), xlen);
+                        csweep_one(rv_enc_s(0x23, 3, rs, rd, im), xlen);
+                    }
+                }
+                /* jalr with a zero displacement (c.jr / c.jalr / ret) */
+                if (im == 0)
+                    csweep_one(rv_enc_i(0x67, rd, 0, rs, 0), xlen);
+            }
+    /* the register-register forms, and lui */
+    for (int a = 0; a < NR; a++)
+        for (int b = 0; b < NR; b++) {
+            int rd = regs[a], rs2 = regs[b];
+            csweep_one(rv_enc_r(0x33, rd, 0, rd, rs2, 0), xlen);      /* add */
+            csweep_one(rv_enc_r(0x33, rd, 0, 0, rs2, 0), xlen);       /* mv-ish */
+            csweep_one(rv_enc_r(0x33, rd, 0, rd, rs2, 0x20), xlen);   /* sub */
+            csweep_one(rv_enc_r(0x33, rd, 4, rd, rs2, 0), xlen);      /* xor */
+            csweep_one(rv_enc_r(0x33, rd, 6, rd, rs2, 0), xlen);      /* or */
+            csweep_one(rv_enc_r(0x33, rd, 7, rd, rs2, 0), xlen);      /* and */
+            if (xlen == 64) {
+                csweep_one(rv_enc_r(0x3b, rd, 0, rd, rs2, 0), xlen);  /* addw */
+                csweep_one(rv_enc_r(0x3b, rd, 0, rd, rs2, 0x20), xlen); /* subw */
+            }
+        }
+    for (int a = 0; a < NR; a++)
+        for (int i = 0; i < NI; i++)
+            csweep_one(rv_enc_u(0x37, regs[a], imms[i] & 0xfffff), xlen);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "--rv32";
+    if (strcmp(mode, "--csweep32") == 0) return csweep(32);
+    if (strcmp(mode, "--csweep64") == 0) return csweep(64);
     if (strcmp(mode, "--li32") == 0) return sweep_li(32);
     if (strcmp(mode, "--li64") == 0) return sweep_li(64);
     if (strcmp(mode, "--refuse") == 0) {
@@ -352,7 +444,41 @@ int main(int argc, char **argv)
         }
         refuse(argc > 2 ? atoi(argv[2]) : -1);
     }
-    encodings(strcmp(mode, "--rv64") == 0 ? 64 : 32);
-    fwrite(C.p, 1, (size_t)C.len, stdout);
+    /* --c32 / --c64: the SAME instruction sweep, but every 32-bit word
+     * is run through rv_compress() and the short form written when
+     * there is one. The shell then assembles the same expectation text
+     * with `llvm-mc -mattr=+c`, which compresses on its own, and the
+     * two byte streams must be identical.
+     *
+     * That is the referee the compressed forms need and the only one
+     * worth having: it compares against an assembler's opinion of what
+     * the SAME instruction compresses to, over the whole corpus, so a
+     * wrong bit in a field cannot hide behind a form that is never
+     * reached. */
+    int cmode = strcmp(mode, "--c32") == 0 || strcmp(mode, "--c64") == 0;
+    int xlen = (strcmp(mode, "--rv64") == 0 || strcmp(mode, "--c64") == 0)
+               ? 64 : 32;
+    encodings(xlen);
+    if (!cmode) {
+        fwrite(C.p, 1, (size_t)C.len, stdout);
+        return 0;
+    }
+    /* One hex line per instruction, in the same order as the
+     * expectations on stderr, so a mismatch names the instruction
+     * instead of an offset into a stream whose lengths have already
+     * diverged. */
+    for (int i = 0; i + 3 < C.len; i += 4) {
+        unsigned long w = (unsigned long)C.p[i] |
+                          ((unsigned long)C.p[i + 1] << 8) |
+                          ((unsigned long)C.p[i + 2] << 16) |
+                          ((unsigned long)C.p[i + 3] << 24);
+        unsigned c = rv_compress(w, xlen);
+        if (c)
+            printf("%02x%02x\n", c & 0xff, (c >> 8) & 0xff);
+        else
+            printf("%02x%02x%02x%02x\n", (unsigned)C.p[i],
+                   (unsigned)C.p[i + 1], (unsigned)C.p[i + 2],
+                   (unsigned)C.p[i + 3]);
+    }
     return 0;
 }

@@ -773,8 +773,13 @@ static int invert_branch(int cond)
 static void branch_if(struct rv_fn *F, int cond, int rs1, int rs2, int label)
 {
     int at = rv_b_placeholder(F->t, invert_branch(cond), rs1, rs2);
-    rv_patch_b(F->t, at, at + 8);           /* over the jump below */
+    /* Emit the jump first and patch the branch to wherever it ENDED,
+     * rather than to `at + 8`. The two instructions are four bytes each
+     * today, and were the only reason compression had to be kept away
+     * from this sequence; measuring it removes the dependency instead
+     * of documenting it. */
     jump_to(F, label);
+    rv_patch_b(F->t, at, F->t->len);        /* over the jump just emitted */
 }
 
 /* ---- site lists --------------------------------------------------------- */
@@ -1852,24 +1857,27 @@ static void gen_ins(struct rv_fn *F, int n)
      * image lives. Every global's address came out sign-extended and the
      * first store through one faulted. */
     case IR_STRADDR:
-        note_str(F->st, t->len, i->label, RK_RISCV_PCREL_HI20);
-        rv_auipc(t, ACC, 0);
-        note_str(F->st, t->len, i->label, RK_RISCV_PCREL_LO12_I);
-        rv_alu_imm(t, RV_ADD, ACC, ACC, 0, 0);
+        {
+        int at = rv_pcrel_pair(t, ACC);
+        note_str(F->st, at, i->label, RK_RISCV_PCREL_HI20);
+        note_str(F->st, at + 4, i->label, RK_RISCV_PCREL_LO12_I);
+        }
         wr(F, i->dst, ACC);
         return;
     case IR_GADDR:
-        note_glob(F->st, t->len, i->glob, RK_RISCV_PCREL_HI20);
-        rv_auipc(t, ACC, 0);
-        note_glob(F->st, t->len, i->glob, RK_RISCV_PCREL_LO12_I);
-        rv_alu_imm(t, RV_ADD, ACC, ACC, 0, 0);
+        {
+        int at = rv_pcrel_pair(t, ACC);
+        note_glob(F->st, at, i->glob, RK_RISCV_PCREL_HI20);
+        note_glob(F->st, at + 4, i->glob, RK_RISCV_PCREL_LO12_I);
+        }
         wr(F, i->dst, ACC);
         return;
     case IR_FADDR:
-        note_fn(F->st, t->len, i->callee, RK_RISCV_PCREL_HI20);
-        rv_auipc(t, ACC, 0);
-        note_fn(F->st, t->len, i->callee, RK_RISCV_PCREL_LO12_I);
-        rv_alu_imm(t, RV_ADD, ACC, ACC, 0, 0);
+        {
+        int at = rv_pcrel_pair(t, ACC);
+        note_fn(F->st, at, i->callee, RK_RISCV_PCREL_HI20);
+        note_fn(F->st, at + 4, i->callee, RK_RISCV_PCREL_LO12_I);
+        }
         wr(F, i->dst, ACC);
         return;
 
@@ -2183,8 +2191,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     for (i = 0; i <= fn->nlabels; i++)
         F.label_off[i] = -1;
 
+    /* Align the function to four, with padding that traps if it is ever
+     * reached. The loop that used to be here added FOUR bytes at a time,
+     * which never terminates once the C extension can leave t->len at
+     * two mod four -- it was an out-of-memory on the second function of
+     * any unit. Every instruction is two or four bytes, so at most one
+     * halfword is ever needed, and c.unimp (the all-zero encoding, a
+     * defined illegal instruction) is exactly two. */
+    if (t->len & 3)
+        rv_cunimp(t);
     while (t->len & 3)
-        rv_unimp(t);      /* alignment padding that traps if ever reached */
+        rv_unimp(t);
     f->code_off = t->len;
 
     /* The prologue. `addi sp, sp, -frame` reaches 2047 bytes; a larger
@@ -2415,6 +2432,14 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     int xlen = target_xlen();
 
     (void)optimize; (void)no_sse;
+    /* The C extension. EmbCC has no -march= yet, so this is on for
+     * every RISC-V target -- which is what both reference compilers
+     * default to (clang's -march for riscv32-unknown-elf is rv32imac)
+     * and what every RISC-V microcontroller implements. When -march=
+     * exists this becomes the place that reads it, and the predefined
+     * macro table (the per-width predef.c, __riscv_c) has to move
+     * with it. */
+    rv_set_compress(1, xlen);
     g_rv_regalloc = regalloc;
     if (want_debug) {
         fprintf(stderr, "embcc: error: -g is not supported for RISC-V yet "

@@ -19,6 +19,14 @@ void code_u32(struct code *c, unsigned long v)
     code_byte(c, (int)((v >> 24) & 0xff));
 }
 
+/* Two bytes, little-endian: a RISC-V compressed instruction, and the
+ * halfword a Thumb one is built from. */
+void code_u16(struct code *c, unsigned v)
+{
+    code_byte(c, (int)(v & 0xff));
+    code_byte(c, (int)((v >> 8) & 0xff));
+}
+
 void code_patch32(struct code *c, int off, unsigned long v)
 {
     c->p[off] = (unsigned char)(v & 0xff);

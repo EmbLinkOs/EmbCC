@@ -24,9 +24,13 @@ command -v "$MC" >/dev/null 2>&1 || {
 out=tests/golden/out/riscv-encoding
 rm -rf "$out"; mkdir -p "$out"
 
+# src/arch/target.c joined the list when emit.c learned to compress:
+# rv_w() asks target_xlen() which short form applies. sema/type.c and
+# ldfloat.c come with target.c.
 cc -std=c99 -Wall -Wextra -o "$out/riscvcheck" \
    tools/riscvcheck/riscvcheck.c src/arch/riscv/emit.c \
-   src/arch/code.c src/driver/util.c src/driver/diag.c \
+   src/arch/code.c src/arch/target.c src/driver/util.c src/driver/diag.c \
+   src/sema/type.c src/sema/ldfloat.c \
    src/platform/platform_posix.c || {
     echo "riscvcheck did not build"; exit 1; }
 

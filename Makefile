@@ -149,11 +149,21 @@ $(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
 # embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
 # the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)
 # the compiler uses produces, so the toolchain owns the whole build (drops nasm).
+# src/arch/target.c and the two sema files it needs joined this list
+# because src/elf/write.c asks target_ptr_size() to choose ELF32 vs
+# ELF64 -- which it has done since the RISC-V backend landed, leaving
+# `embas` unlinkable and `make all` failing. Nothing noticed, because
+# no test builds embas: `make test` depends on embcc, embread, embld,
+# embdbg and embls, and the assembler is only reached through the
+# kernel build. tests/golden/tools-build.sh now builds every tool in
+# `all`, which is the cheapest guard against the next one.
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
+       src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
        src/platform/platform_posix.c src/platform/platform.h
 	$(CC) $(CFLAGS) -o $@ tools/embas/embas.c src/arch/x86_64/as.c \
 	    src/elf/write.c src/driver/util.c src/driver/diag.c \
+	    src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
 	    src/platform/platform_posix.c
 
 # embld — the integrated linker (ARCHITECTURE §6, WORKPLAN stream B), as

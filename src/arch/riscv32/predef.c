@@ -358,7 +358,9 @@ const struct predef_macro predef_macros_riscv32[] = {
     { "__WINT_WIDTH__", "32" },
     { "__riscv", "1" },
     { "__riscv_arch_test", "1" },
+    { "__riscv_c", "2000000" },
     { "__riscv_cmodel_medany", "1" },
+    { "__riscv_compressed", "1" },
     { "__riscv_div", "1" },
     { "__riscv_float_abi_soft", "1" },
     { "__riscv_i", "2001000" },
@@ -367,6 +369,7 @@ const struct predef_macro predef_macros_riscv32[] = {
     { "__riscv_mul", "1" },
     { "__riscv_muldiv", "1" },
     { "__riscv_xlen", "32" },
+    { "__riscv_zca", "1000000" },
     { "__riscv_zmmul", "1000000" },
 };
 

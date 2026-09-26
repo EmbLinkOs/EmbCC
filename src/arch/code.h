@@ -10,6 +10,7 @@ struct code {
 };
 
 void code_byte(struct code *c, int b);
+void code_u16(struct code *c, unsigned v);               /* little-endian */
 void code_u32(struct code *c, unsigned long v);          /* little-endian */
 void code_patch32(struct code *c, int off, unsigned long v);
 void code_align(struct code *c, int align, int fill);
