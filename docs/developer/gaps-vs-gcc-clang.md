@@ -369,9 +369,14 @@ Ranked by (blocked work) ÷ (effort), not by size of the gap:
    accept-and-honour, a few accept-and-ignore-with-a-reason.
 5. **`-include`, `-imacros`, `-iquote`, `-idirafter`** — and fix the
    help text either way.
-6. **`-g` on thumb / rv32 / rv64** — the DWARF writer exists and works
-   on two targets; this is the last thing between EmbCC and source-level
-   firmware debugging, which is the whole point of the embedded work.
+6. ~~**`-g` on thumb / rv32 / rv64**~~ — **DONE** (`b273078`). The frame
+   base is `sp + 0`, exact because sp does not move for the life of the
+   body. The OBJECTS carry correct DWARF; the LINKED image does not,
+   because `embld` keeps only `SHF_ALLOC` sections and writes an
+   `.embdbg` sidecar — merging `.debug_info` across objects and
+   rebasing every CU's abbrev and line-program offsets is a linker
+   feature of its own, and is what now stands between this and a gdb
+   session.
 7. **`__builtin_types_compatible_p` + `__builtin_choose_expr`** — a pair,
    small, high header-compatibility value.
 8. **Refuse what is not understood**: bad `-O`, unknown `-W`, unknown
