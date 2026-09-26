@@ -75,6 +75,9 @@ void t_mov_reg(struct code *c, int rd, int rm);
  * `movw`+`movt` above, and the 16-bit `movs` when the value fits eight
  * bits and the caller says the flags are dead. */
 void t_mov_imm(struct code *c, int rd, long imm, int s);
+/* ...and the same where the flags are dead, which lets the two-byte
+ * `movs` be chosen. See the note on the implementation. */
+void t_mov_imm_dead_flags(struct code *c, int rd, long imm);
 
 /* rd = ~rm. */
 void t_mvn_reg(struct code *c, int rd, int rm, int s);

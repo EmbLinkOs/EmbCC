@@ -108,6 +108,25 @@ static void movw(struct code *c, int rd, unsigned v, int top)
            (imm3 << 12) | (unsigned)(rd << 8) | imm8);
 }
 
+/* A constant into a register where THE FLAGS ARE DEAD.
+ *
+ * `movs rd, #imm` is two bytes for 0..255 into r0-r7, and `movw` is
+ * four -- but movs always sets the flags, so t_mov_imm only reaches it
+ * when the caller asked for flag-setting, and no caller ever does.
+ * movw was the single commonest instruction EmbCC emitted for ARMv7-M.
+ *
+ * Whether that is safe is a question about this backend, and the
+ * answer is written into it: every lowering that tests a value emits
+ * its own `cmp` first (see IR_BRZ), so no flag value survives from one
+ * IR instruction to the next. A lowering may therefore clobber the
+ * flags freely; only a sequence that has already compared inside
+ * ITSELF must not, and that one keeps calling t_mov_imm.
+ */
+void t_mov_imm_dead_flags(struct code *c, int rd, long imm)
+{
+    t_mov_imm(c, rd, imm, 1);
+}
+
 void t_mov_imm(struct code *c, int rd, long imm, int s)
 {
     unsigned long v = (unsigned long)imm & 0xffffffffUL;

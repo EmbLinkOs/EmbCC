@@ -80,6 +80,14 @@ struct rv_sites {
 };
 
 struct rv_fn {
+    /* Comparison/branch fusion: read counts per vreg, so a comparison
+     * whose only reader is the branch after it becomes ONE branch
+     * instruction. RISC-V branches compare two registers directly, so
+     * `if (a < b)` is a single `blt` -- materialising 0 or 1 and then
+     * testing it against zero was three instructions and a register.
+     * skip_next tells the dispatch loop the branch is already out. */
+    int *usecnt;
+    int skip_next;
     struct ir_func *fn;
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when the allocator did not run (-O0/-O1),
@@ -1736,6 +1744,44 @@ static void gen_ins(struct rv_fn *F, int n)
             return;
         }
         {
+            /* Fuse with the branch that follows, when nothing else
+             * reads the result. RISC-V has no flags: a branch names
+             * its two registers and its condition, so the fused form
+             * is one instruction where the unfused one is a compare
+             * sequence, a store and a test.
+             *
+             * B_GT and B_LE have no branch of their own -- the ISA
+             * provides lt/ge and expects the operands swapped, which
+             * is what the mapping below does. */
+            struct ir_ins *nx = n + 1 < F->fn->nins ? &F->fn->ins[n + 1]
+                                                    : (struct ir_ins *)0;
+            if (nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
+                nx->a == i->dst && !(nx->w == 8 && F->xlen == 32) &&
+                F->usecnt && F->usecnt[i->dst] == 1) {
+                int ra_ = rdr(F, i->a, ACC);
+                int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+                int cond, sw = 0;
+                if (rb_ == TMP) operand_b(F, i, TMP);
+                switch (i->pred) {
+                case B_EQ: cond = RV_BEQ; break;
+                case B_NE: cond = RV_BNE; break;
+                case B_LT: cond = i->sign ? RV_BLT : RV_BLTU; break;
+                case B_GE: cond = i->sign ? RV_BGE : RV_BGEU; break;
+                case B_GT: cond = i->sign ? RV_BLT : RV_BLTU; sw = 1; break;
+                case B_LE: cond = i->sign ? RV_BGE : RV_BGEU; sw = 1; break;
+                default:   cond = -1; break;
+                }
+                if (cond >= 0) {
+                    int x = sw ? rb_ : ra_, y = sw ? ra_ : rb_;
+                    if (nx->op == IR_BRZ)
+                        cond = invert_branch(cond);
+                    branch_if(F, cond, x, y, nx->label);
+                    F->skip_next = 1;
+                    return;
+                }
+            }
+        }
+        {
             /* cmp_to_reg writes its destination before it has finished
              * reading -- `xor d, a, b` then `sltu d, d, 1` -- but only
              * the FIRST instruction reads a and b, so d may safely be
@@ -2133,6 +2179,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     struct rv_fn F;
     int i;
 
+    /* Zeroed first: usecnt and skip_next are only set when the
+     * allocator runs, and reading them uninitialised on the other
+     * paths is a segfault at -O0 -- which is exactly what the ARMv7-M
+     * version of this change did before the memset went in. */
+    memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
     F.xlen = xlen; F.w = xlen / 8;
     F.fix = NULL; F.nfix = F.capfix = 0;
@@ -2164,6 +2215,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
          * both classes and leave it with nowhere to live. */
         F.loc = ra_allocate(fn, &RISCV_RA, xlen == 32 ? F.wide : NULL, NULL,
                             F.used_callee, &F.nsave);
+        /* Read counts for comparison/branch fusion, with the allocator
+         * on: without it every value goes through a slot and the
+         * branch reads the slot, so "the only reader" would not hold. */
+        if (fn->nvregs) {
+            F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
+            ra_count_vreg_uses(fn, F.usecnt);
+        }
         /* A BISECTION HANDLE. EMBCC_RV_RA_MAX=N leaves only the first N
          * vregs in registers and sends the rest back to memory, which
          * is always a correct thing to do -- so a miscompile that
@@ -2386,8 +2444,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             F.va_first = F.va_regsave + (long)narg * F.w + stk;
     }
 
-    for (i = 0; i < fn->nins; i++)
+    for (i = 0; i < fn->nins; i++) {
         gen_ins(&F, i);
+        if (F.skip_next) {          /* the comparison emitted its branch */
+            F.skip_next = 0;
+            i++;
+        }
+    }
 
     /* The epilogue. */
     F.label_off[fn->nlabels] = t->len;
@@ -2414,6 +2477,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
 
     f->code_len = t->len - f->code_off;
     f->stack_bytes = (int)F.frame;     /* what -fstack-usage reports */
+    free(F.usecnt);
     free(F.slot);
     free(F.label_off);
     free(F.fix);

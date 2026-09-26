@@ -80,6 +80,15 @@ struct t_sites {
  * slots are and what is still unpatched — is in one place. */
 struct t_fn {
     struct ir_func *fn;
+    /* Comparison/branch fusion: how many times each vreg is READ, so a
+     * comparison whose only reader is the branch after it can become
+     * one `cmp` and one conditional branch instead of materialising 0
+     * or 1 and testing that. `skip_next` tells the dispatch loop the
+     * branch has already been emitted. The x86-64 backend has done
+     * this from the start (usecnt there); ARMv7-M paid seven
+     * instructions for every `if` without it. */
+    int *usecnt;
+    int skip_next;
     /* Per vreg: 1 when it holds a 64-bit integer, which on a 32-bit
      * machine is an eight-byte slot and a REGISTER PAIR. Built from the
      * width of each value's DEFINING instruction, which is not the same
@@ -1263,7 +1272,7 @@ static void gen_ins(struct t_fn *F, int n)
          * instructions on the commonest operation there is, and the
          * copy out of a high scratch cannot use a 16-bit encoding. */
         int d = wreg(F, i->dst, T_ACC);
-        t_mov_imm(t, d, (long)i->imm, 0);
+        t_mov_imm_dead_flags(t, d, (long)i->imm);
         wrote(F, i->dst, d);
         return;
     }
@@ -1367,8 +1376,25 @@ static void gen_ins(struct t_fn *F, int n)
 
     case IR_CMP: {
         int cond = cond_for(i->pred, i->sign);
+        /* Does the NEXT instruction branch on this result, and does
+         * nothing else read it? Then the 0/1 never has to exist.
+         *
+         * IR_BRNZ takes the branch when the predicate HELD, so it is
+         * the condition itself; IR_BRZ when it failed, which is the
+         * inverse -- and an ARM condition inverts by flipping its low
+         * bit (EQ/NE, CS/CC, ...), which is why this is `^ 1` and not
+         * a table. */
+        struct ir_ins *nx = n + 1 < fn->nins ? &fn->ins[n + 1] : (struct ir_ins *)0;
+        int fuse = nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
+                   nx->a == i->dst && nx->w != 8 &&
+                   F->usecnt && F->usecnt[i->dst] == 1;
         if (i->w == 8) {
             cond = cmp64(F, i, i->pred, i->sign);
+            if (fuse) {
+                jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
+                F->skip_next = 1;
+                return;
+            }
             t_mov_imm(t, T_ACC, 1, 0);
             {
                 int over = t_bcond(t, cond);
@@ -1388,6 +1414,11 @@ static void gen_ins(struct t_fn *F, int n)
             operand_b(F, i, T_TMP);
             t_cmp_reg(t, sa, T_TMP);
         }
+        }
+        if (fuse) {
+            jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
+            F->skip_next = 1;
+            return;
         }
         /* 0 or 1, without an IT block: set it, then jump over the
          * clear. Two instructions either way, and no flag-liveness
@@ -1874,6 +1905,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     struct t_fn F;
     int push_at, i;
 
+    /* Zeroed first: the struct is a local and several fields -- usecnt
+     * and skip_next among them -- are only set on some paths, so
+     * reading them uninitialised on the others is exactly the
+     * segfault this caused at -O0, where the allocator does not run. */
+    memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
@@ -1895,6 +1931,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
          * lives in a core register and must stay eligible for this pool. */
         F.loc = ra_allocate(fn, &THUMB_RA, F.wide, NULL,
                             F.used_callee, &F.nsave);
+        /* Read counts for comparison/branch fusion. Only with the
+         * allocator on: without it every value round-trips through a
+         * slot and the branch reads the slot, so nothing is saved and
+         * the "only reader" claim would not hold. */
+        if (fn->nvregs) {
+            F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
+            ra_count_vreg_uses(fn, F.usecnt);
+        }
         {
             const char *lim = getenv("EMBCC_T_RA_MAX");
             if (lim) {
@@ -2067,8 +2111,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
             F.va_first = F.va_regsave + (long)ncrn * 4 + stk;
     }
 
-    for (i = 0; i < fn->nins; i++)
+    for (i = 0; i < fn->nins; i++) {
         gen_ins(&F, i);
+        if (F.skip_next) {      /* the comparison emitted its branch too */
+            F.skip_next = 0;
+            i++;
+        }
+    }
 
     /* The epilogue. */
     F.label_off[fn->nlabels] = t->len;
@@ -2112,6 +2161,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st)
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved. */
     f->stack_bytes = (int)(F.frame + SAVE_BYTES + F.nsave * 4);
+    free(F.usecnt);
     free(F.slot);
     free(F.label_off);
     free(F.fix);
