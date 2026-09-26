@@ -2211,6 +2211,13 @@ static const char *default_asm_output(const char *in)
 
 int main(int argc, char **argv)
 {
+
+    /* -fsanitize state: which checks, and whether trap mode was
+     * asked for by name (it is the only mode, so this only has to be
+     * accepted, not acted on). */
+    unsigned san_mask = 0;
+    int san_trap_asked = 0;
+    (void)san_trap_asked;
     const char *input = NULL, *output = NULL;
     int out_is_stdout = 0;          /* `-o -` */
     int compile_mode = 0, pp_only = 0;
@@ -2691,6 +2698,57 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "-f", 2) == 0 && argv[i][2] &&
                    opt_set_pass(argv[i] + 2, 1)) {
             /* a named pass, on -- so a single pass can be tried at -O1 */
+        } else if (strncmp(argv[i], "-fsanitize=", 11) == 0 ||
+                   strncmp(argv[i], "-fno-sanitize=", 14) == 0 ||
+                   strncmp(argv[i], "-fsanitize-trap", 15) == 0 ||
+                   strcmp(argv[i], "-fsanitize-undefined-trap-on-error") == 0) {
+            /* TRAP mode, which is the only mode there can be here: a
+             * diagnosing sanitizer needs __ubsan_handle_* and a bare
+             * metal target has nowhere to print. A failed check runs
+             * the target's trap instruction. Under a debugger that is a
+             * breakpoint at the offending operation; without one the
+             * program stops instead of continuing with a wrong value.
+             *
+             * -fsanitize-trap= and -fsanitize-undefined-trap-on-error
+             * are accepted and mean what they say. The checks EmbCC
+             * does not have are refused BY NAME below rather than
+             * quietly dropped from the set, because "I asked for
+             * address and got nothing" is the failure this whole file
+             * exists to prevent. */
+            int off = strncmp(argv[i], "-fno-", 5) == 0;
+            const char *list = strchr(argv[i], '=');
+            if (!list) {           /* -fsanitize-trap / ...-trap-on-error */
+                san_trap_asked = 1;
+                continue;
+            }
+            for (const char *p = list + 1; *p; ) {
+                const char *e = strchr(p, ',');
+                size_t n = e ? (size_t)(e - p) : strlen(p);
+                unsigned bit = 0;
+                if (n == 9 && !strncmp(p, "undefined", 9))
+                    bit = SAN_OVERFLOW | SAN_DIVIDE | SAN_SHIFT;
+                else if (n == 23 && !strncmp(p, "signed-integer-overflow", 23))
+                    bit = SAN_OVERFLOW;
+                else if (n == 22 && !strncmp(p, "integer-divide-by-zero", 22))
+                    bit = SAN_DIVIDE;
+                else if ((n == 5 && !strncmp(p, "shift", 5)) ||
+                         (n == 14 && !strncmp(p, "shift-exponent", 14)))
+                    bit = SAN_SHIFT;
+                else if (n == 4 && !strncmp(p, "trap", 4))
+                    bit = 0;       /* -fsanitize-trap=... names checks */
+                else
+                    diag_fatal(NULL, 0,
+                        "-fsanitize=%.*s is not supported: EmbCC's "
+                        "sanitizer inserts checks that TRAP, and this one "
+                        "needs a runtime library to report through. The "
+                        "ones it has are undefined, "
+                        "signed-integer-overflow, integer-divide-by-zero "
+                        "and shift", (int)n, p);
+                if (off) san_mask &= ~bit; else san_mask |= bit;
+                if (!e) break;
+                p = e + 1;
+            }
+            continue;
         } else if (strncmp(argv[i], "-fsanitize", 10) == 0 ||
                    strncmp(argv[i], "-fprofile", 9) == 0 ||
                    strcmp(argv[i], "-fcoverage-mapping") == 0 ||
@@ -2822,6 +2880,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "embcc: error: no input file\n");
         return 1;
     }
+    /* The checks are inserted by irgen, as ordinary IR, so at -O2 the
+     * optimizer folds away the ones whose operands it knows -- a
+     * constant non-zero divisor leaves nothing behind. */
+    irgen_set_sanitize(san_mask);
     lang_cxx = lang >= 0 ? lang : has_cxx_suffix(input);
     if (lang_cxx) {
         /* These analyses run in the C front end, over the C that C++ lowers

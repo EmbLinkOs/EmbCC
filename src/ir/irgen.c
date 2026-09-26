@@ -618,6 +618,11 @@ int emit_cmp(struct ir_func *fn, enum binop pred, int a, int b,
 }
 
 int gen_expr(struct ir_func *fn, struct expr *e);
+/* -fsanitize's arithmetic wrapper; defined with the checks below. */
+static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
+                   int w, int sign);
+static void san_trap_if(struct ir_func *fn, int cond, int w);
+static long san_min(int w);
 
 
 /* ---- the IEEE-754 bit builtins -----------------------------------------
@@ -1835,8 +1840,15 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             sum = emit_bin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
                            type_size_val(fn, t->pointee), w, 1);
         else
-            sum = emit_bin(fn, IR_ADD, cur,
-                           emit_const(fn, (long)e->delta * scale, w), w, 1);
+            /* Through san_bin: `x++` at INT_MAX is a signed overflow
+             * like any other, and a pointer step is not (scale != 1
+             * only for a pointer, whose arithmetic sanitize does not
+             * check). */
+            sum = scale != 1
+                ? emit_bin(fn, IR_ADD, cur,
+                           emit_const(fn, (long)e->delta * scale, w), w, 1)
+                : san_bin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
+                          emit_const(fn, 1, w), w, ty_signed_int(t));
         if (ty_size(t) <= 2 && !is_bf) {
             /* ++c on a char must wrap like a char, in the value too */
             struct ir_ins *i = emit(fn);
@@ -1884,6 +1896,14 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                                   sz == 8 ? (long)0x8000000000000000LL
                                           : (long)0x80000000L, sz);
             return emit_bin(fn, IR_XOR, v, mask, sz, 0);
+        }
+        if (e->kind == EXPR_NEG && (irgen_sanitize() & SAN_OVERFLOW) &&
+            ty_signed_int(e->ty)) {
+            /* -x is representable for every x but the most negative,
+             * where it is the one value the type cannot hold. */
+            int w = ty_w(e->ty);
+            san_trap_if(fn, emit_cmp(fn, B_EQ, v,
+                                     emit_const(fn, san_min(w), w), w, 1), w);
         }
         struct ir_ins *i = emit(fn);
         i->op = e->kind == EXPR_NEG ? IR_NEG : IR_BNOT;
@@ -2037,14 +2057,20 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 return emit_bin(fn, e->op == B_ADD ? IR_ADD : IR_SUB,
                                 p, idx, AW, 1);
             }
-            /* plain arithmetic */
+            /* plain arithmetic -- and through san_bin, like the other
+             * two sites that lower a C arithmetic operator. This one is
+             * easy to miss: `+` and `-` are handled HERE rather than in
+             * the default arm, because they have the pointer cases
+             * above, so converting the default arm alone left signed
+             * add and sub unchecked while multiply and divide were
+             * checked. */
             int a = gen_expr(fn, e->lhs);
             int b = gen_expr(fn, e->rhs);
             enum ir_op o = e->op == B_ADD ? IR_ADD : IR_SUB;
             if (ty_is_float(e->ty))
                 return emit_fbin(fn, o, a, b, ty_size(e->ty));
-            return emit_bin(fn, o, a, b, ty_w(e->ty),
-                            ty_signed_int(e->ty));
+            return san_bin(fn, o, a, b, ty_w(e->ty),
+                           ty_signed_int(e->ty));
         }
         case B_EQ:
         case B_NE:
@@ -2080,8 +2106,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             if (ty_is_float(e->ty))
                 return emit_fbin(fn, map[e->op - B_ADD], a, b,
                                  ty_size(e->ty));
-            return emit_bin(fn, map[e->op - B_ADD], a, b,
-                            ty_w(e->ty), ty_signed_int(e->ty));
+            return san_bin(fn, map[e->op - B_ADD], a, b,
+                           ty_w(e->ty), ty_signed_int(e->ty));
         }
         }
     }
@@ -2126,8 +2152,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             if (ty_is_float(ct))
                 res = emit_fbin(fn, o, cv, rv, ty_size(ct));
             else
-                res = emit_bin(fn, o, cv, rv, ty_w(ct),
-                               ty_signed_int(ct));
+                res = san_bin(fn, o, cv, rv, ty_w(ct),
+                              ty_signed_int(ct));
             res = gen_convert(fn, res, ct, lt);
         }
         if (local)
@@ -2574,6 +2600,112 @@ struct loopctx {
 
 /* The exception region being generated (ir_func.eh), or -1. */
 static int g_eh_cur = -1;
+
+/* ---- -fsanitize, trap mode ---------------------------------------------
+ *
+ * Each check is ordinary IR -- a comparison and a branch to IR_UD2 --
+ * so it costs nothing in the backends and the optimizer folds the ones
+ * whose operands it knows. At -O2 and -Os a constant divisor that is
+ * not zero, or a constant shift count in range, leaves no check behind
+ * at all -- `a / 7` comes out as the ordinary magic-multiply sequence.
+ * That is the whole reason to express these as IR rather than as a
+ * per-backend pattern. At -O0 and -O1 every check stands, which is what
+ * those levels are for.
+ */
+static unsigned g_san;
+
+void irgen_set_sanitize(unsigned mask) { g_san = mask; }
+unsigned irgen_sanitize(void) { return g_san; }
+
+/* if (cond) trap; */
+static void san_trap_if(struct ir_func *fn, int cond, int w)
+{
+    int ok = new_label(fn);
+    emit_brz(fn, cond, w, ok);
+    emit(fn)->op = IR_UD2;
+    emit_label(fn, ok);
+}
+
+/* The most negative value of a signed type `w` bytes wide. */
+static long san_min(int w)
+{
+    return w >= 8 ? (long)0x8000000000000000UL
+                  : -(1L << (w * 8 - 1));
+}
+
+/* a op b, with the checks -fsanitize asked for. Every caller that
+ * lowers a C arithmetic operator goes through here rather than calling
+ * emit_bin, so a new operator cannot quietly skip the checks. */
+static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
+                   int w, int sign)
+{
+    if (!g_san)
+        return emit_bin(fn, op, a, b, w, sign);
+
+    if ((g_san & SAN_SHIFT) && (op == IR_SHL || op == IR_SHR)) {
+        /* C says the count must be non-negative and less than the
+         * promoted left operand's width. Both halves matter: a negative
+         * count and an over-wide one are different bugs and neither is
+         * what the hardware does -- x86 masks the count to 5 or 6 bits,
+         * so `x << 32` silently returns x. */
+        san_trap_if(fn, emit_cmp(fn, B_GE, b, emit_const(fn, w * 8, w),
+                                 w, 0), w);
+        san_trap_if(fn, emit_cmp(fn, B_LT, b, emit_const(fn, 0, w),
+                                 w, 1), w);
+    }
+
+    if ((g_san & SAN_DIVIDE) && (op == IR_DIV || op == IR_MOD)) {
+        san_trap_if(fn, emit_cmp(fn, B_EQ, b, emit_const(fn, 0, w), w, 0), w);
+        if (sign)
+            /* INT_MIN / -1 has no representable answer, and on x86 it
+             * raises #DE rather than wrapping -- so this one is a
+             * crash today and a named trap after. */
+            san_trap_if(fn,
+                emit_bin(fn, IR_AND,
+                    emit_cmp(fn, B_EQ, a, emit_const(fn, san_min(w), w), w, 1),
+                    emit_cmp(fn, B_EQ, b, emit_const(fn, -1, w), w, 1),
+                    w, 1), w);
+    }
+
+    if ((g_san & SAN_OVERFLOW) && sign &&
+        (op == IR_ADD || op == IR_SUB || op == IR_MUL)) {
+        if (op == IR_MUL) {
+            /* Overflow iff the product does not divide back. The zero
+             * case is excluded first (it never overflows and would
+             * divide by zero), and INT_MIN * -1 separately, because
+             * that division is itself the undefined one above. */
+            int r = emit_bin(fn, IR_MUL, a, b, w, 1);
+            int nz = emit_cmp(fn, B_NE, a, emit_const(fn, 0, w), w, 1);
+            int mn = emit_bin(fn, IR_AND,
+                        emit_cmp(fn, B_EQ, a, emit_const(fn, -1, w), w, 1),
+                        emit_cmp(fn, B_EQ, b, emit_const(fn, san_min(w), w),
+                                 w, 1), w, 1);
+            san_trap_if(fn, mn, w);
+            /* guard the division: only when a != 0 */
+            int ok = new_label(fn);
+            emit_brz(fn, nz, w, ok);
+            san_trap_if(fn,
+                emit_cmp(fn, B_NE, emit_bin(fn, IR_DIV, r, a, w, 1), b,
+                         w, 1), w);
+            emit_label(fn, ok);
+            return r;
+        }
+        int r = emit_bin(fn, op, a, b, w, 1);
+        /* add: ((a^r) & (b^r)) < 0    sub: ((a^b) & (a^r)) < 0
+         * -- the same two formulas __builtin_add_overflow uses, so the
+         * builtin and the sanitizer cannot disagree about what
+         * overflow is. */
+        int t = op == IR_ADD
+              ? emit_bin(fn, IR_AND, emit_bin(fn, IR_XOR, a, r, w, 1),
+                                     emit_bin(fn, IR_XOR, b, r, w, 1), w, 1)
+              : emit_bin(fn, IR_AND, emit_bin(fn, IR_XOR, a, b, w, 1),
+                                     emit_bin(fn, IR_XOR, a, r, w, 1), w, 1);
+        san_trap_if(fn, emit_cmp(fn, B_LT, t, emit_const(fn, 0, w), w, 1), w);
+        return r;
+    }
+    return emit_bin(fn, op, a, b, w, sign);
+}
+
 
 /* The selector a landing pad sees for catch type ti (NULL: catch-all):
  * its 1-based place in the function's type table. */

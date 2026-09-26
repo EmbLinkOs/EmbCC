@@ -441,6 +441,19 @@ int ir_sym_global(struct ir_unit *u, struct global *g);
 
 struct ir_unit *irgen(struct unit *u);
 
+/* -fsanitize, in TRAP mode -- the only mode there can be here, because
+ * a diagnosing sanitizer needs a runtime (__ubsan_handle_*) and a bare
+ * metal target has nowhere to print. A failed check executes the
+ * target's trap instruction, which IR_UD2 already lowers on all four
+ * backends: `ud2` on x86-64, `udf #0` on aarch64 and ARMv7-M, and
+ * `unimp` on RISC-V. Each is an illegal encoding, so the program takes
+ * an exception at the offending operation -- a breakpoint under a
+ * debugger, and a stop rather than a wrong value without one, which is
+ * the point on a board. */
+enum { SAN_OVERFLOW = 1, SAN_DIVIDE = 2, SAN_SHIFT = 4 };
+void irgen_set_sanitize(unsigned mask);
+unsigned irgen_sanitize(void);
+
 /* EmbIR's textual form (src/ir/irprint.c, vision §18) — what
  * `embcc --inspect=ir` prints. Print only: see that file's head for why the
  * round-trip half of §9.1 is a structural change, not a printer feature. */

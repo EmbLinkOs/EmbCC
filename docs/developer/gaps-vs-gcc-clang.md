@@ -357,7 +357,7 @@ name.
 | Warnings | 359 `-W` flags (GCC front end alone) | **12**, and every other `-W…` is silently swallowed |
 | PIC / PIE | yes | none — so no shared libraries, no ASLR |
 | LTO | yes | none |
-| Sanitizers | ASan, UBSan, TSan, MSan | none |
+| Sanitizers | ASan, UBSan, TSan, MSan | **UBSan, trap mode** (DONE); the rest refused by name |
 | Coverage / PGO | `-fprofile-*`, `-pg`, `--coverage` | none |
 | Architectures | GCC 79 target dirs, LLVM 62 | 5 (34 triple spellings) |
 | `-g` on embedded | yes | **refused on thumb, rv32, rv64** |
@@ -365,13 +365,46 @@ name.
 
 Two deserve expanding.
 
-**UBSan is the one to want first.** Not ASan — on a microcontroller
-there is no shadow memory to spare. But `-fsanitize=undefined` with
-`-fsanitize-trap=all` costs a `brk`/`ebreak` on each check and catches
-exactly the class of bug that is hardest to find on a board with no
-debugger attached: signed overflow, shift past width, null deref,
-misaligned access. For EmbCC's actual audience this is worth more than
-LTO.
+**UBSan was the one to want first, and it is DONE.** Not ASan — on a
+microcontroller there is no shadow memory to spare. `-fsanitize=undefined`
+now inserts checks that TRAP, which is the only mode there can be here:
+a diagnosing sanitizer calls `__ubsan_handle_*` to print, and a bare
+metal target has nowhere to print to.
+
+What is checked, on all four targets, at every optimisation level:
+
+| Check | Operators |
+|---|---|
+| `signed-integer-overflow` | `+` `-` `*` unary `-` `++` `--` and their compound forms |
+| `integer-divide-by-zero` | `/` `%` — including `INT_MIN / -1`, which faults in hardware on x86-64 |
+| `shift` | `<<` `>>` — count negative, or at least the width |
+
+A failed check runs the target's trap instruction: `ud2` on x86-64,
+`udf #0` on aarch64 and ARMv7-M, `unimp` on RISC-V. Under a debugger
+that is a breakpoint at the offending operation; without one the program
+stops rather than continuing with a wrong value.
+
+Every check is ordinary IR — a comparison and a branch — so it costs
+nothing in the backends and the optimizer settles the ones it can: at
+`-O2` a constant divisor or an in-range constant shift leaves no check
+at all, and `a / 7` comes out as the usual magic-multiply. That is the
+reason to express them as IR rather than as a per-backend pattern.
+
+`address`, `thread`, `memory`, `leak`, `bounds` and `object-size` are
+refused BY NAME rather than dropped from the set, because "I asked for
+address and got nothing" is the failure the whole option-refusal policy
+exists to prevent. `-fsanitize-trap=`, `-fsanitize-undefined-trap-on-error`
+and `-fno-sanitize=` are accepted and mean what they say.
+
+One thing to know: three separate places in irgen lower a C arithmetic
+operator, and converting two of them left signed `+` and `-` unchecked
+while `*` and `/` were checked. Nothing caught that but running the
+cases, which is why `tests/golden/sanitize.sh` lists every operator that
+can overflow rather than a representative few.
+
+Still missing, and worth having next: null-pointer dereference and
+misaligned access, both of which need the check at the load/store rather
+than at an arithmetic operator.
 
 **Twelve warnings is the number to be uncomfortable about.** EmbCC
 implements `-Wunused-variable/-parameter/-function`, `-Wshadow`,
@@ -443,8 +476,8 @@ Ranked by (blocked work) ÷ (effort), not by size of the gap:
 
 9. **Multiple inputs and a real link driver** (`-l`, `-L`, `.o` inputs,
    default crt).
-10. **`-fsanitize=undefined` with trap-on-error** — the highest-value
-    new subsystem for this compiler's actual audience.
+10. ~~**`-fsanitize=undefined` with trap-on-error**~~ — **DONE**. The
+    arithmetic checks are in; null deref and misaligned access are not.
 
 Everything after that — PIC/PIE, LTO, PGO, the remaining 347 warnings,
 more architectures — is real but is not what is currently stopping
