@@ -138,14 +138,24 @@ for bn in alloca alloca_with_align assume_aligned bswap16 bswap32 bswap64 \
     fi
 done
 [ "$miss" -eq 0 ] && echo "  every listed builtin is one the compiler really knows"
-# And the three that are NOT claimed must still not be claimed, or the
-# list has quietly grown a promise C cannot keep.
+# The overflow builtins were listed here first from a grep that found
+# the C++ implementation, and this direction caught it: C did not have
+# them and __has_builtin promised otherwise. C lowers them now
+# (src/ir/irgen.c gen_overflow, tests/golden/overflow-builtins.sh), so
+# the claim and the compiler have to agree in the other direction --
+# both must say yes.
 for bn in add_overflow sub_overflow mul_overflow; do
-    printf '#if __has_builtin(__builtin_%s)\n#error "claimed but C does not implement it"\n#endif\n' \
+    printf '#if !__has_builtin(__builtin_%s)\n#error "C implements it but __has_builtin says no"\n#endif\n' \
         "$bn" > "$out/n.c"
     "$EMBCC" -E "$out/n.c" >/dev/null 2>&1 || {
-        echo "FAIL: __has_builtin claims __builtin_$bn, which only C++ has"
+        echo "FAIL: __has_builtin denies __builtin_$bn, which C now has"
+        fail=1; }
+    printf 'int f(int a,int b,int*r){return __builtin_%s(a,b,r);}\n' "$bn" \
+        > "$out/n2.c"
+    "$EMBCC" -fsyntax-only "$out/n2.c" >/dev/null 2>&1 || {
+        echo "FAIL: __has_builtin claims __builtin_$bn but it does not compile"
         fail=1; }
 done
+echo "  the overflow builtins are claimed and really compile"
 
 [ "$fail" -eq 0 ] || exit 1

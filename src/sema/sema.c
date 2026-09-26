@@ -1968,6 +1968,40 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(TY_INT, 0);
                 break;
             }
+            /* __builtin_{add,sub,mul}_overflow(a, b, *r): the
+             * operation in infinite precision, truncated into *r, and
+             * 1 when it did not fit. The C++ front end has had these
+             * (src/cxx/emit.c overflow_text) and C did not, which the
+             * GCC/Clang audit found by probe -- a grep for the name
+             * finds the C++ one and says otherwise. */
+            else if (strcmp(bn, "add_overflow") == 0 ||
+                     strcmp(bn, "sub_overflow") == 0 ||
+                     strcmp(bn, "mul_overflow") == 0) {
+                if (e->nargs != 3)
+                    sema_error_at(u, e->line, e->col,
+                            "%s takes two values and a pointer to the result",
+                            e->lhs->name);
+                for (int i = 0; i < 3; i++)
+                    check_expr(u, f, sc, e->args[i]);
+                for (int i = 0; i < 2; i++)
+                    if (!ty_is_integer(e->args[i]->ty))
+                        sema_error_at(u, e->args[i]->line, e->args[i]->col,
+                                "%s: operand %d must be an integer, got %s",
+                                e->lhs->name, i + 1, ty_name(e->args[i]->ty));
+                struct type *pt = e->args[2]->ty;
+                if (!pt || pt->kind != TY_PTR || !pt->pointee ||
+                    !ty_is_integer(pt->pointee))
+                    sema_error_at(u, e->args[2]->line, e->args[2]->col,
+                            "%s: the third argument points at the integer to "
+                            "store the result in", e->lhs->name);
+                /* _Bool would match gcc's prototype, but the value is
+                 * used as a condition and as an int everywhere, and
+                 * EmbCC's _Bool already normalises to 0/1. int keeps
+                 * the lowering free of a narrowing store. */
+                e->name = e->lhs->name;
+                e->ty = ty_base(TY_INT, 0);
+                break;
+            }
             /* control never reaches here -> a trap (ud2 / udf) */
             else if (strcmp(bn, "unreachable") == 0 || strcmp(bn, "trap") == 0) {
                 e->name = e->lhs->name;
@@ -2745,12 +2779,7 @@ static const char *const g_named_builtins[] = {
     "sqrt", "sqrtf", "sqrtl",
     "trap", "unreachable",
     "va_arg", "va_copy", "va_end", "va_start",
-    /* NOT the overflow builtins. __builtin_add_overflow and its two
-     * siblings exist in the C++ front end (src/cxx/expr.c) and not in
-     * this one, so C code calling them gets "is not declared". The
-     * drift test caught that -- it was listed here first, from a grep
-     * of the tree that found the C++ implementation. Add them back
-     * when sema lowers them. */
+    "add_overflow", "sub_overflow", "mul_overflow",
 };
 
 int sema_has_builtin(const char *name)

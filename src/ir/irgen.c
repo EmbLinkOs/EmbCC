@@ -1517,6 +1517,125 @@ static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int w)
     return gen_convert(fn, r, ut, ty_base(TY_INT, 0));    /* the result is int */
 }
 
+/* __builtin_{add,sub,mul}_overflow(a, b, r): the operation as if in
+ * infinite precision, truncated into *r, and 1 when it did not fit.
+ *
+ * Two shapes, chosen by the RESULT type's width:
+ *
+ *   narrower than 64 bits -- compute exactly in 64, store the
+ *     truncation, and compare the exact value with the truncation
+ *     read back. No identities and nothing to get wrong; a 32-bit
+ *     multiply cannot escape 64 bits.
+ *
+ *   64 bits -- there is no wider type to compute in on every target
+ *     (__int128 is 64-bit-only), so overflow is read off the operands
+ *     with the two's-complement identities.
+ *
+ * The identities are the usual ones. The DIVISIONS are not: a multiply
+ * test wants `a != 0 && r / a != b`, and the guard is not optional
+ * because dividing by zero traps -- and for the signed case
+ * LMIN / -1 traps too, which is exactly the overflow being tested for.
+ * src/cxx/emit.c spells both guards with `&&`, i.e. with branches.
+ *
+ * Here the divisor is made safe instead, so the whole thing stays
+ * branchless: never zero, and never -1 in the one case where the
+ * dividend is LMIN. A branchless form is worth having because these
+ * appear in bounds checks on hot paths, where a mispredicted branch
+ * costs more than the arithmetic.
+ */
+static int gen_overflow(struct ir_func *fn, struct expr *e, char op)
+{
+    /* `volatile int *` is an ordinary destination here; the volatile
+     * COPY points at the unqualified original through ->canon. */
+    struct type *rt = e->args[2]->ty->pointee;
+    if (rt->canon)
+        rt = rt->canon;
+    long sz = ty_size(rt);
+    int uns = rt->is_unsigned;
+    enum ir_op iop = op == 'a' ? IR_ADD : op == 's' ? IR_SUB : IR_MUL;
+    int addr = gen_expr(fn, e->args[2]);
+
+    if (sz < 8) {
+        /* Exact in 64 bits, then "does it still say the same thing
+         * after being narrowed to T". */
+        struct type *w = ty_int_of_size(8, 0);
+        int a = gen_convert(fn, gen_expr(fn, e->args[0]),
+                            e->args[0]->ty, w);
+        int b = gen_convert(fn, gen_expr(fn, e->args[1]),
+                            e->args[1]->ty, w);
+        int r = emit_bin(fn, iop, a, b, 8, 1);
+        int nar = gen_convert(fn, r, w, rt);          /* truncate into T */
+        emit_store(fn, addr, nar, rt);
+        int back = gen_convert(fn, nar, rt, w);       /* and read it back */
+        return emit_cmp(fn, B_NE, r, back, 8, 1);
+    }
+
+    /* 64-bit: wrapping arithmetic in T's own width. */
+    struct type *wt = ty_int_of_size(8, uns);
+    int sign = !uns;
+    int a = gen_convert(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, wt);
+    int b = gen_convert(fn, gen_expr(fn, e->args[1]), e->args[1]->ty, wt);
+    int r = emit_bin(fn, iop, a, b, 8, sign);
+    emit_store(fn, addr, r, rt);
+
+    if (op == 'a' && uns)                 /* a + b wrapped iff r < a */
+        return emit_cmp(fn, B_LT, r, a, 8, 0);
+    if (op == 's' && uns)                 /* a - b wrapped iff a < b */
+        return emit_cmp(fn, B_LT, a, b, 8, 0);
+    if (op == 'a') {                      /* ((a^r) & (b^r)) < 0 */
+        int t = emit_bin(fn, IR_AND,
+                         emit_bin(fn, IR_XOR, a, r, 8, 1),
+                         emit_bin(fn, IR_XOR, b, r, 8, 1), 8, 1);
+        return emit_cmp(fn, B_LT, t, bk(fn, 0, 8), 8, 1);
+    }
+    if (op == 's') {                      /* ((a^b) & (a^r)) < 0 */
+        int t = emit_bin(fn, IR_AND,
+                         emit_bin(fn, IR_XOR, a, b, 8, 1),
+                         emit_bin(fn, IR_XOR, a, r, 8, 1), 8, 1);
+        return emit_cmp(fn, B_LT, t, bk(fn, 0, 8), 8, 1);
+    }
+
+    /* Multiply. The test is `x != 0 && r / x != y`, with x the operand
+     * divided by; the guard is folded into the DIVISOR so no branch is
+     * needed and no division can trap. */
+    if (uns) {
+        int azero = emit_cmp(fn, B_EQ, a, bk(fn, 0, 8), 8, 0);   /* int 0/1 */
+        int az64 = gen_convert(fn, azero, ty_base(TY_INT, 0), wt);
+        int safe = emit_bin(fn, IR_OR, a, az64, 8, 0);   /* a, or 1 when a==0 */
+        int q = emit_bin(fn, IR_DIV, r, safe, 8, 0);
+        int ne = emit_cmp(fn, B_NE, q, b, 8, 0);
+        int nz = emit_cmp(fn, B_NE, a, bk(fn, 0, 8), 8, 0);
+        return emit_bin(fn, IR_AND, nz, ne, 4, 0);
+    }
+    {
+        /* Signed. LMIN * -1 is the one product whose wrapped value is
+         * LMIN, and LMIN / -1 is the one division that traps -- the
+         * same case, so replacing the divisor with 1 there removes the
+         * trap and the answer is supplied directly. */
+        int lmin = bk(fn, (unsigned long)1 << 63, 8);
+        int bm1 = emit_cmp(fn, B_EQ, b, bk(fn, (unsigned long)-1, 8), 8, 1);
+        int almin = emit_cmp(fn, B_EQ, a, lmin, 8, 1);
+        int special = emit_bin(fn, IR_AND, bm1, almin, 4, 0);    /* int 0/1 */
+        int bzero = emit_cmp(fn, B_EQ, b, bk(fn, 0, 8), 8, 1);
+        int unsafe = emit_bin(fn, IR_OR, special, bzero, 4, 0);
+        int u64 = gen_convert(fn, unsafe, ty_base(TY_INT, 0), wt);
+        /* mask = 0 - unsafe, so all ones when the divisor must be 1 */
+        int mask = emit_bin(fn, IR_SUB, bk(fn, 0, 8), u64, 8, 1);
+        int keep = emit_bin(fn, IR_AND, b,
+                            emit_bin(fn, IR_XOR, mask,
+                                     bk(fn, (unsigned long)-1, 8), 8, 1),
+                            8, 1);
+        int safe = emit_bin(fn, IR_OR, keep,
+                            emit_bin(fn, IR_AND, bk(fn, 1, 8), mask, 8, 1),
+                            8, 1);
+        int q = emit_bin(fn, IR_DIV, r, safe, 8, 1);
+        int ne = emit_cmp(fn, B_NE, q, a, 8, 1);
+        int bnz = emit_cmp(fn, B_NE, b, bk(fn, 0, 8), 8, 1);
+        int div_says = emit_bin(fn, IR_AND, bnz, ne, 4, 0);
+        return emit_bin(fn, IR_OR, special, div_says, 4, 0);
+    }
+}
+
 static int eh_type_index(struct ir_func *fn, struct global *ti);
 
 int gen_expr(struct ir_func *fn, struct expr *e)
@@ -2063,6 +2182,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             if (bk)
                 return gen_bitop(fn, e, bk, bw);
         }
+        if (e->name && strncmp(e->name, "__builtin_", 10) == 0 &&
+            (strcmp(e->name + 10, "add_overflow") == 0 ||
+             strcmp(e->name + 10, "sub_overflow") == 0 ||
+             strcmp(e->name + 10, "mul_overflow") == 0))
+            return gen_overflow(fn, e, e->name[10]);
         if (e->name && (strcmp(e->name, "__builtin_unreachable") == 0 ||
                         strcmp(e->name, "__builtin_trap") == 0)) {
             emit(fn)->op = IR_UD2;

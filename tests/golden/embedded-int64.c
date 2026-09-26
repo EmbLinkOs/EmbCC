@@ -87,6 +87,45 @@ int main(void)
       for (int i = 0; i < 4; i++) hx(arr[i]);
       nl(); }
 
+    /* __builtin_{add,sub,mul}_overflow on 64-bit values. These are the
+     * cases where the naive lowering traps rather than answers -- a
+     * multiply by zero (the divisor guard) and LLONG_MIN * -1, whose
+     * wrapped product is LLONG_MIN and whose division by -1 traps on
+     * the very case being detected. On a 32-bit target the 64-bit
+     * divide goes through lib/rt/int64.c, which is why they belong in
+     * THIS corpus and not only in the host-side test. */
+    {
+        long long lmin = (long long)((unsigned long long)1 << 63);
+        long long lmax = (long long)~(unsigned long long)((unsigned long long)1 << 63);
+        long long r;
+        unsigned long long ur;
+        putn(__builtin_add_overflow(lmax, 1LL, &r));        hx((unsigned long long)r);
+        putn(__builtin_add_overflow(lmin, -1LL, &r));       hx((unsigned long long)r);
+        putn(__builtin_add_overflow(2LL, 3LL, &r));         hx((unsigned long long)r);
+        nl();
+        putn(__builtin_sub_overflow(lmin, 1LL, &r));        hx((unsigned long long)r);
+        putn(__builtin_sub_overflow(lmax, -1LL, &r));       hx((unsigned long long)r);
+        putn(__builtin_sub_overflow(9LL, 4LL, &r));         hx((unsigned long long)r);
+        nl();
+        putn(__builtin_mul_overflow(lmin, -1LL, &r));       hx((unsigned long long)r);
+        putn(__builtin_mul_overflow(-1LL, lmin, &r));       hx((unsigned long long)r);
+        putn(__builtin_mul_overflow(0LL, lmin, &r));        hx((unsigned long long)r);
+        putn(__builtin_mul_overflow(lmin, 0LL, &r));        hx((unsigned long long)r);
+        nl();
+        putn(__builtin_mul_overflow(4000000000LL, 4000000000LL, &r));
+        hx((unsigned long long)r);
+        putn(__builtin_mul_overflow(123456LL, 654321LL, &r));
+        hx((unsigned long long)r);
+        putn(__builtin_mul_overflow(lmax, 2LL, &r));        hx((unsigned long long)r);
+        nl();
+        putn(__builtin_mul_overflow(0ULL, ~0ULL, &ur));     hx(ur);
+        putn(__builtin_mul_overflow(~0ULL, 2ULL, &ur));     hx(ur);
+        putn(__builtin_mul_overflow(1000ULL, 1000ULL, &ur)); hx(ur);
+        putn(__builtin_add_overflow(~0ULL, 1ULL, &ur));     hx(ur);
+        putn(__builtin_sub_overflow(0ULL, 1ULL, &ur));      hx(ur);
+        nl();
+    }
+
     puts_("==END==\n");
     return 0;
 }
