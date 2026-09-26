@@ -139,6 +139,35 @@ int target_is_hosted(void);
 const char *target_os_name(enum target_os o);
 const char *target_fmt_name(enum target_fmt f);
 
+/* Apply the CONFIGURED default target, before any --target= is seen.
+ *
+ * GCC's `./configure --target=` builds a compiler that defaults to one
+ * machine, so a person cross-compiling for a board types `gcc main.c`
+ * and not `gcc --target=... main.c` a hundred times a day. This is that,
+ * without a configure script:
+ *
+ *   --target=                     on the command line, always wins
+ *   EMBCC_DEFAULT_TARGET          in the environment, for one shell
+ *   -DEMBCC_DEFAULT_TARGET="..."  compiled in (make DEFAULT_TARGET=...)
+ *   x86_64-elf                    when none of the above says otherwise
+ *
+ * NOT `EMBCC_TARGET`, which is taken: tests/lib.sh uses that name for
+ * which target the SUITE is exercising, and the suite exports it while
+ * passing --target= explicitly. Honouring it here would mean
+ * `make test-arm64` silently retargeted every test that relies on the
+ * default -- two unrelated things behind one name, and the failure
+ * would look like a miscompile.
+ *
+ * Returns 1, or 0 with the offending name in *bad when a configured
+ * triple is not one this compiler knows. */
+int target_apply_default(const char **bad);
+
+/* The configured default's triple, or NULL when none was configured and
+ * x86_64-elf stands. Not validated -- target_apply_default does that.
+ * --help uses it, which is the point: a cross compiler whose help says
+ * "x86_64-elf (the default)" is lying to the person reading it. */
+const char *target_default_name(void);
+
 /* Parses a full triple into all three dimensions. Returns 0 and leaves
  * every output alone on anything it does not know, so the driver can
  * refuse loudly rather than silently emit for the wrong machine (THE

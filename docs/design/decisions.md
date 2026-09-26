@@ -950,9 +950,10 @@ that assumption is what makes Windows C++ affordable at all.
 
 ## D-015 — A third architecture: **ARMv7-M (Cortex-M)**, and the first 32-bit target
 
-**Decided:** 2026-09-25. **Status:** the front end and a first backend are
-in — the triple, the data model, the predefined macros, ELF32 objects, and
-Thumb-2 code for the 32-bit scalar language. What it cannot lower it
+**Decided:** 2026-09-25. **Status:** the front end, the backend, the
+register allocator and inline assembly are in — the triple, the data
+model, the predefined macros, ELF32 objects, and Thumb-2 code for the
+32-bit scalar language, at 3.7x clang's size. What it cannot lower it
 refuses by name.
 
 **2026-09-25, later:** the backend landed for the 32-bit scalar subset.
@@ -1267,9 +1268,11 @@ wholesale rather than as exceptions to a fixed set.
 
 ## D-016 — RISC-V, as **two targets and one backend**
 
-**Decided:** 2026-09-26. **Status:** the front end is in for both widths —
-the triples, the data models, the predefined macros, the `long double`
-format. There is no code generator yet, and `-c` refuses by name.
+**Decided:** 2026-09-26. **Status:** done at both widths — the triples,
+the data models, the predefined macros, the `long double` format, a code
+generator, the register allocator, inline assembly, and images that run
+under QEMU. 1.7x clang's code size at both widths. What it cannot lower
+it refuses by name.
 
 RV32 and RV64 are two entries in `enum target_arch` and not one entry with
 a width knob beside it, because the enum keys the DATA MODEL and the two
@@ -1439,3 +1442,50 @@ all — most likely if RV32 and RV64 end up needing different lowering for
 It has not happened: the register-pair code is still the only RV32-only
 part, and the allocator's one width-dependent line (whether `wide`
 reaches `ra_allocate`) is marked as such.
+
+
+## D-017 — A **configured default target**, compiled in, with every backend still there
+
+**Decided:** 2026-09-26. **Status:** done.
+`make DEFAULT_TARGET=riscv32-unknown-elf` builds an EmbCC that compiles
+for that machine when the command line names none;
+`EMBCC_DEFAULT_TARGET` overrides it for one shell and `--target=`
+overrides both.
+
+D-014 made every machine reachable from one binary, which was the right
+shape and left one thing unsolved: a person whose work is one board still
+typed `--target=` on every line, and a Makefile that inherited no
+environment still compiled for x86-64. A cross toolchain that has to be
+asked, every time, to be a cross toolchain is not one.
+
+**Why a build-time knob and not only an environment variable.** An
+installed compiler should behave the same for everyone who runs it —
+including cron, including a build server, including a Makefile that
+scrubs the environment. An environment variable alone puts the target in
+the *caller's* hands, which is exactly where a cross build should not
+keep it. So the compiled-in value is the durable one and the variable is
+the temporary override, which is also the order GCC users already expect
+from `./configure --target=`.
+
+**What is deliberately NOT copied from GCC.** There, a cross build is a
+different binary that can only emit for one machine. Here only the
+DEFAULT string is compiled in; the binary still contains x86-64,
+aarch64, ARMv7-M and both RISC-V widths, and `--target=` reaches all of
+them. A cross-configured install is the same compiler with a different
+starting point — which is what makes it safe to configure one, and is
+D-014's property preserved rather than traded away.
+
+**Why the variable is `EMBCC_DEFAULT_TARGET` and not `EMBCC_TARGET`.**
+The short name was taken: `tests/lib.sh` uses it for which target the
+SUITE is exercising, and `tests/run.sh` exports it around every golden
+test. A driver that honoured it would have retargeted, under
+`make test-arm64`, every test that relies on the default — and the
+failure would have looked like a miscompile rather than a naming
+mistake. Two unrelated settings behind one name is a bug with a delay
+fuse; `tests/golden/default-target.sh` asserts the separation so nobody
+tidies the two names into one.
+
+**A bad default is refused at startup**, by name, saying which of the two
+places it came from (THE RULE). Falling back to `x86_64-elf` would be the
+worst possible behaviour here: the objects link, and then the board does
+not run.

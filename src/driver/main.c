@@ -48,11 +48,23 @@ static void print_version(void)
            "_Atomic and the atomic builtins, _Generic — plus the GNU "
            "extensions EmbLinkOS uses (statement expressions, typeof, "
            "computed goto, attributes, extended inline asm).\n");
-    printf("Targets (--target=): x86_64-elf (the default; System V AMD64, "
-           "x87 long double) and aarch64-elf (AAPCS64, binary128 long "
-           "double) are the freestanding pair; each architecture also has "
-           "-emblink, -linux-gnu and -apple-darwin, and any unknown "
-           "--target lists every triple (D-014).\n");
+    printf("Targets (--target=): x86_64-elf (System V AMD64, x87 long "
+           "double) and aarch64-elf (AAPCS64, binary128 long double) are "
+           "the freestanding pair; thumbv7m-none-eabi and "
+           "riscv32/riscv64-unknown-elf are the embedded ones (D-015, "
+           "D-016); each architecture also has -emblink, -linux-gnu and "
+           "-apple-darwin, and any unknown --target lists every triple "
+           "(D-014).\n");
+    {
+        const char *dt = target_default_name();
+        printf("With no --target= this compiler emits for %s%s.\n",
+               dt ? dt : "x86_64-elf",
+               dt ? ", the default it was configured with; "
+                    "EMBCC_DEFAULT_TARGET changes that for one shell"
+                  : "; build with `make DEFAULT_TARGET=riscv32-unknown-elf` "
+                    "(or set EMBCC_DEFAULT_TARGET) for a compiler that "
+                    "targets your board by default");
+    }
     printf("Hosted: Linux builds a STATIC image with no glibc under it "
            "(lib/libc/os/linux issues syscalls; make libc-linux-x86_64) and "
            "it has run on a real kernel; macOS emits Mach-O objects the "
@@ -79,7 +91,7 @@ static void print_usage(FILE *out)
 {
     fprintf(out,
             "usage: embcc [-E] -c FILE.c|FILE.cc|FILE.asm [-o FILE.o]\n"
-            "             [--target=x86_64-elf|aarch64-elf] [-x c|c++]\n"
+            "             [--target=TRIPLE] [-x c|c++]\n"
             "             [-std=...] [--emit-c]\n"
             "             [-I DIR]... [-isystem DIR]... [-nostdinc] [-g]\n"
             "             [-O0|-O1|-O2]\n"
@@ -114,7 +126,15 @@ static void print_options(FILE *out)
       "  -fno-exceptions, -fno-rtti   C++ without them\n"
       "  -fno-access-control          do not enforce private/protected\n"
       "\nthe target\n"
-      "  --target=x86_64-elf|aarch64-elf\n"
+      "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
+      "                         riscv32/riscv64-unknown-elf, and the -emblink,\n"
+      "                         -linux-gnu, -apple-darwin and -windows-gnu\n"
+      "                         spellings; an unknown one lists them all\n",
+      out);
+    fprintf(out,
+      "                         with none, this compiler emits for %s\n",
+      target_default_name() ? target_default_name() : "x86_64-elf");
+    fputs(
       "  -dumpmachine           print that target\n"
       "  -O0 -O1 -O2            optimisation\n"
       "  -g                     debug information (DWARF)\n"
@@ -2255,6 +2275,25 @@ int main(int argc, char **argv)
         argv[2] = argv[0];            /* shift: argv[2..] is now the command */
         argv += 2;
         argc -= 2;
+    }
+    /* The CONFIGURED default, before the command line is read, so a
+     * --target= below simply overwrites it. A compiler built with
+     * `make DEFAULT_TARGET=riscv32-unknown-elf` compiles for the board
+     * when it is handed nothing at all. */
+    {
+        const char *bad = NULL;
+        if (!target_apply_default(&bad)) {
+            fprintf(stderr, "embcc: error: the default target '%s' is not "
+                            "one EmbCC knows\n", bad);
+            fprintf(stderr, "embcc: it came from %s\n",
+                    plat_getenv("EMBCC_DEFAULT_TARGET")
+                        ? "EMBCC_DEFAULT_TARGET in the environment"
+                        : "the DEFAULT_TARGET this compiler was built with");
+            fprintf(stderr, "embcc: the targets it emits for are:\n");
+            for (int t = 0; t < target_triple_count(); t++)
+                fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
+            return 1;
+        }
     }
     /* Scanned ahead of everything else: --version and --dump-predef must
      * describe the target that was asked for, not the default. */

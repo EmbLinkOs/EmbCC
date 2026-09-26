@@ -11,6 +11,27 @@ CC      ?= cc
 CFLAGS  ?= -std=c99 -Wall -Wextra -Werror -g
 BUILD   := build
 
+# The target `embcc` compiles for when the command line names none.
+# Empty means x86_64-elf -- a compiler built here targets here. A person
+# whose work is one board builds the compiler for it once:
+#
+#     make DEFAULT_TARGET=riscv32-unknown-elf
+#
+# and then types `embcc main.c` rather than repeating --target= all day.
+# This is GCC's `./configure --target=`, which is why it is a build-time
+# knob and not only an environment variable: an installed cross compiler
+# should behave the same for everyone who runs it, including a Makefile
+# that inherited no environment. EMBCC_DEFAULT_TARGET overrides it for
+# one shell, and --target= overrides both.
+#
+# Only the string is compiled in. The compiler still contains every
+# backend, so --target= reaches all of them -- unlike GCC, where a cross
+# build is a different binary.
+DEFAULT_TARGET ?=
+ifneq ($(DEFAULT_TARGET),)
+CFLAGS += -DEMBCC_DEFAULT_TARGET='"$(DEFAULT_TARGET)"'
+endif
+
 # The target-neutral compiler, then src/arch: what every target shares
 # (selection, the backend contract, the code buffer), then one directory per
 # architecture — everything x86-64-only under x86_64/, aarch64-only under

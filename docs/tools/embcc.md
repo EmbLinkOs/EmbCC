@@ -29,7 +29,7 @@ usage: embcc [-E] -c FILE.c [-o FILE.o] [--target=TRIPLE] [-I DIR]... [flags]
 
 | Flag | Meaning |
 |------|---------|
-| `--target=TRIPLE` | Which machine to emit for: `x86_64-elf` (default) or `aarch64-elf`. Fixed for the whole compile — it selects the backend, the predefined-macro set, `e_machine` and the relocation types together (D-011). Also accepted before `--version`/`--dump-predef`, which then describe that target. |
+| `--target=TRIPLE` | Which machine to emit for: `x86_64-elf`, `aarch64-elf`, `thumbv7m-none-eabi`, `riscv32-unknown-elf`, `riscv64-unknown-elf`, and the `-emblink`/`-linux-gnu`/`-apple-darwin`/`-windows-gnu` spellings of the two big ones. With no `--target=` the compiler uses its **configured default** (below). Fixed for the whole compile — it selects the backend, the predefined-macro set, `e_machine` and the relocation types together (D-011). Also accepted before `--version`/`--dump-predef`, which then describe that target. |
 | `-o FILE.o` | Output path (default: the input with `.o`). |
 | `-I DIR` | Add a header search directory (repeatable). |
 | `-isystem DIR` | Add a *system* header search directory (repeatable). |
@@ -37,6 +37,55 @@ usage: embcc [-E] -c FILE.c [-o FILE.o] [--target=TRIPLE] [-I DIR]... [flags]
 | `-O0` / `-O1` / `-O2` | Optimization level. Bare `-O` = `-O1`. `-O2` enables register allocation. |
 | `-funwind-tables` (also `-fasynchronous-unwind-tables`, `-fexceptions`) | Emit unwind tables (`.eh_frame`), so a C++ exception can unwind through the unit's functions. Always on for C++; off by default for C (a C callback library that C++ code may throw through wants it). `-fno-…` turns it off. |
 | `-fno-exceptions` | C++ without exceptions: `throw`/`try` are errors and no cleanup regions are made (as g++'s flag). |
+
+### The default target
+
+With no `--target=` on the command line, `embcc` compiles for whichever
+machine it was configured for. Three places say what that is, in this
+order:
+
+| | How | Scope |
+|---|---|---|
+| 1 | `--target=TRIPLE` on the command line | that one compile |
+| 2 | `EMBCC_DEFAULT_TARGET=TRIPLE` in the environment | that shell |
+| 3 | `make DEFAULT_TARGET=TRIPLE` when EmbCC was built | that installed compiler |
+| 4 | nothing — `x86_64-elf` | |
+
+So a person whose work is one board builds the compiler for it once:
+
+```
+make DEFAULT_TARGET=riscv32-unknown-elf
+make install PREFIX=/opt/embcc
+embcc -c main.c -o main.o        # RV32, no --target= anywhere
+```
+
+This is what `./configure --target=` buys a GCC cross build, without a
+configure script — and with one difference that matters: **the binary
+still contains every backend.** `--target=` reaches all of them from the
+same `embcc`, so a cross-configured install is not a separate compiler
+you can only use for one machine. Only the *default* changed.
+
+`embcc --version` and `embcc --help` both print the default they were
+built with, and `embcc -dumpmachine` prints the target actually in
+effect — which is the quickest way to find out what a Makefile is really
+compiling for.
+
+A default that is not a triple EmbCC knows is refused at startup, by
+name, saying which of the two places it came from. It is never silently
+ignored: a compiler that quietly fell back to `x86_64-elf` would produce
+objects that link and then do not run.
+
+**Note the variable is `EMBCC_DEFAULT_TARGET`, not `EMBCC_TARGET`.** The
+shorter name belongs to the test harness (`tests/lib.sh`), which uses it
+for which target the suite is exercising and exports it around every
+golden test. `tests/golden/default-target.sh` holds the two apart.
+
+**Libraries.** `make install` installs `libc`/`libc++` for the x86-64 and
+aarch64 triples only; the embedded targets are freestanding (D-015,
+D-016), so what they get is the freestanding header set — `<stdint.h>`,
+`<stddef.h>`, `<limits.h>` and the rest — which is installed for every
+target and needs no `-I`. `embcc --print-search-dirs` says which
+directories a given compiler actually found.
 
 **Codegen flags** (for freestanding / kernel targets)
 

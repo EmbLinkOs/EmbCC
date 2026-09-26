@@ -1,5 +1,7 @@
 #include "target.h"
 
+#include "../platform/platform.h"
+
 #include <string.h>
 
 #include "../elf/elf.h"
@@ -12,6 +14,38 @@ static enum target_fmt  g_fmt  = TGT_FMT_ELF;
 
 enum target_arch target_get(void) { return g_arch; }
 void target_set(enum target_arch a) { g_arch = a; }
+
+const char *target_default_name(void)
+{
+    const char *t = plat_getenv("EMBCC_DEFAULT_TARGET");
+
+#ifdef EMBCC_DEFAULT_TARGET
+    /* The environment wins over the compiled-in one, so a person can
+     * switch boards for a shell without rebuilding the compiler. */
+    if (!t || !*t)
+        t = EMBCC_DEFAULT_TARGET;
+#endif
+    return t && *t ? t : NULL;
+}
+
+int target_apply_default(const char **bad)
+{
+    const char *t = target_default_name();
+    enum target_arch a;
+    enum target_os os;
+    enum target_fmt fmt;
+
+    if (!t)
+        return 1;                    /* the built-in default stands */
+    if (!target_from_triple(t, &a, &os, &fmt)) {
+        *bad = t;
+        return 0;
+    }
+    target_set(a);
+    target_os_set(os);
+    target_fmt_set(fmt);
+    return 1;
+}
 
 enum target_os  target_os_get(void)  { return g_os; }
 enum target_fmt target_fmt_get(void) { return g_fmt; }

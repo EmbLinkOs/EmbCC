@@ -283,7 +283,7 @@ output: /data/build/out/embcc/coff_write.o
 
 name: arch_target.o
 kind: compile
-inputs: /data/src/embcc/arch/target.c /data/src/embcc/arch/target.h /data/apps/embcc/include/string.h /data/apps/embcc/include/stddef.h /data/src/embcc/elf/elf.h /data/src/embcc/coff/coff.h /data/src/embcc/macho/macho.h /data/apps/embcc/include/stdint.h 
+inputs: /data/src/embcc/arch/target.c /data/src/embcc/arch/target.h /data/src/embcc/platform/platform.h /data/apps/embcc/include/stddef.h /data/apps/embcc/include/string.h /data/src/embcc/elf/elf.h /data/src/embcc/coff/coff.h /data/src/embcc/macho/macho.h /data/apps/embcc/include/stdint.h 
 args: /data/apps/embcc/embcc.elf -c -I/data/apps/embcc/include -I/system/abi/include /data/src/embcc/arch/target.c -o /data/build/out/embcc/arch_target.o
 output: /data/build/out/embcc/arch_target.o
 

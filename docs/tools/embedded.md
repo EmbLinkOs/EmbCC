@@ -24,6 +24,17 @@ canonical one), `thumbv7m`, `thumbv7em-none-eabi`, `thumbv7em`,
 — a microcontroller has no operating system under the code, so there is
 no hosted spelling of it.
 
+If every compile in a project is for the same board, stop typing it:
+
+```
+make DEFAULT_TARGET=thumbv7m-none-eabi     # build EmbCC for the board
+embcc -Os -c main.c -o main.o              # ...and it stays the board
+```
+
+`EMBCC_DEFAULT_TARGET=thumbv7m-none-eabi` does the same for one shell,
+and `--target=` still overrides both — the binary keeps every backend.
+See [the default target](embcc.md#the-default-target).
+
 ### The data model
 
 It is the first ILP32 target here, and the differences from the 64-bit
