@@ -170,6 +170,9 @@ void t_bx(struct code *c, int rm);
 void t_blx(struct code *c, int rm);
 void t_nop(struct code *c);
 
+/* One half of an address: movw (top=0) or movt (top=1). */
+void t_movw_movt(struct code *c, int rd, unsigned v, int top);
+
 /* rd = <pc-relative address>, as the movw/movt pair a symbol reference
  * relocates through. Returns the offset of the movw; the movt follows it
  * immediately, so a caller that relocates both knows where each is. */

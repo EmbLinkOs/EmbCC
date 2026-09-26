@@ -132,6 +132,12 @@ static int tok_imm(const struct tok *t, long *out)
     long v = 0;
     if (i < t->len && t->s[i] == '#')
         i++;
+    /* `.+8` / `.-12`: a displacement from this instruction. The file
+     * assembler (src/as/gas.c) turns a label into exactly this before
+     * calling, and a branch operand can mean nothing else here --
+     * this layer sees no labels and does not know its own address. */
+    if (i < t->len && t->s[i] == '.')
+        i++;
     if (i < t->len && (t->s[i] == '-' || t->s[i] == '+')) {
         neg = t->s[i] == '-';
         i++;
@@ -449,6 +455,106 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             t_strex(out, rd, rn, base, (int)off);
             return 0;
         }
+    }
+
+    /* ---- control flow and the rest of what a .S file needs ---------
+     *
+     * Added for the file assembler (src/as/gas.c), which resolves a
+     * label into a PC-relative displacement before calling -- this
+     * layer never sees a name. The displacement is written `.+N` as
+     * it is for RISC-V, and a bare number means the same thing.
+     *
+     * Every branch here is the WIDE encoding. A .S file's branch
+     * could often be the narrow one, but choosing per displacement
+     * would make an instruction's length depend on a value the first
+     * pass does not have yet -- which is what relaxation is for, and
+     * this assembler does not relax. Four bytes always is correct and
+     * is a size question, not a correctness one.
+     */
+    if (n == 1) {
+        if (mnemonic_is(&t[0], "nop")) { t_nop(out); return 0; }
+    }
+    {
+        static const struct { const char *name; int cond; } bc[] = {
+            { "beq", T_EQ }, { "bne", T_NE }, { "bcs", T_CS },
+            { "bhs", T_CS }, { "bcc", T_CC }, { "blo", T_CC },
+            { "bmi", T_MI }, { "bpl", T_PL }, { "bvs", T_VS },
+            { "bvc", T_VC }, { "bhi", T_HI }, { "bls", T_LS },
+            { "bge", T_GE }, { "blt", T_LT }, { "bgt", T_GT },
+            { "ble", T_LE }
+        };
+        for (unsigned k = 0; k < sizeof bc / sizeof bc[0]; k++)
+            if (mnemonic_is(&t[0], bc[k].name)) {
+                long v;
+                int at;
+                if (n != 2 || !tok_imm(&t[1], &v))
+                    FAIL("%s wants a branch offset", bc[k].name);
+                if (v & 1) FAIL("%s offset %ld is odd", bc[k].name, v);
+                at = t_bcond(out, bc[k].cond);
+                /* t_patch_bcond takes a TARGET offset within the code
+                 * buffer; `at + v` is where the displacement points. */
+                t_patch_bcond(out, at, at + (int)v);
+                return 0;
+            }
+    }
+    if (mnemonic_is(&t[0], "b") && n == 2) {
+        long v;
+        int at;
+        if (!tok_imm(&t[1], &v)) FAIL("b wants a branch offset");
+        if (v & 1) FAIL("b offset %ld is odd", v);
+        at = t_b(out);
+        t_patch_b(out, at, at + (int)v);
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "bl") && n == 2) {
+        long v;
+        int at;
+        if (!tok_imm(&t[1], &v)) FAIL("bl wants a branch offset");
+        if (v & 1) FAIL("bl offset %ld is odd", v);
+        at = t_bl(out);
+        t_patch_bl(out, at, at + (int)v);
+        return 0;
+    }
+    if ((mnemonic_is(&t[0], "bx") || mnemonic_is(&t[0], "blx")) && n == 2) {
+        int r = tok_reg(&t[1]);
+        if (r < 0) FAIL("%.*s wants a register", t[0].len, t[0].s);
+        if (mnemonic_is(&t[0], "bx")) t_bx(out, r);
+        else                          t_blx(out, r);
+        return 0;
+    }
+    if ((mnemonic_is(&t[0], "push") || mnemonic_is(&t[0], "pop")) && n >= 2) {
+        /* `{r4, r5, lr}` arrives as one token per register, because
+         * the splitter treats the braces as punctuation. */
+        unsigned mask = 0;
+        for (int k = 1; k < n; k++) {
+            int r = tok_reg(&t[k]);
+            if (r < 0) FAIL("%.*s wants a register list", t[0].len, t[0].s);
+            mask |= 1u << r;
+        }
+        if (mnemonic_is(&t[0], "push")) (void)t_push(out, mask);
+        else                            (void)t_pop(out, mask);
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "mov") && n == 3) {
+        int rd = tok_reg(&t[1]), rm = tok_reg(&t[2]);
+        long v;
+        if (rd < 0) FAIL("mov wants a destination register");
+        if (rm >= 0) { t_mov_reg(out, rd, rm); return 0; }
+        if (!tok_imm(&t[2], &v)) FAIL("mov wants a register or a constant");
+        t_mov_imm(out, rd, v, 0);
+        return 0;
+    }
+    if ((mnemonic_is(&t[0], "movw") || mnemonic_is(&t[0], "movt")) && n == 3) {
+        int rd = tok_reg(&t[1]);
+        long v;
+        if (rd < 0 || !tok_imm(&t[2], &v))
+            FAIL("%.*s wants a register and a 16-bit constant",
+                 t[0].len, t[0].s);
+        if (v < 0 || v > 0xffff)
+            FAIL("%.*s constant %ld does not fit 16 bits",
+                 t[0].len, t[0].s, v);
+        t_movw_movt(out, rd, (unsigned)v, mnemonic_is(&t[0], "movt"));
+        return 0;
     }
 
     FAIL("asm instruction \"%.*s\" is not in the ARMv7-M vocabulary",

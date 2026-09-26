@@ -14,6 +14,8 @@
 #include "../platform/platform.h"
 #include "../cpp/cpp.h"
 #include "../arch/riscv/asm.h"
+#include "../arch/thumb/asm.h"
+#include "../arch/aarch64/asm.h"
 
 /* ---- the pieces of a file ------------------------------------------ */
 
@@ -429,6 +431,22 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
     const char *p = skip_ws((char *)stmt);
     int is_call = strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
     int is_la = strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
+    /* ARM writes a call to a symbol as `bl sym`, one instruction
+     * carrying one relocation -- there is no auipc pair to build. */
+    if ((g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64) &&
+        strncmp(p, "bl", 2) == 0 && isspace((unsigned char)p[2])) {
+        struct code tmp = { 0, 0, 0 };
+        char err[256];
+        if (pass == 2)
+            fix_add(g, g->cur, pc, ext, g->tgt->r_call, 0);
+        if (g->tgt->encode("bl .+0", &tmp, err, sizeof err) != 0) {
+            gerr(g, "%s", err);
+        } else {
+            emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
+        }
+        free(tmp.p);
+        return 1;
+    }
     if (!is_call && !is_la)
         return 0;
     if (pass == 2) {
@@ -500,6 +518,23 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
     const char *p = skip_ws((char *)stmt);
     const char *q;
     size_t n;
+    if ((g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64) &&
+        strncmp(p, "bl", 2) == 0 && isspace((unsigned char)p[2])) {
+        const char *b = skip_ws((char *)(p + 2));
+        size_t bn = 0;
+        while (b[bn] && is_symc((unsigned char)b[bn])) bn++;
+        /* Only when it names a SYMBOL: `bl .+8` is an ordinary
+         * displacement the statement assembler handles. */
+        if (bn && is_sym0((unsigned char)b[0]) &&
+            !sym_find(g, b, bn))
+            return sym_get(g, b, bn)->name;
+        if (bn && is_sym0((unsigned char)b[0])) {
+            struct sym *sy = sym_find(g, b, bn);
+            if (sy && sy->sec < 0)
+                return sy->name;
+        }
+        return NULL;
+    }
     if (!((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
           (strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]))))
         return NULL;
@@ -686,10 +721,31 @@ static const struct gas_target RISCV_GAS = {
     R_RISCV_32, R_RISCV_64
 };
 
+/* ARMv7-M. `call` and `la` are RISC-V pseudos and have no ARM
+ * spelling, so r_call/r_pcrel are zero: a symbol reference from a .S
+ * file here goes through `bl sym` (R_ARM_THM_CALL) and the movw/movt
+ * pair, which the driver names below. */
+static const struct gas_target THUMB_GAS = {
+    EM_ARM, 1, tasm_assemble, tasm_gpr,
+    R_ARM_THM_CALL, 0, 0,
+    R_ARM_ABS32, 0
+};
+
+/* aarch64. `bl sym` carries R_AARCH64_CALL26, one instruction and one
+ * relocation, the same shape ARM uses -- so the driver's ARM branch
+ * covers it once the machine is allowed through. */
+static const struct gas_target A64_GAS = {
+    EM_AARCH64, 0, a64asm_assemble, a64asm_gpr,
+    R_AARCH64_CALL26, 0, 0,
+    R_AARCH64_ABS32, R_AARCH64_ABS64
+};
+
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
     case TARGET_RISCV32: case TARGET_RISCV64: return &RISCV_GAS;
+    case TARGET_THUMB: return &THUMB_GAS;
+    case TARGET_AARCH64: return &A64_GAS;
     default: return NULL;
     }
 }

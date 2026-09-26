@@ -138,6 +138,17 @@ int a64asm_gpr(const char *name, int len)
     return n <= 30 ? n : -1;
 }
 
+/* Is this operand a general register? Unlike gpr() below it does not
+ * FAIL when it is not -- an operand that may be a register or an
+ * immediate has to be asked without committing. */
+static int maybe_gpr(const char *s, int *w)
+{
+    int r = a64asm_gpr(s, (int)strlen(s));
+    if (r >= 0 && w)
+        *w = s[0] == 'w';
+    return r;
+}
+
 /* A general register operand. *w is set to 1 for a W name. */
 static int gpr(struct actx *a, const char *s, int *w)
 {
@@ -155,6 +166,12 @@ static int gpr(struct actx *a, const char *s, int *w)
 static long imm(struct actx *a, const char *s)
 {
     if (*s == '#')
+        s++;
+    /* `.+8` / `.-12`: a displacement from this instruction, which is
+     * what the file assembler (src/as/gas.c) turns a label into
+     * before calling. This layer sees no labels and does not know its
+     * own address, so a branch operand can mean nothing else. */
+    if (*s == '.' && (s[1] == '+' || s[1] == '-'))
         s++;
     char *end;
     long v = strtol(s, &end, 0);
@@ -385,6 +402,133 @@ static void assemble_stmt(struct actx *a, char *st)
             }
             a64_word(a->out, (unsigned long)v);
         }
+        return;
+    }
+
+    /* ---- what a .S file needs -------------------------------------
+     *
+     * The encoders for all of this already existed (src/arch/aarch64/
+     * emit.h) and only the inline-asm vocabulary did not reach them:
+     * that vocabulary was MEASURED from the EmbLinkOS kernel, whose
+     * __asm__ statements are system instructions. A file assembler
+     * needs the ordinary ones too, so they are exposed here rather
+     * than re-encoded anywhere.
+     *
+     * Branch displacements arrive as `.+N`, resolved by the file
+     * assembler before this layer is called; a bare number means the
+     * same. Every branch is emitted then patched to `at + N`, which
+     * is what the existing patch helpers take.
+     *
+     * gpr() reports "this is a W register" as a flag; the encoders
+     * take a byte WIDTH. `w ? 4 : 8` is the conversion the ldr/str
+     * path above already makes, and passing the flag straight through
+     * emitted `mov w0` for `mov x0, 0`.
+     */
+    {
+        static const struct { const char *name; int op; } alu[] = {
+            { "add", '+' }, { "sub", '-' }, { "and", '&' },
+            { "orr", '|' }, { "eor", '^' }
+        };
+        for (unsigned k = 0; k < sizeof alu / sizeof alu[0]; k++)
+            if (strcmp(mn, alu[k].name) == 0 && n == 3) {
+                int w1 = 0, w2 = 0, w3 = 0;
+                int rd = gpr(a, ops[0], &w1);
+                int rn = gpr(a, ops[1], &w2);
+                int rm = maybe_gpr(ops[2], &w3);
+                if (a->failed) return;
+                if (rm < 0) {
+                    long v = imm(a, ops[2]);
+                    if (a->failed) return;
+                    if (alu[k].op == '+')      a64_add_imm(a->out, rd, rn, v, w1 ? 4 : 8);
+                    else if (alu[k].op == '-') a64_sub_imm(a->out, rd, rn, v, w1 ? 4 : 8);
+                    else { fail(a, "'%s' takes a register third operand", mn);
+                           return; }
+                    return;
+                }
+                (void)w2; (void)w3;
+                a64_alu_reg(a->out, alu[k].op, rd, rn, rm, w1 ? 4 : 8);
+                return;
+            }
+    }
+    if (strcmp(mn, "mov") == 0 && n == 2) {
+        int w1 = 0, w2 = 0;
+        int rd = gpr(a, ops[0], &w1);
+        int rm = maybe_gpr(ops[1], &w2);
+        if (a->failed) return;
+        (void)w2;
+        if (rm >= 0) a64_mov_reg(a->out, rd, rm, w1 ? 4 : 8);
+        else {
+            long v = imm(a, ops[1]);
+            if (!a->failed) a64_mov_imm(a->out, rd, v, w1 ? 4 : 8);
+        }
+        return;
+    }
+    if (strcmp(mn, "cmp") == 0 && n == 2) {
+        int w1 = 0, w2 = 0;
+        int rn = gpr(a, ops[0], &w1);
+        int rm = maybe_gpr(ops[1], &w2);
+        if (a->failed) return;
+        (void)w2;
+        if (rm >= 0) a64_cmp_reg(a->out, rn, rm, w1 ? 4 : 8);
+        else {
+            /* `cmp rn, #k` is `subs xzr, rn, #k`, which the existing
+             * sub-immediate encoder gives with xzr as its result. */
+            long v = imm(a, ops[0 + 1]);
+            if (!a->failed) a64_sub_imm(a->out, 31, rn, v, w1 ? 4 : 8);
+        }
+        return;
+    }
+    if (strcmp(mn, "ret") == 0 && n == 0) { a64_ret(a->out); return; }
+    if ((strcmp(mn, "br") == 0 || strcmp(mn, "blr") == 0) && n == 1) {
+        int w1 = 0;
+        int rn = gpr(a, ops[0], &w1);
+        (void)w1;
+        if (a->failed) return;
+        if (mn[1] == 'r') a64_br(a->out, rn);
+        else              a64_blr(a->out, rn);
+        return;
+    }
+    if ((strcmp(mn, "b") == 0 || strcmp(mn, "bl") == 0) && n == 1) {
+        long v = imm(a, ops[0]);
+        int at;
+        if (a->failed) return;
+        if (v & 3) { fail(a, "'%s' offset %ld is not a multiple of 4", mn, v);
+                     return; }
+        at = mn[1] ? a64_bl(a->out) : a64_b(a->out);
+        a64_patch_b26(a->out, at, at + (int)v);
+        return;
+    }
+    {
+        static const struct { const char *name; int cond; } bc[] = {
+            { "b.eq", 0 }, { "b.ne", 1 }, { "b.cs", 2 }, { "b.hs", 2 },
+            { "b.cc", 3 }, { "b.lo", 3 }, { "b.mi", 4 }, { "b.pl", 5 },
+            { "b.vs", 6 }, { "b.vc", 7 }, { "b.hi", 8 }, { "b.ls", 9 },
+            { "b.ge", 10 }, { "b.lt", 11 }, { "b.gt", 12 }, { "b.le", 13 }
+        };
+        for (unsigned k = 0; k < sizeof bc / sizeof bc[0]; k++)
+            if (strcmp(mn, bc[k].name) == 0 && n == 1) {
+                long v = imm(a, ops[0]);
+                int at;
+                if (a->failed) return;
+                if (v & 3) { fail(a, "'%s' offset %ld is not a multiple of 4",
+                                  mn, v); return; }
+                at = a64_bcond(a->out, bc[k].cond);
+                a64_patch_b19(a->out, at, at + (int)v);
+                return;
+            }
+    }
+    if ((strcmp(mn, "cbz") == 0 || strcmp(mn, "cbnz") == 0) && n == 2) {
+        int w1 = 0;
+        int rt = gpr(a, ops[0], &w1);
+        long v;
+        int at;
+        if (a->failed) return;
+        v = imm(a, ops[1]);
+        if (a->failed) return;
+        if (v & 3) { fail(a, "'%s' offset %ld is not a multiple of 4", mn, v);
+                     return; }
+        at = a64_cbz(a->out, rt, mn[2] == 'n', w1 ? 4 : 8);
+        a64_patch_b19(a->out, at, at + (int)v);
         return;
     }
 

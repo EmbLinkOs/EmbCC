@@ -108,6 +108,14 @@ static void movw(struct code *c, int rd, unsigned v, int top)
            (imm3 << 12) | (unsigned)(rd << 8) | imm8);
 }
 
+/* movw / movt, exposed for the file assembler: a .S file writes the
+ * two halves of an address by hand where the compiler emits them as a
+ * relocated pair. */
+void t_movw_movt(struct code *c, int rd, unsigned v, int top)
+{
+    movw(c, rd, v, top);
+}
+
 /* A constant into a register where THE FLAGS ARE DEAD.
  *
  * `movs rd, #imm` is two bytes for 0..255 into r0-r7, and `movw` is

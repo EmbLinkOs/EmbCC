@@ -142,13 +142,124 @@ else
     grep -q 'frobnicate' "$out/b2.txt" || {
         echo "FAIL: the refusal does not name the directive"; fail=1; }
 fi
-# A target with no file assembler yet says so, and says why.
-if "$EMBCC" --target=thumbv7m-none-eabi -c "$out/plain.s" -o /dev/null \
+# ARMv7-M, whose startup file is a vector table rather than a stack
+# setup: the first word is the initial SP and the second the reset
+# handler's ADDRESS, which is a relocation into .text from .text.
+cat > "$out/start.S" <<'CEOF'
+    .syntax unified
+    .thumb
+    .section .text
+    .global _vectors
+_vectors:
+    .word  0x20008000
+    .word  reset_handler
+    .global reset_handler
+    .type reset_handler, %function
+reset_handler:
+    mov  r1, 0
+loop:
+    cmp  r1, 4
+    bge  done
+    add  r1, r1, 1
+    b    loop
+done:
+    bl   main
+hang:
+    b    hang
+CEOF
+if "$EMBCC" --target=thumbv7m-none-eabi -c "$out/start.S" -o "$out/start.o" \
+     2> "$out/t.err"; then
+    if command -v llvm-objdump > /dev/null 2>&1; then
+        llvm-objdump -d --triple=thumbv7m "$out/start.o" > "$out/t.dis" 2>/dev/null
+        # A backward branch and a forward one, each resolved to its
+        # label -- the two directions the two passes exist for.
+        grep -q 'b.w.*<loop>' "$out/t.dis" || {
+            echo "FAIL thumb: the backward branch does not reach loop"
+            fail=1; }
+        grep -q 'bge.w.*<done>' "$out/t.dis" || {
+            echo "FAIL thumb: the forward branch does not reach done"
+            fail=1; }
+    fi
+    if command -v llvm-readelf > /dev/null 2>&1; then
+        llvm-readelf -r "$out/start.o" > "$out/t.rel" 2>/dev/null
+        grep -q 'R_ARM_THM_CALL.*main' "$out/t.rel" || {
+            echo "FAIL thumb: bl to an external symbol did not relocate"
+            fail=1; }
+        grep -q 'R_ARM_ABS32.*reset_handler' "$out/t.rel" || {
+            echo "FAIL thumb: the vector word did not relocate"
+            grep R_ARM "$out/t.rel" | head -3 | sed 's/^/     | /'; fail=1; }
+    fi
+    echo "  thumbv7m: a vector table, both branch directions, and bl to an"
+    echo "  external symbol all assemble and relocate"
+else
+    echo "FAIL thumbv7m: the startup file does not assemble"
+    head -3 "$out/t.err" | sed 's/^/     | /'; fail=1
+fi
+
+# aarch64. Its inline-asm vocabulary was MEASURED from the EmbLinkOS
+# kernel, whose __asm__ statements are system instructions, so the
+# ordinary ones were missing although every encoder existed. The
+# width flag is the trap here: gpr() reports "is a W register" and
+# the encoders take a byte width, so `mov x0, 0` assembled as
+# `mov w0, 0` until that was converted.
+cat > "$out/a64.S" <<'CEOF'
+    .section .text
+    .global _start
+    .type _start, %function
+_start:
+    mov x0, 0
+    mov x1, 4
+loop:
+    cmp x0, x1
+    b.ge done
+    add x0, x0, 1
+    b   loop
+done:
+    bl  main
+    ret
+    .global tag
+    .data
+    .align 8
+tag:
+    .quad _start
+CEOF
+if "$EMBCC" --target=aarch64-elf -c "$out/a64.S" -o "$out/a64.o" \
+     2> "$out/a.err"; then
+    if command -v llvm-objdump > /dev/null 2>&1; then
+        llvm-objdump -d --triple=aarch64 "$out/a64.o" > "$out/a.dis" 2>/dev/null
+        grep -q 'mov[[:space:]]*x0' "$out/a.dis" || {
+            echo "FAIL aarch64: 'mov x0' came out as a W-register move"
+            grep -m1 mov "$out/a.dis" | sed 's/^/     | /'; fail=1; }
+        grep -q 'b[[:space:]].*<loop>' "$out/a.dis" || {
+            echo "FAIL aarch64: the backward branch does not reach loop"
+            fail=1; }
+        grep -q 'b.ge.*<done>' "$out/a.dis" || {
+            echo "FAIL aarch64: the conditional branch does not reach done"
+            fail=1; }
+    fi
+    if command -v llvm-readelf > /dev/null 2>&1; then
+        llvm-readelf -r "$out/a64.o" > "$out/a.rel" 2>/dev/null
+        grep -q 'R_AARCH64_CALL26.*main' "$out/a.rel" || {
+            echo "FAIL aarch64: bl to an external symbol did not relocate"
+            fail=1; }
+        grep -q 'R_AARCH64_ABS64.*_start' "$out/a.rel" || {
+            echo "FAIL aarch64: .quad of a symbol did not relocate"; fail=1; }
+    fi
+    echo "  aarch64: X-register moves, both branch kinds, bl and .quad all"
+    echo "  assemble and relocate"
+else
+    echo "FAIL aarch64: the file does not assemble"
+    head -3 "$out/a.err" | sed 's/^/     | /'; fail=1
+fi
+
+# x86-64 keeps its own NASM-syntax assembler (embas) and is not wired
+# to this driver, so it still refuses by name rather than half-working.
+if "$EMBCC" --target=x86_64-elf -c "$out/plain.s" -o /dev/null \
      2> "$out/b3.txt"; then
-    echo "  (thumbv7m assembles .s too)"
+    echo "  (x86-64 assembles .s too)"
 else
     grep -q 'assembly-file support' "$out/b3.txt" || {
-        echo "FAIL: thumbv7m's refusal does not explain itself"
+        echo "FAIL: x86-64's refusal does not explain itself"
         head -1 "$out/b3.txt" | sed 's/^/     | /'; fail=1; }
     echo "  a target without a file assembler refuses by name"
 fi
