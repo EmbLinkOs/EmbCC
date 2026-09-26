@@ -168,6 +168,22 @@ int target_apply_default(const char **bad);
  * "x86_64-elf (the default)" is lying to the person reading it. */
 const char *target_default_name(void);
 
+/* The length in bytes of the instruction at `p`, for a reader walking a
+ * .text stream (-S, and anything else that must group bytes by
+ * instruction). Returns 0 when this target's length cannot be decided
+ * from the bytes alone -- x86-64, where the caller must ask a real
+ * disassembler.
+ *
+ * This exists because -S used to call the x86-64 disassembler for EVERY
+ * target, so a RISC-V .text was grouped into x86 instruction lengths and
+ * annotated with x86 mnemonics. The fixed-width targets do not need a
+ * disassembler to be grouped correctly -- they need three lines of
+ * arithmetic each -- and getting the GROUPING right is what makes the
+ * emitted text reassemble to the same object.
+ *
+ * `avail` is how many bytes remain; a result is never larger than it. */
+int target_insn_len(const unsigned char *p, int avail);
+
 /* Parses a full triple into all three dimensions. Returns 0 and leaves
  * every output alone on anything it does not know, so the driver can
  * refuse loudly rather than silently emit for the wrong machine (THE

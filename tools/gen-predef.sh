@@ -38,6 +38,14 @@
 #   __BITINT_MAXWIDTH__      gcc 14+ advertises C23 _BitInt with it; EmbCC
 #                            has no _BitInt, so a header testing it must not
 #                            be told otherwise.
+# -mcmodel=medany is asked for explicitly, and is not a detail either.
+# Clang defaults to medlow and then defines __riscv_cmodel_medlow, but
+# the backend emits MEDANY at both widths -- PC-relative auipc, because
+# lui sign-extends bit 31 and the absolute pair cannot name a firmware
+# image at 0x80000000 (D-016). The table said medlow for a compiler that
+# emits medany, so code that switches on the macro to pick an addressing
+# sequence picked the wrong one.
+#
 #   __riscv_v_intrinsic      clang defines it for plain rv32im/rv64im, with
 #                            no __riscv_v beside it -- the version of a
 #                            vector intrinsics API for a vector unit that
@@ -65,9 +73,9 @@ refflags() {
         thumb)   [ -n "${EMBCC_REF_GCC_THUMB:-}" ] || \
                      echo "-target thumbv7m-none-eabi -ffreestanding" ;;
         riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
-                     echo "-target riscv32-unknown-elf -march=rv32im -mabi=ilp32 -ffreestanding" ;;
+                     echo "-target riscv32-unknown-elf -march=rv32im -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
         riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
-                     echo "-target riscv64-unknown-elf -march=rv64im -mabi=lp64 -ffreestanding" ;;
+                     echo "-target riscv64-unknown-elf -march=rv64im -mabi=lp64 -mcmodel=medany -ffreestanding" ;;
         *)       ;;
     esac
 }

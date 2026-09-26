@@ -33,6 +33,7 @@
 #include <string.h>
 
 #include "util.h"
+
 #include "../arch/backend.h"
 #include "../arch/target.h"
 #include "../ir/ir.h"
@@ -81,21 +82,88 @@ static void str_label(char *out, size_t cap, const struct ir_unit *iu, int off)
  * backend's zeroed field implies. A PC-relative field is measured from its
  * own END, so the addend is -(bytes after the field), which for every form
  * EmbCC emits is -4. */
+/* (kind, target) -> the ELF relocation type name an assembler accepts.
+ *
+ * This used to answer R_X86_64_* for every target, which was harmless
+ * only because -S refused aarch64 and had not been taught about the
+ * three machines added after it. The kinds are already per-machine
+ * (target.h): what was missing was the other half of the mapping that
+ * src/elf/write.c has always had.
+ *
+ * NULL means "this kind cannot be spelled as a plain .reloc on this
+ * target", and the caller refuses rather than emitting a relocation
+ * that assembles into the wrong program. Nothing lands there today;
+ * the kind that nearly did is RISC-V's paired low half, whose operand
+ * is the ADDRESS OF THE PAIRED auipc rather than the symbol, and which
+ * is handled by labelling the auipc at its emission site. */
+/* ARM assemblers treat '@' as the start of a comment, so a symbol type
+ * is spelled `%function` there and `@function` everywhere else. Getting
+ * this wrong is not subtle -- the whole directive vanishes into a
+ * comment and the symbol is left untyped. */
+static const char *type_sigil(void)
+{
+    return target_get() == TARGET_THUMB ? "%" : "@";
+}
+
 static const char *reloc_name(int kind)
 {
-    switch (kind) {
-    case RK_CALL:        return "R_X86_64_PLT32";
-    case RK_PCREL32:     return "R_X86_64_PC32";
-    case RK_ABS64:       return "R_X86_64_64";
-    case RK_ABS32:       return "R_X86_64_32";
-    case RK_DATA_PREL32: return "R_X86_64_PC32";
-    default:             return "R_X86_64_PC32";
+    switch (target_get()) {
+    case TARGET_AARCH64:
+        switch (kind) {
+        case RK_CALL:        return "R_AARCH64_CALL26";
+        case RK_ADR_HI21:    return "R_AARCH64_ADR_PREL_PG_HI21";
+        case RK_ADD_LO12:    return "R_AARCH64_ADD_ABS_LO12_NC";
+        case RK_GOT_PAGE:    return "R_AARCH64_ADR_GOT_PAGE";
+        case RK_GOT_LO12:    return "R_AARCH64_LD64_GOT_LO12_NC";
+        case RK_TPREL_HI12:  return "R_AARCH64_TLSLE_ADD_TPREL_HI12";
+        case RK_TPREL_LO12:  return "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC";
+        case RK_ABS64:       return "R_AARCH64_ABS64";
+        case RK_ABS32:       return "R_AARCH64_ABS32";
+        case RK_DATA_PREL32: return "R_AARCH64_PREL32";
+        default:             return NULL;
+        }
+    case TARGET_THUMB:
+        switch (kind) {
+        case RK_CALL:        return "R_ARM_THM_CALL";
+        case RK_THM_MOVW:    return "R_ARM_THM_MOVW_ABS_NC";
+        case RK_THM_MOVT:    return "R_ARM_THM_MOVT_ABS";
+        case RK_ABS32:       return "R_ARM_ABS32";
+        case RK_DATA_PREL32: return "R_ARM_REL32";
+        default:             return NULL;
+        }
+    case TARGET_RISCV32:
+    case TARGET_RISCV64:
+        switch (kind) {
+        case RK_CALL:             return "R_RISCV_CALL";
+        case RK_RISCV_PCREL_HI20: return "R_RISCV_PCREL_HI20";
+        case RK_ABS64:            return "R_RISCV_64";
+        case RK_ABS32:            return "R_RISCV_32";
+        case RK_DATA_PREL32:      return "R_RISCV_32_PCREL";
+        case RK_RISCV_PCREL_LO12_I: return "R_RISCV_PCREL_LO12_I";
+        default:                  return NULL;
+        }
+    case TARGET_X86_64:
+    default:
+        switch (kind) {
+        case RK_CALL:        return "R_X86_64_PLT32";
+        case RK_PCREL32:     return "R_X86_64_PC32";
+        case RK_ABS64:       return "R_X86_64_64";
+        case RK_ABS32:       return "R_X86_64_32";
+        case RK_DATA_PREL32: return "R_X86_64_PC32";
+        case RK_TPOFF32:     return "R_X86_64_TPOFF32";
+        default:             return "R_X86_64_PC32";
+        }
     }
 }
 
+/* x86-64 counts a PC-relative displacement from the END of the
+ * instruction and every other target here counts it from the start, so
+ * the -4 that corrects for that is x86's alone. */
 static long addend_for(int kind)
 {
-    return kind == RK_ABS64 || kind == RK_ABS32 ? 0 : -4;
+    if (kind == RK_ABS64 || kind == RK_ABS32)
+        return 0;
+    return target_get() == TARGET_X86_64 ? -4 : 0;
 }
 
 void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
@@ -133,8 +201,19 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     qsort(site, (size_t)ns, sizeof *site, site_cmp);
 
     ob_fmt(b, "\t.file\t\"%s\"\n", srcname);
+    /* ARMv7-M is Thumb-only, and an assembler defaults to ARM state.
+     * Without these the bytes are placed correctly and every symbol is
+     * marked ARM, so a caller interworks into the wrong instruction
+     * set. `.syntax unified` because the pre-UAL syntax is still the
+     * default in some assemblers. */
+    if (target_get() == TARGET_THUMB)
+        ob_str(b, "\t.syntax unified\n\t.thumb\n");
     ob_str(b, "\t.text\n");
-    long prev_end = 0;            /* where the previous function's code ended */
+    long prev_end = 0;
+    /* The most recent auipc's local label, for the addi that pairs with
+     * it, and a counter so the labels are unique within the unit. */
+    char hi_label[32] = "";
+    int pcrel_n = 0;            /* where the previous function's code ended */
 
     for (int i = 0; i < iu->nfuncs; i++) {
         struct ir_func *f = &iu->funcs[i];
@@ -157,17 +236,44 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         }
         if (!f->is_static)
             ob_fmt(b, "\t.globl\t%s\n", f->name);
-        ob_fmt(b, "\t.type\t%s, @function\n%s:\n", f->name, f->name);
+        if (target_get() == TARGET_THUMB)
+            ob_fmt(b, "\t.thumb_func\n");
+        ob_fmt(b, "\t.type\t%s, %sfunction\n%s:\n", f->name, type_sigil(),
+               f->name);
 
         long pc = lo;
         while (pc < hi) {
             char dis[256];
-            int len = embdbg_decode_one(text + pc, (int)(hi - pc),
+            /* The target's own length rule first. It is exact on every
+             * fixed-width machine and costs no disassembler; only
+             * x86-64 returns 0 ("decode it to find out"), and only
+             * x86-64 has a disassembler here to do that. Asking the
+             * x86-64 decoder on a RISC-V stream -- which is what this
+             * did -- mis-groups the bytes AND annotates them with the
+             * wrong mnemonics. */
+            int have_dis = 0;
+            int len = target_insn_len((const unsigned char *)text + pc,
+                                      (int)(hi - pc));
+            if (len < 1) {
+                len = embdbg_decode_one(text + pc, (int)(hi - pc),
                                         (unsigned long)pc, dis);
+                have_dis = target_get() == TARGET_X86_64 && len >= 1;
+            }
             if (len < 1)
                 len = 1;
             const struct site *st = site_in(site, ns, (int)pc,
                                             (int)(pc + len));
+            /* RISC-V splits an address across auipc + addi, and the LOW
+             * half's relocation names the auipc's ADDRESS rather than
+             * the symbol -- that is how the psABI lets the linker find
+             * the displacement the high half rounded. An assembler
+             * spells it with a local label on the auipc, so that is
+             * what is emitted here. The pair is always adjacent (the
+             * object writer relies on the same fact: patch_off - 4). */
+            if (st && st->kind == RK_RISCV_PCREL_HI20) {
+                snprintf(hi_label, sizeof hi_label, ".Lpcrel_hi%d", pcrel_n++);
+                ob_fmt(b, "%s:\n", hi_label);
+            }
             /* An instruction that names nothing is emitted as its BYTES,
              * with the disassembly as a comment.
              *
@@ -186,7 +292,13 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             for (int k = 0; k < len; k++)
                 ob_fmt(b, "%s0x%02x", k ? "," : "",
                        (unsigned)text[pc + k]);
-            ob_fmt(b, "\t# %s\n", dis);
+            /* The comment is a convenience and must never be a guess:
+             * printed only where a disassembler for THIS target
+             * produced it. */
+            if (have_dis)
+                ob_fmt(b, "\t# %s\n", dis);
+            else
+                ob_str(b, "\n");
             /* A relocation is attached explicitly rather than spelled into
              * the instruction. Written symbolically, an assembler that can
              * SEE the target resolves it itself -- `lea add(%rip)` becomes a
@@ -200,10 +312,34 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 else
                     str_label(sym, sizeof sym, iu, st->str_off);
                 const char *rt = reloc_name(st->kind);
+                if (st->kind == RK_RISCV_PCREL_LO12_I) {
+                    if (!*hi_label)
+                        diag_fatal(srcname, 0,
+                                   "-S: a RISC-V PCREL_LO12 relocation with "
+                                   "no PCREL_HI20 before it; the two halves "
+                                   "of an address must be emitted as a pair");
+                    snprintf(sym, sizeof sym, "%s", hi_label);
+                }
+                /* Refuse rather than emit a relocation that assembles
+                 * into a different program (THE RULE). The one kind
+                 * that lands here is RISC-V's paired low half, whose
+                 * .reloc operand is the address of the auipc it pairs
+                 * with and not the symbol -- emitting the symbol would
+                 * assemble cleanly and compute the wrong address. */
+                if (!rt)
+                    diag_fatal(srcname, 0,
+                               "-S cannot yet spell one of this unit's "
+                               "relocations for %s (kind %d); the object "
+                               "(-c) is correct, and emitting assembly "
+                               "that is not the object would be worse "
+                               "than refusing",
+                               target_triple_now(), st->kind);
                 long field = (long)st->off - pc;   /* within the instruction */
                 long tail = len - field - (st->kind == RK_ABS64 ? 8 : 4);
                 ob_fmt(b, "\t.reloc\t.-%ld, %s, %s%+ld\n",
-                       len - field, rt, sym, addend_for(st->kind));
+                       len - field, rt, sym,
+                       st->kind == RK_RISCV_PCREL_LO12_I
+                           ? 0L : addend_for(st->kind));
                 (void)tail;
             }
             pc += len;
@@ -250,8 +386,8 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             ob_fmt(b, "\t.globl\t%s\n", g->name);
         if (g->init_bytes && g->init_len > 0) {
             ob_str(b, "\t.data\n");
-            ob_fmt(b, "\t.align\t%d\n\t.type\t%s, @object\n%s:\n",
-                   al, g->name, g->name);
+            ob_fmt(b, "\t.align\t%d\n\t.type\t%s, %sobject\n%s:\n",
+                   al, g->name, type_sigil(), g->name);
             /* A pointer slot in an initializer is an ADDRESS the linker
              * fills in, not bytes: `static char *p = "hi";` holds a
              * relocation, and emitting its zeroed bytes would produce a
@@ -294,8 +430,9 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 k = stop;
             }
         } else {
-            ob_fmt(b, "\t.bss\n\t.align\t%d\n\t.type\t%s, @object\n%s:\n"
-                      "\t.zero\t%d\n", al, g->name, g->name, sz);
+            ob_fmt(b, "\t.bss\n\t.align\t%d\n\t.type\t%s, %sobject\n%s:\n"
+                      "\t.zero\t%d\n", al, g->name, type_sigil(),
+                   g->name, sz);
         }
         ob_fmt(b, "\t.size\t%s, %d\n", g->name, sz);
     }

@@ -1076,11 +1076,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * emitter needs is in hand here -- the code, the string pool, and the
      * relocation sites the backend recorded. */
     if (want_asm) {
-        if (ta == TARGET_AARCH64)
-            diag_fatal(in, 0,
-                       "-S is x86-64 only: there is no aarch64 disassembler "
-                       "here, and emitting text that is not the object would "
-                       "be worse than refusing");
+        /* Every target, now. What -S emits is the OBJECT's bytes as
+         * .byte directives with the relocations attached explicitly --
+         * not a re-rendering that an assembler would be free to encode
+         * differently -- so the only per-target knowledge it needs is
+         * how to group the bytes into instructions and what to call
+         * each relocation. Both are answered in src/arch/target.c and
+         * asmout.c now, and asmout refuses by name for anything it
+         * cannot spell. The x86-64 disassembly comment stays x86-64's;
+         * the other targets get the bytes without a commentary that
+         * would have to be guessed. */
         struct outbuf ab = { NULL, 0, 0 };
         asm_emit_unit(&ab, in, u, iu, (const unsigned char *)text.p,
                       text.len, (const unsigned char *)rodata,
@@ -2194,6 +2199,7 @@ static const char *default_asm_output(const char *in)
 int main(int argc, char **argv)
 {
     const char *input = NULL, *output = NULL;
+    int out_is_stdout = 0;          /* `-o -` */
     int compile_mode = 0, pp_only = 0;
     int lang = -1;                  /* -x: 0 C, 1 C++; -1 by suffix */
 
@@ -2601,6 +2607,14 @@ int main(int argc, char **argv)
                 return 1;
             }
             output = argv[++i];
+            /* `-o -` means stdout, as it does in every other compiler.
+             * Every text-producing mode here already writes to stdout
+             * when no -o was given, so the whole of the support is to
+             * map the name onto that. Without it the driver created a
+             * FILE called "-" in the working directory -- which is how
+             * one got committed to this repository. */
+            if (strcmp(output, "-") == 0)
+                output = NULL, out_is_stdout = 1;
         } else if (has_c_suffix(argv[i]) || has_asm_suffix(argv[i]) ||
                    has_cxx_suffix(argv[i]) || has_ir_suffix(argv[i]) ||
                    (lang >= 0 && argv[i][0] != '-')) {
@@ -2720,5 +2734,14 @@ int main(int argc, char **argv)
      * gets the default name. */
     if ((want_iface || want_asm) && !output)
         return done(compile(input, NULL, 0));
+    /* `-o -` reached here with output == NULL, which for an OBJECT means
+     * "use the default name" rather than "write to stdout" -- so it
+     * would quietly produce input.o. Refuse instead of surprising the
+     * caller (THE RULE); the ELF writer writes to a path, not a pipe. */
+    if (out_is_stdout)
+        return done((fprintf(stderr, "embcc: error: `-o -` writes to stdout, "
+                                     "which -E, -S and --emit-interfaces "
+                                     "support but an object file does not; "
+                                     "name a file\n"), 1));
     return done(compile(input, output ? output : default_output(input), 0));
 }

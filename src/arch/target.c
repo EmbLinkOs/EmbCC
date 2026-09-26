@@ -28,6 +28,48 @@ const char *target_default_name(void)
     return t && *t ? t : NULL;
 }
 
+int target_insn_len(const unsigned char *p, int avail)
+{
+    if (avail <= 0)
+        return 0;
+    switch (g_arch) {
+    case TARGET_AARCH64:
+        /* A64 is fixed 32-bit, with no exceptions. */
+        return avail >= 4 ? 4 : 0;
+
+    case TARGET_RISCV32:
+    case TARGET_RISCV64:
+        /* The RISC-V length encoding lives in the low bits of the first
+         * halfword (unprivileged ISA, "Expanded Instruction-Length
+         * Encoding"). EmbCC emits no compressed instructions today, but
+         * the rule is written in full: adding the C extension must not
+         * also require remembering to change this. */
+        if ((p[0] & 0x03) != 0x03)
+            return avail >= 2 ? 2 : 0;          /* 16-bit (C extension) */
+        if ((p[0] & 0x1f) != 0x1f)
+            return avail >= 4 ? 4 : 0;          /* the base 32-bit forms */
+        return 0;                               /* 48-bit and wider: unused */
+
+    case TARGET_THUMB: {
+        /* Thumb-2: a first halfword whose top five bits are 0b11101,
+         * 0b11110 or 0b11111 introduces a 32-bit instruction; everything
+         * else is one halfword (ARMv7-M ARM, A5.1). */
+        if (avail < 2)
+            return 0;
+        unsigned hw = (unsigned)p[0] | ((unsigned)p[1] << 8);   /* little-endian */
+        if ((hw & 0xf800u) >= 0xe800u)
+            return avail >= 4 ? 4 : 0;
+        return 2;
+    }
+
+    case TARGET_X86_64:
+    default:
+        /* Variable-length, and no rule short of decoding it. The caller
+         * asks the disassembler. */
+        return 0;
+    }
+}
+
 int target_apply_default(const char **bad)
 {
     const char *t = target_default_name();

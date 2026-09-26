@@ -352,7 +352,7 @@ const struct predef_macro predef_macros_cxx_riscv64[] = {
     { "__private_extern__", "extern" },
     { "__riscv", "1" },
     { "__riscv_arch_test", "1" },
-    { "__riscv_cmodel_medlow", "1" },
+    { "__riscv_cmodel_medany", "1" },
     { "__riscv_div", "1" },
     { "__riscv_float_abi_soft", "1" },
     { "__riscv_i", "2001000" },
