@@ -204,7 +204,7 @@ Missing:
 | `__builtin_LINE` `FILE` `FUNCTION` | logging/assert macros |
 | `__builtin_memcmp` `strlen` | already have memcpy/memset/memmove |
 | `__builtin_setjmp` `clear_cache` | |
-| `__builtin_add/sub/mul_overflow` | **C++ only** — C says "is not declared" |
+| ~~`__builtin_add/sub/mul_overflow`~~ | **DONE** (`2e8c1f6`), branchless, 44 boundary cases against the host |
 | `__builtin_shufflevector` | needs vectors first |
 | `__c11_atomic_*` | `_Atomic` works; Clang's spelling does not |
 
@@ -427,15 +427,25 @@ Every target against Clang on the same real corpus, at `-Os`:
 |---|---|---|---|
 | `x86_64-elf` | 134,010 | 63,387 | 2.11× |
 | `aarch64-elf` | 143,576 | 71,536 | 2.00× |
-| `riscv64-unknown-elf` | 135,664 | 42,090 | 3.22× |
-| `riscv32-unknown-elf` | 157,204 | 44,764 | 3.51× |
+| `riscv64-unknown-elf` | 113,710 | 42,090 | 2.70× *(was 3.22×)* |
+| `riscv32-unknown-elf` | 132,676 | 44,764 | 2.96× *(was 3.51×)* |
 | `thumbv7m-none-eabi` | 141,668 | 36,408 | **3.89×** |
+
+*The two RISC-V rows improved when the C extension landed (`f550d42`):
+15.6% off RV32 and 16.2% off RV64. Thumb is now the worst target.*
 
 The two embedded families, the ones the recent work was for, are the
 worst — and they are the ones where size is not a preference but a
 budget.
 
-### RISC-V has no compressed instructions, and that is most of its gap
+### ~~RISC-V has no compressed instructions~~ — LANDED (`f550d42`)
+
+*15.6% off RV32, 16.2% off RV64, verified against llvm-mc over 50,687
+instructions. Branches and jumps are still uncompressed — their
+displacements are patched later, so claiming `c.j`/`c.beqz` needs a
+relaxation pass. The measurement that motivated it follows.*
+
+### The measurement
 
 Clang's default `-march` for `riscv32-unknown-elf` is **`rv32imac`**.
 EmbCC emits `rv32im`. Holding everything else equal:
@@ -621,9 +631,9 @@ Merged and re-ranked:
    positions; `aligned()` refused by name rather than silently dropped.
 5. ~~**`typeof` on parameters**~~ — **DONE** (`de00ab2`), plus literals,
    arithmetic, comparisons, shifts, `p - q`, `?:` and calls.
-6. **RISC-V compressed instructions** — 28.8% of code size, measured. No
-   new optimisation needed, only encodings and a selector that prefers
-   them.
+6. ~~**RISC-V compressed instructions**~~ — **DONE** (`f550d42`), as a
+   derivation at the one place instructions become bytes rather than a
+   selector. 15.6%/16.2%. Branch compression remains.
 7. **Make `-Os` mean something** — it is currently `-O2`. Start with
    size-aware selection and not inlining/unrolling at `-Os`.
 8. **`.S` input for every target** — the per-target assemblers already
