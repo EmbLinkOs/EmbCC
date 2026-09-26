@@ -48,6 +48,7 @@ SRCS := \
 	src/driver/explain.c \
 	src/driver/paths.c \
 	src/link/link.c \
+	src/as/gas.c \
 	src/embx/embx.c \
 	src/lex/lex.c \
 	src/cpp/cpp.c \

@@ -38,6 +38,7 @@
 #include "version.h"
 #include "paths.h"
 #include "../link/link.h"
+#include "../as/gas.h"
 
 static void print_version(void)
 {
@@ -2186,6 +2187,18 @@ static int has_asm_suffix(const char *s)
     return n > 4 && strcmp(s + n - 4, ".asm") == 0;
 }
 
+/* `.s` and `.S`: GNU-syntax assembly, which src/as/gas.c assembles for
+ * whichever target is selected. The case is the whole difference --
+ * `.S` is preprocessed first, as it is in every other compiler, which
+ * is what lets a startup file share a header with the C beside it.
+ * Returns 0, 1 for `.s`, or 2 for `.S`. */
+static int has_gas_suffix(const char *s)
+{
+    size_t n = strlen(s);
+    if (n <= 2 || s[n - 2] != '.') return 0;
+    return s[n - 1] == 's' ? 1 : s[n - 1] == 'S' ? 2 : 0;
+}
+
 /* Swap `.asm` for `.o`, the default assembler output name. */
 static const char *default_asm_output(const char *in)
 {
@@ -2616,6 +2629,7 @@ int main(int argc, char **argv)
             if (strcmp(output, "-") == 0)
                 output = NULL, out_is_stdout = 1;
         } else if (has_c_suffix(argv[i]) || has_asm_suffix(argv[i]) ||
+                   has_gas_suffix(argv[i]) ||
                    has_cxx_suffix(argv[i]) || has_ir_suffix(argv[i]) ||
                    (lang >= 0 && argv[i][0] != '-')) {
             if (input) {
@@ -2706,6 +2720,13 @@ int main(int argc, char **argv)
     /* A `.asm` input goes to the built-in assembler (A1), not the C front-end.
      * Like gcc dispatching `.s`, embcc owns the kernel's hand-written assembly:
      * `embcc -c foo.asm -o foo.o` replaces `nasm -f elf64`. */
+    if (has_gas_suffix(input)) {
+        if (pp_only)
+            return done(compile(input, NULL, 1));
+        return gas_assemble(input,
+                            output ? output : default_asm_output(input),
+                            has_gas_suffix(input) == 2);
+    }
     if (has_asm_suffix(input)) {
         if (pp_only) {
             fprintf(stderr, "embcc: error: -E does not apply to assembly\n");

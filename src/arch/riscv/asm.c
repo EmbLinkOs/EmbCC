@@ -169,6 +169,16 @@ static int tok_imm(const struct tok *t, long long *out)
 {
     int i = 0, neg = 0, base = 10, any = 0;
     long long v = 0;
+    /* `.+8` / `.-12`: a displacement from this instruction, which is
+     * the standard spelling and the ONLY meaning a branch operand can
+     * have here. This assembler sees no labels and does not know its
+     * own address -- the file assembler (src/as/gas.c) resolves a
+     * label into exactly this form before calling, and an inline asm
+     * template could never have named a surrounding label anyway. The
+     * bare number is accepted as the same thing, so `beq a0, a1, 8`
+     * and `beq a0, a1, .+8` agree. */
+    if (i < t->len && t->s[i] == '.')
+        i++;
     if (i < t->len && (t->s[i] == '-' || t->s[i] == '+')) {
         neg = t->s[i] == '-';
         i++;
@@ -215,7 +225,8 @@ static int tok_mem(const struct tok *t, int *reg, long long *off)
  * are the code generator's own; only the CSR and system instructions are
  * encoded here, and those are three fields in a fixed format.
  */
-enum { OP_SYSTEM = 0x73, OP_FENCE = 0x0f };
+enum { OP_SYSTEM = 0x73, OP_FENCE = 0x0f,
+       OP_BRANCH = 0x63, OP_JAL = 0x6f };
 
 static void emit_csr(struct code *c, int f3, int rd, int rs1, unsigned csr)
 {
@@ -538,6 +549,151 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         return 0;
     }
 
+    /* ---- control flow ------------------------------------------------
+     *
+     * These are here for the FILE assembler (src/as/gas.c), which turns
+     * a label into the PC-relative displacement before calling: this
+     * layer never sees a name. Inline asm can use them too, with a
+     * numeric offset, which is the only form it could have used anyway
+     * -- a template cannot see the surrounding function's labels.
+     */
+    {
+        static const struct { const char *name; int f3; } br[] = {
+            { "beq", 0 }, { "bne", 1 }, { "blt", 4 }, { "bge", 5 },
+            { "bltu", 6 }, { "bgeu", 7 }
+        };
+        /* The zero-comparison pseudos, each one of the above against x0.
+         * `bgt`/`ble` and their unsigned forms swap the operands, which
+         * is how the ISA spells them at all. */
+        static const struct { const char *name; int f3; int zfirst; } brz[] = {
+            { "beqz", 0, 0 }, { "bnez", 1, 0 }, { "bltz", 4, 0 },
+            { "bgez", 5, 0 }, { "blez", 5, 1 }, { "bgtz", 4, 1 }
+        };
+        for (unsigned k = 0; k < sizeof br / sizeof br[0]; k++)
+            if (tok_is(&t[0], br[k].name)) {
+                long long v;
+                int r1, r2;
+                if (n != 4) FAIL("%s wants two registers and an offset",
+                                 br[k].name);
+                r1 = tok_reg(&t[1]); r2 = tok_reg(&t[2]);
+                if (r1 < 0 || r2 < 0) FAIL("%s wants two registers",
+                                           br[k].name);
+                if (!tok_imm(&t[3], &v)) FAIL("%s wants an offset", br[k].name);
+                if ((v & 1) || !rv_fits(v, 13))
+                    FAIL("%s offset %lld is odd or out of range", br[k].name, v);
+                rv_w(out, rv_enc_b(OP_BRANCH, br[k].f3, r1, r2, (int)v));
+                return 0;
+            }
+        for (unsigned k = 0; k < sizeof brz / sizeof brz[0]; k++)
+            if (tok_is(&t[0], brz[k].name)) {
+                long long v;
+                int r1;
+                if (n != 3) FAIL("%s wants a register and an offset",
+                                 brz[k].name);
+                r1 = tok_reg(&t[1]);
+                if (r1 < 0) FAIL("%s wants a register", brz[k].name);
+                if (!tok_imm(&t[2], &v)) FAIL("%s wants an offset", brz[k].name);
+                if ((v & 1) || !rv_fits(v, 13))
+                    FAIL("%s offset %lld is odd or out of range",
+                         brz[k].name, v);
+                rv_w(out, rv_enc_b(OP_BRANCH, brz[k].f3,
+                                   brz[k].zfirst ? RV_ZERO : r1,
+                                   brz[k].zfirst ? r1 : RV_ZERO, (int)v));
+                return 0;
+            }
+    }
+    if (tok_is(&t[0], "j") && n == 2) {           /* jal zero, off */
+        long long v;
+        if (!tok_imm(&t[1], &v)) FAIL("j wants an offset");
+        if ((v & 1) || !rv_fits(v, 21)) FAIL("j offset %lld is out of range", v);
+        rv_w(out, rv_enc_j(OP_JAL, RV_ZERO, (int)v));
+        return 0;
+    }
+    if (tok_is(&t[0], "jal")) {
+        long long v;
+        int rd = RV_RA, ai = 1;
+        if (n == 3) { rd = tok_reg(&t[1]); ai = 2;
+                      if (rd < 0) FAIL("jal wants a register"); }
+        else if (n != 2) FAIL("jal wants an offset");
+        if (!tok_imm(&t[ai], &v)) FAIL("jal wants an offset");
+        if ((v & 1) || !rv_fits(v, 21)) FAIL("jal offset %lld is out of range", v);
+        rv_w(out, rv_enc_j(OP_JAL, rd, (int)v));
+        return 0;
+    }
+    if (tok_is(&t[0], "jr") && n == 2) {
+        int r = tok_reg(&t[1]);
+        if (r < 0) FAIL("jr wants a register");
+        rv_jalr(out, RV_ZERO, r, 0);
+        return 0;
+    }
+    if (tok_is(&t[0], "jalr")) {
+        int rd = RV_RA, rs, off = 0;
+        if (n == 2) {                              /* jalr rs */
+            rs = tok_reg(&t[1]);
+            if (rs < 0) FAIL("jalr wants a register");
+        } else if (n == 3) {
+            rd = tok_reg(&t[1]);
+            if (rd < 0) FAIL("jalr wants a register");
+            /* `jalr rd, rs` or `jalr rd, off(rs)` -- the second is ONE
+             * token, as every load and store operand is here. */
+            rs = tok_reg(&t[2]);
+            if (rs < 0) {
+                long long mo;
+                if (!tok_mem(&t[2], &rs, &mo))
+                    FAIL("jalr wants a register or off(reg)");
+                if (!rv_fits(mo, 12))
+                    FAIL("jalr offset %lld does not fit 12 bits", mo);
+                off = (int)mo;
+            }
+        } else FAIL("jalr takes one or two operands");
+        rv_jalr(out, rd, rs, off);
+        return 0;
+    }
+    if ((tok_is(&t[0], "lui") || tok_is(&t[0], "auipc")) && n == 3) {
+        long long v;
+        int rd = tok_reg(&t[1]);
+        if (rd < 0) FAIL("%.*s wants a register", t[0].len, t[0].s);
+        if (!tok_imm(&t[2], &v)) FAIL("%.*s wants an immediate",
+                                      t[0].len, t[0].s);
+        if (v < -524288 || v > 1048575)
+            FAIL("%.*s immediate %lld does not fit 20 bits",
+                 t[0].len, t[0].s, v);
+        if (tok_is(&t[0], "lui")) rv_lui(out, rd, (long)(v & 0xfffff));
+        else                      rv_auipc(out, rd, (long)(v & 0xfffff));
+        return 0;
+    }
+    /* ---- the register pseudos ---------------------------------------- */
+    if (n == 3) {
+        int rd = tok_reg(&t[1]);
+        if (rd >= 0) {
+            long long v;
+            if (tok_is(&t[0], "li")) {
+                if (!tok_imm(&t[2], &v)) FAIL("li wants a constant");
+                rv_li(out, rd, v, xlen);
+                return 0;
+            }
+            {
+                int rs = tok_reg(&t[2]);
+                if (rs >= 0) {
+                    if (tok_is(&t[0], "mv"))
+                        { rv_mv(out, rd, rs); return 0; }
+                    if (tok_is(&t[0], "not"))
+                        { rv_alu_imm(out, RV_XOR, rd, rs, -1, 0); return 0; }
+                    if (tok_is(&t[0], "neg"))
+                        { rv_alu(out, RV_SUB, rd, RV_ZERO, rs, 0); return 0; }
+                    if (tok_is(&t[0], "negw"))
+                        { rv_alu(out, RV_SUB, rd, RV_ZERO, rs, 1); return 0; }
+                    if (tok_is(&t[0], "seqz"))
+                        { rv_alu_imm(out, RV_SLTU, rd, rs, 1, 0); return 0; }
+                    if (tok_is(&t[0], "snez"))
+                        { rv_alu(out, RV_SLTU, rd, RV_ZERO, rs, 0); return 0; }
+                    if (tok_is(&t[0], "sext.w"))
+                        { rv_alu_imm(out, RV_ADD, rd, rs, 0, 1); return 0; }
+                }
+            }
+        }
+    }
+
     FAIL("asm instruction \"%.*s\" is not in the RISC-V vocabulary",
          t[0].len, t[0].s);
 }
@@ -579,6 +735,18 @@ void rvasm_vocabulary(FILE *f)
     fprintf(f, "\tfence rw, rw\n\tfence iorw, iorw\n\tfence r, w\n");
     fprintf(f, "\tmv a0, t3\n\tli a1, -2048\n\tli a2, 305419896\n");
     fprintf(f, "\tnot s2, a3\n\tneg s3, a4\n\tjr t5\n\tjalr t6\n");
+    /* Control flow, added for the file assembler. The displacement is
+     * written `.+N` so llvm-mc and this file read the same text and
+     * mean the same thing. */
+    fprintf(f, "\tbeq a0, a1, .+8\n\tbne t3, t4, .-16\n");
+    fprintf(f, "\tblt s2, s3, .+2048\n\tbge a4, a5, .-2048\n");
+    fprintf(f, "\tbltu t0, t1, .+4\n\tbgeu a6, a7, .-4\n");
+    fprintf(f, "\tbeqz a0, .+8\n\tbnez t3, .-8\n\tbltz s2, .+12\n");
+    fprintf(f, "\tbgez a4, .-12\n\tblez t5, .+16\n\tbgtz t6, .-16\n");
+    fprintf(f, "\tj .+2048\n\tj .-2048\n\tjal .+8\n\tjal t0, .-8\n");
+    fprintf(f, "\tjalr a0, 16(t1)\n\tjalr s2, s3\n\tjalr a0, 0(ra)\n");
+    fprintf(f, "\tlui a0, 4096\n\tauipc a1, 1\n\tlui t3, 1048575\n");
+    fprintf(f, "\tseqz a0, a1\n\tsnez a2, a3\n");
     for (const struct csr *c = csrs; c->name; c++) {
         if (c->rv32 && target_xlen() != 32)
             continue;
