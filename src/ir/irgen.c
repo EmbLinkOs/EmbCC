@@ -2601,6 +2601,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             /* the template is assembled by the target's own vocabulary */
             if (target_get() == TARGET_AARCH64)
                 irg_asm_arm64(fn, s);
+            else if (target_get() == TARGET_THUMB)
+                irg_asm_thumb(fn, s);
             else if (target_get() == TARGET_RISCV32 ||
                      target_get() == TARGET_RISCV64)
                 irg_asm_riscv(fn, s);

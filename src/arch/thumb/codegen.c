@@ -1755,9 +1755,53 @@ static void gen_ins(struct t_fn *F, int n)
         t_refuse(fn, i, "__builtin_sqrt (a libm routine here, not an "
                         "instruction)");
         return;
-    case IR_ASM:
-        t_refuse(fn, i, "inline assembly");
+    case IR_ASM: {
+        /* Extended asm, assembled in irgen (thumb/irgen.c irg_asm_thumb)
+         * against the vocabulary in thumb/asm.c. This only places the
+         * operands and splices the bytes.
+         *
+         * Nothing is live in a REGISTER across an asm, and that is not
+         * an assumption: the shared allocator excludes every vreg whose
+         * range spans an IR_ASM, because the clobber set is not visible
+         * to it. So the operands' registers may be loaded freely. */
+        struct ir_asm *ia = i->asm_ir;
+        int used[16] = { 0 };
+        /* The address scratch. r12 is the ABI's own and the only
+         * register that is neither an argument nor callee-saved, so it
+         * is tried first; r0-r3 after it, when an operand has taken it. */
+        static const int scr_pool[] = { 12, 0, 1, 2, 3 };
+        int scr = -1;
+        for (int k = 0; k < ia->nin; k++) used[ia->in[k].reg] = 1;
+        for (int k = 0; k < ia->nout; k++) used[ia->out[k].reg] = 1;
+        for (unsigned k = 0; k < sizeof scr_pool / sizeof scr_pool[0]; k++)
+            if (!used[scr_pool[k]]) { scr = scr_pool[k]; break; }
+        if (scr < 0 && ia->nout > 0)
+            t_refuse(fn, i, "an asm with no scratch register left around it");
+        for (int k = 0; k < ia->nout; k++)
+            if (!ia->out[k].mem && ia->out[k].size > 4)
+                t_refuse(fn, i, "an asm output wider than a register");
+        /* A "+" output starts with the lvalue's CURRENT value. */
+        for (int k = 0; k < ia->nout; k++) {
+            if (!ia->out[k].inout || ia->out[k].mem)
+                continue;
+            rd(F, ia->out[k].temp, scr);
+            t_ldst_imm(t, ia->out[k].reg, scr, 0, ia->out[k].size, 0, 0);
+        }
+        for (int k = 0; k < ia->nin; k++)
+            rd(F, ia->in[k].temp, ia->in[k].reg);
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        for (int k = 0; k < ia->nout; k++) {
+            /* An "m" output was written BY the template through the
+             * address this register holds; storing over it would destroy
+             * what the asm produced. */
+            if (ia->out[k].mem)
+                continue;
+            rd(F, ia->out[k].temp, scr);
+            t_ldst_imm(t, ia->out[k].reg, scr, 0, ia->out[k].size, 0, 1);
+        }
         return;
+    }
     case IR_VA_START:
         /* `a` holds the ADDRESS of the va_list, which on this ABI is a
          * bare pointer at the next argument. */

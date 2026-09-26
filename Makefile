@@ -82,6 +82,7 @@ SRCS := \
 	src/arch/thumb/emit.c \
 	src/arch/thumb/irgen.c \
 	src/arch/thumb/codegen.c \
+	src/arch/thumb/asm.c \
 	src/arch/thumb/predef.c \
 	src/arch/thumb/predef_cxx.c \
 	src/arch/riscv/emit.c \
@@ -177,7 +178,8 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
              src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
-             src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/riscv/irgen.c \
+             src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
+             src/arch/thumb/emit.c src/arch/riscv/irgen.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)

@@ -179,4 +179,51 @@ void t_it(struct code *c, int cond, int nthen, unsigned pattern);
 /* The condition that inverts this one. */
 int t_cond_invert(int cond);
 
+/* ---- the system instructions ------------------------------------------
+ *
+ * What a Cortex-M program reaches inline assembly FOR: the special
+ * registers, the interrupt masks, the barriers and the hints. None of
+ * them is reachable from C, which is why every CMSIS header opens with
+ * an asm block.
+ *
+ * Each is derived from its field layout rather than restated as a
+ * constant, and tools/thumbcheck round-trips all of them through
+ * llvm-objdump -- the same discipline the rest of this file is under.
+ */
+
+/* The M-profile special registers, by their SYSm number. */
+enum {
+    T_SYS_APSR = 0, T_SYS_IAPSR = 1, T_SYS_EAPSR = 2, T_SYS_XPSR = 3,
+    T_SYS_IPSR = 5, T_SYS_EPSR = 6, T_SYS_IEPSR = 7,
+    T_SYS_MSP = 8, T_SYS_PSP = 9,
+    T_SYS_PRIMASK = 16, T_SYS_BASEPRI = 17, T_SYS_BASEPRI_MAX = 18,
+    T_SYS_FAULTMASK = 19, T_SYS_CONTROL = 20
+};
+
+void t_mrs(struct code *c, int rd, int sysm);
+void t_msr(struct code *c, int sysm, int rn);
+
+/* `cpsid`/`cpsie` over the i and f masks. Masking interrupts is what a
+ * critical section is on this machine. */
+void t_cps(struct code *c, int disable, int mask_i, int mask_f);
+
+/* Barriers. `op` is 4 for dsb, 5 for dmb, 6 for isb -- the field's own
+ * numbering, so the three share one encoder. */
+enum { T_BAR_DSB = 4, T_BAR_DMB = 5, T_BAR_ISB = 6 };
+void t_barrier(struct code *c, int op);
+
+/* Hints, likewise by their field value. nop is here too, and t_nop is
+ * the same instruction under the name the rest of this file uses. */
+enum { T_HINT_NOP = 0, T_HINT_YIELD = 1, T_HINT_WFE = 2,
+       T_HINT_WFI = 3, T_HINT_SEV = 4 };
+void t_hint(struct code *c, int op);
+
+void t_bkpt(struct code *c, int imm8);
+void t_rbit(struct code *c, int rd, int rm);
+
+/* The exclusive pair, which is how an atomic is built here: `off` is a
+ * byte offset and must be a multiple of four. */
+void t_ldrex(struct code *c, int rt, int rn, int off);
+void t_strex(struct code *c, int rd, int rt, int rn, int off);
+
 #endif

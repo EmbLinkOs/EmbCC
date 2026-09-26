@@ -547,3 +547,77 @@ void t_it(struct code *c, int cond, int nthen, unsigned pattern)
 }
 
 int t_cond_invert(int cond) { return cond ^ 1; }
+
+/* ---- the system instructions -------------------------------------------
+ *
+ * Each field layout is written once, here, and checked by thumbcheck.
+ * They are the instructions a Cortex-M program cannot reach from C --
+ * the special registers, the interrupt masks, the barriers, the hints --
+ * and they exist so src/arch/thumb/asm.c has something to call rather
+ * than four hex constants to copy.
+ */
+
+/* MRS <Rd>, <spec_reg>: 1111 0011 1110 1111 | 1000 Rd SYSm. */
+void t_mrs(struct code *c, int rd, int sysm)
+{
+    hw2(c, 0xF3EF, 0x8000u | ((unsigned)rd << 8) | ((unsigned)sysm & 0xff));
+}
+
+/* MSR <spec_reg>, <Rn>: 1111 0011 100 0 Rn | 1000 mask 00 SYSm, with the
+ * mask 0b10 -- write the whole register, which is the only form a C
+ * program wants. */
+void t_msr(struct code *c, int sysm, int rn)
+{
+    hw2(c, 0xF380u | (unsigned)rn, 0x8800u | ((unsigned)sysm & 0xff));
+}
+
+/* CPS: 1011 0110 011 im 0 a i f. Only i and f matter on M-profile. */
+void t_cps(struct code *c, int disable, int mask_i, int mask_f)
+{
+    hw(c, 0xB660u | (disable ? 0x10u : 0u) |
+          (mask_i ? 2u : 0u) | (mask_f ? 1u : 0u));
+}
+
+/* DSB/DMB/ISB: 1111 0011 1011 1111 | 1000 1111 op 1111, with `op`
+ * numbering them 4/5/6 and the option field 0xF ("sy", full system) --
+ * the only one worth having, since a narrower barrier that is wrong is
+ * indistinguishable from one that works until it does not. */
+void t_barrier(struct code *c, int op)
+{
+    hw2(c, 0xF3BF, 0x8F0Fu | ((unsigned)op << 4));
+}
+
+/* The hints share one 16-bit encoding: 1011 1111 op 0000. */
+void t_hint(struct code *c, int op)
+{
+    hw(c, 0xBF00u | ((unsigned)op << 4));
+}
+
+void t_bkpt(struct code *c, int imm8)
+{
+    hw(c, 0xBE00u | ((unsigned)imm8 & 0xff));
+}
+
+/* RBIT <Rd>, <Rm>: the operand appears TWICE, in both halfwords, which
+ * is the encoding and not a typo. */
+void t_rbit(struct code *c, int rd, int rm)
+{
+    hw2(c, 0xFA90u | (unsigned)rm,
+           0xF0A0u | ((unsigned)rd << 8) | (unsigned)rm);
+}
+
+/* LDREX <Rt>, [<Rn>, #off] -- the offset is in WORDS in the encoding and
+ * in bytes in the syntax, which is the sort of thing that is wrong by a
+ * factor of four until a disassembler says so. */
+void t_ldrex(struct code *c, int rt, int rn, int off)
+{
+    hw2(c, 0xE850u | (unsigned)rn,
+           ((unsigned)rt << 12) | 0x0F00u | (((unsigned)off >> 2) & 0xff));
+}
+
+void t_strex(struct code *c, int rd, int rt, int rn, int off)
+{
+    hw2(c, 0xE840u | (unsigned)rn,
+           ((unsigned)rt << 12) | ((unsigned)rd << 8) |
+           (((unsigned)off >> 2) & 0xff));
+}

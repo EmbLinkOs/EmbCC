@@ -235,6 +235,53 @@ int main(int argc, char **argv)
     t_blx(&C, 3);                       expect("blx\tr3");
     t_nop(&C);                          expect("nop");
 
+    /* The system instructions: what a Cortex-M program reaches inline
+     * assembly for, and the only part of this file a C program cannot
+     * otherwise express. Every special register is listed, because the
+     * SYSm number is the whole encoding and a wrong one reads a
+     * different register perfectly legally. */
+    t_mrs(&C, 0, T_SYS_PRIMASK);        expect("mrs\tr0, primask");
+    t_mrs(&C, 3, T_SYS_BASEPRI);        expect("mrs\tr3, basepri");
+    t_mrs(&C, 7, T_SYS_CONTROL);        expect("mrs\tr7, control");
+    t_mrs(&C, 1, T_SYS_MSP);            expect("mrs\tr1, msp");
+    t_mrs(&C, 2, T_SYS_PSP);            expect("mrs\tr2, psp");
+    t_mrs(&C, 4, T_SYS_IPSR);           expect("mrs\tr4, ipsr");
+    t_mrs(&C, 5, T_SYS_XPSR);           expect("mrs\tr5, xpsr");
+    t_mrs(&C, 6, T_SYS_FAULTMASK);      expect("mrs\tr6, faultmask");
+    t_mrs(&C, 8, T_SYS_APSR);           expect("mrs\tr8, apsr");
+    t_mrs(&C, 9, T_SYS_BASEPRI_MAX);    expect("mrs\tr9, basepri_max");
+    t_msr(&C, T_SYS_PRIMASK, 0);        expect("msr\tprimask, r0");
+    t_msr(&C, T_SYS_BASEPRI, 3);        expect("msr\tbasepri, r3");
+    t_msr(&C, T_SYS_CONTROL, 7);        expect("msr\tcontrol, r7");
+    t_msr(&C, T_SYS_MSP, 1);            expect("msr\tmsp, r1");
+    t_msr(&C, T_SYS_PSP, 2);            expect("msr\tpsp, r2");
+    t_msr(&C, T_SYS_FAULTMASK, 4);      expect("msr\tfaultmask, r4");
+
+    t_cps(&C, 1, 1, 0);                 expect("cpsid i");
+    t_cps(&C, 0, 1, 0);                 expect("cpsie i");
+    t_cps(&C, 1, 0, 1);                 expect("cpsid f");
+    t_cps(&C, 0, 0, 1);                 expect("cpsie f");
+    t_cps(&C, 1, 1, 1);                 expect("cpsid if");
+
+    t_barrier(&C, T_BAR_DSB);           expect("dsb\tsy");
+    t_barrier(&C, T_BAR_DMB);           expect("dmb\tsy");
+    t_barrier(&C, T_BAR_ISB);           expect("isb\tsy");
+
+    t_hint(&C, T_HINT_YIELD);           expect("yield");
+    t_hint(&C, T_HINT_WFE);             expect("wfe");
+    t_hint(&C, T_HINT_WFI);             expect("wfi");
+    t_hint(&C, T_HINT_SEV);             expect("sev");
+
+    t_bkpt(&C, 0);                      expect("bkpt\t#0");
+    t_bkpt(&C, 170);                    expect("bkpt\t#170");
+    t_rbit(&C, 0, 1);                   expect("rbit\tr0, r1");
+
+    /* The offset is in WORDS in the encoding and bytes in the syntax. */
+    t_ldrex(&C, 0, 1, 0);               expect("ldrex\tr0, [r1]");
+    t_ldrex(&C, 2, 3, 16);              expect("ldrex\tr2, [r3, #16]");
+    t_strex(&C, 0, 1, 2, 0);            expect("strex\tr0, r1, [r2]");
+    t_strex(&C, 3, 4, 5, 8);            expect("strex\tr3, r4, [r5, #8]");
+
     fwrite(C.p, 1, (size_t)C.len, stdout);
     return 0;
 }
