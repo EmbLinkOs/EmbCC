@@ -533,6 +533,35 @@ Every target against Clang on the same real corpus, at `-Os`:
 reading operands where the allocator put them (`fa9621b`), and fusing
 a comparison with the branch that reads it (`c544750`).*
 
+**ARMv7-M, a further 4.9%.** Measured separately, on the 58 files of
+`lib/` that both compilers accept at `-Os`: 115,265 -> 109,597 bytes,
+against Clang's 44,089 on the same set (2.61x -> 2.48x). That is a
+different corpus from the table above, so it is quoted as its own
+delta rather than folded into the 3.06x.
+
+Three things were forcing values into memory, and each cost
+instructions in every function:
+
+- `ret_scalar_in_reg` was 0, so a returned value went out through its
+  slot -- `str` to a slot and `ldr` back into r0, in every function.
+  `rd()` had been register-aware all along; the flag was the only
+  thing forcing the slot.
+- there were no ABI hints (`NULL, /* ABI hints: later */`), so the
+  register the allocator chose was rarely the one the ABI wanted.
+- `layout()` reserved a stack slot for EVERY vreg, including the ones
+  `ra_allocate` had just put in registers -- paid for in `sub sp` and
+  then never read. It runs after the allocator, so it can simply skip
+  them. `int f(int a,int b){return a+b;}` had a 24-byte frame for two
+  values that were both in registers.
+
+Still to do there, and worth about as much again: the prologue pushes
+`{r9, r10, r11, lr}` in every function, including a leaf that touches
+none of them. The mask is patched after the body, so the touched set
+IS known in time -- but `SAVE_BYTES` feeds the stack-parameter offsets,
+which are computed before the body runs. Making it exact needs either
+a two-pass emit or patchable parameter offsets, and it moves stack
+offsets, so it belongs in its own change.
+
 ### What `-Os` turned out to be
 
 Part II called `-Os` "the most valuable missing thing", on the grounds

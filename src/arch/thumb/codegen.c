@@ -177,17 +177,27 @@ static int t_op_calls_helper(const struct ir_ins *i)
     return (i->op == IR_DIV || i->op == IR_MOD) && i->w == 8;
 }
 
+/* Where AAPCS32 would put each value if it had the choice. Defined
+ * below place_arg, whose answer it uses rather than restating. */
+static void t_abi_hints(const struct ir_func *fn, int *hint);
+
 static const struct ra_target THUMB_RA = {
     t_pool_for,
     t_callee_saved,
     t_ldvar_plain,
-    /* The three capability flags start at 0, as they did on RISC-V: this
-     * backend still reads a call's arguments, a returned value and a
-     * memcpy's addresses out of their slots. They go on one at a time. */
-    0, 0, 0,
+    /* They go on one at a time, and the SECOND is now on. A scalar
+     * return goes out through `rd`, which has been register-aware all
+     * along -- the flag was the only thing forcing the value into a
+     * slot, so every function ended with `str` to a slot and `ldr` back
+     * into r0. A 64-bit value is never in a register here (the wide map
+     * makes it ineligible) so rd64's slot read stays correct.
+     *
+     * A call's arguments and a memcpy's addresses are still read from
+     * slots, so those values must stay there. */
+    0, 1, 0,
     t_op_calls_helper,
     0,            /* Thumb-2's wide forms are three-operand */
-    NULL,         /* ABI hints: later */
+    t_abi_hints,
     NULL, NULL    /* no FP class -- soft float, in the core registers */
 };
 
@@ -395,6 +405,49 @@ static int arg_align(const struct ir_arg *a)
     return a->size > 4 ? 8 : 4;
 }
 
+/* Where AAPCS32 would put each value if it had the choice: a parameter
+ * in the register it arrives in, and a scalar return in r0. Each of
+ * those is a `mov` that disappears when the home IS that register.
+ *
+ * Placement comes from place_arg, the same function the prologue and
+ * every call site use, so no second copy of AAPCS32 is stated here --
+ * a hint that disagreed with the placement would quietly cost the move
+ * it was meant to save.
+ *
+ * Only single-register scalars are hinted. A 64-bit value needs a pair
+ * and is not eligible for a register at all here; a struct is placed by
+ * a rule this one register cannot express.
+ *
+ * A call's ARGUMENTS are deliberately not hinted yet: the allocator is
+ * still told the backend reads them from their slots
+ * (call_int_arg_in_reg is 0), so hinting a value into an argument
+ * register would ask for a register the call lowering does not read. */
+static void t_abi_hints(const struct ir_func *fn, int *hint)
+{
+    struct func *f = fn->src;
+    int ncrn = 0;
+    long stk = 0;
+    /* A returned composite takes r0 for the hidden pointer, which is
+     * what shifts every declared parameter along one. */
+    if (fn->ret_abi.is_struct && fn->ret_abi.size > 4)
+        ncrn = 1;
+    for (int p = 0; f && p < fn->nparams && p < fn->nvregs; p++) {
+        struct ir_arg *a = &fn->param_abi[p];
+        struct argplace pl;
+        place_arg(a->size, arg_align(a), &ncrn, &stk, &pl);
+        if (pl.nreg == 1 && !pl.nstk && !a->is_struct && a->size <= 4)
+            hint[p] = pl.reg;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        /* r0 for a scalar return -- the one boundary the allocator has
+         * been told this backend can read from a register. */
+        if (i->op == IR_RET && i->a >= 0 && i->a < fn->nvregs &&
+            !fn->ret_abi.is_struct && !i->flt)
+            hint[i->a] = 0;
+    }
+}
+
 static long outgoing_area(const struct ir_func *fn)
 {
     long most = 0;
@@ -426,20 +479,46 @@ static void layout(struct t_fn *F)
         F->slot[v] = -1;
 
     for (int v = 0; v < fn->nvars; v++) {
-        int size = fn->locals[v].size ? fn->locals[v].size : 4;
-        int align = fn->locals[v].user_align ? fn->locals[v].user_align
-                  : fn->locals[v].align ? fn->locals[v].align : 4;
+        int size, align;
+        /* A LOCAL in a register needs no slot either. The allocator
+         * only ever gives one to a local whose address is never taken
+         * (anything else is opaque to it), and under -g every local is
+         * pinned to its slot so this cannot fire -- which is what keeps
+         * DW_AT_location true. */
+        if (F->loc && F->loc[v] >= 0)
+            continue;
+        size = fn->locals[v].size ? fn->locals[v].size : 4;
+        align = fn->locals[v].user_align ? fn->locals[v].user_align
+              : fn->locals[v].align ? fn->locals[v].align : 4;
         if (align < 4) align = 4;
         off = (off + align - 1) & ~(long)(align - 1);
         F->slot[v] = off;
         off += size;
     }
     for (int v = fn->nvars; v < fn->nvregs; v++) {
+        /* A TEMPORARY the allocator put in a register needs no slot.
+         * layout() runs after ra_allocate for exactly this reason, and
+         * every helper that would write one (wr, wrote, wr64) already
+         * asks in_reg first and returns without touching the slot -- so
+         * the slot was reserved, aligned and paid for in `sub sp` and
+         * then never read or written.
+         *
+         * It is worth real bytes: `int f(int a,int b){return a+b;}` had
+         * a 24-byte frame for two values that were both in registers,
+         * and the sub/add pair around it. Only temporaries, though:
+         * a LOCAL keeps its slot, because its address can be taken and
+         * because -g describes it by that slot.
+         *
+         * `F->slot[v]` stays -1 for these, which wr() already treats as
+         * "nowhere to store" and skips. */
+        int size;
+        if (F->loc && F->loc[v] >= 0)
+            continue;
         /* Eight-byte values are eight-ALIGNED as well as eight wide:
          * AAPCS32 aligns `long long` to 8, and a pair straddling that
          * boundary would be legal but slower and would break `ldrd` if
          * this ever emits one. */
-        int size = F->wide[v] ? 8 : 4;
+        size = F->wide[v] ? 8 : 4;
         off = (off + size - 1) & ~(long)(size - 1);
         F->slot[v] = off;
         off += size;

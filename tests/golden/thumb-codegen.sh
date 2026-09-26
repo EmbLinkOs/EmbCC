@@ -204,3 +204,72 @@ double g(int n, ...){ va_list ap; va_start(ap,n);
 "$EMBCC" --target=$T -O1 -I include -c "$out/va.c" -o "$out/va.o" || {
     echo "variadic functions no longer compile"; exit 1; }
 echo "variadic functions compile"
+
+# ---- what the allocator is allowed to keep in a register --------------
+#
+# Three things used to force values into stack slots on this target, and
+# each cost instructions in EVERY function:
+#
+#   - ret_scalar_in_reg was 0, so a returned value went out through its
+#     slot: `str r12, [sp,#N]` then `ldr r0, [sp,#N]`, always.
+#   - there were no ABI hints, so the value the allocator chose was
+#     rarely the register the ABI wanted, and the move stayed.
+#   - layout() reserved a stack slot for EVERY vreg, including the ones
+#     the allocator had just put in registers -- paid for in `sub sp`
+#     and then never read or written.
+#
+# The test is on the emitted code rather than on a byte count, because a
+# count moves with unrelated changes and says nothing about why.
+cat > "$out/q.c" <<'EOF'
+int  add32(int a, int b)        { return a + b; }
+int  chain(int a, int b, int c) { int x = a * b; return x + c; }
+int  ld(const int *p)           { return p[3]; }
+EOF
+"$EMBCC" --target=$T -Os -c "$out/q.c" -o "$out/q.o" || {
+    echo "the register-quality file does not compile"; exit 1; }
+"$OD" -d --triple=thumbv7m --no-show-raw-insn "$out/q.o" > "$out/q.s" 2>&1
+
+# None of these three touches memory at all: every value is a register,
+# so a load or store from sp means something went back to a slot.
+n=$(grep -cE '(ldr|str)[a-z.]*[[:space:]].*\[sp' "$out/q.s" || true)
+[ "$n" = 0 ] || {
+    echo "a value round-tripped through a stack slot in a function that
+needs none ($n access(es)):"
+    cat "$out/q.s"; exit 1; }
+# ...and the result is computed straight into r0, not moved there.
+grep -qE '^ *[0-9a-f]+:[[:space:]]+add(\.w|s)?[[:space:]]+r0,' "$out/q.s" || {
+    echo "the returned sum does not land in r0:"; cat "$out/q.s"; exit 1; }
+echo "a function whose values all fit in registers touches no stack slot,
+and its result is computed straight into r0"
+
+# The two cases where a slot is still REQUIRED, so the skip above cannot
+# be doing it by forgetting.
+printf 'int g(int *);\nint f(int a){ int x = a + 1; return g(&x) + x; }\n' \
+    > "$out/at.c"
+"$EMBCC" --target=$T -Os -c "$out/at.c" -o "$out/at.o" || {
+    echo "the address-taken file does not compile"; exit 1; }
+"$OD" -d --triple=thumbv7m --no-show-raw-insn "$out/at.o" > "$out/at.s" 2>&1
+grep -qE '(ldr|str)[a-z.]*[[:space:]].*\[sp' "$out/at.s" || {
+    echo "a local whose ADDRESS is taken lost its stack slot:"
+    cat "$out/at.s"; exit 1; }
+echo "a local whose address is taken keeps its slot"
+
+# Under -g every local is pinned to a slot, which is what makes
+# DW_AT_location naming that slot true. If the skip ever fires here, the
+# debugger is told where a variable is not.
+if command -v llvm-dwarfdump > /dev/null 2>&1; then
+    printf 'int f(int a, int b){ int s = a + b; return s * 2; }\n' \
+        > "$out/g.c"
+    "$EMBCC" --target=$T -Os -g -c "$out/g.c" -o "$out/g.o" || {
+        echo "the -g file does not compile"; exit 1; }
+    llvm-dwarfdump "$out/g.o" > "$out/g.dw" 2>&1
+    for v in a b s; do
+        grep -A3 "DW_AT_name	(\"$v\")" "$out/g.dw" |
+            grep -q 'DW_AT_location.*DW_OP_fbreg' || {
+            echo "-g: '$v' has no frame location, so the skip fired under -g"
+            exit 1; }
+    done
+    echo "-g pins every local to a slot, and each has a DW_OP_fbreg location"
+else
+    echo "SKIP the -g half: no llvm-dwarfdump"
+fi
