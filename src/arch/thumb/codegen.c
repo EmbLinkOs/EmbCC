@@ -2542,8 +2542,7 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
         t_patch_bl(text, st.call[n].patch_off, st.call[n].target->code_off);
     free(st.call);
 
-    for (int n = 0; n < st.nstr; n++)
-        st.str[n].str_off = iu->strs[st.str[n].str_off].off;
+    cg_resolve_strsites(iu, st.str, st.nstr);
 
     *ext = st.ext;   *next = st.next;
     *strs = st.str;  *nstrs = st.nstr;

@@ -488,6 +488,23 @@ char *cg_wide_vregs(struct ir_func *fn)
  *
  * A compare is the one op whose operands and result disagree: it reads
  * two floats and produces a 0/1 integer. */
+/* String sites carry the string INDEX while a function is being lowered,
+ * because that is what the IR's IR_STRADDR holds; the driver's relocations
+ * want the OFFSET in .rodata. Every backend owes this conversion once its
+ * unit is done.
+ *
+ * It lives here, shared, rather than as the same line in each backend.
+ * Four of them had that line and the fifth did not, and the symptom was
+ * three strings away from the cause: string index N resolved to
+ * rodata + N, so `puts_("DONE\n")` printed "cXYZ" out of the middle of
+ * the previous literal and a digit-summing loop over "0123456789" got 224.
+ * Nothing faulted and every address was inside .rodata. */
+void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n)
+{
+    for (int k = 0; k < n; k++)
+        s[k].str_off = iu->strs[s[k].str_off].off;
+}
+
 char *cg_float_vregs(struct ir_func *fn)
 {
     int nv = fn->nvregs ? fn->nvregs : 1;
@@ -4533,10 +4550,7 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
     }
     free(st.call);
 
-    /* String sites still carry the string INDEX; turn it into the
-     * .rodata offset the driver's relocations speak. */
-    for (int n = 0; n < st.nstr; n++)
-        st.str[n].str_off = iu->strs[st.str[n].str_off].off;
+    cg_resolve_strsites(iu, st.str, st.nstr);
 
     *ext = st.ext;
     *next = st.next;

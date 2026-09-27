@@ -2568,14 +2568,7 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     }
     free(st.call);
 
-    /* A string site recorded the string's INDEX (that is what IR_STRADDR
-     * carries); the driver wants its OFFSET in .rodata. Resolved here,
-     * where the unit's string table exists, exactly as the other three
-     * backends do -- leaving it out made every literal after the first
-     * resolve to a few bytes into the one before it, and `puts_("sum")`
-     * printed the tail of "hello". */
-    for (int n = 0; n < st.nstr; n++)
-        st.str[n].str_off = iu->strs[st.str[n].str_off].off;
+    cg_resolve_strsites(iu, st.str, st.nstr);
 
     *ext = st.ext;   *next = st.next;
     *strs = st.str;  *nstrs = st.nstr;

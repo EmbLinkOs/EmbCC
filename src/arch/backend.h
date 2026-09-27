@@ -18,6 +18,15 @@ char *cg_wide_vregs(struct ir_func *fn);
  * backend that gives them their own register class. NULL when none. */
 char *cg_float_vregs(struct ir_func *fn);
 
+/* Turn each string site's INDEX into its offset in .rodata. A backend
+ * records the index while lowering (that is what IR_STRADDR carries) and
+ * calls this once, at the end of its unit, before handing the sites back.
+ * Shared because it was once the same line in four backends and missing
+ * from the fifth. */
+struct ir_unit;
+struct strsite;
+void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n);
+
 struct extcall {
     int patch_off;        /* offset of the rel32 field in .text */
     struct func *callee;  /* canonical, !has_defn */
@@ -84,6 +93,17 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
                         struct gsite **gs, int *ngs,
                         struct fsite **fs, int *nfs, int want_debug,
                         int optimize, int no_sse, int regalloc);
+
+/* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
+ * a register and every value is a run of them. Same signature all the
+ * same, so the driver still picks one on --target= and nothing downstream
+ * knows which machine produced the image. */
+void codegen_unit_avr(struct ir_unit *iu, struct code *text,
+                      struct extcall **ext, int *next,
+                      struct strsite **strs, int *nstrs,
+                      struct gsite **gs, int *ngs,
+                      struct fsite **fs, int *nfs, int want_debug,
+                      int optimize, int no_sse, int regalloc);
 
 void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
