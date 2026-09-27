@@ -119,6 +119,7 @@ SRCS := \
 	src/arch/avr/emit.c \
 	src/arch/avr/codegen.c \
 	src/arch/avr/asm.c \
+	src/arch/avr/irgen.c \
 	src/arch/avr/predef.c \
 	src/arch/avr/predef_cxx.c
 

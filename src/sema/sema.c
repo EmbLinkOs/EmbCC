@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "../arch/aarch64/asm.h"
+#include "../arch/avr/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
 #include "ldfloat.h"
@@ -3480,6 +3481,65 @@ static int asm_resolve_reg_arm64(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* AVR operand resolution. Its letters are its own, and they exist because
+ * the register file is NOT uniform: nearly every restriction in the
+ * instruction set shows up as a constraint letter.
+ *
+ *   r/g   any register            d   r16-r31 (the ldi/subi/andi half)
+ *   a     r16-r23                 w   r24/r26/r28/r30 (the adiw pairs)
+ *   e     X, Y or Z               b   Y or Z (the displaced forms)
+ *   x/y/z that pointer pair       q   the stack pointer
+ *   i/n   an integer constant     I   0..63        M   0..255
+ *
+ * The class letters all return -2 and src/arch/avr/irgen.c picks a register
+ * that satisfies them -- it has to, because an operand wider than one byte
+ * needs a RUN of registers and a pointer an even-aligned one, which is not
+ * a decision a single number here could carry. x/y/z pin a pair outright. */
+static int asm_resolve_reg_avr(struct unit *u, struct stmt *s,
+                               struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = avrasm_gpr(rn, (int)strlen(rn));
+        if (r < 0)
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not an AVR register",
+                    rn);
+        return r;
+    }
+    /* A specific pointer pair, by name. */
+    for (const char *p = c; *p; p++) {
+        if (*p == 'x') return 26;
+        if (*p == 'y') return 28;
+        if (*p == 'z') return 30;
+    }
+    {
+        int has_class = 0, has_i = 0;
+        for (const char *p = c; *p; p++) {
+            if (*p == 'r' || *p == 'g' || *p == 'd' || *p == 'a' ||
+                *p == 'w' || *p == 'e' || *p == 'b' || *p == 'q' ||
+                *p == 'm')
+                has_class = 1;
+            if (*p == 'i' || *p == 'n' || *p == 'I' || *p == 'M' ||
+                *p == 'J' || *p == 'K' || *p == 'L' || *p == 'N' ||
+                *p == 'O' || *p == 'P' || *p == 'R')
+                has_i = 1;
+        }
+        if (has_i && !has_class) {
+            long v;
+            if (const_fold(op->expr, &v)) {
+                op->is_imm = 1;
+                op->imm = v;
+                return ASM_REG_IMM;
+            }
+            return ASM_REG_INVALID;   /* a non-constant "i": gcc refuses too */
+        }
+        if (has_class)
+            return -2;
+    }
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -3492,6 +3552,8 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         c++;
     if (target_get() == TARGET_AARCH64)
         return asm_resolve_reg_arm64(u, s, op, c);
+    if (target_get() == TARGET_AVR)
+        return asm_resolve_reg_avr(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)

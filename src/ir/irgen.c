@@ -3009,6 +3009,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             else if (target_get() == TARGET_RISCV32 ||
                      target_get() == TARGET_RISCV64)
                 irg_asm_riscv(fn, s);
+            else if (target_get() == TARGET_AVR)
+                irg_asm_avr(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;

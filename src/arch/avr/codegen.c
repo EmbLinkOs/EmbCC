@@ -1338,6 +1338,70 @@ static void gen_ins(struct a_fn *F, int n)
         return;
     }
 
+    case IR_ASM: {
+        /* Extended asm, assembled in irgen (avr/irgen.c irg_asm_avr) against
+         * the vocabulary in avr/asm.c. This only has to place the operands
+         * and splice the bytes in.
+         *
+         * Nothing is live in a register across an asm here, and that needs no
+         * argument: every value lives in a frame slot in this backend, so the
+         * only registers holding anything across the asm are Y (the frame
+         * pointer) and r1 (the zero register) -- and irgen refuses any
+         * template, operand or clobber that names either.
+         *
+         * Z is the address scratch for a slot that ldd cannot reach. An
+         * operand pinned to Z is therefore loaded LAST, after every other
+         * operand has been placed, so the far-slot path cannot overwrite it.
+         */
+        struct ir_asm *ia = i->asm_ir;
+        int pass;
+
+        for (int k = 0; k < ia->nout; k++)
+            if (!ia->out[k].mem && ia->out[k].size > VW)
+                a_refuse(fn, i, "an asm output wider than four bytes");
+        /* A "+" output starts with the lvalue's CURRENT value; an "m" one is
+         * an address the template writes THROUGH. Two passes so that an
+         * operand in Z or X goes after the ones whose slots may need Z or X
+         * to reach. */
+        for (pass = 0; pass < 2; pass++) {
+            int late;
+            for (int k = 0; k < ia->nout; k++) {
+                struct ir_asm_op *o = &ia->out[k];
+                late = o->reg >= AVR_X;
+                if (late != pass || !o->inout || o->mem)
+                    continue;
+                /* The address is in the slot; the VALUE is what it points at. */
+                ld_slot(F, AVR_Z, F->slot[o->temp], 2);
+                for (int b = 0; b < o->size; b++)
+                    avr_ldd(t, o->reg + b, AVR_Z, b);
+            }
+            for (int k = 0; k < ia->nin; k++) {
+                struct ir_asm_op *o = &ia->in[k];
+                late = o->reg >= AVR_X;
+                if (late != pass)
+                    continue;
+                ld_slot(F, o->reg, F->slot[o->temp], o->size);
+            }
+        }
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        for (int k = 0; k < ia->nout; k++) {
+            struct ir_asm_op *o = &ia->out[k];
+            /* An "m" output was written BY the template, through the address
+             * this register holds; storing the register over it would destroy
+             * what the asm produced. */
+            if (o->mem)
+                continue;
+            /* The output value is in o->reg..+size; o->temp holds the
+             * ADDRESS to write it to. X is used for the address so that an
+             * output sitting in Z is not the thing overwritten. */
+            ld_slot(F, AVR_X, F->slot[o->temp], 2);
+            for (int b = 0; b < o->size; b++)
+                avr_st(t, AVR_X, o->reg + b, AVR_PTR_POST_INC);
+        }
+        return;
+    }
+
     case IR_FENCE:
         /* Nothing. An ATmega has one core, no store buffer and no cache:
          * every access is already ordered with respect to every other, so
