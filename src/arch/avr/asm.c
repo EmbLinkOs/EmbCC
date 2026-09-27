@@ -72,6 +72,15 @@ static const char *skipws(const char *p)
 
 static int idc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$'; }
 
+/* A symbol NAME cannot begin with a digit -- that is a number. The
+ * distinction matters only in avrasm_symform, where an operand is either a
+ * constant or a symbol: without it `sts 0xC1, r24` was read as a store to a
+ * symbol called "0xC1", which the linker then reported as undefined. A
+ * plain `1` or `0x40` reaches the expression parser instead, which is where
+ * every I/O address in a real source goes. */
+static int sym_start(int c) { return isalpha(c) || c == '_' || c == '.' ||
+                                     c == '$'; }
+
 /* ---- registers -------------------------------------------------------- */
 
 int avrasm_gpr(const char *name, int len)
@@ -1029,6 +1038,7 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
     if ((mnlen == 3 && strncmp(mn, "jmp", 3) == 0) ||
         (mnlen == 4 && strncmp(mn, "call", 4) == 0)) {
         int n = 0;
+        if (!sym_start((unsigned char)p[0])) return 0;
         while (idc((unsigned char)p[n]))
             n++;
         if (!n) return 0;
@@ -1042,6 +1052,7 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
     if ((mnlen == 4 && strncmp(mn, "rjmp", 4) == 0) ||
         (mnlen == 5 && strncmp(mn, "rcall", 5) == 0)) {
         int n = 0;
+        if (!sym_start((unsigned char)p[0])) return 0;
         while (idc((unsigned char)p[n]))
             n++;
         if (!n) return 0;
@@ -1059,7 +1070,7 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
             n++;
         /* A bit number is not a symbol, which is why brbs/brbc are excluded
          * above: their FIRST operand is the flag. */
-        if (n && !isdigit((unsigned char)p[0]) && find_insn(mn, mnlen)) {
+        if (n && sym_start((unsigned char)p[0]) && find_insn(mn, mnlen)) {
             f->sym_at = (int)(p - stmt); f->sym_len = n;
             snprintf(f->encode, sizeof f->encode, "%.*s .+2", mnlen, mn);
             f->site[0].off = 0; f->site[0].reloc = R_AVR_7_PCREL;
@@ -1084,6 +1095,7 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
             sp = skipws(sp + 1);
         }
         n = 0;
+        if (!sym_start((unsigned char)sp[0])) return 0;
         while (idc((unsigned char)sp[n]))
             n++;
         if (!n) return 0;
@@ -1137,6 +1149,8 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
                 if (*g2 == '(') { gs = 1; r = skipws(g2 + 1); }
             }
             n = 0;
+            if (!sym_start((unsigned char)r[0]))
+                return 0;          /* lo8(64): a constant, not a symbol */
             while (idc((unsigned char)r[n]))
                 n++;
             if (!n)

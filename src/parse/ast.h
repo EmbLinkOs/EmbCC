@@ -302,6 +302,10 @@ struct func {
     /* __attribute__((constructor)) / ((destructor)): its address goes in
      * .init_array / .fini_array, and the startup code walks them. */
     int is_ctor, is_dtor;
+    /* __attribute__((signal)) / ((interrupt)): an interrupt handler.
+     * 1 signal, 2 interrupt (which re-enables interrupts on entry), 0 an
+     * ordinary function. Only AVR acts on it; see the attribute table. */
+    int is_isr;
     /* The hints EmbCC acts on: keep the symbol, do not warn that it is
      * unused, force or forbid inlining, warn at each call, warn when a
      * caller throws the result away. `vis` is an ELF visibility. */

@@ -40,6 +40,15 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                int used, unused, always_inline, noinline;
                int deprecated, warn_unused_result;
                const char *vis;      /* visibility("...") */
+               /* __attribute__((signal)) / ((interrupt)): this function is
+                * an interrupt handler. 1 for signal (interrupts stay
+                * disabled in the body) and 2 for interrupt (re-enabled on
+                * entry) -- avr-gcc's two spellings, one `sei` apart.
+                *
+                * LAST in this struct on purpose: several declarations
+                * initialise it positionally, so a field added in the middle
+                * silently shifts every value after it. */
+               int isr;
 };
 
 struct parser {
@@ -410,7 +419,18 @@ static const struct attr_entry attr_table[] = {
     { "interrupt", ATTR_REFUSED,
       "the handler would return with an ordinary return instead of the "
       "interrupt return the CPU needs, and without saving the registers "
-      "(on ARMv7-M it needs neither, and is accepted)" },
+      "(on ARMv7-M it needs neither, and is accepted; on AVR it is "
+      "implemented)" },
+    /* avr-gcc's other spelling, and the one avr-libc's ISR() macro
+     * expands to. `signal` leaves interrupts disabled in the body and
+     * `interrupt` re-enables them on entry -- one `sei` apart. Refused
+     * away from AVR rather than ignored: a handler that returns with
+     * `ret` where the machine needs `reti` leaves interrupts masked for
+     * the rest of time, which looks like a hang and not like a
+     * miscompile. */
+    { "signal",    ATTR_REFUSED,
+      "an interrupt handler needs the machine's own return instruction "
+      "and every register saved, which only the AVR backend does" },
     { "cleanup",   ATTR_REFUSED,
       "the cleanup function would never run" },
     { "ms_abi",    ATTR_REFUSED,
@@ -674,7 +694,10 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                         "ignored", name);
                 else if (ae->disp == ATTR_REFUSED &&
                          !(attr_is(name, "interrupt") &&
-                           target_get() == TARGET_THUMB))
+                           target_get() == TARGET_THUMB) &&
+                         !((attr_is(name, "interrupt") ||
+                            attr_is(name, "signal")) &&
+                           target_get() == TARGET_AVR))
                     parse_error_line(ps, aline,
                         "__attribute__((%s)) is not supported: %s",
                         name, ae->why);
@@ -686,6 +709,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             if (name && out) {
                 if (attr_is(name, "packed")) out->packed = 1;
                 else if (attr_is(name, "weak")) out->weak = 1;
+                else if (attr_is(name, "signal")) out->isr = 1;
+                else if (attr_is(name, "interrupt")) out->isr = 2;
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;
                 else if (attr_is(name, "nothrow")) out->nothrow = 1;
                 else if (attr_is(name, "embcc_sret")) out->sret = 1;
@@ -967,8 +992,7 @@ static int param_sret_attr(struct parser *ps, int index)
     if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
         return 0;
     struct token *at = cur(ps);
-    struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                       0, 0, 0, 0, 0, 0, NULL };
+    struct attrs a = { 0 };
     parse_attributes(ps, &a);
     if (a.sret && index != 0)
         parse_error_at(ps, at->line, at->col,
@@ -1012,8 +1036,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
             /* A parameter may carry attributes too:
              * `int f([[maybe_unused]] int x)`. */
             if (at_attribute(ps)) {
-                struct attrs pat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                                     0, 0, 0, 0, 0, 0, NULL };
+                struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
             }
             struct type *spec = parse_type_spec(ps, 0);
@@ -1066,8 +1089,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
      * closing brace (parse_struct_body). Leading ones are collected here and
      * applied to the body exactly as trailing ones are. Between the tag and
      * the '{' is NOT a place gcc accepts one, so neither does EmbCC. */
-    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                       0, 0, 0, 0, 0, 0, NULL };
+    struct attrs lead = { 0 };
     parse_attributes(ps, &lead);
     const char *tag = NULL;
     if (cur(ps)->kind == TOK_IDENT) {
@@ -1476,8 +1498,7 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * they are refused rather than silently dropped. */
         if (at_attribute(ps)) {
             struct token *at_tok = cur(ps);
-            struct attrs a = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                       0, 0, 0, 0, 0, 0, NULL };
+            struct attrs a = { 0 };
             parse_attributes(ps, &a);
             if (ps->attr_carry_on) {
                 /* The enclosing declaration will take them. */
@@ -2008,8 +2029,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
                 cap = cap ? cap * 2 : 8;
                 ms = xrealloc(ms, (size_t)cap * sizeof *ms);
             }
-            struct attrs mat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                       0, 0, 0, 0, 0, 0, NULL };
+            struct attrs mat = { 0 };
             parse_attributes(ps, &mat);  /* T buf[N] __attribute__((aligned(N))) */
             ms[n].name = mname;
             ms[n].ty = mty;
@@ -3147,8 +3167,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
      * writes, because it has to come before a type it does not know --
      * failed with "expected a statement". The attributes are merged
      * with any trailing ones at the declarator below. */
-    struct attrs lead = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                          0, 0, 0, 0, 0, 0, NULL };
+    struct attrs lead = { 0 };
     if (at_attribute(ps)) {
         parse_attributes(ps, &lead);
         t = cur(ps);
@@ -3383,8 +3402,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * on a local declarator; aligned(N) raises the stack slot's
              * alignment (codegen rounds the frame offset). */
             {
-                struct attrs lat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                       0, 0, 0, 0, 0, 0, NULL };
+                struct attrs lat = { 0 };
                 parse_attributes(ps, &lat);
                 if (lat.section)
                     parse_error_line(ps, s->line,
@@ -3757,8 +3775,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
 
     int is_static = 0, is_extern = 0, is_tls = 0;
-    struct attrs at = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                       0, 0, 0, 0, 0, 0, NULL };
+    struct attrs at = { 0 };
     ps->seq = seq;
 
     /* A file-scope `__asm__("...")` block (crt0's _start stub). Basic asm
@@ -3828,8 +3845,7 @@ static void parse_top(struct parser *ps, struct unit *u,
          * rather than a decision, and every vector typedef in
          * existence has the second shape, which is why
          * __attribute__((vector_size)) looked like a vector problem. */
-        struct attrs tdat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                              0, 0, 0, 0, 0, 0, NULL };
+        struct attrs tdat = { 0 };
         if (at_attribute(ps))
             parse_attributes(ps, &tdat);
         struct type *tbase = parse_type_spec(ps, 1);
@@ -3944,6 +3960,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_first = at.fmt_first;
                 f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
+    if (at.isr) f->is_isr = at.isr;
     f->is_dtor = at.dtor;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
@@ -3953,6 +3970,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_warn_unused_result = at.warn_unused_result;
     f->vis = at.vis;
                 f->is_ctor = at.ctor;
+                if (at.isr) f->is_isr = at.isr;
                 f->is_dtor = at.dtor;
                 f->attr_used = at.used;
                 f->attr_unused = at.unused;
@@ -4019,6 +4037,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
+    if (at.isr) f->is_isr = at.isr;
     f->is_dtor = at.dtor;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
@@ -4061,8 +4080,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             /* A parameter may carry attributes too:
              * `int f([[maybe_unused]] int x)`. */
             if (at_attribute(ps)) {
-                struct attrs pat = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 0,
-                                     0, 0, 0, 0, 0, 0, NULL };
+                struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
             }
             struct type *spec = parse_type_spec(ps, 0);
@@ -4107,6 +4125,7 @@ fn_tail:
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
+    if (at.isr) f->is_isr = at.isr;
     f->is_dtor = at.dtor;
     f->attr_used = at.used;
     f->attr_unused = at.unused;

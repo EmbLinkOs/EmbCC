@@ -13,6 +13,11 @@
 set -u
 here=$(dirname "$0")
 QEMU=${EMBCC_QEMU_AVR:-qemu-system-avr}
+# QEMU's own stderr is KEPT, not discarded. It refuses an AVR image whose
+# ELF entry point is not 0x0000 and says so in one clear line -- and that
+# line was invisible for an afternoon because this script sent it to
+# /dev/null, so a rejected image looked exactly like a program that printed
+# nothing. Any diagnostic here is worth more than the tidier output.
 "$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" "$QEMU" \
-    -M uno -nographic -bios "$1" 2>/dev/null
+    -M uno -nographic -bios "$1"
 exit 0

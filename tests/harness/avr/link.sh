@@ -27,5 +27,9 @@ H=${EMBCC_AVR_HARNESS:-$here}
 # rt.o is lib/rt/avr.c: multiply, divide and remainder, which this target
 # has no instructions for. It goes on every link because the backend emits
 # calls to it and a bare part has no library to find them in.
-"${EMBLD:-./embld}" -e reset -Ttext 0x0 -Tdata 0x100 \
+# -e __vectors, not -e reset: the entry must be address 0, because QEMU
+# refuses an AVR image whose entry_point is anything else and the silicon
+# fetches its first instruction from 0 in any case. __vectors is the
+# interrupt vector table, whose first entry jumps to reset.
+"${EMBLD:-./embld}" -e __vectors -Ttext 0x0 -Tdata 0x100 \
     "$H/boot.o" "$H/io.o" "$H/rt.o" "$@" -o "$out"

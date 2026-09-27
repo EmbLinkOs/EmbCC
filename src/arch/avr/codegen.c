@@ -1381,6 +1381,70 @@ static void set_sp_from_y(struct code *t)
     avr_out(t, IO_SPL, 28);
 }
 
+/* ---- interrupt handlers ----------------------------------------------
+ *
+ * An AVR interrupt handler is a different function from an ordinary one, in
+ * three ways the hardware imposes:
+ *
+ *   It returns with `reti`, which re-enables interrupts. `ret` leaves them
+ *   masked for the rest of the program's life -- which looks like a hang
+ *   and not like a miscompile, and is why this attribute is refused rather
+ *   than ignored on the targets that do not implement it.
+ *
+ *   It saves SREG. The interrupt arrived between two instructions of code
+ *   that was mid-comparison, and every flag belongs to that code.
+ *
+ *   It cannot assume r1 is zero. The machine's zero register is only zero
+ *   by convention, and `mul` clobbers it -- so an interrupt that lands
+ *   between a `mul` and its `clr r1` sees a dirty r1. The handler saves it,
+ *   clears it for its own body (and for anything it calls), and restores
+ *   it. avr-gcc does exactly this, and it is the reason an ISR is bigger
+ *   than a function that does the same work.
+ *
+ * Everything this backend touches is saved, because a handler must leave
+ * the interrupted code exactly as it found it and nothing here knows what
+ * that code was using. That is r0, r1, SREG, the A and B scratch banks,
+ * X, Z and the frame pointer -- seventeen pushes. A register allocator
+ * would narrow it to what the body really uses; until then it is correct
+ * and expensive, which is the right way round.
+ *
+ * The order matters at one point only: SREG is read with `in` AFTER r0 is
+ * safe to use and BEFORE anything sets a flag.
+ */
+static const int ISR_SAVE[] = {
+    0, 1,                                  /* scratch and the zero register */
+    18, 19, 20, 21, 22, 23, 24, 25,        /* A and B */
+    26, 27,                                /* X */
+    30, 31,                                /* Z */
+    28, 29                                 /* Y, the frame pointer */
+};
+
+static void isr_prologue(struct code *t, int kind)
+{
+    unsigned k;
+    avr_push(t, 0);
+    avr_in(t, R_TMP, IO_SREG);
+    avr_push(t, R_TMP);                    /* SREG, through r0 */
+    for (k = 1; k < sizeof ISR_SAVE / sizeof ISR_SAVE[0]; k++)
+        avr_push(t, ISR_SAVE[k]);
+    /* The body and everything it calls read r1 as zero. */
+    avr_rr(t, AVR_EOR, R_ZERO, R_ZERO);
+    /* `interrupt`, unlike `signal`, runs with interrupts enabled. */
+    if (kind == 2)
+        avr_bset(t, AVR_SREG_I);
+}
+
+static void isr_epilogue(struct code *t)
+{
+    int k;
+    for (k = (int)(sizeof ISR_SAVE / sizeof ISR_SAVE[0]) - 1; k >= 1; k--)
+        avr_pop(t, ISR_SAVE[k]);
+    avr_pop(t, R_TMP);
+    avr_out(t, IO_SREG, R_TMP);
+    avr_pop(t, 0);
+    avr_reti(t);
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                      int want_debug)
 {
@@ -1413,8 +1477,32 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     }
 
     /* ---- prologue ---- */
-    avr_push(t, 28);
-    avr_push(t, 29);
+    if (f->is_isr) {
+        /* An interrupt handler takes no arguments and returns nothing --
+         * the hardware calls it, so there is no caller to agree with. A
+         * handler with a signature would silently read its parameters out
+         * of registers the interrupted code was using. */
+        if (fn->nparams)
+            a_refuse(fn, NULL,
+                     "an interrupt handler with parameters: the hardware "
+                     "calls it, so there is no caller to pass them and they "
+                     "would be read out of whatever the interrupted code "
+                     "left in those registers");
+        if (fn->ret_abi.size)
+            a_refuse(fn, NULL,
+                     "an interrupt handler that returns a value: `reti` goes "
+                     "back to the interrupted instruction, and nothing is "
+                     "there to receive it");
+        isr_prologue(t, f->is_isr);
+    }
+    /* Y is pushed here for an ordinary function and was pushed by
+     * isr_prologue for a handler, so the frame arithmetic below is the
+     * same either way -- and the distance from Y to the incoming stack
+     * arguments stays exact, because a handler has none. */
+    if (!f->is_isr) {
+        avr_push(t, 28);
+        avr_push(t, 29);
+    }
     avr_in(t, 28, IO_SPL);
     avr_in(t, 29, IO_SPH);
     if (F.frame) {
@@ -1454,9 +1542,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         add_const16(&F, AVR_Y, F.frame);
         set_sp_from_y(t);
     }
-    avr_pop(t, 29);
-    avr_pop(t, 28);
-    avr_ret(t);
+    if (f->is_isr) {
+        isr_epilogue(t);
+    } else {
+        avr_pop(t, 29);
+        avr_pop(t, 28);
+        avr_ret(t);
+    }
 
     for (i = 0; i < F.nfix; i++) {
         int at = F.fix[i].at;

@@ -33,6 +33,10 @@ struct sym {
     int is_global;
     int is_func;
     long size;
+    int is_weak;            /* .weak: an undefined reference resolves to 0
+                             * rather than failing the link, which is how a
+                             * vector table names a handler that may not
+                             * exist */
     int elf_ndx;            /* filled when the symbol table is built */
 };
 
@@ -260,6 +264,22 @@ static int directive(struct gas *g, char *p, int pass)
         while (*e && is_symc((unsigned char)*e)) e++;
         if (e == arg) { gerr(g, ".global needs a name"); return 1; }
         sym_get(g, arg, (size_t)(e - arg))->is_global = 1;
+        return 1;
+    }
+    /* .weak. A kernel's vector table names a handler for every interrupt
+     * the part has, and a program that uses three of them must still link:
+     * an undefined WEAK reference resolves to zero, which on AVR makes a
+     * spurious interrupt jump to the reset vector -- avr-libc's own
+     * behaviour for one. Without this the table cannot be written at all. */
+    if (DIR(".weak") || DIR(".weakref")) {
+        char *e = arg;
+        while (*e && is_symc((unsigned char)*e)) e++;
+        if (e == arg) { gerr(g, ".weak needs a name"); return 1; }
+        {
+            struct sym *sy = sym_get(g, arg, (size_t)(e - arg));
+            sy->is_weak = 1;
+            sy->is_global = 1;       /* a weak symbol is a global one */
+        }
         return 1;
     }
     if (DIR(".type")) {
@@ -875,7 +895,8 @@ static int write_object(struct gas *g, const char *out_path)
                  * global for the linker to resolve it. */
                 continue;
             }
-            unsigned char bind = s->is_global ? STB_GLOBAL : STB_LOCAL;
+            unsigned char bind = s->is_weak ? STB_WEAK
+                               : s->is_global ? STB_GLOBAL : STB_LOCAL;
             unsigned char type = s->is_func ? STT_FUNC : STT_NOTYPE;
             s->elf_ndx = elfw_add_symbol(w, s->name,
                                          (Elf64_Addr)(s->sec >= 0 ? s->value : 0),
@@ -889,7 +910,9 @@ static int write_object(struct gas *g, const char *out_path)
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
         if (s && !s->elf_ndx)
             s->elf_ndx = elfw_add_symbol(w, s->name, 0, 0,
-                                         (STB_GLOBAL << 4) | STT_NOTYPE,
+                                         (Elf64_Uchar)(((s->is_weak ? STB_WEAK
+                                                       : STB_GLOBAL) << 4) |
+                                                       STT_NOTYPE),
                                          SHN_UNDEF);
     }
     for (i = 0; i < g->nfix; i++) {
