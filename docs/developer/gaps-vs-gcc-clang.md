@@ -517,6 +517,77 @@ For a compiler whose stated audience is firmware on parts measured in
 kilobytes, that is the single most valuable missing thing in this entire
 document. 1.39× was the flattering framing; 2.11× is the honest one.
 
+## Cortex-M4F hard float: what is done, and what the attempt taught
+
+The FPU **computes** single precision (`f4b7ec1`), run on QEMU's
+mps2-an386 and bit-identical to the host at four optimisation levels.
+`double` still goes to the runtime, which is what FPv4-SP-D16 is.
+
+`-mfpu=` and `-mfloat-abi=hard` are still **refused by name**, and that
+is correct: the flags promise an ABI that is not finished, and accepting
+a promise while emitting something else is the failure the whole
+option-refusal policy exists to prevent. The FPU path is reachable only
+through `EMBCC_T_FPU=1`.
+
+### An FP register class needs the data path, for CORRECTNESS
+
+A first attempt (`1ce162c`) was **reverted**: it miscompiled.
+`f2(1.5f, 2.25f)` returned 0 at `-O2`.
+
+With two register classes a float can be PRODUCED by an integer path --
+a call's result arrives in `r0`, and a load is an integer load on this
+target -- and CONSUMED by a floating-point one. The integer side writes
+the value's SLOT; the FP side reads its REGISTER, which nothing wrote.
+
+`cg_float_vregs` marks a float-returning call's result as float, which is
+right on x86-64 where that result really does arrive in `xmm0`. On Thumb
+it arrives in `r0`. So reconciling the two classes in `rd`/`wr` is not an
+optimisation to do later; it is the condition for having a second class
+at all.
+
+The test that missed it called DIRECTLY, so the inliner removed every
+boundary. The bug needs a float to actually cross a call, which
+`tests/golden/thumb-fpu.sh` now forces through volatile function
+pointers.
+
+### Two things the hard-float ABI attempt established
+
+Both were verified and then set aside with the work; neither is guesswork.
+
+**AAPCS-VFP back-fills, and the placement was checked against Clang.**
+The VFP argument registers are sixteen single slots. A float takes the
+lowest free one; a double takes the lowest free ALIGNED PAIR, and when
+that skips a free single the single stays free for a later float:
+
+| signature | placement |
+|---|---|
+| `f(float, double, float)` | `s0`, `d1`, `s1` -- not `s2` |
+| `f(double, float)` | `d0`, `s2` |
+| `f(float, float, double)` | `s0`, `s1`, `d1` |
+| `f(float, double, double, float)` | `s0`, `d1`, `d2`, `s1` |
+
+All four agree with Clang. A sequential allocator puts the second float
+in `s4`, links cleanly against any other toolchain, and reads the wrong
+register.
+
+**VFP parameter homing needs its OWN parallel move.** The core one cannot
+help -- it shuffles r-registers -- but one VFP parameter's home is
+another's source. `float add(float a, float b)` with `a` in `s1` and `b`
+in `s0` emitted `vmov s1, s0` then `vmov s0, s1` and returned `a + a`.
+
+**The runtime helpers follow whichever ABI they were built for.** The
+soft-float runtime is not soft "by nature": libgcc ships per-ABI, and
+`lib/rt/softfp.c` is ordinary C compiled like anything else. Building it
+hard while calling it with core-register arguments is a mismatch inside
+EmbCC's own output -- it made an eight-float call return 163 instead of
+204.
+
+With those three fixed, an EmbCC hard-float caller linked against a
+**Clang** hard-float callee and agreed with the host, which is the
+interoperability the requirements document asks for. The remaining
+failures were in the FP register class underneath it, which is why that
+is the piece to redo first.
+
 ## ARM ABI metadata, and who checks it
 
 **DONE.** EmbCC emitted no `.ARM.attributes` at all. That sounds

@@ -137,17 +137,23 @@ double arithmetic"; exit 1; }
 requires"
 fi
 
-# ---- the FP register class, under pressure ----------------------------
-# Twelve live floats, so the allocator has to place and reuse registers
-# rather than keeping one value at a time. This is the case that would
-# expose the dangerous shape: a value the FP allocator placed, written by
-# the INTEGER path (which does not know about FP registers) and then read
-# back from the register. cg_float_vregs prevents it -- a value stays in
-# the class only if every instruction touching it is floating point, and a
-# float LOAD is not -- so anything from memory keeps its slot. This test
-# is what says that rule is actually holding.
-cat > "$out/stress.c" <<'CEOF'
-void writec(int c); void puts_(const char *s); void putn(long v);
+# ---- a float ACROSS A CALL --------------------------------------------
+#
+# This is the case that matters and the one the first version of this
+# test missed. Everything above calls directly, so the inliner removes
+# the boundary; here the calls go through volatile function pointers,
+# which no inliner may see through, and the arguments and results really
+# do cross.
+#
+# It is what caught a miscompile that had already been committed: with an
+# FP register class, a float can be PRODUCED by an integer path (a call's
+# result arrives in r0, and a load is an integer load on this target) and
+# CONSUMED by a floating-point one. If the two classes are not reconciled
+# the integer side writes the value's slot while the FP side reads its
+# register, and the arithmetic uses whatever was there before --
+# f2(1.5f, 2.25f) returned 0. Direct calls never showed it.
+cat > "$out/cross.c" <<'CEOF'
+void writec(int c); void puts_(const char *s);
 union fu { float f; unsigned u; };
 static unsigned B(float f) { union fu x; x.f = f; return x.u; }
 static void h8(unsigned v)
@@ -156,38 +162,51 @@ static void h8(unsigned v)
         writec("0123456789abcdef"[(v >> i) & 15]);
     writec(' ');
 }
-volatile float t[12] = { 1.5f, 2.5f, 0.5f, 4.0f, 0.25f, 8.0f,
-                         3.0f, 1.25f, 6.0f, 0.75f, 2.0f, 5.0f };
+static float f2(float a, float b)            { return a * 2.0f + b; }
+static float ifi(int i, float f, int j)      { return f + (float)(i + j); }
+static double dd(double a, double b)         { return a * b + a; }
+static float f8(float a, float b, float c, float d,
+                float e, float f, float g, float h)
+{ return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8; }
+/* volatile: the boundary is the thing under test, and an inlined call
+ * has no boundary. */
+static float  (*volatile p2)(float, float)            = f2;
+static float  (*volatile pi)(int, float, int)          = ifi;
+static double (*volatile pd)(double, double)           = dd;
+static float  (*volatile p8)(float,float,float,float,
+                             float,float,float,float)  = f8;
 int main(void)
 {
-    float a = t[0], b = t[1], c = t[2], d = t[3], e = t[4], f = t[5];
-    float g = t[6], h = t[7], i = t[8], j = t[9], k = t[10], l = t[11];
-    float r1 = a * b + c * d, r2 = e * f + g * h, r3 = i * j + k * l;
-    float r4 = r1 / r2, r5 = r2 / r3, r6 = r3 / r1;
-    float s = r4 + r5 + r6 - a * b * c;
-    h8(B(r1)); h8(B(r2)); h8(B(r3));
-    h8(B(r4)); h8(B(r5)); h8(B(r6)); h8(B(s));
+    h8(B(p2(1.5f, 2.25f)));
+    h8(B(pi(3, 1.25f, 4)));
+    h8((unsigned)(pd(1.5, 2.0) * 100.0));
+    h8(B(p8(1, 2, 3, 4, 5, 6, 7, 8)));
     puts_("\n==END==\n");
     return 0;
 }
 CEOF
-cc -w -o "$out/shost" "$out/stress.c" \
+cc -w -o "$out/chost" "$out/cross.c" \
     "$EMBCC_ROOT/tests/harness/thumb/hostio.c" 2>/dev/null || {
-    echo "the stress host reference does not build"; exit 1; }
-swant=$("$out/shost" | head -1)
-for opt in -O0 -O1 -O2 -Os; do
-    EMBCC_T_FPU=1 "$EMBCC" --target=$T $opt -c "$out/stress.c" \
-        -o "$out/st.o" || { echo "stress $opt: does not compile"; exit 1; }
-    sh "$H/link.sh" "$out/st.elf" "$out/st.o" "$out/softfp.o" \
-        > /dev/null 2>&1 || { echo "stress $opt: does not link"; exit 1; }
-    got=$(sh "$H/run.sh" "$out/st.elf" 2>&1 | head -1)
-    [ "$got" = "$swant" ] || {
-        echo "stress $opt: twelve live floats disagree with the host"
-        echo "  want: $swant"
-        echo "  got:  $got"; exit 1; }
+    echo "the cross-call host reference does not build"; exit 1; }
+cwant=$("$out/chost" | head -1)
+[ -n "$cwant" ] || { echo "the cross-call reference printed nothing"; exit 1; }
+for fpu in 0 1; do
+    for opt in -O0 -O1 -O2 -Os; do
+        EMBCC_T_FPU=$fpu "$EMBCC" --target=$T $opt -c "$out/cross.c" \
+            -o "$out/cr.o" || { echo "cross FPU=$fpu $opt: no compile"
+                                exit 1; }
+        sh "$H/link.sh" "$out/cr.elf" "$out/cr.o" "$out/softfp.o" \
+            > /dev/null 2>&1 || { echo "cross FPU=$fpu $opt: no link"
+                                  exit 1; }
+        got=$(sh "$H/run.sh" "$out/cr.elf" 2>&1 | head -1)
+        [ "$got" = "$cwant" ] || {
+            echo "cross FPU=$fpu $opt: a float crossing a call disagrees"
+            echo "  want: $cwant"
+            echo "  got:  $got"; exit 1; }
+    done
 done
-echo "twelve live floats agree with the host at four levels, so the FP
-register class is placing values soundly"
+echo "floats and doubles crossing a real call boundary agree with the host,
+with the FPU and without, at four levels"
 
 # -mfpu= stays REFUSED. The FPU arithmetic works, but the flag promises
 # the hard-float ABI as well, and that is not finished -- accepting it
