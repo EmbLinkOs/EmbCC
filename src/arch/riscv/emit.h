@@ -141,6 +141,34 @@ void rv_shift_imm(struct code *c, int op, int rd, int rs1, int amt,
 enum { RV_MUL, RV_MULH, RV_MULHSU, RV_MULHU, RV_DIV, RV_DIVU, RV_REM, RV_REMU };
 void rv_muldiv(struct code *c, int op, int rd, int rs1, int rs2, int w);
 
+/* ---- the A extension: atomics ----------------------------------------
+ *
+ * Hazard3 (the RP2350's RISC-V core, and the RTOS requirements' fourth
+ * target) is RV32IMAC, so these are part of the baseline rather than an
+ * option -- an RTOS needs a lock.
+ *
+ * All eleven share one encoding: opcode 0x2f, funct3 selecting the width,
+ * and a seven-bit field holding funct5 at its top with the two ordering
+ * bits below it -- `aq` (acquire) at bit 26 and `rl` (release) at 25. That
+ * is the same seven-bit slot an R-type's funct7 occupies, which is why
+ * rv_enc_r packs these too and there is no second packer to keep in step.
+ *
+ * The funct5 values were read off `llvm-mc -show-encoding`, not a table. */
+enum rv_amo {
+    RV_AMOADD  = 0x00, RV_AMOSWAP = 0x01, RV_LR      = 0x02, RV_SC   = 0x03,
+    RV_AMOXOR  = 0x04, RV_AMOOR   = 0x08, RV_AMOAND  = 0x0C,
+    RV_AMOMIN  = 0x10, RV_AMOMAX  = 0x14, RV_AMOMINU = 0x18,
+    RV_AMOMAXU = 0x1C
+};
+/* The ordering suffix. AQRL is what a C11 seq_cst operation needs, and is
+ * what every lowering here uses: an RTOS lock that is merely relaxed is a
+ * lock that does not work on an out-of-order core. */
+enum { RV_ORD_RELAXED = 0, RV_ORD_RL = 1, RV_ORD_AQ = 2, RV_ORD_AQRL = 3 };
+/* `w` is 0 for .w (four bytes) and 1 for .d (eight, RV64 only). `lr` has no
+ * rs2 and takes RV_ZERO there. */
+void rv_amo(struct code *c, enum rv_amo op, int rd, int rs1, int rs2,
+            int ord, int w);
+
 /* ---- memory ---------------------------------------------------------- */
 
 /* rd = *(rs1 + off), sized and signed. `size` is 1/2/4/8 and `sign` says

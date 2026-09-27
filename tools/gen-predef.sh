@@ -38,7 +38,15 @@
 #   __BITINT_MAXWIDTH__      gcc 14+ advertises C23 _BitInt with it; EmbCC
 #                            has no _BitInt, so a header testing it must not
 #                            be told otherwise.
-# The `c` in -march=rv32imc/rv64imc is the compressed extension, which
+# The `a` in -march=rv32imac/rv64imac is the ATOMIC extension, and it is in
+# the baseline because Hazard3 -- the RTOS requirements' fourth target, and
+# the RP2350's RISC-V core -- is RV32IMAC. A kernel cannot be written without
+# a compare-and-swap, and the backend emits lr/sc and the amo* family
+# (src/arch/riscv/codegen.c). Claiming __riscv_atomic while refusing every
+# atomic operation, which is what -march=rv32imc did, is the overclaim this
+# file exists to avoid -- in the other direction.
+#
+# The `c` in -march=rv32imac/rv64imac is the compressed extension, which
 # the backend now emits (src/arch/riscv/emit.c rv_compress). It is asked
 # for here so __riscv_c and __riscv_compressed are defined, because code
 # that tests them and gets the wrong answer picks the wrong instruction
@@ -97,9 +105,9 @@ refflags() {
         thumbv8m) [ -n "${EMBCC_REF_GCC_THUMBV8M:-}" ] || \
                      echo "-target thumbv8m.main-none-eabi -ffreestanding" ;;
         riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
-                     echo "-target riscv32-unknown-elf -march=rv32imc -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
+                     echo "-target riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
         riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
-                     echo "-target riscv64-unknown-elf -march=rv64imc -mabi=lp64 -mcmodel=medany -ffreestanding" ;;
+                     echo "-target riscv64-unknown-elf -march=rv64imac -mabi=lp64 -mcmodel=medany -ffreestanding" ;;
         # AVR names the PART, not just the architecture: __AVR_ATmega328P__
         # and the __AVR_HAVE_* feature macros all come from -mmcu=, and a
         # header that tests them is how AVR code is normally written. The
@@ -110,10 +118,29 @@ refflags() {
     esac
 }
 
+# Per-ARCH exclusions, for a macro that is legitimate on one target and an
+# overclaim on another.
+#
+# RISC-V: __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 and _2 claim one- and two-byte
+# atomics. The A extension has no such instruction -- it provides .w and, at
+# RV64, .d and nothing narrower -- so the backend refuses them rather than
+# doing a read-modify-write of the containing word, which would not be atomic
+# against a neighbouring byte. gcc answers these by calling libatomic; EmbCC
+# has no such library, so claiming them would make a program compile and then
+# fail to link. _4 (and _8 at RV64) stay: those are real.
+exclude_arch() {
+    case "$1" in
+        riscv32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2|8)' ;;
+        riscv64) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
+    esac
+}
+
 reference() {
     # shellcheck disable=SC2046
     "$(refgcc "$1")" $(refflags "$1") -dM -E - </dev/null \
-        | LC_ALL=C sort | grep -v -E "$EXCLUDE"
+        | LC_ALL=C sort | grep -v -E "$EXCLUDE" \
+        | grep -v -E "$(exclude_arch "$1")"
 }
 
 # C++ (D-013): the g++ -std=gnu++20 set, less the same families, less every

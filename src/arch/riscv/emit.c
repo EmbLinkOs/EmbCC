@@ -599,6 +599,22 @@ void rv_muldiv(struct code *c, int op, int rd, int rs1, int rs2, int w)
     rv_w(c, rv_enc_r(w ? OP_OP32 : OP_OP, rd, muldiv_f3[op], rs1, rs2, 1));
 }
 
+/* ---- the A extension ------------------------------------------------- */
+
+void rv_amo(struct code *c, enum rv_amo op, int rd, int rs1, int rs2,
+            int ord, int w)
+{
+    if (ord < 0 || ord > 3)
+        internal_error("riscv: amo ordering %d is not one of the four", ord);
+    if (op == RV_LR && rs2 != RV_ZERO)
+        internal_error("riscv: lr takes no second source register");
+    /* funct5 at the top of the seven-bit field, then aq (bit 26) and rl
+     * (bit 25) beneath it -- which is what makes this an ordinary R-type as
+     * far as the packer is concerned. */
+    rv_w(c, rv_enc_r(0x2f, rd, w ? 3 : 2, rs1, rs2,
+                     ((int)op << 2) | ord));
+}
+
 /* ---- memory ---------------------------------------------------------- */
 
 /* The loads are where the two widths differ in what EXISTS, not merely

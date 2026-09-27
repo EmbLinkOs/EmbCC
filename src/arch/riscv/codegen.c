@@ -2171,10 +2171,123 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         return;
     }
-    case IR_XCHG: case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS:
-        rv_refuse(F, i, "an atomic operation (this configuration has no A "
-                        "extension)");
+    /* ---- the A extension ---------------------------------------------
+     *
+     * Hazard3, the RTOS requirements' fourth target, is RV32IMAC, and a
+     * kernel cannot be written without these: a lock is a compare-and-swap.
+     *
+     * Every one is AQRL -- acquire AND release ordering -- rather than
+     * relaxed. A C11 atomic defaults to seq_cst, and an RTOS lock that is
+     * merely relaxed is a lock that does not work on a core that reorders.
+     * The cost of getting this wrong is invisible on Hazard3, which is
+     * in-order, and appears on the first core that is not.
+     *
+     * Only at the register's own width. The A extension has .w and (at
+     * RV64) .d and nothing narrower, so a one- or two-byte atomic is
+     * refused rather than turned into a read-modify-write of the word
+     * around it -- which is what it would have to be, and which is not
+     * atomic with respect to a neighbouring byte. */
+    case IR_XCHG: case IR_XADD: case IR_ARMW: {
+        int aw = i->size;
+        int addr, val, dst;
+        if (aw != F->w && !(aw == 4 && F->xlen == 64))
+            rv_refuse(F, i, aw < 4 ? "an atomic narrower than four bytes "
+                                     "(the A extension has no such form, and "
+                                     "a read-modify-write of the containing "
+                                     "word is not atomic against its "
+                                     "neighbours)"
+                                   : "an atomic wider than a register");
+        addr = rdr(F, i->a, ADDR);
+        val = rdr(F, i->b, TMP);
+        dst = wreg(F, i->dst, ACC);
+        if (i->op == IR_XCHG)
+            rv_amo(t, RV_AMOSWAP, dst, addr, val, RV_ORD_AQRL, aw == 8);
+        else if (i->op == IR_XADD)
+            rv_amo(t, RV_AMOADD, dst, addr, val, RV_ORD_AQRL, aw == 8);
+        else {
+            /* IR_ARMW's operation is a character in `imm`. Three of the four
+             * are single instructions; NAND is not -- there is no amonand --
+             * so it becomes the load-reserved loop below. */
+            enum rv_amo op;
+            switch ((int)i->imm) {
+            case '&': op = RV_AMOAND; break;
+            case '|': op = RV_AMOOR;  break;
+            case '^': op = RV_AMOXOR; break;
+            default:
+                /* nand: dst = *a; *a = ~(dst & b). An lr/sc retry loop,
+                 * which is also the shape every CAS below has. */
+                {
+                    int top = t->len;
+                    rv_amo(t, RV_LR, dst, addr, RV_ZERO, RV_ORD_AQ, aw == 8);
+                    rv_alu(t, RV_AND, SCR, dst, val, 0);
+                    rv_alu_imm(t, RV_XOR, SCR, SCR, -1, 0);    /* xori -1 = ~ */
+                    rv_amo(t, RV_SC, SCR2, addr, SCR, RV_ORD_RL, aw == 8);
+                    /* sc writes 0 on success; retry while non-zero. */
+                    {
+                        int br = rv_b_placeholder(t, RV_BNE, SCR2, RV_ZERO);
+                        rv_patch_b(t, br, top);
+                    }
+                }
+                wrote(F, i->dst, dst);
+                return;
+            }
+            rv_amo(t, op, dst, addr, val, RV_ORD_AQRL, aw == 8);
+        }
+        wrote(F, i->dst, dst);
         return;
+    }
+
+    case IR_CAS: case IR_CMPXCHG: {
+        /* A compare-and-swap is a load-reserved/store-conditional loop: the
+         * A extension has no single instruction for it.
+         *
+         *   retry: lr.w   seen, (addr)
+         *          bne    seen, expected, out      -- someone else's value
+         *          sc.w   failed, desired, (addr)
+         *          bnez   failed, retry            -- the reservation broke
+         *   out:
+         *
+         * IR_CAS yields the value SEEN, whether or not the swap happened --
+         * the __sync_val_compare_and_swap shape. IR_CMPXCHG yields a 0/1 and
+         * writes the seen value back through the pointer in `b` -- the
+         * __atomic_compare_exchange one. The two differ only in what is
+         * stored afterwards, so they share the loop. */
+        int aw = i->size;
+        int addr, exp, des, seen, out_br, top, sc_br;
+        if (aw != F->w && !(aw == 4 && F->xlen == 64))
+            rv_refuse(F, i, aw < 4 ? "an atomic compare-and-swap narrower "
+                                     "than four bytes"
+                                   : "an atomic wider than a register");
+        addr = rdr(F, i->a, ADDR);
+        if (i->op == IR_CAS) {
+            exp = rdr(F, i->b, TMP);
+        } else {
+            /* IR_CMPXCHG's expected value is at *b, not in b. */
+            int p = rdr(F, i->b, TMP);
+            rv_load(t, SCR, p, 0, aw, 1, F->xlen);
+            exp = SCR;
+        }
+        des = rdr(F, i->c, SCR2);
+        seen = ACC;
+        top = t->len;
+        rv_amo(t, RV_LR, seen, addr, RV_ZERO, RV_ORD_AQ, aw == 8);
+        out_br = rv_b_placeholder(t, RV_BNE, seen, exp);
+        rv_amo(t, RV_SC, FAR, addr, des, RV_ORD_RL, aw == 8);
+        sc_br = rv_b_placeholder(t, RV_BNE, FAR, RV_ZERO);
+        rv_patch_b(t, sc_br, top);
+        rv_patch_b(t, out_br, t->len);
+        if (i->op == IR_CAS) {
+            wr(F, i->dst, seen);
+        } else {
+            /* the bool: did the value seen equal the expected one? */
+            int p = rdr(F, i->b, TMP);
+            rv_store(t, seen, p, 0, aw, F->xlen);   /* *b = what was seen */
+            rv_alu(t, RV_XOR, FAR, seen, exp, 0);
+            rv_alu_imm(t, RV_SLTU, FAR, FAR, 1, 0);    /* sltiu 1: == 0 -> 1 */
+            wr(F, i->dst, FAR);
+        }
+        return;
+    }
     case IR_LABELADDR: case IR_IGOTO:
         rv_refuse(F, i, "a computed goto");
         return;
