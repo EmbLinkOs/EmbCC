@@ -116,6 +116,7 @@ SRCS := \
 	src/arch/riscv32/predef_cxx.c \
 	src/arch/riscv64/predef.c \
 	src/arch/riscv64/predef_cxx.c \
+	src/arch/avr/emit.c \
 	src/arch/avr/predef.c \
 	src/arch/avr/predef_cxx.c
 

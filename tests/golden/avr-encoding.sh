@@ -1,0 +1,90 @@
+#!/bin/sh
+# EmbCC's AVR vocabulary, against llvm-mc.
+#
+# tools/avrcheck generates one assembly line per instruction form from the
+# SAME walk that emits the bytes, so a form added to emit.c cannot escape
+# the referee, and a form printed but not encoded cannot shift every
+# comparison after it and blame the wrong instruction.
+#
+# AVR needs this more than most machines, because its wrong answers are
+# all VALID instructions:
+#
+#  - operand fields are SPLIT. A five-bit register sits across bits 8 and
+#    7..4; a six-bit displacement across three fields; an eight-bit
+#    immediate across two. Any mistake encodes a different register or a
+#    different constant, never an invalid instruction.
+#  - three groups have RESTRICTED operands -- immediates reach only
+#    r16-r31, adiw/sbiw only r24/r26/r28/r30, ldd/std only Y and Z -- so a
+#    wrong register is silently a different register.
+#  - the groups OVERLAP. Nibble 0 of the 0x9000 group is `lds`, a 32-bit
+#    instruction; routing `ld rd, Z` there emits half an instruction and
+#    turns everything after it into garbage.
+#
+# Two bugs were caught here that hand-checking had passed:
+#
+#  1. adiw/sbiw's layout is KKdd KKKK -- K split around dd -- not dd
+#     followed by a contiguous K. The two encodings agree for (r24, 3)
+#     and (r30, 63), which is exactly what the first hand-check used.
+#  2. `ld rd, Y` and `ld rd, Z` are the DISPLACED form at zero, not the
+#     0x9000 group. The naive encoding produced `lds`.
+#
+# Which is why the vocabulary sweeps both halves of every split field: an
+# r0-r15 and an r16-r31 operand, odd and even registers, the lowest and
+# highest immediate, all three pointers, and the displacement values that
+# straddle its field boundaries.
+set -u
+echo "TEST-MARKER avr-encoding"
+. "$(dirname "$0")/../lib.sh"
+
+MC=${EMBCC_LLVM_MC:-llvm-mc}
+OBJCOPY=${EMBCC_LLVM_OBJCOPY:-llvm-objcopy}
+out=tests/golden/out/avr-encoding
+rm -rf "$out"; mkdir -p "$out"
+
+command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 || {
+    echo "SKIP: llvm-mc/llvm-objcopy not found"; exit 0; }
+"$MC" -triple=avr -mcpu=atmega328p /dev/null -o /dev/null 2>/dev/null || {
+    echo "SKIP: this llvm-mc has no AVR target"; exit 0; }
+
+cc -std=c99 -Wall -Wextra -o "$out/avrcheck" \
+   tools/avrcheck/avrcheck.c src/arch/avr/emit.c src/arch/code.c \
+   src/driver/util.c src/driver/diag.c src/platform/platform_posix.c \
+   src/arch/target.c src/sema/type.c src/sema/ldfloat.c || {
+    echo "avrcheck did not build"; exit 1; }
+
+"$out/avrcheck" --list > "$out/v.s" || {
+    echo "avrcheck could not list the vocabulary"; exit 1; }
+"$out/avrcheck" bytes > "$out/v.bin" || {
+    echo "avrcheck could not encode its own vocabulary"; exit 1; }
+
+n=$(wc -l < "$out/v.s" | tr -d ' ')
+[ "$n" -ge 200 ] || {
+    echo "the vocabulary is only $n instructions -- it no longer sweeps
+both halves of the split fields"; exit 1; }
+
+"$MC" -triple=avr -mcpu=atmega328p -filetype=obj "$out/v.s" -o "$out/v.o" \
+    2> "$out/mc.err" || {
+    echo "llvm-mc rejected the vocabulary -- an entry claims an"
+    echo "        instruction that does not exist:"
+    head -4 "$out/mc.err"; exit 1; }
+"$OBJCOPY" -O binary --only-section=.text "$out/v.o" "$out/v.ref" 2>/dev/null
+
+cmp -s "$out/v.bin" "$out/v.ref" || {
+    echo "an encoding differs from llvm-mc's:"
+    # Name the instruction, not the byte. AVR mixes 16- and 32-bit forms
+    # so an offset does not divide into a line number -- the two streams
+    # are disassembled and diffed instead.
+    "$OBJCOPY" --update-section=.text="$out/v.bin" "$out/v.o" "$out/ours.o" \
+        2>/dev/null || cp "$out/v.o" "$out/ours.o"
+    # Temp files, not process substitution: <(...) is not POSIX sh and
+    # this runs under /bin/sh.
+    for pair in "ours.o ours.dis" "v.o ref.dis"; do
+        set -- $pair
+        llvm-objdump -d --triple=avr --mcpu=atmega328p --no-show-raw-insn \
+            "$out/$1" 2>/dev/null | sed 's/^ *[0-9a-f]*:\t//' |
+            grep -vE '^$|file format|Disassembly|<' > "$out/$2"
+    done
+    diff "$out/ours.dis" "$out/ref.dis" | head -12
+    exit 1; }
+echo "all $n AVR instructions encode as llvm-mc does, across both halves
+of every split field and all three pointer registers"
