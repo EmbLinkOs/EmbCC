@@ -14,6 +14,7 @@
 #include "../platform/platform.h"
 #include "../cpp/cpp.h"
 #include "../arch/riscv/asm.h"
+#include "../arch/avr/asm.h"
 #include "../arch/thumb/asm.h"
 #include "../arch/aarch64/asm.h"
 
@@ -52,6 +53,9 @@ struct gas {
     struct fixup *fix;
     int nfix, capfix;
     const struct gas_target *tgt;
+    /* How many times each numeric local label has been DEFINED so far in
+     * this pass. Reset between passes so both agree. */
+    int local_n[10];
     int cur;                /* current section */
     int npcrel;             /* .Lpcrel_hiN counter */
     int line;               /* for diagnostics */
@@ -118,7 +122,7 @@ static int is_symc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$
 
 /* Strips comments and trailing space, in place. `#` and `//` start one;
  * a `#` inside a string does not. */
-static void strip_comment(char *s)
+static void strip_comment(char *s, char extra)
 {
     int q = 0;
     for (char *p = s; *p; p++) {
@@ -128,7 +132,8 @@ static void strip_comment(char *s)
             continue;
         }
         if (*p == '"' || *p == '\'') { q = *p; continue; }
-        if (*p == '#' || (*p == '/' && p[1] == '/')) { *p = '\0'; break; }
+        if (*p == '#' || (*p == '/' && p[1] == '/') ||
+            (extra && *p == extra)) { *p = '\0'; break; }
     }
     size_t n = strlen(s);
     while (n && isspace((unsigned char)s[n - 1])) s[--n] = '\0';
@@ -271,9 +276,14 @@ static int directive(struct gas *g, char *p, int pass)
         return 1;      /* accepted and carried no further */
     if (DIR(".byte") || DIR(".short") || DIR(".half") || DIR(".word") ||
         DIR(".long") || DIR(".quad") || DIR(".dword")) {
+        /* `.word` is the MACHINE's word, which is two bytes on AVR and four
+         * everywhere else here -- GNU as does the same, and a `.word` read
+         * as four bytes silently doubles every table in an AVR source. */
+        int wordw = g->tgt->word_bytes ? g->tgt->word_bytes : 4;
         int width = DIR(".byte") ? 1
                   : (DIR(".short") || DIR(".half")) ? 2
-                  : (DIR(".quad") || DIR(".dword")) ? 8 : 4;
+                  : (DIR(".quad") || DIR(".dword")) ? 8
+                  : DIR(".word") ? wordw : 4;
         for (;;) {
             char *e;
             long v;
@@ -286,9 +296,14 @@ static int directive(struct gas *g, char *p, int pass)
                 emit_int(g, v, width);
             } else if (is_sym0((unsigned char)*arg)) {
                 /* A symbol's ADDRESS in a data word: a relocation. */
-                int rt = width == 8 ? g->tgt->r_abs64 : g->tgt->r_abs32;
-                if (width != 4 && width != 8) {
-                    gerr(g, "a symbol address needs a 4- or 8-byte slot");
+                int rt = width == 8 ? g->tgt->r_abs64
+                       : width == 2 ? g->tgt->r_abs16 : g->tgt->r_abs32;
+                if (width != 2 && width != 4 && width != 8) {
+                    gerr(g, "a symbol address needs a 2-, 4- or 8-byte slot");
+                } else if (width == 2 && !g->tgt->r_abs16) {
+                    gerr(g, "this target's pointer does not fit in two bytes, "
+                            "so a symbol address cannot go in a %d-byte slot",
+                         width);
                 } else if (!rt) {
                     gerr(g, "this target has no absolute relocation for a "
                             "%d-byte symbol address", width);
@@ -354,6 +369,52 @@ static int directive(struct gas *g, char *p, int pass)
  * names a LOCAL label with `.+N` (the displacement the statement
  * assemblers take). Returns a malloc'd string, and sets *ext to the
  * name when the identifier is an external symbol instead. */
+/* ---- numeric local labels --------------------------------------------
+ *
+ * `1:` defines one, `1f` refers to the NEXT definition of 1 and `1b` to the
+ * previous. GNU as has had them forever and every hand-written assembly
+ * file uses them -- a loop wants a label, not a name -- so an assembler
+ * without them cannot read real sources. AVR's startup was the first file
+ * here to need them.
+ *
+ * Each definition becomes an ordinary symbol named `.L<digit>\x01<instance>`,
+ * so the rest of this file needs to know nothing about them: they are
+ * defined, substituted and relocated like any other label. The \x01 cannot
+ * occur in a source identifier, which is what keeps a hand-written
+ * `.L1.0` from colliding with a generated one.
+ *
+ * Counting happens in PASS ONE only and is replayed in pass two, so `1f`
+ * resolves to the same instance in both. Without that the two passes
+ * disagree about which `1:` a forward reference means, and the difference
+ * shows up as a jump to the wrong loop.
+ */
+#define NLOCAL 10
+
+static void local_name(char *buf, size_t n, int digit, int inst)
+{
+    snprintf(buf, n, ".L%d\x01%d", digit, inst);
+}
+
+/* Is `s` a numeric local reference -- one or more digits then 'f' or 'b'?
+ * Returns the digit value, or -1. */
+static int local_ref(const char *s, size_t n, int *fwd)
+{
+    size_t i = 0;
+    int v = 0;
+    if (n < 2)
+        return -1;
+    while (i < n - 1 && isdigit((unsigned char)s[i])) {
+        v = v * 10 + (s[i] - '0');
+        i++;
+    }
+    if (i == 0 || i != n - 1)
+        return -1;
+    if (s[i] == 'f') *fwd = 1;
+    else if (s[i] == 'b') *fwd = 0;
+    else return -1;
+    return v < NLOCAL ? v : -1;
+}
+
 static char *substitute(struct gas *g, const char *stmt, long pc,
                         int pass, char **ext, int *placeheld)
 {
@@ -368,13 +429,30 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
          * "x80800000" was not a register or a known label, and the
          * constant came out as `0.+0`. */
         int mid = p > stmt && (is_symc((unsigned char)p[-1]));
-        if (!is_sym0((unsigned char)*p) || mid) {
+        /* A numeric local reference starts with a DIGIT, so the identifier
+         * scanner below would never see it: `2f` was read as the number 2
+         * followed by a stray `f`. Recognised here, and only when the digits
+         * are followed by exactly one 'f' or 'b' and then a non-identifier
+         * character -- so `0x1f` and a plain `63` are untouched. */
+        int lref = 0;
+        if (!mid && isdigit((unsigned char)*p)) {
+            const char *d = p;
+            while (isdigit((unsigned char)*d)) d++;
+            if ((*d == 'f' || *d == 'b') && !is_symc((unsigned char)d[1]))
+                lref = 1;
+        }
+        if ((!is_sym0((unsigned char)*p) || mid) && !lref) {
             if (len + 2 >= cap) { cap *= 2; out = xrealloc(out, cap); }
             out[len++] = *p++;
             continue;
         }
         const char *s = p;
-        while (*p && is_symc((unsigned char)*p)) p++;
+        if (lref) {
+            while (isdigit((unsigned char)*p)) p++;
+            p++;                              /* the 'f' or 'b' */
+        } else {
+            while (*p && is_symc((unsigned char)*p)) p++;
+        }
         size_t n = (size_t)(p - s);
         /* The mnemonic itself is never a label, and a register name is
          * never one either -- the target answers that, so this file
@@ -382,6 +460,46 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
          * an identifier IS a symbol reference. */
         int first = s == skip_ws((char *)stmt);
         int reg = g->tgt->is_reg && g->tgt->is_reg(s, (int)n) >= 0;
+        /* `1f` / `1b`: the next or previous definition of numeric local 1.
+         * Rewritten to the generated name and then treated as any other
+         * label, so nothing downstream needs to know about them. `1f` is the
+         * instance that has NOT been defined yet -- local_n[d] is the count
+         * so far -- which is exactly what makes it forward. */
+        if (!first && !reg) {
+            int fwd, d = local_ref(s, n, &fwd);
+            if (d >= 0) {
+                char nm[32];
+                int inst = fwd ? g->local_n[d] : g->local_n[d] - 1;
+                if (inst < 0) {
+                    gerr(g, "'%.*s' refers backwards and there is no earlier "
+                            "'%d:'", (int)n, s, d);
+                    inst = 0;
+                }
+                local_name(nm, sizeof nm, d, inst);
+                struct sym *ly = sym_find(g, nm, strlen(nm));
+                if (ly && ly->sec >= 0) {
+                    char rep[32];
+                    long disp = ly->value - pc;
+                    int k = snprintf(rep, sizeof rep, ".%+ld", disp);
+                    if (len + (size_t)k + 2 >= cap) {
+                        cap = cap * 2 + (size_t)k; out = xrealloc(out, cap);
+                    }
+                    memcpy(out + len, rep, (size_t)k);
+                    len += (size_t)k;
+                    continue;
+                }
+                /* A forward one, not placed yet: pass one needs only the
+                 * width, and these instructions are fixed-width. */
+                if (len + 4 >= cap) { cap = cap * 2 + 8; out = xrealloc(out, cap); }
+                memcpy(out + len, ".+0", 3);
+                len += 3;
+                *placeheld = 1;
+                if (pass == 2)
+                    gerr(g, "'%.*s' refers forward and there is no later "
+                            "'%d:'", (int)n, s, d);
+                continue;
+            }
+        }
         if (!first && !reg) {
             struct sym *sy = sym_find(g, s, n);
             if (sy && sy->sec >= 0) {          /* a label in this file */
@@ -429,6 +547,32 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
                        const char *ext)
 {
     const char *p = skip_ws((char *)stmt);
+    /* A target that owns its symbol forms answers first. AVR has eight of
+     * them and they are not shaped like RISC-V's pair or ARM's single `bl`
+     * -- an address loaded a byte at a time needs one relocation per byte
+     * -- so the target rewrites the statement and says where each site
+     * goes, rather than this file growing a branch per machine. */
+    if (g->tgt->symform) {
+        struct asm_symform f;
+        int lfwd;
+        if (g->tgt->symform(stmt, &f) &&
+            local_ref(stmt + f.sym_at, (size_t)f.sym_len, &lfwd) < 0) {
+            struct code tmp = { 0, 0, 0 };
+            char err[256];
+            if (g->tgt->encode(f.encode, &tmp, err, sizeof err) != 0) {
+                gerr(g, "%s", err);
+                free(tmp.p);
+                return 1;
+            }
+            if (pass == 2)
+                for (int k = 0; k < f.nsites; k++)
+                    fix_add(g, g->cur, pc + f.site[k].off, ext,
+                            f.site[k].reloc, 0);
+            emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
+            free(tmp.p);
+            return 1;
+        }
+    }
     int is_call = strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
     int is_la = strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
     /* ARM writes a call to a symbol as `bl sym`, one instruction
@@ -535,6 +679,26 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
         }
         return NULL;
     }
+    /* A target-owned symbol form, asked BEFORE the RISC-V pseudos: on AVR
+     * `call sym` is one of these too, and its symbol may be a label defined
+     * in this file -- which still needs a relocation, because `call` carries
+     * an absolute word address and a relocatable object does not know where
+     * its own section lands. */
+    if (g->tgt->symform) {
+        struct asm_symform f;
+        if (g->tgt->symform(stmt, &f)) {
+            /* ...unless the operand is a NUMERIC LOCAL reference. `1b` and
+             * `2f` are identifiers as far as a target's parser can tell, so
+             * `rjmp 1b` was claimed here and relocated against a symbol
+             * named "1b" -- which produced a forward jump of zero where the
+             * source meant the top of the loop. Numeric locals belong to
+             * this file, which owns their numbering, so they are resolved by
+             * substitute() and never offered to a target. */
+            int fwd;
+            if (local_ref(stmt + f.sym_at, (size_t)f.sym_len, &fwd) < 0)
+                return sym_get(g, stmt + f.sym_at, (size_t)f.sym_len)->name;
+        }
+    }
     if (!((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
           (strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]))))
         return NULL;
@@ -597,6 +761,12 @@ static void instruction(struct gas *g, char *stmt, int pass)
 
 static void pass_over(struct gas *g, char *src, int pass)
 {
+    /* The numeric-local counters are replayed, not carried: `1f` must
+     * resolve to the same instance in both passes, and it is chosen from
+     * how many `1:` have been SEEN so far. Leaving them set from pass one
+     * makes every forward reference in pass two pick the instance after the
+     * last one in the file, which is a jump to nowhere. */
+    memset(g->local_n, 0, sizeof g->local_n);
     char *p = src;
     g->cur = SEC_TEXT;
     g->line = 0;
@@ -610,21 +780,48 @@ static void pass_over(struct gas *g, char *src, int pass)
         memcpy(line, p, n);
         line[n] = '\0';
         g->line++;
-        strip_comment(line);
+        strip_comment(line, g->tgt->comment_char);
 
         char *q = skip_ws(line);
         /* Any number of `label:` may precede a statement on one line. */
         for (;;) {
             char *e = q;
-            if (!is_sym0((unsigned char)*e)) break;
+            /* A numeric local label begins with a DIGIT, which is not a
+             * normal identifier start -- so both are allowed here and the
+             * body below decides which it was. */
+            if (!is_sym0((unsigned char)*e) && !isdigit((unsigned char)*e))
+                break;
             while (*e && is_symc((unsigned char)*e)) e++;
             char *c = skip_ws(e);
             if (*c != ':') break;
-            struct sym *s = sym_get(g, q, (size_t)(e - q));
-            if (pass == 1 && s->sec >= 0)
-                gerr(g, "label '%s' is defined twice", s->name);
-            s->sec = g->cur;
-            s->value = cur_off(g);
+            {
+                struct sym *s;
+                size_t ln = (size_t)(e - q);
+                int alldig = ln > 0, k;
+                for (k = 0; k < (int)ln; k++)
+                    if (!isdigit((unsigned char)q[k])) { alldig = 0; break; }
+                if (alldig) {
+                    /* `1:` -- the nth definition of local 1. */
+                    char nm[32];
+                    int d = atoi(q);
+                    if (d >= NLOCAL) {
+                        gerr(g, "a numeric local label must be 0..%d",
+                             NLOCAL - 1);
+                        break;
+                    }
+                    local_name(nm, sizeof nm, d, g->local_n[d]++);
+                    s = sym_get(g, nm, strlen(nm));
+                    s->sec = g->cur;
+                    s->value = cur_off(g);
+                    q = skip_ws(c + 1);
+                    continue;
+                }
+                s = sym_get(g, q, ln);
+                if (pass == 1 && s->sec >= 0)
+                    gerr(g, "label '%s' is defined twice", s->name);
+                s->sec = g->cur;
+                s->value = cur_off(g);
+            }
             q = skip_ws(c + 1);
         }
         if (*q == '.' && is_sym0((unsigned char)q[1]))
@@ -718,7 +915,10 @@ static int write_object(struct gas *g, const char *out_path)
 static const struct gas_target RISCV_GAS = {
     EM_RISCV, 0, rvasm_assemble, rvasm_gpr,
     R_RISCV_CALL, R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I,
-    R_RISCV_32, R_RISCV_64
+    R_RISCV_32, R_RISCV_64,
+    /* no 16-bit pointer, `.word` is four bytes, and no symbol
+     * forms beyond the ones above. */
+    0, 0, NULL, 0
 };
 
 /* ARMv7-M. `call` and `la` are RISC-V pseudos and have no ARM
@@ -728,7 +928,10 @@ static const struct gas_target RISCV_GAS = {
 static const struct gas_target THUMB_GAS = {
     EM_ARM, 1, tasm_assemble, tasm_gpr,
     R_ARM_THM_CALL, 0, 0,
-    R_ARM_ABS32, 0
+    R_ARM_ABS32, 0,
+    /* no 16-bit pointer, `.word` is four bytes, and no symbol
+     * forms beyond the ones above. */
+    0, 0, NULL, 0
 };
 
 /* aarch64. `bl sym` carries R_AARCH64_CALL26, one instruction and one
@@ -737,12 +940,29 @@ static const struct gas_target THUMB_GAS = {
 static const struct gas_target A64_GAS = {
     EM_AARCH64, 0, a64asm_assemble, a64asm_gpr,
     R_AARCH64_CALL26, 0, 0,
-    R_AARCH64_ABS32, R_AARCH64_ABS64
+    R_AARCH64_ABS32, R_AARCH64_ABS64,
+    /* no 16-bit pointer, `.word` is four bytes, and no symbol
+     * forms beyond the ones above. */
+    0, 0, NULL, 0
+};
+
+/* AVR. Its symbol-bearing forms are its own -- eight of them, because a
+ * sixteen-bit address is loaded a byte at a time and program space is
+ * addressed in words -- so they go through `symform` rather than through
+ * the r_call/r_pcrel pair, which stay zero. `.word` is TWO bytes here, and
+ * a symbol's address fits in one. */
+static const struct gas_target AVR_GAS = {
+    EM_AVR, 1, avrasm_assemble, avrasm_gpr,
+    0, 0, 0,
+    R_AVR_32, 0,
+    R_AVR_16, 2, avrasm_symform,
+    ';'          /* AVR's line comment, as GNU as sets it for this port */
 };
 
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+    case TARGET_AVR: return &AVR_GAS;
     case TARGET_RISCV32: case TARGET_RISCV64: return &RISCV_GAS;
     case TARGET_THUMB: return &THUMB_GAS;
     case TARGET_AARCH64: return &A64_GAS;

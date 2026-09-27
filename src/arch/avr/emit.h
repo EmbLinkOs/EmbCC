@@ -43,7 +43,11 @@ enum { AVR_X = 26, AVR_Y = 28, AVR_Z = 30 };
 enum avr_rr {
     AVR_ADD = 0x0C00, AVR_ADC = 0x1C00, AVR_SUB = 0x1800, AVR_SBC = 0x0800,
     AVR_AND = 0x2000, AVR_OR  = 0x2800, AVR_EOR = 0x2400, AVR_MOV = 0x2C00,
-    AVR_CP  = 0x1400, AVR_CPC = 0x0400, AVR_MUL = 0x9C00
+    AVR_CP  = 0x1400, AVR_CPC = 0x0400, AVR_MUL = 0x9C00,
+    /* Skip-if-equal. The code generator has no use for it -- a compare and
+     * a branch say the same thing more legibly -- but real AVR sources use
+     * it and an assembler that lacks it is not an assembler. */
+    AVR_CPSE = 0x1000
 };
 void avr_rr(struct code *c, enum avr_rr op, int d, int r);
 

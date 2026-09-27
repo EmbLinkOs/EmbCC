@@ -386,6 +386,7 @@ struct r1_name { enum avr_r1 op; const char *name; };
 
 static const struct rr_name g_rr[] = {
     { AVR_ADD, "add" }, { AVR_ADC, "adc" }, { AVR_SUB, "sub" },
+    { AVR_CPSE, "cpse" },
     { AVR_SBC, "sbc" }, { AVR_AND, "and" }, { AVR_OR,  "or"  },
     { AVR_EOR, "eor" }, { AVR_MOV, "mov" }, { AVR_CP,  "cp"  },
     { AVR_CPC, "cpc" }, { AVR_MUL, "mul" }

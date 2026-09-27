@@ -9,6 +9,30 @@ struct code {
     int len, cap;
 };
 
+/* ---- a statement that names a symbol ---------------------------------
+ *
+ * The contract between an assembler front end (src/as/gas.c) and a
+ * target's own assembler: the target recognises a statement whose operand
+ * is a SYMBOL, rewrites it into one it can encode with a zero in that
+ * place, and says where each relocation goes.
+ *
+ * It lives here, in the header both sides already include, because
+ * defining it in each gave two structurally identical types and one
+ * incompatible function pointer. A target with no such forms leaves the
+ * hook NULL.
+ */
+struct asm_symsite {
+    int off;                     /* bytes from the start of this statement */
+    int reloc;                   /* the target's relocation type */
+};
+
+struct asm_symform {
+    int sym_at, sym_len;         /* the symbol's extent within the statement */
+    char encode[128];            /* the statement with a zero operand */
+    struct asm_symsite site[2];
+    int nsites;
+};
+
 void code_byte(struct code *c, int b);
 void code_u16(struct code *c, unsigned v);               /* little-endian */
 void code_u32(struct code *c, unsigned long v);          /* little-endian */

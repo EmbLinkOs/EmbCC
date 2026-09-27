@@ -28,7 +28,6 @@ echo "TEST-MARKER avr-exec"
 out=tests/golden/out/avr-exec
 rm -rf "$out"; mkdir -p "$out"
 
-command -v llvm-mc >/dev/null 2>&1 || { echo "SKIP: no llvm-mc"; exit 0; }
 QEMU=${EMBCC_QEMU_AVR:-qemu-system-avr}
 command -v "$QEMU" >/dev/null 2>&1 || { echo "SKIP: no $QEMU"; exit 0; }
 cat > "$out/prog.c" <<'EOF'
@@ -277,9 +276,12 @@ cc -std=c99 -w -o "$out/host" "$out/prog.c" "$out/hostio.c" || {
 
 # ---- the AVR answer ----------------------------------------------------
 H=$out/h; mkdir -p "$H"
-llvm-mc -triple=avr -mcpu=atmega328p -filetype=obj \
-    tests/harness/avr/boot.S -o "$H/boot.o" 2> "$out/mc.err" || {
-    echo "the AVR startup did not assemble:"; head -4 "$out/mc.err"; exit 1; }
+# EmbCC's OWN assembler, not llvm-mc: src/arch/avr/asm.c reads the startup
+# and src/as/gas.c turns it into an object. That closes the last place this
+# target needed another toolchain to produce a running image.
+./embcc --target=avr -c tests/harness/avr/boot.S -o "$H/boot.o" \
+    2> "$out/mc.err" || {
+    echo "the AVR startup did not assemble:"; head -6 "$out/mc.err"; exit 1; }
 
 for O in -O0 -O1 -O2 -Os; do
     ./embcc --target=avr $O -c tests/harness/avr/io.c -o "$H/io.o" \

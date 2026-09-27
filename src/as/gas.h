@@ -48,6 +48,33 @@ struct gas_target {
     int r_call;                     /* `call sym`  -- a two-instruction pair */
     int r_pcrel_hi, r_pcrel_lo;     /* `la rd, sym` -- likewise */
     int r_abs32, r_abs64;           /* `.word sym` / `.quad sym` */
+    int r_abs16;                    /* AVR: a pointer is TWO bytes, so a
+                                     * symbol's address fits in a `.word`
+                                     * there and nowhere else. 0 elsewhere. */
+    /* How wide `.word` is. GNU as makes it the machine's word: TWO bytes on
+     * AVR and four everywhere else here. 0 means four. Getting it wrong
+     * silently doubles every table in an AVR source. */
+    int word_bytes;
+    /* Statements whose operand is a SYMBOL rather than a number, for a
+     * target whose forms are not RISC-V's `call`/`la` or ARM's `bl`.
+     *
+     * AVR needs eight of them where RISC-V needs two, and that is a
+     * property of the machine rather than of its assembler: a sixteen-bit
+     * address is loaded a BYTE AT A TIME, so `ldi rd, lo8(sym)` and
+     * `ldi rd, hi8(sym)` are separate instructions carrying separate
+     * relocations, and program space is addressed in WORDS, so a
+     * function's address needs the gs() forms whose relocation halves it.
+     *
+     * The target rewrites the statement into one it can encode with a zero
+     * operand and reports where each relocation goes. NULL when the target
+     * has only the generic forms above. */
+    int (*symform)(const char *stmt, struct asm_symform *f);
+    /* An extra line-comment character, beyond `#` and `//`. GNU as sets
+     * this per port and AVR's is `;` -- so an AVR source's comments reach
+     * the parser as statements without it, and the first apostrophe in one
+     * ("the harness's startup") opens a quote that swallows the rest of the
+     * line. 0 when the target has none. */
+    char comment_char;
 };
 
 /* Assembles `in_path` into an ET_REL object at `out_path`, for the
