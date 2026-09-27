@@ -86,5 +86,42 @@ cmp -s "$out/v.bin" "$out/v.ref" || {
     done
     diff "$out/ours.dis" "$out/ref.dis" | head -12
     exit 1; }
+
+# The PC-relative forms, refereed in the OTHER direction. llvm-mc leaves a
+# R_AVR_7_PCREL relocation on a branch even to a label in its own section,
+# so its bytes are a placeholder and comparing them grades nothing. Our
+# bytes are disassembled instead and the text compared against what each
+# form was MEANT to be.
+#
+# This mode exists because its absence cost a miscompile. enum avr_cond
+# numbered its flags in mnemonic order rather than by SREG bit, so `breq`
+# tested carry and `brlt` tested overflow. Both encoded cleanly, both were
+# self-consistent, and `while (*s)` walked past its NUL and printed 1700
+# bytes of RAM. A referee that only ever compared this encoder against
+# itself could not have seen it.
+"$out/avrcheck" --branches > "$out/b.want" || {
+    echo "avrcheck could not list the branch forms"; exit 1; }
+"$out/avrcheck" branch-bytes > "$out/b.bin" || {
+    echo "avrcheck could not encode the branch forms"; exit 1; }
+# llvm-mc's own disassembler, fed hex: llvm-objdump cannot read a raw
+# binary and these bytes are not in an object. It prints a leading tab,
+# which is stripped; the rest of the line is its own spelling and is
+# compared as it stands.
+od -An -tx1 "$out/b.bin" | tr -s ' ' '\n' | grep -v '^$' | sed 's/^/0x/' |
+    tr '\n' ' ' > "$out/b.hex"
+llvm-mc -triple=avr -mcpu=atmega328p -disassemble < "$out/b.hex" \
+    2> "$out/b.err" | sed 's/^\t//' | grep -v '^$' > "$out/b.cut" || {
+    echo "llvm-mc could not disassemble the branch bytes:"
+    head -4 "$out/b.err"; exit 1; }
+cmp -s "$out/b.want" "$out/b.cut" || {
+    echo "a PC-relative form disassembles as something other than what it
+        was meant to be -- a condition that encodes cleanly and means the
+        wrong thing is exactly this check's job:"
+    diff "$out/b.want" "$out/b.cut" | head -12
+    exit 1; }
+bn=$(wc -l < "$out/b.want" | tr -d ' ')
+
 echo "all $n AVR instructions encode as llvm-mc does, across both halves
-of every split field and all three pointer registers"
+of every split field and all three pointer registers
+and all $bn PC-relative forms disassemble as the condition they name,
+which is the half a self-comparison cannot grade"

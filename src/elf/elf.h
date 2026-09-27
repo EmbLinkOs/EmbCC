@@ -341,6 +341,21 @@ typedef struct {
 /* AVR, from the ELF machine registry. */
 #define EM_AVR 83
 
+/* AVR relocation types. Read off llvm-mc's own output rather than a
+ * table: `llvm-readobj -r` on an object assembled from call/ldi/.word
+ * names each one, which is the same referee the encoder uses. */
+#define R_AVR_NONE          0
+#define R_AVR_32            1
+#define R_AVR_7_PCREL       2
+#define R_AVR_13_PCREL      3
+#define R_AVR_16            4
+#define R_AVR_16_PM         5
+#define R_AVR_LO8_LDI       6
+#define R_AVR_HI8_LDI       7
+#define R_AVR_CALL          18
+#define R_AVR_LO8_LDI_GS    24
+#define R_AVR_HI8_LDI_GS    25
+
 #define SHT_PROGBITS  1
 /* ARM's build-attributes section. A processor-specific type, so it is
  * SHT_LOPROC+3 rather than a number in the generic range. */

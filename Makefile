@@ -117,6 +117,7 @@ SRCS := \
 	src/arch/riscv64/predef.c \
 	src/arch/riscv64/predef_cxx.c \
 	src/arch/avr/emit.c \
+	src/arch/avr/codegen.c \
 	src/arch/avr/predef.c \
 	src/arch/avr/predef_cxx.c
 
@@ -179,7 +180,7 @@ embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
 # writer the embdbg tool uses — one implementation, not two.
 embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
-       src/arch/riscv/emit.c src/arch/code.c \
+       src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/code.c \
        src/link/link.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
        src/platform/platform_posix.c src/platform/platform.h
@@ -187,7 +188,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c src/platform/platform_posix.c \
-	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/code.c
+	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/code.c
 
 # embls — the language server (docs/tools/diagnostics.md T5). It links EmbCC's own
 # preprocessor and parser, so what an editor is told about a file comes from

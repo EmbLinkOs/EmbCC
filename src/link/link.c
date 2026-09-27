@@ -22,6 +22,7 @@
 #include "../elf/elf.h"
 #include "../embx/embx.h"
 #include "../arch/riscv/emit.h"
+#include "../arch/avr/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -193,6 +194,12 @@ struct linker {
     Elf64_Addr data_lma;       /* ... and where its bytes are STORED */
     int elf32;                 /* ELFCLASS32 output, from the inputs */
     int machine;               /* e_machine, one across every input */
+    /* A Harvard machine: program space and data space are separate, and
+     * no instruction reads read-only data where it was stored. .rodata
+     * therefore belongs in the WRITABLE segment -- a RAM address with a
+     * flash load address -- so the startup can copy it across. AVR is
+     * the only such target here. */
+    int harvard;
     struct orphan orphans[MAX_ORPHANS];
     int norphan;
 };
@@ -389,9 +396,10 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         Elf32_Ehdr *e32 = (Elf32_Ehdr *)buf;
         if (e32->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
-        if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV)
-            die("%s: a 32-bit object for machine %u; only ARM (EM_ARM) "
-                "and RV32 (EM_RISCV) are supported", name,
+        if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV &&
+            e32->e_machine != EM_AVR)
+            die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
+                "RV32 (EM_RISCV) and AVR (EM_AVR) are supported", name,
                 (unsigned)e32->e_machine);
         o->machine = e32->e_machine;
         o->nsh = e32->e_shnum;
@@ -638,10 +646,23 @@ static void collect_sections(struct linker *l, struct object *o)
          * construction — the constructor arrays are read-only data that
          * the ABI keeps in the writable segment (they hold relocated
          * pointers), never executable. */
-        s->seg = (s->osec == OSEC_VECTORS ||
-                  s->osec == OSEC_TEXT || s->osec == OSEC_RODATA ||
-                  (s->osec >= OSEC_COUNT &&
-                   !l->orphans[s->osec - OSEC_COUNT].writable))
+        /* .rodata rides in the TEXT segment on every von Neumann target,
+         * because the processor can read it where it lies.
+         *
+         * AVR cannot. Program space and data space are separate address
+         * spaces there, and `ld`/`lds` reach only the data one -- a string
+         * literal left in flash is not slow to read, it is UNREADABLE by
+         * any instruction the compiler emits for `*s`. So on a Harvard
+         * target read-only data joins the writable segment, gets a RAM
+         * address and a flash load address like .data, and the startup
+         * copies it across with `lpm`. That is what avr-gcc's linker
+         * script does and why `const char *s = "hi"` costs RAM there. */
+        int harvard_ro = o->machine == EM_AVR && s->osec == OSEC_RODATA;
+        s->seg = (!harvard_ro &&
+                  (s->osec == OSEC_VECTORS ||
+                   s->osec == OSEC_TEXT || s->osec == OSEC_RODATA ||
+                   (s->osec >= OSEC_COUNT &&
+                    !l->orphans[s->osec - OSEC_COUNT].writable)))
                      ? SEG_TEXT : SEG_DATA;
         o->sec_out[i] = l->nsec;
         l->nsec++;
@@ -720,6 +741,7 @@ static void add_object(struct linker *l, struct object *o)
      * both would be neither. */
     if (l->nobj == 0) {
         l->machine = o->machine;
+        l->harvard = o->machine == EM_AVR;
         l->elf32 = o->elf32;
     } else if (o->machine != l->machine) {
         die("%s: an object for a different machine than the ones before "
@@ -995,7 +1017,14 @@ static void layout(struct linker *l, struct osec_bound *b,
     *text_start = va;
     place_osec(l, OSEC_VECTORS, &va, b);
     place_osec(l, OSEC_TEXT, &va, b);
-    place_osec(l, OSEC_RODATA, &va, b);
+    /* On a Harvard target .rodata is placed with the writable segment
+     * below, not here: see `harvard` in struct linker. Placing it in both
+     * would double-count the location counter; placing it in neither
+     * would leave it unaddressed and silently dropped, which is exactly
+     * what happened when only the per-section `seg` was changed and this
+     * order was not. */
+    if (!l->harvard)
+        place_osec(l, OSEC_RODATA, &va, b);
     for (int i = 0; i < l->norphan; i++)
         if (!l->orphans[i].writable)
             place_osec(l, OSEC_COUNT + i, &va, b);
@@ -1045,6 +1074,11 @@ static void layout(struct linker *l, struct osec_bound *b,
      * bytes end, because .tbss contributed none. */
     va = *tls_start + *tls_filesz;
 
+    /* First in the writable segment on a Harvard target, so that the
+     * string literals a program reads sit at the bottom of its RAM image
+     * and the .data that follows keeps the order every other target has. */
+    if (l->harvard)
+        place_osec(l, OSEC_RODATA, &va, b);
     place_osec(l, OSEC_INIT_ARRAY, &va, b);
     place_osec(l, OSEC_FINI_ARRAY, &va, b);
     place_osec(l, OSEC_CTORS, &va, b);
@@ -1519,6 +1553,92 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     }
 }
 
+/* ---- AVR --------------------------------------------------------------
+ *
+ * Two things make this machine's relocations unlike the others'.
+ *
+ * An address arrives a BYTE at a time, because the registers are eight
+ * bits wide: LO8_LDI and HI8_LDI patch two separate `ldi` instructions
+ * with two halves of one sixteen-bit value. They are independent sites,
+ * so unlike RISC-V's auipc/addi pair there is no rounding to agree on and
+ * no need to remember the first when applying the second.
+ *
+ * And program space is a SEPARATE address space addressed in WORDS. The
+ * _GS and _PM forms halve the address; the plain forms do not. Using the
+ * wrong one does not fault -- it produces a pointer to twice as far into
+ * flash, which lands on a real instruction -- so the halving is the whole
+ * difference between a working indirect call and a program that runs the
+ * wrong function.
+ *
+ * Every split field is patched by a function in src/arch/avr/emit.c, the
+ * same one the encoder writes through. None of those layouts is written
+ * down here.
+ */
+static void apply_avr(struct linker *l, struct object *o, unsigned type,
+                      unsigned char *loc, Elf64_Addr S, long long A,
+                      Elf64_Addr P)
+{
+    long long V = (long long)S + A;
+    (void)l;
+    switch (type) {
+    case R_AVR_NONE:
+        return;
+    case R_AVR_32:
+        put32(loc, (unsigned int)V);
+        return;
+    case R_AVR_16:
+        put16(loc, (unsigned int)V & 0xffffu);
+        return;
+    case R_AVR_16_PM:
+        /* A function pointer in data: the WORD address. */
+        put16(loc, (unsigned int)(V >> 1) & 0xffffu);
+        return;
+    case R_AVR_LO8_LDI:
+        avr_patch_ldi_at(loc, (int)(V & 0xff));
+        return;
+    case R_AVR_HI8_LDI:
+        avr_patch_ldi_at(loc, (int)((V >> 8) & 0xff));
+        return;
+    case R_AVR_LO8_LDI_GS:
+        avr_patch_ldi_at(loc, (int)((V >> 1) & 0xff));
+        return;
+    case R_AVR_HI8_LDI_GS:
+        avr_patch_ldi_at(loc, (int)((V >> 9) & 0xff));
+        return;
+    case R_AVR_CALL:
+        if (V & 1)
+            die("%s: a call to an odd address 0x%llx; AVR instructions are "
+                "halfword-aligned and the address is halved to a word "
+                "number, so an odd one cannot be encoded", o->name,
+                (unsigned long long)V);
+        avr_patch_call_at(loc, (long)V);
+        return;
+    case R_AVR_13_PCREL: {
+        /* rjmp/rcall: words, from the instruction AFTER. */
+        long long d = (V - (long long)P - 2) / 2;
+        if (d < -2048 || d > 2047)
+            die("%s: an rjmp reaches +-4KB and this target is %lld bytes "
+                "away; this linker mints no trampolines, so the call has "
+                "to be a `call` rather than an `rcall`", o->name,
+                (long long)(V - (long long)P));
+        avr_patch_rjmp_at(loc, (int)d);
+        return;
+    }
+    case R_AVR_7_PCREL: {
+        long long d = (V - (long long)P - 2) / 2;
+        if (d < -64 || d > 63)
+            die("%s: a conditional branch reaches +-126 bytes and this "
+                "target is %lld away; it has to be an inverted branch "
+                "over an rjmp", o->name, (long long)(V - (long long)P));
+        avr_patch_br_at(loc, (int)d);
+        return;
+    }
+    default:
+        die("%s: unsupported AVR relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
+}
+
 static unsigned int get32loc(const unsigned char *p)
 {
     return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
@@ -1636,6 +1756,10 @@ static void apply_relocs(struct linker *l, struct object *o)
 
             if (o->machine == EM_RISCV) {
                 apply_riscv(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_AVR) {
+                apply_avr(l, o, type, loc, S, A, P);
                 continue;
             }
             if (o->elf32) {

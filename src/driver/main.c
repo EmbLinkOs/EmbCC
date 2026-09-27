@@ -845,24 +845,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* Which machine. Four backends behind this and five targets: RISC-V
      * is ONE code generator for both widths, because the instruction set
      * is the same at both and only the data model differs (D-016). */
-    /* AVR has no code generator yet, and the x86-64 one is the `else`
-     * below -- so without this the compiler emitted an ELF64 object
-     * claiming EM_AVR and full of x86-64 instructions. It linked. It
-     * disassembled as nonsense AVR. That is precisely the outcome every
-     * refusal in this compiler exists to prevent, and adding a target's
-     * data model before its backend is how it happened.
-     *
-     * The front end is complete for AVR: -E, -fsyntax-only and the data
-     * model all work, which is what makes the target useful before the
-     * backend lands. Only code generation is missing, and it says so. */
     if (ta == TARGET_AVR)
-        diag_fatal(NULL, 0,
-                   "EmbCC has no AVR code generator yet: the front end "
-                   "understands the target (its data model, its predefined "
-                   "macros, -E and -fsyntax-only) but nothing can emit "
-                   "instructions for it. Emitting an object anyway would "
-                   "put another machine's code in it");
-    if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64)
+        codegen_unit_avr(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                         &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                         opt_level >= 2);
+    else if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64)
         codegen_unit_riscv(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                            opt_level >= 2);
@@ -2087,12 +2074,22 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             }
             /* A pointer in .data is as wide as a pointer: eight bytes
              * on LP64 and four on ARMv7-M, where asking for ABS64 would
-             * get -1 back from a table that has no such relocation. */
+             * get -1 back from a table that has no such relocation.
+             *
+             * AVR is two bytes AND two address spaces. A pointer to data
+             * is R_AVR_16; a pointer to a FUNCTION is R_AVR_16_PM, whose
+             * value is the WORD address, because that is what `icall`
+             * reads out of Z. Using the data form for a vtable entry
+             * would produce a pointer to twice as far into flash -- and
+             * land on a real instruction, so nothing would fault. */
+            enum reloc_kind dk;
+            if (target_ptr_size() == 2)
+                dk = ft ? RK_AVR_ABS16_PM : RK_AVR_ABS16;
+            else
+                dk = target_ptr_size() == 8 ? RK_ABS64 : RK_ABS32;
             elfw_add_rela(w, g->named ? named[g->named - 1].ndx : data_ndx,
                           (Elf64_Addr)(g->off + g->relocs[i].off), sym,
-                          target_reloc_type(ta, target_ptr_size() == 8
-                                                ? RK_ABS64 : RK_ABS32),
-                          add);
+                          target_reloc_type(ta, dk), add);
         }
     }
 

@@ -316,6 +316,29 @@ enum reloc_kind {
      * is how an assembler's `.Lpcrel_hi0` label resolves too. */
     RK_RISCV_PCREL_HI20,
     RK_RISCV_PCREL_LO12_I,
+    /* AVR. Two things make this target's relocations unlike the others'.
+     *
+     * An address is materialised a BYTE at a time, because the registers
+     * are eight bits wide: `ldi rlo, lo8(sym)` and `ldi rhi, hi8(sym)`
+     * are two instructions and two relocations for one sixteen-bit
+     * address, and the linker writes a different byte of the same value
+     * into each.
+     *
+     * And program space is a SEPARATE address space, addressed in WORDS.
+     * A function pointer therefore holds half a byte address, which is
+     * why the _GS and _PM forms exist and why using the data forms for a
+     * function would produce a pointer that calls the wrong place --
+     * twice as far in, and still a valid instruction when it got there.
+     * (_GS is "generate stub": the linker may insert a trampoline when
+     * the target is beyond the word-address range, which is why it is the
+     * form to use for a function rather than a plain halving.) */
+    RK_AVR_CALL,        /* the 22-bit word address of a 32-bit call/jmp */
+    RK_AVR_LO8_LDI,     /* ldi: bits 7:0 of a DATA address */
+    RK_AVR_HI8_LDI,     /* ldi: bits 15:8 of a data address */
+    RK_AVR_LO8_LDI_GS,  /* ldi: bits 7:0 of a FUNCTION's word address */
+    RK_AVR_HI8_LDI_GS,  /* ldi: bits 15:8 of a function's word address */
+    RK_AVR_ABS16,       /* a 16-bit data pointer in .data */
+    RK_AVR_ABS16_PM,    /* a 16-bit FUNCTION pointer in .data (word) */
     /* A call is `auipc ra, 0` + `jalr ra`, and ONE relocation at the
      * auipc patches BOTH -- which is why there is no separate kind for
      * the jalr. That is the ABI's own shape, not a convenience here. */

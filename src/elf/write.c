@@ -86,7 +86,11 @@ struct elfw *elfw_new(int machine)
         fatal_unwind();
     }
     w->machine = machine;
-    w->elf32 = target_ptr_size() == 4;
+    /* <= 4, not == 4: AVR's pointer is TWO bytes and its objects are
+     * ELFCLASS32 like every other small machine's. Asking for equality
+     * gave it an ELF64 header, which readelf accepted and every AVR tool
+     * rejected. */
+    w->elf32 = target_ptr_size() <= 4;
     if (machine == EM_ARM)
         w->eflags = EF_ARM_EABI_VER5;
     /* RISC-V's e_flags stay 0, and that is a statement rather than an

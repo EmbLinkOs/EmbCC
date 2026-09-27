@@ -12,6 +12,14 @@
  * rather than an invalid one. Three of its groups also have restricted
  * operands (immediates reach only r16-r31, adiw only four pairs, ldd only
  * Y and Z), so a wrong register is silently a different register.
+ *
+ * The PC-relative forms are refereed the OTHER WAY ROUND, under
+ * `--branches` and `branch-bytes`: llvm-mc leaves a relocation on a
+ * branch even to a label in its own section, so its bytes carry a
+ * placeholder and comparing them would grade nothing. Instead our bytes
+ * are DISASSEMBLED and the text compared -- which is what catches a
+ * condition that encodes cleanly and means the wrong thing, the bug that
+ * made this mode exist.
  */
 #include <stdio.h>
 #include <string.h>
@@ -25,9 +33,16 @@ int main(int argc, char **argv)
         avr_vocabulary(stdout);
         return 0;
     }
+    if (argc > 1 && !strcmp(argv[1], "--branches")) {
+        avr_branch_vocabulary(stdout);
+        return 0;
+    }
     {
         struct code c = { 0, 0, 0 };
-        avr_encode_vocabulary(&c);
+        if (argc > 1 && !strcmp(argv[1], "branch-bytes"))
+            avr_encode_branches(&c);
+        else
+            avr_encode_vocabulary(&c);
         fwrite(c.p, 1, (size_t)c.len, stdout);
     }
     return 0;

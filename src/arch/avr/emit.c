@@ -264,12 +264,60 @@ int avr_br(struct code *c, enum avr_cond cond, int word_disp)
     return at;
 }
 
+/* ---- patching an already-emitted field --------------------------------
+ *
+ * The LINKER patches three of these fields too, and it works on raw bytes
+ * of a section image rather than on a struct code. So the split layouts
+ * live here, once, in functions that take a byte pointer -- and the
+ * struct code forms below are two lines each on top of them. Writing the
+ * layouts down a second time in src/link/link.c is exactly the
+ * duplication that put a wrong `adiw` in this file to begin with. */
+static unsigned rdhw(const unsigned char *p)
+{
+    return (unsigned)p[0] | ((unsigned)p[1] << 8);
+}
+
+static void wrhw(unsigned char *p, unsigned v)
+{
+    p[0] = (unsigned char)(v & 0xffu);
+    p[1] = (unsigned char)((v >> 8) & 0xffu);
+}
+
+void avr_patch_br_at(unsigned char *p, int word_disp)
+{
+    wrhw(p, (rdhw(p) & ~0x03F8u) | (((unsigned)word_disp & 0x7fu) << 3));
+}
+
+void avr_patch_rjmp_at(unsigned char *p, int word_disp)
+{
+    wrhw(p, (rdhw(p) & 0xF000u) | ((unsigned)word_disp & 0x0fffu));
+}
+
+/* ldi's eight-bit immediate is SPLIT: the high nibble at bits 11:8 and
+ * the low nibble at bits 3:0, with the register between them. Writing it
+ * as one contiguous field would encode a different constant AND a
+ * different register. */
+void avr_patch_ldi_at(unsigned char *p, int k)
+{
+    wrhw(p, (rdhw(p) & ~0x0F0Fu) | (((unsigned)k & 0xf0u) << 4) |
+            ((unsigned)k & 0x0fu));
+}
+
+/* The 22-bit word address of a 32-bit jmp/call: bits 21:17 at the first
+ * halfword's 8:4, bit 16 at its bit 0, and bits 15:0 in the second
+ * halfword. The operand is a BYTE address, halved here as everywhere
+ * else in this file. */
+void avr_patch_call_at(unsigned char *p, long byte_addr)
+{
+    unsigned long w = (unsigned long)byte_addr >> 1;
+    wrhw(p, (rdhw(p) & ~0x01F1u) | (unsigned)((w >> 17) & 0x1fu) << 4 |
+            (unsigned)((w >> 16) & 1u));
+    wrhw(p + 2, (unsigned)(w & 0xffffu));
+}
+
 void avr_patch_br(struct code *c, int at, int word_disp)
 {
-    unsigned v = (unsigned)c->p[at] | ((unsigned)c->p[at + 1] << 8);
-    v = (v & ~0x03F8u) | (((unsigned)word_disp & 0x7fu) << 3);
-    c->p[at]     = (unsigned char)(v & 0xff);
-    c->p[at + 1] = (unsigned char)((v >> 8) & 0xff);
+    avr_patch_br_at(c->p + at, word_disp);
 }
 
 int avr_rjmp(struct code *c, int word_disp)
@@ -288,10 +336,7 @@ int avr_rcall(struct code *c, int word_disp)
 
 void avr_patch_rjmp(struct code *c, int at, int word_disp)
 {
-    unsigned v = (unsigned)c->p[at] | ((unsigned)c->p[at + 1] << 8);
-    v = (v & 0xF000u) | ((unsigned)word_disp & 0x0fffu);
-    c->p[at]     = (unsigned char)(v & 0xff);
-    c->p[at + 1] = (unsigned char)((v >> 8) & 0xff);
+    avr_patch_rjmp_at(c->p + at, word_disp);
 }
 
 /* The 32-bit forms take a WORD address, and every caller has a byte
@@ -310,6 +355,12 @@ static void jmp_call(struct code *c, unsigned base, long byte_addr)
 void avr_jmp(struct code *c, long byte_addr)  { jmp_call(c, 0x940Cu, byte_addr); }
 void avr_call(struct code *c, long byte_addr) { jmp_call(c, 0x940Eu, byte_addr); }
 void avr_ret(struct code *c)   { hw(c, 0x9508u); }
+/* 1001 0100 0sss 1000 sets, 1001 0100 1sss 1000 clears. `sei` is bset 7
+ * and `cli` is bclr 7; nothing here special-cases them. */
+void avr_bset(struct code *c, enum avr_sreg_bit b)
+{ hw(c, 0x9408u | ((unsigned)b << 4)); }
+void avr_bclr(struct code *c, enum avr_sreg_bit b)
+{ hw(c, 0x9488u | ((unsigned)b << 4)); }
 void avr_reti(struct code *c)  { hw(c, 0x9518u); }
 void avr_nop(struct code *c)   { hw(c, 0x0000u); }
 void avr_ijmp(struct code *c)  { hw(c, 0x9409u); }
@@ -462,6 +513,15 @@ static void avr_walk(FILE *f, struct code *c)
         if (f) fprintf(f, "push r%d\n", r); else avr_push(c, r);
         if (f) fprintf(f, "pop r%d\n", r);  else avr_pop(c, r);
     }
+    /* Both senses of every SREG bit, because the set/clear distinction is
+     * ONE bit of the opcode and an inverted sense would make the
+     * prologue's cli an sei -- interrupts enabled across a half-written
+     * stack pointer, which is the one bug on this machine that would
+     * only ever appear under load. */
+    for (k = 0; k < 8; k++) {
+        if (f) fprintf(f, "bset %d\n", k); else avr_bset(c, (enum avr_sreg_bit)k);
+        if (f) fprintf(f, "bclr %d\n", k); else avr_bclr(c, (enum avr_sreg_bit)k);
+    }
     if (f) fprintf(f, "ret\n");  else avr_ret(c);
     if (f) fprintf(f, "reti\n"); else avr_reti(c);
     if (f) fprintf(f, "nop\n");  else avr_nop(c);
@@ -483,3 +543,61 @@ static void avr_walk(FILE *f, struct code *c)
 
 void avr_vocabulary(FILE *f) { avr_walk(f, NULL); }
 void avr_encode_vocabulary(struct code *c) { avr_walk(NULL, c); }
+
+/* ---- the PC-relative forms, refereed the other way round --------------
+ *
+ * These were missing from the walk above, and the omission cost a real
+ * miscompile: enum avr_cond numbered its flags in mnemonic order rather
+ * than by SREG bit, so `breq` tested CARRY and `brlt` tested overflow.
+ * Every encoding this file produced was self-consistent, which is all a
+ * comparison against itself can establish. The MEANING of a condition is
+ * llvm's to confirm, and it had never been asked -- `while (*s)` walked
+ * past its NUL and printed 1700 bytes of RAM.
+ *
+ * They cannot go in the walk above, because llvm-mc leaves a
+ * R_AVR_7_PCREL relocation even for a branch to a label in the same
+ * section: its bytes carry a placeholder, so a byte comparison would
+ * grade nothing. So the referee runs the other way -- llvm-objdump
+ * DISASSEMBLES our bytes and the text is compared against what each form
+ * was meant to be. That names the condition and decodes the
+ * displacement, which is both halves of what can go wrong.
+ *
+ * llvm's AVR printer measures the displacement from the END of the
+ * instruction, so a word displacement d prints as `.%+d` of 2*d bytes.
+ */
+static void avr_branch_walk(FILE *f, struct code *c)
+{
+    static const struct { const char *name; enum avr_cond c; } conds[8] = {
+        /* llvm's preferred spellings: brlo IS brcs and brsh IS brcc, the
+         * same opcode under the unsigned-comparison name. The referee
+         * compares its text, so the text is its own. */
+        { "brlo", AVR_BR_CS }, { "brsh", AVR_BR_CC },
+        { "breq", AVR_BR_EQ }, { "brne", AVR_BR_NE },
+        { "brmi", AVR_BR_MI }, { "brpl", AVR_BR_PL },
+        { "brlt", AVR_BR_LT }, { "brge", AVR_BR_GE }
+    };
+    /* Zero, both ends of the seven-bit field, and values either side of
+     * bit 6 -- where a field read as six bits would still have passed. */
+    static const int ds[6] = { 0, 1, -1, 63, -64, -33 };
+    int k, j;
+
+    for (k = 0; k < 8; k++)
+        for (j = 0; j < 6; j++) {
+            if (f) fprintf(f, "%s\t.%+d\n", conds[k].name, 2 * ds[j]);
+            else   avr_br(c, conds[k].c, ds[j]);
+        }
+    /* rjmp and rcall carry TWELVE bits, so the interesting values are the
+     * ones a seven-bit reading would truncate. */
+    {
+        static const int rd[6] = { 0, 1, -1, 2047, -2048, -1000 };
+        for (j = 0; j < 6; j++) {
+            if (f) fprintf(f, "rjmp\t.%+d\n", 2 * rd[j]);
+            else   avr_rjmp(c, rd[j]);
+            if (f) fprintf(f, "rcall\t.%+d\n", 2 * rd[j]);
+            else   avr_rcall(c, rd[j]);
+        }
+    }
+}
+
+void avr_branch_vocabulary(FILE *f) { avr_branch_walk(f, NULL); }
+void avr_encode_branches(struct code *c) { avr_branch_walk(NULL, c); }

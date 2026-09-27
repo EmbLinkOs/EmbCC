@@ -1489,3 +1489,124 @@ tidies the two names into one.
 places it came from (THE RULE). Falling back to `x86_64-elf` would be the
 worst possible behaviour here: the objects link, and then the board does
 not run.
+
+## D-018 — AVR, the first **8-bit** target, and what a byte-wide register file changes
+
+**Decided:** 2026-09-27. **Status:** the triple, the data model, the
+predefined macros, the instruction encoder, a code generator, and images
+that run on an ATmega328P under QEMU. What it cannot lower it refuses by
+name. No register allocator yet, and no runtime helpers, so general
+multiply and divide are among the refusals.
+
+AVR is first in the EmbLinkRTOS requirements document's target order
+(ATmega328P, the Nano profile), and it is the first target here that is not
+a flat 32- or 64-bit register machine. Four things about it are unlike
+every other target, and each cost a design decision rather than a port.
+
+**Nothing fits in a register.** An `int` is two registers and a `long` is
+four, so every operation is a carry chain over bytes. On the other four
+targets a scalar fits and the awkward case was the one that did not (a
+`long long` on ARMv7-M); here the awkward case is everything. The IR's
+width class is only ever 4, 8 or 16 — there is no `w == 2` — so a two-byte
+`int` arrives as a value already extended to four, and computing at four
+bytes is the CORRECT reading rather than a shortcut. Narrowing it would
+take a width analysis over the whole function.
+
+**There is no sp-relative addressing.** Memory is reachable only through
+X, Y or Z, and only Y and Z take a displacement — of six bits. So a frame
+pointer is not an optimisation, it is the only way to name a local, and a
+frame past 63 bytes needs a computed pointer for its upper reaches. That
+is why `layout()` here produces offsets from Y starting at 1, and why the
+slot helpers have a near and a far path at all.
+
+**Four bytes per temporary does not fit in 2 KB.** This is the decision
+that separates this target from the others in practice. The test program's
+`run` wanted 1910 bytes of frame for its temporaries once the inliner had
+been through it, against the part's 2048 bytes of SRAM, and the symptom was
+not a diagnostic — it was a program that printed nothing, because the frame
+ran off the bottom of RAM into the register file. Temporaries therefore
+SHARE slots by live range, which at -O0 is almost all of them: each
+subexpression gets its own vreg and nearly every one dies at the next
+instruction. 1296 bytes down to 304 at -O0, 1910 down to 418 at -O2.
+
+The interval is [definition, last use] in instruction order, STRETCHED over
+any loop it touches, to a fixpoint. The stretching is not conservatism for
+its own sake: without it a value defined inside a loop and used after it
+shares with one defined earlier in the same loop — disjoint in the listing,
+but the back edge re-executes the earlier definition. At -O2 that is not a
+corner case, because mem2reg turns every promotable local into a vreg.
+
+**Program space is a separate address space, addressed in words.** Two
+consequences, and neither faults when it is wrong.
+
+  * A function pointer holds half a byte address. `&f` therefore goes
+    through the `_GS` relocations and a function pointer in data is
+    `R_AVR_16_PM`; using the data forms would produce a pointer to twice as
+    far into flash, landing on a real instruction.
+  * `.rodata` cannot stay in flash. `ld`/`lds` reach only the data space, so
+    a string literal left there is not slow to read — it is unreadable by
+    any instruction this compiler emits. On a Harvard target it joins the
+    WRITABLE segment and gets a RAM address with a flash load address, and
+    the startup copies it across with `lpm`, which is what avr-gcc's linker
+    script does and why `const char *s = "hi"` costs RAM there.
+
+**Why no register allocator yet.** The shared Chaitin-Briggs allocator
+hands out single registers. AVR needs RUNS of one, two or four consecutive
+registers, even-aligned for `movw` and `adiw`, out of a pool whose halves
+are not interchangeable — the immediate instructions (`ldi`, `subi`,
+`andi`, `cpi`) reach only r16-r31, and `adiw` only four pairs. Teaching the
+shared layer that is a change to code five working targets depend on, and
+it is not the first thing to do on a machine that had never run an
+instruction from this compiler. D-005 applies to a fifth backend as it did
+to the second.
+
+**Why multiply and divide are refusals rather than inline sequences.**
+AVR's `mul` is 8x8 into r1:r0 and DESTROYS r1, the machine's zero register
+that every other lowering reads. A 32-bit product is ten partial products
+with a carry chain threaded through them — about seventy instructions, 140
+bytes of flash at every site on a part that has 32 KB. Every AVR toolchain
+calls a helper instead (libgcc's `__mulsi3`, `__udivmodsi4`), so this is
+`lib/rt` work and a helper-call convention, not an instruction selection.
+
+Multiply by a CONSTANT is implemented, and had to be: at -O0 an array index
+scales by its element size with an `IR_MUL`, so refusing it would refuse
+`tab[1].x`. Double-and-add from the top bit down — one shift for a power of
+two. That also required the backend to work constants out for itself rather
+than trusting `imm_b`, which is the optimizer's answer and absent at -O0.
+
+**Two things this target settled elsewhere:**
+
+  * **A call's scalar return type is now in the IR** (`ret_tybytes`,
+    `ret_tysign`). AVR's return value is a run of byte registers sized by
+    the type, and the ABI leaves everything above it undefined, so the
+    CALLER must extend — which avr-gcc's callers also do. The IR kept the
+    return type only for structs, so `signed char sc(void)` yielded an
+    `ext.4:2s` reading a byte the callee never wrote. The same gap is
+    latent on x86-64, where convention masks it.
+  * **`elf32` is `target_ptr_size() <= 4`, not `== 4`.** An AVR pointer is
+    two bytes and its objects are ELFCLASS32 like every other small
+    machine's.
+
+**The referee, and the hole in it.** The instruction encoder is checked
+against llvm-mc form by form, as the RISC-V and VFP vocabularies are, and
+for a stronger reason: AVR's operand fields are SPLIT, so a mistake encodes
+a DIFFERENT VALID instruction rather than an invalid one. It found two bugs
+hand-checking had passed (the `adiw`/`sbiw` `KKdd KKKK` layout, and `ld rd,
+Y`/`Z` being the displaced form at q=0 where nibble 0 of the 0x9000 group
+is `lds`).
+
+It then missed a third, and the reason is worth recording. The conditional
+branches were not in the vocabulary, because llvm-mc leaves an
+`R_AVR_7_PCREL` relocation even on a branch to a label in its own section —
+its bytes are a placeholder, so a byte comparison would grade nothing.
+`enum avr_cond` numbered its flags in mnemonic order rather than by SREG
+bit, so `breq` tested CARRY and `brlt` tested overflow. Every encoding was
+self-consistent, which is all a comparison against itself can establish.
+`while (*s)` walked past its NUL and printed 1700 bytes of RAM.
+
+So those forms are refereed in the OTHER direction: `llvm-mc -disassemble`
+decodes our bytes and the text is compared against what each form was meant
+to be. The general rule this leaves behind is that a referee must grade the
+MEANING of an operand and not only its packing — and that an encoder
+function absent from the vocabulary is unchecked however many forms the
+vocabulary reports.

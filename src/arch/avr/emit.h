@@ -96,17 +96,37 @@ void avr_pop(struct code *c, int r);
  * jump into the middle of something. Returns the offset of the emitted
  * halfword so a forward branch can be patched. */
 enum avr_cond {
-    /* The condition is three bits plus a sense bit: brne is "not equal"
-     * and breq is the same three bits with the sense flipped, which is
-     * why these come in pairs and share one encoder. */
-    AVR_BR_EQ = 0, AVR_BR_NE = 1, AVR_BR_CS = 2, AVR_BR_CC = 3,
-    AVR_BR_MI = 4, AVR_BR_PL = 5, AVR_BR_LT = 6, AVR_BR_GE = 7
+    /* (flag << 1) | sense, where `flag` is the SREG BIT NUMBER and sense
+     * is 0 for "branch if set" and 1 for "branch if clear" -- which is
+     * exactly how the instruction encodes them, so one encoder serves all
+     * sixteen forms and `cond ^ 1` inverts any of them.
+     *
+     * The numbers are the MACHINE's SREG bits: C is 0, Z is 1, N is 2,
+     * V is 3, S is 4. The first version of this enum numbered them in
+     * mnemonic order instead, which put breq on the carry flag and brlt
+     * on overflow rather than on S. Both were valid instructions and both
+     * were wrong, and no test that compared this encoder against itself
+     * could see it -- `while (*s)` walked past its NUL and printed 1700
+     * bytes of RAM. Only llvm-mc's own mnemonics can grade this, which is
+     * why the vocabulary now contains every one of them. */
+    AVR_BR_CS = 0, AVR_BR_CC = 1,   /* C (bit 0): unsigned <  /  >= */
+    AVR_BR_EQ = 2, AVR_BR_NE = 3,   /* Z (bit 1) */
+    AVR_BR_MI = 4, AVR_BR_PL = 5,   /* N (bit 2) */
+    AVR_BR_LT = 8, AVR_BR_GE = 9    /* S (bit 4): signed, N xor V */
 };
 int  avr_br(struct code *c, enum avr_cond cond, int word_disp);
 void avr_patch_br(struct code *c, int at, int word_disp);
 int  avr_rjmp(struct code *c, int word_disp);
 int  avr_rcall(struct code *c, int word_disp);
 void avr_patch_rjmp(struct code *c, int at, int word_disp);
+/* The same four fields, patched in a raw section image -- what the LINKER
+ * does to a relocation site. Declared here rather than restated there,
+ * because each of these operand fields is SPLIT and a second copy of the
+ * layout is a second chance to get it wrong. */
+void avr_patch_br_at(unsigned char *p, int word_disp);
+void avr_patch_rjmp_at(unsigned char *p, int word_disp);
+void avr_patch_ldi_at(unsigned char *p, int k);
+void avr_patch_call_at(unsigned char *p, long byte_addr);
 /* The 32-bit forms, which reach the whole program space. The operand is
  * a BYTE address and is halved here, because the instruction counts
  * words and every caller has a byte address. */
@@ -114,6 +134,18 @@ void avr_jmp(struct code *c, long byte_addr);
 void avr_call(struct code *c, long byte_addr);
 void avr_ret(struct code *c);
 void avr_reti(struct code *c);
+/* A single SREG bit, set or cleared. sei and cli are bit 7 of this group,
+ * not two separate instructions -- and writing them as one encoder is
+ * what keeps the other six (sec/clc, sez/clz, ...) from being invented
+ * later as three more constants. The prologue needs cli: an interrupt
+ * between the two halves of a stack-pointer write would run on a
+ * half-updated SP. */
+enum avr_sreg_bit {
+    AVR_SREG_C = 0, AVR_SREG_Z = 1, AVR_SREG_N = 2, AVR_SREG_V = 3,
+    AVR_SREG_S = 4, AVR_SREG_H = 5, AVR_SREG_T = 6, AVR_SREG_I = 7
+};
+void avr_bset(struct code *c, enum avr_sreg_bit b);
+void avr_bclr(struct code *c, enum avr_sreg_bit b);
 void avr_nop(struct code *c);
 /* `ijmp`/`icall` jump to where Z points -- how a call through a function
  * pointer is made. */
@@ -126,5 +158,13 @@ void avr_icall(struct code *c);
 void avr_vocabulary(FILE *f);
 /* The same forms, encoded. One walk serves both so they cannot drift. */
 void avr_encode_vocabulary(struct code *c);
+
+/* The PC-relative forms, refereed in the opposite direction: llvm-mc
+ * relocates a branch even to a label in its own section, so these are
+ * DISASSEMBLED from our bytes and the text compared. What that grades is
+ * the meaning of each condition, which is what a self-comparison cannot.
+ * The text is llvm-objdump's own, tab and all. */
+void avr_branch_vocabulary(FILE *f);
+void avr_encode_branches(struct code *c);
 
 #endif

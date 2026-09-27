@@ -19,12 +19,15 @@
 #     pins what EmbCC actually does; settling it against a real avr-gcc
 #     is an open item recorded in the gap document.
 #
-# The refusal half matters more than the data model. Adding a target's
-# triple before its backend made the x86-64 code generator the fallback,
-# and `--target=avr -c` produced an ELF64 object claiming EM_AVR full of
+# The code generator now exists (tests/golden/avr-exec.sh runs its output
+# on an ATmega328P), so what this file asserts about it has changed: -c
+# must now SUCCEED and produce an ELF32 object for EM_AVR. That is still
+# the same guard, pointed the other way -- adding the triple before the
+# backend once made the x86-64 code generator the fallback, and
+# `--target=avr -c` produced an ELF64 object claiming EM_AVR full of
 # x86-64 instructions. It linked. It disassembled as plausible nonsense.
-# That is the single worst thing this compiler can do, so the guard has a
-# test of its own.
+# So the check is now on the header and the machine, which is what would
+# catch the same mistake if the dispatch were ever lost again.
 set -u
 echo "TEST-MARKER avr-target"
 . "$(dirname "$0")/../lib.sh"
@@ -77,20 +80,23 @@ printf '#ifndef __AVR__\n#error not avr\n#endif\n#if __SIZEOF_INT__ != 2\n#error
     echo "a normal #ifdef __AVR__ guard does not work"; exit 1; }
 echo "the predefined macros are there and an #ifdef __AVR__ guard works"
 
-# ---- and it REFUSES to emit code -------------------------------------
+# ---- and the object it emits is an AVR object ------------------------
 printf 'int f(int a){ return a + 1; }\n' > "$out/f.c"
-for mode in -c -S; do
-    if "$EMBCC" --target=avr $mode "$out/f.c" -o "$out/o.out" 2> "$out/e.txt"; then
-        echo "--target=avr $mode produced output, and there is no AVR"
-        echo "code generator -- so whatever is in it came from another"
-        echo "machine's backend:"
-        head -3 "$out/e.txt"; exit 1
-    fi
-    grep -q 'no AVR code generator' "$out/e.txt" || {
-        echo "$mode was refused, but not by name:"; cat "$out/e.txt"; exit 1; }
-done
-echo "-c and -S are refused by name, so no object can carry another"
-echo "machine's instructions under an EM_AVR header"
+"$EMBCC" --target=avr -c "$out/f.c" -o "$out/f.o" 2> "$out/e.txt" || {
+    echo "--target=avr -c failed:"; head -4 "$out/e.txt"; exit 1; }
+# Byte 4 of an ELF header is EI_CLASS: 1 is ELFCLASS32. Bytes 18-19 are
+# e_machine, little-endian: 83 (0x53) is EM_AVR. Read out of the file
+# rather than asked of a tool, so this test needs none.
+cls=$(od -An -tu1 -j4 -N1 "$out/f.o" | tr -d ' ')
+mach=$(od -An -tu1 -j18 -N1 "$out/f.o" | tr -d ' ')
+[ "$cls" = 1 ] || {
+    echo "the object is ELF class $cls, not 1 (ELFCLASS32) -- an AVR"
+    echo "pointer is two bytes and its objects are 32-bit"; exit 1; }
+[ "$mach" = 83 ] || {
+    echo "the object claims machine $mach, not 83 (EM_AVR) -- so whatever"
+    echo "is in it came from another machine's backend"; exit 1; }
+echo "-c produces an ELFCLASS32 object for EM_AVR, so no object can carry"
+echo "another machine's instructions under an EM_AVR header"
 
 # The front end still works, which is the point of having the target at
 # all before the backend exists.
@@ -98,5 +104,5 @@ echo "machine's instructions under an EM_AVR header"
     echo "-fsyntax-only does not work for AVR"; exit 1; }
 "$EMBCC" --target=avr -E "$out/f.c" > /dev/null || {
     echo "-E does not work for AVR"; exit 1; }
-echo "-E and -fsyntax-only work, which is what the target is for until"
-echo "the backend lands"
+echo "-E and -fsyntax-only work as well, so a program can be checked for"
+echo "this target without being built for it"

@@ -412,6 +412,23 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         default:             return -1;
         }
     }
+    if (a == TARGET_AVR) {
+        switch (k) {
+        case RK_CALL:            return R_AVR_CALL;
+        case RK_AVR_CALL:        return R_AVR_CALL;
+        case RK_AVR_LO8_LDI:     return R_AVR_LO8_LDI;
+        case RK_AVR_HI8_LDI:     return R_AVR_HI8_LDI;
+        case RK_AVR_LO8_LDI_GS:  return R_AVR_LO8_LDI_GS;
+        case RK_AVR_HI8_LDI_GS:  return R_AVR_HI8_LDI_GS;
+        case RK_AVR_ABS16:       return R_AVR_16;
+        case RK_AVR_ABS16_PM:    return R_AVR_16_PM;
+        /* R_AVR_32 exists and is NOT the pointer relocation: a pointer
+         * here is two bytes. It is what a `.long` holding an address
+         * would need, and nothing emits one yet. */
+        case RK_ABS32:           return R_AVR_32;
+        default:                 return -1;
+        }
+    }
     if (a == TARGET_AARCH64) {
         switch (k) {
         /* CALL26, not JUMP26: the field is the same, but CALL26 is what a
@@ -504,7 +521,7 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
 long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 {
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
-        a == TARGET_RISCV32 || a == TARGET_RISCV64)
+        a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
