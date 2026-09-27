@@ -58,6 +58,11 @@ struct object {
      * the writer, which has to put the class back. */
     int elf32;
     int machine;              /* e_machine, checked to be one across inputs */
+    /* What .ARM.attributes says, plus one -- so 0 means the object did
+     * not say, which is not the same as saying zero. An object with no
+     * attributes section must not be read as claiming the base
+     * standard. */
+    int arm_vfp, arm_enum, arm_arch;
 };
 
 /* An allocated input section placed into the output. */
@@ -233,6 +238,126 @@ static struct symbol *sym_intern(struct linker *l, const char *name)
 
 static Elf64_Shdr *sh_at(struct object *o, int i) { return &o->shdrs[i]; }
 
+
+/* ---- ARM build attributes ---------------------------------------------
+ *
+ * Only the tags that decide whether two objects can be linked at all
+ * are read; the rest are skipped, which the format allows because every
+ * value is either a ULEB128 or a NUL-terminated string and the tag
+ * number says which.
+ */
+enum { ARM_TAG_CPU_ARCH = 6, ARM_TAG_ENUM_SIZE = 26, ARM_TAG_VFP_ARGS = 28 };
+
+/* The tags whose VALUE is a string rather than a number. From the ABI:
+ * CPU_raw_name, CPU_name, compatibility, also_compatible_with and
+ * conformance. A tag not in this list has a ULEB128 value. */
+static int arm_tag_is_string(unsigned long t)
+{
+    return t == 4 || t == 5 || t == 32 || t == 65 || t == 67;
+}
+
+static unsigned long arm_uleb(const unsigned char **p, const unsigned char *end)
+{
+    unsigned long v = 0;
+    int shift = 0;
+    while (*p < end) {
+        unsigned char b = *(*p)++;
+        v |= (unsigned long)(b & 0x7f) << shift;
+        shift += 7;
+        if (!(b & 0x80))
+            break;
+    }
+    return v;
+}
+
+static void arm_attrs_scan(struct object *o,
+                           const unsigned char *p, size_t n)
+{
+    const unsigned char *end = p + n;
+    if (n < 1 || *p != 'A')
+        return;                         /* not a format this knows */
+    p++;
+    while (p + 4 <= end) {
+        unsigned long slen = (unsigned long)p[0] | ((unsigned long)p[1] << 8) |
+                             ((unsigned long)p[2] << 16) |
+                             ((unsigned long)p[3] << 24);
+        const unsigned char *sub = p + 4, *subend;
+        if (slen < 4 || p + slen > end)
+            return;
+        subend = p + slen;
+        /* the vendor string; only "aeabi" is defined */
+        const char *vendor = (const char *)sub;
+        while (sub < subend && *sub)
+            sub++;
+        if (sub < subend)
+            sub++;
+        if (strcmp(vendor, "aeabi") != 0) {
+            p = subend;
+            continue;                   /* a vendor nothing here knows */
+        }
+        while (sub + 5 <= subend) {
+            unsigned char tag = *sub++;
+            unsigned long blen = (unsigned long)sub[0] |
+                                 ((unsigned long)sub[1] << 8) |
+                                 ((unsigned long)sub[2] << 16) |
+                                 ((unsigned long)sub[3] << 24);
+            const unsigned char *b = sub + 4, *bend;
+            if (blen < 5 || sub - 1 + blen > subend)
+                return;
+            bend = sub - 1 + blen;
+            sub = bend;
+            if (tag != 1)               /* only Tag_File is read */
+                continue;
+            while (b < bend) {
+                unsigned long t = arm_uleb(&b, bend);
+                if (arm_tag_is_string(t)) {
+                    while (b < bend && *b)
+                        b++;
+                    if (b < bend)
+                        b++;
+                    continue;
+                }
+                unsigned long v = arm_uleb(&b, bend);
+                if (t == ARM_TAG_VFP_ARGS)  { o->arm_vfp = (int)v + 1; }
+                if (t == ARM_TAG_ENUM_SIZE) { o->arm_enum = (int)v + 1; }
+                if (t == ARM_TAG_CPU_ARCH)  { o->arm_arch = (int)v + 1; }
+            }
+        }
+        p = subend;
+    }
+}
+
+/* Compare what each object says about itself, and refuse a combination
+ * that cannot work. Called once every object is loaded, because the
+ * question is about the SET and not about any one of them.
+ *
+ * A stored value is the tag's value plus one, so zero means "the object
+ * did not say" -- an object with no attributes section at all, which
+ * must not be treated as claiming the base standard. */
+static void arm_attrs_check(struct linker *l)
+{
+    struct object *ref = NULL;
+    for (int i = 0; i < l->nobj; i++) {
+        struct object *o = l->objs[i];
+        if (!o->arm_vfp && !o->arm_enum)
+            continue;
+        if (!ref) { ref = o; continue; }
+        if (ref->arm_vfp && o->arm_vfp && ref->arm_vfp != o->arm_vfp)
+            die("'%s' and '%s' disagree about where floating-point "
+                "arguments go: one passes them in the core registers "
+                "(-mfloat-abi=soft) and the other in s0-s15 "
+                "(-mfloat-abi=hard). Linking them would leave every "
+                "float argument read from a register the caller never "
+                "wrote",
+                ref->name ? ref->name : "?", o->name ? o->name : "?");
+        if (ref->arm_enum && o->arm_enum && ref->arm_enum != o->arm_enum)
+            die("'%s' and '%s' disagree about the size of an enum, which "
+                "changes the layout of every struct that holds one",
+                ref->name ? ref->name : "?", o->name ? o->name : "?");
+    }
+}
+
+
 static struct object *parse_object(const char *name, unsigned char *buf,
                                    long len)
 {
@@ -315,6 +440,29 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         o->sec_out[i] = -1;
         o->dbg_sec[i] = -1;
         o->dbg_off[i] = 0;
+    }
+
+    /* ARM BUILD ATTRIBUTES, checked across inputs.
+     *
+     * Tag_ABI_VFP_args says where floating-point arguments travel: 0 in
+     * the core registers (the base standard, -mfloat-abi=soft), 1 in
+     * s0-s15. An object of each kind links without complaint unless
+     * somebody compares the tag, and then the callee reads its
+     * arguments from registers the caller never wrote -- a
+     * miscompilation produced at LINK time, past every check the
+     * compiler makes.
+     *
+     * GNU ld does this comparison. EmbCC does not depend on GNU ld, so
+     * EmbCC's linker has to do it, and does: this is the only place in
+     * the whole toolchain that can see both objects at once. The same
+     * reasoning applies to Tag_ABI_enum_size, where a disagreement
+     * changes the layout of every struct holding an enum. */
+    for (int i = 0; i < o->nsh; i++) {
+        const char *nm = o->shstr + o->shdrs[i].sh_name;
+        if (strcmp(nm, ".ARM.attributes") != 0)
+            continue;
+        arm_attrs_scan(o, buf + o->shdrs[i].sh_offset,
+                       (size_t)o->shdrs[i].sh_size);
     }
 
     /* find the symbol table */
@@ -2263,6 +2411,11 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     define_orphan_brackets(&l, bounds);
     define_end_symbols(&l, data_start + data_memsz);   /* L1: kernel_end/_end */
     define_firmware_symbols(&l, data_start, data_filesz, data_memsz);
+
+    /* Every input is loaded by now, which is what this question needs:
+     * whether the SET of objects can be linked at all. See
+     * arm_attrs_check. */
+    arm_attrs_check(&l);
 
     struct symbol *e = sym_find(&l, l.entry);
     if (!e || !e->defined)

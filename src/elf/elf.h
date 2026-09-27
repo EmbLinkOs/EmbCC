@@ -339,6 +339,9 @@ typedef struct {
 /* sh_type */
 #define SHT_NULL      0
 #define SHT_PROGBITS  1
+/* ARM's build-attributes section. A processor-specific type, so it is
+ * SHT_LOPROC+3 rather than a number in the generic range. */
+#define SHT_ARM_ATTRIBUTES 0x70000003
 #define SHT_SYMTAB    2
 #define SHT_STRTAB    3
 #define SHT_RELA      4

@@ -22,6 +22,7 @@
 #include "../macho/write.h"
 #include "../coff/write.h"
 #include "../ir/ir.h"
+#include "../arch/thumb/attrs.h"
 #include "../opt/opt.h"
 #include "../parse/parse.h"
 #include "../sema/sema.h"
@@ -1814,10 +1815,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * and the linker uses them to decide where an interworking veneer
      * may go. One at offset zero is the whole story for a Cortex-M
      * object, which is Thumb from end to end. */
-    if (ta == TARGET_THUMB)
+    if (ta == TARGET_THUMB) {
         elfw_add_symbol(w, "$t", 0, 0,
                         ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                         (Elf64_Half)text_ndx);
+        /* ARM BUILD ATTRIBUTES. What the object was built for, and the
+         * only place downstream that can refuse a combination which
+         * cannot work: ld compares Tag_ABI_VFP_args to stop a
+         * soft-float object linking against a hard-float one. With no
+         * section at all there was nothing to compare, so that link
+         * succeeded and the callee read its arguments from registers the
+         * caller never wrote. See src/arch/thumb/attrs.h. */
+        size_t alen = 0;
+        unsigned char *ab = arm_build_attributes(&alen);
+        elfw_add_section(w, ".ARM.attributes", SHT_ARM_ATTRIBUTES, 0,
+                         ab, (Elf64_Xword)alen, 1);
+        free(ab);
+    }
     int rodata_sym = 0;
     if (rodata)
         rodata_sym = elfw_add_symbol(w, "", 0, 0,
@@ -2698,6 +2712,73 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "-f", 2) == 0 && argv[i][2] &&
                    opt_set_pass(argv[i] + 2, 1)) {
             /* a named pass, on -- so a single pass can be tried at -O1 */
+        } else if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                   strncmp(argv[i], "-mfpu=", 6) == 0 ||
+                   strncmp(argv[i], "-mfloat-abi=", 12) == 0 ||
+                   strcmp(argv[i], "-mthumb") == 0 ||
+                   strcmp(argv[i], "-marm") == 0) {
+            /* The ARM machine flags every Cortex-M build passes. They
+             * were "unknown argument" before, which stops a kernel's
+             * existing Makefile dead -- and the two that describe the
+             * FLOAT ABI are the ones that must not be guessed at,
+             * because getting them wrong is an ABI mismatch the linker
+             * cannot see (EmbCC emits no .ARM.attributes yet either).
+             *
+             * -mcpu= selects the sub-architecture, which EmbCC now
+             * carries. -mthumb is the only state this backend has, so it
+             * is a no-op that has to be accepted. -marm asks for the ARM
+             * instruction set, which a Cortex-M does not have at all. */
+            const char *v = strchr(argv[i], '=');
+            v = v ? v + 1 : NULL;
+            if (target_get() != TARGET_THUMB)
+                diag_fatal(NULL, 0, "%s is an ARM option, and the target "
+                           "is %s", argv[i], target_triple_now());
+            if (strcmp(argv[i], "-marm") == 0)
+                diag_fatal(NULL, 0, "-marm is not supported: a Cortex-M "
+                           "has no ARM instruction set, only Thumb");
+            if (strcmp(argv[i], "-mthumb") == 0)
+                continue;          /* the only state there is */
+            if (strncmp(argv[i], "-mcpu=", 6) == 0) {
+                /* Only the parts whose ISA this backend really emits.
+                 * An F part is refused by name rather than accepted and
+                 * built soft-float: its ABI passes floats in s0-s15 and
+                 * an object built the other way links and then reads its
+                 * arguments from the wrong registers. */
+                if (!strcmp(v, "cortex-m3") || !strcmp(v, "cortex-m0") ||
+                    !strcmp(v, "cortex-m0plus") || !strcmp(v, "cortex-m1"))
+                    target_set_thumb_em(0);
+                else if (!strcmp(v, "cortex-m4") || !strcmp(v, "cortex-m7") ||
+                         !strcmp(v, "cortex-m33") || !strcmp(v, "cortex-m23"))
+                    target_set_thumb_em(1);
+                else
+                    diag_fatal(NULL, 0, "-mcpu=%s is not a part EmbCC knows: "
+                               "it emits ARMv7-M and ARMv7E-M (cortex-m0, "
+                               "m0plus, m1, m3, m4, m7, m23, m33)", v);
+                continue;
+            }
+            if (strncmp(argv[i], "-mfpu=", 6) == 0) {
+                if (!strcmp(v, "none") || !strcmp(v, "soft"))
+                    continue;
+                diag_fatal(NULL, 0, "-mfpu=%s is not supported: EmbCC has no "
+                           "hardware floating point on this target, so a "
+                           "float goes through __aeabi_fadd and friends. "
+                           "Accepting this and emitting soft float anyway "
+                           "would give an object that links against a "
+                           "hard-float one and reads its arguments from the "
+                           "wrong registers", v);
+            }
+            if (strncmp(argv[i], "-mfloat-abi=", 12) == 0) {
+                if (!strcmp(v, "soft"))
+                    continue;      /* what this backend does */
+                diag_fatal(NULL, 0, "-mfloat-abi=%s is not supported: EmbCC "
+                           "passes floating point in the CORE registers "
+                           "(the base standard, -mfloat-abi=soft). %s passes "
+                           "it in s0-s15, so the two do not interoperate, "
+                           "and that is a mismatch no diagnostic downstream "
+                           "would catch", v,
+                           !strcmp(v, "hard") ? "hard" : v);
+            }
+            continue;
         } else if (strncmp(argv[i], "-fsanitize=", 11) == 0 ||
                    strncmp(argv[i], "-fno-sanitize=", 14) == 0 ||
                    strncmp(argv[i], "-fsanitize-trap", 15) == 0 ||

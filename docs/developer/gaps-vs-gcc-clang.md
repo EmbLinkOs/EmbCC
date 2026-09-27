@@ -517,6 +517,47 @@ For a compiler whose stated audience is firmware on parts measured in
 kilobytes, that is the single most valuable missing thing in this entire
 document. 1.39× was the flattering framing; 2.11× is the honest one.
 
+## ARM ABI metadata, and who checks it
+
+**DONE.** EmbCC emitted no `.ARM.attributes` at all. That sounds
+harmless and is the opposite: the section is how an object says what it
+was built FOR, and `Tag_ABI_VFP_args` is how a linker refuses to mix an
+object that passes floating point in the core registers with one that
+passes it in `s0-s15`. With no section there is nothing to compare, so
+that link SUCCEEDS and the callee reads its arguments from registers the
+caller never wrote -- a miscompilation produced at link time, past every
+check the compiler makes.
+
+The format was read back off a real object rather than transcribed:
+both length fields count themselves, and either one off by four
+produces a section every reader rejects. One deliberate difference from
+Clang -- `Tag_ABI_VFP_args` is emitted explicitly as 0 rather than
+omitted, so the object states its ABI positively instead of by absence.
+
+**The check lives in EmbCC's own linker**, not in GNU ld. EmbCC does not
+depend on another toolchain to work, so relying on somebody else's
+linker for the safety net is the wrong shape: `embld` reads the
+attributes from every input and refuses the combination itself, for the
+float ABI and for `Tag_ABI_enum_size`. Verified against objects another
+compiler built, because interoperating with one is the entire point.
+
+A stored tag is the real value PLUS ONE, so zero means "the object did
+not say". An object with no attributes section must not be read as
+claiming the base standard, or adding the check would itself create a
+false negative on everything built before it existed.
+
+`thumbv7em` was also an alias: `-dumpmachine` answered
+`thumbv7m-none-eabi` and the object's `Tag_CPU_arch` said ARM v7 on a
+v7E-M part. The code generated is still identical; what changed is that
+the object no longer misdescribes itself. `tests/golden/thumb-target.sh`
+had asserted the aliasing as intended behaviour and was corrected.
+
+And the ARM machine flags every Cortex-M build passes -- `-mthumb`,
+`-mcpu=`, `-mfpu=`, `-mfloat-abi=` -- are recognised: accepted where
+they describe what EmbCC does, refused by name where they do not.
+`-mfloat-abi=hard` is the one that matters, and guessing it either way
+is the mismatch above.
+
 ## Target gaps
 
 Every target against Clang on the same real corpus, at `-Os`:

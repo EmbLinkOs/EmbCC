@@ -108,6 +108,13 @@ int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
  * rather than lowering something no backend can carry. */
 int target_has_int128(void);
 
+/* ARMv7E-M (Cortex-M4/M7) rather than ARMv7-M (Cortex-M3). Set by the
+ * --target= name and by -mcpu=. The instruction selection is the same
+ * for both; this changes what the object SAYS it was built for, which
+ * is what a linker and a debugger read. */
+int target_thumb_em(void);
+void target_set_thumb_em(int on);
+
 /* The selected target. Defaults to x86_64 so every existing command line
  * keeps its meaning; --target= is the only thing that changes it. */
 enum target_arch target_get(void);

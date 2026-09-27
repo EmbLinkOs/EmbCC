@@ -15,13 +15,28 @@ tmp=${TMPDIR:-/tmp}/thumb-target.$$
 mkdir -p "$tmp"
 trap 'rm -rf "$tmp"' EXIT
 
-# 1. Every spelling of the target resolves, and the canonical name comes back.
-for alias in thumbv7m-none-eabi thumbv7m thumbv7em-none-eabi thumbv7em \
-             armv7m-none-eabi arm-none-eabi; do
+# 1. Every spelling of the target resolves, and the canonical name for
+# ITS SUB-ARCHITECTURE comes back.
+#
+# This used to assert that every spelling answered thumbv7m-none-eabi,
+# v7em included -- which was the aliasing itself written down as
+# intended. It is not: a v7em request answered for a different part, and
+# the object's Tag_CPU_arch then said ARM v7 on a v7E-M chip. The two
+# generate identical code; what differs is what the object says about
+# itself, and a consumer is entitled to believe that.
+for alias in thumbv7m-none-eabi thumbv7m armv7m-none-eabi arm-none-eabi; do
     got=$("$EMBCC" --target="$alias" -dumpmachine) || {
         echo "--target=$alias was not accepted"; exit 1; }
     [ "$got" = "$T" ] || {
         echo "--target=$alias -dumpmachine said '$got', not '$T'"; exit 1; }
+done
+for alias in thumbv7em-none-eabi thumbv7em armv7em-none-eabi; do
+    got=$("$EMBCC" --target="$alias" -dumpmachine) || {
+        echo "--target=$alias was not accepted"; exit 1; }
+    [ "$got" = "thumbv7em-none-eabi" ] || {
+        echo "--target=$alias -dumpmachine said '$got', not
+thumbv7em-none-eabi -- the v7em name is aliasing to the base profile
+again"; exit 1; }
 done
 echo "six spellings of ARMv7-M resolve to $T"
 

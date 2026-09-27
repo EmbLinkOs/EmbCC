@@ -9,6 +9,7 @@
 #include "../macho/macho.h"
 
 static enum target_arch g_arch = TARGET_X86_64;
+static int g_thumb_em;      /* --target=thumbv7em-*: see target_thumb_em */
 static enum target_os   g_os   = TGT_OS_NONE;
 static enum target_fmt  g_fmt  = TGT_FMT_ELF;
 
@@ -183,21 +184,30 @@ const char *target_fmt_name(enum target_fmt f)
  * aliases it merely accepts, so --version and diagnostics always give
  * one name for one target.
  */
+/* ARMv7E-M (Cortex-M4/M7) is the same instruction set as v7-M plus the
+ * DSP extension and an optional FPU. It used to be accepted as a name
+ * that meant v7-M, which was one silent substitution: -dumpmachine
+ * answered `thumbv7m-none-eabi` for a v7em request, and the object's
+ * Tag_CPU_arch said v7 where the part is v7E-M. A consumer reading that
+ * attribute is told the wrong architecture. So the name now carries
+ * state, even though the code generated for the two is still identical
+ * -- what differs is what the object SAYS about itself. */
 static const struct triple {
     const char *name;
     enum target_arch arch;
     enum target_os os;
     enum target_fmt fmt;
     int canon;
+    int thumb_em;      /* ARMv7E-M rather than ARMv7-M */
 } g_triples[] = {
     /* freestanding: bare metal and EmbLinkOS (the default) */
-    { "x86_64-elf",        TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   1 },
-    { "x86_64",            TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
-    { "x86_64-none-elf",   TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
-    { "aarch64-elf",       TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   1 },
-    { "aarch64",           TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0 },
-    { "arm64",             TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0 },
-    { "aarch64-none-elf",  TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0 },
+    { "x86_64-elf",        TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
+    { "x86_64",            TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
+    { "x86_64-none-elf",   TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
+    { "aarch64-elf",       TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
+    { "aarch64",           TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
+    { "arm64",             TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
+    { "aarch64-none-elf",  TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
 
     /* ARMv7-M, the Cortex-M line. Freestanding is the only thing it can
      * be: a microcontroller has no operating system under the code, so
@@ -209,45 +219,46 @@ static const struct triple {
      * v7em (Cortex-M4/M7) is the same instruction set plus DSP and an
      * optional FPU; it is accepted as a name now and will differ from
      * v7m only once -mfpu selects hardware floating point. */
-    { "thumbv7m-none-eabi", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   1 },
-    { "thumbv7m",           TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
-    { "thumbv7em-none-eabi",TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
-    { "thumbv7em",          TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
-    { "armv7m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
-    { "arm-none-eabi",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0 },
+    { "thumbv7m-none-eabi", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
+    { "thumbv7m",           TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
+    { "thumbv7em-none-eabi",TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   2, 1 },
+    { "thumbv7em",          TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 1 },
+    { "armv7em-none-eabi",  TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 1 },
+    { "armv7m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
+    { "arm-none-eabi",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
 
     /* RISC-V, bare metal. `-unknown-elf` is the spelling the reference
      * toolchains use and the one a project's existing --target= string
      * will say; the short forms are accepted because everyone writes
      * them. Freestanding only for now, as ARMv7-M is: a hosted RISC-V
      * needs an OS underneath and EmbLinkOS does not run there yet. */
-    { "riscv32-unknown-elf", TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   1 },
-    { "riscv32",             TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
-    { "riscv32-elf",         TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
-    { "rv32",                TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
-    { "riscv64-unknown-elf", TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   1 },
-    { "riscv64",             TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
-    { "riscv64-elf",         TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
-    { "rv64",                TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0 },
+    { "riscv32-unknown-elf", TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "riscv32",             TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "riscv32-elf",         TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "rv32",                TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "riscv64-unknown-elf", TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "riscv64",             TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "riscv64-elf",         TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "rv64",                TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
 
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
      * time, which is why the format column says ELF and not EMBX. */
-    { "x86_64-emblink",    TARGET_X86_64,  TGT_OS_EMBLINK,  TGT_FMT_ELF,   1 },
-    { "aarch64-emblink",   TARGET_AARCH64, TGT_OS_EMBLINK,  TGT_FMT_ELF,   1 },
+    { "x86_64-emblink",    TARGET_X86_64,  TGT_OS_EMBLINK,  TGT_FMT_ELF,   1, 0 },
+    { "aarch64-emblink",   TARGET_AARCH64, TGT_OS_EMBLINK,  TGT_FMT_ELF,   1, 0 },
 
     /* hosted: someone else's libc and linker (D-014) */
-    { "x86_64-linux-gnu",  TARGET_X86_64,  TGT_OS_LINUX,   TGT_FMT_ELF,   1 },
-    { "x86_64-linux",      TARGET_X86_64,  TGT_OS_LINUX,   TGT_FMT_ELF,   0 },
-    { "aarch64-linux-gnu", TARGET_AARCH64, TGT_OS_LINUX,   TGT_FMT_ELF,   1 },
-    { "aarch64-linux",     TARGET_AARCH64, TGT_OS_LINUX,   TGT_FMT_ELF,   0 },
-    { "x86_64-apple-darwin",  TARGET_X86_64,  TGT_OS_DARWIN, TGT_FMT_MACHO, 1 },
-    { "x86_64-darwin",        TARGET_X86_64,  TGT_OS_DARWIN, TGT_FMT_MACHO, 0 },
-    { "aarch64-apple-darwin", TARGET_AARCH64, TGT_OS_DARWIN, TGT_FMT_MACHO, 1 },
-    { "arm64-apple-darwin",   TARGET_AARCH64, TGT_OS_DARWIN, TGT_FMT_MACHO, 0 },
-    { "aarch64-darwin",       TARGET_AARCH64, TGT_OS_DARWIN, TGT_FMT_MACHO, 0 },
-    { "x86_64-windows-gnu",   TARGET_X86_64,  TGT_OS_WINDOWS, TGT_FMT_COFF, 1 },
-    { "x86_64-w64-mingw32",   TARGET_X86_64,  TGT_OS_WINDOWS, TGT_FMT_COFF, 0 },
+    { "x86_64-linux-gnu",  TARGET_X86_64,  TGT_OS_LINUX,   TGT_FMT_ELF,   1, 0 },
+    { "x86_64-linux",      TARGET_X86_64,  TGT_OS_LINUX,   TGT_FMT_ELF,   0, 0 },
+    { "aarch64-linux-gnu", TARGET_AARCH64, TGT_OS_LINUX,   TGT_FMT_ELF,   1, 0 },
+    { "aarch64-linux",     TARGET_AARCH64, TGT_OS_LINUX,   TGT_FMT_ELF,   0, 0 },
+    { "x86_64-apple-darwin",  TARGET_X86_64,  TGT_OS_DARWIN, TGT_FMT_MACHO, 1, 0 },
+    { "x86_64-darwin",        TARGET_X86_64,  TGT_OS_DARWIN, TGT_FMT_MACHO, 0, 0 },
+    { "aarch64-apple-darwin", TARGET_AARCH64, TGT_OS_DARWIN, TGT_FMT_MACHO, 1, 0 },
+    { "arm64-apple-darwin",   TARGET_AARCH64, TGT_OS_DARWIN, TGT_FMT_MACHO, 0, 0 },
+    { "aarch64-darwin",       TARGET_AARCH64, TGT_OS_DARWIN, TGT_FMT_MACHO, 0, 0 },
+    { "x86_64-windows-gnu",   TARGET_X86_64,  TGT_OS_WINDOWS, TGT_FMT_COFF, 1, 0 },
+    { "x86_64-w64-mingw32",   TARGET_X86_64,  TGT_OS_WINDOWS, TGT_FMT_COFF, 0, 0 },
 };
 static const int g_ntriples = (int)(sizeof g_triples / sizeof g_triples[0]);
 
@@ -259,6 +270,11 @@ int target_from_triple(const char *triple, enum target_arch *out,
             if (out) *out = g_triples[i].arch;
             if (os)  *os  = g_triples[i].os;
             if (fmt) *fmt = g_triples[i].fmt;
+            /* The ARM sub-architecture travels with the name, so
+             * -dumpmachine and the object's Tag_CPU_arch both answer
+             * what was ASKED for rather than the base profile. */
+            if (g_triples[i].arch == TARGET_THUMB)
+                g_thumb_em = g_triples[i].thumb_em;
             return 1;
         }
     return 0;
@@ -266,12 +282,27 @@ int target_from_triple(const char *triple, enum target_arch *out,
 
 const char *target_triple_of(enum target_arch a, enum target_os o)
 {
+    /* canon 2 is the ARMv7E-M spelling: the canonical name for this
+     * arch/os pair depends on the sub-architecture as well, which is
+     * the only place that is true. */
+    int want = a == TARGET_THUMB && g_thumb_em ? 2 : 1;
     for (int i = 0; i < g_ntriples; i++)
-        if (g_triples[i].canon && g_triples[i].arch == a &&
+        if (g_triples[i].canon == want && g_triples[i].arch == a &&
+            g_triples[i].os == o)
+            return g_triples[i].name;
+    for (int i = 0; i < g_ntriples; i++)
+        if (g_triples[i].canon == 1 && g_triples[i].arch == a &&
             g_triples[i].os == o)
             return g_triples[i].name;
     return NULL;
 }
+
+/* ARMv7E-M rather than ARMv7-M: the DSP extension and, on an F part, an
+ * FPU. The code generated is identical today -- what differs is what
+ * the object reports about itself, which a consumer is entitled to
+ * believe. */
+int target_thumb_em(void) { return g_thumb_em; }
+void target_set_thumb_em(int on) { g_thumb_em = on ? 1 : 0; }
 
 const char *target_triple_now(void)
 {
