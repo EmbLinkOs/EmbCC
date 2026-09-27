@@ -225,6 +225,33 @@ enum { T_HINT_NOP = 0, T_HINT_YIELD = 1, T_HINT_WFE = 2,
 void t_hint(struct code *c, int op);
 
 void t_bkpt(struct code *c, int imm8);
+
+/* ---- VFP (FPv4-SP-D16, the Cortex-M4F unit) ----
+ *
+ * `dbl` selects the width: 0 for a single (s0-s31), 1 for a double
+ * (d0-d15). The register NUMBERING differs between them and vsplit in
+ * emit.c is the one place that knows how -- see the note there, because
+ * getting it backwards names a different register and still assembles.
+ *
+ * Single precision is what the hardware computes. A double has
+ * registers and moves but no arithmetic on this part, so t_vadd(.., 1)
+ * exists for an M7 and for the ABI's sake, not because M4F can use it. */
+void t_vadd(struct code *c, int d, int n, int m, int dbl);
+void t_vsub(struct code *c, int d, int n, int m, int dbl);
+void t_vmul(struct code *c, int d, int n, int m, int dbl);
+void t_vdiv(struct code *c, int d, int n, int m, int dbl);
+void t_vfma(struct code *c, int d, int n, int m, int dbl);
+void t_vmov_reg(struct code *c, int d, int m, int dbl);
+void t_vabs(struct code *c, int d, int m, int dbl);
+void t_vneg(struct code *c, int d, int m, int dbl);
+void t_vsqrt(struct code *c, int d, int m, int dbl);
+void t_vcmp(struct code *c, int n, int m, int dbl);
+void t_vcvt_f_from_i(struct code *c, int d, int m, int sgn, int dbl);
+void t_vcvt_i_from_f(struct code *c, int d, int m, int sgn, int dbl);
+void t_vldst(struct code *c, int sd, int rn, int off, int dbl, int store);
+void t_vmov_core(struct code *c, int sn, int rt, int to_fp);
+void t_vmov_core_pair(struct code *c, int dm, int rt, int rt2, int to_fp);
+void t_vmrs_apsr(struct code *c);
 void t_rbit(struct code *c, int rd, int rm);
 
 /* The exclusive pair, which is how an atomic is built here: `off` is a

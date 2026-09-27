@@ -648,3 +648,166 @@ void t_strex(struct code *c, int rd, int rt, int rn, int off)
            ((unsigned)rt << 12) | ((unsigned)rd << 8) |
            (((unsigned)off >> 2) & 0xff));
 }
+
+/* ---- VFP: the floating-point unit an F part has ------------------------
+ *
+ * Cortex-M4F is FPv4-SP-D16: SINGLE precision in hardware, sixteen
+ * double registers that exist for storage and moves but have no
+ * arithmetic. So `float` runs here and `double` still goes through
+ * __adddf3 and friends -- and yet the hard-float ABI passes a double in
+ * d0-d7 anyway, because those registers exist even where the arithmetic
+ * does not. Both widths therefore have to be encodable.
+ *
+ * Every instruction below comes out of ONE packer, because VFP's operand
+ * encoding is one rule: a register contributes four bits to a field and
+ * one bit to a flag whose position says which operand it was -- D for
+ * the destination, N for the first source, M for the second.
+ *
+ * THE TRAP, and the reason vsplit exists rather than two shifts at each
+ * call site: the split is OPPOSITE for the two widths. A single s<N>
+ * contributes N>>1 to the field and N&1 to the flag; a double d<N>
+ * contributes N&0xf to the field and N>>4 to the flag. Encoding a double
+ * the single way names a DIFFERENT REGISTER and assembles without
+ * complaint -- there is no invalid encoding to catch it.
+ *
+ * Checked against llvm-mc instruction by instruction before any of it
+ * was written here (tools/vfpcheck does it again on every test run), for
+ * the same reason the RISC-V vocabulary is: a hand-written encoder with
+ * no referee is a guess.
+ */
+
+/* The four-bit field and the one-bit flag a register number splits into.
+ * `dbl` picks which of the two rules applies. */
+static void vsplit(int r, int dbl, unsigned *field, unsigned *flag)
+{
+    if (dbl) {
+        *field = (unsigned)r & 0xfu;
+        *flag  = ((unsigned)r >> 4) & 1u;
+    } else {
+        *field = ((unsigned)r >> 1) & 0xfu;
+        *flag  = (unsigned)r & 1u;
+    }
+}
+
+/* hw1: 1110 1110 | D | group | Vn4      hw2: Vd4 | 101 | sz | N | op | M | Vm4
+ *
+ * `grp` carries hw1's opcode bits and `op6` hw2's, which together name
+ * the operation. Nothing else varies. */
+/* The destination and the source carry their OWN widths, and `sz` is a
+ * third thing again -- the width of the FLOATING-POINT side.
+ *
+ * For everything but a conversion all three agree, which is why one flag
+ * looked sufficient. A conversion is where they come apart: the integer
+ * side of `vcvt` always lives in a SINGLE register, so
+ * `vcvt.f64.s32 d0, s1` has a double destination and a single source,
+ * and splitting both by the same rule names two wrong registers and
+ * still assembles. tools/vfpcheck is what said so. */
+static void vfp(struct code *c, unsigned grp, unsigned vn4, unsigned n1,
+                unsigned op6, int d, int d_dbl, int m, int m_dbl, int sz)
+{
+    unsigned df, dfl, mf, mfl;
+    vsplit(d, d_dbl, &df, &dfl);
+    vsplit(m, m_dbl, &mf, &mfl);
+    hw2(c, 0xEE00u | (dfl << 6) | grp | (vn4 & 0xfu),
+           (df << 12) | 0x0A00u | ((unsigned)!!sz << 8) | (n1 << 7) |
+           (op6 << 6) | (mfl << 5) | mf);
+}
+
+/* d = n <op> m. The first source is a register, so it fills Vn/N. */
+static void vfp_bin(struct code *c, unsigned grp, unsigned op6,
+                    int d, int n, int m, int dbl)
+{
+    unsigned f, fl;
+    vsplit(n, dbl, &f, &fl);
+    vfp(c, grp, f, fl, op6, d, dbl, m, dbl, dbl);
+}
+
+/* d = <op> m. There is no first source, so Vn/N carry a five-bit
+ * sub-opcode instead -- its top four bits where Vn would go and its low
+ * bit where N would go, which is why vneg and vsqrt differ in one bit. */
+static void vfp_un(struct code *c, unsigned opc5, int d, int m, int dbl)
+{
+    vfp(c, 0xB0, opc5 >> 1, opc5 & 1u, 1, d, dbl, m, dbl, dbl);
+}
+
+void t_vadd(struct code *c, int d, int n, int m, int dbl)
+    { vfp_bin(c, 0x30, 0, d, n, m, dbl); }
+void t_vsub(struct code *c, int d, int n, int m, int dbl)
+    { vfp_bin(c, 0x30, 1, d, n, m, dbl); }
+void t_vmul(struct code *c, int d, int n, int m, int dbl)
+    { vfp_bin(c, 0x20, 0, d, n, m, dbl); }
+void t_vdiv(struct code *c, int d, int n, int m, int dbl)
+    { vfp_bin(c, 0x80, 0, d, n, m, dbl); }
+/* Fused multiply-add: d += n * m, with ONE rounding. Not the same
+ * value as a separate multiply and add, which is why it is only ever
+ * emitted for __builtin_fma and never to fold an expression. */
+void t_vfma(struct code *c, int d, int n, int m, int dbl)
+    { vfp_bin(c, 0xA0, 0, d, n, m, dbl); }
+
+void t_vmov_reg(struct code *c, int d, int m, int dbl)
+    { vfp_un(c, 0, d, m, dbl); }
+void t_vabs(struct code *c, int d, int m, int dbl)  { vfp_un(c, 1, d, m, dbl); }
+void t_vneg(struct code *c, int d, int m, int dbl)  { vfp_un(c, 2, d, m, dbl); }
+void t_vsqrt(struct code *c, int d, int m, int dbl) { vfp_un(c, 3, d, m, dbl); }
+/* Sets FPSCR's flags, which only vmrs can move to APSR -- a float
+ * comparison is two instructions on this machine, never one. */
+void t_vcmp(struct code *c, int n, int m, int dbl) { vfp_un(c, 8, n, m, dbl); }
+
+/* The conversions are deliberately NOT forced into vfp_un's shape: their
+ * Vn/N fields do not hold one opcode. Going TO float, N is the integer's
+ * signedness; coming FROM float, Vn selects the destination's signedness
+ * and N means round-toward-zero, which is the rounding C requires. */
+/* Group 0xB0, the same as the unary family -- NOT 0xF0. The difference
+ * is invisible whenever the destination register is odd, because the D
+ * flag then sets bit 6 and 0xB0|8 and 0xF0|8 come out as the same byte.
+ * Every register the first draft of this was checked against happened to
+ * be odd, so it passed; tools/vfpcheck sweeps both parities and said so
+ * at once. */
+/* The float side's width is `dbl`; the integer side is a SINGLE
+ * register either way, which is what the 0 argument says. */
+void t_vcvt_f_from_i(struct code *c, int d, int m, int sgn, int dbl)
+    { vfp(c, 0xB0, 8, (unsigned)!!sgn, 1, d, dbl, m, 0, dbl); }
+void t_vcvt_i_from_f(struct code *c, int d, int m, int sgn, int dbl)
+    { vfp(c, 0xB0, sgn ? 13u : 12u, 1, 1, d, 0, m, dbl, dbl); }
+
+/* vldr/vstr: hw2's 0x0A00/0x0B00 selects the width exactly as it does
+ * above, and the offset is in WORDS, so it reaches four times as far as
+ * the byte count suggests and must be a multiple of four. */
+void t_vldst(struct code *c, int sd, int rn, int off, int dbl, int store)
+{
+    unsigned df, dfl;
+    int neg = off < 0;
+    unsigned u = (unsigned)(neg ? -off : off);
+    vsplit(sd, dbl, &df, &dfl);
+    hw2(c, 0xED00u | (store ? 0 : 0x10u) | ((unsigned)!neg << 7) |
+           (dfl << 6) | ((unsigned)rn & 0xfu),
+           (df << 12) | 0x0A00u | ((unsigned)!!dbl << 8) | ((u >> 2) & 0xffu));
+}
+
+/* A core register and a SINGLE register, either way round. `to_fp` says
+ * which; the register fields do not move. */
+void t_vmov_core(struct code *c, int sn, int rt, int to_fp)
+{
+    unsigned f, fl;
+    vsplit(sn, 0, &f, &fl);
+    hw2(c, 0xEE00u | (to_fp ? 0 : 0x10u) | f,
+           ((unsigned)rt << 12) | 0x0A00u | (fl << 7) | 0x10u);
+}
+
+/* A core PAIR and a double register: what the hard-float ABI needs
+ * around every soft-float helper call, since the value arrives in d0 and
+ * __adddf3 wants it in r0/r1. */
+void t_vmov_core_pair(struct code *c, int dm, int rt, int rt2, int to_fp)
+{
+    unsigned f, fl;
+    vsplit(dm, 1, &f, &fl);
+    hw2(c, 0xEC00u | (to_fp ? 0x40u : 0x50u) | ((unsigned)rt2 & 0xfu),
+           ((unsigned)rt << 12) | 0x0B00u | (fl << 5) | 0x10u | f);
+}
+
+/* vmrs APSR_nzcv, FPSCR -- the only way a float comparison's result
+ * reaches the condition flags. */
+void t_vmrs_apsr(struct code *c)
+{
+    hw2(c, 0xEEF1u, 0xFA10u);
+}
