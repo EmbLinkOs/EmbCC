@@ -966,6 +966,206 @@ static void vla_prepare(struct unit *u, struct func *f, struct scope *sc,
     t->vla_size = scope_add(sc, "<vla size>", ty_base(TY_LONG, 1), NULL);
 }
 
+
+/* -Waddress in a TRUTH test: `if (f)` rather than `if (f())`. The name
+ * decays to its address, which is never null, so the branch is always
+ * taken. Separate from the comparison case because a condition is not a
+ * binary operator. */
+static void warn_truth_shape(struct unit *u, struct expr *c, const char *where)
+{
+    struct expr *base = c;
+    while (base && base->kind == EXPR_CAST)
+        base = base->rhs;
+    /* A WEAK function's address really can be null -- that is the
+     * whole point of `extern void f(void) __attribute__((weak)); if (f)
+     * f();`, which is how lib/libc/os/posixlike/backend.c asks whether
+     * the host provides something. Warning there would be wrong. */
+    if (base && base->kind == EXPR_VAR && base->name && base->fref &&
+        !base->fref->is_weak &&
+        c->ty && c->ty->kind == TY_PTR && c->ty->pointee &&
+        c->ty->pointee->kind == TY_FUNC)
+        diag_warn_opt(diag_file(u), c->line, c->col, "address",
+                      "the address of '%s' is never null, so this %s is "
+                      "always taken -- a call may be missing",
+                      base->name, where);
+}
+
+/* ---- the statically-decidable warnings on a binary operator ----------
+ *
+ * Each asks a question about the TEXT, answered from what is already
+ * known here: a constant's value, a type's width. None needs an
+ * analysis that does not exist.
+ */
+
+/* Is this a comparison? Those are the operators whose precedence is
+ * higher than & | ^, which is the trap -Wparentheses is about. */
+static int is_cmp_op(enum binop o)
+{
+    return o == B_EQ || o == B_NE || o == B_LT || o == B_LE ||
+           o == B_GT || o == B_GE;
+}
+
+/* Could evaluating this expression do anything besides produce a value?
+ * Used to decide whether `a || a` is worth mentioning: if a is a call
+ * or an assignment, the two are not the same thing at all. */
+static int side_effect_free(const struct expr *e)
+{
+    if (!e)
+        return 1;
+    switch (e->kind) {
+    case EXPR_NUM: case EXPR_FNUM: case EXPR_STR:
+        return 1;
+    case EXPR_VAR:
+        return 1;
+    case EXPR_MEMBER:
+        return side_effect_free(e->lhs);
+    case EXPR_NEG: case EXPR_BNOT: case EXPR_NOT: case EXPR_CAST:
+        return side_effect_free(e->rhs);
+    case EXPR_BINOP:
+        return side_effect_free(e->lhs) && side_effect_free(e->rhs);
+    default:
+        /* A call, an assignment, ++/--, a dereference (which may trap),
+         * anything else: assume it matters. */
+        return 0;
+    }
+}
+
+/* Do these two expressions name the same thing, textually? Deliberately
+ * shallow: a variable or a chain of member accesses off one, and
+ * nothing that could have a side effect. */
+static int same_operand(const struct expr *a, const struct expr *b)
+{
+    if (!a || !b || a->kind != b->kind)
+        return 0;
+    switch (a->kind) {
+    case EXPR_VAR:
+        return a->name && b->name && !strcmp(a->name, b->name);
+    case EXPR_NUM:
+        return a->num == b->num;
+    case EXPR_MEMBER:
+        return a->name && b->name && !strcmp(a->name, b->name) &&
+               same_operand(a->lhs, b->lhs);
+    default:
+        return 0;
+    }
+}
+
+static void warn_binop_shape(struct unit *u, struct expr *e,
+                             struct type *lt, struct type *rt)
+{
+    long v;
+
+    /* -Wparentheses. `REG & MASK == 0` is `REG & (MASK == 0)`, because
+     * == binds tighter than &, so the test is against one bit of the
+     * wrong value. The classic MMIO bug, and nothing else catches it. */
+    if ((e->op == B_AND || e->op == B_OR || e->op == B_XOR) &&
+        ty_is_integer(lt) && ty_is_integer(rt)) {
+        const char *bop = e->op == B_AND ? "&" : e->op == B_OR ? "|" : "^";
+        if (e->rhs->kind == EXPR_BINOP && is_cmp_op(e->rhs->op) &&
+            !e->rhs->parens)
+            diag_warn_opt(diag_file(u), e->line, e->col, "parentheses",
+                          "comparison binds tighter than '%s' here: this is "
+                          "'a %s (b == c)', not '(a %s b) == c'",
+                          bop, bop, bop);
+        else if (e->lhs->kind == EXPR_BINOP && is_cmp_op(e->lhs->op) &&
+                 !e->lhs->parens)
+            diag_warn_opt(diag_file(u), e->line, e->col, "parentheses",
+                          "comparison binds tighter than '%s' here: this is "
+                          "'(a == b) %s c', not 'a == (b %s c)'",
+                          bop, bop, bop);
+    }
+
+    /* -Wshift-count-overflow. The count is taken modulo the width by
+     * the hardware, so `x << 32` returns x rather than zero. The
+     * standard calls it undefined; -fsanitize=undefined traps it at run
+     * time and this catches the constant. */
+    if ((e->op == B_SHL || e->op == B_SHR) && ty_is_integer(lt) &&
+        const_fold(e->rhs, &v)) {
+        long w = ty_size(ty_promote(lt)) * 8;
+        if (v < 0)
+            diag_warn_opt(diag_file(u), e->line, e->col,
+                          "shift-count-overflow",
+                          "shift count %ld is negative", v);
+        else if (v >= w)
+            diag_warn_opt(diag_file(u), e->line, e->col,
+                          "shift-count-overflow",
+                          "shift count %ld is not less than the width of "
+                          "%s (%ld bits)", v, ty_name(ty_promote(lt)), w);
+    }
+
+    /* -Wdiv-by-zero. A constant zero divisor cannot be meant. */
+    if ((e->op == B_DIV || e->op == B_MOD) && ty_is_integer(rt) &&
+        const_fold(e->rhs, &v) && v == 0)
+        diag_warn_opt(diag_file(u), e->line, e->col, "div-by-zero",
+                      "division by zero");
+
+    /* -Wlogical-op. `a || a` -- one side was meant to be something
+     * else. Only when repeating it changes nothing. */
+    if ((e->op == B_LAND || e->op == B_LOR) &&
+        same_operand(e->lhs, e->rhs) && side_effect_free(e->lhs))
+        diag_warn_opt(diag_file(u), e->line, e->col, "logical-op",
+                      "both operands of '%s' are the same expression",
+                      e->op == B_LAND ? "&&" : "||");
+
+    /* -Wtype-limits. A comparison the types already decide. The classic
+     * is `u < 0` for an unsigned u, which is never true however the
+     * value got there. */
+    if (is_cmp_op(e->op) && ty_is_integer(lt) && ty_is_integer(rt)) {
+        struct expr *var = NULL;
+        struct type *vt = NULL;
+        enum binop op = e->op;
+        if (const_fold(e->rhs, &v) && !const_fold(e->lhs, &(long){0})) {
+            var = e->lhs; vt = lt;
+        } else if (const_fold(e->lhs, &v) && !const_fold(e->rhs, &(long){0})) {
+            var = e->rhs; vt = rt;
+            /* Read the comparison from the variable's side. */
+            op = op == B_LT ? B_GT : op == B_GT ? B_LT
+               : op == B_LE ? B_GE : op == B_GE ? B_LE : op;
+        }
+        if (var && vt && !ty_signed_int(vt) && v == 0 &&
+            (op == B_LT || op == B_GE))
+            diag_warn_opt(diag_file(u), e->line, e->col, "type-limits",
+                          "comparison of %s with 0 is always %s: it has no "
+                          "negative values", ty_name(vt),
+                          op == B_LT ? "false" : "true");
+    }
+
+    /* -Waddress. `if (f)` on a function name: always true, because the
+     * name decays to its address. Nearly always a forgotten call. */
+    if (e->op == B_EQ || e->op == B_NE) {
+        /* By the time this runs the function name has DECAYED to a
+         * pointer, so the test is for a pointer-to-function that came
+         * from a plain name -- not for a TY_FUNC operand, which no
+         * longer exists here. A function POINTER variable is a real
+         * question and is left alone. */
+        struct expr *fn = NULL;
+        for (int k = 0; k < 2; k++) {
+            struct expr *o = k ? e->rhs : e->lhs;
+            struct expr *base = o;
+            while (base && base->kind == EXPR_CAST)
+                base = base->rhs;
+            /* `fref` is what makes this sound: it is set only for a
+             * FUNCTION used as a value. A function POINTER variable has
+             * the same decayed type and can legitimately be null, so
+             * testing the type alone warned on correct code. */
+            if (base && base->kind == EXPR_VAR && base->name &&
+                base->fref && !base->fref->is_weak &&
+                o->ty && o->ty->kind == TY_PTR &&
+                o->ty->pointee && o->ty->pointee->kind == TY_FUNC) {
+                struct expr *other = k ? e->lhs : e->rhs;
+                if (is_null_const(other))
+                    fn = base;
+            }
+        }
+        if (fn)
+            diag_warn_opt(diag_file(u), e->line, e->col, "address",
+                          "the address of '%s' is never null, so this is "
+                          "always %s -- a call may be missing", fn->name,
+                          e->op == B_NE ? "true" : "false");
+    }
+}
+
+
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
 {
@@ -1693,6 +1893,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             cx_binop(u, e);
             break;
         }
+        warn_binop_shape(u, e, lt, rt);
 
         switch (e->op) {
         case B_LAND:
@@ -3602,8 +3803,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             check_expr(u, f, sc, s->cond);
             if (ty_is_complex(s->cond->ty) && cx_lowering())
                 s->cond = cx_truth(s->cond);
-            else
+            else {
                 need_scalar(u, s->cond, "'if'");
+                warn_truth_shape(u, s->cond, "branch");
+            }
             check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
             if (s->els)
                 check_stmt(u, f, sc, s->els, in_loop, in_switch, 0);

@@ -60,6 +60,12 @@ struct expr {
     int var_index;        /* EXPR_VAR/EXPR_INCDEC: slot; set by sema */
     struct global *gref;  /* EXPR_VAR/EXPR_INCDEC: the global, when the
                            * name is not a local (sema) */
+    /* Written inside parentheses. Only -Wparentheses reads it, and it
+     * is the difference between `a | b == c`, which is a bug, and
+     * `a | (b == c)`, which is how the author says they meant it.
+     * Without it the warning fires fifteen times on EmbCC's own
+     * correct code. */
+    int parens;
     struct func *fref;    /* EXPR_VAR: a function used as a value —
                            * decays to pointer-to-function (sema) */
     int str_index;        /* EXPR_STR: unit string table slot (irgen) */

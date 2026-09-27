@@ -406,7 +406,7 @@ Still missing, and worth having next: null-pointer dereference and
 misaligned access, both of which need the check at the load/store rather
 than at an arithmetic operator.
 
-**Twelve warnings is the number to be uncomfortable about.** EmbCC
+**Eighteen warnings now, and twelve was the number to be uncomfortable about.** EmbCC
 implements `-Wunused-variable/-parameter/-function`, `-Wshadow`,
 `-Wsign-compare`, `-Wuninitialized`, `-Wmaybe-uninitialized`,
 `-Wformat`, `-Wattributes`, `-Wdeprecated-declarations`,

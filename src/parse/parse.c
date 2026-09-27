@@ -2185,6 +2185,7 @@ static struct expr *parse_primary(struct parser *ps)
         }
         e = parse_comma(ps);
         expect(ps, TOK_RPAREN, "')'");
+        e->parens = 1;      /* -Wparentheses: the author said so */
         return e;
     case TOK_IDENT: {
         /* va_arg(ap, type) -> __builtin_va_arg((ap), type): a special form,
