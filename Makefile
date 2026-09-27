@@ -108,6 +108,8 @@ SRCS := \
 	src/arch/thumb/asm.c \
 	src/arch/thumb/predef.c \
 	src/arch/thumb/predef_cxx.c \
+	src/arch/thumbv8m/predef.c \
+	src/arch/thumbv8m/predef_cxx.c \
 	src/arch/riscv/emit.c \
 	src/arch/riscv/codegen.c \
 	src/arch/riscv/irgen.c \

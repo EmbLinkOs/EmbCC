@@ -30,7 +30,10 @@ enum {
 };
 
 /* Tag_CPU_arch's values, again from the ABI's table. */
-enum { CPU_ARCH_V7 = 10, CPU_ARCH_V7E_M = 13 };
+/* Read off clang's own output (llvm-readobj -A on an object built for each
+ * triple), not from recollection: v8-M Mainline is 17 and its THUMB_ISA_use
+ * is 3 where v7-M's is 2. */
+enum { CPU_ARCH_V7 = 10, CPU_ARCH_V7E_M = 13, CPU_ARCH_V8M_MAIN = 17 };
 
 struct buf {
     unsigned char *p;
@@ -83,6 +86,7 @@ unsigned char *arm_build_attributes(size_t *len)
 {
     struct buf attrs = { NULL, 0, 0 };
     int em = target_thumb_em();
+    int v8 = target_thumb_arch() >= 8;
 
     /* ---- the File sub-subsection's tag/value pairs ---- */
     buleb(&attrs, Tag_conformance);
@@ -91,14 +95,19 @@ unsigned char *arm_build_attributes(size_t *len)
     /* The ARCHITECTURE's name, not a part number: EmbCC emits the same
      * code for every part of a profile, and naming one it was not told
      * about would be a claim it cannot support. */
-    bstr(&attrs, em ? "7E-M" : "7-M");
-    btag(&attrs, Tag_CPU_arch, em ? CPU_ARCH_V7E_M : CPU_ARCH_V7);
+    bstr(&attrs, v8 ? "8-M.MAIN" : em ? "7E-M" : "7-M");
+    btag(&attrs, Tag_CPU_arch, v8 ? CPU_ARCH_V8M_MAIN
+                                  : em ? CPU_ARCH_V7E_M : CPU_ARCH_V7);
     btag(&attrs, Tag_CPU_arch_profile, 'M');
     /* No ARM instruction set at all -- a Cortex-M is Thumb from end to
      * end, which is also why the object carries a `$t` mapping symbol
      * and no `$a`. */
     btag(&attrs, Tag_ARM_ISA_use, 0);
-    btag(&attrs, Tag_THUMB_ISA_use, 2);          /* Thumb-2 */
+    /* 2 is Thumb-2; 3 is "the v8-M Mainline Thumb set", which is a superset.
+     * A linker uses this to refuse an object built for a wider set than the
+     * image's other objects, so claiming 3 on a v7-M build would let an
+     * object into an image whose parts cannot all run there. */
+    btag(&attrs, Tag_THUMB_ISA_use, v8 ? 3 : 2);
     btag(&attrs, Tag_ABI_PCS_R9_use, 0);         /* r9 is an ordinary reg */
     btag(&attrs, Tag_ABI_PCS_GOT_use, 1);        /* direct: no GOT, no PIC */
     btag(&attrs, Tag_ABI_PCS_wchar_t, 4);

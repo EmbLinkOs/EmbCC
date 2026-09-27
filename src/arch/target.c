@@ -10,6 +10,16 @@
 
 static enum target_arch g_arch = TARGET_X86_64;
 static int g_thumb_em;      /* --target=thumbv7em-*: see target_thumb_em */
+/* The Thumb architecture LEVEL: 7 for ARMv7-M and 8 for ARMv8-M Mainline
+ * (Cortex-M33, which the RTOS requirements name as its third target).
+ *
+ * A level and not a new enum target_arch value, because that enum keys the
+ * DATA MODEL -- D-016's reasoning for RISC-V being two targets -- and
+ * ARMv8-M's is identical to ARMv7-M's: ILP32, the same sizes, the same
+ * AAPCS32. What differs is the instruction set's CEILING (v8-M Mainline is
+ * a superset), the predefined macros, and two .ARM.attributes tags. A
+ * second enum value would duplicate a data model to express none of that. */
+static int g_thumb_arch = 7;
 static int g_thumb_fpu;     /* see target_thumb_fpu */
 static enum target_os   g_os   = TGT_OS_NONE;
 static enum target_fmt  g_fmt  = TGT_FMT_ELF;
@@ -232,8 +242,9 @@ static const struct triple {
     enum target_arch arch;
     enum target_os os;
     enum target_fmt fmt;
-    int canon;
-    int thumb_em;      /* ARMv7E-M rather than ARMv7-M */
+    int canon;         /* 1 the canonical name; 2 the v7E-M one; 3 the v8-M
+                        * Mainline one -- see target_triple_of */
+    int thumb_em;      /* 1 ARMv7E-M rather than ARMv7-M; 3 ARMv8-M Mainline */
 } g_triples[] = {
     /* freestanding: bare metal and EmbLinkOS (the default) */
     { "x86_64-elf",        TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
@@ -261,6 +272,24 @@ static const struct triple {
     { "armv7em-none-eabi",  TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 1 },
     { "armv7m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
     { "arm-none-eabi",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
+
+    /* ARMv8-M Mainline: Cortex-M33, the RTOS requirements' third target,
+     * and the RP2350's core. The same data model and the same AAPCS32 as
+     * ARMv7-M, so it is a LEVEL on this target and not a new one (see
+     * g_thumb_arch). `thumb_em` is 3 here, which the reader below turns
+     * into level 8 -- the column already carried "which architecture
+     * variant" and this is one more value of it rather than a second
+     * column saying the same thing twice.
+     *
+     * The DSP extension and the FPU are what -mcpu/-mfpu select, exactly
+     * as on v7em; the security extension (TrustZone-M) is refused by name
+     * because an object that used it would need the linker to place a
+     * secure gateway veneer, which embld does not mint. */
+    /*                                                          canon, em */
+    { "thumbv8m.main-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 3, 3 },
+    { "thumbv8m.main",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 3 },
+    { "thumbv8m-none-eabi", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 3 },
+    { "armv8m.main-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF,    0, 3 },
 
     /* RISC-V, bare metal. `-unknown-elf` is the spelling the reference
      * toolchains use and the one a project's existing --target= string
@@ -318,8 +347,19 @@ int target_from_triple(const char *triple, enum target_arch *out,
             /* The ARM sub-architecture travels with the name, so
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
-            if (g_triples[i].arch == TARGET_THUMB)
-                g_thumb_em = g_triples[i].thumb_em;
+            if (g_triples[i].arch == TARGET_THUMB) {
+                /* 3 in this column means ARMv8-M Mainline. It implies the
+                 * DSP extension too -- v8-M Mainline includes it -- so the
+                 * `em` flag stays set for the code that asks "may I use the
+                 * v7E-M/DSP instructions". */
+                if (g_triples[i].thumb_em == 3) {
+                    g_thumb_arch = 8;
+                    g_thumb_em = 1;
+                } else {
+                    g_thumb_arch = 7;
+                    g_thumb_em = g_triples[i].thumb_em;
+                }
+            }
             return 1;
         }
     return 0;
@@ -327,10 +367,12 @@ int target_from_triple(const char *triple, enum target_arch *out,
 
 const char *target_triple_of(enum target_arch a, enum target_os o)
 {
-    /* canon 2 is the ARMv7E-M spelling: the canonical name for this
-     * arch/os pair depends on the sub-architecture as well, which is
-     * the only place that is true. */
-    int want = a == TARGET_THUMB && g_thumb_em ? 2 : 1;
+    /* canon 2 is the ARMv7E-M spelling and canon 3 the ARMv8-M Mainline
+     * one: the canonical name for this arch/os pair depends on the
+     * sub-architecture as well, which is the only place that is true. */
+    int want = 1;
+    if (a == TARGET_THUMB)
+        want = g_thumb_arch >= 8 ? 3 : g_thumb_em ? 2 : 1;
     for (int i = 0; i < g_ntriples; i++)
         if (g_triples[i].canon == want && g_triples[i].arch == a &&
             g_triples[i].os == o)
@@ -347,6 +389,8 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
  * the object reports about itself, which a consumer is entitled to
  * believe. */
 int target_thumb_em(void) { return g_thumb_em; }
+int target_thumb_arch(void) { return g_thumb_arch; }
+void target_set_thumb_arch(int lvl) { g_thumb_arch = lvl; }
 int target_thumb_fpu(void) { return g_thumb_fpu; }
 void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }
 void target_set_thumb_em(int on) { g_thumb_em = on ? 1 : 0; }

@@ -133,6 +133,11 @@ int target_has_int128(void);
  * for both; this changes what the object SAYS it was built for, which
  * is what a linker and a debugger read. */
 int target_thumb_em(void);
+/* The Thumb architecture level: 7 (ARMv7-M) or 8 (ARMv8-M Mainline). A
+ * level rather than a separate enum target_arch value, because that enum
+ * keys the data model and these two share one; see g_thumb_arch. */
+int target_thumb_arch(void);
+void target_set_thumb_arch(int lvl);
 void target_set_thumb_em(int on);
 
 /* Hardware floating point on ARMv7E-M (FPv4-SP-D16, the Cortex-M4F

@@ -21,6 +21,14 @@ static const struct predef_macro *arch_table(int *count)
             *count = predef_macro_count_cxx_aarch64;
             return predef_macros_cxx_aarch64;
         case TARGET_THUMB:
+            /* ARMv8-M Mainline has its own table. Not the v7-M one with
+             * __ARM_ARCH patched: the feature macros differ throughout, and
+             * a generated file is not hand-parameterised (ARCHITECTURE.md
+             * §5). Same arrangement as the two RISC-V widths. */
+            if (target_thumb_arch() >= 8) {
+                *count = predef_macro_count_cxx_thumbv8m;
+                return predef_macros_cxx_thumbv8m;
+            }
             *count = predef_macro_count_cxx_thumb;
             return predef_macros_cxx_thumb;
         case TARGET_RISCV32:
@@ -42,6 +50,10 @@ static const struct predef_macro *arch_table(int *count)
         *count = predef_macro_count_aarch64;
         return predef_macros_aarch64;
     case TARGET_THUMB:
+        if (target_thumb_arch() >= 8) {
+            *count = predef_macro_count_thumbv8m;
+            return predef_macros_thumbv8m;
+        }
         *count = predef_macro_count_thumb;
         return predef_macros_thumb;
     case TARGET_RISCV32:

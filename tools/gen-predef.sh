@@ -12,7 +12,7 @@
 #                                                    (what tests/golden/predef.sh
 #                                                    compares --dump-predef with)
 #
-#   ARCH is one of: x86_64 aarch64 thumb riscv32 riscv64 avr
+#   ARCH is one of: x86_64 aarch64 thumb thumbv8m riscv32 riscv64 avr
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -65,12 +65,19 @@ set -eu
 # __clang__/__llvm__ join the list for the same reason __GNUC__ is on it:
 # EmbCC is not clang either, and a header that believes it is will take a
 # path built on builtins this compiler does not have.
-EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm__|__riscv_v_intrinsic)'
+#   __ARM_FEATURE_CMSE       clang defines it for every ARMv8-M target,
+#        because the security extension is part of the architecture. EmbCC
+#        cannot emit for it: a non-secure entry function needs the linker to
+#        mint a secure gateway veneer, and embld does not. A header that sees
+#        this macro writes __attribute__((cmse_nonsecure_entry)), so leaving
+#        it in advertises a feature whose use would then fail somewhere else
+#        entirely -- the same reason __riscv_v_intrinsic is filtered.
+EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm__|__riscv_v_intrinsic|__ARM_FEATURE_CMSE)'
 
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|riscv32|riscv64|avr) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv8m|riscv32|riscv64|avr) eval "echo \${$gccvar:-clang}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -81,6 +88,14 @@ refflags() {
     case "$1" in
         thumb)   [ -n "${EMBCC_REF_GCC_THUMB:-}" ] || \
                      echo "-target thumbv7m-none-eabi -ffreestanding" ;;
+        # ARMv8-M Mainline (Cortex-M33). A SECOND table rather than the v7-M
+        # one with __ARM_ARCH patched: the two differ in far more than the
+        # architecture number -- the feature macros (__ARM_FEATURE_*), the
+        # CMSE ones and the DSP flags all move -- and a generated file has no
+        # business being hand-edited into a parameterised one
+        # (ARCHITECTURE.md §5). Same reason the two RISC-V widths have two.
+        thumbv8m) [ -n "${EMBCC_REF_GCC_THUMBV8M:-}" ] || \
+                     echo "-target thumbv8m.main-none-eabi -ffreestanding" ;;
         riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
                      echo "-target riscv32-unknown-elf -march=rv32imc -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
         riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
@@ -114,7 +129,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|riscv32|riscv64) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv8m|riscv32|riscv64) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -190,9 +205,12 @@ case "${1:-both}" in
     x86_64)  gen x86_64 ;;
     aarch64) gen aarch64 ;;
     thumb)   gen thumb ;;
+    thumbv8m) gen thumbv8m ;;
     riscv32) gen riscv32 ;;
     riscv64) gen riscv64 ;;
     avr)     gen avr ;;
-    both|all) gen x86_64; gen aarch64; gen thumb; gen riscv32; gen riscv64; gen avr ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|riscv32|riscv64|avr]" >&2; exit 1 ;;
+    both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv8m; gen riscv32
+              gen riscv64; gen avr ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv8m|riscv32|riscv64|avr]" >&2
+       exit 1 ;;
 esac

@@ -45,8 +45,14 @@ extern const struct predef_macro predef_macros_cxx_aarch64[];
 extern const int predef_macro_count_cxx_aarch64;
 extern const struct predef_macro predef_macros_thumb[];
 extern const int predef_macro_count_thumb;
+/* ARMv8-M Mainline (Cortex-M33) has its own generated table: the feature
+ * macros differ from v7-M's throughout, not just __ARM_ARCH. */
+extern const struct predef_macro predef_macros_thumbv8m[];
+extern const int predef_macro_count_thumbv8m;
 extern const struct predef_macro predef_macros_cxx_thumb[];
 extern const int predef_macro_count_cxx_thumb;
+extern const struct predef_macro predef_macros_cxx_thumbv8m[];
+extern const int predef_macro_count_cxx_thumbv8m;
 extern const struct predef_macro predef_macros_riscv32[];
 extern const int predef_macro_count_riscv32;
 extern const struct predef_macro predef_macros_cxx_riscv32[];
