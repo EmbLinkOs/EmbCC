@@ -12,7 +12,7 @@
 #                                                    (what tests/golden/predef.sh
 #                                                    compares --dump-predef with)
 #
-#   ARCH is one of: x86_64 aarch64 thumb riscv32 riscv64
+#   ARCH is one of: x86_64 aarch64 thumb riscv32 riscv64 avr
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -70,7 +70,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|riscv32|riscv64) eval "echo \${$gccvar:-clang}" ;;
+        thumb|riscv32|riscv64|avr) eval "echo \${$gccvar:-clang}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -85,6 +85,12 @@ refflags() {
                      echo "-target riscv32-unknown-elf -march=rv32imc -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
         riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
                      echo "-target riscv64-unknown-elf -march=rv64imc -mabi=lp64 -mcmodel=medany -ffreestanding" ;;
+        # AVR names the PART, not just the architecture: __AVR_ATmega328P__
+        # and the __AVR_HAVE_* feature macros all come from -mmcu=, and a
+        # header that tests them is how AVR code is normally written. The
+        # Nano profile in the requirements document is an ATmega328P.
+        avr)     [ -n "${EMBCC_REF_GCC_AVR:-}" ] || \
+                     echo "-target avr -mmcu=atmega328p -ffreestanding" ;;
         *)       ;;
     esac
 }
@@ -186,6 +192,7 @@ case "${1:-both}" in
     thumb)   gen thumb ;;
     riscv32) gen riscv32 ;;
     riscv64) gen riscv64 ;;
-    both|all) gen x86_64; gen aarch64; gen thumb; gen riscv32; gen riscv64 ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|riscv32|riscv64]" >&2; exit 1 ;;
+    avr)     gen avr ;;
+    both|all) gen x86_64; gen aarch64; gen thumb; gen riscv32; gen riscv64; gen avr ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|riscv32|riscv64|avr]" >&2; exit 1 ;;
 esac

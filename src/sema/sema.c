@@ -2459,6 +2459,34 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
  * refused by name rather than guessed at — case labels must be integer
  * constant expressions, and a label we cannot evaluate is a label we
  * cannot dispatch on (THE RULE). */
+/* A cast in a CONSTANT EXPRESSION truncates and re-extends, exactly as it
+ * would at run time. Folding the operand and ignoring the cast made
+ * `(char)200` fold to 200 instead of -56 and `(unsigned char)300` to 300
+ * instead of 44, on every target, because nothing consulted the cast's
+ * type at all. It matters wherever a constant expression is REQUIRED
+ * rather than convenient: an enumerator, a case label, an array bound.
+ * The same function exists in parse.c for the parse-time folder, which
+ * is the one _Static_assert uses. */
+static long cast_fold_value(const struct type *t, long v)
+{
+    int sz;
+    if (!t || !ty_is_integer(t))
+        return v;
+    sz = ty_size(t);
+    if (sz <= 0 || sz >= (int)sizeof(long))
+        return v;
+    {
+        unsigned long mask = (~0UL) >> ((sizeof(unsigned long) - (size_t)sz) * 8);
+        unsigned long u = (unsigned long)v & mask;
+        if (!t->is_unsigned) {
+            unsigned long sign = 1UL << (sz * 8 - 1);
+            if (u & sign)
+                u |= ~mask;
+        }
+        return (long)u;
+    }
+}
+
 static int const_fold(const struct expr *e, long *out)
 {
     long a, b;
@@ -2468,7 +2496,10 @@ static int const_fold(const struct expr *e, long *out)
         *out = e->num;
         return 1;
     case EXPR_CAST:
-        return const_fold(e->rhs, out);
+        if (!const_fold(e->rhs, out))
+            return 0;
+        *out = cast_fold_value(e->cast_ty, *out);
+        return 1;
     case EXPR_NEG:
         if (!const_fold(e->rhs, &a))
             return 0;

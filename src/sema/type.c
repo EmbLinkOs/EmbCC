@@ -235,10 +235,15 @@ int ty_size(const struct type *t)
     case TY_BOOL: return 1;
     case TY_CHAR: return 1;
     case TY_SHORT: return 2;
-    case TY_INT: return 4;
+    /* Two on AVR, four elsewhere. On a 16-bit target int is the same
+     * width as a POINTER, which is what makes the usual arithmetic
+     * conversions land differently from every other target here. */
+    case TY_INT: return target_int_size();
     case TY_LONG: return t->is_llong ? 8 : target_long_size();
     case TY_FLOAT: return 4;
-    case TY_DOUBLE: return 8;
+    /* Four on AVR, eight everywhere else -- a target property like
+     * long double's, not a constant. */
+    case TY_DOUBLE: return target_double_size();
     case TY_LDOUBLE: return target_ldouble_size();
     case TY_INT128: return 16;
     case TY_PTR: return target_ptr_size();

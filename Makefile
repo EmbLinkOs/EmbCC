@@ -115,7 +115,9 @@ SRCS := \
 	src/arch/riscv32/predef.c \
 	src/arch/riscv32/predef_cxx.c \
 	src/arch/riscv64/predef.c \
-	src/arch/riscv64/predef_cxx.c
+	src/arch/riscv64/predef_cxx.c \
+	src/arch/avr/predef.c \
+	src/arch/avr/predef_cxx.c
 
 OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
 
@@ -202,7 +204,7 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/arch/aarch64/predef_cxx.c \
              src/arch/thumb/predef.c src/arch/thumb/predef_cxx.c \
              src/arch/riscv32/predef.c src/arch/riscv32/predef_cxx.c \
-             src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
+             src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \

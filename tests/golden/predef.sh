@@ -12,13 +12,14 @@ echo "TEST-MARKER predef"
 # ONE exclusion list in tools/gen-predef.sh (asked for directly, not restated
 # here, so the test and the generator cannot drift apart).
 checked=0
-for arch in x86_64 aarch64 thumb riscv32 riscv64; do
+for arch in x86_64 aarch64 thumb riscv32 riscv64 avr; do
     # The triple is not always "<arch>-elf": ARMv7-M is spelled the way
     # every other toolchain spells it, and gen-predef.sh keys on the short
     # name, so the two are named apart here rather than assumed equal.
     case $arch in
         thumb)          triple=thumbv7m-none-eabi ;;
         riscv32|riscv64) triple=$arch-unknown-elf ;;
+        avr)            triple=avr ;;
         *)              triple=$arch-elf ;;
     esac
     out=$("$EMBCC" --target=$triple --dump-predef) || {
@@ -47,6 +48,12 @@ for arch in x86_64 aarch64 thumb riscv32 riscv64; do
             thumb)   own="__arm__ __thumb__ __ARM_EABI__ __CHAR_UNSIGNED__" ;;
             riscv32) own="__riscv __riscv_xlen __riscv_float_abi_soft __CHAR_UNSIGNED__" ;;
             riscv64) own="__riscv __riscv_xlen __riscv_float_abi_soft __LP64__" ;;
+            # AVR is the one target where an `int` is two bytes and a
+            #  POINTER is two bytes, so __SIZEOF_INT__ is in its own list:
+            #  asking every target for "int is 2" would demand the wrong
+            #  answer from the other five. __AVR_ATmega328P__ is here
+            #  because AVR code selects on the PART, not the family.
+            avr)     own="__AVR__ __AVR_ARCH__ __AVR_ATmega328P__ __SIZEOF_INT__" ;;
         esac
         for m in __INT64_TYPE__ __INTPTR_TYPE__ __SIZE_TYPE__ __PTRDIFF_TYPE__ \
                  __CHAR_BIT__ __SIZEOF_POINTER__ __SIZEOF_LONG__ \

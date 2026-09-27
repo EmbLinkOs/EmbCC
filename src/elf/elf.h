@@ -338,6 +338,9 @@ typedef struct {
 
 /* sh_type */
 #define SHT_NULL      0
+/* AVR, from the ELF machine registry. */
+#define EM_AVR 83
+
 #define SHT_PROGBITS  1
 /* ARM's build-attributes section. A processor-specific type, so it is
  * SHT_LOPROC+3 rather than a number in the generic range. */

@@ -845,6 +845,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* Which machine. Four backends behind this and five targets: RISC-V
      * is ONE code generator for both widths, because the instruction set
      * is the same at both and only the data model differs (D-016). */
+    /* AVR has no code generator yet, and the x86-64 one is the `else`
+     * below -- so without this the compiler emitted an ELF64 object
+     * claiming EM_AVR and full of x86-64 instructions. It linked. It
+     * disassembled as nonsense AVR. That is precisely the outcome every
+     * refusal in this compiler exists to prevent, and adding a target's
+     * data model before its backend is how it happened.
+     *
+     * The front end is complete for AVR: -E, -fsyntax-only and the data
+     * model all work, which is what makes the target useful before the
+     * backend lands. Only code generation is missing, and it says so. */
+    if (ta == TARGET_AVR)
+        diag_fatal(NULL, 0,
+                   "EmbCC has no AVR code generator yet: the front end "
+                   "understands the target (its data model, its predefined "
+                   "macros, -E and -fsyntax-only) but nothing can emit "
+                   "instructions for it. Emitting an object anyway would "
+                   "put another machine's code in it");
     if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64)
         codegen_unit_riscv(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,

@@ -25,7 +25,25 @@ enum target_arch {
      * not, and that is what this enum keys. RV32 is ILP32 and RV64 is
      * LP64, and a single value could not answer for both. */
     TARGET_RISCV32 = 3,
-    TARGET_RISCV64 = 4
+    TARGET_RISCV64 = 4,
+    /* AVR: 8-bit, and the first target here that is not a flat 32- or
+     * 64-bit register machine. Three things about it are unlike every
+     * other target in this enum, and each one costs work elsewhere:
+     *
+     *  - the registers are EIGHT bits. A 16-bit value needs a pair and a
+     *    32-bit value four, so the register allocator hands out runs
+     *    rather than registers.
+     *  - pointers are SIXTEEN bits, so this is the first target where a
+     *    pointer is narrower than a long.
+     *  - it is HARVARD: code and data are separate address spaces, and a
+     *    pointer to one is not a pointer to the other. A string literal
+     *    lives in flash and reaching it is not an ordinary load.
+     *
+     * `double` is FOUR bytes here, which no other target does, and
+     * `char` is UNSIGNED by default -- avr-gcc's documented behaviour,
+     * and it differs from clang's AVR target. Both are measured facts
+     * rather than recollections; see docs. */
+    TARGET_AVR = 5
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -92,6 +110,8 @@ enum target_fmt {
  */
 int target_ptr_size(void);        /* 8 on LP64, 4 on ILP32 */
 int target_long_size(void);       /* likewise; long long is always 8 */
+int target_double_size(void);      /* 8, or 4 on AVR */
+int target_int_size(void);         /* 4, or 2 on AVR */
 int target_ldouble_size(void);    /* 16, or 8 where it is just a double */
 int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
 

@@ -56,6 +56,13 @@ extern const int predef_macro_count_riscv64;
 extern const struct predef_macro predef_macros_cxx_riscv64[];
 extern const int predef_macro_count_cxx_riscv64;
 
+/* AVR (ATmega328P). Generated like the others, from the reference
+ * compiler's own answer for the triple. */
+extern const struct predef_macro predef_macros_avr[];
+extern const int predef_macro_count_avr;
+extern const struct predef_macro predef_macros_cxx_avr[];
+extern const int predef_macro_count_cxx_avr;
+
 /* The language being compiled: 0 C, 1 C++ (its own table — __cplusplus and
  * friends). Set by the driver before preprocessing. */
 void predef_set_cxx(int cxx);

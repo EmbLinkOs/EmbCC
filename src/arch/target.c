@@ -100,28 +100,62 @@ void target_fmt_set(enum target_fmt f) { g_fmt = f; }
  * new architecture is one row and the compiler will not build until
  * every column of it is filled in. */
 static const struct data_model {
-    int ptr, lng, ldbl, char_uns, wchar_uns, int128;
+    /* `dbl` is here because AVR's `double` is FOUR bytes -- avr-gcc's
+     * documented default, and confirmed against clang --target=avr. Every
+     * other target has eight, which is why ty_size() answered 8 outright
+     * until now; a column makes the exception explicit instead of
+     * hiding it in one architecture's backend. A four-byte double also
+     * means `double` arithmetic uses the FLOAT helpers (__addsf3, not
+     * __adddf3), which is what avr-gcc does. */
+    /* `it` is int's width. Two on AVR, four everywhere else -- the
+     * other half of what makes AVR not a 32-bit machine, and hardcoded
+     * as 4 until now for the same reason double was hardcoded as 8. */
+    int ptr, lng, it, dbl, ldbl, char_uns, wchar_uns, int128;
 } g_model[] = {
     /* x86-64 System V: LP64, signed char, x87 long double in 16 bytes */
-    [TARGET_X86_64]  = { 8, 8, 16, 0, 0, 1 },
+    [TARGET_X86_64]  = { 8, 8, 4, 8, 16, 0, 0, 1 },
     /* AAPCS64: LP64, UNSIGNED char and wchar_t, binary128 long double */
-    [TARGET_AARCH64] = { 8, 8, 16, 1, 1, 1 },
+    [TARGET_AARCH64] = { 8, 8, 4, 8, 16, 1, 1, 1 },
     /* AAPCS (32-bit, EABI): ILP32, unsigned char and wchar_t, and a
      * long double that is an ordinary IEEE double -- checked against
      * clang -target thumbv7m-none-eabi -dM, which gives
      * __SIZEOF_LONG_DOUBLE__ 8 and __LDBL_MANT_DIG__ 53. long long
      * stays 8, and is 8-ALIGNED, which is where a 32-bit ABI most
      * often surprises: __BIGGEST_ALIGNMENT__ is 8, not 4. */
-    [TARGET_THUMB]   = { 4, 4,  8, 1, 1, 0 },
+    [TARGET_THUMB]   = { 4, 4, 4, 8, 8, 1, 1, 0 },
     /* The RISC-V psABI. Unsigned char like the ARM ones, but a SIGNED
      * wchar_t -- which is why those are two columns and not one -- and
      * a binary128 long double at both widths. Read off
      * `clang -target riscv{32,64}-unknown-elf -dM`. */
-    [TARGET_RISCV32] = { 4, 4, 16, 1, 0, 0 },
-    [TARGET_RISCV64] = { 8, 8, 16, 1, 0, 1 },
+    [TARGET_RISCV32] = { 4, 4, 4, 8, 16, 1, 0, 0 },
+    [TARGET_RISCV64] = { 8, 8, 4, 8, 16, 1, 0, 1 },
+    /* AVR (avr-gcc's ABI, measured against clang --target=avr
+     * -mmcu=atmega328p): 16-bit pointers -- the first target here where
+     * a pointer is NARROWER than a long -- a four-byte double, and no
+     * __int128 on an 8-bit machine.
+     *
+     * `char` is SIGNED here, which is what clang --target=avr does and
+     * what the generated predefined-macro table therefore says. It is
+     * very likely NOT what avr-gcc does -- avr-gcc is documented as
+     * defaulting to -funsigned-char -- but there is no avr-gcc on this
+     * machine to check, and the alternative was to set the model from
+     * recollection and hand-edit a GENERATED table to agree with it.
+     *
+     * So: the compiler is self-consistent, every part of it verifiable
+     * against something real, and the open question is written down
+     * rather than guessed. Settling it needs a real avr-gcc, and it
+     * matters before the kernel is built: char's default signedness
+     * changes what `char c = 200; c > 0` answers, though not the ABI.
+     *
+     * `long double` is four bytes too: the same type as double, which is
+     * the same type as float. There is no wider floating point on this
+     * machine. */
+    [TARGET_AVR]     = { 2, 4, 2, 4,  4, 0, 0, 0 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
+int target_double_size(void)    { return g_model[g_arch].dbl; }
+int target_int_size(void)       { return g_model[g_arch].it; }
 /* XLEN is RISC-V's own name for the register width IN BITS -- 32 or 64,
  * the number in `rv32`/`rv64` and in __riscv_xlen. Returning the pointer
  * column directly would give BYTES, and the backend that divided it by 8
@@ -242,6 +276,16 @@ static const struct triple {
     { "riscv64-elf",         TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "rv64",                TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
 
+    /* AVR. `avr` is the canonical spelling because that is what every
+     * other toolchain calls the target and what a project's --target=
+     * string will say; the part is selected with -mmcu=, as avr-gcc and
+     * clang both do, and not by a triple per device. Freestanding is the
+     * only thing an 8-bit microcontroller can be. */
+    { "avr",                 TARGET_AVR,     TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "avr-none-elf",        TARGET_AVR,     TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "avr-elf",             TARGET_AVR,     TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "avr-unknown-none",    TARGET_AVR,     TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
      * time, which is why the format column says ELF and not EMBX. */
@@ -327,6 +371,7 @@ int target_elf_machine(enum target_arch a)
     case TARGET_THUMB:   return EM_ARM;
     case TARGET_RISCV32:
     case TARGET_RISCV64: return EM_RISCV;
+    case TARGET_AVR:     return EM_AVR;
     default:             return EM_X86_64;
     }
 }

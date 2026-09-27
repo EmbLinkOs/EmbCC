@@ -29,6 +29,9 @@ static const struct predef_macro *arch_table(int *count)
         case TARGET_RISCV64:
             *count = predef_macro_count_cxx_riscv64;
             return predef_macros_cxx_riscv64;
+        case TARGET_AVR:
+            *count = predef_macro_count_cxx_avr;
+            return predef_macros_cxx_avr;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -47,6 +50,9 @@ static const struct predef_macro *arch_table(int *count)
     case TARGET_RISCV64:
         *count = predef_macro_count_riscv64;
         return predef_macros_riscv64;
+    case TARGET_AVR:
+        *count = predef_macro_count_avr;
+        return predef_macros_avr;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;

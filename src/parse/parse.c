@@ -760,6 +760,39 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
 
 static struct type *parse_stars(struct parser *ps, struct type *t);
 static struct expr *parse_cond(struct parser *ps);
+/* A cast in a CONSTANT EXPRESSION truncates and re-extends, exactly as
+ * it would at run time. Folding the operand and ignoring the cast made
+ * `(char)200` fold to 200 instead of -56 and `(unsigned char)300` to 300
+ * instead of 44 -- on every target, since nothing here consulted the
+ * cast's type at all.
+ *
+ * It matters wherever a constant expression is required and not merely
+ * convenient: _Static_assert, an array bound, a case label, an
+ * enumerator. clang gets all of those right and EmbCC did not.
+ *
+ * Only INTEGER casts narrower than the fold's own `long` are adjusted; a
+ * pointer or floating cast is left to the caller that understands it,
+ * which is what returning the operand unchanged already did. */
+static long cast_fold_value(const struct type *t, long v)
+{
+    int sz;
+    if (!t || !ty_is_integer(t))
+        return v;
+    sz = ty_size(t);
+    if (sz <= 0 || sz >= (int)sizeof(long))
+        return v;
+    {
+        unsigned long mask = (~0UL) >> ((sizeof(unsigned long) - (size_t)sz) * 8);
+        unsigned long u = (unsigned long)v & mask;
+        if (!t->is_unsigned) {
+            unsigned long sign = 1UL << (sz * 8 - 1);
+            if (u & sign)
+                u |= ~mask;            /* sign-extend back to long */
+        }
+        return (long)u;
+    }
+}
+
 static int size_fold(const struct expr *e, long *out);
 static struct type *ce_type(const struct expr *e);
 static struct type *parse_array_dims(struct parser *ps, struct type *t);
@@ -1701,7 +1734,10 @@ static int size_fold(const struct expr *e, long *out)
         return 1;
     }
     case EXPR_CAST:
-        return size_fold(e->rhs, out);
+        if (!size_fold(e->rhs, out))
+            return 0;
+        *out = cast_fold_value(e->cast_ty, *out);
+        return 1;
     case EXPR_CALL:
         /* __atomic_always_lock_free / __atomic_is_lock_free are integer
          * constant expressions in gcc — `_Static_assert` uses them, and it
