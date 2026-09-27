@@ -115,6 +115,18 @@ int target_has_int128(void);
 int target_thumb_em(void);
 void target_set_thumb_em(int on);
 
+/* Hardware floating point on ARMv7E-M (FPv4-SP-D16, the Cortex-M4F
+ * unit): SINGLE precision only, so `float` runs on the FPU and `double`
+ * still goes through __adddf3.
+ *
+ * Separate from the ABI on purpose. This says the compiler may EMIT VFP
+ * arithmetic; where floating-point ARGUMENTS travel is a different
+ * question (-mfloat-abi), and answering the two together is how an
+ * object ends up claiming an ABI it does not implement. -mfpu= stays
+ * refused until both halves are right. */
+int target_thumb_fpu(void);
+void target_set_thumb_fpu(int on);
+
 /* The selected target. Defaults to x86_64 so every existing command line
  * keeps its meaning; --target= is the only thing that changes it. */
 enum target_arch target_get(void);

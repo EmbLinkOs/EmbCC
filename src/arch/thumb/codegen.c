@@ -1277,6 +1277,94 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
     return sign ? T_GE : T_CS;             /* B_GE */
 }
 
+
+/* ---- the FPU, for single precision -------------------------------------
+ *
+ * S0 and S1 are the scratch pair, chosen the way T_ACC and T_TMP are:
+ * caller-saved in AAPCS-VFP (s0-s15 are), so using them costs no
+ * prologue. Nothing else in this backend touches an FP register yet,
+ * which is why two are enough.
+ */
+#define T_FS0 0
+#define T_FS1 1
+
+/* A single-precision value from its slot into an FP register, and back.
+ * The offset field is in WORDS, so it reaches 1020 bytes -- further than
+ * the integer immediate forms -- and a slot beyond that needs the
+ * address computed first. */
+static void vfp_load(struct t_fn *F, int v, int sreg)
+{
+    if (in_reg(F, v)) {
+        /* The value is in a CORE register: one move, no memory. */
+        t_vmov_core(F->t, sreg, F->loc[v], 1);
+        return;
+    }
+    if (F->slot[v] >= 0 && F->slot[v] <= 1020 && !(F->slot[v] & 3)) {
+        t_vldst(F->t, sreg, T_SP, (int)F->slot[v], 0, 0);
+        return;
+    }
+    rd(F, v, T_ACC);                    /* the general path, via a core reg */
+    t_vmov_core(F->t, sreg, T_ACC, 1);
+}
+
+static void vfp_store(struct t_fn *F, int v, int sreg)
+{
+    if (v < 0)
+        return;
+    if (in_reg(F, v)) {
+        t_vmov_core(F->t, sreg, F->loc[v], 0);
+        return;
+    }
+    if (F->slot[v] >= 0 && F->slot[v] <= 1020 && !(F->slot[v] & 3)) {
+        t_vldst(F->t, sreg, T_SP, (int)F->slot[v], 0, 1);
+        return;
+    }
+    t_vmov_core(F->t, sreg, T_ACC, 0);
+    wr(F, v, T_ACC);
+}
+
+/* Returns 1 when this instruction was emitted on the FPU, 0 to fall
+ * through to the soft-float helper. Saying 0 rather than refusing is
+ * deliberate: an operation the FPU cannot do is not an error, it is a
+ * call -- `double` on an SP-only part is the whole reason. */
+static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    if (i->imm_b)
+        return 0;                       /* the helper path folds it */
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+        vfp_load(F, i->a, T_FS0);
+        vfp_load(F, i->b, T_FS1);
+        if (i->op == IR_ADD)      t_vadd(t, T_FS0, T_FS0, T_FS1, 0);
+        else if (i->op == IR_SUB) t_vsub(t, T_FS0, T_FS0, T_FS1, 0);
+        else if (i->op == IR_MUL) t_vmul(t, T_FS0, T_FS0, T_FS1, 0);
+        else                      t_vdiv(t, T_FS0, T_FS0, T_FS1, 0);
+        vfp_store(F, i->dst, T_FS0);
+        return 1;
+    case IR_NEG:
+        vfp_load(F, i->a, T_FS0);
+        t_vneg(t, T_FS0, T_FS0, 0);
+        vfp_store(F, i->dst, T_FS0);
+        return 1;
+    case IR_SQRT:
+        vfp_load(F, i->a, T_FS0);
+        t_vsqrt(t, T_FS0, T_FS0, 0);
+        vfp_store(F, i->dst, T_FS0);
+        return 1;
+    /* IR_CMP is deliberately NOT here yet. vcmp writes FPSCR and only
+     * vmrs moves that to APSR, so the comparison is two instructions and
+     * then the 0/1 result still has to be materialised from the flags --
+     * a different shape from the helper, which returns it in r0. Emitting
+     * the vcmp here and returning 0 would emit the helper call as well,
+     * which is how the first draft of this was wrong. It goes in with
+     * the flag-reading path, not before it. */
+    default:
+        return 0;
+    }
+}
+
+
 /* ---- one instruction ------------------------------------------------ */
 
 static void gen_ins(struct t_fn *F, int n)
@@ -1319,6 +1407,19 @@ static void gen_ins(struct t_fn *F, int n)
         const char *name = fp_binop_name(i->op, i->w);
         if (i->w != 4 && i->w != 8)
             t_refuse(fn, i, "a long double (ARMv7-M has no 16-byte float)");
+        /* THE FPU, where there is one. FPv4-SP-D16 computes SINGLE
+         * precision only, so this is `float` and nothing else -- a
+         * double still goes to __adddf3 below, on the same part.
+         *
+         * The values go through their slots rather than staying in FP
+         * registers: there is no floating-point register class on this
+         * target yet, so `vldr` both operands, one instruction, `vstr`
+         * the result. That is already four to six instructions where the
+         * helper call was a dozen plus the call itself, and it is
+         * CORRECT before it is fast -- the register class is the next
+         * step and does not change what is computed. */
+        if (target_thumb_fpu() && i->w == 4 && fp_vfp_arith(F, i))
+            return;
         if (name) {
             if (i->imm_b)
                 t_refuse(fn, i, "a folded floating-point immediate");
@@ -2412,6 +2513,20 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
 {
     (void)optimize; (void)no_sse;
     g_t_regalloc = regalloc;
+    /* EMBCC_T_FPU=1: emit VFP for single-precision arithmetic.
+     *
+     * An environment variable and not -mfpu=, because -mfpu= is a
+     * PROMISE about the object -- it implies the hard-float ABI, the
+     * register class and Tag_ABI_VFP_args, none of which is finished.
+     * Accepting the flag now would mean accepting it and emitting
+     * something else, which is the failure this whole area is being
+     * fixed for. The variable lets the arithmetic be exercised and
+     * tested while the flag stays refused by name; it goes away when
+     * -mfpu= can be honoured in full. */
+    {
+        const char *e = getenv("EMBCC_T_FPU");
+        target_set_thumb_fpu(e && *e && *e != '0');
+    }
 
     struct t_sites st;
     st.call = NULL; st.ncall = st.capcall = 0;

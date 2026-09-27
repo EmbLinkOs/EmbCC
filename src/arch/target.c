@@ -10,6 +10,7 @@
 
 static enum target_arch g_arch = TARGET_X86_64;
 static int g_thumb_em;      /* --target=thumbv7em-*: see target_thumb_em */
+static int g_thumb_fpu;     /* see target_thumb_fpu */
 static enum target_os   g_os   = TGT_OS_NONE;
 static enum target_fmt  g_fmt  = TGT_FMT_ELF;
 
@@ -302,6 +303,8 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
  * the object reports about itself, which a consumer is entitled to
  * believe. */
 int target_thumb_em(void) { return g_thumb_em; }
+int target_thumb_fpu(void) { return g_thumb_fpu; }
+void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }
 void target_set_thumb_em(int on) { g_thumb_em = on ? 1 : 0; }
 
 const char *target_triple_now(void)
