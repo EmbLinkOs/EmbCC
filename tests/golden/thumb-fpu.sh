@@ -137,6 +137,58 @@ double arithmetic"; exit 1; }
 requires"
 fi
 
+# ---- the FP register class, under pressure ----------------------------
+# Twelve live floats, so the allocator has to place and reuse registers
+# rather than keeping one value at a time. This is the case that would
+# expose the dangerous shape: a value the FP allocator placed, written by
+# the INTEGER path (which does not know about FP registers) and then read
+# back from the register. cg_float_vregs prevents it -- a value stays in
+# the class only if every instruction touching it is floating point, and a
+# float LOAD is not -- so anything from memory keeps its slot. This test
+# is what says that rule is actually holding.
+cat > "$out/stress.c" <<'CEOF'
+void writec(int c); void puts_(const char *s); void putn(long v);
+union fu { float f; unsigned u; };
+static unsigned B(float f) { union fu x; x.f = f; return x.u; }
+static void h8(unsigned v)
+{
+    for (int i = 28; i >= 0; i -= 4)
+        writec("0123456789abcdef"[(v >> i) & 15]);
+    writec(' ');
+}
+volatile float t[12] = { 1.5f, 2.5f, 0.5f, 4.0f, 0.25f, 8.0f,
+                         3.0f, 1.25f, 6.0f, 0.75f, 2.0f, 5.0f };
+int main(void)
+{
+    float a = t[0], b = t[1], c = t[2], d = t[3], e = t[4], f = t[5];
+    float g = t[6], h = t[7], i = t[8], j = t[9], k = t[10], l = t[11];
+    float r1 = a * b + c * d, r2 = e * f + g * h, r3 = i * j + k * l;
+    float r4 = r1 / r2, r5 = r2 / r3, r6 = r3 / r1;
+    float s = r4 + r5 + r6 - a * b * c;
+    h8(B(r1)); h8(B(r2)); h8(B(r3));
+    h8(B(r4)); h8(B(r5)); h8(B(r6)); h8(B(s));
+    puts_("\n==END==\n");
+    return 0;
+}
+CEOF
+cc -w -o "$out/shost" "$out/stress.c" \
+    "$EMBCC_ROOT/tests/harness/thumb/hostio.c" 2>/dev/null || {
+    echo "the stress host reference does not build"; exit 1; }
+swant=$("$out/shost" | head -1)
+for opt in -O0 -O1 -O2 -Os; do
+    EMBCC_T_FPU=1 "$EMBCC" --target=$T $opt -c "$out/stress.c" \
+        -o "$out/st.o" || { echo "stress $opt: does not compile"; exit 1; }
+    sh "$H/link.sh" "$out/st.elf" "$out/st.o" "$out/softfp.o" \
+        > /dev/null 2>&1 || { echo "stress $opt: does not link"; exit 1; }
+    got=$(sh "$H/run.sh" "$out/st.elf" 2>&1 | head -1)
+    [ "$got" = "$swant" ] || {
+        echo "stress $opt: twelve live floats disagree with the host"
+        echo "  want: $swant"
+        echo "  got:  $got"; exit 1; }
+done
+echo "twelve live floats agree with the host at four levels, so the FP
+register class is placing values soundly"
+
 # -mfpu= stays REFUSED. The FPU arithmetic works, but the flag promises
 # the hard-float ABI as well, and that is not finished -- accepting it
 # now would mean accepting a promise and emitting something else.

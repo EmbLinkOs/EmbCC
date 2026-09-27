@@ -150,6 +150,9 @@ struct t_fn {
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when it did not run (-O0/-O1). */
     int *loc;
+    /* Where the FP allocator put each float vreg, or -1. NULL when there
+     * is no FPU, which is also how in_freg answers no. */
+    int *floc;
     int used_callee[RA_MAXPOOL];
     int nsave;           /* how many of those it took */
     long save_at;        /* where the prologue spilled them */
@@ -178,6 +181,44 @@ static const int T_POOL[T_NPOOL] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
  * pushes r0-r3 and `va_arg` walks them, so those four are not the
  * allocator's to give. */
 static const int T_POOL_VA[5] = { 4, 5, 6, 7, 8 };
+
+/* ---- the floating-point register class (FPv4-SP) ----------------------
+ *
+ * s0-s15 are caller-saved in AAPCS-VFP and s16-s31 callee-saved, so the
+ * pool is the caller-saved half and NOTHING is added to the prologue --
+ * the same reasoning that makes the aarch64 FP pool report nfsave 0.
+ * s14 and s15 stay out as the scratch pair the slot paths need, which
+ * leaves fourteen.
+ *
+ * The pool deliberately INCLUDES s0-s13, the argument registers: a pool
+ * that avoids the argument file pays a move at every call, and a hint
+ * beats an extra register. That is the lesson from the integer pools on
+ * this target and on RISC-V, and it is why the ABI hints matter more
+ * than the pool's size.
+ *
+ * s16-s31 are left out entirely for now. Taking one means vpush/vpop in
+ * the prologue and a bigger frame, and that is a separate change from
+ * "values stop round-tripping through slots". */
+#define T_NFPOOL 14
+static const int T_FPOOL[T_NFPOOL] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
+};
+
+static const int *t_fp_pool_for(const struct ir_func *fn, int *n)
+{
+    (void)fn;
+    *n = T_NFPOOL;
+    return T_FPOOL;
+}
+
+/* Nothing in the pool is callee-saved, so this is always 0 -- stated
+ * rather than left NULL, because NULL means "this backend has no FP
+ * class at all" and it now has one. */
+static int t_fp_callee_saved(int reg)
+{
+    (void)reg;
+    return 0;
+}
 
 static const int *t_pool_for(const struct ir_func *fn, int *n)
 {
@@ -242,7 +283,13 @@ static const struct ra_target THUMB_RA = {
     t_op_calls_helper,
     0,            /* Thumb-2's wide forms are three-operand */
     t_abi_hints,
-    NULL, NULL    /* no FP class -- soft float, in the core registers */
+    /* The FP class, which exists only where the FPU does. Without one a
+     * float lives in a CORE register and must stay eligible for the
+     * integer pool, which is what soft float needs -- so the two answers
+     * are conditional on target_thumb_fpu() at the call site, not here.
+     * These two functions describe the class; whether it is used is a
+     * different question. */
+    t_fp_pool_for, t_fp_callee_saved
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -619,6 +666,14 @@ static void layout(struct t_fn *F)
 static int in_reg(const struct t_fn *F, int v)
 {
     return F->loc && v >= 0 && F->loc[v] >= 0;
+}
+
+/* In an FP register. Separate from in_reg because the two classes are
+ * disjoint by construction: a value the FP allocator placed is excluded
+ * from the general pool, so exactly one of these can be true. */
+static int in_freg(struct t_fn *F, int v)
+{
+    return F->floc && v >= 0 && F->floc[v] >= 0;
 }
 
 /* Get vreg v into exactly `reg` -- a load without the allocator, a MOVE
@@ -1280,13 +1335,18 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
 
 /* ---- the FPU, for single precision -------------------------------------
  *
- * S0 and S1 are the scratch pair, chosen the way T_ACC and T_TMP are:
- * caller-saved in AAPCS-VFP (s0-s15 are), so using them costs no
- * prologue. Nothing else in this backend touches an FP register yet,
- * which is why two are enough.
+ * S14 and S15 are the scratch pair, chosen the way T_ACC and T_TMP are:
+ * caller-saved in AAPCS-VFP (s0-s15 all are), so using them costs no
+ * prologue, and outside the allocator's pool so they cannot collide with
+ * a value it placed.
  */
-#define T_FS0 0
-#define T_FS1 1
+/* s14 and s15: OUTSIDE the allocator's pool (T_FPOOL is s0-s13) and
+ * caller-saved, so using them costs no prologue and cannot collide with
+ * a value the allocator placed. The pool and this pair have to be
+ * disjoint or a scratch write destroys a live value -- they are declared
+ * a few hundred lines apart, which is why both say so. */
+#define T_FS0 14
+#define T_FS1 15
 
 /* A single-precision value from its slot into an FP register, and back.
  * The offset field is in WORDS, so it reaches 1020 bytes -- further than
@@ -1294,6 +1354,13 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
  * address computed first. */
 static void vfp_load(struct t_fn *F, int v, int sreg)
 {
+    if (in_freg(F, v)) {
+        /* Already where it is wanted, or one register move away -- the
+         * whole point of the FP class. */
+        if (F->floc[v] != sreg)
+            t_vmov_reg(F->t, sreg, F->floc[v], 0);
+        return;
+    }
     if (in_reg(F, v)) {
         /* The value is in a CORE register: one move, no memory. */
         t_vmov_core(F->t, sreg, F->loc[v], 1);
@@ -1311,6 +1378,11 @@ static void vfp_store(struct t_fn *F, int v, int sreg)
 {
     if (v < 0)
         return;
+    if (in_freg(F, v)) {
+        if (F->floc[v] != sreg)
+            t_vmov_reg(F->t, F->floc[v], sreg, 0);
+        return;
+    }
     if (in_reg(F, v)) {
         t_vmov_core(F->t, sreg, F->loc[v], 0);
         return;
@@ -1333,25 +1405,31 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
     if (i->imm_b)
         return 0;                       /* the helper path folds it */
     switch (i->op) {
-    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: {
+        /* Into the destination's OWN register when it has one, so the
+         * result needs no move afterwards. VFP is three-operand, so
+         * nothing has to be copied to make room first -- unlike the
+         * two-operand integer paths above. */
+        int d = in_freg(F, i->dst) ? F->floc[i->dst] : T_FS0;
         vfp_load(F, i->a, T_FS0);
         vfp_load(F, i->b, T_FS1);
-        if (i->op == IR_ADD)      t_vadd(t, T_FS0, T_FS0, T_FS1, 0);
-        else if (i->op == IR_SUB) t_vsub(t, T_FS0, T_FS0, T_FS1, 0);
-        else if (i->op == IR_MUL) t_vmul(t, T_FS0, T_FS0, T_FS1, 0);
-        else                      t_vdiv(t, T_FS0, T_FS0, T_FS1, 0);
-        vfp_store(F, i->dst, T_FS0);
+        if (i->op == IR_ADD)      t_vadd(t, d, T_FS0, T_FS1, 0);
+        else if (i->op == IR_SUB) t_vsub(t, d, T_FS0, T_FS1, 0);
+        else if (i->op == IR_MUL) t_vmul(t, d, T_FS0, T_FS1, 0);
+        else                      t_vdiv(t, d, T_FS0, T_FS1, 0);
+        if (d == T_FS0)
+            vfp_store(F, i->dst, T_FS0);
         return 1;
-    case IR_NEG:
+    }
+    case IR_NEG: case IR_SQRT: {
+        int d = in_freg(F, i->dst) ? F->floc[i->dst] : T_FS0;
         vfp_load(F, i->a, T_FS0);
-        t_vneg(t, T_FS0, T_FS0, 0);
-        vfp_store(F, i->dst, T_FS0);
+        if (i->op == IR_NEG) t_vneg(t, d, T_FS0, 0);
+        else                 t_vsqrt(t, d, T_FS0, 0);
+        if (d == T_FS0)
+            vfp_store(F, i->dst, T_FS0);
         return 1;
-    case IR_SQRT:
-        vfp_load(F, i->a, T_FS0);
-        t_vsqrt(t, T_FS0, T_FS0, 0);
-        vfp_store(F, i->dst, T_FS0);
-        return 1;
+    }
     /* IR_CMP is deliberately NOT here yet. vcmp writes FPSCR and only
      * vmrs moves that to APSR, so the comparison is two instructions and
      * then the 0/1 result still has to be materialised from the flags --
@@ -2250,9 +2328,37 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * register needs a location list to describe, which is the
          * larger feature; this is exact. */
         char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
-        F.loc = ra_allocate(fn, &THUMB_RA, F.wide, pin,
+        /* The float vregs, where there is an FPU to put them in. Without
+         * one a float lives in a CORE register and must stay eligible
+         * for the general pool -- which is why this is conditional and
+         * not simply cg_float_vregs(fn). */
+        char *flt = target_thumb_fpu() ? cg_float_vregs(fn) : (char *)0;
+        /* Both maps mean the same thing to ra_allocate -- "must not get
+         * a general register" -- and both can apply at once, so they are
+         * merged rather than one passed and the other dropped. Passing
+         * `pin` alone was correct only while there was no FP class. */
+        char *excl = pin;
+        if (pin && flt) {
+            for (int v = 0; v < fn->nvregs; v++)
+                if (flt[v]) pin[v] = 1;
+        } else if (flt) {
+            excl = flt;
+        }
+        F.loc = ra_allocate(fn, &THUMB_RA, F.wide, excl,
                             F.used_callee, &F.nsave);
+        if (flt) {
+            /* The FP pool is caller-saved throughout, so it reports no
+             * registers to save and nfsave is always 0 -- passed only
+             * because the shared allocator wants somewhere to put an
+             * answer. */
+            int fsave[T_NFPOOL], nfsave = 0;
+            F.floc = ra_allocate_fp(fn, &THUMB_RA, F.wide, flt,
+                                    fsave, &nfsave);
+            (void)nfsave;
+        }
         free(pin);
+        if (flt != pin)
+            free(flt);
         /* Read counts for comparison/branch fusion. Only with the
          * allocator on: without it every value round-trips through a
          * slot and the branch reads the slot, so nothing is saved and
