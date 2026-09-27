@@ -533,13 +533,13 @@ Every target against Clang on the same real corpus, at `-Os`:
 reading operands where the allocator put them (`fa9621b`), and fusing
 a comparison with the branch that reads it (`c544750`).*
 
-**ARMv7-M, a further 4.9%.** Measured separately, on the 58 files of
-`lib/` that both compilers accept at `-Os`: 115,265 -> 109,597 bytes,
-against Clang's 44,089 on the same set (2.61x -> 2.48x). That is a
-different corpus from the table above, so it is quoted as its own
-delta rather than folded into the 3.06x.
+**ARMv7-M, 9.3%.** Measured separately, on the 58 files of `lib/` that
+both compilers accept at `-Os`: 115,265 -> 104,507 bytes, against
+Clang's 44,089 on the same set (2.61x -> 2.37x). That is a different
+corpus from the table above, so it is quoted as its own delta rather
+than folded into the 3.06x.
 
-Three things were forcing values into memory, and each cost
+Four things were forcing values into memory, and each cost
 instructions in every function:
 
 - `ret_scalar_in_reg` was 0, so a returned value went out through its
@@ -553,6 +553,34 @@ instructions in every function:
   then never read. It runs after the allocator, so it can simply skip
   them. `int f(int a,int b){return a+b;}` had a 24-byte frame for two
   values that were both in registers.
+- `call_int_arg_in_reg` was 0, so every scalar call ARGUMENT went out
+  through its slot: two instructions per argument, at every call.
+  Turning it on needs the arguments moved in PARALLEL -- loading them
+  one at a time overwrites a register another argument is still to be
+  read from, and `g(a+1, b+2)` with the sums in the opposite registers
+  is enough to hit it. The prologue and the soft-float helper path
+  already had that shape.
+
+**And it uncovered a miscompile that had been there all along.** AAPCS32
+wants `sp` eight-byte aligned, so the prologue push must move it by a
+multiple of eight -- an EVEN number of registers. `SAVE_MASK` is four
+for exactly that reason. But the allocator's callee-saved set is pushed
+by the same instruction and its parity was never counted: with an odd
+`nsave` the push is 4 mod 8 and every eight-byte object below it is four
+bytes out. Keeping call arguments in registers made that common --
+`main` in `embedded-varargs.c` went from pushing four registers to nine
+-- and a variadic callee then read a `long long` stack argument as zero,
+three calls from the function with the wrong prologue. It reproduces
+before any of this work.
+
+The pad is r12: the ABI's own scratch, harmless to save, and never in
+the allocator's pool, unlike r4-r8 which can all be taken at once.
+Padding the FRAME by four instead would also make the arithmetic work
+but leaves `sp` misaligned between the `push` and the `sub`, which is
+where Cortex-M exception entry stacks context. The mask and its byte
+count now come from one pair of functions used by the prologue, the
+epilogue and the stack-parameter offsets -- the missing pad was exactly
+the term that made those three disagree.
 
 The prologue's unconditional `push {r9, r10, r11, lr}` looks like the
 next thing to fix and, MEASURED, is not. Instrumenting the point where

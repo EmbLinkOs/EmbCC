@@ -273,3 +273,60 @@ if command -v llvm-dwarfdump > /dev/null 2>&1; then
 else
     echo "SKIP the -g half: no llvm-dwarfdump"
 fi
+
+# ---- the push keeps sp eight-byte aligned -----------------------------
+#
+# AAPCS32 requires sp to be eight-byte aligned at every public
+# interface. SAVE_MASK is four registers, chosen even for exactly that
+# reason -- but the allocator's callee-saved set is pushed by the SAME
+# instruction, and its parity was never counted. An odd number of extra
+# registers makes the push 4 mod 8, and every eight-byte object below it
+# is then four bytes out.
+#
+# That was reachable before anything in this file changed and became
+# common once call arguments started living in registers: `main` in
+# embedded-varargs.c went from pushing four registers to nine, and the
+# variadic callee read its eight-byte stack arguments from a misaligned
+# frame. The symptom was a `long long` argument reading as zero, three
+# calls away from the function with the wrong prologue.
+#
+# So the invariant is asserted directly, over a range of functions
+# chosen to need different numbers of registers -- an assertion on the
+# push itself does not depend on some caller happening to notice.
+cat > "$out/al.c" <<'EOF'
+int f1(int a) { return a; }
+int f2(int a, int b) { return a * b; }
+int f3(int a, int b, int c) { int x = a * b, y = b * c; return x + y + a; }
+int f4(int a, int b, int c, int d)
+{ int p = a * b, q = c * d, r = p + q, s = p * q; return p + q + r + s + a; }
+long long f5(long long a, long long b) { return a * b + a; }
+int f6(const int *p, int n)
+{ int s = 0, t = 1, u = 2, v = 3;
+  for (int i = 0; i < n; i++) { s += p[i]; t ^= p[i]; u += t; v *= 3; }
+  return s + t + u + v; }
+int g(int, int, int, int, int, int);
+int f7(int a, int b, int c, int d, int e, int f)
+{ return g(f, e, d, c, b, a) + g(a, b, c, d, e, f); }
+EOF
+"$EMBCC" --target=$T -Os -c "$out/al.c" -o "$out/al.o" || {
+    echo "the alignment file does not compile"; exit 1; }
+"$OD" -d --triple=thumbv7m --no-show-raw-insn "$out/al.o" > "$out/al.s" 2>&1
+# Every `push` in the object, counted. A push moves sp by 4 per
+# register, so an odd count leaves it 4 mod 8.
+bad=0
+while IFS= read -r line; do
+    regs=$(printf '%s\n' "$line" | sed 's/.*{//; s/}.*//')
+    n=$(printf '%s\n' "$regs" | tr ',' '\n' | grep -c '[a-z]')
+    if [ $((n % 2)) != 0 ]; then
+        echo "a push of $n registers leaves sp 4 mod 8: $line"
+        bad=1
+    fi
+done <<EOF2
+$(grep -E '^\s*[0-9a-f]+:\s+push' "$out/al.s")
+EOF2
+[ "$bad" = 0 ] || exit 1
+np=$(grep -cE '^\s*[0-9a-f]+:\s+push' "$out/al.s" || true)
+[ "$np" -ge 4 ] || {
+    echo "only $np push(es) in the alignment file -- it no longer
+exercises a range of register counts"; exit 1; }
+echo "all $np prologue pushes move sp by a multiple of eight"

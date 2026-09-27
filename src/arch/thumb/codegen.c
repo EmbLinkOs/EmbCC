@@ -64,7 +64,44 @@
  * — and because r9 then costs nothing and is a fourth scratch if this
  * file ever wants one. */
 #define SAVE_MASK ((1u << 9) | (1u << T_ADDR) | (1u << T_TMP) | (1u << T_LR))
-#define SAVE_BYTES 16
+
+/* AAPCS32 requires sp eight-byte aligned at every public interface, so
+ * the push must move it by a multiple of eight -- an EVEN number of
+ * registers. SAVE_MASK is four for that reason, but the allocator's
+ * callee-saved set is pushed by the same instruction and its parity was
+ * never counted: an odd F.nsave made the push 4 mod 8 and put every
+ * eight-byte object below it four bytes out.
+ *
+ * r12 is the pad. It is the ABI's own scratch, so saving and restoring
+ * it is harmless, and it is never in the allocator's pool -- unlike
+ * r4-r8, which may all be taken, leaving nothing else to add.
+ *
+ * The symptom was three calls away from the cause: a variadic callee
+ * read a `long long` stack argument as zero because its CALLER had an
+ * odd prologue. */
+static unsigned save_mask_for(int nsave, const int *used)
+{
+    unsigned m = SAVE_MASK;
+    int n = 4;
+    for (int k = 0; k < nsave; k++) {
+        m |= 1u << used[k];
+        n++;
+    }
+    if (n & 1)
+        m |= 1u << T_ACC;      /* r12: the pad */
+    return m;
+}
+
+/* The bytes that mask moves sp by -- what the stack-parameter offsets
+ * are measured from, so it must be the same answer. */
+static long save_bytes_for(int nsave, const int *used)
+{
+    unsigned m = save_mask_for(nsave, used);
+    long n = 0;
+    for (int r = 0; r < 16; r++)
+        if (m & (1u << r)) n++;
+    return n * 4;
+}
 
 struct t_sites {
     struct { int patch_off; struct func *target; } *call;
@@ -185,16 +222,23 @@ static const struct ra_target THUMB_RA = {
     t_pool_for,
     t_callee_saved,
     t_ldvar_plain,
-    /* They go on one at a time, and the SECOND is now on. A scalar
-     * return goes out through `rd`, which has been register-aware all
-     * along -- the flag was the only thing forcing the value into a
-     * slot, so every function ended with `str` to a slot and `ldr` back
-     * into r0. A 64-bit value is never in a register here (the wide map
-     * makes it ineligible) so rd64's slot read stays correct.
+    /* Two of the three are on now.
      *
-     * A call's arguments and a memcpy's addresses are still read from
-     * slots, so those values must stay there. */
-    0, 1, 0,
+     * A scalar call ARGUMENT is moved into its argument register by the
+     * parallel move in the IR_CALL lowering -- one at a time would
+     * overwrite a register another argument is still to be read from.
+     * The allocator keeps a struct argument and an indirect target in
+     * memory regardless, and a 64-bit value is never in a register
+     * here, so only scalars reach that move.
+     *
+     * A scalar RETURN goes out through `rd`, which has been
+     * register-aware all along; the flag was the only thing forcing the
+     * value into a slot, so every function used to end with `str` to a
+     * slot and `ldr` back into r0.
+     *
+     * A memcpy's addresses are still read from their slots, so those
+     * values must stay there. */
+    1, 1, 0,
     t_op_calls_helper,
     0,            /* Thumb-2's wide forms are three-operand */
     t_abi_hints,
@@ -418,10 +462,13 @@ static int arg_align(const struct ir_arg *a)
  * and is not eligible for a register at all here; a struct is placed by
  * a rule this one register cannot express.
  *
- * A call's ARGUMENTS are deliberately not hinted yet: the allocator is
- * still told the backend reads them from their slots
- * (call_int_arg_in_reg is 0), so hinting a value into an argument
- * register would ask for a register the call lowering does not read. */
+ * A call's ARGUMENTS are hinted too, now that the call lowering moves
+ * them in parallel out of wherever they live. Without this the
+ * allocator's choice and the ABI's disagreed and the move stayed:
+ * `g(a+1, b+2)` came out swapping r0 and r1 on the way in and swapping
+ * them back at the call. A value that is an argument to two calls at
+ * different positions takes the later hint -- right at one of the two
+ * beats right at neither. */
 static void t_abi_hints(const struct ir_func *fn, int *hint)
 {
     struct func *f = fn->src;
@@ -445,6 +492,29 @@ static void t_abi_hints(const struct ir_func *fn, int *hint)
         if (i->op == IR_RET && i->a >= 0 && i->a < fn->nvregs &&
             !fn->ret_abi.is_struct && !i->flt)
             hint[i->a] = 0;
+        /* ...and r0 for a scalar result coming back from a call. */
+        else if (i->op == IR_CALL && !i->retsize && i->dst >= 0 &&
+                 i->dst < fn->nvregs)
+            hint[i->dst] = 0;
+    }
+    /* A call's arguments, placed by the same place_arg the call site
+     * itself uses -- so no second copy of AAPCS32 is stated here. */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int cn = 0;
+        long cstk = 0;
+        if (i->op != IR_CALL)
+            continue;
+        if (sret_bytes(i->retsize))
+            cn = 1;
+        for (int k = 0; k < i->nargs; k++) {
+            const struct ir_arg *a = &i->argv[k];
+            struct argplace pl;
+            place_arg(a->size, arg_align(a), &cn, &cstk, &pl);
+            if (pl.nreg == 1 && !pl.nstk && !a->is_struct && a->size <= 4 &&
+                a->vreg >= 0 && a->vreg < fn->nvregs)
+                hint[a->vreg] = pl.reg;
+        }
     }
 }
 
@@ -536,8 +606,7 @@ static void layout(struct t_fn *F)
         off += 4;
     }
     /* Eight, not four: AAPCS32 requires sp to be eight-byte aligned at
-     * every public interface, and the push above already moved it by a
-     * multiple of eight. */
+     * every public interface. */
     F->frame = (off + 7) & ~7L;
 }
 
@@ -1750,9 +1819,47 @@ static void gen_ins(struct t_fn *F, int n)
                 t_ldst_imm(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
             }
         }
+        /* The register-resident scalars move in PARALLEL. Loading them
+         * one at a time would overwrite a register another argument is
+         * still to be read from -- `g(a+1, b+2)` with the sum of a in
+         * r1 and of b in r0 is enough. This is the same shape as the
+         * soft-float helper setup above and the prologue's parameter
+         * placement, and T_SCR breaks a cycle because it is reserved
+         * scratch and not in the allocator's pool.
+         *
+         * Only scalars appear here: the allocator keeps a struct
+         * argument and an indirect call's target in memory whatever
+         * this backend can do, and a 64-bit value is never in a
+         * register on this target at all. */
+        {
+            int pd[8], ps[8], npm = 0;
+            for (int k = 0; k < i->nargs && npm < 8; k++) {
+                struct ir_arg *a = &i->argv[k];
+                if (!pl[k].nreg || a->is_struct || a->size > 4)
+                    continue;
+                if (!in_reg(F, a->vreg))
+                    continue;
+                pd[npm] = pl[k].reg;
+                ps[npm] = F->loc[a->vreg];
+                npm++;
+            }
+            if (npm) {
+                int od[16], os[16];
+                int m = ra_parallel_move(pd, ps, npm, T_SCR, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    internal_error("thumb: a call's argument setup is not "
+                                   "a well-formed move");
+                for (int k = 0; k < m; k++)
+                    t_mov_reg(t, od[k], os[k]);
+            }
+        }
         for (int k = 0; k < i->nargs; k++) {
             struct ir_arg *a = &i->argv[k];
             if (!pl[k].nreg)
+                continue;
+            /* Already placed by the parallel move above. */
+            if (!a->is_struct && a->size <= 4 && in_reg(F, a->vreg))
                 continue;
             if (a->is_struct) {
                 rd(F, a->vreg, T_ADDR);
@@ -2106,7 +2213,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * that: a variadic argument is placed exactly like a named one. */
     if (fn->is_varargs)
         t_push(t, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
-    push_at = t_push(t, SAVE_MASK);
+    /* The mask is decided HERE, not patched at the end: its register
+     * COUNT sets how far sp moves, which every stack-parameter offset
+     * below is measured from. F.nsave is already known -- ra_allocate
+     * ran before layout() -- so there is nothing left to discover. */
+    push_at = t_push(t, save_mask_for(F.nsave, F.used_callee));
     /* The mask is PATCHED at the end with whatever callee-saved
      * registers the allocator turned out to take: a `push` encodes them
      * as a bitmask, so growing the set costs no extra instruction, and
@@ -2123,14 +2234,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         int ncrn = 0;
         long stk = 0;
         /* The caller's outgoing area, above everything this prologue
-         * pushed. SAVE_BYTES is the four fixed registers; the
-         * allocator's callee-saved ones are pushed by the SAME
-         * instruction (a mask costs no extra push) and move sp down
-         * just as far -- so leaving them out of this sum reads every
-         * stack parameter four bytes too low per register taken, which
-         * is a miscompile in any function with more arguments than the
-         * register file holds. */
-        long base = F.frame + SAVE_BYTES + (long)F.nsave * 4;
+         * pushed. save_bytes_for is the ONE answer for how far that
+         * push moves sp: the four fixed registers, the allocator's
+         * callee-saved ones (pushed by the same instruction, since a
+         * mask costs no extra push), and the r12 pad when the count
+         * would otherwise be odd. Leaving any of them out of this sum
+         * reads every stack parameter four bytes too low per register,
+         * which is a miscompile in any function with more arguments
+         * than the register file holds -- and the pad is exactly the
+         * term that was missing. */
+        long base = F.frame + save_bytes_for(F.nsave, F.used_callee);
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
         int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
         int npstk = 0;
@@ -2250,9 +2363,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* The same set the prologue pushed: SAVE_MASK plus whatever
          * callee-saved registers the allocator took. Built here and
          * patched into the push below, so the two cannot disagree. */
-        unsigned mask = SAVE_MASK;
-        for (int k = 0; k < F.nsave; k++)
-            mask |= 1u << F.used_callee[k];
+        unsigned mask = save_mask_for(F.nsave, F.used_callee);
         t_patch_push(t, push_at, mask);
         if (fn->is_varargs) {
             /* Return through lr rather than popping into pc: the four
@@ -2283,7 +2394,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     f->code_len = t->len - f->code_off;
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved. */
-    f->stack_bytes = (int)(F.frame + SAVE_BYTES + F.nsave * 4);
+    f->stack_bytes = (int)(F.frame + save_bytes_for(F.nsave, F.used_callee));
     free(F.usecnt);
     free(F.slot);
     free(F.label_off);
