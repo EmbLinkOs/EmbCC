@@ -263,6 +263,21 @@ struct ir_ins {
      * caller-side scratch the result lands in. nclass 0 means MEMORY,
      * i.e. the hidden-pointer (sret) convention. */
     int retsize;
+    /* A SCALAR return's own type, which `w` above deliberately does not
+     * describe: it reports the return REGISTER's width, because on the
+     * four register-per-value machines that is what the callee leaves
+     * behind. AVR's return value is a RUN of byte registers sized by the
+     * type -- r24 alone for a char, r25:r24 for an int -- and the ABI
+     * leaves everything above it undefined, so the CALLER must extend.
+     * It cannot: `signed char sc(void)` yields `ext.4:2s` at the use,
+     * which reads a second byte the callee never wrote.
+     *
+     * avr-gcc's callers extend for themselves at exactly this point, so
+     * this is the convention and not a shortcoming to route around. The
+     * size and signedness therefore travel with the call, from irgen
+     * where the type still exists (§9.1). Zero size means "no scalar
+     * result" -- a void call, or a struct, which retsize describes. */
+    int ret_tybytes, ret_tysign;
     /* The same, for the value a call returns. */
     int ret_hfa_n, ret_hfa_size;
     int ret_byref;

@@ -2575,6 +2575,13 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             fn->scratch_bytes += (i->retsize + 7) & ~7;
         }
         i->flt = ty_is_float(e->ty);
+        /* The return TYPE's own width and signedness, which `w` below is
+         * explicitly not: see ret_tybytes in ir.h for why a machine whose
+         * return value is a run of byte registers needs both. */
+        if (e->ty->kind != TY_VOID && e->ty->kind != TY_STRUCT) {
+            i->ret_tybytes = ty_size(e->ty);
+            i->ret_tysign = ty_is_integer(e->ty) && !e->ty->is_unsigned;
+        }
         /* An integer result comes back in the whole RETURN REGISTER, so
          * the width here is the register's and not the type's: an `int`
          * returned on x86-64 arrives in rax and codegen reads all of
