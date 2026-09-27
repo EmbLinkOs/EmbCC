@@ -37,18 +37,9 @@ refuses() {                       # refuses <name> <expected phrase> <source>
         exit 1; }
 }
 
-# The runtime helpers. AVR's `mul` is 8x8 into r1:r0 and destroys the zero
-# register; there is no divide instruction at all. Both are library calls
-# on every AVR toolchain, so they are lib/rt work rather than instruction
-# selection. Multiplying by a CONSTANT does work -- an array index scales
-# by its element size, so refusing that would refuse tab[1].x -- and
-# avr-exec.sh covers it.
-refuses "a multiply by a value" "a multiply by a value" \
-    'long f(long a, long b) { return a * b; }'
-refuses "divide" "div" \
-    'long f(long a, long b) { return a / b; }'
-refuses "modulo" "mod" \
-    'long f(long a, long b) { return a % b; }'
+# Multiply, divide and remainder used to be here. They are calls into
+# lib/rt/avr.c now and avr-exec.sh runs them, which is what a case leaving
+# this file is supposed to look like.
 
 # Floating point. `float` and `double` are BOTH four-byte IEEE single on
 # this target, and every operation on either is a soft-float call.

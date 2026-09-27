@@ -685,6 +685,76 @@ static void note_fn(struct a_sites *st, int at, struct func *target,
     st->nf++;
 }
 
+/* ---- runtime helpers --------------------------------------------------
+ *
+ * Multiply, divide and remainder are calls. AVR's `mul` is 8x8 into r1:r0
+ * and destroys r1, the zero register every other lowering here reads; there
+ * is no divide instruction at all. lib/rt/avr.c implements them, under the
+ * constraint rt.h states -- a routine may not use the operation it
+ * implements -- so they are shifts and adds inside.
+ *
+ * A helper has no declaration in the translation unit, so one is minted
+ * and kept: the driver turns each site into a relocation against an UNDEF
+ * symbol of that name, exactly as it does for any other external call.
+ * The list is static because a helper is shared across every function in
+ * the unit and the same `struct func` must be handed to every site, or
+ * each would get a symbol of its own.
+ */
+static struct func **g_helpers;
+static int g_nhelpers, g_caphelpers;
+
+static void call_helper(struct a_fn *F, const char *name)
+{
+    struct func *h = NULL;
+    for (int k = 0; k < g_nhelpers; k++)
+        if (strcmp(g_helpers[k]->name, name) == 0) {
+            h = g_helpers[k];
+            break;
+        }
+    if (!h) {
+        h = xcalloc(1, sizeof *h);
+        h->name = name;
+        h->declared = 1;
+        h->used = 1;
+        if (g_nhelpers == g_caphelpers) {
+            g_caphelpers = g_caphelpers ? g_caphelpers * 2 : 16;
+            g_helpers = xrealloc(g_helpers,
+                                 (size_t)g_caphelpers * sizeof *g_helpers);
+        }
+        g_helpers[g_nhelpers++] = h;
+    }
+    note_call(F->st, F->t->len, h);
+    avr_call(F->t, 0);
+}
+
+/* The helper for one operation. Names are libgcc's and single-result.
+ *
+ * avr-gcc calls __divmodsi4, which returns the quotient in r18-r21 AND the
+ * remainder in r22-r25 -- two results in a layout no C function can
+ * express, so matching it needs assembly this compiler cannot yet emit for
+ * AVR. These are extra symbols in EmbCC's own runtime rather than
+ * redefinitions of avr-libgcc's, so both can be linked into one program;
+ * the cost is that `a / b` and `a % b` together are two calls here and one
+ * there.
+ *
+ * ONE width, because the backend computes everything at four bytes: a
+ * 32-bit divide of two sign-extended 16-bit values has the right low 16
+ * bits. That is also why `int` arithmetic is slower here than avr-gcc's,
+ * which has __divmodhi4 and an inline 16-bit multiply.
+ */
+static const char *helper_for(enum ir_op op, int sign)
+{
+    switch (op) {
+    /* Signedness does not enter a multiply: the low 32 bits of a
+     * two's-complement product are the same either way, which is why
+     * libgcc has one __mulsi3 and not two. */
+    case IR_MUL: return "__mulsi3";
+    case IR_DIV: return sign ? "__divsi3" : "__udivsi3";
+    case IR_MOD: return sign ? "__modsi3" : "__umodsi3";
+    default:     return NULL;
+    }
+}
+
 /* A 16-bit address into a register pair: two `ldi`s, two relocations,
  * one per byte. The relocation sits on the INSTRUCTION, and the
  * immediate's own bits are split across it -- which the linker knows and
@@ -923,12 +993,7 @@ static void gen_ins(struct a_fn *F, int n)
         int bit, hi, neg;
 
         if (!const_b(F, i, &k))
-            a_refuse(fn, i,
-                     "a multiply by a value: AVR's `mul` is 8x8 into r1:r0 "
-                     "and destroys the zero register, so a 32-bit product "
-                     "is a runtime helper (__mulsi3) rather than an "
-                     "instruction selection. Multiplying by a CONSTANT "
-                     "works");
+            goto helper;               /* __mulsi3 */
         neg = k < 0;
         if (neg) k = -k;
         rd4(F, i->a, RA);
@@ -940,10 +1005,7 @@ static void gen_ins(struct a_fn *F, int n)
         for (hi = 8 * VW - 1; hi > 0 && !((k >> hi) & 1); hi--)
             ;
         if (hi > 16)
-            a_refuse(fn, i,
-                     "a multiply by a constant wider than 16 bits: it would "
-                     "expand to more instructions than the runtime helper "
-                     "this target is getting");
+            goto helper;               /* wider than the shifts are worth */
         if (k == (1L << hi)) {
             shift_imm(F, RA, IR_SHL, 0, hi);    /* a power of two */
         } else {
@@ -973,6 +1035,38 @@ static void gen_ins(struct a_fn *F, int n)
             avr_rr(t, AVR_SUB, RA, RB);
             for (int q = 1; q < VW; q++) avr_rr(t, AVR_SBC, RA + q, RB + q);
         }
+        wr4(F, i->dst, RA);
+        return;
+    }
+
+    case IR_DIV: case IR_MOD:
+    helper: {
+        /* The operands go straight into the helper's argument registers,
+         * which for a two-long call are r22-r25 and r18-r21 -- the same
+         * places A and B already are, so the loads land where they belong
+         * with nothing to move. The result comes back in r22-r25 and is
+         * copied to A, because everything after this reads A. */
+        const char *name = helper_for(i->op, i->sign);
+        /* Two four-byte arguments: the cursor starts above r25 and steps
+         * down by four, so they are r22-r25 and r18-r21 -- which is where
+         * B and A already sit, so the operands load straight into place.
+         * The result returns in r22-r25 and is copied to A, because every
+         * lowering after this reads A. */
+        struct argplace pl;
+        int cursor = ARG_TOP;
+        long stk = 0;
+        int a_reg, b_reg;
+        place_arg(VW, &cursor, &stk, &pl); a_reg = pl.reg;
+        place_arg(VW, &cursor, &stk, &pl); b_reg = pl.reg;
+
+        ld_slot(F, a_reg, F->slot[i->a], VW);
+        if (i->imm_b)
+            ldi4(F, b_reg, (unsigned long)i->imm, VW);
+        else
+            ld_slot(F, b_reg, F->slot[i->b], VW);
+        call_helper(F, name);
+        for (int q = 0; q < VW; q++)
+            avr_rr(t, AVR_MOV, RA + q, a_reg + q);
         wr4(F, i->dst, RA);
         return;
     }

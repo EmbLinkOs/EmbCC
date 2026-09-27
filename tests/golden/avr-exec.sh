@@ -16,9 +16,11 @@
 # backend had exactly that: enum avr_cond numbered its flags in mnemonic
 # order, so `breq` tested carry, and `while (*s)` walked past its NUL.
 #
-# No divide, modulo, float or long long: this backend refuses all four by
-# name (they need runtime helpers or a legalisation pass), and
-# tests/golden/avr-refuse.sh is what checks that they are refused.
+# No float or long long: this backend refuses both by name (a soft-float
+# runtime and a legalisation pass), and tests/golden/avr-refuse.sh is what
+# checks that they are refused. Multiply, divide and remainder ARE here --
+# they are calls into lib/rt/avr.c, built below at the same optimisation
+# level as the program.
 set -u
 echo "TEST-MARKER avr-exec"
 . "$(dirname "$0")/../lib.sh"
@@ -59,6 +61,18 @@ int six(int a, int b, int c, int d, int e, int f)
 long ten(long a, int b, int c, int d, int e, int f, int g, int h, int i,
          int j)
 { return a + b + c + d + e + f + g + h + i + j; }
+
+/* ---- multiply, divide and remainder: the runtime helpers -------------
+ *
+ * Every product below stays inside 32 bits, because the host's `long` is
+ * eight bytes and AVR's is four -- an overflowing product is undefined and
+ * the two would disagree about it for reasons that are not a bug.
+ */
+long mull(long a, long b)  { return a * b; }
+long divl(long a, long b)  { return a / b; }
+long modl(long a, long b)  { return a % b; }
+unsigned long udivl(unsigned long a, unsigned long b) { return a / b; }
+unsigned long umodl(unsigned long a, unsigned long b) { return a % b; }
 
 /* ---- shifts ---------------------------------------------------------- */
 long shl(long v, int n)  { return v << n; }
@@ -138,8 +152,32 @@ void run(void)
     putn(shl(-1L, 3));
     putn(shr(-1024L, 3)); putn(shr(-1024L, 8));
     putn((long)ushr(0x80000000UL, 24));
-    for (i = 0; i < 20; i += 5)
-        putn(shl(3L, i));
+    for (i = 0; i < 4; i++)
+        putn(shl(3L, i * 5));
+    puts_("| ");
+
+    /* multiply, divide, remainder -- and the four corners that a
+     * magnitude-then-sign divider gets wrong if it is written naively */
+    putn(mull(1234L, 5678L));
+    putn(mull(-1234L, 5678L));
+    putn(mull(46340L, 46340L));         /* just under 2^31 */
+    putn(mull(g_i, 7L));
+    putn(divl(1000000L, 7L));
+    putn(modl(1000000L, 7L));
+    putn(divl(-100L, 7L));              /* truncates toward zero: -14 */
+    putn(modl(-100L, 7L));              /* the DIVIDEND's sign: -2 */
+    putn(divl(100L, -7L));
+    putn(modl(100L, -7L));
+    putn(divl(-100L, -7L));
+    putn(modl(-100L, -7L));
+    /* LONG_MIN: its magnitude does not fit in a signed long, which is why
+     * the helper negates the UNSIGNED value. Written as a subtraction so
+     * the constant itself is in range on both machines. */
+    putn(divl(-2147483647L - 1L, 3L));
+    putn(modl(-2147483647L - 1L, 3L));
+    putn((long)udivl(4000000000UL, 123UL));   /* a dividend above 2^31 */
+    putn((long)umodl(4000000000UL, 123UL));
+    putn((long)udivl(4294967295UL, 65535UL));
     puts_("| ");
 
     /* comparisons */
@@ -149,12 +187,8 @@ void run(void)
     puts_("| ");
 
     /* memory: arrays, structs, and the copies the compiler synthesises */
-    /* No multiply: this backend refuses it until the runtime helpers
-     * land, so the table is built by accumulation. */
-    {
-        int v = 100;
-        for (i = 0; i < 5; i++) { arr[i] = v; v += 100; }
-    }
+    for (i = 0; i < 5; i++)
+        arr[i] = (i + 1) * 100;
     putn(sum_through_pointer(arr, 5));
     a.x = 7; a.y = 9; a.tag = 123456L;
     tab[1] = a;                     /* a struct copy: IR_MEMCPY */
@@ -252,6 +286,13 @@ for O in -O0 -O1 -O2 -Os; do
         2> "$out/io.err" || {
         echo "$O: the harness io did not compile:"
         head -6 "$out/io.err"; exit 1; }
+    # The compiler runtime: multiply, divide and remainder, which this
+    # machine has no instructions for. Built at the same level as the
+    # program, so a bug in the helpers shows up here too rather than only
+    # at whatever level the library happened to be compiled at.
+    ./embcc --target=avr $O -c lib/rt/avr.c -o "$H/rt.o" 2> "$out/rt.err" || {
+        echo "$O: lib/rt/avr.c did not compile:"
+        head -6 "$out/rt.err"; exit 1; }
     ./embcc --target=avr $O -c "$out/prog.c" -o "$H/prog.o" \
         2> "$out/prog.err" || {
         echo "$O: the program did not compile:"
@@ -287,5 +328,6 @@ echo "every case agrees with the host on a real ATmega328P, at four
 optimisation levels: multi-register arithmetic and its carry chains,
 extension by each type's own signedness, arguments in registers and past
 them onto the stack, constant and variable shifts, both signednesses of
-every comparison, struct and array memory, and an indirect call through
-a function pointer holding a WORD address"
+every comparison, multiply/divide/remainder through lib/rt including
+LONG_MIN and a dividend above 2^31, struct and array memory, and an
+indirect call through a function pointer holding a WORD address"
