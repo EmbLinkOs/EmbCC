@@ -555,6 +555,37 @@ void t_patch_bcond(struct code *c, int at, int target)
                         (unsigned)(v & 0x7ff));
 }
 
+/* The 16-bit branches: B<c> (T1) reaches -256..+254 bytes and B (T2)
+ * -2048..+2046, both from the instruction's address plus four -- the
+ * same base as the wide forms. Emitted with a zero offset and patched
+ * once the target is placed; the patch refuses an offset that does not
+ * fit rather than wrapping it into a jump somewhere else. */
+int t_bcond16(struct code *c, int cond)
+{
+    int at = c->len;
+    hw(c, 0xD000u | (unsigned)(cond << 8));
+    return at;
+}
+int t_b16(struct code *c) { int at = c->len; hw(c, 0xE000u); return at; }
+
+int t_patch_bcond16(struct code *c, int at, int target)
+{
+    long off = (long)target - (long)at - 4;
+    unsigned h = (unsigned)(c->p[at + 1] << 8 | c->p[at]);
+    if (off < -256 || off > 254 || (off & 1))
+        return 0;
+    patch_hw(c, at, (h & 0xff00u) | (unsigned)((off >> 1) & 0xff));
+    return 1;
+}
+int t_patch_b16(struct code *c, int at, int target)
+{
+    long off = (long)target - (long)at - 4;
+    if (off < -2048 || off > 2046 || (off & 1))
+        return 0;
+    patch_hw(c, at, 0xE000u | (unsigned)((off >> 1) & 0x7ff));
+    return 1;
+}
+
 void t_bx(struct code *c, int rm)  { hw(c, 0x4700u | (unsigned)(rm << 3)); }
 void t_blx(struct code *c, int rm) { hw(c, 0x4780u | (unsigned)(rm << 3)); }
 void t_nop(struct code *c)         { hw(c, 0xbf00u); }

@@ -145,7 +145,12 @@ struct t_fn {
     long va_regsave;
     long va_first;       /* ... and the offset of the first UNNAMED one */
     int *label_off;      /* per label id, or -1 while unseen */
-    struct { int at; int label; int cond; } *fix;
+    struct { int at; int label; int cond; int sz; } *fix;
+    /* Branch relaxation: per branch, in emission order, whether the
+     * first pass found its target within the 16-bit form's reach. NULL
+     * on the first pass, which emits every branch 32-bit. */
+    const char *shortb;
+    int nshortb;
     int nfix, capfix;
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when it did not run (-O0/-O1). */
@@ -1048,17 +1053,29 @@ static void want_label(struct t_fn *F, int at, int label, int cond)
     F->fix[F->nfix].at = at;
     F->fix[F->nfix].label = label;
     F->fix[F->nfix].cond = cond;
+    F->fix[F->nfix].sz = F->t->len - at;
     F->nfix++;
+}
+
+/* A branch to a label, 16-bit when the first pass measured that it fits
+ * (cond < 0 is unconditional). */
+static int emit_branch(struct t_fn *F, int cond)
+{
+    int k = F->nfix;
+    int sh = F->shortb && k < F->nshortb && F->shortb[k];
+    if (cond < 0)
+        return sh ? t_b16(F->t) : t_b(F->t);
+    return sh ? t_bcond16(F->t, cond) : t_bcond(F->t, cond);
 }
 
 static void jump_to(struct t_fn *F, int label)
 {
-    want_label(F, t_b(F->t), label, -1);
+    want_label(F, emit_branch(F, -1), label, -1);
 }
 
 static void jump_if(struct t_fn *F, int cond, int label)
 {
-    want_label(F, t_bcond(F->t, cond), label, cond);
+    want_label(F, emit_branch(F, cond), label, cond);
     F->bc_end = F->t->len;
     F->bc_fix = F->nfix - 1;
 }
@@ -1091,8 +1108,12 @@ static int invert_last_bcond(struct t_fn *F, int n, int label)
     if (!hit)
         return 0;
     cond = F->fix[F->bc_fix].cond ^ 1;
-    F->t->len -= 4;
-    at = t_bcond(F->t, cond);
+    F->t->len -= F->fix[F->bc_fix].sz;
+    /* The same ordinal, so the same size decision: the first pass made
+     * this inversion too, and measured the branch it produced. */
+    F->nfix--;
+    at = emit_branch(F, cond);
+    F->nfix++;
     F->fix[F->bc_fix].at = at;
     F->fix[F->bc_fix].label = label;
     F->fix[F->bc_fix].cond = cond;
@@ -1886,9 +1907,9 @@ static void gen_ins(struct t_fn *F, int n)
             }
             t_mov_imm(t, T_ACC, 1, 0);
             {
-                int over = t_bcond(t, cond);
+                int over = t_bcond16(t, cond);
                 t_mov_imm(t, T_ACC, 0, 0);
-                t_patch_bcond(t, over, t->len);
+                t_patch_bcond16(t, over, t->len);
             }
             wr(F, i->dst, T_ACC);
             return;
@@ -1928,9 +1949,9 @@ static void gen_ins(struct t_fn *F, int n)
             cond = cond_for(i->pred, 1);      /* the helper's signed answer */
             t_mov_imm(t, T_ACC, 1, 0);
             {
-                int over = t_bcond(t, cond);
+                int over = t_bcond16(t, cond);
                 t_mov_imm(t, T_ACC, 0, 0);
-                t_patch_bcond(t, over, t->len);
+                t_patch_bcond16(t, over, t->len);
             }
             wr(F, i->dst, T_ACC);
             return;
@@ -2155,9 +2176,9 @@ static void gen_ins(struct t_fn *F, int n)
             }
             t_mov_imm(t, T_ACC, 1, 0);
             {
-                int over = t_bcond(t, cond);
+                int over = t_bcond16(t, cond);
                 t_mov_imm(t, T_ACC, 0, 0);
-                t_patch_bcond(t, over, t->len);
+                t_patch_bcond16(t, over, t->len);
             }
             wr(F, i->dst, T_ACC);
             return;
@@ -2183,9 +2204,9 @@ static void gen_ins(struct t_fn *F, int n)
          * question to get wrong. */
         t_mov_imm(t, T_ACC, 1, 0);
         {
-            int over = t_bcond(t, cond);
+            int over = t_bcond16(t, cond);
             t_mov_imm(t, T_ACC, 0, 0);
-            t_patch_bcond(t, over, t->len);
+            t_patch_bcond16(t, over, t->len);
         }
         wr(F, i->dst, T_ACC);
         return;
@@ -2814,6 +2835,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.loc = NULL; F.nsave = 0; F.save_at = 0;
     F.floc = NULL; F.nfsave = 0;
     F.bc_end = F.bc_fix = -1;
+    F.shortb = NULL; F.nshortb = 0;
     if (g_t_regalloc) {
         /* nsave is what the allocator REPORTS it took, and the prologue
          * pushes exactly that -- so the two must be computed together.
@@ -2895,6 +2917,38 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     for (i = 0; i <= fn->nlabels; i++)
         F.label_off[i] = -1;
 
+    /* BRANCH RELAXATION. The function is emitted twice: the first pass
+     * uses the 32-bit branch forms everywhere and records which ones
+     * would have reached their label in 16 bits, and the second emits
+     * those short. Everything else it emits is decided by the IR and the
+     * frame, never by code addresses, so the second pass makes the same
+     * branches in the same order and the ordinal is enough to match
+     * them. Optimising builds only: -O0's output stays as it was. */
+    {
+    int len0 = t->len, nl0 = fn->nlines;
+    int sc0 = F.st->ncall, se0 = F.st->next, ss0 = F.st->nstr,
+        sg0 = F.st->ng, sf0 = F.st->nf;
+    char *shortb = NULL;
+    int nshortb = 0;
+    for (int pass = 0; pass < 2; pass++) {
+    if (pass) {
+        t->len = len0;
+        fn->nlines = nl0;
+        F.st->ncall = sc0; F.st->next = se0; F.st->nstr = ss0;
+        F.st->ng = sg0; F.st->nf = sf0;
+        F.nfix = 0;
+        for (i = 0; i <= fn->nlabels; i++)
+            F.label_off[i] = -1;
+        F.skip_next = 0;
+        F.bc_end = F.bc_fix = -1;
+        F.va_regsave = F.va_first = -1;
+        F.shortb = shortb;
+        F.nshortb = nshortb;
+        if (want_debug) {
+            free(fn->var_off);
+            fn->var_off = NULL;
+        }
+    }
     /* A Thumb function must start on a halfword, and four keeps the
      * literal loads and the disassembly tidy. */
     /* Pad with halfword NOPs (bf00), not with a repeated 0xbf: that
@@ -3148,10 +3202,41 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                             "never placed\n", F.fix[i].label, fn->name);
             exit(1);
         }
-        if (F.fix[i].cond < 0)
+        if (F.fix[i].sz == 2) {
+            /* Measured to fit on the first pass, and nothing between
+             * here and the target can have grown since. Checked anyway:
+             * an offset that did not fit would be a jump elsewhere. */
+            if (!(F.fix[i].cond < 0
+                  ? t_patch_b16(t, F.fix[i].at, target)
+                  : t_patch_bcond16(t, F.fix[i].at, target)))
+                internal_error("thumb: %s: a relaxed branch no longer "
+                               "reaches its label", fn->name);
+        } else if (F.fix[i].cond < 0) {
             t_patch_b(t, F.fix[i].at, target);
-        else
+        } else {
             t_patch_bcond(t, F.fix[i].at, target);
+        }
+    }
+
+    /* After the first pass: which branches would the 16-bit form reach?
+     * Measured from this pass's positions, where every branch is still
+     * the wide form. On the second pass code between a branch and its
+     * target can only get SHORTER, so what reached still reaches. */
+    if (pass == 0) {
+        int any = 0;
+        nshortb = F.nfix;
+        shortb = xcalloc((size_t)(nshortb ? nshortb : 1), 1);
+        for (i = 0; i < F.nfix; i++) {
+            long d = (long)F.label_off[F.fix[i].label] - F.fix[i].at - 4;
+            shortb[i] = F.fix[i].cond < 0 ? (d >= -2048 && d <= 2046)
+                                          : (d >= -256 && d <= 254);
+            any |= shortb[i];
+        }
+        if (!any || !g_t_regalloc)
+            break;
+    }
+    }                                   /* the two passes */
+    free(shortb);
     }
 
     f->code_len = t->len - f->code_off;
