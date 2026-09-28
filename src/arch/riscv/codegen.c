@@ -532,6 +532,8 @@ static long byref_area(const struct rv_fn *F)
     return (most + STACK_ALIGN - 1) & ~(long)(STACK_ALIGN - 1);
 }
 
+static int in_reg(const struct rv_fn *F, int v);
+
 static void layout(struct rv_fn *F)
 {
     struct ir_func *fn = F->fn;
@@ -544,20 +546,67 @@ static void layout(struct rv_fn *F)
     for (int v = 0; v < fn->nvregs; v++)
         F->slot[v] = -1;
 
-    for (int v = 0; v < fn->nvars; v++) {
-        int size = fn->locals[v].size ? fn->locals[v].size : F->w;
-        int align = fn->locals[v].user_align ? fn->locals[v].user_align
-                  : fn->locals[v].align ? fn->locals[v].align : F->w;
-        if (align < F->w) align = F->w;
-        off = (off + align - 1) & ~(long)(align - 1);
-        F->slot[v] = off;
-        off += size;
+    /* Only values that need memory get a slot, and the busiest go nearest
+     * sp: a load or store reaches a 12-bit offset, the compressed
+     * c.lwsp/c.swsp only 0..252, and past 2047 every access is built with
+     * lui/addi/add first. Every value used to get a slot here -- including
+     * the ones the allocator had put in registers -- so a function with a
+     * few arrays addressed every temporary that way.
+     *
+     * Temporaries share a pool (ra_coalesce_temps, as the other backends
+     * use): two whose live ranges do not overlap take one slot. A 64-bit
+     * temp at RV32 keeps a slot of its own, eight-aligned, and so is shown
+     * to the coalescer as if it had a register. Then locals, small ones
+     * first; one nothing names needs none (ra_locals_referenced), nor one
+     * in a register (ra_slot_dead; under -g every local keeps its slot). */
+    {
+        int nv = fn->nvregs, npool = 0, has_cgoto = 0;
+        int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
+        for (int v = 0; v < nv; v++)
+            loc2[v] = in_reg(F, v) || F->wide[v] ? 0 : -1;
+        for (int n = 0; n < fn->nins; n++)
+            if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
+                has_cgoto = 1;
+        {
+            struct ra_slots so = { loc2, NULL, g_rv_regalloc, has_cgoto };
+            int *tslot = ra_coalesce_temps(fn, fn->nvars, &so, &npool);
+            off = (off + F->w - 1) & ~(long)(F->w - 1);
+            for (int v = fn->nvars; v < nv; v++) {
+                int k = v - fn->nvars;
+                if (loc2[v] >= 0 || !tslot || tslot[k] < 0)
+                    continue;
+                F->slot[v] = off + (long)tslot[k] * F->w;
+            }
+            off += (long)npool * F->w;
+            free(tslot);
+        }
+        for (int v = fn->nvars; v < nv; v++) {
+            if (!F->wide[v] || in_reg(F, v))
+                continue;
+            off = (off + 7) & ~7L;
+            F->slot[v] = off;
+            off += 8;
+        }
+        free(loc2);
     }
-    for (int v = fn->nvars; v < fn->nvregs; v++) {
-        int size = F->wide[v] ? 8 : F->w;
-        off = (off + size - 1) & ~(long)(size - 1);
-        F->slot[v] = off;
-        off += size;
+    {
+        char *lref = ra_locals_referenced(fn, F->want_debug);
+        for (int pass = 0; pass < 2; pass++)
+            for (int v = 0; v < fn->nvars; v++) {
+                int size = fn->locals[v].size ? fn->locals[v].size : F->w;
+                int align = fn->locals[v].user_align ? fn->locals[v].user_align
+                          : fn->locals[v].align ? fn->locals[v].align : F->w;
+                if (in_reg(F, v) || !lref[v] ||
+                    ra_slot_dead(fn, F->loc, NULL, v, F->want_debug))
+                    continue;
+                if ((size > 2 * F->w) != pass)
+                    continue;
+                if (align < F->w) align = F->w;
+                off = (off + align - 1) & ~(long)(align - 1);
+                F->slot[v] = off;
+                off += size;
+            }
+        free(lref);
     }
     F->scratch_at = (off + 15) & ~15L;
     off = F->scratch_at + fn->scratch_bytes;
@@ -656,6 +705,17 @@ static int in_reg(const struct rv_fn *F, int v)
  * allocator land without rewriting a hundred call sites at once: every
  * one of them stays correct, and the ones that decide code size are
  * converted to rdr/wreg below, which skip the move entirely. */
+/* A slot, for code that addresses one directly. A value without one --
+ * in a register, or never stored -- reaching such a path would read memory
+ * nothing wrote; it is a refusal instead. */
+static long sslot(const struct rv_fn *F, int v)
+{
+    if (v < 0 || v >= F->fn->nvregs || F->slot[v] < 0)
+        internal_error("riscv: %s: a path addresses vreg %d's slot, and it "
+                       "has none", F->fn->name, v);
+    return F->slot[v];
+}
+
 static void rd(struct rv_fn *F, int v, int reg)
 {
     if (in_reg(F, v)) {
@@ -663,7 +723,7 @@ static void rd(struct rv_fn *F, int v, int reg)
             rv_mv(F->t, reg, F->loc[v]);
         return;
     }
-    ld_sp(F, reg, F->slot[v], F->w, 1);
+    ld_sp(F, reg, sslot(F, v), F->w, 1);
 }
 
 static void wr(struct rv_fn *F, int v, int reg)
@@ -675,7 +735,7 @@ static void wr(struct rv_fn *F, int v, int reg)
     }
     if (F->slot[v] < 0)
         return;
-    st_sp(F, reg, F->slot[v], F->w);
+    st_sp(F, reg, sslot(F, v), F->w);
 }
 
 /* The three that skip the move.
@@ -692,7 +752,7 @@ static int rdr(struct rv_fn *F, int v, int scratch)
 {
     if (in_reg(F, v))
         return F->loc[v];
-    ld_sp(F, scratch, F->slot[v], F->w, 1);
+    ld_sp(F, scratch, sslot(F, v), F->w, 1);
     return scratch;
 }
 
@@ -710,23 +770,23 @@ static void wrote(struct rv_fn *F, int v, int reg)
     }
     if (F->slot[v] < 0)
         return;
-    st_sp(F, reg, F->slot[v], F->w);
+    st_sp(F, reg, sslot(F, v), F->w);
 }
 
 /* A 64-bit value's two halves at RV32, little-endian: the low word at the
  * slot and the high word four bytes above it. */
 static void rd64(struct rv_fn *F, int v, int lo, int hi)
 {
-    ld_sp(F, lo, F->slot[v], 4, 1);
-    ld_sp(F, hi, F->slot[v] + 4, 4, 1);
+    ld_sp(F, lo, sslot(F, v), 4, 1);
+    ld_sp(F, hi, sslot(F, v) + 4, 4, 1);
 }
 
 static void wr64(struct rv_fn *F, int v, int lo, int hi)
 {
     if (F->slot[v] < 0)
         return;
-    st_sp(F, lo, F->slot[v], 4);
-    st_sp(F, hi, F->slot[v] + 4, 4);
+    st_sp(F, lo, sslot(F, v), 4);
+    st_sp(F, hi, sslot(F, v) + 4, 4);
 }
 
 /* An instruction's SECOND operand, into `reg`.
@@ -1013,7 +1073,7 @@ static void set_args(struct rv_fn *F, const int *dstreg, const int *vreg,
      * now nothing still needs the old contents of one. */
     for (int k = 0; k < n; k++)
         if (!in_reg(F, vreg[k]))
-            ld_sp(F, dstreg[k], F->slot[vreg[k]], F->w, 1);
+            ld_sp(F, dstreg[k], sslot(F, vreg[k]), F->w, 1);
 }
 
 /* Both operands of a two-argument helper. A pair at RV32 is never
@@ -1327,14 +1387,14 @@ static int gen_ins64(struct rv_fn *F, int n)
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     case IR_LDVAR:
-        ld_sp(F, A_LO, F->slot[i->a], 4, 1);
-        ld_sp(F, A_HI, F->slot[i->a] + 4, 4, 1);
+        ld_sp(F, A_LO, sslot(F, i->a), 4, 1);
+        ld_sp(F, A_HI, sslot(F, i->a) + 4, 4, 1);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     case IR_STVAR:
         rd64(F, i->a, A_LO, A_HI);
-        st_sp(F, A_LO, F->slot[i->dst], 4);
-        st_sp(F, A_HI, F->slot[i->dst] + 4, 4);
+        st_sp(F, A_LO, sslot(F, i->dst), 4);
+        st_sp(F, A_HI, sslot(F, i->dst) + 4, 4);
         return 1;
     case IR_LOAD:
         rd(F, i->a, ADDR);
@@ -1501,7 +1561,7 @@ static void gen_call(struct rv_fn *F, int n)
             if (pl[k].nreg == 2)
                 rd64(F, a->vreg, argreg(pl[k].reg), argreg(pl[k].reg + 1));
             else
-                ld_sp(F, argreg(pl[k].reg), F->slot[a->vreg], 4, 1); /* low */
+                ld_sp(F, argreg(pl[k].reg), sslot(F, a->vreg), 4, 1); /* low */
         }
         /* a plain scalar: already placed by the parallel move above */
     }
@@ -1922,7 +1982,7 @@ static void gen_ins(struct rv_fn *F, int n)
                 ext_reg(F, d, F->loc[i->a], i->size, i->sign);
             }
         } else {
-            ld_sp(F, d, F->slot[i->a], i->size, i->sign);
+            ld_sp(F, d, sslot(F, i->a), i->size, i->sign);
         }
         wrote(F, i->dst, d);
         return;
@@ -1942,7 +2002,7 @@ static void gen_ins(struct rv_fn *F, int n)
                 ext_reg(F, F->loc[i->dst], src, i->size, 1);
             }
         } else {
-            st_sp(F, src, F->slot[i->dst], i->size);
+            st_sp(F, src, sslot(F, i->dst), i->size);
         }
         return;
     }
@@ -1969,7 +2029,7 @@ static void gen_ins(struct rv_fn *F, int n)
 
     case IR_ADDR: {
         int d = wreg(F, i->dst, ACC);
-        addr_sp(F, d, F->slot[i->a]);
+        addr_sp(F, d, sslot(F, i->a));
         wrote(F, i->dst, d);
         return;
     }
@@ -2533,7 +2593,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                 else         ld_sp(&F, ADDR, base + pl.stk, F.w, 1);
                 for (long b = 0; b < a->size; b++) {
                     rv_load(t, SCR2, ADDR, (int)b, 1, 0, xlen);
-                    st_sp(&F, SCR2, F.slot[i] + b, 1);
+                    st_sp(&F, SCR2, sslot(&F, i) + b, 1);
                 }
                 continue;
             }
@@ -2549,11 +2609,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                      * it), so both halves go to the slot. */
                     for (int q = 0; q < pl.nreg; q++)
                         st_sp(&F, param_reg(&F, &pl, q),
-                              F.slot[i] + (long)q * F.w, F.w);
+                              sslot(&F, i) + (long)q * F.w, F.w);
                     for (int q = 0; q < pl.nstk; q++) {
                         ld_sp(&F, SCR, base + pl.stk + (long)q * F.w, F.w, 1);
                         st_sp(&F, SCR,
-                              F.slot[i] + (long)(pl.nreg + q) * F.w, F.w);
+                              sslot(&F, i) + (long)(pl.nreg + q) * F.w, F.w);
                     }
                 } else if (pl.nreg && in_reg(&F, i) && !fn->is_varargs) {
                     /* ALLOCATED, and arriving in a register: this is
@@ -2584,7 +2644,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                     pstk_off[npstk] = F.va_regsave + (long)pl.reg * F.w;
                     npstk++;
                 } else if (pl.nreg) {
-                    st_sp(&F, param_reg(&F, &pl, 0), F.slot[i], F.w);
+                    st_sp(&F, param_reg(&F, &pl, 0), sslot(&F, i), F.w);
                 } else if (in_reg(&F, i)) {
                     /* On the stack, and allocated: a load straight into
                      * its register. Loads address off sp and so cannot
@@ -2596,12 +2656,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                     npstk++;
                 } else {
                     ld_sp(&F, SCR, base + pl.stk, F.w, 1);
-                    st_sp(&F, SCR, F.slot[i], F.w);
+                    st_sp(&F, SCR, sslot(&F, i), F.w);
                 }
                 continue;
             }
             for (int q = 0; q < pl.nreg; q++) {
-                long off = F.slot[i] + (long)q * F.w;
+                long off = sslot(&F, i) + (long)q * F.w;
                 long left = a->size - (long)q * F.w;
                 int r = param_reg(&F, &pl, q);
                 if (left >= F.w) {
@@ -2617,7 +2677,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             }
             for (int q = 0; q < pl.nstk; q++) {
                 long src = base + pl.stk + (long)q * F.w;
-                long dst = F.slot[i] + (long)(pl.nreg + q) * F.w;
+                long dst = sslot(&F, i) + (long)(pl.nreg + q) * F.w;
                 long left = a->size - (long)(pl.nreg + q) * F.w;
                 ld_sp(&F, SCR, src, F.w, 1);
                 if (left >= F.w) {

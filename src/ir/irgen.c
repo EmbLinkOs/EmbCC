@@ -2208,15 +2208,22 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int res;
         if (lt->kind == TY_PTR) {
             int esz = ty_size(lt->pointee);
+            /* At the ADDRESS width, as every other pointer operation
+             * here: this was 8, so `p += n` on a 32-bit target was a
+             * 64-bit add of a four-byte pointer. It came out right only
+             * because the backends read the missing high half from
+             * whatever sat beside the pointer's slot, and the low half of
+             * a sum does not depend on it; once the pointer lived in a
+             * register, there was no beside. */
             if (ty_is_vla(lt->pointee))
                 rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
-                              8, 1);
+                              AW, 1);
             else if (esz > 1) {
                 int k = emit_const(fn, esz, AW);
                 rv = emit_bin(fn, IR_MUL, rv, k, AW, 1);
             }
             res = emit_bin(fn, e->op == B_ADD ? IR_ADD : IR_SUB, cur, rv,
-                           8, 1);
+                           AW, 1);
         } else {
             struct type *ct = e->cast_ty;
             int cv = gen_convert(fn, cur, lt, ct);
