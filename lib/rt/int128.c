@@ -11,6 +11,12 @@
  */
 #include "rt.h"
 
+/* Only where __int128 exists. lib/rt is built by a wildcard for every target,
+ * and on a 32- or 8-bit one this file failed to compile at its first `u128`
+ * -- which is right about the type and wrong about the file: nothing on those
+ * targets can call these, so the answer is an empty object, not an error. */
+#if defined(__SIZEOF_INT128__)
+
 /* ---- multiply -----------------------------------------------------------
  *
  * (ah:al) * (bh:bl), keeping the low 128 bits. The cross terms ah*bl and
@@ -173,3 +179,11 @@ s128 __negti2(s128 a)
     w.u = neg128(w.u);
     return w.s;
 }
+
+#else
+
+/* Not this target; see above. A translation unit has to contain at least
+ * one declaration. */
+typedef int embcc_rt_int128_is_not_this_target;
+
+#endif

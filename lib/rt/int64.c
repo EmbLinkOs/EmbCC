@@ -21,7 +21,13 @@
  * LP64 the backends emit a divide instruction and never call these, and
  * defining them there would put a second `__divdi3` in the archive
  * beside libgcc's for no reason. */
-#if __SIZEOF_LONG_LONG__ > __SIZEOF_POINTER__
+/* Not on AVR, which has its own: lib/rt/avr64.c defines the same four names
+ * plus __muldi3, written for a machine with no hardware multiply wider than
+ * 8x8 and tested on the part. Both used to compile there -- this guard asked
+ * only whether `long long` is wider than a pointer, which on a 2-byte-pointer
+ * machine it very much is -- so an AVR librt.a held two __udivdi3s and which
+ * one a program got depended on the order the archive was built in. */
+#if __SIZEOF_LONG_LONG__ > __SIZEOF_POINTER__ && !defined(__AVR__)
 
 typedef unsigned long long u64;
 typedef long long s64;

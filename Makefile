@@ -430,6 +430,22 @@ libc-linux-aarch64: embcc
 	    $(BUILD)/libc/linux-aarch64/librt.a $(BUILD)/libc/linux-aarch64/rt/*.o
 	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + crt1.o"
 
+# The compiler runtime for each EMBEDDED target, as an archive per triple.
+# These had no rule at all: a firmware build for any of the four targets the
+# EmbLinkRTOS requirements name had to compile lib/rt by hand and choose the
+# objects itself. tools/build-rt.sh is the one place the recipe lives, and
+# tests/golden/embedded-runtime.sh uses it too, so the archive the test checks
+# is the archive that ships. RV64 is not here: its table claims __int128 while
+# its backend refuses 128-bit values, so lib/rt/int128.c cannot build for it,
+# and it is not one of the four named targets.
+RT_EMBEDDED := avr thumbv7m-none-eabi thumbv7em-none-eabi \
+               thumbv8m.main-none-eabi riscv32-unknown-elf
+rt-embedded: embcc
+	@for t in $(RT_EMBEDDED); do \
+	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
+	    echo "rt: $(BUILD)/libc/$$t/librt.a"; \
+	done
+
 libc-linux: libc-linux-x86_64 libc-linux-aarch64
 
 # ---- installation ------------------------------------------------------
@@ -460,7 +476,7 @@ LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
 # test that rebuilds the compiler while the rest of the suite is using
 # it, which is the one thing the suite must never do to itself.
 install: all libc libcxx libc-linux libcxx-linux-x86_64 \
-         libcxx-linux-aarch64 install-files
+         libcxx-linux-aarch64 rt-embedded install-files
 
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
@@ -476,7 +492,8 @@ install-files:
 	@cp -R include/. $(LIBROOT)/freestanding/
 	@for pair in "x86_64-elf:x86_64" "aarch64-elf:aarch64" \
 	             "x86_64-linux-gnu:linux-x86_64" \
-	             "aarch64-linux-gnu:linux-aarch64"; do \
+	             "aarch64-linux-gnu:linux-aarch64" \
+	             $(foreach t,$(RT_EMBEDDED),"$(t):$(t)"); do \
 	    triple=$${pair%%:*}; dir=$${pair#*:}; \
 	    mkdir -p $(LIBROOT)/$$triple; \
 	    for f in libc.a librt.a crt1.o; do \

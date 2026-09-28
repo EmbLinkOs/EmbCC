@@ -23,7 +23,23 @@
 
 typedef unsigned long long u64;
 typedef long long          s64;
+/* u32 is THIRTY-TWO bits, which `unsigned int` is not everywhere: on AVR an
+ * `int` is sixteen. This was `typedef unsigned int u32` while every target
+ * that included it had a 32-bit int, and it would have stayed silently wrong
+ * on AVR -- lib/rt/complex.c reads a float's bits through a `u32` union
+ * member, and a two-byte member reads half of them. */
+#if __SIZEOF_INT__ >= 4
 typedef unsigned int       u32;
+#else
+typedef unsigned long      u32;
+#endif
+
+/* Everything below that names __int128 exists only where the type does.
+ * It was unconditional, so ANY file including this header failed on a 32- or
+ * 8-bit target -- lib/rt/complex.c among them, which uses none of it, so
+ * `float _Complex` multiply and divide had no runtime on any embedded
+ * target. rt_mul64 is outside the guard: it is 64-bit arithmetic only. */
+#ifdef __SIZEOF_INT128__
 typedef unsigned __int128  u128;
 typedef __int128           s128;
 
@@ -43,6 +59,7 @@ static inline u128 mk(u64 hi, u64 lo)
 
 static inline u64 hi64(u128 x) { union w128 w; w.u = x; return w.h.hi; }
 static inline u64 lo64(u128 x) { union w128 w; w.u = x; return w.h.lo; }
+#endif /* __SIZEOF_INT128__ */
 
 /* 64 x 64 -> 128, in four 32-bit pieces.
  *

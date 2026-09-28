@@ -149,7 +149,7 @@ for O in -O0 -O1 -O2 -Os; do
     EMBCC_M33_HARNESS="$H" sh tests/harness/thumb-m33/link.sh "$H/run.elf" \
         "$H/run.o" 2> "$out/l.err" || {
         echo "$O: link failed:"; head -4 "$out/l.err"; exit 1; }
-    EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-15} \
+    EMBCC_QEMU_UNTIL=DONE EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-15} \
         sh tests/harness/thumb-m33/run.sh "$H/run.elf" > "$out/got.$O" 2>/dev/null
     sed -n '1,/DONE/p' "$out/got.$O" > "$out/cut"
     want="55 7006652 -142857 28502 66051 1800 DONE"
@@ -161,6 +161,100 @@ for O in -O0 -O1 -O2 -Os; do
         head -c 200 "$out/got.$O" | od -c | head -4; exit 1; }
 done
 
+# ---- the runtime, which the program above never touched ---------------
+#
+# Everything above is integer arithmetic the backend does inline, so it would
+# have passed with NO runtime -- and for a while there effectively was none:
+# this target's predefined macros claimed a hardware FPU (`__ARM_FP 0xe`),
+# lib/rt/softfp.c's guard compiled to an empty object, and no float program
+# linked for a Cortex-M33. So the shared programs the other targets run
+# (tests/golden/embedded-*.c) run here too, against the SHIPPED archive
+# (tools/build-rt.sh, the recipe `make rt-embedded` uses), compared with the
+# host: floats as bit patterns, 64-bit division, aggregates by value, varargs.
+#
+# Complex arithmetic is compared against lib/rt/complex.c built FOR THE HOST,
+# not against the host's own __divsc3. Complex division is not correctly
+# rounded in C and compiler-rt uses a different algorithm, so the host's
+# answer differs in the last bit -- and on (1e30+1e30i)/(1e30+1e30i) it is the
+# LESS accurate one, 2.2e-8 where the exact imaginary part is 0. The same
+# algorithm on both sides compares two compilers rather than two runtimes.
+T=thumbv8m.main-none-eabi
+sh tools/build-rt.sh "$T" "$out/rt" 2> "$out/rt.err" || {
+    echo "the runtime does not build for $T:"; head -3 "$out/rt.err"; exit 1; }
+cat > "$out/wrap.c" <<'EOF'
+void puts_(const char *s);
+int prog_main(void);
+int main(void) { prog_main(); puts_("<<END>>\n"); for (;;) ; }
+EOF
+cat > "$out/hostio.c" <<'EOF'
+#include <stdio.h>
+void writec(int c) { putchar(c); }
+void puts_(const char *s) { while (*s) putchar(*s++); }
+void putn(long v) { printf("%ld ", v); }
+int prog_main(void);
+int main(void) { return prog_main(); }
+EOF
+cat > "$out/cx.c" <<'EOF'
+void writec(int c); void puts_(const char *s);
+static void phex(unsigned char b)
+{ static const char d[] = "0123456789abcdef"; writec(d[b >> 4]); writec(d[b & 15]); }
+static void pf(float f)
+{ unsigned char *p = (unsigned char *)&f; int i; for (i = 3; i >= 0; i--) phex(p[i]); writec(' '); }
+static float _Complex mul(float _Complex a, float _Complex b) { return a * b; }
+static float _Complex dv(float _Complex a, float _Complex b) { return a / b; }
+static float _Complex mk(float r, float i)
+{ float _Complex z; __real__ z = r; __imag__ z = i; return z; }
+int prog_main(void)
+{
+    float _Complex a = mk(1.5f, -2.0f), b = mk(0.25f, 3.0f), z;
+    float inf = 1e38f * 10.0f, nan = inf - inf;
+    z = mul(a, b);                          pf(__real__ z); pf(__imag__ z);
+    z = dv(a, b);                           pf(__real__ z); pf(__imag__ z);
+    /* Annex G: an infinite operand makes the product infinite whatever the
+     * other's NaNs -- the case the naive formula gets wrong */
+    z = mul(mk(inf, nan), mk(2.0f, 0.0f));  pf(__real__ z); pf(__imag__ z);
+    z = dv(mk(1.0f, 1.0f), mk(0.0f, 0.0f)); pf(__real__ z); pf(__imag__ z);
+    /* Smith's method: no overflow in the intermediate products */
+    z = dv(mk(1e30f, 1e30f), mk(1e30f, 1e30f)); pf(__real__ z); pf(__imag__ z);
+    puts_("\n");
+    return 0;
+}
+EOF
+for prog in float int64 aggregate varargs cx; do
+    src=tests/golden/embedded-$prog.c; extra=
+    [ "$prog" = cx ] && { src=$out/cx.c; extra=lib/rt/complex.c; }
+    # -Dmain=prog_main, so the wrapper can print a sentinel after it returns
+    # -- on the PROGRAM only, in its own compile: on one cc line with
+    # hostio.c it renamed hostio.c's own main as well, and there was none.
+    cc -std=c99 -w -ffp-contract=off -Dmain=prog_main -c "$src" \
+       -o "$out/host-$prog.o" &&
+    cc -std=c99 -w -ffp-contract=off -o "$out/host-$prog" \
+       "$out/host-$prog.o" "$out/hostio.c" $extra || {
+        echo "$prog: the host build failed"; exit 1; }
+    "$out/host-$prog" > "$out/want-$prog" || {
+        echo "$prog: the host program failed"; exit 1; }
+    for O in -O0 -O1 -O2 -Os; do
+        for f in boot io; do
+            "$EMBCC" --target=$T $O -c tests/harness/thumb-m33/$f.c \
+                -o "$H/$f.o" || exit 1
+        done
+        "$EMBCC" --target=$T $O -c "$out/wrap.c" -o "$H/wrap.o" || exit 1
+        "$EMBCC" --target=$T $O -Dmain=prog_main -c "$src" -o "$H/p.o" \
+            2> "$out/p.err" || {
+            echo "$prog $O: did not compile:"; head -4 "$out/p.err"; exit 1; }
+        EMBCC_M33_HARNESS="$H" sh tests/harness/thumb-m33/link.sh \
+            "$H/p.elf" "$H/p.o" "$H/wrap.o" "$out/rt/librt.a" \
+            2> "$out/l.err" || {
+            echo "$prog $O: link failed:"; head -4 "$out/l.err"; exit 1; }
+        EMBCC_QEMU_UNTIL='<<END>>' EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-20} \
+            sh tests/harness/thumb-m33/run.sh "$H/p.elf" 2>/dev/null \
+            | sed '/<<END>>/,$d' > "$out/got-$prog$O"
+        cmp -s "$out/want-$prog" "$out/got-$prog$O" || {
+            echo "$prog $O: the Cortex-M33 disagrees with the host:"
+            diff "$out/want-$prog" "$out/got-$prog$O" | head -6; exit 1; }
+    done
+done
+
 echo "and it runs on a Cortex-M33 at four optimisation levels: 32-bit
 arithmetic, a signed divide, an unsigned shift and a 64-bit shift, all
 agreeing with the arithmetic they were computed from
@@ -168,4 +262,8 @@ The harness lives at the board's SECURE alias, 0x10000000. On an Armv8-M
 with TrustZone the same memory is non-secure at 0x00000000 and the core
 leaves reset in the SECURE state, so an image linked at 0 is fetched from
 non-secure memory by a secure core -- QEMU answers \"Lockup: can't escalate
-3 to HardFault\" before the first instruction retires."
+3 to HardFault\" before the first instruction retires.
+The runtime runs there too, from the archive that ships: IEEE floats bit for
+bit, 64-bit division, aggregates by value, varargs, and complex multiply and
+divide including the Annex G infinity case and Smith's method, all agreeing
+with the host at four optimisation levels."

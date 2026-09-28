@@ -16,6 +16,14 @@
 set -u
 here=$(dirname "$0")
 QEMU=${EMBCC_QEMU_ARM:-qemu-system-arm}
-"$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" "$QEMU" \
-    -M mps2-an505 -cpu cortex-m33 -nographic -kernel "$1"
+# EMBCC_QEMU_UNTIL: end the run when the image prints this sentinel rather
+# than when the timeout expires -- see ../qrun.sh. Optional; without it the
+# behaviour is what it always was.
+if [ -n "${EMBCC_QEMU_UNTIL:-}" ]; then
+    "$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" --until "$EMBCC_QEMU_UNTIL" \
+        "$QEMU" -M mps2-an505 -cpu cortex-m33 -nographic -kernel "$1"
+else
+    "$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" "$QEMU" \
+        -M mps2-an505 -cpu cortex-m33 -nographic -kernel "$1"
+fi
 exit 0

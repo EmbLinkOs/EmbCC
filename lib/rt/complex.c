@@ -35,6 +35,34 @@
 /* Neither <math.h> nor libm is available here -- this library is linked
  * by programs that may not use either -- so the three predicates are
  * written from their definitions. */
+static int is_nan_f(float x) { return x != x; }
+static int is_inf_f(float x)
+{
+    union { float f; u32 u; } v;
+    v.f = x;
+    return (v.u & 0x7FFFFFFFU) == 0x7F800000U;
+}
+static float copysign_f(float m, float s)
+{
+    union { float f; u32 u; } a, b;
+    a.f = m; b.f = s;
+    a.u = (a.u & 0x7FFFFFFFU) | (b.u & 0x80000000U);
+    return a.f;
+}
+static float fabs_f(float x)
+{
+    union { float f; u32 u; } v;
+    v.f = x;
+    v.u &= 0x7FFFFFFFU;
+    return v.f;
+}
+
+/* The double predicates read the IEEE binary64 layout -- where there is one.
+ * On AVR `double` IS binary32, the same four bytes as a `float`, so a u64
+ * union member would read four bytes of the double and four of whatever
+ * followed it. There the double forms are the float forms: converting
+ * between the two is the identity on that target, not a rounding. */
+#if __SIZEOF_DOUBLE__ == 8
 static int is_nan_d(double x) { return x != x; }
 static int is_inf_d(double x)
 {
@@ -57,27 +85,15 @@ static double fabs_d(double x)
     return v.d;
 }
 
-static int is_nan_f(float x) { return x != x; }
-static int is_inf_f(float x)
+#else
+static int is_nan_d(double x) { return x != x; }
+static int is_inf_d(double x) { return is_inf_f((float)x); }
+static double copysign_d(double m, double s)
 {
-    union { float f; u32 u; } v;
-    v.f = x;
-    return (v.u & 0x7FFFFFFFU) == 0x7F800000U;
+    return copysign_f((float)m, (float)s);
 }
-static float copysign_f(float m, float s)
-{
-    union { float f; u32 u; } a, b;
-    a.f = m; b.f = s;
-    a.u = (a.u & 0x7FFFFFFFU) | (b.u & 0x80000000U);
-    return a.f;
-}
-static float fabs_f(float x)
-{
-    union { float f; u32 u; } v;
-    v.f = x;
-    v.u &= 0x7FFFFFFFU;
-    return v.f;
-}
+static double fabs_d(double x) { return fabs_f((float)x); }
+#endif
 
 double _Complex __muldc3(double a, double b, double c, double d)
 {

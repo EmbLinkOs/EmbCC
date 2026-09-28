@@ -102,8 +102,20 @@ refflags() {
         # CMSE ones and the DSP flags all move -- and a generated file has no
         # business being hand-edited into a parameterised one
         # (ARCHITECTURE.md §5). Same reason the two RISC-V widths have two.
+        #
+        # -mfloat-abi=soft, which the v7-M line gets for free because
+        # thumbv7m has no FPU by default and thumbv8m.main does. Without it
+        # this table said `__ARM_FP 0xe` -- a hardware FPU with single AND
+        # double precision -- and no `__SOFTFP__`, on a backend that does
+        # every float operation as a call. The first thing that read it was
+        # lib/rt/softfp.c's own guard, which compiled to NOTHING for this
+        # target: `a + b` on two floats called __addsf3 and nothing anywhere
+        # defined it, so no float program linked for a Cortex-M33 at all.
+        # A predefined macro is a promise to the program; this one promised
+        # hardware the generated code never uses. When the hard-float ABI
+        # lands, it changes here and in the backend together.
         thumbv8m) [ -n "${EMBCC_REF_GCC_THUMBV8M:-}" ] || \
-                     echo "-target thumbv8m.main-none-eabi -ffreestanding" ;;
+                     echo "-target thumbv8m.main-none-eabi -mfloat-abi=soft -ffreestanding" ;;
         riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
                      echo "-target riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
         riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
