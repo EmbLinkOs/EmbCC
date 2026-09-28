@@ -217,6 +217,8 @@ struct ir_ins {
     int sret_first;          /* IR_CALL: argument 0 is the indirect-result
                               * pointer (type.h sret_first) */
     int call_varargs;        /* al = 0 needed at the call */
+    int call_pcs;            /* IR_CALL: the callee's pcs attribute (ARM;
+                              * see target_pcs_vfp) */
     int call_nfixed;         /* IR_CALL: how many NAMED parameters the
                               * callee has. Needed because Darwin's
                               * arm64 passes every argument past them on
@@ -379,6 +381,7 @@ struct ir_func {
     struct ir_local *locals;
     /* The function's own return type, classified as a call's is. */
     struct ir_arg ret_abi;
+    int pcs;                 /* its own pcs attribute (ARM) */
 
     struct func *src;        /* code_off/len; the types not yet interned */
     int nvregs;

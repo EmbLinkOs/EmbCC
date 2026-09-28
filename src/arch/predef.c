@@ -144,8 +144,13 @@ static const struct predef_macro thumb_hard_add[] = { { "__ARM_PCS_VFP", "1" } }
 
 static int thumb_fpu_drops(const char *name)
 {
-    return target_get() == TARGET_THUMB && target_thumb_fpu() &&
-           (strcmp(name, "__SOFTFP__") == 0 || strcmp(name, "__ARM_FP") == 0);
+    if (target_get() != TARGET_THUMB || !target_thumb_fpu())
+        return 0;
+    /* __ARM_PCS names the base calling convention; the hard-float one
+     * says __ARM_PCS_VFP INSTEAD, and code tests for either. */
+    if (target_thumb_hard_abi() && strcmp(name, "__ARM_PCS") == 0)
+        return 1;
+    return strcmp(name, "__SOFTFP__") == 0 || strcmp(name, "__ARM_FP") == 0;
 }
 
 /* __ELF__ lives in the generated architecture tables, because the

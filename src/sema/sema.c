@@ -1284,6 +1284,16 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                   "deprecated-declarations",
                                   "'%s' is deprecated", fd->name);
                 fd->used = 1;
+                /* The pointer's type cannot say which convention it
+                 * points at, so a call through it would use the default
+                 * one -- the wrong registers, silently. */
+                if (target_pcs_differs(fd->pcs))
+                    sema_error_at(u, e->line, e->col,
+                               "taking the address of '%s' is not supported: "
+                               "it is declared with a pcs attribute that is "
+                               "not this build's convention, and a call "
+                               "through the pointer would use this build's",
+                               fd->name);
                 e->ty = ty_ptr(ty_func(fd->ret_ty, fd->param_tys,
                                        fd->nparams, fd->is_varargs));
                 e->ty->pointee->sret_first = fd->sret_first;
@@ -4327,6 +4337,14 @@ static void merge_decls(struct unit *u)
         }
         canon->is_weak |= f->is_weak;  /* weak on any declaration is weak */
         canon->sret_first |= f->sret_first;
+        /* A calling convention on any declaration is THE convention; two
+         * different ones cannot both be honoured. */
+        if (f->pcs && canon->pcs && f->pcs != canon->pcs)
+            sema_error_line(u, f->line,
+                       "'%s' is declared with a different pcs than on "
+                       "line %d", f->name, canon->line);
+        if (f->pcs)
+            canon->pcs = f->pcs;
         canon->is_noreturn |= f->is_noreturn;  /* noreturn on any wins */
         canon->is_nothrow |= f->is_nothrow;
         f->absorbed = 1;

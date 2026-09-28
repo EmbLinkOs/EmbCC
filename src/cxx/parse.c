@@ -137,6 +137,15 @@ static void parse_attrs(struct attrs *a)
                 if (cx_accept(TOK_COMMA))
                     continue;
                 const char *n = cx_cur()->t.text ? cx_cur()->t.text : "";
+                /* A calling convention cannot be one of the attributes
+                 * "accepted" by skipping it: the callers would use the
+                 * default one and the function the other. The C front end
+                 * honours it; this one does not carry it yet. */
+                if (attr_is(n, "pcs"))
+                    cx_error(cx_cur(), "__attribute__((pcs)) is not "
+                             "supported in C++ yet: calls would use this "
+                             "build's calling convention instead of the one "
+                             "it names");
                 cx_advance();
                 if (cx_kind() == TOK_LPAREN) {
                     if (attr_is(n, "aligned")) {

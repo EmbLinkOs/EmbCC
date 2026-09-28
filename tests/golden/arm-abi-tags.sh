@@ -76,17 +76,17 @@ echo "-dumpmachine answers for the part that was asked for"
 # they describe something else. The float ones are the point: guessing
 # either way is the ABI mismatch above.
 for fl in -mthumb -mcpu=cortex-m3 -mcpu=cortex-m4 -mfpu=none -mfloat-abi=soft \
-          -mfpu=fpv4-sp-d16 "-mfpu=fpv4-sp-d16 -mfloat-abi=softfp"
+          -mfpu=fpv4-sp-d16 "-mfpu=fpv4-sp-d16 -mfloat-abi=softfp" \
+          "-mfpu=fpv4-sp-d16 -mfloat-abi=hard"
 do
     "$EMBCC" --target=thumbv7em-none-eabi $fl -c "$out/t.c" -o /dev/null \
         2> "$out/f.err" || { echo "$fl was refused:"; cat "$out/f.err"
                              exit 1; }
 done
-# -mfloat-abi=softfp and =hard with no FPU named, an FPU the part does not
-# have (FPv5 is the Cortex-M33's), and hard-float itself, which waits on
-# AAPCS-VFP argument passing.
+# -mfloat-abi=softfp and =hard with no FPU named, and an FPU the part
+# does not have (FPv5 is the Cortex-M33's).
 for fl in -mfloat-abi=hard -mfloat-abi=softfp -mfpu=fpv5-sp-d16 \
-          "-mfpu=fpv4-sp-d16 -mfloat-abi=hard" -marm -mcpu=cortex-m9
+          -marm -mcpu=cortex-m9
 do
     if "$EMBCC" --target=thumbv7em-none-eabi $fl -c "$out/t.c" -o /dev/null \
          2> "$out/f.err"; then

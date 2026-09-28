@@ -2242,7 +2242,7 @@ static const char *default_asm_output(const char *in)
     return out;
 }
 
-static int g_want_dump_predef;
+static int g_want_dump_predef, g_want_dumpmachine;
 
 /* -mfpu= and -mfloat-abi=, as recorded while parsing. */
 static const char *g_arm_fpu;
@@ -2271,13 +2271,20 @@ static const char *g_arm_float_abi;
  * (__ARM_FP, __ARM_VFPV4__, __SOFTFP__); both follow from what is set here. */
 static void arm_float_resolve(void)
 {
-    const char *abi = g_arm_float_abi ? g_arm_float_abi : "soft";
+    if (target_get() != TARGET_THUMB)
+        return;                        /* refused where the flag was parsed */
+    /* An -eabihf triple is shorthand for the part's FPU and the hard
+     * convention; a flag that says otherwise wins, as with clang. */
+    int hf = target_thumb_hf_name();
+    const char *hf_fpu = target_thumb_arch() >= 8 ? "fpv5-sp-d16"
+                                                   : "fpv4-sp-d16";
+    const char *abi = g_arm_float_abi ? g_arm_float_abi : hf ? "hard" : "soft";
+    if (!g_arm_fpu && hf)
+        g_arm_fpu = hf_fpu;
     int fpu_named = g_arm_fpu && strcmp(g_arm_fpu, "none") != 0 &&
                     strcmp(g_arm_fpu, "soft") != 0 && strcmp(g_arm_fpu, "auto") != 0;
     if (!g_arm_fpu && !g_arm_float_abi)
         return;
-    if (target_get() != TARGET_THUMB)
-        return;                        /* refused where the flag was parsed */
     if (strcmp(abi, "soft") && strcmp(abi, "softfp") && strcmp(abi, "hard"))
         diag_fatal(NULL, 0, "-mfloat-abi=%s is not an ARM float ABI: it is "
                    "one of soft, softfp and hard", abi);
@@ -2303,13 +2310,11 @@ static void arm_float_resolve(void)
         diag_fatal(NULL, 0, "-mfloat-abi=%s needs an FPU to use: add "
                    "-mfpu=fpv4-sp-d16 (Cortex-M4F) or -mfpu=fpv5-sp-d16 "
                    "(Cortex-M33)", abi);
-    if (!strcmp(abi, "hard"))
-        diag_fatal(NULL, 0, "-mfloat-abi=hard is not supported yet: it passes "
-                   "floating point in s0-s15 (AAPCS-VFP), and EmbCC still "
-                   "passes it in the core registers. -mfloat-abi=softfp gives "
-                   "the FPU's arithmetic with the core-register convention, "
-                   "and links with soft-float objects");
-    target_set_thumb_fpu(1);           /* softfp */
+    /* hard: the FPU's arithmetic, and floating point passed and
+     * returned in s0-s15 / d0-d7 (AAPCS-VFP). The runtime helpers keep the
+     * base convention either way, as the RTABI requires. */
+    target_set_thumb_hard_abi(!strcmp(abi, "hard"));
+    target_set_thumb_fpu(1);
 }
 
 int main(int argc, char **argv)
@@ -2476,9 +2481,13 @@ int main(int argc, char **argv)
             /* The canonical spelling of whatever --target= chose, from
              * the one table that knows them. A chain of ternaries here
              * was a second list to keep in step, and it silently
-             * printed x86_64-elf for every target added after it. */
-            printf("%s\n", target_triple_now());
-            return 0;
+             * printed x86_64-elf for every target added after it.
+             *
+             * Answered after the arguments, as --dump-predef is: the
+             * name also says the float ABI (thumbv7em-none-eabihf), which
+             * -mfloat-abi= can change. */
+            g_want_dumpmachine = 1;
+            continue;
         }
         if (strcmp(argv[i], "--dump-predef") == 0)
             /* NOT answered here: this scan has applied --target= and
@@ -2804,7 +2813,8 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "-f", 2) == 0 && argv[i][2] &&
                    opt_set_pass(argv[i] + 2, 1)) {
             /* a named pass, on -- so a single pass can be tried at -O1 */
-        } else if (strcmp(argv[i], "--dump-predef") == 0) {
+        } else if (strcmp(argv[i], "--dump-predef") == 0 ||
+                   strcmp(argv[i], "-dumpmachine") == 0) {
             /* answered after every argument has been applied */
         } else if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
                    strncmp(argv[i], "-mfpu=", 6) == 0 ||
@@ -3043,6 +3053,10 @@ int main(int argc, char **argv)
 
     arm_float_resolve();
 
+    if (g_want_dumpmachine) {
+        printf("%s\n", target_triple_now());
+        return 0;
+    }
     if (g_want_dump_predef) {
         dump_predef();
         return 0;

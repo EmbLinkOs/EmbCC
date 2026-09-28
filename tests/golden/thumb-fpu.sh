@@ -298,11 +298,4 @@ if command -v clang >/dev/null 2>&1; then
     echo "embld refuses a clang hard-float object mixed with a softfp one, by name"
 fi
 
-# -mfloat-abi=hard stays REFUSED until AAPCS-VFP argument passing exists.
-if "$EMBCC" --target=$T -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard \
-     -c "$out/d.c" -o /dev/null 2> "$out/f.err"; then
-    echo "-mfloat-abi=hard was accepted before AAPCS-VFP exists"; exit 1
-fi
-grep -q 'not supported yet' "$out/f.err" || {
-    echo "the -mfloat-abi=hard refusal does not say why:"; cat "$out/f.err"; exit 1; }
-echo "-mfloat-abi=hard is still refused by name: the FPU is in, AAPCS-VFP is not"
+# -mfloat-abi=hard itself is tests/golden/thumb-hardfp.sh.

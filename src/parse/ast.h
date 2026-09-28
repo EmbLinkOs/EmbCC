@@ -316,6 +316,8 @@ struct func {
      * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */
     int fmt_kind, fmt_idx, fmt_first;
     int is_varargs;       /* declared with a trailing ", ..." */
+    int pcs;              /* __attribute__((pcs)): 1 "aapcs", 2 "aapcs-vfp",
+                           * 0 whatever -mfloat-abi says (ARM only) */
     int sret_first;       /* param 0 is the indirect-result pointer
                            * (embcc_sret; type.h) */
     struct type *ret_ty;

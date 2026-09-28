@@ -398,7 +398,11 @@ static char *wide64_map(struct ir_func *fn)
  * `align` is the type's, and only 8 matters: it rounds the register
  * number up to even, and the stack offset with it. A `long long` is
  * therefore never split, because rounding leaves two registers or none. */
-struct argplace { int reg, nreg, nstk; long stk; };
+/* Where one argument goes: `nreg` core registers from r`reg`, then
+ * `nstk` words at `stk` in the outgoing area -- or, under the hard-float
+ * convention, `nvfp` SINGLE registers from s`vfp` (a double takes two,
+ * and `vdbl` says the elements are doubles, so d(vfp/2) is the name). */
+struct argplace { int reg, nreg, nstk; long stk; int vfp, nvfp, vdbl; };
 
 static void place_arg(int size, int align, int *ncrn, long *stk,
                       struct argplace *p)
@@ -409,8 +413,19 @@ static void place_arg(int size, int align, int *ncrn, long *stk,
         *ncrn = (*ncrn + 1) & ~1;
         *stk = (*stk + 7) & ~7L;
     }
+    p->vfp = -1;
+    p->nvfp = p->vdbl = 0;
     p->reg = *ncrn;
     p->nreg = *ncrn < 4 ? (words < 4 - *ncrn ? words : 4 - *ncrn) : 0;
+    /* C.5: an argument is SPLIT between the last core registers and the
+     * stack only while nothing is on the stack yet. The base standard
+     * alone never gets here with a stack argument and a free register;
+     * the hard-float one does, once a float has overflowed s0-s15, and
+     * then the whole of the next composite goes to memory. */
+    if (p->nreg && p->nreg < words && *stk) {
+        p->nreg = 0;
+        *ncrn = 4;
+    }
     p->nstk = words - p->nreg;
     p->stk = *stk;
     *ncrn += p->nreg;
@@ -431,9 +446,136 @@ static void place_arg(int size, int align, int *ncrn, long *stk,
  * first parameter out of r1. */
 static int sret_bytes(int retsize) { return retsize > 4 ? retsize : 0; }
 
+/* ---- the hard-float calling convention (AAPCS §6.1.2, "VFP") --------
+ *
+ * -mfloat-abi=hard changes WHERE floating point travels, and nothing
+ * else. A "co-processor register candidate" -- a float, a double, or a
+ * homogeneous aggregate of one to four of either (which is what a
+ * `_Complex float` is here too) -- goes in s0-s15 / d0-d7, allocated
+ * lowest-first WITH BACK-FILL: f(float, double, float) passes s0, d1 and
+ * then s1, the hole the double's alignment left. Everything else walks
+ * r0-r3 and the stack exactly as before, independently.
+ *
+ * When a candidate does not fit, it goes to the stack and EVERY VFP
+ * register still free becomes unusable (C.3), so a later float cannot
+ * slip back into a hole.
+ *
+ * A VARIADIC function uses the base standard for all of its arguments,
+ * named ones included, and for its result: the callee cannot know which
+ * register file an unnamed argument came in. */
+
+/* How many elements, and of what size, if `a` is a candidate. */
+static int vfp_cprc(const struct ir_arg *a, int *esz)
+{
+    if (!a->is_struct && a->is_float && (a->size == 4 || a->size == 8)) {
+        *esz = a->size;
+        return 1;
+    }
+    if (a->is_struct && a->hfa_n >= 1 && a->hfa_n <= 4 &&
+        (a->hfa_size == 4 || a->hfa_size == 8)) {
+        *esz = a->hfa_size;
+        return a->hfa_n;
+    }
+    return 0;
+}
+
+/* One walk over an argument list: the core registers, the stack and the
+ * VFP registers, with the state all three share. */
+struct abi_walk { int ncrn; long stk; unsigned vfree; int vfp; };
+
+static void walk_init(struct abi_walk *w, int sret, int varargs, int pcs)
+{
+    w->ncrn = sret ? 1 : 0;
+    w->stk = 0;
+    w->vfree = 0xffffu;            /* s0-s15 */
+    w->vfp = target_pcs_vfp(pcs, varargs);
+}
+
+static int arg_align(const struct ir_arg *a);
+
+static void place_one(struct abi_walk *w, const struct ir_arg *a,
+                      struct argplace *p)
+{
+    int esz, n = w->vfp ? vfp_cprc(a, &esz) : 0;
+    if (n) {
+        int step = esz / 4, need = n * step;
+        unsigned m = (1u << need) - 1;
+        p->reg = p->nreg = p->nstk = 0;
+        p->stk = 0;
+        p->vdbl = esz == 8;
+        for (int s = 0; s + need <= 16; s += step)
+            if ((w->vfree & (m << s)) == (m << s)) {
+                w->vfree &= ~(m << s);
+                p->vfp = s;
+                p->nvfp = need;
+                return;
+            }
+        /* C.3: to memory, and no VFP register is used after this. The
+         * core registers are not touched: a later int still gets r0. */
+        w->vfree = 0;
+        p->vfp = -1;
+        p->nvfp = 0;
+        if (esz == 8)
+            w->stk = (w->stk + 7) & ~7L;
+        p->stk = w->stk;
+        p->nstk = (a->size + 3) / 4;
+        w->stk += (long)p->nstk * 4;
+        return;
+    }
+    place_arg(a->size, arg_align(a), &w->ncrn, &w->stk, p);
+}
+
+/* Is a result returned in VFP registers? A float or double in s0/d0; a
+ * homogeneous aggregate in s0-s3 / d0-d3, WHATEVER its size -- so an
+ * eight-byte `struct { float x, y; }` that the base standard returns
+ * through a hidden pointer comes back in s0 and s1 instead. */
+static int ret_vfp(int varargs, int pcs, int is_struct, int is_float, int size,
+                   int hfa_n, int hfa_size)
+{
+    struct ir_arg a;
+    int esz;
+    if (!target_pcs_vfp(pcs, varargs))
+        return 0;
+    memset(&a, 0, sizeof a);
+    a.is_struct = is_struct;
+    a.is_float = is_float;
+    a.size = size;
+    a.hfa_n = hfa_n;
+    a.hfa_size = hfa_size;
+    return vfp_cprc(&a, &esz);
+}
+
+static int call_ret_vfp(const struct ir_ins *i, int *esz)
+{
+    int n = ret_vfp(i->call_varargs, i->call_pcs, i->retsize > 0, i->flt,
+                    i->retsize ? i->retsize : i->w, i->ret_hfa_n,
+                    i->ret_hfa_size);
+    *esz = i->retsize ? i->ret_hfa_size : i->w;
+    return i->dst >= 0 || i->retsize ? n : 0;
+}
+
+static int fn_ret_vfp(const struct ir_func *fn, int *esz)
+{
+    const struct ir_arg *r = &fn->ret_abi;
+    *esz = r->is_struct ? r->hfa_size : r->size;
+    return ret_vfp(fn->is_varargs, fn->pcs, r->is_struct, r->is_float, r->size,
+                   r->hfa_n, r->hfa_size);
+}
+
 static int fn_sret_bytes(const struct ir_func *fn)
 {
+    int esz;
+    if (fn_ret_vfp(fn, &esz))
+        return 0;
     return fn->ret_abi.is_struct ? sret_bytes(fn->ret_abi.size) : 0;
+}
+
+static int call_sret_bytes(const struct ir_ins *i)
+{
+    int esz;
+    if (call_ret_vfp(i, &esz))
+        return 0;
+    return sret_bytes(i->retsize);
 }
 
 /* What an argument's alignment is for placement purposes. A composite
@@ -472,16 +614,14 @@ static int arg_align(const struct ir_arg *a)
 static void t_abi_hints(const struct ir_func *fn, int *hint)
 {
     struct func *f = fn->src;
-    int ncrn = 0;
-    long stk = 0;
     /* A returned composite takes r0 for the hidden pointer, which is
      * what shifts every declared parameter along one. */
-    if (fn->ret_abi.is_struct && fn->ret_abi.size > 4)
-        ncrn = 1;
+    struct abi_walk w;
+    walk_init(&w, fn_sret_bytes(fn) != 0, fn->is_varargs, fn->pcs);
     for (int p = 0; f && p < fn->nparams && p < fn->nvregs; p++) {
         struct ir_arg *a = &fn->param_abi[p];
         struct argplace pl;
-        place_arg(a->size, arg_align(a), &ncrn, &stk, &pl);
+        place_one(&w, a, &pl);
         if (pl.nreg == 1 && !pl.nstk && !a->is_struct && a->size <= 4)
             hint[p] = pl.reg;
     }
@@ -501,16 +641,14 @@ static void t_abi_hints(const struct ir_func *fn, int *hint)
      * itself uses -- so no second copy of AAPCS32 is stated here. */
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
-        int cn = 0;
-        long cstk = 0;
+        struct abi_walk cw;
         if (i->op != IR_CALL)
             continue;
-        if (sret_bytes(i->retsize))
-            cn = 1;
+        walk_init(&cw, call_sret_bytes(i) != 0, i->call_varargs, i->call_pcs);
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
             struct argplace pl;
-            place_arg(a->size, arg_align(a), &cn, &cstk, &pl);
+            place_one(&cw, a, &pl);
             if (pl.nreg == 1 && !pl.nstk && !a->is_struct && a->size <= 4 &&
                 a->vreg >= 0 && a->vreg < fn->nvregs)
                 hint[a->vreg] = pl.reg;
@@ -524,17 +662,15 @@ static long outgoing_area(const struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
         struct argplace pl;
-        int ncrn = 0;
-        long stk = 0;
+        struct abi_walk w;
         if (i->op != IR_CALL)
             continue;
-        if (sret_bytes(i->retsize))
-            ncrn = 1;                  /* r0 holds the result's address */
+        /* r0 holds the result's address when there is one */
+        walk_init(&w, call_sret_bytes(i) != 0, i->call_varargs, i->call_pcs);
         for (int k = 0; k < i->nargs; k++)
-            place_arg(i->argv[k].size, arg_align(&i->argv[k]),
-                      &ncrn, &stk, &pl);
-        if (stk > most)
-            most = stk;
+            place_one(&w, &i->argv[k], &pl);
+        if (w.stk > most)
+            most = w.stk;
     }
     return (most + 7) & ~7L;
 }
@@ -1323,6 +1459,48 @@ static void vfp_store(struct t_fn *F, int v, int sreg)
     wr(F, v, T_ACC);
 }
 
+/* A DOUBLE between its vreg -- a pair of words on the frame, since a
+ * 64-bit value is never in a register here -- and d register `d`.
+ * FPv4-SP-D16 cannot compute in double precision, but it can hold, load,
+ * store and move one, which is all the hard-float convention asks of it
+ * at a call. */
+static int vfp_slot_ok(const struct t_fn *F, int v)
+{
+    return F->slot[v] >= 0 && F->slot[v] <= 1020 && !(F->slot[v] & 3);
+}
+
+static void vfp_load_d(struct t_fn *F, int v, int d)
+{
+    if (vfp_slot_ok(F, v)) {
+        t_vldst(F->t, d, T_SP, (int)F->slot[v], 1, 0);
+        return;
+    }
+    rd64(F, v, T_ACC, T_TMP);
+    t_vmov_core_pair(F->t, d, T_ACC, T_TMP, 1);
+}
+
+static void vfp_store_d(struct t_fn *F, int v, int d)
+{
+    if (v < 0 || F->slot[v] < 0)
+        return;
+    if (vfp_slot_ok(F, v)) {
+        t_vldst(F->t, d, T_SP, (int)F->slot[v], 1, 1);
+        return;
+    }
+    t_vmov_core_pair(F->t, d, T_ACC, T_TMP, 0);
+    wr64(F, v, T_ACC, T_TMP);
+}
+
+/* A homogeneous aggregate between memory at [base, #0...] and the VFP
+ * registers from s`s0` -- element by element, doubles as d registers. */
+static void vfp_aggregate(struct t_fn *F, int base, int s0, int n, int dbl,
+                          int store)
+{
+    for (int e = 0; e < n; e++)
+        t_vldst(F->t, dbl ? s0 / 2 + e : s0 + e, base, e * (dbl ? 8 : 4),
+                dbl, store);
+}
+
 /* Returns 1 when this instruction was emitted on the FPU, 0 to fall
  * through to the soft-float helper. Saying 0 rather than refusing is
  * deliberate: an operation the FPU cannot do is not an error, it is a
@@ -1867,23 +2045,19 @@ static void gen_ins(struct t_fn *F, int n)
          * slots from sp. An eight-byte argument would round the register
          * number up to even and take two — refused above with everything
          * else 64-bit, so the placement here stays the simple one. */
-        int ncrn = 0;
-        long stk = 0;
-        long sret = sret_bytes(i->retsize);
+        long sret = call_sret_bytes(i);
+        int resz, rvfp = call_ret_vfp(i, &resz);
         /* The STACK words first, then the registers: writing a stack
          * argument needs a scratch, and by the time r0-r3 are loaded
          * there is none left that is not already an argument. */
         struct argplace pl[MAX_PARAMS];
-        if (sret)
-            ncrn = 1;
-        for (int k = 0; k < i->nargs; k++) {
-            struct ir_arg *a = &i->argv[k];
-            /* A struct of floats needs no special case either: the
-             * base AAPCS standard has no homogeneous-aggregate rule —
-             * that is the VFP variant's — so it travels in core
-             * registers like any other composite. */
-            place_arg(a->size, arg_align(a), &ncrn, &stk, &pl[k]);
-        }
+        struct abi_walk w;
+        walk_init(&w, sret != 0, i->call_varargs, i->call_pcs);
+        /* Under the base standard a struct of floats is a composite like
+         * any other; under the hard-float one it is a candidate for the
+         * VFP registers. place_one knows which convention is in force. */
+        for (int k = 0; k < i->nargs; k++)
+            place_one(&w, &i->argv[k], &pl[k]);
         for (int k = 0; k < i->nargs; k++) {
             struct ir_arg *a = &i->argv[k];
             if (!pl[k].nstk)
@@ -1918,6 +2092,25 @@ static void gen_ins(struct t_fn *F, int n)
             } else {
                 rd(F, a->vreg, T_ACC);
                 t_ldst_imm(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
+            }
+        }
+        /* The VFP arguments next, while every vreg is still where the
+         * allocator put it: the core moves below overwrite r0-r3, which
+         * may be exactly where a float argument lives. Nothing after
+         * this touches s0-s15 before the call. */
+        for (int k = 0; k < i->nargs; k++) {
+            struct ir_arg *a = &i->argv[k];
+            if (!pl[k].nvfp)
+                continue;
+            if (a->is_struct) {
+                rd(F, a->vreg, T_ADDR);
+                vfp_aggregate(F, T_ADDR, pl[k].vfp,
+                              pl[k].vdbl ? pl[k].nvfp / 2 : pl[k].nvfp,
+                              pl[k].vdbl, 0);
+            } else if (pl[k].vdbl) {
+                vfp_load_d(F, a->vreg, pl[k].vfp / 2);
+            } else {
+                vfp_load(F, a->vreg, pl[k].vfp);
             }
         }
         /* The register-resident scalars move in PARALLEL. Loading them
@@ -1999,14 +2192,25 @@ static void gen_ins(struct t_fn *F, int n)
         } else {
             note_ext(F->st, t_bl(t), i->callee);
         }
-        if (i->dst >= 0) {
+        if (i->dst >= 0 && rvfp) {
+            /* Back in s0 / d0, or s0-s3 / d0-d3 for an aggregate. */
+            if (i->retsize) {
+                t_add_sp(t, T_ADDR, F->scratch_at + i->scratch);
+                vfp_aggregate(F, T_ADDR, 0, rvfp, resz == 8, 1);
+                wr(F, i->dst, T_ADDR);
+            } else if (resz == 8) {
+                vfp_store_d(F, i->dst, 0);
+            } else {
+                vfp_store(F, i->dst, 0);
+            }
+        } else if (i->dst >= 0) {
             if (i->retsize) {
                 /* dst receives the scratch's ADDRESS, which is the
                  * contract irgen shares with the other backends. A
                  * four-byte composite came back in r0 and has to be
                  * stored there first; a larger one the callee already
                  * wrote through the pointer. */
-                if (!sret_bytes(i->retsize)) {
+                if (!sret) {
                     t_add_sp(t, T_ADDR, F->scratch_at + i->scratch);
                     t_ldst_imm(t, T_R0, T_ADDR, 0, i->retsize, 0, 1);
                 }
@@ -2021,7 +2225,22 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
 
-    case IR_RET:
+    case IR_RET: {
+        int resz, rvfp = i->a >= 0 ? fn_ret_vfp(fn, &resz) : 0;
+        if (rvfp) {
+            /* Home in s0 / d0, or s0-s3 / d0-d3 for an aggregate whose
+             * ADDRESS `a` holds. The epilogue only pops core registers,
+             * so nothing disturbs them on the way out. */
+            if (fn->ret_abi.is_struct) {
+                rd(F, i->a, T_ADDR);
+                vfp_aggregate(F, T_ADDR, 0, rvfp, resz == 8, 0);
+            } else if (resz == 8) {
+                vfp_load_d(F, i->a, 0);
+            } else {
+                vfp_load(F, i->a, 0);
+            }
+            goto ret_epilogue;
+        }
         if (i->a >= 0 && fn->ret_abi.size && fn->ret_abi.is_struct) {
             /* `a` holds the ADDRESS of the composite being returned.
              * Four bytes or fewer come back in r0; anything larger is
@@ -2065,6 +2284,7 @@ static void gen_ins(struct t_fn *F, int n)
         if (n + 1 < fn->nins)
             jump_to(F, fn->nlabels);
         return;
+    }
 
     case IR_UD2:
         /* `udf #0` (0xde00): PERMANENTLY UNDEFINED, which is what this
@@ -2338,8 +2558,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * every later reference reads. */
     {
         struct argplace pl;
-        int ncrn = 0;
-        long stk = 0;
+        struct abi_walk w;
+        /* float parameters the allocator put in a core register, and the
+         * s register each arrives in: moved after the core parameters */
+        int pvf_reg[RA_MAXPOOL], pvf_s[RA_MAXPOOL], npvf = 0;
         /* The caller's outgoing area, above everything this prologue
          * pushed. save_bytes_for is the ONE answer for how far that
          * push moves sp: the four fixed registers, the allocator's
@@ -2358,13 +2580,34 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.va_regsave = base;            /* r0-r3, four words */
             base += 16;                     /* ... then the stack ones */
         }
-        if (F.sret_slot >= 0) {
+        if (F.sret_slot >= 0)
             t_ldst_imm(t, T_R0, T_SP, F.sret_slot, 4, 0, 1);
-            ncrn = 1;
-        }
+        walk_init(&w, F.sret_slot >= 0, fn->is_varargs, fn->pcs);
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
-            place_arg(a->size, arg_align(a), &ncrn, &stk, &pl);
+            place_one(&w, a, &pl);
+            /* Arrived in VFP registers (-mfloat-abi=hard). Reading them
+             * disturbs no core register, so everything except a float
+             * headed for a core register is done here; that one waits
+             * for the core parameters to leave the register it may be
+             * about to take. */
+            if (pl.nvfp) {
+                if (a->is_struct) {
+                    t_add_sp(t, T_ADDR, F.slot[i]);
+                    vfp_aggregate(&F, T_ADDR, pl.vfp,
+                                  pl.vdbl ? pl.nvfp / 2 : pl.nvfp,
+                                  pl.vdbl, 1);
+                } else if (pl.vdbl) {
+                    vfp_store_d(&F, i, pl.vfp / 2);
+                } else if (in_reg(&F, i) && npvf < RA_MAXPOOL) {
+                    pvf_reg[npvf] = F.loc[i];
+                    pvf_s[npvf] = pl.vfp;
+                    npvf++;
+                } else {
+                    vfp_store(&F, i, pl.vfp);
+                }
+                continue;
+            }
             /* A parameter the allocator put in a REGISTER is one edge of
              * a PARALLEL MOVE, deferred until every parameter has been
              * placed: writing it here would destroy an incoming argument
@@ -2444,6 +2687,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 t_add_sp(t, T_ADDR, pstk_off[k]);
                 t_ldst_imm(t, pstk_reg[k], T_ADDR, 0, 4, 0, 0);
             }
+        /* And the floats that arrived in s registers, into theirs. */
+        for (int k = 0; k < npvf; k++)
+            t_vmov_core(t, pvf_s[k], pvf_reg[k], 0);
 
         /* Where the first UNNAMED argument sits — which is simply where
          * the named ones stopped. The save area and the caller's stack
@@ -2451,7 +2697,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * cases: below four named words it is inside the save area, and
          * at four it is exactly its end, which is the stack. */
         if (fn->is_varargs)
-            F.va_first = F.va_regsave + (long)ncrn * 4 + stk;
+            F.va_first = F.va_regsave + (long)w.ncrn * 4 + w.stk;
     }
 
     for (i = 0; i < fn->nins; i++) {

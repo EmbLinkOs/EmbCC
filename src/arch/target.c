@@ -22,6 +22,7 @@ static int g_thumb_em;      /* --target=thumbv7em-*: see target_thumb_em */
 static int g_thumb_arch = 7;
 static int g_thumb_fpu;     /* see target_thumb_fpu */
 static int g_thumb_hard;    /* see target_thumb_hard_abi */
+static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
 static enum target_os   g_os   = TGT_OS_NONE;
 static enum target_fmt  g_fmt  = TGT_FMT_ELF;
 
@@ -332,6 +333,16 @@ static const struct triple {
     { "thumbv8m-none-eabi", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 3 },
     { "armv8m.main-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF,    0, 3 },
 
+    /* The hard-float spellings, as LLVM and Rust name them: the part's
+     * FPU (FPv4-SP-D16 on a Cortex-M4F, FPv5-SP-D16 on a Cortex-M33) and
+     * floating point passed in its registers. Canon 4 and 5 are these
+     * two, so -dumpmachine and the runtime's directory say which
+     * convention a build uses -- a hard-float and a soft-float object do
+     * not link, so their runtimes cannot share a name. -mfloat-abi= and
+     * -mfpu= still override what the name implies. */
+    { "thumbv7em-none-eabihf", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF,    4, 1 },
+    { "thumbv8m.main-none-eabihf", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 5, 3 },
+
     /* RISC-V, bare metal. `-unknown-elf` is the spelling the reference
      * toolchains use and the one a project's existing --target= string
      * will say; the short forms are accepted because everyone writes
@@ -393,6 +404,8 @@ int target_from_triple(const char *triple, enum target_arch *out,
                  * DSP extension too -- v8-M Mainline includes it -- so the
                  * `em` flag stays set for the code that asks "may I use the
                  * v7E-M/DSP instructions". */
+                size_t n = strlen(triple);
+                g_thumb_hf_name = n > 6 && !strcmp(triple + n - 6, "eabihf");
                 if (g_triples[i].thumb_em == 3) {
                     g_thumb_arch = 8;
                     g_thumb_em = 1;
@@ -413,7 +426,8 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
      * sub-architecture as well, which is the only place that is true. */
     int want = 1;
     if (a == TARGET_THUMB)
-        want = g_thumb_arch >= 8 ? 3 : g_thumb_em ? 2 : 1;
+        want = g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
+             : g_thumb_em ? (g_thumb_hard ? 4 : 2) : 1;
     for (int i = 0; i < g_ntriples; i++)
         if (g_triples[i].canon == want && g_triples[i].arch == a &&
             g_triples[i].os == o)
@@ -435,6 +449,23 @@ void target_set_thumb_arch(int lvl) { g_thumb_arch = lvl; }
 int target_thumb_fpu(void) { return g_thumb_fpu; }
 void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }
 int target_thumb_hard_abi(void) { return g_thumb_hard; }
+int target_thumb_hf_name(void) { return g_thumb_hf_name; }
+
+int target_pcs_vfp(int pcs, int varargs)
+{
+    /* A variadic function uses the base standard whatever else is said:
+     * the callee cannot know which file an unnamed argument came in. */
+    if (varargs || target_get() != TARGET_THUMB)
+        return 0;
+    return pcs ? pcs == 2 : g_thumb_hard;
+}
+
+int target_pcs_differs(int pcs)
+{
+    return pcs && target_get() == TARGET_THUMB &&
+           (pcs == 2) != (g_thumb_hard != 0);
+}
+
 void target_set_thumb_hard_abi(int on) { g_thumb_hard = on ? 1 : 0; }
 void target_set_thumb_em(int on) { g_thumb_em = on ? 1 : 0; }
 

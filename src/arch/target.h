@@ -216,6 +216,15 @@ void target_set_thumb_fpu(int on);
  * alone. It decides Tag_ABI_VFP_args and __ARM_PCS_VFP, and it is what the
  * linker checks before mixing two objects. */
 int target_thumb_hard_abi(void);
+/* Does a function declared __attribute__((pcs(N))) (1 "aapcs", 2
+ * "aapcs-vfp", 0 none) use a convention OTHER than this build's? */
+int target_pcs_differs(int pcs);
+/* Was the target named with an -eabihf triple (thumbv7em-none-eabihf)?
+ * The driver reads it as -mfpu=<the part's> -mfloat-abi=hard. */
+int target_thumb_hf_name(void);
+/* Are floating-point arguments and results in VFP registers for a
+ * function with this pcs and variadic-ness? */
+int target_pcs_vfp(int pcs, int varargs);
 void target_set_thumb_hard_abi(int on);
 
 /* The selected target. Defaults to x86_64 so every existing command line

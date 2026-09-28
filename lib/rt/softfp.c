@@ -39,8 +39,26 @@
  * (or simply leaves __ARM_FP undefined) for the same. x86-64 and
  * AArch64 always have hardware floating point, so neither macro is
  * defined there and the file is empty, as before. */
+/* ...and an ARM FPU that is SINGLE-precision (bit 3 of __ARM_FP clear,
+ * which is every Cortex-M4F and M33) still needs every `double` routine
+ * here, and the 64-bit integer conversions of `float`, which VFP has no
+ * instruction for. It used to be compiled away as soon as __ARM_FP was
+ * defined, and an FPU build then linked a soft-float build of this file
+ * -- which works until the objects must agree about the float ABI. */
 #if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
-    (defined(__arm__) && !defined(__ARM_FP))
+    (defined(__arm__) && (!defined(__ARM_FP) || !(__ARM_FP & 8)))
+
+/* The run-time ABI: these routines take and return their operands in the
+ * CORE registers under every ARM float ABI, -mfloat-abi=hard included --
+ * the RTABI says so, and it is what every compiler's calls to them
+ * assume, EmbCC's backend among them. Under the hard-float convention
+ * that has to be said, or their float arguments would be read from
+ * s0-s15. libgcc and compiler-rt say it the same way. */
+#if defined(__ARM_PCS_VFP)
+#define RT_ABI __attribute__((pcs("aapcs")))
+#else
+#define RT_ABI
+#endif
 
 typedef unsigned int u32;
 typedef unsigned long long u64;
@@ -241,10 +259,10 @@ static double addsub(double x, double y, int negate_y)
     return round_pack(b.sign, a.exp, b.sig - a.sig);
 }
 
-double __adddf3(double a, double b) { return addsub(a, b, 0); }
-double __subdf3(double a, double b) { return addsub(a, b, 1); }
+RT_ABI double __adddf3(double a, double b) { return addsub(a, b, 0); }
+RT_ABI double __subdf3(double a, double b) { return addsub(a, b, 1); }
 
-double __negdf2(double a) { return u2d(d2u(a) ^ ((u64)1 << 63)); }
+RT_ABI double __negdf2(double a) { return u2d(d2u(a) ^ ((u64)1 << 63)); }
 
 /* ---- multiply ----------------------------------------------------- */
 
@@ -264,7 +282,7 @@ static u64 mul64(u64 a, u64 b, u64 *lo_out)
     return hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
 }
 
-double __muldf3(double x, double y)
+RT_ABI double __muldf3(double x, double y)
 {
     struct fp a, b;
 
@@ -298,7 +316,7 @@ double __muldf3(double x, double y)
 
 /* ---- divide -------------------------------------------------------- */
 
-double __divdf3(double x, double y)
+RT_ABI double __divdf3(double x, double y)
 {
     struct fp a, b;
 
@@ -369,13 +387,13 @@ static int compare(double x, double y, int nan_result)
     return ua > ub ? 1 : -1;
 }
 
-int __eqdf2(double a, double b) { return compare(a, b, 1); }
-int __nedf2(double a, double b) { return compare(a, b, 1); }
-int __ltdf2(double a, double b) { return compare(a, b, 1); }
-int __ledf2(double a, double b) { return compare(a, b, 1); }
-int __gtdf2(double a, double b) { return compare(a, b, -1); }
-int __gedf2(double a, double b) { return compare(a, b, -1); }
-int __unorddf2(double a, double b)
+RT_ABI int __eqdf2(double a, double b) { return compare(a, b, 1); }
+RT_ABI int __nedf2(double a, double b) { return compare(a, b, 1); }
+RT_ABI int __ltdf2(double a, double b) { return compare(a, b, 1); }
+RT_ABI int __ledf2(double a, double b) { return compare(a, b, 1); }
+RT_ABI int __gtdf2(double a, double b) { return compare(a, b, -1); }
+RT_ABI int __gedf2(double a, double b) { return compare(a, b, -1); }
+RT_ABI int __unorddf2(double a, double b)
 {
     struct fp x, y;
     unpack(d2u(a), &x);
@@ -406,16 +424,16 @@ static double from_u64(u64 v, int sign)
     return round_pack(sign, exp, sig);
 }
 
-double __floatsidf(int v)
+RT_ABI double __floatsidf(int v)
 {
     return v < 0 ? from_u64((u64)-(s64)v, 1) : from_u64((u64)v, 0);
 }
-double __floatunsidf(unsigned v) { return from_u64((u64)v, 0); }
-double __floatdidf(s64 v)
+RT_ABI double __floatunsidf(unsigned v) { return from_u64((u64)v, 0); }
+RT_ABI double __floatdidf(s64 v)
 {
     return v < 0 ? from_u64((u64)-v, 1) : from_u64((u64)v, 0);
 }
-double __floatundidf(u64 v) { return from_u64(v, 0); }
+RT_ABI double __floatundidf(u64 v) { return from_u64(v, 0); }
 
 /* ---- conversions: floating to integer ------------------------------
  *
@@ -446,7 +464,7 @@ static u64 to_u64(double x, int *sign_out)
     return sig << (-shift);
 }
 
-s64 __fixdfdi(double x)
+RT_ABI s64 __fixdfdi(double x)
 {
     int sign;
     u64 v = to_u64(x, &sign);
@@ -454,20 +472,20 @@ s64 __fixdfdi(double x)
         return v > (u64)1 << 63 ? -(s64)((u64)1 << 63) : -(s64)v;
     return v > (((u64)1 << 63) - 1) ? (s64)(((u64)1 << 63) - 1) : (s64)v;
 }
-u64 __fixunsdfdi(double x)
+RT_ABI u64 __fixunsdfdi(double x)
 {
     int sign;
     u64 v = to_u64(x, &sign);
     return sign ? 0 : v;
 }
-int __fixdfsi(double x)
+RT_ABI int __fixdfsi(double x)
 {
     s64 v = __fixdfdi(x);
     if (v > 2147483647LL) return 2147483647;
     if (v < -2147483647LL - 1) return -2147483647 - 1;
     return (int)v;
 }
-unsigned __fixunsdfsi(double x)
+RT_ABI unsigned __fixunsdfsi(double x)
 {
     u64 v = __fixunsdfdi(x);
     return v > 4294967295ULL ? 4294967295u : (unsigned)v;
@@ -478,7 +496,7 @@ unsigned __fixunsdfsi(double x)
  * Widening is exact, so the only rounding is the one on the way back.
  */
 
-float __truncdfsf2(double x)
+RT_ABI float __truncdfsf2(double x)
 {
     struct fp a;
     int exp;
@@ -533,7 +551,7 @@ float __truncdfsf2(double x)
     }
 }
 
-double __extendsfdf2(float f)
+RT_ABI double __extendsfdf2(float f)
 {
     u32 u = f2u(f);
     int sign = (int)(u >> 31);
@@ -561,34 +579,34 @@ double __extendsfdf2(float f)
     return pack_raw(sign, (u64)(e - 127 + BIAS), (u64)frac << 29);
 }
 
-float __addsf3(float a, float b)
+RT_ABI float __addsf3(float a, float b)
 { return __truncdfsf2(__adddf3(__extendsfdf2(a), __extendsfdf2(b))); }
-float __subsf3(float a, float b)
+RT_ABI float __subsf3(float a, float b)
 { return __truncdfsf2(__subdf3(__extendsfdf2(a), __extendsfdf2(b))); }
-float __mulsf3(float a, float b)
+RT_ABI float __mulsf3(float a, float b)
 { return __truncdfsf2(__muldf3(__extendsfdf2(a), __extendsfdf2(b))); }
-float __divsf3(float a, float b)
+RT_ABI float __divsf3(float a, float b)
 { return __truncdfsf2(__divdf3(__extendsfdf2(a), __extendsfdf2(b))); }
-float __negsf2(float a) { return u2f(f2u(a) ^ 0x80000000u); }
+RT_ABI float __negsf2(float a) { return u2f(f2u(a) ^ 0x80000000u); }
 
-int __eqsf2(float a, float b) { return __eqdf2(__extendsfdf2(a), __extendsfdf2(b)); }
-int __nesf2(float a, float b) { return __nedf2(__extendsfdf2(a), __extendsfdf2(b)); }
-int __ltsf2(float a, float b) { return __ltdf2(__extendsfdf2(a), __extendsfdf2(b)); }
-int __lesf2(float a, float b) { return __ledf2(__extendsfdf2(a), __extendsfdf2(b)); }
-int __gtsf2(float a, float b) { return __gtdf2(__extendsfdf2(a), __extendsfdf2(b)); }
-int __gesf2(float a, float b) { return __gedf2(__extendsfdf2(a), __extendsfdf2(b)); }
-int __unordsf2(float a, float b)
+RT_ABI int __eqsf2(float a, float b) { return __eqdf2(__extendsfdf2(a), __extendsfdf2(b)); }
+RT_ABI int __nesf2(float a, float b) { return __nedf2(__extendsfdf2(a), __extendsfdf2(b)); }
+RT_ABI int __ltsf2(float a, float b) { return __ltdf2(__extendsfdf2(a), __extendsfdf2(b)); }
+RT_ABI int __lesf2(float a, float b) { return __ledf2(__extendsfdf2(a), __extendsfdf2(b)); }
+RT_ABI int __gtsf2(float a, float b) { return __gtdf2(__extendsfdf2(a), __extendsfdf2(b)); }
+RT_ABI int __gesf2(float a, float b) { return __gedf2(__extendsfdf2(a), __extendsfdf2(b)); }
+RT_ABI int __unordsf2(float a, float b)
 { return __unorddf2(__extendsfdf2(a), __extendsfdf2(b)); }
 
-float __floatsisf(int v)        { return __truncdfsf2(__floatsidf(v)); }
-float __floatunsisf(unsigned v) { return __truncdfsf2(__floatunsidf(v)); }
-float __floatdisf(s64 v)        { return __truncdfsf2(__floatdidf(v)); }
-float __floatundisf(u64 v)      { return __truncdfsf2(__floatundidf(v)); }
+RT_ABI float __floatsisf(int v)        { return __truncdfsf2(__floatsidf(v)); }
+RT_ABI float __floatunsisf(unsigned v) { return __truncdfsf2(__floatunsidf(v)); }
+RT_ABI float __floatdisf(s64 v)        { return __truncdfsf2(__floatdidf(v)); }
+RT_ABI float __floatundisf(u64 v)      { return __truncdfsf2(__floatundidf(v)); }
 
-int __fixsfsi(float f)        { return __fixdfsi(__extendsfdf2(f)); }
-unsigned __fixunssfsi(float f) { return __fixunsdfsi(__extendsfdf2(f)); }
-s64 __fixsfdi(float f)        { return __fixdfdi(__extendsfdf2(f)); }
-u64 __fixunssfdi(float f)     { return __fixunsdfdi(__extendsfdf2(f)); }
+RT_ABI int __fixsfsi(float f)        { return __fixdfsi(__extendsfdf2(f)); }
+RT_ABI unsigned __fixunssfsi(float f) { return __fixunsdfsi(__extendsfdf2(f)); }
+RT_ABI s64 __fixsfdi(float f)        { return __fixdfdi(__extendsfdf2(f)); }
+RT_ABI u64 __fixunssfdi(float f)     { return __fixunsdfdi(__extendsfdf2(f)); }
 
 #else
 /* A translation unit needs a declaration, and this one has none to make

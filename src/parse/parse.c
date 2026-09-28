@@ -49,6 +49,11 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * initialise it positionally, so a field added in the middle
                 * silently shifts every value after it. */
                int isr;
+               /* __attribute__((pcs("aapcs" | "aapcs-vfp"))): the ARM
+                * calling convention this function uses, whatever
+                * -mfloat-abi says. 1 base, 2 VFP, 0 the default. After
+                * isr for the reason isr gives. */
+               int pcs, pcs_line;
 };
 
 struct parser {
@@ -402,6 +407,10 @@ static const struct attr_entry attr_table[] = {
     { "deprecated",    ATTR_HONOURED, NULL },
     { "warn_unused_result", ATTR_HONOURED, NULL },
     { "embcc_sret",    ATTR_HONOURED, NULL },   /* EmbCC's own */
+    /* ARM only, and checked below: which of the two AAPCS conventions a
+     * function uses. What every runtime library puts on its helpers so
+     * they keep the base convention under -mfloat-abi=hard. */
+    { "pcs",           ATTR_HONOURED, NULL },
 
     /* ---- refused ---- */
     { "naked",     ATTR_REFUSED,
@@ -577,6 +586,18 @@ static int at_attribute(struct parser *ps)
     return 0;
 }
 
+/* pcs changes how a FUNCTION is called; anywhere else there is nothing
+ * to attach it to, and dropping it would leave the callers and the
+ * function disagreeing about where a float is. */
+static void pcs_not_here(struct parser *ps, const struct attrs *a,
+                         const char *what)
+{
+    if (a->pcs)
+        parse_error_line(ps, a->pcs_line,
+            "pcs is only supported on a function declaration, not on %s",
+            what);
+}
+
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
     /* Two spellings, one body. C23 writes `[[noreturn]]` where GNU
@@ -705,6 +726,29 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     diag_warn_opt(ps->lx.file, aline, 0, "attributes",
                         "__attribute__((%s)) is accepted but does nothing "
                         "here: %s", name, ae->why);
+            }
+            if (name && attr_is(name, "pcs")) {
+                int v = sarg && !strcmp(sarg, "aapcs") ? 1
+                      : sarg && !strcmp(sarg, "aapcs-vfp") ? 2 : 0;
+                if (target_get() != TARGET_THUMB)
+                    parse_error_line(ps, aline,
+                        "__attribute__((pcs)) names an ARM calling "
+                        "convention, and this is not an ARM target");
+                if (!v)
+                    parse_error_line(ps, aline,
+                        "pcs wants \"aapcs\" or \"aapcs-vfp\"");
+                if (v == 2 && !target_thumb_fpu())
+                    parse_error_line(ps, aline,
+                        "pcs(\"aapcs-vfp\") passes floating point in VFP "
+                        "registers, and this part has no FPU: add -mfpu=");
+                if (!out)
+                    parse_error_line(ps, aline,
+                        "pcs is only supported on a function declaration");
+                if (out->pcs && out->pcs != v)
+                    parse_error_line(ps, aline,
+                        "two different pcs attributes on one declaration");
+                out->pcs = v;
+                out->pcs_line = aline;
             }
             if (name && out) {
                 if (attr_is(name, "packed")) out->packed = 1;
@@ -1038,6 +1082,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
+                pcs_not_here(ps, &pat, "a parameter");
             }
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
@@ -1477,6 +1522,10 @@ static void take_carried(struct parser *ps, struct attrs *a)
         a->aligned = ps->attr_slot.aligned;
     if (ps->attr_slot.section && !a->section)
         a->section = ps->attr_slot.section;
+    if (ps->attr_slot.pcs) {
+        a->pcs = ps->attr_slot.pcs;
+        a->pcs_line = ps->attr_slot.pcs_line;
+    }
     memset(&ps->attr_slot, 0, sizeof ps->attr_slot);
     /* The slot stays OPEN: a declaration may parse its declarator
      * twice -- once to see whether it is a function, then again after
@@ -1514,8 +1563,17 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
                     ps->attr_slot.aligned = a.aligned;
                 if (a.section && !ps->attr_slot.section)
                     ps->attr_slot.section = a.section;
+                if (a.pcs) {
+                    ps->attr_slot.pcs = a.pcs;
+                    ps->attr_slot.pcs_line = a.pcs_line;
+                }
                 continue;
             }
+            if (a.pcs)
+                parse_error_at(ps, at_tok->line, at_tok->col,
+                        "pcs is only supported on a function declaration, "
+                        "not on a pointer to one: a call through the "
+                        "pointer would use the default convention");
             if (a.packed || a.aligned || a.weak || a.noreturn)
                 parse_error_at(ps, at_tok->line, at_tok->col,
                         "__attribute__((%s)) is not supported in this position "
@@ -2073,6 +2131,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
             }
             struct attrs mat = { 0 };
             parse_attributes(ps, &mat);  /* T buf[N] __attribute__((aligned(N))) */
+            pcs_not_here(ps, &mat, "a member");
             ms[n].name = mname;
             ms[n].ty = mty;
             ms[n].off = 0;
@@ -3446,6 +3505,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             {
                 struct attrs lat = { 0 };
                 parse_attributes(ps, &lat);
+                pcs_not_here(ps, &lat, "a variable");
+                pcs_not_here(ps, &lead, "a variable");
                 if (lat.section)
                     parse_error_line(ps, s->line,
                                "section attribute on block-scope '%s' is "
@@ -3904,6 +3965,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             struct attrs tdone = tdat;
             if (at_attribute(ps))
                 parse_attributes(ps, &tdone);
+            pcs_not_here(ps, &tdone, "a typedef");
             /* An alignment on the NAME cannot be honoured: struct type
              * has no per-type alignment override, so the typedef would
              * silently name a type of ordinary alignment and a DMA
@@ -4008,6 +4070,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
     f->attr_warn_unused_result = at.warn_unused_result;
     f->vis = at.vis;
@@ -4018,6 +4081,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->attr_unused = at.unused;
                 f->attr_always_inline = at.always_inline;
                 f->attr_noinline = at.noinline;
+                f->pcs = at.pcs;
+    f->pcs = at.pcs;
                 f->attr_deprecated = at.deprecated;
                 f->attr_warn_unused_result = at.warn_unused_result;
                 f->vis = at.vis;
@@ -4047,6 +4112,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             struct global *g = parse_global(ps, gt, gname, gline,
                                             is_static, is_extern);
             parse_attributes(ps, &at); /* trailing: T x[] __attribute__((weak)) */
+            pcs_not_here(ps, &at, "a variable");
             g->is_weak = at.weak;
             g->attr_used = at.used;
             g->attr_unused = at.unused;
@@ -4085,6 +4151,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
     f->attr_warn_unused_result = at.warn_unused_result;
     f->vis = at.vis;
@@ -4124,6 +4191,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
+                pcs_not_here(ps, &pat, "a parameter");
             }
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
@@ -4173,6 +4241,7 @@ fn_tail:
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
     f->attr_warn_unused_result = at.warn_unused_result;
     f->vis = at.vis;
@@ -4224,6 +4293,7 @@ fn_tail:
                 struct global *g = parse_global(ps, vty, dname, dline,
                                                 is_static, is_extern);
                 parse_attributes(ps, &at);
+                pcs_not_here(ps, &at, "a variable");
                 g->is_weak = at.weak;
                 g->attr_used = at.used;
                 g->attr_unused = at.unused;
