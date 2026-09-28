@@ -115,6 +115,19 @@ reset:
 
 	; Copy the writable image (.data and, on this target, .rodata)
 	; from flash to RAM. Z walks the flash, X the RAM.
+	;
+	; __do_copy_data and __do_clear_bss are libgcc's names for exactly
+	; these two loops. avr-gcc and clang emit an UNDEFINED reference to
+	; each from any unit with initialised or zeroed data, so that linking
+	; pulls in the code that fills it -- they are markers, never called.
+	; A startup that is to link with objects from either compiler must
+	; define them, and this one does, at the loops that do the work.
+	;
+	; Not as empty stubs in librt.a. That would let a startup that never
+	; copies .data link cleanly and run with garbage in every initialised
+	; global -- the marker exists to make that a link error.
+	.globl	__do_copy_data
+__do_copy_data:
 	ldi	r30, lo8(__data_load)
 	ldi	r31, hi8(__data_load)
 	ldi	r26, lo8(__data_start)
@@ -130,6 +143,8 @@ reset:
 	rjmp	1b
 2:
 	; Zero .bss.
+	.globl	__do_clear_bss
+__do_clear_bss:
 	ldi	r26, lo8(__bss_start)
 	ldi	r27, hi8(__bss_start)
 	ldi	r18, lo8(__bss_end)

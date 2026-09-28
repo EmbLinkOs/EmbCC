@@ -376,12 +376,30 @@ static void place_arg(int size, int *cursor, long *stk, struct argplace *p)
     }
 }
 
-/* The return value follows the same rule applied to one value: r24 for a
- * byte, r25:r24 for two, r25:r22 for four, r25:r18 for eight. Which is
- * what libgcc's AVR routines use, so `26 - even` is the whole table. */
+/* Where a returned value's low byte is: r24 for one or two bytes, r22 for
+ * up to four, r18 for up to eight.
+ *
+ * The size is padded to the next POWER OF TWO, not to the next even number,
+ * and that is not the argument rule. avr-libc's FAQ says it in so many words
+ * -- "When an argument is returned in registers, its size is padded to the
+ * next power of 2" -- where an ARGUMENT is only rounded up to even. This was
+ * `26 - even` and it agreed with the power-of-two rule for every size but
+ * five and six, which it returned in r20 where avr-gcc returns them in r18: a
+ * five-byte struct from any avr-gcc-built function came back two registers
+ * off. Every scalar is a power of two already, so only composites move.
+ *
+ * It was measured from clang when it was written, and clang is not a safe
+ * oracle for composites on this target: its struct ARGUMENT passing puts the
+ * first field in the highest registers, against the same FAQ's "allocated
+ * left to right" -- which Rust's AVR backend documents as clang's ABI not
+ * being binary-compatible with avr-gcc. tests/golden/avr-abi.sh checks
+ * every size against the documented rules directly. */
 static int ret_reg(int size)
 {
-    return ARG_TOP - ((size + 1) & ~1);
+    int p = 1;
+    while (p < size)
+        p <<= 1;
+    return ARG_TOP - (p < 2 ? 2 : p);
 }
 
 /* Does a composite of this size come back through a hidden POINTER?
@@ -2211,19 +2229,42 @@ static void gen_ins(struct a_fn *F, int n)
         return;
 
     case IR_CALL: {
-        struct argplace pl;
+        struct argplace pl, hid;
         int cursor = i->call_varargs ? -1 : ARG_TOP;
         long stk = 0;
         int k;
-
-
-
+        /* A callee returning a composite of more than eight bytes takes the
+         * buffer's address as an implicit FIRST argument, so the real ones
+         * start one slot along -- r23:r22 for the first, not r25:r24.
+         *
+         * The callee's prologue always knew that. This side did not: it
+         * placed the arguments from r25 down as though there were no hidden
+         * pointer, then wrote the pointer into r25:r24 at the end, on top of
+         * the first argument. `struct s20 m20(int k)` received whatever was
+         * left in r23:r22 as `k`, and every AVR call to a function returning
+         * a large struct with arguments silently lost its first one --
+         * tests/golden/embedded-aggregate.c printed 40 for 190 and 5 for 205
+         * the first time it ran on the part.
+         *
+         * For a VARIADIC callee every argument is on the stack, and so is the
+         * pointer: it is the first stack word, below the named arguments.
+         * That is what clang emits, and what place_arg gives from a cursor of
+         * -1 without being told. */
+        int sret = sret_bytes(i->retsize) != 0;
 
         /* Stack arguments FIRST, while the argument registers are still
          * free to carry them: each is read out of its slot into A and
          * written into the outgoing area, which sits at the bottom of
          * this frame so that it lands directly above the return address
          * the `call` is about to push. */
+        if (sret) {
+            place_arg(2, &cursor, &stk, &hid);
+            if (hid.nstk) {
+                avr_movw(t, RA, AVR_Y);
+                add_const16(F, RA, F->scratch_at + i->scratch);
+                st_slot(F, 1 + hid.stk, RA, 2);
+            }
+        }
         for (k = 0; k < i->nargs; k++) {
             place_arg(i->argv[k].size, &cursor, &stk, &pl);
             if (!pl.nstk)
@@ -2248,6 +2289,8 @@ static void gen_ins(struct a_fn *F, int n)
          * and Y alone, so no argument can tread on another and there is
          * no parallel move here at all. */
         cursor = i->call_varargs ? -1 : ARG_TOP; stk = 0;
+        if (sret)
+            place_arg(2, &cursor, &stk, &hid);    /* the same slot again */
         for (k = 0; k < i->nargs; k++) {
             place_arg(i->argv[k].size, &cursor, &stk, &pl);
             if (!pl.nreg)
@@ -2265,10 +2308,11 @@ static void gen_ins(struct a_fn *F, int n)
         }
 
         /* The hidden result pointer goes in LAST, so nothing above can have
-         * used its register as a scratch after it was set. */
-        if (sret_bytes(i->retsize)) {
-            avr_movw(t, ret_reg(2), AVR_Y);
-            add_const16(F, ret_reg(2), F->scratch_at + i->scratch);
+         * used its register as a scratch after it was set. (Its stack form,
+         * for a variadic callee, went out with the other stack words.) */
+        if (sret && hid.nreg) {
+            avr_movw(t, hid.reg, AVR_Y);
+            add_const16(F, hid.reg, F->scratch_at + i->scratch);
         }
         if (i->indirect) {
             /* Z holds a WORD address here, which is what icall wants and
@@ -2647,12 +2691,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         if (F.sret_slot >= 0) {
             struct argplace p0;
             place_arg(2, &cursor, &stk, &p0);
-            if (p0.nreg)
+            if (p0.nreg) {
                 st_slot(&F, F.sret_slot, p0.reg, 2);
-            else
-                a_refuse(fn, NULL,
-                         "a composite result whose hidden pointer did not "
-                         "fit in a register");
+            } else {
+                /* A variadic function's is on the stack, as its first word
+                 * -- clang's layout, and what a caller's place_arg gives it.
+                 * This used to be a refusal. */
+                ld_slot(&F, RA, F.frame + INCOMING_AT + p0.stk, 2);
+                st_slot(&F, F.sret_slot, RA, 2);
+            }
         }
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];

@@ -1703,3 +1703,41 @@ same bytes is correct, and the real fault was elsewhere entirely (the slot
 width above). The referee lesson recorded earlier in this entry has a
 companion: a disassembler is a referee too, and this one is wrong about the
 one field an AVR frame is made of.
+
+**Frame slots are placed by use, and that was worth a quarter of all AVR
+code.** Measured over the backend's own output (the embedded-*.c programs and
+lib/rt/avr*.c, 54730 instructions), the far-slot path -- a slot past `ldd`'s
+63-byte reach, addressed as `movw Z,Y / subi / sbci / ld` with SREG saved
+around it where a carry must survive -- was roughly HALF of everything
+emitted, and the program's own arithmetic barely registered. Offsets had been
+handed out in discovery order, so a loop counter declared after a buffer was
+out of reach for its whole life. Every local and shared temporary is now an
+object weighed by the bytes of access the code makes to it, placed densest
+first. 102324 bytes to 78160 over that corpus (7.2x clang to 5.5x), with no
+change to what any instruction does. The jump shortening that looked obvious
+was measured first and was worth 0.7%.
+
+**The calling convention is checked against the RULE, not a compiler.** Two
+silent miscompiles surfaced the first time the shared cross-target programs
+ran on the part: va_copy (an inline target list in irgen that nobody extended
+for AVR, now `target_va_list_is_pointer()`, a switch with no default) and
+every call to a function returning a struct wider than eight bytes, which
+lost its first argument -- the caller placed it in r25:r24 and then wrote the
+hidden pointer on top. Both sides of that call were EmbCC's, which is why
+EmbCC-against-EmbCC tests could not see it. Cross-checking against clang then
+showed a third -- five- and six-byte structs returned in r20, where avr-gcc
+pads a returned size to a POWER OF TWO and uses r18 -- and also that clang is
+not a usable oracle here: its struct ARGUMENTS put the first field in the
+highest registers, against "allocated left to right", and Rust's AVR backend
+documents clang's convention as not binary-compatible with avr-gcc. So
+tests/golden/avr-abi.sh encodes avr-libc's FAQ rules directly, with
+hand-written assembly as the other side in both directions.
+
+**`sym+N` in AVR assembly meant `sym`.** Every symbol form read the identifier,
+stopped at the `+`, and never looked at what followed, and the contract
+between src/as/gas.c and a target's assembler had no addend to carry --
+`lds r24, buf+5` linked to buf[0], silently. The C compiler never takes that
+path; hand-written .S -- startup and context switching, which the
+requirements put in assembly -- takes nothing else. The contract carries an
+addend now, and an operand followed by anything its form does not expect is
+refused rather than shortened.
