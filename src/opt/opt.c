@@ -2377,8 +2377,23 @@ static int sel_width(struct ir_func *fn, struct defs *d, int v)
     if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
         return 0;
     int n = d->ins[v];
-    if (n < 0)
-        return 8;                       /* a parameter, full width */
+    if (n < 0) {
+        /* No defining instruction: an incoming parameter. Its width is the
+         * one it was DECLARED with. This used to answer 8 -- "a parameter,
+         * full width" -- which is harmless where a select is a register move
+         * and 8 is the register, and wrong anywhere else: on AVR an 8-byte
+         * select is a byte-at-a-time chain through the frame, so a `?:` on
+         * two 4-byte parameters asked the backend to move eight bytes out of
+         * a value that only ever had four. It presented as a refusal rather
+         * than as bad code, which is the only reason it cost an hour and not
+         * a day (lib/rt/avrfp.c's `is_inf(ua) ? ub : ua`, at -Os only,
+         * because -O0 leaves the branch alone). */
+        if (v < fn->nvars && fn->locals[v].is_int_or_ptr) {
+            int sz = fn->locals[v].size;
+            return sz == 4 || sz == 8 ? sz : 0;
+        }
+        return 0;
+    }
     int w = fn->ins[n].w;
     return w == 4 || w == 8 ? w : 0;
 }
@@ -7167,9 +7182,38 @@ static int pass_immfold(struct ir_func *fn)
  * caller's register pressure will do -- not more arithmetic on facts
  * already available here. */
 #define INLINE_MAX_CALLEE 24     /* instruction budget for an inline candidate */
-#define INLINE_SOLE_CALLEE 200   /* ...and for a body that MOVES (sole_static_caller) */   /* ...and for a body that MOVES (sole_static_caller) */
+#define INLINE_SOLE_CALLEE 200   /* ...and for a body that MOVES (sole_static_caller) */
 #define INLINE_MAX_CALLER 800    /* stop expanding a caller past this many ins */
 #define INLINE_MAX_PER_FUNC 64   /* and cap inlines per caller, for termination */
+
+/* -Os: a much smaller budget, and WHY it needed one.
+ *
+ * The comment above opt_run used to say that inlining everything -O2 inlines
+ * is the smaller answer at -Os too, because a callee with one caller is
+ * DELETED after it moves, so refusing to inline it keeps two copies. That
+ * half is still true, and INLINE_SOLE_CALLEE below is how it stays true.
+ *
+ * The other half was wrong, and it was wrong because 24 is a count of IR
+ * instructions being used as a proxy for BYTES. An IR op costs one or two
+ * instructions on x86-64 and six to ten on AVR, where an int add is four and
+ * every value lives in a frame slot. So the same budget that admits a genuine
+ * one-liner on a 64-bit machine admits a 450-byte function on an 8-bit one,
+ * and lib/rt/avrfp.c is what that looks like from the outside: -Os produced
+ * 41392 bytes of text against -O1's 32856, on a part with 32768 of flash.
+ * `pack` and `mul24` had been copied into every caller and deleted, and
+ * addsub grew 6600 -> 9850 for it.
+ *
+ * So at -Os a body is inlined only when it MOVES -- the sole-caller case,
+ * where there is no duplication to pay for -- or when it is small enough that
+ * the copy is plausibly smaller than the call sequence it replaces, on the
+ * most expansive target rather than the least. Nothing changes at -O2, so no
+ * speed measurement moves; -Os is the level that asked for size.
+ */
+#define INLINE_SIZE_CALLEE 6
+
+/* Whether opt_run was asked for size. A global in the style of g_pass: the
+ * inliner's decision is three call levels below opt_run. */
+static int g_opt_size;
 
 /* Vreg remap over one instruction. kind 0 = caller shift (a temp >= p1 moves up
  * by p2); kind 1 = callee map (a callee local < p3 -> p1+x, a temp -> p2+x). */
@@ -7234,12 +7278,13 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
      * would not inline the call, it would emit a wrong one. The remark
      * still names whichever test refused, so a function marked
      * always_inline that was not inlined says why. */
-    if (!force && cf->nins > INLINE_MAX_CALLEE &&
+    int budget = g_opt_size ? INLINE_SIZE_CALLEE : INLINE_MAX_CALLEE;
+    if (!force && cf->nins > budget &&
         !(sole && cf->nins <= INLINE_SOLE_CALLEE)) {
         *why = "callee-too-large";
         if (detail)
-            snprintf(detail, dcap, "%d instructions, budget %d",
-                     cf->nins, INLINE_MAX_CALLEE);
+            snprintf(detail, dcap, "%d instructions, budget %d%s",
+                     cf->nins, budget, g_opt_size ? " (-Os)" : "");
         return 0;
     }
     if (cf->neh)             { *why = "callee-has-exception-regions"; return 0; }
@@ -8503,9 +8548,9 @@ static void opt_func(struct ir_func *fn)
  * obvious guess was wrong. Turning it off made the benchmark's object
  * file grow from 3959 bytes to 7340 -- inlining a static function that
  * has one caller lets the original be deleted, so refusing to inline
- * keeps two copies of it. Until there is a cost model that can tell
- * that case from a body copied into twenty call sites (section 4's
- * work), inlining everything it already inlines is the smaller answer.
+ * keeps two copies of it -- INLINE_SOLE_CALLEE keeps that case inlined
+ * at every level. The body copied into twenty call sites is the other
+ * case, and -Os now tells them apart by budget: INLINE_SIZE_CALLEE.
  *
  * Everything else -- folding, value numbering, dead code, loop
  * invariants, strength reduction -- makes code smaller as well as
@@ -8513,6 +8558,7 @@ static void opt_func(struct ir_func *fn)
 void opt_run(struct ir_unit *iu, int level)
 {
     int size = level == OPT_SIZE;
+    g_opt_size = size;
     if (size)
         level = 2;
     if (level < 1)
