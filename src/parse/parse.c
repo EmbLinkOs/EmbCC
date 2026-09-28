@@ -1587,6 +1587,14 @@ static struct type *ce_type(const struct expr *e)
         return e->ty;
     case EXPR_VAR:
         return fold_var_type(e->name);
+    case EXPR_NEG: case EXPR_BNOT: {
+        /* -x and ~x have x's PROMOTED type. Without this, -1u had no type
+         * here and folded as the host's -1 rather than as 4294967295. */
+        struct type *t = ce_type(e->rhs);
+        return t && ty_is_arith(t) ? ty_promote(t) : NULL;
+    }
+    case EXPR_NOT:
+        return ty_base(TY_INT, 0);
     case EXPR_STR: {
         /* char[n+1], not char * -- sizeof("abc") is 4 -- so the caller
          * that wants the DECAYED type (a _Generic controlling
@@ -1779,11 +1787,11 @@ static int size_fold(const struct expr *e, long *out)
         return 0;
     case EXPR_NEG:
         if (!size_fold(e->rhs, &a)) return 0;
-        *out = -a;
+        *out = cast_fold_value(ce_type(e), (long)(0UL - (unsigned long)a));
         return 1;
     case EXPR_BNOT:
         if (!size_fold(e->rhs, &a)) return 0;
-        *out = ~a;
+        *out = cast_fold_value(ce_type(e), ~a);
         return 1;
     case EXPR_NOT:
         if (!size_fold(e->rhs, &a)) return 0;
@@ -1849,26 +1857,60 @@ static int size_fold(const struct expr *e, long *out)
         }
         if (!size_fold(e->lhs, &a) || !size_fold(e->rhs, &b))
             return 0;
-        switch (e->op) {
-        case B_ADD: *out = a + b; return 1;
-        case B_SUB: *out = a - b; return 1;
-        case B_MUL: *out = a * b; return 1;
-        case B_DIV: if (!b) return 0; *out = a / b; return 1;
-        case B_MOD: if (!b) return 0; *out = a % b; return 1;
-        case B_AND: *out = a & b; return 1;
-        case B_OR:  *out = a | b; return 1;
-        case B_XOR: *out = a ^ b; return 1;
-        case B_SHL: *out = a << b; return 1;
-        case B_SHR: *out = a >> b; return 1;
-        case B_LT:  *out = a < b; return 1;
-        case B_GT:  *out = a > b; return 1;
-        case B_LE:  *out = a <= b; return 1;
-        case B_GE:  *out = a >= b; return 1;
-        case B_EQ:  *out = a == b; return 1;
-        case B_NE:  *out = a != b; return 1;
-        case B_LAND: *out = a && b; return 1;
-        case B_LOR:  *out = a || b; return 1;
-        default: return 0;
+        {
+            /* Folded in the TYPES C gives the expression, the way sema's
+             * const_fold now does -- except that sema has already inserted
+             * the conversions as casts and this pass, running before sema,
+             * has not. So the operands are converted here: to the common
+             * type for everything but a shift, whose left operand is only
+             * promoted and whose right one is left alone. Then the result is
+             * reduced to its own type.
+             *
+             * Without that, `_Static_assert(0u - 1 == 4294967295u, "")`
+             * FAILED on every target -- the fold made 0u - 1 the host's -1 --
+             * which is to say a correct program was rejected. */
+            struct type *lt = ce_type(e->lhs), *rt = ce_type(e->rhs);
+            int shift = e->op == B_SHL || e->op == B_SHR;
+            struct type *ct = NULL;
+            if (lt && ty_is_integer(lt) && (shift || (rt && ty_is_integer(rt))))
+                ct = shift ? ty_promote(lt) : ty_arith_common(lt, rt);
+            if (ct) {
+                a = cast_fold_value(ct, a);
+                if (!shift)
+                    b = cast_fold_value(ct, b);
+            }
+            {
+                unsigned long ua = (unsigned long)a, ub = (unsigned long)b;
+                int u = ct && ct->is_unsigned && ty_size(ct) >= 8;
+                int uns = ct && ct->is_unsigned;
+                int wbits = ct ? 8 * ty_size(ct) : 64;
+                long r;
+                switch (e->op) {
+                case B_ADD: r = (long)(ua + ub); break;
+                case B_SUB: r = (long)(ua - ub); break;
+                case B_MUL: r = (long)(ua * ub); break;
+                case B_DIV: if (!b) return 0; r = u ? (long)(ua / ub) : a / b; break;
+                case B_MOD: if (!b) return 0; r = u ? (long)(ua % ub) : a % b; break;
+                case B_AND: r = a & b; break;
+                case B_OR:  r = a | b; break;
+                case B_XOR: r = a ^ b; break;
+                case B_SHL: if (b < 0 || b >= wbits) return 0;
+                            r = (long)(ua << b); break;
+                case B_SHR: if (b < 0 || b >= wbits) return 0;
+                            r = uns ? (long)(ua >> b) : a >> b; break;
+                case B_LT:  *out = u ? ua <  ub : a <  b; return 1;
+                case B_GT:  *out = u ? ua >  ub : a >  b; return 1;
+                case B_LE:  *out = u ? ua <= ub : a <= b; return 1;
+                case B_GE:  *out = u ? ua >= ub : a >= b; return 1;
+                case B_EQ:  *out = a == b; return 1;
+                case B_NE:  *out = a != b; return 1;
+                case B_LAND: *out = a && b; return 1;
+                case B_LOR:  *out = a || b; return 1;
+                default: return 0;
+                }
+                *out = cast_fold_value(ct, r);
+                return 1;
+            }
         }
     default:
         return 0;

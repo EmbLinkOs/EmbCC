@@ -411,23 +411,59 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
     return v > 0x7FFFFFFFUL ? (long)v - 0x100000000L : (long)v;  /* int wchar_t */
 }
 
-/* A standard integer or floating suffix (C++)? */
-/* C's integer-constant ladder stops at the first type that holds the
- * value, and on ILP32 `long` runs out four bytes early: 4294967296 is a
- * `long` on LP64 and a `long long` on a Cortex-M. Each of the three
- * literal forms below types itself for a 64-bit long first; this is the
- * single place that knows the target's may be narrower, so there is one
- * rule to get right rather than three copies of it. */
-static void num_fit_target(struct token *t, unsigned long v)
+/* The type of an integer constant: C11 6.4.4.1p5, exactly, with the TARGET's
+ * widths.
+ *
+ * A constant takes the FIRST type in its list that can represent its value.
+ * The list starts at the rank its suffix names (none: int, L: long, LL: long
+ * long) and climbs; a DECIMAL constant without U tries only the signed types,
+ * one written in hex, octal or binary may take the unsigned type at each rank
+ * as well, and a U constant only the unsigned ones.
+ *
+ * This replaces three copies of an approximation, each of which typed a
+ * constant with the HOST's INT_MAX and LONG_MAX and a literal 0xffffffff and
+ * then patched ILP32's long afterwards. It was wrong three ways:
+ *
+ *   `4294967295U` and `0xffffffffU` became unsigned LONG -- "long if it
+ *   exceeds INT_MAX" was applied even with a U, where unsigned int holds it.
+ *   On x86-64 `0xffffffffU + 1` folded to 4294967296 where C says 0.
+ *   On AVR, where int is SIXTEEN bits, 32768, 40000, 0x10000 and 65536U were
+ *   all typed `int`: sizeof(40000) was 2.
+ *   Nothing checked any of it against a reference.
+ *
+ * tests/golden/int-literals.sh now does, for every target. */
+static void num_classify(struct token *t, unsigned long v, int has_u,
+                         int has_l, int decimal)
 {
-    if (target_long_size() >= 8)
-        return;
-    unsigned long lmax = 0x7fffffffUL;
-    if (v > (t->num_uns ? lmax * 2 + 1 : lmax))
-        t->num_llong = 1;
-    if (t->num_llong)
-        t->num_long = 1;
+    int ib = 8 * target_int_size(), lb = 8 * target_long_size();
+    int rank = t->num_llong ? 2 : has_l ? 1 : 0;
+
+    for (; rank <= 2; rank++) {
+        int bits = rank == 0 ? ib : rank == 1 ? lb : 64;
+        unsigned long smax = bits >= 64 ? (unsigned long)LLONG_MAX
+                                        : (1UL << (bits - 1)) - 1;
+        unsigned long umax = bits >= 64 ? ~0UL : (1UL << bits) - 1;
+        if (!has_u && v <= smax) {
+            t->num_uns = 0;
+            break;
+        }
+        if ((has_u || !decimal) && v <= umax) {
+            t->num_uns = 1;
+            break;
+        }
+    }
+    if (rank > 2) {
+        /* No type holds it: a decimal constant above LLONG_MAX with no U.
+         * GCC and clang make it unsigned long long, with a warning; so does
+         * this, and the caller has said so where it applies. */
+        rank = 2;
+        t->num_uns = 1;
+    }
+    t->num_long = rank >= 1;
+    t->num_llong = rank == 2;
 }
+
+/* A standard integer or floating suffix (C++)? */
 
 static int std_suffix(const char *s, int is_float)
 {
@@ -562,17 +598,7 @@ static int cxx_number(struct lexer *lx, struct token *t)
             }
         t->kind = TOK_NUM;
         t->num = (long)v;
-        t->num_long = has_l || v > (unsigned long)INT_MAX;
-        t->num_uns = has_u;
-        if ((hex || bin) && !has_u) {
-            if (v > (unsigned long)INT_MAX && v <= 0xffffffffUL) {
-                t->num_uns = 1;
-                t->num_long = has_l;
-            } else if (v > (unsigned long)LONG_MAX) {
-                t->num_uns = 1;
-            }
-        }
-        num_fit_target(t, v);
+        num_classify(t, v, has_u, has_l, digits[0] != '0');
     }
     free(buf);
     lx->p = q;
@@ -674,13 +700,7 @@ void lex_next(struct lexer *lx)
             diag_fatal(lx->file, lx->line, "malformed binary constant");
         t->kind = TOK_NUM;
         t->num = (long)v;
-        t->num_long = has_l || v > (unsigned long)INT_MAX;
-        t->num_uns = has_u || (v > (unsigned long)INT_MAX &&
-                               v <= 0xffffffffUL && !has_l) ||
-                     v > (unsigned long)LONG_MAX;
-        if (!has_l && v > (unsigned long)INT_MAX && v <= 0xffffffffUL)
-            t->num_long = 0;
-        num_fit_target(t, v);
+        num_classify(t, v, has_u, has_l, 0);   /* binary: never decimal */
         lx->p = q;
         return;
     }
@@ -777,22 +797,14 @@ void lex_next(struct lexer *lx)
                        "malformed integer constant");
         t->kind = TOK_NUM;
         t->num = (long)v;
-        /* C99 typing: decimal grows int -> long; hex additionally
-         * passes through the unsigned types. Suffixes force it. */
-        t->num_long = has_l || v > (unsigned long)INT_MAX;
-        t->num_uns = has_u;
-        if (hex && !has_u) {
-            if (v > (unsigned long)INT_MAX && v <= 0xffffffffUL) {
-                t->num_uns = 1;
-                t->num_long = has_l;
-            } else if (v > (unsigned long)LONG_MAX) {
-                t->num_uns = 1;
-            }
-        }
-        if (!hex && !has_u && !has_l && v > (unsigned long)LONG_MAX)
+        (void)hex;
+        /* A decimal constant with no U above LLONG_MAX fits no type C
+         * names. That was, and is, an error here, rather than the unsigned
+         * long long GCC falls back to with a warning. */
+        if (lx->p[0] != '0' && !has_u && v > (unsigned long)LLONG_MAX)
             diag_fatal(lx->file, lx->line,
-                       "integer constant out of range for long");
-        num_fit_target(t, v);
+                       "integer constant out of range for long long");
+        num_classify(t, v, has_u, has_l, lx->p[0] != '0');
         lx->p = end;
         return;
     }

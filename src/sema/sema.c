@@ -2494,6 +2494,28 @@ static long cast_fold_value(const struct type *t, long v)
     }
 }
 
+/* Every operator's result is a value OF ITS TYPE: an unsigned result is reduced
+ * modulo 2^n, and a signed one wraps as it would at run time. This folder
+ * used to compute in the host's 64-bit `long` and stop there, so
+ * `unsigned long long x = 0u - 1;` stored 0xffffffffffffffff where C says
+ * 0xffffffff, and `0xffffffffu + 1u` was 4294967296 where it is 0. The code
+ * the same expression compiles to at run time was right all along -- a
+ * four-byte subtract, then a zero extension -- so a static initializer and an
+ * assignment of the same expression disagreed.
+ *
+ * And a 64-bit UNSIGNED operand is not the host's signed long it is stored
+ * in: dividing, taking a remainder, shifting right and comparing each have to
+ * treat the bits as unsigned there, or 0xffffffffffffffffull / 2 is 0. */
+static long in_type(const struct expr *e, long v)
+{
+    return cast_fold_value(e->ty, v);
+}
+
+static int is_uns64(const struct type *t)
+{
+    return t && ty_is_integer(t) && t->is_unsigned && ty_size(t) >= 8;
+}
+
 static int const_fold(const struct expr *e, long *out)
 {
     long a, b;
@@ -2510,12 +2532,12 @@ static int const_fold(const struct expr *e, long *out)
     case EXPR_NEG:
         if (!const_fold(e->rhs, &a))
             return 0;
-        *out = -a;
+        *out = in_type(e, (long)(0UL - (unsigned long)a));
         return 1;
     case EXPR_BNOT:
         if (!const_fold(e->rhs, &a))
             return 0;
-        *out = ~a;
+        *out = in_type(e, ~a);
         return 1;
     case EXPR_NOT:
         if (!const_fold(e->rhs, &a))
@@ -2552,18 +2574,55 @@ static int const_fold(const struct expr *e, long *out)
         }
         if (!const_fold(e->lhs, &a) || !const_fold(e->rhs, &b))
             return 0;
-        switch (e->op) {
-        case B_ADD: *out = a + b; return 1;
-        case B_SUB: *out = a - b; return 1;
-        case B_MUL: *out = a * b; return 1;
-        case B_DIV: if (!b) return 0; *out = a / b; return 1;
-        case B_MOD: if (!b) return 0; *out = a % b; return 1;
-        case B_AND: *out = a & b; return 1;
-        case B_OR:  *out = a | b; return 1;
-        case B_XOR: *out = a ^ b; return 1;
-        case B_SHL: *out = a << b; return 1;
-        case B_SHR: *out = a >> b; return 1;
-        default: return 0;
+        {
+            /* Unsigned arithmetic for the wrap-around ones, so the host never
+             * sees a signed overflow. The operands already carry their own
+             * types' values; `u` says how to read the bits of a 64-bit
+             * unsigned one. For a comparison that is the OPERANDS' type --
+             * the usual arithmetic conversions have made them one -- and for
+             * everything else the result's. */
+            unsigned long ua = (unsigned long)a, ub = (unsigned long)b;
+            int cmp = e->op >= B_EQ && e->op <= B_GE;
+            int u = is_uns64(cmp ? e->lhs->ty : e->ty);
+            int wbits = e->ty && ty_is_integer(e->ty) ? 8 * ty_size(e->ty) : 64;
+            switch (e->op) {
+            case B_ADD: *out = in_type(e, (long)(ua + ub)); return 1;
+            case B_SUB: *out = in_type(e, (long)(ua - ub)); return 1;
+            case B_MUL: *out = in_type(e, (long)(ua * ub)); return 1;
+            case B_DIV:
+                if (!b) return 0;
+                *out = in_type(e, u ? (long)(ua / ub) : a / b);
+                return 1;
+            case B_MOD:
+                if (!b) return 0;
+                *out = in_type(e, u ? (long)(ua % ub) : a % b);
+                return 1;
+            case B_AND: *out = in_type(e, a & b); return 1;
+            case B_OR:  *out = in_type(e, a | b); return 1;
+            case B_XOR: *out = in_type(e, a ^ b); return 1;
+            /* A shift by the width or more, or by a negative count, is
+             * undefined, so it is not a constant expression: refused rather
+             * than answered with whatever the host's shifter does. */
+            case B_SHL:
+                if (b < 0 || b >= wbits) return 0;
+                *out = in_type(e, (long)(ua << b));
+                return 1;
+            case B_SHR:
+                if (b < 0 || b >= wbits) return 0;
+                *out = in_type(e, u || (e->ty && e->ty->is_unsigned)
+                                      ? (long)(ua >> b) : a >> b);
+                return 1;
+            /* The comparisons. C11 6.6 admits them in an integer constant
+             * expression and this folder did not, so `int x = (1 < 2);` at
+             * file scope was refused as "not a constant". */
+            case B_EQ: *out = a == b; return 1;
+            case B_NE: *out = a != b; return 1;
+            case B_LT: *out = u ? ua <  ub : a <  b; return 1;
+            case B_LE: *out = u ? ua <= ub : a <= b; return 1;
+            case B_GT: *out = u ? ua >  ub : a >  b; return 1;
+            case B_GE: *out = u ? ua >= ub : a >= b; return 1;
+            default: return 0;
+            }
         }
     default:
         return 0;
