@@ -809,6 +809,17 @@ void t_vmov_core_pair(struct code *c, int dm, int rt, int rt2, int to_fp)
            ((unsigned)rt << 12) | 0x0B00u | (fl << 5) | 0x10u | f);
 }
 
+/* vpush / vpop of `n` consecutive single registers from s`first`: the
+ * callee-saved half of the VFP file, s16-s31, which a function that keeps
+ * floats in it must restore. `n` is the register COUNT, in the low byte. */
+void t_vpush_s(struct code *c, int first, int n, int pop)
+{
+    unsigned f, fl;
+    vsplit(first, 0, &f, &fl);
+    hw2(c, (pop ? 0xECBDu : 0xED2Du) | (fl << 6),
+           (f << 12) | 0x0A00u | ((unsigned)n & 0xffu));
+}
+
 /* vmrs APSR_nzcv, FPSCR -- the only way a float comparison's result
  * reaches the condition flags. */
 void t_vmrs_apsr(struct code *c)

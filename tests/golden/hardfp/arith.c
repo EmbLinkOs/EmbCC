@@ -42,6 +42,22 @@ static float (*volatile p_sum12)(float, float, float, float, float, float,
                                  float, float, float, float, float, float)
     = sum12;
 
+/* A float at an ODD address, which only a packed struct makes legal.
+ * ldr takes it on a Cortex-M4; vldr faults. So these must stay core
+ * loads and stores, however much the value wants an S register. */
+struct __attribute__((packed)) pk { char c; float f; float g; };
+static struct pk pks[2] = { { 1, 1.5f, -2.25f }, { 2, 3.75f, 0.5f } };
+static struct pk *volatile ppk = &pks[1];
+static float packed_work(struct pk *p, struct pk *q)
+{
+    float x = p->f * q->g + p->g;
+    q->f = x * 2.0f;
+    p->g = x - q->f;
+    pks[0].f = pks[1].g + x;
+    return x + pks[0].f;
+}
+static float (*volatile p_packed)(struct pk *, struct pk *) = packed_work;
+
 int main(void)
 {
     struct v3 a = { 1.5f, -2.25f, 3.125f }, b = { -0.5f, 4.75f, 2.0f }, r;
@@ -50,6 +66,8 @@ int main(void)
     r = p_cross(a, b);
     pf(r.x); pf(r.y); pf(r.z);
     pf(p_sum12(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12.5f));
+    pf(p_packed(&pks[0], ppk));
+    pf(pks[0].f); pf(pks[0].g); pf(pks[1].f); pf(pks[1].g);
     puts_("\n==END==\n");
     return 0;
 }

@@ -217,6 +217,14 @@ struct ir_ins {
     int sret_first;          /* IR_CALL: argument 0 is the indirect-result
                               * pointer (type.h sret_first) */
     int call_varargs;        /* al = 0 needed at the call */
+    int natural;             /* IR_LOAD/IR_STORE: the address is aligned
+                              * to the access, because C guarantees it
+                              * there (a dereference, a global, a member
+                              * at its natural offset). 0 is "not known":
+                              * a packed struct's member, or anything
+                              * irgen did not say -- a backend whose
+                              * aligned-only instructions (vldr) fault on
+                              * a misaligned address must not use them. */
     int call_pcs;            /* IR_CALL: the callee's pcs attribute (ARM;
                               * see target_pcs_vfp) */
     int call_nfixed;         /* IR_CALL: how many NAMED parameters the

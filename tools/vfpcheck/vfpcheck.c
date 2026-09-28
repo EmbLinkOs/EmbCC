@@ -105,6 +105,11 @@ int main(int argc, char **argv)
         E(t_vmov_core_pair(&c, dm, rt, rt2, 0));
     }
     P("vmrs apsr_nzcv, fpscr%s", "");  E(t_vmrs_apsr(&c));
+    /* the callee-saved block, at the counts a prologue uses */
+    for (int n = 2; n <= 16; n += 2) {
+        P("vpush {s16-s%d}", 15 + n);  E(t_vpush_s(&c, 16, n, 0));
+        P("vpop {s16-s%d}", 15 + n);   E(t_vpush_s(&c, 16, n, 1));
+    }
 #undef P
 #undef E
 

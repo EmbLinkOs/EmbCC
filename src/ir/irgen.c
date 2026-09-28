@@ -316,6 +316,39 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
     return i->dst;
 }
 
+/* Is an lvalue's address aligned to its type, as C guarantees -- or might
+ * it be a packed struct's member, which is the one legal way for it not
+ * to be? A member is under-aligned when its offset, or the alignment of
+ * the struct it sits in, is less than its type asks for; and a member is
+ * only as aligned as the object it is a member of. */
+static int lv_natural(const struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_VAR:
+        return 1;
+    case EXPR_DEREF:
+        return 1;              /* a misaligned pointer is already UB */
+    case EXPR_MEMBER: {
+        const struct type *st = e->is_arrow ? e->lhs->ty->pointee : e->lhs->ty;
+        int ma = ty_align(e->memb->ty);
+        if (!st || e->memb->is_bitfield || ty_align(st) < ma ||
+            e->memb->off % ma)
+            return 0;
+        return e->is_arrow ? 1 : lv_natural(e->lhs);
+    }
+    default:
+        return 0;
+    }
+}
+
+/* Mark the load or store just emitted for lvalue `e`. */
+static void mark_natural(struct ir_func *fn, const struct expr *e)
+{
+    struct ir_ins *i = &fn->ins[fn->nins - 1];
+    if (i->op == IR_LOAD || i->op == IR_STORE)
+        i->natural = lv_natural(e);
+}
+
 /* Typed load/store through an address temp. */
 int emit_load(struct ir_func *fn, int addr, const struct type *t)
 {
@@ -1800,16 +1833,22 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         /* arrays and structs are represented by their address */
         if (e->undecayed || e->ty->kind == TY_STRUCT)
             return gen_addr(fn, e);
-        if (e->gref)
-            return emit_load(fn, emit_gaddr(fn, e->gref), e->ty);
+        if (e->gref) {
+            int v = emit_load(fn, emit_gaddr(fn, e->gref), e->ty);
+            mark_natural(fn, e);
+            return v;
+        }
         return emit_ldvar(fn, e->var_index, e->ty);
     case EXPR_MEMBER: {
         int addr = gen_addr(fn, e);
+        int v;
         if (e->memb->is_bitfield)
             return bf_load(fn, addr, e->memb);
         if (e->undecayed || e->ty->kind == TY_STRUCT)
             return addr; /* array member decays; nested struct is addr */
-        return emit_load(fn, addr, e->ty);
+        v = emit_load(fn, addr, e->ty);
+        mark_natural(fn, e);
+        return v;
     }
     case EXPR_COMPLIT: {
         int addr = gen_complit(fn, e);
@@ -1840,6 +1879,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         if (expr_is_bitfield(e->lhs))
             return bf_store(fn, addr, e->lhs->memb, v);
         emit_store(fn, addr, v, e->ty);
+        mark_natural(fn, e->lhs);
         return v;
     }
     case EXPR_INCDEC: {
@@ -1954,6 +1994,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         i->size = ty_size(e->ty);
         i->sign = ty_signed_int(e->ty);
         i->w = ty_w(e->ty);
+        i->natural = 1;        /* C: an object of this type is aligned */
         i->dst = new_temp(fn);
         return i->dst;
     }

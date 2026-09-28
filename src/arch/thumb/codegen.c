@@ -150,6 +150,13 @@ struct t_fn {
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when it did not run (-O0/-O1). */
     int *loc;
+    /* Per vreg: the S register (s16-s31) a single-precision float lives
+     * in, or -1. NULL without an FPU or without the allocator. A value
+     * has at most one of loc and floc, and one with an floc has NO slot:
+     * rd/wr/vfp_load/vfp_store cross to it with vmov, and every other
+     * reader of a slot goes through slot_of(), which refuses it. */
+    int *floc;
+    int nfsave;          /* s16.. that the prologue vpushes (even) */
     int used_callee[RA_MAXPOOL];
     int nsave;           /* how many of those it took */
     long save_at;        /* where the prologue spilled them */
@@ -240,6 +247,24 @@ static int t_op_calls_helper(const struct ir_ins *i)
     return (i->op == IR_DIV || i->op == IR_MOD) && i->w == 8;
 }
 
+/* The FP class: s16-s31, the CALLEE-SAVED half of the VFP file, and only
+ * that half. Everything else in it is spoken for -- s0-s15 carry
+ * hard-float arguments and results, and s0/s1 are the scratch pair every
+ * VFP instruction here computes in -- so a float in s16 survives a call,
+ * a helper, an argument setup and an incoming parameter without a
+ * parallel move to get right. The cost is a vpush/vpop of what is used.
+ *
+ * Empty without an FPU: then a float is bits in a core register. */
+static const int T_FPOOL[16] = { 16, 17, 18, 19, 20, 21, 22, 23,
+                                 24, 25, 26, 27, 28, 29, 30, 31 };
+static const int *t_fp_pool_for(const struct ir_func *fn, int *n)
+{
+    (void)fn;
+    *n = target_thumb_fpu() ? 16 : 0;
+    return T_FPOOL;
+}
+static int t_fp_callee_saved(int reg) { return reg >= 16; }
+
 /* Where AAPCS32 would put each value if it had the choice. Defined
  * below place_arg, whose answer it uses rather than restating. */
 static void t_abi_hints(const struct ir_func *fn, int *hint);
@@ -268,7 +293,8 @@ static const struct ra_target THUMB_RA = {
     t_op_calls_helper,
     0,            /* Thumb-2's wide forms are three-operand */
     t_abi_hints,
-    NULL, NULL    /* no FP class -- soft float, in the core registers */
+    t_fp_pool_for,
+    t_fp_callee_saved
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -701,6 +727,62 @@ static long outgoing_area(const struct ir_func *fn)
     return (most + 7) & ~7L;
 }
 
+static int in_freg(const struct t_fn *F, int v);
+
+/* Which vregs belong to the FP class: the single-precision floats the
+ * FPU computes with -- operands and results of what fp_on_vfp() runs,
+ * floats passed to and returned from calls, and float locals. Nothing
+ * here is needed for CORRECTNESS: a vreg in this map that some integer
+ * path also touches is reached through rd/wr, which cross with vmov. It
+ * decides only what is worth an S register.
+ *
+ * A double is not here: FPv4-SP-D16 cannot compute with one, so it is a
+ * pair of core words handed to the runtime. Under -g a source variable
+ * stays in its slot, as the integer class keeps them. */
+static char *t_float_map(const struct ir_func *fn, const char *wide,
+                         int debug)
+{
+    int nv = fn->nvregs;
+    char *m;
+    if (!target_thumb_fpu() || nv <= 0)
+        return NULL;
+    m = xcalloc((size_t)nv, 1);
+#define MARK(v) do { int v_ = (v); \
+        if (v_ >= 0 && v_ < nv && !wide[v_]) m[v_] = 1; } while (0)
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (fp_on_vfp(i)) {
+            switch (i->op) {
+            case IR_I2F: MARK(i->dst); break;
+            case IR_F2I: MARK(i->a); break;
+            case IR_CMP: MARK(i->a); if (!i->imm_b) MARK(i->b); break;
+            default:
+                MARK(i->dst); MARK(i->a);
+                if (!i->imm_b && i->op != IR_NEG && i->op != IR_SQRT)
+                    MARK(i->b);
+                break;
+            }
+        } else if (i->op == IR_CALL) {
+            if (i->flt && i->w == 4 && !i->retsize)
+                MARK(i->dst);
+            for (int k = 0; k < i->nargs; k++)
+                if (!i->argv[k].is_struct && i->argv[k].is_float &&
+                    i->argv[k].size == 4)
+                    MARK(i->argv[k].vreg);
+        } else if (i->op == IR_RET && i->a >= 0 &&
+                   fn->ret_abi.is_float && !fn->ret_abi.is_struct &&
+                   fn->ret_abi.size == 4) {
+            MARK(i->a);
+        }
+    }
+#undef MARK
+    for (int v = 0; v < fn->nvars && v < nv; v++)
+        if (debug || !fn->locals[v].is_scalar_float ||
+            fn->locals[v].size != 4)
+            m[v] = 0;
+    return m;
+}
+
 static void layout(struct t_fn *F)
 {
     struct ir_func *fn = F->fn;
@@ -717,7 +799,7 @@ static void layout(struct t_fn *F)
          * (anything else is opaque to it), and under -g every local is
          * pinned to its slot so this cannot fire -- which is what keeps
          * DW_AT_location true. */
-        if (F->loc && F->loc[v] >= 0)
+        if ((F->loc && F->loc[v] >= 0) || in_freg(F, v))
             continue;
         size = fn->locals[v].size ? fn->locals[v].size : 4;
         align = fn->locals[v].user_align ? fn->locals[v].user_align
@@ -744,7 +826,7 @@ static void layout(struct t_fn *F)
          * `F->slot[v]` stays -1 for these, which wr() already treats as
          * "nowhere to store" and skips. */
         int size;
-        if (F->loc && F->loc[v] >= 0)
+        if ((F->loc && F->loc[v] >= 0) || in_freg(F, v))
             continue;
         /* Eight-byte values are eight-ALIGNED as well as eight wide:
          * AAPCS32 aligns `long long` to 8, and a pair straddling that
@@ -787,8 +869,29 @@ static int in_reg(const struct t_fn *F, int v)
  * with it, nothing at all when it is already there. Keeping that
  * contract is what leaves every existing call site correct; the ones
  * that decide code size use the trio below and skip the move. */
+static int in_freg(const struct t_fn *F, int v)
+{
+    return F->floc && v >= 0 && F->floc[v] >= 0;
+}
+
+/* A slot, for code that addresses one directly. A value with an S
+ * register home has none, and a path that reached here with one would
+ * read memory nothing wrote -- the miscompile the first FP class made. It
+ * is a refusal instead. */
+static long slot_of(const struct t_fn *F, int v)
+{
+    if (in_freg(F, v))
+        internal_error("thumb: %s: a path reads vreg %d's slot, and it "
+                       "lives in s%d", F->fn->name, v, F->floc[v]);
+    return F->slot[v];
+}
+
 static void rd(struct t_fn *F, int v, int reg)
 {
+    if (in_freg(F, v)) {
+        t_vmov_core(F->t, F->floc[v], reg, 0);
+        return;
+    }
     if (in_reg(F, v)) {
         if (F->loc[v] != reg)
             t_mov_reg(F->t, reg, F->loc[v]);
@@ -817,6 +920,10 @@ static int wreg(struct t_fn *F, int v, int scratch)
 
 static void wr(struct t_fn *F, int v, int reg)
 {
+    if (in_freg(F, v)) {
+        t_vmov_core(F->t, F->floc[v], reg, 1);
+        return;
+    }
     if (in_reg(F, v)) {
         if (F->loc[v] != reg)
             t_mov_reg(F->t, F->loc[v], reg);
@@ -843,6 +950,7 @@ static void wrote(struct t_fn *F, int v, int reg)
  * and the high word four bytes above it. */
 static void rd64(struct t_fn *F, int v, int lo, int hi)
 {
+    (void)slot_of(F, v);
     if (!t_ldst_imm(F->t, lo, T_SP, F->slot[v], 4, 0, 0) ||
         !t_ldst_imm(F->t, hi, T_SP, F->slot[v] + 4, 4, 0, 0)) {
         t_add_sp(F->t, hi, F->slot[v]);
@@ -853,6 +961,7 @@ static void rd64(struct t_fn *F, int v, int lo, int hi)
 
 static void wr64(struct t_fn *F, int v, int lo, int hi)
 {
+    (void)slot_of(F, v);
     if (F->slot[v] < 0)
         return;
     if (!t_ldst_imm(F->t, lo, T_SP, F->slot[v], 4, 0, 1) ||
@@ -896,7 +1005,7 @@ static void operand_b(struct t_fn *F, const struct ir_ins *i, int reg)
 /* The address of a local's slot, into `reg`. */
 static void addr_of_slot(struct t_fn *F, int v, int reg)
 {
-    t_add_sp(F->t, reg, F->slot[v]);
+    t_add_sp(F->t, reg, slot_of(F, v));
 }
 
 /* ---- branches ------------------------------------------------------- */
@@ -1343,7 +1452,7 @@ static int gen_ins64(struct t_fn *F, int n)
         if (i->size == 8) {
             rd64(F, i->a, A_LO, A_HI);
         } else {
-            if (!t_ldst_imm(t, A_LO, T_SP, F->slot[i->a], i->size, i->sign,
+            if (!t_ldst_imm(t, A_LO, T_SP, slot_of(F, i->a), i->size, i->sign,
                             0)) {
                 t_add_sp(t, B_LO, F->slot[i->a]);
                 t_ldst_imm(t, A_LO, B_LO, 0, i->size, i->sign, 0);
@@ -1358,7 +1467,7 @@ static int gen_ins64(struct t_fn *F, int n)
         if (i->size == 8) {
             wr64(F, i->dst, A_LO, A_HI);
         } else {                       /* a truncating store */
-            if (!t_ldst_imm(t, A_LO, T_SP, F->slot[i->dst], i->size, 0, 1)) {
+            if (!t_ldst_imm(t, A_LO, T_SP, slot_of(F, i->dst), i->size, 0, 1)) {
                 t_add_sp(t, B_LO, F->slot[i->dst]);
                 t_ldst_imm(t, A_LO, B_LO, 0, i->size, 0, 1);
             }
@@ -1456,6 +1565,11 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
  * address computed first. */
 static void vfp_load(struct t_fn *F, int v, int sreg)
 {
+    if (in_freg(F, v)) {
+        if (F->floc[v] != sreg)
+            t_vmov_reg(F->t, sreg, F->floc[v], 0);
+        return;
+    }
     if (in_reg(F, v)) {
         /* The value is in a CORE register: one move, no memory. */
         t_vmov_core(F->t, sreg, F->loc[v], 1);
@@ -1473,6 +1587,11 @@ static void vfp_store(struct t_fn *F, int v, int sreg)
 {
     if (v < 0)
         return;
+    if (in_freg(F, v)) {
+        if (F->floc[v] != sreg)
+            t_vmov_reg(F->t, F->floc[v], sreg, 0);
+        return;
+    }
     if (in_reg(F, v)) {
         t_vmov_core(F->t, sreg, F->loc[v], 0);
         return;
@@ -1497,6 +1616,7 @@ static int vfp_slot_ok(const struct t_fn *F, int v)
 
 static void vfp_load_d(struct t_fn *F, int v, int d)
 {
+    (void)slot_of(F, v);
     if (vfp_slot_ok(F, v)) {
         t_vldst(F->t, d, T_SP, (int)F->slot[v], 1, 0);
         return;
@@ -1531,16 +1651,38 @@ static void vfp_aggregate(struct t_fn *F, int base, int s0, int n, int dbl,
  * through to the soft-float helper. Saying 0 rather than refusing is
  * deliberate: an operation the FPU cannot do is not an error, it is a
  * call -- `double` on an SP-only part is the whole reason. */
+/* An operand's S register: its home when it has one, else `scratch`
+ * loaded with it. And a result's: its home, else `scratch`, which
+ * vfp_done then stores. Computing straight into and out of s16-s31 is
+ * the point of the register class -- vadd s17, s16, s18, one
+ * instruction where the slots needed four. */
+static int vfp_src(struct t_fn *F, int v, int scratch)
+{
+    if (in_freg(F, v))
+        return F->floc[v];
+    vfp_load(F, v, scratch);
+    return scratch;
+}
+static int vfp_dst(struct t_fn *F, int v, int scratch)
+{
+    return in_freg(F, v) ? F->floc[v] : scratch;
+}
+static void vfp_done(struct t_fn *F, int v, int sreg)
+{
+    if (!in_freg(F, v))
+        vfp_store(F, v, sreg);
+}
+
 /* The second operand into s register `sreg`: a vreg, or a folded
  * constant, which for a float operation is its bit pattern. */
-static void vfp_operand_b(struct t_fn *F, const struct ir_ins *i, int sreg)
+static int vfp_operand_b(struct t_fn *F, const struct ir_ins *i, int sreg)
 {
     if (i->imm_b) {
         t_mov_imm(F->t, T_ACC, (long)i->imm, 0);
         t_vmov_core(F->t, sreg, T_ACC, 1);
-    } else {
-        vfp_load(F, i->b, sreg);
+        return sreg;
     }
+    return vfp_src(F, i->b, sreg);
 }
 
 /* A float comparison's condition, read after vmrs. Each is chosen so an
@@ -1562,12 +1704,12 @@ static int fp_cond_for(enum binop pred)
 
 static void fp_vfp_cmp(struct t_fn *F, const struct ir_ins *i)
 {
-    vfp_load(F, i->a, T_FS0);
-    vfp_operand_b(F, i, T_FS1);
+    int a = vfp_src(F, i->a, T_FS0);
+    int b = vfp_operand_b(F, i, T_FS1);
     if (i->pred == B_EQ || i->pred == B_NE)
-        t_vcmp(F->t, T_FS0, T_FS1, 0);
+        t_vcmp(F->t, a, b, 0);
     else
-        t_vcmpe(F->t, T_FS0, T_FS1, 0);
+        t_vcmpe(F->t, a, b, 0);
     t_vmrs_apsr(F->t);
 }
 
@@ -1575,25 +1717,25 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
 {
     struct code *t = F->t;
     switch (i->op) {
-    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
-        vfp_load(F, i->a, T_FS0);
-        vfp_operand_b(F, i, T_FS1);
-        if (i->op == IR_ADD)      t_vadd(t, T_FS0, T_FS0, T_FS1, 0);
-        else if (i->op == IR_SUB) t_vsub(t, T_FS0, T_FS0, T_FS1, 0);
-        else if (i->op == IR_MUL) t_vmul(t, T_FS0, T_FS0, T_FS1, 0);
-        else                      t_vdiv(t, T_FS0, T_FS0, T_FS1, 0);
-        vfp_store(F, i->dst, T_FS0);
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: {
+        int a = vfp_src(F, i->a, T_FS0);
+        int b = vfp_operand_b(F, i, T_FS1);
+        int d = vfp_dst(F, i->dst, T_FS0);
+        if (i->op == IR_ADD)      t_vadd(t, d, a, b, 0);
+        else if (i->op == IR_SUB) t_vsub(t, d, a, b, 0);
+        else if (i->op == IR_MUL) t_vmul(t, d, a, b, 0);
+        else                      t_vdiv(t, d, a, b, 0);
+        vfp_done(F, i->dst, d);
         return 1;
-    case IR_NEG:
-        vfp_load(F, i->a, T_FS0);
-        t_vneg(t, T_FS0, T_FS0, 0);
-        vfp_store(F, i->dst, T_FS0);
+    }
+    case IR_NEG: case IR_SQRT: {
+        int a = vfp_src(F, i->a, T_FS0);
+        int d = vfp_dst(F, i->dst, T_FS0);
+        if (i->op == IR_NEG) t_vneg(t, d, a, 0);
+        else                 t_vsqrt(t, d, a, 0);
+        vfp_done(F, i->dst, d);
         return 1;
-    case IR_SQRT:
-        vfp_load(F, i->a, T_FS0);
-        t_vsqrt(t, T_FS0, T_FS0, 0);
-        vfp_store(F, i->dst, T_FS0);
-        return 1;
+    }
     /* IR_CMP is deliberately NOT here yet. vcmp writes FPSCR and only
      * vmrs moves that to APSR, so the comparison is two instructions and
      * then the 0/1 result still has to be materialised from the flags --
@@ -1825,7 +1967,12 @@ static void gen_ins(struct t_fn *F, int n)
          * for a copy between two allocated registers -- two
          * instructions that together do nothing, on every move in the
          * program. */
-        int srcr = rdr(F, i->a, T_ACC);
+        int srcr;
+        if (in_freg(F, i->dst)) {        /* into an S register: vmov */
+            vfp_load(F, i->a, F->floc[i->dst]);
+            return;
+        }
+        srcr = rdr(F, i->a, T_ACC);
         wr(F, i->dst, srcr);
         return;
     }
@@ -2012,6 +2159,20 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LDVAR: {
         int d;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit local");
+        if (in_freg(F, i->a) || in_freg(F, i->dst)) {
+            /* A float local in s16-s31, or read into one: the value is
+             * all four bytes of it, so this is a move. */
+            if (i->size != 4)
+                internal_error("thumb: %s: a %d-byte read of a float in "
+                               "an S register", fn->name, i->size);
+            if (in_freg(F, i->a) && in_freg(F, i->dst))
+                t_vmov_reg(t, F->floc[i->dst], F->floc[i->a], 0);
+            else if (in_freg(F, i->a))
+                wr(F, i->dst, rdr(F, i->a, T_ACC));
+            else
+                vfp_store(F, i->dst, (vfp_load(F, i->a, T_FS0), T_FS0));
+            return;
+        }
         d = wreg(F, i->dst, T_ACC);
         if (in_reg(F, i->a)) {
             if (t_ldvar_plain(i->size, i->sign, i->w)) {
@@ -2019,7 +2180,7 @@ static void gen_ins(struct t_fn *F, int n)
             } else {
                 t_ext(t, d, F->loc[i->a], i->size, i->sign);
             }
-        } else if (!t_ldst_imm(t, d, T_SP, F->slot[i->a], i->size,
+        } else if (!t_ldst_imm(t, d, T_SP, slot_of(F, i->a), i->size,
                                i->sign, 0)) {
             t_add_sp(t, T_ADDR, F->slot[i->a]);
             t_ldst_imm(t, d, T_ADDR, 0, i->size, i->sign, 0);
@@ -2030,6 +2191,13 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_STVAR: {
         int src;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit local");
+        if (in_freg(F, i->dst)) {
+            if (i->size != 4)
+                internal_error("thumb: %s: a %d-byte store to a float in "
+                               "an S register", fn->name, i->size);
+            vfp_load(F, i->a, F->floc[i->dst]);
+            return;
+        }
         src = rdr(F, i->a, T_ACC);
         if (in_reg(F, i->dst)) {
             /* A narrowing store extends, because the register now holds
@@ -2042,7 +2210,7 @@ static void gen_ins(struct t_fn *F, int n)
             } else {
                 t_ext(t, F->loc[i->dst], src, i->size, 0);
             }
-        } else if (!t_ldst_imm(t, src, T_SP, F->slot[i->dst], i->size, 0, 1)) {
+        } else if (!t_ldst_imm(t, src, T_SP, slot_of(F, i->dst), i->size, 0, 1)) {
             t_add_sp(t, T_ADDR, F->slot[i->dst]);
             t_ldst_imm(t, src, T_ADDR, 0, i->size, 0, 1);
         }
@@ -2053,7 +2221,16 @@ static void gen_ins(struct t_fn *F, int n)
          * may share the address's register; nothing has to be kept
          * apart here. */
         int an = rdr(F, i->a, T_ADDR);
-        int d = wreg(F, i->dst, T_ACC);
+        int d;
+        /* A float with an S-register home, read with vldr -- only where
+         * the address is KNOWN aligned: vldr faults on a misaligned one
+         * where ldr would not, and a packed struct's float member is
+         * exactly that. */
+        if (in_freg(F, i->dst) && i->size == 4 && i->natural) {
+            t_vldst(t, F->floc[i->dst], an, 0, 0, 0);
+            return;
+        }
+        d = wreg(F, i->dst, T_ACC);
         if (i->w > 4) t_refuse(fn, i, "a 64-bit load");
         t_ldst_imm(t, d, an, 0, i->size, i->sign, 0);
         wrote(F, i->dst, d);
@@ -2063,6 +2240,10 @@ static void gen_ins(struct t_fn *F, int n)
         int an, vr;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit store");
         an = rdr(F, i->a, T_ADDR);
+        if (in_freg(F, i->b) && i->size == 4 && i->natural) {
+            t_vldst(t, F->floc[i->b], an, 0, 0, 1);   /* see IR_LOAD */
+            return;
+        }
         /* The value must not land in the register the address is in
          * when that register is the scratch -- rdr would overwrite it. */
         vr = rdr(F, i->b, an == T_ACC ? T_TMP : T_ACC);
@@ -2408,10 +2589,10 @@ static void gen_ins(struct t_fn *F, int n)
          * representable shape, and zero-extending it is still right. */
         if (fp_on_vfp(i)) {
             /* vcvt reads its integer from an S register. */
-            rd(F, i->a, T_ACC);
-            t_vmov_core(t, T_FS0, T_ACC, 1);
-            t_vcvt_f_from_i(t, T_FS0, T_FS0, i->sign, 0);
-            vfp_store(F, i->dst, T_FS0);
+            int d = vfp_dst(F, i->dst, T_FS0);
+            t_vmov_core(t, T_FS0, rdr(F, i->a, T_ACC), 1);
+            t_vcvt_f_from_i(t, d, T_FS0, i->sign, 0);
+            vfp_done(F, i->dst, d);
             return;
         }
         if (i->size == 8) {
@@ -2437,10 +2618,10 @@ static void gen_ins(struct t_fn *F, int n)
         if (fp_on_vfp(i)) {
             /* Round toward zero, which is C's conversion and what
              * t_vcvt_i_from_f encodes. */
-            vfp_load(F, i->a, T_FS0);
-            t_vcvt_i_from_f(t, T_FS0, T_FS0, i->sign, 0);
-            t_vmov_core(t, T_FS0, T_ACC, 0);
-            wr(F, i->dst, T_ACC);
+            int r = wreg(F, i->dst, T_ACC);
+            t_vcvt_i_from_f(t, T_FS0, vfp_src(F, i->a, T_FS0), i->sign, 0);
+            t_vmov_core(t, T_FS0, r, 0);
+            wrote(F, i->dst, r);
             return;
         }
         fp_arg(F, i->a, i->size, T_R0);
@@ -2561,6 +2742,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.wide = wide64_map(fn);
     F.va_regsave = F.va_first = -1;
     F.loc = NULL; F.nsave = 0; F.save_at = 0;
+    F.floc = NULL; F.nfsave = 0;
     if (g_t_regalloc) {
         /* nsave is what the allocator REPORTS it took, and the prologue
          * pushes exactly that -- so the two must be computed together.
@@ -2580,8 +2762,31 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * register needs a location list to describe, which is the
          * larger feature; this is exact. */
         char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
-        F.loc = ra_allocate(fn, &THUMB_RA, F.wide, pin,
+        char *flt = t_float_map(fn, F.wide, want_debug);
+        /* The integer pass must not give a GPR to a value the FP pass
+         * owns, and the -g pins are the same kind of "not here" -- so it
+         * takes the union of the two. */
+        char *excl = pin;
+        if (flt) {
+            excl = xcalloc((size_t)fn->nvregs, 1);
+            for (int v = 0; v < fn->nvregs; v++)
+                excl[v] = (char)(flt[v] || (pin && pin[v]));
+        }
+        F.loc = ra_allocate(fn, &THUMB_RA, F.wide, excl,
                             F.used_callee, &F.nsave);
+        if (flt) {
+            int fused[32], nfused = 0, top = 15;
+            F.floc = ra_allocate_fp(fn, &THUMB_RA, F.wide, flt,
+                                    fused, &nfused);
+            for (int k = 0; k < nfused; k++)
+                if (fused[k] > top)
+                    top = fused[k];
+            /* vpush takes a RANGE, so s16 up to the highest one used,
+             * rounded to an even count to keep sp eight-aligned. */
+            F.nfsave = (top - 15 + 1) & ~1;
+            free(excl);
+            free(flt);
+        }
         free(pin);
         /* Read counts for comparison/branch fusion. Only with the
          * allocator on: without it every value round-trips through a
@@ -2649,6 +2854,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * below is measured from. F.nsave is already known -- ra_allocate
      * ran before layout() -- so there is nothing left to discover. */
     push_at = t_push(t, save_mask_for(F.nsave, F.used_callee));
+    if (F.nfsave)
+        t_vpush_s(t, 16, F.nfsave, 0);
     /* The mask is PATCHED at the end with whatever callee-saved
      * registers the allocator turned out to take: a `push` encodes them
      * as a bitmask, so growing the set costs no extra instruction, and
@@ -2676,7 +2883,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * which is a miscompile in any function with more arguments
          * than the register file holds -- and the pad is exactly the
          * term that was missing. */
-        long base = F.frame + save_bytes_for(F.nsave, F.used_callee);
+        long base = F.frame + save_bytes_for(F.nsave, F.used_callee) +
+                    (long)F.nfsave * 4;
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
         int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
         int npstk = 0;
@@ -2690,6 +2898,31 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
             place_one(&w, a, &pl);
+            /* A float parameter with an S-register home goes straight
+             * there, from wherever it arrived. Nothing here writes a core
+             * or an argument VFP register, so it cannot disturb another
+             * parameter, and it has no slot to write. */
+            if (in_freg(&F, i)) {
+                int s = F.floc[i];
+                if (pl.nvfp == 1) {
+                    t_vmov_reg(t, s, pl.vfp, 0);
+                } else if (pl.nreg == 1 && !pl.nstk) {
+                    t_vmov_core(t, s, pl.reg, 1);
+                } else if (!pl.nreg && pl.nstk == 1 && !pl.nvfp) {
+                    long off = base + pl.stk;
+                    if (off <= 1020) {
+                        t_vldst(t, s, T_SP, (int)off, 0, 0);
+                    } else {
+                        t_add_sp(t, T_ADDR, off);
+                        t_vldst(t, s, T_ADDR, 0, 0, 0);
+                    }
+                } else {
+                    internal_error("thumb: %s: float parameter %d arrives "
+                                   "in a shape an S register cannot take",
+                                   fn->name, i);
+                }
+                continue;
+            }
             /* Arrived in VFP registers (-mfloat-abi=hard). Reading them
              * disturbs no core register, so everything except a float
              * headed for a core register is done here; that one waits
@@ -2816,6 +3049,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.label_off[fn->nlabels] = t->len;
     if (F.frame)
         t_sp_adjust(t, F.frame, 0);
+    if (F.nfsave)
+        t_vpush_s(t, 16, F.nfsave, 1);
     {
         /* The same set the prologue pushed: SAVE_MASK plus whatever
          * callee-saved registers the allocator took. Built here and
@@ -2851,13 +3086,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     f->code_len = t->len - f->code_off;
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved. */
-    f->stack_bytes = (int)(F.frame + save_bytes_for(F.nsave, F.used_callee));
+    f->stack_bytes = (int)(F.frame + save_bytes_for(F.nsave, F.used_callee) +
+                           (long)F.nfsave * 4);
     free(F.usecnt);
     free(F.slot);
     free(F.label_off);
     free(F.fix);
     free(F.wide);
     free(F.loc);
+    free(F.floc);
 }
 
 void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
