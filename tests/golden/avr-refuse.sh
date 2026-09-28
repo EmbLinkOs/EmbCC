@@ -48,20 +48,14 @@ refuses "float arithmetic" "floating point" \
 refuses "double arithmetic" "floating point" \
     'double f(double a, double b) { return a * b; }'
 
-# 64-bit integers: eight consecutive registers and a carry chain twice as
-# long as the four-byte one. A legalisation pass, not a second set of
-# hand-written chains.
-refuses "long long" "64-bit integer" \
-    'long long f(long long a, long long b) { return a + b; }'
-
-# ABI work of its own, each.
-refuses "a variadic function" "variadic" \
-    '#include <stdarg.h>
-     int f(int n, ...) { va_list ap; int s; va_start(ap, n); s = va_arg(ap, int); va_end(ap); return s; }'
-refuses "a struct parameter" "struct" \
-    'struct s { long a, b; }; int f(struct s v) { return (int)v.a; }'
-refuses "a struct return" "struct" \
-    'struct s { long a, b; }; struct s g(void); long f(void) { return g().a; }'
+# 64-bit integers, varargs and aggregates by value used to be here. They
+# work now -- tests/golden/avr-wide.sh runs all three on the part -- which is
+# what a case leaving this file is supposed to look like.
+#
+# What remains is floating point and the handful of builtins below, each
+# named rather than lumped under "unsupported".
+refuses "a byte swap" "bswap" \
+    'unsigned long f(unsigned long a) { return __builtin_bswap32(a); }'
 
 echo "all $n unsupported constructs are refused, and each diagnostic names
 which one -- so nothing here can be mistaken for code that works"

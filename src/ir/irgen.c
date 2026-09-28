@@ -1958,6 +1958,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_thumb(fn, e);
         if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
             return irg_va_arg_riscv(fn, e);
+        if (target_get() == TARGET_AVR)
+            return irg_va_arg_avr(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)

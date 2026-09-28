@@ -234,6 +234,49 @@ static char *avr_subst(const char *file, int line, const char *tmpl,
     return out;
 }
 
+/* ---- varargs ----------------------------------------------------------
+ *
+ * AVR's variadic convention is the simplest of any target here, and that is
+ * measured rather than assumed: for a variadic call ALL arguments go on the
+ * stack, including the NAMED ones. `sum(3, 10, 20, 30)` writes all four
+ * words to the outgoing area and puts nothing in a register.
+ *
+ * So a va_list is a bare POINTER at the next argument -- the same
+ * representation AAPCS32 and the RISC-V psABI use -- and there is no
+ * register-save area, no record to walk, and no split point to track.
+ *
+ * Arguments are PACKED at their natural size, with no rounding and no
+ * alignment: the stack is byte-addressed here and nothing on this machine
+ * wants more. That is the same rule the non-variadic stack arguments follow.
+ *
+ * One promotion still applies, and it is the C standard's rather than the
+ * ABI's: a `float` passed through `...` is promoted to `double`. On this
+ * target both are four-byte IEEE single, so the promotion is a no-op -- the
+ * one place AVR's unusual `double` makes something simpler.
+ */
+int irg_va_arg_avr(struct ir_func *fn, struct expr *e)
+{
+    struct type *rt = e->ty;
+    long size = ty_size(rt);
+    /* The list is a pointer, and a pointer here is TWO bytes -- so the
+     * temporary holding it is an `int` by AVR's data model, not the
+     * four-byte one the 32-bit targets use. */
+    struct type *ptr = ty_base(TY_INT, 1);
+
+    int apa = gen_addr(fn, e->lhs);
+    int cur = emit_load(fn, apa, ptr);
+    int addr = new_temp(fn);
+
+    emit_mov(fn, addr, cur);
+    /* Packed: no rounding up. */
+    emit_store(fn, apa,
+               emit_bin(fn, IR_ADD, addr,
+                        emit_const(fn, size, target_ptr_size()),
+                        target_ptr_size(), 1),
+               ptr);
+    return emit_load(fn, addr, rt);
+}
+
 void irg_asm_avr(struct ir_func *fn, struct stmt *s)
 {
     struct asm_stmt *a = s->asm_s;

@@ -460,6 +460,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         switch (k) {
         case RK_CALL:            return R_AVR_CALL;
         case RK_AVR_CALL:        return R_AVR_CALL;
+        case RK_AVR_TEXT_CALL:   return R_AVR_CALL;
         case RK_AVR_LO8_LDI:     return R_AVR_LO8_LDI;
         case RK_AVR_HI8_LDI:     return R_AVR_HI8_LDI;
         case RK_AVR_LO8_LDI_GS:  return R_AVR_LO8_LDI_GS;

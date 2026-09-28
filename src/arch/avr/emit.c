@@ -285,6 +285,14 @@ static void wrhw(unsigned char *p, unsigned v)
 
 void avr_patch_br_at(unsigned char *p, int word_disp)
 {
+    /* Seven bits, SIGNED: +-64 words, which is +-128 bytes. Checked here as
+     * well as in avr_br, because a branch is normally emitted with a
+     * placeholder and patched once the body between is known -- and the body
+     * is exactly what can outgrow the field. Masking it silently turns a
+     * loop's exit branch into a jump into the middle of its own body. */
+    if (word_disp < -64 || word_disp > 63)
+        bad("a conditional branch further than +-64 words: it needs an "
+            "inverted branch over an rjmp", word_disp);
     wrhw(p, (rdhw(p) & ~0x03F8u) | (((unsigned)word_disp & 0x7fu) << 3));
 }
 
@@ -320,9 +328,27 @@ void avr_patch_br(struct code *c, int at, int word_disp)
     avr_patch_br_at(c->p + at, word_disp);
 }
 
+/* The twelve-bit displacement is SIGNED and reaches +-2048 words, which is
+ * +-4 KB. Out of range is a diagnostic and not a mask.
+ *
+ * It was a mask, and that cost a silent miscompile: a back edge 2300 words
+ * behind wrapped to 1866 words AHEAD, so a loop in a large -O0 function
+ * jumped into empty flash and the part executed NOPs to the end of memory.
+ * Masking an operand that does not fit is exactly the failure every range
+ * check in this file exists to prevent. */
+static void rjmp_range(int word_disp)
+{
+    if (word_disp < -2048 || word_disp > 2047)
+        bad("an rjmp/rcall further than +-2048 words (+-4KB): it needs the "
+            "32-bit `jmp`, whose operand is an absolute address and so needs "
+            "a relocation this backend does not yet emit for a label",
+            word_disp);
+}
+
 int avr_rjmp(struct code *c, int word_disp)
 {
     int at = c->len;
+    rjmp_range(word_disp);
     hw(c, 0xC000u | ((unsigned)word_disp & 0x0fffu));
     return at;
 }
@@ -330,12 +356,14 @@ int avr_rjmp(struct code *c, int word_disp)
 int avr_rcall(struct code *c, int word_disp)
 {
     int at = c->len;
+    rjmp_range(word_disp);
     hw(c, 0xD000u | ((unsigned)word_disp & 0x0fffu));
     return at;
 }
 
 void avr_patch_rjmp(struct code *c, int at, int word_disp)
 {
+    rjmp_range(word_disp);
     avr_patch_rjmp_at(c->p + at, word_disp);
 }
 

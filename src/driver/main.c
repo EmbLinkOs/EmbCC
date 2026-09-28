@@ -2023,8 +2023,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * end of the instruction, four bytes past r_offset. */
     for (int i = 0; i < nstrs; i++) {
         int lo = riscv && strs[i].kind == RK_RISCV_PCREL_LO12_I;
+        /* AVR: a jump to a label in this object's own .text, too far for the
+         * 12-bit rjmp. Against the SECTION symbol with the label's offset as
+         * the addend, because `jmp` carries an absolute address and nothing
+         * in a relocatable object knows where its own .text will land. */
+        int tx = strs[i].kind == RK_AVR_TEXT_CALL;
         elfw_add_rela(w, text_ndx, (Elf64_Addr)strs[i].patch_off,
-                      lo ? text_sym : rodata_sym,
+                      (lo || tx) ? text_sym : rodata_sym,
                       target_reloc_type(ta, strs[i].kind),
                       lo ? strs[i].patch_off - 4
                          : target_reloc_addend(ta, strs[i].kind,

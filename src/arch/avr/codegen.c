@@ -130,7 +130,16 @@ struct a_sites {
 /* A jump whose target label was not placed yet. Every branch to a label
  * goes on this list and is patched when the function ends, so forward
  * and backward jumps take one path. */
-struct a_fix { int at; int label; };
+/* A jump whose target label was not placed yet.
+ *
+ * `wide` says the site is a 32-bit `jmp` rather than a 16-bit `rjmp`. AVR has
+ * no PC-relative long jump: rjmp reaches +-4 KB and `jmp` carries an
+ * ABSOLUTE word address, which a relocatable object cannot know -- so a far
+ * jump is a `jmp` with a relocation against this .text plus the label's
+ * offset. A FORWARD jump is always the wide form, because its distance is not
+ * known when it is emitted and the two sizes differ; a BACKWARD one takes
+ * the short form when it fits, which is the common case and every loop. */
+struct a_fix { int at; int label; int wide; };
 
 struct a_fn {
     struct ir_func *fn;
@@ -139,6 +148,8 @@ struct a_fn {
     long *slot;          /* per vreg: its offset from Y, or -1 */
     long frame;          /* bytes between Y and the caller's saved Y */
     int *label_off;
+    long scratch_at;     /* base of the struct-return temporaries */
+    long sret_slot;      /* where the hidden result pointer is kept, or -1 */
     struct a_fix *fix;
     int nfix, capfix;
     /* Which vregs are known constants, and what they hold.
@@ -157,8 +168,93 @@ struct a_fn {
      * more than the IR guarantees. */
     long *cval;
     char *cknown;
+    /* Which vregs hold an EIGHT-byte value. By the width of the RESULT --
+     * i->w for the value-producing operations and four for the rest however
+     * wide their operands are: an IR_CMP at w == 8 compares two 64-bit
+     * values and yields a 0 or a 1. Getting that backwards gives the result
+     * an eight-byte slot and reads four bytes of a neighbouring temporary as
+     * its high half. */
+    char *wide;
     int want_debug;
 };
+
+/* A value's width in bytes: eight when the map says so, four otherwise. */
+static int vw(const struct a_fn *F, int v)
+{
+    return (v >= 0 && F->wide && F->wide[v]) ? 8 : VW;
+}
+
+/* Does this INSTRUCTION operate on eight bytes?
+ *
+ * `i->w` answers for the arithmetic, but not for the memory operations: an
+ * IR_STVAR carries the width of the value it stores in `size` and leaves `w`
+ * at four, so asking `w == 8` sends an eight-byte store down the four-byte
+ * path -- which silently drops its top half, and did, inside __muldi3. The
+ * operand's own map entry is the answer there. */
+static int wide_ins(const struct a_fn *F, const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_STVAR: return i->size == 8 || vw(F, i->a) == 8;
+    case IR_STORE: return i->size == 8 || vw(F, i->b) == 8;
+    case IR_LDVAR: case IR_LOAD: case IR_EXT:
+        return i->size == 8 || (i->dst >= 0 && vw(F, i->dst) == 8);
+    default:
+        /* `w` is the first answer, and the DESTINATION's own width is the
+         * second -- because a MOV is not required to carry a width and often
+         * does not. The merge of a `?:`'s two arms is emitted with an operand
+         * and a destination and nothing else, so asking `w == 8` alone made
+         * an eight-byte merge copy four bytes: __divdi3's
+         * `neg ? -(s64_)q : (s64_)q` returned its low half with the high half
+         * of whatever the slot's previous tenant left there. */
+        return i->w == 8 || (i->dst >= 0 && vw(F, i->dst) == 8);
+    }
+}
+
+/* Which vregs are eight bytes wide. */
+static char *avr_wide_map(struct ir_func *fn)
+{
+    char *w = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), 1);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->w != 8 || i->dst < 0 || i->dst >= fn->nvregs)
+            continue;
+        switch (i->op) {
+        case IR_CONST: case IR_MOV:
+        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
+        case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+        case IR_NEG: case IR_BNOT:
+        case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
+        case IR_SELECT: case IR_BSWAP:
+            w[i->dst] = 1;
+            break;
+        default:
+            break;
+        }
+    }
+    /* A local declared eight bytes wide is one whether or not any
+     * instruction has been seen to define it: the prologue writes a
+     * parameter into its slot before the body runs. */
+    for (int v = 0; v < fn->nvars && v < fn->nvregs; v++)
+        if (fn->locals[v].size == 8 && fn->locals[v].is_int_or_ptr)
+            w[v] = 1;
+    /* Then through COPIES, to a fixpoint: a MOV is not required to carry a
+     * width and often does not -- the merge of a `?:`'s two arms is emitted
+     * with an operand and a destination and nothing else. */
+    for (int again = 1; again; ) {
+        again = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->dst < 0 || i->dst >= fn->nvregs || w[i->dst])
+                continue;
+            if (i->op == IR_MOV && i->w != 4 &&
+                i->a >= 0 && i->a < fn->nvregs && w[i->a]) {
+                w[i->dst] = 1;
+                again = 1;
+            }
+        }
+    }
+    return w;
+}
 
 /* Build that map. One pass, and the second write to a vreg withdraws it. */
 static void const_map(struct a_fn *F)
@@ -243,11 +339,22 @@ struct argplace {
     int nstk;            /* bytes on the stack */
 };
 
+/* `cursor` of -1 means a VARIADIC call: every argument goes on the stack,
+ * the named ones included. Measured from clang -- sum(3, 10, 20, 30) writes
+ * all four words to the outgoing area and puts nothing in a register -- and
+ * it is why a va_list here is a bare pointer with no register-save area
+ * behind it. */
 static void place_arg(int size, int *cursor, long *stk, struct argplace *p)
 {
     int even = (size + 1) & ~1;
 
     p->reg = 0; p->nreg = 0; p->stk = 0; p->nstk = 0;
+    if (*cursor < 0) {
+        p->stk = *stk;
+        p->nstk = size;
+        *stk += size;
+        return;
+    }
     if (*cursor - even >= ARG_BOT) {
         p->reg = *cursor - even;
         p->nreg = size;
@@ -268,6 +375,23 @@ static int ret_reg(int size)
     return ARG_TOP - ((size + 1) & ~1);
 }
 
+/* Does a composite of this size come back through a hidden POINTER?
+ *
+ * Eight bytes is the largest that fits: r25:r18 is the lowest run the cursor
+ * can give, so nine bytes has nowhere to go. Measured from clang -- a
+ * 12-byte struct is written through an address the caller passed in r24:r25,
+ * and an 8-byte one comes back in r18-r25.
+ *
+ * Only a COMPOSITE. A `long long` is eight bytes and comes back in
+ * r18-r25 like any other scalar; asking about size alone would make every
+ * 64-bit-returning function treat r24 as a buffer address. */
+static int sret_bytes(int retsize) { return retsize > 8 ? retsize : 0; }
+
+static int fn_sret_bytes(const struct ir_func *fn)
+{
+    return fn->ret_abi.is_struct ? sret_bytes(fn->ret_abi.size) : 0;
+}
+
 /* The widest outgoing-argument area any call in this function needs. The
  * IR's own outgoing_bytes is the System V answer and does not apply. */
 static long outgoing_area(const struct ir_func *fn)
@@ -276,10 +400,11 @@ static long outgoing_area(const struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
         struct argplace pl;
-        int cursor = ARG_TOP;
+        int cursor;
         long stk = 0;
         if (i->op != IR_CALL)
             continue;
+        cursor = i->call_varargs ? -1 : ARG_TOP;
         for (int k = 0; k < i->nargs; k++)
             place_arg(i->argv[k].size, &cursor, &stk, &pl);
         if (stk > most)
@@ -319,6 +444,8 @@ static void layout(struct a_fn *F)
 
     for (int v = 0; v < fn->nvars; v++) {
         int size = fn->locals[v].size ? fn->locals[v].size : VW;
+        if (F->wide[v] && size < 8)
+            size = 8;
         /* No alignment. AVR's stack pointer is whatever the caller left
          * it at and nothing aligns it, so a slot cannot be promised an
          * alignment in absolute terms -- which is what an
@@ -365,6 +492,7 @@ static void layout(struct a_fn *F)
         int *last = xmalloc((size_t)(nv ? nv : 1) * sizeof *last);
         long *free_from = xmalloc((size_t)(nv ? nv : 1) * sizeof *free_from);
         long *slot_at = xmalloc((size_t)(nv ? nv : 1) * sizeof *slot_at);
+        int *slot_sz = xmalloc((size_t)(nv ? nv : 1) * sizeof *slot_sz);
         int nslots = 0;
 
         int *labpos = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) *
@@ -436,29 +564,46 @@ static void layout(struct a_fn *F)
             int k;
             if (def[v] < 0)
                 continue;              /* never defined: no slot at all */
+            /* A slot is reused only by a value of the SAME width, which is
+             * why the sweep below tracks one size per slot. Mixing them
+             * would let a four-byte value land on the high half of an
+             * eight-byte one. */
+            int need = vw(F, v);
             if (last[v] < def[v]) {
                 /* Either never read, or read before it is written. The
                  * first needs one instruction's worth of slot and the
                  * second needs the whole function; both are covered by
                  * refusing to share this one. */
                 F->slot[v] = off;
-                off += VW;
+                off += need;
                 continue;
             }
             for (k = 0; k < nslots; k++)
-                if (free_from[k] <= def[v])
+                if (free_from[k] <= def[v] && slot_sz[k] == need)
                     break;
             if (k == nslots) {
                 slot_at[k] = off;
-                off += VW;
+                slot_sz[k] = need;
+                off += need;
                 nslots++;
             }
             free_from[k] = last[v] + 1;
             F->slot[v] = slot_at[k];
         }
-        free(def); free(last); free(free_from); free(slot_at); free(labpos);
+        free(def); free(last); free(free_from); free(slot_at);
+        free(slot_sz); free(labpos);
     }
+    F->scratch_at = off;
     off += fn->scratch_bytes;
+    /* A function returning a composite in memory is handed the address to
+     * write it to, and must still have it at the return -- which may be many
+     * calls later, and r24:r25 survives none of them. It lives on the
+     * frame. */
+    F->sret_slot = -1;
+    if (fn_sret_bytes(fn)) {
+        F->sret_slot = off;
+        off += 2;
+    }
     F->frame = off - 1;
 }
 
@@ -532,13 +677,97 @@ static void st_slot(struct a_fn *F, long off, int r, int n)
         avr_st(F->t, p, r + k, AVR_PTR_POST_INC);
 }
 
-/* A vreg, whole: four bytes in and out of its slot. */
+/* A vreg, whole. Four bytes for an ordinary value; an eight-byte one does
+ * NOT come through here -- both scratch banks together are eight registers,
+ * so an eight-byte binary operation could not hold its two operands. Those
+ * go through the byte-at-a-time chain below instead. */
+/* A slot access that PRESERVES the flags.
+ *
+ * The far path computes its walker with subi/sbci, which clobber SREG -- and
+ * a carry chain has memory traffic between the instruction that sets the
+ * carry and the one that consumes it. So a chain must use these, or its
+ * carry is destroyed the first time the frame grows past ldd's six-bit
+ * reach. That is not hypothetical: it made __muldi3's `y >>= 1` produce
+ * garbage, so the loop never terminated, and only in functions whose frame
+ * was large enough -- which is every function that calls it.
+ *
+ * SREG goes through r0, which the chains never use for a value. The two
+ * instructions are paid only on the far path; a near access is a bare ldd
+ * and touches nothing. */
+static int slot_is_far(long off, int n)
+{
+    return !(off >= 0 && off + n <= 64);
+}
+
+static void ld_slot_cc(struct a_fn *F, int r, long off, int n)
+{
+    int far = slot_is_far(off, n);
+    if (far) { avr_in(F->t, R_TMP, IO_SREG); }
+    ld_slot(F, r, off, n);
+    if (far) { avr_out(F->t, IO_SREG, R_TMP); }
+}
+
+static void st_slot_cc(struct a_fn *F, long off, int r, int n)
+{
+    int far = slot_is_far(off, n);
+    if (far) { avr_in(F->t, R_TMP, IO_SREG); }
+    st_slot(F, off, r, n);
+    if (far) { avr_out(F->t, IO_SREG, R_TMP); }
+}
+
 static void rd4(struct a_fn *F, int v, int r) { ld_slot(F, r, F->slot[v], VW); }
 
 static void wr4(struct a_fn *F, int v, int r)
 {
     if (v >= 0 && F->slot[v] >= 0)
         st_slot(F, F->slot[v], r, VW);
+}
+
+static void ldi4(struct a_fn *F, int r, unsigned long v, int n);
+
+/* ---- values wider than the scratch banks ------------------------------
+ *
+ * An eight-byte value cannot be held in registers here: A and B are four
+ * each, and a binary operation needs both operands at once. So it is
+ * processed a BYTE AT A TIME, straight out of one slot and into another.
+ *
+ * That works because `ldd` and `std` do NOT affect SREG on this machine.
+ * The carry from byte k survives the two loads and the store that byte k+1
+ * needs, so an eight-byte add is eight `adc`s with memory traffic between
+ * them and no spill. It is the same reason an eight-byte shift can be eight
+ * `rol`s: the carry is the only state that has to live across the loads.
+ *
+ * Slower than a register-resident chain and correct at any width, which is
+ * the right trade on a machine with 32 registers and none to spare.
+ */
+static void wide_bin(struct a_fn *F, const struct ir_ins *i, int n,
+                     enum avr_rr first, enum avr_rr rest)
+{
+    long sa = F->slot[i->a], sd = F->slot[i->dst];
+    long sb = i->imm_b ? -1 : F->slot[i->b];
+    for (int k = 0; k < n; k++) {
+        ld_slot_cc(F, RA, sa + k, 1);
+        if (i->imm_b)
+            ldi4(F, RB, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
+        else
+            ld_slot_cc(F, RB, sb + k, 1);
+        avr_rr(F->t, k ? rest : first, RA, RB);
+        if (sd >= 0)
+            st_slot_cc(F, sd + k, RA, 1);
+    }
+}
+
+/* The same shape for a one-operand chain: com, or a shift step. */
+static void wide_un(struct a_fn *F, long sa, long sd, int n,
+                    enum avr_r1 op, int down)
+{
+    for (int j = 0; j < n; j++) {
+        int k = down ? n - 1 - j : j;
+        ld_slot_cc(F, RA, sa + k, 1);
+        avr_r1(F->t, op, RA);
+        if (sd >= 0)
+            st_slot_cc(F, sd + k, RA, 1);
+    }
 }
 
 /* ---- extension ------------------------------------------------------
@@ -590,7 +819,7 @@ static void ldi4(struct a_fn *F, int r, unsigned long v, int n)
 
 /* ---- labels and branches --------------------------------------------- */
 
-static void want_label(struct a_fn *F, int at, int label)
+static void want_label(struct a_fn *F, int at, int label, int wide)
 {
     if (F->nfix == F->capfix) {
         F->capfix = F->capfix ? F->capfix * 2 : 16;
@@ -598,12 +827,33 @@ static void want_label(struct a_fn *F, int at, int label)
     }
     F->fix[F->nfix].at = at;
     F->fix[F->nfix].label = label;
+    F->fix[F->nfix].wide = wide;
     F->nfix++;
 }
 
+/* An unconditional jump to a label.
+ *
+ * Backward and in reach: `rjmp`, two bytes. Otherwise a 32-bit `jmp` whose
+ * absolute address the linker fills in. The choice has to be made HERE and
+ * not at patch time, because the two are different sizes -- and a forward
+ * jump's distance is not known yet, so it takes the long form. At -O0 a
+ * single 64-bit statement is hundreds of instructions, so a loop's back edge
+ * really does leave rjmp's +-4 KB; before this, that displacement was masked
+ * to twelve bits and a back edge 2300 words behind became a forward jump
+ * 1866 words ahead, into empty flash. */
 static void jump_to(struct a_fn *F, int label)
 {
-    want_label(F, avr_rjmp(F->t, 0), label);
+    long here = F->t->len;
+    int known = label <= F->fn->nlabels && F->label_off[label] >= 0;
+    if (known) {
+        long d = (F->label_off[label] - (here + 2)) / 2;
+        if (d >= -2048 && d <= 2047) {
+            want_label(F, avr_rjmp(F->t, 0), label, 0);
+            return;
+        }
+    }
+    want_label(F, F->t->len, label, 1);
+    avr_jmp(F->t, 0);
 }
 
 /* A conditional branch to a label is always an INVERTED skip over an
@@ -618,8 +868,15 @@ static void jump_to(struct a_fn *F, int label)
  */
 static void jump_if(struct a_fn *F, enum avr_cond cond, int label)
 {
+    /* The inverted branch skips the jump, whose size depends on how far the
+     * target is -- so the skip is over one word or two. */
+    long at = F->t->len;
+    int before;
     avr_br(F->t, (enum avr_cond)(cond ^ 1), 1);
+    before = F->t->len;
     jump_to(F, label);
+    if (F->t->len - before != 2)
+        avr_patch_br(F->t, (int)at, (int)((F->t->len - (at + 2)) / 2));
 }
 
 /* ---- call sites ------------------------------------------------------ */
@@ -876,17 +1133,21 @@ static void shift_imm(struct a_fn *F, int r, int op, int sign, long n)
  */
 static void shift_var(struct a_fn *F, int r, int cnt, int op, int sign)
 {
-    int top, back;
-    avr_rr(F->t, AVR_MOV, R_TMP, cnt);
+    int top, back, exitj;
+    /* The count is decremented WHERE IT IS, not copied into r0: r0 is where a
+     * far slot access saves SREG, so a counter there does not survive a chain
+     * that touches memory. Nothing needs the original count afterwards. */
     top = F->t->len;
-    avr_r1(F->t, AVR_DEC, R_TMP);
-    {
-        int br = avr_br(F->t, AVR_BR_MI, 0);
-        shift1(F, r, op, sign);
-        back = avr_rjmp(F->t, 0);
-        avr_patch_rjmp(F->t, back, (top - (back + 2)) / 2);
-        avr_patch_br(F->t, br, (F->t->len - (br + 2)) / 2);
-    }
+    avr_r1(F->t, AVR_DEC, cnt);
+    /* Inverted, over an rjmp: a conditional branch reaches +-128 bytes and
+     * nothing should depend on a loop body staying inside that. The wide
+     * version of this loop really did outgrow it. */
+    avr_br(F->t, AVR_BR_PL, 1);
+    exitj = avr_rjmp(F->t, 0);
+    shift1(F, r, op, sign);
+    back = avr_rjmp(F->t, 0);
+    avr_patch_rjmp(F->t, back, (top - (back + 2)) / 2);
+    avr_patch_rjmp(F->t, exitj, (F->t->len - (exitj + 2)) / 2);
 }
 
 /* ---- the instruction dispatch ---------------------------------------- */
@@ -905,11 +1166,9 @@ static void gen_ins(struct a_fn *F, int n)
                  "floating point: on AVR a float and a double are both "
                  "four-byte IEEE single and every operation on them is a "
                  "soft-float call this target has no runtime for");
-    if (i->w == 8)
-        a_refuse(fn, i,
-                 "a 64-bit integer: it needs eight consecutive registers "
-                 "and a carry chain twice as long as the four-byte one, "
-                 "which belongs in a legalisation pass");
+    /* Eight-byte values are handled per operation below, through the
+     * byte-at-a-time chain rather than in registers. The ones that have no
+     * such path say so where they are. */
     if (i->w == 16)
         a_refuse(fn, i, "a 128-bit value");
     /* A memory access's width is `size`, not `w`, and the four that use it
@@ -918,14 +1177,335 @@ static void gen_ins(struct a_fn *F, int n)
      * refusal above catches the ordinary `long long`, but nothing states
      * that size cannot exceed w -- and every construct that would reach
      * here is refused for some other reason today, so no test would
-     * notice if one stopped being. Say it instead of relying on that. */
-    if (i->size > VW &&
+     * notice if one stopped being. Say it instead of relying on that.
+     *
+     * w == 8 is exempt: those go through the byte-at-a-time chain, which
+     * never puts more than one byte in a register at a time. */
+    if (i->size > VW && !wide_ins(F, i) &&
         (i->op == IR_LDVAR || i->op == IR_STVAR ||
          i->op == IR_LOAD  || i->op == IR_STORE || i->op == IR_EXT))
         a_refuse(fn, i,
                  "a memory access wider than four bytes: the value would "
                  "need eight consecutive registers and this backend's "
                  "second scratch bank is already one of them");
+
+    /* ---- eight bytes: byte at a time, through memory ------------------ */
+    if (wide_ins(F, i)) {
+        int n = 8;
+        switch (i->op) {
+        case IR_CONST:
+            for (int k = 0; k < n; k++) {
+                ldi4(F, RA, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
+                st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            return;
+        case IR_MOV:
+            for (int k = 0; k < n; k++) {
+                ld_slot_cc(F, RA, F->slot[i->a] + k, 1);
+                st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            return;
+        case IR_ADD: wide_bin(F, i, n, AVR_ADD, AVR_ADC); return;
+        case IR_SUB: wide_bin(F, i, n, AVR_SUB, AVR_SBC); return;
+        case IR_AND: wide_bin(F, i, n, AVR_AND, AVR_AND); return;
+        case IR_OR:  wide_bin(F, i, n, AVR_OR,  AVR_OR);  return;
+        case IR_XOR: wide_bin(F, i, n, AVR_EOR, AVR_EOR); return;
+        case IR_BNOT:
+            wide_un(F, F->slot[i->a], F->slot[i->dst], n, AVR_COM, 0);
+            return;
+        case IR_NEG:
+            /* 0 - a, the same answer as at four bytes: the zero is an
+             * immediate per byte, so this is one chain and not two. */
+            for (int k = 0; k < n; k++) {
+                avr_rr(t, AVR_MOV, RA, R_ZERO);
+                ld_slot_cc(F, RB, F->slot[i->a] + k, 1);
+                avr_rr(t, k ? AVR_SBC : AVR_SUB, RA, RB);
+                st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            return;
+        case IR_EXT: {
+            /* Widen the low `size` bytes into eight. */
+            int from = i->size < 1 ? 1 : i->size;
+            if (from > n) from = n;
+            for (int k = 0; k < from; k++) {
+                ld_slot_cc(F, RA, F->slot[i->a] + k, 1);
+                st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            if (from < n) {
+                /* The fill byte: zero, or the sign of the top valid byte. */
+                if (i->sign) {
+                    ld_slot_cc(F, RA, F->slot[i->a] + from - 1, 1);
+                    avr_rr(t, AVR_ADD, RA, RA);      /* lsl: MSB -> carry */
+                    avr_rr(t, AVR_SBC, RA, RA);      /* 0 - carry */
+                } else {
+                    avr_rr(t, AVR_MOV, RA, R_ZERO);
+                }
+                for (int k = from; k < n; k++)
+                    st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            return;
+        }
+        case IR_LDVAR: {
+            int from = i->size < 1 ? 1 : i->size;
+            if (from > n) from = n;
+            for (int k = 0; k < from; k++) {
+                ld_slot_cc(F, RA, F->slot[i->a] + k, 1);
+                st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            if (from < n) {
+                if (i->sign) {
+                    ld_slot_cc(F, RA, F->slot[i->a] + from - 1, 1);
+                    avr_rr(t, AVR_ADD, RA, RA);
+                    avr_rr(t, AVR_SBC, RA, RA);
+                } else {
+                    avr_rr(t, AVR_MOV, RA, R_ZERO);
+                }
+                for (int k = from; k < n; k++)
+                    st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            return;
+        }
+        case IR_STVAR: {
+            int to = i->size < 1 ? 1 : i->size;
+            if (to > n) to = n;
+            for (int k = 0; k < to; k++) {
+                ld_slot_cc(F, RA, F->slot[i->a] + k, 1);
+                st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            return;
+        }
+        /* The address lives in X, and that is the whole point.
+         *
+         * A slot the frame pointer cannot reach builds a WALKER, and
+         * walk_ptr's answer for a byte in the A bank is Z -- so an address
+         * held in Z is destroyed by the very next far slot access. With an
+         * eight-byte value the first three bytes came from near slots and
+         * worked, and the fourth built its walker in Z and wrote the
+         * remaining five through a clobbered pointer: __umoddi3 returned
+         * 0x24ffff0697000000 where 4 was wanted.
+         *
+         * X is never a walker for these. It has no DISPLACED form either,
+         * which costs nothing: the bytes are consecutive, so the run walks it
+         * with post-increment. */
+        case IR_LOAD: {
+            int from = i->size < 1 ? 1 : i->size;
+            if (from > n) from = n;
+            ld_slot(F, RB, F->slot[i->a], 2);
+            avr_movw(t, AVR_X, RB);
+            for (int k = 0; k < from; k++) {
+                avr_ld(t, RA, AVR_X, AVR_PTR_POST_INC);
+                st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            if (from < n) {
+                if (i->sign) {
+                    /* X has walked past the value, so the sign byte is read
+                     * back from the slot just written. */
+                    ld_slot(F, RA, F->slot[i->dst] + from - 1, 1);
+                    avr_rr(t, AVR_ADD, RA, RA);
+                    avr_rr(t, AVR_SBC, RA, RA);
+                } else {
+                    avr_rr(t, AVR_MOV, RA, R_ZERO);
+                }
+                for (int k = from; k < n; k++)
+                    st_slot_cc(F, F->slot[i->dst] + k, RA, 1);
+            }
+            return;
+        }
+        case IR_STORE: {
+            int to = i->size < 1 ? 1 : i->size;
+            if (to > n) to = n;
+            ld_slot(F, RB, F->slot[i->a], 2);
+            avr_movw(t, AVR_X, RB);
+            for (int k = 0; k < to; k++) {
+                ld_slot(F, RA, F->slot[i->b] + k, 1);
+                avr_st(t, AVR_X, RA, AVR_PTR_POST_INC);
+            }
+            return;
+        }
+        case IR_SHL: case IR_SHR: {
+            /* One bit at a time across all eight bytes, and the carry is
+             * what carries the bit between them -- which survives the load
+             * and store of the next byte because neither touches SREG.
+             *
+             * A constant count runs the chain that many times; a variable
+             * one wraps it in the same count-down loop the four-byte path
+             * uses. Left shifts walk UP from the low byte and right shifts
+             * DOWN from the high one. */
+            long k;
+            long sd = F->slot[i->dst], sa = F->slot[i->a];
+            int var = !const_b(F, i, &k);
+            if (sa != sd)
+                for (int b = 0; b < n; b++) {
+                    ld_slot_cc(F, RA, sa + b, 1);
+                    st_slot_cc(F, sd + b, RA, 1);
+                }
+            if (!var && k >= 8 * n)
+                k = i->op == IR_SHR && i->sign ? 8 * n - 1 : 8 * n;
+            if (var) {
+                int top, exitj;
+                /* The counter stays in RB, NOT in r0. r0 is where a far slot
+                 * access saves SREG, and the chain below is full of them --
+                 * so a counter there is destroyed on the first iteration
+                 * whose frame needs the far path. It shifted by seven bytes
+                 * whatever the count said. RB is untouched by the chain,
+                 * which only ever uses RA. */
+                rd4(F, i->b, RB);
+                top = t->len;
+                avr_r1(t, AVR_DEC, RB);
+                /* An INVERTED branch over an rjmp, not a branch to the exit.
+                 * A conditional branch reaches +-128 bytes and the chain
+                 * below is eight bytes' worth of load/shift/store -- more
+                 * than that as soon as a slot needs the far path. Written the
+                 * direct way, the exit branch's displacement overflowed its
+                 * seven-bit field and (before avr_patch_br checked) wrapped
+                 * into a jump inside the loop's own body. */
+                avr_br(t, AVR_BR_PL, 1);
+                exitj = avr_rjmp(t, 0);
+                /* The first byte sets the carry from nothing: lsl for a left
+                 * shift, asr/lsr for a right one, then rol/ror for the rest. */
+                if (i->op == IR_SHL) {
+                    ld_slot_cc(F, RA, sd, 1);
+                    avr_rr(t, AVR_ADD, RA, RA);
+                    st_slot_cc(F, sd, RA, 1);
+                    for (int b = 1; b < n; b++) {
+                        ld_slot_cc(F, RA, sd + b, 1);
+                        avr_rr(t, AVR_ADC, RA, RA);
+                        st_slot_cc(F, sd + b, RA, 1);
+                    }
+                } else {
+                    ld_slot_cc(F, RA, sd + n - 1, 1);
+                    avr_r1(t, i->sign ? AVR_ASR : AVR_LSR, RA);
+                    st_slot_cc(F, sd + n - 1, RA, 1);
+                    for (int b = n - 2; b >= 0; b--) {
+                        ld_slot_cc(F, RA, sd + b, 1);
+                        avr_r1(t, AVR_ROR, RA);
+                        st_slot_cc(F, sd + b, RA, 1);
+                    }
+                }
+                {
+                    int back = avr_rjmp(t, 0);
+                    avr_patch_rjmp(t, back, (top - (back + 2)) / 2);
+                    avr_patch_rjmp(t, exitj,
+                                   (int)((t->len - (exitj + 2)) / 2));
+                }
+                return;
+            }
+            for (long q = 0; q < k; q++) {
+                if (i->op == IR_SHL) {
+                    ld_slot_cc(F, RA, sd, 1);
+                    avr_rr(t, AVR_ADD, RA, RA);
+                    st_slot_cc(F, sd, RA, 1);
+                    for (int b = 1; b < n; b++) {
+                        ld_slot_cc(F, RA, sd + b, 1);
+                        avr_rr(t, AVR_ADC, RA, RA);
+                        st_slot_cc(F, sd + b, RA, 1);
+                    }
+                } else {
+                    ld_slot_cc(F, RA, sd + n - 1, 1);
+                    avr_r1(t, i->sign ? AVR_ASR : AVR_LSR, RA);
+                    st_slot_cc(F, sd + n - 1, RA, 1);
+                    for (int b = n - 2; b >= 0; b--) {
+                        ld_slot_cc(F, RA, sd + b, 1);
+                        avr_r1(t, AVR_ROR, RA);
+                        st_slot_cc(F, sd + b, RA, 1);
+                    }
+                }
+            }
+            return;
+        }
+        case IR_MUL: case IR_DIV: case IR_MOD: {
+            /* Eight-byte multiply and divide are runtime calls, as the
+             * four-byte ones are. libgcc's names for this width. */
+            const char *nm = i->op == IR_MUL ? "__muldi3"
+                           : i->op == IR_DIV ? (i->sign ? "__divdi3"
+                                                        : "__udivdi3")
+                           :                   (i->sign ? "__moddi3"
+                                                        : "__umoddi3");
+            struct argplace pl;
+            int cursor = ARG_TOP;
+            long stk = 0;
+            int a_reg, b_reg;
+            place_arg(8, &cursor, &stk, &pl); a_reg = pl.reg;
+            place_arg(8, &cursor, &stk, &pl); b_reg = pl.reg;
+            if (!pl.nreg)
+                a_refuse(fn, i,
+                         "a 64-bit multiply or divide: its two arguments do "
+                         "not both fit in the argument registers, so the "
+                         "helper would need a stack argument this path does "
+                         "not place");
+            ld_slot(F, a_reg, F->slot[i->a], 8);
+            if (i->imm_b)
+                for (int k = 0; k < 8; k++)
+                    ldi4(F, b_reg + k,
+                         (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
+            else
+                ld_slot(F, b_reg, F->slot[i->b], 8);
+            call_helper(F, nm);
+            /* The result comes back in the first argument's registers. */
+            st_slot(F, F->slot[i->dst], ret_reg(8), 8);
+            return;
+        }
+        case IR_CMP: {
+            /* cp then seven cpc, through memory: the carry and zero flags
+             * survive the loads, so the whole 64-bit subtraction's result is
+             * in SREG by the last byte. */
+            int swap;
+            enum avr_cond c = cond_for(i->pred, i->sign, &swap);
+            long sl = swap ? (i->imm_b ? -1 : F->slot[i->b]) : F->slot[i->a];
+            long sr = swap ? F->slot[i->a] : (i->imm_b ? -1 : F->slot[i->b]);
+            for (int k = 0; k < n; k++) {
+                if (sl < 0)
+                    ldi4(F, RA, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
+                else
+                    ld_slot_cc(F, RA, sl + k, 1);
+                if (sr < 0)
+                    ldi4(F, RB, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
+                else
+                    ld_slot_cc(F, RB, sr + k, 1);
+                avr_rr(t, k ? AVR_CPC : AVR_CP, RA, RB);
+            }
+            /* The result is four bytes wide even though the comparison was
+             * eight -- an IR_CMP yields a 0 or a 1. */
+            avr_ri(t, AVR_LDI, RA, 1);
+            avr_br(t, c, 1);
+            avr_rr(t, AVR_MOV, RA, R_ZERO);
+            for (int k = 1; k < VW; k++) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
+            wr4(F, i->dst, RA);
+            return;
+        }
+        case IR_BRZ: case IR_BRNZ:
+            /* PLAIN ld_slot here, not the flag-preserving one, for two
+             * reasons that point the same way. It is not needed: this chain
+             * BUILDS the flags rather than carrying them, and the last thing
+             * before the branch is an `or`. And it is harmful: the
+             * flag-preserving path saves SREG through r0, which is this
+             * chain's accumulator -- so on a frame large enough for the far
+             * path it destroyed the accumulated value, and `while (y)` in
+             * __muldi3 read garbage. */
+            avr_rr(t, AVR_MOV, R_TMP, R_ZERO);
+            for (int k = 0; k < n; k++) {
+                ld_slot(F, RA, F->slot[i->a] + k, 1);
+                avr_rr(t, AVR_OR, R_TMP, RA);
+            }
+            jump_if(F, i->op == IR_BRZ ? AVR_BR_EQ : AVR_BR_NE, i->label);
+            return;
+
+        /* These do not care how wide the value is, or handle it themselves:
+         * a call places its arguments and takes its result by SIZE, an
+         * address is two bytes whatever it points at, and control flow has
+         * no operand width at all. They fall through to the ordinary
+         * switch. */
+        case IR_CALL: case IR_RET: case IR_LABEL: case IR_JMP:
+        case IR_MEMCPY: case IR_MEMZERO: case IR_FENCE: case IR_UD2:
+        case IR_ASM: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
+        case IR_FADDR:
+            break;
+
+        default:
+            /* Anything else at eight bytes has no path yet, and says so. */
+            a_refuse(fn, i, "this operation at 64 bits");
+        }
+    }
 
     switch (i->op) {
     case IR_CONST:
@@ -1121,6 +1701,9 @@ static void gen_ins(struct a_fn *F, int n)
     }
 
     case IR_BRZ: case IR_BRNZ:
+        /* r0 is the accumulator, so every access here must be one that does
+         * NOT save SREG through it -- rd4 is, and the wide path above says
+         * why that matters. */
         rd4(F, i->a, RA);
         avr_rr(t, AVR_MOV, R_TMP, RA);
         for (int k = 1; k < VW; k++) avr_rr(t, AVR_OR, R_TMP, RA + k);
@@ -1210,10 +1793,41 @@ static void gen_ins(struct a_fn *F, int n)
         return;
 
     case IR_RET:
+        if (i->a >= 0 && fn->ret_abi.is_struct && fn->ret_abi.size) {
+            /* `a` holds the ADDRESS of the composite being returned. Eight
+             * bytes or fewer come back in registers; anything larger is
+             * copied to the buffer the caller named, whose address must
+             * also be in r24:r25 at the return. */
+            long n = fn->ret_abi.size;
+            /* Both addresses are read into the scratch banks FIRST and moved
+             * across with movw. Loading one straight into Z and the other
+             * into X does not work: each load's far path needs a walker, and
+             * walk_ptr hands out the very pair the other is sitting in. */
+            ld_slot(F, RA, F->slot[i->a], 2);
+            if (F->sret_slot >= 0) {
+                ld_slot(F, RB, F->sret_slot, 2);
+                avr_movw(t, AVR_Z, RA);
+                avr_movw(t, AVR_X, RB);
+                for (long b = 0; b < n; b++) {
+                    avr_ldd(t, R_TMP, AVR_Z, (int)b);
+                    avr_st(t, AVR_X, R_TMP, AVR_PTR_POST_INC);
+                }
+                /* and the pointer itself is the return value */
+                ld_slot(F, ret_reg(2), F->sret_slot, 2);
+            } else {
+                avr_movw(t, AVR_Z, RA);
+                for (long b = 0; b < n; b++)
+                    avr_ldd(t, ret_reg((int)n) + (int)b, AVR_Z, (int)b);
+            }
+            jump_to(F, fn->nlabels);
+            return;
+        }
         if (i->a >= 0) {
             int size = fn->ret_abi.size ? fn->ret_abi.size : 2;
-            if (size > VW)
-                a_refuse(fn, i, "returning a value wider than four bytes");
+            /* Eight bytes is r25:r18 -- the cursor's own answer for a value
+             * of that width, and what libgcc's 64-bit helpers return in. */
+            if (size > 8)
+                a_refuse(fn, i, "returning a value wider than eight bytes");
             ld_slot(F, ret_reg(size), F->slot[i->a], size);
         }
         jump_to(F, fn->nlabels);             /* the epilogue */
@@ -1221,17 +1835,12 @@ static void gen_ins(struct a_fn *F, int n)
 
     case IR_CALL: {
         struct argplace pl;
-        int cursor = ARG_TOP;
+        int cursor = i->call_varargs ? -1 : ARG_TOP;
         long stk = 0;
         int k;
 
-        if (i->sret_first || i->rety)
-            a_refuse(fn, i, "a call returning a struct by value");
-        if (i->call_varargs)
-            a_refuse(fn, i, "a variadic call");
-        for (k = 0; k < i->nargs; k++)
-            if (i->argv[k].is_struct)
-                a_refuse(fn, i, "passing a struct by value");
+
+
 
         /* Stack arguments FIRST, while the argument registers are still
          * free to carry them: each is read out of its slot into A and
@@ -1242,19 +1851,48 @@ static void gen_ins(struct a_fn *F, int n)
             place_arg(i->argv[k].size, &cursor, &stk, &pl);
             if (!pl.nstk)
                 continue;
-            rd4(F, i->argv[k].vreg, RA);
-            st_slot(F, 1 + pl.stk, RA, pl.nstk);
+            if (i->argv[k].is_struct) {
+                /* The vreg holds the struct's ADDRESS; the bytes are what
+                 * travels. Copied one at a time through r0 so that no
+                 * argument register is disturbed. */
+                ld_slot(F, AVR_Z, F->slot[i->argv[k].vreg], 2);
+                for (int b = 0; b < pl.nstk; b++) {
+                    avr_ldd(t, R_TMP, AVR_Z, b);
+                    st_slot(F, 1 + pl.stk + b, R_TMP, 1);
+                }
+            } else {
+                int n = vw(F, i->argv[k].vreg);
+                ld_slot(F, RA, F->slot[i->argv[k].vreg],
+                        pl.nstk < n ? pl.nstk : n);
+                st_slot(F, 1 + pl.stk, RA, pl.nstk);
+            }
         }
         /* Then the register ones. In any order: `ldd rN, Y+q` touches rN
          * and Y alone, so no argument can tread on another and there is
          * no parallel move here at all. */
-        cursor = ARG_TOP; stk = 0;
+        cursor = i->call_varargs ? -1 : ARG_TOP; stk = 0;
         for (k = 0; k < i->nargs; k++) {
             place_arg(i->argv[k].size, &cursor, &stk, &pl);
-            if (pl.nreg)
+            if (!pl.nreg)
+                continue;
+            if (i->argv[k].is_struct) {
+                /* A struct in registers is just its bytes, one per
+                 * register -- no partial-word assembly, because a register
+                 * here IS a byte. */
+                ld_slot(F, AVR_Z, F->slot[i->argv[k].vreg], 2);
+                for (int b = 0; b < pl.nreg; b++)
+                    avr_ldd(t, pl.reg + b, AVR_Z, b);
+            } else {
                 ld_slot(F, pl.reg, F->slot[i->argv[k].vreg], pl.nreg);
+            }
         }
 
+        /* The hidden result pointer goes in LAST, so nothing above can have
+         * used its register as a scratch after it was set. */
+        if (sret_bytes(i->retsize)) {
+            avr_movw(t, ret_reg(2), AVR_Y);
+            add_const16(F, ret_reg(2), F->scratch_at + i->scratch);
+        }
         if (i->indirect) {
             /* Z holds a WORD address here, which is what icall wants and
              * what IR_FADDR put in the pointer. */
@@ -1265,11 +1903,32 @@ static void gen_ins(struct a_fn *F, int n)
             avr_call(t, 0);
         }
 
+        if (i->dst >= 0 && i->retsize) {
+            /* dst receives the scratch's ADDRESS, which is the contract
+             * irgen shares with every backend -- not the composite itself.
+             * A composite of eight bytes or fewer came back in registers and
+             * has to be stored there first; a larger one the callee already
+             * wrote through the pointer handed to it above. */
+            if (!sret_bytes(i->retsize))
+                st_slot(F, F->scratch_at + i->scratch, ret_reg(i->retsize),
+                        i->retsize);
+            avr_movw(t, RA, AVR_Y);
+            add_const16(F, RA, F->scratch_at + i->scratch);
+            extend(F, RA, 2, 0, VW);
+            wr4(F, i->dst, RA);
+            return;
+        }
         if (i->dst >= 0 && i->ret_tybytes) {
             int size = i->ret_tybytes;
-            if (size > VW)
+            if (size > 8)
                 a_refuse(fn, i, "a call returning a value wider than "
-                                "four bytes");
+                                "eight bytes");
+            if (size > VW) {
+                /* Eight bytes: straight from the return registers into the
+                 * slot, with no extension to do -- the value fills it. */
+                st_slot(F, F->slot[i->dst], ret_reg(size), size);
+                return;
+            }
             /* The CALLER extends. The ABI leaves everything above the
              * return value's own bytes undefined -- r25 after a
              * char-returning call is not zero and not the sign -- and the
@@ -1402,6 +2061,25 @@ static void gen_ins(struct a_fn *F, int n)
         return;
     }
 
+    case IR_VA_START: {
+        /* The list is a two-byte pointer at the first argument past the
+         * named ones. Everything a variadic call passes is on the stack and
+         * packed, so that address is the incoming area plus the named
+         * parameters' own bytes -- there is no register-save area to skip. */
+        struct argplace pl;
+        int cursor = -1;
+        long stk = 0;
+        for (int k = 0; k < fn->nparams; k++)
+            place_arg(fn->param_abi[k].size, &cursor, &stk, &pl);
+        avr_movw(t, RA, AVR_Y);
+        add_const16(F, RA, F->frame + INCOMING_AT + stk);
+        /* `a` holds the ADDRESS of the va_list object. */
+        ld_slot(F, AVR_Z, F->slot[i->a], 2);
+        avr_std(t, AVR_Z, 0, RA);
+        avr_std(t, AVR_Z, 1, RA + 1);
+        return;
+    }
+
     case IR_FENCE:
         /* Nothing. An ATmega has one core, no store buffer and no cache:
          * every access is already ordered with respect to every other, so
@@ -1519,12 +2197,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
     F.want_debug = want_debug;
-    if (fn->is_varargs)
-        a_refuse(fn, NULL, "a variadic function");
+
     if (fn->has_alloca)
         a_refuse(fn, NULL, "a variable-length array");
     if (fn->neh)
         a_refuse(fn, NULL, "an exception region");
+    /* The width map BEFORE layout: a slot's size depends on it. */
+    F.wide = avr_wide_map(fn);
     layout(&F);
     const_map(&F);
 
@@ -1581,18 +2260,38 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
      * arguments are r8-r25. */
     {
         struct argplace pl;
-        int cursor = ARG_TOP;
+        /* A variadic function's parameters are ALL on the stack, the named
+         * ones too -- so the placement it must undo is the variadic one. */
+        int cursor = fn->is_varargs ? -1 : ARG_TOP;
         long stk = 0;
+        /* A function returning a composite in memory receives the buffer's
+         * address as an implicit FIRST argument, so the real ones start one
+         * slot along. */
+        if (F.sret_slot >= 0) {
+            struct argplace p0;
+            place_arg(2, &cursor, &stk, &p0);
+            if (p0.nreg)
+                st_slot(&F, F.sret_slot, p0.reg, 2);
+            else
+                a_refuse(fn, NULL,
+                         "a composite result whose hidden pointer did not "
+                         "fit in a register");
+        }
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
-            if (a->is_struct)
-                a_refuse(fn, NULL, "a struct parameter passed by value");
             place_arg(a->size, &cursor, &stk, &pl);
             if (pl.nreg) {
                 st_slot(&F, F.slot[a->vreg], pl.reg, pl.nreg);
-            } else {
+            } else if (pl.nstk <= VW) {
                 ld_slot(&F, RA, F.frame + INCOMING_AT + pl.stk, pl.nstk);
                 st_slot(&F, F.slot[a->vreg], RA, pl.nstk);
+            } else {
+                /* Wider than a scratch bank -- a struct, or a long long:
+                 * byte at a time, which needs no run of registers. */
+                for (int b = 0; b < pl.nstk; b++) {
+                    ld_slot(&F, R_TMP, F.frame + INCOMING_AT + pl.stk + b, 1);
+                    st_slot(&F, F.slot[a->vreg] + b, R_TMP, 1);
+                }
             }
         }
     }
@@ -1619,7 +2318,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         int to = F.label_off[F.fix[i].label];
         if (to < 0)
             a_refuse(fn, NULL, "a jump to a label that was never placed");
-        avr_patch_rjmp(t, at, (to - (at + 2)) / 2);
+        if (F.fix[i].wide) {
+            /* A 32-bit `jmp`, whose operand is an ABSOLUTE word address that
+             * only the linker knows: the site is relocated against this
+             * .text with the label's offset as the addend. */
+            note_str(F.st, at, to, RK_AVR_TEXT_CALL);
+        } else {
+            avr_patch_rjmp(t, at, (to - (at + 2)) / 2);
+        }
     }
 
     /* -fstack-usage. Worth more on this target than on any other: the
@@ -1634,6 +2340,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     free(F.fix);
     free(F.cval);
     free(F.cknown);
+    free(F.wide);
 }
 
 void codegen_unit_avr(struct ir_unit *iu, struct code *text,

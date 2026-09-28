@@ -342,6 +342,13 @@ enum reloc_kind {
     RK_AVR_HI8_LDI,     /* ldi: bits 15:8 of a data address */
     RK_AVR_LO8_LDI_GS,  /* ldi: bits 7:0 of a FUNCTION's word address */
     RK_AVR_HI8_LDI_GS,  /* ldi: bits 15:8 of a function's word address */
+    /* A label inside this object's own .text, for a jump too far for rjmp.
+     * AVR has no PC-relative long jump: `jmp` carries an ABSOLUTE word
+     * address, which a relocatable object cannot know. So the site is
+     * relocated against the .text section symbol with the label's offset as
+     * the addend -- the same shape RISC-V's PCREL_LO12 uses, and the reason
+     * a 12-bit rjmp is not the whole story on a 32 KB part. */
+    RK_AVR_TEXT_CALL,
     RK_AVR_ABS16,       /* a 16-bit data pointer in .data */
     RK_AVR_ABS16_PM,    /* a 16-bit FUNCTION pointer in .data (word) */
     /* A call is `auipc ra, 0` + `jalr ra`, and ONE relocation at the

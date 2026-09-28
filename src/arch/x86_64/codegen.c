@@ -501,8 +501,15 @@ char *cg_wide_vregs(struct ir_func *fn)
  * Nothing faulted and every address was inside .rodata. */
 void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n)
 {
-    for (int k = 0; k < n; k++)
+    for (int k = 0; k < n; k++) {
+        /* RK_AVR_TEXT_CALL names a label in .text and its str_off is ALREADY
+         * an offset -- a jump too far for AVR's 12-bit rjmp, relocated
+         * against the section symbol. Everything else here is a string index
+         * into the unit's pool. */
+        if (s[k].kind == RK_AVR_TEXT_CALL)
+            continue;
         s[k].str_off = iu->strs[s[k].str_off].off;
+    }
 }
 
 char *cg_float_vregs(struct ir_func *fn)

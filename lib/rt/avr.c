@@ -43,6 +43,14 @@
  *
  * Measured from clang -target avr, not recalled: see the commit that
  * added this file.
+ *
+ * The SIXTY-FOUR-bit helpers are in lib/rt/avr64.c, not here, and the split
+ * is not tidiness: a runtime library is one routine per object precisely so
+ * that a program pays only for what it calls. With both in one file an
+ * ATmega328P program that never writes `long long` still carried
+ * __muldi3, __udivdi3 and their friends -- and at -O0 that pushed
+ * tests/golden/avr-exec's image to 34718 bytes on a part with 32768. The
+ * symptom was `CALL 0x8770`, a call past the end of flash.
  */
 
 /* This file is AVR's alone. lib/rt is built by a wildcard, so it has to
