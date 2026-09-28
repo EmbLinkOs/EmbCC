@@ -12,7 +12,8 @@
 # r4-r11, calls an EmbCC function, and reports which came back changed,
 # for functions shaped to use every scratch path: a leaf, an argument
 # cycle, 64-bit arithmetic, a frame past every short offset, values
-# living across calls, a switch, division and soft floating point.
+# living across calls, a switch, division, soft floating point and a
+# variable-length array (whose frame base is r7).
 set -u
 echo "TEST-MARKER thumb-calleesave"
 . "$(dirname "$0")/../lib.sh"

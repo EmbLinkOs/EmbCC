@@ -52,3 +52,11 @@ u32 flt(u32 a, u32 b, u32 c, u32 d)
     float y = (float)d * 1.25f - (float)a;
     return (u32)(x * 1000.0) + (u32)(y > 0 ? y : -y);
 }
+/* a variable-length array: the frame is addressed from r7, which must
+ * come back as it went in */
+u32 vla(u32 a, u32 b, u32 c, u32 d)
+{
+    u32 v[(a & 7) + 4];
+    for (u32 i = 0; i < (a & 7) + 4; i++) v[i] = i * b + c;
+    return v[(a & 7) + 3] ^ v[0] ^ d ^ (u32)sizeof v;
+}

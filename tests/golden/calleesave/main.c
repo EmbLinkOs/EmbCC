@@ -11,13 +11,14 @@ u32 across(u32, u32, u32, u32);
 u32 sw(u32, u32, u32, u32);
 u32 divs(u32, u32, u32, u32);
 u32 flt(u32, u32, u32, u32);
+u32 vla(u32, u32, u32, u32);
 static void hx(u32 v)
 {
     for (int i = 28; i >= 0; i -= 4)
         writec("0123456789abcdef"[(v >> i) & 15]);
     writec(' ');
 }
-static fn_t fns[] = { leaf, swapper, wide, bigframe, across, sw, divs, flt };
+static fn_t fns[] = { leaf, swapper, wide, bigframe, across, sw, divs, flt, vla };
 int main(void)
 {
     for (unsigned k = 0; k < sizeof fns / sizeof fns[0]; k++)

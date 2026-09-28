@@ -108,6 +108,11 @@ struct rv_fn {
     long byref_at;       /* where the by-reference argument copies go */
     long sret_slot;      /* where the hidden result pointer is kept, or -1 */
     long ra_slot;        /* where the return address is saved */
+    /* The register every frame slot is addressed from: sp, except in a
+     * function with a variable-length array, where sp moves at run time
+     * and s0 holds the frame base (see IR_ALLOCA). */
+    int fb;
+    long out_bytes;      /* the outgoing-argument area, at the live sp */
     long save_at;        /* ... and the allocator's callee-saved ones */
     long va_regsave;     /* a variadic function's a0-a7 spill area, or -1 */
     long va_first;       /* ... and the offset of the first UNNAMED one */
@@ -538,6 +543,7 @@ static void layout(struct rv_fn *F)
 {
     struct ir_func *fn = F->fn;
     long off = outgoing_area(F);
+    F->out_bytes = off;
 
     F->byref_at = off;
     off += byref_area(F);
@@ -655,14 +661,14 @@ static void layout(struct rv_fn *F)
 static int sp_addr(struct rv_fn *F, long off)
 {
     rv_li(F->t, FAR, off, F->xlen);
-    rv_alu(F->t, RV_ADD, FAR, RV_SP, FAR, 0);
+    rv_alu(F->t, RV_ADD, FAR, F->fb, FAR, 0);
     return FAR;
 }
 
 static void ld_sp(struct rv_fn *F, int reg, long off, int size, int sign)
 {
     if (rv_fits(off, 12)) {
-        rv_load(F->t, reg, RV_SP, (int)off, size, sign, F->xlen);
+        rv_load(F->t, reg, F->fb, (int)off, size, sign, F->xlen);
         return;
     }
     rv_load(F->t, reg, sp_addr(F, off), 0, size, sign, F->xlen);
@@ -671,21 +677,35 @@ static void ld_sp(struct rv_fn *F, int reg, long off, int size, int sign)
 static void st_sp(struct rv_fn *F, int reg, long off, int size)
 {
     if (rv_fits(off, 12)) {
-        rv_store(F->t, reg, RV_SP, (int)off, size, F->xlen);
+        rv_store(F->t, reg, F->fb, (int)off, size, F->xlen);
         return;
     }
     rv_store(F->t, reg, sp_addr(F, off), 0, size, F->xlen);
+}
+
+/* A store into the OUTGOING argument area, which is always at the live
+ * sp -- the callee finds its stack arguments at its own entry sp, and
+ * after a VLA that is not the frame base. */
+static void st_out(struct rv_fn *F, int reg, long off, int size)
+{
+    if (rv_fits(off, 12)) {
+        rv_store(F->t, reg, RV_SP, (int)off, size, F->xlen);
+        return;
+    }
+    rv_li(F->t, FAR, off, F->xlen);
+    rv_alu(F->t, RV_ADD, FAR, RV_SP, FAR, 0);
+    rv_store(F->t, reg, FAR, 0, size, F->xlen);
 }
 
 /* sp + off, into `reg`. */
 static void addr_sp(struct rv_fn *F, int reg, long off)
 {
     if (rv_fits(off, 12)) {
-        rv_alu_imm(F->t, RV_ADD, reg, RV_SP, (int)off, 0);
+        rv_alu_imm(F->t, RV_ADD, reg, F->fb, (int)off, 0);
         return;
     }
     rv_li(F->t, reg, off, F->xlen);
-    rv_alu(F->t, RV_ADD, reg, RV_SP, reg, 0);
+    rv_alu(F->t, RV_ADD, reg, F->fb, reg, 0);
 }
 
 /* Does the allocator have this vreg in a register? */
@@ -1472,7 +1492,7 @@ static void gen_call(struct rv_fn *F, int n)
             continue;
         if (pl[k].byref) {
             addr_sp(F, SCR, pl[k].copy);
-            st_sp(F, SCR, pl[k].stk, F->w);
+            st_out(F, SCR, pl[k].stk, F->w);
         } else if (a->is_struct) {
             rd(F, a->vreg, ADDR);
             for (int q = 0; q < pl[k].nstk; q++) {
@@ -1480,13 +1500,13 @@ static void gen_call(struct rv_fn *F, int n)
                 long left = a->size - off;
                 if (left >= F->w) {
                     rv_load(t, SCR, ADDR, (int)off, F->w, 0, F->xlen);
-                    st_sp(F, SCR, pl[k].stk + (long)q * F->w, F->w);
+                    st_out(F, SCR, pl[k].stk + (long)q * F->w, F->w);
                 } else {
                     /* The tail of an odd-sized struct, byte by byte: a
                      * whole-word load would read past the object. */
                     for (long b = 0; b < left; b++) {
                         rv_load(t, SCR, ADDR, (int)(off + b), 1, 0, F->xlen);
-                        st_sp(F, SCR, pl[k].stk + (long)q * F->w + b, 1);
+                        st_out(F, SCR, pl[k].stk + (long)q * F->w + b, 1);
                     }
                 }
             }
@@ -1497,14 +1517,14 @@ static void gen_call(struct rv_fn *F, int n)
                  * scalar puts its LOW half there and its HIGH half at the
                  * bottom of the stack area -- so only the high half is
                  * written here. Confirmed against clang. */
-                st_sp(F, SCR2, pl[k].stk, F->w);
+                st_out(F, SCR2, pl[k].stk, F->w);
             } else {
-                st_sp(F, SCR, pl[k].stk, F->w);
-                st_sp(F, SCR2, pl[k].stk + F->w, F->w);
+                st_out(F, SCR, pl[k].stk, F->w);
+                st_out(F, SCR2, pl[k].stk + F->w, F->w);
             }
         } else {
             rd(F, a->vreg, SCR);
-            st_sp(F, SCR, pl[k].stk, F->w);
+            st_out(F, SCR, pl[k].stk, F->w);
         }
     }
     /* The SCALAR register arguments, all at once. This is the third of
@@ -2406,6 +2426,35 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         return;
     }
+    case IR_ALLOCA: {
+        /* A variable-length array: sp -= round16(size). The block starts
+         * ABOVE the outgoing-argument area, which stays at the bottom
+         * of the stack where a callee looks for its arguments -- so the
+         * area moves down with sp and the block sits on top of it. The
+         * frame itself is addressed from s0 in such a function. */
+        int d = wreg(F, i->dst, SCR2);
+        rd(F, i->a, SCR);
+        rv_alu_imm(t, RV_ADD, SCR, SCR, 15, 0);
+        rv_alu_imm(t, RV_AND, SCR, SCR, -16, 0);
+        rv_alu(t, RV_SUB, RV_SP, RV_SP, SCR, 0);
+        if (rv_fits(F->out_bytes, 12)) {
+            rv_alu_imm(t, RV_ADD, d, RV_SP, (int)F->out_bytes, 0);
+        } else {
+            rv_li(t, d, F->out_bytes, F->xlen);
+            rv_alu(t, RV_ADD, d, RV_SP, d, 0);
+        }
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_SPSAVE: {
+        int d = wreg(F, i->dst, SCR);
+        rv_mv(t, d, RV_SP);
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_SPRESTORE:
+        rv_mv(t, RV_SP, rdr(F, i->a, SCR));
+        return;
     case IR_LABELADDR: case IR_IGOTO:
         rv_refuse(F, i, "a computed goto");
         return;
@@ -2450,6 +2499,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide_map(fn);
     F.loc = NULL; F.nsave = 0;
+    F.fb = RV_SP;
     if (g_rv_regalloc) {
         /* `wide` means two different things and they must not be
          * confused, which they were:
@@ -2506,6 +2556,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             }
         }
     }
+    /* A variable-length array moves sp at run time, so the frame is
+     * addressed from s0 instead, which the prologue sets once the frame
+     * is in place. s0 is callee-saved and never in the allocator's pool,
+     * so it only has to be saved like any other callee-saved register. */
+    if (fn->has_alloca)
+        F.used_callee[F.nsave++] = RV_FP;
     layout(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -2550,6 +2606,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     st_sp(&F, RV_RA, F.ra_slot, F.w);
     for (i = 0; i < F.nsave; i++)
         st_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w);
+    if (fn->has_alloca) {
+        rv_mv(t, RV_FP, RV_SP);        /* the frame base, from here on */
+        F.fb = RV_FP;
+    }
 
     /* A variadic function spills EVERY argument register, named ones
      * included: the named ones are read out of the spill below, and the
@@ -2728,6 +2788,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
 
     /* The epilogue. */
     F.label_off[fn->nlabels] = t->len;
+    if (fn->has_alloca) {
+        /* Release every VLA at once: sp back to the frame base. The
+         * restores below then address from sp, because s0 is one of the
+         * registers they restore. */
+        rv_mv(t, RV_SP, RV_FP);
+        F.fb = RV_SP;
+    }
     for (i = 0; i < F.nsave; i++)
         ld_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w, 1);
     ld_sp(&F, RV_RA, F.ra_slot, F.w, 1);
