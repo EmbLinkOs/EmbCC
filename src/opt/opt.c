@@ -2638,6 +2638,37 @@ static int pass_cfgclean(struct ir_func *fn)
      *
      * A landing pad's label IS named, by the exception region rather
      * than by a branch, and the unwinder is what jumps to it. */
+    /* A conditional branch AROUND an unconditional one:
+     *
+     *      brz  c, L1              brnz c, L2
+     *      jmp  L2         ==>
+     *   L1:                     L1:
+     *
+     * is one branch on the opposite sense. irgen writes the first shape
+     * for every `?:` and `if` whose arm ends in a jump, and on a machine
+     * with conditional branches it cost a branch per test. The inversion
+     * is exact on the IR's 0/1 value -- brz and brnz are each other's
+     * complement whatever produced it, NaN compares included. The jump
+     * is left aimed at L1, where the rule below drops it. */
+    for (int n = 0; n + 2 < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n], *j = &fn->ins[n + 1];
+        if ((i->op != IR_BRZ && i->op != IR_BRNZ) || j->op != IR_JMP ||
+            j->label == i->label)
+            continue;
+        int m = n + 2, hit = 0;
+        while (m < fn->nins && fn->ins[m].op == IR_LABEL)
+            if (fn->ins[m++].label == i->label) { hit = 1; break; }
+        if (!hit)
+            continue;
+        {
+            int l2 = j->label;       /* where the branch goes now */
+            i->op = i->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+            j->label = i->label;     /* a jump to the fall-through */
+            i->label = l2;
+        }
+        changed = 1;
+    }
+
     char *reached = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1);
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
