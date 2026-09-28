@@ -17,6 +17,7 @@ enum {
     Tag_THUMB_ISA_use        = 9,
     Tag_ABI_PCS_R9_use       = 14,
     Tag_ABI_PCS_GOT_use      = 17,
+    Tag_FP_arch              = 10,
     Tag_ABI_PCS_wchar_t      = 18,
     Tag_ABI_FP_denormal      = 20,
     Tag_ABI_FP_exceptions    = 21,
@@ -24,6 +25,7 @@ enum {
     Tag_ABI_align_needed     = 24,
     Tag_ABI_align_preserved  = 25,
     Tag_ABI_enum_size        = 26,
+    Tag_ABI_HardFP_use       = 27,
     Tag_ABI_VFP_args         = 28,
     Tag_CPU_unaligned_access = 34,
     Tag_conformance          = 67
@@ -108,6 +110,13 @@ unsigned char *arm_build_attributes(size_t *len)
      * image's other objects, so claiming 3 on a v7-M build would let an
      * object into an image whose parts cannot all run there. */
     btag(&attrs, Tag_THUMB_ISA_use, v8 ? 3 : 2);
+    /* The FPU, when this object's code uses one: -mfpu= with softfp or
+     * hard. FPv4-SP-D16 on v7E-M and FPv5-SP-D16 (FP-ARMv8, D16) on v8-M,
+     * clang's values for those units. It used to be absent even when the
+     * EMBCC_T_FPU hook had emitted VFP instructions -- an object claiming no
+     * FPU while containing FPU code. */
+    if (target_thumb_fpu())
+        btag(&attrs, Tag_FP_arch, v8 ? 8 : 6);
     btag(&attrs, Tag_ABI_PCS_R9_use, 0);         /* r9 is an ordinary reg */
     btag(&attrs, Tag_ABI_PCS_GOT_use, 1);        /* direct: no GOT, no PIC */
     btag(&attrs, Tag_ABI_PCS_wchar_t, 4);
@@ -120,12 +129,16 @@ unsigned char *arm_build_attributes(size_t *len)
      * 2. An object built the other way disagrees on every struct that
      * holds an enum, and this tag is what makes the linker say so. */
     btag(&attrs, Tag_ABI_enum_size, 2);
+    /* Single precision only: both units are -SP-. A double still goes
+     * through __adddf3, and this is what says so. */
+    if (target_thumb_fpu())
+        btag(&attrs, Tag_ABI_HardFP_use, 1);
     /* THE one that matters: 0 is the base standard -- floating point
      * travels in the CORE registers. Emitted explicitly rather than left
      * out, so the object states its ABI positively instead of by
      * absence. When hardware floating point lands this becomes 1, and
      * the two will then refuse to link, which is the point. */
-    btag(&attrs, Tag_ABI_VFP_args, 0);
+    btag(&attrs, Tag_ABI_VFP_args, target_thumb_hard_abi() ? 1 : 0);
     btag(&attrs, Tag_CPU_unaligned_access, 1);
 
     /* ---- wrap it: File sub-subsection, vendor subsection, version ----

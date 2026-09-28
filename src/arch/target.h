@@ -203,6 +203,21 @@ void target_set_thumb_em(int on);
 int target_thumb_fpu(void);
 void target_set_thumb_fpu(int on);
 
+/* The float ABI, which -mfloat-abi= selects and which is independent of the
+ * FPU above:
+ *
+ *   soft    no FPU instructions; float travels in the core registers
+ *   softfp  FPU instructions; float STILL travels in the core registers
+ *           (the base standard -- links with soft-float objects)
+ *   hard    FPU instructions; float travels in s0-s15 (AAPCS-VFP --
+ *           links only with other hard-float objects)
+ *
+ * target_thumb_fpu() is true for softfp and hard; this is true for hard
+ * alone. It decides Tag_ABI_VFP_args and __ARM_PCS_VFP, and it is what the
+ * linker checks before mixing two objects. */
+int target_thumb_hard_abi(void);
+void target_set_thumb_hard_abi(int on);
+
 /* The selected target. Defaults to x86_64 so every existing command line
  * keeps its meaning; --target= is the only thing that changes it. */
 enum target_arch target_get(void);

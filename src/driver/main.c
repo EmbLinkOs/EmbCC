@@ -2242,6 +2242,76 @@ static const char *default_asm_output(const char *in)
     return out;
 }
 
+static int g_want_dump_predef;
+
+/* -mfpu= and -mfloat-abi=, as recorded while parsing. */
+static const char *g_arm_fpu;
+static const char *g_arm_float_abi;
+
+/* What the two ARM float flags mean together, decided once every argument has
+ * been seen.
+ *
+ * The FPUs EmbCC knows are the two single-precision units its parts carry:
+ * FPv4-SP-D16 on a Cortex-M4F (ARMv7E-M) and FPv5-SP-D16 on a Cortex-M33
+ * (ARMv8-M Mainline). Anything else is refused BY NAME -- a double-precision
+ * unit would be a promise about `double` this backend does not keep, and an
+ * unknown name is not a thing to guess at.
+ *
+ *   soft (the default, as for arm-none-eabi-gcc): no FPU instructions, even
+ *       with an -mfpu= -- which is GCC's reading of the pair.
+ *   softfp: FPU instructions, float arguments in the CORE registers. Links
+ *       with soft-float objects, because the calling convention is theirs.
+ *   hard: refused, until AAPCS-VFP argument passing is implemented; see
+ *       docs/developer/gaps-vs-gcc-clang.md. Accepting it and passing floats
+ *       in the core registers would link against a hard-float library and
+ *       read every float argument from registers the caller never wrote.
+ *
+ * The object says which it was built for (Tag_FP_arch, Tag_ABI_HardFP_use,
+ * Tag_ABI_VFP_args) and the predefined macros say so to the program
+ * (__ARM_FP, __ARM_VFPV4__, __SOFTFP__); both follow from what is set here. */
+static void arm_float_resolve(void)
+{
+    const char *abi = g_arm_float_abi ? g_arm_float_abi : "soft";
+    int fpu_named = g_arm_fpu && strcmp(g_arm_fpu, "none") != 0 &&
+                    strcmp(g_arm_fpu, "soft") != 0 && strcmp(g_arm_fpu, "auto") != 0;
+    if (!g_arm_fpu && !g_arm_float_abi)
+        return;
+    if (target_get() != TARGET_THUMB)
+        return;                        /* refused where the flag was parsed */
+    if (strcmp(abi, "soft") && strcmp(abi, "softfp") && strcmp(abi, "hard"))
+        diag_fatal(NULL, 0, "-mfloat-abi=%s is not an ARM float ABI: it is "
+                   "one of soft, softfp and hard", abi);
+    if (fpu_named) {
+        int v8 = target_thumb_arch() >= 8;
+        const char *want = v8 ? "fpv5-sp-d16" : "fpv4-sp-d16";
+        if (strcmp(g_arm_fpu, want) != 0)
+            diag_fatal(NULL, 0, "-mfpu=%s is not supported on %s: EmbCC "
+                       "emits VFP for the %s unit (-mfpu=%s) and nothing else: "
+                       "another unit's instruction set and attributes are "
+                       "unchecked here, and a double-precision one (fpv5-d16) "
+                       "would promise hardware `double` this backend does not emit", g_arm_fpu,
+                       target_triple_now(), v8 ? "Cortex-M33's" : "Cortex-M4F's",
+                       want);
+        if (!v8 && !target_thumb_em())
+            diag_fatal(NULL, 0, "-mfpu=%s is an ARMv7E-M unit, and the part "
+                       "is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4",
+                       g_arm_fpu);
+    }
+    if (!strcmp(abi, "soft"))
+        return;                        /* no FPU instructions, as GCC reads it */
+    if (!fpu_named)
+        diag_fatal(NULL, 0, "-mfloat-abi=%s needs an FPU to use: add "
+                   "-mfpu=fpv4-sp-d16 (Cortex-M4F) or -mfpu=fpv5-sp-d16 "
+                   "(Cortex-M33)", abi);
+    if (!strcmp(abi, "hard"))
+        diag_fatal(NULL, 0, "-mfloat-abi=hard is not supported yet: it passes "
+                   "floating point in s0-s15 (AAPCS-VFP), and EmbCC still "
+                   "passes it in the core registers. -mfloat-abi=softfp gives "
+                   "the FPU's arithmetic with the core-register convention, "
+                   "and links with soft-float objects");
+    target_set_thumb_fpu(1);           /* softfp */
+}
+
 int main(int argc, char **argv)
 {
 
@@ -2410,10 +2480,13 @@ int main(int argc, char **argv)
             printf("%s\n", target_triple_now());
             return 0;
         }
-        if (strcmp(argv[i], "--dump-predef") == 0) {
-            dump_predef();
-            return 0;
-        }
+        if (strcmp(argv[i], "--dump-predef") == 0)
+            /* NOT answered here: this scan has applied --target= and
+             * nothing else, and the table also depends on -mcpu=, -mfpu=
+             * and -mfloat-abi=. Answering early printed the soft-float
+             * table for an FPU build -- a tool for inspecting the
+             * configuration that described a different one. */
+            g_want_dump_predef = 1;
     }
     if (strcmp(argv[1], "--emit-empty-object") == 0) {
         if (argc != 3) {
@@ -2731,6 +2804,8 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "-f", 2) == 0 && argv[i][2] &&
                    opt_set_pass(argv[i] + 2, 1)) {
             /* a named pass, on -- so a single pass can be tried at -O1 */
+        } else if (strcmp(argv[i], "--dump-predef") == 0) {
+            /* answered after every argument has been applied */
         } else if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
                    strncmp(argv[i], "-mfpu=", 6) == 0 ||
                    strncmp(argv[i], "-mfloat-abi=", 12) == 0 ||
@@ -2775,27 +2850,17 @@ int main(int argc, char **argv)
                                "m0plus, m1, m3, m4, m7, m23, m33)", v);
                 continue;
             }
+            /* The FPU and the float ABI are RECORDED here and resolved
+             * after every argument has been read (see arm_float_resolve):
+             * `-mfloat-abi=softfp -mfpu=fpv4-sp-d16` and the other order
+             * mean the same thing, and neither flag decides anything alone. */
             if (strncmp(argv[i], "-mfpu=", 6) == 0) {
-                if (!strcmp(v, "none") || !strcmp(v, "soft"))
-                    continue;
-                diag_fatal(NULL, 0, "-mfpu=%s is not supported: EmbCC has no "
-                           "hardware floating point on this target, so a "
-                           "float goes through __aeabi_fadd and friends. "
-                           "Accepting this and emitting soft float anyway "
-                           "would give an object that links against a "
-                           "hard-float one and reads its arguments from the "
-                           "wrong registers", v);
+                g_arm_fpu = v;
+                continue;
             }
             if (strncmp(argv[i], "-mfloat-abi=", 12) == 0) {
-                if (!strcmp(v, "soft"))
-                    continue;      /* what this backend does */
-                diag_fatal(NULL, 0, "-mfloat-abi=%s is not supported: EmbCC "
-                           "passes floating point in the CORE registers "
-                           "(the base standard, -mfloat-abi=soft). %s passes "
-                           "it in s0-s15, so the two do not interoperate, "
-                           "and that is a mismatch no diagnostic downstream "
-                           "would catch", v,
-                           !strcmp(v, "hard") ? "hard" : v);
+                g_arm_float_abi = v;
+                continue;
             }
             continue;
         } else if (strncmp(argv[i], "-fsanitize=", 11) == 0 ||
@@ -2974,6 +3039,13 @@ int main(int argc, char **argv)
             print_usage(stderr);
             return 1;
         }
+    }
+
+    arm_float_resolve();
+
+    if (g_want_dump_predef) {
+        dump_predef();
+        return 0;
     }
 
     if (!input) {

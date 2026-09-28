@@ -75,20 +75,24 @@ echo "-dumpmachine answers for the part that was asked for"
 # Accepted where they describe what EmbCC does, refused BY NAME where
 # they describe something else. The float ones are the point: guessing
 # either way is the ABI mismatch above.
-for fl in -mthumb -mcpu=cortex-m3 -mcpu=cortex-m4 -mfpu=none -mfloat-abi=soft
+for fl in -mthumb -mcpu=cortex-m3 -mcpu=cortex-m4 -mfpu=none -mfloat-abi=soft \
+          -mfpu=fpv4-sp-d16 "-mfpu=fpv4-sp-d16 -mfloat-abi=softfp"
 do
     "$EMBCC" --target=thumbv7em-none-eabi $fl -c "$out/t.c" -o /dev/null \
         2> "$out/f.err" || { echo "$fl was refused:"; cat "$out/f.err"
                              exit 1; }
 done
-for fl in -mfloat-abi=hard -mfloat-abi=softfp -mfpu=fpv4-sp-d16 -marm \
-          -mcpu=cortex-m9
+# -mfloat-abi=softfp and =hard with no FPU named, an FPU the part does not
+# have (FPv5 is the Cortex-M33's), and hard-float itself, which waits on
+# AAPCS-VFP argument passing.
+for fl in -mfloat-abi=hard -mfloat-abi=softfp -mfpu=fpv5-sp-d16 \
+          "-mfpu=fpv4-sp-d16 -mfloat-abi=hard" -marm -mcpu=cortex-m9
 do
     if "$EMBCC" --target=thumbv7em-none-eabi $fl -c "$out/t.c" -o /dev/null \
          2> "$out/f.err"; then
         echo "$fl was accepted, and EmbCC does not do it"; exit 1
     fi
-    grep -q 'not supported\|not a part' "$out/f.err" || {
+    grep -q 'not supported\|not a part\|needs an FPU\|has no\|is not' "$out/f.err" || {
         echo "$fl's refusal does not say why:"; cat "$out/f.err"; exit 1; }
 done
 echo "the ARM machine flags are accepted where they match and refused by

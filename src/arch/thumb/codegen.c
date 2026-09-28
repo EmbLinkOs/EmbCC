@@ -2530,8 +2530,11 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
      * tested while the flag stays refused by name; it goes away when
      * -mfpu= can be honoured in full. */
     {
+        /* Only when SET: unconditionally, this overwrote whatever the
+         * driver had decided from -mfpu= -- to off. */
         const char *e = getenv("EMBCC_T_FPU");
-        target_set_thumb_fpu(e && *e && *e != '0');
+        if (e)
+            target_set_thumb_fpu(*e && *e != '0');
     }
 
     struct t_sites st;

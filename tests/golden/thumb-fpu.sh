@@ -82,9 +82,15 @@ want=$("$out/host" | head -1)
 # Both ways must agree, at four levels: the FPU and the soft-float
 # runtime are two implementations of the same arithmetic, and a
 # disagreement means one of them is wrong.
+# The FPU is asked for the way a Cortex-M4F build asks: -mfpu= and
+# -mfloat-abi=softfp. (EMBCC_T_FPU, the hook this test used before the flags
+# were accepted, still exists; nothing here needs it.)
+FPUFLAGS="-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=softfp"
+fpuflags() { [ "$1" = 1 ] && echo "$FPUFLAGS"; }
 for fpu in 0 1; do
     for opt in -O0 -O1 -O2 -Os; do
-        EMBCC_T_FPU=$fpu "$EMBCC" --target=$T $opt -c "$out/fp.c" \
+        # shellcheck disable=SC2046
+        "$EMBCC" --target=$T $(fpuflags $fpu) $opt -c "$out/fp.c" \
             -o "$out/fp.o" || { echo "FPU=$fpu $opt: does not compile"
                                 exit 1; }
         sh "$H/link.sh" "$out/fp.elf" "$out/fp.o" "$out/softfp.o" \
@@ -103,8 +109,8 @@ Cortex-M4F, with the FPU and with the soft-float runtime, at four levels"
 
 # The FPU path must actually USE the FPU -- agreeing with the host while
 # quietly calling __addsf3 would pass the check above and mean nothing.
-EMBCC_T_FPU=1 "$EMBCC" --target=$T -Os -c "$out/fp.c" -o "$out/hard.o"
-EMBCC_T_FPU=0 "$EMBCC" --target=$T -Os -c "$out/fp.c" -o "$out/soft.o"
+"$EMBCC" --target=$T $FPUFLAGS -Os -c "$out/fp.c" -o "$out/hard.o"
+"$EMBCC" --target=$T -Os -c "$out/fp.c" -o "$out/soft.o"
 OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
 if command -v "$OD" >/dev/null 2>&1; then
     nh=$("$OD" -d --triple=thumbv7em --mattr=+vfp4 "$out/hard.o" |
@@ -126,7 +132,7 @@ fi
 # has no double arithmetic. Claiming otherwise would be the interesting
 # way to be wrong.
 printf 'double g(double x, double y){ return x * y + x; }\n' > "$out/d.c"
-EMBCC_T_FPU=1 "$EMBCC" --target=$T -Os -c "$out/d.c" -o "$out/d.o" || {
+"$EMBCC" --target=$T $FPUFLAGS -Os -c "$out/d.c" -o "$out/d.o" || {
     echo "the double file does not compile"; exit 1; }
 if command -v "$OD" >/dev/null 2>&1; then
     "$OD" -d --triple=thumbv7em --mattr=+vfp4 "$out/d.o" |
@@ -192,7 +198,8 @@ cwant=$("$out/chost" | head -1)
 [ -n "$cwant" ] || { echo "the cross-call reference printed nothing"; exit 1; }
 for fpu in 0 1; do
     for opt in -O0 -O1 -O2 -Os; do
-        EMBCC_T_FPU=$fpu "$EMBCC" --target=$T $opt -c "$out/cross.c" \
+        # shellcheck disable=SC2046
+        "$EMBCC" --target=$T $(fpuflags $fpu) $opt -c "$out/cross.c" \
             -o "$out/cr.o" || { echo "cross FPU=$fpu $opt: no compile"
                                 exit 1; }
         sh "$H/link.sh" "$out/cr.elf" "$out/cr.o" "$out/softfp.o" \
@@ -208,14 +215,94 @@ done
 echo "floats and doubles crossing a real call boundary agree with the host,
 with the FPU and without, at four levels"
 
-# -mfpu= stays REFUSED. The FPU arithmetic works, but the flag promises
-# the hard-float ABI as well, and that is not finished -- accepting it
-# now would mean accepting a promise and emitting something else.
-if "$EMBCC" --target=$T -mfpu=fpv4-sp-d16 -c "$out/d.c" -o /dev/null \
-     2> "$out/f.err"; then
-    echo "-mfpu=fpv4-sp-d16 was accepted before the hard-float ABI exists"
-    exit 1
+# ---- the flags, what they promise, and what they refuse ---------------
+#
+# softfp is FPU arithmetic with the CORE-register calling convention, so its
+# whole reason to exist is that it links with soft-float code. Four ways
+# round: caller and callee each built soft or softfp, in separate objects, and
+# every pairing must agree with the host.
+cat > "$out/lib.c" <<'CEOF'
+float scale(float a, float b, int k) { return a * b + (float)k; }
+double widen(float a) { return (double)a * 3.0; }
+float pick(float a, float b, float c, float d, float e) { return (a - b) * c + d / e; }
+CEOF
+cat > "$out/use.c" <<'CEOF'
+void writec(int c); void puts_(const char *s);
+float scale(float, float, int); double widen(float);
+float pick(float, float, float, float, float);
+static void hx(unsigned long long v, int n) { int i; for (i = n - 4; i >= 0; i -= 4) writec("0123456789abcdef"[(v >> i) & 15]); writec(' '); }
+static unsigned fb(float f) { union { float f; unsigned u; } x; x.f = f; return x.u; }
+static unsigned long long db(double d) { union { double d; unsigned long long u; } x; x.d = d; return x.u; }
+int main(void)
+{
+    hx(fb(scale(1.5f, 2.25f, 3)), 32);
+    hx(db(widen(0.1f)), 64);
+    hx(fb(pick(10.0f, 2.5f, 0.125f, 7.0f, 3.0f)), 32);
+    puts_("\n");
+    return 0;
+}
+CEOF
+cc -w -o "$out/ihost" "$out/lib.c" "$out/use.c" "$EMBCC_ROOT/tests/harness/thumb/hostio.c" 2>/dev/null ||
+    { echo "the interop host reference does not build"; exit 1; }
+iwant=$("$out/ihost" | head -1)
+for caller in 0 1; do
+    for callee in 0 1; do
+        # shellcheck disable=SC2046
+        "$EMBCC" --target=$T $(fpuflags $callee) -O2 -c "$out/lib.c" -o "$out/lib.o" &&
+        # shellcheck disable=SC2046
+        "$EMBCC" --target=$T $(fpuflags $caller) -O2 -c "$out/use.c" -o "$out/use.o" || {
+            echo "interop caller=$caller callee=$callee: does not compile"; exit 1; }
+        sh "$H/link.sh" "$out/io.elf" "$out/use.o" "$out/lib.o" "$out/softfp.o" \
+            > "$out/iln.log" 2>&1 || {
+            echo "interop caller=$caller callee=$callee: does not link"
+            head -3 "$out/iln.log"; exit 1; }
+        got=$(sh "$H/run.sh" "$out/io.elf" 2>&1 | head -1)
+        [ "$got" = "$iwant" ] || {
+            echo "interop caller=$caller callee=$callee: disagrees with the host"
+            echo "  want: $iwant"; echo "  got:  $got"; exit 1; }
+    done
+done
+echo "softfp and soft-float objects call each other in all four pairings and
+agree with the host: the FPU does the arithmetic, the core registers carry it"
+
+# What the object CLAIMS: an FPU (FPv4-SP-D16, single precision) and the base
+# calling convention. Without the flags, no FPU at all.
+RE=${EMBCC_LLVM_READELF:-llvm-readelf}
+if command -v "$RE" >/dev/null 2>&1; then
+    a=$("$RE" --arch-specific "$out/hard.o")
+    echo "$a" | grep -A2 'TagName: FP_arch' | grep -q 'VFPv4-D16' || {
+        echo "a softfp object does not say it uses FPv4-SP-D16"; exit 1; }
+    echo "$a" | grep -A2 'TagName: ABI_HardFP_use' | grep -q 'Single-Precision' || {
+        echo "a softfp object does not say its FPU is single-precision"; exit 1; }
+    echo "$a" | grep -A2 'TagName: ABI_VFP_args' | grep -q 'Description: AAPCS$' || {
+        echo "a softfp object does not say it uses the base calling convention"; exit 1; }
+    "$RE" --arch-specific "$out/soft.o" | grep -q 'TagName: FP_arch' && {
+        echo "a soft-float object claims an FPU"; exit 1; }
+    echo "the objects say what they are: FPv4-SP-D16 with the base convention,
+and no FPU at all without the flags"
 fi
-grep -q 'not supported' "$out/f.err" || {
-    echo "the -mfpu= refusal does not say why:"; cat "$out/f.err"; exit 1; }
-echo "-mfpu= is still refused by name: the arithmetic is in, the ABI is not"
+
+# The safety net for the mistake softfp does NOT protect against: a HARD-float
+# object passes floats in s0-s15, and linking one with ours would read every
+# float argument from a register nobody wrote. embld must refuse the pair.
+if command -v clang >/dev/null 2>&1; then
+    clang -target thumbv7em-none-eabi -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 \
+        -mfloat-abi=hard -ffreestanding -c "$out/lib.c" -o "$out/hlib.o" 2>/dev/null &&
+    "$EMBCC" --target=$T $FPUFLAGS -O2 -c "$out/use.c" -o "$out/use.o" &&
+    if sh "$H/link.sh" "$out/hx.elf" "$out/use.o" "$out/hlib.o" "$out/softfp.o" \
+         > "$out/hx.log" 2>&1; then
+        echo "embld linked a hard-float object with a softfp one"; exit 1
+    fi
+    grep -qi 'VFP\|float' "$out/hx.log" || {
+        echo "embld refused the hard/softfp mix without saying why:"; cat "$out/hx.log"; exit 1; }
+    echo "embld refuses a clang hard-float object mixed with a softfp one, by name"
+fi
+
+# -mfloat-abi=hard stays REFUSED until AAPCS-VFP argument passing exists.
+if "$EMBCC" --target=$T -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard \
+     -c "$out/d.c" -o /dev/null 2> "$out/f.err"; then
+    echo "-mfloat-abi=hard was accepted before AAPCS-VFP exists"; exit 1
+fi
+grep -q 'not supported yet' "$out/f.err" || {
+    echo "the -mfloat-abi=hard refusal does not say why:"; cat "$out/f.err"; exit 1; }
+echo "-mfloat-abi=hard is still refused by name: the FPU is in, AAPCS-VFP is not"

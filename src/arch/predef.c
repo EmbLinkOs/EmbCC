@@ -119,6 +119,35 @@ static const struct predef_macro os_windows[] = {
     { "__MINGW64__", "1" },
 };
 
+/* The FPU on ARMv7E-M and ARMv8-M, when -mfpu= and -mfloat-abi=softfp|hard
+ * turn it on. The generated tables are the soft-float ones (see
+ * tools/gen-predef.sh), and these are the macros clang changes between that
+ * and an FPU build, read off `clang -dM` for both parts and all three ABIs:
+ * __SOFTFP__ goes, the VFP version macros and __ARM_FP arrive, and the hard
+ * ABI adds __ARM_PCS_VFP.
+ *
+ * Two deliberate differences from clang, both of them promises this compiler
+ * does not make yet. __ARM_FP is 0x4, single precision, where clang says 0x6:
+ * bit 1 is hardware half-precision conversion and EmbCC emits no vcvtb. And
+ * __ARM_FEATURE_FMA is left out: DSP code reads it to choose fused
+ * multiply-add, which EmbCC does not emit. A predefined macro is a promise
+ * to the program; the first one this table got wrong, __ARM_FP 0xe on v8-M,
+ * compiled lib/rt/softfp.c to nothing. */
+static const struct predef_macro thumb_fpu_add[] = {
+    { "__ARM_FP", "0x4" },
+    { "__ARM_VFPV2__", "1" },
+    { "__ARM_VFPV3__", "1" },
+    { "__ARM_VFPV4__", "1" },
+};
+static const struct predef_macro thumb_fpv5_add[] = { { "__ARM_FPV5__", "1" } };
+static const struct predef_macro thumb_hard_add[] = { { "__ARM_PCS_VFP", "1" } };
+
+static int thumb_fpu_drops(const char *name)
+{
+    return target_get() == TARGET_THUMB && target_thumb_fpu() &&
+           (strcmp(name, "__SOFTFP__") == 0 || strcmp(name, "__ARM_FP") == 0);
+}
+
 /* __ELF__ lives in the generated architecture tables, because the
  * compilers they were generated from were the *-elf ones. It is a
  * statement about the OBJECT FORMAT, so on a target that is not ELF it
@@ -126,7 +155,8 @@ static const struct predef_macro os_windows[] = {
  * thing. Dropped rather than overridden: there is no "__ELF__ 0". */
 static int contradicted(const char *name)
 {
-    return target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0;
+    return (target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0) ||
+           thumb_fpu_drops(name);
 }
 
 const struct predef_macro *predef_table(int *count)
@@ -157,7 +187,8 @@ const struct predef_macro *predef_table(int *count)
      * and it hands back the generated table itself -- no copy, no
      * filtering, nothing to go wrong in the path that everything else
      * depends on. */
-    if (!os && target_fmt_get() == TGT_FMT_ELF) {
+    int fpu = target_get() == TARGET_THUMB && target_thumb_fpu();
+    if (!os && !fpu && target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -165,12 +196,20 @@ const struct predef_macro *predef_table(int *count)
     static struct predef_macro *merged;
     static int nmerged;
     if (!merged) {
-        merged = xmalloc((size_t)(narch + nos) * sizeof *merged);
+        merged = xmalloc((size_t)(narch + nos + 8) * sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
                 merged[nmerged++] = arch[i];
         for (int i = 0; i < nos; i++)
             merged[nmerged++] = os[i];
+        if (fpu) {
+            for (size_t i = 0; i < sizeof thumb_fpu_add / sizeof *thumb_fpu_add; i++)
+                merged[nmerged++] = thumb_fpu_add[i];
+            if (target_thumb_arch() >= 8)
+                merged[nmerged++] = thumb_fpv5_add[0];
+            if (target_thumb_hard_abi())
+                merged[nmerged++] = thumb_hard_add[0];
+        }
     }
     *count = nmerged;
     return merged;

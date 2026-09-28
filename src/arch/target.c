@@ -21,6 +21,7 @@ static int g_thumb_em;      /* --target=thumbv7em-*: see target_thumb_em */
  * second enum value would duplicate a data model to express none of that. */
 static int g_thumb_arch = 7;
 static int g_thumb_fpu;     /* see target_thumb_fpu */
+static int g_thumb_hard;    /* see target_thumb_hard_abi */
 static enum target_os   g_os   = TGT_OS_NONE;
 static enum target_fmt  g_fmt  = TGT_FMT_ELF;
 
@@ -433,6 +434,8 @@ int target_thumb_arch(void) { return g_thumb_arch; }
 void target_set_thumb_arch(int lvl) { g_thumb_arch = lvl; }
 int target_thumb_fpu(void) { return g_thumb_fpu; }
 void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }
+int target_thumb_hard_abi(void) { return g_thumb_hard; }
+void target_set_thumb_hard_abi(int on) { g_thumb_hard = on ? 1 : 0; }
 void target_set_thumb_em(int on) { g_thumb_em = on ? 1 : 0; }
 
 const char *target_triple_now(void)
