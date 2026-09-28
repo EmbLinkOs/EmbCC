@@ -2086,13 +2086,19 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_I2F: {
         /* size/sign describe the integer source, w the float result.
          *
-         * irgen converts an `unsigned int` by asking for a SIGNED
+         * irgen USED TO convert an `unsigned int` by asking for a SIGNED
          * 64-bit conversion of it, on the grounds that "a 32-bit
          * operation zero-extends its result into the eight-byte slot".
-         * That is true of a register write on both other targets and
+         * That is true of a register write on x86-64 and aarch64 and
          * false of a four-byte stack slot here, where the next four
-         * bytes are another temporary — so the zero extension is done
-         * explicitly, which is what that comment meant all along. */
+         * bytes are another temporary — which is what the explicit zero
+         * extension below cost.
+         *
+         * It no longer does: target_widen_unsigned_fp_cvt() is false for
+         * this target, so an unsigned 32-bit source arrives as size 4 with
+         * sign 0 and __floatunsisf is called by name. The widening path
+         * stays because `size == 8` with a narrow source vreg is still a
+         * representable shape, and zero-extending it is still right. */
         if (i->size == 8) {
             if (F->wide[i->a]) {
                 rd64(F, i->a, T_R0, T_R1);

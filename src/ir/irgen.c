@@ -1090,9 +1090,15 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
             return i->dst;
         }
         if (ty_is_float(to)) {
-            /* unsigned 64-bit -> float needs the split-and-add fixup; every
-             * other integer source goes straight through signed cvtsi2sd. */
-            if (from->is_unsigned && ty_size(from) == 8)
+            /* unsigned 64-bit -> float: on a target whose convert
+             * instruction is signed only, this is a split-and-add fixup --
+             * the top bit cannot be read as part of the value, so the value
+             * is halved, converted, and added to itself. Where the
+             * conversion is a CALL there is nothing to fix up: libgcc has
+             * __floatundisf under its own name and every soft-float backend
+             * here already emits it. */
+            if (from->is_unsigned && ty_size(from) == 8 &&
+                target_widen_unsigned_fp_cvt())
                 return gen_u64_to_float(fn, v, tsize);
             /* int -> float, and the source WIDTH matters: a 32-bit
              * operation zero-extends its result into the 8-byte slot
@@ -1101,31 +1107,53 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
              * 32 bits and let cvtsi2sd interpret the sign; read an
              * unsigned int as 64, where the zero extension IS the value
              * (which is what makes it exact). */
-            int srcw = 4;
-            if (ty_wide(from) ||
-                (from->is_unsigned && ty_size(from) == 4))
-                srcw = 8;
+            /* An unsigned 32-bit source is the case that differs. Where
+             * the conversion is a signed-only INSTRUCTION, widen it to 64
+             * and let the zero extension carry the value exactly. Where it
+             * is a CALL, ask for the unsigned helper by name instead --
+             * __floatunsisf rather than a 64-bit __floatdisf. */
+            int u32src = from->is_unsigned && ty_size(from) == 4;
+            int widen  = target_widen_unsigned_fp_cvt();
+            int srcw   = ty_wide(from) || (u32src && widen) ? 8 : 4;
+            /* On a widening target every source reaches the convert as
+             * SIGNED: an unsigned 32-bit one was extended to 64, where the
+             * zero extension is the value, and an unsigned 64-bit one took
+             * the split-and-add above and never gets here. Where the
+             * conversion is a call, ask for the helper whose signedness
+             * matches the source -- __floatunsisf or __floatundisf. */
+            int isign  = widen ? 1 : !from->is_unsigned;
             i = emit(fn);
             i->op = IR_I2F;
             i->a = v;
             i->size = srcw;
-            i->sign = 1;
+            i->sign = isign;
             i->w = tsize;
             i->dst = new_temp(fn);
             return i->dst;
         }
-        /* float -> unsigned 64-bit needs the 2^63 bias fixup (cvttsd2si is
-         * signed); other targets use the signed convert-then-narrow below. */
-        if (to->is_unsigned && ty_size(to) == 8)
+        /* float -> unsigned 64-bit: the 2^63 bias fixup, for the same
+         * reason and with the same exception -- cvttsd2si is signed only,
+         * and __fixunssfdi is not. */
+        if (to->is_unsigned && ty_size(to) == 8 &&
+            target_widen_unsigned_fp_cvt())
             return gen_float_to_u64(fn, v, fsize);
-        /* float -> int: truncates toward zero, as C requires. Convert
-         * to the 64-bit form then narrow, so unsigned int lands right. */
+        /* float -> int: truncates toward zero, as C requires.
+         *
+         * Where the conversion is a signed-only instruction, go to the
+         * 64-bit form and narrow, so an unsigned 32-bit destination lands
+         * right. Where it is a call, name the unsigned helper instead:
+         * __fixunssfsi rather than a 64-bit __fixsfdi and a truncation. */
+        int dstw = 8, dsign = 1;
+        if (!target_widen_unsigned_fp_cvt()) {
+            dstw = tsize <= 4 ? 4 : 8;
+            dsign = !to->is_unsigned;
+        }
         i = emit(fn);
         i->op = IR_F2I;
         i->a = v;
         i->size = fsize;
-        i->w = 8;
-        i->sign = 1;
+        i->w = dstw;
+        i->sign = dsign;
         i->dst = new_temp(fn);
         int iv = i->dst;
         if (tsize <= 2) {

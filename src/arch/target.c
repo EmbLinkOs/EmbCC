@@ -188,6 +188,11 @@ int target_char_unsigned(void)
 int target_wchar_unsigned(void) { return g_model[g_arch].wchar_uns; }
 int target_has_int128(void)     { return g_model[g_arch].int128; }
 
+int target_widen_unsigned_fp_cvt(void)
+{
+    return g_arch == TARGET_X86_64 || g_arch == TARGET_AARCH64;
+}
+
 int target_has_os(void) { return g_os != TGT_OS_NONE; }
 
 int target_is_hosted(void)

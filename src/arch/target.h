@@ -128,6 +128,24 @@ int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
  * rather than lowering something no backend can carry. */
 int target_has_int128(void);
 
+/* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
+ * conversion to or from floating point.
+ *
+ * x86-64 needs it: cvtsi2sd and cvttsd2si are signed only, there is no
+ * unsigned form, so the zero extension into 64 bits IS how an unsigned
+ * 32-bit value is converted exactly. aarch64 has ucvtf and fcvtzu and does
+ * not strictly need it; it has always done it and a register-to-register
+ * widening costs nothing there, so that stays.
+ *
+ * The three embedded targets convert with a CALL, and libgcc's names come in
+ * both signednesses -- __floatunsisf and __fixunssfsi, which the thumb,
+ * riscv and avr backends all already emit and which nothing reached. There
+ * the widening is not a correctness device, it is a 64-bit software
+ * conversion in place of a 32-bit one. On AVR that also pulls
+ * lib/rt/avrfpi64.c into the image: 8.5 KB, on a part with 32768 bytes of
+ * flash, for a cast a program writes without thinking about it. */
+int target_widen_unsigned_fp_cvt(void);
+
 /* ARMv7E-M (Cortex-M4/M7) rather than ARMv7-M (Cortex-M3). Set by the
  * --target= name and by -mcpu=. The instruction selection is the same
  * for both; this changes what the object SAYS it was built for, which

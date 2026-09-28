@@ -2093,16 +2093,21 @@ static void gen_ins(struct rv_fn *F, int n)
             name = dst_w == 8 ? "__extendsfdf2" : "__truncdfsf2";
 
         if (i->op == IR_I2F && src_w == 8 && i->a >= 0 && !F->wide[i->a]) {
-            /* irgen converts an `unsigned int` by asking for a SIGNED
-             * 64-bit conversion of it, on the grounds that "a 32-bit
-             * operation zero-extends its result into the eight-byte
-             * slot". That is true of a register write on x86-64 and
-             * aarch64 and false here: at RV32 the slot is four bytes and
-             * the next four are another temporary, and at RV64 a slot
-             * load SIGN-extends. So the zero extension is done
-             * explicitly, which is what that comment meant all along --
-             * without it (float)(unsigned)k came back as a constant
-             * 4.7e18 whatever k was. */
+            /* irgen USED TO convert an `unsigned int` by asking for a
+             * SIGNED 64-bit conversion of it, on the grounds that "a
+             * 32-bit operation zero-extends its result into the
+             * eight-byte slot". That is true of a register write on
+             * x86-64 and aarch64 and false here: at RV32 the slot is four
+             * bytes and the next four are another temporary, and at RV64 a
+             * slot load SIGN-extends. Without the explicit zero extension
+             * below, (float)(unsigned)k came back as a constant 4.7e18
+             * whatever k was.
+             *
+             * It no longer does: target_widen_unsigned_fp_cvt() is false
+             * here, so an unsigned 32-bit source arrives as size 4 with
+             * sign 0 and __floatunsisf is called by name. This path stays
+             * because `src_w == 8` with a narrow source vreg is still a
+             * representable shape and the zero extension is still right. */
             rd(F, i->a, RV_A0);
             if (F->xlen == 32) rv_mv(t, RV_A1, RV_ZERO);
             else               ext_reg(F, RV_A0, RV_A0, 4, 0);
