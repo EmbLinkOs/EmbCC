@@ -60,12 +60,35 @@ gen() {
     done
     printf '%s\n' '    puts_("\n==END==\n"); return 0; }'
 }
-# An increment of a volatile is eight bytes here (ldr, add, str), so 28-35
-# walk a conditional branch's target across 256 bytes and 252-259 an
-# unconditional one's across 2048. If the code for a statement changes size
-# the sweep drifts off the limits, so the check below measures that it
-# still straddles both before believing a pass.
-ns="20 28 29 30 31 32 33 34 35 252 253 254 255 256 257 258 259"
+# Where the limits fall depends on how big a statement compiles to, which
+# every size improvement changes -- a hard-coded sweep drifted off both
+# limits the day `add` got a 16-bit form. So it is CALIBRATED: compile a
+# probe with 20 and 40 statements, read the conditional (the `if`) and the
+# unconditional (the jump over `else`) distances from the object code, and
+# centre each sweep on the padding that puts its branch at the limit.
+OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
+command -v "$OD" >/dev/null 2>&1 || { echo "SKIP: no llvm-objdump"; exit 0; }
+gen 20 40 > "$out/probe.c"
+"$EMBCC" --target=$T -Os -c "$out/probe.c" -o "$out/probe.o" || {
+    echo "the calibration probe does not compile"; exit 1; }
+cal=$("$OD" -d --no-show-raw-insn --triple=thumbv7m "$out/probe.o" | awk '
+    function hex(v,   d, k) { d = 0; for (k = 3; k <= length(v); k++)
+        d = d * 16 + index("0123456789abcdef", substr(v, k, 1)) - 1; return d }
+    /^[0-9a-f]+ <f[0-9]+>:/ { f = $2; seen_c = seen_u = 0 }
+    /\t(ble|bgt|blt|bge)(\.w)?\t/ && !seen_c && f != "" {
+        match($0, /imm = #0x[0-9a-f]+/); c[f] = hex(substr($0, RSTART + 7, RLENGTH - 7)); seen_c = 1 }
+    /\tb(\.w)?\t/ && seen_c && !seen_u {
+        match($0, /imm = #0x[0-9a-f]+/); if (RSTART) { u[f] = hex(substr($0, RSTART + 7, RLENGTH - 7)); seen_u = 1 } }
+    END {
+        sc = (c["<f40>:"] - c["<f20>:"]) / 20; su = (u["<f40>:"] - u["<f20>:"]) / 20;
+        if (sc <= 0 || su <= 0) { print "0 0"; exit }
+        printf "%d %d\n", 20 + (256 - c["<f20>:"]) / sc, 20 + (2048 - u["<f20>:"]) / su }')
+nc=${cal% *}; nu=${cal#* }
+[ "$nc" -gt 0 ] && [ "$nu" -gt 0 ] || {
+    echo "could not calibrate the padding from the probe"; exit 1; }
+ns=20
+k=$((nc - 5)); while [ $k -le $((nc + 5)) ]; do ns="$ns $k"; k=$((k + 1)); done
+k=$((nu - 5)); while [ $k -le $((nu + 5)) ]; do ns="$ns $k"; k=$((k + 1)); done
 gen $ns > "$out/r.c"
 cc -w -o "$out/host" "$out/r.c" "$H/hostio.c" 2>/dev/null ||
     { echo "the host reference does not build"; exit 1; }

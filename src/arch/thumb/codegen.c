@@ -2082,11 +2082,19 @@ static void gen_ins(struct t_fn *F, int n)
                : 0;                          /* IR_MUL: not an ALU op */
         int ra_ = rdr(F, i->a, T_ACC);
         int d = wreg(F, i->dst, T_ACC);
+        /* The flags are dead here -- no flag value survives from one IR
+         * instruction to the next (t_mov_imm_dead_flags says why) -- so
+         * the flag-setting forms are allowed, and for r0-r7 those are the
+         * 16-bit ones: `adds r0, #1` is two bytes where `addw` is four. */
         if (i->imm_b && i->op != IR_MUL) {
+            int lo = d < 8 && ra_ < 8;
+            if ((i->op == IR_ADD || i->op == IR_SUB) && lo &&
+                i->imm >= 0 && (i->imm <= 7 || (d == ra_ && i->imm <= 255))) {
+                t_alu_imm(t, op, d, ra_, i->imm, 1);
             /* addw/subw reach any 0..4095 where the modified immediate
              * reaches only what it can rotate into place, and almost
              * every constant folded here is a small offset. */
-            if ((i->op == IR_ADD || i->op == IR_SUB) &&
+            } else if ((i->op == IR_ADD || i->op == IR_SUB) &&
                 i->imm >= 0 && i->imm <= 4095) {
                 if (i->op == IR_ADD) t_addw(t, d, ra_, i->imm);
                 else                 t_subw(t, d, ra_, i->imm);
@@ -2106,8 +2114,12 @@ static void gen_ins(struct t_fn *F, int n)
             if (rb_ == T_TMP) operand_b(F, i, T_TMP);
             if (i->op == IR_MUL)
                 t_mul(t, d, ra_, rb_);
+            else if (d == rb_ && ra_ != rb_ && i->op != IR_SUB)
+                /* The 16-bit two-operand forms need the destination to
+                 * be the FIRST operand; these commute. */
+                t_alu_reg(t, op, d, rb_, ra_, 1);
             else
-                t_alu_reg(t, op, d, ra_, rb_, 0);
+                t_alu_reg(t, op, d, ra_, rb_, 1);   /* flags dead: above */
         }
         wrote(F, i->dst, d);
         return;
@@ -2130,10 +2142,10 @@ static void gen_ins(struct t_fn *F, int n)
         int sa = rdr(F, i->a, T_ACC);
         int d = wreg(F, i->dst, T_ACC);
         if (i->imm_b && i->imm >= 0 && i->imm < 32) {
-            t_shift_imm(t, sh, d, sa, (int)i->imm, 0);
+            t_shift_imm(t, sh, d, sa, (int)i->imm, 1);   /* flags dead */
         } else {
             operand_b(F, i, T_TMP);
-            t_shift_reg(t, sh, d, sa, T_TMP, 0);
+            t_shift_reg(t, sh, d, sa, T_TMP, 1);
         }
         wrote(F, i->dst, d);
         return;
