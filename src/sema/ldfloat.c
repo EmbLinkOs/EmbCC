@@ -242,6 +242,13 @@ enum ldf_fmt ldf_target_fmt(void)
      * not a degenerate one. */
     if (target_ldouble_size() == 8)
         return LDF_DOUBLE;
+    /* ...and one of four bytes is a float: AVR's, where avr-gcc makes
+     * double and long double both binary32. Falling through to binary128
+     * here rounded and ENCODED every long double constant as a quad, and
+     * the four bytes a static initializer kept were a quad's low word --
+     * zero for 1.5L. */
+    if (target_ldouble_size() == 4)
+        return LDF_FLOAT;
     /* x87's 80-bit extended is the EXCEPTION, not the rule: it is
      * x86-64's and nobody else's. aarch64 and both RISC-V widths use
      * IEEE binary128, so the test asks for the odd one out rather than

@@ -114,7 +114,7 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         L->align = ty_align(t);
         L->user_align = f->var_aligns ? f->var_aligns[i] : 0;
         L->is_volatile = t->is_volatile;
-        L->is_ldouble = t->kind == TY_LDOUBLE;
+        L->is_ldouble = ty_is_xldouble(t);
         L->is_int128 = t->kind == TY_INT128;
         L->is_int_or_ptr = ty_is_integer(t) || t->kind == TY_PTR;
         L->is_scalar_int_or_ptr =
@@ -159,7 +159,7 @@ int new_label(struct ir_func *fn) { return fn->nlabels++; }
  * produces one says w = 16 (codegen sizes the slot from that). */
 static int ty_w(const struct type *t)
 {
-    if (t->kind == TY_LDOUBLE || t->kind == TY_INT128) return 16;
+    if (ty_is_xldouble(t) || t->kind == TY_INT128) return 16;
     return ty_wide(t) ? 8 : 4;
 }
 
@@ -1806,9 +1806,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_EHTYPEID:          /* a catch type's selector: a constant */
         return emit_const(fn, eh_type_index(fn, e->gref), 8);
     case EXPR_FNUM:
-        if (e->ty->kind == TY_LDOUBLE)
+        if (ty_is_xldouble(e->ty))
             return emit_ldconst(fn, e->ldv ? e->ldv : ldf_from_double(e->fnum));
-        return emit_fconst(fn, e->fnum, ty_size(e->ty));
+        /* a long double that is a double (or a float): its value,
+         * which sema already rounded to that format */
+        return emit_fconst(fn, e->ldv ? ldf_to_double(e->ldv) : e->fnum,
+                           ty_size(e->ty));
     case EXPR_LABELADDR: {   /* &&label -> a void* to the label's code location */
         struct ir_ins *i = emit(fn);
         i->op = IR_LABELADDR;
@@ -1950,7 +1953,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_NEG:
     case EXPR_BNOT: {
         int v = gen_expr(fn, e->rhs);
-        if (e->kind == EXPR_NEG && e->ty->kind == TY_LDOUBLE) {
+        if (e->kind == EXPR_NEG && ty_is_xldouble(e->ty)) {
             /* the sign bit of a 16-byte value: a float IR_NEG (fchs, or
              * flipping bit 127) — exact for -0.0 and NaN like the XOR below */
             struct ir_ins *i = emit(fn);
@@ -2264,7 +2267,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
          * emitted with none, which cost nothing while a register held
          * any scalar and is half a `long long` on a 32-bit machine. */
         int mw = ty_is_float(e->ty) ? ty_size(e->ty) : ty_w(e->ty);
-        int mflt = ty_is_float(e->ty) && e->ty->kind != TY_LDOUBLE;
+        int mflt = ty_is_float(e->ty) && !ty_is_xldouble(e->ty);
         int a = gen_expr(fn, e->lhs);
         struct ir_ins *m1 = emit(fn);
         m1->op = IR_MOV;

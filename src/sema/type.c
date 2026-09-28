@@ -335,6 +335,16 @@ int ty_is_integer(const struct type *t)
            t->kind == TY_INT128;
 }
 
+/* A long double with a representation of its own -- x87's 80 bits or a
+ * 128-bit quad -- as opposed to one that IS a double (ARM EABI) or a
+ * float (AVR). Only these need the 16-byte paths; the others are
+ * lowered exactly as the type they share a format with, while staying a
+ * distinct C type for _Generic, format checking and C++ mangling. */
+int ty_is_xldouble(const struct type *t)
+{
+    return t && t->kind == TY_LDOUBLE && target_ldouble_size() > 8;
+}
+
 int ty_is_float(const struct type *t)
 {
     return t->kind == TY_FLOAT || t->kind == TY_DOUBLE ||

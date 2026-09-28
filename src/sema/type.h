@@ -172,6 +172,7 @@ struct type *ty_promote(struct type *t);
 struct type *ty_arith_common(struct type *a, struct type *b);
 int ty_is_scalar(const struct type *t);     /* integer or pointer */
 int ty_wide(const struct type *t);          /* 1 = 64-bit value class */
+int ty_is_xldouble(const struct type *t);   /* long double wider than double */
 int ty_signed_int(const struct type *t);    /* signed integer? */
 
 /* ---- SysV AMD64 argument classification (the ABI's §3.2.3) ----
