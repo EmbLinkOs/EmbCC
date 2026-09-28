@@ -1897,6 +1897,126 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
 }
 
 
+/* ---- atomics ---------------------------------------------------------
+ *
+ * ARMv7-M and ARMv8-M Mainline have exclusive loads and stores at one, two
+ * and four bytes, and every atomic here is a retry loop around a pair:
+ *
+ *      dmb
+ *   1: ldrex{b,h}  old, [addr]
+ *      <new from old>
+ *      strex{b,h}  lr, new, [addr]     -- 0 in lr when it took
+ *      cmp  lr, #0
+ *      bne  1b
+ *      dmb
+ *
+ * which is what GCC and clang emit for a sequentially consistent one on a
+ * Cortex-M. The barriers are always full: the IR does not carry the memory
+ * order, and the strongest one is right for every weaker request.
+ *
+ * Five values are live in the loop -- address, operand, old, new and the
+ * store's status -- and the backend's scratch set is four, so the status
+ * goes in lr: every prologue saves it, and nothing in the loop calls.
+ *
+ * The byte and halfword forms zero-extend, so a compare-and-swap compares
+ * against its expected value zero-extended to the same width, and a signed
+ * result is sign-extended on the way out. Eight bytes has no exclusive
+ * pair on ARMv7-M and is refused. */
+static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    int sz = i->size, addr, top, br;
+    if (sz != 1 && sz != 2 && sz != 4)
+        t_refuse(F->fn, i, "an atomic wider than four bytes (ARMv7-M has "
+                           "no doubleword exclusive; GCC calls libatomic "
+                           "for these)");
+#define LDX(rt) (sz == 4 ? t_ldrex(t, (rt), addr, 0) \
+                         : t_ldrexbh(t, (rt), addr, sz))
+#define STX(rt) (sz == 4 ? t_strex(t, T_LR, (rt), addr, 0) \
+                         : t_strexbh(t, T_LR, (rt), addr, sz))
+    addr = rdr(F, i->a, T_ADDR);
+    t_barrier(t, T_BAR_DMB);
+    if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW) {
+        int val = rdr(F, i->b, T_TMP), nw;
+        top = t->len;
+        LDX(T_ACC);
+        if (i->op == IR_XCHG) {
+            nw = val;
+        } else {
+            nw = T_SCR;
+            if (i->op == IR_XADD)
+                t_alu_reg(t, T_OP_ADD, nw, T_ACC, val, 0);
+            else if (i->imm == '&' || i->imm == 'n')
+                t_alu_reg(t, T_OP_AND, nw, T_ACC, val, 0);
+            else if (i->imm == '|')
+                t_alu_reg(t, T_OP_ORR, nw, T_ACC, val, 0);
+            else if (i->imm == '^')
+                t_alu_reg(t, T_OP_EOR, nw, T_ACC, val, 0);
+            else
+                t_refuse(F->fn, i, "an atomic read-modify-write of this "
+                                   "operation");
+            if (i->imm == 'n')
+                t_mvn_reg(t, nw, nw, 0);
+        }
+        STX(nw);
+        t_cmp_imm(t, T_LR, 0);
+        br = t_bcond16(t, T_NE);
+        if (!t_patch_bcond16(t, br, top))
+            internal_error("thumb: an atomic's retry loop is out of reach");
+    } else {
+        /* compare-and-swap: IR_CAS by value, IR_CMPXCHG with the expected
+         * value at *b and the value seen written back there */
+        int exp = T_TMP, des, fail, done;
+        if (i->op == IR_CAS && sz == 4) {
+            exp = rdr(F, i->b, T_TMP);
+        } else if (i->op == IR_CAS) {
+            t_ext(t, T_TMP, rdr(F, i->b, T_TMP), sz, 0);
+        } else {
+            int p = rdr(F, i->b, T_TMP);
+            t_ldst_imm(t, T_TMP, p, 0, sz, 0, 0);    /* zero-extended */
+        }
+        des = rdr(F, i->c, T_SCR);
+        top = t->len;
+        LDX(T_ACC);
+        t_cmp_reg(t, T_ACC, exp);
+        fail = t_bcond16(t, T_NE);
+        STX(des);
+        t_cmp_imm(t, T_LR, 0);
+        br = t_bcond16(t, T_NE);
+        done = t_b16(t);
+        if (!t_patch_bcond16(t, br, top) ||
+            !t_patch_bcond16(t, fail, t->len))
+            internal_error("thumb: a compare-and-swap loop is out of reach");
+        t_clrex(t);                  /* the failed path holds a reservation */
+        if (!t_patch_b16(t, done, t->len))
+            internal_error("thumb: a compare-and-swap loop is out of reach");
+        if (i->op == IR_CMPXCHG) {
+            /* *b = the value seen; the result is whether it matched */
+            int p = rdr(F, i->b, T_SCR);
+            int d = wreg(F, i->dst, T_SCR);
+            t_ldst_imm(t, T_ACC, p, 0, sz, 0, 1);
+            t_barrier(t, T_BAR_DMB);
+            t_cmp_reg(t, T_ACC, exp);
+            t_mov_imm(t, d, 1, 0);
+            {
+                int over = t_bcond16(t, T_EQ);
+                t_mov_imm(t, d, 0, 0);
+                t_patch_bcond16(t, over, t->len);
+            }
+            wrote(F, i->dst, d);
+            return;
+        }
+    }
+    t_barrier(t, T_BAR_DMB);
+    if (i->dst >= 0) {
+        if (sz < 4 && i->sign)
+            t_ext(t, T_ACC, T_ACC, sz, 1);
+        wr(F, i->dst, T_ACC);
+    }
+#undef LDX
+#undef STX
+}
+
 /* ---- one instruction ------------------------------------------------ */
 
 static void gen_ins(struct t_fn *F, int n)
@@ -2900,9 +3020,13 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_IGOTO: case IR_LABELADDR:
         t_refuse(fn, i, "a computed goto");
         return;
-    case IR_XCHG: case IR_XADD: case IR_CMPXCHG: case IR_ARMW:
-    case IR_CAS: case IR_CAS16:
-        t_refuse(fn, i, "an atomic operation");
+    case IR_XCHG: case IR_XADD: case IR_ARMW:
+    case IR_CAS: case IR_CMPXCHG:
+        thumb_atomic(F, i);
+        return;
+    case IR_CAS16:
+        t_refuse(fn, i, "a 16-byte atomic (ARMv7-M has no doubleword "
+                        "exclusive, let alone a quadword one)");
         return;
     default:
         t_refuse(fn, i, "this operation");

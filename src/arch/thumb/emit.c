@@ -612,6 +612,24 @@ int t_patch_b16(struct code *c, int at, int target)
     return 1;
 }
 
+/* The byte and halfword exclusives (ARMv7-M and v8-M Mainline have both):
+ * ldrexb/ldrexh zero-extend, and strexb/strexh put 0 in rd on success.
+ * No offset form exists for these. `size` is 1 or 2. */
+void t_ldrexbh(struct code *c, int rt, int rn, int size)
+{
+    hw2(c, 0xe8d0u | (unsigned)rn,
+           ((unsigned)rt << 12) | (size == 1 ? 0x0f4fu : 0x0f5fu));
+}
+void t_strexbh(struct code *c, int rd, int rt, int rn, int size)
+{
+    hw2(c, 0xe8c0u | (unsigned)rn,
+           ((unsigned)rt << 12) | (size == 1 ? 0x0f40u : 0x0f50u) |
+           (unsigned)rd);
+}
+/* clrex: drop the exclusive reservation, as a failed compare-and-swap
+ * does before it leaves the loop. */
+void t_clrex(struct code *c) { hw2(c, 0xf3bfu, 0x8f2fu); }
+
 void t_bx(struct code *c, int rm)  { hw(c, 0x4700u | (unsigned)(rm << 3)); }
 void t_blx(struct code *c, int rm) { hw(c, 0x4780u | (unsigned)(rm << 3)); }
 void t_nop(struct code *c)         { hw(c, 0xbf00u); }

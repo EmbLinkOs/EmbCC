@@ -1294,6 +1294,10 @@ static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
     i->imm = opc;
     i->size = ty_size(t);
     i->w = ty_w(t);
+    /* Whether the old value, read at `size`, extends as signed: a
+     * backend with sub-word exclusive loads (ldrexb/ldrexh zero-extend)
+     * needs it to hand back a `signed char` right. */
+    i->sign = ty_signed_int(t);
     i->dst = new_temp(fn);
     return i->dst;
 }
@@ -1522,6 +1526,7 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         i->c = des;
         i->size = ty_size(obj);
         i->w = w;
+        i->sign = ty_signed_int(obj);
         i->dst = new_temp(fn);
         return i->dst;
     }
@@ -1552,6 +1557,7 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         i->c = newv;
         i->size = ty_size(obj);
         i->w = w;
+        i->sign = ty_signed_int(obj);
         i->dst = new_temp(fn);
         int old = atomic_result(fn, i->dst, obj);
         if (ak == AK_SYNC_VAL_CAS)

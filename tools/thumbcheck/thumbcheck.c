@@ -281,6 +281,16 @@ int main(int argc, char **argv)
     t_ldrex(&C, 2, 3, 16);              expect("ldrex\tr2, [r3, #16]");
     t_strex(&C, 0, 1, 2, 0);            expect("strex\tr0, r1, [r2]");
     t_strex(&C, 3, 4, 5, 8);            expect("strex\tr3, r4, [r5, #8]");
+    t_ldrexbh(&C, 0, 1, 1);             expect("ldrexb\tr0, [r1]");
+    t_ldrexbh(&C, 12, 10, 2);           expect("ldrexh\tr12, [r10]");
+    t_strexbh(&C, 2, 3, 1, 1);          expect("strexb\tr2, r3, [r1]");
+    t_strexbh(&C, 9, 11, 10, 2);        expect("strexh\tr9, r11, [r10]");
+    t_clrex(&C);                        expect("clrex");
+
+    /* the 16-bit push/pop, chosen when the list is r0-r7 plus lr/pc */
+    t_push(&C, (1u << 3) | (1u << T_LR)); expect("push\t{r3, lr}");
+    t_pop(&C, (1u << 3) | (1u << T_PC));  expect("pop\t{r3, pc}");
+    t_push(&C, 0xf0u | (1u << T_LR));     expect("push\t{r4, r5, r6, r7, lr}");
 
     fwrite(C.p, 1, (size_t)C.len, stdout);
     return 0;
