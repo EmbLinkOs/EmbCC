@@ -51,8 +51,27 @@
  * lowerings read as pairs: A_LO/A_HI hold the left operand and
  * B_LO/B_HI the right, and the 32-bit paths keep using T_ACC, T_TMP and
  * T_ADDR for the same registers. */
-#define T_ADDR 10
-#define T_SCR   9
+/* r9, r10 and r11 are the backend's fixed scratch registers, and all
+ * three are CALLEE-SAVED: a function that touches one must push it. Every
+ * use goes through t_scr(), which records it, so the prologue can save
+ * only what the body used (see the pass loop in the function generator).
+ * Recording a register that is merely compared against is harmless -- it
+ * only saves one more -- and nothing may name r9-r11 by number instead. */
+static unsigned g_t_scr_used;
+static int t_scr(int r) { g_t_scr_used |= 1u << r; return r; }
+#define T_SCR  t_scr(9)
+#define T_ADDR t_scr(10)
+#undef T_TMP
+#define T_TMP  t_scr(11)
+#define T_SCR_ALL ((1u << 9) | (1u << 10) | (1u << 11))
+/* The numbers, for COMPARING a register against one: evaluating the
+ * marker would record a use that is not one. */
+#define R_SCR  9
+#define R_ADDR 10
+#define R_TMP  11
+/* A parallel move is given R_SCR as the register that breaks a cycle,
+ * and only a move that USES it touches r9. */
+static int pm_reg(int r) { return r == R_SCR ? t_scr(r) : r; }
 
 #define A_LO T_ACC      /* r12 */
 #define A_HI T_TMP      /* r11 */
@@ -63,7 +82,7 @@
  * wants sp eight-byte aligned and `push` of an odd count would break it
  * — and because r9 then costs nothing and is a fourth scratch if this
  * file ever wants one. */
-#define SAVE_MASK ((1u << 9) | (1u << T_ADDR) | (1u << T_TMP) | (1u << T_LR))
+#define SAVE_MASK (T_SCR_ALL | (1u << T_LR))
 
 /* AAPCS32 requires sp eight-byte aligned at every public interface, so
  * the push must move it by a multiple of eight -- an EVEN number of
@@ -79,24 +98,29 @@
  * The symptom was three calls away from the cause: a variadic callee
  * read a `long long` stack argument as zero because its CALLER had an
  * odd prologue. */
-static unsigned save_mask_for(int nsave, const int *used)
+/* `scr` is which of r9-r11 the body uses (T_SCR_ALL when not known).
+ * The pad is r3: an argument register, so nothing is lost by saving it,
+ * and never a return register, so nothing is lost by restoring it -- and
+ * unlike r12 it keeps an all-low list in the 16-bit push/pop. GCC pads
+ * the same way. */
+static unsigned save_mask_for(int nsave, const int *used, unsigned scr)
 {
-    unsigned m = SAVE_MASK;
-    int n = 4;
-    for (int k = 0; k < nsave; k++) {
+    unsigned m = (scr & T_SCR_ALL) | (1u << T_LR);
+    int n = 0;
+    for (int k = 0; k < nsave; k++)
         m |= 1u << used[k];
+    for (unsigned b = m; b; b &= b - 1)
         n++;
-    }
     if (n & 1)
-        m |= 1u << T_ACC;      /* r12: the pad */
+        m |= 1u << 3;          /* r3: the pad */
     return m;
 }
 
 /* The bytes that mask moves sp by -- what the stack-parameter offsets
  * are measured from, so it must be the same answer. */
-static long save_bytes_for(int nsave, const int *used)
+static long save_bytes_for(int nsave, const int *used, unsigned scr)
 {
-    unsigned m = save_mask_for(nsave, used);
+    unsigned m = save_mask_for(nsave, used, scr);
     long n = 0;
     for (int r = 0; r < 16; r++)
         if (m & (1u << r)) n++;
@@ -166,6 +190,9 @@ struct t_fn {
      * or bc_end -1 once a label has been placed since. See
      * invert_last_bcond. */
     int bc_end, bc_fix;
+    /* Which of the scratch registers r9-r11 the prologue saves: all of
+     * them until a pass has shown which the body uses. */
+    unsigned scr_save;
     int used_callee[RA_MAXPOOL];
     int nsave;           /* how many of those it took */
     long save_at;        /* where the prologue spilled them */
@@ -968,7 +995,7 @@ static void wr(struct t_fn *F, int v, int reg)
     if (!t_ldst_imm(F->t, reg, T_SP, F->slot[v], 4, 0, 1)) {
         /* The offset does not reach: compute the address in a scratch
          * that is not the value being stored. */
-        int a = reg == T_ADDR ? T_TMP : T_ADDR;
+        int a = reg == R_ADDR ? T_TMP : T_ADDR;
         t_mov_imm(F->t, a, F->slot[v], 0);
         t_alu_reg(F->t, T_OP_ADD, a, T_SP, a, 0);
         t_ldst_imm(F->t, reg, a, 0, 4, 0, 1);
@@ -1000,7 +1027,7 @@ static void wr64(struct t_fn *F, int v, int lo, int hi)
         return;
     if (!t_ldst_imm(F->t, lo, T_SP, F->slot[v], 4, 0, 1) ||
         !t_ldst_imm(F->t, hi, T_SP, F->slot[v] + 4, 4, 0, 1)) {
-        int a = (lo == T_SCR || hi == T_SCR) ? T_ADDR : T_SCR;
+        int a = (lo == R_SCR || hi == R_SCR) ? T_ADDR : T_SCR;
         t_add_sp(F->t, a, F->slot[v]);
         t_ldst_imm(F->t, lo, a, 0, 4, 0, 1);
         t_ldst_imm(F->t, hi, a, 4, 4, 0, 1);
@@ -1290,12 +1317,12 @@ static void fp_args2(struct t_fn *F, const struct ir_ins *i)
         if (in_reg(F, i->b)) { pd[npm] = T_R1; ps[npm] = F->loc[i->b]; npm++; }
         if (npm) {
             int od[8], os[8];
-            int m = ra_parallel_move(pd, ps, npm, T_SCR, od, os, 8);
+            int m = ra_parallel_move(pd, ps, npm, R_SCR, od, os, 8);
             if (m < 0)
                 internal_error("thumb: a helper's argument setup is not a "
                                "well-formed move");
             for (int k = 0; k < m; k++)
-                t_mov_reg(F->t, od[k], os[k]);
+                t_mov_reg(F->t, pm_reg(od[k]), pm_reg(os[k]));
         }
         /* The loads come after: they only WRITE argument registers, so
          * nothing still needs the old contents of one. */
@@ -2104,7 +2131,7 @@ static void gen_ins(struct t_fn *F, int n)
                 else     t_subw(t, d, ra_, mag);
             } else if (!t_alu_imm(t, op, d, ra_, i->imm, 0)) {
                 int rb_ = (!in_reg(F, i->b)) ? T_TMP : F->loc[i->b];
-                if (rb_ == T_TMP) operand_b(F, i, T_TMP);
+                if (rb_ == R_TMP) operand_b(F, i, T_TMP);
                 t_alu_reg(t, op, d, ra_, rb_, 0);
             }
             wrote(F, i->dst, d);
@@ -2115,7 +2142,7 @@ static void gen_ins(struct t_fn *F, int n)
              * already in a register, so a load of it cannot land in the
              * destination before the operation reads it. */
             int rb_ = (i->imm_b || !in_reg(F, i->b)) ? T_TMP : F->loc[i->b];
-            if (rb_ == T_TMP) operand_b(F, i, T_TMP);
+            if (rb_ == R_TMP) operand_b(F, i, T_TMP);
             if (i->op == IR_MUL)
                 t_mul(t, d, ra_, rb_);
             else if (d == rb_ && ra_ != rb_ && i->op != IR_SUB)
@@ -2514,13 +2541,13 @@ static void gen_ins(struct t_fn *F, int n)
             }
             if (npm) {
                 int od[16], os[16];
-                int m = ra_parallel_move(pd, ps, npm, T_SCR, od, os,
+                int m = ra_parallel_move(pd, ps, npm, R_SCR, od, os,
                                          (int)(sizeof od / sizeof od[0]));
                 if (m < 0)
                     internal_error("thumb: a call's argument setup is not "
                                    "a well-formed move");
                 for (int k = 0; k < m; k++)
-                    t_mov_reg(t, od[k], os[k]);
+                    t_mov_reg(t, pm_reg(od[k]), pm_reg(os[k]));
             }
         }
         for (int k = 0; k < i->nargs; k++) {
@@ -2852,6 +2879,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.floc = NULL; F.nfsave = 0;
     F.bc_end = F.bc_fix = -1;
     F.shortb = NULL; F.nshortb = 0;
+    F.scr_save = T_SCR_ALL;
     if (g_t_regalloc) {
         /* nsave is what the allocator REPORTS it took, and the prologue
          * pushes exactly that -- so the two must be computed together.
@@ -2946,7 +2974,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         sg0 = F.st->ng, sf0 = F.st->nf;
     char *shortb = NULL;
     int nshortb = 0;
-    for (int pass = 0; pass < 2; pass++) {
+    for (int pass = 0; pass < 3; pass++) {
+    g_t_scr_used = 0;
     if (pass) {
         t->len = len0;
         fn->nlines = nl0;
@@ -2994,7 +3023,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * COUNT sets how far sp moves, which every stack-parameter offset
      * below is measured from. F.nsave is already known -- ra_allocate
      * ran before layout() -- so there is nothing left to discover. */
-    push_at = t_push(t, save_mask_for(F.nsave, F.used_callee));
+    push_at = t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save));
     if (F.nfsave)
         t_vpush_s(t, 16, F.nfsave, 0);
     /* The mask is PATCHED at the end with whatever callee-saved
@@ -3024,7 +3053,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * which is a miscompile in any function with more arguments
          * than the register file holds -- and the pad is exactly the
          * term that was missing. */
-        long base = F.frame + save_bytes_for(F.nsave, F.used_callee) +
+        long base = F.frame + save_bytes_for(F.nsave, F.used_callee,
+                                             F.scr_save) +
                     (long)F.nfsave * 4;
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
         int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
@@ -3149,14 +3179,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * already saved it, and it holds nothing of its own yet. */
         if (npmv) {
             int od[RA_MAXPOOL * 2], os[RA_MAXPOOL * 2];
-            int n = ra_parallel_move(pmv_dst, pmv_src, npmv, T_SCR, od, os,
+            int n = ra_parallel_move(pmv_dst, pmv_src, npmv, R_SCR, od, os,
                                      (int)(sizeof od / sizeof od[0]));
             if (n < 0)
                 internal_error("thumb: %s: the prologue's parameter "
                                "placement is not a well-formed move",
                                fn->name);
             for (int k = 0; k < n; k++)
-                t_mov_reg(t, od[k], os[k]);
+                t_mov_reg(t, pm_reg(od[k]), pm_reg(os[k]));
         }
         /* Then the loads: they only WRITE, so by now nothing still needs
          * the old contents of an argument register. */
@@ -3196,7 +3226,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* The same set the prologue pushed: SAVE_MASK plus whatever
          * callee-saved registers the allocator took. Built here and
          * patched into the push below, so the two cannot disagree. */
-        unsigned mask = save_mask_for(F.nsave, F.used_callee);
+        unsigned mask = save_mask_for(F.nsave, F.used_callee, F.scr_save);
         t_patch_push(t, push_at, mask);
         if (fn->is_varargs) {
             /* Return through lr rather than popping into pc: the four
@@ -3248,17 +3278,36 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                                           : (d >= -256 && d <= 254);
             any |= shortb[i];
         }
-        if (!any || !g_t_regalloc)
+        /* ...and which scratch registers it touched: only those need
+         * saving. Inline asm keeps all three, since what it clobbers is
+         * not seen here. */
+        {
+            unsigned used = g_t_scr_used & T_SCR_ALL;
+            for (int n = 0; n < fn->nins; n++)
+                if (fn->ins[n].op == IR_ASM)
+                    used = T_SCR_ALL;
+            if (!g_t_regalloc || (!any && used == T_SCR_ALL))
+                break;
+            F.scr_save = used;
+        }
+    } else if (pass == 1) {
+        /* The second pass saved only what the first used. It emitted
+         * the same body, so it should have used the same -- checked,
+         * and a third pass with everything saved if it did not, rather
+         * than return with a callee-saved register clobbered. */
+        if (!(g_t_scr_used & T_SCR_ALL & ~F.scr_save))
             break;
+        F.scr_save = T_SCR_ALL;
     }
-    }                                   /* the two passes */
+    }                                   /* the passes */
     free(shortb);
     }
 
     f->code_len = t->len - f->code_off;
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved. */
-    f->stack_bytes = (int)(F.frame + save_bytes_for(F.nsave, F.used_callee) +
+    f->stack_bytes = (int)(F.frame + save_bytes_for(F.nsave, F.used_callee,
+                                                    F.scr_save) +
                            (long)F.nfsave * 4);
     free(F.usecnt);
     free(F.slot);

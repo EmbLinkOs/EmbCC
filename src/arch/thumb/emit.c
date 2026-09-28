@@ -1,5 +1,8 @@
 /* Thumb-2 encoding for ARMv7-M. See emit.h for the model; every encoder
  * here is checked against llvm-objdump by tools/thumbcheck. */
+#include <stdio.h>
+#include <stdlib.h>
+
 #include "emit.h"
 
 /* A Thumb instruction is one or two halfwords, each written
@@ -485,22 +488,45 @@ void t_sp_adjust(struct code *c, long imm, int sub)
     t_alu_reg(c, sub ? T_OP_SUB : T_OP_ADD, T_SP, T_SP, T_ACC, 0);
 }
 
+/* push/pop: the 16-bit form (T1) when the list is r0-r7 plus lr (push)
+ * or pc (pop), which is every function whose saves are all low -- and a
+ * leaf's `push {r3, lr}` / `pop {r3, pc}` is two bytes each. */
 int t_push(struct code *c, unsigned mask)
 {
     int at = c->len;
-    hw2(c, 0xe92du, mask & 0x5fffu);
+    if (!(mask & ~(0xffu | (1u << 14))))
+        hw(c, 0xb400u | ((mask >> 14) & 1u) << 8 | (mask & 0xffu));
+    else
+        hw2(c, 0xe92du, mask & 0x5fffu);
     return at;
 }
 
 int t_pop(struct code *c, unsigned mask)
 {
     int at = c->len;
-    hw2(c, 0xe8bdu, mask & 0xdfffu);
+    if (!(mask & ~(0xffu | (1u << 15))))
+        hw(c, 0xbc00u | ((mask >> 15) & 1u) << 8 | (mask & 0xffu));
+    else
+        hw2(c, 0xe8bdu, mask & 0xdfffu);
     return at;
 }
 
+/* The mask is re-written in whichever form t_push chose; it cannot
+ * change form, because the size would move everything after it. */
 void t_patch_push(struct code *c, int at, unsigned mask)
 {
+    if (((unsigned)(c->p[at + 1] << 8 | c->p[at]) & 0xfe00u) == 0xb400u) {
+        if (mask & ~(0xffu | (1u << 14)))
+        {
+            /* emit.c is linked into the encoding checkers too, which
+             * carry no driver: no internal_error here. */
+            fprintf(stderr, "embcc: internal: thumb: a 16-bit push "
+                            "patched with a mask it cannot encode\n");
+            abort();
+        }
+        patch_hw(c, at, 0xb400u | ((mask >> 14) & 1u) << 8 | (mask & 0xffu));
+        return;
+    }
     patch_hw(c, at + 2, mask & 0x5fffu);
 }
 
