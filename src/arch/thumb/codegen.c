@@ -157,6 +157,10 @@ struct t_fn {
      * reader of a slot goes through slot_of(), which refuses it. */
     int *floc;
     int nfsave;          /* s16.. that the prologue vpushes (even) */
+    /* The last conditional branch: where its code ended and its fixup,
+     * or bc_end -1 once a label has been placed since. See
+     * invert_last_bcond. */
+    int bc_end, bc_fix;
     int used_callee[RA_MAXPOOL];
     int nsave;           /* how many of those it took */
     long save_at;        /* where the prologue spilled them */
@@ -792,50 +796,75 @@ static void layout(struct t_fn *F)
     for (int v = 0; v < fn->nvregs; v++)
         F->slot[v] = -1;
 
-    for (int v = 0; v < fn->nvars; v++) {
-        int size, align;
-        /* A LOCAL in a register needs no slot either. The allocator
-         * only ever gives one to a local whose address is never taken
-         * (anything else is opaque to it), and under -g every local is
-         * pinned to its slot so this cannot fire -- which is what keeps
-         * DW_AT_location true. */
-        if ((F->loc && F->loc[v] >= 0) || in_freg(F, v))
-            continue;
-        size = fn->locals[v].size ? fn->locals[v].size : 4;
-        align = fn->locals[v].user_align ? fn->locals[v].user_align
-              : fn->locals[v].align ? fn->locals[v].align : 4;
-        if (align < 4) align = 4;
-        off = (off + align - 1) & ~(long)(align - 1);
-        F->slot[v] = off;
-        off += size;
+    /* ORDER matters as much as size here. Thumb-2's 16-bit `ldr/str rt,
+     * [sp, #imm]` reaches 1020 bytes (and only r0-r7); past that every
+     * access is the 32-bit form, and a function with one large array used
+     * to push every temporary out of reach. So the busiest slots go
+     * nearest sp: the temporaries, then the eight-byte ones and the small
+     * locals, and the large locals -- arrays, structs -- last. */
+    {
+        /* Temporaries share a pool of four-byte slots: two whose live
+         * ranges do not overlap take the same one (ra_coalesce_temps, the
+         * pass x86-64 and aarch64 use). A 64-bit temp keeps a slot of its
+         * own, eight-aligned, outside the pool -- the pool's slots are
+         * four -- so it is shown to the coalescer as if it had a register
+         * and placed below. */
+        int nv = fn->nvregs, npool = 0, has_cgoto = 0;
+        int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
+        for (int v = 0; v < nv; v++)
+            loc2[v] = (F->loc && F->loc[v] >= 0) || F->wide[v] ? 0 : -1;
+        for (int n = 0; n < fn->nins; n++)
+            if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
+                has_cgoto = 1;
+        {
+            struct ra_slots so = { loc2, F->floc, g_t_regalloc, has_cgoto };
+            int *tslot = ra_coalesce_temps(fn, fn->nvars, &so, &npool);
+            long base = off;
+            for (int v = fn->nvars; v < nv; v++) {
+                int k = v - fn->nvars;
+                if (loc2[v] >= 0 || in_freg(F, v) || !tslot || tslot[k] < 0)
+                    continue;
+                F->slot[v] = base + (long)tslot[k] * 4;
+            }
+            off = base + (long)npool * 4;
+            free(tslot);
+        }
+        for (int v = fn->nvars; v < nv; v++) {
+            if (!F->wide[v] || (F->loc && F->loc[v] >= 0))
+                continue;
+            /* Eight-aligned as well as eight wide: AAPCS32 aligns `long
+             * long` to 8, and ldrd would need it. */
+            off = (off + 7) & ~7L;
+            F->slot[v] = off;
+            off += 8;
+        }
+        free(loc2);
     }
-    for (int v = fn->nvars; v < fn->nvregs; v++) {
-        /* A TEMPORARY the allocator put in a register needs no slot.
-         * layout() runs after ra_allocate for exactly this reason, and
-         * every helper that would write one (wr, wrote, wr64) already
-         * asks in_reg first and returns without touching the slot -- so
-         * the slot was reserved, aligned and paid for in `sub sp` and
-         * then never read or written.
-         *
-         * It is worth real bytes: `int f(int a,int b){return a+b;}` had
-         * a 24-byte frame for two values that were both in registers,
-         * and the sub/add pair around it. Only temporaries, though:
-         * a LOCAL keeps its slot, because its address can be taken and
-         * because -g describes it by that slot.
-         *
-         * `F->slot[v]` stays -1 for these, which wr() already treats as
-         * "nowhere to store" and skips. */
-        int size;
-        if ((F->loc && F->loc[v] >= 0) || in_freg(F, v))
-            continue;
-        /* Eight-byte values are eight-ALIGNED as well as eight wide:
-         * AAPCS32 aligns `long long` to 8, and a pair straddling that
-         * boundary would be legal but slower and would break `ldrd` if
-         * this ever emits one. */
-        size = F->wide[v] ? 8 : 4;
-        off = (off + size - 1) & ~(long)(size - 1);
-        F->slot[v] = off;
-        off += size;
+    {
+        /* Locals: those nothing names need no slot (SROA leaves whole
+         * aggregates behind that way), nor one the allocator put in a
+         * register (ra_slot_dead; under -g every local keeps its slot,
+         * which is what DW_AT_location describes). Small ones first. */
+        char *lref = ra_locals_referenced(fn, F->want_debug);
+        for (int pass = 0; pass < 2; pass++)
+            for (int v = 0; v < fn->nvars; v++) {
+                int size, align;
+                if ((F->loc && F->loc[v] >= 0) || in_freg(F, v))
+                    continue;
+                if (!lref[v] ||
+                    ra_slot_dead(fn, F->loc, F->floc, v, F->want_debug))
+                    continue;
+                size = fn->locals[v].size ? fn->locals[v].size : 4;
+                if ((size > 8) != pass)
+                    continue;
+                align = fn->locals[v].user_align ? fn->locals[v].user_align
+                      : fn->locals[v].align ? fn->locals[v].align : 4;
+                if (align < 4) align = 4;
+                off = (off + align - 1) & ~(long)(align - 1);
+                F->slot[v] = off;
+                off += size;
+            }
+        free(lref);
     }
     F->scratch_at = (off + 7) & ~7L;
     off = F->scratch_at + fn->scratch_bytes;
@@ -1030,6 +1059,45 @@ static void jump_to(struct t_fn *F, int label)
 static void jump_if(struct t_fn *F, int cond, int label)
 {
     want_label(F, t_bcond(F->t, cond), label, cond);
+    F->bc_end = F->t->len;
+    F->bc_fix = F->nfix - 1;
+}
+
+/* About to jump to `label` from IR instruction n. If the code so far ends
+ * in a conditional branch around THIS jump --
+ *
+ *      b<c>  L1                 b<!c> label
+ *      b     label      ==>
+ *   L1:                      L1:
+ *
+ * -- turn it into one branch on the opposite condition. The IR often
+ * has a move between the two that the allocator made free (a `?:` arm
+ * whose value is already in the merge's register), and a return's jump
+ * to the epilogue is the same shape, so this is caught here, after
+ * allocation, and not only in the optimizer.
+ *
+ * Only when NOTHING was emitted since the branch and no label was placed
+ * (nothing can arrive between the two), and L1 is where control goes
+ * next. ARM inverts a condition by its low bit; the float conditions
+ * were chosen so that is exact for an unordered result too. */
+static int invert_last_bcond(struct t_fn *F, int n, int label)
+{
+    struct ir_func *fn = F->fn;
+    int hit = 0, cond, at;
+    if (F->bc_end != F->t->len || F->bc_fix != F->nfix - 1)
+        return 0;
+    for (int m = n + 1; m < fn->nins && fn->ins[m].op == IR_LABEL; m++)
+        if (fn->ins[m].label == F->fix[F->bc_fix].label) { hit = 1; break; }
+    if (!hit)
+        return 0;
+    cond = F->fix[F->bc_fix].cond ^ 1;
+    F->t->len -= 4;
+    at = t_bcond(F->t, cond);
+    F->fix[F->bc_fix].at = at;
+    F->fix[F->bc_fix].label = label;
+    F->fix[F->bc_fix].cond = cond;
+    F->bc_end = -1;
+    return 1;
 }
 
 /* ---- calls ---------------------------------------------------------- */
@@ -1937,6 +2005,7 @@ static void gen_ins(struct t_fn *F, int n)
     switch (i->op) {
     case IR_LABEL:
         F->label_off[i->label] = t->len;
+        F->bc_end = -1;          /* something may branch here */
         return;
     case IR_JMP:
         /* A jump to the label that follows it is not an instruction.
@@ -1945,7 +2014,8 @@ static void gen_ins(struct t_fn *F, int n)
         if (n + 1 < fn->nins && fn->ins[n + 1].op == IR_LABEL &&
             fn->ins[n + 1].label == i->label)
             return;
-        jump_to(F, i->label);
+        if (!invert_last_bcond(F, n, i->label))
+            jump_to(F, i->label);
         return;
     case IR_CONST: {
         /* Build the constant in the destination's OWN register when it
@@ -2549,7 +2619,7 @@ static void gen_ins(struct t_fn *F, int n)
          * except the LAST instruction, which the epilogue already
          * follows. */
     ret_epilogue:
-        if (n + 1 < fn->nins)
+        if (n + 1 < fn->nins && !invert_last_bcond(F, n, fn->nlabels))
             jump_to(F, fn->nlabels);
         return;
     }
@@ -2743,6 +2813,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.va_regsave = F.va_first = -1;
     F.loc = NULL; F.nsave = 0; F.save_at = 0;
     F.floc = NULL; F.nfsave = 0;
+    F.bc_end = F.bc_fix = -1;
     if (g_t_regalloc) {
         /* nsave is what the allocator REPORTS it took, and the prologue
          * pushes exactly that -- so the two must be computed together.
