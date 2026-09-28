@@ -222,6 +222,13 @@ int target_pcs_differs(int pcs);
 /* Was the target named with an -eabihf triple (thumbv7em-none-eabihf)?
  * The driver reads it as -mfpu=<the part's> -mfloat-abi=hard. */
 int target_thumb_hf_name(void);
+
+/* Thumb's answer to "may the optimizer fold this constant into op's
+ * immediate operand" (arch/thumb/codegen.c). Asked only by the optimizer
+ * (opt.c), which is linked only into embcc: target.c is also linked into
+ * the standalone encoding checkers, which carry no backend, so it must
+ * not name one. */
+int thumb_imm_foldable(int op, long imm);
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);

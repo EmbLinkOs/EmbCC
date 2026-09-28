@@ -7122,6 +7122,17 @@ static enum binop swap_pred(enum binop p)
  * the value need not be materialised in a register. Run once AFTER the main
  * fixpoint (fold/lvn/copyprop never see the imm_b form) and followed by DCE,
  * which drops the CONSTs that folding left unreferenced. */
+/* May constant `imm` become op's immediate operand? Yes, except where the
+ * target's instructions cannot hold it: there a folded constant is rebuilt
+ * at every use -- a movw+movt pair each time on Thumb -- where one left in
+ * a register is built once and can be hoisted out of a loop. */
+static int target_imm_foldable(int op, long imm)
+{
+    if (target_get() == TARGET_THUMB)
+        return thumb_imm_foldable(op, imm);
+    return 1;
+}
+
 static int pass_immfold(struct ir_func *fn)
 {
     struct defs d;
@@ -7150,11 +7161,13 @@ static int pass_immfold(struct ir_func *fn)
         default:
             continue;
         }
-        if (get_const(fn, &d, i->b, &B) && fits_imm32(B)) {
+        if (get_const(fn, &d, i->b, &B) && fits_imm32(B) &&
+            target_imm_foldable(i->op, B)) {
             i->imm = B; i->imm_b = 1; i->b = -1;    /* op a, imm */
             changed = 1;
         } else if ((commutative || i->op == IR_CMP) &&
-                   get_const(fn, &d, i->a, &A) && fits_imm32(A)) {
+                   get_const(fn, &d, i->a, &A) && fits_imm32(A) &&
+                   target_imm_foldable(i->op, A)) {
             /* Constant in the first operand: move it to the immediate, keeping
              * a valid instruction — commutative ops just swap, a compare swaps
              * and flips its predicate. */

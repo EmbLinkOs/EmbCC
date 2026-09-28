@@ -2095,9 +2095,13 @@ static void gen_ins(struct t_fn *F, int n)
              * reaches only what it can rotate into place, and almost
              * every constant folded here is a small offset. */
             } else if ((i->op == IR_ADD || i->op == IR_SUB) &&
-                i->imm >= 0 && i->imm <= 4095) {
-                if (i->op == IR_ADD) t_addw(t, d, ra_, i->imm);
-                else                 t_subw(t, d, ra_, i->imm);
+                i->imm >= -4095 && i->imm <= 4095) {
+                /* A negative one is the other operation: x + -5 is a
+                 * subw of 5. */
+                int add = (i->op == IR_ADD) == (i->imm >= 0);
+                long mag = i->imm < 0 ? -i->imm : i->imm;
+                if (add) t_addw(t, d, ra_, mag);
+                else     t_subw(t, d, ra_, mag);
             } else if (!t_alu_imm(t, op, d, ra_, i->imm, 0)) {
                 int rb_ = (!in_reg(F, i->b)) ? T_TMP : F->loc[i->b];
                 if (rb_ == T_TMP) operand_b(F, i, T_TMP);

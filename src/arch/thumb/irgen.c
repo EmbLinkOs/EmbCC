@@ -281,3 +281,25 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     ins->dst = -1;
     ins->a = ins->b = -1;
 }
+
+/* What the IR_ADD..IR_CMP lowerings in codegen.c encode as an immediate without
+ * building the constant in a register first -- the answer the optimizer
+ * asks for before folding one (target_imm_foldable). It must say what
+ * those lowerings DO: anything else is folded and then rebuilt at each
+ * use, which is exactly what asking avoids.
+ *
+ * HERE rather than beside them because the optimizer asks it, and embls
+ * links the optimizer without the code generator. */
+int thumb_imm_foldable(int op, long imm)
+{
+    switch (op) {
+    case IR_ADD: case IR_SUB:
+        return (imm >= -4095 && imm <= 4095) || t_imm_ok(imm);
+    case IR_AND: case IR_OR: case IR_XOR:
+        return t_imm_ok(imm);
+    case IR_CMP:
+        return (imm >= 0 && imm <= 255) || t_imm_ok(imm);
+    default:                     /* MUL has no immediate form */
+        return 0;
+    }
+}
