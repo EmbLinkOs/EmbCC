@@ -2047,7 +2047,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 sema_error_at(u, e->line, e->col,
                            "va_start in '%s', which is not variadic",
                            f->name);
-            if (is_copy)   /* SysV's tag is 24 bytes, AAPCS64's 32 */
+            /* The hidden tag, only where there IS a tag. SysV's is 24
+             * bytes and AAPCS64's 32, and both are LP64, where long[4] is
+             * 32. Where a va_list is a bare pointer irgen lowers va_copy to
+             * an assignment and never looks at this -- and on AVR, where
+             * long[4] is sixteen bytes, it was a 16-byte buffer that a
+             * 24-byte copy ran eight bytes past. */
+            if (is_copy && !target_va_list_is_pointer())
                 e->var_index = scope_add(sc, "<va_copy tag>",
                                          ty_array(ty_base(TY_LONG, 0), 4),
                                          NULL);

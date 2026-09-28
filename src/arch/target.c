@@ -188,6 +188,19 @@ int target_char_unsigned(void)
 int target_wchar_unsigned(void) { return g_model[g_arch].wchar_uns; }
 int target_has_int128(void)     { return g_model[g_arch].int128; }
 
+int target_va_list_is_pointer(void)
+{
+    switch (target_get()) {
+    case TARGET_X86_64:  return 0;   /* SysV: __va_list_tag, 24 bytes */
+    case TARGET_AARCH64: return 0;   /* AAPCS64: the va_list record, 32 */
+    case TARGET_THUMB:   return 1;   /* AAPCS32: void * */
+    case TARGET_RISCV32:
+    case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */
+    case TARGET_AVR:     return 1;   /* avr-gcc: char * */
+    }
+    return 0;
+}
+
 int target_widen_unsigned_fp_cvt(void)
 {
     return g_arch == TARGET_X86_64 || g_arch == TARGET_AARCH64;

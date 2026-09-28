@@ -146,6 +146,26 @@ int target_has_int128(void);
  * flash, for a cast a program writes without thinking about it. */
 int target_widen_unsigned_fp_cvt(void);
 
+/* Is a va_list a bare POINTER at the next variadic argument, rather than a
+ * pointer to a tag that va_start builds?
+ *
+ * It decides what va_copy is. Where there is a tag -- SysV x86-64's 24-byte
+ * __va_list_tag, AAPCS64's 32-byte record -- va_arg advances the tag in
+ * place, so a copy needs a tag of its own. Where the va_list is the pointer
+ * itself, the copy IS the assignment, and copying "the tag" copies the
+ * arguments instead.
+ *
+ * This used to be an enumeration written inline in irgen -- "thumb, riscv32,
+ * riscv64" -- and when AVR arrived nobody added it. So AVR took the x86-64
+ * path: a hidden `long[4]` tag, which is SIXTEEN bytes where long is four,
+ * and a 24-byte memcpy into it. Eight bytes ran over whatever the frame
+ * layout had put next. At -O0 `copied(1, 7)` returned 7 instead of 707 and
+ * the program carried on printing as if nothing were wrong.
+ *
+ * So it is a switch here with NO default: -Wswitch under -Werror refuses to
+ * build until a new target says which it is. */
+int target_va_list_is_pointer(void);
+
 /* ARMv7E-M (Cortex-M4/M7) rather than ARMv7-M (Cortex-M3). Set by the
  * --target= name and by -mcpu=. The instruction selection is the same
  * for both; this changes what the object SAYS it was built for, which

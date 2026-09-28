@@ -2247,9 +2247,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
              * the copy IS the assignment. Copying 24 bytes from it would
              * copy the ARGUMENTS, and advancing either list would then
              * walk a snapshot of them. */
-            if (target_get() == TARGET_THUMB ||
-                target_get() == TARGET_RISCV32 ||
-                target_get() == TARGET_RISCV64) {
+            if (target_va_list_is_pointer()) {
                 struct type *ptr = ty_int_of_size(target_ptr_size(), 1);
                 int dsta = gen_addr(fn, e->args[0]);
                 int src = gen_expr(fn, e->args[1]);
