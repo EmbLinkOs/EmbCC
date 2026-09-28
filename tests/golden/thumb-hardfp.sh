@@ -33,10 +33,12 @@ cc -w -o "$out/host" "$D/caller.c" "$D/callee.c" \
     "$EMBCC_ROOT/tests/harness/thumb/hostio.c" 2>/dev/null ||
     { echo "the host reference does not build"; exit 1; }
 want=$("$out/host" | head -2 | tr '\n' '|')
-cc -w -o "$out/ahost" "$D/arith.c" \
-    "$EMBCC_ROOT/tests/harness/thumb/hostio.c" 2>/dev/null ||
-    { echo "the arithmetic host reference does not build"; exit 1; }
-awant=$("$out/ahost" | head -1)
+for prog in arith cmpcvt; do
+    cc -w -o "$out/$prog.host" "$D/$prog.c" \
+        "$EMBCC_ROOT/tests/harness/thumb/hostio.c" 2>/dev/null ||
+        { echo "the $prog host reference does not build"; exit 1; }
+    "$out/$prog.host" | head -3 | tr '\n' '|' > "$out/$prog.want"
+done
 
 CLANG=${EMBCC_CLANG:-clang}
 have_clang=0
@@ -85,16 +87,19 @@ board() {
         done
     done
 
+    for prog in arith cmpcvt; do
+    awant=$(cat "$out/$prog.want")
     for opt in -O0 -O2 -Os; do
-        "$EMBCC" --target=$T $opt -c "$D/arith.c" -o "$B/arith.o" &&
+        "$EMBCC" --target=$T $opt -c "$D/$prog.c" -o "$B/arith.o" &&
         sh "$HD/link.sh" "$B/a.elf" "$B/arith.o" "$B/softfp.o" \
             > "$B/aln.log" 2>&1 || {
             echo "$T arith $opt: does not build"; head -3 "$B/aln.log"
             exit 1; }
-        got=$(sh "$HD/run.sh" "$B/a.elf" 2>&1 | head -1)
+        got=$(sh "$HD/run.sh" "$B/a.elf" 2>&1 | head -3 | tr '\n' '|')
         [ "$got" = "$awant" ] || {
-            echo "$T arith $opt: disagrees with the host"
+            echo "$T $prog $opt: disagrees with the host"
             echo "  want: $awant"; echo "  got:  $got"; exit 1; }
+    done
     done
 }
 
@@ -106,8 +111,9 @@ else
     echo "Cortex-M4F: EmbCC agrees with the host at four levels (clang absent,
 so the cross pairings were not run)"
 fi
-echo "and float and double arithmetic across calls is bit-identical to the
-host: floats on the FPU, doubles through the runtime in core registers"
+echo "and float and double arithmetic across calls, comparisons (NaN, signed
+zeros and infinities, as values and as branches) and conversions are
+bit-identical to the host"
 
 if "$QEMU" -machine help 2>/dev/null | grep -q mps2-an505; then
     board thumbv8m.main-none-eabihf cortex-m33 fpv5-sp-d16 thumb-m33 \

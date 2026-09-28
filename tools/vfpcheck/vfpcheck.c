@@ -59,6 +59,8 @@ int main(int argc, char **argv)
             E(t_vsqrt(&c, d, m, dbl));
             P("vcmp.f%s %s%d, %s%d", w, r, d, r, m);
             E(t_vcmp(&c, d, m, dbl));
+            P("vcmpe.f%s %s%d, %s%d", w, r, d, r, m);
+            E(t_vcmpe(&c, d, m, dbl));
         }
         /* the conversions, both directions and both signednesses. The
          * INTEGER side of a conversion is always a single register even

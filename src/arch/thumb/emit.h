@@ -246,6 +246,7 @@ void t_vabs(struct code *c, int d, int m, int dbl);
 void t_vneg(struct code *c, int d, int m, int dbl);
 void t_vsqrt(struct code *c, int d, int m, int dbl);
 void t_vcmp(struct code *c, int n, int m, int dbl);
+void t_vcmpe(struct code *c, int n, int m, int dbl);
 void t_vcvt_f_from_i(struct code *c, int d, int m, int sgn, int dbl);
 void t_vcvt_i_from_f(struct code *c, int d, int m, int sgn, int dbl);
 void t_vldst(struct code *c, int sd, int rn, int off, int dbl, int store);

@@ -200,12 +200,38 @@ static int t_ldvar_plain(int size, int sign, int w)
     return size == 4 && w == 4;
 }
 
+/* Is this floating-point instruction executed on the FPU, rather than by
+ * a runtime helper? FPv4-SP-D16 and FPv5-SP-D16 are SINGLE precision: a
+ * double, a 64-bit integer conversion and fmodf are still calls. */
+static int fp_on_vfp(const struct ir_ins *i)
+{
+    if (!target_thumb_fpu())
+        return 0;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_NEG:
+    case IR_CMP: case IR_SQRT:
+        return i->flt && i->w == 4;
+    case IR_I2F:                       /* int32 -> float */
+        return i->w == 4 && i->size != 8;
+    case IR_F2I:                       /* float -> int32 */
+        return i->size == 4 && i->w != 8;
+    default:
+        return 0;
+    }
+}
+
 /* Which instructions become a CALL the IR does not show as one.
  * Everything floating point -- ARMv7-M's base profile has no FPU -- and
  * the 64-bit divides. A value live across one of these may not sit in a
  * caller-saved register. */
 static int t_op_calls_helper(const struct ir_ins *i)
 {
+    /* With the FPU, the single-precision arithmetic, comparisons and
+     * 32-bit conversions are instructions. This must say exactly what
+     * fp_on_vfp() says, since it is the same question: a value live
+     * across a call it does not know about is in a clobbered register. */
+    if (fp_on_vfp(i))
+        return 0;
     if (i->flt)
         return i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
                i->op == IR_DIV || i->op == IR_CMP;
@@ -1505,15 +1531,53 @@ static void vfp_aggregate(struct t_fn *F, int base, int s0, int n, int dbl,
  * through to the soft-float helper. Saying 0 rather than refusing is
  * deliberate: an operation the FPU cannot do is not an error, it is a
  * call -- `double` on an SP-only part is the whole reason. */
+/* The second operand into s register `sreg`: a vreg, or a folded
+ * constant, which for a float operation is its bit pattern. */
+static void vfp_operand_b(struct t_fn *F, const struct ir_ins *i, int sreg)
+{
+    if (i->imm_b) {
+        t_mov_imm(F->t, T_ACC, (long)i->imm, 0);
+        t_vmov_core(F->t, sreg, T_ACC, 1);
+    } else {
+        vfp_load(F, i->b, sreg);
+    }
+}
+
+/* A float comparison's condition, read after vmrs. Each is chosen so an
+ * UNORDERED result (a NaN operand sets C and V) makes it false, as C
+ * requires of everything but !=: MI rather than LT, LS rather than LE.
+ * Its inverse (the low bit flipped) is then exactly "not this", NaN
+ * included, which is what a fused branch on the false side needs. */
+static int fp_cond_for(enum binop pred)
+{
+    switch (pred) {
+    case B_EQ: return T_EQ;
+    case B_NE: return T_NE;
+    case B_LT: return T_MI;
+    case B_LE: return T_LS;
+    case B_GT: return T_GT;
+    default:   return T_GE;          /* B_GE */
+    }
+}
+
+static void fp_vfp_cmp(struct t_fn *F, const struct ir_ins *i)
+{
+    vfp_load(F, i->a, T_FS0);
+    vfp_operand_b(F, i, T_FS1);
+    if (i->pred == B_EQ || i->pred == B_NE)
+        t_vcmp(F->t, T_FS0, T_FS1, 0);
+    else
+        t_vcmpe(F->t, T_FS0, T_FS1, 0);
+    t_vmrs_apsr(F->t);
+}
+
 static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
 {
     struct code *t = F->t;
-    if (i->imm_b)
-        return 0;                       /* the helper path folds it */
     switch (i->op) {
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
         vfp_load(F, i->a, T_FS0);
-        vfp_load(F, i->b, T_FS1);
+        vfp_operand_b(F, i, T_FS1);
         if (i->op == IR_ADD)      t_vadd(t, T_FS0, T_FS0, T_FS1, 0);
         else if (i->op == IR_SUB) t_vsub(t, T_FS0, T_FS0, T_FS1, 0);
         else if (i->op == IR_MUL) t_vmul(t, T_FS0, T_FS0, T_FS1, 0);
@@ -1596,7 +1660,30 @@ static void gen_ins(struct t_fn *F, int n)
          * helper call was a dozen plus the call itself, and it is
          * CORRECT before it is fast -- the register class is the next
          * step and does not change what is computed. */
-        if (target_thumb_fpu() && i->w == 4 && fp_vfp_arith(F, i))
+        if (fp_on_vfp(i) && i->op == IR_CMP) {
+            int cond = fp_cond_for(i->pred);
+            struct ir_ins *nx = n + 1 < fn->nins ? &fn->ins[n + 1]
+                                                 : (struct ir_ins *)0;
+            fp_vfp_cmp(F, i);
+            /* The same fusion as an integer compare: a branch that is the
+             * only reader of the 0/1 takes the flags directly. */
+            if (nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
+                nx->a == i->dst && nx->w != 8 &&
+                F->usecnt && F->usecnt[i->dst] == 1) {
+                jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
+                F->skip_next = 1;
+                return;
+            }
+            t_mov_imm(t, T_ACC, 1, 0);
+            {
+                int over = t_bcond(t, cond);
+                t_mov_imm(t, T_ACC, 0, 0);
+                t_patch_bcond(t, over, t->len);
+            }
+            wr(F, i->dst, T_ACC);
+            return;
+        }
+        if (fp_on_vfp(i) && fp_vfp_arith(F, i))
             return;
         if (name) {
             if (i->imm_b)
@@ -2319,6 +2406,14 @@ static void gen_ins(struct t_fn *F, int n)
          * sign 0 and __floatunsisf is called by name. The widening path
          * stays because `size == 8` with a narrow source vreg is still a
          * representable shape, and zero-extending it is still right. */
+        if (fp_on_vfp(i)) {
+            /* vcvt reads its integer from an S register. */
+            rd(F, i->a, T_ACC);
+            t_vmov_core(t, T_FS0, T_ACC, 1);
+            t_vcvt_f_from_i(t, T_FS0, T_FS0, i->sign, 0);
+            vfp_store(F, i->dst, T_FS0);
+            return;
+        }
         if (i->size == 8) {
             if (F->wide[i->a]) {
                 rd64(F, i->a, T_R0, T_R1);
@@ -2339,6 +2434,15 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_F2I: {
         /* size is the float source's width, w/sign the integer result. */
+        if (fp_on_vfp(i)) {
+            /* Round toward zero, which is C's conversion and what
+             * t_vcvt_i_from_f encodes. */
+            vfp_load(F, i->a, T_FS0);
+            t_vcvt_i_from_f(t, T_FS0, T_FS0, i->sign, 0);
+            t_vmov_core(t, T_FS0, T_ACC, 0);
+            wr(F, i->dst, T_ACC);
+            return;
+        }
         fp_arg(F, i->a, i->size, T_R0);
         call_helper(F, i->size == 8
                     ? (i->w == 8 ? (i->sign ? "__fixdfdi" : "__fixunsdfdi")

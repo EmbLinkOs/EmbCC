@@ -752,6 +752,10 @@ void t_vsqrt(struct code *c, int d, int m, int dbl) { vfp_un(c, 3, d, m, dbl); }
 /* Sets FPSCR's flags, which only vmrs can move to APSR -- a float
  * comparison is two instructions on this machine, never one. */
 void t_vcmp(struct code *c, int n, int m, int dbl) { vfp_un(c, 8, n, m, dbl); }
+/* vcmpE: the same, and an Invalid Operation exception for a quiet NaN as
+ * well as a signalling one -- which is what IEEE 754 asks of <, <=, >
+ * and >=, and what GCC and clang emit for them. == and != use vcmp. */
+void t_vcmpe(struct code *c, int n, int m, int dbl) { vfp_un(c, 9, n, m, dbl); }
 
 /* The conversions are deliberately NOT forced into vfp_un's shape: their
  * Vn/N fields do not hold one opcode. Going TO float, N is the integer's
