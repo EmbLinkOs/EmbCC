@@ -829,6 +829,18 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                 if (POOL[k] == ehint[e] && !(taken & (1 << k)))
                     want |= 1 << k;
         int pick = -1;
+        /* On a three-operand machine the ABI's hint comes FIRST. The
+         * arithmetic bias (dst prefers an operand) is a tie-breaker there
+         * -- it lets Thumb use its two-operand 16-bit forms -- and letting
+         * it outvote a parameter's own register is what made `int add(int
+         * a, int b) { return a + b; }` put b in the result's r0, a in r1,
+         * and open with a three-move swap, on Thumb, RISC-V and aarch64. A
+         * two-operand machine keeps the old order: there the bias saves a
+         * move on every operation. */
+        if (!t->alu_dst_is_lhs && ehint[e] >= 0)
+            for (int k = 0; k < NP; k++)
+                if (POOL[k] == ehint[e] && !(taken & (1 << k))) { pick = k; break; }
+        if (pick < 0)
         for (int k = 0; k < NP; k++)                  /* a free preferred reg */
             if ((want & (1 << k)) && !(taken & (1 << k))) { pick = k; break; }
         if (pick < 0)

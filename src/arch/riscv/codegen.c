@@ -212,6 +212,10 @@ static int rv_op_calls_helper(const struct ir_ins *i)
            i->w == 8;
 }
 
+/* Where the psABI would put each value (below place_arg, whose answer
+ * it uses). */
+static void rv_abi_hints(const struct ir_func *fn, int *hint);
+
 static const struct ra_target RISCV_RA = {
     rv_pool_for,
     rv_callee_saved,
@@ -230,7 +234,7 @@ static const struct ra_target RISCV_RA = {
     1, 1, 1,
     rv_op_calls_helper,
     0,            /* RISC-V is three-operand: d = a op b needs no copy */
-    NULL,         /* ABI hints: a later increment */
+    rv_abi_hints,
     NULL, NULL    /* no FP class -- soft float lives in the core registers */
 };
 
@@ -428,6 +432,55 @@ static long sret_bytes(int wb, int retsize)
 static long fn_sret_bytes(int wb, const struct ir_func *fn)
 {
     return fn->ret_abi.is_struct ? sret_bytes(wb, fn->ret_abi.size) : 0;
+}
+
+/* Where the psABI would put each value if it had the choice: a parameter
+ * in the register it arrives in, a call's arguments in theirs, a call's
+ * result and a returned value in a0. Each is a move that disappears when
+ * the home IS that register -- without them the allocator put `a` of
+ * `int add(int a, int b)` in a1 and b in a0 and the function opened by
+ * swapping them through t4.
+ *
+ * Placement comes from place_arg, the same function the prologue and
+ * every call use, so the psABI is not restated here. Only single-register
+ * scalars: a pair or an aggregate is placed by a rule one register cannot
+ * say, and a hint is only ever a preference -- the parallel moves at the
+ * prologue and at each call are what is correct whatever is chosen. */
+static void rv_abi_hints(const struct ir_func *fn, int *hint)
+{
+    int wb = target_ptr_size();
+    int narg = fn_sret_bytes(wb, fn) ? 1 : 0;
+    long stk = 0;
+    struct argplace pl;
+    for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
+        const struct ir_arg *a = &fn->param_abi[p];
+        place_arg(wb, a->size, arg_align(wb, a), a->is_struct, 0,
+                  &narg, &stk, &pl);
+        if (pl.nreg == 1 && !pl.nstk && !pl.byref && !a->is_struct &&
+            a->size <= wb)
+            hint[p] = argreg(pl.reg);
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_RET && i->a >= 0 && i->a < fn->nvregs &&
+            !fn->ret_abi.is_struct && fn->ret_abi.size <= wb)
+            hint[i->a] = RV_A0;
+        if (i->op != IR_CALL)
+            continue;
+        if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w <= wb)
+            hint[i->dst] = RV_A0;
+        narg = sret_bytes(wb, i->retsize) ? 1 : 0;
+        stk = 0;
+        for (int k = 0; k < i->nargs; k++) {
+            const struct ir_arg *a = &i->argv[k];
+            place_arg(wb, a->size, arg_align(wb, a), a->is_struct,
+                      i->call_varargs && k >= i->call_nfixed,
+                      &narg, &stk, &pl);
+            if (pl.nreg == 1 && !pl.nstk && !pl.byref && !a->is_struct &&
+                a->size <= wb && a->vreg >= 0 && a->vreg < fn->nvregs)
+                hint[a->vreg] = argreg(pl.reg);
+        }
+    }
 }
 
 /* ---- the frame ---------------------------------------------------------- */
