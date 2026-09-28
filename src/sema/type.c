@@ -607,10 +607,19 @@ int ty_aapcs64_byref(const struct type *t)
  * Moved here from sema.c unchanged. They are pure functions of types,
  * and the parser needs ty_arith_common for `typeof(a - b)`. */
 
+/* Integer promotion, C11 6.3.1.1p2: a type narrower than int becomes `int`
+ * "if an int can represent all values of the original type", and `unsigned
+ * int` otherwise. The second half never mattered until AVR, where short and
+ * int are BOTH sixteen bits: `unsigned short` cannot fit in an int there, so it
+ * promotes to unsigned int. This returned plain int for every short, so on
+ * AVR `(unsigned short)1 < -1` -- true in C, because -1 converts to 65535 --
+ * compiled to a signed compare and came out false. That is the ordinary
+ * uint16_t-against-an-int pattern of firmware code. */
 struct type *ty_promote(struct type *t)
 {
     if (t->kind == TY_CHAR || t->kind == TY_SHORT)
-        return ty_base(TY_INT, 0);
+        return ty_base(TY_INT, t->is_unsigned &&
+                               ty_size(t) >= ty_size(ty_base(TY_INT, 0)));
     return t;
 }
 
@@ -651,11 +660,25 @@ struct type *ty_arith_common(struct type *a, struct type *b)
         return ty_int_of_size(8, uns);
     }
     if (a->kind == TY_LONG || b->kind == TY_LONG) {
-        /* Only reachable on ILP32, where a `long` is not wide. */
+        /* Only reachable where a `long` is not wide: ILP32 and AVR.
+         *
+         * A signed long with an unsigned int takes the long's signedness
+         * only if a long can represent EVERY unsigned int (C11 6.3.1.8) --
+         * true on AVR, where long is 32 bits and int 16, and FALSE on ILP32,
+         * where both are 32: there the answer is unsigned long. This took
+         * the long's signedness unconditionally, so on a Cortex-M or RV32
+         * `long a < unsigned b` compiled to a SIGNED compare, and -1L < 0u
+         * was true. */
         int la = a->kind == TY_LONG, lb = b->kind == TY_LONG;
-        return ty_base(TY_LONG, la && lb
-                                ? a->is_unsigned || b->is_unsigned
-                                : (la ? a : b)->is_unsigned);
+        int uns;
+        if (la && lb) {
+            uns = a->is_unsigned || b->is_unsigned;
+        } else {
+            struct type *l = la ? a : b, *o = la ? b : a;
+            uns = l->is_unsigned ||
+                  (o->is_unsigned && ty_size(o) >= ty_size(l));
+        }
+        return ty_base(TY_LONG, uns);
     }
     return ty_base(TY_INT, a->is_unsigned || b->is_unsigned);
 }
