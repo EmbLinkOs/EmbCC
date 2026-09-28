@@ -1995,6 +1995,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         i->sign = ty_signed_int(e->ty);
         i->w = ty_w(e->ty);
         i->natural = 1;        /* C: an object of this type is aligned */
+        /* `*p` with p a pointer to volatile is the READ of a device
+         * register, and each one has to happen. This load was built by
+         * hand and never said so, while emit_load did: at -O2 two reads
+         * of the same status register became one on every target. */
+        i->vol = e->ty->is_volatile;
         i->dst = new_temp(fn);
         return i->dst;
     }
