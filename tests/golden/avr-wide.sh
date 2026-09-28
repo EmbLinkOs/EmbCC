@@ -113,6 +113,16 @@ static long long modll(long long a, long long b) { return a % b; }
 static int ltll(long long a, long long b) { return a < b; }
 static int eqll(long long a, long long b) { return a == b; }
 static int nzll(long long a) { return a != 0; }
+/* A small CONSTANT operand of a 64-bit multiply, which -Os folds into the
+ * instruction as imm_b. The multiply is a call to __muldi3 with its second
+ * argument in r17:r10, so the constant is loaded into registers `ldi` cannot
+ * reach: the backend asked for `ldi r10, 3` until ldi4 learned to borrow r31,
+ * and the encoder's range check refused it. NOT static, so it is compiled as
+ * written rather than inlined into a caller where the whole product folds --
+ * the first version of this case was static, never reached the path, and
+ * passed with the fix taken out. This shape is tests/golden/
+ * embedded-abi-callee.c's mix64, which is where the bug was found. */
+long long mul3add(int a, long long b) { return (long long)a + b * 3; }
 
 void run(void)
 {
@@ -134,6 +144,8 @@ void run(void)
     p64(modll(10000000000LL, 7LL));
     p64(divll(-10000000000LL, 7LL));    /* truncates toward zero */
     p64(modll(-10000000000LL, 7LL));    /* the DIVIDEND's sign */
+    p64(mul3add(7, 0x0123456789abcdefLL));
+    p64(mul3add(-7, -1000000000000LL));
     p64(divll(-10000000000LL, -7LL));
     puts_("| ");
     putn(ltll(1LL, 2LL));

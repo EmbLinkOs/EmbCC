@@ -812,18 +812,39 @@ static void extend(struct a_fn *F, int r, int from, int sign, int to)
 
 static void ldi4(struct a_fn *F, int r, unsigned long v, int n)
 {
+    int borrowed = 0;
     for (int k = 0; k < n; k++) {
         int b = (int)((v >> (8 * k)) & 0xffu);
         /* `ldi rX, 0` and `mov rX, r1` are the same size and the same
          * speed; the move is used so that a zero byte does not depend on
-         * the destination being in r16-r31. Every register this file
-         * loads a constant into is, but the helper is also the one the
-         * shift paths use for their fill bytes. */
-        if (b == 0)
+         * the destination being in r16-r31. */
+        if (b == 0) {
             avr_rr(F->t, AVR_MOV, r + k, R_ZERO);
-        else
+        } else if (r + k >= 16) {
             avr_ri(F->t, AVR_LDI, r + k, b);
+        } else {
+            /* A NONZERO byte into r0-r15, which `ldi` cannot reach. This
+             * comment used to say that never happens, because every
+             * register this file loads a constant into is a high one --
+             * and the 64-bit multiply/divide helpers take their second
+             * argument in r17:r10, so at -Os, where the optimizer folds a
+             * constant operand into imm_b, `x * 1000000007LL` asked for
+             * `ldi r10`. The encoder's range check refused it; without
+             * that check it would have encoded a load into r26.
+             *
+             * Borrowed through r31, saved around the run: push, ldi and
+             * mov leave SREG alone, so this is safe inside a carry chain
+             * too, and nothing live in Z is disturbed. */
+            if (!borrowed) {
+                avr_push(F->t, 31);
+                borrowed = 1;
+            }
+            avr_ri(F->t, AVR_LDI, 31, b);
+            avr_rr(F->t, AVR_MOV, r + k, 31);
+        }
     }
+    if (borrowed)
+        avr_pop(F->t, 31);
 }
 
 /* ---- labels and branches --------------------------------------------- */
