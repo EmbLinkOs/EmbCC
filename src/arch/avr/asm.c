@@ -1019,6 +1019,39 @@ int avrasm_assemble(const char *text, struct code *out, char *err, int errlen)
  * whose relocation halves it. Using a data form for a function produces a
  * pointer to twice as far into flash, which lands on a real instruction.
  */
+/* A symbol operand, with an optional constant offset: `sym`, `sym+5`,
+ * `sym - 0x10`. Returns the symbol's length (0 if there is none), the
+ * offset in *addend, and in *end the first thing after it -- which every
+ * caller CHECKS, because that is what went wrong here: each form used to read
+ * the identifier and stop at the `+`, and nothing looked at what followed, so
+ * `lds r24, buf+5` assembled as `lds r24, buf`. An operand followed by
+ * anything its form does not expect is now left unclaimed and refused by the
+ * ordinary path, never silently shortened. */
+static int sym_operand(const char *p, long *addend, const char **end)
+{
+    int n = 0;
+    const char *q;
+    *addend = 0;
+    if (!sym_start((unsigned char)p[0]))
+        return 0;
+    while (idc((unsigned char)p[n]))
+        n++;
+    q = skipws(p + n);
+    if (*q == '+' || *q == '-') {
+        int neg = *q == '-';
+        char *e;
+        long v;
+        q = skipws(q + 1);
+        if (*q < '0' || *q > '9')
+            return 0;            /* sym+other: not an offset this can carry */
+        v = strtol(q, &e, 0);
+        *addend = neg ? -v : v;
+        q = e;
+    }
+    *end = skipws(q);
+    return n;
+}
+
 int avrasm_symform(const char *stmt, struct asm_symform *f)
 {
     const char *p = skipws(stmt);
@@ -1037,11 +1070,9 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
      * both: R_AVR_CALL patches the 22-bit word address across the pair. */
     if ((mnlen == 3 && strncmp(mn, "jmp", 3) == 0) ||
         (mnlen == 4 && strncmp(mn, "call", 4) == 0)) {
-        int n = 0;
-        if (!sym_start((unsigned char)p[0])) return 0;
-        while (idc((unsigned char)p[n]))
-            n++;
-        if (!n) return 0;
+        const char *end;
+        int n = sym_operand(p, &f->addend, &end);
+        if (!n || *end) return 0;
         f->sym_at = (int)(p - stmt); f->sym_len = n;
         snprintf(f->encode, sizeof f->encode, "%.*s 0", mnlen, mn);
         f->site[0].off = 0; f->site[0].reloc = R_AVR_CALL;
@@ -1051,11 +1082,9 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
     /* rjmp / rcall sym -- PC-relative, 12 bits of words. */
     if ((mnlen == 4 && strncmp(mn, "rjmp", 4) == 0) ||
         (mnlen == 5 && strncmp(mn, "rcall", 5) == 0)) {
-        int n = 0;
-        if (!sym_start((unsigned char)p[0])) return 0;
-        while (idc((unsigned char)p[n]))
-            n++;
-        if (!n) return 0;
+        const char *end;
+        int n = sym_operand(p, &f->addend, &end);
+        if (!n || *end) return 0;
         f->sym_at = (int)(p - stmt); f->sym_len = n;
         snprintf(f->encode, sizeof f->encode, "%.*s .+2", mnlen, mn);
         f->site[0].off = 0; f->site[0].reloc = R_AVR_13_PCREL;
@@ -1065,12 +1094,11 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
     /* A conditional branch to a symbol -- 7 bits of words. */
     if (mnlen == 4 && mn[0] == 'b' && mn[1] == 'r' &&
         strncmp(mn, "brbs", 4) != 0 && strncmp(mn, "brbc", 4) != 0) {
-        int n = 0;
-        while (idc((unsigned char)p[n]))
-            n++;
+        const char *end;
+        int n = sym_operand(p, &f->addend, &end);
         /* A bit number is not a symbol, which is why brbs/brbc are excluded
          * above: their FIRST operand is the flag. */
-        if (n && sym_start((unsigned char)p[0]) && find_insn(mn, mnlen)) {
+        if (n && !*end && find_insn(mn, mnlen)) {
             f->sym_at = (int)(p - stmt); f->sym_len = n;
             snprintf(f->encode, sizeof f->encode, "%.*s .+2", mnlen, mn);
             f->site[0].off = 0; f->site[0].reloc = R_AVR_7_PCREL;
@@ -1094,16 +1122,21 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
             if (*sp != ',') return 0;
             sp = skipws(sp + 1);
         }
-        n = 0;
-        if (!sym_start((unsigned char)sp[0])) return 0;
-        while (idc((unsigned char)sp[n]))
-            n++;
-        if (!n) return 0;
+        {
+            const char *end;
+            n = sym_operand(sp, &f->addend, &end);
+            if (!n) return 0;
+            /* lds: nothing may follow. sts: the register, after a comma --
+             * and `sts buf+1, r24` was REFUSED before this, because the
+             * comma was looked for straight after `buf`. */
+            if (is_lds ? *end != '\0' : *end != ',') return 0;
+        }
         if (is_lds) {
             f->sym_at = (int)(sp - stmt); f->sym_len = n;
             snprintf(f->encode, sizeof f->encode, "lds %s, 0", reg);
         } else {
             const char *rest = skipws(sp + n);
+            while (*rest && *rest != ',') rest++;   /* past the offset */
             if (*rest != ',') return 0;
             rest = skipws(rest + 1);
             f->sym_at = (int)(sp - stmt); f->sym_len = n;
@@ -1148,13 +1181,21 @@ int avrasm_symform(const char *stmt, struct asm_symform *f)
                 const char *g2 = skipws(r + 2);
                 if (*g2 == '(') { gs = 1; r = skipws(g2 + 1); }
             }
-            n = 0;
-            if (!sym_start((unsigned char)r[0]))
-                return 0;          /* lo8(64): a constant, not a symbol */
-            while (idc((unsigned char)r[n]))
-                n++;
-            if (!n)
-                return 0;
+            {
+                const char *end;
+                n = sym_operand(r, &f->addend, &end);
+                if (!n)
+                    return 0;      /* lo8(64): a constant, not a symbol */
+                /* The closing parenthesis -- two for gs(...) -- and then
+                 * nothing. `lo8(buf+5)` used to be read as `lo8(buf)`. */
+                if (*end != ')') return 0;
+                end = skipws(end + 1);
+                if (gs) {
+                    if (*end != ')') return 0;
+                    end = skipws(end + 1);
+                }
+                if (*end) return 0;
+            }
             if (gs || wrap[i].pm)
                 reloc = (wrap[i].data == 2 || wrap[i].pm == 2)
                         ? R_AVR_HI8_LDI_GS : R_AVR_LO8_LDI_GS;

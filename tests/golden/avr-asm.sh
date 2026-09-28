@@ -129,9 +129,72 @@ if grep '^>' "$out/b.diff" | grep -vE '\.-2$' | grep -q .; then
     grep '^>' "$out/b.diff" | head -6; exit 1
 fi
 
+# ---- a symbol with an offset: `buf+5` must mean buf+5 -------------------
+#
+# Every symbol form read the identifier and stopped at the `+`, and nothing
+# looked at what followed -- so `lds r24, buf+5` assembled as `lds r24, buf`,
+# `lo8(buf+5)` as `lo8(buf)`, and `sts buf+1, r24` was refused outright. No
+# diagnostic, and the object linked. The C compiler never goes through this
+# path, which is why no test saw it; hand-written startup and context-switch
+# code, which the EmbLinkRTOS requirements put in .S files, does nothing else.
+#
+# So: link each form against a buffer at a known address and read the
+# instruction back from the IMAGE, where the addend has had to be applied.
+cat > "$out/off.S" <<'EOF'
+	.text
+	.globl	__vectors
+__vectors:
+	lds	r24, obuf+5
+	sts	obuf+3, r24
+	sts	obuf - 2, r25
+	ldi	r30, lo8(obuf+0x105)
+	ldi	r31, hi8(obuf+0x105)
+	call	target+4
+	rjmp	target+2
+	ret
+target:
+	nop
+	nop
+	nop
+	nop
+	ret
+	.data
+	.globl	obuf
+obuf:
+	.byte	0,0,0,0,0,0,0,0
+EOF
+"$EMBCC" --target=avr -c "$out/off.S" -o "$out/off.o" 2> "$out/off.err" || {
+    echo "an operand with an offset did not assemble:"; head -3 "$out/off.err"; exit 1; }
+"${EMBLD:-./embld}" -e __vectors -Ttext 0x0 -Tdata 0x100 "$out/off.o" \
+    -o "$out/off.elf" 2> "$out/off.lerr" || {
+    echo "the offset test did not link:"; head -3 "$out/off.lerr"; exit 1; }
+llvm-objcopy -O binary --only-section=.text "$out/off.elf" "$out/off.bin"
+# llvm-mc -disassemble rather than llvm-objdump, which prints ldd/std
+# displacements wrong on this target (see docs/design/decisions.md D-018).
+xxd -p "$out/off.bin" | tr -d '\n' | sed 's/\(..\)/0x\1 /g' |
+    llvm-mc -triple=avr -mcpu=atmega328p -disassemble 2>/dev/null |
+    grep -v '^[[:space:]]*\.' | head -7 | sed 's/^[[:space:]]*//' > "$out/off.got"
+# obuf is at 0x100. `target` is 24 bytes into .text -- 4+4+4+2+2+4+2+2 --
+# and llvm prints a call's operand as a BYTE address, so call target+4 is 28;
+# rjmp sits at 20, so target+2 = 26 is .+4 from the next instruction.
+cat > "$out/off.want" <<'EOF'
+lds	r24, 261
+sts	259, r24
+sts	254, r25
+ldi	r30, 5
+ldi	r31, 2
+call	28
+rjmp	.+4
+EOF
+cmp -s "$out/off.want" "$out/off.got" || {
+    echo "a symbol's offset did not survive to the image:"
+    diff "$out/off.want" "$out/off.got"; exit 1; }
+
 echo "all $n instruction forms assemble exactly as llvm-mc does, and all $pn
 PC-relative forms disassemble as the condition they name -- the half a
 byte comparison cannot grade, because llvm-mc relocates those fields
 instead of encoding them
 and the harness startup assembles to the same instructions, so this target
-needs no other toolchain to turn a .S file into an object"
+needs no other toolchain to turn a .S file into an object
+and a symbol with a constant offset -- lds, sts, lo8/hi8, call, rjmp, negative
+offsets included -- links to the address it names, not to the bare symbol"

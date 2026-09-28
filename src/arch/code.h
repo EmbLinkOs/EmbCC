@@ -28,6 +28,13 @@ struct asm_symsite {
 
 struct asm_symform {
     int sym_at, sym_len;         /* the symbol's extent within the statement */
+    /* A constant offset written after the symbol: `lds r24, buf+5`. It goes
+     * into the relocation's addend, never into the instruction. This field
+     * did not exist, and the AVR assembler read `buf+5` as `buf` -- the
+     * identifier stopped at the `+` and nothing looked at what followed --
+     * so the load went to buf[0] and the object assembled and linked
+     * cleanly. */
+    long addend;
     char encode[128];            /* the statement with a zero operand */
     struct asm_symsite site[2];
     int nsites;

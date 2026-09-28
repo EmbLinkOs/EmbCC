@@ -587,7 +587,7 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             if (pass == 2)
                 for (int k = 0; k < f.nsites; k++)
                     fix_add(g, g->cur, pc + f.site[k].off, ext,
-                            f.site[k].reloc, 0);
+                            f.site[k].reloc, f.addend);
             emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
             free(tmp.p);
             return 1;
@@ -753,8 +753,8 @@ static void instruction(struct gas *g, char *stmt, int pass)
 
     if (ext) {
         if (!extern_form(g, text, pc, pass, ext))
-            gerr(g, "\"%s\" names the undefined symbol '%s'; only `call` and "
-                    "`la` can carry one here", stmt, ext);
+            gerr(g, "\"%s\" names the undefined symbol '%s' in a form this "
+                    "target's assembler cannot relocate", stmt, ext);
         free(text);
         return;
     }
