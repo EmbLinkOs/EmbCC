@@ -77,6 +77,7 @@
 #include "emit.h"
 #include "../backend.h"
 #include "../target.h"
+#include "../regalloc.h"
 #include "../../driver/util.h"
 
 /* ---- the register plan ----------------------------------------------
@@ -149,6 +150,9 @@ struct a_fn {
     long frame;          /* bytes between Y and the caller's saved Y */
     int *label_off;
     long scratch_at;     /* base of the struct-return temporaries */
+    /* Bytes of each temporary anything reads (avr_demand). Slots stay four
+     * bytes; only the traffic narrows, so no write can overrun one. */
+    unsigned char *need;
     long sret_slot;      /* where the hidden result pointer is kept, or -1 */
     struct a_fix *fix;
     int nfix, capfix;
@@ -571,6 +575,154 @@ static long place_objects(struct fobj *obj, int nobj, long off)
     return off;
 }
 
+/* ---- how many bytes of each value anything reads ----------------------
+ *
+ * need[v] is the number of low bytes of v that some use can observe: 0 if
+ * none, else 1, 2 or 4. Backward, to a fixpoint, because a loop can carry a
+ * use around to before the definition.
+ *
+ * It rests on one fact of two's-complement arithmetic: the low N bytes of a
+ * sum, difference, product, bitwise and/or/xor, negation, complement or left
+ * shift depend ONLY on the low N bytes of the operands. So when nothing reads
+ * past byte 2 of a result, nothing about bytes 2 and 3 of its operands can
+ * matter either -- and on this target, where an `int` is two bytes and the
+ * IR computes it at four, that is most of the arithmetic there is.
+ *
+ * Every use not named below needs ALL of its operands: a compare, a right
+ * shift, a divide, a branch on zero, an intrinsic this was never told about.
+ * The default is the safe answer, never the convenient one. Eight-byte values
+ * are left alone; they have their own path. */
+static int need_of_use(const struct a_fn *F, const struct ir_ins *i, int opnd,
+                       int nd)
+{
+    const struct ir_func *fn = F->fn;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL:
+    case IR_AND: case IR_OR: case IR_XOR:
+    case IR_NEG: case IR_BNOT: case IR_MOV:
+        return nd;
+    case IR_SHL:
+        return opnd == 0 ? nd : 1;          /* the count: its low byte */
+    case IR_SELECT:
+        return opnd == 0 ? VW : nd;         /* the condition: all of it */
+    case IR_EXT:
+        return nd < i->size ? nd : i->size;
+    case IR_STVAR:
+        return i->size;
+    case IR_STORE:
+        return opnd == 0 ? 2 : i->size;     /* an address is two bytes */
+    case IR_LOAD:
+        return 2;
+    case IR_RET:
+        /* A composite is returned by ADDRESS: the operand is a pointer to
+         * it, all of which is needed however small the struct. The first
+         * version of this rule gave it the struct's size -- one byte for a
+         * one-byte struct -- so half the pointer was written, and
+         * tests/golden/avr-abi.sh's callret1 came back 00 for 60. */
+        if (fn->ret_abi.is_struct)
+            return VW;
+        return fn->ret_abi.size ? fn->ret_abi.size : VW;
+    default:
+        return VW;
+    }
+}
+
+/* Uses the rules above do not describe are taken from ra_each_use -- the
+ * register allocator's own list of every vreg an instruction reads, inline
+ * asm operands included -- and demand all of the value. So an instruction
+ * this analysis was never told about can only make a value WIDER, never
+ * narrower; the failure it guards against is a sixth hand-kept operand list
+ * that misses a field. */
+struct dem_ctx { unsigned char *need; const struct a_fn *F; int again; };
+
+static void dem_raise(struct dem_ctx *d, int v, int w)
+{
+    const struct ir_func *fn = d->F->fn;
+    if (v < 0 || v >= fn->nvregs)
+        return;
+    if (vw(d->F, v) == 8)
+        w = 8;
+    else if (w > VW || w == 3)
+        w = VW;
+    if (d->need[v] < w) {
+        d->need[v] = (unsigned char)w;
+        d->again = 1;
+    }
+}
+
+static void dem_full(int v, void *ctx) { dem_raise(ctx, v, VW); }
+
+static int narrow_aware(int op)
+{
+    switch (op) {
+    case IR_ADD: case IR_SUB: case IR_MUL:
+    case IR_AND: case IR_OR: case IR_XOR:
+    case IR_NEG: case IR_BNOT: case IR_MOV: case IR_SHL:
+    case IR_SELECT: case IR_EXT: case IR_STVAR: case IR_STORE:
+    case IR_LOAD: case IR_RET: case IR_CALL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static unsigned char *avr_demand(const struct a_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    struct dem_ctx d;
+    d.need = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), 1);
+    d.F = F;
+    for (d.again = 1; d.again; ) {
+        d.again = 0;
+        for (int n = fn->nins - 1; n >= 0; n--) {
+            const struct ir_ins *i = &fn->ins[n];
+            int nd = (i->dst >= 0 && i->dst < fn->nvregs) ? d.need[i->dst] : VW;
+            if (!narrow_aware(i->op)) {
+                ra_each_use(i, dem_full, &d);
+                continue;
+            }
+            if (i->op == IR_CALL) {
+                for (int k = 0; k < i->nargs; k++) {
+                    int w = i->argv[k].size;
+                    if (w <= 0 || i->argv[k].is_struct) w = VW;
+                    dem_raise(&d, i->argv[k].vreg, w);
+                }
+                if (i->indirect)
+                    dem_raise(&d, i->a, VW);
+                continue;
+            }
+            dem_raise(&d, i->a, need_of_use(F, i, 0, nd));
+            if (i->op != IR_NEG && i->op != IR_BNOT && i->op != IR_MOV &&
+                i->op != IR_EXT && i->op != IR_STVAR && i->op != IR_LOAD &&
+                i->op != IR_RET && !i->imm_b)
+                dem_raise(&d, i->b, need_of_use(F, i, 1, nd));
+            if (i->op == IR_SELECT)
+                dem_raise(&d, i->c, need_of_use(F, i, 2, nd));
+        }
+    }
+    return d.need;
+}
+
+/* The bytes of v that anything reads. A LOCAL (v < nvars) is always read
+ * whole: its slot is its declared size, and -g describes it by that slot.
+ * dw() is the same for an instruction's result, capped at a scratch bank. */
+static int cw(const struct a_fn *F, int v)
+{
+    int n;
+    if (v < 0 || v < F->fn->nvars || !F->need)
+        return VW;
+    if (vw(F, v) == 8)
+        return 8;
+    n = F->need[v];
+    return n == 0 ? 0 : n == 1 ? 1 : n == 2 ? 2 : VW;
+}
+
+static int dw(const struct a_fn *F, const struct ir_ins *i)
+{
+    int n = cw(F, i->dst);
+    return n > VW ? VW : n;
+}
+
 static void layout(struct a_fn *F)
 {
     struct ir_func *fn = F->fn;
@@ -884,12 +1036,24 @@ static void st_slot_cc(struct a_fn *F, long off, int r, int n)
     if (far) { avr_out(F->t, IO_SREG, R_TMP); }
 }
 
-static void rd4(struct a_fn *F, int v, int r) { ld_slot(F, r, F->slot[v], VW); }
+/* Read and write only the bytes of a temporary that something reads -- see
+ * avr_demand. What stays in the high registers after a narrow read is stale,
+ * and nothing that uses it can tell: the only operations allowed a narrow
+ * operand are the ones whose low bytes depend on nothing else. */
+static void rd4(struct a_fn *F, int v, int r)
+{
+    int n = cw(F, v);
+    if (n > VW) n = VW;
+    if (n > 0)
+        ld_slot(F, r, F->slot[v], n);
+}
 
 static void wr4(struct a_fn *F, int v, int r)
 {
-    if (v >= 0 && F->slot[v] >= 0)
-        st_slot(F, F->slot[v], r, VW);
+    int n = cw(F, v);
+    if (n > VW) n = VW;
+    if (v >= 0 && F->slot[v] >= 0 && n > 0)
+        st_slot(F, F->slot[v], r, n);
 }
 
 static void ldi4(struct a_fn *F, int r, unsigned long v, int n);
@@ -1899,10 +2063,17 @@ static void gen_ins(struct a_fn *F, int n)
     }
 
     switch (i->op) {
-    case IR_CONST:
-        ldi4(F, RA, (unsigned long)i->imm, VW);
-        wr4(F, i->dst, RA);
+    case IR_CONST: {
+        /* Only the bytes something reads -- see avr_demand. A result nothing
+         * reads is not computed at all, which for these operations is safe:
+         * none of them has an effect beyond its result. */
+        int nb = dw(F, i);
+        if (nb) {
+            ldi4(F, RA, (unsigned long)i->imm, nb);
+            wr4(F, i->dst, RA);
+        }
         return;
+    }
 
     case IR_MOV:
         rd4(F, i->a, RA);
@@ -1916,24 +2087,27 @@ static void gen_ins(struct a_fn *F, int n)
          * negation, with sbci for the carry bytes) and `xor` has none
          * either, so half the cases would take the register path anyway.
          * One path is worth more here than three instructions. */
+        int nb = dw(F, i);
+        if (!nb)
+            return;
         rd4(F, i->a, RA);
         if (i->imm_b)
-            ldi4(F, RB, (unsigned long)i->imm, VW);
+            ldi4(F, RB, (unsigned long)i->imm, nb);
         else
             rd4(F, i->b, RB);
         switch (i->op) {
         case IR_ADD:
             avr_rr(t, AVR_ADD, RA, RB);
-            for (int k = 1; k < VW; k++) avr_rr(t, AVR_ADC, RA + k, RB + k);
+            for (int k = 1; k < nb; k++) avr_rr(t, AVR_ADC, RA + k, RB + k);
             break;
         case IR_SUB:
             avr_rr(t, AVR_SUB, RA, RB);
-            for (int k = 1; k < VW; k++) avr_rr(t, AVR_SBC, RA + k, RB + k);
+            for (int k = 1; k < nb; k++) avr_rr(t, AVR_SBC, RA + k, RB + k);
             break;
         default: {
             enum avr_rr op = i->op == IR_AND ? AVR_AND
                            : i->op == IR_OR  ? AVR_OR : AVR_EOR;
-            for (int k = 0; k < VW; k++) avr_rr(t, op, RA + k, RB + k);
+            for (int k = 0; k < nb; k++) avr_rr(t, op, RA + k, RB + k);
             break;
         }
         }
@@ -2046,18 +2220,27 @@ static void gen_ins(struct a_fn *F, int n)
         /* 0 - a, which is what clang emits: the com/neg/sbci chain is
          * shorter to write down and longer to get right, and this reuses
          * the subtract that is already here. */
-        rd4(F, i->a, RB);
-        ldi4(F, RA, 0, VW);
-        avr_rr(t, AVR_SUB, RA, RB);
-        for (int k = 1; k < VW; k++) avr_rr(t, AVR_SBC, RA + k, RB + k);
-        wr4(F, i->dst, RA);
+        {
+            int nb = dw(F, i);
+            if (!nb)
+                return;
+            rd4(F, i->a, RB);
+            ldi4(F, RA, 0, nb);
+            avr_rr(t, AVR_SUB, RA, RB);
+            for (int k = 1; k < nb; k++) avr_rr(t, AVR_SBC, RA + k, RB + k);
+            wr4(F, i->dst, RA);
+        }
         return;
 
-    case IR_BNOT:
+    case IR_BNOT: {
+        int nb = dw(F, i);
+        if (!nb)
+            return;
         rd4(F, i->a, RA);
-        for (int k = 0; k < VW; k++) avr_r1(t, AVR_COM, RA + k);
+        for (int k = 0; k < nb; k++) avr_r1(t, AVR_COM, RA + k);
         wr4(F, i->dst, RA);
         return;
+    }
 
     case IR_SHL: case IR_SHR: {
         long k;
@@ -2105,11 +2288,22 @@ static void gen_ins(struct a_fn *F, int n)
         jump_if(F, i->op == IR_BRZ ? AVR_BR_EQ : AVR_BR_NE, i->label);
         return;
 
-    case IR_LDVAR:
-        ld_slot(F, RA, F->slot[i->a], i->size);
-        extend(F, RA, i->size, i->sign, VW);
+    case IR_LDVAR: {
+        /* Load only what is read, and extend only past what was loaded.
+         * A VOLATILE access is performed as written, whatever is used of
+         * it: on this part a 16-bit timer or ADC register latches its high
+         * byte when the low one is read, and the standard says the access
+         * happens regardless. */
+        int nb = dw(F, i);
+        int ld = (i->vol || nb > i->size) ? i->size : nb;
+        if (!ld)
+            return;
+        ld_slot(F, RA, F->slot[i->a], ld);
+        if (nb > i->size)
+            extend(F, RA, i->size, i->sign, nb);
         wr4(F, i->dst, RA);
         return;
+    }
 
     case IR_STVAR:
         rd4(F, i->a, RA);
@@ -2119,15 +2313,25 @@ static void gen_ins(struct a_fn *F, int n)
     case IR_LOAD:
         /* The pointer is two bytes: an AVR address IS two bytes, whatever
          * the IR's width class says about the vreg holding it. */
-        ld_slot(F, AVR_Z, F->slot[i->a], 2);
-        if (i->size == 1) {
-            avr_ld(t, RA, AVR_Z, AVR_PTR_NONE);
-        } else {
-            for (int k = 0; k < i->size; k++)
-                avr_ld(t, RA + k, AVR_Z, AVR_PTR_POST_INC);
+        {
+            /* Narrowed as IR_LDVAR is, with the same exception for a
+             * volatile access -- which here is the common case: this is how
+             * a memory-mapped register is read. */
+            int nb = dw(F, i);
+            int ld = (i->vol || nb > i->size) ? i->size : nb;
+            if (!ld)
+                return;
+            ld_slot(F, AVR_Z, F->slot[i->a], 2);
+            if (ld == 1) {
+                avr_ld(t, RA, AVR_Z, AVR_PTR_NONE);
+            } else {
+                for (int k = 0; k < ld; k++)
+                    avr_ld(t, RA + k, AVR_Z, AVR_PTR_POST_INC);
+            }
+            if (nb > i->size)
+                extend(F, RA, i->size, i->sign, nb);
+            wr4(F, i->dst, RA);
         }
-        extend(F, RA, i->size, i->sign, VW);
-        wr4(F, i->dst, RA);
         return;
 
     case IR_STORE:
@@ -2143,16 +2347,24 @@ static void gen_ins(struct a_fn *F, int n)
         }
         return;
 
-    case IR_EXT:
+    case IR_EXT: {
+        /* When no more is read than the source had, there is nothing to
+         * extend: the low bytes ARE the source's low bytes. */
+        int nb = dw(F, i);
+        if (!nb)
+            return;
         rd4(F, i->a, RA);
-        extend(F, RA, i->size, i->sign, VW);
+        if (nb > i->size)
+            extend(F, RA, i->size, i->sign, nb);
         wr4(F, i->dst, RA);
         return;
+    }
 
     case IR_ADDR:
         avr_movw(t, RA, AVR_Y);
         add_const16(F, RA, F->slot[i->a]);
-        extend(F, RA, 2, 0, VW);
+        if (dw(F, i) > 2)
+            extend(F, RA, 2, 0, dw(F, i));
         wr4(F, i->dst, RA);
         return;
 
@@ -2625,6 +2837,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         a_refuse(fn, NULL, "an exception region");
     /* The width map BEFORE layout: a slot's size depends on it. */
     F.wide = avr_wide_map(fn);
+    F.need = avr_demand(&F);
     layout(&F);
     const_map(&F);
 
@@ -2760,6 +2973,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                                        * address the call pushed */;
     f->code_len = t->len - f->code_off;
     free(F.slot);
+    free(F.need);
     free(F.label_off);
     free(F.fix);
     free(F.cval);
