@@ -18,6 +18,16 @@ QEMU=${EMBCC_QEMU_AVR:-qemu-system-avr}
 # line was invisible for an afternoon because this script sent it to
 # /dev/null, so a rejected image looked exactly like a program that printed
 # nothing. Any diagnostic here is worth more than the tidier output.
-"$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" "$QEMU" \
-    -M uno -nographic -bios "$1"
+# EMBCC_QEMU_UNTIL is the sentinel this image prints when it is finished. It
+# is optional and it changes only the SPEED: with it the run ends when the
+# guest says so instead of when the timeout does, which for a test that boots
+# twenty-eight images is the difference between forty seconds and nine
+# minutes. Without it the behaviour is exactly what it always was.
+if [ -n "${EMBCC_QEMU_UNTIL:-}" ]; then
+    "$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" --until "$EMBCC_QEMU_UNTIL" \
+        "$QEMU" -M uno -nographic -bios "$1"
+else
+    "$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" "$QEMU" \
+        -M uno -nographic -bios "$1"
+fi
 exit 0

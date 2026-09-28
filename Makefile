@@ -194,6 +194,14 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c src/platform/platform_posix.c \
 	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/code.c
 
+# NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
+# a backend file added without a line here breaks only `make test` -- and
+# breaks it at the BUILD step, so the suite reports nothing rather than
+# failing a test. That has now happened twice in one week: src/arch/avr/asm.c
+# and src/arch/avr/irgen.c when the AVR assembler and inline asm landed, and
+# src/arch/thumbv8m/predef*.c when ARMv8-M did. Anything defining a symbol
+# that sema.c, irgen.c or predef.c's arch_table reaches belongs here.
+#
 # embls — the language server (docs/tools/diagnostics.md T5). It links EmbCC's own
 # preprocessor and parser, so what an editor is told about a file comes from
 # the compiler that will compile it; diagnostics it gets by running embcc
@@ -210,7 +218,9 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/arch/aarch64/predef_cxx.c \
              src/arch/thumb/predef.c src/arch/thumb/predef_cxx.c \
              src/arch/riscv32/predef.c src/arch/riscv32/predef_cxx.c \
-             src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
+             src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
+             src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
+             src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
@@ -221,7 +231,8 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
              src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
              src/arch/thumb/emit.c src/arch/thumb/attrs.c src/arch/riscv/irgen.c \
-             src/arch/riscv/asm.c src/arch/riscv/emit.c
+             src/arch/riscv/asm.c src/arch/riscv/emit.c \
+             src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
 

@@ -277,6 +277,11 @@ for O in -O0 -O1 -O2 -Os; do
                 exit 1
             fi
         fi
+        # EMBCC_QEMU_UNTIL ends the run when the image prints its sentinel
+        # rather than when the timeout expires. The image never exits on its
+        # own, so without it each of these eight runs cost the full 60
+        # seconds however fast it was.
+        EMBCC_QEMU_UNTIL=DONE \
         EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-60} \
             sh tests/harness/avr/run.sh "$H/run.elf" \
             > "$out/got.$which$O" 2>/dev/null

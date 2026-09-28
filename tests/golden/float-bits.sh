@@ -98,10 +98,17 @@ norm "$out/ref.raw" > "$out/want.txt"
     exit 1; }
 
 # ---- the hosted target, through the harness ---------------------------
+#
+# --target="$TARGET", which these two compiles were missing. t_link below
+# branches on $ARCH and links with the aarch64 harness when the suite was
+# invoked with --target=aarch64-elf, so without it this built x86-64 objects
+# and handed them to aarch64-elf-ld: "Relocations in generic ELF (EM: 62)",
+# which is the x86-64 machine number. tests/run.sh exports EMBCC_TARGET for
+# exactly this and tests/lib.sh turns it into $TARGET.
 for opt in -O0 -O1 -O2 -Os; do
-    "$EMBCC" $opt -c "$out/t.c" -o "$out/h$opt.o" ||
+    "$EMBCC" --target="$TARGET" $opt -c "$out/t.c" -o "$out/h$opt.o" ||
         { echo "$opt: the program does not compile"; exit 1; }
-    "$EMBCC" $opt -c "$out/shim.c" -o "$out/s$opt.o" ||
+    "$EMBCC" --target="$TARGET" $opt -c "$out/shim.c" -o "$out/s$opt.o" ||
         { echo "$opt: the shim does not compile"; exit 1; }
     t_link "$out/h$opt" "$out/h$opt.o" "$out/s$opt.o" ||
         { echo "$opt: could not link"; exit 1; }
