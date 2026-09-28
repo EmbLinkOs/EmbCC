@@ -442,6 +442,117 @@ static long outgoing_area(const struct ir_func *fn)
  */
 #define INCOMING_AT 5
 
+/* ---- where each slot goes ----------------------------------------------
+ *
+ * `ldd`/`std` reach 63 bytes above Y. Past that, a slot is addressed by
+ * copying Y into Z and adding the offset -- movw, subi, sbci -- and then an
+ * indirect ld/st per byte, with SREG saved and restored around it wherever a
+ * carry has to survive. A byte that costs ONE instruction near costs four or
+ * five far.
+ *
+ * Measured over this backend's own output (the embedded-*.c programs and
+ * lib/rt/avr*.c, 54730 instructions): ld/st 19%, subi/sbci 18%, movw 9%,
+ * in/out 13% -- the far path was roughly HALF OF ALL CODE, and the arithmetic
+ * the program asked for barely registered.
+ *
+ * Offsets used to be handed out in discovery order: outgoing arguments, then
+ * every local in declaration order, then temporaries first-come. So a loop
+ * counter declared after a 64-byte buffer was out of reach for its whole
+ * life. Now every object is weighed by the bytes of access the code makes to
+ * it, and they are placed densest first -- accesses per byte of frame -- so
+ * the near window holds what is touched most. A big array that is only ever
+ * addressed goes last, where its size costs nothing.
+ *
+ * The weight is STATIC -- each access in the listing counts once, however
+ * often a loop runs it -- because what is being minimised is code size, and
+ * an access costs its bytes once whatever its trip count. */
+struct fobj {
+    int size;
+    long weight;
+    long at;
+};
+
+static void weigh_one(struct a_fn *F, struct fobj *obj, const int *obj_of,
+                      int v, int bytes)
+{
+    struct ir_func *fn = F->fn;
+    if (v < 0 || v >= fn->nvregs || obj_of[v] < 0)
+        return;
+    obj[obj_of[v]].weight += bytes > 0 ? bytes : 1;
+}
+
+static void weigh_objects(struct a_fn *F, struct fobj *obj, const int *obj_of)
+{
+    struct ir_func *fn = F->fn;
+    /* Every parameter is stored into its slot once, in the prologue. */
+    for (int v = 0; v < fn->nparams && v < fn->nvars; v++)
+        weigh_one(F, obj, obj_of, v, fn->locals[v].size);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        switch (i->op) {
+        case IR_LDVAR:
+            /* `a` is the LOCAL; the destination is a temporary. */
+            weigh_one(F, obj, obj_of, i->a, i->size);
+            weigh_one(F, obj, obj_of, i->dst, vw(F, i->dst));
+            break;
+        case IR_STVAR:
+            weigh_one(F, obj, obj_of, i->dst, i->size);
+            weigh_one(F, obj, obj_of, i->a, vw(F, i->a));
+            break;
+        case IR_ADDR:
+            /* Taking a local's address is add_const16, which costs the same
+             * near or far -- so it earns the local no place near Y. */
+            weigh_one(F, obj, obj_of, i->dst, vw(F, i->dst));
+            break;
+        case IR_CALL:
+            for (int k = 0; k < i->nargs; k++)
+                weigh_one(F, obj, obj_of, i->argv[k].vreg,
+                          vw(F, i->argv[k].vreg));
+            weigh_one(F, obj, obj_of, i->dst, vw(F, i->dst));
+            break;
+        default:
+            weigh_one(F, obj, obj_of, i->a, vw(F, i->a));
+            weigh_one(F, obj, obj_of, i->b, vw(F, i->b));
+            weigh_one(F, obj, obj_of, i->c, vw(F, i->c));
+            weigh_one(F, obj, obj_of, i->dst, vw(F, i->dst));
+            break;
+        }
+    }
+}
+
+/* Densest first; the original order breaks ties, so the layout is a pure
+ * function of the IR and an unchanged function gets unchanged bytes. */
+static int dense_first(const struct fobj *a, int ia, const struct fobj *b, int ib)
+{
+    /* a->weight/a->size > b->weight/b->size, without division */
+    long l = a->weight * b->size, r = b->weight * a->size;
+    if (l != r)
+        return l > r;
+    return ia < ib;
+}
+
+static long place_objects(struct fobj *obj, int nobj, long off)
+{
+    int *order = xmalloc((size_t)(nobj ? nobj : 1) * sizeof *order);
+    for (int k = 0; k < nobj; k++)
+        order[k] = k;
+    /* Insertion sort: a frame has tens of objects, and it is stable. */
+    for (int k = 1; k < nobj; k++) {
+        int x = order[k], j = k - 1;
+        while (j >= 0 && dense_first(&obj[x], x, &obj[order[j]], order[j])) {
+            order[j + 1] = order[j];
+            j--;
+        }
+        order[j + 1] = x;
+    }
+    for (int k = 0; k < nobj; k++) {
+        obj[order[k]].at = off;
+        off += obj[order[k]].size;
+    }
+    free(order);
+    return off;
+}
+
 static void layout(struct a_fn *F)
 {
     struct ir_func *fn = F->fn;
@@ -450,6 +561,18 @@ static void layout(struct a_fn *F)
     F->slot = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *F->slot);
     for (int v = 0; v < fn->nvregs; v++)
         F->slot[v] = -1;
+
+    /* Offsets are NOT handed out as objects are found. Every local and every
+     * shared temporary slot is first collected as an object with a size;
+     * then each is weighted by how many bytes of code-visible access it gets,
+     * and they are placed DENSEST FIRST. See place_objects() for why that
+     * is the single largest code-size lever on this machine. */
+    int nobj_cap = fn->nvars + fn->nvregs + 4;
+    struct fobj *obj = xcalloc((size_t)nobj_cap, sizeof *obj);
+    int nobj = 0;
+    int *obj_of = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *obj_of);
+    for (int v = 0; v < fn->nvregs; v++)
+        obj_of[v] = -1;
 
     for (int v = 0; v < fn->nvars; v++) {
         int size = fn->locals[v].size ? fn->locals[v].size : VW;
@@ -465,8 +588,8 @@ static void layout(struct a_fn *F)
                      "a local with __attribute__((aligned)): AVR's stack "
                      "pointer has no known alignment, so a frame slot "
                      "cannot be given one");
-        F->slot[v] = off;
-        off += size;
+        obj[nobj].size = size;
+        obj_of[v] = nobj++;
     }
     /* Every temporary is four bytes, because the IR's width class is only
      * ever 4, 8 or 16 -- there is no w == 2 -- so a two-byte `int` arrives
@@ -583,37 +706,56 @@ static void layout(struct a_fn *F)
                  * first needs one instruction's worth of slot and the
                  * second needs the whole function; both are covered by
                  * refusing to share this one. */
-                F->slot[v] = off;
-                off += need;
+                obj[nobj].size = need;
+                obj_of[v] = nobj++;
                 continue;
             }
             for (k = 0; k < nslots; k++)
                 if (free_from[k] <= def[v] && slot_sz[k] == need)
                     break;
             if (k == nslots) {
-                slot_at[k] = off;
+                /* A new shared slot is a new object; slot_at holds its
+                 * object index until offsets are assigned. */
+                slot_at[k] = nobj;
+                obj[nobj].size = need;
+                nobj++;
                 slot_sz[k] = need;
-                off += need;
                 nslots++;
             }
             free_from[k] = last[v] + 1;
-            F->slot[v] = slot_at[k];
+            obj_of[v] = (int)slot_at[k];
         }
         free(def); free(last); free(free_from); free(slot_at);
         free(slot_sz); free(labpos);
     }
-    F->scratch_at = off;
-    off += fn->scratch_bytes;
+    int scratch_obj = -1, sret_obj = -1;
+    if (fn->scratch_bytes > 0) {
+        scratch_obj = nobj;
+        obj[nobj++].size = fn->scratch_bytes;
+    }
     /* A function returning a composite in memory is handed the address to
      * write it to, and must still have it at the return -- which may be many
      * calls later, and r24:r25 survives none of them. It lives on the
      * frame. */
     F->sret_slot = -1;
     if (fn_sret_bytes(fn)) {
-        F->sret_slot = off;
-        off += 2;
+        sret_obj = nobj;
+        obj[nobj].size = 2;
+        obj[nobj++].weight = 4;          /* stored once, read at each return */
     }
+
+    weigh_objects(F, obj, obj_of);
+    off = place_objects(obj, nobj, off);
+
+    for (int v = 0; v < fn->nvregs; v++)
+        if (obj_of[v] >= 0)
+            F->slot[v] = obj[obj_of[v]].at;
+    F->scratch_at = scratch_obj >= 0 ? obj[scratch_obj].at : off;
+    if (sret_obj >= 0)
+        F->sret_slot = obj[sret_obj].at;
     F->frame = off - 1;
+    free(obj);
+    free(obj_of);
 }
 
 /* ---- addressing a slot ----------------------------------------------- */
