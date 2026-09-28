@@ -41,19 +41,17 @@ refuses() {                       # refuses <name> <expected phrase> <source>
 # lib/rt/avr.c now and avr-exec.sh runs them, which is what a case leaving
 # this file is supposed to look like.
 
-# Floating point. `float` and `double` are BOTH four-byte IEEE single on
-# this target, and every operation on either is a soft-float call.
-refuses "float arithmetic" "floating point" \
-    'float f(float a, float b) { return a + b; }'
-refuses "double arithmetic" "floating point" \
-    'double f(double a, double b) { return a * b; }'
-
-# 64-bit integers, varargs and aggregates by value used to be here. They
-# work now -- tests/golden/avr-wide.sh runs all three on the part -- which is
-# what a case leaving this file is supposed to look like.
+# Floating point used to be here, both names of it -- `float` and `double`
+# are BOTH four-byte binary32 on this target. It works now: every operation
+# is a call into lib/rt/avrfp*.c, and tests/golden/avr-float.sh runs seven
+# images on the part and compares them with the host bit for bit.
 #
-# What remains is floating point and the handful of builtins below, each
-# named rather than lumped under "unsupported".
+# 64-bit integers, varargs and aggregates by value used to be here too, and
+# tests/golden/avr-wide.sh runs all three. That is what a case leaving this
+# file is supposed to look like.
+#
+# What remains is the handful of builtins below, each named rather than
+# lumped under "unsupported".
 refuses "a byte swap" "bswap" \
     'unsigned long f(unsigned long a) { return __builtin_bswap32(a); }'
 

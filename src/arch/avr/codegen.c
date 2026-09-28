@@ -225,6 +225,15 @@ static char *avr_wide_map(struct ir_func *fn)
         case IR_NEG: case IR_BNOT:
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT: case IR_BSWAP:
+        /* IR_F2I belongs here even though it is lowered ABOVE the eight-byte
+         * dispatch, with its own helper call: what this map decides is how
+         * many bytes the DESTINATION SLOT gets, and that lowering stores
+         * eight of them for `(long long)f`. Left out, the store ran four
+         * bytes past the end of a four-byte slot and over whichever slot the
+         * sharing had put next to it. The symptom was a reset loop -- the
+         * program printed its first marker over and over -- because what it
+         * landed on was a saved return address. */
+        case IR_F2I:
             w[i->dst] = 1;
             break;
         default:
@@ -879,6 +888,70 @@ static void jump_if(struct a_fn *F, enum avr_cond cond, int label)
         avr_patch_br(F->t, (int)at, (int)((F->t->len - (at + 2)) / 2));
 }
 
+/* ---- a select, which on this machine is a branch --------------------- */
+
+/* dst = cond ? b : c, at `n` bytes.
+ *
+ * There is no conditional move on AVR, so this is the branch the optimizer's
+ * if-conversion pass just removed. That sounds like a reason to stop the pass
+ * on this target, and it is not: the pass runs for every target and a backend
+ * that has no IR_SELECT refuses ordinary code. `long pick(int c, long a, long
+ * b) { return c ? a : b; }` compiled at -O0 and -O1 and REFUSED at -O2, which
+ * is the worst shape a gap can have -- the same source, the same target, and
+ * the optimisation level decides whether it builds.
+ *
+ * Two-byte values never showed it, because if-conversion asks for a 4- or
+ * 8-byte arm and an `int` here is two. So the hole was open for exactly the
+ * widths a program is most likely to write.
+ *
+ * A byte at a time through RA rather than a wide load: the arms can be eight
+ * bytes and there is no eight-register run to spare, and no flag has to
+ * survive a copy.
+ */
+static void copy_slot(struct a_fn *F, long dst, long src, int n)
+{
+    if (dst == src)
+        return;
+    for (int k = 0; k < n; k++) {
+        ld_slot(F, RA, src + k, 1);
+        st_slot(F, dst + k, RA, 1);
+    }
+}
+
+static void gen_select(struct a_fn *F, const struct ir_ins *i, int n)
+{
+    struct code *t = F->t;
+    long br_at, rj_at, join;
+
+    /* The condition is a value, not flags: OR its bytes so Z answers
+     * "was it zero". PLAIN ld_slot, as IR_BRZ uses, because r0 is the
+     * accumulator and the flag-preserving path saves SREG through it. */
+    rd4(F, i->a, RA);
+    avr_rr(t, AVR_MOV, R_TMP, RA);
+    for (int k = 1; k < VW; k++)
+        avr_rr(t, AVR_OR, R_TMP, RA + k);
+
+    /* An INVERTED branch over an rjmp, not a branch over the arm: a br
+     * reaches +-63 words and an eight-byte copy out of a far slot is more
+     * than that. Written the direct way, this passed at -O0 and -O1 and
+     * tripped its own range check at -O2, where the frame had grown enough
+     * to put the arms past ldd's reach -- 65 words for a branch that can
+     * carry 63. jump_if() above has the same shape for the same reason. */
+    avr_br(t, AVR_BR_NE, 1);            /* nonzero -> fall into the true arm */
+    br_at = t->len;
+    avr_rjmp(t, 0);                     /* ...zero -> the false arm */
+    copy_slot(F, F->slot[i->dst], F->slot[i->b], n);
+    rj_at = t->len;
+    avr_rjmp(t, 0);
+    join = t->len;
+    /* Both displacements are measured, not predicted: a slot past ldd's
+     * six-bit reach costs extra instructions, so neither arm has a size
+     * this code can know in advance. */
+    avr_patch_rjmp(t, (int)br_at, (int)((join - (br_at + 2)) / 2));
+    copy_slot(F, F->slot[i->dst], F->slot[i->c], n);
+    avr_patch_rjmp(t, (int)rj_at, (int)((t->len - (rj_at + 2)) / 2));
+}
+
 /* ---- call sites ------------------------------------------------------ */
 
 /* EVERY call on this target is a relocation, including one to a function
@@ -1161,11 +1234,7 @@ static void gen_ins(struct a_fn *F, int n)
     /* Everything this backend has not learned, named before anything is
      * emitted for it. The width test comes first because it applies to
      * every arithmetic op at once. */
-    if (i->flt)
-        a_refuse(fn, i,
-                 "floating point: on AVR a float and a double are both "
-                 "four-byte IEEE single and every operation on them is a "
-                 "soft-float call this target has no runtime for");
+
     /* Eight-byte values are handled per operation below, through the
      * byte-at-a-time chain rather than in registers. The ones that have no
      * such path say so where they are. */
@@ -1188,6 +1257,143 @@ static void gen_ins(struct a_fn *F, int n)
                  "a memory access wider than four bytes: the value would "
                  "need eight consecutive registers and this backend's "
                  "second scratch bank is already one of them");
+
+    /* ---- floating point: every operation is a call --------------------
+     *
+     * `float` AND `double` are both four-byte binary32 here (avr-gcc's
+     * documented default, and what the data model in src/arch/target.c says),
+     * so there is no `df` family to emit -- a double IS a float, and F2F
+     * between them is a move. lib/rt/avrfp.c is what these call.
+     *
+     * A float is four bytes, so it travels exactly as a `long` does: the
+     * cursor gives r25:r22 for the first argument and r21:r18 for the second,
+     * which is where A and B already sit. */
+    if (i->flt) {
+        static const struct { enum ir_op op; const char *name; } fops[] = {
+            { IR_ADD, "__addsf3" }, { IR_SUB, "__subsf3" },
+            { IR_MUL, "__mulsf3" }, { IR_DIV, "__divsf3" }
+        };
+        int a_reg = ret_reg(4), b_reg = ret_reg(4) - 4;   /* r22 and r18 */
+
+        switch (i->op) {
+        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: {
+            const char *nm = NULL;
+            for (unsigned k = 0; k < sizeof fops / sizeof fops[0]; k++)
+                if (fops[k].op == i->op) nm = fops[k].name;
+            ld_slot(F, a_reg, F->slot[i->a], 4);
+            if (i->imm_b)
+                ldi4(F, b_reg, (unsigned long)i->imm, 4);
+            else
+                ld_slot(F, b_reg, F->slot[i->b], 4);
+            call_helper(F, nm);
+            st_slot(F, F->slot[i->dst], ret_reg(4), 4);
+            return;
+        }
+        case IR_MOD:
+            a_refuse(fn, i, "the remainder of two floats (C has no such "
+                            "operator; fmod is a library function)");
+            return;
+        case IR_NEG:
+            /* The sign bit, not a call: negation is exact and this is what
+             * __negsf2 does anyway. Byte 3 holds the sign. */
+            rd4(F, i->a, RA);
+            avr_ri(t, AVR_LDI, RB, 0x80);
+            avr_rr(t, AVR_EOR, RA + 3, RB);
+            wr4(F, i->dst, RA);
+            return;
+        case IR_CMP: {
+            /* The helper returns an `int` -- TWO bytes here -- whose sign
+             * answers the question, and any comparison with a NaN answers
+             * "not equal, not less, not greater". So the 0/1 this IR_CMP
+             * yields comes from comparing that against zero. */
+            static const struct { enum binop p; const char *nm; } fc[] = {
+                { B_EQ, "__eqsf2" }, { B_NE, "__nesf2" },
+                { B_LT, "__ltsf2" }, { B_LE, "__lesf2" },
+                { B_GT, "__gtsf2" }, { B_GE, "__gesf2" }
+            };
+            const char *nm = "__gesf2";
+            enum avr_cond c;
+            int swap = 0;
+            for (unsigned k = 0; k < sizeof fc / sizeof fc[0]; k++)
+                if (fc[k].p == i->pred) nm = fc[k].nm;
+            ld_slot(F, a_reg, F->slot[i->a], 4);
+            if (i->imm_b)
+                ldi4(F, b_reg, (unsigned long)i->imm, 4);
+            else
+                ld_slot(F, b_reg, F->slot[i->b], 4);
+            call_helper(F, nm);
+            /* The result is in r25:r24. Compare it against zero -- signed,
+             * because its SIGN is the answer. For `> 0` and `<= 0` the
+             * comparison is the other way round, since AVR has no "greater
+             * than" and zero is the fixed operand. */
+            switch (i->pred) {
+            case B_EQ: c = AVR_BR_EQ; break;
+            case B_NE: c = AVR_BR_NE; break;
+            case B_LT: c = AVR_BR_LT; break;
+            case B_GE: c = AVR_BR_GE; break;
+            case B_GT: c = AVR_BR_LT; swap = 1; break;
+            default:   c = AVR_BR_GE; swap = 1; break;   /* B_LE */
+            }
+            if (swap) {
+                avr_rr(t, AVR_CP,  R_ZERO, ret_reg(2));
+                avr_rr(t, AVR_CPC, R_ZERO, ret_reg(2) + 1);
+            } else {
+                avr_rr(t, AVR_CP,  ret_reg(2), R_ZERO);
+                avr_rr(t, AVR_CPC, ret_reg(2) + 1, R_ZERO);
+            }
+            avr_ri(t, AVR_LDI, RA, 1);
+            avr_br(t, c, 1);
+            avr_rr(t, AVR_MOV, RA, R_ZERO);
+            for (int k = 1; k < VW; k++) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
+            wr4(F, i->dst, RA);
+            return;
+        }
+        default:
+            /* Everything else that carries `flt` just MOVES four bytes -- a
+             * return, a call, a load, a store, a copy, a branch on zero --
+             * and the ordinary paths below already do that correctly, because
+             * a binary32 is exactly the width they work in. Only arithmetic
+             * needs a helper. */
+            break;
+        }
+    }
+
+    /* A conversion is a call too, and its `flt` is on the SOURCE or the
+     * destination rather than on the operation -- so these are outside the
+     * block above. */
+    if (i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F) {
+        int a_reg = ret_reg(4);
+        if (i->op == IR_F2F) {
+            /* binary32 to binary32: a move. `float` and `double` are the same
+             * type on this target, so there is nothing to convert -- and a
+             * call to __truncdfsf2 would be a call to the identity. */
+            rd4(F, i->a, RA);
+            wr4(F, i->dst, RA);
+            return;
+        }
+        if (i->op == IR_I2F) {
+            int sz = i->size < 1 ? 4 : i->size;
+            const char *nm = sz > 4 ? (i->sign ? "__floatdisf"
+                                              : "__floatundisf")
+                                    : (i->sign ? "__floatsisf"
+                                              : "__floatunsisf");
+            int reg = sz > 4 ? ret_reg(8) : ret_reg(4);
+            ld_slot(F, reg, F->slot[i->a], sz > 4 ? 8 : 4);
+            call_helper(F, nm);
+            st_slot(F, F->slot[i->dst], ret_reg(4), 4);
+            return;
+        }
+        {
+            int sz = i->w < 1 ? 4 : i->w;
+            const char *nm = sz > 4 ? (i->sign ? "__fixsfdi" : "__fixunssfdi")
+                                    : (i->sign ? "__fixsfsi" : "__fixunssfsi");
+            ld_slot(F, a_reg, F->slot[i->a], 4);
+            call_helper(F, nm);
+            st_slot(F, F->slot[i->dst], ret_reg(sz > 4 ? 8 : 4),
+                    sz > 4 ? 8 : 4);
+            return;
+        }
+    }
 
     /* ---- eight bytes: byte at a time, through memory ------------------ */
     if (wide_ins(F, i)) {
@@ -1473,6 +1679,10 @@ static void gen_ins(struct a_fn *F, int n)
             wr4(F, i->dst, RA);
             return;
         }
+        case IR_SELECT:
+            gen_select(F, i, n);
+            return;
+
         case IR_BRZ: case IR_BRNZ:
             /* PLAIN ld_slot here, not the flag-preserving one, for two
              * reasons that point the same way. It is not needed: this chain
@@ -1699,6 +1909,10 @@ static void gen_ins(struct a_fn *F, int n)
         wr4(F, i->dst, RA);
         return;
     }
+
+    case IR_SELECT:
+        gen_select(F, i, VW);
+        return;
 
     case IR_BRZ: case IR_BRNZ:
         /* r0 is the accumulator, so every access here must be one that does

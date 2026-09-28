@@ -1493,10 +1493,12 @@ not run.
 ## D-018 — AVR, the first **8-bit** target, and what a byte-wide register file changes
 
 **Decided:** 2026-09-27. **Status:** the triple, the data model, the
-predefined macros, the instruction encoder, a code generator, and images
-that run on an ATmega328P under QEMU. What it cannot lower it refuses by
-name. No register allocator yet, and no runtime helpers, so general
-multiply and divide are among the refusals.
+predefined macros, the instruction encoder, a code generator, an assembler,
+interrupt handlers, inline `__asm__`, 64-bit integers, varargs, aggregates
+by value, and software binary32 — all of it running on an ATmega328P under
+QEMU and judged against the host. What it cannot lower it still refuses by
+name; what remains is `__flash`/PROGMEM and a byte swap. No register
+allocator yet, so every value lives in a frame slot.
 
 AVR is first in the EmbLinkRTOS requirements document's target order
 (ATmega328P, the Nano profile), and it is the first target here that is not
@@ -1610,3 +1612,94 @@ to be. The general rule this leaves behind is that a referee must grade the
 MEANING of an operand and not only its packing — and that an encoder
 function absent from the vocabulary is unchecked however many forms the
 vocabulary reports.
+
+**Floating point, and the three things it broke elsewhere.** `float` and
+`double` are BOTH four-byte binary32 on this target — avr-gcc's documented
+default — so there is no binary64 anywhere and `lib/rt/softfp.c` cannot be
+reused: that file implements binary32 by widening to binary64, doing the work
+there and rounding back, which is exact (53 >= 2p+2 for p = 24) and needs a
+type this machine does not have. binary32 is therefore implemented natively,
+in `lib/rt/avrfp*.c`.
+
+Nothing in it is wider than 32 bits, and that is a size decision rather than a
+style one. The first version carried significands in `unsigned long long`,
+which reads better — a 24×24 product is 48 bits and wants a type that holds it
+— and came to 51 KB of text on a part with 32768 bytes of flash, because every
+64-bit operation in this backend is a byte-at-a-time chain through frame slots.
+`round_pack` alone was 10.7 KB and `addsub` 14.7 KB. Rewritten at 32 bits they
+are 6.5 KB and 8.2 KB. The one value that genuinely does not fit is the
+multiply's product, carried as two 32-bit words split at bit 24.
+
+It still does not fit as one object, so it is EIGHT: `avrfp.c` holds only
+unpack and round, and add, multiply, divide, compare, and each direction of
+each integer width is its own object. The boundaries were put where -O0 put
+them — `addsub` left the core when its image was 9 KB over, and the 64-bit
+conversions split by direction when the two together came to 19 KB — because
+-O0 is the level someone debugging builds at. `tests/golden/avr-float.sh` is
+one image per object, so a dependency a group should not have fails its link by
+name; that is how the multiply's call to `__mulsi3` surfaced.
+
+**`-Os` was not a size mode.** It differed from `-O2` only by turning off
+vectorization (x86-64 only) and unrolling, and this file is what showed the
+cost: 41392 bytes against `-O1`'s 32856. `pack` and `mul24` had been copied
+into every caller and deleted, `addsub` growing 6600 → 9850 to hold them. The
+inliner's budget is 24 IR instructions, which is a proxy for BYTES — and an IR
+op is one or two instructions on x86-64 and six to ten here, where an `int` add
+is four and every value lives in a frame slot. So the same budget that admits a
+one-liner on a 64-bit machine admits a 450-byte function on an 8-bit one.
+`-Os` now has its own budget (`INLINE_SIZE_CALLEE`), and keeps
+`INLINE_SOLE_CALLEE` because a body with one caller MOVES and duplicates
+nothing. `-O2` is unchanged, so no speed measurement moves.
+
+**Unsigned conversions went through 64 bits for no reason.** The front end
+widened an unsigned 32-bit integer to 64 before converting to or from floating
+point, and split an unsigned 64-bit one into halves to add — both correct, and
+both devices for a signed-only INSTRUCTION. x86-64's `cvtsi2sd` and `cvttsd2si`
+have no unsigned form; libgcc's `__floatunsisf`, `__fixunssfsi`,
+`__floatundisf` and `__fixunssfdi` do, and the thumb, riscv and avr backends
+all already emitted those names — nothing reached them. On AVR the widening
+turned a 32-bit software conversion into a 64-bit one and pulled 8.5 KB of
+64-bit conversion code into any image containing an unsigned cast.
+`target_widen_unsigned_fp_cvt()` now says which targets want it: x86-64
+because it must, aarch64 because it always has and a register widening there
+is free.
+
+**`IR_SELECT` had no lowering here, and if-conversion creates them.** `long
+pick(int c, long a, long b) { return c ? a : b; }` compiled at -O0 and -O1 and
+was REFUSED at -O2 — the same source, the same target, the optimisation level
+deciding whether it builds. Two-byte values never showed it, because
+if-conversion asks for a 4- or 8-byte arm and an `int` here is two, so the hole
+was open for exactly the widths a program is most likely to write. There is no
+conditional move on this machine, so the lowering is the branch the pass just
+removed; it is still required, because the pass runs for every target. Written
+the obvious way it tripped its own range check at -O2 (a `br` reaches ±63 words
+and an eight-byte copy out of a far slot is more than that), so it is an
+inverted branch over an `rjmp`, which is the shape `jump_if` already had.
+
+A fourth bug came out of the same work but belongs to the optimizer, not this
+target: `sel_width` answered 8 for any parameter — "a parameter, full width" —
+which is harmless where a select is a register move and wrong anywhere else. It
+now reads the declared width.
+
+**What the float code cost to get right.** Four rounding bugs were found on
+the host, driving the same source against native float over 3338 cases, before
+any of it ran on the part: the exponent recomputed after shifting into
+subnormal position, exact cancellation taking the magnitude path and producing
+−0, a divide that did not maintain `rem < den` (3.0f / 1.0f = 2.0f), and a
+divide that did not normalise a subnormal significand. 477 → 266 → 77 → 6 → 0
+mismatches. A fifth was found on the part: the multiply folded the low word of
+its product into the sticky bit on the assumption the high word held bits
+47..24, which is false when an operand is subnormal — 7.0f × 1.4e-45f came out
+zero. Normalising both significands before the product makes the shift down to
+27 bits a constant 21 places with no loop and nothing guessed at.
+
+**And a note on the disassembler, because it cost a wrong hypothesis.**
+`llvm-objdump --triple=avr` drops the high three bits of an `ldd`/`std`
+six-bit displacement, silently: it prints `std Y+24, r18` as `std Y+0, r18`
+and `std Y+17` as `std Y+1`. Reading a frame copy off it, the last store of a
+four-byte move appeared to go to offset 0 instead of 8, which looked exactly
+like an off-by-one in `layout()` and was not — `llvm-mc -disassemble` on the
+same bytes is correct, and the real fault was elsewhere entirely (the slot
+width above). The referee lesson recorded earlier in this entry has a
+companion: a disassembler is a referee too, and this one is wrong about the
+one field an AVR frame is made of.
