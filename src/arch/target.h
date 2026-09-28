@@ -111,7 +111,9 @@ enum target_fmt {
 int target_ptr_size(void);        /* 8 on LP64, 4 on ILP32 */
 int target_long_size(void);       /* likewise; long long is always 8 */
 int target_double_size(void);      /* 8, or 4 on AVR */
-int target_int_size(void);         /* 4, or 2 on AVR */
+int target_int_size(void);
+/* The most alignment any scalar gets, or 0 for no cap -- 1 on AVR. */
+int target_max_scalar_align(void);         /* 4, or 2 on AVR */
 int target_ldouble_size(void);    /* 16, or 8 where it is just a double */
 int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
 
@@ -165,6 +167,17 @@ int target_widen_unsigned_fp_cvt(void);
  * So it is a switch here with NO default: -Wswitch under -Werror refuses to
  * build until a new target says which it is. */
 int target_va_list_is_pointer(void);
+
+/* Does an UNNAMED bit-field -- `unsigned :4;`, `int :0;` -- raise the
+ * alignment of the struct it is in? AAPCS and AAPCS64 say yes; x86-64 SysV
+ * and the RISC-V psABI say no, only named members count. Measured against
+ * x86_64-elf-gcc, aarch64-elf-gcc and clang for Thumb and RISC-V.
+ *
+ * EmbCC applied ARM's answer everywhere, so on x86-64 and RISC-V
+ * `struct { char c; unsigned :4; char d; }` was four bytes where the ABI makes
+ * it three -- and `unsigned :4; // reserved` is how a hardware register block
+ * is written. A switch with no default, as target_va_list_is_pointer is. */
+int target_anon_bitfield_aligns(void);
 
 /* ARMv7E-M (Cortex-M4/M7) rather than ARMv7-M (Cortex-M3). Set by the
  * --target= name and by -mcpu=. The instruction selection is the same

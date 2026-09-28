@@ -120,25 +120,33 @@ static const struct data_model {
     /* `it` is int's width. Two on AVR, four everywhere else -- the
      * other half of what makes AVR not a 32-bit machine, and hardcoded
      * as 4 until now for the same reason double was hardcoded as 8. */
-    int ptr, lng, it, dbl, ldbl, char_uns, wchar_uns, int128;
+    /* `maxal` caps a SCALAR's alignment, 0 meaning no cap: every scalar is
+     * aligned to its own size unless this says less. It says 1 on AVR,
+     * where nothing needs alignment -- avr-gcc and clang give _Alignof of
+     * every type as 1 -- and nothing anywhere else, so no other target's
+     * layout moves. Without it, alignment was the size on every target, and
+     * `struct { char c; int i; }` was four bytes on AVR where avr-gcc makes
+     * it three: a struct shared with avr-gcc-built code, laid over a
+     * register block or sent down a wire came out a different shape. */
+    int ptr, lng, it, dbl, ldbl, char_uns, wchar_uns, int128, maxal;
 } g_model[] = {
     /* x86-64 System V: LP64, signed char, x87 long double in 16 bytes */
-    [TARGET_X86_64]  = { 8, 8, 4, 8, 16, 0, 0, 1 },
+    [TARGET_X86_64]  = { 8, 8, 4, 8, 16, 0, 0, 1, 0 },
     /* AAPCS64: LP64, UNSIGNED char and wchar_t, binary128 long double */
-    [TARGET_AARCH64] = { 8, 8, 4, 8, 16, 1, 1, 1 },
+    [TARGET_AARCH64] = { 8, 8, 4, 8, 16, 1, 1, 1, 0 },
     /* AAPCS (32-bit, EABI): ILP32, unsigned char and wchar_t, and a
      * long double that is an ordinary IEEE double -- checked against
      * clang -target thumbv7m-none-eabi -dM, which gives
      * __SIZEOF_LONG_DOUBLE__ 8 and __LDBL_MANT_DIG__ 53. long long
      * stays 8, and is 8-ALIGNED, which is where a 32-bit ABI most
      * often surprises: __BIGGEST_ALIGNMENT__ is 8, not 4. */
-    [TARGET_THUMB]   = { 4, 4, 4, 8, 8, 1, 1, 0 },
+    [TARGET_THUMB]   = { 4, 4, 4, 8, 8, 1, 1, 0, 0 },
     /* The RISC-V psABI. Unsigned char like the ARM ones, but a SIGNED
      * wchar_t -- which is why those are two columns and not one -- and
      * a binary128 long double at both widths. Read off
      * `clang -target riscv{32,64}-unknown-elf -dM`. */
-    [TARGET_RISCV32] = { 4, 4, 4, 8, 16, 1, 0, 0 },
-    [TARGET_RISCV64] = { 8, 8, 4, 8, 16, 1, 0, 1 },
+    [TARGET_RISCV32] = { 4, 4, 4, 8, 16, 1, 0, 0, 0 },
+    [TARGET_RISCV64] = { 8, 8, 4, 8, 16, 1, 0, 1, 0 },
     /* AVR (avr-gcc's ABI, measured against clang --target=avr
      * -mmcu=atmega328p): 16-bit pointers -- the first target here where
      * a pointer is NARROWER than a long -- a four-byte double, and no
@@ -160,7 +168,7 @@ static const struct data_model {
      * `long double` is four bytes too: the same type as double, which is
      * the same type as float. There is no wider floating point on this
      * machine. */
-    [TARGET_AVR]     = { 2, 4, 2, 4,  4, 0, 0, 0 },
+    [TARGET_AVR]     = { 2, 4, 2, 4,  4, 0, 0, 0, 1 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -172,6 +180,7 @@ int target_int_size(void)       { return g_model[g_arch].it; }
  * to get bytes got 1 and made every value a byte wide. */
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
+int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
 int target_ldouble_size(void)   { return g_model[g_arch].ldbl; }
 static int g_char_uns_override = -1;
 
@@ -187,6 +196,19 @@ int target_char_unsigned(void)
 }
 int target_wchar_unsigned(void) { return g_model[g_arch].wchar_uns; }
 int target_has_int128(void)     { return g_model[g_arch].int128; }
+
+int target_anon_bitfield_aligns(void)
+{
+    switch (target_get()) {
+    case TARGET_X86_64:  return 0;   /* SysV */
+    case TARGET_AARCH64: return 1;   /* AAPCS64 */
+    case TARGET_THUMB:   return 1;   /* AAPCS */
+    case TARGET_RISCV32:
+    case TARGET_RISCV64: return 0;   /* RISC-V psABI */
+    case TARGET_AVR:     return 0;   /* moot: every alignment is 1 */
+    }
+    return 0;
+}
 
 int target_va_list_is_pointer(void)
 {

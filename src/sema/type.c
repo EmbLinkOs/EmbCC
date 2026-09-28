@@ -169,6 +169,13 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
 
         if (m->is_bitfield) {
             int unit = 8 * ty_size(m->ty);   /* storage-unit width, bits */
+            /* The type's ALIGNMENT in bits, which is what GCC's rules are
+             * written in -- and which is the size everywhere but AVR, where
+             * every alignment is one byte. Using the size made a `:0` round
+             * up to two bytes there instead of one, and kept a 12-bit field
+             * of a 16-bit type from straddling a byte boundary as avr-gcc lets
+             * it. */
+            int abits = packed ? 8 : 8 * ty_align(m->ty);
             if (t->is_union) {
                 m->off = 0;
                 m->bit_off = 0;
@@ -178,14 +185,19 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
                 /* a zero-width field rounds up to the next unit boundary and
                  * names nothing — a separator, never stored or accessed. */
                 if (!packed)
-                    bitpos = (bitpos + unit - 1) / unit * unit;
+                    bitpos = (bitpos + abits - 1) / abits * abits;
                 m->off = bitpos / 8;
                 m->bit_off = 0;
             } else {
-                /* keep the field within one storage unit of its type */
-                if (!packed &&
-                    bitpos / unit != (bitpos + m->bit_width - 1) / unit)
-                    bitpos = (bitpos + unit - 1) / unit * unit;
+                /* GCC's excess_unit_span (stor-layout.c): a field may not span
+                 * more alignment units of its type than the type itself does.
+                 * Where alignment is the size, that is "within one storage
+                 * unit"; on AVR it lets a field straddle bytes as avr-gcc does. */
+                if (!packed) {
+                    int in = bitpos % abits;
+                    if ((in + m->bit_width + abits - 1) / abits > unit / abits)
+                        bitpos = (bitpos + abits - 1) / abits * abits;
+                }
                 m->off = (bitpos / unit) * ty_size(m->ty);
                 m->bit_off = bitpos - m->off * 8;
                 if (m->bit_off + m->bit_width > unit) {
@@ -208,7 +220,10 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
                 bitpos = (bytepos + ms) * 8;
             }
         }
-        if (ma > align)
+        /* An unnamed bit-field raises the struct's alignment only on the
+         * ARM ABIs; see target_anon_bitfield_aligns. */
+        if (ma > align &&
+            (!m->is_bitfield || m->name || target_anon_bitfield_aligns()))
             align = ma;
     }
     if (user_align > align)
@@ -260,7 +275,14 @@ int ty_align(const struct type *t)
     switch (t->kind) {
     case TY_ARRAY: return ty_align(t->pointee);
     case TY_STRUCT: return t->complete ? t->align : 1;
-    default: return ty_size(t);
+    default: {
+        /* A scalar is aligned to its size, capped where the target says so:
+         * on AVR every type's alignment is 1 (see target.c's `maxal`). A
+         * struct inherits it through its members, which is why the cap is
+         * here and not in the struct layout. */
+        int a = ty_size(t), m = target_max_scalar_align();
+        return m && a > m ? m : a;
+    }
     }
 }
 
