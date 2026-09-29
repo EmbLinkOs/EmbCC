@@ -2716,6 +2716,143 @@ static int pass_ifconv(struct ir_func *fn)
  * that reasons about blocks gets a smaller graph: a label with no
  * remaining jumps to it stops splitting a block, so the block-local
  * passes see more at once. */
+/* Jump threading on a merged boolean: what `a && b` and `a || b` leave in
+ * a condition.
+ *
+ *       %t = mov %c        ; the comparison, on one arm
+ *       jmp L
+ *       ...
+ *       %t = const 0       ; the short-circuit, on the other
+ *       jmp L
+ *   L:  brz %t -> Lx       ; %t's only reader
+ *       <Lafter>
+ *
+ * Each arm already knows where it is going: the constant one straight to
+ * Lx or Lafter, the copying one on %c itself. So an arm becomes a jump
+ * there, and the 0/1 is never built, merged and tested again -- 128 of
+ * these in lib/libc, and on AVR each 0/1 was four bytes wide.
+ *
+ * Lafter is the label right after the branch, or the target of a jmp
+ * there; when it is neither, one is inserted, and only then. The skipped
+ * `jmp L` is left dead for cfgclean. A copying arm that FALLS into L is
+ * left alone, since a branch there would leave %t unset on the way
+ * through. */
+static int thread_arm(const struct ir_func *fn, int k, int t, int L,
+                      const struct defs *d)
+{
+    const struct ir_ins *def = &fn->ins[k], *go = &fn->ins[k + 1];
+    int jumps = go->op == IR_JMP && go->label == L;
+    int falls = k + 1 < fn->nins && go->op == IR_LABEL && go->label == L;
+    if (def->dst != t || def->flt || (!falls && !jumps))
+        return 0;
+    if (def->op == IR_CONST)
+        return 1;
+    return def->op == IR_MOV && jumps && def->a >= 0 &&
+           def->a < fn->nvregs && d->cnt[def->a] == 1 &&
+           d->ins[def->a] >= 0 && fn->ins[d->ins[def->a]].op == IR_CMP;
+}
+
+static int thread_site(const struct ir_func *fn, int n, const int *use)
+{
+    const struct ir_ins *lab = &fn->ins[n], *br = &fn->ins[n + 1];
+    int t = br->a;
+    return n + 2 < fn->nins && lab->op == IR_LABEL &&
+           (br->op == IR_BRZ || br->op == IR_BRNZ) &&
+           t >= fn->nvars && t < fn->nvregs && use[t] == 1 && br->w <= 8;
+}
+
+static int pass_thread(struct ir_func *fn)
+{
+    int changed = 0, nv = fn->nvregs;
+    int *use = xcalloc((size_t)(nv ? nv : 1), sizeof *use);
+    struct ucount uc = { use, nv };
+    struct defs d;
+
+    for (int n = 0; n < fn->nins; n++)
+        each_read(&fn->ins[n], count_cb, &uc);
+    compute_defs(fn, &d);
+    /* A label after each branch that will be threaded and has none. */
+    {
+        int need = 0;
+        char *mark = xcalloc((size_t)fn->nins + 1, 1);
+        for (int n = 0; n + 2 < fn->nins; n++) {
+            const struct ir_ins *nx = &fn->ins[n + 2];
+            if (!thread_site(fn, n, use) || nx->op == IR_LABEL ||
+                nx->op == IR_JMP)
+                continue;
+            for (int k = 0; k + 1 < fn->nins; k++)
+                if (thread_arm(fn, k, fn->ins[n + 1].a, fn->ins[n].label, &d)) {
+                    mark[n + 1] = 1;
+                    need = 1;
+                    break;
+                }
+        }
+        if (need) {
+            struct ibuf nb = { 0, 0, 0 };
+            for (int n = 0; n < fn->nins; n++) {
+                *ib_push(&nb) = fn->ins[n];
+                if (mark[n]) {
+                    struct ir_ins *l = ib_push(&nb);
+                    memset(l, 0, sizeof *l);
+                    l->op = IR_LABEL;
+                    l->label = fn->nlabels++;
+                    l->dst = l->a = l->b = -1;
+                    l->line = fn->ins[n].line; l->col = fn->ins[n].col;
+                    l->synth = 1;
+                }
+            }
+            free(fn->ins);
+            fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+            free(d.cnt); free(d.ins);
+            compute_defs(fn, &d);
+        }
+        free(mark);
+    }
+    for (int n = 0; n + 2 < fn->nins; n++) {
+        const struct ir_ins *lab = &fn->ins[n], *br = &fn->ins[n + 1];
+        const struct ir_ins *nx = &fn->ins[n + 2];
+        int t = br->a, L = lab->label, Lx = br->label, Lafter;
+        if (!thread_site(fn, n, use))
+            continue;
+        if (nx->op == IR_LABEL)     Lafter = nx->label;
+        else if (nx->op == IR_JMP)  Lafter = nx->label;
+        else                        continue;
+        for (int k = 0; k + 1 < fn->nins; k++) {
+            struct ir_ins *def = &fn->ins[k], *go = &fn->ins[k + 1];
+            if (!thread_arm(fn, k, t, L, &d))
+                continue;
+            if (def->op == IR_CONST) {
+                unsigned long mask = br->w >= 8 ? ~0UL
+                                   : (1UL << (8 * (br->w > 0 ? br->w : 4))) - 1;
+                int zero = ((unsigned long)def->imm & mask) == 0;
+                int taken = br->op == IR_BRZ ? zero : !zero;
+                int line = def->line, col = def->col;
+                memset(def, 0, sizeof *def);
+                def->op = IR_JMP;
+                def->label = taken ? Lx : Lafter;
+                def->dst = def->a = def->b = -1;
+                def->line = line; def->col = col;
+                changed = 1;
+            } else {                               /* a copied comparison */
+                int c = def->a;
+                def->op = br->op;
+                def->a = c;
+                def->b = -1;
+                def->dst = -1;
+                def->label = Lx;
+                def->w = br->w;
+                def->sign = br->sign;
+                def->imm_b = 0;
+                go->label = Lafter;
+                changed = 1;
+            }
+        }
+    }
+    free(use);
+    free(d.cnt); free(d.ins);
+    return changed;
+}
+
 static int pass_cfgclean(struct ir_func *fn)
 {
     if (fn->nins == 0 || fn->nlabels == 0)
@@ -8637,8 +8774,10 @@ static void opt_func(struct ir_func *fn)
             changed |= pass_copyprop_local(fn);  /* the phi copies the global
                                                   * one cannot touch */
             changed |= pass_dce(fn);
-            if (g_cfgclean)
+            if (g_cfgclean) {
+                changed |= pass_thread(fn);
                 changed |= pass_cfgclean(fn);
+            }
             if (g_dse && cfg_ok)
                 changed |= pass_dse(fn);
         }
