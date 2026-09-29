@@ -41,3 +41,25 @@ u16 pressure(u16 a)
     }
     return (u16)(v0 ^ v1 ^ v2 ^ v3 ^ v4 ^ v5 ^ v6 ^ v7 ^ v8 ^ v9);
 }
+
+/* four-byte values: each takes a QUAD, two adjacent pairs */
+typedef uint32_t u32;
+u16 across32(u16 a)
+{
+    u32 s = (u32)a * 40503u, t = (u32)a << 17, u = s ^ 0x5a5a5a5au;
+    s += pnop((u16)t); t ^= pnop((u16)(s >> 16)); u += pnop((u16)u);
+    return (u16)((s + t * 3 + u * 5) >> 7);
+}
+u16 loop32(u16 a)
+{
+    u32 s = 1, x = a, y = 0x10001u * a;
+    u16 z = 3;
+    for (u16 i = 0; i < 25; i++) {
+        s = s * 31 + (x ^ i);
+        x += y >> 3;
+        y ^= s;
+        z = (u16)(z + (u16)x);
+        if (s & 4) s += pnop(z);
+    }
+    return (u16)(s ^ (s >> 16) ^ x ^ y ^ z);
+}

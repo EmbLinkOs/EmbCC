@@ -181,11 +181,13 @@ struct a_fn {
     char *wide;
     int want_debug;
     /* Per vreg: the low register of the PAIR the allocator gave it (r2,
-     * r4, ... r16), or -1 for its slot. A value with a pair has no slot
-     * traffic: vld/vst move its bytes with mov/movw, and every direct
-     * slot access goes through sslot(), which refuses one. NULL at -O0
-     * and -O1. */
+     * r4, ... r16) -- or of the QUAD, two adjacent pairs (r2, r6, r10,
+     * r14), for a four-byte value -- or -1 for its slot. hw[v] is how
+     * many bytes that home holds. A value with one has no slot traffic:
+     * vld/vst move its bytes with mov/movw, and every direct slot access
+     * goes through sslot(), which refuses one. NULL at -O0 and -O1. */
     int *loc;
+    unsigned char *hw;
     int used_callee[RA_MAXPOOL];
     int nsave;           /* how many pairs the allocator took */
     long in_at;          /* Y to the incoming stack arguments, less the frame */
@@ -1179,13 +1181,13 @@ static long sslot(const struct a_fn *F, int v)
 {
     if (in_pair(F, v))
         internal_error("avr: %s: a path addresses vreg %d's slot, and it "
-                       "lives in r%d:r%d", F->fn->name, v, F->loc[v],
-                       F->loc[v] + 1);
+                       "lives in r%d..r%d", F->fn->name, v, F->loc[v],
+                       F->loc[v] + F->hw[v] - 1);
     return F->slot[v];
 }
 
 /* n bytes of vreg v, from byte `off`, into registers from r -- out of its
- * pair when it has one. A pair holds the two bytes anything reads
+ * pair or quad when it has one. That holds every byte anything reads
  * (avr_demand); a wider request leaves r's upper bytes as they were,
  * which is what a narrow slot read does too. mov and movw set no flags,
  * so this serves the flag-preserving _cc paths as well. */
@@ -1193,14 +1195,17 @@ static void vld(struct a_fn *F, int r, int v, long off, int n)
 {
     if (in_pair(F, v)) {
         int h = F->loc[v] + (int)off, k = 0;
-        int have = 2 - (int)off;
+        int have = F->hw[v] - (int)off;
         if (n > have) n = have;
-        if (n >= 2 && !(h & 1) && !(r & 1)) {
-            if (h != r) avr_movw(F->t, r, h);
-            k = 2;
+        while (k < n) {
+            if (k + 2 <= n && !((h + k) & 1) && !((r + k) & 1)) {
+                if (h != r) avr_movw(F->t, r + k, h + k);
+                k += 2;
+            } else {
+                if (h != r) avr_rr(F->t, AVR_MOV, r + k, h + k);
+                k++;
+            }
         }
-        for (; k < n; k++)
-            if (h + k != r + k) avr_rr(F->t, AVR_MOV, r + k, h + k);
         return;
     }
     ld_slot(F, r, F->slot[v] + off, n);
@@ -1214,14 +1219,17 @@ static void vst(struct a_fn *F, int v, long off, int r, int n)
 {
     if (in_pair(F, v)) {
         int h = F->loc[v] + (int)off, k = 0;
-        int room = 2 - (int)off;
+        int room = F->hw[v] - (int)off;
         if (n > room) n = room;
-        if (n >= 2 && !(h & 1) && !(r & 1)) {
-            if (h != r) avr_movw(F->t, h, r);
-            k = 2;
+        while (k < n) {
+            if (k + 2 <= n && !((h + k) & 1) && !((r + k) & 1)) {
+                if (h != r) avr_movw(F->t, h + k, r + k);
+                k += 2;
+            } else {
+                if (h != r) avr_rr(F->t, AVR_MOV, h + k, r + k);
+                k++;
+            }
         }
-        for (; k < n; k++)
-            if (h + k != r + k) avr_rr(F->t, AVR_MOV, h + k, r + k);
         return;
     }
     st_slot(F, F->slot[v] + off, r, n);
@@ -1920,8 +1928,7 @@ static void gen_ins(struct a_fn *F, int n)
                                     : (i->sign ? "__fixsfsi" : "__fixunssfsi");
             vld(F, a_reg, i->a, 0, 4);
             call_helper(F, nm);
-            st_slot(F, sslot(F, i->dst), ret_reg(sz > 4 ? 8 : 4),
-                    sz > 4 ? 8 : 4);
+            vst(F, i->dst, 0, ret_reg(sz > 4 ? 8 : 4), sz > 4 ? 8 : 4);
             return;
         }
     }
@@ -3046,6 +3053,7 @@ static void isr_epilogue(struct code *t)
  * many arguments LOADS them into r8-r17, so each function's pool stops
  * below the lowest argument register any of its calls uses. */
 static const int A_POOL[8] = { 2, 4, 6, 8, 10, 12, 14, 16 };
+static int g_a_pool[8];
 static int g_a_npool;
 static int g_a_regalloc;
 
@@ -3053,7 +3061,7 @@ static const int *a_pool_for(const struct ir_func *fn, int *n)
 {
     (void)fn;
     *n = g_a_npool;
-    return A_POOL;
+    return g_a_pool;
 }
 static int a_callee_saved(int r) { return r >= 2 && r <= 17; }
 static int a_ldvar_plain(int size, int sign, int w)
@@ -3072,9 +3080,9 @@ static const struct ra_target AVR_RA = {
     NULL, NULL
 };
 
-/* How many pairs this function may use: those wholly below the lowest
- * register any call's arguments are loaded into. */
-static int avr_pool_size(const struct ir_func *fn)
+/* The lowest register any call's arguments are loaded into: every home
+ * the allocator hands out must lie wholly below it. */
+static int avr_arg_low(const struct ir_func *fn)
 {
     int low = 26, n = 0;
     for (int k = 0; k < fn->nins; k++) {
@@ -3094,14 +3102,14 @@ static int avr_pool_size(const struct ir_func *fn)
             if (p.nreg && p.reg < low) low = p.reg;
         }
     }
-    for (int k = 0; k < 8; k++)
-        if (A_POOL[k] + 1 < low)
-            n++;
-    return n;
+    (void)n;
+    return low;
 }
 
-/* Values the allocator must leave in memory. */
-static char *avr_excl(const struct a_fn *F)
+/* Values the allocator must leave in memory. `quad` asks the other
+ * question: which must stay out of the QUAD pass, which takes only the
+ * values whose reads need three or four bytes. */
+static char *avr_excl(const struct a_fn *F, int quad)
 {
     const struct ir_func *fn = F->fn;
     int nv = fn->nvregs;
@@ -3112,9 +3120,9 @@ static char *avr_excl(const struct a_fn *F)
         else if (F->wide[v])
             x[v] = 1;
         else if (v < fn->nvars)
-            x[v] = fn->locals[v].size > 2;
+            x[v] = quad ? fn->locals[v].size != 4 : fn->locals[v].size > 2;
         else
-            x[v] = cw(F, v) > 2;
+            x[v] = quad ? cw(F, v) < 3 || cw(F, v) > 4 : cw(F, v) > 2;
     }
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
@@ -3128,8 +3136,107 @@ static char *avr_excl(const struct a_fn *F)
     return x;
 }
 
+/* Two passes of the shared allocator, because it hands out one register
+ * per value and a four-byte value needs four. One pass colours the
+ * four-byte values with QUADS -- two adjacent pairs, named by the low
+ * register -- and the other the two-byte ones with PAIRS, each from what
+ * the first left. A pair or quad the first pass took is withdrawn for the
+ * whole function, not just where its value is live: coarser than one
+ * graph with both classes in it, and sound without teaching the colourer
+ * about overlapping registers.
+ *
+ * Which pass goes first decides who starves. Quads first shrank the
+ * 32-bit kernels by a fifth, and grew tests/exec/byte-regs.c by a
+ * quarter: its `int` temporaries that read four bytes took every quad,
+ * and the two-byte values that had pairs lost them. And no estimate of
+ * the traffic saved is the answer either: tests/exec/switch.c's main
+ * grew with the better estimate, because the values that lost their
+ * pairs pushed its frame past Y+63, where every access costs five more
+ * instructions. So gen_func is run under each choice (AVR_RA_*) and the
+ * shortest code is kept -- the pairs-only one is what the allocator did
+ * before quads, so no function comes out longer than it did then. */
+enum { AVR_RA_NONE, AVR_RA_QUADS_FIRST, AVR_RA_PAIRS_FIRST, AVR_RA_PAIRS_ONLY };
+
+struct avr_ra {
+    int *loc;
+    unsigned char *hw;
+    int used[RA_MAXPOOL], nsave;
+};
+
+static void avr_ra_pass(struct a_fn *F, int quad, int low, int *taken,
+                        const char *also, struct avr_ra *r)
+{
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs, used[RA_MAXPOOL], nused = 0;
+    int *a = NULL;
+    char *x;
+
+    g_a_npool = 0;
+    if (quad) {
+        /* r2..r5, r6..r9, r10..r13, r14..r17 */
+        for (int b = 2; b + 3 < low && b <= 14; b += 4)
+            if (!(*taken & (0xF << b)))
+                g_a_pool[g_a_npool++] = b;
+    } else {
+        for (int k = 0; k < 8; k++)
+            if (A_POOL[k] + 1 < low && !(*taken & (3 << A_POOL[k])))
+                g_a_pool[g_a_npool++] = A_POOL[k];
+    }
+    if (!g_a_npool)
+        return;
+    x = avr_excl(F, quad);
+    for (int v = 0; v < nv; v++)
+        if (also[v]) x[v] = 1;
+    a = ra_allocate(fn, &AVR_RA, F->wide, x, used, &nused);
+    free(x);
+    for (int k = 0; k < nused; k++) {
+        *taken |= (quad ? 0xF : 3) << used[k];
+        r->used[r->nsave++] = used[k];
+        if (quad)
+            r->used[r->nsave++] = used[k] + 2;
+    }
+    for (int v = 0; v < nv; v++)
+        if (a[v] >= 0) {
+            r->loc[v] = a[v];
+            r->hw[v] = (unsigned char)(quad ? 4 : 2);
+        }
+    free(a);
+}
+
+static void avr_ra_try(struct a_fn *F, int mode, struct avr_ra *r)
+{
+    int quads_first = mode == AVR_RA_QUADS_FIRST;
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs, low = avr_arg_low(fn), taken = 0;
+    char *also = xcalloc((size_t)(nv ? nv : 1), 1);
+
+    r->loc = xmalloc((size_t)(nv ? nv : 1) * sizeof *r->loc);
+    r->hw = xcalloc((size_t)(nv ? nv : 1), 1);
+    for (int v = 0; v < nv; v++) r->loc[v] = -1;
+    r->nsave = 0;
+    avr_ra_pass(F, quads_first, low, &taken, also, r);
+    for (int v = 0; v < nv; v++) also[v] = r->loc[v] >= 0;
+    if (mode != AVR_RA_PAIRS_ONLY)
+        avr_ra_pass(F, !quads_first, low, &taken, also, r);
+    free(also);
+}
+
+static void avr_regalloc(struct a_fn *F, int mode)
+{
+    struct avr_ra r;
+
+    avr_ra_try(F, mode, &r);
+    if (r.nsave) {
+        F->loc = r.loc; F->hw = r.hw;
+        F->nsave = r.nsave;
+        for (int k = 0; k < r.nsave; k++) F->used_callee[k] = r.used[k];
+    } else {
+        free(r.loc); free(r.hw);
+    }
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
-                     int want_debug)
+                     int want_debug, int ra_mode)
 {
     struct func *f = fn->src;
     struct a_fn F;
@@ -3151,14 +3258,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
         ra_count_vreg_uses(fn, F.usecnt);
     }
-    if (g_a_regalloc && !want_debug && !f->is_isr) {
-        char *x = avr_excl(&F);
-        g_a_npool = avr_pool_size(fn);
-        if (g_a_npool)
-            F.loc = ra_allocate(fn, &AVR_RA, F.wide, x, F.used_callee,
-                                &F.nsave);
-        free(x);
-    }
+    if (ra_mode != AVR_RA_NONE)
+        avr_regalloc(&F, ra_mode);
     layout(&F);
     const_map(&F);
 
@@ -3316,6 +3417,41 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     free(F.cval);
     free(F.cknown);
     free(F.wide);
+    free(F.loc);
+    free(F.hw);
+    free(F.usecnt);
+}
+
+/* Each allocation choice in turn, keeping the shortest (avr_regalloc).
+ * A discarded attempt is undone by truncating what it appended: the code,
+ * and the four site lists, which only ever grow. */
+static void gen_func_best(struct ir_func *fn, struct code *t,
+                          struct a_sites *st, int want_debug)
+{
+    int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
+        nf = st->nf, best = AVR_RA_NONE, best_len = 0;
+
+    if (!g_a_regalloc || want_debug || fn->src->is_isr) {
+        gen_func(fn, t, st, want_debug, AVR_RA_NONE);
+        return;
+    }
+    for (int m = AVR_RA_QUADS_FIRST; m <= AVR_RA_PAIRS_ONLY; m++) {
+        t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
+        st->nf = nf;
+        gen_func(fn, t, st, want_debug, m);
+        if (getenv("EMBCC_AVR_RA"))
+            fprintf(stderr, "%s: mode %d, %d bytes\n", fn->name, m,
+                    t->len - at);
+        if (best == AVR_RA_NONE || t->len - at < best_len) {
+            best = m;
+            best_len = t->len - at;
+        }
+    }
+    if (best != AVR_RA_PAIRS_ONLY) {
+        t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
+        st->nf = nf;
+        gen_func(fn, t, st, want_debug, best);
+    }
 }
 
 void codegen_unit_avr(struct ir_unit *iu, struct code *text,
@@ -3331,7 +3467,7 @@ void codegen_unit_avr(struct ir_unit *iu, struct code *text,
     g_a_regalloc = regalloc;           /* -O2 and -Os */
 
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, want_debug);
 
     /* The sites still carry string INDICES; the driver's relocations want
      * .rodata offsets. */
