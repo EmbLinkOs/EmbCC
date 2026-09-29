@@ -152,8 +152,13 @@ refuses() {
         echo "$1 failed, but not with the backend's own refusal:"
         cat "$out/no.err"; exit 1; }
 }
-refuses "a long double"     'long double f(long double a){return a*a;}'
-echo "long double refuses by name"
+refuses "a computed goto"   'void f(int i){ void *t[] = { &&a, &&b }; goto *t[i & 1]; a: return; b: return; }'
+echo "a computed goto refuses by name"
+# long double is a double on ARM EABI and is lowered as one now; what it
+# computes is tests/golden/ldouble-same.sh's to check.
+printf 'long double f(long double a){return a*a;}\n' > "$out/ld.c"
+"$EMBCC" --target=$T -c "$out/ld.c" -o "$out/ld.o" || {
+    echo "a long double (a double on ARM EABI) does not compile"; exit 1; }
 
 # And what it NO LONGER refuses: 64-bit integers, which the backend
 # carries in register pairs. Checked here as well as in thumb-exec.sh
