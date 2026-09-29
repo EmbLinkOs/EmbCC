@@ -711,6 +711,70 @@ void rv_patch_j(struct code *c, int at, int target)
     code_patch32(c, at, w);
 }
 
+/* The compressed jump and branches, for BRANCH RELAXATION (codegen.c):
+ * a jump or branch the first pass measured within reach is emitted as a
+ * two-byte placeholder and patched here, once, with the real
+ * displacement. They are not in rv_compress() because that sees every
+ * word rv_w() writes, and a jump there with a real displacement sits in a
+ * sequence that counts its bytes; here the decision is the caller's and
+ * the size is chosen before anything after it is placed.
+ *
+ *   c.j     101 imm[11|4|9:8|10|6|7|3:1|5] 01   (+-2 KiB)
+ *   c.beqz  110 imm[8|4:3] rs1' imm[7:6|2:1|5] 01, c.bnez 111  (+-256 B,
+ *           rs1' one of x8-x15, comparing against zero)
+ *
+ * The bit orders were checked against llvm-mc's own encodings. Each patch
+ * returns 0, writing nothing, when the displacement does not fit. */
+int rv_c_placeholder(struct code *c)
+{
+    int at = c->len;
+    code_u16(c, 0x0001);                 /* c.nop until patched */
+    return at;
+}
+
+int rv_patch_cj(struct code *c, int at, int target)
+{
+    long off = (long)target - at;
+    unsigned o = (unsigned)off & 0xfffu, e;
+    if (off < -2048 || off > 2046 || (off & 1))
+        return 0;
+#define B_(n) ((o >> (n)) & 1u)
+    e = (B_(11) << 12) | (B_(4) << 11) | (((o >> 8) & 3u) << 9) |
+        (B_(10) << 8) | (B_(6) << 7) | (B_(7) << 6) |
+        (((o >> 1) & 7u) << 3) | (B_(5) << 2);
+#undef B_
+    c->p[at] = (unsigned char)((0xa001u | e) & 0xff);
+    c->p[at + 1] = (unsigned char)((0xa001u | e) >> 8);
+    return 1;
+}
+
+int rv_patch_cb(struct code *c, int at, int ne, int rs1, int target)
+{
+    long off = (long)target - at;
+    unsigned o = (unsigned)off & 0x1ffu, e, h;
+    if (off < -256 || off > 254 || (off & 1) || rs1 < 8 || rs1 > 15)
+        return 0;
+#define B_(n) ((o >> (n)) & 1u)
+    e = (B_(8) << 12) | (((o >> 3) & 3u) << 10) |
+        ((unsigned)(rs1 - 8) << 7) | (((o >> 6) & 3u) << 5) |
+        (((o >> 1) & 3u) << 3) | (B_(5) << 2);
+#undef B_
+    h = ((ne ? 7u : 6u) << 13) | 1u | e;
+    c->p[at] = (unsigned char)(h & 0xff);
+    c->p[at + 1] = (unsigned char)(h >> 8);
+    return 1;
+}
+
+/* rv_patch_b, refusing a displacement a branch cannot hold (+-4 KiB). */
+int rv_patch_b_checked(struct code *c, int at, int target)
+{
+    long off = (long)target - at;
+    if (off < -4096 || off > 4094 || (off & 1))
+        return 0;
+    rv_patch_b(c, at, target);
+    return 1;
+}
+
 void rv_jalr(struct code *c, int rd, int rs1, int off)
 {
     rv_w(c, rv_enc_i(OP_JALR, rd, 0, rs1, off));

@@ -193,6 +193,10 @@ void rv_patch_b(struct code *c, int at, int target);
 
 int rv_j_placeholder(struct code *c, int rd);   /* jal rd, . */
 void rv_patch_j(struct code *c, int at, int target);
+int rv_c_placeholder(struct code *c);
+int rv_patch_cj(struct code *c, int at, int target);
+int rv_patch_cb(struct code *c, int at, int ne, int rs1, int target);
+int rv_patch_b_checked(struct code *c, int at, int target);
 
 void rv_jalr(struct code *c, int rd, int rs1, int off);
 void rv_ret(struct code *c);                    /* jalr zero, 0(ra) */

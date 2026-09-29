@@ -121,7 +121,15 @@ struct rv_fn {
     long va_regsave;     /* a variadic function's a0-a7 spill area, or -1 */
     long va_first;       /* ... and the offset of the first UNNAMED one */
     int *label_off;      /* per label id, or -1 while unseen */
-    struct { int at; int label; } *fix;
+    /* A jump or branch to a label. `kind` is its form (FX_*); for the
+     * long form `bat` is where its branch-over begins, which is where a
+     * direct branch would sit. */
+    struct { int at; int label; int kind; int cond, rs1, rs2; int bat; } *fix;
+    /* Branch relaxation: per jump or branch, in emission order, the form
+     * the first pass measured would reach. NULL on the first pass, which
+     * emits every one in its longest form. */
+    const signed char *relax;
+    int nrelax;
     int nfix, capfix;
 };
 
@@ -889,7 +897,16 @@ static void ext_reg(struct rv_fn *F, int rdst, int rs, int size, int sign)
  * how large the function turns out to be. The extra four bytes are the
  * same trade this whole file makes -- correct before small.
  */
-static void want_label(struct rv_fn *F, int at, int label)
+/* The forms a jump or branch to a label can take. The first pass uses J
+ * and LONG, which reach anywhere in a function; the second, whichever
+ * shorter one the first measured in reach -- CJ (c.j, +-2 KiB), B (a
+ * direct branch, +-4 KiB), CB (c.beqz/c.bnez, +-256 B, against zero from
+ * x8-x15). Code between a branch and its target only shrinks on the
+ * second pass, so what reached still reaches; the patch checks anyway. */
+enum { FX_J, FX_CJ, FX_LONG, FX_B, FX_CB };
+
+static void want_label(struct rv_fn *F, int at, int label, int kind,
+                       int cond, int rs1, int rs2, int bat)
 {
     if (F->nfix == F->capfix) {
         F->capfix = F->capfix ? F->capfix * 2 : 16;
@@ -897,12 +914,27 @@ static void want_label(struct rv_fn *F, int at, int label)
     }
     F->fix[F->nfix].at = at;
     F->fix[F->nfix].label = label;
+    F->fix[F->nfix].kind = kind;
+    F->fix[F->nfix].cond = cond;
+    F->fix[F->nfix].rs1 = rs1;
+    F->fix[F->nfix].rs2 = rs2;
+    F->fix[F->nfix].bat = bat;
     F->nfix++;
+}
+
+/* The form the first pass chose for the next jump or branch, or -1. */
+static int relaxed_form(const struct rv_fn *F)
+{
+    return F->relax && F->nfix < F->nrelax ? F->relax[F->nfix] : -1;
 }
 
 static void jump_to(struct rv_fn *F, int label)
 {
-    want_label(F, rv_j_placeholder(F->t, RV_ZERO), label);
+    if (relaxed_form(F) == FX_CJ)
+        want_label(F, rv_c_placeholder(F->t), label, FX_CJ, 0, 0, 0, 0);
+    else
+        want_label(F, rv_j_placeholder(F->t, RV_ZERO), label, FX_J,
+                   0, 0, 0, 0);
 }
 
 static int invert_branch(int cond)
@@ -919,13 +951,22 @@ static int invert_branch(int cond)
 
 static void branch_if(struct rv_fn *F, int cond, int rs1, int rs2, int label)
 {
-    int at = rv_b_placeholder(F->t, invert_branch(cond), rs1, rs2);
-    /* Emit the jump first and patch the branch to wherever it ENDED,
-     * rather than to `at + 8`. The two instructions are four bytes each
-     * today, and were the only reason compression had to be kept away
-     * from this sequence; measuring it removes the dependency instead
-     * of documenting it. */
-    jump_to(F, label);
+    int form = relaxed_form(F), at, jat;
+    if (form == FX_CB) {
+        want_label(F, rv_c_placeholder(F->t), label, FX_CB, cond, rs1, rs2,
+                   0);
+        return;
+    }
+    if (form == FX_B) {
+        want_label(F, rv_b_placeholder(F->t, cond, rs1, rs2), label, FX_B,
+                   cond, rs1, rs2, 0);
+        return;
+    }
+    /* The long form, which reaches anywhere: the opposite branch over a
+     * jump. Patched to wherever the jump ENDED, not to `at + 8`. */
+    at = rv_b_placeholder(F->t, invert_branch(cond), rs1, rs2);
+    jat = rv_j_placeholder(F->t, RV_ZERO);
+    want_label(F, jat, label, FX_LONG, cond, rs1, rs2, at);
     rv_patch_b(F->t, at, F->t->len);        /* over the jump just emitted */
 }
 
@@ -1928,6 +1969,10 @@ static void gen_ins(struct rv_fn *F, int n)
                 int ra_ = rdr(F, i->a, ACC);
                 int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
                 int cond, sw = 0;
+                /* against zero: x0 is zero, and only a branch against
+                 * x0 has a compressed form (c.beqz/c.bnez) */
+                if (i->imm_b && imm_val(F, i) == 0)
+                    rb_ = RV_ZERO;
                 if (rb_ == TMP) operand_b(F, i, TMP);
                 switch (i->pred) {
                 case B_EQ: cond = RV_BEQ; break;
@@ -2511,6 +2556,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.want_debug = want_debug;
     F.xlen = xlen; F.w = xlen / 8;
     F.fix = NULL; F.nfix = F.capfix = 0;
+    F.relax = NULL; F.nrelax = 0;
     F.wide = wide_map(fn);
     F.loc = NULL; F.nsave = 0;
     F.fb = RV_SP;
@@ -2593,6 +2639,37 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     for (i = 0; i <= fn->nlabels; i++)
         F.label_off[i] = -1;
 
+    /* BRANCH RELAXATION, as on Thumb: the function is emitted twice, the
+     * first pass with every jump and branch in its longest form, the
+     * second with each in the shortest form the first measured it reaches
+     * in. Nothing else emitted depends on a code address, so the second
+     * pass makes the same jumps and branches in the same order and the
+     * ordinal matches them. Optimising builds only. */
+    {
+    int len0 = t->len, nl0 = fn->nlines;
+    int sc0 = F.st->ncall, se0 = F.st->next, ss0 = F.st->nstr,
+        sg0 = F.st->ng, sf0 = F.st->nf;
+    signed char *relax = NULL;
+    int nrelax = 0;
+    for (int pass = 0; pass < 2; pass++) {
+    F.fb = RV_SP;
+    if (pass) {
+        t->len = len0;
+        fn->nlines = nl0;
+        F.st->ncall = sc0; F.st->next = se0; F.st->nstr = ss0;
+        F.st->ng = sg0; F.st->nf = sf0;
+        F.nfix = 0;
+        for (i = 0; i <= fn->nlabels; i++)
+            F.label_off[i] = -1;
+        F.skip_next = 0;
+        F.va_first = -1;
+        F.relax = relax;
+        F.nrelax = nrelax;
+        if (want_debug) {
+            free(fn->var_off);
+            fn->var_off = NULL;
+        }
+    }
     /* Align the function to four, with padding that traps if it is ever
      * reached. The loop that used to be here added FOUR bytes at a time,
      * which never terminates once the C extension can leave t->len at
@@ -2834,11 +2911,61 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     rv_ret(t);
 
     for (i = 0; i < F.nfix; i++) {
-        int target = F.label_off[F.fix[i].label];
+        int target = F.label_off[F.fix[i].label], ok = 1;
         if (target < 0)
             internal_error("riscv: label %d of %s was never placed",
                            F.fix[i].label, fn->name);
-        rv_patch_j(t, F.fix[i].at, target);
+        switch (F.fix[i].kind) {
+        case FX_J: case FX_LONG:
+            rv_patch_j(t, F.fix[i].at, target);
+            break;
+        case FX_CJ:
+            ok = rv_patch_cj(t, F.fix[i].at, target);
+            break;
+        case FX_B:
+            ok = rv_patch_b_checked(t, F.fix[i].at, target);
+            break;
+        default:                                    /* FX_CB */
+            ok = rv_patch_cb(t, F.fix[i].at, F.fix[i].cond == RV_BNE,
+                             F.fix[i].rs1, target);
+            break;
+        }
+        /* Measured to fit on the first pass, and only shorter since. An
+         * offset that did not fit would be a jump somewhere else. */
+        if (!ok)
+            internal_error("riscv: %s: a relaxed branch no longer reaches "
+                           "its label", fn->name);
+    }
+
+    /* After the first pass: the shortest form each jump and branch
+     * reaches in, measured from this pass's positions. */
+    if (pass == 0) {
+        int any = 0;
+        nrelax = F.nfix;
+        relax = xcalloc((size_t)(nrelax ? nrelax : 1), 1);
+        for (i = 0; i < F.nfix; i++) {
+            long tgt = F.label_off[F.fix[i].label];
+            if (F.fix[i].kind == FX_J) {
+                long d = tgt - F.fix[i].at;
+                relax[i] = d >= -2048 && d <= 2046 ? FX_CJ : FX_J;
+            } else {
+                long d = tgt - F.fix[i].bat;
+                int c = F.fix[i].cond, r1 = F.fix[i].rs1;
+                if ((c == RV_BEQ || c == RV_BNE) && F.fix[i].rs2 == RV_ZERO &&
+                    r1 >= 8 && r1 <= 15 && d >= -256 && d <= 254)
+                    relax[i] = FX_CB;
+                else if (d >= -4096 && d <= 4094)
+                    relax[i] = FX_B;
+                else
+                    relax[i] = FX_LONG;
+            }
+            any |= relax[i] != FX_J && relax[i] != FX_LONG;
+        }
+        if (!any || !g_rv_regalloc)
+            break;
+    }
+    }                                   /* the passes */
+    free(relax);
     }
 
     f->code_len = t->len - f->code_off;
