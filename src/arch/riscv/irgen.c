@@ -298,3 +298,28 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
     ins->dst = -1;
     ins->a = ins->b = -1;
 }
+
+/* What the IR_ADD..IR_CMP lowerings in codegen.c take as an immediate
+ * without building the constant first -- the optimizer asks before
+ * folding one (opt.c's target_imm_foldable). Anything else is folded and
+ * then rebuilt at every use, a lui/addi pair inside a loop, where a value
+ * left in a register is built once and can be hoisted.
+ *
+ * add/and/or/xor take a signed 12-bit immediate, and sub is an add of the
+ * negation. A branch compares two REGISTERS -- there is no immediate
+ * form -- so a compare's constant is free only when it is zero, which is
+ * x0. mul has no immediate at all. HERE rather than beside the lowerings
+ * because embls links the optimizer without the code generator. */
+int riscv_imm_foldable(int op, long imm)
+{
+    switch (op) {
+    case IR_ADD: case IR_AND: case IR_OR: case IR_XOR:
+        return imm >= -2048 && imm <= 2047;
+    case IR_SUB:
+        return imm >= -2047 && imm <= 2048;
+    case IR_CMP:
+        return imm == 0;
+    default:
+        return 0;
+    }
+}

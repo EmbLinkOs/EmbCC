@@ -7252,6 +7252,8 @@ static int target_imm_foldable(int op, long imm)
 {
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
+    if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
+        return riscv_imm_foldable(op, imm);
     return 1;
 }
 

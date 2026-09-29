@@ -229,6 +229,7 @@ int target_thumb_hf_name(void);
  * the standalone encoding checkers, which carry no backend, so it must
  * not name one. */
 int thumb_imm_foldable(int op, long imm);
+int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
