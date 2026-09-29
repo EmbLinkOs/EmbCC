@@ -1001,7 +1001,7 @@ static void rd(struct t_fn *F, int v, int reg)
 
 /* `rdr` says where a value already IS; `wreg` where to compute a result;
  * `wrote` commits it only if that was a scratch. */
-static int rdr(struct t_fn *F, int v, int scratch)
+static int rdr_(struct t_fn *F, int v, int scratch)
 {
     if (in_reg(F, v))
         return F->loc[v];
@@ -1009,10 +1009,15 @@ static int rdr(struct t_fn *F, int v, int scratch)
     return scratch;
 }
 
-static int wreg(struct t_fn *F, int v, int scratch)
-{
-    return in_reg(F, v) ? F->loc[v] : scratch;
-}
+/* Macros, so the SCRATCH argument is evaluated only when it is used.
+ * T_ADDR, T_TMP and T_SCR are t_scr() calls that mark r9-r11 as needing
+ * a save, and as function arguments they were evaluated for every value
+ * already in a register -- so a leaf that never touched r10 still pushed
+ * and popped it, and lost its `bx lr`. */
+#define rdr(F, v, scratch) \
+    (in_reg((F), (v)) ? (F)->loc[(v)] : rdr_((F), (v), (scratch)))
+#define wreg(F, v, scratch) \
+    (in_reg((F), (v)) ? (F)->loc[(v)] : (scratch))
 
 static void wr(struct t_fn *F, int v, int reg)
 {
@@ -2402,6 +2407,10 @@ static void gen_ins(struct t_fn *F, int n)
         int sa = rdr(F, i->a, T_ACC);
         if (i->imm_b && ((i->imm >= 0 && i->imm <= 255) || t_imm_ok(i->imm))) {
             t_cmp_imm(t, sa, i->imm);
+        } else if (!i->imm_b) {
+            /* ...and its right one too: `cmp r2, r4`, not a copy of r4
+             * into r11 first. */
+            t_cmp_reg(t, sa, rdr(F, i->b, T_TMP));
         } else {
             operand_b(F, i, T_TMP);
             t_cmp_reg(t, sa, T_TMP);
@@ -2450,8 +2459,9 @@ static void gen_ins(struct t_fn *F, int n)
             t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
             t_cmp_imm(t, A_LO, 0);
         } else {
-            rd(F, i->a, T_ACC);
-            t_cmp_imm(t, T_ACC, 0);
+            /* In place: a low register takes the 16-bit `cmp rN, #0`,
+             * where a copy into r12 took a mov and a cmp.w. */
+            t_cmp_imm(t, rdr(F, i->a, T_ACC), 0);
         }
         jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
         return;
