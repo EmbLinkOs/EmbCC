@@ -2319,9 +2319,22 @@ static void gen_ins(struct rv_fn *F, int n)
                     /* Through the caller's buffer, whose address the
                      * prologue put on the frame because a0 does not
                      * survive the calls in between. */
+                    /* In the widest access the type's alignment allows:
+                     * both ends are objects of this type, so both are
+                     * aligned to it. Byte by byte, lldiv's 16 bytes were
+                     * 32 instructions; a packed struct (align 1) still
+                     * goes a byte at a time. */
+                    int al = fn->ret_abi.align;
+                    int step = al >= F->w ? F->w : al >= 4 ? 4
+                             : al >= 2 ? 2 : 1;
+                    long k = 0;
                     rd(F, i->a, TMP);
                     ld_sp(F, ADDR, F->sret_slot, F->w, 1);
-                    for (long k = 0; k < size; k++) {
+                    for (; k + step <= size; k += step) {
+                        rv_load(t, SCR, TMP, (int)k, step, 0, F->xlen);
+                        rv_store(t, SCR, ADDR, (int)k, step, F->xlen);
+                    }
+                    for (; k < size; k++) {
                         rv_load(t, SCR, TMP, (int)k, 1, 0, F->xlen);
                         rv_store(t, SCR, ADDR, (int)k, 1, F->xlen);
                     }
