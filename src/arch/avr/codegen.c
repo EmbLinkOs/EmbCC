@@ -2139,7 +2139,7 @@ static void gen_ins(struct a_fn *F, int n)
             avr_ri(t, AVR_LDI, RA, 1);
             avr_br(t, c, 1);
             avr_rr(t, AVR_MOV, RA, R_ZERO);
-            for (int k = 1; k < VW; k++) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
+            for (int k = 1; k < dw(F, i); k++) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
             wr4(F, i->dst, RA);
             return;
         }
@@ -2469,7 +2469,7 @@ static void gen_ins(struct a_fn *F, int n)
             avr_ri(t, AVR_LDI, RA, 1);
             avr_br(t, c, 1);
             avr_rr(t, AVR_MOV, RA, R_ZERO);
-            for (int k = 1; k < VW; k++) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
+            for (int k = 1; k < dw(F, i); k++) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
             wr4(F, i->dst, RA);
             return;
         }
@@ -2841,7 +2841,8 @@ static void gen_ins(struct a_fn *F, int n)
         avr_ri(t, AVR_LDI, RA, 1);
         avr_br(t, c, 1);                        /* skip the clear */
         avr_rr(t, AVR_MOV, RA, R_ZERO);
-        for (int k = 1; k < VW; k++) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
+        /* the 0/1's upper bytes, as far as anything reads them */
+        for (int k = 1; k < dw(F, i); k++) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
         wr4(F, i->dst, RA);
         return;
     }
@@ -3182,11 +3183,28 @@ static void gen_ins(struct a_fn *F, int n)
              * char-returning call is not zero and not the sign -- and the
              * use site asks for a four-byte value. ret_tybytes/ret_tysign
              * exist in the IR for exactly this (see ir.h). */
-            if (ret_reg(size) != RA)
-                for (int b = 0; b < size; b++)
-                    avr_rr(t, AVR_MOV, RA + b, ret_reg(size) + b);
-            extend(F, RA, size, i->ret_tysign, VW);
-            wr4(F, i->dst, RA);
+            /* Only as far as something reads, and into its home: a
+             * two-byte result read as two was moved byte by byte into A
+             * and extended to four with two `mov r, r1`. */
+            {
+                int nb = dw(F, i), d, cp, rr = ret_reg(size);
+                if (!nb)
+                    return;
+                d = dst_reg(F, i, nb);
+                cp = size < nb ? size : nb;
+                for (int b = 0; b < cp; ) {
+                    if (b + 1 < cp && !((d + b) & 1) && !((rr + b) & 1)) {
+                        if (d != rr) avr_movw(t, d + b, rr + b);
+                        b += 2;
+                    } else {
+                        if (d != rr) avr_rr(t, AVR_MOV, d + b, rr + b);
+                        b++;
+                    }
+                }
+                if (nb > size)
+                    extend(F, d, size, i->ret_tysign, nb);
+                dst_done(F, i, d);
+            }
         }
         return;
     }
@@ -3611,6 +3629,13 @@ struct avr_ra {
     int used[RA_MAXPOOL], nsave;
 };
 
+/* How many PAIRS the allocator may take for this attempt, a quad being
+ * two. Every pair it takes is two pushes and two pops, eight bytes, and
+ * the allocator counts them as free -- so a function saved all sixteen
+ * registers for values that were each read twice. gen_func_best tries a
+ * few budgets and keeps what the size says. */
+static int g_a_cap = 8;
+
 static void avr_ra_pass(struct a_fn *F, int quad, int low, int *taken,
                         const char *also, struct avr_ra *r)
 {
@@ -3629,6 +3654,15 @@ static void avr_ra_pass(struct a_fn *F, int quad, int low, int *taken,
         for (int k = 0; k < 8; k++)
             if (A_POOL[k] + 1 < low && !(*taken & (3 << A_POOL[k])))
                 g_a_pool[g_a_npool++] = A_POOL[k];
+    }
+    {
+        int have = 0, left;
+        for (int b = 2; b <= 17; b++)
+            if (*taken & (1 << b)) have++;
+        left = g_a_cap - have / 2;
+        if (quad) left /= 2;
+        if (left < 0) left = 0;
+        if (g_a_npool > left) g_a_npool = left;
     }
     if (!g_a_npool)
         return;
@@ -4084,19 +4118,34 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         return;
     }
     int m0 = AVR_RA_QUADS_FIRST, m1 = AVR_RA_PAIRS_ONLY;
+    /* ...and each mode under a few budgets of pairs (g_a_cap). */
+    static const int caps[3] = { 8, 3, 1 };
+    int c0 = 0, c1 = 2, best_cap = 8, last_cap = 1;
     if (avr_knob("EMBCC_AVR_RA_MODE"))
         m0 = m1 = atoi(avr_knob("EMBCC_AVR_RA_MODE"));
-    for (int m = m0; m <= m1; m++) {
-        int len = gen_relaxed(fn, t, st, want_debug, m, &rb);
-        if (avr_knob("EMBCC_AVR_RA"))
-            fprintf(stderr, "%s: mode %d, %d bytes\n", fn->name, m, len);
-        if (best == AVR_RA_NONE || len < best_len) {
-            best = m;
-            best_len = len;
-        }
+    if (avr_knob("EMBCC_AVR_RA_CAP")) {
+        c0 = c1 = 0;
+        last_cap = atoi(avr_knob("EMBCC_AVR_RA_CAP"));
     }
-    if (best != m1)
+    for (int m = m0; m <= m1; m++)
+        for (int c = c0; c <= c1; c++) {
+            int len;
+            g_a_cap = avr_knob("EMBCC_AVR_RA_CAP") ? last_cap : caps[c];
+            len = gen_relaxed(fn, t, st, want_debug, m, &rb);
+            if (avr_knob("EMBCC_AVR_RA"))
+                fprintf(stderr, "%s: mode %d cap %d, %d bytes\n", fn->name,
+                        m, g_a_cap, len);
+            if (best == AVR_RA_NONE || len < best_len) {
+                best = m;
+                best_cap = g_a_cap;
+                best_len = len;
+            }
+        }
+    if (best != m1 || best_cap != g_a_cap) {
+        g_a_cap = best_cap;
         gen_relaxed(fn, t, st, want_debug, best, &rb);
+    }
+    g_a_cap = 8;
 }
 
 void codegen_unit_avr(struct ir_unit *iu, struct code *text,
