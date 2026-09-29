@@ -140,7 +140,27 @@ struct a_sites {
  * offset. A FORWARD jump is always the wide form, because its distance is not
  * known when it is emitted and the two sizes differ; a BACKWARD one takes
  * the short form when it fits, which is the common case and every loop. */
-struct a_fix { int at; int label; int wide; };
+/* wide: 0 an rjmp, 1 a 32-bit jmp (relocated), 2 a conditional br.
+ * site: the jump site it belongs to (avr_relax), or -1. */
+struct a_fix { int at; int label; int wide; int site; };
+
+/* Branch relaxation, by regeneration. A forward branch's distance is not
+ * known when it is emitted, so every site starts in its long form -- an
+ * inverted br over a 4-byte jmp for a conditional one, a jmp for the rest
+ * -- and gen_func is run again with each site the last layout showed
+ * would reach in a short one: a direct br (+-64 words) or an rjmp
+ * (+-2048). Shortening a site only moves every other target closer, so
+ * this converges, and a short site that does not reach after all is
+ * caught at patch time (`bad`) and pinned long. The site numbering is
+ * the order jump_to/jump_if are called in, which no hint changes. */
+struct avr_relax {
+    unsigned char *hint;   /* per site, in: 0 long, 1 rjmp, 2 br, 3 none:
+                            * an unconditional jump to where it stands */
+    unsigned char *fits;   /* per site, out: the shortest that reaches */
+    int nsite, cap;
+    int bad;               /* out: a short site that did not reach, or -1 */
+};
+struct a_jsite { long at, end; int label; int cond; };
 
 struct a_fn {
     struct ir_func *fn;
@@ -156,6 +176,9 @@ struct a_fn {
     long sret_slot;      /* where the hidden result pointer is kept, or -1 */
     struct a_fix *fix;
     int nfix, capfix;
+    struct avr_relax *rx;
+    struct a_jsite *js;  /* every jump site, in order (avr_relax) */
+    int njs, capjs;
     /* Which vregs are known constants, and what they hold.
      *
      * `imm_b` is the OPTIMIZER's answer and is absent at -O0, where a
@@ -197,7 +220,8 @@ struct a_fn {
      * of those (ext_info). */
     unsigned char *xw, *xs;
     int *usecnt;         /* reads per vreg, for compare/branch fusion */
-    int skip_next;       /* the compare emitted the branch that follows */
+    int skip_next;
+    int use_y;           /* the frame pointer is set up (see the prologue) */       /* the compare emitted the branch that follows */
 };
 
 /* A value's width in bytes: eight when the map says so, four otherwise. */
@@ -785,6 +809,12 @@ static int narrow_aware(int op)
     case IR_NEG: case IR_BNOT: case IR_MOV: case IR_SHL:
     case IR_SELECT: case IR_EXT: case IR_STVAR: case IR_STORE:
     case IR_LOAD: case IR_RET: case IR_CALL:
+    /* The compare and the zero tests read only the bytes need_of_use
+     * names -- cmp_width's for a compare, the extension's for a branch --
+     * and they were written for that; without them here a compared value
+     * was demanded whole, and loaded, extended and kept at four bytes to
+     * have one byte tested. */
+    case IR_CMP: case IR_BRZ: case IR_BRNZ:
         return 1;
     default:
         return 0;
@@ -1097,16 +1127,34 @@ static int walk_ptr(int r, int n)
  * may sit between a compare and its branch; gen_ins is written so that
  * nothing does.
  */
+/* Y, the frame pointer, is set up only when the function has a frame
+ * (F->use_y, see the prologue). Every reader of it goes through here, so
+ * a path that needs it where it was not set up is a refusal instead of an
+ * access relative to whatever the caller left in r28:r29. */
+static void need_y(const struct a_fn *F)
+{
+    if (!F->use_y)
+        internal_error("avr: %s: a frame access in a function whose frame "
+                       "pointer was not set up", F->fn->name);
+}
+
+static void y_to(struct a_fn *F, int r)
+{
+    need_y(F);
+    avr_movw(F->t, r, AVR_Y);
+}
+
 static void ld_slot(struct a_fn *F, int r, long off, int n)
 {
     int p, k;
+    need_y(F);
     if (off >= 0 && off + n <= 64) {
         for (k = 0; k < n; k++)
             avr_ldd(F->t, r + k, AVR_Y, (int)off + k);
         return;
     }
     p = walk_ptr(r, n);
-    avr_movw(F->t, p, AVR_Y);
+    y_to(F, p);
     add_const16(F, p, off);
     for (k = 0; k < n; k++)
         avr_ld(F->t, r + k, p, AVR_PTR_POST_INC);
@@ -1115,13 +1163,14 @@ static void ld_slot(struct a_fn *F, int r, long off, int n)
 static void st_slot(struct a_fn *F, long off, int r, int n)
 {
     int p, k;
+    need_y(F);
     if (off >= 0 && off + n <= 64) {
         for (k = 0; k < n; k++)
             avr_std(F->t, AVR_Y, (int)off + k, r + k);
         return;
     }
     p = walk_ptr(r, n);
-    avr_movw(F->t, p, AVR_Y);
+    y_to(F, p);
     add_const16(F, p, off);
     for (k = 0; k < n; k++)
         avr_st(F->t, p, r + k, AVR_PTR_POST_INC);
@@ -1373,7 +1422,8 @@ static void ldi4(struct a_fn *F, int r, unsigned long v, int n)
 
 /* ---- labels and branches --------------------------------------------- */
 
-static void want_label(struct a_fn *F, int at, int label, int wide)
+static void want_label_site(struct a_fn *F, int at, int label, int wide,
+                            int site)
 {
     if (F->nfix == F->capfix) {
         F->capfix = F->capfix ? F->capfix * 2 : 16;
@@ -1382,6 +1432,7 @@ static void want_label(struct a_fn *F, int at, int label, int wide)
     F->fix[F->nfix].at = at;
     F->fix[F->nfix].label = label;
     F->fix[F->nfix].wide = wide;
+    F->fix[F->nfix].site = site;
     F->nfix++;
 }
 
@@ -1395,40 +1446,93 @@ static void want_label(struct a_fn *F, int at, int label, int wide)
  * really does leave rjmp's +-4 KB; before this, that displacement was masked
  * to twelve bits and a back edge 2300 words behind became a forward jump
  * 1866 words ahead, into empty flash. */
-static void jump_to(struct a_fn *F, int label)
+/* A new jump site, and the form the relaxation hint allows it. `cond` is
+ * the condition of a conditional one, -1 for an unconditional one. */
+static int jump_site(struct a_fn *F, int label, int cond, int *hint)
+{
+    int k = F->njs;
+    if (F->njs == F->capjs) {
+        F->capjs = F->capjs ? F->capjs * 2 : 16;
+        F->js = xrealloc(F->js, (size_t)F->capjs * sizeof *F->js);
+    }
+    F->js[k].at = F->t->len;
+    F->js[k].label = label;
+    F->js[k].cond = cond;
+    F->njs++;
+    *hint = F->rx && k < F->rx->nsite ? F->rx->hint[k] : 0;
+    return k;
+}
+
+/* The jump itself, after any inverted skip: rjmp when the target is
+ * behind and in reach or the hint says it will be, else a jmp. */
+static void emit_jump(struct a_fn *F, int label, int site, int short_ok)
 {
     long here = F->t->len;
     int known = label <= F->fn->nlabels && F->label_off[label] >= 0;
     if (known) {
         long d = (F->label_off[label] - (here + 2)) / 2;
         if (d >= -2048 && d <= 2047) {
-            want_label(F, avr_rjmp(F->t, 0), label, 0);
+            want_label_site(F, avr_rjmp(F->t, 0), label, 0, site);
             return;
         }
     }
-    want_label(F, F->t->len, label, 1);
+    if (short_ok) {
+        want_label_site(F, avr_rjmp(F->t, 0), label, 0, site);
+        return;
+    }
+    want_label_site(F, F->t->len, label, 1, site);
     avr_jmp(F->t, 0);
 }
 
-/* A conditional branch to a label is always an INVERTED skip over an
- * rjmp, never a br to the label itself.
+/* An unconditional jump to a label.
  *
- * A br reaches +-63 words, which is 126 bytes -- less than one loop body
- * on a machine where an int add is four instructions. The distance is not
- * known when the branch is emitted, so choosing per site would mean
- * either a relaxation pass or a refusal that fires on ordinary code.
- * Two words always works, and `cond ^ 1` is the inversion because the
- * condition enum pairs each sense with its opposite in bit 0.
- */
+ * Backward and in reach: `rjmp`, two bytes. Forward, the long 32-bit
+ * `jmp` whose absolute address the linker fills in -- unless relaxation
+ * has shown an rjmp reaches (struct avr_relax). The choice has to be made
+ * HERE and not at patch time, because the two are different sizes. At -O0
+ * a single 64-bit statement is hundreds of instructions, so a loop's back
+ * edge really does leave rjmp's +-4 KB; before the range check, that
+ * displacement was masked to twelve bits and a back edge 2300 words
+ * behind became a forward jump 1866 words ahead, into empty flash. */
+static void jump_to(struct a_fn *F, int label)
+{
+    int h, k = jump_site(F, label, -1, &h);
+    if (h != 3)                   /* 3: the target is the next instruction */
+        emit_jump(F, label, k, h >= 1);
+    F->js[k].end = F->t->len;
+}
+
+/* A conditional branch to a label: a direct `br` when the target is in
+ * its +-64 words -- behind and measured, or ahead and shown to be by
+ * relaxation -- and otherwise an INVERTED br skipping the jump, since
+ * `cond ^ 1` is the inversion (the condition enum pairs each sense with
+ * its opposite in bit 0).
+ *
+ * The inverted form was the only form until relaxation: a br reaches 126
+ * bytes, less than one loop body on a machine where an int add is four
+ * instructions, and the distance of a forward target is not known here. */
 static void jump_if(struct a_fn *F, enum avr_cond cond, int label)
 {
-    /* The inverted branch skips the jump, whose size depends on how far the
-     * target is -- so the skip is over one word or two. */
+    int h, k = jump_site(F, label, (int)cond, &h);
     long at = F->t->len;
+    F->js[k].end = -1;
+    int known = label <= F->fn->nlabels && F->label_off[label] >= 0;
     int before;
+    if (known) {
+        long d = (F->label_off[label] - (at + 2)) / 2;
+        if (d >= -64 && d <= 63) {
+            avr_br(F->t, cond, (int)d);
+            return;
+        }
+    } else if (h == 2) {
+        want_label_site(F, avr_br(F->t, cond, 0), label, 2, k);
+        return;
+    }
+    /* The inverted branch skips the jump, whose size depends on how far
+     * the target is -- so the skip is over one word or two. */
     avr_br(F->t, (enum avr_cond)(cond ^ 1), 1);
     before = F->t->len;
-    jump_to(F, label);
+    emit_jump(F, label, k, h >= 1);
     if (F->t->len - before != 2)
         avr_patch_br(F->t, (int)at, (int)((F->t->len - (at + 2)) / 2));
 }
@@ -2268,26 +2372,66 @@ static void gen_ins(struct a_fn *F, int n)
         return;
     }
 
-    case IR_MOV:
+    case IR_MOV: {
+        /* Straight into or out of a home when there is one, rather than
+         * through A both ways: a copy between two values that share a
+         * home is then nothing at all, which is what most of them are --
+         * the colourer puts a copy's two ends together when it can. */
+        int n = dw(F, i);
+        if (n && in_pair(F, i->dst)) {
+            vld(F, F->loc[i->dst], i->a, 0, n);
+            return;
+        }
+        if (n && in_pair(F, i->a) && F->slot[i->dst] >= 0) {
+            vst(F, i->dst, 0, F->loc[i->a], n);
+            return;
+        }
         rd4(F, i->a, RA);
         wr4(F, i->dst, RA);
         return;
+    }
 
     case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR: {
-        /* An immediate operand is materialised into B rather than folded
-         * into subi/andi. The folded forms exist and reach r16-r31, which
-         * B is -- but `add` has no immediate at all (it is subi of the
-         * negation, with sbci for the carry bytes) and `xor` has none
-         * either, so half the cases would take the register path anyway.
-         * One path is worth more here than three instructions. */
         int nb = dw(F, i);
         if (!nb)
             return;
         rd4(F, i->a, RA);
-        if (i->imm_b)
-            ldi4(F, RB, (unsigned long)i->imm, nb);
-        else
-            rd4(F, i->b, RB);
+        if (i->imm_b) {
+            /* A constant folds into the instruction, since A is in
+             * r16-r31 where the immediate forms reach: an add is a subi
+             * of the negation with sbci carrying the borrow -- exactly
+             * the sum, mod 2^(8nb) -- a subtract is subi/sbci of the
+             * constant itself, and and/or/xor go a byte at a time,
+             * skipping each byte the constant leaves alone. `x + 1` is
+             * two instructions instead of four. */
+            unsigned long v = (unsigned long)i->imm;
+            if (i->op == IR_ADD) v = 0UL - v;
+            for (int k = 0; k < nb; k++) {
+                int b = (int)((v >> (8 * k)) & 0xffu);
+                switch (i->op) {
+                case IR_ADD: case IR_SUB:
+                    avr_ri(t, k ? AVR_SBCI : AVR_SUBI, RA + k, b);
+                    break;
+                case IR_AND:
+                    if (b == 0) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
+                    else if (b != 0xff) avr_ri(t, AVR_ANDI, RA + k, b);
+                    break;
+                case IR_OR:
+                    if (b) avr_ri(t, AVR_ORI, RA + k, b);
+                    break;
+                default:
+                    if (b == 0xff) avr_r1(t, AVR_COM, RA + k);
+                    else if (b) {
+                        avr_ri(t, AVR_LDI, RB + k, b);
+                        avr_rr(t, AVR_EOR, RA + k, RB + k);
+                    }
+                    break;
+                }
+            }
+            wr4(F, i->dst, RA);
+            return;
+        }
+        rd4(F, i->b, RB);
         switch (i->op) {
         case IR_ADD:
             avr_rr(t, AVR_ADD, RA, RB);
@@ -2493,14 +2637,22 @@ static void gen_ins(struct a_fn *F, int n)
         {
             /* only the bytes that can be nonzero (need_of_use) */
             int nb = (F->xw && F->xw[i->a]) ? F->xw[i->a] : VW;
-            vld(F, RA, i->a, 0, nb);
-            /* `or` sets Z; `mov` does not. With a single byte there is no
-             * `or` to OR in, and the branch read the flags of whatever came
-             * before -- so the first byte is ORed with itself. */
-            avr_rr(t, AVR_MOV, R_TMP, RA);
-            if (nb == 1)
-                avr_rr(t, AVR_OR, R_TMP, R_TMP);
-            for (int k = 1; k < nb; k++) avr_rr(t, AVR_OR, R_TMP, RA + k);
+            int r = RA;
+            /* Tested where it is: a home in place, anything else once it
+             * is loaded into A. One byte is `or r,r` (tst) -- a `mov`
+             * sets no flag, and a branch after one alone read whatever
+             * came before. More are compared with zero, low byte up: cpc
+             * keeps Z only while every byte so far was zero. */
+            if (in_pair(F, i->a) && nb <= F->hw[i->a])
+                r = F->loc[i->a];
+            else
+                vld(F, RA, i->a, 0, nb);
+            if (nb == 1) {
+                avr_rr(t, AVR_OR, r, r);
+            } else {
+                avr_rr(t, AVR_CP, r, R_ZERO);
+                for (int k = 1; k < nb; k++) avr_rr(t, AVR_CPC, r + k, R_ZERO);
+            }
         }
         jump_if(F, i->op == IR_BRZ ? AVR_BR_EQ : AVR_BR_NE, i->label);
         return;
@@ -2515,6 +2667,10 @@ static void gen_ins(struct a_fn *F, int n)
         int ld = (i->vol || nb > i->size) ? i->size : nb;
         if (!ld)
             return;
+        if (nb <= ld && in_pair(F, i->dst)) {  /* no extension: in place */
+            vld(F, F->loc[i->dst], i->a, 0, ld);
+            return;
+        }
         vld(F, RA, i->a, 0, ld);
         if (nb > i->size)
             extend(F, RA, i->size, i->sign, nb);
@@ -2523,6 +2679,11 @@ static void gen_ins(struct a_fn *F, int n)
     }
 
     case IR_STVAR:
+        if (in_pair(F, i->a)) {                /* straight from its home */
+            vst(F, i->dst, 0, F->loc[i->a],
+                i->size < F->hw[i->a] ? i->size : F->hw[i->a]);
+            return;
+        }
         rd4(F, i->a, RA);
         vst(F, i->dst, 0, RA, i->size);
         return;
@@ -2570,6 +2731,14 @@ static void gen_ins(struct a_fn *F, int n)
         int nb = dw(F, i);
         if (!nb)
             return;
+        if (nb <= i->size && in_pair(F, i->dst)) {   /* a copy, in place */
+            vld(F, F->loc[i->dst], i->a, 0, nb);
+            return;
+        }
+        if (nb <= i->size && in_pair(F, i->a) && F->slot[i->dst] >= 0) {
+            vst(F, i->dst, 0, F->loc[i->a], nb);
+            return;
+        }
         rd4(F, i->a, RA);
         if (nb > i->size)
             extend(F, RA, i->size, i->sign, nb);
@@ -2578,7 +2747,7 @@ static void gen_ins(struct a_fn *F, int n)
     }
 
     case IR_ADDR:
-        avr_movw(t, RA, AVR_Y);
+        y_to(F, RA);
         add_const16(F, RA, sslot(F, i->a));
         if (dw(F, i) > 2)
             extend(F, RA, 2, 0, dw(F, i));
@@ -2689,7 +2858,7 @@ static void gen_ins(struct a_fn *F, int n)
         if (sret) {
             place_arg(2, &cursor, &stk, &hid);
             if (hid.nstk) {
-                avr_movw(t, RA, AVR_Y);
+                y_to(F, RA);
                 add_const16(F, RA, F->scratch_at + i->scratch);
                 st_slot(F, 1 + hid.stk, RA, 2);
             }
@@ -2741,7 +2910,7 @@ static void gen_ins(struct a_fn *F, int n)
          * used its register as a scratch after it was set. (Its stack form,
          * for a variadic callee, went out with the other stack words.) */
         if (sret && hid.nreg) {
-            avr_movw(t, hid.reg, AVR_Y);
+            y_to(F, hid.reg);
             add_const16(F, hid.reg, F->scratch_at + i->scratch);
         }
         if (i->indirect) {
@@ -2763,7 +2932,7 @@ static void gen_ins(struct a_fn *F, int n)
             if (!sret_bytes(i->retsize))
                 st_slot(F, F->scratch_at + i->scratch, ret_reg(i->retsize),
                         i->retsize);
-            avr_movw(t, RA, AVR_Y);
+            y_to(F, RA);
             add_const16(F, RA, F->scratch_at + i->scratch);
             extend(F, RA, 2, 0, VW);
             wr4(F, i->dst, RA);
@@ -2922,7 +3091,7 @@ static void gen_ins(struct a_fn *F, int n)
         long stk = 0;
         for (int k = 0; k < fn->nparams; k++)
             place_arg(fn->param_abi[k].size, &cursor, &stk, &pl);
-        avr_movw(t, RA, AVR_Y);
+        y_to(F, RA);
         add_const16(F, RA, F->frame + F->in_at + stk);
         /* `a` holds the ADDRESS of the va_list object. */
         vld(F, AVR_Z, i->a, 0, 2);
@@ -3308,7 +3477,7 @@ static void avr_regalloc(struct a_fn *F, int mode)
 }
 
 static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
-                     int want_debug, int ra_mode)
+                     int want_debug, int ra_mode, struct avr_relax *rx)
 {
     struct func *f = fn->src;
     struct a_fn F;
@@ -3317,6 +3486,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
     F.want_debug = want_debug;
+    F.rx = rx;
 
     if (fn->has_alloca)
         a_refuse(fn, NULL, "a variable-length array");
@@ -3394,12 +3564,32 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         avr_push(t, F.used_callee[i] + 1);
     }
     F.in_at = INCOMING_AT + 2L * F.nsave;
-    if (!f->is_isr) {
+    /* Y is the frame pointer, and a function with no frame -- no slot, no
+     * outgoing area, nothing on the stack coming in -- never reads it:
+     * then it is neither saved nor set, which is twelve bytes a function.
+     * Every Y-relative access is to one of those, so F.frame is zero
+     * without them; stack parameters and varargs are the two that are
+     * above the frame instead of in it. */
+    {
+        struct argplace pl;
+        int cursor = ARG_TOP;
+        long stk = 0;
+        F.use_y = f->is_isr || fn->is_varargs || F.frame != 0 ||
+                  F.sret_slot >= 0;
+        if (fn_sret_bytes(fn)) place_arg(2, &cursor, &stk, &pl);
+        for (i = 0; i < fn->nparams && !F.use_y; i++) {
+            place_arg(fn->param_abi[i].size, &cursor, &stk, &pl);
+            if (pl.nstk) F.use_y = 1;
+        }
+    }
+    if (!f->is_isr && F.use_y) {
         avr_push(t, 28);
         avr_push(t, 29);
     }
-    avr_in(t, 28, IO_SPL);
-    avr_in(t, 29, IO_SPH);
+    if (F.use_y) {
+        avr_in(t, 28, IO_SPL);
+        avr_in(t, 29, IO_SPH);
+    }
     if (F.frame) {
         add_const16(&F, AVR_Y, -F.frame);
         set_sp_from_y(t);
@@ -3468,8 +3658,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     if (f->is_isr) {
         isr_epilogue(t);
     } else {
-        avr_pop(t, 29);
-        avr_pop(t, 28);
+        if (F.use_y) {
+            avr_pop(t, 29);
+            avr_pop(t, 28);
+        }
         for (i = F.nsave - 1; i >= 0; i--) {
             avr_pop(t, F.used_callee[i] + 1);
             avr_pop(t, F.used_callee[i]);
@@ -3482,7 +3674,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         int to = F.label_off[F.fix[i].label];
         if (to < 0)
             a_refuse(fn, NULL, "a jump to a label that was never placed");
-        if (F.fix[i].wide) {
+        if (F.fix[i].wide != 1) {
+            /* A short form relaxation chose: it must reach, or this
+             * attempt is thrown away and that site pinned long. One
+             * emitted without a hint was measured, and cannot miss. */
+            long d = (to - (at + 2)) / 2;
+            int lim = F.fix[i].wide == 2 ? 64 : 2048;
+            if (d < -lim || d > lim - 1) {
+                if (F.rx && F.fix[i].site >= 0) {
+                    F.rx->bad = F.fix[i].site;
+                    continue;
+                }
+            }
+            if (F.fix[i].wide == 2) {
+                avr_patch_br(t, at, (int)d);
+                continue;
+            }
+        }
+        if (F.fix[i].wide == 1) {
             /* A 32-bit `jmp`, whose operand is an ABSOLUTE word address that
              * only the linker knows: the site is relocated against this
              * .text with the label's offset as the addend. */
@@ -3496,9 +3705,41 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
      * part has 2 KB of SRAM total, every temporary here takes four bytes
      * of it, and a frame that does not fit shows up as a program that
      * produces no output at all. */
-    f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 /* the pushed Y */ + 2 /* the return
+    f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 * F.use_y /* Y */ + 2 /* the return
                                        * address the call pushed */;
     f->code_len = t->len - f->code_off;
+    if (F.rx) {
+        struct avr_relax *rx = F.rx;
+        if (F.njs > rx->cap) {
+            rx->cap = F.njs;
+            rx->hint = xrealloc(rx->hint, (size_t)rx->cap);
+            rx->fits = xrealloc(rx->fits, (size_t)rx->cap);
+        }
+        for (i = rx->nsite; i < F.njs; i++) rx->hint[i] = 0;
+        rx->nsite = F.njs;
+        /* A jump left out must have had its target right where it stood. */
+        for (i = 0; i < F.njs; i++)
+            if (F.js[i].cond < 0 && F.js[i].end == F.js[i].at &&
+                F.label_off[F.js[i].label] != F.js[i].at)
+                rx->bad = i;
+        for (i = 0; i < F.njs; i++) {
+            long to = F.label_off[F.js[i].label], at = F.js[i].at;
+            long d = (to - (at + 2)) / 2;
+            rx->fits[i] = 0;
+            if (to < 0)
+                continue;
+            if (F.js[i].cond >= 0 && d >= -64 && d <= 63)
+                rx->fits[i] = 2;
+            else if (F.js[i].cond >= 0) {
+                d = (to - (at + 4)) / 2;       /* the rjmp after the skip */
+                if (d >= -2048 && d <= 2047) rx->fits[i] = 1;
+            } else if (to == F.js[i].end)
+                rx->fits[i] = 3;
+            else if (d >= -2048 && d <= 2047)
+                rx->fits[i] = 1;
+        }
+    }
+    free(F.js);
     free(F.slot);
     free(F.need);
     free(F.label_off);
@@ -3511,41 +3752,88 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     free(F.usecnt);
 }
 
+/* One allocation mode, relaxed (struct avr_relax): generated until no site
+ * can shorten further. Ends with that mode's code in `t`, and returns its
+ * length. The caller has marked where the function starts in `rb`. */
+struct avr_rollback { int at, next, nstr, ng, nf; };
+
+static void avr_rollback(struct code *t, struct a_sites *st,
+                         const struct avr_rollback *rb)
+{
+    t->len = rb->at; st->next = rb->next; st->nstr = rb->nstr;
+    st->ng = rb->ng; st->nf = rb->nf;
+}
+
+static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
+                       int want_debug, int mode, const struct avr_rollback *rb)
+{
+    struct avr_relax rx;
+    unsigned char *pin = NULL;
+    int npin = 0, ok = 0;
+
+    memset(&rx, 0, sizeof rx);
+    for (int it = 0; it < 16; it++) {
+        int changed = 0;
+        avr_rollback(t, st, rb);
+        rx.bad = -1;
+        gen_func(fn, t, st, want_debug, mode, &rx);
+        if (npin < rx.nsite) {
+            pin = xrealloc(pin, (size_t)rx.nsite);
+            for (; npin < rx.nsite; npin++) pin[npin] = 0;
+        }
+        if (rx.bad >= 0) {                   /* thrown away: pin it long */
+            pin[rx.bad] = 1;
+            rx.hint[rx.bad] = 0;
+            ok = 0;
+            continue;
+        }
+        ok = 1;
+        for (int k = 0; k < rx.nsite; k++) {
+            int h = pin[k] ? 0 : rx.fits[k] > rx.hint[k] ? rx.fits[k]
+                                                         : rx.hint[k];
+            if (h != rx.hint[k]) { rx.hint[k] = (unsigned char)h; changed = 1; }
+        }
+        if (!changed)
+            break;
+    }
+    if (!ok) {
+        /* Never left with a thrown-away attempt in `t`: everything long. */
+        avr_rollback(t, st, rb);
+        gen_func(fn, t, st, want_debug, mode, NULL);
+    }
+    free(rx.hint); free(rx.fits); free(pin);
+    return t->len - rb->at;
+}
+
 /* Each allocation choice in turn, keeping the shortest (avr_regalloc).
  * A discarded attempt is undone by truncating what it appended: the code,
  * and the four site lists, which only ever grow. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
                           struct a_sites *st, int want_debug)
 {
-    int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
-        nf = st->nf, best = AVR_RA_NONE, best_len = 0;
+    struct avr_rollback rb = { t->len, st->next, st->nstr, st->ng, st->nf };
+    int best = AVR_RA_NONE, best_len = 0;
 
     if (!g_a_regalloc || want_debug || fn->src->is_isr ||
         (avr_knob("EMBCC_AVR_RA_ONLY") &&
          strcmp(avr_knob("EMBCC_AVR_RA_ONLY"), fn->name) != 0)) {
-        gen_func(fn, t, st, want_debug, AVR_RA_NONE);
+        gen_relaxed(fn, t, st, want_debug, AVR_RA_NONE, &rb);
         return;
     }
     int m0 = AVR_RA_QUADS_FIRST, m1 = AVR_RA_PAIRS_ONLY;
     if (avr_knob("EMBCC_AVR_RA_MODE"))
         m0 = m1 = atoi(avr_knob("EMBCC_AVR_RA_MODE"));
     for (int m = m0; m <= m1; m++) {
-        t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
-        st->nf = nf;
-        gen_func(fn, t, st, want_debug, m);
+        int len = gen_relaxed(fn, t, st, want_debug, m, &rb);
         if (avr_knob("EMBCC_AVR_RA"))
-            fprintf(stderr, "%s: mode %d, %d bytes\n", fn->name, m,
-                    t->len - at);
-        if (best == AVR_RA_NONE || t->len - at < best_len) {
+            fprintf(stderr, "%s: mode %d, %d bytes\n", fn->name, m, len);
+        if (best == AVR_RA_NONE || len < best_len) {
             best = m;
-            best_len = t->len - at;
+            best_len = len;
         }
     }
-    if (best != AVR_RA_PAIRS_ONLY) {
-        t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
-        st->nf = nf;
-        gen_func(fn, t, st, want_debug, best);
-    }
+    if (best != m1)
+        gen_relaxed(fn, t, st, want_debug, best, &rb);
 }
 
 void codegen_unit_avr(struct ir_unit *iu, struct code *text,
