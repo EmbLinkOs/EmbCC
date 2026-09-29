@@ -235,7 +235,12 @@ static const int T_POOL_VA[5] = { 4, 5, 6, 7, 8 };
 static const int T_POOL_FB[] = { 0, 1, 2, 3, 4, 5, 6, 8 };
 static const int T_POOL_VA_FB[] = { 4, 5, 6, 8 };
 
-static const int *t_pool_for(const struct ir_func *fn, int *n)
+/* Registers the pair pass (t_pair_alloc) took for the whole function,
+ * withheld from the ordinary pool; bit r for rr. */
+static unsigned g_t_taken;
+static int g_t_pool[T_NPOOL];
+
+static const int *t_pool_base(const struct ir_func *fn, int *n)
 {
     if (fn->has_alloca) {
         *n = fn->is_varargs ? 4 : 8;
@@ -247,6 +252,35 @@ static const int *t_pool_for(const struct ir_func *fn, int *n)
     }
     *n = T_NPOOL;
     return T_POOL;
+}
+
+static const int *t_pool_for(const struct ir_func *fn, int *n)
+{
+    int np, k = 0;
+    const int *p = t_pool_base(fn, &np);
+    if (!g_t_taken) {
+        *n = np;
+        return p;
+    }
+    for (int j = 0; j < np; j++)
+        if (!(g_t_taken >> p[j] & 1))
+            g_t_pool[k++] = p[j];
+    *n = k;
+    return g_t_pool;
+}
+
+/* The PAIR pool for 64-bit values, each named by its low register: the
+ * argument pairs r0:r1 and r2:r3, where AAPCS32 passes a double or a long
+ * long and every helper takes one, then r4:r5 and r6:r7 for one that
+ * lives across a call. Without r6:r7 when r7 is a VLA's frame base, and
+ * without the argument file in a variadic function, whose prologue owns
+ * it. Even-aligned, as AAPCS32 wants a 64-bit value passed. */
+static const int T_PAIRS[4] = { 0, 2, 4, 6 };
+static const int *t_pair_pool_for(const struct ir_func *fn, int *n)
+{
+    int lo = fn->is_varargs ? 2 : 0, hi = fn->has_alloca ? 3 : 4;
+    *n = hi - lo;
+    return T_PAIRS + lo;
 }
 
 static int t_callee_saved(int reg) { return reg >= 4 && reg <= 11; }
@@ -979,6 +1013,9 @@ static long slot_of(const struct t_fn *F, int v)
     if (in_freg(F, v))
         internal_error("thumb: %s: a path reads vreg %d's slot, and it "
                        "lives in s%d", F->fn->name, v, F->floc[v]);
+    if (in_reg(F, v))
+        internal_error("thumb: %s: a path reads vreg %d's slot, and it "
+                       "lives in r%d", F->fn->name, v, F->loc[v]);
     return F->slot[v];
 }
 
@@ -1049,8 +1086,33 @@ static void wrote(struct t_fn *F, int v, int reg)
 
 /* A 64-bit value's two halves, little-endian: the low word at the slot
  * and the high word four bytes above it. */
+/* dl <- sl and dh <- sh as one parallel move. */
+static void mv2(struct t_fn *F, int dl, int sl, int dh, int sh)
+{
+    if (dl == sh && dh == sl) {
+        if (dl == sl) return;
+        t_mov_reg(F->t, T_SCR, sl);
+        t_mov_reg(F->t, dh, sh);
+        t_mov_reg(F->t, dl, T_SCR);
+        return;
+    }
+    if (dl == sh) {
+        if (dh != sh) t_mov_reg(F->t, dh, sh);
+        if (dl != sl) t_mov_reg(F->t, dl, sl);
+        return;
+    }
+    if (dl != sl) t_mov_reg(F->t, dl, sl);
+    if (dh != sh) t_mov_reg(F->t, dh, sh);
+}
+
+/* A 64-bit value in a register PAIR (t_pair_alloc) has its low word in
+ * F->loc[v] and its high word in the next register. */
 static void rd64(struct t_fn *F, int v, int lo, int hi)
 {
+    if (in_reg(F, v)) {
+        mv2(F, lo, F->loc[v], hi, F->loc[v] + 1);
+        return;
+    }
     (void)slot_of(F, v);
     if (!t_ldst_imm(F->t, lo, F->fb, F->slot[v], 4, 0, 0) ||
         !t_ldst_imm(F->t, hi, F->fb, F->slot[v] + 4, 4, 0, 0)) {
@@ -1062,6 +1124,10 @@ static void rd64(struct t_fn *F, int v, int lo, int hi)
 
 static void wr64(struct t_fn *F, int v, int lo, int hi)
 {
+    if (in_reg(F, v)) {
+        mv2(F, F->loc[v], lo, F->loc[v] + 1, hi);
+        return;
+    }
     (void)slot_of(F, v);
     if (F->slot[v] < 0)
         return;
@@ -1359,11 +1425,39 @@ static int fp_arg(struct t_fn *F, int v, int w, int reg)
  * allocated, so that case keeps its loads.
  *
  * T_SCR breaks a cycle: r9 is scratch and holds nothing of its own. */
+/* Two 64-bit operands into r0:r1 and r2:r3 as ONE parallel move: a pair
+ * may live in the argument registers (t_pair_alloc), and loading r0:r1
+ * first loses a b that lives there. vb < 0: only the first. */
+static void args64x2(struct t_fn *F, int va, int vb)
+{
+    int pd[4], ps[4], npm = 0;
+    int v[2], nv = vb >= 0 ? 2 : 1;
+    v[0] = va; v[1] = vb;
+    for (int k = 0; k < nv; k++)
+        if (in_reg(F, v[k]))
+            for (int q = 0; q < 2; q++) {
+                pd[npm] = 2 * k + q;
+                ps[npm] = F->loc[v[k]] + q;
+                npm++;
+            }
+    if (npm) {
+        int od[8], os[8];
+        int m = ra_parallel_move(pd, ps, npm, R_SCR, od, os, 8);
+        if (m < 0)
+            internal_error("thumb: a 64-bit helper's argument setup is not "
+                           "a well-formed move");
+        for (int k = 0; k < m; k++)
+            t_mov_reg(F->t, pm_reg(od[k]), pm_reg(os[k]));
+    }
+    for (int k = 0; k < nv; k++)
+        if (!in_reg(F, v[k]))
+            rd64(F, v[k], 2 * k, 2 * k + 1);
+}
+
 static void fp_args2(struct t_fn *F, const struct ir_ins *i)
 {
     if (i->w == 8) {
-        rd64(F, i->a, T_R0, T_R1);
-        rd64(F, i->b, T_R2, T_R3);
+        args64x2(F, i->a, i->b);
         return;
     }
     {
@@ -1517,10 +1611,15 @@ static int gen_ins64(struct t_fn *F, int n)
 
     switch (i->op) {
     case IR_CONST:
-        t_mov_imm(t, A_LO, (long)(i->imm & 0xffffffffL), 0);
-        t_mov_imm(t, A_HI, (long)((i->imm >> 32) & 0xffffffffL), 0);
-        wr64(F, i->dst, A_LO, A_HI);
+    {
+        /* Built where it lives when that is a pair. */
+        int lo = in_reg(F, i->dst) ? F->loc[i->dst] : A_LO;
+        int hi = in_reg(F, i->dst) ? F->loc[i->dst] + 1 : A_HI;
+        t_mov_imm(t, lo, (long)(i->imm & 0xffffffffL), 0);
+        t_mov_imm(t, hi, (long)((i->imm >> 32) & 0xffffffffL), 0);
+        wr64(F, i->dst, lo, hi);
         return 1;
+    }
     /* This target has no floating-point register file: a double
      * already lives in a general register pair, so reinterpreting
      * its bits is a copy and nothing else. */
@@ -1623,8 +1722,14 @@ static int gen_ins64(struct t_fn *F, int n)
         if (i->size == 8) {
             rd64(F, i->a, A_LO, A_HI);
         } else {
-            if (!t_ldst_imm(t, A_LO, F->fb, slot_of(F, i->a), i->size, i->sign,
-                            0)) {
+            /* A narrow local widened: from its register when it has one,
+             * as the 32-bit IR_LDVAR does. This read its slot regardless,
+             * which a local in a register does not have. */
+            if (in_reg(F, i->a)) {
+                if (i->size >= 4) t_mov_reg(t, A_LO, F->loc[i->a]);
+                else              t_ext(t, A_LO, F->loc[i->a], i->size, i->sign);
+            } else if (!t_ldst_imm(t, A_LO, F->fb, slot_of(F, i->a), i->size,
+                                   i->sign, 0)) {
                 fb_addr(F, B_LO, F->slot[i->a]);
                 t_ldst_imm(t, A_LO, B_LO, 0, i->size, i->sign, 0);
             }
@@ -1637,6 +1742,9 @@ static int gen_ins64(struct t_fn *F, int n)
         rd64(F, i->a, A_LO, A_HI);
         if (i->size == 8) {
             wr64(F, i->dst, A_LO, A_HI);
+        } else if (in_reg(F, i->dst)) {  /* a truncating store, to a reg */
+            if (i->size >= 4) t_mov_reg(t, F->loc[i->dst], A_LO);
+            else              t_ext(t, F->loc[i->dst], A_LO, i->size, 0);
         } else {                       /* a truncating store */
             if (!t_ldst_imm(t, A_LO, F->fb, slot_of(F, i->dst), i->size, 0, 1)) {
                 fb_addr(F, B_LO, F->slot[i->dst]);
@@ -2208,8 +2316,12 @@ static void gen_ins(struct t_fn *F, int n)
                  * of ours links beside one of theirs. Both operands are
                  * eight bytes, which AAPCS32 puts in r0:r1 and r2:r3,
                  * and the result comes back in r0:r1. */
-                rd64(F, i->a, T_R0, T_R1);
-                operand_b64(F, i, T_R2, T_R3);
+                if (i->imm_b) {
+                    args64x2(F, i->a, -1);
+                    operand_b64(F, i, T_R2, T_R3);
+                } else {
+                    args64x2(F, i->a, i->b);
+                }
                 call_helper(F, i->op == IR_DIV
                             ? (i->sign ? "__divdi3" : "__udivdi3")
                             : (i->sign ? "__moddi3" : "__umoddi3"));
@@ -2711,13 +2823,16 @@ static void gen_ins(struct t_fn *F, int n)
             int pd[8], ps[8], npm = 0;
             for (int k = 0; k < i->nargs && npm < 8; k++) {
                 struct ir_arg *a = &i->argv[k];
-                if (!pl[k].nreg || a->is_struct || a->size > 4)
+                if (!pl[k].nreg || a->is_struct || a->size > 8)
                     continue;
                 if (!in_reg(F, a->vreg))
                     continue;
-                pd[npm] = pl[k].reg;
-                ps[npm] = F->loc[a->vreg];
-                npm++;
+                /* A 64-bit value in a pair is two edges of the move. */
+                for (int q = 0; q < (a->size > 4 ? 2 : 1) && npm < 8; q++) {
+                    pd[npm] = pl[k].reg + q;
+                    ps[npm] = F->loc[a->vreg] + q;
+                    npm++;
+                }
             }
             if (npm) {
                 int od[16], os[16];
@@ -2735,7 +2850,7 @@ static void gen_ins(struct t_fn *F, int n)
             if (!pl[k].nreg)
                 continue;
             /* Already placed by the parallel move above. */
-            if (!a->is_struct && a->size <= 4 && in_reg(F, a->vreg))
+            if (!a->is_struct && a->size <= 8 && in_reg(F, a->vreg))
                 continue;
             if (a->is_struct) {
                 rd(F, a->vreg, T_ADDR);
@@ -3064,6 +3179,116 @@ static void gen_ins(struct t_fn *F, int n)
 
 /* ---- one function --------------------------------------------------- */
 
+/* ---- register pairs for 64-bit values -----------------------------------
+ *
+ * The allocator hands out one register per value, so a double or a long
+ * long -- two registers -- was always in a stack slot, and fdlibm on
+ * soft-float Cortex-M ran at 2.2x clang's size. As on RV32 (and AVR's
+ * quads), the allocator runs first over PAIRS (T_PAIRS) for the 64-bit
+ * values alone, and the ordinary pass gets the registers no pair took
+ * (g_t_taken). rd64/wr64 are pair-aware, and every setup that loads two
+ * 64-bit operands, or a call's register arguments, is one parallel move
+ * over the halves.
+ *
+ * Not with an FPU: the hard-float paths pass doubles in d registers
+ * through vfp_load_d/vfp_store_d, which address slots. And not for a
+ * variadic function's 64-bit parameters, a wide local read or written
+ * narrower than itself, or anything pinned for -g. slot_of() refuses a
+ * path this misses. */
+static int g_t_pairs = 1;
+
+static void t_pair_hints(const struct ir_func *fn, int *hint)
+{
+    struct abi_walk w;
+    struct argplace pl;
+    walk_init(&w, fn_sret_bytes(fn) != 0, fn->is_varargs, fn->pcs);
+    for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
+        struct ir_arg *a = &fn->param_abi[p];
+        place_one(&w, a, &pl);
+        if (a->size == 8 && !a->is_struct && pl.nreg == 2)
+            hint[p] = pl.reg;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_RET && i->a >= 0 && i->a < fn->nvregs &&
+            !fn->ret_abi.is_struct && fn->ret_abi.size == 8)
+            hint[i->a] = 0;
+        if (i->op != IR_CALL && t_op_calls_helper(i) && i->w == 8) {
+            if (i->a >= 0 && i->a < fn->nvregs && hint[i->a] < 0)
+                hint[i->a] = 0;
+            if (!i->imm_b && i->b >= 0 && i->b < fn->nvregs &&
+                hint[i->b] < 0)
+                hint[i->b] = 2;
+            if (i->dst >= 0 && i->dst < fn->nvregs && hint[i->dst] < 0)
+                hint[i->dst] = 0;
+        }
+        if (i->op != IR_CALL)
+            continue;
+        if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w == 8)
+            hint[i->dst] = 0;
+        {
+            struct abi_walk cw;
+            walk_init(&cw, call_sret_bytes(i) != 0, i->call_varargs,
+                      i->call_pcs);
+            for (int k = 0; k < i->nargs; k++) {
+                const struct ir_arg *a = &i->argv[k];
+                place_one(&cw, a, &pl);
+                if (a->size == 8 && !a->is_struct && pl.nreg == 2 &&
+                    a->vreg >= 0 && a->vreg < fn->nvregs)
+                    hint[a->vreg] = pl.reg;
+            }
+        }
+    }
+}
+
+static const struct ra_target THUMB_PAIR_RA = {
+    t_pair_pool_for, t_callee_saved, t_ldvar_plain,
+    1, 1, 0,
+    t_op_calls_helper,
+    0,
+    t_pair_hints,
+    NULL, NULL,
+    1
+};
+
+/* The pair pass: a vreg -> low register map, or NULL for none. Fills
+ * g_t_taken with every register a pair holds, and `used` with the
+ * callee-saved ones to push. */
+static int *t_pair_alloc(struct ir_func *fn, const char *wide,
+                         const char *excl, int *used, int *nused)
+{
+    int nv = fn->nvregs, any = 0;
+    char *x;
+    int *loc;
+
+    *nused = 0;
+    if (target_thumb_fpu() || !wide)
+        return NULL;
+    x = xcalloc((size_t)(nv ? nv : 1), 1);
+    for (int v = 0; v < nv; v++) {
+        x[v] = !wide[v] || (excl && excl[v]) ||
+               (v < fn->nparams && fn->is_varargs);
+        any |= !x[v];
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_LDVAR && i->a >= 0 && i->a < nv && i->size != 8)
+            x[i->a] |= (char)wide[i->a];
+        if (i->op == IR_STVAR && i->dst >= 0 && i->dst < nv && i->size != 8)
+            x[i->dst] |= (char)wide[i->dst];
+    }
+    if (!any) {
+        free(x);
+        return NULL;
+    }
+    loc = ra_allocate(fn, &THUMB_PAIR_RA, NULL, x, used, nused);
+    free(x);
+    for (int v = 0; v < nv; v++)
+        if (loc[v] >= 0)
+            g_t_taken |= 3u << loc[v];
+    return loc;
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                      int want_debug)
 {
@@ -3117,8 +3342,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             for (int v = 0; v < fn->nvregs; v++)
                 excl[v] = (char)(flt[v] || (pin && pin[v]));
         }
+        int pused[RA_MAXPOOL], npused = 0;
+        int *pair = g_t_pairs ? t_pair_alloc(fn, F.wide, excl, pused, &npused)
+                              : NULL;
         F.loc = ra_allocate(fn, &THUMB_RA, F.wide, excl,
                             F.used_callee, &F.nsave);
+        g_t_taken = 0;
+        if (pair) {
+            for (int v = 0; v < fn->nvregs; v++)
+                if (pair[v] >= 0) F.loc[v] = pair[v];
+            for (int k = 0; k < npused; k++) {
+                F.used_callee[F.nsave++] = pused[k];
+                F.used_callee[F.nsave++] = pused[k] + 1;
+            }
+            free(pair);
+        }
         if (flt) {
             int fused[32], nfused = 0, top = 15;
             F.floc = ra_allocate_fp(fn, &THUMB_RA, F.wide, flt,
@@ -3154,7 +3392,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 for (int k = 0; k < F.nsave; k++) {
                     int used = 0;
                     for (int v = 0; v < fn->nvregs; v++)
-                        if (F.loc[v] == F.used_callee[k]) { used = 1; break; }
+                        if (F.loc[v] == F.used_callee[k] ||
+                            (F.loc[v] >= 0 && F.wide[v] &&
+                             F.loc[v] + 1 == F.used_callee[k])) {
+                            used = 1;
+                            break;
+                        }
                     if (used) F.used_callee[keep++] = F.used_callee[k];
                 }
                 F.nsave = keep;
@@ -3368,6 +3611,25 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 npmv++;
                 continue;
             }
+            /* A 64-bit parameter in a PAIR: each half an edge of the same
+             * move, or a deferred load for a half that came on the stack
+             * (t_pair_alloc keeps pairs out of variadic functions' r0-r3,
+             * and their pl.reg is not an incoming register anyway). */
+            if (a->size > 4 && !a->is_struct && in_reg(&F, i) &&
+                pl.nreg + pl.nstk == 2 && !fn->is_varargs) {
+                for (int q = 0; q < 2; q++) {
+                    if (q < pl.nreg) {
+                        pmv_dst[npmv] = F.loc[i] + q;
+                        pmv_src[npmv] = pl.reg + q;
+                        npmv++;
+                    } else {
+                        pstk_reg[npstk] = F.loc[i] + q;
+                        pstk_off[npstk] = base + pl.stk + (long)(q - pl.nreg) * 4;
+                        npstk++;
+                    }
+                }
+                continue;
+            }
             /* A scalar arriving ON THE STACK that the allocator put in a
              * register: a LOAD into it, deferred with the moves because
              * it writes a register another parameter may still be read
@@ -3563,6 +3825,45 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.floc);
 }
 
+/* With the allocator on and no FPU, a function is generated with the pair
+ * pass and without it and the shorter kept: a pair withheld for the whole
+ * function can cost the integer values more than it saves. A discarded
+ * attempt is undone by truncating the code and the five site lists.
+ * EMBCC_T_PAIRS=0/1 forces the choice, EMBCC_T_PAIRS_ONLY=fn limits the
+ * pairs to one function -- so a pair path wrong only where it loses can
+ * still be tested and bisected. */
+static void gen_func_best(struct ir_func *fn, struct code *t,
+                          struct t_sites *st, int want_debug)
+{
+    int at = t->len, ncall = st->ncall, next = st->next, nstr = st->nstr,
+        ng = st->ng, nf = st->nf, with;
+    const char *knob = getenv("EMBCC_T_PAIRS");
+    const char *only = getenv("EMBCC_T_PAIRS_ONLY");
+
+    g_t_pairs = 1;
+    if (!g_t_regalloc || want_debug || target_thumb_fpu() ||
+        (knob && *knob) || (only && *only)) {
+        if (knob && *knob) g_t_pairs = atoi(knob);
+        if (only && *only) g_t_pairs = strcmp(only, fn->name) == 0;
+        gen_func(fn, t, st, want_debug);
+        g_t_pairs = 1;
+        return;
+    }
+    gen_func(fn, t, st, want_debug);
+    with = t->len - at;
+    t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
+    st->ng = ng; st->nf = nf;
+    g_t_pairs = 0;
+    gen_func(fn, t, st, want_debug);
+    if (t->len - at > with) {
+        t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
+        st->ng = ng; st->nf = nf;
+        g_t_pairs = 1;
+        gen_func(fn, t, st, want_debug);
+    }
+    g_t_pairs = 1;
+}
+
 void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
@@ -3598,7 +3899,7 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
     st.f = NULL;    st.nf = st.capf = 0;
 
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, want_debug);
 
     for (int n = 0; n < st.ncall; n++)
         t_patch_bl(text, st.call[n].patch_off, st.call[n].target->code_off);
