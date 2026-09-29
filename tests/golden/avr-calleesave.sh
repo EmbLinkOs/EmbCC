@@ -6,7 +6,9 @@
 # sees a pair that was used and not saved. An assembly probe
 # (avr-calleesave/probe.S) loads a known value into each, calls functions
 # shaped to use the pairs -- values across calls, a loop, more live values
-# than pairs -- and reports any that came back changed, at every level.
+# than pairs, four-byte values, which take a QUAD of two pairs, and a call
+# whose arguments are loaded into r10-r17 -- and reports any that came
+# back changed, at every level.
 set -u
 echo "TEST-MARKER avr-calleesave"
 . "$(dirname "$0")/../lib.sh"
@@ -28,20 +30,26 @@ mkdir -p "$out/rt"
 for f in lib/rt/avr.c; do
     "$EMBCC" --target=avr -Os -c "$f" -o "$out/rt/avr.o" || exit 1
 done
-for opt in -O0 -O1 -O2 -Os; do
-    "$EMBCC" --target=avr $opt -c "$D/funcs.c" -o "$out/f.o" &&
-    "$EMBCC" --target=avr $opt -c "$D/main.c" -o "$out/m.o" &&
+# -O2:n forces the allocator's mode n (EMBCC_AVR_RA_MODE): each function
+# is generated every way and the shortest kept, so a mode that is wrong
+# where it never wins would go unseen otherwise.
+for spec in -O0 -O1 -O2 -Os -O2:1 -O2:2 -O2:3; do
+    opt=${spec%%:*}; mode=${spec#*:}; [ "$mode" = "$spec" ] && mode=
+    EMBCC_AVR_RA_MODE=$mode "$EMBCC" --target=avr $opt -c "$D/funcs.c" \
+        -o "$out/f.o" &&
+    EMBCC_AVR_RA_MODE=$mode "$EMBCC" --target=avr $opt -c "$D/main.c" \
+        -o "$out/m.o" &&
     sh tests/harness/avr/link.sh "$out/c.elf" "$out/m.o" "$out/f.o" \
         "$out/probe.o" "$out/rt/avr.o" > "$out/ln.log" 2>&1 || {
-        echo "$opt: does not build"; head -3 "$out/ln.log"; exit 1; }
+        echo "$spec: does not build"; head -3 "$out/ln.log"; exit 1; }
     got=$(EMBCC_QEMU_UNTIL=END sh tests/harness/avr/run.sh "$out/c.elf" \
               2>/dev/null | head -1)
     case $got in *CLOBBERED*)
-        echo "$opt: a call-saved register came back changed"
+        echo "$spec: a call-saved register came back changed"
         echo "  (CLOBBERED <function> <bit n = r(n+2)> <Y>): $got"; exit 1;;
     esac
     [ "$got" = "$want" ] || {
-        echo "$opt: disagrees with the host"
+        echo "$spec: disagrees with the host"
         echo "  want: $want"; echo "  got:  $got"; exit 1; }
 done
 echo "r2-r17 and Y survive every AVR function shape, called from assembly that

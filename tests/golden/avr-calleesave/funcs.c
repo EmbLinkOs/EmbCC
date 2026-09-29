@@ -63,3 +63,16 @@ u16 loop32(u16 a)
     }
     return (u16)(s ^ (s >> 16) ^ x ^ y ^ z);
 }
+
+/* A call whose arguments reach DOWN into the call-saved registers: four
+ * longs are r22, r18, r14 and r10. Loading them writes r10-r17, which the
+ * caller must therefore save -- avr-gcc does, and EmbCC did not, at any
+ * level. */
+__attribute__((noinline)) u32 many(u32 a, u32 b, u32 c, u32 d)
+{
+    return a * 3 + (b ^ c) - d + pnop((u16)(a >> 3));
+}
+u16 manyargs(u16 a)
+{
+    return (u16)(many(a, (u32)a * 40503u, a ^ 0x1234u, (u32)a << 9) >> 2);
+}

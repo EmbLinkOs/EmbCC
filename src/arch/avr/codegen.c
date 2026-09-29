@@ -2709,8 +2709,7 @@ static void gen_ins(struct a_fn *F, int n)
                 }
             } else {
                 int n = vw(F, i->argv[k].vreg);
-                ld_slot(F, RA, sslot(F, i->argv[k].vreg),
-                        pl.nstk < n ? pl.nstk : n);
+                vld(F, RA, i->argv[k].vreg, 0, pl.nstk < n ? pl.nstk : n);
                 st_slot(F, 1 + pl.stk, RA, pl.nstk);
             }
         }
@@ -2732,7 +2731,9 @@ static void gen_ins(struct a_fn *F, int n)
                 for (int b = 0; b < pl.nreg; b++)
                     avr_ldd(t, pl.reg + b, AVR_Z, b);
             } else {
-                ld_slot(F, pl.reg, sslot(F, i->argv[k].vreg), pl.nreg);
+                /* From a home too: every home is below every argument
+                 * register (avr_arg_low), so this is no parallel move. */
+                vld(F, pl.reg, i->argv[k].vreg, 0, pl.nreg);
             }
         }
 
@@ -3073,23 +3074,39 @@ static int a_calls_helper(const struct ir_ins *i) { (void)i; return 0; }
 
 static const struct ra_target AVR_RA = {
     a_pool_for, a_callee_saved, a_ldvar_plain,
-    0, 0, 0,          /* call arguments, returns, memcpy: in memory */
+    1, 1, 0,          /* call arguments and returns from a home; memcpy's
+                       * addresses from their slots */
     a_calls_helper,   /* the pool is all call-saved: nothing to cross */
     0,
     NULL,
     NULL, NULL
 };
 
-/* The lowest register any call's arguments are loaded into: every home
- * the allocator hands out must lie wholly below it. */
-static int avr_arg_low(const struct ir_func *fn)
+/* The lowest register any call this function makes -- the IR's, and the
+ * ones codegen makes that the IR does not show -- loads an argument into,
+ * or 26 for none.
+ *
+ * The helpers matter: an eight-byte multiply or divide is __muldi3 and
+ * friends, whose SECOND argument travels in r10-r17. Missing them, the
+ * allocator gave a loop counter r14:r17 across `x * 6364136223846793005ULL`,
+ * the argument load overwrote it, and tests/golden/bitops-width.c never
+ * left its loop. The float helpers take theirs in r18-r25. */
+static int avr_call_low(const struct ir_func *fn)
 {
-    int low = 26, n = 0;
+    int low = 26;
     for (int k = 0; k < fn->nins; k++) {
         const struct ir_ins *i = &fn->ins[k];
         int cursor;
         long stk = 0;
         struct argplace p;
+        if ((i->op == IR_MUL || i->op == IR_DIV || i->op == IR_MOD) &&
+            i->w == 8) {
+            cursor = ARG_TOP;
+            place_arg(8, &cursor, &stk, &p);
+            place_arg(8, &cursor, &stk, &p);
+            if (p.nreg && p.reg < low) low = p.reg;
+            continue;
+        }
         if (i->op != IR_CALL || i->call_varargs)
             continue;
         cursor = ARG_TOP;
@@ -3102,7 +3119,30 @@ static int avr_arg_low(const struct ir_func *fn)
             if (p.nreg && p.reg < low) low = p.reg;
         }
     }
-    (void)n;
+    return low;
+}
+
+/* Below which every home the allocator hands out must lie: avr_call_low,
+ * so that loading one argument cannot overwrite a value another still has
+ * to be read from, and the lowest register this function's own
+ * parameters ARRIVE in, so that the prologue, storing each parameter to
+ * its home, cannot land on one not yet stored. */
+static int avr_arg_low(const struct ir_func *fn)
+{
+    int low = avr_call_low(fn);
+    if (!fn->is_varargs) {
+        int cursor = ARG_TOP;
+        long stk = 0;
+        struct argplace p;
+        if (fn_sret_bytes(fn)) {
+            place_arg(2, &cursor, &stk, &p);
+            if (p.nreg && p.reg < low) low = p.reg;
+        }
+        for (int a = 0; a < fn->nparams; a++) {
+            place_arg(fn->param_abi[a].size, &cursor, &stk, &p);
+            if (p.nreg && p.reg < low) low = p.reg;
+        }
+    }
     return low;
 }
 
@@ -3115,9 +3155,7 @@ static char *avr_excl(const struct a_fn *F, int quad)
     int nv = fn->nvregs;
     char *x = xcalloc((size_t)(nv ? nv : 1), 1);
     for (int v = 0; v < nv; v++) {
-        if (v < fn->nparams)
-            x[v] = 1;                /* stored by the prologue, from r8+ */
-        else if (F->wide[v])
+        if (F->wide[v])
             x[v] = 1;
         else if (v < fn->nvars)
             x[v] = quad ? fn->locals[v].size != 4 : fn->locals[v].size > 2;
@@ -3221,11 +3259,45 @@ static void avr_ra_try(struct a_fn *F, int mode, struct avr_ra *r)
     free(also);
 }
 
+/* An environment knob, with an EMPTY value read as unset: a script that
+ * writes `EMBCC_AVR_RA_MODE=$mode cmd` with no mode must get the default,
+ * not mode 0. */
+static const char *avr_knob(const char *name)
+{
+    const char *v = getenv(name);
+    return v && *v ? v : NULL;
+}
+
+/* Knobs for finding a miscompile in all this, each read at compile time:
+ *
+ *   EMBCC_AVR_RA=1         each function's homes and each mode's size
+ *   EMBCC_AVR_RA_MODE=n    only mode n (AVR_RA_*), so a mode that never
+ *                          wins is still testable -- the tests force each
+ *   EMBCC_AVR_RA_ONLY=fn   allocate in that one function only
+ *   EMBCC_AVR_RA_LIMIT=k   keep the first k homes and drop the rest
+ *
+ * Dropping homes is always sound, so bisecting k names the one value
+ * whose home breaks the program; that is how the r10-r17 argument loads
+ * below were found. */
 static void avr_regalloc(struct a_fn *F, int mode)
 {
     struct avr_ra r;
 
     avr_ra_try(F, mode, &r);
+    if (avr_knob("EMBCC_AVR_RA_LIMIT")) {
+        int lim = atoi(avr_knob("EMBCC_AVR_RA_LIMIT")), c = 0;
+        for (int v = 0; v < F->fn->nvregs; v++)
+            if (r.loc[v] >= 0 && c++ >= lim) r.loc[v] = -1;
+    }
+    if (avr_knob("EMBCC_AVR_RA")) {
+        fprintf(stderr, "%s mode %d:", F->fn->name, mode);
+        for (int v = 0; v < F->fn->nvregs; v++)
+            if (r.loc[v] >= 0)
+                fprintf(stderr, " %%%d=r%d/%d", v, r.loc[v], r.hw[v]);
+        fprintf(stderr, " save:");
+        for (int k = 0; k < r.nsave; k++) fprintf(stderr, " r%d", r.used[k]);
+        fprintf(stderr, "\n");
+    }
     if (r.nsave) {
         F->loc = r.loc; F->hw = r.hw;
         F->nsave = r.nsave;
@@ -3260,6 +3332,23 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     }
     if (ra_mode != AVR_RA_NONE)
         avr_regalloc(&F, ra_mode);
+    /* Loading a call's arguments WRITES r8-r17 once there are enough of
+     * them, and those are call-saved: avr-gcc saves each one a function
+     * writes, argument loads included, and so must this. Missing it was
+     * invisible while no EmbCC function kept anything in r2-r17 -- and
+     * wrong for every avr-gcc caller that did. With the allocator it was
+     * EmbCC's own: __modsi3 loads &r into r16:r17 to call udivmod, and a
+     * caller's constant in r14:r17 came back as an address. At every
+     * level, since the loads are there at -O0 too. */
+    for (int r = avr_call_low(fn) & ~1; r <= 16; r += 2) {
+        int have = 0;
+        if (r < 2)
+            continue;
+        for (i = 0; i < F.nsave; i++)
+            if (F.used_callee[i] == r) have = 1;
+        if (!have)
+            F.used_callee[F.nsave++] = r;
+    }
     layout(&F);
     const_map(&F);
 
@@ -3347,10 +3436,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             struct ir_arg *a = &fn->param_abi[i];
             place_arg(a->size, &cursor, &stk, &pl);
             if (pl.nreg) {
-                st_slot(&F, sslot(&F, a->vreg), pl.reg, pl.nreg);
+                vst(&F, a->vreg, 0, pl.reg, pl.nreg);
             } else if (pl.nstk <= VW) {
                 ld_slot(&F, RA, F.frame + F.in_at + pl.stk, pl.nstk);
-                st_slot(&F, sslot(&F, a->vreg), RA, pl.nstk);
+                vst(&F, a->vreg, 0, RA, pl.nstk);
             } else {
                 /* Wider than a scratch bank -- a struct, or a long long:
                  * byte at a time, which needs no run of registers. */
@@ -3431,15 +3520,20 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
         nf = st->nf, best = AVR_RA_NONE, best_len = 0;
 
-    if (!g_a_regalloc || want_debug || fn->src->is_isr) {
+    if (!g_a_regalloc || want_debug || fn->src->is_isr ||
+        (avr_knob("EMBCC_AVR_RA_ONLY") &&
+         strcmp(avr_knob("EMBCC_AVR_RA_ONLY"), fn->name) != 0)) {
         gen_func(fn, t, st, want_debug, AVR_RA_NONE);
         return;
     }
-    for (int m = AVR_RA_QUADS_FIRST; m <= AVR_RA_PAIRS_ONLY; m++) {
+    int m0 = AVR_RA_QUADS_FIRST, m1 = AVR_RA_PAIRS_ONLY;
+    if (avr_knob("EMBCC_AVR_RA_MODE"))
+        m0 = m1 = atoi(avr_knob("EMBCC_AVR_RA_MODE"));
+    for (int m = m0; m <= m1; m++) {
         t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
         st->nf = nf;
         gen_func(fn, t, st, want_debug, m);
-        if (getenv("EMBCC_AVR_RA"))
+        if (avr_knob("EMBCC_AVR_RA"))
             fprintf(stderr, "%s: mode %d, %d bytes\n", fn->name, m,
                     t->len - at);
         if (best == AVR_RA_NONE || t->len - at < best_len) {
