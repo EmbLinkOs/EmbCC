@@ -532,23 +532,25 @@ static int fold_cvt(const struct ir_ins *i, long A, long *out)
             }
             return 1;
         }
-        /* IR_F2I: truncate toward zero, only when the result fits */
+        /* IR_F2I: truncate toward zero, only when the result fits. C's
+         * own conversion truncates, so the host does it -- after the
+         * range check, which is what makes the conversion defined. (No
+         * math builtins here: EmbCC compiles this file too.) */
         {
-            double t = d < 0 ? -__builtin_floor(-d) : __builtin_floor(d);
             int bits = i->w * 8;
-            if (bits > 64 || !(t == t))
+            double two63 = (double)(1ULL << 63);
+            if (bits > 64 || bits <= 0)
                 return 0;
             if (i->sign) {
-                double lo = -__builtin_ldexp(1.0, bits - 1);
-                double hi = __builtin_ldexp(1.0, bits - 1);
-                if (!(t >= lo && t < hi))
+                double hi = bits == 64 ? two63 : (double)(1ULL << (bits - 1));
+                if (!(d > -hi - 1.0 && d < hi))
                     return 0;
-                *out = norm((long)t, i->w);
+                *out = norm((long)(long long)d, i->w);
             } else {
-                double hi = __builtin_ldexp(1.0, bits);
-                if (!(t >= 0 && t < hi))
+                double hi = bits == 64 ? two63 * 2.0 : (double)(1ULL << bits);
+                if (!(d > -1.0 && d < hi))
                     return 0;
-                *out = norm((long)(unsigned long)t, i->w);
+                *out = norm((long)(unsigned long long)d, i->w);
             }
             return 1;
         }
