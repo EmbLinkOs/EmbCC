@@ -898,6 +898,7 @@ static int dw(const struct a_fn *F, const struct ir_ins *i)
 }
 
 static int in_pair(const struct a_fn *F, int v);
+static int g_a_regalloc;           /* -O2 and -Os (defined below) */
 
 static void layout(struct a_fn *F)
 {
@@ -1047,11 +1048,49 @@ static void layout(struct a_fn *F)
                 }
             }
         }
+        /* The four-byte temps share slots by LIVENESS (ra_coalesce_temps,
+         * as the other backends do), not by the interval sweep below: two
+         * values share a slot unless they are live at once, rather than
+         * unless their [first, last] spans overlap once stretched over
+         * every loop they touch. What that saves is frame, and on this
+         * machine frame is more than memory: past Y+63 every access is
+         * three instructions more (a Z walk off Y), and 1938 of them were
+         * across lib/libc. Eight-byte temps keep the sweep. */
+        int *tslot = NULL, npool = 0, *pool_obj = NULL;
+        {
+            int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
+            int has_cgoto = 0;
+            for (int v = 0; v < nv; v++)
+                loc2[v] = (in_pair(F, v) || (F->remat && F->remat[v]) ||
+                           vw(F, v) != VW) ? 0 : -1;
+            for (int n = 0; n < fn->nins; n++)
+                if (fn->ins[n].op == IR_IGOTO ||
+                    fn->ins[n].op == IR_LABELADDR)
+                    has_cgoto = 1;
+            {
+                struct ra_slots so = { loc2, NULL, g_a_regalloc, has_cgoto };
+                tslot = ra_coalesce_temps(fn, fn->nvars, &so, &npool);
+            }
+            free(loc2);
+            pool_obj = xmalloc((size_t)(npool ? npool : 1) * sizeof *pool_obj);
+            for (int k = 0; k < npool; k++) pool_obj[k] = -1;
+        }
         for (int v = fn->nvars; v < nv; v++) {
             int k;
             if (def[v] < 0 || in_pair(F, v) ||
                 (F->remat && F->remat[v]))
                 continue;      /* never defined, in a pair, or rebuilt */
+            if (vw(F, v) == VW && tslot) {
+                int ts = tslot[v - fn->nvars];
+                if (ts < 0)
+                    continue;              /* named by no instruction */
+                if (pool_obj[ts] < 0) {
+                    pool_obj[ts] = nobj;
+                    obj[nobj++].size = VW;
+                }
+                obj_of[v] = pool_obj[ts];
+                continue;
+            }
             /* A slot is reused only by a value of the SAME width, which is
              * why the sweep below tracks one size per slot. Mixing them
              * would let a four-byte value land on the high half of an
@@ -1083,6 +1122,7 @@ static void layout(struct a_fn *F)
         }
         free(def); free(last); free(free_from); free(slot_at);
         free(slot_sz); free(labpos);
+        free(tslot); free(pool_obj);
     }
     int scratch_obj = -1, sret_obj = -1;
     if (fn->scratch_bytes > 0) {
@@ -1182,6 +1222,17 @@ static void ld_slot(struct a_fn *F, int r, long off, int n)
         return;
     }
     p = walk_ptr(r, n);
+    if (p == AVR_Z && off > 0 && off + n <= 127) {
+        /* Within Y+127: `adiw` moves Z up to 63 in one instruction where
+         * subi/sbci take two, and ldd reaches the rest -- Z has a
+         * displacement form, X does not. adiw sets SREG as subi does. */
+        int a = off > 63 ? 63 : (int)off;
+        y_to(F, AVR_Z);
+        avr_adiw(F->t, AVR_Z, a);
+        for (k = 0; k < n; k++)
+            avr_ldd(F->t, r + k, AVR_Z, (int)off - a + k);
+        return;
+    }
     y_to(F, p);
     add_const16(F, p, off);
     for (k = 0; k < n; k++)
@@ -1198,6 +1249,14 @@ static void st_slot(struct a_fn *F, long off, int r, int n)
         return;
     }
     p = walk_ptr(r, n);
+    if (p == AVR_Z && off > 0 && off + n <= 127) {   /* as ld_slot */
+        int a = off > 63 ? 63 : (int)off;
+        y_to(F, AVR_Z);
+        avr_adiw(F->t, AVR_Z, a);
+        for (k = 0; k < n; k++)
+            avr_std(F->t, AVR_Z, (int)off - a + k, r + k);
+        return;
+    }
     y_to(F, p);
     add_const16(F, p, off);
     for (k = 0; k < n; k++)
