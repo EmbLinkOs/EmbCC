@@ -443,6 +443,118 @@ static int retarget_const(struct ir_func *fn, struct defs *d, const int *use,
     return 1;
 }
 
+/* A conversion of a constant, done now: `(double)1000000` was a call to
+ * __floatsidf at run time on every soft-float target, and `float s = 0`
+ * a vcvt on the FPU ones. `size` is the source's width and `w` the
+ * result's, as the backends read them; a float constant is its bit
+ * pattern in an IR_CONST, as irgen's emit_fconst makes it.
+ *
+ * The host computes it, with its IEEE round-to-nearest -- what every
+ * target does by default. Declined where the answer is not that simple:
+ * a float that is not finite, or out of the integer type's range (C
+ * leaves that undefined and targets really do differ -- ARM saturates,
+ * x86 gives the "integer indefinite"), a NaN through a float/double
+ * conversion (a soft-float runtime need not keep its payload as the host
+ * does), and anything 16 bytes wide. */
+static double fc_bits_to(long bits, int size)
+{
+    if (size == 8) {
+        double d;
+        memcpy(&d, &bits, 8);
+        return d;
+    }
+    {
+        unsigned int u = (unsigned int)bits;
+        float f;
+        memcpy(&f, &u, 4);
+        return (double)f;
+    }
+}
+static long fc_to_bits(double d, int w)
+{
+    long bits = 0;
+    if (w == 8) {
+        memcpy(&bits, &d, 8);
+    } else {
+        float f = (float)d;
+        unsigned int u;
+        memcpy(&u, &f, 4);
+        bits = (long)u;
+    }
+    return bits;
+}
+static int fold_cvt(const struct ir_ins *i, long A, long *out)
+{
+    if (i->w == 16 || i->size == 16 || i->w <= 0 || i->size <= 0)
+        return 0;
+    if (i->op == IR_I2F) {
+        long v;
+        /* Where an unsigned 32-bit source is widened to a 64-bit signed
+         * conversion (target_widen_unsigned_fp_cvt), irgen relies on the
+         * MACHINE having zero-extended it -- there is no extension in the
+         * IR to fold, and the constant's own normalisation need not match.
+         * Only a value that reads the same either way is folded. */
+        if (i->size == 8 && target_widen_unsigned_fp_cvt() &&
+            (A < 0 || A > 0x7fffffffL))
+            return 0;
+        v = fold_ext(A, i->size, i->sign, 8);
+        double d;
+        float f;
+        if (i->w != 4 && i->w != 8)
+            return 0;
+        if (i->w == 4) {
+            /* ONE rounding, straight to float: through double first
+             * would round twice for a 64-bit value */
+            f = i->sign ? (float)v : (float)(unsigned long)v;
+            *out = fc_to_bits((double)f, 4);
+            return 1;
+        }
+        d = i->sign ? (double)v : (double)(unsigned long)v;
+        *out = fc_to_bits(d, 8);
+        return 1;
+    }
+    if (i->size != 4 && i->size != 8)
+        return 0;
+    {
+        double d = fc_bits_to(A, i->size);
+        if (d != d)                            /* NaN */
+            return 0;
+        if (i->op == IR_F2F) {
+            if (i->w != 4 && i->w != 8)
+                return 0;
+            if (i->w == 4 && i->size == 8) {
+                /* the rounding of double to float, which may overflow
+                 * to infinity -- as the conversion does at run time */
+                float f = (float)d;
+                *out = fc_to_bits((double)f, 4);
+            } else {
+                *out = fc_to_bits(d, i->w);
+            }
+            return 1;
+        }
+        /* IR_F2I: truncate toward zero, only when the result fits */
+        {
+            double t = d < 0 ? -__builtin_floor(-d) : __builtin_floor(d);
+            int bits = i->w * 8;
+            if (bits > 64 || !(t == t))
+                return 0;
+            if (i->sign) {
+                double lo = -__builtin_ldexp(1.0, bits - 1);
+                double hi = __builtin_ldexp(1.0, bits - 1);
+                if (!(t >= lo && t < hi))
+                    return 0;
+                *out = norm((long)t, i->w);
+            } else {
+                double hi = __builtin_ldexp(1.0, bits);
+                if (!(t >= 0 && t < hi))
+                    return 0;
+                *out = norm((long)(unsigned long)t, i->w);
+            }
+            return 1;
+        }
+    }
+}
+
 static int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -473,6 +585,14 @@ static int pass_fold(struct ir_func *fn)
                 unsigned long r = i->op == IR_NEG ? -(unsigned long)A
                                                   : ~(unsigned long)A;
                 to_const(i, norm((long)r, i->w));
+                changed = 1;
+            }
+            continue;
+        }
+        if ((i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F) && ka) {
+            long r;
+            if (fold_cvt(i, A, &r)) {
+                to_const(i, r);
                 changed = 1;
             }
             continue;
