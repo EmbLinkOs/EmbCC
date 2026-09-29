@@ -2737,6 +2737,19 @@ static int pass_ifconv(struct ir_func *fn)
  * `jmp L` is left dead for cfgclean. A copying arm that FALLS into L is
  * left alone, since a branch there would leave %t unset on the way
  * through. */
+/* Move fn->var_scope_lo/hi with a renumbering: newpos[n] is where old
+ * instruction n now is, newpos[oldn] the new end (DCE's idiom). */
+static void remap_scopes(struct ir_func *fn, const int *newpos, int oldn)
+{
+    if (!fn->var_scope_lo || !newpos)
+        return;
+    for (int v = 0; v < fn->nvars; v++) {
+        int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+        if (lo >= 0 && lo <= oldn) fn->var_scope_lo[v] = newpos[lo];
+        if (hi >= 0 && hi <= oldn) fn->var_scope_hi[v] = newpos[hi];
+    }
+}
+
 static int thread_arm(const struct ir_func *fn, int k, int t, int L,
                       const struct defs *d)
 {
@@ -2789,7 +2802,9 @@ static int pass_thread(struct ir_func *fn)
         }
         if (need) {
             struct ibuf nb = { 0, 0, 0 };
+            int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
             for (int n = 0; n < fn->nins; n++) {
+                newpos[n] = nb.n;
                 *ib_push(&nb) = fn->ins[n];
                 if (mark[n]) {
                     struct ir_ins *l = ib_push(&nb);
@@ -2801,6 +2816,9 @@ static int pass_thread(struct ir_func *fn)
                     l->synth = 1;
                 }
             }
+            newpos[fn->nins] = nb.n;
+            remap_scopes(fn, newpos, fn->nins);
+            free(newpos);
             free(fn->ins);
             fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
             free(d.cnt); free(d.ins);
@@ -7319,6 +7337,416 @@ static int pass_storefwd(struct ir_func *fn)
     return changed;
 }
 
+/* ---- reading a global nothing writes ------------------------------------
+ *
+ * `static const double pi = 3.14159...;` and fdlibm's two hundred other
+ * constants were each an address and two loads at every use, where a
+ * constant is two instructions. The type system here records no `const`,
+ * and it would not be enough anyway (a cast can write through it), so
+ * this PROVES it instead: a static global of this unit is read-only when
+ * every use of its address, in every function, is a load address --
+ * directly or at a constant offset -- no initializer anywhere points at
+ * it, and no inline or top-level assembly could touch it. Its bytes are
+ * then its initializer's, forever, and a load of them is that constant.
+ * A float's constant is its bit pattern, which is what every backend
+ * takes a float constant to be. Bytes a relocation fills (a pointer in
+ * an initializer) are left alone. */
+static const struct global **g_ro;
+static int g_nro;
+
+static const struct global *ro_find(const struct global *g)
+{
+    for (int k = 0; g && k < g_nro; k++)
+        if (g_ro[k] == g || (g_ro[k]->name && g->name &&
+                             strcmp(g_ro[k]->name, g->name) == 0))
+            return g_ro[k];
+    return NULL;
+}
+
+static void ro_globals(struct ir_unit *iu)
+{
+    struct unit *u = iu->src;
+    g_nro = 0;
+    free(g_ro);
+    g_ro = NULL;
+    if (!u || u->topasm)
+        return;
+    int cap = 0;
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (!g->is_static || !g->defined || g->absorbed || g->is_tls ||
+            g->is_weak || g->section || !g->ty || !g->ty->kind ||
+            g->ty->is_volatile)
+            continue;
+        if (g_nro == cap) {
+            cap = cap ? cap * 2 : 16;
+            g_ro = xrealloc(g_ro, (size_t)cap * sizeof *g_ro);
+        }
+        g_ro[g_nro++] = g;
+    }
+    /* withdraw every one that something could write or see */
+    char *out = xcalloc((size_t)(g_nro ? g_nro : 1), 1);
+    for (struct global *g = u->globals; g; g = g->next)
+        for (int r = 0; r < g->nrelocs; r++)
+            for (int k = 0; k < g_nro; k++)
+                if (g->relocs[r].gtarget &&
+                    (g->relocs[r].gtarget == g_ro[k] ||
+                     (g->relocs[r].gtarget->name &&
+                      strcmp(g->relocs[r].gtarget->name, g_ro[k]->name) == 0)))
+                    out[k] = 1;
+    for (int f = 0; f < iu->nfuncs; f++) {
+        struct ir_func *fn = &iu->funcs[f];
+        int nv = fn->nvregs;
+        if (!nv) continue;
+        int *gof = xmalloc((size_t)nv * sizeof *gof);   /* vreg -> ro index */
+        struct defs d;
+        compute_defs(fn, &d);
+        for (int v = 0; v < nv; v++) gof[v] = -1;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_ASM) {
+                memset(out, 1, (size_t)(g_nro ? g_nro : 1));
+                break;
+            }
+            if (i->op == IR_GADDR && i->glob) {
+                const struct global *r = ro_find(i->glob);
+                if (!r) continue;
+                int k;
+                for (k = 0; k < g_nro && g_ro[k] != r; k++) ;
+                if (i->dst >= 0 && i->dst < nv && d.cnt[i->dst] == 1)
+                    gof[i->dst] = k;
+                else
+                    out[k] = 1;
+            } else if (i->op == IR_ADD && i->a >= 0 && i->a < nv &&
+                       gof[i->a] >= 0 && i->dst >= 0 && i->dst < nv &&
+                       d.cnt[i->dst] == 1) {
+                /* Any offset, constant or not: this runs on the IR as
+                 * irgen left it, where `table[1]` is still `mul 1, 4`,
+                 * and a read at a computed offset is still only a read.
+                 * pass_roload folds only the constant ones. */
+                gof[i->dst] = gof[i->a];
+            }
+        }
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            int *ops[3], nops = 0;
+            if (i->a >= 0 && i->a < nv && gof[i->a] >= 0) ops[nops++] = &i->a;
+            if (!i->imm_b && i->b >= 0 && i->b < nv && gof[i->b] >= 0)
+                ops[nops++] = &i->b;
+            if (i->c >= 0 && i->c < nv && gof[i->c] >= 0) ops[nops++] = &i->c;
+            for (int k = 0; k < nops; k++) {
+                int ok = ops[k] == &i->a &&
+                         ((i->op == IR_LOAD && !i->vol) ||
+                          (i->op == IR_ADD && i->dst >= 0 && gof[i->dst] >= 0));
+                if (!ok) out[gof[*ops[k]]] = 1;
+            }
+            if (i->op == IR_CALL)
+                for (int k = 0; k < i->nargs; k++) {
+                    int v = i->argv[k].vreg;
+                    if (v >= 0 && v < nv && gof[v] >= 0) out[gof[v]] = 1;
+                }
+            if (i->op == IR_RET && i->a >= 0 && i->a < nv && gof[i->a] >= 0)
+                out[gof[i->a]] = 1;
+        }
+        free(gof); free(d.cnt); free(d.ins);
+    }
+    int k = 0;
+    for (int j = 0; j < g_nro; j++)
+        if (!out[j]) g_ro[k++] = g_ro[j];
+    g_nro = k;
+    free(out);
+}
+
+/* The `size` bytes at `off` of read-only global g, or 0 if a relocation
+ * fills any of them or they are outside it. */
+static int ro_bytes(const struct global *g, long off, int size,
+                    unsigned long *out)
+{
+    int gs = ty_size(g->ty);
+    unsigned long v = 0;
+    if (off < 0 || off + size > gs || size < 1 || size > 8)
+        return 0;
+    for (int r = 0; r < g->nrelocs; r++) {
+        long ro = g->relocs[r].off;
+        if (ro < off + size && off < ro + 8)
+            return 0;
+    }
+    for (int b = size - 1; b >= 0; b--) {
+        unsigned char byte;
+        if (g->init_bytes)
+            byte = off + b < g->init_len
+                 ? (unsigned char)g->init_bytes[off + b] : 0;
+        else
+            byte = (unsigned char)(((unsigned long)g->init >> (8 * (off + b)))
+                                   & 0xff);
+        v = v << 8 | byte;
+    }
+    *out = v;
+    return 1;
+}
+
+static int pass_roload(struct ir_func *fn)
+{
+    int nv = fn->nvregs, changed = 0;
+    if (!g_nro || !nv)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    const struct global **gv = xcalloc((size_t)nv, sizeof *gv);
+    long *goff = xcalloc((size_t)nv, sizeof *goff);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        long c;
+        if (i->dst < 0 || i->dst >= nv || d.cnt[i->dst] != 1)
+            continue;
+        if (i->op == IR_GADDR && i->glob)
+            gv[i->dst] = ro_find(i->glob);
+        else if (i->op == IR_ADD && i->a >= 0 && i->a < nv && gv[i->a] &&
+                 (i->imm_b ? (c = i->imm, 1)
+                           : get_const(fn, &d, i->b, &c))) {
+            gv[i->dst] = gv[i->a];
+            goff[i->dst] = goff[i->a] + c;
+        }
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        unsigned long v;
+        if (i->op != IR_LOAD || i->vol || i->a < 0 || i->a >= nv ||
+            !gv[i->a] || i->w > 8)
+            continue;
+        if (!ro_bytes(gv[i->a], goff[i->a], i->size, &v))
+            continue;
+        to_const(i, fold_ext((long)v, i->size, i->sign, i->w));
+        i->flt = 0;
+        changed = 1;
+    }
+    free(gv); free(goff); free(d.cnt); free(d.ins);
+    return changed;
+}
+
+/* ---- forwarding through a punning union --------------------------------
+ *
+ * fdlibm reads a double's words through a union -- EXTRACT_WORDS,
+ * GET_HIGH_WORD, GET_LOW_WORD -- and every such union stayed a stack
+ * object: the double stored, one word loaded back, in nearly every
+ * function of the math library. mem2reg cannot promote a union (it is
+ * not a scalar) and storefwd will not touch a local whose address is
+ * taken.
+ *
+ * Here a local is PRIVATE when every use of its address is a load or
+ * store address, directly or at a constant offset -- nothing can see it
+ * but these accesses. In a block, a load that one earlier store covers
+ * becomes that store's value: a copy or a bit-reinterpret at the same
+ * width and offset, and at half the width the low or high word
+ * (reinterpret, shift by 32, truncate). A private local left with no load
+ * loses its stores, and DCE the addresses.
+ *
+ * Not on AVR, whose 64-bit shift is a byte loop and whose double is four
+ * bytes anyway. */
+struct pun_rec { int off, width, val, flt; };
+
+static int pass_punfwd(struct ir_func *fn)
+{
+    int nv = fn->nvregs, nvars = fn->nvars, changed = 0;
+    if (!nvars || !nv || target_get() == TARGET_AVR)
+        return 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ASM)
+            return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    int *base = xmalloc((size_t)nv * sizeof *base);
+    long *boff = xcalloc((size_t)nv, sizeof *boff);
+    char *bad = xcalloc((size_t)nvars, 1);
+    for (int v = 0; v < nv; v++) base[v] = -1;
+    /* the address of a local, and constant offsets from it */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        long c;
+        if (i->dst < 0 || i->dst >= nv || d.cnt[i->dst] != 1)
+            continue;
+        if (i->op == IR_ADDR && i->a >= 0 && i->a < nvars) {
+            base[i->dst] = i->a;
+            boff[i->dst] = 0;
+        } else if (i->op == IR_ADD && i->a >= 0 && i->a < nv &&
+                   base[i->a] >= 0 &&
+                   (i->imm_b ? (c = i->imm, 1)
+                             : get_const(fn, &d, i->b, &c))) {
+            base[i->dst] = base[i->a];
+            boff[i->dst] = boff[i->a] + c;
+        }
+    }
+    /* private: every read of such an address is a load/store address or
+     * another offset; and no whole-local access */
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if ((i->op == IR_LDVAR && i->a >= 0 && i->a < nvars) ||
+            (i->op == IR_STVAR && i->dst >= 0 && i->dst < nvars)) {
+            bad[i->op == IR_LDVAR ? i->a : i->dst] = 1;
+            continue;
+        }
+        int *ops[4], nops = 0;
+        if (i->a >= 0 && i->a < nv && base[i->a] >= 0) ops[nops++] = &i->a;
+        if (!i->imm_b && i->b >= 0 && i->b < nv && base[i->b] >= 0)
+            ops[nops++] = &i->b;
+        if (i->c >= 0 && i->c < nv && base[i->c] >= 0) ops[nops++] = &i->c;
+        for (int k = 0; k < nops; k++) {
+            int ok = ops[k] == &i->a &&
+                     (i->op == IR_LOAD || i->op == IR_STORE ||
+                      (i->op == IR_ADD && i->dst >= 0 && base[i->dst] >= 0));
+            if (!ok)
+                bad[base[*ops[k]]] = 1;
+        }
+        if (i->op == IR_CALL)
+            for (int k = 0; k < i->nargs; k++) {
+                int v = i->argv[k].vreg;
+                if (v >= 0 && v < nv && base[v] >= 0) bad[base[v]] = 1;
+            }
+        if (i->op == IR_RET && i->a >= 0 && i->a < nv && base[i->a] >= 0)
+            bad[base[i->a]] = 1;
+    }
+    /* forward, a block at a time */
+    struct pun_rec (*rec)[4] = xcalloc((size_t)nvars, sizeof *rec);
+    int *nrec = xcalloc((size_t)nvars, sizeof *nrec);
+    int *plan = xmalloc((size_t)fn->nins * sizeof *plan);  /* rec index */
+    struct pun_rec *pr = xmalloc((size_t)fn->nins * sizeof *pr);
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        plan[n] = 0;
+        if (i->op == IR_LABEL || i->op == IR_CALL) {
+            /* a join; and a call cannot touch a private local, but a
+             * longjmp-style return into the middle is not worth reasoning
+             * about -- start again either way */
+            memset(nrec, 0, (size_t)nvars * sizeof *nrec);
+            continue;
+        }
+        if ((i->op != IR_LOAD && i->op != IR_STORE) || i->a < 0 ||
+            i->a >= nv || base[i->a] < 0 || bad[base[i->a]] || i->vol)
+            continue;
+        int L = base[i->a], off = (int)boff[i->a], wid = i->size;
+        if (i->op == IR_STORE) {
+            int k = 0;
+            for (int j = 0; j < nrec[L]; j++) {      /* drop what it overlaps */
+                struct pun_rec *r = &rec[L][j];
+                if (r->off + r->width <= off || off + wid <= r->off)
+                    rec[L][k++] = *r;
+            }
+            nrec[L] = k;
+            if (k < 4 && (wid == 4 || wid == 8) && i->b >= 0) {
+                rec[L][k].off = off; rec[L][k].width = wid;
+                rec[L][k].val = i->b; rec[L][k].flt = i->flt;
+                nrec[L] = k + 1;
+            }
+            continue;
+        }
+        for (int j = 0; j < nrec[L]; j++) {          /* a LOAD */
+            struct pun_rec *r = &rec[L][j];
+            if (i->flt && r->width != wid)
+                continue;      /* half a double as a float: not handled */
+            if ((r->width == wid && r->off == off) ||
+                (r->width == 8 && wid == 4 &&
+                 (off == r->off || off == r->off + 4))) {
+                plan[n] = 1;
+                pr[n] = *r;
+                any = 1;
+                break;
+            }
+        }
+    }
+    if (any) {
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins in = fn->ins[n];
+            newpos[n] = nb.n;
+            if (!plan[n]) {
+                *ib_push(&nb) = in;
+                continue;
+            }
+            const struct pun_rec *r = &pr[n];
+            int x = r->val, hi = (int)boff[in.a] != r->off;
+            if (r->width == in.size) {
+                struct ir_ins *m = ib_push(&nb);
+                *m = in;
+                m->op = r->flt == in.flt ? IR_MOV : IR_BITCAST;
+                m->a = x; m->b = -1; m->c = -1;
+                m->w = in.size; m->size = in.size;
+                m->sign = in.flt ? 0 : 1;
+                m->vol = 0; m->natural = 0;
+                changed = 1;
+                continue;
+            }
+            if (r->flt) {                   /* the double's bits */
+                struct ir_ins *b = ib_push(&nb);
+                *b = in;
+                b->op = IR_BITCAST; b->a = x; b->b = -1; b->c = -1;
+                b->w = 8; b->size = 8; b->sign = 1; b->flt = 0;
+                b->vol = 0; b->natural = 0;
+                b->dst = x = fn->nvregs++;
+            }
+            if (hi) {
+                struct ir_ins *k = ib_push(&nb);
+                memset(k, 0, sizeof *k);
+                k->op = IR_CONST; k->imm = 32; k->w = 8;
+                k->a = k->b = k->c = -1;
+                k->line = in.line; k->col = in.col;
+                k->dst = fn->nvregs++;
+                struct ir_ins *sh = ib_push(&nb);
+                memset(sh, 0, sizeof *sh);
+                sh->op = IR_SHR; sh->a = x; sh->b = k->dst; sh->w = 8;
+                sh->sign = 0; sh->c = -1;
+                sh->line = in.line; sh->col = in.col;
+                sh->dst = x = fn->nvregs++;
+            }
+            struct ir_ins *e = ib_push(&nb);
+            *e = in;
+            e->op = IR_EXT; e->a = x; e->b = -1; e->c = -1;
+            e->size = 4; e->flt = 0; e->vol = 0; e->natural = 0;
+            changed = 1;
+        }
+        newpos[fn->nins] = nb.n;
+        remap_scopes(fn, newpos, fn->nins);
+        free(newpos);
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    }
+    /* a private local nothing loads from any more: its stores are dead */
+    {
+        char *loaded = xcalloc((size_t)nvars, 1);
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if ((i->op == IR_LOAD || i->op == IR_MEMCPY) && i->a >= 0 &&
+                i->a < nv && base[i->a] >= 0)
+                loaded[base[i->a]] = 1;
+            if (i->op == IR_MEMCPY && i->b >= 0 && i->b < nv &&
+                base[i->b] >= 0)
+                loaded[base[i->b]] = 1;
+        }
+        int k = 0;
+        int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            newpos[n] = k;
+            if (i->op == IR_STORE && i->a >= 0 && i->a < nv &&
+                base[i->a] >= 0 && !bad[base[i->a]] &&
+                !loaded[base[i->a]] && !i->vol) {
+                changed = 1;
+                continue;
+            }
+            fn->ins[k++] = fn->ins[n];
+        }
+        newpos[fn->nins] = k;
+        remap_scopes(fn, newpos, fn->nins);
+        free(newpos);
+        fn->nins = k;
+        free(loaded);
+    }
+    free(base); free(boff); free(bad); free(rec); free(nrec);
+    free(plan); free(pr);
+    free(d.cnt); free(d.ins);
+    return changed;
+}
+
 /* ---- sinking a constant to the use that wants it ----------------------
  *
  * A literal has no operands and no side effects, so where it is
@@ -8757,6 +9185,7 @@ static void opt_func(struct ir_func *fn)
         while (changed && guard++ < 1000) {
             changed = 0;
             changed |= pass_storefwd(fn); /* forward local stores to loads (mem2reg-lite) */
+            changed |= pass_roload(fn);   /* a global nothing writes */
             changed |= pass_fold(fn);
             /* After folding, so the constants it just exposed are the
              * ones this moves, and before value numbering, so what it
@@ -8780,6 +9209,11 @@ static void opt_func(struct ir_func *fn)
             }
             if (g_dse && cfg_ok)
                 changed |= pass_dse(fn);
+        }
+        if (pass_punfwd(fn)) {         /* a union's words, without the union */
+            pass_copyprop(fn);
+            pass_dce(fn);
+            outer = 1;
         }
         if (g_loadcse && cfg_ok && pass_loadcse(fn)) {   /* reuse loads redundant on every path */
             pass_copyprop(fn);
@@ -8969,6 +9403,12 @@ void opt_run(struct ir_unit *iu, int level)
      * every call site. */
     if (level >= 2)
         infer_attrs(iu);
+    /* After inlining too: it is every function's final body that has to
+     * leave the global alone. */
+    if (level >= 2)
+        ro_globals(iu);
+    else
+        g_nro = 0;
     /* Every function, including one computing with __int128. The folds
      * that are 64-bit refuse a 128-bit width individually now (see
      * pass_fold), which is a great deal narrower than refusing the
