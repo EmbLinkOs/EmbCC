@@ -71,7 +71,7 @@
 #define FAR  RV_T6
 
 struct rv_sites {
-    struct { int patch_off; struct func *target; } *call;
+    struct { int patch_off; struct func *target; int jal; } *call;
     int ncall, capcall;
     struct extcall *ext;   int next, capext;
     struct strsite *str;   int nstr, capstr;
@@ -1069,6 +1069,14 @@ static void branch_if(struct rv_fn *F, int cond, int rs1, int rs2, int label)
 
 /* ---- site lists --------------------------------------------------------- */
 
+/* Calls to a function defined in this unit are `jal ra` -- four bytes
+ * where auipc+jalr is eight -- while this is set. jal reaches +-1 MB,
+ * which the unit's own text has to exceed before it matters; if a patch
+ * finds it did, the unit is generated again with it clear. The linker
+ * cannot do this: branches inside a function are resolved here, with no
+ * relocation to move, so deleting bytes at link time would break them. */
+static int g_rv_short_calls = 1;
+
 static void note_call(struct rv_sites *st, int at, struct func *target)
 {
     if (st->ncall == st->capcall) {
@@ -1077,6 +1085,7 @@ static void note_call(struct rv_sites *st, int at, struct func *target)
     }
     st->call[st->ncall].patch_off = at;
     st->call[st->ncall].target = target;
+    st->call[st->ncall].jal = 0;
     st->ncall++;
 }
 
@@ -1780,6 +1789,10 @@ static void gen_call(struct rv_fn *F, int n)
          * in place, and SCR is not one of them. */
         rd(F, i->a, SCR);
         rv_jalr(t, RV_RA, SCR, 0);
+    } else if (i->callee->has_defn && g_rv_short_calls) {
+        note_call(F->st, t->len, i->callee);
+        F->st->call[F->st->ncall - 1].jal = 1;
+        code_u32(t, rv_enc_j(0x6f, RV_RA, 0));  /* raw: a fixed patch site */
     } else if (i->callee->has_defn) {
         note_call(F->st, rv_call_placeholder(t), i->callee);
     } else {
@@ -3358,8 +3371,29 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     g_rv_regalloc = regalloc;
     memset(&st, 0, sizeof st);
 
-    for (int n = 0; n < iu->nfuncs; n++)
-        gen_func_best(&iu->funcs[n], text, &st, xlen, want_debug);
+    int text0 = text->len;
+    /* EMBCC_RV_JAL_RANGE shrinks jal's reach, so the fallback -- which
+     * real code meets only past 1 MB of text -- can be tested. */
+    long reach = getenv("EMBCC_RV_JAL_RANGE") ? atol(getenv("EMBCC_RV_JAL_RANGE"))
+                                              : 1L << 20;
+    g_rv_short_calls = !getenv("EMBCC_RV_LONG_CALLS");
+    for (;;) {
+        int far = 0;
+        for (int n = 0; n < iu->nfuncs; n++)
+            gen_func_best(&iu->funcs[n], text, &st, xlen, want_debug);
+        for (int k = 0; k < st.ncall; k++) {
+            long disp = st.call[k].target->code_off - st.call[k].patch_off;
+            if (st.call[k].jal && (disp < -reach || disp >= reach))
+                far = 1;
+        }
+        if (!far || !g_rv_short_calls)
+            break;
+        /* A jal that does not reach: everything again, the long way. */
+        g_rv_short_calls = 0;
+        text->len = text0;
+        free(st.call); free(st.ext); free(st.str); free(st.g); free(st.f);
+        memset(&st, 0, sizeof st);
+    }
 
     /* Intra-unit calls, now that every function has a place. The auipc
      * and the jalr are patched together: the auipc adds the HI20 of the
@@ -3369,6 +3403,10 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     for (int k = 0; k < st.ncall; k++) {
         int at = st.call[k].patch_off;
         long disp = st.call[k].target->code_off - at;
+        if (st.call[k].jal) {
+            code_patch32(text, at, rv_enc_j(0x6f, RV_RA, (int)disp));
+            continue;
+        }
         long hi = ((disp + 0x800) >> 12) & 0xfffff;
         int lo = (int)(((disp & 0xfff) ^ 0x800) - 0x800);
         code_patch32(text, at, rv_enc_u(0x17, RV_RA, hi));
