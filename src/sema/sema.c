@@ -3314,7 +3314,11 @@ int builtin_bitop(const char *bn, int *width)
         if (strncmp(bn, ops[i], n) != 0)
             continue;
         const char *sfx = bn + n;
-        int w = !*sfx ? 4 : (strcmp(sfx, "l") == 0 || strcmp(sfx, "ll") == 0) ? 8 : 0;
+        /* the operand's type: 1 int, 2 long, 3 long long -- a RANK and
+         * not a size, because the size is the target's: `long` is four
+         * bytes on every 32-bit target and `int` two on AVR */
+        int w = !*sfx ? 1 : strcmp(sfx, "l") == 0 ? 2
+              : strcmp(sfx, "ll") == 0 ? 3 : 0;
         if (!w)
             continue;
         if (width)

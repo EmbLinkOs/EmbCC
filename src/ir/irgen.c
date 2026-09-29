@@ -1621,25 +1621,37 @@ static int bctz(struct ir_func *fn, int x, int w)
     return bpopcount(fn, emit_bin(fn, IR_SUB, low, bk(fn, 1, w), w, 0), w);
 }
 
-static int bclz(struct ir_func *fn, int x, int w)
+/* `bits` is the operand type's width, which may be narrower than the
+ * operation's w: a 16-bit int computed at four bytes, zero-extended. Its
+ * leading zeros are counted within `bits`, not within w. */
+static int bclz(struct ir_func *fn, int x, int w, int bits)
 {
-    for (int sh = 1; sh < w * 8; sh <<= 1)
+    for (int sh = 1; sh < bits; sh <<= 1)
         x = emit_bin(fn, IR_OR, x, emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)sh, w),
                                              w, 0), w, 0);
-    return emit_bin(fn, IR_SUB, bk(fn, (unsigned long)(w * 8), w),
+    return emit_bin(fn, IR_SUB, bk(fn, (unsigned long)bits, w),
                     bpopcount(fn, x, w), w, 0);
 }
 
-static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int w)
+/* `rank` is builtin_bitop's: the operand is an unsigned int, long or long
+ * long (ffs and clrsb take a signed one, which is the same bits). Its
+ * SIZE is the target's, and was once assumed: 8 for the l and ll forms
+ * and 4 for the plain one. On a 32-bit target that read popcountl's
+ * four-byte operand as eight -- the four bytes past it included -- and
+ * truncated popcountll's eight-byte one to the four bytes of a long; on
+ * AVR, clz of a 16-bit int came back 16 too many. The IR has widths 4
+ * and 8 only, so a two-byte operand is computed at four, zero-extended,
+ * and only clz and clrsb need to know it has 16 bits. */
+static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int rank)
 {
-    /* the operand as the unsigned int / unsigned long the builtin takes (ffs
-     * and clrsb take a signed one, which is the same bits) */
-    const struct type *ut = ty_base(w == 8 ? TY_LONG : TY_INT, 1);
+    const struct type *ut = rank == 3 ? ty_llong(1)
+                          : ty_base(rank == 2 ? TY_LONG : TY_INT, 1);
+    int bytes = ty_size(ut), w = bytes > 4 ? 8 : 4, bits = bytes * 8;
     int x = gen_convert(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, ut);
     int r;
     switch (kind) {
     case 1: r = bctz(fn, x, w); break;
-    case 2: r = bclz(fn, x, w); break;
+    case 2: r = bclz(fn, x, w, bits); break;
     case 3: r = bpopcount(fn, x, w); break;
     case 4: {
         int nz = emit_cmp(fn, B_NE, x, bk(fn, 0, w), w, 0);
@@ -1651,9 +1663,18 @@ static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int w)
     }
     case 5: r = emit_bin(fn, IR_AND, bpopcount(fn, x, w), bk(fn, 1, w), w, 0); break;
     default: {
-        int sign = emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)(w * 8 - 1), w), w, 1);
-        r = emit_bin(fn, IR_SUB, bclz(fn, emit_bin(fn, IR_XOR, x, sign, w, 0), w),
-                     bk(fn, 1, w), w, 0);
+        /* x's sign smeared over every bit: its top bit moved to the top
+         * of w first, when the type is narrower than w. The XOR is then
+         * masked back to the type's own bits. */
+        int top = x;
+        if (bits < w * 8)
+            top = emit_bin(fn, IR_SHL, x, bk(fn, (unsigned long)(w * 8 - bits), w),
+                           w, 0);
+        int sign = emit_bin(fn, IR_SHR, top, bk(fn, (unsigned long)(w * 8 - 1), w), w, 1);
+        int t = emit_bin(fn, IR_XOR, x, sign, w, 0);
+        if (bits < w * 8)
+            t = emit_bin(fn, IR_AND, t, bk(fn, (1UL << bits) - 1, w), w, 0);
+        r = emit_bin(fn, IR_SUB, bclz(fn, t, w, bits), bk(fn, 1, w), w, 0);
         break;
     }
     }

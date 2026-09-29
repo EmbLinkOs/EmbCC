@@ -38,7 +38,8 @@ enum atomic_kind atomic_builtin(const char *name, int *op);
 
 /* The GCC bit builtins, by the name after "__builtin_": 1 ctz, 2 clz,
  * 3 popcount, 4 ffs, 5 parity, 6 clrsb, or 0. *width (if not NULL) gets the
- * operand width — 4 for the plain form, 8 for the l / ll forms. */
+ * operand's type as a rank -- 1 int, 2 long, 3 long long -- whose size is
+ * the target's to say (irgen gen_bitop). */
 int builtin_bitop(const char *bn, int *width);
 
 /* Does the C front end implement this compiler-known name? This is the
