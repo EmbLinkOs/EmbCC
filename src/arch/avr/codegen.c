@@ -3252,7 +3252,8 @@ static const struct ra_target AVR_RA = {
     0,
     NULL,
     NULL, NULL,
-    0                 /* float_in_gpr: the float lowerings read slots */
+    1                 /* float_in_gpr: a float is four bytes in a quad,
+                       * and every float lowering reads through vld/rd4 */
 };
 
 /* The lowest register any call this function makes -- the IR's, and the
