@@ -369,7 +369,8 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             int sz = L->size;
             /* any scalar int/pointer that fits a GPR — char/short included: a
              * narrow write keeps the low bytes, a read movsx/movzx-extends. */
-            elig[v] = L->is_int_or_ptr &&
+            elig[v] = (L->is_int_or_ptr ||
+                       (t->float_in_gpr && !fp && L->is_scalar_float)) &&
                       (sz == 1 || sz == 2 || sz == 4 || sz == 8);
             if (!elig[v] && g_ra_why && v < g_ra_why_n)
                 g_ra_why[v] = L->is_int_or_ptr ? "local-odd-size"
@@ -402,7 +403,9 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                        in->op == IR_F2F;
         /* On the integer pass a float operand is somebody else's: it has
          * no GPR home. On the float pass it is the whole point. */
-        if (is_float && !fp) { OPAQUE(in->dst); OPAQUE(in->a); OPAQUE(in->b); }
+        if (is_float && !fp && !t->float_in_gpr) {
+            OPAQUE(in->dst); OPAQUE(in->a); OPAQUE(in->b);
+        }
         switch (in->op) {
         case IR_ADDR:      OPAQUE(in->a); break;          /* address-taken */
         /* IR_STORE's address is register-aware now (codegen stores to [reg]),
@@ -425,7 +428,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
              * backend; a scalar one only where the backend can take it
              * from a register. */
             if (fn->ret_abi.is_struct ||
-                (in->flt ? !fp : !t->ret_scalar_in_reg))
+                (in->flt && !t->float_in_gpr ? !fp : !t->ret_scalar_in_reg))
                 OPAQUE(in->a);
             break;
         case IR_CALL:
@@ -446,10 +449,10 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
              * its argument register only by a backend that knows how. */
             for (int k = 0; k < in->nargs; k++)
                 if (in->argv[k].is_struct ||
-                    (in->argv[k].cls[0] == CLASS_SSE
+                    (in->argv[k].cls[0] == CLASS_SSE && !t->float_in_gpr
                          ? !fp : !t->call_int_arg_in_reg))
                     OPAQUE(in->argv[k].vreg);
-            if (in->retsize || (in->flt ? !fp : 0))
+            if (in->retsize || (in->flt && !t->float_in_gpr ? !fp : 0))
                 OPAQUE(in->dst);                     /* float/struct result */
             break;
         case IR_ASM:

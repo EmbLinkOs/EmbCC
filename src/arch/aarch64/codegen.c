@@ -251,7 +251,8 @@ static const struct ra_target A64_RA = {
                     * so forcing d and a together only constrains the
                     * colourer -- measured at +880 bytes. */
     a64_abi_hints,
-    a64_fp_pool_for, a64_fp_callee_saved
+    a64_fp_pool_for, a64_fp_callee_saved,
+    0              /* float_in_gpr: floats have their own class (SIMD) */
 };
 
 

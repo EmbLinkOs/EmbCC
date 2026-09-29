@@ -3248,7 +3248,8 @@ static const struct ra_target AVR_RA = {
     a_calls_helper,   /* the pool is all call-saved: nothing to cross */
     0,
     NULL,
-    NULL, NULL
+    NULL, NULL,
+    0                 /* float_in_gpr: the float lowerings read slots */
 };
 
 /* The lowest register any call this function makes -- the IR's, and the

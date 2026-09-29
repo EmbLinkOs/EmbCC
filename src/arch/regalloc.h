@@ -140,6 +140,18 @@ struct ra_target {
      * ra_allocate_fp returns nothing, which is what it did before. */
     const int *(*fp_pool_for)(const struct ir_func *fn, int *n);
     int (*is_fp_callee_saved)(int reg);
+
+    /* A SOFT-float target: a float is bits in an ordinary integer
+     * register, operated on by helper calls, with no register class of
+     * its own. Then a float value belongs to the integer class and is as
+     * eligible as an int; without this every one of them was kept in a
+     * stack slot, and RV32 float code ran at 2.3x clang's size -- each
+     * operation a store, two loads and the call.
+     *
+     * Only for a backend whose every float lowering reads and writes
+     * through its register-aware accessors, the same condition the three
+     * flags above state for arguments, returns and copies. */
+    int float_in_gpr;
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that

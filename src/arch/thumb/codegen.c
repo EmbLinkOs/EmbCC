@@ -347,7 +347,10 @@ static const struct ra_target THUMB_RA = {
     0,            /* Thumb-2's wide forms are three-operand */
     t_abi_hints,
     t_fp_pool_for,
-    t_fp_callee_saved
+    t_fp_callee_saved,
+    1             /* float_in_gpr: a soft float is allocated with the core
+                   * registers; with an FPU every float belongs to the FP
+                   * pass, which the integer pass excludes (excl) */
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -741,6 +744,18 @@ static void t_abi_hints(const struct ir_func *fn, int *hint)
         else if (i->op == IR_CALL && !i->retsize && i->dst >= 0 &&
                  i->dst < fn->nvregs)
             hint[i->dst] = 0;
+        /* A soft-float helper the lowering calls: operands in r0 and r1,
+         * the result back in r0 -- so a chain of float operations hands
+         * each result straight on. Not over a hint already given. */
+        else if (i->op != IR_CALL && t_op_calls_helper(i) && i->w <= 4) {
+            if (i->a >= 0 && i->a < fn->nvregs && hint[i->a] < 0)
+                hint[i->a] = 0;
+            if (!i->imm_b && i->b >= 0 && i->b < fn->nvregs &&
+                hint[i->b] < 0)
+                hint[i->b] = 1;
+            if (i->dst >= 0 && i->dst < fn->nvregs && hint[i->dst] < 0)
+                hint[i->dst] = 0;
+        }
     }
     /* A call's arguments, placed by the same place_arg the call site
      * itself uses -- so no second copy of AAPCS32 is stated here. */
