@@ -198,6 +198,9 @@ struct t_fn {
     /* Which of the scratch registers r9-r11 the prologue saves: all of
      * them until a pass has shown which the body uses. */
     unsigned scr_save;
+    /* A leaf that saves nothing at all: no push, no pop, `bx lr`. Decided
+     * per pass, once scr_save is known (see the pass loop). */
+    int leaf, nopush;
     int used_callee[RA_MAXPOOL];
     int nsave;           /* how many of those it took */
     long save_at;        /* where the prologue spilled them */
@@ -3059,6 +3062,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.shortb = NULL; F.nshortb = 0;
     F.scr_save = T_SCR_ALL;
     F.fb = T_SP;
+    F.leaf = F.nopush = 0;
     if (g_t_regalloc) {
         /* nsave is what the allocator REPORTS it took, and the prologue
          * pushes exactly that -- so the two must be computed together.
@@ -3138,6 +3142,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * (t_pool_for), and so saved like any register the allocator took. */
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = 7;
+    /* A leaf: no call in the IR and none the lowering makes -- the
+     * t_op_calls_helper the allocator already trusts -- and no inline asm,
+     * which might call anything. Such a function never overwrites lr. */
+    F.leaf = 1;
+    for (i = 0; i < fn->nins; i++)
+        if (fn->ins[i].op == IR_CALL || fn->ins[i].op == IR_ASM ||
+            t_op_calls_helper(&fn->ins[i]))
+            F.leaf = 0;
     layout(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -3209,7 +3221,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * COUNT sets how far sp moves, which every stack-parameter offset
      * below is measured from. F.nsave is already known -- ra_allocate
      * ran before layout() -- so there is nothing left to discover. */
-    push_at = t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save));
+    /* A leaf with nothing to save: not even lr, which no call overwrites.
+     * Only once a pass has shown the body touches none of r9-r11 (the
+     * first pass saves all three), and only with no frame, no FPU saves,
+     * no variadic save area and no VLA frame base to set up. */
+    F.nopush = F.leaf && !F.nsave && !F.nfsave && !F.frame &&
+               !fn->is_varargs && !fn->has_alloca &&
+               !(F.scr_save & T_SCR_ALL);
+    push_at = F.nopush ? -1
+            : t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save));
     if (F.nfsave)
         t_vpush_s(t, 16, F.nfsave, 0);
     /* The mask is PATCHED at the end with whatever callee-saved
@@ -3243,7 +3263,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * which is a miscompile in any function with more arguments
          * than the register file holds -- and the pad is exactly the
          * term that was missing. */
-        long base = F.frame + save_bytes_for(F.nsave, F.used_callee,
+        long base = F.nopush ? 0 : F.frame + save_bytes_for(F.nsave, F.used_callee,
                                              F.scr_save) +
                     (long)F.nfsave * 4;
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
@@ -3422,8 +3442,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * callee-saved registers the allocator took. Built here and
          * patched into the push below, so the two cannot disagree. */
         unsigned mask = save_mask_for(F.nsave, F.used_callee, F.scr_save);
-        t_patch_push(t, push_at, mask);
-        if (fn->is_varargs) {
+        if (F.nopush)
+            t_bx(t, T_LR);
+        else
+            t_patch_push(t, push_at, mask);
+        if (F.nopush) {
+            /* returned above */
+        } else if (fn->is_varargs) {
             /* Return through lr rather than popping into pc: the four
              * words of register save area sit above the saved registers
              * and have to come off too, and `pop {..., pc}` would jump
@@ -3501,7 +3526,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     f->code_len = t->len - f->code_off;
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved. */
-    f->stack_bytes = (int)(F.frame + save_bytes_for(F.nsave, F.used_callee,
+    f->stack_bytes = F.nopush ? 0 : (int)(F.frame + save_bytes_for(F.nsave, F.used_callee,
                                                     F.scr_save) +
                            (long)F.nfsave * 4);
     free(F.usecnt);
