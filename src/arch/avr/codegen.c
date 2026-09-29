@@ -709,9 +709,11 @@ static void ext_info(struct a_fn *F)
  * whatever the IR said; a sign-extended one keeps the IR's signedness. */
 static int cmp_width(const struct a_fn *F, const struct ir_ins *i, int *sign)
 {
-    int nv = F->fn->nvregs, wa, ka, wb;
+    int nv = F->fn->nvregs, wa = 0, ka, wb = 0;
     *sign = i->sign;
-    if (!F->xw || i->a < 0 || i->a >= nv || !(wa = F->xw[i->a]))
+    if (F->xw && i->a >= 0 && i->a < nv)
+        wa = F->xw[i->a];
+    if (!wa)
         return VW;
     ka = F->xs[i->a];
     if (i->imm_b) {
@@ -721,8 +723,9 @@ static int cmp_width(const struct a_fn *F, const struct ir_ins *i, int *sign)
             return VW;
         wb = wa;
     } else {
-        if (i->b < 0 || i->b >= nv || !(wb = F->xw[i->b]) ||
-            F->xs[i->b] != ka)
+        if (i->b >= 0 && i->b < nv && F->xs[i->b] == ka)
+            wb = F->xw[i->b];
+        if (!wb)
             return VW;
     }
     if (!ka)
