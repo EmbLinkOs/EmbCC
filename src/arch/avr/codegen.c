@@ -1410,6 +1410,23 @@ static int rd_in(struct a_fn *F, int v, int n, int scratch)
     return scratch;
 }
 
+/* Where to compute a result of nb bytes: in the destination's home when
+ * it holds them, so the value is never copied out of A afterwards; A
+ * otherwise. dst_done() commits an A result, and does nothing for a home. */
+static int dst_reg(const struct a_fn *F, const struct ir_ins *i, int nb)
+{
+    if (in_pair(F, i->dst) && nb <= F->hw[i->dst])
+        return F->loc[i->dst];
+    return RA;
+}
+
+static void wr4(struct a_fn *F, int v, int r);
+static void dst_done(struct a_fn *F, const struct ir_ins *i, int r)
+{
+    if (r == RA)
+        wr4(F, i->dst, RA);
+}
+
 static void rd4(struct a_fn *F, int v, int r)
 {
     int n = cw(F, v);
@@ -1901,20 +1918,33 @@ static enum avr_cond cond_for(enum binop pred, int sign, int *swap)
  * avr-gcc does and what clang's `a << 9` shows: three bit-shifts and
  * three moves, not nine of anything.
  */
-static void shift1(struct a_fn *F, int r, int op, int sign)
+/* The shifts work on `w` bytes, VW unless the caller knows fewer carry
+ * the answer (the IR_SHL/IR_SHR lowering): a left shift's low bytes
+ * depend only on the low bytes, and a right shift of an extension is the
+ * extension of the shift, when the kinds agree. */
+static void shift1w(struct a_fn *F, int r, int op, int sign, int w)
 {
     if (op == IR_SHL) {
         avr_rr(F->t, AVR_ADD, r, r);                  /* lsl r */
-        for (int k = 1; k < VW; k++)
+        for (int k = 1; k < w; k++)
             avr_rr(F->t, AVR_ADC, r + k, r + k);      /* rol r+k */
     } else {
-        avr_r1(F->t, sign ? AVR_ASR : AVR_LSR, r + VW - 1);
-        for (int k = VW - 2; k >= 0; k--)
+        avr_r1(F->t, sign ? AVR_ASR : AVR_LSR, r + w - 1);
+        for (int k = w - 2; k >= 0; k--)
             avr_r1(F->t, AVR_ROR, r + k);
     }
 }
 
+static void shift_immw(struct a_fn *F, int r, int op, int sign, long n,
+                       int VWn);
+
 static void shift_imm(struct a_fn *F, int r, int op, int sign, long n)
+{
+    shift_immw(F, r, op, sign, n, VW);
+}
+
+static void shift_immw(struct a_fn *F, int r, int op, int sign, long n,
+                       int VWn)
 {
     int bytes, k;
 
@@ -1924,36 +1954,36 @@ static void shift_imm(struct a_fn *F, int r, int op, int sign, long n)
      * zeroes (or all sign) is the honest answer and keeps the emitted
      * sequence bounded; the alternative is 32 shift instructions for a
      * program that was already wrong. */
-    if (n >= 8 * VW)
-        n = 8 * VW - (op == IR_SHL || !sign ? 0 : 1);
+    if (n >= 8 * VWn)
+        n = 8 * VWn - (op == IR_SHL || !sign ? 0 : 1);
     bytes = (int)(n / 8);
     n -= 8 * bytes;
 
     if (bytes > 0) {
         if (op == IR_SHL) {
-            for (k = VW - 1; k >= bytes; k--)
+            for (k = VWn - 1; k >= bytes; k--)
                 avr_rr(F->t, AVR_MOV, r + k, r + k - bytes);
-            for (k = 0; k < bytes && k < VW; k++)
+            for (k = 0; k < bytes && k < VWn; k++)
                 avr_rr(F->t, AVR_MOV, r + k, R_ZERO);
         } else {
             /* The fill byte is built BEFORE the moves, from the top byte
              * that is about to be overwritten. */
             int fill = R_ZERO;
             if (sign) {
-                avr_rr(F->t, AVR_MOV, R_TMP, r + VW - 1);
+                avr_rr(F->t, AVR_MOV, R_TMP, r + VWn - 1);
                 avr_rr(F->t, AVR_ADD, R_TMP, R_TMP);
                 avr_rr(F->t, AVR_SBC, R_TMP, R_TMP);
                 fill = R_TMP;
             }
-            for (k = 0; k + bytes < VW; k++)
+            for (k = 0; k + bytes < VWn; k++)
                 avr_rr(F->t, AVR_MOV, r + k, r + k + bytes);
-            for (k = VW - bytes; k < VW; k++)
+            for (k = VWn - bytes; k < VWn; k++)
                 if (k >= 0)
                     avr_rr(F->t, AVR_MOV, r + k, fill);
         }
     }
     for (k = 0; k < (int)n; k++)
-        shift1(F, r, op, sign);
+        shift1w(F, r, op, sign, VWn);
 }
 
 /* A variable count: the count-down loop clang emits, and the only shape
@@ -1968,7 +1998,8 @@ static void shift_imm(struct a_fn *F, int r, int op, int sign, long n)
  * `dec` then `brmi` tests count-1 < 0, so a count of zero exits before
  * shifting anything -- which is what makes the pre-test unnecessary.
  */
-static void shift_var(struct a_fn *F, int r, int cnt, int op, int sign)
+static void shift_varw(struct a_fn *F, int r, int cnt, int op, int sign,
+                       int w)
 {
     int top, back, exitj;
     /* The count is decremented WHERE IT IS, not copied into r0: r0 is where a
@@ -1981,7 +2012,7 @@ static void shift_var(struct a_fn *F, int r, int cnt, int op, int sign)
      * version of this loop really did outgrow it. */
     avr_br(F->t, AVR_BR_PL, 1);
     exitj = avr_rjmp(F->t, 0);
-    shift1(F, r, op, sign);
+    shift1w(F, r, op, sign, w);
     back = avr_rjmp(F->t, 0);
     avr_patch_rjmp(F->t, back, (top - (back + 2)) / 2);
     avr_patch_rjmp(F->t, exitj, (F->t->len - (exitj + 2)) / 2);
@@ -2516,10 +2547,29 @@ static void gen_ins(struct a_fn *F, int n)
 
     case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR: {
         int nb = dw(F, i);
+        int d, a = i->a, b = i->b;
         if (!nb)
             return;
-        rd4(F, i->a, RA);
+        /* Computed IN the destination's home when it has one: `d = a op
+         * b` is then a copy of a into d and the operation, where it was a
+         * copy of a into A, the operation, and a copy of A into d. The
+         * immediate forms reach r16 and up only, so a constant goes
+         * through A unless the home is there. If d is where b lives,
+         * copying a in first would lose b: a commutative operation takes
+         * them the other way round, a subtraction takes A. */
+        d = dst_reg(F, i, nb);
+        if (i->imm_b && d < 16)
+            d = RA;
+        if (!i->imm_b && d != RA && in_pair(F, b) && F->loc[b] == d &&
+            !(in_pair(F, a) && F->loc[a] == d)) {
+            if (i->op == IR_SUB) {
+                d = RA;
+            } else {
+                int x = a; a = b; b = x;
+            }
+        }
         if (i->imm_b) {
+            vld(F, d, a, 0, nb);
             /* A constant folds into the instruction, since A is in
              * r16-r31 where the immediate forms reach: an add is a subi
              * of the negation with sbci carrying the borrow -- exactly
@@ -2533,47 +2583,48 @@ static void gen_ins(struct a_fn *F, int n)
                 int b = (int)((v >> (8 * k)) & 0xffu);
                 switch (i->op) {
                 case IR_ADD: case IR_SUB:
-                    avr_ri(t, k ? AVR_SBCI : AVR_SUBI, RA + k, b);
+                    avr_ri(t, k ? AVR_SBCI : AVR_SUBI, d + k, b);
                     break;
                 case IR_AND:
-                    if (b == 0) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
-                    else if (b != 0xff) avr_ri(t, AVR_ANDI, RA + k, b);
+                    if (b == 0) avr_rr(t, AVR_MOV, d + k, R_ZERO);
+                    else if (b != 0xff) avr_ri(t, AVR_ANDI, d + k, b);
                     break;
                 case IR_OR:
-                    if (b) avr_ri(t, AVR_ORI, RA + k, b);
+                    if (b) avr_ri(t, AVR_ORI, d + k, b);
                     break;
                 default:
-                    if (b == 0xff) avr_r1(t, AVR_COM, RA + k);
+                    if (b == 0xff) avr_r1(t, AVR_COM, d + k);
                     else if (b) {
                         avr_ri(t, AVR_LDI, RB + k, b);
-                        avr_rr(t, AVR_EOR, RA + k, RB + k);
+                        avr_rr(t, AVR_EOR, d + k, RB + k);
                     }
                     break;
                 }
             }
-            wr4(F, i->dst, RA);
+            dst_done(F, i, d);
             return;
         }
         {
-        int rb = rd_in(F, i->b, nb, RB);      /* b where it lives */
+        int rb = rd_in(F, b, nb, RB);         /* b where it lives */
+        vld(F, d, a, 0, nb);
         switch (i->op) {
         case IR_ADD:
-            avr_rr(t, AVR_ADD, RA, rb);
-            for (int k = 1; k < nb; k++) avr_rr(t, AVR_ADC, RA + k, rb + k);
+            avr_rr(t, AVR_ADD, d, rb);
+            for (int k = 1; k < nb; k++) avr_rr(t, AVR_ADC, d + k, rb + k);
             break;
         case IR_SUB:
-            avr_rr(t, AVR_SUB, RA, rb);
-            for (int k = 1; k < nb; k++) avr_rr(t, AVR_SBC, RA + k, rb + k);
+            avr_rr(t, AVR_SUB, d, rb);
+            for (int k = 1; k < nb; k++) avr_rr(t, AVR_SBC, d + k, rb + k);
             break;
         default: {
             enum avr_rr op = i->op == IR_AND ? AVR_AND
                            : i->op == IR_OR  ? AVR_OR : AVR_EOR;
-            for (int k = 0; k < nb; k++) avr_rr(t, op, RA + k, rb + k);
+            for (int k = 0; k < nb; k++) avr_rr(t, op, d + k, rb + k);
             break;
         }
         }
         }
-        wr4(F, i->dst, RA);
+        dst_done(F, i, d);
         return;
     }
 
@@ -2705,15 +2756,48 @@ static void gen_ins(struct a_fn *F, int n)
     }
 
     case IR_SHL: case IR_SHR: {
+        /* At the width that carries the answer: a left shift's nb low
+         * bytes need only the operand's nb low bytes, and a right shift of
+         * an extension is that extension of the shift when the kinds agree
+         * -- logical of a zero-extended value, arithmetic of a sign-extended
+         * one. An `int` here is two bytes and the IR shifts four. */
         long k;
-        rd4(F, i->a, RA);
-        if (const_b(F, i, &k)) {
-            shift_imm(F, RA, (int)i->op, i->sign, k);
-        } else {
-            rd4(F, i->b, RB);
-            shift_var(F, RA, RB, (int)i->op, i->sign);
+        int nb = dw(F, i), w = VW, xk = -1;
+        int a = i->a;
+        if (!nb)
+            return;
+        if (i->op == IR_SHL) {
+            w = nb;
+        } else if (F->xw && a >= 0 && a < F->fn->nvregs && F->xw[a] &&
+                   F->xw[a] < VW) {
+            if (F->xs[a] == 0)           { w = F->xw[a]; xk = 0; }
+            else if (i->sign)            { w = F->xw[a]; xk = 1; }
         }
-        wr4(F, i->dst, RA);
+        {
+            int d = dst_reg(F, i, nb > w ? nb : w);   /* all w shifted */
+            int cnt;
+            if (d != RA && !const_b(F, i, &k) && in_pair(F, i->b) &&
+                F->loc[i->b] == d)
+                d = RA;                     /* the count lives there */
+            if (!const_b(F, i, &k))
+                vld(F, RB, i->b, 0, 1);     /* the count: its low byte */
+            /* A zero-extended operand shifts LOGICALLY at its own width
+             * whatever the IR says: at four bytes its top bit is 0 and an
+             * arithmetic shift is a logical one, but at one byte `asr`
+             * would drag bit 7 back in -- `(uint8_t)b >> 4` gave 0xfe for
+             * b = 0xea. */
+            int sg = xk == 0 ? 0 : i->sign;
+            vld(F, d, a, 0, w);
+            if (const_b(F, i, &k)) {
+                shift_immw(F, d, (int)i->op, sg, k, w);
+            } else {
+                cnt = RB;
+                shift_varw(F, d, cnt, (int)i->op, sg, w);
+            }
+            if (w < nb)
+                extend(F, d, w, xk == 1, nb);
+            dst_done(F, i, d);
+        }
         return;
     }
 
@@ -2835,29 +2919,33 @@ static void gen_ins(struct a_fn *F, int n)
             int ld = (i->vol || nb > i->size) ? i->size : nb;
             if (!ld)
                 return;
+            int d = dst_reg(F, i, nb);       /* straight into its home */
             vld(F, AVR_Z, i->a, 0, 2);
             if (ld == 1) {
-                avr_ld(t, RA, AVR_Z, AVR_PTR_NONE);
+                avr_ld(t, d, AVR_Z, AVR_PTR_NONE);
             } else {
                 for (int k = 0; k < ld; k++)
-                    avr_ld(t, RA + k, AVR_Z, AVR_PTR_POST_INC);
+                    avr_ld(t, d + k, AVR_Z, AVR_PTR_POST_INC);
             }
             if (nb > i->size)
-                extend(F, RA, i->size, i->sign, nb);
-            wr4(F, i->dst, RA);
+                extend(F, d, i->size, i->sign, nb);
+            dst_done(F, i, d);
         }
         return;
 
     case IR_STORE:
         /* The value FIRST: its far path may walk through Z, which the
          * address load is about to own. */
-        rd4(F, i->b, RA);
+        {
+        /* ...from its home when it has one, which touches no Z. */
+        int src = rd_in(F, i->b, i->size, RA);
         vld(F, AVR_Z, i->a, 0, 2);
         if (i->size == 1) {
-            avr_st(t, AVR_Z, RA, AVR_PTR_NONE);
+            avr_st(t, AVR_Z, src, AVR_PTR_NONE);
         } else {
             for (int k = 0; k < i->size; k++)
-                avr_st(t, AVR_Z, RA + k, AVR_PTR_POST_INC);
+                avr_st(t, AVR_Z, src + k, AVR_PTR_POST_INC);
+        }
         }
         return;
 
@@ -2875,10 +2963,13 @@ static void gen_ins(struct a_fn *F, int n)
             vst(F, i->dst, 0, F->loc[i->a], nb);
             return;
         }
-        rd4(F, i->a, RA);
+        {
+        int d = dst_reg(F, i, nb);
+        vld(F, d, i->a, 0, nb < i->size ? nb : i->size);
         if (nb > i->size)
-            extend(F, RA, i->size, i->sign, nb);
-        wr4(F, i->dst, RA);
+            extend(F, d, i->size, i->sign, nb);
+        dst_done(F, i, d);
+        }
         return;
     }
 
