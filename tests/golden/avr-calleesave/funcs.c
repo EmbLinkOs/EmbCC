@@ -92,3 +92,21 @@ u16 relabel(u16 a)
     } while (--n);
     return (u16)(s ^ (s >> 16));
 }
+
+/* Values live ACROSS a runtime helper call -- a 32-bit divide and a
+ * float add, which the IR does not show as calls. X (r26:r27) is a home
+ * for a value that crosses no call, and a helper may use X freely, so
+ * the allocator has to be told these ARE calls (a_calls_helper). */
+__attribute__((noinline)) u16 acrossdiv(u16 a)
+{
+    u16 t = (u16)(a * 3 + 1), w = (u16)(a ^ 0x5a5a);
+    u32 q = ((u32)a << 11) / (u32)(a | 3);
+    u32 r = ((u32)a * 40503u) % (u32)(t | 1);
+    return (u16)(t + w + (u16)q + (u16)r);
+}
+__attribute__((noinline)) u16 acrossflt(u16 a)
+{
+    u16 t = (u16)(a * 5 + 7);
+    float f = (float)a * 1.5f + 0.25f;
+    return (u16)(t + (u16)f);
+}

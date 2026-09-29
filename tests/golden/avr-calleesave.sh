@@ -26,10 +26,15 @@ EMBCC_AVR_HARNESS=$PWD/$out; export EMBCC_AVR_HARNESS
 "$EMBCC" --target=avr -Os -c tests/harness/avr/io.c -o "$out/io.o" &&
 "$EMBCC" --target=avr -c "$D/probe.S" -o "$out/probe.o" || {
     echo "the harness or the probe does not build"; exit 1; }
+# The runtime as an ARCHIVE of every AVR half (the integer and the float
+# helpers), so a program links only what it calls: acrossflt needs the
+# float ones.
 mkdir -p "$out/rt"
-for f in lib/rt/avr.c; do
-    "$EMBCC" --target=avr -Os -c "$f" -o "$out/rt/avr.o" || exit 1
+for f in lib/rt/avr*.c; do
+    "$EMBCC" --target=avr -Os -c "$f" -o "$out/rt/$(basename "$f" .c).o" ||
+        exit 1
 done
+${EMBCC_AR:-llvm-ar} rcs "$out/librt.a" "$out"/rt/*.o || exit 1
 # -O2:n forces the allocator's mode n (EMBCC_AVR_RA_MODE): each function
 # is generated every way and the shortest kept, so a mode that is wrong
 # where it never wins would go unseen otherwise.
@@ -40,7 +45,7 @@ for spec in -O0 -O1 -O2 -Os -O2:1 -O2:2 -O2:3; do
     EMBCC_AVR_RA_MODE=$mode "$EMBCC" --target=avr $opt -c "$D/main.c" \
         -o "$out/m.o" &&
     sh tests/harness/avr/link.sh "$out/c.elf" "$out/m.o" "$out/f.o" \
-        "$out/probe.o" "$out/rt/avr.o" > "$out/ln.log" 2>&1 || {
+        "$out/probe.o" "$out/librt.a" > "$out/ln.log" 2>&1 || {
         echo "$spec: does not build"; head -3 "$out/ln.log"; exit 1; }
     got=$(EMBCC_QEMU_UNTIL=END sh tests/harness/avr/run.sh "$out/c.elf" \
               2>/dev/null | head -1)

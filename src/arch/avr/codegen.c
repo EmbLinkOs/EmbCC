@@ -1178,9 +1178,19 @@ static void add_const16(struct a_fn *F, int p, long k)
 /* A pointer to walk a slot with, chosen so it cannot be the value being
  * moved. Z unless the destination run covers it, then X; values never
  * live in either, so one of the two is always free. */
+/* X (r26:r27) as a HOME: offered to the pair pass (g_a_xhome) and then
+ * checked, since a few lowerings take X as a scratch pointer. Each such
+ * use sets g_x_hit; an attempt that both gave X to a value (g_x_alloc)
+ * and used it so is thrown away and generated without it. */
+static int g_a_xhome, g_x_hit, g_x_alloc;
+
 static int walk_ptr(int r, int n)
 {
-    return (r <= AVR_Z + 1 && r + n > AVR_Z) ? AVR_X : AVR_Z;
+    if (r <= AVR_Z + 1 && r + n > AVR_Z) {
+        g_x_hit = 1;
+        return AVR_X;
+    }
+    return AVR_Z;
 }
 
 /* n bytes of the slot at `off` into r .. r+n-1.
@@ -2291,7 +2301,7 @@ static void gen_ins(struct a_fn *F, int n)
             int from = i->size < 1 ? 1 : i->size;
             if (from > n) from = n;
             vld(F, RB, i->a, 0, 2);
-            avr_movw(t, AVR_X, RB);
+            g_x_hit = 1; avr_movw(t, AVR_X, RB);
             for (int k = 0; k < from; k++) {
                 avr_ld(t, RA, AVR_X, AVR_PTR_POST_INC);
                 vst_cc(F, i->dst, k, RA, 1);
@@ -2315,7 +2325,7 @@ static void gen_ins(struct a_fn *F, int n)
             int to = i->size < 1 ? 1 : i->size;
             if (to > n) to = n;
             vld(F, RB, i->a, 0, 2);
-            avr_movw(t, AVR_X, RB);
+            g_x_hit = 1; avr_movw(t, AVR_X, RB);
             for (int k = 0; k < to; k++) {
                 vld(F, RA, i->b, k, 1);
                 avr_st(t, AVR_X, RA, AVR_PTR_POST_INC);
@@ -3029,7 +3039,7 @@ static void gen_ins(struct a_fn *F, int n)
             if (F->sret_slot >= 0) {
                 ld_slot(F, RB, F->sret_slot, 2);
                 avr_movw(t, AVR_Z, RA);
-                avr_movw(t, AVR_X, RB);
+                g_x_hit = 1; avr_movw(t, AVR_X, RB);
                 for (long b = 0; b < n; b++) {
                     avr_ldd(t, R_TMP, AVR_Z, (int)b);
                     avr_st(t, AVR_X, R_TMP, AVR_PTR_POST_INC);
@@ -3232,8 +3242,10 @@ static void gen_ins(struct a_fn *F, int n)
         if (i->op == IR_MEMCPY)
             vld(F, RB, i->b, 0, 2);
         avr_movw(t, AVR_Z, RA);
-        if (i->op == IR_MEMCPY)
+        if (i->op == IR_MEMCPY) {
+            g_x_hit = 1;
             avr_movw(t, AVR_X, RB);
+        }
         if (i->size <= 255) {
             avr_ri(t, AVR_LDI, cnt, i->size);
             top = t->len;
@@ -3320,7 +3332,7 @@ static void gen_ins(struct a_fn *F, int n)
             /* The output value is in o->reg..+size; o->temp holds the
              * ADDRESS to write it to. X is used for the address so that an
              * output sitting in Z is not the thing overwritten. */
-            vld(F, AVR_X, o->temp, 0, 2);
+            g_x_hit = 1; vld(F, AVR_X, o->temp, 0, 2);
             for (int b = 0; b < o->size; b++)
                 avr_st(t, AVR_X, o->reg + b, AVR_PTR_POST_INC);
         }
@@ -3469,7 +3481,7 @@ static void isr_epilogue(struct code *t)
  * many arguments LOADS them into r8-r17, so each function's pool stops
  * below the lowest argument register any of its calls uses. */
 static const int A_POOL[8] = { 2, 4, 6, 8, 10, 12, 14, 16 };
-static int g_a_pool[8];
+static int g_a_pool[9];            /* the eight pairs, and X (g_a_xhome) */
 static int g_a_npool;
 static int g_a_regalloc;
 
@@ -3494,7 +3506,16 @@ static int a_ldvar_plain(int size, int sign, int w)
     (void)sign;
     return size == w || size <= 2;
 }
-static int a_calls_helper(const struct ir_ins *i) { (void)i; return 0; }
+/* Which operations become a helper call. Nothing needed this while every
+ * home was call-saved; X is not, so a value in it must not live across
+ * one. Conservative -- a multiply by a constant is shifts and adds, and
+ * saying it calls only keeps X from a value across it. */
+static int a_calls_helper(const struct ir_ins *i)
+{
+    return i->flt || i->op == IR_I2F || i->op == IR_F2I ||
+           i->op == IR_F2F || i->op == IR_MUL || i->op == IR_DIV ||
+           i->op == IR_MOD;
+}
 
 static const struct ra_target AVR_RA = {
     a_pool_for, a_callee_saved, a_ldvar_plain,
@@ -3651,6 +3672,11 @@ static void avr_ra_pass(struct a_fn *F, int quad, int low, int *taken,
             if (!(*taken & (0xF << b)))
                 g_a_pool[g_a_npool++] = b;
     } else {
+        /* X first, being call-clobbered: a value that crosses no call
+         * takes it and costs no push. It is no argument register, so the
+         * `low` bound does not apply. */
+        if (g_a_xhome && !(*taken & (3 << AVR_X)))
+            g_a_pool[g_a_npool++] = AVR_X;
         for (int k = 0; k < 8; k++)
             if (A_POOL[k] + 1 < low && !(*taken & (3 << A_POOL[k])))
                 g_a_pool[g_a_npool++] = A_POOL[k];
@@ -3728,6 +3754,8 @@ static void avr_regalloc(struct a_fn *F, int mode)
     struct avr_ra r;
 
     avr_ra_try(F, mode, &r);
+    for (int v = 0; v < F->fn->nvregs; v++)
+        if (r.loc[v] == AVR_X) g_x_alloc = 1;
     if (avr_knob("EMBCC_AVR_RA_LIMIT")) {
         int lim = atoi(avr_knob("EMBCC_AVR_RA_LIMIT")), c = 0;
         for (int v = 0; v < F->fn->nvregs; v++)
@@ -3742,7 +3770,13 @@ static void avr_regalloc(struct a_fn *F, int mode)
         for (int k = 0; k < r.nsave; k++) fprintf(stderr, " r%d", r.used[k]);
         fprintf(stderr, "\n");
     }
-    if (r.nsave) {
+    /* Anything allocated at all -- not "anything saved": a value in X
+     * needs no push, and testing nsave threw such an allocation away and
+     * left the function a frame for it. */
+    int any = 0;
+    for (int v = 0; v < F->fn->nvregs; v++)
+        if (r.loc[v] >= 0) any = 1;
+    if (any) {
         F->loc = r.loc; F->hw = r.hw;
         F->nsave = r.nsave;
         for (int k = 0; k < r.nsave; k++) F->used_callee[k] = r.used[k];
@@ -4120,7 +4154,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     int m0 = AVR_RA_QUADS_FIRST, m1 = AVR_RA_PAIRS_ONLY;
     /* ...and each mode under a few budgets of pairs (g_a_cap). */
     static const int caps[3] = { 8, 3, 1 };
-    int c0 = 0, c1 = 2, best_cap = 8, last_cap = 1;
+    int c0 = 0, c1 = 2, best_cap = 8, last_cap = 1, best_x = 0;
     if (avr_knob("EMBCC_AVR_RA_MODE"))
         m0 = m1 = atoi(avr_knob("EMBCC_AVR_RA_MODE"));
     if (avr_knob("EMBCC_AVR_RA_CAP")) {
@@ -4131,21 +4165,36 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         for (int c = c0; c <= c1; c++) {
             int len;
             g_a_cap = avr_knob("EMBCC_AVR_RA_CAP") ? last_cap : caps[c];
+            /* with X offered, unless the attempt then used it as scratch */
+            g_a_xhome = !avr_knob("EMBCC_AVR_NO_XHOME");
+            g_x_hit = g_x_alloc = 0;
             len = gen_relaxed(fn, t, st, want_debug, m, &rb);
+            if (g_a_xhome && g_x_hit && g_x_alloc) {
+                g_a_xhome = 0;
+                g_x_hit = g_x_alloc = 0;
+                len = gen_relaxed(fn, t, st, want_debug, m, &rb);
+            }
             if (avr_knob("EMBCC_AVR_RA"))
                 fprintf(stderr, "%s: mode %d cap %d, %d bytes\n", fn->name,
                         m, g_a_cap, len);
             if (best == AVR_RA_NONE || len < best_len) {
                 best = m;
                 best_cap = g_a_cap;
+                best_x = g_a_xhome;
                 best_len = len;
             }
         }
-    if (best != m1 || best_cap != g_a_cap) {
+    if (best != m1 || best_cap != g_a_cap || best_x != g_a_xhome) {
         g_a_cap = best_cap;
+        g_a_xhome = best_x;
+        g_x_hit = g_x_alloc = 0;
         gen_relaxed(fn, t, st, want_debug, best, &rb);
+        if (g_x_hit && g_x_alloc)
+            internal_error("avr: %s: X is a home and was used as scratch",
+                           fn->name);
     }
     g_a_cap = 8;
+    g_a_xhome = 0;
 }
 
 void codegen_unit_avr(struct ir_unit *iu, struct code *text,
