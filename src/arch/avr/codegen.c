@@ -195,6 +195,14 @@ struct a_fn {
      * more than the IR guarantees. */
     long *cval;
     char *cknown;
+    /* Per vreg: a four-byte-or-narrower constant with one definition that
+     * is REBUILT where it is read (vld, vld_cc) rather than kept anywhere:
+     * no home, no slot, and its IR_CONST emits nothing. */
+    char *remat;
+    /* The last store into a home (vst), and where the code stood after it:
+     * a vld of the same value into the same registers with nothing emitted
+     * since -- and no label placed -- has nothing to do. */
+    struct { int v, r, n; long at; } last_st;
     /* Which vregs hold an EIGHT-byte value. By the width of the RESULT --
      * i->w for the value-producing operations and four for the rest however
      * wide their operands are: an IR_CMP at w == 8 compares two 64-bit
@@ -318,6 +326,12 @@ static void const_map(struct a_fn *F)
     int n = fn->nvregs ? fn->nvregs : 1;
     F->cval = xcalloc((size_t)n, sizeof *F->cval);
     F->cknown = xcalloc((size_t)n, 1);
+    /* A constant only if its ONE definition is an IR_CONST. Counting every
+     * definition, not only the constant ones: a merge like `%4 = mov %15
+     * ... %4 = const 0` wrote %4 first with a mov, which this used to miss,
+     * so %4 was taken for the constant 0 -- folded as an immediate by
+     * const_b and, once constants were rebuilt where read, rebuilt as 0
+     * on the path that had moved %15 into it. */
     for (int k = 0; k < fn->nins; k++) {
         const struct ir_ins *i = &fn->ins[k];
         int d = i->dst;
@@ -330,6 +344,8 @@ static void const_map(struct a_fn *F)
         if (i->op == IR_CONST) {
             F->cval[d] = i->imm;
             F->cknown[d] = 1;
+        } else {
+            F->cknown[d] = 2;          /* defined, and not as a constant */
         }
     }
     for (int v = 0; v < n; v++)
@@ -1026,8 +1042,9 @@ static void layout(struct a_fn *F)
         }
         for (int v = fn->nvars; v < nv; v++) {
             int k;
-            if (def[v] < 0 || in_pair(F, v))
-                continue;              /* never defined, or in a pair */
+            if (def[v] < 0 || in_pair(F, v) ||
+                (F->remat && F->remat[v]))
+                continue;      /* never defined, in a pair, or rebuilt */
             /* A slot is reused only by a value of the SAME width, which is
              * why the sweep below tracks one size per slot. Mixing them
              * would let a four-byte value land on the high half of an
@@ -1231,6 +1248,9 @@ static int in_pair(const struct a_fn *F, int v)
  * wrote: it is a refusal instead. */
 static long sslot(const struct a_fn *F, int v)
 {
+    if (F->remat && v >= 0 && F->remat[v])
+        internal_error("avr: %s: a path addresses vreg %d's slot, and it is "
+                       "a constant rebuilt where it is read", F->fn->name, v);
     if (in_pair(F, v))
         internal_error("avr: %s: a path addresses vreg %d's slot, and it "
                        "lives in r%d..r%d", F->fn->name, v, F->loc[v],
@@ -1243,8 +1263,22 @@ static long sslot(const struct a_fn *F, int v)
  * (avr_demand); a wider request leaves r's upper bytes as they were,
  * which is what a narrow slot read does too. mov and movw set no flags,
  * so this serves the flag-preserving _cc paths as well. */
+static void ldi4(struct a_fn *F, int r, unsigned long v, int n);
+
+static int is_remat(const struct a_fn *F, int v)
+{
+    return F->remat && v >= 0 && F->remat[v];
+}
+
 static void vld(struct a_fn *F, int r, int v, long off, int n)
 {
+    if (is_remat(F, v)) {
+        ldi4(F, r, (unsigned long)F->cval[v] >> (8 * off), n);
+        return;
+    }
+    if (in_pair(F, v) && F->last_st.v == v && F->last_st.r == r &&
+        off == 0 && n <= F->last_st.n && F->last_st.at == F->t->len)
+        return;              /* just stored from exactly these registers */
     if (in_pair(F, v)) {
         int h = F->loc[v] + (int)off, k = 0;
         int have = F->hw[v] - (int)off;
@@ -1264,7 +1298,8 @@ static void vld(struct a_fn *F, int r, int v, long off, int n)
 }
 static void vld_cc(struct a_fn *F, int r, int v, long off, int n)
 {
-    if (in_pair(F, v)) { vld(F, r, v, off, n); return; }
+    /* ldi, mov and the r31 borrow ldi4 may use leave SREG alone */
+    if (in_pair(F, v) || is_remat(F, v)) { vld(F, r, v, off, n); return; }
     ld_slot_cc(F, r, F->slot[v] + off, n);
 }
 static void vst(struct a_fn *F, int v, long off, int r, int n)
@@ -1281,6 +1316,10 @@ static void vst(struct a_fn *F, int v, long off, int r, int n)
                 if (h != r) avr_rr(F->t, AVR_MOV, h + k, r + k);
                 k++;
             }
+        }
+        if (off == 0 && h != r) {      /* r..r+n-1 still hold it (vld) */
+            F->last_st.v = v; F->last_st.r = r; F->last_st.n = n;
+            F->last_st.at = F->t->len;
         }
         return;
     }
@@ -2368,6 +2407,8 @@ static void gen_ins(struct a_fn *F, int n)
          * reads is not computed at all, which for these operations is safe:
          * none of them has an effect beyond its result. */
         int nb = dw(F, i);
+        if (is_remat(F, i->dst))
+            return;                   /* rebuilt where it is read */
         if (nb) {
             ldi4(F, RA, (unsigned long)i->imm, nb);
             wr4(F, i->dst, RA);
@@ -2782,6 +2823,7 @@ static void gen_ins(struct a_fn *F, int n)
 
     case IR_LABEL:
         F->label_off[i->label] = t->len;
+        F->last_st.v = -1;            /* a jump may arrive here */
         return;
 
     case IR_JMP:
@@ -3335,6 +3377,8 @@ static char *avr_excl(const struct a_fn *F, int quad)
             x[v] = quad ? fn->locals[v].size != 4 : fn->locals[v].size > 2;
         else
             x[v] = quad ? cw(F, v) < 3 || cw(F, v) > 4 : cw(F, v) > 2;
+        if (F->remat && F->remat[v])
+            x[v] = 1;                /* rebuilt where it is read */
     }
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
@@ -3505,6 +3549,28 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
         ra_count_vreg_uses(fn, F.usecnt);
     }
+    const_map(&F);
+    if (ra_mode != AVR_RA_NONE) {
+        F.remat = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), 1);
+        for (int v = fn->nvars; v < fn->nvregs; v++)
+            F.remat[v] = F.cknown[v] == 1 && !F.wide[v];
+        /* EMBCC_AVR_REMAT_MAX=k: only the first k are rebuilt, the rest
+         * kept -- for bisecting one that is rebuilt wrong. */
+        if (avr_knob("EMBCC_AVR_REMAT_MAX")) {
+            int lim = atoi(avr_knob("EMBCC_AVR_REMAT_MAX")), c = 0;
+            for (int v = 0; v < fn->nvregs; v++)
+                if (F.remat[v] && c++ >= lim) F.remat[v] = 0;
+        }
+        /* ...but not an arm of a select, which gen_select copies slot to
+         * slot (the same reason avr_excl keeps them out of homes). */
+        for (int k = 0; k < fn->nins; k++)
+            if (fn->ins[k].op == IR_SELECT) {
+                const struct ir_ins *s = &fn->ins[k];
+                if (s->b >= 0 && s->b < fn->nvregs) F.remat[s->b] = 0;
+                if (s->c >= 0 && s->c < fn->nvregs) F.remat[s->c] = 0;
+            }
+    }
+    F.last_st.v = -1;
     if (ra_mode != AVR_RA_NONE)
         avr_regalloc(&F, ra_mode);
     /* Loading a call's arguments WRITES r8-r17 once there are enough of
@@ -3525,7 +3591,6 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             F.used_callee[F.nsave++] = r;
     }
     layout(&F);
-    const_map(&F);
 
     F.label_off = xmalloc((size_t)(fn->nlabels + 1) * sizeof *F.label_off);
     for (i = 0; i <= fn->nlabels; i++)
@@ -3751,6 +3816,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     free(F.fix);
     free(F.cval);
     free(F.cknown);
+    free(F.remat);
     free(F.wide);
     free(F.loc);
     free(F.hw);

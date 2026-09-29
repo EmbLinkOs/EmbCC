@@ -76,3 +76,19 @@ u16 manyargs(u16 a)
 {
     return (u16)(many(a, (u32)a * 40503u, a ^ 0x1234u, (u32)a << 9) >> 2);
 }
+
+/* A value stored to its home from r22-r25 right before a loop's label,
+ * then passed in r22-r25 again first thing in the body. The first time
+ * round the registers still hold it; from the back edge they hold the
+ * other call's result -- so the reload may be skipped only when nothing,
+ * not even a label, came between (vld's last_st). */
+__attribute__((noinline)) u32 twice(u32 v) { return v * 2 + (u32)pnop((u16)v); }
+u16 relabel(u16 a)
+{
+    u32 x = twice(a), s = 0;
+    u16 n = 4;
+    do {
+        s += twice(x);
+    } while (--n);
+    return (u16)(s ^ (s >> 16));
+}
