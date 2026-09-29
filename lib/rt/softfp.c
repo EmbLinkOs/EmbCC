@@ -600,8 +600,43 @@ RT_ABI int __unordsf2(float a, float b)
 
 RT_ABI float __floatsisf(int v)        { return __truncdfsf2(__floatsidf(v)); }
 RT_ABI float __floatunsisf(unsigned v) { return __truncdfsf2(__floatunsidf(v)); }
-RT_ABI float __floatdisf(s64 v)        { return __truncdfsf2(__floatdidf(v)); }
-RT_ABI float __floatundisf(u64 v)      { return __truncdfsf2(__floatundidf(v)); }
+/* 64-bit integer to float, rounded ONCE. These went through double
+ * (__truncdfsf2(__floatdidf(v))), which rounds twice: a value just above
+ * the halfway point between two floats rounds to double exactly ON it,
+ * and then to even -- the wrong neighbour. 2^62 + 2^38 + 1 became 2^62.
+ * tests/golden/cvt-fold.sh has the case. So the top 24 bits are taken
+ * directly and rounded to nearest-even on everything below them. */
+static float u64_to_f(u64 u, int neg)
+{
+    int msb = 63;
+    u32 bits;
+    u64 m;
+    if (!u)
+        return 0.0f;                     /* an integer zero is +0.0 */
+    while (!(u >> msb))
+        msb--;
+    if (msb <= 23) {
+        m = u << (23 - msb);             /* exact */
+    } else {
+        int sh = msb - 23;
+        u64 rem = u & (((u64)1 << sh) - 1), half = (u64)1 << (sh - 1);
+        m = u >> sh;
+        if (rem > half || (rem == half && (m & 1))) {
+            m++;
+            if (m >> 24) {               /* rounded up to the next power */
+                m >>= 1;
+                msb++;
+            }
+        }
+    }
+    bits = ((u32)neg << 31) | ((u32)(msb + 127) << 23) | ((u32)m & 0x7fffffu);
+    return u2f(bits);
+}
+RT_ABI float __floatdisf(s64 v)
+{
+    return v < 0 ? u64_to_f(-(u64)v, 1) : u64_to_f((u64)v, 0);
+}
+RT_ABI float __floatundisf(u64 v)      { return u64_to_f(v, 0); }
 
 RT_ABI int __fixsfsi(float f)        { return __fixdfsi(__extendsfdf2(f)); }
 RT_ABI unsigned __fixunssfsi(float f) { return __fixunsdfsi(__extendsfdf2(f)); }
