@@ -920,10 +920,17 @@ static void layout(struct a_fn *F)
     for (int v = 0; v < fn->nvregs; v++)
         obj_of[v] = -1;
 
+    char *lref = ra_locals_referenced(fn, F->want_debug);
     for (int v = 0; v < fn->nvars; v++) {
         int size = fn->locals[v].size ? fn->locals[v].size : VW;
         if (in_pair(F, v))
             continue;                  /* in its register pair: no slot */
+        /* Nothing names it -- mem2reg promoted every access away, which
+         * it now does for this target's two-byte locals -- so it needs no
+         * slot, and a function with none needs no frame at all. Under -g
+         * every local keeps one (ra_locals_referenced). */
+        if (!lref[v] && v >= fn->nparams)
+            continue;
         if (F->wide[v] && size < 8)
             size = 8;
         /* No alignment. AVR's stack pointer is whatever the caller left
@@ -1105,6 +1112,7 @@ static void layout(struct a_fn *F)
     F->frame = off - 1;
     free(obj);
     free(obj_of);
+    free(lref);
 }
 
 /* ---- addressing a slot ----------------------------------------------- */
@@ -1329,6 +1337,18 @@ static void vst_cc(struct a_fn *F, int v, long off, int r, int n)
 {
     if (in_pair(F, v)) { vst(F, v, off, r, n); return; }
     st_slot_cc(F, F->slot[v] + off, r, n);
+}
+
+/* Where n bytes of v can be READ in place: its home when it holds them,
+ * else `scratch` after a load. For the operations that take any register
+ * -- add/adc, sub/sbc, and/or/eor, cp/cpc -- so an operand in a home is
+ * not first copied into a bank to be read once. */
+static int rd_in(struct a_fn *F, int v, int n, int scratch)
+{
+    if (in_pair(F, v) && n <= F->hw[v])
+        return F->loc[v];
+    vld(F, scratch, v, 0, n);
+    return scratch;
 }
 
 static void rd4(struct a_fn *F, int v, int r)
@@ -2475,21 +2495,23 @@ static void gen_ins(struct a_fn *F, int n)
             wr4(F, i->dst, RA);
             return;
         }
-        rd4(F, i->b, RB);
+        {
+        int rb = rd_in(F, i->b, nb, RB);      /* b where it lives */
         switch (i->op) {
         case IR_ADD:
-            avr_rr(t, AVR_ADD, RA, RB);
-            for (int k = 1; k < nb; k++) avr_rr(t, AVR_ADC, RA + k, RB + k);
+            avr_rr(t, AVR_ADD, RA, rb);
+            for (int k = 1; k < nb; k++) avr_rr(t, AVR_ADC, RA + k, rb + k);
             break;
         case IR_SUB:
-            avr_rr(t, AVR_SUB, RA, RB);
-            for (int k = 1; k < nb; k++) avr_rr(t, AVR_SBC, RA + k, RB + k);
+            avr_rr(t, AVR_SUB, RA, rb);
+            for (int k = 1; k < nb; k++) avr_rr(t, AVR_SBC, RA + k, rb + k);
             break;
         default: {
             enum avr_rr op = i->op == IR_AND ? AVR_AND
                            : i->op == IR_OR  ? AVR_OR : AVR_EOR;
-            for (int k = 0; k < nb; k++) avr_rr(t, op, RA + k, RB + k);
+            for (int k = 0; k < nb; k++) avr_rr(t, op, RA + k, rb + k);
             break;
+        }
         }
         }
         wr4(F, i->dst, RA);
@@ -2640,15 +2662,26 @@ static void gen_ins(struct a_fn *F, int n)
         int swap, sg, nb = cmp_width(F, i, &sg);
         enum avr_cond c = cond_for(i->pred, sg, &swap);
         const struct ir_ins *nx = n + 1 < fn->nins ? &fn->ins[n + 1] : NULL;
-        vld(F, RA, i->a, 0, nb);
-        if (i->imm_b)
-            ldi4(F, RB, (unsigned long)i->imm, nb);
-        else
-            vld(F, RB, i->b, 0, nb);
         {
-            int l = swap ? RB : RA, r = swap ? RA : RB;
-            for (int k = 0; k < nb; k++)
-                avr_rr(t, k ? AVR_CPC : AVR_CP, l + k, r + k);
+            /* Both operands where they live; a comparison with zero is
+             * against r1, the zero register, byte for byte. */
+            int ra = rd_in(F, i->a, nb, RA), rb, zero = 0;
+            if (i->imm_b && (i->imm & ((nb >= 4 ? 0xffffffffL
+                                                : (1L << (8 * nb)) - 1))) == 0) {
+                rb = R_ZERO;
+                zero = 1;
+            } else if (i->imm_b) {
+                ldi4(F, RB, (unsigned long)i->imm, nb);
+                rb = RB;
+            } else {
+                rb = rd_in(F, i->b, nb, RB);
+            }
+            {
+                int l = swap ? rb : ra, r = swap ? ra : rb;
+                int dl = swap && zero ? 0 : 1, dr = !swap && zero ? 0 : 1;
+                for (int k = 0; k < nb; k++)
+                    avr_rr(t, k ? AVR_CPC : AVR_CP, l + k * dl, r + k * dr);
+            }
         }
         /* The branch that follows, when it is the 0/1's only reader: take
          * the flags as they stand, and the value never exists. */
@@ -3279,10 +3312,19 @@ static const int *a_pool_for(const struct ir_func *fn, int *n)
     return g_a_pool;
 }
 static int a_callee_saved(int r) { return r >= 2 && r <= 17; }
+/* Is `dst = ldvar(local)` a plain copy here, so the two may share a home?
+ * At the full width, always. Narrower too: an `int` is two bytes on this
+ * machine and the IR computes at four, so nearly every load of a local is
+ * `ldvar.4:2` -- and the extension that makes it more than a copy is only
+ * emitted when more bytes are demanded than the local has, which a PAIR
+ * cannot be asked for (it holds two). The only bytes an in-place extension
+ * could write are above the local's own size, which nothing reads as the
+ * local. Answering "no" kept every such pair of values apart, and a copy
+ * between two homes at each use. */
 static int a_ldvar_plain(int size, int sign, int w)
 {
     (void)sign;
-    return size == w;
+    return size == w || size <= 2;
 }
 static int a_calls_helper(const struct ir_ins *i) { (void)i; return 0; }
 
