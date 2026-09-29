@@ -113,6 +113,10 @@ struct rv_fn {
      * and s0 holds the frame base (see IR_ALLOCA). */
     int fb;
     long out_bytes;      /* the outgoing-argument area, at the live sp */
+    /* Makes no call -- none in the IR and none to a runtime helper -- so
+     * ra is never overwritten and needs no slot, save or restore. With
+     * nothing else in the frame, the function touches sp not at all. */
+    int leaf;
     long save_at;        /* ... and the allocator's callee-saved ones */
     long va_regsave;     /* a variadic function's a0-a7 spill area, or -1 */
     long va_first;       /* ... and the offset of the first UNNAMED one */
@@ -635,15 +639,16 @@ static void layout(struct rv_fn *F)
      * stack ones. Whatever padding the alignment needs lands below them,
      * where nothing depends on it. */
     {
-        long need = off + F->w + (long)F->nsave * F->w
+        int raw = F->leaf ? 0 : F->w;
+        long need = off + raw + (long)F->nsave * F->w
                   + (fn->is_varargs ? (long)RV_NARGREG * F->w : 0);
         F->frame = (need + STACK_ALIGN - 1) & ~(long)(STACK_ALIGN - 1);
         if (fn->is_varargs) {
             F->va_regsave = F->frame - (long)RV_NARGREG * F->w;
-            F->ra_slot = F->va_regsave - F->w;
+            F->ra_slot = F->va_regsave - raw;
         } else {
             F->va_regsave = -1;
-            F->ra_slot = F->frame - F->w;
+            F->ra_slot = F->frame - raw;
         }
         /* The callee-saved registers the allocator took, just below the
          * return address. Only the ones it REPORTS: a function that
@@ -2159,7 +2164,16 @@ static void gen_ins(struct rv_fn *F, int n)
                 rd(F, i->a, RV_A0);
             }
         }
-        jump_to(F, fn->nlabels);           /* the epilogue */
+        /* To the epilogue -- unless it is what comes next: only labels
+         * between here and the end of the function emit no code, and a
+         * jump to the next instruction is four bytes of nothing. */
+        {
+            int m = n + 1;
+            while (m < fn->nins && fn->ins[m].op == IR_LABEL)
+                m++;
+            if (m < fn->nins)
+                jump_to(F, fn->nlabels);
+        }
         return;
 
     case IR_UD2:
@@ -2562,6 +2576,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * so it only has to be saved like any other callee-saved register. */
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = RV_FP;
+    /* A leaf: no call in the IR and none the lowering makes -- the same
+     * rv_op_calls_helper the allocator trusts for which values survive a
+     * call, so the two cannot disagree. Inline asm might call anything,
+     * so it keeps ra saved. */
+    F.leaf = 1;
+    for (i = 0; i < fn->nins; i++)
+        if (fn->ins[i].op == IR_CALL || fn->ins[i].op == IR_ASM ||
+            rv_op_calls_helper(&fn->ins[i]))
+            F.leaf = 0;
     layout(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -2603,7 +2626,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
         }
     }
-    st_sp(&F, RV_RA, F.ra_slot, F.w);
+    if (!F.leaf)
+        st_sp(&F, RV_RA, F.ra_slot, F.w);
     for (i = 0; i < F.nsave; i++)
         st_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w);
     if (fn->has_alloca) {
@@ -2797,7 +2821,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }
     for (i = 0; i < F.nsave; i++)
         ld_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w, 1);
-    ld_sp(&F, RV_RA, F.ra_slot, F.w, 1);
+    if (!F.leaf)
+        ld_sp(&F, RV_RA, F.ra_slot, F.w, 1);
     if (F.frame) {
         if (rv_fits(F.frame, 12)) {
             rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)F.frame, 0);
