@@ -62,6 +62,13 @@ int main(int argc, char **argv)
                                        : (++i < argc ? argv[i] : NULL);
             if (!v) { fprintf(stderr, "embld: -Tdata needs an address\n"); return 2; }
             opts.data_base = strtoul(v, NULL, 0);
+        } else if (strncmp(argv[i], "--rom-limit", 11) == 0) {
+            /* The part's flash size: an image that does not fit is refused
+             * (link.h). --rom-limit=N or --rom-limit N. */
+            const char *v = argv[i][11] == '=' ? argv[i] + 12
+                          : (++i < argc ? argv[i] : NULL);
+            if (!v) { fprintf(stderr, "embld: --rom-limit needs a size\n"); return 2; }
+            opts.rom_limit = strtoul(v, NULL, 0);
         } else if (strncmp(argv[i], "-Tstack", 7) == 0) {
             /* RISC-V only: the initial stack pointer, and with it a
              * four-instruction entry stub that sets sp and jumps to the

@@ -192,6 +192,7 @@ struct linker {
     Elf64_Addr lma_offset;     /* L2: p_paddr = p_vaddr - this (0 = paddr==vaddr) */
     Elf64_Addr data_base;      /* firmware: the writable segment's VMA (0 = off) */
     Elf64_Addr data_lma;       /* ... and where its bytes are STORED */
+    unsigned long rom_limit;   /* bytes of flash the image may occupy, 0 = any */
     int elf32;                 /* ELFCLASS32 output, from the inputs */
     int machine;               /* e_machine, one across every input */
     /* A Harvard machine: program space and data space are separate, and
@@ -1088,6 +1089,22 @@ static void layout(struct linker *l, struct osec_bound *b,
         if (l->orphans[i].writable)
             place_osec(l, OSEC_COUNT + i, &va, b);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
+
+    /* The part's flash is finite, and an image past its end does not fail
+     * to run: on the ATmega328P the copy of .data read the bytes beyond
+     * 32 KB, and a program that printed nothing but digits was the only
+     * symptom. What is stored is the text and, in a firmware layout, the
+     * initial data after it. */
+    if (l->rom_limit) {
+        Elf64_Addr end = l->data_base ? l->data_lma + *data_filesz
+                                      : *text_start + *text_size;
+        if (end - l->base > l->rom_limit)
+            die("the image needs %lu bytes of flash and the part has %lu "
+                "(--rom-limit): %lu of text, %lu of initial data",
+                (unsigned long)(end - l->base), l->rom_limit,
+                (unsigned long)*text_size,
+                l->data_base ? (unsigned long)*data_filesz : 0UL);
+    }
 
     b[OSEC_BSS].start = va;
     place_osec(l, OSEC_BSS, &va, b);   /* real .bss inputs first */
@@ -2479,6 +2496,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     l.entry = (opts && opts->entry) ? opts->entry : "_start";
     l.lma_offset = (opts) ? opts->lma_offset : 0;
     l.data_base = (opts) ? opts->data_base : 0;
+    l.rom_limit = (opts) ? opts->rom_limit : 0;
     l.stack_top = (opts && opts->have_stack) ? opts->stack_top : 0;
     l.stub_sec = -1;
 

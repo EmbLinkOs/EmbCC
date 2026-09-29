@@ -42,5 +42,7 @@ for f in "$H"/rt*.o; do
     [ -f "$f" ] && rts="$rts $f"
 done
 # shellcheck disable=SC2086
-"${EMBLD:-./embld}" -e __vectors -Ttext 0x0 -Tdata 0x100 \
+# --rom-limit: the ATmega328P's 32 KB of flash. An image past it is refused
+# at link rather than run into whatever lies beyond.
+"${EMBLD:-./embld}" -e __vectors -Ttext 0x0 -Tdata 0x100 --rom-limit 32768 \
     "$H/boot.o" "$H/io.o" $rts "$@" -o "$out"

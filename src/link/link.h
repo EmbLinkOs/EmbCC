@@ -42,6 +42,11 @@ struct link_opts {
      * needs to copy .data out of flash and zero .bss -- so the startup
      * can be ordinary C with no linker script to keep in step. */
     unsigned long data_base;
+    /* The bytes of flash the stored image may occupy -- the text and, in a
+     * firmware layout, the initial data after it. 0 = no limit. A link
+     * past it is refused by name, because the part does not fail such an
+     * image at load: it runs whatever lies beyond. */
+    unsigned long rom_limit;
     /* RISC-V: the initial stack pointer, and an entry STUB to set it.
      *
      * A Cortex-M needs nothing like this -- the processor fetches its
