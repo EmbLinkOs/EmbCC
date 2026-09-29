@@ -314,4 +314,9 @@ int ra_ins_def(const struct ir_ins *in);
 int ra_parallel_move(const int *dst, const int *src, int n, int scratch,
                      int *out_dst, int *out_src, int max);
 
+/* Per vreg: a 64-bit shift right by 32..63 whose every reader takes four
+ * bytes or fewer -- the source's high word, in one register rather than a
+ * pair, on a 32-bit target. The caller frees the map. */
+char *ra_narrow_hishift(const struct ir_func *fn);
+
 #endif

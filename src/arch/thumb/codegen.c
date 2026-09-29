@@ -157,6 +157,8 @@ struct t_fn {
      * as i->w everywhere -- a compare of two 64-bit values has w == 8
      * and produces a one-or-zero that is four bytes wide. */
     char *wide;
+    char *nshr;          /* per vreg: a narrow high-word shift
+                          * (ra_narrow_hishift) */
     struct code *t;
     struct t_sites *st;
     long *slot;          /* per-vreg byte offset from sp, -1 for none */
@@ -2283,6 +2285,23 @@ static void gen_ins(struct t_fn *F, int n)
      * neither and would send one home in r0 alone. The wide map,
      * which is built from each value's defining instruction, is what
      * knows -- so each op asks about the value it actually touches. */
+    /* The high word of a 64-bit value, shifted: one register
+     * (ra_narrow_hishift). */
+    if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {
+        int k = (int)i->imm - 32, d = wreg(F, i->dst, T_ACC), hi;
+        if (in_reg(F, i->a)) {
+            hi = F->loc[i->a] + 1;             /* the pair's high register */
+        } else {
+            rd64(F, i->a, T_ACC, T_TMP);
+            hi = T_TMP;
+        }
+        if (k)
+            t_shift_imm(t, i->sign ? T_SH_ASR : T_SH_LSR, d, hi, k, 0);
+        else if (d != hi)
+            t_mov_reg(t, d, hi);
+        wrote(F, i->dst, d);
+        return;
+    }
     {
         int wide = i->w == 8;
         switch (i->op) {
@@ -3305,6 +3324,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.want_debug = want_debug;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
+    F.nshr = ra_narrow_hishift(fn);
+    for (int v = 0; v < fn->nvregs; v++)
+        if (F.nshr[v]) F.wide[v] = 0;
     F.va_regsave = F.va_first = -1;
     F.loc = NULL; F.nsave = 0; F.save_at = 0;
     F.floc = NULL; F.nfsave = 0;
@@ -3821,6 +3843,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.label_off);
     free(F.fix);
     free(F.wide);
+    free(F.nshr);
     free(F.loc);
     free(F.floc);
 }

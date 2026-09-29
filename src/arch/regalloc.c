@@ -1222,3 +1222,79 @@ char *ra_debug_pin_vars(const struct ir_func *fn)
         m[v] = 1;
     return m;
 }
+
+/* A 64-bit shift right by 32 or more whose result is only ever read at
+ * four bytes or fewer is the source's HIGH word, shifted: one register,
+ * not a pair. The union forwarding (opt pass_punfwd) makes one of these
+ * of every GET_HIGH_WORD, and as a pair each held two registers for one
+ * word's worth of value -- enough, in fdlibm's larger functions, to push
+ * others into memory. The result is left out of the wide map, and
+ * the backend computes the one word (RV32 and ARMv7-M).
+ *
+ * Every reader has to say four bytes or fewer: an operation at w 4, an
+ * extension of four or fewer, a narrow store or local or argument or
+ * return. A copy that does not say four keeps it wide, since a copy
+ * carries whatever width reaches it. */
+static int nhs_reader(const struct ir_func *fn, const struct ir_ins *i,
+                         int v)
+{
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
+    case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+    case IR_CMP: case IR_BRZ: case IR_BRNZ: case IR_NEG: case IR_BNOT:
+        return i->w == 4 && !i->flt;
+    case IR_MOV:
+        return i->w == 4;
+    case IR_EXT:
+        return i->a == v && i->size <= 4;
+    case IR_STORE:
+        return i->b == v && i->a != v && i->size <= 4;
+    case IR_STVAR:
+        return i->size <= 4;
+    case IR_RET:
+        return !fn->ret_abi.is_struct && fn->ret_abi.size <= 4;
+    case IR_CALL:
+        if (i->a == v)
+            return 0;
+        for (int k = 0; k < i->nargs; k++)
+            if (i->argv[k].vreg == v &&
+                (i->argv[k].is_struct || i->argv[k].size > 4))
+                return 0;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+char *ra_narrow_hishift(const struct ir_func *fn)
+{
+    int nv = fn->nvregs;
+    char *nar = xcalloc((size_t)(nv ? nv : 1), 1);
+    int *defs = xcalloc((size_t)(nv ? nv : 1), sizeof *defs);
+    for (int n = 0; n < fn->nins; n++) {
+        int d = fn->ins[n].dst;
+        if (d >= 0 && d < nv) defs[d]++;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int v = i->dst, ok = 1, used = 0;
+        if (i->op != IR_SHR || i->w != 8 || !i->imm_b || i->imm < 32 ||
+            i->imm > 63 || v < fn->nvars || v >= nv || defs[v] != 1)
+            continue;
+        for (int m = 0; m < fn->nins && ok; m++) {
+            const struct ir_ins *u = &fn->ins[m];
+            int reads = u->a == v || (!u->imm_b && u->b == v) || u->c == v;
+            if (u->op == IR_CALL)
+                for (int k = 0; k < u->nargs; k++)
+                    if (u->argv[k].vreg == v) reads = 1;
+            if (!reads)
+                continue;
+            used = 1;
+            ok = nhs_reader(fn, u, v);
+        }
+        nar[v] = (char)(ok && used);
+    }
+    free(defs);
+    return nar;
+}
+

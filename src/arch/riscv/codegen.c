@@ -103,6 +103,7 @@ struct rv_fn {
     int xlen;            /* 32 or 64 */
     int w;               /* a register in bytes: 4 or 8 */
     char *wide;          /* per vreg: needs a register pair (RV32 only) */
+    char *nshr;          /* per vreg: a narrow high-word shift (narrow_shr) */
     long *slot;          /* per-vreg byte offset from sp, -1 for none */
     long frame;          /* total bytes sp moves down by */
     long scratch_at;     /* where fn->scratch_bytes begins */
@@ -1922,6 +1923,23 @@ static void gen_ins(struct rv_fn *F, int n)
      * carry a `size` and no `w`, so asking `w` says four and stores half
      * of a long long; IR_RET carries neither. The wide map, built from
      * each value's defining instruction, is what knows. */
+    /* The high word of a 64-bit value, shifted: one register (narrow_shr). */
+    if (F->xlen == 32 && i->op == IR_SHR && F->nshr && i->dst >= 0 &&
+        F->nshr[i->dst]) {
+        int k = (int)i->imm - 32, d = wreg(F, i->dst, A_LO), hi;
+        if (in_reg(F, i->a)) {
+            hi = F->loc[i->a] + 1;             /* the pair's high register */
+        } else {
+            ld_sp(F, A_HI, sslot(F, i->a) + 4, 4, 1);
+            hi = A_HI;
+        }
+        if (k)
+            rv_shift_imm(t, i->sign ? RV_SRA : RV_SRL, d, hi, k, 0, 32);
+        else if (d != hi)
+            rv_mv(t, d, hi);
+        wrote(F, i->dst, d);
+        return;
+    }
     if (F->xlen == 32) {
         int wide = i->w == 8;
         switch (i->op) {
@@ -2852,6 +2870,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.relax = NULL; F.nrelax = 0;
     F.wide = wide_map(fn);
+    if (xlen == 32) {
+        F.nshr = ra_narrow_hishift(fn);
+        for (int v = 0; v < fn->nvregs; v++)
+            if (F.nshr[v]) F.wide[v] = 0;
+    }
     F.loc = NULL; F.nsave = 0;
     F.fb = RV_SP;
     if (g_rv_regalloc) {
@@ -3305,6 +3328,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.label_off);
     free(F.fix);
     free(F.wide);
+    free(F.nshr);
     free(F.loc);
 }
 
