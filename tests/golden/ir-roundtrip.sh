@@ -46,6 +46,10 @@ int shapes(int n, int m)
         v = i;
     }
     sink(w);
+    /* A volatile READ: every access is kept, so this stays an ldvar at
+     * any level. The char's reads used to be the only ldvar left at -O2,
+     * and mem2reg promotes a char now. */
+    t += v;
     vfmt("t=%d c=%d\n", t, (int)c);
     g = t + *p;
     return t;

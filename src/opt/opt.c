@@ -614,6 +614,41 @@ static int pass_fold(struct ir_func *fn)
                  * backend was already folding into its addressing. */
                 to_mov(i, i->a);
                 changed = 1;
+            } else if (i->a >= 0 && i->a < fn->nvregs && d.cnt[i->a] == 1 &&
+                       d.ins[i->a] >= 0 &&
+                       fn->ins[d.ins[i->a]].op == IR_EXT &&
+                       !fn->ins[d.ins[i->a]].flt &&
+                       fn->ins[d.ins[i->a]].w >= i->size) {
+                /* An extension of an extension, which promoting a narrow
+                 * local makes of every read after a store: `x = ext.4:2
+                 * (ext.4:2 y)`. Wider than the inner width, or the same
+                 * width and kind, the outer changes nothing -- the bits
+                 * it would write already hold that extension -- so it is
+                 * a copy. At the same width with the other kind, or
+                 * narrower, it only needs the inner's SOURCE, provided
+                 * that has one definition and so cannot have changed. */
+                const struct ir_ins *in = &fn->ins[d.ins[i->a]];
+                int src_ok = in->a >= 0 && in->a < fn->nvregs &&
+                             d.cnt[in->a] == 1 && i->a != in->a;
+                int keeps = i->size > in->size ||
+                            (i->size == in->size && i->sign == in->sign);
+                if (keeps && i->w == in->w) {
+                    to_mov(i, i->a);
+                    changed = 1;
+                } else if (keeps && src_ok) {
+                    /* WIDER than the inner result (`ext.8:4` of an
+                     * `ext.4:2`): not a copy -- the high bytes are the
+                     * outer's to make -- but the inner's extension taken
+                     * straight to the outer width. As a copy it handed a
+                     * four-byte value to an eight-byte add. */
+                    i->a = in->a;
+                    i->size = in->size;
+                    i->sign = in->sign;
+                    changed = 1;
+                } else if (!keeps && src_ok) {
+                    i->a = in->a;
+                    changed = 1;
+                }
             }
             continue;
         }
@@ -1648,7 +1683,17 @@ static int pass_mem2reg(struct ir_func *fn)
          * value carried across a branch stops being a store and a
          * reload. 188 locals in lib/libc and lib/libcxx were refused
          * here for being neither an integer nor a pointer. */
-        int promotable = Li->is_scalar_int_or_ptr || Li->is_scalar_float;
+        /* ...and a one- or two-byte integer or pointer: every pointer
+         * and `int` on AVR, and a char or short anywhere. Each read of
+         * it becomes an EXTENSION of the current value from the local's
+         * width, which is exactly what the narrow load did; each store
+         * keeps the whole value, since only the low bytes are ever read
+         * back. Refusing them left every AVR local in memory, where the
+         * value numbering, LICM and strength reduction below cannot see. */
+        int narrow = Li->is_int_or_ptr && !Li->is_int128 &&
+                     (Li->size == 1 || Li->size == 2);
+        int promotable = Li->is_scalar_int_or_ptr || Li->is_scalar_float ||
+                         narrow;
         if (!Li->size)                          { ok[L] = 0; why[L] = "type-unknown"; }
         else if (!promotable && (Li->size == 4 || Li->size == 8))
                                                 { ok[L] = 0; why[L] = "not-a-scalar-integer-pointer-or-float"; }
@@ -1665,7 +1710,10 @@ static int pass_mem2reg(struct ir_func *fn)
             ok[in->a] = 0; why[in->a] = "address-is-taken";
         }
         if (in->op == IR_LDVAR && in->a >= 0 && in->a < nvars && ok[in->a] &&
-            (in->vol || !m2r_plain(in->size, in->sign, in->w))) {
+            (in->vol ||
+             (fn->locals[in->a].size < 4
+                  ? in->size != fn->locals[in->a].size
+                  : !m2r_plain(in->size, in->sign, in->w)))) {
             ok[in->a] = 0;
             why[in->a] = in->vol ? "read-is-volatile"
                                  : "read-is-partial-or-extending";
@@ -1673,6 +1721,13 @@ static int pass_mem2reg(struct ir_func *fn)
         if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars &&
             in->vol && ok[in->dst]) {
             ok[in->dst] = 0; why[in->dst] = "write-is-volatile";
+        }
+        /* A narrow local is promoted only if every write covers all of
+         * it: a partial store leaves bytes the new value does not carry. */
+        if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars &&
+            ok[in->dst] && fn->locals[in->dst].size < 4 &&
+            in->size != fn->locals[in->dst].size) {
+            ok[in->dst] = 0; why[in->dst] = "write-is-partial";
         }
     }
     if (remarks_on())
@@ -1822,6 +1877,14 @@ static int pass_mem2reg(struct ir_func *fn)
                     int pidx = prom[in->a];
                     int fw = in->size == 8 ? 8 : 4;
                     int was_float = in->flt;
+                    if (fn->locals[ploc[pidx]].size < 4) {
+                        /* A narrow local: the read extends the value's low
+                         * `size` bytes, as the load did -- size, sign and
+                         * width are the load's own. */
+                        in->op = IR_EXT; in->a = stk[pidx][sp[pidx]-1];
+                        in->b = -1;
+                        continue;
+                    }
                     in->op = IR_MOV; in->a = stk[pidx][sp[pidx]-1]; in->b = -1;
                     if (was_float) {
                         /* A copy of the BITS, at the variable's width.
