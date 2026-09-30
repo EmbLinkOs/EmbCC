@@ -239,6 +239,11 @@ void target_set_thumb_hard_abi(int on);
  * keeps its meaning; --target= is the only thing that changes it. */
 enum target_arch target_get(void);
 void target_set(enum target_arch a);
+/* -Os, for the one question a backend asks of it: how far to align a
+ * function's start. Everything else about -Os is the optimizer's -- the
+ * backends read opt_level, which -Os leaves an ordinary number. */
+void target_set_opt_size(int on);
+int  target_opt_size(void);
 
 /* The other two dimensions. Both default to the freestanding ELF answer,
  * so a caller that has never heard of them reads the world exactly as it

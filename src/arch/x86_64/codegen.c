@@ -2360,7 +2360,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
             frameless = 0;
     }
 
-    code_align(text, 16, 0x90);
+    /* Sixteen at -O2, as clang does; none at -Os, as clang does there --
+     * a one-byte function was followed by fifteen nops. */
+    if (!target_opt_size())
+        code_align(text, 16, 0x90);
     f->code_off = text->len;
 
     /* The frame record, then the callee-saved registers, then the rest

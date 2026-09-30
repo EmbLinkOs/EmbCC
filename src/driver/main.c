@@ -703,6 +703,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     remarks_enable(want_remarks || why_decision != NULL);
     struct ir_unit *iu = irgen(u);
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
+    target_set_opt_size(opt_for_size);
 
     /* ---- what is still reachable -------------------------------------
      *

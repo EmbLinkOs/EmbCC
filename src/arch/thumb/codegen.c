@@ -3673,14 +3673,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             fn->var_off = NULL;
         }
     }
-    /* A Thumb function must start on a halfword, and four keeps the
-     * literal loads and the disassembly tidy. */
+    /* A Thumb function must start on a halfword, and that is all: this
+     * backend has no literal pool whose pc-relative loads would care
+     * where it sits (constants and addresses are movw/movt), and clang
+     * lays functions out at two as well. Rounding each up to four was
+     * a nop after every other one. A function with inline asm keeps the
+     * four, since its template may address relative to pc. */
     /* Pad with halfword NOPs (bf00), not with a repeated 0xbf: that
      * byte pairs into 0xbfbf, which is an `itttt` — harmless, since
      * nothing branches there, but it makes every disassembly of the gap
      * between two functions look like a condition block. */
-    while (t->len & 3)
-        t_nop(t);
+    {
+        int al = 1;
+        for (int k = 0; k < fn->nins; k++)
+            if (fn->ins[k].op == IR_ASM)
+                al = 3;
+        while (t->len & al)
+            t_nop(t);
+    }
     /* -g: each source variable's slot, which IS its offset from the
      * DWARF frame base -- sp, because this backend keeps no frame
      * pointer (see src/debug/dwarf.c). */

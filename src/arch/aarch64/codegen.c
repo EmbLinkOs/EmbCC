@@ -1716,7 +1716,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             fn->var_off[v] = (int)(sd[v] - fr.size);
     }
 
-    align16(t);
+    /* Sixteen for the fetch unit's sake, as clang does at -O2; at -Os the
+     * four every instruction already has, as clang does there -- the
+     * padding was 596 nops over the libc corpus. */
+    if (!target_opt_size())
+        align16(t);
     f->code_off = t->len;
 
     /* -fstack-usage: the frame plus the 16-byte record the prologue

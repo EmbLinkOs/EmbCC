@@ -29,6 +29,10 @@ static enum target_fmt  g_fmt  = TGT_FMT_ELF;
 enum target_arch target_get(void) { return g_arch; }
 void target_set(enum target_arch a) { g_arch = a; }
 
+static int g_opt_size;
+void target_set_opt_size(int on) { g_opt_size = on; }
+int  target_opt_size(void)       { return g_opt_size; }
+
 const char *target_default_name(void)
 {
     const char *t = plat_getenv("EMBCC_DEFAULT_TARGET");
