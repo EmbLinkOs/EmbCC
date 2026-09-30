@@ -686,12 +686,22 @@ static void ext_info(struct a_fn *F)
         int d = ra_ins_def(&fn->ins[n]);
         if (d >= 0 && d < nv) ndef[d]++;
     }
-    while (again) {
+    /* A temporary with SEVERAL definitions -- the merge of `a && b`'s two
+     * arms, a 0/1 from either compare -- is known narrow when every one
+     * of them is, the same way (the widest of their widths): mw/mk/mn
+     * gather that per round, and it is settled when mn reaches ndef. One
+     * whose definitions depend on itself never gets there, and stays
+     * unknown, which is the safe answer. */
+    unsigned char *mw = xcalloc((size_t)(nv ? nv : 1), 1);
+    unsigned char *mk = xcalloc((size_t)(nv ? nv : 1), 1);
+    int *mn = xcalloc((size_t)(nv ? nv : 1), sizeof *mn);
+    for (int round = 0; again && round < 32; round++) {
         again = 0;
+        memset(mn, 0, (size_t)(nv ? nv : 1) * sizeof *mn);
         for (int n = 0; n < fn->nins; n++) {
             const struct ir_ins *i = &fn->ins[n];
             int d = i->dst, w = 0, k = 0;
-            if (d < fn->nvars || d >= nv || ndef[d] != 1 || F->wide[d])
+            if (d < fn->nvars || d >= nv || ndef[d] < 1 || F->wide[d])
                 continue;
             switch (i->op) {
             case IR_LDVAR: case IR_LOAD:
@@ -716,6 +726,19 @@ static void ext_info(struct a_fn *F)
                 break;
             case IR_CMP:
                 w = 1; k = 0;                  /* a 0 or a 1 */
+                break;
+            /* A constant is as narrow as its value: a small non-negative
+             * one zero-extended, a small negative one sign-extended. The
+             * `1` in one arm of `a && b` is what the other arm's compare
+             * is merged with. */
+            case IR_CONST:
+                if (!i->flt) {
+                    long c = (long)i->imm;
+                    if (c >= 0 && c <= 0xff)          { w = 1; k = 0; }
+                    else if (c >= 0 && c <= 0xffff)   { w = 2; k = 0; }
+                    else if (c < 0 && c >= -0x80)     { w = 1; k = 1; }
+                    else if (c < 0 && c >= -0x8000)   { w = 2; k = 1; }
+                }
                 break;
             case IR_MOV:
                 if (i->a >= 0 && i->a < nv && F->xw[i->a]) {
@@ -756,13 +779,31 @@ static void ext_info(struct a_fn *F)
             default:
                 break;
             }
+            if (ndef[d] > 1) {
+                if (!w || (mn[d] && mk[d] != k)) {
+                    mn[d] = -nv - 1;          /* one without, or a mix */
+                } else if (mn[d] >= 0) {
+                    if (!mn[d] || w > mw[d]) mw[d] = (unsigned char)w;
+                    mk[d] = (unsigned char)k;
+                    mn[d]++;
+                }
+                continue;
+            }
             if (w && (F->xw[d] != w || F->xs[d] != k)) {
                 F->xw[d] = (unsigned char)w;
                 F->xs[d] = (unsigned char)k;
                 again = 1;
             }
         }
+        for (int d = fn->nvars; d < nv; d++)
+            if (ndef[d] > 1 && mn[d] == ndef[d] &&
+                (F->xw[d] != mw[d] || F->xs[d] != mk[d])) {
+                F->xw[d] = mw[d];
+                F->xs[d] = mk[d];
+                again = 1;
+            }
     }
+    free(mw); free(mk); free(mn);
     free(ndef);
 }
 

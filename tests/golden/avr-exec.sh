@@ -84,6 +84,18 @@ int  mulcm3(int x)            { return x * -3; }
 long mulcm12(long x)          { return x * -12L; }
 unsigned char mulc5b(unsigned char x) { return (unsigned char)(x * 5); }
 
+/* ---- a value merged from two arms, then tested -----------------------
+ *
+ * The backend reads a value at the width its definitions give it (a char
+ * compared as one byte), and a merge is that narrow only when BOTH arms
+ * are, the same way, at the wider of their widths. Each case below
+ * breaks one of those: mixed extensions, a narrower arm than the other,
+ * and a negative constant in one arm. */
+int mergesg(int c, signed char a, unsigned char b)   { int x = c ? a : b; return x < 0; }
+int mergebrz(int c, unsigned char a, unsigned short b)
+{ unsigned x = c ? a : b; return x ? 7 : 9; }
+int mergeneg(int c, unsigned char b)                 { int x = c ? -1 : b; return x < 0; }
+
 /* ---- shifts ---------------------------------------------------------- */
 long shl(long v, int n)  { return v << n; }
 long shr(long v, int n)  { return v >> n; }
@@ -192,6 +204,9 @@ void run(void)
     putn(mulcm3(7)); putn(mulcm3(256)); putn(mulcm3(-85));
     putn(mulcm12(100000L)); putn(mulcm12(-3L));
     putn(mulc5b(200));
+    putn(mergesg(1, -1, 0)); putn(mergesg(0, 0, 255));
+    putn(mergebrz(0, 0, 256)); putn(mergebrz(1, 3, 0));
+    putn(mergeneg(1, 0)); putn(mergeneg(0, 255));
     puts_("| ");
 
     /* comparisons */
