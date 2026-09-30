@@ -40,6 +40,20 @@ static int (*fp)(int);
 
 static int slen(const char *s) { const char *p = s; while (*p) p++; return (int)(p - s); }
 
+/* Shifted operands and scaled addressing, as a backend with those forms
+ * fuses them: a shift whose only reader is the next add or subtract, on
+ * either side of it, and an index shifted into a SIGNED narrow load --
+ * ldrsb/ldrsh with a register offset, whose sign is the part to lose. */
+static short sh[16]; static signed char sc[16]; static unsigned char uc[16];
+static long shifted(int x, int y)
+{
+    return (long)((x << 3) - y) * 7 + ((y << 2) - x) + (x - (y << 1)) + ((x << 4) + y);
+}
+static long scaled(int i, int j)
+{
+    return sh[(i * 5) & 15] + sc[(j * 3) & 15] + uc[(i + j) & 15] + sh[(j * 7) & 15] * sc[i & 15];
+}
+
 int main(void)
 {
     for (int i = 0; i < 4; i++) {
@@ -99,6 +113,11 @@ int main(void)
       putn(c.en); putn(c.mode); putn(c.prio); putn(c.chan);
       w.a = 4000; w.b = 3000; w.e = 200;
       putn(w.a); putn(w.b); putn(w.e); nl(); }
+
+    for (int i = 0; i < 16; i++) { sh[i] = (short)(i * -300 + 17); sc[i] = (signed char)(i * 9 - 70); uc[i] = (unsigned char)(i * 17 + 200); }
+    { long t = 0;
+      for (int x = -3; x <= 3; x++) for (int y = -2; y <= 5; y++) t += shifted(x, y) * (x + 7) + scaled(x + 4, y + 2);
+      putn(t); putn(shifted(-9, 40)); putn(scaled(13, 11)); nl(); }
 
     puts_("==END==\n");
     return 0;

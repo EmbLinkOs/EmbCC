@@ -295,11 +295,23 @@ int thumb_imm_foldable(int op, long imm)
     switch (op) {
     case IR_ADD: case IR_SUB:
         return (imm >= -4095 && imm <= 4095) || t_imm_ok(imm);
-    case IR_AND: case IR_OR: case IR_XOR:
+    case IR_AND:
+        /* ...or a mask of the low bits, which is `ubfx rd, rn, #0, #n`
+         * when the modified immediate cannot hold it: 0xfff is not one. */
+        return t_imm_ok(imm) ||
+               (imm > 0 && imm <= 0x7fffffffL && ((imm + 1) & imm) == 0);
+    case IR_OR: case IR_XOR:
         return t_imm_ok(imm);
     case IR_CMP:
         return (imm >= 0 && imm <= 255) || t_imm_ok(imm);
-    default:                     /* MUL has no immediate form */
+    case IR_MUL: {
+        /* No multiply-immediate, but a shifted-operand add or rsb (and a
+         * shift) does 3, 5, 6, 7, 9, 10, 12, 15, 20, 24...: see the
+         * codegen lowering. Anything else is a constant in a register. */
+        int k, neg, j;
+        return target_mul_shift_add(imm, &k, &neg, &j);
+    }
+    default:
         return 0;
     }
 }

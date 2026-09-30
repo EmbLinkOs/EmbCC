@@ -2299,6 +2299,7 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
 
 /* ---- one instruction ------------------------------------------------ */
 
+
 /* dst = the condition's truth, 0 or 1, after a compare that set the flags.
  * Into a low register: `ite cond; mov d, #1; mov d, #0`, six bytes --
  * inside an IT block the 16-bit mov sets no flags. Elsewhere: set r12,
@@ -2591,6 +2592,13 @@ static void gen_ins(struct t_fn *F, int n)
                 long mag = i->imm < 0 ? -i->imm : i->imm;
                 if (add) t_addw(t, d, ra_, mag);
                 else     t_subw(t, d, ra_, mag);
+            } else if (i->op == IR_AND && i->imm > 0 &&
+                       ((i->imm + 1) & i->imm) == 0 && !t_imm_ok(i->imm)) {
+                /* a mask of the low n bits the modified immediate cannot
+                 * hold: the bitfield extract, one instruction */
+                int nb = 0;
+                while ((1L << nb) - 1 < i->imm) nb++;
+                t_bfx(t, d, ra_, 0, nb, 0);
             } else if (!t_alu_imm(t, op, d, ra_, i->imm, 0)) {
                 int rb_ = !in_reg(F, i->b) ? LO(F, T_TMP) : F->loc[i->b];
                 if (!in_reg(F, i->b)) operand_b(F, i, rb_);
@@ -2598,6 +2606,22 @@ static void gen_ins(struct t_fn *F, int n)
             }
             wrote(F, i->dst, d);
             return;
+        }
+        if (i->op == IR_MUL && i->imm_b && i->w == 4) {
+            /* x * ((2^k +- 1) << j): the shifted-operand add or rsb, then
+             * the shift -- `add.w d, a, a, lsl #1` for 3, `rsb d, a, a,
+             * lsl #3` for 7, `lsls` after for 6, 10, 12, 20. One or two
+             * instructions where the constant's mov and the mul were two,
+             * and no smaller. */
+            int k, neg, j;
+            if (target_mul_shift_add(i->imm, &k, &neg, &j)) {
+                t_alu_reg_shift(t, neg ? T_OP_RSB : T_OP_ADD, d, ra_, ra_,
+                                T_SH_LSL, k, 0);
+                if (j)
+                    t_shift_imm(t, T_SH_LSL, d, d, j, 1);   /* flags dead */
+                wrote(F, i->dst, d);
+                return;
+            }
         }
         {
             /* The second operand is pinned to a scratch unless it is
@@ -2648,6 +2672,74 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_SHL: case IR_SHR: {
         int sh = i->op == IR_SHL ? T_SH_LSL : i->sign ? T_SH_ASR : T_SH_LSR;
+        /* A shift by a constant whose only reader is the next instruction's
+         * operand is that instruction's SHIFTED OPERAND: `add.w rd, rn, rm,
+         * lsl #k` is one instruction where the shift and the add were two
+         * -- the same size as the two 16-bit ones, and half the count. And
+         * when that add is itself only the address of the access after it,
+         * `ldr rt, [rn, rm, lsl #k]` does all three. aarch64 has had both
+         * since its own array indexing came out three instructions long. */
+        if (i->imm_b && i->imm >= 1 && i->imm <= 31 && i->w == 4 &&
+            i->dst >= 0 && !F->wide[i->dst] && F->usecnt &&
+            F->usecnt[i->dst] == 1 && n + 1 < fn->nins) {
+            struct ir_ins *nx = &fn->ins[n + 1];
+            int comm = nx->op == IR_ADD || nx->op == IR_AND ||
+                       nx->op == IR_OR || nx->op == IR_XOR;
+            int op = nx->op == IR_ADD ? T_OP_ADD : nx->op == IR_SUB ? T_OP_SUB
+                   : nx->op == IR_AND ? T_OP_AND : nx->op == IR_OR ? T_OP_ORR
+                   : nx->op == IR_XOR ? T_OP_EOR : -1;
+            int other = -1;
+            if (op >= 0 && !nx->flt && !nx->imm_b && nx->w == 4 &&
+                nx->dst >= 0 && !F->wide[nx->dst]) {
+                if (nx->b == i->dst && nx->a != i->dst)
+                    other = nx->a;
+                else if (nx->a == i->dst && nx->b != i->dst && comm)
+                    other = nx->b;
+                else if (nx->a == i->dst && nx->b != i->dst && op == T_OP_SUB)
+                    other = nx->b, op = T_OP_RSB;   /* (a << k) - b */
+            }
+            if (other >= 0 && !F->wide[other] && !in_freg(F, other)) {
+                F->lofree = 0;      /* the pool was computed for this
+                                     * instruction alone */
+                if (op == T_OP_ADD && sh == T_SH_LSL && i->imm <= 3 &&
+                    F->usecnt[nx->dst] == 1 && n + 2 < fn->nins) {
+                    struct ir_ins *ax = &fn->ins[n + 2];
+                    int isld = ax->op == IR_LOAD && ax->a == nx->dst &&
+                               ax->memoff == 0 && ax->w <= 4 &&
+                               ax->dst >= 0 && !F->wide[ax->dst] &&
+                               !in_freg(F, ax->dst);
+                    int isst = ax->op == IR_STORE && ax->a == nx->dst &&
+                               ax->memoff == 0 && ax->size <= 4 &&
+                               ax->b >= 0 && ax->b != nx->dst &&
+                               !F->wide[ax->b] && !in_freg(F, ax->b);
+                    if (isld || isst) {
+                        int rm = rdr(F, i->a, T_TMP);
+                        int rn = rdr(F, other, T_ADDR);
+                        if (isld) {
+                            int d = wreg(F, ax->dst, T_ACC);
+                            t_ldst_reg(t, d, rn, rm, (int)i->imm, ax->size,
+                                       ax->sign, 0);
+                            wrote(F, ax->dst, d);
+                        } else {
+                            int v = rdr(F, ax->b, T_ACC);
+                            t_ldst_reg(t, v, rn, rm, (int)i->imm, ax->size,
+                                       0, 1);
+                        }
+                        F->skip_next = 2;
+                        return;
+                    }
+                }
+                {
+                    int rm = rdr(F, i->a, T_TMP);
+                    int rn = rdr(F, other, T_ACC);
+                    int d = wreg(F, nx->dst, T_ACC);
+                    t_alu_reg_shift(t, op, d, rn, rm, sh, (int)i->imm, 0);
+                    wrote(F, nx->dst, d);
+                    F->skip_next = 1;
+                    return;
+                }
+            }
+        }
         int sa = rdr(F, i->a, T_ACC);
         int d = wreg(F, i->dst, T_ACC);
         if (i->imm_b && i->imm >= 0 && i->imm < 32) {
@@ -4074,9 +4166,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.lofree = lo_free(&F, i);
         gen_ins(&F, i);
         F.lofree = 0;
-        if (F.skip_next) {      /* the comparison emitted its branch too */
+        if (F.skip_next) {      /* the comparison emitted its branch too,
+                                 * or a shift its consumer (and its load) */
+            i += F.skip_next;
             F.skip_next = 0;
-            i++;
         }
         tail_end = i == fn->nins - 1 && was_tail;
     }

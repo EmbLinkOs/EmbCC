@@ -216,6 +216,25 @@ void t_alu_reg(struct code *c, int op, int rd, int rn, int rm, int s)
            (unsigned)(rd << 8) | (unsigned)rm);
 }
 
+void t_alu_reg_shift(struct code *c, int op, int rd, int rn, int rm,
+                     int type, int amount, int s)
+{
+    /* The same first halfword as t_alu_reg's 32-bit form; the amount is
+     * split imm3:imm2 around rd, and the type sits below it. */
+    unsigned imm3 = (unsigned)(amount >> 2) & 7, imm2 = (unsigned)amount & 3;
+    hw2(c, 0xea00u | (unsigned)(op << 5) | (unsigned)(s << 4) | (unsigned)rn,
+           (imm3 << 12) | (unsigned)(rd << 8) | (imm2 << 6) |
+           (unsigned)(type << 4) | (unsigned)rm);
+}
+
+void t_bfx(struct code *c, int rd, int rn, int lsb, int width, int sign)
+{
+    unsigned imm3 = (unsigned)(lsb >> 2) & 7, imm2 = (unsigned)lsb & 3;
+    hw2(c, (sign ? 0xf340u : 0xf3c0u) | (unsigned)rn,
+           (imm3 << 12) | (unsigned)(rd << 8) | (imm2 << 6) |
+           (unsigned)(width - 1));
+}
+
 int t_alu_imm(struct code *c, int op, int rd, int rn, long imm, int s)
 {
     int e;

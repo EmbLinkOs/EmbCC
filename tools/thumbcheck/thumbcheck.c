@@ -152,6 +152,18 @@ int main(int argc, char **argv)
     t_alu_reg(&C, T_OP_ORN, 0, 1, 2, 0); expect("orn\tr0, r1, r2");
     t_alu_reg(&C, T_OP_ADC, 0, 0, 1, 1); expect("adcs\tr0, r1");
     t_alu_reg(&C, T_OP_SBC, 0, 0, 1, 1); expect("sbcs\tr0, r1");
+    /* the shifted second operand: every type, both halves of the amount */
+    t_alu_reg_shift(&C, T_OP_ADD, 0, 1, 2, T_SH_LSL, 2, 0);  expect("add.w\tr0, r1, r2, lsl #2");
+    t_alu_reg_shift(&C, T_OP_ADD, 0, 1, 2, T_SH_LSL, 2, 1);  expect("adds.w\tr0, r1, r2, lsl #2");
+    t_alu_reg_shift(&C, T_OP_SUB, 0, 1, 2, T_SH_LSR, 5, 0);  expect("sub.w\tr0, r1, r2, lsr #5");
+    t_alu_reg_shift(&C, T_OP_RSB, 0, 1, 1, T_SH_LSL, 3, 0);  expect("rsb\tr0, r1, r1, lsl #3");
+    t_alu_reg_shift(&C, T_OP_AND, 9, 1, 2, T_SH_ASR, 31, 0); expect("and.w\tr9, r1, r2, asr #31");
+    t_alu_reg_shift(&C, T_OP_ORR, 0, 1, 12, T_SH_LSL, 1, 0); expect("orr.w\tr0, r1, r12, lsl #1");
+    t_alu_reg_shift(&C, T_OP_EOR, 0, 1, 2, T_SH_ROR, 8, 0);  expect("eor.w\tr0, r1, r2, ror #8");
+    t_bfx(&C, 0, 1, 0, 12, 0);  expect("ubfx\tr0, r1, #0, #12");
+    t_bfx(&C, 9, 1, 4, 8, 0);   expect("ubfx\tr9, r1, #4, #8");
+    t_bfx(&C, 0, 1, 0, 5, 1);   expect("sbfx\tr0, r1, #0, #5");
+    t_bfx(&C, 0, 12, 31, 1, 0); expect("ubfx\tr0, r12, #31, #1");
     t_alu_reg(&C, T_OP_RSB, 0, 1, 2, 0); expect("rsb\tr0, r1, r2");
 
     t_alu_imm(&C, T_OP_ADD, 0, 1, 3, 1);   expect("adds\tr0, r1, #3");
@@ -219,6 +231,10 @@ int main(int argc, char **argv)
     t_ldst_reg(&C, 0, 1, 2, 0, 1, 1, 0); expect("ldrsb\tr0, [r1, r2]");
     t_ldst_reg(&C, 0, 1, 2, 0, 1, 0, 1); expect("strb\tr0, [r1, r2]");
     t_ldst_reg(&C, 0, 1, 2, 1, 2, 0, 1); expect("strh.w\tr0, [r1, r2, lsl #1]");
+    t_ldst_reg(&C, 0, 1, 2, 3, 1, 0, 0); expect("ldrb.w\tr0, [r1, r2, lsl #3]");
+    t_ldst_reg(&C, 0, 1, 2, 1, 2, 1, 0); expect("ldrsh.w\tr0, [r1, r2, lsl #1]");
+    t_ldst_reg(&C, 0, 1, 2, 2, 4, 0, 1); expect("str.w\tr0, [r1, r2, lsl #2]");
+    t_ldst_reg(&C, 9, 10, 2, 2, 4, 0, 0); expect("ldr.w\tr9, [r10, r2, lsl #2]");
 
     t_add_sp(&C, 0, 16);                expect("add\tr0, sp, #16");
     t_add_sp(&C, 0, 2000);              expect("addw\tr0, sp, #2000");

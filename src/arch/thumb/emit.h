@@ -64,6 +64,15 @@ enum {
 
 /* The shifts, numbered as the `type` field has them. */
 enum { T_SH_LSL = 0, T_SH_LSR = 1, T_SH_ASR = 2, T_SH_ROR = 3 };
+/* op rd, rn, rm, <type> #amount -- the 32-bit data-processing form with a
+ * shifted second operand: `add.w r0, r1, r2, lsl #2`. Never the 16-bit
+ * encodings, which have no shift field. amount is 1..31 (LSR/ASR by 32
+ * are not made here). */
+void t_alu_reg_shift(struct code *c, int op, int rd, int rn, int rm,
+                     int type, int amount, int s);
+/* rd = rn's bits lsb .. lsb+width-1, at the bottom, zero- or sign-extended:
+ * ubfx / sbfx. width is 1..32-lsb. */
+void t_bfx(struct code *c, int rd, int rn, int lsb, int width, int sign);
 
 /* ---- moves ---------------------------------------------------------- */
 
