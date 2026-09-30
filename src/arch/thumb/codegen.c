@@ -2815,21 +2815,27 @@ static void gen_ins(struct t_fn *F, int n)
         wrote(F, i->dst, d);
         return;
     }
-    case IR_STRADDR:
-        note_str(F->st, t_mov_addr(t, T_ACC, 0), i->label, RK_THM_MOVW);
+    case IR_STRADDR: {
+        int d = wreg(F, i->dst, T_ACC);   /* straight into its home */
+        note_str(F->st, t_mov_addr(t, d, 0), i->label, RK_THM_MOVW);
         note_str(F->st, t->len - 4, i->label, RK_THM_MOVT);
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
         return;
-    case IR_GADDR:
-        note_glob(F->st, t_mov_addr(t, T_ACC, 0), i->glob, RK_THM_MOVW);
+    }
+    case IR_GADDR: {
+        int d = wreg(F, i->dst, T_ACC);   /* straight into its home */
+        note_glob(F->st, t_mov_addr(t, d, 0), i->glob, RK_THM_MOVW);
         note_glob(F->st, t->len - 4, i->glob, RK_THM_MOVT);
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
         return;
-    case IR_FADDR:
-        note_fn(F->st, t_mov_addr(t, T_ACC, 0), i->callee, RK_THM_MOVW);
+    }
+    case IR_FADDR: {
+        int d = wreg(F, i->dst, T_ACC);   /* straight into its home */
+        note_fn(F->st, t_mov_addr(t, d, 0), i->callee, RK_THM_MOVW);
         note_fn(F->st, t->len - 4, i->callee, RK_THM_MOVT);
-        wr(F, i->dst, T_ACC);
+        wrote(F, i->dst, d);
         return;
+    }
 
     case IR_MEMCPY: case IR_MEMZERO: {
         /* A byte loop, unrolled to words where the size allows. Small

@@ -408,6 +408,12 @@ static unsigned wide_ldst_op(int size, int sign, int store)
 int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
                int store)
 {
+    /* Signedness means something only for a load narrower than the
+     * register. A four-byte `load.4:4s` or any store carrying it was sent
+     * to the 32-bit forms, and every signed int read through a pointer
+     * cost two bytes more than it had to. */
+    if (store || size >= 4)
+        sign = 0;
     /* The scaled 16-bit forms: five bits times the access size, low
      * registers only, and no sign-extending member. */
     if (low(rt) && low(rn) && !sign && off >= 0 && (off % size) == 0 &&

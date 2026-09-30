@@ -2357,27 +2357,30 @@ static void gen_ins(struct rv_fn *F, int n)
      * first store through one faulted. */
     case IR_STRADDR:
         {
-        int at = rv_pcrel_pair(t, ACC);
+        int d = wreg(F, i->dst, ACC);     /* straight into its home */
+        int at = rv_pcrel_pair(t, d);
         note_str(F->st, at, i->label, RK_RISCV_PCREL_HI20);
         note_str(F->st, at + 4, i->label, RK_RISCV_PCREL_LO12_I);
+        wrote(F, i->dst, d);
         }
-        wr(F, i->dst, ACC);
         return;
     case IR_GADDR:
         {
-        int at = rv_pcrel_pair(t, ACC);
+        int d = wreg(F, i->dst, ACC);     /* straight into its home */
+        int at = rv_pcrel_pair(t, d);
         note_glob(F->st, at, i->glob, RK_RISCV_PCREL_HI20);
         note_glob(F->st, at + 4, i->glob, RK_RISCV_PCREL_LO12_I);
+        wrote(F, i->dst, d);
         }
-        wr(F, i->dst, ACC);
         return;
     case IR_FADDR:
         {
-        int at = rv_pcrel_pair(t, ACC);
+        int d = wreg(F, i->dst, ACC);     /* straight into its home */
+        int at = rv_pcrel_pair(t, d);
         note_fn(F->st, at, i->callee, RK_RISCV_PCREL_HI20);
         note_fn(F->st, at + 4, i->callee, RK_RISCV_PCREL_LO12_I);
+        wrote(F, i->dst, d);
         }
-        wr(F, i->dst, ACC);
         return;
 
     case IR_MEMCPY: case IR_MEMZERO: {
