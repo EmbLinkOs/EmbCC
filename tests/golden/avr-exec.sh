@@ -73,6 +73,17 @@ long modl(long a, long b)  { return a % b; }
 unsigned long udivl(unsigned long a, unsigned long b) { return a / b; }
 unsigned long umodl(unsigned long a, unsigned long b) { return a % b; }
 
+/* ---- multiply by a constant: shifts and adds, in place ---------------
+ *
+ * No helper: the product is built in the destination from its top bit
+ * down, and a negative constant negates it there -- com, neg and sbci
+ * when the destination is from r16 up, which an int returned in r24 is.
+ * A case whose low byte is nonzero is what tells sbci from subi. */
+int  mulc10(int x)            { return x * 10; }
+int  mulcm3(int x)            { return x * -3; }
+long mulcm12(long x)          { return x * -12L; }
+unsigned char mulc5b(unsigned char x) { return (unsigned char)(x * 5); }
+
 /* ---- shifts ---------------------------------------------------------- */
 long shl(long v, int n)  { return v << n; }
 long shr(long v, int n)  { return v >> n; }
@@ -177,6 +188,10 @@ void run(void)
     putn((long)udivl(4000000000UL, 123UL));   /* a dividend above 2^31 */
     putn((long)umodl(4000000000UL, 123UL));
     putn((long)udivl(4294967295UL, 65535UL));
+    putn(mulc10(1234)); putn(mulc10(-77));
+    putn(mulcm3(7)); putn(mulcm3(256)); putn(mulcm3(-85));
+    putn(mulcm12(100000L)); putn(mulcm12(-3L));
+    putn(mulc5b(200));
     puts_("| ");
 
     /* comparisons */

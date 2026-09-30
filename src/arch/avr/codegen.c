@@ -2126,11 +2126,6 @@ static void shift1w(struct a_fn *F, int r, int op, int sign, int w)
 static void shift_immw(struct a_fn *F, int r, int op, int sign, long n,
                        int VWn);
 
-static void shift_imm(struct a_fn *F, int r, int op, int sign, long n)
-{
-    shift_immw(F, r, op, sign, n, VW);
-}
-
 static void shift_immw(struct a_fn *F, int r, int op, int sign, long n,
                        int VWn)
 {
@@ -3121,54 +3116,89 @@ static void gen_ins(struct a_fn *F, int n)
          * down: one shift for a power of two, a few adds for an ordinary
          * struct stride.
          */
-        static const int ACC[VW] = { 26, 27, 30, 31 };
         long k;
-        int bit, hi, neg;
+        int hi, neg, nb = dw(F, i), d, ra;
 
         if (!const_b(F, i, &k))
             goto helper;               /* __mulsi3 */
+        if (!nb)
+            return;
         neg = k < 0;
         if (neg) k = -k;
-        rd4(F, i->a, RA);
-        if (k == 0) {
-            ldi4(F, RA, 0, VW);
-            wr4(F, i->dst, RA);
-            return;
-        }
         for (hi = 8 * VW - 1; hi > 0 && !((k >> hi) & 1); hi--)
             ;
-        if (hi > 16)
+        if (k && hi > 16)
             goto helper;               /* wider than the shifts are worth */
-        if (k == (1L << hi)) {
-            shift_imm(F, RA, IR_SHL, 0, hi);    /* a power of two */
-        } else {
-            for (int q = 0; q < VW; q++)
-                avr_rr(t, AVR_MOV, ACC[q], R_ZERO);
-            for (bit = hi; bit >= 0; bit--) {
-                /* acc <<= 1. The accumulator's registers are not
-                 * consecutive -- X and Z, the two pairs no value uses --
-                 * which lsl/rol do not care about. */
-                avr_rr(t, AVR_ADD, ACC[0], ACC[0]);
-                for (int q = 1; q < VW; q++)
-                    avr_rr(t, AVR_ADC, ACC[q], ACC[q]);
-                if ((k >> bit) & 1) {
-                    avr_rr(t, AVR_ADD, ACC[0], RA);
-                    for (int q = 1; q < VW; q++)
-                        avr_rr(t, AVR_ADC, ACC[q], RA + q);
+        /* At the width anything reads -- a product's low bytes depend on
+         * the operands' low bytes alone -- and in the destination's home
+         * when it has one. The accumulator STARTS as a, which is the top
+         * bit's add done for nothing, then shifts once per bit below it
+         * and adds a again for each one set: `i * 12` on an int is a copy
+         * and four pairs, where it was a four-byte accumulator in X and Z
+         * zeroed, shifted and added from bit 16 down, and copied out. */
+        d = dst_reg(F, i, nb);
+        if (k == 0) {
+            ldi4(F, d, 0, nb);
+            dst_done(F, i, d);
+            return;
+        }
+        /* a, to add at each set bit: in place where it lives, unless that
+         * is d; otherwise in the bank d is not -- d may be a home in B. */
+        ra = -1;
+        if (k != (1L << hi)) {
+            if (in_pair(F, i->a) && nb <= F->hw[i->a] && F->loc[i->a] != d)
+                ra = F->loc[i->a];
+            else {
+                ra = d == RA ? RB : RA;
+                vld(F, ra, i->a, 0, nb);
+            }
+        }
+        if (in_pair(F, i->a) && F->loc[i->a] == d) {
+            ;                          /* d holds a already */
+        } else if (ra >= 0 && !(in_pair(F, i->a) && F->loc[i->a] == ra)) {
+            /* d from the copy just made, not from memory again */
+            for (int q = 0; q < nb; q++) {
+                if (q + 1 < nb && !((d + q) & 1) && !((ra + q) & 1)) {
+                    avr_movw(t, d + q, ra + q);
+                    q++;
+                } else {
+                    avr_rr(t, AVR_MOV, d + q, ra + q);
                 }
             }
-            for (int q = 0; q < VW; q++)
-                avr_rr(t, AVR_MOV, RA + q, ACC[q]);
+        } else {
+            vld(F, d, i->a, 0, nb);
         }
-        if (neg) {
-            /* 0 - acc, through B as IR_NEG does. */
-            for (int q = 0; q < VW; q++)
-                avr_rr(t, AVR_MOV, RB + q, RA + q);
-            ldi4(F, RA, 0, VW);
-            avr_rr(t, AVR_SUB, RA, RB);
-            for (int q = 1; q < VW; q++) avr_rr(t, AVR_SBC, RA + q, RB + q);
+        for (int bit = hi - 1; bit >= 0; bit--) {
+            if (ra < 0) {
+                shift_immw(F, d, IR_SHL, 0, hi, nb);   /* a power of two */
+                break;
+            }
+            shift1w(F, d, IR_SHL, 0, nb);
+            if ((k >> bit) & 1) {
+                avr_rr(t, AVR_ADD, d, ra);
+                for (int q = 1; q < nb; q++)
+                    avr_rr(t, AVR_ADC, d + q, ra + q);
+            }
         }
-        wr4(F, i->dst, RA);
+        if (neg && d >= 16) {
+            /* -d = ~d + 1: com the upper bytes, neg the low one -- which
+             * leaves carry set unless it was zero -- and sbci 0xff carries
+             * the +1 up. avr-gcc's sequence, a byte shorter than 0 - d. */
+            for (int q = nb - 1; q >= 1; q--)
+                avr_r1(t, AVR_COM, d + q);
+            avr_r1(t, AVR_NEG, d);
+            for (int q = 1; q < nb; q++)
+                avr_ri(t, AVR_SBCI, d + q, 0xff);
+        } else if (neg) {
+            /* 0 - d, in place, through a byte of the bank d is not */
+            int sc = d == RA ? RB : RA;
+            for (int q = 0; q < nb; q++) {
+                avr_rr(t, AVR_MOV, sc, R_ZERO);
+                avr_rr(t, q ? AVR_SBC : AVR_SUB, sc, d + q);
+                avr_rr(t, AVR_MOV, d + q, sc);
+            }
+        }
+        dst_done(F, i, d);
         return;
     }
 
@@ -4074,6 +4104,11 @@ static int a_ldvar_plain(int size, int sign, int w)
  * saying it calls only keeps X from a value across it. */
 static int a_calls_helper(const struct ir_ins *i)
 {
+    /* A multiply by an immediate below 2^17 is shifts and adds in place
+     * (IR_MUL), and calls nothing. */
+    if (i->op == IR_MUL && i->imm_b && i->w <= VW && !i->flt &&
+        i->imm > -(1L << 17) && i->imm < (1L << 17))
+        return 0;
     return i->flt || i->op == IR_I2F || i->op == IR_F2I ||
            i->op == IR_F2F || i->op == IR_MUL || i->op == IR_DIV ||
            i->op == IR_MOD;
