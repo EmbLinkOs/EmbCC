@@ -1465,49 +1465,148 @@ static void ldi4(struct a_fn *F, int r, unsigned long v, int n);
 
 /* ---- values wider than the scratch banks ------------------------------
  *
- * An eight-byte value cannot be held in registers here: A and B are four
- * each, and a binary operation needs both operands at once. So it is
- * processed a BYTE AT A TIME, straight out of one slot and into another.
+ * An eight-byte value either has a HOME -- a run of eight registers, r18,
+ * r10 or r2 up, which the allocator's first pass hands out -- or lives in
+ * a slot. Either way it is processed a BYTE AT A TIME: A and B are four
+ * bytes each, and an operation between two eight-byte values in scratch
+ * would need sixteen.
  *
- * That works because `ldd` and `std` do NOT affect SREG on this machine.
- * The carry from byte k survives the two loads and the store that byte k+1
- * needs, so an eight-byte add is eight `adc`s with memory traffic between
- * them and no spill. It is the same reason an eight-byte shift can be eight
- * `rol`s: the carry is the only state that has to live across the loads.
+ * In memory that works because `ldd` and `std` do NOT affect SREG on this
+ * machine: the carry from byte k survives the two loads and the store
+ * that byte k+1 needs, so an eight-byte add is eight `adc`s with memory
+ * traffic between them. In registers it is just the eight `adc`s, in the
+ * destination's home -- a quarter of the instructions, and why the homes
+ * exist.
  *
- * Slower than a register-resident chain and correct at any width, which is
- * the right trade on a machine with 32 registers and none to spare.
+ * The byte scratch is two registers outside every home this instruction
+ * names (w_scr): r18:r19 normally, r30:r31 when one of its values lives
+ * in r18-r25. What it must not be is the destination's own home, which a
+ * chain writing byte k and then loading byte k+1 into it would destroy --
+ * the one hazard a_verify cannot see.
  */
+static int w_home(const struct a_fn *F, int v, int r)
+{
+    return in_pair(F, v) && r + 1 >= F->loc[v] && r < F->loc[v] + F->hw[v];
+}
+
+static int w_scr(const struct a_fn *F, const struct ir_ins *i)
+{
+    int bad = w_home(F, i->dst, RA) || w_home(F, i->a, RA) ||
+              (!i->imm_b && w_home(F, i->b, RA));
+    return bad ? AVR_Z : RA;
+}
+
+/* Byte k of v, where it can be read: its home, or `scr` after a load
+ * that keeps the flags (the chains read these between an add and its
+ * adc). An immediate operand when v < 0. */
+static int w_byte(struct a_fn *F, int v, long imm, int k, int scr)
+{
+    if (v >= 0 && is_remat(F, v)) {
+        imm = F->cval[v];               /* a constant, rebuilt here */
+        v = -1;
+    }
+    if (v < 0) {
+        ldi4(F, scr, (unsigned long)imm >> (8 * k), 1);
+        return scr;
+    }
+    if (in_pair(F, v))
+        return F->loc[v] + k;
+    ld_slot_cc(F, scr, sslot(F, v) + k, 1);
+    return scr;
+}
+
 static void wide_bin(struct a_fn *F, const struct ir_ins *i, int n,
                      enum avr_rr first, enum avr_rr rest)
 {
-    long sa = sslot(F, i->a), sd = sslot(F, i->dst);
-    long sb = i->imm_b ? -1 : sslot(F, i->b);
-    /* The second operand's byte in r19, A's second register: B may be a
-     * home, and one byte of A is all the first operand needs. */
+    struct code *t = F->t;
+    int a = i->a, b = i->imm_b ? -1 : i->b;
+    int sc = w_scr(F, i);
+    long imm = i->imm;
+    if (b >= 0 && is_remat(F, b)) {     /* a constant: the immediate forms */
+        imm = F->cval[b];
+        b = -1;
+    }
+
+    if (in_pair(F, i->dst)) {
+        /* In the destination's home: a copied in, then b applied. When d
+         * is where b lives, a commutative operation takes them the other
+         * way round; a subtraction goes byte by byte below, which reads
+         * byte k of b before writing byte k of d and never looks back. */
+        int d = F->loc[i->dst];
+        if (b >= 0 && in_pair(F, b) && F->loc[b] == d &&
+            !(in_pair(F, a) && F->loc[a] == d)) {
+            if (first == AVR_SUB)
+                goto bytewise;
+            int x = a; a = b; b = x;
+        }
+        vld(F, d, a, 0, n);
+        if (b < 0 && d >= 16 && (first == AVR_ADD || first == AVR_SUB)) {
+            /* subi/sbci of the constant -- or of its negation for an add,
+             * which is the same sum mod 2^64 -- as the four-byte path. */
+            unsigned long v = (unsigned long)imm;
+            if (first == AVR_ADD) v = 0UL - v;
+            for (int k = 0; k < n; k++)
+                avr_ri(t, k ? AVR_SBCI : AVR_SUBI, d + k,
+                       (int)((v >> (8 * k)) & 0xffu));
+            return;
+        }
+        for (int k = 0; k < n; k++) {
+            int c = (int)(((unsigned long)imm >> (8 * k)) & 0xffu);
+            if (b < 0 && first == AVR_AND) {
+                if (c == 0xff) continue;
+                if (c == 0) { avr_rr(t, AVR_MOV, d + k, R_ZERO); continue; }
+                if (d + k >= 16) { avr_ri(t, AVR_ANDI, d + k, c); continue; }
+            } else if (b < 0 && first == AVR_OR) {
+                if (c == 0) continue;
+                if (d + k >= 16) { avr_ri(t, AVR_ORI, d + k, c); continue; }
+            } else if (b < 0 && first == AVR_EOR) {
+                if (c == 0) continue;
+                if (c == 0xff) { avr_r1(t, AVR_COM, d + k); continue; }
+            }
+            avr_rr(t, k ? rest : first, d + k, w_byte(F, b, imm, k, sc + 1));
+        }
+        return;
+    }
+bytewise:
+    /* A byte of a into the scratch, b applied, the result stored where
+     * the destination lives. */
     for (int k = 0; k < n; k++) {
-        ld_slot_cc(F, RA, sa + k, 1);
-        if (i->imm_b)
-            ldi4(F, RA + 1, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
-        else
-            ld_slot_cc(F, RA + 1, sb + k, 1);
-        avr_rr(F->t, k ? rest : first, RA, RA + 1);
-        if (sd >= 0)
-            st_slot_cc(F, sd + k, RA, 1);
+        vld_cc(F, sc, a, k, 1);
+        avr_rr(t, k ? rest : first, sc, w_byte(F, b, imm, k, sc + 1));
+        vst_cc(F, i->dst, k, sc, 1);
     }
 }
 
-/* The same shape for a one-operand chain: com, or a shift step. */
-static void wide_un(struct a_fn *F, long sa, long sd, int n,
-                    enum avr_r1 op, int down)
+/* One eight-byte value copied to another's place, whichever has a home. */
+static void wide_copy(struct a_fn *F, int dst, int a, int n)
 {
-    for (int j = 0; j < n; j++) {
-        int k = down ? n - 1 - j : j;
-        ld_slot_cc(F, RA, sa + k, 1);
-        avr_r1(F->t, op, RA);
-        if (sd >= 0)
-            st_slot_cc(F, sd + k, RA, 1);
+    if (in_pair(F, dst)) {
+        vld(F, F->loc[dst], a, 0, n);
+        return;
     }
+    if (in_pair(F, a)) {
+        vst(F, dst, 0, F->loc[a], n);
+        return;
+    }
+    if (!is_remat(F, a) && sslot(F, dst) == sslot(F, a))
+        return;
+    for (int k = 0; k < n; k += 4) {
+        int m = n - k < 4 ? n - k : 4;
+        vld(F, RA, a, k, m);            /* a slot, or a constant rebuilt */
+        st_slot(F, sslot(F, dst) + k, RA, m);
+    }
+}
+
+/* The byte above `from` valid ones: zero, or the sign of the top one --
+ * built in r0, which no home and no scratch here is. */
+static int w_fill(struct a_fn *F, int top, int sign)
+{
+    if (!sign)
+        return R_ZERO;
+    avr_rr(F->t, AVR_MOV, R_TMP, top);
+    avr_rr(F->t, AVR_ADD, R_TMP, R_TMP);        /* lsl: MSB -> carry */
+    avr_rr(F->t, AVR_SBC, R_TMP, R_TMP);        /* 0 - carry */
+    return R_TMP;
 }
 
 /* ---- extension ------------------------------------------------------
@@ -2336,21 +2435,24 @@ static void gen_ins(struct a_fn *F, int n)
         }
     }
 
-    /* ---- eight bytes: byte at a time, through memory ------------------ */
+    /* ---- eight bytes: byte at a time, in a home or through memory ----- */
     if (wide_ins(F, i)) {
         int n = 8;
         switch (i->op) {
         case IR_CONST:
+            if (is_remat(F, i->dst))
+                return;                   /* rebuilt where it is read */
+            if (in_pair(F, i->dst)) {
+                ldi4(F, F->loc[i->dst], (unsigned long)i->imm, n);
+                return;
+            }
             for (int k = 0; k < n; k++) {
                 ldi4(F, RA, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
                 vst_cc(F, i->dst, k, RA, 1);
             }
             return;
         case IR_MOV:
-            for (int k = 0; k < n; k++) {
-                vld_cc(F, RA, i->a, k, 1);
-                vst_cc(F, i->dst, k, RA, 1);
-            }
+            wide_copy(F, i->dst, i->a, n);
             return;
         case IR_ADD: wide_bin(F, i, n, AVR_ADD, AVR_ADC); return;
         case IR_SUB: wide_bin(F, i, n, AVR_SUB, AVR_SBC); return;
@@ -2358,22 +2460,56 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_OR:  wide_bin(F, i, n, AVR_OR,  AVR_OR);  return;
         case IR_XOR: wide_bin(F, i, n, AVR_EOR, AVR_EOR); return;
         case IR_BNOT:
-            wide_un(F, sslot(F, i->a), sslot(F, i->dst), n, AVR_COM, 0);
+            if (in_pair(F, i->dst)) {
+                int d = F->loc[i->dst];
+                vld(F, d, i->a, 0, n);
+                for (int k = 0; k < n; k++) avr_r1(t, AVR_COM, d + k);
+                return;
+            }
+            {
+                int sc = w_scr(F, i);
+                for (int k = 0; k < n; k++) {
+                    vld(F, sc, i->a, k, 1);
+                    avr_r1(t, AVR_COM, sc);
+                    vst(F, i->dst, k, sc, 1);
+                }
+            }
             return;
         case IR_NEG:
             /* 0 - a, the same answer as at four bytes: the zero is an
              * immediate per byte, so this is one chain and not two. */
-            for (int k = 0; k < n; k++) {
-                avr_rr(t, AVR_MOV, RA, R_ZERO);
-                vld_cc(F, RA + 1, i->a, k, 1);
-                avr_rr(t, k ? AVR_SBC : AVR_SUB, RA, RA + 1);
-                vst_cc(F, i->dst, k, RA, 1);
+            {
+                int sc = w_scr(F, i);
+                if (in_pair(F, i->dst)) {
+                    int d = F->loc[i->dst];
+                    vld(F, d, i->a, 0, n);
+                    for (int k = 0; k < n; k++) {
+                        avr_rr(t, AVR_MOV, sc, R_ZERO);
+                        avr_rr(t, k ? AVR_SBC : AVR_SUB, sc, d + k);
+                        avr_rr(t, AVR_MOV, d + k, sc);
+                    }
+                    return;
+                }
+                for (int k = 0; k < n; k++) {
+                    avr_rr(t, AVR_MOV, sc, R_ZERO);
+                    avr_rr(t, k ? AVR_SBC : AVR_SUB, sc,
+                           w_byte(F, i->a, 0, k, sc + 1));
+                    vst_cc(F, i->dst, k, sc, 1);
+                }
             }
             return;
         case IR_EXT: {
             /* Widen the low `size` bytes into eight. */
             int from = i->size < 1 ? 1 : i->size;
             if (from > n) from = n;
+            if (in_pair(F, i->dst)) {
+                int d = F->loc[i->dst], fill;
+                vld(F, d, i->a, 0, from);
+                fill = w_fill(F, d + from - 1, i->sign);
+                for (int k = from; k < n; k++)
+                    avr_rr(t, AVR_MOV, d + k, fill);
+                return;
+            }
             for (int k = 0; k < from; k++) {
                 vld_cc(F, RA, i->a, k, 1);
                 vst_cc(F, i->dst, k, RA, 1);
@@ -2395,6 +2531,14 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_LDVAR: {
             int from = i->size < 1 ? 1 : i->size;
             if (from > n) from = n;
+            if (in_pair(F, i->dst)) {
+                int d = F->loc[i->dst], fill;
+                vld(F, d, i->a, 0, from);
+                fill = w_fill(F, d + from - 1, i->sign);
+                for (int k = from; k < n; k++)
+                    avr_rr(t, AVR_MOV, d + k, fill);
+                return;
+            }
             for (int k = 0; k < from; k++) {
                 vld_cc(F, RA, i->a, k, 1);
                 vst_cc(F, i->dst, k, RA, 1);
@@ -2415,6 +2559,10 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_STVAR: {
             int to = i->size < 1 ? 1 : i->size;
             if (to > n) to = n;
+            if (in_pair(F, i->dst) || in_pair(F, i->a)) {
+                wide_copy(F, i->dst, i->a, to);
+                return;
+            }
             for (int k = 0; k < to; k++) {
                 vld_cc(F, RA, i->a, k, 1);
                 vst_cc(F, i->dst, k, RA, 1);
@@ -2437,6 +2585,18 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_LOAD: {
             int from = i->size < 1 ? 1 : i->size;
             if (from > n) from = n;
+            if (in_pair(F, i->dst)) {
+                /* Into the home, through Z: nothing between reaches a
+                 * slot, so nothing walks with Z. */
+                int d = F->loc[i->dst], fill;
+                vld(F, AVR_Z, i->a, 0, 2);
+                for (int k = 0; k < from; k++)
+                    avr_ldd(t, d + k, AVR_Z, k);
+                fill = w_fill(F, d + from - 1, i->sign);
+                for (int k = from; k < n; k++)
+                    avr_rr(t, AVR_MOV, d + k, fill);
+                return;
+            }
             vld(F, RA + 2, i->a, 0, 2);   /* A's upper pair: B may be a home */
             g_x_hit = 1; avr_movw(t, AVR_X, RA + 2);
             for (int k = 0; k < from; k++) {
@@ -2461,6 +2621,13 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_STORE: {
             int to = i->size < 1 ? 1 : i->size;
             if (to > n) to = n;
+            if (in_pair(F, i->b)) {
+                int h = F->loc[i->b];
+                vld(F, AVR_Z, i->a, 0, 2);
+                for (int k = 0; k < to; k++)
+                    avr_std(t, AVR_Z, k, h + k);
+                return;
+            }
             vld(F, RA + 2, i->a, 0, 2);
             g_x_hit = 1; avr_movw(t, AVR_X, RA + 2);
             for (int k = 0; k < to; k++) {
@@ -2479,13 +2646,25 @@ static void gen_ins(struct a_fn *F, int n)
              * uses. Left shifts walk UP from the low byte and right shifts
              * DOWN from the high one. */
             long k;
-            long sd = sslot(F, i->dst), sa = sslot(F, i->a);
             int var = !const_b(F, i, &k);
-            if (sa != sd)
-                for (int b = 0; b < n; b++) {
-                    ld_slot_cc(F, RA, sa + b, 1);
-                    st_slot_cc(F, sd + b, RA, 1);
-                }
+            long sd;
+            if (in_pair(F, i->dst)) {
+                /* In the home: the four-byte shifts at eight bytes, whole
+                 * bytes moved and the rest shifted, or the count-down loop
+                 * with its count in r0 -- which the far slot path saves
+                 * SREG through, and nothing here reaches a slot. */
+                int d = F->loc[i->dst];
+                if (var)
+                    vld(F, R_TMP, i->b, 0, 1);
+                vld(F, d, i->a, 0, n);
+                if (var)
+                    shift_varw(F, d, R_TMP, (int)i->op, i->sign, n);
+                else
+                    shift_immw(F, d, (int)i->op, i->sign, k, n);
+                return;
+            }
+            wide_copy(F, i->dst, i->a, n);
+            sd = sslot(F, i->dst);
             if (!var && k >= 8 * n)
                 k = i->op == IR_SHR && i->sign ? 8 * n - 1 : 8 * n;
             if (var) {
@@ -2581,12 +2760,31 @@ static void gen_ins(struct a_fn *F, int n)
                          "not both fit in the argument registers, so the "
                          "helper would need a stack argument this path does "
                          "not place");
-            vld(F, a_reg, i->a, 0, 8);
+            /* The operands with homes first, as one parallel move -- one
+             * may live where the other goes, r18-r25 and r10-r17 both
+             * being homes -- then the ones in memory and the constant. */
+            {
+                int md[16], ms[16], od[24], os[24], nm2 = 0, no;
+                for (int k = 0; in_pair(F, i->a) && k < F->hw[i->a]; k++) {
+                    md[nm2] = a_reg + k; ms[nm2] = F->loc[i->a] + k; nm2++;
+                }
+                for (int k = 0; !i->imm_b && in_pair(F, i->b) &&
+                                k < F->hw[i->b]; k++) {
+                    md[nm2] = b_reg + k; ms[nm2] = F->loc[i->b] + k; nm2++;
+                }
+                no = ra_parallel_move(md, ms, nm2, R_TMP, od, os, 24);
+                if (no < 0)
+                    internal_error("avr: %s: a 64-bit helper's operands do "
+                                   "not form a parallel move", fn->name);
+                emit_moves(t, od, os, no);
+            }
+            if (!in_pair(F, i->a))
+                vld(F, a_reg, i->a, 0, 8);
             if (i->imm_b)
                 for (int k = 0; k < 8; k++)
                     ldi4(F, b_reg + k,
                          (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
-            else
+            else if (!in_pair(F, i->b))
                 vld(F, b_reg, i->b, 0, 8);
             call_helper(F, nm);
             /* The result comes back in the first argument's registers. */
@@ -2597,20 +2795,14 @@ static void gen_ins(struct a_fn *F, int n)
             /* cp then seven cpc, through memory: the carry and zero flags
              * survive the loads, so the whole 64-bit subtraction's result is
              * in SREG by the last byte. */
-            int swap;
+            int swap, sc = w_scr(F, i);
             enum avr_cond c = cond_for(i->pred, i->sign, &swap);
-            long sl = swap ? (i->imm_b ? -1 : sslot(F, i->b)) : sslot(F, i->a);
-            long sr = swap ? sslot(F, i->a) : (i->imm_b ? -1 : sslot(F, i->b));
+            int vb = i->imm_b ? -1 : i->b;
+            int vl = swap ? vb : i->a, vr = swap ? i->a : vb;
             for (int k = 0; k < n; k++) {
-                if (sl < 0)
-                    ldi4(F, RA, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
-                else
-                    ld_slot_cc(F, RA, sl + k, 1);
-                if (sr < 0)
-                    ldi4(F, RA + 1, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
-                else
-                    ld_slot_cc(F, RA + 1, sr + k, 1);
-                avr_rr(t, k ? AVR_CPC : AVR_CP, RA, RA + 1);
+                int rl = w_byte(F, vl, i->imm, k, sc);
+                int rr = w_byte(F, vr, i->imm, k, sc + 1);
+                avr_rr(t, k ? AVR_CPC : AVR_CP, rl, rr);
             }
             /* The result is four bytes wide even though the comparison was
              * eight -- an IR_CMP yields a 0 or a 1. */
@@ -2636,8 +2828,12 @@ static void gen_ins(struct a_fn *F, int n)
              * __muldi3 read garbage. */
             avr_rr(t, AVR_MOV, R_TMP, R_ZERO);
             for (int k = 0; k < n; k++) {
-                vld(F, RA, i->a, k, 1);
-                avr_rr(t, AVR_OR, R_TMP, RA);
+                int r = RA;
+                if (in_pair(F, i->a))
+                    r = F->loc[i->a] + k;      /* read in its home */
+                else
+                    vld(F, RA, i->a, k, 1);
+                avr_rr(t, AVR_OR, R_TMP, r);
             }
             jump_if(F, i->op == IR_BRZ ? AVR_BR_EQ : AVR_BR_NE, i->label);
             return;
@@ -3694,6 +3890,8 @@ static int g_a_regalloc;
  * caught the emitted code overwriting that value there. g_a_pend is what
  * this generation caught, merged into those by avr_attempt. */
 static int g_a_vol = 1;
+/* Homes for eight-byte values (the first allocation pass): g_a_oct. */
+static int g_a_oct = 1;
 
 static const int *a_pool_for(const struct ir_func *fn, int *n)
 {
@@ -3870,13 +4068,15 @@ static int avr_arg_low(const struct ir_func *fn)
 /* Values the allocator must leave in memory. `quad` asks the other
  * question: which must stay out of the QUAD pass, which takes only the
  * values whose reads need three or four bytes. */
-static char *avr_excl(const struct a_fn *F, int quad)
+static char *avr_excl(const struct a_fn *F, int hw)
 {
     const struct ir_func *fn = F->fn;
-    int nv = fn->nvregs;
+    int nv = fn->nvregs, quad = hw == 4;
     char *x = xcalloc((size_t)(nv ? nv : 1), 1);
     for (int v = 0; v < nv; v++) {
-        if (F->wide[v])
+        if (hw == 8)
+            x[v] = !F->wide[v];      /* the eight-byte pass takes only them */
+        else if (F->wide[v])
             x[v] = 1;
         else if (v < fn->nvars)
             x[v] = quad ? fn->locals[v].size != 4 : fn->locals[v].size > 2;
@@ -3933,9 +4133,11 @@ struct avr_ra {
  * few budgets and keeps what the size says. */
 static int g_a_cap = 8;
 
-static void avr_ra_pass(struct a_fn *F, int quad, int low, int *taken,
+/* The pass for values of `hw` bytes: 2 (pairs), 4 (quads) or 8. */
+static void avr_ra_pass(struct a_fn *F, int hw, int low, int *taken,
                         const char *also, struct avr_ra *r)
 {
+    int quad = hw == 4;
     struct ir_func *fn = F->fn;
     int nv = fn->nvregs, used[RA_MAXPOOL], nused = 0;
     int *a = NULL;
@@ -3951,9 +4153,20 @@ static void avr_ra_pass(struct a_fn *F, int quad, int low, int *taken,
         int have = 0, left;
         for (int b = 2; b <= 17; b++)
             if (*taken & (1 << b)) have++;
-        left = g_a_cap - have / 2;
-        if (quad) left /= 2;
-        if (quad) {
+        left = (g_a_cap - have / 2) / (hw / 2);
+        if (hw == 8) {
+            /* r18..r25 -- where libgcc's 64-bit helpers take their first
+             * argument and return, so a value there is neither pushed nor
+             * moved for one -- then r10..r17, where they take the second,
+             * and r2..r9. */
+            if (g_a_vol && !(*taken & (0xFF << 18)))
+                g_a_pool[g_a_npool++] = 18;
+            for (int b = 10; b >= 2 && left > 0; b -= 8)
+                if (b + 7 < low && !(*taken & (0xFF << b))) {
+                    g_a_pool[g_a_npool++] = b;
+                    left--;
+                }
+        } else if (quad) {
             if (g_a_vol && !(*taken & (0xF << 22)))
                 g_a_pool[g_a_npool++] = 22;
             /* r2..r5, r6..r9, r10..r13, r14..r17 */
@@ -3979,26 +4192,27 @@ static void avr_ra_pass(struct a_fn *F, int quad, int low, int *taken,
     }
     if (!g_a_npool)
         return;
-    x = avr_excl(F, quad);
+    x = avr_excl(F, hw);
     for (int v = 0; v < nv; v++)
         if (also[v]) x[v] = 1;
-    g_a_quadpass = quad;
-    a = ra_allocate(fn, &AVR_RA, F->wide, x, used, &nused);
+    g_a_quadpass = hw != 2;
+    /* `wide` tells the allocator which values no register can hold, and
+     * for the eight-byte pass that is none of them: its registers are
+     * runs of eight. The other passes leave them out through `x`. */
+    a = ra_allocate(fn, &AVR_RA, hw == 8 ? NULL : F->wide, x, used, &nused);
     g_a_quadpass = 0;
     free(x);
-    for (int k = 0; k < nused; k++) {
-        r->used[r->nsave++] = used[k];
-        if (quad)
-            r->used[r->nsave++] = used[k] + 2;
-    }
+    for (int k = 0; k < nused; k++)
+        for (int q = 0; q < hw; q += 2)
+            r->used[r->nsave++] = used[k] + q;
     /* Taken for the other pass by what was HANDED OUT, not by what is
      * saved: `used` lists the call-saved registers only, and a quad in
      * r22-r25 left out of `taken` would be given again as a pair. */
     for (int v = 0; v < nv; v++)
         if (a[v] >= 0) {
             r->loc[v] = a[v];
-            r->hw[v] = (unsigned char)(quad ? 4 : 2);
-            *taken |= (quad ? 0xF : 3) << a[v];
+            r->hw[v] = (unsigned char)hw;
+            *taken |= ((1 << hw) - 1) << a[v];
         }
     free(a);
 }
@@ -4014,10 +4228,18 @@ static void avr_ra_try(struct a_fn *F, int mode, struct avr_ra *r)
     r->hw = xcalloc((size_t)(nv ? nv : 1), 1);
     for (int v = 0; v < nv; v++) r->loc[v] = -1;
     r->nsave = 0;
-    avr_ra_pass(F, quads_first, low, &taken, also, r);
+    /* The eight-byte values first, in every mode: one of those in memory
+     * costs four instructions a byte for every operation on it, and a
+     * home is a run of eight registers that only this pass can find
+     * free. */
+    if (g_a_oct) {
+        avr_ra_pass(F, 8, low, &taken, also, r);
+        for (int v = 0; v < nv; v++) also[v] = r->loc[v] >= 0;
+    }
+    avr_ra_pass(F, quads_first ? 4 : 2, low, &taken, also, r);
     for (int v = 0; v < nv; v++) also[v] = r->loc[v] >= 0;
     if (mode != AVR_RA_PAIRS_ONLY)
-        avr_ra_pass(F, !quads_first, low, &taken, also, r);
+        avr_ra_pass(F, quads_first ? 2 : 4, low, &taken, also, r);
     free(also);
 }
 
@@ -4105,7 +4327,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     if (ra_mode != AVR_RA_NONE) {
         F.remat = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), 1);
         for (int v = fn->nvars; v < fn->nvregs; v++)
-            F.remat[v] = F.cknown[v] == 1 && !F.wide[v];
+            F.remat[v] = F.cknown[v] == 1;
         /* EMBCC_AVR_REMAT_MAX=k: only the first k are rebuilt, the rest
          * kept -- for bisecting one that is rebuilt wrong. */
         if (avr_knob("EMBCC_AVR_REMAT_MAX")) {
@@ -4545,6 +4767,8 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     /* EMBCC_AVR_NO_VOL: no homes in B, which is what the allocator did
      * before it had them -- for telling a miscompile of theirs apart. */
     g_a_vol = !avr_knob("EMBCC_AVR_NO_VOL");
+    /* EMBCC_AVR_NO_OCT: every eight-byte value in memory, as before. */
+    g_a_oct = !avr_knob("EMBCC_AVR_NO_OCT");
     g_a_nvr = nv;
     g_a_novol = xcalloc((size_t)(nv ? nv : 1), 1);
     g_a_nohome = xcalloc((size_t)(nv ? nv : 1), 1);
@@ -4601,6 +4825,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     g_a_cap = 8;
     g_a_xhome = 0;
     g_a_vol = 1;
+    g_a_oct = 1;
 }
 
 void codegen_unit_avr(struct ir_unit *iu, struct code *text,
