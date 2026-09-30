@@ -1792,10 +1792,8 @@ static int w_fill(struct a_fn *F, int top, int sign)
  */
 static void extend(struct a_fn *F, int r, int from, int sign, int to)
 {
-    int k;
     if (from >= to)
         return;
-    (void)k;
     if (!sign) {
         fill_run(F->t, r + from, to - from, R_ZERO);
         return;
