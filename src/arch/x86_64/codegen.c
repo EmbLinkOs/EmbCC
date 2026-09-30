@@ -2344,19 +2344,32 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int frameless = g_regalloc && frame == 0 && nsave == 0 &&
                     !fn->has_alloca && !f->is_varargs && !g_want_debug &&
                     sret_slot == 0 && f->nparams <= 4;
+    /* A SIBLING call is not a call here: it leaves rsp exactly as it
+     * found it and jumps, and the callee sees the stack our caller
+     * aligned. A function whose only calls are tail calls needs no frame
+     * record to tear down before them. */
     for (int n = 0; n < fn->nins && frameless; n++)
         switch (fn->ins[n].op) {
-        case IR_CALL: case IR_ASM: case IR_ALLOCA: case IR_VA_START:
+        case IR_CALL:
+            if (!(g_tailcalls && tail_call_ok(fn, n)))
+                frameless = 0;
+            break;
+        case IR_ASM: case IR_ALLOCA: case IR_VA_START:
         case IR_FRAMEADDR: case IR_SPSAVE: case IR_SPRESTORE:
             frameless = 0;
             break;
         default:
             break;
         }
+    /* float and double arrive in xmm0-3 under both conventions when there
+     * are four parameters or fewer -- System V has eight of them, and
+     * Win64 gives each of the four positions an xmm register as well as
+     * an integer one. long double is x87 memory in both. */
     for (int p = 0; p < f->nparams && frameless; p++) {
         struct type *pt = f->param_tys[p];
         if (!pt || pt->kind == TY_STRUCT || pt->kind == TY_ARRAY ||
-            pt->kind == TY_INT128 || ty_is_float(pt) || ty_size(pt) > 8)
+            pt->kind == TY_INT128 || pt->kind == TY_LDOUBLE ||
+            ty_size(pt) > 8)
             frameless = 0;
     }
 
@@ -2676,8 +2689,19 @@ static void gen_func(struct ir_func *fn, struct code *text,
     for (int t = 0; t < fn->nins; t++) if (fn->ins[t].op == IR_RET) nret++;
     int shared_epi = g_regalloc && nsave >= 1 && nret >= 2;
     int *epi_patch = NULL, nepi = 0, capepi = 0;
+    /* UNREACHABLE code: what follows a return, a jump, a trap or a tail
+     * call, up to the next label, which is the only way back in. A
+     * sibling call's IR_RET was emitted after its `jmp` -- `mov %r8,%rax;
+     * leave; ret` that nothing could reach, in every function ending in
+     * one. Optimising builds only, so -O0/-O1 stay byte-identical. */
+    int dead = 0, tail_made = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        if (dead) {
+            if (i->op != IR_LABEL && i->op != IR_LANDING)
+                continue;
+            dead = 0;
+        }
         /* What xmm0 held coming in. Cleared by default, so any op that
          * is not one of the vector cases below invalidates it simply by
          * not setting it again. */
@@ -4160,7 +4184,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * callee-saved ones cannot disturb them. Doing it the
                  * other way round would restore over an argument. */
                 restore_callee(text, used_callee, nsave, save_base);
-                x86_leave(text);
+                if (!frameless)
+                    x86_leave(text);
                 int patch = x86_jmp_rel32(text);
                 if (i->callee->has_defn) {
                     struct callsite cs;
@@ -4173,6 +4198,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     ec.callee = i->callee;
                     PUSH(st->ext, st->next, st->capext, ec);
                 }
+                tail_made = 1;
                 break;    /* whatever follows is now unreachable, and
                            * a join label after it is still entered by
                            * the path that did not take this jump */
@@ -4428,6 +4454,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
         if (i->op == IR_CALL && fn->neh)
             ir_add_csite(fn, ins_start - f->code_off, text->len - f->code_off,
                          i->eh_region - 1);
+        if (g_regalloc && (tail_made || i->op == IR_RET ||
+                           i->op == IR_JMP || i->op == IR_UD2))
+            dead = 1;
+        tail_made = 0;
     }
 
     /* Every function ends with an epilogue, whether or not its last
