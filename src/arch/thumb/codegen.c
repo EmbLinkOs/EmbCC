@@ -2599,19 +2599,34 @@ static void gen_ins(struct t_fn *F, int n)
         wrote(F, i->dst, d);
         return;
     }
-    case IR_DIV: case IR_MOD:
-        rd(F, i->a, T_ACC);
-        operand_b(F, i, T_TMP);
-        t_div(t, T_ADDR, T_ACC, T_TMP, i->sign);
-        if (i->op == IR_MOD) {
-            /* There is no remainder instruction: r = a - (a / b) * b,
-             * which `mls` does in one. */
-            t_mls(t, T_ACC, T_ADDR, T_TMP, T_ACC);
-            wr(F, i->dst, T_ACC);
+    case IR_DIV: case IR_MOD: {
+        /* The operands where they live and the result where it goes:
+         * sdiv, udiv and mls take any registers and read all of them
+         * before writing. Copying both into r12 and r11 first and the
+         * quotient through r10 was three moves a division, and r10 and
+         * r11 are callee-saved -- pushed for it. */
+        int sa = rdr(F, i->a, T_ACC), sb, d;
+        if (i->imm_b) {
+            t_mov_imm(t, T_TMP, (long)i->imm, 0);
+            sb = T_TMP;
         } else {
-            wr(F, i->dst, T_ADDR);
+            sb = rdr(F, i->b, T_TMP);
         }
+        d = wreg(F, i->dst, T_ACC);
+        if (i->op == IR_DIV) {
+            t_div(t, d, sa, sb, i->sign);
+        } else {
+            /* There is no remainder instruction: r = a - (a / b) * b,
+             * which `mls` does in one. The quotient in d itself when d
+             * is neither operand, else in r12 unless an operand is. */
+            int q = d != sa && d != sb ? d
+                  : sa != T_ACC && sb != T_ACC ? T_ACC : T_ADDR;
+            t_div(t, q, sa, sb, i->sign);
+            t_mls(t, d, q, sb, sa);
+        }
+        wrote(F, i->dst, d);
         return;
+    }
     case IR_SHL: case IR_SHR: {
         int sh = i->op == IR_SHL ? T_SH_LSL : i->sign ? T_SH_ASR : T_SH_LSR;
         int sa = rdr(F, i->a, T_ACC);
