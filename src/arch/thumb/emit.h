@@ -253,6 +253,8 @@ void t_strexbh(struct code *c, int rd, int rt, int rn, int size);
 void t_clrex(struct code *c);
 int t_bcond16(struct code *c, int cond);
 int t_b16(struct code *c);
+int t_cbz(struct code *c, int nonzero, int rn);
+int t_patch_cbz(struct code *c, int at, int target);
 int t_patch_bcond16(struct code *c, int at, int target);
 int t_patch_b16(struct code *c, int at, int target);
 void t_vcvt_f_from_i(struct code *c, int d, int m, int sgn, int dbl);

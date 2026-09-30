@@ -171,7 +171,10 @@ struct t_fn {
     long va_regsave;
     long va_first;       /* ... and the offset of the first UNNAMED one */
     int *label_off;      /* per label id, or -1 while unseen */
-    struct { int at; int label; int cond; int sz; } *fix;
+    /* cond >= T_CBZ is a cbz (T_CBZ) or cbnz (T_CBZ + 1). cz_at is where
+     * a zero test's `cmp` began when it could become one (r0-r7), else -1:
+     * what the first pass measures cbz's reach from. */
+    struct { int at; int label; int cond; int sz; int cz_at; } *fix;
     /* Branch relaxation: per branch, in emission order, whether the
      * first pass found its target within the 16-bit form's reach. NULL
      * on the first pass, which emits every branch 32-bit. */
@@ -1194,6 +1197,8 @@ static void fb_addr(struct t_fn *F, int rd, long off)
 
 /* ---- branches ------------------------------------------------------- */
 
+#define T_CBZ 100              /* a fix's cond for cbz; cbnz is T_CBZ + 1 */
+
 static void want_label(struct t_fn *F, int at, int label, int cond)
 {
     if (F->nfix == F->capfix) {
@@ -1204,6 +1209,7 @@ static void want_label(struct t_fn *F, int at, int label, int cond)
     F->fix[F->nfix].label = label;
     F->fix[F->nfix].cond = cond;
     F->fix[F->nfix].sz = F->t->len - at;
+    F->fix[F->nfix].cz_at = -1;
     F->nfix++;
 }
 
@@ -2591,8 +2597,22 @@ static void gen_ins(struct t_fn *F, int n)
             t_cmp_imm(t, A_LO, 0);
         } else {
             /* In place: a low register takes the 16-bit `cmp rN, #0`,
-             * where a copy into r12 took a mov and a cmp.w. */
-            t_cmp_imm(t, rdr(F, i->a, T_ACC), 0);
+             * where a copy into r12 took a mov and a cmp.w -- and when the
+             * first pass measured the target forward within 126 bytes,
+             * `cbz`/`cbnz`: the compare and the branch in two bytes. */
+            int r = rdr(F, i->a, T_ACC), k = F->nfix, cmp_at;
+            if (r < 8 && F->shortb && k < F->nshortb && F->shortb[k] == 2) {
+                int at = t_cbz(t, i->op == IR_BRNZ, r);
+                want_label(F, at, i->label, T_CBZ + (i->op == IR_BRNZ));
+                F->bc_end = -1;        /* no condition to invert */
+                return;
+            }
+            cmp_at = t->len;
+            t_cmp_imm(t, r, 0);
+            jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
+            if (r < 8)
+                F->fix[F->nfix - 1].cz_at = cmp_at;
+            return;
         }
         jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
         return;
@@ -3792,7 +3812,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                             "never placed\n", F.fix[i].label, fn->name);
             exit(1);
         }
-        if (F.fix[i].sz == 2) {
+        if (F.fix[i].cond >= T_CBZ) {
+            if (!t_patch_cbz(t, F.fix[i].at, target))
+                internal_error("thumb: %s: a cbz no longer reaches its "
+                               "label", fn->name);
+        } else if (F.fix[i].sz == 2) {
             /* Measured to fit on the first pass, and nothing between
              * here and the target can have grown since. Checked anyway:
              * an offset that did not fit would be a jump elsewhere. */
@@ -3820,6 +3844,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             long d = (long)F.label_off[F.fix[i].label] - F.fix[i].at - 4;
             shortb[i] = F.fix[i].cond < 0 ? (d >= -2048 && d <= 2046)
                                           : (d >= -256 && d <= 254);
+            /* cbz: forward 0..126 from where the cmp stands, since the
+             * two become the one instruction there. */
+            if (F.fix[i].cz_at >= 0) {
+                long dz = (long)F.label_off[F.fix[i].label] -
+                          F.fix[i].cz_at - 4;
+                if (dz >= 0 && dz <= 126)
+                    shortb[i] = 2;
+            }
+            any |= shortb[i];
             any |= shortb[i];
         }
         /* ...and which scratch registers it touched: only those need

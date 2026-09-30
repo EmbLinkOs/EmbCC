@@ -594,6 +594,32 @@ int t_bcond16(struct code *c, int cond)
 }
 int t_b16(struct code *c) { int at = c->len; hw(c, 0xE000u); return at; }
 
+/* cbz/cbnz Rn, label: 1011 o0i1 iiii irrr, a FORWARD branch of 0..126
+ * bytes from pc+4 on r0-r7 being zero (o=0) or not (o=1). No flags. */
+int t_cbz(struct code *c, int nonzero, int rn)
+{
+    int at = c->len;
+    if (rn < 0 || rn > 7) {
+        /* emit.c is linked into the encoding checkers, which carry no
+         * driver: no internal_error here. */
+        fprintf(stderr, "embcc: internal: thumb: cbz on r%d, which is not "
+                        "a low register\n", rn);
+        abort();
+    }
+    hw(c, 0xB100u | (unsigned)(nonzero ? 0x800 : 0) | (unsigned)rn);
+    return at;
+}
+int t_patch_cbz(struct code *c, int at, int target)
+{
+    long off = (long)target - (long)at - 4;
+    unsigned h = (unsigned)(c->p[at + 1] << 8 | c->p[at]);
+    if (off < 0 || off > 126 || (off & 1))
+        return 0;
+    patch_hw(c, at, (h & 0xfd07u) | (unsigned)(((off >> 6) & 1) << 9) |
+                    (unsigned)(((off >> 1) & 0x1f) << 3));
+    return 1;
+}
+
 int t_patch_bcond16(struct code *c, int at, int target)
 {
     long off = (long)target - (long)at - 4;
