@@ -2526,14 +2526,48 @@ static int is_uns64(const struct type *t)
     return t && ty_is_integer(t) && t->is_unsigned && ty_size(t) >= 8;
 }
 
+/* The address of an lvalue whose address is a constant: `*p`, `p->m` and
+ * `lv.m` over a pointer that folds -- `(T *)0x40020000` and arithmetic on
+ * it. C11 6.6p9 calls these address constants, and the register maps of
+ * every microcontroller header are made of them: `&GPIOA->ODR` in a
+ * static const pointer, `&((volatile u8 *)0x80)[4]`. A subscript arrives
+ * here as `*(p + i)`, which const_fold scales. A bitfield has no address,
+ * and anything built on a variable is resolve_addr's (a relocation). */
+static int addr_fold(const struct expr *lv, long *out)
+{
+    long base;
+    switch (lv->kind) {
+    case EXPR_DEREF:
+        return const_fold(lv->rhs, out);
+    case EXPR_MEMBER:
+        if (!lv->memb || lv->memb->is_bitfield || !lv->lhs)
+            return 0;
+        if (lv->is_arrow ? !const_fold(lv->lhs, &base)
+                         : !addr_fold(lv->lhs, &base))
+            return 0;
+        *out = (long)((unsigned long)base + (unsigned long)lv->memb->off);
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int const_fold(const struct expr *e, long *out)
 {
     long a, b;
+
+    /* An array lvalue used as a value decays to its address -- the array
+     * member in `&((struct regs *)0x100)->arr[2]`. */
+    if (e->undecayed && e->undecayed->kind == TY_ARRAY &&
+        (e->kind == EXPR_MEMBER || e->kind == EXPR_DEREF))
+        return addr_fold(e, out);
 
     switch (e->kind) {
     case EXPR_NUM:
         *out = e->num;
         return 1;
+    case EXPR_ADDR:
+        return addr_fold(e->rhs, out);
     case EXPR_CAST:
         if (!const_fold(e->rhs, out))
             return 0;
@@ -2584,6 +2618,38 @@ static int const_fold(const struct expr *e, long *out)
         }
         if (!const_fold(e->lhs, &a) || !const_fold(e->rhs, &b))
             return 0;
+        if ((e->op == B_ADD || e->op == B_SUB) && e->lhs->ty && e->rhs->ty &&
+            (e->lhs->ty->kind == TY_PTR || e->rhs->ty->kind == TY_PTR)) {
+            /* Pointer arithmetic counts ELEMENTS, as irgen's does: the
+             * integer side scaled by the pointee's size, a difference of
+             * two pointers divided by it. This folder added the bare
+             * integer, so `(unsigned *)0x100 + 1` in a static initializer
+             * was 0x101 -- a wrong address, silently. */
+            int lp = e->lhs->ty->kind == TY_PTR, rp = e->rhs->ty->kind == TY_PTR;
+            struct type *pt = (lp ? e->lhs->ty : e->rhs->ty)->pointee;
+            long size;
+            if (!pt || ty_is_vla(pt))
+                return 0;
+            size = pt->kind == TY_VOID ? 1 : ty_size(pt);   /* GNU void * */
+            if (size <= 0)
+                return 0;
+            if (lp && rp) {
+                if (e->op != B_SUB)
+                    return 0;
+                *out = in_type(e, (long)((unsigned long)a - (unsigned long)b) /
+                                  size);
+                return 1;
+            }
+            {
+                unsigned long p = (unsigned long)(lp ? a : b);
+                unsigned long k = (unsigned long)(lp ? b : a) *
+                                  (unsigned long)size;
+                if (!lp && e->op == B_SUB)
+                    return 0;                          /* int - ptr */
+                *out = (long)(e->op == B_ADD ? p + k : p - k);
+                return 1;
+            }
+        }
         {
             /* Unsigned arithmetic for the wrap-around ones, so the host never
              * sees a signed overflow. The operands already carry their own
