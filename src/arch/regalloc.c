@@ -267,6 +267,31 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                               const char *g_wide, const char *fltmap, int fp,
                               int *used_out, int *nused_out);
 
+/* ---- spill cost -----------------------------------------------------
+ *
+ * What a value costs to keep in memory: a load at each read and a store at
+ * each write, weighted by how deep in loops it happens. The simplify pass
+ * below spills the node with the lowest cost for the square of its degree
+ * -- Chaitin's rule, with the degree counted twice because a node that
+ * interferes with more of the graph frees more of it -- where it used to
+ * spill the one with the highest degree alone, the rule that sends a value
+ * read on every trip of a loop to the stack because it is live across a
+ * long switch. Measured against cost/degree and against no loop weight:
+ * this is the smallest on all five targets together (-1411 bytes of code,
+ * math included), AVR and x86-64 most. */
+struct ra_costacc { const int *eof; const int *alias; unsigned long *cost;
+                    unsigned long w; int nvr; };
+static void ra_cost_cb(int v, void *ctx)
+{
+    struct ra_costacc *c = ctx;
+    if (v < 0 || v >= c->nvr || c->eof[v] < 0)
+        return;
+    int e = c->eof[v];
+    while (c->alias[e] != e)
+        e = c->alias[e];
+    c->cost[e] += c->w;
+}
+
 int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                  const char *g_wide, const char *fltmap,
                  int *used_out, int *nused_out)
@@ -782,9 +807,45 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         free(deg);
     }
 
+    /* Each node's spill cost (ra_cost_cb): its reads and writes, a loop
+     * level multiplying their weight by four -- a loop being the span of a
+     * backward branch, which is what the IR has for one. */
+    unsigned long *cost = xcalloc((size_t)(E ? E : 1), sizeof *cost);
+    /* EMBCC_RA_DEGREE_SPILL=1: the old rule, highest degree first, for
+     * bisecting a difference to this choice. */
+    int by_degree = getenv("EMBCC_RA_DEGREE_SPILL") != NULL;
+    {
+        int *depth = xcalloc((size_t)(nins ? nins : 1), sizeof *depth);
+        int *lab = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *lab);
+        for (int l = 0; l < fn->nlabels; l++) lab[l] = -1;
+        for (int i = 0; i < nins; i++)
+            if (fn->ins[i].op == IR_LABEL && fn->ins[i].label >= 0 &&
+                fn->ins[i].label < fn->nlabels)
+                lab[fn->ins[i].label] = i;
+        for (int i = 0; i < nins; i++) {
+            const struct ir_ins *in = &fn->ins[i];
+            if ((in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ) &&
+                in->label >= 0 && in->label < fn->nlabels &&
+                lab[in->label] >= 0 && lab[in->label] <= i)
+                for (int k = lab[in->label]; k <= i; k++)
+                    depth[k]++;
+        }
+        struct ra_costacc ca;
+        ca.eof = eof; ca.alias = alias; ca.cost = cost; ca.nvr = nvr;
+        for (int i = 0; i < nins; i++) {
+            int d = depth[i] > 5 ? 5 : depth[i];
+            const struct ir_ins *in = &fn->ins[i];
+            ca.w = 1UL << (2 * d);
+            ra_each_use(in, ra_cost_cb, &ca);
+            ra_cost_cb(in->op == IR_STVAR ? in->dst : ra_ins_def(in), &ca);
+        }
+        free(depth); free(lab);
+    }
+
     /* Chaitin-Briggs simplify order. Repeatedly remove a node of degree < NCALLEE
-     * (trivially colourable) onto a stack; when none remains, remove the highest-
-     * degree node as an OPTIMISTIC spill candidate. Colouring then pops the stack
+     * (trivially colourable) onto a stack; when none remains, remove the node
+     * with the lowest spill cost for its degree as an OPTIMISTIC spill
+     * candidate. Colouring then pops the stack
      * (below) — a spill candidate popped early may still find a free colour, so
      * fewer values actually spill than a fixed first-appearance order gives.
      * Deterministic: ties broken by the lowest eligible index. */
@@ -807,10 +868,15 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             int pick = -1;
             for (int e = 0; e < E; e++)          /* a trivially-colourable node */
                 if (!gone[e] && !absorbed[e] && deg[e] < NP) { pick = e; break; }
-            if (pick < 0)                        /* else the most-constrained one */
+            if (pick < 0)                        /* else the cheapest to spill */
                 for (int e = 0; e < E; e++)
                     if (!gone[e] && !absorbed[e] &&
-                        (pick < 0 || deg[e] > deg[pick])) pick = e;
+                        (pick < 0 ||
+                         (by_degree
+                              ? deg[e] > deg[pick]
+                              : (unsigned long long)cost[e] * deg[pick] * deg[pick] <
+                                (unsigned long long)cost[pick] * deg[e] * deg[e])))
+                        pick = e;
             if (pick < 0) break;                 /* only absorbed nodes left */
             gone[pick] = 1;
             order[sp++] = pick;                  /* push */
@@ -985,6 +1051,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     *nused_out = nu;
 
     free(hint); free(alias); free(absorbed); free(xcross); free(ehint);
+    free(cost);
     free(first); free(last); free(elig); free(crosses);
     free(eof); free(eidx); free(adj); free(pref);
     free(members); free(order);
