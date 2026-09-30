@@ -1500,8 +1500,7 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
         long k = i->imm;
         if (i->op != IR_ADD || !i->imm_b || i->flt || i->w != w_addr ||
             p < fn->nvars || p >= nv || s < 0 || s >= nv || s == p ||
-            defs[p] != 1 || defs[s] != 1 || uses[p] != addr_uses[p] ||
-            !uses[p])
+            defs[p] != 1 || uses[p] != addr_uses[p] || !uses[p])
             continue;
         int ok = 1;
         for (int m = 0; m < fn->nins && ok; m++) {
@@ -1510,6 +1509,31 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
                 long off = (long)u->memoff + k;
                 if (off < lo || off > hi - u->size) ok = 0;
             }
+        }
+        if (ok && defs[s] != 1) {
+            /* A base written more than once -- a pointer a loop walks --
+             * still holds the ADD's value at an access that follows it in
+             * the same block with no write to the base between. Every
+             * access must be there: an unrolled loop's `[p + 4]`,
+             * `[p + 8]` are exactly this, and stayed an add and a load
+             * each while the base's second definition, the walk itself,
+             * kept the rule to one. */
+            int seen = 0;
+            for (int m = n + 1; m < fn->nins && ok; m++) {
+                const struct ir_ins *u = &fn->ins[m];
+                if (u->op == IR_LABEL || u->op == IR_JMP ||
+                    u->op == IR_BRZ || u->op == IR_BRNZ || u->op == IR_RET ||
+                    u->op == IR_IGOTO || u->op == IR_UD2)
+                    break;
+                if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == p)
+                    seen++;
+                if (seen == uses[p])
+                    break;
+                if (ra_ins_def(u) == s || (u->op == IR_STVAR && u->dst == s))
+                    ok = 0;
+            }
+            if (seen != uses[p])
+                ok = 0;
         }
         if (!ok)
             continue;

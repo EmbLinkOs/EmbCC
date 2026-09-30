@@ -6817,7 +6817,11 @@ struct unrloop {
     int Lh;
     int iv;            /* the induction variable's phi temp */
     int bound;         /* the vreg it is compared against (loop-invariant) */
-    int cmp_ins;       /* `c = cmp.w lt iv, bound` -- not copied */
+    long step;         /* what the iv advances by each iteration: 1, or a
+                        * pointer walk's element size */
+    int cmp_ins;       /* `c = cmp.w lt iv, bound`, or `cmp.w ne iv, bound`
+                        * once strength reduction has made the loop walk a
+                        * pointer -- not copied */
     int w;             /* 4 or 8: the compare's width */
     int body_lo;       /* [body_lo, cmp_ins): what a copy consists of */
 };
@@ -6900,14 +6904,21 @@ static int unr_find(struct ir_func *fn, struct bb *bb, int nbb, int *order,
         if (L->hi > fn->nins)
             continue;
 
-        /* `c = cmp.w lt iv, bound`, signed, bound a loop-invariant vreg. */
+        /* `c = cmp.w lt iv, bound`, signed, bound a loop-invariant vreg --
+         * or `cmp.w ne iv, bound`, which is what induction-variable
+         * strength reduction leaves: the loop walks a pointer up to its
+         * end. For `ne` the iterations left are the UNSIGNED, modular
+         * (bound - iv) / step exactly when the loop terminates at all,
+         * whatever the direction the values were in, so the counted
+         * tests below are right for it with no signed guard. */
         int cn = (br->a >= 0 && br->a < fn->nvregs && d->cnt[br->a] == 1)
                  ? d->ins[br->a] : -1;
         if (cn < L->lo || cn >= L->hi || cn != L->hi - 2)
             continue;                    /* the test must be the latch's last */
         struct ir_ins *cmp = &fn->ins[cn];
-        if (cmp->op != IR_CMP || cmp->pred != B_LT || !cmp->sign || cmp->flt ||
-            cmp->imm_b || cmp->b < 0 || cmp->b >= fn->nvregs)
+        if (cmp->op != IR_CMP || cmp->flt || cmp->imm_b ||
+            cmp->b < 0 || cmp->b >= fn->nvregs ||
+            !((cmp->pred == B_LT && cmp->sign) || cmp->pred == B_NE))
             continue;
         if (cmp->w != 4 && cmp->w != 8)
             continue;
@@ -6922,24 +6933,39 @@ static int unr_find(struct ir_func *fn, struct bb *bb, int nbb, int *order,
         if (bn == -2 || (bn >= L->lo && bn < L->hi))
             continue;
 
-        /* `iv = mov next`, `next = iv + 1`, both inside the loop. */
-        int copy_ins = -1;
-        for (int n = L->lo; n < L->hi; n++)
-            if (fn->ins[n].op == IR_MOV && fn->ins[n].dst == L->iv) {
-                if (copy_ins >= 0) { copy_ins = -1; break; }
-                copy_ins = n;
-            }
-        if (copy_ins < 0)
+        /* `iv = mov next`, `next = iv + 1`, both inside the loop -- or the
+         * one instruction `iv = add iv, step`, which is how strength
+         * reduction advances the pointer it walks. Either way the iv must
+         * be written exactly once inside the loop, so that the renaming
+         * of the copies carries it from each to the next. */
+        int copy_ins = -1, step_ins = -1, ndef = 0;
+        for (int n = L->lo; n < L->hi; n++) {
+            const struct ir_ins *q = &fn->ins[n];
+            if (def_target(q) != L->iv)
+                continue;
+            ndef++;
+            if (q->op == IR_MOV) copy_ins = n;
+            else if (q->op == IR_ADD && q->a == L->iv) step_ins = n;
+        }
+        if (ndef != 1)
             continue;
-        int nxt = fn->ins[copy_ins].a;
-        if (nxt < 0 || nxt >= fn->nvregs || d->cnt[nxt] != 1)
+        if (copy_ins >= 0) {
+            int nxt = fn->ins[copy_ins].a;
+            if (nxt < 0 || nxt >= fn->nvregs || d->cnt[nxt] != 1)
+                continue;
+            step_ins = d->ins[nxt];
+            if (step_ins < L->lo || step_ins >= L->hi ||
+                fn->ins[step_ins].op != IR_ADD ||
+                fn->ins[step_ins].a != L->iv)
+                continue;
+        } else if (step_ins < 0) {
             continue;
-        int step_ins = d->ins[nxt];
+        }
         long step;
-        if (step_ins < L->lo || step_ins >= L->hi ||
-            fn->ins[step_ins].op != IR_ADD || fn->ins[step_ins].a != L->iv ||
-            !const_b(fn, d, &fn->ins[step_ins], &step) || step != 1)
+        if (!const_b(fn, d, &fn->ins[step_ins], &step) || step < 1 ||
+            (cmp->pred == B_LT && step != 1) || step > 4096)
             continue;
+        L->step = step;
 
         /* Everything from just after the header's label up to the test is
          * what a copy consists of. */
@@ -7067,11 +7093,17 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
             p = ib_push(&nb);
             *p = fn->ins[L.cmp_ins];          /* same compare, same location */
             p->dst = c0;
+            /* ...and when there is not: the ORIGINAL loop, not the exit.
+             * The loop is a rotated one, entered from a guard that already
+             * held, so the difference cannot show today; but a rotated
+             * loop is a do-while, and one entered with its test false
+             * runs its body once, which the remainder loop does and the
+             * exit would not. */
             p = unr_emit(&nb, IR_BRZ, lineh, colh);
-            p->a = c0; p->label = Lexit; p->w = brw; p->sign = brs;
+            p->a = c0; p->label = L.Lh; p->w = brw; p->sign = brs;
 
             p = unr_emit(&nb, IR_CONST, lineh, colh);
-            p->dst = kU; p->imm = U; p->w = L.w;
+            p->dst = kU; p->imm = U * L.step; p->w = L.w;   /* U iterations' worth */
             int d0 = fn->nvregs++, e0 = fn->nvregs++;
             p = unr_emit(&nb, IR_SUB, lineh, colh);
             p->dst = d0; p->a = L.bound; p->b = L.iv; p->w = L.w; p->sign = 1;
