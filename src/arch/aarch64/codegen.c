@@ -1723,10 +1723,40 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         align16(t);
     f->code_off = t->len;
 
+    /* A leaf with nothing on the stack needs no frame record: no call
+     * overwrites x30, and x29 is only ever the frame base of a function
+     * that has a frame. Then there is no prologue, the epilogue is `ret`,
+     * and the unwind tables' opening rule (the CFA is sp) holds from
+     * entry to return -- 94 of the libc corpus's leaves built one, three
+     * instructions each. Not with a parameter on the caller's stack, which
+     * is found through x29, and not where anything could read the frame:
+     * -g, a VLA, va_start, EH, asm, the frame-address builtins. */
+    int frameless = g_a64_regalloc && !want_debug && fr.size == 0 &&
+                    !nsave && !fn->has_alloca && !f->is_varargs && !fn->neh;
+    for (int n = 0; n < fn->nins && frameless; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_CALL || i->op == IR_ASM || i->op == IR_ALLOCA ||
+            i->op == IR_VA_START || i->op == IR_FRAMEADDR ||
+            i->op == IR_SPSAVE || i->op == IR_SPRESTORE ||
+            a64_op_calls_helper(i))
+            frameless = 0;
+    }
+    if (frameless) {
+        struct a64_cursor cu = { 0, 0, 0, 0 };
+        struct a64_argplan pl;
+        for (int p = 0; p < fn->nparams && frameless; p++) {
+            a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl,
+                          0, 0);
+            if (pl.where == AP_STACK || pl.byref)
+                frameless = 0;
+        }
+    }
+    f->cfi_frameless = frameless;
     /* -fstack-usage: the frame plus the 16-byte record the prologue
      * pushes (x29 and x30). */
-    f->stack_bytes = (int)(fr.size + 16);
-    a64_prologue(t, fr.size);
+    f->stack_bytes = frameless ? 0 : (int)(fr.size + 16);
+    if (!frameless)
+        a64_prologue(t, fr.size);
     /* for the unwind tables: stp x29, x30 ends at +4, mov x29, sp at +8 */
     f->cfi_push = 4;
     f->cfi_frame = 8;
@@ -3034,7 +3064,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             a64_ldr(t, used_callee[k], FB, save_base + k * 8, 8, 0, 8);
         k += pair;
     }
-    if (fn->has_alloca) {
+    if (frameless) {
+        a64_ret(t);
+    } else if (fn->has_alloca) {
         a64_ldr(t, A64_FBREG, A64_FBREG, fr.fb_save, 8, 0, 8);
         a64_word(t, 0x910003BFUL);                   /* mov sp, x29 */
         a64_epilogue(t, 0);
