@@ -71,7 +71,7 @@
 #define FAR  RV_T6
 
 struct rv_sites {
-    struct { int patch_off; struct func *target; int jal; } *call;
+    struct { int patch_off; struct func *target; int jal, tail; } *call;
     int ncall, capcall;
     struct extcall *ext;   int next, capext;
     struct strsite *str;   int nstr, capstr;
@@ -119,6 +119,10 @@ struct rv_fn {
      * ra is never overwritten and needs no slot, save or restore. With
      * nothing else in the frame, the function touches sp not at all. */
     int leaf;
+    /* Per instruction: an IR_CALL made as a TAIL call (rv_tail_ok) --
+     * the epilogue's restores, then a jump, with the IR_RET after it
+     * never reached. NULL when there are none. */
+    char *tail;
     long save_at;        /* ... and the allocator's callee-saved ones */
     long va_regsave;     /* a variadic function's a0-a7 spill area, or -1 */
     long va_first;       /* ... and the offset of the first UNNAMED one */
@@ -1088,6 +1092,7 @@ static void note_call(struct rv_sites *st, int at, struct func *target)
     st->call[st->ncall].patch_off = at;
     st->call[st->ncall].target = target;
     st->call[st->ncall].jal = 0;
+    st->call[st->ncall].tail = 0;
     st->ncall++;
 }
 
@@ -1099,6 +1104,7 @@ static void note_ext(struct rv_sites *st, int at, struct func *callee)
     }
     st->ext[st->next].patch_off = at;
     st->ext[st->next].callee = callee;
+    st->ext[st->next].tail = 0;
     st->next++;
 }
 
@@ -1693,6 +1699,85 @@ static int gen_ins64(struct rv_fn *F, int n)
 
 /* ---- one call ------------------------------------------------------------ */
 
+/* Can the call at n be a TAIL call: the frame torn down first and the
+ * callee jumped to, returning straight to this function's caller? Only
+ * when nothing of this frame can still be needed -- no argument on the
+ * stack or passed by reference (the copy is in this frame), no local
+ * whose address could have escaped into the callee, no struct result --
+ * and the IR_RET right after returns exactly what the call returned, at
+ * the same width and in the same register class. */
+static int rv_tail_ok(const struct rv_fn *F, int n)
+{
+    const struct ir_func *fn = F->fn;
+    const struct ir_ins *i = &fn->ins[n], *r;
+    struct argplace pl;
+    int narg = 0;
+    long stk = 0;
+
+    if (i->op != IR_CALL || i->indirect || i->call_varargs || i->retsize ||
+        i->flt || getenv("EMBCC_NO_TAILCALL"))
+        return 0;
+    if (fn->ret_abi.is_struct || fn->ret_abi.is_float)
+        return 0;
+    if (n + 1 >= fn->nins) {
+        /* the last instruction of a function that returns nothing */
+        if (fn->ret_abi.size)
+            return 0;
+    } else {
+        r = &fn->ins[n + 1];
+        if (r->op != IR_RET)
+            return 0;
+        if (r->a >= 0 && (r->a != i->dst ||
+                          i->ret_tybytes != fn->ret_abi.size ||
+                          i->ret_tybytes > F->w))
+            return 0;
+    }
+    {
+        int nret = 0;
+        for (int k = 0; k < fn->nins; k++) {
+            enum ir_op op = fn->ins[k].op;
+            if (op == IR_ADDR || op == IR_VA_START)
+                return 0;
+            nret += op == IR_RET;
+        }
+        /* ...and the function's ONLY return: elsewhere the restores
+         * here would sit beside the epilogue's, which a tail call
+         * pays for with its copy. Measured over the libc corpus, that
+         * rule is the smaller of the two. */
+        if (nret > 1)
+            return 0;
+    }
+    if (fn->has_alloca || fn->is_varargs || fn->neh)
+        return 0;
+    for (int k = 0; k < i->nargs; k++) {
+        place_arg(F->w, i->argv[k].size, arg_align(F->w, &i->argv[k]),
+                  i->argv[k].is_struct, 0, &narg, &stk, &pl);
+        if (pl.nstk || pl.byref)
+            return 0;
+    }
+    return 1;
+}
+
+/* The epilogue's restores: the callee-saved registers, ra when it was
+ * saved, and the frame. Shared by the epilogue and a tail call, which
+ * must leave exactly the state the epilogue's `ret` would. */
+static void rv_restore(struct rv_fn *F)
+{
+    struct code *t = F->t;
+    for (int k = 0; k < F->nsave; k++)
+        ld_sp(F, F->used_callee[k], F->save_at + (long)k * F->w, F->w, 1);
+    if (!F->leaf)
+        ld_sp(F, RV_RA, F->ra_slot, F->w, 1);
+    if (F->frame) {
+        if (rv_fits(F->frame, 12)) {
+            rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)F->frame, 0);
+        } else {
+            rv_li(t, RV_T0, F->frame, F->xlen);
+            rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
+        }
+    }
+}
+
 static void gen_call(struct rv_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -1852,6 +1937,27 @@ static void gen_call(struct rv_fn *F, int n)
     if (sret)
         addr_sp(F, RV_A0, F->scratch_at + i->scratch);
 
+    if (F->tail && F->tail[n]) {
+        /* The frame down, then a JUMP: the callee returns straight to
+         * this function's caller, with ra as it came in. t1 carries the
+         * far form's address, and nothing is live in it by now. */
+        rv_restore(F);
+        if (i->callee->has_defn && g_rv_short_calls) {
+            note_call(F->st, t->len, i->callee);
+            F->st->call[F->st->ncall - 1].jal = 1;
+            F->st->call[F->st->ncall - 1].tail = 1;
+            code_u32(t, rv_enc_j(0x6f, RV_ZERO, 0));
+        } else if (i->callee->has_defn) {
+            note_call(F->st, rv_tail_placeholder(t), i->callee);
+            F->st->call[F->st->ncall - 1].tail = 1;
+        } else {
+            note_ext(F->st, rv_tail_placeholder(t), i->callee);
+            F->st->ext[F->st->next - 1].tail = 1;
+        }
+        if (n + 1 < fn->nins)
+            F->skip_next = 1;         /* the IR_RET: not reached */
+        return;
+    }
     if (i->indirect) {
         /* The target is read BEFORE nothing -- the arguments are already
          * in place, and SCR is not one of them. */
@@ -3026,10 +3132,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * rv_op_calls_helper the allocator trusts for which values survive a
      * call, so the two cannot disagree. Inline asm might call anything,
      * so it keeps ra saved. */
+    /* A tail call leaves ra alone -- it is the caller's, and the callee
+     * returns with it -- so it does not make this function a non-leaf. */
+    F.tail = NULL;
+    if (g_rv_regalloc && !want_debug)
+        for (i = 0; i < fn->nins; i++)
+            if (rv_tail_ok(&F, i)) {
+                if (!F.tail)
+                    F.tail = xcalloc((size_t)fn->nins, 1);
+                F.tail[i] = 1;
+            }
     F.leaf = 1;
     for (i = 0; i < fn->nins; i++)
-        if (fn->ins[i].op == IR_CALL || fn->ins[i].op == IR_ASM ||
-            rv_op_calls_helper(&fn->ins[i]))
+        if ((fn->ins[i].op == IR_CALL && !(F.tail && F.tail[i])) ||
+            fn->ins[i].op == IR_ASM || rv_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
     layout(&F);
 
@@ -3310,16 +3426,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             F.va_first = F.va_regsave + (long)narg * F.w + stk;
     }
 
+    int tail_end = 0;        /* the body's last act is a tail call */
     for (i = 0; i < fn->nins; i++) {
+        int was_tail = F.tail && F.tail[i];
         gen_ins(&F, i);
         if (F.skip_next) {          /* the comparison emitted its branch */
             F.skip_next = 0;
             i++;
         }
+        tail_end = i == fn->nins - 1 && was_tail;
     }
 
-    /* The epilogue. */
+    /* The epilogue -- unless nothing reaches it: the body ended in a tail
+     * call and no IR_RET jumps here. */
     F.label_off[fn->nlabels] = t->len;
+    for (i = 0; tail_end && i < F.nfix; i++)
+        if (F.fix[i].label == fn->nlabels)
+            tail_end = 0;
+    if (!tail_end) {
     if (fn->has_alloca) {
         /* Release every VLA at once: sp back to the frame base. The
          * restores below then address from sp, because s0 is one of the
@@ -3327,19 +3451,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         rv_mv(t, RV_SP, RV_FP);
         F.fb = RV_SP;
     }
-    for (i = 0; i < F.nsave; i++)
-        ld_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w, 1);
-    if (!F.leaf)
-        ld_sp(&F, RV_RA, F.ra_slot, F.w, 1);
-    if (F.frame) {
-        if (rv_fits(F.frame, 12)) {
-            rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)F.frame, 0);
-        } else {
-            rv_li(t, RV_T0, F.frame, xlen);
-            rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
-        }
-    }
+    rv_restore(&F);
     rv_ret(t);
+    }
 
     for (i = 0; i < F.nfix; i++) {
         int target = F.label_off[F.fix[i].label], ok = 1;
@@ -3402,6 +3516,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     f->code_len = t->len - f->code_off;
     f->stack_bytes = (int)F.frame;     /* what -fstack-usage reports */
     free(F.usecnt);
+    free(F.tail);
     free(F.slot);
     free(F.label_off);
     free(F.fix);
@@ -3512,14 +3627,18 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     for (int k = 0; k < st.ncall; k++) {
         int at = st.call[k].patch_off;
         long disp = st.call[k].target->code_off - at;
+        /* A tail call keeps its own registers: jal x0, and auipc t1
+         * with jalr x0 through it. */
+        int lr = st.call[k].tail ? RV_ZERO : RV_RA;
+        int ar = st.call[k].tail ? RV_T1 : RV_RA;
         if (st.call[k].jal) {
-            code_patch32(text, at, rv_enc_j(0x6f, RV_RA, (int)disp));
+            code_patch32(text, at, rv_enc_j(0x6f, lr, (int)disp));
             continue;
         }
         long hi = ((disp + 0x800) >> 12) & 0xfffff;
         int lo = (int)(((disp & 0xfff) ^ 0x800) - 0x800);
-        code_patch32(text, at, rv_enc_u(0x17, RV_RA, hi));
-        code_patch32(text, at + 4, rv_enc_i(0x67, RV_RA, 0, RV_RA, lo));
+        code_patch32(text, at, rv_enc_u(0x17, ar, hi));
+        code_patch32(text, at + 4, rv_enc_i(0x67, lr, 0, ar, lo));
     }
     free(st.call);
 

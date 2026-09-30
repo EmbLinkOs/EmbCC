@@ -437,7 +437,13 @@ enum reloc_kind {
     /* A call is `auipc ra, 0` + `jalr ra`, and ONE relocation at the
      * auipc patches BOTH -- which is why there is no separate kind for
      * the jalr. That is the ABI's own shape, not a convenience here. */
-    RK_RISCV_CALL
+    RK_RISCV_CALL,
+    /* A TAIL call to a function symbol: a branch, not a call. Thumb
+     * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
+     * `bl`, whose encodings differ in one bit a linker must not flip --
+     * and so does aarch64, JUMP26 for `b`; every other target relocates
+     * it exactly as RK_CALL. */
+    RK_TAIL
 };
 
 /* The ELF relocation type for this kind on this target, or -1 if the kind

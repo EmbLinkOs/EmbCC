@@ -111,6 +111,7 @@ void a64_str(struct code *c, int rt, int rn, long off, int size);
 /* stp x29,x30,[sp,#-16]! ; mov x29,sp ; sub sp,sp,#framesize */
 void a64_prologue(struct code *c, int framesize);
 /* add sp,sp,#framesize ; ldp x29,x30,[sp],#16 ; ret */
+void a64_teardown(struct code *c, int framesize);
 void a64_epilogue(struct code *c, int framesize);
 
 /* ---- control flow --------------------------------------------------- */

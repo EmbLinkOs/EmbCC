@@ -456,6 +456,61 @@ static int a64_on_stack_here(int k, int sret_first, int varargs, int nfixed)
 }
 
 static void a64_place_arg(const struct ir_arg *a, int k, int sret_first,
+                          struct a64_cursor *cu, struct a64_argplan *pl,
+                          int variadic, int nfixed);
+
+/* Can the call at n be a TAIL call: the saved registers and the frame
+ * record restored, then `b` to the callee, which returns straight to this
+ * function's caller? Only when nothing of this frame can still be needed
+ * -- every argument in a register, no by-reference copy (those live in
+ * this frame), no struct result, no local whose address could have
+ * escaped into the callee -- when the IR_RET after it returns exactly the
+ * call's result, or nothing at the end of a function returning nothing,
+ * and when that is the function's ONLY return: this machine always builds
+ * a frame record, so a tail call pays for its own copy of the epilogue,
+ * which is only a saving when the shared one then goes. */
+static int a64_tail_ok(const struct ir_func *fn, int n)
+{
+    const struct ir_ins *i = &fn->ins[n];
+    struct a64_cursor cu = { 0, 0, 0, 0 };
+    struct a64_argplan pl;
+    int nret = 0;
+
+    if (i->op != IR_CALL || i->indirect || i->call_varargs || i->retsize ||
+        i->flt || getenv("EMBCC_NO_TAILCALL"))
+        return 0;
+    if (fn->ret_abi.is_struct || fn->ret_abi.is_float || fn->is_varargs ||
+        fn->has_alloca || fn->neh)
+        return 0;
+    if (n + 1 >= fn->nins) {
+        if (fn->ret_abi.size)
+            return 0;
+    } else {
+        const struct ir_ins *r = &fn->ins[n + 1];
+        if (r->op != IR_RET)
+            return 0;
+        if (r->a >= 0 && (r->a != i->dst ||
+                          i->ret_tybytes != fn->ret_abi.size ||
+                          i->ret_tybytes > 8))
+            return 0;
+    }
+    for (int k = 0; k < fn->nins; k++) {
+        enum ir_op op = fn->ins[k].op;
+        if (op == IR_ADDR || op == IR_VA_START)
+            return 0;
+        nret += op == IR_RET;
+    }
+    if (nret > 1)
+        return 0;
+    for (int k = 0; k < i->nargs; k++) {
+        a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl, 0, 0);
+        if (pl.where == AP_STACK || pl.byref)
+            return 0;
+    }
+    return 1;
+}
+
+static void a64_place_arg(const struct ir_arg *a, int k, int sret_first,
                           struct a64_cursor *cu, struct a64_argplan *p,
                           int varargs, int nfixed)
 {
@@ -1184,7 +1239,7 @@ static struct func *a64_helper(const char *name)
 
 static void call_helper(struct code *t, struct a64_sites *st, const char *name)
 {
-    struct extcall ec;
+    struct extcall ec = { 0, NULL, 0 };
     ec.patch_off = a64_bl(t);
     ec.callee = a64_helper(name);
     PUSH(st->ext, st->next, st->capext, ec);
@@ -1855,10 +1910,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     int *usecnt = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *usecnt);
     ra_count_vreg_uses(fn, usecnt);
     int fused_cc = -1;
+    /* Tail calls (a64_tail_ok): the IR_RET each makes unreachable, and
+     * whether the function's one exit became one -- then no epilogue. */
+    int skip_ret = -1, tail_exit = 0;
 
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         int ins_start = t->len;
+        if (n == skip_ret)
+            continue;
 
         /* -g: a line-table row wherever the source line changes, exactly
          * as the x86 backend records them (t->len is where this
@@ -2609,6 +2669,33 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             if (i->retsize && i->ret_byref)
                 addr_of(t, A64_SRET, FB, fr.scratch + i->scratch);
 
+            if (g_a64_regalloc && !want_debug && a64_tail_ok(fn, n)) {
+                /* The epilogue's restores and frame record, then `b`. */
+                for (int k = 0; k < nsave; k++) {
+                    int pair = k + 1 < nsave &&
+                               a64_ldp(t, used_callee[k], used_callee[k + 1],
+                                       FB, save_base + k * 8);
+                    if (!pair)
+                        a64_ldr(t, used_callee[k], FB, save_base + k * 8,
+                                8, 0, 8);
+                    k += pair;
+                }
+                a64_teardown(t, fr.size);
+                if (i->callee->has_defn) {
+                    struct a64_callsite cs;
+                    cs.patch_off = a64_b(t);   /* patched as a bl is: imm26 */
+                    cs.target = i->callee;
+                    PUSH(st->call, st->ncall, st->capcall, cs);
+                } else {
+                    struct extcall ec = { 0, NULL, 1 };
+                    ec.patch_off = a64_b(t);
+                    ec.callee = i->callee;
+                    PUSH(st->ext, st->next, st->capext, ec);
+                }
+                skip_ret = n + 1;
+                tail_exit = n == last_code || n + 1 == last_code;
+                break;
+            }
             if (i->indirect) {
                 ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
                 a64_blr(t, A64_ADDR);
@@ -2618,7 +2705,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 cs.target = i->callee;
                 PUSH(st->call, st->ncall, st->capcall, cs);
             } else {
-                struct extcall ec;
+                struct extcall ec = { 0, NULL, 0 };
                 ec.patch_off = a64_bl(t);
                 ec.callee = i->callee;
                 PUSH(st->ext, st->next, st->capext, ec);
@@ -2934,6 +3021,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * wherever the last allocation left it: x29 knows where the frame
      * record is, and x19 is restored from the pinned frame first. */
     int epi = t->len;
+    if (!(tail_exit && !nret)) {        /* unless the tail call was it */
     for (int k = 0; k < nsave; k++) {
         int pair = k + 1 < nsave &&
                    a64_ldp(t, used_callee[k], used_callee[k + 1], FB,
@@ -2948,6 +3036,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         a64_epilogue(t, 0);
     } else {
         a64_epilogue(t, fr.size);
+    }
     }
     g_fb = A64_SP;
     free(g_a64_wide);

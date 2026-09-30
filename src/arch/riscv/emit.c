@@ -819,6 +819,21 @@ int rv_call_placeholder(struct code *c)
     return at;
 }
 
+/* The same pair for a TAIL call: `auipc t1; jalr x0, 0(t1)`, the psABI's
+ * `tail` -- t1 because ra must still hold the caller's return address.
+ * Patched by the same R_RISCV_CALL, which touches only the immediates. */
+int rv_tail_placeholder(struct code *c)
+{
+    int save_rvc = g_rvc;
+    g_rvc = 0;
+
+    int at = c->len;
+    rv_w(c, rv_enc_u(OP_AUIPC, RV_T1, 0));
+    rv_w(c, rv_enc_i(OP_JALR, RV_ZERO, 0, RV_T1, 0));
+    g_rvc = save_rvc;
+    return at;
+}
+
 /* ---- traps ------------------------------------------------------------ */
 
 /* A CSR instruction's top 12 bits are an UNSIGNED csr number, not the

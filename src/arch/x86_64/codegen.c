@@ -1697,7 +1697,7 @@ static struct func *x86_helper(const char *name)
 static void x86_call_helper(struct code *text, struct sites *st,
                             const char *name)
 {
-    struct extcall ec;
+    struct extcall ec = { 0, NULL, 0 };
     ec.patch_off = x86_call_rel32(text);
     ec.callee = x86_helper(name);
     PUSH(st->ext, st->next, st->capext, ec);
@@ -4165,7 +4165,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     cs.target = i->callee;
                     PUSH(st->call, st->ncall, st->capcall, cs);
                 } else {
-                    struct extcall ec;
+                    struct extcall ec = { 0, NULL, 0 };
                     ec.patch_off = patch;
                     ec.callee = i->callee;
                     PUSH(st->ext, st->next, st->capext, ec);
@@ -4184,7 +4184,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     cs.target = i->callee;
                     PUSH(st->call, st->ncall, st->capcall, cs);
                 } else {
-                    struct extcall ec;
+                    struct extcall ec = { 0, NULL, 0 };
                     ec.patch_off = patch;
                     ec.callee = i->callee;
                     PUSH(st->ext, st->next, st->capext, ec);

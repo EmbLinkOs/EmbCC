@@ -30,6 +30,7 @@ void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n);
 struct extcall {
     int patch_off;        /* offset of the rel32 field in .text */
     struct func *callee;  /* canonical, !has_defn */
+    int tail;             /* a tail call -- a branch (RK_TAIL) */
 };
 
 /* String-address sites: the instruction field the linker must point into

@@ -496,6 +496,8 @@ int target_elf_machine(enum target_arch a)
 
 int target_reloc_type(enum target_arch a, enum reloc_kind k)
 {
+    if (k == RK_TAIL && a != TARGET_THUMB && a != TARGET_AARCH64)
+        k = RK_CALL;
     if (a == TARGET_THUMB) {
         switch (k) {
         /* THM_CALL, not CALL: the caller is in Thumb state, so the
@@ -503,6 +505,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
          * the ARM-state 24-bit one. A linker told CALL would patch the
          * wrong bits of the right instruction. */
         case RK_CALL:        return R_ARM_THM_CALL;
+        case RK_TAIL:        return R_ARM_THM_JUMP24;
         case RK_ABS32:       return R_ARM_ABS32;
         case RK_DATA_PREL32: return R_ARM_REL32;
         case RK_THM_MOVW:    return R_ARM_THM_MOVW_ABS_NC;
@@ -554,6 +557,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
          * `bl` carries, and a linker may only insert a veneer for the
          * range-exceeding case on the call form. */
         case RK_CALL:     return R_AARCH64_CALL26;
+        case RK_TAIL:     return R_AARCH64_JUMP26;   /* `b`: a tail call */
         case RK_ADR_HI21: return R_AARCH64_ADR_PREL_PG_HI21;
         case RK_ADD_LO12: return R_AARCH64_ADD_ABS_LO12_NC;
         case RK_ABS64:    return R_AARCH64_ABS64;

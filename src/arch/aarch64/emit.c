@@ -595,7 +595,9 @@ void a64_prologue(struct code *c, int framesize)
     }
 }
 
-void a64_epilogue(struct code *c, int framesize)
+/* The frame down and the frame record reloaded -- the epilogue short of
+ * its `ret`, which a tail call replaces with a branch. */
+void a64_teardown(struct code *c, int framesize)
 {
     if (framesize > 0 &&
         !a64_add_imm(c, A64_SP, A64_SP, framesize, 8)) {
@@ -603,6 +605,11 @@ void a64_epilogue(struct code *c, int framesize)
         a64_word(c, 0x910003BFUL);        /* mov sp, x29 */
     }
     a64_word(c, 0xA8C17BFDUL);            /* ldp x29, x30, [sp], #16 */
+}
+
+void a64_epilogue(struct code *c, int framesize)
+{
+    a64_teardown(c, framesize);
     a64_word(c, 0xD65F03C0UL);            /* ret */
 }
 

@@ -1938,7 +1938,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                               STT_NOTYPE),
                                 SHN_UNDEF);
         elfw_add_rela(w, text_ndx, (Elf64_Addr)ext[i].patch_off,
-                      callee->sym_ndx, target_reloc_type(ta, RK_CALL),
+                      callee->sym_ndx,
+                      target_reloc_type(ta, ext[i].tail ? RK_TAIL : RK_CALL),
                       target_reloc_addend(ta, RK_CALL, 0));
     }
     free(ext);

@@ -206,6 +206,7 @@ void rv_ret(struct code *c);                    /* jalr zero, 0(ra) */
  * the auipc, which is where the relocation goes — the jalr is patched by
  * the same relocation and carries no site of its own. */
 int rv_call_placeholder(struct code *c);
+int rv_tail_placeholder(struct code *c);
 
 /* ---- traps ------------------------------------------------------------ */
 

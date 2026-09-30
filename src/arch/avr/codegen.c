@@ -219,6 +219,11 @@ struct a_fn {
      * can change through a pointer to it. -1 when nothing. */
     int zv;
     long zat;
+    /* Per instruction: an IR_CALL that may be a TAIL call (a_tail_ok) --
+     * made one when, too, no argument register is one the epilogue pops.
+     * NULL when there are none. */
+    char *tail;
+    int tail_made;            /* the last instruction was one */
     /* Which vregs hold an EIGHT-byte value. By the width of the RESULT --
      * i->w for the value-producing operations and four for the rest however
      * wide their operands are: an IR_CMP at w == 8 compares two 64-bit
@@ -1990,6 +1995,7 @@ static void note_call(struct a_sites *st, int at, struct func *callee)
     }
     st->ext[st->next].patch_off = at;
     st->ext[st->next].callee = callee;
+    st->ext[st->next].tail = 0;
     st->next++;
 }
 
@@ -2364,6 +2370,89 @@ static void emit_moves(struct code *t, const int *od, const int *os, int no)
             avr_rr(t, AVR_MOV, od[q], os[q]);
         }
     }
+}
+
+static void set_sp_from_y(struct code *t);
+
+/* The registers the epilogue pops: the saved pairs, and Y when it was
+ * set up. */
+static unsigned long a_saved_mask(const struct a_fn *F)
+{
+    unsigned long m = F->use_y ? 3UL << 28 : 0;
+    for (int k = 0; k < F->nsave; k++)
+        m |= 3UL << F->used_callee[k];
+    return m;
+}
+
+/* The epilogue's teardown, short of the `ret`: the frame, Y, the saved
+ * pairs. Shared by the epilogue and a tail call, which must leave the
+ * stack exactly as the `ret` would find it. */
+static void a_teardown(struct a_fn *F)
+{
+    struct code *t = F->t;
+    if (F->frame) {
+        add_const16(F, AVR_Y, F->frame);
+        set_sp_from_y(t);
+    }
+    if (F->use_y) {
+        avr_pop(t, 29);
+        avr_pop(t, 28);
+    }
+    for (int k = F->nsave - 1; k >= 0; k--) {
+        avr_pop(t, F->used_callee[k] + 1);
+        avr_pop(t, F->used_callee[k]);
+    }
+}
+
+/* Can the call at n be a TAIL call -- the frame and the saved pairs
+ * popped, then `jmp` to the callee, which returns to this function's
+ * caller through the address still on the stack? Only when nothing of
+ * this frame can still be needed: every argument in registers, no struct
+ * result, no local whose address could have escaped into the callee, and
+ * the IR_RET after it returning exactly the call's result -- or nothing,
+ * at the end of a function that returns nothing. Not through a pointer,
+ * not variadic, not a float, and not from an interrupt handler, whose
+ * epilogue is reti. */
+static int a_tail_ok(const struct a_fn *F, int n)
+{
+    const struct ir_func *fn = F->fn;
+    const struct ir_ins *i = &fn->ins[n];
+    struct argplace pl;
+    int cursor = ARG_TOP;
+    long stk = 0;
+    int nret = 0;
+
+    if (i->op != IR_CALL || i->indirect || i->call_varargs || i->retsize ||
+        i->flt || avr_knob("EMBCC_NO_TAILCALL"))
+        return 0;
+    if (fn->ret_abi.is_struct || fn->ret_abi.is_float || fn->is_varargs ||
+        fn->src->is_isr || fn->has_alloca || fn->neh)
+        return 0;
+    if (n + 1 >= fn->nins) {
+        if (fn->ret_abi.size)
+            return 0;
+    } else {
+        const struct ir_ins *r = &fn->ins[n + 1];
+        if (r->op != IR_RET)
+            return 0;
+        if (r->a >= 0 && (r->a != i->dst ||
+                          i->ret_tybytes != fn->ret_abi.size ||
+                          i->ret_tybytes > 8))
+            return 0;
+    }
+    for (int k = 0; k < fn->nins; k++) {
+        if (fn->ins[k].op == IR_ADDR || fn->ins[k].op == IR_VA_START)
+            return 0;
+        nret += fn->ins[k].op == IR_RET;
+    }
+    for (int k = 0; k < i->nargs; k++) {
+        place_arg(i->argv[k].size, &cursor, &stk, &pl);
+        if (pl.nstk)
+            return 0;
+    }
+    /* 2 when the function returns anywhere else: then the tail call is
+     * worth its copy of the teardown only if that copy is empty. */
+    return nret > 1 ? 2 : 1;
 }
 
 /* Where an address is built: the destination's home when `ldi` reaches
@@ -3641,6 +3730,7 @@ static void gen_ins(struct a_fn *F, int n)
         int cursor = i->call_varargs ? -1 : ARG_TOP;
         long stk = 0;
         int k;
+        unsigned long argregs = 0;     /* the registers the arguments use */
         /* A callee returning a composite of more than eight bytes takes the
          * buffer's address as an implicit FIRST argument, so the real ones
          * start one slot along -- r23:r22 for the first, not r25:r24.
@@ -3704,7 +3794,6 @@ static void gen_ins(struct a_fn *F, int n)
             place_arg(2, &cursor, &stk, &hid);    /* the same slot again */
         {
             int md[48], ms[48], od[52], os[52], nm = 0, no;
-            unsigned long argregs = 0;
             int zmoved = 0, zused = 0;
             if (sret && hid.nreg)
                 argregs |= 3UL << hid.reg;
@@ -3779,6 +3868,26 @@ static void gen_ins(struct a_fn *F, int n)
             /* Z holds a WORD address here, which is what icall wants and
              * what IR_FADDR put in the pointer. */
             avr_icall(t);
+        } else if (F->tail && F->tail[n] && !(argregs & a_saved_mask(F)) &&
+                   (F->tail[n] == 1 ||
+                    (!F->frame && !F->use_y && !F->nsave))) {
+            /* The epilogue's teardown, then a JUMP: the return address
+             * this function was called with is on top of the stack again,
+             * and the callee returns through it. Not when an argument
+             * sits in a register the pops restore -- r8-r17 carry the
+             * later arguments of a long call, and are saved exactly
+             * because such a call writes them. And where the function
+             * returns elsewhere too, only when the teardown is empty:
+             * its copy here would sit beside the epilogue's, and the
+             * pops and a `jmp` outweigh the `call` and `ret` they save. */
+            a_teardown(F);
+            note_call(F->st, t->len, i->callee);
+            F->st->ext[F->st->next - 1].tail = 1;
+            avr_jmp(t, 0);
+            if (n + 1 < fn->nins)
+                F->skip_next = 1;     /* the IR_RET: not reached */
+            F->tail_made = 1;
+            return;
         } else {
             note_call(F->st, t->len, i->callee);
             avr_call(t, 0);
@@ -4753,6 +4862,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         }
     }
 
+    int tail_end = 0;        /* the body's last act is a tail call */
+    /* Which calls may be tail calls (a_tail_ok); whether each is made
+     * waits for the argument registers it uses. */
+    F.tail = NULL;
+    if (F.loc)
+        for (i = 0; i < fn->nins; i++)
+            if (a_tail_ok(&F, i)) {
+                if (!F.tail)
+                    F.tail = xcalloc((size_t)fn->nins, 1);
+                F.tail[i] = (char)a_tail_ok(&F, i);
+            }
     {
         /* Liveness for a_verify, when anything has a home to check. */
         unsigned long *lout = NULL;
@@ -4769,6 +4889,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         for (i = 0; i < fn->nins; i++) {
             long at = t->len;
             int first = i;
+            F.tail_made = 0;
             gen_ins(&F, i);
             if (F.skip_next) {          /* the compare emitted its branch */
                 F.skip_next = 0;
@@ -4778,27 +4899,31 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                 F.zv = -1;              /* Z's pointer was redefined */
             if (lout)
                 a_verify(&F, first, i, at, lout, lwords);
+            tail_end = i == fn->nins - 1 && F.tail_made;
         }
         free(lout);
     }
 
     /* ---- epilogue ---- */
+    /* ...unless nothing reaches it: the body ended in a tail call and no
+     * IR_RET jumps here. */
     F.label_off[fn->nlabels] = t->len;
-    if (F.frame) {
-        add_const16(&F, AVR_Y, F.frame);
-        set_sp_from_y(t);
-    }
-    if (f->is_isr) {
+    for (i = 0; tail_end && i < F.nfix; i++)
+        if (F.fix[i].label == fn->nlabels)
+            tail_end = 0;
+    for (i = 0; tail_end && i < F.njs; i++)
+        if (F.js[i].label == fn->nlabels)
+            tail_end = 0;
+    if (tail_end) {
+        ;
+    } else if (f->is_isr) {
+        if (F.frame) {
+            add_const16(&F, AVR_Y, F.frame);
+            set_sp_from_y(t);
+        }
         isr_epilogue(t);
     } else {
-        if (F.use_y) {
-            avr_pop(t, 29);
-            avr_pop(t, 28);
-        }
-        for (i = F.nsave - 1; i >= 0; i--) {
-            avr_pop(t, F.used_callee[i] + 1);
-            avr_pop(t, F.used_callee[i]);
-        }
+        a_teardown(&F);
         avr_ret(t);
     }
 
@@ -4884,6 +5009,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     free(F.loc);
     free(F.hw);
     free(F.usecnt);
+    free(F.tail);
 }
 
 /* One allocation mode, relaxed (struct avr_relax): generated until no site

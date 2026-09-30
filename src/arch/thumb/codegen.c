@@ -128,7 +128,7 @@ static long save_bytes_for(int nsave, const int *used, unsigned scr)
 }
 
 struct t_sites {
-    struct { int patch_off; struct func *target; } *call;
+    struct { int patch_off; struct func *target; int tail; } *call;
     int ncall, capcall;
     struct extcall *ext;   int next, capext;
     struct strsite *str;   int nstr, capstr;
@@ -206,6 +206,9 @@ struct t_fn {
     /* A leaf that saves nothing at all: no push, no pop, `bx lr`. Decided
      * per pass, once scr_save is known (see the pass loop). */
     int leaf, nopush;
+    /* Per instruction: an IR_CALL made as a TAIL call (t_tail_ok). NULL
+     * when there are none. */
+    char *tail;
     int used_callee[RA_MAXPOOL];
     int nsave;           /* how many of those it took */
     long save_at;        /* where the prologue spilled them */
@@ -716,6 +719,53 @@ static int fn_sret_bytes(const struct ir_func *fn)
     if (fn_ret_vfp(fn, &esz))
         return 0;
     return fn->ret_abi.is_struct ? sret_bytes(fn->ret_abi.size) : 0;
+}
+
+static int call_sret_bytes(const struct ir_ins *i);
+
+/* Can the call at n be a TAIL call -- the frame torn down, then `b.w` to
+ * the callee, which returns straight to this function's caller? Only when
+ * nothing of this frame can still be needed: every argument in r0-r3, no
+ * struct result, no local whose address could have escaped into the
+ * callee, and the IR_RET after it returning exactly the call's result --
+ * or nothing, at the end of a function that returns nothing. Not through
+ * a pointer, not variadic, and no floats: an s0 result is left alone. */
+static int t_tail_ok(const struct ir_func *fn, int n)
+{
+    const struct ir_ins *i = &fn->ins[n];
+    struct argplace pl;
+    struct abi_walk w;
+    int esz;
+
+    if (i->op != IR_CALL || i->indirect || i->call_varargs || i->retsize ||
+        i->flt || call_sret_bytes(i) || call_ret_vfp(i, &esz) ||
+        getenv("EMBCC_NO_TAILCALL"))
+        return 0;
+    if (fn->ret_abi.is_struct || fn->ret_abi.is_float || fn->is_varargs ||
+        fn->has_alloca || fn->neh)
+        return 0;
+    if (n + 1 >= fn->nins) {
+        if (fn->ret_abi.size)
+            return 0;
+    } else {
+        const struct ir_ins *r = &fn->ins[n + 1];
+        if (r->op != IR_RET)
+            return 0;
+        if (r->a >= 0 && (r->a != i->dst ||
+                          i->ret_tybytes != fn->ret_abi.size ||
+                          i->ret_tybytes > 4))
+            return 0;
+    }
+    for (int k = 0; k < fn->nins; k++)
+        if (fn->ins[k].op == IR_ADDR || fn->ins[k].op == IR_VA_START)
+            return 0;
+    walk_init(&w, 0, 0, i->call_pcs);
+    for (int k = 0; k < i->nargs; k++) {
+        place_one(&w, &i->argv[k], &pl);
+        if (pl.nstk)
+            return 0;
+    }
+    return 1;
 }
 
 static int call_sret_bytes(const struct ir_ins *i)
@@ -1288,6 +1338,7 @@ static void note_call(struct t_sites *st, int at, struct func *target)
     }
     st->call[st->ncall].patch_off = at;
     st->call[st->ncall].target = target;
+    st->call[st->ncall].tail = 0;
     st->ncall++;
 }
 
@@ -1299,6 +1350,7 @@ static void note_ext(struct t_sites *st, int at, struct func *callee)
     }
     st->ext[st->next].patch_off = at;
     st->ext[st->next].callee = callee;
+    st->ext[st->next].tail = 0;
     st->next++;
 }
 
@@ -3009,6 +3061,25 @@ static void gen_ins(struct t_fn *F, int n)
          * have used r0 as a scratch after it was set. */
         if (sret)
             fb_addr(F, T_R0, F->scratch_at + i->scratch);
+        if (F->tail && F->tail[n] && F->nopush) {
+            /* A BRANCH: the callee returns to this function's caller with
+             * lr as it came in. Only in a function that pushes nothing,
+             * which the tail calls themselves can make it -- they do not
+             * count as calls for the leaf test. Anywhere else the pop
+             * would have to put lr back, and `pop.w {..., lr}; b.w` is
+             * two bytes more than `bl; pop {..., pc}`; and since every
+             * push saves lr, the ordinary call there is sound. */
+            if (i->callee->has_defn) {
+                note_call(F->st, t_b(t), i->callee);
+                F->st->call[F->st->ncall - 1].tail = 1;
+            } else {
+                note_ext(F->st, t_b(t), i->callee);
+                F->st->ext[F->st->next - 1].tail = 1;
+            }
+            if (n + 1 < fn->nins)
+                F->skip_next = 1;     /* the IR_RET: not reached */
+            return;
+        }
         if (i->indirect) {
             rd(F, i->a, T_ACC);
             t_blx(t, T_ACC);
@@ -3545,10 +3616,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     /* A leaf: no call in the IR and none the lowering makes -- the
      * t_op_calls_helper the allocator already trusts -- and no inline asm,
      * which might call anything. Such a function never overwrites lr. */
+    /* A tail call leaves lr alone -- it is the caller's, and the callee
+     * returns with it -- so it does not make this function a non-leaf. */
+    F.tail = NULL;
+    if (g_t_regalloc && !want_debug)
+        for (i = 0; i < fn->nins; i++)
+            if (t_tail_ok(fn, i)) {
+                if (!F.tail)
+                    F.tail = xcalloc((size_t)fn->nins, 1);
+                F.tail[i] = 1;
+            }
     F.leaf = 1;
     for (i = 0; i < fn->nins; i++)
-        if (fn->ins[i].op == IR_CALL || fn->ins[i].op == IR_ASM ||
-            t_op_calls_helper(&fn->ins[i]))
+        if ((fn->ins[i].op == IR_CALL && !(F.tail && F.tail[i])) ||
+            fn->ins[i].op == IR_ASM || t_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
     layout(&F);
 
@@ -3837,16 +3918,29 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.va_first = F.va_regsave + (long)w.ncrn * 4 + w.stk;
     }
 
+    int tail_end = 0;        /* the body's last act is a tail call */
     for (i = 0; i < fn->nins; i++) {
+        int was_tail = F.tail && F.tail[i] && F.nopush;
         gen_ins(&F, i);
         if (F.skip_next) {      /* the comparison emitted its branch too */
             F.skip_next = 0;
             i++;
         }
+        tail_end = i == fn->nins - 1 && was_tail;
     }
 
-    /* The epilogue. */
+    /* The epilogue -- its code only if something reaches it: not when the
+     * body ended in a tail call and no IR_RET jumps here. The push mask
+     * is patched either way. */
     F.label_off[fn->nlabels] = t->len;
+    for (i = 0; tail_end && i < F.nfix; i++)
+        if (F.fix[i].label == fn->nlabels)
+            tail_end = 0;
+    if (tail_end) {
+        if (!F.nopush)
+            t_patch_push(t, push_at, save_mask_for(F.nsave, F.used_callee,
+                                                   F.scr_save));
+    } else {
     if (fn->has_alloca) {
         /* Release every VLA at once: sp back to the frame base, which
          * the `add sp` below then unwinds as usual. */
@@ -3879,6 +3973,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             t_pop(t, (mask & ~(1u << T_LR)) | (1u << T_PC));
         }
     }
+    }                                   /* the epilogue */
 
     for (i = 0; i < F.nfix; i++) {
         int target = F.label_off[F.fix[i].label];
@@ -3962,6 +4057,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                                                     F.scr_save) +
                            (long)F.nfsave * 4);
     free(F.usecnt);
+    free(F.tail);
     free(F.slot);
     free(F.label_off);
     free(F.fix);
@@ -4055,8 +4151,12 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
     for (int n = 0; n < iu->nfuncs; n++)
         gen_func_best(&iu->funcs[n], text, &st, want_debug);
 
-    for (int n = 0; n < st.ncall; n++)
-        t_patch_bl(text, st.call[n].patch_off, st.call[n].target->code_off);
+    for (int n = 0; n < st.ncall; n++) {
+        if (st.call[n].tail)          /* b.w, not bl: see t_tail_ok */
+            t_patch_b(text, st.call[n].patch_off, st.call[n].target->code_off);
+        else
+            t_patch_bl(text, st.call[n].patch_off, st.call[n].target->code_off);
+    }
     free(st.call);
 
     cg_resolve_strsites(iu, st.str, st.nstr);

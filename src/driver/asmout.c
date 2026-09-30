@@ -107,10 +107,14 @@ static const char *type_sigil(void)
 
 static const char *reloc_name(int kind)
 {
+    if (kind == RK_TAIL && target_get() != TARGET_THUMB &&
+        target_get() != TARGET_AARCH64)
+        kind = RK_CALL;       /* Thumb and aarch64 spell a branch apart */
     switch (target_get()) {
     case TARGET_AARCH64:
         switch (kind) {
         case RK_CALL:        return "R_AARCH64_CALL26";
+        case RK_TAIL:        return "R_AARCH64_JUMP26";
         case RK_ADR_HI21:    return "R_AARCH64_ADR_PREL_PG_HI21";
         case RK_ADD_LO12:    return "R_AARCH64_ADD_ABS_LO12_NC";
         case RK_GOT_PAGE:    return "R_AARCH64_ADR_GOT_PAGE";
@@ -125,6 +129,7 @@ static const char *reloc_name(int kind)
     case TARGET_THUMB:
         switch (kind) {
         case RK_CALL:        return "R_ARM_THM_CALL";
+        case RK_TAIL:        return "R_ARM_THM_JUMP24";
         case RK_THM_MOVW:    return "R_ARM_THM_MOVW_ABS_NC";
         case RK_THM_MOVT:    return "R_ARM_THM_MOVT_ABS";
         case RK_ABS32:       return "R_ARM_ABS32";
@@ -180,7 +185,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     for (int i = 0; i < next; i++) {
         site[ns].off = ext[i].patch_off;
         site[ns].name = ext[i].callee ? ext[i].callee->name : "?";
-        site[ns++].kind = 0;
+        site[ns++].kind = ext[i].tail ? RK_TAIL : RK_CALL;
     }
     for (int i = 0; i < nfs; i++) {
         site[ns].off = fs[i].patch_off;
