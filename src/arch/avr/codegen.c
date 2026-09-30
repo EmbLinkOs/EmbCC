@@ -2624,15 +2624,18 @@ static void gen_ins(struct a_fn *F, int n)
             if (in_pair(F, i->b)) {
                 int h = F->loc[i->b];
                 vld(F, AVR_Z, i->a, 0, 2);
-                for (int k = 0; k < to; k++)
+                for (int k = to - 1; k >= 0; k--)   /* high first: IR_STORE */
                     avr_std(t, AVR_Z, k, h + k);
                 return;
             }
             vld(F, RA + 2, i->a, 0, 2);
             g_x_hit = 1; avr_movw(t, AVR_X, RA + 2);
-            for (int k = 0; k < to; k++) {
+            /* High byte first (IR_STORE says why): X past the end, then
+             * pre-decrement down. */
+            avr_adiw(t, AVR_X, to);
+            for (int k = to - 1; k >= 0; k--) {
                 vld(F, RA, i->b, k, 1);
-                avr_st(t, AVR_X, RA, AVR_PTR_POST_INC);
+                avr_st(t, AVR_X, RA, AVR_PTR_PRE_DEC);
             }
             return;
         }
@@ -3297,12 +3300,16 @@ static void gen_ins(struct a_fn *F, int n)
         /* ...from its home when it has one, which touches no Z. */
         int src = rd_in(F, i->b, i->size, RA);
         vld(F, AVR_Z, i->a, 0, 2);
-        if (i->size == 1) {
-            avr_st(t, AVR_Z, src, AVR_PTR_NONE);
-        } else {
-            for (int k = 0; k < i->size; k++)
-                avr_st(t, AVR_Z, src + k, AVR_PTR_POST_INC);
-        }
+        /* The HIGH byte first. A 16-bit timer, compare or ADC register
+         * is written through the part's TEMP latch: the high byte waits
+         * there and the LOW byte's write commits both, so written low
+         * first the register takes whatever TEMP last held as its top
+         * half. `TCNT1 = 0x1234` read back 0 under QEMU, which models the
+         * latch (tests/golden/avr-io16.sh). avr-gcc and clang both store
+         * every multi-byte value high byte first; reads stay low first,
+         * which is the order the same latch needs for them. */
+        for (int k = i->size - 1; k >= 0; k--)
+            avr_std(t, AVR_Z, k, src + k);
         }
         return;
 
