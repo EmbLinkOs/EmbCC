@@ -1692,6 +1692,63 @@ bytewise:
     }
 }
 
+/* ---- runs of bytes, two at a time where they pair --------------------
+ *
+ * `movw` moves an aligned pair to an aligned pair in one instruction,
+ * reading both bytes before writing either -- so wherever a byte loop
+ * reaches such a pair, doing its two moves at once cannot differ from
+ * doing them in turn. These are the byte loops, with that taken.
+ *
+ * copy_run copies n bytes upward (d below s, or apart), copy_run_down
+ * downward (d above s): the order each caller already relied on. */
+static void copy_run(struct code *t, int d, int s, int n)
+{
+    for (int k = 0; k < n; ) {
+        if (k + 1 < n && !((d + k) & 1) && !((s + k) & 1)) {
+            avr_movw(t, d + k, s + k);
+            k += 2;
+        } else {
+            avr_rr(t, AVR_MOV, d + k, s + k);
+            k++;
+        }
+    }
+}
+
+static void copy_run_down(struct code *t, int d, int s, int n)
+{
+    for (int k = n - 1; k >= 0; ) {
+        if (k >= 1 && !((d + k - 1) & 1) && !((s + k - 1) & 1)) {
+            avr_movw(t, d + k - 1, s + k - 1);
+            k -= 2;
+        } else {
+            avr_rr(t, AVR_MOV, d + k, s + k);
+            k--;
+        }
+    }
+}
+
+/* Bytes r .. r+n-1 all set to the byte in register `src` -- the zero
+ * register, or a sign byte. Once an aligned pair of them holds it, each
+ * later aligned pair is a copy of that pair: eight bytes of zero are two
+ * moves and three movw, not eight moves. `src` may be r-1 itself, which
+ * then makes the pair it completes. */
+static void fill_run(struct code *t, int r, int n, int src)
+{
+    int pair = -1;                  /* an even register whose pair is filled */
+    for (int k = 0; k < n; ) {
+        int q = r + k;
+        if (pair >= 0 && !(q & 1) && k + 1 < n) {
+            avr_movw(t, q, pair);
+            k += 2;
+            continue;
+        }
+        avr_rr(t, AVR_MOV, q, src);
+        if ((q & 1) && (k >= 1 || src == q - 1))
+            pair = q - 1;
+        k++;
+    }
+}
+
 /* One eight-byte value copied to another's place, whichever has a home. */
 static void wide_copy(struct a_fn *F, int dst, int a, int n)
 {
@@ -1738,9 +1795,9 @@ static void extend(struct a_fn *F, int r, int from, int sign, int to)
     int k;
     if (from >= to)
         return;
+    (void)k;
     if (!sign) {
-        for (k = from; k < to; k++)
-            avr_rr(F->t, AVR_MOV, r + k, R_ZERO);
+        fill_run(F->t, r + from, to - from, R_ZERO);
         return;
     }
     /* The sign byte is built in the FIRST byte above the value and then
@@ -1749,8 +1806,7 @@ static void extend(struct a_fn *F, int r, int from, int sign, int to)
     avr_rr(F->t, AVR_MOV, r + from, r + from - 1);
     avr_rr(F->t, AVR_ADD, r + from, r + from);       /* lsl: MSB -> carry */
     avr_rr(F->t, AVR_SBC, r + from, r + from);       /* 0 - carry */
-    for (k = from + 1; k < to; k++)
-        avr_rr(F->t, AVR_MOV, r + k, r + from);
+    fill_run(F->t, r + from + 1, to - from - 1, r + from);
 }
 
 /* ---- constants ------------------------------------------------------- */
@@ -2191,10 +2247,9 @@ static void shift_immw(struct a_fn *F, int r, int op, int sign, long n,
 
     if (bytes > 0) {
         if (op == IR_SHL) {
-            for (k = VWn - 1; k >= bytes; k--)
-                avr_rr(F->t, AVR_MOV, r + k, r + k - bytes);
-            for (k = 0; k < bytes && k < VWn; k++)
-                avr_rr(F->t, AVR_MOV, r + k, R_ZERO);
+            if (VWn > bytes)
+                copy_run_down(F->t, r + bytes, r, VWn - bytes);
+            fill_run(F->t, r, bytes < VWn ? bytes : VWn, R_ZERO);
         } else {
             /* The fill byte is built BEFORE the moves, from the top byte
              * that is about to be overwritten. */
@@ -2205,11 +2260,10 @@ static void shift_immw(struct a_fn *F, int r, int op, int sign, long n,
                 avr_rr(F->t, AVR_SBC, R_TMP, R_TMP);
                 fill = R_TMP;
             }
-            for (k = 0; k + bytes < VWn; k++)
-                avr_rr(F->t, AVR_MOV, r + k, r + k + bytes);
-            for (k = VWn - bytes; k < VWn; k++)
-                if (k >= 0)
-                    avr_rr(F->t, AVR_MOV, r + k, fill);
+            if (VWn > bytes)
+                copy_run(F->t, r, r + bytes, VWn - bytes);
+            k = VWn - bytes < 0 ? 0 : VWn - bytes;
+            fill_run(F->t, r + k, VWn - k, fill);
         }
     }
     for (k = 0; k < (int)n; k++)
@@ -2711,8 +2765,7 @@ static void gen_ins(struct a_fn *F, int n)
                 int d = F->loc[i->dst], fill;
                 vld(F, d, i->a, 0, from);
                 fill = w_fill(F, d + from - 1, i->sign);
-                for (int k = from; k < n; k++)
-                    avr_rr(t, AVR_MOV, d + k, fill);
+                fill_run(t, d + from, n - from, fill);
                 return;
             }
             for (int k = 0; k < from; k++) {
@@ -2740,8 +2793,7 @@ static void gen_ins(struct a_fn *F, int n)
                 int d = F->loc[i->dst], fill;
                 vld(F, d, i->a, 0, from);
                 fill = w_fill(F, d + from - 1, i->sign);
-                for (int k = from; k < n; k++)
-                    avr_rr(t, AVR_MOV, d + k, fill);
+                fill_run(t, d + from, n - from, fill);
                 return;
             }
             for (int k = 0; k < from; k++) {
@@ -2798,8 +2850,7 @@ static void gen_ins(struct a_fn *F, int n)
                 for (int k = 0; k < from; k++)
                     avr_ldd(t, d + k, AVR_Z, k);
                 fill = w_fill(F, d + from - 1, i->sign);
-                for (int k = from; k < n; k++)
-                    avr_rr(t, AVR_MOV, d + k, fill);
+                fill_run(t, d + from, n - from, fill);
                 return;
             }
             vld(F, RA + 2, i->a, 0, 2);   /* A's upper pair: B may be a home */
@@ -3359,8 +3410,7 @@ static void gen_ins(struct a_fn *F, int n)
             vld(F, b_reg, i->b, 0, VW);
         vld(F, a_reg, i->a, 0, VW);
         call_helper(F, name);
-        for (int q = 0; q < VW; q++)
-            avr_rr(t, AVR_MOV, RA + q, a_reg + q);
+        copy_run(t, RA, a_reg, VW);
         wr4(F, i->dst, RA);
         return;
     }
