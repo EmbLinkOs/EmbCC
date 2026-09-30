@@ -330,6 +330,21 @@ void eh_emit(struct ir_unit *iu, int arm64, struct eh_out *out)
             close_entry(b, fde);
             continue;
         }
+        if (f->cfi_pushonly) {
+            /* No frame pointer: each push moves the CFA eight further
+             * from rsp, and the saved registers are where they went. */
+            for (int k = 0; k < f->cfi_npush; k++) {
+                advance(b, &at, f->cfi_push_end[k], code_align);
+                u8(b, CFA_def_cfa_offset);
+                uleb(b, (unsigned long)(16 + 8 * k));
+            }
+            for (int k = 0; k < f->cfi_nsaved; k++) {
+                u8(b, CFA_offset | (unsigned)f->cfi_reg[k]);
+                uleb(b, (unsigned long)(-f->cfi_off[k] / 8));
+            }
+            close_entry(b, fde);
+            continue;
+        }
         /* the frame record pushed: the CFA 16 above the stack pointer,
          * the caller's frame pointer (and on aarch64 x30) below it */
         advance(b, &at, f->cfi_push, code_align);

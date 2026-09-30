@@ -29,9 +29,15 @@ static void rexw(struct code *c, int w)
  * pointed at the one case in a line. The operands are not named here
  * because this file encodes instructions and knows nothing of the IR. */
 const char *x86_lowering_op = "?";
+int x86_no_rbp;
 
 static void no_dead_slot(int disp)
 {
+    if (x86_no_rbp)
+        internal_error("a frame access in a function that has no frame "
+                       "pointer -- rbp is the caller's here, and the "
+                       "lowering of `%s` does not know that",
+                       x86_lowering_op);
     if (disp == X86_DEAD_SLOT)
         internal_error("a value was read from a stack slot it does not have "
                        "-- it lives in a register, and the lowering of `%s` "

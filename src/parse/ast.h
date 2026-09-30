@@ -385,6 +385,11 @@ struct func {
      * return address at CFA-8 -- holds for the whole function and the
      * FDE carries no instructions. */
     int cfi_frameless;
+    /* A frame with no frame POINTER: rsp moves only by the pushes, each
+     * of which ends at cfi_push_end[k] and moves the CFA eight further
+     * up, and the CFA stays rsp-based throughout (x86-64). */
+    int cfi_pushonly, cfi_npush;
+    int cfi_push_end[17];
     int cfi_reg[16];
     long cfi_off[16];
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */

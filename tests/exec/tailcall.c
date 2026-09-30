@@ -39,6 +39,20 @@ __attribute__((noinline)) int t_frame(int a, int b, int c, int d)
 /* nothing returned: the call is the last thing and falls off the end */
 __attribute__((noinline)) void t_void(int *p, int v) { put(p, v * 2); }
 
+/* two values live across a call and so two saved registers -- an even
+ * count, which on x86-64 takes an alignment pad the epilogue pops again
+ * -- then a tail call with a FOURTH argument, in rcx, where a pad popped
+ * into the wrong register would land */
+__attribute__((noinline)) long four(long a, long b, long c, long d)
+{
+    return a + b * 2 + c * 3 + d * 4;
+}
+__attribute__((noinline)) long t_pad(long a, long b, long c)
+{
+    long x = add3((int)a, (int)b, 1);
+    return four(x, b, c, 7);
+}
+
 /* a chain: each tail-calls the next */
 __attribute__((noinline)) int t_chain3(int x) { return mix(x, 1); }
 __attribute__((noinline)) int t_chain2(int x) { return t_chain3(x + 1); }
@@ -70,6 +84,8 @@ int main(void)
         return 2;
     if (t_frame(1, 2, 3, 4) != 56)
         return 3;
+    if (t_pad(1, 2, 3) != 45)           /* 4 + 4 + 9 + 28 */
+        return 6;
     t_void(&out, 21);
     if (out != 42)
         return 4;

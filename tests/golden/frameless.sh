@@ -11,10 +11,13 @@
 #
 #  1. A small leaf emits no frame at all.
 #  2. A function that DOES need one still gets it. Each case here is a
-#     way rbp is still reachable -- a call (the stack has to be aligned
-#     and the frame walked), an address that escapes, alloca, varargs,
-#     more arguments than fit in registers, and -g (DWARF describes a
-#     local as an offset from the frame base).
+#     way rbp is still reachable -- an address that escapes, alloca,
+#     varargs, more arguments than fit in registers, and -g (DWARF
+#     describes a local as an offset from the frame base).
+#  3. A function that calls keeps rsp 16-aligned at the call. It no
+#     longer needs rbp for that -- one that keeps nothing in memory is
+#     only its pushes, with a pad when their count is even -- so what is
+#     checked is the alignment itself.
 #
 # The last of those is the one that bit: a stack-passed parameter reaches
 # its allocated register BY WAY of its home slot, so eliding the slot
@@ -52,13 +55,8 @@ fi
 echo "a leaf with no frame builds none"
 
 # ---- 2. and everything that still needs one ----------------------------
-for case in call addr alloca varargs manyargs; do
+for case in addr alloca varargs manyargs; do
     case $case in
-    call)     cat > "$out/n.c" <<'EOF'
-long g(long);
-long f(long a) { return g(a) + 1; }
-EOF
-              why="it calls, so the stack must stay aligned" ;;
     addr)     cat > "$out/n.c" <<'EOF'
 void g(long *);
 long f(long a) { long x = a + 1; g(&x); return x; }
@@ -85,8 +83,37 @@ EOF
         echo "FAIL: '$case' lost its frame, but $why"
         exit 1; }
 done
-echo "a call, an escaping address, alloca, varargs and stack arguments
-each still build one"
+echo "an escaping address, alloca, varargs and stack arguments each still
+build one"
+
+# ---- 2b. a call is made with rsp 16-aligned -----------------------------
+# The return address leaves rsp 8 off at entry; everything pushed or
+# subtracted before the first call has to bring it back to a multiple of
+# sixteen. Zero, one and three saved registers: the even counts need a pad.
+cat > "$out/c.c" <<'EOF'
+long g(long);
+long f0(long a) { return g(a) + 1; }
+long f1(long a) { return g(a) + a; }
+long f3(long a, long b) { return g(a) + g(b) + g(a * b); }
+EOF
+"$EMBCC" --target=x86_64-linux-gnu -O2 -S "$out/c.c" -o "$out/c.s" \
+    2> "$out/cc.log" || { echo "FAIL: could not compile:"; cat "$out/cc.log"
+                          exit 1; }
+awk 'function hex(s,  i, v) { v = 0
+         for (i = 1; i <= length(s); i++)
+             v = v * 16 + index("0123456789abcdef", substr(s, i, 1)) - 1
+         return v }
+     /^f[0-9]:/ { fn = $1; off = 8; seen = 0; nf++ }
+     fn != "" && !seen && /# push / { off += 8 }
+     fn != "" && !seen && /# sub +\$0x[0-9a-f]+,%rsp/ {
+         s = $0; sub(/.*\$0x/, "", s); sub(/,.*/, "", s); off += hex(s) }
+     fn != "" && !seen && /# call / { seen = 1; nc++
+         if (off % 16) { print "FAIL: " fn " calls with rsp " off \
+                                 " below its entry value mod 16"; bad = 1 } }
+     END { if (nc != 3 || nf != 3) { print "FAIL: expected three functions " \
+                                     "with calls, read " nf " and " nc; bad = 1 }
+           exit bad }' "$out/c.s" || { cat "$out/c.s"; exit 1; }
+echo "a function that calls does so with rsp 16-aligned, frame record or not"
 
 # ---- 3. -g keeps it, because DWARF describes locals from the frame base -
 if ! has_frame "$out/leaf.c" "-g"; then

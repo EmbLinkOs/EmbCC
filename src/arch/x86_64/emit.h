@@ -20,6 +20,10 @@
  * message. Its instruction loop sets it; the guard reads it only when
  * it fires. */
 extern const char *x86_lowering_op;
+/* Set while a function with no frame pointer is lowered: a frameless one,
+ * or one whose frame is only its pushes. rbp is then the CALLER's, and an
+ * access through it is refused by name rather than emitted. */
+extern int x86_no_rbp;
 
 void x86_prologue(struct code *c, int framesize, int frameless);
 void x86_sub_rsp(struct code *c, int bytes);

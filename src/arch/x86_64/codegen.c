@@ -2209,9 +2209,22 @@ static struct afold afold_build(struct ir_func *fn, const int *sd)
  *
  * After the pops rsp is rbp again, which is what the `leave` that
  * follows assumes anyway -- so the caller's epilogue is unchanged. */
+/* A frame that is only its pushes (see gen_func): popped in the order
+ * they sit, the alignment pad first -- into r11, which carries neither
+ * an argument nor a result, since a tail call pops after its arguments
+ * are in place. */
+static int g_pushonly, g_pad;
+
 static void restore_callee(struct code *text, const int *used_callee,
                            int nsave, int save_base)
 {
+    if (g_pushonly) {
+        if (g_pad)
+            x86_pop_reg(text, 11);
+        for (int k = 0; k < nsave; k++)
+            x86_pop_reg(text, used_callee[k]);
+        return;
+    }
     if (nsave >= 2) {
         x86_lea_reg_slot(text, REG_RSP, save_base);
         for (int k = 0; k < nsave; k++)
@@ -2373,6 +2386,59 @@ static void gen_func(struct ir_func *fn, struct code *text,
             frameless = 0;
     }
 
+    /* ---- or a frame without a frame POINTER ---------------------------
+     *
+     * A function that saves registers or makes calls but keeps nothing
+     * in memory does not need rbp either: its frame is the pushes. clang
+     * and gcc build it that way, and here it was `push rbp; mov rbp,rsp`
+     * ... `lea -N(%rbp),%rsp` (or a load per register) ... `leave` --
+     * nine bytes a function that point rbp at a frame nothing reads.
+     *
+     * The conditions are frameless's -- nothing that names rbp or the
+     * stack arguments -- with the calls allowed and every slot dead: no
+     * local, temp, scratch or outgoing area has an address. At a call
+     * rsp must be 16-aligned; it is 8 off at entry, so an even number of
+     * pushes takes one more as a pad. ELF only: Mach-O's compact unwind
+     * describes every x86-64 function as an rbp frame, and Win64 has
+     * unwind codes of its own. Not with exception regions, whose landing
+     * pads are entered by the unwinder. */
+    g_pushonly = g_pad = 0;
+    x86_no_rbp = 0;              /* the prologue below may use rbp */
+    if (!frameless && g_regalloc && !fn->has_alloca && !f->is_varargs &&
+        !g_want_debug && sret_slot == 0 && f->nparams <= 4 && !fn->neh &&
+        !target_win64_abi() && target_fmt_get() == TGT_FMT_ELF &&
+        fn->scratch_bytes == 0 && fn->outgoing_bytes == 0) {
+        int calls = 0;
+        g_pushonly = 1;
+        for (int v = 0; v < fn->nvregs; v++)
+            if (sd[v] != DEAD_SLOT_OFF)
+                g_pushonly = 0;
+        for (int n = 0; n < fn->nins && g_pushonly; n++)
+            switch (fn->ins[n].op) {
+            case IR_CALL:
+                if (!(g_tailcalls && tail_call_ok(fn, n)))
+                    calls = 1;
+                break;
+            case IR_ASM: case IR_ALLOCA: case IR_VA_START:
+            case IR_FRAMEADDR: case IR_SPSAVE: case IR_SPRESTORE:
+            case IR_LANDING:
+                g_pushonly = 0;
+                break;
+            default:
+                if (i128_ins(&fn->ins[n]))
+                    calls = 1;          /* a libgcc helper */
+                break;
+            }
+        for (int p = 0; p < f->nparams && g_pushonly; p++) {
+            struct type *pt = f->param_tys[p];
+            if (!pt || pt->kind == TY_STRUCT || pt->kind == TY_ARRAY ||
+                pt->kind == TY_INT128 || pt->kind == TY_LDOUBLE ||
+                ty_size(pt) > 8)
+                g_pushonly = 0;
+        }
+        g_pad = g_pushonly && calls && !(nsave & 1);
+    }
+
     /* Sixteen at -O2, as clang does; none at -Os, as clang does there --
      * a one-byte function was followed by fifteen nops. */
     if (!target_opt_size())
@@ -2391,13 +2457,29 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * moved it by before. */
     /* -fstack-usage: everything below the caller's rsp — the return
      * address, the saved rbp where there is one, and the frame. */
-    f->stack_bytes = (int)(frame + 8 + (frameless ? 0 : 8));
-    x86_prologue(text, frameless ? frame : 0, frameless);
+    f->stack_bytes = g_pushonly ? 8 + 8 * (nsave + g_pad)
+                                : (int)(frame + 8 + (frameless ? 0 : 8));
+    f->cfi_pushonly = g_pushonly;
+    f->cfi_npush = 0;
+    if (g_pushonly) {
+        /* The same order as below, so the registers land where the
+         * unwind table says: the last slot first, then the pad. */
+        for (int k = nsave - 1; k >= 0; k--) {
+            x86_push_reg(text, used_callee[k]);
+            f->cfi_push_end[f->cfi_npush++] = text->len - f->code_off;
+        }
+        if (g_pad) {
+            x86_push_reg(text, REG_RAX);
+            f->cfi_push_end[f->cfi_npush++] = text->len - f->code_off;
+        }
+    } else {
+        x86_prologue(text, frameless ? frame : 0, frameless);
+    }
     /* for the unwind tables: push rbp ends at +1, mov rbp,rsp at +4 */
     f->cfi_frameless = frameless;
     f->cfi_push = 1;
     f->cfi_frame = 4;
-    if (!frameless) {
+    if (!frameless && !g_pushonly) {
         for (int k = nsave - 1; k >= 0; k--)
             x86_push_reg(text, used_callee[k]);
         x86_sub_rsp(text, frame - nsave * 8);
@@ -2408,9 +2490,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
         static const int dw[8] = { 0, 2, 1, 3, 7, 6, 4, 5 };
         f->cfi_reg[k] = used_callee[k] < 8 ? dw[used_callee[k]]
                                            : used_callee[k];
-        f->cfi_off[k] = save_base + k * 8 - 16;     /* the CFA is rbp+16 */
+        /* the CFA is rbp+16, or -- with no rbp -- the return address
+         * plus the pushes: slot k was the (nsave-k)th of them */
+        f->cfi_off[k] = g_pushonly ? -8 * (nsave + 1 - k)
+                                   : save_base + k * 8 - 16;
     }
     f->cfi_saved_at = text->len - f->code_off;
+    x86_no_rbp = frameless || g_pushonly;
     /* Variadic: spill the whole argument register file into the save area
      * FIRST, before the parameter pass below uses rcx/rax as scratch and
      * so clobbers the vararg registers. Storing a register does not alter
@@ -4184,7 +4270,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * callee-saved ones cannot disturb them. Doing it the
                  * other way round would restore over an argument. */
                 restore_callee(text, used_callee, nsave, save_base);
-                if (!frameless)
+                if (!frameless && !g_pushonly)
                     x86_leave(text);
                 int patch = x86_jmp_rel32(text);
                 if (i->callee->has_defn) {
@@ -4447,7 +4533,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 epi_patch[nepi++] = p;
             } else {
                 restore_callee(text, used_callee, nsave, save_base);
-                x86_epilogue(text, frameless);
+                x86_epilogue(text, frameless || g_pushonly);
             }
             break;
         case IR_LANDING:
@@ -4489,8 +4575,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int epi_off = text->len;
     if (shared_epi || !(g_regalloc && last_terminates)) {
         restore_callee(text, used_callee, nsave, save_base);
-        x86_epilogue(text, frameless);
+        x86_epilogue(text, frameless || g_pushonly);
     }
+    x86_no_rbp = 0;
+    g_pushonly = g_pad = 0;
     for (int e = 0; e < nepi; e++) {                    /* patch shared-return jumps */
         int from = epi_patch[e] + 4;
         code_patch32(text, epi_patch[e],
