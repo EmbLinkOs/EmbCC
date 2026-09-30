@@ -1734,9 +1734,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * -g, a VLA, va_start, EH, asm, the frame-address builtins. */
     int frameless = g_a64_regalloc && !want_debug && fr.size == 0 &&
                     !nsave && !fn->has_alloca && !f->is_varargs && !fn->neh;
+    /* A TAIL call is not a call here: `b` leaves x30 and sp as they were
+     * at entry, and the callee returns straight to our caller. A function
+     * whose only call is one needs no frame record to tear down first. */
     for (int n = 0; n < fn->nins && frameless; n++) {
         const struct ir_ins *i = &fn->ins[n];
-        if (i->op == IR_CALL || i->op == IR_ASM || i->op == IR_ALLOCA ||
+        if ((i->op == IR_CALL &&
+             !(g_a64_regalloc && !want_debug && a64_tail_ok(fn, n))) ||
+            i->op == IR_ASM || i->op == IR_ALLOCA ||
             i->op == IR_VA_START || i->op == IR_FRAMEADDR ||
             i->op == IR_SPSAVE || i->op == IR_SPRESTORE ||
             a64_op_calls_helper(i))
@@ -1945,15 +1950,37 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     int *usecnt = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *usecnt);
     ra_count_vreg_uses(fn, usecnt);
     int fused_cc = -1;
+    /* A comparison with zero for (in)equality that feeds the branch after
+     * it: no flags at all, the branch is a cbz or cbnz on the register.
+     * fused_z is that register, fused_zne whether the comparison was
+     * `!= 0`, and fused_zw its width. */
+    int fused_z = -1, fused_zne = 0, fused_zw = 4;
     /* Tail calls (a64_tail_ok): the IR_RET each makes unreachable, and
      * whether the function's one exit became one -- then no epilogue. */
     int skip_ret = -1, tail_exit = 0;
+    /* UNREACHABLE code: what follows a return, a jump, a trap or a tail
+     * call, up to the next label, which is the only way back in. `fell`
+     * is whether the last code emitted can run on into the epilogue --
+     * which is then needed only if it can, or a return branches there.
+     * abort() ended `b .` and then an epilogue nothing reached. */
+    int dead = 0, fell = 1;
 
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         int ins_start = t->len;
         if (n == skip_ret)
             continue;
+        if (dead) {
+            if (i->op != IR_LABEL && i->op != IR_LANDING)
+                continue;
+            dead = 0;
+        }
+        /* what this one leaves: a return at last_code runs on into the
+         * epilogue, every other exit does not */
+        fell = !(i->op == IR_JMP || i->op == IR_UD2 || i->op == IR_IGOTO ||
+                 (i->op == IR_RET && n != last_code));
+        if (g_a64_regalloc && !fell)
+            dead = 1;
 
         /* -g: a line-table row wherever the source line changes, exactly
          * as the x86 backend records them (t->len is where this
@@ -2276,6 +2303,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                  * both operands, so the destination may be one of them. */
                 int ra = rd(t, sd, i->a, A64_ACC);
                 int cc = cond_for(i->pred, i->sign);
+                if (i->imm_b && imm_at_w(i) == 0 &&
+                    (i->pred == B_EQ || i->pred == B_NE) &&
+                    cmp_feeds_branch(fn, n, usecnt)) {
+                    fused_z = ra;
+                    fused_zne = i->pred == B_NE;
+                    fused_zw = i->w;
+                    break;
+                }
                 if (!i->imm_b || !a64_cmp_imm(t, ra, imm_at_w(i), i->w))
                     a64_cmp_reg(t, ra, rd_b(t, sd, i), i->w);
                 if (cmp_feeds_branch(fn, n, usecnt)) { fused_cc = cc; break; }
@@ -2533,7 +2568,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
         case IR_BRZ: case IR_BRNZ: {
             struct a64_fix fx;
-            if (fused_cc >= 0) {
+            if (fused_z >= 0) {
+                /* BRNZ is taken when the comparison held: on a nonzero
+                 * register for `!= 0`, on a zero one for `== 0`. BRZ the
+                 * other way round. */
+                fx.at = a64_cbz(t, fused_z, (i->op == IR_BRNZ) == fused_zne,
+                                fused_zw);
+                fused_z = -1;
+            } else if (fused_cc >= 0) {
                 /* BRNZ branches when the comparison was true, BRZ when
                  * it was false -- and a condition code's inverse is its
                  * low bit flipped. */
@@ -2715,7 +2757,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                                 8, 0, 8);
                     k += pair;
                 }
-                a64_teardown(t, fr.size);
+                if (!frameless)
+                    a64_teardown(t, fr.size);
                 if (i->callee->has_defn) {
                     struct a64_callsite cs;
                     cs.patch_off = a64_b(t);   /* patched as a bl is: imm26 */
@@ -2729,6 +2772,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 }
                 skip_ret = n + 1;
                 tail_exit = n == last_code || n + 1 == last_code;
+                fell = 0;
+                dead = g_a64_regalloc;
                 break;
             }
             if (i->indirect) {
@@ -3056,7 +3101,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * wherever the last allocation left it: x29 knows where the frame
      * record is, and x19 is restored from the pinned frame first. */
     int epi = t->len;
-    if (!(tail_exit && !nret)) {        /* unless the tail call was it */
+    (void)tail_exit;
+    if (nret || fell) {                 /* unless nothing reaches it */
     for (int k = 0; k < nsave; k++) {
         int pair = k + 1 < nsave &&
                    a64_ldp(t, used_callee[k], used_callee[k + 1], FB,
