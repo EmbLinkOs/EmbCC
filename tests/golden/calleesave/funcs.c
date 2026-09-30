@@ -60,3 +60,40 @@ u32 vla(u32 a, u32 b, u32 c, u32 d)
     for (u32 i = 0; i < (a & 7) + 4; i++) v[i] = i * b + c;
     return v[(a & 7) + 3] ^ v[0] ^ d ^ (u32)sizeof v;
 }
+/* the LOW scratch: a slot-resident value is worked on in whichever of
+ * r0-r7 holds nothing live, and r4-r7 count only once the prologue saves
+ * them. finalize() is __cxa_finalize's shape, where they first did not:
+ * r0-r3 are all busy at the struct copy's address (this backend keeps a
+ * copy's addresses in slots), r4 holds `dso` across the call, and r5-r7
+ * are unsaved -- so a pick among them would be a clobber the probe sees
+ * through lowscr, which calls it. */
+struct hnd { void (*fn)(void *); void *arg; void *dso; };
+struct hnd g_hs[4];
+int g_hn;
+static void hfn(void *p) { vsink = vsink * 3 + (u32)p; }
+void finalize(void *dso)
+{
+    while (g_hn > 0) {
+        int i = g_hn - 1;
+        struct hnd h = g_hs[i];
+        g_hn = i;
+        if (dso && h.dso != dso)
+            continue;
+        if (h.fn)
+            h.fn(h.arg);
+    }
+}
+u32 lowscr(u32 a, u32 b, u32 c, u32 d)
+{
+    for (int k = 0; k < 4; k++) {
+        g_hs[k].fn = k == 2 ? 0 : hfn;
+        g_hs[k].arg = (void *)(a + b * (u32)k);
+        g_hs[k].dso = (void *)(k & 1 ? c : d);
+    }
+    g_hn = 4;
+    vsink = 0;
+    finalize((void *)d);
+    g_hn = 4;
+    finalize(0);
+    return vsink;
+}

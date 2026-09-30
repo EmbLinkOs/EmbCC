@@ -212,6 +212,12 @@ struct t_fn {
     int used_callee[RA_MAXPOOL];
     int nsave;           /* how many of those it took */
     long save_at;        /* where the prologue spilled them */
+    /* LOW SCRATCH (lo_free): which of r0-r7 the instruction being
+     * emitted may use in place of a high scratch -- bit r for rr, 0 when
+     * none may -- and the liveness it is computed from. */
+    unsigned lofree;
+    unsigned long *lv_in, *lv_out;
+    int lv_words;
 };
 
 /* ---- the register allocator's view of this machine ---------------------
@@ -1092,6 +1098,20 @@ static void rd(struct t_fn *F, int v, int reg)
     }
 }
 
+/* A free low register for this instruction, taken so the next ask gets
+ * another (see lo_free). */
+static int lo_take(struct t_fn *F)
+{
+    int r = 0;
+    while (!(F->lofree & (1u << r)))
+        r++;
+    F->lofree &= ~(1u << r);
+    return r;
+}
+/* A scratch: a free low register when this instruction has one, else
+ * the high one named. A macro for the reason rdr is one below. */
+#define LO(F, scratch) ((F)->lofree ? lo_take(F) : (scratch))
+
 /* `rdr` says where a value already IS; `wreg` where to compute a result;
  * `wrote` commits it only if that was a scratch. */
 static int rdr_(struct t_fn *F, int v, int scratch)
@@ -1108,9 +1128,9 @@ static int rdr_(struct t_fn *F, int v, int scratch)
  * already in a register -- so a leaf that never touched r10 still pushed
  * and popped it, and lost its `bx lr`. */
 #define rdr(F, v, scratch) \
-    (in_reg((F), (v)) ? (F)->loc[(v)] : rdr_((F), (v), (scratch)))
+    (in_reg((F), (v)) ? (F)->loc[(v)] : rdr_((F), (v), LO((F), (scratch))))
 #define wreg(F, v, scratch) \
-    (in_reg((F), (v)) ? (F)->loc[(v)] : (scratch))
+    (in_reg((F), (v)) ? (F)->loc[(v)] : LO((F), (scratch)))
 
 static void wr(struct t_fn *F, int v, int reg)
 {
@@ -2574,8 +2594,8 @@ static void gen_ins(struct t_fn *F, int n)
                 if (add) t_addw(t, d, ra_, mag);
                 else     t_subw(t, d, ra_, mag);
             } else if (!t_alu_imm(t, op, d, ra_, i->imm, 0)) {
-                int rb_ = (!in_reg(F, i->b)) ? T_TMP : F->loc[i->b];
-                if (rb_ == R_TMP) operand_b(F, i, T_TMP);
+                int rb_ = !in_reg(F, i->b) ? LO(F, T_TMP) : F->loc[i->b];
+                if (!in_reg(F, i->b)) operand_b(F, i, rb_);
                 t_alu_reg(t, op, d, ra_, rb_, 0);
             }
             wrote(F, i->dst, d);
@@ -2585,8 +2605,9 @@ static void gen_ins(struct t_fn *F, int n)
             /* The second operand is pinned to a scratch unless it is
              * already in a register, so a load of it cannot land in the
              * destination before the operation reads it. */
-            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? T_TMP : F->loc[i->b];
-            if (rb_ == R_TMP) operand_b(F, i, T_TMP);
+            int bin = !i->imm_b && in_reg(F, i->b);
+            int rb_ = bin ? F->loc[i->b] : LO(F, T_TMP);
+            if (!bin) operand_b(F, i, rb_);
             if (i->op == IR_MUL)
                 t_mul(t, d, ra_, rb_);
             else if (d == rb_ && ra_ != rb_ && i->op != IR_SUB)
@@ -2607,8 +2628,8 @@ static void gen_ins(struct t_fn *F, int n)
          * r11 are callee-saved -- pushed for it. */
         int sa = rdr(F, i->a, T_ACC), sb, d;
         if (i->imm_b) {
-            t_mov_imm(t, T_TMP, (long)i->imm, 0);
-            sb = T_TMP;
+            sb = LO(F, T_TMP);
+            t_mov_imm(t, sb, (long)i->imm, 0);
         } else {
             sb = rdr(F, i->b, T_TMP);
         }
@@ -2634,8 +2655,9 @@ static void gen_ins(struct t_fn *F, int n)
         if (i->imm_b && i->imm >= 0 && i->imm < 32) {
             t_shift_imm(t, sh, d, sa, (int)i->imm, 1);   /* flags dead */
         } else {
-            operand_b(F, i, T_TMP);
-            t_shift_reg(t, sh, d, sa, T_TMP, 1);
+            int sb = LO(F, T_TMP);
+            operand_b(F, i, sb);
+            t_shift_reg(t, sh, d, sa, sb, 1);
         }
         wrote(F, i->dst, d);
         return;
@@ -2690,8 +2712,9 @@ static void gen_ins(struct t_fn *F, int n)
              * into r11 first. */
             t_cmp_reg(t, sa, rdr(F, i->b, T_TMP));
         } else {
-            operand_b(F, i, T_TMP);
-            t_cmp_reg(t, sa, T_TMP);
+            int sb = LO(F, T_TMP);
+            operand_b(F, i, sb);
+            t_cmp_reg(t, sa, sb);
         }
         }
         if (fuse) {
@@ -3504,6 +3527,95 @@ static int *t_pair_alloc(struct ir_func *fn, const char *wide,
     return loc;
 }
 
+/* ---- LOW SCRATCH -----------------------------------------------------
+ *
+ * r9-r12 are this file's scratch registers, and all four are high: a
+ * value that lives in a slot came back through `ldr.w r12, [sp, #n]`,
+ * four bytes where `ldr r2, [sp, #n]` is two, and whatever worked on it
+ * after took a 32-bit form too -- a quarter of the instructions in the
+ * non-math corpus named one of them.
+ *
+ * Most instructions leave some of r0-r7 holding nothing. A register is
+ * free across instruction n when no value live into or out of it, and
+ * none it reads or writes, has its home there; n + 1 counts as well,
+ * because a comparison emits the branch after it. r0-r3 are free for
+ * the asking, r4-r7 only once the prologue saves them anyway, and r7
+ * never while it is the frame base.
+ *
+ * Only for the instructions below, whose lowering names no low register
+ * of its own: a call, a helper, inline asm, an atomic and every 64-bit
+ * path put arguments and pairs in fixed ones, and a scratch there could
+ * be the register an argument is about to arrive in. */
+static int lo_op_ok(const struct t_fn *F, const struct ir_ins *i)
+{
+    int nv = F->fn->nvregs, v[3], k;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
+    case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+    case IR_NEG: case IR_BNOT: case IR_CMP:
+        if (i->flt)
+            return 0;
+        break;
+    case IR_CONST: case IR_MOV: case IR_BITCAST:
+    case IR_LDVAR: case IR_STVAR: case IR_LOAD: case IR_STORE: case IR_EXT:
+    case IR_ADDR: case IR_STRADDR: case IR_GADDR: case IR_FADDR:
+    case IR_BRZ: case IR_BRNZ:
+        break;
+    default:
+        return 0;
+    }
+    if (t_op_calls_helper(i) || i->w > 4 || i->size > 4)
+        return 0;
+    v[0] = i->a; v[1] = i->b; v[2] = i->dst;
+    for (k = 0; k < 3; k++)
+        if (v[k] >= 0 && v[k] < nv && F->wide[v[k]])
+            return 0;
+    return 1;
+}
+
+struct lo_busy { const struct t_fn *F; unsigned busy; };
+
+static void lo_mark(int v, void *ctx)
+{
+    struct lo_busy *b = ctx;
+    const struct t_fn *F = b->F;
+    if (v < 0 || v >= F->fn->nvregs || !F->loc || F->loc[v] < 0)
+        return;
+    b->busy |= 1u << F->loc[v];
+    if (F->wide[v])
+        b->busy |= 2u << F->loc[v];     /* the pair's high register */
+}
+
+static unsigned lo_free(const struct t_fn *F, int n)
+{
+    const struct ir_func *fn = F->fn;
+    struct lo_busy b;
+    unsigned avail = 0xfu;
+    int m, w, k;
+    if (!F->lv_out || !lo_op_ok(F, &fn->ins[n]))
+        return 0;
+    for (k = 0; k < F->nsave; k++)
+        if (F->used_callee[k] < 8)
+            avail |= 1u << F->used_callee[k];
+    if (F->fb == 7 || fn->has_alloca)
+        avail &= ~(1u << 7);
+    b.F = F;
+    b.busy = 0;
+    for (m = n; m < fn->nins && m <= n + 1; m++) {
+        const unsigned long *li = F->lv_in + (size_t)m * F->lv_words;
+        const unsigned long *lo = F->lv_out + (size_t)m * F->lv_words;
+        for (w = 0; w < F->lv_words; w++) {
+            unsigned long bits = li[w] | lo[w];
+            for (k = 0; bits && k < 64; k++, bits >>= 1)
+                if (bits & 1)
+                    lo_mark(w * 64 + k, &b);
+        }
+        ra_each_use(&fn->ins[m], lo_mark, &b);
+        lo_mark(fn->ins[m].dst, &b);
+    }
+    return avail & ~b.busy;
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                      int want_debug)
 {
@@ -3647,6 +3759,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             fn->ins[i].op == IR_ASM || t_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
     layout(&F);
+    if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO")) {
+        int *lf = xmalloc((size_t)fn->nvregs * sizeof *lf);
+        int *ll = xmalloc((size_t)fn->nvregs * sizeof *ll);
+        int *dv = NULL;
+        F.lv_out = ra_live_intervals(fn, lf, ll, &F.lv_in, &dv,
+                                     &F.lv_words);
+        free(lf); free(ll); free(dv);
+    }
 
     /* One more label than the IR has: the epilogue, which every IR_RET
      * jumps to so the frame size is written down once. */
@@ -3946,7 +4066,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     int tail_end = 0;        /* the body's last act is a tail call */
     for (i = 0; i < fn->nins; i++) {
         int was_tail = F.tail && F.tail[i] && F.nopush;
+        F.lofree = lo_free(&F, i);
         gen_ins(&F, i);
+        F.lofree = 0;
         if (F.skip_next) {      /* the comparison emitted its branch too */
             F.skip_next = 0;
             i++;
@@ -4090,6 +4212,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.nshr);
     free(F.loc);
     free(F.floc);
+    free(F.lv_in);
+    free(F.lv_out);
 }
 
 /* With the allocator on and no FPU, a function is generated with the pair
