@@ -181,6 +181,7 @@ int t_mov_addr(struct code *c, int rd, unsigned long value);
 /* An `it` block header: `cond` and a mask of up to three following
  * instructions. mask bit i (from the top) is 1 for "then". */
 void t_it(struct code *c, int cond, int nthen, unsigned pattern);
+void t_setcc_low(struct code *c, int cond, int rd);
 
 /* The condition that inverts this one. */
 int t_cond_invert(int cond);

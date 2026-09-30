@@ -2158,6 +2158,27 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
 
 /* ---- one instruction ------------------------------------------------ */
 
+/* dst = the condition's truth, 0 or 1, after a compare that set the flags.
+ * Into a low register: `ite cond; mov d, #1; mov d, #0`, six bytes --
+ * inside an IT block the 16-bit mov sets no flags. Elsewhere: set r12,
+ * skip the clear on the condition, clear -- ten bytes, and no IT. */
+static void set_cc(struct t_fn *F, int dst, int cond)
+{
+    int d = wreg(F, dst, T_ACC);
+    if (d < 8) {
+        t_setcc_low(F->t, cond, d);
+        wrote(F, dst, d);
+        return;
+    }
+    t_mov_imm(F->t, T_ACC, 1, 0);
+    {
+        int over = t_bcond16(F->t, cond);
+        t_mov_imm(F->t, T_ACC, 0, 0);
+        t_patch_bcond16(F->t, over, F->t->len);
+    }
+    wr(F, dst, T_ACC);
+}
+
 static void gen_ins(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -2223,13 +2244,7 @@ static void gen_ins(struct t_fn *F, int n)
                 F->skip_next = 1;
                 return;
             }
-            t_mov_imm(t, T_ACC, 1, 0);
-            {
-                int over = t_bcond16(t, cond);
-                t_mov_imm(t, T_ACC, 0, 0);
-                t_patch_bcond16(t, over, t->len);
-            }
-            wr(F, i->dst, T_ACC);
+            set_cc(F, i->dst, cond);
             return;
         }
         if (fp_on_vfp(i) && fp_vfp_arith(F, i))
@@ -2265,13 +2280,7 @@ static void gen_ins(struct t_fn *F, int n)
             call_helper(F, fp_cmp_name(i->pred, i->w));
             t_cmp_imm(t, T_R0, 0);
             cond = cond_for(i->pred, 1);      /* the helper's signed answer */
-            t_mov_imm(t, T_ACC, 1, 0);
-            {
-                int over = t_bcond16(t, cond);
-                t_mov_imm(t, T_ACC, 0, 0);
-                t_patch_bcond16(t, over, t->len);
-            }
-            wr(F, i->dst, T_ACC);
+            set_cc(F, i->dst, cond);
             return;
         }
         if (i->op == IR_SQRT)
@@ -2529,13 +2538,7 @@ static void gen_ins(struct t_fn *F, int n)
                 F->skip_next = 1;
                 return;
             }
-            t_mov_imm(t, T_ACC, 1, 0);
-            {
-                int over = t_bcond16(t, cond);
-                t_mov_imm(t, T_ACC, 0, 0);
-                t_patch_bcond16(t, over, t->len);
-            }
-            wr(F, i->dst, T_ACC);
+            set_cc(F, i->dst, cond);
             return;
         }
         {
@@ -2561,13 +2564,7 @@ static void gen_ins(struct t_fn *F, int n)
         /* 0 or 1, without an IT block: set it, then jump over the
          * clear. Two instructions either way, and no flag-liveness
          * question to get wrong. */
-        t_mov_imm(t, T_ACC, 1, 0);
-        {
-            int over = t_bcond16(t, cond);
-            t_mov_imm(t, T_ACC, 0, 0);
-            t_patch_bcond16(t, over, t->len);
-        }
-        wr(F, i->dst, T_ACC);
+        set_cc(F, i->dst, cond);
         return;
     }
     case IR_SELECT: {

@@ -676,6 +676,19 @@ void t_it(struct code *c, int cond, int nthen, unsigned pattern)
 
 int t_cond_invert(int cond) { return cond ^ 1; }
 
+/* rd = cond ? 1 : 0 for a LOW register, in six bytes: `ite cond; mov rd,
+ * #1; mov rd, #0`. Inside an IT block the 16-bit `mov` sets no flags,
+ * which is what lets it stand where a flag-setting `movs` could not. The
+ * ITE mask is the second instruction's sense -- the inverse of cond's low
+ * bit, since it is the ELSE -- then the terminating 1. */
+void t_setcc_low(struct code *c, int cond, int rd)
+{
+    hw(c, 0xbf00u | (unsigned)(cond << 4) |
+          ((unsigned)(~cond & 1) << 3) | 4u);
+    hw(c, 0x2000u | (unsigned)(rd << 8) | 1u);
+    hw(c, 0x2000u | (unsigned)(rd << 8));
+}
+
 /* ---- the system instructions -------------------------------------------
  *
  * Each field layout is written once, here, and checked by thumbcheck.
