@@ -172,6 +172,15 @@ struct ra_target {
      * values made from it, where before each was a separate node with a
      * movw between. */
     int (*ext_plain)(const struct ir_ins *i);
+
+    /* Does this backend's atomic lowering -- IR_XCHG, IR_XADD, IR_ARMW,
+     * IR_CAS, IR_CMPXCHG -- read its address and operands where they are,
+     * register or slot, the way the three flags above describe arguments,
+     * returns and copies? 0 keeps every one of them in memory, which is
+     * what x86-64's raw-slot lowering needs; RISC-V's reads through rdr,
+     * and a lock's fast path there was a store and a reload of the lock
+     * pointer, the desired value and the expected value's address. */
+    int atomic_in_reg;
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that

@@ -253,7 +253,8 @@ static const struct ra_target A64_RA = {
     a64_abi_hints,
     a64_fp_pool_for, a64_fp_callee_saved,
     0,             /* float_in_gpr: floats have their own class (SIMD) */
-    NULL, NULL
+    NULL, NULL,
+    0  /* atomic_in_reg */
 };
 
 

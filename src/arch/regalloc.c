@@ -417,8 +417,16 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
          * so it is NOT opaque — only its raw value path was. */
         case IR_VA_START:  OPAQUE(in->a); break;
         case IR_XCHG: case IR_XADD: case IR_ARMW:
-            OPAQUE(in->a); OPAQUE(in->b); break;          /* raw addr/val slots */
-        case IR_CMPXCHG: case IR_CAS: case IR_CAS16:
+            if (!t->atomic_in_reg) {                      /* raw addr/val slots */
+                OPAQUE(in->a); OPAQUE(in->b);
+            }
+            break;
+        case IR_CMPXCHG: case IR_CAS:
+            if (!t->atomic_in_reg) {
+                OPAQUE(in->a); OPAQUE(in->b); OPAQUE(in->c);
+            }
+            break;
+        case IR_CAS16:                  /* a pair operation: never */
             OPAQUE(in->a); OPAQUE(in->b); OPAQUE(in->c); break;
         case IR_FRAMEADDR:
             OPAQUE(in->dst); break;                        /* a raw-slot result */

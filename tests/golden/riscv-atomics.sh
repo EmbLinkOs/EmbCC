@@ -116,6 +116,19 @@ void putn(long v);
 static volatile int lock;
 static volatile int counter;
 
+/* Through a POINTER ARGUMENT: the address arrives in a0 and the result
+ * leaves in a0, so an allocator that keeps atomics' operands in registers
+ * may give the result the address's own register. The NAND loop writes
+ * its result before its store-conditional reads the address again. */
+__attribute__((noinline)) int nand_at(volatile int *p, int v)
+{ return __sync_fetch_and_nand(p, v); }
+__attribute__((noinline)) int swap_at(volatile int *p, int v)
+{ return __sync_lock_test_and_set(p, v); }
+__attribute__((noinline)) int add_at(volatile int *p, int v)
+{ return __sync_fetch_and_add(p, v); }
+__attribute__((noinline)) int cas_at(volatile int *p, int o, int n)
+{ return __sync_val_compare_and_swap(p, o, n); }
+
 int main(void)
 {
     int prev;
@@ -149,12 +162,20 @@ int main(void)
     putn(counter);                                          /* 400 */
     putn(__sync_bool_compare_and_swap(&counter, 200, 500)); /* 0 */
     putn(counter);                                          /* 400 */
+
+    counter = 12;
+    putn(nand_at(&counter, 10));                  /* 12 */
+    putn(counter & 0xff);                         /* ~(12 & 10) = 0xf7 */
+    putn(swap_at(&counter, 21) & 0xff);           /* 0xf7 again */
+    putn(add_at(&counter, 4));                    /* 21 */
+    putn(cas_at(&counter, 25, 30));               /* 25 */
+    putn(counter);                                /* 30 */
     __sync_synchronize();
     puts_("DONE\n");
     return 0;
 }
 EOF
-want="0 1 0 10 15 15 12 12 4 4 7 7 6 100 200 200 200 1 400 0 400 DONE"
+want="0 1 0 10 15 15 12 12 4 4 7 7 6 100 200 200 200 1 400 0 400 12 247 247 21 25 30 DONE"
 H=$out/h; mkdir -p "$H"
 for pair in "riscv32-unknown-elf 32" "riscv64-unknown-elf 64"; do
     t=${pair% *}; x=${pair#* }

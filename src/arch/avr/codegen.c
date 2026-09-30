@@ -4337,7 +4337,8 @@ static const struct ra_target AVR_RA = {
     1,                /* float_in_gpr: a float is four bytes in a quad,
                        * and every float lowering reads through vld/rd4 */
     a_saved_only,
-    a_ext_plain
+    a_ext_plain,
+    0  /* atomic_in_reg */
 };
 
 /* The lowest register any call this function makes -- the IR's, and the

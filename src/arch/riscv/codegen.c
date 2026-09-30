@@ -310,7 +310,9 @@ static const struct ra_target RISCV_RA = {
     NULL, NULL,   /* no FP class -- soft float lives in the core registers */
     1,            /* ...and so is allocated with them: every float lowering
                    * here goes through rd/wr/set_args (float_in_gpr) */
-    NULL, NULL
+    NULL, NULL,
+    1             /* atomic_in_reg: every atomic reads its address and
+                   * values through rdr and writes through wreg/wr */
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -2760,6 +2762,13 @@ static void gen_ins(struct rv_fn *F, int n)
         addr = rdr(F, i->a, ADDR);
         val = rdr(F, i->b, TMP);
         dst = wreg(F, i->dst, ACC);
+        /* With the operands in their homes (atomic_in_reg) the result's
+         * home may be one of theirs -- an operand that dies here -- and
+         * the NAND loop below writes dst before its store-conditional
+         * reads addr and val again. So the result is made in ACC then;
+         * `wrote` moves it home. */
+        if (dst == addr || dst == val)
+            dst = ACC;
         if (i->op == IR_XCHG)
             rv_amo(t, RV_AMOSWAP, dst, addr, val, RV_ORD_AQRL, aw == 8);
         else if (i->op == IR_XADD)
@@ -2928,7 +2937,8 @@ static const struct ra_target RV_PAIR_RA = {
     rv_pair_hints,
     NULL, NULL,
     1,
-    NULL, NULL
+    NULL, NULL,
+    1
 };
 
 static void rv_pair_hints(const struct ir_func *fn, int *hint)
