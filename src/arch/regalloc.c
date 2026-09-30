@@ -880,6 +880,40 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         if (pick < 0)
         for (int k = 0; k < NP; k++)                  /* a free preferred reg */
             if ((want & (1 << k)) && !(taken & (1 << k))) { pick = k; break; }
+        /* Else the lowest free register -- but first one no interfering
+         * value still to be coloured has asked for. Colouring order is
+         * the simplify stack's, not the program's, so a constant could
+         * take a0 ahead of the parameter that ARRIVES in a0 and is passed
+         * in it again: `mv a1, a0` at entry and `mv a0, a1` before the
+         * call, around nothing. */
+        if (pick < 0) {
+            int avoid = 0;
+            for (int w = 0; w < ew; w++) {
+                unsigned long bits = row[w];
+                while (bits) {
+                    int b = 0; unsigned long tt = bits;
+                    while (!(tt & 1)) { tt >>= 1; b++; }
+                    int ne = w * 64 + b;
+                    if (!absorbed[ne] && loc[eidx[ne]] < 0 && ehint[ne] >= 0)
+                        for (int k = 0; k < NP; k++)
+                            if (POOL[k] == ehint[ne]) avoid |= 1 << k;
+                    bits &= bits - 1;
+                }
+            }
+            /* ...but not at the price of a save: a register the ABI
+             * wants for someone else is still better than a callee-saved
+             * one the prologue must push for this value. */
+            int first = -1;
+            for (int k = 0; k < NP && first < 0; k++)
+                if (!(taken & (1 << k))) first = k;
+            for (int k = 0; k < NP; k++)
+                if (!(taken & (1 << k)) && !(avoid & (1 << k)) &&
+                    (!callee_saved(POOL[k]) ||
+                     (first >= 0 && callee_saved(POOL[first])))) {
+                    pick = k;
+                    break;
+                }
+        }
         if (pick < 0)
             for (int k = 0; k < NP; k++)               /* else lowest free */
                 if (!(taken & (1 << k))) { pick = k; break; }
