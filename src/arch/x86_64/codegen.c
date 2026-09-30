@@ -4249,6 +4249,15 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 cg_store(text, sd, i->dst, 8);
                 break;
             }
+            /* A result nothing reads -- every void call has a temp for
+             * one -- stays in rax/xmm0: copying it home was a `mov
+             * %rax,%r8` after each of them. Temps only: a local's value
+             * can be read through a pointer the counts do not see. The
+             * x87 one below must still be popped. */
+            if (g_regalloc && usecnt && i->dst >= fn->nvars &&
+                i->dst < fn->nvregs && usecnt[i->dst] == 0 &&
+                !(i->flt && i->w == 16) && i->w != 16)
+                break;
             if (i->flt && i->w == 16)      /* long double comes back in st0 */
                 x86_x87_mem(text, 0xDB, 7, REG_RBP, sd[i->dst]);
             else if (i->w == 16) {         /* an __int128 in rax:rdx */
