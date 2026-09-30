@@ -300,6 +300,15 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
 
     int NP = 0;
     const int *POOL = fp ? t->fp_pool_for(fn, &NP) : t->pool_for(fn, &NP);
+    /* EMBCC_RA_MAXPOOL=N: the first N registers of the pool and no more,
+     * for a test that has to reach the lowerings' SPILLED-operand paths --
+     * which a real pool reaches only in the few functions that run out,
+     * so a register those paths clobber can go unnoticed for years. */
+    if (!fp && getenv("EMBCC_RA_MAXPOOL")) {
+        int m = atoi(getenv("EMBCC_RA_MAXPOOL"));
+        if (m >= 0 && m < NP)
+            NP = m;
+    }
     int (*callee_saved)(int) = fp && t->is_fp_callee_saved
                              ? t->is_fp_callee_saved : t->is_callee_saved;
 

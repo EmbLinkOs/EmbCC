@@ -82,7 +82,7 @@ static const int VARIADIC_POOL[NVARIADIC] = { 10, 11, 3 /*rbx*/, 12, 13, 14, 15 
  * `is_arg` masks in colouring. A leaf function has neither constraint, so it
  * gets all nine freely. NLEAF sizes the allocator's per-colour arrays. */
 #define NLEAF 10
-static const int LEAF_POOL[NLEAF] = { 8, 9, 10, 11, 6 /*rsi*/,
+static const int LEAF_POOL[NLEAF] = { 6 /*rsi*/, 8, 9, 10, 11,
                                       3 /*rbx*/, 12, 13, 14, 15 };
 /* rdi is NOT here, and it was tried. It is argument register zero AND
  * the hidden pointer a struct return travels through, so it is written
@@ -99,8 +99,8 @@ static const int LEAF_POOL[NLEAF] = { 8, 9, 10, 11, 6 /*rsi*/,
 /* ...and with rdx, for a function that neither divides nor has an
  * atomic in it. */
 #define NLEAF_RDX 11
-static const int LEAF_POOL_RDX[NLEAF_RDX] = { 8, 9, 10, 11, 6 /*rsi*/,
-                                              2 /*rdx*/, 3 /*rbx*/,
+static const int LEAF_POOL_RDX[NLEAF_RDX] = { 6 /*rsi*/, 2 /*rdx*/,
+                                              8, 9, 10, 11, 3 /*rbx*/,
                                               12, 13, 14, 15 };
 
 #define NLEAF_AT 9
@@ -224,8 +224,7 @@ static const int *x86_pool_for(const struct ir_func *fn, int *n)
     /* After the caller-saved ones already there (it is caller-saved too,
      * so it needs no prologue save) and before the callee-saved five. */
     int k = 0, o = 0;
-    while (k < nb && (base[k] == 8 || base[k] == 9 || base[k] == 10 ||
-                      base[k] == 11 || base[k] == 6 || base[k] == 2))
+    while (k < nb && (base[k] == 6 || base[k] == 2))
         x86_pool_buf[o++] = base[k++];
     x86_pool_buf[o++] = REG_RDI;
     while (k < nb) x86_pool_buf[o++] = base[k++];
@@ -3889,14 +3888,23 @@ static void gen_func(struct ir_func *fn, struct code *text,
             if (in_reg(i->a)) dbase = g_loc[i->a];
             else { x86_load_slot(text, sd[i->a], 8, 0, 8);
                    x86_mov_reg_reg(text, REG_RCX, REG_RAX); dbase = REG_RCX; }
-            if (in_reg(i->b)) sbase = g_loc[i->b];
-            else { x86_load_slot(text, sd[i->b], 8, 0, 8);
-                   x86_mov_reg_reg(text, REG_RDX, REG_RAX); sbase = REG_RDX; }
+            /* A source address in memory is read again for each chunk,
+             * into rax. It went through rdx, which is in the pool of every
+             * function that neither divides nor has an atomic -- and so held
+             * some other value's home that the copy then overwrote. rax and
+             * rcx are the only registers no pool contains (see the call's
+             * struct-argument copy, which re-reads the same way). */
+            sbase = in_reg(i->b) ? g_loc[i->b] : -1;
             int off = 0;
             while (off < i->size) {
                 int chunk = i->size - off;
                 chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4 : chunk >= 2 ? 2 : 1;
-                x86_load_reg_mem(text, REG_RAX, sbase, off, chunk);
+                if (sbase < 0) {
+                    x86_load_slot(text, sd[i->b], 8, 0, 8);
+                    x86_load_reg_mem(text, REG_RAX, REG_RAX, off, chunk);
+                } else {
+                    x86_load_reg_mem(text, REG_RAX, sbase, off, chunk);
+                }
                 x86_store_mem_reg(text, dbase, off, REG_RAX, chunk);
                 off += chunk;
             }
