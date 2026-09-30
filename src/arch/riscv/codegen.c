@@ -1462,28 +1462,74 @@ static void shift64_var(struct rv_fn *F, int op, int sign)
 /* A 64-bit comparison at RV32, into ACC as a 0 or a 1. The high words
  * decide unless they are equal, in which case the low words do -- and the
  * low comparison is always UNSIGNED however the value itself is signed. */
+/* Where a 64-bit operand's halves ARE: its pair, or the given scratch
+ * registers after a load -- so an operation reads it in place. And where
+ * to compute a 64-bit result: its pair, or A. Pairs never partly overlap
+ * (rv_pair_alloc hands out whole aligned pairs), so an operation that
+ * reads a half before writing the same half is safe with the result in
+ * an operand's pair. */
+static void src64(struct rv_fn *F, int v, int slo, int shi, int *lo, int *hi)
+{
+    if (in_reg(F, v)) {
+        *lo = F->loc[v];
+        *hi = F->loc[v] + 1;
+        return;
+    }
+    rd64(F, v, slo, shi);
+    *lo = slo;
+    *hi = shi;
+}
+static void dst64(struct rv_fn *F, int v, int *lo, int *hi)
+{
+    *lo = in_reg(F, v) ? F->loc[v] : A_LO;
+    *hi = in_reg(F, v) ? F->loc[v] + 1 : A_HI;
+}
+
 static void cmp64(struct rv_fn *F, const struct ir_ins *i, enum binop pred,
                   int sign)
 {
     struct code *t = F->t;
-    int hi_ne, done;
+    int hi_ne, done, al, ah, bl, bh;
 
-    rd64(F, i->a, A_LO, A_HI);
-    operand_b64(F, i, B_LO, B_HI);
+    /* The operand where it lives. */
+    src64(F, i->a, A_LO, A_HI, &al, &ah);
+    /* Against zero -- `x < 0`, `x == 0`, most 64-bit compares there are --
+     * the answer is in the high word's sign, or in whether either half
+     * is set: no second operand, no branch. */
+    if (i->imm_b && i->imm == 0) {
+        if (pred == B_EQ || pred == B_NE) {
+            rv_alu(t, RV_OR, SCR, al, ah, 0);
+            if (pred == B_EQ) rv_alu_imm(t, RV_SLTU, ACC, SCR, 1, 0);
+            else              rv_alu(t, RV_SLTU, ACC, RV_ZERO, SCR, 0);
+            return;
+        }
+        if (sign && (pred == B_LT || pred == B_GE)) {
+            rv_alu(t, RV_SLT, ACC, ah, RV_ZERO, 0);
+            if (pred == B_GE)
+                rv_alu_imm(t, RV_XOR, ACC, ACC, 1, 0);
+            return;
+        }
+    }
+    if (i->imm_b) {
+        operand_b64(F, i, B_LO, B_HI);
+        bl = B_LO; bh = B_HI;
+    } else {
+        src64(F, i->b, B_LO, B_HI, &bl, &bh);
+    }
 
     if (pred == B_EQ || pred == B_NE) {
-        rv_alu(t, RV_XOR, SCR, A_LO, B_LO, 0);
-        rv_alu(t, RV_XOR, SCR2, A_HI, B_HI, 0);
+        rv_alu(t, RV_XOR, SCR, al, bl, 0);
+        rv_alu(t, RV_XOR, SCR2, ah, bh, 0);
         rv_alu(t, RV_OR, SCR, SCR, SCR2, 0);
         if (pred == B_EQ) rv_alu_imm(t, RV_SLTU, ACC, SCR, 1, 0);
         else              rv_alu(t, RV_SLTU, ACC, RV_ZERO, SCR, 0);
         return;
     }
-    hi_ne = rv_b_placeholder(t, RV_BNE, A_HI, B_HI);
-    cmp_to_reg(F, pred, 0, A_LO, B_LO, SCR);   /* equal highs: unsigned lows */
+    hi_ne = rv_b_placeholder(t, RV_BNE, ah, bh);
+    cmp_to_reg(F, pred, 0, al, bl, SCR);       /* equal highs: unsigned lows */
     done = rv_j_placeholder(t, RV_ZERO);
     rv_patch_b(t, hi_ne, t->len);
-    cmp_to_reg(F, pred, sign, A_HI, B_HI, SCR);
+    cmp_to_reg(F, pred, sign, ah, bh, SCR);
     rv_patch_j(t, done, t->len);
     rv_mv(t, ACC, SCR);
 }
@@ -1511,8 +1557,16 @@ static int gen_ins64(struct rv_fn *F, int n)
      * its bits is a copy and nothing else. */
     case IR_BITCAST:
     case IR_MOV:
-        rd64(F, i->a, A_LO, A_HI);
-        wr64(F, i->dst, A_LO, A_HI);
+        /* Straight between the two homes; a copy within one pair is
+         * nothing (mv2). Through A was four moves for a pair-to-pair. */
+        if (in_reg(F, i->dst)) {
+            rd64(F, i->a, F->loc[i->dst], F->loc[i->dst] + 1);
+        } else if (in_reg(F, i->a)) {
+            wr64(F, i->dst, F->loc[i->a], F->loc[i->a] + 1);
+        } else {
+            rd64(F, i->a, A_LO, A_HI);
+            wr64(F, i->dst, A_LO, A_HI);
+        }
         return 1;
     case IR_ADD:
         rd64(F, i->a, A_LO, A_HI);
@@ -1527,12 +1581,21 @@ static int gen_ins64(struct rv_fn *F, int n)
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     case IR_AND: case IR_OR: case IR_XOR: {
+        /* Each half on its own: operands where they live, result where it
+         * lives. */
         int op = i->op == IR_AND ? RV_AND : i->op == IR_OR ? RV_OR : RV_XOR;
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
-        rv_alu(t, op, A_LO, A_LO, B_LO, 0);
-        rv_alu(t, op, A_HI, A_HI, B_HI, 0);
-        wr64(F, i->dst, A_LO, A_HI);
+        int al, ah, bl, bh, dl, dh;
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        if (i->imm_b) {
+            operand_b64(F, i, B_LO, B_HI);
+            bl = B_LO; bh = B_HI;
+        } else {
+            src64(F, i->b, B_LO, B_HI, &bl, &bh);
+        }
+        dst64(F, i->dst, &dl, &dh);
+        rv_alu(t, op, dl, al, bl, 0);
+        rv_alu(t, op, dh, ah, bh, 0);
+        wr64(F, i->dst, dl, dh);
         return 1;
     }
     case IR_MUL:
@@ -1550,14 +1613,17 @@ static int gen_ins64(struct rv_fn *F, int n)
         rv_mv(t, A_HI, SCR2);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
-    case IR_NEG:
-        rd64(F, i->a, A_LO, A_HI);
-        rv_alu(t, RV_SLTU, SCR, RV_ZERO, A_LO, 0);   /* borrow out of 0-lo */
-        rv_alu(t, RV_SUB, A_LO, RV_ZERO, A_LO, 0);
-        rv_alu(t, RV_SUB, A_HI, RV_ZERO, A_HI, 0);
-        rv_alu(t, RV_SUB, A_HI, A_HI, SCR, 0);
-        wr64(F, i->dst, A_LO, A_HI);
+    case IR_NEG: {
+        int al, ah, dl, dh;
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        dst64(F, i->dst, &dl, &dh);
+        rv_alu(t, RV_SLTU, SCR, RV_ZERO, al, 0);     /* borrow out of 0-lo */
+        rv_alu(t, RV_SUB, dl, RV_ZERO, al, 0);
+        rv_alu(t, RV_SUB, dh, RV_ZERO, ah, 0);
+        rv_alu(t, RV_SUB, dh, dh, SCR, 0);
+        wr64(F, i->dst, dl, dh);
         return 1;
+    }
     case IR_BNOT:
         rd64(F, i->a, A_LO, A_HI);
         rv_alu_imm(t, RV_XOR, A_LO, A_LO, -1, 0);
