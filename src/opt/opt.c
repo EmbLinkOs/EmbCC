@@ -630,7 +630,13 @@ static int pass_fold(struct ir_func *fn)
                 const struct ir_ins *in = &fn->ins[d.ins[i->a]];
                 int src_ok = in->a >= 0 && in->a < fn->nvregs &&
                              d.cnt[in->a] == 1 && i->a != in->a;
-                int keeps = i->size > in->size ||
+                /* Wider than the inner, the outer changes nothing when the
+                 * inner ZERO-extended (the bits above are 0, which either
+                 * kind of extension keeps) or both sign-extend -- but a
+                 * zero-extension of a sign-extended value clears what the
+                 * inner set: (unsigned short)(signed char)-1 is 65535, and
+                 * calling that a copy returned -1 at -O2. */
+                int keeps = (i->size > in->size && (i->sign || !in->sign)) ||
                             (i->size == in->size && i->sign == in->sign);
                 if (keeps && i->w == in->w) {
                     to_mov(i, i->a);
@@ -645,8 +651,28 @@ static int pass_fold(struct ir_func *fn)
                     i->size = in->size;
                     i->sign = in->sign;
                     changed = 1;
-                } else if (!keeps && src_ok) {
+                } else if (!keeps && src_ok && i->size <= in->size) {
+                    /* Narrower, or the same width and the other kind: the
+                     * outer reads only bytes the inner left as they were,
+                     * so it may read them from the inner's source. Wider,
+                     * it would read bytes the inner made. */
                     i->a = in->a;
+                    changed = 1;
+                }
+            } else if (i->a >= 0 && i->a < fn->nvregs && d.cnt[i->a] == 1 &&
+                       d.ins[i->a] >= 0 &&
+                       fn->ins[d.ins[i->a]].op == IR_LOAD &&
+                       !fn->ins[d.ins[i->a]].flt &&
+                       fn->ins[d.ins[i->a]].w == i->w) {
+                /* An extension of a narrow LOAD, which already extended
+                 * what it read -- `load.4:1` is a byte zero-extended to
+                 * four. The same rule as above decides whether the outer
+                 * one is a copy; 31 byte loads in the Thumb corpus were
+                 * followed by an `ext.4:1` of their own result. */
+                const struct ir_ins *in = &fn->ins[d.ins[i->a]];
+                if ((i->size > in->size && (i->sign || !in->sign)) ||
+                    (i->size == in->size && i->sign == in->sign)) {
+                    to_mov(i, i->a);
                     changed = 1;
                 }
             }
