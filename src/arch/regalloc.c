@@ -1298,3 +1298,85 @@ char *ra_narrow_hishift(const struct ir_func *fn)
     return nar;
 }
 
+/* ---- an address's constant offset, into the access ------------------
+ *
+ * `%p = add %s, #8; load [%p]` is a struct field on every target, and a
+ * backend with a base+offset addressing mode spent an instruction on the
+ * add and a register on %p for it: `addw r0, r5, #8; ldr r0, [r0]` where
+ * `ldr r0, [r5, #8]` does. So an ADD of a constant whose EVERY use is the
+ * address of a plain load or store folds into them -- the accesses take
+ * its base and its offset (ir_ins.memoff) -- and the ADD goes.
+ *
+ * Before register allocation, because the base's live range grows to the
+ * accesses. Only a base with one definition, so it holds the same value
+ * there as at the ADD; only integer accesses of up to four bytes (the
+ * paths that honour memoff); and only offsets the target says it can
+ * encode for that access, [lo, hi - size]. */
+int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
+                   const char *wide)
+{
+    int nv = fn->nvregs, changed = 0;
+    if (!nv)
+        return 0;
+    int *defs = xcalloc((size_t)nv, sizeof *defs);
+    int *uses = xcalloc((size_t)nv, sizeof *uses);
+    int *addr_uses = xcalloc((size_t)nv, sizeof *addr_uses);
+    char *drop = xcalloc((size_t)(fn->nins ? fn->nins : 1), 1);
+    for (int v = 0; v < fn->nparams && v < nv; v++)
+        defs[v]++;
+    for (int n = 0; n < fn->nins; n++) {
+        int d = ra_ins_def(&fn->ins[n]);
+        if (d >= 0 && d < nv) defs[d]++;
+    }
+    ra_count_vreg_uses(fn, uses);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        /* ...and not a store of a WIDE value, even a four-byte one: that
+         * takes the backend's 64-bit path, which knows no memoff. */
+        if ((i->op == IR_LOAD || i->op == IR_STORE) && i->a >= 0 &&
+            i->a < nv && !i->flt && i->size >= 1 && i->size <= 4 &&
+            i->w <= 4 && !(i->op == IR_STORE && i->b == i->a) &&
+            !(wide && i->op == IR_STORE && i->b >= 0 && i->b < nv &&
+              wide[i->b]) &&
+            !(wide && i->op == IR_LOAD && i->dst >= 0 && i->dst < nv &&
+              wide[i->dst]))
+            addr_uses[i->a]++;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int p = i->dst, s = i->a;
+        long k = i->imm;
+        if (i->op != IR_ADD || !i->imm_b || i->flt || i->w != w_addr ||
+            p < fn->nvars || p >= nv || s < 0 || s >= nv || s == p ||
+            defs[p] != 1 || defs[s] != 1 || uses[p] != addr_uses[p] ||
+            !uses[p])
+            continue;
+        int ok = 1;
+        for (int m = 0; m < fn->nins && ok; m++) {
+            const struct ir_ins *u = &fn->ins[m];
+            if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == p) {
+                long off = (long)u->memoff + k;
+                if (off < lo || off > hi - u->size) ok = 0;
+            }
+        }
+        if (!ok)
+            continue;
+        for (int m = 0; m < fn->nins; m++) {
+            struct ir_ins *u = &fn->ins[m];
+            if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == p) {
+                u->a = s;
+                u->memoff += (int)k;
+            }
+        }
+        drop[n] = 1;
+        changed = 1;
+    }
+    if (changed) {
+        int j = 0;
+        for (int n = 0; n < fn->nins; n++)
+            if (!drop[n]) fn->ins[j++] = fn->ins[n];
+        fn->nins = j;
+    }
+    free(defs); free(uses); free(addr_uses); free(drop);
+    return changed;
+}

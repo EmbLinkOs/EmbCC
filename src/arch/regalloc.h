@@ -319,4 +319,10 @@ int ra_parallel_move(const int *dst, const int *src, int n, int scratch,
  * pair, on a 32-bit target. The caller frees the map. */
 char *ra_narrow_hishift(const struct ir_func *fn);
 
+/* Fold an ADD of a constant into the loads and stores that are its only
+ * uses (ir_ins.memoff), for a target with base+offset addressing whose
+ * encodable range is [lo, hi - size]. Run before allocation. */
+int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
+                   const char *wide);
+
 #endif

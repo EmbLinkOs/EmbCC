@@ -217,6 +217,11 @@ struct ir_ins {
     int sret_first;          /* IR_CALL: argument 0 is the indirect-result
                               * pointer (type.h sret_first) */
     int call_varargs;        /* al = 0 needed at the call */
+    int memoff;              /* IR_LOAD/IR_STORE: a constant byte offset
+                              * added to the address -- set only by a
+                              * backend's own pre-codegen pass
+                              * (ra_fold_memoff), never by irgen or the
+                              * optimizer, so every other backend sees 0 */
     int natural;             /* IR_LOAD/IR_STORE: the address is aligned
                               * to the access, because C guarantees it
                               * there (a dereference, a global, a member

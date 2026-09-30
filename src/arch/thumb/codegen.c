@@ -2667,17 +2667,25 @@ static void gen_ins(struct t_fn *F, int n)
          * apart here. */
         int an = rdr(F, i->a, T_ADDR);
         int d;
+        long off = i->memoff;          /* ra_fold_memoff's, or 0 */
         /* A float with an S-register home, read with vldr -- only where
          * the address is KNOWN aligned: vldr faults on a misaligned one
          * where ldr would not, and a packed struct's float member is
          * exactly that. */
         if (in_freg(F, i->dst) && i->size == 4 && i->natural) {
+            if (off) {
+                t_addw(t, T_ADDR, an, off);
+                an = T_ADDR;
+            }
             t_vldst(t, F->floc[i->dst], an, 0, 0, 0);
             return;
         }
         d = wreg(F, i->dst, T_ACC);
         if (i->w > 4) t_refuse(fn, i, "a 64-bit load");
-        t_ldst_imm(t, d, an, 0, i->size, i->sign, 0);
+        if (!t_ldst_imm(t, d, an, off, i->size, i->sign, 0)) {
+            t_addw(t, T_ADDR, an, off);
+            t_ldst_imm(t, d, T_ADDR, 0, i->size, i->sign, 0);
+        }
         wrote(F, i->dst, d);
         return;
     }
@@ -2686,13 +2694,20 @@ static void gen_ins(struct t_fn *F, int n)
         if (i->w > 4) t_refuse(fn, i, "a 64-bit store");
         an = rdr(F, i->a, T_ADDR);
         if (in_freg(F, i->b) && i->size == 4 && i->natural) {
+            if (i->memoff) {
+                t_addw(t, T_ADDR, an, i->memoff);
+                an = T_ADDR;
+            }
             t_vldst(t, F->floc[i->b], an, 0, 0, 1);   /* see IR_LOAD */
             return;
         }
         /* The value must not land in the register the address is in
          * when that register is the scratch -- rdr would overwrite it. */
         vr = rdr(F, i->b, an == T_ACC ? T_TMP : T_ACC);
-        t_ldst_imm(t, vr, an, 0, i->size, 0, 1);
+        if (!t_ldst_imm(t, vr, an, i->memoff, i->size, 0, 1)) {
+            t_addw(t, T_ADDR, an, i->memoff);
+            t_ldst_imm(t, vr, T_ADDR, 0, i->size, 0, 1);
+        }
         return;
     }
     case IR_EXT: {
@@ -3863,6 +3878,14 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     const char *knob = getenv("EMBCC_T_PAIRS");
     const char *only = getenv("EMBCC_T_PAIRS_ONLY");
 
+    /* A field's constant offset into its load or store (ldr r, [rn, #k])
+     * -- once, before any attempt, and before allocation since the base's
+     * live range grows. */
+    if (g_t_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+        char *w = wide64_map(fn);
+        ra_fold_memoff(fn, 0, 4095, 4, w);
+        free(w);
+    }
     g_t_pairs = 1;
     if (!g_t_regalloc || want_debug || target_thumb_fpu() ||
         (knob && *knob) || (only && *only)) {

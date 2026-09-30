@@ -2250,17 +2250,17 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         return;
     }
-    case IR_LOAD: {
+    case IR_LOAD: {                    /* memoff: ra_fold_memoff's, or 0 */
         int addr = rdr(F, i->a, ADDR);
         int d = wreg(F, i->dst, ACC);
-        rv_load(t, d, addr, 0, i->size, i->sign, F->xlen);
+        rv_load(t, d, addr, i->memoff, i->size, i->sign, F->xlen);
         wrote(F, i->dst, d);
         return;
     }
     case IR_STORE: {
         int addr = rdr(F, i->a, ADDR);
         int val = rdr(F, i->b, ACC);
-        rv_store(t, val, addr, 0, i->size, F->xlen);
+        rv_store(t, val, addr, i->memoff, i->size, F->xlen);
         return;
     }
     case IR_EXT: {
@@ -3349,6 +3349,13 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
 
     const char *only = getenv("EMBCC_RV_PAIRS_ONLY");
 
+    /* A field's constant offset into its load or store (lw r, k(rn)) --
+     * once, before any attempt, and before allocation. */
+    if (g_rv_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+        char *w = xlen == 32 ? wide_map(fn) : NULL;
+        ra_fold_memoff(fn, -2048, 2047, xlen / 8, w);
+        free(w);
+    }
     g_rv_pairs = 1;
     if (xlen != 32 || !g_rv_regalloc || want_debug || (knob && *knob) ||
         (only && *only)) {
