@@ -17,9 +17,11 @@
 # This grades the ORDER in the emitted code rather than running it,
 # because QEMU's arduino-uno does not model the latch: OCR1A written low
 # byte first reads back correct there, and a stopped TCNT1 reads 0 either
-# way. So the rule is checked where it lives -- every run of stores
-# through Z or X in the listing must go down in address, and none may be a
-# post-increment store, which can only go up.
+# way. So the rule is checked where it lives: each function below makes
+# ONE store, so every run of stores through Z in its listing must go down
+# in address, and none may be a post-increment store, which can only go
+# up. (One store each, because two stores through the same pointer share
+# its load into Z, and the second's high byte is above the first's low.)
 set -u
 echo "TEST-MARKER avr-io16"
 . "$(dirname "$0")/../lib.sh"
@@ -37,8 +39,8 @@ void put16(volatile unsigned *p, unsigned v)   { *p = v; }
 void put32(volatile unsigned long *p, unsigned long v) { *p = v; }
 void put64(volatile unsigned long long *p, unsigned long long v) { *p = v; }
 struct regs { unsigned char ctl; unsigned cnt; unsigned long acc; };
-void field(volatile struct regs *r, unsigned c, unsigned long a)
-{ r->cnt = c; r->acc = a; }
+void field16(volatile struct regs *r, unsigned c)      { r->cnt = c; }
+void field32(volatile struct regs *r, unsigned long a) { r->acc = a; }
 EOT
 
 for O in -O0 -O1 -O2 -Os; do

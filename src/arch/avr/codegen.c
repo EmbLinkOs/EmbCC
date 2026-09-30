@@ -211,6 +211,14 @@ struct a_fn {
      * a vld of the same value into the same registers with nothing emitted
      * since -- and no label placed -- has nothing to do. */
     struct { int v, r, n; long at; } last_st;
+    /* What Z holds: the temporary last loaded into it as an address, and
+     * where the code stood then. The next access through the same pointer
+     * loads nothing if nothing since has written Z -- avr_insn_writes over
+     * what was emitted in between says -- and the temporary has not been
+     * redefined (gen_func) or a label reached. Temporaries only: a local
+     * can change through a pointer to it. -1 when nothing. */
+    int zv;
+    long zat;
     /* Which vregs hold an EIGHT-byte value. By the width of the RESULT --
      * i->w for the value-producing operations and four for the rest however
      * wide their operands are: an IR_CMP at w == 8 compares two 64-bit
@@ -714,6 +722,37 @@ static void ext_info(struct a_fn *F)
                     w = F->xw[i->a]; k = F->xs[i->a];
                 }
                 break;
+            /* An address is two bytes, zero above: the machine has no
+             * more, and every lowering of one fills the rest with r1. */
+            case IR_ADDR: case IR_GADDR: case IR_STRADDR: case IR_FADDR:
+                w = 2; k = 0;
+                break;
+            /* A call's result is extended by the CALLER from its own
+             * width, by its own signedness (see IR_CALL). */
+            case IR_CALL:
+                if (!i->retsize && i->ret_tybytes > 0 && i->ret_tybytes < VW) {
+                    w = i->ret_tybytes; k = i->ret_tysign;
+                }
+                break;
+            /* A mask whose upper bytes are zero leaves those bytes zero,
+             * whatever it masks: `(f->flags & 2) != 0` tests one byte. And
+             * an AND of a zero-extended value is no wider than it. */
+            case IR_AND: {
+                int wm = 0;
+                if (i->imm_b) {
+                    unsigned long m = (unsigned long)i->imm & 0xffffffffUL;
+                    wm = m <= 0xff ? 1 : m <= 0xffff ? 2 : m <= 0xffffff ? 3 : 0;
+                }
+                if (i->a >= 0 && i->a < nv && F->xw[i->a] && !F->xs[i->a] &&
+                    (!wm || F->xw[i->a] < wm))
+                    wm = F->xw[i->a];
+                if (!i->imm_b && i->b >= 0 && i->b < nv && F->xw[i->b] &&
+                    !F->xs[i->b] && (!wm || F->xw[i->b] < wm))
+                    wm = F->xw[i->b];
+                if (wm == 3) wm = VW;          /* no three-byte forms */
+                if (wm && wm < VW) { w = wm; k = 0; }
+                break;
+            }
             default:
                 break;
             }
@@ -1355,7 +1394,37 @@ static int is_remat(const struct a_fn *F, int v)
     return F->remat && v >= 0 && F->remat[v];
 }
 
+static void vld_raw(struct a_fn *F, int r, int v, long off, int n);
+
+static int z_holds(struct a_fn *F, int v)
+{
+    struct code *t = F->t;
+    if (F->zv < 0 || F->zv != v)
+        return 0;
+    for (long p = F->zat; p < t->len; ) {
+        int len;
+        if (avr_insn_writes(t->p + p, t->len - p, &len) & (3UL << AVR_Z)) {
+            F->zv = -1;
+            return 0;
+        }
+        p += len;
+    }
+    return 1;
+}
+
 static void vld(struct a_fn *F, int r, int v, long off, int n)
+{
+    int zc = r == AVR_Z && off == 0 && n == 2 && v >= F->fn->nvars;
+    if (zc && z_holds(F, v))
+        return;                        /* Z still holds this pointer */
+    vld_raw(F, r, v, off, n);
+    if (zc) {
+        F->zv = v;
+        F->zat = F->t->len;
+    }
+}
+
+static void vld_raw(struct a_fn *F, int r, int v, long off, int n)
 {
     if (is_remat(F, v)) {
         ldi4(F, r, (unsigned long)F->cval[v] >> (8 * off), n);
@@ -2261,6 +2330,17 @@ static void emit_moves(struct code *t, const int *od, const int *os, int no)
     }
 }
 
+/* Where an address is built: the destination's home when `ldi` reaches
+ * it and it holds every byte read, else A. */
+static int addr_reg(const struct a_fn *F, const struct ir_ins *i)
+{
+    int nb = dw(F, i);
+    if (in_pair(F, i->dst) && F->loc[i->dst] >= 16 &&
+        (nb < 2 ? 2 : nb) <= F->hw[i->dst])
+        return F->loc[i->dst];
+    return RA;
+}
+
 /* ---- the instruction dispatch ---------------------------------------- */
 
 static void gen_ins(struct a_fn *F, int n)
@@ -2866,6 +2946,17 @@ static void gen_ins(struct a_fn *F, int n)
         int nb = dw(F, i);
         if (is_remat(F, i->dst))
             return;                   /* rebuilt where it is read */
+        if (nb && in_pair(F, i->dst) && nb <= F->hw[i->dst]) {
+            /* Straight into the home: `ldi` reaches it from r16 up, and
+             * below that a zero is `mov r, r1` from the zero register.
+             * Anything else below r16 goes through A as before. */
+            int d = F->loc[i->dst];
+            unsigned long m = nb >= 4 ? 0xffffffffUL : (1UL << (8 * nb)) - 1;
+            if (d >= 16 || ((unsigned long)i->imm & m) == 0) {
+                ldi4(F, d, (unsigned long)i->imm, nb);
+                return;
+            }
+        }
         if (nb) {
             ldi4(F, RA, (unsigned long)i->imm, nb);
             wr4(F, i->dst, RA);
@@ -2905,6 +2996,30 @@ static void gen_ins(struct a_fn *F, int n)
          * copying a in first would lose b: a commutative operation takes
          * them the other way round, a subtraction takes A. */
         d = dst_reg(F, i, nb);
+        if (i->imm_b && d < 16 && (i->op == IR_ADD || i->op == IR_SUB)) {
+            /* A home below r16, which subi cannot reach -- but a constant
+             * of one significant byte is `ldi` into A and an add or a
+             * subtract of that with the zero register carrying: three
+             * instructions in place of a copy into A, subi/sbci and a copy
+             * back. `p + 1` on a pointer in r2 is the common case. */
+            unsigned long m = nb >= 4 ? 0xffffffffUL : (1UL << (8 * nb)) - 1;
+            unsigned long v = (unsigned long)i->imm & m;
+            int sub = i->op == IR_SUB;
+            if (v > 0xff && ((0UL - v) & m) <= 0xff) {
+                v = (0UL - v) & m;      /* a small negative: the other op */
+                sub = !sub;
+            }
+            if (v <= 0xff) {
+                vld(F, d, a, 0, nb);
+                if (v) {
+                    avr_ri(t, AVR_LDI, RA, (int)v);
+                    avr_rr(t, sub ? AVR_SUB : AVR_ADD, d, RA);
+                    for (int k = 1; k < nb; k++)
+                        avr_rr(t, sub ? AVR_SBC : AVR_ADC, d + k, R_ZERO);
+                }
+                return;
+            }
+        }
         if (i->imm_b && d < 16)
             d = RA;
         if (!i->imm_b && d != RA && in_pair(F, b) && F->loc[b] == d &&
@@ -2925,6 +3040,14 @@ static void gen_ins(struct a_fn *F, int n)
              * skipping each byte the constant leaves alone. `x + 1` is
              * two instructions instead of four. */
             unsigned long v = (unsigned long)i->imm;
+            if ((d == 24 || d == AVR_X) && nb == 2 &&
+                (i->op == IR_ADD || i->op == IR_SUB)) {
+                /* adiw/sbiw: one word where subi/sbci are two */
+                long k = (long)(short)(v & 0xffffu);
+                if (i->op == IR_SUB) k = -k;
+                if (k >= 1 && k <= 63) { avr_adiw(t, d, (int)k); return; }
+                if (k <= -1 && k >= -63) { avr_sbiw(t, d, (int)-k); return; }
+            }
             if (i->op == IR_ADD) v = 0UL - v;
             for (int k = 0; k < nb; k++) {
                 int b = (int)((v >> (8 * k)) & 0xffu);
@@ -3164,25 +3287,37 @@ static void gen_ins(struct a_fn *F, int n)
         {
             /* Both operands where they live; a comparison with zero is
              * against r1, the zero register, byte for byte. */
-            int ra = rd_in(F, i->a, nb, RA), rb, zero = 0;
+            int ra = rd_in(F, i->a, nb, RA), rb[4], cpi = -1;
             /* b's scratch is A when a did not need it, so that B is
              * written only when both operands had to be loaded */
             int sc = ra == RA ? RB : RA;
-            if (i->imm_b && (i->imm & ((nb >= 4 ? 0xffffffffL
-                                                : (1L << (8 * nb)) - 1))) == 0) {
-                rb = R_ZERO;
-                zero = 1;
-            } else if (i->imm_b) {
-                ldi4(F, sc, (unsigned long)i->imm, nb);
-                rb = sc;
+            if (i->imm_b) {
+                /* A constant byte by byte: a zero is r1, the zero register,
+                 * and the low byte of `a < K` is `cpi` when a is from r16
+                 * up; only the rest need loading. */
+                for (int k = 0; k < nb; k++) {
+                    int c = (int)(((unsigned long)i->imm >> (8 * k)) & 0xffu);
+                    if (c == 0) {
+                        rb[k] = R_ZERO;
+                    } else if (k == 0 && !swap && ra >= 16) {
+                        cpi = c;
+                        rb[k] = -1;
+                    } else {
+                        avr_ri(t, AVR_LDI, sc + k, c);
+                        rb[k] = sc + k;
+                    }
+                }
             } else {
-                rb = rd_in(F, i->b, nb, sc);
+                int r = rd_in(F, i->b, nb, sc);
+                for (int k = 0; k < nb; k++) rb[k] = r + k;
             }
-            {
-                int l = swap ? rb : ra, r = swap ? ra : rb;
-                int dl = swap && zero ? 0 : 1, dr = !swap && zero ? 0 : 1;
-                for (int k = 0; k < nb; k++)
-                    avr_rr(t, k ? AVR_CPC : AVR_CP, l + k * dl, r + k * dr);
+            for (int k = 0; k < nb; k++) {
+                if (k == 0 && cpi >= 0)
+                    avr_ri(t, AVR_CPI, ra, cpi);
+                else if (swap)
+                    avr_rr(t, k ? AVR_CPC : AVR_CP, rb[k], ra + k);
+                else
+                    avr_rr(t, k ? AVR_CPC : AVR_CP, ra + k, rb[k]);
             }
         }
         /* The branch that follows, when it is the 0/1's only reader: take
@@ -3196,13 +3331,21 @@ static void gen_ins(struct a_fn *F, int n)
             return;
         }
         /* ldi does not touch SREG, so the 1 may be loaded between the
-         * compare and the branch; `mov` does not either. */
-        avr_ri(t, AVR_LDI, RA, 1);
-        avr_br(t, c, 1);                        /* skip the clear */
-        avr_rr(t, AVR_MOV, RA, R_ZERO);
-        /* the 0/1's upper bytes, as far as anything reads them */
-        for (int k = 1; k < dw(F, i); k++) avr_rr(t, AVR_MOV, RA + k, R_ZERO);
-        wr4(F, i->dst, RA);
+         * compare and the branch; `mov` does not either. In the home when
+         * `ldi` reaches it. */
+        {
+            int d = RA, nb2 = dw(F, i);
+            if (in_pair(F, i->dst) && F->loc[i->dst] >= 16 &&
+                nb2 <= F->hw[i->dst])
+                d = F->loc[i->dst];
+            avr_ri(t, AVR_LDI, d, 1);
+            avr_br(t, c, 1);                    /* skip the clear */
+            avr_rr(t, AVR_MOV, d, R_ZERO);
+            /* the 0/1's upper bytes, as far as anything reads them */
+            for (int k = 1; k < nb2; k++) avr_rr(t, AVR_MOV, d + k, R_ZERO);
+            if (d == RA)
+                wr4(F, i->dst, RA);
+        }
         return;
     }
 
@@ -3281,12 +3424,12 @@ static void gen_ins(struct a_fn *F, int n)
                 return;
             int d = dst_reg(F, i, nb);       /* straight into its home */
             vld(F, AVR_Z, i->a, 0, 2);
-            if (ld == 1) {
-                avr_ld(t, d, AVR_Z, AVR_PTR_NONE);
-            } else {
-                for (int k = 0; k < ld; k++)
-                    avr_ld(t, d + k, AVR_Z, AVR_PTR_POST_INC);
-            }
+            /* Displaced off Z, low byte first -- the order a 16-bit I/O
+             * register's latch needs for a read -- at the field offset
+             * ra_fold_memoff folded in, and without moving Z, so the next
+             * access through the same pointer finds it there. */
+            for (int k = 0; k < ld; k++)
+                avr_ldd(t, d + k, AVR_Z, i->memoff + k);
             if (nb > i->size)
                 extend(F, d, i->size, i->sign, nb);
             dst_done(F, i, d);
@@ -3309,7 +3452,7 @@ static void gen_ins(struct a_fn *F, int n)
          * every multi-byte value high byte first; reads stay low first,
          * which is the order the same latch needs for them. */
         for (int k = i->size - 1; k >= 0; k--)
-            avr_std(t, AVR_Z, k, src + k);
+            avr_std(t, AVR_Z, i->memoff + k, src + k);
         }
         return;
 
@@ -3345,32 +3488,36 @@ static void gen_ins(struct a_fn *F, int n)
         wr4(F, i->dst, RA);
         return;
 
-    case IR_STRADDR:
-        note_str(F->st, ldi_addr_pair(F, RA), i->label, RK_AVR_LO8_LDI);
-        note_str(F->st, F->t->len - 2, i->label, RK_AVR_HI8_LDI);
-        extend(F, RA, 2, 0, VW);
-        wr4(F, i->dst, RA);
+    /* An address is two `ldi`s the linker fills in: into the home when
+     * it is from r16 up, and extended past its two bytes only as far as
+     * anything reads -- a pointer in a pair is read as two. */
+    case IR_STRADDR: case IR_GADDR: case IR_FADDR: {
+        int nb = dw(F, i), d = addr_reg(F, i);
+        if (!nb)
+            return;
+        if (i->op == IR_STRADDR) {
+            note_str(F->st, ldi_addr_pair(F, d), i->label, RK_AVR_LO8_LDI);
+            note_str(F->st, F->t->len - 2, i->label, RK_AVR_HI8_LDI);
+        } else if (i->op == IR_GADDR) {
+            note_glob(F->st, ldi_addr_pair(F, d), i->glob, RK_AVR_LO8_LDI);
+            note_glob(F->st, F->t->len - 2, i->glob, RK_AVR_HI8_LDI);
+        } else {
+            /* _GS, not the data forms: a function pointer on AVR holds the
+             * WORD address, and the linker may route it through a stub. */
+            note_fn(F->st, ldi_addr_pair(F, d), i->callee, RK_AVR_LO8_LDI_GS);
+            note_fn(F->st, F->t->len - 2, i->callee, RK_AVR_HI8_LDI_GS);
+        }
+        if (nb > 2)
+            extend(F, d, 2, 0, nb);
+        if (d == RA)
+            wr4(F, i->dst, RA);
         return;
-
-    case IR_GADDR:
-        note_glob(F->st, ldi_addr_pair(F, RA), i->glob, RK_AVR_LO8_LDI);
-        note_glob(F->st, F->t->len - 2, i->glob, RK_AVR_HI8_LDI);
-        extend(F, RA, 2, 0, VW);
-        wr4(F, i->dst, RA);
-        return;
-
-    case IR_FADDR:
-        /* _GS, not the data forms: a function pointer on AVR holds the
-         * WORD address, and the linker may route it through a stub. */
-        note_fn(F->st, ldi_addr_pair(F, RA), i->callee, RK_AVR_LO8_LDI_GS);
-        note_fn(F->st, F->t->len - 2, i->callee, RK_AVR_HI8_LDI_GS);
-        extend(F, RA, 2, 0, VW);
-        wr4(F, i->dst, RA);
-        return;
+    }
 
     case IR_LABEL:
         F->label_off[i->label] = t->len;
         F->last_st.v = -1;            /* a jump may arrive here */
+        F->zv = -1;
         return;
 
     case IR_JMP:
@@ -4352,6 +4499,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             }
     }
     F.last_st.v = -1;
+    F.zv = -1;
     if (ra_mode != AVR_RA_NONE)
         avr_regalloc(&F, ra_mode);
     /* Loading a call's arguments WRITES r8-r17 once there are enough of
@@ -4541,6 +4689,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             lout = ra_live_intervals(fn, lf, ll, &lin, &dv, &lwords);
             free(lf); free(ll); free(lin); free(dv);
         }
+        F.zv = -1;
         for (i = 0; i < fn->nins; i++) {
             long at = t->len;
             int first = i;
@@ -4549,6 +4698,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                 F.skip_next = 0;
                 i++;
             }
+            if (fn->ins[first].dst >= 0 && fn->ins[first].dst == F.zv)
+                F.zv = -1;              /* Z's pointer was redefined */
             if (lout)
                 a_verify(&F, first, i, at, lout, lwords);
         }
@@ -4758,6 +4909,16 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
          strcmp(avr_knob("EMBCC_AVR_RA_ONLY"), fn->name) != 0)) {
         gen_relaxed(fn, t, st, want_debug, AVR_RA_NONE, &rb);
         return;
+    }
+    /* A field's constant offset into its load or store -- `ldd r, Z+q`
+     * reaches q = 63 -- once, before any attempt and before allocation,
+     * since the base's live range grows. `f->flags` was the pointer into
+     * X, subi/sbci, into Z and a load: six instructions for clang's
+     * three. EMBCC_NO_MEMOFF turns it off, as on Thumb and RISC-V. */
+    if (!avr_knob("EMBCC_NO_MEMOFF")) {
+        char *w = avr_wide_map(fn);
+        ra_fold_memoff(fn, 0, 64, 2, w);
+        free(w);
     }
     int m0 = AVR_RA_QUADS_FIRST, m1 = AVR_RA_PAIRS_ONLY;
     /* ...and each mode under a few budgets of pairs (g_a_cap). */
