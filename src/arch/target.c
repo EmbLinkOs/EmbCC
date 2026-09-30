@@ -504,6 +504,21 @@ int target_elf_machine(enum target_arch a)
  * RISC-V microcontroller implements. When -march= exists this becomes the
  * place that reads it, and the predefined macro table (the per-width
  * predef.c, __riscv_c) has to move with it. */
+int target_mul_shift_add(long c, int *k, int *neg, int *j)
+{
+    if (c <= 2)
+        return 0;
+    *j = 0;
+    while (!(c & 1)) { c >>= 1; (*j)++; }
+    if (c < 3)
+        return 0;
+    for (int b = 1; b < 31; b++) {
+        if (c == (1L << b) + 1) { *k = b; *neg = 0; return 1; }
+        if (c == (1L << b) - 1) { *k = b; *neg = 1; return 1; }
+    }
+    return 0;
+}
+
 int target_riscv_rvc(void)
 {
     return 1;

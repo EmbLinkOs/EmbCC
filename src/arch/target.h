@@ -229,6 +229,12 @@ int target_thumb_hf_name(void);
  * the standalone encoding checkers, which carry no backend, so it must
  * not name one. */
 int thumb_imm_foldable(int op, long imm);
+/* Is c == ((1 << k) + 1) << j or ((1 << k) - 1) << j, with k >= 1? Then a
+ * multiply by c is an add or a reverse-subtract with a shifted operand,
+ * and a shift: one or two instructions on a machine with shifted
+ * operands. Powers of two are not here -- the optimizer made those
+ * shifts already -- and neither are 0, 1 and 2. */
+int target_mul_shift_add(long c, int *k, int *neg, int *j);
 int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */

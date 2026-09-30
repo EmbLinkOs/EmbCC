@@ -2141,6 +2141,27 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         case IR_MUL:
             if (i->flt) { fbin(t, sd, i, '*'); break; }
             else {
+                int k, neg, j;
+                if (i->imm_b && (i->w == 4 || i->w == 8) &&
+                    target_mul_shift_add(i->imm, &k, &neg, &j)) {
+                    /* x * ((2^k +- 1) << j): `add d, a, a, lsl #k` for 3,
+                     * 5, 9; `lsl t, a, #k; sub d, t, a` for 7, 15; a shift
+                     * after for 6, 10, 12. No more instructions than the
+                     * constant's mov and the mul, and no multiplier
+                     * latency. */
+                    int ra = rd(t, sd, i->a, A64_ACC);
+                    int d = wr(i->dst, A64_ACC);
+                    if (!neg) {
+                        a64_alu_reg_shifted(t, '+', d, ra, ra, '<', k, i->w);
+                    } else {
+                        a64_shift_imm(t, '<', A64_TMP, ra, k, i->w);
+                        a64_alu_reg(t, '-', d, A64_TMP, ra, i->w);
+                    }
+                    if (j)
+                        a64_shift_imm(t, '<', d, d, j, i->w);
+                    wrote(t, sd, i->dst, d);
+                    break;
+                }
                 int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
                 int d = wr(i->dst, A64_ACC);
                 a64_mul(t, d, ra, rb, i->w);
