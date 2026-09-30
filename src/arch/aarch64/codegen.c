@@ -965,16 +965,6 @@ static int rd_b(struct code *t, const long *sd, struct ir_ins *i)
     return rd(t, sd, i->b, A64_TMP);
 }
 
-/* Materialise operand b into A64_TMP, whether it is a vreg or a folded
- * immediate (the optimizer's imm_b). */
-static void operand_b(struct code *t, const long *sd, struct ir_ins *i)
-{
-    if (i->imm_b)
-        a64_mov_imm(t, A64_TMP, i->imm, i->w);
-    else
-        ld_slot(t, sd, i->b, A64_TMP, 8, 0, 8);
-}
-
 /* Where AAPCS64 would put each value if it had the choice. A parameter
  * arrives in a register and is moved to its home; a call's result comes
  * back in x0 and is moved out; a returned value is moved into x0. Each
@@ -2168,14 +2158,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             }
             break;
 
-        case IR_MOD:
-            /* q = a / b ; r = a - q*b. msub does the second half. */
-            ld_slot(t, sd, i->a, A64_ACC, 8, 0, 8);
-            operand_b(t, sd, i);
-            a64_div(t, A64_ADDR, A64_ACC, A64_TMP, i->sign, i->w);
-            a64_msub(t, A64_ACC, A64_ADDR, A64_TMP, A64_ACC, i->w);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+        case IR_MOD: {
+            /* q = a / b ; r = a - q*b. msub does the second half. The
+             * operands where they live and the result where it goes, as
+             * IR_DIV has them: sdiv and msub read every operand before
+             * they write, so d may be a or b. The quotient goes in x11,
+             * which neither rd (x9) nor rd_b (x10) uses. Copying both
+             * operands to x9/x10 first and the result back cost three
+             * moves a remainder. */
+            int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
+            int d = wr(i->dst, A64_ACC);
+            a64_div(t, A64_ADDR, ra, rb, i->sign, i->w);
+            a64_msub(t, d, A64_ADDR, rb, ra, i->w);
+            wrote(t, sd, i->dst, d);
             break;
+        }
 
         case IR_SHL: case IR_SHR: {
             int kind = i->op == IR_SHL ? '<' : (i->sign ? '>' : 'u');
