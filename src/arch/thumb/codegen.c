@@ -1611,6 +1611,39 @@ static void shift64_imm(struct t_fn *F, int op, int sign, long n)
 
 /* Lower one 64-bit instruction. Returns 0 for one this does not handle,
  * which the caller then refuses by name. */
+/* Where a 64-bit operand's halves ARE -- its pair, or the given scratch
+ * registers after a load -- and where a 64-bit result belongs: its pair,
+ * or A. Pairs are whole and never partly overlap (t_pair_alloc), so an
+ * operation that reads each half before writing the same half is safe
+ * with its result in an operand's pair. */
+static void src64(struct t_fn *F, int v, int slo, int shi, int *lo, int *hi)
+{
+    if (in_reg(F, v)) {
+        *lo = F->loc[v];
+        *hi = F->loc[v] + 1;
+        return;
+    }
+    rd64(F, v, slo, shi);
+    *lo = slo;
+    *hi = shi;
+}
+static void dst64(struct t_fn *F, int v, int *lo, int *hi)
+{
+    *lo = in_reg(F, v) ? F->loc[v] : A_LO;
+    *hi = in_reg(F, v) ? F->loc[v] + 1 : A_HI;
+}
+/* The second operand likewise, or an immediate into B. */
+static void srcb64(struct t_fn *F, const struct ir_ins *i, int *lo, int *hi)
+{
+    if (i->imm_b) {
+        operand_b64(F, i, B_LO, B_HI);
+        *lo = B_LO;
+        *hi = B_HI;
+        return;
+    }
+    src64(F, i->b, B_LO, B_HI, lo, hi);
+}
+
 static int gen_ins64(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -1633,53 +1666,72 @@ static int gen_ins64(struct t_fn *F, int n)
      * its bits is a copy and nothing else. */
     case IR_BITCAST:
     case IR_MOV:
-        rd64(F, i->a, A_LO, A_HI);
-        wr64(F, i->dst, A_LO, A_HI);
+        /* Straight between the two homes; within one pair, nothing. */
+        if (in_reg(F, i->dst)) {
+            rd64(F, i->a, F->loc[i->dst], F->loc[i->dst] + 1);
+        } else if (in_reg(F, i->a)) {
+            wr64(F, i->dst, F->loc[i->a], F->loc[i->a] + 1);
+        } else {
+            rd64(F, i->a, A_LO, A_HI);
+            wr64(F, i->dst, A_LO, A_HI);
+        }
         return 1;
 
-    case IR_ADD: case IR_SUB:
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
+    case IR_ADD: case IR_SUB: {
         /* The carry must survive from one instruction to the next, so
          * nothing may come between them -- which is why both operands
-         * are fully in registers before either is emitted. */
+         * are fully in registers before either is emitted. In place: the
+         * low result never lands on a high operand, pairs being whole. */
+        int al, ah, bl, bh, dl, dh;
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        srcb64(F, i, &bl, &bh);
+        dst64(F, i->dst, &dl, &dh);
         if (i->op == IR_ADD) {
-            t_alu_reg(t, T_OP_ADD, A_LO, A_LO, B_LO, 1);
-            t_alu_reg(t, T_OP_ADC, A_HI, A_HI, B_HI, 1);
+            t_alu_reg(t, T_OP_ADD, dl, al, bl, 1);
+            t_alu_reg(t, T_OP_ADC, dh, ah, bh, 1);
         } else {
-            t_alu_reg(t, T_OP_SUB, A_LO, A_LO, B_LO, 1);
-            t_alu_reg(t, T_OP_SBC, A_HI, A_HI, B_HI, 1);
+            t_alu_reg(t, T_OP_SUB, dl, al, bl, 1);
+            t_alu_reg(t, T_OP_SBC, dh, ah, bh, 1);
         }
-        wr64(F, i->dst, A_LO, A_HI);
+        wr64(F, i->dst, dl, dh);
         return 1;
+    }
 
     case IR_AND: case IR_OR: case IR_XOR: {
         int op = i->op == IR_AND ? T_OP_AND
                : i->op == IR_OR  ? T_OP_ORR : T_OP_EOR;
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
-        t_alu_reg(t, op, A_LO, A_LO, B_LO, 0);
-        t_alu_reg(t, op, A_HI, A_HI, B_HI, 0);
-        wr64(F, i->dst, A_LO, A_HI);
+        int al, ah, bl, bh, dl, dh;
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        srcb64(F, i, &bl, &bh);
+        dst64(F, i->dst, &dl, &dh);
+        t_alu_reg(t, op, dl, al, bl, 0);
+        t_alu_reg(t, op, dh, ah, bh, 0);
+        wr64(F, i->dst, dl, dh);
         return 1;
     }
 
-    case IR_BNOT:
-        rd64(F, i->a, A_LO, A_HI);
-        t_mvn_reg(t, A_LO, A_LO, 0);
-        t_mvn_reg(t, A_HI, A_HI, 0);
-        wr64(F, i->dst, A_LO, A_HI);
+    case IR_BNOT: {
+        int al, ah, dl, dh;
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        dst64(F, i->dst, &dl, &dh);
+        t_mvn_reg(t, dl, al, 0);
+        t_mvn_reg(t, dh, ah, 0);
+        wr64(F, i->dst, dl, dh);
         return 1;
+    }
 
-    case IR_NEG:
+    case IR_NEG: {
         /* 0 - a. `rsbs` leaves C clear exactly when the low word
          * borrowed, and `sbc` from zero is the high half. */
-        rd64(F, i->a, A_LO, A_HI);
+        int al, ah, dl, dh;
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        dst64(F, i->dst, &dl, &dh);
         t_mov_imm(t, B_LO, 0, 0);
-        t_alu_imm(t, T_OP_RSB, A_LO, A_LO, 0, 1);
-        t_alu_reg(t, T_OP_SBC, A_HI, B_LO, A_HI, 0);
-        wr64(F, i->dst, A_LO, A_HI);
+        t_alu_imm(t, T_OP_RSB, dl, al, 0, 1);
+        t_alu_reg(t, T_OP_SBC, dh, B_LO, ah, 0);
+        wr64(F, i->dst, dl, dh);
         return 1;
+    }
 
     case IR_MUL:
         /* (a_hi:a_lo) * (b_hi:b_lo), keeping 64 bits: the two cross
@@ -1811,26 +1863,44 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
 {
     struct code *t = F->t;
     int swap = pred == B_GT || pred == B_LE;
+    int al, ah, bl, bh;
+    /* Against zero, the common case: signed `< 0` / `>= 0` is the high
+     * word's sign alone (cmp with 0 clears V, so LT is N), and `== 0` /
+     * `!= 0` is an OR of the halves -- no second operand, no subtract. */
+    if (i->imm_b && i->imm == 0 &&
+        (pred == B_EQ || pred == B_NE ||
+         (sign && (pred == B_LT || pred == B_GE)))) {
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        if (pred == B_EQ || pred == B_NE) {
+            t_alu_reg(t, T_OP_ORR, T_ACC, al, ah, 1);
+            return pred == B_EQ ? T_EQ : T_NE;
+        }
+        t_cmp_imm(t, ah, 0);
+        return pred == B_LT ? T_LT : T_GE;
+    }
     if (swap) {
         operand_b64(F, i, A_LO, A_HI);
         rd64(F, i->a, B_LO, B_HI);
         pred = pred == B_GT ? B_LT : B_GE;
+        al = A_LO; ah = A_HI; bl = B_LO; bh = B_HI;
     } else {
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        srcb64(F, i, &bl, &bh);
     }
     if (pred == B_EQ || pred == B_NE) {
         /* Equality needs both halves, and `sbcs` only reports Z for the
          * high one -- so the difference of each half is folded together
          * and tested against zero. */
-        t_alu_reg(t, T_OP_EOR, A_LO, A_LO, B_LO, 0);
-        t_alu_reg(t, T_OP_EOR, A_HI, A_HI, B_HI, 0);
+        t_alu_reg(t, T_OP_EOR, A_LO, al, bl, 0);
+        t_alu_reg(t, T_OP_EOR, A_HI, ah, bh, 0);
         t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
         t_cmp_imm(t, A_LO, 0);
         return pred == B_EQ ? T_EQ : T_NE;
     }
-    t_alu_reg(t, T_OP_SUB, A_LO, A_LO, B_LO, 1);
-    t_alu_reg(t, T_OP_SBC, A_HI, A_HI, B_HI, 1);
+    /* Only the flags are wanted: the differences go to scratch, leaving
+     * the operands where they live. */
+    t_alu_reg(t, T_OP_SUB, A_LO, al, bl, 1);
+    t_alu_reg(t, T_OP_SBC, A_HI, ah, bh, 1);
     if (pred == B_LT) return sign ? T_LT : T_CC;
     return sign ? T_GE : T_CS;             /* B_GE */
 }
