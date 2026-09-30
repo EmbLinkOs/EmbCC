@@ -129,9 +129,41 @@ static void contention(void)
 static void contention(void) { hx(1); hx(1); hx(1); hx(1); hx(1); }
 #endif
 
+/* Part three: an atomic in a function that has nothing else -- no call, no
+ * slot, its operands in registers. The exclusive store reports into lr,
+ * so such a function is not a leaf that may return with `bx lr` and no
+ * push: lr has to be saved around it. */
+static _Atomic u32 leafv;
+__attribute__((noinline)) static u32 bump(_Atomic u32 *p)
+{
+    return atomic_fetch_add(p, 1);
+}
+/* ...and one that needs no scratch register beyond r12, so nothing else
+ * makes it push: the exchange stores its operand as it is. */
+__attribute__((noinline)) static u32 swap_in(_Atomic u32 *p, u32 v)
+{
+    return atomic_exchange(p, v);
+}
+__attribute__((noinline)) static u32 swap_if(_Atomic u32 *p, u32 o, u32 n)
+{
+    return atomic_compare_exchange_strong(p, &o, n) ? o : ~o;
+}
+static void leaves(void)
+{
+    hx(bump(&leafv));                        /* 0 */
+    hx(bump(&leafv));                        /* 1 */
+    hx(swap_if(&leafv, 2, 7));               /* 2 */
+    hx(swap_if(&leafv, 2, 9));               /* ~7 */
+    hx(atomic_load(&leafv));                 /* 7 */
+    hx(swap_in(&leafv, 12));                 /* 7 */
+    hx(swap_in(&leafv, 13));                 /* 12 */
+    hx(atomic_load(&leafv));                 /* 13 */
+}
+
 int main(void)
 {
     semantics();
+    leaves();
     contention();
     puts_("\n==END==\n");
     return 0;

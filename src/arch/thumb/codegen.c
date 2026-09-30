@@ -400,7 +400,8 @@ static const struct ra_target THUMB_RA = {
                    * registers; with an FPU every float belongs to the FP
                    * pass, which the integer pass excludes (excl) */
     NULL, NULL,
-    0  /* atomic_in_reg */
+    1             /* atomic_in_reg: thumb_atomic reads through rdr and
+                   * writes through wr/wreg */
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -2205,6 +2206,8 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
  * against its expected value zero-extended to the same width, and a signed
  * result is sign-extended on the way out. Eight bytes has no exclusive
  * pair on ARMv7-M and is refused. */
+static void set_cc(struct t_fn *F, int dst, int cond);
+
 static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
 {
     struct code *t = F->t;
@@ -2274,19 +2277,13 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
         if (!t_patch_b16(t, done, t->len))
             internal_error("thumb: a compare-and-swap loop is out of reach");
         if (i->op == IR_CMPXCHG) {
-            /* *b = the value seen; the result is whether it matched */
+            /* *b = the value seen; the result is whether it matched --
+             * set_cc's IT block when it has a low register. */
             int p = rdr(F, i->b, T_SCR);
-            int d = wreg(F, i->dst, T_SCR);
             t_ldst_imm(t, T_ACC, p, 0, sz, 0, 1);
             t_barrier(t, T_BAR_DMB);
             t_cmp_reg(t, T_ACC, exp);
-            t_mov_imm(t, d, 1, 0);
-            {
-                int over = t_bcond16(t, T_EQ);
-                t_mov_imm(t, d, 0, 0);
-                t_patch_bcond16(t, over, t->len);
-            }
-            wrote(F, i->dst, d);
+            set_cc(F, i->dst, T_EQ);
             return;
         }
     }
@@ -3755,10 +3752,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                     F.tail = xcalloc((size_t)fn->nins, 1);
                 F.tail[i] = 1;
             }
+    /* ...and an atomic writes lr too: its strex reports into it
+     * (thumb_atomic), which was harmless only while an atomic's operands
+     * lived in memory and so gave every such function a frame. */
     F.leaf = 1;
     for (i = 0; i < fn->nins; i++)
         if ((fn->ins[i].op == IR_CALL && !(F.tail && F.tail[i])) ||
-            fn->ins[i].op == IR_ASM || t_op_calls_helper(&fn->ins[i]))
+            fn->ins[i].op == IR_ASM || t_op_calls_helper(&fn->ins[i]) ||
+            fn->ins[i].op == IR_XCHG || fn->ins[i].op == IR_XADD ||
+            fn->ins[i].op == IR_ARMW || fn->ins[i].op == IR_CAS ||
+            fn->ins[i].op == IR_CMPXCHG)
             F.leaf = 0;
     layout(&F);
     if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO")) {
