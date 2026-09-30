@@ -3006,10 +3006,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * any unit. Every instruction is two or four bytes, so at most one
      * halfword is ever needed, and c.unimp (the all-zero encoding, a
      * defined illegal instruction) is exactly two. */
-    if (t->len & 3)
-        rv_cunimp(t);
-    while (t->len & 3)
-        rv_unimp(t);
+    /* Only without the C extension. With it every instruction is
+     * two-aligned and so is every function, which is what clang emits: the
+     * c.unimp that rounded each function up to four was two bytes of
+     * nothing after about one function in two -- 236 bytes across lib/libc's
+     * non-math code. */
+    if (!rv_compress_enabled()) {
+        if (t->len & 3)
+            rv_cunimp(t);
+        while (t->len & 3)
+            rv_unimp(t);
+    }
     /* -g: each source variable's slot, which IS its offset from the
      * DWARF frame base -- sp, because this backend keeps no frame
      * pointer (src/debug/dwarf.c). */
