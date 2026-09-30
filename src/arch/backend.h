@@ -1,6 +1,8 @@
 #ifndef EMBCC_CODEGEN_CODEGEN_H
 #define EMBCC_CODEGEN_CODEGEN_H
 
+#include <stddef.h>
+
 #include "code.h"
 #include "../ir/ir.h"
 #include "target.h"
@@ -94,6 +96,11 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
                         struct gsite **gs, int *ngs,
                         struct fsite **fs, int *nfs, int want_debug,
                         int optimize, int no_sse, int regalloc);
+/* The .riscv.attributes payload: the ISA string and stack alignment the
+ * code was built for, as clang and gcc record them. Without it a
+ * disassembler knows only RV32I and the C extension, and read every
+ * mul, div and lr/sc as <unknown>. A malloc'd buffer the caller frees. */
+unsigned char *riscv_build_attributes(size_t *len);
 
 /* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
  * a register and every value is a run of them. Same signature all the

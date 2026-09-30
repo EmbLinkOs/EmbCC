@@ -59,6 +59,7 @@ struct object {
      * the writer, which has to put the class back. */
     int elf32;
     int machine;              /* e_machine, checked to be one across inputs */
+    unsigned long eflags;     /* its e_flags */
     /* What .ARM.attributes says, plus one -- so 0 means the object did
      * not say, which is not the same as saying zero. An object with no
      * attributes section must not be read as claiming the base
@@ -195,6 +196,10 @@ struct linker {
     unsigned long rom_limit;   /* bytes of flash the image may occupy, 0 = any */
     int elf32;                 /* ELFCLASS32 output, from the inputs */
     int machine;               /* e_machine, one across every input */
+    /* The output's e_flags, from the inputs': RISC-V's EF_RISCV_RVC when
+     * any of them has compressed code, AVR's architecture as the first
+     * one names it. */
+    unsigned long eflags;
     /* A Harvard machine: program space and data space are separate, and
      * no instruction reads read-only data where it was stored. .rodata
      * therefore belongs in the WRITABLE segment -- a RAM address with a
@@ -403,6 +408,7 @@ static struct object *parse_object(const char *name, unsigned char *buf,
                 "RV32 (EM_RISCV) and AVR (EM_AVR) are supported", name,
                 (unsigned)e32->e_machine);
         o->machine = e32->e_machine;
+        o->eflags = e32->e_flags;
         o->nsh = e32->e_shnum;
         if ((long)e32->e_shoff + (long)o->nsh * (long)sizeof(Elf32_Shdr) > len)
             die("%s: section headers run past end of file", name);
@@ -434,6 +440,7 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             die("%s: a 64-bit object for machine %u; only x86-64 and RV64 "
                 "(EM_RISCV) are supported", name, (unsigned)eh->e_machine);
         o->machine = eh->e_machine;
+        o->eflags = eh->e_flags;
         o->eh = eh;
         o->nsh = eh->e_shnum;
         o->shdrs = (Elf64_Shdr *)(buf + eh->e_shoff);
@@ -749,6 +756,10 @@ static void add_object(struct linker *l, struct object *o)
             "it (%u against %u)", o->name, (unsigned)o->machine,
             (unsigned)l->machine);
     }
+    if (o->machine == EM_RISCV)
+        l->eflags |= o->eflags & EF_RISCV_RVC;
+    else if (o->machine == EM_AVR && !(l->eflags & EF_AVR_ARCH_MASK))
+        l->eflags = o->eflags & EF_AVR_ARCH_MASK;
     if (l->nobj == l->capobj) {
         l->capobj = l->capobj ? l->capobj * 2 : 8;
         l->objs = xrealloc(l->objs, (size_t)l->capobj * sizeof *l->objs);
@@ -2095,10 +2106,11 @@ static void write_exec(struct linker *l, const char *out,
      * the symbol; the ELF entry must too, or the processor starts in
      * ARM state and faults on the first instruction. */
     eh->e_entry = entry;
-    /* RISC-V's e_flags stay 0: bit 0 is EF_RISCV_RVC (nothing here emits
-     * compressed instructions) and bits 2:1 are the float ABI, whose 0
-     * means SOFT. */
-    eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5 : 0;
+    /* RISC-V's and AVR's from the inputs (see l->eflags); bits 2:1 of
+     * RISC-V's are the float ABI, whose 0 means SOFT. */
+    eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5
+                : l->machine == EM_RISCV || l->machine == EM_AVR ? l->eflags
+                : 0;
     eh->e_phoff = ehsz;
     eh->e_ehsize = (Elf64_Half)ehsz;
     eh->e_phentsize = (Elf64_Half)phsz;

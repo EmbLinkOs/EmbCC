@@ -97,6 +97,14 @@ mach=$(od -An -tu1 -j18 -N1 "$out/f.o" | tr -d ' ')
     echo "is in it came from another machine's backend"; exit 1; }
 echo "-c produces an ELFCLASS32 object for EM_AVR, so no object can carry"
 echo "another machine's instructions under an EM_AVR header"
+# e_flags' low seven bits are the AVR architecture. 0 reads as avr0, a
+# core without mul, movw or adiw -- which a disassembler then decodes as
+# such, and which this backend's code is not.
+fl=$(od -An -tu1 -j36 -N1 "$out/f.o" | tr -d ' ')
+[ "$fl" = 5 ] || {
+    echo "the object's e_flags say AVR architecture $fl, not 5 (avr5, the"
+    echo "ATmega328P's)"; exit 1; }
+echo "...whose e_flags name avr5, the architecture it was built for"
 
 # The front end still works, which is the point of having the target at
 # all before the backend exists.

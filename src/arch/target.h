@@ -524,5 +524,11 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias);
 
 /* ELF e_machine. */
 int target_elf_machine(enum target_arch a);
+/* ...and its e_flags: ARM's EABI version, RISC-V's EF_RISCV_RVC when the
+ * C extension is on, AVR's architecture. */
+unsigned long target_elf_flags(enum target_arch a);
+/* Does RISC-V code use the C extension? The one answer the code generator
+ * and the object's e_flags both read. */
+int target_riscv_rvc(void);
 
 #endif

@@ -93,11 +93,8 @@ struct elfw *elfw_new(int machine)
     w->elf32 = target_ptr_size() <= 4;
     if (machine == EM_ARM)
         w->eflags = EF_ARM_EABI_VER5;
-    /* RISC-V's e_flags stay 0, and that is a statement rather than an
-     * omission: bit 0 is EF_RISCV_RVC (this emits no compressed
-     * instructions) and bits 2:1 are the float ABI, whose 0 means SOFT.
-     * An object built -march=rv32imafd would have to set them, and a
-     * linker refuses to combine objects whose float ABIs disagree. */
+    /* RISC-V's and AVR's come from the target (elfw_set_flags): whether
+     * the C extension is on, and which AVR architecture. */
     /* Index 0 is reserved in every table it manages. */
     w->nsec = 1; /* SHT_NULL section */
     strtab_add(&w->strtab, "");
@@ -108,6 +105,11 @@ struct elfw *elfw_new(int machine)
     w->nsym = 1;
     w->nlocal = 1;
     return w;
+}
+
+void elfw_set_flags(struct elfw *w, unsigned long flags)
+{
+    w->eflags = (Elf64_Word)flags;
 }
 
 void elfw_free(struct elfw *w)

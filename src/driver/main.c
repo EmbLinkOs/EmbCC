@@ -216,6 +216,7 @@ static int emit_empty_object(const char *path)
     if (!object_format_ready())
         return 1;
     struct elfw *w = elfw_new(target_elf_machine(target_get()));
+    elfw_set_flags(w, target_elf_flags(target_get()));
     int text = elfw_add_section(w, ".text", SHT_PROGBITS,
                                 SHF_ALLOC | SHF_EXECINSTR, NULL, 0, 16);
     elfw_add_symbol(w, "empty.c", 0, 0,
@@ -1707,6 +1708,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     if (!object_format_ready())
         return 1;
     struct elfw *w = elfw_new(target_elf_machine(target_get()));
+    elfw_set_flags(w, target_elf_flags(target_get()));
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_EXECINSTR,
                                     text.p, (Elf64_Xword)text.len, 16);
@@ -1834,6 +1836,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         size_t alen = 0;
         unsigned char *ab = arm_build_attributes(&alen);
         elfw_add_section(w, ".ARM.attributes", SHT_ARM_ATTRIBUTES, 0,
+                         ab, (Elf64_Xword)alen, 1);
+        free(ab);
+    }
+    if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64) {
+        size_t alen = 0;
+        unsigned char *ab = riscv_build_attributes(&alen);
+        elfw_add_section(w, ".riscv.attributes", SHT_RISCV_ATTRIBUTES, 0,
                          ab, (Elf64_Xword)alen, 1);
         free(ab);
     }

@@ -498,6 +498,28 @@ int target_elf_machine(enum target_arch a)
     }
 }
 
+/* The C extension. EmbCC has no -march= yet, so this is on for every
+ * RISC-V target -- which is what both reference compilers default to
+ * (clang's -march for riscv32-unknown-elf is rv32imac) and what every
+ * RISC-V microcontroller implements. When -march= exists this becomes the
+ * place that reads it, and the predefined macro table (the per-width
+ * predef.c, __riscv_c) has to move with it. */
+int target_riscv_rvc(void)
+{
+    return 1;
+}
+
+unsigned long target_elf_flags(enum target_arch a)
+{
+    switch (a) {
+    case TARGET_THUMB:   return EF_ARM_EABI_VER5;
+    case TARGET_RISCV32:
+    case TARGET_RISCV64: return target_riscv_rvc() ? EF_RISCV_RVC : 0;
+    case TARGET_AVR:     return EF_AVR_ARCH_AVR5;
+    default:             return 0;
+    }
+}
+
 int target_reloc_type(enum target_arch a, enum reloc_kind k)
 {
     if (k == RK_TAIL && a != TARGET_THUMB && a != TARGET_AARCH64)

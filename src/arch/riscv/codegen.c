@@ -3573,6 +3573,63 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     g_rv_pairs = 1;
 }
 
+/* ---- .riscv.attributes ------------------------------------------------
+ *
+ * The RISC-V psABI's build attributes, in the same container as ARM's:
+ * format 'A', a vendor subsection ("riscv") and a File sub-subsection of
+ * tag/value pairs, both lengths counting themselves. Read back off
+ * clang's object for the same triple rather than transcribed. */
+enum { Tag_RISCV_stack_align = 4, Tag_RISCV_arch = 5 };
+
+static void ab_put(unsigned char **p, size_t *n, size_t *cap, unsigned v)
+{
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 64;
+        *p = xrealloc(*p, *cap);
+    }
+    (*p)[(*n)++] = (unsigned char)v;
+}
+
+static void ab_u32(unsigned char **p, size_t *n, size_t *cap, unsigned long v)
+{
+    for (int k = 0; k < 4; k++)
+        ab_put(p, n, cap, (unsigned)(v >> (8 * k)) & 0xff);
+}
+
+static void ab_str(unsigned char **p, size_t *n, size_t *cap, const char *s)
+{
+    while (*s)
+        ab_put(p, n, cap, (unsigned char)*s++);
+    ab_put(p, n, cap, 0);
+}
+
+unsigned char *riscv_build_attributes(size_t *len)
+{
+    /* I, M and A -- mul/div and the lr/sc atomics are emitted -- plus C
+     * when target_riscv_rvc says so. No F or D: floating point is soft
+     * (e_flags' float ABI bits are 0 to match). */
+    const char *arch = target_xlen() == 64
+        ? (target_riscv_rvc() ? "rv64i2p1_m2p0_a2p1_c2p0" : "rv64i2p1_m2p0_a2p1")
+        : (target_riscv_rvc() ? "rv32i2p1_m2p0_a2p1_c2p0" : "rv32i2p1_m2p0_a2p1");
+    unsigned char *a = NULL, *o = NULL;
+    size_t na = 0, ca = 0, no = 0, co = 0;
+    ab_put(&a, &na, &ca, Tag_RISCV_stack_align);
+    ab_put(&a, &na, &ca, 16);                   /* uleb128 16 */
+    ab_put(&a, &na, &ca, Tag_RISCV_arch);
+    ab_str(&a, &na, &ca, arch);
+
+    ab_put(&o, &no, &co, 'A');                  /* format version */
+    ab_u32(&o, &no, &co, (unsigned long)(4 + sizeof "riscv" + 1 + 4 + na));
+    ab_str(&o, &no, &co, "riscv");
+    ab_put(&o, &no, &co, 1);                    /* Tag_File */
+    ab_u32(&o, &no, &co, (unsigned long)(1 + 4 + na));
+    for (size_t k = 0; k < na; k++)
+        ab_put(&o, &no, &co, a[k]);
+    free(a);
+    *len = no;
+    return o;
+}
+
 void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
@@ -3584,14 +3641,9 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     int xlen = target_xlen();
 
     (void)optimize; (void)no_sse;
-    /* The C extension. EmbCC has no -march= yet, so this is on for
-     * every RISC-V target -- which is what both reference compilers
-     * default to (clang's -march for riscv32-unknown-elf is rv32imac)
-     * and what every RISC-V microcontroller implements. When -march=
-     * exists this becomes the place that reads it, and the predefined
-     * macro table (the per-width predef.c, __riscv_c) has to move
-     * with it. */
-    rv_set_compress(1, xlen);
+    /* The C extension: target_riscv_rvc, which the object's e_flags
+     * read as well. */
+    rv_set_compress(target_riscv_rvc(), xlen);
     g_rv_regalloc = regalloc;
     memset(&st, 0, sizeof st);
 

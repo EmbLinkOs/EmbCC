@@ -128,4 +128,41 @@ for t in riscv32-unknown-elf riscv64-unknown-elf; do
 done
 [ "$fail" -eq 0 ] && echo "  __riscv_c and __riscv_compressed are defined"
 
+# ...and so must the OBJECT. With e_flags 0 and no .riscv.attributes it
+# claimed a core without the C extension while full of compressed code,
+# and llvm-objdump read every compressed instruction -- and every mul,
+# div and lr/sc -- as <unknown>. The linked image carries the flag too.
+RE=${EMBCC_LLVM_READELF:-llvm-readelf}
+OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
+if command -v "$RE" >/dev/null 2>&1 && command -v "$OD" >/dev/null 2>&1; then
+    cat > "$out/flags.c" <<'EOF'
+int v;
+int m(int a, int b) { return a * b / (b | 1); }
+int x(int *p) { return __atomic_fetch_add(p, 1, __ATOMIC_SEQ_CST); }
+void _start(void) { v = m(v, 3) + x(&v); for (;;) {} }
+EOF
+    for t in riscv32-unknown-elf riscv64-unknown-elf; do
+        case $t in riscv32*) x=32 ;; *) x=64 ;; esac
+        "$EMBCC" --target=$t -Os -c "$out/flags.c" -o "$out/flags.o" || {
+            echo "FAIL $t: flags.c does not compile"; fail=1; continue; }
+        "$RE" -h "$out/flags.o" | grep -q 'Flags:.*RVC' || {
+            echo "FAIL $t: the object's e_flags lack EF_RISCV_RVC"; fail=1; }
+        "$RE" -A "$out/flags.o" | grep -q "Value: rv${x}i2p1_m2p0_a2p1_c2p0" || {
+            echo "FAIL $t: .riscv.attributes does not name rv${x}imac"; fail=1; }
+        if "$OD" -d "$out/flags.o" | grep -q '<unknown>'; then
+            echo "FAIL $t: llvm-objdump cannot decode the object:"
+            "$OD" -d "$out/flags.o" | grep '<unknown>' | head -3; fail=1
+        fi
+        if [ -x "$EMBCC_ROOT/embld" ]; then
+            "$EMBCC_ROOT/embld" -o "$out/flags.elf" "$out/flags.o" || {
+                echo "FAIL $t: flags.o does not link"; fail=1; continue; }
+            "$RE" -h "$out/flags.elf" | grep -q 'Flags:.*RVC' || {
+                echo "FAIL $t: the linked image's e_flags lack EF_RISCV_RVC"
+                fail=1; }
+        fi
+    done
+    [ "$fail" -eq 0 ] && echo "  objects and images say RVC and rv32imac/rv64imac, and every
+  instruction in them disassembles"
+fi
+
 [ "$fail" -eq 0 ] || exit 1

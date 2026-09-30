@@ -174,6 +174,15 @@ typedef struct {
  * consumer checks and which is 0 on an object that forgot it. Read off
  * llvm-mc's own output for a thumbv7m object rather than remembered. */
 #define EF_ARM_EABI_VER5 0x05000000
+/* EF_RISCV_RVC: the object holds compressed (C extension) instructions,
+ * which a disassembler reads as <unknown> and a core without the
+ * extension traps on. Bits 2:1 are the float ABI, whose 0 means SOFT. */
+#define EF_RISCV_RVC 0x0001
+/* AVR's e_flags carry the architecture in the low seven bits; avr5 is the
+ * ATmega328P's (__AVR_ARCH__ 5), and 0 reads as avr0 -- a core without
+ * mul, movw or the 16-bit adiw/sbiw. */
+#define EF_AVR_ARCH_AVR5 5
+#define EF_AVR_ARCH_MASK 0x7f
 
 #define ELF64_R_INFO(sym, type) \
     (((Elf64_Xword)(sym) << 32) | ((Elf64_Xword)(type) & 0xffffffff))
@@ -361,6 +370,7 @@ typedef struct {
 /* ARM's build-attributes section. A processor-specific type, so it is
  * SHT_LOPROC+3 rather than a number in the generic range. */
 #define SHT_ARM_ATTRIBUTES 0x70000003
+#define SHT_RISCV_ATTRIBUTES 0x70000003   /* the same processor-specific number */
 #define SHT_SYMTAB    2
 #define SHT_STRTAB    3
 #define SHT_RELA      4
