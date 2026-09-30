@@ -304,8 +304,9 @@ static const struct ra_target RISCV_RA = {
     0,            /* RISC-V is three-operand: d = a op b needs no copy */
     rv_abi_hints,
     NULL, NULL,   /* no FP class -- soft float lives in the core registers */
-    1             /* ...and so is allocated with them: every float lowering
+    1,            /* ...and so is allocated with them: every float lowering
                    * here goes through rd/wr/set_args (float_in_gpr) */
+    NULL, NULL
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -2817,7 +2818,8 @@ static const struct ra_target RV_PAIR_RA = {
     0,
     rv_pair_hints,
     NULL, NULL,
-    1
+    1,
+    NULL, NULL
 };
 
 static void rv_pair_hints(const struct ir_func *fn, int *hint)

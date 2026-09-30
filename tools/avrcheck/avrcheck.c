@@ -20,6 +20,9 @@
  * are DISASSEMBLED and the text compared -- which is what catches a
  * condition that encodes cleanly and means the wrong thing, the bug that
  * made this mode exist.
+ *
+ * `--writes` is the decoder's turn: which registers avr_insn_writes says
+ * each form writes, for a rule per mnemonic to grade.
  */
 #include <stdio.h>
 #include <string.h>
@@ -35,6 +38,26 @@ int main(int argc, char **argv)
     }
     if (argc > 1 && !strcmp(argv[1], "--branches")) {
         avr_branch_vocabulary(stdout);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "--writes")) {
+        /* What avr_insn_writes reads out of every form -- the plain
+         * vocabulary, then the PC-relative one, in --list/--branches
+         * order -- one line each, for the rule in avr-encoding.sh. */
+        struct code c = { 0, 0, 0 };
+        avr_encode_vocabulary(&c);
+        avr_encode_branches(&c);
+        for (long p = 0; p < c.len; ) {
+            int len, any = 0;
+            unsigned long w = avr_insn_writes(c.p + p, c.len - p, &len);
+            for (int r = 0; r < 32; r++)
+                if (w >> r & 1) {
+                    printf("%sr%d", any ? " " : "", r);
+                    any = 1;
+                }
+            printf("%s\n", any ? "" : "-");
+            p += len;
+        }
         return 0;
     }
     {

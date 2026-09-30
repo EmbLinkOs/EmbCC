@@ -85,22 +85,30 @@
  *   r0        the ABI's scratch: SREG saves, and byte shuffling.
  *   r1        the zero register. Read, never written.
  *   r18-r21   A, the accumulator: four bytes, LOW BYTE FIRST.
- *   r22-r25   B, the second operand: the same shape.
- *   r26:r27   X and r30:r31 Z: addresses. No value ever lives in either.
+ *   r22-r25   B, the second operand: the same shape -- and HOMES, r24:r25
+ *             and r22:r23 or all four, for values the allocator gives them
+ *             (see "the proof", below).
+ *   r26:r27   X: a scratch pointer, or a home.
+ *   r30:r31   Z: the address scratch. No value lives in it.
  *   r28:r29   Y, the frame pointer.
- *   r2-r17    never touched, and therefore never saved.
+ *   r2-r17    homes, each pushed and popped by the function using it.
  *
  * A and B both sit inside r16-r31, which is the half the immediate
  * instructions (ldi, subi, sbci, andi, ori, cpi) can reach. That is not
  * an accident to be lost later: moving either down would put an extra
  * register in the path of every constant.
  *
- * A and B are also exactly the first four argument registers, which
- * costs nothing because an argument is loaded STRAIGHT from its slot
- * into its own ABI register -- `ldd rN, Y+q` touches rN and Y and
- * nothing else, so the arguments cannot tread on one another and there
- * is no parallel move to solve. That is the one place where keeping
- * every value in memory makes the code SIMPLER rather than slower.
+ * A and B are also exactly the first four argument registers, and B is
+ * where a two- or four-byte result comes back. A value that lives THERE
+ * costs no push, and no copy at the call, the return or the parameter it
+ * arrived as -- which is where clang keeps nearly everything, and why a
+ * leaf function here saved four pairs where clang saved none. So B is
+ * both: a home for whatever the allocator puts in it, and a scratch bank
+ * for an instruction that needs one. Those cannot both hold at once, and
+ * what keeps them apart is a proof rather than a convention: gen_func
+ * decodes every instruction it emitted and checks that nothing still
+ * needed was written (a_verify). Arguments are therefore a PARALLEL MOVE
+ * now (see IR_CALL), since one may sit where another goes.
  */
 #define R_TMP    0
 #define R_ZERO   1
@@ -1475,13 +1483,15 @@ static void wide_bin(struct a_fn *F, const struct ir_ins *i, int n,
 {
     long sa = sslot(F, i->a), sd = sslot(F, i->dst);
     long sb = i->imm_b ? -1 : sslot(F, i->b);
+    /* The second operand's byte in r19, A's second register: B may be a
+     * home, and one byte of A is all the first operand needs. */
     for (int k = 0; k < n; k++) {
         ld_slot_cc(F, RA, sa + k, 1);
         if (i->imm_b)
-            ldi4(F, RB, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
+            ldi4(F, RA + 1, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
         else
-            ld_slot_cc(F, RB, sb + k, 1);
-        avr_rr(F->t, k ? rest : first, RA, RB);
+            ld_slot_cc(F, RA + 1, sb + k, 1);
+        avr_rr(F->t, k ? rest : first, RA, RA + 1);
         if (sd >= 0)
             st_slot_cc(F, sd + k, RA, 1);
     }
@@ -2028,6 +2038,130 @@ static void shift_varw(struct a_fn *F, int r, int cnt, int op, int sign,
     avr_patch_rjmp(F->t, exitj, (F->t->len - (exitj + 2)) / 2);
 }
 
+static int a_calls_helper(const struct ir_ins *i);
+static const char *avr_knob(const char *name);
+static int g_a_vol;
+static char *g_a_novol, *g_a_nohome, *g_a_pend;
+static int g_a_nvr;
+
+/* ---- the proof -------------------------------------------------------
+ *
+ * B and X are homes AND scratch. Nothing about an instruction's lowering
+ * says in advance which it will need -- whether `a + b` loads b into B
+ * depends on where b ended up -- so instead of a rule, a check: after
+ * each IR instruction, decode what was emitted for it (avr_insn_writes)
+ * and see that no register it wrote held something still needed:
+ *
+ *  - a value live after the instruction, other than the one it defines;
+ *  - an operand, except where it shares the destination's home (the
+ *    two-address case, `p = p + 1` in one pair, which writes it by
+ *    design). A call's operands are exempt too: its argument move writes
+ *    registers after reading them, which is its whole job, and nothing
+ *    call-clobbered is live across one.
+ *
+ * A value caught is kept out of that class of home on the next attempt
+ * (avr_attempt) -- the call-clobbered ones if it was in one, else all --
+ * and the function is generated again, until nothing is caught. Every
+ * home is checked, the call-saved ones too, though only B and X are
+ * expected to fail: a hit there is a lowering that writes a home it was
+ * not given, and the retry is sound either way.
+ *
+ * What this cannot see is a lowering that uses the destination's own
+ * home as scratch before writing the result into it; the lowerings that
+ * compute in place (dst_reg) take their scratch from whichever bank the
+ * destination is not, for that reason. */
+static unsigned long home_mask(const struct a_fn *F, int v)
+{
+    if (!in_pair(F, v))
+        return 0;
+    return ((1UL << F->hw[v]) - 1) << F->loc[v];
+}
+
+static void a_conflict(struct a_fn *F, int v)
+{
+    int r = F->loc[v];
+    if (!g_a_pend || v < 0 || v >= g_a_nvr)
+        internal_error("avr: %s: vreg %d's home r%d was overwritten outside "
+                       "an attempt that can be retried", F->fn->name, v, r);
+    g_a_pend[v] |= (r >= 22 && r <= 27) ? 1 : 2;
+    if (avr_knob("EMBCC_AVR_RA"))
+        fprintf(stderr, "%s: %%%d overwritten in r%d\n", F->fn->name, v, r);
+}
+
+struct a_vuse { struct a_fn *F; unsigned long w, own; };
+
+static void a_verify_use(int v, void *p)
+{
+    struct a_vuse *c = p;
+    if (home_mask(c->F, v) & ~c->own & c->w)
+        a_conflict(c->F, v);
+}
+
+/* IR instructions n..last were emitted from byte `at` on. */
+static void a_verify(struct a_fn *F, int n, int last, long at,
+                     const unsigned long *lout, int words)
+{
+    struct code *t = F->t;
+    unsigned long w = 0;
+    for (long p = at; p < t->len; ) {
+        int len;
+        unsigned long m = avr_insn_writes(t->p + p, t->len - p, &len);
+        /* `or r, r` -- the zero test a branch reads -- and `and r, r` and
+         * `mov r, r` write r with what it already held: no value is lost. */
+        if (len == 2) {
+            unsigned op = (unsigned)t->p[p] | (unsigned)t->p[p + 1] << 8;
+            unsigned d = (op >> 4) & 0x1f, r = (op & 0xf) | ((op >> 5) & 0x10);
+            if (d == r && ((op & 0xfc00) == 0x2800 || (op & 0xfc00) == 0x2000 ||
+                           (op & 0xfc00) == 0x2c00))
+                m = 0;
+        }
+        w |= m;
+        p += len;
+    }
+    if (!w)
+        return;
+    for (int k = n; k <= last; k++) {
+        const struct ir_ins *i = &F->fn->ins[k];
+        const unsigned long *lo = lout + (size_t)k * words;
+        for (int q = 0; q < words; q++) {
+            unsigned long bits = lo[q];
+            while (bits) {
+                int b = 0;
+                while (!((bits >> b) & 1)) b++;
+                bits &= bits - 1;
+                int v = q * 64 + b;
+                if (v != i->dst && (home_mask(F, v) & w))
+                    a_conflict(F, v);
+            }
+        }
+        /* The operands -- not a fused branch's, whose one operand is the
+         * comparison it replaced and never existed. */
+        if (k == n && i->op != IR_CALL && !a_calls_helper(i)) {
+            struct a_vuse c;
+            c.F = F; c.w = w;
+            c.own = i->dst >= 0 ? home_mask(F, i->dst) : 0;
+            ra_each_use(i, a_verify_use, &c);
+        }
+    }
+}
+
+/* Emit the moves ra_parallel_move ordered, a byte each -- or two at once
+ * with movw where consecutive moves are an aligned pair to an aligned
+ * pair. Doing those two together cannot differ from doing them in turn:
+ * the first writes an even register and the second reads an odd one. */
+static void emit_moves(struct code *t, const int *od, const int *os, int no)
+{
+    for (int q = 0; q < no; q++) {
+        if (q + 1 < no && !(od[q] & 1) && !(os[q] & 1) &&
+            od[q + 1] == od[q] + 1 && os[q + 1] == os[q] + 1) {
+            avr_movw(t, od[q], os[q]);
+            q++;
+        } else {
+            avr_rr(t, AVR_MOV, od[q], os[q]);
+        }
+    }
+}
+
 /* ---- the instruction dispatch ---------------------------------------- */
 
 static void gen_ins(struct a_fn *F, int n)
@@ -2085,11 +2219,13 @@ static void gen_ins(struct a_fn *F, int n)
             const char *nm = NULL;
             for (unsigned k = 0; k < sizeof fops / sizeof fops[0]; k++)
                 if (fops[k].op == i->op) nm = fops[k].name;
-            vld(F, a_reg, i->a, 0, 4);
+            /* b FIRST: a goes into r22-r25, which may be b's home, and
+             * r18-r21 are nobody's. */
             if (i->imm_b)
                 ldi4(F, b_reg, (unsigned long)i->imm, 4);
             else
                 vld(F, b_reg, i->b, 0, 4);
+            vld(F, a_reg, i->a, 0, 4);
             call_helper(F, nm);
             vst(F, i->dst, 0, ret_reg(4), 4);
             return;
@@ -2102,8 +2238,9 @@ static void gen_ins(struct a_fn *F, int n)
             /* The sign bit, not a call: negation is exact and this is what
              * __negsf2 does anyway. Byte 3 holds the sign. */
             rd4(F, i->a, RA);
-            avr_ri(t, AVR_LDI, RB, 0x80);
-            avr_rr(t, AVR_EOR, RA + 3, RB);
+            /* Adding 0x80 to the top byte flips bit 7 and nothing else
+             * (mod 256), and needs no second register to hold the mask. */
+            avr_ri(t, AVR_SUBI, RA + 3, 0x80);
             wr4(F, i->dst, RA);
             return;
         case IR_CMP: {
@@ -2121,11 +2258,11 @@ static void gen_ins(struct a_fn *F, int n)
             int swap = 0;
             for (unsigned k = 0; k < sizeof fc / sizeof fc[0]; k++)
                 if (fc[k].p == i->pred) nm = fc[k].nm;
-            vld(F, a_reg, i->a, 0, 4);
-            if (i->imm_b)
+            if (i->imm_b)                       /* b first, as above */
                 ldi4(F, b_reg, (unsigned long)i->imm, 4);
             else
                 vld(F, b_reg, i->b, 0, 4);
+            vld(F, a_reg, i->a, 0, 4);
             call_helper(F, nm);
             /* The result is in r25:r24. Compare it against zero -- signed,
              * because its SIGN is the answer. For `> 0` and `<= 0` the
@@ -2228,8 +2365,8 @@ static void gen_ins(struct a_fn *F, int n)
              * immediate per byte, so this is one chain and not two. */
             for (int k = 0; k < n; k++) {
                 avr_rr(t, AVR_MOV, RA, R_ZERO);
-                vld_cc(F, RB, i->a, k, 1);
-                avr_rr(t, k ? AVR_SBC : AVR_SUB, RA, RB);
+                vld_cc(F, RA + 1, i->a, k, 1);
+                avr_rr(t, k ? AVR_SBC : AVR_SUB, RA, RA + 1);
                 vst_cc(F, i->dst, k, RA, 1);
             }
             return;
@@ -2300,8 +2437,8 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_LOAD: {
             int from = i->size < 1 ? 1 : i->size;
             if (from > n) from = n;
-            vld(F, RB, i->a, 0, 2);
-            g_x_hit = 1; avr_movw(t, AVR_X, RB);
+            vld(F, RA + 2, i->a, 0, 2);   /* A's upper pair: B may be a home */
+            g_x_hit = 1; avr_movw(t, AVR_X, RA + 2);
             for (int k = 0; k < from; k++) {
                 avr_ld(t, RA, AVR_X, AVR_PTR_POST_INC);
                 vst_cc(F, i->dst, k, RA, 1);
@@ -2324,8 +2461,8 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_STORE: {
             int to = i->size < 1 ? 1 : i->size;
             if (to > n) to = n;
-            vld(F, RB, i->a, 0, 2);
-            g_x_hit = 1; avr_movw(t, AVR_X, RB);
+            vld(F, RA + 2, i->a, 0, 2);
+            g_x_hit = 1; avr_movw(t, AVR_X, RA + 2);
             for (int k = 0; k < to; k++) {
                 vld(F, RA, i->b, k, 1);
                 avr_st(t, AVR_X, RA, AVR_PTR_POST_INC);
@@ -2353,15 +2490,16 @@ static void gen_ins(struct a_fn *F, int n)
                 k = i->op == IR_SHR && i->sign ? 8 * n - 1 : 8 * n;
             if (var) {
                 int top, exitj;
-                /* The counter stays in RB, NOT in r0. r0 is where a far slot
+                /* The counter stays in r19, NOT in r0. r0 is where a far slot
                  * access saves SREG, and the chain below is full of them --
                  * so a counter there is destroyed on the first iteration
                  * whose frame needs the far path. It shifted by seven bytes
-                 * whatever the count said. RB is untouched by the chain,
-                 * which only ever uses RA. */
-                rd4(F, i->b, RB);
+                 * whatever the count said. r19 is untouched by the chain,
+                 * which only ever uses r18; and it is not B, which may be a
+                 * home. */
+                vld(F, RA + 1, i->b, 0, 1);
                 top = t->len;
-                avr_r1(t, AVR_DEC, RB);
+                avr_r1(t, AVR_DEC, RA + 1);
                 /* An INVERTED branch over an rjmp, not a branch to the exit.
                  * A conditional branch reaches +-128 bytes and the chain
                  * below is eight bytes' worth of load/shift/store -- more
@@ -2469,10 +2607,10 @@ static void gen_ins(struct a_fn *F, int n)
                 else
                     ld_slot_cc(F, RA, sl + k, 1);
                 if (sr < 0)
-                    ldi4(F, RB, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
+                    ldi4(F, RA + 1, (unsigned long)((unsigned long)i->imm >> (8 * k)), 1);
                 else
-                    ld_slot_cc(F, RB, sr + k, 1);
-                avr_rr(t, k ? AVR_CPC : AVR_CP, RA, RB);
+                    ld_slot_cc(F, RA + 1, sr + k, 1);
+                avr_rr(t, k ? AVR_CPC : AVR_CP, RA, RA + 1);
             }
             /* The result is four bytes wide even though the comparison was
              * eight -- an IR_CMP yields a 0 or a 1. */
@@ -2605,8 +2743,11 @@ static void gen_ins(struct a_fn *F, int n)
                 default:
                     if (b == 0xff) avr_r1(t, AVR_COM, d + k);
                     else if (b) {
-                        avr_ri(t, AVR_LDI, RB + k, b);
-                        avr_rr(t, AVR_EOR, d + k, RB + k);
+                        /* the mask in whichever bank d is not: d may be
+                         * a home in B */
+                        int sc = d == RA ? RB : RA;
+                        avr_ri(t, AVR_LDI, sc + k, b);
+                        avr_rr(t, AVR_EOR, d + k, sc + k);
                     }
                     break;
                 }
@@ -2615,7 +2756,9 @@ static void gen_ins(struct a_fn *F, int n)
             return;
         }
         {
-        int rb = rd_in(F, b, nb, RB);         /* b where it lives */
+        /* b where it lives, or loaded into the bank d is not: d may be
+         * a home in B, which copying a into would then overwrite */
+        int rb = rd_in(F, b, nb, d == RA ? RB : RA);
         vld(F, d, a, 0, nb);
         switch (i->op) {
         case IR_ADD:
@@ -2727,11 +2870,12 @@ static void gen_ins(struct a_fn *F, int n)
         place_arg(VW, &cursor, &stk, &pl); a_reg = pl.reg;
         place_arg(VW, &cursor, &stk, &pl); b_reg = pl.reg;
 
-        vld(F, a_reg, i->a, 0, VW);
+        /* b FIRST: a's registers r22-r25 may be b's home. */
         if (i->imm_b)
             ldi4(F, b_reg, (unsigned long)i->imm, VW);
         else
             vld(F, b_reg, i->b, 0, VW);
+        vld(F, a_reg, i->a, 0, VW);
         call_helper(F, name);
         for (int q = 0; q < VW; q++)
             avr_rr(t, AVR_MOV, RA + q, a_reg + q);
@@ -2747,10 +2891,10 @@ static void gen_ins(struct a_fn *F, int n)
             int nb = dw(F, i);
             if (!nb)
                 return;
-            rd4(F, i->a, RB);
+            int ra = rd_in(F, i->a, nb, RB);
             ldi4(F, RA, 0, nb);
-            avr_rr(t, AVR_SUB, RA, RB);
-            for (int k = 1; k < nb; k++) avr_rr(t, AVR_SBC, RA + k, RB + k);
+            avr_rr(t, AVR_SUB, RA, ra);
+            for (int k = 1; k < nb; k++) avr_rr(t, AVR_SBC, RA + k, ra + k);
             wr4(F, i->dst, RA);
         }
         return;
@@ -2789,8 +2933,11 @@ static void gen_ins(struct a_fn *F, int n)
             if (d != RA && !const_b(F, i, &k) && in_pair(F, i->b) &&
                 F->loc[i->b] == d)
                 d = RA;                     /* the count lives there */
+            /* the count's low byte, in the bank d is not: d may be a
+             * home in B */
+            int cr = d == RA ? RB : RA;
             if (!const_b(F, i, &k))
-                vld(F, RB, i->b, 0, 1);     /* the count: its low byte */
+                vld(F, cr, i->b, 0, 1);
             /* A zero-extended operand shifts LOGICALLY at its own width
              * whatever the IR says: at four bytes its top bit is 0 and an
              * arithmetic shift is a logical one, but at one byte `asr`
@@ -2801,7 +2948,7 @@ static void gen_ins(struct a_fn *F, int n)
             if (const_b(F, i, &k)) {
                 shift_immw(F, d, (int)i->op, sg, k, w);
             } else {
-                cnt = RB;
+                cnt = cr;
                 shift_varw(F, d, cnt, (int)i->op, sg, w);
             }
             if (w < nb)
@@ -2819,15 +2966,18 @@ static void gen_ins(struct a_fn *F, int n)
             /* Both operands where they live; a comparison with zero is
              * against r1, the zero register, byte for byte. */
             int ra = rd_in(F, i->a, nb, RA), rb, zero = 0;
+            /* b's scratch is A when a did not need it, so that B is
+             * written only when both operands had to be loaded */
+            int sc = ra == RA ? RB : RA;
             if (i->imm_b && (i->imm & ((nb >= 4 ? 0xffffffffL
                                                 : (1L << (8 * nb)) - 1))) == 0) {
                 rb = R_ZERO;
                 zero = 1;
             } else if (i->imm_b) {
-                ldi4(F, RB, (unsigned long)i->imm, nb);
-                rb = RB;
+                ldi4(F, sc, (unsigned long)i->imm, nb);
+                rb = sc;
             } else {
-                rb = rd_in(F, i->b, nb, RB);
+                rb = rd_in(F, i->b, nb, sc);
             }
             {
                 int l = swap ? rb : ra, r = swap ? ra : rb;
@@ -3121,41 +3271,92 @@ static void gen_ins(struct a_fn *F, int n)
                 st_slot(F, 1 + pl.stk, RA, pl.nstk);
             }
         }
-        /* Then the register ones. In any order: `ldd rN, Y+q` touches rN
-         * and Y alone, so no argument can tread on another and there is
-         * no parallel move here at all. */
+        /* Then the register ones: first every argument that lives in a
+         * home, as ONE parallel move -- a home can be where another
+         * argument goes, r22-r25 being homes as well as the first four
+         * argument registers, so loading them in order would overwrite a
+         * value before it was read. Then what comes from memory or is a
+         * constant, which writes only its own registers and Z, none of
+         * them a source by then. r0 breaks a cycle. */
         cursor = i->call_varargs ? -1 : ARG_TOP; stk = 0;
         if (sret)
             place_arg(2, &cursor, &stk, &hid);    /* the same slot again */
-        for (k = 0; k < i->nargs; k++) {
-            place_arg(i->argv[k].size, &cursor, &stk, &pl);
-            if (!pl.nreg)
-                continue;
-            if (i->argv[k].is_struct) {
-                /* A struct in registers is just its bytes, one per
-                 * register -- no partial-word assembly, because a register
-                 * here IS a byte. */
-                ld_slot(F, AVR_Z, sslot(F, i->argv[k].vreg), 2);
-                for (int b = 0; b < pl.nreg; b++)
-                    avr_ldd(t, pl.reg + b, AVR_Z, b);
-            } else {
-                /* From a home too: every home is below every argument
-                 * register (avr_arg_low), so this is no parallel move. */
-                vld(F, pl.reg, i->argv[k].vreg, 0, pl.nreg);
+        {
+            int md[48], ms[48], od[52], os[52], nm = 0, no;
+            unsigned long argregs = 0;
+            int zmoved = 0, zused = 0;
+            if (sret && hid.nreg)
+                argregs |= 3UL << hid.reg;
+            for (k = 0; k < i->nargs; k++) {
+                int v = i->argv[k].vreg;
+                place_arg(i->argv[k].size, &cursor, &stk, &pl);
+                if (!pl.nreg)
+                    continue;
+                argregs |= ((1UL << pl.nreg) - 1) << pl.reg;
+                if (i->argv[k].is_struct) {
+                    zused = 1;               /* its bytes come through Z */
+                    continue;
+                }
+                if (!in_pair(F, v)) {
+                    if (!is_remat(F, v) && slot_is_far(F->slot[v], pl.nreg))
+                        zused = 1;           /* the far path walks with Z */
+                    continue;
+                }
+                for (int b = 0; b < pl.nreg && b < F->hw[v]; b++) {
+                    md[nm] = pl.reg + b;
+                    ms[nm] = F->loc[v] + b;
+                    nm++;
+                }
             }
-        }
-
-        /* The hidden result pointer goes in LAST, so nothing above can have
-         * used its register as a scratch after it was set. (Its stack form,
-         * for a variadic callee, went out with the other stack words.) */
-        if (sret && hid.nreg) {
-            y_to(F, hid.reg);
-            add_const16(F, hid.reg, F->scratch_at + i->scratch);
+            /* An indirect callee's address, when an argument goes where it
+             * lives: into Z in the same move, since afterwards it is gone.
+             * Nothing after may then walk with Z -- an attempt that needs
+             * it to is one a_verify's retry makes without that home. */
+            if (i->indirect && in_pair(F, i->a) &&
+                ((3UL << F->loc[i->a]) & argregs)) {
+                md[nm] = AVR_Z;     ms[nm] = F->loc[i->a];     nm++;
+                md[nm] = AVR_Z + 1; ms[nm] = F->loc[i->a] + 1; nm++;
+                zmoved = 1;
+                if (zused)
+                    a_conflict(F, i->a);
+            }
+            no = ra_parallel_move(md, ms, nm, R_TMP, od, os, 52);
+            if (no < 0)
+                internal_error("avr: %s: a call's argument registers do not "
+                               "form a parallel move", fn->name);
+            emit_moves(t, od, os, no);
+            cursor = i->call_varargs ? -1 : ARG_TOP; stk = 0;
+            if (sret)
+                place_arg(2, &cursor, &stk, &hid);
+            for (k = 0; k < i->nargs; k++) {
+                place_arg(i->argv[k].size, &cursor, &stk, &pl);
+                if (!pl.nreg)
+                    continue;
+                if (i->argv[k].is_struct) {
+                    /* A struct in registers is just its bytes, one per
+                     * register -- no partial-word assembly, because a
+                     * register here IS a byte. */
+                    ld_slot(F, AVR_Z, sslot(F, i->argv[k].vreg), 2);
+                    for (int b = 0; b < pl.nreg; b++)
+                        avr_ldd(t, pl.reg + b, AVR_Z, b);
+                } else if (!in_pair(F, i->argv[k].vreg)) {
+                    vld(F, pl.reg, i->argv[k].vreg, 0, pl.nreg);
+                }
+            }
+            /* The hidden result pointer goes in LAST, so nothing above can
+             * have used its register as a scratch after it was set. (Its
+             * stack form, for a variadic callee, went out with the other
+             * stack words.) */
+            if (sret && hid.nreg) {
+                y_to(F, hid.reg);
+                add_const16(F, hid.reg, F->scratch_at + i->scratch);
+            }
+            if (i->indirect && !zmoved)
+                vld(F, AVR_Z, i->a, 0, 2);
         }
         if (i->indirect) {
             /* Z holds a WORD address here, which is what icall wants and
              * what IR_FADDR put in the pointer. */
-            vld(F, AVR_Z, i->a, 0, 2);
             avr_icall(t);
         } else {
             note_call(F->st, t->len, i->callee);
@@ -3481,9 +3682,18 @@ static void isr_epilogue(struct code *t)
  * many arguments LOADS them into r8-r17, so each function's pool stops
  * below the lowest argument register any of its calls uses. */
 static const int A_POOL[8] = { 2, 4, 6, 8, 10, 12, 14, 16 };
-static int g_a_pool[9];            /* the eight pairs, and X (g_a_xhome) */
+/* r24, r22 and X (g_a_vol, g_a_xhome), then the eight call-saved pairs */
+static int g_a_pool[11];
 static int g_a_npool;
 static int g_a_regalloc;
+
+/* The call-clobbered homes in B (r24:r25, r22:r23, or r22-r25 as one
+ * quad) are offered when g_a_vol is set. Per vreg, for the attempt being
+ * generated: g_a_novol keeps a value out of every call-clobbered home, X
+ * included, and g_a_nohome out of every home -- each set because a_verify
+ * caught the emitted code overwriting that value there. g_a_pend is what
+ * this generation caught, merged into those by avr_attempt. */
+static int g_a_vol = 1;
 
 static const int *a_pool_for(const struct ir_func *fn, int *n)
 {
@@ -3517,16 +3727,80 @@ static int a_calls_helper(const struct ir_ins *i)
            i->op == IR_MOD;
 }
 
+static const char *a_saved_only(const struct ir_func *fn)
+{
+    return g_a_novol && fn->nvregs <= g_a_nvr ? g_a_novol : NULL;
+}
+
+/* The register the ABI puts each boundary value in, as the allocator's
+ * hint: a parameter where it arrives, a call's result and a returned
+ * value where they come back, an argument where it goes. A value in
+ * that register needs no copy at the boundary -- `return f(x)` was a
+ * call, `movw r26, r24` and `movw r24, r26`. Only r24, r22 and the r22
+ * quad are in the pool, so any other answer is simply not taken, and a
+ * hint is dropped like any other when the register is not free. */
+static void a_abi_hints(const struct ir_func *fn, int *hint)
+{
+    struct argplace pl;
+    int cursor = ARG_TOP, nv = fn->nvregs;
+    long stk = 0;
+
+    if (!fn->is_varargs) {
+        if (fn_sret_bytes(fn))
+            place_arg(2, &cursor, &stk, &pl);
+        for (int a = 0; a < fn->nparams; a++) {
+            const struct ir_arg *pa = &fn->param_abi[a];
+            place_arg(pa->size, &cursor, &stk, &pl);
+            if (pl.nreg && !pl.nstk && !pa->is_struct &&
+                pa->vreg >= 0 && pa->vreg < nv)
+                hint[pa->vreg] = pl.reg;
+        }
+    }
+    for (int k = 0; k < fn->nins; k++) {
+        const struct ir_ins *i = &fn->ins[k];
+        if (i->op == IR_RET && i->a >= 0 && i->a < nv &&
+            !fn->ret_abi.is_struct)
+            hint[i->a] = ret_reg(fn->ret_abi.size ? fn->ret_abi.size : 2);
+        if (i->op != IR_CALL || i->call_varargs)
+            continue;
+        if (i->dst >= 0 && i->dst < nv && !i->retsize && i->ret_tybytes &&
+            i->ret_tybytes <= VW)
+            hint[i->dst] = ret_reg(i->ret_tybytes);
+        cursor = ARG_TOP; stk = 0;
+        if (sret_bytes(i->retsize))
+            place_arg(2, &cursor, &stk, &pl);
+        for (int a = 0; a < i->nargs; a++) {
+            int v = i->argv[a].vreg;
+            place_arg(i->argv[a].size, &cursor, &stk, &pl);
+            if (pl.nreg && !pl.nstk && !i->argv[a].is_struct &&
+                v >= 0 && v < nv && hint[v] < 0)
+                hint[v] = pl.reg;
+        }
+    }
+}
+
+/* Which pass is allocating (avr_ra_pass): an `ext.4:2` is a copy in a
+ * PAIR, which holds the two bytes it keeps, and not in a quad, whose
+ * upper two it would write. */
+static int g_a_quadpass;
+
+static int a_ext_plain(const struct ir_ins *i)
+{
+    return !g_a_quadpass && i->size == 2;
+}
+
 static const struct ra_target AVR_RA = {
     a_pool_for, a_callee_saved, a_ldvar_plain,
     1, 1, 0,          /* call arguments and returns from a home; memcpy's
                        * addresses from their slots */
-    a_calls_helper,   /* the pool is all call-saved: nothing to cross */
+    a_calls_helper,   /* for the call-clobbered homes, B and X */
     0,
-    NULL,
+    a_abi_hints,
     NULL, NULL,
-    1                 /* float_in_gpr: a float is four bytes in a quad,
+    1,                /* float_in_gpr: a float is four bytes in a quad,
                        * and every float lowering reads through vld/rd4 */
+    a_saved_only,
+    a_ext_plain
 };
 
 /* The lowest register any call this function makes -- the IR's, and the
@@ -3610,6 +3884,8 @@ static char *avr_excl(const struct a_fn *F, int quad)
             x[v] = quad ? cw(F, v) < 3 || cw(F, v) > 4 : cw(F, v) > 2;
         if (F->remat && F->remat[v])
             x[v] = 1;                /* rebuilt where it is read */
+        if (g_a_nohome && v < g_a_nvr && g_a_nohome[v])
+            x[v] = 1;                /* overwritten where it was (a_verify) */
     }
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
@@ -3666,47 +3942,63 @@ static void avr_ra_pass(struct a_fn *F, int quad, int low, int *taken,
     char *x;
 
     g_a_npool = 0;
-    if (quad) {
-        /* r2..r5, r6..r9, r10..r13, r14..r17 */
-        for (int b = 2; b + 3 < low && b <= 14; b += 4)
-            if (!(*taken & (0xF << b)))
-                g_a_pool[g_a_npool++] = b;
-    } else {
-        /* X first, being call-clobbered: a value that crosses no call
-         * takes it and costs no push. It is no argument register, so the
-         * `low` bound does not apply. */
-        if (g_a_xhome && !(*taken & (3 << AVR_X)))
-            g_a_pool[g_a_npool++] = AVR_X;
-        for (int k = 0; k < 8; k++)
-            if (A_POOL[k] + 1 < low && !(*taken & (3 << A_POOL[k])))
-                g_a_pool[g_a_npool++] = A_POOL[k];
-    }
     {
+        /* The call-clobbered homes first: a value that crosses no call
+         * takes one and costs no push. They are no argument register a
+         * call's loads could overwrite first -- those are a parallel
+         * move now (see IR_CALL) -- so `low` does not bound them, and
+         * neither does the budget, which counts pushes. */
         int have = 0, left;
         for (int b = 2; b <= 17; b++)
             if (*taken & (1 << b)) have++;
         left = g_a_cap - have / 2;
         if (quad) left /= 2;
-        if (left < 0) left = 0;
-        if (g_a_npool > left) g_a_npool = left;
+        if (quad) {
+            if (g_a_vol && !(*taken & (0xF << 22)))
+                g_a_pool[g_a_npool++] = 22;
+            /* r2..r5, r6..r9, r10..r13, r14..r17 */
+            for (int b = 2; b + 3 < low && b <= 14 && left > 0; b += 4)
+                if (!(*taken & (0xF << b))) {
+                    g_a_pool[g_a_npool++] = b;
+                    left--;
+                }
+        } else {
+            if (g_a_vol && !(*taken & (3 << 24)))
+                g_a_pool[g_a_npool++] = 24;
+            if (g_a_vol && !(*taken & (3 << 22)))
+                g_a_pool[g_a_npool++] = 22;
+            /* X, call-clobbered as well, and no argument register */
+            if (g_a_xhome && !(*taken & (3 << AVR_X)))
+                g_a_pool[g_a_npool++] = AVR_X;
+            for (int k = 0; k < 8 && left > 0; k++)
+                if (A_POOL[k] + 1 < low && !(*taken & (3 << A_POOL[k]))) {
+                    g_a_pool[g_a_npool++] = A_POOL[k];
+                    left--;
+                }
+        }
     }
     if (!g_a_npool)
         return;
     x = avr_excl(F, quad);
     for (int v = 0; v < nv; v++)
         if (also[v]) x[v] = 1;
+    g_a_quadpass = quad;
     a = ra_allocate(fn, &AVR_RA, F->wide, x, used, &nused);
+    g_a_quadpass = 0;
     free(x);
     for (int k = 0; k < nused; k++) {
-        *taken |= (quad ? 0xF : 3) << used[k];
         r->used[r->nsave++] = used[k];
         if (quad)
             r->used[r->nsave++] = used[k] + 2;
     }
+    /* Taken for the other pass by what was HANDED OUT, not by what is
+     * saved: `used` lists the call-saved registers only, and a quad in
+     * r22-r25 left out of `taken` would be given again as a pair. */
     for (int v = 0; v < nv; v++)
         if (a[v] >= 0) {
             r->loc[v] = a[v];
             r->hw[v] = (unsigned char)(quad ? 4 : 2);
+            *taken |= (quad ? 0xF : 3) << a[v];
         }
     free(a);
 }
@@ -3952,11 +4244,48 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                 st_slot(&F, F.sret_slot, RA, 2);
             }
         }
+        /* Those arriving in registers: the ones kept in memory stored
+         * first, which reads the argument registers and writes none, then
+         * the ones with a home as ONE parallel move, since a home may be
+         * where another parameter arrived -- two ints swapped between
+         * r24 and r22 is a cycle. The stack ones last, through A, which
+         * no parameter arrives in by then and nothing lives in. */
+        {
+            int md[40], ms[40], od[48], os[48], nm = 0, no;
+            int c2 = cursor;
+            long s2 = stk;
+            for (i = 0; i < fn->nparams; i++) {
+                struct ir_arg *a = &fn->param_abi[i];
+                place_arg(a->size, &c2, &s2, &pl);
+                if (!pl.nreg)
+                    continue;
+                if (!in_pair(&F, a->vreg)) {
+                    vst(&F, a->vreg, 0, pl.reg, pl.nreg);
+                    continue;
+                }
+                /* A parameter nothing reads is live nowhere, so its home
+                 * may be a live one's: moving it there would clobber that,
+                 * and two moves into one register are no parallel move. */
+                if (F.usecnt && !F.usecnt[a->vreg])
+                    continue;
+                for (int b = 0; b < pl.nreg && b < F.hw[a->vreg]; b++) {
+                    md[nm] = F.loc[a->vreg] + b;
+                    ms[nm] = pl.reg + b;
+                    nm++;
+                }
+            }
+            no = ra_parallel_move(md, ms, nm, R_TMP, od, os, 48);
+            if (no < 0)
+                internal_error("avr: %s: the parameters' homes do not form a "
+                               "parallel move", fn->name);
+            emit_moves(t, od, os, no);
+            F.last_st.v = -1;
+        }
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
             place_arg(a->size, &cursor, &stk, &pl);
             if (pl.nreg) {
-                vst(&F, a->vreg, 0, pl.reg, pl.nreg);
+                continue;                           /* placed above */
             } else if (pl.nstk <= VW) {
                 ld_slot(&F, RA, F.frame + F.in_at + pl.stk, pl.nstk);
                 vst(&F, a->vreg, 0, RA, pl.nstk);
@@ -3971,12 +4300,30 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         }
     }
 
-    for (i = 0; i < fn->nins; i++) {
-        gen_ins(&F, i);
-        if (F.skip_next) {          /* the compare emitted its branch */
-            F.skip_next = 0;
-            i++;
+    {
+        /* Liveness for a_verify, when anything has a home to check. */
+        unsigned long *lout = NULL;
+        int lwords = 0;
+        if (F.loc && fn->nvregs && fn->nins) {
+            int *lf = xmalloc((size_t)fn->nvregs * sizeof *lf);
+            int *ll = xmalloc((size_t)fn->nvregs * sizeof *ll);
+            unsigned long *lin = NULL;
+            int *dv = NULL;
+            lout = ra_live_intervals(fn, lf, ll, &lin, &dv, &lwords);
+            free(lf); free(ll); free(lin); free(dv);
         }
+        for (i = 0; i < fn->nins; i++) {
+            long at = t->len;
+            int first = i;
+            gen_ins(&F, i);
+            if (F.skip_next) {          /* the compare emitted its branch */
+                F.skip_next = 0;
+                i++;
+            }
+            if (lout)
+                a_verify(&F, first, i, at, lout, lwords);
+        }
+        free(lout);
     }
 
     /* ---- epilogue ---- */
@@ -4136,6 +4483,37 @@ static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
     return t->len - rb->at;
 }
 
+/* One allocation choice, generated until a_verify catches nothing: each
+ * value it caught is kept out of the home it was overwritten in, and the
+ * function generated again. Each round excludes at least one more value
+ * from at least one more class of home, so this ends; the bound is only
+ * there to name a loop that did not. */
+static int avr_attempt(struct ir_func *fn, struct code *t, struct a_sites *st,
+                       int want_debug, int mode, const struct avr_rollback *rb)
+{
+    int nv = fn->nvregs;
+    for (int tries = 0; ; tries++) {
+        int len, any = 0;
+        g_x_hit = g_x_alloc = 0;
+        if (nv)
+            memset(g_a_pend, 0, (size_t)nv);
+        len = gen_relaxed(fn, t, st, want_debug, mode, rb);
+        if (g_a_xhome && g_x_hit && g_x_alloc) {
+            g_a_xhome = 0;               /* X was scratch after all */
+            continue;
+        }
+        for (int v = 0; v < nv; v++) {
+            if (g_a_pend[v] & 1) { g_a_novol[v] = 1; any = 1; }
+            if (g_a_pend[v] & 2) { g_a_nohome[v] = 1; any = 1; }
+        }
+        if (!any)
+            return len;
+        if (tries > 2 * nv + 2)
+            internal_error("avr: %s: values kept being overwritten in their "
+                           "homes after %d attempts", fn->name, tries);
+    }
+}
+
 /* Each allocation choice in turn, keeping the shortest (avr_regalloc).
  * A discarded attempt is undone by truncating what it appended: the code,
  * and the four site lists, which only ever grow. */
@@ -4144,6 +4522,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
 {
     struct avr_rollback rb = { t->len, st->next, st->nstr, st->ng, st->nf };
     int best = AVR_RA_NONE, best_len = 0;
+    int nv = fn->nvregs;
 
     if (!g_a_regalloc || want_debug || fn->src->is_isr ||
         (avr_knob("EMBCC_AVR_RA_ONLY") &&
@@ -4155,46 +4534,73 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     /* ...and each mode under a few budgets of pairs (g_a_cap). */
     static const int caps[3] = { 8, 3, 1 };
     int c0 = 0, c1 = 2, best_cap = 8, last_cap = 1, best_x = 0;
+    int best_last = 0;
+    char *best_novol, *best_nohome;
     if (avr_knob("EMBCC_AVR_RA_MODE"))
         m0 = m1 = atoi(avr_knob("EMBCC_AVR_RA_MODE"));
     if (avr_knob("EMBCC_AVR_RA_CAP")) {
         c0 = c1 = 0;
         last_cap = atoi(avr_knob("EMBCC_AVR_RA_CAP"));
     }
+    /* EMBCC_AVR_NO_VOL: no homes in B, which is what the allocator did
+     * before it had them -- for telling a miscompile of theirs apart. */
+    g_a_vol = !avr_knob("EMBCC_AVR_NO_VOL");
+    g_a_nvr = nv;
+    g_a_novol = xcalloc((size_t)(nv ? nv : 1), 1);
+    g_a_nohome = xcalloc((size_t)(nv ? nv : 1), 1);
+    g_a_pend = xcalloc((size_t)(nv ? nv : 1), 1);
+    best_novol = xcalloc((size_t)(nv ? nv : 1), 1);
+    best_nohome = xcalloc((size_t)(nv ? nv : 1), 1);
     for (int m = m0; m <= m1; m++)
         for (int c = c0; c <= c1; c++) {
             int len;
             g_a_cap = avr_knob("EMBCC_AVR_RA_CAP") ? last_cap : caps[c];
             /* with X offered, unless the attempt then used it as scratch */
             g_a_xhome = !avr_knob("EMBCC_AVR_NO_XHOME");
-            g_x_hit = g_x_alloc = 0;
-            len = gen_relaxed(fn, t, st, want_debug, m, &rb);
-            if (g_a_xhome && g_x_hit && g_x_alloc) {
-                g_a_xhome = 0;
-                g_x_hit = g_x_alloc = 0;
-                len = gen_relaxed(fn, t, st, want_debug, m, &rb);
-            }
+            /* each attempt learns its own exclusions */
+            memset(g_a_novol, 0, (size_t)(nv ? nv : 1));
+            memset(g_a_nohome, 0, (size_t)(nv ? nv : 1));
+            len = avr_attempt(fn, t, st, want_debug, m, &rb);
             if (avr_knob("EMBCC_AVR_RA"))
                 fprintf(stderr, "%s: mode %d cap %d, %d bytes\n", fn->name,
                         m, g_a_cap, len);
+            best_last = 0;
             if (best == AVR_RA_NONE || len < best_len) {
                 best = m;
                 best_cap = g_a_cap;
                 best_x = g_a_xhome;
                 best_len = len;
+                best_last = 1;
+                memcpy(best_novol, g_a_novol, (size_t)(nv ? nv : 1));
+                memcpy(best_nohome, g_a_nohome, (size_t)(nv ? nv : 1));
             }
         }
-    if (best != m1 || best_cap != g_a_cap || best_x != g_a_xhome) {
+    if (!best_last) {
+        /* The best attempt again, exactly: its choices and what its own
+         * retries learned, so the code is the code that was measured. */
         g_a_cap = best_cap;
         g_a_xhome = best_x;
+        memcpy(g_a_novol, best_novol, (size_t)(nv ? nv : 1));
+        memcpy(g_a_nohome, best_nohome, (size_t)(nv ? nv : 1));
         g_x_hit = g_x_alloc = 0;
+        if (nv)
+            memset(g_a_pend, 0, (size_t)nv);
         gen_relaxed(fn, t, st, want_debug, best, &rb);
         if (g_x_hit && g_x_alloc)
             internal_error("avr: %s: X is a home and was used as scratch",
                            fn->name);
+        for (int v = 0; v < nv; v++)
+            if (g_a_pend[v])
+                internal_error("avr: %s: vreg %d's home was overwritten in "
+                               "the attempt chosen", fn->name, v);
     }
+    free(g_a_novol); free(g_a_nohome); free(g_a_pend);
+    free(best_novol); free(best_nohome);
+    g_a_novol = g_a_nohome = g_a_pend = NULL;
+    g_a_nvr = 0;
     g_a_cap = 8;
     g_a_xhome = 0;
+    g_a_vol = 1;
 }
 
 void codegen_unit_avr(struct ir_unit *iu, struct code *text,

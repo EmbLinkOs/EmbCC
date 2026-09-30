@@ -391,7 +391,8 @@ static const struct ra_target X86_RA = {
                     * would never match. That changes if the pool ever
                     * grows to them. */,
     x86_fp_pool_for, x86_fp_callee_saved,
-    0             /* float_in_gpr: floats have their own class (SSE) */
+    0,            /* float_in_gpr: floats have their own class (SSE) */
+    NULL, NULL
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----

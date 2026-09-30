@@ -156,6 +156,16 @@ void avr_nop(struct code *c);
 void avr_ijmp(struct code *c);
 void avr_icall(struct code *c);
 
+/* Which registers one instruction WRITES, as a mask over r0..r31, and its
+ * length in bytes through *len. The code generator's proof that a value
+ * kept in a register survived each instruction is built on this, so it
+ * reads the BYTES that were emitted rather than trusting what was meant.
+ * A call writes every register a callee may clobber (AVR_W_CALL: r0,
+ * r18-r27 and Z); an encoding this does not know writes all of them. */
+#define AVR_W_ALL  0xffffffffUL
+#define AVR_W_CALL (0x1UL | 0x0ffc0000UL | 0xc0000000UL)
+unsigned long avr_insn_writes(const unsigned char *p, long avail, int *len);
+
 /* Writes one line per instruction form, generated from the tables
  * themselves, so a form added here cannot escape the referee. */
 #include <stdio.h>

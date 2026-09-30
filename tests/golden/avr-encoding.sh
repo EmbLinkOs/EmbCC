@@ -121,7 +121,55 @@ cmp -s "$out/b.want" "$out/b.cut" || {
     exit 1; }
 bn=$(wc -l < "$out/b.want" | tr -d ' ')
 
+# What each instruction WRITES, decoded from our bytes by avr_insn_writes
+# -- which the code generator's proof that a value kept in a register
+# survived each instruction is built on -- against a rule per MNEMONIC
+# applied to the text above. llvm-mc has already tied that text to those
+# bytes, so these are two readings of one instruction that share no code:
+# a decoder that misreads a split field disagrees here, instead of
+# certifying that a value outlived an instruction that overwrote it.
+"$out/avrcheck" --writes > "$out/w.ours" || {
+    echo "avrcheck could not decode its own vocabulary"; exit 1; }
+cat "$out/v.s" "$out/b.want" > "$out/all.s"
+awk '
+function add(r) { got[r] = 1 }
+function reg(s) { sub(/^r/, "", s); return s + 0 }
+function ptr(p) { if (p ~ /X/) return 26; if (p ~ /Y/) return 28; return 30 }
+{
+    split("", got)
+    m = $1; ops = $0; sub(/^[a-z]+[ \t]*/, "", ops)
+    n = split(ops, o, /, */)
+    if (m ~ /^(add|adc|sub|sbc|and|or|eor|mov|andi|ori|subi|sbci|ldi|com|neg|swap|inc|dec|asr|lsr|ror|in|pop|lds|ldd|bld)$/)
+        add(reg(o[1]))
+    else if (m == "movw" || m == "adiw" || m == "sbiw") {
+        add(reg(o[1])); add(reg(o[1]) + 1)
+    } else if (m ~ /^(mul|muls|mulsu|fmul|fmuls|fmulsu)$/) {
+        add(0); add(1)
+    } else if (m == "ld") {
+        add(reg(o[1]))
+        if (o[2] ~ /[+-]/) { add(ptr(o[2])); add(ptr(o[2]) + 1) }
+    } else if (m == "st") {
+        if (o[1] ~ /[+-]/) { add(ptr(o[1])); add(ptr(o[1]) + 1) }
+    } else if (m == "lpm" || m == "elpm") {
+        if (ops == "") add(0)
+        else { add(reg(o[1])); if (o[2] ~ /[+]/) { add(30); add(31) } }
+    } else if (m ~ /^(call|rcall|icall|eicall)$/) {
+        add(0); for (r = 18; r <= 27; r++) add(r); add(30); add(31)
+    }
+    s = ""
+    for (r = 0; r < 32; r++) if (r in got) s = s (s == "" ? "" : " ") "r" r
+    print (s == "" ? "-" : s)
+}' "$out/all.s" > "$out/w.want"
+cmp -s "$out/w.ours" "$out/w.want" || {
+    echo "the decoder says an instruction writes other registers than its"
+    echo "        mnemonic does (instruction | decoded | the rule):"
+    paste -d'|' "$out/all.s" "$out/w.ours" "$out/w.want" |
+        awk -F'|' '$2 != $3' | head -8
+    exit 1; }
+wn=$(wc -l < "$out/w.want" | tr -d ' ')
+
 echo "all $n AVR instructions encode as llvm-mc does, across both halves
 of every split field and all three pointer registers
 and all $bn PC-relative forms disassemble as the condition they name,
-which is the half a self-comparison cannot grade"
+which is the half a self-comparison cannot grade
+and all $wn decode to the registers their mnemonic writes"

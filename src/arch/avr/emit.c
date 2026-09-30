@@ -630,3 +630,137 @@ static void avr_branch_walk(FILE *f, struct code *c)
 
 void avr_branch_vocabulary(FILE *f) { avr_branch_walk(f, NULL); }
 void avr_encode_branches(struct code *c) { avr_branch_walk(NULL, c); }
+
+/* ---- what an instruction writes -------------------------------------
+ *
+ * The code generator proves, instruction by instruction, that no value
+ * it keeps in a register is overwritten while something still needs it
+ * (gen_func's check). It proves that from the BYTES it emitted rather
+ * than from what it meant to emit, because the bytes are what runs --
+ * so this is a decoder, the one place in the file that reads an
+ * instruction back.
+ *
+ * The answer is a mask over r0..r31. A call writes every register the
+ * ABI lets a callee clobber: r0, r18-r27 and Z (r1 comes back zero, which
+ * is the invariant every caller already relies on). Anything not
+ * recognised answers ALL of them: this mask is the evidence that a value
+ * survived, and an encoding nobody taught it must never be the reason a
+ * proof went through.
+ *
+ * Refereed in tests/golden/avr-encoding.sh against a rule per MNEMONIC
+ * applied to the vocabulary's own text, which llvm-mc has already tied
+ * to these bytes -- two readings of the same instruction that share no
+ * code. */
+#define AVR_W(r)    (1UL << (r))
+#define AVR_W_PAIR(r) (3UL << (r))
+
+unsigned long avr_insn_writes(const unsigned char *p, long avail, int *len)
+{
+    unsigned w;
+    int d;
+
+    *len = 2;
+    if (avail < 2) {
+        *len = avail > 0 ? (int)avail : 1;
+        return AVR_W_ALL;
+    }
+    w = (unsigned)p[0] | (unsigned)p[1] << 8;
+    d = (int)((w >> 4) & 0x1f);
+    switch (w >> 12) {
+    case 0x0:
+        if (w == 0)
+            return 0;                                   /* nop */
+        switch ((w >> 8) & 0xf) {
+        case 0x1: return AVR_W_PAIR(2 * (int)((w >> 4) & 0xf));  /* movw */
+        case 0x2: case 0x3: return AVR_W_PAIR(0);       /* muls, mulsu, fmul* */
+        case 0x4: case 0x5: case 0x6: case 0x7: return 0;         /* cpc */
+        case 0x8: case 0x9: case 0xa: case 0xb:         /* sbc */
+        case 0xc: case 0xd: case 0xe: case 0xf:         /* add */
+            return AVR_W(d);
+        }
+        return AVR_W_ALL;
+    case 0x1:
+        if ((w & 0x0800) == 0)
+            return 0;                                   /* cpse, cp */
+        return AVR_W(d);                                /* sub, adc */
+    case 0x2:
+        return AVR_W(d);                                /* and, eor, or, mov */
+    case 0x3:
+        return 0;                                       /* cpi */
+    case 0x4: case 0x5: case 0x6: case 0x7: case 0xe:
+        return AVR_W(16 + (int)((w >> 4) & 0xf));       /* sbci subi ori andi ldi */
+    case 0x8: case 0xa:
+        return (w & 0x0200) ? 0 : AVR_W(d);             /* std / ldd */
+    case 0x9:
+        switch ((w >> 9) & 0x7) {
+        case 0:                                         /* loads */
+            switch (w & 0xf) {
+            case 0x0: *len = 4; return avail < 4 ? AVR_W_ALL : AVR_W(d);  /* lds */
+            case 0x1: case 0x2: case 0x5: case 0x7:
+                return AVR_W(d) | AVR_W_PAIR(30);       /* ld Z+/-Z, lpm/elpm Z+ */
+            case 0x4: case 0x6: case 0xc: case 0xf:
+                return AVR_W(d);                        /* lpm, elpm Z; ld X; pop */
+            case 0x9: case 0xa:
+                return AVR_W(d) | AVR_W_PAIR(28);       /* ld Y+/-Y */
+            case 0xd: case 0xe:
+                return AVR_W(d) | AVR_W_PAIR(26);       /* ld X+/-X */
+            }
+            return AVR_W_ALL;
+        case 1:                                         /* stores */
+            switch (w & 0xf) {
+            case 0x0: *len = 4; return avail < 4 ? AVR_W_ALL : 0;         /* sts */
+            case 0xc: case 0xf: return 0;               /* st X; push */
+            case 0x1: case 0x2: return AVR_W_PAIR(30);
+            case 0x9: case 0xa: return AVR_W_PAIR(28);
+            case 0xd: case 0xe: return AVR_W_PAIR(26);
+            }
+            return AVR_W_ALL;                           /* xch/las/lac/lat too */
+        case 2:
+            switch (w & 0xf) {
+            case 0x0: case 0x1: case 0x2: case 0x3:     /* com neg swap inc */
+            case 0x5: case 0x6: case 0x7: case 0xa:     /* asr lsr ror dec */
+                return AVR_W(d);
+            case 0x8:
+                if (!(w & 0x0100))
+                    return 0;                           /* bset, bclr */
+                switch ((w >> 4) & 0xf) {
+                case 0x0: case 0x1: case 0x8: case 0x9: case 0xa:
+                    return 0;                           /* ret reti sleep break wdr */
+                case 0xc: case 0xd:
+                    return AVR_W(0);                    /* lpm, elpm into r0 */
+                }
+                return AVR_W_ALL;
+            case 0x9:
+                if (w == 0x9409 || w == 0x9419)
+                    return 0;                           /* ijmp, eijmp */
+                if (w == 0x9509 || w == 0x9519)
+                    return AVR_W_CALL;                  /* icall, eicall */
+                return AVR_W_ALL;
+            case 0xc: case 0xd:
+                *len = 4; return avail < 4 ? AVR_W_ALL : 0;               /* jmp */
+            case 0xe: case 0xf:
+                *len = 4; return avail < 4 ? AVR_W_ALL : AVR_W_CALL;      /* call */
+            }
+            return AVR_W_ALL;
+        case 3:
+            return AVR_W_PAIR(24 + 2 * (int)((w >> 4) & 3));              /* adiw, sbiw */
+        case 4: case 5:
+            return 0;                                   /* cbi sbic sbi sbis */
+        default:
+            return AVR_W_PAIR(0);                       /* mul */
+        }
+    case 0xb:
+        return (w & 0x0800) ? 0 : AVR_W(d);             /* out / in */
+    case 0xc:
+        return 0;                                       /* rjmp */
+    case 0xd:
+        return AVR_W_CALL;                              /* rcall */
+    case 0xf:
+        if (!(w & 0x0800))
+            return 0;                                   /* brbs, brbc */
+        if ((w & 0x0e08) == 0x0800)
+            return AVR_W(d);                            /* bld */
+        return 0;                                       /* bst sbrc sbrs */
+    }
+    return AVR_W_ALL;
+}

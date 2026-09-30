@@ -152,6 +152,26 @@ struct ra_target {
      * through its register-aware accessors, the same condition the three
      * flags above state for arguments, returns and copies. */
     int float_in_gpr;
+
+    /* Per vreg, values that may take only a register that survives a
+     * call, whether or not they cross one; NULL for none. May be NULL.
+     *
+     * For a backend that checks its own output: AVR proves from the
+     * emitted bytes that nothing overwrote a value in a call-clobbered
+     * register while it was live, and a value its scratch use did
+     * overwrite is named here on the next attempt -- the same answer
+     * `crosses` gives a value live across a call, for a reason the IR
+     * does not show. */
+    const char *(*saved_only)(const struct ir_func *fn);
+
+    /* Is this IR_EXT a plain copy in the registers being allocated -- the
+     * low bytes the home holds being the source's own? May be NULL (no).
+     * AVR's `int` is two bytes and the IR computes at four, so nearly
+     * every read of an int is `ext.4:2`, and a pair holds exactly those
+     * two bytes: counted as a copy, a parameter's register reaches the
+     * values made from it, where before each was a separate node with a
+     * movw between. */
+    int (*ext_plain)(const struct ir_ins *i);
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that

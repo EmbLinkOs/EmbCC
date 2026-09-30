@@ -387,9 +387,10 @@ static const struct ra_target THUMB_RA = {
     t_abi_hints,
     t_fp_pool_for,
     t_fp_callee_saved,
-    1             /* float_in_gpr: a soft float is allocated with the core
+    1,            /* float_in_gpr: a soft float is allocated with the core
                    * registers; with an FPU every float belongs to the FP
                    * pass, which the integer pass excludes (excl) */
+    NULL, NULL
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -3369,7 +3370,8 @@ static const struct ra_target THUMB_PAIR_RA = {
     0,
     t_pair_hints,
     NULL, NULL,
-    1
+    1,
+    NULL, NULL
 };
 
 /* The pair pass: a vreg -> low register map, or NULL for none. Fills

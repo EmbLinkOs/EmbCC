@@ -356,6 +356,11 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             }
         }
     }
+    if (!fp && t->saved_only) {
+        const char *so = t->saved_only(fn);
+        for (int v = 0; so && v < nvr; v++)
+            if (so[v]) crosses[v] = 1;
+    }
     for (int v = 0; v < nvr; v++) {
         if (fp) {
             /* this class is exactly the values cg_float_vregs found */
@@ -513,36 +518,63 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     int ew = (E + 63) / 64;
     unsigned long *adj = E ? xcalloc((size_t)E * ew, sizeof *adj) : NULL;
     int *members = xmalloc((size_t)(E ? E : 1) * sizeof *members);
-    /* Vregs simultaneously live interfere. Precisely: those live at an
-     * instruction's ENTRY (live_in) are mutually live, and those live at its
-     * EXIT (live_out, plus a dead def that still clobbers a register) are
-     * mutually live — but a value dying at i (live_in only) and one born at i
-     * (the def, live_out only) are NOT simultaneously live, so no edge crosses
-     * the two groups. That precision is what lets a copy's source (which dies)
-     * share a register with its result (move coalescing, below). */
-    for (int pass = 0; adj && pass < 2; pass++) {
-        for (int i = 0; i < nins; i++) {
-            unsigned long *grp = (pass == 0 ? livein : liveout)
-                                 + (size_t)i * lwords;
-            int m = 0;
-            for (int w = 0; w < lwords; w++) {
-                unsigned long bits = grp[w];
-                while (bits) {
-                    int b = 0; unsigned long t = bits;
-                    while (!(t & 1)) { t >>= 1; b++; }
-                    int v = w * 64 + b;
-                    if (v < nvr && eof[v] >= 0) members[m++] = eof[v];
-                    bits &= bits - 1;
-                }
+    /* Which instructions are COPIES the colourer may give one register:
+     * the same test the coalescer below applies, since both are asking
+     * whether the two ends hold the same value. */
+#define RA_COPY(in) ((in)->op == IR_MOV || \
+        ((in)->op == IR_LDVAR && t->ldvar_plain((in)->size, (in)->sign, (in)->w)) || \
+        ((in)->op == IR_EXT && t->ext_plain && t->ext_plain(in)) || \
+        ((in)->op == IR_STVAR && (in)->size >= 8))
+    /* Interference, Chaitin's way: an edge from each DEFINITION to every
+     * value live after it -- a dead def too, which still clobbers its
+     * register -- except, for a copy, its source, which holds the value
+     * just written. Values live into the function's first instruction
+     * (parameters, and anything read before it is written) are live
+     * together there with no definition to find them, so they are made
+     * a clique.
+     *
+     * The copy exception is the point. `p2 = p; ...; p = p2 + 1` around
+     * a loop keeps p live the whole way, so p and its copy were live at
+     * once, and marking everything live together as interfering kept
+     * them apart -- one more register, and a move between them each
+     * time round. Nothing redefines either while both hold the value, and
+     * if something did, THAT definition would add the edge. A value dying
+     * at an instruction still shares a register with one born there, as
+     * before: the def is only tied to what is live after it. */
+    for (int i = 0; adj && i <= nins; i++) {
+        int m = 0, dv = -1, src = -1;
+        unsigned long *grp;
+        if (i == nins) {                       /* the entry clique */
+            if (!nins) break;
+            grp = livein;
+        } else {
+            struct ir_ins *in = &fn->ins[i];
+            dv = defv[i];
+            if (dv < 0 || dv >= nvr || eof[dv] < 0)
+                continue;
+            if (RA_COPY(in))
+                src = in->a;
+            grp = liveout + (size_t)i * lwords;
+        }
+        for (int w = 0; w < lwords; w++) {
+            unsigned long bits = grp[w];
+            while (bits) {
+                int b = 0; unsigned long tt = bits;
+                while (!(tt & 1)) { tt >>= 1; b++; }
+                int v = w * 64 + b;
+                if (v < nvr && eof[v] >= 0 && v != src && v != dv)
+                    members[m++] = eof[v];
+                bits &= bits - 1;
             }
-            if (pass == 1) {   /* a dead def joins the live-out group */
-                int dv = defv[i];
-                if (dv >= 0 && dv < nvr && eof[dv] >= 0) {
-                    int had = 0;
-                    for (int j = 0; j < m; j++) if (members[j] == eof[dv]) had = 1;
-                    if (!had) members[m++] = eof[dv];
-                }
+        }
+        if (i < nins) {
+            int a = eof[dv];
+            for (int q = 0; q < m; q++) {
+                int b = members[q];
+                adj[(size_t)a * ew + (b >> 6)] |= 1UL << (b & 63);
+                adj[(size_t)b * ew + (a >> 6)] |= 1UL << (a & 63);
             }
+        } else {
             for (int p = 0; p < m; p++)
                 for (int q = p + 1; q < m; q++) {
                     int a = members[p], b = members[q];
@@ -572,7 +604,8 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         enum ir_op op = in->op;
         int d = in->dst, partner[2], np = 0;
         if (op == IR_MOV || op == IR_STVAR ||
-            (op == IR_LDVAR && t->ldvar_plain(in->size, in->sign, in->w))) {
+            (op == IR_LDVAR && t->ldvar_plain(in->size, in->sign, in->w)) ||
+            (op == IR_EXT && t->ext_plain && t->ext_plain(in))) {
             partner[np++] = in->a;
         } else if (op == IR_ADD || op == IR_SUB || op == IR_MUL ||
                    op == IR_DIV || op == IR_AND || op == IR_OR ||
@@ -676,6 +709,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             if (!alu && in->op != IR_MOV &&
                 !(in->op == IR_LDVAR &&
                   t->ldvar_plain(in->size, in->sign, in->w)) &&
+                !(in->op == IR_EXT && t->ext_plain && t->ext_plain(in)) &&
                 !(in->op == IR_STVAR && in->size >= 8))
                 continue;
             int d = in->dst, a = in->a;
