@@ -6542,21 +6542,33 @@ static int ivsr_one(struct ir_func *fn)
         }
 
         /* the induction variable must start at a known place, because
-         * the new pointer has to be initialised to match it */
-        int init_zero = 1;
+         * the new pointer has to be initialised to match it: its one
+         * other definition is OUTSIDE the loop, and is a zero.
+         *
+         * "Outside" is the part that was missing. With both definitions
+         * inside, this loop had nothing to check and said yes -- which is
+         * what an INNER loop's counter looks like from the loop around
+         * it: `for (j..) for (i = k; i < 16; i++) s += a[i]` walked its
+         * pointer once per j, from a, and the inner loop read a[j]
+         * sixteen times. Only an inner counter starting at zero escaped,
+         * because that inner loop was rewritten first and its counter
+         * was gone before the outer one looked. */
+        int init_zero = 1, ninit = 0;
         for (int n = 0; n < fn->nins && init_zero; n++) {
             if (n >= lo && n < hi)
                 continue;
             struct ir_ins *i = &fn->ins[n];
             if (def_target(i) != iv)
                 continue;
-            if (!(i->op == IR_MOV && i->a >= 0 && i->a < fn->nvregs &&
-                  d.cnt[i->a] == 1 && d.ins[i->a] >= 0 &&
-                  fn->ins[d.ins[i->a]].op == IR_CONST &&
-                  fn->ins[d.ins[i->a]].imm == 0))
+            ninit++;
+            if (!((i->op == IR_MOV && i->a >= 0 && i->a < fn->nvregs &&
+                   d.cnt[i->a] == 1 && d.ins[i->a] >= 0 &&
+                   fn->ins[d.ins[i->a]].op == IR_CONST &&
+                   fn->ins[d.ins[i->a]].imm == 0) ||
+                  (i->op == IR_CONST && i->imm == 0)))
                 init_zero = 0;
         }
-        if (!init_zero)
+        if (!init_zero || ninit != 1)
             continue;
 
         /* every candidate: an address computed from the index, whose

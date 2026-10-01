@@ -49,6 +49,14 @@ static long shifted(int x, int y)
 {
     return (long)((x << 3) - y) * 7 + ((y << 2) - x) + (x - (y << 1)) + ((x << 4) + y);
 }
+static long from_k(const int *a, int n, int k)
+{
+    /* an inner counter that does not start at zero: strength reduction
+     * once took it for the OUTER loop's, and walked a[j] instead of a[i] */
+    long s = 0;
+    for (int j = 0; j < n; j++) for (int i = k; i < 16; i++) s += a[i];
+    return s;
+}
 static long scaled(int i, int j)
 {
     return sh[(i * 5) & 15] + sc[(j * 3) & 15] + uc[(i + j) & 15] + sh[(j * 7) & 15] * sc[i & 15];
@@ -118,6 +126,8 @@ int main(void)
     { long t = 0;
       for (int x = -3; x <= 3; x++) for (int y = -2; y <= 5; y++) t += shifted(x, y) * (x + 7) + scaled(x + 4, y + 2);
       putn(t); putn(shifted(-9, 40)); putn(scaled(13, 11)); nl(); }
+    { int a[16]; for (int i = 0; i < 16; i++) a[i] = i + 1;
+      putn(from_k(a, 5, 3)); putn(from_k(a, 3, 0)); putn(from_k(a, 2, 9)); nl(); }
 
     puts_("==END==\n");
     return 0;
