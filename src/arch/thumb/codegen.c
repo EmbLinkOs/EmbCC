@@ -1409,6 +1409,14 @@ static int invert_last_bcond(struct t_fn *F, int n, int label)
     F->fix[F->bc_fix].at = at;
     F->fix[F->bc_fix].label = label;
     F->fix[F->bc_fix].cond = cond;
+    /* No longer a `cbz` candidate: the second pass decides cbz at the
+     * BRZ, before it can know this jump follows, and a cbz cannot be
+     * inverted into it -- it would emit cbz AND this jump, one branch
+     * more than the first pass counted, and every later branch would
+     * take its neighbour's short-or-long decision -- lib/libc's
+     * mbrtowc at -O2 stopped with `a relaxed branch no longer reaches
+     * its label`. */
+    F->fix[F->bc_fix].cz_at = -1;
     F->bc_end = -1;
     return 1;
 }
