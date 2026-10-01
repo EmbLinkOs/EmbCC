@@ -4712,6 +4712,7 @@ static int licm_one(struct ir_func *fn)
     compute_defs(fn, &d);
     char *in = xmalloc((size_t)nbb);
     char *inl_ins = xmalloc((size_t)fn->nins);
+    char *wrin = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1));
     char *inv = xmalloc((size_t)fn->nins);
     char *stored = xmalloc((size_t)(fn->nvars ? fn->nvars : 1));
     int *hoist = xmalloc((size_t)fn->nins * sizeof *hoist);
@@ -4781,6 +4782,26 @@ static int licm_one(struct ir_func *fn)
                     stored[fn->ins[n].dst] = 1;
             }
         }
+        /* Which temps the loop writes at all, by ANY definition. A temp
+         * written more than once -- an enclosing loop's counter, defined
+         * at its entry and again at its latch -- is still invariant here
+         * when none of those writes is inside this loop: the loop is
+         * entered only through its preheader, and nothing in it changes
+         * the value it found there. Refusing every multiply-defined
+         * operand refused the row address of every 2-D array walk:
+         * `ma[i][k]` recomputed i*48 + ma on each trip of the k loop. */
+        memset(wrin, 0, (size_t)(fn->nvregs ? fn->nvregs : 1));
+        for (int n = 0; n < fn->nins; n++) {
+            if (!inl_ins[n])
+                continue;
+            int t = def_target(&fn->ins[n]);
+            if (t >= 0 && t < fn->nvregs) wrin[t] = 1;
+            if (fn->ins[n].op == IR_LANDING && fn->ins[n].b >= 0 &&
+                fn->ins[n].b < fn->nvregs)
+                wrin[fn->ins[n].b] = 1;
+            if (fn->ins[n].op == IR_ASM)
+                memset(wrin, 1, (size_t)(fn->nvregs ? fn->nvregs : 1));
+        }
 
         /* The invariance fixpoint. */
         memset(inv, 0, (size_t)fn->nins);
@@ -4811,7 +4832,12 @@ static int licm_one(struct ir_func *fn)
                 for (int k = 0; k < o.n && all; k++) {
                     int v = o.v[k];
                     if (v < 0 || v >= fn->nvregs) { all = 0; break; }
-                    if (d.cnt[v] != 1) { all = 0; break; }
+                    if (d.cnt[v] != 1) {
+                        /* several writes: invariant iff none in the loop
+                         * (a local's slot has its own rules, above) */
+                        if (v < fn->nvars || wrin[v]) all = 0;
+                        continue;
+                    }
                     int def = d.ins[v];
                     if (def < 0)            /* a parameter, bound at entry */
                         continue;
@@ -4836,6 +4862,8 @@ static int licm_one(struct ir_func *fn)
             struct opnds o;
             value_opnds(&fn->ins[hoist[k]], &o);
             for (int q = 0; q < o.n && ok; q++) {
+                if (d.cnt[o.v[q]] != 1)
+                    continue;                /* written only outside the loop */
                 int def = d.ins[o.v[q]];
                 if (def < 0 || !inv[def])
                     continue;
@@ -4911,7 +4939,7 @@ static int licm_one(struct ir_func *fn)
         done = 1;
     }
 
-    free(hoist); free(stored); free(inv); free(inl_ins); free(in);
+    free(hoist); free(stored); free(inv); free(inl_ins); free(wrin); free(in);
     free_defs(&d); free(addr_taken);
     free(order); free(l2b);
     free_cfg(bb, nbb);
@@ -6595,6 +6623,105 @@ static int pass_vectorize(struct ir_func *fn)
  * see base + n*scale where the chain would have given base + (n-1)*scale.
  */
 
+/* Is `x` the induction variable scaled by a constant -- iv, a widening of
+ * it, a shift of that by a constant, or a multiply by one? Fills the
+ * scale. A multiply is how a ROW of a 2-D array is indexed (`m[k][j]`
+ * is base + k*48 + j*2), and the shift is how an element is. */
+static int scaled_iv(struct ir_func *fn, struct defs *d, int lo, int hi,
+                     int x, int iv, long *scale_out)
+{
+    long sc = 1;
+    if (x >= 0 && x < fn->nvregs && d->cnt[x] == 1) {
+        int xn = d->ins[x];
+        if (xn >= lo && xn < hi &&
+            (fn->ins[xn].op == IR_SHL || fn->ins[xn].op == IR_MUL)) {
+            struct ir_ins *s = &fn->ins[xn];
+            long c;
+            if (!const_b(fn, d, s, &c))
+                return 0;
+            if (s->op == IR_SHL) {
+                if (c < 0 || c > 30) return 0;
+                sc = 1L << c;
+            } else {
+                if (c <= 0 || c > (1L << 20)) return 0;
+                sc = c;
+            }
+            x = s->a;
+        }
+    }
+    if (x >= 0 && x < fn->nvregs && d->cnt[x] == 1) {
+        int xn = d->ins[x];
+        if (xn >= lo && xn < hi && fn->ins[xn].op == IR_EXT)
+            x = fn->ins[xn].a;
+    }
+    if (x != iv)
+        return 0;
+    *scale_out = sc;
+    return 1;
+}
+
+/* Defined once, and outside [lo, hi): a value the loop cannot change. */
+static int invariant_vreg(struct ir_func *fn, struct defs *d, int lo, int hi, int v)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    int bd = d->ins[v];
+    return !(bd >= lo && bd < hi);
+}
+static int is_const_vreg(struct ir_func *fn, struct defs *d, int v)
+{
+    return v >= 0 && v < fn->nvregs && d->cnt[v] == 1 && d->ins[v] >= 0 &&
+           fn->ins[d->ins[v]].op == IR_CONST;
+}
+
+/* Is `v` the value base + iv*scale (+ base2), every base invariant? The
+ * second base is the column of a row walk: (m + k*48) + j*2, where j*2
+ * is fixed while k moves. base2 is -1 when there is none. */
+static int linear_in_iv2(struct ir_func *fn, struct defs *d, int lo, int hi,
+                         int v, int iv, int *base_out, int *base2_out,
+                         long *scale_out)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    int an = d->ins[v];
+    if (an < lo || an >= hi || fn->ins[an].op != IR_ADD || fn->ins[an].imm_b)
+        return 0;
+    const struct ir_ins *add = &fn->ins[an];
+    for (int side = 0; side < 2; side++) {
+        int p = side ? add->b : add->a, q = side ? add->a : add->b;
+        if (!invariant_vreg(fn, d, lo, hi, p))
+            continue;
+        /* base + scaled iv -- where the base is something to walk from:
+         * a CONSTANT base is counter arithmetic, `i + 1` with its one
+         * hoisted into a vreg, and taking that for an address turned
+         * every counted loop's increment into a second induction
+         * variable, which the unroller then no longer recognised (the
+         * `unroll` kernel ran 1.6 times slower). */
+        if (!is_const_vreg(fn, d, p) &&
+            scaled_iv(fn, d, lo, hi, q, iv, scale_out)) {
+            *base_out = p; *base2_out = -1;
+            return 1;
+        }
+        /* (base + scaled iv) + base2, the inner sum computed only here */
+        if (q >= 0 && q < fn->nvregs && d->cnt[q] == 1) {
+            int qn = d->ins[q];
+            if (qn < lo || qn >= hi || fn->ins[qn].op != IR_ADD || fn->ins[qn].imm_b)
+                continue;
+            const struct ir_ins *in2 = &fn->ins[qn];
+            for (int s2 = 0; s2 < 2; s2++) {
+                int b1 = s2 ? in2->b : in2->a, r = s2 ? in2->a : in2->b;
+                if (invariant_vreg(fn, d, lo, hi, b1) &&
+                    !(is_const_vreg(fn, d, b1) && is_const_vreg(fn, d, p)) &&
+                    scaled_iv(fn, d, lo, hi, r, iv, scale_out)) {
+                    *base_out = b1; *base2_out = p;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 /* Is `v` the value base + iv*scale, with base invariant? Fills base and
  * scale. The chain is irgen's: an optional widening of the index, a
  * shift by the log of the element size, and an add. */
@@ -6755,20 +6882,47 @@ static int ivsr_one(struct ir_func *fn)
                    fn->ins[d.ins[i->a]].imm == 0) ||
                   (i->op == IR_CONST && i->imm == 0)))
                 init_zero = 0;
+            /* A copy of a temp written more than once -- value numbering
+             * shares one `const 0` between `s = 0` and `k = 0`, and s is
+             * then the loop's accumulator too. What the copy reads is the
+             * nearest write of that temp before it in the same block: if
+             * that is a zero, so is the counter. */
+            if (!init_zero && i->op == IR_MOV && i->a >= 0 &&
+                i->a < fn->nvregs && d.cnt[i->a] > 1) {
+                for (int m = n - 1; m >= 0; m--) {
+                    const struct ir_ins *w = &fn->ins[m];
+                    if (w->op == IR_LABEL || w->op == IR_ASM ||
+                        w->op == IR_LANDING)
+                        break;
+                    if (def_target(w) != i->a)
+                        continue;
+                    if (w->op == IR_CONST && w->imm == 0 && !w->flt)
+                        init_zero = 1;
+                    break;
+                }
+            }
         }
         if (!init_zero || ninit != 1)
             continue;
 
         /* every candidate: an address computed from the index, whose
          * value nothing outside the loop reads */
-        int cand[16], cbase[16], nc = 0;
+        int cand[16], cbase[16], cbase2[16], nc = 0;
         long cscale[16];
         for (int n = lo; n < hi && nc < 16; n++) {
             int t = def_target(&fn->ins[n]);
-            int base; long scale;
-            if (t < 0 || fn->ins[n].op != IR_ADD)
+            int base, base2 = -1; long scale;
+            /* At POINTER width, and only there: the walk is an add of that
+             * width, so it reproduces the chain exactly modulo 2^PTRW and
+             * nothing else. A 64-bit integer on a 32-bit target --
+             * `m[i][k] = i * 1000000000LL + k` -- is linear in k too, and
+             * walking it as a pointer kept its low word and dropped the
+             * high one. */
+            if (t < 0 || fn->ins[n].op != IR_ADD || fn->ins[n].w != PTRW ||
+                fn->ins[n].flt)
                 continue;
-            if (!linear_in_iv(fn, &d, lo, hi, t, iv, &base, &scale))
+            if (!linear_in_iv(fn, &d, lo, hi, t, iv, &base, &scale) &&
+                !linear_in_iv2(fn, &d, lo, hi, t, iv, &base, &base2, &scale))
                 continue;
             int escapes = 0;
             for (int m = 0; m < fn->nins && !escapes; m++)
@@ -6781,7 +6935,8 @@ static int ivsr_one(struct ir_func *fn)
                 if (cand[k] == t) dup = 1;
             if (dup)
                 continue;
-            cand[nc] = t; cbase[nc] = base; cscale[nc] = scale; nc++;
+            cand[nc] = t; cbase[nc] = base; cbase2[nc] = base2;
+            cscale[nc] = scale; nc++;
         }
         if (nc == 0)
             continue;
@@ -6842,16 +6997,27 @@ static int ivsr_one(struct ir_func *fn)
         }
 
         /* ---- rewrite: a pointer per candidate ---- */
-        int ptr[16], delta[16];
+        int ptr[16], delta[16], bsum[16];
         for (int k = 0; k < nc; k++) {
             ptr[k] = fn->nvregs++;
             delta[k] = fn->nvregs++;
+            bsum[k] = cbase2[k] >= 0 ? fn->nvregs++ : -1;
         }
         struct ibuf nb = { 0, 0, 0 };
         int *newpos = fn->var_scope_lo
             ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
         for (int n = 0; n < fn->nins; n++) {
             if (n == lo) {
+                /* a two-part base, summed once before the loop */
+                for (int k = 0; k < nc; k++) {
+                    if (bsum[k] < 0)
+                        continue;
+                    struct ir_ins *a = ib_push(&nb);
+                    a->op = IR_ADD; a->dst = bsum[k]; a->a = cbase[k];
+                    a->b = cbase2[k]; a->w = PTRW;
+                    a->line = fn->ins[d.ins[cand[k]]].line; a->synth = 1;
+                    cbase[k] = bsum[k];
+                }
                 for (int k = 0; k < nc; k++) {
                     struct ir_ins *c = ib_push(&nb);
                     c->op = IR_CONST; c->dst = delta[k];
