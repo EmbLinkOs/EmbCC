@@ -586,6 +586,62 @@ static int fold_cvt(const struct ir_ins *i, long A, long *out)
     }
 }
 
+/* The bits of vreg v that are zero in EVERY value it can take, at width
+ * w: a shift leaves the bits it shifted over, a multiply by a multiple
+ * of 2^k the low k, a mask the bits it clears, a zero-extension
+ * everything above the source, and an or/xor only what both sides
+ * leave. Bits above the width are reported zero, which is what the
+ * caller's own width mask discards. Conservative: a bit not proven
+ * zero is not claimed, and the walk stops a few definitions up. */
+static unsigned long known_zero(struct ir_func *fn, struct defs *d, int v,
+                                int w, int depth)
+{
+    unsigned long wm = w == 8 ? ~0UL : 0xffffffffUL, hi = ~wm;
+    if (v < 0 || depth > 4 || d->cnt[v] != 1 || d->ins[v] < 0)
+        return hi;
+    const struct ir_ins *i = &fn->ins[d->ins[v]];
+    if (i->flt || i->w == 16 || (i->w != w && i->op != IR_EXT))
+        return hi;
+    long B = 0;
+    int kb = i->imm_b ? (B = i->imm, 1) : get_const(fn, d, i->b, &B);
+    unsigned long ub = (unsigned long)B & wm;
+    switch (i->op) {
+    case IR_CONST:
+        return hi | (~(unsigned long)i->imm & wm);
+    case IR_MOV:
+        return hi | known_zero(fn, d, i->a, w, depth + 1);
+    case IR_SHL:
+        if (!kb || B < 0 || B >= 8 * w)
+            return hi;
+        return hi | ((known_zero(fn, d, i->a, w, depth + 1) << B) & wm) |
+               ((1UL << B) - 1);
+    case IR_SHR:
+        if (!kb || B < 0 || B >= 8 * w || i->sign)
+            return hi;                   /* an arithmetic shift copies the sign */
+        return hi | ((known_zero(fn, d, i->a, w, depth + 1) & wm) >> B) |
+               (~(wm >> B) & wm);
+    case IR_AND:
+        return hi | known_zero(fn, d, i->a, w, depth + 1) |
+               (kb ? (~ub & wm) : known_zero(fn, d, i->b, w, depth + 1));
+    case IR_OR: case IR_XOR:
+        return hi | (known_zero(fn, d, i->a, w, depth + 1) &
+                     (kb ? (~ub & wm) : known_zero(fn, d, i->b, w, depth + 1)));
+    case IR_MUL: {
+        if (!kb || ub == 0)
+            return hi;
+        int tz = 0;
+        while (!(ub & 1)) { ub >>= 1; tz++; }
+        return hi | ((1UL << tz) - 1);   /* a multiple of 2^tz ends in tz zeros */
+    }
+    case IR_EXT:
+        if (i->sign || i->size <= 0 || i->size >= w)
+            return hi;
+        return hi | (~((1UL << (8 * i->size)) - 1) & wm);
+    default:
+        return hi;
+    }
+}
+
 static int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -724,6 +780,21 @@ static int pass_fold(struct ir_func *fn)
                 changed = 1;
             }
             continue;
+        }
+        /* `(i * 2) & 1` is zero whatever i is: an AND whose constant
+         * reads only bits the other operand can never set (known_zero)
+         * is a constant zero, and the branch on it, and the arm behind
+         * the branch, go with it -- tests/bench's dead_branch spent
+         * eleven instructions an iteration on x86-64 where five do. Only
+         * the all-zero answer is taken; trimming a mask would change
+         * nothing that runs. */
+        if (i->op == IR_AND && kb && !ka && i->a >= 0) {
+            unsigned long wm = i->w == 8 ? ~0UL : 0xffffffffUL;
+            if (((unsigned long)B & wm & ~known_zero(fn, &d, i->a, i->w, 0)) == 0) {
+                to_const(i, 0);
+                changed = 1;
+                continue;
+            }
         }
         /* A COMPARISON OF A COMPARISON. `!!x` is `(x == 0) == 0`, and
          * `(a == b) && (b == c)` re-tests its own result twice more --
