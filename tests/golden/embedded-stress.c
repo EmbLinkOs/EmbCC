@@ -55,6 +55,8 @@ static long from_k(const int *a, int n, int k)
      * once took it for the OUTER loop's, and walked a[j] instead of a[i] */
     long s = 0;
     for (int j = 0; j < n; j++) for (int i = k; i < 16; i++) s += a[i];
+    return s;
+}
 static long moved(const int *p, int n)
 {
     /* an address made from p, read after p has moved: the offset fold
