@@ -10352,6 +10352,199 @@ static int pass_rangecheck(struct ir_func *fn)
     return changed;
 }
 
+/* ==== a join's copies, coalesced ==========================================
+ *
+ * Leaving SSA puts a copy on every edge into a join, and nested choices
+ * make chains of them: `st = c ? (d ? 1 : 2) : 3` is
+ *
+ *      %197 = const 1 ... jmp L21      L21: %198 = mov %197
+ *      %198 = const 2 ... jmp L19      L19: %199 = mov %198
+ *                                      L14: %188 = mov %199; jmp L5
+ *
+ * Every backend's allocator gives the four names one register and the
+ * copies vanish -- leaving L21, L19 and L14 as blocks that do nothing but
+ * fall or jump to the next, so each arm pays a jump to a jump. CoreMark's
+ * state machine took one per character. Done here, in the IR, the copies
+ * go and the blocks are empty before cfgclean threads the jumps.
+ *
+ * `%b = mov %a` takes %a's name away -- every definition of %a writes %b
+ * instead, and the copy goes -- when %a is a temp the copy is the one
+ * reader of, of the same width and class as %b, and the two never hold
+ * different live values at once: %b is dead right after each definition
+ * of %a (its old value is not wanted), and %a is dead right after each
+ * other definition of %b (no %a value is in flight to the copy when %b
+ * is written). That is the allocator's own interference test, made here
+ * where the CFG still knows which blocks become empty. Not when a
+ * definition of %a reads %b: that is an update in place, which needs
+ * nothing from here. Liveness is per block, updated by union as names
+ * merge; each question about one point is a walk to the end of its
+ * block. Functions with inline asm (whose outputs are not definitions to
+ * the rest of this file) or exception edges are left alone. */
+static int jc_live_after(struct ir_func *fn, const char *gone, int n, int end,
+                         int v, const unsigned long *lout)
+{
+    for (int k = n + 1; k < end; k++) {
+        if (gone[k])
+            continue;
+        if (ins_reads(&fn->ins[k], v))
+            return 1;
+        if (def_target(&fn->ins[k]) == v)
+            return 0;
+    }
+    return (lout[v >> 6] & (1UL << (v & 63))) != 0;
+}
+struct jc_cnt { int *use; int nv; };
+static void jc_cnt_cb(int *p, void *ctx)
+{
+    struct jc_cnt *c = ctx;
+    if (*p >= 0 && *p < c->nv) c->use[*p]++;
+}
+static int pass_joincopies(struct ir_func *fn)
+{
+    if (fn->nins == 0 || fn->nvregs == 0 || fn->neh)
+        return 0;
+    int nv = fn->nvregs, nins = fn->nins;
+    for (int n = 0; n < nins; n++)
+        if (fn->ins[n].op == IR_ASM)
+            return 0;
+    int *nuse = xcalloc((size_t)nv, sizeof *nuse);
+    int *vw = xcalloc((size_t)nv, sizeof *vw);
+    char *vflt = xcalloc((size_t)nv, 1), *mixed = xcalloc((size_t)nv, 1);
+    for (int n = 0; n < nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        struct jc_cnt c = { nuse, nv };
+        if (i->op != IR_LDVAR && i->op != IR_ADDR)
+            each_read(i, jc_cnt_cb, &c);
+        int t = i->op == IR_STVAR ? -1 : def_target(i);
+        if (t < 0 || t >= nv)
+            continue;
+        int w = i->op == IR_CALL ? (i->w ? i->w : 8) : i->w;
+        if (!vw[t]) { vw[t] = w; vflt[t] = (char)i->flt; }
+        else if (vw[t] != w || vflt[t] != (char)i->flt) mixed[t] = 1;
+    }
+    int any = 0;
+    for (int n = 0; n < nins && !any; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_MOV && i->a >= fn->nvars && i->a < nv &&
+            i->dst >= fn->nvars && i->dst < nv && i->a != i->dst &&
+            nuse[i->a] == 1)
+            any = 1;
+    }
+    int changed = 0, nbb, *l2b;
+    struct bb *bb = NULL;
+    if (!any)
+        goto out0;
+    bb = build_cfg(fn, &nbb, &l2b);
+    int words = (nv + 63) / 64;
+    int *blk = xmalloc((size_t)nins * sizeof *blk);
+    for (int n = 0; n < nins; n++) blk[n] = -1;
+    for (int b = 0; b < nbb; b++)
+        for (int n = bb[b].start; n < bb[b].end; n++) blk[n] = b;
+    unsigned long *use = xcalloc((size_t)nbb * words, sizeof *use);
+    unsigned long *def = xcalloc((size_t)nbb * words, sizeof *def);
+    unsigned long *lin = xcalloc((size_t)nbb * words, sizeof *lin);
+    unsigned long *lout = xcalloc((size_t)nbb * words, sizeof *lout);
+    for (int b = 0; b < nbb; b++) {
+        struct splituse su = { use + (size_t)b * words, def + (size_t)b * words, nv };
+        for (int n = bb[b].start; n < bb[b].end; n++) {
+            if (fn->ins[n].op != IR_LDVAR && fn->ins[n].op != IR_ADDR)
+                each_read(&fn->ins[n], split_use_cb, &su);
+            int t = def_target(&fn->ins[n]);
+            if (t >= 0 && t < nv) su.def[t >> 6] |= 1UL << (t & 63);
+        }
+    }
+    for (int again = 1; again; ) {
+        again = 0;
+        for (int b = nbb - 1; b >= 0; b--) {
+            unsigned long *o = lout + (size_t)b * words;
+            for (int w = 0; w < words; w++) o[w] = 0;
+            for (int k = 0; k < bb[b].nsucc; k++) {
+                unsigned long *si = lin + (size_t)bb[b].succ[k] * words;
+                for (int w = 0; w < words; w++) o[w] |= si[w];
+            }
+            unsigned long *ii = lin + (size_t)b * words;
+            for (int w = 0; w < words; w++) {
+                unsigned long nvl = use[(size_t)b * words + w] |
+                                    (o[w] & ~def[(size_t)b * words + w]);
+                if (nvl != ii[w]) { ii[w] = nvl; again = 1; }
+            }
+        }
+    }
+    char *gone = xcalloc((size_t)nins, 1);
+    for (int m = 0; m < nins; m++) {
+        struct ir_ins *i = &fn->ins[m];
+        if (gone[m] || i->op != IR_MOV || blk[m] < 0)
+            continue;
+        int a = i->a, b = i->dst;
+        if (a < fn->nvars || a >= nv || b < fn->nvars || b >= nv || a == b ||
+            nuse[a] != 1 || mixed[a] || mixed[b] || vw[a] != vw[b] ||
+            vw[a] != i->w || vflt[a] != vflt[b] || vflt[a] != (char)i->flt)
+            continue;
+        int ok = 1, nd = 0;
+        for (int d = 0; d < nins && ok; d++) {
+            if (gone[d] || d == m || blk[d] < 0)
+                continue;
+            int t = def_target(&fn->ins[d]);
+            if (t == a) {
+                nd++;
+                /* `%a = add %b, 1; %b = mov %a` is a loop's own update:
+                 * every allocator already gives the two one register,
+                 * and writing it in place only moves its heuristics --
+                 * RV32's spilled a pointer in the next loop of the
+                 * workload's `text`, 5% more instructions. */
+                if (ins_reads(&fn->ins[d], b))
+                    ok = 0;
+                if (jc_live_after(fn, gone, d, bb[blk[d]].end, b,
+                                  lout + (size_t)blk[d] * words))
+                    ok = 0;
+            } else if (t == b) {
+                if (jc_live_after(fn, gone, d, bb[blk[d]].end, a,
+                                  lout + (size_t)blk[d] * words))
+                    ok = 0;
+            }
+        }
+        if (!ok || nd == 0)
+            continue;
+        for (int d = 0; d < nins; d++)
+            if (!gone[d] && d != m && def_target(&fn->ins[d]) == a &&
+                fn->ins[d].op != IR_STVAR)
+                fn->ins[d].dst = b;
+        gone[m] = 1;
+        nuse[a] = 0;
+        for (int bl = 0; bl < nbb; bl++) {
+            unsigned long *li = lin + (size_t)bl * words, *lo = lout + (size_t)bl * words;
+            if (li[a >> 6] & (1UL << (a & 63))) li[b >> 6] |= 1UL << (b & 63);
+            if (lo[a >> 6] & (1UL << (a & 63))) lo[b >> 6] |= 1UL << (b & 63);
+            li[a >> 6] &= ~(1UL << (a & 63));
+            lo[a >> 6] &= ~(1UL << (a & 63));
+        }
+        changed = 1;
+    }
+    if (changed) {
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(nins + 1) * sizeof *newpos) : NULL;
+        for (int n = 0; n < nins; n++) {
+            if (newpos) newpos[n] = nb.n;
+            if (!gone[n])
+                *ib_push(&nb) = fn->ins[n];
+        }
+        if (newpos) {
+            newpos[nins] = nb.n;
+            remap_scopes(fn, newpos, nins);
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    }
+    free(gone); free(use); free(def); free(lin); free(lout); free(blk);
+    free(l2b);
+    free_cfg(bb, nbb);
+out0:
+    free(nuse); free(vw); free(vflt); free(mixed);
+    return changed;
+}
+
 /* ==== an address next to its access ======================================
  *
  * Every backend fuses an address computation into the access it feeds --
@@ -10780,6 +10973,10 @@ static void opt_func(struct ir_func *fn)
      * finished first. Inside the round it also never settled -- folding
      * and value numbering kept producing literals for it to move and it
      * kept reporting a change, which put format.c at six minutes. */
+    /* The joins' copies, before anything decides where literals go: a
+     * constant written straight into the merged name is where it was. */
+    if (cfg_ok && pass_joincopies(fn) && g_cfgclean)
+        pass_cfgclean(fn);
     pass_sinkconst(fn);
     /* Last: the copies it adds must not be propagated away again.
      * EMBCC_NO_SPLITLOOPS=1 turns it off, for bisecting a difference. */

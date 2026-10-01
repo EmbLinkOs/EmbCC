@@ -1655,9 +1655,21 @@ static struct a64_afold a64_afold_build(struct ir_func *fn, const long *sd)
     int *root = xmalloc((size_t)nv * sizeof *root);
     long *disp = xmalloc((size_t)nv * sizeof *disp);
     for (int v = 0; v < nv; v++) root[v] = -1;
+    /* A temp folded into its accesses stands for ONE frame address, so it
+     * must have one definition. A name written on two paths -- `&s1` on
+     * one, `&s2` on the other, once a join's copies are coalesced -- took
+     * whichever definition came last, and `(k ? s1 : s2).a` read s1
+     * either way (tests/exec/struct-rvalue-member.c at -O1). */
+    int *ndef = xcalloc((size_t)nv, sizeof *ndef);
+    for (int n = 0; n < fn->nins; n++) {
+        int d = ra_ins_def(&fn->ins[n]);
+        if (d >= 0 && d < nv) ndef[d]++;
+    }
     int any = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        if (i->dst >= 0 && i->dst < nv && ndef[i->dst] != 1)
+            continue;
         if (i->op == IR_ADDR && i->dst >= 0 && i->dst < nv &&
             i->a >= 0 && i->a < fn->nvars) {
             root[i->dst] = i->dst; disp[i->dst] = sd[i->a];
@@ -1669,6 +1681,7 @@ static struct a64_afold a64_afold_build(struct ir_func *fn, const long *sd)
             isb[i->dst] = 1;
         }
     }
+    free(ndef);
     if (!any) { free(isb); free(root); free(disp); return r; }
     char *bad = xcalloc((size_t)nv, 1);
 #define A64_UNFOLD(v) do { int _v=(v); if (_v>=0 && _v<nv && isb[_v]) \
