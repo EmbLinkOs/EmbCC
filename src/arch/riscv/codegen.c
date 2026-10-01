@@ -47,6 +47,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+struct rv_fn;
+static void copy_block(struct rv_fn *F, int copy, long size, int step);
+
 /* The scratch registers. Four named ones, because a 64-bit value at RV32
  * is a pair and a binary operation on two of them needs four; t5 and t6
  * stay spare for the few places that want a fifth. */
@@ -2493,30 +2496,12 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         return;
 
-    case IR_MEMCPY: case IR_MEMZERO: {
-        /* Straight-line, unrolled to registers where the size allows.
-         * Small and obviously right; a tuned copy is a later question. */
-        long size = i->size, k;
-        int step = F->w;
+    case IR_MEMCPY: case IR_MEMZERO:
         rd(F, i->a, ADDR);
-        if (i->op == IR_MEMCPY) {
+        if (i->op == IR_MEMCPY)
             rd(F, i->b, TMP);
-            for (k = 0; k + step <= size; k += step) {
-                rv_load(t, SCR, TMP, (int)k, step, 0, F->xlen);
-                rv_store(t, SCR, ADDR, (int)k, step, F->xlen);
-            }
-            for (; k < size; k++) {
-                rv_load(t, SCR, TMP, (int)k, 1, 0, F->xlen);
-                rv_store(t, SCR, ADDR, (int)k, 1, F->xlen);
-            }
-        } else {
-            for (k = 0; k + step <= size; k += step)
-                rv_store(t, RV_ZERO, ADDR, (int)k, step, F->xlen);
-            for (; k < size; k++)
-                rv_store(t, RV_ZERO, ADDR, (int)k, 1, F->xlen);
-        }
+        copy_block(F, i->op == IR_MEMCPY, i->size, F->w);
         return;
-    }
 
     case IR_CALL:
         gen_call(F, n);
@@ -2538,17 +2523,9 @@ static void gen_ins(struct rv_fn *F, int n)
                     int al = fn->ret_abi.align;
                     int step = al >= F->w ? F->w : al >= 4 ? 4
                              : al >= 2 ? 2 : 1;
-                    long k = 0;
                     rd(F, i->a, TMP);
                     ld_sp(F, ADDR, F->sret_slot, F->w, 1);
-                    for (; k + step <= size; k += step) {
-                        rv_load(t, SCR, TMP, (int)k, step, 0, F->xlen);
-                        rv_store(t, SCR, ADDR, (int)k, step, F->xlen);
-                    }
-                    for (; k < size; k++) {
-                        rv_load(t, SCR, TMP, (int)k, 1, 0, F->xlen);
-                        rv_store(t, SCR, ADDR, (int)k, 1, F->xlen);
-                    }
+                    copy_block(F, 1, size, step);
                     ld_sp(F, RV_A0, F->sret_slot, F->w, 1);
                 } else {
                     /* Small enough for a0:a1, PACKED -- the object's
@@ -2933,6 +2910,46 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     default:
         rv_refuse(F, i, "this operation");
+    }
+}
+
+/* Copy `size` bytes from [TMP] to [ADDR] (copy) or zero them (!copy), in
+ * accesses of `step` bytes and a byte tail. Straight-line while every
+ * offset fits a load's or store's 12-bit immediate; past that, a loop
+ * that walks both pointers with the end in SCR2 -- `long long a[300] =
+ * {0}` and a 2403-byte struct returned by value were internal errors at
+ * every -O level. TMP and ADDR are scratch and may be moved. */
+static void copy_block(struct rv_fn *F, int copy, long size, int step)
+{
+    struct code *t = F->t;
+    long k;
+    if (size <= 2040) {
+        for (k = 0; k + step <= size; k += step) {
+            if (copy) rv_load(t, SCR, TMP, (int)k, step, 0, F->xlen);
+            rv_store(t, copy ? SCR : RV_ZERO, ADDR, (int)k, step, F->xlen);
+        }
+        for (; k < size; k++) {
+            if (copy) rv_load(t, SCR, TMP, (int)k, 1, 0, F->xlen);
+            rv_store(t, copy ? SCR : RV_ZERO, ADDR, (int)k, 1, F->xlen);
+        }
+        return;
+    }
+    long body = size / step * step;
+    rv_li(t, SCR2, body, F->xlen);
+    rv_alu(t, RV_ADD, SCR2, SCR2, ADDR, 0);
+    int top = t->len;
+    if (copy) {
+        rv_load(t, SCR, TMP, 0, step, 0, F->xlen);
+        rv_store(t, SCR, ADDR, 0, step, F->xlen);
+        rv_alu_imm(t, RV_ADD, TMP, TMP, step, 0);
+    } else {
+        rv_store(t, RV_ZERO, ADDR, 0, step, F->xlen);
+    }
+    rv_alu_imm(t, RV_ADD, ADDR, ADDR, step, 0);
+    rv_patch_b(t, rv_b_placeholder(t, RV_BNE, ADDR, SCR2), top);
+    for (k = 0; k < size - body; k++) {
+        if (copy) rv_load(t, SCR, TMP, (int)k, 1, 0, F->xlen);
+        rv_store(t, copy ? SCR : RV_ZERO, ADDR, (int)k, 1, F->xlen);
     }
 }
 

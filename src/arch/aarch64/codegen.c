@@ -1140,11 +1140,69 @@ static int q_off_ok(long off)
  * -mgeneral-regs-only there is no q register to use -- a kernel built
  * that way must not touch the FPU at all -- so the eightbyte loop
  * stays as the fallback. */
+/* ---- a copy past the immediates' reach ----
+ *
+ * The straight-line forms address every piece from the two bases, and a
+ * byte at offset 4096 or beyond has no immediate form: ldst() then builds
+ * the address in A64_SCR -- which IR_MEMCPY had just loaded the SOURCE
+ * pointer into. A 32003-byte struct assignment computed 2*offset for its
+ * tail and the program died. Past 1 KiB the copy is a loop instead:
+ * x16/x17 (IP0/IP1, reserved only ACROSS a call, and a copy makes none)
+ * walk the two pointers, so whatever registers the caller passed are left
+ * as they were; the end is in A64_ACC and the tail goes at small offsets
+ * from where the walk stopped. */
+#define A64_IP0 16
+#define A64_IP1 17
+static void copy_loop(struct code *t, int dst, int src, int size)
+{
+    int zero = src < 0;
+    int step = g_no_fp || zero ? 8 : 16;
+    int body = size / step * step;
+    if (dst == A64_ACC || src == A64_ACC)
+        internal_error("aarch64: a block copy through the accumulator");
+    a64_mov_reg(t, A64_IP0, dst, 8);
+    if (!zero)
+        a64_mov_reg(t, A64_IP1, src, 8);
+    a64_mov_imm(t, A64_ACC, body, 8);
+    a64_alu_reg(t, '+', A64_ACC, A64_ACC, A64_IP0, 8);
+    int top = t->len;
+    if (zero) {
+        a64_str(t, A64_ZR, A64_IP0, 0, 8);
+    } else if (step == 16) {
+        a64_ldr_q(t, A64_FACC, A64_IP1, 0);
+        a64_str_q(t, A64_FACC, A64_IP0, 0);
+    } else {
+        a64_ldr(t, A64_TMP, A64_IP1, 0, 8, 0, 8);
+        a64_str(t, A64_TMP, A64_IP0, 0, 8);
+    }
+    if (!zero && !a64_add_imm(t, A64_IP1, A64_IP1, step, 8))
+        internal_error("aarch64: copy step");
+    if (!a64_add_imm(t, A64_IP0, A64_IP0, step, 8))
+        internal_error("aarch64: copy step");
+    a64_cmp_reg(t, A64_IP0, A64_ACC, 8);
+    a64_patch_b19(t, a64_bcond(t, A64_NE), top);
+    for (int off = 0; off < size - body; ) {
+        int rest = size - body - off;
+        int chunk = rest >= 8 ? 8 : rest >= 4 ? 4 : rest >= 2 ? 2 : 1;
+        if (zero) {
+            a64_str(t, A64_ZR, A64_IP0, off, chunk);
+        } else {
+            a64_ldr(t, A64_ACC, A64_IP1, off, chunk, 0, 8);
+            a64_str(t, A64_ACC, A64_IP0, off, chunk);
+        }
+        off += chunk;
+    }
+}
+
 static void emit_copy(struct code *t, int dst, int src, int size)
 {
     int off = 0;
     if (dst == src)
         return;                  /* the two ends share a slot */
+    if (size > 1024) {
+        copy_loop(t, dst, src, size);
+        return;
+    }
     if (!g_no_fp)
         for (; size - off >= 16 && q_off_ok(off); off += 16) {
             a64_ldr_q(t, A64_FACC, src, off);
@@ -1162,6 +1220,10 @@ static void emit_copy(struct code *t, int dst, int src, int size)
 static void emit_zero(struct code *t, int dst, int size)
 {
     int off = 0;
+    if (size > 1024) {
+        copy_loop(t, dst, -1, size);
+        return;
+    }
     while (off < size) {
         int chunk = size - off >= 8 ? 8 : size - off >= 4 ? 4
                   : size - off >= 2 ? 2 : 1;

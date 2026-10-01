@@ -100,6 +100,38 @@ again:
     default: return 100;
     }
 }
+#if defined(__clang__)
+/* The REFERENCE build's large struct copies call the C library's block
+ * routines, and these boards have none: byte loops, through volatile so
+ * clang cannot recognise them as the very calls they stand in for. */
+typedef __SIZE_TYPE__ ref_size_t;
+void *memcpy(void *d, const void *s, ref_size_t n)
+{ volatile unsigned char *p = d; const volatile unsigned char *q = s; while (n--) *p++ = *q++; return d; }
+void *memset(void *d, int c, ref_size_t n)
+{ volatile unsigned char *p = d; while (n--) *p++ = (unsigned char)c; return d; }
+void __aeabi_memcpy(void *d, const void *s, ref_size_t n) { memcpy(d, s, n); }
+void __aeabi_memcpy4(void *d, const void *s, ref_size_t n) { memcpy(d, s, n); }
+void __aeabi_memcpy8(void *d, const void *s, ref_size_t n) { memcpy(d, s, n); }
+void __aeabi_memclr(void *d, ref_size_t n) { memset(d, 0, n); }
+void __aeabi_memclr4(void *d, ref_size_t n) { memset(d, 0, n); }
+void __aeabi_memclr8(void *d, ref_size_t n) { memset(d, 0, n); }
+#endif
+struct blob { unsigned char b[4999]; };   /* past every immediate: 4095 Thumb, 2047 RISC-V */
+static struct blob b1, b2;
+static long big_copy(int k)
+{
+    /* a struct this large is copied and zeroed by a LOOP: the straight-
+     * line form had no immediate for its far bytes, and Thumb dropped
+     * those accesses while RISC-V refused to compile */
+    for (int i = 0; i < 4999; i++) b1.b[i] = (unsigned char)(i * 7 + k);
+    b2 = b1;
+    long s = 0;
+    for (int i = 0; i < 4999; i += 97) s += b2.b[i];
+    s += b2.b[4998] * 1000L;
+    b2 = (struct blob){ { 0 } };
+    for (int i = 0; i < 4999; i++) s += b2.b[i];
+    return s;
+}
 static long scaled(int i, int j)
 {
     return sh[(i * 5) & 15] + sc[(j * 3) & 15] + uc[(i + j) & 15] + sh[(j * 7) & 15] * sc[i & 15];
@@ -179,6 +211,7 @@ int main(void)
     { long t = 0;
       for (int v = -1; v <= 5; v++) t = t * 7 + dispatch2(v);
       putn(t); nl(); }
+    putn(big_copy(3)); putn(big_copy(200)); nl();
 
     puts_("==END==\n");
     return 0;

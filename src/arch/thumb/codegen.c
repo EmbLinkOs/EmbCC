@@ -64,6 +64,9 @@ static int t_scr(int r) { g_t_scr_used |= 1u << r; return r; }
 #undef T_TMP
 #define T_TMP  t_scr(11)
 #define T_SCR_ALL ((1u << 9) | (1u << 10) | (1u << 11))
+static void ldst_must(struct code *c, int rt, int rn, long off, int size,
+                      int sign, int store);
+static void t_copy_block(struct code *t, int dst, int src, int copy, long size);
 /* The numbers, for COMPARING a register against one: evaluating the
  * marker would record a use that is not one. */
 #define R_SCR  9
@@ -1153,7 +1156,7 @@ static void wr(struct t_fn *F, int v, int reg)
         int a = reg == R_ADDR ? T_TMP : T_ADDR;
         t_mov_imm(F->t, a, F->slot[v], 0);
         t_alu_reg(F->t, T_OP_ADD, a, F->fb, a, 0);
-        t_ldst_imm(F->t, reg, a, 0, 4, 0, 1);
+        ldst_must(F->t, reg, a, 0, 4, 0, 1);
     }
 }
 
@@ -1195,8 +1198,8 @@ static void rd64(struct t_fn *F, int v, int lo, int hi)
     if (!t_ldst_imm(F->t, lo, F->fb, F->slot[v], 4, 0, 0) ||
         !t_ldst_imm(F->t, hi, F->fb, F->slot[v] + 4, 4, 0, 0)) {
         fb_addr(F, hi, F->slot[v]);
-        t_ldst_imm(F->t, lo, hi, 0, 4, 0, 0);
-        t_ldst_imm(F->t, hi, hi, 4, 4, 0, 0);
+        ldst_must(F->t, lo, hi, 0, 4, 0, 0);
+        ldst_must(F->t, hi, hi, 4, 4, 0, 0);
     }
 }
 
@@ -1213,8 +1216,8 @@ static void wr64(struct t_fn *F, int v, int lo, int hi)
         !t_ldst_imm(F->t, hi, F->fb, F->slot[v] + 4, 4, 0, 1)) {
         int a = (lo == R_SCR || hi == R_SCR) ? T_ADDR : T_SCR;
         fb_addr(F, a, F->slot[v]);
-        t_ldst_imm(F->t, lo, a, 0, 4, 0, 1);
-        t_ldst_imm(F->t, hi, a, 4, 4, 0, 1);
+        ldst_must(F->t, lo, a, 0, 4, 0, 1);
+        ldst_must(F->t, hi, a, 4, 4, 0, 1);
     }
 }
 
@@ -1266,6 +1269,61 @@ static void fb_addr(struct t_fn *F, int rd, long off)
     }
     t_mov_imm(F->t, rd, off, 0);
     t_alu_reg(F->t, T_OP_ADD, rd, F->fb, rd, 0);
+}
+
+/* ---- accesses that must be encodable ----------------------------------
+ *
+ * t_ldst_imm answers 0 when the offset is out of its forms' reach, and
+ * that answer was ignored at forty-eight call sites -- so an access that
+ * did not fit was not emitted at all. An 8000-byte struct assignment
+ * copied its first 4096 bytes and returned. Every site that does not
+ * handle the failure itself now goes through this, which refuses the
+ * function by name instead (THE RULE); the copies that can be large are
+ * loops (t_copy_block) and never get here with a big offset. */
+static void ldst_must(struct code *c, int rt, int rn, long off, int size,
+                      int sign, int store)
+{
+    if (!t_ldst_imm(c, rt, rn, off, size, sign, store))
+        internal_error("thumb: a %d-byte %s at offset %ld from r%d is out of "
+                       "reach", size, store ? "store" : "load", off, rn);
+}
+
+/* Copy `size` bytes from [src] to [dst] (copy) or zero them (!copy).
+ * Straight-line while every offset fits an immediate; past that a loop
+ * that walks both pointers, with the end in r9 -- so src and dst are
+ * scratch and are moved. T_ACC carries the data. */
+static void t_copy_block(struct code *t, int dst, int src, int copy, long size)
+{
+    long k;
+    if (!copy)
+        t_mov_imm(t, T_ACC, 0, 0);
+    if (size <= 4092) {
+        for (k = 0; k + 4 <= size; k += 4) {
+            if (copy) ldst_must(t, T_ACC, src, k, 4, 0, 0);
+            ldst_must(t, T_ACC, dst, k, 4, 0, 1);
+        }
+        for (; k < size; k++) {
+            if (copy) ldst_must(t, T_ACC, src, k, 1, 0, 0);
+            ldst_must(t, T_ACC, dst, k, 1, 0, 1);
+        }
+        return;
+    }
+    long body = size & ~3L;
+    t_mov_imm(t, T_SCR, body, 0);
+    t_alu_reg(t, T_OP_ADD, T_SCR, T_SCR, dst, 0);
+    int top = t->len;
+    if (copy) {
+        ldst_must(t, T_ACC, src, 0, 4, 0, 0);
+        t_addw(t, src, src, 4);
+    }
+    ldst_must(t, T_ACC, dst, 0, 4, 0, 1);
+    t_addw(t, dst, dst, 4);
+    t_cmp_reg(t, dst, T_SCR);
+    t_patch_bcond(t, t_bcond(t, T_NE), top);
+    for (k = 0; k < size - body; k++) {
+        if (copy) ldst_must(t, T_ACC, src, k, 1, 0, 0);
+        ldst_must(t, T_ACC, dst, k, 1, 0, 1);
+    }
 }
 
 /* ---- branches ------------------------------------------------------- */
@@ -1871,7 +1929,7 @@ static int gen_ins64(struct t_fn *F, int n)
             } else if (!t_ldst_imm(t, A_LO, F->fb, slot_of(F, i->a), i->size,
                                    i->sign, 0)) {
                 fb_addr(F, B_LO, F->slot[i->a]);
-                t_ldst_imm(t, A_LO, B_LO, 0, i->size, i->sign, 0);
+                ldst_must(t, A_LO, B_LO, 0, i->size, i->sign, 0);
             }
             if (i->sign) t_shift_imm(t, T_SH_ASR, A_HI, A_LO, 31, 0);
             else         t_mov_imm(t, A_HI, 0, 0);
@@ -1888,17 +1946,17 @@ static int gen_ins64(struct t_fn *F, int n)
         } else {                       /* a truncating store */
             if (!t_ldst_imm(t, A_LO, F->fb, slot_of(F, i->dst), i->size, 0, 1)) {
                 fb_addr(F, B_LO, F->slot[i->dst]);
-                t_ldst_imm(t, A_LO, B_LO, 0, i->size, 0, 1);
+                ldst_must(t, A_LO, B_LO, 0, i->size, 0, 1);
             }
         }
         return 1;
     case IR_LOAD:
         rd(F, i->a, B_LO);
         if (i->size == 8) {
-            t_ldst_imm(t, A_LO, B_LO, 0, 4, 0, 0);
-            t_ldst_imm(t, A_HI, B_LO, 4, 4, 0, 0);
+            ldst_must(t, A_LO, B_LO, 0, 4, 0, 0);
+            ldst_must(t, A_HI, B_LO, 4, 4, 0, 0);
         } else {
-            t_ldst_imm(t, A_LO, B_LO, 0, i->size, i->sign, 0);
+            ldst_must(t, A_LO, B_LO, 0, i->size, i->sign, 0);
             if (i->sign) t_shift_imm(t, T_SH_ASR, A_HI, A_LO, 31, 0);
             else         t_mov_imm(t, A_HI, 0, 0);
         }
@@ -1907,9 +1965,9 @@ static int gen_ins64(struct t_fn *F, int n)
     case IR_STORE:
         rd(F, i->a, B_LO);
         rd64(F, i->b, A_LO, A_HI);
-        t_ldst_imm(t, A_LO, B_LO, 0, i->size == 8 ? 4 : i->size, 0, 1);
+        ldst_must(t, A_LO, B_LO, 0, i->size == 8 ? 4 : i->size, 0, 1);
         if (i->size == 8)
-            t_ldst_imm(t, A_HI, B_LO, 4, 4, 0, 1);
+            ldst_must(t, A_HI, B_LO, 4, 4, 0, 1);
         return 1;
 
     case IR_SELECT:
@@ -2264,7 +2322,7 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
             t_ext(t, T_TMP, rdr(F, i->b, T_TMP), sz, 0);
         } else {
             int p = rdr(F, i->b, T_TMP);
-            t_ldst_imm(t, T_TMP, p, 0, sz, 0, 0);    /* zero-extended */
+            ldst_must(t, T_TMP, p, 0, sz, 0, 0);    /* zero-extended */
         }
         des = rdr(F, i->c, T_SCR);
         top = t->len;
@@ -2285,7 +2343,7 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
             /* *b = the value seen; the result is whether it matched --
              * set_cc's IT block when it has a low register. */
             int p = rdr(F, i->b, T_SCR);
-            t_ldst_imm(t, T_ACC, p, 0, sz, 0, 1);
+            ldst_must(t, T_ACC, p, 0, sz, 0, 1);
             t_barrier(t, T_BAR_DMB);
             t_cmp_reg(t, T_ACC, exp);
             set_cc(F, i->dst, T_EQ);
@@ -2901,7 +2959,7 @@ static void gen_ins(struct t_fn *F, int n)
         } else if (!t_ldst_imm(t, d, F->fb, slot_of(F, i->a), i->size,
                                i->sign, 0)) {
             fb_addr(F, T_ADDR, F->slot[i->a]);
-            t_ldst_imm(t, d, T_ADDR, 0, i->size, i->sign, 0);
+            ldst_must(t, d, T_ADDR, 0, i->size, i->sign, 0);
         }
         wrote(F, i->dst, d);
         return;
@@ -2930,7 +2988,7 @@ static void gen_ins(struct t_fn *F, int n)
             }
         } else if (!t_ldst_imm(t, src, F->fb, slot_of(F, i->dst), i->size, 0, 1)) {
             fb_addr(F, T_ADDR, F->slot[i->dst]);
-            t_ldst_imm(t, src, T_ADDR, 0, i->size, 0, 1);
+            ldst_must(t, src, T_ADDR, 0, i->size, 0, 1);
         }
         return;
     }
@@ -2957,7 +3015,7 @@ static void gen_ins(struct t_fn *F, int n)
         if (i->w > 4) t_refuse(fn, i, "a 64-bit load");
         if (!t_ldst_imm(t, d, an, off, i->size, i->sign, 0)) {
             t_addw(t, T_ADDR, an, off);
-            t_ldst_imm(t, d, T_ADDR, 0, i->size, i->sign, 0);
+            ldst_must(t, d, T_ADDR, 0, i->size, i->sign, 0);
         }
         wrote(F, i->dst, d);
         return;
@@ -2979,7 +3037,7 @@ static void gen_ins(struct t_fn *F, int n)
         vr = rdr(F, i->b, an == T_ACC ? T_TMP : T_ACC);
         if (!t_ldst_imm(t, vr, an, i->memoff, i->size, 0, 1)) {
             t_addw(t, T_ADDR, an, i->memoff);
-            t_ldst_imm(t, vr, T_ADDR, 0, i->size, 0, 1);
+            ldst_must(t, vr, T_ADDR, 0, i->size, 0, 1);
         }
         return;
     }
@@ -3022,30 +3080,13 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
 
-    case IR_MEMCPY: case IR_MEMZERO: {
-        /* A byte loop, unrolled to words where the size allows. Small
-         * and obviously right; a tuned copy is a later question. */
-        long size = i->size, k;
+    case IR_MEMCPY: case IR_MEMZERO:
+        /* A word loop, unrolled while the offsets fit (t_copy_block). */
         rd(F, i->a, T_ADDR);
-        if (i->op == IR_MEMCPY) {
+        if (i->op == IR_MEMCPY)
             rd(F, i->b, T_TMP);
-            for (k = 0; k + 4 <= size; k += 4) {
-                t_ldst_imm(t, T_ACC, T_TMP, k, 4, 0, 0);
-                t_ldst_imm(t, T_ACC, T_ADDR, k, 4, 0, 1);
-            }
-            for (; k < size; k++) {
-                t_ldst_imm(t, T_ACC, T_TMP, k, 1, 0, 0);
-                t_ldst_imm(t, T_ACC, T_ADDR, k, 1, 0, 1);
-            }
-        } else {
-            t_mov_imm(t, T_ACC, 0, 0);
-            for (k = 0; k + 4 <= size; k += 4)
-                t_ldst_imm(t, T_ACC, T_ADDR, k, 4, 0, 1);
-            for (; k < size; k++)
-                t_ldst_imm(t, T_ACC, T_ADDR, k, 1, 0, 1);
-        }
+        t_copy_block(t, T_ADDR, T_TMP, i->op == IR_MEMCPY, i->size);
         return;
-    }
 
     case IR_CALL: {
         /* AAPCS32, the scalar half: r0-r3 in order, then four-byte stack
@@ -3081,24 +3122,24 @@ static void gen_ins(struct t_fn *F, int n)
                      * object would be a load nothing put there. */
                     if (last && (a->size & 3)) {
                         for (long b = off; b < a->size; b++) {
-                            t_ldst_imm(t, T_ACC, T_ADDR, b, 1, 0, 0);
-                            t_ldst_imm(t, T_ACC, F->fb,
+                            ldst_must(t, T_ACC, T_ADDR, b, 1, 0, 0);
+                            ldst_must(t, T_ACC, F->fb,
                                        pl[k].stk + (long)q * 4 + (b - off),
                                        1, 0, 1);
                         }
                     } else {
-                        t_ldst_imm(t, T_ACC, T_ADDR, off, 4, 0, 0);
-                        t_ldst_imm(t, T_ACC, T_SP, pl[k].stk + (long)q * 4,
+                        ldst_must(t, T_ACC, T_ADDR, off, 4, 0, 0);
+                        ldst_must(t, T_ACC, T_SP, pl[k].stk + (long)q * 4,
                                    4, 0, 1);
                     }
                 }
             } else if (a->size > 4) {
                 rd64(F, a->vreg, T_ACC, T_TMP);
-                t_ldst_imm(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
-                t_ldst_imm(t, T_TMP, T_SP, pl[k].stk + 4, 4, 0, 1);
+                ldst_must(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
+                ldst_must(t, T_TMP, T_SP, pl[k].stk + 4, 4, 0, 1);
             } else {
                 rd(F, a->vreg, T_ACC);
-                t_ldst_imm(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
+                ldst_must(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
             }
         }
         /* The VFP arguments next, while every vreg is still where the
@@ -3176,12 +3217,12 @@ static void gen_ins(struct t_fn *F, int n)
                         for (long b = a->size - 1; b >= off; b--) {
                             t_shift_imm(t, T_SH_LSL, pl[k].reg + q,
                                         pl[k].reg + q, 8, 0);
-                            t_ldst_imm(t, T_ACC, T_ADDR, b, 1, 0, 0);
+                            ldst_must(t, T_ACC, T_ADDR, b, 1, 0, 0);
                             t_alu_reg(t, T_OP_ORR, pl[k].reg + q,
                                       pl[k].reg + q, T_ACC, 0);
                         }
                     } else {
-                        t_ldst_imm(t, pl[k].reg + q, T_ADDR, off, 4, 0, 0);
+                        ldst_must(t, pl[k].reg + q, T_ADDR, off, 4, 0, 0);
                     }
                 }
             } else if (a->size > 4) {
@@ -3241,7 +3282,7 @@ static void gen_ins(struct t_fn *F, int n)
                  * wrote through the pointer. */
                 if (!sret) {
                     fb_addr(F, T_ADDR, F->scratch_at + i->scratch);
-                    t_ldst_imm(t, T_R0, T_ADDR, 0, i->retsize, 0, 1);
+                    ldst_must(t, T_R0, T_ADDR, 0, i->retsize, 0, 1);
                 }
                 fb_addr(F, T_ACC, F->scratch_at + i->scratch);
                 wr(F, i->dst, T_ACC);
@@ -3278,22 +3319,15 @@ static void gen_ins(struct t_fn *F, int n)
             long n = fn->ret_abi.size;
             rd(F, i->a, T_ADDR);
             if (F->sret_slot >= 0) {
-                long k;
-                t_ldst_imm(t, T_TMP, F->fb, F->sret_slot, 4, 0, 0);
-                for (k = 0; k + 4 <= n; k += 4) {
-                    t_ldst_imm(t, T_ACC, T_ADDR, k, 4, 0, 0);
-                    t_ldst_imm(t, T_ACC, T_TMP, k, 4, 0, 1);
-                }
-                for (; k < n; k++) {
-                    t_ldst_imm(t, T_ACC, T_ADDR, k, 1, 0, 0);
-                    t_ldst_imm(t, T_ACC, T_TMP, k, 1, 0, 1);
-                }
-                t_mov_reg(t, T_R0, T_TMP);
+                ldst_must(t, T_TMP, F->fb, F->sret_slot, 4, 0, 0);
+                t_copy_block(t, T_TMP, T_ADDR, 1, n);
+                /* the loop form moves the pointer: r0 from the slot */
+                ldst_must(t, T_R0, F->fb, F->sret_slot, 4, 0, 0);
             } else {
                 /* Four bytes or fewer, in r0. A three-byte composite is
                  * read as a word: it is at least four-byte aligned and
                  * the high byte is padding the caller ignores. */
-                t_ldst_imm(t, T_R0, T_ADDR, 0, n == 3 ? 4 : (int)n, 0, 0);
+                ldst_must(t, T_R0, T_ADDR, 0, n == 3 ? 4 : (int)n, 0, 0);
             }
             goto ret_epilogue;
         }
@@ -3440,7 +3474,7 @@ static void gen_ins(struct t_fn *F, int n)
             if (!ia->out[k].inout || ia->out[k].mem)
                 continue;
             rd(F, ia->out[k].temp, scr);
-            t_ldst_imm(t, ia->out[k].reg, scr, 0, ia->out[k].size, 0, 0);
+            ldst_must(t, ia->out[k].reg, scr, 0, ia->out[k].size, 0, 0);
         }
         for (int k = 0; k < ia->nin; k++)
             rd(F, ia->in[k].temp, ia->in[k].reg);
@@ -3453,7 +3487,7 @@ static void gen_ins(struct t_fn *F, int n)
             if (ia->out[k].mem)
                 continue;
             rd(F, ia->out[k].temp, scr);
-            t_ldst_imm(t, ia->out[k].reg, scr, 0, ia->out[k].size, 0, 1);
+            ldst_must(t, ia->out[k].reg, scr, 0, ia->out[k].size, 0, 1);
         }
         return;
     }
@@ -3462,7 +3496,7 @@ static void gen_ins(struct t_fn *F, int n)
          * bare pointer at the next argument. */
         rd(F, i->a, T_ADDR);
         fb_addr(F, T_ACC, F->va_first);
-        t_ldst_imm(t, T_ACC, T_ADDR, 0, 4, 0, 1);
+        ldst_must(t, T_ACC, T_ADDR, 0, 4, 0, 1);
         return;
     case IR_ALLOCA: {
         /* A variable-length array: sp -= round8(size), AAPCS32's stack
@@ -4091,7 +4125,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             base += 16;                     /* ... then the stack ones */
         }
         if (F.sret_slot >= 0)
-            t_ldst_imm(t, T_R0, F.fb, F.sret_slot, 4, 0, 1);
+            ldst_must(t, T_R0, F.fb, F.sret_slot, 4, 0, 1);
         walk_init(&w, F.sret_slot >= 0, fn->is_varargs, fn->pcs);
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
@@ -4206,17 +4240,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 if (!t_ldst_imm(t, pl.reg + q, F.fb, off, wid == 4 ? 4 : wid,
                                 0, 1)) {
                     fb_addr(&F, T_ADDR, off);
-                    t_ldst_imm(t, pl.reg + q, T_ADDR, 0, wid == 4 ? 4 : wid,
+                    ldst_must(t, pl.reg + q, T_ADDR, 0, wid == 4 ? 4 : wid,
                                0, 1);
                 }
             }
             for (int q = 0; q < pl.nstk; q++) {
                 long src = base + pl.stk + (long)q * 4;
                 long dst = F.slot[i] + (long)(pl.nreg + q) * 4;
-                t_ldst_imm(t, T_ACC, F.fb, src, 4, 0, 0);
+                ldst_must(t, T_ACC, F.fb, src, 4, 0, 0);
                 if (!t_ldst_imm(t, T_ACC, F.fb, dst, 4, 0, 1)) {
                     fb_addr(&F, T_ADDR, dst);
-                    t_ldst_imm(t, T_ACC, T_ADDR, 0, 4, 0, 1);
+                    ldst_must(t, T_ACC, T_ADDR, 0, 4, 0, 1);
                 }
             }
         }
@@ -4239,7 +4273,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         for (int k = 0; k < npstk; k++)
             if (!t_ldst_imm(t, pstk_reg[k], F.fb, pstk_off[k], 4, 0, 0)) {
                 fb_addr(&F, T_ADDR, pstk_off[k]);
-                t_ldst_imm(t, pstk_reg[k], T_ADDR, 0, 4, 0, 0);
+                ldst_must(t, pstk_reg[k], T_ADDR, 0, 4, 0, 0);
             }
         /* And the floats that arrived in s registers, into theirs. */
         for (int k = 0; k < npvf; k++)

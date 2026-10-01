@@ -551,7 +551,12 @@ static void ldst(struct code *c, int rt, int rn, long off, int size,
         return;
     }
     /* Out of the scaled field: form the address in the scratch register.
-     * Callers are documented not to hold anything in A64_SCR here. */
+     * Callers are documented not to hold anything in A64_SCR here -- and
+     * when the BASE is that register, the first move would destroy it:
+     * refuse by name rather than load from 2*off (a block copy whose
+     * source was in x12 did exactly that before it became a loop). */
+    if (rn == A64_SCR || (!load && rt == A64_SCR))
+        internal_error("aarch64: an access at offset %ld from x12 needs x12", off);
     a64_mov_imm(c, A64_SCR, off, 8);
     if (rn == A64_SP)
         /* SP is not encodable as Rn in the shifted-register ADD; the
