@@ -1138,6 +1138,41 @@ static int vw_src = -1;
 static int fold_idx = -1;         /* the unshifted index, or -1 */
 static int fold_scale = 1;
 
+/* zx32[v]: temp v is written exactly once, by an integer operation at
+ * width 4 whose every lowering here ends in a 32-bit write of the
+ * register -- in place (`and $255, %esi`, `lea (..), %esi`, `imul`), or
+ * through RAX and a 32-bit `mov` home. x86-64 zeroes a register's upper
+ * half on every 32-bit write, so such a temp's register already holds
+ * its zero extension and `(unsigned long)` of it is no instruction.
+ *
+ * NOT every width-4 value has that property, which is why the general
+ * widening still emits `movl`: a copy, a local's read, or a truncating
+ * store into a local sharing its source's register can leave the source's
+ * upper half in place. Hence the single definition, by one of these
+ * operations, of a temp (never a local). Shifts only by a count of 1-31:
+ * the manual's pseudo-code for a shift by zero never assigns the
+ * destination, so what it does to the upper half is not relied on. Loads
+ * only unsigned: every one of those zero-fills, at any width. */
+static char *g_zx32;
+static int x86_def_zx32(const struct ir_ins *i)
+{
+    if (i->flt || i->w != 4)
+        return 0;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_AND: case IR_OR:
+    case IR_XOR: case IR_NEG: case IR_BNOT:
+        return 1;
+    case IR_SHL: case IR_SHR:
+        return i->imm_b && (i->imm & 31) != 0;
+    case IR_LOAD:
+        /* a zero-extending load fills the register whatever form it
+         * takes -- movzbl, movzwl, movl, or a 64-bit movzx */
+        return !i->sign;
+    default:
+        return 0;
+    }
+}
+
 /* May an address computation feeding `mem` be folded into that access's
  * addressing mode?
  *
@@ -2769,6 +2804,22 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int *usecnt = fn->nvregs
         ? xmalloc((size_t)fn->nvregs * sizeof *usecnt) : (int *)0;
     if (usecnt) ra_count_vreg_uses(fn, usecnt);
+    g_zx32 = NULL;
+    if (g_regalloc && fn->nvregs) {
+        int *nd = xcalloc((size_t)fn->nvregs, sizeof *nd);
+        for (int t = 0; t < fn->nins; t++) {
+            int v = ra_ins_def(&fn->ins[t]);
+            if (v >= 0 && v < fn->nvregs) nd[v]++;
+        }
+        g_zx32 = xcalloc((size_t)fn->nvregs, 1);
+        for (int t = 0; t < fn->nins; t++) {
+            int v = ra_ins_def(&fn->ins[t]);
+            if (v >= fn->nvars && v < fn->nvregs && nd[v] == 1 &&
+                x86_def_zx32(&fn->ins[t]))
+                g_zx32[v] = 1;
+        }
+        free(nd);
+    }
     /* -O2: with two or more returns each inlining the full callee-restore
      * sequence, route them through ONE shared epilogue instead — each return
      * loads its value then `jmp`s to it. Worth the jmp only when there is more
@@ -3761,6 +3812,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         }
         case IR_EXT:
+            /* already zero-extended in the register it shares (g_zx32) */
+            if (i->size == 4 && !i->sign && i->w == 8 && g_zx32 &&
+                i->a >= 0 && g_zx32[i->a] && !afolded(i->a) &&
+                in_reg(i->dst) && in_reg(i->a) &&
+                g_loc[i->dst] == g_loc[i->a])
+                break;
             /* re-extend from the low `size` bytes of the temp's slot */
             if (in_reg(i->dst)) {
                 cg_ext_into(text, sd, g_loc[i->dst], i->a, i->size, i->sign, i->w);
@@ -4684,6 +4741,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
     free(sd);
     free(loc);
     free(usecnt);
+    free(g_zx32);
+    g_zx32 = NULL;
     free(vacc); g_vacc = NULL;
     g_loc = NULL;
     free(g_wide);
