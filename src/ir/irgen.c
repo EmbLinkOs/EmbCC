@@ -1179,6 +1179,21 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
              * conversion is a call, ask for the helper whose signedness
              * matches the source -- __floatunsisf or __floatundisf. */
             int isign  = widen ? 1 : !from->is_unsigned;
+            /* ...extended EXPLICITLY. It used to be read at eight bytes on
+             * the strength of "a 32-bit operation zero-extends its result",
+             * but nothing promises that of every 32-bit value: an int a call
+             * returned, or a merge of two arms, can hold its sign bits above
+             * bit 31 -- and (double)(unsigned)f() of -104634 converted as
+             * -104634, not 4294862662, on x86-64 and aarch64 (random
+             * programs found it). The extension costs a move where the
+             * upper half really was zero, and the optimizer drops it where
+             * it can prove that. */
+            if (u32src && widen && !ty_wide(from)) {
+                struct ir_ins *x = emit(fn);
+                x->op = IR_EXT; x->a = v; x->size = 4; x->sign = 0; x->w = 8;
+                x->dst = new_temp(fn);
+                v = x->dst;
+            }
             i = emit(fn);
             i->op = IR_I2F;
             i->a = v;

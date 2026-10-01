@@ -1418,7 +1418,13 @@ static void cg_load(struct code *text, const int *sd, int vreg,
         else if (size == 4 && sign && w == 8)
             x86_movsxd_rr(text, REG_RAX, R);      /* signed int -> 64 */
         else
-            x86_mov_rr_w(text, REG_RAX, R, size == 8 ? 8 : w);
+            /* Four bytes read are a 32-BIT move, which zeroes the upper
+             * half -- as cg_ext_into learned. Copying 64 bits trusted the
+             * register's upper half to be zero already, and an integer a
+             * call returns sits in the whole of rax with whatever the
+             * callee left above bit 31: (double)(unsigned)f() converted
+             * a negative int's sign bits as part of the value. */
+            x86_mov_rr_w(text, REG_RAX, R, size == 8 ? 8 : 4);
     } else {
         x86_load_slot(text, sd[vreg], size, sign, w);
     }
