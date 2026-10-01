@@ -7480,34 +7480,40 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
             int kU = fn->nvregs++;
             /* ---- once, on the way in: is there a full run to do? ----
              *
-             * `(unsigned)(bound - iv) >= U` counts the iterations left
-             * without overflowing, and `iv < bound` is what makes that
-             * subtraction meaningful -- so the signed test comes first.
-             * Both are paid once; the loop below re-tests only the
-             * count, because after U bodies it knows iv <= bound. */
-            int c0 = fn->nvregs++;
-            p = ib_push(&nb);
-            *p = fn->ins[L.cmp_ins];          /* same compare, same location */
-            p->dst = c0;
-            /* ...and when there is not: the ORIGINAL loop, not the exit.
-             * The loop is a rotated one, entered from a guard that already
-             * held, so the difference cannot show today; but a rotated
-             * loop is a do-while, and one entered with its test false
-             * runs its body once, which the remainder loop does and the
-             * exit would not. */
-            p = unr_emit(&nb, IR_BRZ, lineh, colh);
-            p->a = c0; p->label = L.Lh; p->w = brw; p->sign = brs;
-
+             * lim = bound - U*step, and the copies run while iv <= lim:
+             * then iv + U*step <= bound, so every one of the U
+             * iterations is one the loop would have run. That holds only
+             * if the subtraction did not wrap, which `lim < bound` tests
+             * (U*step is positive), at the loop's own signedness -- a
+             * signed `iv < bound` loop, or unsigned for `iv != bound`,
+             * whose walk is upward to its end. Both tests are paid once;
+             * each run of copies then re-tests with one compare, where
+             * re-deriving the count (`bound - iv >= U*step`) took a
+             * subtract and a compare -- four instructions with x86's
+             * two-operand subtract. A loop that fails either test, an
+             * `iv != bound` walk that wraps included, runs as the
+             * ORIGINAL loop, not the exit: the loop is a rotated one, a
+             * do-while, and what it does when entered is what it always
+             * did. The subtraction is the machine's, wrapping: that is
+             * what the `lim < bound` test reads, and why nothing here may
+             * assume a signed difference cannot overflow. */
+            int ls = fn->ins[L.cmp_ins].pred == B_LT
+                     ? fn->ins[L.cmp_ins].sign : 0;
+            int lim = fn->nvregs++, e0 = fn->nvregs++, e1 = fn->nvregs++;
             p = unr_emit(&nb, IR_CONST, lineh, colh);
             p->dst = kU; p->imm = U * L.step; p->w = L.w;   /* U iterations' worth */
-            int d0 = fn->nvregs++, e0 = fn->nvregs++;
             p = unr_emit(&nb, IR_SUB, lineh, colh);
-            p->dst = d0; p->a = L.bound; p->b = L.iv; p->w = L.w; p->sign = 1;
+            p->dst = lim; p->a = L.bound; p->b = kU; p->w = L.w; p->sign = ls;
             p = unr_emit(&nb, IR_CMP, lineh, colh);
-            p->dst = e0; p->a = d0; p->b = kU;
-            p->pred = B_LT; p->w = L.w; p->sign = 0;      /* unsigned */
-            p = unr_emit(&nb, IR_BRNZ, lineh, colh);
+            p->dst = e0; p->a = lim; p->b = L.bound;
+            p->pred = B_LT; p->w = L.w; p->sign = ls;
+            p = unr_emit(&nb, IR_BRZ, lineh, colh);
             p->a = e0; p->label = L.Lh; p->w = brw; p->sign = brs;
+            p = unr_emit(&nb, IR_CMP, lineh, colh);
+            p->dst = e1; p->a = L.iv; p->b = lim;
+            p->pred = B_LE; p->w = L.w; p->sign = ls;
+            p = unr_emit(&nb, IR_BRZ, lineh, colh);
+            p->a = e1; p->label = L.Lh; p->w = brw; p->sign = brs;
 
             /* ---- the copies ---- */
             p = unr_emit(&nb, IR_LABEL, lineh, colh);
@@ -7538,20 +7544,16 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
             free(cur);
             free(local);
 
-            /* ---- the back edge: three instructions per U iterations ----
+            /* ---- the back edge: a compare and a branch per U iterations ----
              *
-             * U bodies ran from an iv with bound - iv >= U, so iv <=
-             * bound now and the unsigned difference is still the true
-             * count. No signed test is needed to make it sound, which is
-             * the whole point of testing on the way in. */
-            int d1 = fn->nvregs++, e1 = fn->nvregs++;
-            p = unr_emit(&nb, IR_SUB, lineh, colh);
-            p->dst = d1; p->a = L.bound; p->b = L.iv; p->w = L.w; p->sign = 1;
+             * iv only grew by U*step from a value <= lim, so it is <=
+             * bound and the same compare stays exact. */
+            int e2 = fn->nvregs++;
             p = unr_emit(&nb, IR_CMP, lineh, colh);
-            p->dst = e1; p->a = d1; p->b = kU;
-            p->pred = B_GE; p->w = L.w; p->sign = 0;      /* unsigned */
+            p->dst = e2; p->a = L.iv; p->b = lim;
+            p->pred = B_LE; p->w = L.w; p->sign = ls;
             p = unr_emit(&nb, IR_BRNZ, lineh, colh);
-            p->a = e1; p->label = Lunroll; p->w = brw; p->sign = brs;
+            p->a = e2; p->label = Lunroll; p->w = brw; p->sign = brs;
 
             /* Out of full runs. iv <= bound, so anything left is a
              * partial one -- which is what the original loop below is. */
@@ -10756,6 +10758,13 @@ static void opt_func(struct ir_func *fn)
              * This is what notices. */
             if (g_cfgclean)
                 changed |= pass_cfgclean(fn);
+            /* And a guard that folding has just decided: the copies'
+             * value numbering sees `end != base + 2048` with end ==
+             * base + 2048 and makes it a constant, which nothing in
+             * this loop resolved -- CRC's inner loop entered through
+             * `mov $1; test; je` on every outer trip. */
+            if (g_sccp && cfg_ok)
+                changed |= pass_sccp(fn);
         }
     }
     /* After the fixpoint: fold constant operands into immediates, then DCE the
