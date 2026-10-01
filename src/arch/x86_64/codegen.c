@@ -740,6 +740,14 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
             rlo[i] = lf[i];
             rhi[i] = ll[i] + 1;              /* half-open */
         }
+        /* A parameter is written by the prologue, before instruction 0,
+         * whether or not its incoming value is ever read -- so its slot is
+         * in use from the entry. Liveness started a parameter that is only
+         * assigned at its first assignment, and `u8 a3` was given the slot
+         * of `u64 a1`: the prologue's store of a3 overwrote a1 before the
+         * body read it (random programs, x86-64 -O0). */
+        if (i < fn->nparams)
+            rlo[i] = 0;
     }
     free(at); free(lf); free(ll); free(lout); free(lin); free(dv);
 
