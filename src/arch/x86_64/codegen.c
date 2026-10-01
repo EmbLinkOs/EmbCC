@@ -514,6 +514,17 @@ void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n)
     }
 }
 
+/* Can this load, store, ldvar or stvar move its value as a float or a
+ * double? (cg_float_vregs) */
+static int flt_width(const struct ir_ins *i)
+{
+    if (i->size != 4 && i->size != 8)
+        return 0;
+    if (i->op == IR_LOAD || i->op == IR_LDVAR)
+        return !(i->sign && i->size < i->w);
+    return 1;
+}
+
 char *cg_float_vregs(struct ir_func *fn)
 {
     int nv = fn->nvregs ? fn->nvregs : 1;
@@ -607,10 +618,28 @@ char *cg_float_vregs(struct ir_func *fn)
             if (i->w == 16 || i->size == 16) { BAD(i->dst); BAD(i->a); }
             break;
         case IR_SQRT: break;
-        case IR_MOV: case IR_LDVAR: case IR_STVAR: break;   /* copies */
-        case IR_LOAD:  BAD(i->a);   break;        /* the address */
-        case IR_STORE: BAD(i->a);   break;        /* the address */
-        case IR_RET:   break;
+        case IR_MOV: break;                       /* a copy */
+        /* A memory access moves a float or a double as movss/movsd (ldr
+         * s/d): four or eight bytes. One of another width is an INTEGER
+         * access -- `r->h = 0` where the same `const 0` is also the 0.0f
+         * of `f * 0.0f` -- and from an FP register it stored eight bytes
+         * into a two-byte field. A signed widening read is integer too:
+         * movss fills the high half with zeros, not the sign. */
+        case IR_LDVAR: case IR_STVAR:             /* copies, unless narrow */
+            if (!flt_width(i)) { BAD(i->a); BAD(i->dst); }
+            break;
+        case IR_LOAD:
+            BAD(i->a);                            /* the address */
+            if (!flt_width(i)) BAD(i->dst);
+            break;
+        case IR_STORE:
+            BAD(i->a);                            /* the address */
+            if (!flt_width(i)) BAD(i->b);
+            break;
+        /* A floating-point return is `flt` and never reaches here; this
+         * one hands its value back in rax (x0), so the value has to be
+         * in a general register. */
+        case IR_RET:   BAD(i->a); break;
         case IR_CALL:
             if (i->indirect) BAD(i->a);
             for (int k = 0; k < i->nargs; k++)
