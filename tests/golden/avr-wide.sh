@@ -98,6 +98,24 @@ cat > "$out/w64.c" <<'EOF'
 #include "pr.h"
 
 static long long addll(long long a, long long b) { return a + b; }
+/* A long long that arrives on the STACK -- a, b and c fill r8-r25 -- and
+ * that the allocator then gives a register home: the prologue copied it
+ * into a slot the value does not have, and the function was refused at
+ * -O2 and -Os ("a path addresses vreg 3's slot"). */
+__attribute__((noinline)) static long long stk64(long long a, long b, long c,
+                                                 long long d)
+{
+    long long s = 0;
+    int i;
+    for (i = 0; i < 4; i++) s += d >> (i * 8);
+    return s + a + b + c + d;
+}
+__attribute__((noinline)) static long long stk64id(long long a, long b,
+                                                   long c, long long d)
+{
+    (void)a; (void)b; (void)c;
+    return d;
+}
 /* An unrolled loop on a 64-bit counter, in a function whose FIRST
  * parameter is eight bytes. The unroller's branches carried a `dst` of 0,
  * which named that parameter, so the backend took them for eight-byte
@@ -167,6 +185,8 @@ void run(void)
     putn(nzll(0x100000000LL));          /* and so does this */
     putn(nzll(0LL));
     puts_("| ");
+    p64(stk64(-5LL, 7L, 9L, 0x0123456789ABCDEFLL));
+    p64(stk64id(1LL, 2L, 3L, -0x0123456789ABCDEFLL));
     {
         long long k;
         for (k = 0; k < 11; k++)

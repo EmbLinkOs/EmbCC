@@ -4909,6 +4909,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             } else if (pl.nstk <= VW) {
                 ld_slot(&F, RA, F.frame + F.in_at + pl.stk, pl.nstk);
                 vst(&F, a->vreg, 0, RA, pl.nstk);
+            } else if (in_pair(&F, a->vreg)) {
+                /* A long long the allocator gave a home: straight into it,
+                 * a byte at a time. It has no slot -- the copy below asked
+                 * for one and was refused, for any function whose eighth
+                 * argument byte onwards held a 64-bit parameter. Not when
+                 * nothing reads it: as above, its home may be a live one's. */
+                if (F.usecnt && !F.usecnt[a->vreg])
+                    continue;
+                for (int b = 0; b < pl.nstk && b < F.hw[a->vreg]; b++)
+                    ld_slot(&F, F.loc[a->vreg] + b,
+                            F.frame + F.in_at + pl.stk + b, 1);
             } else {
                 /* Wider than a scratch bank -- a struct, or a long long:
                  * byte at a time, which needs no run of registers. */
