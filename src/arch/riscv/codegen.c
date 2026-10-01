@@ -1667,25 +1667,55 @@ static int gen_ins64(struct rv_fn *F, int n)
         else         rv_mv(t, A_HI, RV_ZERO);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
+    /* These four reach here when EITHER side is 64 bits, and only one
+     * of them has to be: `*(unsigned *)p = (unsigned)(v >> i)` is a
+     * four-byte store of an eight-byte value, and `long long x = y` of a
+     * four-byte local an eight-byte read of it. The access is `size`
+     * bytes whatever the value's width -- each of them wrote or read all
+     * eight, and the four past a four-byte object are someone else's:
+     * the next local, or past the frame's top, the caller's frame. As
+     * Thumb's 64-bit path has always done, a narrower access moves the
+     * low word, and a narrower read extends into the high one. */
     case IR_LDVAR:
-        rd64(F, i->a, A_LO, A_HI);           /* the local, slot or pair */
+        if (i->size == 8) {
+            rd64(F, i->a, A_LO, A_HI);       /* the local, slot or pair */
+        } else {
+            if (in_reg(F, i->a))
+                ext_reg(F, A_LO, F->loc[i->a], i->size, i->sign);
+            else
+                ld_sp(F, A_LO, sslot(F, i->a), i->size, i->sign);
+            if (i->sign) rv_shift_imm(t, RV_SRA, A_HI, A_LO, 31, 0, 32);
+            else         rv_mv(t, A_HI, RV_ZERO);
+        }
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     case IR_STVAR:
         rd64(F, i->a, A_LO, A_HI);
-        wr64(F, i->dst, A_LO, A_HI);
+        if (i->size == 8)
+            wr64(F, i->dst, A_LO, A_HI);
+        else if (in_reg(F, i->dst))          /* sign-extends, as at 32 bits */
+            ext_reg(F, F->loc[i->dst], A_LO, i->size, 1);
+        else if (F->slot[i->dst] >= 0)
+            st_sp(F, A_LO, sslot(F, i->dst), i->size);
         return 1;
     case IR_LOAD:
         rd(F, i->a, ADDR);
-        rv_load(t, A_LO, ADDR, 0, 4, 1, F->xlen);
-        rv_load(t, A_HI, ADDR, 4, 4, 1, F->xlen);
+        if (i->size == 8) {
+            rv_load(t, A_LO, ADDR, 0, 4, 1, F->xlen);
+            rv_load(t, A_HI, ADDR, 4, 4, 1, F->xlen);
+        } else {
+            rv_load(t, A_LO, ADDR, 0, i->size, i->sign, F->xlen);
+            if (i->sign) rv_shift_imm(t, RV_SRA, A_HI, A_LO, 31, 0, 32);
+            else         rv_mv(t, A_HI, RV_ZERO);
+        }
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     case IR_STORE:
         rd(F, i->a, ADDR);
         rd64(F, i->b, A_LO, A_HI);
-        rv_store(t, A_LO, ADDR, 0, 4, F->xlen);
-        rv_store(t, A_HI, ADDR, 4, 4, F->xlen);
+        rv_store(t, A_LO, ADDR, 0, i->size == 8 ? 4 : i->size, F->xlen);
+        if (i->size == 8)
+            rv_store(t, A_HI, ADDR, 4, 4, F->xlen);
         return 1;
     case IR_SELECT: {
         int take_c, done;
