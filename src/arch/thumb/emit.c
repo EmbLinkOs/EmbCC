@@ -575,6 +575,21 @@ int t_adr_w(struct code *c, int rd, int imm12)
     return at;
 }
 
+int t_tbh(struct code *c, int rm)
+{
+    /* 1110 1000 1101 1111 | 1111 0000 0001 Rm. llvm-mc: tbh [pc, r0,
+     * lsl #1] = e8df f010, [pc, r12, lsl #1] = e8df f01c. */
+    int at = c->len;
+    hw2(c, 0xe8dfu, 0xf010u | (unsigned)rm);
+    return at;
+}
+
+void t_patch_hw16(struct code *c, int at, unsigned v)
+{
+    c->p[at] = (unsigned char)(v & 0xff);
+    c->p[at + 1] = (unsigned char)((v >> 8) & 0xff);
+}
+
 void t_patch_adr_w(struct code *c, int at, int rd, int imm12)
 {
     unsigned i1 = (unsigned)(imm12 >> 11) & 1, imm3 = (unsigned)(imm12 >> 8) & 7;

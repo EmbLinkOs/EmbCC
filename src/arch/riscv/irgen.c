@@ -259,7 +259,7 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
 
     char *text = rv_subst(file, s->line, a->tmpl, regs, imms, isimm,
                           names, nops);
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     char err[512];
     if (rvasm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);

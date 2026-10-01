@@ -577,7 +577,7 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         int lfwd;
         if (g->tgt->symform(stmt, &f) &&
             local_ref(stmt + f.sym_at, (size_t)f.sym_len, &lfwd) < 0) {
-            struct code tmp = { 0, 0, 0 };
+            struct code tmp = { 0 };
             char err[256];
             if (g->tgt->encode(f.encode, &tmp, err, sizeof err) != 0) {
                 gerr(g, "%s", err);
@@ -599,7 +599,7 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
      * carrying one relocation -- there is no auipc pair to build. */
     if ((g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64) &&
         strncmp(p, "bl", 2) == 0 && isspace((unsigned char)p[2])) {
-        struct code tmp = { 0, 0, 0 };
+        struct code tmp = { 0 };
         char err[256];
         if (pass == 2)
             fix_add(g, g->cur, pc, ext, g->tgt->r_call, 0);
@@ -646,7 +646,7 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
      * `jalr ra, 0(ra)`; for `la` an `addi rd, rd, 0`. */
     {
         char buf[128];
-        struct code tmp = { 0, 0, 0 };
+        struct code tmp = { 0 };
         char err[256];
         const char *rd = "ra";
         char rdbuf[16];
@@ -748,7 +748,7 @@ static void instruction(struct gas *g, char *stmt, int pass)
         return;
     }
     text = substitute(g, stmt, pc, pass, &ext, &placeheld);
-    struct code tmp = { 0, 0, 0 };
+    struct code tmp = { 0 };
     char err[256];
 
     if (ext) {

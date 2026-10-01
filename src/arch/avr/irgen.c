@@ -364,7 +364,7 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s)
 
     char *text = avr_subst(file, s->line, a->tmpl, regs, imms, isimm,
                            names, nops);
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     char err[512];
     if (avrasm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s (assembling \"%s\")", err, text);

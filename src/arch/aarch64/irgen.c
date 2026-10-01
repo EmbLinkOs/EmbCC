@@ -304,7 +304,7 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
 
     char *text = a64_subst(file, s->line, a->tmpl, regs, imms, isimm, sizes,
                            names, nops);
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     char err[512];
     if (a64asm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);

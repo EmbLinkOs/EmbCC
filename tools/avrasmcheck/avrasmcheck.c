@@ -22,7 +22,7 @@
 int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "bytes";
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     char err[256];
 
     if (!strcmp(mode, "--list")) {

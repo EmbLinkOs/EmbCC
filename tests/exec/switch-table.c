@@ -122,6 +122,21 @@ again:
     default: return -n;
     }
 }
+NI int backward2(int v)         /* `case 4: goto again;` -- an empty case block */
+{                               /* that CFG cleanup forwards: the table entry */
+    int n = 0;                  /* then names a label BEFORE the switch */
+again:
+    n++;
+    if (n > 5) return -n;
+    switch (v) {
+    case 0: return n;
+    case 1: v = 3; goto again;
+    case 2: return 2 * n;
+    case 3: return 3 * n;
+    case 4: goto again;
+    default: return 100;
+    }
+}
 NI int big(int v)               /* 40 cases: wider than any short form */
 {
     switch (v) {
@@ -183,6 +198,8 @@ int main(void)
     }
     if (backwards(0, 3) != 10 || backwards(1, 3) != 11 || backwards(2, 3) != 36 || backwards(2, 1) != 12 ||
         backwards(3, 3) != 13 || backwards(4, 3) != 14 || backwards(5, 3) != -1 || backwards(-1, 3) != -1) bad |= 512;
+    if (backward2(0) != 1 || backward2(1) != 6 || backward2(2) != 2 || backward2(3) != 3 ||
+        backward2(4) != -6 || backward2(5) != 100 || backward2(-1) != 100) bad |= 4096;
     for (int v = -3; v < 45; v++) if (big(v) != (v >= 0 && v < 40 ? v * 3 + 1 : -1)) bad |= 1024;
     if (big(-2147483647 - 1) != -1 || big(2147483647) != -1) bad |= 1024;
     if (minmax(-2147483647 - 1) != 1 || minmax(-2147483647) != 2 || minmax(-2147483646) != 3 ||

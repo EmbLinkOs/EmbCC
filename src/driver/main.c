@@ -837,7 +837,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 0;
     }
 
-    struct code text = { 0, 0, 0 };
+    struct code text = { 0 };
     struct extcall *ext;
     struct strsite *strs;
     struct gsite *gs;
@@ -1822,10 +1822,26 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * and the linker uses them to decide where an interworking veneer
      * may go. One at offset zero is the whole story for a Cortex-M
      * object, which is Thumb from end to end. */
-    if (ta == TARGET_THUMB) {
-        elfw_add_symbol(w, "$t", 0, 0,
+    if (ta == TARGET_THUMB || ta == TARGET_AARCH64) {
+        /* ...and `$x` is AArch64's "A64 instructions start here". A
+         * jump table in .text is data between two of these: `$d` where
+         * it starts and the code symbol again where it ends, so that a
+         * disassembler prints words, not instructions. */
+        const char *codesym = ta == TARGET_THUMB ? "$t" : "$x";
+        elfw_add_symbol(w, codesym, 0, 0,
                         ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                         (Elf64_Half)text_ndx);
+        for (int r = 0; r + 1 < text.ndrange; r += 2) {
+            elfw_add_symbol(w, "$d", (Elf64_Addr)text.drange[r], 0,
+                            ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
+                            (Elf64_Half)text_ndx);
+            if (text.drange[r + 1] < text.len)
+                elfw_add_symbol(w, codesym, (Elf64_Addr)text.drange[r + 1], 0,
+                                ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
+                                (Elf64_Half)text_ndx);
+        }
+    }
+    if (ta == TARGET_THUMB) {
         /* ARM BUILD ATTRIBUTES. What the object was built for, and the
          * only place downstream that can refuse a combination which
          * cannot work: ld compares Tag_ABI_VFP_args to stop a

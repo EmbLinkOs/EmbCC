@@ -19,7 +19,7 @@
 int main(int argc, char **argv)
 {
     int list = argc > 1 && !strcmp(argv[1], "--list");
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     char buf[64];
 
     /* The vocabulary, written once. Each entry prints its own assembly

@@ -1273,6 +1273,9 @@ static void fb_addr(struct t_fn *F, int rd, long off)
 #define T_CBZ 100              /* a fix's cond for cbz; cbnz is T_CBZ + 1 */
 #define T_TAB 99               /* a jump table's entry: cz_at holds the table,
                                 * the word becomes (target | 1) - table */
+#define T_TBH 98               /* a tbh table's halfword: cz_at holds the pc
+                                * it is relative to, the halfword becomes
+                                * (target - pc) / 2 */
 
 static void want_label(struct t_fn *F, int at, int label, int cond)
 {
@@ -3508,6 +3511,26 @@ static void gen_ins(struct t_fn *F, int n)
             t_cmp_reg(t, ri, T_TMP);
         }
         jump_if(F, T_CS, i->label);                  /* bhs: unsigned >= n */
+        /* When every target still lies ahead, the one-instruction form:
+         * `tbh [pc, rI, lsl #1]` adds twice the halfword the index picks
+         * from the table right after it. Its offsets are unsigned, so a
+         * target already placed (a case whose block the CFG cleanup
+         * forwarded to a label before the switch) rules it out, and the
+         * general form below takes over. */
+        int ahead = 1;
+        for (int k = 0; k < n; k++)
+            if (F->label_off[fn->jt[i->jt].labels[k]] >= 0)
+                ahead = 0;
+        if (ahead) {
+            int at = t_tbh(t, ri);
+            for (int k = 0; k < n; k++) {
+                want_label(F, t->len, fn->jt[i->jt].labels[k], T_TBH);
+                F->fix[F->nfix - 1].cz_at = at + 4;
+                code_u16(t, 0);
+            }
+            code_mark_data(t, at + 4, t->len);
+            return;
+        }
         int adr_at = t_adr_w(t, T_TMP, 0);
         t_ldst_reg(t, T_ACC, T_TMP, ri, 2, 4, 0, 0);
         t_alu_reg(t, T_OP_ADD, T_ACC, T_ACC, T_TMP, 0);
@@ -3524,6 +3547,7 @@ static void gen_ins(struct t_fn *F, int n)
             F->fix[F->nfix - 1].cz_at = tab;
             code_u32(t, 0);
         }
+        code_mark_data(t, tab, t->len);
         return;
     }
     case IR_IGOTO: case IR_LABELADDR:
@@ -4269,6 +4293,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (F.fix[i].cond == T_TAB) {
             code_patch32(t, F.fix[i].at, (unsigned long)(unsigned int)
                          ((target | 1) - F.fix[i].cz_at));
+        } else if (F.fix[i].cond == T_TBH) {
+            long d = (long)target - F.fix[i].cz_at;
+            if (d < 0 || d > 2L * 65535 || (d & 1))
+                internal_error("thumb: %s: a tbh entry cannot reach its "
+                               "label", fn->name);
+            t_patch_hw16(t, F.fix[i].at, (unsigned)(d / 2));
         } else if (F.fix[i].cond >= T_CBZ) {
             if (!t_patch_cbz(t, F.fix[i].at, target))
                 internal_error("thumb: %s: a cbz no longer reaches its "

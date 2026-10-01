@@ -82,6 +82,24 @@ static int dispatch(int v)
     }
     return r;
 }
+static int dispatch2(int v)
+{
+    /* an empty case that only jumps back: the table entry is forwarded to
+     * a label before the switch, which the one-instruction tbh form
+     * cannot reach -- the general form must take over */
+    int n = 0;
+again:
+    n++;
+    if (n > 5) return -n;
+    switch (v) {
+    case 0: return n;
+    case 1: v = 3; goto again;
+    case 2: return 2 * n;
+    case 3: return 3 * n;
+    case 4: goto again;
+    default: return 100;
+    }
+}
 static long scaled(int i, int j)
 {
     return sh[(i * 5) & 15] + sc[(j * 3) & 15] + uc[(i + j) & 15] + sh[(j * 7) & 15] * sc[i & 15];
@@ -158,6 +176,9 @@ int main(void)
     { long t = 0;
       for (int v = -4; v <= 8; v++) t = t * 3 + dispatch(v);
       putn(t); putn(dispatch(-2147483647 - 1)); putn(dispatch(2147483647)); nl(); }
+    { long t = 0;
+      for (int v = -1; v <= 5; v++) t = t * 7 + dispatch2(v);
+      putn(t); nl(); }
 
     puts_("==END==\n");
     return 0;

@@ -44,7 +44,7 @@ int main(int argc, char **argv)
         /* What avr_insn_writes reads out of every form -- the plain
          * vocabulary, then the PC-relative one, in --list/--branches
          * order -- one line each, for the rule in avr-encoding.sh. */
-        struct code c = { 0, 0, 0 };
+        struct code c = { 0 };
         avr_encode_vocabulary(&c);
         avr_encode_branches(&c);
         for (long p = 0; p < c.len; ) {
@@ -61,7 +61,7 @@ int main(int argc, char **argv)
         return 0;
     }
     {
-        struct code c = { 0, 0, 0 };
+        struct code c = { 0 };
         if (argc > 1 && !strcmp(argv[1], "branch-bytes"))
             avr_encode_branches(&c);
         else

@@ -3170,6 +3170,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 PUSH(fix, nfix, capfix, fx);
                 code_u32(t, 0);
             }
+            code_mark_data(t, tab, t->len);
             break;
         }
         case IR_LANDING:

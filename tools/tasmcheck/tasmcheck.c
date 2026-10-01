@@ -15,7 +15,7 @@ int main(int argc, char **argv)
 {
     char line[512];
     FILE *tmp;
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     char err[512];
     int list = argc > 1 && strcmp(argv[1], "--list") == 0;
 

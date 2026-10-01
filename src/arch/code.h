@@ -7,7 +7,15 @@
 struct code {
     unsigned char *p;
     int len, cap;
+    /* [start, end) ranges of DATA inside the code: a jump table a backend
+     * placed in .text. The ELF writer puts ARM's mapping symbols around
+     * them ($d at the start, $t or $x after), so a disassembler shows
+     * them as words rather than as instructions that happen to decode
+     * or not, and a linker never plants a veneer inside one. Pairs. */
+    int *drange;
+    int ndrange, capdrange;
 };
+void code_mark_data(struct code *c, int start, int end);
 
 /* ---- a statement that names a symbol ---------------------------------
  *

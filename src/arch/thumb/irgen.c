@@ -242,7 +242,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
 
     char *text = t_subst(file, s->line, a->tmpl, regs, imms, isimm,
                           names, nops);
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     char err[512];
     if (tasm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);

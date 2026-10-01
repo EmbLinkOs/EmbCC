@@ -19,7 +19,7 @@ int main(int argc, char **argv)
         return 0;
     }
     char line[1024];
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     int lineno = 0;
     while (fgets(line, sizeof line, stdin)) {
         lineno++;

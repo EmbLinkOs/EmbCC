@@ -242,7 +242,7 @@ static long long run_li(const unsigned char *p, int n, int rd, int xlen)
 
 static int li_one(long long v, int xlen, int *nbad)
 {
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     rv_li(&c, RV_A0, v, xlen);
     long long want = v;
     if (xlen == 32) want = (long long)(int)(unsigned int)v;
@@ -317,7 +317,7 @@ static int sweep_li(int xlen)
 #define NREFUSE 12
 static void refuse(int n)
 {
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     switch (n) {
     case 0: rv_shift_imm(&c, RV_SLL, RV_A0, RV_A1, 32, 0, 32); break;
     case 1: rv_shift_imm(&c, RV_SLL, RV_A0, RV_A1, 64, 0, 64); break;

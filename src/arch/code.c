@@ -2,6 +2,18 @@
 
 #include "../driver/util.h"
 
+void code_mark_data(struct code *c, int start, int end)
+{
+    if (end <= start)
+        return;
+    if (c->ndrange + 2 > c->capdrange) {
+        c->capdrange = c->capdrange ? c->capdrange * 2 : 16;
+        c->drange = xrealloc(c->drange, (size_t)c->capdrange * sizeof *c->drange);
+    }
+    c->drange[c->ndrange++] = start;
+    c->drange[c->ndrange++] = end;
+}
+
 void code_byte(struct code *c, int b)
 {
     if (c->len == c->cap) {
