@@ -7033,6 +7033,19 @@ static int unr_find(struct ir_func *fn, struct bb *bb, int nbb, int *order,
     return 0;
 }
 
+/* unr_local_cb: a read of v at instruction `at`. v stays the body's own
+ * only while every read of it is inside the body and after its def. */
+struct unr_local { char *local; const struct defs *d; int at, end, nv; };
+static void unr_local_cb(int *p, void *ctx)
+{
+    struct unr_local *c = ctx;
+    int v = *p;
+    if (v < 0 || v >= c->nv || !c->local[v])
+        return;
+    if (!(c->at > c->d->ins[v] && c->at < c->end))
+        c->local[v] = 0;
+}
+
 static int unroll_one(struct ir_func *fn, char *seen, int nseen)
 {
     if (fn->nins == 0)
@@ -7078,6 +7091,23 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
      * carried temp and the next would read it back -- a dependency chain
      * that exists only because two copies share a name. */
     int nvr = fn->nvregs;
+    /* The last copy writes the original names, so that the block leaves
+     * every value where the loop's own body would -- but only the values
+     * that outlive the body need that: the ones the loop carries, tests,
+     * or reads after it. A temp that dies inside the body gets a fresh
+     * name in the last copy as in every other. Otherwise its original
+     * name is written twice, by that copy and by the remainder loop, and
+     * the backends' single-use fusions (`ldr [xn, xm, lsl #2]` is a
+     * shift, an add and a load with one use each) refuse it in both:
+     * `bounds` in tests/bench ran 5% MORE instructions unrolled. */
+    char *local = xmalloc((size_t)(nvr ? nvr : 1));
+    for (int v = 0; v < nvr; v++)
+        local[v] = d.cnt[v] == 1 && d.ins[v] >= L.body_lo &&
+                   d.ins[v] < L.cmp_ins;
+    for (int m = 0; m < fn->nins; m++) {
+        struct unr_local ul = { local, &d, m, L.cmp_ins, nvr };
+        each_read(&fn->ins[m], unr_local_cb, &ul);
+    }
     int Lunroll = fn->nlabels++;
     int Lexit = fn->nlabels++;
     int lineh = fn->ins[L.lo].line, colh = fn->ins[L.lo].col;
@@ -7147,11 +7177,12 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
                     struct lcopy lc = { cur, nvr, 0 };
                     each_read(q, lcopy_cb, &lc);
                     if (t >= 0 && t < nvr) {
-                        if (c == U - 1) { q->dst = t; cur[t] = -1; }
-                        else            { q->dst = fn->nvregs++; cur[t] = q->dst; }
+                        if (c == U - 1 && !local[t]) { q->dst = t; cur[t] = -1; }
+                        else { q->dst = fn->nvregs++; cur[t] = q->dst; }
                     }
                 }
             free(cur);
+            free(local);
 
             /* ---- the back edge: three instructions per U iterations ----
              *
