@@ -2473,6 +2473,12 @@ int main(int argc, char **argv)
             return 1;
         }
         target_set(a);
+        /* The backend's "this op calls a runtime helper" predicate, for
+         * the optimizer's view of what a value crosses: x86-64 has no
+         * such helpers and AVR's allocator does not model them. */
+        target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
+                              : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
+                              : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
         target_os_set(os);
         target_fmt_set(fmt);
     }

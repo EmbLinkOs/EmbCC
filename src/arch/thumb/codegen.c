@@ -332,7 +332,7 @@ static int fp_on_vfp(const struct ir_ins *i)
  * Everything floating point -- ARMv7-M's base profile has no FPU -- and
  * the 64-bit divides. A value live across one of these may not sit in a
  * caller-saved register. */
-static int t_op_calls_helper(const struct ir_ins *i)
+int t_op_calls_helper(const struct ir_ins *i)
 {
     /* With the FPU, the single-precision arithmetic, comparisons and
      * 32-bit conversions are instructions. This must say exactly what

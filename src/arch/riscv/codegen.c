@@ -269,7 +269,7 @@ static int rv_ldvar_plain(int size, int sign, int w)
  * operation on a float or a double is a libgcc call. Answering this
  * wrong is invisible until a float program is optimized, which is
  * exactly where the parked ARMv7-M attempt went wrong. */
-static int rv_op_calls_helper(const struct ir_ins *i)
+int rv_op_calls_helper(const struct ir_ins *i)
 {
     if (i->flt)
         return i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||

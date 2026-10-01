@@ -291,6 +291,38 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
  * math included), AVR and x86-64 most. */
 struct ra_costacc { const int *eof; const int *alias; unsigned long *cost;
                     unsigned long w; int nvr; };
+/* Loop depth per instruction: a loop being the span of a backward
+ * branch, which is what the IR has for one (a switch never closes a
+ * loop; a branch to a label at or before itself does). Capped at five
+ * levels by the callers that weight by it. */
+static int *ra_loop_depth(const struct ir_func *fn)
+{
+    int nins = fn->nins;
+    int *depth = xcalloc((size_t)(nins ? nins : 1), sizeof *depth);
+    int *lab = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *lab);
+    for (int l = 0; l < fn->nlabels; l++) lab[l] = -1;
+    for (int i = 0; i < nins; i++)
+        if (fn->ins[i].op == IR_LABEL && fn->ins[i].label >= 0 &&
+            fn->ins[i].label < fn->nlabels)
+            lab[fn->ins[i].label] = i;
+    for (int i = 0; i < nins; i++) {
+        const struct ir_ins *in = &fn->ins[i];
+        if ((in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ) &&
+            in->label >= 0 && in->label < fn->nlabels &&
+            lab[in->label] >= 0 && lab[in->label] <= i)
+            for (int k = lab[in->label]; k <= i; k++)
+                depth[k]++;
+    }
+    free(lab);
+    return depth;
+}
+struct ra_depacc { int *vdep; int nvr, d; };
+static void ra_depth_cb(int v, void *ctx)
+{
+    struct ra_depacc *c = ctx;
+    if (v >= 0 && v < c->nvr && c->vdep[v] < c->d) c->vdep[v] = c->d;
+}
+
 static void ra_cost_cb(int v, void *ctx)
 {
     struct ra_costacc *c = ctx;
@@ -718,6 +750,22 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * any ABI wish one of them had is the node's. */
     char *xcross = xcalloc((size_t)(E ? E : 1), 1);
     int *ehint = xmalloc((size_t)(E ? E : 1) * sizeof *ehint);
+    /* ...and how deep in a loop a node's members live, for the one
+     * merge that is refused below. */
+    int *idepth = ra_loop_depth(fn);
+    int *ndep = xcalloc((size_t)(E ? E : 1), sizeof *ndep);
+    {
+        int *vdep = xcalloc((size_t)nvr, sizeof *vdep);
+        struct ra_depacc da = { vdep, nvr, 0 };
+        for (int i = 0; i < nins; i++) {
+            da.d = idepth[i] > 5 ? 5 : idepth[i];
+            ra_each_use(&fn->ins[i], ra_depth_cb, &da);
+            ra_depth_cb(fn->ins[i].op == IR_STVAR ? fn->ins[i].dst
+                                                  : ra_ins_def(&fn->ins[i]), &da);
+        }
+        for (int e = 0; e < E; e++) ndep[e] = vdep[eidx[e]];
+        free(vdep);
+    }
     for (int e = 0; e < E; e++) {
         alias[e] = e;
         xcross[e] = crosses[eidx[e]];
@@ -786,6 +834,21 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                 }
             }
             if (high >= NP) continue;
+            /* A node that crosses a call takes a callee-saved register,
+             * and so would the union. When the OTHER node is the deeper
+             * one in a loop -- the inside name a live-range split gave a
+             * value, crossing nothing -- the merge would charge every
+             * iteration for a crossing made once outside: the moves it
+             * saves are the two on the loop's edges, the moves it costs
+             * are the ones into and out of the callee-saved register on
+             * every trip. Keep them apart. Equal depth merges as before:
+             * a call's result copied into a value that crosses the next
+             * call has to move out of r0 anyway. */
+            if (xcross[x] != xcross[y]) {
+                int dc = xcross[x] ? ndep[x] : ndep[y];
+                int dn = xcross[x] ? ndep[y] : ndep[x];
+                if (dn > dc) continue;
+            }
             /* merge y into x */
             for (int w = 0; w < ew; w++) {
                 unsigned long b = adj[(size_t)y * ew + w];
@@ -805,6 +868,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             alias[y] = x;
             absorbed[y] = 1;
             xcross[x] |= xcross[y];
+            if (ndep[y] > ndep[x]) ndep[x] = ndep[y];
             if (ehint[x] < 0) ehint[x] = ehint[y];
             int d2 = 0;
             for (int w = 0; w < ew; w++) {
@@ -825,21 +889,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * bisecting a difference to this choice. */
     int by_degree = getenv("EMBCC_RA_DEGREE_SPILL") != NULL;
     {
-        int *depth = xcalloc((size_t)(nins ? nins : 1), sizeof *depth);
-        int *lab = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *lab);
-        for (int l = 0; l < fn->nlabels; l++) lab[l] = -1;
-        for (int i = 0; i < nins; i++)
-            if (fn->ins[i].op == IR_LABEL && fn->ins[i].label >= 0 &&
-                fn->ins[i].label < fn->nlabels)
-                lab[fn->ins[i].label] = i;
-        for (int i = 0; i < nins; i++) {
-            const struct ir_ins *in = &fn->ins[i];
-            if ((in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ) &&
-                in->label >= 0 && in->label < fn->nlabels &&
-                lab[in->label] >= 0 && lab[in->label] <= i)
-                for (int k = lab[in->label]; k <= i; k++)
-                    depth[k]++;
-        }
+        int *depth = idepth;
         struct ra_costacc ca;
         ca.eof = eof; ca.alias = alias; ca.cost = cost; ca.nvr = nvr;
         for (int i = 0; i < nins; i++) {
@@ -849,7 +899,6 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             ra_each_use(in, ra_cost_cb, &ca);
             ra_cost_cb(in->op == IR_STVAR ? in->dst : ra_ins_def(in), &ca);
         }
-        free(depth); free(lab);
     }
 
     /* Chaitin-Briggs simplify order. Repeatedly remove a node of degree < NCALLEE
@@ -1060,7 +1109,22 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         if (reg_used[k] && callee_saved(POOL[k])) used_out[nu++] = POOL[k];
     *nused_out = nu;
 
+    /* EMBCC_RA_TRACE=1: every allocated or eligible value, whether it
+     * crosses a call, what the ABI hinted and where it went -- the view
+     * that showed a live-range split's inside name being coalesced back
+     * into the outside one. */
+    if (getenv("EMBCC_RA_TRACE")) {
+        fprintf(stderr, "ra %s pool(%d):", fn->name, NP);
+        for (int k = 0; k < NP; k++) fprintf(stderr, " %d", POOL[k]);
+        fprintf(stderr, " nins=%d E=%d\n", nins, E);
+    }
+    if (getenv("EMBCC_RA_TRACE"))
+        for (int v = 0; v < nvr; v++)
+            if (elig[v] || loc[v] >= 0)
+                fprintf(stderr, "ra %s v%d cross=%d hint=%d loc=%d [%d,%d]\n",
+                        fn->name, v, crosses[v], hint[v], loc[v], first[v], last[v]);
     free(hint); free(alias); free(absorbed); free(xcross); free(ehint);
+    free(ndep); free(idepth);
     free(cost);
     free(first); free(last); free(elig); free(crosses);
     free(eof); free(eidx); free(adj); free(pref);

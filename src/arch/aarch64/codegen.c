@@ -163,7 +163,7 @@ static int a64_ldvar_plain(int size, int sign, int w)
  * clobbered address (regalloc.h). */
 static int a64_ld_ins(const struct ir_ins *i);
 static int a64_i128_ins(const struct ir_ins *i);
-static int a64_op_calls_helper(const struct ir_ins *i)
+int a64_op_calls_helper(const struct ir_ins *i)
 {
     return a64_i128_ins(i) || a64_ld_ins(i);
 }

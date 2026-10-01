@@ -207,6 +207,13 @@ int target_has_int128(void)     { return g_model[g_arch].int128; }
  * for the table yet -- it refuses the op by name if it ever sees one. */
 int target_jump_tables(void)    { return target_get() != TARGET_AVR; }
 
+static int (*g_calls_helper)(const struct ir_ins *i);
+void target_set_calls_helper(int (*pred)(const struct ir_ins *i)) { g_calls_helper = pred; }
+int target_op_calls_helper(const struct ir_ins *i)
+{
+    return g_calls_helper ? g_calls_helper(i) : 0;
+}
+
 int target_anon_bitfield_aligns(void)
 {
     switch (target_get()) {

@@ -130,6 +130,23 @@ int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
  * rather than lowering something no backend can carry. */
 int target_has_int128(void);
 int target_jump_tables(void);     /* a dense switch may be a table: not AVR */
+/* Does the current backend lower this op to a CALL of a runtime helper
+ * (soft-float arithmetic, a 64-bit divide, an __int128 op)? The
+ * allocator already knows -- it is the backend's own predicate, handed
+ * over in its ra_target -- and an optimizer pass that reasons about what
+ * a value crosses must agree with it, or it reasons about the wrong
+ * calls. x86-64 and AVR answer 0: the one has no such helpers, the
+ * other's allocator does not model them this way. */
+struct ir_ins;
+int target_op_calls_helper(const struct ir_ins *i);
+/* The driver registers the backend's predicate at target selection:
+ * src/arch/target.c itself must not name the backends, because the
+ * tools that link it alone (embls) link no Thumb or RISC-V codegen.
+ * Unregistered, every op is an ordinary one. */
+void target_set_calls_helper(int (*pred)(const struct ir_ins *i));
+int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c */
+int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
+int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
