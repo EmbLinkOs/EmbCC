@@ -254,6 +254,7 @@ int thumb_imm_foldable(int op, long imm);
  * shifts already -- and neither are 0, 1 and 2. */
 int target_mul_shift_add(long c, int *k, int *neg, int *j);
 int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
+int a64_imm_foldable(int op, long imm, int w);   /* arch/aarch64/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);

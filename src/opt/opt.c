@@ -8224,7 +8224,79 @@ static int pass_punfwd(struct ir_func *fn)
  * Only forward. A use EARLIER in the instruction stream is the far side
  * of a back edge, and moving the definition after it would leave the
  * first iteration reading nothing.
+ *
+ * And never INTO a loop. A constant before a loop whose one use is
+ * inside it is very often there because LICM put it there, and sinking
+ * it undoes the hoist: the value is rebuilt on every trip. That is one
+ * instruction on x86-64, but two on aarch64 for a 32-bit multiplier
+ * (mov + movk) and three for a global's address (adrp + add + mov) --
+ * an FNV hash rebuilt 16777619 for every byte it read. A loop here is
+ * the span of a backward branch, which is what the IR has for one.
  */
+/* Does this constant take more than one instruction to build on the
+ * target? Only those are worth a register held across a loop: x86-64
+ * builds anything in one (`mov $imm`, `lea sym(%rip)`), and there sinking
+ * into a loop frees a register for one instruction a trip -- keeping them
+ * all hoisted made matrix and sort slower and lib/libc bigger. A global's
+ * address is two (adrp+add, movw+movt, auipc+addi); a literal is two when
+ * it is outside the one-instruction range (movz/movn or a bitmask on
+ * aarch64; a 16-bit movw or a modified immediate on Thumb; 12 bits on
+ * RISC-V). AVR is left as it was: every multi-byte value there is several
+ * instructions, and its register file is what runs out first. */
+static int g_opt_size;                  /* -Os, set by opt_run (defined below) */
+int t_imm_ok(long imm);                 /* arch/thumb/emit.c */
+int a64_bitmask_ok(long imm, int w);    /* arch/aarch64/emit.c */
+static int const_is_expensive(const struct ir_ins *i)
+{
+    enum target_arch ta = target_get();
+    if (ta == TARGET_X86_64 || ta == TARGET_AVR)
+        return 0;
+    switch (i->op) {
+    case IR_GADDR: case IR_STRADDR: case IR_FADDR:
+        return 1;
+    case IR_CONST: {
+        long v = i->imm;
+        if (i->w == 4) v = (long)(int)v;
+        if (ta == TARGET_AARCH64) {
+            unsigned long u = (unsigned long)v, n = ~u;
+            int w = i->w == 4 ? 4 : 8;
+            if (w == 4) { u &= 0xffffffffUL; n &= 0xffffffffUL; }
+            for (int s = 0; s < 8 * w; s += 16) {
+                if ((u & ~(0xffffUL << s)) == 0) return 0;     /* movz */
+                if ((n & ~(0xffffUL << s)) == 0) return 0;     /* movn */
+            }
+            return !a64_bitmask_ok(w == 4 ? (long)(unsigned)u : v, w);
+        }
+        if (ta == TARGET_THUMB)
+            return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
+        return !(v >= -2048 && v <= 2047);                     /* RISC-V */
+    }
+    default:
+        return 0;
+    }
+}
+
+static int *sink_loop_depth(const struct ir_func *fn)
+{
+    int N = fn->nins;
+    int *depth = xcalloc((size_t)(N ? N : 1), sizeof *depth);
+    int *lab = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *lab);
+    for (int l = 0; l < fn->nlabels; l++) lab[l] = -1;
+    for (int i = 0; i < N; i++)
+        if (fn->ins[i].op == IR_LABEL && fn->ins[i].label >= 0 &&
+            fn->ins[i].label < fn->nlabels)
+            lab[fn->ins[i].label] = i;
+    for (int i = 0; i < N; i++) {
+        const struct ir_ins *in = &fn->ins[i];
+        if ((in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ) &&
+            in->label >= 0 && in->label < fn->nlabels &&
+            lab[in->label] >= 0 && lab[in->label] <= i)
+            for (int k = lab[in->label]; k <= i; k++)
+                depth[k]++;
+    }
+    free(lab);
+    return depth;
+}
 /* each_read's callback for "which instruction reads this vreg": the
  * FIRST one wins, which is the only one when the use count is 1. */
 struct sink_at_ctx { int *at; int nv; int n; };
@@ -8260,6 +8332,7 @@ static int pass_sinkconst(struct ir_func *fn)
     /* where each sinkable constant wants to go */
     int *to = xmalloc((size_t)fn->nins * sizeof *to);
     for (int n = 0; n < fn->nins; n++) to[n] = -1;
+    int *depth = sink_loop_depth(fn);
     int any = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
@@ -8278,9 +8351,15 @@ static int pass_sinkconst(struct ir_func *fn)
             continue;
         if (use[i->dst] != 1 || d.cnt[i->dst] != 1)
             continue;
-        if (at[i->dst] > n + 1) { to[n] = at[i->dst]; any = 1; }
+        if (at[i->dst] > n + 1 &&
+            (depth[at[i->dst]] <= depth[n] || g_opt_size ||
+             !const_is_expensive(i))) {
+            to[n] = at[i->dst];
+            any = 1;
+        }
     }
     free(at);
+    free(depth);
     if (!any) { free(use); free(to); free_defs(&d); return 0; }
 
     /* Rebuild in one pass: `head[m]` chains the constants that want to
@@ -8331,12 +8410,14 @@ static enum binop swap_pred(enum binop p)
  * target's instructions cannot hold it: there a folded constant is rebuilt
  * at every use -- a movw+movt pair each time on Thumb -- where one left in
  * a register is built once and can be hoisted out of a loop. */
-static int target_imm_foldable(int op, long imm)
+static int target_imm_foldable(int op, long imm, int w)
 {
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return riscv_imm_foldable(op, imm);
+    if (target_get() == TARGET_AARCH64)
+        return a64_imm_foldable(op, imm, w);
     return 1;
 }
 
@@ -8369,12 +8450,12 @@ static int pass_immfold(struct ir_func *fn)
             continue;
         }
         if (get_const(fn, &d, i->b, &B) && fits_imm32(B) &&
-            target_imm_foldable(i->op, B)) {
+            target_imm_foldable(i->op, B, i->w)) {
             i->imm = B; i->imm_b = 1; i->b = -1;    /* op a, imm */
             changed = 1;
         } else if ((commutative || i->op == IR_CMP) &&
                    get_const(fn, &d, i->a, &A) && fits_imm32(A) &&
-                   target_imm_foldable(i->op, A)) {
+                   target_imm_foldable(i->op, A, i->w)) {
             /* Constant in the first operand: move it to the immediate, keeping
              * a valid instruction — commutative ops just swap, a compare swaps
              * and flips its predicate. */

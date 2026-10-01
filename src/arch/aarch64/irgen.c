@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "../../driver/util.h"
+#include "emit.h"
 #include "../../sema/sema.h"
 #include "../../sema/type.h"
 #include "asm.h"
@@ -344,3 +345,31 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
 
 /* Innermost enclosing loop's exit and continue targets; sema already
  * rejected break/continue outside any loop. */
+
+/* What the aarch64 lowerings take as an immediate without building the
+ * constant first -- asked by the optimizer before it folds one (opt.c's
+ * target_imm_foldable). This target used to answer "everything", and a
+ * constant no instruction can hold was then rebuilt at its use: FNV-1a's
+ * multiplier 16777619 by a mov and a movk on every byte of every string
+ * hashed, where a value left in a register is built once before the loop.
+ *
+ * add, sub and compare: 12 bits, optionally shifted by 12, either sign
+ * (an add of a negative is a sub, a compare a cmn). and, orr, eor: a
+ * bitmask immediate at the operation's width. mul has no immediate form
+ * at all, but the code generator turns a multiply by 2^k +- 1 (shifted)
+ * into one shifted add (target_mul_shift_add), so those fold. */
+int a64_imm_foldable(int op, long imm, int w)
+{
+    long m = imm < 0 ? -imm : imm;
+    int k, neg, j;
+    switch (op) {
+    case IR_ADD: case IR_SUB: case IR_CMP:
+        return m <= 0xfff || ((m & 0xfff) == 0 && m <= 0xfff000L);
+    case IR_AND: case IR_OR: case IR_XOR:
+        return a64_bitmask_ok(w == 4 ? (long)(unsigned)imm : imm, w == 4 ? 4 : 8);
+    case IR_MUL:
+        return target_mul_shift_add(imm, &k, &neg, &j);
+    default:
+        return 0;
+    }
+}

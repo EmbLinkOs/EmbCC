@@ -247,6 +247,14 @@ static int a64_bitmask_imm(unsigned long imm, int w, unsigned long *field)
     return 0;
 }
 
+/* May `imm` be an AND/ORR/EOR immediate at width w? The question
+ * a64_logical_imm answers by trying, asked without emitting. */
+int a64_bitmask_ok(long imm, int w)
+{
+    unsigned long field;
+    return a64_bitmask_imm((unsigned long)imm, w, &field);
+}
+
 int a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w)
 {
     unsigned long field, base;
