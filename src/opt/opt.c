@@ -642,6 +642,18 @@ static unsigned long known_zero(struct ir_func *fn, struct defs *d, int v,
     }
 }
 
+/* Is vreg v defined earlier in the same basic block as instruction n --
+ * no label between its definition and n? */
+static int defined_in_block(struct ir_func *fn, struct defs *d, int v, int n)
+{
+    if (v < 0 || d->cnt[v] != 1 || d->ins[v] < 0 || d->ins[v] >= n)
+        return 0;
+    for (int m = d->ins[v] + 1; m < n; m++)
+        if (fn->ins[m].op == IR_LABEL)
+            return 0;
+    return 1;
+}
+
 static int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -674,6 +686,26 @@ static int pass_fold(struct ir_func *fn)
                 to_const(i, norm((long)r, i->w));
                 changed = 1;
             }
+            continue;
+        }
+        if (i->op == IR_MOV && ka && !i->flt && (i->w == 4 || i->w == 8) &&
+            target_get() != TARGET_AVR && !defined_in_block(fn, &d, i->a, n)) {
+            /* A copy of a constant IS that constant. The copies are what
+             * phi destruction leaves at a loop's entry and latch, and a
+             * constant they all read stayed live across the whole loop
+             * for their sake -- in a callee-saved register, or a slot:
+             * `bounds` in tests/bench kept its zero on the stack and
+             * reloaded it every outer iteration. As a constant of its own
+             * each copy is one instruction and no live range. Only across
+             * a block boundary, though: within one block value numbering
+             * merges equal constants into exactly this copy, and the two
+             * rules undid each other forever -- src/arch/x86_64/codegen.c
+             * never finished compiling. Not on AVR:
+             * a constant there is an ldi per byte (four `mov r,r1` for a
+             * zero) where the copy was a movw per pair, and lib/libc's
+             * math grew by 256 bytes. */
+            to_const(i, norm(A, i->w));
+            changed = 1;
             continue;
         }
         if ((i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F) && ka) {
