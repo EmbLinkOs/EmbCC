@@ -10269,6 +10269,153 @@ static int pass_rangecheck(struct ir_func *fn)
     return changed;
 }
 
+/* ==== an address next to its access ======================================
+ *
+ * Every backend fuses an address computation into the access it feeds --
+ * x86-64's `[base + idx*4]`, Thumb's `ldr r, [rn, rm, lsl #2]`, aarch64's
+ * `[xn, xm, lsl #2]`, and the offset fold of every target -- and every
+ * one of those looks at the instructions immediately before the access.
+ * An interpreter's `stack[sp++] = prog[pc++]` computes the store's
+ * address, then loads the value, then stores: the address is two
+ * instructions away and is materialised whole, a shift and an add the
+ * store did not need.
+ *
+ * So a single-use chain of address arithmetic -- add, shift or multiply
+ * by a constant, widening -- defined earlier in the access's own block is
+ * moved down to sit right before it, deepest operand first. Nothing about
+ * the values changes: the chain is pure, its result is read only by the
+ * access, and it moves only when no instruction it passes writes any of
+ * its operands. */
+static int sinkaddr_op(const struct ir_ins *i)
+{
+    if (i->flt || i->vol)
+        return 0;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_EXT:
+        return 1;
+    case IR_SHL: case IR_MUL:
+        return i->imm_b;              /* by a constant only */
+    default:
+        return 0;
+    }
+}
+struct sa_rd { const int *wr; int lo, hi, bad, nv; };
+static int pass_sinkaddr(struct ir_func *fn)
+{
+    int N = fn->nins, nv = fn->nvregs;
+    /* Not on AVR: its pointer registers are three pairs, and an address
+     * formed early and held is often what keeps one of them from being
+     * reloaded -- lib/libc grew by 92 bytes when they were moved. */
+    if (N < 3 || nv == 0 || target_get() == TARGET_AVR)
+        return 0;
+    int *use = xcalloc((size_t)nv, sizeof *use);
+    struct ucount uc = { use, nv };
+    for (int n = 0; n < N; n++)
+        each_read(&fn->ins[n], count_cb, &uc);
+    struct defs d;
+    compute_defs(fn, &d);
+    /* block start of each instruction: the index of the last label or
+     * terminator before it, so "same block" is one comparison */
+    int *bstart = xmalloc((size_t)N * sizeof *bstart);
+    for (int n = 0, b = 0; n < N; n++) {
+        enum ir_op op = fn->ins[n].op;
+        if (op == IR_LABEL) b = n;
+        bstart[n] = b;
+        if (op == IR_JMP || op == IR_BRZ || op == IR_BRNZ || op == IR_RET ||
+            op == IR_UD2 || op == IR_IGOTO || op == IR_SWITCH)
+            b = n + 1;
+    }
+    char *moved = xcalloc((size_t)N, 1);
+    int *before = xmalloc((size_t)N * 4 * sizeof *before);  /* up to 4 per access */
+    int *nbefore = xcalloc((size_t)N, sizeof *nbefore);
+    int changed = 0;
+    for (int n = 0; n < N; n++) {
+        const struct ir_ins *acc = &fn->ins[n];
+        if (acc->op != IR_LOAD && acc->op != IR_STORE)
+            continue;
+        /* the chain, root first: the address, then its operands */
+        int chain[4], nc = 0, frontier[4], nf = 0;
+        frontier[nf++] = acc->a;
+        while (nf && nc < 4) {
+            int v = frontier[--nf];
+            if (v < fn->nvars || v >= nv || d.cnt[v] != 1 || use[v] != 1)
+                continue;
+            int dn = d.ins[v];
+            if (dn < 0 || dn >= n || moved[dn] || bstart[dn] != bstart[n])
+                continue;
+            if (!sinkaddr_op(&fn->ins[dn]))
+                continue;
+            chain[nc++] = dn;
+            const struct ir_ins *c = &fn->ins[dn];
+            if (c->a >= 0 && nf < 4) frontier[nf++] = c->a;
+            if (!c->imm_b && c->b >= 0 && c->op != IR_EXT && nf < 4) frontier[nf++] = c->b;
+        }
+        if (nc == 0)
+            continue;
+        /* already in place? the chain occupies the slots right before n */
+        int lowest = n;
+        for (int k = 0; k < nc; k++) if (chain[k] < lowest) lowest = chain[k];
+        if (lowest == n - nc) {
+            int contiguous = 1;
+            for (int m = n - nc; m < n; m++) {
+                int in = 0;
+                for (int k = 0; k < nc; k++) if (chain[k] == m) in = 1;
+                if (!in) contiguous = 0;
+            }
+            if (contiguous)
+                continue;
+        }
+        /* nothing between a chain member and n may write its operands,
+         * or another member's (they read each other, which is fine: the
+         * order is kept) */
+        int ok = 1;
+        for (int k = 0; k < nc && ok; k++) {
+            const struct ir_ins *c = &fn->ins[chain[k]];
+            int ops[2] = { c->a, (!c->imm_b && c->op != IR_EXT) ? c->b : -1 };
+            for (int m = chain[k] + 1; m < n && ok; m++) {
+                int t = fn->ins[m].op == IR_STVAR ? fn->ins[m].dst : def_target(&fn->ins[m]);
+                if (fn->ins[m].op == IR_ASM || fn->ins[m].op == IR_LANDING)
+                    ok = 0;
+                for (int q = 0; q < 2; q++)
+                    if (ops[q] >= 0 && t == ops[q]) ok = 0;
+            }
+        }
+        if (!ok)
+            continue;
+        /* emit in original order (each member's operands come before it) */
+        for (int x = 0; x < nc; x++)
+            for (int y = x + 1; y < nc; y++)
+                if (chain[y] < chain[x]) { int t = chain[x]; chain[x] = chain[y]; chain[y] = t; }
+        for (int k = 0; k < nc; k++) {
+            moved[chain[k]] = 1;
+            before[n * 4 + nbefore[n]++] = chain[k];
+        }
+        changed = 1;
+    }
+    if (changed) {
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(N + 1) * sizeof *newpos) : NULL;
+        for (int n = 0; n < N; n++) {
+            if (newpos) newpos[n] = nb.n;
+            for (int k = 0; k < nbefore[n]; k++)
+                *ib_push(&nb) = fn->ins[before[n * 4 + k]];
+            if (!moved[n])
+                *ib_push(&nb) = fn->ins[n];
+        }
+        if (newpos) newpos[N] = nb.n;   /* a scope ending at the end */
+        if (newpos) {
+            remap_scopes(fn, newpos, N);
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    }
+    free(use); free(bstart); free(moved); free(before); free(nbefore);
+    free_defs(&d);
+    return changed;
+}
+
 static void opt_func(struct ir_func *fn)
 {
     /* ---- functions the CFG cannot be trusted for -------------------
@@ -10551,6 +10698,7 @@ static void opt_func(struct ir_func *fn)
         while (guard++ < 64 && pass_splitloops(fn))
             ;
     }
+    pass_sinkaddr(fn);       /* last: nothing may separate them again */
     if (verify) verify_func(fn, "opt");
 
     /* What the whole fixpoint came to, for this function. The per-pass
