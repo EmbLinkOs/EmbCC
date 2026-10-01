@@ -334,6 +334,10 @@ static void ra_cost_cb(int v, void *ctx)
     c->cost[e] += c->w;
 }
 
+static const struct ra_range *g_ra_res;
+static int g_ra_nres;
+void ra_reserve(const struct ra_range *r, int n) { g_ra_res = r; g_ra_nres = n; }
+
 int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                  const char *g_wide, const char *fltmap,
                  int *used_out, int *nused_out)
@@ -363,7 +367,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     int *loc = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *loc);
     for (int v = 0; v < nvr; v++) loc[v] = -1;
     *nused_out = 0;
-    if (nvr == 0) return loc;
+    if (nvr == 0) { g_ra_res = NULL; g_ra_nres = 0; return loc; }
 
     int NP = 0;
     const int *POOL = fp ? t->fp_pool_for(fn, &NP) : t->pool_for(fn, &NP);
@@ -958,6 +962,18 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         free(deg); free(gone);
     }
 
+    /* Each node's span, for the reserved ranges below: the earliest
+     * first and the latest last of its members. */
+    int *nfirst = xmalloc((size_t)(E ? E : 1) * sizeof *nfirst);
+    int *nlast = xmalloc((size_t)(E ? E : 1) * sizeof *nlast);
+    for (int e = 0; e < E; e++) { nfirst[e] = nins; nlast[e] = -1; }
+    if (g_ra_nres)
+        for (int v = 0; v < nvr; v++) {
+            if (eof[v] < 0 || first[v] < 0) continue;
+            int e = ra_find(alias, eof[v]);
+            if (first[v] < nfirst[e]) nfirst[e] = first[v];
+            if (last[v] > nlast[e]) nlast[e] = last[v];
+        }
     int reg_used[RA_MAXPOOL];
     int nspill = 0;
     for (int k = 0; k < NP; k++) reg_used[k] = 0;
@@ -965,6 +981,11 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         int e = order[oi];
         if (e < 0 || absorbed[e]) continue;
         int taken = 0;                        /* bitmask of neighbour registers */
+        /* ...and the registers a pair holds while this node lives */
+        for (int r = 0; r < g_ra_nres; r++)
+            if (g_ra_res[r].last >= nfirst[e] && g_ra_res[r].first <= nlast[e])
+                for (int k = 0; k < NP; k++)
+                    if (POOL[k] == g_ra_res[r].reg) taken |= 1 << k;
         unsigned long *row = adj + (size_t)e * ew;
         for (int w = 0; w < ew; w++) {
             unsigned long bits = row[w];
@@ -1124,7 +1145,8 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                 fprintf(stderr, "ra %s v%d cross=%d hint=%d loc=%d [%d,%d]\n",
                         fn->name, v, crosses[v], hint[v], loc[v], first[v], last[v]);
     free(hint); free(alias); free(absorbed); free(xcross); free(ehint);
-    free(ndep); free(idepth);
+    free(ndep); free(idepth); free(nfirst); free(nlast);
+    g_ra_res = NULL; g_ra_nres = 0;          /* consumed */
     free(cost);
     free(first); free(last); free(elig); free(crosses);
     free(eof); free(eidx); free(adj); free(pref);

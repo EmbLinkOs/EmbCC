@@ -228,6 +228,16 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first, int *last,
                                  unsigned long **livein_out, int **defv_out,
                                  int *words_out);
 
+/* A register a PAIR pass gave a 64-bit value, over the instructions
+ * [first, last] that value is live (ra_live_intervals' numbering): the
+ * next allocation treats the register as taken there, and only there.
+ * Withholding a pair's registers from the whole function -- the old
+ * rule -- cost a Cortex-M4 loop its r0 for three doubles that lived
+ * briefly after it. The list is read by the next ra_allocate and then
+ * dropped. */
+struct ra_range { int reg, first, last; };
+void ra_reserve(const struct ra_range *r, int n);
+
 /* A map of the function's source variables, for the -g pinning above.
  * malloc'd, one byte per vreg; the caller frees. */
 char *ra_debug_pin_vars(const struct ir_func *fn);

@@ -3646,6 +3646,37 @@ static const struct ra_target THUMB_PAIR_RA = {
 /* The pair pass: a vreg -> low register map, or NULL for none. Fills
  * g_t_taken with every register a pair holds, and `used` with the
  * callee-saved ones to push. */
+
+/* The pair pass's registers, each over its value's live range only, for
+ * the integer pass that follows (ra_reserve). */
+static struct ra_range *g_t_res;
+static int g_t_nres, g_t_capres;
+static void g_t_reserve_pairs(struct ir_func *fn, const int *loc)
+{
+    int nv = fn->nvregs;
+    int *first = xmalloc((size_t)(nv ? nv : 1) * sizeof *first);
+    int *last = xmalloc((size_t)(nv ? nv : 1) * sizeof *last);
+    unsigned long *li = NULL, *lo;
+    int *dv = NULL, wds = 0;
+    lo = ra_live_intervals(fn, first, last, &li, &dv, &wds);
+    free(lo); free(li); free(dv);
+    g_t_nres = 0;
+    for (int v = 0; v < nv; v++) {
+        if (loc[v] < 0 || first[v] < 0) continue;
+        if (g_t_nres + 2 > g_t_capres) {
+            g_t_capres = g_t_capres ? g_t_capres * 2 : 16;
+            g_t_res = xrealloc(g_t_res, (size_t)g_t_capres * sizeof *g_t_res);
+        }
+        for (int h = 0; h < 2; h++) {
+            g_t_res[g_t_nres].reg = loc[v] + h;
+            g_t_res[g_t_nres].first = first[v];
+            g_t_res[g_t_nres].last = last[v];
+            g_t_nres++;
+        }
+    }
+    ra_reserve(g_t_res, g_t_nres);
+    free(first); free(last);
+}
 static int *t_pair_alloc(struct ir_func *fn, const char *wide,
                          const char *excl, int *used, int *nused)
 {
@@ -3675,9 +3706,9 @@ static int *t_pair_alloc(struct ir_func *fn, const char *wide,
     }
     loc = ra_allocate(fn, &THUMB_PAIR_RA, NULL, x, used, nused);
     free(x);
-    for (int v = 0; v < nv; v++)
-        if (loc[v] >= 0)
-            g_t_taken |= 3u << loc[v];
+    /* Each pair's registers are the integer pass's to use outside the
+     * pair's live range: reserved by range, not withheld whole. */
+    g_t_reserve_pairs(fn, loc);
     return loc;
 }
 

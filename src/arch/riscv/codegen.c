@@ -3027,6 +3027,37 @@ static void rv_pair_hints(const struct ir_func *fn, int *hint)
     }
 }
 
+
+/* The pair pass's registers, each over its value's live range only, for
+ * the integer pass that follows (ra_reserve). */
+static struct ra_range *g_rv_res;
+static int g_rv_nres, g_rv_capres;
+static void g_rv_reserve_pairs(struct ir_func *fn, const int *loc)
+{
+    int nv = fn->nvregs;
+    int *first = xmalloc((size_t)(nv ? nv : 1) * sizeof *first);
+    int *last = xmalloc((size_t)(nv ? nv : 1) * sizeof *last);
+    unsigned long *li = NULL, *lo;
+    int *dv = NULL, wds = 0;
+    lo = ra_live_intervals(fn, first, last, &li, &dv, &wds);
+    free(lo); free(li); free(dv);
+    g_rv_nres = 0;
+    for (int v = 0; v < nv; v++) {
+        if (loc[v] < 0 || first[v] < 0) continue;
+        if (g_rv_nres + 2 > g_rv_capres) {
+            g_rv_capres = g_rv_capres ? g_rv_capres * 2 : 16;
+            g_rv_res = xrealloc(g_rv_res, (size_t)g_rv_capres * sizeof *g_rv_res);
+        }
+        for (int h = 0; h < 2; h++) {
+            g_rv_res[g_rv_nres].reg = loc[v] + h;
+            g_rv_res[g_rv_nres].first = first[v];
+            g_rv_res[g_rv_nres].last = last[v];
+            g_rv_nres++;
+        }
+    }
+    ra_reserve(g_rv_res, g_rv_nres);
+    free(first); free(last);
+}
 static int *rv_pair_alloc(struct ir_func *fn, struct rv_fn *F,
                           const char *pin)
 {
@@ -3069,11 +3100,11 @@ static int *rv_pair_alloc(struct ir_func *fn, struct rv_fn *F,
     }
     loc = ra_allocate(fn, &RV_PAIR_RA, NULL, x, used, &nused);
     free(x);
-    /* Withheld from the ordinary pass: EVERY pair that holds a value.
-     * `used` lists only the callee-saved ones, for the prologue to save. */
-    for (int v = 0; v < nv; v++)
-        if (loc[v] >= 0)
-            g_rv_taken |= 3UL << loc[v];
+    /* Each pair's registers are the ordinary pass's to use outside the
+     * pair's live range: reserved by range (ra_reserve), not withheld
+     * from the whole function. `used` lists only the callee-saved ones,
+     * for the prologue to save. */
+    g_rv_reserve_pairs(fn, loc);
     for (int k = 0; k < nused && k < RV_NPAIRS; k++)
         F->pair_used[F->npair++] = used[k];
     return loc;
