@@ -9345,6 +9345,20 @@ static void verify_func(struct ir_func *fn, const char *tag)
     free_defs(&d);
 }
 
+#define OPT_MAX_ROUNDS 64   /* rounds of the block-local passes per outer round */
+static void opt_no_fixpoint(struct ir_func *fn, int rounds)
+{
+    if (getenv("EMBCC_VERIFY"))
+        diag_fatal(fn->file, fn->line,
+                   "internal: the optimizer did not converge on '%s' after %d "
+                   "rounds -- two passes are undoing each other's work",
+                   fn->name, rounds);
+    fprintf(stderr, "embcc: warning: the optimizer stopped after %d rounds on "
+                    "'%s' without converging (the code is correct; this is a "
+                    "compiler performance bug worth reporting)\n",
+            rounds, fn->name);
+}
+
 static void opt_func(struct ir_func *fn)
 {
     /* ---- functions the CFG cannot be trusted for -------------------
@@ -9463,11 +9477,24 @@ static void opt_func(struct ir_func *fn)
      * dataflow), so it runs ONCE per outer round instead of on every inner
      * iteration. When it exposes copies, the inner fixpoint reconverges and we
      * round again — it settles in one or two rounds. */
+    /* The rounds run to a fixpoint, and the guards are how a fixpoint
+     * that never comes is noticed rather than waited for. A pair of
+     * passes that undo each other -- a constant-copy rule against value
+     * numbering, once -- is a compiler that never finishes on a function
+     * big enough to make each round slow: an hour on
+     * src/arch/x86_64/codegen.c before anyone looked. So the cap is low
+     * enough to hit in seconds (a real fixpoint takes a handful of
+     * rounds), and hitting it is reported: fatal under EMBCC_VERIFY,
+     * where the test suite runs, and a warning otherwise, because every
+     * round leaves the function correct and the user's build should not
+     * fail for a slow convergence. */
     int outer = 1, oguard = 0;
     while (outer && oguard++ < 100) {
         outer = 0;
         int changed = 1, guard = 0;
-        while (changed && guard++ < 1000) {
+        while (changed && guard++ < OPT_MAX_ROUNDS) {
+            if (guard == OPT_MAX_ROUNDS)
+                opt_no_fixpoint(fn, OPT_MAX_ROUNDS);
             changed = 0;
             changed |= pass_storefwd(fn); /* forward local stores to loads (mem2reg-lite) */
             changed |= pass_roload(fn);   /* a global nothing writes */
