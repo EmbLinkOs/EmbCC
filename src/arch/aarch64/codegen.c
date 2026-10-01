@@ -2511,6 +2511,37 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_EXT: {
+            /* An extension whose only reader is the next add or subtract
+             * is that instruction's EXTENDED operand: `add x6, x6, w13,
+             * sxtw` where `sxtw x13, w13; add x6, x6, x13` was two. It is
+             * how `long += int` comes out, in every reduction over ints. */
+            if (i->dst >= 0 && i->dst < fn->nvregs && usecnt[i->dst] == 1 &&
+                n + 1 < fn->nins && (i->size == 1 || i->size == 2 ||
+                                     i->size == 4) &&
+                i->size < i->w && (i->w == 4 || i->w == 8) &&
+                !a64_is_flt(i->dst)) {
+                struct ir_ins *nx = &fn->ins[n + 1];
+                int other = -1;
+                if ((nx->op == IR_ADD || nx->op == IR_SUB) && !nx->flt &&
+                    !nx->imm_b && nx->w == i->w && nx->dst >= 0 &&
+                    !a64_ld_ins(nx) && !a64_i128_ins(nx)) {
+                    if (nx->b == i->dst && nx->a != i->dst)
+                        other = nx->a;
+                    else if (nx->op == IR_ADD && nx->a == i->dst &&
+                             nx->b != i->dst)
+                        other = nx->b;
+                }
+                if (other >= 0 && !a64_is_flt(other)) {
+                    int rm = rd(t, sd, i->a, A64_TMP);
+                    int rn = rd(t, sd, other, A64_ACC);
+                    int d = wr(nx->dst, A64_ACC);
+                    a64_alu_reg_ext(t, nx->op == IR_ADD ? '+' : '-', d, rn,
+                                    rm, i->size, i->sign, i->w);
+                    wrote(t, sd, nx->dst, d);
+                    n++;                 /* the fused operation */
+                    break;
+                }
+            }
             int src = rd(t, sd, i->a, A64_ACC);
             int d = wr(i->dst, A64_ACC);
             a64_extend(t, d, src, i->size, i->sign, i->w);

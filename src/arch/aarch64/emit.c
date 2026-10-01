@@ -165,6 +165,17 @@ void a64_alu_reg_shifted(struct code *c, int op, int rd, int rn, int rm,
                 ((unsigned long)rn << 5) | (unsigned long)rd);
 }
 
+void a64_alu_reg_ext(struct code *c, int op, int rd, int rn, int rm,
+                     int size, int sign, int w)
+{
+    /* option: UXTB 0, UXTH 1, UXTW 2, SXTB 4, SXTH 5, SXTW 6 */
+    unsigned long option = (sign ? 4UL : 0UL) |
+                           (size == 1 ? 0UL : size == 2 ? 1UL : 2UL);
+    a64_word(c, (op == '-' ? 0x4B200000UL : 0x0B200000UL) | sf(w) |
+                ((unsigned long)rm << 16) | (option << 13) |
+                ((unsigned long)rn << 5) | (unsigned long)rd);
+}
+
 void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w)
 {
     a64_alu_reg_shifted(c, op, rd, rn, rm, '<', 0, w);

@@ -72,6 +72,10 @@ int  a64_ldp(struct code *c, int rt, int rt2, int rn, long off);
 int  a64_sub_imm(struct code *c, int rd, int rn, long imm, int w);
 /* op: '+' '-' '&' '|' '^' */
 void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w);
+/* add/sub rd, rn, wm, <extend>: the second operand's low `size` bytes,
+ * sign- or zero-extended -- `add x0, x1, w2, sxtw`. op is '+' or '-'. */
+void a64_alu_reg_ext(struct code *c, int op, int rd, int rn, int rm,
+                     int size, int sign, int w);
 void a64_alu_reg_shifted(struct code *c, int op, int rd, int rn, int rm,
                          int kind, int amount, int w);
 void a64_mul(struct code *c, int rd, int rn, int rm, int w);
