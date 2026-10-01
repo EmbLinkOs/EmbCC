@@ -8521,13 +8521,23 @@ static int pass_immfold(struct ir_func *fn)
  *   original would have freed is smaller than what the caller then
  *   spends on spills.
  *
+ * Re-measured 2026-10-02, after the allocator had changed under it: a
+ * sole-caller budget of 2000 made lib/libc SMALLER at -O2 and -Os on all
+ * five targets (x86-64 -84 bytes, aarch64 -156, RV32 -58, Thumb -22, AVR
+ * -54), left tests/bench/kernels.c unchanged on four boards, memory_stream
+ * included, and made the workload's state machine 4-11% faster (its
+ * per-token function, 316 instructions, now moves into its one caller).
+ * So the sole-caller number is 2000; the copied-callee one stays at 24 --
+ * at 64 the hash table's probe and key builder were copied into their
+ * callers and ran 1-4% SLOWER on every board.
+ *
  * So the number stays, and this is what it is doing there. A cost model
  * that beats it wants something these three did not have -- how HOT the
  * call is (section 4's profile work), or a real estimate of what the
  * caller's register pressure will do -- not more arithmetic on facts
  * already available here. */
 #define INLINE_MAX_CALLEE 24     /* instruction budget for an inline candidate */
-#define INLINE_SOLE_CALLEE 200   /* ...and for a body that MOVES (sole_static_caller) */
+#define INLINE_SOLE_CALLEE 2000  /* ...and for a body that MOVES (sole_static_caller) */
 #define INLINE_MAX_CALLER 800    /* stop expanding a caller past this many ins */
 #define INLINE_MAX_PER_FUNC 64   /* and cap inlines per caller, for termination */
 
