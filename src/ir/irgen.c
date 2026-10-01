@@ -997,14 +997,45 @@ static int emit_f2i(struct ir_func *fn, int a, int srcw, int dstw)
     return i->dst;
 }
 
-/* unsigned-64 -> floating. SSE2's cvtsi2sd is SIGNED, so a u64 with its top bit
- * set would convert as a huge negative. Split into two 32-bit halves -- each is
- * positive and < 2^32, so cvtsi2sd is exact -- then hi*2^32 + lo. Both partials
- * are exact doubles, so the single add rounds the true u64 once (correctly
- * rounded). For a float target do it in double first (exact) then narrow, which
- * avoids a double rounding. */
+/* unsigned-64 -> float (the single-precision type). Not through double:
+ * the double sum below is NOT exact -- a 64-bit integer has up to 64
+ * significant bits and a double 53 -- so narrowing it rounds a second
+ * time, and 2^60 + 2^36 + 1 came out 2^60 instead of 2^60 + 2^37: the
+ * first rounding dropped the 1 that put it above the tie. Random programs
+ * found it on x86-64 and aarch64.
+ *
+ * The standard sequence instead: below 2^63 the value converts as SIGNED,
+ * one rounding. From 2^63 it is halved with its lowest bit kept as a
+ * sticky bit -- (v >> 1) | (v & 1), which rounds to a float exactly as v/2
+ * would, the bit standing for everything shifted out -- converted, and
+ * doubled, which is exact. */
+static int gen_u64_to_f32(struct ir_func *fn, int v)
+{
+    int res = new_temp(fn);
+    int l_big = new_label(fn), l_done = new_label(fn);
+    int top = emit_bin(fn, IR_SHR, v, emit_const(fn, 63, 4), 8, 0);
+    emit_brnz(fn, top, 8, l_big);
+    emit_mov(fn, res, emit_i2f(fn, v, 8, 4));
+    emit_jmp(fn, l_done);
+    emit_label(fn, l_big);
+    int half = emit_bin(fn, IR_SHR, v, emit_const(fn, 1, 4), 8, 0);
+    int odd = emit_bin(fn, IR_AND, v, emit_const(fn, 1, 8), 8, 0);
+    int sticky = emit_bin(fn, IR_OR, half, odd, 8, 0);
+    int f = emit_i2f(fn, sticky, 8, 4);
+    emit_mov(fn, res, emit_fbin(fn, IR_ADD, f, f, 4));
+    emit_label(fn, l_done);
+    return res;
+}
+
+/* unsigned-64 -> double (or long double). SSE2's cvtsi2sd is SIGNED, so a
+ * u64 with its top bit set would convert as a huge negative. Split into two
+ * 32-bit halves -- each is positive and < 2^32, so cvtsi2sd is exact -- then
+ * hi*2^32 + lo. Both partials are exact doubles, so the single add rounds
+ * the true u64 once: correctly rounded. (Not for float: see above.) */
 static int gen_u64_to_float(struct ir_func *fn, int v, int tsize)
 {
+    if (tsize == 4)
+        return gen_u64_to_f32(fn, v);
     /* In long double the halves and the sum are all exact (64-bit or wider
      * significand), so compute there directly. */
     int cw = tsize == 16 ? 16 : 8;
@@ -1013,14 +1044,7 @@ static int gen_u64_to_float(struct ir_func *fn, int v, int tsize)
     int hd = emit_i2f(fn, hi, 8, cw);
     int ld = emit_i2f(fn, lo, 8, cw);
     int hs = emit_fbin(fn, IR_MUL, hd, emit_fconst(fn, 4294967296.0, cw), cw);
-    int res = emit_fbin(fn, IR_ADD, hs, ld, cw);
-    if (tsize == 4) {   /* narrow the exact double to float: one rounding */
-        struct ir_ins *nf = emit(fn);
-        nf->op = IR_F2F; nf->a = res; nf->size = 8; nf->w = 4;
-        nf->dst = new_temp(fn);
-        return nf->dst;
-    }
-    return res;
+    return emit_fbin(fn, IR_ADD, hs, ld, cw);
 }
 
 /* floating -> unsigned-64. cvttsd2si is SIGNED: exact for v < 2^63, but v in
