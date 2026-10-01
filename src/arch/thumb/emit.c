@@ -611,10 +611,23 @@ int t_bcond(struct code *c, int cond)
  * I2 are stored as J1 = NOT(I1 XOR S) and J2 = NOT(I2 XOR S). That
  * double negation is the trap in this encoding — it exists so a short
  * forward branch has J1 = J2 = 1 and looks like the older ARM form. */
+/* A branch offset past its form's reach: refused, since an offset that
+ * does not fit would encode a jump somewhere else. emit.c is linked into
+ * the encoding checkers too, which carry no driver: no internal_error. */
+static void out_of_reach(const char *what, long off)
+{
+    fprintf(stderr, "embcc: internal: thumb: %s cannot reach %ld bytes\n",
+            what, off);
+    abort();
+}
+
 static void patch_b24(struct code *c, int at, int target, unsigned keep)
 {
     long off = (long)target - (long)at - 4;
     unsigned long v = (unsigned long)off >> 1;
+    /* +-16 MB. An offset past it would encode a jump somewhere else. */
+    if (off < -16777216L || off > 16777214L || (off & 1))
+        out_of_reach("a 32-bit branch", off);
     unsigned s = (unsigned)((v >> 23) & 1);
     unsigned i1 = (unsigned)((v >> 22) & 1), i2 = (unsigned)((v >> 21) & 1);
     unsigned j1 = (~(i1 ^ s)) & 1, j2 = (~(i2 ^ s)) & 1;
@@ -632,6 +645,12 @@ void t_patch_bcond(struct code *c, int at, int target)
 {
     long off = (long)target - (long)at - 4;
     unsigned long v = (unsigned long)off >> 1;
+    /* +-1 MB. This had no check: a conditional branch further away -- a
+     * 1.7 MB function at -O0 -- was encoded with its offset's top bits
+     * dropped, a branch to somewhere else that assembled cleanly. The
+     * code generator relaxes such branches; this refuses any it missed. */
+    if (off < -1048576L || off > 1048574L || (off & 1))
+        out_of_reach("a conditional branch", off);
     unsigned cond = (unsigned)((c->p[at + 1] << 8 | c->p[at]) >> 6) & 0xf;
     unsigned s = (unsigned)((v >> 19) & 1);
     unsigned j2 = (unsigned)((v >> 18) & 1), j1 = (unsigned)((v >> 17) & 1);

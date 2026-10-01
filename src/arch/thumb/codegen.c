@@ -177,7 +177,15 @@ struct t_fn {
     /* cond >= T_CBZ is a cbz (T_CBZ) or cbnz (T_CBZ + 1). cz_at is where
      * a zero test's `cmp` began when it could become one (r0-r7), else -1:
      * what the first pass measures cbz's reach from. */
-    struct { int at; int label; int cond; int sz; int cz_at; } *fix;
+    struct { int at; int label; int cond; int sz; int cz_at; int ins; } *fix;
+    /* Per IR instruction: a switch whose `tbh` table could not reach a
+     * case on the first pass, and so takes the word table. */
+    char *no_tbh;
+    /* A function with a conditional branch past B<c>.W's +-1 MB: every
+     * conditional jump to a label is then `b<!c> .+n; b label`, and none
+     * is merged with the jump after it -- so the passes still make the
+     * same branches in the same order. */
+    int far_mode;
     /* Branch relaxation: per branch, in emission order, whether the
      * first pass found its target within the 16-bit form's reach. NULL
      * on the first pass, which emits every branch 32-bit. */
@@ -1359,6 +1367,7 @@ static void want_label(struct t_fn *F, int at, int label, int cond)
     F->fix[F->nfix].cond = cond;
     F->fix[F->nfix].sz = F->t->len - at;
     F->fix[F->nfix].cz_at = -1;
+    F->fix[F->nfix].ins = -1;
     F->nfix++;
 }
 
@@ -1380,6 +1389,15 @@ static void jump_to(struct t_fn *F, int label)
 
 static void jump_if(struct t_fn *F, int cond, int label)
 {
+    if (F->far_mode) {
+        int skip = t_bcond16(F->t, cond ^ 1);   /* ARM inverts by bit 0 */
+        int at = emit_branch(F, -1);
+        if (!t_patch_bcond16(F->t, skip, F->t->len))
+            internal_error("thumb: a far branch's skip does not reach");
+        want_label(F, at, label, -1);
+        F->bc_end = -1;                          /* nothing to invert */
+        return;
+    }
     want_label(F, emit_branch(F, cond), label, cond);
     F->bc_end = F->t->len;
     F->bc_fix = F->nfix - 1;
@@ -3559,6 +3577,7 @@ static void gen_ins(struct t_fn *F, int n)
          * rT is r11 and rE r12, the scratch pair; a terminator keeps
          * nothing in them. adr.w reads Align(pc, 4) and is patched once
          * the table's place is known. */
+        int n_ins = (int)(i - fn->ins);   /* `n` is the entry count below */
         int n = fn->jt[i->jt].n;
         int ri = rdr(F, i->a, T_ACC);
         if (t_imm_ok(n)) {
@@ -3574,7 +3593,7 @@ static void gen_ins(struct t_fn *F, int n)
          * target already placed (a case whose block the CFG cleanup
          * forwarded to a label before the switch) rules it out, and the
          * general form below takes over. */
-        int ahead = 1;
+        int ahead = !(F->no_tbh && F->no_tbh[n_ins] == 1);
         for (int k = 0; k < n; k++)
             if (F->label_off[fn->jt[i->jt].labels[k]] >= 0)
                 ahead = 0;
@@ -3583,6 +3602,7 @@ static void gen_ins(struct t_fn *F, int n)
             for (int k = 0; k < n; k++) {
                 want_label(F, t->len, fn->jt[i->jt].labels[k], T_TBH);
                 F->fix[F->nfix - 1].cz_at = at + 4;
+                F->fix[F->nfix - 1].ins = n_ins;
                 code_u16(t, 0);
             }
             code_mark_data(t, at + 4, t->len);
@@ -4030,16 +4050,22 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * branches in the same order and the ordinal is enough to match
      * them. Optimising builds only: -O0's output stays as it was. */
     {
-    int len0 = t->len, nl0 = fn->nlines;
+    int len0 = t->len, nl0 = fn->nlines, nd0 = t->ndrange;
     int sc0 = F.st->ncall, se0 = F.st->next, ss0 = F.st->nstr,
         sg0 = F.st->ng, sf0 = F.st->nf;
     char *shortb = NULL;
     int nshortb = 0;
+    F.no_tbh = xcalloc((size_t)fn->nins + 1, 1);
+    int restarted = 0;           /* a first pass made again: reset as for a later one */
     for (int pass = 0; pass < 3; pass++) {
+    int redo0 = 0;
     g_t_scr_used = 0;
     F.fb = T_SP;                 /* until the prologue sets r7 */
-    if (pass) {
+    if (pass || restarted) {
         t->len = len0;
+        /* and the jump tables an abandoned pass marked as data: left in,
+         * their $d mapping symbols fell on this pass's instructions */
+        t->ndrange = nd0;
         fn->nlines = nl0;
         F.st->ncall = sc0; F.st->next = se0; F.st->nstr = ss0;
         F.st->ng = sg0; F.st->nf = sf0;
@@ -4386,9 +4412,25 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                          ((target | 1) - F.fix[i].cz_at));
         } else if (F.fix[i].cond == T_TBH) {
             long d = (long)target - F.fix[i].cz_at;
-            if (d < 0 || d > 2L * 65535 || (d & 1))
+            if (d < 0 || d > 2L * 65535 || (d & 1)) {
+                /* A tbh entry is a halfword count: 128 KB forward and no
+                 * more, which a large function at -O0 passes. On the
+                 * first pass that switch is marked for the word table and
+                 * the pass is made again -- the table is longer, so every
+                 * other branch has to be measured over it. Later passes
+                 * only shrink the code, so they cannot meet this. */
+                /* 2: marked by this pass, whose other entries for the
+                 * same table land here too. 1, marked by an earlier pass,
+                 * would be a switch that ignored it: refused. */
+                if (pass == 0 && F.fix[i].ins >= 0 &&
+                    F.no_tbh[F.fix[i].ins] != 1) {
+                    F.no_tbh[F.fix[i].ins] = 2;
+                    redo0 = 1;
+                    continue;
+                }
                 internal_error("thumb: %s: a tbh entry cannot reach its "
                                "label", fn->name);
+            }
             t_patch_hw16(t, F.fix[i].at, (unsigned)(d / 2));
         } else if (F.fix[i].cond >= T_CBZ) {
             if (!t_patch_cbz(t, F.fix[i].at, target))
@@ -4406,6 +4448,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         } else if (F.fix[i].cond < 0) {
             t_patch_b(t, F.fix[i].at, target);
         } else {
+            long d = (long)target - F.fix[i].at - 4;
+            /* past B<c>.W's reach: again, in far mode -- and skip the
+             * rest that do not reach either, in this pass that asked */
+            if ((d < -1048576L || d > 1048574L) && pass == 0 &&
+                (!F.far_mode || redo0)) {
+                F.far_mode = 1;
+                redo0 = 1;
+                continue;
+            }
             t_patch_bcond(t, F.fix[i].at, target);
         }
     }
@@ -4414,6 +4465,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * Measured from this pass's positions, where every branch is still
      * the wide form. On the second pass code between a branch and its
      * target can only get SHORTER, so what reached still reaches. */
+    if (redo0) {                     /* a tbh became a word table: again */
+        for (i = 0; i < fn->nins; i++)
+            if (F.no_tbh[i] == 2)
+                F.no_tbh[i] = 1;
+        restarted = 1;
+        pass = -1;
+        continue;
+    }
     if (pass == 0) {
         int any = 0;
         nshortb = F.nfix;
@@ -4456,6 +4515,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     }                                   /* the passes */
     free(shortb);
+    free(F.no_tbh);
+    F.no_tbh = NULL;
     }
 
     f->code_len = t->len - f->code_off;
@@ -4488,7 +4549,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
                           struct t_sites *st, int want_debug)
 {
     int at = t->len, ncall = st->ncall, next = st->next, nstr = st->nstr,
-        ng = st->ng, nf = st->nf, with;
+        ng = st->ng, nf = st->nf, nd = t->ndrange, with;
     const char *knob = getenv("EMBCC_T_PAIRS");
     const char *only = getenv("EMBCC_T_PAIRS_ONLY");
 
@@ -4511,12 +4572,12 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     }
     gen_func(fn, t, st, want_debug);
     with = t->len - at;
-    t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
+    t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next; st->nstr = nstr;
     st->ng = ng; st->nf = nf;
     g_t_pairs = 0;
     gen_func(fn, t, st, want_debug);
     if (t->len - at > with) {
-        t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
+        t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next; st->nstr = nstr;
         st->ng = ng; st->nf = nf;
         g_t_pairs = 1;
         gen_func(fn, t, st, want_debug);
