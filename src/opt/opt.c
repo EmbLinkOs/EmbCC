@@ -1370,6 +1370,20 @@ struct bb {
     int **phi_inc;                  /* phi_inc[p][k] = value on edge from pred p */
 };
 
+/* A fresh instruction with no operands: what irgen's emit() starts from.
+ * The vreg and label fields are -1, not 0 -- slot 0 is a real local, the
+ * first parameter, and a field left at 0 names it. A branch built here
+ * with dst 0 told AVR's width test the branch WROTE that parameter, so
+ * where it was eight bytes a four-byte zero test was lowered over eight
+ * registers: past r31 the encoder refused it, short of r31 four bytes of
+ * an unrelated value decided the branch. */
+static void ins_blank(struct ir_ins *i)
+{
+    memset(i, 0, sizeof *i);
+    i->dst = i->a = i->b = -1;
+    i->label = -1;
+}
+
 /* Growable instruction buffer, for rebuilding fn->ins out of SSA. */
 struct ibuf { struct ir_ins *p; int n, cap; };
 static struct ir_ins *ib_push(struct ibuf *b)
@@ -1379,7 +1393,7 @@ static struct ir_ins *ib_push(struct ibuf *b)
         b->p = xrealloc(b->p, (size_t)b->cap * sizeof *b->p);
     }
     struct ir_ins *i = &b->p[b->n++];
-    memset(i, 0, sizeof *i);
+    ins_blank(i);
     return i;
 }
 
@@ -7219,7 +7233,6 @@ static struct ir_ins *unr_emit(struct ibuf *nb, enum ir_op op,
                                int line, int col)
 {
     struct ir_ins *p = ib_push(nb);
-    memset(p, 0, sizeof *p);
     p->op = op;
     p->line = line; p->col = col; p->synth = 1;
     return p;
@@ -7568,7 +7581,6 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
         }
         if (n == L.hi) {
             struct ir_ins *p = ib_push(&nb);
-            memset(p, 0, sizeof *p);
             p->op = IR_LABEL; p->label = Lexit;
             p->line = lineh; p->col = colh; p->synth = 1;
         }
@@ -7576,7 +7588,6 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
     }
     if (L.hi == fn->nins) {            /* the loop ends the function */
         struct ir_ins *p = ib_push(&nb);
-        memset(p, 0, sizeof *p);
         p->op = IR_LABEL; p->label = Lexit;
         p->line = lineh; p->col = colh; p->synth = 1;
     }
@@ -8732,14 +8743,14 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
         if (in.op == IR_RET) {
             if (in.a >= 0 && dst >= 0) {
                 struct ir_ins *mv = &buf[m++];
-                memset(mv, 0, sizeof *mv);
+                ins_blank(mv);
                 mv->op = IR_MOV; mv->dst = dst; mv->a = in.a;
                 mv->line = in.line;      /* the callee's `return` */
                 mv->col = in.col;
             }
             if (i != cf->nins - 1) {     /* the last RET falls into `after` */
                 struct ir_ins *jp = &buf[m++];
-                memset(jp, 0, sizeof *jp);
+                ins_blank(jp);
                 jp->op = IR_JMP; jp->label = after;
                 jp->line = in.line;
                 jp->col = in.col;

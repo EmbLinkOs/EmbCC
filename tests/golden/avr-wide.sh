@@ -98,6 +98,17 @@ cat > "$out/w64.c" <<'EOF'
 #include "pr.h"
 
 static long long addll(long long a, long long b) { return a + b; }
+/* An unrolled loop on a 64-bit counter, in a function whose FIRST
+ * parameter is eight bytes. The unroller's branches carried a `dst` of 0,
+ * which named that parameter, so the backend took them for eight-byte
+ * branches and tested eight registers: past r31 it refused, short of it
+ * four bytes of something else decided the branch. */
+__attribute__((noinline)) static long long cnt64(long long x, long long n)
+{
+    long long s = 0, i;
+    for (i = 0; i < n; i++) s += i + i + i + 1;
+    return s + (x >> 60);
+}
 static long long subll(long long a, long long b) { return a - b; }
 static long long andll(long long a, long long b) { return a & b; }
 static long long orll (long long a, long long b) { return a | b; }
@@ -155,6 +166,12 @@ void run(void)
     putn(eqll(0x100000000LL, 0LL));     /* differ only above 32 bits */
     putn(nzll(0x100000000LL));          /* and so does this */
     putn(nzll(0LL));
+    puts_("| ");
+    {
+        long long k;
+        for (k = 0; k < 11; k++)
+            p64(cnt64(-0x1000000000000000LL, k));
+    }
     puts_("DONE\n");
 }
 EOF

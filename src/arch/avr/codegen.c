@@ -280,8 +280,17 @@ static int wide_ins(const struct a_fn *F, const struct ir_ins *i)
          * and a destination and nothing else, so asking `w == 8` alone made
          * an eight-byte merge copy four bytes: __divdi3's
          * `neg ? -(s64_)q : (s64_)q` returned its low half with the high half
-         * of whatever the slot's previous tenant left there. */
-        return i->w == 8 || (i->dst >= 0 && vw(F, i->dst) == 8);
+         * of whatever the slot's previous tenant left there.
+         *
+         * The destination the instruction WRITES, by its opcode -- not the
+         * `dst` field, which a branch, a jump or a store has no use for and
+         * may leave at 0: that is local 0, and where it was an eight-byte
+         * parameter every four-byte branch on the optimizer's own compares
+         * came here and read eight registers. */
+        {
+            int d = ra_ins_def(i);
+            return i->w == 8 || (d >= 0 && vw(F, d) == 8);
+        }
     }
 }
 
