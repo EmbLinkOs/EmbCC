@@ -3556,7 +3556,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * once, before any attempt, and before allocation. */
     if (g_rv_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
         char *w = xlen == 32 ? wide_map(fn) : NULL;
-        ra_fold_memoff(fn, -2048, 2047, xlen / 8, w);
+        ra_fold_memoff(fn, -2048, 2047, xlen / 8, xlen / 8, w);
         free(w);
     }
     g_rv_pairs = 1;

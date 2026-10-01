@@ -55,6 +55,12 @@ static long from_k(const int *a, int n, int k)
      * once took it for the OUTER loop's, and walked a[j] instead of a[i] */
     long s = 0;
     for (int j = 0; j < n; j++) for (int i = k; i < 16; i++) s += a[i];
+static long moved(const int *p, int n)
+{
+    /* an address made from p, read after p has moved: the offset fold
+     * must not turn *q into a load at [p, #4] */
+    long s = 0;
+    for (int i = 0; i < n; i++) { const int *q = p + 1; p += 3; s += *q * (i + 1); }
     return s;
 }
 static long scaled(int i, int j)
@@ -128,6 +134,8 @@ int main(void)
       putn(t); putn(shifted(-9, 40)); putn(scaled(13, 11)); nl(); }
     { int a[16]; for (int i = 0; i < 16; i++) a[i] = i + 1;
       putn(from_k(a, 5, 3)); putn(from_k(a, 3, 0)); putn(from_k(a, 2, 9)); nl(); }
+    { int a[40]; for (int i = 0; i < 40; i++) a[i] = i * 3 + 1;
+      putn(moved(a, 10)); putn(moved(a + 2, 7)); nl(); }
 
     puts_("==END==\n");
     return 0;

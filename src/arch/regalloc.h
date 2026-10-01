@@ -351,7 +351,8 @@ char *ra_narrow_hishift(const struct ir_func *fn);
 /* Fold an ADD of a constant into the loads and stores that are its only
  * uses (ir_ins.memoff), for a target with base+offset addressing whose
  * encodable range is [lo, hi - size]. Run before allocation. */
+/* `max_size`: the widest access whose lowering reads memoff. */
 int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
-                   const char *wide);
+                   int max_size, const char *wide);
 
 #endif

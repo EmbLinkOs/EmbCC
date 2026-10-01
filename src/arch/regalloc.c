@@ -1461,11 +1461,12 @@ char *ra_narrow_hishift(const struct ir_func *fn)
  *
  * Before register allocation, because the base's live range grows to the
  * accesses. Only a base with one definition, so it holds the same value
- * there as at the ADD; only integer accesses of up to four bytes (the
- * paths that honour memoff); and only offsets the target says it can
- * encode for that access, [lo, hi - size]. */
+ * there as at the ADD; only integer accesses of up to `max_size` bytes
+ * (the paths that honour memoff: four on the 32-bit machines, eight on
+ * aarch64); and only offsets the target says it can encode for that
+ * access, [lo, hi - size]. */
 int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
-                   const char *wide)
+                   int max_size, const char *wide)
 {
     int nv = fn->nvregs, changed = 0;
     if (!nv)
@@ -1486,8 +1487,8 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
         /* ...and not a store of a WIDE value, even a four-byte one: that
          * takes the backend's 64-bit path, which knows no memoff. */
         if ((i->op == IR_LOAD || i->op == IR_STORE) && i->a >= 0 &&
-            i->a < nv && !i->flt && i->size >= 1 && i->size <= 4 &&
-            i->w <= 4 && !(i->op == IR_STORE && i->b == i->a) &&
+            i->a < nv && !i->flt && i->size >= 1 && i->size <= max_size &&
+            i->w <= max_size && !(i->op == IR_STORE && i->b == i->a) &&
             !(wide && i->op == IR_STORE && i->b >= 0 && i->b < nv &&
               wide[i->b]) &&
             !(wide && i->op == IR_LOAD && i->dst >= 0 && i->dst < nv &&

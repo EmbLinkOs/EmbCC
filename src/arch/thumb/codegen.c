@@ -4334,7 +4334,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * live range grows. */
     if (g_t_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
         char *w = wide64_map(fn);
-        ra_fold_memoff(fn, 0, 4095, 4, w);
+        ra_fold_memoff(fn, 0, 4095, 4, 4, w);
         free(w);
     }
     g_t_pairs = 1;

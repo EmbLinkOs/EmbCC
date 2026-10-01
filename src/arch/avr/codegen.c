@@ -5168,7 +5168,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * three. EMBCC_NO_MEMOFF turns it off, as on Thumb and RISC-V. */
     if (!avr_knob("EMBCC_NO_MEMOFF")) {
         char *w = avr_wide_map(fn);
-        ra_fold_memoff(fn, 0, 64, 2, w);
+        ra_fold_memoff(fn, 0, 64, 2, 4, w);
         free(w);
     }
     int m0 = AVR_RA_QUADS_FIRST, m1 = AVR_RA_PAIRS_ONLY;

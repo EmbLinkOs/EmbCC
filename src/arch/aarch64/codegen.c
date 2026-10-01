@@ -1674,6 +1674,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             }
         if (!cgoto) {
             const struct ra_target *rt = &A64_RA;
+            /* `%p = add %s, #k; load [%p]` becomes `ldr [%s, #k]`: the
+             * scaled offsets reach 4095 bytes at any size, the unscaled
+             * ones -256..255 (ldst in emit.c). Before allocation, because
+             * %p then needs no register. 171 such adds in lib/libc. */
+            ra_fold_memoff(fn, -256, 4095, 8, 8, g_a64_wide);
             /* The float map first: the integer allocation needs it to
              * leave those values alone. Its own pool is caller-saved
              * throughout, so it reports no registers to save and
@@ -2104,14 +2109,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             /* An ADD whose sole use is the very next access's ADDRESS
              * is that access's register offset: `ldr xt, [xn, xm]`
              * needs no address to have been computed. 155 sites across
-             * lib/libc and lib/libcxx. */
+             * lib/libc and lib/libcxx. Not when the access also carries
+             * an immediate offset (ra_fold_memoff's): the register form
+             * has no field for it, and row[1][1] once read row[1][0]. */
             if (i->op == IR_ADD && !i->imm_b && i->dst >= 0 &&
                 usecnt[i->dst] == 1 && n + 1 < fn->nins && i->w == 8) {
                 struct ir_ins *nx = &fn->ins[n + 1];
                 int isld = nx->op == IR_LOAD && nx->a == i->dst &&
-                           !a64_is_flt(nx->dst);
+                           nx->memoff == 0 && !a64_is_flt(nx->dst);
                 int isst = nx->op == IR_STORE && nx->a == i->dst &&
-                           !a64_is_flt(nx->b);
+                           nx->memoff == 0 && !a64_is_flt(nx->b);
                 if ((isld || isst) && !a64_ld_ins(nx) && !a64_i128_ins(nx) &&
                     !(g_a64_wide && nx->dst >= 0 && nx->dst < fn->nvregs &&
                       g_a64_wide[nx->dst])) {
@@ -2223,9 +2230,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                         n + 2 < fn->nins && nx->w == 8) {
                         struct ir_ins *ax = &fn->ins[n + 2];
                         int isld = ax->op == IR_LOAD && ax->a == nx->dst &&
-                                   !a64_is_flt(ax->dst);
+                                   ax->memoff == 0 && !a64_is_flt(ax->dst);
                         int isst = ax->op == IR_STORE && ax->a == nx->dst &&
-                                   !a64_is_flt(ax->b);
+                                   ax->memoff == 0 && !a64_is_flt(ax->b);
                         if ((isld || isst) && !a64_ld_ins(ax) &&
                             !a64_i128_ins(ax) &&
                             (1 << i->imm) == ax->size &&
@@ -2472,7 +2479,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
         case IR_LOAD: {
             int fold = a64_afolded(i->a);
-            long foff = fold ? g_a64_afold.disp[i->a] : 0;
+            /* the local's displacement, if the address is one, PLUS the
+             * offset ra_fold_memoff moved into the access */
+            long foff = (fold ? g_a64_afold.disp[i->a] : 0) + i->memoff;
             if (a64_is_flt(i->dst)) {
                 int fa = fold ? FB : rd(t, sd, i->a, A64_ADDR);
                 a64_fldr(t, A64_FACC, fa, foff, i->size);
@@ -2488,7 +2497,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
         case IR_STORE: {
             int fold = a64_afolded(i->a);
-            long foff = fold ? g_a64_afold.disp[i->a] : 0;
+            long foff = (fold ? g_a64_afold.disp[i->a] : 0) + i->memoff;
             if (a64_is_flt(i->b)) {
                 int fa = fold ? FB : rd(t, sd, i->a, A64_ADDR);
                 fld_slot(t, sd, i->b, A64_FACC, i->size);

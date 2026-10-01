@@ -529,6 +529,16 @@ static void ldst(struct code *c, int rt, int rn, long off, int size,
                     ((unsigned long)rn << 5) | (unsigned long)rt);
         return;
     }
+    /* The UNSCALED form, ldur/stur: a signed 9-bit byte offset, for a
+     * negative one or one the size does not divide -- a field before the
+     * pointer, or an odd offset into a packed struct. Same size, opc and
+     * registers; bit 24 clear and imm9 where imm12 was. */
+    if (off >= -256 && off <= 255) {
+        a64_word(c, (base & ~0x01000000UL) |
+                    (((unsigned long)off & 0x1ff) << 12) |
+                    ((unsigned long)rn << 5) | (unsigned long)rt);
+        return;
+    }
     /* Out of the scaled field: form the address in the scratch register.
      * Callers are documented not to hold anything in A64_SCR here. */
     a64_mov_imm(c, A64_SCR, off, 8);
@@ -748,6 +758,12 @@ static void fldst(struct code *c, int vt, int rn, long off, int w, int load)
         base = load ? 0x3DC00000UL : 0x3D800000UL;
     if (off >= 0 && off % w == 0 && off / w <= 0xfff) {
         a64_word(c, base | ((unsigned long)(off / w) << 10) |
+                    ((unsigned long)rn << 5) | (unsigned long)vt);
+        return;
+    }
+    if (w != 16 && off >= -256 && off <= 255) {         /* ldur/stur (SIMD&FP) */
+        a64_word(c, (base & ~0x01000000UL) |
+                    (((unsigned long)off & 0x1ff) << 12) |
                     ((unsigned long)rn << 5) | (unsigned long)vt);
         return;
     }
