@@ -1288,6 +1288,19 @@ static void ldst_must(struct code *c, int rt, int rn, long off, int size,
                        "reach", size, store ? "store" : "load", off, rn);
 }
 
+/* A load from the frame at any offset: the immediate form when it
+ * reaches, else the address built in the destination itself. A frame
+ * past 4 KB is ordinary at -O0 -- every temp has a slot -- and the
+ * incoming stack arguments and the struct-return slot sit above all of
+ * it. */
+static void fb_ld(struct t_fn *F, int rt, long off, int size, int sign)
+{
+    if (t_ldst_imm(F->t, rt, F->fb, off, size, sign, 0))
+        return;
+    fb_addr(F, rt, off);
+    ldst_must(F->t, rt, rt, 0, size, sign, 0);
+}
+
 /* Copy `size` bytes from [src] to [dst] (copy) or zero them (!copy).
  * Straight-line while every offset fits an immediate; past that a loop
  * that walks both pointers, with the end in r9 -- so src and dst are
@@ -3131,7 +3144,9 @@ static void gen_ins(struct t_fn *F, int n)
                     if (last && (a->size & 3)) {
                         for (long b = off; b < a->size; b++) {
                             ldst_must(t, T_ACC, T_ADDR, b, 1, 0, 0);
-                            ldst_must(t, T_ACC, F->fb,
+                            /* the outgoing area is at the live sp, which
+                             * after a VLA is not the frame base */
+                            ldst_must(t, T_ACC, T_SP,
                                        pl[k].stk + (long)q * 4 + (b - off),
                                        1, 0, 1);
                         }
@@ -3327,10 +3342,10 @@ static void gen_ins(struct t_fn *F, int n)
             long n = fn->ret_abi.size;
             rd(F, i->a, T_ADDR);
             if (F->sret_slot >= 0) {
-                ldst_must(t, T_TMP, F->fb, F->sret_slot, 4, 0, 0);
+                fb_ld(F, T_TMP, F->sret_slot, 4, 0);
                 t_copy_block(t, T_TMP, T_ADDR, 1, n);
                 /* the loop form moves the pointer: r0 from the slot */
-                ldst_must(t, T_R0, F->fb, F->sret_slot, 4, 0, 0);
+                fb_ld(F, T_R0, F->sret_slot, 4, 0);
             } else {
                 /* Four bytes or fewer, in r0. A three-byte composite is
                  * read as a word: it is at least four-byte aligned and
@@ -4132,8 +4147,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.va_regsave = base;            /* r0-r3, four words */
             base += 16;                     /* ... then the stack ones */
         }
-        if (F.sret_slot >= 0)
-            ldst_must(t, T_R0, F.fb, F.sret_slot, 4, 0, 1);
+        if (F.sret_slot >= 0 &&
+            !t_ldst_imm(t, T_R0, F.fb, F.sret_slot, 4, 0, 1)) {
+            fb_addr(&F, T_ADDR, F.sret_slot);
+            ldst_must(t, T_R0, T_ADDR, 0, 4, 0, 1);
+        }
         walk_init(&w, F.sret_slot >= 0, fn->is_varargs, fn->pcs);
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
@@ -4255,7 +4273,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             for (int q = 0; q < pl.nstk; q++) {
                 long src = base + pl.stk + (long)q * 4;
                 long dst = F.slot[i] + (long)(pl.nreg + q) * 4;
-                ldst_must(t, T_ACC, F.fb, src, 4, 0, 0);
+                fb_ld(&F, T_ACC, src, 4, 0);
                 if (!t_ldst_imm(t, T_ACC, F.fb, dst, 4, 0, 1)) {
                     fb_addr(&F, T_ADDR, dst);
                     ldst_must(t, T_ACC, T_ADDR, 0, 4, 0, 1);
