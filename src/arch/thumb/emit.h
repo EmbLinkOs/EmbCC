@@ -176,6 +176,10 @@ void t_patch_bcond(struct code *c, int at, int target);
 void t_patch_bl(struct code *c, int at, int target);
 
 void t_bx(struct code *c, int rm);
+/* adr.w rd, Align(pc, 4) + imm12 (the ADD form, T3): a jump table's
+ * address, which sits a known few bytes on. */
+int  t_adr_w(struct code *c, int rd, int imm12);           /* where it is */
+void t_patch_adr_w(struct code *c, int at, int rd, int imm12);
 void t_blx(struct code *c, int rm);
 void t_nop(struct code *c);
 

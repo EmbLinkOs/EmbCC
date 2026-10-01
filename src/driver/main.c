@@ -3081,6 +3081,7 @@ int main(int argc, char **argv)
      * optimizer folds away the ones whose operands it knows -- a
      * constant non-zero divisor leaves nothing behind. */
     irgen_set_sanitize(san_mask);
+    irgen_set_opt_size(opt_for_size);
     lang_cxx = lang >= 0 ? lang : has_cxx_suffix(input);
     if (lang_cxx) {
         /* These analyses run in the C front end, over the C that C++ lowers

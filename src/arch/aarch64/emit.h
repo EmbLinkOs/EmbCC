@@ -126,6 +126,9 @@ int  a64_cbz(struct code *c, int rt, int nonzero, int w);
 int  a64_bl(struct code *c);
 void a64_blr(struct code *c, int rn);
 void a64_br(struct code *c, int rn);
+/* ldrsw xt, [xn, wm, uxtw #2] (w 4) or [xn, xm, lsl #2] (w 8): a jump
+ * table's entry, scaled by the index. */
+void a64_ldrsw_tab(struct code *c, int rt, int rn, int rm, int w);
 void a64_ret(struct code *c);
 /* Patch a branch at `at` to land on .text offset `target`. */
 void a64_patch_b26(struct code *c, int at, int target);

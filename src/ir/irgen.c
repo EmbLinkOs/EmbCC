@@ -2936,6 +2936,92 @@ static void mark_eh_calls(struct ir_func *fn)
  * Below a handful of cases the chain wins -- no tree, no extra labels,
  * and the first compare usually hits -- so a leaf is a chain.
  */
+int ir_jt_add(struct ir_func *fn, int n)
+{
+    if (fn->njt == fn->jtcap) {
+        fn->jtcap = fn->jtcap ? fn->jtcap * 2 : 4;
+        fn->jt = xrealloc(fn->jt, (size_t)fn->jtcap * sizeof *fn->jt);
+    }
+    int t = fn->njt++;
+    fn->jt[t].n = n;
+    fn->jt[t].labels = xmalloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+    for (int k = 0; k < n; k++)
+        fn->jt[t].labels[k] = -1;
+    return t;
+}
+
+int ir_jt_clone(struct ir_func *dst, const struct ir_func *src, int jt, int lbase)
+{
+    /* read the source out first: dst may be src, and ir_jt_add moves
+     * the table array */
+    int n = src->jt[jt].n;
+    int *copy = xmalloc((size_t)(n > 0 ? n : 1) * sizeof *copy);
+    for (int k = 0; k < n; k++)
+        copy[k] = src->jt[jt].labels[k] + lbase;
+    int t = ir_jt_add(dst, n);
+    for (int k = 0; k < n; k++)
+        dst->jt[t].labels[k] = copy[k];
+    free(copy);
+    return t;
+}
+
+static int g_opt_size;
+void irgen_set_opt_size(int on) { g_opt_size = on; }
+
+/* ---- the table ----
+ *
+ * Which switches get one: at least four cases, and the span of values
+ * from the lowest to the highest at most 4n + 4; under -Os, where an
+ * entry is bytes and a compare is bytes too, at least six cases spanning
+ * at most 2n; capped at 4096 entries either way.
+ * The index is the value less the lowest case, so a value below the
+ * range wraps above it and one unsigned compare in the backend sends
+ * both to the default. Every target but AVR has one (target_jump_tables):
+ * the tree stays there, and stays the fallback everywhere for the sparse
+ * ones. */
+static void switch_table(struct ir_func *fn, int v, int w, int sign,
+                         struct stmt **cs, int n, long lo, unsigned long range,
+                         int dflt)
+{
+    int idx = v;
+    if (lo != 0) {
+        int k = emit_const(fn, lo, w);
+        struct ir_ins *s = emit(fn);
+        s->op = IR_SUB;
+        s->a = v;
+        s->b = k;
+        s->w = w;
+        s->sign = sign;
+        s->dst = new_temp(fn);
+        idx = s->dst;
+    }
+    int t = ir_jt_add(fn, (int)range);
+    for (unsigned long k = 0; k < range; k++)
+        fn->jt[t].labels[k] = dflt;
+    for (int c = 0; c < n; c++)
+        fn->jt[t].labels[(unsigned long)cs[c]->cval - (unsigned long)lo] =
+            cs[c]->label;
+    struct ir_ins *s = emit(fn);
+    s->op = IR_SWITCH;
+    s->a = idx;
+    s->w = w;
+    s->label = dflt;
+    s->jt = t;
+}
+
+static int switch_dense(int n, int w, long lo, long hi)
+{
+    unsigned long range = (unsigned long)hi - (unsigned long)lo + 1;
+    /* a value wider than a register (long long on ARMv7-M, RV32) stays
+     * on the tree: the 32-bit backends lower nothing at 64 bits here */
+    if (n < 4 || range == 0 || range > 4096 || !target_jump_tables() ||
+        w > target_ptr_size())
+        return 0;
+    if (g_opt_size)
+        return n >= 6 && range <= 2UL * (unsigned long)n;
+    return range <= 4UL * (unsigned long)n + 4;
+}
+
 static void switch_case_eq(struct ir_func *fn, int v, int w, int sign,
                            long val, int label)
 {
@@ -3184,8 +3270,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             emit_label(fn, s->label);
             break;
         case STMT_SWITCH: {
-            /* A balanced decision tree over the case values: see
-             * switch_tree above, including why it is not a jump table. */
+            /* A jump table when the cases are dense (switch_table), a
+             * balanced decision tree over the values otherwise
+             * (switch_tree). */
             struct loopctx lc;
             lc.brk = new_label(fn);
             /* continue inside a switch belongs to the enclosing LOOP;
@@ -3236,8 +3323,14 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                     }
                     cs[b1 + 1] = t;
                 }
-                switch_tree(fn, v, w, sign, cs, 0, n - 1,
-                            dflt >= 0 ? dflt : lc.brk);
+                if (switch_dense(n, w, cs[0]->cval, cs[n - 1]->cval))
+                    switch_table(fn, v, w, sign, cs, n, cs[0]->cval,
+                                 (unsigned long)cs[n - 1]->cval -
+                                 (unsigned long)cs[0]->cval + 1,
+                                 dflt >= 0 ? dflt : lc.brk);
+                else
+                    switch_tree(fn, v, w, sign, cs, 0, n - 1,
+                                dflt >= 0 ? dflt : lc.brk);
                 free(cs);
             } else {
                 emit_jmp(fn, dflt >= 0 ? dflt : lc.brk);

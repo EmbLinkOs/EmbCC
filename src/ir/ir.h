@@ -89,6 +89,13 @@ enum ir_op {
                * template, store outputs. Detail in ir_ins.asm_ir */
     IR_LABELADDR, /* dst = &&label  (GNU label address; id in `label`) */
     IR_IGOTO, /* goto *a  (GNU computed goto: jump to the address in temp a) */
+    IR_SWITCH, /* a dense switch as ONE multi-way terminator: if (unsigned)a
+                * < jt[jt].n then goto jt[jt].labels[a], else goto label.
+                * `w` is a's width (4 or 8); a is the case value with the
+                * lowest case subtracted, so the test is unsigned by
+                * construction. Every target is named, which is what lets
+                * the CFG, liveness and the allocator see through it where
+                * IR_IGOTO's unknown targets make them step aside. */
     IR_ARMW,  /* dst = *(temp a); *(temp a) = dst OP b   (atomic; size, w).
                * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b).
                * Add and subtract stay IR_XADD, which x86 does in one
@@ -182,6 +189,13 @@ struct ir_asm {
     int nout;
 };
 
+/* A jump table: the targets of one IR_SWITCH, for index values 0..n-1; a
+ * value with no case names the default. Owned by the function and referred
+ * to by index, so a copied switch shares its table -- which is what every
+ * copy of one wants, since a pass that retargets labels rewrites the table
+ * once for all of them. */
+struct ir_jt { int n; int *labels; };
+
 struct ir_ins {
     enum ir_op op;
     /* Where this instruction came from (R3). `line` is the statement or
@@ -206,7 +220,8 @@ struct ir_ins {
                               * in `imm` (an immediate), not vreg b — set by the
                               * optimizer's immediate-fold pass, read by codegen */
     enum binop pred;         /* IR_CMP */
-    int label;               /* IR_LABEL/IR_JMP/IR_BRZ */
+    int label;               /* IR_LABEL/IR_JMP/IR_BRZ; IR_SWITCH's default */
+    int jt;                  /* IR_SWITCH: index into ir_func::jt */
     struct func *callee;     /* IR_CALL (direct), IR_FADDR */
     /* The same target as an index into ir_unit::syms -- what a self-contained
      * IR refers to, and what its textual form prints (§9.1). The pointers
@@ -408,6 +423,8 @@ struct ir_func {
                               * from it (aarch64 then uses x19) */
     struct ir_ins *ins;
     int nins, cap;
+    struct ir_jt *jt;        /* the jump tables IR_SWITCH refers to */
+    int njt, jtcap;
     struct ir_line *lines;   /* -g: (offset, line) rows in .text order */
     int nlines, linecap;
     struct ir_dbgvar *dbgvars; /* -g: params + locals (irgen) */
@@ -483,6 +500,12 @@ struct ir_unit *irgen(struct unit *u);
  * the point on a board. */
 enum { SAN_OVERFLOW = 1, SAN_DIVIDE = 2, SAN_SHIFT = 4 };
 void irgen_set_sanitize(unsigned mask);
+void irgen_set_opt_size(int on);       /* -Os: a switch table must be denser */
+/* A new table of n entries (all -1) in fn; its index. */
+int ir_jt_add(struct ir_func *fn, int n);
+/* A copy of src's table `jt` in dst, every label moved up by lbase (the
+ * inliner's renumbering); its index. dst and src may be one function. */
+int ir_jt_clone(struct ir_func *dst, const struct ir_func *src, int jt, int lbase);
 unsigned irgen_sanitize(void);
 
 /* EmbIR's textual form (src/ir/irprint.c, vision §18) — what

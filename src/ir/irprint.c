@@ -68,6 +68,7 @@ const char *ir_opname(enum ir_op op)
         [IR_UD2] = "ud2",       [IR_XCHG] = "xchg",     [IR_XADD] = "xadd",
         [IR_CMPXCHG] = "cmpxchg", [IR_ASM] = "asm",
         [IR_LABELADDR] = "labeladdr", [IR_IGOTO] = "igoto",
+        [IR_SWITCH] = "switch",
         [IR_ARMW] = "armw",     [IR_CAS] = "cas",       [IR_CAS16] = "cas16",
         [IR_FRAMEADDR] = "frameaddr", [IR_ALLOCA] = "alloca",
         [IR_SPSAVE] = "spsave", [IR_SPRESTORE] = "sprestore",
@@ -162,7 +163,7 @@ static const char *sym_name(const struct ir_unit *u, int idx,
 }
 
 static void print_ins(struct outbuf *b, const struct ir_unit *u,
-                      const struct ir_ins *i)
+                      const struct ir_func *fn, const struct ir_ins *i)
 {
     /* A label is the only thing that starts at column 0: it is a position in
      * the instruction stream, not an operation on values. */
@@ -266,6 +267,14 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         break;
     case IR_IGOTO:
         ob_fmt(b, "igoto [%%%d]", i->a);
+        break;
+    case IR_SWITCH:
+        /* `switch.4 %3 -> L9 [5] L1 L2 L9 L3 L4`: the index, the default,
+         * the table's length, the table */
+        ob_fmt(b, "switch"); suffix(b, i, 1);
+        ob_fmt(b, " %%%d -> L%d [%d]", i->a, i->label, fn->jt[i->jt].n);
+        for (int k = 0; k < fn->jt[i->jt].n; k++)
+            ob_fmt(b, " L%d", fn->jt[i->jt].labels[k]);
         break;
     case IR_MEMCPY:
         ob_fmt(b, "memcpy:%d [%%%d], [%%%d]", i->size, i->a, i->b);
@@ -401,7 +410,7 @@ static void print_func(struct outbuf *b, const struct ir_unit *u,
         ob_ch(b, '\n');
     }
     for (int i = 0; i < f->nins; i++)
-        print_ins(b, u, &f->ins[i]);
+        print_ins(b, u, f, &f->ins[i]);
     ob_str(b, "}\n");
 }
 

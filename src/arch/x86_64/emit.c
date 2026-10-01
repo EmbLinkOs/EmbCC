@@ -1547,6 +1547,15 @@ int x86_jmp_rel8(struct code *c)
 }
 
 /* jmp *reg  (FF /4) — the indirect jump a GNU computed goto lowers to. */
+/* movsxd rax, dword [rcx + rax*4]: a jump table's entry, rcx the table and
+ * rax the index (both this backend's scratch). 48 63 /r with SIB
+ * base=rcx index=rax scale=4. */
+void x86_movsxd_rax_tab(struct code *c)
+{
+    code_byte(c, 0x48); code_byte(c, 0x63);
+    code_byte(c, 0x04); code_byte(c, 0x81);
+}
+
 void x86_jmp_reg(struct code *c, int reg)
 {
     if (reg >= 8) code_byte(c, 0x41);     /* REX.B for r8..r15 */

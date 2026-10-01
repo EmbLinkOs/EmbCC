@@ -82,6 +82,7 @@ void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
     case IR_ALLOCA: case IR_SPRESTORE:
     case IR_RET: case IR_BRZ: case IR_BRNZ:
     case IR_IGOTO:            /* `goto *p` reads p */
+    case IR_SWITCH:           /* the table index */
     case IR_VLOAD:            /* the ADDRESS read, an integer temp */
     case IR_VSPLAT: case IR_VREDADD: case IR_VWIDEN:
         U(s->a); break;
@@ -172,13 +173,22 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
             for (int w = 0; w < words; w++) oi[w] = 0;
             /* successors */
             if (s->op != IR_JMP && s->op != IR_RET && s->op != IR_UD2 &&
-                i + 1 < nins) {
+                s->op != IR_SWITCH && i + 1 < nins) {
                 unsigned long *si = in + (size_t)(i + 1) * words;
                 for (int w = 0; w < words; w++) oi[w] |= si[w];
             }
             if (s->op == IR_JMP || s->op == IR_BRZ || s->op == IR_BRNZ) {
                 int t = labelidx[s->label];
                 if (t >= 0) {
+                    unsigned long *si = in + (size_t)t * words;
+                    for (int w = 0; w < words; w++) oi[w] |= si[w];
+                }
+            }
+            if (s->op == IR_SWITCH) {       /* the default and every entry */
+                for (int k = -1; k < fn->jt[s->jt].n; k++) {
+                    int l = k < 0 ? s->label : fn->jt[s->jt].labels[k];
+                    int t = l >= 0 && l < fn->nlabels ? labelidx[l] : -1;
+                    if (t < 0) continue;
                     unsigned long *si = in + (size_t)t * words;
                     for (int w = 0; w < words; w++) oi[w] |= si[w];
                 }
@@ -1151,7 +1161,7 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
         if (op == IR_LABEL) b++;
         blk[i] = b;
         if (op == IR_JMP || op == IR_BRZ || op == IR_BRNZ ||
-            op == IR_RET || op == IR_UD2)
+            op == IR_RET || op == IR_UD2 || op == IR_SWITCH)
             b++;
     }
 
@@ -1524,7 +1534,7 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
                 const struct ir_ins *u = &fn->ins[m];
                 if (u->op == IR_LABEL || u->op == IR_JMP ||
                     u->op == IR_BRZ || u->op == IR_BRNZ || u->op == IR_RET ||
-                    u->op == IR_IGOTO || u->op == IR_UD2)
+                    u->op == IR_IGOTO || u->op == IR_UD2 || u->op == IR_SWITCH)
                     break;
                 if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == p)
                     seen++;

@@ -1198,8 +1198,10 @@ static int cond_for(enum binop pred, int sign)
 
 /* Branch fixups within one function. */
 /* kind: 26-bit branch, 19-bit conditional branch, or a 21-bit adr. */
-enum a64_fixkind { FIX_B26, FIX_B19, FIX_ADR };
-struct a64_fix { int at; int label; enum a64_fixkind kind; };
+enum a64_fixkind { FIX_B26, FIX_B19, FIX_ADR, FIX_TAB };
+struct a64_fix { int at; int label; enum a64_fixkind kind;
+                 int base; };   /* FIX_TAB: the table's offset; the word at
+                                 * `at` becomes target - base */
 
 /* ---- one function ---------------------------------------------------- */
 
@@ -1973,6 +1975,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         /* what this one leaves: a return at last_code runs on into the
          * epilogue, every other exit does not */
         fell = !(i->op == IR_JMP || i->op == IR_UD2 || i->op == IR_IGOTO ||
+                 i->op == IR_SWITCH ||
                  (i->op == IR_RET && n != last_code));
         if (g_a64_regalloc && !fell)
             dead = 1;
@@ -3139,6 +3142,36 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
             a64_br(t, A64_ADDR);
             break;
+        case IR_SWITCH: {
+            /* A jump table in .text right after its dispatch, of 32-bit
+             * offsets from the table's own start, so no relocation:
+             *     cmp wI, #n ; b.hs default
+             *     adr xT, table ; ldrsw xE, [xT, wI, uxtw #2]
+             *     add xE, xT, xE ; br xE
+             * At width 4 only the low word of the index counts (uxtw);
+             * at 8 the whole register (lsl). The entries go on the fixup
+             * list as FIX_TAB and are patched to target - table. */
+            int n = fn->jt[i->jt].n;
+            int ri = rd(t, sd, i->a, A64_ACC);
+            a64_cmp_imm(t, ri, n, i->w);
+            struct a64_fix fx;
+            fx.at = a64_bcond(t, 2);                   /* b.hs: unsigned >= n */
+            fx.label = i->label; fx.kind = FIX_B19; fx.base = 0;
+            PUSH(fix, nfix, capfix, fx);
+            int adr = a64_adr(t, A64_ADDR);
+            a64_ldrsw_tab(t, A64_SCR, A64_ADDR, ri, i->w);
+            a64_alu_reg(t, '+', A64_SCR, A64_ADDR, A64_SCR, 8);
+            a64_br(t, A64_SCR);
+            int tab = t->len;                           /* 4-aligned already */
+            a64_patch_adr(t, adr, tab);
+            for (int k = 0; k < n; k++) {
+                fx.at = t->len; fx.label = fn->jt[i->jt].labels[k];
+                fx.kind = FIX_TAB; fx.base = tab;
+                PUSH(fix, nfix, capfix, fx);
+                code_u32(t, 0);
+            }
+            break;
+        }
         case IR_LANDING:
             /* the unwinder left the exception in x0, the selector in x1 */
             st_slot(t, sd, i->dst, 0, 8);
@@ -3201,6 +3234,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         case FIX_B26: a64_patch_b26(t, fix[k].at, target); break;
         case FIX_B19: a64_patch_b19(t, fix[k].at, target); break;
         case FIX_ADR: a64_patch_adr(t, fix[k].at, target); break;
+        case FIX_TAB:
+            code_patch32(t, fix[k].at,
+                         (unsigned long)(unsigned int)(target - fix[k].base));
+            break;
         }
     }
 

@@ -641,6 +641,16 @@ void a64_blr(struct code *c, int rn)
 {
     a64_word(c, 0xD63F0000UL | ((unsigned long)rn << 5));
 }
+void a64_ldrsw_tab(struct code *c, int rt, int rn, int rm, int w)
+{
+    /* LDRSW (register): size 10, opc 10, option UXTW (010) or LSL (011),
+     * S = 1 for the scale of 4. llvm-mc: ldrsw x1,[x2,w3,uxtw #2] =
+     * b8a35841, ldrsw x1,[x2,x3,lsl #2] = b8a37841. */
+    unsigned long option = w == 8 ? 3UL : 2UL;
+    a64_word(c, 0xB8A00800UL | ((unsigned long)rm << 16) | (option << 13) |
+                (1UL << 12) | ((unsigned long)rn << 5) | (unsigned long)rt);
+}
+
 void a64_br(struct code *c, int rn)
 {
     a64_word(c, 0xD61F0000UL | ((unsigned long)rn << 5));

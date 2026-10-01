@@ -42,6 +42,13 @@ int shapes(int n, int m)
         case 1:  t -= helper(i);        break;
         default: t ^= i;                break;
         }
+        /* dense enough for a jump table: the IR has an IR_SWITCH with
+         * its table, which the text must carry */
+        switch (i & 7) {
+        case 1: t += 1; break;  case 2: t += 3; break;  case 3: t += 5; break;
+        case 5: t += 7; break;  case 6: t -= 1; break;
+        default: break;
+        }
         w += (long)i;
         v = i;
     }

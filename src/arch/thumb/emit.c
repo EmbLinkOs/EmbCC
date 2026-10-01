@@ -563,6 +563,26 @@ void t_patch_pop(struct code *c, int at, unsigned mask)
 /* ---- control flow ---------------------------------------------------- */
 
 int t_b(struct code *c)     { int at = c->len; hw2(c, 0xf000u, 0x9000u); return at; }
+
+int t_adr_w(struct code *c, int rd, int imm12)
+{
+    /* 11110 i 1 0 0 0 0 0 1111 | 0 imm3 Rd imm8. llvm-mc: adr.w r11, .+100
+     * from a 4-aligned pc is f20f 0b60. */
+    int at = c->len;
+    unsigned i1 = (unsigned)(imm12 >> 11) & 1, imm3 = (unsigned)(imm12 >> 8) & 7;
+    unsigned imm8 = (unsigned)imm12 & 0xff;
+    hw2(c, 0xf20fu | (i1 << 10), (imm3 << 12) | ((unsigned)rd << 8) | imm8);
+    return at;
+}
+
+void t_patch_adr_w(struct code *c, int at, int rd, int imm12)
+{
+    unsigned i1 = (unsigned)(imm12 >> 11) & 1, imm3 = (unsigned)(imm12 >> 8) & 7;
+    unsigned imm8 = (unsigned)imm12 & 0xff;
+    unsigned h1 = 0xf20fu | (i1 << 10);
+    unsigned h2 = (imm3 << 12) | ((unsigned)rd << 8) | imm8;
+    code_patch32(c, at, (unsigned long)h1 | ((unsigned long)h2 << 16));
+}
 int t_bl(struct code *c)    { int at = c->len; hw2(c, 0xf000u, 0xd000u); return at; }
 
 int t_bcond(struct code *c, int cond)

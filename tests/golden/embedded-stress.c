@@ -65,6 +65,23 @@ static long moved(const int *p, int n)
     for (int i = 0; i < n; i++) { const int *q = p + 1; p += 3; s += *q * (i + 1); }
     return s;
 }
+static int dispatch(int v)
+{
+    /* dense cases, a hole, two shared, one falling through, and a default:
+     * a jump table on every target that has them (AVR keeps the tree) */
+    int r = 0;
+    switch (v) {
+    case -2: r = 20; break;
+    case -1: r = 10;                /* falls into 0 */
+    case 0:  r += 1; break;
+    case 1: case 2: r = 100 + v; break;
+    case 4:  r = 4; break;
+    case 5:  r = 5; break;
+    case 6:  r = 6; break;
+    default: r = -v; break;
+    }
+    return r;
+}
 static long scaled(int i, int j)
 {
     return sh[(i * 5) & 15] + sc[(j * 3) & 15] + uc[(i + j) & 15] + sh[(j * 7) & 15] * sc[i & 15];
@@ -138,6 +155,9 @@ int main(void)
       putn(from_k(a, 5, 3)); putn(from_k(a, 3, 0)); putn(from_k(a, 2, 9)); nl(); }
     { int a[40]; for (int i = 0; i < 40; i++) a[i] = i * 3 + 1;
       putn(moved(a, 10)); putn(moved(a + 2, 7)); nl(); }
+    { long t = 0;
+      for (int v = -4; v <= 8; v++) t = t * 3 + dispatch(v);
+      putn(t); putn(dispatch(-2147483647 - 1)); putn(dispatch(2147483647)); nl(); }
 
     puts_("==END==\n");
     return 0;

@@ -1008,7 +1008,9 @@ static void ext_reg(struct rv_fn *F, int rdst, int rs, int size, int sign)
  * direct branch, +-4 KiB), CB (c.beqz/c.bnez, +-256 B, against zero from
  * x8-x15). Code between a branch and its target only shrinks on the
  * second pass, so what reached still reaches; the patch checks anyway. */
-enum { FX_J, FX_CJ, FX_LONG, FX_B, FX_CB };
+enum { FX_J, FX_CJ, FX_LONG, FX_B, FX_CB,
+       FX_TAB };   /* a jump table's entry: bat is the auipc that finds
+                    * the table, the word becomes target - auipc */
 
 static void want_label(struct rv_fn *F, int at, int label, int kind,
                        int cond, int rs1, int rs2, int bat)
@@ -2886,6 +2888,46 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_SPRESTORE:
         rv_mv(t, RV_SP, rdr(F, i->a, SCR));
         return;
+    case IR_SWITCH: {
+        /* A jump table in .text right after its dispatch, of 32-bit
+         * offsets from the AUIPC that finds it (so the table's own
+         * distance folds into the load's immediate and no addi is
+         * needed):
+         *     li t2, n ; bgeu rI, t2, default
+         *     auipc t1, 0 ; slli t2, rI, 2 ; add t2, t2, t1
+         *     lw t2, table - auipc(t2) ; add t2, t2, t1 ; jr t2
+         * The six words after the branch are emitted with compression
+         * off, so the table sits a known 24 bytes past the auipc (plus
+         * alignment). At width 4 on RV64 the index is sign-extended, so
+         * a negative one is a huge unsigned and takes the default like
+         * any other value outside the range. */
+        int n = fn->jt[i->jt].n;
+        int ri = rdr(F, i->a, ACC);
+        rv_li(t, RV_T2, n, F->xlen);
+        branch_if(F, RV_BGEU, ri, RV_T2, i->label);
+        int on = rv_compress_enabled();
+        rv_set_compress(0, F->xlen);
+        int at = t->len;
+        int tab = (at + 24 + 3) & ~3;
+        rv_auipc(t, TMP, 0);
+        rv_shift_imm(t, RV_SLL, RV_T2, ri, 2, 0, F->xlen);
+        rv_alu(t, RV_ADD, RV_T2, RV_T2, TMP, 0);
+        rv_load(t, RV_T2, RV_T2, tab - at, 4, 1, F->xlen);
+        rv_alu(t, RV_ADD, RV_T2, RV_T2, TMP, 0);
+        rv_jalr(t, RV_ZERO, RV_T2, 0);
+        while (t->len < tab)
+            code_u16(t, 0x0001);                      /* c.nop, never run */
+        rv_set_compress(on, F->xlen);
+        if (t->len != tab)
+            internal_error("riscv: %s: the jump table is not where its "
+                           "auipc says", fn->name);
+        for (int k = 0; k < n; k++) {
+            want_label(F, t->len, fn->jt[i->jt].labels[k], FX_TAB,
+                       0, 0, 0, at);
+            code_u32(t, 0);
+        }
+        return;
+    }
     case IR_LABELADDR: case IR_IGOTO:
         rv_refuse(F, i, "a computed goto");
         return;
@@ -3480,6 +3522,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         case FX_B:
             ok = rv_patch_b_checked(t, F.fix[i].at, target);
             break;
+        case FX_TAB:
+            code_patch32(t, F.fix[i].at,
+                         (unsigned long)(unsigned int)(target - F.fix[i].bat));
+            break;
         default:                                    /* FX_CB */
             ok = rv_patch_cb(t, F.fix[i].at, F.fix[i].cond == RV_BNE,
                              F.fix[i].rs1, target);
@@ -3500,6 +3546,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         relax = xcalloc((size_t)(nrelax ? nrelax : 1), 1);
         for (i = 0; i < F.nfix; i++) {
             long tgt = F.label_off[F.fix[i].label];
+            if (F.fix[i].kind == FX_TAB) {             /* not a branch */
+                relax[i] = FX_TAB;
+                continue;
+            }
             if (F.fix[i].kind == FX_J) {
                 long d = tgt - F.fix[i].at;
                 relax[i] = d >= -2048 && d <= 2046 ? FX_CJ : FX_J;

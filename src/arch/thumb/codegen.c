@@ -1271,6 +1271,8 @@ static void fb_addr(struct t_fn *F, int rd, long off)
 /* ---- branches ------------------------------------------------------- */
 
 #define T_CBZ 100              /* a fix's cond for cbz; cbnz is T_CBZ + 1 */
+#define T_TAB 99               /* a jump table's entry: cz_at holds the table,
+                                * the word becomes (target | 1) - table */
 
 static void want_label(struct t_fn *F, int at, int label, int cond)
 {
@@ -3487,6 +3489,43 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LANDING:
         t_refuse(fn, i, "an exception landing pad");
         return;
+    case IR_SWITCH: {
+        /* A jump table in .text right after its dispatch, of 32-bit
+         * offsets from the table's own start (plus the Thumb bit, so the
+         * sum is ready for bx):
+         *     cmp rI, #n ; bhs default
+         *     adr.w rT, table ; ldr.w rE, [rT, rI, lsl #2]
+         *     add rE, rT ; bx rE
+         * rT is r11 and rE r12, the scratch pair; a terminator keeps
+         * nothing in them. adr.w reads Align(pc, 4) and is patched once
+         * the table's place is known. */
+        int n = fn->jt[i->jt].n;
+        int ri = rdr(F, i->a, T_ACC);
+        if (t_imm_ok(n)) {
+            t_cmp_imm(t, ri, n);
+        } else {
+            t_mov_imm(t, T_TMP, n, 0);
+            t_cmp_reg(t, ri, T_TMP);
+        }
+        jump_if(F, T_CS, i->label);                  /* bhs: unsigned >= n */
+        int adr_at = t_adr_w(t, T_TMP, 0);
+        t_ldst_reg(t, T_ACC, T_TMP, ri, 2, 4, 0, 0);
+        t_alu_reg(t, T_OP_ADD, T_ACC, T_ACC, T_TMP, 0);
+        t_bx(t, T_ACC);
+        if (t->len % 4)
+            t_nop(t);
+        int tab = t->len, disp = tab - ((adr_at + 4) & ~3);
+        if (disp < 0 || disp > 4095)
+            internal_error("thumb: %s: the jump table is out of adr.w's "
+                           "reach", fn->name);
+        t_patch_adr_w(t, adr_at, T_TMP, disp);
+        for (int k = 0; k < n; k++) {
+            want_label(F, t->len, fn->jt[i->jt].labels[k], T_TAB);
+            F->fix[F->nfix - 1].cz_at = tab;
+            code_u32(t, 0);
+        }
+        return;
+    }
     case IR_IGOTO: case IR_LABELADDR:
         t_refuse(fn, i, "a computed goto");
         return;
@@ -4227,7 +4266,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                             "never placed\n", F.fix[i].label, fn->name);
             exit(1);
         }
-        if (F.fix[i].cond >= T_CBZ) {
+        if (F.fix[i].cond == T_TAB) {
+            code_patch32(t, F.fix[i].at, (unsigned long)(unsigned int)
+                         ((target | 1) - F.fix[i].cz_at));
+        } else if (F.fix[i].cond >= T_CBZ) {
             if (!t_patch_cbz(t, F.fix[i].at, target))
                 internal_error("thumb: %s: a cbz no longer reaches its "
                                "label", fn->name);

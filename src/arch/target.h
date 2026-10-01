@@ -129,6 +129,7 @@ int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
  * not in the 32-bit multilib, so the front-end refuses it by name
  * rather than lowering something no backend can carry. */
 int target_has_int128(void);
+int target_jump_tables(void);     /* a dense switch may be a table: not AVR */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.

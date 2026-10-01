@@ -248,6 +248,11 @@ int main(int argc, char **argv)
     expect("pop.w\t{r4, r8, pc}");
 
     t_bx(&C, T_LR);                     expect("bx\tlr");
+    t_adr_w(&C, 11, 12);                expect("adr.w\tr11, #12");
+    t_adr_w(&C, 1, 4095);               expect("adr.w\tr1, #4095");
+    { int at = t_adr_w(&C, 11, 0); t_patch_adr_w(&C, at, 11, 100);
+                                        expect("adr.w\tr11, #100"); }
+    t_alu_reg(&C, T_OP_ADD, 12, 12, 11, 0); expect("add.w\tr12, r12, r11");
     t_blx(&C, 3);                       expect("blx\tr3");
     t_nop(&C);                          expect("nop");
 

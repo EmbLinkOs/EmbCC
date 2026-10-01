@@ -1026,6 +1026,8 @@ struct brsite {
     int ord;        /* this branch's number in the function, or -1 for
                      * something that is not a branch at all (the `lea`
                      * of a label's address, which is always 32-bit) */
+    int tab;        /* a jump table's entry: the table's offset + 1, and
+                     * the value is target - table; 0 for everything else */
 };
 
 /* ---- branch relaxation ----------------------------------------------
@@ -3432,6 +3434,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                             brs[nbrs].label = br->label;
                             brs[nbrs].size = sh ? 1 : 4;
                             brs[nbrs].ord = ord;
+                            brs[nbrs].tab = 0;
                             nbrs++;
                         }
                         cg_reset();
@@ -3477,6 +3480,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 brs[nbrs].label = br->label;
                 brs[nbrs].size = sh ? 1 : 4;
                 brs[nbrs].ord = ord;
+                brs[nbrs].tab = 0;
                 nbrs++;
                 n++;                              /* consume the fused branch */
                 break;
@@ -3991,6 +3995,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             brs[nbrs].label = i->label;
             brs[nbrs].size = sh ? 1 : 4;
             brs[nbrs].ord = ord;
+            brs[nbrs].tab = 0;
             nbrs++;
             break;
         }
@@ -4007,6 +4012,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             brs[nbrs].label = i->label;
             brs[nbrs].size = 4;       /* a `lea`, not a branch */
             brs[nbrs].ord = -1;
+            brs[nbrs].tab = 0;
             nbrs++;
             cg_store(text, sd, i->dst, 8);
             break;
@@ -4017,6 +4023,55 @@ static void gen_func(struct ir_func *fn, struct code *text,
             cg_reset();
             x86_jmp_reg(text, REG_RAX);
             break;
+        case IR_SWITCH: {
+            /* A jump table, in .text right after its dispatch and
+             * holding 32-bit offsets from its own start, so it needs no
+             * relocation:
+             *     cmp rax, n ; jae default
+             *     lea rcx, [rip + table]
+             *     movsxd rax, [rcx + rax*4] ; add rax, rcx ; jmp rax
+             * rax is the index (zero-extended at width 4: cg_load's
+             * unsigned read) and rcx the table -- both scratch, and a
+             * terminator keeps nothing live in either. The entries go on
+             * the branch list with `tab` set, and are patched to
+             * target - table. */
+            int n = fn->jt[i->jt].n;
+            cg_load(text, sd, i->a, i->w, 0, i->w);
+            cg_reset();
+            x86_alu_reg_imm(text, 'c', REG_RAX, n, i->w);
+            int patch = x86_jcc_rel32(text, 0x93);      /* jae: unsigned >= n */
+            if (nbrs == capbrs) {
+                capbrs = capbrs ? capbrs * 2 : 16;
+                brs = xrealloc(brs, (size_t)capbrs * sizeof *brs);
+            }
+            brs[nbrs].patch_off = patch;
+            brs[nbrs].label = i->label;
+            brs[nbrs].size = 4;
+            brs[nbrs].ord = -1;
+            brs[nbrs].tab = 0;
+            nbrs++;
+            int lea = x86_lea_reg_rip(text, REG_RCX);
+            x86_movsxd_rax_tab(text);
+            x86_alu_rr(text, '+', REG_RAX, REG_RCX, 8);
+            x86_jmp_reg(text, REG_RAX);
+            code_align(text, 4, 0xcc);                  /* int3 padding */
+            int tab = text->len;
+            code_patch32(text, lea, (unsigned long)(unsigned int)(tab - (lea + 4)));
+            for (int k = 0; k < n; k++) {
+                if (nbrs == capbrs) {
+                    capbrs = capbrs ? capbrs * 2 : 16;
+                    brs = xrealloc(brs, (size_t)capbrs * sizeof *brs);
+                }
+                brs[nbrs].patch_off = text->len;
+                brs[nbrs].label = fn->jt[i->jt].labels[k];
+                brs[nbrs].size = 4;
+                brs[nbrs].ord = -1;
+                brs[nbrs].tab = tab + 1;
+                nbrs++;
+                code_u32(text, 0);
+            }
+            break;
+        }
         case IR_CALL: {
             /* SysV walks TWO register files independently: integers and
              * pointers take rdi..r9, floats take xmm0..7. */
@@ -4604,7 +4659,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                            brs[n].label, f->name);
         }
         int from = brs[n].patch_off + brs[n].size;
-        long rel = (long)target - from;
+        long rel = brs[n].tab ? (long)target - (brs[n].tab - 1)
+                              : (long)target - from;
         if (brs[n].size == 1) {
             if (rel < -128 || rel > 127) {
                 /* It does not reach. This whole layout is about to be

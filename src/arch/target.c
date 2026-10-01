@@ -202,6 +202,10 @@ int target_char_unsigned(void)
 }
 int target_wchar_unsigned(void) { return g_model[g_arch].wchar_uns; }
 int target_has_int128(void)     { return g_model[g_arch].int128; }
+/* AVR keeps the decision tree: an indirect jump there goes through Z
+ * with a word address read from flash, and the backend has no lowering
+ * for the table yet -- it refuses the op by name if it ever sees one. */
+int target_jump_tables(void)    { return target_get() != TARGET_AVR; }
 
 int target_anon_bitfield_aligns(void)
 {

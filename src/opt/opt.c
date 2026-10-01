@@ -99,6 +99,34 @@ static int def_target(const struct ir_ins *i)
     return -1;
 }
 
+/* Visit &slot for every LABEL an instruction names: a branch's target, a
+ * label address, a switch's default and each entry of its table. The one
+ * place that knows where they all are, so a pass that retargets or counts
+ * them cannot miss the table -- which lives in the function, not the
+ * instruction, and is why this takes fn. */
+static void each_label(struct ir_func *fn, struct ir_ins *i,
+                       void (*cb)(int *, void *), void *ctx)
+{
+    switch (i->op) {
+    case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_LABELADDR:
+        cb(&i->label, ctx);
+        break;
+    case IR_SWITCH:
+        cb(&i->label, ctx);
+        for (int k = 0; k < fn->jt[i->jt].n; k++)
+            cb(&fn->jt[i->jt].labels[k], ctx);
+        break;
+    default:
+        break;
+    }
+}
+struct retarget { int from, to; };
+static void retarget_cb(int *p, void *ctx)
+{
+    struct retarget *r = ctx;
+    if (*p == r->from) *p = r->to;
+}
+
 /* Visit &field for every vreg this instruction READS (never its dst).
  *
  * IR_LDVAR's and IR_ADDR's `a` name a FRAME SLOT, and they are here
@@ -130,6 +158,7 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
      * writes. Every visitor built on each_read -- the use counts, the
      * inliner's remap, the verifier -- was blind to it the same way. */
     case IR_IGOTO:
+    case IR_SWITCH:               /* the table index */
         cb(&i->a, ctx);
         break;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
@@ -1454,7 +1483,8 @@ static struct bb *build_cfg(struct ir_func *fn, int *nbb_out, int **l2b_out)
         enum ir_op op = fn->ins[i].op;
         if (op == IR_LABEL) lead[i] = 1;
         if ((op == IR_JMP || op == IR_BRZ || op == IR_BRNZ ||
-             op == IR_RET || op == IR_UD2 || op == IR_IGOTO) && i + 1 < N)
+             op == IR_RET || op == IR_UD2 || op == IR_IGOTO ||
+             op == IR_SWITCH) && i + 1 < N)
             lead[i + 1] = 1;
     }
     int nbb = 0;
@@ -1495,6 +1525,16 @@ static struct bb *build_cfg(struct ir_func *fn, int *nbb_out, int **l2b_out)
         } else if (op == IR_BRZ || op == IR_BRNZ) {
             if (l2b[L] >= 0) bb_add_succ(&bb[i], l2b[L]);
             if (i + 1 < nbb) bb_add_succ(&bb[i], i + 1);
+        } else if (op == IR_SWITCH) {
+            /* the default, and every entry of the table */
+            const struct ir_ins *sw = &fn->ins[bb[i].end - 1];
+            if (L >= 0 && L < fn->nlabels && l2b[L] >= 0)
+                bb_add_succ(&bb[i], l2b[L]);
+            for (int k = 0; k < fn->jt[sw->jt].n; k++) {
+                int tl = fn->jt[sw->jt].labels[k];
+                if (tl >= 0 && tl < fn->nlabels && l2b[tl] >= 0)
+                    bb_add_succ(&bb[i], l2b[tl]);
+            }
         } else if (op == IR_IGOTO) {
             /* An edge to every address-taken label. Without these the
              * blocks they open look unreachable, and the passes that
@@ -1987,7 +2027,7 @@ static int pass_mem2reg(struct ir_func *fn)
         int hasterm = bb[b].end > bb[b].start;
         enum ir_op top = hasterm ? fn->ins[bb[b].end - 1].op : IR_UD2;
         int isterm = top == IR_JMP || top == IR_BRZ || top == IR_BRNZ ||
-                     top == IR_RET || top == IR_UD2;
+                     top == IR_RET || top == IR_UD2 || top == IR_SWITCH;
         int body_end = (hasterm && isterm) ? bb[b].end - 1 : bb[b].end;
         for (int i = bb[b].start; i < body_end; i++)
             if (!(fn->ins[i].op == IR_MOV && fn->ins[i].dst < 0))   /* dropped store */
@@ -2011,6 +2051,28 @@ static int pass_mem2reg(struct ir_func *fn)
             *ib_push(&nb) = br;
             if (bb[b].nsucc > 1)                         /* fall-through copies (inline) */
                 emit_edge_copies(&nb, bb, bb[b].succ[1], b, fn);
+        } else if (top == IR_SWITCH && isterm) {
+            /* Every edge out of a switch is a taken edge: a successor
+             * with phis gets a trampoline, and every entry (and the
+             * default) that named it names the trampoline instead. A
+             * block may open with several labels; any of them may be
+             * what the table says. */
+            struct ir_ins sw = fn->ins[bb[b].end - 1];
+            for (int s = 0; s < bb[b].nsucc; s++) {
+                int sb = bb[b].succ[s];
+                if (!bb[sb].nphi) continue;
+                int Lt = fn->nlabels++;
+                if (ntramp == ctramp) { ctramp = ctramp?ctramp*2:8;
+                    tramp = xrealloc(tramp, (size_t)ctramp*sizeof *tramp); }
+                tramp[ntramp].lbl = Lt; tramp[ntramp].from = b;
+                tramp[ntramp].edge_pred = sb; ntramp++;
+                for (int q = bb[sb].start;
+                     q < bb[sb].end && fn->ins[q].op == IR_LABEL; q++) {
+                    struct retarget rt = { fn->ins[q].label, Lt };
+                    each_label(fn, &sw, retarget_cb, &rt);
+                }
+            }
+            *ib_push(&nb) = sw;
         } else {   /* falls through to the next block */
             if (bb[b].nsucc > 0)
                 emit_edge_copies(&nb, bb, bb[b].succ[0], b, fn);
@@ -2025,7 +2087,7 @@ static int pass_mem2reg(struct ir_func *fn)
     if (ntramp > 0 && nbb > 0) {
         enum ir_op lt = bb[nbb - 1].end > bb[nbb - 1].start
                         ? fn->ins[bb[nbb - 1].end - 1].op : IR_UD2;
-        if (lt != IR_JMP && lt != IR_RET && lt != IR_UD2) {
+        if (lt != IR_JMP && lt != IR_RET && lt != IR_UD2 && lt != IR_SWITCH) {
             struct ir_ins *r = ib_push(&nb);
             r->op = IR_RET; r->a = -1;
             /* A cap so the trampolines below cannot be fallen into: it
@@ -2897,6 +2959,23 @@ static int pass_thread(struct ir_func *fn)
     return changed;
 }
 
+struct fwdctx { const int *fwd; int n, changed; };
+static void fwd_cb(int *p, void *ctx)
+{
+    struct fwdctx *c = ctx;
+    int l = *p;
+    if (l < 0 || l >= c->n || c->fwd[l] < 0 || c->fwd[l] == l)
+        return;
+    *p = c->fwd[l];
+    c->changed = 1;
+}
+struct reachctx { char *reached; int n; };
+static void reach_cb(int *p, void *ctx)
+{
+    struct reachctx *c = ctx;
+    if (*p >= 0 && *p < c->n) c->reached[*p] = 1;
+}
+
 static int pass_cfgclean(struct ir_func *fn)
 {
     if (fn->nins == 0 || fn->nlabels == 0)
@@ -2929,15 +3008,17 @@ static int pass_cfgclean(struct ir_func *fn)
             t = fwd[t];
         fwd[l] = t;
     }
-    for (int n = 0; n < fn->nins; n++) {
-        struct ir_ins *i = &fn->ins[n];
-        if (i->op != IR_JMP && i->op != IR_BRZ && i->op != IR_BRNZ)
-            continue;
-        int l = i->label;
-        if (l < 0 || l >= fn->nlabels || fwd[l] < 0 || fwd[l] == l)
-            continue;
-        i->label = fwd[l];
-        changed = 1;
+    {
+        struct fwdctx fc = { fwd, fn->nlabels, 0 };
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_JMP && i->op != IR_BRZ && i->op != IR_BRNZ &&
+                i->op != IR_SWITCH)
+                continue;
+            each_label(fn, i, fwd_cb, &fc);
+        }
+        if (fc.changed)
+            changed = 1;
     }
 
     /* A conditional branch whose taken target is the fall-through is a
@@ -3036,12 +3117,10 @@ static int pass_cfgclean(struct ir_func *fn)
     }
 
     char *reached = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1);
-    for (int n = 0; n < fn->nins; n++) {
-        struct ir_ins *i = &fn->ins[n];
-        if ((i->op == IR_JMP || i->op == IR_BRZ || i->op == IR_BRNZ ||
-             i->op == IR_LABELADDR) &&
-            i->label >= 0 && i->label < fn->nlabels)
-            reached[i->label] = 1;
+    {
+        struct reachctx rc = { reached, fn->nlabels };
+        for (int n = 0; n < fn->nins; n++)
+            each_label(fn, &fn->ins[n], reach_cb, &rc);
     }
     for (int e = 0; e < fn->neh; e++)
         if (fn->eh[e].lp_label >= 0 && fn->eh[e].lp_label < fn->nlabels)
@@ -3065,7 +3144,7 @@ static int pass_cfgclean(struct ir_func *fn)
             }
         }
         if ((i->op == IR_JMP && !dead[n]) || i->op == IR_RET ||
-            i->op == IR_UD2) {
+            i->op == IR_UD2 || i->op == IR_SWITCH) {
             for (int m = n + 1; m < fn->nins; m++) {
                 if (fn->ins[m].op == IR_LABEL)
                     break;
@@ -3973,7 +4052,8 @@ static int pre_tail(struct ir_func *fn, struct bb *bb, int b)
     if (e > bb[b].start) {
         enum ir_op op = fn->ins[e - 1].op;
         if (op == IR_JMP || op == IR_BRZ || op == IR_BRNZ ||
-            op == IR_RET || op == IR_UD2 || op == IR_IGOTO)
+            op == IR_RET || op == IR_UD2 || op == IR_IGOTO ||
+            op == IR_SWITCH)
             return e - 1;
     }
     return e;
@@ -4379,7 +4459,9 @@ static int pre_one(struct ir_func *fn)
             /* retarget the branch when cb is its target; otherwise cb is
              * the fall-through, and a jmp after the branch takes it */
             struct ir_ins *term = &fn->ins[bb[pb].end - 1];
-            if (term->label == cblab) pins[pb] = bb[pb].end - 1;  /* retarget */
+            /* a switch never falls through: cb is in its table */
+            if (term->op == IR_SWITCH || term->label == cblab)
+                pins[pb] = bb[pb].end - 1;                    /* retarget */
             else { pins[pb] = bb[pb].end; pjmp[pb] = 1; }
         } else {
             pins[pb] = pre_tail(fn, bb, pb);
@@ -4449,6 +4531,9 @@ static int pre_one(struct ir_func *fn)
                 j->op = IR_JMP; j->dst = -1; j->a = -1; j->b = -1;
                 j->label = pnew[b]; j->line = line; j->col = col;
                 j->synth = line ? 0 : 1;
+            } else if (out->op == IR_SWITCH) {
+                struct retarget rt = { cblab, pnew[b] };
+                each_label(fn, out, retarget_cb, &rt);  /* every entry that was cb */
             } else {
                 out->label = pnew[b];           /* branch now enters the split */
             }
@@ -4573,7 +4658,7 @@ static int licm_one(struct ir_func *fn)
             if (!in[p] || bb[p].end != bb[h].start || bb[p].end <= bb[p].start)
                 continue;
             enum ir_op t = fn->ins[bb[p].end - 1].op;
-            if (t != IR_JMP && t != IR_RET && t != IR_UD2)
+            if (t != IR_JMP && t != IR_RET && t != IR_UD2 && t != IR_SWITCH)
                 ok = 0;
         }
         if (!ok)
@@ -6847,7 +6932,7 @@ static int unr_copyable(const struct ir_ins *i)
     switch (i->op) {
     case IR_ALLOCA: case IR_SPSAVE: case IR_SPRESTORE:
     case IR_ASM: case IR_VA_START: case IR_LANDING:
-    case IR_IGOTO: case IR_LABELADDR:
+    case IR_IGOTO: case IR_LABELADDR: case IR_SWITCH:
     case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_RET: case IR_UD2:
         return 0;
     case IR_CALL:
@@ -8139,8 +8224,8 @@ static void remap_ins(struct ir_ins *in, struct rmp *r)
         in->dst = vmap(r, in->dst);
     }
     if (in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ ||
-        in->op == IR_LABEL)
-        in->label += r->lbase;
+        in->op == IR_LABEL || in->op == IR_SWITCH)
+        in->label += r->lbase;      /* a switch's table: see inline_call */
 }
 
 /* The ir_func for a callee, or NULL if not defined in this unit. */
@@ -8290,6 +8375,8 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     for (int i = 0; i < cf->nins; i++) {
         struct ir_ins in = cf->ins[i];
         remap_ins(&in, &cm);
+        if (in.op == IR_SWITCH)          /* its table, renumbered like its default */
+            in.jt = ir_jt_clone(fn, cf, in.jt, L);
         if (in.op == IR_RET) {
             if (in.a >= 0 && dst >= 0) {
                 struct ir_ins *mv = &buf[m++];
@@ -9127,6 +9214,32 @@ static void verify_func(struct ir_func *fn, const char *tag)
     struct vrfy v = { &d, fn->nparams, fn->nvars, fn, tag };
     for (int n = 0; n < fn->nins; n++)
         each_read(&fn->ins[n], vrfy_read_cb, &v);
+    /* (3) every target a switch names is a label this function places:
+     * a table entry left behind by a pass that renumbered or dropped
+     * labels is a jump into nowhere. */
+    {
+        char *placed = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1);
+        for (int n = 0; n < fn->nins; n++)
+            if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+                fn->ins[n].label < fn->nlabels)
+                placed[fn->ins[n].label] = 1;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_SWITCH)
+                continue;
+            if (i->jt < 0 || i->jt >= fn->njt || fn->jt[i->jt].n < 1)
+                diag_fatal(fn->file, 0, "internal: %s has a switch with no "
+                           "table (after %s)", fn->name, tag);
+            for (int k = -1; k < fn->jt[i->jt].n; k++) {
+                int l = k < 0 ? i->label : fn->jt[i->jt].labels[k];
+                if (l < 0 || l >= fn->nlabels || !placed[l])
+                    diag_fatal(fn->file, 0, "internal: %s: a switch names "
+                               "label L%d, which nothing places (after %s)",
+                               fn->name, l, tag);
+            }
+        }
+        free(placed);
+    }
     if (fn->var_scope_lo)
         for (int i = 0; i < fn->nvars; i++) {
             int lo = fn->var_scope_lo[i], hi = fn->var_scope_hi[i];
