@@ -1546,7 +1546,13 @@ static void take_carried(struct parser *ps, struct attrs *a)
 static struct type *parse_stars(struct parser *ps, struct type *t)
 {
     for (;;) {
-        skip_quals(ps); /* char * const p, const char *p, ... */
+        /* A qualifier here belongs to the type built so far: before the
+         * first `*` to what the specifiers named, after a `*` to that
+         * pointer -- `int *volatile p` is a volatile OBJECT, read anew at
+         * every use. That volatile was dropped, so a loop polling a
+         * pointer an interrupt handler advances read it once. */
+        if (skip_quals(ps))
+            t = ty_volatile(t);
         /* GCC also lets an attribute sit where a qualifier can:
          * `typedef uint64_t __attribute__((may_alias)) word_t;`,
          * `int * __attribute__((unused)) p`. The ones EmbCC ignores everywhere
