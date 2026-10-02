@@ -1159,7 +1159,15 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * the outgoing-argument area have been laid out. */
     if (want_stack_usage) {
         struct outbuf sub = { NULL, 0, 0 };
-        char *sup = xmalloc(strlen(out) + 4);
+        /* Beside the output, or with no -o (`-S` to stdout, say) named
+         * after the source in the current directory, as GCC does: this
+         * took strlen(NULL) and crashed. */
+        const char *base = out;
+        if (!base) {
+            const char *sl = strrchr(in, '/');
+            base = sl ? sl + 1 : in;
+        }
+        char *sup = xmalloc(strlen(base) + 4);
         const char *dot;
         /* Only functions that got code. One the inliner absorbed, or
          * that reachability dropped, still has a definition in the AST
@@ -1169,7 +1177,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             if (!fn->absorbed && fn->has_defn && fn->code_len > 0)
                 ob_fmt(&sub, "%s:%d:%s\t%d\tstatic\n",
                        in, fn->line, fn->name, fn->stack_bytes);
-        strcpy(sup, out);
+        strcpy(sup, base);
         dot = strrchr(sup, '.');
         strcpy((char *)(dot && !strchr(dot, '/') ? dot : sup + strlen(sup)),
                ".su");
