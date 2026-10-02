@@ -13,6 +13,8 @@
 
 #include "../arch/aarch64/asm.h"
 #include "../arch/avr/asm.h"
+#include "../arch/riscv/asm.h"
+#include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
 #include "ldfloat.h"
@@ -4017,6 +4019,60 @@ static int asm_resolve_reg_avr(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* ARMv7-M and RISC-V operand resolution. Both went through the x86 path,
+ * where the letters a/b/c/d/S/D pin x86 register NUMBERS: "=a" on RISC-V
+ * was x0, the zero register, so an output written there was lost, and S/D
+ * on Thumb were r6/r7, callee-saved and not saved. 'i' and 'n' became a
+ * register holding the value, where the template wants a literal, and a
+ * register variable was matched against the x86 names. Their own letters
+ * here, as aarch64 has:
+ *   r/g          a register irgen allocates from its caller-saved pool (-2)
+ *   m            the same, holding the operand's address
+ *   i/n (and on Thumb I/J/K/L/M) a constant, substituted as a literal
+ *   a register variable  its register, which must be one the pool may use
+ * Anything else is ASM_REG_INVALID, refused by irgen with the constraint. */
+static int asm_resolve_reg_ilp32(struct unit *u, struct stmt *s,
+                                 struct asm_operand *op, const char *c,
+                                 int riscv)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int n = (int)strlen(rn);
+        int r = riscv ? rvasm_gpr(rn, n) : tasm_gpr(rn, n);
+        /* the registers irgen's pool hands out: RISC-V t0-t6 and a0-a7
+         * (x5-x7, x10-x17, x28-x31), ARMv7-M r0-r3 and r12 */
+        int ok = riscv ? (r >= 5 && r <= 7) || (r >= 10 && r <= 17) ||
+                         (r >= 28 && r <= 31)
+                       : (r >= 0 && r <= 3) || r == 12;
+        if (!ok)
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "%s asm (use %s)", rn, riscv ? "RISC-V" : "ARMv7-M",
+                    riscv ? "a0-a7 or t0-t6" : "r0-r3 or r12");
+        return r;
+    }
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'm') has_r = 1;
+        if (*p == 'i' || *p == 'n' ||
+            (!riscv && (*p == 'I' || *p == 'J' || *p == 'K' || *p == 'L' ||
+                        *p == 'M')))
+            has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;     /* a non-constant "i": gcc refuses too */
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -4031,6 +4087,10 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_arm64(u, s, op, c);
     if (target_get() == TARGET_AVR)
         return asm_resolve_reg_avr(u, s, op, c);
+    if (target_get() == TARGET_THUMB)
+        return asm_resolve_reg_ilp32(u, s, op, c, 0);
+    if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
+        return asm_resolve_reg_ilp32(u, s, op, c, 1);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)

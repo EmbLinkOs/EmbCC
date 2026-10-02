@@ -212,7 +212,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         struct asm_operand *op = i < a->nout ? &a->out[i] : &a->in[i - a->nout];
         if (op->reg == ASM_REG_INVALID)
             diag_fatal(file, s->line, "asm constraint \"%s\" is not valid for "
-                                      "RISC-V", op->constraint);
+                                      "ARMv7-M", op->constraint);
         if (op->reg == ASM_REG_IMM && i < a->nout)
             diag_fatal(file, s->line, "an asm output cannot be an immediate");
         regs[i] = op->reg;

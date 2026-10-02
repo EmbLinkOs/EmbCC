@@ -92,6 +92,15 @@ static int chain(int a)
 { int r; __asm__("addi %0, %1, 1; slli %0, %0, 2; addi %0, %0, -3"
                  : "=r"(r) : "r"(a)); return r; }
 
+/* An "i" operand is a LITERAL in the template, and a register variable
+ * pins its operand. Both went through x86's constraint letters, where
+ * "i" became a register and a register variable an x86 name. */
+static int addk(int a)
+{ int r; __asm__("addi %0, %1, %2" : "=r"(r) : "r"(a), "i"(9)); return r; }
+static int pinned(int a)
+{ register int y __asm__("a3") = a; int r;
+  __asm__("addi %0, %1, 2" : "=r"(r) : "r"(y)); return r; }
+
 int main(void)
 {
     putn(add3(20, 22));        /* 42 */
@@ -100,6 +109,8 @@ int main(void)
     putn(hart());              /* 0 */
     putn(fenced(41));          /* 42 */
     putn(chain(10));           /* (10+1)<<2 - 3 = 41 */
+    putn(addk(33));            /* 42 */
+    putn(pinned(40));          /* 42 */
     puts_("\n==END==\n");
     return 0;
 }
@@ -126,7 +137,7 @@ for w in 32 64; do
         # The answers are all 42 but one, and they are checked as a whole
         # line so a single wrong operand fails rather than averaging out.
         got=$(tr -d '\n' < "$d/a$opt.txt" | sed 's/==END==.*//')
-        want="42 40 42 0 42 41 "
+        want="42 40 42 0 42 41 42 42 "
         [ "$got" = "$want" ] || {
             echo "rv$w $opt: inline asm computed '$got', wanted '$want'"
             exit 1; }
@@ -157,3 +168,23 @@ fi
 "$EMBCC" --target=riscv32-unknown-elf -c "$out/csr.c" -o /dev/null || {
     echo "cycleh was refused at RV32, where it does exist"; exit 1; }
 echo "an unknown instruction and an RV32-only CSR are each refused by name"
+
+# x86's constraint letters mean nothing here. "=a" pinned the output to
+# x86 register 0 -- x0, the zero register -- and the result was lost
+# with no diagnostic; a register variable on a callee-saved register
+# would be loaded without being saved.
+printf 'int f(int x){ int r; __asm__("mv %%0, %%1" : "=a"(r) : "r"(x)); return r; }\n' \
+    > "$out/x86c.c"
+if "$EMBCC" --target=riscv32-unknown-elf -c "$out/x86c.c" -o /dev/null \
+     2> "$out/x86c.err"; then
+    echo "x86's \"=a\" was accepted on RISC-V"; exit 1
+fi
+grep -q 'asm constraint "=a" is not valid for RISC-V' "$out/x86c.err" || {
+    echo "the \"=a\" refusal is not by name:"; cat "$out/x86c.err"; exit 1; }
+printf 'int f(int x){ register int y __asm__("s0") = x; int r; __asm__("mv %%0, %%1" : "=r"(r) : "r"(y)); return r; }\n' \
+    > "$out/s0.c"
+if "$EMBCC" --target=riscv32-unknown-elf -c "$out/s0.c" -o /dev/null \
+     2> "$out/s0.err"; then
+    echo "a register variable on callee-saved s0 was accepted"; exit 1
+fi
+echo "x86's constraint letters and a callee-saved register variable are refused"
