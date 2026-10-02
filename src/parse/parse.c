@@ -1193,7 +1193,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
 
 static struct type *parse_struct_body(struct parser *ps, struct type *t,
                                       const struct attrs *lead);
-static void parse_enum_body(struct parser *ps);
+static struct type *parse_enum_body(struct parser *ps, struct type *fixed);
 
 /* struct/union/enum specifier, after the keyword was consumed. */
 static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
@@ -1233,7 +1233,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
             if (!allow_body)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "define enums at file scope");
-            parse_enum_body(ps);
+            parse_enum_body(ps, under);
         }
         if (tag && !find_tag(ps, tag)) {
             struct tagdef *td = xcalloc(1, sizeof *td);
@@ -1259,6 +1259,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                        "definitions are not supported)",
                        kind == TAG_ENUM ? "enums" : "structs/unions");
         struct type *t = NULL;
+        struct tagdef *etd = NULL;
         if (tag) {
             struct tagdef *td = find_tag(ps, tag);
             if (td) {
@@ -1279,12 +1280,15 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                 ps->tags = td;
                 t = td->ty;
             }
+            etd = td;
         } else if (kind != TAG_ENUM) {
             t = ty_struct(NULL, kind == TAG_UNION);
         }
         if (kind == TAG_ENUM) {
-            parse_enum_body(ps);
-            return ty_base(TY_INT, 0);
+            struct type *et = parse_enum_body(ps, NULL);
+            if (etd && et->kind != TY_INT)
+                etd->ty = et;       /* `enum G x;` later: the same type */
+            return et;
         }
         return parse_struct_body(ps, t, &lead);
     }
@@ -2286,10 +2290,19 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     return t;
 }
 
-static void parse_enum_body(struct parser *ps)
+/* The enumerators, and the enum's type. With a fixed underlying type
+ * (C23 `enum e : T`) that is T, and so is each enumerator's. Without one
+ * it is int while every value fits int, and otherwise the type GCC and
+ * clang choose -- unsigned int, then long, unsigned long, long long --
+ * which the enumerators then have too (C23 6.7.2.2). They were all int
+ * whatever their value, so `enum { G = 0x100000005 }` was truncated in
+ * every expression and sizeof the enum was 4 against their 8. */
+static struct type *parse_enum_body(struct parser *ps, struct type *fixed)
 {
     expect(ps, TOK_LBRACE, "'{'");
-    long val = 0;
+    long val = 0, lo = 0, hi = 0;
+    int any = 0;
+    struct econst **first = ps->econst_tail;
 
     while (cur(ps)->kind != TOK_RBRACE) {
         if (cur(ps)->kind != TOK_IDENT)
@@ -2314,6 +2327,9 @@ static void parse_enum_body(struct parser *ps)
                            "duplicate enumerator '%s'", name);
         struct econst *ec = xcalloc(1, sizeof *ec);
         ec->name = name;
+        if (!any || val < lo) lo = val;
+        if (!any || val > hi) hi = val;
+        any = 1;
         ec->val = val++;
         ec->seq = ps->seq;
         *ps->econst_tail = ec;
@@ -2323,6 +2339,28 @@ static void parse_enum_body(struct parser *ps)
         advance(ps); /* trailing comma before '}' is fine, as in C99 */
     }
     expect(ps, TOK_RBRACE, "'}'");
+
+    struct type *t = fixed;
+    if (!t) {
+        int ib = target_int_size() * 8, lb = target_long_size() * 8;
+        long imax = (1L << (ib - 1)) - 1, imin = -imax - 1;
+        unsigned long umax = ib == 64 ? ~0UL : (1UL << ib) - 1;
+        long lmax = lb == 64 ? 0x7fffffffffffffffL : (1L << (lb - 1)) - 1;
+        long lmin = -lmax - 1;
+        if (lo >= imin && hi <= imax)
+            return ty_base(TY_INT, 0);
+        if (lo >= 0 && (unsigned long)hi <= umax)
+            t = ty_base(TY_INT, 1);
+        else if (lo >= lmin && hi <= lmax)
+            t = ty_base(TY_LONG, 0);
+        else if (lb == 64 && lo >= 0)
+            t = ty_base(TY_LONG, 1);
+        else
+            t = ty_llong(lo >= 0);
+    }
+    for (struct econst *ec = *first; ec; ec = ec->next)
+        ec->ty = t;
+    return t;
 }
 
 /* ---- expressions ---- */
