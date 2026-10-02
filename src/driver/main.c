@@ -719,7 +719,19 @@ static int compile_and_link(const char *in, const char *out)
         remove(obj);
         return 1;
     }
-    rc = embld_link(inputs, n, exe, &lo);
+    /* Inside a boundary: embld's refusals unwind to here (util.h), where
+     * with none they ended the process and left OUT.embcc-tmp.o behind
+     * for every undefined symbol or --rom-limit overflow. */
+    {
+        jmp_buf lb;
+        volatile int lrc = 1;
+        if (setjmp(lb) == 0) {
+            fatal_set_boundary(&lb);
+            lrc = embld_link(inputs, n, exe, &lo);
+        }
+        fatal_set_boundary(NULL);
+        rc = lrc;
+    }
     remove(obj);
     return rc;
 }

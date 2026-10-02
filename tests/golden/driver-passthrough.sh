@@ -71,3 +71,17 @@ err=$("$EMBCC" $T -c "$out/s.c" -o "$out/s.o" -pedantic 2>&1) || {
 echo "$err" | grep -q "turns nothing on" || {
     echo "FAIL: -pedantic was accepted silently:"; echo "$err"; exit 1; }
 echo "-pedantic is accepted, and says what it does"
+
+# 6. A link embld refuses fails the command and leaves nothing behind:
+#    embld's refusal ended the process, and the compile's temporary
+#    object (OUT.embcc-tmp.o) stayed beside the output.
+printf 'int undefined_fn(void);\nvoid _start(void) { undefined_fn(); for (;;); }\n' \
+    > "$out/u.c"
+if "$EMBCC" $T "$out/u.c" -o "$out/u.elf" 2> "$out/u.err"; then
+    echo "FAIL: a link with an undefined symbol succeeded"; exit 1
+fi
+grep -q "undefined symbol 'undefined_fn'" "$out/u.err" || {
+    echo "FAIL: the link failure does not name the symbol:"; cat "$out/u.err"; exit 1; }
+[ ! -e "$out/u.elf.embcc-tmp.o" ] && [ ! -e "$out/u.elf" ] || {
+    echo "FAIL: the failed link left $(ls "$out" | grep '^u\.elf' | tr '\n' ' ')"; exit 1; }
+echo "and a refused link leaves no output and no temporary object"
