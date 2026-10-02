@@ -418,7 +418,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->defined || g->is_extern)
             continue;
-        int sz = g->ty ? ty_size(g->ty) : 0;
+        int sz = global_size(g);
         int al = g->ty ? ty_align(g->ty) : 1;
         if (!sz)
             continue;

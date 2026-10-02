@@ -278,6 +278,9 @@ struct global {
                              * by sema into init_bytes + relocs */
     const char *init_bytes; /* the constant byte image (string or aggregate) */
     int init_len;
+    int fam_extra;        /* bytes past ty_size(ty) that an initialized
+                           * flexible array member adds (GNU C): see
+                           * global_size() */
     struct greloc *relocs;  /* pointer slots the linker resolves */
     int nrelocs;
     struct global *next;
@@ -482,5 +485,6 @@ int parse_error_count(void);
  * `[i] =` designators (defined in parse.c, used there and in sema). */
 int initlist_elided_count(const struct expr *il, struct type *arr,
                           const struct econst *ec, int *guessed);
+int global_size(const struct global *g);
 
 #endif

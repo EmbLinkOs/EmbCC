@@ -3023,6 +3023,15 @@ static int elide_walk(struct elide_cur *c, struct type *ty, int braced)
  * unit's enumerators; *guessed (when given) is set when the count rests
  * on a guess about an initializer's type. A lone string in braces sizes
  * a character array as the string does: `char s[] = { "abc" }`. */
+/* The bytes a global occupies: its type's size, and for a struct whose
+ * flexible array member the initializer fills, the elements past it --
+ * GNU C sizes `struct f { int n; int d[]; } g = { 2, { 7, 8 } };` at 12
+ * bytes while sizeof g stays 4. Every writer of the object asks this. */
+int global_size(const struct global *g)
+{
+    return (g->ty ? ty_size(g->ty) : 0) + g->fam_extra;
+}
+
 int initlist_elided_count(const struct expr *il, struct type *arr,
                           const struct econst *ec, int *guessed)
 {

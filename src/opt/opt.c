@@ -8860,7 +8860,7 @@ static void ro_globals(struct ir_unit *iu)
 static int ro_bytes(const struct global *g, long off, int size,
                     unsigned long *out)
 {
-    int gs = ty_size(g->ty);
+    int gs = global_size(g);
     unsigned long v = 0;
     if (off < 0 || off + size > gs || size < 1 || size > 8)
         return 0;

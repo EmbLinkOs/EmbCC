@@ -436,3 +436,13 @@ check array-designator-in-struct \
 check non-ascii-operator \
     "int main(void) { int a = 2 $(printf '\303\227') 3; return a; }" \
     "is not part of a character C allows"
+
+# An automatic object has no room past its type's size, so its flexible
+# array member cannot be initialized (gcc refuses it too); the elements
+# were stored past the object, over the rest of the frame.
+check fam-init-automatic \
+    'struct fam { int n; int d[]; }; int main(void) { struct fam l = { 3, { 10 } }; return l.n; }' \
+    "flexible array member 'd' cannot be initialized"
+check fam-init-compound-literal \
+    'struct fam { int n; int d[]; }; int main(void) { struct fam *p = &(struct fam){ 3, { 10 } }; return p->n; }' \
+    "flexible array member 'd' cannot be initialized"

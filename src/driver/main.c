@@ -974,7 +974,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         }
         *len = (*len + align - 1) & ~(align - 1);
         g->off = *len;
-        *len += ty_size(g->ty);
+        *len += global_size(g);
         if (!g->is_tls && !g->section) {
             int *sa = g->in_bss ? &bss_align : &data_align;
             if (align > *sa)
@@ -1000,8 +1000,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 continue;                   /* a zero-length section */
             if (g->init_bytes) {
                 int n = g->init_len;
-                if (n > ty_size(g->ty))
-                    n = ty_size(g->ty);
+                if (n > global_size(g))
+                    n = global_size(g);
                 memcpy(img + g->off, g->init_bytes, (size_t)n);
                 continue;
             }
@@ -1890,7 +1890,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         if (!g->absorbed && g->defined && g->is_static)
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, (Elf64_Addr)g->off,
-                (Elf64_Xword)ty_size(g->ty),
+                (Elf64_Xword)global_size(g),
                 ELF64_ST_INFO(STB_LOCAL, g->is_tls ? STT_TLS : STT_OBJECT),
                 (Elf64_Half)(g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)
                              : g->named ? named[g->named - 1].ndx
@@ -1906,7 +1906,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         if (!g->absorbed && g->defined && !g->is_static)
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, (Elf64_Addr)g->off,
-                (Elf64_Xword)ty_size(g->ty),
+                (Elf64_Xword)global_size(g),
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
                               g->is_tls ? STT_TLS : STT_OBJECT),
                 (Elf64_Half)(g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)

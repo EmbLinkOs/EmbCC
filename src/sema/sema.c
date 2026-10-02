@@ -443,6 +443,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                                struct initelem *v, int n,
                                const char **out_bytes,
                                struct greloc **out_rel, int *out_nrel);
+static int init_overhang(struct unit *u, int line, const char *what,
+                         struct type *ty, const struct initelem *v, int n,
+                         int is_static);
 
 /* A bit-field's value merged into its storage unit's nb bytes at p
  * (they start zeroed, so OR is enough and neighbours are kept): its low
@@ -1566,9 +1569,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             g->defined = 1;
             g->used = 1;
             g->has_init = 1;   /* it has real bytes -> .data, not .bss */
-            lower_static_bytes(u, e->line, ty_size(ty), ib.v, ib.n,
+            g->fam_extra = init_overhang(u, e->line, "a compound literal",
+                                         ty, ib.v, ib.n, 1);
+            lower_static_bytes(u, e->line, global_size(g), ib.v, ib.n,
                                &g->init_bytes, &g->relocs, &g->nrelocs);
-            g->init_len = ty_size(ty);
+            g->init_len = global_size(g);
             struct global **gt = &u->globals;
             while (*gt) gt = &(*gt)->next;
             *gt = g;
@@ -1594,6 +1599,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         } else {
             flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
         }
+        init_overhang(u, e->line, "a compound literal", ty, ib.v, ib.n, 0);
         e->inits = ib.v;
         e->ninits = ib.n;
         e->lhs = NULL;
@@ -3314,6 +3320,50 @@ static int resolve_addr(struct expr *e, struct global **gt,
  * — both have static storage, so every leaf must reduce to constant
  * bytes now, save pointer slots initialized by a string literal, which
  * become relocations the linker resolves. */
+/* How far past ty's size the initializer leaves v reach. Only a
+ * struct whose last member is a flexible array is initialized past its
+ * end: GNU C gives a static object the room (struct global's fam_extra)
+ * and refuses it for one on the stack, which has none. Anything else
+ * past the end would be EmbCC's own error, and is refused rather than
+ * written over whatever follows the object. */
+static int init_overhang(struct unit *u, int line, const char *what,
+                         struct type *ty, const struct initelem *v, int n,
+                         int is_static)
+{
+    int size = ty_size(ty), end = size;
+    for (int k = 0; k < n; k++) {
+        /* a bit-field reaches as far as its bits do, not as far as its
+         * declared type: AVR packs an `unsigned` (2 bytes) field into a
+         * one-byte struct */
+        int w = v[k].bit_width ? (v[k].bit_off + v[k].bit_width + 7) / 8
+                               : ty_size(v[k].ty);
+        if (v[k].off + w > end)
+            end = v[k].off + w;
+    }
+    if (end == size)
+        return 0;
+    struct member *last = ty->kind == TY_STRUCT && !ty->is_union &&
+                          ty->nmembers > 0
+                        ? &ty->members[ty->nmembers - 1] : NULL;
+    if (!last || last->ty->kind != TY_ARRAY || last->ty->count != 0)
+        sema_error_line(u, line, "the initializer of %s reaches past its "
+                        "end", what);
+    if (!is_static)
+        sema_error_line(u, line, "%s is not static, so its flexible "
+                        "array member '%s' cannot be initialized: the "
+                        "object has no room for the elements", what,
+                        last->name ? last->name : "");
+    return end - size;
+}
+
+/* The bytes a bit-field's storage unit spans inside the object: the
+ * unit may be wider than what is left of it (init_overhang has checked
+ * the bits themselves fit), and the bytes past the end are not ours. */
+static int bf_span(int nb, int off, int size)
+{
+    return off + nb > size ? size - off : nb;
+}
+
 static void lower_static_bytes(struct unit *u, int line, int size,
                                struct initelem *v, int n,
                                const char **out_bytes,
@@ -3412,7 +3462,8 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "expression");
             if (v[k].bit_width) {
                 merge_bits(bytes + v[k].off,
-                           v[k].bf_bytes ? v[k].bf_bytes : 16, w,
+                           bf_span(v[k].bf_bytes ? v[k].bf_bytes : 16,
+                                   v[k].off, size), w,
                            v[k].bit_off, v[k].bit_width);
                 continue;
             }
@@ -3428,7 +3479,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                        "a static initializer must be a constant, a "
                        "string literal, or the address of a global");
         if (v[k].bit_width) {
-            merge_bits(bytes + v[k].off, v[k].bf_bytes ? v[k].bf_bytes : sz,
+            merge_bits(bytes + v[k].off,
+                       bf_span(v[k].bf_bytes ? v[k].bf_bytes : sz,
+                               v[k].off, size),
                        w_make((unsigned long)cv, 0), v[k].bit_off,
                        v[k].bit_width);
             continue;
@@ -3471,9 +3524,12 @@ static void lower_globals(struct unit *u)
         } else
             flatten_init(u, &gf, &sc, g->init_expr, g->ty, 0, &ib);
         g_in_static_init--;
-        lower_static_bytes(u, g->line, ty_size(g->ty), ib.v, ib.n,
+        char what[96];
+        snprintf(what, sizeof what, "'%s'", g->name);
+        g->fam_extra = init_overhang(u, g->line, what, g->ty, ib.v, ib.n, 1);
+        lower_static_bytes(u, g->line, global_size(g), ib.v, ib.n,
                            &g->init_bytes, &g->relocs, &g->nrelocs);
-        g->init_len = ty_size(g->ty);
+        g->init_len = global_size(g);
         g->init_expr = NULL;
     }
 }
@@ -4149,6 +4205,11 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 s->inits = ib.v;
                 s->ninits = ib.n;
                 s->expr = NULL;
+                if (!s->is_static) {
+                    char what[96];
+                    snprintf(what, sizeof what, "'%s'", s->name);
+                    init_overhang(u, s->line, what, s->dty, ib.v, ib.n, 0);
+                }
             }
             if (s->is_static)
                 g_in_static_init--;
@@ -4200,10 +4261,14 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     in = 1;
                 }
                 if (in) {
-                    lower_static_bytes(u, s->line, ty_size(s->dty), iv, in,
+                    char what[96];
+                    snprintf(what, sizeof what, "'%s'", s->name);
+                    g->fam_extra = init_overhang(u, s->line, what, s->dty,
+                                                 iv, in, 1);
+                    lower_static_bytes(u, s->line, global_size(g), iv, in,
                                        &g->init_bytes, &g->relocs,
                                        &g->nrelocs);
-                    g->init_len = ty_size(s->dty);
+                    g->init_len = global_size(g);
                     g->has_init = 1;
                 }
                 s->ninits = 0;
