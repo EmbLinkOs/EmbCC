@@ -200,6 +200,14 @@ int target_int_size(void)       { return g_model[g_arch].it; }
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
+int target_stack_align(void)
+{
+    switch (g_arch) {
+    case TARGET_THUMB: return 8;        /* AAPCS32 at a public interface */
+    case TARGET_AVR:   return 1;
+    default:           return 16;       /* SysV, AAPCS64, RISC-V psABI */
+    }
+}
 /* Apple's arm64 is not AAPCS64's data model in three columns, read off
  * `clang -target arm64-apple-macos -dM`: plain char is SIGNED, wchar_t
  * is `int`, and long double is double. EmbCC gave macOS the Linux model

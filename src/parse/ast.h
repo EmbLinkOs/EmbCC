@@ -347,6 +347,12 @@ struct func {
     struct type **var_tys;          /* sema: type of every var slot */
     int *var_aligns;                /* sema: __attribute__((aligned(N))) per
                                      * var slot (0 = natural); parallels var_tys */
+    /* sema: a local aligned beyond what the stack guarantees -- its real
+     * type, else NULL. Its slot (var_tys) is a POINTER, set at entry to
+     * storage carved off the stack and rounded up (irgen), and each
+     * address of it is that pointer. var_ind_align is the alignment. */
+    struct type **var_indirect;
+    int *var_ind_align;
     struct stmt *body;
     int defined;          /* parse: THIS node syntactically had a body
                            * (may be NULL even so: "{ }" — sema rejects

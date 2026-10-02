@@ -798,6 +798,21 @@ static int stmts_define_label(const struct stmt *s, const char *name)
 /* The address of an lvalue (or of a struct-typed expression — struct
  * "values" are represented by their address, since sema bars them from
  * every value context). */
+/* The address of local `v`: its slot -- or, for one aligned beyond what
+ * the stack guarantees (func.var_indirect), the pointer to its storage
+ * that the slot holds. */
+static int local_addr(struct ir_func *fn, int v)
+{
+    struct func *f = fn->src;
+    if (f && f->var_indirect && v < f->nvars && f->var_indirect[v])
+        return emit_ldvar(fn, v, ty_ptr(f->var_indirect[v]));
+    struct ir_ins *i = emit(fn);
+    i->op = IR_ADDR;
+    i->a = v;
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
 int gen_addr(struct ir_func *fn, struct expr *e)
 {
     switch (e->kind) {
@@ -809,13 +824,7 @@ int gen_addr(struct ir_func *fn, struct expr *e)
             return emit_ldvar(fn, e->var_index,
                               ty_ptr(e->undecayed ? e->undecayed->pointee
                                                   : e->ty->pointee));
-        {
-            struct ir_ins *i = emit(fn);
-            i->op = IR_ADDR;
-            i->a = e->var_index;
-            i->dst = new_temp(fn);
-            return i->dst;
-        }
+        return local_addr(fn, e->var_index);
     case EXPR_DEREF:
         return gen_expr(fn, e->rhs);
     case EXPR_MEMBER: {
@@ -842,11 +851,7 @@ int gen_expr(struct ir_func *fn, struct expr *e);
 
 int irg_va_struct_slot(struct ir_func *fn, struct expr *e)
 {
-    struct ir_ins *ad = emit(fn);
-    ad->op = IR_ADDR;
-    ad->a = e->var_index;
-    ad->dst = new_temp(fn);
-    return ad->dst;
+    return local_addr(fn, e->var_index);
 }
 
 void irg_va_copy(struct ir_func *fn, int dst, long off, int src, long n)
@@ -867,11 +872,7 @@ void irg_va_copy(struct ir_func *fn, int dst, long off, int src, long n)
  * aggregate), and return the object's address. */
 static int gen_complit(struct ir_func *fn, struct expr *e)
 {
-    struct ir_ins *ad = emit(fn);
-    ad->op = IR_ADDR;
-    ad->a = e->var_index;
-    ad->dst = new_temp(fn);
-    int base = ad->dst;
+    int base = local_addr(fn, e->var_index);
     struct ir_ins *z = emit(fn);
     z->op = IR_MEMZERO;
     z->a = base;
@@ -3397,11 +3398,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 /* C zero-fills whatever the initializer does not
                  * mention, so clear the object first and then place
                  * the listed values. */
-                struct ir_ins *ad = emit(fn);
-                ad->op = IR_ADDR;
-                ad->a = s->var_index;
-                ad->dst = new_temp(fn);
-                int base = ad->dst;
+                int base = local_addr(fn, s->var_index);
                 struct ir_ins *z = emit(fn);
                 z->op = IR_MEMZERO;
                 z->a = base;
@@ -3422,13 +3419,10 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 if (s->dty->kind == TY_STRUCT) {
                     /* initializing a struct is the same byte copy an
                      * assignment is */
-                    struct ir_ins *a = emit(fn);
-                    a->op = IR_ADDR;
-                    a->a = s->var_index;
-                    a->dst = new_temp(fn);
+                    int at = local_addr(fn, s->var_index);
                     struct ir_ins *i = emit(fn);
                     i->op = IR_MEMCPY;
-                    i->a = a->dst;
+                    i->a = at;
                     i->b = v;
                     i->size = ty_size(s->dty);
                 } else {
@@ -3851,12 +3845,41 @@ static void gen_func(struct ir_func *fn, struct func *f)
         for (int i = 0; i < f->nparams; i++)
             vla_eval(fn, f->param_tys[i]);
     g_eh_cur = -1;
+    /* Locals aligned beyond the stack's guarantee (sema's var_indirect):
+     * each is carved off the stack ONCE, here, rounded up to its
+     * alignment, and its slot keeps the address -- for the whole
+     * function, so a goto past its declaration cannot skip the carving
+     * and a loop around it cannot grow the stack. */
+    for (int v = 0; f->var_indirect && v < f->nvars; v++) {
+        if (!f->var_indirect[v])
+            continue;
+        long al = f->var_ind_align[v];
+        int size = emit_const(fn, ty_size(f->var_indirect[v]) + al - 1, AW);
+        struct ir_ins *a = emit(fn);        /* after its operand */
+        a->op = IR_ALLOCA;
+        a->a = size;
+        a->dst = new_temp(fn);
+        int p = emit_bin(fn, IR_AND,
+                         emit_bin(fn, IR_ADD, a->dst,
+                                  emit_const(fn, al - 1, AW), AW, 1),
+                         emit_const(fn, -al, AW), AW, 1);
+        emit_stvar(fn, v, p, ty_ptr(f->var_indirect[v]));
+        fn->has_alloca = 1;
+    }
     gen_stmt(fn, f->body, NULL);
     if (fn->neh)
         mark_eh_calls(fn);
     for (int i = 0; i < f->nvars; i++)  /* clamp the un-narrowed default */
         if (fn->var_scope_hi[i] == 0x7fffffff)
             fn->var_scope_hi[i] = fn->nins;
+    /* ...and those pointers live from the entry, wherever their names'
+     * blocks are: a slot shared with another block's local would lose
+     * the address */
+    for (int v = 0; f->var_indirect && v < f->nvars; v++)
+        if (f->var_indirect[v]) {
+            fn->var_scope_lo[v] = 0;
+            fn->var_scope_hi[v] = fn->nins;
+        }
     for (int i = 0; i < g_nlabels_used; i++)
         if (!g_labels[i].defined)
             diag_fatal(fn->file, g_labels[i].line,

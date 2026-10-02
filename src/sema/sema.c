@@ -4738,6 +4738,41 @@ static void check_func(struct unit *u, struct func *f)
         f->var_aligns[i] = sc.vars[i].g || sc.vars[i].fdecl
                            ? 0 : sc.vars[i].user_align;
     }
+    /* A local aligned beyond what the stack guarantees. A frame slot's
+     * OFFSET can be rounded to anything, but the address is the stack
+     * pointer plus it, and sp is only ever 16-aligned (8 on AAPCS32):
+     * Thumb and RISC-V put `char buf[64] __attribute__((aligned(64)))`
+     * at whatever sp gave them, silently, and x86-64 and aarch64 refused
+     * it. An aggregate gets storage of its own instead (var_indirect);
+     * a scalar so aligned is refused by name. AVR keeps its own refusal
+     * of any aligned local. */
+    f->var_indirect = NULL;
+    f->var_ind_align = NULL;
+    for (int i = f->nparams; i < sc.n && target_get() != TARGET_AVR; i++) {
+        struct type *t = f->var_tys[i];
+        if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t))
+            continue;
+        int al = ty_align(t);
+        if (f->var_aligns[i] > al)
+            al = f->var_aligns[i];
+        if (al <= target_stack_align())
+            continue;
+        if (t->kind != TY_STRUCT && t->kind != TY_ARRAY)
+            sema_error_at(u, sc.vars[i].line, sc.vars[i].col,
+                          "'%s' needs %d-byte alignment and the stack only "
+                          "guarantees %d: supported for an array or a "
+                          "struct, not yet for a scalar", sc.vars[i].name,
+                          al, target_stack_align());
+        if (!f->var_indirect) {
+            f->var_indirect = xcalloc((size_t)sc.n, sizeof *f->var_indirect);
+            f->var_ind_align = xcalloc((size_t)sc.n,
+                                       sizeof *f->var_ind_align);
+        }
+        f->var_indirect[i] = t;
+        f->var_ind_align[i] = al;
+        f->var_tys[i] = ty_ptr(t);
+        f->var_aligns[i] = 0;
+    }
     free(sc.vars);
     g_cx_sc = NULL;
     g_file = savefile;

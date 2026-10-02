@@ -114,6 +114,9 @@ int target_double_size(void);      /* 8, or 4 on AVR */
 int target_int_size(void);
 /* The most alignment any scalar gets, or 0 for no cap -- 1 on AVR. */
 int target_max_scalar_align(void);         /* 4, or 2 on AVR */
+/* What the stack pointer is aligned to at every call -- and so the most a
+ * frame slot's offset alone can promise an address. */
+int target_stack_align(void);
 int target_ldouble_size(void);    /* 16, or 8 where it is just a double */
 int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
 
