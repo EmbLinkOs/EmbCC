@@ -255,41 +255,70 @@ void x86_movx_rr(struct code *c, int dst, int src, int size, int sign, int w)
     code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
 }
 
+/* The "r, r/m" opcode of a two-operand ALU op (+ - & | ^), or -1. The
+ * "r/m, r" form, the one that can write memory, is two below it for every
+ * one of them: 01 add, 29 sub, 21 and, 09 or, 31 xor. */
+static int alu_rm_opcode(int op)
+{
+    switch (op) {
+    case '+': return 0x03;
+    case '-': return 0x2b;
+    case '&': return 0x23;
+    case '|': return 0x0b;
+    case '^': return 0x33;
+    default:  return -1;
+    }
+}
+
 /* dst op= src (+ - * & | ^), w-bit — the reg-reg twin of x86_alu_eax_mem, same
  * "r, r/m" opcodes with reg=dst, rm=src. */
 void x86_alu_rr(struct code *c, int op, int dst, int src, int w)
 {
     rex_rb(c, w == 8, dst, src);
-    switch (op) {
-    case '+': code_byte(c, 0x03); break;
-    case '-': code_byte(c, 0x2b); break;
-    case '*': code_byte(c, 0x0f); code_byte(c, 0xaf); break;
-    case '&': code_byte(c, 0x23); break;
-    case '|': code_byte(c, 0x0b); break;
-    case '^': code_byte(c, 0x33); break;
-    default:
+    if (op == '*') {
+        code_byte(c, 0x0f); code_byte(c, 0xaf);
+    } else if (alu_rm_opcode(op) >= 0) {
+        code_byte(c, alu_rm_opcode(op));
+    } else {
         internal_error("no reg-reg encoding for '%c'", op);
     }
     code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
+}
+
+/* [base+disp] op= src (+ - & | ^), w-bit: read-modify-write, the memory
+ * operand in r/m and the register in reg. */
+void x86_alu_mem_reg(struct code *c, int op, int base, int disp, int src,
+                     int w)
+{
+    if (alu_rm_opcode(op) < 0)
+        internal_error("no memory-destination encoding for '%c'", op);
+    rex_rb(c, w == 8, src, base);
+    code_byte(c, alu_rm_opcode(op) - 2);
+    modrm_base(c, src, base, disp);
 }
 
 /* group-1 ALU `reg OP= imm` (add/sub/and/or/xor, and cmp via op 'c'): the imm8
  * form (83 /ext ib, sign-extended) when the value fits, else imm32 (81 /ext id).
  * Works for any register including rax — shorter than materialising the constant
  * in a scratch register first. */
+static int alu_group1_ext(int op)
+{
+    switch (op) {
+    case '+': return 0;
+    case '|': return 1;
+    case '&': return 4;
+    case '-': return 5;
+    case '^': return 6;
+    case 'c': return 7;         /* cmp */
+    default:  return -1;
+    }
+}
+
 void x86_alu_reg_imm(struct code *c, int op, int reg, long imm, int w)
 {
-    int ext;
-    switch (op) {
-    case '+': ext = 0; break;
-    case '|': ext = 1; break;
-    case '&': ext = 4; break;
-    case '-': ext = 5; break;
-    case '^': ext = 6; break;
-    case 'c': ext = 7; break;   /* cmp */
-    default:
+    int ext = alu_group1_ext(op);
+    if (ext < 0)
         internal_error("no reg-imm encoding for '%c'", op);
-    }
     rex_rb(c, w == 8, 0, reg);   /* reg is the r/m operand -> REX.B */
     if (imm >= -128 && imm <= 127) {
         code_byte(c, 0x83);
@@ -298,6 +327,27 @@ void x86_alu_reg_imm(struct code *c, int op, int reg, long imm, int w)
     } else {
         code_byte(c, 0x81);
         code_byte(c, 0xc0 | (ext << 3) | (reg & 7));
+        code_u32(c, (unsigned long)imm);
+    }
+}
+
+/* [base+disp] op= imm: x86_alu_reg_imm's group-1 forms with a memory r/m.
+ * At w == 8 the immediate is sign-extended from 32 bits; the caller checks
+ * it fits. */
+void x86_alu_mem_imm(struct code *c, int op, int base, int disp, long imm,
+                     int w)
+{
+    int ext = alu_group1_ext(op);
+    if (ext < 0)
+        internal_error("no memory-imm encoding for '%c'", op);
+    rex_rb(c, w == 8, 0, base);
+    if (imm >= -128 && imm <= 127) {
+        code_byte(c, 0x83);
+        modrm_base(c, ext, base, disp);
+        code_byte(c, (int)(imm & 0xff));
+    } else {
+        code_byte(c, 0x81);
+        modrm_base(c, ext, base, disp);
         code_u32(c, (unsigned long)imm);
     }
 }

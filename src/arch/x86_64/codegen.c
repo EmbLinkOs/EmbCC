@@ -2328,6 +2328,95 @@ static void restore_callee(struct code *text, const int *used_callee,
         x86_load_reg_mem(text, used_callee[k], REG_RBP, save_base + k * 8, 8);
 }
 
+/* ---- read-modify-write ------------------------------------------------
+ *
+ * `t = load [A]`, later `u = t OP v`, then `store [A], u` -- a counter, an
+ * accumulator in memory, `stack[sp - 1] += stack[sp]` -- is one x86
+ * instruction, `OP v, (A)`, where it was three: the load into a register,
+ * the op, and the store back. x86_rmw_find recognises it at the load and
+ * returns the op's index; the load emits nothing and the op emits the
+ * whole thing and consumes the store.
+ *
+ * Between the load and the op nothing may write memory (it could be A),
+ * redefine A, or leave the block; t and u must have no other use, so
+ * neither needs to exist in a register. Only a full-width access (4 or
+ * 8 bytes, the op's own width), and only the ops with a memory
+ * destination: + - & | ^, with t as the left operand of a subtraction. */
+static int x86_rmw_writes_memory(enum ir_op op)
+{
+    switch (op) {
+    case IR_STORE: case IR_STVAR: case IR_CALL: case IR_MEMCPY:
+    case IR_MEMZERO: case IR_XCHG: case IR_XADD: case IR_ARMW: case IR_CAS:
+    case IR_CMPXCHG: case IR_CAS16: case IR_VSTORE: case IR_ASM:
+    case IR_VA_START: case IR_FENCE: case IR_ALLOCA: case IR_SPRESTORE:
+    case IR_LANDING:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+struct rmw_rd { int v, found; };
+static void rmw_rd_cb(int v, void *ctx)
+{
+    struct rmw_rd *r = ctx;
+    if (v == r->v)
+        r->found = 1;
+}
+
+static int x86_rmw_find(struct ir_func *fn, int n, const int *usecnt)
+{
+    const struct ir_ins *ld = &fn->ins[n];
+    int t = ld->dst, A = ld->a;
+    if (ld->op != IR_LOAD || ld->vol || ld->memoff || ld->flt ||
+        (ld->size != 4 && ld->size != 8) || ld->w != ld->size ||
+        t < fn->nvars || t >= fn->nvregs || usecnt[t] != 1 || is_flt(t) ||
+        A < 0 || A >= fn->nvregs || (!in_reg(A) && !afolded(A)))
+        return -1;
+    for (int k = n + 1; k + 1 < fn->nins && k <= n + 16; k++) {
+        const struct ir_ins *o = &fn->ins[k];
+        switch (o->op) {
+        case IR_LABEL: case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_RET:
+        case IR_SWITCH: case IR_IGOTO: case IR_UD2:
+            return -1;
+        default:
+            break;
+        }
+        if (x86_rmw_writes_memory(o->op) || ra_ins_def(o) == A)
+            return -1;
+        struct rmw_rd rd = { t, 0 };
+        ra_each_use(o, rmw_rd_cb, &rd);
+        if (!rd.found)
+            continue;
+        /* the one use of t */
+        int u = o->dst, v;
+        if ((o->op != IR_ADD && o->op != IR_SUB && o->op != IR_AND &&
+             o->op != IR_OR && o->op != IR_XOR) || o->flt ||
+            o->w != ld->w || u < fn->nvars || u >= fn->nvregs ||
+            usecnt[u] != 1 || is_flt(u))
+            return -1;
+        if (o->a == t)
+            v = o->imm_b ? -1 : o->b;
+        else if (!o->imm_b && o->b == t && o->op != IR_SUB)
+            v = o->a;
+        else
+            return -1;
+        if (v == t || (v < 0 && !o->imm_b))
+            return -1;
+        if (o->imm_b && ld->w == 8 &&
+            (o->imm < -2147483648L || o->imm > 2147483647L))
+            return -1;
+        if (v >= 0 && is_flt(v))
+            return -1;
+        const struct ir_ins *st = &fn->ins[k + 1];
+        if (st->op != IR_STORE || st->a != A || st->b != u || st->vol ||
+            st->memoff || st->size != ld->size)
+            return -1;
+        return k;
+    }
+    return -1;
+}
+
 static void gen_func(struct ir_func *fn, struct code *text,
                      struct sites *st)
 {
@@ -2889,7 +2978,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * sibling call's IR_RET was emitted after its `jmp` -- `mov %r8,%rax;
      * leave; ret` that nothing could reach, in every function ending in
      * one. Optimising builds only, so -O0/-O1 stay byte-identical. */
-    int dead = 0, tail_made = 0;
+    int dead = 0, tail_made = 0, rmw_op = -1, rmw_ld = -1;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (dead) {
@@ -2955,6 +3044,38 @@ static void gen_func(struct ir_func *fn, struct code *text,
         if ((i->op == IR_ADDR || (i->op == IR_ADD && i->imm_b)) &&
             afolded(i->dst))
             continue;
+        /* Read-modify-write (x86_rmw_find): the load emits nothing... */
+        if (n == rmw_op) {
+            const struct ir_ins *ld = &fn->ins[rmw_ld];
+            int base = afolded(ld->a) ? REG_RBP : g_loc[ld->a];
+            int disp = afolded(ld->a) ? g_afold.disp[ld->a] : 0;
+            int aop = i->op == IR_ADD ? '+' : i->op == IR_SUB ? '-' :
+                      i->op == IR_AND ? '&' : i->op == IR_OR ? '|' : '^';
+            int v = i->a == ld->dst ? (i->imm_b ? -1 : i->b) : i->a;
+            if (v < 0) {
+                x86_alu_mem_imm(text, aop, base, disp, i->imm, i->w);
+            } else {
+                int V = REG_RAX;
+                if (in_reg(v))
+                    V = g_loc[v];
+                else
+                    cg_load(text, sd, v, 8, 0, 8);
+                x86_alu_mem_reg(text, aop, base, disp, V, i->w);
+            }
+            cg_reset();
+            rmw_op = -1;
+            n++;                                /* ...and the store */
+            continue;
+        }
+        if (rmw_op < 0 && i->op == IR_LOAD && g_regalloc && usecnt &&
+            !getenv("EMBCC_NO_RMW")) {
+            int m = x86_rmw_find(fn, n, usecnt);
+            if (m >= 0) {
+                rmw_op = m;
+                rmw_ld = n;
+                continue;
+            }
+        }
         switch (i->op) {
         /* ---- 128-bit vectors -------------------------------------------
          *

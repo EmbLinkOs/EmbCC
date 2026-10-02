@@ -147,6 +147,11 @@ void x86_movsxd_rr(struct code *c, int dst, int src);         /* dst64=sext(src3
 void x86_movx_rr(struct code *c, int dst, int src, int size, int sign, int w);
                                                     /* dst = extend(src low 1/2 bytes) */
 void x86_alu_rr(struct code *c, int op, int dst, int src, int w); /* dst op= src */
+/* [base+disp] op= src / imm (+ - & | ^): read-modify-write */
+void x86_alu_mem_reg(struct code *c, int op, int base, int disp, int src,
+                     int w);
+void x86_alu_mem_imm(struct code *c, int op, int base, int disp, long imm,
+                     int w);
 void x86_cmp_rr(struct code *c, int a, int b, int w);         /* cmp a, b */
 void x86_div_rr(struct code *c, int src, int sign, int w);    /* [rdx:rax]/src */
 /* argument registers by index, for aggregates arriving in pieces */
