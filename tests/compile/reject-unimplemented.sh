@@ -402,3 +402,12 @@ check attr-constructor-priority \
 check attr-unknown \
     '__attribute__((no_such_attribute_anywhere)) int f(void) { return 0; }' \
     "is not one EmbCC knows"
+
+# A block-scope function declaration must agree with the unit's: calls
+# use the unit's, so a different one would be silently overruled.
+check block-fn-conflict \
+    'int g(void) { extern long f(int); return (int)f(1); } int f(int x) { return x; }' \
+    "conflicting declaration of 'f'"
+check block-fn-redeclared \
+    'int g(void) { int f = 1; extern int f(int); return f; } int f(int x) { return x; }' \
+    "redeclared as a different kind of symbol"

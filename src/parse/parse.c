@@ -3498,6 +3498,27 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             s = new_stmt(STMT_DECL, t->line, t->col);
             const char *dname;
             s->dty = parse_declarator(ps, base, &dname);
+            /* `int f(int);` in a block declares a function, exactly as
+             * `extern int f(int);` does: sema gives the name block scope
+             * and the declaration takes no storage. (The declarator stops
+             * short of a parameter list after a plain name.) */
+            if (dname && cur(ps)->kind == TOK_LPAREN &&
+                s->dty->kind != TY_ARRAY && s->dty->kind != TY_FUNC)
+                s->dty = parse_fn_params(ps, s->dty);
+            if (s->dty->kind == TY_FUNC && dname && !local_static &&
+                !local_tls) {
+                struct attrs fat = { 0 };
+                parse_attributes(ps, &fat);
+                s->name = dname;
+                s->is_extern = 1;
+                *dtail = s;
+                dtail = &s->next;
+                if (cur(ps)->kind == TOK_COMMA) {
+                    advance(ps);
+                    continue;
+                }
+                break;
+            }
             if (s->dty->kind == TY_VOID || s->dty->kind == TY_FUNC)
                 parse_error_at(ps, t->line, t->col,
                            "a variable cannot have type %s",

@@ -33,6 +33,8 @@ struct vardef {
     const char *asm_reg; /* a register-asm binding, else NULL */
     int user_align;     /* __attribute__((aligned(N))) on the local; 0 = none */
     int unused_ok;      /* __attribute__((unused)): do not report it */
+    struct func *fdecl; /* a block-scope function declaration: the name
+                         * denotes this function here, not a variable */
 };
 
 /* Block scoping without giving up unique frame slots: entries are never
@@ -163,6 +165,7 @@ static int scope_add(struct scope *sc, const char *name, struct type *ty,
     sc->vars[sc->n].asm_reg = NULL;
     sc->vars[sc->n].user_align = 0;
     sc->vars[sc->n].unused_ok = 0;
+    sc->vars[sc->n].fdecl = NULL;
     return sc->n++;
 }
 
@@ -1225,7 +1228,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_VAR: {
         int i = scope_find(sc, e->name);
-        if (i >= 0) {
+        /* a block-scope declaration of a function names it from here on,
+         * even when the definition comes later in the file */
+        struct func *blkfn = i >= 0 ? sc->vars[i].fdecl : NULL;
+        if (i >= 0 && !blkfn) {
             sc->vars[i].used = 1;     /* -Wunused-variable: it was read */
             e->var_index = i;
             e->ty = sc->vars[i].ty;
@@ -1233,7 +1239,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             e->asm_reg = sc->vars[i].asm_reg; /* register-asm binding */
         } else {
             /* enumerators fold to their constant right here */
-            struct econst *ec = u->econsts;
+            struct econst *ec = blkfn ? NULL : u->econsts;
             for (; ec; ec = ec->next)
                 if (strcmp(ec->name, e->name) == 0)
                     break;
@@ -1252,7 +1258,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 sema_error_at(u, e->line, e->col,
                            "enumerator '%s' is used before its "
                            "declaration", e->name);
-            struct global *g = find_global(u, e->name);
+            struct global *g = blkfn ? NULL : find_global(u, e->name);
             /* '<=' not '<': a global's own name is in scope within its
              * initializer (C11 6.2.1p7), so `void *p = &p` is legal; seqs
              * are unique, so this only ever admits that self-reference. */
@@ -1268,13 +1274,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 sema_error_at(u, e->line, e->col,
                            "'%s' is used before its declaration "
                            "(line %d)", e->name, g->line);
-            } else if (find_func(u, e->name)) {
-                struct func *fd = find_func(u, e->name);
+            } else if (blkfn || find_func(u, e->name)) {
+                struct func *fd = blkfn ? blkfn : find_func(u, e->name);
                 /* seq-based, not the ordered-walk `declared` flag: a function
                  * used as a value in a static initializer (a vtable) is
                  * lowered before that walk runs, but is still legal if the
                  * function was declared earlier in the source. */
-                if (fd->seq > cur_body_seq)
+                if (!blkfn && fd->seq > cur_body_seq)
                     sema_error_at(u, e->line, e->col,
                                "'%s' is used before its declaration",
                                e->name);
@@ -2425,12 +2431,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * function-pointer value. */
         struct type *ft = NULL;
         e->callee = NULL;
-        if (e->lhs->kind == EXPR_VAR &&
-            scope_find(sc, e->lhs->name) < 0 &&
-            !find_global(u, e->lhs->name) &&
-            find_func(u, e->lhs->name)) {
-            struct func *callee = find_func(u, e->lhs->name);
-            if (callee->seq > cur_body_seq)
+        int si = e->lhs->kind == EXPR_VAR ? scope_find(sc, e->lhs->name) : -1;
+        struct func *blkfn = si >= 0 ? sc->vars[si].fdecl : NULL;
+        if (blkfn || (e->lhs->kind == EXPR_VAR && si < 0 &&
+                      !find_global(u, e->lhs->name) &&
+                      find_func(u, e->lhs->name))) {
+            struct func *callee = blkfn ? blkfn : find_func(u, e->lhs->name);
+            if (!blkfn && callee->seq > cur_body_seq)
                 sema_error_at(u, e->line, e->col,
                            "call to '%s' before its declaration — "
                            "declare or define functions before their "
@@ -3825,7 +3832,27 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                  * a variable wire a block-scope entry onto it so references
                  * resolve. A function needs no var entry (calls use find_func). */
                 if (s->dty->kind == TY_FUNC) {
-                    if (!find_func(u, s->name)) {
+                    struct func *fn = find_func(u, s->name);
+                    if (fn) {
+                        /* the unit's declaration is what calls will use,
+                         * so this one must say the same thing */
+                        int match = fn->nparams == s->dty->nptypes &&
+                                    fn->is_varargs == s->dty->is_varargs &&
+                                    ty_equal(fn->ret_ty, s->dty->ret);
+                        for (int k = 0; match && k < fn->nparams; k++)
+                            if (!ty_equal(fn->param_tys[k], s->dty->ptypes[k]))
+                                match = 0;
+                        if (!match) {
+                            diag_error_at(diag_file(u), s->line, 0,
+                                          "conflicting declaration of '%s'",
+                                          s->name);
+                            diag_note_at(fn->file, fn->line, 0,
+                                         "previous declaration of '%s' here",
+                                         s->name);
+                            fatal_unwind();
+                        }
+                    }
+                    if (!fn) {
                         struct func *g = xcalloc(1, sizeof *g);
                         g->name = s->name; g->file = u->file; g->line = s->line;
                         g->seq = f->seq; g->declared = 1;
@@ -3837,6 +3864,20 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                         struct func **ft = &u->funcs;
                         while (*ft) ft = &(*ft)->next;
                         *ft = g;
+                        fn = g;
+                    }
+                    /* The name has block scope: it hides an outer variable
+                     * of the same name, and lets a call reach a function
+                     * defined further down the file. */
+                    int h = scope_find_here(sc, s->name);
+                    if (h >= 0 && sc->vars[h].fdecl != fn)
+                        sema_error_line(u, s->line,
+                                   "'%s' redeclared as a different kind of "
+                                   "symbol", s->name);
+                    if (h < 0) {
+                        int vi = scope_add(sc, s->name, s->dty, NULL);
+                        sc->vars[vi].fdecl = fn;
+                        sc->vars[vi].used = 1;
                     }
                 } else {
                     struct global *g = find_global(u, s->name);
@@ -4338,6 +4379,7 @@ static void check_func(struct unit *u, struct func *f)
             uv[i].ty = sc.vars[i].ty;
             uv[i].is_param = sc.vars[i].is_param;
             uv[i].is_static = sc.vars[i].g != NULL ||
+                              sc.vars[i].fdecl != NULL ||
                               sc.vars[i].asm_reg != NULL;
             uv[i].line = sc.vars[i].line;
             uv[i].col = sc.vars[i].col;
@@ -4352,12 +4394,13 @@ static void check_func(struct unit *u, struct func *f)
     for (int i = 0; i < sc.n; i++) {
         /* a static local keeps its scope index but needs no frame
          * storage — give it a pointer's worth and never address it */
-        f->var_tys[i] = sc.vars[i].g ? ty_base(TY_LONG, 0)
-                                     : sc.vars[i].ty;
+        f->var_tys[i] = sc.vars[i].g || sc.vars[i].fdecl
+                        ? ty_base(TY_LONG, 0) : sc.vars[i].ty;
         /* a VLA's slot holds the pointer to its run-time storage */
         if (ty_is_vla(f->var_tys[i]))
             f->var_tys[i] = ty_ptr(f->var_tys[i]->pointee);
-        f->var_aligns[i] = sc.vars[i].g ? 0 : sc.vars[i].user_align;
+        f->var_aligns[i] = sc.vars[i].g || sc.vars[i].fdecl
+                           ? 0 : sc.vars[i].user_align;
     }
     free(sc.vars);
     g_cx_sc = NULL;
