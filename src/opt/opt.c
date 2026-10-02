@@ -512,6 +512,88 @@ static long fc_to_bits(double d, int w)
     }
     return bits;
 }
+/* A float or double operation on constants, as the machine does it: in
+ * the operation's own format, one rounding, the default rounding mode
+ * (EmbCC does not honour FENV_ACCESS, and keeps no exception flags).
+ * Constants arrive as bit patterns, the form irgen gives them.
+ *
+ * Not when an operand or the result is a NaN: WHICH NaN an invalid
+ * operation produces is the machine's choice (x86's default NaN is
+ * negative, ARM's positive) and so is how a payload propagates, so the
+ * folded bits could differ from the ones the program would compute.
+ * Long double (width 16) is never here. A comparison folds to 0 or 1;
+ * with NaN excluded every predicate is the plain ordered one. Integer
+ * division is not folded (a divide by zero must happen at run time);
+ * a floating one by zero is infinity, which is what the machine gives.
+ *
+ * Every float constant expression used to be computed at run time:
+ * `(struct color){ 251/255.0f, ... }` was a divss per component, and
+ * EmbLinkOs's ui/theme/theme.c was five times gcc's size for it. */
+static int fold_fp(const struct ir_ins *i, long A, long B, long *out)
+{
+    if (i->w == 4) {
+        unsigned int ua = (unsigned int)A, ub = (unsigned int)B, ur;
+        float a, b, r;
+        memcpy(&a, &ua, 4);
+        memcpy(&b, &ub, 4);
+        if (a != a || (i->op != IR_NEG && b != b))
+            return 0;
+        switch (i->op) {
+        case IR_ADD: r = a + b; break;
+        case IR_SUB: r = a - b; break;
+        case IR_MUL: r = a * b; break;
+        case IR_DIV: r = a / b; break;
+        case IR_NEG: r = -a; break;
+        case IR_CMP:
+            switch (i->pred) {
+            case B_EQ: *out = a == b; return 1;
+            case B_NE: *out = a != b; return 1;
+            case B_LT: *out = a < b;  return 1;
+            case B_LE: *out = a <= b; return 1;
+            case B_GT: *out = a > b;  return 1;
+            case B_GE: *out = a >= b; return 1;
+            default: return 0;
+            }
+        default: return 0;
+        }
+        if (r != r)
+            return 0;
+        memcpy(&ur, &r, 4);
+        *out = (long)ur;
+        return 1;
+    }
+    if (i->w == 8) {
+        double a, b, r;
+        memcpy(&a, &A, 8);
+        memcpy(&b, &B, 8);
+        if (a != a || (i->op != IR_NEG && b != b))
+            return 0;
+        switch (i->op) {
+        case IR_ADD: r = a + b; break;
+        case IR_SUB: r = a - b; break;
+        case IR_MUL: r = a * b; break;
+        case IR_DIV: r = a / b; break;
+        case IR_NEG: r = -a; break;
+        case IR_CMP:
+            switch (i->pred) {
+            case B_EQ: *out = a == b; return 1;
+            case B_NE: *out = a != b; return 1;
+            case B_LT: *out = a < b;  return 1;
+            case B_LE: *out = a <= b; return 1;
+            case B_GT: *out = a > b;  return 1;
+            case B_GE: *out = a >= b; return 1;
+            default: return 0;
+            }
+        default: return 0;
+        }
+        if (r != r)
+            return 0;
+        memcpy(out, &r, 8);
+        return 1;
+    }
+    return 0;
+}
+
 static int fold_cvt(const struct ir_ins *i, long A, long *out)
 {
     if (i->w == 16 || i->size == 16 || i->w <= 0 || i->size <= 0)
@@ -666,8 +748,20 @@ static int pass_fold(struct ir_func *fn)
     int changed = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
-        if (i->flt)
-            continue;   /* never fold an SSE op as an integer */
+        if (i->flt) {
+            /* never as an integer -- as a float, from bit patterns */
+            long A, B = 0, r;
+            if ((i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
+                 i->op == IR_DIV || i->op == IR_NEG || i->op == IR_CMP) &&
+                get_const(fn, &d, i->a, &A) &&
+                (i->op == IR_NEG || get_const(fn, &d, i->b, &B)) &&
+                fold_fp(i, A, B, &r)) {
+                to_const(i, r);
+                i->flt = 0;             /* a bit pattern, as irgen's are */
+                changed = 1;
+            }
+            continue;
+        }
         /* Nor an __int128 one as a long. `imm` is 64 bits and norm()
          * truncates anything that is not width 8, so a 128-bit constant
          * cannot even be held here, let alone folded. Skipping these is
