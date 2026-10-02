@@ -539,10 +539,24 @@ static unsigned long ldst_base(int size, int load, int sign, int w)
     return 0x39000000UL | (sz << 30) | (opc << 22);
 }
 
+int a64_frame_base = A64_SP;
+
+/* Within the first 64K past the sentinel: a slot's own field offset
+ * (sd + q * 8) is still the dead slot. */
+void a64_no_dead_slot(int rn, long off)
+{
+    if ((rn == a64_frame_base || rn == A64_FP || rn == A64_SP) &&
+        off >= A64_DEAD_SLOT && off < A64_DEAD_SLOT + 0x10000)
+        internal_error("aarch64: a value was read or written at a stack "
+                       "slot it does not have -- it lives in a register, "
+                       "and some lowering path does not know that");
+}
+
 static void ldst(struct code *c, int rt, int rn, long off, int size,
                  int load, int sign, int w)
 {
     unsigned long base = ldst_base(size, load, sign, w);
+    a64_no_dead_slot(rn, off);
     if (off >= 0 && off % size == 0 && off / size <= 0xfff) {
         a64_word(c, base | ((unsigned long)(off / size) << 10) |
                     ((unsigned long)rn << 5) | (unsigned long)rt);
@@ -786,6 +800,7 @@ void a64_udf(struct code *c)     { a64_word(c, 0x00000000UL); }
  * V bit (26) set: size 10 selects S registers, 11 selects D. */
 static void fldst(struct code *c, int vt, int rn, long off, int w, int load)
 {
+    a64_no_dead_slot(rn, off);
     unsigned long sz = (w == 8) ? 3UL : 2UL;
     unsigned long base = 0x3D000000UL | (sz << 30) | (load ? 0x400000UL : 0);
     if (w == 16)       /* q: size 00 with opc<1> set (a long double) */

@@ -546,12 +546,11 @@ struct a64_frame {
     long fb_save;           /* -1, or where the caller's x19 is kept */
 };
 
-/* The offset a slot nothing names is given. A gigabyte above the frame
- * base is not a frame; an access that reaches it faults on the spot
- * rather than reading whatever the stack happens to hold there. THE
- * RULE, applied to an offset -- x86-64's DEAD_SLOT_OFF is the same
- * idea from the other side of rbp. */
-#define A64_DEAD_SLOT 0x40000000L
+/* The offset a slot nothing names is given (A64_DEAD_SLOT, emit.h). A
+ * gigabyte above the frame base is not a frame, and every access the
+ * emitters make at it is refused at compile time -- THE RULE, applied
+ * to an offset; x86-64's X86_DEAD_SLOT is the same idea from the other
+ * side of rbp. */
 
 static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
                           int want_debug)
@@ -1106,6 +1105,7 @@ static void a64_parallel_move(struct code *t, int *dst, int *src, int n,
 /* dst = src + off, where src may be sp. */
 static void addr_of(struct code *t, int dst, int base, long off)
 {
+    a64_no_dead_slot(base, off);
     if (!a64_add_imm(t, dst, base, off, 8)) {
         a64_mov_imm(t, A64_SCR, off, 8);
         if (base == A64_SP)
@@ -1871,6 +1871,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         f->cfi_saved_at = t->len - f->code_off;
         a64_add_imm(t, A64_FBREG, A64_SP, 0, 8);     /* mov x19, sp */
         g_fb = A64_FBREG;
+        a64_frame_base = A64_FBREG;
     }
 
     /* A variadic function saves every argument register first, raw, before
@@ -1984,6 +1985,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 addr_of(t, A64_ADDR, FB, sd[p]);
                 addr_of(t, A64_TMP, A64_FP, 16 + pl.stk_off);
                 emit_copy(t, A64_ADDR, A64_TMP, pl.size);
+            } else if (a64_in_freg(p)) {
+                /* A float that came on the stack and lives in a v
+                 * register -- the ninth double. st_slot knows only the
+                 * general registers, so this went through x8 into a
+                 * slot the parameter does not have, a gigabyte above
+                 * sp, and the register was never loaded. */
+                a64_fldr(t, g_a64_floc[p], A64_FP, 16 + pl.stk_off,
+                         pl.size);
             } else {
                 a64_ldr(t, A64_ACC, A64_FP, 16 + pl.stk_off, 8, 0, 8);
                 st_slot(t, sd, p, A64_ACC, pl.size > 8 ? 8 : pl.size);
@@ -3290,6 +3299,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     }
     }
     g_fb = A64_SP;
+    a64_frame_base = A64_SP;
     free(g_a64_wide);
     g_a64_wide = NULL;
     free(g_a64_loc);

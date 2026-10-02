@@ -1870,6 +1870,23 @@ static int addr_reg(struct code *text, const int *sd, int v)
     return REG_RCX;
 }
 
+/* A parameter's bytes, from where the caller left them into the slot at
+ * [rbp+dst], through rax: 8, 4, 2 and 1 bytes at a time, because an
+ * aggregate of 3, 5, 6 or 7 bytes has a tail no single move is (copying
+ * it as `chunk` bytes stopped the build with "bad load size 3"). It
+ * writes only rax and memory, so in the prologue loop it disturbs no
+ * argument register the parallel move has yet to read. */
+static void x86_param_copy(struct code *text, int dst, int base, int off,
+                           int sz)
+{
+    for (int at = 0; at < sz;) {
+        int w = sz - at >= 8 ? 8 : sz - at >= 4 ? 4 : sz - at >= 2 ? 2 : 1;
+        x86_load_reg_mem(text, REG_RAX, base, off + at, w);
+        x86_store_mem_reg(text, REG_RBP, dst + at, REG_RAX, w);
+        at += w;
+    }
+}
+
 /* The floating-point pair of cg_load/cg_store. An xmm home and a stack
  * slot are the same value and only one of them is current, so every site
  * that touches a float vreg's slot goes through these. */
@@ -2940,6 +2957,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * so they need no cycle breaking, only to come after it. */
     int pstk_dst[MAX_PARAMS], pstk_off[MAX_PARAMS], pstk_sz[MAX_PARAMS];
     int npstk = 0;
+    /* The float ones, whose home is an xmm register: the same rule,
+     * against the FP permutation. Their slot does not exist -- before
+     * these, a ninth double went by way of rax into it, and the
+     * dead-slot guard refused any such function at -O2. */
+    int fstk_dst[MAX_PARAMS], fstk_off[MAX_PARAMS], fstk_sz[MAX_PARAMS];
+    int nfstk = 0;
     int fmv_dst[16], fmv_src[16], nfmv = 0;   /* the float half */
     char pmoved[MAX_PARAMS];
     for (int p = 0; p < MAX_PARAMS; p++) pmoved[p] = 0;
@@ -3059,7 +3082,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
                      * instructions for nothing, and it is the only
                      * reason a stack-passed parameter's slot has to
                      * exist at all. */
-                    if (pmove && g_loc[i] >= 0) {
+                    if (ty_is_float(pt) && in_freg(i)) {
+                        fstk_dst[nfstk] = g_floc[i];
+                        fstk_off[nfstk] = incoming;
+                        fstk_sz[nfstk] = ty_size(pt);
+                        nfstk++;
+                    } else if (pmove && g_loc[i] >= 0) {
                         pstk_dst[npstk] = g_loc[i];
                         pstk_off[npstk] = incoming;
                         pstk_sz[npstk] = ty_size(pt);
@@ -3095,12 +3123,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             }
             if (n == 0) {
                 /* MEMORY: copy it out of the caller's frame into ours, so its
-                 * address is a normal local. RAX carries each eightbyte, so the
-                 * destination pointer needs a DIFFERENT scratch — and not an
-                 * integer arg register (RCX would drop a later scalar param that
-                 * arrives in it). r11 is caller-saved, never an arg register, and
-                 * free at prologue time (params reach their allocated registers
-                 * only in the parallel move that runs after this loop). */
+                 * address is a normal local. */
                 int sz = ty_size(pt);
                 if (ty_align(pt) > 8)       /* a 16-aligned stack slot */
                     incoming = (incoming + 15) & ~15;
@@ -3109,14 +3132,28 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     incoming += (sz + 7) & ~7;
                     continue;
                 }
-                x86_lea_reg_slot(text, 11 /*r11*/, sd[i]);
-                for (int off = 0; off < sz; off += 8) {
-                    int chunk = sz - off >= 8 ? 8 : sz - off;
-                    x86_load_reg_mem(text, REG_RAX, REG_RBP,
-                                     incoming + off, chunk >= 8 ? 8 : chunk);
-                    x86_store_mem_reg(text, 11 /*r11*/, off, REG_RAX,
-                                      chunk >= 8 ? 8 : chunk);
-                }
+                x86_param_copy(text, sd[i], REG_RBP, incoming, sz);
+                incoming += (sz + 7) & ~7;
+                continue;
+            }
+            /* Registers -- if there are enough left for EVERY eightbyte.
+             * When there are not, the whole struct came on the caller's
+             * stack and takes no register at all (SysV 3.2.3), which the
+             * caller's on_stack decision in irgen already said; this read
+             * the next "register" regardless, so a seventh-place
+             * struct{short} came out of r9. */
+            int need_i = 0, need_s = 0;
+            for (int k = 0; k < n; k++) {
+                if (cls[k] == CLASS_SSE)
+                    need_s++;
+                else
+                    need_i++;
+            }
+            if (ireg + need_i > 6 || freg + need_s > 8) {
+                int sz = ty_size(pt);
+                if (ty_align(pt) > 8)       /* a 16-aligned stack slot */
+                    incoming = (incoming + 15) & ~15;
+                x86_param_copy(text, sd[i], REG_RBP, incoming, sz);
                 incoming += (sz + 7) & ~7;
                 continue;
             }
@@ -3144,6 +3181,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
         for (int k = 0; k < npstk; k++)
             x86_load_reg_mem(text, pstk_dst[k], REG_RBP, pstk_off[k],
                              pstk_sz[k]);
+        for (int k = 0; k < nfstk; k++)
+            x86_movs_load_base(text, fstk_dst[k], REG_RBP, fstk_off[k],
+                               fstk_sz[k]);
         va_named_int = ireg;
         va_named_sse = freg;
         va_overflow = incoming;

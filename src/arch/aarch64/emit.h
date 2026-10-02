@@ -109,6 +109,16 @@ void a64_extend(struct code *c, int rd, int rn, int size, int sign, int w);
  * live across these calls. */
 void a64_ldr(struct code *c, int rt, int rn, long off,
              int size, int sign, int w);
+/* The offset codegen gives a slot nothing names (layout_frame), and the
+ * register frame offsets are taken from -- sp, or x19 in a function with
+ * alloca. Every rn-relative load, store and address in this file and in
+ * codegen's addr_of refuses an offset at A64_DEAD_SLOT from that base or
+ * from x29: it was meant to fault on the spot, and a board without an
+ * MMU takes no fault -- a ninth double was stored a gigabyte above sp. */
+#define A64_DEAD_SLOT 0x40000000L
+extern int a64_frame_base;
+void a64_no_dead_slot(int rn, long off);
+
 /* *(rn + off) = rt's low `size` bytes. Same A64_SCR caveat. */
 void a64_str(struct code *c, int rt, int rn, long off, int size);
 
