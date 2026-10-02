@@ -2691,7 +2691,11 @@ static struct expr *parse_unary(struct parser *ps)
             if (at_type_start(ps)) {
                 e->cast_ty = parse_type_name(ps, parse_type_spec(ps, 0));
                 expect(ps, TOK_RPAREN, "')'");
-                return e;
+                /* `sizeof (T){ ... }` is the size of a compound literal,
+                 * an expression: read it again as one */
+                if (cur(ps)->kind != TOK_LBRACE)
+                    return e;
+                e->cast_ty = NULL;
             }
             ps->lx = save; /* sizeof (expr) */
         }
@@ -2710,7 +2714,9 @@ static struct expr *parse_unary(struct parser *ps)
             if (at_type_start(ps)) {
                 e->cast_ty = parse_type_name(ps, parse_type_spec(ps, 0));
                 expect(ps, TOK_RPAREN, "')'");
-                return e;
+                if (cur(ps)->kind != TOK_LBRACE)   /* as sizeof, above */
+                    return e;
+                e->cast_ty = NULL;
             }
             ps->lx = save;
         }
