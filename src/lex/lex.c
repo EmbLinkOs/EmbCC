@@ -558,6 +558,19 @@ static int std_suffix(const char *s, int is_float)
 /* C++ numbers (lex_next's): 1 if lexed here — one with a separator, a
  * binary one, or one with a user-defined suffix; 0 leaves the plain C
  * forms to the C paths. */
+/* Does the number at p use C23's digit separator, 1'000'000? (It is
+ * read by cxx_number, which C++ has needed for C++14's.) */
+static int has_digit_separator(const char *p)
+{
+    while (isalnum((unsigned char)*p) || *p == '_' || *p == '.' ||
+           (*p == '\'' && (isalnum((unsigned char)p[1]) || p[1] == '_'))) {
+        if (*p == '\'')
+            return 1;
+        p++;
+    }
+    return 0;
+}
+
 static int cxx_number(struct lexer *lx, struct token *t)
 {
     const char *p = lx->p, *q = p;
@@ -739,10 +752,16 @@ void lex_next(struct lexer *lx)
     /* C++: a pp-number with digit separators (1'000) or a user-defined
      * suffix (5_km, 1.5_m, 10ms), and binary literals: read from a
      * cleaned copy, the suffix kept apart. */
-    if (lx->cxx && (isdigit((unsigned char)*lx->p) ||
-                    (*lx->p == '.' && isdigit((unsigned char)lx->p[1])))) {
-        if (cxx_number(lx, t))
+    if ((lx->cxx || has_digit_separator(lx->p)) &&
+        (isdigit((unsigned char)*lx->p) ||
+         (*lx->p == '.' && isdigit((unsigned char)lx->p[1])))) {
+        if (cxx_number(lx, t)) {
+            /* C23 has the separator; C has no user-defined suffix */
+            if (!lx->cxx && t->ud_suffix)
+                diag_fatal(lx->file, lx->line, "invalid suffix '%s' on a "
+                           "number", t->ud_suffix);
             return;
+        }
     }
     if (*lx->p == '0' && (lx->p[1] == 'b' || lx->p[1] == 'B') &&
         (lx->p[2] == '0' || lx->p[2] == '1')) {

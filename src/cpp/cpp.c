@@ -119,6 +119,33 @@ static int is_id0(char c)
 
 static int is_idc(char c) { return is_id0(c) || (c >= '0' && c <= '9'); }
 
+/* The length of the pp-number at p, or 0 when p does not start one: a
+ * digit, or a '.' before one, not inside an identifier (prev is the
+ * character before p). A pp-number takes letters, digits, '.', a sign
+ * after e/E/p/P, and C23's digit separator -- a ' before a letter or
+ * digit, as in 1'000'000. Every scanner here asks this before taking a
+ * quote for a character literal: otherwise that separator opened one,
+ * which ran to the end of the line when the separators were odd in
+ * number, hiding the macros and the comment start that followed. */
+static size_t pp_number(const char *p, char prev)
+{
+    if (is_idc(prev) || !((p[0] >= '0' && p[0] <= '9') ||
+                          (p[0] == '.' && p[1] >= '0' && p[1] <= '9')))
+        return 0;
+    size_t i = 1;
+    for (;;) {
+        char c = p[i];
+        if ((c == '+' || c == '-') && strchr("eEpP", p[i - 1]))
+            i++;
+        else if (is_idc(c) || c == '.')
+            i++;
+        else if (c == '\'' && is_idc(p[i + 1]))
+            i += 2;
+        else
+            return i;
+    }
+}
+
 /* Copies a string or char literal verbatim; returns chars consumed. */
 static size_t copy_literal(const char *p, struct tbuf *out)
 {
@@ -158,6 +185,12 @@ static size_t collect_arg(struct src *s, const char *p, struct tbuf *arg)
         }
         if (c == ',' && depth == 0)
             break;
+        size_t pn = pp_number(p + i, i ? p[i - 1] : 0);
+        if (pn) {
+            tb_putn(arg, p + i, pn);
+            i += pn;
+            continue;
+        }
         if (c == '"' || c == '\'') {
             i += copy_literal(p + i, arg);
             continue;
@@ -197,8 +230,14 @@ static char *va_opt_body(struct src *s, struct macro *m, char **exp)
         if (*q != ' ' && *q != '\t' && *q != '\n')
             empty = 0;
     struct tbuf out = { 0, 0, 0 };
-    const char *p = m->body;
+    const char *p = m->body, *start = m->body;
     while (*p) {
+        size_t pn = pp_number(p, p > start ? p[-1] : 0);
+        if (pn) {
+            tb_putn(&out, p, pn);
+            p += pn;
+            continue;
+        }
         if (*p == '"' || *p == '\'') {
             p += copy_literal(p, &out);
             continue;
@@ -241,9 +280,15 @@ static char *subst_body(struct src *s, struct macro *m,
 {
     struct tbuf out = { 0, 0, 0 };
     char *vbody = va_opt_body(s, m, exp);
-    const char *p = vbody ? vbody : m->body;
+    const char *p = vbody ? vbody : m->body, *start = p;
 
     while (*p) {
+        size_t pn = pp_number(p, p > start ? p[-1] : 0);
+        if (pn) {
+            tb_putn(&out, p, pn);
+            p += pn;
+            continue;
+        }
         if (*p == '"' || *p == '\'') {
             p += copy_literal(p, &out);
             continue;
@@ -394,6 +439,12 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
     const char *p = text;
 
     while (*p) {
+        size_t pn = pp_number(p, p > text ? p[-1] : 0);
+        if (pn) {
+            tb_putn(out, p, pn);
+            p += pn;
+            continue;
+        }
         if (*p == '"' || *p == '\'') {
             p += copy_literal(p, out);
             continue;
@@ -546,12 +597,26 @@ static long eval_primary(struct evalp *e)
         return lit_char_value(c, cpfx, &uns, e->s->file, e->s->line);
     }
     if (*e->p >= '0' && *e->p <= '9') {
+        /* The whole pp-number, its C23 separators dropped (1'000), in
+         * binary too (0b1010), and read unsigned: strtol stopped at the
+         * separator and at the b, and saturated past LONG_MAX. */
+        size_t n = pp_number(e->p, 0);
+        char buf[80];
+        size_t k = 0;
+        for (size_t i = 0; i < n && k + 1 < sizeof buf; i++)
+            if (e->p[i] != '\'')
+                buf[k++] = e->p[i];
+        buf[k] = 0;
         char *end;
-        long v = strtol(e->p, &end, 0);
+        unsigned long long v =
+            buf[0] == '0' && (buf[1] == 'b' || buf[1] == 'B')
+                ? strtoull(buf + 2, &end, 2) : strtoull(buf, &end, 0);
         while (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L')
             end++;
-        e->p = end;
-        return v;
+        if (*end)
+            cerr(e->s, "a number in #if is malformed", NULL);
+        e->p += n;
+        return (long)v;
     }
     if (is_id0(*e->p)) { /* surviving identifiers evaluate to 0 */
         const char *id = e->p;
@@ -946,6 +1011,12 @@ static long eval_if(struct src *s, const char *line)
     struct tbuf pre = { 0, 0, 0 };
     const char *p = line;
     while (*p) {
+        size_t pn = pp_number(p, p > line ? p[-1] : 0);
+        if (pn) {
+            tb_putn(&pre, p, pn);
+            p += pn;
+            continue;
+        }
         if (*p == '\'' || *p == '"') {
             p += copy_literal(p, &pre);
             continue;
@@ -1053,6 +1124,11 @@ static int needs_more_input(struct cpp *cpp, const char *text)
     const char *p = text;
 
     while (*p) {
+        size_t pn = pp_number(p, p > text ? p[-1] : 0);
+        if (pn) {
+            p += pn;
+            continue;
+        }
         if (*p == '"' || *p == '\'') {
             p += copy_literal(p, NULL);
             continue;
@@ -1072,6 +1148,11 @@ static int needs_more_input(struct cpp *cpp, const char *text)
             int depth = 0;
             const char *r = q;
             while (*r) {
+                size_t rn = pp_number(r, r > text ? r[-1] : 0);
+                if (rn) {
+                    r += rn;
+                    continue;
+                }
                 if (*r == '"' || *r == '\'') {
                     r += copy_literal(r, NULL);
                     continue;
@@ -1203,6 +1284,13 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
         }
         if (c == 'R' && raw_string_at(s, out)) {
             read_raw_string(s, out, nl);
+            continue;
+        }
+        /* (the character before, as this line has it: what was put) */
+        size_t pn = pp_number(s->p, out->len ? out->p[out->len - 1] : 0);
+        if (pn) {
+            tb_putn(out, s->p, pn);
+            s->p += pn;
             continue;
         }
         if (c == '"' || c == '\'') {
