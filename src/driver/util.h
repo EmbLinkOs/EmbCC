@@ -114,6 +114,8 @@ void diag_set_format(int format);      /* DIAG_TEXT (default) or DIAG_JSON */
 void diag_set_color(int mode);         /* -1 auto (a terminal), 0 no, 1 yes */
 void diag_set_max_errors(int n);       /* stop after n errors; 0 = no limit */
 void diag_set_werror(int on);          /* warnings become errors */
+int  diag_set_werror_for(const char *name, int on); /* -W[no-]error=NAME;
+                                                     * 0 = no such warning */
 void diag_set_no_warnings(int on);     /* -w: drop them */
 int  diag_error_count(void);           /* for the driver's exit status */
 void diag_set_parseable_fixits(int on); /* GCC's fix-it: lines */

@@ -259,3 +259,29 @@ fi
     echo "FAIL: a warning without -Werror failed the compile"; exit 1; }
 [ -e "$out/we.o" ] || { echo "FAIL: a warning stopped the object"; exit 1; }
 echo "and -Werror fails the compile without leaving its object behind"
+
+# -Werror=NAME makes that one warning an error (and turns it on), and
+# -Wno-error=NAME exempts it from -Werror; a NAME that is no warning is
+# said, not ignored.
+printf 'int f(void) { int unused; return 1; }\n' > "$out/wn.c"
+rm -f "$out/wn.o"
+if "$EMBCC" -Werror=unused-variable -c "$out/wn.c" -o "$out/wn.o" \
+       2> "$out/wn.err"; then
+    echo "FAIL: -Werror=unused-variable left the warning a warning"; exit 1
+fi
+grep -q "error: unused variable" "$out/wn.err" || {
+    echo "FAIL: -Werror=unused-variable did not report an error:"
+    cat "$out/wn.err"; exit 1; }
+"$EMBCC" -Werror=unused-variable -Wno-unused-variable -c "$out/wn.c" \
+    -o "$out/wn.o" 2> /dev/null || {
+    echo "FAIL: -Wno-unused-variable after -Werror= did not turn it off"; exit 1; }
+"$EMBCC" -Wall -Werror -Wno-error=unused-variable -c "$out/wn.c" \
+    -o "$out/wn.o" 2> "$out/wn.err" || {
+    echo "FAIL: -Wno-error=unused-variable still failed the compile"; exit 1; }
+grep -q "warning: unused variable" "$out/wn.err" || {
+    echo "FAIL: -Wno-error=unused-variable lost the warning itself"; exit 1; }
+"$EMBCC" -Werror=no-such-warning -c "$out/wn.c" -o "$out/wn.o" \
+    2> "$out/wn.err" || true
+grep -q "names no warning" "$out/wn.err" || {
+    echo "FAIL: -Werror=no-such-warning was ignored silently"; exit 1; }
+echo "and -Werror=NAME / -Wno-error=NAME pick out one warning"

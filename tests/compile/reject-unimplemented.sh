@@ -298,18 +298,22 @@ check assign-to-literal \
 # linker was M3 and had not arrived. It links in-process now, so that
 # case graduated out of this file, which is what the header above says
 # happens. What is left is the part still refused, and it is refused
-# for a reason that will not go away by itself: EmbLD reads x86-64 ELF,
-# and an image for another machine is not something it can quietly
-# approximate.
+# for a reason that will not go away by itself: a board image needs the
+# board's memory map, which embld takes and the driver has no default
+# for. The message once named "aarch64" for every such target -- a Thumb
+# build was told it needed aarch64 -- so each target is named as itself.
 printf 'int main(void) { return 0; }\n' > "$out_dir/nolink.c"
-if err=$("$EMBCC" --target=aarch64-elf "$out_dir/nolink.c" \
-         -o "$out_dir/nolink.bin" 2>&1); then
-    echo "case nolink: linked for a machine the linker cannot read"
-    exit 1
-fi
-echo "$err" | grep -q "integrated linker reads x86-64 ELF" || {
-    echo "case nolink: wrong diagnostic:"; echo "$err"; exit 1; }
-echo "case nolink: linking for another machine is refused by name"
+for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf; do
+    if err=$("$EMBCC" --target=$t "$out_dir/nolink.c" \
+             -o "$out_dir/nolink.bin" 2>&1); then
+        echo "case nolink $t: linked in one step without a memory map"
+        exit 1
+    fi
+    echo "$err" | grep -q "cannot link for $t in one step: the driver links x86-64 ELF only" &&
+    echo "$err" | grep -q "link with embld" || {
+        echo "case nolink $t: wrong diagnostic:"; echo "$err"; exit 1; }
+done
+echo "case nolink: linking a board image in one step is refused by name"
 check asm-bad-constraint \
     'int main(void) { int x; __asm__("int $0x80" : "=t"(x)); return x; }' \
     "is not supported"
