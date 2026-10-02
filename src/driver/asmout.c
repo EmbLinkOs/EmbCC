@@ -45,6 +45,24 @@
  * letters (`größe`), and a name with any byte outside [A-Za-z0-9_.$] is
  * written in quotes, as clang writes it; the object file carries the
  * bytes either way. The quoted copy lives as long as the compile. */
+/* A pointer-sized slot holding an address: as wide as the target's
+ * pointer -- `.quad` was written everywhere, which a 32-bit target's
+ * assembler rejects and a 64-bit one would lay out twice too wide -- and
+ * on AVR a FUNCTION's address is its word address, pm(), as the object
+ * writer's R_AVR_16_PM says. */
+static void ptr_slot(struct outbuf *b, const char *sym, long addend, int fn)
+{
+    int ps = target_ptr_size();
+    const char *dir = ps == 8 ? ".quad" : ps == 4 ? ".long" : ".short";
+    if (ps == 2 && fn)
+        ob_fmt(b, "\t%s\tpm(%s", dir, sym);
+    else
+        ob_fmt(b, "\t%s\t%s", dir, sym);
+    if (addend)
+        ob_fmt(b, "%+ld", addend);
+    ob_str(b, ps == 2 && fn ? ")\n" : "\n");
+}
+
 static const char *asym(const char *n)
 {
     int plain = 1;
@@ -163,13 +181,27 @@ static const char *reloc_name(int kind)
     case TARGET_RISCV32:
     case TARGET_RISCV64:
         switch (kind) {
-        case RK_CALL:             return "R_RISCV_CALL";
+        case RK_CALL:             return "R_RISCV_CALL_PLT";  /* as the object (target.c) */
         case RK_RISCV_PCREL_HI20: return "R_RISCV_PCREL_HI20";
         case RK_ABS64:            return "R_RISCV_64";
         case RK_ABS32:            return "R_RISCV_32";
         case RK_DATA_PREL32:      return "R_RISCV_32_PCREL";
         case RK_RISCV_PCREL_LO12_I: return "R_RISCV_PCREL_LO12_I";
         default:                  return NULL;
+        }
+    case TARGET_AVR:
+        /* (without this case AVR fell through to x86-64's names) */
+        switch (kind) {
+        case RK_CALL: case RK_AVR_CALL: case RK_AVR_TEXT_CALL:
+                                 return "R_AVR_CALL";
+        case RK_AVR_LO8_LDI:     return "R_AVR_LO8_LDI";
+        case RK_AVR_HI8_LDI:     return "R_AVR_HI8_LDI";
+        case RK_AVR_LO8_LDI_GS:  return "R_AVR_LO8_LDI_GS";
+        case RK_AVR_HI8_LDI_GS:  return "R_AVR_HI8_LDI_GS";
+        case RK_AVR_ABS16:       return "R_AVR_16";
+        case RK_AVR_ABS16_PM:    return "R_AVR_16_PM";
+        case RK_ABS32:           return "R_AVR_32";
+        default:                 return NULL;
         }
     case TARGET_X86_64:
     default:
@@ -265,7 +297,8 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             ob_str(b, "\n");
         }
         if (!f->is_static)
-            ob_fmt(b, "\t.globl\t%s\n", asym(f->name));
+            ob_fmt(b, "\t.%s\t%s\n", f->src->is_weak ? "weak" : "globl",
+                   asym(f->name));
         if (target_get() == TARGET_THUMB)
             ob_fmt(b, "\t.thumb_func\n");
         ob_fmt(b, "\t.type\t%s, %sfunction\n%s:\n", asym(f->name),
@@ -437,19 +470,23 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             continue;
         if (!any_data) { ob_str(b, "\n"); any_data = 1; }
         if (!g->is_static)
-            ob_fmt(b, "\t.globl\t%s\n", asym(g->name));
+            ob_fmt(b, "\t.%s\t%s\n", g->is_weak ? "weak" : "globl",
+                   asym(g->name));
         /* a const object is read-only data, as in the object (main.c) */
         const char *sec = g->in_rodata ? "\t.section\t.rodata\n" : "\t.data\n";
         if (g->init_bytes && g->init_len > 0) {
             ob_str(b, sec);
-            ob_fmt(b, "\t.align\t%d\n\t.type\t%s, %sobject\n%s:\n",
+            /* .balign: a BYTE count everywhere. `.align N` is N bytes on
+             * x86 and 2^N on ARM, aarch64 and RISC-V, so an 8-aligned
+             * object reassembled 256-aligned there. */
+            ob_fmt(b, "\t.balign\t%d\n\t.type\t%s, %sobject\n%s:\n",
                    al, asym(g->name), type_sigil(), asym(g->name));
             /* A pointer slot in an initializer is an ADDRESS the linker
              * fills in, not bytes: `static char *p = "hi";` holds a
              * relocation, and emitting its zeroed bytes would produce a
              * null pointer that links and then crashes. The byte runs
              * between relocations are emitted as bytes; each relocated
-             * slot becomes a `.quad symbol + addend`. */
+             * slot becomes a pointer-wide `symbol + addend` (ptr_slot). */
             int k = 0;
             while (k < sz) {
                 const struct greloc *r = NULL;
@@ -465,11 +502,8 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                         snprintf(sym, sizeof sym, "%s", asym(r->ftarget->name));
                     else
                         snprintf(sym, sizeof sym, "0");
-                    ob_fmt(b, "\t.quad\t%s", sym);
-                    if (r->addend)
-                        ob_fmt(b, "%+ld", r->addend);
-                    ob_str(b, "\n");
-                    k += 8;
+                    ptr_slot(b, sym, r->addend, r->ftarget != NULL);
+                    k += target_ptr_size();
                     continue;
                 }
                 /* bytes up to the next relocation */
@@ -486,7 +520,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 k = stop;
             }
         } else {
-            ob_fmt(b, "%s\t.align\t%d\n\t.type\t%s, %sobject\n%s:\n"
+            ob_fmt(b, "%s\t.balign\t%d\n\t.type\t%s, %sobject\n%s:\n"
                       "\t.zero\t%d\n",
                    g->in_rodata ? "\t.section\t.rodata\n" : "\t.bss\n",
                    al, asym(g->name), type_sigil(), asym(g->name), sz);
@@ -514,11 +548,12 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             if (!(pass == 0 ? f->is_ctor : f->is_dtor))
                 continue;
             if (!any) {
-                ob_fmt(b, "\n\t.section\t%s,\"aw\",@%s\n\t.align\t8\n",
-                       arr[pass], arr[pass] + 1);
+                ob_fmt(b, "\n\t.section\t%s,\"aw\",%s%s\n\t.balign\t%d\n",
+                       arr[pass], type_sigil(), arr[pass] + 1,
+                       target_ptr_size());
                 any = 1;
             }
-            ob_fmt(b, "\t.quad\t%s\n", asym(f->name));
+            ptr_slot(b, asym(f->name), 0, 1);
         }
     }
 }

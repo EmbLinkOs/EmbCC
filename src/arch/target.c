@@ -80,6 +80,19 @@ int target_insn_len(const unsigned char *p, int avail)
         return 2;
     }
 
+    case TARGET_AVR: {
+        /* One 16-bit word, but for the four that carry an address in a
+         * second: JMP and CALL (1001 010k kkkk 11xk) and the 32-bit LDS
+         * and STS (1001 00sd dddd 0000). Without this AVR's -S grouped
+         * its bytes by x86 lengths and ran past function ends. */
+        if (avail < 2)
+            return 0;
+        unsigned w = (unsigned)p[0] | ((unsigned)p[1] << 8);
+        if ((w & 0xfe0cu) == 0x940cu || (w & 0xfc0fu) == 0x9000u)
+            return avail >= 4 ? 4 : 0;
+        return 2;
+    }
+
     case TARGET_X86_64:
     default:
         /* Variable-length, and no rule short of decoding it. The caller

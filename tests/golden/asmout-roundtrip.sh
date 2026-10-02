@@ -28,6 +28,8 @@ echo "TEST-MARKER asmout-roundtrip"
 
 MC=${EMBCC_LLVM_MC:-llvm-mc}
 OBJCOPY=${EMBCC_LLVM_OBJCOPY:-llvm-objcopy}
+NM=${EMBCC_LLVM_NM:-llvm-nm}
+READELF=${EMBCC_LLVM_READELF:-llvm-readelf}
 out=$EMBCC_ROOT/tests/golden/out/asmout-roundtrip
 rm -rf "$out"; mkdir -p "$out"
 
@@ -37,7 +39,10 @@ command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 || {
 # Chosen to force every relocation kind these targets emit: a call to an
 # undefined symbol, a string literal's address, a global's address, a
 # pointer slot in .data, and .bss -- and symbols whose names hold UTF-8
-# letters, which an assembler reads only in quotes.
+# letters, which an assembler reads only in quotes. And the symbols and
+# data an object carries beyond its code: a weak function and variable,
+# aliases (CMSIS's weak IRQ handlers), constructors, and tables of
+# function and string pointers, const and not.
 cat > "$out/u.c" <<'CEOF'
 extern int helper(int);
 static const char msg[] = "hello, world";
@@ -50,6 +55,17 @@ long mix(long a, long b) { return a * b - (a >> 3) + (b & 0xff); }
 extern int hölper(int);
 int zähler = 3;
 int größe(int x) { return hölper(x) + zähler; }
+void Default_Handler(void) { }
+void USART1_IRQHandler(void) __attribute__((weak, alias("Default_Handler")));
+static int sreal(int x) { return x + 1; }
+static int salias(int) __attribute__((alias("sreal")));
+__attribute__((weak)) int wfn(void) { return 1; }
+__attribute__((weak)) int wvar = 7;
+__attribute__((constructor)) static void ctor1(void) { zähler++; }
+__attribute__((constructor)) static void ctor2(void) { zähler += 2; }
+void (*const vectors[])(void) = { USART1_IRQHandler, Default_Handler };
+static const char *names[] = { "a", "b" };
+const char *pick(int i) { return names[i] + salias(0) + wfn() - 2; }
 CEOF
 
 fail=0
@@ -57,7 +73,8 @@ for spec in "x86_64-elf:x86_64:" \
             "aarch64-elf:aarch64:" \
             "thumbv7m-none-eabi:thumbv7m:" \
             "riscv32-unknown-elf:riscv32:-mattr=+m" \
-            "riscv64-unknown-elf:riscv64:-mattr=+m"; do
+            "riscv64-unknown-elf:riscv64:-mattr=+m" \
+            "avr:avr:-mcpu=atmega328p"; do
     t=${spec%%:*}; rest=${spec#*:}; mc=${rest%%:*}; attr=${rest#*:}
     d="$out/$t"; mkdir -p "$d"
 
@@ -86,6 +103,34 @@ for spec in "x86_64-elf:x86_64:" \
         diff "$d/a.txt" "$d/b.txt" | head -8 | sed 's/^/     | /'
         fail=1
     fi
+    # The data sections byte for byte -- but for ARM's: an ARM assembler
+    # keeps a relocation's addend in the bytes (REL), where EmbCC's
+    # object keeps it in the relocation (RELA); the relocations below
+    # cover both.
+    for sec in .data .rodata .init_array; do
+        [ "$mc" = thumbv7m ] && [ $sec != .init_array ] && continue
+        "$OBJCOPY" -O binary --only-section=$sec "$d/direct.o" "$d/a.bin" 2>/dev/null
+        "$OBJCOPY" -O binary --only-section=$sec "$d/reasm.o" "$d/b.bin" 2>/dev/null
+        cmp -s "$d/a.bin" "$d/b.bin" || {
+            echo "FAIL $t: the reassembled $sec differs from the object"; fail=1; }
+    done
+    # Every defined symbol: name, kind (weak, local, function...) and value.
+    for o in direct reasm; do
+        "$NM" "$d/$o.o" | grep -v ' \.L' | grep -v ' [tTdDbBrR] $' | sort > "$d/$o.nm"
+        # the relocations' places and kinds, per section. Not their
+        # symbols: an assembler rewrites one against a local symbol as
+        # its section plus an offset, which links the same.
+        "$READELF" -r "$d/$o.o" |
+            awk '/^Relocation section/ { sec = $3 }
+                 /^ *[0-9a-f]+ +[0-9a-f]+ +R_/ { print sec, $1, $3 }' |
+            sed 's/\.rela\{0,1\}\./ ./' | sort > "$d/$o.rel"
+    done
+    diff "$d/direct.nm" "$d/reasm.nm" > /dev/null || {
+        echo "FAIL $t: the reassembled symbols differ from the object's"
+        diff "$d/direct.nm" "$d/reasm.nm" | head -6 | sed 's/^/     | /'; fail=1; }
+    diff "$d/direct.rel" "$d/reasm.rel" > /dev/null || {
+        echo "FAIL $t: the reassembled relocations differ from the object's"
+        diff "$d/direct.rel" "$d/reasm.rel" | head -6 | sed 's/^/     | /'; fail=1; }
 done
 
 # And the grouping itself, which is what silently broke: a fixed-width
