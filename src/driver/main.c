@@ -1833,17 +1833,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         }
     int init_ndx = 0, fini_ndx = 0;
     unsigned char *initbuf = NULL, *finibuf = NULL;
+    /* One pointer per slot -- four bytes on ARMv7-M and RV32, two on AVR.
+     * It was eight everywhere, so on a 32-bit part the startup's walk of
+     * .init_array read the first constructor and then a zero half. */
+    int ps = target_ptr_size();
     if (nctor) {
-        initbuf = xcalloc((size_t)nctor, 8);
+        initbuf = xcalloc((size_t)nctor, (size_t)ps);
         init_ndx = elfw_add_section(w, ".init_array", SHT_INIT_ARRAY,
                                     SHF_ALLOC | SHF_WRITE, initbuf,
-                                    (Elf64_Xword)(nctor * 8), 8);
+                                    (Elf64_Xword)(nctor * ps),
+                                    (Elf64_Xword)ps);
     }
     if (ndtor) {
-        finibuf = xcalloc((size_t)ndtor, 8);
+        finibuf = xcalloc((size_t)ndtor, (size_t)ps);
         fini_ndx = elfw_add_section(w, ".fini_array", SHT_FINI_ARRAY,
                                     SHF_ALLOC | SHF_WRITE, finibuf,
-                                    (Elf64_Xword)(ndtor * 8), 8);
+                                    (Elf64_Xword)(ndtor * ps),
+                                    (Elf64_Xword)ps);
     }
     /* -g: the three DWARF sections (non-alloc, so no load cost; stripped
      * from a shipped image without touching the code). Their indices feed
@@ -2074,17 +2080,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * parse.c refuses one rather than quietly running them wrong. */
     if (nctor || ndtor) {
         int ci = 0, di = 0;
+        /* a function's address at pointer width: on AVR its WORD
+         * address, as for a function pointer in data */
+        enum reloc_kind ck = ps == 8 ? RK_ABS64 : ps == 4 ? RK_ABS32
+                                                         : RK_AVR_ABS16_PM;
         for (struct func *f = u->funcs; f; f = f->next) {
             if (f->absorbed || !f->has_defn)
                 continue;
             if (f->is_ctor)
-                elfw_add_rela(w, init_ndx, (Elf64_Addr)(ci++ * 8),
-                              f->sym_ndx,
-                              target_reloc_type(target_get(), RK_ABS64), 0);
+                elfw_add_rela(w, init_ndx, (Elf64_Addr)(ci++ * ps),
+                              f->sym_ndx, target_reloc_type(target_get(), ck),
+                              0);
             if (f->is_dtor)
-                elfw_add_rela(w, fini_ndx, (Elf64_Addr)(di++ * 8),
-                              f->sym_ndx,
-                              target_reloc_type(target_get(), RK_ABS64), 0);
+                elfw_add_rela(w, fini_ndx, (Elf64_Addr)(di++ * ps),
+                              f->sym_ndx, target_reloc_type(target_get(), ck),
+                              0);
         }
     }
 

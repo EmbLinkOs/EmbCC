@@ -210,3 +210,22 @@ grep -q 'is not one EmbCC knows' "$out/u.log" || {
     echo "FAIL: an unknown attribute no longer warns:"; cat "$out/u.log"
     exit 1; }
 echo "and an attribute nobody has decided about still warns"
+
+# constructor/destructor slots are pointers, so they are as wide as the
+# target's: .init_array was eight bytes a slot on every target, with a
+# 64-bit relocation the 32-bit ones do not have -- a startup walking
+# 4-byte pointers read the first constructor and then a zero.
+printf '__attribute__((constructor)) static void c1(void) { }\n__attribute__((constructor)) static void c2(void) { }\n' > "$out/ct.c"
+for spec in thumbv7m-none-eabi:8:R_ARM_ABS32 riscv32-unknown-elf:8:R_RISCV_32 \
+            avr:4:R_AVR_16_PM x86_64-elf:16:R_X86_64_64; do
+    t=${spec%%:*}; rest=${spec#*:}; want=${rest%%:*}; rel=${rest#*:}
+    "$EMBCC" --target=$t -c "$out/ct.c" -o "$out/ct.o"
+    size=$(llvm-objdump -h "$out/ct.o" | awk '$2 == ".init_array" { print $3 }')
+    [ "$((0x$size))" -eq "$want" ] || {
+        echo "FAIL: $t's .init_array for two constructors is $((0x$size)) bytes, not $want"
+        exit 1; }
+    [ "$(llvm-readelf -r "$out/ct.o" | grep -c "$rel")" -eq 2 ] || {
+        echo "FAIL: $t's constructor slots are not $rel"; exit 1; }
+done
+echo "and constructor slots are pointer-wide, with the target's pointer
+relocation, on Thumb, RISC-V, AVR and x86-64"
