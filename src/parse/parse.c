@@ -1213,8 +1213,8 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
     }
     if (kind == TAG_ENUM && (lead.packed || lead.aligned))
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                "a packed or aligned enum is not supported (EmbCC's enums "
-                "are always int-sized)");
+                "a packed or aligned enum is not supported (an enum here is "
+                "int, or the type its values need)");
 
     /* C23 `enum e : type` -- a FIXED underlying type, which is the
      * standard's answer to the -fshort-enums question: instead of a
@@ -1286,8 +1286,11 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
         }
         if (kind == TAG_ENUM) {
             struct type *et = parse_enum_body(ps, NULL);
-            if (etd && et->kind != TY_INT)
-                etd->ty = et;       /* `enum G x;` later: the same type */
+            /* `enum G x;` later: the same type -- unsigned int too, which
+             * is TY_INT and was taken for plain int, so a variable of
+             * the enum read 0xffffffff as -1 */
+            if (etd && et != ty_base(TY_INT, 0))
+                etd->ty = et;
             return et;
         }
         return parse_struct_body(ps, t, &lead);
@@ -2347,16 +2350,18 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed)
         unsigned long umax = ib == 64 ? ~0UL : (1UL << ib) - 1;
         long lmax = lb == 64 ? 0x7fffffffffffffffL : (1L << (lb - 1)) - 1;
         long lmin = -lmax - 1;
+        unsigned long ulmax = lb == 64 ? ~0UL : (1UL << lb) - 1;
         if (lo >= imin && hi <= imax)
             return ty_base(TY_INT, 0);
-        if (lo >= 0 && (unsigned long)hi <= umax)
-            t = ty_base(TY_INT, 1);
-        else if (lo >= lmin && hi <= lmax)
-            t = ty_base(TY_LONG, 0);
-        else if (lb == 64 && lo >= 0)
-            t = ty_base(TY_LONG, 1);
+        /* No negative value: the unsigned types, as GCC and clang choose
+         * -- 2^31..2^32-1 is an unsigned long on AVR, four bytes, not a
+         * long long. A negative one: the signed types. */
+        if (lo >= 0)
+            t = (unsigned long)hi <= umax ? ty_base(TY_INT, 1)
+              : (unsigned long)hi <= ulmax ? ty_base(TY_LONG, 1)
+              : ty_llong(1);
         else
-            t = ty_llong(lo >= 0);
+            t = lo >= lmin && hi <= lmax ? ty_base(TY_LONG, 0) : ty_llong(0);
     }
     for (struct econst *ec = *first; ec; ec = ec->next)
         ec->ty = t;

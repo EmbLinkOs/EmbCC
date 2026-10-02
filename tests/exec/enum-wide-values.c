@@ -30,5 +30,12 @@ int main(void)
     if (sizeof(enum mixed) != sizeof(long) || mx() != 0x80000000LL) return 5;
     if (sizeof(enum small) != 4 || T(S1) != 1) return 6;
     if (T(X) != 6 && T(X) != 4) return 7;
+    /* no negative value: an unsigned type, which the tag keeps too */
+    {
+        enum uns u2 = U;
+        if (u2 < 0 || T(u2) != 2) return 8;
+        if (T(G) != 4) return 9;                /* unsigned long */
+        if (T(MN) != 3) return 10;              /* long: it has -1 */
+    }
     return 42;
 }
