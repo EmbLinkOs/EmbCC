@@ -2342,6 +2342,10 @@ static void restore_callee(struct code *text, const int *used_callee,
  * neither needs to exist in a register. Only a full-width access (4 or
  * 8 bytes, the op's own width), and only the ops with a memory
  * destination: + - & | ^, with t as the left operand of a subtraction. */
+/* A block copy or clear longer than this is `rep movsq` / `rep stosq`
+ * rather than two instructions per eight bytes (IR_MEMCPY). */
+#define X86_REP_MIN 256
+
 static int x86_rmw_writes_memory(enum ir_op op)
 {
     switch (op) {
@@ -4122,6 +4126,37 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * address is used directly as the base (no slot->rcx/rdx load) — the
              * reason its temp can be register-allocated (OPAQUE dropped). */
             cg_reset();
+            /* A LARGE one is `rep movsq`. Unrolled, every eight bytes were
+             * two instructions: the loop-idiom pass turns a copy loop over a
+             * whole array into one of these, and EmbLinkOs's colour picker
+             * copied a 113 KB buffer in 28,000 of them -- 199 KB of code in
+             * one function, where gcc calls memcpy. rsi and rdi may hold
+             * allocated values, so they are pushed around it; the addresses
+             * are fetched into rax and rcx first, before the pushes move
+             * rsp (a slot is rbp-relative, but nothing here needs to know
+             * that to be right). */
+            if (i->size > X86_REP_MIN) {
+                if (in_reg(i->a)) x86_mov_reg_reg(text, REG_RAX, g_loc[i->a]);
+                else              x86_load_slot(text, sd[i->a], 8, 0, 8);
+                if (in_reg(i->b)) x86_mov_reg_reg(text, REG_RCX, g_loc[i->b]);
+                else              x86_mov_rcx_slot(text, sd[i->b]);
+                x86_push_reg(text, REG_RSI);
+                x86_push_reg(text, REG_RDI);
+                x86_mov_reg_reg(text, REG_RDI, REG_RAX);
+                x86_mov_reg_reg(text, REG_RSI, REG_RCX);
+                x86_mov_reg_imm(text, REG_RCX, i->size / 8, 4);
+                x86_rep_movsq(text);
+                for (int off = 0; off < i->size % 8; ) {   /* rsi, rdi: past it */
+                    int rest = i->size % 8 - off;
+                    int chunk = rest >= 4 ? 4 : rest >= 2 ? 2 : 1;
+                    x86_load_reg_mem(text, REG_RAX, REG_RSI, off, chunk);
+                    x86_store_mem_reg(text, REG_RDI, off, REG_RAX, chunk);
+                    off += chunk;
+                }
+                x86_pop_reg(text, REG_RDI);
+                x86_pop_reg(text, REG_RSI);
+                break;
+            }
             int dbase, sbase;
             if (in_reg(i->a)) dbase = g_loc[i->a];
             else { x86_load_slot(text, sd[i->a], 8, 0, 8);
@@ -4150,6 +4185,23 @@ static void gen_func(struct ir_func *fn, struct code *text,
         }
         case IR_MEMZERO: {
             cg_reset();
+            if (i->size > X86_REP_MIN) {        /* see IR_MEMCPY */
+                if (in_reg(i->a)) x86_mov_reg_reg(text, REG_RCX, g_loc[i->a]);
+                else              x86_mov_rcx_slot(text, sd[i->a]);
+                x86_push_reg(text, REG_RDI);
+                x86_mov_reg_reg(text, REG_RDI, REG_RCX);
+                x86_mov_eax_imm(text, 0, 8);
+                x86_mov_reg_imm(text, REG_RCX, i->size / 8, 4);
+                x86_rep_stosq(text);
+                for (int off = 0; off < i->size % 8; ) {
+                    int rest = i->size % 8 - off;
+                    int chunk = rest >= 4 ? 4 : rest >= 2 ? 2 : 1;
+                    x86_store_mem_reg(text, REG_RDI, off, REG_RAX, chunk);
+                    off += chunk;
+                }
+                x86_pop_reg(text, REG_RDI);
+                break;
+            }
             int dbase;
             if (in_reg(i->a)) dbase = g_loc[i->a];
             else { x86_load_slot(text, sd[i->a], 8, 0, 8);

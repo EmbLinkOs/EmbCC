@@ -458,6 +458,19 @@ void x86_sub_rsp(struct code *c, int bytes)
 }
 
 /* push/pop a 64-bit register: one byte, or two for r8-r15. */
+/* rep movsq: rcx quadwords from [rsi] to [rdi]; rep stosq: rcx copies of
+ * rax to [rdi]. Both advance the pointers, which is forward because both
+ * ABIs keep the direction flag clear. */
+void x86_rep_movsq(struct code *c)
+{
+    code_byte(c, 0xf3); code_byte(c, 0x48); code_byte(c, 0xa5);
+}
+
+void x86_rep_stosq(struct code *c)
+{
+    code_byte(c, 0xf3); code_byte(c, 0x48); code_byte(c, 0xab);
+}
+
 void x86_push_reg(struct code *c, int reg)
 {
     if (reg & 8) code_byte(c, 0x41);
