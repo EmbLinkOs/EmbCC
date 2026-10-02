@@ -3245,10 +3245,18 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
         flatten_agg(u, f, sc, &c, ty, off, out, 1, NULL, NULL);
         return;
     }
-    /* a braced scalar: { x } */
-    if (init->nelems != 1)
+    /* a braced scalar: { x }, or C23's empty { }, which is zero -- and
+     * the object is zero-filled already, so it takes no leaf */
+    if (init->nelems == 0)
+        return;
+    if (init->nelems != 1 || init->elems[0]->desig_field ||
+        init->elems[0]->desig_index >= 0)
         sema_error_at(u, init->line, init->col,
                    "a scalar takes exactly one initializer");
+    /* one level of braces: C11 6.7.9p11, and gcc refuses `{ { 4 } }` */
+    if (init->elems[0]->kind == EXPR_INITLIST)
+        sema_error_at(u, init->elems[0]->line, init->elems[0]->col,
+                   "braces around a scalar initializer take one level");
     flatten_init(u, f, sc, init->elems[0], ty, off, out);
 }
 
@@ -4227,6 +4235,33 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
              * initializer is an anonymous global, not a stack slot. */
             if (s->is_static)
                 g_in_static_init++;
+            /* A braced scalar, `int x = { 5 };` (C89), or `= {}` (C23),
+             * which is zero: the value inside, or a 0 of the right type. */
+            if (s->expr && s->expr->kind == EXPR_INITLIST &&
+                s->dty->kind != TY_ARRAY && s->dty->kind != TY_STRUCT) {
+                struct expr *il = s->expr;
+                if (il->nelems > 1 || (il->nelems == 1 &&
+                    (il->elems[0]->desig_field ||
+                     il->elems[0]->desig_index >= 0)))
+                    sema_error_at(u, il->line, il->col,
+                               "a scalar takes exactly one initializer");
+                if (il->nelems == 1 && il->elems[0]->kind == EXPR_INITLIST)
+                    sema_error_at(u, il->elems[0]->line, il->elems[0]->col,
+                               "braces around a scalar initializer take "
+                               "one level");
+                if (il->nelems == 1) {
+                    s->expr = il->elems[0];
+                } else {
+                    s->expr = xcalloc(1, sizeof *s->expr);
+                    s->expr->kind = EXPR_NUM;
+                    s->expr->line = il->line;
+                    s->expr->col = il->col;
+                    s->expr->num = 0;
+                    s->expr->ty = ty_base(TY_INT, 0);
+                    s->expr->desig_index = -1;
+                    s->expr->desig_index_hi = -1;
+                }
+            }
             if (s->expr && s->dty->kind != TY_ARRAY &&
                 s->dty->kind != TY_STRUCT) {
                 check_expr(u, f, sc, s->expr);

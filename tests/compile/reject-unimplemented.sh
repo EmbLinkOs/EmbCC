@@ -452,3 +452,8 @@ check fam-init-compound-literal \
 check desig-range-path \
     'int m[3][2] = { [0 ... 1][1] = 5 };' \
     "range designator"
+
+# One level of braces around a scalar (C11 6.7.9p11); gcc refuses more.
+check scalar-double-braces \
+    'int main(void) { int q = { { 4 } }; return q; }' \
+    "take one level"

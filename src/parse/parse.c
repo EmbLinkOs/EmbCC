@@ -4168,8 +4168,11 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
             /* A scalar/pointer global: a constant expression — an integer
              * literal, sizeof arithmetic, a string-literal address for a
              * pointer, 0 for a null pointer. sema flattens and folds it
-             * through the same path as an aggregate leaf. */
-            g->init_expr = parse_cond(ps);
+             * through the same path as an aggregate leaf -- braced too,
+             * `int g = { 7 };` (C89) or `= {}` (C23), which flatten_init
+             * reads as a braced scalar. */
+            g->init_expr = cur(ps)->kind == TOK_LBRACE ? parse_initializer(ps)
+                                                       : parse_cond(ps);
             g->has_init = 1;
         }
     }
