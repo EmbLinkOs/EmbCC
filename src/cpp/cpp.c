@@ -1828,8 +1828,13 @@ char *cpp_process(const char *path, const char *src,
     define_macro(&boot, "__inline__");
     defining_builtins = 0;
     define_macro(&boot, "__STDC__ 1");
+    /* C17: the language EmbCC compiles is C11's (with C17's fixes),
+     * _Atomic operators included, and much of C23's. It said C99, which
+     * sent headers to their pre-C11 fallbacks -- newlib emulates
+     * _Alignof with a struct in offsetof -- and withheld C11's macros
+     * (FLT_TRUE_MIN) from its own <float.h>. */
     if (!predef_is_cxx())      /* C++ has __cplusplus instead */
-        define_macro(&boot, "__STDC_VERSION__ 199901L");
+        define_macro(&boot, "__STDC_VERSION__ 201710L");
     define_macro(&boot, "__STDC_HOSTED__ 1");
     if (predef_is_cxx()) {
         /* the C++ features EmbCC implements (docs/language/cpp-levels.md): each one
