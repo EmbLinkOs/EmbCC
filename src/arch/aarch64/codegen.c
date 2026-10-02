@@ -673,7 +673,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
     long temp_base = running;
     for (int t = fn->nvars; t < fn->nvregs; t++) {
         int k = t - fn->nvars;
-        if (!tslot || tslot[k] < 0) { disp[t] = temp_base; continue; }
+        if (!tslot || tslot[k] < 0) { disp[t] = A64_DEAD_SLOT; continue; }
         disp[t] = temp_base + (long)tslot[k] * 8;
     }
     running = temp_base + (long)npool * 8;
@@ -2822,6 +2822,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                     addr_of(t, A64_ADDR, A64_SP, pl[k].stk_off);
                     addr_of(t, A64_TMP, FB, sd[v]);
                     emit_copy(t, A64_ADDR, A64_TMP, 16);
+                } else if (a64_in_freg(v)) {
+                    /* A float in a v register has no slot: ld_slot read
+                     * the first temp slot instead, and h(8 doubles,
+                     * x * 3, y * 5) passed some other value twice. */
+                    a64_fstr(t, g_a64_floc[v], A64_SP, pl[k].stk_off,
+                             pl[k].size);
                 } else {
                     ld_slot(t, sd, v, A64_ACC, 8, 0, 8);
                     a64_str(t, A64_ACC, A64_SP, pl[k].stk_off, 8);

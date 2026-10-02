@@ -4781,8 +4781,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 if (!a->is_struct) {
                     /* a scalar that ran out of registers: its slot
                      * already holds the value, extended to 8 bytes (or it is
-                     * register-resident -> store the register straight out). */
-                    if (in_reg(a->vreg)) {
+                     * register-resident -> store the register straight out).
+                     * A float in an xmm home has no slot at all: this read
+                     * one, and -O2 refused `h(8 doubles, x * 3)`. */
+                    if (in_freg(a->vreg)) {
+                        x86_movs_store_base(text, REG_RSP, a->stk_off,
+                                            g_floc[a->vreg], a->size);
+                    } else if (in_reg(a->vreg)) {
                         x86_store_mem_reg(text, REG_RSP, a->stk_off,
                                           g_loc[a->vreg], 8);
                     } else {
