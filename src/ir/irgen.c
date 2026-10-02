@@ -657,6 +657,47 @@ static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
 static void san_trap_if(struct ir_func *fn, int cond, int w);
 static long san_min(int w);
 
+/* An `int` narrower than the class it is computed in: AVR's two bytes in
+ * a four-byte value. Nothing else reads such a value at its own width --
+ * a divide, a right shift, a compare, the free conversion to `long` all
+ * read all four bytes -- so the value has to BE its extension, and an
+ * operation that can carry out of sixteen bits re-extends its result.
+ * Without it (unsigned)0xffff + 1 was 65536 to the divide after it, and
+ * `long f(int x) { return x + 1; }` returned 32768 for 32767: C's
+ * arithmetic modulo 2^16 was arithmetic modulo 2^32 inside an
+ * expression, on every AVR program, with nothing said. And/or/xor and a
+ * right shift of extended values are already extended; a signed
+ * remainder is too, and an unsigned complement is not. */
+static int int_wrap(struct ir_func *fn, int v, const struct type *t,
+                    enum ir_op op)
+{
+    if (!t || ty_is_float(t) || t->kind == TY_BOOL ||
+        ty_size(t) < 2 || ty_size(t) >= ty_w(t))
+        return v;
+    switch (op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_SHL: case IR_NEG:
+        break;
+    case IR_DIV:                       /* INT_MIN / -1 */
+        if (!ty_signed_int(t))
+            return v;
+        break;
+    case IR_BNOT:                      /* ~ of a zero extension */
+        if (ty_signed_int(t))
+            return v;
+        break;
+    default:
+        return v;
+    }
+    struct ir_ins *x = emit(fn);
+    x->op = IR_EXT;
+    x->a = v;
+    x->size = ty_size(t);
+    x->sign = ty_signed_int(t);
+    x->w = ty_w(t);
+    x->dst = new_temp(fn);
+    return x->dst;
+}
+
 
 /* ---- the IEEE-754 bit builtins -----------------------------------------
  *
@@ -1558,7 +1599,8 @@ static int compound_value(struct ir_func *fn, struct expr *e, int cur,
     if (ty_is_float(ct))
         res = emit_fbin(fn, o, cv, rv, ty_size(ct));
     else
-        res = san_bin(fn, o, cv, rv, ty_w(ct), ty_signed_int(ct));
+        res = int_wrap(fn, san_bin(fn, o, cv, rv, ty_w(ct),
+                                   ty_signed_int(ct)), ct, o);
     return gen_convert(fn, res, ct, lt);
 }
 
@@ -2277,7 +2319,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         i->a = v;
         i->w = ty_w(e->ty);
         i->dst = new_temp(fn);
-        return i->dst;
+        return int_wrap(fn, i->dst, e->ty, i->op);
     }
     case EXPR_DEREF: {
         int addr = gen_expr(fn, e->rhs);
@@ -2444,8 +2486,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             enum ir_op o = e->op == B_ADD ? IR_ADD : IR_SUB;
             if (ty_is_float(e->ty))
                 return emit_fbin(fn, o, a, b, ty_size(e->ty));
-            return san_bin(fn, o, a, b, ty_w(e->ty),
-                           ty_signed_int(e->ty));
+            return int_wrap(fn, san_bin(fn, o, a, b, ty_w(e->ty),
+                                        ty_signed_int(e->ty)), e->ty, o);
         }
         case B_EQ:
         case B_NE:
@@ -2481,8 +2523,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             if (ty_is_float(e->ty))
                 return emit_fbin(fn, map[e->op - B_ADD], a, b,
                                  ty_size(e->ty));
-            return san_bin(fn, map[e->op - B_ADD], a, b,
-                           ty_w(e->ty), ty_signed_int(e->ty));
+            return int_wrap(fn, san_bin(fn, map[e->op - B_ADD], a, b,
+                                        ty_w(e->ty), ty_signed_int(e->ty)),
+                            e->ty, map[e->op - B_ADD]);
         }
         }
     }

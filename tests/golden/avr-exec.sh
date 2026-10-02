@@ -141,6 +141,23 @@ static int thrice(int v) { return v + v + v; }
  * source, so the sixth struct here arrived as frame bytes. And a struct
  * return of 80 bytes, which the 64-byte reach of `ldd` refused. */
 struct big4 { long a, b, c, d; };
+/* int's own width inside an expression. AVR's int is two bytes computed
+ * in a four-byte value, and the value went on carrying bit 16 into the
+ * divide, shift, compare or widening after it. Written with UINT_MAX and
+ * INT_MAX rather than 0xffff and 32767, so the host's 32-bit int gives
+ * the same answers and needs no second expected value. */
+static volatile unsigned v_umax = ~0u;
+static volatile int v_imax = (int)(~0u >> 1);
+__attribute__((noinline)) static unsigned w_half(unsigned x)
+{ return (x + 1) / 2; }
+__attribute__((noinline)) static unsigned w_shr(unsigned x)
+{ return (x + 1) >> 1; }
+__attribute__((noinline)) static long w_widen(int x) { return x + 1; }
+__attribute__((noinline)) static int w_gt(int x) { return x + 1 > x; }
+__attribute__((noinline)) static unsigned long w_uwiden(unsigned x)
+{ return x + 1u; }
+__attribute__((noinline)) static int w_neg(unsigned x) { return ~x == 0; }
+
 __attribute__((noinline)) static long far6(int n, struct big4 a,
     struct big4 b, struct big4 c, struct big4 d, struct big4 e,
     struct big4 f)
@@ -282,6 +299,10 @@ void run(void)
         putn(t);
     }
     puts_("| ");
+    putn(w_half(v_umax)); putn(w_shr(v_umax));
+    putn(w_widen(v_imax) < 0);
+    putn(w_gt(v_imax)); putn((long)w_uwiden(v_umax)); putn(w_neg(v_umax));
+    puts_("| ");
     puts_("DONE\n");
 }
 EOF
@@ -325,7 +346,7 @@ EOF
 # Built with the HOST compiler, so `long` is 8 bytes there and 4 on AVR.
 # -DAVR_LONG is not used: every constant in the program fits in 32 bits
 # and every intermediate is written to stay inside it, so the two agree.
-cc -std=c99 -w -o "$out/host" "$out/prog.c" "$out/hostio.c" || {
+cc -std=c99 -w -fwrapv -o "$out/host" "$out/prog.c" "$out/hostio.c" || {
     echo "the host build failed"; exit 1; }
 "$out/host" > "$out/want" || { echo "the host program failed"; exit 1; }
 
