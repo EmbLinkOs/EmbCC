@@ -311,6 +311,8 @@ static int at_type_start(struct parser *ps)
              * variable can be called that. */
             strcmp(cur(ps)->text, "auto") == 0 ||
             strcmp(cur(ps)->text, "constexpr") == 0 ||
+            /* C23 `bool`, when the unit has not named a type that */
+            strcmp(cur(ps)->text, "bool") == 0 ||
             strcmp(cur(ps)->text, "__builtin_va_list") == 0 ||
             strcmp(cur(ps)->text, "__int128_t") == 0 ||
             strcmp(cur(ps)->text, "__uint128_t") == 0);
@@ -1356,6 +1358,13 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             return ty_base(TY_INT128, u);
         }
         struct type *td = find_typedef(ps, cur(ps)->text);
+        /* C23's `bool` keyword: _Bool. A typedef of that name -- old code's
+         * `typedef int bool;` -- was looked up first and wins, and with
+         * <stdbool.h> the macro has already made it _Bool. */
+        if (!td && strcmp(cur(ps)->text, "bool") == 0) {
+            advance(ps);
+            return ty_base(TY_BOOL, 0);
+        }
         if (!td)
             return NULL;
         advance(ps);

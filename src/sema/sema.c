@@ -1318,6 +1318,19 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->str_width = 1;
                 e->str_prefix = 0;
                 check_expr(u, f, sc, e);   /* give it the array/pointer type */
+            } else if (strcmp(e->name, "true") == 0 ||
+                       strcmp(e->name, "false") == 0) {
+                /* C23 makes `true` and `false` keywords: constants of type
+                 * bool. gcc 15 and later default to C23, and code written
+                 * against them -- EmbLinkOs among it -- uses both without
+                 * <stdbool.h>. EmbCC compiles one dialect, so they are
+                 * names of last resort here, like __func__ above: a unit
+                 * that declares its own `true` (an enum constant, a
+                 * variable) or includes <stdbool.h>, whose macros come
+                 * first, keeps what it said. */
+                e->kind = EXPR_NUM;
+                e->num = e->name[0] == 't';
+                e->ty = ty_base(TY_BOOL, 0);
             } else {
                 /* A name misspelt once is usually used several times:
                  * report it once per function, then carry on quietly. */

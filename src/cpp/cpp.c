@@ -493,8 +493,13 @@ static long eval_primary(struct evalp *e)
         return v;
     }
     if (is_id0(*e->p)) { /* surviving identifiers evaluate to 0 */
+        const char *id = e->p;
         while (is_idc(*e->p))
             e->p++;
+        /* ...except C23's `true`, which is 1 in #if as everywhere else
+         * (a unit that #defines it has had it replaced already) */
+        if (e->p - id == 4 && !memcmp(id, "true", 4))
+            return 1;
         return 0;
     }
     cerr(e->s, "cannot parse #if expression", NULL);
