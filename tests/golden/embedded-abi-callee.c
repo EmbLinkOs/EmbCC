@@ -10,6 +10,8 @@ int u3(struct s3 s){ return s.a + s.b*10 + s.c*100; }
 int u8(struct s8 s){ return s.a*10 + s.b; }
 int u20(struct s20 s){ int t=0; for(int i=0;i<5;i++) t+=s.v[i]*(i+1); return t; }
 int umix(struct mix s){ return s.c + s.i + s.s; }
+long long stk64(int a, int b, int c, int d, int e, int f, int g,
+                long long x, long long y){ return y - x - x - x + a + g + (b-c+d-e+f); }
 int split(int a,int b,int c, struct s8 s, struct s12 t)
 { return a+b+c + s.a*10 + s.b*100 + t.a + t.b*2 + t.c*3; }
 long long mix64(int a, long long b, int c, struct s8 s)

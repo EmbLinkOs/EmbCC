@@ -472,6 +472,16 @@ static void place_arg(int wb, int size, int align, int is_struct,
         *narg = (*narg + 1) & ~1;
         *stk = (*stk + 2 * wb - 1) & ~(long)(2 * wb - 1);
     }
+    /* Wholly on the stack, an argument is aligned to its type, and to
+     * XLEN at least, never past the stack's 16 (psABI). This rounded to
+     * XLEN only, so a double or long long after one stack word went at
+     * sp+4 on RV32 where clang and gcc put it at sp+8 -- and a call
+     * between EmbCC code and theirs read the wrong half. (A split
+     * argument starts the stack area, at offset 0, already aligned.) */
+    if (*narg >= RV_NARGREG) {
+        int a = p->byref || align < wb ? wb : align > 16 ? 16 : align;
+        *stk = (*stk + a - 1) & ~(long)(a - 1);
+    }
     p->reg = *narg;
     p->nreg = *narg < RV_NARGREG
             ? (words < RV_NARGREG - *narg ? words : RV_NARGREG - *narg) : 0;

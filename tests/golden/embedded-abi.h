@@ -27,6 +27,12 @@ int u3(struct s3 s);
 int u8(struct s8 s);
 int u20(struct s20 s);
 int umix(struct mix s);
+/* Seven words in registers, then two eight-byte scalars: on RISC-V the
+ * first splits across a7 and the stack and the second lands on the stack
+ * aligned to EIGHT (psABI) -- sp+8, not sp+4 straight after the split
+ * half, which is where EmbCC put it and clang never looked. */
+long long stk64(int a, int b, int c, int d, int e, int f, int g,
+                long long x, long long y);
 /* Three words placed, then a two-word composite -- which splits across
  * the last argument register and the stack on AAPCS32, and travels in
  * registers on RISC-V, where there are eight of them. s12 is twelve
