@@ -92,6 +92,30 @@ void t_mov_reg(struct code *c, int rd, int rm)
            (unsigned)(rd & 7));
 }
 
+void t_movs_reg(struct code *c, int rd, int rm)
+{
+    if (low(rd) && low(rm))
+        hw(c, 0x0000u | (unsigned)(rm << 3) | (unsigned)rd); /* LSLS #0 */
+    else
+        hw2(c, 0xea5fu, (unsigned)(rd << 8) | (unsigned)rm);   /* MOVS.W */
+}
+
+int t_movs_imm(struct code *c, int rd, long imm)
+{
+    unsigned long v = (unsigned long)imm & 0xffffffffUL;
+    int e;
+    if (low(rd) && v <= 0xff) {
+        hw(c, 0x2000u | (unsigned)(rd << 8) | (unsigned)v);
+        return 0;
+    }
+    e = encode_imm(v);
+    if (e < 0)
+        return -1;
+    hw2(c, 0xf04fu | (imm_i(e) << 10) | (1u << 4),
+           (imm_hi3(e) << 12) | (unsigned)(rd << 8) | imm_lo8(e));
+    return 0;
+}
+
 void t_mvn_reg(struct code *c, int rd, int rm, int s)
 {
     if (s && low(rd) && low(rm)) {

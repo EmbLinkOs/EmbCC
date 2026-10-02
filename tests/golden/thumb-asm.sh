@@ -184,3 +184,21 @@ if "$EMBCC" --target=$T -c "$out/r6.c" -o /dev/null 2> "$out/r6.err"; then
     echo "a register variable on callee-saved r6 was accepted"; exit 1
 fi
 echo "x86's constraint letters and a callee-saved register variable are refused"
+
+# `movs` and `mvns` SET the flags -- a branch after them in the same
+# template reads them -- and were encoded as movw/mov and mvn.w, which do
+# not. A movs immediate no flag-setting MOV can hold is refused.
+printf 'int f(int x){ int r; __asm__("movs %%0, #0\\n mvns %%0, %%1\\n movs %%0, %%1\\n movs %%0, #0x10000" : "=r"(r) : "r"(x)); return r; }\n' \
+    > "$out/flags.c"
+"$EMBCC" --target=$T -c "$out/flags.c" -o "$out/flags.o" || {
+    echo "the flag-setting moves do not assemble"; exit 1; }
+fl=$(llvm-objdump -d --triple=thumbv7em "$out/flags.o" | grep -cE '[[:space:]](movs(\.w)?|mvns)[[:space:]]')
+[ "$fl" = 4 ] || {
+    echo "$fl of 4 flag-setting moves set the flags:"
+    llvm-objdump -d --triple=thumbv7em "$out/flags.o" | grep -E 'mov|mvn'; exit 1; }
+printf 'int f(int x){ int r; __asm__("movs %%0, #0x12345" : "=r"(r) : "r"(x)); return r; }\n' \
+    > "$out/movs-big.c"
+if "$EMBCC" --target=$T -c "$out/movs-big.c" -o /dev/null 2>/dev/null; then
+    echo "movs of an immediate no MOVS encodes was accepted"; exit 1
+fi
+echo "movs and mvns set the flags, or are refused"
