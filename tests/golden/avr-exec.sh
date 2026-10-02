@@ -135,6 +135,20 @@ static long sum_through_pointer(const int *p, int n)
  * and lands on a real instruction, so nothing faults. */
 static int twice(int v)  { return v + v; }
 static int thrice(int v) { return v + v + v; }
+
+/* Struct arguments past 64 bytes of outgoing stack, where `std` cannot
+ * reach: the copy built its destination pointer in Z, which held the
+ * source, so the sixth struct here arrived as frame bytes. And a struct
+ * return of 80 bytes, which the 64-byte reach of `ldd` refused. */
+struct big4 { long a, b, c, d; };
+__attribute__((noinline)) static long far6(int n, struct big4 a,
+    struct big4 b, struct big4 c, struct big4 d, struct big4 e,
+    struct big4 f)
+{ return n + a.d + b.d * 2 + c.d * 3 + d.d * 4 + e.a * 5 + e.d * 6 +
+         f.a * 7 + f.b * 8 + f.c * 9 + f.d * 10; }
+struct s80 { char b[80]; };
+__attribute__((noinline)) static struct s80 mk80(int k)
+{ struct s80 r; for (int i = 0; i < 80; i++) r.b[i] = (char)(i + k); return r; }
 int (*volatile fp)(int);
 
 void run(void)
@@ -257,6 +271,17 @@ void run(void)
         while (*p) { n += *p - '0'; p++; }
         putn(n);
     }
+    {
+        struct big4 a = { 1, 2, 3, 4 }, b = { 5, 6, 7, 8 },
+                    c = { 9, 10, 11, 12 }, d = { 13, 14, 15, 16 },
+                    e = { 17, 18, 19, 20 }, f = { 21, 22, 23, 24 };
+        struct s80 r = mk80(3);
+        long t = 0;
+        putn(far6(1, a, b, c, d, e, f));
+        for (i = 0; i < 80; i++) t += r.b[i];
+        putn(t);
+    }
+    puts_("| ");
     puts_("DONE\n");
 }
 EOF
