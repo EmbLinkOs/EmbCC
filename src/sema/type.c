@@ -427,26 +427,36 @@ static void class_merge(enum arg_class *slot, int *seen, enum arg_class c)
 /* Walks every scalar leaf of t at byte offset `off`, classifying the
  * eightbyte each one falls in. Arrays and nested structs recurse, which
  * is what makes "all floating" mean all the way down. */
-static void classify_fields(const struct type *t, int off,
-                            enum arg_class *cls, int *seen)
+/* Returns nonzero when some field is UNALIGNED -- at an offset its own
+ * type's alignment does not divide, which only packing makes -- and the
+ * whole aggregate is then MEMORY (SysV 3.2.3), as gcc and clang pass it.
+ * A scalar marks every eightbyte it covers: an __int128 member is both
+ * halves, and marking only the first left the second "padding". */
+static int classify_fields(const struct type *t, int off,
+                           enum arg_class *cls, int *seen)
 {
     if (t->kind == TY_STRUCT) {
-        for (int i = 0; i < t->nmembers; i++)
-            classify_fields(t->members[i].ty, off + t->members[i].off,
-                            cls, seen);
-        return;
+        int bad = 0;
+        for (int i = 0; i < t->nmembers; i++) {
+            const struct member *m = &t->members[i];
+            if (!m->is_bitfield && (off + m->off) % ty_align(m->ty))
+                bad = 1;
+            bad |= classify_fields(m->ty, off + m->off, cls, seen);
+        }
+        return bad;
     }
     if (t->kind == TY_ARRAY) {
-        int esz = ty_size(t->pointee);
+        int esz = ty_size(t->pointee), bad = 0;
         for (int i = 0; i < t->count; i++)
-            classify_fields(t->pointee, off + i * esz, cls, seen);
-        return;
+            bad |= classify_fields(t->pointee, off + i * esz, cls, seen);
+        return bad;
     }
-    int idx = off / 8;
-    if (idx < 0 || idx > 1)
-        return; /* caller already decided MEMORY */
-    class_merge(&cls[idx], &seen[idx],
-                ty_is_float(t) ? CLASS_SSE : CLASS_INTEGER);
+    int sz = ty_size(t);
+    for (int idx = off / 8; idx <= (off + (sz > 0 ? sz : 1) - 1) / 8; idx++)
+        if (idx >= 0 && idx <= 1)   /* past that the caller said MEMORY */
+            class_merge(&cls[idx], &seen[idx],
+                        ty_is_float(t) ? CLASS_SSE : CLASS_INTEGER);
+    return 0;
 }
 
 /* Does t contain a long double anywhere? */
@@ -526,11 +536,12 @@ int ty_classify(const struct type *t, enum arg_class *classes)
 
     int seen[2] = { 0, 0 };
     classes[0] = classes[1] = CLASS_INTEGER;
-    classify_fields(t, 0, classes, seen);
+    if (classify_fields(t, 0, classes, seen))
+        return 0; /* MEMORY: an unaligned field */
     int n = (size + 7) / 8;
     for (int i = 0; i < n; i++)
         if (!seen[i])
-            classes[i] = CLASS_INTEGER; /* padding-only: harmless */
+            classes[i] = CLASS_NONE;    /* padding only: no register */
     return n;
 }
 

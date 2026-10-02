@@ -341,7 +341,8 @@ static void x86_abi_hints(const struct ir_func *fn, int *hint)
                 continue;
             if (a->is_struct || a->nclass == 2) {
                 for (int q = 0; q < a->nclass; q++)
-                    if (a->cls[q] == CLASS_SSE) freg2++; else ireg2++;
+                    if (a->cls[q] == CLASS_SSE) freg2++;
+                    else if (a->cls[q] != CLASS_NONE) ireg2++;
                 continue;
             }
             if (a->cls[0] == CLASS_SSE) {
@@ -3148,7 +3149,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             for (int k = 0; k < n; k++) {
                 if (cls[k] == CLASS_SSE)
                     need_s++;
-                else
+                else if (cls[k] != CLASS_NONE)
                     need_i++;
             }
             if (ireg + need_i > 6 || freg + need_s > 8) {
@@ -3168,7 +3169,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             for (int k = 0; k < n; k++) {
                 if (cls[k] == CLASS_SSE)
                     x86_movs_store_base(text, REG_RAX, k * 8, freg++, 8);
-                else
+                else if (cls[k] != CLASS_NONE)
                     x86_store_mem_reg(text, REG_RAX, k * 8,
                                       x86_argreg(ireg++), 8);
             }
@@ -4902,7 +4903,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                     if (a->is_struct || a->nclass == 2) {
                         for (int q = 0; q < a->nclass; q++)
-                            if (a->cls[q] != CLASS_SSE) pireg++;
+                            if (a->cls[q] == CLASS_INTEGER) pireg++;
                     } else if (a->cls[0] != CLASS_SSE) {
                         if (in_reg(a->vreg)) {
                             mvdest[nmv] = x86_argreg(pireg++);
@@ -4959,7 +4960,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         if (a->cls[q] == CLASS_SSE)
                             x86_movs_load_base(text, freg++, REG_RAX,
                                                q * 8, 8);
-                        else
+                        else if (a->cls[q] != CLASS_NONE)
                             x86_load_reg_mem(text, x86_argreg(ireg++),
                                              REG_RAX, q * 8, 8);
                     }
@@ -5072,7 +5073,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         if (i->retcls[q] == CLASS_SSE)
                             x86_movs_store_base(text, REG_RCX, q * 8,
                                                 fr++, 8);
-                        else
+                        else if (i->retcls[q] != CLASS_NONE)
                             x86_store_mem_reg(text, REG_RCX, q * 8,
                                               ir++ == 0 ? REG_RAX
                                                         : REG_RDX, 8);
@@ -5250,7 +5251,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         if (rc[q] == CLASS_SSE)
                             x86_movs_load_base(text, fr++, REG_RCX,
                                                q * 8, 8);
-                        else
+                        else if (rc[q] != CLASS_NONE)
                             x86_load_reg_mem(text,
                                              ir++ == 0 ? REG_RAX : REG_RDX,
                                              REG_RCX, q * 8, 8);

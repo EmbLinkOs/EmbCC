@@ -195,7 +195,11 @@ int ty_signed_int(const struct type *t);    /* signed integer? */
  * An aggregate larger than two eightbytes is MEMORY (stack / hidden
  * return pointer). Otherwise each eightbyte is SSE when every scalar
  * overlapping it is floating, and INTEGER otherwise. */
-enum arg_class { CLASS_INTEGER, CLASS_SSE, CLASS_MEMORY };
+/* CLASS_NONE is SysV's NO_CLASS: an eightbyte that holds only padding --
+ * the second half of a struct aligned(16) around one long. It takes no
+ * register and nothing is moved for it; counting it as INTEGER spent a
+ * register gcc and clang do not, and every later argument was one off. */
+enum arg_class { CLASS_INTEGER, CLASS_SSE, CLASS_MEMORY, CLASS_NONE };
 
 /* Fills classes[] with one entry per eightbyte and returns the count
  * (1 or 2); returns 0 when the type is MEMORY class. Non-aggregates

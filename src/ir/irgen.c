@@ -2868,7 +2868,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             for (int q = 0; q < ar->nclass; q++) {
                 if (ar->cls[q] == CLASS_SSE)
                     nf++;
-                else
+                else if (ar->cls[q] != CLASS_NONE)
                     ni++;
             }
             if (ar->nclass == 0 || ireg + ni > 6 || freg + nf > 8) {
