@@ -85,3 +85,19 @@ grep -q "undefined symbol 'undefined_fn'" "$out/u.err" || {
 [ ! -e "$out/u.elf.embcc-tmp.o" ] && [ ! -e "$out/u.elf" ] || {
     echo "FAIL: the failed link left $(ls "$out" | grep '^u\.elf' | tr '\n' ' ')"; exit 1; }
 echo "and a refused link leaves no output and no temporary object"
+
+# 7. The LAST -O wins, size mode included, as with GCC: -Os followed by
+#    -O0 or -O2 kept optimizing for size.
+printf 'int f(int *a) { int s = 0; for (int i = 0; i < 64; i++) s += a[i]; return s; }\n' \
+    > "$out/o.c"
+for f in "-O2" "-Os -O2" "-O0" "-Os -O0" "-Os"; do
+    n=$(echo $f | tr -d ' -')
+    # shellcheck disable=SC2086
+    "$EMBCC" $T $f -c "$out/o.c" -o "$out/o$n.o" || {
+        echo "FAIL: $f does not compile"; exit 1; }
+done
+cmp -s "$out/oOs.o" "$out/oO2.o" && {
+    echo "FAIL: the probe compiles the same at -Os and -O2, so it proves nothing"; exit 1; }
+cmp -s "$out/oO2.o" "$out/oOsO2.o" || { echo "FAIL: -Os -O2 is not -O2"; exit 1; }
+cmp -s "$out/oO0.o" "$out/oOsO0.o" || { echo "FAIL: -Os -O0 is not -O0"; exit 1; }
+echo "and the last -O wins, size mode included"

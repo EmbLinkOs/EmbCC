@@ -3250,13 +3250,15 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "-O", 2) == 0) {
             /* -O/-O1, -O2, -O3 and -Os. -O0 turns the optimizer off,
              * which is what keeps the self-host fixed point. */
+            /* The LAST -O wins, size mode included: `-Os -O0` kept
+             * optimizing for size at -O0, and `-Os -O2` was still -Os. */
             const char *lvl = argv[i] + 2;
             if (lvl[0] == '\0')
-                opt_level = 1;
+                { opt_level = 1; opt_for_size = 0; }
             else if (lvl[0] == 's' && lvl[1] == '\0')
                 { opt_level = 2; opt_for_size = 1; }
             else if (lvl[1] == '\0' && lvl[0] >= '0' && lvl[0] <= '3')
-                opt_level = lvl[0] - '0';
+                { opt_level = lvl[0] - '0'; opt_for_size = 0; }
             else if (lvl[0] == 'z' && lvl[1] == '\0')
                 { opt_level = 2; opt_for_size = 1; }   /* -Oz is -Os here */
             else {
