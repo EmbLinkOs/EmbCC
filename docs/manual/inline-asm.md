@@ -1,0 +1,1284 @@
+# Inline Assembly
+
+This page describes assembly language embedded in C source: `asm`
+statements inside functions (basic and extended), local register
+variables, assembler names on declarations, and file-scope `asm` blocks.
+For each target it lists the constraint letters, the operand modifiers and
+the complete set of instructions EmbCC's built-in assembler accepts in a
+template. It is for people writing kernels, drivers, startup code and
+other low-level C with EmbCC, and for people porting inline assembly
+written for GCC or Clang. Target triples, register conventions and ABIs
+are in [Targets](targets.md); the other GNU extensions are in
+[Extensions](extensions.md).
+
+## How EmbCC assembles a template
+
+EmbCC does not hand an `asm` template to an external assembler. It
+assembles the template itself, while it generates code for the
+function, with a built-in assembler for the selected target. Each
+target's assembler accepts a fixed set of instructions, listed on this
+page under the target. An instruction outside that set is refused with a
+diagnostic that names it. The few places where an assembler accepts an
+operand form and encodes something other than what GNU `as` would are
+stated under the target.
+
+| Target | Diagnostic for an instruction the assembler does not know |
+|---|---|
+| [x86-64](#x86-64) | `asm instruction "vzeroall" not supported` |
+| [AArch64](#aarch64) | `aarch64 inline asm: instruction 'ldxr' is not supported (in "...")` |
+| [ARM Cortex-M](#arm-cortex-m) | `asm instruction "vldr" is not in the ARMv7-M vocabulary` |
+| [RISC-V](#risc-v) | `asm instruction "amoswap.w" is not in the RISC-V vocabulary` |
+| [AVR](#avr) | `'frobnicate' is not an AVR instruction this assembler knows (assembling "...")` |
+
+The full diagnostic carries the file and the line of the `asm` statement:
+
+```text
+embcc: probe.c:1: error: asm instruction "vzeroall" not supported
+  void f(void){ __asm__("vzeroall"); }
+```
+
+On AArch64, ARM Cortex-M, RISC-V and AVR, EmbCC first substitutes the
+operands into the template text and then assembles the text with the
+same assembler that handles `.s` and `.S` files for that target (see
+[Assembly input](invoking.md#assembly-input)). On x86-64 the template is
+AT&T syntax and is read by a separate encoder that resolves each operand
+reference as it encodes the instruction; it is unrelated to the
+NASM-syntax assembler used for `.asm` files ([embas](tools/embas.md)).
+
+A template is assembled only when its function is emitted. An `asm`
+statement in a function that is never emitted, such as an unused
+`static inline` function in a header, is not assembled, and an unknown
+instruction in it is not reported.
+
+There is no `-masm=` option; x86-64 templates are AT&T syntax. The GCC
+option `-fno-asm` is not accepted (`unknown argument '-fno-asm'`).
+
+## Basic asm
+
+```text
+asm ( "TEMPLATE" ) ;
+```
+
+The keyword is spelled `asm`, `__asm__` or `__asm`. All three are
+keywords in every `-std=` mode, so `asm` cannot be used as an identifier
+even with `-std=c11`. Adjacent string literals in the template are
+concatenated.
+
+Inside a function, EmbCC treats basic asm exactly as an extended asm
+statement with no operands. In particular:
+
+- The template rules of extended asm apply. On x86-64 a hard register is
+  written `%%rax` even in basic asm; a single `%` is read as an operand
+  reference and refused with `asm: expected a %N operand in "..."`.
+- Basic asm is a compiler barrier like any other `asm` statement (see
+  [What the compiler assumes](#what-the-compiler-assumes)).
+
+Basic asm at file scope is described in [File-scope asm](#file-scope-asm).
+
+## Extended asm
+
+### Syntax
+
+```text
+asm [volatile] ( TEMPLATE
+                 [ : OUTPUTS
+                 [ : INPUTS
+                 [ : CLOBBERS ] ] ] ) ;
+```
+
+`OUTPUTS` and `INPUTS` are comma-separated lists of operands, each of the
+form
+
+```text
+[ [NAME] ] "CONSTRAINT" ( EXPRESSION )
+```
+
+and `CLOBBERS` is a comma-separated list of string literals. Any list may
+be empty, and trailing sections may be omitted. The template, every
+constraint and every clobber may be written as adjacent string literals,
+which are concatenated.
+
+Operands are numbered from 0 in the order they appear, outputs first and
+then inputs. A `+` operand is one operand and has one number.
+
+```c
+long add_named(long a, long b)
+{
+    long r;
+    __asm__("movq %[x], %[r]\n\taddq %[y], %[r]"
+            : [r] "=&r"(r)
+            : [x] "r"(a), [y] "r"(b));
+    return r;
+}
+```
+
+### Qualifiers
+
+| Qualifier | Status |
+|---|---|
+| `volatile` | Accepted, also spelled `__volatile__` and `__volatile`. It changes nothing: EmbCC treats every `asm` statement as volatile. |
+| `inline` | Not accepted in C: `expected '(' after asm before 'inline'`. |
+| `goto` | Not supported; refused with the diagnostic below. |
+
+```text
+`asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that
+```
+
+### Output operands
+
+An output constraint must begin with `=` or `+`; otherwise EmbCC reports
+`an asm output constraint must start with '=' or '+' (got "r")`. The
+expression must be an lvalue; otherwise it reports
+`an asm output operand must be an lvalue`.
+
+| Modifier | Meaning |
+|---|---|
+| `=` | The operand is written by the template. Its register holds an unspecified value when the template starts. |
+| `+` | The operand is read and written. EmbCC loads the lvalue's current value into the register before the template starts. A `+` anywhere in the constraint has this effect. |
+| `&` | Accepted and ignored. Every operand EmbCC allocates gets a register of its own, distinct from every other operand's, so an output never shares a register with an input unless both name the same fixed register. |
+
+After the template, EmbCC stores the output register into the lvalue,
+writing as many bytes as the lvalue's type has.
+
+An output must fit in one general-purpose register; on AVR it may occupy
+up to four consecutive registers. A wider output is refused on ARM
+Cortex-M, RISC-V and AVR with the diagnostics listed under each target;
+on x86-64 and AArch64 it stops the compiler with an internal error
+(`bad store size 16`, `aarch64 access size cannot encode 16`).
+
+An output constraint that contains `m` (`=m`, `+m`) is accepted, but
+EmbCC does not load the lvalue's address into the operand's register and
+stores nothing afterwards, so the template has no usable operand. Pass
+the address as an input in a register and add a `"memory"` clobber
+instead.
+
+### Input operands
+
+EmbCC evaluates each input expression and loads its value into the
+operand's register immediately before the template. On AVR an input
+occupies as many consecutive registers as its type has bytes (1, 2 or 4).
+
+An input whose constraint contains the letter `m` anywhere (`"m"`,
+`"rm"`) is passed by **address**: the register holds the address of the
+expression, and the template dereferences it. The expression must be an
+lvalue; anything else stops the compiler with an internal error
+(`address of a non-lvalue`). This differs from GCC, where `%1` of an `m`
+operand prints a memory reference. In EmbCC the template writes the
+dereference itself:
+
+| Target | Template |
+|---|---|
+| x86-64 | `movq (%1), %0` |
+| AArch64, ARM Cortex-M | `ldr %0, [%1]` |
+| RISC-V | `lw %0, 0(%1)` |
+| AVR | do not use `m`; pass a pointer with `e`, `x` or `z` and write `%a1` (see [AVR](#avr)) |
+
+On AArch64 a bare `m` is refused; `rm` is accepted and passes the
+address.
+
+The integer-constant constraints `i` and `n` behave differently per
+target. On AArch64 and AVR the constant is substituted into the template
+as a literal. On x86-64, ARM Cortex-M and RISC-V the constant is
+computed into a register like any other input, so the template uses it
+as a register operand:
+
+```c
+/* ARM Cortex-M and RISC-V: %2 is a register holding 5 */
+__asm__("add %0, %1, %2" : "=r"(r) : "r"(a), "i"(5));
+```
+
+### Clobbers
+
+A clobber names a register the template changes that is neither an
+operand nor otherwise visible to EmbCC. EmbCC never places an operand in
+a clobbered general-purpose register. List every register an instruction
+writes implicitly, for example `rcx` and `r11` for x86-64 `syscall`, so
+that no input is placed in it.
+
+`"memory"` is accepted and has no additional effect, because EmbCC
+already treats every `asm` statement as reading and writing memory.
+`"cc"` is accepted and has no effect.
+
+A clobber that does not name a general-purpose register of the target
+(a floating-point or vector register, or an unknown name) is accepted and
+ignored.
+
+A callee-saved register in the clobber list is refused on AArch64, ARM
+Cortex-M, RISC-V and AVR, and accepted without being saved on x86-64; see
+[Callee-saved registers](#callee-saved-registers).
+
+### Referring to operands in the template
+
+| Form | Meaning |
+|---|---|
+| `%N` | Operand number `N`. |
+| `%[NAME]` | The operand declared with `[NAME]`. An unknown name is refused (x86-64: `asm: unknown operand %[zz] in "..."`; other targets: `asm template names an unknown operand 'zz'`). |
+| `%%` | On x86-64, the prefix of a hard register name (`%%rax`, `%%cr3`). On the other targets, a literal `%`. |
+
+A number past the last operand is refused (x86-64:
+`asm operand %5 out of range in "..."`; other targets:
+`asm template refers to operand %5, but there are only 2`).
+
+The modifiers each target accepts between `%` and the operand are:
+
+| Modifier | Meaning | Targets |
+|---|---|---|
+| `%wN`, `%w[NAME]` | the 32-bit name of the register (`w9`) | AArch64 |
+| `%xN`, `%x[NAME]` | the 64-bit name of the register (`x9`) | AArch64 |
+| `%AN` .. `%DN` | byte 0 to 3 of a multi-register operand | AVR |
+| `%aN` | the operand as a pointer register: `X`, `Y` or `Z` | AVR |
+
+No other modifier is supported. x86-64 has none at all: GCC's `%b`,
+`%h`, `%w`, `%k` and `%q` are refused there with
+`asm: expected a %N operand in "..."`. The generic `%c`, `%n`, `%l`,
+`%P` and `%=` are refused on every target; outside x86-64 the
+diagnostic is `asm template modifier '%c' is not supported for aarch64`
+(with `ARMv7-M`, `RISC-V` or `AVR` in place of `aarch64`).
+
+A register that the template names directly (`%%rsi` on x86-64, `x0` on
+AArch64, `r0` on ARM, `a0` on RISC-V, `r24` on AVR) is never given to an
+operand.
+
+### Constraint strings
+
+EmbCC reads a constraint as a set of letters: it looks for the letters it
+knows, in a fixed order of precedence for the target, and ignores the
+others. A GCC constraint with several alternatives therefore takes the
+meaning of the first known letter by that order. The letters and their
+precedence are listed under each target.
+
+Matching constraints (a digit such as `"0"`) and flag-output constraints
+(`"=@ccz"`) are not supported on any target. A digit constraint is
+refused. Flag outputs are discussed under [x86-64](#x86-64) and
+[AArch64](#aarch64), the two targets that define
+`__GCC_ASM_FLAG_OUTPUTS__`.
+
+Whether an unsupported constraint is reported depends on the target. On
+x86-64, ARM Cortex-M and RISC-V it is reported when the function is
+checked, even if the function is never emitted. On AArch64 and AVR it is
+reported only when the `asm` statement is generated, so a GCC-style
+header with another machine's constraints in an unused `static inline`
+function compiles.
+
+### What the compiler assumes
+
+EmbCC makes the same assumptions about every `asm` statement, with or
+without `volatile` and whatever its clobbers say:
+
+- It is never deleted, even when its outputs are unused, and a loop that
+  contains one is not unrolled.
+- It may read and write any memory. Values that the code read from memory
+  before the statement are read again after it.
+- A function that contains an `asm` statement is never inlined into its
+  callers.
+- No value is kept in a register across it. Every value that is live
+  across an `asm` statement stays in memory, so the template may change
+  any caller-saved register without listing it, provided no operand is
+  placed there (see [Clobbers](#clobbers)).
+
+The operands are moved between memory and their registers around the
+template: inputs and `+` outputs are loaded immediately before it, and
+outputs are stored immediately after it.
+
+### Callee-saved registers
+
+EmbCC does not save callee-saved registers around an `asm` statement.
+Each target handles a template that would change one as follows:
+
+| Target | Callee-saved register named in the template or the clobbers | Operand placed in a callee-saved register |
+|---|---|---|
+| x86-64 | accepted; not saved | saved by the prologue at `-O2` and `-Os` only |
+| AArch64 | refused (x19 to x30) | cannot happen: neither the allocator nor a register variable uses one |
+| ARM Cortex-M | refused (r4 to r11) | never chosen by the allocator; possible through the letters `S` and `D` or a register variable (see [ARM Cortex-M](#arm-cortex-m) and [Register variables](#register-variables)); not saved |
+| RISC-V | refused (s0 to s11) | never chosen by the allocator; see [Register variables](#register-variables) |
+| AVR | refused (r2 to r17, and r28 and r29) | refused |
+
+The details and the diagnostics are under each target.
+
+## Register variables
+
+```text
+register TYPE NAME __asm__("REGISTER") [= INITIALIZER];
+```
+
+A local variable declared with an `asm` register name is placed in that
+register when, and only when, the variable itself appears as an operand
+of an `asm` statement. Everywhere else it is an ordinary local variable.
+An expression that merely contains the variable (`x + 0`) is not bound.
+The `register` keyword is optional: `long x __asm__("r10");` binds the
+same way.
+
+| Target | Names that bind | Other names |
+|---|---|---|
+| x86-64 | `rax`, `rbx`, `rcx`, `rdx`, `rsi`, `rdi`, `r8` to `r15` | ignored without a diagnostic; the operand is placed as its constraint says |
+| AArch64 | `x0` to `x11`, `x13` to `x15`, and the `w` names of the same registers | refused |
+| ARM Cortex-M | not supported (see below) | |
+| RISC-V | not supported (see below) | |
+| AVR | `r0`, `r1`, `r18` to `r27`, `r30`, `r31`, `XL`, `XH`, `ZL`, `ZH`, `X`, `Z`, `__tmp_reg__`, `__zero_reg__` | refused |
+
+On x86-64 a fixed-register constraint letter (`a`, `b`, `c`, `d`, `S`,
+`D`) takes precedence over the variable's register. Only the 64-bit
+names bind: `register int x __asm__("eax")` is ignored.
+
+On AArch64 any other name is refused with
+`register variable bound to 'x19' is not supported for aarch64 asm (use x0..x11 or x13..x15)`.
+x12 is the code generator's address scratch, x16 to x18 are the
+intra-procedure-call and platform registers, and x19 and above are
+callee-saved.
+
+On AVR a name that is not a register is refused with
+`register variable bound to 'foo' is not an AVR register`, and a
+callee-saved register or half of the frame pointer with
+`an asm operand is pinned to 'r5', which is callee-saved, and EmbCC saves nothing around an asm`.
+
+On ARM Cortex-M and RISC-V register variables are not supported, and
+EmbCC does not diagnose them. It looks the name up among the x86-64
+names above, so every RISC-V ABI name and the ARM names `r0` to `r7` are
+ignored and the operand is allocated as its constraint says. The names
+`r8` to `r15` match x86-64 names and bind to register number 8 to 15
+with no callee-saved check: on Cortex-M that is r8 to r15. To put a
+value in a particular register on these targets, move it there inside
+the template and name the register; a register the template names is
+never given to an operand:
+
+```c
+int semihost(int op, void *arg)            /* ARM Cortex-M */
+{
+    int r;
+    __asm__ volatile("mov r0, %1\n\tmov r1, %2\n\tbkpt #0xab\n\tmov %0, r0"
+                     : "=r"(r) : "r"(op), "r"(arg) : "r0", "r1", "memory");
+    return r;
+}
+```
+
+Register variables at file scope (global register variables) are not
+supported: `'register' is not supported yet (see docs/manual/c-language.md)`.
+
+## Assembler names on declarations
+
+GCC's `asm` labels, which give a declaration a different symbol name,
+are not supported in C:
+
+| Declaration | Result |
+|---|---|
+| `int foo asm("bar");` at file scope | `expected ';' before 'asm'` |
+| `int f(void) asm("g");` | `expected '{' or ';' before 'asm'` |
+| `extern int y asm("zz");` in a block | `expected ';' before 'asm'` |
+| `static int y asm("zz");` in a block | accepted; the name is ignored and the object keeps its usual symbol |
+
+In C++ they are supported; see [C++](cxx.md).
+
+## File-scope asm
+
+```text
+asm ( "TEMPLATE" ) ;
+```
+
+An `asm` block outside any function takes no qualifier and no operands.
+Each line of the template is one statement, optionally preceded by a
+label (`name:`). `#`, `;` and `/*` start a comment that runs to the end
+of the line. Registers are written with a single `%`.
+
+The assembled bytes of every block are placed in `.text` after the
+unit's functions, each block starting on a 16-byte boundary.
+
+### Directives
+
+| Directive | Effect |
+|---|---|
+| `.global NAME`, `.globl NAME` | makes the label `NAME`, defined in the same block, a global function symbol |
+| `.byte V, ...` | 1-byte values |
+| `.long V, ...` | 4-byte values |
+| `.quad V, ...` | 8-byte values; a symbol name instead of a number emits an absolute 64-bit relocation |
+| `.text`, `.data`, `.rodata`, `.bss`, `.section`, `.pushsection`, `.popsection`, `.previous` | accepted, no effect: the bytes stay in `.text` |
+| `.align`, `.balign`, `.p2align` | accepted, no effect |
+| `.local`, `.weak`, `.hidden`, `.type`, `.size` | accepted, no effect (`.weak` does not make the symbol weak) |
+| `.file`, `.loc`, `.cfi_startproc`, `.cfi_endproc`, `.cfi_def_cfa`, `.cfi_def_cfa_offset`, `.cfi_def_cfa_register`, `.cfi_offset`, `.cfi_restore`, `.cfi_sections` | accepted, no effect |
+
+Values are decimal, hexadecimal (`0x`) or octal (leading `0`). Any other
+directive is refused:
+
+```text
+file-scope asm directive not supported: ".word". EmbCC's assembler emits data with .byte/.long/.quad; an unknown directive would contribute no bytes and leave the label pointing at whatever came next
+```
+
+A symbol in `.byte` or `.long` is refused with
+`asm .byte/.long wants a number: ".byte foo" (a symbol's address is eight bytes, so name it with .quad)`.
+A `.global` that names no label in its block is refused with
+`asm .global names "ghost", which has no label`.
+
+Labels that no `.global` names are local to the block and produce no
+symbol.
+
+### Instructions
+
+On x86-64 four instructions are accepted:
+
+| Instruction | Encoding |
+|---|---|
+| `and $IMM, %REG` | 64-bit AND with a sign-extended 8-bit immediate (-128 to 127); `REG` is a 64-bit name |
+| `call SYMBOL` | `call rel32` with a relocation; `SYMBOL` may be any function |
+| `jmp LABEL` | `jmp rel32` to a label in the same block (`1b`, `1f`, or a name) |
+| `ret` | `ret` |
+
+Anything else is refused:
+
+```text
+file-scope asm instruction not supported: "push %rbx" (EmbCC assembles .global/labels/.byte/.long/.quad and and/call/jmp/ret)
+```
+
+A `jmp` to a name outside the block is refused with
+`file-scope asm jump target "nowhere" is not a local label`. A function
+that a block calls with `call` counts as used, so a `static` function
+reached only from file-scope asm is still emitted.
+
+```c
+__asm__(".global _start\n"
+        "_start:\n"
+        "  and $-16, %rsp\n"
+        "  call start_c\n"
+        "1: jmp 1b\n");
+```
+
+### Per target
+
+| Target | What a file-scope block may contain |
+|---|---|
+| x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
+| AArch64 ELF, ARM Cortex-M, RISC-V, AVR | directives and data only; an instruction is refused (below) |
+| `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
+| `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
+| `x86_64-windows-gnu` | a block with a label or a symbol reference is refused (below) |
+| C++ (any target) | refused: `file-scope asm in C++ is not supported yet` |
+
+On every target except x86-64, an instruction in a file-scope block is
+refused, whatever its mnemonic:
+
+```text
+file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
+```
+
+A block written as data (`.byte`, `.long`, `.quad`, labels and the
+directives above) assembles on these targets. On the 32-bit targets
+(Cortex-M, RV32 and AVR) `.quad SYMBOL` produces a relocation that is not
+valid for the target, and on Cortex-M a `.global` label's symbol value
+does not have bit 0 set, so it is not a valid Thumb function address.
+
+On Darwin and Windows targets the bytes of a block would be emitted
+without its symbols and relocations, so a block with any label or symbol
+reference is refused:
+
+```text
+a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped
+a file-scope asm block with labels or symbol references is not supported for a Windows target yet
+```
+
+## x86-64
+
+This section applies to every x86-64 triple, including
+`x86_64-apple-darwin` and `x86_64-windows-gnu`.
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `a` | `rax` |
+| `b` | `rbx` |
+| `c` | `rcx` |
+| `d` | `rdx` |
+| `S` | `rsi` |
+| `D` | `rdi` |
+| `r`, `q`, `g`, `R` | a general register chosen by EmbCC |
+| `i`, `n` | the constant, computed into a general register chosen by EmbCC |
+| `m` | a general register chosen by EmbCC, holding the address of the operand (inputs; see [Input operands](#input-operands)) |
+| `x` | an SSE register, `xmm0` to `xmm7` |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Precedence: a fixed letter (`a`, `b`, `c`, `d`, `S`, `D`) anywhere in the
+string wins; then a [register variable](#register-variables); then any of
+`r`, `q`, `g`, `m`, `R`, `i`, `n`; then `x`. So `"Nd"` means `rdx` and
+`"rm"` means a register holding an address.
+
+`q`, `g` and `R` do not have their GCC meanings: each is any register of
+the pool, including `r8` to `r11`. `g` never means memory or an
+immediate.
+
+A chosen register comes from `rax`, `rcx`, `rdx`, `rbx`, `rsi`, `rdi`,
+`r8`, `r9`, `r10`, `r11`, in that order, skipping registers fixed by
+another operand, listed as clobbers, or named anywhere in the template
+(`%%rsi`). When none is left EmbCC reports
+`asm: out of registers for the operands`, and for `x` operands
+`asm: out of xmm registers for the operands`.
+
+Any other letter is refused:
+
+```text
+asm constraint "=t" is not supported (EmbCC handles a/b/c/d/S/D, 'r'/'q'/'g'/'m', 'x', and a register-asm variable)
+```
+
+This includes `A`, `I`, `J`, `K`, `L`, `M`, `N` alone, `e`, `Z`, `t`,
+`u`, `f`, `y`, `Y` and `0` to `9`.
+
+**Flag outputs.** `__GCC_ASM_FLAG_OUTPUTS__` is defined, but flag-output
+constraints are not implemented and are not refused: in `"=@ccc"`,
+`"=@ccz"` and every other `=@cc` spelling, EmbCC sees the fixed letter
+`c`, and the output receives the contents of `rcx`. Compute the condition
+in the template instead, for example with `setc` into an `r` output.
+
+### Operands
+
+An operand reference names the whole register; there are no size
+modifiers. The width of an operation comes from the mnemonic (`addl`
+operates on 32 bits, `addq` and `add` on 64), and `setc` writes the low
+byte of its operand's register. Hard registers are written `%%name`.
+
+Memory operands have the form `DISP(BASE)`, where `BASE` is `%N`,
+`%[NAME]` or a 64-bit `%%register`, and `DISP` is an optional signed
+decimal or `0x` number. There is no index register, no scale, and no
+symbol. `(%N)` with a base of `rsp` or `rbp` is refused by `invlpg` and
+`movdqa` with `asm: memory base %rsp/%rbp unsupported`.
+
+Statements are separated by newlines or `;`. A template has no comment
+syntax: `#` is read as a mnemonic and refused. Mnemonics are lower case.
+
+### Instructions
+
+No operands (any operand text after the mnemonic is ignored):
+
+`cli`, `sti`, `hlt`, `nop`, `pause`, `cpuid`, `rdtsc`, `rdmsr`,
+`wrmsr`, `syscall`, `mfence`, `lfence`, `sfence`, `wbinvd`, `fninit`,
+`pushfq`, `popfq`, `iretq`, `lretq`, `stac`, `clac`.
+
+The registers these instructions read and write are fixed by the
+hardware; bind them with the fixed-register constraints (`a`, `b`, `c`,
+`d`, `S`, `D`) or register variables.
+
+| Instruction | Operands |
+|---|---|
+| `int $N` | vector 0 to 255, written as a literal |
+| `inb`, `inw`, `inl` | always `in %dx, %al` / `%ax` / `%eax`; the operand text is ignored |
+| `outb`, `outw`, `outl` | always `out %al` / `%ax` / `%eax`, `%dx`; the operand text is ignored |
+| `rdrand %N`, `rdseed %N` | 64-bit register; numbered form only |
+| `setc %N` | low byte of the register; numbered form only |
+| `sqrtsd %N, %M`, `sqrtss %N, %M` | both operands `x`; numbered forms only |
+| `push`, `pushq` | `%N`, `%[NAME]`, a 64-bit `%%register`, or `$IMM` (32-bit, sign-extended) |
+| `pop`, `popq` | `%N`, `%[NAME]` or a 64-bit `%%register` |
+| `mov`, `movq`, `movabs` | see below |
+| `add`, `or`, `and`, `sub`, `xor`, `cmp`, with suffix `q`, `l` or none | `SRC, DST` or `$IMM, DST`; registers only; any register name width is accepted, the suffix sets the operation size |
+| `leaq Nf(%%rip), %%REG` | address of local label `N:` defined in the same template (`Nb` is accepted too); `REG` is a 64-bit name |
+| `str %N`, `ltr %N` | task register |
+| `lgdt %N`, `lidt %N` | the register holds the address of the descriptor-table pointer |
+| `stmxcsr %N`, `ldmxcsr %N` | the register holds the address of the 4-byte MXCSR image |
+| `invlpg (%N)` | the register holds the address |
+| `movdqa (%N), %%xmm0`, `movdqa %%xmm0, (%N)` | `xmm0` only |
+| `N:` | defines local label `N`, used only by `leaq` |
+
+`mov`, `movq` and `movabs` always operate on 64 bits, except the two
+16-bit segment forms:
+
+| Form | Encoding |
+|---|---|
+| `mov SRC, DST`, both registers (`%N`, `%[NAME]`, 64-bit `%%register`) | 64-bit register move |
+| `mov $IMM, DST` | sign-extended 32-bit immediate when it fits, else a 64-bit immediate; `movabs` always uses the 64-bit form |
+| `mov DISP(BASE), DST` | 64-bit load |
+| `mov SRC, DISP(BASE)` | 64-bit store; `$IMM` to memory is refused with `asm: mov $imm to memory unsupported` |
+| `mov %%crN, DST`, `mov SRC, %%crN` | control register |
+| `mov %%ax, %%SEG` | segment register (`es`, `cs`, `ss`, `ds`, `fs`, `gs`) |
+| `mov $IMM, %%ax` | 16-bit immediate |
+
+There is no `movl`, `movb`, `movw`, `lea`, `xchg`, `lock`, `test`,
+`jmp`, `jcc`, `call`, `ret`, `ud2` or `int3`, and no memory operand for
+the arithmetic instructions.
+
+The port I/O instructions ignore their operands: `inb $0x60, %%al` is
+encoded as `inb %dx, %al`. Use the `"a"` and `"Nd"` (or `"d"`)
+constraints so that the value and the port are in `al` and `dx`:
+
+```c
+static inline unsigned char inb(unsigned short port)
+{
+    unsigned char v;
+    __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+
+static inline void outb(unsigned short port, unsigned char v)
+{
+    __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(port));
+}
+```
+
+A system call with six arguments:
+
+```c
+static inline long syscall6(long n, long a1, long a2, long a3,
+                            long a4, long a5, long a6)
+{
+    long ret;
+    register long r10 __asm__("r10") = a4;
+    register long r8  __asm__("r8")  = a5;
+    register long r9  __asm__("r9")  = a6;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"(n), "D"(a1), "S"(a2), "d"(a3),
+                       "r"(r10), "r"(r8), "r"(r9)
+                     : "rcx", "r11", "memory");
+    return ret;
+}
+```
+
+### Callee-saved registers on x86-64
+
+At `-O2` and `-Os` the prologue saves `rbx` and `r12` to `r15` when an
+operand is placed in one of them, whether by a constraint (`"=b"` for
+`cpuid`), a register variable, or the allocator (the fourth `r` operand
+gets `rbx` when `rax`, `rcx` and `rdx` are taken). At `-O0` and `-O1`
+nothing is saved.
+
+A callee-saved register that the template writes by name or that the
+clobber list names is not saved at any level, and EmbCC gives no
+diagnostic. On `x86_64-windows-gnu`, where `rsi` and `rdi` are also
+callee-saved, an operand placed in either is not saved. In these cases
+the template must preserve the register itself.
+
+## AArch64
+
+This section applies to every AArch64 triple, including
+`aarch64-apple-darwin`.
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `g` | a general register chosen by EmbCC |
+| `i`, `n` | an integer constant expression, substituted into the template as a decimal literal |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Precedence: a [register variable](#register-variables) wins; then, if the
+string contains `i` or `n` but neither `r` nor `g`, the operand is an
+immediate; then `r` or `g` makes it a register. `"ri"` is therefore a
+register. An `m` in a string that also contains `r` or `g` passes the
+address (see [Input operands](#input-operands)).
+
+An immediate whose expression is not a constant, and any constraint with
+none of these letters (`m`, `w`, `x`, `Q`, `I`, `K`, `0`, ...), is
+refused when the statement is generated:
+
+```text
+asm constraint "m" is not valid for aarch64
+```
+
+An output cannot be an immediate (`an asm output cannot be an immediate`).
+
+A chosen register comes from `x9`, `x10`, `x11`, `x13`, `x14`, `x15`,
+then `x0` to `x8`, skipping registers bound to another operand, listed
+as clobbers, or named in the template. When none is left EmbCC reports
+`no free register for an asm operand`.
+
+**Flag outputs.** `__GCC_ASM_FLAG_OUTPUTS__` is defined, but flag-output
+constraints are not implemented. Most spellings are refused (for example
+`asm constraint "=@cceq" is not valid for aarch64`), but `"=@ccge"` and
+`"=@ccgt"` contain `g` and are accepted as ordinary register outputs:
+the output receives a register's contents, not the condition.
+
+### Modifiers
+
+`%N` prints a register operand as `wN` when its type is 4 bytes or
+smaller and as `xN` otherwise. `%wN` and `%xN` (and `%w[NAME]`,
+`%x[NAME]`) force the 32-bit or 64-bit name. An immediate prints as its
+value; a modifier on an immediate is refused with
+`a %w modifier on an immediate asm operand makes no sense`.
+
+Instructions that need an X register reject a 4-byte operand printed as
+`w`: write `%x0`, or give the operand a 64-bit type.
+
+### Template syntax
+
+GNU AArch64 syntax. Statements are separated by `;` or newlines; `//`
+starts a comment. Mnemonics, system-register names and barrier options
+are case-insensitive. Immediates may be written with or without `#`, in
+decimal or `0x` hexadecimal. A branch target is a byte displacement from
+the start of the instruction, written `.+N`, `.-N` or as a bare number;
+labels are refused with
+`labels in aarch64 inline asm are not supported yet (in "1: nop")`.
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `nop`, `yield`, `wfe`, `wfi`, `sev`, `sevl` | none |
+| `dsb OPT`, `dmb OPT` | `sy`, `st`, `ld`, `ish`, `ishst`, `ishld`, `nsh`, `nshst`, `nshld`, `osh`, `oshst`, `oshld` |
+| `isb`, `isb sy` | none, or `sy` |
+| `mrs Xt, SYSREG` | X register only |
+| `msr SYSREG, Xt` | X register only |
+| `msr daifset, #IMM`, `msr daifclr, #IMM` | immediate mask |
+| `tlbi OP[, Xt]` | `vmalle1`, `vmalle1is` (no register); `vae1`, `vae1is`, `aside1`, `aside1is`, `vaae1`, `vaae1is`, `vale1`, `vale1is`, `vaale1`, `vaale1is` (with a register) |
+| `dc OP, Xt` | `ivac`, `isw`, `csw`, `cisw`, `zva`, `cvac`, `cvau`, `cvap`, `civac` |
+| `ic OP[, Xt]` | `ialluis`, `iallu` (no register); `ivau` (with a register) |
+| `brk`, `hvc`, `smc`, `svc` `#IMM` | 0 to 0xffff |
+| `ldr`, `str` `Rt, [Xn{, #OFF}]` | `Rt` a W, X or Q register; base an X register or `sp`; `OFF` unsigned and a multiple of the access size (4, 8, or 16 for Q) |
+| `add`, `sub` `Rd, Rn, Rm` or `Rd, Rn, #IMM` | |
+| `and`, `orr`, `eor` `Rd, Rn, Rm` | registers only |
+| `mov Rd, Rm` or `mov Rd, #IMM` | any 64-bit immediate |
+| `cmp Rn, Rm` or `cmp Rn, #IMM` | |
+| `ret`, `br Xn`, `blr Xn` | |
+| `b`, `bl`, `b.COND` `OFFSET` | `COND` one of `eq`, `ne`, `cs`, `hs`, `cc`, `lo`, `mi`, `pl`, `vs`, `vc`, `hi`, `ls`, `ge`, `lt`, `gt`, `le`; offset a multiple of 4 |
+| `cbz`, `cbnz` `Rt, OFFSET` | offset a multiple of 4 |
+| `.inst V[, V...]` | 32-bit words |
+
+`SYSREG` is one of `nzcv`, `daif`, `fpcr`, `fpsr`, `currentel`, `pan`,
+`spsel`, `sp_el0`, `spsr_el1`, `elr_el1`, `esr_el1`, `far_el1`,
+`par_el1`, `midr_el1`, `mpidr_el1`, `id_aa64pfr0_el1`,
+`id_aa64pfr1_el1`, `id_aa64isar0_el1`, `id_aa64isar1_el1`,
+`id_aa64mmfr0_el1`, `id_aa64mmfr1_el1`, `id_aa64mmfr2_el1`,
+`sctlr_el1`, `cpacr_el1`, `ttbr0_el1`, `ttbr1_el1`, `tcr_el1`,
+`mair_el1`, `vbar_el1`, `contextidr_el1`, `tpidr_el1`, `tpidr_el0`,
+`tpidrro_el0`, `cntfrq_el0`, `cntpct_el0`, `cntvct_el0`,
+`cntp_tval_el0`, `cntp_ctl_el0`, `cntp_cval_el0`, `cntv_tval_el0`,
+`cntv_ctl_el0`, `cntv_cval_el0`, `cntkctl_el1`, or the generic form
+`S<op0>_<op1>_C<n>_C<m>_<op2>` (for example `s3_0_c12_c12_5`).
+
+There are no exclusive or acquire/release loads and stores, no `ldrb`,
+`ldrh`, `ldp` or `stp`, no pre- or post-indexed addressing, no
+conditional select, no `eret`, and no floating-point or SIMD instruction
+other than `ldr`/`str` of a Q register. Use `.inst` with the encoding for
+anything else.
+
+Other assembler diagnostics name the statement, for example
+`'mrs' needs an X register, got 'w0' (in "mrs w0")` and
+`offset must be a multiple of 8 in the unsigned range (in "ldr x0")`.
+
+### Callee-saved registers on AArch64
+
+A template that names x19 to x30 (including `x29` and `x30`) is refused:
+
+```text
+aarch64 asm names callee-saved register 'x19', which EmbCC does not save around an asm
+```
+
+and the same registers in the clobber list with
+`aarch64 asm clobbers callee-saved register 'x20', which EmbCC does not save around an asm`.
+
+### Example
+
+```c
+static inline unsigned long read_cntvct(void)
+{
+    unsigned long v;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+
+static long psci_version(void)
+{
+    register long x0 __asm__("x0") = 0x84000000;     /* PSCI_VERSION */
+    register long x1 __asm__("x1") = 0;
+    register long x2 __asm__("x2") = 0;
+    register long x3 __asm__("x3") = 0;
+    __asm__ volatile("hvc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3)
+                     : "memory");
+    return x0;
+}
+
+int second(const int *p)
+{
+    int w;
+    __asm__("ldr %w0, [%1, #4]" : "=r"(w) : "r"(p));
+    return w;
+}
+```
+
+## ARM Cortex-M
+
+This section applies to every Cortex-M triple: `thumbv7m-none-eabi`,
+`thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`
+and `thumbv8m.main-none-eabihf`. All of them use the same ARMv7-M
+instruction set for inline assembly.
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `q`, `g`, `R` | a general register chosen by EmbCC |
+| `i`, `n` | the constant, computed into a general register chosen by EmbCC |
+| `m` | a general register chosen by EmbCC, holding the address of the operand (inputs) |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Constraints are read by the same rules as on x86-64. As a result the
+x86-64 letters `a`, `b`, `c`, `d`, `S` and `D` are accepted and select
+r0, r3, r1, r2, r6 and r7 respectively; r6 and r7 are callee-saved and
+are not saved. Do not use these letters. `x` is accepted and produces a
+template that does not assemble. ARM letters such as `l`, `h`, `I`, `J`,
+`K`, `L`, `M`, `Q`, `t` and `w`, alone, are refused:
+
+```text
+asm constraint "=l" is not supported (EmbCC handles a/b/c/d/S/D, 'r'/'q'/'g'/'m', 'x', and a register-asm variable)
+```
+
+A combination with `r`, such as `"Ir"`, is a register.
+
+A chosen register comes from r0, r1, r2, r3 and r12, skipping registers
+listed as clobbers or named in the template. When none is left EmbCC
+reports `no free register for an asm operand`. One of these five
+registers must also stay free for EmbCC to store the outputs; otherwise:
+
+```text
+the ARMv7-M backend cannot lower an asm with no scratch register left around it yet (function f)
+```
+
+An output wider than 4 bytes is refused:
+
+```text
+the ARMv7-M backend cannot lower an asm output wider than a register yet (function f)
+```
+
+### Modifiers
+
+None. `%N` prints the register name (`r0` to `r12`, `sp`, `lr`, `pc`).
+Any modifier is refused with
+`asm template modifier '%w' is not supported for ARMv7-M`.
+
+### Template syntax
+
+GNU ARM unified syntax. Statements are separated by `;` or newlines; `@`
+and `//` start a comment. Mnemonics are lower case and case-sensitive. A
+`.w` or `.n` suffix is accepted and ignored: EmbCC chooses the 16-bit or
+32-bit encoding itself. Registers are `r0` to `r15`, `sp`, `lr`, `pc`,
+`ip` (r12) and `fp` (r11). A branch target is a byte displacement from
+the start of the instruction, written `.+N`, `.-N` or as a bare number;
+every branch uses the 32-bit encoding. Labels are not accepted (`1:` is
+reported as an unknown instruction).
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `nop`, `yield`, `wfe`, `wfi`, `sev` | none |
+| `dsb`, `dmb`, `isb` | none, or `sy` |
+| `cpsid`, `cpsie` | `i`, `f` or `if` |
+| `mrs Rd, SPECREG`, `msr SPECREG, Rn` | `apsr`, `iapsr`, `eapsr`, `xpsr`, `ipsr`, `epsr`, `iepsr`, `msp`, `psp`, `primask`, `basepri`, `basepri_max`, `faultmask`, `control` (case-insensitive) |
+| `bkpt #IMM` | 0 to 255 |
+| `bx Rm`, `blx Rm` | |
+| `mov`, `movs` `Rd, Rm` or `Rd, #IMM` | any 32-bit immediate |
+| `movw`, `movt` `Rd, #IMM` | 0 to 0xffff |
+| `mvn`, `mvns` `Rd, Rm` | |
+| `clz`, `rbit`, `rev` `Rd, Rm` | |
+| `cmp Rn, Rm` or `Rn, #IMM`; `tst Rn, Rm` | |
+| `add`, `adds`, `sub`, `subs`, `and`, `ands`, `orr`, `orrs`, `eor`, `eors`, `bic`, `bics`, `adc`, `adcs`, `sbc`, `sbcs`, `rsb`, `rsbs` | `Rd, Rn, Rm` or `Rd, Rn, #IMM` (three operands) |
+| `lsl`, `lsls`, `lsr`, `lsrs`, `asr`, `asrs`, `ror`, `rors` | `Rd, Rn, Rm` or `Rd, Rn, #0..31` |
+| `mul Rd, Rn, Rm`, `udiv`, `sdiv` | |
+| `ldr`, `ldrb`, `ldrsb`, `ldrh`, `ldrsh`, `str`, `strb`, `strh` | `Rt, [Rn]` or `Rt, [Rn, #OFF]` |
+| `ldrex Rt, [Rn{, #OFF}]` | `OFF` a multiple of 4, 0 to 1020 |
+| `strex Rd, Rt, [Rn{, #OFF}]` | `OFF` a multiple of 4, 0 to 1020 |
+| `b`, `bl`, `beq`, `bne`, `bcs`, `bhs`, `bcc`, `blo`, `bmi`, `bpl`, `bvs`, `bvc`, `bhi`, `bls`, `bge`, `blt`, `bgt`, `ble` | `OFFSET` (even) |
+| `push`, `pop` | a register list written **without braces**: `push r0, r1` |
+
+Points that differ from the GNU assembler:
+
+- `movs` and `mvns` are encoded as `mov` and `mvn`: they do not set the
+  flags.
+- `push` and `pop` with a braced list (`push {r4, lr}`) are refused with
+  `push wants a register list`.
+- The arithmetic instructions need all three operands; the two-operand
+  form `add r0, #1` is refused.
+- A barrier option other than `sy` is refused with
+  ``only the `sy` barrier option is supported; "ish" is not``.
+
+There is no `svc`, no `it` block or conditional execution, no `cbz` or
+`cbnz`, no `ldm`, `stm`, `ldrd` or `strd`, no `clrex`, no byte or
+halfword exclusives, no extend, bit-field, multiply-accumulate or
+long-multiply instruction,
+and no floating-point instruction (`vmrs`, `vmsr`, `vldr`, ...). The
+ARMv8-M registers `msplim` and `psplim` and the ARMv8-M security
+instructions are not available on the `thumbv8m.main` triples either.
+
+### Callee-saved registers on ARM Cortex-M
+
+A template that names r4 to r11 (or `fp`) is refused:
+
+```text
+ARMv7-M asm names callee-saved register 'r4', which EmbCC does not save around an asm
+```
+
+and the same registers in the clobber list with
+`ARMv7-M asm clobbers callee-saved register 'r5', which EmbCC does not save around an asm`.
+
+### Example
+
+```c
+static inline unsigned irq_save(void)
+{
+    unsigned primask;
+    __asm__ volatile("mrs %0, primask\n\tcpsid i" : "=r"(primask) : : "memory");
+    return primask;
+}
+
+static inline void irq_restore(unsigned primask)
+{
+    __asm__ volatile("msr primask, %0" : : "r"(primask) : "memory");
+}
+
+static inline int clz32(unsigned x)
+{
+    int r;
+    __asm__("clz %0, %1" : "=r"(r) : "r"(x));
+    return r;
+}
+```
+
+## RISC-V
+
+This section applies to `riscv32-unknown-elf` and `riscv64-unknown-elf`.
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `q`, `g`, `R` | a general register chosen by EmbCC |
+| `i`, `n` | the constant, computed into a general register chosen by EmbCC |
+| `m` | a general register chosen by EmbCC, holding the address of the operand (inputs) |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Constraints are read by the same rules as on x86-64. As a result the
+x86-64 letters `a`, `b`, `c`, `d`, `S` and `D` are accepted and select
+x0 (`zero`), x3 (`gp`), x1 (`ra`), x2 (`sp`), x6 (`t1`) and x7 (`t2`)
+respectively. Do not use these letters. `x` is accepted and produces a
+template that does not assemble. RISC-V letters such as `f`, `I`, `J`,
+`K` and `A`, alone, are refused with
+`asm constraint "=f" is not supported (EmbCC handles a/b/c/d/S/D, 'r'/'q'/'g'/'m', 'x', and a register-asm variable)`.
+
+Because `i` gives a register, an instruction with an immediate field
+cannot take an `i` operand: `addi %0, %1, %2` with `"i"(5)` is refused
+with `addi wants an immediate`. Write `add %0, %1, %2`, or put the
+constant in the template text.
+
+A chosen register comes from `t0` to `t6`, then `a0` to `a7`, skipping
+registers listed as clobbers or named in the template. When none is left
+EmbCC reports `no free register for an asm operand`. An output wider
+than a register (an 8-byte type on RV32) is refused:
+
+```text
+the RV32 backend cannot lower an asm output wider than a register yet (function f)
+```
+
+### Modifiers
+
+None. `%N` prints the ABI name of the register (`t0`, `a0`, ...). Any
+modifier is refused with
+`asm template modifier '%z' is not supported for RISC-V`.
+
+### Template syntax
+
+GNU RISC-V syntax. Statements are separated by `;` or newlines; `#` and
+`//` start a comment. Mnemonics are lower case and case-sensitive.
+Registers are the ABI names (`zero`, `ra`, `sp`, `gp`, `tp`, `t0`-`t6`,
+`s0`-`s11`, `a0`-`a7`), `fp` (s0), and `x0` to `x31`. Memory operands are
+`OFF(REG)` or `(REG)` with a 12-bit signed offset. A branch or jump
+target is a byte displacement from the start of the instruction, written
+`.+N`, `.-N` or as a bare number. Labels are not accepted.
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `nop`, `ret`, `ebreak`, `unimp`, `ecall`, `mret`, `sret`, `wfi`, `fence.i` | none |
+| `fence` | none (meaning `fence iorw, iorw`), or two sets of `i`, `o`, `r`, `w` |
+| `csrr Rd, CSR` | |
+| `csrw`, `csrs`, `csrc` `CSR, Rs` | |
+| `csrrw`, `csrrs`, `csrrc` `Rd, CSR, Rs` | |
+| `csrwi`, `csrsi`, `csrci` `CSR, IMM` | `IMM` 0 to 31 |
+| `csrrwi`, `csrrsi`, `csrrci` `Rd, CSR, IMM` | `IMM` 0 to 31 |
+| `add`, `sub`, `and`, `or`, `xor`, `slt`, `sltu` `Rd, Rs1, Rs2` | |
+| `addi`, `andi`, `ori`, `xori`, `slti`, `sltiu` `Rd, Rs1, IMM` | 12-bit signed |
+| `sll`, `srl`, `sra` `Rd, Rs1, Rs2`; `slli`, `srli`, `srai` `Rd, Rs1, SHAMT` | `SHAMT` 0 to XLEN-1 |
+| `mul`, `mulh`, `mulhsu`, `mulhu`, `div`, `divu`, `rem`, `remu` | three registers |
+| `lb`, `lbu`, `lh`, `lhu`, `lw`, `sb`, `sh`, `sw` | `Rt, OFF(Rs)` |
+| `beq`, `bne`, `blt`, `bge`, `bltu`, `bgeu` `Rs1, Rs2, OFFSET` | even, within 4 KiB |
+| `beqz`, `bnez`, `bltz`, `bgez`, `blez`, `bgtz` `Rs, OFFSET` | even, within 4 KiB |
+| `j OFFSET`, `jal [Rd,] OFFSET` | even, within 1 MiB |
+| `jr Rs`, `jalr Rs`, `jalr Rd, Rs`, `jalr Rd, OFF(Rs)` | |
+| `lui`, `auipc` `Rd, IMM` | 20-bit |
+| `li Rd, IMM` | any constant; expanded to the instruction sequence the code generator uses |
+| `mv`, `not`, `neg`, `seqz`, `snez` `Rd, Rs` | |
+
+RV64 only: `addw`, `subw`, `addiw`, `sllw`, `srlw`, `sraw`, `slliw`,
+`srliw`, `sraiw`, `mulw`, `divw`, `divuw`, `remw`, `remuw`, `ld`, `sd`,
+`negw`, `sext.w`, `lwu`. At RV32 most of them are refused, for example
+with `ld is an RV64 instruction and this is RV32`. Three are not: `negw`
+and `sext.w` are encoded with their RV64 opcodes, which an RV32 core does
+not implement, and `lwu` is encoded as `lw`.
+
+`CSR` is a name from the table below, or a number from 0 to 0xfff.
+
+| Group | CSRs |
+|---|---|
+| Machine information | `mvendorid`, `marchid`, `mimpid`, `mhartid` |
+| Machine trap setup | `mstatus`, `misa`, `medeleg`, `mideleg`, `mie`, `mtvec`, `mcounteren` |
+| Machine trap handling | `mscratch`, `mepc`, `mcause`, `mtval`, `mip` |
+| Memory protection | `pmpcfg0`, `pmpcfg1` (RV32 only), `pmpaddr0`, `pmpaddr1` |
+| Supervisor | `sstatus`, `sie`, `stvec`, `scounteren`, `sscratch`, `sepc`, `scause`, `stval`, `sip`, `satp` |
+| Counters | `cycle`, `time`, `instret`, and `cycleh`, `timeh`, `instreth` (RV32 only) |
+
+An RV32-only CSR at RV64 is refused with `CSR "cycleh" exists only on RV32`,
+and an unknown name or a number out of range with
+`"mfoo" is not a CSR this assembler knows`.
+
+There are no atomic instructions (`lr`, `sc`, `amo*`), no compressed
+instructions written explicitly (`c.*`), no floating-point instructions,
+no `la`, `call` or `tail`, no `rdcycle`/`rdtime`/`rdinstret` (use
+`csrr`), and no two-register `bgt`, `ble`, `bgtu` or `bleu`.
+
+### Callee-saved registers on RISC-V
+
+A template that names s0 to s11 (or `fp`) is refused:
+
+```text
+RISC-V asm names callee-saved register 's1', which EmbCC does not save around an asm
+```
+
+and the same registers in the clobber list with
+`RISC-V asm clobbers callee-saved register 's2', which EmbCC does not save around an asm`.
+
+### Example
+
+```c
+static inline unsigned long hart_id(void)
+{
+    unsigned long id;
+    __asm__ volatile("csrr %0, mhartid" : "=r"(id));
+    return id;
+}
+
+static inline unsigned long irq_save(void)
+{
+    unsigned long m;
+    __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(m) : : "memory");
+    return m;
+}
+
+static inline void irq_restore(unsigned long m)
+{
+    __asm__ volatile("csrw mstatus, %0" : : "r"(m) : "memory");
+}
+
+long sbi_call(long ext, long fid, long arg0)
+{
+    long r;
+    __asm__ volatile("mv a7, %1\n\tmv a6, %2\n\tmv a0, %3\n\tecall\n\tmv %0, a0"
+                     : "=r"(r) : "r"(ext), "r"(fid), "r"(arg0)
+                     : "a0", "a1", "a6", "a7", "memory");
+    return r;
+}
+```
+
+## AVR
+
+This section applies to the `avr` target (ATmega328P).
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `g`, `q` | registers chosen by EmbCC from the pool below |
+| `m` | registers chosen by EmbCC, holding the address of the operand; see below |
+| `d` | registers chosen from r16 to r31 (the registers `ldi`, `subi`, `andi`, `cpi` reach) |
+| `a` | registers chosen from r16 to r23 |
+| `w` | the pair r24, r26 or r30 (the pairs `adiw` and `sbiw` reach, except Y) |
+| `e` | the pointer pair X (r26) or Z (r30) |
+| `b` | the pointer pair Z (r30) |
+| `x` | X (r26:r27) |
+| `z` | Z (r30:r31) |
+| `i`, `n`, `I`, `J`, `K`, `L`, `M`, `N`, `O`, `P`, `R` | an integer constant expression, substituted into the template as a decimal literal |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Precedence: a [register variable](#register-variables) wins; then `x`,
+`y` or `z`; then the class letters (`r`, `g`, `d`, `a`, `w`, `e`, `b`,
+`q`, `m`); then the constant letters. When a string holds several class
+letters, a register is accepted if any one of them accepts it, so a
+string containing `r`, `g`, `q` or `m` accepts every register of the
+pool. The constant letters only require a constant; its range is checked
+by the instruction that uses it (`adiw: 100 is outside 0..63`).
+
+`y` is refused, because Y is the frame pointer:
+
+```text
+an asm operand is pinned to 'r28', which is half of Y, the frame pointer this function reaches its own locals through
+```
+
+`q` does not mean the stack pointer: it is treated like `r`.
+
+Do not use `m` on AVR. The operand receives as many registers as the
+expression's type has bytes, but the address loaded into them is two
+bytes, so for a 1-byte object the address overwrites the next register,
+which may belong to another operand. The operand is also not
+necessarily placed in a pointer pair. To read or write through a
+pointer, pass the pointer with `e`, `x` or `z` and write `%a`.
+
+A constant letter with an expression that is not constant, and any other
+letter, is refused when the statement is generated:
+`asm constraint "S" is not valid for AVR`.
+
+An operand occupies as many consecutive registers as its type has bytes,
+starting on an even register when it is wider than one byte. Registers
+are chosen from r18 to r27, r30 and r31, skipping registers bound to
+another operand, listed as clobbers, or named in the template. An
+operand wider than 4 bytes is refused with
+`an asm operand of 8 bytes needs 8 consecutive registers, which is more than this backend keeps free across an asm`,
+and an exhausted class with
+`no register satisfying "d" is free for an asm operand of 2 bytes`.
+
+### Modifiers
+
+| Form | Register operand | Immediate operand |
+|---|---|---|
+| `%N` | the lowest register (`r24`) | the value |
+| `%AN` | byte 0: the lowest register | the whole value |
+| `%BN` | byte 1: the next register up | bits 8 to 15 |
+| `%CN` | byte 2 | bits 16 to 23 |
+| `%DN` | byte 3 | bits 24 to 31 |
+| `%aN` | the pair as a pointer: `X`, `Y` or `Z` | |
+
+The named forms (`%A[NAME]`, `%a[NAME]`, ...) work the same way. `%a` on
+an operand that is not in X, Y or Z is refused:
+
+```text
+%a names operand %1 as a pointer, but it is in r19 -- only X, Y and Z address memory, which is what the "e" and "b" constraints are for
+```
+
+Any other modifier is refused with
+`asm template modifier '%E' is not supported for AVR (%A..%D name the bytes of a wider operand)`.
+
+For the low byte of an immediate use `lo8()`, since `%A` prints the whole
+value: `ldi %A0, lo8(%1)` and `ldi %B0, hi8(%1)`.
+
+### Template syntax
+
+GNU AVR syntax. Statements are separated by **newlines only**: on AVR
+`;` starts a comment, as do `#` at the start of a statement and `//`.
+Mnemonics are case-insensitive.
+
+Registers are `r0` to `r31`, `XL`, `XH`, `YL`, `YH`, `ZL`, `ZH`, the
+pointer pairs `X`, `Y`, `Z` (with `+`, `-` and `Y+q`/`Z+q` forms), and
+`__tmp_reg__` (r0) and `__zero_reg__` (r1). `__SREG__`, `__SP_L__` and
+the other avr-libc I/O names are not known; write the I/O address
+(`0x3f` for SREG).
+
+Operands may be constant expressions with `+ - * / % & | ^ ~ ! << >>`,
+parentheses, character constants, and `lo8()`, `hi8()`, `hlo8()`,
+`hh8()`, `pm_lo8()`, `pm_hi8()`, `pm_hh8()` and `gs()` applied to
+constants. A symbol name is not accepted in an inline template
+(`'buf)' is not a number, a register or an expression this assembler knows`).
+
+The target of a relative branch (`br...`, `rjmp`, `rcall`) must be
+written relative to `.`, the address of the start of the instruction
+(`brne .-4`); a bare number is refused with
+``rjmp needs a target written relative to `.` (a label, or `.+4`); ...``.
+`jmp` and `call` take an absolute, even byte address written as a
+number; a `.`-relative target is refused for them. Labels are not
+accepted.
+
+### Instructions
+
+The whole AVR5 instruction set:
+
+| Group | Instructions |
+|---|---|
+| Two registers | `add`, `adc`, `sub`, `sbc`, `and`, `or`, `eor`, `mov`, `cp`, `cpc`, `cpse`, `mul`, `movw` |
+| One register written twice | `clr`, `tst`, `lsl`, `rol` |
+| Signed and fractional multiply | `muls`, `mulsu`, `fmul`, `fmuls`, `fmulsu` |
+| Register and immediate | `subi`, `sbci`, `andi`, `ori`, `cpi`, `ldi`, `ser` |
+| One register | `com`, `neg`, `swap`, `inc`, `asr`, `lsr`, `ror`, `dec`, `push`, `pop` |
+| Word | `adiw`, `sbiw` |
+| Memory | `ld`, `st`, `ldd`, `std`, `lds`, `sts`, `lpm`, `elpm` |
+| I/O | `in`, `out`, `cbi`, `sbi`, `sbic`, `sbis` |
+| Register bits | `bld`, `bst`, `sbrc`, `sbrs` |
+| Branches | `brcs`, `brlo`, `brcc`, `brsh`, `breq`, `brne`, `brmi`, `brpl`, `brlt`, `brge`, `brvs`, `brvc`, `brhs`, `brhc`, `brts`, `brtc`, `brie`, `brid`, `brbs`, `brbc` |
+| Jumps and calls | `rjmp`, `rcall`, `jmp`, `call`, `ijmp`, `icall`, `eijmp`, `eicall` |
+| Status register | `sec`, `clc`, `sez`, `clz`, `sen`, `cln`, `sev`, `clv`, `ses`, `cls`, `seh`, `clh`, `set`, `clt`, `sei`, `cli`, `bset`, `bclr` |
+| No operands | `ret`, `reti`, `nop`, `sleep`, `wdr`, `break`, `spm` |
+
+`elpm`, `eijmp`, `eicall` and `spm` are encoded although the ATmega328P
+does not implement them all. The XMEGA instructions `xch`, `las`, `lac`,
+`lat` and `des` are refused with
+`xch is an AVR instruction this assembler does not implement yet (it is XMEGA-only or a cryptographic accelerator); ...`.
+
+### Reserved registers on AVR
+
+A template, a clobber or an operand that names r2 to r17 (callee-saved)
+or r28, r29 or `Y` (the frame pointer) is refused:
+
+```text
+AVR asm names register 'r28', which is half of Y, the frame pointer this function reaches its own locals through
+AVR asm clobbers register 'r5', which is callee-saved, and EmbCC saves nothing around an asm
+```
+
+r0 and r1 may be used. r1 is the zero register: a template that changes
+it, for example with `mul`, must clear it again (`clr r1`) before it
+ends. EmbCC does not check this.
+
+### Example
+
+```c
+static inline unsigned char irq_save(void)
+{
+    unsigned char sreg;
+    __asm__ volatile("in %0, 0x3f\n\tcli" : "=r"(sreg) : : "memory");
+    return sreg;
+}
+
+static inline void irq_restore(unsigned char sreg)
+{
+    __asm__ volatile("out 0x3f, %0" : : "r"(sreg) : "memory");
+}
+
+unsigned int mul8(unsigned char a, unsigned char b)
+{
+    unsigned int r;
+    __asm__("mul %1, %2\n\tmovw %0, r0\n\tclr r1" : "=r"(r) : "r"(a), "r"(b));
+    return r;
+}
+
+unsigned int swap16(unsigned int v)
+{
+    unsigned int r;
+    __asm__("mov %A0, %B1\n\tmov %B0, %A1" : "=r"(r) : "r"(v));
+    return r;
+}
+
+unsigned char next_byte(const unsigned char **pp)
+{
+    const unsigned char *p = *pp;
+    unsigned char c;
+    __asm__("ld %0, %a1+" : "=r"(c), "+e"(p));
+    *pp = p;
+    return c;
+}
+```
+
+## Limitations
+
+In summary, compared with GCC:
+
+- Only the instructions listed for each target can appear in a template,
+  and a function template cannot refer to a symbol on any target.
+- `asm goto`, `asm inline`, matching constraints (`"0"`) and flag-output
+  constraints are not supported. Flag outputs are not always refused
+  (see [x86-64](#x86-64) and [AArch64](#aarch64)).
+- `m` outputs do not work, and `m` inputs are a register holding the
+  address rather than a memory reference.
+- On x86-64, ARM Cortex-M and RISC-V, `i` and `n` give a register, not
+  an immediate.
+- Labels inside a function template are supported only for the x86-64
+  `leaq Nf(%%rip)` form; elsewhere branches use numeric displacements.
+- Register variables are not supported on ARM Cortex-M and RISC-V, are
+  limited to x0-x11 and x13-x15 on AArch64, and are not supported at
+  file scope on any target.
+- Assembler names on C declarations are not supported.
+- File-scope asm accepts data and a few directives on every target, and
+  four instructions on x86-64 only; section and alignment directives
+  have no effect.
+- On x86-64, a callee-saved register that a template changes is saved
+  only when it holds an operand and the optimization level is `-O2` or
+  `-Os`.
+- Every `asm` statement is volatile, a memory barrier, and prevents
+  inlining of its function.

@@ -170,7 +170,7 @@ EOF
     echo "the offset test did not link:"; head -3 "$out/off.lerr"; exit 1; }
 llvm-objcopy -O binary --only-section=.text "$out/off.elf" "$out/off.bin"
 # llvm-mc -disassemble rather than llvm-objdump, which prints ldd/std
-# displacements wrong on this target (see docs/design/decisions.md D-018).
+# displacements wrong on this target.
 xxd -p "$out/off.bin" | tr -d '\n' | sed 's/\(..\)/0x\1 /g' |
     llvm-mc -triple=avr -mcpu=atmega328p -disassemble 2>/dev/null |
     grep -v '^[[:space:]]*\.' | head -7 | sed 's/^[[:space:]]*//' > "$out/off.got"

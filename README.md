@@ -1,233 +1,79 @@
-# EmbCC — a native C compiler for EmbLinkOS
+# EmbCC
 
-**Status: the toolchain is real and has built the OS.** EmbCC compiles
-*itself* (the self-hosting fixed point holds), and the EmbLinkOS **kernel** —
-89 C translation units through `embcc`, 6 hand-written `.asm` through `embas`,
-linked by `embld` — built and **booted to the home desktop** with no gcc, no
-nasm and no `ld` anywhere in the loop. The kernel has kept growing since —
-165 C units and 6 `.asm` today — and the whole of it still builds from its
-EmbBuild manifest with EmbCC alone and boots
-(`tests/golden/x86_64/embbuild-kernel.sh`).
+EmbCC is a C and C++ compiler with its own preprocessor, assemblers,
+linker (`embld`) and debugger (`embdbg`). One `embcc` process
+preprocesses, compiles and assembles, and links x86-64 ELF programs; it
+starts no other program. EmbCC is written in C99, compiles its own
+sources, and runs on macOS and Linux. Its primary target is EmbLinkOS on
+x86-64.
 
-**EmbCC now emits for two machines.** EmbLinkOS became two architectures when
-its aarch64 campaign closed (`myos/docs/ARM64.md`), and `--target=aarch64-elf`
-answers it: one binary, two backends, chosen at run time (D-011). The whole
-test corpus compiles for aarch64 and RUNS on it under `qemu-system-aarch64`,
-agreeing with gcc's build of every program, and **all 131 C files in the
-EmbLinkOS ARM kernel build compile** — see "Where aarch64 stands" below.
+## Targets
 
-`embcc -c` compiles C11 to genuine relocatable objects for either machine,
-cross-checked against gcc on every test: the integer and floating types
-(`long double` and `_Complex` included), VLAs, pointers (incl.
-function pointers), arrays, structs/unions/enums, bitfields, globals, the full
-operator and statement set, C11 (`_Alignof`/`_Alignas`/`_Atomic`/`_Generic`/
-`_Static_assert`), and the GNU extensions the kernel needs — statement
-expressions, computed `goto`, `typeof`, `__attribute__`, `__builtin_*`, and a
-real inline-asm assembler. Its preprocessor digests **real newlib headers**, so
-`#include <stdio.h>` compiles, links and runs.
+| Target | `--target=` | Output |
+|---|---|---|
+| x86-64, bare metal and EmbLinkOS | `x86_64-elf` (the default), `x86_64-emblink` | ELF64 objects and executables; `embld --embx` writes EmbLinkOS images |
+| x86-64 Linux | `x86_64-linux-gnu` | static ELF64 executables on EmbCC's own C library |
+| AArch64, bare metal, EmbLinkOS and Linux | `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | ELF64 objects, linked with another toolchain's linker |
+| ARM Cortex-M | `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 objects, linked by `embld` |
+| RISC-V | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF objects, linked by `embld` |
+| AVR (ATmega328P) | `avr` | ELF32 objects, linked by `embld` |
+| macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` | Mach-O objects for the system linker |
+| Windows | `x86_64-windows-gnu` | COFF objects, not yet compatible with the Microsoft x64 ABI |
 
-It has a genuine optimizer (`-O1`/`-O2`: SSA mem2reg, inlining, SCCP,
-dominator-scoped global CSE, redundant-load elimination, strength reduction, and
-a Chaitin-Briggs register allocator), clang-style caret diagnostics, and DWARF-4
-debug info (`-g`) that our own **EmbDBG** reads back. **EmbLD** links, emitting
-ET_EXEC ELF and the native **EMBX**; `embread` verifies EMBX images; **EmbAS**
-assembles NASM/Intel source byte-identically to nasm.
+C is supported on every target. C++ is supported on the x86-64 and
+AArch64 targets; Cortex-M, RISC-V and AVR are C only. An unknown
+`--target=` lists every triple EmbCC accepts. Each target's ABI, options
+and limitations are in [Targets](docs/manual/targets.md) and
+[Status](docs/internals/status.md).
 
-The decision record below still governs.
+## Building
 
-**On test counts.** Both suites RUN what EmbCC compiles, on the architecture
-it was compiled for: aarch64 on `qemu-system-aarch64 -M virt`, and x86-64
-either natively (on a Linux x86-64 host) or as a Multiboot image on
-`qemu-system-x86_64` (anywhere else) — see [tests/harness/](tests/harness/).
-`make test` and `make test-arm64` both pass in full on the Apple Silicon
-development machine. A test that cannot run on a host says SKIP and why; it is
-never counted as a pass (that is how 23 golden tests "passed" here for a while
-while proving nothing — and how a stale build manifest went unnoticed).
-
-The differential tests are the ones that carry the weight: every exec program
-built by EmbCC and by the target's gcc and run, with exit codes and output
-compared (`agrees-with-gcc`, and again at `-O1` and `-O2`), and the cross-ABI
-tests that link an EmbCC half with a gcc half. `tools/x86-identity.sh`
-additionally requires x86-64 objects to be byte-identical to a baseline
-revision, so a change to shared code proves what it did to the x86 backend.
-
-## Where it stands next to TCC
-
-EmbLinkOS also hosts **TCC** (with four local patches), and TCC remains what the
-OS ships by default: it works, it builds real C on the metal, and nothing is
-being ripped out on a schedule.
-
-What has changed is that EmbCC is no longer the speculative half of that pair.
-It clears walls TCC does not — it compiles the **kernel**, it emits the native
-**EMBX** format with a declared capability table, it produces debug info, and it
-optimizes. Adoption remains what it always was: a one-line change in an EmbBuild
-manifest, made when a concrete need makes it the better tool (DECISIONS D-006),
-not because we wrote it.
-
-EmbCC still develops in its own repository on its own clock (D-001), so the OS
-stays shippable and honest while the compiler moves.
-
-## Why it exists
-
-An OS is defined by the code that owns the machine and its contracts, and all of
-that is already EmbLinkOS's own. Building it with gcc/TCC/ELF no more dilutes
-that ownership than writing the kernel in C does — tools are leverage, not
-authorship.
-
-But there is a rarer form: the closed, self-consistent loop where language,
-compiler, format, loader, and OS are one thing, beholden to nothing external.
-Oberon did it. TempleOS did it. EmbCC is a deliberate step toward that loop.
-
-Note the tension honestly: this points *opposite* to EmbLinkOS's ports story
-(git, CPython, C++, TCC — "meet the existing software world on its own terms and
-refuse to fake it"). One soul says *host the world*, the other *own the stack*.
-Both are legitimate; EmbCC is the second, entered with eyes open. See
-[docs/design/vision-first.md](docs/design/vision-first.md).
-
-## The shape of the plan
-
-- **A C compiler, not a new language.** Compiling C to the EmbLink ABI made
-  every increment testable *on the OS* from the day it could emit a valid
-  object. A language of our own is not planned (D-008); C++ is the one intended
-  second language.
-- **Both ELF and EMBX, today.** ELF linked against newlib is the shape the
-  in-kernel loader binds (there is no `ld.so`; **the kernel is the linker**) and
-  the substrate for porting foreign source. The *native* target (DECISIONS
-  D-003/D-009) is **EMBX**, EmbLinkOS's own capability-carrying format
-  (`myos/docs/EMBX_Specification_v2.md`, byte-exact, working loader), linked
-  against **emlibc**, the OS's own non-POSIX libc
-  (`myos/docs/EMLIBC_Requirements.md`). ELF stays as the porting lane — a dual
-  *loader*, not a converter, mirroring EMBKFS-native-plus-FAT32 for disks. The
-  earlier "ELF superset only" plan was **revised** once the capability model
-  landed and the OS's author chose to own the format; D-003 records why.
-- **The milestones are loops.** EmbCC compiles a program the OS runs (exit 42
-  — M1, closed); then EmbCC compiles *itself* (M3, closed); then EmbBuild builds
-  EmbCC from `/data/src` on the OS (M4 — the manifest exists and builds it on
-  the host; running it on the metal is the open step). Each is the self-hosting
-  loop, one ring deeper.
-
-## Documents
-
-**[docs/README.md](docs/README.md) is the index** — the tree is laid out as
-the specification's §31 asks (`architecture/`, `language/`, `ir/`, `tools/`,
-`developer/`, `design/`), and that page says where everything is and where
-it deliberately differs.
-
-| Doc | What it is |
-|---|---|
-| [docs/design/vision.md](docs/design/vision.md) | **The specification.** What EmbCC is, the invariants it never breaks, and what is and is not built |
-| [docs/ir/specification.md](docs/ir/specification.md) | EmbIR: the form, its textual syntax, provenance, and the round-trip |
-| [docs/design/vision-first.md](docs/design/vision-first.md) | Why a native compiler; the ownership thesis; the own-the-stack vs host-the-world tension |
-| [docs/design/vision-longterm.md](docs/design/vision-longterm.md) | The horizon past the named milestones: C++, deeper analysis, compiler services — gated by D-006. Optimization and diagnostics have since landed off this list; see `src/opt`, `src/arch`, `src/driver/util.c` |
-| [docs/design/decisions.md](docs/design/decisions.md) | Decisions already made, each with its rationale (ADR-style) |
-| [docs/architecture/abi.md](docs/architecture/abi.md) | **The grounding doc.** The exact EmbLinkOS contract EmbCC must emit — syscalls, crt0, and the precise ELF the in-kernel loader accepts |
-| [docs/architecture/overview.md](docs/architecture/overview.md) | Intended compiler structure and phases |
-| [docs/design/roadmap.md](docs/design/roadmap.md) | Milestones M0–M4, each with a concrete acceptance test, and what is open past them |
-| [docs/language/compatibility.md](docs/language/compatibility.md) | **What works on which architecture** — types, language, ABI, tools, EmbLinkOS status and test coverage, x86-64 against aarch64 |
-| [docs/tools/embcc.md](docs/tools/embcc.md) | The `embcc`/`embas`/`embld`/`embdbg` CLI reference |
-| [tests/harness/](tests/harness/) | The aarch64 proving ground: a bare-metal QEMU `virt` image with an ARM-semihosting syscall floor, so compiled code is RUN on the architecture it was compiled for |
-| [docs/developer/todo.md](docs/developer/todo.md) | The evidence-backed completeness audit: what C we do not yet compile, ranked by a real corpus |
-| [docs/developer/gaps-vs-gcc-clang.md](docs/developer/gaps-vs-gcc-clang.md) | Where we stand against GCC and Clang, measured against their own option and builtin tables. 1.39x Clang's code size on real sources; the gap is the driver surface, not codegen |
-| [docs/design/workplan.md](docs/design/workplan.md) | The team's three streams (core, linker, proving ground), what each is working on now, and the process that keeps them off each other's critical path |
-| [docs/tools/embdbg.md](docs/tools/embdbg.md) | Producer-side debug-info requirements + the DWARF-bridge decision (D-010); the byte format & kernel contract live OS-side in `myos/docs/EMBDBG_Specification.md` |
-| [src/embx/embx.h](src/embx/embx.h) | The EMBX container, byte-exact — mirrors the kernel's loader header; written by EmbLD, read by `embread` |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | The discipline inherited from EmbLinkOS (prove on the host, selftest the invariant, THE RULE) |
-
-## Where to start reading
-
-For the *why*, read [docs/design/vision-first.md](docs/design/vision-first.md), then
-[docs/design/decisions.md](docs/design/decisions.md) — the arguments are settled there, with
-their reopen conditions.
-
-For the *how*, read [docs/architecture/overview.md](docs/architecture/overview.md) for the phase
-structure, then [docs/architecture/abi.md](docs/architecture/abi.md), which is the grounding
-doc: the exact contract the OS enforces, and the expensive facts that cost a
-debugging session each.
-
-The source is laid out by phase, with the machine confined to one place:
-`src/lex`, `cpp`, `parse`, `sema`, `ir`, `opt`, `debug`, `elf`, `driver` never
-name a target; everything that does is under `src/arch/` — shared pieces at
-its top, then [`src/arch/x86_64/`](src/arch/x86_64/README.md) and
-[`src/arch/aarch64/`](src/arch/aarch64/README.md), each with its backend,
-encoder, share of IR generation (`va_arg`, inline asm) and predefined macros
-([src/arch/README.md](src/arch/README.md)). The tests follow suit:
-`tests/golden/` runs for both targets, `tests/golden/<arch>/` for one.
-
-To build and run it:
+EmbCC needs a C99 compiler (`cc`, or set `CC=`) and GNU `make`:
 
 ```sh
-make && make embdbg     # embdbg is not in `all`, and the golden tests need it
-make test               # x86-64: compiles AND runs, natively or under qemu-system-x86_64
-make test-arm64         # aarch64: compiles AND runs, under qemu-system-aarch64
+make embcc     # the compiler, ./embcc
+make all       # embcc, embread, embld, embas, embls and embidx
+make embdbg    # the debugger, which is not part of all
+make check     # compile and run every program in tests/exec and tests/cxx
 ```
 
-`make test-arm64` needs `aarch64-elf-gcc`, `qemu-system-aarch64`, and an
-aarch64 newlib (`EMBCC_AARCH64_NEWLIB`, default `~/cross/newlib-aarch64-c99`).
-It links each test into a bare-metal image and runs it on QEMU's `virt`
-machine — the same machine EmbLinkOS itself targets — with ARM semihosting
-carrying stdout and the exit status back to the host. See
-[tests/harness/aarch64/](tests/harness/aarch64/).
+Name a target: plain `make` builds only one object and leaves `./embcc`
+as it was. The libraries, `make install`, the test suites and the tools
+each needs are described in
+[Getting started](docs/manual/getting-started.md).
 
-Then [docs/tools/embcc.md](docs/tools/embcc.md) for the CLI.
+## Example
 
-## Where aarch64 stands
+```c
+#include <stdio.h>
 
-The feature-by-feature comparison with x86-64 is
-[docs/language/compatibility.md](docs/language/compatibility.md). In short, working and proven
-by running it: the integer and floating types, pointers,
-arrays, structs and unions by value (AAPCS64 — including the composite-return
-rules and the hidden `x8` pointer), the full operator and statement set,
-globals, string literals, computed `goto`, calls both direct and through
-function pointers, and **extended inline asm**. `--target=aarch64-elf`
-produces real `EM_AARCH64` ET_REL objects with `R_AARCH64_CALL26` /
-`ADR_PREL_PG_HI21` / `ADD_ABS_LO12_NC` / `ABS64` relocations that
-`aarch64-elf-ld` links against stock newlib.
+int main(void)
+{
+    printf("hello, world\n");
+    return 0;
+}
+```
 
-The inline-asm assembler (`src/arch/aarch64/asm.c`) covers exactly the
-vocabulary the ARM kernel uses, measured rather than guessed — 67 distinct
-templates collected by preprocessing every C file the aarch64 kernel build
-compiles: `mrs`/`msr` over 41 named system registers plus the generic
-`S<op0>_<op1>_C<n>_C<m>_<op2>` form, `msr daifset/daifclr`, the barriers and
-hints, `tlbi`, `hvc`/`smc`/`brk`, `ldr`/`str` (including `q` registers) and
-`.inst`. Every encoding is refereed against `aarch64-elf-as`; the kernel's own
-PSCI call — register variables `x0`–`x3`, a `"+r"` operand, `hvc #0` — runs
-under QEMU and returns what gcc's build returns.
+On an Apple silicon Mac, EmbCC compiles `hello.c` and the system linker
+links it:
 
-**The ARM kernel: all 131 C files compile.** The atomics (`ldxr`/`stxr`
-retry loops between barriers), `va_start`/`va_arg` over AAPCS64's register
-save areas, Homogeneous Floating-point Aggregates in `v` registers, and
-composites over 16 bytes passed by reference (stage B.3) are all in, each
-checked against gcc's own code by the cross-ABI tests — EmbCC calling gcc,
-gcc calling EmbCC, and a `va_list` handed across the line in both directions.
+```sh
+./embcc --target=aarch64-apple-darwin -O2 -c hello.c -o hello.o
+cc hello.o -o hello
+./hello
+```
 
-`-g` works on aarch64 as on x86-64 — DWARF lines, and variable locations off
-x29 — and a real gdb debugs the program running in QEMU on both targets
-(`tests/golden/debug-live.sh`).
+On Linux x86-64, `make libc-linux-x86_64` builds the C library, and
+`./embcc --target=x86_64-linux-gnu -O2 hello.c -o hello` compiles and
+links a static executable in one step. The file is written without
+execute permission; run `chmod +x hello` before `./hello`. Cross builds
+for the boards are in [Getting started](docs/manual/getting-started.md).
 
-VLAs, `long double` (IEEE binary128 through libgcc, as gcc does) and
-`_Complex` work here as on x86-64, each checked against gcc across the call
-boundary.
+## Documentation
 
-The backend is also naive where the x86 one is not: no slot coalescing, no
-residency cache, no register allocator, so frames are wider and the code is
-longer. That is the same order the x86 backend was built in (D-005), not an
-oversight.
-
-## What's next
-
-- **C itself is covered on both targets.** The last gaps closed in
-  September 2026: variable-length arrays, `long double` (x87 80-bit extended
-  on x86-64, IEEE binary128 through libgcc on aarch64, constants bit for bit
-  as gcc's) and `_Complex` (float, double and long double, gcc-compatible
-  across the call boundary, newlib's `<complex.h>` included). What remains
-  refused is listed in `docs/tools/embcc.md` — GNU extensions like integer
-  `_Complex`, and a few seams such as `va_arg` of a struct.
-- **M4's OS half** — ship the source and `build.ebm` to `/data/src/embcc/`, run
-  the OS's own EmbBuild on it, and have that on-OS-built EmbCC compile the M1
-  program to exit 42. The manifest and a host reference walker already exist;
-  what remains is orchestration on the metal. This is the total loop, and the
-  last named milestone.
-- **The kernel, through EmbBuild on the OS** — the same step for the bigger
-  prize; the two blockers (an on-OS assembler, `kernel_end`) are closed.
-- **Past that, only if earned** (D-006): C++ as the second language (D-008),
-  `__thread`/TLS, and dynamic-linking output. Candidates, not commitments.
+- [docs/README.md](docs/README.md): the index of the manual and the
+  internals reference.
+- [Getting started](docs/manual/getting-started.md): building,
+  installing, first programs and cross builds.
+- [Contributing](docs/internals/contributing.md): the rules for changing
+  EmbCC, the code style, commit messages and the tests a change needs.

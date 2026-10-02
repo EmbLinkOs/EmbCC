@@ -74,7 +74,7 @@ static void print_version(void)
            "Microsoft x64 convention, but nothing has been executed there "
            "yet and there is no libc for it.\n");
     printf("C++ (.cc/.cpp/.cxx/.C, or -x c++): in progress toward C++20 "
-           "with libstdc++ (docs/language/cpp-levels.md) — namespaces, overloading, "
+           "with libstdc++ (docs/manual/cxx.md) — namespaces, overloading, "
            "references, classes with constructors and destructors, "
            "new/delete, lowered through C to either target.\n");
     printf("Installed or not: EmbCC finds its headers and per-target "
@@ -86,7 +86,7 @@ static void print_version(void)
            "(NASM-syntax .asm, x86-64) and embld (the linker, x86-64 ELF "
            "and EMBX). __thread and thread_local work on the ELF targets. "
            "Not yet: PIE, dynamic linking, embld for aarch64 — "
-           "see docs/language/compatibility.md.\n");
+           "see docs/internals/status.md.\n");
 }
 
 static void print_usage(FILE *out)
@@ -141,7 +141,7 @@ static void print_options(FILE *out)
       "  -O0 -O1 -O2            optimisation\n"
       "  -g                     debug information (DWARF)\n"
       "  -mno-sse -mno-red-zone -mcmodel=kernel -mgeneral-regs-only\n"
-      "\ndiagnostics (docs/tools/diagnostics.md)\n"
+      "\ndiagnostics (docs/manual/diagnostics.md)\n"
       "  -fdiagnostics-format=text|json   caret output, or GCC's JSON\n"
       "  -fdiagnostics-color=auto|always|never\n"
       "  -fmax-errors=N         stop after N\n"
@@ -322,7 +322,7 @@ static int emit_c_only;
 static int want_fix;
 
 /* -fsyntax-only: run the front end, write nothing. What an editor asks for
- * (docs/tools/diagnostics.md T5) and what a build's "does this still compile" step
+ * (docs/manual/diagnostics.md T5) and what a build's "does this still compile" step
  * wants. */
 static int syntax_only;
 /* Tool mode (§17): `embcc inspect <stage> file.c` stops the pipeline at a
@@ -2694,10 +2694,8 @@ static const char *g_arm_float_abi;
  *       with an -mfpu= -- which is GCC's reading of the pair.
  *   softfp: FPU instructions, float arguments in the CORE registers. Links
  *       with soft-float objects, because the calling convention is theirs.
- *   hard: refused, until AAPCS-VFP argument passing is implemented; see
- *       docs/developer/gaps-vs-gcc-clang.md. Accepting it and passing floats
- *       in the core registers would link against a hard-float library and
- *       read every float argument from registers the caller never wrote.
+ *   hard: FPU instructions, and floating point passed and returned in
+ *       s0-s15 / d0-d7 (AAPCS-VFP); docs/manual/invoking.md, -mfloat-abi=.
  *
  * The object says which it was built for (Tag_FP_arch, Tag_ABI_HardFP_use,
  * Tag_ABI_VFP_args) and the predefined macros say so to the program
@@ -3576,7 +3574,7 @@ int main(int argc, char **argv)
          * to — where a template instantiated from a header is attributed to
          * the .cc that instantiated it. A warning pointing at the wrong line
          * is worse than none, so they stay C-only until the C++ front end
-         * grows its own (docs/tools/diagnostics.md T4).
+         * grows its own (docs/manual/diagnostics.md T4).
          *
          * The test is whether the analysis is about code the LOWERING
          * invented. These five are: an unused variable or a shadowed name

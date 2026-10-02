@@ -22,8 +22,7 @@ the duplication this project removes everywhere else.
 `src/setjmp/` holds one file per architecture, each wrapped whole in
 `#ifdef __x86_64__` / `#ifdef __aarch64__` so the build picks one and the
 other compiles to nothing. That is file selection rather than conditional
-code: no function in this library has two bodies. See
-`docs/language/libc.md` for why those two functions are machine code.
+code: no function in this library has two bodies.
 
 ## The seam
 
@@ -37,7 +36,6 @@ printf, malloc and math as every other target.
 
 ## Status
 
-What exists, what does not, and what each part is tested by is in
-`docs/language/libc.md`. The acceptance test is `tests/golden/libc.sh`:
-every program in `tests/exec` built and run against this library with no
-newlib at all.
+What exists and what does not is in `docs/manual/libraries.md`. The
+acceptance test is `tests/golden/libc.sh`: every program in `tests/exec`
+built and run against this library with no newlib at all.

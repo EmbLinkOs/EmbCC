@@ -20,7 +20,7 @@
  * representable value, or the larger or smaller representable value
  * immediately adjacent"), and this says so rather than claiming better.
  * A correctly-rounded implementation for every input needs arbitrary-
- * precision arithmetic; see docs/language/libc.md.
+ * precision arithmetic; see docs/manual/libraries.md.
  *
  * Hexadecimal floats (0x1.8p3) are exact by construction -- they are
  * binary already -- and are parsed separately below for that reason.

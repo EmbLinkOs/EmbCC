@@ -35,7 +35,7 @@
  *
  * The floating-point `to_chars` with no precision -- the shortest form
  * that round-trips. That needs a Ryu- or Grisu-style algorithm; this
- * uses printf's exact conversion (see docs/language/libc.md), which
+ * uses printf's exact conversion (see docs/manual/libraries.md), which
  * gives correctly rounded digits at a precision you ASK for and cannot
  * find the shortest one for you. The fixed/scientific/general forms
  * with an explicit precision are here and are exact.
@@ -244,7 +244,7 @@ inline from_chars_result from_chars(const char *first, const char *last,
 /* ---- to_chars, floating point ------------------------------------------
  *
  * Through snprintf, which is this project's own and is EXACTLY rounded
- * (docs/language/libc.md). Borrowing it rather than writing a second
+ * (docs/manual/libraries.md). Borrowing it rather than writing a second
  * decimal conversion is deliberate: a second copy of that arithmetic is
  * a second thing to get wrong, and the digits would have to be the
  * same anyway.

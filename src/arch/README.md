@@ -5,7 +5,7 @@ architecture, plus the few files every target shares. The rest of `src/` (the
 lexer, preprocessor, parser, sema, IR, optimizer, DWARF and ELF writers,
 driver) is target-neutral and never names a machine; it asks this directory.
 What each target supports, feature by feature, is in
-[docs/language/compatibility.md](../../docs/language/compatibility.md).
+[docs/manual/targets.md](../../docs/manual/targets.md).
 
 ```
 src/arch/
@@ -80,6 +80,6 @@ which machine produced the image. `cg_wide_vregs` (the vregs holding a
 
 A new directory with the files in the table, a column in `target.c`'s
 relocation mapping, a predef table from `tools/gen-predef.sh`, a QEMU harness
-under `tests/harness/<arch>/`, and a row in every table of
-docs/language/compatibility.md. Then `tests/run.sh --target=<triple>` must pass, with
+under `tests/harness/<arch>/`, and its section in
+docs/manual/targets.md. Then `tests/run.sh --target=<triple>` must pass, with
 `agrees-with-gcc` refereeing it against that target's gcc.
