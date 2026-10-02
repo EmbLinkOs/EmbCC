@@ -2273,8 +2273,12 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 check_expr(u, f, sc, e->args[0]);
                 need_integer(u, e->args[0], "__builtin_bswap");
                 e->name = e->lhs->name;
-                e->ty = ty_base(bn[5] == '1' ? TY_SHORT :
-                                bn[5] == '3' ? TY_INT : TY_LONG, 1);
+                /* By SIZE, not by name: `unsigned long` is four bytes
+                 * on a 32-bit target and `unsigned int` two on AVR, and
+                 * bswap64 typed as unsigned long swapped four bytes
+                 * there and called it the answer. */
+                e->ty = ty_int_of_size(bn[5] == '1' ? 2 : bn[5] == '3' ? 4 : 8,
+                                       1);
                 break;
             }
             /* square root -- one instruction on both targets, and the

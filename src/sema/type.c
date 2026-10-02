@@ -55,7 +55,9 @@ struct type *ty_int_of_size(int size, int is_unsigned)
     switch (size) {
     case 1:  return ty_base(TY_CHAR, is_unsigned);
     case 2:  return ty_base(TY_SHORT, is_unsigned);
-    case 4:  return ty_base(TY_INT, is_unsigned);
+    case 4:  return target_int_size() == 4 ? ty_base(TY_INT, is_unsigned)
+                                           : ty_base(TY_LONG, is_unsigned);
+                                       /* AVR's int is two bytes */
     case 8:  return target_long_size() == 8 ? ty_base(TY_LONG, is_unsigned)
                                             : ty_llong(is_unsigned);
     case 16: return target_has_int128() ? ty_base(TY_INT128, is_unsigned)

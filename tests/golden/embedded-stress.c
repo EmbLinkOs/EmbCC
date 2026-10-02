@@ -248,6 +248,13 @@ int main(void)
     putn(dense(pow32 + 2)); putn(dense(nar));
     putn(pick64(pow32, 1, 2)); putn((long)pick64w(pow32, 3, 4));
     putn(pick32(pow32, 5, 6)); putn((long)pick32w(pow32, 7, 8)); nl();
+    /* byte swaps: bswap64 was typed `unsigned long`, four bytes here,
+     * and ARMv7-M had no lowering for any of them */
+    putn((long)(__builtin_bswap64(nar) & 0xffffff));
+    putn((long)(__builtin_bswap64(nar) >> 40));
+    putn((long)(__builtin_bswap32((unsigned)nar) >> 8));
+    putn((long)__builtin_bswap16((unsigned short)nar));
+    putn((long)sizeof __builtin_bswap64(nar)); nl();
 
     puts_("==END==\n");
     return 0;
