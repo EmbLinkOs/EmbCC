@@ -52,6 +52,18 @@ int f_vtypedef(void)          { return (tp != 0) + (tp != 0) + (tp != 0); }
 void f_vstore(unsigned *q)    { vp = q; vp = q; vp = q; }
 CEOF
 
+# Volatile BIT-FIELDS, a peripheral register's usual shape: the storage
+# unit was loaded and stored through an unqualified type, so `r->mode`
+# three times was one load at -O1 and up and three stores to `r->cnt`
+# were one. A store also re-read the unit for the assignment's value --
+# a second access to a register that may clear on read.
+cat > "$out/b.c" <<'CEOF'
+struct reg { unsigned en : 1, mode : 3, cnt : 12; };
+unsigned f_bread(volatile struct reg *r) { return r->mode + r->mode + r->mode; }
+void f_bstore(volatile struct reg *r) { r->cnt = 1; r->cnt = 2; r->cnt = 3; }
+unsigned f_bset(volatile struct reg *r) { return (r->en = 1) + (r->en = 1) + (r->en = 1); }
+CEOF
+
 # Volatile LOCALS: their accesses are to the frame, and each must happen.
 # Store forwarding handed `volatile int v = 3`'s 3 straight to its reads,
 # dead-code elimination dropped `(void)v`, and the register allocator kept
@@ -114,6 +126,15 @@ checkl riscv32-unknown-elf "--mattr=+c,+m" '[[:space:]](c\.)?lw[[:space:]]' \
 checkl aarch64-elf "" '[[:space:]]ldu?r[[:space:]]+w' '[[:space:]]stu?r[[:space:]]+w'
 checkl x86_64-elf "" 'mov[l]?[[:space:]]+-?(0x[0-9a-f]+)?\(%r[a-z0-9]+\),' \
        'mov[l]?[[:space:]]+(\$0x[0-9a-f]+|%[a-z0-9]+),[[:space:]]*-?(0x[0-9a-f]+)?\(%r'
+# bit-fields: three reads, three stores, and an assignment's value that
+# is not a fourth read (f_bset: three read-modify-writes, so three loads)
+BF="f_bread f_bstore f_bset"
+check thumbv7em-none-eabi "--triple=thumbv7em" '[[:space:]]ldr' '[[:space:]]str' b "$BF"
+check riscv32-unknown-elf "--mattr=+c,+m" '[[:space:]](c\.)?lw[[:space:]]' \
+      '[[:space:]](c\.)?sw[[:space:]]' b "$BF"
+check aarch64-elf "" '[[:space:]]ldr[[:space:]]+w' '[[:space:]]str[[:space:]]+w' b "$BF"
+check x86_64-elf "" 'mov[l]?[[:space:]]+(0x[0-9a-f]+)?\(%r[a-z0-9]+\),' \
+      'mov[l]?[[:space:]]+(\$0x[0-9a-f]+|%[a-z0-9]+),[[:space:]]*(0x[0-9a-f]+)?\(%r' b "$BF"
 # the pointer objects, at pointer width
 PF="f_vglobal f_vmember f_vtypedef f_vstore"
 check thumbv7em-none-eabi "--triple=thumbv7em" '[[:space:]]ldr' '[[:space:]]str' p "$PF"
@@ -124,7 +145,7 @@ check x86_64-elf "" 'movq?[[:space:]]+(0x[0-9a-f]+)?\(%r[a-z0-9]+\),' \
       'movq?[[:space:]]+%[a-z0-9]+,[[:space:]]*(0x[0-9a-f]+)?\(%r' p "$PF"
 echo "three volatile reads are three loads, and three writes three stores,
 through *p, p[i], p->m, a global, a cast address and a qualifier written
-after a typedef or struct name, and of a volatile
+after a typedef or struct name, of a volatile bit-field, and of a volatile
 pointer object (a global, a member, a typedef), and of a volatile
 local (read, read and discarded, written; at -O2 and -Os), on Thumb,
 RISC-V, aarch64 and x86-64 at -O1, -O2 and -Os"

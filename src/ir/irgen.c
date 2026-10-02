@@ -350,6 +350,13 @@ static void mark_natural(struct ir_func *fn, const struct expr *e)
 }
 
 /* Typed load/store through an address temp. */
+/* Set while a bit-field is read or written through a VOLATILE lvalue:
+ * the storage unit is loaded and stored through an unqualified type of its
+ * width, and those accesses carried no `vol`, so `s->a + s->a` on a device
+ * register was one read at -O1 and up. emit_load and emit_store mark what
+ * they emit while it is set (bf_load_v, bf_store_v). */
+static int g_bf_vol;
+
 int emit_load(struct ir_func *fn, int addr, const struct type *t)
 {
     struct ir_ins *i = emit(fn);
@@ -358,7 +365,7 @@ int emit_load(struct ir_func *fn, int addr, const struct type *t)
     i->size = ty_size(t);
     i->sign = ty_signed_int(t);
     i->w = ty_w(t);
-    i->vol = t->is_volatile;
+    i->vol = t->is_volatile || g_bf_vol;
     i->dst = new_temp(fn);
     return i->dst;
 }
@@ -371,7 +378,7 @@ void emit_store(struct ir_func *fn, int addr, int val,
     i->a = addr;
     i->b = val;
     i->size = ty_size(t);
-    i->vol = t->is_volatile;
+    i->vol = t->is_volatile || g_bf_vol;
 }
 
 void emit_mov(struct ir_func *fn, int dst, int src)
@@ -603,7 +610,42 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
         low = emit_bin(fn, IR_SHL, low, emit_const(fn, m->bit_off, 4), w, 0);
     int merged = emit_bin(fn, IR_OR, cleared, low, w, 0);
     emit_store(fn, addr, merged, ut);
+    if (g_bf_vol) {
+        /* The assignment's value is the stored value converted to the
+         * field, not a second read of a device register -- which may
+         * clear what it reports. Made from `val` with the two shifts a
+         * load would use. */
+        int vb = w * 8, sh = vb - m->bit_width;
+        int v = val;
+        if (sh) {
+            v = emit_bin(fn, IR_SHL, v, emit_const(fn, sh, 4), w, 0);
+            v = emit_bin(fn, IR_SHR, v, emit_const(fn, sh, 4), w,
+                         ty_signed_int(bt));
+        }
+        return v;
+    }
     return bf_load(fn, addr, m);
+}
+
+/* bf_load and bf_store through an lvalue of type `t`, volatile or not. */
+static int bf_load_v(struct ir_func *fn, int addr, const struct member *m,
+                     const struct type *t)
+{
+    int save = g_bf_vol, v;
+    g_bf_vol = t && t->is_volatile;
+    v = bf_load(fn, addr, m);
+    g_bf_vol = save;
+    return v;
+}
+
+static int bf_store_v(struct ir_func *fn, int addr, const struct member *m,
+                      int val, const struct type *t)
+{
+    int save = g_bf_vol, v;
+    g_bf_vol = t && t->is_volatile;
+    v = bf_store(fn, addr, m, val);
+    g_bf_vol = save;
+    return v;
 }
 
 /* Place one flattened initializer leaf `ie` (value already in `v`) at address
@@ -2206,7 +2248,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int addr = gen_addr(fn, e);
         int v;
         if (e->memb->is_bitfield)
-            return bf_load(fn, addr, e->memb);
+            return bf_load_v(fn, addr, e->memb, e->ty);
         if (atomic_lv(e)) {
             atomic_scalar_ok(fn, e, "reading");
             return atomic_load(fn, addr, e->ty, e->line);
@@ -2251,7 +2293,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int addr = gen_addr(fn, e->lhs);
         int v = gen_expr(fn, e->rhs);
         if (expr_is_bitfield(e->lhs))
-            return bf_store(fn, addr, e->lhs->memb, v);
+            return bf_store_v(fn, addr, e->lhs->memb, v, e->lhs->ty);
         emit_store(fn, addr, v, e->ty);
         mark_natural(fn, e->lhs);
         return v;
@@ -2267,7 +2309,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int is_bf = expr_is_bitfield(e->lhs);
         int addr = local ? -1 : gen_addr(fn, e->lhs);
         int cur = local ? emit_ldvar(fn, e->lhs->var_index, t)
-                : is_bf ? bf_load(fn, addr, e->lhs->memb)
+                : is_bf ? bf_load_v(fn, addr, e->lhs->memb, e->lhs->ty)
                         : emit_load(fn, addr, t);
         int old = -1;
         if (e->is_post) {
@@ -2307,7 +2349,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         if (local)
             emit_stvar(fn, e->lhs->var_index, sum, t);
         else if (is_bf)
-            sum = bf_store(fn, addr, e->lhs->memb, sum);
+            sum = bf_store_v(fn, addr, e->lhs->memb, sum, e->lhs->ty);
         else
             emit_store(fn, addr, sum, t);
         return e->is_post ? old : sum;
@@ -2581,14 +2623,14 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int is_bf = expr_is_bitfield(e->lhs);
         int addr = local ? -1 : gen_addr(fn, e->lhs);
         int cur = local ? emit_ldvar(fn, e->lhs->var_index, lt)
-                : is_bf ? bf_load(fn, addr, e->lhs->memb)
+                : is_bf ? bf_load_v(fn, addr, e->lhs->memb, e->lhs->ty)
                         : emit_load(fn, addr, lt);
         int rv = gen_expr(fn, e->rhs);
         int res = compound_value(fn, e, cur, rv);
         if (local)
             emit_stvar(fn, e->lhs->var_index, res, lt);
         else if (is_bf)
-            return bf_store(fn, addr, e->lhs->memb, res);
+            return bf_store_v(fn, addr, e->lhs->memb, res, e->lhs->ty);
         else
             emit_store(fn, addr, res, lt);
         return res;
