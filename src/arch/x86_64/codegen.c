@@ -815,10 +815,156 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
  * applied to an offset. */
 #define DEAD_SLOT_OFF (-0x40000000)
 
+/* Is parameter p a struct that System V passes in MEMORY? It arrives in
+ * the caller's outgoing area, which belongs to this function for the
+ * length of the call -- gcc and clang use it as the parameter's home, and
+ * so does this: the prologue used to copy it into the frame eight bytes
+ * at a time, 168 bytes for every EmbLinkOs widget call's EmProps. Not
+ * under -g, where its DWARF home is a frame offset, nor on Win64, which
+ * passes such an aggregate by reference. */
+static int x86_param_home_incoming(const struct func *f, int p)
+{
+    enum arg_class cls[2];
+    if (target_win64_abi() || g_want_debug || !f ||
+        p < 0 || p >= f->nparams || !f->param_tys[p])
+        return 0;
+    return f->param_tys[p]->kind == TY_STRUCT &&
+           ty_classify(f->param_tys[p], cls) == 0;
+}
+
+/* ---- a struct argument built where the callee will read it ------------
+ *
+ * A struct passed by value in MEMORY travels in the outgoing area at
+ * [rsp + stk_off], and the call copies it there from wherever it was
+ * built. For a compound literal -- `f((Props){ .x = 1 })`, every widget
+ * call in EmbLinkOs's UI -- that wherever is a temporary local made for
+ * the purpose: zeroed, its fields stored, copied, and never read again.
+ * gcc builds it in the outgoing area directly. So does this, for a local
+ * whose one `addr` reaches nothing but its own loads, stores, clears and
+ * copies and that one argument of that one call, all in the call's block
+ * and before it, with nothing between its first write and the call that
+ * could write the outgoing area -- another call, asm, an alloca, or an
+ * operation lowered through a helper. Two such locals whose lives overlap
+ * would share the area, so the later one keeps its own slot.
+ *
+ * The frame is fixed (no alloca), so rsp is rbp - frame at every call and
+ * the local's slot is simply rbp - frame + stk_off. Its address then IS
+ * the destination, and the call's copy, which compares them, is skipped.
+ * Returns, per local, that stk_off, or -1; NULL when there is none. */
+static int *x86_inplace_locals(struct ir_func *fn)
+{
+    struct func *f = fn->src;
+    int nv = fn->nvregs, nvars = fn->nvars;
+    if (!g_regalloc || g_want_debug || fn->has_alloca || target_win64_abi() ||
+        !f || nvars == 0 || nv == 0)
+        return NULL;
+    int *res = NULL;
+    int *ndef = xcalloc((size_t)nv, sizeof *ndef);
+    int *defn = xmalloc((size_t)nv * sizeof *defn);
+    int *naddr = xcalloc((size_t)nvars, sizeof *naddr);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int d = ra_ins_def(i);
+        if (d >= 0 && d < nv) { ndef[d]++; defn[d] = n; }
+        if (i->op == IR_ADDR && i->a >= 0 && i->a < nvars)
+            naddr[i->a]++;
+        if ((i->op == IR_LDVAR && i->a >= 0 && i->a < nvars) ||
+            (i->op == IR_STVAR && i->dst >= 0 && i->dst < nvars))
+            naddr[i->op == IR_LDVAR ? i->a : i->dst] += 2;   /* named directly */
+    }
+    char *der = xcalloc((size_t)nv, 1);
+    int busy_until = -1;
+    for (int c = 0; c < fn->nins; c++) {
+        const struct ir_ins *call = &fn->ins[c];
+        if (call->op != IR_CALL)
+            continue;
+        for (int k = 0; k < call->nargs; k++) {
+            const struct ir_arg *a = &call->argv[k];
+            int p = a->vreg;
+            if (!a->on_stack || !a->is_struct || p < nvars || p >= nv ||
+                ndef[p] != 1 || fn->ins[defn[p]].op != IR_ADDR)
+                continue;
+            int X = fn->ins[defn[p]].a;
+            if (X < 0 || X >= nvars || naddr[X] != 1 || !f->var_tys ||
+                !f->var_tys[X] || ty_size(f->var_tys[X]) != a->size)
+                continue;
+            int al = f->var_aligns ? f->var_aligns[X] : 0;
+            if (ty_align(f->var_tys[X]) > al) al = ty_align(f->var_tys[X]);
+            if (al > 16 || (al > 0 && a->stk_off % al) || (res && res[X] >= 0))
+                continue;
+            /* the address and its constant offsets, and every use */
+            memset(der, 0, (size_t)nv);
+            der[p] = 1;
+            int ok = 1, first = defn[p];
+            for (int n = 0; n < fn->nins && ok; n++) {
+                const struct ir_ins *i = &fn->ins[n];
+                int ra = i->a >= 0 && i->a < nv && der[i->a];
+                int rb = !i->imm_b && i->b >= 0 && i->b < nv && der[i->b];
+                int rc = i->c >= 0 && i->c < nv && der[i->c];
+                if (n == defn[p])
+                    continue;
+                if (i->op == IR_ADD && i->imm_b && ra && i->dst >= 0 &&
+                    i->dst < nv && ndef[i->dst] == 1) {
+                    der[i->dst] = 1;
+                } else if (i->op == IR_CALL) {
+                    for (int q = 0; q < i->nargs; q++)
+                        if (i->argv[q].vreg >= 0 && i->argv[q].vreg < nv &&
+                            der[i->argv[q].vreg] && !(n == c && q == k))
+                            ok = 0;
+                    if (i->indirect && ra)
+                        ok = 0;
+                    continue;
+                } else if ((i->op == IR_LOAD || i->op == IR_MEMZERO) && !rb && !rc) {
+                    /* through it: fine; it is checked for place below */
+                } else if (i->op == IR_STORE && !rb && !rc) {
+                } else if (i->op == IR_MEMCPY && !rc) {
+                } else {
+                    if (ra || rb || rc)
+                        ok = 0;
+                    continue;
+                }
+                if ((ra || rb) && (n < first || n > c))
+                    ok = 0;                     /* used after the call */
+            }
+            if (!ok || first <= busy_until)
+                continue;
+            /* between the first write and the call: one block, and
+             * nothing that could write the outgoing area */
+            for (int n = first; n < c && ok; n++) {
+                const struct ir_ins *i = &fn->ins[n];
+                switch (i->op) {
+                case IR_LABEL: case IR_CALL: case IR_ASM: case IR_ALLOCA:
+                case IR_SPSAVE: case IR_SPRESTORE: case IR_VA_START:
+                case IR_LANDING: case IR_JMP: case IR_BRZ: case IR_BRNZ:
+                case IR_SWITCH: case IR_IGOTO: case IR_RET: case IR_UD2:
+                    ok = 0;
+                    break;
+                default:
+                    if (i128_ins(i) || x87_ins(i))
+                        ok = 0;
+                    break;
+                }
+            }
+            if (!ok)
+                continue;
+            if (!res) {
+                res = xmalloc((size_t)nvars * sizeof *res);
+                for (int v = 0; v < nvars; v++)
+                    res[v] = -1;
+            }
+            res[X] = a->stk_off;
+            busy_until = c;
+        }
+    }
+    free(ndef); free(defn); free(naddr); free(der);
+    return res;
+}
+
 static int *layout_frame(struct ir_func *fn, int *frame_out,
                          int *scratch_base_out, int *sret_slot_out,
                          int *va_save_out, int *va_tag_out,
-                         int nsave, int *save_base_out, const int *loc)
+                         int nsave, int *save_base_out, const int *loc,
+                         const int *inplace)
 {
     struct func *f = fn->src;
     int *disp = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1)
@@ -859,6 +1005,10 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         int s = lslot[i];
         if (!lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_want_debug))
             continue;               /* in a register, or named nowhere at all */
+        if (inplace && inplace[i] >= 0)
+            continue;               /* in the outgoing area: placed below */
+        if (i < fn->nparams && x86_param_home_incoming(f, i))
+            continue;               /* in the caller's: the prologue says where */
         int sz = (ty_size(f->var_tys[i]) + 7) & ~7;
         if (sz > ssize[s]) ssize[s] = sz;
         /* Alignment of a local's stack slot: the greater of its type's natural
@@ -989,6 +1139,12 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
      * ABI requires at every call, since the frame is a multiple of 16. */
     running += fn->outgoing_bytes;
     *frame_out = (running + 15) & ~15;
+    for (int i = 0; inplace && i < fn->nvars; i++)
+        if (inplace[i] >= 0)
+            disp[i] = -*frame_out + inplace[i];     /* rsp + stk_off */
+    for (int i = 0; i < fn->nparams && i < fn->nvars; i++)
+        if (x86_param_home_incoming(f, i))
+            disp[i] = DEAD_SLOT_OFF;                /* until the prologue */
     return disp;
 }
 
@@ -2513,8 +2669,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
         g_floc = NULL;
     }
     int save_base;
+    int *inplace = x86_inplace_locals(fn);
     int *sd = layout_frame(fn, &frame, &scratch_base, &sret_slot,
-                           &va_save, &va_tag, nsave, &save_base, loc);
+                           &va_save, &va_tag, nsave, &save_base, loc,
+                           inplace);
+    free(inplace);
     /* Set by the parameter pass below, read by IR_VA_START: how many
      * named arguments the integer and SSE register files hold, and the
      * rbp offset of the first stack-passed argument (the overflow area). */
@@ -2616,6 +2775,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
         g_pushonly = 1;
         for (int v = 0; v < fn->nvregs; v++)
             if (sd[v] != DEAD_SLOT_OFF)
+                g_pushonly = 0;
+        /* a parameter at home in the caller's area is found through rbp */
+        for (int p = 0; p < f->nparams; p++)
+            if (x86_param_home_incoming(f, p))
                 g_pushonly = 0;
         for (int n = 0; n < fn->nins && g_pushonly; n++)
             switch (fn->ins[n].op) {
@@ -2907,6 +3070,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 int sz = ty_size(pt);
                 if (ty_align(pt) > 8)       /* a 16-aligned stack slot */
                     incoming = (incoming + 15) & ~15;
+                if (x86_param_home_incoming(f, i)) {
+                    sd[i] = incoming;       /* its home: no copy at all */
+                    incoming += (sz + 7) & ~7;
+                    continue;
+                }
                 x86_lea_reg_slot(text, 11 /*r11*/, sd[i]);
                 for (int off = 0; off < sz; off += 8) {
                     int chunk = sz - off >= 8 ? 8 : sz - off;
@@ -4518,6 +4686,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     continue;
                 }
                 int sz = a->size;
+                /* Built in place (x86_inplace_locals): the copy would be
+                 * of the argument onto itself. */
+                if (afolded(a->vreg) &&
+                    g_afold.disp[a->vreg] == a->stk_off - frame)
+                    continue;
                 /* The source address in rcx for the whole copy: rax and
                  * rcx are in no pool, and nothing in this stretch of the
                  * call sequence -- the Win64 by-reference copy above does
