@@ -352,6 +352,9 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf riscv64-unknown-elf
         echo "case topasm $t: a data-only block was refused"; exit 1; }
 done
 echo "case topasm: an instruction in file-scope asm off x86-64 is refused by name"
+check generic-const-ambiguous \
+    'int main(void) { return _Generic((const char *)0, char *: 1, const char *: 2, default: 3); }' \
+    "more than one _Generic association matches"
 check asm-bad-constraint \
     'int main(void) { int x; __asm__("int $0x80" : "=t"(x)); return x; }' \
     "is not supported"

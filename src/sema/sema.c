@@ -1639,13 +1639,29 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * node simply becomes the selected expression. */
         check_expr(u, f, sc, e->lhs);
         struct expr *chosen = NULL, *deflt = NULL;
+        /* lvalue conversion drops the operand's own qualifiers */
+        const struct type *ct = e->lhs->ty;
+        if (ct->canon && (ct->is_volatile || ct->is_atomic))
+            ct = ct->canon;
+        int nmatch = 0;
         for (int i = 0; i < e->ngen; i++) {
             if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
-            if (ty_equal(e->lhs->ty, e->gtypes[i])) {
-                chosen = e->gexprs[i];
-                break;
+            /* Strictly: ty_equal lets `long` be `long long` and `char`
+             * be `signed char`, and the first association that matched
+             * that loosely was taken -- _Generic(1L, long long: ...,
+             * long: ...) picked the long long arm. */
+            if (ty_generic_same(ct, e->gtypes[i])) {
+                if (!chosen)
+                    chosen = e->gexprs[i];
+                nmatch++;
             }
         }
+        if (nmatch > 1)
+            sema_error_at(u, e->line, e->col,
+                       "more than one _Generic association matches type %s: "
+                       "their types differ only in const, which EmbCC does "
+                       "not yet keep in a type, or are the same type",
+                       ty_name(e->lhs->ty));
         if (!chosen)
             chosen = deflt;
         if (!chosen)

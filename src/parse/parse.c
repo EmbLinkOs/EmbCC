@@ -2614,7 +2614,7 @@ static struct expr *parse_primary(struct parser *ps)
             e->name = w ? w : "";
             e->num = (long)strlen(e->name) + 1;
             e->str_width = 1;
-            e->ty = ty_array(ty_base(TY_CHAR, target_char_unsigned()),
+            e->ty = ty_array(ty_plain_char(),
                              (int)e->num);
             return e;
         }

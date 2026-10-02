@@ -113,6 +113,8 @@ struct type *ty_base(enum ty_kind kind, int is_unsigned);
  * EmbCC does not model plain char as a third type distinct from signed and
  * unsigned char: it IS one of the two, chosen per target. */
 struct type *ty_plain_char(void);
+int ty_is_plain_char(const struct type *t);
+int ty_generic_same(const struct type *a, const struct type *b);
 struct type *ty_wchar(void);
 /* `long long` / `unsigned long long`: eight bytes on every target. */
 struct type *ty_llong(int is_unsigned);

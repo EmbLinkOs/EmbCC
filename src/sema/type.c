@@ -35,9 +35,51 @@ static struct type llongs[2] = {
     { .kind = TY_LONG, .is_llong = 1, .is_unsigned = 1 },
 };
 
+/* Plain `char` has the kind and signedness of one of the other two, but
+ * is a distinct TYPE (C11 6.2.5p15), which only _Generic observes. Its own
+ * nodes, so ty_is_plain_char tells it apart by identity. */
+static struct type plain_chars[2] = {
+    { .kind = TY_CHAR }, { .kind = TY_CHAR, .is_unsigned = 1 }
+};
+
 struct type *ty_plain_char(void)
 {
-    return ty_base(TY_CHAR, target_char_unsigned());
+    return &plain_chars[target_char_unsigned() ? 1 : 0];
+}
+
+int ty_is_plain_char(const struct type *t)
+{
+    const struct type *c = t->canon ? t->canon : t;
+    return c == &plain_chars[0] || c == &plain_chars[1];
+}
+
+/* Two types the same for _Generic, which is stricter than ty_equal:
+ * `long` is not `long long`, plain `char` is neither signed nor unsigned
+ * char, and a pointee's volatile and _Atomic count. (`const` is not in
+ * the type here at all, which sema's _Generic says when it matters.) */
+int ty_generic_same(const struct type *a, const struct type *b)
+{
+    if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
+        a->is_llong != b->is_llong || a->is_volatile != b->is_volatile ||
+        a->is_atomic != b->is_atomic)
+        return 0;
+    if (a->kind == TY_CHAR && ty_is_plain_char(a) != ty_is_plain_char(b))
+        return 0;
+    if (a->kind == TY_PTR)
+        return ty_generic_same(a->pointee, b->pointee);
+    if (a->kind == TY_ARRAY)
+        return (a->count == b->count || a->vla_len || b->vla_len) &&
+               ty_generic_same(a->pointee, b->pointee);
+    if (a->kind == TY_FUNC) {
+        if (a->nptypes != b->nptypes || a->is_varargs != b->is_varargs ||
+            !ty_generic_same(a->ret, b->ret))
+            return 0;
+        for (int i = 0; i < a->nptypes; i++)
+            if (!ty_equal(a->ptypes[i], b->ptypes[i]))
+                return 0;
+        return 1;
+    }
+    return ty_equal(a, b);
 }
 
 struct type *ty_wchar(void)
