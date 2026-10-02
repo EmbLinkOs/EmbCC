@@ -3536,6 +3536,11 @@ static void gen_ins(struct t_fn *F, int n)
         }
         for (int k = 0; k < ia->nin; k++)
             rd(F, ia->in[k].temp, ia->in[k].reg);
+        /* An "m" output's register holds the ADDRESS the template writes
+         * through, and nothing put it there (see riscv/codegen.c). */
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].mem)
+                rd(F, ia->out[k].temp, ia->out[k].reg);
         for (int k = 0; k < ia->codelen; k++)
             code_byte(t, ia->code[k]);
         for (int k = 0; k < ia->nout; k++) {

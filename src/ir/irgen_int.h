@@ -54,4 +54,10 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s);
 void irg_asm_thumb(struct ir_func *fn, struct stmt *s);
 void irg_asm_avr(struct ir_func *fn, struct stmt *s);
 
+/* Whether an asm operand names MEMORY: its constraint, past = + &, allows
+ * nothing but `m`. "rm" and "g" allow a register too, and GCC gives them
+ * one, so the template is written for a VALUE -- reading them as memory
+ * handed it the operand's address instead. */
+int asm_constraint_mem_only(const char *c);
+
 #endif

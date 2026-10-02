@@ -1166,7 +1166,7 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
          * happened to work for a struct, whose "value" in this IR is
          * already an address, and silently read from a garbage address
          * for a scalar. */
-        ia->in[i].mem = strchr(a->in[i].constraint, 'm') != NULL;
+        ia->in[i].mem = asm_constraint_mem_only(a->in[i].constraint);
         ia->in[i].temp = ia->in[i].mem ? gen_addr(fn, a->in[i].expr)
                                        : gen_expr(fn, a->in[i].expr);
         ia->in[i].size = ia->in[i].reg >= 16
@@ -1177,7 +1177,7 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
         ia->out[i].size = ty_size(a->out[i].expr->ty);
         /* "+": the register must START with the lvalue's value */
         ia->out[i].inout = strchr(a->out[i].constraint, '+') != NULL;
-        ia->out[i].mem = strchr(a->out[i].constraint, 'm') != NULL;
+        ia->out[i].mem = asm_constraint_mem_only(a->out[i].constraint);
     }
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;

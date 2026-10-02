@@ -107,6 +107,12 @@ static int pinned(int a)
 { register int y __asm__("r2") = a; int r;
   __asm__("adds %0, %1, #2" : "=r"(r) : "r"(y)); return r; }
 
+/* An "m" output: its register holds the ADDRESS the template writes
+ * through, and nothing loaded it -- the store went wherever the register
+ * last pointed. */
+static int memout(int k)
+{ int v = 0; __asm__ volatile("str %1, [%0]" : "=m"(v) : "r"(k)); return v; }
+
 int main(void)
 {
     putn(add3(20, 22));        /* 42 */
@@ -118,6 +124,7 @@ int main(void)
     putn(bits(1u << 20));      /* 11 leading zeros */
     putn(addk(33));            /* 42 */
     putn(pinned(40));          /* 42 */
+    putn(memout(42));          /* 42 */
     puts_("\n==END==\n");
     return 0;
 }
@@ -136,7 +143,7 @@ for opt in -O0 -O1 -O2 -Os; do
         { echo "$opt: could not link"; exit 1; }
     sh tests/harness/thumb/run.sh "$out/a$opt.elf" > "$out/a$opt.txt" 2>&1
     got=$(tr -d '\n' < "$out/a$opt.txt" | sed 's/==END==.*//')
-    want="42 40 42 10 42 41 11 42 42 "
+    want="42 40 42 10 42 41 11 42 42 42 "
     [ "$got" = "$want" ] || {
         echo "$opt: inline asm computed '$got', wanted '$want'"; exit 1; }
 done

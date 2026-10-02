@@ -4125,6 +4125,15 @@ static void gen_ins(struct a_fn *F, int n)
                     continue;
                 vld(F, o->reg, o->temp, 0, o->size);
             }
+            /* ...and an "m" output's register its ADDRESS, which nothing
+             * loaded: the template wrote through whatever it held. */
+            for (int k = 0; k < ia->nout; k++) {
+                struct ir_asm_op *o = &ia->out[k];
+                late = o->reg >= AVR_X;
+                if (late != pass || !o->mem)
+                    continue;
+                vld(F, o->reg, o->temp, 0, 2);
+            }
         }
         for (int k = 0; k < ia->codelen; k++)
             code_byte(t, ia->code[k]);

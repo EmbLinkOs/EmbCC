@@ -4075,3 +4075,16 @@ struct ir_unit *irgen(struct unit *u)
             gen_func(&iu->funcs[n++], f);
     return iu;
 }
+
+int asm_constraint_mem_only(const char *c)
+{
+    int any = 0;
+    for (; *c; c++) {
+        if (*c == '=' || *c == '+' || *c == '&')
+            continue;
+        if (*c != 'm')
+            return 0;
+        any = 1;
+    }
+    return any;
+}

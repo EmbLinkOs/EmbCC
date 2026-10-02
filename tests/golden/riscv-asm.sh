@@ -101,6 +101,12 @@ static int pinned(int a)
 { register int y __asm__("a3") = a; int r;
   __asm__("addi %0, %1, 2" : "=r"(r) : "r"(y)); return r; }
 
+/* An "m" output: its register holds the ADDRESS the template writes
+ * through, and nothing loaded it -- the store went wherever the register
+ * last pointed. */
+static int memout(int k)
+{ int v = 0; __asm__ volatile("sw %1, 0(%0)" : "=m"(v) : "r"(k)); return v; }
+
 int main(void)
 {
     putn(add3(20, 22));        /* 42 */
@@ -111,6 +117,7 @@ int main(void)
     putn(chain(10));           /* (10+1)<<2 - 3 = 41 */
     putn(addk(33));            /* 42 */
     putn(pinned(40));          /* 42 */
+    putn(memout(42));          /* 42 */
     puts_("\n==END==\n");
     return 0;
 }
@@ -137,7 +144,7 @@ for w in 32 64; do
         # The answers are all 42 but one, and they are checked as a whole
         # line so a single wrong operand fails rather than averaging out.
         got=$(tr -d '\n' < "$d/a$opt.txt" | sed 's/==END==.*//')
-        want="42 40 42 0 42 41 42 42 "
+        want="42 40 42 0 42 41 42 42 42 "
         [ "$got" = "$want" ] || {
             echo "rv$w $opt: inline asm computed '$got', wanted '$want'"
             exit 1; }

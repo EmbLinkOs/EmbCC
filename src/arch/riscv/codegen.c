@@ -2900,6 +2900,13 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         for (int k = 0; k < ia->nin; k++)
             rd(F, ia->in[k].temp, ia->in[k].reg);
+        /* An "m" output's register holds the ADDRESS the template writes
+         * through. Nothing put it there: the template wrote through
+         * whatever the register last held, which was the address only
+         * when the code before happened to leave it. */
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].mem)
+                rd(F, ia->out[k].temp, ia->out[k].reg);
         for (int k = 0; k < ia->codelen; k++)
             code_byte(t, ia->code[k]);
         for (int k = 0; k < ia->nout; k++) {

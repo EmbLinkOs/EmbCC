@@ -5174,6 +5174,15 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 else
                     x86_load_reg_mem(text, ia->in[k].reg, REG_RBP,
                                      sd[ia->in[k].temp], 8);
+            /* An "m" output's register holds the ADDRESS the template
+             * writes through, and nothing put it there: `stmxcsr %0` in
+             * <fenv.h> wrote through whatever the register last held,
+             * which was the address only because the code before it
+             * happened to compute it there. */
+            for (int k = 0; k < ia->nout; k++)
+                if (ia->out[k].mem && ia->out[k].reg < 16)
+                    x86_load_reg_mem(text, ia->out[k].reg, REG_RBP,
+                                     sd[ia->out[k].temp], 8);
             for (int k = 0; k < ia->codelen; k++)
                 code_byte(text, ia->code[k]);
             /* The address scratch must not be an OUTPUT register, or loading
