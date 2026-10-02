@@ -309,6 +309,8 @@ struct func {
     int seq;              /* source order (see struct global) */
     int is_static;
     int is_weak;          /* __attribute__((weak)) */
+    const char *alias_of; /* __attribute__((alias("t"))): another name for
+                           * function t, defined in this file */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
     int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
                            * (a call of it needs no landing pad) */

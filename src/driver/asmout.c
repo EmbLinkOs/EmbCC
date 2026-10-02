@@ -396,6 +396,19 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                    (unsigned)text[k]);
         ob_str(b, "\n");
     }
+    /* An alias is its target's address under another name; on Thumb
+     * .thumb_set, so the symbol keeps the bit that says Thumb code. */
+    for (struct func *f = u->funcs; f; f = f->next) {
+        if (f->absorbed || !f->alias_of)
+            continue;
+        if (!f->is_static)
+            ob_fmt(b, "\t.%s\t%s\n", f->is_weak ? "weak" : "globl",
+                   asym(f->name));
+        ob_fmt(b, "\t.type\t%s, %sfunction\n", asym(f->name), type_sigil());
+        ob_fmt(b, "\t.%s\t%s, %s\n",
+               target_get() == TARGET_THUMB ? "thumb_set" : "set",
+               asym(f->name), asym(f->alias_of));
+    }
 
     /* .rodata: the string literals, each under the label the code refers
      * to. Emitted as bytes, because a string may hold anything. */

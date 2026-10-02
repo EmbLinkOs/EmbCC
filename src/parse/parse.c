@@ -54,6 +54,10 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * -mfloat-abi says. 1 base, 2 VFP, 0 the default. After
                 * isr for the reason isr gives. */
                int pcs, pcs_line;
+               /* alias("target"): this function is another name for
+                * target, defined in the same file (CMSIS's weak IRQ
+                * handlers). Last, for the reason isr gives. */
+               const char *alias;
 };
 
 struct parser {
@@ -407,6 +411,7 @@ static const struct attr_entry attr_table[] = {
     { "packed",        ATTR_HONOURED, NULL },
     { "aligned",       ATTR_HONOURED, NULL },
     { "weak",          ATTR_HONOURED, NULL },
+    { "alias",         ATTR_HONOURED, NULL },
     { "noreturn",      ATTR_HONOURED, NULL },
     { "nothrow",       ATTR_HONOURED, NULL },
     { "section",       ATTR_HONOURED, NULL },
@@ -817,6 +822,13 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     out->fmt_kind = fkind;
                     out->fmt_idx = (int)fidx;
                     out->fmt_first = (int)ffirst;
+                }
+                else if (attr_is(name, "alias")) {
+                    if (!sarg || !*sarg)
+                        parse_error_line(ps, aline,
+                                   "alias attribute needs the target's "
+                                   "name as a string");
+                    out->alias = sarg;
                 }
                 else if (attr_is(name, "section")) {
                     if (!sarg || !*sarg)
@@ -4576,6 +4588,9 @@ static void parse_top(struct parser *ps, struct unit *u,
             g->is_tls = is_tls;
             g->is_const = gconst;
             g->section = at.section;
+            if (at.alias)
+                parse_error_line(ps, gline, "alias attribute on variable '%s' "
+                           "is not supported (functions take it)", gname);
             g->seq = seq;
             g->def_seq = seq;
             **gtail = g;
@@ -4703,6 +4718,11 @@ fn_tail:
         parse_error_line(ps, line,
                    "section attribute on function '%s' is not supported — "
                    "every function is emitted into .text", name);
+    f->alias_of = at.alias;
+    if (at.alias && cur(ps)->kind == TOK_LBRACE)
+        parse_error_line(ps, line,
+                   "'%s' is an alias of '%s' and cannot have a body too",
+                   name, at.alias);
 
     if (cur(ps)->kind == TOK_SEMI) {
         advance(ps); /* prototype */
@@ -4757,6 +4777,10 @@ fn_tail:
                 g->vis = at.vis;
                 g->is_tls = is_tls;
                 g->section = at.section;
+                if (at.alias)
+                    parse_error_line(ps, dline, "alias attribute on variable "
+                               "'%s' is not supported (functions take it)",
+                               dname);
                 g->seq = seq;
                 g->def_seq = seq;
                 **gtail = g;

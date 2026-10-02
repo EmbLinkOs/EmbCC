@@ -4785,6 +4785,8 @@ static void merge_decls(struct unit *u)
             }
         }
         canon->is_weak |= f->is_weak;  /* weak on any declaration is weak */
+        if (f->alias_of)
+            canon->alias_of = f->alias_of;
         canon->sret_first |= f->sret_first;
         /* A calling convention on any declaration is THE convention; two
          * different ones cannot both be honoured. */
@@ -4891,9 +4893,37 @@ static void merge_globals(struct unit *u)
     }
 }
 
+/* An alias names a function defined in this file, as gcc requires: the
+ * symbol is defined at that function's address (main.c), so it cannot be
+ * defined itself, and a chain is not followed. */
+static void check_aliases(struct unit *u)
+{
+    for (struct func *f = u->funcs; f; f = f->next) {
+        if (f->absorbed || !f->alias_of)
+            continue;
+        if (f->has_defn)
+            sema_error_line(u, f->line, "'%s' is defined and is also an "
+                            "alias of '%s'", f->name, f->alias_of);
+        struct func *t = find_func(u, f->alias_of);
+        if (!t || !t->has_defn)
+            sema_error_line(u, f->line, "'%s' is an alias of '%s', which is "
+                            "not a function defined in this file", f->name,
+                            f->alias_of);
+        if (t->alias_of)
+            sema_error_line(u, f->line, "'%s' is an alias of '%s', which is "
+                            "itself an alias", f->name, f->alias_of);
+        /* Its body must be emitted, and nothing calls it by name -- the
+         * calls are the alias's -- so it is kept as __attribute__((used))
+         * keeps a function: not inlined away, not dropped. */
+        t->used = 1;
+        t->attr_used = 1;
+    }
+}
+
 void sema_check(struct unit *u)
 {
     merge_decls(u);
+    check_aliases(u);
     merge_globals(u);
     lower_globals(u);
 
@@ -4928,7 +4958,8 @@ void sema_check(struct unit *u)
      * An undefined static has no linker to save it — refuse now instead
      * of emitting an unresolvable object (THE RULE). */
     for (struct func *f = u->funcs; f; f = f->next)
-        if (!f->absorbed && !f->has_defn && f->is_static && f->used)
+        if (!f->absorbed && !f->has_defn && !f->alias_of && f->is_static &&
+            f->used)
             sema_error_line(u, f->line,
                        "static function '%s' is called but never defined",
                        f->name);

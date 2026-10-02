@@ -416,6 +416,18 @@ static void write_deps(const char *in, const char *obj)
  * ARM state on the first indirect call, where the processor faults.
  * Checked against llvm-mc's own output, which gives `f` at offset 0 a
  * st_value of 1. */
+/* The function an alias names: the canonical definition, which sema
+ * checked is in this file. */
+static const struct func *alias_target(const struct unit *u,
+                                       const struct func *f)
+{
+    for (const struct func *t = u->funcs; t; t = t->next)
+        if (!t->absorbed && t->has_defn && strcmp(t->name, f->alias_of) == 0)
+            return t;
+    internal_error("alias '%s' of '%s': no definition", f->name, f->alias_of);
+    return NULL;
+}
+
 static long fn_sym_value(enum target_arch a, long code_off)
 {
     return a == TARGET_THUMB ? code_off | 1 : code_off;
@@ -1163,6 +1175,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * minus that one" is a SUBTRACTOR/UNSIGNED pair here rather than
      * one relocation.
      */
+    /* Only the ELF writer and -S define an alias's symbol. */
+    if (target_fmt_get() != TGT_FMT_ELF)
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && f->alias_of)
+                diag_fatal(f->file, f->line, "alias attribute on '%s' is "
+                           "not supported for %s output", f->name,
+                           target_fmt_name(target_fmt_get()));
     if (target_fmt_get() == TGT_FMT_MACHO) {
         if (want_debug)
             diag_fatal(in, 0,
@@ -1930,6 +1949,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 (Elf64_Xword)f->code_len,
                 ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
                 (Elf64_Half)text_ndx);
+    /* An alias is one more symbol at its target's address and size (sema
+     * checked the target is a function defined here); a call or an
+     * address taken goes through the alias's own symbol, so a strong
+     * definition elsewhere still wins over a weak alias. */
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && f->alias_of && f->is_static) {
+            const struct func *t = alias_target(u, f);
+            f->sym_ndx = elfw_add_symbol(
+                w, f->name, (Elf64_Addr)fn_sym_value(ta, t->code_off),
+                (Elf64_Xword)t->code_len, ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
+                (Elf64_Half)text_ndx);
+        }
     for (struct global *g = u->globals; g; g = g->next)
         if (!g->absorbed && g->defined && g->is_static)
             g->sym_ndx = elfw_add_symbol(
@@ -1947,6 +1978,15 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 (Elf64_Xword)f->code_len,
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
                 (Elf64_Half)text_ndx);
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && f->alias_of && !f->is_static) {
+            const struct func *t = alias_target(u, f);
+            f->sym_ndx = elfw_add_symbol(
+                w, f->name, (Elf64_Addr)fn_sym_value(ta, t->code_off),
+                (Elf64_Xword)t->code_len,
+                ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
+                (Elf64_Half)text_ndx);
+        }
     for (struct global *g = u->globals; g; g = g->next)
         if (!g->absorbed && g->defined && !g->is_static)
             g->sym_ndx = elfw_add_symbol(
