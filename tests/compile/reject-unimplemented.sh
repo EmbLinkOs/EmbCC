@@ -267,11 +267,14 @@ check unnamed-param-in-definition \
     'int f(int) { return 1; }
 int main(void) { return f(1); }' \
     "needs a name in a definition"
+# main alone may reach its closing brace (it returns 0, C99 5.1.2.2.3)
 check fallthrough \
-    'int main(void) { int x = 1; }' \
+    'static int f(void) { int x = 1; }
+int main(void) { return f(); }' \
     "must end in a return"
 check fallthrough-if \
-    'int main(void) { if (1) return 1; }' \
+    'static int f(void) { if (1) return 1; }
+int main(void) { return f(); }' \
     "must end in a return"
 check arity \
     'static int f(int a, int b) { return a + b; }

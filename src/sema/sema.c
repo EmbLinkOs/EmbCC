@@ -4669,7 +4669,11 @@ static void check_func(struct unit *u, struct func *f)
 
     check_stmt(u, f, &sc, f->body, 0, 0, 0);
 
-    if (f->ret_ty->kind != TY_VOID && !list_returns(f->body)) {
+    /* main is the exception the language makes: reaching its closing
+     * brace returns 0 (C99 5.1.2.2.3), and irgen says so. Refusing it
+     * refused `int main(void) { }`. */
+    if (f->ret_ty->kind != TY_VOID && !list_returns(f->body) &&
+        strcmp(f->name, "main") != 0) {
         diag_error_at(f->file ? f->file : u->file, f->line, 0,
                       "control may reach the end of '%s' — every path must "
                       "end in a return statement", f->name);

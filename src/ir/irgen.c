@@ -3867,6 +3867,14 @@ static void gen_func(struct ir_func *fn, struct func *f)
         fn->has_alloca = 1;
     }
     gen_stmt(fn, f->body, NULL);
+    /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3). After
+     * a body whose every path returned this is unreachable, and goes. */
+    if (!strcmp(f->name, "main") && ty_is_integer(f->ret_ty)) {
+        int z = emit_const(fn, 0, ty_size(f->ret_ty) > 4 ? 8 : 4);
+        struct ir_ins *r = emit(fn);
+        r->op = IR_RET;
+        r->a = z;
+    }
     if (fn->neh)
         mark_eh_calls(fn);
     for (int i = 0; i < f->nvars; i++)  /* clamp the un-narrowed default */
