@@ -9,6 +9,66 @@
 #include "../driver/util.h"
 #include "../arch/target.h"
 
+/* An identifier may hold the characters C11 Annex D lists, written in
+ * UTF-8 as gcc and clang read them: `int café;`. Returns the length of
+ * the UTF-8 sequence at p when it encodes one of them -- and, for an
+ * identifier's first character, not one D.2 rules out there (combining
+ * marks) -- else 0. A malformed or overlong sequence is never one. */
+int lex_ident_utf8(const char *p, int first)
+{
+    static const unsigned long allowed[][2] = {
+        { 0x00A8, 0x00A8 }, { 0x00AA, 0x00AA }, { 0x00AD, 0x00AD },
+        { 0x00AF, 0x00AF }, { 0x00B2, 0x00B5 }, { 0x00B7, 0x00BA },
+        { 0x00BC, 0x00BE }, { 0x00C0, 0x00D6 }, { 0x00D8, 0x00F6 },
+        { 0x00F8, 0x00FF }, { 0x0100, 0x167F }, { 0x1681, 0x180D },
+        { 0x180F, 0x1FFF }, { 0x200B, 0x200D }, { 0x202A, 0x202E },
+        { 0x203F, 0x2040 }, { 0x2054, 0x2054 }, { 0x2060, 0x206F },
+        { 0x2070, 0x218F }, { 0x2460, 0x24FF }, { 0x2776, 0x2793 },
+        { 0x2C00, 0x2DFF }, { 0x2E80, 0x2FFF }, { 0x3004, 0x3007 },
+        { 0x3021, 0x302F }, { 0x3031, 0x303F }, { 0x3040, 0xD7FF },
+        { 0xF900, 0xFD3D }, { 0xFD40, 0xFDCF }, { 0xFDF0, 0xFE44 },
+        { 0xFE47, 0xFFFD },
+    };
+    static const unsigned long not_first[][2] = {
+        { 0x0300, 0x036F }, { 0x1DC0, 0x1DFF }, { 0x20D0, 0x20FF },
+        { 0xFE20, 0xFE2F },
+    };
+    const unsigned char *s = (const unsigned char *)p;
+    unsigned long c;
+    int n;
+    if (s[0] < 0xC2)                  /* ASCII, a continuation, overlong */
+        return 0;
+    if (s[0] < 0xE0) {
+        n = 2;
+        c = s[0] & 0x1F;
+    } else if (s[0] < 0xF0) {
+        n = 3;
+        c = s[0] & 0x0F;
+    } else if (s[0] < 0xF5) {
+        n = 4;
+        c = s[0] & 0x07;
+    } else {
+        return 0;
+    }
+    for (int i = 1; i < n; i++) {
+        if ((s[i] & 0xC0) != 0x80)
+            return 0;
+        c = c << 6 | (s[i] & 0x3F);
+    }
+    if ((n == 3 && c < 0x800) || (n == 4 && (c < 0x10000 || c > 0x10FFFF)))
+        return 0;
+    int ok = 0;
+    if (c >= 0x10000)                 /* planes 1-14, less their last two */
+        ok = c <= 0xEFFFD && (c & 0xFFFF) <= 0xFFFD;
+    for (size_t i = 0; !ok && i < sizeof allowed / sizeof allowed[0]; i++)
+        ok = c >= allowed[i][0] && c <= allowed[i][1];
+    for (size_t i = 0; ok && first && i < sizeof not_first / sizeof not_first[0];
+         i++)
+        if (c >= not_first[i][0] && c <= not_first[i][1])
+            ok = 0;
+    return ok ? n : 0;
+}
+
 void lex_init(struct lexer *lx, const char *file, const char *src)
 {
     lex_init_mode(lx, file, src, 0);
@@ -809,10 +869,18 @@ void lex_next(struct lexer *lx)
         return;
     }
 
-    if (isalpha((unsigned char)*lx->p) || *lx->p == '_') {
+    if (isalpha((unsigned char)*lx->p) || *lx->p == '_' ||
+        lex_ident_utf8(lx->p, 1)) {
         const char *start = lx->p;
-        while (isalnum((unsigned char)*lx->p) || *lx->p == '_')
-            lx->p++;
+        for (;;) {
+            int u8;
+            if (isalnum((unsigned char)*lx->p) || *lx->p == '_')
+                lx->p++;
+            else if ((u8 = lex_ident_utf8(lx->p, 0)) > 0)
+                lx->p += u8;
+            else
+                break;
+        }
         size_t n = (size_t)(lx->p - start);
         if (lx->cxx)
             for (size_t i = 0; i < sizeof cxx_keywords / sizeof cxx_keywords[0];
@@ -1039,6 +1107,11 @@ void lex_next(struct lexer *lx)
         }
         break;
     default:
+        if ((unsigned char)*lx->p >= 0x80)
+            diag_fatal(lx->file, lx->line,
+                       "byte 0x%02x is not part of a character C allows "
+                       "here (identifiers take UTF-8 letters, C11 "
+                       "Annex D)", (unsigned char)*lx->p);
         diag_fatal(lx->file, lx->line,
                    "character '%c' is not supported yet", *lx->p);
     }

@@ -219,5 +219,6 @@ void lex_next(struct lexer *lx);
 
 /* Human-readable name of a token, for diagnostics. */
 const char *tok_describe(const struct token *t);
+int lex_ident_utf8(const char *p, int first);
 
 #endif

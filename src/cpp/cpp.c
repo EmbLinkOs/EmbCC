@@ -108,9 +108,13 @@ static void undef_macro(struct cpp *cpp, const char *name, size_t n)
 
 /* ---- character helpers ---- */
 
+/* A byte of a UTF-8 sequence counts as an identifier's, so `café` is
+ * one name to macro lookup; the lexer decides which characters an
+ * identifier may really hold (lex_ident_utf8). */
 static int is_id0(char c)
 {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+           (unsigned char)c >= 0x80;
 }
 
 static int is_idc(char c) { return is_id0(c) || (c >= '0' && c <= '9'); }
@@ -1412,6 +1416,10 @@ static void process_file(struct cpp *cpp, const char *path,
     struct src s;
     s.cpp = cpp;
     s.file = path;
+    /* a UTF-8 byte-order mark is not part of the program */
+    if ((unsigned char)src[0] == 0xEF && (unsigned char)src[1] == 0xBB &&
+        (unsigned char)src[2] == 0xBF)
+        src += 3;
     s.p = src;
     s.line = 1;
     s.incdir_idx = incdir_idx;

@@ -430,3 +430,9 @@ check union-excess-init \
 check array-designator-in-struct \
     'struct s { int a, b; }; struct s x = { [1] = 2 };' \
     "array designator"
+
+# UTF-8 is read in identifiers, for the letters C11 Annex D lists; any
+# other non-ASCII character outside a literal is named, not skipped.
+check non-ascii-operator \
+    "int main(void) { int a = 2 $(printf '\303\227') 3; return a; }" \
+    "is not part of a character C allows"

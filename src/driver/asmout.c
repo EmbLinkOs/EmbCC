@@ -41,6 +41,29 @@
 #include "../sema/type.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
+/* A symbol as an assembler reads it. C lets an identifier hold UTF-8
+ * letters (`größe`), and a name with any byte outside [A-Za-z0-9_.$] is
+ * written in quotes, as clang writes it; the object file carries the
+ * bytes either way. The quoted copy lives as long as the compile. */
+static const char *asym(const char *n)
+{
+    int plain = 1;
+    for (const char *p = n; *p; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '.' ||
+              *p == '$'))
+            plain = 0;
+    if (plain)
+        return n;
+    size_t len = strlen(n);
+    char *q = xmalloc(len + 3);
+    q[0] = '"';
+    memcpy(q + 1, n, len);
+    q[len + 1] = '"';
+    q[len + 2] = 0;
+    return q;
+}
+
 /* One place in .text that names a symbol. Collected from what the backend
  * recorded, so this is the same information the ELF writer turns into
  * relocations — not a second derivation of it. */
@@ -185,18 +208,18 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     struct site *site = xcalloc((size_t)(nsite ? nsite : 1), sizeof *site);
     for (int i = 0; i < next; i++) {
         site[ns].off = ext[i].patch_off;
-        site[ns].name = ext[i].callee ? ext[i].callee->name : "?";
+        site[ns].name = ext[i].callee ? asym(ext[i].callee->name) : "?";
         site[ns++].kind = ext[i].tail ? RK_TAIL : RK_CALL;
     }
     for (int i = 0; i < nfs; i++) {
         site[ns].off = fs[i].patch_off;
-        site[ns].name = fs[i].target ? fs[i].target->name : "?";
+        site[ns].name = fs[i].target ? asym(fs[i].target->name) : "?";
         site[ns].addend = fs[i].kind == RK_ABS64 ? fs[i].addend : 0;
         site[ns++].kind = fs[i].kind;
     }
     for (int i = 0; i < ngs; i++) {
         site[ns].off = gs[i].patch_off;
-        site[ns].name = gs[i].glob ? gs[i].glob->name : "?";
+        site[ns].name = gs[i].glob ? asym(gs[i].glob->name) : "?";
         site[ns++].kind = gs[i].kind;
     }
     for (int i = 0; i < nstrs; i++) {
@@ -242,11 +265,11 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             ob_str(b, "\n");
         }
         if (!f->is_static)
-            ob_fmt(b, "\t.globl\t%s\n", f->name);
+            ob_fmt(b, "\t.globl\t%s\n", asym(f->name));
         if (target_get() == TARGET_THUMB)
             ob_fmt(b, "\t.thumb_func\n");
-        ob_fmt(b, "\t.type\t%s, %sfunction\n%s:\n", f->name, type_sigil(),
-               f->name);
+        ob_fmt(b, "\t.type\t%s, %sfunction\n%s:\n", asym(f->name),
+               type_sigil(), asym(f->name));
 
         long pc = lo;
         while (pc < hi) {
@@ -326,7 +349,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             if (st) {
                 char sym[160];
                 if (st->name)
-                    snprintf(sym, sizeof sym, "%s", st->name);
+                    snprintf(sym, sizeof sym, "%s", st->name);   /* the site table holds asym() names */
                 else
                     str_label(sym, sizeof sym, iu, st->str_off);
                 const char *rt = reloc_name(st->kind);
@@ -362,7 +385,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             }
             pc += len;
         }
-        ob_fmt(b, "\t.size\t%s, .-%s\n", f->name, f->name);
+        ob_fmt(b, "\t.size\t%s, .-%s\n", asym(f->name), asym(f->name));
         prev_end = hi;
     }
     /* .text may end with padding too. */
@@ -401,11 +424,11 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             continue;
         if (!any_data) { ob_str(b, "\n"); any_data = 1; }
         if (!g->is_static)
-            ob_fmt(b, "\t.globl\t%s\n", g->name);
+            ob_fmt(b, "\t.globl\t%s\n", asym(g->name));
         if (g->init_bytes && g->init_len > 0) {
             ob_str(b, "\t.data\n");
             ob_fmt(b, "\t.align\t%d\n\t.type\t%s, %sobject\n%s:\n",
-                   al, g->name, type_sigil(), g->name);
+                   al, asym(g->name), type_sigil(), asym(g->name));
             /* A pointer slot in an initializer is an ADDRESS the linker
              * fills in, not bytes: `static char *p = "hi";` holds a
              * relocation, and emitting its zeroed bytes would produce a
@@ -422,9 +445,9 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                     if (r->str)
                         str_label(sym, sizeof sym, iu, r->str_off);
                     else if (r->gtarget)
-                        snprintf(sym, sizeof sym, "%s", r->gtarget->name);
+                        snprintf(sym, sizeof sym, "%s", asym(r->gtarget->name));
                     else if (r->ftarget)
-                        snprintf(sym, sizeof sym, "%s", r->ftarget->name);
+                        snprintf(sym, sizeof sym, "%s", asym(r->ftarget->name));
                     else
                         snprintf(sym, sizeof sym, "0");
                     ob_fmt(b, "\t.quad\t%s", sym);
@@ -449,10 +472,10 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             }
         } else {
             ob_fmt(b, "\t.bss\n\t.align\t%d\n\t.type\t%s, %sobject\n%s:\n"
-                      "\t.zero\t%d\n", al, g->name, type_sigil(),
-                   g->name, sz);
+                      "\t.zero\t%d\n", al, asym(g->name), type_sigil(),
+                   asym(g->name), sz);
         }
-        ob_fmt(b, "\t.size\t%s, %d\n", g->name, sz);
+        ob_fmt(b, "\t.size\t%s, %d\n", asym(g->name), sz);
     }
 
     /* __attribute__((constructor)) / ((destructor)). The object writer
@@ -479,7 +502,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                        arr[pass], arr[pass] + 1);
                 any = 1;
             }
-            ob_fmt(b, "\t.quad\t%s\n", f->name);
+            ob_fmt(b, "\t.quad\t%s\n", asym(f->name));
         }
     }
 }

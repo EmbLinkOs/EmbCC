@@ -36,7 +36,8 @@ command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 || {
 
 # Chosen to force every relocation kind these targets emit: a call to an
 # undefined symbol, a string literal's address, a global's address, a
-# pointer slot in .data, and .bss.
+# pointer slot in .data, and .bss -- and symbols whose names hold UTF-8
+# letters, which an assembler reads only in quotes.
 cat > "$out/u.c" <<'CEOF'
 extern int helper(int);
 static const char msg[] = "hello, world";
@@ -46,6 +47,9 @@ const char *greet(void) { return msg; }
 int *where(void) { return table; }
 int compute(int x) { return helper(x) + table[1] + scratch[2]; }
 long mix(long a, long b) { return a * b - (a >> 3) + (b & 0xff); }
+extern int hölper(int);
+int zähler = 3;
+int größe(int x) { return hölper(x) + zähler; }
 CEOF
 
 fail=0
