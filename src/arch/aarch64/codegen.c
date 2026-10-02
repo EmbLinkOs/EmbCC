@@ -390,6 +390,9 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
         }
         return;
     }
+    /* Composites are placed by their NATURAL alignment (ty_natural_align):
+     * the members', not a struct-level aligned attribute's. */
+    int nal = a->nat_align ? a->nat_align : a->align;
     int esz = a->hfa_size, n = a->hfa_n;
     if (n) {                                            /* C.2 - C.4 */
         if (cu->nsrn + n <= 8) {
@@ -397,7 +400,7 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
             cu->nsrn += n;
         } else {
             cu->nsrn = 8;
-            to_stack(cu, p, p->size, a->align);
+            to_stack(cu, p, p->size, nal);
         }
         return;
     }
@@ -425,14 +428,21 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
         }
         return;
     }
-    int nslot = p->is_struct ? (p->size + 7) / 8 : 1;   /* C.9 / C.10 */
+    /* C.10: an argument aligned to sixteen starts at an EVEN register
+     * -- a struct holding an __int128 as much as the __int128 itself,
+     * by its natural alignment: one only declared aligned(16) does not.
+     * Without this, f(long x5, struct{__int128}) took x5,x6 where gcc
+     * and clang put it in x6,x7, in both directions of the call. */
+    if (p->is_struct && nal >= 16)
+        cu->ngrn = (cu->ngrn + 1) & ~1;
+    int nslot = p->is_struct ? (p->size + 7) / 8 : 1;   /* C.12 */
     if (cu->ngrn + nslot <= 8) {
         p->where = AP_X; p->reg = cu->ngrn; p->nreg = nslot;
         cu->ngrn += nslot;
         return;
     }
     cu->ngrn = 8;                                       /* C.11 */
-    to_stack(cu, p, p->is_struct ? p->size : 8, a->align);
+    to_stack(cu, p, p->is_struct ? p->size : 8, p->is_struct ? nal : a->align);
 }
 
 /* Argument k of a call or function whose argument 0 may be the indirect-

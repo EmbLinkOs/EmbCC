@@ -272,6 +272,7 @@ struct ir_ins {
          * computed at irgen where the type still exists (§9.1). The backend
          * reads these instead of walking `ty`. */
         int align;
+        int nat_align;       /* ty_natural_align; 0 when not filled: align */
         int is_float;
         int is_int128;
         int hfa_n, hfa_size;

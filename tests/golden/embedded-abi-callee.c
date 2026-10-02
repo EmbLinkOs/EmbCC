@@ -45,3 +45,9 @@ int vafter4(int a, int b, int c, int d, ...)
     va_end(ap);
     return t;
 }
+int nat_ov8(int a, struct ov8 s, int z) { return a + s.x * 10 + z * 100; }
+int nat_ll8(int a, struct ll8 s, int z) { return a + (int)s.x * 10 + z * 100; }
+int nat_m8(int a, struct m8 s, int z) { return a + s.x * 10 + z * 100; }
+int nat_stk(int a, int b, int c, int d, int e, int f, int g, int h, int i,
+            struct ov8 s, struct m8 t, int z)
+{ return a + e + i * 10 + s.x * 100 + t.x * 1000 + z * 10000; }

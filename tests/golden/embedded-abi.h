@@ -43,6 +43,20 @@ int split(int a, int b, int c, struct s8 s, struct s12 t);
  * NOT, for a fixed argument, and DOES for a variadic one. */
 long long mix64(int a, long long b, int c, struct s8 s);
 
+/* A composite is placed by its NATURAL alignment -- its members' --
+ * not by an aligned attribute on the struct itself. AAPCS32 rounds to
+ * an even register for nat_ll8 and nat_m8 and NOT for nat_ov8, which
+ * EmbCC did, reading r2 where clang had put the struct in r1. The
+ * nine-argument forms reach the stack on RISC-V too. */
+struct __attribute__((aligned(8))) ov8 { int x; };
+struct ll8 { long long x; };
+struct m8 { int x __attribute__((aligned(8))); };
+int nat_ov8(int a, struct ov8 s, int z);
+int nat_ll8(int a, struct ll8 s, int z);
+int nat_m8(int a, struct m8 s, int z);
+int nat_stk(int a, int b, int c, int d, int e, int f, int g, int h, int i,
+            struct ov8 s, struct m8 t, int z);
+
 /* Variadic, where the ABI question is whether the callee's register
  * save area lines up with where the caller left the arguments. */
 int vsum(int n, ...);

@@ -249,6 +249,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
             (!m->is_bitfield || m->name || target_anon_bitfield_aligns()))
             align = ma;
     }
+    t->nat_align = align;
     if (user_align > align)
         align = user_align;
     int bytes = t->is_union ? umax : (bitpos + 7) / 8;
@@ -291,6 +292,16 @@ int ty_size(const struct type *t)
     case TY_VOID: break;
     }
     return 0;
+}
+
+/* The ARM procedure-call standards' natural alignment (type.h). */
+int ty_natural_align(const struct type *t)
+{
+    if (t->kind == TY_ARRAY)
+        return ty_natural_align(t->pointee);
+    if (t->kind == TY_STRUCT && t->complete && t->nat_align)
+        return t->nat_align;
+    return ty_align(t);
 }
 
 int ty_align(const struct type *t)

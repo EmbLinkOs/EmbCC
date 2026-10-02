@@ -796,7 +796,10 @@ static int call_sret_bytes(const struct ir_ins *i)
 }
 
 /* What an argument's alignment is for placement purposes. A composite
- * carries its own; a SCALAR does not, and an eight-byte one is
+ * carries its own -- its NATURAL alignment, the members' (type.h): a
+ * struct declared aligned(8) around one int goes in the next register,
+ * as gcc and clang pass it, where EmbCC rounded to an even one. A
+ * SCALAR carries none, and an eight-byte one is
  * eight-aligned — which is what rounds the register number up to even.
  * Asking only composites (an earlier shape of this) put `long long` in
  * whichever register came next, so f(int, long long, ...) passed it in
@@ -804,7 +807,7 @@ static int call_sret_bytes(const struct ir_ins *i)
 static int arg_align(const struct ir_arg *a)
 {
     if (a->is_struct)
-        return a->align ? a->align : 4;
+        return a->nat_align ? a->nat_align : a->align ? a->align : 4;
     return a->size > 4 ? 8 : 4;
 }
 

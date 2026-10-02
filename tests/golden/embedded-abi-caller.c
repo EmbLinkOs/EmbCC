@@ -11,4 +11,7 @@ int main(void){
   putn(vsum(5,1,2,3,4,5)); putn(vsum(1,42)); putn(vafter4(1,2,3,4,50,600));
   { long long v = vmix(4, 1, 100000000000LL, 2, 200000000000LL);
     putn((long)(unsigned)v); putn((long)(unsigned)(v >> 32)); }
+  { struct ov8 o = { 3 }; struct ll8 l = { 4 }; struct m8 m = { 5 };
+    putn(nat_ov8(1, o, 2)); putn(nat_ll8(1, l, 2)); putn(nat_m8(1, m, 2));
+    putn(nat_stk(1, 0, 0, 0, 2, 0, 0, 0, 3, o, m, 4)); }
   puts_("\n==END==\n"); return 0; }

@@ -2766,6 +2766,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             ar->hfa_n = ty_hfa(at, &ar->hfa_size);
             ar->byref = ty_aapcs64_byref(at);
             ar->align = ty_align(at);
+            ar->nat_align = ty_natural_align(at);
             ar->is_float = ty_is_float(at);
             ar->is_int128 = at->kind == TY_INT128;
             ar->is_struct = at->kind == TY_STRUCT;
@@ -3792,6 +3793,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
             a->vreg = k;
             a->size = pt ? ty_size(pt) : 0;
             a->align = pt ? ty_align(pt) : 1;
+            a->nat_align = pt ? ty_natural_align(pt) : 1;
             a->is_struct = pt && pt->kind == TY_STRUCT;
             a->is_float = pt && ty_is_float(pt);
             a->is_int128 = pt && pt->kind == TY_INT128;

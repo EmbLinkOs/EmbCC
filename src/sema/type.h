@@ -83,6 +83,12 @@ struct type {
     struct member *members;
     int nmembers;
     int size, align;        /* SysV layout, computed when completed */
+    /* The alignment its MEMBERS give it -- `align` before the struct's
+     * own __attribute__((aligned)) is applied, after packing. AAPCS64
+     * and AAPCS place arguments by this "natural alignment", and gcc and
+     * clang agree: a struct aligned(16) holding a long goes in x1, one
+     * holding an __int128 in x2 (ty_natural_align). */
+    int nat_align;
     /* TY_FUNC (always behind a pointer in this subset): */
     struct type *ret;
     struct type *ptypes[MAX_PARAMS];
@@ -162,6 +168,7 @@ struct member *ty_find_member(struct type *t, const char *name);
 
 int ty_size(const struct type *t);          /* bytes; void has none */
 int ty_align(const struct type *t);
+int ty_natural_align(const struct type *t);
 int ty_equal(const struct type *a, const struct type *b);
 int ty_is_integer(const struct type *t);
 int ty_is_float(const struct type *t);
