@@ -8573,6 +8573,15 @@ static int pass_divmod(struct ir_func *fn)
 {
     struct dm_ent tab[16];
     int ntab = 0, nrw = 0;
+    /* A CONSTANT divisor is left alone: pass_divmagic has made it a
+     * multiply where that pays, and where it did not -- a core with a
+     * hardware divide, Thumb's `udiv; mls` -- the remainder is already
+     * one fused instruction, which a separate multiply and subtract
+     * (strength-reduced to shifts and adds, the constant rematerialised
+     * in the loop) only made longer: the workload's utoa ran 6.7% more
+     * instructions on Cortex-M4. */
+    struct defs dd;
+    compute_defs(fn, &dd);
     /* per instruction: mulq -- this MOD becomes a - q*b with q given;
      * preq -- a DIV into the given fresh q is inserted before this MOD,
      * which then becomes a - q*b; movq -- this DIV becomes a copy of q */
@@ -8583,10 +8592,12 @@ static int pass_divmod(struct ir_func *fn)
             ntab = 0;
             continue;
         }
+        long kb;
         int pairable = (i->op == IR_MOD || i->op == IR_DIV) && !i->flt &&
                        !i->imm_b && (i->w == 4 || i->w == 8) &&
                        i->a >= 0 && i->b >= 0 && i->dst >= 0 &&
-                       i->dst != i->a && i->dst != i->b;
+                       i->dst != i->a && i->dst != i->b &&
+                       !get_const(fn, &dd, i->b, &kb);
         int matched = 0;
         if (pairable) {
             for (int k = 0; k < ntab; k++) {
@@ -8632,6 +8643,7 @@ static int pass_divmod(struct ir_func *fn)
             ntab++;
         }
     }
+    free_defs(&dd);
     if (!nrw)
         return 0;
     struct ibuf nb = { 0, 0, 0 };
