@@ -1257,7 +1257,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             if (ec && ec->seq <= cur_body_seq) {
                 e->kind = EXPR_NUM;
                 e->num = ec->val;
-                e->ty = ty_base(TY_INT, 0);
+                e->ty = ec->ty ? ec->ty : ty_base(TY_INT, 0);
                 break;
             }
             if (ec)

@@ -414,6 +414,8 @@ struct func {
 struct econst {
     const char *name;
     long val;
+    struct type *ty;      /* NULL: int, as an enumerator is; a C23
+                           * constexpr's own type otherwise */
     int seq;
     struct econst *next;
 };

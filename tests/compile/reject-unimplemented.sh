@@ -479,3 +479,12 @@ check pack-bad-value \
     '#pragma pack(3)
 struct s { char c; int i; };' \
     "wants 1, 2, 4, 8 or 16"
+
+# C23 constexpr takes an exactly representable integer constant; EmbCC
+# keeps integer ones, and says so for the rest.
+check constexpr-not-exact \
+    'constexpr unsigned char c = 300;' \
+    "does not fit"
+check constexpr-floating \
+    'constexpr double d = 1.5;' \
+    "takes integer constants"
