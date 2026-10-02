@@ -332,6 +332,26 @@ done
     echo "case cxx-not-lp64: -fsyntax-only, which writes nothing, was refused"
     exit 1; }
 echo "case cxx-not-lp64: C++ for a target that is not LP64 is refused by name"
+
+# File-scope asm: the built-in encoder is x86-64's. An instruction in a
+# block for any other machine is refused by name; it was refused only on
+# aarch64, and `ret` became 0xc3 in a Thumb, RISC-V or AVR object. A block
+# written as data still assembles everywhere.
+printf '__asm__(".globl f\\nf:\\n ret\\n");\nint g(void) { return 1; }\n' \
+    > "$out_dir/topasm.c"
+printf '__asm__(".globl tbl\\ntbl:\\n .long 1\\n");\nint g(void) { return 1; }\n' \
+    > "$out_dir/topdata.c"
+for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf riscv64-unknown-elf avr; do
+    if err=$("$EMBCC" --target=$t -c "$out_dir/topasm.c" \
+             -o "$out_dir/topasm.o" 2>&1); then
+        echo "case topasm $t: an x86-64 instruction went into the object"; exit 1
+    fi
+    echo "$err" | grep -q 'file-scope asm instruction "ret"' || {
+        echo "case topasm $t: wrong diagnostic:"; echo "$err"; exit 1; }
+    "$EMBCC" --target=$t -c "$out_dir/topdata.c" -o "$out_dir/topdata.o" || {
+        echo "case topasm $t: a data-only block was refused"; exit 1; }
+done
+echo "case topasm: an instruction in file-scope asm off x86-64 is refused by name"
 check asm-bad-constraint \
     'int main(void) { int x; __asm__("int $0x80" : "=t"(x)); return x; }' \
     "is not supported"

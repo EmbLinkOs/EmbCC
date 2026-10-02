@@ -872,8 +872,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * directives -- labels and .byte/.long/.quad -- are not, so a
          * block written as data assembles on any target, and one written
          * with mnemonics is refused there by name instead of quietly
-         * emitting x86 bytes into an aarch64 image. */
-        topasm_assemble(ta, target_get() != TARGET_AARCH64);
+         * emitting x86 bytes into another machine's image. The test was
+         * "not aarch64", which let `ret` become 0xc3 in a Thumb, RISC-V
+         * or AVR object. */
+        topasm_assemble(ta, target_get() == TARGET_X86_64);
         for (int r = 0; r < ta->nrels; r++)
             for (struct func *f = u->funcs; f; f = f->next)
                 if (!f->absorbed &&
