@@ -3765,6 +3765,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * documented limitation, not a miscompile. */
         struct type *base = parse_type_spec(ps, 1);
         int spec_const = ps->spec_const;
+        /* every declarator takes the declaration's _Alignas, not only
+         * the first */
+        int decl_alignas = ps->alignas_out;
+        ps->alignas_out = 0;
         /* No type specifier at all. Implicit int is not C99 and guessing
          * one here would compile a declaration nobody wrote; the old
          * behaviour was worse still, since every use below dereferences
@@ -3841,10 +3845,9 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                                dname);
                 if (lead.aligned > lat.aligned)
                     lat.aligned = lead.aligned;
-                s->user_align = lat.aligned > ps->alignas_out
-                                ? lat.aligned : ps->alignas_out;
+                s->user_align = lat.aligned > decl_alignas
+                                ? lat.aligned : decl_alignas;
                 s->attr_unused = lat.unused || lead.unused;
-                ps->alignas_out = 0;
             }
             int was_array = s->dty->kind == TY_ARRAY;
             (void)was_array;
@@ -4270,6 +4273,8 @@ static void parse_top(struct parser *ps, struct unit *u,
             advance(ps);
         } else if (at_attribute(ps)) {
             parse_attributes(ps, &at); /* leading __attribute__((weak)) etc. */
+        } else if (cur(ps)->kind == TOK_KW_ALIGNAS) {
+            consume_alignas(ps);   /* `_Alignas(16) static int g;`: any order */
         } else {
             break;
         }
@@ -4355,8 +4360,13 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (!base)
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                    "expected a type before %s", tok_describe(cur(ps)));
-    ps->alignas_out = 0;   /* a top-level object carries no over-alignment slot;
-                            * drop any _Alignas so it can't leak into the next decl */
+    /* An _Alignas among the specifiers applies to every declarator of
+     * the declaration. It was dropped here, before anything read it, so
+     * `_Alignas(64) int buf[16];` at file scope was laid out at its
+     * type's alignment -- silently. Taken now, and cleared so it cannot
+     * leak into the next declaration. */
+    int decl_alignas = ps->alignas_out;
+    ps->alignas_out = 0;
     if (cur(ps)->kind == TOK_SEMI) {
         /* bare declaration: 'struct X { ... };', 'enum { ... };' */
         advance(ps);
@@ -4468,8 +4478,8 @@ static void parse_top(struct parser *ps, struct unit *u,
             g->attr_used = at.used;
             g->attr_unused = at.unused;
             g->attr_deprecated = at.deprecated;
-            g->user_align = at.aligned > ps->alignas_out
-                            ? at.aligned : ps->alignas_out;
+            g->user_align = at.aligned > decl_alignas
+                            ? at.aligned : decl_alignas;
             g->vis = at.vis;
             g->is_tls = is_tls;
             g->is_const = gconst;
@@ -4650,10 +4660,8 @@ fn_tail:
                 g->attr_used = at.used;
                 g->attr_unused = at.unused;
                 g->attr_deprecated = at.deprecated;
-                g->user_align = at.aligned > ps->alignas_out
-                                ? at.aligned : ps->alignas_out;
-            g->user_align = at.aligned > ps->alignas_out
-                            ? at.aligned : ps->alignas_out;
+                g->user_align = at.aligned > decl_alignas
+                                ? at.aligned : decl_alignas;
                 g->vis = at.vis;
                 g->is_tls = is_tls;
                 g->section = at.section;
