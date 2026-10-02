@@ -1213,7 +1213,13 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
     }
 
     if (cur(ps)->kind == TOK_LBRACE) {
-        if (!allow_body)
+        /* A type name in an expression may define a struct, and headers
+         * do: newlib's fallback _Alignof is `__offsetof(struct { char __a;
+         * x __b; }, __b)`. One without a tag names nothing the one flat
+         * tag namespace could collide with, so it is taken; a tagged one,
+         * or an enum (whose constants would land in that namespace), is
+         * not. */
+        if (!allow_body && (tag || kind == TAG_ENUM))
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "define %s at file scope (block-scope type "
                        "definitions are not supported)",
