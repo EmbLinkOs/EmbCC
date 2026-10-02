@@ -1666,7 +1666,7 @@ static void cmd_tui(struct img *m, int argc, char **argv)
  * live Cortex-M prints what `where ADDR` prints on a crash dump,
  * because it IS the same function underneath.
  *
- * docs/tools/embdbg.md §4 parked live debugging behind the EmbLinkOS
+ * EmbDBG's original design parked live debugging behind the EmbLinkOS
  * kernel's own contract, which was right for a process running on
  * EmbLinkOS and is not the only live target this compiler has any
  * more. tools/embdbg/remote.c's header argues that at length.

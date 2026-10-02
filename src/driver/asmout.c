@@ -23,7 +23,7 @@
  *
  * x86-64 only. The aarch64 backend has no disassembler in this repository,
  * so `-S` for that target refuses rather than emitting something that looks
- * like assembly and is not (docs/language/compatibility.md's rule:
+ * like assembly and is not (docs/internals/contributing.md's rule:
  * unsupported must fail, never be silently wrong).
  */
 #include "asmout.h"

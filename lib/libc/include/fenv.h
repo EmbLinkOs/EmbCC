@@ -38,7 +38,7 @@ extern "C" {
                        FE_OVERFLOW | FE_UNDERFLOW | FE_INEXACT)
 
 /* The four IEEE rounding directions. FE_TONEAREST is ties-to-even and
- * is the default everywhere -- see docs/language/libc.md on why ties
+ * is the default everywhere -- see docs/manual/libraries.md on why ties
  * matter. */
 #define FE_TONEAREST  0
 #define FE_DOWNWARD   1

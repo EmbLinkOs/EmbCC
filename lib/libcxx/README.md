@@ -50,12 +50,11 @@ Two are not standard headers: `include/__tree` is the red-black tree
 `<unordered_map>` and `<unordered_set>` share. They exist so those pairs
 have one implementation each rather than two.
 
-See `docs/language/libcxx.md` for the design decisions and what each
-part is tested by.
+`docs/manual/libraries.md` describes the runtime and the headers.
 
 ## Status
 
 The runtime is complete enough to run C++ programs with virtual dispatch,
 RTTI, `dynamic_cast`, static locals, `new`/`delete` and exceptions with no
 `libsupc++` at all, on both targets — `tests/golden/libcxx.sh`. The
-standard library above it is next; see `docs/language/libcxx.md`.
+standard library above it is described in `docs/manual/libraries.md`.

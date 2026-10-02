@@ -40,5 +40,6 @@ tests/
   the referee for embas, objdump and `aarch64-elf-as` for the aarch64 encoder
   and inline-asm assembler, QEMU booting the kernel for the whole toolchain.
 
-What each target supports, and which of these suites covers it, is tabulated
-in [docs/language/compatibility.md](../docs/language/compatibility.md).
+What each target supports is described in
+[docs/manual/targets.md](../docs/manual/targets.md); the suites, and which
+test a change needs, in [docs/internals/testing.md](../docs/internals/testing.md).

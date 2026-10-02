@@ -1,6 +1,6 @@
 # src/parse
 
-C → AST — ../../docs/architecture/overview.md §2.
+C → AST — ../../docs/internals/front-end.md.
 
 Recursive descent over the C99 grammar plus the GNU extensions the kernel and
 newlib actually use.

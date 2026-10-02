@@ -1,7 +1,7 @@
 #!/bin/sh
-# Re-run the GCC/Clang gap audit (docs/developer/gaps-vs-gcc-clang.md).
+# Re-run the GCC/Clang gap audit (the gaps are listed in docs/internals/status.md).
 #
-# Every claim in that document came from this script, because a gap list
+# Every claim in the audit came from this script, because a gap list
 # written from reading source rots the moment something lands -- and two
 # findings in the first draft were simply WRONG that way (EmbCC does have
 # an inliner; attributes are warned-and-ignored rather than honoured).

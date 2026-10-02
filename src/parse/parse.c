@@ -152,7 +152,7 @@ static struct type *find_typedef(struct parser *ps, const char *name)
 
 /* A syntax error: recorded, then the parser resumes at the nearest recovery
  * point — the enclosing statement, or the next external declaration — so one
- * run reports every independent problem (docs/tools/diagnostics.md T2). Where no
+ * run reports every independent problem (docs/manual/diagnostics.md T2). Where no
  * recovery point is set, it stops the compile, as every error once did. */
 static void parse_error_at(struct parser *ps, int line, int col,
                            const char *fmt, ...)
@@ -261,7 +261,7 @@ static void reject_reserved(struct parser *ps, const char *name, int line, int c
          i++)
         if (strcmp(reserved_unsupported[i], name) == 0)
             parse_error_at(ps, line, col,
-                    "'%s' is not supported yet (see docs/design/roadmap.md M2)",
+                    "'%s' is not supported yet (see docs/manual/c-language.md)",
                     name);
 }
 
@@ -571,10 +571,10 @@ static const struct attr_entry attr_table[] = {
      * corpus this compiler is tested against from building at all.
      * Ignoring it is only wrong above -O0, where a value kept in a
      * register across the call could survive the second return.
-     * docs/developer/todo.md records that. */
+     * docs/internals/status.md records that. */
     { "returns_twice", ATTR_NOOP,
       "refusing it would stop newlib's <setjmp.h> from compiling; see "
-      "docs/developer/todo.md" },
+      "docs/internals/status.md" },
 };
 
 static const struct attr_entry *attr_lookup(const char *n)

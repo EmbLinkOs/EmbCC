@@ -1,7 +1,7 @@
 /* EmbDBG's live target: a client for the GDB remote serial protocol.
  *
  * WHY THIS, AND WHY IT NEEDS NO KERNEL. EmbDBG v0 is a static reader and
- * crash analyser, and docs/tools/embdbg.md §4 parked live debugging
+ * crash analyser, and EmbDBG's original design parked live debugging
  * behind the EmbLinkOS kernel's own contract (CAP_DEBUG, syscalls 69-75)
  * — correctly, for a process running on EmbLinkOS. But that is not the
  * only live target this compiler has any more. Firmware is debugged

@@ -647,7 +647,7 @@ using aligned_storage_t = typename aligned_storage<Len, Align>::type;
  * libstdc++ detects `__invoke(...)` once -- but detecting through a
  * function template whose own return type is deduced asks the compiler to
  * do SFINAE two levels deep during partial-specialisation matching, and
- * EmbCC does not do that yet (docs/developer/todo.md). Written this way it
+ * EmbCC does not do that yet (docs/internals/status.md). Written this way it
  * asks only for what plainly works, and each form's requirement is visible
  * instead of hidden inside an overload set.
  */
