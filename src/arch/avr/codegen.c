@@ -873,8 +873,8 @@ static int need_of_use(const struct a_fn *F, const struct ir_ins *i, int opnd,
         if (F->xw && i->a >= 0 && i->a < F->fn->nvregs && F->xw[i->a])
             return F->xw[i->a];
         return VW;
-    case IR_SELECT:
-        return opnd == 0 ? VW : nd;         /* the condition: all of it */
+    case IR_SELECT:                         /* the condition: all of it */
+        return opnd == 0 ? (i->size == 8 ? 8 : VW) : nd;
     case IR_EXT:
         return nd < i->size ? nd : i->size;
     case IR_STVAR:
@@ -2010,10 +2010,25 @@ static void gen_select(struct a_fn *F, const struct ir_ins *i, int n)
     /* The condition is a value, not flags: OR its bytes so Z answers
      * "was it zero". PLAIN ld_slot, as IR_BRZ uses, because r0 is the
      * accumulator and the flag-preserving path saves SREG through it. */
-    rd4(F, i->a, RA);
-    avr_rr(t, AVR_MOV, R_TMP, RA);
-    for (int k = 1; k < VW; k++)
-        avr_rr(t, AVR_OR, R_TMP, RA + k);
+    if (i->size == 8) {
+        /* A 64-bit condition -- its own width, `size`, not the arms'.
+         * Four bytes were read whatever it was, so 2^32 was false. Byte
+         * by byte, as the 64-bit IR_BRZ reads it. */
+        avr_rr(t, AVR_MOV, R_TMP, R_ZERO);
+        for (int k = 0; k < 8; k++) {
+            int r = RA;
+            if (in_pair(F, i->a))
+                r = F->loc[i->a] + k;
+            else
+                vld(F, RA, i->a, k, 1);
+            avr_rr(t, AVR_OR, R_TMP, r);
+        }
+    } else {
+        rd4(F, i->a, RA);
+        avr_rr(t, AVR_MOV, R_TMP, RA);
+        for (int k = 1; k < VW; k++)
+            avr_rr(t, AVR_OR, R_TMP, RA + k);
+    }
 
     /* An INVERTED branch over an rjmp, not a branch over the arm: a br
      * reaches +-63 words and an eight-byte copy out of a far slot is more
