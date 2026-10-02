@@ -5075,27 +5075,52 @@ static int rotate_one(struct ir_func *fn)
          * which then paid two branches an iteration for the life of the
          * program. Volatile is still refused: the ACCESS is the effect
          * there, and moving one is not a thing to do on this argument. */
+        /* A value the header computes and the body (or the code after
+         * the loop) also reads -- `while (*s) h ^= *s++;` once value
+         * numbering has given the body the header's load -- is written
+         * by the copy under its OWN name: the body is entered from the
+         * guard or from the copy, and either way that name holds this
+         * iteration's value; so does every path to the exit. It is
+         * assigned twice then, which is the price; refusing it cost
+         * every such loop a jump an iteration. One read only in the
+         * header gets a fresh temp, so the guard's stands untouched. */
         int ok = 1;
+        int ncopy = bb[h].end - 1 - (bb[h].start + 1);
+        char *outside = xcalloc((size_t)(ncopy ? ncopy : 1), 1);
         for (int n = bb[h].start + 1; n < bb[h].end - 1 && ok; n++) {
             struct ir_ins *i = &fn->ins[n];
             if (!(is_pure(i->op) || i->op == IR_LOAD) || i->vol)
                 { ok = 0; break; }
             int t = def_target(i);
             if (t < fn->nvars || t >= fn->nvregs) { ok = 0; break; }
-            for (int m = 0; m < fn->nins && ok; m++) {
+            for (int m = 0; m < fn->nins; m++) {
                 if (m >= bb[h].start && m < bb[h].end)
                     continue;
-                if (ins_reads(&fn->ins[m], t))
-                    ok = 0;
+                if (ins_reads(&fn->ins[m], t)) {
+                    outside[n - (bb[h].start + 1)] = 1;
+                    break;
+                }
             }
         }
-        if (!ok) { free(in); continue; }
+        if (!ok) { free(in); free(outside); continue; }
 
-        /* Fresh temps for the copy, so the guard's values stand. */
-        int ncopy = bb[h].end - 1 - (bb[h].start + 1);
+        /* A value with no operands -- a constant, an address -- is the
+         * same on every iteration: the copy reads the guard's, which
+         * dominates the latch, rather than writing it again. Written
+         * twice it would stop being a known constant, and folding,
+         * LICM and unrolling all ask for exactly one definition (the
+         * loop bound `j < 24` shared by value numbering with `i * 24`
+         * left the workload's matrix checksum un-unrolled). */
         int *map = xmalloc((size_t)(ncopy ? ncopy : 1) * sizeof *map);
-        for (int k = 0; k < ncopy; k++)
-            map[k] = fn->nvregs++;
+        for (int k = 0; k < ncopy; k++) {
+            enum ir_op op = fn->ins[bb[h].start + 1 + k].op;
+            int fixed = op == IR_CONST || op == IR_GADDR || op == IR_ADDR ||
+                        op == IR_STRADDR || op == IR_FADDR;
+            map[k] = fixed ? -1
+                   : outside[k] ? def_target(&fn->ins[bb[h].start + 1 + k])
+                   : fn->nvregs++;
+        }
+        free(outside);
         int Lbody = fn->nlabels++;
 
         struct ibuf nb = { 0, 0, 0 };
@@ -5121,10 +5146,13 @@ static int rotate_one(struct ir_func *fn)
                     tbl[v] = -1;
                 for (int q = 0; q < ncopy; q++) {
                     int old = def_target(&fn->ins[bb[h].start + 1 + q]);
-                    if (old >= 0 && old < fn->nvregs)
+                    if (old >= 0 && old < fn->nvregs && map[q] >= 0 &&
+                        map[q] != old)
                         tbl[old] = map[q];
                 }
                 for (int k = 0; k < ncopy; k++) {
+                    if (map[k] < 0)
+                        continue;            /* the guard's value stands */
                     struct ir_ins *c = ib_push(&nb);
                     *c = fn->ins[bb[h].start + 1 + k];
                     struct lcopy lc = { tbl, fn->nvregs, 0 };
