@@ -300,18 +300,44 @@ name is omitted for x86-64):
 embld: FILE: unsupported RISC-V relocation type N (this is the next linker increment, not a bug in your program)
 ```
 
-`embld` performs no linker relaxation and creates no veneers or
-trampolines. A branch whose target is out of range is an error that
-names the limit:
+`embld` performs no linker relaxation and creates no veneers,
+trampolines or stubs. A relocated value that its field cannot hold is an
+error, not truncated. For these types the message names the relocation,
+the symbol, the value and the range the field holds:
+
+| Machine | Checked types |
+|---|---|
+| x86-64 | `R_X86_64_32` (0 to 2^32 - 1), `R_X86_64_32S`, `R_X86_64_PC32`, `R_X86_64_PLT32` and `R_X86_64_TPOFF32` (-2^31 to 2^31 - 1) |
+| RISC-V | `R_RISCV_32` (-2^31 to 2^32 - 1), `R_RISCV_BRANCH` (±4 KiB), `R_RISCV_JAL` (±1 MiB); at RV64 only, `R_RISCV_HI20`, `R_RISCV_PCREL_HI20`, `R_RISCV_CALL` and `R_RISCV_CALL_PLT` (about ±2 GiB) |
+
+```text
+embld: far.o: R_X86_64_PC32 against 'g' needs 12880707577 (0x2ffbffff9), and the field holds -2147483648 to 2147483647; the image is laid out beyond what this code can reach
+```
+
+At RV64, `lui` sign-extends its result, so an object built for the
+`medlow` code model (which addresses data with `lui`) cannot address
+data at `0x7ffff800` or above, and cannot be linked at the `0x80000000`
+RAM base of QEMU's `virt` board. EmbCC itself uses `auipc` (the `medany`
+model) at both widths.
+
+```text
+embld: lui64.o: R_RISCV_HI20 against 'g' needs 2147487744 (0x80001000), and the field holds -2147485696 to 2147481599; the image is laid out beyond what this code can reach
+```
+
+At RV32 the `lui`/`auipc` forms and `call` wrap around the 32-bit address
+space and reach every address, so they are not checked. The other
+relocation errors have messages of their own:
 
 | Message | Cause |
 |---|---|
 | `a Thumb call is more than 16MB away; this linker mints no veneers` | ARM `bl`/`b.w` out of range |
-| `a RISC-V call is more than 2GB away; auipc/jalr cannot reach it and this linker mints no stubs` | RISC-V `call` out of range |
 | `an rjmp reaches +-4KB and this target is N bytes away; ...` | AVR `rjmp`/`rcall` out of range; use `call` and `jmp` |
 | `a conditional branch reaches +-126 bytes and this target is N away; ...` | AVR conditional branch out of range |
 | `a call to an odd address 0x...; ...` | AVR `call`/`jmp` to an odd byte address |
 | `a thread-local relocation, but the image has no thread block ...` | a `TPOFF32` relocation in an image with no `.tdata`/`.tbss` |
+
+The ARM `movw`/`movt` and word forms and the AVR data and `ldi` forms
+keep the low bits of the value without a check.
 
 ### EMBX output
 
@@ -515,7 +541,8 @@ Link a static Linux x86-64 program by hand, where `$LIB` is the
 `x86_64-linux-gnu` library directory:
 
 ```sh
-embcc --target=x86_64-linux-gnu -c main.c util.c
+embcc --target=x86_64-linux-gnu -c main.c -o main.o
+embcc --target=x86_64-linux-gnu -c util.c -o util.o
 embld -o prog $LIB/crt1.o main.o util.o $LIB/libc.a $LIB/librt.a
 chmod +x prog
 ```
@@ -524,7 +551,8 @@ Link a Cortex-M3 firmware image with flash at 0 and SRAM at
 `0x20000000`:
 
 ```sh
-embcc --target=thumbv7m-none-eabi -c boot.c main.c
+embcc --target=thumbv7m-none-eabi -c boot.c -o boot.o
+embcc --target=thumbv7m-none-eabi -c main.c -o main.o
 embld -e reset -Ttext 0x0 -Tdata 0x20000000 boot.o main.o -o fw.elf
 qemu-system-arm -M lm3s6965evb -cpu cortex-m3 -nographic -kernel fw.elf
 ```
@@ -533,7 +561,8 @@ Link an ATmega328P image (32 KiB of flash, SRAM from `0x100`) with the
 compiler runtime:
 
 ```sh
-embcc --target=avr -c boot.S main.c
+embcc --target=avr -c boot.S -o boot.o
+embcc --target=avr -c main.c -o main.o
 embld -e __vectors -Ttext 0x0 -Tdata 0x100 --rom-limit 32768 \
       boot.o main.o $LIB/librt.a -o fw.elf
 ```

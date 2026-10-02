@@ -122,6 +122,13 @@ with its name, its type and a location that is a single offset from the
 frame base (`DW_OP_fbreg`). There are no location lists and no
 register locations.
 
+An array or structure aligned beyond what the stack guarantees (for
+example `char buf[64] __attribute__((aligned(64)))`) is stored in a
+block carved from the stack at function entry, and its slot holds the
+block's address. Its DWARF entry describes that slot, so its type is a
+pointer to the declared type (`unsigned char (*)[64]`), and the
+debugger shows the address; dereference it to see the contents.
+
 Variables declared in inner blocks are listed directly under the
 function, with no `DW_TAG_lexical_block`: the debugger sees all of a
 function's variables at once, including ones whose block has not been
@@ -141,7 +148,7 @@ type.
 | Pointers | Pointer to the described type |
 | Arrays | Array with its upper bound; an array of unknown size or a variable-length array has none |
 | `struct`, `union` | Name, size, and each member with its offset; bit-fields with bit offset and width |
-| `enum` | Its underlying type (`int`); enumerators are not described |
+| `enum` | Its underlying type: `int`, or the wider integer type an enumeration takes when a value does not fit in `int`; enumerators are not described |
 | `typedef` names | The type they name; the typedef name itself is not described |
 | `const`, `volatile` | Not described; the unqualified type is used |
 | Pointers to functions | Pointer to `void` |
@@ -203,8 +210,8 @@ have no effect.
 |---|---|---|
 | x86-64 | `rbp` frame in every function at `-O0` and `-O1`; at `-O2`, frameless leaf functions and push-only frames have none | `rbp` frame in every function |
 | AArch64 | `x29`/`x30` frame record at `-O0` and `-O1`; at `-O2`, frameless leaf functions have none | Frame record in every function |
-| Thumb | None (`r7` only in a function with `alloca` or a variable-length array) | Same |
-| RISC-V | None (`s0` only in a function with `alloca` or a variable-length array) | Same |
+| Thumb | None (`r7` only in a function with `alloca`, a variable-length array, or a local aligned beyond 8 bytes) | Same |
+| RISC-V | None (`s0` only in a function with `alloca`, a variable-length array, or a local aligned beyond 16 bytes) | Same |
 
 See [Optimization](optimization.md#frame-pointer) for AVR.
 
@@ -250,6 +257,9 @@ value there:
 - At `-O1`, a value stored to a local variable and read back in the same
   basic block is forwarded without the reload, and the store is then
   usually removed, so the slot can hold an old value.
+- A `volatile` local is the exception at every level: it is never
+  promoted, forwarded or given a register, so its slot always holds its
+  current value.
 - Inlined functions have no frame of their own: a backtrace shows the
   caller, and the line table moves between the caller's lines and the
   inlined function's lines.
@@ -288,7 +298,9 @@ EmbLD merges the debug sections of its input objects into the output:
   produces the absolute-addressed native form that EmbDBG reads.
 
 EmbLD has no option to strip debug information (`-s`, `-S` and
-`--strip-debug` are refused as unknown options). Strip a finished image
+`--strip-debug` are refused as unknown options). Given to the driver as
+`-Wl,-s` or `-Wl,--strip-debug`, they are accepted and change nothing:
+the debug sections stay in the image. Strip a finished image
 with a separate tool if needed, for example
 `llvm-objcopy --strip-debug fw.elf`. An image converted to a raw binary
 for flashing does not contain the debug sections in any case.
@@ -382,13 +394,15 @@ These are defects in the current implementation, not intended behavior.
   8 bytes, also on Thumb and RV32, where pointers are 4 bytes. A
   debugger may print a pointer variable with 4 bytes of neighboring
   memory in its upper half.
-- **`alloca` and variable-length arrays on Thumb and RISC-V.** The frame
-  base is `sp`, but such a function addresses its frame from `r7` or
-  `s0`, and `sp` moves when the array is allocated. Variable locations
-  are wrong from that point on.
-- **Unwind tables on Thumb, RISC-V and AVR.** `-funwind-tables` (and C++)
-  produce an `.eh_frame` in the x86-64 layout on these targets, which
-  does not describe their frames. Do not rely on it for unwinding.
+- **`alloca`, variable-length arrays and over-aligned locals on Thumb
+  and RISC-V.** The frame base is `sp`, but such a function addresses its
+  frame from `r7` or `s0`, and `sp` moves when the block is allocated (at
+  function entry for a local aligned beyond the stack's alignment).
+  Variable locations are wrong from that point on.
+- **Unwind tables on Thumb, RISC-V and AVR.** `-funwind-tables` (and C++
+  at RV64, the one of these targets that compiles C++) produce an
+  `.eh_frame` in the x86-64 layout on these targets, which does not
+  describe their frames. Do not rely on it for unwinding.
 - **Header files.** Code from a header is attributed to the main source
   file, as described in [Line table](#line-table).
 

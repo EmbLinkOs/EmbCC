@@ -312,8 +312,10 @@ follow the sections of the inputs read before them.
 - a defined global: its final value;
 - an undefined weak global: 0, with no error. The relocation is then
   applied with `S = 0` like any other, so a PC-relative reference to it
-  must be able to reach address 0 (a RISC-V `call` from code linked at
-  `0x80000000` cannot, and fails with the 2 GB range error);
+  must be able to reach address 0: an x86-64 `PC32` or an RV64 `call`
+  placed more than about 2 GB above it fails the range check (see
+  [Relocations out of range](#relocations-out-of-range)). At RV32 a
+  `call` reaches every address;
 - an undefined strong global: an error, with a note when the name
   belongs to the compiler runtime or the unwinder.
 
@@ -452,11 +454,12 @@ counted.
 ## Per-target images
 
 The table shows the options each in-tree caller passes. The driver passes
-none: see [The driver's link](#the-drivers-link).
+only what `-Wl,` and `-Xlinker` give it: see
+[The driver's link](#the-drivers-link).
 
 | Caller | Options | Image |
 |---|---|---|
-| `embcc FILE -o OUT` | none | x86-64 program at `0x400000` |
+| `embcc FILE -o OUT` | none, unless given with `-Wl,` | x86-64 program at `0x400000` |
 | `tools/gen-kernel-manifest.sh` | `-e _start -Ttext 0xFFFFFFFF80100000 --lma-offset 0xFFFFFFFF80000000` | the higher-half EmbLinkOS kernel |
 | `tests/harness/thumb/link.sh`, `thumb-m4f/link.sh` | `-e reset -Ttext 0x0 -Tdata 0x20000000` | ARMv7-M firmware: flash at 0, SRAM at `0x20000000` |
 | `tests/harness/thumb-m33/link.sh` | `-e reset -Ttext 0x10000000 -Tdata 0x10100000` | ARMv8-M firmware in the secure alias of the MPS2-AN505's SSRAM |
@@ -633,20 +636,22 @@ In the tables below, `V` is `S + A`.
 
 ### x86-64 relocations
 
-| Type | Value written | Width |
-|---|---|---|
-| `R_X86_64_64` | `V` | 8 |
-| `R_X86_64_32`, `R_X86_64_32S` | `V` | 4 |
-| `R_X86_64_PC32`, `R_X86_64_PLT32` | `V - P` | 4 |
-| `R_X86_64_PC64` | `V - P` | 8 |
-| `R_X86_64_TPOFF32` | `V - tls_start - align(tls_memsz, tls_align)` | 4 |
+| Type | Value written | Width | Range checked |
+|---|---|---|---|
+| `R_X86_64_64` | `V` | 8 | no |
+| `R_X86_64_32` | `V` | 4 | 0 to 2^32 - 1 |
+| `R_X86_64_32S` | `V` | 4 | -2^31 to 2^31 - 1 |
+| `R_X86_64_PC32`, `R_X86_64_PLT32` | `V - P` | 4 | -2^31 to 2^31 - 1 |
+| `R_X86_64_PC64` | `V - P` | 8 | no |
+| `R_X86_64_TPOFF32` | `V - tls_start - align(tls_memsz, tls_align)` | 4 | -2^31 to 2^31 - 1 |
 
 `R_X86_64_PLT32` is a direct PC-relative reference: no PLT slot is
 created. `R_X86_64_TPOFF32` is the local-exec thread-local model. x86-64
 places the thread block below the thread pointer, so the offset is
 negative; the runtime (`lib/libc/os/linux/tls.c`) must round the block
-to the same alignment. The 4-byte forms are truncated with no overflow
-check. `R_X86_64_GOTPCREL`, `R_X86_64_GOTPCRELX` and
+to the same alignment. A 4-byte value outside its range is refused by
+`need_range` (see [Relocations out of range](#relocations-out-of-range)),
+not truncated. `R_X86_64_GOTPCREL`, `R_X86_64_GOTPCRELX` and
 `R_X86_64_REX_GOTPCRELX` are defined in `src/elf/elf.h` but not applied;
 an object that uses them fails with the unsupported-type error.
 
@@ -707,19 +712,27 @@ The `+ 0x800` is required because the low half is sign-extended: when
 bit 11 of `v` is set, the low half contributes a negative value and the
 high half must be one larger.
 
-| Type | Value written | Field |
-|---|---|---|
-| `R_RISCV_32` | `V` | word |
-| `R_RISCV_64` | `V` | doubleword |
-| `R_RISCV_HI20` | `hi20(V)` | U-type immediate |
-| `R_RISCV_LO12_I` | `lo12(V)` | I-type immediate |
-| `R_RISCV_LO12_S` | `lo12(V)` | S-type immediate (bits 11:5 at 31:25, 4:0 at 11:7) |
-| `R_RISCV_PCREL_HI20` | `hi20(V - P)`; `V - P` is recorded under `P` | U-type immediate |
-| `R_RISCV_PCREL_LO12_I`, `_S` | `lo12(d)`, where `d` is the value recorded for the `auipc` at `V` | I- or S-type immediate |
-| `R_RISCV_BRANCH` | `V - P`, re-encoded by `rv_enc_b` | B-type, ±4 KiB |
-| `R_RISCV_JAL` | `V - P`, re-encoded by `rv_enc_j` | J-type, ±1 MiB |
-| `R_RISCV_CALL`, `R_RISCV_CALL_PLT` | `hi20(V - P)` at `P`, `lo12(V - P)` at `P + 4` | `auipc` + `jalr`, ±2 GiB |
-| `R_RISCV_RELAX`, `R_RISCV_ALIGN` | nothing | |
+| Type | Value written | Field | Range checked |
+|---|---|---|---|
+| `R_RISCV_32` | `V` | word | -2^31 to 2^32 - 1 |
+| `R_RISCV_64` | `V` | doubleword | no |
+| `R_RISCV_HI20` | `hi20(V)` | U-type immediate | RV64: -2^31 - 0x800 to 2^31 - 1 - 0x800; RV32: no |
+| `R_RISCV_LO12_I` | `lo12(V)` | I-type immediate | no |
+| `R_RISCV_LO12_S` | `lo12(V)` | S-type immediate (bits 11:5 at 31:25, 4:0 at 11:7) | no |
+| `R_RISCV_PCREL_HI20` | `hi20(V - P)`; `V - P` is recorded under `P` | U-type immediate | `V - P` as `HI20`'s `V`, at RV64 only |
+| `R_RISCV_PCREL_LO12_I`, `_S` | `lo12(d)`, where `d` is the value recorded for the `auipc` at `V` | I- or S-type immediate | no |
+| `R_RISCV_BRANCH` | `V - P`, re-encoded by `rv_enc_b` | B-type | -4096 to 4094 |
+| `R_RISCV_JAL` | `V - P`, re-encoded by `rv_enc_j` | J-type | -2^20 to 2^20 - 2 |
+| `R_RISCV_CALL`, `R_RISCV_CALL_PLT` | `hi20(V - P)` at `P`, `lo12(V - P)` at `P + 4` | `auipc` + `jalr` | `V - P` as `HI20`'s `V`, at RV64 only |
+| `R_RISCV_RELAX`, `R_RISCV_ALIGN` | nothing | | |
+
+The upper-half ranges are those a `lui` or `auipc` pair can produce at
+RV64, where the 20-bit immediate is sign-extended to 64 bits; the
+`+ 0x800` rounding shifts the reachable range down by 2 KiB. At RV32 the
+pair wraps with the 32-bit address space, so every value is in reach and
+none is checked; in particular, a `call` at RV32 reaches any address.
+The low halves need no check: they are the low 12 bits of the value
+whose high half the paired relocation carries.
 
 Only the immediate bits are rewritten; the opcode and registers stay as
 the compiler wrote them.
@@ -736,19 +749,11 @@ relocated before its low half: in the same object, earlier in the
 relocation order. EmbCC lists each pair high half first.
 
 **Branches and jumps** are re-encoded by the compiler's own B-type and
-J-type encoders, which check the range. An out-of-range displacement is
-reported by the encoder as an internal error, not by the linker:
-
-```text
-embcc: <embcc>: error: internal error: riscv: jump displacement: 2097156 does not fit in 21 signed bits
-embcc: <embcc>: note: this is a bug in EmbCC, not in the program being compiled
-```
-
+J-type encoders. `apply_riscv` checks the displacement against the
+field first, so one out of range is refused by the linker, naming the
+relocation and the symbol, and never reaches the encoder's own check.
 EmbCC's own branches are resolved inside the function and never reach
 the linker; these relocations come from assembler or clang objects.
-
-**Not range-checked:** `R_RISCV_32`, `R_RISCV_HI20`, `R_RISCV_LO12_*` and
-`R_RISCV_PCREL_HI20` keep the bits that fit.
 
 **Not handled:** the compressed-instruction relocations
 (`R_RISCV_RVC_BRANCH`, `R_RISCV_RVC_JUMP`), the `ADD`/`SUB`/`SET` family,
@@ -901,24 +906,36 @@ by [embread](../manual/tools/embread.md).
 
 `embcc FILE -o OUT` links in-process through `compile_and_link` in
 `src/driver/main.c`. It links only when the target is x86-64 and the
-object format is ELF; otherwise it stops before compiling:
+object format is ELF; otherwise it stops before compiling. For another
+ELF target:
 
 ```text
-embcc: error: cannot link for TRIPLE: the integrated linker reads x86-64 ELF, and this needs FORMAT
-embcc: compile with -c and link with a toolchain for it
+embcc: error: cannot link for TRIPLE in one step: the driver links x86-64 ELF only
+embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
 ```
 
-`FORMAT` is `Mach-O` or `COFF` for those formats and `aarch64` for every
-other ELF target, including the RISC-V, ARM and AVR triples.
+For a Mach-O or COFF target the first line is
+`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and this target writes FORMAT`,
+with `FORMAT` `Mach-O` or `COFF`, and the second line is the same.
 
 The driver compiles to `OUT.embcc-tmp.o` beside the output and calls
-`embld_link` with a zeroed `struct link_opts`, so the entry is `_start`
-and the text starts at `0x400000`; it passes no option. The inputs are,
-in order: `crt1.o` (if the target has one), the temporary object,
-`libcxx.a` (C++ only), `libc.a` (if the target has one) and `librt.a`
-(if the target has one). Because of the fixed-point pull, the order of
-the archives in this list does not change which symbols resolve; it
-changes only the order of the pulled members' sections.
+`embld_link` with a `struct link_opts` that is zero except for what
+`apply_wl` sets from the `-Wl,` and `-Xlinker` words: `-e`/`--entry`,
+`-Ttext` (and `-Ttext-segment`), `-Tdata`, `-Tstack`, `--rom-limit` and
+`--lma-offset`. Without them the entry is `_start` and the text starts
+at `0x400000`. `apply_wl` accepts the options that change nothing about
+an image EmbLD makes (`--gc-sections`, `-s`, `--build-id`, `-z now` and
+the others listed in
+[Invoking EmbCC](../manual/invoking.md#-wlargs--xlinker-arg)) and refuses
+any other (`embcc: error: linker option 'OPT' is not one EmbLD has ...`);
+the driver then removes the temporary object and links nothing.
+
+The inputs are, in order: `crt1.o` (if the target has one), the
+temporary object, `libcxx.a` (C++ only), `libc.a` (if the target has
+one) and `librt.a` (if the target has one). Because of the fixed-point
+pull, the order of the archives in this list does not change which
+symbols resolve; it changes only the order of the pulled members'
+sections.
 
 A link error ends the process from inside `embld_link`. The message
 names the temporary object (`referenced by OUT.embcc-tmp.o`), and the
@@ -1101,16 +1118,36 @@ embld: 'A' and 'B' disagree about the size of an enum, which changes the layout 
 
 ### Relocations out of range
 
+The x86-64 4-byte forms and the RISC-V forms marked as checked in the
+tables above are refused by `need_range` with one message:
+
+```text
+embld: FILE: R_TYPE against 'SYM' needs V (0xHEX), and the field holds LO to HI; the image is laid out beyond what this code can reach
+```
+
+`SYM` is the symbol the relocation names, or the section's name for a
+section symbol. `V` is the value the field would have to hold (for a
+PC-relative form, the displacement), printed in decimal and then in
+hexadecimal as a 64-bit pattern. `R_RISCV_CALL_PLT` is reported as `R_RISCV_CALL`. For
+example, data placed 12 GB from RIP-relative code:
+
+```text
+embld: far.o: R_X86_64_PC32 against 'g' needs 12880707577 (0x2ffbffff9), and the field holds -2147483648 to 2147483647; the image is laid out beyond what this code can reach
+```
+
+The other range errors have messages of their own:
+
 | Message | Limit |
 |---|---|
 | `FILE: a Thumb call is more than 16MB away; this linker mints no veneers` | `bl`/`b.w`: -2^24 to 2^24 - 1 bytes |
-| `FILE: a RISC-V call is more than 2GB away; auipc/jalr cannot reach it and this linker mints no stubs` | `call`: -2^31 to 2^31 - 1 bytes |
 | `` FILE: an rjmp reaches +-4KB and this target is N bytes away; this linker mints no trampolines, so the call has to be a `call` rather than an `rcall` `` | `rjmp`/`rcall`: -2048 to 2047 words |
 | `FILE: a conditional branch reaches +-126 bytes and this target is N away; it has to be an inverted branch over an rjmp` | AVR branch: -64 to 63 words |
 | `FILE: a call to an odd address 0xADDR; AVR instructions are halfword-aligned and the address is halved to a word number, so an odd one cannot be encoded` | AVR `call`/`jmp` |
 
-RISC-V `BRANCH` and `JAL` out of range are reported by the encoder as an
-internal error (see [RISC-V relocations](#risc-v-relocations)).
+The ARM `movw`/`movt`, `ABS32`, `REL32` and `PREL31` forms are not
+range-checked. Neither are the AVR data and `ldi` forms, by design: they
+keep the low bits of the value, so a `0x800000` data-space offset in an
+input is dropped (see [AVR](#avr)).
 
 ### Other relocation errors
 
@@ -1144,8 +1181,10 @@ link prints `embld: wrote OUT (EMBX, N capabilit(y|ies))`.
    it is missing.
 3. On ARM, if the type can arrive in `SHT_REL`, teach the addend switch in
    `apply_relocs` to read the field back.
-4. Check the range the field can hold and `die` with a message that
-   names the limit, in the style of the existing ones.
+4. Check the range the field can hold with `need_range` (or, for a
+   machine-specific limit, a `die` that names it in the style of the
+   existing ones). Writing the low bits of a value that does not fit
+   produces a working-looking image that jumps or reads elsewhere.
 5. Test it with an object from another assembler (clang or `llvm-mc`),
    because EmbCC's own output usually does not exercise the new type.
 6. Add the type to the table in [embld](../manual/tools/embld.md#relocations).
@@ -1176,6 +1215,7 @@ bracket symbols in `define_brackets`. `bounds[]` is sized by
 | `tests/golden/x86_64/embld-b1.sh` | a link against EmbLinkOS's `crt0.o`, `syscalls.o` and newlib's `libc.a`, compared with the cross `ld`; skips without the OS tree |
 | `tests/golden/x86_64/embld-embdbg.sh`, `embld-embdbg-multi.sh` | the `.embdbg` sidecar, for one object and merged across several |
 | `tests/golden/embld-doctor.sh` | every `--doctor` cause, demangling, and that all undefined names are reported in one run |
+| `tests/golden/embld-reloc-range.sh` | the range refusals: x86-64 data 8 GB from RIP-relative code, and a clang RV64 `lui` (medlow) object linked at `0x80000000` |
 | `tests/golden/link-dwarf.sh` | DWARF carried through a link, checked by a `gdb` session against a QEMU guest |
 | `tests/golden/arm-abi-tags.sh` | the build-attribute refusals, against clang objects with hard-float arguments and short enums |
 | `tests/golden/thumb-exec.sh`, `riscv-exec.sh`, `avr-exec.sh` and the other embedded execution tests | every program linked with the harness `link.sh` scripts and run on QEMU, which exercises the firmware layout, the entry stub, a passing `--rom-limit` and the relocations EmbCC emits for those targets |

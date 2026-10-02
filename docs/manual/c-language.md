@@ -28,24 +28,20 @@ that names it. The exceptions are the places where EmbCC accepts a
 program the standard requires it to diagnose, or gives a program a
 meaning other than the standard's. Check these first when porting code:
 
-- An empty initializer `= {}` on an automatic array, structure or union
-  leaves the object uninitialized. See [Initializers](#initializers).
 - Struct, union and enum tags, typedef names and enumeration constants
   declared in a block remain visible to the end of the translation unit.
   See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants).
-- An enumeration constant whose value does not fit in `int` is not
-  diagnosed, and its value is truncated where it is used at run time. See
-  [Enumeration constants](#enumeration-constants).
+- An enumeration constant of 2^63 or more is read as a negative value,
+  and an enumeration of type `unsigned int` that is named again by its
+  tag is `int`. See [Enumeration constants](#enumeration-constants).
 - `const` is not enforced. See [Const qualification](#const-qualification).
-- `_Generic` does not distinguish some distinct types. See
+- `_Generic` does not distinguish types that differ only in `const`. See
   [Generic selection](#generic-selection).
 - A non-`static` `inline` function is emitted as an external definition
   in every translation unit. See [Inline functions](#inline-functions).
-- The size of a variable length array typedef is computed where the
-  typedef name is used. See [Variable length arrays](#variable-length-arrays).
 
 EmbCC is also stricter than the standard in two places that commonly
-affect existing code: a non-`void` function, `main` included, that can
+affect existing code: a non-`void` function other than `main` that can
 reach its closing brace is an error ([details](#functions-that-can-reach-their-closing-brace)),
 and an empty parameter list `()` always means "no parameters"
 ([details](#empty-parameter-lists)).
@@ -96,9 +92,15 @@ embcc: error: unknown standard '-std=c2y'
 
 Whatever the value, `__STDC_VERSION__` is `201710L` and `__STRICT_ANSI__`
 is not defined. With no `-std=` option the dialect is the same. EmbCC has
-no mode that diagnoses extensions: `-ansi`, `-pedantic` and
-`-pedantic-errors` are refused as unknown arguments (see
-[Diagnostics](diagnostics.md)).
+no mode that diagnoses extensions. `-ansi` is refused as an unknown
+argument. `-pedantic` and `-pedantic-errors` are accepted, turn nothing
+on, and print a warning that says so:
+
+```text
+embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
+```
+
+See [Diagnostics](diagnostics.md).
 
 The C++ values (`c++20`, `gnu++17`, ...) are described in
 [Invoking EmbCC](invoking.md#-stdstandard) and [C++ support](cxx.md).
@@ -163,15 +165,15 @@ define `__GNUC__` when compiling C.
 | Old-style (K&R) function definitions | Not supported | `int add(a, b) int a, b; { ... }` gives `expected a parameter type before 'a'`. C23 removed them. |
 | Implicit `int` | Not supported | `static x = 3;` gives `expected a type before 'x'`. C99 removed it. |
 | Implicit function declarations | Not supported | `'foo' is not declared in 'main' — for a call, add a prototype or define it first [E0001]`. C99 removed them. |
-| Reaching the `}` of a non-`void` function | Not supported | An error even when the value is never used: `control may reach the end of 'f' — every path must end in a return statement [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
+| Reaching the `}` of a non-`void` function | Not supported | An error even when the value is never used, except in `main`: `control may reach the end of 'f' — every path must end in a return statement [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
 | `return;` in a non-`void` function | Not supported | `'g' returns int; 'return' needs a value`. A constraint violation since C99. |
 | `auto` storage class | Supported | `auto int x;` |
-| `register` storage class | Partial | Accepted on block-scope objects. On a parameter or at file scope: `'register' is not supported yet (see docs/design/roadmap.md M2)`. Taking the address of a `register` object is not diagnosed. |
+| `register` storage class | Partial | Accepted on block-scope objects. On a parameter or at file scope: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. |
 | `const` | Partial | Not enforced. See [Const qualification](#const-qualification). |
 | `volatile` | Supported | |
 | Scopes | Partial | Objects, functions and labels follow the standard's rules. Tags, typedef names and enumeration constants do not. See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants). |
 | Structures, unions, bit-fields | Supported | A structure or union with no members is refused: `a struct/union needs at least one member`. |
-| Enumerations | Partial | Enumeration constants must fit in `int`. See [Enumeration constants](#enumeration-constants). |
+| Enumerations | Supported | A constant outside the range of `int` is accepted without a diagnostic and gives the enumeration a wider type, as in C23. See [Enumeration constants](#enumeration-constants). |
 | Tentative definitions | Partial | A file-scope array of unknown size, `int a[];`, is refused even when a later declaration completes it: `'a' has incomplete type int[0]`. `extern int a[];` is accepted. |
 | `goto`, labels, `switch` | Supported | |
 | Adjacent string literal concatenation | Supported | A prefixed and an unprefixed literal concatenate: `L"wi" "de"` is `L"wide"`. |
@@ -207,7 +209,7 @@ define `__GNUC__` when compiling C.
 | `_Complex` and `<complex.h>` | Partial | `float`, `double` and `long double` complex types. Static initializers are limited. See [Complex types](#complex-types). |
 | `_Imaginary` | Not supported | Not a keyword; a declaration that uses it is a syntax error. |
 | Hexadecimal floating constants `0x1.8p1` | Supported | |
-| Universal character names | Supported | In identifiers and literals. `caf\u00e9` and `café` are the same identifier. |
+| Universal character names | Partial | In character constants and string literals. In an identifier one is refused, `int caf\u00e9;` gives `character '\' is not supported yet`; write the character in UTF-8 instead. |
 | `__func__` | Supported | |
 | Variadic macros, `__VA_ARGS__` | Supported | |
 | Empty macro arguments | Supported | |
@@ -215,7 +217,7 @@ define `__GNUC__` when compiling C.
 | `#pragma STDC FP_CONTRACT`, `FENV_ACCESS`, `CX_LIMITED_RANGE` | Partial | Accepted and ignored. |
 | `va_copy` | Supported | |
 | Trailing comma in an enumerator list | Supported | |
-| `main` returns 0 when it reaches `}` | Not supported | Refused with `[E0008]`, as for any other function. |
+| `main` returns 0 when it reaches `}` | Supported | |
 | Integer division truncates toward zero | Supported | |
 | `__STDC_IEC_559__` and the other conditional feature macros | Not supported | Not defined; see [Predefined macros](#predefined-macros). |
 
@@ -226,7 +228,7 @@ define `__GNUC__` when compiling C.
 | `_Alignas`, `_Alignof`, `<stdalign.h>` | Partial | See [Alignment specifiers](#alignment-specifiers). |
 | `_Noreturn`, `<stdnoreturn.h>` | Supported | The same as `__attribute__((noreturn))`. |
 | `_Static_assert` | Supported | A failed assertion: `static assertion failed: MESSAGE`. A non-constant condition: `_Static_assert needs a constant integer expression`. |
-| `_Generic` | Partial | See [Generic selection](#generic-selection). With no matching association and no `default`: `no _Generic association matches type double`. |
+| `_Generic` | Partial | Types that differ only in `const` are not distinguished. See [Generic selection](#generic-selection). With no matching association and no `default`: `no _Generic association matches type double`. |
 | `_Atomic` qualifier and `_Atomic(T)` specifier | Partial | Integer and pointer types only; sizes depend on the target. See [Atomic types](#atomic-types). |
 | `<stdatomic.h>` | Supported | See [Atomic types](#atomic-types). |
 | `_Thread_local` | Partial | Per-thread storage on the x86-64 and AArch64 ELF, EmbLinkOS and Linux targets; refused on macOS and Windows; one shared instance on Cortex-M, RISC-V and AVR. See [Target-dependent features](#target-dependent-features). At block scope without `static` or `extern`: `a block-scope __thread object must also be static: an automatic one is already private to the call`. |
@@ -234,7 +236,7 @@ define `__GNUC__` when compiling C.
 | `char16_t`, `char32_t`, `u"..."`, `U"..."`, `u'x'`, `U'x'`, `u8"..."` | Supported | `<uchar.h>` is provided by the C library. |
 | `max_align_t` | Not supported | `<stddef.h>` declares it only for C++: `expected a type before 'max_align_t'`. |
 | `CMPLX`, `CMPLXF`, `CMPLXL` | Partial | Defined as function calls, so they cannot initialize a static object. See [Complex types](#complex-types). |
-| Extended identifiers (C11 Annex D) | Supported | Written as UTF-8 or as universal character names. Any other non-ASCII byte outside a literal: `byte 0xc3 is not part of a character C allows here (identifiers take UTF-8 letters, C11 Annex D)`. |
+| Extended identifiers (C11 Annex D) | Supported | Written as UTF-8; a universal character name in an identifier is refused (see the [C99](#c99) table). Any other non-ASCII byte outside a literal: `byte 0xc3 is not part of a character C allows here (identifiers take UTF-8 letters, C11 Annex D)`. |
 | Optional features: VLAs, complex types, atomics, threads | Supported | All four are provided, subject to [Target-dependent features](#target-dependent-features). |
 
 ## C17
@@ -273,9 +275,9 @@ C17's value, `201710L`.
 | `u8` character constants `u8'a'` | Not supported | Read as the identifier `u8` followed by `'a'`, which is a syntax error such as `expected ';' before number 97 [E0002]`. |
 | `char8_t`; `u8"..."` of type `unsigned char[]` | Not supported | `u8"..."` has C17's type, `char[]`. `<uchar.h>` does not declare `char8_t`. |
 | `_BitInt(N)`, the `wb` and `uwb` suffixes | Not supported | `expected a type before '_BitInt'`; a `3wb` constant gives `malformed integer constant`. |
-| Enumerations with a fixed underlying type, `enum E : unsigned char` | Partial | The enumeration has the size of the underlying type, and `enum E : short;` declares it ahead of its definition. The constants have type `int`. See [Enumeration constants](#enumeration-constants). A non-integer type: `an enum's underlying type must be an integer type`. |
-| Enumeration constants outside the range of `int` | Not supported | Not diagnosed. See [Enumeration constants](#enumeration-constants). |
-| Empty initializer `= {}` | Partial | Correct for scalars, static objects, nested braces and compound literals. An automatic array, structure or union initialized with `= {}` is left uninitialized. On a VLA: `variable length array 'a' cannot be initialized`. See [Initializers](#initializers). |
+| Enumerations with a fixed underlying type, `enum E : unsigned char` | Partial | The enumeration and its constants have the underlying type, and `enum E : short;` declares it ahead of its definition. A value the underlying type cannot represent is not diagnosed. See [Enumeration constants](#enumeration-constants). A non-integer type: `an enum's underlying type must be an integer type`. |
+| Enumeration constants outside the range of `int` | Partial | The enumeration and its constants take a type that can represent every value. A value of 2^63 or more is read as negative. See [Enumeration constants](#enumeration-constants). |
+| Empty initializer `= {}` | Partial | Zero-initializes any object except a VLA, which is refused: `variable length array 'a' cannot be initialized`. See [Initializers](#initializers). |
 | Labels before declarations and at the end of a compound statement | Supported | |
 | Unnamed parameters in a function definition | Not supported | `parameter 1 of 'f' needs a name in a definition` |
 | Redefinition of a tag with the same content | Not supported | `redefinition of 'P'` |
@@ -357,14 +359,17 @@ be lowered.
 
 ### Functions that can reach their closing brace
 
-A function with a non-`void` return type must end every path with a
-`return` statement. The standard allows control to reach the closing
-brace as long as the caller does not use the value, and makes `main`
-return 0 when it does; EmbCC refuses both:
+A function with a non-`void` return type, other than `main`, must end
+every path with a `return` statement. The standard allows control to
+reach the closing brace as long as the caller does not use the value;
+EmbCC refuses it:
 
 ```text
-error: control may reach the end of 'main' — every path must end in a return statement [E0008]
+error: control may reach the end of 'f' — every path must end in a return statement [E0008]
 ```
+
+`main` is the exception the standard makes: reaching its closing brace
+returns 0.
 
 A path also ends at an infinite loop, at a call to a function declared
 `_Noreturn`, `[[noreturn]]` or `__attribute__((noreturn))`, and at a call
@@ -440,27 +445,41 @@ See also [Diagnostics](diagnostics.md).
 
 ### Enumeration constants
 
-An enumeration constant has type `int`, also in an enumeration with a
-fixed underlying type. An enumeration without a fixed underlying type is
-`int`-sized (two bytes on AVR); with one, it has the size of that type.
-`-fshort-enums` is refused (see [Targets](targets.md#data-models)).
+An enumeration with a fixed underlying type, `enum E : unsigned char`,
+has that type, and so do its constants. A value that the underlying type
+cannot represent, `enum E : unsigned char { A = 256 }`, is not diagnosed.
 
-A constant's value must be representable in `int`. A value outside that
-range is not diagnosed, and it is not preserved consistently: integer
-constant expressions (array sizes, `_Static_assert`, case labels, static
-initializers) see the full value, while code that reads the constant at
-run time sees it truncated to `int`.
+An enumeration without a fixed underlying type is `int` (two bytes on
+AVR) while every value fits `int`, and its constants then have type
+`int`. A constant outside the range of `int`, which C17 does not allow
+and C23 does, is accepted without a diagnostic. The enumeration then
+takes the first of these types that can represent every value, and, as
+C23 specifies, its constants take that type too:
+
+1. `unsigned int`, if no value is negative;
+2. `long`;
+3. `unsigned long long` if no value is negative, otherwise `long long`.
 
 ```c
-enum big { HUGE = 0x100000005 };
-long long g = HUGE;                       /* 0x100000005 */
-long long f(void) { return HUGE; }        /* returns 5 */
+enum big { HUGE = 0x100000005 };      /* long on x86-64: sizeof(enum big) is 8 */
+long long f(void) { return HUGE; }    /* returns 0x100000005 */
 ```
 
-This also applies in an enumeration whose fixed underlying type is wider
-than `int`, such as `enum E : unsigned long long`. A value that does not
-fit the fixed underlying type, `enum E : unsigned char { A = 256 }`, is
-not diagnosed either.
+Where this choice differs from GCC's and Clang's is described in
+[Implementation-defined behavior](implementation-defined.md#structures-unions-enumerations-and-bit-fields).
+`-fshort-enums` is refused (see [Targets](targets.md#data-models)).
+
+Two cases do not follow the standard:
+
+- Each value is computed as a signed 64-bit integer, so a value of 2^63
+  or more becomes negative. In `enum { X = 0xffffffffffffffff }`, `X` is
+  −1 and the enumeration is `int`.
+- An enumeration of type `unsigned int` is `int` when it is named again
+  by its tag. After `enum u { U = 0xffffffff };`, the constant `U` has
+  type `unsigned int`, but `enum u x;` declares an `int`, so after
+  `x = U;` the comparison `x < 0` is true. An object or typedef declared
+  in the defining declaration itself (`enum u { ... } x;`) has type
+  `unsigned int`.
 
 ### Inline functions
 
@@ -482,7 +501,10 @@ Supported: VLAs of any number of dimensions at block scope, VLA
 parameters, pointers to VLAs and `[*]` in prototypes. The size
 expression is evaluated once, where the declaration is reached; `sizeof`
 of a VLA is computed at run time; the storage is released when control
-leaves the block, including by `break`, `continue` and `goto`.
+leaves the block, including by `break`, `continue` and `goto`. This
+includes a typedef of a variably modified type, whose size is fixed
+where the typedef is declared: after
+`int n = 3; typedef int row[n]; n = 10;`, `sizeof(row)` is 12.
 
 Refused:
 
@@ -493,15 +515,8 @@ Refused:
 | `int a[n] = { 1 };`, `int a[n] = {};` | `variable length array 'a' cannot be initialized` |
 | Any VLA on AVR | `the AVR backend cannot lower a variable-length array yet (function f)` |
 
-Differences from the standard:
-
-- The size of a variably modified typedef is evaluated where the typedef
-  name is used, not where the typedef is declared. After
-  `int n = 3; typedef int row[n]; n = 10;`, `sizeof(row)` is 40 rather
-  than 12. Ordinary VLA objects and pointers to VLAs keep the size they
-  had when they were declared.
-- A `goto` or `switch` that jumps into the scope of a VLA is not
-  diagnosed.
+A `goto` or `switch` that jumps into the scope of a VLA is not
+diagnosed, although the standard requires a diagnostic.
 
 ### Complex types
 
@@ -530,28 +545,31 @@ function. At block scope both are accepted.
 
 ### Generic selection
 
-`_Generic` selects the first association whose type EmbCC considers the
-same as the type of the controlling expression after lvalue conversion.
-That comparison differs from the standard's type compatibility in three
-ways:
+`_Generic` selects the association whose type is the type of the
+controlling expression after lvalue conversion, which removes the
+expression's own qualifiers and `_Atomic`. Types are compared exactly:
+`long` and `long long` are different types even on targets where they
+have the same size, plain `char` is neither `signed char` nor
+`unsigned char`, and `volatile` and `_Atomic` in a pointed-to type
+count.
 
-- Qualifiers are ignored at every level, so `const int *` and `int *`
-  match each other.
-- `long` and `long long` match each other on targets where they have the
-  same size (all 64-bit targets). On Cortex-M, RV32 and AVR they are
-  distinct.
-- Plain `char` matches `signed char` on targets where `char` is signed,
-  and `unsigned char` where it is unsigned.
-
-A selection whose associations differ only in these ways takes the first
-one listed:
+The comparison differs from the standard's in one way: `const` is
+ignored, at every level. Types that differ only in `const` are the same
+type, so `const int *` and `int *` match each other:
 
 ```c
-_Generic((const char *)0, char *: 1, const char *: 2)   /* 1; the standard gives 2 */
-_Generic(1L, long long: 1, long: 2)                     /* 1 on x86-64; the standard gives 2 */
+_Generic((const char *)0, char *: 1, default: 2)   /* 1; the standard gives 2 */
+_Generic(1, const int: 1, default: 2)              /* 1; the standard gives 2 */
+_Generic(1L, long long: 1, long: 2)                /* 2, as the standard gives */
 ```
 
-Two associations with types EmbCC considers the same are not diagnosed.
+A selection in which two associations differ only in `const` is refused,
+and so is one in which two associations have the same type, which the
+standard also forbids:
+
+```text
+error: more than one _Generic association matches type char *: their types differ only in const, which EmbCC does not yet keep in a type, or are the same type
+```
 
 ### Atomic types
 
@@ -579,28 +597,31 @@ builtins; see [Libraries](libraries.md) and [Extensions](extensions.md).
 
 `_Alignas(N)`, `_Alignas(type)` and `_Alignof(type)` are supported on
 objects and structure members, in any order among the declaration
-specifiers, and an alignment larger than the stack's is honoured for
-automatic objects. The `alignas` and `alignof` spellings are keywords
-(see [Keywords](#keywords)). The cases the standard constrains are
-handled as follows:
+specifiers. An automatic array, structure or union may have an alignment
+larger than the stack's own (16 bytes; 8 on Cortex-M), and gets it. The
+`alignas` and `alignof` spellings are keywords (see
+[Keywords](#keywords)). The cases the standard constrains, and the ones
+EmbCC limits, are handled as follows:
 
 | Case | Behavior |
 |---|---|
-| `_Alignas(0)` | Refused: `_Alignas requires a positive constant alignment`. The standard says it has no effect. |
-| An alignment that is not a power of two, `_Alignas(3)` | Not diagnosed. The requested alignment is not applied. |
+| `_Alignas(0)` | Accepted, with no effect, as the standard specifies. |
+| An alignment that is not a power of two, `_Alignas(3)` | Refused: `_Alignas requires a constant power of two`. |
 | An alignment weaker than the type's, `_Alignas(1) int` | Not diagnosed. The type's own alignment is kept. |
 | `_Alignas` in a typedef or on a parameter | Not diagnosed. |
+| An automatic scalar aligned beyond the stack's alignment, `_Alignas(32) int x;` | Refused: `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
+| On AVR, an alignment greater than 1 on an automatic object | Refused: `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |
 
 `_Alignof` applied to an expression is a GNU extension; see
 [Extensions](extensions.md).
 
 ### Initializers
 
-- **Empty initializer.** `= {}` zero-initializes a scalar, an object
-  with static storage duration, a nested aggregate (`{ {}, 1 }`) and a
-  compound literal (`(struct p){}`). On an automatic array, structure or
-  union, `= {}` emits no code and the object keeps whatever its storage
-  held. Write `= { 0 }` instead, which zero-initializes every member.
+- **Empty initializer.** `= {}` zero-initializes the whole object: a
+  scalar, an array, a structure or a union of any storage duration, a
+  nested aggregate (`{ {}, 1 }`) and a compound literal (`(struct p){}`).
+  A VLA cannot be initialized; see
+  [Variable length arrays](#variable-length-arrays).
 - **Flexible array members.** See the [C99](#c99) table.
 - **File-scope compound literals.** See the [C99](#c99) table.
 - **Brace elision in an array of unknown size.** When an initializer
@@ -773,7 +794,7 @@ operators (`#include_next`, `__has_include_next`, `__has_builtin`,
 | Line splicing | Partial | A backslash-newline is removed between tokens, in directives and inside identifiers and numbers. Inside a string literal or character constant it is an error (shown below the table). At the end of a `//` comment it does not continue the comment: the next line is compiled as code. |
 | Comments | Supported | Each comment is replaced by one space. |
 | Digraphs | Not supported | See [C95](#c95-amendment-1). |
-| Universal character names | Supported | |
+| Universal character names | Partial | In character constants and string literals only; see the [C99](#c99) table. |
 | String literal concatenation | Supported | |
 
 A backslash-newline inside a string literal or character constant gives:

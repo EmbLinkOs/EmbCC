@@ -21,9 +21,10 @@ by g++ and with libstdc++, and exceptions propagate between the two. The
 headers and the sources of GCC's libstdc++ compile with EmbCC. EmbCC
 also ships its own C++ runtime and standard library (`lib/libcxx`).
 
-On the Darwin and Windows targets C++ works with restrictions. On the
-Cortex-M, RISC-V and AVR targets it is not supported. See
-[Targets](#targets).
+On the Darwin and Windows targets C++ works with restrictions. On
+`riscv64-unknown-elf` it is not supported: a unit compiles when
+exceptions are turned off, and is not tested. On the Cortex-M, RV32 and AVR targets
+EmbCC refuses to generate code for C++. See [Targets](#targets).
 
 EmbCC compiles C++ by lowering it to C, which the C front end, the
 optimizer and the code generators then compile (design decision D-013 in
@@ -178,10 +179,13 @@ this:
   by the length of its name and the name (`_C5Shape`). Line numbers refer
   to the C++ source. See [Debugging](debugging.md).
 - **Data model.** The C++ front end computes `sizeof`, `alignof`, class
-  layout and constant expressions with fixed sizes: `int` and `wchar_t`
-  4 bytes; `long`, `long long`, `double` and pointers 8; `long double`
-  16. These are the sizes of the x86-64 and AArch64 ELF targets. On a
-  target with other sizes, C++ disagrees with C; see [Targets](#targets).
+  layout and constant expressions itself, for a target whose `long` and
+  pointers are 8 bytes: `int` and `wchar_t` are 4 bytes; `long`,
+  `long long`, `double` and pointers 8. `long double` has the target's
+  size and alignment: 16 bytes on x86-64, on AArch64 ELF and Linux, and
+  on RISC-V, and 8 on `arm64-apple-darwin`. A target whose `long` or
+  pointers are not 8 bytes refuses C++ code generation; see
+  [Targets](#targets).
 
 ## Targets
 
@@ -189,10 +193,11 @@ this:
 |---|---|---|---|
 | `x86_64-elf`, `aarch64-elf`, `-emblink` | Supported | Supported | `libcxx.a`, or libsupc++/libstdc++; libgcc's unwinder |
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | Supported | Supported | `libcxx.a`; the unwinder in EmbCC's `librt.a` |
-| `arm64-apple-darwin` | Supported, one difference | Supported | the system's C++ runtime |
-| `x86_64-apple-darwin` | Supported, one difference | Objects do not link | the system's C++ runtime |
+| `arm64-apple-darwin` | Supported | Supported | the system's C++ runtime |
+| `x86_64-apple-darwin` | Supported | Objects do not link | the system's C++ runtime |
 | `x86_64-windows-gnu` | Restricted | Not supported | none |
-| Cortex-M (`thumbv7m-none-eabi`, ...), `riscv32-unknown-elf`, `riscv64-unknown-elf`, `avr` | Not supported | Not supported | none |
+| `riscv64-unknown-elf` | Not supported; compiles, untested | Not supported | none |
+| Cortex-M (`thumbv7m-none-eabi`, ...), `riscv32-unknown-elf`, `avr` | Refused | Not supported | none |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
 built for `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu` and
@@ -207,9 +212,10 @@ embcc: error: no libcxx.a for TRIPLE -- a C++ program needs the C++ runtime, and
 **Darwin.** Objects follow the platform's C++ ABI and link with the
 system's C++ runtime through the system linker; on `arm64-apple-darwin`,
 exceptions thrown by EmbCC code are caught by Clang-compiled code and the
-reverse. The difference from the platform: `sizeof(long double)` is 16
-in C++, where the platform's `long double` is 8 bytes. `thread_local` is
-refused, as `__thread` is on Darwin. On `x86_64-apple-darwin`, an object
+reverse. `long double` has the platform's size, 8 bytes on
+`arm64-apple-darwin` and 16 on `x86_64-apple-darwin`, so a class that
+holds one is laid out as Clang lays it out. `thread_local` is refused,
+as `__thread` is on Darwin. On `x86_64-apple-darwin`, an object
 that calls the exception runtime (any unit with landing pads or a
 `throw`) does not link with Apple's linker:
 
@@ -230,31 +236,37 @@ The dynamic initialization of namespace-scope objects is not registered
 in the COFF object, so it does not run. See [Windows](targets.md#windows-coff)
 for the other limits of that target.
 
-**Cortex-M, RISC-V and AVR.** C++ is not supported on these targets:
+**Cortex-M, RV32 and AVR.** The C++ front end lays out types for 8-byte
+`long` and pointers (see [Data model](#how-c-is-compiled) above), and
+these targets have a 4-byte `long` and 4-byte pointers (2-byte on AVR).
+EmbCC refuses to generate code for a C++ unit there, whether with `-c`,
+`-S` or `--emit-c`:
 
-- The data model of the C++ front end (above) is not the target's. On
-  `thumbv7m-none-eabi`, for example, `sizeof(long)` is 8 in C++ and 4 in
-  C, and on `avr` `sizeof(int)` is 4 in C++ and 2 in C. `sizeof`,
-  `alignof`, class layouts and constant expressions therefore disagree
-  with C and with the target's ABI. Names that involve `std::size_t` are
-  mangled with `unsigned long`.
-- No `libcxx.a` is built for these targets.
+```text
+embcc: error: C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4
+```
+
+`-fsyntax-only`, which writes nothing, is accepted. It checks the unit
+with the front end's sizes, not the target's: `sizeof(long)` is 8 there.
+
+**`riscv64-unknown-elf`.** The front end's data model is the target's,
+and a C++ unit compiles, but C++ is not supported there:
+
+- No `libcxx.a` is built for the target.
 - Exceptions are not implemented. With exceptions on, any function that
   needs a landing pad is refused, and that includes a function whose
   local object has a destructor:
 
   ```text
-  error: a landing pad's selector must be a long lvalue
+  error: the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]
   ```
 
-  On `riscv64-unknown-elf` the message is
-  `error: the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]`.
-- The `.eh_frame` section a C++ unit gets on these targets cannot be used
-  by an unwinder; `-fno-unwind-tables` removes it.
+- The `.eh_frame` section a C++ unit gets cannot be used by an unwinder;
+  `-fno-unwind-tables` removes it.
 
 A unit compiled with `-fno-exceptions -fno-unwind-tables` (and
 `-fno-rtti`, there being no runtime to supply `type_info`) produces an
-object, but EmbCC does not test C++ on these targets.
+object, but EmbCC does not test C++ on this target.
 
 ## Language features
 

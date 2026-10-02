@@ -67,7 +67,8 @@ The IR optimizer runs the local passes listed in
 [Passes with no switch](#passes-with-no-switch) and the
 [`cfg-clean`](#-fcfg-clean--fno-cfg-clean) pass. Local variables stay in
 memory (mem2reg is an `-O2` pass), but a value stored to a local and
-read back in the same basic block is forwarded without the reload.
+read back in the same basic block is forwarded without the reload, unless
+the local is `volatile`.
 
 After optimization, a `static` function that no longer has a reachable
 caller is not emitted. This is decided by reachability from the
@@ -499,8 +500,9 @@ These run whenever the IR optimizer runs (`-O1` and above), and cannot
 be turned off individually:
 
 - **Constant folding** of integer operations at their width and
-  signedness, and algebraic identities (`x + 0`, `x * 1`, `x * 0`,
-  `x & 0`, ...).
+  signedness, of `float` and `double` arithmetic and comparisons on
+  constants (see [Floating point](#floating-point)), and integer
+  algebraic identities (`x + 0`, `x * 1`, `x * 0`, `x & 0`, ...).
 - **Strength reduction**: multiplication by a power of two becomes a
   shift; unsigned division and remainder by a power of two become a
   shift and a mask. Signed division is never a plain shift, because it
@@ -513,12 +515,15 @@ be turned off individually:
   never reused.
 - **Quotient and remainder**: `a / b` and `a % b` with the same operands
   in one block divide once; the remainder is `a - q * b`.
-- **Copy propagation** and **dead-code elimination**. Loads, divisions
-  (which can trap), stores, calls and branches are never treated as
-  dead code.
-- **Store-to-load forwarding** for local variables whose address is not
-  taken, within a basic block, and for a private `union` whose words are
-  read back after a store.
+- **Copy propagation** and **dead-code elimination**. A read of a local
+  variable whose value is unused is removed, unless the variable is
+  `volatile`. Loads through a pointer, divisions (which can trap), stores
+  and branches are never treated as dead code, and neither are calls,
+  except that at `-O2` an unused call to a function found to touch no
+  memory and not to throw is removed.
+- **Store-to-load forwarding** for local variables that are not
+  `volatile` and whose address is not taken, within a basic block, and
+  for a private `union` whose words are read back after a store.
 - **Range checks**: `c >= 'a' && c <= 'z'`, and the negated form, become
   one subtraction and one unsigned compare.
 - Instruction-selection preparation: constants become immediate
@@ -669,6 +674,12 @@ folded to 1, and `(x * 2) / 2` is not folded to `x`.
 Unsigned arithmetic wraps, as C requires. Out-of-range conversions from
 floating point to integer are not folded at compile time.
 
+Arithmetic wraps at the width of its type inside an expression as well as
+when the result is stored. On AVR, where `int` is 16 bits, an `int` or
+`unsigned int` result that leaves its 16-bit range wraps before the next
+operation reads it: `long f(int x) { return x + 1; }` returns -32768 for
+32767, and `(0xffffu + 1) / 2` is 0.
+
 ### Aliasing
 
 EmbCC does no type-based alias analysis. A store through an `int *` is
@@ -690,21 +701,36 @@ nothing it would disable is done. `-fstrict-aliasing` and
 
 ### Floating point
 
-The optimizer never changes a floating-point computation:
+From `-O1` up, the optimizer evaluates `float` and `double` arithmetic
+whose operands are constants, and otherwise leaves a floating-point
+computation as written:
 
-- floating-point arithmetic is not constant-folded, reassociated or
-  simplified (`x + 0.0` and `x * 1.0` stay), and two identical
-  floating-point operations are not merged;
+- `+`, `-`, `*`, `/`, negation and the comparisons on constant operands
+  are evaluated in the operation's own format with one rounding, to
+  nearest, which is what the machine computes under the default rounding
+  mode: `251 / 255.0f` and `0.1 + 0.2` become constants. Where `double`
+  is binary32, as on AVR, a `double` operation is evaluated in binary32.
+  A floating-point division by zero folds to the infinity the machine
+  would produce. An operation is left to run time when an operand or the
+  result is a NaN, because which NaN an invalid operation produces
+  differs between machines. `long double` arithmetic is never evaluated
+  at compile time;
+- floating-point arithmetic is not reassociated or simplified (`x + 0.0`
+  and `x * 1.0` stay), and two identical floating-point operations are
+  not merged;
 - a multiply and an add are never contracted into a fused multiply-add;
   EmbCC emits no fused multiply-add instruction on any target
   (`__builtin_fma` is not a builtin; `fma` is the library function);
 - negation flips the sign bit, which is exact for zero and NaN.
 
-The one compile-time floating-point evaluation the optimizer does is the
-conversion of a constant (for example `(double)1000000`), with
-round-to-nearest. A conversion is left to run time when the value is not
-finite, when it is out of range for an integer result, or when it would
-carry a NaN between `float` and `double`.
+The conversion of a constant (for example `(double)1000000`) is also
+evaluated, with round-to-nearest. A conversion is left to run time when
+the value is not finite, when it is out of range for an integer result,
+or when it would carry a NaN between `float` and `double`.
+
+The evaluation assumes the default rounding mode and floating-point
+environment, so a program that changes the rounding mode with `fesetround`
+does not see it applied to arithmetic on constants.
 
 `-ffast-math`, `-fno-fast-math` and `-ffp-contract=STYLE` are not
 accepted (`unknown argument`). `#pragma STDC FP_CONTRACT` and
@@ -713,25 +739,23 @@ effect.
 
 ### `volatile`
 
-Every load from and store to a `volatile` object through a pointer, and
-every access to a `volatile` variable with static storage duration, is
-performed as written: it is not removed, merged, moved out of a loop,
-vectorized or replaced by a value already known. A `volatile` local
-variable is not promoted to a register, and a `volatile` aggregate is not
-split.
+Every access to a `volatile` object is performed as written, at every
+level: it is not removed, merged, moved out of a loop, vectorized or
+replaced by a value already known. This holds for an access through a
+pointer, for a variable with static storage duration, and for a local
+variable:
 
-<!-- BUG, reported to the lead: pass_storefwd (opt.c, "local
-     store-forwarding") does not check `vol` on STVAR/LDVAR, so
-     `volatile int x = a; return x + x;` loses both reads at -O1 and -O2
-     (the stvar stays). Loops and other cross-block uses are not affected,
-     because the forwarding stops at every label. Remove the paragraph
-     below when fixed. -->
-
-**Known problem:** at `-O1` and above, a read of a `volatile` local
-variable (automatic storage, address not taken) that follows a store to
-it in the same basic block is replaced by the stored value. Reads in a
-later block, such as the test of a `for (volatile int i = 0; ...)` delay
-loop or a polled flag, are performed.
+- A `volatile` local variable is kept in its stack slot by every code
+  generator; it is never promoted to a register or given one by the
+  register allocator. `volatile int v = 5; return v + v;` reads `v` twice,
+  and `(void)v;` reads it once. A `volatile` local changed between
+  `setjmp` and `longjmp` keeps its new value, as C11 7.13.2.1 requires.
+- A `volatile` aggregate is not split.
+- A `volatile` bit-field is read and written through its storage unit,
+  and every such access is volatile. Reading the field loads the unit
+  once; assigning to it loads the unit once and stores it once. The value
+  of the assignment expression is the assigned value converted to the
+  field's width, not a second read of the unit.
 
 ### Library calls
 

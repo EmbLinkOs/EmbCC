@@ -97,10 +97,19 @@ the file depends on the file name suffix (see
 Without `-c`, `-S` or `-E`, `embcc` compiles the file and then links it
 in the same process, adding the target's start-up file and libraries.
 The driver links only for the x86-64 ELF targets (`x86_64-elf`,
-`x86_64-emblink`, `x86_64-linux-gnu`). For every other target it stops
-with `embcc: error: cannot link for TRIPLE` and the program is linked
-separately: by `embld` for Cortex-M, RISC-V and AVR, and by another
-toolchain's linker for AArch64, macOS and Windows.
+`x86_64-emblink`, `x86_64-linux-gnu`). For any other ELF target it
+stops:
+
+```text
+embcc: error: cannot link for thumbv7m-none-eabi in one step: the driver links x86-64 ELF only
+embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
+```
+
+For macOS and Windows the first line reads
+`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and this target writes Mach-O`
+(or `COFF`). Compile with `-c` and link separately: with `embld` for
+Cortex-M, RISC-V and AVR, and with another toolchain's linker for
+AArch64, macOS and Windows, which `embld` does not link.
 
 `embcc inspect STAGE FILE` prints one stage of this pipeline (tokens,
 preprocessed source, syntax tree, symbols, struct layout, EmbIR, control
@@ -194,11 +203,14 @@ exact list of accepted names is under
 [`-std=STANDARD`](invoking.md#-stdstandard).
 
 C is supported on every target. C++ is supported on the x86-64 and
-AArch64 targets, with restrictions on macOS and Windows. On the
-Cortex-M, RISC-V and AVR targets C++ is not supported: EmbCC compiles a
-C++ unit there without a diagnostic, but its C++ front end does not use
-the target's data model (on `thumbv7m-none-eabi`, `sizeof(long)` is 8 in
-C++), and there is no C++ library for those targets.
+AArch64 targets, with restrictions on macOS and Windows. The C++ front
+end lays out types for 8-byte `long` and pointers, so on Cortex-M, RV32
+and AVR EmbCC refuses to generate code for a C++ unit
+(`embcc: error: C++ is not yet supported for TRIPLE: ...`); `-fsyntax-only`
+still checks one. On RV64 a C++ unit compiles when exceptions are
+turned off, but C++ is not supported or tested there. There is no C++
+library for any of these targets. See [Targets](cxx.md#targets) in the
+C++ page.
 
 The language pages give the details:
 

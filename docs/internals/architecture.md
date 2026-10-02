@@ -257,16 +257,24 @@ the same process with, in order: `crt1.o`, the object, `libcxx.a` for a
 C++ input, `libc.a`, and `librt.a`. The files are found through
 `paths_target_file` (`src/driver/paths.c`), relative to the `embcc`
 binary. A hosted target refuses to link without its `crt1.o` and
-`libc.a`; a C++ input refuses to link without `libcxx.a`.
+`libc.a`; a C++ input refuses to link without `libcxx.a`. The link
+options are those `-Wl,` and `-Xlinker` gave (`apply_wl`): EmbLD's own
+`-e`, `-Ttext`, `-Tdata`, `-Tstack`, `--rom-limit` and `--lma-offset`
+are applied, options that change nothing about the image are accepted,
+and any other is refused ([EmbLD](linker.md#the-drivers-link)).
 
 The in-process link is done only for x86-64 targets with ELF output
 (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` and their aliases).
-Every other target is refused by name:
+Every other target is refused by name, before anything is compiled:
 
 ```text
-embcc: error: cannot link for aarch64-elf: the integrated linker reads x86-64 ELF, and this needs aarch64
-embcc: compile with -c and link with a toolchain for it
+embcc: error: cannot link for aarch64-elf in one step: the driver links x86-64 ELF only
+embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
 ```
+
+A Mach-O or COFF target gets
+`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and this target writes Mach-O`
+(or `COFF`) as the first line.
 
 The standalone `embld` links more than the driver uses: it accepts
 x86-64, ARMv7-M and ARMv8-M, RV32, RV64 and AVR objects, and refuses
@@ -292,6 +300,13 @@ With no boundary installed, the same calls flush the diagnostics and
 call `exit(1)`, so a tool that does not install one still behaves
 correctly. Diagnostics are records rendered once, at the boundary or at
 exit, as caret text or JSON (`src/driver/diag.c`).
+
+`compile` also fails a unit that ran to the end but recorded an error,
+which is how a warning promoted by `-Werror` or `-Werror=NAME` ends:
+when `diag_error_count()` is nonzero it returns 1 and removes the output
+file it was writing, so no object, assembly file or executable is left
+for `make` to take as up to date. `compile_and_link` then stops before
+linking.
 
 The following still end the process directly:
 
@@ -329,8 +344,12 @@ driver sets it in this order:
    `target_from_triple` looks the name up in `g_triples[]`, the explicit
    table of accepted spellings; an unknown name is refused with
    `embcc: error: unknown target 'NAME'` and the list of known triples.
-   The scan also installs the backend's "this operation calls a runtime
-   helper" predicate for the optimizer (`target_set_calls_helper`).
+   Once the scan is done, the backend's "this operation calls a runtime
+   helper" predicate is installed for the optimizer
+   (`target_set_calls_helper`), from the target finally chosen, so a
+   compiler with a configured default makes the same code as one given
+   that target by `--target=`. Thumb, RISC-V and AArch64 have one;
+   x86-64 and AVR have none.
 4. After all options, `arm_float_resolve` settles the Thumb FPU and
    float ABI from `-mfpu=`, `-mfloat-abi=` and an `-eabihf` triple.
 

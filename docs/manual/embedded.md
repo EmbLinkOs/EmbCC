@@ -28,12 +28,9 @@ The `embcc` driver links in-process only for x86-64 ELF targets. For every
 embedded target it stops with:
 
 ```text
-embcc: error: cannot link for thumbv7m-none-eabi: the integrated linker reads x86-64 ELF, and this needs aarch64
-embcc: compile with -c and link with a toolchain for it
+embcc: error: cannot link for thumbv7m-none-eabi in one step: the driver links x86-64 ELF only
+embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
 ```
-
-<!-- The second half of that message names "aarch64" for every non-x86-64
-     target (src/driver/main.c, compile_and_link); reported to the lead. -->
 
 So a firmware build compiles each file with `-c` and links the objects
 with `embld`, naming every input explicitly, the runtime archive included:
@@ -52,7 +49,9 @@ toolchain's linker (see [Running images under QEMU](#running-images-under-qemu))
 There is no `-nostdlib`, `-nostartfiles` or `-nodefaultlibs`; the driver
 rejects each as `embcc: error: unknown argument '-nostdlib'`. They are not
 needed, because nothing is linked that the `embld` command line does not
-name. See [Libraries](libraries.md#how-the-driver-links-the-libraries).
+name. `-Wl,` options are ignored by a compile with `-c`, so a build system
+that passes them to every command still compiles; the memory map goes on
+the `embld` command line. See [Libraries](libraries.md#how-the-driver-links-the-libraries).
 
 ## Freestanding compilation
 
@@ -236,6 +235,42 @@ ships no `objcopy`. The symbol table is kept in the image, outside every
 loadable segment, so it costs no flash. All EmbLD options are in
 [EmbLD](tools/embld.md).
 
+### `volatile` and memory-mapped registers
+
+An access through a `volatile` lvalue is performed every time the source
+makes it, at every optimization level, so a peripheral register can be
+declared the usual way:
+
+```c
+struct uart {
+    volatile unsigned data;
+    volatile unsigned status : 8;
+    volatile unsigned mode : 3;
+};
+#define UART0 ((struct uart *)0x4000C000u)
+
+void put(char c)
+{
+    while (UART0->status & 0x20)    /* one read of the register per test */
+        ;
+    UART0->data = c;                /* one store */
+}
+```
+
+- A read or write through a pointer to `volatile` is never removed,
+  merged with another, moved out of a loop or replaced by a value already
+  known. `(void)UART0->data;` performs the read.
+- A `volatile` bit-field is accessed through its storage unit. Reading
+  the field loads the unit once; assigning to it loads the unit once and
+  stores it once. The value of an assignment such as `x = (r->mode = 5)`
+  is computed from the stored value, without reading the register again,
+  which matters for a register that clears when read.
+- A `volatile` local variable stays in memory, so a delay loop such as
+  `for (volatile int i = 0; i < 1000; i++) ;` performs every read and
+  write of `i`.
+
+See [Optimization](optimization.md#volatile).
+
 ### Sizing the stack: `-fstack-usage`
 
 A microcontroller has no guard page and no room to grow a stack, so the
@@ -288,8 +323,9 @@ sub-architecture as GCC's options do. `-mcpu=cortex-m0`, `cortex-m0plus`,
 or ARMv7E-M Thumb-2 for them, which an ARMv6-M or ARMv8-M Baseline part
 cannot execute. `-mthumb` is accepted and has no effect; `-marm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
-only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and
-`enum` is always `int`-sized (`-fshort-enums` is refused). The rest of the
+only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
+`enum` is `int`-sized unless its values need a wider type
+(`-fshort-enums` is refused). The rest of the
 data model is in [Targets](targets.md).
 
 ### Vector table and reset handler
@@ -902,11 +938,24 @@ cross toolchain; only the program under test comes from EmbCC.
 
 ## C++ on the embedded targets
 
-C++ compiles for every embedded target, but no C++ runtime is built for
-them. Code that can throw does not compile:
+EmbCC's C++ front end lays out classes for a target whose `long` and
+pointers are 8 bytes. On the Cortex-M targets, RV32 and AVR it refuses to
+generate code for a C++ unit:
 
 ```text
-embcc: cxe.cc:5:1: error: a landing pad's selector must be a long lvalue
+embcc: error: C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4
+```
+
+`-fsyntax-only`, `-E`, `-M` and `-MM` still accept C++ there; `-c`, `-S`,
+`--emit-c` and `--emit-interfaces` do not.
+
+C++ compiles for `riscv64-unknown-elf`, but no C++ runtime is built for
+it. Code that needs a landing pad (a `try` block, or a local
+object whose destructor must run while an exception unwinds) does not
+compile:
+
+```text
+embcc: cx.cc:7: error: the RV64 backend cannot lower this operation yet (function _Z1gi) [landing w=8 size=4]
 ```
 
 Compile with `-fno-exceptions`, and with `-fno-rtti` unless the program

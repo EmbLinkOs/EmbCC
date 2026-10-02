@@ -8,7 +8,7 @@ say what the optimizer decided. It is for anyone who compiles code with
 EmbCC or integrates it into an editor or build system.
 
 > **Section ids.** Comments in the EmbCC sources cite
-> "docs/tools/diagnostics.md T1" through "T6". Those ids refer to
+> "docs/manual/diagnostics.md T1" through "T6". Those ids refer to
 > sections of this page: T1 is [the diagnostic format](#t1), T2 is
 > [error recovery](#t2), T3 is [fix-its](#t3), T4 is
 > [the warning options](#t4), T5 is [the language server](#t5), and T6 is
@@ -52,7 +52,7 @@ The parts are, in order:
 | `area.c:4:16:` | File, line and column. Columns count bytes from 1. The column is omitted when it is not known (some diagnostics are tied to a whole line); the line is omitted when the diagnostic is about the file as a whole. A diagnostic with no file names `<embcc>`. |
 | `error:` | The severity: `error`, `warning` or `note`. |
 | message | What is wrong. |
-| `[-Wname]` | Printed after a diagnostic that a `-W` option controls (a warning, or an error under `-Werror`). `-Wno-name` turns it off. |
+| `[-Wname]` | Printed after a diagnostic that a `-W` option controls (a warning, or an error under `-Werror` or `-Werror=name`). `-Wno-name` turns it off. |
 | `[E0001]` | Printed after a diagnostic that has an [explanation](#t6): `embcc --explain E0001` prints it. |
 
 When the source text of the file is available, the diagnostic is
@@ -101,7 +101,8 @@ A small number of messages bypass this mechanism and are printed
 immediately as plain text:
 
 - driver messages about the command line itself, such as an unknown `-W`
-  name or a `-std=` value that is accepted but not enforced;
+  or `-Werror=` name, `-pedantic`, or a `-std=` value that is accepted but
+  not enforced;
 - `escape sequence out of range ...; truncated, as gcc does`, from the
   lexer;
 - `the optimizer stopped after N rounds on 'F' without converging`, from
@@ -132,7 +133,7 @@ The same as `-fdiagnostics-color=never`.
 | Status | Meaning |
 |---|---|
 | 0 | No errors. Warnings do not change the status. |
-| 1 | At least one error, including a warning turned into an error by `-Werror`. |
+| 1 | At least one error, including a warning turned into an error by `-Werror` or `-Werror=NAME`. No output file is left (see [`-Werror`](#-werror)). |
 
 With `--fix`, the status is 0 whenever at least one fix-it was applied
 (see [`--fix`](#fix)).
@@ -236,9 +237,10 @@ far and
 embcc: compilation terminated due to -fmax-errors=N
 ```
 
-and exits with status 1. Warnings turned into errors by `-Werror` count
-toward the limit. `0` means no limit, which is the default. The value is
-read with `atoi`, so a value that is not a number also means no limit.
+and exits with status 1. Warnings turned into errors by `-Werror` or
+`-Werror=NAME` count toward the limit. `0` means no limit, which is the
+default. The value is read with `atoi`, so a value that is not a number
+also means no limit.
 
 EmbCC does not accept Clang's spelling `-ferror-limit=N` or GCC's
 `-Wfatal-errors` (the first is an unknown argument, the second an unknown
@@ -278,7 +280,7 @@ Each element of the array is an object with these members:
 
 | Member | Present | Value |
 |---|---|---|
-| `kind` | always | `"error"`, `"warning"` or `"note"`. A warning turned into an error by `-Werror` has kind `"error"`. |
+| `kind` | always | `"error"`, `"warning"` or `"note"`. A warning turned into an error by `-Werror` or `-Werror=NAME` has kind `"error"`. |
 | `message` | always | The message text, without the `[-W...]` and `[E....]` tags. |
 | `option` | warnings a `-W` option controls | The option, for example `"-Wunused-variable"`. Kept when `-Werror` makes the diagnostic an error. |
 | `id` | diagnostics with an explanation | The [explain id](#t6), for example `"E0001"`. EmbCC's own member; GCC has no equivalent. |
@@ -474,8 +476,9 @@ object, although the `E0007` entry gives one as an example.
      diagnose. Reported to the lead. -->
 
 `E0008` is an error, not a warning, and it ends the compile. It applies
-to every function with a non-`void` return type, including `main`: a
-`main` that can reach its closing brace is rejected.
+to every function with a non-`void` return type except `main`. Reaching
+the closing brace of `main` returns 0, as C99 5.1.2.2.3 specifies, so
+`int main(void) { }` is a valid program.
 
 <a id="t4"></a>
 
@@ -529,13 +532,14 @@ Turn every warning into an error. The diagnostic is printed with
 exit status becomes 1. Warnings that no option controls (a macro
 redefinition, `#warning`) are turned into errors too.
 
-A warning turned into an error does not stop the compile: semantic
-analysis and code generation continue, and **the object file is still
-written**, although the exit status is 1. A build system that relies on
-the output file not existing after a failed compile (as `make` does when
-deciding what to rebuild) should delete it on failure.
-<!-- Observed at this commit: `embcc -Wall -Werror -c w.c -o w.o` exits 1
-     and leaves w.o. GCC does not write the object. Reported to the lead. -->
+A warning turned into an error does not stop the compile: the remaining
+diagnostics are still reported. The compile has failed, though, and it
+leaves no output file: the object, assembly file or executable it was
+writing is removed, together with any file of that name an earlier
+compile left, so `make` builds it again on the next run. A dependency
+file from `-MD` or `-MMD` and a `.su` file from `-fstack-usage` are still
+written. A warning that is not an error still lets the object be
+written.
 
 #### `-Wno-error`
 
@@ -543,11 +547,27 @@ Undo an earlier `-Werror`.
 
 #### `-Werror=NAME`, `-Wno-error=NAME`
 
-Not implemented. `-Werror=NAME` is treated as an unknown warning name: it
-prints the `is not a warning EmbCC has` message, does not enable `NAME`,
-and does not turn it into an error. `-Wno-error=NAME` is accepted
-silently and has no effect. To fail a build on a particular warning,
-enable it and use `-Werror`.
+`-Werror=NAME` turns the warning `NAME` on and reports it as an error,
+whether or not `-Werror` is given. `-Wno-error=NAME` keeps `NAME` a
+warning when `-Werror` is given; it does not turn the warning on. For
+the warning it names, either option overrides `-Werror` and `-Wno-error`
+wherever they appear on the command line:
+
+```sh
+embcc -Wall -Werror -Wno-error=unused-variable -c f.c   # -Wunused-variable stays a warning
+embcc -Werror=format -c f.c                            # -Wformat on, and an error
+```
+
+`-Wno-NAME` after `-Werror=NAME` turns the warning off again, and `-w`
+suppresses it. The warnings no option controls follow `-Werror` alone. A
+`NAME` that is not a warning EmbCC has is reported and ignored:
+
+```text
+embcc: warning: -Werror=cast-align names no warning EmbCC has (--help-warnings lists them)
+```
+
+Like the unknown-warning message, it is printed immediately as plain
+text.
 
 #### `-w`
 
@@ -567,15 +587,19 @@ include directories, or was included by another system header.
 
 #### `-pedantic`, `-pedantic-errors`, `-Wpedantic`
 
-Not supported. `-pedantic` and `-pedantic-errors` are refused:
+EmbCC compiles one C dialect, C11 with the GNU extensions, and has no
+diagnostics for extensions to ISO C; see
+[C language support](c-language.md). `-pedantic` and `-pedantic-errors`
+are accepted with a warning that they turn nothing on:
 
 ```text
-embcc: error: unknown argument '-pedantic'
+embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
 ```
 
-`-Wpedantic` is an unknown warning name and turns nothing on. EmbCC
-compiles one C dialect, C11 with the GNU extensions, and has no mode that
-diagnoses extensions; see [C language support](c-language.md).
+The message is printed immediately as plain text; `-w` does not suppress
+it and `-Werror` does not make it an error. `-pedantic-errors` makes no
+diagnostic an error. `-Wpedantic` is an unknown warning name and turns
+nothing on.
 
 ### Summary of warnings
 
@@ -1075,10 +1099,11 @@ rules above, with these consequences:
 | Option | What EmbCC does |
 |---|---|
 | `-WNAME` for a name not in the [summary](#summary-of-warnings) (`-Wconversion`, `-Wcast-align`, `-Wpedantic`, `-Wunused`, `-Weverything`, `-Wfatal-errors`, ...) | Accepted; prints `embcc: warning: -WNAME is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)`; no effect. |
-| `-Wno-NAME` for a name not in the summary (`-Wno-unused`, `-Wno-system-headers`, `-Wno-error=NAME`, ...) | Accepted silently; no effect. `-Wno-unused` does **not** turn off the `-Wunused-*` warnings. |
-| `-Werror=NAME` | Treated as an unknown name, as above. |
-| `-Wl,ARGS`, `-Wa,ARGS`, `-Wp,ARGS` | Not passed to the linker, assembler or preprocessor. Each is treated as an unknown warning name: the `is not a warning EmbCC has` message is printed and the arguments are ignored. |
-| `-pedantic`, `-pedantic-errors` | Refused: `embcc: error: unknown argument '-pedantic'`. |
+| `-Wno-NAME` for a name not in the summary (`-Wno-unused`, `-Wno-system-headers`, ...) | Accepted silently; no effect. `-Wno-unused` does **not** turn off the `-Wunused-*` warnings. |
+| `-Werror=NAME`, `-Wno-error=NAME` for a name not in the summary | Accepted; prints `embcc: warning: -Werror=NAME names no warning EmbCC has (--help-warnings lists them)`; no effect. |
+| `-Wp,ARGS` | Not passed to the preprocessor. Treated as an unknown warning name: the `is not a warning EmbCC has` message is printed and the arguments are ignored. |
+| `-Wl,ARGS`, `-Wa,ARGS` | Options for the link and the assembler, not warnings; see [Invoking EmbCC](invoking.md#assembler-and-linker-options). |
+| `-pedantic`, `-pedantic-errors` | Accepted; prints `embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on`; no effect. |
 
 <a id="remarks"></a>
 

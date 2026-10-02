@@ -59,13 +59,13 @@ the full entry.
 |---|---|
 | [Overall](#overall-options) | `-c` `-S` `-E` `-o FILE` `-x LANG` `-fsyntax-only` `--emit-c` `--emit-interfaces` `--emit-empty-object FILE` `--help` `-h` `--help-warnings` `--version` `-dumpmachine` `--dump-predef` `--print-search-dirs` `--explain[=ID]` |
 | [Language](#c-and-c-language-options) | `-std=STD` `-fsigned-char` `-funsigned-char` `-ffreestanding` `-fno-builtin` `-fwrapv` `-fstrict-aliasing` `-fno-strict-aliasing` `-fno-common` `-fchar8_t` `-fexceptions` `-fno-exceptions` `-frtti` `-fno-rtti` `-faccess-control` `-fno-access-control` |
-| [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fdiagnostics-parseable-fixits` `--fix` |
+| [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fdiagnostics-parseable-fixits` `--fix` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
 | [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-fPASS` `-fno-PASS` `-fremarks` `-fremarks=json` |
 | [Instrumentation](#instrumentation-options) | `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fno-stack-protector` |
 | [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
-| [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`); none of GCC's linker options |
+| [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` |
 | [Code generation](#code-generation-options) | `-funwind-tables` `-fasynchronous-unwind-tables` `-fno-unwind-tables` `-fno-asynchronous-unwind-tables` `-fomit-frame-pointer` `-fno-omit-frame-pointer` `-fno-plt` `-ffunction-sections` `-fdata-sections` |
 | [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mfpu=FPU` `-mfloat-abi=ABI` |
 | [Target](#target-selection) | `--target=TRIPLE` |
@@ -106,6 +106,12 @@ What happens to the input depends on the mode options:
 
 The default object is written next to the input, not in the current
 directory: `embcc -c src/foo.c` writes `src/foo.o`.
+
+A C++ input is compiled only for a target whose `long` and pointers are
+8 bytes. For the Cortex-M targets, RV32 and AVR, every mode but `-E`,
+`-M`, `-MM` and `-fsyntax-only` stops with `embcc: error: C++ is not yet supported for
+TRIPLE: the C++ front end lays out types for 8-byte long and pointers,
+...` (see [Targets](targets.md)).
 
 When several mode options are given, `-E` takes precedence over the
 others, then `-fsyntax-only`, then `-S`, then `-c`.
@@ -301,9 +307,10 @@ and status 1. See [Diagnostics](diagnostics.md).
 ### Exit status
 
 `embcc` exits with status 0 when the requested output was produced and no
-error was reported, and 1 otherwise. A warning promoted by `-Werror`
-counts as an error. With `--fix`, the status is 0 when at least one fix
-was applied.
+error was reported, and 1 otherwise. A warning promoted by `-Werror` or
+`-Werror=NAME` counts as an error, and the compile then leaves no output
+file (see [`-Werror`](#-werror--wno-error)). With `--fix`, the status is 0
+when at least one fix was applied.
 
 ## C and C++ language options
 
@@ -342,9 +349,10 @@ Any other name is refused: `embcc: error: unknown standard '-std=NAME'`,
 or `embcc: error: unknown C++ standard '-std=NAME'` for a malformed
 `c++`/`gnu++` name.
 
-`-ansi`, `-pedantic` and `-pedantic-errors` are not accepted (unknown
-argument). `-Wpedantic` is accepted as a warning name EmbCC does not have
-(see [`-WNAME`](#-wname)).
+`-ansi` is not accepted (unknown argument). `-pedantic` and
+`-pedantic-errors` are accepted with a warning and change nothing (see
+[`-pedantic`](#-pedantic--pedantic-errors)). `-Wpedantic` is accepted as a
+warning name EmbCC does not have (see [`-WNAME`](#-wname)).
 
 ### `-fsigned-char`, `-funsigned-char`
 
@@ -406,9 +414,10 @@ as GCC's option does. `-faccess-control` restores the default.
 
 ### Language options that are not accepted
 
-`-fshort-enums` is [refused](#refused-options): enumerations are `int`
-sized on every target, and a structure containing one would be laid out
-differently. `-fshort-wchar`, `-fms-extensions`, `-fno-asm`,
+`-fshort-enums` is [refused](#refused-options): on every target an
+enumeration is `int`-sized unless its values need a wider type (see
+[Targets](targets.md#data-models)), and a structure containing one would
+be laid out differently. `-fshort-wchar`, `-fms-extensions`, `-fno-asm`,
 `-fgnu89-inline`, `-fvisibility=...` and `-fno-builtin-NAME` are not
 accepted (unknown argument).
 
@@ -428,11 +437,29 @@ Suppress all warnings. Takes precedence over every `-W` option, including
 `-Werror` reports every warning as an error, and the compile fails.
 `-Wno-error` turns that off again; the last one wins.
 
-The per-warning forms differ from GCC. `-Werror=NAME` is not understood as
-"make `NAME` an error": it is read as a warning named `error=NAME`, which
-does not exist, so it prints the
-[unknown-warning message](#-wname) and changes nothing. `-Wno-error=NAME`
-is accepted and ignored.
+A compile that fails because of a warning made an error writes no output:
+the object, assembly file or executable it was producing is removed, so
+that `make` does not take it as up to date. A file of that name left by
+an earlier compile is removed as well. The dependency file of `-MD` or
+`-MMD` and the `.su` file of `-fstack-usage` are still written.
+
+### `-Werror=NAME`, `-Wno-error=NAME`
+
+`-Werror=NAME` reports the warning `NAME` as an error, with or without
+`-Werror`, and turns the warning on. `-Wno-error=NAME` keeps `NAME` a
+warning under `-Werror`; it does not turn the warning on. Either form
+decides for its one warning whatever `-Werror` and `-Wno-error` say, and
+wherever it appears on the command line. `-w` still suppresses the
+warning. A `NAME` that is not a warning EmbCC has is reported and
+ignored:
+
+```text
+embcc: warning: -Werror=cast-align names no warning EmbCC has (--help-warnings lists them)
+```
+
+The warnings that no option controls (see
+[Diagnostics](diagnostics.md#warnings-no-option-controls)) follow
+`-Werror` alone.
 
 ### `-Wall`, `-Wextra`, `-W`
 
@@ -448,19 +475,32 @@ embcc: warning: -Wcast-align is not a warning EmbCC has, so it turns nothing on 
 ```
 
 Any argument beginning with `-W` that matches nothing else is handled
-this way, including `-Wl,...`, `-Wa,...` and `-Wp,...` (see
-[Assembler and linker options](#assembler-and-linker-options)) and
-`-Wformat=2`.
+this way, including `-Wp,...` and `-Wformat=2`. `-Wa,...` and `-Wl,...`
+are options of their own (see
+[Assembler and linker options](#assembler-and-linker-options)).
 
 ### `-Wno-NAME`
 
 Turn off the warning `NAME`. An unknown `NAME` is accepted silently.
+`-Wno-error=NAME` is a different option; see above.
 
 ### `-Wsystem-headers`
 
 Report warnings in system headers. By default a warning whose location is
 in a header found through `-isystem` or through EmbCC's own include
 directories is not reported.
+
+### `-pedantic`, `-pedantic-errors`
+
+Accepted, with a warning that they turn nothing on: EmbCC has no
+diagnostics for extensions to ISO C.
+
+```text
+embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
+```
+
+The warning is printed when the command line is read; `-w` does not
+suppress it and `-Werror` does not make it an error.
 
 ### The warnings
 
@@ -904,27 +944,48 @@ default output name is derived correctly only for `.asm`
 (`boot.asm` gives `boot.o`), and for a `.s` file it is not the expected
 `.o` name.
 
+### `-Wa,ARGS`
+
+Options for the assembler, separated by commas. The integrated assembler
+takes no options, so only those that change nothing it writes are
+accepted: `--noexecstack`, `-g`, any option beginning with `--gdwarf`, and
+`-mrelax`. Any other is refused, and nothing is compiled:
+
+```text
+embcc: error: assembler option '-adhln' is not one the integrated assembler has
+```
+
+The options are checked on every invocation, whatever the input file.
+
 ### Linking
 
 Without `-c`, `-S`, `-E` or `-fsyntax-only`, `embcc FILE -o OUT` compiles
 the file and links it in the same process with EmbCC's linker,
 [`embld`](tools/embld.md). This is available only for x86-64 ELF targets
 (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` and their aliases).
-For every other target the driver stops:
+For every other target the driver stops before compiling:
 
 ```text
-embcc: error: cannot link for TARGET: the integrated linker reads x86-64 ELF, and this needs FORMAT
-embcc: compile with -c and link with a toolchain for it
+embcc: error: cannot link for thumbv7m-none-eabi in one step: the driver links x86-64 ELF only
+embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
 ```
 
-Compile with `-c` and run `embld` (which also links ARM, RISC-V and AVR
-images) or the platform's linker instead.
+For a target whose objects are Mach-O or COFF, the first line is
+`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and
+this target writes Mach-O` (or `COFF`), followed by the same second line.
+
+Compile with `-c`, then link the objects with `embld`, which links the ARM,
+RISC-V and AVR targets (see [Embedded programming](embedded.md)). `embld`
+does not read AArch64, Mach-O or COFF objects; link those with the
+platform's linker.
 
 The link line is fixed. In order, it contains:
 
 1. `crt1.o` from the target's library directory, if there is one;
 2. the object just compiled (written to `OUT.embcc-tmp.o` beside the
-   output and removed afterwards);
+   output and removed afterwards; when `embld` itself refuses the link,
+   for an undefined symbol or an image over `--rom-limit`, the temporary
+   object is left in place);
 3. `libcxx.a`, for a C++ input;
 4. `libc.a`, if the target has one;
 5. `librt.a`, the compiler runtime, if the target has one.
@@ -940,19 +1001,57 @@ targets nothing supplies the entry point: the program must define
 The image is written without execute permission; run `chmod +x` on it
 before running it directly.
 
+### `-Wl,ARGS`, `-Xlinker ARG`
+
+Pass options to the link. `-Wl,` splits `ARGS` at its commas, so
+`-Wl,-Ttext,0x200000` is two words; `-Xlinker` passes the next argument as
+one word, and with none the driver stops with `embcc: -Xlinker needs an
+option`. The words are kept in command-line order and read when the
+driver links. A compile that does not link (`-c`, `-S`, `-E`,
+`-fsyntax-only`) ignores them, as GCC does.
+
+These are applied, with the meaning of the [`embld`](tools/embld.md)
+option of the same name:
+
+| Linker option | Effect |
+|---|---|
+| `-Ttext ADDR`, `-Ttext=ADDR`, `-TtextADDR`, `-Ttext-segment ADDR`, `-Ttext-segment=ADDR` | the address the image starts at (default `0x400000`) |
+| `-Tdata ADDR`, `-Tdata=ADDR`, `-TdataADDR` | the address of the writable data |
+| `--rom-limit N`, `--rom-limit=N` | refuse an image whose stored bytes exceed `N` |
+| `--lma-offset N`, `--lma-offset=N` | load each segment at its address minus `N` |
+| `-e SYM`, `--entry SYM`, `--entry=SYM` | the entry symbol (default `_start`) |
+| `-Tstack ADDR`, `-Tstack=ADDR` | passed on, and refused by `embld` for x86-64: `embld: -Tstack is a RISC-V option: ...` |
+
+These are accepted and change nothing, because nothing in an image
+`embld` makes depends on them: `--gc-sections`, `--no-gc-sections`,
+`--as-needed`, `--no-as-needed`, `-O0`, `-O1`, `-O2`, `--build-id`,
+`--build-id=STYLE`, `--no-undefined`, `-s`, `--strip-all`, `-S`,
+`--strip-debug`, and `-z` followed by `noexecstack`, `relro`, `norelro`,
+`now` or `lazy` as a separate word (`-Wl,-z,now`). The image keeps its
+symbol table under `-s` and `--strip-all`.
+
+Any other linker option is refused, and nothing is linked:
+
+```text
+embcc: error: linker option '-T' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for
+```
+
+This covers linker scripts (`-T`), `--section-start`, `-Map`, `-zKEYWORD`
+written as one word, and `-z` with any other keyword.
+
 ### Linker options that are not accepted
 
-There is no way to pass options to the linker through `embcc`:
+Apart from [`-Wl,` and `-Xlinker`](#-wlargs--xlinker-arg), the driver
+takes no linker options:
 
 | Option | What happens |
 |---|---|
 | `-l LIB`, `-L DIR`, `-nostdlib`, `-nostartfiles`, `-nodefaultlibs`, `-static`, `-pthread`, `-T SCRIPT`, `-e SYM`, `-rdynamic`, `-no-pie` | unknown argument |
-| `-Wl,OPTION`, `-Xlinker` | `-Wl,...` is read as a warning name and only prints the unknown-warning message; `-Xlinker` is an unknown argument |
 | `-shared`, `-static-pie` | refused: `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
 | object files and archives as inputs | unknown argument |
 
-To link several objects or add libraries, run [`embld`](tools/embld.md)
-directly.
+`-e` reaches the linker as `-Wl,-e,SYM`. To link several objects or add
+libraries, run [`embld`](tools/embld.md) directly.
 
 ## Code generation options
 
@@ -1242,6 +1341,8 @@ message that names the option.
 | `-gdwarf-5` (any version but 2 to 4), `-gsplit-dwarf`, `-gz` | `embcc: error: -gdwarf-5 is not supported; EmbCC emits DWARF 4, uncompressed and in one piece` |
 | `-marm` | `-marm is not supported: a Cortex-M has no ARM instruction set, only Thumb` |
 | `-Og`, `-Ofast`, `-O4` and other `-O` forms | `embcc: unknown optimization flag '-Og'` |
+| `-Wl,OPTION` or `-Xlinker OPTION`, for a linker option not listed under [`-Wl,`](#-wlargs--xlinker-arg) | `embcc: error: linker option 'OPTION' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for` |
+| `-Wa,OPTION`, for an option not listed under [`-Wa,`](#-waargs) | `embcc: error: assembler option 'OPTION' is not one the integrated assembler has` |
 
 ## Environment variables
 

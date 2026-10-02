@@ -138,7 +138,7 @@ again after it adds slots.
 |---|---|
 | `size`, `align` | Size and alignment in bytes. |
 | `user_align` | `__attribute__((aligned(N)))` on the variable; 0 when absent. |
-| `is_volatile` | The slot is `volatile`. |
+| `is_volatile` | The slot is `volatile`. `mem2reg` does not promote it, store forwarding and DCE leave its accesses alone, and the shared register allocator (`ra_allocate_class`) gives it no register, so every access is to memory. |
 | `is_ldouble` | A `long double` wider than `double` (x87 or binary128). |
 | `is_int128` | An `__int128`. |
 | `is_int_or_ptr` | An integer or a pointer of any width. |
@@ -162,8 +162,16 @@ Vregs are numbered from 0 to `nvregs - 1` in three ranges:
 | Range | Meaning |
 |---|---|
 | `0 .. nparams-1` | The parameters, in order. |
-| `nparams .. nvars-1` | The other frame slots: locals in declaration order and the hidden slots semantic analysis creates (compound literals, VLA sizes, saved stack pointers). |
+| `nparams .. nvars-1` | The other frame slots: locals in declaration order and the hidden slots semantic analysis creates (compound literals, VLA sizes, saved stack pointers). The slot of a local aligned beyond the stack's alignment holds a pointer to its storage (see `IR_ALLOCA`). |
 | `nvars .. nvregs-1` | Temporaries. |
+
+A VLA's length is evaluated into its size slot where its declaration is
+reached. A block-scope `typedef` of a variably modified type is a
+`STMT_DECL` with `is_vm_typedef` set (the id its VLA nodes carry): IR
+generation evaluates the typedef's own array lengths into their size
+slots at that statement, and a later declaration, `sizeof` or array
+step that uses the name reads those slots instead of evaluating the
+lengths again. A typedef inside a loop is sized again on each pass.
 
 A vreg below `nvars` is a frame slot. `IR_LDVAR`, `IR_STVAR` and
 `IR_ADDR` take a slot number, printed `vN`. A slot number used as an
@@ -199,6 +207,16 @@ width of the value it operates on or produces:
 arithmetic uses the target's pointer size (8 on the LP64 targets, 4 on
 ARMv7-M and RV32).
 
+A value whose C type is narrower than its class (only AVR's 2-byte
+`int` and `unsigned`) is kept equal to its extension, because a
+divide, a right shift, a comparison or a conversion to `long` reads all
+four bytes. After an operation that can carry out of the type's width,
+IR generation (`int_wrap`) emits an `IR_EXT` of the type's size, signed
+for `int`: after `IR_ADD`, `IR_SUB`, `IR_MUL`, `IR_SHL` and `IR_NEG`, a
+signed `IR_DIV`, and an unsigned `IR_BNOT`, in binary expressions,
+compound assignments and unary `-` and `~`. The optimizer removes the
+extensions it can prove redundant.
+
 Variables live in memory at their true size. `IR_LDVAR` and `IR_LOAD`
 read `size` bytes and extend to `w` (sign-extending when `sign` is set);
 `IR_STVAR` and `IR_STORE` truncate to `size` bytes.
@@ -217,7 +235,7 @@ read `size` bytes and extend to `w` (sign-extending when `sign` is set);
 | `size` | Memory or source width in bytes, for the operations that have one. |
 | `sign` | Signed variant: signed division, arithmetic shift, signed comparison, sign extension. |
 | `flt` | Floating-point operation at width `w`. |
-| `vol` | `LOAD`/`STORE`/`LDVAR`/`STVAR`: a `volatile` or atomic access. The optimizer never removes, merges or reorders it. |
+| `vol` | `LOAD`/`STORE`/`LDVAR`/`STVAR`: a `volatile` or atomic access. The optimizer never removes, merges, forwards or reorders it. The load and store of a bit-field's storage unit carry it when the bit-field is accessed through a volatile lvalue, and the `LDVAR`/`STVAR` of a volatile local carry it. |
 | `imm` | `IR_CONST`'s value; the folded constant when `imm_b` is set; the operator of `IR_ARMW` and `IR_VBIN`. |
 | `imm_b` | Operand `b` is the constant `imm`, not a vreg. Set only by the optimizer's immediate-folding pass, on `ADD`, `SUB`, `MUL`, `AND`, `OR`, `XOR`, `CMP`, `SHL` and `SHR`, never on a floating-point or 16-byte operation. |
 | `pred` | `IR_CMP`'s predicate: `B_EQ`, `B_NE`, `B_LT`, `B_LE`, `B_GT` or `B_GE`. |
@@ -291,8 +309,8 @@ In the tables, *Form* is the textual form (see
 | `IR_NEG` | `%d = neg.W %a` | `dst = -a`. |
 | `IR_BNOT` | `%d = bnot.W %a` | `dst = ~a`. |
 | `IR_CMP` | `%d = cmp.W PRED %a, %b` | `dst = (a PRED b)`, 0 or 1. `sign` selects a signed integer comparison. With `flt`, `w` is the width of the floating-point operands. |
-| `IR_SELECT` | `%d = select.W %a ? %b : %c` | `dst = a ? b : c`. Both arms are already-computed values. Produced only by if-conversion in the optimizer. |
-| `IR_BSWAP` | `%d = bswap.W %a` | `dst` is `a` with its `size` bytes reversed (2, 4 or 8); `__builtin_bswapN`. |
+| `IR_SELECT` | `%d = select.W:C %a ? %b : %c` | `dst = a ? b : c`. Both arms are already-computed values. `w` and `sign` describe the arms; `size` (printed `C`) is the width of the condition `a`, 4 or 8, which the backend tests at that width. Produced only by if-conversion in the optimizer, which copies `C` from the `w` of the branch it replaces. |
+| `IR_BSWAP` | `%d = bswap.W %a` | `dst` is `a` with its `size` bytes reversed (2, 4 or 8); `__builtin_bswapN`. Produced only for x86-64, AArch64 and RV64. For ARMv7-M, RV32 and AVR, IR generation builds the swap from shifts, masks and ORs (`bswap_lowered`), an 8-byte one as two 4-byte swaps exchanged. |
 | `IR_SQRT` | `%d = sqrt.W[f] %a` | `dst = sqrt(a)` at float width `w` (4 or 8); `__builtin_sqrt*`. |
 
 With `flt` set, `ADD`, `SUB`, `MUL`, `DIV`, `MOV` and `CMP` operate on
@@ -321,8 +339,8 @@ is printed `#IMM` when `imm_b` is set.
 | `IR_LOAD` | `%d = load.W:S [%a]` | Read `S` bytes at address `a` (plus `memoff`), extend to `W`. |
 | `IR_STORE` | `store:S [%a], %b` | Write the low `S` bytes of `b` at address `a` (plus `memoff`). |
 | `IR_MEMCPY` | `memcpy:S [%a], [%b]` | Copy `S` bytes from address `b` to address `a`. |
-| `IR_MEMZERO` | `memzero:S [%a]` | Zero `S` bytes at address `a`. |
-| `IR_ALLOCA` | `%d = alloca %a` | `dst` = a fresh 16-byte-aligned block of `a` bytes on the stack, above the outgoing-argument area. Used for VLAs and `__builtin_alloca`; sets `has_alloca`. |
+| `IR_MEMZERO` | `memzero:S [%a]` | Zero `S` bytes at address `a`. IR generation clears an initialized local array or structure, and any local initialized with a brace list, this way before it stores the initializer's elements; `= {}` lists none and leaves only the clear. |
+| `IR_ALLOCA` | `%d = alloca %a` | `dst` = a fresh block of `a` bytes on the stack, above the outgoing-argument area, aligned as the stack is (16 bytes; 8 on ARMv7-M). Used for VLAs and `__builtin_alloca`, and at function entry for each aggregate local aligned beyond `target_stack_align()`: IR generation carves `size + align - 1` bytes, rounds the address up, and stores it in the local's slot, through which every access to the local goes (`local_addr`). Sets `has_alloca`. |
 | `IR_SPSAVE` | `%d = spsave` | `dst` = the stack pointer. |
 | `IR_SPRESTORE` | `sprestore %a` | Set the stack pointer to `a`, releasing every `IR_ALLOCA` since the `IR_SPSAVE` that produced `a`. |
 | `IR_FRAMEADDR` | `%d = frameaddr` | `dst` = this function's frame pointer (`rbp`, `x29`), which points at the saved frame pointer and the return address. The base of `__builtin_frame_address` and `__builtin_return_address`. Lowered by the x86-64 and AArch64 backends only. |
@@ -345,7 +363,10 @@ is printed `#IMM` when `imm_b` is set.
 
 The end of the instruction array also returns: every backend emits an
 epilogue after the last instruction, so a `void` function may end
-without `IR_RET`.
+without `IR_RET`. IR generation ends `main` (with an integer return
+type) with `ret` of the constant 0, as C99 requires for a `main` that
+reaches its closing brace; after a body whose every path returns, the
+optimizer removes it as unreachable.
 
 #### Control flow
 
@@ -604,9 +625,9 @@ Operands are spelled:
 
 The mnemonic carries a suffix. For operations without a memory width it
 is `.W` followed by the flags; for those with one (`ldvar`, `stvar`,
-`load`, `store`, `ext`, the conversions, the atomics and the vector
-opcodes) it is `.W:S` followed by the flags. `stvar` and `store` omit
-`.W`. The flags are `s` (`sign`), `f` (`flt`) and `v` (`vol`), in that
+`load`, `store`, `ext`, the conversions, the atomics, the vector
+opcodes and `select`) it is `.W:S` followed by the flags. `stvar` and
+`store` omit `.W`. The flags are `s` (`sign`), `f` (`flt`) and `v` (`vol`), in that
 order. So `ldvar.8:4s` is a sign-extending 4-byte load into an 8-byte
 value, and `load.4:1v` a volatile byte load. A width or flag that is
 not set is not printed. Because IR generation sets `sign` by default,

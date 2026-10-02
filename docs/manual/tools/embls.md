@@ -557,8 +557,6 @@ In this example, `-DDEBUG=1` affects the diagnostics only.
 
 Point Neovim's built-in LSP client at `embls` for the current buffer:
 
-<!-- UNVERIFIED: not run in Neovim here; vim.lsp.start is Neovim's API,
-     taken from the old docs/tools/diagnostics.md T5 example. -->
 
 ```lua
 vim.lsp.start({ name = "embls", cmd = { "embls" },

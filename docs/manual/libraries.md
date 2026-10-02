@@ -30,9 +30,12 @@ the system's libraries, and the Windows triple has no C library.
 `embcc FILE -o OUT` (no `-c`, `-S`, `-E` or `-fsyntax-only`) compiles and
 then links in the same process with [EmbLD](tools/embld.md). The driver
 links only for x86-64 ELF targets (`x86_64-elf`, `x86_64-emblink`,
-`x86_64-linux-gnu`); for every other target it stops with
-`embcc: error: cannot link for TRIPLE: ...` and the object has to be linked
-with `embld` or another linker. The details are in
+`x86_64-linux-gnu`); for every other target it stops before compiling
+with `embcc: error: cannot link for TRIPLE in one step: the driver links
+x86-64 ELF only` (or, for a Mach-O or COFF target, `embcc: error: cannot
+link for TRIPLE: the driver links x86-64 ELF, and this target writes
+Mach-O`), and the object has to be compiled with `-c` and linked with
+`embld` or the platform's linker. The details are in
 [Invoking](invoking.md#linking).
 
 ### The link line
@@ -95,8 +98,11 @@ The driver has no `-nostdlib`, `-nodefaultlibs` or `-nostartfiles`, and no
 embcc: error: unknown argument '-nostdlib'
 ```
 
-To link without EmbCC's libraries, or with others, compile with `-c` and
-run `embld` with exactly the inputs wanted:
+The driver's link takes EmbLD's own options through `-Wl,` and
+`-Xlinker` (`-e`, `-Ttext`, `-Tdata`, `-Tstack`, `--rom-limit`,
+`--lma-offset`; see [Invoking](invoking.md#-wlargs--xlinker-arg)), but not
+other inputs. To link without EmbCC's libraries, or with others, compile
+with `-c` and run `embld` with exactly the inputs wanted:
 
 ```sh
 embcc -c -O2 kernel.c -o kernel.o
@@ -330,7 +336,7 @@ depends on the target:
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | EmbCC's own, `lib/rt/unwind.c`, in `librt.a` |
 | `x86_64-elf`, `aarch64-elf` | libgcc's; the program links `libgcc.a` (or `libgcc_eh.a`) |
 | EmbLinkOS, macOS | the platform's |
-| the embedded targets | none; C++ that can throw does not compile there (see [Bare-metal programming](embedded.md#c-on-the-embedded-targets)) |
+| the embedded targets | none. C++ code generation is refused on Cortex-M, RV32 and AVR, and at RV64 a function that needs a landing pad is refused (see [Bare-metal programming](embedded.md#c-on-the-embedded-targets)) |
 
 `<unwind.h>` in the freestanding directory declares the level-I unwinder
 interface (`_Unwind_RaiseException`, `_Unwind_GetIP`, ...) with the GCC

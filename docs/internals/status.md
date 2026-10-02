@@ -82,16 +82,22 @@ listed under [ABI limitations](#abi-limitations).
 ### Linking
 
 `embcc FILE -o OUT` links in the same process only for the x86-64 ELF
-triples. For every other target it stops:
+triples. For every other target it stops before compiling:
 
 ```text
-embcc: error: cannot link for aarch64-linux-gnu: the integrated linker reads x86-64 ELF, and this needs aarch64
-embcc: compile with -c and link with a toolchain for it
+embcc: error: cannot link for aarch64-linux-gnu in one step: the driver links x86-64 ELF only
+embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
 ```
 
+For a Mach-O or COFF target the first line is
+`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and this target writes Mach-O`
+(or `COFF`), followed by the same second line.
+
 For Cortex-M, RISC-V and AVR, compile with `-c` and run
-[`embld`](../manual/tools/embld.md), which links those machines. `embld`
-does not link AArch64:
+[`embld`](../manual/tools/embld.md), which links those machines. The
+second line names `embld` for every target, but `embld` does not link
+AArch64, Mach-O or COFF objects; link those with the platform's linker.
+An AArch64 object is refused with:
 
 ```text
 embld: FILE: a 64-bit object for machine 183; only x86-64 and RV64 (EM_RISCV) are supported
@@ -119,7 +125,7 @@ are refused (see [Options](#options)).
 | `.s` and `.S` files (GNU syntax) | Refused: `no assembly-file support for x86_64-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` | Assembled |
 | `.asm` files (NASM syntax) | Assembled | Assembled as x86-64; see [Known defects](#known-defects) |
 | `-S` | `.byte` directives with the disassembly in comments | `.byte` directives without mnemonics |
-| File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | Labels, `.globl` and data directives |
+| File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | Labels, `.globl` and data directives; no instruction |
 
 Any other instruction in a file-scope `asm` block is refused. On x86-64:
 
@@ -127,10 +133,11 @@ Any other instruction in a file-scope `asm` block is refused. On x86-64:
 file-scope asm instruction not supported: "movq %rdi, %rax" (EmbCC assembles .global/labels/.byte/.long/.quad and and/call/jmp/ret)
 ```
 
-On AArch64:
+On every other target, every instruction is refused, including the four
+that x86-64 accepts:
 
 ```text
-file-scope asm instruction "mov x0, x1": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
+file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
 ```
 
 Inline `asm` inside a function is assembled on every target; its
@@ -201,8 +208,8 @@ AVR:
 | An 8-byte `asm` operand | `an asm operand of 8 bytes needs 8 consecutive registers, which is more than this backend keeps free across an asm` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 
-On every Cortex-M, RISC-V and AVR target, C++ exceptions are refused;
-see [C++](#c).
+C++ code generation is refused on Cortex-M, RV32 and AVR, and C++
+exceptions at RV64; see [C++](#c).
 
 ### Runtime libraries
 
@@ -383,10 +390,11 @@ target:
 | Target | C++ |
 |---|---|
 | x86-64 and AArch64 ELF | Supported, with exceptions, RTTI and `libcxx.a`. |
-| Apple arm64 | Supported, with exceptions, against the system's C++ runtime. `long double` is 16 bytes in C++ and 8 bytes in C. |
+| Apple arm64 | Supported, with exceptions, against the system's C++ runtime. |
 | macOS x86-64 | An object that uses exceptions does not link: Apple's linker reports `ld: fixup error (kind=x86_64_rip) ... target '___cxa_allocate_exception' does not have address`. Compile with `-fno-exceptions`. |
 | Windows x86-64 | Only with `-fno-exceptions -fno-unwind-tables`. Otherwise every unit is refused: `C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written` |
-| Cortex-M, RISC-V, AVR | Not supported. The C++ front end uses a 64-bit data model on these targets (`sizeof(long)` is 8 in C++ on `thumbv7m-none-eabi`), no `libcxx.a` is built, and a function that needs a landing pad is refused: `a landing pad's selector must be a long lvalue` (on RV64: `the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]`). |
+| Cortex-M, RV32, AVR | Not supported. The C++ front end lays out types for 8-byte `long` and pointers, so code generation is refused on a target where either is narrower: `C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4`. `-fsyntax-only`, `-E` and `-c -M` still run. |
+| RV64 | Not supported. Code is generated, but no `libcxx.a` is built, and a function that needs a landing pad is refused: `the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]`. |
 
 Language refusals:
 
@@ -470,12 +478,14 @@ headers, such as `printf`, link and run.
 
 - Cortex-M objects carry `.ARM.attributes`, and `embld` refuses to link
   objects whose float ABI (`Tag_ABI_VFP_args`) or enumeration size
-  (`Tag_ABI_enum_size`) disagree. Enumerations are always `int`-sized,
-  as with Clang; `-fshort-enums` is refused.
+  (`Tag_ABI_enum_size`) disagree. An enumeration is `int`-sized unless
+  one of its values does not fit in `int`, as with Clang;
+  `-fshort-enums` is refused.
 - On AVR, structures are passed and returned by avr-gcc's documented
   rules. Clang's AVR target passes structure arguments differently.
-- The C++ front end's data model is not the target's on Cortex-M,
-  RISC-V and AVR (see [C++](#c)).
+- C++ code generation is refused on Cortex-M, RV32 and AVR, whose `long`
+  or pointers are narrower than the 8 bytes the C++ front end lays types
+  out for (see [C++](#c)).
 
 ## Options
 
@@ -495,15 +505,36 @@ list, with the options that are accepted and have no effect, is in
 These are unknown arguments (`embcc: error: unknown argument '-march=native'`,
 followed by the usage summary): `-march=`, `-mtune=`, `-m32`, `-m64`,
 `-mabi=`, `-mmcu=`, `-mavx2` and the other x86 feature flags; `-include`,
-`-imacros`, `-iquote`, `-idirafter`, `-undef`; `-ansi`, `-pedantic`,
-`-pedantic-errors`; `-ffast-math`, `-ffp-contract=`, `-funroll-loops`,
-`-ftrapv`, `-fcommon`, `-fvisibility=`, `-fopenmp`; `-l`, `-L`,
-`-static`, `-nostdlib`, `-nostartfiles`; `-v`, `-save-temps`, `-pipe`.
+`-imacros`, `-iquote`, `-idirafter`, `-undef`; `-ansi`; `-ffast-math`,
+`-ffp-contract=`, `-funroll-loops`, `-ftrapv`, `-fcommon`,
+`-fvisibility=`, `-fopenmp`; `-l`, `-L`, `-static`, `-nostdlib`,
+`-nostartfiles`; `-v`, `-save-temps`, `-pipe`.
 `--help` lists `-include FILE`, but the option is refused.
 
-`-Wl,OPTION` is read as a warning name and has no effect other than the
-unknown-warning message. Any `-W` name that is not one of EmbCC's
-eighteen warnings (`--help-warnings` lists them) is accepted with:
+`-Wl,OPTION` and `-Xlinker OPTION` reach the driver's link. EmbLD's own
+options (`-e`, `-Ttext`, `-Tdata`, `-Tstack`, `--rom-limit`,
+`--lma-offset`) are applied, a set that changes nothing about the image
+(`--gc-sections`, `-s`, `-z now` and others) is accepted, and any other
+is refused before anything is linked:
+
+```text
+embcc: error: linker option '-T' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for
+```
+
+`-Wa,OPTION` accepts `--noexecstack`, `-g`, `--gdwarf*` and `-mrelax`
+and refuses any other
+(`embcc: error: assembler option '-al' is not one the integrated assembler has`).
+The full rules are in
+[Invoking EmbCC](../manual/invoking.md#-wlargs--xlinker-arg).
+
+`-pedantic` and `-pedantic-errors` are accepted and turn nothing on:
+
+```text
+embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
+```
+
+Any `-W` name that is not one of EmbCC's eighteen warnings
+(`--help-warnings` lists them) is accepted with:
 
 ```text
 embcc: warning: -Wconversion is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)
@@ -531,16 +562,9 @@ asked, without an error. Each is a defect, not intended behavior.
   - `#pragma weak NAME` does not make `NAME` weak.
   - `#pragma GCC diagnostic` does not change any warning, and
     `#pragma GCC poison` poisons nothing.
-- **File-scope `asm` on Cortex-M, RISC-V and AVR.** The x86-64
-  instructions `and`, `call`, `jmp` and `ret` are not refused there.
-  They are encoded as x86-64 machine code (`ret` becomes the byte
-  `0xc3`) inside the target's `.text`.
 - **`.asm` input for a non-x86 target.** A NASM-syntax file is assembled
   as x86-64 whatever `--target=` says. With a 32-bit target the result
   is an ELF32 file whose machine is x86-64.
-- **The link refusal for Cortex-M, RISC-V and AVR** names the wrong
-  format (`... and this needs aarch64`) and suggests another toolchain,
-  though `embld` links these targets.
 - **`va_arg(ap, long double)` on RISC-V** stops with
   `internal error: riscv: no 16-byte store` instead of the backend's
   refusal.
@@ -550,6 +574,11 @@ asked, without an error. Each is a defect, not intended behavior.
   that those cores do not implement.
 - **`__has_builtin(__builtin_sqrt)`** is 1 on Cortex-M without an FPU,
   RISC-V and AVR, where the backend refuses the builtin.
+- **A select on a 64-bit condition on AVR.** At `-O2` and `-Os`,
+  if-conversion turns `if (c) r = a; else r = b;` into a select when `r`
+  is a `long` or `long long`. The AVR backend tests only the low four
+  bytes of the condition, so a `long long` condition whose low 32 bits
+  are zero (such as `1LL << 32`) takes the false arm.
 - **Debug information.** On AVR, `-g` produces a compile unit with no
   functions, variables or line-table rows. On Cortex-M and RV32 every
   pointer type is described as 8 bytes. Enumerations, `typedef` names
@@ -684,8 +713,8 @@ dates.
 - What you expected and what happened. For a calling-convention or
   layout problem, the other compiler, its version and its command line.
 
-Report it to the EmbCC repository, `https://github.com/EmbLinkOs/EmbCC`.
-<!-- UNVERIFIED: whether the repository accepts issues (could not query GitHub from here); the URL is the worktree's git remote. -->
+Report it as an issue in the EmbCC repository,
+`https://github.com/EmbLinkOs/EmbCC/issues`.
 
 A fix comes with a test that fails without it; see
 [Testing](testing.md#a-new-test-must-fail-first). A construct that

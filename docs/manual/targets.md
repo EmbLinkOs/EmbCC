@@ -27,23 +27,26 @@ little-endian.
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 
-| Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ exceptions |
+| Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ |
 |---|---|---|---|---|---|---|
-| x86-64 ELF, EmbLinkOS, Linux | Primary target | SSE2; x87 for `long double` | DWARF | 1, 2, 4, 8, 16 bytes | Local-exec TLS | Yes |
-| x86-64 macOS | Objects for the system linker | SSE2; x87 for `long double` | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes |
+| x86-64 ELF, EmbLinkOS, Linux | Primary target | SSE2; x87 for `long double` | DWARF | 1, 2, 4, 8, 16 bytes | Local-exec TLS | Yes, with exceptions |
+| x86-64 macOS | Objects for the system linker | SSE2; x87 for `long double` | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes, with exceptions |
 | x86-64 Windows | Objects only; warns on every compile | SSE2 | Refused | 1, 2, 4, 8, 16 bytes | Refused | Refused |
-| AArch64 ELF, EmbLinkOS, Linux | Supported | FP/SIMD; `long double` in software | DWARF | 1, 2, 4, 8, 16 bytes | Local-exec TLS | Yes |
-| Apple arm64 | Objects for the system linker | FP/SIMD | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes |
-| Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | No |
-| Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | One shared instance | No |
-| RV32 | Bare metal | Software | DWARF | 4 bytes | One shared instance | No |
-| RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | No |
-| AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | No |
+| AArch64 ELF, EmbLinkOS, Linux | Supported | FP/SIMD; `long double` in software | DWARF | 1, 2, 4, 8, 16 bytes | Local-exec TLS | Yes, with exceptions |
+| Apple arm64 | Objects for the system linker | FP/SIMD | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes, with exceptions |
+| Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
+| Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
+| RV32 | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
+| RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions |
+| AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
-thread. "No" under C++ exceptions means a `throw` or `try` does not
-compile; build C++ for these targets with `-fno-exceptions`.
+thread. "Refused" under C++ means a C++ unit is not compiled for that
+target (`-fsyntax-only` still checks it); the diagnostic is in the
+target's Limitations. "Without exceptions" means code that needs a
+landing pad (a `try` block, or a destructor that must run during
+unwinding) does not compile; build C++ for RV64 with `-fno-exceptions`.
 
 ## Selecting a target
 
@@ -119,14 +122,29 @@ covers every `thumb*` triple.
 | `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 |
 | `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` |
 | `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — |
-| `enum` | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 |
 | `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 |
 | Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 |
 
 Notes on the table:
 
-- `_Bool` is one byte everywhere. Enumerations are always `int`-sized;
-  `-fshort-enums` is refused.
+- `_Bool` is one byte everywhere.
+- An enumeration without a fixed underlying type is `int` while every
+  value fits `int`. Otherwise it takes, and its enumerators take, the
+  first of these that holds every value: `unsigned int` (when no value is
+  negative), `long`, `unsigned long` (when `long` is 8 bytes and no value
+  is negative), and `long long`, which is `unsigned long long` when no
+  value is negative. `enum { G = 0x100000005 }` is 8 bytes on every
+  target. Clang chooses only among the unsigned types when no value is
+  negative, so a non-negative enumeration that does not fit `unsigned
+  int` can differ from Clang's: on the targets where `long` is 8 bytes it
+  is `long` where Clang's is `unsigned long`, of the same size; on AVR
+  one whose largest value lies between 2^16 and 2^31 - 1 is `long` where
+  Clang's is `unsigned long`, and one whose largest value lies between
+  2^31 and 2^32 - 1 is an 8-byte `unsigned long long` where Clang's is a
+  4-byte `unsigned long`. A fixed underlying type
+  (`enum e : unsigned char`) is used as written. `-fshort-enums` is
+  refused.
 - Plain `char`'s signedness can be changed with `-fsigned-char` and
   `-funsigned-char` (see [Invoking EmbCC](invoking.md)); the
   `__CHAR_UNSIGNED__` macro follows the option.
@@ -345,11 +363,18 @@ libc-linux-x86_64` and linked automatically. On `x86_64-elf`, link
 ### Limitations
 
 - `embcc` without `-c` can link only for the ELF x86-64 triples. For
-  every other target it stops with `embcc: error: cannot link for
-  TRIPLE: the integrated linker reads x86-64 ELF, and this needs ...`;
-  compile with `-c` and link separately.
+  every other target it stops with `embcc: error: cannot link for TRIPLE
+  in one step: the driver links x86-64 ELF only` (for macOS and Windows,
+  `embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and
+  this target writes Mach-O` or `COFF`); compile with `-c` and link
+  separately. See [Linking](invoking.md#linking).
 - `__thread` uses the local-exec model only (`R_X86_64_TPOFF32`), which
   is correct in a statically linked executable.
+- A scalar local aligned beyond 16 bytes is refused: `'x' needs 32-byte
+  alignment and the stack only guarantees 16: supported for an array or a
+  struct, not yet for a scalar`. An array or structure local so aligned
+  is supported: its storage is carved from the stack at function entry
+  and rounded up.
 
 ## AArch64
 
@@ -421,7 +446,11 @@ convention, which departs from AAPCS64 in these points:
 - Nothing is rounded to an even register: an `__int128`, or a structure
   holding one, takes the next free pair.
 - Every variadic argument goes on the stack, in eight-byte slots.
-  `va_list` is a `char *` and `va_copy` is an assignment.
+  `va_list` is a `char *` and `va_copy` is an assignment. `va_arg` of a
+  structure reads it from whole doublewords aligned as its type is.
+- An unnamed bit-field does not affect a structure's alignment, as on
+  x86-64: `struct { char a; int :0; char b; }` is 5 bytes with alignment
+  1, where AAPCS64 makes it 8 bytes with alignment 4.
 - The address of a symbol not defined in the translation unit is loaded
   from the GOT.
 
@@ -448,6 +477,8 @@ As for x86-64, plus the binary128 `long double` routines (`softtf.c`).
 - Inline assembly has its own vocabulary; see
   [Inline assembly](inline-asm.md#aarch64).
 - `__thread` uses the local-exec model only.
+- A scalar local aligned beyond 16 bytes is refused, as on x86-64; an
+  array or structure local so aligned is supported.
 
 ## ARM Cortex-M
 
@@ -557,7 +588,8 @@ The base standard applies with `-mfloat-abi=soft` and `softfp`:
 - A variadic argument is passed as a named one would be. `va_list` is a
   `void *`; a variadic function stores `r0`–`r3` immediately below the
   caller's stack arguments, so one pointer walks both. `va_copy` is an
-  assignment.
+  assignment, and `va_arg` of a structure reads it from that walk where
+  the caller placed it.
 - The stack is 8-byte aligned at every public interface. An unnamed
   bit-field affects a structure's alignment.
 
@@ -652,7 +684,8 @@ compiler that calls them must bring its own.
 | 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | a scalar local aligned beyond 8 | `'x' needs 32-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
-| C++ `throw`/`try` | `a landing pad's selector must be a long lvalue` |
+| an instruction in a file-scope `__asm__` block | `file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).` |
+| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4` |
 
 An array or structure local aligned beyond 8 bytes is supported: its
 storage is carved from the stack at function entry and rounded up.
@@ -695,6 +728,11 @@ equivalent, stack alignment 16).
   larger one is passed by reference to a copy.
 - `float` and `double` are passed and returned in integer registers, as
   the `ilp32` and `lp64` soft-float ABIs require.
+- At RV64, a 32-bit integer in a register is kept sign-extended to 64
+  bits, `unsigned int` included, as the psABI requires: arguments and
+  results of 32-bit type are passed that way, in registers and on the
+  stack, and EmbCC extends such a value wherever all 64 bits are read
+  (a compare, a branch, a call).
 - An argument wholly on the stack is aligned to the larger of its type's
   alignment and XLEN, but never more than 16 bytes.
 - Results come back in `a0` and `a1`. A composite larger than 2×XLEN is
@@ -740,7 +778,12 @@ individually.
 | an 8-byte atomic read-modify-write at RV32 | `the RV32 backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
-| C++ `throw`/`try` | RV32: `a landing pad's selector must be a long lvalue`; RV64: `the RV64 backend cannot lower this operation yet (function f) [landing w=8 size=4]` |
+| an instruction in a file-scope `__asm__` block | `file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).` |
+| any C++ translation unit at RV32, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for riscv32-unknown-elf: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4` |
+| C++ code that needs a landing pad (`try`, or a destructor run during unwinding) at RV64 | `the RV64 backend cannot lower this operation yet (function f) [landing w=8 size=4]` |
+
+An array or structure local aligned beyond 16 bytes is supported: its
+storage is carved from the stack at function entry and rounded up.
 
 ## AVR
 
@@ -760,6 +803,10 @@ are the same 4-byte IEEE binary32 format as `float`, which is avr-gcc's
 default. Nothing is aligned: `_Alignof` of every type is 1. Plain `char`
 is signed, matching `clang --target=avr`.
 
+`int` and `unsigned int` arithmetic is carried out modulo 2^16 inside an
+expression, not only when the result is stored: `(0xffffu + 1) / 2` is 0,
+and `long f(int x) { return x + 1; }` returns -32768 for 32767.
+
 Program memory is a separate, word-addressed space. A function pointer
 holds the function's word address (half its byte address), formed with
 the `_GS` relocations (`R_AVR_LO8_LDI_GS`, `R_AVR_HI8_LDI_GS`) or, in
@@ -776,7 +823,8 @@ and copied there from flash by the startup code, as with avr-gcc.
   stack, and so does every later one.
 - Stack arguments are packed at their natural size, with no padding.
 - A call to a variadic function passes every argument on the stack,
-  named ones included. `va_list` is a 2-byte pointer.
+  named ones included. `va_list` is a 2-byte pointer, and `va_arg` of a
+  structure reads its bytes from the packed stack arguments.
 - A result is returned in registers with its size rounded up to a power
   of two: 1–2 bytes in `r24`(:`r25`), 3–4 bytes in `r22`–`r25`, 5–8
   bytes in `r18`–`r25`. A composite larger than 8 bytes is written
@@ -802,12 +850,16 @@ From `clang --target=avr -mmcu=atmega328p`: `__AVR__`, `__AVR`, `AVR`,
 `__AVR_2_BYTE_PC__`, `__SIZEOF_INT__` (2), `__SIZEOF_POINTER__` (2),
 `__SIZEOF_DOUBLE__` (4).
 
-The table also defines `__flash` and `__BUILTIN_AVR_CLI`,
+The table also defines `__flash` (as
+`__attribute__((__address_space__(1)))`) and `__BUILTIN_AVR_CLI`,
 `__BUILTIN_AVR_SEI`, `__BUILTIN_AVR_NOP`, `__BUILTIN_AVR_SLEEP`,
 `__BUILTIN_AVR_SWAP` and `__BUILTIN_AVR_WDR`, but EmbCC implements
-neither: a declaration using `__flash` fails with `expected a type before
-'__attribute__'`, and the `__builtin_avr_*` functions are undeclared.
-Use inline assembly (`cli`, `sei`, `sleep`, `wdr`, `swap`) instead.
+neither. `__flash` at the start of a declaration
+(`__flash const char t[]`) is ignored with a `-Wattributes` warning, and
+the data goes to RAM like any other; after another specifier
+(`const __flash char t[]`) it fails with `expected a type before
+'__attribute__'`. The `__builtin_avr_*` functions are undeclared. Use
+inline assembly (`cli`, `sei`, `sleep`, `wdr`, `swap`) instead.
 
 ### Interrupt handlers
 
@@ -835,7 +887,8 @@ rt-embedded` builds `librt.a` for `avr`.
 | an interrupt handler with parameters | `the AVR backend cannot lower an interrupt handler with parameters: the hardware calls it, so there is no caller to pass them and they would be read out of whatever the interrupted code left in those registers yet (function __vector_3)` |
 | an interrupt handler that returns a value | ``the AVR backend cannot lower an interrupt handler that returns a value: `reti` goes back to the interrupted instruction, and nothing is there to receive it yet (function __vector_3)`` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| C++ `throw`/`try` | `a landing pad's selector must be a long lvalue` |
+| an instruction in a file-scope `__asm__` block | `file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).` |
+| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for avr: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 2` |
 
 Code compiled at `-O0` is large; an ordinary program may not fit the
 part's 32 KB of flash unless built with `-O2` or `-Os`.

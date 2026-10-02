@@ -352,7 +352,7 @@ int semihost(int op, void *arg)            /* ARM Cortex-M */
 ```
 
 Register variables at file scope (global register variables) are not
-supported: `'register' is not supported yet (see docs/design/roadmap.md M2)`.
+supported: `'register' is not supported yet (see docs/manual/c-language.md)`.
 
 ## Assembler names on declarations
 
@@ -445,25 +445,24 @@ __asm__(".global _start\n"
 | Target | What a file-scope block may contain |
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
-| AArch64 ELF | directives and data only; an instruction is refused (below) |
-| ARM Cortex-M, RISC-V, AVR | directives and data only; see below |
-| `x86_64-apple-darwin`, `aarch64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
+| AArch64 ELF, ARM Cortex-M, RISC-V, AVR | directives and data only; an instruction is refused (below) |
+| `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
+| `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
 | `x86_64-windows-gnu` | a block with a label or a symbol reference is refused (below) |
 | C++ (any target) | refused: `file-scope asm in C++ is not supported yet` |
 
-On AArch64 an instruction is refused with:
+On every target except x86-64, an instruction in a file-scope block is
+refused, whatever its mnemonic:
 
 ```text
 file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
 ```
 
-On ARM Cortex-M, RISC-V and AVR the four instructions are **not**
-refused: EmbCC encodes them as x86-64 instructions, which are meaningless
-on those machines. Write file-scope blocks for these targets as data
-only. On these 32-bit targets `.quad SYMBOL` also produces a relocation
-that is not valid for the target, and on Cortex-M a `.global` label's
-symbol value does not have bit 0 set, so it is not a valid Thumb function
-address.
+A block written as data (`.byte`, `.long`, `.quad`, labels and the
+directives above) assembles on these targets. On the 32-bit targets
+(Cortex-M, RV32 and AVR) `.quad SYMBOL` produces a relocation that is not
+valid for the target, and on Cortex-M a `.global` label's symbol value
+does not have bit 0 set, so it is not a valid Thumb function address.
 
 On Darwin and Windows targets the bytes of a block would be emitted
 without its symbols and relocations, so a block with any label or symbol
@@ -1275,9 +1274,9 @@ In summary, compared with GCC:
   limited to x0-x11 and x13-x15 on AArch64, and are not supported at
   file scope on any target.
 - Assembler names on C declarations are not supported.
-- File-scope asm accepts data and a few directives on every target and
-  four x86-64 instructions; section and alignment directives have no
-  effect.
+- File-scope asm accepts data and a few directives on every target, and
+  four instructions on x86-64 only; section and alignment directives
+  have no effect.
 - On x86-64, a callee-saved register that a template changes is saved
   only when it holds an operand and the optimization level is `-O2` or
   `-Os`.

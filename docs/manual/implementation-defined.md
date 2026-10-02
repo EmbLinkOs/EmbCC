@@ -82,13 +82,10 @@ returns. EmbCC adds nothing.
 forms, `int main(int, char **, char **)` and `void main(void)` are
 accepted without a diagnostic.
 
-EmbCC does not supply the implicit `return 0` that C99 and later define
-for reaching the closing brace of `main`. A path that falls off the end
-of `main` is an error, as it is for every function that returns a value:
-
-```text
-embcc: m.c:1: error: control may reach the end of 'main' — every path must end in a return statement [E0008]
-```
+Reaching the closing brace of `main` returns 0, as C99 and later
+specify. Every other function that returns a value must end each path
+with a `return` statement; see
+[Functions that can reach their closing brace](c-language.md#functions-that-can-reach-their-closing-brace).
 
 *What constitutes an interactive device (C17 5.1.2.3).*
 
@@ -392,28 +389,14 @@ int gt(int x)  { return x + 1 > x; }    /* gt(INT_MAX) == 0; not folded to 1 */
 overflow at run time, use `-fsanitize=signed-integer-overflow`. See
 [Optimization](optimization.md#signed-integer-overflow).
 
-On AVR this guarantee does not hold within an expression. Arithmetic on
-`int` and `unsigned int` (16 bits there) is carried out at 32 bits, and
-the result is reduced to 16 bits only when it is stored in a 16-bit
-object, returned or passed as a 16-bit value, or explicitly cast. A
-result that has overflowed 16 bits and is compared, divided, shifted
-right or converted to `long` in the same expression gives the 32-bit
-answer. This affects `unsigned int`, whose wrapping C requires, as well:
+Wrapping applies on every target at the width of the type. On AVR,
+where `int` is 16 bits, `int` and `unsigned int` arithmetic wraps at 16
+bits inside an expression, not only when the result is stored:
 
 ```c
-unsigned half(unsigned x) { return (x + 1) / 2; }   /* half(0xFFFF): C requires 0, AVR gives 32768 */
-long next(int x)          { return x + 1; }         /* next(32767): -32768 with wrapping, AVR gives 32768 */
+unsigned half(unsigned x) { return (x + 1) / 2; }   /* half(0xFFFF) == 0 */
+long next(int x)          { return x + 1; }         /* next(32767) == -32768 */
 ```
-
-Assigning the intermediate result to a variable, or casting it
-(`(unsigned)(x + 1) / 2`), gives the C result.
-
-<!-- Reported to the lead as a miscompile, not a design choice: the IR
-     for AVR computes int ops at width 4 (`add.4`, `cmp.4`, `shr.4`) from
-     2-byte operands with no reduction (embcc inspect ir --target=avr).
-     Confirmed by running the four functions above under qemu-system-avr
-     at -O2: 32768 32768 1 1. Remove this subsection's AVR paragraphs when
-     fixed. -->
 
 ## Floating point
 
@@ -509,9 +492,14 @@ instruction. `#pragma STDC FP_CONTRACT` is accepted and has no effect.
 *The default state for the `FENV_ACCESS` pragma (C17 7.6.1).*
 
 `#pragma STDC FENV_ACCESS` and `#pragma STDC CX_LIMITED_RANGE` are
-accepted and have no effect. The optimizer does not fold, reorder or
-remove floating-point arithmetic; see
-[Optimization](optimization.md#floating-point).
+accepted and have no effect; EmbCC compiles every program as if
+`FENV_ACCESS` were off. At `-O1` and above, the optimizer evaluates `+`,
+`-`, `*`, `/`, negation and the comparisons on `float` and `double`
+constants during translation, rounding to nearest, ties to even, so a
+rounding mode set with `fesetround` does not apply to them. It leaves an
+operation whose operand or result is a NaN, and all `long double`
+arithmetic, to run time, and it does not reassociate floating-point
+arithmetic. See [Optimization](optimization.md#floating-point).
 
 *Additional floating-point exceptions, rounding modes, environments, and
 classifications, and their macro names (C17 7.6, 7.12).*
@@ -558,7 +546,7 @@ is accepted without a diagnostic.
 `register` on a parameter or at file scope is refused:
 
 ```text
-embcc: f.c:1:7: error: 'register' is not supported yet (see docs/design/roadmap.md M2)
+embcc: f.c:1:7: error: 'register' is not supported yet (see docs/manual/c-language.md)
 ```
 
 *The extent to which suggestions made by using the `inline` function
@@ -589,9 +577,10 @@ signedness of plain `char` on the target. For example, after
 
 Every integer type: plain, signed and unsigned `char`, `short`, `long`,
 `long long`, `__int128` where it exists, and enumerated types. A
-bit-field of enumerated type is a `signed int` bit-field, because the
-enumerated type is `int` (see below). The width may not exceed the width
-of the declared type, which on AVR is 16 for `int`:
+bit-field of enumerated type has the signedness of the enumerated type
+(see below); an enumeration whose values all fit `int` is `int`, so its
+bit-fields are signed. The width may not exceed the width of the
+declared type, which on AVR is 16 for `int`:
 
 ```text
 embcc: f.c:1: error: a bitfield must have integer type, not float
@@ -625,32 +614,20 @@ lowest-addressed byte.
 
 A zero-width bit-field moves the next member to the next unit boundary of
 its declared type's alignment. An unnamed bit-field, of any width, raises
-the alignment of the structure on AArch64, Apple arm64 and Cortex-M, as
-AAPCS and AAPCS64 require; on x86-64 and RISC-V it does not, as the
-System V and RISC-V ABIs require.
+the alignment of the structure on AArch64 and Cortex-M, as AAPCS and
+AAPCS64 require; on x86-64, Apple arm64 and RISC-V it does not, as the
+System V, Apple and RISC-V ABIs require.
 
 `embcc inspect types FILE.c` prints the layout EmbCC chose for each
 structure: offsets, bit positions and padding. Some examples, as
 size/alignment in bytes:
 
-| Structure | x86-64, RV32, RV64 | AArch64, Apple arm64, Cortex-M | AVR |
+| Structure | x86-64, Apple arm64, RV32, RV64 | AArch64, Cortex-M | AVR |
 |---|---|---|---|
 | `struct { char c; int i : 4; }` | 4/4, `i` in bits 8–11 | 4/4, `i` in bits 8–11 | 2/1, `i` in bits 8–11 |
 | `struct { char c; unsigned : 4; char d; }` | 3/1 | 4/4 | 3/1 |
 | `struct { char a; int : 0; char b; }` | 5/1, `b` at offset 4 | 8/4, `b` at offset 4 | 2/1, `b` at offset 1 |
 | `struct { unsigned short a : 12, b : 12; }` | 4/2, `b` at offset 2 | 4/2, `b` at offset 2 | 3/1, `b` in bits 12–23 |
-
-On Apple arm64 the unnamed bit-field rows differ from Apple's Clang,
-which does not let an unnamed bit-field raise a structure's alignment
-(it gives 3/1 and 5/1 for the second and third rows). A structure
-containing an unnamed bit-field is therefore laid out differently by the
-two compilers on that target.
-
-<!-- Reported to the lead: target_anon_bitfield_aligns() answers 1 for
-     TARGET_AARCH64 regardless of OS; clang -target arm64-apple-macos
-     gives sizeof/alignof 5/1 and 3/1 for the B and C rows, EmbCC 8/4 and
-     4/4. -->
-
 
 *The alignment of non-bit-field members of structures (C17 6.7.2.1).*
 
@@ -671,10 +648,51 @@ embcc: f.c:1:14: error: a struct/union needs at least one member
 
 *The integer type compatible with each enumerated type (C17 6.7.2.2).*
 
-`int`, on every target: 4 bytes, or 2 bytes on AVR. The type is `int`
-even when no enumerator is negative, where GCC and Clang choose
-`unsigned int`; so `(enum e)-1 < 0` is true under EmbCC. Enumeration
-constants have type `int`.
+For an enumeration without a fixed underlying type, the first of these
+types that can represent the value of every enumeration constant, on
+every target:
+
+| Type | Chosen when |
+|---|---|
+| `int` | every value fits `int` |
+| `unsigned int` | no value is negative, and every value fits `unsigned int` |
+| `long` | every value fits `long` |
+| `unsigned long long` | no value is negative |
+| `long long` | otherwise |
+
+The enumeration constants have the enumerated type, as in C23. An
+enumeration whose values all fit `int` is `int` even when no value is
+negative, where GCC and Clang choose `unsigned int`; so
+`(enum e)-1 < 0` is true under EmbCC. `unsigned long` is never chosen:
+an enumeration with no negative value that needs more than 32 bits is
+`long` on x86-64, Apple arm64, AArch64 and RV64, where Clang chooses
+`unsigned long`. On AVR, such an enumeration that needs more than 16
+bits is `long` while its values fit `long`, and `unsigned long long`
+(8 bytes) above that; Clang chooses `unsigned long` (4 bytes) for any
+whose values fit it.
+
+Each value is computed as a 64-bit signed integer, so a value of 2^63 or
+more is negative: `enum { X = 0xffffffffffffffff }` is an `int`
+enumeration in which `X` is −1.
+
+An enumeration of type `unsigned int` is `int` when it is named again by
+its tag: after `enum u { U = 0xffffffff };`, `enum u x;` declares an
+`int`, so after `x = U;` the comparison `x < 0` is true. An object or
+typedef declared in the defining declaration itself
+(`typedef enum u { ... } T;`) has type `unsigned int`.
+
+<!-- Reported to the lead: parse_enum_body (src/parse/parse.c) holds the
+     values in a signed long, so 2^63..2^64-1 wrap negative and
+     `enum { X = 0xffffffffffffffff }` is a 4-byte int enum (clang: 8-byte
+     unsigned long); parse_tagged records the enum's type on its tag only
+     when its kind is not TY_INT, so an `unsigned int` enum named again by
+     its tag is int; and unsigned long is never chosen (LP64 gives long,
+     AVR gives an 8-byte unsigned long long, where clang gives unsigned
+     long). -->
+
+A C23 fixed underlying type (`enum e : unsigned char { ... }`) is
+supported: the enumerated type and its enumeration constants have that
+type. A value the type cannot represent is not diagnosed.
 
 `-fshort-enums` is refused, and so is a `packed` or `aligned` attribute on
 an enumeration:
@@ -683,17 +701,6 @@ an enumeration:
 embcc: error: -fshort-enums is not supported; EmbCC would emit ordinary code and the flag's promise would not hold
 embcc: f.c:1:32: error: a packed or aligned enum is not supported (EmbCC's enums are always int-sized)
 ```
-
-A C23 fixed underlying type (`enum e : unsigned char { ... }`) is
-supported: the enumerated type is then that type. Its enumeration
-constants still have type `int`, where C23 gives them the enumerated
-type.
-
-An enumeration constant whose value is outside the range of `int` is
-accepted without a diagnostic. The constant keeps its full value in
-expressions, but an object of the enumerated type is still `int`-sized
-and cannot hold it. Use a fixed underlying type such as
-`enum e : long long` for such values.
 
 ## Qualifiers
 
@@ -708,52 +715,30 @@ loop or vectorized. A compound assignment (`reg |= 4`) is one read and
 one write. A `volatile` object whose value is not used (`(void)reg;`) is
 still read.
 
-This holds at every optimization level for:
-
-- objects with static or thread storage duration;
-- any object accessed through a pointer to a `volatile` type, such as a
-  memory-mapped register (`*(volatile unsigned *)0x40000000`);
-- local variables whose address is taken.
+This holds at every optimization level for every `volatile` object:
+objects with static, thread or automatic storage duration, whether or
+not their address is taken, and any object accessed through a pointer to
+a `volatile` type, such as a memory-mapped register
+(`*(volatile unsigned *)0x40000000`).
 
 ```c
 extern volatile unsigned short reg;
 void f(void) { reg = 1; reg = 1; (void)reg; reg |= 4; }   /* 2 stores, 1 load, then load and store */
 ```
 
-At `-O0` every `volatile` object, local variables included, is accessed
-in memory.
-
-At `-O1` and above, a `volatile` local variable whose address is never
-taken is not guaranteed to be accessed in memory:
-
-- a read that follows a store to it in the same basic block is replaced
-  by the stored value;
-- at `-O2` and `-Os` the register allocator may keep the variable in a
-  register, so that its accesses are register operations. A delay loop
-  `for (volatile int i = 0; i < n; i++) ;` keeps its iterations but
-  touches no memory.
-
-To force memory accesses, take the variable's address or give it static
-storage duration.
+A `volatile` local variable is kept in its stack slot, never in a
+register. A delay loop `for (volatile int i = 0; i < n; i++) ;` reads
+and writes `i` in memory on each iteration, and a `volatile` local
+changed between `setjmp` and `longjmp` has its new value after the
+`longjmp` (C17 7.13.2.1).
 
 A bit-field member of a `volatile` structure, or a `volatile` bit-field,
-is accessed by reading the whole unit of its declared type (four bytes
-for an `unsigned` bit-field, one byte for an `unsigned char` one). A
-store is a read of the unit, a modify, and a write of the unit, followed
-by one more read of the unit, which is made whether or not the value of
-the assignment is used. At `-O1` and above, two reads of a `volatile`
-bit-field in one expression may be merged into one load.
-
-<!-- Reported to the lead, three defects behind the last two paragraphs:
-     (1) store-to-load forwarding ignores `vol` on STVAR/LDVAR (already
-     noted in optimization.md); (2) at -O2 the backend register allocator
-     homes a volatile, never-address-taken local in a register on every
-     target (delay(n) above uses r1/esi/a1/w13 and no stack slot); this
-     also breaks the setjmp/longjmp guarantee for volatile locals; (3)
-     irgen's bit-field load/store do not carry the `vol` flag
-     (`load.4:4 [%1]` for a volatile bit-field), so the -O1+ passes merge
-     the reads: `s->a + s->a` becomes one ldr at -O2 on Thumb and x86-64.
-     The old docs/tools/embedded.md says volatile bit-fields "work". -->
+is accessed through the whole unit of its declared type (four bytes for
+an `unsigned` bit-field, one byte for an `unsigned char` one). A read is
+one load of the unit; two reads in one expression are two loads. A
+store is one load of the unit and one store of it with the field
+replaced. The value of the assignment is the value stored, converted to
+the bit-field's type; the unit is not read again.
 
 See also [Optimization](optimization.md#volatile).
 
@@ -993,7 +978,7 @@ Size and alignment in bytes, written `size/alignment`:
 |---|---|---|---|---|---|---|---|
 | `_Bool`, `char` | 1/1 | 1/1 | 1/1 | 1/1 | 1/1 | 1/1 | 1/1 |
 | `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 |
-| `int`, enumerated types | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 |
+| `int`, and enumerated types whose values fit `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 |
 | `long` | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 |
 | `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 |
 | `__int128` | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — |
@@ -1007,8 +992,11 @@ Size and alignment in bytes, written `size/alignment`:
 | `_Complex long double` | 32/16 | 16/8 | 32/16 | 16/8 | 32/16 | 32/16 | 8/1 |
 | `wchar_t` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 |
 
-"—" means the type does not exist on that target. The same table, with
-the ABI details that go with it, is in
+"—" means the type does not exist on that target. Any other enumerated
+type has the size and alignment of the integer type it is compatible
+with (see
+[Structures, unions, enumerations, and bit-fields](#structures-unions-enumerations-and-bit-fields)).
+The same table, with the ABI details that go with it, is in
 [Data models](targets.md#data-models).
 
 *Whether any extended alignments are supported and the contexts in which
@@ -1019,49 +1007,52 @@ The largest fundamental alignment (`__BIGGEST_ALIGNMENT__`) is 16 on
 x86-64, Apple arm64, AArch64, RV32 and RV64, 8 on Cortex-M and 1 on AVR.
 
 Extended alignments are supported with `_Alignas` and
-`__attribute__((aligned(N)))`:
+`__attribute__((aligned(N)))`, where `N` is an integer constant
+expression:
 
 - for objects with static storage duration, at least up to 4096 (the
   section is given the alignment);
 - for structure members, which raises the structure's alignment;
-- for local variables on every target except AVR. On AVR a local with an
-  alignment attribute is refused:
+- for local arrays, structures and unions on every target except AVR.
+
+A local scalar may be aligned up to the stack's alignment, which is 16
+bytes, or 8 on Cortex-M. A larger alignment is refused:
+
+```text
+embcc: f.c:1:32: error: 'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar
+```
+
+On AVR a local with an alignment greater than 1 is refused:
 
 ```text
 embcc: f.c:7: error: the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)
 ```
 
-Valid alignments are powers of two. EmbCC does not reject an alignment
-that is not a power of two: `_Alignas(3)` is accepted and gives an
-alignment of 3. Do not rely on this.
+Valid alignments are powers of two. Any other value is refused, by
+`_Alignas` and by the `aligned` attribute; `_Alignas(0)` is accepted and
+has no effect, as the standard specifies:
 
-<!-- Reported to the lead: _Alignas(3) on a member makes
-     `struct { char a; _Alignas(3) char b; }` 4 bytes with alignment 3;
-     C17 6.7.5p3 makes a non-power-of-two alignment a constraint
-     violation. -->
+```text
+embcc: f.c:1: error: _Alignas requires a constant power of two
+embcc: f.c:1: error: aligned wants a constant power of two
+```
 
 ## Summary of departures from the standard
 
 These are the places, described above, where EmbCC does not do what C17
 requires:
 
-- Falling off the end of `main` is an error, not `return 0`
-  ([Environment](#environment)).
 - Universal character names in identifiers are refused
   ([Identifiers](#identifiers)).
-- On AVR, `int` and `unsigned int` intermediate results are not reduced
-  to 16 bits within an expression, and wide string literals have
-  four-byte elements ([Signed integer overflow](#signed-integer-overflow),
-  [Characters](#characters)).
+- On AVR, wide string literals have four-byte elements
+  ([Characters](#characters)).
 - On Cortex-M, RISC-V and AVR, `FLT_EVAL_METHOD` cannot be used in an
   expression ([Floating point](#floating-point)).
-- An enumeration constant outside the range of `int`, and an alignment
-  that is not a power of two, are not diagnosed
-  ([Structures](#structures-unions-enumerations-and-bit-fields),
-  [Architecture](#architecture)).
-- At `-O1` and above, accesses to `volatile` local variables whose
-  address is not taken, and to `volatile` bit-fields, are not all
-  performed ([Qualifiers](#qualifiers)).
+- An enumeration constant outside the range of `int` is accepted
+  without a diagnostic, as C23 allows; one of 2^63 or more is read as a
+  negative value, and an enumeration of type `unsigned int` that is
+  named again by its tag is `int`
+  ([Structures](#structures-unions-enumerations-and-bit-fields)).
 - `__DATE__` and `__TIME__` are not defined, and a macro may have at most
   16 parameters ([Preprocessing directives](#preprocessing-directives)).
 - `max_align_t` is not declared in C, `MB_CUR_MAX` is not defined, and

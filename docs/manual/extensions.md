@@ -15,8 +15,12 @@ described in [C language](c-language.md), C++ in [C++](cxx.md), and the
 
 Every extension on this page is available in every compilation.
 [`-std=`](invoking.md#-stdstandard) does not change what the parser
-accepts, `-pedantic` and `-pedantic-errors` are not accepted, and no
-warning reports the use of an extension.
+accepts, and no warning reports the use of an extension. `-pedantic` and
+`-pedantic-errors` are accepted, turn nothing on, and say so:
+
+```text
+embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
+```
 
 When EmbCC does not implement an extension, it refuses the program with
 an error that names the construct, rather than compiling it to do
@@ -457,18 +461,36 @@ falls through. `unused` after a label is accepted.
 
 ### `aligned`
 
-The argument of `aligned` is read as a single integer constant: a
-literal, or a macro that expands to one. An expression is not
-evaluated, and no diagnostic is given: `aligned(2*32)` gives an
-alignment of 2, and `aligned(sizeof(long long))` and `aligned((64))`
-give 16. Write the value as one number:
+The argument of `aligned` is an integer constant expression, evaluated
+as the operand of `_Alignas` is. `aligned(2*32)` and `aligned((64))`
+give 64, and `aligned(sizeof(long long))` gives the size of `long long`:
 
 ```c
 #define CACHE_LINE 64
 struct ring { unsigned head, tail; } __attribute__((aligned(CACHE_LINE)));
+struct line { char bytes[CACHE_LINE]; } __attribute__((aligned(2 * CACHE_LINE)));
 ```
 
-EmbCC does not check that the value is a power of two.
+The value must be a positive power of two. Any other value, including 0,
+and an argument that is not an integer constant expression are refused:
+
+```text
+embcc: a.c:1: error: aligned wants a constant power of two
+```
+
+`_Alignas` makes the same check (`_Alignas requires a constant power of
+two`), except that `_Alignas(0)` is accepted and has no effect, as C11
+specifies.
+
+A local array, structure or union whose alignment exceeds what the
+stack pointer guarantees (16 bytes on x86-64, AArch64 and RISC-V, 8 on
+Cortex-M) is placed in storage that EmbCC aligns at function entry, so
+its address has the requested alignment at any call depth. A local of
+scalar type with such an alignment is refused:
+
+```text
+embcc: f.c:2:20: error: 'x' needs 64-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar
+```
 
 On AVR, a local variable cannot be given an alignment:
 
@@ -574,7 +596,11 @@ records for each.
 `returns_twice` is accepted because newlib's `<setjmp.h>` puts it on
 `setjmp`, and is not acted on. Above `-O0`, a local variable that the
 optimizer keeps in a register across a call to such a function can hold
-a stale value after the second return.
+a stale value after the second return. A `volatile` local is kept in
+memory at every optimization level, so a value stored in it between the
+two returns is still there after the second, as C requires; declare a
+local `volatile` when it is changed after `setjmp` and read after
+`longjmp`.
 
 `error("message")` and `warning("message")` are accepted with a warning,
 because GCC reports a call to such a function only after optimization,
@@ -744,23 +770,16 @@ undefined; EmbCC returns a value, which code should not depend on.
 
 ### Byte swapping
 
-| Builtin | Result | Targets |
-|---|---|---|
-| `__builtin_bswap16(x)` | `x` with its two bytes reversed, as `unsigned short` | x86-64, AArch64, RV32, RV64 |
-| `__builtin_bswap32(x)` | `x` with its four bytes reversed, as `unsigned int` | x86-64, AArch64, RV32, RV64 |
-| `__builtin_bswap64(x)` | `x` with its eight bytes reversed | x86-64, AArch64, RV64. See the note for RV32 |
+| Builtin | Result |
+|---|---|
+| `__builtin_bswap16(x)` | `x` with its two bytes reversed, as `unsigned short` |
+| `__builtin_bswap32(x)` | `x` with its four bytes reversed, as the 4-byte unsigned type: `unsigned int`, or `unsigned long` on AVR |
+| `__builtin_bswap64(x)` | `x` with its eight bytes reversed, as the 8-byte unsigned type: `unsigned long` where `long` is 8 bytes, `unsigned long long` on Cortex-M, RV32 and AVR |
 
-The result type of `__builtin_bswap64` is `unsigned long`. On RV32,
-where `unsigned long` is 32 bits, the result is wrong: only the low
-four bytes of the argument are swapped, and EmbCC does not diagnose it.
-Use two `__builtin_bswap32` calls there.
-
-On Cortex-M and AVR the byte swaps are refused:
-
-```text
-embcc: b.c:1: error: the ARMv7-M backend cannot lower this operation yet (function f) [bswap w=4 size=4]
-embcc: b.c:1: error: the AVR backend cannot lower bswap yet (function f) [bswap w=4 size=2]
-```
+The result has the builtin's size on every target, and the argument is
+converted to the result type before its bytes are reversed. All three
+compile on every target. On Cortex-M, RV32 and AVR the swap is computed
+with shifts, masks and ORs.
 
 ### Checked arithmetic
 
@@ -1192,8 +1211,6 @@ Each is described in its section above.
 - Every pragma except `pack`, including `#pragma once` and `#pragma weak`.
 - `packed` and `section` on a single structure member.
 - `pcs` on a function-pointer parameter.
-- The `aligned` attribute's argument when it is an expression rather
-  than a single number.
 - `__builtin_alloca_with_align`'s alignment argument.
 - The memory-order arguments of the atomic builtins.
 - The payload string of `__builtin_nan`.
@@ -1201,4 +1218,3 @@ Each is described in its section above.
   output.
 - `section` on a variable on COFF output, which also places the object
   incorrectly.
-- `__builtin_bswap64` on RV32, which returns only 32 bits.

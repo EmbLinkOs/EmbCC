@@ -446,7 +446,8 @@ the entry its own block first. Rejections are reported with
 `IR_STVAR L, v` to later `IR_LDVAR L` of a local whose address is never
 taken, when the load is plain at the stored width (size 8, or size 4
 unless sign-extending to 8). Stops at the next store to `L` and at a
-label.
+label. A volatile local, or a store or load marked `vol`, is never
+forwarded: each read of it happens and reads memory.
 
 **`pass_roload`**. Replaces a load from a static global proven read-only
 by `ro_globals` with the constant stored there. A global qualifies when
@@ -463,6 +464,18 @@ reduction: `x*2^k` to a shift, unsigned `x/2^k` to a shift, unsigned
 proves zero becomes zero. A copy of a constant defined in another block
 becomes the constant (not on AVR). Folds that assume 64-bit arithmetic
 refuse a 128-bit (`w == 16`) operation individually.
+
+Floating-point operations on constants are folded by `fold_fp`: `+`,
+`-`, `*`, `/`, negation and the six comparisons on `float` (`w` 4) and
+`double` (`w` 8) operands, which arrive as bit patterns. Each is
+computed in the operation's own format with one rounding, in the
+default rounding mode (EmbCC does not honour `FENV_ACCESS` and keeps no
+exception flags), and the result replaces the instruction as an integer
+`IR_CONST` holding its bits; a comparison gives 0 or 1. Division by zero
+folds to the infinity the machine produces. Nothing is folded when an
+operand or the result is a NaN, because which NaN an invalid operation
+produces, and how a payload propagates, differ between machines.
+`long double` (`w` 16) is never folded.
 
 **`pass_reassoc`**. `(x op c1) op c2` becomes `x op (c1 op c2)` when both
 operations are the same kind and both other operands are constants. Only
@@ -508,7 +521,8 @@ cleared on every definition and at every block boundary.
 
 **`pass_dce`**. Dead-code elimination by marking. An instruction is live
 when it has an effect (a store, branch, label, return, observable call,
-volatile `IR_STVAR`) or when a live instruction reads what it defines;
+volatile `IR_STVAR`, volatile `IR_LDVAR` even when its value is unused,
+as in `(void)v;`) or when a live instruction reads what it defines;
 everything else is removed, including cycles. A call to a function
 inferred to read and write no memory, that cannot throw, whose result is
 unused, is removed. DCE remaps `var_scope_lo/hi` as it compacts.
@@ -520,11 +534,13 @@ is the branch after the join, each arm jumps directly to its outcome.
 `pass_cfgclean` retargets jumps to jumps (following chains up to 16
 hops), turns a conditional branch whose target is its fall-through, or
 whose two edges reach the same label, into a jump, resolves a second
-branch on a condition that the branch just above it already decided,
-rewrites a branch around a jump as one inverted branch, deletes a jump
-to the label that immediately follows it, deletes instructions after an
-unconditional transfer up to the next label, and removes labels that
-nothing names, so that the block-local passes see longer blocks.
+branch on a condition that the branch just above it already decided
+(marking it for removal), rewrites a branch around a jump as one
+inverted branch unless the branch or the jump is already marked for
+removal, deletes a jump to the label that immediately follows it,
+deletes instructions after an unconditional transfer up to the next
+label, and removes labels that nothing names, so that the block-local
+passes see longer blocks.
 
 **`pass_dse`** (`dse`; `cfg_ok`). Dead-store elimination within a block,
 walking backward: a store is removed when a later store to the same
@@ -612,7 +628,9 @@ stderr.
 destruction leaves for `c ? a : b`, where each arm is a single `MOV` of a
 value computed before the branch, becomes `IR_SELECT`. Arms that would
 need to be evaluated speculatively (a load, anything that can fault) are
-not taken. The select width must be 4 or 8 bytes.
+not taken, nor are floating-point arms. The arms' width must be 4 or 8
+bytes, and so must the branch's `w`, which the select keeps in `size`
+as the width its condition is tested at.
 
 **`pass_ivsr`** (`licm`; `edge_ok`). Induction-variable strength
 reduction. An address `base + i*scale` (including a widening of `i`, a
@@ -701,7 +719,7 @@ The optimizer is target-neutral except where it asks `src/arch/target.h`:
 | `target_get() == TARGET_AVR` | `pass_rangecheck`, `pass_punfwd` and `pass_sinkaddr` do nothing; a copy of a constant from another block is not folded |
 | `thumb_imm_foldable`, `riscv_imm_foldable`, `a64_imm_foldable` | which constants `pass_immfold` folds |
 | `t_imm_ok`, `a64_bitmask_ok` | whether a constant is expensive for `pass_sinkconst` |
-| `target_op_calls_helper` | which ops count as calls for `pass_splitloops` |
+| `target_op_calls_helper` | which ops count as calls for `pass_splitloops`; the driver installs the predicate for the target finally chosen, whether it came from `--target=` or the configured default |
 | `target_widen_unsigned_fp_cvt` | conversion folding |
 
 ## The IR verifier
