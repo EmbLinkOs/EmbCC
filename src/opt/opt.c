@@ -6327,6 +6327,20 @@ static int vectorize_one(struct ir_func *fn)
         if (!ok) { VDBG("h=%d a vector value escapes\n", h); free(vec); continue; }
 
         /* ---- rewrite ------------------------------------------------ */
+        /* A frame slot written in the body -- a local kept in memory
+         * because its address is taken -- is one place written on every
+         * iteration. Neither rewrite keeps that: the copying one renames
+         * every definition, slots included, and the in-place one would
+         * write it once per vector of iterations. */
+        {
+            int slot_write = 0;
+            for (int q = L.lo; q < L.hi; q++)
+                slot_write |= fn->ins[q].op == IR_STVAR;
+            if (slot_write) {
+                VDBG("h=%d writes a local kept in memory\n", h);
+                free(vec); continue;
+            }
+        }
         if (L.bound_reg >= 0 && L.red_ext >= 0) {
             VDBG("h=%d a widening sum with a runtime count\n", h);
             free(vec); continue;        /* the copy path does not widen */
@@ -7549,7 +7563,15 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
                     *q = fn->ins[n2];
                     struct lcopy lc = { cur, nvr, 0 };
                     each_read(q, lcopy_cb, &lc);
-                    if (t >= 0 && t < nvr) {
+                    /* A TEMP is renamed. A frame slot -- the dst of an
+                     * stvar, a local that stays in memory because its
+                     * address is taken -- is not a value to rename but a
+                     * place: every copy has to write that one place, or a
+                     * read of it through its address sees none of the
+                     * copies' stores. Renamed, `stvar v2` became `stvar
+                     * v98`, a slot that does not exist, and loading `*ps`
+                     * where ps = &s gave the value from before the loop. */
+                    if (t >= fn->nvars && t < nvr) {
                         if (c == U - 1 && !local[t]) { q->dst = t; cur[t] = -1; }
                         else { q->dst = fn->nvregs++; cur[t] = q->dst; }
                     }
