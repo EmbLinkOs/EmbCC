@@ -2963,7 +2963,8 @@ static struct expr *g_init_checked;
 
 static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
                         struct icur *c, struct type *ty, int off,
-                        struct initbuf *out, int braced, int *count);
+                        struct initbuf *out, int braced, int *count,
+                        struct desig *path);
 
 static int str_inits_array(const struct expr *e, const struct type *ty)
 {
@@ -3000,7 +3001,7 @@ static void flatten_one(struct unit *u, struct func *f, struct scope *sc,
         return;
     }
     int before = c->pos;
-    flatten_agg(u, f, sc, c, ty, off, out, 0, NULL);
+    flatten_agg(u, f, sc, c, ty, off, out, 0, NULL, NULL);
     if (c->pos == before)
         sema_error_at(u, el->line, el->col,
                    "%s cannot be initialized without braces of its own "
@@ -3013,45 +3014,57 @@ static void flatten_one(struct unit *u, struct func *f, struct scope *sc,
  * *count, when asked for, receives an array's element count. */
 static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
                         struct icur *c, struct type *ty, int off,
-                        struct initbuf *out, int braced, int *count)
+                        struct initbuf *out, int braced, int *count,
+                        struct desig *path)
 {
     int start = c->pos;
     if (ty->kind == TY_ARRAY) {
         int esz = ty_size(ty->pointee);
         /* Positional by default; a `[i] =` designator repositions the
          * running index and initialization continues positionally after it
-         * (later writes to the same slot win, matching C). */
+         * (later writes to the same slot win, matching C). A longer one,
+         * `[i].x =`, goes into element i the way an elided brace does and
+         * carries on there (path, below). */
         int ai = 0, max = 0;
         while (c->pos < c->il->nelems) {
             struct expr *el = c->il->elems[c->pos];
-            if (!braced) {
-                /* this element is full, or the list moves elsewhere; an
-                 * unsized (flexible) array has no end to elide to */
-                if (c->pos != start &&
-                    (el->desig_field || el->desig_index >= 0))
+            const char *df = NULL;
+            int di = -1, has = 0;
+            struct desig *rest = NULL;
+            if (c->pos == start && path) {
+                df = path->field; di = path->index; rest = path->next;
+                has = 1;
+            } else if ((el->desig_field || el->desig_index >= 0) &&
+                       (braced || c->pos != start)) {
+                /* (an elided walk's first element had its designator
+                 * applied by the level that started the walk) */
+                if (!braced)      /* it names a member of the braced list */
                     break;
-                if (!ty->count || ai >= ty->count)
-                    break;
-                flatten_one(u, f, sc, c, ty->pointee, off + ai * esz, out);
-                ai++;
-                continue;
+                df = el->desig_field; di = el->desig_index;
+                rest = el->desig_next; has = 1;
             }
-            if (el->desig_field)
+            if (has && df)
                 sema_error_at(u, el->line, el->col,
                            "field designator '.%s' in an array initializer",
-                           el->desig_field);
-            if (el->desig_index >= 0)
-                ai = el->desig_index;
+                           df);
+            if (has)
+                ai = di;
+            /* an elided brace: this element is full; an unsized
+             * (flexible) array has no end to elide to */
+            if (!braced && (!ty->count || ai >= ty->count))
+                break;
             /* GNU range `[lo ... hi] = v`: place v at every index in the
              * span. A zero value needs no leaves — the object is already
              * zero-filled (static bytes start zero; a local is memzeroed) —
              * which also keeps a huge `[a ... b] = 0` cheap. */
-            int hi = el->desig_index_hi >= 0 ? el->desig_index_hi : ai;
+            int ranged = has && !path && el->desig_index_hi >= 0;
+            int hi = ranged ? el->desig_index_hi : ai;
             if (ty->count && hi >= ty->count)
                 sema_error_at(u, el->line, el->col,
                            "initializer index %d is past the end of an "
                            "array of %d", hi, ty->count);
-            if (el->desig_index_hi >= 0) {
+            int before = c->pos;
+            if (ranged) {
                 int is_zero = el->kind == EXPR_NUM && el->num == 0;
                 for (; ai <= hi; ai++)
                     if (!is_zero)
@@ -3059,9 +3072,17 @@ static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
                                      off + ai * esz, out);
                 c->pos++;
             } else {
-                flatten_one(u, f, sc, c, ty->pointee, off + ai * esz, out);
+                if (has && rest)
+                    flatten_agg(u, f, sc, c, ty->pointee, off + ai * esz,
+                                out, 0, NULL, rest);
+                else
+                    flatten_one(u, f, sc, c, ty->pointee, off + ai * esz,
+                                out);
                 ai++;
             }
+            if (c->pos == before)
+                sema_error_at(u, el->line, el->col,
+                           "this initializer does not fit %s", ty_name(ty));
             if (ai > max)
                 max = ai;
         }
@@ -3071,25 +3092,35 @@ static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
     }
     /* A struct or union. Positional by default; a `.field =` designator
      * jumps to that member and initialization continues positionally
-     * after it. A union holds one member. */
+     * after it -- inside the member, for `.a.b =`, as elided braces
+     * would. A union holds one member. */
     int mi = 0, filled = 0;
     while (c->pos < c->il->nelems) {
         struct expr *el = c->il->elems[c->pos];
-        int desig = braced || c->pos == start ? 0
-                  : el->desig_field || el->desig_index >= 0;
-        if (desig)
-            break;
-        if (braced && el->desig_index >= 0)
+        const char *df = NULL;
+        int di = -1, has = 0;
+        struct desig *rest = NULL;
+        if (c->pos == start && path) {
+            df = path->field; di = path->index; rest = path->next; has = 1;
+        } else if ((el->desig_field || el->desig_index >= 0) &&
+                   (braced || c->pos != start)) {
+            if (!braced)
+                break;
+            df = el->desig_field; di = el->desig_index;
+            rest = el->desig_next; has = 1;
+        }
+        if (has && !df)
             sema_error_at(u, el->line, el->col,
                        "array designator [%d] in an initializer for %s",
-                       el->desig_index, ty_name(ty));
-        if (braced && el->desig_field) {
-            struct member *m = ty_find_member(ty, el->desig_field);
-            if (!m)
+                       di, ty_name(ty));
+        if (has) {
+            /* a member of an anonymous struct or union is reached
+             * through it: one more step on the path */
+            int k = desig_member(ty, df, rest, &rest);
+            if (k < 0)
                 sema_error_at(u, el->line, el->col,
-                           "%s has no member '%s'", ty_name(ty),
-                           el->desig_field);
-            mi = (int)(m - ty->members);
+                           "%s has no member '%s'", ty_name(ty), df);
+            mi = k;
         } else if (ty->is_union && filled) {
             if (!braced)
                 break;
@@ -3110,14 +3141,24 @@ static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
                        "members", ty_name(ty), ty->nmembers);
         }
         struct member *m = &ty->members[mi];
-        if (m->is_bitfield) {
+        int before = c->pos;
+        if (has && rest) {
+            flatten_agg(u, f, sc, c, m->ty, off + m->off, out, 0, NULL, rest);
+        } else if (m->is_bitfield) {
             /* A bitfield leaf: its value is masked and merged into the
              * shared storage unit at m->off by both lowerings, so it
              * carries (bit_off, bit_width) rather than a byte width. */
-            if (el != g_init_checked)
-                check_expr(u, f, sc, el);
-            need_scalar(u, el, "a bitfield initializer");
-            struct expr *cv = convert_assign(u, el, m->ty,
+            struct expr *bv = el;   /* a scalar may be braced: `{ 5 }` */
+            if (bv->kind == EXPR_INITLIST) {
+                if (bv->nelems != 1)
+                    sema_error_at(u, bv->line, bv->col,
+                               "a scalar takes exactly one initializer");
+                bv = bv->elems[0];
+            }
+            if (bv != g_init_checked)
+                check_expr(u, f, sc, bv);
+            need_scalar(u, bv, "a bitfield initializer");
+            struct expr *cv = convert_assign(u, bv, m->ty,
                                              "initialization");
             init_push_bf(out, off + m->off, m->ty, cv,
                          m->bit_off, m->bit_width, m->bf_bytes);
@@ -3125,6 +3166,9 @@ static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
         } else {
             flatten_one(u, f, sc, c, m->ty, off + m->off, out);
         }
+        if (c->pos == before)
+            sema_error_at(u, el->line, el->col,
+                       "this initializer does not fit %s", ty_name(m->ty));
         mi++;
         filled = 1;
     }
@@ -3198,7 +3242,7 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
     }
     if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT) {
         struct icur c = { init, 0 };
-        flatten_agg(u, f, sc, &c, ty, off, out, 1, NULL);
+        flatten_agg(u, f, sc, &c, ty, off, out, 1, NULL, NULL);
         return;
     }
     /* a braced scalar: { x } */
@@ -3224,7 +3268,7 @@ static int flatten_sized(struct unit *u, struct func *f, struct scope *sc,
     }
     struct icur c = { init, 0 };
     int n = 0;
-    flatten_agg(u, f, sc, &c, ty, 0, out, 1, &n);
+    flatten_agg(u, f, sc, &c, ty, 0, out, 1, &n, NULL);
     return n;
 }
 

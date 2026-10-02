@@ -107,6 +107,8 @@ struct expr {
                               * -1 when it is positional */
     int desig_index_hi;      /* GNU range `[lo ... hi]`: the high index, else
                               * -1 (a plain `[index]` or positional element) */
+    struct desig *desig_next; /* the steps after the first: `.b` and `[2]`
+                               * of `.a.b[2] =`, else NULL */
     const char *asm_reg;  /* EXPR_VAR: a register-asm binding propagated
                            * from the variable's declaration, else NULL */
 };
@@ -464,6 +466,13 @@ struct tagdef {
     struct tagdef *next;
 };
 
+/* One step of a designator after its first: `.field` or `[index]`. */
+struct desig {
+    const char *field;    /* NULL for an index */
+    int index;            /* -1 for a field */
+    struct desig *next;
+};
+
 struct typedefent {
     const char *name;
     struct type *ty;
@@ -494,5 +503,7 @@ int parse_error_count(void);
 int initlist_elided_count(const struct expr *il, struct type *arr,
                           const struct econst *ec, int *guessed);
 int global_size(const struct global *g);
+int desig_member(struct type *ty, const char *name, struct desig *rest,
+                 struct desig **rest_out);
 
 #endif

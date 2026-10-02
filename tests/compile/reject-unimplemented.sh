@@ -446,3 +446,9 @@ check fam-init-automatic \
 check fam-init-compound-literal \
     'struct fam { int n; int d[]; }; int main(void) { struct fam *p = &(struct fam){ 3, { 10 } }; return p->n; }' \
     "flexible array member 'd' cannot be initialized"
+
+# A GNU range designator with more steps after it, `[0 ... 1][1] = 5`,
+# would have to repeat a path; it is refused rather than guessed.
+check desig-range-path \
+    'int m[3][2] = { [0 ... 1][1] = 5 };' \
+    "range designator"

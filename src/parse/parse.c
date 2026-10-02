@@ -3003,7 +3003,8 @@ static int elide_whole(struct elide_cur *c, const struct expr *e,
     }
 }
 
-static int elide_walk(struct elide_cur *c, struct type *ty, int braced);
+static int elide_walk(struct elide_cur *c, struct type *ty, int braced,
+                      struct desig *path);
 
 static void elide_one(struct elide_cur *c, struct type *ty)
 {
@@ -3014,7 +3015,7 @@ static void elide_one(struct elide_cur *c, struct type *ty)
         ty_is_complex(ty) || elide_whole(c, e, ty))
         c->pos++;
     else
-        elide_walk(c, ty, 0);
+        elide_walk(c, ty, 0, NULL);
     if (c->pos == before)
         c->pos++;            /* sema refuses it; the count only moves on */
 }
@@ -3023,34 +3024,91 @@ static void elide_one(struct elide_cur *c, struct type *ty)
  * (braced = 0) as many as the aggregate holds, up to a designator --
  * which names a member of the enclosing braced list. Returns an
  * array's element count. */
-static int elide_walk(struct elide_cur *c, struct type *ty, int braced)
+/* The member of struct ty a designator `.name` reaches, as an index into
+ * ty->members, with the steps still to take in *rest_out. A member of an
+ * anonymous struct or union inside ty is reached through it (C11
+ * 6.7.2.1p13): `.w` in `struct { int k; union { unsigned w; ... }; }`
+ * is the union, then `.w` -- a designator one step longer than written.
+ * -1 when ty has no such member. Shared by sema's walk and the parser's
+ * size count, which must read a list the same way. */
+int desig_member(struct type *ty, const char *name, struct desig *rest,
+                 struct desig **rest_out)
+{
+    for (int i = 0; i < ty->nmembers; i++)
+        if (ty->members[i].name && strcmp(ty->members[i].name, name) == 0) {
+            *rest_out = rest;
+            return i;
+        }
+    for (int i = 0; i < ty->nmembers; i++) {
+        struct member *m = &ty->members[i];
+        struct desig *sub;
+        if (!m->name && !m->is_bitfield && m->ty->kind == TY_STRUCT &&
+            !ty_is_complex(m->ty) && desig_member(m->ty, name, rest, &sub) >= 0) {
+            struct desig *d = xcalloc(1, sizeof *d);
+            d->field = name;
+            d->index = -1;
+            d->next = rest;
+            *rest_out = d;
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* The elements or members of one aggregate: a braced list's all, or
+ * (braced = 0) as many as the aggregate holds, up to a designator --
+ * which names a member of the enclosing braced list. `path`, when given,
+ * is where the first element goes: the rest of a designator like
+ * `.a.b`, whose walk into `a` continues past b as elided braces would.
+ * Returns an array's element count. */
+static int elide_walk(struct elide_cur *c, struct type *ty, int braced,
+                      struct desig *path)
 {
     int start = c->pos, idx = 0, max = 0, filled = 0;
     while (c->pos < c->il->nelems) {
         const struct expr *e = c->il->elems[c->pos];
-        if (!braced && c->pos != start &&
-            (e->desig_field || e->desig_index >= 0))
-            break;
+        const char *f = NULL;
+        int ix = -1, has = 0, before = c->pos;
+        struct desig *rest = NULL;
+        if (c->pos == start && path) {
+            f = path->field; ix = path->index; rest = path->next; has = 1;
+        } else if ((e->desig_field || e->desig_index >= 0) &&
+                   (braced || c->pos != start)) {
+            /* (an elided walk's first element had its designator applied
+             * by the level that started the walk) */
+            if (!braced)
+                break;
+            f = e->desig_field; ix = e->desig_index; rest = e->desig_next;
+            has = 1;
+        }
         if (ty->kind == TY_ARRAY) {
-            if (braced && e->desig_index >= 0)
-                idx = e->desig_index;
+            if (has && f) {           /* sema refuses it */
+                c->pos++;
+                continue;
+            }
+            if (has)
+                idx = ix;
             if (!braced && (!ty->count || idx >= ty->count))
                 break;
-            if (braced && e->desig_index_hi >= 0) {
+            if (has && rest)
+                elide_walk(c, ty->pointee, 0, rest);
+            else if (has && !path && e->desig_index_hi >= 0) {
                 idx = e->desig_index_hi;
                 c->pos++;
             } else {
                 elide_one(c, ty->pointee);
             }
+            if (c->pos == before)
+                c->pos++;
             idx++;
             if (idx > max)
                 max = idx;
             continue;
         }
         int mi = filled;
-        if (braced && e->desig_field) {
-            struct member *m = ty_find_member(ty, e->desig_field);
-            mi = m ? (int)(m - ty->members) : ty->nmembers;
+        if (has) {
+            int k = f ? desig_member(ty, f, rest, &rest) : -1;
+            mi = k >= 0 ? k : ty->nmembers;
         } else if (ty->is_union && filled) {
             mi = ty->nmembers;
         }
@@ -3063,20 +3121,19 @@ static int elide_walk(struct elide_cur *c, struct type *ty, int braced)
             c->pos++;
             continue;
         }
-        if (ty->members[mi].is_bitfield)
+        if (has && rest)
+            elide_walk(c, ty->members[mi].ty, 0, rest);
+        else if (ty->members[mi].is_bitfield)
             c->pos++;
         else
             elide_one(c, ty->members[mi].ty);
+        if (c->pos == before)
+            c->pos++;
         filled = mi + 1;
     }
     return max;
 }
 
-/* The element count an initializer list gives an unsized array `arr`:
- * the highest index reached, counting elided braces (above). ec is the
- * unit's enumerators; *guessed (when given) is set when the count rests
- * on a guess about an initializer's type. A lone string in braces sizes
- * a character array as the string does: `char s[] = { "abc" }`. */
 /* The bytes a global occupies: its type's size, and for a struct whose
  * flexible array member the initializer fills, the elements past it --
  * GNU C sizes `struct f { int n; int d[]; } g = { 2, { 7, 8 } };` at 12
@@ -3086,6 +3143,11 @@ int global_size(const struct global *g)
     return (g->ty ? ty_size(g->ty) : 0) + g->fam_extra;
 }
 
+/* The element count an initializer list gives an unsized array `arr`:
+ * the highest index reached, counting elided braces (above). ec is the
+ * unit's enumerators; *guessed (when given) is set when the count rests
+ * on a guess about an initializer's type. A lone string in braces sizes
+ * a character array as the string does: `char s[] = { "abc" }`. */
 int initlist_elided_count(const struct expr *il, struct type *arr,
                           const struct econst *ec, int *guessed)
 {
@@ -3098,7 +3160,7 @@ int initlist_elided_count(const struct expr *il, struct type *arr,
                                   ? il->elems[0]->str_width : 1))
         return (int)il->elems[0]->num;
     struct elide_cur c = { il, 0, ec, 0 };
-    int n = elide_walk(&c, arr, 1);
+    int n = elide_walk(&c, arr, 1, NULL);
     if (guessed)
         *guessed = c.guessed;
     return n;
@@ -3118,10 +3180,11 @@ static struct expr *parse_initializer(struct parser *ps)
         if (cur(ps)->kind == TOK_EOF)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "unterminated initializer");
-        /* A designator: struct field `.name =` or array element `[i] =`.
-         * One level only (no `[i].f =` chains — no EmbCC source needs it). */
+        /* A designator: struct field `.name =` or array element `[i] =`,
+         * and the steps after it in a chain, `[1].a.b[2] =`. */
         const char *field = NULL;
         long index = -1, index_hi = -1;
+        struct desig *dnext = NULL, **dtail = &dnext;
         if (cur(ps)->kind == TOK_LBRACKET) {
             int iline = cur(ps)->line;
             advance(ps);
@@ -3139,7 +3202,6 @@ static struct expr *parse_initializer(struct parser *ps)
                                "constant hi >= lo");
             }
             expect(ps, TOK_RBRACKET, "']'");
-            expect(ps, TOK_ASSIGN, "'=' after an array designator");
         } else if (cur(ps)->kind == TOK_DOT) {
             advance(ps);
             if (cur(ps)->kind != TOK_IDENT)
@@ -3147,7 +3209,38 @@ static struct expr *parse_initializer(struct parser *ps)
                            "expected a field name after '.'");
             field = cur(ps)->text;
             advance(ps);
-            expect(ps, TOK_ASSIGN, "'=' after a field designator");
+        }
+        if (field || index >= 0) {
+            while (cur(ps)->kind == TOK_DOT || cur(ps)->kind == TOK_LBRACKET) {
+                struct desig *d = xcalloc(1, sizeof *d);
+                d->index = -1;
+                int dline = cur(ps)->line;
+                if (index_hi >= 0)
+                    parse_error_line(ps, dline,
+                               "a range designator [lo ... hi] followed by "
+                               "more designators is not supported");
+                if (cur(ps)->kind == TOK_DOT) {
+                    advance(ps);
+                    if (cur(ps)->kind != TOK_IDENT)
+                        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                                   "expected a field name after '.'");
+                    d->field = cur(ps)->text;
+                    advance(ps);
+                } else {
+                    advance(ps);
+                    long di;
+                    struct expr *ie = parse_cond(ps);
+                    if (!size_fold(ie, &di) || di < 0)
+                        parse_error_line(ps, dline,
+                                   "an array designator [index] must be a "
+                                   "constant >= 0");
+                    d->index = (int)di;
+                    expect(ps, TOK_RBRACKET, "']'");
+                }
+                *dtail = d;
+                dtail = &d->next;
+            }
+            expect(ps, TOK_ASSIGN, "'=' after a designator");
         }
         if (e->nelems == cap) {
             cap = cap ? cap * 2 : 8;
@@ -3158,6 +3251,7 @@ static struct expr *parse_initializer(struct parser *ps)
         el->desig_field = field;
         el->desig_index = index >= 0 ? (int)index : -1;
         el->desig_index_hi = (int)index_hi;
+        el->desig_next = dnext;
         e->elems[e->nelems++] = el;
         if (cur(ps)->kind != TOK_COMMA)
             break;
