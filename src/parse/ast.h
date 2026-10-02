@@ -271,6 +271,8 @@ struct global {
     int is_tls;
     const char *section;  /* __attribute__((section("name"))), or NULL */
     int has_init;
+    int count_from_init;  /* an unsized array sized by its brace list at
+                           * parse time, which sema checks */
     long init;            /* constant initializer value (scalar) */
     struct expr *init_expr; /* aggregate/relocatable initializer, lowered
                              * by sema into init_bytes + relocs */
@@ -478,6 +480,7 @@ int parse_error_count(void);
 
 /* Element count an EXPR_INITLIST implies for an unsized array, honoring
  * `[i] =` designators (defined in parse.c, used there and in sema). */
-int initlist_array_count(const struct expr *il);
+int initlist_elided_count(const struct expr *il, struct type *arr,
+                          const struct econst *ec, int *guessed);
 
 #endif

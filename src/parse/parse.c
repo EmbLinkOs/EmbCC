@@ -2897,22 +2897,142 @@ static struct stmt *new_stmt(enum stmt_kind kind, int line, int col)
 
 static struct stmt *parse_stmt(struct parser *ps, int allow_decl);
 
-/* The element count an initializer list implies for an unsized array:
- * the highest index reached, where a `[i] =` designator repositions the
- * running index and each element then advances it by one. */
-int initlist_array_count(const struct expr *il)
+/* Brace elision (C11 6.7.9p20), on the syntax alone: a subaggregate
+ * may be initialized without braces of its own, taking as many
+ * initializers from the enclosing list as it holds, so
+ * `struct pt v[] = { 1, 2, 3, 4 }` has two elements. The walk follows
+ * the one flatten_init makes; this one only counts. An unbraced
+ * initializer where a struct or union begins is taken as the whole of it
+ * when it can be a value of that type -- a name that is not an
+ * enumerator, a call, a member -- as in `{ s1, s2 }`, and the answer is
+ * marked a guess. Only sema knows the types; it sizes the array itself,
+ * and checks a size the parser had to commit to. */
+struct elide_cur {
+    const struct expr *il;
+    int pos;
+    const struct econst *ec;
+    int guessed;
+};
+
+/* Does the unbraced initializer e cover the whole subobject of type ty
+ * (a struct, union or array), rather than its first scalar? */
+static int elide_whole(struct elide_cur *c, const struct expr *e,
+                       const struct type *ty)
 {
-    int idx = 0, max = 0;
-    for (int i = 0; i < il->nelems; i++) {
-        if (il->elems[i]->desig_index >= 0)
-            idx = il->elems[i]->desig_index;
-        if (il->elems[i]->desig_index_hi >= 0)  /* `[lo ... hi]` ends at hi */
-            idx = il->elems[i]->desig_index_hi;
-        idx++;
-        if (idx > max)
-            max = idx;
+    if (e->kind == EXPR_INITLIST || e->kind == EXPR_COMPLIT)
+        return 1;
+    if (ty->kind == TY_ARRAY)
+        return e->kind == EXPR_STR && ty_is_integer(ty->pointee) &&
+               ty_size(ty->pointee) == (e->str_width ? e->str_width : 1);
+    switch (e->kind) {
+    case EXPR_VAR:
+        for (const struct econst *k = c->ec; k; k = k->next)
+            if (strcmp(k->name, e->name) == 0)
+                return 0;
+        c->guessed = 1;
+        return 1;
+    case EXPR_CAST:
+        return e->cast_ty && e->cast_ty->kind == TY_STRUCT;
+    case EXPR_CALL: case EXPR_ASSIGN: case EXPR_DEREF: case EXPR_MEMBER:
+    case EXPR_COND: case EXPR_COMMA: case EXPR_VA_ARG: case EXPR_GENERIC:
+    case EXPR_STMTEXPR:
+        c->guessed = 1;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int elide_walk(struct elide_cur *c, struct type *ty, int braced);
+
+static void elide_one(struct elide_cur *c, struct type *ty)
+{
+    const struct expr *e = c->il->elems[c->pos];
+    int before = c->pos;
+    /* a complex number is a struct inside EmbCC, and a scalar to C */
+    if ((ty->kind != TY_ARRAY && ty->kind != TY_STRUCT) ||
+        ty_is_complex(ty) || elide_whole(c, e, ty))
+        c->pos++;
+    else
+        elide_walk(c, ty, 0);
+    if (c->pos == before)
+        c->pos++;            /* sema refuses it; the count only moves on */
+}
+
+/* The elements or members of one aggregate: a braced list's all, or
+ * (braced = 0) as many as the aggregate holds, up to a designator --
+ * which names a member of the enclosing braced list. Returns an
+ * array's element count. */
+static int elide_walk(struct elide_cur *c, struct type *ty, int braced)
+{
+    int start = c->pos, idx = 0, max = 0, filled = 0;
+    while (c->pos < c->il->nelems) {
+        const struct expr *e = c->il->elems[c->pos];
+        if (!braced && c->pos != start &&
+            (e->desig_field || e->desig_index >= 0))
+            break;
+        if (ty->kind == TY_ARRAY) {
+            if (braced && e->desig_index >= 0)
+                idx = e->desig_index;
+            if (!braced && (!ty->count || idx >= ty->count))
+                break;
+            if (braced && e->desig_index_hi >= 0) {
+                idx = e->desig_index_hi;
+                c->pos++;
+            } else {
+                elide_one(c, ty->pointee);
+            }
+            idx++;
+            if (idx > max)
+                max = idx;
+            continue;
+        }
+        int mi = filled;
+        if (braced && e->desig_field) {
+            struct member *m = ty_find_member(ty, e->desig_field);
+            mi = m ? (int)(m - ty->members) : ty->nmembers;
+        } else if (ty->is_union && filled) {
+            mi = ty->nmembers;
+        }
+        while (mi < ty->nmembers && ty->members[mi].is_bitfield &&
+               !ty->members[mi].name)
+            mi++;
+        if (mi >= ty->nmembers) {
+            if (!braced)
+                break;
+            c->pos++;
+            continue;
+        }
+        if (ty->members[mi].is_bitfield)
+            c->pos++;
+        else
+            elide_one(c, ty->members[mi].ty);
+        filled = mi + 1;
     }
     return max;
+}
+
+/* The element count an initializer list gives an unsized array `arr`:
+ * the highest index reached, counting elided braces (above). ec is the
+ * unit's enumerators; *guessed (when given) is set when the count rests
+ * on a guess about an initializer's type. A lone string in braces sizes
+ * a character array as the string does: `char s[] = { "abc" }`. */
+int initlist_elided_count(const struct expr *il, struct type *arr,
+                          const struct econst *ec, int *guessed)
+{
+    if (guessed)
+        *guessed = 0;
+    if (il->nelems == 1 && il->elems[0]->kind == EXPR_STR &&
+        il->elems[0]->desig_index < 0 && !il->elems[0]->desig_field &&
+        ty_is_integer(arr->pointee) &&
+        ty_size(arr->pointee) == (il->elems[0]->str_width
+                                  ? il->elems[0]->str_width : 1))
+        return (int)il->elems[0]->num;
+    struct elide_cur c = { il, 0, ec, 0 };
+    int n = elide_walk(&c, arr, 1);
+    if (guessed)
+        *guessed = c.guessed;
+    return n;
 }
 
 /* An initializer: either an ordinary expression or a brace list, which
@@ -3573,9 +3693,16 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                     if (s->expr->kind == EXPR_STR &&
                         ft->pointee->kind == TY_CHAR)
                         ft = ty_array(ft->pointee, (int)s->expr->num);
-                    else if (s->expr->kind == EXPR_INITLIST)
-                        ft = ty_array(ft->pointee,
-                                      initlist_array_count(s->expr));
+                    else if (s->expr->kind == EXPR_INITLIST) {
+                        /* a guessed size is left out: sema sizes the
+                         * array, and a sizeof here must not fold first */
+                        int guessed;
+                        int n = initlist_elided_count(s->expr, ft,
+                                                      ps->unit->econsts,
+                                                      &guessed);
+                        if (!guessed)
+                            ft = ty_array(ft->pointee, n);
+                    }
                 }
                 fold_local_add(dname, ft);
             }
@@ -3856,9 +3983,13 @@ static struct global *parse_global(struct parser *ps, struct type *ty,
                     ty_is_integer(g->ty->pointee) &&
                     ty_size(g->ty->pointee) == (ie->str_width ? ie->str_width : 1))
                     g->ty = ty_array(g->ty->pointee, (int)ie->num);
-                else if (ie->kind == EXPR_INITLIST)
+                else if (ie->kind == EXPR_INITLIST) {
                     g->ty = ty_array(g->ty->pointee,
-                                     initlist_array_count(ie));
+                                     initlist_elided_count(ie, g->ty,
+                                                    ps->unit->econsts,
+                                                    NULL));
+                    g->count_from_init = 1;   /* sema checks the count */
+                }
                 else
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "'%s' needs a brace or string initializer "

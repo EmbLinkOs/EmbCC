@@ -411,3 +411,22 @@ check block-fn-conflict \
 check block-fn-redeclared \
     'int g(void) { int f = 1; extern int f(int); return f; } int f(int x) { return x; }' \
     "redeclared as a different kind of symbol"
+
+# An unsized array's size, when its initializer leaves braces out, is
+# worked out at parse time from the syntax (sizeof may fold it there)
+# and again in sema from the types. Here the syntax cannot tell that
+# `1 ? 2 : 3` is an int and not a struct value: rather than give the
+# object one size and sizeof another, the declaration is refused.
+check elision-size-guess \
+    'struct pt { int x, y; }; static struct pt g[] = { 1 ? 2 : 3, 4 }; int main(void) { return sizeof g; }' \
+    "cannot size 'g' from its initializer"
+# A union initializer takes one member; a second one is not stored over
+# it (it was, at the same offset).
+check union-excess-init \
+    'union u { int i; int j; }; int main(void) { union u v = { 1, 2 }; return v.i; }' \
+    "a union takes one"
+# `[i] =` names an array element; in a struct's list it was taken as
+# positional and stored into the first member.
+check array-designator-in-struct \
+    'struct s { int a, b; }; struct s x = { [1] = 2 };' \
+    "array designator"

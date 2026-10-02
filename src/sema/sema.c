@@ -436,6 +436,9 @@ struct initbuf {
 static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                          struct expr *init, struct type *ty, int off,
                          struct initbuf *out);
+static int flatten_sized(struct unit *u, struct func *f, struct scope *sc,
+                         struct expr *init, struct type *ty,
+                         struct initbuf *out);
 static void lower_static_bytes(struct unit *u, int line, int size,
                                struct initelem *v, int n,
                                const char **out_bytes,
@@ -1535,18 +1538,22 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col,
                        "compound literal of incomplete type %s",
                        ty_name(ty));
-        /* `(int[]){...}` takes its size from the initializer, as `int a[]`
-         * does. */
-        if (ty->kind == TY_ARRAY && ty->count == 0 &&
-            e->lhs->kind == EXPR_INITLIST)
-            ty = ty_array(ty->pointee, initlist_array_count(e->lhs));
+        /* `(int[]){...}` takes its size from the initializer, as `int
+         * a[]` does: flatten_sized works it out */
+        int sized_by_init = ty->kind == TY_ARRAY && ty->count == 0 &&
+                            e->lhs->kind == EXPR_INITLIST;
         e->cast_ty = ty;
         if (g_in_static_init) {
             /* Static storage: the literal is an anonymous global, and this
              * node becomes a reference to it (so `&(T){...}` in a static
              * initializer lowers to a relocation like any `&global`). */
             struct initbuf ib = { 0, 0, 0 };
-            flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
+            if (sized_by_init)
+                ty = ty_array(ty->pointee,
+                              flatten_sized(u, f, sc, e->lhs, ty, &ib));
+            else
+                flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
+            e->cast_ty = ty;
             static int anon_seq;
             struct global *g = xcalloc(1, sizeof *g);
             char *nm = xmalloc(24);
@@ -1579,7 +1586,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         }
         e->var_index = scope_add(sc, "<compound literal>", ty, NULL);
         struct initbuf ib = { 0, 0, 0 };
-        flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
+        if (sized_by_init) {
+            ty = ty_array(ty->pointee,
+                          flatten_sized(u, f, sc, e->lhs, ty, &ib));
+            sc->vars[e->var_index].ty = ty;
+            e->cast_ty = ty;
+        } else {
+            flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
+        }
         e->inits = ib.v;
         e->ninits = ib.n;
         e->lhs = NULL;
@@ -2926,6 +2940,191 @@ static void init_push_bf(struct initbuf *b, int off, struct type *ty,
     b->v[b->n - 1].bf_bytes = bf_bytes;
 }
 
+/* A brace list being consumed. Brace elision (C11 6.7.9p20) lets one
+ * list initialize a subaggregate and carry on into the next -- `int
+ * m[2][3] = { 1, 2, 3, 4 }`, `struct s v = { 0 }` with an array or a
+ * struct first -- so the position is shared by every level that walks
+ * the same list. */
+struct icur {
+    struct expr *il;
+    int pos;
+};
+
+/* The unbraced initializer whose type flatten_one looked at to decide
+ * between a whole struct value and an elided brace: it is checked
+ * already, and check_expr rewrites in place, so it must not run twice. */
+static struct expr *g_init_checked;
+
+static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
+                        struct icur *c, struct type *ty, int off,
+                        struct initbuf *out, int braced, int *count);
+
+static int str_inits_array(const struct expr *e, const struct type *ty)
+{
+    return e->kind == EXPR_STR && ty->kind == TY_ARRAY &&
+           ty_is_integer(ty->pointee) &&
+           ty_size(ty->pointee) == (e->str_width ? e->str_width : 1);
+}
+
+/* One subobject of type ty at off, from the list at c->pos: a braced
+ * initializer or a scalar takes one element; so does a string for a
+ * character array and a value of the struct's own type for a struct.
+ * Anything else begins the subaggregate's first scalar, and the
+ * subaggregate takes as many elements as it holds. */
+static void flatten_one(struct unit *u, struct func *f, struct scope *sc,
+                        struct icur *c, struct type *ty, int off,
+                        struct initbuf *out)
+{
+    struct expr *el = c->il->elems[c->pos];
+    /* (a complex number is a struct inside EmbCC, and a scalar to C:
+     * `4` is 4 + 0i, not the real part of an elided pair) */
+    int whole = el->kind == EXPR_INITLIST || el->kind == EXPR_COMPLIT ||
+                (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT) ||
+                ty_is_complex(ty) || str_inits_array(el, ty);
+    if (!whole && ty->kind == TY_STRUCT) {
+        if (el != g_init_checked) {
+            check_expr(u, f, sc, el);
+            g_init_checked = el;
+        }
+        whole = el->ty && el->ty->kind == TY_STRUCT && ty_equal(el->ty, ty);
+    }
+    if (whole) {
+        flatten_init(u, f, sc, el, ty, off, out);
+        c->pos++;
+        return;
+    }
+    int before = c->pos;
+    flatten_agg(u, f, sc, c, ty, off, out, 0, NULL);
+    if (c->pos == before)
+        sema_error_at(u, el->line, el->col,
+                   "%s cannot be initialized without braces of its own "
+                   "here", ty_name(ty));
+}
+
+/* The elements or members of an array, struct or union at off: all of a
+ * braced list, or (braced = 0, an elided brace) as many as it holds, up
+ * to a designator, which names a member of the enclosing braced list.
+ * *count, when asked for, receives an array's element count. */
+static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
+                        struct icur *c, struct type *ty, int off,
+                        struct initbuf *out, int braced, int *count)
+{
+    int start = c->pos;
+    if (ty->kind == TY_ARRAY) {
+        int esz = ty_size(ty->pointee);
+        /* Positional by default; a `[i] =` designator repositions the
+         * running index and initialization continues positionally after it
+         * (later writes to the same slot win, matching C). */
+        int ai = 0, max = 0;
+        while (c->pos < c->il->nelems) {
+            struct expr *el = c->il->elems[c->pos];
+            if (!braced) {
+                /* this element is full, or the list moves elsewhere; an
+                 * unsized (flexible) array has no end to elide to */
+                if (c->pos != start &&
+                    (el->desig_field || el->desig_index >= 0))
+                    break;
+                if (!ty->count || ai >= ty->count)
+                    break;
+                flatten_one(u, f, sc, c, ty->pointee, off + ai * esz, out);
+                ai++;
+                continue;
+            }
+            if (el->desig_field)
+                sema_error_at(u, el->line, el->col,
+                           "field designator '.%s' in an array initializer",
+                           el->desig_field);
+            if (el->desig_index >= 0)
+                ai = el->desig_index;
+            /* GNU range `[lo ... hi] = v`: place v at every index in the
+             * span. A zero value needs no leaves — the object is already
+             * zero-filled (static bytes start zero; a local is memzeroed) —
+             * which also keeps a huge `[a ... b] = 0` cheap. */
+            int hi = el->desig_index_hi >= 0 ? el->desig_index_hi : ai;
+            if (ty->count && hi >= ty->count)
+                sema_error_at(u, el->line, el->col,
+                           "initializer index %d is past the end of an "
+                           "array of %d", hi, ty->count);
+            if (el->desig_index_hi >= 0) {
+                int is_zero = el->kind == EXPR_NUM && el->num == 0;
+                for (; ai <= hi; ai++)
+                    if (!is_zero)
+                        flatten_init(u, f, sc, el, ty->pointee,
+                                     off + ai * esz, out);
+                c->pos++;
+            } else {
+                flatten_one(u, f, sc, c, ty->pointee, off + ai * esz, out);
+                ai++;
+            }
+            if (ai > max)
+                max = ai;
+        }
+        if (count)
+            *count = braced ? max : ai;
+        return;
+    }
+    /* A struct or union. Positional by default; a `.field =` designator
+     * jumps to that member and initialization continues positionally
+     * after it. A union holds one member. */
+    int mi = 0, filled = 0;
+    while (c->pos < c->il->nelems) {
+        struct expr *el = c->il->elems[c->pos];
+        int desig = braced || c->pos == start ? 0
+                  : el->desig_field || el->desig_index >= 0;
+        if (desig)
+            break;
+        if (braced && el->desig_index >= 0)
+            sema_error_at(u, el->line, el->col,
+                       "array designator [%d] in an initializer for %s",
+                       el->desig_index, ty_name(ty));
+        if (braced && el->desig_field) {
+            struct member *m = ty_find_member(ty, el->desig_field);
+            if (!m)
+                sema_error_at(u, el->line, el->col,
+                           "%s has no member '%s'", ty_name(ty),
+                           el->desig_field);
+            mi = (int)(m - ty->members);
+        } else if (ty->is_union && filled) {
+            if (!braced)
+                break;
+            sema_error_at(u, el->line, el->col,
+                       "too many initializers for %s: a union takes one",
+                       ty_name(ty));
+        }
+        /* An unnamed bitfield (padding, or a `:0` separator) takes no
+         * initializer — skip past it in positional order. */
+        while (mi < ty->nmembers && ty->members[mi].is_bitfield &&
+               !ty->members[mi].name)
+            mi++;
+        if (mi >= ty->nmembers) {
+            if (!braced)
+                break;
+            sema_error_at(u, c->il->line, c->il->col,
+                       "too many initializers for %s, which has %d "
+                       "members", ty_name(ty), ty->nmembers);
+        }
+        struct member *m = &ty->members[mi];
+        if (m->is_bitfield) {
+            /* A bitfield leaf: its value is masked and merged into the
+             * shared storage unit at m->off by both lowerings, so it
+             * carries (bit_off, bit_width) rather than a byte width. */
+            if (el != g_init_checked)
+                check_expr(u, f, sc, el);
+            need_scalar(u, el, "a bitfield initializer");
+            struct expr *cv = convert_assign(u, el, m->ty,
+                                             "initialization");
+            init_push_bf(out, off + m->off, m->ty, cv,
+                         m->bit_off, m->bit_width, m->bf_bytes);
+            c->pos++;
+        } else {
+            flatten_one(u, f, sc, c, m->ty, off + m->off, out);
+        }
+        mi++;
+        filled = 1;
+    }
+    (void)count;
+}
+
 static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                          struct expr *init, struct type *ty, int off,
                          struct initbuf *out)
@@ -2974,7 +3173,8 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, init->line, init->col,
                        "an array needs a brace initializer or a string");
         }
-        check_expr(u, f, sc, init);
+        if (init != g_init_checked)   /* see flatten_one */
+            check_expr(u, f, sc, init);
         if (ty->kind != TY_STRUCT)
             if (!ty_is_complex(init->ty))
             need_scalar(u, init, "an initializer");
@@ -2983,77 +3183,16 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
         return;
     }
 
-    if (ty->kind == TY_ARRAY) {
-        int esz = ty_size(ty->pointee);
-        /* Positional by default; a `[i] =` designator repositions the
-         * running index and initialization continues positionally after it
-         * (later writes to the same slot win, matching C). */
-        int ai = 0;
-        for (int i = 0; i < init->nelems; i++) {
-            struct expr *el = init->elems[i];
-            if (el->desig_field)
-                sema_error_at(u, el->line, el->col,
-                           "field designator '.%s' in an array initializer",
-                           el->desig_field);
-            if (el->desig_index >= 0)
-                ai = el->desig_index;
-            /* GNU range `[lo ... hi] = v`: place v at every index in the
-             * span. A zero value needs no leaves — the object is already
-             * zero-filled (static bytes start zero; a local is memzeroed) —
-             * which also keeps a huge `[a ... b] = 0` cheap. */
-            int hi = el->desig_index_hi >= 0 ? el->desig_index_hi : ai;
-            if (ty->count && hi >= ty->count)
-                sema_error_at(u, el->line, el->col,
-                           "initializer index %d is past the end of an "
-                           "array of %d", hi, ty->count);
-            int is_zero = el->kind == EXPR_NUM && el->num == 0;
-            for (; ai <= hi; ai++)
-                if (!(el->desig_index_hi >= 0 && is_zero))
-                    flatten_init(u, f, sc, el, ty->pointee,
-                                 off + ai * esz, out);
-        }
+    /* `char s[] = { "abc" }`: the braces around a string are optional */
+    if (init->nelems == 1 && !init->elems[0]->desig_field &&
+        init->elems[0]->desig_index < 0 &&
+        str_inits_array(init->elems[0], ty)) {
+        flatten_init(u, f, sc, init->elems[0], ty, off, out);
         return;
     }
-    if (ty->kind == TY_STRUCT) {
-        /* Positional by default; a `.field =` designator jumps to that
-         * member and initialization continues positionally after it. */
-        int mi = 0;
-        for (int i = 0; i < init->nelems; i++) {
-            struct expr *el = init->elems[i];
-            if (el->desig_field) {
-                struct member *m = ty_find_member(ty, el->desig_field);
-                if (!m)
-                    sema_error_at(u, el->line, el->col,
-                               "%s has no member '%s'", ty_name(ty),
-                               el->desig_field);
-                mi = (int)(m - ty->members);
-            }
-            /* An unnamed bitfield (padding, or a `:0` separator) takes no
-             * initializer — skip past it in positional order. */
-            while (mi < ty->nmembers && ty->members[mi].is_bitfield &&
-                   !ty->members[mi].name)
-                mi++;
-            if (mi >= ty->nmembers)
-                sema_error_at(u, init->line, init->col,
-                           "too many initializers for %s, which has %d "
-                           "members", ty_name(ty), ty->nmembers);
-            struct member *m = &ty->members[mi];
-            if (m->is_bitfield) {
-                /* A bitfield leaf: its value is masked and merged into the
-                 * shared storage unit at m->off by both lowerings, so it
-                 * carries (bit_off, bit_width) rather than a byte width. */
-                check_expr(u, f, sc, el);
-                need_scalar(u, el, "a bitfield initializer");
-                struct expr *cv = convert_assign(u, el, m->ty,
-                                                 "initialization");
-                init_push_bf(out, off + m->off, m->ty, cv,
-                             m->bit_off, m->bit_width, m->bf_bytes);
-                mi++;
-                continue;
-            }
-            flatten_init(u, f, sc, el, m->ty, off + m->off, out);
-            mi++;
-        }
+    if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT) {
+        struct icur c = { init, 0 };
+        flatten_agg(u, f, sc, &c, ty, off, out, 1, NULL);
         return;
     }
     /* a braced scalar: { x } */
@@ -3061,6 +3200,26 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
         sema_error_at(u, init->line, init->col,
                    "a scalar takes exactly one initializer");
     flatten_init(u, f, sc, init->elems[0], ty, off, out);
+}
+
+/* flatten_init for an unsized array `T a[] = { ... }`: returns the
+ * element count the list gives it, brace elision and designators
+ * included. The parser's count (initlist_elided_count) reads the syntax
+ * alone; this one knows the types, so it is the answer. */
+static int flatten_sized(struct unit *u, struct func *f, struct scope *sc,
+                         struct expr *init, struct type *ty,
+                         struct initbuf *out)
+{
+    if (init->nelems == 1 && !init->elems[0]->desig_field &&
+        init->elems[0]->desig_index < 0 &&
+        str_inits_array(init->elems[0], ty)) {
+        flatten_init(u, f, sc, init->elems[0], ty, 0, out);
+        return (int)init->elems[0]->num;
+    }
+    struct icur c = { init, 0 };
+    int n = 0;
+    flatten_agg(u, f, sc, &c, ty, 0, out, 1, &n);
+    return n;
 }
 
 /* Resolve a constant-address expression (the value of a pointer slot in a
@@ -3298,7 +3457,19 @@ static void lower_globals(struct unit *u)
         struct scope sc = { 0, 0, 0, 0 };
         struct initbuf ib = { 0, 0, 0 };
         g_in_static_init++;
-        flatten_init(u, &gf, &sc, g->init_expr, g->ty, 0, &ib);
+        if (g->count_from_init) {
+            /* The parser sized it, and sizeof may have folded that size
+             * already: the walk that knows the types must agree. */
+            struct type *open = ty_array(g->ty->pointee, 0);
+            int n = flatten_sized(u, &gf, &sc, g->init_expr, open, &ib);
+            if (n != g->ty->count)
+                sema_error_line(u, g->line,
+                           "cannot size '%s' from its initializer: the "
+                           "braces it leaves out read as %d elements "
+                           "without the types and %d with them; brace "
+                           "each element", g->name, g->ty->count, n);
+        } else
+            flatten_init(u, &gf, &sc, g->init_expr, g->ty, 0, &ib);
         g_in_static_init--;
         lower_static_bytes(u, g->line, ty_size(g->ty), ib.v, ib.n,
                            &g->init_bytes, &g->relocs, &g->nrelocs);
@@ -3898,6 +4069,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 }
                 break;
             }
+            int sized_by_init = 0;   /* `T a[] = { ... }` */
             if (ty_is_vm(s->dty)) {
                 if (s->is_static)
                     sema_error_at(u, s->line, s->col,
@@ -3930,9 +4102,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                                       (int)s->expr->num);
             } else if (s->expr && s->expr->kind == EXPR_INITLIST &&
                        s->dty->kind == TY_ARRAY && s->dty->count == 0) {
-                /* an omitted array size is the highest index reached */
-                s->dty = ty_array(s->dty->pointee,
-                                  initlist_array_count(s->expr));
+                /* An omitted array size is the highest index reached,
+                 * which the initializer's walk works out below; until
+                 * then the name is in scope with the incomplete type. */
+                sized_by_init = 1;
             }
             /* The name is in scope WITHIN its own initializer (C11
              * 6.2.1p7: scope begins just after the declarator), so the
@@ -3967,7 +4140,12 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                             s->dty->kind == TY_ARRAY ||
                             s->dty->kind == TY_STRUCT)) {
                 struct initbuf ib = { 0, 0, 0 };
-                flatten_init(u, f, sc, s->expr, s->dty, 0, &ib);
+                if (sized_by_init) {
+                    int n = flatten_sized(u, f, sc, s->expr, s->dty, &ib);
+                    s->dty = ty_array(s->dty->pointee, n);
+                    sc->vars[s->var_index].ty = s->dty;
+                } else
+                    flatten_init(u, f, sc, s->expr, s->dty, 0, &ib);
                 s->inits = ib.v;
                 s->ninits = ib.n;
                 s->expr = NULL;
@@ -4542,6 +4720,8 @@ static void merge_globals(struct unit *u)
             canon->has_init = 1;
             canon->init = g->init;
             canon->init_expr = g->init_expr;
+            canon->count_from_init = g->count_from_init &&
+                                     canon->ty == g->ty;
             canon->def_seq = g->seq;   /* the initializer's real position */
         }
         canon->defined |= !g->is_extern;
