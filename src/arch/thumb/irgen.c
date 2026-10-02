@@ -48,6 +48,10 @@ int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
         size = 8;
         align = 8;
     }
+    /* a struct is its own bytes, doubleword-aligned by its NATURAL
+     * alignment as a named one is (place_arg), copied into the slot */
+    if (rt->kind == TY_STRUCT)
+        align = ty_natural_align(rt);
     if (align >= 8)
         cur = emit_bin(fn, IR_AND,
                        emit_bin(fn, IR_ADD, cur, emit_const(fn, 7, 4), 4, 1),
@@ -60,6 +64,11 @@ int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
         emit_store(fn, apa,
                    emit_bin(fn, IR_ADD, addr, emit_const(fn, step, 4), 4, 1),
                    ptr);
+        if (rt->kind == TY_STRUCT) {
+            int dst = irg_va_struct_slot(fn, e);
+            irg_va_copy(fn, dst, 0, addr, size);
+            return dst;
+        }
 
         if (flt) {
             /* Read the double that was passed, then narrow if the

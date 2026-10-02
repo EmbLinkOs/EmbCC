@@ -15,6 +15,70 @@
 #include "asm.h"
 #include "../target.h"
 
+/* va_arg of a struct, AAPCS64 (its appendix's va_arg, which gcc and
+ * clang follow): an HFA is gathered from the v save area, one member
+ * per sixteen-byte register slot; a composite of more than sixteen
+ * bytes came as a POINTER, read like a long and followed; any other
+ * comes from the x save area, contiguous, starting at an even register
+ * when its natural alignment is sixteen. Whatever did not fit is on the
+ * stack, aligned to eight or sixteen and occupying whole doublewords.
+ * The bytes are copied into the expression's own slot. */
+static int va_struct_aapcs(struct ir_func *fn, struct expr *e, int ap)
+{
+    struct type *rt = e->ty;
+    struct type *s32 = ty_base(TY_INT, 0);
+    struct type *ptr = ty_base(TY_LONG, 1);
+    long size = ty_size(rt);
+    int byref = ty_aapcs64_byref(rt);
+    int esz = 0, nh = byref ? 0 : ty_hfa(rt, &esz);
+    int nat = ty_natural_align(rt);
+    int dst = irg_va_struct_slot(fn, e);
+    int l_stack = new_label(fn), l_done = new_label(fn);
+
+    int nreg = nh ? nh : byref ? 1 : (int)((size + 7) / 8);
+    int stride = nh ? 16 : 8;
+    int a_offs = emit_bin(fn, IR_ADD, ap, emit_const(fn, nh ? 28 : 24, 8), 8, 1);
+    int a_top = emit_bin(fn, IR_ADD, ap, emit_const(fn, nh ? 16 : 8, 8), 8, 1);
+    int offs = emit_load(fn, a_offs, s32);
+    emit_brnz(fn, emit_cmp(fn, B_GE, offs, emit_const(fn, 0, 4), 4, 1), 4,
+              l_stack);                                  /* already spent */
+    if (!nh && !byref && nat >= 16)
+        offs = emit_bin(fn, IR_AND,
+                        emit_bin(fn, IR_ADD, offs, emit_const(fn, 15, 4), 4, 1),
+                        emit_const(fn, -16, 4), 4, 1);
+    int next = emit_bin(fn, IR_ADD, offs,
+                        emit_const(fn, stride * nreg, 4), 4, 1);
+    emit_store(fn, a_offs, next, s32);
+    emit_brnz(fn, emit_cmp(fn, B_GT, next, emit_const(fn, 0, 4), 4, 1), 4,
+              l_stack);                                  /* did not fit */
+    int base = emit_bin(fn, IR_ADD, emit_load(fn, a_top, ptr),
+                        gen_convert(fn, offs, s32, ty_base(TY_LONG, 0)), 8, 1);
+    if (nh) {
+        for (int k = 0; k < nh; k++)
+            irg_va_copy(fn, dst, (long)k * esz,
+                        k ? emit_bin(fn, IR_ADD, base,
+                                     emit_const(fn, 16 * k, 8), 8, 1) : base,
+                        esz);
+    } else {
+        irg_va_copy(fn, dst, 0, byref ? emit_load(fn, base, ptr) : base,
+                    size);
+    }
+    emit_jmp(fn, l_done);
+
+    emit_label(fn, l_stack);
+    int stk = emit_load(fn, ap, ptr);
+    if (!byref && nat >= 16)
+        stk = emit_bin(fn, IR_AND,
+                       emit_bin(fn, IR_ADD, stk, emit_const(fn, 15, 8), 8, 1),
+                       emit_const(fn, -16, 8), 8, 1);
+    irg_va_copy(fn, dst, 0, byref ? emit_load(fn, stk, ptr) : stk, size);
+    emit_store(fn, ap, emit_bin(fn, IR_ADD, stk,
+                                emit_const(fn, byref ? 8 : (size + 7) & ~7L,
+                                           8), 8, 1), ptr);
+    emit_label(fn, l_done);
+    return dst;
+}
+
 /* va_arg for AAPCS64. The record va_start fills (aarch64/codegen.c
  * IR_VA_START): __stack at +0, __gr_top +8, __vr_top +16, __gr_offs +24,
  * __vr_offs +28. gcc's sequence, exactly: if the offset is already >= 0 the
@@ -30,6 +94,8 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e)
     struct type *ptr = ty_base(TY_LONG, 1);
     int ap = gen_expr(fn, e->lhs);
 
+    if (rt->kind == TY_STRUCT)
+        return va_struct_aapcs(fn, e, ap);
     int a_offs = emit_bin(fn, IR_ADD, ap, emit_const(fn, flt ? 28 : 24, 8), 8, 1);
     int a_top = emit_bin(fn, IR_ADD, ap, emit_const(fn, flt ? 16 : 8, 8), 8, 1);
     int addr = new_temp(fn);
@@ -108,6 +174,25 @@ int irg_va_arg_darwin(struct ir_func *fn, struct expr *e)
 
     int apa = gen_addr(fn, e->lhs);
     int cur = emit_load(fn, apa, ptr);
+
+    /* A struct: whole doublewords of the stack, sixteen-aligned when its
+     * type is (Darwin counts a struct's own aligned attribute here, as
+     * for named arguments), or -- past sixteen bytes -- a pointer. */
+    if (rt->kind == TY_STRUCT) {
+        long sz = ty_size(rt);
+        int byref = ty_aapcs64_byref(rt);
+        int dst = irg_va_struct_slot(fn, e);
+        if (!byref && ty_align(rt) >= 16)
+            cur = emit_bin(fn, IR_AND,
+                           emit_bin(fn, IR_ADD, cur, emit_const(fn, 15, 8),
+                                    8, 1),
+                           emit_const(fn, -16, 8), 8, 1);
+        irg_va_copy(fn, dst, 0, byref ? emit_load(fn, cur, ptr) : cur, sz);
+        emit_store(fn, apa, emit_bin(fn, IR_ADD, cur,
+                                     emit_const(fn, byref ? 8 : (sz + 7) & ~7L,
+                                                8), 8, 1), ptr);
+        return dst;
+    }
 
     /* Sixteen-byte types get a sixteen-byte slot, aligned; everything
      * else is rounded up to eight, which is the whole of the layout. */

@@ -840,6 +840,28 @@ int gen_addr(struct ir_func *fn, struct expr *e)
 
 int gen_expr(struct ir_func *fn, struct expr *e);
 
+int irg_va_struct_slot(struct ir_func *fn, struct expr *e)
+{
+    struct ir_ins *ad = emit(fn);
+    ad->op = IR_ADDR;
+    ad->a = e->var_index;
+    ad->dst = new_temp(fn);
+    return ad->dst;
+}
+
+void irg_va_copy(struct ir_func *fn, int dst, long off, int src, long n)
+{
+    if (n <= 0)
+        return;
+    int at = off ? emit_bin(fn, IR_ADD, dst, emit_const(fn, off, AW), AW, 1)
+                 : dst;
+    struct ir_ins *m = emit(fn);
+    m->op = IR_MEMCPY;
+    m->a = at;
+    m->b = src;
+    m->size = (int)n;
+}
+
 /* A compound literal `(type){ init }`: clear its synthesized slot, place the
  * flattened initializer leaves (zero-fill + last-write-wins, like a declared
  * aggregate), and return the object's address. */

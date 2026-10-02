@@ -468,7 +468,10 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
          * struct itself does count here, unlike in AAPCS64 */
         to_stack(cu, p, (p->size + 7) & ~7L, a->align > 8 ? a->align : 8);
     else
-        to_stack(cu, p, p->size, nal);
+        /* ...and on Darwin a VARIADIC one, in an eight-byte slot, is
+         * aligned by its declared alignment too (clang; and va_arg) */
+        to_stack(cu, p, p->size,
+                 target_os_get() == TGT_OS_DARWIN ? a->align : nal);
 }
 
 /* Argument k of a call or function whose argument 0 may be the indirect-

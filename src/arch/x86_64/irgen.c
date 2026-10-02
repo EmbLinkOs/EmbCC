@@ -12,6 +12,77 @@
 #include "../../sema/sema.h"
 #include "../../sema/type.h"
 
+/* va_arg of a struct (SysV 3.5.7): classified like an argument. When
+ * every eightbyte finds a register of its class still unread, it is
+ * gathered from the register save area -- INTEGER ones from the
+ * gp_offset run, SSE ones from the fp_offset run sixteen bytes apart --
+ * into the expression's own slot; otherwise, and always for a MEMORY
+ * one, it is the next run of the overflow area, aligned as the caller
+ * aligned it. An eightbyte that is only padding is not fetched at all. */
+static int va_struct_sysv(struct ir_func *fn, struct expr *e, int ap,
+                          int a_ova, int a_rsa)
+{
+    struct type *rt = e->ty;
+    struct type *u32 = ty_base(TY_INT, 1);
+    struct type *ptr = ty_base(TY_LONG, 1);
+    long size = ty_size(rt);
+    enum arg_class cls[2];
+    int n = ty_classify(rt, cls), ni = 0, ns = 0;
+    for (int k = 0; k < n; k++) {
+        if (cls[k] == CLASS_SSE)
+            ns++;
+        else if (cls[k] == CLASS_INTEGER)
+            ni++;
+    }
+    int dst = irg_va_struct_slot(fn, e);
+    int l_over = new_label(fn), l_done = new_label(fn);
+    if (n > 0) {
+        int a_fp = emit_bin(fn, IR_ADD, ap, emit_const(fn, 4, 8), 8, 1);
+        int gp = emit_load(fn, ap, u32), fp = emit_load(fn, a_fp, u32);
+        if (ni)     /* registers left for all of them: gp <= 48 - 8*ni */
+            emit_brz(fn, emit_cmp(fn, B_LT, gp,
+                                  emit_const(fn, 49 - 8 * ni, 4), 4, 0),
+                     4, l_over);
+        if (ns)
+            emit_brz(fn, emit_cmp(fn, B_LT, fp,
+                                  emit_const(fn, 177 - 16 * ns, 4), 4, 0),
+                     4, l_over);
+        int rsa = emit_load(fn, a_rsa, ptr);
+        int ki = 0, ks = 0;
+        for (int k = 0; k < n; k++) {
+            long chunk = size - 8 * k < 8 ? size - 8 * k : 8;
+            if (cls[k] == CLASS_NONE)
+                continue;
+            int off = cls[k] == CLASS_SSE
+                ? emit_bin(fn, IR_ADD, fp, emit_const(fn, 16 * ks++, 4), 4, 0)
+                : emit_bin(fn, IR_ADD, gp, emit_const(fn, 8 * ki++, 4), 4, 0);
+            int src = emit_bin(fn, IR_ADD, rsa,
+                               gen_convert(fn, off, u32, ptr), 8, 1);
+            irg_va_copy(fn, dst, 8 * k, src, chunk);
+        }
+        if (ni)
+            emit_store(fn, ap, emit_bin(fn, IR_ADD, gp,
+                                        emit_const(fn, 8 * ni, 4), 4, 0), u32);
+        if (ns)
+            emit_store(fn, a_fp, emit_bin(fn, IR_ADD, fp,
+                                          emit_const(fn, 16 * ns, 4), 4, 0),
+                       u32);
+        emit_jmp(fn, l_done);
+    }
+    emit_label(fn, l_over);
+    int ova = emit_load(fn, a_ova, ptr);
+    if (ty_align(rt) > 8)
+        ova = emit_bin(fn, IR_AND,
+                       emit_bin(fn, IR_ADD, ova, emit_const(fn, 15, 8), 8, 1),
+                       emit_const(fn, -16, 8), 8, 1);
+    irg_va_copy(fn, dst, 0, ova, size);
+    emit_store(fn, a_ova, emit_bin(fn, IR_ADD, ova,
+                                   emit_const(fn, (size + 7) & ~7L, 8), 8, 1),
+               ptr);
+    emit_label(fn, l_done);
+    return dst;
+}
+
 /* va_arg(ap, T) for an INTEGER-class T (SysV). ap's value is a pointer to
  * a __va_list_tag { gp_offset u32, fp_offset u32, overflow_arg_area ptr,
  * reg_save_area ptr }. If gp_offset < 48 the argument sits in the register
@@ -26,6 +97,9 @@ int irg_va_arg_sysv(struct ir_func *fn, struct expr *e)
 
     int a_ova = emit_bin(fn, IR_ADD, ap, emit_const(fn, 8, 8), 8, 1);
     int a_rsa = emit_bin(fn, IR_ADD, ap, emit_const(fn, 16, 8), 8, 1);
+
+    if (rt->kind == TY_STRUCT)
+        return va_struct_sysv(fn, e, ap, a_ova, a_rsa);
 
     /* long double is X87 class, which SysV passes in memory — always the
      * overflow area, at a 16-aligned slot of 16 bytes. */

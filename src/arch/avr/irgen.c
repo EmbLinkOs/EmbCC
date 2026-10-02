@@ -274,6 +274,11 @@ int irg_va_arg_avr(struct ir_func *fn, struct expr *e)
                         emit_const(fn, size, target_ptr_size()),
                         target_ptr_size(), 1),
                ptr);
+    if (rt->kind == TY_STRUCT) {        /* its bytes, into its own slot */
+        int dst = irg_va_struct_slot(fn, e);
+        irg_va_copy(fn, dst, 0, addr, size);
+        return dst;
+    }
     return emit_load(fn, addr, rt);
 }
 

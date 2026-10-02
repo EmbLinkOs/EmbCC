@@ -55,6 +55,10 @@ unsigned short rus(int x);
 long double ldf(long double a, double b, long double c);
 long vs(int a, int b, int c, int d, int e, int f, int g, int h, char x,
         short y, ...);
+struct al16 { long x; } __attribute__((aligned(16)));
+struct hf2 { float a, b; };
+struct big24 { long a, b, c; };
+long vstruct(int n, ...);
 E
 
 cat > "$out/callee.c" << 'E'
@@ -92,6 +96,19 @@ long vs(int a, int b, int c, int d, int e, int f, int g, int h, char x,
     return r;
 }
 long double ldf(long double a, double b, long double c) { return a * 10 + b * 100 + c * 1000; }
+long vstruct(int n, ...)
+{
+    va_list ap; va_start(ap, n);
+    struct c3 a = va_arg(ap, struct c3);
+    struct al16 b = va_arg(ap, struct al16);
+    struct s12 c = va_arg(ap, struct s12);
+    struct hf2 d = va_arg(ap, struct hf2);
+    struct hd e = va_arg(ap, struct hd);
+    struct big24 f = va_arg(ap, struct big24);
+    va_end(ap);
+    return n + a.c * 10 + b.x * 100 + c.c * 1000 + (long)d.b * 10000 +
+           (long)e.y * 100000 + f.c * 1000000;
+}
 E
 
 cat > "$out/caller.c" << 'E'
@@ -127,6 +144,12 @@ int main(void)
     check(rc(id(5)) + big == -71 + 1000000);
     check(vs(1, 0, 0, 0, 0, 0, 0, 0, 2, 3, 4, 5.0, 6L) == 1 + 20 + 300 + 4000 + 50000 + 600000);
     check(ldf(1.5L, 2, 3.25L) == 15 + 200 + 3250);
+    {
+        struct al16 al = { 5 }; struct hf2 h2 = { 1, 2 };
+        struct big24 b24 = { 7, 8, 9 };
+        check(vstruct(1, c3, al, s12, h2, hd, b24) ==
+              1 + 30 + 500 + 6000 + 20000 + 200000 + 9000000);
+    }
     check(sizeof(long double) == 8 && (char)-1 < 0);
     char buf[32];
     snprintf(buf, sizeof buf, "%.2Lf %d %hhd", ldf(1.5L, 2, 3.25L), (int)sizeof(__WCHAR_TYPE__) * ((__WCHAR_TYPE__)-1 < 0), (signed char)c);
