@@ -3916,7 +3916,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             advance(ps);                       /* consume ':' */
             s = new_stmt(STMT_LABEL, lline, 0);
             s->name = label_map(ps, lname);
-            s->body = parse_stmt(ps, allow_decl);
+            /* C23: a label may end a block, `out: }`, labelling nothing */
+            s->body = cur(ps)->kind == TOK_RBRACE
+                    ? new_stmt(STMT_BLOCK, lline, 0)
+                    : parse_stmt(ps, allow_decl);
             return s;
         }
         ps->lx = save;                         /* not a label */

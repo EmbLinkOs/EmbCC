@@ -190,6 +190,13 @@ static const struct {
     { "__imag__", TOK_KW_IMAG },
     { "__imag", TOK_KW_IMAG },
     { "_Static_assert", TOK_KW_STATIC_ASSERT },
+    /* C23 spells four C11 keywords plainly, and gcc 15 compiles C23 by
+     * default; a header's macros of these names are expanded first.
+     * (C++ has its own, below.) */
+    { "static_assert", TOK_KW_STATIC_ASSERT },
+    { "alignof", TOK_KW_ALIGNOF },
+    { "alignas", TOK_KW_ALIGNAS },
+    { "thread_local", TOK_KW_THREAD },
     { "_Generic", TOK_KW_GENERIC },
     { "_Alignof", TOK_KW_ALIGNOF },
     { "__alignof__", TOK_KW_ALIGNOF },
@@ -894,8 +901,12 @@ void lex_next(struct lexer *lx)
                 }
         for (size_t i = 0; i < sizeof keywords / sizeof keywords[0]; i++) {
             if (lx->cxx && (strcmp(keywords[i].word, "restrict") == 0 ||
-                            strcmp(keywords[i].word, "typeof") == 0))
-                continue;        /* identifiers in C++ */
+                            strcmp(keywords[i].word, "typeof") == 0 ||
+                            strcmp(keywords[i].word, "static_assert") == 0 ||
+                            strcmp(keywords[i].word, "alignof") == 0 ||
+                            strcmp(keywords[i].word, "alignas") == 0 ||
+                            strcmp(keywords[i].word, "thread_local") == 0))
+                continue;        /* identifiers in C++, or its own */
             if (strlen(keywords[i].word) == n &&
                 memcmp(keywords[i].word, start, n) == 0) {
                 t->kind = keywords[i].kind;
