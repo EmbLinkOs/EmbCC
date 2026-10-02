@@ -8525,6 +8525,125 @@ static int drop_unreachable(struct ir_func *fn)
     return sccp_core(fn, 0);
 }
 
+/* ---- a remainder from the quotient beside it ----
+ *
+ * `q = a / b; r = a % b;` divided twice: two idivs on x86-64, two calls
+ * to the 64-bit helper on Thumb, RISC-V without M and AVR, where a divide
+ * is a library routine of hundreds of cycles. C's division truncates, so
+ * a == (a / b) * b + a % b whenever a / b is defined, and the remainder is
+ * a - q * b -- a multiply and a subtract, at the operation's own width,
+ * where the wrap of both gives exactly the remainder's bits. gcc and clang
+ * do the same; division by a CONSTANT is already pass_divmagic's.
+ *
+ * Either order: the digit loop's `d = v % base; v = v / base;` puts the
+ * remainder first, so the quotient is computed there instead, and the
+ * division that follows becomes a copy of it. Within a block, by operand
+ * names: an entry dies when a, b or its result is written again. */
+struct dm_ent { int a, b, w, sign, res, at, is_div; };
+
+static int pass_divmod(struct ir_func *fn)
+{
+    struct dm_ent tab[16];
+    int ntab = 0, nrw = 0;
+    /* per instruction: mulq -- this MOD becomes a - q*b with q given;
+     * preq -- a DIV into the given fresh q is inserted before this MOD,
+     * which then becomes a - q*b; movq -- this DIV becomes a copy of q */
+    int *mulq = NULL, *preq = NULL, *movq = NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_LABEL || i->op == IR_ASM || i->op == IR_LANDING) {
+            ntab = 0;
+            continue;
+        }
+        int pairable = (i->op == IR_MOD || i->op == IR_DIV) && !i->flt &&
+                       !i->imm_b && (i->w == 4 || i->w == 8) &&
+                       i->a >= 0 && i->b >= 0 && i->dst >= 0 &&
+                       i->dst != i->a && i->dst != i->b;
+        int matched = 0;
+        if (pairable) {
+            for (int k = 0; k < ntab; k++) {
+                struct dm_ent *e = &tab[k];
+                if (e->a != i->a || e->b != i->b || e->w != i->w ||
+                    e->sign != i->sign || e->is_div == (i->op == IR_DIV))
+                    continue;
+                if (!mulq) {
+                    mulq = xmalloc((size_t)fn->nins * sizeof *mulq);
+                    preq = xmalloc((size_t)fn->nins * sizeof *preq);
+                    movq = xmalloc((size_t)fn->nins * sizeof *movq);
+                    for (int m = 0; m < fn->nins; m++)
+                        mulq[m] = preq[m] = movq[m] = -1;
+                }
+                if (e->is_div) {                /* div then mod */
+                    mulq[n] = e->res;
+                } else if (preq[e->at] < 0 && mulq[e->at] < 0) {
+                    int q = fn->nvregs++;       /* mod then div */
+                    preq[e->at] = q;
+                    movq[n] = q;
+                } else {
+                    continue;
+                }
+                nrw++;
+                matched = 1;
+                e->a = -2;                      /* used: one pairing each */
+                break;
+            }
+        }
+        int t = def_target(i);
+        if (t >= 0) {                   /* forget what named t */
+            int j = 0;
+            for (int k = 0; k < ntab; k++)
+                if (tab[k].a != t && tab[k].b != t && tab[k].res != t &&
+                    tab[k].a != -2)
+                    tab[j++] = tab[k];
+            ntab = j;
+        }
+        if (pairable && !matched && ntab < 16) {
+            tab[ntab].a = i->a; tab[ntab].b = i->b; tab[ntab].w = i->w;
+            tab[ntab].sign = i->sign; tab[ntab].res = i->dst;
+            tab[ntab].at = n; tab[ntab].is_div = i->op == IR_DIV;
+            ntab++;
+        }
+    }
+    if (!nrw)
+        return 0;
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+    for (int n = 0; n < fn->nins; n++) {
+        newpos[n] = nb.n;
+        const struct ir_ins o = fn->ins[n];
+        if (movq[n] >= 0) {                     /* the division, done above */
+            struct ir_ins *m = ib_push(&nb);
+            *m = o;
+            m->op = IR_MOV; m->a = movq[n]; m->b = -1;
+            continue;
+        }
+        int q = mulq[n] >= 0 ? mulq[n] : preq[n];
+        if (q < 0) {
+            *ib_push(&nb) = o;
+            continue;
+        }
+        if (preq[n] >= 0) {
+            struct ir_ins *d = ib_push(&nb);
+            *d = o;
+            d->op = IR_DIV; d->dst = q;
+        }
+        int prod = fn->nvregs++;
+        struct ir_ins *m = ib_push(&nb);
+        m->op = IR_MUL; m->dst = prod; m->a = q; m->b = o.b; m->w = o.w;
+        m->line = o.line; m->col = o.col;
+        struct ir_ins *r = ib_push(&nb);
+        r->op = IR_SUB; r->dst = o.dst; r->a = o.a; r->b = prod; r->w = o.w;
+        r->line = o.line; r->col = o.col;
+    }
+    newpos[fn->nins] = nb.n;
+    remap_scopes(fn, newpos, fn->nins);
+    free(newpos);
+    free(mulq); free(preq); free(movq);
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    return 1;
+}
+
 /* ---- local store-forwarding (a lightweight mem2reg) ----
  *
  * EmbIR keeps locals in memory (STVAR/LDVAR). Within an extended basic block a
@@ -11635,6 +11754,7 @@ static void opt_func(struct ir_func *fn)
              * leaves is what CSE sees. */
             changed |= pass_reassoc(fn);
             changed |= pass_lvn(fn);      /* CSE: reuse identical computations */
+            changed |= pass_divmod(fn);   /* a % b from the a / b beside it */
             if (g_gcse && cfg_ok)
                 changed |= pass_gcse(fn); /* CSE across the dominator tree */
             /* SCCP is the one that must stay off without a trustworthy
