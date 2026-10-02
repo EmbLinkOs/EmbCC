@@ -166,6 +166,10 @@ enum rv_amo {
 enum { RV_ORD_RELAXED = 0, RV_ORD_RL = 1, RV_ORD_AQ = 2, RV_ORD_AQRL = 3 };
 /* `w` is 0 for .w (four bytes) and 1 for .d (eight, RV64 only). `lr` has no
  * rs2 and takes RV_ZERO there. */
+/* `fence pred, succ`: each a subset of i/o/r/w as bits 3..0
+ * (RV_FENCE_I .. RV_FENCE_W). */
+enum { RV_FENCE_I = 8, RV_FENCE_O = 4, RV_FENCE_R = 2, RV_FENCE_W = 1 };
+void rv_fence(struct code *c, unsigned pred, unsigned succ);
 void rv_amo(struct code *c, enum rv_amo op, int rd, int rs1, int rs2,
             int ord, int w);
 

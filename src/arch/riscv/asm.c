@@ -328,7 +328,7 @@ static int one_stmt(const char *stmt, int len, struct code *out,
          * memory and not device I/O, so a barrier written for an MMIO
          * register would not have ordered it. */
         if (tok_is(&t[0], "fence")) {
-            code_u32(out, (unsigned long)OP_FENCE | (0xffUL << 20));
+            rv_fence(out, 0xf, 0xf);
             return 0;
         }
         if (tok_is(&t[0], "fence.i")) {
@@ -360,9 +360,7 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                     FAIL("\"%.*s\" is not a set of i/o/r/w",
                          t[k + 1].len, t[k + 1].s);
                 }
-        code_u32(out, (unsigned long)OP_FENCE |
-                      ((unsigned long)set[0] << 24) |
-                      ((unsigned long)set[1] << 20));
+        rv_fence(out, set[0], set[1]);
         return 0;
     }
 

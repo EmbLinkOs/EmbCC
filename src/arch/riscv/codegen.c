@@ -2604,9 +2604,12 @@ static void gen_ins(struct rv_fn *F, int n)
         rv_unimp(t);
         return;
     case IR_FENCE:
-        /* Nothing to order: one hart, no A extension, no cache the ISA
-         * exposes. `fence` would be correct too; this says why it is not
-         * needed rather than leaving a reader to wonder. */
+        /* fence rw, rw: memory against memory, both ways -- what a
+         * seq_cst fence and the barrier around a seq_cst load or store
+         * ask for. It was nothing, on the reasoning of one hart; but the
+         * A extension's AMOs are emitted, so harts are expected, and on
+         * a second one a store could be seen out of order. */
+        rv_fence(t, RV_FENCE_R | RV_FENCE_W, RV_FENCE_R | RV_FENCE_W);
         return;
 
     case IR_BSWAP: {

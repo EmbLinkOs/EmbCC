@@ -601,6 +601,14 @@ void rv_muldiv(struct code *c, int op, int rd, int rs1, int rs2, int w)
 
 /* ---- the A extension ------------------------------------------------- */
 
+void rv_fence(struct code *c, unsigned pred, unsigned succ)
+{
+    if (pred > 15 || succ > 15)
+        internal_error("riscv: fence sets are four bits");
+    /* MISC-MEM, funct3 0, rd/rs1 zero; pred in 27..24, succ in 23..20 */
+    rv_w(c, 0x0fUL | ((unsigned long)pred << 24) | ((unsigned long)succ << 20));
+}
+
 void rv_amo(struct code *c, enum rv_amo op, int rd, int rs1, int rs2,
             int ord, int w)
 {
