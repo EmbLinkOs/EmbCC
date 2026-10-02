@@ -160,4 +160,37 @@ if grep -qE 'mul' "$out/cgoto.ir"; then
 fi
 echo "a function with a computed goto is optimized, not skipped"
 
+# 7. Nor does a block nothing reaches.
+#
+# mem2reg's dominators are wrong over a block no path enters, so it
+# refused any function that had one -- and irgen leaves one wherever a
+# statement follows a jump: a `break` after a `continue` or a `return`,
+# code after a noreturn call. That kept every local of the function in
+# memory through the whole optimizer: sin, cos, pow and most of fdlibm,
+# 149 functions over lib/libc and EmbLinkOs. The blocks are dropped first.
+cat > "$out/unreach.c" <<'EOF'
+int count(const unsigned char *s, int n)
+{
+    short st = 0;
+    int acc = 0;
+    for (int i = 0; i < n; i++) {
+        switch (st) {
+        case 0: acc += s[i]; st = 1; continue; break;
+        case 1: acc ^= s[i]; st = 0; break;
+        }
+        acc += st;
+    }
+    return acc;
+    acc++;
+}
+EOF
+"$EMBCC" inspect ir --target="$TARGET" -O2 "$out/unreach.c" > "$out/unreach.ir" \
+    2>/dev/null || { echo "FAIL: could not dump the unreachable-block IR"; exit 1; }
+if grep -qE 'ldvar|stvar' "$out/unreach.ir"; then
+    echo "FAIL: locals still read and written in memory, so mem2reg refused"
+    echo "      a function for having a block nothing reaches:"
+    cat "$out/unreach.ir"; exit 1
+fi
+echo "a function with an unreachable block still has its locals promoted"
+
 echo "optimizer acceptance passed"

@@ -44,10 +44,20 @@ struct member {
 struct type {
     enum ty_kind kind;
     int is_unsigned;        /* integers only */
+    /* TY_LONG spelled `long long`. C has two distinct 64-bit-capable
+     * integer types and this compiler had one kind for both, which cost
+     * nothing while every target was LP64 and they were the same size.
+     * On an ILP32 target they are not: `long` is four bytes and
+     * `long long` is eight, so the spelling has to survive into the
+     * type. ty_equal() deliberately IGNORES this -- see the note
+     * there. */
+    int is_llong;
     int is_volatile;        /* `volatile`-qualified: every access must happen and
                              * must not be CSE'd/removed (MMIO). Set on the
                              * ACCESSED type — the pointee of a volatile pointer,
                              * or a volatile variable. Ignored by ty_equal. */
+    int is_atomic;          /* `_Atomic`: a volatile copy whose reads, writes
+                             * and read-modify-writes are atomic (irgen) */
     struct type *canon;     /* a volatile COPY points at the unqualified original
                              * (structs compare by identity, so equality follows
                              * this); NULL on an original. */
@@ -73,6 +83,12 @@ struct type {
     struct member *members;
     int nmembers;
     int size, align;        /* SysV layout, computed when completed */
+    /* The alignment its MEMBERS give it -- `align` before the struct's
+     * own __attribute__((aligned)) is applied, after packing. AAPCS64
+     * and AAPCS place arguments by this "natural alignment", and gcc and
+     * clang agree: a struct aligned(16) holding a long goes in x1, one
+     * holding an __int128 in x2 (ty_natural_align). */
+    int nat_align;
     /* TY_FUNC (always behind a pointer in this subset): */
     struct type *ret;
     struct type *ptypes[MAX_PARAMS];
@@ -98,10 +114,19 @@ struct type *ty_base(enum ty_kind kind, int is_unsigned);
  * unsigned char: it IS one of the two, chosen per target. */
 struct type *ty_plain_char(void);
 struct type *ty_wchar(void);
+/* `long long` / `unsigned long long`: eight bytes on every target. */
+struct type *ty_llong(int is_unsigned);
+/* The integer type that is exactly `size` bytes wide, or NULL if the
+ * target has none. Callers that want "the unsigned type of width w"
+ * must ask this rather than assuming w == 8 means long: on ILP32 it
+ * means long long, and on a target without __int128 there is no
+ * answer at 16 and the caller has to cope with NULL. */
+struct type *ty_int_of_size(int size, int is_unsigned);
 /* A copy of `t` marked `volatile` (or t itself if already). Base types are
  * interned singletons, so this returns a fresh non-interned node — safe because
  * nothing compares types by pointer identity (ty_equal compares fields). */
 struct type *ty_volatile(struct type *t);
+struct type *ty_atomic(struct type *t);
 struct type *ty_ptr(struct type *pointee);
 struct type *ty_array(struct type *elem, int count);
 /* SysV x86-64: a struct that is exactly one long double (X87 + X87UP) —
@@ -138,17 +163,26 @@ struct type *ty_func(struct type *ret, struct type **ptypes, int n,
 /* Assigns member offsets and the struct's size/align per SysV, and
  * marks the type complete. Members must already have complete types. */
 void ty_struct_layout(struct type *t, struct member *members, int n,
-                      int packed, int user_align);
+                      int packed, int user_align, int pack);
 struct member *ty_find_member(struct type *t, const char *name);
 
 int ty_size(const struct type *t);          /* bytes; void has none */
 int ty_align(const struct type *t);
+int ty_natural_align(const struct type *t);
 int ty_equal(const struct type *a, const struct type *b);
 int ty_is_integer(const struct type *t);
 int ty_is_float(const struct type *t);
 int ty_is_arith(const struct type *t);   /* integer or floating */
+
+/* The integer promotions, and the usual arithmetic conversions.
+ * Public because the PARSER needs the second one: typeof(a - b) is
+ * the type those rules give, and a second copy of them in parse.c
+ * would be a copy that drifts from the one sema uses. */
+struct type *ty_promote(struct type *t);
+struct type *ty_arith_common(struct type *a, struct type *b);
 int ty_is_scalar(const struct type *t);     /* integer or pointer */
 int ty_wide(const struct type *t);          /* 1 = 64-bit value class */
+int ty_is_xldouble(const struct type *t);   /* long double wider than double */
 int ty_signed_int(const struct type *t);    /* signed integer? */
 
 /* ---- SysV AMD64 argument classification (the ABI's §3.2.3) ----
@@ -161,7 +195,11 @@ int ty_signed_int(const struct type *t);    /* signed integer? */
  * An aggregate larger than two eightbytes is MEMORY (stack / hidden
  * return pointer). Otherwise each eightbyte is SSE when every scalar
  * overlapping it is floating, and INTEGER otherwise. */
-enum arg_class { CLASS_INTEGER, CLASS_SSE, CLASS_MEMORY };
+/* CLASS_NONE is SysV's NO_CLASS: an eightbyte that holds only padding --
+ * the second half of a struct aligned(16) around one long. It takes no
+ * register and nothing is moved for it; counting it as INTEGER spent a
+ * register gcc and clang do not, and every later argument was one off. */
+enum arg_class { CLASS_INTEGER, CLASS_SSE, CLASS_MEMORY, CLASS_NONE };
 
 /* Fills classes[] with one entry per eightbyte and returns the count
  * (1 or 2); returns 0 when the type is MEMORY class. Non-aggregates

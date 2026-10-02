@@ -1,6 +1,8 @@
 #ifndef EMBCC_CODEGEN_CODEGEN_H
 #define EMBCC_CODEGEN_CODEGEN_H
 
+#include <stddef.h>
+
 #include "code.h"
 #include "../ir/ir.h"
 #include "target.h"
@@ -18,9 +20,21 @@ char *cg_wide_vregs(struct ir_func *fn);
  * backend that gives them their own register class. NULL when none. */
 char *cg_float_vregs(struct ir_func *fn);
 
+/* Turn each string site's INDEX into its offset in .rodata. A backend
+ * records the index while lowering (that is what IR_STRADDR carries) and
+ * calls this once, at the end of its unit, before handing the sites back.
+ * Shared because it was once the same line in four backends and missing
+ * from the fifth. */
+struct ir_unit;
+struct strsite;
+void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n);
+struct func;
+int cg_call_local(const struct func *caller, const struct func *callee);
+
 struct extcall {
     int patch_off;        /* offset of the rel32 field in .text */
     struct func *callee;  /* canonical, !has_defn */
+    int tail;             /* a tail call -- a branch (RK_TAIL) */
 };
 
 /* String-address sites: the instruction field the linker must point into
@@ -45,6 +59,10 @@ struct fsite {
     int patch_off;
     struct func *target;
     enum reloc_kind kind;
+    /* RK_ABS64 only: added to the target's address -- a label inside
+     * it, for a jump table of absolute entries. Read for no other
+     * kind, and set to 0 by every site that makes one anyway. */
+    long addend;
 };
 
 /* Lowers the unit to x86-64 into one .text image and fills each
@@ -64,6 +82,43 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
 /* The same lowering for aarch64 (AAPCS64). Same signature, same site
  * lists, so the driver picks one on --target= and nothing downstream
  * knows which machine produced the image. */
+/* And for ARMv7-M (Thumb-2, AAPCS32). Same signature again — a third
+ * machine the driver picks on --target= and nothing downstream knows
+ * about. This one refuses far more than it emits; see the header of
+ * src/arch/thumb/codegen.c for what and why. */
+void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
+                        struct extcall **ext, int *next,
+                        struct strsite **strs, int *nstrs,
+                        struct gsite **gs, int *ngs,
+                        struct fsite **fs, int *nfs, int want_debug,
+                        int optimize, int no_sse, int regalloc);
+
+/* And for RISC-V -- ONE function for RV32 and RV64 alike, which reads
+ * target_xlen() to know which. The other three backends are one per
+ * machine; these two widths are one machine, and D-016 says why. */
+void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
+                        struct extcall **ext, int *next,
+                        struct strsite **strs, int *nstrs,
+                        struct gsite **gs, int *ngs,
+                        struct fsite **fs, int *nfs, int want_debug,
+                        int optimize, int no_sse, int regalloc);
+/* The .riscv.attributes payload: the ISA string and stack alignment the
+ * code was built for, as clang and gcc record them. Without it a
+ * disassembler knows only RV32I and the C extension, and read every
+ * mul, div and lr/sc as <unknown>. A malloc'd buffer the caller frees. */
+unsigned char *riscv_build_attributes(size_t *len);
+
+/* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
+ * a register and every value is a run of them. Same signature all the
+ * same, so the driver still picks one on --target= and nothing downstream
+ * knows which machine produced the image. */
+void codegen_unit_avr(struct ir_unit *iu, struct code *text,
+                      struct extcall **ext, int *next,
+                      struct strsite **strs, int *nstrs,
+                      struct gsite **gs, int *ngs,
+                      struct fsite **fs, int *nfs, int want_debug,
+                      int optimize, int no_sse, int regalloc);
+
 void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,

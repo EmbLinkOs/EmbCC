@@ -33,6 +33,7 @@
 #include <string.h>
 
 #include "util.h"
+
 #include "../arch/backend.h"
 #include "../arch/target.h"
 #include "../ir/ir.h"
@@ -40,10 +41,52 @@
 #include "../sema/type.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
+/* A symbol as an assembler reads it. C lets an identifier hold UTF-8
+ * letters (`größe`), and a name with any byte outside [A-Za-z0-9_.$] is
+ * written in quotes, as clang writes it; the object file carries the
+ * bytes either way. The quoted copy lives as long as the compile. */
+/* A pointer-sized slot holding an address: as wide as the target's
+ * pointer -- `.quad` was written everywhere, which a 32-bit target's
+ * assembler rejects and a 64-bit one would lay out twice too wide -- and
+ * on AVR a FUNCTION's address is its word address, pm(), as the object
+ * writer's R_AVR_16_PM says. */
+static void ptr_slot(struct outbuf *b, const char *sym, long addend, int fn)
+{
+    int ps = target_ptr_size();
+    const char *dir = ps == 8 ? ".quad" : ps == 4 ? ".long" : ".short";
+    if (ps == 2 && fn)
+        ob_fmt(b, "\t%s\tpm(%s", dir, sym);
+    else
+        ob_fmt(b, "\t%s\t%s", dir, sym);
+    if (addend)
+        ob_fmt(b, "%+ld", addend);
+    ob_str(b, ps == 2 && fn ? ")\n" : "\n");
+}
+
+static const char *asym(const char *n)
+{
+    int plain = 1;
+    for (const char *p = n; *p; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '.' ||
+              *p == '$'))
+            plain = 0;
+    if (plain)
+        return n;
+    size_t len = strlen(n);
+    char *q = xmalloc(len + 3);
+    q[0] = '"';
+    memcpy(q + 1, n, len);
+    q[len + 1] = '"';
+    q[len + 2] = 0;
+    return q;
+}
+
 /* One place in .text that names a symbol. Collected from what the backend
  * recorded, so this is the same information the ELF writer turns into
  * relocations — not a second derivation of it. */
 struct site {
+    long addend;             /* an RK_ABS64 site's offset into its target */
     int off;                 /* the relocated field's offset in .text */
     const char *name;        /* the symbol, or NULL for a .rodata string */
     int str_off;             /* when name is NULL: offset inside .rodata */
@@ -81,21 +124,107 @@ static void str_label(char *out, size_t cap, const struct ir_unit *iu, int off)
  * backend's zeroed field implies. A PC-relative field is measured from its
  * own END, so the addend is -(bytes after the field), which for every form
  * EmbCC emits is -4. */
+/* (kind, target) -> the ELF relocation type name an assembler accepts.
+ *
+ * This used to answer R_X86_64_* for every target, which was harmless
+ * only because -S refused aarch64 and had not been taught about the
+ * three machines added after it. The kinds are already per-machine
+ * (target.h): what was missing was the other half of the mapping that
+ * src/elf/write.c has always had.
+ *
+ * NULL means "this kind cannot be spelled as a plain .reloc on this
+ * target", and the caller refuses rather than emitting a relocation
+ * that assembles into the wrong program. Nothing lands there today;
+ * the kind that nearly did is RISC-V's paired low half, whose operand
+ * is the ADDRESS OF THE PAIRED auipc rather than the symbol, and which
+ * is handled by labelling the auipc at its emission site. */
+/* ARM assemblers treat '@' as the start of a comment, so a symbol type
+ * is spelled `%function` there and `@function` everywhere else. Getting
+ * this wrong is not subtle -- the whole directive vanishes into a
+ * comment and the symbol is left untyped. */
+static const char *type_sigil(void)
+{
+    return target_get() == TARGET_THUMB ? "%" : "@";
+}
+
 static const char *reloc_name(int kind)
 {
-    switch (kind) {
-    case RK_CALL:        return "R_X86_64_PLT32";
-    case RK_PCREL32:     return "R_X86_64_PC32";
-    case RK_ABS64:       return "R_X86_64_64";
-    case RK_ABS32:       return "R_X86_64_32";
-    case RK_DATA_PREL32: return "R_X86_64_PC32";
-    default:             return "R_X86_64_PC32";
+    if (kind == RK_TAIL && target_get() != TARGET_THUMB &&
+        target_get() != TARGET_AARCH64)
+        kind = RK_CALL;       /* Thumb and aarch64 spell a branch apart */
+    switch (target_get()) {
+    case TARGET_AARCH64:
+        switch (kind) {
+        case RK_CALL:        return "R_AARCH64_CALL26";
+        case RK_TAIL:        return "R_AARCH64_JUMP26";
+        case RK_ADR_HI21:    return "R_AARCH64_ADR_PREL_PG_HI21";
+        case RK_ADD_LO12:    return "R_AARCH64_ADD_ABS_LO12_NC";
+        case RK_GOT_PAGE:    return "R_AARCH64_ADR_GOT_PAGE";
+        case RK_GOT_LO12:    return "R_AARCH64_LD64_GOT_LO12_NC";
+        case RK_TPREL_HI12:  return "R_AARCH64_TLSLE_ADD_TPREL_HI12";
+        case RK_TPREL_LO12:  return "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC";
+        case RK_ABS64:       return "R_AARCH64_ABS64";
+        case RK_ABS32:       return "R_AARCH64_ABS32";
+        case RK_DATA_PREL32: return "R_AARCH64_PREL32";
+        default:             return NULL;
+        }
+    case TARGET_THUMB:
+        switch (kind) {
+        case RK_CALL:        return "R_ARM_THM_CALL";
+        case RK_TAIL:        return "R_ARM_THM_JUMP24";
+        case RK_THM_MOVW:    return "R_ARM_THM_MOVW_ABS_NC";
+        case RK_THM_MOVT:    return "R_ARM_THM_MOVT_ABS";
+        case RK_ABS32:       return "R_ARM_ABS32";
+        case RK_DATA_PREL32: return "R_ARM_REL32";
+        default:             return NULL;
+        }
+    case TARGET_RISCV32:
+    case TARGET_RISCV64:
+        switch (kind) {
+        case RK_CALL:             return "R_RISCV_CALL_PLT";  /* as the object (target.c) */
+        case RK_RISCV_PCREL_HI20: return "R_RISCV_PCREL_HI20";
+        case RK_ABS64:            return "R_RISCV_64";
+        case RK_ABS32:            return "R_RISCV_32";
+        case RK_DATA_PREL32:      return "R_RISCV_32_PCREL";
+        case RK_RISCV_PCREL_LO12_I: return "R_RISCV_PCREL_LO12_I";
+        default:                  return NULL;
+        }
+    case TARGET_AVR:
+        /* (without this case AVR fell through to x86-64's names) */
+        switch (kind) {
+        case RK_CALL: case RK_AVR_CALL: case RK_AVR_TEXT_CALL:
+                                 return "R_AVR_CALL";
+        case RK_AVR_LO8_LDI:     return "R_AVR_LO8_LDI";
+        case RK_AVR_HI8_LDI:     return "R_AVR_HI8_LDI";
+        case RK_AVR_LO8_LDI_GS:  return "R_AVR_LO8_LDI_GS";
+        case RK_AVR_HI8_LDI_GS:  return "R_AVR_HI8_LDI_GS";
+        case RK_AVR_ABS16:       return "R_AVR_16";
+        case RK_AVR_ABS16_PM:    return "R_AVR_16_PM";
+        case RK_ABS32:           return "R_AVR_32";
+        default:                 return NULL;
+        }
+    case TARGET_X86_64:
+    default:
+        switch (kind) {
+        case RK_CALL:        return "R_X86_64_PLT32";
+        case RK_PCREL32:     return "R_X86_64_PC32";
+        case RK_ABS64:       return "R_X86_64_64";
+        case RK_ABS32:       return "R_X86_64_32";
+        case RK_DATA_PREL32: return "R_X86_64_PC32";
+        case RK_TPOFF32:     return "R_X86_64_TPOFF32";
+        default:             return "R_X86_64_PC32";
+        }
     }
 }
 
+/* x86-64 counts a PC-relative displacement from the END of the
+ * instruction and every other target here counts it from the start, so
+ * the -4 that corrects for that is x86's alone. */
 static long addend_for(int kind)
 {
-    return kind == RK_ABS64 || kind == RK_ABS32 ? 0 : -4;
+    if (kind == RK_ABS64 || kind == RK_ABS32)
+        return 0;
+    return target_get() == TARGET_X86_64 ? -4 : 0;
 }
 
 void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
@@ -111,17 +240,18 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     struct site *site = xcalloc((size_t)(nsite ? nsite : 1), sizeof *site);
     for (int i = 0; i < next; i++) {
         site[ns].off = ext[i].patch_off;
-        site[ns].name = ext[i].callee ? ext[i].callee->name : "?";
-        site[ns++].kind = 0;
+        site[ns].name = ext[i].callee ? asym(ext[i].callee->name) : "?";
+        site[ns++].kind = ext[i].tail ? RK_TAIL : RK_CALL;
     }
     for (int i = 0; i < nfs; i++) {
         site[ns].off = fs[i].patch_off;
-        site[ns].name = fs[i].target ? fs[i].target->name : "?";
+        site[ns].name = fs[i].target ? asym(fs[i].target->name) : "?";
+        site[ns].addend = fs[i].kind == RK_ABS64 ? fs[i].addend : 0;
         site[ns++].kind = fs[i].kind;
     }
     for (int i = 0; i < ngs; i++) {
         site[ns].off = gs[i].patch_off;
-        site[ns].name = gs[i].glob ? gs[i].glob->name : "?";
+        site[ns].name = gs[i].glob ? asym(gs[i].glob->name) : "?";
         site[ns++].kind = gs[i].kind;
     }
     for (int i = 0; i < nstrs; i++) {
@@ -133,14 +263,47 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     qsort(site, (size_t)ns, sizeof *site, site_cmp);
 
     ob_fmt(b, "\t.file\t\"%s\"\n", srcname);
+    /* ARMv7-M is Thumb-only, and an assembler defaults to ARM state.
+     * Without these the bytes are placed correctly and every symbol is
+     * marked ARM, so a caller interworks into the wrong instruction
+     * set. `.syntax unified` because the pre-UAL syntax is still the
+     * default in some assemblers. */
+    if (target_get() == TARGET_THUMB)
+        ob_str(b, "\t.syntax unified\n\t.thumb\n");
     ob_str(b, "\t.text\n");
-    long prev_end = 0;            /* where the previous function's code ended */
+    long prev_end = 0;
+    /* The most recent auipc's local label, for the addi that pairs with
+     * it, and a counter so the labels are unique within the unit. */
+    char hi_label[32] = "";
+    int pcrel_n = 0;            /* where the previous function's code ended */
 
+    /* A function with a section attribute is in that section, after
+     * .text's (the driver lays them out last, grouped): the padding before
+     * the first one stays in .text, as in the object, and padding between
+     * two groups is in neither. */
+    const char *cursec = NULL;            /* NULL: .text */
     for (int i = 0; i < iu->nfuncs; i++) {
         struct ir_func *f = &iu->funcs[i];
         if (!f->src || f->src->code_len <= 0)
             continue;
         long lo = f->src->code_off, hi = lo + f->src->code_len;
+        const char *sec = f->src->section;
+        if (sec != cursec && (!sec || !cursec || strcmp(sec, cursec))) {
+            if (!cursec && lo > prev_end) {    /* .text's tail padding */
+                ob_str(b, "\t.byte\t");
+                for (long k = prev_end; k < lo; k++)
+                    ob_fmt(b, "%s0x%02x", k > prev_end ? "," : "",
+                           (unsigned)text[k]);
+                ob_str(b, "\n");
+            }
+            prev_end = lo;
+            if (sec)
+                ob_fmt(b, "\n\t.section\t%s,\"ax\",%sprogbits\n",
+                       asym(sec), type_sigil());
+            else
+                ob_str(b, "\n\t.text\n");
+            cursec = sec;
+        }
         ob_str(b, "\n");
         /* codegen aligns each function to 16 (code_align in codegen.c), and
          * the padding lies BETWEEN functions, so the instruction loop below
@@ -156,18 +319,57 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             ob_str(b, "\n");
         }
         if (!f->is_static)
-            ob_fmt(b, "\t.globl\t%s\n", f->name);
-        ob_fmt(b, "\t.type\t%s, @function\n%s:\n", f->name, f->name);
+            ob_fmt(b, "\t.%s\t%s\n", f->src->is_weak ? "weak" : "globl",
+                   asym(f->name));
+        if (target_get() == TARGET_THUMB)
+            ob_fmt(b, "\t.thumb_func\n");
+        ob_fmt(b, "\t.type\t%s, %sfunction\n%s:\n", asym(f->name),
+               type_sigil(), asym(f->name));
 
         long pc = lo;
         while (pc < hi) {
             char dis[256];
-            int len = embdbg_decode_one(text + pc, (int)(hi - pc),
+            /* The target's own length rule first. It is exact on every
+             * fixed-width machine and costs no disassembler; only
+             * x86-64 returns 0 ("decode it to find out"), and only
+             * x86-64 has a disassembler here to do that. Asking the
+             * x86-64 decoder on a RISC-V stream -- which is what this
+             * did -- mis-groups the bytes AND annotates them with the
+             * wrong mnemonics. */
+            int have_dis = 0;
+            int len = target_insn_len((const unsigned char *)text + pc,
+                                      (int)(hi - pc));
+            if (len < 1) {
+                len = embdbg_decode_one(text + pc, (int)(hi - pc),
                                         (unsigned long)pc, dis);
+                have_dis = target_get() == TARGET_X86_64 && len >= 1;
+            }
             if (len < 1)
                 len = 1;
+            /* An absolute address in .text -- a jump table's entry -- is
+             * data: eight bytes of their own, and what came before it
+             * stops where it starts, so no decode of the bytes around a
+             * table can swallow one of its relocations. */
+            for (int k = 0; k < ns; k++)
+                if (site[k].kind == RK_ABS64 && site[k].off >= pc &&
+                    site[k].off < pc + len) {
+                    len = site[k].off == pc ? 8 : (int)(site[k].off - pc);
+                    have_dis = 0;
+                    break;
+                }
             const struct site *st = site_in(site, ns, (int)pc,
                                             (int)(pc + len));
+            /* RISC-V splits an address across auipc + addi, and the LOW
+             * half's relocation names the auipc's ADDRESS rather than
+             * the symbol -- that is how the psABI lets the linker find
+             * the displacement the high half rounded. An assembler
+             * spells it with a local label on the auipc, so that is
+             * what is emitted here. The pair is always adjacent (the
+             * object writer relies on the same fact: patch_off - 4). */
+            if (st && st->kind == RK_RISCV_PCREL_HI20) {
+                snprintf(hi_label, sizeof hi_label, ".Lpcrel_hi%d", pcrel_n++);
+                ob_fmt(b, "%s:\n", hi_label);
+            }
             /* An instruction that names nothing is emitted as its BYTES,
              * with the disassembly as a comment.
              *
@@ -186,7 +388,13 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             for (int k = 0; k < len; k++)
                 ob_fmt(b, "%s0x%02x", k ? "," : "",
                        (unsigned)text[pc + k]);
-            ob_fmt(b, "\t# %s\n", dis);
+            /* The comment is a convenience and must never be a guess:
+             * printed only where a disassembler for THIS target
+             * produced it. */
+            if (have_dis)
+                ob_fmt(b, "\t# %s\n", dis);
+            else
+                ob_str(b, "\n");
             /* A relocation is attached explicitly rather than spelled into
              * the instruction. Written symbolically, an assembler that can
              * SEE the target resolves it itself -- `lea add(%rip)` becomes a
@@ -196,28 +404,68 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             if (st) {
                 char sym[160];
                 if (st->name)
-                    snprintf(sym, sizeof sym, "%s", st->name);
+                    snprintf(sym, sizeof sym, "%s", st->name);   /* the site table holds asym() names */
                 else
                     str_label(sym, sizeof sym, iu, st->str_off);
                 const char *rt = reloc_name(st->kind);
+                if (st->kind == RK_RISCV_PCREL_LO12_I) {
+                    if (!*hi_label)
+                        diag_fatal(srcname, 0,
+                                   "-S: a RISC-V PCREL_LO12 relocation with "
+                                   "no PCREL_HI20 before it; the two halves "
+                                   "of an address must be emitted as a pair");
+                    snprintf(sym, sizeof sym, "%s", hi_label);
+                }
+                /* Refuse rather than emit a relocation that assembles
+                 * into a different program (THE RULE). The one kind
+                 * that lands here is RISC-V's paired low half, whose
+                 * .reloc operand is the address of the auipc it pairs
+                 * with and not the symbol -- emitting the symbol would
+                 * assemble cleanly and compute the wrong address. */
+                if (!rt)
+                    diag_fatal(srcname, 0,
+                               "-S cannot yet spell one of this unit's "
+                               "relocations for %s (kind %d); the object "
+                               "(-c) is correct, and emitting assembly "
+                               "that is not the object would be worse "
+                               "than refusing",
+                               target_triple_now(), st->kind);
                 long field = (long)st->off - pc;   /* within the instruction */
                 long tail = len - field - (st->kind == RK_ABS64 ? 8 : 4);
                 ob_fmt(b, "\t.reloc\t.-%ld, %s, %s%+ld\n",
-                       len - field, rt, sym, addend_for(st->kind));
+                       len - field, rt, sym,
+                       st->kind == RK_RISCV_PCREL_LO12_I
+                           ? 0L : addend_for(st->kind) + st->addend);
                 (void)tail;
             }
             pc += len;
         }
-        ob_fmt(b, "\t.size\t%s, .-%s\n", f->name, f->name);
+        ob_fmt(b, "\t.size\t%s, .-%s\n", asym(f->name), asym(f->name));
         prev_end = hi;
     }
-    /* .text may end with padding too. */
+    /* .text may end with padding too, and the file-scope asm after it --
+     * in .text, whatever section the last function was in. */
+    if (cursec)
+        ob_str(b, "\n\t.text\n");
     if (textlen > prev_end) {
         ob_str(b, "\t.byte\t");
         for (long k = prev_end; k < textlen; k++)
             ob_fmt(b, "%s0x%02x", k > prev_end ? "," : "",
                    (unsigned)text[k]);
         ob_str(b, "\n");
+    }
+    /* An alias is its target's address under another name; on Thumb
+     * .thumb_set, so the symbol keeps the bit that says Thumb code. */
+    for (struct func *f = u->funcs; f; f = f->next) {
+        if (f->absorbed || !f->alias_of)
+            continue;
+        if (!f->is_static)
+            ob_fmt(b, "\t.%s\t%s\n", f->is_weak ? "weak" : "globl",
+                   asym(f->name));
+        ob_fmt(b, "\t.type\t%s, %sfunction\n", asym(f->name), type_sigil());
+        ob_fmt(b, "\t.%s\t%s, %s\n",
+               target_get() == TARGET_THUMB ? "thumb_set" : "set",
+               asym(f->name), asym(f->alias_of));
     }
 
     /* .rodata: the string literals, each under the label the code refers
@@ -241,23 +489,29 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->defined || g->is_extern)
             continue;
-        int sz = g->ty ? ty_size(g->ty) : 0;
+        int sz = global_size(g);
         int al = g->ty ? ty_align(g->ty) : 1;
         if (!sz)
             continue;
         if (!any_data) { ob_str(b, "\n"); any_data = 1; }
         if (!g->is_static)
-            ob_fmt(b, "\t.globl\t%s\n", g->name);
+            ob_fmt(b, "\t.%s\t%s\n", g->is_weak ? "weak" : "globl",
+                   asym(g->name));
+        /* a const object is read-only data, as in the object (main.c) */
+        const char *sec = g->in_rodata ? "\t.section\t.rodata\n" : "\t.data\n";
         if (g->init_bytes && g->init_len > 0) {
-            ob_str(b, "\t.data\n");
-            ob_fmt(b, "\t.align\t%d\n\t.type\t%s, @object\n%s:\n",
-                   al, g->name, g->name);
+            ob_str(b, sec);
+            /* .balign: a BYTE count everywhere. `.align N` is N bytes on
+             * x86 and 2^N on ARM, aarch64 and RISC-V, so an 8-aligned
+             * object reassembled 256-aligned there. */
+            ob_fmt(b, "\t.balign\t%d\n\t.type\t%s, %sobject\n%s:\n",
+                   al, asym(g->name), type_sigil(), asym(g->name));
             /* A pointer slot in an initializer is an ADDRESS the linker
              * fills in, not bytes: `static char *p = "hi";` holds a
              * relocation, and emitting its zeroed bytes would produce a
              * null pointer that links and then crashes. The byte runs
              * between relocations are emitted as bytes; each relocated
-             * slot becomes a `.quad symbol + addend`. */
+             * slot becomes a pointer-wide `symbol + addend` (ptr_slot). */
             int k = 0;
             while (k < sz) {
                 const struct greloc *r = NULL;
@@ -268,16 +522,13 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                     if (r->str)
                         str_label(sym, sizeof sym, iu, r->str_off);
                     else if (r->gtarget)
-                        snprintf(sym, sizeof sym, "%s", r->gtarget->name);
+                        snprintf(sym, sizeof sym, "%s", asym(r->gtarget->name));
                     else if (r->ftarget)
-                        snprintf(sym, sizeof sym, "%s", r->ftarget->name);
+                        snprintf(sym, sizeof sym, "%s", asym(r->ftarget->name));
                     else
                         snprintf(sym, sizeof sym, "0");
-                    ob_fmt(b, "\t.quad\t%s", sym);
-                    if (r->addend)
-                        ob_fmt(b, "%+ld", r->addend);
-                    ob_str(b, "\n");
-                    k += 8;
+                    ptr_slot(b, sym, r->addend, r->ftarget != NULL);
+                    k += target_ptr_size();
                     continue;
                 }
                 /* bytes up to the next relocation */
@@ -294,10 +545,12 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 k = stop;
             }
         } else {
-            ob_fmt(b, "\t.bss\n\t.align\t%d\n\t.type\t%s, @object\n%s:\n"
-                      "\t.zero\t%d\n", al, g->name, g->name, sz);
+            ob_fmt(b, "%s\t.balign\t%d\n\t.type\t%s, %sobject\n%s:\n"
+                      "\t.zero\t%d\n",
+                   g->in_rodata ? "\t.section\t.rodata\n" : "\t.bss\n",
+                   al, asym(g->name), type_sigil(), asym(g->name), sz);
         }
-        ob_fmt(b, "\t.size\t%s, %d\n", g->name, sz);
+        ob_fmt(b, "\t.size\t%s, %d\n", asym(g->name), sz);
     }
 
     /* __attribute__((constructor)) / ((destructor)). The object writer
@@ -320,11 +573,12 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             if (!(pass == 0 ? f->is_ctor : f->is_dtor))
                 continue;
             if (!any) {
-                ob_fmt(b, "\n\t.section\t%s,\"aw\",@%s\n\t.align\t8\n",
-                       arr[pass], arr[pass] + 1);
+                ob_fmt(b, "\n\t.section\t%s,\"aw\",%s%s\n\t.balign\t%d\n",
+                       arr[pass], type_sigil(), arr[pass] + 1,
+                       target_ptr_size());
                 any = 1;
             }
-            ob_fmt(b, "\t.quad\t%s\n", f->name);
+            ptr_slot(b, asym(f->name), 0, 1);
         }
     }
 }

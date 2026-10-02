@@ -9,6 +9,66 @@
 #include "../driver/util.h"
 #include "../arch/target.h"
 
+/* An identifier may hold the characters C11 Annex D lists, written in
+ * UTF-8 as gcc and clang read them: `int café;`. Returns the length of
+ * the UTF-8 sequence at p when it encodes one of them -- and, for an
+ * identifier's first character, not one D.2 rules out there (combining
+ * marks) -- else 0. A malformed or overlong sequence is never one. */
+int lex_ident_utf8(const char *p, int first)
+{
+    static const unsigned long allowed[][2] = {
+        { 0x00A8, 0x00A8 }, { 0x00AA, 0x00AA }, { 0x00AD, 0x00AD },
+        { 0x00AF, 0x00AF }, { 0x00B2, 0x00B5 }, { 0x00B7, 0x00BA },
+        { 0x00BC, 0x00BE }, { 0x00C0, 0x00D6 }, { 0x00D8, 0x00F6 },
+        { 0x00F8, 0x00FF }, { 0x0100, 0x167F }, { 0x1681, 0x180D },
+        { 0x180F, 0x1FFF }, { 0x200B, 0x200D }, { 0x202A, 0x202E },
+        { 0x203F, 0x2040 }, { 0x2054, 0x2054 }, { 0x2060, 0x206F },
+        { 0x2070, 0x218F }, { 0x2460, 0x24FF }, { 0x2776, 0x2793 },
+        { 0x2C00, 0x2DFF }, { 0x2E80, 0x2FFF }, { 0x3004, 0x3007 },
+        { 0x3021, 0x302F }, { 0x3031, 0x303F }, { 0x3040, 0xD7FF },
+        { 0xF900, 0xFD3D }, { 0xFD40, 0xFDCF }, { 0xFDF0, 0xFE44 },
+        { 0xFE47, 0xFFFD },
+    };
+    static const unsigned long not_first[][2] = {
+        { 0x0300, 0x036F }, { 0x1DC0, 0x1DFF }, { 0x20D0, 0x20FF },
+        { 0xFE20, 0xFE2F },
+    };
+    const unsigned char *s = (const unsigned char *)p;
+    unsigned long c;
+    int n;
+    if (s[0] < 0xC2)                  /* ASCII, a continuation, overlong */
+        return 0;
+    if (s[0] < 0xE0) {
+        n = 2;
+        c = s[0] & 0x1F;
+    } else if (s[0] < 0xF0) {
+        n = 3;
+        c = s[0] & 0x0F;
+    } else if (s[0] < 0xF5) {
+        n = 4;
+        c = s[0] & 0x07;
+    } else {
+        return 0;
+    }
+    for (int i = 1; i < n; i++) {
+        if ((s[i] & 0xC0) != 0x80)
+            return 0;
+        c = c << 6 | (s[i] & 0x3F);
+    }
+    if ((n == 3 && c < 0x800) || (n == 4 && (c < 0x10000 || c > 0x10FFFF)))
+        return 0;
+    int ok = 0;
+    if (c >= 0x10000)                 /* planes 1-14, less their last two */
+        ok = c <= 0xEFFFD && (c & 0xFFFF) <= 0xFFFD;
+    for (size_t i = 0; !ok && i < sizeof allowed / sizeof allowed[0]; i++)
+        ok = c >= allowed[i][0] && c <= allowed[i][1];
+    for (size_t i = 0; ok && first && i < sizeof not_first / sizeof not_first[0];
+         i++)
+        if (c >= not_first[i][0] && c <= not_first[i][1])
+            ok = 0;
+    return ok ? n : 0;
+}
+
 void lex_init(struct lexer *lx, const char *file, const char *src)
 {
     lex_init_mode(lx, file, src, 0);
@@ -109,6 +169,18 @@ static const struct {
     { "__int128", TOK_KW_INT128 },
     { "float", TOK_KW_FLOAT },
     { "double", TOK_KW_DOUBLE },
+    /* C23's interchange float types. _Float32 and _Float64 ARE float and
+     * double on every target here -- both are IEEE binary32/binary64 --
+     * so they lex to the same keyword and need nothing else. The two
+     * that are not an existing type get their own tokens, because
+     * whether they exist is a question about the TARGET and has to be
+     * asked where the target is known. */
+    { "_Float32", TOK_KW_FLOAT },
+    { "_Float64", TOK_KW_DOUBLE },
+    { "_Float128", TOK_KW_FLOAT128 },
+    { "__float128", TOK_KW_FLOAT128 },
+    { "_Float16", TOK_KW_FLOAT16 },
+    { "__fp16", TOK_KW_FLOAT16 },
     { "_Bool", TOK_KW_BOOL },
     { "_Complex", TOK_KW_COMPLEX },
     { "__complex__", TOK_KW_COMPLEX },
@@ -118,6 +190,13 @@ static const struct {
     { "__imag__", TOK_KW_IMAG },
     { "__imag", TOK_KW_IMAG },
     { "_Static_assert", TOK_KW_STATIC_ASSERT },
+    /* C23 spells four C11 keywords plainly, and gcc 15 compiles C23 by
+     * default; a header's macros of these names are expanded first.
+     * (C++ has its own, below.) */
+    { "static_assert", TOK_KW_STATIC_ASSERT },
+    { "alignof", TOK_KW_ALIGNOF },
+    { "alignas", TOK_KW_ALIGNAS },
+    { "thread_local", TOK_KW_THREAD },
     { "_Generic", TOK_KW_GENERIC },
     { "_Alignof", TOK_KW_ALIGNOF },
     { "__alignof__", TOK_KW_ALIGNOF },
@@ -129,6 +208,17 @@ static const struct {
     { "__thread", TOK_KW_THREAD },
     { "_Thread_local", TOK_KW_THREAD },
     { "typeof", TOK_KW_TYPEOF },
+    /* __auto_type: "the type of my initializer". The parser
+     * handles it where a local declaration starts; it is a
+     * keyword so an ordinary variable of that name cannot
+     * shadow it. */
+    { "__auto_type", TOK_KW_AUTOTYPE },
+    /* C23 spells the same thing `typeof_unqual`, minus the
+     * qualifiers; the parser strips them. */
+    { "typeof_unqual", TOK_KW_TYPEOF_UNQUAL },
+    /* C23's null pointer constant. A keyword so it cannot be shadowed
+     * by a variable of that name, which is what the standard says. */
+    { "nullptr", TOK_KW_NULLPTR },
     { "__typeof__", TOK_KW_TYPEOF },
     { "__typeof", TOK_KW_TYPEOF },
     { "_Atomic", TOK_KW_ATOMIC },
@@ -364,8 +454,8 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
                     "range for a character constant; truncated, as gcc "
                     "does\n", file, line);
         unsigned long b = c.v & 0xFF;
-        if (target_get() == TARGET_AARCH64)
-            return (long)b;                        /* char is unsigned */
+        if (target_char_unsigned())
+            return (long)b;
         return b > 0x7F ? (long)b - 0x100 : (long)b;
     }
     if (pfx == 'u') {
@@ -381,14 +471,67 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
         fprintf(stderr, "embcc: %s:%d: warning: escape sequence out of range "
                 "for a 32-bit character; truncated, as gcc does\n", file, line);
     unsigned long v = c.v & 0xFFFFFFFFUL;
-    if (pfx == 'U' || target_get() == TARGET_AARCH64) {
-        *uns = 1;                    /* char32_t, or aarch64's unsigned wchar_t */
+    if (pfx == 'U' || target_wchar_unsigned()) {
+        *uns = 1;                    /* char32_t, or an unsigned wchar_t */
         return (long)v;
     }
     return v > 0x7FFFFFFFUL ? (long)v - 0x100000000L : (long)v;  /* int wchar_t */
 }
 
+/* The type of an integer constant: C11 6.4.4.1p5, exactly, with the TARGET's
+ * widths.
+ *
+ * A constant takes the FIRST type in its list that can represent its value.
+ * The list starts at the rank its suffix names (none: int, L: long, LL: long
+ * long) and climbs; a DECIMAL constant without U tries only the signed types,
+ * one written in hex, octal or binary may take the unsigned type at each rank
+ * as well, and a U constant only the unsigned ones.
+ *
+ * This replaces three copies of an approximation, each of which typed a
+ * constant with the HOST's INT_MAX and LONG_MAX and a literal 0xffffffff and
+ * then patched ILP32's long afterwards. It was wrong three ways:
+ *
+ *   `4294967295U` and `0xffffffffU` became unsigned LONG -- "long if it
+ *   exceeds INT_MAX" was applied even with a U, where unsigned int holds it.
+ *   On x86-64 `0xffffffffU + 1` folded to 4294967296 where C says 0.
+ *   On AVR, where int is SIXTEEN bits, 32768, 40000, 0x10000 and 65536U were
+ *   all typed `int`: sizeof(40000) was 2.
+ *   Nothing checked any of it against a reference.
+ *
+ * tests/golden/int-literals.sh now does, for every target. */
+static void num_classify(struct token *t, unsigned long v, int has_u,
+                         int has_l, int decimal)
+{
+    int ib = 8 * target_int_size(), lb = 8 * target_long_size();
+    int rank = t->num_llong ? 2 : has_l ? 1 : 0;
+
+    for (; rank <= 2; rank++) {
+        int bits = rank == 0 ? ib : rank == 1 ? lb : 64;
+        unsigned long smax = bits >= 64 ? (unsigned long)LLONG_MAX
+                                        : (1UL << (bits - 1)) - 1;
+        unsigned long umax = bits >= 64 ? ~0UL : (1UL << bits) - 1;
+        if (!has_u && v <= smax) {
+            t->num_uns = 0;
+            break;
+        }
+        if ((has_u || !decimal) && v <= umax) {
+            t->num_uns = 1;
+            break;
+        }
+    }
+    if (rank > 2) {
+        /* No type holds it: a decimal constant above LLONG_MAX with no U.
+         * GCC and clang make it unsigned long long, with a warning; so does
+         * this, and the caller has said so where it applies. */
+        rank = 2;
+        t->num_uns = 1;
+    }
+    t->num_long = rank >= 1;
+    t->num_llong = rank == 2;
+}
+
 /* A standard integer or floating suffix (C++)? */
+
 static int std_suffix(const char *s, int is_float)
 {
     if (!*s)
@@ -415,6 +558,19 @@ static int std_suffix(const char *s, int is_float)
 /* C++ numbers (lex_next's): 1 if lexed here — one with a separator, a
  * binary one, or one with a user-defined suffix; 0 leaves the plain C
  * forms to the C paths. */
+/* Does the number at p use C23's digit separator, 1'000'000? (It is
+ * read by cxx_number, which C++ has needed for C++14's.) */
+static int has_digit_separator(const char *p)
+{
+    while (isalnum((unsigned char)*p) || *p == '_' || *p == '.' ||
+           (*p == '\'' && (isalnum((unsigned char)p[1]) || p[1] == '_'))) {
+        if (*p == '\'')
+            return 1;
+        p++;
+    }
+    return 0;
+}
+
 static int cxx_number(struct lexer *lx, struct token *t)
 {
     const char *p = lx->p, *q = p;
@@ -522,16 +678,7 @@ static int cxx_number(struct lexer *lx, struct token *t)
             }
         t->kind = TOK_NUM;
         t->num = (long)v;
-        t->num_long = has_l || v > (unsigned long)INT_MAX;
-        t->num_uns = has_u;
-        if ((hex || bin) && !has_u) {
-            if (v > (unsigned long)INT_MAX && v <= 0xffffffffUL) {
-                t->num_uns = 1;
-                t->num_long = has_l;
-            } else if (v > (unsigned long)LONG_MAX) {
-                t->num_uns = 1;
-            }
-        }
+        num_classify(t, v, has_u, has_l, digits[0] != '0');
     }
     free(buf);
     lx->p = q;
@@ -605,10 +752,16 @@ void lex_next(struct lexer *lx)
     /* C++: a pp-number with digit separators (1'000) or a user-defined
      * suffix (5_km, 1.5_m, 10ms), and binary literals: read from a
      * cleaned copy, the suffix kept apart. */
-    if (lx->cxx && (isdigit((unsigned char)*lx->p) ||
-                    (*lx->p == '.' && isdigit((unsigned char)lx->p[1])))) {
-        if (cxx_number(lx, t))
+    if ((lx->cxx || has_digit_separator(lx->p)) &&
+        (isdigit((unsigned char)*lx->p) ||
+         (*lx->p == '.' && isdigit((unsigned char)lx->p[1])))) {
+        if (cxx_number(lx, t)) {
+            /* C23 has the separator; C has no user-defined suffix */
+            if (!lx->cxx && t->ud_suffix)
+                diag_fatal(lx->file, lx->line, "invalid suffix '%s' on a "
+                           "number", t->ud_suffix);
             return;
+        }
     }
     if (*lx->p == '0' && (lx->p[1] == 'b' || lx->p[1] == 'B') &&
         (lx->p[2] == '0' || lx->p[2] == '1')) {
@@ -633,12 +786,7 @@ void lex_next(struct lexer *lx)
             diag_fatal(lx->file, lx->line, "malformed binary constant");
         t->kind = TOK_NUM;
         t->num = (long)v;
-        t->num_long = has_l || v > (unsigned long)INT_MAX;
-        t->num_uns = has_u || (v > (unsigned long)INT_MAX &&
-                               v <= 0xffffffffUL && !has_l) ||
-                     v > (unsigned long)LONG_MAX;
-        if (!has_l && v > (unsigned long)INT_MAX && v <= 0xffffffffUL)
-            t->num_long = 0;
+        num_classify(t, v, has_u, has_l, 0);   /* binary: never decimal */
         lx->p = q;
         return;
     }
@@ -735,29 +883,30 @@ void lex_next(struct lexer *lx)
                        "malformed integer constant");
         t->kind = TOK_NUM;
         t->num = (long)v;
-        /* C99 typing: decimal grows int -> long; hex additionally
-         * passes through the unsigned types. Suffixes force it. */
-        t->num_long = has_l || v > (unsigned long)INT_MAX;
-        t->num_uns = has_u;
-        if (hex && !has_u) {
-            if (v > (unsigned long)INT_MAX && v <= 0xffffffffUL) {
-                t->num_uns = 1;
-                t->num_long = has_l;
-            } else if (v > (unsigned long)LONG_MAX) {
-                t->num_uns = 1;
-            }
-        }
-        if (!hex && !has_u && !has_l && v > (unsigned long)LONG_MAX)
+        (void)hex;
+        /* A decimal constant with no U above LLONG_MAX fits no type C
+         * names. That was, and is, an error here, rather than the unsigned
+         * long long GCC falls back to with a warning. */
+        if (lx->p[0] != '0' && !has_u && v > (unsigned long)LLONG_MAX)
             diag_fatal(lx->file, lx->line,
-                       "integer constant out of range for long");
+                       "integer constant out of range for long long");
+        num_classify(t, v, has_u, has_l, lx->p[0] != '0');
         lx->p = end;
         return;
     }
 
-    if (isalpha((unsigned char)*lx->p) || *lx->p == '_') {
+    if (isalpha((unsigned char)*lx->p) || *lx->p == '_' ||
+        lex_ident_utf8(lx->p, 1)) {
         const char *start = lx->p;
-        while (isalnum((unsigned char)*lx->p) || *lx->p == '_')
-            lx->p++;
+        for (;;) {
+            int u8;
+            if (isalnum((unsigned char)*lx->p) || *lx->p == '_')
+                lx->p++;
+            else if ((u8 = lex_ident_utf8(lx->p, 0)) > 0)
+                lx->p += u8;
+            else
+                break;
+        }
         size_t n = (size_t)(lx->p - start);
         if (lx->cxx)
             for (size_t i = 0; i < sizeof cxx_keywords / sizeof cxx_keywords[0];
@@ -771,8 +920,12 @@ void lex_next(struct lexer *lx)
                 }
         for (size_t i = 0; i < sizeof keywords / sizeof keywords[0]; i++) {
             if (lx->cxx && (strcmp(keywords[i].word, "restrict") == 0 ||
-                            strcmp(keywords[i].word, "typeof") == 0))
-                continue;        /* identifiers in C++ */
+                            strcmp(keywords[i].word, "typeof") == 0 ||
+                            strcmp(keywords[i].word, "static_assert") == 0 ||
+                            strcmp(keywords[i].word, "alignof") == 0 ||
+                            strcmp(keywords[i].word, "alignas") == 0 ||
+                            strcmp(keywords[i].word, "thread_local") == 0))
+                continue;        /* identifiers in C++, or its own */
             if (strlen(keywords[i].word) == n &&
                 memcmp(keywords[i].word, start, n) == 0) {
                 t->kind = keywords[i].kind;
@@ -984,6 +1137,11 @@ void lex_next(struct lexer *lx)
         }
         break;
     default:
+        if ((unsigned char)*lx->p >= 0x80)
+            diag_fatal(lx->file, lx->line,
+                       "byte 0x%02x is not part of a character C allows "
+                       "here (identifiers take UTF-8 letters, C11 "
+                       "Annex D)", (unsigned char)*lx->p);
         diag_fatal(lx->file, lx->line,
                    "character '%c' is not supported yet", *lx->p);
     }

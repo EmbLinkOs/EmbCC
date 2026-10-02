@@ -1,0 +1,960 @@
+# What EmbCC still lacks, measured against GCC and Clang
+
+**Audit date:** 2026-09-26. **Method:** GCC trunk (`gcc-mirror/gcc`) and
+`llvm/llvm-project` were cloned locally and their own tables read — GCC's
+`gcc/common.opt` and `gcc/c-family/c.opt` (1129 front-end options),
+Clang's `clang/include/clang/Options/Options.td`, `Builtins.td`,
+`Attr.td`, and LLVM's `PassBuilderPipelines.cpp`. Every claim below was
+then **probed against the built `./embcc`**, not inferred from reading
+EmbCC's source. Where a probe contradicted a reading of the code, the
+probe won; two of the findings in the first draft were wrong that way
+and are corrected here.
+
+This file complements `todo.md`, which is a corpus audit (does real C
+compile at all). This one asks a different question: where does EmbCC
+sit against the two compilers it will be compared to.
+
+---
+
+## The headline: the gap is not code quality
+
+Measured on this tree's own real sources — `lib/libc` and `lib/rt`, 69
+files that both compilers accept:
+
+| | `.text` bytes, `-O2` |
+|---|---|
+| EmbCC | 134,858 |
+| Clang | 96,407 |
+| **ratio** | **1.39× Clang** |
+
+On `tests/exec/*.c` the same measurement says 7.58×, and that number is
+worthless: those are toy programs whose `main` Clang constant-folds to a
+single `return`. **Measure on real code.** 1.39× is the honest figure,
+and for a from-scratch compiler it is a good one.
+
+EmbCC also has more optimizer than its reputation here suggests: a real
+inliner with budgets (`INLINE_MAX_CALLEE` 24, `INLINE_SOLE_CALLEE` 200),
+sixteen toggleable passes — `mem2reg gcse load-cse sccp licm vectorize
+inline dse div-magic if-convert cfg-clean tail-recursion idiom sroa
+unroll pre` — plus always-on fold, LVN, copy propagation, DCE,
+reassociation, loop rotation, IV strength reduction, store forwarding
+and immediate folding. A probe of `static inline` through two levels
+inlines completely and leaves five instructions with no calls, which is
+what Clang does with the same input.
+
+The C++ front end is likewise further along than a "from scratch"
+compiler suggests. Probed working: lambdas (including generic),
+`constexpr`/`consteval`, concepts, coroutines, `<ranges>`, structured
+bindings, `if constexpr`, fold expressions, `operator<=>`, exceptions,
+RTTI and `dynamic_cast`.
+
+**So the gap is elsewhere: in the driver surface, in the preprocessor
+features that headers depend on, and in whole subsystems that were never
+started.** Those are below, in priority order.
+
+---
+
+## Tier 0 — EmbCC cannot be dropped into an existing build
+
+This is the highest-leverage tier by a wide margin. Every item is small
+on its own; together they are the difference between "a compiler" and "a
+compiler you can point at someone else's Makefile".
+
+### ~~The `__has_*` family does not exist~~ — FIXED, and the cause was one line
+
+*Landed. Kept here because the shape of the bug is worth remembering.*
+
+The whole mechanism existed and was gated on one line in
+`src/cpp/cpp.c`: `if (!predef_is_cxx()) return 0;`. It had been built
+for libstdc++ and C never got it. What follows is what C saw.
+
+```c
+#if defined(__has_include) && __has_include(<foo.h>)
+```
+
+is the pattern every portable header written since about 2015 uses, and
+it **fails to compile**: `error: trailing junk in #if expression`.
+`__has_include`, `__has_builtin`, `__has_attribute`, `__has_feature` and
+`__has_c_attribute` are all undefined, so the identifier becomes `0` and
+the preprocessor then chokes on `(<foo.h>)`.
+
+That is worse than the feature merely being absent. An absent feature
+lets the guarded fallback run; this one turns a header that was written
+*defensively* into a compile error. It is the single biggest interop
+blocker found in this audit.
+
+GCC and Clang both special-case these in the `#if` grammar. EmbCC must
+too — the parse has to recognise the call form even when the answer is
+"no".
+
+### `_Pragma` does not exist
+
+`_Pragma("GCC diagnostic ignored ...")` inside a macro is how headers
+suppress warnings at their own definition sites. EmbCC handles `#pragma`
+as a directive (`once`, `pack`, `GCC diagnostic` all work) but not the
+operator form, so any macro that carries a pragma is a syntax error.
+
+### `-include` is documented in `--help` and rejected by the driver
+
+```
+$ ./embcc -include pre.h -fsyntax-only x.c
+embcc: error: unknown argument '-include'
+```
+
+`src/driver/main.c:122` promises `-include FILE  include it before the
+file`. There is no pre-include machinery anywhere in `src/`. A help text
+that names a flag the compiler refuses is the same class of thing THE
+RULE exists to prevent, pointed at the user instead of at codegen. Fix
+it or delete the line.
+
+### Options a real build passes, all rejected
+
+Probed by compiling a translation unit with each flag:
+
+| Group | Rejected |
+|---|---|
+| Freestanding / kernel | `-ffreestanding` `-fno-builtin` `-fno-strict-aliasing` `-fwrapv` `-ftrapv` |
+| Embedded link shaping | `-ffunction-sections` `-fdata-sections` `-fshort-enums` |
+| Char / enum signedness | `-fsigned-char` `-funsigned-char` |
+| Position independence | `-fPIC` `-fpic` `-fpie` `-fPIE` |
+| Link driver | `-shared` `-static` `-nostdlib` `-nostartfiles` `-nodefaultlibs` `-l` `-L` |
+| Preprocessor paths | `-imacros` `-iquote` `-idirafter` `-undef` |
+| Debug | `-gdwarf-4` `-gdwarf-5` `-g3` `-ggdb` `-gsplit-dwarf` |
+| Machine | `-march=` `-mtune=` `-mavx2` `-msse4.2` `-mfpu=` `-mthumb` |
+| Ergonomics | `-v` `-save-temps` `-pipe` `-pedantic` `-ansi` `-pg` |
+
+`-fshort-enums` deserved a line of its own and got the wrong one. The
+first draft said it is "the ARM EABI default, so ARM code is already
+compiling wrong" — **that is false against the reference used here**.
+Clang gives `sizeof(enum) == 4` for `thumbv7m-none-eabi`; it is
+`arm-none-eabi-gcc` that defaults to short enums. So EmbCC agrees with
+clang and differs from GCC, which is a compatibility question and not
+a silent miscompile. It is refused by name now, because enums are
+`int` here and a struct holding one really would be laid out
+differently.
+
+Also: GCC spells it `-print-search-dirs`, EmbCC spells it
+`--print-search-dirs`. Accept both.
+
+### One input file at a time, and no link driver
+
+```
+$ ./embcc -c a.c b.c
+embcc: error: more than one input file (M1: one file at a time)
+$ ./embcc a.c -o prog
+embld: entry symbol '_start' is undefined
+```
+
+`embcc a.c -o prog` does reach `embld`, so the plumbing exists — what is
+missing is default startup objects and libraries for a hosted target,
+plus accepting `.o` inputs and `-l`/`-L`. `cc *.c -o prog`, the most
+common compiler invocation in the world, does not work.
+
+---
+
+## Tier 1 — front-end holes that real code hits
+
+### `typeof` fails on a function parameter
+
+This is the most surprising finding in the audit, because the comment
+above the implementation claims the opposite.
+
+```c
+int x; typeof(x) y;                      /* OK */
+int f(void){int a=1; typeof(a) b=a;}     /* OK */
+int f(int a){typeof(a) b=a;}             /* error: typeof of an unsupported expression */
+int f(int a){typeof(a+1) b=0;}           /* error */
+typeof(f()) y;                           /* error */
+```
+
+The parameter case is the *only* shape that matters, because it is the
+shape `min()`, `max()` and `container_of()` expand into.
+
+**Root cause, located:** `typeof` is resolved in the parser, by
+`ce_type` (`src/parse/parse.c:1215`) reading a shadow symbol table
+`g_fold_locals` (`:1185`) that exists for folding `sizeof(expr)`.
+Function parameters are never pushed into that table — only block-scope
+locals and file-scope globals are — so `fold_var_type` returns NULL and
+the parser reports the expression as unsupported. `ce_type` also handles
+only five expression kinds (var, cast, deref, member, pointer
+arithmetic), which is why `a+1` and `f()` fail even for a local.
+
+Two fixes, in increasing order of correctness:
+
+1. **Contained:** push the parameter names and types into
+   `g_fold_locals` when a function body opens (they are already captured
+   in `ps->fn_pnames`). Fixes the common case; leaves `typeof(a+1)`
+   broken.
+2. **Right:** resolve `typeof` in sema, where real scopes and the real
+   type rules live, rather than in a parse-time approximation of them.
+   The parse-time table is a duplicate of a thing sema already has, and
+   duplicates drift — this gap *is* that drift.
+
+### Builtins that are missing
+
+Present and working (probed): the whole bit-twiddling family
+(`clz`/`ctz`/`popcount`/`parity`/`ffs` and the `ll` variants), `bswap16`/`32`,
+`assume_aligned`, `expect`, `unreachable`, `trap`,
+`alloca`, and — notably solid — **all of the atomics**:
+`__atomic_load_n`, `store_n`, `exchange_n`, `compare_exchange_n`,
+`fetch_add`, `thread_fence`, and the `__sync_*` legacy family.
+
+Missing:
+
+| Builtin | Why it matters |
+|---|---|
+| `__builtin_types_compatible_p` | kernel macro staple, pairs with `_Generic` |
+| `__builtin_choose_expr` | the other half of that pair |
+| `__builtin_object_size` | `_FORTIFY_SOURCE` is built on it |
+| ~~`__builtin_fabs` `copysign` `signbit` `isnan` `isinf` `isfinite` `isnormal` `isinf_sign`~~ | **DONE**, all four targets, four -O levels |
+| `__builtin_fma` | still missing: it is arithmetic, not a bit test, so it needs hardware FMA or a libm call |
+| `__builtin_LINE` `FILE` `FUNCTION` | logging/assert macros |
+| `__builtin_memcmp` `strlen` | already have memcpy/memset/memmove |
+| `__builtin_setjmp` `clear_cache` | |
+| ~~`__builtin_add/sub/mul_overflow`~~ | **DONE** (`2e8c1f6`), branchless, 44 boundary cases against the host |
+| `__builtin_shufflevector` | needs vectors first |
+| `__c11_atomic_*` | `_Atomic` works; Clang's spelling does not |
+
+### `__attribute__` is not parsed on a `typedef`, in either position
+
+```c
+typedef int i __attribute__((aligned(16)));   /* error: expected ';' before '__attribute__' */
+typedef __attribute__((aligned(16))) int i;   /* error: expected a type after 'typedef' */
+
+int g __attribute__((aligned(16)));           /* OK */
+void f(void) __attribute__((noreturn));       /* OK */
+struct s { int a; } __attribute__((packed));  /* OK */
+typedef struct { int a; } __attribute__((packed)) s;  /* OK */
+```
+
+So the attribute grammar covers variables, functions and struct
+definitions but not a typedef NAME. `typedef int i
+__attribute__((aligned(16)))` is an ordinary idiom, and every
+vector-typedef in existence has this shape — which is the real reason the
+`vector_size` probe fails, rather than anything to do with vectors.
+
+This is a contained parser gap and is probably the cheapest item in this
+whole document.
+
+### Attributes: every one now has a decided disposition
+
+**DONE.** Fifteen attributes used to fall through to `-Wattributes`
+("is not one EmbCC knows, and is ignored"). That is the right answer for
+an attribute nobody has heard of. It is the wrong one for `vector_size`
+or `mode`, which change the type: the program then computes something
+else and says so in one line of a build log.
+
+Each now has one of four dispositions, and the table in
+`src/parse/parse.c` states the reason next to the name.
+
+Refused by name, because ignoring them changes results:
+
+| Attribute | What would go wrong |
+|---|---|
+| `vector_size` | the type would stay a scalar |
+| `mode` | the declaration would keep its written width |
+| `transparent_union` | the union would be passed as a union, not as its first member |
+| `target` | the function would be compiled for the wrong instruction set |
+| `weakref` | a missing target would fail to link instead of being null |
+| `ifunc` | calls would go to the resolver, not to what it picks |
+
+Silent no-ops, because what they ask for is already true here or only
+affects a diagnostic EmbCC does not issue: `counted_by`, `access`,
+`copy`, `noclone`, `noipa`, `designated_init`, `assume_aligned`,
+`tls_model`. Warning on each of these would be noise -- a kernel puts
+`cold` on half its functions.
+
+Accepted with the loss named (`ATTR_WARNED`, added for exactly this):
+`error` and `warning`. GCC makes a CALL to such a function a compile
+error unless the optimizer removes the call, so the diagnostic has to
+wait until after optimisation and EmbCC issues its own before then.
+Refusing the attribute would break any header that declares such a
+function without calling it; ignoring it in silence means a
+`BUILD_BUG_ON` written with it passes. So it is accepted, the loss is
+stated once where it is written, and `-Wno-attributes` silences it.
+
+Still refused by name from before: `cleanup`, `naked`, `interrupt`
+(a no-op on ARMv7-M, where an interrupt handler is an ordinary
+function), `ms_abi`, `sysv_abi`.
+
+`vector_size` is the one worth revisiting. EmbCC has vector IR
+(`IR_VLOAD`, `IR_VBIN`, `IR_VSPLAT`, `IR_VREDADD`, `IR_VWIDEN`) but it
+comes from the auto-vectorizer and only the x86-64 backend lowers it, so
+a user-level vector TYPE needs front-end type support plus three more
+backends. That is a feature, not a parser gap.
+
+### Language features absent
+
+| Feature | Status |
+|---|---|
+| nested functions | error |
+| `__label__` | error |
+| `__auto_type` | error |
+| vector extensions | no typedef attribute, and `vector_size` is dropped |
+| `asm goto` | refused by name, with the two missing pieces stated |
+| case ranges `case 1 ... 5:` | error |
+| `__VA_OPT__` | error |
+| `_Float16`, `__float128` | error |
+| **C23:** `constexpr` `auto` `nullptr` `[[attr]]` `enum : type` `typeof_unqual` `#embed` | all error |
+| C++ modules | refused by name |
+
+Working, for the record: computed goto, VLAs, statement expressions,
+`_Complex`, `_Generic`, `__int128`, designated initialisers, compound
+literals, `__thread`, flexible and zero-length arrays, anonymous
+structs.
+
+`asm goto` is worth singling out: the Linux kernel's static-key
+infrastructure is built on it, and EmbCC's stated target is an OS
+kernel. It is now REFUSED BY NAME rather than failing with a confusing
+parse error, and the message says what it needs, because the two missing
+pieces are each a place a silent miscompile would come from:
+
+1. The template BRANCHES to a label whose offset is not known when the
+   statement is assembled. Every backend's inline assembler would have
+   to emit a placeholder and have it patched when the label is placed.
+2. The optimizer's CFG needs an edge from the asm to each listed label.
+   Without them a target label looks unreachable and its code can be
+   deleted, or a value live across the jump can have its register
+   reused.
+
+Accepting the syntax while doing neither is worse than not accepting it.
+
+### The IEEE-754 bit builtins, and why they are one IR op
+
+`fabs`, `copysign`, `signbit` and the `isnan`/`isinf`/`isfinite`/
+`isnormal`/`isinf_sign` family are all the same job -- reading the sign
+and exponent fields of the representation -- and two of them cannot be
+done in floating point at all without getting a corner wrong:
+`x < 0 ? -x : x` returns `-0.0` for `fabs(-0.0)` and leaves a NaN's sign
+set.
+
+GCC and Clang each carry a separate optab entry per builtin per target,
+so adding a predicate is a change in every backend. EmbCC adds ONE op,
+`IR_BITCAST` -- the move between the register files -- and everything
+after it is ordinary integer IR the existing optimizer already folds:
+
+```
+%5 = bitcast.8:8s %0              ; the bits into a general register
+%6 = const.8s 9223372036854775807
+%7 = and.8 %5, %6
+%8 = bitcast.8:8 %7
+```
+
+On the soft-float targets (ARMv7-M, RISC-V) even that op is a plain
+move, because the double was already in a general register. A tenth
+predicate is a change in one function.
+
+The one part not done: a 16-byte `long double`, whose sign bit is in its
+tenth or sixteenth byte, past what a register holds. That is refused by
+name.
+
+---
+
+## Tier 2 — subsystems that do not exist
+
+| Subsystem | GCC/Clang | EmbCC |
+|---|---|---|
+| Warnings | 359 `-W` flags (GCC front end alone) | **12**, and every other `-W…` is silently swallowed |
+| PIC / PIE | yes | none — so no shared libraries, no ASLR |
+| LTO | yes | none |
+| Sanitizers | ASan, UBSan, TSan, MSan | **UBSan, trap mode** (DONE); the rest refused by name |
+| Coverage / PGO | `-fprofile-*`, `-pg`, `--coverage` | none |
+| Architectures | GCC 79 target dirs, LLVM 62 | 5 (34 triple spellings) |
+| `-g` on embedded | yes | **refused on thumb, rv32, rv64** |
+| DWARF | v5, full | v4, 3 sections |
+
+Two deserve expanding.
+
+**UBSan was the one to want first, and it is DONE.** Not ASan — on a
+microcontroller there is no shadow memory to spare. `-fsanitize=undefined`
+now inserts checks that TRAP, which is the only mode there can be here:
+a diagnosing sanitizer calls `__ubsan_handle_*` to print, and a bare
+metal target has nowhere to print to.
+
+What is checked, on all four targets, at every optimisation level:
+
+| Check | Operators |
+|---|---|
+| `signed-integer-overflow` | `+` `-` `*` unary `-` `++` `--` and their compound forms |
+| `integer-divide-by-zero` | `/` `%` — including `INT_MIN / -1`, which faults in hardware on x86-64 |
+| `shift` | `<<` `>>` — count negative, or at least the width |
+
+A failed check runs the target's trap instruction: `ud2` on x86-64,
+`udf #0` on aarch64 and ARMv7-M, `unimp` on RISC-V. Under a debugger
+that is a breakpoint at the offending operation; without one the program
+stops rather than continuing with a wrong value.
+
+Every check is ordinary IR — a comparison and a branch — so it costs
+nothing in the backends and the optimizer settles the ones it can: at
+`-O2` a constant divisor or an in-range constant shift leaves no check
+at all, and `a / 7` comes out as the usual magic-multiply. That is the
+reason to express them as IR rather than as a per-backend pattern.
+
+`address`, `thread`, `memory`, `leak`, `bounds` and `object-size` are
+refused BY NAME rather than dropped from the set, because "I asked for
+address and got nothing" is the failure the whole option-refusal policy
+exists to prevent. `-fsanitize-trap=`, `-fsanitize-undefined-trap-on-error`
+and `-fno-sanitize=` are accepted and mean what they say.
+
+One thing to know: three separate places in irgen lower a C arithmetic
+operator, and converting two of them left signed `+` and `-` unchecked
+while `*` and `/` were checked. Nothing caught that but running the
+cases, which is why `tests/golden/sanitize.sh` lists every operator that
+can overflow rather than a representative few.
+
+Still missing, and worth having next: null-pointer dereference and
+misaligned access, both of which need the check at the load/store rather
+than at an arithmetic operator.
+
+**Eighteen warnings now, and twelve was the number to be uncomfortable about.** EmbCC
+implements `-Wunused-variable/-parameter/-function`, `-Wshadow`,
+`-Wsign-compare`, `-Wuninitialized`, `-Wmaybe-uninitialized`,
+`-Wformat`, `-Wattributes`, `-Wdeprecated-declarations`,
+`-Wunused-result`, `-Wwindows-abi`. Everything else a build passes —
+`-Wstrict-prototypes`, `-Wmissing-prototypes`, `-Wcast-align`,
+`-Wconversion`, `-Wnull-dereference`, `-Warray-bounds`, `-Wswitch` — is
+accepted and does nothing. A project that turns on `-Wall -Wextra
+-Werror` and builds clean under EmbCC has learned almost nothing.
+
+**DWARF detail.** EmbCC emits `.debug_info`, `.debug_abbrev`,
+`.debug_line` and gets structs, members, pointers, variables and
+formal parameters right. Against Clang on the same input it is missing
+`DW_TAG_enumeration_type`, `DW_TAG_enumerator`, `DW_TAG_typedef` and
+`DW_TAG_lexical_block` — so an enum prints as an integer in a debugger,
+a typedef'd type shows its underlying name, and block-scoped locals are
+not scoped.
+
+---
+
+## Tier 3 — silent acceptance, which this project calls a bug
+
+THE RULE says refuse loudly rather than emit wrong. These all accept
+quietly:
+
+- `-O9` — accepted.
+- `-Wcompletely-made-up` — accepted. Any `-W…` is.
+- `-std=c89` with a C99 `for(int i…)` — accepted.
+- `-std=c++98` with a C++11 lambda — **accepted**, and compiled as
+  C++20. `--version` says "EmbCC has one dialect per language", which is
+  a defensible position, but then `-std=` should say so rather than
+  nod.
+- `-include` — documented, rejected.
+
+Each of these is a small lie the compiler tells a build system, and each
+one costs somebody an afternoon eventually.
+
+---
+
+## Suggested order
+
+Ranked by (blocked work) ÷ (effort), not by size of the gap:
+
+1. **`__has_include` / `__has_builtin` / `__has_attribute`** — one
+   change in the `#if` expression parser; unblocks modern headers
+   wholesale.
+1b. **`__attribute__` on a `typedef`** — a few lines of declarator
+   grammar; the cheapest item here.
+2. **`typeof` on parameters** — push `ps->fn_pnames` into
+   `g_fold_locals`; one function, unblocks every kernel macro.
+3. **`_Pragma`** — preprocessor operator, contained.
+4. **The freestanding/embedded option set** — `-ffreestanding`,
+   `-fno-builtin`, `-ffunction-sections`, `-fdata-sections`,
+   `-fshort-enums`, `-fsigned-char`/`-funsigned-char`, `-fwrapv`. Mostly
+   accept-and-honour, a few accept-and-ignore-with-a-reason.
+5. **`-include`, `-imacros`, `-iquote`, `-idirafter`** — and fix the
+   help text either way.
+6. ~~**`-g` on thumb / rv32 / rv64**~~ — **DONE** (`b273078`), and so
+   is the linker half (`801ba98`). The frame base is `sp + 0`, exact
+   because sp does not move for the life of the body, and EmbLD now
+   merges `.debug_*` across objects — which needed no DWARF-aware
+   fixup, because EmbCC's writer expresses every cross-reference as a
+   relocation against a section symbol. **gdb breaks by source line on
+   a QEMU guest, reads the arguments and prints a struct local.**
+7. ~~**`__builtin_types_compatible_p` + `__builtin_choose_expr`**~~ —
+   **DONE** (`b0ee1dc`), with the rest of the GNU C batch.
+8. ~~**Refuse what is not understood**~~ — **DONE** (`51c6f7a`).
+
+9. **Multiple inputs and a real link driver** (`-l`, `-L`, `.o` inputs,
+   default crt).
+10. ~~**`-fsanitize=undefined` with trap-on-error**~~ — **DONE**. The
+    arithmetic checks are in; null deref and misaligned access are not.
+
+Everything after that — PIC/PIE, LTO, PGO, the remaining 347 warnings,
+more architectures — is real but is not what is currently stopping
+anybody.
+
+---
+
+# Part II — structure, optimization, targets, architecture
+
+Part I audited the compiler's SURFACE: what it accepts. That is the
+wrong half to stop at. This part audits how it is BUILT, what it
+actually optimises, and which machines it can really serve.
+
+## The correction Part I needs
+
+Part I reported 1.39× Clang and called it good. That number is at
+`-O2`, and at `-O2` **Clang grows code** — it inlines and unrolls for
+speed. For anything embedded the level that matters is `-Os`, and there
+the picture changes:
+
+| level | EmbCC | Clang | ratio |
+|---|---|---|---|
+| `-O0` | 376,009 | 114,489 | 3.28× |
+| `-O1` | 246,385 | 84,223 | 2.92× |
+| `-O2` | 134,858 | 96,407 | **1.39×** |
+| `-Os` | 134,010 | 63,387 | **2.11×** |
+
+Same 69 real files, x86-64, `.text` bytes. Read the last two rows
+together:
+
+**`-Os` is `-O2` under a different name.** EmbCC goes from 134,858 to
+134,010 — six tenths of one percent. Clang goes from 96,407 to 63,387 —
+thirty-four percent. EmbCC accepts `-Os`, reports it, and does almost
+nothing with it.
+
+For a compiler whose stated audience is firmware on parts measured in
+kilobytes, that is the single most valuable missing thing in this entire
+document. 1.39× was the flattering framing; 2.11× is the honest one.
+
+## Cortex-M4F hard float: what is done, and what the attempt taught
+
+The FPU **computes** single precision (`f4b7ec1`), run on QEMU's
+mps2-an386 and bit-identical to the host at four optimisation levels.
+`double` still goes to the runtime, which is what FPv4-SP-D16 is.
+
+`-mfpu=` and `-mfloat-abi=hard` are still **refused by name**, and that
+is correct: the flags promise an ABI that is not finished, and accepting
+a promise while emitting something else is the failure the whole
+option-refusal policy exists to prevent. The FPU path is reachable only
+through `EMBCC_T_FPU=1`.
+
+### An FP register class needs the data path, for CORRECTNESS
+
+A first attempt (`1ce162c`) was **reverted**: it miscompiled.
+`f2(1.5f, 2.25f)` returned 0 at `-O2`.
+
+With two register classes a float can be PRODUCED by an integer path --
+a call's result arrives in `r0`, and a load is an integer load on this
+target -- and CONSUMED by a floating-point one. The integer side writes
+the value's SLOT; the FP side reads its REGISTER, which nothing wrote.
+
+`cg_float_vregs` marks a float-returning call's result as float, which is
+right on x86-64 where that result really does arrive in `xmm0`. On Thumb
+it arrives in `r0`. So reconciling the two classes in `rd`/`wr` is not an
+optimisation to do later; it is the condition for having a second class
+at all.
+
+The test that missed it called DIRECTLY, so the inliner removed every
+boundary. The bug needs a float to actually cross a call, which
+`tests/golden/thumb-fpu.sh` now forces through volatile function
+pointers.
+
+### Two things the hard-float ABI attempt established
+
+Both were verified and then set aside with the work; neither is guesswork.
+
+**AAPCS-VFP back-fills, and the placement was checked against Clang.**
+The VFP argument registers are sixteen single slots. A float takes the
+lowest free one; a double takes the lowest free ALIGNED PAIR, and when
+that skips a free single the single stays free for a later float:
+
+| signature | placement |
+|---|---|
+| `f(float, double, float)` | `s0`, `d1`, `s1` -- not `s2` |
+| `f(double, float)` | `d0`, `s2` |
+| `f(float, float, double)` | `s0`, `s1`, `d1` |
+| `f(float, double, double, float)` | `s0`, `d1`, `d2`, `s1` |
+
+All four agree with Clang. A sequential allocator puts the second float
+in `s4`, links cleanly against any other toolchain, and reads the wrong
+register.
+
+**VFP parameter homing needs its OWN parallel move.** The core one cannot
+help -- it shuffles r-registers -- but one VFP parameter's home is
+another's source. `float add(float a, float b)` with `a` in `s1` and `b`
+in `s0` emitted `vmov s1, s0` then `vmov s0, s1` and returned `a + a`.
+
+**The runtime helpers follow whichever ABI they were built for.** The
+soft-float runtime is not soft "by nature": libgcc ships per-ABI, and
+`lib/rt/softfp.c` is ordinary C compiled like anything else. Building it
+hard while calling it with core-register arguments is a mismatch inside
+EmbCC's own output -- it made an eight-float call return 163 instead of
+204.
+
+With those three fixed, an EmbCC hard-float caller linked against a
+**Clang** hard-float callee and agreed with the host, which is the
+interoperability the requirements document asks for. The remaining
+failures were in the FP register class underneath it, which is why that
+is the piece to redo first.
+
+## ARM ABI metadata, and who checks it
+
+**DONE.** EmbCC emitted no `.ARM.attributes` at all. That sounds
+harmless and is the opposite: the section is how an object says what it
+was built FOR, and `Tag_ABI_VFP_args` is how a linker refuses to mix an
+object that passes floating point in the core registers with one that
+passes it in `s0-s15`. With no section there is nothing to compare, so
+that link SUCCEEDS and the callee reads its arguments from registers the
+caller never wrote -- a miscompilation produced at link time, past every
+check the compiler makes.
+
+The format was read back off a real object rather than transcribed:
+both length fields count themselves, and either one off by four
+produces a section every reader rejects. One deliberate difference from
+Clang -- `Tag_ABI_VFP_args` is emitted explicitly as 0 rather than
+omitted, so the object states its ABI positively instead of by absence.
+
+**The check lives in EmbCC's own linker**, not in GNU ld. EmbCC does not
+depend on another toolchain to work, so relying on somebody else's
+linker for the safety net is the wrong shape: `embld` reads the
+attributes from every input and refuses the combination itself, for the
+float ABI and for `Tag_ABI_enum_size`. Verified against objects another
+compiler built, because interoperating with one is the entire point.
+
+A stored tag is the real value PLUS ONE, so zero means "the object did
+not say". An object with no attributes section must not be read as
+claiming the base standard, or adding the check would itself create a
+false negative on everything built before it existed.
+
+`thumbv7em` was also an alias: `-dumpmachine` answered
+`thumbv7m-none-eabi` and the object's `Tag_CPU_arch` said ARM v7 on a
+v7E-M part. The code generated is still identical; what changed is that
+the object no longer misdescribes itself. `tests/golden/thumb-target.sh`
+had asserted the aliasing as intended behaviour and was corrected.
+
+And the ARM machine flags every Cortex-M build passes -- `-mthumb`,
+`-mcpu=`, `-mfpu=`, `-mfloat-abi=` -- are recognised: accepted where
+they describe what EmbCC does, refused by name where they do not.
+`-mfloat-abi=hard` is the one that matters, and guessing it either way
+is the mismatch above.
+
+## Target gaps
+
+Every target against Clang on the same real corpus, at `-Os`:
+
+| target | EmbCC | Clang | ratio |
+|---|---|---|---|
+| `aarch64-elf` | 143,576 | 71,536 | 2.00× |
+| `x86_64-elf` | 134,010 | 63,387 | 2.11× |
+| `riscv64-unknown-elf` | 108,384 | 42,090 | 2.57× *(was 3.22×)* |
+| `riscv32-unknown-elf` | 127,686 | 44,764 | 2.85× *(was 3.51×)* |
+| `thumbv7m-none-eabi` | 111,442 | 36,408 | 3.06× *(was 3.89×)* |
+
+*All three embedded targets improved: the C extension (`f550d42`),
+reading operands where the allocator put them (`fa9621b`), and fusing
+a comparison with the branch that reads it (`c544750`).*
+
+**ARMv7-M, 9.3%.** Measured separately, on the 58 files of `lib/` that
+both compilers accept at `-Os`: 115,265 -> 104,507 bytes, against
+Clang's 44,089 on the same set (2.61x -> 2.37x). That is a different
+corpus from the table above, so it is quoted as its own delta rather
+than folded into the 3.06x.
+
+Four things were forcing values into memory, and each cost
+instructions in every function:
+
+- `ret_scalar_in_reg` was 0, so a returned value went out through its
+  slot -- `str` to a slot and `ldr` back into r0, in every function.
+  `rd()` had been register-aware all along; the flag was the only
+  thing forcing the slot.
+- there were no ABI hints (`NULL, /* ABI hints: later */`), so the
+  register the allocator chose was rarely the one the ABI wanted.
+- `layout()` reserved a stack slot for EVERY vreg, including the ones
+  `ra_allocate` had just put in registers -- paid for in `sub sp` and
+  then never read. It runs after the allocator, so it can simply skip
+  them. `int f(int a,int b){return a+b;}` had a 24-byte frame for two
+  values that were both in registers.
+- `call_int_arg_in_reg` was 0, so every scalar call ARGUMENT went out
+  through its slot: two instructions per argument, at every call.
+  Turning it on needs the arguments moved in PARALLEL -- loading them
+  one at a time overwrites a register another argument is still to be
+  read from, and `g(a+1, b+2)` with the sums in the opposite registers
+  is enough to hit it. The prologue and the soft-float helper path
+  already had that shape.
+
+**And it uncovered a miscompile that had been there all along.** AAPCS32
+wants `sp` eight-byte aligned, so the prologue push must move it by a
+multiple of eight -- an EVEN number of registers. `SAVE_MASK` is four
+for exactly that reason. But the allocator's callee-saved set is pushed
+by the same instruction and its parity was never counted: with an odd
+`nsave` the push is 4 mod 8 and every eight-byte object below it is four
+bytes out. Keeping call arguments in registers made that common --
+`main` in `embedded-varargs.c` went from pushing four registers to nine
+-- and a variadic callee then read a `long long` stack argument as zero,
+three calls from the function with the wrong prologue. It reproduces
+before any of this work.
+
+The pad is r12: the ABI's own scratch, harmless to save, and never in
+the allocator's pool, unlike r4-r8 which can all be taken at once.
+Padding the FRAME by four instead would also make the arithmetic work
+but leaves `sp` misaligned between the `push` and the `sub`, which is
+where Cortex-M exception entry stacks context. The mask and its byte
+count now come from one pair of functions used by the prologue, the
+epilogue and the stack-parameter offsets -- the missing pad was exactly
+the term that made those three disagree.
+
+The prologue's unconditional `push {r9, r10, r11, lr}` looks like the
+next thing to fix and, MEASURED, is not. Instrumenting the point where
+each scratch register is named, over the same 366 functions:
+
+| | functions | share |
+|---|---|---|
+| r9 never named | 195 | 53% |
+| r10 never named | 137 | 37% |
+| r11 never named | 194 | 53% |
+| none of the three | 113 | 31% |
+| ...and a leaf (so `lr` is free too) | 7 | 2% |
+| ...and a zero frame as well | 3 | 0.8% |
+
+The push is emitted before the body, so only its MASK can be patched
+afterwards, not the instruction itself. A narrower mask is still one
+`push` and one `pop`, and pushing fewer registers moves `sp` less, so
+every stack-parameter offset would have to move with it. The push only
+DISAPPEARS when the mask is empty, which needs the answer before the
+body runs -- and that case is three functions in 366.
+
+So the instruction-count saving is under 1%, not the "about as much
+again" an earlier draft of this section guessed. What a conditional
+push would buy is memory traffic (cycles) and a smaller frame, not
+size. It is not worth moving stack offsets for, which is the
+highest-consequence thing in this backend.
+
+The measurement cost twenty minutes and stopped a day of risky work,
+which is the whole argument for doing it first.
+
+### What `-Os` turned out to be
+
+Part II called `-Os` "the most valuable missing thing", on the grounds
+that it sat 0.6% below `-O2` while Clang's sits 34% below its own. That
+diagnosis was wrong, and the measurement that corrected it is worth
+keeping.
+
+`-Os` already drops vectorisation and unrolling, and an instruction
+histogram says why that cannot be the story: on this corpus EmbCC
+emitted **43,215** ARMv7-M instructions where Clang emitted **13,147**.
+A 3.3× *count* gap. The 16-bit encoding share — the thing that looked
+like the problem — was 36% against 62%, which cannot explain 3.3×.
+
+So the gap was never pass selection. It was that the backend routed
+every value through a scratch register even when the allocator had
+given it one, and materialised 0 or 1 for every comparison before
+testing it. Both are fixed above; the count is now 38,875 and falling.
+
+One real `-Os` finding did come out of it: turning inlining **off**
+makes this corpus 1.3% smaller, which is the opposite of the benchmark
+result recorded in `opt.c`. Both can be true — sole-caller inlining
+deletes the original, multi-caller inlining copies it — and it is the
+case for a cost model rather than a single switch.
+
+The two embedded families, the ones the recent work was for, are the
+worst — and they are the ones where size is not a preference but a
+budget.
+
+### ~~RISC-V has no compressed instructions~~ — LANDED (`f550d42`)
+
+*15.6% off RV32, 16.2% off RV64, verified against llvm-mc over 50,687
+instructions. Branches and jumps are still uncompressed — their
+displacements are patched later, so claiming `c.j`/`c.beqz` needs a
+relaxation pass. The measurement that motivated it follows.*
+
+### The measurement
+
+Clang's default `-march` for `riscv32-unknown-elf` is **`rv32imac`**.
+EmbCC emits `rv32im`. Holding everything else equal:
+
+| | `.text` | vs EmbCC |
+|---|---|---|
+| EmbCC `rv32im` | 157,204 | — |
+| Clang `rv32imac` (its default) | 44,764 | 3.51× |
+| Clang `rv32im` (compressed off) | 62,808 | 2.50× |
+
+**The C extension alone is 28.8% of Clang's code size.** It is 16-bit
+encodings for the common register/immediate forms — the highest
+size-per-effort item available on this target, and it does not need any
+new optimisation, only new encodings in `src/arch/riscv/emit.c` and a
+selector that prefers them.
+
+### The RISC-V predefined macros claim the wrong code model
+
+```
+$ ./embcc --target=riscv32-unknown-elf --dump-predef | grep cmodel
+#define __riscv_cmodel_medlow 1
+```
+
+The backend emits **medany** — PC-relative `auipc`, chosen deliberately
+because `lui` sign-extends bit 31 and cannot name the addresses RV64
+needs (D-016). `src/arch/riscv32/predef.c:361` says medlow. Code that
+tests this macro to decide how to take an address will choose the wrong
+sequence. It is a one-line fix and a real miscompile source.
+
+### Machines that are missing, ranked by who would notice
+
+| Gap | Who it locks out |
+|---|---|
+| **Thumb-1 / ARMv6-M** | Cortex-M0 and M0+ — the most shipped MCU core there is |
+| **Hardware FP** | M4F, M7, and RISC-V F/D. Everything is soft float today |
+| **`-march=` / `-mcpu=` at all** | there is no way to ASK for any of the above |
+| ARMv8-M | anything with TrustZone-M |
+| Xtensa | the entire ESP32 family |
+| AVR, MSP430 | 8- and 16-bit MCU work |
+
+The first three are one theme: EmbCC has one fixed ISA per target and no
+vocabulary for saying which chip. That is the structural reason
+compressed RISC-V, Thumb-1 and hardware FP cannot be added as options
+today — there is nowhere to put the option.
+
+## Structural gaps — the shape of the toolchain
+
+### There is no assembler for any embedded target
+
+```
+$ ./embcc --target=riscv32-unknown-elf -c start.S -o start.o
+embcc: error: unknown argument 'start.S'
+```
+
+`.s` and `.S` are not input types at all. The only standalone assembler
+is `embas`, which is **NASM syntax, x86-64 only**. Firmware startup —
+the reset vector, the stack setup before `main`, a context switch — is
+hand-written assembly in every real project, and here it can only be
+written as inline asm inside a C function.
+
+The per-target `asm.c` files exist and work, but they are reachable only
+through `__asm__` in C. Wiring them to a `.S` input is mostly plumbing.
+
+### `-S` prints the x86 disassembler's output for non-x86 targets
+
+```
+$ ./embcc --target=riscv32-unknown-elf -S t.c -o -
+f:
+	.byte	0x13,0x01	# adc    (%rcx),%eax
+```
+
+That comment is the **x86-64 disassembler** run over RISC-V bytes. The
+guard at `src/driver/main.c:1081` refuses `-S` for aarch64 only:
+
+```c
+if (ta == TARGET_AARCH64)
+    diag_fatal(in, 0, "-S is x86-64 only: there is no aarch64 disassembler "
+                      "here, and emitting text that is not the object would "
+                      "be worse than refusing");
+```
+
+Thumb and both RISC-V targets were added after that line and fall
+through it. The comment states the principle exactly and the code now
+does the opposite for three of five targets. This is a THE RULE
+violation with a two-line fix, and it should be fixed before anything
+else in this document.
+
+Note also that `-S` never emits real assembly on any target: it emits
+`.byte` directives with a disassembly comment. There is no assembly
+printer, only an encoder.
+
+### Archiving is still binutils
+
+`Makefile:301` and friends shell out to `x86_64-elf-ar` and
+`aarch64-elf-ar`. There is no `ar` for thumb or RISC-V at all, so the
+embedded targets cannot produce a static library with this toolchain.
+A1 in `todo.md` called owning the build done at the assembler; archiving
+was not part of it.
+
+### Self-hosting is x86-64 only
+
+`tests/golden/x86_64/self-host.sh` is the only one. The fixed point is a
+real achievement and it covers one of five targets.
+
+## Architectural gaps — how the compiler is built
+
+### EmbIR is not SSA, and SSA lasts for one pass
+
+`src/ir/ir.h` still opens with "Still no SSA and no passes — that
+revision comes with the optimizer". The optimizer arrived; the revision
+did not. What actually happens is narrower: `mem2reg` builds the CFG,
+the dominator tree (Cooper-Harvey-Kennedy), dominance frontiers, inserts
+phis, renames — and then **destructs SSA immediately**, realising each
+phi as copies on its incoming edges. Every other pass runs on linear,
+non-SSA three-address code.
+
+The cost is visible in the source: `build_cfg` is called **16 times** in
+`opt.c`. Each pass re-derives the control flow and the dataflow it
+needs, because the IR does not carry them. In LLVM the IR is SSA from
+the front end to register allocation, which is why GVN, SCCP, LICM and
+jump threading there are both cheap and precise — a def is a single
+value with a known set of uses, permanently.
+
+This is the deepest item in this document and the one least suited to an
+afternoon. It is also the one that would make the next ten passes easier
+to write than the last ten were.
+
+### There is no machine-IR level
+
+The driver says so itself, at `main.c:2260`: "the separate machine-IR
+level of the design (vision §9.2) does not exist". IR lowers straight to
+encoded bytes. Four things follow, and all four showed up independently
+elsewhere in this audit:
+
+- **No instruction scheduling**, anywhere. Confirmed absent. On an
+  in-order dual-issue core — Cortex-M7, most RISC-V microcontrollers —
+  that is real cycles.
+- **No machine-level peephole** across instruction boundaries, and no
+  size-aware selection, which is part of why `-Os` does nothing and why
+  Thumb's 16-bit encodings are under-used.
+- **`-S` cannot print assembly**, only bytes plus a comment.
+- **Each backend hand-writes its own assembler** for inline asm, because
+  there is no shared MC layer to assemble against.
+
+### Inlining is the only interprocedural transform
+
+No argument promotion, no dead-argument elimination, no global
+constant merging, no IPA constant propagation, no attribute inference
+(`readnone`/`readonly`, which is what lets a caller keep values in
+registers across a call). Everything else is within one function.
+
+### What is genuinely good, so nobody "fixes" it
+
+- **The register allocator** is a proper Chaitin-Briggs graph colourer:
+  real live ranges across back-edges, an interference graph, coalescing
+  by union-find, optimistic spilling, ABI hints. It is shared across all
+  five targets. This is not a gap.
+- **Alias analysis exists** (`opt.c:1979`), with type-based aliasing
+  deliberately excluded and the reason written down.
+- **The inliner** has sensible budgets and a sole-caller path.
+- **Dependency generation** (`-M` and its whole family) is complete.
+
+## Revised order
+
+Part I's list was right about the surface and wrong about the weighting.
+Merged and re-ranked:
+
+1. ~~**Fix `-S` on thumb and RISC-V**~~ — **DONE** (`796cd86`). Went
+   further than a refusal: `-S` now works on all five targets, with
+   per-target instruction lengths and relocation names, and
+   `tests/golden/asmout-roundtrip.sh` requires the emitted text to
+   reassemble to a byte-identical `.text` everywhere. `-o -` writing a
+   literal file named `-` was fixed in the same commit.
+2. ~~**Fix `__riscv_cmodel_medlow`**~~ — **DONE** (`796cd86`), in the
+   generator rather than the generated file.
+3. ~~**`__has_include` / `__has_builtin` / `__has_attribute`**~~ —
+   **DONE** (`b32297a`). The entire mechanism already existed behind
+   `if (!predef_is_cxx()) return 0;`. `__has_builtin` now answers from
+   sema, deriving the bit and atomic families from the same predicates
+   the dispatch uses, with a golden test that reads the dispatch and
+   requires agreement.
+4. ~~**`__attribute__` on a `typedef`**~~ — **DONE** (`de00ab2`), both
+   positions; `aligned()` refused by name rather than silently dropped.
+5. ~~**`typeof` on parameters**~~ — **DONE** (`de00ab2`), plus literals,
+   arithmetic, comparisons, shifts, `p - q`, `?:` and calls.
+6. ~~**RISC-V compressed instructions**~~ — **DONE** (`f550d42`), as a
+   derivation at the one place instructions become bytes rather than a
+   selector. 15.6%/16.2%. Branch compression remains.
+7. **Make `-Os` mean something** — it is currently `-O2`. Start with
+   size-aware selection and not inlining/unrolling at `-Os`.
+8. **`.S` input for every target** — the per-target assemblers already
+   exist; this is plumbing, and firmware cannot ship without it.
+9. **`-g` on the embedded targets** — last step to source-level firmware
+   debugging.
+10. **`-march=`/`-mcpu=`** — the vocabulary that Thumb-1, hardware FP and
+    RISC-V extensions all need before they can exist.
+11. The Part I driver-option set, `_Pragma`, the missing builtins.
+12. **SSA as the IR's actual form** — the deep one. Not an afternoon, and
+    the thing that makes everything after it cheaper.

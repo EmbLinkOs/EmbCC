@@ -13,6 +13,18 @@
 #include "../sema/type.h"
 #include "../arch/target.h"
 
+/* The width of an ADDRESS, as an IR operation's `w`.
+ *
+ * This used to be the literal 8 at every site that did arithmetic on a
+ * pointer -- a member offset, an array index scaled by its element size,
+ * the difference of two pointers -- which was right while every target
+ * was LP64 and is a 64-bit operation on a machine with 32-bit registers
+ * otherwise. The sites that are genuinely 64-bit (assembling a bitfield's
+ * storage unit, the software float conversions) still say 8, and this
+ * says only "as wide as a pointer", so the two cannot be confused for
+ * each other again. */
+#define AW (target_ptr_size())
+
 /* The source line currently being lowered. gen_stmt updates it as it walks
  * the statement list, and gen_func resets it per function; emit() stamps it
  * onto every instruction so the -g line table in codegen can map .text
@@ -102,7 +114,7 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         L->align = ty_align(t);
         L->user_align = f->var_aligns ? f->var_aligns[i] : 0;
         L->is_volatile = t->is_volatile;
-        L->is_ldouble = t->kind == TY_LDOUBLE;
+        L->is_ldouble = ty_is_xldouble(t);
         L->is_int128 = t->kind == TY_INT128;
         L->is_int_or_ptr = ty_is_integer(t) || t->kind == TY_PTR;
         L->is_scalar_int_or_ptr =
@@ -147,7 +159,7 @@ int new_label(struct ir_func *fn) { return fn->nlabels++; }
  * produces one says w = 16 (codegen sizes the slot from that). */
 static int ty_w(const struct type *t)
 {
-    if (t->kind == TY_LDOUBLE || t->kind == TY_INT128) return 16;
+    if (ty_is_xldouble(t) || t->kind == TY_INT128) return 16;
     return ty_wide(t) ? 8 : 4;
 }
 
@@ -304,6 +316,39 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
     return i->dst;
 }
 
+/* Is an lvalue's address aligned to its type, as C guarantees -- or might
+ * it be a packed struct's member, which is the one legal way for it not
+ * to be? A member is under-aligned when its offset, or the alignment of
+ * the struct it sits in, is less than its type asks for; and a member is
+ * only as aligned as the object it is a member of. */
+static int lv_natural(const struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_VAR:
+        return 1;
+    case EXPR_DEREF:
+        return 1;              /* a misaligned pointer is already UB */
+    case EXPR_MEMBER: {
+        const struct type *st = e->is_arrow ? e->lhs->ty->pointee : e->lhs->ty;
+        int ma = ty_align(e->memb->ty);
+        if (!st || e->memb->is_bitfield || ty_align(st) < ma ||
+            e->memb->off % ma)
+            return 0;
+        return e->is_arrow ? 1 : lv_natural(e->lhs);
+    }
+    default:
+        return 0;
+    }
+}
+
+/* Mark the load or store just emitted for lvalue `e`. */
+static void mark_natural(struct ir_func *fn, const struct expr *e)
+{
+    struct ir_ins *i = &fn->ins[fn->nins - 1];
+    if (i->op == IR_LOAD || i->op == IR_STORE)
+        i->natural = lv_natural(e);
+}
+
 /* Typed load/store through an address temp. */
 int emit_load(struct ir_func *fn, int addr, const struct type *t)
 {
@@ -363,7 +408,7 @@ static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
     struct type *u8 = ty_base(TY_CHAR, 1);
     int raw = emit_const(fn, 0, 8);
     for (int k = 0; k < m->bf_bytes && k < 8; k++) {
-        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                   : addr;
         int b = zext64(fn, emit_load(fn, a, u8));
         if (k)
@@ -382,7 +427,7 @@ static int bf_wide_bytes(struct ir_func *fn, int addr, int from, int n)
     struct type *u8 = ty_base(TY_CHAR, 1), *u128 = ty_base(TY_INT128, 1);
     int raw = emit_const(fn, 0, 16);
     for (int k = from; k < n; k++) {
-        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                   : addr;
         int b = gen_convert(fn, emit_load(fn, a, u8), u8, u128);
         if (k > from)
@@ -437,7 +482,7 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
                                       16, 0),
                   nv, 16, 0);
     for (int k = 0; k < n && k < 16; k++) {
-        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+        int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                   : addr;
         int b = k ? emit_bin(fn, IR_SHR, lo, emit_const(fn, 8 * k, 4), 16, 0)
                   : lo;
@@ -453,7 +498,7 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
                             emit_bin(fn, IR_XOR, hm, ones, 16, 0), 16, 0);
         int put = emit_bin(fn, IR_SHR, v, sh, 16, 0);
         hi = emit_bin(fn, IR_OR, keep, put, 16, 0);
-        int at = emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, 8), 8, 0);
+        int at = emit_bin(fn, IR_ADD, addr, emit_const(fn, 16, AW), AW, 0);
         int val = gen_convert(fn, hi, u128, u8);
         emit_store(fn, at, val, u8);
     }
@@ -516,7 +561,7 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
         int merged = emit_bin(fn, IR_OR, cleared, low, 8, 0);
         struct type *u8 = ty_base(TY_CHAR, 1);
         for (int k = 0; k < m->bf_bytes && k < 8; k++) {
-            int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, 8), 8, 0)
+            int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                       : addr;
             int b = k ? emit_bin(fn, IR_SHR, merged,
                                  emit_const(fn, 8 * k, 4), 8, 0)
@@ -606,6 +651,82 @@ int emit_cmp(struct ir_func *fn, enum binop pred, int a, int b,
 }
 
 int gen_expr(struct ir_func *fn, struct expr *e);
+/* -fsanitize's arithmetic wrapper; defined with the checks below. */
+static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
+                   int w, int sign);
+static void san_trap_if(struct ir_func *fn, int cond, int w);
+static long san_min(int w);
+
+
+/* ---- the IEEE-754 bit builtins -----------------------------------------
+ *
+ * fabs, copysign, signbit and the isnan/isinf/isfinite/isnormal family are
+ * all the same job: look at the exponent and sign fields of the
+ * representation. Done in floating point they need either a library call
+ * or a per-builtin instruction pattern in every backend, and two of them
+ * cannot be done in floating point AT ALL without getting a corner wrong
+ * -- `x < 0 ? -x : x` returns -0.0 for fabs(-0.0) and leaves a NaN's sign
+ * set, and `x != x` is the only float-only spelling of isnan.
+ *
+ * So the bits go into a general register once (IR_BITCAST, the single
+ * target-specific instruction in all of this) and everything after it is
+ * ordinary integer IR the existing optimizer already constant-folds,
+ * coalesces and allocates. That is the whole reason IR_BITCAST is one op
+ * instead of nine: gcc and clang each carry a separate optab entry per
+ * builtin per target, and adding a tenth predicate there is a change in
+ * every backend. Here it is a change in this one function.
+ */
+static int fb_bits(struct ir_func *fn, struct expr *arg, int *w)
+{
+    *w = ty_size(arg->ty);
+    int v = gen_expr(fn, arg);
+    struct ir_ins *i = emit(fn);
+    i->op = IR_BITCAST;
+    i->a = v;
+    i->size = *w;
+    i->w = *w;
+    i->sign = 1;                      /* an integer comes out */
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+static int fb_float(struct ir_func *fn, int bits, int w)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = IR_BITCAST;
+    i->a = bits;
+    i->size = w;
+    i->w = w;
+    i->sign = 0;                      /* a float comes out */
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
+/* The three fields of an IEEE binary32/binary64, as masks at that width. */
+static long fb_signmask(int w) { return w == 4 ? (long)0x80000000L
+                                               : (long)0x8000000000000000UL; }
+static long fb_absmask(int w)  { return w == 4 ? (long)0x7fffffffL
+                                               : (long)0x7fffffffffffffffL; }
+static long fb_expmask(int w)  { return w == 4 ? (long)0x7f800000L
+                                               : (long)0x7ff0000000000000L; }
+
+/* The names lowered above. Kept next to them so a name added to one is
+ * a compile error in the other rather than a silent call to libm. */
+static int fb_is_bit_builtin(const char *n)
+{
+    static const char *const v[] = {
+        "fabs", "fabsf", "fabsl", "copysign", "copysignf", "copysignl",
+        "signbit", "signbitf", "signbitl",
+        "isnan", "isinf", "isinf_sign", "isfinite", "isnormal",
+    };
+    if (strncmp(n, "__builtin_", 10) != 0)
+        return 0;
+    for (unsigned k = 0; k < sizeof v / sizeof v[0]; k++)
+        if (strcmp(n + 10, v[k]) == 0)
+            return 1;
+    return 0;
+}
+
 static int gen_complit(struct ir_func *fn, struct expr *e);
 int gen_convert(struct ir_func *fn, int v, const struct type *from,
                        const struct type *to);
@@ -622,7 +743,7 @@ static int type_size_val(struct ir_func *fn, const struct type *t)
 {
     if (ty_is_vla(t))
         return emit_ldvar(fn, t->vla_size, ty_base(TY_LONG, 1));
-    return emit_const(fn, ty_size(t), 8);
+    return emit_const(fn, ty_size(t), AW);
 }
 
 /* Compute the byte size of every VLA in a variably modified type, innermost
@@ -636,7 +757,7 @@ static void vla_eval(struct ir_func *fn, struct type *t)
     if (!ty_is_vla(t))
         return;
     int n = gen_expr(fn, t->vla_len);
-    int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), 8, 1);
+    int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), AW, 1);
     emit_stvar(fn, t->vla_size, sz, ty_base(TY_LONG, 1));
 }
 
@@ -702,8 +823,8 @@ int gen_addr(struct ir_func *fn, struct expr *e)
                                : gen_addr(fn, e->lhs);
         if (e->memb->off == 0)
             return base;
-        int off = emit_const(fn, e->memb->off, 8);
-        return emit_bin(fn, IR_ADD, base, off, 8, 1);
+        int off = emit_const(fn, e->memb->off, AW);
+        return emit_bin(fn, IR_ADD, base, off, AW, 1);
     }
     case EXPR_COMPLIT:
         return gen_complit(fn, e);
@@ -739,8 +860,8 @@ static int gen_complit(struct ir_func *fn, struct expr *e)
         int v = gen_expr(fn, e->inits[k].e);
         int at = base;
         if (e->inits[k].off) {
-            int o = emit_const(fn, e->inits[k].off, 8);
-            at = emit_bin(fn, IR_ADD, base, o, 8, 1);
+            int o = emit_const(fn, e->inits[k].off, AW);
+            at = emit_bin(fn, IR_ADD, base, o, AW, 1);
         }
         store_init_leaf(fn, at, &e->inits[k], v);
     }
@@ -876,14 +997,45 @@ static int emit_f2i(struct ir_func *fn, int a, int srcw, int dstw)
     return i->dst;
 }
 
-/* unsigned-64 -> floating. SSE2's cvtsi2sd is SIGNED, so a u64 with its top bit
- * set would convert as a huge negative. Split into two 32-bit halves -- each is
- * positive and < 2^32, so cvtsi2sd is exact -- then hi*2^32 + lo. Both partials
- * are exact doubles, so the single add rounds the true u64 once (correctly
- * rounded). For a float target do it in double first (exact) then narrow, which
- * avoids a double rounding. */
+/* unsigned-64 -> float (the single-precision type). Not through double:
+ * the double sum below is NOT exact -- a 64-bit integer has up to 64
+ * significant bits and a double 53 -- so narrowing it rounds a second
+ * time, and 2^60 + 2^36 + 1 came out 2^60 instead of 2^60 + 2^37: the
+ * first rounding dropped the 1 that put it above the tie. Random programs
+ * found it on x86-64 and aarch64.
+ *
+ * The standard sequence instead: below 2^63 the value converts as SIGNED,
+ * one rounding. From 2^63 it is halved with its lowest bit kept as a
+ * sticky bit -- (v >> 1) | (v & 1), which rounds to a float exactly as v/2
+ * would, the bit standing for everything shifted out -- converted, and
+ * doubled, which is exact. */
+static int gen_u64_to_f32(struct ir_func *fn, int v)
+{
+    int res = new_temp(fn);
+    int l_big = new_label(fn), l_done = new_label(fn);
+    int top = emit_bin(fn, IR_SHR, v, emit_const(fn, 63, 4), 8, 0);
+    emit_brnz(fn, top, 8, l_big);
+    emit_mov(fn, res, emit_i2f(fn, v, 8, 4));
+    emit_jmp(fn, l_done);
+    emit_label(fn, l_big);
+    int half = emit_bin(fn, IR_SHR, v, emit_const(fn, 1, 4), 8, 0);
+    int odd = emit_bin(fn, IR_AND, v, emit_const(fn, 1, 8), 8, 0);
+    int sticky = emit_bin(fn, IR_OR, half, odd, 8, 0);
+    int f = emit_i2f(fn, sticky, 8, 4);
+    emit_mov(fn, res, emit_fbin(fn, IR_ADD, f, f, 4));
+    emit_label(fn, l_done);
+    return res;
+}
+
+/* unsigned-64 -> double (or long double). SSE2's cvtsi2sd is SIGNED, so a
+ * u64 with its top bit set would convert as a huge negative. Split into two
+ * 32-bit halves -- each is positive and < 2^32, so cvtsi2sd is exact -- then
+ * hi*2^32 + lo. Both partials are exact doubles, so the single add rounds
+ * the true u64 once: correctly rounded. (Not for float: see above.) */
 static int gen_u64_to_float(struct ir_func *fn, int v, int tsize)
 {
+    if (tsize == 4)
+        return gen_u64_to_f32(fn, v);
     /* In long double the halves and the sum are all exact (64-bit or wider
      * significand), so compute there directly. */
     int cw = tsize == 16 ? 16 : 8;
@@ -892,14 +1044,7 @@ static int gen_u64_to_float(struct ir_func *fn, int v, int tsize)
     int hd = emit_i2f(fn, hi, 8, cw);
     int ld = emit_i2f(fn, lo, 8, cw);
     int hs = emit_fbin(fn, IR_MUL, hd, emit_fconst(fn, 4294967296.0, cw), cw);
-    int res = emit_fbin(fn, IR_ADD, hs, ld, cw);
-    if (tsize == 4) {   /* narrow the exact double to float: one rounding */
-        struct ir_ins *nf = emit(fn);
-        nf->op = IR_F2F; nf->a = res; nf->size = 8; nf->w = 4;
-        nf->dst = new_temp(fn);
-        return nf->dst;
-    }
-    return res;
+    return emit_fbin(fn, IR_ADD, hs, ld, cw);
 }
 
 /* floating -> unsigned-64. cvttsd2si is SIGNED: exact for v < 2^63, but v in
@@ -1002,9 +1147,15 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
             return i->dst;
         }
         if (ty_is_float(to)) {
-            /* unsigned 64-bit -> float needs the split-and-add fixup; every
-             * other integer source goes straight through signed cvtsi2sd. */
-            if (from->is_unsigned && ty_size(from) == 8)
+            /* unsigned 64-bit -> float: on a target whose convert
+             * instruction is signed only, this is a split-and-add fixup --
+             * the top bit cannot be read as part of the value, so the value
+             * is halved, converted, and added to itself. Where the
+             * conversion is a CALL there is nothing to fix up: libgcc has
+             * __floatundisf under its own name and every soft-float backend
+             * here already emits it. */
+            if (from->is_unsigned && ty_size(from) == 8 &&
+                target_widen_unsigned_fp_cvt())
                 return gen_u64_to_float(fn, v, tsize);
             /* int -> float, and the source WIDTH matters: a 32-bit
              * operation zero-extends its result into the 8-byte slot
@@ -1013,31 +1164,68 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
              * 32 bits and let cvtsi2sd interpret the sign; read an
              * unsigned int as 64, where the zero extension IS the value
              * (which is what makes it exact). */
-            int srcw = 4;
-            if (ty_wide(from) ||
-                (from->is_unsigned && ty_size(from) == 4))
-                srcw = 8;
+            /* An unsigned 32-bit source is the case that differs. Where
+             * the conversion is a signed-only INSTRUCTION, widen it to 64
+             * and let the zero extension carry the value exactly. Where it
+             * is a CALL, ask for the unsigned helper by name instead --
+             * __floatunsisf rather than a 64-bit __floatdisf. */
+            int u32src = from->is_unsigned && ty_size(from) == 4;
+            int widen  = target_widen_unsigned_fp_cvt();
+            int srcw   = ty_wide(from) || (u32src && widen) ? 8 : 4;
+            /* On a widening target every source reaches the convert as
+             * SIGNED: an unsigned 32-bit one was extended to 64, where the
+             * zero extension is the value, and an unsigned 64-bit one took
+             * the split-and-add above and never gets here. Where the
+             * conversion is a call, ask for the helper whose signedness
+             * matches the source -- __floatunsisf or __floatundisf. */
+            int isign  = widen ? 1 : !from->is_unsigned;
+            /* ...extended EXPLICITLY. It used to be read at eight bytes on
+             * the strength of "a 32-bit operation zero-extends its result",
+             * but nothing promises that of every 32-bit value: an int a call
+             * returned, or a merge of two arms, can hold its sign bits above
+             * bit 31 -- and (double)(unsigned)f() of -104634 converted as
+             * -104634, not 4294862662, on x86-64 and aarch64 (random
+             * programs found it). The extension costs a move where the
+             * upper half really was zero, and the optimizer drops it where
+             * it can prove that. */
+            if (u32src && widen && !ty_wide(from)) {
+                struct ir_ins *x = emit(fn);
+                x->op = IR_EXT; x->a = v; x->size = 4; x->sign = 0; x->w = 8;
+                x->dst = new_temp(fn);
+                v = x->dst;
+            }
             i = emit(fn);
             i->op = IR_I2F;
             i->a = v;
             i->size = srcw;
-            i->sign = 1;
+            i->sign = isign;
             i->w = tsize;
             i->dst = new_temp(fn);
             return i->dst;
         }
-        /* float -> unsigned 64-bit needs the 2^63 bias fixup (cvttsd2si is
-         * signed); other targets use the signed convert-then-narrow below. */
-        if (to->is_unsigned && ty_size(to) == 8)
+        /* float -> unsigned 64-bit: the 2^63 bias fixup, for the same
+         * reason and with the same exception -- cvttsd2si is signed only,
+         * and __fixunssfdi is not. */
+        if (to->is_unsigned && ty_size(to) == 8 &&
+            target_widen_unsigned_fp_cvt())
             return gen_float_to_u64(fn, v, fsize);
-        /* float -> int: truncates toward zero, as C requires. Convert
-         * to the 64-bit form then narrow, so unsigned int lands right. */
+        /* float -> int: truncates toward zero, as C requires.
+         *
+         * Where the conversion is a signed-only instruction, go to the
+         * 64-bit form and narrow, so an unsigned 32-bit destination lands
+         * right. Where it is a call, name the unsigned helper instead:
+         * __fixunssfsi rather than a 64-bit __fixsfdi and a truncation. */
+        int dstw = 8, dsign = 1;
+        if (!target_widen_unsigned_fp_cvt()) {
+            dstw = tsize <= 4 ? 4 : 8;
+            dsign = !to->is_unsigned;
+        }
         i = emit(fn);
         i->op = IR_F2I;
         i->a = v;
         i->size = fsize;
-        i->w = 8;
-        i->sign = 1;
+        i->w = dstw;
+        i->sign = dsign;
         i->dst = new_temp(fn);
         int iv = i->dst;
         if (tsize <= 2) {
@@ -1095,7 +1283,18 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
  * brackets each exclusive-access loop with barriers of its own.
  */
 
-static int atomic_arm(void) { return target_get() == TARGET_AARCH64; }
+/* A target whose memory order is weaker than sequential consistency, so a
+ * seq_cst load needs a barrier after it and a store one before it as well
+ * as after: aarch64, ARMv7-M and RISC-V. (x86-64's stores need only the
+ * one after; AVR is one core that does not reorder.) This was aarch64
+ * alone, which left a seq_cst load or store on the M-profile parts with
+ * two cores, and on harts, unordered. */
+static int atomic_arm(void)
+{
+    int t = target_get();
+    return t == TARGET_AARCH64 || t == TARGET_THUMB ||
+           t == TARGET_RISCV32 || t == TARGET_RISCV64;
+}
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
  * its type says — a signed char object holding -1 must read back as -1 — and
@@ -1114,10 +1313,28 @@ static int atomic_result(struct ir_func *fn, int v, const struct type *t)
     return x->dst;
 }
 
+/* The widest object this target reads or writes in ONE access that an
+ * interrupt or another core cannot split: a pointer's width -- and a byte
+ * on AVR, whose 16-bit loads are two. An atomic load or store wider than
+ * that would be two accesses with a window between them, so it is
+ * refused, as the backends refuse a read-modify-write they cannot do. */
+static void atomic_width_ok(struct ir_func *fn, const struct type *t,
+                            int line)
+{
+    int max = target_get() == TARGET_AVR ? 1 : target_ptr_size();
+    if (ty_size(t) > max)
+        diag_fatal(fn->file, line,
+                   "an atomic access of %d bytes is not one access on this "
+                   "target (it moves %d at once): the halves could be "
+                   "split by an interrupt or another core", ty_size(t), max);
+}
+
 /* An atomic access is never merged with another or removed: vol says so to
  * the optimizer (and changes nothing codegen emits). */
-static int atomic_load(struct ir_func *fn, int addr, const struct type *t)
+static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
+                       int line)
 {
+    atomic_width_ok(fn, t, line);
     int v = emit_load(fn, addr, t);
     fn->ins[fn->nins - 1].vol = 1;
     if (atomic_arm())
@@ -1126,8 +1343,9 @@ static int atomic_load(struct ir_func *fn, int addr, const struct type *t)
 }
 
 static void atomic_store(struct ir_func *fn, int addr, int val,
-                         const struct type *t)
+                         const struct type *t, int line)
 {
+    atomic_width_ok(fn, t, line);
     if (atomic_arm())
         emit(fn)->op = IR_FENCE;          /* release */
     emit_store(fn, addr, val, t);
@@ -1145,6 +1363,10 @@ static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
     i->imm = opc;
     i->size = ty_size(t);
     i->w = ty_w(t);
+    /* Whether the old value, read at `size`, extends as signed: a
+     * backend with sub-word exclusive loads (ldrexb/ldrexh zero-extend)
+     * needs it to hand back a `signed char` right. */
+    i->sign = ty_signed_int(t);
     i->dst = new_temp(fn);
     return i->dst;
 }
@@ -1156,6 +1378,167 @@ static int atomic_value(struct ir_func *fn, struct expr *arg,
 {
     return gen_convert(fn, gen_expr(fn, arg), arg->ty, t);
 }
+
+/* An _Atomic lvalue. C11 gives the plain operators on one seq_cst
+ * atomic semantics: a read is an atomic load, `=` an atomic store, and
+ * `++`, `--` and `op=` one atomic read-modify-write. They go through the
+ * helpers above, as the __atomic builtins do; EmbCC used to treat
+ * `_Atomic` as `volatile`, which made `x++` a plain load, add and store
+ * -- an increment another core or an interrupt could lose. */
+static int atomic_lv(const struct expr *e)
+{
+    return e && e->ty && e->ty->is_atomic && !e->undecayed &&
+           e->ty->kind != TY_ARRAY;
+}
+
+static void atomic_scalar_ok(struct ir_func *fn, const struct expr *lv,
+                             const char *what)
+{
+    if ((!ty_is_integer(lv->ty) && lv->ty->kind != TY_PTR) ||
+        expr_is_bitfield(lv))
+        diag_fatal(fn->file, lv->line,
+                   "%s an _Atomic %s is not supported: EmbCC makes the "
+                   "operators atomic for integers and pointers only",
+                   what, ty_name(lv->ty));
+    if (lv->ty->kind == TY_PTR && ty_is_vla(lv->ty->pointee))
+        diag_fatal(fn->file, lv->line,
+                   "%s an _Atomic pointer to a variable-length array is "
+                   "not supported", what);
+    atomic_width_ok(fn, lv->ty, lv->line);
+}
+
+static int atomic_read(struct ir_func *fn, struct expr *e)
+{
+    atomic_scalar_ok(fn, e, "reading");
+    return atomic_load(fn, gen_addr(fn, e), e->ty, e->line);
+}
+
+/* x++, x--, ++x, --x: one fetch-and-add of the step */
+static int atomic_incdec(struct ir_func *fn, struct expr *e)
+{
+    struct type *t = e->lhs->ty;
+    atomic_scalar_ok(fn, e->lhs, "incrementing");
+    int w = ty_w(t);
+    long step = (long)e->delta * (t->kind == TY_PTR ? ty_size(t->pointee) : 1);
+    int addr = gen_addr(fn, e->lhs);
+    int old = atomic_result(fn, atomic_rmw(fn, IR_XADD, 0, addr,
+                                           emit_const(fn, step, w), t), t);
+    int nv = atomic_result(fn, emit_bin(fn, IR_ADD, old,
+                                        emit_const(fn, step, w), w,
+                                        ty_signed_int(t)), t);
+    return e->is_post ? old : nv;
+}
+
+static int compound_value(struct ir_func *fn, struct expr *e, int cur,
+                          int rv);
+
+/* x op= v: one atomic read-modify-write for + - & | ^ (and a pointer's
+ * += -=); for the others, the value is computed as the plain operator
+ * computes it and swapped in only if the object still holds what it was
+ * computed from -- a compare-and-swap loop. */
+static int atomic_compound(struct ir_func *fn, struct expr *e)
+{
+    struct type *lt = e->lhs->ty;
+    atomic_scalar_ok(fn, e->lhs, "a compound assignment to");
+    int addr = gen_addr(fn, e->lhs);
+    int rv = gen_expr(fn, e->rhs);
+    int w = ty_w(lt), sign = ty_signed_int(lt);
+    int opc = e->op == B_AND ? '&' : e->op == B_OR ? '|'
+            : e->op == B_XOR ? '^' : 0;
+    if (lt->kind == TY_PTR || opc || e->op == B_ADD || e->op == B_SUB) {
+        int v;
+        if (lt->kind == TY_PTR) {
+            int esz = ty_size(lt->pointee);
+            v = esz > 1 ? emit_bin(fn, IR_MUL, rv, emit_const(fn, esz, AW),
+                                   AW, 1)
+                        : rv;
+        } else {
+            v = gen_convert(fn, rv, e->cast_ty, lt);
+        }
+        int old;
+        if (opc) {
+            old = atomic_rmw(fn, IR_ARMW, opc, addr, v, lt);
+        } else {
+            int add = e->op == B_SUB
+                ? emit_bin(fn, IR_SUB, emit_const(fn, 0, w), v, w, 1) : v;
+            old = atomic_rmw(fn, IR_XADD, 0, addr, add, lt);
+        }
+        old = atomic_result(fn, old, lt);
+        enum ir_op o = opc == '&' ? IR_AND : opc == '|' ? IR_OR
+                     : opc == '^' ? IR_XOR
+                     : e->op == B_SUB ? IR_SUB : IR_ADD;
+        return atomic_result(fn, emit_bin(fn, o, old, v, w, sign), lt);
+    }
+    int exp = new_temp(fn);
+    struct ir_ins *m = emit(fn);
+    m->op = IR_MOV;
+    m->a = atomic_load(fn, addr, lt, e->line);
+    m->dst = exp;
+    m->w = w;
+    int top = new_label(fn);
+    emit_label(fn, top);
+    int res = compound_value(fn, e, exp, rv);
+    struct ir_ins *c = emit(fn);
+    c->op = IR_CAS;
+    c->a = addr;
+    c->b = exp;
+    c->c = res;
+    c->size = ty_size(lt);
+    c->w = w;
+    c->sign = sign;
+    c->dst = new_temp(fn);
+    int seen = atomic_result(fn, c->dst, lt);
+    int ok = emit_cmp(fn, B_EQ, seen, exp, w, sign);
+    m = emit(fn);
+    m->op = IR_MOV;
+    m->a = seen;
+    m->dst = exp;
+    m->w = w;
+    emit_brz(fn, ok, 4, top);
+    return res;
+}
+
+/* `x op= v`'s new value from x's current one (cur) and v's (rv), as
+ * the plain operator computes it: a pointer steps by elements, anything
+ * else is computed in the operator's type (cast_ty) and converted back. */
+static int compound_value(struct ir_func *fn, struct expr *e, int cur,
+                          int rv)
+{
+    struct type *lt = e->lhs->ty;
+    int res;
+    if (lt->kind == TY_PTR) {
+        int esz = ty_size(lt->pointee);
+        /* At the ADDRESS width, as every other pointer operation
+         * here: this was 8, so `p += n` on a 32-bit target was a
+         * 64-bit add of a four-byte pointer. It came out right only
+         * because the backends read the missing high half from
+         * whatever sat beside the pointer's slot, and the low half of
+         * a sum does not depend on it; once the pointer lived in a
+         * register, there was no beside. */
+        if (ty_is_vla(lt->pointee))
+            rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
+                          AW, 1);
+        else if (esz > 1) {
+            int k = emit_const(fn, esz, AW);
+            rv = emit_bin(fn, IR_MUL, rv, k, AW, 1);
+        }
+        return emit_bin(fn, e->op == B_ADD ? IR_ADD : IR_SUB, cur, rv,
+                        AW, 1);
+    }
+    struct type *ct = e->cast_ty;
+    int cv = gen_convert(fn, cur, lt, ct);
+    static const enum ir_op map[] = {
+        IR_ADD, IR_SUB, IR_MUL, IR_DIV, IR_MOD,
+        IR_AND, IR_OR, IR_XOR, IR_SHL, IR_SHR,
+    };
+    enum ir_op o = map[e->op - B_ADD];
+    if (ty_is_float(ct))
+        res = emit_fbin(fn, o, cv, rv, ty_size(ct));
+    else
+        res = san_bin(fn, o, cv, rv, ty_w(ct), ty_signed_int(ct));
+    return gen_convert(fn, res, ct, lt);
+}
+
 
 /* dst = the value *addr held, *addr = des if it was exp (IR_CAS16) */
 static int cas16(struct ir_func *fn, int addr, int exp, int des)
@@ -1308,12 +1691,13 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
 
     switch (ak) {
     case AK_LOAD_N:
-        return atomic_load(fn, addr, obj);
+        return atomic_load(fn, addr, obj, e->line);
     case AK_STORE_N:
-        atomic_store(fn, addr, atomic_value(fn, e->args[1], obj), obj);
+        atomic_store(fn, addr, atomic_value(fn, e->args[1], obj), obj,
+                     e->line);
         return -1;
     case AK_SYNC_LOCK_RELEASE: case AK_CLEAR:
-        atomic_store(fn, addr, emit_const(fn, 0, w), obj);
+        atomic_store(fn, addr, emit_const(fn, 0, w), obj, e->line);
         return -1;
     case AK_EXCHANGE_N: case AK_SYNC_LOCK_TAS: {
         int val = atomic_value(fn, e->args[1], obj);
@@ -1373,17 +1757,18 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         i->c = des;
         i->size = ty_size(obj);
         i->w = w;
+        i->sign = ty_signed_int(obj);
         i->dst = new_temp(fn);
         return i->dst;
     }
     case AK_LOAD: {                                   /* *ret = atomic *p */
         int ret = gen_expr(fn, e->args[1]);
-        emit_store(fn, ret, atomic_load(fn, addr, obj), obj);
+        emit_store(fn, ret, atomic_load(fn, addr, obj, e->line), obj);
         return -1;
     }
     case AK_STORE: {                                  /* atomic *p = *val */
         int vp = gen_expr(fn, e->args[1]);
-        atomic_store(fn, addr, emit_load(fn, vp, obj), obj);
+        atomic_store(fn, addr, emit_load(fn, vp, obj), obj, e->line);
         return -1;
     }
     case AK_EXCHANGE: {                               /* *ret = xchg(p, *val) */
@@ -1403,6 +1788,7 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         i->c = newv;
         i->size = ty_size(obj);
         i->w = w;
+        i->sign = ty_signed_int(obj);
         i->dst = new_temp(fn);
         int old = atomic_result(fn, i->dst, obj);
         if (ak == AK_SYNC_VAL_CAS)
@@ -1466,25 +1852,37 @@ static int bctz(struct ir_func *fn, int x, int w)
     return bpopcount(fn, emit_bin(fn, IR_SUB, low, bk(fn, 1, w), w, 0), w);
 }
 
-static int bclz(struct ir_func *fn, int x, int w)
+/* `bits` is the operand type's width, which may be narrower than the
+ * operation's w: a 16-bit int computed at four bytes, zero-extended. Its
+ * leading zeros are counted within `bits`, not within w. */
+static int bclz(struct ir_func *fn, int x, int w, int bits)
 {
-    for (int sh = 1; sh < w * 8; sh <<= 1)
+    for (int sh = 1; sh < bits; sh <<= 1)
         x = emit_bin(fn, IR_OR, x, emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)sh, w),
                                              w, 0), w, 0);
-    return emit_bin(fn, IR_SUB, bk(fn, (unsigned long)(w * 8), w),
+    return emit_bin(fn, IR_SUB, bk(fn, (unsigned long)bits, w),
                     bpopcount(fn, x, w), w, 0);
 }
 
-static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int w)
+/* `rank` is builtin_bitop's: the operand is an unsigned int, long or long
+ * long (ffs and clrsb take a signed one, which is the same bits). Its
+ * SIZE is the target's, and was once assumed: 8 for the l and ll forms
+ * and 4 for the plain one. On a 32-bit target that read popcountl's
+ * four-byte operand as eight -- the four bytes past it included -- and
+ * truncated popcountll's eight-byte one to the four bytes of a long; on
+ * AVR, clz of a 16-bit int came back 16 too many. The IR has widths 4
+ * and 8 only, so a two-byte operand is computed at four, zero-extended,
+ * and only clz and clrsb need to know it has 16 bits. */
+static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int rank)
 {
-    /* the operand as the unsigned int / unsigned long the builtin takes (ffs
-     * and clrsb take a signed one, which is the same bits) */
-    const struct type *ut = ty_base(w == 8 ? TY_LONG : TY_INT, 1);
+    const struct type *ut = rank == 3 ? ty_llong(1)
+                          : ty_base(rank == 2 ? TY_LONG : TY_INT, 1);
+    int bytes = ty_size(ut), w = bytes > 4 ? 8 : 4, bits = bytes * 8;
     int x = gen_convert(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, ut);
     int r;
     switch (kind) {
     case 1: r = bctz(fn, x, w); break;
-    case 2: r = bclz(fn, x, w); break;
+    case 2: r = bclz(fn, x, w, bits); break;
     case 3: r = bpopcount(fn, x, w); break;
     case 4: {
         int nz = emit_cmp(fn, B_NE, x, bk(fn, 0, w), w, 0);
@@ -1496,13 +1894,141 @@ static int gen_bitop(struct ir_func *fn, struct expr *e, int kind, int w)
     }
     case 5: r = emit_bin(fn, IR_AND, bpopcount(fn, x, w), bk(fn, 1, w), w, 0); break;
     default: {
-        int sign = emit_bin(fn, IR_SHR, x, bk(fn, (unsigned long)(w * 8 - 1), w), w, 1);
-        r = emit_bin(fn, IR_SUB, bclz(fn, emit_bin(fn, IR_XOR, x, sign, w, 0), w),
-                     bk(fn, 1, w), w, 0);
+        /* x's sign smeared over every bit: its top bit moved to the top
+         * of w first, when the type is narrower than w. The XOR is then
+         * masked back to the type's own bits. */
+        int top = x;
+        if (bits < w * 8)
+            top = emit_bin(fn, IR_SHL, x, bk(fn, (unsigned long)(w * 8 - bits), w),
+                           w, 0);
+        int sign = emit_bin(fn, IR_SHR, top, bk(fn, (unsigned long)(w * 8 - 1), w), w, 1);
+        int t = emit_bin(fn, IR_XOR, x, sign, w, 0);
+        if (bits < w * 8)
+            t = emit_bin(fn, IR_AND, t, bk(fn, (1UL << bits) - 1, w), w, 0);
+        r = emit_bin(fn, IR_SUB, bclz(fn, t, w, bits), bk(fn, 1, w), w, 0);
         break;
     }
     }
     return gen_convert(fn, r, ut, ty_base(TY_INT, 0));    /* the result is int */
+}
+
+/* __builtin_{add,sub,mul}_overflow(a, b, r): the operation as if in
+ * infinite precision, truncated into *r, and 1 when it did not fit.
+ *
+ * Two shapes, chosen by the RESULT type's width:
+ *
+ *   narrower than 64 bits -- compute exactly in 64, store the
+ *     truncation, and compare the exact value with the truncation
+ *     read back. No identities and nothing to get wrong; a 32-bit
+ *     multiply cannot escape 64 bits.
+ *
+ *   64 bits -- there is no wider type to compute in on every target
+ *     (__int128 is 64-bit-only), so overflow is read off the operands
+ *     with the two's-complement identities.
+ *
+ * The identities are the usual ones. The DIVISIONS are not: a multiply
+ * test wants `a != 0 && r / a != b`, and the guard is not optional
+ * because dividing by zero traps -- and for the signed case
+ * LMIN / -1 traps too, which is exactly the overflow being tested for.
+ * src/cxx/emit.c spells both guards with `&&`, i.e. with branches.
+ *
+ * Here the divisor is made safe instead, so the whole thing stays
+ * branchless: never zero, and never -1 in the one case where the
+ * dividend is LMIN. A branchless form is worth having because these
+ * appear in bounds checks on hot paths, where a mispredicted branch
+ * costs more than the arithmetic.
+ */
+static int gen_overflow(struct ir_func *fn, struct expr *e, char op)
+{
+    /* `volatile int *` is an ordinary destination here; the volatile
+     * COPY points at the unqualified original through ->canon. */
+    struct type *rt = e->args[2]->ty->pointee;
+    if (rt->canon)
+        rt = rt->canon;
+    long sz = ty_size(rt);
+    int uns = rt->is_unsigned;
+    enum ir_op iop = op == 'a' ? IR_ADD : op == 's' ? IR_SUB : IR_MUL;
+    int addr = gen_expr(fn, e->args[2]);
+
+    if (sz < 8) {
+        /* Exact in 64 bits, then "does it still say the same thing
+         * after being narrowed to T". */
+        struct type *w = ty_int_of_size(8, 0);
+        int a = gen_convert(fn, gen_expr(fn, e->args[0]),
+                            e->args[0]->ty, w);
+        int b = gen_convert(fn, gen_expr(fn, e->args[1]),
+                            e->args[1]->ty, w);
+        int r = emit_bin(fn, iop, a, b, 8, 1);
+        int nar = gen_convert(fn, r, w, rt);          /* truncate into T */
+        emit_store(fn, addr, nar, rt);
+        int back = gen_convert(fn, nar, rt, w);       /* and read it back */
+        return emit_cmp(fn, B_NE, r, back, 8, 1);
+    }
+
+    /* 64-bit: wrapping arithmetic in T's own width. */
+    struct type *wt = ty_int_of_size(8, uns);
+    int sign = !uns;
+    int a = gen_convert(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, wt);
+    int b = gen_convert(fn, gen_expr(fn, e->args[1]), e->args[1]->ty, wt);
+    int r = emit_bin(fn, iop, a, b, 8, sign);
+    emit_store(fn, addr, r, rt);
+
+    if (op == 'a' && uns)                 /* a + b wrapped iff r < a */
+        return emit_cmp(fn, B_LT, r, a, 8, 0);
+    if (op == 's' && uns)                 /* a - b wrapped iff a < b */
+        return emit_cmp(fn, B_LT, a, b, 8, 0);
+    if (op == 'a') {                      /* ((a^r) & (b^r)) < 0 */
+        int t = emit_bin(fn, IR_AND,
+                         emit_bin(fn, IR_XOR, a, r, 8, 1),
+                         emit_bin(fn, IR_XOR, b, r, 8, 1), 8, 1);
+        return emit_cmp(fn, B_LT, t, bk(fn, 0, 8), 8, 1);
+    }
+    if (op == 's') {                      /* ((a^b) & (a^r)) < 0 */
+        int t = emit_bin(fn, IR_AND,
+                         emit_bin(fn, IR_XOR, a, b, 8, 1),
+                         emit_bin(fn, IR_XOR, a, r, 8, 1), 8, 1);
+        return emit_cmp(fn, B_LT, t, bk(fn, 0, 8), 8, 1);
+    }
+
+    /* Multiply. The test is `x != 0 && r / x != y`, with x the operand
+     * divided by; the guard is folded into the DIVISOR so no branch is
+     * needed and no division can trap. */
+    if (uns) {
+        int azero = emit_cmp(fn, B_EQ, a, bk(fn, 0, 8), 8, 0);   /* int 0/1 */
+        int az64 = gen_convert(fn, azero, ty_base(TY_INT, 0), wt);
+        int safe = emit_bin(fn, IR_OR, a, az64, 8, 0);   /* a, or 1 when a==0 */
+        int q = emit_bin(fn, IR_DIV, r, safe, 8, 0);
+        int ne = emit_cmp(fn, B_NE, q, b, 8, 0);
+        int nz = emit_cmp(fn, B_NE, a, bk(fn, 0, 8), 8, 0);
+        return emit_bin(fn, IR_AND, nz, ne, 4, 0);
+    }
+    {
+        /* Signed. LMIN * -1 is the one product whose wrapped value is
+         * LMIN, and LMIN / -1 is the one division that traps -- the
+         * same case, so replacing the divisor with 1 there removes the
+         * trap and the answer is supplied directly. */
+        int lmin = bk(fn, (unsigned long)1 << 63, 8);
+        int bm1 = emit_cmp(fn, B_EQ, b, bk(fn, (unsigned long)-1, 8), 8, 1);
+        int almin = emit_cmp(fn, B_EQ, a, lmin, 8, 1);
+        int special = emit_bin(fn, IR_AND, bm1, almin, 4, 0);    /* int 0/1 */
+        int bzero = emit_cmp(fn, B_EQ, b, bk(fn, 0, 8), 8, 1);
+        int unsafe = emit_bin(fn, IR_OR, special, bzero, 4, 0);
+        int u64 = gen_convert(fn, unsafe, ty_base(TY_INT, 0), wt);
+        /* mask = 0 - unsafe, so all ones when the divisor must be 1 */
+        int mask = emit_bin(fn, IR_SUB, bk(fn, 0, 8), u64, 8, 1);
+        int keep = emit_bin(fn, IR_AND, b,
+                            emit_bin(fn, IR_XOR, mask,
+                                     bk(fn, (unsigned long)-1, 8), 8, 1),
+                            8, 1);
+        int safe = emit_bin(fn, IR_OR, keep,
+                            emit_bin(fn, IR_AND, bk(fn, 1, 8), mask, 8, 1),
+                            8, 1);
+        int q = emit_bin(fn, IR_DIV, r, safe, 8, 1);
+        int ne = emit_cmp(fn, B_NE, q, a, 8, 1);
+        int bnz = emit_cmp(fn, B_NE, b, bk(fn, 0, 8), 8, 1);
+        int div_says = emit_bin(fn, IR_AND, bnz, ne, 4, 0);
+        return emit_bin(fn, IR_OR, special, div_says, 4, 0);
+    }
 }
 
 static int eh_type_index(struct ir_func *fn, struct global *ti);
@@ -1532,9 +2058,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_EHTYPEID:          /* a catch type's selector: a constant */
         return emit_const(fn, eh_type_index(fn, e->gref), 8);
     case EXPR_FNUM:
-        if (e->ty->kind == TY_LDOUBLE)
+        if (ty_is_xldouble(e->ty))
             return emit_ldconst(fn, e->ldv ? e->ldv : ldf_from_double(e->fnum));
-        return emit_fconst(fn, e->fnum, ty_size(e->ty));
+        /* a long double that is a double (or a float): its value,
+         * which sema already rounded to that format */
+        return emit_fconst(fn, e->ldv ? ldf_to_double(e->ldv) : e->fnum,
+                           ty_size(e->ty));
     case EXPR_LABELADDR: {   /* &&label -> a void* to the label's code location */
         struct ir_ins *i = emit(fn);
         i->op = IR_LABELADDR;
@@ -1562,19 +2091,31 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             i->dst = new_temp(fn);
             return i->dst;
         }
+        if (atomic_lv(e))
+            return atomic_read(fn, e);
         /* arrays and structs are represented by their address */
         if (e->undecayed || e->ty->kind == TY_STRUCT)
             return gen_addr(fn, e);
-        if (e->gref)
-            return emit_load(fn, emit_gaddr(fn, e->gref), e->ty);
+        if (e->gref) {
+            int v = emit_load(fn, emit_gaddr(fn, e->gref), e->ty);
+            mark_natural(fn, e);
+            return v;
+        }
         return emit_ldvar(fn, e->var_index, e->ty);
     case EXPR_MEMBER: {
         int addr = gen_addr(fn, e);
+        int v;
         if (e->memb->is_bitfield)
             return bf_load(fn, addr, e->memb);
+        if (atomic_lv(e)) {
+            atomic_scalar_ok(fn, e, "reading");
+            return atomic_load(fn, addr, e->ty, e->line);
+        }
         if (e->undecayed || e->ty->kind == TY_STRUCT)
             return addr; /* array member decays; nested struct is addr */
-        return emit_load(fn, addr, e->ty);
+        v = emit_load(fn, addr, e->ty);
+        mark_natural(fn, e);
+        return v;
     }
     case EXPR_COMPLIT: {
         int addr = gen_complit(fn, e);
@@ -1583,6 +2124,13 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         return emit_load(fn, addr, e->ty);
     }
     case EXPR_ASSIGN: {
+        if (atomic_lv(e->lhs)) {
+            atomic_scalar_ok(fn, e->lhs, "assigning to");
+            int addr = gen_addr(fn, e->lhs);
+            int v = gen_expr(fn, e->rhs);
+            atomic_store(fn, addr, v, e->lhs->ty, e->line);
+            return v;
+        }
         if (e->ty->kind == TY_STRUCT) {
             /* a struct assignment is a copy of its bytes */
             int dst = gen_addr(fn, e->lhs);
@@ -1605,9 +2153,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         if (expr_is_bitfield(e->lhs))
             return bf_store(fn, addr, e->lhs->memb, v);
         emit_store(fn, addr, v, e->ty);
+        mark_natural(fn, e->lhs);
         return v;
     }
     case EXPR_INCDEC: {
+        if (atomic_lv(e->lhs))
+            return atomic_incdec(fn, e);
         struct type *t = e->ty;
         int scale = t->kind == TY_PTR ? ty_size(t->pointee) : 1;
         int vla_step = t->kind == TY_PTR && ty_is_vla(t->pointee);
@@ -1633,8 +2184,15 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             sum = emit_bin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
                            type_size_val(fn, t->pointee), w, 1);
         else
-            sum = emit_bin(fn, IR_ADD, cur,
-                           emit_const(fn, (long)e->delta * scale, w), w, 1);
+            /* Through san_bin: `x++` at INT_MAX is a signed overflow
+             * like any other, and a pointer step is not (scale != 1
+             * only for a pointer, whose arithmetic sanitize does not
+             * check). */
+            sum = scale != 1
+                ? emit_bin(fn, IR_ADD, cur,
+                           emit_const(fn, (long)e->delta * scale, w), w, 1)
+                : san_bin(fn, e->delta > 0 ? IR_ADD : IR_SUB, cur,
+                          emit_const(fn, 1, w), w, ty_signed_int(t));
         if (ty_size(t) <= 2 && !is_bf) {
             /* ++c on a char must wrap like a char, in the value too */
             struct ir_ins *i = emit(fn);
@@ -1662,7 +2220,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_NEG:
     case EXPR_BNOT: {
         int v = gen_expr(fn, e->rhs);
-        if (e->kind == EXPR_NEG && e->ty->kind == TY_LDOUBLE) {
+        if (e->kind == EXPR_NEG && ty_is_xldouble(e->ty)) {
             /* the sign bit of a 16-byte value: a float IR_NEG (fchs, or
              * flipping bit 127) — exact for -0.0 and NaN like the XOR below */
             struct ir_ins *i = emit(fn);
@@ -1682,6 +2240,14 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                                   sz == 8 ? (long)0x8000000000000000LL
                                           : (long)0x80000000L, sz);
             return emit_bin(fn, IR_XOR, v, mask, sz, 0);
+        }
+        if (e->kind == EXPR_NEG && (irgen_sanitize() & SAN_OVERFLOW) &&
+            ty_signed_int(e->ty)) {
+            /* -x is representable for every x but the most negative,
+             * where it is the one value the type cannot hold. */
+            int w = ty_w(e->ty);
+            san_trap_if(fn, emit_cmp(fn, B_EQ, v,
+                                     emit_const(fn, san_min(w), w), w, 1), w);
         }
         struct ir_ins *i = emit(fn);
         i->op = e->kind == EXPR_NEG ? IR_NEG : IR_BNOT;
@@ -1704,6 +2270,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         i->size = ty_size(e->ty);
         i->sign = ty_signed_int(e->ty);
         i->w = ty_w(e->ty);
+        i->natural = 1;        /* C: an object of this type is aligned */
+        /* `*p` with p a pointer to volatile is the READ of a device
+         * register, and each one has to happen. This load was built by
+         * hand and never said so, while emit_load did: at -O2 two reads
+         * of the same status register became one on every target. */
+        i->vol = e->ty->is_volatile;
         i->dst = new_temp(fn);
         return i->dst;
     }
@@ -1732,6 +2304,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_STMTEXPR:
         return gen_stmtexpr(fn, e);
     case EXPR_VA_ARG:
+        if (target_get() == TARGET_THUMB)
+            return irg_va_arg_thumb(fn, e);
+        if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
+            return irg_va_arg_riscv(fn, e);
+        if (target_get() == TARGET_AVR)
+            return irg_va_arg_avr(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -1798,15 +2376,15 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                  * mirror of the IR_MUL scaling on the ptr+int path. */
                 int a = gen_expr(fn, e->lhs);
                 int b = gen_expr(fn, e->rhs);
-                int diff = emit_bin(fn, IR_SUB, a, b, 8, 1);
+                int diff = emit_bin(fn, IR_SUB, a, b, AW, 1);
                 if (ty_is_vla(lt->pointee))
                     return emit_bin(fn, IR_DIV, diff,
-                                    type_size_val(fn, lt->pointee), 8, 1);
+                                    type_size_val(fn, lt->pointee), AW, 1);
                 int size = ty_size(lt->pointee);
                 if (size <= 1)
                     return diff;
-                int c = emit_const(fn, size, 8);
-                return emit_bin(fn, IR_DIV, diff, c, 8, 1);
+                int c = emit_const(fn, size, AW);
+                return emit_bin(fn, IR_DIV, diff, c, AW, 1);
             }
             if (lp || rp) {
                 /* ptr +/- int: scale the (already long) index */
@@ -1823,22 +2401,28 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 int size = ty_size(pt);
                 if (ty_is_vla(pt))
                     idx = emit_bin(fn, IR_MUL, idx, type_size_val(fn, pt),
-                                   8, 1);
+                                   AW, 1);
                 else if (size > 1) {
-                    int c = emit_const(fn, size, 8);
-                    idx = emit_bin(fn, IR_MUL, idx, c, 8, 1);
+                    int c = emit_const(fn, size, AW);
+                    idx = emit_bin(fn, IR_MUL, idx, c, AW, 1);
                 }
                 return emit_bin(fn, e->op == B_ADD ? IR_ADD : IR_SUB,
-                                p, idx, 8, 1);
+                                p, idx, AW, 1);
             }
-            /* plain arithmetic */
+            /* plain arithmetic -- and through san_bin, like the other
+             * two sites that lower a C arithmetic operator. This one is
+             * easy to miss: `+` and `-` are handled HERE rather than in
+             * the default arm, because they have the pointer cases
+             * above, so converting the default arm alone left signed
+             * add and sub unchecked while multiply and divide were
+             * checked. */
             int a = gen_expr(fn, e->lhs);
             int b = gen_expr(fn, e->rhs);
             enum ir_op o = e->op == B_ADD ? IR_ADD : IR_SUB;
             if (ty_is_float(e->ty))
                 return emit_fbin(fn, o, a, b, ty_size(e->ty));
-            return emit_bin(fn, o, a, b, ty_w(e->ty),
-                            ty_signed_int(e->ty));
+            return san_bin(fn, o, a, b, ty_w(e->ty),
+                           ty_signed_int(e->ty));
         }
         case B_EQ:
         case B_NE:
@@ -1874,8 +2458,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             if (ty_is_float(e->ty))
                 return emit_fbin(fn, map[e->op - B_ADD], a, b,
                                  ty_size(e->ty));
-            return emit_bin(fn, map[e->op - B_ADD], a, b,
-                            ty_w(e->ty), ty_signed_int(e->ty));
+            return san_bin(fn, map[e->op - B_ADD], a, b,
+                           ty_w(e->ty), ty_signed_int(e->ty));
         }
         }
     }
@@ -1887,6 +2471,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_GENERIC:
         break; /* sema replaced it with the selected expression */
     case EXPR_COMPOUND: {
+        if (atomic_lv(e->lhs))
+            return atomic_compound(fn, e);
         /* the address is computed ONCE — the whole reason this is not
          * desugared to `x = x op y` */
         struct type *lt = e->lhs->ty;
@@ -1897,33 +2483,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 : is_bf ? bf_load(fn, addr, e->lhs->memb)
                         : emit_load(fn, addr, lt);
         int rv = gen_expr(fn, e->rhs);
-        int res;
-        if (lt->kind == TY_PTR) {
-            int esz = ty_size(lt->pointee);
-            if (ty_is_vla(lt->pointee))
-                rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
-                              8, 1);
-            else if (esz > 1) {
-                int k = emit_const(fn, esz, 8);
-                rv = emit_bin(fn, IR_MUL, rv, k, 8, 1);
-            }
-            res = emit_bin(fn, e->op == B_ADD ? IR_ADD : IR_SUB, cur, rv,
-                           8, 1);
-        } else {
-            struct type *ct = e->cast_ty;
-            int cv = gen_convert(fn, cur, lt, ct);
-            static const enum ir_op map[] = {
-                IR_ADD, IR_SUB, IR_MUL, IR_DIV, IR_MOD,
-                IR_AND, IR_OR, IR_XOR, IR_SHL, IR_SHR,
-            };
-            enum ir_op o = map[e->op - B_ADD];
-            if (ty_is_float(ct))
-                res = emit_fbin(fn, o, cv, rv, ty_size(ct));
-            else
-                res = emit_bin(fn, o, cv, rv, ty_w(ct),
-                               ty_signed_int(ct));
-            res = gen_convert(fn, res, ct, lt);
-        }
+        int res = compound_value(fn, e, cur, rv);
         if (local)
             emit_stvar(fn, e->lhs->var_index, res, lt);
         else if (is_bf)
@@ -1933,17 +2493,25 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         return res;
     }
     case EXPR_COND: {
+
         int dst = new_temp(fn);
         int l_else = new_label(fn);
         int l_end = new_label(fn);
         int cw;
         int c = truth(fn, gen_expr(fn, e->args[0]), e->args[0]->ty, &cw);
         emit_brz(fn, c, cw, l_else);
+        /* The two merges carry the conditional's OWN width. They were
+         * emitted with none, which cost nothing while a register held
+         * any scalar and is half a `long long` on a 32-bit machine. */
+        int mw = ty_is_float(e->ty) ? ty_size(e->ty) : ty_w(e->ty);
+        int mflt = ty_is_float(e->ty) && !ty_is_xldouble(e->ty);
         int a = gen_expr(fn, e->lhs);
         struct ir_ins *m1 = emit(fn);
         m1->op = IR_MOV;
         m1->a = a;
         m1->dst = dst;
+        m1->w = mw;
+        m1->flt = mflt;
         emit_jmp(fn, l_end);
         emit_label(fn, l_else);
         int b = gen_expr(fn, e->rhs);
@@ -1951,6 +2519,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         m2->op = IR_MOV;
         m2->a = b;
         m2->dst = dst;
+        m2->w = mw;
+        m2->flt = mflt;
         emit_label(fn, l_end);
         return dst;
     }
@@ -1971,6 +2541,18 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
          * hidden slot, then point dst at the copy — so each list advances
          * independently, as C99 7.15.1.2 requires. */
         if (e->name && strcmp(e->name, "__builtin_va_copy") == 0) {
+            /* Where a va_list is a bare POINTER at the next argument —
+             * AAPCS32 and the RISC-V psABI — there is no tag to copy and
+             * the copy IS the assignment. Copying 24 bytes from it would
+             * copy the ARGUMENTS, and advancing either list would then
+             * walk a snapshot of them. */
+            if (target_va_list_is_pointer()) {
+                struct type *ptr = ty_int_of_size(target_ptr_size(), 1);
+                int dsta = gen_addr(fn, e->args[0]);
+                int src = gen_expr(fn, e->args[1]);
+                emit_store(fn, dsta, src, ptr);
+                return -1;
+            }
             struct ir_ins *ad = emit(fn);
             ad->op = IR_ADDR;
             ad->a = e->var_index;
@@ -1988,6 +2570,75 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             else
                 emit_store(fn, gen_addr(fn, d), tag, d->ty);
             return -1;
+        }
+        if (e->name && fb_is_bit_builtin(e->name)) {
+            const char *bn = e->name + 10;
+            int w = ty_size(e->args[0]->ty);
+            if (w != 4 && w != 8)
+                /* A 16-byte long double is either x87's 80-bit format or
+                 * IEEE binary128, and its sign bit is in the tenth or the
+                 * sixteenth byte -- past what one register holds. Saying
+                 * so beats answering for the wrong bits. */
+                diag_fatal(fn->file, e->line,
+                           "%s on a %d-byte long double is not supported: its "
+                           "sign and exponent fields do not fit one register, "
+                           "which is how the other widths are done",
+                           e->name, w);
+            int iw = w;
+            int b = fb_bits(fn, e->args[0], &iw);
+            long am = fb_absmask(w), sm = fb_signmask(w), em = fb_expmask(w);
+            int mag = 0;
+            if (strncmp(bn, "fabs", 4) == 0)
+                return fb_float(fn,
+                    emit_bin(fn, IR_AND, b, emit_const(fn, am, w), w, 0), w);
+            if (strncmp(bn, "copysign", 8) == 0) {
+                int w2 = w;
+                int b2 = fb_bits(fn, e->args[1], &w2);
+                return fb_float(fn,
+                    emit_bin(fn, IR_OR,
+                        emit_bin(fn, IR_AND, b, emit_const(fn, am, w), w, 0),
+                        emit_bin(fn, IR_AND, b2, emit_const(fn, sm, w), w, 0),
+                        w, 0), w);
+            }
+            if (strncmp(bn, "signbit", 7) == 0)
+                return gen_convert(fn,
+                    emit_bin(fn, IR_SHR, b, emit_const(fn, w * 8 - 1, w),
+                             w, 0),
+                    ty_int_of_size(w, 0), e->ty);
+            /* The predicates all read the magnitude -- the value with its
+             * sign cleared -- against the exponent field's all-ones. */
+            mag = emit_bin(fn, IR_AND, b, emit_const(fn, am, w), w, 0);
+            if (strcmp(bn, "isnan") == 0)          /* magnitude above inf */
+                return emit_cmp(fn, B_GT, mag, emit_const(fn, em, w), w, 0);
+            if (strcmp(bn, "isinf") == 0)
+                return emit_cmp(fn, B_EQ, mag, emit_const(fn, em, w), w, 0);
+            if (strcmp(bn, "isfinite") == 0)
+                return emit_cmp(fn, B_LT, mag, emit_const(fn, em, w), w, 0);
+            if (strcmp(bn, "isnormal") == 0) {
+                /* Normal iff the exponent field is neither all zeroes
+                 * (zero and the subnormals) nor all ones (inf and NaN). */
+                int ex = emit_bin(fn, IR_AND, b, emit_const(fn, em, w), w, 0);
+                return emit_bin(fn, IR_AND,
+                    emit_cmp(fn, B_NE, ex, emit_const(fn, 0, w), w, 0),
+                    emit_cmp(fn, B_NE, ex, emit_const(fn, em, w), w, 0),
+                    ty_w(e->ty), 1);
+            }
+            /* isinf_sign: 1, -1 or 0, so the caller learns WHICH infinity
+             * without a second test. */
+            {
+                int inf = emit_cmp(fn, B_EQ, mag, emit_const(fn, em, w), w, 0);
+                int neg = emit_bin(fn, IR_SHR, b,
+                                   emit_const(fn, w * 8 - 1, w), w, 0);
+                int sgn = emit_bin(fn, IR_SUB,
+                                   emit_const(fn, 1, 4),
+                                   emit_bin(fn, IR_SHL,
+                                            gen_convert(fn, neg,
+                                                        ty_int_of_size(w, 0),
+                                                        e->ty),
+                                            emit_const(fn, 1, 4), 4, 1),
+                                   4, 1);
+                return emit_bin(fn, IR_MUL, inf, sgn, 4, 1);
+            }
         }
         if (e->name && strncmp(e->name, "__builtin_sqrt", 14) == 0) {
             int v = gen_expr(fn, e->args[0]);
@@ -2024,6 +2675,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             if (bk)
                 return gen_bitop(fn, e, bk, bw);
         }
+        if (e->name && strncmp(e->name, "__builtin_", 10) == 0 &&
+            (strcmp(e->name + 10, "add_overflow") == 0 ||
+             strcmp(e->name + 10, "sub_overflow") == 0 ||
+             strcmp(e->name + 10, "mul_overflow") == 0))
+            return gen_overflow(fn, e, e->name[10]);
         if (e->name && (strcmp(e->name, "__builtin_unreachable") == 0 ||
                         strcmp(e->name, "__builtin_trap") == 0)) {
             emit(fn)->op = IR_UD2;
@@ -2059,7 +2715,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 fp = emit_load(fn, fp, e->ty);
             if (strcmp(e->name, "__builtin_frame_address") == 0)
                 return fp;
-            int at = emit_bin(fn, IR_ADD, fp, emit_const(fn, 8, 8), 8, 0);
+            int at = emit_bin(fn, IR_ADD, fp,
+                              emit_const(fn, AW, AW), AW, 0);
             return emit_load(fn, at, e->ty);
         }
         int args[MAX_PARAMS];
@@ -2076,6 +2733,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         i->a = fptemp;
         i->call_varargs = e->callee ? e->callee->is_varargs
                                     : e->lhs->ty->pointee->is_varargs;
+        /* Only a direct call can name one: sema refuses to take the
+         * address of a function whose pcs is not the default. */
+        i->call_pcs = e->callee ? e->callee->pcs : 0;
         i->call_nfixed = e->callee ? e->callee->nparams
                                    : e->lhs->ty->pointee->nptypes;
         i->sret_first = e->callee ? e->callee->sret_first
@@ -2106,6 +2766,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             ar->hfa_n = ty_hfa(at, &ar->hfa_size);
             ar->byref = ty_aapcs64_byref(at);
             ar->align = ty_align(at);
+            ar->nat_align = ty_natural_align(at);
             ar->is_float = ty_is_float(at);
             ar->is_int128 = at->kind == TY_INT128;
             ar->is_struct = at->kind == TY_STRUCT;
@@ -2207,7 +2868,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             for (int q = 0; q < ar->nclass; q++) {
                 if (ar->cls[q] == CLASS_SSE)
                     nf++;
-                else
+                else if (ar->cls[q] != CLASS_NONE)
                     ni++;
             }
             if (ar->nclass == 0 || ireg + ni > 6 || freg + nf > 8) {
@@ -2245,7 +2906,23 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             fn->scratch_bytes += (i->retsize + 7) & ~7;
         }
         i->flt = ty_is_float(e->ty);
-        i->w = i->flt ? ty_size(e->ty) : e->ty->kind == TY_INT128 ? 16 : 8;
+        /* The return TYPE's own width and signedness, which `w` below is
+         * explicitly not: see ret_tybytes in ir.h for why a machine whose
+         * return value is a run of byte registers needs both. */
+        if (e->ty->kind != TY_VOID && e->ty->kind != TY_STRUCT) {
+            i->ret_tybytes = ty_size(e->ty);
+            i->ret_tysign = ty_is_integer(e->ty) && !e->ty->is_unsigned;
+        }
+        /* An integer result comes back in the whole RETURN REGISTER, so
+         * the width here is the register's and not the type's: an `int`
+         * returned on x86-64 arrives in rax and codegen reads all of
+         * it. That register is four bytes on ILP32, where saying 8
+         * would ask a 32-bit machine for a value it has nowhere to
+         * put; a type that genuinely needs eight still gets it. */
+        i->w = i->flt ? ty_size(e->ty)
+             : e->ty->kind == TY_INT128 ? 16
+             : ty_w(e->ty) > target_ptr_size() ? ty_w(e->ty)
+             : target_ptr_size();
         i->dst = new_temp(fn);
         return i->dst;
     }
@@ -2261,6 +2938,112 @@ struct loopctx {
 
 /* The exception region being generated (ir_func.eh), or -1. */
 static int g_eh_cur = -1;
+
+/* ---- -fsanitize, trap mode ---------------------------------------------
+ *
+ * Each check is ordinary IR -- a comparison and a branch to IR_UD2 --
+ * so it costs nothing in the backends and the optimizer folds the ones
+ * whose operands it knows. At -O2 and -Os a constant divisor that is
+ * not zero, or a constant shift count in range, leaves no check behind
+ * at all -- `a / 7` comes out as the ordinary magic-multiply sequence.
+ * That is the whole reason to express these as IR rather than as a
+ * per-backend pattern. At -O0 and -O1 every check stands, which is what
+ * those levels are for.
+ */
+static unsigned g_san;
+
+void irgen_set_sanitize(unsigned mask) { g_san = mask; }
+unsigned irgen_sanitize(void) { return g_san; }
+
+/* if (cond) trap; */
+static void san_trap_if(struct ir_func *fn, int cond, int w)
+{
+    int ok = new_label(fn);
+    emit_brz(fn, cond, w, ok);
+    emit(fn)->op = IR_UD2;
+    emit_label(fn, ok);
+}
+
+/* The most negative value of a signed type `w` bytes wide. */
+static long san_min(int w)
+{
+    return w >= 8 ? (long)0x8000000000000000UL
+                  : -(1L << (w * 8 - 1));
+}
+
+/* a op b, with the checks -fsanitize asked for. Every caller that
+ * lowers a C arithmetic operator goes through here rather than calling
+ * emit_bin, so a new operator cannot quietly skip the checks. */
+static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
+                   int w, int sign)
+{
+    if (!g_san)
+        return emit_bin(fn, op, a, b, w, sign);
+
+    if ((g_san & SAN_SHIFT) && (op == IR_SHL || op == IR_SHR)) {
+        /* C says the count must be non-negative and less than the
+         * promoted left operand's width. Both halves matter: a negative
+         * count and an over-wide one are different bugs and neither is
+         * what the hardware does -- x86 masks the count to 5 or 6 bits,
+         * so `x << 32` silently returns x. */
+        san_trap_if(fn, emit_cmp(fn, B_GE, b, emit_const(fn, w * 8, w),
+                                 w, 0), w);
+        san_trap_if(fn, emit_cmp(fn, B_LT, b, emit_const(fn, 0, w),
+                                 w, 1), w);
+    }
+
+    if ((g_san & SAN_DIVIDE) && (op == IR_DIV || op == IR_MOD)) {
+        san_trap_if(fn, emit_cmp(fn, B_EQ, b, emit_const(fn, 0, w), w, 0), w);
+        if (sign)
+            /* INT_MIN / -1 has no representable answer, and on x86 it
+             * raises #DE rather than wrapping -- so this one is a
+             * crash today and a named trap after. */
+            san_trap_if(fn,
+                emit_bin(fn, IR_AND,
+                    emit_cmp(fn, B_EQ, a, emit_const(fn, san_min(w), w), w, 1),
+                    emit_cmp(fn, B_EQ, b, emit_const(fn, -1, w), w, 1),
+                    w, 1), w);
+    }
+
+    if ((g_san & SAN_OVERFLOW) && sign &&
+        (op == IR_ADD || op == IR_SUB || op == IR_MUL)) {
+        if (op == IR_MUL) {
+            /* Overflow iff the product does not divide back. The zero
+             * case is excluded first (it never overflows and would
+             * divide by zero), and INT_MIN * -1 separately, because
+             * that division is itself the undefined one above. */
+            int r = emit_bin(fn, IR_MUL, a, b, w, 1);
+            int nz = emit_cmp(fn, B_NE, a, emit_const(fn, 0, w), w, 1);
+            int mn = emit_bin(fn, IR_AND,
+                        emit_cmp(fn, B_EQ, a, emit_const(fn, -1, w), w, 1),
+                        emit_cmp(fn, B_EQ, b, emit_const(fn, san_min(w), w),
+                                 w, 1), w, 1);
+            san_trap_if(fn, mn, w);
+            /* guard the division: only when a != 0 */
+            int ok = new_label(fn);
+            emit_brz(fn, nz, w, ok);
+            san_trap_if(fn,
+                emit_cmp(fn, B_NE, emit_bin(fn, IR_DIV, r, a, w, 1), b,
+                         w, 1), w);
+            emit_label(fn, ok);
+            return r;
+        }
+        int r = emit_bin(fn, op, a, b, w, 1);
+        /* add: ((a^r) & (b^r)) < 0    sub: ((a^b) & (a^r)) < 0
+         * -- the same two formulas __builtin_add_overflow uses, so the
+         * builtin and the sanitizer cannot disagree about what
+         * overflow is. */
+        int t = op == IR_ADD
+              ? emit_bin(fn, IR_AND, emit_bin(fn, IR_XOR, a, r, w, 1),
+                                     emit_bin(fn, IR_XOR, b, r, w, 1), w, 1)
+              : emit_bin(fn, IR_AND, emit_bin(fn, IR_XOR, a, b, w, 1),
+                                     emit_bin(fn, IR_XOR, a, r, w, 1), w, 1);
+        san_trap_if(fn, emit_cmp(fn, B_LT, t, emit_const(fn, 0, w), w, 1), w);
+        return r;
+    }
+    return emit_bin(fn, op, a, b, w, sign);
+}
+
 
 /* The selector a landing pad sees for catch type ti (NULL: catch-all):
  * its 1-based place in the function's type table. */
@@ -2370,6 +3153,92 @@ static void mark_eh_calls(struct ir_func *fn)
  * Below a handful of cases the chain wins -- no tree, no extra labels,
  * and the first compare usually hits -- so a leaf is a chain.
  */
+int ir_jt_add(struct ir_func *fn, int n)
+{
+    if (fn->njt == fn->jtcap) {
+        fn->jtcap = fn->jtcap ? fn->jtcap * 2 : 4;
+        fn->jt = xrealloc(fn->jt, (size_t)fn->jtcap * sizeof *fn->jt);
+    }
+    int t = fn->njt++;
+    fn->jt[t].n = n;
+    fn->jt[t].labels = xmalloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+    for (int k = 0; k < n; k++)
+        fn->jt[t].labels[k] = -1;
+    return t;
+}
+
+int ir_jt_clone(struct ir_func *dst, const struct ir_func *src, int jt, int lbase)
+{
+    /* read the source out first: dst may be src, and ir_jt_add moves
+     * the table array */
+    int n = src->jt[jt].n;
+    int *copy = xmalloc((size_t)(n > 0 ? n : 1) * sizeof *copy);
+    for (int k = 0; k < n; k++)
+        copy[k] = src->jt[jt].labels[k] + lbase;
+    int t = ir_jt_add(dst, n);
+    for (int k = 0; k < n; k++)
+        dst->jt[t].labels[k] = copy[k];
+    free(copy);
+    return t;
+}
+
+static int g_opt_size;
+void irgen_set_opt_size(int on) { g_opt_size = on; }
+
+/* ---- the table ----
+ *
+ * Which switches get one: at least four cases, and the span of values
+ * from the lowest to the highest at most 4n + 4; under -Os, where an
+ * entry is bytes and a compare is bytes too, at least six cases spanning
+ * at most 2n; capped at 4096 entries either way.
+ * The index is the value less the lowest case, so a value below the
+ * range wraps above it and one unsigned compare in the backend sends
+ * both to the default. Every target but AVR has one (target_jump_tables):
+ * the tree stays there, and stays the fallback everywhere for the sparse
+ * ones. */
+static void switch_table(struct ir_func *fn, int v, int w, int sign,
+                         struct stmt **cs, int n, long lo, unsigned long range,
+                         int dflt)
+{
+    int idx = v;
+    if (lo != 0) {
+        int k = emit_const(fn, lo, w);
+        struct ir_ins *s = emit(fn);
+        s->op = IR_SUB;
+        s->a = v;
+        s->b = k;
+        s->w = w;
+        s->sign = sign;
+        s->dst = new_temp(fn);
+        idx = s->dst;
+    }
+    int t = ir_jt_add(fn, (int)range);
+    for (unsigned long k = 0; k < range; k++)
+        fn->jt[t].labels[k] = dflt;
+    for (int c = 0; c < n; c++)
+        fn->jt[t].labels[(unsigned long)cs[c]->cval - (unsigned long)lo] =
+            cs[c]->label;
+    struct ir_ins *s = emit(fn);
+    s->op = IR_SWITCH;
+    s->a = idx;
+    s->w = w;
+    s->label = dflt;
+    s->jt = t;
+}
+
+static int switch_dense(int n, int w, long lo, long hi)
+{
+    unsigned long range = (unsigned long)hi - (unsigned long)lo + 1;
+    /* a value wider than a register (long long on ARMv7-M, RV32) stays
+     * on the tree: the 32-bit backends lower nothing at 64 bits here */
+    if (n < 4 || range == 0 || range > 4096 || !target_jump_tables() ||
+        w > target_ptr_size())
+        return 0;
+    if (g_opt_size)
+        return n >= 6 && range <= 2UL * (unsigned long)n;
+    return range <= 4UL * (unsigned long)n + 4;
+}
+
 static void switch_case_eq(struct ir_func *fn, int v, int w, int sign,
                            long val, int label)
 {
@@ -2519,8 +3388,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                     int v = gen_expr(fn, s->inits[k].e);
                     int at = base;
                     if (s->inits[k].off) {
-                        int o = emit_const(fn, s->inits[k].off, 8);
-                        at = emit_bin(fn, IR_ADD, base, o, 8, 1);
+                        int o = emit_const(fn, s->inits[k].off, AW);
+                        at = emit_bin(fn, IR_ADD, base, o, AW, 1);
                     }
                     store_init_leaf(fn, at, &s->inits[k], v);
                 }
@@ -2552,6 +3421,13 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             /* the template is assembled by the target's own vocabulary */
             if (target_get() == TARGET_AARCH64)
                 irg_asm_arm64(fn, s);
+            else if (target_get() == TARGET_THUMB)
+                irg_asm_thumb(fn, s);
+            else if (target_get() == TARGET_RISCV32 ||
+                     target_get() == TARGET_RISCV64)
+                irg_asm_riscv(fn, s);
+            else if (target_get() == TARGET_AVR)
+                irg_asm_avr(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;
@@ -2611,8 +3487,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             emit_label(fn, s->label);
             break;
         case STMT_SWITCH: {
-            /* A balanced decision tree over the case values: see
-             * switch_tree above, including why it is not a jump table. */
+            /* A jump table when the cases are dense (switch_table), a
+             * balanced decision tree over the values otherwise
+             * (switch_tree). */
             struct loopctx lc;
             lc.brk = new_label(fn);
             /* continue inside a switch belongs to the enclosing LOOP;
@@ -2663,8 +3540,14 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                     }
                     cs[b1 + 1] = t;
                 }
-                switch_tree(fn, v, w, sign, cs, 0, n - 1,
-                            dflt >= 0 ? dflt : lc.brk);
+                if (switch_dense(n, w, cs[0]->cval, cs[n - 1]->cval))
+                    switch_table(fn, v, w, sign, cs, n, cs[0]->cval,
+                                 (unsigned long)cs[n - 1]->cval -
+                                 (unsigned long)cs[0]->cval + 1,
+                                 dflt >= 0 ? dflt : lc.brk);
+                else
+                    switch_tree(fn, v, w, sign, cs, 0, n - 1,
+                                dflt >= 0 ? dflt : lc.brk);
                 free(cs);
             } else {
                 emit_jmp(fn, dflt >= 0 ? dflt : lc.brk);
@@ -2762,6 +3645,20 @@ static int gen_stmtexpr(struct ir_func *fn, struct expr *e)
         prev->next = last;
     }
     int v = -1;
+    /* A LABELLED last statement still has the value of what it labels
+     * -- `({ ...; done: r; })` is r, which is the shape every
+     * __label__ macro takes. The labels are emitted first so a `goto`
+     * from inside the block still reaches them, then the labelled
+     * expression provides the value. sema types it the same way. */
+    while (last && last->kind == STMT_LABEL && last->body) {
+        int ix = label_idx(fn, last->name, last->line);
+        if (g_labels[ix].defined)
+            diag_fatal(fn->file, last->line, "duplicate label '%s'",
+                       last->name);
+        g_labels[ix].defined = 1;
+        emit_label(fn, g_labels[ix].label);
+        last = last->body;
+    }
     if (last && last->kind == STMT_EXPR && last->expr)
         v = gen_expr(fn, last->expr);    /* the block's value */
     else if (last)
@@ -2856,6 +3753,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
         fn->ret_abi.hfa_n = ty_hfa(rt, &fn->ret_abi.hfa_size);
         fn->ret_abi.byref = ty_aapcs64_byref(rt);
         fn->ret_abi.ty = rt;
+        fn->pcs = f->pcs;
     }
     /* The same two refusals as at a call site, on the SIGNATURE --
      * because a function that merely takes or returns one of these
@@ -2895,6 +3793,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
             a->vreg = k;
             a->size = pt ? ty_size(pt) : 0;
             a->align = pt ? ty_align(pt) : 1;
+            a->nat_align = pt ? ty_natural_align(pt) : 1;
             a->is_struct = pt && pt->kind == TY_STRUCT;
             a->is_float = pt && ty_is_float(pt);
             a->is_int128 = pt && pt->kind == TY_INT128;

@@ -35,9 +35,18 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e);
 /* Darwin arm64: every variadic argument is on the stack, so the
  * list is the walking pointer itself (aarch64/irgen.c). */
 int irg_va_arg_darwin(struct ir_func *fn, struct expr *e);
+/* AAPCS32, where a va_list is a bare pointer at the next argument. */
+int irg_va_arg_thumb(struct ir_func *fn, struct expr *e);
+int irg_va_arg_riscv(struct ir_func *fn, struct expr *e);
+/* AVR, where a variadic call puts EVERY argument on the stack -- the named
+ * ones too -- so the list is a bare pointer and there is no split point. */
+int irg_va_arg_avr(struct ir_func *fn, struct expr *e);
 /* extended asm: assign operand registers and assemble the template with
  * the target's own inline-asm vocabulary, then emit IR_ASM */
 void irg_asm_x86(struct ir_func *fn, struct stmt *s);
 void irg_asm_arm64(struct ir_func *fn, struct stmt *s);
+void irg_asm_riscv(struct ir_func *fn, struct stmt *s);
+void irg_asm_thumb(struct ir_func *fn, struct stmt *s);
+void irg_asm_avr(struct ir_func *fn, struct stmt *s);
 
 #endif

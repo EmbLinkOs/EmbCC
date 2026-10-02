@@ -140,7 +140,11 @@ static int opens_targs(int i)
  * expansion; -1: `...` naming no bound pack (in a pattern, kept). */
 int expansion_at(int angles, struct csym **packs, int max, int *ellipsis)
 {
-    char stk[256];                /* ( [ { < as opened */
+    /* One flag per open bracket: was it a template argument list's '<'?
+     * The same reason as packs_in's is_targs below -- this held the
+     * token kind with ASCII '<' as the marker, and TOK_LBRACE is 60,
+     * which IS '<'. */
+    char stk[256];                /* 1: a template '<'; 0: ( [ { */
     int sp = 0, np = 0;
     int i;
     for (i = cx_pos; i < cx_ntoks; i++) {
@@ -149,20 +153,20 @@ int expansion_at(int angles, struct csym **packs, int max, int *ellipsis)
             return 0;
         if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE) {
             if (sp < 256)
-                stk[sp] = (char)k;
+                stk[sp] = 0;
             sp++;
             continue;
         }
         if (k == TOK_LT && ((angles && sp == 0) || opens_targs(i))) {
             if (sp < 256)
-                stk[sp] = '<';
+                stk[sp] = 1;
             sp++;
             continue;
         }
         if (k == TOK_RPAREN || k == TOK_RBRACKET || k == TOK_RBRACE) {
             if (sp == 0)
                 break;
-            while (sp > 0 && sp <= 256 && stk[sp - 1] == '<')
+            while (sp > 0 && sp <= 256 && stk[sp - 1])
                 sp--;             /* a `<` that was a comparison after all */
             if (sp == 0)
                 break;
@@ -171,7 +175,7 @@ int expansion_at(int angles, struct csym **packs, int max, int *ellipsis)
         }
         if (k == TOK_GT || k == TOK_SHR) {
             int n = k == TOK_SHR ? 2 : 1, popped = 0;
-            while (n > 0 && sp > 0 && sp <= 256 && stk[sp - 1] == '<') {
+            while (n > 0 && sp > 0 && sp <= 256 && stk[sp - 1]) {
                 sp--;
                 n--;
                 popped = 1;
@@ -205,7 +209,20 @@ static int is_closer(enum tok_kind k)
 int packs_in(int from, int to, struct csym **packs, int max)
 {
     enum { MAXD = 128 };
-    char kind[MAXD];
+    /* Is the bracket at this depth a template argument list's '<'?
+     *
+     * This was `char kind[MAXD]` holding the token kind, with ASCII '<'
+     * (60) as the marker for the template case -- so any token whose
+     * kind happened to equal 60 was indistinguishable from it. That is
+     * not hypothetical: TOK_LBRACE is 60 today, so a '{' inside the
+     * scanned range was already being popped as an angle bracket, and
+     * inserting two tokens anywhere ahead of TOK_LPAREN moved '(' onto
+     * it too, which broke every pack expansion written `(xs * 2)...`.
+     *
+     * Nothing ever reads the stored kind -- all five uses ask only
+     * "was it '<'" -- so it is a flag, and cannot collide with
+     * anything. */
+    char is_targs[MAXD];
     int open[MAXD], elem[MAXD];
     int sp = 0, np = 0, fold = -1;
     char *skip = xcalloc((size_t)(to - from + 1), 1);
@@ -216,7 +233,7 @@ int packs_in(int from, int to, struct csym **packs, int max)
         if (k == TOK_LPAREN || k == TOK_LBRACKET || k == TOK_LBRACE ||
             (k == TOK_LT && opens_targs(j))) {
             if (sp < MAXD) {
-                kind[sp] = k == TOK_LT ? '<' : (char)k;
+                is_targs[sp] = (k == TOK_LT);
                 open[sp] = j;
                 elem[sp] = j + 1;
             }
@@ -224,7 +241,7 @@ int packs_in(int from, int to, struct csym **packs, int max)
             continue;
         }
         if (is_closer(k)) {
-            while (sp > 0 && sp <= MAXD && kind[sp - 1] == '<')
+            while (sp > 0 && sp <= MAXD && is_targs[sp - 1])
                 sp--;
             if (sp > 0)
                 sp--;
@@ -233,9 +250,9 @@ int packs_in(int from, int to, struct csym **packs, int max)
             continue;
         }
         if ((k == TOK_GT || k == TOK_SHR) && sp > 0 && sp <= MAXD &&
-            kind[sp - 1] == '<') {
+            is_targs[sp - 1]) {
             sp--;
-            if (k == TOK_SHR && sp > 0 && sp <= MAXD && kind[sp - 1] == '<')
+            if (k == TOK_SHR && sp > 0 && sp <= MAXD && is_targs[sp - 1])
                 sp--;
             continue;
         }
@@ -258,7 +275,7 @@ int packs_in(int from, int to, struct csym **packs, int max)
         enum tok_kind next = j + 1 < cx_ntoks ? cx_toks[j + 1].t.kind
                                               : TOK_EOF;
         int list_end = next == TOK_COMMA || is_closer(next) ||
-                       (kind[sp - 1] == '<' &&
+                       (is_targs[sp - 1] &&
                         (next == TOK_GT || next == TOK_SHR));
         int start = list_end ? elem[sp - 1] : open[sp - 1];
         for (int e = start; e <= j; e++)

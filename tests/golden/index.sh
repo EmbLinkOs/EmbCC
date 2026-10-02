@@ -89,7 +89,9 @@ EOF
 grep -q "a.c: rebuild (its own source changed)" "$out/stale.txt" || {
     echo "FAIL: a body edit did not rebuild its own unit:"
     cat "$out/stale.txt"; exit 1; }
-grep -q "b.c" "$out/stale.txt" && {
+# /b\.c: -- the unit, not any "b", any character and a "c" in the path:
+# a checkout under .../b7b2a63b-cc7f/... matched "b-c" and failed here.
+grep -q "/b\.c:" "$out/stale.txt" && {
     echo "FAIL: a body edit rebuilt an unrelated unit:"
     cat "$out/stale.txt"; exit 1; }
 echo "a function body edit: its own unit only"

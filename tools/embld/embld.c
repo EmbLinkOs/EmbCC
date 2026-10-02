@@ -5,7 +5,7 @@
  * fork/exec); this binary exists for host-side development and testing,
  * the way `embread` gives the ELF writer a testable front door.
  *
- * usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR]
+ * usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]
  *              [--embx [--cap NAME]...] INPUT.o|INPUT.a ...
  *        embld --doctor INPUT.o|INPUT.a ...
  *
@@ -43,6 +43,7 @@ int main(int argc, char **argv)
                                        : (++i < argc ? argv[i] : NULL);
             if (!v) { fprintf(stderr, "embld: -Ttext needs an address\n"); return 2; }
             opts.base = strtoul(v, NULL, 0);
+            opts.have_base = 1;        /* `-Ttext 0` is a real request */
         } else if (strncmp(argv[i], "--lma-offset", 12) == 0) {
             /* L2: p_paddr = p_vaddr - OFFSET, for a higher-half kernel (OFFSET =
              * KERNEL_VIRTUAL_BASE). Accepts --lma-offset=HEX or a separate arg. */
@@ -50,6 +51,36 @@ int main(int argc, char **argv)
                           : (++i < argc ? argv[i] : NULL);
             if (!v) { fprintf(stderr, "embld: --lma-offset needs a value\n"); return 2; }
             opts.lma_offset = strtoull(v, NULL, 0);
+        } else if (strncmp(argv[i], "-Tdata", 6) == 0) {
+            /* A FIRMWARE layout: the writable segment is addressed at
+             * this address (RAM) and stored right after the text
+             * (flash), and the linker provides __data_load /
+             * __data_start / __data_end / __bss_start / __bss_end so a
+             * plain C startup can copy and zero. Spelled -Tdata because
+             * that is what every other linker calls it. */
+            const char *v = argv[i][6] ? argv[i] + 6
+                                       : (++i < argc ? argv[i] : NULL);
+            if (!v) { fprintf(stderr, "embld: -Tdata needs an address\n"); return 2; }
+            opts.data_base = strtoul(v, NULL, 0);
+        } else if (strncmp(argv[i], "--rom-limit", 11) == 0) {
+            /* The part's flash size: an image that does not fit is refused
+             * (link.h). --rom-limit=N or --rom-limit N. */
+            const char *v = argv[i][11] == '=' ? argv[i] + 12
+                          : (++i < argc ? argv[i] : NULL);
+            if (!v) { fprintf(stderr, "embld: --rom-limit needs a size\n"); return 2; }
+            opts.rom_limit = strtoul(v, NULL, 0);
+        } else if (strncmp(argv[i], "-Tstack", 7) == 0) {
+            /* RISC-V only: the initial stack pointer, and with it a
+             * four-instruction entry stub that sets sp and jumps to the
+             * entry symbol. A Cortex-M gets this from its hardware --
+             * the processor reads sp out of the first word of the image
+             * -- and RISC-V has nothing equivalent, so without it the
+             * first prologue subtracts from a stack pointer of zero. */
+            const char *v = argv[i][7] ? argv[i] + 7
+                                       : (++i < argc ? argv[i] : NULL);
+            if (!v) { fprintf(stderr, "embld: -Tstack needs an address\n"); return 2; }
+            opts.stack_top = strtoul(v, NULL, 0);
+            opts.have_stack = 1;
         } else if (strcmp(argv[i], "--embx") == 0) {
             opts.emit_embx = 1;            /* write a native EMBX, not ELF */
         } else if (strcmp(argv[i], "--cap") == 0) {
@@ -68,7 +99,7 @@ int main(int argc, char **argv)
         }
     }
     if (!ninputs) {
-        fprintf(stderr, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR]\n"
+        fprintf(stderr, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]\n"
                         "             [--embx [--cap NAME]...] INPUT.o|INPUT.a ...\n"
                         "       embld --doctor INPUT.o|INPUT.a ...   "
                         "(why the link fails)\n");

@@ -82,7 +82,7 @@ static const int VARIADIC_POOL[NVARIADIC] = { 10, 11, 3 /*rbx*/, 12, 13, 14, 15 
  * `is_arg` masks in colouring. A leaf function has neither constraint, so it
  * gets all nine freely. NLEAF sizes the allocator's per-colour arrays. */
 #define NLEAF 10
-static const int LEAF_POOL[NLEAF] = { 8, 9, 10, 11, 6 /*rsi*/,
+static const int LEAF_POOL[NLEAF] = { 6 /*rsi*/, 8, 9, 10, 11,
                                       3 /*rbx*/, 12, 13, 14, 15 };
 /* rdi is NOT here, and it was tried. It is argument register zero AND
  * the hidden pointer a struct return travels through, so it is written
@@ -99,26 +99,18 @@ static const int LEAF_POOL[NLEAF] = { 8, 9, 10, 11, 6 /*rsi*/,
 /* ...and with rdx, for a function that neither divides nor has an
  * atomic in it. */
 #define NLEAF_RDX 11
-static const int LEAF_POOL_RDX[NLEAF_RDX] = { 8, 9, 10, 11, 6 /*rsi*/,
-                                              2 /*rdx*/, 3 /*rbx*/,
+static const int LEAF_POOL_RDX[NLEAF_RDX] = { 6 /*rsi*/, 2 /*rdx*/,
+                                              8, 9, 10, 11, 3 /*rbx*/,
                                               12, 13, 14, 15 };
 
 #define NLEAF_AT 9
 static const int LEAF_POOL_AT[NLEAF_AT] = { 8, 9, 10, 11,
                                             3 /*rbx*/, 12, 13, 14, 15 };
 
-/* The FLOATING-POINT pool: xmm8-15.
- *
- * SysV passes floating-point arguments and returns in xmm0-7 and
- * preserves none of the sixteen, so the eight above the argument file
- * are the ones that are nobody else's: no prologue save, no CFI rule,
- * and no collision with a call's arguments being set up. xmm0 stays the
- * scratch every float site already uses.
- *
- * Win64 is the reason this is not xmm2-15: there xmm6-15 are
- * callee-saved and would each need a sixteen-byte save and an unwind
- * rule, which is work this does not do yet -- so that ABI gets no FP
- * pool at all rather than a wrong one. */
+/* The FLOATING-POINT pool, which was xmm8-15 (see below for why it
+ * moved). Win64 makes xmm6-15 callee-saved, and neither the pool's xmm6
+ * nor the xmm7 scratch is saved under it: one of the gaps the
+ * -Wwindows-abi warning names on every Windows compile. */
 #define X86_FP_ALLOC 1    /* see the note below */
 #define NX86_FPOOL 7
 static const int X86_FPOOL[NX86_FPOOL] = { 0, 1, 2, 3, 4, 5, 6 };
@@ -224,8 +216,7 @@ static const int *x86_pool_for(const struct ir_func *fn, int *n)
     /* After the caller-saved ones already there (it is caller-saved too,
      * so it needs no prologue save) and before the callee-saved five. */
     int k = 0, o = 0;
-    while (k < nb && (base[k] == 8 || base[k] == 9 || base[k] == 10 ||
-                      base[k] == 11 || base[k] == 6 || base[k] == 2))
+    while (k < nb && (base[k] == 6 || base[k] == 2))
         x86_pool_buf[o++] = base[k++];
     x86_pool_buf[o++] = REG_RDI;
     while (k < nb) x86_pool_buf[o++] = base[k++];
@@ -350,7 +341,8 @@ static void x86_abi_hints(const struct ir_func *fn, int *hint)
                 continue;
             if (a->is_struct || a->nclass == 2) {
                 for (int q = 0; q < a->nclass; q++)
-                    if (a->cls[q] == CLASS_SSE) freg2++; else ireg2++;
+                    if (a->cls[q] == CLASS_SSE) freg2++;
+                    else if (a->cls[q] != CLASS_NONE) ireg2++;
                 continue;
             }
             if (a->cls[0] == CLASS_SSE) {
@@ -390,7 +382,10 @@ static const struct ra_target X86_RA = {
                     * is in this backend's pool, so a hint naming one
                     * would never match. That changes if the pool ever
                     * grows to them. */,
-    x86_fp_pool_for, x86_fp_callee_saved
+    x86_fp_pool_for, x86_fp_callee_saved,
+    0,            /* float_in_gpr: floats have their own class (SSE) */
+    NULL, NULL,
+    0  /* atomic_in_reg */
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----
@@ -488,6 +483,56 @@ char *cg_wide_vregs(struct ir_func *fn)
  *
  * A compare is the one op whose operands and result disagree: it reads
  * two floats and produces a 0/1 integer. */
+/* String sites carry the string INDEX while a function is being lowered,
+ * because that is what the IR's IR_STRADDR holds; the driver's relocations
+ * want the OFFSET in .rodata. Every backend owes this conversion once its
+ * unit is done.
+ *
+ * It lives here, shared, rather than as the same line in each backend.
+ * Four of them had that line and the fifth did not, and the symptom was
+ * three strings away from the cause: string index N resolved to
+ * rodata + N, so `puts_("DONE\n")` printed "cXYZ" out of the middle of
+ * the previous literal and a digit-summing loop over "0123456789" got 224.
+ * Nothing faulted and every address was inside .rodata. */
+void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n)
+{
+    for (int k = 0; k < n; k++) {
+        /* RK_AVR_TEXT_CALL names a label in .text and its str_off is ALREADY
+         * an offset -- a jump too far for AVR's 12-bit rjmp, relocated
+         * against the section symbol. Everything else here is a string index
+         * into the unit's pool. */
+        if (s[k].kind == RK_AVR_TEXT_CALL)
+            continue;
+        s[k].str_off = iu->strs[s[k].str_off].off;
+    }
+}
+
+/* Is a call from `caller` to `callee` resolved here, as a displacement
+ * within one section -- or left to the linker, as a relocation? Only a
+ * callee defined in this unit AND placed in the same section can be:
+ * a function with a section attribute is laid out apart from .text, and
+ * the distance between two sections is the linker's to decide. Shared,
+ * like cg_resolve_strsites (AVR relocates every call anyway). */
+int cg_call_local(const struct func *caller, const struct func *callee)
+{
+    if (!callee->has_defn)
+        return 0;
+    const char *a = caller && caller->section ? caller->section : "";
+    const char *b = callee->section ? callee->section : "";
+    return strcmp(a, b) == 0;
+}
+
+/* Can this load, store, ldvar or stvar move its value as a float or a
+ * double? (cg_float_vregs) */
+static int flt_width(const struct ir_ins *i)
+{
+    if (i->size != 4 && i->size != 8)
+        return 0;
+    if (i->op == IR_LOAD || i->op == IR_LDVAR)
+        return !(i->sign && i->size < i->w);
+    return 1;
+}
+
 char *cg_float_vregs(struct ir_func *fn)
 {
     int nv = fn->nvregs ? fn->nvregs : 1;
@@ -506,6 +551,11 @@ char *cg_float_vregs(struct ir_func *fn)
         switch (i->op) {
         case IR_I2F:  MARK(i->dst); break;
         case IR_F2I:  MARK(i->a);   break;
+        /* A bitcast has a float on exactly one side: `sign` says
+         * which, so only that side joins the float class. */
+        case IR_BITCAST:
+            if (i->sign) MARK(i->a); else MARK(i->dst);
+            break;
         case IR_F2F:  MARK(i->dst); MARK(i->a); break;
         case IR_SQRT: MARK(i->dst); MARK(i->a); break;
         default: break;
@@ -564,6 +614,9 @@ char *cg_float_vregs(struct ir_func *fn)
             break;
         case IR_I2F:  BAD(i->a);   break;         /* integer in */
         case IR_F2I:  BAD(i->dst); break;         /* integer out */
+        case IR_BITCAST:
+            if (i->sign) BAD(i->dst); else BAD(i->a);
+            break;
         case IR_F2F:
             /* A conversion with a LONG DOUBLE on either side goes
              * through the x87 unit, which loads and stores memory and
@@ -573,10 +626,28 @@ char *cg_float_vregs(struct ir_func *fn)
             if (i->w == 16 || i->size == 16) { BAD(i->dst); BAD(i->a); }
             break;
         case IR_SQRT: break;
-        case IR_MOV: case IR_LDVAR: case IR_STVAR: break;   /* copies */
-        case IR_LOAD:  BAD(i->a);   break;        /* the address */
-        case IR_STORE: BAD(i->a);   break;        /* the address */
-        case IR_RET:   break;
+        case IR_MOV: break;                       /* a copy */
+        /* A memory access moves a float or a double as movss/movsd (ldr
+         * s/d): four or eight bytes. One of another width is an INTEGER
+         * access -- `r->h = 0` where the same `const 0` is also the 0.0f
+         * of `f * 0.0f` -- and from an FP register it stored eight bytes
+         * into a two-byte field. A signed widening read is integer too:
+         * movss fills the high half with zeros, not the sign. */
+        case IR_LDVAR: case IR_STVAR:             /* copies, unless narrow */
+            if (!flt_width(i)) { BAD(i->a); BAD(i->dst); }
+            break;
+        case IR_LOAD:
+            BAD(i->a);                            /* the address */
+            if (!flt_width(i)) BAD(i->dst);
+            break;
+        case IR_STORE:
+            BAD(i->a);                            /* the address */
+            if (!flt_width(i)) BAD(i->b);
+            break;
+        /* A floating-point return is `flt` and never reaches here; this
+         * one hands its value back in rax (x0), so the value has to be
+         * in a general register. */
+        case IR_RET:   BAD(i->a); break;
         case IR_CALL:
             if (i->indirect) BAD(i->a);
             for (int k = 0; k < i->nargs; k++)
@@ -706,6 +777,14 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
             rlo[i] = lf[i];
             rhi[i] = ll[i] + 1;              /* half-open */
         }
+        /* A parameter is written by the prologue, before instruction 0,
+         * whether or not its incoming value is ever read -- so its slot is
+         * in use from the entry. Liveness started a parameter that is only
+         * assigned at its first assignment, and `u8 a3` was given the slot
+         * of `u64 a1`: the prologue's store of a3 overwrote a1 before the
+         * body read it (random programs, x86-64 -O0). */
+        if (i < fn->nparams)
+            rlo[i] = 0;
     }
     free(at); free(lf); free(ll); free(lout); free(lin); free(dv);
 
@@ -744,10 +823,172 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
  * applied to an offset. */
 #define DEAD_SLOT_OFF (-0x40000000)
 
+/* Is parameter p a struct that System V passes in MEMORY? It arrives in
+ * the caller's outgoing area, which belongs to this function for the
+ * length of the call -- gcc and clang use it as the parameter's home, and
+ * so does this: the prologue used to copy it into the frame eight bytes
+ * at a time, 168 bytes for every EmbLinkOs widget call's EmProps. Not
+ * under -g, where its DWARF home is a frame offset, nor on Win64, which
+ * passes such an aggregate by reference. */
+static int x86_param_home_incoming(const struct func *f, int p)
+{
+    enum arg_class cls[2];
+    if (target_win64_abi() || g_want_debug || !f ||
+        p < 0 || p >= f->nparams || !f->param_tys[p])
+        return 0;
+    return f->param_tys[p]->kind == TY_STRUCT &&
+           ty_classify(f->param_tys[p], cls) == 0;
+}
+
+/* ---- a struct argument built where the callee will read it ------------
+ *
+ * A struct passed by value in MEMORY travels in the outgoing area at
+ * [rsp + stk_off], and the call copies it there from wherever it was
+ * built. For a compound literal -- `f((Props){ .x = 1 })`, every widget
+ * call in EmbLinkOs's UI -- that wherever is a temporary local made for
+ * the purpose: zeroed, its fields stored, copied, and never read again.
+ * gcc builds it in the outgoing area directly. So does this, for a local
+ * whose one `addr` reaches nothing but its own loads, stores, clears and
+ * copies and that one argument of that one call, all in the call's block
+ * and before it, with nothing between its first write and the call that
+ * could write the outgoing area -- another call, asm, an alloca, or an
+ * operation lowered through a helper. Two such locals whose lives overlap
+ * would share the area, so the later one keeps its own slot.
+ *
+ * The frame is fixed (no alloca), so rsp is rbp - frame at every call and
+ * the local's slot is simply rbp - frame + stk_off. Its address then IS
+ * the destination, and the call's copy, which compares them, is skipped.
+ * Returns, per local, that stk_off, or -1; NULL when there is none. */
+static int *x86_inplace_locals(struct ir_func *fn)
+{
+    struct func *f = fn->src;
+    int nv = fn->nvregs, nvars = fn->nvars;
+    if (!g_regalloc || g_want_debug || fn->has_alloca || target_win64_abi() ||
+        !f || nvars == 0 || nv == 0)
+        return NULL;
+    int *res = NULL;
+    int *ndef = xcalloc((size_t)nv, sizeof *ndef);
+    int *defn = xmalloc((size_t)nv * sizeof *defn);
+    int *naddr = xcalloc((size_t)nvars, sizeof *naddr);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int d = ra_ins_def(i);
+        if (d >= 0 && d < nv) { ndef[d]++; defn[d] = n; }
+        if (i->op == IR_ADDR && i->a >= 0 && i->a < nvars)
+            naddr[i->a]++;
+        if ((i->op == IR_LDVAR && i->a >= 0 && i->a < nvars) ||
+            (i->op == IR_STVAR && i->dst >= 0 && i->dst < nvars))
+            naddr[i->op == IR_LDVAR ? i->a : i->dst] += 2;   /* named directly */
+    }
+    char *der = xcalloc((size_t)nv, 1);
+    /* The last call given an in-place argument, and the one before it.
+     * Calls are visited in order, so a window for a LATER call must open
+     * after the last one, and another window for the SAME call (its
+     * arguments sit at different offsets) after the one before that. */
+    int last_call = -1, prev_call = -1;
+    for (int c = 0; c < fn->nins; c++) {
+        const struct ir_ins *call = &fn->ins[c];
+        if (call->op != IR_CALL)
+            continue;
+        for (int k = 0; k < call->nargs; k++) {
+            const struct ir_arg *a = &call->argv[k];
+            int p = a->vreg;
+            if (!a->on_stack || !a->is_struct || p < nvars || p >= nv ||
+                ndef[p] != 1 || fn->ins[defn[p]].op != IR_ADDR)
+                continue;
+            int X = fn->ins[defn[p]].a;
+            if (X < 0 || X >= nvars || naddr[X] != 1 || !f->var_tys ||
+                !f->var_tys[X] || ty_size(f->var_tys[X]) != a->size)
+                continue;
+            int al = f->var_aligns ? f->var_aligns[X] : 0;
+            if (ty_align(f->var_tys[X]) > al) al = ty_align(f->var_tys[X]);
+            if (al > 16 || (al > 0 && a->stk_off % al) || (res && res[X] >= 0))
+                continue;
+            /* the address and its constant offsets, and every use */
+            memset(der, 0, (size_t)nv);
+            der[p] = 1;
+            /* `first` is the first access THROUGH it: the `addr` itself
+             * touches nothing, and LICM hoists it to the entry block,
+             * away from the clear and the stores in a loop body. */
+            int ok = 1, first = -1;
+            for (int n = 0; n < fn->nins && ok; n++) {
+                const struct ir_ins *i = &fn->ins[n];
+                int ra = i->a >= 0 && i->a < nv && der[i->a];
+                int rb = !i->imm_b && i->b >= 0 && i->b < nv && der[i->b];
+                int rc = i->c >= 0 && i->c < nv && der[i->c];
+                if (n == defn[p])
+                    continue;
+                if (i->op == IR_ADD && i->imm_b && ra && i->dst >= 0 &&
+                    i->dst < nv && ndef[i->dst] == 1) {
+                    der[i->dst] = 1;
+                } else if (i->op == IR_CALL) {
+                    for (int q = 0; q < i->nargs; q++)
+                        if (i->argv[q].vreg >= 0 && i->argv[q].vreg < nv &&
+                            der[i->argv[q].vreg] && !(n == c && q == k))
+                            ok = 0;
+                    if (i->indirect && ra)
+                        ok = 0;
+                    continue;
+                } else if ((i->op == IR_LOAD || i->op == IR_MEMZERO) && !rb && !rc) {
+                    /* through it: fine; it is checked for place below */
+                } else if (i->op == IR_STORE && !rb && !rc) {
+                } else if (i->op == IR_MEMCPY && !rc) {
+                } else {
+                    if (ra || rb || rc)
+                        ok = 0;
+                    continue;
+                }
+                if (ra || rb) {
+                    if (n > c)
+                        ok = 0;                 /* used after the call */
+                    else if (first < 0 || n < first)
+                        first = n;
+                }
+            }
+            if (first < 0)
+                first = c;
+            if (!ok || first <= (c == last_call ? prev_call : last_call))
+                continue;
+            /* between the first access and the call: one block, and
+             * nothing that could write the outgoing area */
+            for (int n = first; n < c && ok; n++) {
+                const struct ir_ins *i = &fn->ins[n];
+                switch (i->op) {
+                case IR_LABEL: case IR_CALL: case IR_ASM: case IR_ALLOCA:
+                case IR_SPSAVE: case IR_SPRESTORE: case IR_VA_START:
+                case IR_LANDING: case IR_JMP: case IR_BRZ: case IR_BRNZ:
+                case IR_SWITCH: case IR_IGOTO: case IR_RET: case IR_UD2:
+                    ok = 0;
+                    break;
+                default:
+                    if (i128_ins(i) || x87_ins(i))
+                        ok = 0;
+                    break;
+                }
+            }
+            if (!ok)
+                continue;
+            if (!res) {
+                res = xmalloc((size_t)nvars * sizeof *res);
+                for (int v = 0; v < nvars; v++)
+                    res[v] = -1;
+            }
+            res[X] = a->stk_off;
+            if (c != last_call) {
+                prev_call = last_call;
+                last_call = c;
+            }
+        }
+    }
+    free(ndef); free(defn); free(naddr); free(der);
+    return res;
+}
+
 static int *layout_frame(struct ir_func *fn, int *frame_out,
                          int *scratch_base_out, int *sret_slot_out,
                          int *va_save_out, int *va_tag_out,
-                         int nsave, int *save_base_out, const int *loc)
+                         int nsave, int *save_base_out, const int *loc,
+                         const int *inplace)
 {
     struct func *f = fn->src;
     int *disp = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1)
@@ -788,6 +1029,10 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         int s = lslot[i];
         if (!lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_want_debug))
             continue;               /* in a register, or named nowhere at all */
+        if (inplace && inplace[i] >= 0)
+            continue;               /* in the outgoing area: placed below */
+        if (i < fn->nparams && x86_param_home_incoming(f, i))
+            continue;               /* in the caller's: the prologue says where */
         int sz = (ty_size(f->var_tys[i]) + 7) & ~7;
         if (sz > ssize[s]) ssize[s] = sz;
         /* Alignment of a local's stack slot: the greater of its type's natural
@@ -918,6 +1163,12 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
      * ABI requires at every call, since the frame is a multiple of 16. */
     running += fn->outgoing_bytes;
     *frame_out = (running + 15) & ~15;
+    for (int i = 0; inplace && i < fn->nvars; i++)
+        if (inplace[i] >= 0)
+            disp[i] = -*frame_out + inplace[i];     /* rsp + stk_off */
+    for (int i = 0; i < fn->nparams && i < fn->nvars; i++)
+        if (x86_param_home_incoming(f, i))
+            disp[i] = DEAD_SLOT_OFF;                /* until the prologue */
     return disp;
 }
 
@@ -992,6 +1243,8 @@ struct brsite {
     int ord;        /* this branch's number in the function, or -1 for
                      * something that is not a branch at all (the `lea`
                      * of a label's address, which is always 32-bit) */
+    int tab;        /* a jump table's entry: the table's offset + 1, and
+                     * the value is target - table; 0 for everything else */
 };
 
 /* ---- branch relaxation ----------------------------------------------
@@ -1101,6 +1354,74 @@ static int vw_src = -1;
  * out, and undoing that is not possible. */
 static int fold_idx = -1;         /* the unshifted index, or -1 */
 static int fold_scale = 1;
+
+/* zx32[v]: temp v is written exactly once, by an integer operation at
+ * width 4 whose every lowering here ends in a 32-bit write of the
+ * register -- in place (`and $255, %esi`, `lea (..), %esi`, `imul`), or
+ * through RAX and a 32-bit `mov` home. x86-64 zeroes a register's upper
+ * half on every 32-bit write, so such a temp's register already holds
+ * its zero extension and `(unsigned long)` of it is no instruction.
+ *
+ * NOT every width-4 value has that property, which is why the general
+ * widening still emits `movl`: a copy, a local's read, or a truncating
+ * store into a local sharing its source's register can leave the source's
+ * upper half in place. Hence the single definition, by one of these
+ * operations, of a temp (never a local). Shifts only by a count of 1-31:
+ * the manual's pseudo-code for a shift by zero never assigns the
+ * destination, so what it does to the upper half is not relied on. Loads
+ * only unsigned: every one of those zero-fills, at any width. */
+static char *g_zx32;
+static int x86_def_zx32(const struct ir_ins *i)
+{
+    if (i->flt || i->w != 4)
+        return 0;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_AND: case IR_OR:
+    case IR_XOR: case IR_NEG: case IR_BNOT:
+        return 1;
+    case IR_SHL: case IR_SHR:
+        return i->imm_b && (i->imm & 31) != 0;
+    case IR_LOAD:
+        /* a zero-extending load fills the register whatever form it
+         * takes -- movzbl, movzwl, movl, or a 64-bit movzx */
+        return !i->sign;
+    default:
+        return 0;
+    }
+}
+
+/* May an address computation feeding `mem` be folded into that access's
+ * addressing mode?
+ *
+ * Both halves of the fusion have to agree, because they are two
+ * instructions apart: `shl idx, #k` is emitted as NOTHING on the promise
+ * that the `add` two instructions later will fold it into a SIB scale,
+ * and if the add then decides not to fold, the shift is simply gone.
+ *
+ * That is exactly what happened. The shift asked only `!x87_ins(mem)`
+ * while the add also refused a float-class load or store, so
+ * `double *p; p[i]` -- the most ordinary indexed float access there is
+ * -- dropped its `shlq $3` and read byte i instead of byte 8i. It
+ * survived every test in the tree because the caller usually inlines the
+ * function and the inlined copy takes a different path; it shows up the
+ * moment the access is out of line.
+ *
+ * So the question is asked once, here, and both sites call it. */
+static int is_flt(int v);
+static int x87_ins(const struct ir_ins *i);
+static int addr_fold_ok(const struct ir_ins *mem)
+{
+    if (x87_ins(mem))
+        return 0;                       /* long double is gen_x87's */
+    /* A float-class value's home is an xmm register, and the fused paths
+     * write the slot (cg_store) instead. tests/exec/complex.c caught
+     * that end of it. */
+    if (mem->op == IR_LOAD)
+        return !is_flt(mem->dst);
+    if (mem->op == IR_STORE)
+        return !is_flt(mem->b);
+    return 1;
+}
 
 static void cg_reset(void) { rc_vreg = -1; rc_zx = 0; vrc_vreg = -1;
                              vw_src = -1; }
@@ -1306,7 +1627,13 @@ static void cg_load(struct code *text, const int *sd, int vreg,
         else if (size == 4 && sign && w == 8)
             x86_movsxd_rr(text, REG_RAX, R);      /* signed int -> 64 */
         else
-            x86_mov_rr_w(text, REG_RAX, R, size == 8 ? 8 : w);
+            /* Four bytes read are a 32-BIT move, which zeroes the upper
+             * half -- as cg_ext_into learned. Copying 64 bits trusted the
+             * register's upper half to be zero already, and an integer a
+             * call returns sits in the whole of rax with whatever the
+             * callee left above bit 31: (double)(unsigned)f() converted
+             * a negative int's sign bits as part of the value. */
+            x86_mov_rr_w(text, REG_RAX, R, size == 8 ? 8 : 4);
     } else {
         x86_load_slot(text, sd[vreg], size, sign, w);
     }
@@ -1536,6 +1863,23 @@ static int addr_reg(struct code *text, const int *sd, int v)
     return REG_RCX;
 }
 
+/* A parameter's bytes, from where the caller left them into the slot at
+ * [rbp+dst], through rax: 8, 4, 2 and 1 bytes at a time, because an
+ * aggregate of 3, 5, 6 or 7 bytes has a tail no single move is (copying
+ * it as `chunk` bytes stopped the build with "bad load size 3"). It
+ * writes only rax and memory, so in the prologue loop it disturbs no
+ * argument register the parallel move has yet to read. */
+static void x86_param_copy(struct code *text, int dst, int base, int off,
+                           int sz)
+{
+    for (int at = 0; at < sz;) {
+        int w = sz - at >= 8 ? 8 : sz - at >= 4 ? 4 : sz - at >= 2 ? 2 : 1;
+        x86_load_reg_mem(text, REG_RAX, base, off + at, w);
+        x86_store_mem_reg(text, REG_RBP, dst + at, REG_RAX, w);
+        at += w;
+    }
+}
+
 /* The floating-point pair of cg_load/cg_store. An xmm home and a stack
  * slot are the same value and only one of them is current, so every site
  * that touches a float vreg's slot goes through these. */
@@ -1630,7 +1974,7 @@ static struct func *x86_helper(const char *name)
 static void x86_call_helper(struct code *text, struct sites *st,
                             const char *name)
 {
-    struct extcall ec;
+    struct extcall ec = { 0, NULL, 0 };
     ec.patch_off = x86_call_rel32(text);
     ec.callee = x86_helper(name);
     PUSH(st->ext, st->next, st->capext, ec);
@@ -2072,9 +2416,21 @@ static struct afold afold_build(struct ir_func *fn, const int *sd)
     int *root = xmalloc((size_t)nv * sizeof *root);
     int *disp = xmalloc((size_t)nv * sizeof *disp);
     for (int v = 0; v < nv; v++) root[v] = -1;
+    /* A temp folded into its accesses stands for ONE frame address, so it
+     * must have one definition. A name written on two paths -- `&s1` on
+     * one, `&s2` on the other, once a join's copies are coalesced -- took
+     * whichever definition came last, and `(k ? s1 : s2).a` read s1
+     * either way (tests/exec/struct-rvalue-member.c at -O1). */
+    int *ndef = xcalloc((size_t)nv, sizeof *ndef);
+    for (int n = 0; n < fn->nins; n++) {
+        int d = ra_ins_def(&fn->ins[n]);
+        if (d >= 0 && d < nv) ndef[d]++;
+    }
     int any = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        if (i->dst >= 0 && i->dst < nv && ndef[i->dst] != 1)
+            continue;
         if (i->op == IR_ADDR && i->dst >= 0 && i->dst < nv &&
             i->a >= 0 && i->a < fn->nvars && sd[i->a] != DEAD_SLOT_OFF) {
             root[i->dst] = i->dst; disp[i->dst] = sd[i->a];
@@ -2086,6 +2442,7 @@ static struct afold afold_build(struct ir_func *fn, const int *sd)
             isb[i->dst] = 1;
         }
     }
+    free(ndef);
     if (!any) { free(isb); free(root); free(disp); return r; }
 
     /* Every use must be one the lowering below folds. */
@@ -2107,9 +2464,27 @@ static struct afold afold_build(struct ir_func *fn, const int *sd)
             continue;                        /* the offset chain itself */
         if (i->op == IR_ADDR)
             continue;
+        /* A block copy or clear, and a struct argument copied into the
+         * outgoing area, take their addresses as rbp+disp too: building a
+         * compound literal is a memzero and a store per field, all through
+         * an address that otherwise sat in a slot and was reloaded for
+         * each one -- four instructions a field where one does. */
+        if (i->op == IR_MEMZERO || i->op == IR_MEMCPY)
+            continue;
+        if (i->op == IR_CALL) {
+            if (i->indirect)
+                UNFOLD(i->a);                /* the target; a direct call's
+                                              * `a` is not an operand */
+            /* `byref` is AAPCS64's, computed for every target; here
+             * only Win64 copies an aggregate by reference, through the
+             * address's slot. */
+            for (int k = 0; k < i->nargs; k++)
+                if (!(i->argv[k].on_stack && i->argv[k].is_struct &&
+                      !target_win64_abi()))
+                    UNFOLD(i->argv[k].vreg);
+            continue;
+        }
         UNFOLD(i->a); UNFOLD(i->b); UNFOLD(i->c);
-        if (i->op == IR_CALL)
-            for (int k = 0; k < i->nargs; k++) UNFOLD(i->argv[k].vreg);
         /* An asm operand is named nowhere near `a`/`b`/`c`, and the
          * lowering loads every one of them from its slot. Missing these
          * is what crashed asm-clobber.c, asm-inout.c and asm-mem-alu.c
@@ -2142,9 +2517,22 @@ static struct afold afold_build(struct ir_func *fn, const int *sd)
  *
  * After the pops rsp is rbp again, which is what the `leave` that
  * follows assumes anyway -- so the caller's epilogue is unchanged. */
+/* A frame that is only its pushes (see gen_func): popped in the order
+ * they sit, the alignment pad first -- into r11, which carries neither
+ * an argument nor a result, since a tail call pops after its arguments
+ * are in place. */
+static int g_pushonly, g_pad;
+
 static void restore_callee(struct code *text, const int *used_callee,
                            int nsave, int save_base)
 {
+    if (g_pushonly) {
+        if (g_pad)
+            x86_pop_reg(text, 11);
+        for (int k = 0; k < nsave; k++)
+            x86_pop_reg(text, used_callee[k]);
+        return;
+    }
     if (nsave >= 2) {
         x86_lea_reg_slot(text, REG_RSP, save_base);
         for (int k = 0; k < nsave; k++)
@@ -2153,6 +2541,99 @@ static void restore_callee(struct code *text, const int *used_callee,
     }
     for (int k = 0; k < nsave; k++)
         x86_load_reg_mem(text, used_callee[k], REG_RBP, save_base + k * 8, 8);
+}
+
+/* ---- read-modify-write ------------------------------------------------
+ *
+ * `t = load [A]`, later `u = t OP v`, then `store [A], u` -- a counter, an
+ * accumulator in memory, `stack[sp - 1] += stack[sp]` -- is one x86
+ * instruction, `OP v, (A)`, where it was three: the load into a register,
+ * the op, and the store back. x86_rmw_find recognises it at the load and
+ * returns the op's index; the load emits nothing and the op emits the
+ * whole thing and consumes the store.
+ *
+ * Between the load and the op nothing may write memory (it could be A),
+ * redefine A, or leave the block; t and u must have no other use, so
+ * neither needs to exist in a register. Only a full-width access (4 or
+ * 8 bytes, the op's own width), and only the ops with a memory
+ * destination: + - & | ^, with t as the left operand of a subtraction. */
+/* A block copy or clear longer than this is `rep movsq` / `rep stosq`
+ * rather than two instructions per eight bytes (IR_MEMCPY). */
+#define X86_REP_MIN 256
+
+static int x86_rmw_writes_memory(enum ir_op op)
+{
+    switch (op) {
+    case IR_STORE: case IR_STVAR: case IR_CALL: case IR_MEMCPY:
+    case IR_MEMZERO: case IR_XCHG: case IR_XADD: case IR_ARMW: case IR_CAS:
+    case IR_CMPXCHG: case IR_CAS16: case IR_VSTORE: case IR_ASM:
+    case IR_VA_START: case IR_FENCE: case IR_ALLOCA: case IR_SPRESTORE:
+    case IR_LANDING:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+struct rmw_rd { int v, found; };
+static void rmw_rd_cb(int v, void *ctx)
+{
+    struct rmw_rd *r = ctx;
+    if (v == r->v)
+        r->found = 1;
+}
+
+static int x86_rmw_find(struct ir_func *fn, int n, const int *usecnt)
+{
+    const struct ir_ins *ld = &fn->ins[n];
+    int t = ld->dst, A = ld->a;
+    if (ld->op != IR_LOAD || ld->vol || ld->memoff || ld->flt ||
+        (ld->size != 4 && ld->size != 8) || ld->w != ld->size ||
+        t < fn->nvars || t >= fn->nvregs || usecnt[t] != 1 || is_flt(t) ||
+        A < 0 || A >= fn->nvregs || (!in_reg(A) && !afolded(A)))
+        return -1;
+    for (int k = n + 1; k + 1 < fn->nins && k <= n + 16; k++) {
+        const struct ir_ins *o = &fn->ins[k];
+        switch (o->op) {
+        case IR_LABEL: case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_RET:
+        case IR_SWITCH: case IR_IGOTO: case IR_UD2:
+            return -1;
+        default:
+            break;
+        }
+        if (x86_rmw_writes_memory(o->op) || ra_ins_def(o) == A)
+            return -1;
+        struct rmw_rd rd = { t, 0 };
+        ra_each_use(o, rmw_rd_cb, &rd);
+        if (!rd.found)
+            continue;
+        /* the one use of t */
+        int u = o->dst, v;
+        if ((o->op != IR_ADD && o->op != IR_SUB && o->op != IR_AND &&
+             o->op != IR_OR && o->op != IR_XOR) || o->flt ||
+            o->w != ld->w || u < fn->nvars || u >= fn->nvregs ||
+            usecnt[u] != 1 || is_flt(u))
+            return -1;
+        if (o->a == t)
+            v = o->imm_b ? -1 : o->b;
+        else if (!o->imm_b && o->b == t && o->op != IR_SUB)
+            v = o->a;
+        else
+            return -1;
+        if (v == t || (v < 0 && !o->imm_b))
+            return -1;
+        if (o->imm_b && ld->w == 8 &&
+            (o->imm < -2147483648L || o->imm > 2147483647L))
+            return -1;
+        if (v >= 0 && is_flt(v))
+            return -1;
+        const struct ir_ins *st = &fn->ins[k + 1];
+        if (st->op != IR_STORE || st->a != A || st->b != u || st->vol ||
+            st->memoff || st->size != ld->size)
+            return -1;
+        return k;
+    }
+    return -1;
 }
 
 static void gen_func(struct ir_func *fn, struct code *text,
@@ -2229,8 +2710,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
         g_floc = NULL;
     }
     int save_base;
+    int *inplace = x86_inplace_locals(fn);
     int *sd = layout_frame(fn, &frame, &scratch_base, &sret_slot,
-                           &va_save, &va_tag, nsave, &save_base, loc);
+                           &va_save, &va_tag, nsave, &save_base, loc,
+                           inplace);
+    free(inplace);
     /* Set by the parameter pass below, read by IR_VA_START: how many
      * named arguments the integer and SSE register files hold, and the
      * rbp offset of the first stack-passed argument (the overflow area). */
@@ -2244,6 +2728,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
         label_off[i] = -1;
     struct brsite *brs = NULL;
     int nbrs = 0, capbrs = 0;
+    /* absolute jump-table entries awaiting their labels (IR_SWITCH) */
+    struct { int off, label; } *jtabs = NULL;
+    int njtabs = 0, capjtabs = 0;
 
     /* -g: expose each source variable's frame slot (rbp-relative) so the
      * DWARF emitter can write DW_OP_fbreg. sd is indexed by vreg; params and
@@ -2277,23 +2764,96 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int frameless = g_regalloc && frame == 0 && nsave == 0 &&
                     !fn->has_alloca && !f->is_varargs && !g_want_debug &&
                     sret_slot == 0 && f->nparams <= 4;
+    /* A SIBLING call is not a call here: it leaves rsp exactly as it
+     * found it and jumps, and the callee sees the stack our caller
+     * aligned. A function whose only calls are tail calls needs no frame
+     * record to tear down before them. */
     for (int n = 0; n < fn->nins && frameless; n++)
         switch (fn->ins[n].op) {
-        case IR_CALL: case IR_ASM: case IR_ALLOCA: case IR_VA_START:
+        case IR_CALL:
+            if (!(g_tailcalls && tail_call_ok(fn, n)))
+                frameless = 0;
+            break;
+        case IR_ASM: case IR_ALLOCA: case IR_VA_START:
         case IR_FRAMEADDR: case IR_SPSAVE: case IR_SPRESTORE:
             frameless = 0;
             break;
         default:
             break;
         }
+    /* float and double arrive in xmm0-3 under both conventions when there
+     * are four parameters or fewer -- System V has eight of them, and
+     * Win64 gives each of the four positions an xmm register as well as
+     * an integer one. long double is x87 memory in both. */
     for (int p = 0; p < f->nparams && frameless; p++) {
         struct type *pt = f->param_tys[p];
         if (!pt || pt->kind == TY_STRUCT || pt->kind == TY_ARRAY ||
-            pt->kind == TY_INT128 || ty_is_float(pt) || ty_size(pt) > 8)
+            pt->kind == TY_INT128 || pt->kind == TY_LDOUBLE ||
+            ty_size(pt) > 8)
             frameless = 0;
     }
 
-    code_align(text, 16, 0x90);
+    /* ---- or a frame without a frame POINTER ---------------------------
+     *
+     * A function that saves registers or makes calls but keeps nothing
+     * in memory does not need rbp either: its frame is the pushes. clang
+     * and gcc build it that way, and here it was `push rbp; mov rbp,rsp`
+     * ... `lea -N(%rbp),%rsp` (or a load per register) ... `leave` --
+     * nine bytes a function that point rbp at a frame nothing reads.
+     *
+     * The conditions are frameless's -- nothing that names rbp or the
+     * stack arguments -- with the calls allowed and every slot dead: no
+     * local, temp, scratch or outgoing area has an address. At a call
+     * rsp must be 16-aligned; it is 8 off at entry, so an even number of
+     * pushes takes one more as a pad. ELF only: Mach-O's compact unwind
+     * describes every x86-64 function as an rbp frame, and Win64 has
+     * unwind codes of its own. Not with exception regions, whose landing
+     * pads are entered by the unwinder. */
+    g_pushonly = g_pad = 0;
+    x86_no_rbp = 0;              /* the prologue below may use rbp */
+    if (!frameless && g_regalloc && !fn->has_alloca && !f->is_varargs &&
+        !g_want_debug && sret_slot == 0 && f->nparams <= 4 && !fn->neh &&
+        !target_win64_abi() && target_fmt_get() == TGT_FMT_ELF &&
+        fn->scratch_bytes == 0 && fn->outgoing_bytes == 0) {
+        int calls = 0;
+        g_pushonly = 1;
+        for (int v = 0; v < fn->nvregs; v++)
+            if (sd[v] != DEAD_SLOT_OFF)
+                g_pushonly = 0;
+        /* a parameter at home in the caller's area is found through rbp */
+        for (int p = 0; p < f->nparams; p++)
+            if (x86_param_home_incoming(f, p))
+                g_pushonly = 0;
+        for (int n = 0; n < fn->nins && g_pushonly; n++)
+            switch (fn->ins[n].op) {
+            case IR_CALL:
+                if (!(g_tailcalls && tail_call_ok(fn, n)))
+                    calls = 1;
+                break;
+            case IR_ASM: case IR_ALLOCA: case IR_VA_START:
+            case IR_FRAMEADDR: case IR_SPSAVE: case IR_SPRESTORE:
+            case IR_LANDING:
+                g_pushonly = 0;
+                break;
+            default:
+                if (i128_ins(&fn->ins[n]))
+                    calls = 1;          /* a libgcc helper */
+                break;
+            }
+        for (int p = 0; p < f->nparams && g_pushonly; p++) {
+            struct type *pt = f->param_tys[p];
+            if (!pt || pt->kind == TY_STRUCT || pt->kind == TY_ARRAY ||
+                pt->kind == TY_INT128 || pt->kind == TY_LDOUBLE ||
+                ty_size(pt) > 8)
+                g_pushonly = 0;
+        }
+        g_pad = g_pushonly && calls && !(nsave & 1);
+    }
+
+    /* Sixteen at -O2, as clang does; none at -Os, as clang does there --
+     * a one-byte function was followed by fifteen nops. */
+    if (!target_opt_size())
+        code_align(text, 16, 0x90);
     f->code_off = text->len;
 
     /* The frame record, then the callee-saved registers, then the rest
@@ -2306,12 +2866,31 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * every displacement in the frame is unchanged, because the pushes
      * and the smaller `sub` move rsp by exactly what the `sub` alone
      * moved it by before. */
-    x86_prologue(text, frameless ? frame : 0, frameless);
+    /* -fstack-usage: everything below the caller's rsp — the return
+     * address, the saved rbp where there is one, and the frame. */
+    f->stack_bytes = g_pushonly ? 8 + 8 * (nsave + g_pad)
+                                : (int)(frame + 8 + (frameless ? 0 : 8));
+    f->cfi_pushonly = g_pushonly;
+    f->cfi_npush = 0;
+    if (g_pushonly) {
+        /* The same order as below, so the registers land where the
+         * unwind table says: the last slot first, then the pad. */
+        for (int k = nsave - 1; k >= 0; k--) {
+            x86_push_reg(text, used_callee[k]);
+            f->cfi_push_end[f->cfi_npush++] = text->len - f->code_off;
+        }
+        if (g_pad) {
+            x86_push_reg(text, REG_RAX);
+            f->cfi_push_end[f->cfi_npush++] = text->len - f->code_off;
+        }
+    } else {
+        x86_prologue(text, frameless ? frame : 0, frameless);
+    }
     /* for the unwind tables: push rbp ends at +1, mov rbp,rsp at +4 */
     f->cfi_frameless = frameless;
     f->cfi_push = 1;
     f->cfi_frame = 4;
-    if (!frameless) {
+    if (!frameless && !g_pushonly) {
         for (int k = nsave - 1; k >= 0; k--)
             x86_push_reg(text, used_callee[k]);
         x86_sub_rsp(text, frame - nsave * 8);
@@ -2322,9 +2901,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
         static const int dw[8] = { 0, 2, 1, 3, 7, 6, 4, 5 };
         f->cfi_reg[k] = used_callee[k] < 8 ? dw[used_callee[k]]
                                            : used_callee[k];
-        f->cfi_off[k] = save_base + k * 8 - 16;     /* the CFA is rbp+16 */
+        /* the CFA is rbp+16, or -- with no rbp -- the return address
+         * plus the pushes: slot k was the (nsave-k)th of them */
+        f->cfi_off[k] = g_pushonly ? -8 * (nsave + 1 - k)
+                                   : save_base + k * 8 - 16;
     }
     f->cfi_saved_at = text->len - f->code_off;
+    x86_no_rbp = frameless || g_pushonly;
     /* Variadic: spill the whole argument register file into the save area
      * FIRST, before the parameter pass below uses rcx/rax as scratch and
      * so clobbers the vararg registers. Storing a register does not alter
@@ -2367,6 +2950,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * so they need no cycle breaking, only to come after it. */
     int pstk_dst[MAX_PARAMS], pstk_off[MAX_PARAMS], pstk_sz[MAX_PARAMS];
     int npstk = 0;
+    /* The float ones, whose home is an xmm register: the same rule,
+     * against the FP permutation. Their slot does not exist -- before
+     * these, a ninth double went by way of rax into it, and the
+     * dead-slot guard refused any such function at -O2. */
+    int fstk_dst[MAX_PARAMS], fstk_off[MAX_PARAMS], fstk_sz[MAX_PARAMS];
+    int nfstk = 0;
     int fmv_dst[16], fmv_src[16], nfmv = 0;   /* the float half */
     char pmoved[MAX_PARAMS];
     for (int p = 0; p < MAX_PARAMS; p++) pmoved[p] = 0;
@@ -2407,25 +2996,28 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * language says. The extra copy is redundant (the
                  * caller's is already private) and is the simple thing
                  * that cannot be subtly wrong. */
+                /* The pointer goes in r11, never an argument register:
+                 * this was rcx, and copying a second-place one there
+                 * overwrote the first parameter before the shuffle read
+                 * it -- f(long a, struct big s) used s's address as a. */
                 if (fn->param_abi && fn->param_abi[i].byref) {
-                    int sz = ty_size(pt);
+                    int src = x86_argreg(slot);
                     if (slot >= 4) {
-                        x86_load_reg_mem(text, REG_RCX, REG_RBP, incoming, 8);
+                        x86_load_reg_mem(text, 11 /*r11*/, REG_RBP,
+                                         incoming, 8);
                         incoming += 8;
-                    } else if (x86_argreg(slot) != REG_RCX) {
-                        x86_mov_reg_reg(text, REG_RCX, x86_argreg(slot));
+                        src = 11;
                     }
-                    x86_lea_reg_slot(text, 11 /*r11*/, sd[i]);
-                    for (int off = 0; off < sz; off += 8) {
-                        int chunk = sz - off >= 8 ? 8 : sz - off;
-                        x86_load_reg_mem(text, REG_RAX, REG_RCX, off, chunk);
-                        x86_store_mem_reg(text, 11 /*r11*/, off, REG_RAX,
-                                          chunk);
-                    }
+                    x86_param_copy(text, sd[i], src, 0, ty_size(pt));
                     continue;
                 }
                 if (slot >= 4) {
-                    if (pmove && g_loc[i] >= 0) {       /* as SysV, above */
+                    if (ty_is_float(pt) && in_freg(i)) {
+                        fstk_dst[nfstk] = g_floc[i];
+                        fstk_off[nfstk] = incoming;
+                        fstk_sz[nfstk] = ty_size(pt);
+                        nfstk++;
+                    } else if (pmove && g_loc[i] >= 0) {  /* as SysV, below */
                         pstk_dst[npstk] = g_loc[i];
                         pstk_off[npstk] = incoming;
                         pstk_sz[npstk] = ty_size(pt);
@@ -2435,6 +3027,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         x86_store_slot(text, sd[i], 8);
                     }
                     incoming += 8;
+                } else if (ty_is_float(pt) && in_freg(i)) {
+                    /* into the FP permutation, as SysV does: moving it
+                     * here wrote the register a LATER float arrives in,
+                     * and f(double a, double b) returned a in place of b */
+                    fmv_dst[nfmv] = g_floc[i];
+                    fmv_src[nfmv] = slot;
+                    nfmv++;
                 } else if (ty_is_float(pt)) {
                     x86_fst(text, sd, i, slot, ty_size(pt));
                 } else if (pmove && g_loc[i] >= 0) {
@@ -2486,7 +3085,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
                      * instructions for nothing, and it is the only
                      * reason a stack-passed parameter's slot has to
                      * exist at all. */
-                    if (pmove && g_loc[i] >= 0) {
+                    if (ty_is_float(pt) && in_freg(i)) {
+                        fstk_dst[nfstk] = g_floc[i];
+                        fstk_off[nfstk] = incoming;
+                        fstk_sz[nfstk] = ty_size(pt);
+                        nfstk++;
+                    } else if (pmove && g_loc[i] >= 0) {
                         pstk_dst[npstk] = g_loc[i];
                         pstk_off[npstk] = incoming;
                         pstk_sz[npstk] = ty_size(pt);
@@ -2522,23 +3126,37 @@ static void gen_func(struct ir_func *fn, struct code *text,
             }
             if (n == 0) {
                 /* MEMORY: copy it out of the caller's frame into ours, so its
-                 * address is a normal local. RAX carries each eightbyte, so the
-                 * destination pointer needs a DIFFERENT scratch — and not an
-                 * integer arg register (RCX would drop a later scalar param that
-                 * arrives in it). r11 is caller-saved, never an arg register, and
-                 * free at prologue time (params reach their allocated registers
-                 * only in the parallel move that runs after this loop). */
+                 * address is a normal local. */
                 int sz = ty_size(pt);
                 if (ty_align(pt) > 8)       /* a 16-aligned stack slot */
                     incoming = (incoming + 15) & ~15;
-                x86_lea_reg_slot(text, 11 /*r11*/, sd[i]);
-                for (int off = 0; off < sz; off += 8) {
-                    int chunk = sz - off >= 8 ? 8 : sz - off;
-                    x86_load_reg_mem(text, REG_RAX, REG_RBP,
-                                     incoming + off, chunk >= 8 ? 8 : chunk);
-                    x86_store_mem_reg(text, 11 /*r11*/, off, REG_RAX,
-                                      chunk >= 8 ? 8 : chunk);
+                if (x86_param_home_incoming(f, i)) {
+                    sd[i] = incoming;       /* its home: no copy at all */
+                    incoming += (sz + 7) & ~7;
+                    continue;
                 }
+                x86_param_copy(text, sd[i], REG_RBP, incoming, sz);
+                incoming += (sz + 7) & ~7;
+                continue;
+            }
+            /* Registers -- if there are enough left for EVERY eightbyte.
+             * When there are not, the whole struct came on the caller's
+             * stack and takes no register at all (SysV 3.2.3), which the
+             * caller's on_stack decision in irgen already said; this read
+             * the next "register" regardless, so a seventh-place
+             * struct{short} came out of r9. */
+            int need_i = 0, need_s = 0;
+            for (int k = 0; k < n; k++) {
+                if (cls[k] == CLASS_SSE)
+                    need_s++;
+                else if (cls[k] != CLASS_NONE)
+                    need_i++;
+            }
+            if (ireg + need_i > 6 || freg + need_s > 8) {
+                int sz = ty_size(pt);
+                if (ty_align(pt) > 8)       /* a 16-aligned stack slot */
+                    incoming = (incoming + 15) & ~15;
+                x86_param_copy(text, sd[i], REG_RBP, incoming, sz);
                 incoming += (sz + 7) & ~7;
                 continue;
             }
@@ -2551,7 +3169,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             for (int k = 0; k < n; k++) {
                 if (cls[k] == CLASS_SSE)
                     x86_movs_store_base(text, REG_RAX, k * 8, freg++, 8);
-                else
+                else if (cls[k] != CLASS_NONE)
                     x86_store_mem_reg(text, REG_RAX, k * 8,
                                       x86_argreg(ireg++), 8);
             }
@@ -2566,6 +3184,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
         for (int k = 0; k < npstk; k++)
             x86_load_reg_mem(text, pstk_dst[k], REG_RBP, pstk_off[k],
                              pstk_sz[k]);
+        for (int k = 0; k < nfstk; k++)
+            x86_movs_load_base(text, fstk_dst[k], REG_RBP, fstk_off[k],
+                               fstk_sz[k]);
         va_named_int = ireg;
         va_named_sse = freg;
         va_overflow = incoming;
@@ -2595,6 +3216,22 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int *usecnt = fn->nvregs
         ? xmalloc((size_t)fn->nvregs * sizeof *usecnt) : (int *)0;
     if (usecnt) ra_count_vreg_uses(fn, usecnt);
+    g_zx32 = NULL;
+    if (g_regalloc && fn->nvregs) {
+        int *nd = xcalloc((size_t)fn->nvregs, sizeof *nd);
+        for (int t = 0; t < fn->nins; t++) {
+            int v = ra_ins_def(&fn->ins[t]);
+            if (v >= 0 && v < fn->nvregs) nd[v]++;
+        }
+        g_zx32 = xcalloc((size_t)fn->nvregs, 1);
+        for (int t = 0; t < fn->nins; t++) {
+            int v = ra_ins_def(&fn->ins[t]);
+            if (v >= fn->nvars && v < fn->nvregs && nd[v] == 1 &&
+                x86_def_zx32(&fn->ins[t]))
+                g_zx32[v] = 1;
+        }
+        free(nd);
+    }
     /* -O2: with two or more returns each inlining the full callee-restore
      * sequence, route them through ONE shared epilogue instead — each return
      * loads its value then `jmp`s to it. Worth the jmp only when there is more
@@ -2603,8 +3240,19 @@ static void gen_func(struct ir_func *fn, struct code *text,
     for (int t = 0; t < fn->nins; t++) if (fn->ins[t].op == IR_RET) nret++;
     int shared_epi = g_regalloc && nsave >= 1 && nret >= 2;
     int *epi_patch = NULL, nepi = 0, capepi = 0;
+    /* UNREACHABLE code: what follows a return, a jump, a trap or a tail
+     * call, up to the next label, which is the only way back in. A
+     * sibling call's IR_RET was emitted after its `jmp` -- `mov %r8,%rax;
+     * leave; ret` that nothing could reach, in every function ending in
+     * one. Optimising builds only, so -O0/-O1 stay byte-identical. */
+    int dead = 0, tail_made = 0, rmw_op = -1, rmw_ld = -1;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        if (dead) {
+            if (i->op != IR_LABEL && i->op != IR_LANDING)
+                continue;
+            dead = 0;
+        }
         /* What xmm0 held coming in. Cleared by default, so any op that
          * is not one of the vector cases below invalidates it simply by
          * not setting it again. */
@@ -2663,6 +3311,38 @@ static void gen_func(struct ir_func *fn, struct code *text,
         if ((i->op == IR_ADDR || (i->op == IR_ADD && i->imm_b)) &&
             afolded(i->dst))
             continue;
+        /* Read-modify-write (x86_rmw_find): the load emits nothing... */
+        if (n == rmw_op) {
+            const struct ir_ins *ld = &fn->ins[rmw_ld];
+            int base = afolded(ld->a) ? REG_RBP : g_loc[ld->a];
+            int disp = afolded(ld->a) ? g_afold.disp[ld->a] : 0;
+            int aop = i->op == IR_ADD ? '+' : i->op == IR_SUB ? '-' :
+                      i->op == IR_AND ? '&' : i->op == IR_OR ? '|' : '^';
+            int v = i->a == ld->dst ? (i->imm_b ? -1 : i->b) : i->a;
+            if (v < 0) {
+                x86_alu_mem_imm(text, aop, base, disp, i->imm, i->w);
+            } else {
+                int V = REG_RAX;
+                if (in_reg(v))
+                    V = g_loc[v];
+                else
+                    cg_load(text, sd, v, 8, 0, 8);
+                x86_alu_mem_reg(text, aop, base, disp, V, i->w);
+            }
+            cg_reset();
+            rmw_op = -1;
+            n++;                                /* ...and the store */
+            continue;
+        }
+        if (rmw_op < 0 && i->op == IR_LOAD && g_regalloc && usecnt &&
+            !getenv("EMBCC_NO_RMW")) {
+            int m = x86_rmw_find(fn, n, usecnt);
+            if (m >= 0) {
+                rmw_op = m;
+                rmw_ld = n;
+                continue;
+            }
+        }
         switch (i->op) {
         /* ---- 128-bit vectors -------------------------------------------
          *
@@ -2826,6 +3506,56 @@ static void gen_func(struct ir_func *fn, struct code *text,
             cg_store(text, sd, i->dst, i->w);
             break;
         case IR_CONST:
+            /* A constant whose one use is the store right after it, to a
+             * folded frame address or one in a register: `mov $imm, mem`,
+             * one instruction where materialising it and storing it were
+             * two. Every field of a compound literal is one of these. An
+             * eight-byte store takes it only when the value fits the
+             * sign-extended 32-bit immediate; a float-class value has its
+             * own home and keeps its own path. */
+            if (g_regalloc && usecnt && i->dst >= 0 && usecnt[i->dst] == 1 &&
+                n + 1 < fn->nins && !is_flt(i->dst) && !i->flt) {
+                /* past the folded address arithmetic, which emits nothing */
+                int m = n + 1;
+                while (m + 1 < fn->nins &&
+                       (fn->ins[m].op == IR_ADDR ||
+                        (fn->ins[m].op == IR_ADD && fn->ins[m].imm_b)) &&
+                       afolded(fn->ins[m].dst))
+                    m++;
+                /* ...or a field's `add base, #off` that only this store
+                 * reads, which then becomes the displacement */
+                int fbase = -1, fdisp = 0;
+                if (m + 1 < fn->nins && fn->ins[m].op == IR_ADD &&
+                    fn->ins[m].imm_b && fn->ins[m].dst >= 0 &&
+                    usecnt[fn->ins[m].dst] == 1 && in_reg(fn->ins[m].a) &&
+                    !afolded(fn->ins[m].dst) &&
+                    fn->ins[m].imm >= -2147483647L - 1 &&
+                    fn->ins[m].imm <= 2147483647L &&
+                    fn->ins[m + 1].op == IR_STORE &&
+                    fn->ins[m + 1].a == fn->ins[m].dst) {
+                    fbase = g_loc[fn->ins[m].a];
+                    fdisp = (int)fn->ins[m].imm;
+                    m++;
+                }
+                struct ir_ins *st = &fn->ins[m];
+                int sz = st->size;
+                if (st->op == IR_STORE && st->b == i->dst && st->a != i->dst &&
+                    !x87_ins(st) && !i128_ins(st) && addr_fold_ok(st) &&
+                    (sz == 1 || sz == 2 || sz == 4 ||
+                     (sz == 8 && i->w == 8 && i->imm >= -2147483647L - 1 &&
+                      i->imm <= 2147483647L)) &&
+                    (fbase >= 0 || afolded(st->a) || in_reg(st->a))) {
+                    if (fbase >= 0)
+                        x86_store_mem_imm(text, fbase, fdisp, i->imm, sz);
+                    else if (afolded(st->a))
+                        x86_store_mem_imm(text, REG_RBP, g_afold.disp[st->a],
+                                          i->imm, sz);
+                    else
+                        x86_store_mem_imm(text, g_loc[st->a], 0, i->imm, sz);
+                    n = m;                      /* consume the store */
+                    break;
+                }
+            }
             /* A FLOAT constant is an ordinary integer const of the value's
              * bit pattern -- `0.5` is `const.8s 4602678819172646912`, and
              * nothing in the IR says float but the class its destination
@@ -2943,9 +3673,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * tests/exec/complex.c caught it: `scalef` loaded the
                  * imaginary part into eax and then multiplied whatever
                  * was still in xmm8, which was the real part's product. */
-                if (x87_ins(nx) ||
-                    (nx->op == IR_LOAD && is_flt(nx->dst)) ||
-                    (nx->op == IR_STORE && is_flt(nx->b))) {
+                if (!addr_fold_ok(nx)) {
                     /* fall through to materialise the address */
                 } else if (nx->op == IR_LOAD && nx->a == i->dst) {
                     /* Straight into the value's own register when it has
@@ -3134,7 +3862,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 struct ir_ins *mem = &fn->ins[n + 2];
                 if (ad->op == IR_ADD && !ad->flt && !ad->imm_b &&
                     ad->b == i->dst && in_reg(ad->a) && ad->dst >= 0 &&
-                    usecnt[ad->dst] == 1 && !x87_ins(mem) &&
+                    usecnt[ad->dst] == 1 && addr_fold_ok(mem) &&
                     ((mem->op == IR_LOAD && mem->a == ad->dst) ||
                      (mem->op == IR_STORE && mem->a == ad->dst))) {
                     fold_idx = i->a;
@@ -3251,6 +3979,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                             brs[nbrs].label = br->label;
                             brs[nbrs].size = sh ? 1 : 4;
                             brs[nbrs].ord = ord;
+                            brs[nbrs].tab = 0;
                             nbrs++;
                         }
                         cg_reset();
@@ -3296,6 +4025,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 brs[nbrs].label = br->label;
                 brs[nbrs].size = sh ? 1 : 4;
                 brs[nbrs].ord = ord;
+                brs[nbrs].tab = 0;
                 nbrs++;
                 n++;                              /* consume the fused branch */
                 break;
@@ -3328,6 +4058,38 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_cvtts2si_reg(text, g_floc[i->a], i->size, i->w);
             else
                 x86_cvtts2si(text, sd[i->a], i->size, i->w);
+            cg_store(text, sd, i->dst, i->w);
+            break;
+        case IR_BITCAST:
+            /* movq/movd between the register files -- the ONE instruction
+             * that is target-specific about fabs, copysign, signbit and
+             * the isnan/isinf family. Everything else those builtins do
+             * is integer arithmetic the optimizer already knows.
+             *
+             * But only when the float side is ACTUALLY in the float
+             * class. The whitelist above hands a value to the integer
+             * file as soon as one use treats it as an integer, and a
+             * bitcast's own use does not count -- `float r = fabsf(x);
+             * memcpy(&b, &r, 4)` reads r as four bytes and takes it
+             * back. When that has happened both ends are integers and
+             * the bits are already where they belong, so this emits a
+             * plain move, or nothing at all. That is the whole reason to
+             * ask in_freg rather than assume: the earlier version read
+             * the float's slot, which a register-resident value does not
+             * have, and the frame guard said so. */
+            cg_reset();
+            if (i->sign) {                        /* float bits -> integer */
+                if (in_freg(i->a))
+                    x86_movq_gpr_xmm(text, REG_RAX, g_floc[i->a], i->w);
+                else
+                    cg_load(text, sd, i->a, i->size, 0, i->w);
+            } else {                              /* integer bits -> float */
+                cg_load(text, sd, i->a, i->size, 0, i->size);
+                if (in_freg(i->dst)) {
+                    x86_movq_xmm_gpr(text, g_floc[i->dst], REG_RAX, i->w);
+                    break;
+                }
+            }
             cg_store(text, sd, i->dst, i->w);
             break;
         case IR_F2F: {
@@ -3447,6 +4209,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                              : x86_lea_rax_rip(text);
             fs.target = i->callee;
             fs.kind = RK_PCREL32;
+            fs.addend = 0;
             PUSH(st->f, st->nf, st->capf, fs);
             if (!D) cg_store(text, sd, i->dst, 8);
             break;
@@ -3544,6 +4307,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         }
         case IR_EXT:
+            /* already zero-extended in the register it shares (g_zx32) */
+            if (i->size == 4 && !i->sign && i->w == 8 && g_zx32 &&
+                i->a >= 0 && g_zx32[i->a] && !afolded(i->a) &&
+                in_reg(i->dst) && in_reg(i->a) &&
+                g_loc[i->dst] == g_loc[i->a])
+                break;
             /* re-extend from the low `size` bytes of the temp's slot */
             if (in_reg(i->dst)) {
                 cg_ext_into(text, sd, g_loc[i->dst], i->a, i->size, i->sign, i->w);
@@ -3671,36 +4440,116 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * address is used directly as the base (no slot->rcx/rdx load) — the
              * reason its temp can be register-allocated (OPAQUE dropped). */
             cg_reset();
-            int dbase, sbase;
-            if (in_reg(i->a)) dbase = g_loc[i->a];
+            /* A LARGE one is `rep movsq`. Unrolled, every eight bytes were
+             * two instructions: the loop-idiom pass turns a copy loop over a
+             * whole array into one of these, and EmbLinkOs's colour picker
+             * copied a 113 KB buffer in 28,000 of them -- 199 KB of code in
+             * one function, where gcc calls memcpy. rsi and rdi may hold
+             * allocated values, so they are pushed around it; the addresses
+             * are fetched into rax and rcx first, before the pushes move
+             * rsp (a slot is rbp-relative, but nothing here needs to know
+             * that to be right). */
+            if (i->size > X86_REP_MIN) {
+                if (afolded(i->a)) x86_lea_reg_slot(text, REG_RAX, g_afold.disp[i->a]);
+                else if (in_reg(i->a)) x86_mov_reg_reg(text, REG_RAX, g_loc[i->a]);
+                else              x86_load_slot(text, sd[i->a], 8, 0, 8);
+                if (afolded(i->b)) x86_lea_reg_slot(text, REG_RCX, g_afold.disp[i->b]);
+                else if (in_reg(i->b)) x86_mov_reg_reg(text, REG_RCX, g_loc[i->b]);
+                else              x86_mov_rcx_slot(text, sd[i->b]);
+                x86_push_reg(text, REG_RSI);
+                x86_push_reg(text, REG_RDI);
+                x86_mov_reg_reg(text, REG_RDI, REG_RAX);
+                x86_mov_reg_reg(text, REG_RSI, REG_RCX);
+                x86_mov_reg_imm(text, REG_RCX, i->size / 8, 4);
+                x86_rep_movsq(text);
+                for (int off = 0; off < i->size % 8; ) {   /* rsi, rdi: past it */
+                    int rest = i->size % 8 - off;
+                    int chunk = rest >= 4 ? 4 : rest >= 2 ? 2 : 1;
+                    x86_load_reg_mem(text, REG_RAX, REG_RSI, off, chunk);
+                    x86_store_mem_reg(text, REG_RDI, off, REG_RAX, chunk);
+                    off += chunk;
+                }
+                x86_pop_reg(text, REG_RDI);
+                x86_pop_reg(text, REG_RSI);
+                break;
+            }
+            int dbase, sbase, ddisp = 0, sdisp = 0;
+            if (afolded(i->a)) { dbase = REG_RBP; ddisp = g_afold.disp[i->a]; }
+            else if (in_reg(i->a)) dbase = g_loc[i->a];
             else { x86_load_slot(text, sd[i->a], 8, 0, 8);
                    x86_mov_reg_reg(text, REG_RCX, REG_RAX); dbase = REG_RCX; }
-            if (in_reg(i->b)) sbase = g_loc[i->b];
-            else { x86_load_slot(text, sd[i->b], 8, 0, 8);
-                   x86_mov_reg_reg(text, REG_RDX, REG_RAX); sbase = REG_RDX; }
+            /* A source address in memory is read again for each chunk,
+             * into rax. It went through rdx, which is in the pool of every
+             * function that neither divides nor has an atomic -- and so held
+             * some other value's home that the copy then overwrote. rax and
+             * rcx are the only registers no pool contains (see the call's
+             * struct-argument copy, which re-reads the same way). */
+            sbase = in_reg(i->b) ? g_loc[i->b] : -1;
+            if (afolded(i->b)) { sbase = REG_RBP; sdisp = g_afold.disp[i->b]; }
             int off = 0;
+            /* sixteen bytes a move where SSE is allowed, through the float
+             * scratch, which no pool contains */
+            for (; !g_no_sse && i->size - off >= 16; off += 16) {
+                int sb = sbase;
+                if (sb < 0) {
+                    x86_load_slot(text, sd[i->b], 8, 0, 8);
+                    sb = REG_RAX;
+                }
+                x86_vload_base(text, X86_FSCR, sb, (sb == sbase ? sdisp : 0) + off);
+                x86_vstore_base(text, dbase, ddisp + off, X86_FSCR);
+            }
             while (off < i->size) {
                 int chunk = i->size - off;
                 chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4 : chunk >= 2 ? 2 : 1;
-                x86_load_reg_mem(text, REG_RAX, sbase, off, chunk);
-                x86_store_mem_reg(text, dbase, off, REG_RAX, chunk);
+                if (sbase < 0) {
+                    x86_load_slot(text, sd[i->b], 8, 0, 8);
+                    x86_load_reg_mem(text, REG_RAX, REG_RAX, off, chunk);
+                } else {
+                    x86_load_reg_mem(text, REG_RAX, sbase, sdisp + off, chunk);
+                }
+                x86_store_mem_reg(text, dbase, ddisp + off, REG_RAX, chunk);
                 off += chunk;
             }
             break;
         }
         case IR_MEMZERO: {
             cg_reset();
-            int dbase;
-            if (in_reg(i->a)) dbase = g_loc[i->a];
+            if (i->size > X86_REP_MIN) {        /* see IR_MEMCPY */
+                if (afolded(i->a)) x86_lea_reg_slot(text, REG_RCX, g_afold.disp[i->a]);
+                else if (in_reg(i->a)) x86_mov_reg_reg(text, REG_RCX, g_loc[i->a]);
+                else              x86_mov_rcx_slot(text, sd[i->a]);
+                x86_push_reg(text, REG_RDI);
+                x86_mov_reg_reg(text, REG_RDI, REG_RCX);
+                x86_mov_eax_imm(text, 0, 8);
+                x86_mov_reg_imm(text, REG_RCX, i->size / 8, 4);
+                x86_rep_stosq(text);
+                for (int off = 0; off < i->size % 8; ) {
+                    int rest = i->size % 8 - off;
+                    int chunk = rest >= 4 ? 4 : rest >= 2 ? 2 : 1;
+                    x86_store_mem_reg(text, REG_RDI, off, REG_RAX, chunk);
+                    off += chunk;
+                }
+                x86_pop_reg(text, REG_RDI);
+                break;
+            }
+            int dbase, ddisp = 0;
+            if (afolded(i->a)) { dbase = REG_RBP; ddisp = g_afold.disp[i->a]; }
+            else if (in_reg(i->a)) dbase = g_loc[i->a];
             else { x86_load_slot(text, sd[i->a], 8, 0, 8);
                    x86_mov_reg_reg(text, REG_RCX, REG_RAX); dbase = REG_RCX; }
-            x86_mov_eax_imm(text, 0, 8);
             int off = 0;
+            if (!g_no_sse && i->size >= 16) {           /* as IR_MEMCPY */
+                x86_vzero(text, X86_FSCR);
+                for (; i->size - off >= 16; off += 16)
+                    x86_vstore_base(text, dbase, ddisp + off, X86_FSCR);
+            }
+            if (off < i->size)
+                x86_mov_eax_imm(text, 0, 8);
             while (off < i->size) {
                 int chunk = i->size - off;
                 chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4
                       : chunk >= 2 ? 2 : 1;
-                x86_store_mem_reg(text, dbase, off, REG_RAX, chunk);
+                x86_store_mem_reg(text, dbase, ddisp + off, REG_RAX, chunk);
                 off += chunk;
             }
             break;
@@ -3769,6 +4618,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             brs[nbrs].label = i->label;
             brs[nbrs].size = sh ? 1 : 4;
             brs[nbrs].ord = ord;
+            brs[nbrs].tab = 0;
             nbrs++;
             break;
         }
@@ -3785,6 +4635,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
             brs[nbrs].label = i->label;
             brs[nbrs].size = 4;       /* a `lea`, not a branch */
             brs[nbrs].ord = -1;
+            brs[nbrs].tab = 0;
             nbrs++;
             cg_store(text, sd, i->dst, 8);
             break;
@@ -3795,6 +4646,84 @@ static void gen_func(struct ir_func *fn, struct code *text,
             cg_reset();
             x86_jmp_reg(text, REG_RAX);
             break;
+        case IR_SWITCH: {
+            /* A jump table, in .text right after its dispatch and
+             * holding 32-bit offsets from its own start, so it needs no
+             * relocation:
+             *     cmp rax, n ; jae default
+             *     lea rcx, [rip + table]
+             *     movsxd rax, [rcx + rax*4] ; add rax, rcx ; jmp rax
+             * rax is the index (zero-extended at width 4: cg_load's
+             * unsigned read) and rcx the table -- both scratch, and a
+             * terminator keeps nothing live in either. The entries go on
+             * the branch list with `tab` set, and are patched to
+             * target - table. */
+            int n = fn->jt[i->jt].n;
+            cg_load(text, sd, i->a, i->w, 0, i->w);
+            cg_reset();
+            x86_alu_reg_imm(text, 'c', REG_RAX, n, i->w);
+            int patch = x86_jcc_rel32(text, 0x93);      /* jae: unsigned >= n */
+            if (nbrs == capbrs) {
+                capbrs = capbrs ? capbrs * 2 : 16;
+                brs = xrealloc(brs, (size_t)capbrs * sizeof *brs);
+            }
+            brs[nbrs].patch_off = patch;
+            brs[nbrs].label = i->label;
+            brs[nbrs].size = 4;
+            brs[nbrs].ord = -1;
+            brs[nbrs].tab = 0;
+            nbrs++;
+            int lea = x86_lea_reg_rip(text, REG_RCX);
+            /* In an ELF object the entries are absolute addresses --
+             * EmbCC's code is position-dependent (it refuses -fPIC), so
+             * a relocation per entry costs nothing at run time -- and the
+             * dispatch is one indirect jump through the table, where the
+             * 32-bit offsets needed a sign-extending load and an add
+             * first: two instructions on every switch taken, every
+             * opcode an interpreter dispatches. The entries are relocated
+             * against this function's own symbol, at each label's offset
+             * into it (jtabs, resolved with the branches below). Mach-O
+             * and COFF keep the offset table. */
+            if (target_fmt_get() == TGT_FMT_ELF) {
+                x86_jmp_rcx_rax8(text);
+                code_align(text, 8, 0xcc);
+                int tab = text->len;
+                code_patch32(text, lea,
+                             (unsigned long)(unsigned int)(tab - (lea + 4)));
+                for (int k = 0; k < n; k++) {
+                    if (njtabs == capjtabs) {
+                        capjtabs = capjtabs ? capjtabs * 2 : 16;
+                        jtabs = xrealloc(jtabs, (size_t)capjtabs * sizeof *jtabs);
+                    }
+                    jtabs[njtabs].off = text->len;
+                    jtabs[njtabs].label = fn->jt[i->jt].labels[k];
+                    njtabs++;
+                    code_u32(text, 0);
+                    code_u32(text, 0);
+                }
+                break;
+            }
+            x86_movsxd_rax_tab(text);
+            x86_alu_rr(text, '+', REG_RAX, REG_RCX, 8);
+            x86_jmp_reg(text, REG_RAX);
+            code_align(text, 4, 0xcc);                  /* int3 padding */
+            int tab = text->len;
+            code_patch32(text, lea, (unsigned long)(unsigned int)(tab - (lea + 4)));
+            for (int k = 0; k < n; k++) {
+                if (nbrs == capbrs) {
+                    capbrs = capbrs ? capbrs * 2 : 16;
+                    brs = xrealloc(brs, (size_t)capbrs * sizeof *brs);
+                }
+                brs[nbrs].patch_off = text->len;
+                brs[nbrs].label = fn->jt[i->jt].labels[k];
+                brs[nbrs].size = 4;
+                brs[nbrs].ord = -1;
+                brs[nbrs].tab = tab + 1;
+                nbrs++;
+                code_u32(text, 0);
+            }
+            break;
+        }
         case IR_CALL: {
             /* SysV walks TWO register files independently: integers and
              * pointers take rdi..r9, floats take xmm0..7. */
@@ -3852,8 +4781,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 if (!a->is_struct) {
                     /* a scalar that ran out of registers: its slot
                      * already holds the value, extended to 8 bytes (or it is
-                     * register-resident -> store the register straight out). */
-                    if (in_reg(a->vreg)) {
+                     * register-resident -> store the register straight out).
+                     * A float in an xmm home has no slot at all: this read
+                     * one, and -O2 refused `h(8 doubles, x * 3)`. */
+                    if (in_freg(a->vreg)) {
+                        x86_movs_store_base(text, REG_RSP, a->stk_off,
+                                            g_floc[a->vreg], a->size);
+                    } else if (in_reg(a->vreg)) {
                         x86_store_mem_reg(text, REG_RSP, a->stk_off,
                                           g_loc[a->vreg], 8);
                     } else {
@@ -3864,21 +4798,53 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     continue;
                 }
                 int sz = a->size;
-                for (int off = 0; off < sz; ) {
+                /* Built in place (x86_inplace_locals): the copy would be
+                 * of the argument onto itself. */
+                if (afolded(a->vreg) &&
+                    g_afold.disp[a->vreg] == a->stk_off - frame)
+                    continue;
+                /* The source address in rcx for the whole copy: rax and
+                 * rcx are in no pool, and nothing in this stretch of the
+                 * call sequence -- the Win64 by-reference copy above does
+                 * the same -- has put anything in rcx yet. It was re-read
+                 * from its slot for every eightbyte, three instructions
+                 * where two do: EmbLinkOs's UI passes a 168-byte EmProps
+                 * by value to every widget call. */
+                if (afolded(a->vreg))
+                    x86_lea_reg_slot(text, REG_RCX, g_afold.disp[a->vreg]);
+                else
+                    x86_load_reg_mem(text, REG_RCX, REG_RBP, sd[a->vreg], 8);
+                if (sz > X86_REP_MIN) {
+                    /* rep movsq, as IR_MEMCPY: the destination is
+                     * rsp-relative, so it is computed before the pushes */
+                    x86_lea_reg_basedisp(text, REG_RAX, REG_RSP, a->stk_off, 8);
+                    x86_push_reg(text, REG_RSI);
+                    x86_push_reg(text, REG_RDI);
+                    x86_mov_reg_reg(text, REG_RDI, REG_RAX);
+                    x86_mov_reg_reg(text, REG_RSI, REG_RCX);
+                    x86_mov_reg_imm(text, REG_RCX, sz / 8, 4);
+                    x86_rep_movsq(text);
+                    for (int off = 0; off < sz % 8; ) {
+                        int rest = sz % 8 - off;
+                        int chunk = rest >= 4 ? 4 : rest >= 2 ? 2 : 1;
+                        x86_load_reg_mem(text, REG_RAX, REG_RSI, off, chunk);
+                        x86_store_mem_reg(text, REG_RDI, off, REG_RAX, chunk);
+                        off += chunk;
+                    }
+                    x86_pop_reg(text, REG_RDI);
+                    x86_pop_reg(text, REG_RSI);
+                    continue;
+                }
+                int off = 0;
+                for (; !g_no_sse && sz - off >= 16; off += 16) {
+                    x86_vload_base(text, X86_FSCR, REG_RCX, off);
+                    x86_vstore_base(text, REG_RSP, a->stk_off + off, X86_FSCR);
+                }
+                for (; off < sz; ) {
                     int chunk = sz - off;
                     chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4
                           : chunk >= 2 ? 2 : 1;
-                    /* The source address is re-read for each chunk
-                     * rather than parked in a second register, because
-                     * there is no second register to park it in: rax is
-                     * the only GPR no pool contains, and rcx is the one
-                     * this backend's shifts, atomics and struct copies
-                     * all reach for. Three instructions an eightbyte
-                     * instead of two, on an argument class the corpus
-                     * uses eleven times -- and never the wrong
-                     * register. */
-                    x86_load_slot(text, sd[a->vreg], 8, 0, 8);
-                    x86_load_reg_mem(text, REG_RAX, REG_RAX, off, chunk);
+                    x86_load_reg_mem(text, REG_RAX, REG_RCX, off, chunk);
                     x86_store_mem_reg(text, REG_RSP,
                                       a->stk_off + off, REG_RAX, chunk);
                     off += chunk;
@@ -3942,7 +4908,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                     if (a->is_struct || a->nclass == 2) {
                         for (int q = 0; q < a->nclass; q++)
-                            if (a->cls[q] != CLASS_SSE) pireg++;
+                            if (a->cls[q] == CLASS_INTEGER) pireg++;
                     } else if (a->cls[0] != CLASS_SSE) {
                         if (in_reg(a->vreg)) {
                             mvdest[nmv] = x86_argreg(pireg++);
@@ -3999,7 +4965,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         if (a->cls[q] == CLASS_SSE)
                             x86_movs_load_base(text, freg++, REG_RAX,
                                                q * 8, 8);
-                        else
+                        else if (a->cls[q] != CLASS_NONE)
                             x86_load_reg_mem(text, x86_argreg(ireg++),
                                              REG_RAX, q * 8, 8);
                     }
@@ -4057,19 +5023,21 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * callee-saved ones cannot disturb them. Doing it the
                  * other way round would restore over an argument. */
                 restore_callee(text, used_callee, nsave, save_base);
-                x86_leave(text);
+                if (!frameless && !g_pushonly)
+                    x86_leave(text);
                 int patch = x86_jmp_rel32(text);
-                if (i->callee->has_defn) {
+                if (cg_call_local(fn->src, i->callee)) {
                     struct callsite cs;
                     cs.patch_off = patch;
                     cs.target = i->callee;
                     PUSH(st->call, st->ncall, st->capcall, cs);
                 } else {
-                    struct extcall ec;
+                    struct extcall ec = { 0, NULL, 0 };
                     ec.patch_off = patch;
                     ec.callee = i->callee;
                     PUSH(st->ext, st->next, st->capext, ec);
                 }
+                tail_made = 1;
                 break;    /* whatever follows is now unreachable, and
                            * a join label after it is still entered by
                            * the path that did not take this jump */
@@ -4078,13 +5046,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_call_r11(text);
             } else {
                 int patch = x86_call_rel32(text);
-                if (i->callee->has_defn) {
+                if (cg_call_local(fn->src, i->callee)) {
                     struct callsite cs;
                     cs.patch_off = patch;
                     cs.target = i->callee;
                     PUSH(st->call, st->ncall, st->capcall, cs);
                 } else {
-                    struct extcall ec;
+                    struct extcall ec = { 0, NULL, 0 };
                     ec.patch_off = patch;
                     ec.callee = i->callee;
                     PUSH(st->ext, st->next, st->capext, ec);
@@ -4110,7 +5078,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         if (i->retcls[q] == CLASS_SSE)
                             x86_movs_store_base(text, REG_RCX, q * 8,
                                                 fr++, 8);
-                        else
+                        else if (i->retcls[q] != CLASS_NONE)
                             x86_store_mem_reg(text, REG_RCX, q * 8,
                                               ir++ == 0 ? REG_RAX
                                                         : REG_RDX, 8);
@@ -4120,6 +5088,15 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 cg_store(text, sd, i->dst, 8);
                 break;
             }
+            /* A result nothing reads -- every void call has a temp for
+             * one -- stays in rax/xmm0: copying it home was a `mov
+             * %rax,%r8` after each of them. Temps only: a local's value
+             * can be read through a pointer the counts do not see. The
+             * x87 one below must still be popped. */
+            if (g_regalloc && usecnt && i->dst >= fn->nvars &&
+                i->dst < fn->nvregs && usecnt[i->dst] == 0 &&
+                !(i->flt && i->w == 16) && i->w != 16)
+                break;
             if (i->flt && i->w == 16)      /* long double comes back in st0 */
                 x86_x87_mem(text, 0xDB, 7, REG_RBP, sd[i->dst]);
             else if (i->w == 16) {         /* an __int128 in rax:rdx */
@@ -4279,7 +5256,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         if (rc[q] == CLASS_SSE)
                             x86_movs_load_base(text, fr++, REG_RCX,
                                                q * 8, 8);
-                        else
+                        else if (rc[q] != CLASS_NONE)
                             x86_load_reg_mem(text,
                                              ir++ == 0 ? REG_RAX : REG_RDX,
                                              REG_RCX, q * 8, 8);
@@ -4309,7 +5286,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 epi_patch[nepi++] = p;
             } else {
                 restore_callee(text, used_callee, nsave, save_base);
-                x86_epilogue(text, frameless);
+                x86_epilogue(text, frameless || g_pushonly);
             }
             break;
         case IR_LANDING:
@@ -4325,6 +5302,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
         if (i->op == IR_CALL && fn->neh)
             ir_add_csite(fn, ins_start - f->code_off, text->len - f->code_off,
                          i->eh_region - 1);
+        if (g_regalloc && (tail_made || i->op == IR_RET ||
+                           i->op == IR_JMP || i->op == IR_UD2))
+            dead = 1;
+        tail_made = 0;
     }
 
     /* Every function ends with an epilogue, whether or not its last
@@ -4347,8 +5328,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
     int epi_off = text->len;
     if (shared_epi || !(g_regalloc && last_terminates)) {
         restore_callee(text, used_callee, nsave, save_base);
-        x86_epilogue(text, frameless);
+        x86_epilogue(text, frameless || g_pushonly);
     }
+    x86_no_rbp = 0;
+    g_pushonly = g_pad = 0;
     for (int e = 0; e < nepi; e++) {                    /* patch shared-return jumps */
         int from = epi_patch[e] + 4;
         code_patch32(text, epi_patch[e],
@@ -4358,6 +5341,20 @@ static void gen_func(struct ir_func *fn, struct code *text,
 
     for (int r = 0; r < fn->neh; r++)      /* where each landing pad is */
         fn->eh[r].lp_off = label_off[fn->eh[r].lp_label] - f->code_off;
+    /* the absolute jump-table entries: this function + the label's offset */
+    for (int k = 0; k < njtabs; k++) {
+        int target = label_off[jtabs[k].label];
+        if (target < 0)
+            internal_error("label %d in '%s' was never placed",
+                           jtabs[k].label, f->name);
+        struct fsite js;
+        js.patch_off = jtabs[k].off;
+        js.target = f;
+        js.kind = RK_ABS64;
+        js.addend = target - f->code_off;
+        PUSH(st->f, st->nf, st->capf, js);
+    }
+    free(jtabs);
     for (int n = 0; n < nbrs; n++) {
         int target = label_off[brs[n].label];
         if (target < 0) {
@@ -4365,7 +5362,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                            brs[n].label, f->name);
         }
         int from = brs[n].patch_off + brs[n].size;
-        long rel = (long)target - from;
+        long rel = brs[n].tab ? (long)target - (brs[n].tab - 1)
+                              : (long)target - from;
         if (brs[n].size == 1) {
             if (rel < -128 || rel > 127) {
                 /* It does not reach. This whole layout is about to be
@@ -4389,6 +5387,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
     free(sd);
     free(loc);
     free(usecnt);
+    free(g_zx32);
+    g_zx32 = NULL;
     free(vacc); g_vacc = NULL;
     g_loc = NULL;
     free(g_wide);
@@ -4459,10 +5459,7 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
     }
     free(st.call);
 
-    /* String sites still carry the string INDEX; turn it into the
-     * .rodata offset the driver's relocations speak. */
-    for (int n = 0; n < st.nstr; n++)
-        st.str[n].str_off = iu->strs[st.str[n].str_off].off;
+    cg_resolve_strsites(iu, st.str, st.nstr);
 
     *ext = st.ext;
     *next = st.next;

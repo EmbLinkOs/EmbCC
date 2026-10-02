@@ -10,13 +10,14 @@ echo "TEST-MARKER reject-unimplemented"
 out_dir="tests/compile/out"
 mkdir -p "$out_dir"
 
-check() { # name source expected-message-grep
+check() { # name source expected-message-grep [extra flags]
     src="$out_dir/$1.c"
     printf '%s\n' "$2" > "$src"
     # -Werror so that a case whose diagnostic is a WARNING still fails
     # the compile: an attribute EmbCC does not know is warned about,
     # not refused, and this file's whole shape is "it did not compile".
-    if err=$("$EMBCC" -Werror -c "$src" -o "$out_dir/$1.o" 2>&1); then
+    # shellcheck disable=SC2086
+    if err=$("$EMBCC" -Werror ${4:-} -c "$src" -o "$out_dir/$1.o" 2>&1); then
         echo "case $1: compiled instead of failing"
         exit 1
     fi
@@ -402,3 +403,100 @@ check attr-constructor-priority \
 check attr-unknown \
     '__attribute__((no_such_attribute_anywhere)) int f(void) { return 0; }' \
     "is not one EmbCC knows"
+
+# A block-scope function declaration must agree with the unit's: calls
+# use the unit's, so a different one would be silently overruled.
+check block-fn-conflict \
+    'int g(void) { extern long f(int); return (int)f(1); } int f(int x) { return x; }' \
+    "conflicting declaration of 'f'"
+check block-fn-redeclared \
+    'int g(void) { int f = 1; extern int f(int); return f; } int f(int x) { return x; }' \
+    "redeclared as a different kind of symbol"
+
+# An unsized array's size, when its initializer leaves braces out, is
+# worked out at parse time from the syntax (sizeof may fold it there)
+# and again in sema from the types. Here the syntax cannot tell that
+# `1 ? 2 : 3` is an int and not a struct value: rather than give the
+# object one size and sizeof another, the declaration is refused.
+check elision-size-guess \
+    'struct pt { int x, y; }; static struct pt g[] = { 1 ? 2 : 3, 4 }; int main(void) { return sizeof g; }' \
+    "cannot size 'g' from its initializer"
+# A union initializer takes one member; a second one is not stored over
+# it (it was, at the same offset).
+check union-excess-init \
+    'union u { int i; int j; }; int main(void) { union u v = { 1, 2 }; return v.i; }' \
+    "a union takes one"
+# `[i] =` names an array element; in a struct's list it was taken as
+# positional and stored into the first member.
+check array-designator-in-struct \
+    'struct s { int a, b; }; struct s x = { [1] = 2 };' \
+    "array designator"
+
+# UTF-8 is read in identifiers, for the letters C11 Annex D lists; any
+# other non-ASCII character outside a literal is named, not skipped.
+check non-ascii-operator \
+    "int main(void) { int a = 2 $(printf '\303\227') 3; return a; }" \
+    "is not part of a character C allows"
+
+# An automatic object has no room past its type's size, so its flexible
+# array member cannot be initialized (gcc refuses it too); the elements
+# were stored past the object, over the rest of the frame.
+check fam-init-automatic \
+    'struct fam { int n; int d[]; }; int main(void) { struct fam l = { 3, { 10 } }; return l.n; }' \
+    "flexible array member 'd' cannot be initialized"
+check fam-init-compound-literal \
+    'struct fam { int n; int d[]; }; int main(void) { struct fam *p = &(struct fam){ 3, { 10 } }; return p->n; }' \
+    "flexible array member 'd' cannot be initialized"
+
+# A GNU range designator with more steps after it, `[0 ... 1][1] = 5`,
+# would have to repeat a path; it is refused rather than guessed.
+check desig-range-path \
+    'int m[3][2] = { [0 ... 1][1] = 5 };' \
+    "range designator"
+
+# One level of braces around a scalar (C11 6.7.9p11); gcc refuses more.
+check scalar-double-braces \
+    'int main(void) { int q = { { 4 } }; return q; }' \
+    "take one level"
+
+# #pragma pack is honoured; the forms it is not are refused by name: a
+# labelled push or pop (gcc's identifier argument, which a macro there
+# also is -- gcc does not expand them), a change inside a struct body, a
+# pop with no push, and a value that is not 1, 2, 4, 8 or 16.
+check pack-push-label \
+    '#pragma pack(push, hdrs, 1)
+struct s { char c; int i; };' \
+    "pack(push, name) is not supported"
+check pack-in-struct \
+    'struct s { char c;
+#pragma pack(1)
+int i; };' \
+    "inside a struct body is not supported"
+check pack-pop-unmatched \
+    '#pragma pack(pop)
+struct s { char c; int i; };' \
+    "without a matching push"
+check pack-bad-value \
+    '#pragma pack(3)
+struct s { char c; int i; };' \
+    "wants 1, 2, 4, 8 or 16"
+
+# C23 constexpr takes an exactly representable integer constant; EmbCC
+# keeps integer ones, and says so for the rest.
+check constexpr-not-exact \
+    'constexpr unsigned char c = 300;' \
+    "does not fit"
+check constexpr-floating \
+    'constexpr double d = 1.5;' \
+    "takes integer constants"
+
+# A function in a section of its own is laid out apart from .text; -g's
+# compile-unit range cannot span the two yet, and a data object cannot
+# share a section that holds code.
+check fn-section-debug \
+    '__attribute__((section(".ramfunc"))) int f(void) { return 1; }' \
+    "is not supported yet" -g
+check fn-section-shared-with-data \
+    '__attribute__((section(".ramfunc"))) int f(void) { return 1; }
+__attribute__((section(".ramfunc"))) int v = 2;' \
+    "cannot share it"

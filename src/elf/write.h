@@ -18,6 +18,9 @@ struct elfw;
  * stays a library: embas builds x86-64 objects with it while the compiler
  * driver builds whatever --target= selected. */
 struct elfw *elfw_new(int machine);
+/* The object's e_flags, where the machine alone does not decide them
+ * (target_elf_flags). elfw_new sets ARM's EABI version itself. */
+void elfw_set_flags(struct elfw *w, unsigned long flags);
 void elfw_free(struct elfw *w);
 
 /* Returns the section header index, for use as a symbol's st_shndx.

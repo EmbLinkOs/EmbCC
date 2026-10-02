@@ -1,7 +1,13 @@
 # Compatibility — what EmbCC supports, per architecture
 
-EmbCC compiles C for the two machines EmbLinkOS runs on. One process compiles
-for one target, chosen with `--target=`:
+EmbCC compiles C for the two machines EmbLinkOS runs on, and for two families
+of embedded target beside them. One process compiles for one target, chosen
+with `--target=`.
+
+## The hosted targets
+
+The tables in the rest of this file are about these two, which is why they
+have two columns. The embedded targets are further down.
 
 | | **x86_64-elf** (default) | **aarch64-elf** |
 |---|---|---|
@@ -14,6 +20,46 @@ for one target, chosen with `--target=`:
 Everything in `src/` outside `src/arch/` is shared by both. ✓ means supported
 and tested on that target; — means not applicable; ✗ means refused with a
 diagnostic (never miscompiled).
+
+## The embedded targets
+
+Not columns in the tables below, because what they support is a subset
+described in one place rather than a mark against every row. Each has a
+design decision recording what was found and a golden suite holding it:
+
+| | **thumbv7m-none-eabi** | **riscv32-unknown-elf** | **riscv64-unknown-elf** |
+|---|---|---|---|
+| Machine | ARMv7-M (Cortex-M3/M4/M7) | RV32IM | RV64IM |
+| ABI | AAPCS32, ILP32, soft float | psABI, ILP32, soft float | psABI, LP64, soft float |
+| `long double` | IS a `double` (8 bytes) | IEEE binary128 | IEEE binary128 |
+| `char` / `wchar_t` | unsigned / unsigned | unsigned / **signed** | unsigned / **signed** |
+| `__int128` | ✗ refused by name | ✗ refused by name | ✓ |
+| Code model | absolute (`movw`/`movt`) | PC-relative (`auipc`) | PC-relative (`auipc`) |
+| Source | [`src/arch/thumb/`](../../src/arch/thumb/) | [`src/arch/riscv/`](../../src/arch/riscv/) — one backend, both widths | same |
+| Code generator | ✓ | ✓ | ✓ |
+| Linker (`embld`) | ✓ ELF32, firmware layout, `.vectors` | ✓ ELF32, `-Tstack` entry stub | ✓ ELF64, `-Tstack` entry stub |
+| Reference compiler | `clang -target thumbv7m-none-eabi` | `clang … -march=rv32im -mabi=ilp32 -mcmodel=medany` | `clang … -march=rv64im -mabi=lp64 -mcmodel=medany` |
+| Tests run on | QEMU `-M lm3s6965evb -cpu cortex-m3` | QEMU `-M virt` (riscv32) | QEMU `-M virt` (riscv64) |
+| Decision | [D-015](../design/decisions.md) | [D-016](../design/decisions.md) | [D-016](../design/decisions.md) |
+| Suites | `thumb-{target,encoding,codegen,exec}.sh` | `riscv-{target,encoding,exec}.sh` | same |
+
+All three have: 64-bit integers, soft binary64/binary32, aggregates by
+value, varargs, and `-fstack-usage`. ARMv7-M additionally accepts
+`__attribute__((interrupt))`.
+
+All three also have a **register allocator** (at `-O2` and `-Os`) and
+**inline assembly**. Code size against clang on the same sources is
+about 3.7x for ARMv7-M and 1.7x for both RISC-V widths, down from 5.4x
+and 5.4x/7.1x when every value lived in a stack slot.
+
+None of them has: atomics, VLAs, computed goto, C++ exceptions, `-g`,
+or hardware floating point — `long double` arithmetic is refused on
+RISC-V rather than lowered, though its SIZE and FORMAT are right.
+
+The five exercise programs `tests/golden/embedded-*.c` are shared by the
+ARMv7-M and RISC-V suites: ordinary C that names no machine, run on both
+backends at -O0, -O1, -O2 and -Os. A bug in one that the other does not
+have shows up as one suite failing on a program the other passes.
 
 ## Types
 

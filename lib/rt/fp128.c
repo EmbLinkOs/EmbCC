@@ -19,6 +19,11 @@
  */
 #include "rt.h"
 
+/* Only where __int128 exists, for the reason lib/rt/int128.c gives: the
+ * routines here convert between binary128/double and 128-bit integers, and a
+ * target without the integer type has nothing to convert to. */
+#if defined(__SIZEOF_INT128__)
+
 /* 2^n as a double, built rather than computed: no libm here, and this
  * is exact for every n these conversions produce. */
 static double pow2(int n)
@@ -213,3 +218,11 @@ s128 __fixdfti(double a)
 
 u128 __fixunssfti(float a) { return __fixunsdfti((double)a); }
 s128 __fixsfti(float a)    { return __fixdfti((double)a); }
+
+#else
+
+/* Not this target; see above. A translation unit has to contain at least
+ * one declaration. */
+typedef int embcc_rt_fp128_is_not_this_target;
+
+#endif

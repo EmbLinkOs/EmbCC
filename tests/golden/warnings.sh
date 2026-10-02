@@ -130,3 +130,117 @@ echo "C++ does not warn about the C it lowers to"
 "$EMBCC" --help-warnings | grep -q -- "-Wsign-compare" || {
     echo "--help-warnings omits one"; exit 1; }
 echo "--help-warnings lists them"
+
+# ---- the statically-decidable warnings --------------------------------
+#
+# Six questions about the program's TEXT, answered with what sema
+# already knows. Each is paired with the idiom that looks like it and is
+# CORRECT, because a warning that fires on correct code is worse than no
+# warning at all: the first version of these fired nineteen times on
+# EmbCC's own sources, every one of them a false positive.
+#
+#   -Wparentheses        `REG & MASK == 0` is `REG & (MASK == 0)`, since
+#                        == binds tighter than &. The classic MMIO bug.
+#                        Silent when the author wrote the parentheses.
+#   -Waddress            `if (f)` on a function name. Silent for a WEAK
+#                        function, whose address really can be null --
+#                        that is the whole idiom -- and for a function
+#                        POINTER, which is an ordinary question.
+#   -Wtype-limits        `u < 0` for unsigned u.
+#   -Wshift-count-overflow, -Wdiv-by-zero, -Wlogical-op.
+cat > "$out/sd.c" <<'EOF'
+/* --- each of these is a bug --- */
+int p1(int r, int m)      { return r & m == 0; }
+int p2(int a, int b,int c) { return a == b & c; }
+int s1(int x)             { return x << 40; }
+int s2(int x)             { return x << -1; }
+int d1(int a)             { return a / 0; }
+int l1(int a)             { return a || a; }
+int t1(unsigned u)        { return u < 0; }
+int t2(unsigned u)        { return 0 <= u; }
+extern void plain(void);
+int a1(void)              { if (plain) return 1; return 0; }
+int a2(void)              { return plain != 0; }
+EOF
+"$EMBCC" -Wall -Wextra -fsyntax-only "$out/sd.c" > "$out/sd.log" 2>&1
+for w in parentheses shift-count-overflow div-by-zero logical-op type-limits \
+         address; do
+    grep -q -- "-W$w" "$out/sd.log" || {
+        echo "FAIL: -W$w did not fire on code that needs it:"
+        cat "$out/sd.log"; exit 1; }
+done
+# Two of each of the two-sided ones, so a check that only looks at the
+# left operand cannot pass.
+n=$(grep -c -- '-Wparentheses' "$out/sd.log" || true)
+[ "$n" = 2 ] || { echo "FAIL: -Wparentheses fired $n times, wanted 2 (one
+per operand side)"; cat "$out/sd.log"; exit 1; }
+n=$(grep -c -- '-Wtype-limits' "$out/sd.log" || true)
+[ "$n" = 2 ] || { echo "FAIL: -Wtype-limits fired $n times, wanted 2"
+                  cat "$out/sd.log"; exit 1; }
+echo "six statically-decidable warnings each fire on the code that needs
+them, on both operand sides"
+
+# --- and the idioms that look like those bugs and are correct ---
+cat > "$out/sdok.c" <<'EOF'
+/* The author wrote the parentheses: that IS how you say you meant it,
+ * and EmbCC's own x86 encoder is full of this shape. */
+int q1(int r, int m)  { return r & (m == 0); }
+int q2(int g)         { return 0x40 | (g >= 8); }
+int q3(int a, int b, int c) { return (a == b) & c; }
+/* Shifts and divisions that are in range. */
+long long q4(long long x) { return x << 40; }
+int q5(int x)         { return x << 31; }
+int q6(int a)         { return a / 7; }
+/* Comparisons the types do NOT decide. */
+int q7(unsigned u)    { return u < 1; }
+int q8(int i)         { return i < 0; }
+/* A weak function's address really can be null -- this is how libc asks
+ * whether the host provides something. */
+extern void weakfn(void) __attribute__((weak));
+int q9(void)          { if (weakfn) return 1; return 0; }
+int q10(void)         { return weakfn != 0; }
+/* A function POINTER is an ordinary question, not a mistake. */
+int q11(void (*fp)(void)) { if (fp) return 1; return 0; }
+struct S { void (*h)(void); };
+int q12(struct S *s)  { return s->h == 0; }
+/* Repeated operands WITH side effects are not the same expression. */
+int side(void);
+int q13(void)         { return side() || side(); }
+EOF
+"$EMBCC" -Wall -Wextra -fsyntax-only "$out/sdok.c" > "$out/sdok.log" 2>&1 || {
+    echo "FAIL: the correct-idiom file does not compile:"
+    cat "$out/sdok.log"; exit 1; }
+[ -s "$out/sdok.log" ] && {
+    echo "FAIL: a warning fired on correct code:"
+    cat "$out/sdok.log"; exit 1; }
+echo "and none of them fires on the correct idiom that looks like it"
+
+# None is on without being asked for, and each is switched off by the
+# name it printed.
+"$EMBCC" -fsyntax-only "$out/sd.c" > "$out/sdoff.log" 2>&1
+grep -qE -- '-W(parentheses|shift-count-overflow|type-limits|logical-op|address)' \
+    "$out/sdoff.log" && {
+    echo "FAIL: a -Wall/-Wextra warning fired without being asked:"
+    cat "$out/sdoff.log"; exit 1; }
+"$EMBCC" -Wall -Wextra -Wno-parentheses -Wno-shift-count-overflow \
+    -Wno-div-by-zero -Wno-logical-op -Wno-type-limits -Wno-address \
+    -fsyntax-only "$out/sd.c" > "$out/sdno.log" 2>&1
+[ -s "$out/sdno.log" ] && {
+    echo "FAIL: -Wno- did not silence them:"; cat "$out/sdno.log"; exit 1; }
+echo "each is off unless asked for, and each is switched off by the name
+it prints"
+
+# The whole tree compiles clean under them -- which is the check that
+# actually caught the two false-positive classes above.
+bad=0
+for f in $(find lib src -name '*.c' | sort); do
+    "$EMBCC" -Wall -Wextra -fsyntax-only -Ilib/libc/include -Iinclude "$f" \
+        2>> "$out/tree.log" > /dev/null || true
+done
+n=$(grep -cE -- '-W(parentheses|shift-count-overflow|type-limits|div-by-zero|logical-op|address)' \
+    "$out/tree.log" 2>/dev/null || true)
+[ "$n" = 0 ] || {
+    echo "FAIL: $n of these warnings fire on EmbCC's own sources:"
+    grep -E -- '-W(parentheses|shift-count-overflow|type-limits|div-by-zero|logical-op|address)' \
+        "$out/tree.log" | head -6; exit 1; }
+echo "and EmbCC's own sources are clean under all six"

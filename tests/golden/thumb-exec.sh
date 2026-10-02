@@ -1,0 +1,235 @@
+#!/bin/sh
+# What the ARMv7-M backend COMPUTES, not just what it encodes (D-015).
+#
+# Each program is compiled by EmbCC, linked by embld into a firmware
+# image, and run on QEMU's Cortex-M3 — then compiled by clang for the
+# same triple, linked by the same embld, and run on the same board. The
+# two outputs must agree.
+#
+# That shape matters: the reference travels through EmbCC's own linker
+# and harness, so a difference is the COMPILER's and not a difference in
+# how the image was built. It is the same discipline as
+# agrees-with-gcc.sh, on a machine where nothing else here runs.
+#
+# The PROGRAMS are tests/golden/embedded-*.c, shared with the RISC-V
+# suite -- they are ordinary C and name no machine, so the same five
+# exercise both backends. A bug in one that the other does not have
+# shows up as one suite failing on a program the other passes, which is
+# a much sharper signal than two separate programs drifting apart.
+#
+# Every wrong answer this backend has produced was found this way and by
+# nothing else: an `and` emitted as `eor`, a folded immediate read as a
+# register, and a fifth argument written over the first local all
+# assemble, link and disassemble perfectly.
+set -u
+echo "TEST-MARKER thumb-exec"
+. "$(dirname "$0")/../lib.sh"
+
+QEMU=${EMBCC_QEMU_ARM:-qemu-system-arm}
+CLANG=${EMBCC_REF_GCC_THUMB:-clang}
+command -v "$QEMU" >/dev/null 2>&1 || {
+    echo "SKIP: $QEMU not found (set EMBCC_QEMU_ARM)"; exit 0; }
+command -v "$CLANG" >/dev/null 2>&1 || {
+    echo "SKIP: no reference compiler for thumbv7m (set EMBCC_REF_GCC_THUMB)"
+    exit 0; }
+
+T=thumbv7m-none-eabi
+H=tests/harness/thumb
+out=tests/golden/out/thumb-exec
+rm -rf "$out"; mkdir -p "$out"
+
+# The harness itself is built by EmbCC — the startup is C, because a
+# Cortex-M fetches its initial SP and PC from the vector table in
+# hardware and needs no assembler to begin.
+# Into this test's OWN output directory: tests/run.sh runs the golden
+# tests concurrently, and each may only write inside its own.
+export EMBCC_THUMB_HARNESS="$PWD/$out"
+for f in boot io; do
+    "$EMBCC" --target=$T -c "$H/$f.c" -o "$out/$f.o" || {
+        echo "the harness does not compile for $T"; exit 1; }
+done
+
+run_image() {           # run_image OBJ TAG -> $out/TAG.txt
+    sh "$H/link.sh" "$out/$2.elf" "$1" || {
+        echo "$2: embld could not link the image"; return 1; }
+    sh "$H/run.sh" "$out/$2.elf" > "$out/$2.txt" 2>&1
+    grep -q '==END==' "$out/$2.txt" || {
+        echo "$2: the image did not reach the end of main:"
+        sed -n '1,10p' "$out/$2.txt"
+        return 1; }
+    return 0
+}
+
+for src in tests/golden/embedded-stress.c; do
+    base=$(basename "$src" .c)
+
+    # The reference: the same source, the same linker, the same board.
+    "$CLANG" -target $T -ffreestanding -Os -c "$src" -o "$out/$base-ref.o" || {
+        echo "$base: the reference compiler could not compile it"; exit 1; }
+    run_image "$out/$base-ref.o" "$base-ref" || exit 1
+
+    for opt in -O0 -O1 -O2 -Os; do
+        "$EMBCC" --target=$T $opt -c "$src" -o "$out/$base$opt.o" || {
+            echo "$base $opt: EmbCC could not compile it"; exit 1; }
+        run_image "$out/$base$opt.o" "$base$opt" || exit 1
+        if ! diff -u "$out/$base-ref.txt" "$out/$base$opt.txt" \
+             > "$out/$base$opt.diff"; then
+            echo "$base at $opt does not agree with the reference compiler:"
+            head -20 "$out/$base$opt.diff"
+            exit 1
+        fi
+    done
+    echo "$base: EmbCC agrees with $CLANG at -O0, -O1, -O2 and -Os"
+done
+
+# 64-bit integers are checked against the HOST rather than against
+# clang. `long long` arithmetic has one answer whatever the register
+# width, so the machine this suite runs on is as good a reference — and
+# a better one here, because clang for thumbv7m emits __aeabi_ldivmod
+# for a 64-bit divide where EmbCC emits __divdi3, and the two cannot
+# share a runtime.
+"$EMBCC" --target=$T -Os -c lib/rt/int64.c -o "$out/int64.o" || {
+    echo "the 64-bit runtime does not compile for $T"; exit 1; }
+cc -std=c99 -w -o "$out/host64" tests/golden/embedded-int64.c \
+   tests/harness/thumb/hostio.c || {
+    echo "the 64-bit program does not compile for the host"; exit 1; }
+"$out/host64" > "$out/int64-ref.txt" || {
+    echo "the 64-bit program failed on the host"; exit 1; }
+
+for opt in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T $opt -c tests/golden/embedded-int64.c \
+             -o "$out/i64$opt.o" || {
+        echo "$opt: the 64-bit program does not compile"; exit 1; }
+    sh "$H/link.sh" "$out/i64$opt.elf" "$out/i64$opt.o" "$out/int64.o" || {
+        echo "$opt: embld could not link the 64-bit image"; exit 1; }
+    sh "$H/run.sh" "$out/i64$opt.elf" > "$out/i64$opt.txt" 2>&1
+    grep -q '==END==' "$out/i64$opt.txt" || {
+        echo "$opt: the 64-bit image did not reach the end of main:"
+        sed -n '1,10p' "$out/i64$opt.txt"; exit 1; }
+    if ! diff -u "$out/int64-ref.txt" "$out/i64$opt.txt" > "$out/i64$opt.diff"
+    then
+        echo "64-bit arithmetic at $opt does not agree with the host:"
+        head -20 "$out/i64$opt.diff"
+        exit 1
+    fi
+done
+echo "thumb-int64: 64-bit arithmetic agrees with the host at four levels"
+
+# Floating point, the same way and for the same reason: IEEE arithmetic
+# has one answer, and the host's hardware gives it in one instruction
+# where this target gives it in a call into lib/rt/softfp.c. Results are
+# compared as BIT PATTERNS, so a rounding that is off by one ulp fails.
+"$EMBCC" --target=$T -Os -c lib/rt/softfp.c -o "$out/softfp.o" || {
+    echo "the soft-float runtime does not compile for $T"; exit 1; }
+cc -std=c99 -w -o "$out/hostfp" tests/golden/embedded-float.c \
+   tests/harness/thumb/hostio.c || {
+    echo "the float program does not compile for the host"; exit 1; }
+"$out/hostfp" > "$out/float-ref.txt" || {
+    echo "the float program failed on the host"; exit 1; }
+
+for opt in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T $opt -c tests/golden/embedded-float.c \
+             -o "$out/fp$opt.o" || {
+        echo "$opt: the float program does not compile"; exit 1; }
+    sh "$H/link.sh" "$out/fp$opt.elf" "$out/fp$opt.o" "$out/softfp.o" \
+       "$out/int64.o" || {
+        echo "$opt: embld could not link the float image"; exit 1; }
+    sh "$H/run.sh" "$out/fp$opt.elf" > "$out/fp$opt.txt" 2>&1
+    grep -q '==END==' "$out/fp$opt.txt" || {
+        echo "$opt: the float image did not reach the end of main:"
+        sed -n '1,10p' "$out/fp$opt.txt"; exit 1; }
+    if ! diff -u "$out/float-ref.txt" "$out/fp$opt.txt" > "$out/fp$opt.diff"
+    then
+        echo "floating point at $opt does not agree with the host:"
+        head -20 "$out/fp$opt.diff"
+        exit 1
+    fi
+done
+echo "thumb-float: IEEE results are bit-identical to the host at four levels"
+
+# Aggregates by value, against the host — what a struct's members add
+# up to does not depend on the machine.
+cc -std=c99 -w -o "$out/hostagg" tests/golden/embedded-aggregate.c \
+   tests/harness/thumb/hostio.c || {
+    echo "the aggregate program does not compile for the host"; exit 1; }
+"$out/hostagg" > "$out/agg-ref.txt" || {
+    echo "the aggregate program failed on the host"; exit 1; }
+for opt in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T $opt -c tests/golden/embedded-aggregate.c \
+             -o "$out/ag$opt.o" || {
+        echo "$opt: the aggregate program does not compile"; exit 1; }
+    sh "$H/link.sh" "$out/ag$opt.elf" "$out/ag$opt.o" "$out/softfp.o" \
+       "$out/int64.o" || { echo "$opt: could not link"; exit 1; }
+    sh "$H/run.sh" "$out/ag$opt.elf" > "$out/ag$opt.txt" 2>&1
+    grep -q '==END==' "$out/ag$opt.txt" || {
+        echo "$opt: the aggregate image did not finish:"
+        sed -n '1,10p' "$out/ag$opt.txt"; exit 1; }
+    diff -u "$out/agg-ref.txt" "$out/ag$opt.txt" > "$out/ag$opt.diff" || {
+        echo "aggregates at $opt do not agree with the host:"
+        head -20 "$out/ag$opt.diff"; exit 1; }
+done
+echo "thumb-aggregate: by-value structs agree with the host at four levels"
+
+# Variadic functions, against the host.
+cc -std=c99 -w -o "$out/hostva" tests/golden/embedded-varargs.c \
+   tests/harness/thumb/hostio.c || {
+    echo "the varargs program does not compile for the host"; exit 1; }
+"$out/hostva" > "$out/va-ref.txt" || {
+    echo "the varargs program failed on the host"; exit 1; }
+for opt in -O0 -O1 -O2 -Os; do
+    "$EMBCC" --target=$T $opt -c tests/golden/embedded-varargs.c \
+             -o "$out/va$opt.o" || {
+        echo "$opt: the varargs program does not compile"; exit 1; }
+    sh "$H/link.sh" "$out/va$opt.elf" "$out/va$opt.o" "$out/softfp.o" \
+       "$out/int64.o" || { echo "$opt: could not link"; exit 1; }
+    sh "$H/run.sh" "$out/va$opt.elf" > "$out/va$opt.txt" 2>&1
+    grep -q '==END==' "$out/va$opt.txt" || {
+        echo "$opt: the varargs image did not finish:"
+        sed -n '1,10p' "$out/va$opt.txt"; exit 1; }
+    diff -u "$out/va-ref.txt" "$out/va$opt.txt" > "$out/va$opt.diff" || {
+        echo "varargs at $opt do not agree with the host:"
+        head -20 "$out/va$opt.diff"; exit 1; }
+done
+echo "thumb-varargs: variadic calls agree with the host at four levels"
+
+# And the question the host cannot answer: are they passed the way
+# ANOTHER ARM toolchain passes them? The caller and the callee are
+# compiled by different compilers, in both directions, and linked
+# together — so a disagreement about which register a composite starts
+# in shows up as a wrong number rather than as nothing at all.
+abi_pair() {                    # abi_pair CALLER CALLEE TAG
+    for side in caller callee; do
+        eval "cc_$side=\$$( [ $side = caller ] && echo 1 || echo 2 )"
+    done
+    for side in caller callee; do
+        eval "which=\$cc_$side"
+        if [ "$which" = clang ]; then
+            "$CLANG" -target $T -ffreestanding -O1 -I tests/golden \
+                -c "tests/golden/embedded-abi-$side.c" -o "$out/$3-$side.o" || \
+                { echo "$3: clang could not compile the $side"; return 1; }
+        else
+            "$EMBCC" --target=$T -O1 -I tests/golden \
+                -c "tests/golden/embedded-abi-$side.c" -o "$out/$3-$side.o" || \
+                { echo "$3: EmbCC could not compile the $side"; return 1; }
+        fi
+    done
+    sh "$H/link.sh" "$out/$3.elf" "$out/$3-caller.o" "$out/$3-callee.o" \
+       "$out/int64.o" || { echo "$3: could not link"; return 1; }
+    sh "$H/run.sh" "$out/$3.elf" > "$out/$3.txt" 2>&1
+    grep -q '==END==' "$out/$3.txt" || {
+        echo "$3: the image did not finish:"; sed -n '1,6p' "$out/$3.txt"
+        return 1; }
+    return 0
+}
+abi_pair embcc embcc ee || exit 1
+abi_pair embcc clang ec || exit 1
+abi_pair clang embcc ce || exit 1
+abi_pair clang clang cc || exit 1
+for tag in ec ce cc; do
+    diff -u "$out/ee.txt" "$out/$tag.txt" > "$out/$tag.abidiff" || {
+        echo "the $tag pairing disagrees with EmbCC calling itself:"
+        head -12 "$out/$tag.abidiff"; exit 1; }
+done
+echo "embedded-abi: EmbCC and clang call each other's aggregates identically"
+
+echo "ARMv7-M images build with embld and run on $QEMU"

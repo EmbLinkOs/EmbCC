@@ -11,6 +11,27 @@ CC      ?= cc
 CFLAGS  ?= -std=c99 -Wall -Wextra -Werror -g
 BUILD   := build
 
+# The target `embcc` compiles for when the command line names none.
+# Empty means x86_64-elf -- a compiler built here targets here. A person
+# whose work is one board builds the compiler for it once:
+#
+#     make DEFAULT_TARGET=riscv32-unknown-elf
+#
+# and then types `embcc main.c` rather than repeating --target= all day.
+# This is GCC's `./configure --target=`, which is why it is a build-time
+# knob and not only an environment variable: an installed cross compiler
+# should behave the same for everyone who runs it, including a Makefile
+# that inherited no environment. EMBCC_DEFAULT_TARGET overrides it for
+# one shell, and --target= overrides both.
+#
+# Only the string is compiled in. The compiler still contains every
+# backend, so --target= reaches all of them -- unlike GCC, where a cross
+# build is a different binary.
+DEFAULT_TARGET ?=
+ifneq ($(DEFAULT_TARGET),)
+CFLAGS += -DEMBCC_DEFAULT_TARGET='"$(DEFAULT_TARGET)"'
+endif
+
 # The target-neutral compiler, then src/arch: what every target shares
 # (selection, the backend contract, the code buffer), then one directory per
 # architecture — everything x86-64-only under x86_64/, aarch64-only under
@@ -27,6 +48,7 @@ SRCS := \
 	src/driver/explain.c \
 	src/driver/paths.c \
 	src/link/link.c \
+	src/as/gas.c \
 	src/embx/embx.c \
 	src/lex/lex.c \
 	src/cpp/cpp.c \
@@ -78,7 +100,30 @@ SRCS := \
 	src/arch/aarch64/emit.c \
 	src/arch/aarch64/asm.c \
 	src/arch/aarch64/predef.c \
-	src/arch/aarch64/predef_cxx.c
+	src/arch/aarch64/predef_cxx.c \
+	src/arch/thumb/emit.c \
+	src/arch/thumb/attrs.c \
+	src/arch/thumb/irgen.c \
+	src/arch/thumb/codegen.c \
+	src/arch/thumb/asm.c \
+	src/arch/thumb/predef.c \
+	src/arch/thumb/predef_cxx.c \
+	src/arch/thumbv8m/predef.c \
+	src/arch/thumbv8m/predef_cxx.c \
+	src/arch/riscv/emit.c \
+	src/arch/riscv/codegen.c \
+	src/arch/riscv/irgen.c \
+	src/arch/riscv/asm.c \
+	src/arch/riscv32/predef.c \
+	src/arch/riscv32/predef_cxx.c \
+	src/arch/riscv64/predef.c \
+	src/arch/riscv64/predef_cxx.c \
+	src/arch/avr/emit.c \
+	src/arch/avr/codegen.c \
+	src/arch/avr/asm.c \
+	src/arch/avr/irgen.c \
+	src/arch/avr/predef.c \
+	src/arch/avr/predef_cxx.c
 
 OBJS := $(SRCS:src/%.c=$(BUILD)/%.o)
 
@@ -114,11 +159,21 @@ $(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
 # embas — the standalone NASM/Intel-syntax assembler (A1, ARCHITECTURE §4). Reads
 # the kernel's hand-written .asm and emits ELF objects the same writer (src/elf)
 # the compiler uses produces, so the toolchain owns the whole build (drops nasm).
+# src/arch/target.c and the two sema files it needs joined this list
+# because src/elf/write.c asks target_ptr_size() to choose ELF32 vs
+# ELF64 -- which it has done since the RISC-V backend landed, leaving
+# `embas` unlinkable and `make all` failing. Nothing noticed, because
+# no test builds embas: `make test` depends on embcc, embread, embld,
+# embdbg and embls, and the assembler is only reached through the
+# kernel build. tests/golden/tools-build.sh now builds every tool in
+# `all`, which is the cheapest guard against the next one.
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
+       src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
        src/platform/platform_posix.c src/platform/platform.h
 	$(CC) $(CFLAGS) -o $@ tools/embas/embas.c src/arch/x86_64/as.c \
 	    src/elf/write.c src/driver/util.c src/driver/diag.c \
+	    src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
 	    src/platform/platform_posix.c
 
 # embld — the integrated linker (ARCHITECTURE §6, WORKPLAN stream B), as
@@ -129,6 +184,7 @@ embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
 # writer the embdbg tool uses — one implementation, not two.
 embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
+       src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/code.c \
        src/link/link.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
        src/platform/platform_posix.c src/platform/platform.h
@@ -136,8 +192,16 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c src/platform/platform_posix.c \
-	    src/arch/x86_64/disasm.c
+	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/code.c
 
+# NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
+# a backend file added without a line here breaks only `make test` -- and
+# breaks it at the BUILD step, so the suite reports nothing rather than
+# failing a test. That has now happened twice in one week: src/arch/avr/asm.c
+# and src/arch/avr/irgen.c when the AVR assembler and inline asm landed, and
+# src/arch/thumbv8m/predef*.c when ARMv8-M did. Anything defining a symbol
+# that sema.c, irgen.c or predef.c's arch_table reaches belongs here.
+#
 # embls — the language server (docs/tools/diagnostics.md T5). It links EmbCC's own
 # preprocessor and parser, so what an editor is told about a file comes from
 # the compiler that will compile it; diagnostics it gets by running embcc
@@ -152,6 +216,11 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/arch/target.c src/arch/predef.c src/arch/x86_64/predef.c \
              src/arch/aarch64/predef.c src/arch/x86_64/predef_cxx.c \
              src/arch/aarch64/predef_cxx.c \
+             src/arch/thumb/predef.c src/arch/thumb/predef_cxx.c \
+             src/arch/riscv32/predef.c src/arch/riscv32/predef_cxx.c \
+             src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
+             src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
+             src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
@@ -160,7 +229,10 @@ EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
              src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
-             src/arch/aarch64/asm.c
+             src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
+             src/arch/thumb/emit.c src/arch/thumb/attrs.c src/arch/riscv/irgen.c \
+             src/arch/riscv/asm.c src/arch/riscv/emit.c \
+             src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
 
@@ -184,9 +256,10 @@ embread: tools/embread/embread.c src/embx/embx.c src/embx/embx.h
 # embdbg reads the x86-64 decoder from src/arch/x86_64 (disasm.c) rather
 # than carrying its own: the compiler needs it for -S, and one decoder is
 # the same discipline as one encoder (R1).
-embdbg: tools/embdbg/embdbg.c src/elf/elf.h src/arch/x86_64/disasm.c \
-        src/arch/x86_64/disasm.h
-	$(CC) $(CFLAGS) -o $@ tools/embdbg/embdbg.c src/arch/x86_64/disasm.c
+embdbg: tools/embdbg/embdbg.c tools/embdbg/remote.c tools/embdbg/remote.h \
+        src/elf/elf.h src/arch/x86_64/disasm.c src/arch/x86_64/disasm.h
+	$(CC) $(CFLAGS) -o $@ tools/embdbg/embdbg.c tools/embdbg/remote.c \
+	    src/arch/x86_64/disasm.c
 
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
@@ -217,7 +290,10 @@ $(OBJS): $(wildcard src/*/*.h src/arch/*/*.h)
 check: embcc libc-x86_64 libcxx-x86_64
 	tests/run.sh --exec-only
 
-test: embcc embread embld embdbg embls libc-x86_64 libcxx-x86_64 \
+# embas belongs here too: tests/golden/x86_64/assembler.sh runs it, and
+# without it in this list the suite passes from a dirty tree and fails
+# from a clean one -- which is the wrong way round.
+test: embcc embread embld embdbg embls embas libc-x86_64 libcxx-x86_64 \
       libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
@@ -354,6 +430,25 @@ libc-linux-aarch64: embcc
 	    $(BUILD)/libc/linux-aarch64/librt.a $(BUILD)/libc/linux-aarch64/rt/*.o
 	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + crt1.o"
 
+# The compiler runtime for each EMBEDDED target, as an archive per triple.
+# These had no rule at all: a firmware build for any of the four targets the
+# EmbLinkRTOS requirements name had to compile lib/rt by hand and choose the
+# objects itself. tools/build-rt.sh is the one place the recipe lives, and
+# tests/golden/embedded-runtime.sh uses it too, so the archive the test checks
+# is the archive that ships. RV64 is not here: its table claims __int128 while
+# its backend refuses 128-bit values, so lib/rt/int128.c cannot build for it,
+# and it is not one of the four named targets.
+# The -eabihf ones are the hard-float convention: its objects do not link
+# with soft-float ones, so its runtime is a separate archive.
+RT_EMBEDDED := avr thumbv7m-none-eabi thumbv7em-none-eabi \
+               thumbv7em-none-eabihf thumbv8m.main-none-eabi \
+               thumbv8m.main-none-eabihf riscv32-unknown-elf
+rt-embedded: embcc
+	@for t in $(RT_EMBEDDED); do \
+	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
+	    echo "rt: $(BUILD)/libc/$$t/librt.a"; \
+	done
+
 libc-linux: libc-linux-x86_64 libc-linux-aarch64
 
 # ---- installation ------------------------------------------------------
@@ -384,7 +479,7 @@ LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
 # test that rebuilds the compiler while the rest of the suite is using
 # it, which is the one thing the suite must never do to itself.
 install: all libc libcxx libc-linux libcxx-linux-x86_64 \
-         libcxx-linux-aarch64 install-files
+         libcxx-linux-aarch64 rt-embedded install-files
 
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
@@ -400,7 +495,8 @@ install-files:
 	@cp -R include/. $(LIBROOT)/freestanding/
 	@for pair in "x86_64-elf:x86_64" "aarch64-elf:aarch64" \
 	             "x86_64-linux-gnu:linux-x86_64" \
-	             "aarch64-linux-gnu:linux-aarch64"; do \
+	             "aarch64-linux-gnu:linux-aarch64" \
+	             $(foreach t,$(RT_EMBEDDED),"$(t):$(t)"); do \
 	    triple=$${pair%%:*}; dir=$${pair#*:}; \
 	    mkdir -p $(LIBROOT)/$$triple; \
 	    for f in libc.a librt.a crt1.o; do \

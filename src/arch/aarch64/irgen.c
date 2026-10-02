@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "../../driver/util.h"
+#include "emit.h"
 #include "../../sema/sema.h"
 #include "../../sema/type.h"
 #include "asm.h"
@@ -57,7 +58,7 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e)
     emit_label(fn, l_stack);
     int stk = emit_load(fn, ap, ptr);
     int ssz = 8;
-    if (rt->kind == TY_LDOUBLE || i128) {  /* a 16-aligned stack slot of 16 */
+    if (ty_is_xldouble(rt) || i128) {  /* a 16-aligned stack slot of 16 */
         stk = emit_bin(fn, IR_AND,
                        emit_bin(fn, IR_ADD, stk, emit_const(fn, 15, 8), 8, 1),
                        emit_const(fn, -16, 8), 8, 1);
@@ -68,7 +69,7 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e)
                ptr);
     emit_label(fn, l_done);
 
-    if (rt->kind == TY_LDOUBLE)     /* a whole v register's slot */
+    if (ty_is_xldouble(rt))     /* a whole v register's slot */
         return emit_load(fn, addr, rt);
     if (flt) {
         int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));
@@ -110,7 +111,7 @@ int irg_va_arg_darwin(struct ir_func *fn, struct expr *e)
 
     /* Sixteen-byte types get a sixteen-byte slot, aligned; everything
      * else is rounded up to eight, which is the whole of the layout. */
-    int wide = rt->kind == TY_LDOUBLE || rt->kind == TY_INT128;
+    int wide = ty_is_xldouble(rt) || rt->kind == TY_INT128;
     if (wide)
         cur = emit_bin(fn, IR_AND,
                        emit_bin(fn, IR_ADD, cur, emit_const(fn, 15, 8), 8, 1),
@@ -125,7 +126,7 @@ int irg_va_arg_darwin(struct ir_func *fn, struct expr *e)
     emit_store(fn, apa,
                emit_bin(fn, IR_ADD, addr, emit_const(fn, step, 8), 8, 1), ptr);
 
-    if (rt->kind == TY_LDOUBLE)
+    if (ty_is_xldouble(rt))
         return emit_load(fn, addr, rt);
     if (flt) {
         int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));
@@ -304,7 +305,7 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
 
     char *text = a64_subst(file, s->line, a->tmpl, regs, imms, isimm, sizes,
                            names, nops);
-    struct code c = { 0, 0, 0 };
+    struct code c = { 0 };
     char err[512];
     if (a64asm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
@@ -344,3 +345,31 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
 
 /* Innermost enclosing loop's exit and continue targets; sema already
  * rejected break/continue outside any loop. */
+
+/* What the aarch64 lowerings take as an immediate without building the
+ * constant first -- asked by the optimizer before it folds one (opt.c's
+ * target_imm_foldable). This target used to answer "everything", and a
+ * constant no instruction can hold was then rebuilt at its use: FNV-1a's
+ * multiplier 16777619 by a mov and a movk on every byte of every string
+ * hashed, where a value left in a register is built once before the loop.
+ *
+ * add, sub and compare: 12 bits, optionally shifted by 12, either sign
+ * (an add of a negative is a sub, a compare a cmn). and, orr, eor: a
+ * bitmask immediate at the operation's width. mul has no immediate form
+ * at all, but the code generator turns a multiply by 2^k +- 1 (shifted)
+ * into one shifted add (target_mul_shift_add), so those fold. */
+int a64_imm_foldable(int op, long imm, int w)
+{
+    long m = imm < 0 ? -imm : imm;
+    int k, neg, j;
+    switch (op) {
+    case IR_ADD: case IR_SUB: case IR_CMP:
+        return m <= 0xfff || ((m & 0xfff) == 0 && m <= 0xfff000L);
+    case IR_AND: case IR_OR: case IR_XOR:
+        return a64_bitmask_ok(w == 4 ? (long)(unsigned)imm : imm, w == 4 ? 4 : 8);
+    case IR_MUL:
+        return target_mul_shift_add(imm, &k, &neg, &j);
+    default:
+        return 0;
+    }
+}

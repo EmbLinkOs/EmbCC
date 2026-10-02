@@ -168,11 +168,39 @@ look plausible."
    converts), and the DWARF emitter became the host-debugging bridge it always
    was — the ordering §6 argued for, followed.
 
-   **Still open past v0:** *live* debugging. EmbDBG v0 is a static reader and
-   crash analyzer; breakpoints, single-step and register inspection on a running
-   process need the OS's own contract (`CAP_DEBUG`, `SPAWN_ACTION_DEBUG`,
-   syscalls 69–75), which is a **kernel** design question and out of EmbCC's
-   scope (D-007). It is specified OS-side and reserved, not built.
+   **Live debugging: DONE for the embedded targets, 2026-09-26 — and the
+   reasoning that had parked it was too narrow.** It used to say that
+   breakpoints, single-step and register inspection need the OS's own contract
+   (`CAP_DEBUG`, `SPAWN_ACTION_DEBUG`, syscalls 69–75), which is a kernel design
+   question and out of EmbCC's scope (D-007). That is still true of a process
+   running **on EmbLinkOS**. It is not true of the only live targets this
+   compiler has: firmware is debugged through a stub speaking the **GDB remote
+   serial protocol**, which QEMU provides with `-gdb tcp::PORT` and OpenOCD
+   provides over JTAG or SWD to a real Cortex-M or RISC-V chip. Neither needs a
+   kernel, and both exist today — so this is §3's move again: *the bridge comes
+   first, because it needs no consumer we have not built.*
+
+   `embdbg FILE remote [HOST:]PORT` is that client (`tools/embdbg/remote.c`).
+   It reads commands from stdin — `break FUNC`/`FILE:LINE`/`*ADDR`, `continue`,
+   `step` (a source line), `stepi`, `where`, `bt`, `regs`, `mem`, `delete` — and
+   hands everything it reads to the SAME symbolizer, line table and variable
+   lists the static commands use. `where` on a live Cortex-M prints what
+   `where ADDR` prints on a crash dump because it is the same function
+   underneath. Gate: `tests/golden/embdbg-remote.sh`, which stops a running
+   RV64, RV32 and ARMv7-M image inside a named function and checks the argument
+   registers hold what the caller passed.
+
+   Two things had to change underneath it, and both were gaps in their own
+   right. **EmbLD now keeps a symbol table in the executable** — it is outside
+   every `PT_LOAD`, so it costs file size and no flash, and without it a linked
+   image was anonymous and `break compute` had nothing to resolve. And **EmbDBG
+   now reads ELFCLASS32**, which the embedded targets are.
+
+   **Still open:** live debugging of an EmbLinkOS *process*, which does still
+   need the kernel contract above; and source-level stepping in firmware, which
+   needs `-g` on those backends (refused today) and needs EmbLD to carry the
+   `.debug_*` sections or emit the absolute-addressed `.embdbg` for them. The
+   remote client works at symbol level without either.
 
 ## 5. Requirements the format must meet, whichever it is
 

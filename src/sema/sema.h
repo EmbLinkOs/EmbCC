@@ -38,8 +38,32 @@ enum atomic_kind atomic_builtin(const char *name, int *op);
 
 /* The GCC bit builtins, by the name after "__builtin_": 1 ctz, 2 clz,
  * 3 popcount, 4 ffs, 5 parity, 6 clrsb, or 0. *width (if not NULL) gets the
- * operand width — 4 for the plain form, 8 for the l / ll forms. */
+ * operand's type as a rank -- 1 int, 2 long, 3 long long -- whose size is
+ * the target's to say (irgen gen_bitop). */
 int builtin_bitop(const char *bn, int *width);
+
+/* Does the C front end implement this compiler-known name? This is the
+ * answer `__has_builtin` gives, and it must not be able to drift from
+ * what the compiler actually accepts.
+ *
+ * Most of it is DERIVED rather than restated: the bit family goes
+ * through builtin_bitop and the atomics through atomic_builtin -- the
+ * same predicates the dispatch itself calls -- so adding a member to
+ * either family updates this automatically. The remainder is a list,
+ * because sema lowers those through a chain of strcmps and there is
+ * nothing else to ask. tests/golden/has-builtin.sh closes that gap from
+ * both directions: every name here must be accepted by the compiler,
+ * and every name the dispatch strcmps for must be here.
+ *
+ * (Clang generates both its dispatch and its __has_builtin from one
+ * Builtins.td, which is the better shape and the one to move to when
+ * the dispatch becomes table-driven. Until then the test is what makes
+ * this honest rather than aspirational.) */
+int sema_has_builtin(const char *name);
+
+/* The listed (non-derived) half, for the golden test to walk. */
+int sema_named_builtin_count(void);
+const char *sema_named_builtin(int i);
 
 /* A call that never comes back -- __attribute__((noreturn)), or one of
  * the handful of library names that genuinely never return. Statements

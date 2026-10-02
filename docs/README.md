@@ -55,6 +55,7 @@ gap is visible.
 |---|---|
 | [embcc.md](tools/embcc.md) | the driver: options, targets, what it accepts |
 | [diagnostics.md](tools/diagnostics.md) | diagnostics, `--explain`, fix-its, warnings, remarks, the language server, `embld --doctor` |
+| [embedded.md](tools/embedded.md) | building Cortex-M firmware: the target, the startup, the link |
 | [embdbg.md](tools/embdbg.md) | the debugger's requirements and what it consumes |
 
 ## developer/
@@ -63,6 +64,7 @@ gap is visible.
 |---|---|
 | [selfhost-on-os.md](developer/selfhost-on-os.md) | building EmbCC with EmbCC, on EmbLinkOS |
 | [todo.md](developer/todo.md) | the running list of known gaps |
+| [gaps-vs-gcc-clang.md](developer/gaps-vs-gcc-clang.md) | where EmbCC stands against GCC and Clang, probed rather than guessed |
 
 Testing is documented with the tests: [tests/README.md](../tests/README.md).
 

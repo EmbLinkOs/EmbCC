@@ -21,6 +21,8 @@ enum tok_kind {
     TOK_KW_SHORT,
     TOK_KW_LONG,
     TOK_KW_INT128,    /* GNU __int128 */
+    TOK_KW_FLOAT128,  /* _Float128 / __float128 (IEEE binary128) */
+    TOK_KW_FLOAT16,   /* _Float16 / __fp16 (IEEE binary16) */
     TOK_KW_FLOAT,
     TOK_KW_DOUBLE,
     TOK_KW_BOOL,
@@ -32,6 +34,9 @@ enum tok_kind {
     TOK_KW_ALIGNOF,
     TOK_KW_ALIGNAS,
     TOK_KW_TYPEOF,
+    TOK_KW_AUTOTYPE,
+    TOK_KW_TYPEOF_UNQUAL,
+    TOK_KW_NULLPTR,
     TOK_KW_ATOMIC,
     TOK_KW_UNSIGNED,
     TOK_KW_SIGNED,
@@ -175,8 +180,10 @@ struct token {
     struct litch *lit; /* TOK_STR: the decoded elements, for concatenation */
     int nlit;
     int num_long;  /* TOK_NUM: type is long (L suffix or magnitude) */
-    int num_llong; /* TOK_NUM: an LL suffix (long long — the same width as
-                    * long, but a distinct type to C++'s overloading) */
+    int num_llong; /* TOK_NUM: `long long` — an LL suffix, or a magnitude
+                    * that does not fit the target's `long`. The same
+                    * width as long on LP64 and twice it on ILP32; a
+                    * distinct type to C++'s overloading either way. */
     int char_lit;  /* TOK_NUM from a character constant; str_prefix holds its
                     * encoding prefix (C++ types 'a' as char, not int) */
     int num_uns;   /* TOK_NUM: type is unsigned (U suffix or hex range) */
@@ -212,5 +219,6 @@ void lex_next(struct lexer *lx);
 
 /* Human-readable name of a token, for diagnostics. */
 const char *tok_describe(const struct token *t);
+int lex_ident_utf8(const char *p, int first);
 
 #endif

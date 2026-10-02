@@ -160,11 +160,18 @@ int paths_target_file(const char *triple, const char *name,
          * build/libc, because it is built by a different rule for a
          * different set of targets. An install puts them side by side,
          * so only this branch has to know. */
+        /* Anything this does not recognise is looked for under its OWN
+         * name, never under "x86_64". The last arm used to be that
+         * fallback, so asking the build tree for AVR's librt.a found
+         * x86-64's -- a runtime for the wrong machine, which the linker
+         * would reject at best. The embedded runtimes are built into
+         * build/libc/<triple>/ by `make rt-embedded` for exactly this. */
         const char *dir =
             strncmp(triple, "x86_64-linux", 12) == 0 ? "linux-x86_64"
             : strncmp(triple, "aarch64-linux", 13) == 0 ? "linux-aarch64"
             : strncmp(triple, "aarch64", 7) == 0 ? "aarch64"
-            : "x86_64";
+            : strncmp(triple, "x86_64", 6) == 0 ? "x86_64"
+            : triple;
         snprintf(p, sizeof p, "%s/build/%s/%s/%s", g_lib,
                  strcmp(name, "libcxx.a") == 0 ? "libcxx" : "libc",
                  dir, name);

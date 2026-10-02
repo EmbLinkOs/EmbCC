@@ -21,6 +21,8 @@
 #include "../driver/util.h"
 #include "../elf/elf.h"
 #include "../embx/embx.h"
+#include "../arch/riscv/emit.h"
+#include "../arch/avr/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -44,6 +46,25 @@ struct object {
     int local_syms;           /* sh_info of the symtab: [0,local) are LOCAL */
     /* per input section: index into insecs[], or -1 if not laid out */
     int *sec_out;
+    /* Non-allocated .debug_* sections: which merged section each input
+     * section joined (index into l->dbgsecs, or -1) and at what offset
+     * within it. Kept beside sec_out because a relocation names an
+     * input section index and has to reach one or the other. */
+    int *dbg_sec;
+    long *dbg_off;
+    /* ELFCLASS32 input (ARMv7-M, D-015). The headers and the symbol
+     * table are CONVERTED into the 64-bit structures above at parse
+     * time, so nothing downstream of parse_object knows: only the
+     * relocation reader, which walks entries of a different size, and
+     * the writer, which has to put the class back. */
+    int elf32;
+    int machine;              /* e_machine, checked to be one across inputs */
+    unsigned long eflags;     /* its e_flags */
+    /* What .ARM.attributes says, plus one -- so 0 means the object did
+     * not say, which is not the same as saying zero. An object with no
+     * attributes section must not be read as claiming the base
+     * standard. */
+    int arm_vfp, arm_enum, arm_arch;
 };
 
 /* An allocated input section placed into the output. */
@@ -56,6 +77,13 @@ enum seg { SEG_TEXT, SEG_DATA };
  * them. Order matters: constructors precede ordinary data; .bss is last
  * (NOBITS, the memsz tail). */
 enum osec {
+    /* The interrupt vector table, FIRST because a Cortex-M does not
+     * look it up -- it fetches the initial stack pointer from the word
+     * at the image's base and the reset address from the next one. An
+     * orphan group would place it after .rodata, where the processor
+     * would read whatever happened to land at zero and branch there.
+     * Empty and harmless on every other target. */
+    OSEC_VECTORS,
     OSEC_TEXT, OSEC_RODATA,               /* text segment (R+X) */
     /* The thread block, first in the data segment. These are not data
      * every thread shares: they are the TEMPLATE each thread's private
@@ -104,6 +132,7 @@ struct symbol {
     int defined;
     int weak;
     int common;                /* a tentative (COMMON) definition */
+    int type;                  /* STT_FUNC/STT_OBJECT/..., from the input */
     Elf64_Xword size;          /* for COMMON: the size to reserve */
     Elf64_Xword align;         /* for COMMON */
 };
@@ -125,7 +154,18 @@ struct archive {
     int nmembers;
 };
 
+/* One merged .debug_* section. */
+struct dbgsec {
+    const char *name;
+    unsigned char *data;
+    long len, cap;
+    int shndx;              /* its index in the output, filled at write */
+};
+
 struct linker {
+    struct dbgsec *dbgsecs;
+    int ndbg, capdbg;
+    int keep_debug;         /* any input carried DWARF worth keeping */
     /* The thread block, for the TPOFF relocations: where it starts in
      * the image, and its aligned size -- which is what an offset is
      * measured back from, because x86-64 puts the block below the
@@ -142,7 +182,30 @@ struct linker {
     int narch, caparch;
     Elf64_Addr base;
     const char *entry;
+    /* RISC-V: what each PCREL_HI20 computed, keyed by the auipc's
+     * address, for the low half that pairs with it. */
+    struct { Elf64_Addr at; long long val; } *pcrel;
+    int npcrel, cappcrel;
+    Elf64_Addr stack_top;      /* RISC-V: the entry stub's sp, 0 = no stub */
+    int stub_sec;              /* the stub's insecs index, or -1 */
+    unsigned char *stub;       /* its bytes, written after layout */
+    long stub_size;
     Elf64_Addr lma_offset;     /* L2: p_paddr = p_vaddr - this (0 = paddr==vaddr) */
+    Elf64_Addr data_base;      /* firmware: the writable segment's VMA (0 = off) */
+    Elf64_Addr data_lma;       /* ... and where its bytes are STORED */
+    unsigned long rom_limit;   /* bytes of flash the image may occupy, 0 = any */
+    int elf32;                 /* ELFCLASS32 output, from the inputs */
+    int machine;               /* e_machine, one across every input */
+    /* The output's e_flags, from the inputs': RISC-V's EF_RISCV_RVC when
+     * any of them has compressed code, AVR's architecture as the first
+     * one names it. */
+    unsigned long eflags;
+    /* A Harvard machine: program space and data space are separate, and
+     * no instruction reads read-only data where it was stored. .rodata
+     * therefore belongs in the WRITABLE segment -- a RAM address with a
+     * flash load address -- so the startup can copy it across. AVR is
+     * the only such target here. */
+    int harvard;
     struct orphan orphans[MAX_ORPHANS];
     int norphan;
 };
@@ -188,6 +251,126 @@ static struct symbol *sym_intern(struct linker *l, const char *name)
 
 static Elf64_Shdr *sh_at(struct object *o, int i) { return &o->shdrs[i]; }
 
+
+/* ---- ARM build attributes ---------------------------------------------
+ *
+ * Only the tags that decide whether two objects can be linked at all
+ * are read; the rest are skipped, which the format allows because every
+ * value is either a ULEB128 or a NUL-terminated string and the tag
+ * number says which.
+ */
+enum { ARM_TAG_CPU_ARCH = 6, ARM_TAG_ENUM_SIZE = 26, ARM_TAG_VFP_ARGS = 28 };
+
+/* The tags whose VALUE is a string rather than a number. From the ABI:
+ * CPU_raw_name, CPU_name, compatibility, also_compatible_with and
+ * conformance. A tag not in this list has a ULEB128 value. */
+static int arm_tag_is_string(unsigned long t)
+{
+    return t == 4 || t == 5 || t == 32 || t == 65 || t == 67;
+}
+
+static unsigned long arm_uleb(const unsigned char **p, const unsigned char *end)
+{
+    unsigned long v = 0;
+    int shift = 0;
+    while (*p < end) {
+        unsigned char b = *(*p)++;
+        v |= (unsigned long)(b & 0x7f) << shift;
+        shift += 7;
+        if (!(b & 0x80))
+            break;
+    }
+    return v;
+}
+
+static void arm_attrs_scan(struct object *o,
+                           const unsigned char *p, size_t n)
+{
+    const unsigned char *end = p + n;
+    if (n < 1 || *p != 'A')
+        return;                         /* not a format this knows */
+    p++;
+    while (p + 4 <= end) {
+        unsigned long slen = (unsigned long)p[0] | ((unsigned long)p[1] << 8) |
+                             ((unsigned long)p[2] << 16) |
+                             ((unsigned long)p[3] << 24);
+        const unsigned char *sub = p + 4, *subend;
+        if (slen < 4 || p + slen > end)
+            return;
+        subend = p + slen;
+        /* the vendor string; only "aeabi" is defined */
+        const char *vendor = (const char *)sub;
+        while (sub < subend && *sub)
+            sub++;
+        if (sub < subend)
+            sub++;
+        if (strcmp(vendor, "aeabi") != 0) {
+            p = subend;
+            continue;                   /* a vendor nothing here knows */
+        }
+        while (sub + 5 <= subend) {
+            unsigned char tag = *sub++;
+            unsigned long blen = (unsigned long)sub[0] |
+                                 ((unsigned long)sub[1] << 8) |
+                                 ((unsigned long)sub[2] << 16) |
+                                 ((unsigned long)sub[3] << 24);
+            const unsigned char *b = sub + 4, *bend;
+            if (blen < 5 || sub - 1 + blen > subend)
+                return;
+            bend = sub - 1 + blen;
+            sub = bend;
+            if (tag != 1)               /* only Tag_File is read */
+                continue;
+            while (b < bend) {
+                unsigned long t = arm_uleb(&b, bend);
+                if (arm_tag_is_string(t)) {
+                    while (b < bend && *b)
+                        b++;
+                    if (b < bend)
+                        b++;
+                    continue;
+                }
+                unsigned long v = arm_uleb(&b, bend);
+                if (t == ARM_TAG_VFP_ARGS)  { o->arm_vfp = (int)v + 1; }
+                if (t == ARM_TAG_ENUM_SIZE) { o->arm_enum = (int)v + 1; }
+                if (t == ARM_TAG_CPU_ARCH)  { o->arm_arch = (int)v + 1; }
+            }
+        }
+        p = subend;
+    }
+}
+
+/* Compare what each object says about itself, and refuse a combination
+ * that cannot work. Called once every object is loaded, because the
+ * question is about the SET and not about any one of them.
+ *
+ * A stored value is the tag's value plus one, so zero means "the object
+ * did not say" -- an object with no attributes section at all, which
+ * must not be treated as claiming the base standard. */
+static void arm_attrs_check(struct linker *l)
+{
+    struct object *ref = NULL;
+    for (int i = 0; i < l->nobj; i++) {
+        struct object *o = l->objs[i];
+        if (!o->arm_vfp && !o->arm_enum)
+            continue;
+        if (!ref) { ref = o; continue; }
+        if (ref->arm_vfp && o->arm_vfp && ref->arm_vfp != o->arm_vfp)
+            die("'%s' and '%s' disagree about where floating-point "
+                "arguments go: one passes them in the core registers "
+                "(-mfloat-abi=soft) and the other in s0-s15 "
+                "(-mfloat-abi=hard). Linking them would leave every "
+                "float argument read from a register the caller never "
+                "wrote",
+                ref->name ? ref->name : "?", o->name ? o->name : "?");
+        if (ref->arm_enum && o->arm_enum && ref->arm_enum != o->arm_enum)
+            die("'%s' and '%s' disagree about the size of an enum, which "
+                "changes the layout of every struct that holds one",
+                ref->name ? ref->name : "?", o->name ? o->name : "?");
+    }
+}
+
+
 static struct object *parse_object(const char *name, unsigned char *buf,
                                    long len)
 {
@@ -197,36 +380,130 @@ static struct object *parse_object(const char *name, unsigned char *buf,
     if (eh->e_ident[EI_MAG0] != ELFMAG0 || eh->e_ident[EI_MAG1] != ELFMAG1 ||
         eh->e_ident[EI_MAG2] != ELFMAG2 || eh->e_ident[EI_MAG3] != ELFMAG3)
         die("%s: not an ELF file", name);
-    if (eh->e_ident[EI_CLASS] != ELFCLASS64 ||
-        eh->e_ident[EI_DATA] != ELFDATA2LSB)
-        die("%s: not 64-bit little-endian", name);
-    if (eh->e_type != ET_REL)
-        die("%s: not a relocatable object (ET_REL)", name);
-    if (eh->e_machine != EM_X86_64)
-        die("%s: not x86-64", name);
+    if (eh->e_ident[EI_DATA] != ELFDATA2LSB)
+        die("%s: not little-endian", name);
+    if (eh->e_ident[EI_CLASS] != ELFCLASS64 &&
+        eh->e_ident[EI_CLASS] != ELFCLASS32)
+        die("%s: not a 32- or 64-bit ELF", name);
 
     struct object *o = xcalloc(1, sizeof *o);
     o->name = name;
     o->buf = buf;
     o->len = len;
-    o->eh = eh;
-    o->nsh = eh->e_shnum;
-    o->shdrs = (Elf64_Shdr *)(buf + eh->e_shoff);
-    if (eh->e_shoff + (Elf64_Off)o->nsh * sizeof(Elf64_Shdr) > (Elf64_Off)len)
-        die("%s: section headers run past end of file", name);
-    o->shstr = (const char *)(buf + o->shdrs[eh->e_shstrndx].sh_offset);
+    o->elf32 = eh->e_ident[EI_CLASS] == ELFCLASS32;
+
+    /* The 32-bit case is read into the 64-bit structures the rest of
+     * this file uses. Field by field, because Elf32_Shdr and Elf32_Sym
+     * are not their 64-bit namesakes with narrower members -- Elf32_Sym
+     * puts st_value and st_size BEFORE st_info, where Elf64_Sym puts
+     * them after. The section DATA stays where it is and is still read
+     * out of o->buf; only the descriptions are copied. */
+    if (o->elf32) {
+        Elf32_Ehdr *e32 = (Elf32_Ehdr *)buf;
+        if (e32->e_type != ET_REL)
+            die("%s: not a relocatable object (ET_REL)", name);
+        if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV &&
+            e32->e_machine != EM_AVR)
+            die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
+                "RV32 (EM_RISCV) and AVR (EM_AVR) are supported", name,
+                (unsigned)e32->e_machine);
+        o->machine = e32->e_machine;
+        o->eflags = e32->e_flags;
+        o->nsh = e32->e_shnum;
+        if ((long)e32->e_shoff + (long)o->nsh * (long)sizeof(Elf32_Shdr) > len)
+            die("%s: section headers run past end of file", name);
+        o->eh = xcalloc(1, sizeof *o->eh);
+        o->eh->e_type = e32->e_type;
+        o->eh->e_machine = e32->e_machine;
+        o->eh->e_shnum = e32->e_shnum;
+        o->eh->e_shstrndx = e32->e_shstrndx;
+        o->shdrs = xcalloc((size_t)(o->nsh ? o->nsh : 1), sizeof *o->shdrs);
+        {
+            Elf32_Shdr *s32 = (Elf32_Shdr *)(buf + e32->e_shoff);
+            for (int i = 0; i < o->nsh; i++) {
+                o->shdrs[i].sh_name      = s32[i].sh_name;
+                o->shdrs[i].sh_type      = s32[i].sh_type;
+                o->shdrs[i].sh_flags     = s32[i].sh_flags;
+                o->shdrs[i].sh_addr      = s32[i].sh_addr;
+                o->shdrs[i].sh_offset    = s32[i].sh_offset;
+                o->shdrs[i].sh_size      = s32[i].sh_size;
+                o->shdrs[i].sh_link      = s32[i].sh_link;
+                o->shdrs[i].sh_info      = s32[i].sh_info;
+                o->shdrs[i].sh_addralign = s32[i].sh_addralign;
+                o->shdrs[i].sh_entsize   = s32[i].sh_entsize;
+            }
+        }
+    } else {
+        if (eh->e_type != ET_REL)
+            die("%s: not a relocatable object (ET_REL)", name);
+        if (eh->e_machine != EM_X86_64 && eh->e_machine != EM_RISCV)
+            die("%s: a 64-bit object for machine %u; only x86-64 and RV64 "
+                "(EM_RISCV) are supported", name, (unsigned)eh->e_machine);
+        o->machine = eh->e_machine;
+        o->eflags = eh->e_flags;
+        o->eh = eh;
+        o->nsh = eh->e_shnum;
+        o->shdrs = (Elf64_Shdr *)(buf + eh->e_shoff);
+        if (eh->e_shoff + (Elf64_Off)o->nsh * sizeof(Elf64_Shdr) >
+            (Elf64_Off)len)
+            die("%s: section headers run past end of file", name);
+    }
+    o->shstr = (const char *)(buf + o->shdrs[o->eh->e_shstrndx].sh_offset);
     o->sec_out = xmalloc((size_t)o->nsh * sizeof(int));
-    for (int i = 0; i < o->nsh; i++)
+    o->dbg_sec = xmalloc((size_t)o->nsh * sizeof(int));
+    o->dbg_off = xmalloc((size_t)o->nsh * sizeof(long));
+    for (int i = 0; i < o->nsh; i++) {
         o->sec_out[i] = -1;
+        o->dbg_sec[i] = -1;
+        o->dbg_off[i] = 0;
+    }
+
+    /* ARM BUILD ATTRIBUTES, checked across inputs.
+     *
+     * Tag_ABI_VFP_args says where floating-point arguments travel: 0 in
+     * the core registers (the base standard, -mfloat-abi=soft), 1 in
+     * s0-s15. An object of each kind links without complaint unless
+     * somebody compares the tag, and then the callee reads its
+     * arguments from registers the caller never wrote -- a
+     * miscompilation produced at LINK time, past every check the
+     * compiler makes.
+     *
+     * GNU ld does this comparison. EmbCC does not depend on GNU ld, so
+     * EmbCC's linker has to do it, and does: this is the only place in
+     * the whole toolchain that can see both objects at once. The same
+     * reasoning applies to Tag_ABI_enum_size, where a disagreement
+     * changes the layout of every struct holding an enum. */
+    for (int i = 0; i < o->nsh; i++) {
+        const char *nm = o->shstr + o->shdrs[i].sh_name;
+        if (strcmp(nm, ".ARM.attributes") != 0)
+            continue;
+        arm_attrs_scan(o, buf + o->shdrs[i].sh_offset,
+                       (size_t)o->shdrs[i].sh_size);
+    }
 
     /* find the symbol table */
     for (int i = 0; i < o->nsh; i++) {
         if (o->shdrs[i].sh_type == SHT_SYMTAB) {
             Elf64_Shdr *sh = &o->shdrs[i];
-            o->syms = (Elf64_Sym *)(buf + sh->sh_offset);
-            o->nsym = (int)(sh->sh_size / sizeof(Elf64_Sym));
             o->local_syms = (int)sh->sh_info;
             o->symstr = (const char *)(buf + o->shdrs[sh->sh_link].sh_offset);
+            if (o->elf32) {
+                Elf32_Sym *s32 = (Elf32_Sym *)(buf + sh->sh_offset);
+                o->nsym = (int)(sh->sh_size / sizeof(Elf32_Sym));
+                o->syms = xcalloc((size_t)(o->nsym ? o->nsym : 1),
+                                  sizeof *o->syms);
+                for (int k = 0; k < o->nsym; k++) {
+                    o->syms[k].st_name  = s32[k].st_name;
+                    o->syms[k].st_info  = s32[k].st_info;
+                    o->syms[k].st_other = s32[k].st_other;
+                    o->syms[k].st_shndx = s32[k].st_shndx;
+                    o->syms[k].st_value = s32[k].st_value;
+                    o->syms[k].st_size  = s32[k].st_size;
+                }
+            } else {
+                o->syms = (Elf64_Sym *)(buf + sh->sh_offset);
+                o->nsym = (int)(sh->sh_size / sizeof(Elf64_Sym));
+            }
             break;
         }
     }
@@ -243,6 +520,9 @@ static int classify_osec(const char *name, int writable, int is_bss)
         { ".fini_array", OSEC_FINI_ARRAY },
         { ".ctors", OSEC_CTORS },
         { ".dtors", OSEC_DTORS },
+        /* Both spellings: `.vectors` and CMSIS's `.isr_vector`. */
+        { ".vectors", OSEC_VECTORS },
+        { ".isr_vector", OSEC_VECTORS },
         { ".text", OSEC_TEXT },
         { ".rodata", OSEC_RODATA },
         { ".data", OSEC_DATA },
@@ -275,6 +555,53 @@ static int orphan_osec(struct linker *l, const char *name, int writable)
     return OSEC_COUNT + l->norphan++;
 }
 
+/* ---- debug sections ---------------------------------------------------
+ *
+ * DWARF is not SHF_ALLOC: it occupies no memory in the running image
+ * and has no address. It was therefore dropped entirely, and the
+ * linked file carried no .debug_* at all -- so `-g` produced correct
+ * objects and an executable no debugger could open. EmbLD wrote its
+ * own .embdbg sidecar instead, which embdbg reads and gdb does not.
+ *
+ * Merging them is simpler here than it is in general, because EmbCC's
+ * DWARF writer expresses every cross-reference AS A RELOCATION: a
+ * CU's abbrev offset and its stmt_list are absolute relocations
+ * against the .debug_abbrev and .debug_line section symbols, and its
+ * low_pc/high_pc against .text. So concatenating the sections and
+ * resolving those relocations against each object's own contribution
+ * rebases everything -- there is no DWARF-aware fixup to write.
+ */
+static int dbgsec_for(struct linker *l, const char *name)
+{
+    for (int i = 0; i < l->ndbg; i++)
+        if (strcmp(l->dbgsecs[i].name, name) == 0)
+            return i;
+    if (l->ndbg == l->capdbg) {
+        l->capdbg = l->capdbg ? l->capdbg * 2 : 8;
+        l->dbgsecs = xrealloc(l->dbgsecs,
+                              (size_t)l->capdbg * sizeof *l->dbgsecs);
+    }
+    {
+        struct dbgsec *d = &l->dbgsecs[l->ndbg];
+        memset(d, 0, sizeof *d);
+        d->name = name;
+        return l->ndbg++;
+    }
+}
+
+static void dbg_append(struct dbgsec *d, const unsigned char *p, long n)
+{
+    if (d->len + n > d->cap) {
+        d->cap = (d->len + n) * 2 + 256;
+        d->data = xrealloc(d->data, (size_t)d->cap);
+    }
+    if (p)
+        memcpy(d->data + d->len, p, (size_t)n);
+    else
+        memset(d->data + d->len, 0, (size_t)n);
+    d->len += n;
+}
+
 /* Collect the object's SHF_ALLOC sections into the global insec list and
  * record where each landed (sec_out), so relocations and symbols can map
  * a (object, section) back to its output placement. */
@@ -282,8 +609,21 @@ static void collect_sections(struct linker *l, struct object *o)
 {
     for (int i = 0; i < o->nsh; i++) {
         Elf64_Shdr *sh = sh_at(o, i);
-        if (!(sh->sh_flags & SHF_ALLOC))
+        if (!(sh->sh_flags & SHF_ALLOC)) {
+            /* Not allocated, but DWARF still has to reach the output.
+             * Concatenated per name; the offset this object's piece
+             * landed at is what its relocations resolve against. */
+            const char *nm = o->shstr + sh->sh_name;
+            if (l->keep_debug && sh->sh_type == SHT_PROGBITS &&
+                strncmp(nm, ".debug_", 7) == 0 && sh->sh_size) {
+                int d = dbgsec_for(l, nm);
+                o->dbg_sec[i] = d;
+                o->dbg_off[i] = l->dbgsecs[d].len;
+                dbg_append(&l->dbgsecs[d], o->buf + sh->sh_offset,
+                           (long)sh->sh_size);
+            }
             continue;
+        }
         if (l->nsec == l->capsec) {
             l->capsec = l->capsec ? l->capsec * 2 : 64;
             l->insecs = xrealloc(l->insecs,
@@ -314,13 +654,87 @@ static void collect_sections(struct linker *l, struct object *o)
          * construction — the constructor arrays are read-only data that
          * the ABI keeps in the writable segment (they hold relocated
          * pointers), never executable. */
-        s->seg = (s->osec == OSEC_TEXT || s->osec == OSEC_RODATA ||
-                  (s->osec >= OSEC_COUNT &&
-                   !l->orphans[s->osec - OSEC_COUNT].writable))
+        /* .rodata rides in the TEXT segment on every von Neumann target,
+         * because the processor can read it where it lies.
+         *
+         * AVR cannot. Program space and data space are separate address
+         * spaces there, and `ld`/`lds` reach only the data one -- a string
+         * literal left in flash is not slow to read, it is UNREADABLE by
+         * any instruction the compiler emits for `*s`. So on a Harvard
+         * target read-only data joins the writable segment, gets a RAM
+         * address and a flash load address like .data, and the startup
+         * copies it across with `lpm`. That is what avr-gcc's linker
+         * script does and why `const char *s = "hi"` costs RAM there. */
+        int harvard_ro = o->machine == EM_AVR && s->osec == OSEC_RODATA;
+        s->seg = (!harvard_ro &&
+                  (s->osec == OSEC_VECTORS ||
+                   s->osec == OSEC_TEXT || s->osec == OSEC_RODATA ||
+                   (s->osec >= OSEC_COUNT &&
+                    !l->orphans[s->osec - OSEC_COUNT].writable)))
                      ? SEG_TEXT : SEG_DATA;
         o->sec_out[i] = l->nsec;
         l->nsec++;
     }
+}
+
+/* The RISC-V entry stub: set sp, then jump to the real entry.
+ *
+ * Registered as an ordinary input section in the .vectors group, which
+ * already sorts AHEAD of .text (it is where a Cortex-M's vector table
+ * goes), so the stub lands at the image base and the bytes travel
+ * through the same path as everything else. The instructions are filled
+ * in after layout, when the entry's address exists.
+ *
+ * The jump is `auipc`+`jalr` rather than a bare `jal`, which reaches 1MB
+ * where this reaches 2GB -- and a fixed eight bytes means the layout does
+ * not depend on how far the entry turns out to be. The sp materialisation
+ * in front of it is however long rv_li needs for THAT address, which is
+ * known before layout because it is a constant from the command line. */
+static void add_entry_stub(struct linker *l)
+{
+    int xlen = l->elf32 ? 32 : 64;
+    long size = rv_li_len((long long)l->stack_top, xlen) + 8;
+
+    if (l->nsec == l->capsec) {
+        l->capsec = l->capsec ? l->capsec * 2 : 64;
+        l->insecs = xrealloc(l->insecs,
+                             (size_t)l->capsec * sizeof *l->insecs);
+    }
+    l->stub = xcalloc((size_t)size, 1);
+    l->stub_size = size;
+    struct insec *s = &l->insecs[l->nsec];
+    memset(s, 0, sizeof *s);
+    s->obj = NULL;              /* synthetic: apply_relocs never sees it */
+    s->shndx = -1;
+    s->name = ".start";
+    s->size = (Elf64_Xword)size;
+    s->align = 4;
+    s->data = l->stub;
+    s->osec = OSEC_VECTORS;
+    s->seg = SEG_TEXT;
+    l->stub_sec = l->nsec;
+    l->nsec++;
+}
+
+static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
+{
+    struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0 };
+    struct insec *s = &l->insecs[l->stub_sec];
+    int xlen = l->elf32 ? 32 : 64;
+    /* The auipc sits just before the jalr, at the end of the stub. */
+    Elf64_Addr auipc_at = s->vaddr + (Elf64_Addr)l->stub_size - 8;
+    long long d = (long long)entry - (long long)auipc_at;
+
+    if (d < -(1LL << 31) || d >= (1LL << 31))
+        die("the entry symbol is more than 2GB from the image base");
+    /* rv_li and not a hand-rolled lui/addi: at RV64 `lui` sign-extends
+     * bit 31, so the pair cannot produce 0x80800000 -- it produces
+     * 0xffffffff80800000, and the first push faulted on an address that
+     * looked almost right. rv_li knows to build the wider value. */
+    rv_li(&c, RV_SP, (long long)l->stack_top, xlen);
+    rv_auipc(&c, RV_T0, (long)(((d + 0x800) >> 12) & 0xfffff));
+    /* jalr with rd = zero is a tail jump: nothing returns to the stub. */
+    rv_jalr(&c, RV_ZERO, RV_T0, (int)(((d & 0xfff) ^ 0x800) - 0x800));
 }
 
 static void add_symbols(struct linker *l, struct object *o);
@@ -329,6 +743,23 @@ static void add_symbols(struct linker *l, struct object *o);
  * allocated sections, and merge its symbols. */
 static void add_object(struct linker *l, struct object *o)
 {
+    /* One machine per link, decided by the first object. Mixing them is
+     * not a case to handle later: the relocations, the pointer width
+     * and the output class all follow from it, and an image containing
+     * both would be neither. */
+    if (l->nobj == 0) {
+        l->machine = o->machine;
+        l->harvard = o->machine == EM_AVR;
+        l->elf32 = o->elf32;
+    } else if (o->machine != l->machine) {
+        die("%s: an object for a different machine than the ones before "
+            "it (%u against %u)", o->name, (unsigned)o->machine,
+            (unsigned)l->machine);
+    }
+    if (o->machine == EM_RISCV)
+        l->eflags |= o->eflags & EF_RISCV_RVC;
+    else if (o->machine == EM_AVR && !(l->eflags & EF_AVR_ARCH_MASK))
+        l->eflags = o->eflags & EF_AVR_ARCH_MASK;
     if (l->nobj == l->capobj) {
         l->capobj = l->capobj ? l->capobj * 2 : 8;
         l->objs = xrealloc(l->objs, (size_t)l->capobj * sizeof *l->objs);
@@ -534,6 +965,16 @@ static void add_symbols(struct linker *l, struct object *o)
         g->weak = weak;
         g->obj = o;
         g->value = sy->st_value;
+        /* The SIZE travels too, and not only for COMMON as it used to:
+         * a debugger filters the symbol table on STT_FUNC with a nonzero
+         * size, so a linked image whose functions all had size 0 was one
+         * EmbDBG could see no functions in. */
+        g->size = sy->st_size;
+        /* And the TYPE, from the input rather than inferred from which
+         * segment it landed in: a `const void *vectors[]` in .vectors is
+         * in the text segment and is not a function, and a debugger that
+         * is told it is will try to disassemble a table of addresses. */
+        g->type = ELF64_ST_TYPE(sy->st_info);
         g->insec = (sy->st_shndx == SHN_ABS) ? -1
                                              : o->sec_out[sy->st_shndx];
     }
@@ -586,14 +1027,37 @@ static void layout(struct linker *l, struct osec_bound *b,
     Elf64_Addr va = l->base;
 
     *text_start = va;
+    place_osec(l, OSEC_VECTORS, &va, b);
     place_osec(l, OSEC_TEXT, &va, b);
-    place_osec(l, OSEC_RODATA, &va, b);
+    /* On a Harvard target .rodata is placed with the writable segment
+     * below, not here: see `harvard` in struct linker. Placing it in both
+     * would double-count the location counter; placing it in neither
+     * would leave it unaddressed and silently dropped, which is exactly
+     * what happened when only the per-section `seg` was changed and this
+     * order was not. */
+    if (!l->harvard)
+        place_osec(l, OSEC_RODATA, &va, b);
     for (int i = 0; i < l->norphan; i++)
         if (!l->orphans[i].writable)
             place_osec(l, OSEC_COUNT + i, &va, b);
     *text_size = va - *text_start;
 
-    va = align_up(va, PAGE);           /* W^X boundary */
+    /* Where the writable segment is ADDRESSED. A firmware image says so
+     * explicitly -- its RAM is nowhere near its flash -- and everything
+     * else continues past the text at the W^X boundary. */
+    if (l->data_base) {
+        l->data_lma = align_up(va, 4);
+        va = l->data_base;
+    } else {
+        va = align_up(va, PAGE);       /* W^X boundary */
+        /* Stored WHERE IT IS ADDRESSED, which is the ordinary case and
+         * has to be said rather than left at zero: __data_load is a real
+         * symbol in every link, and a startup that copies .data from it
+         * -- which is the same startup a firmware build uses -- read
+         * from address 0 and hung. Equal brackets make that copy a
+         * correct no-op instead. */
+        l->data_lma = va;
+    }
     *data_start = va;
 
     /* The thread block first in the data segment, and contiguous: the
@@ -622,6 +1086,11 @@ static void layout(struct linker *l, struct osec_bound *b,
      * bytes end, because .tbss contributed none. */
     va = *tls_start + *tls_filesz;
 
+    /* First in the writable segment on a Harvard target, so that the
+     * string literals a program reads sit at the bottom of its RAM image
+     * and the .data that follows keeps the order every other target has. */
+    if (l->harvard)
+        place_osec(l, OSEC_RODATA, &va, b);
     place_osec(l, OSEC_INIT_ARRAY, &va, b);
     place_osec(l, OSEC_FINI_ARRAY, &va, b);
     place_osec(l, OSEC_CTORS, &va, b);
@@ -631,6 +1100,22 @@ static void layout(struct linker *l, struct osec_bound *b,
         if (l->orphans[i].writable)
             place_osec(l, OSEC_COUNT + i, &va, b);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
+
+    /* The part's flash is finite, and an image past its end does not fail
+     * to run: on the ATmega328P the copy of .data read the bytes beyond
+     * 32 KB, and a program that printed nothing but digits was the only
+     * symptom. What is stored is the text and, in a firmware layout, the
+     * initial data after it. */
+    if (l->rom_limit) {
+        Elf64_Addr end = l->data_base ? l->data_lma + *data_filesz
+                                      : *text_start + *text_size;
+        if (end - l->base > l->rom_limit)
+            die("the image needs %lu bytes of flash and the part has %lu "
+                "(--rom-limit): %lu of text, %lu of initial data",
+                (unsigned long)(end - l->base), l->rom_limit,
+                (unsigned long)*text_size,
+                l->data_base ? (unsigned long)*data_filesz : 0UL);
+    }
 
     b[OSEC_BSS].start = va;
     place_osec(l, OSEC_BSS, &va, b);   /* real .bss inputs first */
@@ -748,6 +1233,27 @@ static void define_end_symbols(struct linker *l, Elf64_Addr image_end)
     define_linker_symbol(l, "__kernel_end", image_end);
 }
 
+/* What a firmware startup needs to bring RAM up, provided by the linker
+ * so the startup can be ordinary C and no linker script has to be kept
+ * in step with it:
+ *
+ *   for (p = __data_start, q = __data_load; p < __data_end; ) *p++ = *q++;
+ *   for (p = __bss_start; p < __bss_end; ) *p++ = 0;
+ *
+ * Defined only when they are referenced and otherwise undefined
+ * (define_linker_symbol's rule), so a hosted link is untouched and a
+ * program that provides its own still wins. */
+static void define_firmware_symbols(struct linker *l, Elf64_Addr data_start,
+                                    Elf64_Xword data_filesz,
+                                    Elf64_Xword data_memsz)
+{
+    define_linker_symbol(l, "__data_start", data_start);
+    define_linker_symbol(l, "__data_end", data_start + data_filesz);
+    define_linker_symbol(l, "__data_load", l->data_lma);
+    define_linker_symbol(l, "__bss_start", data_start + data_filesz);
+    (void)data_memsz;             /* __bss_end is define_end_symbols's */
+}
+
 /* Two libraries whose absence shows up HERE — at the link, as a bare
  * undefined name — rather than at the compile that caused it.
  *
@@ -834,8 +1340,23 @@ static Elf64_Addr reloc_symval(struct linker *l, struct object *o,
         if (sy->st_shndx == SHN_ABS)
             return sy->st_value;
         int out = o->sec_out[sy->st_shndx];
-        if (out < 0)
-            die("%s: local symbol in a non-allocated section", o->name);
+        if (out < 0) {
+            /* A DWARF section symbol. It has no ADDRESS -- the section
+             * is not allocated -- but it does have a position in the
+             * merged section, and that is what the reference means: a
+             * CU's abbrev offset and its stmt_list are offsets into
+             * .debug_abbrev and .debug_line, expressed as relocations
+             * against those section symbols. Resolving them to this
+             * object's own contribution is the whole of what merging
+             * DWARF takes. */
+            if (o->dbg_sec[sy->st_shndx] >= 0)
+                return (Elf64_Addr)o->dbg_off[sy->st_shndx] + sy->st_value;
+            die("%s: local symbol '%s' is in section %u (%s), which is not "
+                "allocated and so has no address to relocate against",
+                o->name, name && *name ? name : "<unnamed>",
+                (unsigned)sy->st_shndx,
+                o->shstr + o->shdrs[sy->st_shndx].sh_name);
+        }
         return l->insecs[out].vaddr + sy->st_value;
     }
 
@@ -867,33 +1388,490 @@ static void put64(unsigned char *p, unsigned long long v)
     for (int i = 0; i < 8; i++)
         p[i] = (unsigned char)(v >> (8 * i));
 }
+static unsigned int get16(const unsigned char *p)
+{
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
+}
+static void put16(unsigned char *p, unsigned int v)
+{
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+}
+
+/* ---- the ARM patches -------------------------------------------------
+ *
+ * A 32-bit Thumb instruction is two halfwords in program order, each
+ * little-endian on its own -- not a little-endian word. Every function
+ * here reads and writes them as halfwords for that reason.
+ */
+
+/* The ±16MB branch displacement shared by `bl` and `b.w`:
+ * S:I1:I2:imm10:imm11, where I1 and I2 are STORED as J1 = ~(I1^S) and
+ * J2 = ~(I2^S). That double negation exists so a short forward branch
+ * has J1 = J2 = 1 and looks like the older ARM encoding, and it is the
+ * single easiest thing in this relocation to get backwards. */
+static void patch_thm_b24(struct object *o, unsigned char *loc, long long off)
+{
+    unsigned long v;
+    unsigned s, i1, i2, j1, j2;
+    if (off < -(1LL << 24) || off >= (1LL << 24))
+        die("%s: a Thumb call is more than 16MB away; this linker mints "
+            "no veneers", o->name);
+    v = (unsigned long)(off >> 1) & 0xffffffUL;
+    s = (unsigned)((v >> 23) & 1);
+    i1 = (unsigned)((v >> 22) & 1);
+    i2 = (unsigned)((v >> 21) & 1);
+    j1 = (~(i1 ^ s)) & 1;
+    j2 = (~(i2 ^ s)) & 1;
+    put16(loc, 0xf000u | (s << 10) | (unsigned)((v >> 11) & 0x3ff));
+    /* The second halfword's top nibble says which instruction this is
+     * (0xd000 bl, 0x9000 b.w); it is kept, not rewritten. */
+    put16(loc + 2, (get16(loc + 2) & 0xd000u) | (j1 << 13) | (j2 << 11) |
+                   (unsigned)(v & 0x7ff));
+}
+
+static unsigned int get32loc(const unsigned char *p);
+
+/* ---- RISC-V relocations -------------------------------------------------
+ *
+ * Four shapes, and only one of them is an ordinary field.
+ *
+ * HI20/LO12 are a pair in ARITHMETIC, not in bits: `lui` supplies bits
+ * 31:12 and the paired instruction a SIGN-EXTENDED low 12, so when bit 11
+ * of the address is set the low half contributes -4096..-1 and the high
+ * half must be one larger. That is the +0x800 below, and it is the single
+ * most-repeated bug in RISC-V toolchains: without it every address whose
+ * bit 11 is set comes out 4096 too low, which is half of them.
+ *
+ * CALL patches TWO instructions from ONE relocation -- the `auipc` it
+ * sits on and the `jalr` four bytes later -- and the same rounding
+ * applies, with the displacement measured from the auipc.
+ *
+ * LO12_S is the same twelve bits as LO12_I in an S-type instruction,
+ * where the field is split across bits 31:25 and 11:7 so that rs1 and rs2
+ * keep the places they have in every other format.
+ *
+ * RELAX carries no value: it marks a site a linker MAY shorten. Optional,
+ * so ignoring it is correct, and this does.
+ */
+static long rv_hi20(long long v) { return (long)(((v + 0x800) >> 12) & 0xfffff); }
+static int  rv_lo12(long long v) { return (int)(((v & 0xfff) ^ 0x800) - 0x800); }
+
+static void rv_put_u(unsigned char *loc, long hi)
+{
+    /* Only the imm field; the opcode and rd stay as the compiler wrote
+     * them, so a relocation cannot quietly turn a `lui` into an `auipc`. */
+    put32(loc, (get32loc(loc) & 0x00000fffU) |
+               ((unsigned int)hi << 12));
+}
+
+static void rv_put_i(unsigned char *loc, int lo)
+{
+    put32(loc, (get32loc(loc) & 0x000fffffU) |
+               (((unsigned int)lo & 0xfffU) << 20));
+}
+
+static void rv_put_s(unsigned char *loc, int lo)
+{
+    unsigned int u = (unsigned int)lo & 0xfffU;
+    put32(loc, (get32loc(loc) & 0x01fff07fU) |
+               ((u & 0x1fU) << 7) | ((u >> 5) << 25));
+}
+
+/* Every PCREL_HI20 this link has resolved, by the address of its auipc.
+ * The low halves are looked up here rather than recomputed, because the
+ * two must agree about the rounding and only the high one saw the whole
+ * displacement. A linear scan: there are a handful per function and the
+ * lookup is once per pair. */
+static void note_pcrel_hi(struct linker *l, Elf64_Addr at, long long val)
+{
+    if (l->npcrel == l->cappcrel) {
+        l->cappcrel = l->cappcrel ? l->cappcrel * 2 : 64;
+        l->pcrel = xrealloc(l->pcrel, (size_t)l->cappcrel * sizeof *l->pcrel);
+    }
+    l->pcrel[l->npcrel].at = at;
+    l->pcrel[l->npcrel].val = val;
+    l->npcrel++;
+}
+
+static long long find_pcrel_hi(struct linker *l, struct object *o,
+                               Elf64_Addr at)
+{
+    for (int i = l->npcrel - 1; i >= 0; i--)
+        if (l->pcrel[i].at == at)
+            return l->pcrel[i].val;
+    die("%s: a RISC-V PCREL_LO12 relocation names 0x%llx, where no "
+        "PCREL_HI20 was relocated; the two halves of an address must be "
+        "emitted as a pair", o->name, (unsigned long long)at);
+    return 0;
+}
+
+static void apply_riscv(struct linker *l, struct object *o, unsigned type,
+                        unsigned char *loc, Elf64_Addr S, long long A,
+                        Elf64_Addr P)
+{
+    long long V = (long long)S + A;
+    switch (type) {
+    case R_RISCV_32:
+        put32(loc, (unsigned int)V);
+        return;
+    case R_RISCV_64:
+        put64(loc, (unsigned long long)V);
+        return;
+    case R_RISCV_HI20:
+        rv_put_u(loc, rv_hi20(V));
+        return;
+    case R_RISCV_LO12_I:
+        rv_put_i(loc, rv_lo12(V));
+        return;
+    case R_RISCV_LO12_S:
+        rv_put_s(loc, rv_lo12(V));
+        return;
+    case R_RISCV_PCREL_HI20:
+        /* Recorded as well as written: the low half that pairs with it
+         * has to take the low twelve bits of THIS displacement, not of
+         * the address, or the two disagree about the +0x800 rounding
+         * and the result is 4096 out for half of all symbols. */
+        note_pcrel_hi(l, P, V - (long long)P);
+        rv_put_u(loc, rv_hi20(V - (long long)P));
+        return;
+    case R_RISCV_PCREL_LO12_I:
+    case R_RISCV_PCREL_LO12_S: {
+        /* S + A is the address of the AUIPC, not of the target: the
+         * psABI resolves this relocation by looking up the high half's
+         * own relocation there. */
+        long long d = find_pcrel_hi(l, o, (Elf64_Addr)V);
+        if (type == R_RISCV_PCREL_LO12_I) rv_put_i(loc, rv_lo12(d));
+        else                              rv_put_s(loc, rv_lo12(d));
+        return;
+    }
+    case R_RISCV_BRANCH:
+    case R_RISCV_JAL: {
+        /* An ordinary displacement, but in the two SCRAMBLED formats:
+         * B-type stores bits (12, 10:5, 4:1, 11) and J-type
+         * (20, 10:1, 11, 19:12), so the field is rebuilt by the same
+         * encoder the compiler uses rather than shifted into place here.
+         * EmbCC's own branches never reach this -- they are resolved
+         * inside the function that emits them -- but clang's do, from a
+         * `.L0` label in another section. */
+        long long d = V - (long long)P;
+        unsigned int keep = get32loc(loc);
+        if (type == R_RISCV_BRANCH)
+            put32(loc, (keep & ~0xfe000f80U) |
+                       (unsigned int)rv_enc_b(0, 0, 0, 0, (int)d));
+        else
+            put32(loc, (keep & ~0xfffff000U) |
+                       (unsigned int)rv_enc_j(0, 0, (int)d));
+        return;
+    }
+    case R_RISCV_CALL:
+    case R_RISCV_CALL_PLT: {
+        long long d = V - (long long)P;
+        if (d < -(1LL << 31) || d >= (1LL << 31))
+            die("%s: a RISC-V call is more than 2GB away; auipc/jalr "
+                "cannot reach it and this linker mints no stubs", o->name);
+        rv_put_u(loc, rv_hi20(d));
+        rv_put_i(loc + 4, rv_lo12(d));
+        return;
+    }
+    case R_RISCV_RELAX:
+        return;                 /* a hint; relaxation is optional */
+    default:
+        die("%s: unsupported RISC-V relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
+}
+
+/* ---- AVR --------------------------------------------------------------
+ *
+ * Two things make this machine's relocations unlike the others'.
+ *
+ * An address arrives a BYTE at a time, because the registers are eight
+ * bits wide: LO8_LDI and HI8_LDI patch two separate `ldi` instructions
+ * with two halves of one sixteen-bit value. They are independent sites,
+ * so unlike RISC-V's auipc/addi pair there is no rounding to agree on and
+ * no need to remember the first when applying the second.
+ *
+ * And program space is a SEPARATE address space addressed in WORDS. The
+ * _GS and _PM forms halve the address; the plain forms do not. Using the
+ * wrong one does not fault -- it produces a pointer to twice as far into
+ * flash, which lands on a real instruction -- so the halving is the whole
+ * difference between a working indirect call and a program that runs the
+ * wrong function.
+ *
+ * Every split field is patched by a function in src/arch/avr/emit.c, the
+ * same one the encoder writes through. None of those layouts is written
+ * down here.
+ */
+static void apply_avr(struct linker *l, struct object *o, unsigned type,
+                      unsigned char *loc, Elf64_Addr S, long long A,
+                      Elf64_Addr P)
+{
+    long long V = (long long)S + A;
+    (void)l;
+    switch (type) {
+    case R_AVR_NONE:
+        return;
+    case R_AVR_32:
+        put32(loc, (unsigned int)V);
+        return;
+    case R_AVR_16:
+        put16(loc, (unsigned int)V & 0xffffu);
+        return;
+    case R_AVR_16_PM:
+        /* A function pointer in data: the WORD address. */
+        put16(loc, (unsigned int)(V >> 1) & 0xffffu);
+        return;
+    case R_AVR_LO8_LDI:
+        avr_patch_ldi_at(loc, (int)(V & 0xff));
+        return;
+    case R_AVR_HI8_LDI:
+        avr_patch_ldi_at(loc, (int)((V >> 8) & 0xff));
+        return;
+    case R_AVR_LO8_LDI_GS:
+        avr_patch_ldi_at(loc, (int)((V >> 1) & 0xff));
+        return;
+    case R_AVR_HI8_LDI_GS:
+        avr_patch_ldi_at(loc, (int)((V >> 9) & 0xff));
+        return;
+    case R_AVR_CALL:
+        if (V & 1)
+            die("%s: a call to an odd address 0x%llx; AVR instructions are "
+                "halfword-aligned and the address is halved to a word "
+                "number, so an odd one cannot be encoded", o->name,
+                (unsigned long long)V);
+        avr_patch_call_at(loc, (long)V);
+        return;
+    case R_AVR_13_PCREL: {
+        /* rjmp/rcall: words, from the instruction AFTER. */
+        long long d = (V - (long long)P - 2) / 2;
+        if (d < -2048 || d > 2047)
+            die("%s: an rjmp reaches +-4KB and this target is %lld bytes "
+                "away; this linker mints no trampolines, so the call has "
+                "to be a `call` rather than an `rcall`", o->name,
+                (long long)(V - (long long)P));
+        avr_patch_rjmp_at(loc, (int)d);
+        return;
+    }
+    case R_AVR_7_PCREL: {
+        long long d = (V - (long long)P - 2) / 2;
+        if (d < -64 || d > 63)
+            die("%s: a conditional branch reaches +-126 bytes and this "
+                "target is %lld away; it has to be an inverted branch "
+                "over an rjmp", o->name, (long long)(V - (long long)P));
+        avr_patch_br_at(loc, (int)d);
+        return;
+    }
+    default:
+        die("%s: unsupported AVR relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
+}
+
+static unsigned int get32loc(const unsigned char *p)
+{
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+/* The displacement already encoded in a `bl` or `b.w`, undoing the
+ * J1/J2 storage so it can serve as an implicit addend. */
+static long long read_thm_b24(const unsigned char *loc)
+{
+    unsigned hi = get16(loc), lo = get16(loc + 2);
+    unsigned s = (hi >> 10) & 1;
+    unsigned j1 = (lo >> 13) & 1, j2 = (lo >> 11) & 1;
+    unsigned i1 = (~(j1 ^ s)) & 1, i2 = (~(j2 ^ s)) & 1;
+    unsigned long v = ((unsigned long)s << 23) | ((unsigned long)i1 << 22) |
+                      ((unsigned long)i2 << 21) |
+                      ((unsigned long)(hi & 0x3ff) << 11) |
+                      (unsigned long)(lo & 0x7ff);
+    long long off = (long long)(v << 1);
+    if (off & (1LL << 24))                 /* sign-extend from 25 bits */
+        off -= 1LL << 25;
+    return off;
+}
+
+/* The 16-bit immediate a movw or movt already carries. */
+static unsigned int read_thm_mov(const unsigned char *loc)
+{
+    unsigned hi = get16(loc), lo = get16(loc + 2);
+    return ((hi & 0xfu) << 12) | (((hi >> 10) & 1u) << 11) |
+           (((lo >> 12) & 7u) << 8) | (lo & 0xffu);
+}
+
+/* One half of a movw/movt pair: the 16-bit immediate is split across
+ * imm4, i, imm3 and imm8, in that order and not in a contiguous field. */
+static void patch_thm_mov(unsigned char *loc, unsigned int h)
+{
+    unsigned hi = get16(loc), lo = get16(loc + 2);
+    hi = (hi & 0xfbf0u) | ((h >> 12) & 0xfu) | (((h >> 11) & 1u) << 10);
+    lo = (lo & 0x8f00u) | (((h >> 8) & 7u) << 12) | (h & 0xffu);
+    put16(loc, hi);
+    put16(loc + 2, lo);
+}
 
 static void apply_relocs(struct linker *l, struct object *o)
 {
     for (int i = 0; i < o->nsh; i++) {
         Elf64_Shdr *rsh = sh_at(o, i);
-        if (rsh->sh_type != SHT_RELA)
+        /* SHT_REL as well as SHT_RELA. The ARM EABI specifies the
+         * implicit-addend form, so every object a real ARM toolchain
+         * produces carries .rel.text and not .rela.text -- and a
+         * linker that skipped those would relocate nothing, link
+         * without complaint, and produce an image that does nothing at
+         * all. Which is exactly what happened. */
+        int isrel = rsh->sh_type == SHT_REL;
+        if (rsh->sh_type != SHT_RELA && !isrel)
             continue;
+        int relsz = o->elf32 ? (isrel ? (int)sizeof(Elf32_Rel)
+                                      : (int)sizeof(Elf32_Rela))
+                             : (isrel ? (int)sizeof(Elf64_Rel)
+                                      : (int)sizeof(Elf64_Rela));
         int target = (int)rsh->sh_info;         /* section being relocated */
-        if (o->sec_out[target] < 0)
-            continue; /* relocations for a non-allocated section (debug) */
-        struct insec *ts = &l->insecs[o->sec_out[target]];
-        if (ts->is_bss)
+        int dtgt = o->dbg_sec[target];
+        if (o->sec_out[target] < 0 && dtgt < 0)
+            continue; /* a non-allocated section nothing kept */
+        struct insec *ts = dtgt >= 0 ? (struct insec *)0
+                                     : &l->insecs[o->sec_out[target]];
+        if (ts && ts->is_bss)
             continue;
         /* the output bytes to patch live in the object's own buffer; we
          * patch there, then copy the section into the image at write. */
-        unsigned char *base = o->buf + sh_at(o, target)->sh_offset;
-        Elf64_Rela *r = (Elf64_Rela *)(o->buf + rsh->sh_offset);
-        int n = (int)(rsh->sh_size / sizeof(Elf64_Rela));
+        /* A DWARF section was already copied into its merged buffer, so
+         * that is where its fields are patched; everything else is
+         * patched in the object's own buffer and copied at write. */
+        unsigned char *base = dtgt >= 0
+            ? l->dbgsecs[dtgt].data + o->dbg_off[target]
+            : o->buf + sh_at(o, target)->sh_offset;
+        unsigned char *rbytes = o->buf + rsh->sh_offset;
+        int n = (int)(rsh->sh_size / (Elf64_Xword)relsz);
 
         for (int j = 0; j < n; j++) {
-            Elf64_Word type = ELF64_R_TYPE(r[j].r_info);
-            Elf64_Word symi = ELF64_R_SYM(r[j].r_info);
+            Elf64_Addr r_offset;
+            Elf64_Word type, symi;
+            long long A;
+            if (o->elf32) {
+                Elf32_Rela *r32 = (Elf32_Rela *)(rbytes + (long)j * relsz);
+                r_offset = r32->r_offset;
+                /* ELF32 packs the symbol index into 24 bits and the type
+                 * into 8 -- not the 32/32 split ELF64 uses. */
+                type = r32->r_info & 0xff;
+                symi = r32->r_info >> 8;
+                A = isrel ? 0 : r32->r_addend;
+            } else {
+                Elf64_Rela *r64 = (Elf64_Rela *)(rbytes + (long)j * relsz);
+                r_offset = r64->r_offset;
+                type = ELF64_R_TYPE(r64->r_info);
+                symi = ELF64_R_SYM(r64->r_info);
+                A = r64->r_addend;
+            }
+            /* R_RISCV_RELAX carries no symbol -- its index is 0, the
+             * null entry -- so it has to be recognised BEFORE the symbol
+             * is resolved. It is a hint that the site may be shortened,
+             * relaxation is optional, and this linker does not do it.
+             * R_RISCV_ALIGN is the same shape: it marks NOP padding that
+             * a relaxing linker may shrink, and one that moves nothing
+             * leaves the alignment the assembler already arranged. */
+            if (o->machine == EM_RISCV &&
+                (type == R_RISCV_RELAX || type == R_RISCV_ALIGN))
+                continue;
             int uw;
             Elf64_Addr S = reloc_symval(l, o, symi, &uw);
-            long long A = r[j].r_addend;
-            Elf64_Addr P = ts->vaddr + r[j].r_offset; /* patch site vaddr */
-            unsigned char *loc = base + r[j].r_offset;
+            /* A debug section has no address; every relocation into
+             * one is absolute, so there is no P to compute. */
+            Elf64_Addr P = ts ? ts->vaddr + r_offset : 0;
+            unsigned char *loc = base + r_offset;
+
+            if (o->machine == EM_RISCV) {
+                apply_riscv(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_AVR) {
+                apply_avr(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->elf32) {
+                /* SHT_REL keeps the addend IN the field, in whatever
+                 * shape that field has -- a word for the data
+                 * relocations, a branch displacement for a call, a
+                 * 16-bit immediate split across four fields for a
+                 * movw. Each is read back the way it was written. */
+                if (isrel) {
+                    switch (type) {
+                    case R_ARM_ABS32:
+                    case R_ARM_REL32:
+                    case R_ARM_PREL31:
+                        A = (int)get32loc(loc);
+                        break;
+                    case R_ARM_THM_CALL:
+                    case R_ARM_THM_JUMP24:
+                        /* The field encodes a displacement from P + 4,
+                         * and the ABI's addend is measured from P — so
+                         * the addend is four MORE than the field says.
+                         * An assembler with nothing to point at writes
+                         * a branch to itself (`f7ff fffe`, displacement
+                         * -4), which is exactly how it spells an addend
+                         * of zero; taking that -4 literally puts every
+                         * call four bytes early, which is one halfword
+                         * into the instruction before the one meant. */
+                        A = read_thm_b24(loc) + 4;
+                        break;
+                    case R_ARM_THM_MOVW_ABS_NC:
+                    case R_ARM_THM_MOVT_ABS:
+                        A = (short)read_thm_mov(loc);
+                        break;
+                    default:
+                        A = 0;
+                        break;
+                    }
+                }
+                switch (type) {
+                case R_ARM_PREL31:
+                    /* The exception index table's self-relative pointer:
+                     * 31 bits of offset with the top bit preserved,
+                     * which says whether the entry is a table offset or
+                     * an inline unwind instruction. Nothing here reads
+                     * those tables, but they are ALLOCATED, so the
+                     * pointers in them must still be made consistent. */
+                    put32(loc, (unsigned int)(((unsigned long)((long long)S +
+                                A - (long long)P) & 0x7fffffffUL) |
+                                (get32loc(loc) & 0x80000000UL)));
+                    break;
+                case R_ARM_ABS32:
+                    /* S already carries the Thumb bit for a function
+                     * symbol: the compiler and the assembler both put it
+                     * in st_value, so nothing here adds it and nothing
+                     * strips it. A vector table entry is exactly this. */
+                    put32(loc, (unsigned int)(S + (Elf64_Addr)A));
+                    break;
+                case R_ARM_REL32:
+                    put32(loc, (unsigned int)(long)((long long)S + A -
+                                                    (long long)P));
+                    break;
+                case R_ARM_THM_CALL:
+                case R_ARM_THM_JUMP24:
+                    /* The displacement is between ADDRESSES, so the
+                     * Thumb bit comes off S first -- leaving it on would
+                     * shift every call by one byte. */
+                    patch_thm_b24(o, loc,
+                                  (long long)(S & ~(Elf64_Addr)1) + A -
+                                  ((long long)P + 4));
+                    break;
+                case R_ARM_THM_MOVW_ABS_NC:
+                    patch_thm_mov(loc, (unsigned int)((S + (Elf64_Addr)A)
+                                                      & 0xffff));
+                    break;
+                case R_ARM_THM_MOVT_ABS:
+                    patch_thm_mov(loc, (unsigned int)(((S + (Elf64_Addr)A)
+                                                       >> 16) & 0xffff));
+                    break;
+                default:
+                    die("%s: unsupported ARM relocation type %u (this is "
+                        "the next linker increment, not a bug in your "
+                        "program)", o->name, type);
+                }
+                continue;
+            }
 
             switch (type) {
             case R_X86_64_64:
@@ -945,6 +1923,31 @@ static void apply_relocs(struct linker *l, struct object *o)
 
 /* ---- output ---- */
 
+/* A string table for the executable's own .strtab/.shstrtab. Small and
+ * local: the object writer has its own, and threading that one through
+ * the linker would couple two files that otherwise share nothing. */
+struct ltab { char *p; long len, cap; };
+
+static long ltab_add(struct ltab *t, const char *s)
+{
+    long n = (long)strlen(s) + 1, at;
+    if (!t->p) {                       /* index 0 is always the empty name */
+        t->cap = 256;
+        t->p = xmalloc((size_t)t->cap);
+        t->p[0] = 0;
+        t->len = 1;
+    }
+    if (!*s) return 0;
+    while (t->len + n > t->cap) {
+        t->cap *= 2;
+        t->p = xrealloc(t->p, (size_t)t->cap);
+    }
+    at = t->len;
+    memcpy(t->p + at, s, (size_t)n);
+    t->len += n;
+    return at;
+}
+
 static void write_exec(struct linker *l, const char *out,
                        Elf64_Addr entry,
                        Elf64_Addr text_start, Elf64_Xword text_size,
@@ -979,37 +1982,141 @@ static void write_exec(struct linker *l, const char *out,
      * The kernel loader maps PT_LOAD by (offset, vaddr, filesz, memsz);
      * keeping offset ≡ vaddr (mod PAGE) is what lets it map file pages
      * directly. */
-    Elf64_Off hdrs = sizeof(Elf64_Ehdr) + (Elf64_Off)nph * sizeof(Elf64_Phdr);
+    /* A firmware image is not mapped by a kernel: it is COPIED into
+     * flash, so there is no page-congruence to preserve and every
+     * page of padding is flash the board does not have. Four bytes is
+     * all its segments need to be aligned to. */
+    Elf64_Xword pagesz = l->data_base ? 4 : PAGE;
+    Elf64_Off ehsz = l->elf32 ? sizeof(Elf32_Ehdr) : sizeof(Elf64_Ehdr);
+    Elf64_Off phsz = l->elf32 ? sizeof(Elf32_Phdr) : sizeof(Elf64_Phdr);
+    Elf64_Off hdrs = ehsz + (Elf64_Off)nph * phsz;
 
     Elf64_Off text_off = hdrs;
-    /* keep text_off ≡ text_start (mod PAGE) */
-    text_off = align_up(text_off, PAGE) + (text_start & (PAGE - 1));
+    /* keep text_off ≡ text_start (mod pagesz) */
+    text_off = align_up(text_off, pagesz) + (text_start & (pagesz - 1));
     if (text_off < hdrs)
-        text_off += PAGE;
+        text_off += pagesz;
     Elf64_Off data_off = text_off + text_size;
-    data_off = align_up(data_off, PAGE) + (data_start & (PAGE - 1));
+    data_off = l->data_base
+        ? align_up(data_off, 4)
+        : align_up(data_off, pagesz) + (data_start & (pagesz - 1));
 
-    Elf64_Off total = data_off + data_filesz;
+    /* ---- a SYMBOL TABLE in the executable -----------------------------
+     *
+     * Not loaded -- the section headers and the two string tables sit
+     * outside every PT_LOAD, so a firmware image copied to flash is the
+     * segments and none of this. It costs file size and no bytes on the
+     * board, which is why every linker keeps it unless asked not to.
+     *
+     * It is here because without it a linked image is anonymous: EmbDBG
+     * could symbolize a .o and not the firmware built from it, so
+     * `embdbg fw.elf remote :1234` had nothing to say about where the
+     * target had stopped. llvm-objdump gains the same names.
+     */
+    struct { const char *name; Elf64_Addr val; Elf64_Xword size;
+             int text; int type; } *sy;
+    int nsy = 0;
+    sy = xmalloc((size_t)(l->nsym + 1) * sizeof *sy);
+    for (int i = 0; i < l->nsym; i++) {
+        struct symbol *sm = &l->syms[i];
+        if (!sm->defined || !sm->name || !*sm->name)
+            continue;
+        sy[nsy].name = sm->name;
+        sy[nsy].val = sm->value;
+        sy[nsy].size = sm->size;
+        /* STT_FUNC for anything defined in the text segment: it is what
+         * a debugger filters on, and a symbol with no size is skipped
+         * there, so the size has to travel too. */
+        sy[nsy].text = sm->insec >= 0 && l->insecs[sm->insec].seg == SEG_TEXT;
+        sy[nsy].type = sm->type ? sm->type
+                     : (sy[nsy].text ? STT_FUNC : STT_OBJECT);
+        nsy++;
+    }
+
+    int have_data = data_filesz > 0;
+    /* [0] NULL  [1] .text  ([2] .data)  .symtab  .strtab  .shstrtab */
+    int sh_text = 1, sh_data = have_data ? 2 : 0;
+    int sh_symtab = have_data ? 3 : 2;
+    /* The merged .debug_* sections go between .text/.data and the
+     * symbol table: they are not allocated, so they take no address
+     * and sit only in the file. */
+    int sh_dbg0 = sh_symtab;
+    sh_symtab += l->ndbg;
+    int sh_strtab = sh_symtab + 1, sh_shstr = sh_symtab + 2;
+    int nsh = sh_shstr + 1;
+
+    struct ltab symstr, shstr;
+    memset(&symstr, 0, sizeof symstr);
+    memset(&shstr, 0, sizeof shstr);
+    ltab_add(&symstr, "");
+    ltab_add(&shstr, "");
+    Elf64_Word *symname = xmalloc((size_t)(nsy + 1) * sizeof *symname);
+    for (int i = 0; i < nsy; i++)
+        symname[i] = (Elf64_Word)ltab_add(&symstr, sy[i].name);
+    Elf64_Word n_text = (Elf64_Word)ltab_add(&shstr, ".text");
+    Elf64_Word n_data = have_data ? (Elf64_Word)ltab_add(&shstr, ".data") : 0;
+    Elf64_Word n_symtab = (Elf64_Word)ltab_add(&shstr, ".symtab");
+    Elf64_Word n_strtab = (Elf64_Word)ltab_add(&shstr, ".strtab");
+    Elf64_Word n_shstr = (Elf64_Word)ltab_add(&shstr, ".shstrtab");
+    Elf64_Word *n_dbg = l->ndbg
+        ? xmalloc((size_t)l->ndbg * sizeof *n_dbg) : (Elf64_Word *)0;
+    for (int i = 0; i < l->ndbg; i++)
+        n_dbg[i] = (Elf64_Word)ltab_add(&shstr, l->dbgsecs[i].name);
+
+    Elf64_Xword symentsz = l->elf32 ? sizeof(Elf32_Sym) : sizeof(Elf64_Sym);
+    Elf64_Xword shentsz  = l->elf32 ? sizeof(Elf32_Shdr) : sizeof(Elf64_Shdr);
+
+    Elf64_Off dbg_off0 = align_up(data_off + data_filesz, 8);
+    Elf64_Off dbg_total = 0;
+    Elf64_Off *dbg_at = l->ndbg
+        ? xmalloc((size_t)l->ndbg * sizeof *dbg_at) : (Elf64_Off *)0;
+    for (int i = 0; i < l->ndbg; i++) {
+        dbg_at[i] = dbg_off0 + dbg_total;
+        dbg_total += (Elf64_Off)l->dbgsecs[i].len;
+    }
+    Elf64_Off sym_off = align_up(dbg_off0 + dbg_total, 8);
+    Elf64_Off symsz = (Elf64_Xword)(nsy + 1) * symentsz;   /* +1: the null */
+    Elf64_Off str_off = sym_off + symsz;
+    Elf64_Off shstr_off = str_off + symstr.len;
+    Elf64_Off sh_off = align_up(shstr_off + shstr.len, 8);
+
+    Elf64_Off total = sh_off + (Elf64_Off)nsh * shentsz;
     unsigned char *img = xcalloc(1, (size_t)total);
 
-    Elf64_Ehdr *eh = (Elf64_Ehdr *)img;
+    /* Built as the 64-bit structures and written as whichever class the
+     * inputs were, exactly as the object writer does it -- one place
+     * that knows about the narrower layout instead of two shapes of
+     * header threaded through everything above. */
+    Elf64_Ehdr ehbuf;
+    Elf64_Phdr phbuf[3];
+    Elf64_Ehdr *eh = &ehbuf;
+    memset(&ehbuf, 0, sizeof ehbuf);
+    memset(phbuf, 0, sizeof phbuf);
     eh->e_ident[EI_MAG0] = ELFMAG0;
     eh->e_ident[EI_MAG1] = ELFMAG1;
     eh->e_ident[EI_MAG2] = ELFMAG2;
     eh->e_ident[EI_MAG3] = ELFMAG3;
-    eh->e_ident[EI_CLASS] = ELFCLASS64;
+    eh->e_ident[EI_CLASS] = l->elf32 ? ELFCLASS32 : ELFCLASS64;
     eh->e_ident[EI_DATA] = ELFDATA2LSB;
     eh->e_ident[EI_VERSION] = EV_CURRENT;
     eh->e_type = ET_EXEC;              /* never ET_DYN — TARGET_ABI §4b */
-    eh->e_machine = EM_X86_64;
+    eh->e_machine = (Elf64_Half)(l->machine ? l->machine : EM_X86_64);
     eh->e_version = EV_CURRENT;
+    /* The entry is a Thumb address on ARM and carries the low bit from
+     * the symbol; the ELF entry must too, or the processor starts in
+     * ARM state and faults on the first instruction. */
     eh->e_entry = entry;
-    eh->e_phoff = sizeof(Elf64_Ehdr);
-    eh->e_ehsize = sizeof(Elf64_Ehdr);
-    eh->e_phentsize = sizeof(Elf64_Phdr);
+    /* RISC-V's and AVR's from the inputs (see l->eflags); bits 2:1 of
+     * RISC-V's are the float ABI, whose 0 means SOFT. */
+    eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5
+                : l->machine == EM_RISCV || l->machine == EM_AVR ? l->eflags
+                : 0;
+    eh->e_phoff = ehsz;
+    eh->e_ehsize = (Elf64_Half)ehsz;
+    eh->e_phentsize = (Elf64_Half)phsz;
     eh->e_phnum = (Elf64_Half)nph;
 
-    Elf64_Phdr *ph = (Elf64_Phdr *)(img + sizeof(Elf64_Ehdr));
+    Elf64_Phdr *ph = phbuf;
     ph[0].p_type = PT_LOAD;
     ph[0].p_flags = PF_R | PF_X;
     if (ntls) {
@@ -1028,15 +2135,20 @@ static void write_exec(struct linker *l, const char *out,
         ph[0].p_filesz = text_size;
         ph[0].p_memsz = text_size;
     }
-    ph[0].p_align = PAGE;
+    ph[0].p_align = pagesz;
     ph[1].p_type = PT_LOAD;
     ph[1].p_flags = PF_R | PF_W;
     ph[1].p_offset = data_off;
     ph[1].p_vaddr = data_start;
-    ph[1].p_paddr = data_start - l->lma_offset;   /* L2: LMA */
+    /* A firmware image's writable segment is STORED in flash, right
+     * after the text, and ADDRESSED in RAM. That is the one case where
+     * p_paddr is not p_vaddr shifted by a constant, which is why
+     * lma_offset could not express it. */
+    ph[1].p_paddr = l->data_base ? l->data_lma
+                                 : data_start - l->lma_offset;  /* L2: LMA */
     ph[1].p_filesz = data_filesz;
     ph[1].p_memsz = data_memsz;       /* memsz > filesz = the .bss tail */
-    ph[1].p_align = PAGE;
+    ph[1].p_align = pagesz;
 
     /* The template, described rather than loaded twice: its bytes are
      * already inside the data segment above, and this header says which
@@ -1053,6 +2165,39 @@ static void write_exec(struct linker *l, const char *out,
         ph[2].p_align = tls_align;
     }
 
+    if (l->elf32) {
+        Elf32_Ehdr e32;
+        memset(&e32, 0, sizeof e32);
+        memcpy(e32.e_ident, eh->e_ident, EI_NIDENT);
+        e32.e_type = eh->e_type;
+        e32.e_machine = eh->e_machine;
+        e32.e_version = eh->e_version;
+        e32.e_entry = (Elf32_Addr)eh->e_entry;
+        e32.e_phoff = (Elf32_Off)eh->e_phoff;
+        e32.e_flags = eh->e_flags;
+        e32.e_ehsize = eh->e_ehsize;
+        e32.e_phentsize = eh->e_phentsize;
+        e32.e_phnum = eh->e_phnum;
+        memcpy(img, &e32, sizeof e32);
+        for (int i = 0; i < nph; i++) {
+            /* Elf32_Phdr is not Elf64_Phdr narrowed: p_flags moves from
+             * second field to last. */
+            Elf32_Phdr p32;
+            p32.p_type = ph[i].p_type;
+            p32.p_offset = (Elf32_Off)ph[i].p_offset;
+            p32.p_vaddr = (Elf32_Addr)ph[i].p_vaddr;
+            p32.p_paddr = (Elf32_Addr)ph[i].p_paddr;
+            p32.p_filesz = (Elf32_Word)ph[i].p_filesz;
+            p32.p_memsz = (Elf32_Word)ph[i].p_memsz;
+            p32.p_flags = ph[i].p_flags;
+            p32.p_align = (Elf32_Word)ph[i].p_align;
+            memcpy(img + ehsz + (size_t)i * phsz, &p32, sizeof p32);
+        }
+    } else {
+        memcpy(img, eh, sizeof *eh);
+        memcpy(img + ehsz, ph, (size_t)nph * sizeof *ph);
+    }
+
     /* copy each allocated, file-backed section to its place */
     for (int i = 0; i < l->nsec; i++) {
         struct insec *s = &l->insecs[i];
@@ -1062,6 +2207,125 @@ static void write_exec(struct linker *l, const char *out,
         Elf64_Addr segva = (s->seg == SEG_TEXT) ? text_start : data_start;
         memcpy(img + base + (s->vaddr - segva), s->data, (size_t)s->size);
     }
+
+    /* ---- the symbol table and the section headers --------------------- */
+    memcpy(img + str_off, symstr.p, (size_t)symstr.len);
+    memcpy(img + shstr_off, shstr.p, (size_t)shstr.len);
+    for (int i = 0; i < nsy; i++) {
+        /* Index 0 is the reserved null entry, already zeroed. */
+        Elf64_Half shndx = (Elf64_Half)(sy[i].text ? sh_text
+                                        : (have_data ? sh_data : sh_text));
+        unsigned char info = (unsigned char)ELF64_ST_INFO(STB_GLOBAL,
+                                                          sy[i].type);
+        if (l->elf32) {
+            Elf32_Sym e;
+            memset(&e, 0, sizeof e);
+            e.st_name = symname[i];
+            e.st_value = (Elf32_Addr)sy[i].val;
+            e.st_size = (Elf32_Word)sy[i].size;
+            e.st_info = info;
+            e.st_shndx = shndx;
+            memcpy(img + sym_off + (size_t)(i + 1) * symentsz, &e, sizeof e);
+        } else {
+            Elf64_Sym e;
+            memset(&e, 0, sizeof e);
+            e.st_name = symname[i];
+            e.st_value = sy[i].val;
+            e.st_size = sy[i].size;
+            e.st_info = info;
+            e.st_shndx = shndx;
+            memcpy(img + sym_off + (size_t)(i + 1) * symentsz, &e, sizeof e);
+        }
+    }
+    {
+        /* Built as the 64-bit shape and narrowed at the one place that
+         * serialises it, exactly as the headers above are. */
+        /* nsh entries, not a fixed six: the merged DWARF sections
+         * added as many headers as there are distinct .debug_* names,
+         * and writing past a six-element array is how that first
+         * showed up -- as an image with no debug sections in it. */
+        Elf64_Shdr *sh = xcalloc((size_t)nsh, sizeof *sh);
+        sh[sh_text].sh_name = n_text;
+        sh[sh_text].sh_type = SHT_PROGBITS;
+        sh[sh_text].sh_flags = SHF_ALLOC | SHF_EXECINSTR;
+        sh[sh_text].sh_addr = text_start;
+        sh[sh_text].sh_offset = text_off;
+        sh[sh_text].sh_size = text_size;
+        sh[sh_text].sh_addralign = 4;
+        if (have_data) {
+            sh[sh_data].sh_name = n_data;
+            sh[sh_data].sh_type = SHT_PROGBITS;
+            sh[sh_data].sh_flags = SHF_ALLOC | SHF_WRITE;
+            sh[sh_data].sh_addr = data_start;
+            sh[sh_data].sh_offset = data_off;
+            sh[sh_data].sh_size = data_filesz;
+            sh[sh_data].sh_addralign = 4;
+        }
+        /* The merged DWARF. No SHF_ALLOC and no address: it is in the
+         * file for a debugger and nowhere in the running image. */
+        for (int i = 0; i < l->ndbg; i++) {
+            sh[sh_dbg0 + i].sh_name = n_dbg[i];
+            sh[sh_dbg0 + i].sh_type = SHT_PROGBITS;
+            sh[sh_dbg0 + i].sh_flags = 0;
+            sh[sh_dbg0 + i].sh_offset = dbg_at[i];
+            sh[sh_dbg0 + i].sh_size = (Elf64_Xword)l->dbgsecs[i].len;
+            sh[sh_dbg0 + i].sh_addralign = 1;
+            memcpy(img + dbg_at[i], l->dbgsecs[i].data,
+                   (size_t)l->dbgsecs[i].len);
+        }
+        sh[sh_symtab].sh_name = n_symtab;
+        sh[sh_symtab].sh_type = SHT_SYMTAB;
+        sh[sh_symtab].sh_offset = sym_off;
+        sh[sh_symtab].sh_size = symsz;
+        sh[sh_symtab].sh_link = (Elf64_Word)sh_strtab;
+        sh[sh_symtab].sh_info = 1;     /* one local: the null entry */
+        sh[sh_symtab].sh_addralign = 8;
+        sh[sh_symtab].sh_entsize = symentsz;
+        sh[sh_strtab].sh_name = n_strtab;
+        sh[sh_strtab].sh_type = SHT_STRTAB;
+        sh[sh_strtab].sh_offset = str_off;
+        sh[sh_strtab].sh_size = (Elf64_Xword)symstr.len;
+        sh[sh_strtab].sh_addralign = 1;
+        sh[sh_shstr].sh_name = n_shstr;
+        sh[sh_shstr].sh_type = SHT_STRTAB;
+        sh[sh_shstr].sh_offset = shstr_off;
+        sh[sh_shstr].sh_size = (Elf64_Xword)shstr.len;
+        sh[sh_shstr].sh_addralign = 1;
+        for (int i = 0; i < nsh; i++) {
+            if (l->elf32) {
+                Elf32_Shdr s32;
+                memset(&s32, 0, sizeof s32);
+                s32.sh_name = sh[i].sh_name;
+                s32.sh_type = sh[i].sh_type;
+                s32.sh_flags = (Elf32_Word)sh[i].sh_flags;
+                s32.sh_addr = (Elf32_Addr)sh[i].sh_addr;
+                s32.sh_offset = (Elf32_Off)sh[i].sh_offset;
+                s32.sh_size = (Elf32_Word)sh[i].sh_size;
+                s32.sh_link = sh[i].sh_link;
+                s32.sh_info = sh[i].sh_info;
+                s32.sh_addralign = (Elf32_Word)sh[i].sh_addralign;
+                s32.sh_entsize = (Elf32_Word)sh[i].sh_entsize;
+                memcpy(img + sh_off + (size_t)i * shentsz, &s32, sizeof s32);
+            } else {
+                memcpy(img + sh_off + (size_t)i * shentsz, &sh[i], sizeof sh[i]);
+            }
+        }
+        free(sh);
+    }
+    if (l->elf32) {
+        Elf32_Ehdr *e = (Elf32_Ehdr *)img;
+        e->e_shoff = (Elf32_Off)sh_off;
+        e->e_shentsize = (Elf32_Half)shentsz;
+        e->e_shnum = (Elf32_Half)nsh;
+        e->e_shstrndx = (Elf32_Half)sh_shstr;
+    } else {
+        Elf64_Ehdr *e = (Elf64_Ehdr *)img;
+        e->e_shoff = sh_off;
+        e->e_shentsize = (Elf64_Half)shentsz;
+        e->e_shnum = (Elf64_Half)nsh;
+        e->e_shstrndx = (Elf64_Half)sh_shstr;
+    }
+    free(sy); free(symname); free(symstr.p); free(shstr.p);
 
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
@@ -1235,9 +2499,18 @@ int embld_link(const char **inputs, int ninputs, const char *out,
 {
     struct linker l;
     memset(&l, 0, sizeof l);
-    l.base = (opts && opts->base) ? opts->base : DEFAULT_BASE;
+    /* Carry DWARF into the image. A build without -g has no .debug_*
+     * to collect, so this costs nothing there; with -g it is the
+     * difference between an executable gdb can open and one it cannot. */
+    l.keep_debug = 1;
+    l.base = (opts && (opts->base || opts->have_base)) ? opts->base
+                                                       : DEFAULT_BASE;
     l.entry = (opts && opts->entry) ? opts->entry : "_start";
     l.lma_offset = (opts) ? opts->lma_offset : 0;
+    l.data_base = (opts) ? opts->data_base : 0;
+    l.rom_limit = (opts) ? opts->rom_limit : 0;
+    l.stack_top = (opts && opts->have_stack) ? opts->stack_top : 0;
+    l.stub_sec = -1;
 
     /* Explicit objects are always linked; archives are stashed and their
      * members pulled on demand (left-to-right, as a linker does — so an
@@ -1256,6 +2529,19 @@ int embld_link(const char **inputs, int ninputs, const char *out,
      * reach back into an earlier archive (the --start-group behaviour,
      * always on: correct over order-sensitive). */
     pull_archives(&l);
+
+    /* The entry stub goes in before layout so it gets an address like
+     * any other section, and is FILLED after, when the entry symbol has
+     * one. Refused on a machine that does not need it rather than
+     * silently ignored: -Tstack on ARM would mean the caller believes
+     * something about the image that is not true. */
+    if (opts && opts->have_stack) {
+        if (l.machine != EM_RISCV)
+            die("-Tstack is a RISC-V option: every other target here "
+                "starts with a stack pointer already set (a Cortex-M "
+                "reads its own from the vector table)");
+        add_entry_stub(&l);
+    }
 
     Elf64_Addr text_start, data_start;
     Elf64_Xword text_size, data_filesz, data_memsz;
@@ -1278,10 +2564,19 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     define_brackets(&l, bounds);
     define_orphan_brackets(&l, bounds);
     define_end_symbols(&l, data_start + data_memsz);   /* L1: kernel_end/_end */
+    define_firmware_symbols(&l, data_start, data_filesz, data_memsz);
+
+    /* Every input is loaded by now, which is what this question needs:
+     * whether the SET of objects can be linked at all. See
+     * arm_attrs_check. */
+    arm_attrs_check(&l);
 
     struct symbol *e = sym_find(&l, l.entry);
     if (!e || !e->defined)
         die("entry symbol '%s' is undefined", l.entry);
+
+    if (l.stub_sec >= 0)
+        fill_entry_stub(&l, e->value);
 
     for (int i = 0; i < l.nobj; i++)
         apply_relocs(&l, l.objs[i]);
@@ -1290,7 +2585,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         emit_embx(&l, out, opts->caps, e->value, text_start, text_size,
                   data_start, data_filesz, data_memsz);
     } else {
-        write_exec(&l, out, e->value, text_start, text_size,
+        write_exec(&l, out,
+                   l.stub_sec >= 0 ? l.insecs[l.stub_sec].vaddr : e->value,
+                   text_start, text_size,
                    data_start, data_filesz, data_memsz,
                    tls_start, tls_filesz, tls_memsz, tls_align);
         emit_embdbg(&l, out);   /* a .embdbg sidecar if any input carries -g info */

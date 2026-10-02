@@ -165,6 +165,17 @@ void a64_alu_reg_shifted(struct code *c, int op, int rd, int rn, int rm,
                 ((unsigned long)rn << 5) | (unsigned long)rd);
 }
 
+void a64_alu_reg_ext(struct code *c, int op, int rd, int rn, int rm,
+                     int size, int sign, int w)
+{
+    /* option: UXTB 0, UXTH 1, UXTW 2, SXTB 4, SXTH 5, SXTW 6 */
+    unsigned long option = (sign ? 4UL : 0UL) |
+                           (size == 1 ? 0UL : size == 2 ? 1UL : 2UL);
+    a64_word(c, (op == '-' ? 0x4B200000UL : 0x0B200000UL) | sf(w) |
+                ((unsigned long)rm << 16) | (option << 13) |
+                ((unsigned long)rn << 5) | (unsigned long)rd);
+}
+
 void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w)
 {
     a64_alu_reg_shifted(c, op, rd, rn, rm, '<', 0, w);
@@ -234,6 +245,14 @@ static int a64_bitmask_imm(unsigned long imm, int w, unsigned long *field)
         return 1;
     }
     return 0;
+}
+
+/* May `imm` be an AND/ORR/EOR immediate at width w? The question
+ * a64_logical_imm answers by trying, asked without emitting. */
+int a64_bitmask_ok(long imm, int w)
+{
+    unsigned long field;
+    return a64_bitmask_imm((unsigned long)imm, w, &field);
 }
 
 int a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w)
@@ -520,17 +539,46 @@ static unsigned long ldst_base(int size, int load, int sign, int w)
     return 0x39000000UL | (sz << 30) | (opc << 22);
 }
 
+int a64_frame_base = A64_SP;
+
+/* Within the first 64K past the sentinel: a slot's own field offset
+ * (sd + q * 8) is still the dead slot. */
+void a64_no_dead_slot(int rn, long off)
+{
+    if ((rn == a64_frame_base || rn == A64_FP || rn == A64_SP) &&
+        off >= A64_DEAD_SLOT && off < A64_DEAD_SLOT + 0x10000)
+        internal_error("aarch64: a value was read or written at a stack "
+                       "slot it does not have -- it lives in a register, "
+                       "and some lowering path does not know that");
+}
+
 static void ldst(struct code *c, int rt, int rn, long off, int size,
                  int load, int sign, int w)
 {
     unsigned long base = ldst_base(size, load, sign, w);
+    a64_no_dead_slot(rn, off);
     if (off >= 0 && off % size == 0 && off / size <= 0xfff) {
         a64_word(c, base | ((unsigned long)(off / size) << 10) |
                     ((unsigned long)rn << 5) | (unsigned long)rt);
         return;
     }
+    /* The UNSCALED form, ldur/stur: a signed 9-bit byte offset, for a
+     * negative one or one the size does not divide -- a field before the
+     * pointer, or an odd offset into a packed struct. Same size, opc and
+     * registers; bit 24 clear and imm9 where imm12 was. */
+    if (off >= -256 && off <= 255) {
+        a64_word(c, (base & ~0x01000000UL) |
+                    (((unsigned long)off & 0x1ff) << 12) |
+                    ((unsigned long)rn << 5) | (unsigned long)rt);
+        return;
+    }
     /* Out of the scaled field: form the address in the scratch register.
-     * Callers are documented not to hold anything in A64_SCR here. */
+     * Callers are documented not to hold anything in A64_SCR here -- and
+     * when the BASE is that register, the first move would destroy it:
+     * refuse by name rather than load from 2*off (a block copy whose
+     * source was in x12 did exactly that before it became a loop). */
+    if (rn == A64_SCR || (!load && rt == A64_SCR))
+        internal_error("aarch64: an access at offset %ld from x12 needs x12", off);
     a64_mov_imm(c, A64_SCR, off, 8);
     if (rn == A64_SP)
         /* SP is not encodable as Rn in the shifted-register ADD; the
@@ -595,7 +643,9 @@ void a64_prologue(struct code *c, int framesize)
     }
 }
 
-void a64_epilogue(struct code *c, int framesize)
+/* The frame down and the frame record reloaded -- the epilogue short of
+ * its `ret`, which a tail call replaces with a branch. */
+void a64_teardown(struct code *c, int framesize)
 {
     if (framesize > 0 &&
         !a64_add_imm(c, A64_SP, A64_SP, framesize, 8)) {
@@ -603,6 +653,11 @@ void a64_epilogue(struct code *c, int framesize)
         a64_word(c, 0x910003BFUL);        /* mov sp, x29 */
     }
     a64_word(c, 0xA8C17BFDUL);            /* ldp x29, x30, [sp], #16 */
+}
+
+void a64_epilogue(struct code *c, int framesize)
+{
+    a64_teardown(c, framesize);
     a64_word(c, 0xD65F03C0UL);            /* ret */
 }
 
@@ -613,6 +668,16 @@ void a64_blr(struct code *c, int rn)
 {
     a64_word(c, 0xD63F0000UL | ((unsigned long)rn << 5));
 }
+void a64_ldrsw_tab(struct code *c, int rt, int rn, int rm, int w)
+{
+    /* LDRSW (register): size 10, opc 10, option UXTW (010) or LSL (011),
+     * S = 1 for the scale of 4. llvm-mc: ldrsw x1,[x2,w3,uxtw #2] =
+     * b8a35841, ldrsw x1,[x2,x3,lsl #2] = b8a37841. */
+    unsigned long option = w == 8 ? 3UL : 2UL;
+    a64_word(c, 0xB8A00800UL | ((unsigned long)rm << 16) | (option << 13) |
+                (1UL << 12) | ((unsigned long)rn << 5) | (unsigned long)rt);
+}
+
 void a64_br(struct code *c, int rn)
 {
     a64_word(c, 0xD61F0000UL | ((unsigned long)rn << 5));
@@ -735,12 +800,19 @@ void a64_udf(struct code *c)     { a64_word(c, 0x00000000UL); }
  * V bit (26) set: size 10 selects S registers, 11 selects D. */
 static void fldst(struct code *c, int vt, int rn, long off, int w, int load)
 {
+    a64_no_dead_slot(rn, off);
     unsigned long sz = (w == 8) ? 3UL : 2UL;
     unsigned long base = 0x3D000000UL | (sz << 30) | (load ? 0x400000UL : 0);
     if (w == 16)       /* q: size 00 with opc<1> set (a long double) */
         base = load ? 0x3DC00000UL : 0x3D800000UL;
     if (off >= 0 && off % w == 0 && off / w <= 0xfff) {
         a64_word(c, base | ((unsigned long)(off / w) << 10) |
+                    ((unsigned long)rn << 5) | (unsigned long)vt);
+        return;
+    }
+    if (w != 16 && off >= -256 && off <= 255) {         /* ldur/stur (SIMD&FP) */
+        a64_word(c, (base & ~0x01000000UL) |
+                    (((unsigned long)off & 0x1ff) << 12) |
                     ((unsigned long)rn << 5) | (unsigned long)vt);
         return;
     }
@@ -795,6 +867,16 @@ void a64_fmov_from_gpr(struct code *c, int vd, int rn, int w)
 {
     unsigned long base = w == 8 ? 0x9E670000UL : 0x1E270000UL;
     a64_word(c, base | ((unsigned long)rn << 5) | (unsigned long)vd);
+}
+
+/* FMOV Xd, Dn / FMOV Wd, Sn -- the reverse of the above. In the
+ * floating-point/integer conversion encoding the direction is one bit of
+ * the `opcode` field (rmode=00, opcode 110 reads the FP register, 111
+ * writes it), so this is the same word with bit 16 clear. */
+void a64_fmov_to_gpr(struct code *c, int rd, int vn, int w)
+{
+    unsigned long base = w == 8 ? 0x9E660000UL : 0x1E260000UL;
+    a64_word(c, base | ((unsigned long)vn << 5) | (unsigned long)rd);
 }
 
 void a64_fmov_reg(struct code *c, int vd, int vn, int w)

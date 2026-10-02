@@ -58,6 +58,13 @@
 #define DW_OP_fbreg           0x91
 #define DW_OP_reg6            0x56   /* rbp — EmbCC's x86-64 frame pointer */
 #define DW_OP_reg29           0x6d   /* x29 — its aarch64 frame pointer */
+/* DW_OP_bregN is 0x70 + N, and takes a signed offset. The embedded
+ * backends keep no frame pointer -- every slot is addressed from sp,
+ * which the prologue sets once and never moves (the outgoing argument
+ * area is part of the frame) -- so their frame base is sp itself. */
+#define DW_OP_breg(n)         (0x70 + (n))
+#define DW_REG_SP_ARM         13     /* r13 */
+#define DW_REG_SP_RISCV       2      /* x2  */
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -423,6 +430,22 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
 }
 
 /* DW_AT_location = DW_OP_fbreg(off): the slot at frame_base(=rbp) + off. */
+/* DWARF address width. A 32-bit target's .debug_info and .debug_line
+ * carry four-byte addresses and say so in the CU header's
+ * address_size; emitting eight everywhere was fine while every target
+ * was 64-bit and is simply wrong on ARMv7-M and RV32 -- a debugger
+ * reads the next field out of the second half of the address. */
+static int addr_bytes(void)
+{
+    return target_ptr_size();
+}
+
+static void db_addr(struct dbuf *b, unsigned long v)
+{
+    if (addr_bytes() == 4) db_u32(b, v);
+    else                   db_u64(b, v);
+}
+
 static void loc_fbreg(struct dbuf *b, long off)
 {
     struct dbuf e = { 0, 0, 0 };
@@ -445,17 +468,17 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
     db_u16(b, 4);                        /* version */
     reloc(out, DWSEC_INFO, b->len, 4, DWTGT_ABBREV, 0);
     db_u32(b, 0);                        /* debug_abbrev_offset (reloc) */
-    db_u8(b, 8);                         /* address_size */
+    db_u8(b, (unsigned char)addr_bytes());   /* address_size */
 
     db_uleb(b, AB_CU);
     db_str(b, "EmbCC");                  /* DW_AT_producer */
     db_u16(b, DW_LANG_C99);              /* DW_AT_language */
     db_str(b, filename);                 /* DW_AT_name */
     db_str(b, ".");                      /* DW_AT_comp_dir (deterministic) */
-    reloc(out, DWSEC_INFO, b->len, 8, DWTGT_TEXT, text_lo);
-    db_u64(b, 0);                        /* DW_AT_low_pc (reloc) */
-    reloc(out, DWSEC_INFO, b->len, 8, DWTGT_TEXT, text_hi);
-    db_u64(b, 0);                        /* DW_AT_high_pc (reloc) */
+    reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, text_lo);
+    db_addr(b, 0);                        /* DW_AT_low_pc (reloc) */
+    reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, text_hi);
+    db_addr(b, 0);                        /* DW_AT_high_pc (reloc) */
     reloc(out, DWSEC_INFO, b->len, 4, DWTGT_LINE, 0);
     db_u32(b, 0);                        /* DW_AT_stmt_list (reloc) */
 
@@ -479,14 +502,36 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
         db_uleb(b, rtoff >= 0 ? AB_SUBPROGRAM_T : AB_SUBPROGRAM);
         db_str(b, fn->name);
         if (rtoff >= 0) db_u32(b, (unsigned long)rtoff);  /* return type */
-        reloc(out, DWSEC_INFO, b->len, 8, DWTGT_TEXT, lo);
-        db_u64(b, 0);                    /* low_pc */
-        reloc(out, DWSEC_INFO, b->len, 8, DWTGT_TEXT, hi);
-        db_u64(b, 0);                    /* high_pc */
-        /* frame_base: the frame pointer, which both backends set in the
-         * prologue and never move (codegen's var_off is relative to it) */
-        db_uleb(b, 1);
-        db_u8(b, target_get() == TARGET_AARCH64 ? DW_OP_reg29 : DW_OP_reg6);
+        reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, lo);
+        db_addr(b, 0);                   /* low_pc */
+        reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, hi);
+        db_addr(b, 0);                   /* high_pc */
+        /* frame_base. x86-64 and aarch64 set a frame pointer in the
+         * prologue and never move it, so it is one byte and no offset.
+         *
+         * ARMv7-M and RISC-V keep no frame pointer at all -- the
+         * prologue subtracts the frame from sp once and everything,
+         * including the outgoing argument area, is addressed from
+         * there -- so their frame base is `sp + 0`, which is exact for
+         * the same reason: sp does not move for the life of the body.
+         * A function whose sp DOES move (alloca, a VLA) is refused at
+         * -g by the backend rather than described wrongly. */
+        {
+            enum target_arch a = target_get();
+            if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
+                a == TARGET_RISCV64) {
+                struct dbuf e = { 0, 0, 0 };
+                db_u8(&e, DW_OP_breg(a == TARGET_THUMB ? DW_REG_SP_ARM
+                                                       : DW_REG_SP_RISCV));
+                db_sleb(&e, 0);
+                db_uleb(b, (unsigned long)e.len);
+                for (int k = 0; k < e.len; k++) db_u8(b, e.p[k]);
+                free(e.p);
+            } else {
+                db_uleb(b, 1);
+                db_u8(b, a == TARGET_AARCH64 ? DW_OP_reg29 : DW_OP_reg6);
+            }
+        }
 
         for (int v = 0; v < fn->ndbgvars; v++) {
             struct ir_dbgvar *dv = &fn->dbgvars[v];
@@ -520,10 +565,11 @@ static void emit_line_func(struct dwarf_out *out, struct dbuf *b,
     long lo = fn->src->code_off;
     long hi = fn->src->code_off + fn->src->code_len;
 
-    /* DW_LNE_set_address <8-byte .text address, relocated> */
-    db_u8(b, 0); db_uleb(b, 9); db_u8(b, DW_LNE_set_address);
-    reloc(out, DWSEC_LINE, b->len, 8, DWTGT_TEXT, lo);
-    db_u64(b, 0);
+    /* DW_LNE_set_address <.text address, relocated, 4 or 8 bytes> */
+    db_u8(b, 0); db_uleb(b, (unsigned long)(addr_bytes() + 1));
+    db_u8(b, DW_LNE_set_address);
+    reloc(out, DWSEC_LINE, b->len, addr_bytes(), DWTGT_TEXT, lo);
+    db_addr(b, 0);
 
     long cur_addr = lo, cur_line = 1;
     for (int r = 0; r < fn->nlines; r++) {

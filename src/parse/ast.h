@@ -60,6 +60,12 @@ struct expr {
     int var_index;        /* EXPR_VAR/EXPR_INCDEC: slot; set by sema */
     struct global *gref;  /* EXPR_VAR/EXPR_INCDEC: the global, when the
                            * name is not a local (sema) */
+    /* Written inside parentheses. Only -Wparentheses reads it, and it
+     * is the difference between `a | b == c`, which is a bug, and
+     * `a | (b == c)`, which is how the author says they meant it.
+     * Without it the warning fires fifteen times on EmbCC's own
+     * correct code. */
+    int parens;
     struct func *fref;    /* EXPR_VAR: a function used as a value —
                            * decays to pointer-to-function (sema) */
     int str_index;        /* EXPR_STR: unit string table slot (irgen) */
@@ -101,6 +107,8 @@ struct expr {
                               * -1 when it is positional */
     int desig_index_hi;      /* GNU range `[lo ... hi]`: the high index, else
                               * -1 (a plain `[index]` or positional element) */
+    struct desig *desig_next; /* the steps after the first: `.b` and `[2]`
+                               * of `.a.b[2] =`, else NULL */
     const char *asm_reg;  /* EXPR_VAR: a register-asm binding propagated
                            * from the variable's declaration, else NULL */
 };
@@ -200,6 +208,8 @@ struct stmt {
     const char *name;     /* STMT_DECL */
     struct type *dty;     /* STMT_DECL: declared type */
     int is_static;        /* STMT_DECL: a static local -> its own global */
+    int obj_const;        /* STMT_DECL: the object itself is const (its
+                           * type, arrays aside, is const-qualified) */
     int is_tls;           /* STMT_DECL: `static __thread` -> a TLS global */
     int attr_unused;      /* STMT_DECL: __attribute__((unused)) on it */
     int is_extern;        /* STMT_DECL: block-scope extern -> a unit global/func */
@@ -265,11 +275,18 @@ struct global {
     int is_tls;
     const char *section;  /* __attribute__((section("name"))), or NULL */
     int has_init;
+    int is_const;         /* the object is const: `const int t[4]`,
+                           * `char *const p` -- not `const char *p` */
+    int count_from_init;  /* an unsized array sized by its brace list at
+                           * parse time, which sema checks */
     long init;            /* constant initializer value (scalar) */
     struct expr *init_expr; /* aggregate/relocatable initializer, lowered
                              * by sema into init_bytes + relocs */
     const char *init_bytes; /* the constant byte image (string or aggregate) */
     int init_len;
+    int fam_extra;        /* bytes past ty_size(ty) that an initialized
+                           * flexible array member adds (GNU C): see
+                           * global_size() */
     struct greloc *relocs;  /* pointer slots the linker resolves */
     int nrelocs;
     struct global *next;
@@ -278,6 +295,8 @@ struct global {
     int absorbed;         /* sema: merged into an earlier node */
     int used;
     int in_bss;           /* driver: zero-valued -> .bss, else .data */
+    int in_rodata;        /* driver: a const object, placed in .rodata
+                           * after the string literals (ELF) */
     int named;            /* driver: 1 + index into the named sections, or 0 */
     int off;              /* driver: offset inside its section */
     int sym_ndx;          /* driver: symbol index */
@@ -290,12 +309,20 @@ struct func {
     int seq;              /* source order (see struct global) */
     int is_static;
     int is_weak;          /* __attribute__((weak)) */
+    const char *alias_of; /* __attribute__((alias("t"))): another name for
+                           * function t, defined in this file */
+    const char *section;  /* __attribute__((section("s"))): its code goes
+                           * to section s rather than .text */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
     int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
                            * (a call of it needs no landing pad) */
     /* __attribute__((constructor)) / ((destructor)): its address goes in
      * .init_array / .fini_array, and the startup code walks them. */
     int is_ctor, is_dtor;
+    /* __attribute__((signal)) / ((interrupt)): an interrupt handler.
+     * 1 signal, 2 interrupt (which re-enables interrupts on entry), 0 an
+     * ordinary function. Only AVR acts on it; see the attribute table. */
+    int is_isr;
     /* The hints EmbCC acts on: keep the symbol, do not warn that it is
      * unused, force or forbid inlining, warn at each call, warn when a
      * caller throws the result away. `vis` is an ELF visibility. */
@@ -306,6 +333,8 @@ struct func {
      * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */
     int fmt_kind, fmt_idx, fmt_first;
     int is_varargs;       /* declared with a trailing ", ..." */
+    int pcs;              /* __attribute__((pcs)): 1 "aapcs", 2 "aapcs-vfp",
+                           * 0 whatever -mfloat-abi says (ARM only) */
     int sret_first;       /* param 0 is the indirect-result pointer
                            * (embcc_sret; type.h) */
     struct type *ret_ty;
@@ -355,6 +384,14 @@ struct func {
                            * and that call may itself be dead. */
     /* codegen bookkeeping: position inside .text (defined funcs only) */
     int code_off, code_len;
+    /* How many bytes of stack this function's own frame takes — the
+     * prologue's saved registers plus its locals, temporaries and
+     * outgoing-argument area, and NOT what it calls. `-fstack-usage`
+     * reports it, which is how a microcontroller's stack gets sized:
+     * there is no guard page and no growth, so the deepest path has to
+     * be added up by hand and has to fit. Filled by whichever backend
+     * knows; 0 where one does not. */
+    int stack_bytes;
     /* ... and what its prologue did, for the unwind tables (debug/eh.c):
      * where (offsets into its code) the frame record was pushed and the
      * frame register set, and the callee-saved registers it stores in its
@@ -365,6 +402,11 @@ struct func {
      * return address at CFA-8 -- holds for the whole function and the
      * FDE carries no instructions. */
     int cfi_frameless;
+    /* A frame with no frame POINTER: rsp moves only by the pushes, each
+     * of which ends at cfi_push_end[k] and moves the CFA eight further
+     * up, and the CFA stays rsp-based throughout (x86-64). */
+    int cfi_pushonly, cfi_npush;
+    int cfi_push_end[17];
     int cfi_reg[16];
     long cfi_off[16];
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
@@ -374,6 +416,8 @@ struct func {
 struct econst {
     const char *name;
     long val;
+    struct type *ty;      /* NULL: int, as an enumerator is; a C23
+                           * constexpr's own type otherwise */
     int seq;
     struct econst *next;
 };
@@ -428,9 +472,18 @@ struct tagdef {
     struct tagdef *next;
 };
 
+/* One step of a designator after its first: `.field` or `[index]`. */
+struct desig {
+    const char *field;    /* NULL for an index */
+    int index;            /* -1 for a field */
+    struct desig *next;
+};
+
 struct typedefent {
     const char *name;
     struct type *ty;
+    int is_const;         /* the type is const at its top level:
+                           * `typedef const struct cfg cfg_t;` */
     struct typedefent *next;
 };
 
@@ -453,6 +506,10 @@ int parse_error_count(void);
 
 /* Element count an EXPR_INITLIST implies for an unsized array, honoring
  * `[i] =` designators (defined in parse.c, used there and in sema). */
-int initlist_array_count(const struct expr *il);
+int initlist_elided_count(const struct expr *il, struct type *arr,
+                          const struct econst *ec, int *guessed);
+int global_size(const struct global *g);
+int desig_member(struct type *ty, const char *name, struct desig *rest,
+                 struct desig **rest_out);
 
 #endif

@@ -48,6 +48,20 @@ enum ir_op {
     IR_I2F,   /* dst = (float)a       (size,sign: int src; w: float dst) */
     IR_F2I,   /* dst = (int)a         (size: float src; w,sign: int dst) */
     IR_F2F,   /* dst = (float)a       (size: src width; w: dst width) */
+    /* dst = the BITS of a, reinterpreted at the same width.
+     * size and w are both that width; sign is 1 when the destination is
+     * an INTEGER (float bits out) and 0 when it is a float (bits in).
+     *
+     * This is one op rather than a builtin-per-operation because every
+     * IEEE-754 predicate is integer arithmetic once the bits are in a
+     * GPR: fabs is an AND, copysign an AND/OR pair, signbit a shift,
+     * isnan and isinf comparisons against the exponent field. gcc and
+     * clang each carry a separate optab for all of them; here they are
+     * ordinary IR the existing optimizer already folds, and only the
+     * move between the register files is target code. On the soft-float
+     * targets (ARMv7-M, RISC-V) even that is a plain move, because the
+     * float was already in a GPR. */
+    IR_BITCAST,
     IR_CALL,  /* dst = callee(args...); indirect: target fp in a */
     IR_RET,   /* return a (a == -1: void return) */
     IR_LABEL, /* label: (id in `label`) */
@@ -75,6 +89,13 @@ enum ir_op {
                * template, store outputs. Detail in ir_ins.asm_ir */
     IR_LABELADDR, /* dst = &&label  (GNU label address; id in `label`) */
     IR_IGOTO, /* goto *a  (GNU computed goto: jump to the address in temp a) */
+    IR_SWITCH, /* a dense switch as ONE multi-way terminator: if (unsigned)a
+                * < jt[jt].n then goto jt[jt].labels[a], else goto label.
+                * `w` is a's width (4 or 8); a is the case value with the
+                * lowest case subtracted, so the test is unsigned by
+                * construction. Every target is named, which is what lets
+                * the CFG, liveness and the allocator see through it where
+                * IR_IGOTO's unknown targets make them step aside. */
     IR_ARMW,  /* dst = *(temp a); *(temp a) = dst OP b   (atomic; size, w).
                * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b).
                * Add and subtract stay IR_XADD, which x86 does in one
@@ -168,6 +189,13 @@ struct ir_asm {
     int nout;
 };
 
+/* A jump table: the targets of one IR_SWITCH, for index values 0..n-1; a
+ * value with no case names the default. Owned by the function and referred
+ * to by index, so a copied switch shares its table -- which is what every
+ * copy of one wants, since a pass that retargets labels rewrites the table
+ * once for all of them. */
+struct ir_jt { int n; int *labels; };
+
 struct ir_ins {
     enum ir_op op;
     /* Where this instruction came from (R3). `line` is the statement or
@@ -192,7 +220,8 @@ struct ir_ins {
                               * in `imm` (an immediate), not vreg b — set by the
                               * optimizer's immediate-fold pass, read by codegen */
     enum binop pred;         /* IR_CMP */
-    int label;               /* IR_LABEL/IR_JMP/IR_BRZ */
+    int label;               /* IR_LABEL/IR_JMP/IR_BRZ; IR_SWITCH's default */
+    int jt;                  /* IR_SWITCH: index into ir_func::jt */
     struct func *callee;     /* IR_CALL (direct), IR_FADDR */
     /* The same target as an index into ir_unit::syms -- what a self-contained
      * IR refers to, and what its textual form prints (§9.1). The pointers
@@ -203,6 +232,21 @@ struct ir_ins {
     int sret_first;          /* IR_CALL: argument 0 is the indirect-result
                               * pointer (type.h sret_first) */
     int call_varargs;        /* al = 0 needed at the call */
+    int memoff;              /* IR_LOAD/IR_STORE: a constant byte offset
+                              * added to the address -- set only by a
+                              * backend's own pre-codegen pass
+                              * (ra_fold_memoff), never by irgen or the
+                              * optimizer, so every other backend sees 0 */
+    int natural;             /* IR_LOAD/IR_STORE: the address is aligned
+                              * to the access, because C guarantees it
+                              * there (a dereference, a global, a member
+                              * at its natural offset). 0 is "not known":
+                              * a packed struct's member, or anything
+                              * irgen did not say -- a backend whose
+                              * aligned-only instructions (vldr) fault on
+                              * a misaligned address must not use them. */
+    int call_pcs;            /* IR_CALL: the callee's pcs attribute (ARM;
+                              * see target_pcs_vfp) */
     int call_nfixed;         /* IR_CALL: how many NAMED parameters the
                               * callee has. Needed because Darwin's
                               * arm64 passes every argument past them on
@@ -228,6 +272,7 @@ struct ir_ins {
          * computed at irgen where the type still exists (§9.1). The backend
          * reads these instead of walking `ty`. */
         int align;
+        int nat_align;       /* ty_natural_align; 0 when not filled: align */
         int is_float;
         int is_int128;
         int hfa_n, hfa_size;
@@ -249,6 +294,21 @@ struct ir_ins {
      * caller-side scratch the result lands in. nclass 0 means MEMORY,
      * i.e. the hidden-pointer (sret) convention. */
     int retsize;
+    /* A SCALAR return's own type, which `w` above deliberately does not
+     * describe: it reports the return REGISTER's width, because on the
+     * four register-per-value machines that is what the callee leaves
+     * behind. AVR's return value is a RUN of byte registers sized by the
+     * type -- r24 alone for a char, r25:r24 for an int -- and the ABI
+     * leaves everything above it undefined, so the CALLER must extend.
+     * It cannot: `signed char sc(void)` yields `ext.4:2s` at the use,
+     * which reads a second byte the callee never wrote.
+     *
+     * avr-gcc's callers extend for themselves at exactly this point, so
+     * this is the convention and not a shortcoming to route around. The
+     * size and signedness therefore travel with the call, from irgen
+     * where the type still exists (§9.1). Zero size means "no scalar
+     * result" -- a void call, or a struct, which retsize describes. */
+    int ret_tybytes, ret_tysign;
     /* The same, for the value a call returns. */
     int ret_hfa_n, ret_hfa_size;
     int ret_byref;
@@ -350,6 +410,7 @@ struct ir_func {
     struct ir_local *locals;
     /* The function's own return type, classified as a call's is. */
     struct ir_arg ret_abi;
+    int pcs;                 /* its own pcs attribute (ARM) */
 
     struct func *src;        /* code_off/len; the types not yet interned */
     int nvregs;
@@ -363,6 +424,8 @@ struct ir_func {
                               * from it (aarch64 then uses x19) */
     struct ir_ins *ins;
     int nins, cap;
+    struct ir_jt *jt;        /* the jump tables IR_SWITCH refers to */
+    int njt, jtcap;
     struct ir_line *lines;   /* -g: (offset, line) rows in .text order */
     int nlines, linecap;
     struct ir_dbgvar *dbgvars; /* -g: params + locals (irgen) */
@@ -426,6 +489,25 @@ int ir_sym_func(struct ir_unit *u, struct func *f);
 int ir_sym_global(struct ir_unit *u, struct global *g);
 
 struct ir_unit *irgen(struct unit *u);
+
+/* -fsanitize, in TRAP mode -- the only mode there can be here, because
+ * a diagnosing sanitizer needs a runtime (__ubsan_handle_*) and a bare
+ * metal target has nowhere to print. A failed check executes the
+ * target's trap instruction, which IR_UD2 already lowers on all four
+ * backends: `ud2` on x86-64, `udf #0` on aarch64 and ARMv7-M, and
+ * `unimp` on RISC-V. Each is an illegal encoding, so the program takes
+ * an exception at the offending operation -- a breakpoint under a
+ * debugger, and a stop rather than a wrong value without one, which is
+ * the point on a board. */
+enum { SAN_OVERFLOW = 1, SAN_DIVIDE = 2, SAN_SHIFT = 4 };
+void irgen_set_sanitize(unsigned mask);
+void irgen_set_opt_size(int on);       /* -Os: a switch table must be denser */
+/* A new table of n entries (all -1) in fn; its index. */
+int ir_jt_add(struct ir_func *fn, int n);
+/* A copy of src's table `jt` in dst, every label moved up by lbase (the
+ * inliner's renumbering); its index. dst and src may be one function. */
+int ir_jt_clone(struct ir_func *dst, const struct ir_func *src, int jt, int lbase);
+unsigned irgen_sanitize(void);
 
 /* EmbIR's textual form (src/ir/irprint.c, vision §18) — what
  * `embcc --inspect=ir` prints. Print only: see that file's head for why the

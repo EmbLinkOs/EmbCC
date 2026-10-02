@@ -947,3 +947,797 @@ if the parser or sema acquire OS knowledge, the seam is in the wrong
 place, and the answer is to move it rather than to spread it. Also if
 MinGW's Itanium EH turns out not to work on Windows in practice, since
 that assumption is what makes Windows C++ affordable at all.
+
+## D-015 — A third architecture: **ARMv7-M (Cortex-M)**, and the first 32-bit target
+
+**Decided:** 2026-09-25. **Status:** the front end, the backend, the
+register allocator and inline assembly are in — the triple, the data
+model, the predefined macros, ELF32 objects, and Thumb-2 code for the
+32-bit scalar language, at 3.7x clang's size. What it cannot lower it
+refuses by name.
+
+**2026-09-25, later:** the backend landed for the 32-bit scalar subset.
+`src/arch/thumb/emit.c` encodes Thumb-2 and `src/arch/thumb/codegen.c`
+lowers to it, naively — every vreg in a stack slot, every operation
+through r12 — which is where both other backends started and what D-005's
+"prove it first" asks of a third. An object is ELF32 now: the ELF writer
+builds every object in the 64-bit structures and converts at the one
+place that serialises them, because a second set threaded through the
+writer would be a second set of places to get a field order wrong.
+
+Three things about this target had to be found rather than assumed, and
+each is the kind that links cleanly and faults at run time:
+
+  * a Thumb function symbol's `st_value` carries BIT 0 SET, which is not
+    part of the address — it tells `blx` which instruction set to switch
+    to, and an object that leaves it clear branches into ARM state on the
+    first indirect call;
+  * `$t` mapping symbols say where Thumb code begins, and a consumer that
+    finds none disassembles the section as ARM;
+  * `e_flags` must carry EF_ARM_EABI_VER5, which is 0 on an object that
+    forgot it.
+
+And one thing about the IR: **`fn->outgoing_bytes` is the SysV answer.**
+SysV has six integer argument registers and AAPCS32 has four, so a
+six-argument call reserves nothing there and needs eight bytes. The
+Thumb backend computes its own outgoing area; believing the IR's number
+compiles, links, and writes the fifth argument over the first local.
+
+Making the front end ILP32 turned up three more places where 8 meant
+"pointer" and now says so: the address arithmetic in irgen, the walking
+pointers strength reduction creates, and a call's result width — which
+is the RETURN REGISTER's width, not the type's, and that register is four
+bytes here.
+
+**2026-09-25, later still:** the toolchain closed. `embld` reads and
+writes ELF32 ARM, so a firmware image is built end to end by EmbCC's own
+compiler and linker — no `arm-none-eabi-*` anywhere, and no assembler,
+because a Cortex-M fetches its initial SP and PC from the vector table
+in hardware and its startup is therefore ordinary C.
+
+Three things the linker had to learn. `.vectors` is an output section of
+its own placed AHEAD of `.text`, since the processor does not look the
+table up but reads address zero. `-Tdata` is a FIRMWARE layout, where
+the writable segment is addressed in RAM and stored after the text in
+flash — which `lma_offset` could not express, because that shifts every
+segment by one constant and here the two differ; the linker then
+provides `__data_load`/`__data_start`/`__data_end`/`__bss_start` so the
+startup needs no linker script to stay in step with. And `-Ttext 0` is a
+real request: zero is where flash begins, so "0 means the default" made
+the one base this target needs the one it could not ask for.
+
+The fourth is the one that mattered: **the ARM EABI specifies `SHT_REL`**,
+so every object a real ARM toolchain produces carries `.rel.text` and
+not `.rela.text`. A linker that skips those relocates nothing, links
+without complaint, and produces an image that does nothing at all —
+which is exactly what happened to the first clang-built reference. With
+it, the implicit addend: the field of an unresolved `bl` is a branch to
+ITSELF (`f7ff fffe`, displacement −4), because the displacement is
+measured from P+4 and the ABI's addend from P. Taking that −4 literally
+puts every call one halfword early.
+
+`tests/golden/thumb-exec.sh` is now the real test: EmbCC compiles,
+`embld` links, QEMU's Cortex-M3 runs, and the output must equal what
+clang produces for the same source through the same linker on the same
+board — at -O0, -O1, -O2 and -Os.
+
+**2026-09-25, later again:** 64-bit integers landed, in the BACKEND
+rather than as a legalisation pass over the IR. The IR has no carry:
+expressing `adds`/`adcs` in EmbIR would take a compare and a branch per
+addition, and adding carry-carrying opcodes would put two operations
+into the shared operand switches that only one target ever emits, which
+is how an opcode rots. A 64-bit value is an eight-byte slot and a
+register pair; divide and remainder are the only calls, into
+`lib/rt/int64.c` under libgcc's names. Bitfields work as a consequence,
+since irgen assembles a field's storage unit in a 64-bit accumulator.
+
+Two things in the SHARED front end were wrong and had been invisible
+while every register was 64 bits. `arith_common` returned
+`ty_base(TY_LONG, uns)` for the wide case, which is a silent NARROWING
+where `long` is four bytes: `a + b` on two long longs came out as a
+32-bit add. And the two merge MOVs a `?:` emits carried no width at all,
+so `neg ? -q : q` returned half of a long long — which is how
+`__divdi3` came back carrying its own dividend's high word. The backend
+also propagates width through copies to a fixpoint, because a MOV is
+not required to carry one and several do not.
+
+The other lesson is about the reference. For 64-bit arithmetic it is the
+HOST compiler, not clang for thumbv7m: `long long` has one answer
+whatever the register width, and clang emits `__aeabi_ldivmod` for a
+divide where EmbCC emits `__divdi3` — a routine that returns quotient
+and remainder in four registers at once and therefore cannot be written
+in C, so the two cannot share a runtime.
+
+**2026-09-25, floating point:** `float` and `double` work, and the
+results are BIT-IDENTICAL to hardware. ARMv7-M has no FPU, so every
+operation is a call into `lib/rt/softfp.c` under libgcc's names, and
+AAPCS's soft-float variant passes the operands in the core registers —
+which means the IR's existing integer paths already carry the value and
+only the arithmetic needed lowering.
+
+Only binary64 is implemented. A binary32 operation widens both operands,
+does it in binary64, and rounds back, which gives the SAME answer as
+computing in binary32 directly because 53 significand bits is at least
+2p+2 for p = 24 (Figueroa). One core, half the code, and no double
+rounding to reason about.
+
+Three bugs, and what each says:
+
+  * the backend's wide map skipped every `flt` instruction — a leftover
+    from when floats were refused — so a double-returning call got a
+    four-byte slot and the next temporary landed on its high word.
+    `__addsf3` added the wrong numbers while every routine it called was
+    exact.
+  * irgen converts an `unsigned int` to floating point by asking for a
+    SIGNED 64-bit conversion, on the grounds that "a 32-bit operation
+    zero-extends its result into the eight-byte slot". True of a
+    register write on both other targets; false of a four-byte stack
+    slot, where the next four bytes are another temporary.
+  * `__extendsfdf2` derived a denormal's exponent from SIGBIT and got
+    -94 where the answer is -126 and nothing else.
+
+The reference is the host again, and the comparison is of BIT PATTERNS:
+a result that prints the same to fifteen digits can still be a rounding
+off. The core is additionally swept against 400,000 random bit patterns
+on the host, which is where the denormals, the huge exponents and the
+near-cancellations that no hand-written list contains actually live.
+NaN payloads are compared by CLASS rather than bit-for-bit, because
+which payload and which sign a NaN carries out of an operation is
+unspecified and x86 and ARM already disagree.
+
+**2026-09-26, aggregates:** structs pass and return by value, and the
+check is against another TOOLCHAIN rather than against the host: the
+caller and the callee are compiled by different compilers, in both
+directions, and linked together, so a disagreement about which register
+a composite starts in shows up as a wrong number rather than as nothing.
+
+AAPCS32 differs from AAPCS64 in ways the IR's SysV classification does
+not carry, so the backend places arguments itself. A composite of four
+bytes or fewer returns in r0 and a larger one through a hidden pointer
+in r0 — which shifts the real arguments to r1. A composite may be SPLIT
+across r3 and the stack; an eight-byte SCALAR may not, because its
+alignment rounds the register number up to even first and that leaves
+two registers or none. And the base standard has no
+homogeneous-aggregate rule at all: a struct of floats is an ordinary
+composite, where AAPCS64 would put it in v registers.
+
+The bug worth recording: the callee decided it had a hidden result
+pointer from the return's SIZE, so every function returning a `long
+long` treated r0 as a buffer address and read its first parameter out of
+r1. Only a COMPOSITE returns in memory; eight bytes of scalar come back
+in r0:r1.
+
+**2026-09-26, varargs:** `printf`-shaped functions work. AAPCS32 passes
+a variadic argument exactly as it passes a named one, so a `va_list` is
+a bare pointer at the next one — the Darwin shape, and the opposite of
+SysV's and AAPCS64's, which point AT a record. The prologue's half is
+that a variadic function pushes r0-r3 immediately BELOW the caller's
+stack arguments, so a single pointer walks from the registers into them
+and `va_start` is one address computation.
+
+Two consequences. `va_copy` is a pointer assignment: copying the 24
+bytes SysV's tag needs would copy the ARGUMENTS, and both lists would
+then walk a snapshot. And a variadic function returns through `lr`
+rather than popping into `pc`, because the save area sits above the
+saved registers and has to come off first.
+
+The cross-compiled pairing covers these too: the caller and the callee
+are built by different compilers and the register save area has to line
+up with where the other one left the arguments.
+
+**2026-09-26, the register allocator — LANDED, on the second attempt.**
+ARMv7-M is 3.7x clang now rather than 5.4x, and RISC-V, which went
+through the same sequence first, reached 1.7x at both widths.
+
+The first attempt is still on `thumb-regalloc-wip` and still fails
+`thumb-float` at -O2. What made the difference was not persistence but
+ORDER: `ra_parallel_move` was written and proven over 3910 shapes BEFORE
+anything used it, and the three sites below then had one routine to call
+instead of three open-codings of the same ordering. Two of the four
+hazards were fixed in shared code and never had to be found twice.
+
+The hazards, as the first attempt recorded them, with what each turned
+out to be:
+
+  * **The call's argument setup is a PARALLEL MOVE.** Loading r0-r3 in
+    order destroys a later argument whose value happens to live in an
+    earlier one's destination — `unpack(d2u(y), &b)` was handed a
+    pointer that y's own low word had overwritten.
+  * **So is the prologue's.** `round_pack(int sign, int exp, u64 sig)`
+    had `sign` allocated to r2, and `mov r2, r0` at the top of the
+    function destroyed the low half of `sig`, which arrives in r2:r3.
+  * **An indirect call's target must be read BEFORE the arguments**, and
+    into a register that is not one of them.
+  * **A copy's two ends must agree about their WIDTH.** A `?:` whose
+    arms are an eight-byte value and a four-byte constant had the merge
+    copying eight bytes out of a slot the constant never used, because
+    the constant had been given a register instead. The width map has to
+    propagate both ways through IR_MOV and IR_SELECT, and the backend
+    has to decide 64-bitness from that map rather than from `i->w`.
+
+The first three were one problem wearing three hats, and the second
+attempt started by writing the parallel move — which is what made it a
+morning's work rather than a session's. The THIRD turned out to be
+solved in the shared layer all along: `ra_allocate` pins an indirect
+call's target to memory itself, because the clobber set is not visible
+to it. The FOURTH needed one change, and in one direction rather than
+two: a copy is as wide as it SAYS, so `mov.4s` from an eight-byte value
+takes its low word and does not make its destination wide. A width-less
+copy still propagates.
+
+Two hazards the first attempt did NOT record, both found the second
+time:
+
+  * **A soft-float helper is not an `IR_CALL`.** `call_int_arg_in_reg`
+    keeps a real call's arguments in memory, but `__ltdf2(a, b)` has no
+    IR_CALL, so its operands are ordinary values the allocator puts in
+    registers — and the setup then does `mov r0, r1` and loses b before
+    reading it. On a target with no FPU that is EVERY float operation,
+    and it is almost certainly what failed `thumb-float` on the branch.
+  * **The frame moves when the allocator takes a callee-saved
+    register.** They go in the same `push` as the fixed four — a mask
+    costs no extra instruction — so sp drops four bytes further per
+    register, and `base`, which locates the caller's stack arguments,
+    has to know. A stack-arriving parameter that the allocator gave a
+    register also has to be LOADED into it; `udivmod64(u64, u64, u64 *,
+    u64 *)` spends r0-r3 on its first two arguments, so `q` arrives on
+    the stack.
+
+**2026-09-26, inline assembly.** `asm()` works here now, with the CMSIS
+core set: mrs/msr over all fourteen special registers, cpsid/cpsie, the
+barriers, the wait hints, ldrex/strex, and the arithmetic a
+hand-written sequence mixes in. Thirty instructions went into emit.c
+first so thumbcheck round-trips them, and tests/golden/thumb-asm.sh
+compares the whole vocabulary against llvm-mc — which caught `adds`
+mapped onto `add` with the flag bit clear, an instruction that
+assembles, runs, and takes the wrong branch.
+
+**What it still does not do, all refused by name:** atomics, VLAs,
+computed goto, exceptions and `-g`.
+
+
+EmbLinkOS is meant to carry embedded tooling, and a compiler for embedded
+systems that stops at 64-bit application cores is not one. `thumbv7m-none-eabi`
+is the Cortex-M line — M3, M4, M7 — which executes Thumb-2 and nothing else.
+It is the first target here with no operating system underneath it by
+construction: there is no `thumbv7m-linux` row to add later, and no hosted
+spelling of this target that would mean anything.
+
+**The interesting part is not the third backend, it is the first ILP32
+target.** x86-64 and aarch64 are both LP64 and their data models differ in
+exactly two places — whether plain `char` is signed and which 16-byte format
+`long double` uses. So `target_get() == TARGET_AARCH64` had become a
+serviceable stand-in for half a dozen different questions, asked at 35 sites
+across the lexer, sema, the C++ front end and the debug writer. Every one of
+those would have taken the x86-64 answer for a target that is not aarch64,
+silently, and most of them would have been wrong.
+
+They are now separate questions with names: `target_ptr_size`,
+`target_long_size`, `target_ldouble_size`, `target_char_unsigned`,
+`target_wchar_unsigned`, `target_has_int128`, each a column of one table in
+`src/arch/target.c`. A fourth architecture is a row, and the compiler will not
+build until every column of it is filled in — which is the property the
+`== TARGET_AARCH64` test did not have.
+
+**`long long` became a type of its own.** It had been folded into `TY_LONG`,
+which cost nothing while every target was LP64 and they were the same width.
+On ILP32 they are four bytes and eight. The spelling now survives into the
+type (`type.is_llong`), the three integer-literal paths in the lexer promote
+past a 32-bit `long` when the magnitude needs it, and `ty_int_of_size()` is
+how a caller asks for "the integer type eight bytes wide" instead of assuming
+that means `long`.
+
+`ty_equal()` deliberately still lets `long` and `long long` interchange where
+they are the same width. Making them distinct everywhere is correct C and a
+separate change with its own fallout; mixing it into the one that adds a
+32-bit target would have put a pile of new diagnostics between a real
+regression and a bisect. It IS enforced where ignoring it is unsound — when
+the two spellings are different widths, as they are here.
+
+**The predefined-macro table comes from clang, not gcc.** `tools/gen-predef.sh`
+has always taken a target's table from a production compiler's own `-dM -E`
+rather than deriving it by hand (ARCHITECTURE.md §5), and that discipline is
+what matters, not which compiler. clang carries every target in one binary
+where `arm-none-eabi-gcc` is a separate toolchain download; the generated
+file's header records which one it was, and `EMBCC_REF_GCC_THUMB` switches it
+to a real cross gcc. `__clang__` and `__llvm__` joined the exclusion list for
+the same reason `__GNUC__` was already on it.
+
+**What is refused loudly rather than emitted wrong** (THE RULE): the whole
+back end. `--target=thumbv7m-none-eabi -c` says there is no code generator and
+stops, because handing the unit to the x86-64 backend on the grounds that it
+is "not aarch64" would write an object full of x86 instructions under an
+EM_ARM header — the exact failure a default case exists to prevent. `__int128`
+is refused by name in the parser, since a 32-bit target has no register pair
+to carry one and libgcc's 32-bit multilib has none of the `__*ti3` routines.
+
+**What the backend will have to face that neither existing one did:** a Thumb
+16-bit data-processing instruction always sets the flags. `and r0, r1` is four
+bytes; `ands r0, r1` is two. So on this target small code and flag liveness
+are the same problem, and the plan is to emit the 32-bit `.w` forms first —
+uniform, flag-preserving, correct — then narrow where the flags are provably
+dead and the registers are low, measuring against `clang -target
+thumbv7m-none-eabi -Os` the way the other two are measured against gcc.
+
+**Reopen if:** a fourth data model appears that the table cannot express —
+a target where `int` is not 4 bytes, or one with a 16-bit `char` — at which
+point the columns are the wrong shape and the sizes belong in the table
+wholesale rather than as exceptions to a fixed set.
+
+---
+
+## D-016 — RISC-V, as **two targets and one backend**
+
+**Decided:** 2026-09-26. **Status:** done at both widths — the triples,
+the data models, the predefined macros, the `long double` format, a code
+generator, the register allocator, inline assembly, and images that run
+under QEMU. 1.7x clang's code size at both widths. What it cannot lower
+it refuses by name.
+
+RV32 and RV64 are two entries in `enum target_arch` and not one entry with
+a width knob beside it, because the enum keys the DATA MODEL and the two
+data models genuinely differ: RV32 is ILP32, RV64 is LP64, `__int128`
+exists only at the wider one. A single value could not answer
+`target_ptr_size()` for both, and every place that asks would have to ask
+something else as well.
+
+The instruction set does not differ nearly as much, so when the backend
+lands it will be ONE directory (`src/arch/riscv/`) parameterised by
+`target_xlen()`, not two. That is the opposite of D-012's per-architecture
+split and deliberately so: D-012 separates ISAs, and these two are the
+same ISA at two widths — `add` and `addw` differ by a bit, the register
+file and the calling convention are the same shape, and two copies would
+drift. `src/arch/riscv32/` and `src/arch/riscv64/` hold only what really
+is per-target: the generated macro tables.
+
+**Why the macro tables are generated twice** rather than once with
+`__riscv_xlen` patched: the widths disagree about far more than the
+pointer. The `int_fast*` types, the lock-free atomic set and
+`__SIZEOF_INT128__` all move, and a generated file has no business being
+hand-edited into a parameterised one (ARCHITECTURE.md §5). They come from
+clang, as ARMv7-M's does and for the same reason — clang carries every
+target in one binary — and with an explicit `-march=rv32im -mabi=ilp32`.
+The `-march` is not a detail: the default `rv32imafdc` would define
+`__riscv_flen` and claim a hardware FPU this compiler cannot emit for
+(THE RULE). One macro is filtered out on top of that, `__riscv_v_intrinsic`,
+which clang defines for plain `rv32im` with no `__riscv_v` beside it — the
+version of a vector intrinsics API for a vector unit that is not in the
+`-march`.
+
+Two front-end facts this target settled:
+
+  * **`wchar_t` is SIGNED here and `char` is unsigned.** That combination
+    is why those are two columns in `src/arch/target.c` and not one; every
+    target before this one had them agree.
+  * **`long double` is IEEE binary128, and x87 is the exception.**
+    `ldf_target_fmt()` used to name the targets that were ordinary and let
+    x86-64 fall through; it now asks for the odd one out. Written the old
+    way, both RISC-V widths would have silently folded `long double` in the
+    80-bit x87 format while advertising `__LDBL_MANT_DIG__ 113`.
+
+`-dumpmachine` was a chain of ternaries — a second list of targets to keep
+in step with the real one, and it had already fallen behind: it printed
+`x86_64-elf` for ARMv7-M. It reads `target_triple_now()` now, so the table
+that parses a triple is the table that prints it.
+
+**2026-09-26, later:** the backend landed, for both widths at once, and
+one directory was the right call — `src/arch/riscv/` is a single
+`codegen.c` reading `target_xlen()`, and the width shows up in three
+places rather than everywhere: a `long long` is a register pair at RV32
+and a register at RV64, a 32-bit operation at RV64 must use the `w`
+instruction forms to keep its result sign-extended, and `ld`/`sd`/`lwu`
+do not exist at RV32.
+
+Running everything TWICE is what the suite is for, not a doubling of it.
+Three of the bugs below passed at one width and failed at the other.
+
+**The one that decided the code model.** `lui` SIGN-EXTENDS bit 31, so
+the absolute `lui`+`addi` pair cannot name an RV64 address between
+0x80000000 and 0xffffffff7fffffff — and a firmware image lives at
+0x80000000, which is where QEMU's `virt` board and most RISC-V hardware
+put RAM. Every global's address came out sign-extended and the first
+store through one faulted. The answer is PC-relative `auipc`+`addi` at
+BOTH widths (what `-mcmodel=medany` gives), which has no hole and is
+position-independent besides; clang needs the same flag to build the
+reference. The low half's relocation names the AUIPC rather than the
+target, because the two halves must agree about the +0x800 rounding and
+only the high one saw the whole displacement.
+
+**The stack pointer, which C cannot write.** A Cortex-M fetches its
+initial sp from the first word of the image, which is why the ARMv7-M
+harness is pure C. RISC-V has nothing equivalent — every register is
+zero at reset — so `embld -Tstack ADDR` emits the four instructions that
+set sp and jump to the entry, from the same encoder the compiler uses.
+That is the software half of what the other target gets in hardware, and
+it keeps a firmware image buildable by this toolchain alone.
+
+Four more, each of which compiled, linked and ran:
+
+  * **`target_xlen()` returned BYTES.** XLEN is the ISA manual's name for
+    the register width in BITS; the backend divided by 8 to get bytes,
+    got 1, and made every value one byte wide.
+  * **`place_arg` numbers argument registers 0..7, and a0 is x10.** On
+    ARM the index and the register number coincide; here the index was
+    used directly, so a function read its second parameter out of `ra`.
+  * **the far-offset scratch was chosen, not reserved.** For a frame
+    deeper than 2047 bytes the address register was "whichever scratch is
+    not the one being moved", which picked B_LO while loading B_HI — so
+    reading the high half of a register pair destroyed the low half. Only
+    functions with enough locals hit it, so every small test passed.
+  * **irgen converts an `unsigned int` by asking for a SIGNED 64-bit
+    conversion**, relying on "a 32-bit operation zero-extends its result
+    into the eight-byte slot". True of a register write on x86-64 and
+    aarch64; false at RV32, where the slot is four bytes, and false at
+    RV64, where a slot load sign-extends. `(float)(unsigned)k` came back
+    as a constant 4.7e18 whatever k was. The Thumb backend had already
+    found and written this down; the note is what made it a ten-minute
+    fix rather than an hour.
+
+Two things outside the backend turned out to be wrong for everyone, not
+just for RISC-V:
+
+  * **`__data_load` was 0 unless `-Tdata` was given.** It is a real symbol
+    in every link, and the startup that copies `.data` from it — the same
+    startup a firmware build uses — read from address 0. It is now equal
+    to `__data_start` when the two are the same place, which makes the
+    copy a correct no-op.
+  * **`lib/rt/softfp.c` was guarded on POINTER WIDTH.** RV64 is a 64-bit
+    machine with no FPU under `-march=rv64im`, and the guard compiled the
+    whole file away. It now asks whether the target has hardware floating
+    point, which is the actual question.
+
+**Still to check:** `va_copy` special-cases the targets whose `va_list` is
+a bare pointer, and RISC-V is now among them. Darwin's arm64 has a
+bare-pointer `va_list` too (`irg_va_arg_darwin`) and is NOT in that list,
+so it appears to copy 32 bytes of arguments where it should copy a
+pointer. Nothing here exercises that target, so it is written down rather
+than changed blind.
+
+**2026-09-26, later still: the register allocator, and inline assembly.**
+Both widths reached 1.7x clang, from 5.4x and 7.1x. The sequence that
+worked, and the order matters more than any of the steps:
+
+  1. `ra_parallel_move` in the shared layer, PROVEN over 3910 shapes
+     before anything used it — because the three sites that need it
+     (a call's arguments, a prologue's parameters, an indirect call's
+     target) had produced three separate bugs when each open-coded the
+     ordering on ARMv7-M.
+  2. The allocator on with all three capability flags at 0, so calls,
+     returns and memcpy still read from slots. Correctness first.
+  3. The straight-line operations converted to compute in the allocated
+     register rather than through a scratch.
+  4. The flags on, one at a time, full matrix each.
+
+The three bugs on the way, each found by a technique the ARMv7-M
+write-up had recorded rather than by guessing: a soft-float helper's
+arguments are a parallel move the IR cannot see (there is no IR_CALL, so
+nothing marks its operands); a copy is as wide as it SAYS; and a
+variadic function's named parameters come from the spill area, not from
+their argument registers.
+
+And one that was mine alone: **`wide` means two different things.** To
+the backend it is "needs a register PAIR"; to `ra_allocate` it is "too
+large for any register". Identical at RV32 and OPPOSITE at RV64, where
+passing the same map marked every pointer ineligible — 294 memory
+operations against RV32's 41 for the same source. The map had once been
+built only at RV32, which made the conflation harmless; the guard came
+off so the float conversions could use it, and the comment asserting
+"at RV64 that map is empty" was true when written and false by the time
+it mattered.
+
+Inline assembly landed with it: the CSR instructions, the fences and the
+system instructions, all encoded through `emit.c` so compiled code and
+inline asm cannot disagree, and all compared against llvm-mc. That
+comparison caught a bare `fence` emitted as `fence rw, rw` — which
+orders memory but not device I/O, so a barrier written around an MMIO
+register would not have ordered it — and four CSRs that exist only at
+RV32. The vocabulary is derived from the privileged ISA rather than
+MEASURED from a corpus, as aarch64's was from the ARM kernel's 67
+templates; `asm.h` says so, and says to prune it when RISC-V code exists
+here to measure.
+
+**Reopen if:** the backend turns out to want separate directories after
+all — most likely if RV32 and RV64 end up needing different lowering for
+64-bit integers, which is where the widths stop being the same machine.
+It has not happened: the register-pair code is still the only RV32-only
+part, and the allocator's one width-dependent line (whether `wide`
+reaches `ra_allocate`) is marked as such.
+
+
+## D-017 — A **configured default target**, compiled in, with every backend still there
+
+**Decided:** 2026-09-26. **Status:** done.
+`make DEFAULT_TARGET=riscv32-unknown-elf` builds an EmbCC that compiles
+for that machine when the command line names none;
+`EMBCC_DEFAULT_TARGET` overrides it for one shell and `--target=`
+overrides both.
+
+D-014 made every machine reachable from one binary, which was the right
+shape and left one thing unsolved: a person whose work is one board still
+typed `--target=` on every line, and a Makefile that inherited no
+environment still compiled for x86-64. A cross toolchain that has to be
+asked, every time, to be a cross toolchain is not one.
+
+**Why a build-time knob and not only an environment variable.** An
+installed compiler should behave the same for everyone who runs it —
+including cron, including a build server, including a Makefile that
+scrubs the environment. An environment variable alone puts the target in
+the *caller's* hands, which is exactly where a cross build should not
+keep it. So the compiled-in value is the durable one and the variable is
+the temporary override, which is also the order GCC users already expect
+from `./configure --target=`.
+
+**What is deliberately NOT copied from GCC.** There, a cross build is a
+different binary that can only emit for one machine. Here only the
+DEFAULT string is compiled in; the binary still contains x86-64,
+aarch64, ARMv7-M and both RISC-V widths, and `--target=` reaches all of
+them. A cross-configured install is the same compiler with a different
+starting point — which is what makes it safe to configure one, and is
+D-014's property preserved rather than traded away.
+
+**Why the variable is `EMBCC_DEFAULT_TARGET` and not `EMBCC_TARGET`.**
+The short name was taken: `tests/lib.sh` uses it for which target the
+SUITE is exercising, and `tests/run.sh` exports it around every golden
+test. A driver that honoured it would have retargeted, under
+`make test-arm64`, every test that relies on the default — and the
+failure would have looked like a miscompile rather than a naming
+mistake. Two unrelated settings behind one name is a bug with a delay
+fuse; `tests/golden/default-target.sh` asserts the separation so nobody
+tidies the two names into one.
+
+**A bad default is refused at startup**, by name, saying which of the two
+places it came from (THE RULE). Falling back to `x86_64-elf` would be the
+worst possible behaviour here: the objects link, and then the board does
+not run.
+
+## D-018 — AVR, the first **8-bit** target, and what a byte-wide register file changes
+
+**Decided:** 2026-09-27. **Status:** the triple, the data model, the
+predefined macros, the instruction encoder, a code generator, an assembler,
+interrupt handlers, inline `__asm__`, 64-bit integers, varargs, aggregates
+by value, and software binary32 — all of it running on an ATmega328P under
+QEMU and judged against the host. What it cannot lower it still refuses by
+name; what remains is `__flash`/PROGMEM and a byte swap. No register
+allocator yet, so every value lives in a frame slot.
+
+AVR is first in the EmbLinkRTOS requirements document's target order
+(ATmega328P, the Nano profile), and it is the first target here that is not
+a flat 32- or 64-bit register machine. Four things about it are unlike
+every other target, and each cost a design decision rather than a port.
+
+**Nothing fits in a register.** An `int` is two registers and a `long` is
+four, so every operation is a carry chain over bytes. On the other four
+targets a scalar fits and the awkward case was the one that did not (a
+`long long` on ARMv7-M); here the awkward case is everything. The IR's
+width class is only ever 4, 8 or 16 — there is no `w == 2` — so a two-byte
+`int` arrives as a value already extended to four, and computing at four
+bytes is the CORRECT reading rather than a shortcut. Narrowing it would
+take a width analysis over the whole function.
+
+**There is no sp-relative addressing.** Memory is reachable only through
+X, Y or Z, and only Y and Z take a displacement — of six bits. So a frame
+pointer is not an optimisation, it is the only way to name a local, and a
+frame past 63 bytes needs a computed pointer for its upper reaches. That
+is why `layout()` here produces offsets from Y starting at 1, and why the
+slot helpers have a near and a far path at all.
+
+**Four bytes per temporary does not fit in 2 KB.** This is the decision
+that separates this target from the others in practice. The test program's
+`run` wanted 1910 bytes of frame for its temporaries once the inliner had
+been through it, against the part's 2048 bytes of SRAM, and the symptom was
+not a diagnostic — it was a program that printed nothing, because the frame
+ran off the bottom of RAM into the register file. Temporaries therefore
+SHARE slots by live range, which at -O0 is almost all of them: each
+subexpression gets its own vreg and nearly every one dies at the next
+instruction. 1296 bytes down to 304 at -O0, 1910 down to 418 at -O2.
+
+The interval is [definition, last use] in instruction order, STRETCHED over
+any loop it touches, to a fixpoint. The stretching is not conservatism for
+its own sake: without it a value defined inside a loop and used after it
+shares with one defined earlier in the same loop — disjoint in the listing,
+but the back edge re-executes the earlier definition. At -O2 that is not a
+corner case, because mem2reg turns every promotable local into a vreg.
+
+**Program space is a separate address space, addressed in words.** Two
+consequences, and neither faults when it is wrong.
+
+  * A function pointer holds half a byte address. `&f` therefore goes
+    through the `_GS` relocations and a function pointer in data is
+    `R_AVR_16_PM`; using the data forms would produce a pointer to twice as
+    far into flash, landing on a real instruction.
+  * `.rodata` cannot stay in flash. `ld`/`lds` reach only the data space, so
+    a string literal left there is not slow to read — it is unreadable by
+    any instruction this compiler emits. On a Harvard target it joins the
+    WRITABLE segment and gets a RAM address with a flash load address, and
+    the startup copies it across with `lpm`, which is what avr-gcc's linker
+    script does and why `const char *s = "hi"` costs RAM there.
+
+**Why no register allocator yet.** The shared Chaitin-Briggs allocator
+hands out single registers. AVR needs RUNS of one, two or four consecutive
+registers, even-aligned for `movw` and `adiw`, out of a pool whose halves
+are not interchangeable — the immediate instructions (`ldi`, `subi`,
+`andi`, `cpi`) reach only r16-r31, and `adiw` only four pairs. Teaching the
+shared layer that is a change to code five working targets depend on, and
+it is not the first thing to do on a machine that had never run an
+instruction from this compiler. D-005 applies to a fifth backend as it did
+to the second.
+
+**Why multiply and divide are refusals rather than inline sequences.**
+AVR's `mul` is 8x8 into r1:r0 and DESTROYS r1, the machine's zero register
+that every other lowering reads. A 32-bit product is ten partial products
+with a carry chain threaded through them — about seventy instructions, 140
+bytes of flash at every site on a part that has 32 KB. Every AVR toolchain
+calls a helper instead (libgcc's `__mulsi3`, `__udivmodsi4`), so this is
+`lib/rt` work and a helper-call convention, not an instruction selection.
+
+Multiply by a CONSTANT is implemented, and had to be: at -O0 an array index
+scales by its element size with an `IR_MUL`, so refusing it would refuse
+`tab[1].x`. Double-and-add from the top bit down — one shift for a power of
+two. That also required the backend to work constants out for itself rather
+than trusting `imm_b`, which is the optimizer's answer and absent at -O0.
+
+**Two things this target settled elsewhere:**
+
+  * **A call's scalar return type is now in the IR** (`ret_tybytes`,
+    `ret_tysign`). AVR's return value is a run of byte registers sized by
+    the type, and the ABI leaves everything above it undefined, so the
+    CALLER must extend — which avr-gcc's callers also do. The IR kept the
+    return type only for structs, so `signed char sc(void)` yielded an
+    `ext.4:2s` reading a byte the callee never wrote. The same gap is
+    latent on x86-64, where convention masks it.
+  * **`elf32` is `target_ptr_size() <= 4`, not `== 4`.** An AVR pointer is
+    two bytes and its objects are ELFCLASS32 like every other small
+    machine's.
+
+**The referee, and the hole in it.** The instruction encoder is checked
+against llvm-mc form by form, as the RISC-V and VFP vocabularies are, and
+for a stronger reason: AVR's operand fields are SPLIT, so a mistake encodes
+a DIFFERENT VALID instruction rather than an invalid one. It found two bugs
+hand-checking had passed (the `adiw`/`sbiw` `KKdd KKKK` layout, and `ld rd,
+Y`/`Z` being the displaced form at q=0 where nibble 0 of the 0x9000 group
+is `lds`).
+
+It then missed a third, and the reason is worth recording. The conditional
+branches were not in the vocabulary, because llvm-mc leaves an
+`R_AVR_7_PCREL` relocation even on a branch to a label in its own section —
+its bytes are a placeholder, so a byte comparison would grade nothing.
+`enum avr_cond` numbered its flags in mnemonic order rather than by SREG
+bit, so `breq` tested CARRY and `brlt` tested overflow. Every encoding was
+self-consistent, which is all a comparison against itself can establish.
+`while (*s)` walked past its NUL and printed 1700 bytes of RAM.
+
+So those forms are refereed in the OTHER direction: `llvm-mc -disassemble`
+decodes our bytes and the text is compared against what each form was meant
+to be. The general rule this leaves behind is that a referee must grade the
+MEANING of an operand and not only its packing — and that an encoder
+function absent from the vocabulary is unchecked however many forms the
+vocabulary reports.
+
+**Floating point, and the three things it broke elsewhere.** `float` and
+`double` are BOTH four-byte binary32 on this target — avr-gcc's documented
+default — so there is no binary64 anywhere and `lib/rt/softfp.c` cannot be
+reused: that file implements binary32 by widening to binary64, doing the work
+there and rounding back, which is exact (53 >= 2p+2 for p = 24) and needs a
+type this machine does not have. binary32 is therefore implemented natively,
+in `lib/rt/avrfp*.c`.
+
+Nothing in it is wider than 32 bits, and that is a size decision rather than a
+style one. The first version carried significands in `unsigned long long`,
+which reads better — a 24×24 product is 48 bits and wants a type that holds it
+— and came to 51 KB of text on a part with 32768 bytes of flash, because every
+64-bit operation in this backend is a byte-at-a-time chain through frame slots.
+`round_pack` alone was 10.7 KB and `addsub` 14.7 KB. Rewritten at 32 bits they
+are 6.5 KB and 8.2 KB. The one value that genuinely does not fit is the
+multiply's product, carried as two 32-bit words split at bit 24.
+
+It still does not fit as one object, so it is EIGHT: `avrfp.c` holds only
+unpack and round, and add, multiply, divide, compare, and each direction of
+each integer width is its own object. The boundaries were put where -O0 put
+them — `addsub` left the core when its image was 9 KB over, and the 64-bit
+conversions split by direction when the two together came to 19 KB — because
+-O0 is the level someone debugging builds at. `tests/golden/avr-float.sh` is
+one image per object, so a dependency a group should not have fails its link by
+name; that is how the multiply's call to `__mulsi3` surfaced.
+
+**`-Os` was not a size mode.** It differed from `-O2` only by turning off
+vectorization (x86-64 only) and unrolling, and this file is what showed the
+cost: 41392 bytes against `-O1`'s 32856. `pack` and `mul24` had been copied
+into every caller and deleted, `addsub` growing 6600 → 9850 to hold them. The
+inliner's budget is 24 IR instructions, which is a proxy for BYTES — and an IR
+op is one or two instructions on x86-64 and six to ten here, where an `int` add
+is four and every value lives in a frame slot. So the same budget that admits a
+one-liner on a 64-bit machine admits a 450-byte function on an 8-bit one.
+`-Os` now has its own budget (`INLINE_SIZE_CALLEE`), and keeps
+`INLINE_SOLE_CALLEE` because a body with one caller MOVES and duplicates
+nothing. `-O2` is unchanged, so no speed measurement moves.
+
+**Unsigned conversions went through 64 bits for no reason.** The front end
+widened an unsigned 32-bit integer to 64 before converting to or from floating
+point, and split an unsigned 64-bit one into halves to add — both correct, and
+both devices for a signed-only INSTRUCTION. x86-64's `cvtsi2sd` and `cvttsd2si`
+have no unsigned form; libgcc's `__floatunsisf`, `__fixunssfsi`,
+`__floatundisf` and `__fixunssfdi` do, and the thumb, riscv and avr backends
+all already emitted those names — nothing reached them. On AVR the widening
+turned a 32-bit software conversion into a 64-bit one and pulled 8.5 KB of
+64-bit conversion code into any image containing an unsigned cast.
+`target_widen_unsigned_fp_cvt()` now says which targets want it: x86-64
+because it must, aarch64 because it always has and a register widening there
+is free.
+
+**`IR_SELECT` had no lowering here, and if-conversion creates them.** `long
+pick(int c, long a, long b) { return c ? a : b; }` compiled at -O0 and -O1 and
+was REFUSED at -O2 — the same source, the same target, the optimisation level
+deciding whether it builds. Two-byte values never showed it, because
+if-conversion asks for a 4- or 8-byte arm and an `int` here is two, so the hole
+was open for exactly the widths a program is most likely to write. There is no
+conditional move on this machine, so the lowering is the branch the pass just
+removed; it is still required, because the pass runs for every target. Written
+the obvious way it tripped its own range check at -O2 (a `br` reaches ±63 words
+and an eight-byte copy out of a far slot is more than that), so it is an
+inverted branch over an `rjmp`, which is the shape `jump_if` already had.
+
+A fourth bug came out of the same work but belongs to the optimizer, not this
+target: `sel_width` answered 8 for any parameter — "a parameter, full width" —
+which is harmless where a select is a register move and wrong anywhere else. It
+now reads the declared width.
+
+**What the float code cost to get right.** Four rounding bugs were found on
+the host, driving the same source against native float over 3338 cases, before
+any of it ran on the part: the exponent recomputed after shifting into
+subnormal position, exact cancellation taking the magnitude path and producing
+−0, a divide that did not maintain `rem < den` (3.0f / 1.0f = 2.0f), and a
+divide that did not normalise a subnormal significand. 477 → 266 → 77 → 6 → 0
+mismatches. A fifth was found on the part: the multiply folded the low word of
+its product into the sticky bit on the assumption the high word held bits
+47..24, which is false when an operand is subnormal — 7.0f × 1.4e-45f came out
+zero. Normalising both significands before the product makes the shift down to
+27 bits a constant 21 places with no loop and nothing guessed at.
+
+**And a note on the disassembler, because it cost a wrong hypothesis.**
+`llvm-objdump --triple=avr` drops the high three bits of an `ldd`/`std`
+six-bit displacement, silently: it prints `std Y+24, r18` as `std Y+0, r18`
+and `std Y+17` as `std Y+1`. Reading a frame copy off it, the last store of a
+four-byte move appeared to go to offset 0 instead of 8, which looked exactly
+like an off-by-one in `layout()` and was not — `llvm-mc -disassemble` on the
+same bytes is correct, and the real fault was elsewhere entirely (the slot
+width above). The referee lesson recorded earlier in this entry has a
+companion: a disassembler is a referee too, and this one is wrong about the
+one field an AVR frame is made of.
+
+**Frame slots are placed by use, and that was worth a quarter of all AVR
+code.** Measured over the backend's own output (the embedded-*.c programs and
+lib/rt/avr*.c, 54730 instructions), the far-slot path -- a slot past `ldd`'s
+63-byte reach, addressed as `movw Z,Y / subi / sbci / ld` with SREG saved
+around it where a carry must survive -- was roughly HALF of everything
+emitted, and the program's own arithmetic barely registered. Offsets had been
+handed out in discovery order, so a loop counter declared after a buffer was
+out of reach for its whole life. Every local and shared temporary is now an
+object weighed by the bytes of access the code makes to it, placed densest
+first. 102324 bytes to 78160 over that corpus (7.2x clang to 5.5x), with no
+change to what any instruction does. The jump shortening that looked obvious
+was measured first and was worth 0.7%.
+
+**The calling convention is checked against the RULE, not a compiler.** Two
+silent miscompiles surfaced the first time the shared cross-target programs
+ran on the part: va_copy (an inline target list in irgen that nobody extended
+for AVR, now `target_va_list_is_pointer()`, a switch with no default) and
+every call to a function returning a struct wider than eight bytes, which
+lost its first argument -- the caller placed it in r25:r24 and then wrote the
+hidden pointer on top. Both sides of that call were EmbCC's, which is why
+EmbCC-against-EmbCC tests could not see it. Cross-checking against clang then
+showed a third -- five- and six-byte structs returned in r20, where avr-gcc
+pads a returned size to a POWER OF TWO and uses r18 -- and also that clang is
+not a usable oracle here: its struct ARGUMENTS put the first field in the
+highest registers, against "allocated left to right", and Rust's AVR backend
+documents clang's convention as not binary-compatible with avr-gcc. So
+tests/golden/avr-abi.sh encodes avr-libc's FAQ rules directly, with
+hand-written assembly as the other side in both directions.
+
+**`sym+N` in AVR assembly meant `sym`.** Every symbol form read the identifier,
+stopped at the `+`, and never looked at what followed, and the contract
+between src/as/gas.c and a target's assembler had no addend to carry --
+`lds r24, buf+5` linked to buf[0], silently. The C compiler never takes that
+path; hand-written .S -- startup and context switching, which the
+requirements put in assembly -- takes nothing else. The contract carries an
+addend now, and an operand followed by anything its form does not expect is
+refused rather than shortened.

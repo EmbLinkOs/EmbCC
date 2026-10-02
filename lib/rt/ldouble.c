@@ -24,6 +24,14 @@
  */
 #include "rt.h"
 
+/* Only the two targets this file was written for. On every embedded target
+ * `long double` is something else again -- the same eight bytes as `double`
+ * on ARMv7-M and ARMv8-M, the same FOUR as `float` on AVR, and binary128 on
+ * RV32, where the backend refuses 128-bit values by name -- so there is no
+ * wider type for the complex half below to be arithmetic on. It was built
+ * unconditionally and failed on all four. */
+#if defined(__x86_64__) || defined(__aarch64__)
+
 #ifdef __x86_64__
 
 #define TWO64 18446744073709551616.0L      /* 2^64, exactly */
@@ -208,3 +216,11 @@ long double _Complex CDIV(long double a, long double b,
     __imag__ z = im;
     return z;
 }
+
+#else
+
+/* Not this target; see above. A translation unit has to contain at least
+ * one declaration. */
+typedef int embcc_rt_ldouble_is_not_this_target;
+
+#endif

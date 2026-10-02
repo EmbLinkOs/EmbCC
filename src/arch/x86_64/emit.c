@@ -29,9 +29,15 @@ static void rexw(struct code *c, int w)
  * pointed at the one case in a line. The operands are not named here
  * because this file encodes instructions and knows nothing of the IR. */
 const char *x86_lowering_op = "?";
+int x86_no_rbp;
 
 static void no_dead_slot(int disp)
 {
+    if (x86_no_rbp)
+        internal_error("a frame access in a function that has no frame "
+                       "pointer -- rbp is the caller's here, and the "
+                       "lowering of `%s` does not know that",
+                       x86_lowering_op);
     if (disp == X86_DEAD_SLOT)
         internal_error("a value was read from a stack slot it does not have "
                        "-- it lives in a register, and the lowering of `%s` "
@@ -249,41 +255,70 @@ void x86_movx_rr(struct code *c, int dst, int src, int size, int sign, int w)
     code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
 }
 
+/* The "r, r/m" opcode of a two-operand ALU op (+ - & | ^), or -1. The
+ * "r/m, r" form, the one that can write memory, is two below it for every
+ * one of them: 01 add, 29 sub, 21 and, 09 or, 31 xor. */
+static int alu_rm_opcode(int op)
+{
+    switch (op) {
+    case '+': return 0x03;
+    case '-': return 0x2b;
+    case '&': return 0x23;
+    case '|': return 0x0b;
+    case '^': return 0x33;
+    default:  return -1;
+    }
+}
+
 /* dst op= src (+ - * & | ^), w-bit — the reg-reg twin of x86_alu_eax_mem, same
  * "r, r/m" opcodes with reg=dst, rm=src. */
 void x86_alu_rr(struct code *c, int op, int dst, int src, int w)
 {
     rex_rb(c, w == 8, dst, src);
-    switch (op) {
-    case '+': code_byte(c, 0x03); break;
-    case '-': code_byte(c, 0x2b); break;
-    case '*': code_byte(c, 0x0f); code_byte(c, 0xaf); break;
-    case '&': code_byte(c, 0x23); break;
-    case '|': code_byte(c, 0x0b); break;
-    case '^': code_byte(c, 0x33); break;
-    default:
+    if (op == '*') {
+        code_byte(c, 0x0f); code_byte(c, 0xaf);
+    } else if (alu_rm_opcode(op) >= 0) {
+        code_byte(c, alu_rm_opcode(op));
+    } else {
         internal_error("no reg-reg encoding for '%c'", op);
     }
     code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
+}
+
+/* [base+disp] op= src (+ - & | ^), w-bit: read-modify-write, the memory
+ * operand in r/m and the register in reg. */
+void x86_alu_mem_reg(struct code *c, int op, int base, int disp, int src,
+                     int w)
+{
+    if (alu_rm_opcode(op) < 0)
+        internal_error("no memory-destination encoding for '%c'", op);
+    rex_rb(c, w == 8, src, base);
+    code_byte(c, alu_rm_opcode(op) - 2);
+    modrm_base(c, src, base, disp);
 }
 
 /* group-1 ALU `reg OP= imm` (add/sub/and/or/xor, and cmp via op 'c'): the imm8
  * form (83 /ext ib, sign-extended) when the value fits, else imm32 (81 /ext id).
  * Works for any register including rax — shorter than materialising the constant
  * in a scratch register first. */
+static int alu_group1_ext(int op)
+{
+    switch (op) {
+    case '+': return 0;
+    case '|': return 1;
+    case '&': return 4;
+    case '-': return 5;
+    case '^': return 6;
+    case 'c': return 7;         /* cmp */
+    default:  return -1;
+    }
+}
+
 void x86_alu_reg_imm(struct code *c, int op, int reg, long imm, int w)
 {
-    int ext;
-    switch (op) {
-    case '+': ext = 0; break;
-    case '|': ext = 1; break;
-    case '&': ext = 4; break;
-    case '-': ext = 5; break;
-    case '^': ext = 6; break;
-    case 'c': ext = 7; break;   /* cmp */
-    default:
+    int ext = alu_group1_ext(op);
+    if (ext < 0)
         internal_error("no reg-imm encoding for '%c'", op);
-    }
     rex_rb(c, w == 8, 0, reg);   /* reg is the r/m operand -> REX.B */
     if (imm >= -128 && imm <= 127) {
         code_byte(c, 0x83);
@@ -292,6 +327,27 @@ void x86_alu_reg_imm(struct code *c, int op, int reg, long imm, int w)
     } else {
         code_byte(c, 0x81);
         code_byte(c, 0xc0 | (ext << 3) | (reg & 7));
+        code_u32(c, (unsigned long)imm);
+    }
+}
+
+/* [base+disp] op= imm: x86_alu_reg_imm's group-1 forms with a memory r/m.
+ * At w == 8 the immediate is sign-extended from 32 bits; the caller checks
+ * it fits. */
+void x86_alu_mem_imm(struct code *c, int op, int base, int disp, long imm,
+                     int w)
+{
+    int ext = alu_group1_ext(op);
+    if (ext < 0)
+        internal_error("no memory-imm encoding for '%c'", op);
+    rex_rb(c, w == 8, 0, base);
+    if (imm >= -128 && imm <= 127) {
+        code_byte(c, 0x83);
+        modrm_base(c, ext, base, disp);
+        code_byte(c, (int)(imm & 0xff));
+    } else {
+        code_byte(c, 0x81);
+        modrm_base(c, ext, base, disp);
         code_u32(c, (unsigned long)imm);
     }
 }
@@ -402,6 +458,38 @@ void x86_sub_rsp(struct code *c, int bytes)
 }
 
 /* push/pop a 64-bit register: one byte, or two for r8-r15. */
+/* [base+disp] = imm, `size` bytes: mov r/m, imm (c6 /0 ib, 66 c7 /0 iw,
+ * c7 /0 id, and REX.W c7 /0 id sign-extending to 64 -- the caller checks
+ * an 8-byte value fits). */
+void x86_store_mem_imm(struct code *c, int base, int disp, long imm, int size)
+{
+    if (size == 2)
+        code_byte(c, 0x66);
+    rex_rb(c, size == 8, 0, base);
+    code_byte(c, size == 1 ? 0xc6 : 0xc7);
+    modrm_base(c, 0, base, disp);
+    if (size == 1)
+        code_byte(c, (int)(imm & 0xff));
+    else if (size == 2) {
+        code_byte(c, (int)(imm & 0xff));
+        code_byte(c, (int)((imm >> 8) & 0xff));
+    } else
+        code_u32(c, (unsigned long)imm);
+}
+
+/* rep movsq: rcx quadwords from [rsi] to [rdi]; rep stosq: rcx copies of
+ * rax to [rdi]. Both advance the pointers, which is forward because both
+ * ABIs keep the direction flag clear. */
+void x86_rep_movsq(struct code *c)
+{
+    code_byte(c, 0xf3); code_byte(c, 0x48); code_byte(c, 0xa5);
+}
+
+void x86_rep_stosq(struct code *c)
+{
+    code_byte(c, 0xf3); code_byte(c, 0x48); code_byte(c, 0xab);
+}
+
 void x86_push_reg(struct code *c, int reg)
 {
     if (reg & 8) code_byte(c, 0x41);
@@ -1256,6 +1344,20 @@ void x86_movq_xmm_gpr(struct code *c, int xmm, int gpr, int w)
     code_byte(c, 0xc0 | ((xmm & 7) << 3) | (gpr & 7));
 }
 
+/* movq r64, xmm / movd r32, xmm -- the same instruction the other way.
+ * Only the opcode byte differs (0x7e against 0x6e); the ModRM still puts
+ * the XMM register in the reg field and the general one in rm, so this
+ * shares every field with the encoder above rather than restating it. */
+void x86_movq_gpr_xmm(struct code *c, int gpr, int xmm, int w)
+{
+    code_byte(c, 0x66);
+    if (w == 8 || xmm >= 8 || gpr >= 8)
+        code_byte(c, 0x40 | ((w == 8) << 3) | ((xmm >= 8) << 2) | (gpr >= 8));
+    code_byte(c, 0x0f);
+    code_byte(c, 0x7e);
+    code_byte(c, 0xc0 | ((xmm & 7) << 3) | (gpr & 7));
+}
+
 void x86_movs_reg(struct code *c, int dst, int src)
 {
     if (dst >= 8 || src >= 8)
@@ -1527,6 +1629,21 @@ int x86_jmp_rel8(struct code *c)
 }
 
 /* jmp *reg  (FF /4) — the indirect jump a GNU computed goto lowers to. */
+/* movsxd rax, dword [rcx + rax*4]: a jump table's entry, rcx the table and
+ * rax the index (both this backend's scratch). 48 63 /r with SIB
+ * base=rcx index=rax scale=4. */
+void x86_movsxd_rax_tab(struct code *c)
+{
+    code_byte(c, 0x48); code_byte(c, 0x63);
+    code_byte(c, 0x04); code_byte(c, 0x81);
+}
+
+/* jmp *(%rcx,%rax,8): through a table of absolute addresses */
+void x86_jmp_rcx_rax8(struct code *c)
+{
+    code_byte(c, 0xff); code_byte(c, 0x24); code_byte(c, 0xc1);
+}
+
 void x86_jmp_reg(struct code *c, int reg)
 {
     if (reg >= 8) code_byte(c, 0x41);     /* REX.B for r8..r15 */
@@ -1591,6 +1708,15 @@ void x86_call_r11(struct code *c)
 
 /* movdqu xmm, [base+disp] / movdqu [base+disp], xmm. Unaligned, because
  * the address comes from the program (&a[i] for any i), not from us. */
+/* xmm = 0: pxor xmm, xmm. */
+void x86_vzero(struct code *c, int xmm)
+{
+    code_byte(c, 0x66);
+    if (xmm >= 8) code_byte(c, 0x45);           /* REX.R and REX.B */
+    code_byte(c, 0x0f); code_byte(c, 0xef);
+    code_byte(c, 0xc0 | ((xmm & 7) << 3) | (xmm & 7));
+}
+
 void x86_vload_base(struct code *c, int xmm, int base, int disp)
 {
     code_byte(c, 0xf3);

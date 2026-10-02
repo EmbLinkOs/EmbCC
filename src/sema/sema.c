@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "../arch/aarch64/asm.h"
+#include "../arch/avr/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
 #include "ldfloat.h"
@@ -32,6 +33,8 @@ struct vardef {
     const char *asm_reg; /* a register-asm binding, else NULL */
     int user_align;     /* __attribute__((aligned(N))) on the local; 0 = none */
     int unused_ok;      /* __attribute__((unused)): do not report it */
+    struct func *fdecl; /* a block-scope function declaration: the name
+                         * denotes this function here, not a variable */
 };
 
 /* Block scoping without giving up unique frame slots: entries are never
@@ -162,6 +165,7 @@ static int scope_add(struct scope *sc, const char *name, struct type *ty,
     sc->vars[sc->n].asm_reg = NULL;
     sc->vars[sc->n].user_align = 0;
     sc->vars[sc->n].unused_ok = 0;
+    sc->vars[sc->n].fdecl = NULL;
     return sc->n++;
 }
 
@@ -209,12 +213,43 @@ static void implicit_mem_decl(struct unit *u, const char *name)
     fd->file = u->file;
     fd->seq = -1;
     fd->declared = 1;
-    fd->ret_ty = ty_ptr(ty_base(TY_VOID, 0));
-    fd->nparams = 3;
-    fd->param_tys[0] = ty_ptr(ty_base(TY_VOID, 0));
-    fd->param_tys[1] = strcmp(name, "memset") == 0 ? ty_base(TY_INT, 0)
-                                                   : ty_ptr(ty_base(TY_VOID, 0));
-    fd->param_tys[2] = ty_base(TY_LONG, 1);            /* size_t */
+    /* The real prototype, per function. One shape for all of them --
+     * which is what this was when only memcpy/memmove/memset used it --
+     * gives memcmp and strlen a `void *` return, and `int c = memcmp(..)`
+     * then fails to convert. The signatures are C's. */
+    {
+        struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+        struct type *cp = ty_ptr(ty_base(TY_CHAR, target_char_unsigned()));
+        struct type *sz = ty_int_of_size(target_ptr_size(), 1);
+        struct type *in = ty_base(TY_INT, 0);
+        int cmp = strcmp(name, "memcmp") == 0 || strcmp(name, "strcmp") == 0 ||
+                  strcmp(name, "strncmp") == 0;
+        int str = name[0] == 's';
+        fd->ret_ty = cmp ? in
+                   : strcmp(name, "strlen") == 0 ? sz
+                   : str ? cp : vp;
+        if (strcmp(name, "strlen") == 0) {
+            fd->nparams = 1;
+            fd->param_tys[0] = cp;
+        } else if (strcmp(name, "strcmp") == 0 ||
+                   strcmp(name, "strcpy") == 0 ||
+                   strcmp(name, "strcat") == 0) {
+            fd->nparams = 2;
+            fd->param_tys[0] = cp;
+            fd->param_tys[1] = cp;
+        } else if (strcmp(name, "strchr") == 0) {
+            fd->nparams = 2;
+            fd->param_tys[0] = cp;
+            fd->param_tys[1] = in;
+        } else {
+            fd->nparams = 3;
+            fd->param_tys[0] = str ? cp : vp;
+            fd->param_tys[1] = (strcmp(name, "memset") == 0 ||
+                                strcmp(name, "memchr") == 0) ? in
+                             : str ? cp : vp;
+            fd->param_tys[2] = sz;
+        }
+    }
     struct func **pp = &u->funcs;
     while (*pp)
         pp = &(*pp)->next;
@@ -272,12 +307,13 @@ static struct expr *mk_cast(struct expr *inner, struct type *to)
 
 /* C's integer promotions: everything narrower than int becomes int
  * (all narrow values fit, so the promoted type is always signed). */
-static struct type *promote(struct type *t)
-{
-    if (t->kind == TY_CHAR || t->kind == TY_SHORT)
-        return ty_base(TY_INT, 0);
-    return t;
-}
+/* promote() and arith_common() live in src/sema/type.c now, as
+ * ty_promote() and ty_arith_common(). They are pure operations on
+ * types, and the PARSER needs the second one: `typeof(a - b)` has to
+ * apply the usual arithmetic conversions, and a second copy of these
+ * rules in parse.c would be a copy that drifts. These two names stay
+ * so the rest of this file reads unchanged. */
+static struct type *promote(struct type *t) { return ty_promote(t); }
 
 /* The DEFAULT ARGUMENT promotions, which are the integer promotions
  * PLUS float -> double. Distinct from promote() on purpose: a variadic
@@ -290,35 +326,9 @@ static struct type *default_arg_promote(struct type *t)
     return promote(t);
 }
 
-/* Usual arithmetic conversions, LP64: ranks are int(32) and long(64);
- * long can represent every unsigned int, so mixed int/long keeps the
- * long's signedness. */
 static struct type *arith_common(struct type *a, struct type *b)
 {
-    /* Floating types outrank every integer, and long double > double >
-     * float — the usual arithmetic conversions, floating half first. */
-    if (a->kind == TY_LDOUBLE || b->kind == TY_LDOUBLE)
-        return ty_base(TY_LDOUBLE, 0);
-    if (a->kind == TY_DOUBLE || b->kind == TY_DOUBLE)
-        return ty_base(TY_DOUBLE, 0);
-    if (a->kind == TY_FLOAT || b->kind == TY_FLOAT)
-        return ty_base(TY_FLOAT, 0);
-    a = promote(a);
-    b = promote(b);
-    int qa = a->kind == TY_INT128, qb = b->kind == TY_INT128;
-    if (qa || qb)       /* __int128 outranks long, holds all its values */
-        return ty_base(TY_INT128, qa && qb ? a->is_unsigned || b->is_unsigned
-                                           : (qa ? a : b)->is_unsigned);
-    int wa = ty_wide(a), wb = ty_wide(b);
-    if (wa || wb) {
-        int uns;
-        if (wa && wb)
-            uns = a->is_unsigned || b->is_unsigned;
-        else
-            uns = (wa ? a : b)->is_unsigned;
-        return ty_base(TY_LONG, uns);
-    }
-    return ty_base(TY_INT, a->is_unsigned || b->is_unsigned);
+    return ty_arith_common(a, b);
 }
 
 static void need_scalar(struct unit *u, struct expr *e, const char *what)
@@ -426,10 +436,16 @@ struct initbuf {
 static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                          struct expr *init, struct type *ty, int off,
                          struct initbuf *out);
+static int flatten_sized(struct unit *u, struct func *f, struct scope *sc,
+                         struct expr *init, struct type *ty,
+                         struct initbuf *out);
 static void lower_static_bytes(struct unit *u, int line, int size,
                                struct initelem *v, int n,
                                const char **out_bytes,
                                struct greloc **out_rel, int *out_nrel);
+static int init_overhang(struct unit *u, int line, const char *what,
+                         struct type *ty, const struct initelem *v, int n,
+                         int is_static);
 
 /* A bit-field's value merged into its storage unit's nb bytes at p
  * (they start zeroed, so OR is enough and neighbours are kept): its low
@@ -671,8 +687,17 @@ static struct func *cx_helper(int div, struct type *T)
     static struct func *made[8];
     const char *name;
     int k = (T->kind == TY_FLOAT ? 0 : T->kind == TY_DOUBLE ? 1 : 2) * 2 + div;
-    if (T->kind == TY_LDOUBLE && target_get() == TARGET_AARCH64)
-        k = 6 + div;
+    /* Which long-double helper depends on the FORMAT, which is why this
+     * asks ldf_target_fmt() and not the architecture. x87 keeps the
+     * `x` pair, binary128 takes the `t` pair, and a target whose long
+     * double is a plain double (AAPCS32) uses the ordinary `d` pair --
+     * calling __multc3 there would pass 8 bytes to a routine reading
+     * 16. */
+    if (T->kind == TY_LDOUBLE) {
+        enum ldf_fmt lf = ldf_target_fmt();
+        if (lf == LDF_QUAD)        k = 6 + div;
+        else if (lf == LDF_DOUBLE) k = 2 + div;
+    }
     static const char *const names[8] = {
         "__mulsc3", "__divsc3", "__muldc3", "__divdc3",
         "__mulxc3", "__divxc3", "__multc3", "__divtc3" };
@@ -951,6 +976,206 @@ static void vla_prepare(struct unit *u, struct func *f, struct scope *sc,
     t->vla_size = scope_add(sc, "<vla size>", ty_base(TY_LONG, 1), NULL);
 }
 
+
+/* -Waddress in a TRUTH test: `if (f)` rather than `if (f())`. The name
+ * decays to its address, which is never null, so the branch is always
+ * taken. Separate from the comparison case because a condition is not a
+ * binary operator. */
+static void warn_truth_shape(struct unit *u, struct expr *c, const char *where)
+{
+    struct expr *base = c;
+    while (base && base->kind == EXPR_CAST)
+        base = base->rhs;
+    /* A WEAK function's address really can be null -- that is the
+     * whole point of `extern void f(void) __attribute__((weak)); if (f)
+     * f();`, which is how lib/libc/os/posixlike/backend.c asks whether
+     * the host provides something. Warning there would be wrong. */
+    if (base && base->kind == EXPR_VAR && base->name && base->fref &&
+        !base->fref->is_weak &&
+        c->ty && c->ty->kind == TY_PTR && c->ty->pointee &&
+        c->ty->pointee->kind == TY_FUNC)
+        diag_warn_opt(diag_file(u), c->line, c->col, "address",
+                      "the address of '%s' is never null, so this %s is "
+                      "always taken -- a call may be missing",
+                      base->name, where);
+}
+
+/* ---- the statically-decidable warnings on a binary operator ----------
+ *
+ * Each asks a question about the TEXT, answered from what is already
+ * known here: a constant's value, a type's width. None needs an
+ * analysis that does not exist.
+ */
+
+/* Is this a comparison? Those are the operators whose precedence is
+ * higher than & | ^, which is the trap -Wparentheses is about. */
+static int is_cmp_op(enum binop o)
+{
+    return o == B_EQ || o == B_NE || o == B_LT || o == B_LE ||
+           o == B_GT || o == B_GE;
+}
+
+/* Could evaluating this expression do anything besides produce a value?
+ * Used to decide whether `a || a` is worth mentioning: if a is a call
+ * or an assignment, the two are not the same thing at all. */
+static int side_effect_free(const struct expr *e)
+{
+    if (!e)
+        return 1;
+    switch (e->kind) {
+    case EXPR_NUM: case EXPR_FNUM: case EXPR_STR:
+        return 1;
+    case EXPR_VAR:
+        return 1;
+    case EXPR_MEMBER:
+        return side_effect_free(e->lhs);
+    case EXPR_NEG: case EXPR_BNOT: case EXPR_NOT: case EXPR_CAST:
+        return side_effect_free(e->rhs);
+    case EXPR_BINOP:
+        return side_effect_free(e->lhs) && side_effect_free(e->rhs);
+    default:
+        /* A call, an assignment, ++/--, a dereference (which may trap),
+         * anything else: assume it matters. */
+        return 0;
+    }
+}
+
+/* Do these two expressions name the same thing, textually? Deliberately
+ * shallow: a variable or a chain of member accesses off one, and
+ * nothing that could have a side effect. */
+static int same_operand(const struct expr *a, const struct expr *b)
+{
+    if (!a || !b || a->kind != b->kind)
+        return 0;
+    switch (a->kind) {
+    case EXPR_VAR:
+        return a->name && b->name && !strcmp(a->name, b->name);
+    case EXPR_NUM:
+        return a->num == b->num;
+    case EXPR_MEMBER:
+        return a->name && b->name && !strcmp(a->name, b->name) &&
+               same_operand(a->lhs, b->lhs);
+    default:
+        return 0;
+    }
+}
+
+static void warn_binop_shape(struct unit *u, struct expr *e,
+                             struct type *lt, struct type *rt)
+{
+    long v;
+
+    /* -Wparentheses. `REG & MASK == 0` is `REG & (MASK == 0)`, because
+     * == binds tighter than &, so the test is against one bit of the
+     * wrong value. The classic MMIO bug, and nothing else catches it. */
+    if ((e->op == B_AND || e->op == B_OR || e->op == B_XOR) &&
+        ty_is_integer(lt) && ty_is_integer(rt)) {
+        const char *bop = e->op == B_AND ? "&" : e->op == B_OR ? "|" : "^";
+        if (e->rhs->kind == EXPR_BINOP && is_cmp_op(e->rhs->op) &&
+            !e->rhs->parens)
+            diag_warn_opt(diag_file(u), e->line, e->col, "parentheses",
+                          "comparison binds tighter than '%s' here: this is "
+                          "'a %s (b == c)', not '(a %s b) == c'",
+                          bop, bop, bop);
+        else if (e->lhs->kind == EXPR_BINOP && is_cmp_op(e->lhs->op) &&
+                 !e->lhs->parens)
+            diag_warn_opt(diag_file(u), e->line, e->col, "parentheses",
+                          "comparison binds tighter than '%s' here: this is "
+                          "'(a == b) %s c', not 'a == (b %s c)'",
+                          bop, bop, bop);
+    }
+
+    /* -Wshift-count-overflow. The count is taken modulo the width by
+     * the hardware, so `x << 32` returns x rather than zero. The
+     * standard calls it undefined; -fsanitize=undefined traps it at run
+     * time and this catches the constant. */
+    if ((e->op == B_SHL || e->op == B_SHR) && ty_is_integer(lt) &&
+        const_fold(e->rhs, &v)) {
+        long w = ty_size(ty_promote(lt)) * 8;
+        if (v < 0)
+            diag_warn_opt(diag_file(u), e->line, e->col,
+                          "shift-count-overflow",
+                          "shift count %ld is negative", v);
+        else if (v >= w)
+            diag_warn_opt(diag_file(u), e->line, e->col,
+                          "shift-count-overflow",
+                          "shift count %ld is not less than the width of "
+                          "%s (%ld bits)", v, ty_name(ty_promote(lt)), w);
+    }
+
+    /* -Wdiv-by-zero. A constant zero divisor cannot be meant. */
+    if ((e->op == B_DIV || e->op == B_MOD) && ty_is_integer(rt) &&
+        const_fold(e->rhs, &v) && v == 0)
+        diag_warn_opt(diag_file(u), e->line, e->col, "div-by-zero",
+                      "division by zero");
+
+    /* -Wlogical-op. `a || a` -- one side was meant to be something
+     * else. Only when repeating it changes nothing. */
+    if ((e->op == B_LAND || e->op == B_LOR) &&
+        same_operand(e->lhs, e->rhs) && side_effect_free(e->lhs))
+        diag_warn_opt(diag_file(u), e->line, e->col, "logical-op",
+                      "both operands of '%s' are the same expression",
+                      e->op == B_LAND ? "&&" : "||");
+
+    /* -Wtype-limits. A comparison the types already decide. The classic
+     * is `u < 0` for an unsigned u, which is never true however the
+     * value got there. */
+    if (is_cmp_op(e->op) && ty_is_integer(lt) && ty_is_integer(rt)) {
+        struct expr *var = NULL;
+        struct type *vt = NULL;
+        enum binop op = e->op;
+        if (const_fold(e->rhs, &v) && !const_fold(e->lhs, &(long){0})) {
+            var = e->lhs; vt = lt;
+        } else if (const_fold(e->lhs, &v) && !const_fold(e->rhs, &(long){0})) {
+            var = e->rhs; vt = rt;
+            /* Read the comparison from the variable's side. */
+            op = op == B_LT ? B_GT : op == B_GT ? B_LT
+               : op == B_LE ? B_GE : op == B_GE ? B_LE : op;
+        }
+        if (var && vt && !ty_signed_int(vt) && v == 0 &&
+            (op == B_LT || op == B_GE))
+            diag_warn_opt(diag_file(u), e->line, e->col, "type-limits",
+                          "comparison of %s with 0 is always %s: it has no "
+                          "negative values", ty_name(vt),
+                          op == B_LT ? "false" : "true");
+    }
+
+    /* -Waddress. `if (f)` on a function name: always true, because the
+     * name decays to its address. Nearly always a forgotten call. */
+    if (e->op == B_EQ || e->op == B_NE) {
+        /* By the time this runs the function name has DECAYED to a
+         * pointer, so the test is for a pointer-to-function that came
+         * from a plain name -- not for a TY_FUNC operand, which no
+         * longer exists here. A function POINTER variable is a real
+         * question and is left alone. */
+        struct expr *fn = NULL;
+        for (int k = 0; k < 2; k++) {
+            struct expr *o = k ? e->rhs : e->lhs;
+            struct expr *base = o;
+            while (base && base->kind == EXPR_CAST)
+                base = base->rhs;
+            /* `fref` is what makes this sound: it is set only for a
+             * FUNCTION used as a value. A function POINTER variable has
+             * the same decayed type and can legitimately be null, so
+             * testing the type alone warned on correct code. */
+            if (base && base->kind == EXPR_VAR && base->name &&
+                base->fref && !base->fref->is_weak &&
+                o->ty && o->ty->kind == TY_PTR &&
+                o->ty->pointee && o->ty->pointee->kind == TY_FUNC) {
+                struct expr *other = k ? e->lhs : e->rhs;
+                if (is_null_const(other))
+                    fn = base;
+            }
+        }
+        if (fn)
+            diag_warn_opt(diag_file(u), e->line, e->col, "address",
+                          "the address of '%s' is never null, so this is "
+                          "always %s -- a call may be missing", fn->name,
+                          e->op == B_NE ? "true" : "false");
+    }
+}
+
+
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
 {
@@ -1009,7 +1234,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
     }
     case EXPR_VAR: {
         int i = scope_find(sc, e->name);
-        if (i >= 0) {
+        /* a block-scope declaration of a function names it from here on,
+         * even when the definition comes later in the file */
+        struct func *blkfn = i >= 0 ? sc->vars[i].fdecl : NULL;
+        if (i >= 0 && !blkfn) {
             sc->vars[i].used = 1;     /* -Wunused-variable: it was read */
             e->var_index = i;
             e->ty = sc->vars[i].ty;
@@ -1017,7 +1245,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             e->asm_reg = sc->vars[i].asm_reg; /* register-asm binding */
         } else {
             /* enumerators fold to their constant right here */
-            struct econst *ec = u->econsts;
+            struct econst *ec = blkfn ? NULL : u->econsts;
             for (; ec; ec = ec->next)
                 if (strcmp(ec->name, e->name) == 0)
                     break;
@@ -1029,14 +1257,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             if (ec && ec->seq <= cur_body_seq) {
                 e->kind = EXPR_NUM;
                 e->num = ec->val;
-                e->ty = ty_base(TY_INT, 0);
+                e->ty = ec->ty ? ec->ty : ty_base(TY_INT, 0);
                 break;
             }
             if (ec)
                 sema_error_at(u, e->line, e->col,
                            "enumerator '%s' is used before its "
                            "declaration", e->name);
-            struct global *g = find_global(u, e->name);
+            struct global *g = blkfn ? NULL : find_global(u, e->name);
             /* '<=' not '<': a global's own name is in scope within its
              * initializer (C11 6.2.1p7), so `void *p = &p` is legal; seqs
              * are unique, so this only ever admits that self-reference. */
@@ -1052,13 +1280,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 sema_error_at(u, e->line, e->col,
                            "'%s' is used before its declaration "
                            "(line %d)", e->name, g->line);
-            } else if (find_func(u, e->name)) {
-                struct func *fd = find_func(u, e->name);
+            } else if (blkfn || find_func(u, e->name)) {
+                struct func *fd = blkfn ? blkfn : find_func(u, e->name);
                 /* seq-based, not the ordered-walk `declared` flag: a function
                  * used as a value in a static initializer (a vtable) is
                  * lowered before that walk runs, but is still legal if the
                  * function was declared earlier in the source. */
-                if (fd->seq > cur_body_seq)
+                if (!blkfn && fd->seq > cur_body_seq)
                     sema_error_at(u, e->line, e->col,
                                "'%s' is used before its declaration",
                                e->name);
@@ -1068,6 +1296,16 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                   "deprecated-declarations",
                                   "'%s' is deprecated", fd->name);
                 fd->used = 1;
+                /* The pointer's type cannot say which convention it
+                 * points at, so a call through it would use the default
+                 * one -- the wrong registers, silently. */
+                if (target_pcs_differs(fd->pcs))
+                    sema_error_at(u, e->line, e->col,
+                               "taking the address of '%s' is not supported: "
+                               "it is declared with a pcs attribute that is "
+                               "not this build's convention, and a call "
+                               "through the pointer would use this build's",
+                               fd->name);
                 e->ty = ty_ptr(ty_func(fd->ret_ty, fd->param_tys,
                                        fd->nparams, fd->is_varargs));
                 e->ty->pointee->sret_first = fd->sret_first;
@@ -1092,6 +1330,19 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->str_width = 1;
                 e->str_prefix = 0;
                 check_expr(u, f, sc, e);   /* give it the array/pointer type */
+            } else if (strcmp(e->name, "true") == 0 ||
+                       strcmp(e->name, "false") == 0) {
+                /* C23 makes `true` and `false` keywords: constants of type
+                 * bool. gcc 15 and later default to C23, and code written
+                 * against them -- EmbLinkOs among it -- uses both without
+                 * <stdbool.h>. EmbCC compiles one dialect, so they are
+                 * names of last resort here, like __func__ above: a unit
+                 * that declares its own `true` (an enum constant, a
+                 * variable) or includes <stdbool.h>, whose macros come
+                 * first, keeps what it said. */
+                e->kind = EXPR_NUM;
+                e->num = e->name[0] == 't';
+                e->ty = ty_base(TY_BOOL, 0);
             } else {
                 /* A name misspelt once is usually used several times:
                  * report it once per function, then carry on quietly. */
@@ -1290,18 +1541,22 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col,
                        "compound literal of incomplete type %s",
                        ty_name(ty));
-        /* `(int[]){...}` takes its size from the initializer, as `int a[]`
-         * does. */
-        if (ty->kind == TY_ARRAY && ty->count == 0 &&
-            e->lhs->kind == EXPR_INITLIST)
-            ty = ty_array(ty->pointee, initlist_array_count(e->lhs));
+        /* `(int[]){...}` takes its size from the initializer, as `int
+         * a[]` does: flatten_sized works it out */
+        int sized_by_init = ty->kind == TY_ARRAY && ty->count == 0 &&
+                            e->lhs->kind == EXPR_INITLIST;
         e->cast_ty = ty;
         if (g_in_static_init) {
             /* Static storage: the literal is an anonymous global, and this
              * node becomes a reference to it (so `&(T){...}` in a static
              * initializer lowers to a relocation like any `&global`). */
             struct initbuf ib = { 0, 0, 0 };
-            flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
+            if (sized_by_init)
+                ty = ty_array(ty->pointee,
+                              flatten_sized(u, f, sc, e->lhs, ty, &ib));
+            else
+                flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
+            e->cast_ty = ty;
             static int anon_seq;
             struct global *g = xcalloc(1, sizeof *g);
             char *nm = xmalloc(24);
@@ -1314,9 +1569,11 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             g->defined = 1;
             g->used = 1;
             g->has_init = 1;   /* it has real bytes -> .data, not .bss */
-            lower_static_bytes(u, e->line, ty_size(ty), ib.v, ib.n,
+            g->fam_extra = init_overhang(u, e->line, "a compound literal",
+                                         ty, ib.v, ib.n, 1);
+            lower_static_bytes(u, e->line, global_size(g), ib.v, ib.n,
                                &g->init_bytes, &g->relocs, &g->nrelocs);
-            g->init_len = ty_size(ty);
+            g->init_len = global_size(g);
             struct global **gt = &u->globals;
             while (*gt) gt = &(*gt)->next;
             *gt = g;
@@ -1334,7 +1591,15 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         }
         e->var_index = scope_add(sc, "<compound literal>", ty, NULL);
         struct initbuf ib = { 0, 0, 0 };
-        flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
+        if (sized_by_init) {
+            ty = ty_array(ty->pointee,
+                          flatten_sized(u, f, sc, e->lhs, ty, &ib));
+            sc->vars[e->var_index].ty = ty;
+            e->cast_ty = ty;
+        } else {
+            flatten_init(u, f, sc, e->lhs, ty, 0, &ib);
+        }
+        init_overhang(u, e->line, "a compound literal", ty, ib.v, ib.n, 0);
         e->inits = ib.v;
         e->ninits = ib.n;
         e->lhs = NULL;
@@ -1354,6 +1619,14 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         struct stmt *last = NULL;
         for (struct stmt *s = e->body->body; s; s = s->next)
             last = s;
+        /* A LABELLED last statement still has the value of the
+         * statement it labels: `({ ...; done: r; })` is r. That shape
+         * is not incidental -- it is what every __label__ macro looks
+         * like, since the label is there to be jumped to from inside
+         * and the value follows it. STMT_LABEL carries the labelled
+         * statement in `body`, so unwrap as many as are stacked. */
+        while (last && last->kind == STMT_LABEL && last->body)
+            last = last->body;
         e->ty = (last && last->kind == STMT_EXPR && last->expr)
               ? last->expr->ty : ty_base(TY_VOID, 0);
         break;
@@ -1670,6 +1943,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             cx_binop(u, e);
             break;
         }
+        warn_binop_shape(u, e, lt, rt);
 
         switch (e->op) {
         case B_LAND:
@@ -1822,7 +2096,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 sema_error_at(u, e->line, e->col,
                            "va_start in '%s', which is not variadic",
                            f->name);
-            if (is_copy)   /* SysV's tag is 24 bytes, AAPCS64's 32 */
+            /* The hidden tag, only where there IS a tag. SysV's is 24
+             * bytes and AAPCS64's 32, and both are LP64, where long[4] is
+             * 32. Where a va_list is a bare pointer irgen lowers va_copy to
+             * an assignment and never looks at this -- and on AVR, where
+             * long[4] is sixteen bytes, it was a 16-byte buffer that a
+             * 24-byte copy ran eight bytes past. */
+            if (is_copy && !target_va_list_is_pointer())
                 e->var_index = scope_add(sc, "<va_copy tag>",
                                          ty_array(ty_base(TY_LONG, 0), 4),
                                          NULL);
@@ -1896,9 +2176,79 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * reserved name -- rename and let the ordinary call path resolve
              * them (the program must declare/provide them). */
             if (strcmp(bn, "memcpy") == 0 || strcmp(bn, "memmove") == 0 ||
-                strcmp(bn, "memset") == 0) {
+                strcmp(bn, "memset") == 0 || strcmp(bn, "memcmp") == 0 ||
+                strcmp(bn, "memchr") == 0 || strcmp(bn, "strlen") == 0 ||
+                strcmp(bn, "strcmp") == 0 || strcmp(bn, "strncmp") == 0 ||
+                strcmp(bn, "strcpy") == 0 || strcmp(bn, "strncpy") == 0 ||
+                strcmp(bn, "strcat") == 0 || strcmp(bn, "strchr") == 0) {
+                /* The library function under its own name. memcpy,
+                 * memmove and memset additionally have IR of their own
+                 * that irgen may pick; the rest become ordinary calls,
+                 * which is what __builtin_ asks for -- a name the
+                 * compiler is allowed to know, not necessarily one it
+                 * open-codes. */
                 e->lhs->name = bn;   /* fall through to normal call handling */
                 implicit_mem_decl(u, bn);
+            }
+            /* __builtin_object_size(p, type): how many bytes are
+             * reachable through p. EmbCC does no object-size analysis,
+             * and the ANSWER FOR "UNKNOWN" IS DEFINED: (size_t)-1 for
+             * types 0 and 1, 0 for 2 and 3. Returning it is correct --
+             * _FORTIFY_SOURCE reads exactly this and disables the
+             * check -- where refusing would break every header that
+             * uses it. */
+            else if (strcmp(bn, "object_size") == 0 ||
+                     strcmp(bn, "dynamic_object_size") == 0) {
+                long which = 0;
+                if (e->nargs != 2)
+                    sema_error_at(u, e->line, e->col,
+                            "%s takes a pointer and a type", e->lhs->name);
+                for (int k = 0; k < e->nargs; k++)
+                    check_expr(u, f, sc, e->args[k]);
+                if (e->args[1]->kind == EXPR_NUM)
+                    which = e->args[1]->num;
+                /* The obvious cases are worth answering, because they
+                 * are the ones _FORTIFY_SOURCE can actually use: a
+                 * named array, and the address of an object. Anything
+                 * else gets the DEFINED "unknown" -- (size_t)-1 for
+                 * types 0 and 1, 0 for 2 and 3 -- which is not a
+                 * failure but the answer the interface has for "I do
+                 * not know", and is what disables the check. */
+                {
+                    struct expr *a0 = e->args[0];
+                    long known = -1;
+                    while (a0->kind == EXPR_CAST && a0->rhs)
+                        a0 = a0->rhs;
+                    if (a0->ty && a0->ty->kind == TY_ARRAY &&
+                        a0->ty->count > 0)
+                        known = ty_size(a0->ty);
+                    else if (a0->kind == EXPR_ADDR && a0->rhs &&
+                             a0->rhs->kind == EXPR_VAR &&
+                             a0->rhs->ty &&
+                             a0->rhs->ty->kind != TY_FUNC &&
+                             /* NOT a pointer-typed operand: an ARRAY
+                              * has already decayed to one by here, so
+                              * `&arr` would answer the size of a
+                              * pointer (8) instead of the array (16).
+                              * Excluding it loses the genuine
+                              * `&some_pointer` case, which is a
+                              * missing answer rather than a wrong
+                              * one. */
+                             a0->rhs->ty->kind != TY_PTR &&
+                             ty_size(a0->rhs->ty) > 0)
+                        known = ty_size(a0->rhs->ty);
+                    /* Deliberately NOT `&a[i]` or `p + n`: the answer
+                     * there is the bytes REMAINING from that point,
+                     * and returning the element's size instead (which
+                     * a first version did) is worse than saying
+                     * nothing -- _FORTIFY_SOURCE would reject a write
+                     * that fits. Unknown is a correct answer; a small
+                     * one is not. */
+                    e->kind = EXPR_NUM;
+                    e->num = known >= 0 ? known : ((which & 2) ? 0 : -1);
+                }
+                e->ty = ty_int_of_size(target_ptr_size(), 1);
+                break;
             }
             /* byte swaps -> a single instruction; the result is the argument's
              * width as an unsigned integer. */
@@ -1926,6 +2276,61 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(bn[4] == 'f' ? TY_FLOAT : TY_DOUBLE, 0);
                 e->args[0] = convert_assign(u, e->args[0], e->ty,
                                             "__builtin_sqrt");
+                break;
+            }
+            /* fabs and copysign: same float type in, same out. The
+             * sign bit is the only thing either touches, so neither
+             * rounds and neither can raise an exception -- which is why
+             * they are folded here rather than called. */
+            else if (strcmp(bn, "fabs") == 0 || strcmp(bn, "fabsf") == 0 ||
+                     strcmp(bn, "fabsl") == 0 ||
+                     strcmp(bn, "copysign") == 0 ||
+                     strcmp(bn, "copysignf") == 0 ||
+                     strcmp(bn, "copysignl") == 0) {
+                int two = bn[0] == 'c';
+                size_t n = strlen(bn);
+                char sfx = bn[n - 1];
+                int want = two ? 2 : 1;
+                if (e->nargs != want)
+                    sema_error_at(u, e->line, e->col, "%s takes %d argument%s",
+                               e->lhs->name, want, want == 1 ? "" : "s");
+                for (int k = 0; k < e->nargs; k++)
+                    check_expr(u, f, sc, e->args[k]);
+                e->name = e->lhs->name;
+                e->ty = ty_base(sfx == 'f' ? TY_FLOAT :
+                                sfx == 'l' ? TY_LDOUBLE : TY_DOUBLE, 0);
+                for (int k = 0; k < e->nargs; k++)
+                    e->args[k] = convert_assign(u, e->args[k], e->ty,
+                                                e->lhs->name);
+                break;
+            }
+            /* The classification predicates. Each returns `int` and takes
+             * one float of ANY type -- there is no suffixed spelling to
+             * pick the width, so the argument's own type decides, exactly
+             * as <math.h>'s macros do. */
+            else if (strcmp(bn, "signbit") == 0 ||
+                     strcmp(bn, "signbitf") == 0 ||
+                     strcmp(bn, "signbitl") == 0 ||
+                     strcmp(bn, "isnan") == 0 || strcmp(bn, "isinf") == 0 ||
+                     strcmp(bn, "isinf_sign") == 0 ||
+                     strcmp(bn, "isfinite") == 0 ||
+                     strcmp(bn, "isnormal") == 0) {
+                if (e->nargs != 1)
+                    sema_error_at(u, e->line, e->col, "%s takes one argument",
+                               e->lhs->name);
+                check_expr(u, f, sc, e->args[0]);
+                if (e->nargs == 1 && !ty_is_float(e->args[0]->ty))
+                    /* An integer here is nearly always a missing cast or
+                     * the wrong variable, and answering for its
+                     * *converted* value would hide that. */
+                    sema_error_at(u, e->line, e->col,
+                               "%s takes a floating-point argument",
+                               e->lhs->name);
+                e->name = e->lhs->name;
+                /* SIGNED int: isinf_sign answers -1 for a negative
+                 * infinity, and an unsigned type turned that into
+                 * 4294967295 the moment it widened to a long. */
+                e->ty = ty_base(TY_INT, 0);
                 break;
             }
             /* the value IS the first argument; the hint is discarded */
@@ -1984,6 +2389,40 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->ty = ty_base(TY_INT, 0);
                 break;
             }
+            /* __builtin_{add,sub,mul}_overflow(a, b, *r): the
+             * operation in infinite precision, truncated into *r, and
+             * 1 when it did not fit. The C++ front end has had these
+             * (src/cxx/emit.c overflow_text) and C did not, which the
+             * GCC/Clang audit found by probe -- a grep for the name
+             * finds the C++ one and says otherwise. */
+            else if (strcmp(bn, "add_overflow") == 0 ||
+                     strcmp(bn, "sub_overflow") == 0 ||
+                     strcmp(bn, "mul_overflow") == 0) {
+                if (e->nargs != 3)
+                    sema_error_at(u, e->line, e->col,
+                            "%s takes two values and a pointer to the result",
+                            e->lhs->name);
+                for (int i = 0; i < 3; i++)
+                    check_expr(u, f, sc, e->args[i]);
+                for (int i = 0; i < 2; i++)
+                    if (!ty_is_integer(e->args[i]->ty))
+                        sema_error_at(u, e->args[i]->line, e->args[i]->col,
+                                "%s: operand %d must be an integer, got %s",
+                                e->lhs->name, i + 1, ty_name(e->args[i]->ty));
+                struct type *pt = e->args[2]->ty;
+                if (!pt || pt->kind != TY_PTR || !pt->pointee ||
+                    !ty_is_integer(pt->pointee))
+                    sema_error_at(u, e->args[2]->line, e->args[2]->col,
+                            "%s: the third argument points at the integer to "
+                            "store the result in", e->lhs->name);
+                /* _Bool would match gcc's prototype, but the value is
+                 * used as a condition and as an int everywhere, and
+                 * EmbCC's _Bool already normalises to 0/1. int keeps
+                 * the lowering free of a narrowing store. */
+                e->name = e->lhs->name;
+                e->ty = ty_base(TY_INT, 0);
+                break;
+            }
             /* control never reaches here -> a trap (ud2 / udf) */
             else if (strcmp(bn, "unreachable") == 0 || strcmp(bn, "trap") == 0) {
                 e->name = e->lhs->name;
@@ -2012,12 +2451,13 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * function-pointer value. */
         struct type *ft = NULL;
         e->callee = NULL;
-        if (e->lhs->kind == EXPR_VAR &&
-            scope_find(sc, e->lhs->name) < 0 &&
-            !find_global(u, e->lhs->name) &&
-            find_func(u, e->lhs->name)) {
-            struct func *callee = find_func(u, e->lhs->name);
-            if (callee->seq > cur_body_seq)
+        int si = e->lhs->kind == EXPR_VAR ? scope_find(sc, e->lhs->name) : -1;
+        struct func *blkfn = si >= 0 ? sc->vars[si].fdecl : NULL;
+        if (blkfn || (e->lhs->kind == EXPR_VAR && si < 0 &&
+                      !find_global(u, e->lhs->name) &&
+                      find_func(u, e->lhs->name))) {
+            struct func *callee = blkfn ? blkfn : find_func(u, e->lhs->name);
+            if (!blkfn && callee->seq > cur_body_seq)
                 sema_error_at(u, e->line, e->col,
                            "call to '%s' before its declaration — "
                            "declare or define functions before their "
@@ -2076,25 +2516,112 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
  * refused by name rather than guessed at — case labels must be integer
  * constant expressions, and a label we cannot evaluate is a label we
  * cannot dispatch on (THE RULE). */
+/* A cast in a CONSTANT EXPRESSION truncates and re-extends, exactly as it
+ * would at run time. Folding the operand and ignoring the cast made
+ * `(char)200` fold to 200 instead of -56 and `(unsigned char)300` to 300
+ * instead of 44, on every target, because nothing consulted the cast's
+ * type at all. It matters wherever a constant expression is REQUIRED
+ * rather than convenient: an enumerator, a case label, an array bound.
+ * The same function exists in parse.c for the parse-time folder, which
+ * is the one _Static_assert uses. */
+static long cast_fold_value(const struct type *t, long v)
+{
+    int sz;
+    if (!t || !ty_is_integer(t))
+        return v;
+    sz = ty_size(t);
+    if (sz <= 0 || sz >= (int)sizeof(long))
+        return v;
+    {
+        unsigned long mask = (~0UL) >> ((sizeof(unsigned long) - (size_t)sz) * 8);
+        unsigned long u = (unsigned long)v & mask;
+        if (!t->is_unsigned) {
+            unsigned long sign = 1UL << (sz * 8 - 1);
+            if (u & sign)
+                u |= ~mask;
+        }
+        return (long)u;
+    }
+}
+
+/* Every operator's result is a value OF ITS TYPE: an unsigned result is reduced
+ * modulo 2^n, and a signed one wraps as it would at run time. This folder
+ * used to compute in the host's 64-bit `long` and stop there, so
+ * `unsigned long long x = 0u - 1;` stored 0xffffffffffffffff where C says
+ * 0xffffffff, and `0xffffffffu + 1u` was 4294967296 where it is 0. The code
+ * the same expression compiles to at run time was right all along -- a
+ * four-byte subtract, then a zero extension -- so a static initializer and an
+ * assignment of the same expression disagreed.
+ *
+ * And a 64-bit UNSIGNED operand is not the host's signed long it is stored
+ * in: dividing, taking a remainder, shifting right and comparing each have to
+ * treat the bits as unsigned there, or 0xffffffffffffffffull / 2 is 0. */
+static long in_type(const struct expr *e, long v)
+{
+    return cast_fold_value(e->ty, v);
+}
+
+static int is_uns64(const struct type *t)
+{
+    return t && ty_is_integer(t) && t->is_unsigned && ty_size(t) >= 8;
+}
+
+/* The address of an lvalue whose address is a constant: `*p`, `p->m` and
+ * `lv.m` over a pointer that folds -- `(T *)0x40020000` and arithmetic on
+ * it. C11 6.6p9 calls these address constants, and the register maps of
+ * every microcontroller header are made of them: `&GPIOA->ODR` in a
+ * static const pointer, `&((volatile u8 *)0x80)[4]`. A subscript arrives
+ * here as `*(p + i)`, which const_fold scales. A bitfield has no address,
+ * and anything built on a variable is resolve_addr's (a relocation). */
+static int addr_fold(const struct expr *lv, long *out)
+{
+    long base;
+    switch (lv->kind) {
+    case EXPR_DEREF:
+        return const_fold(lv->rhs, out);
+    case EXPR_MEMBER:
+        if (!lv->memb || lv->memb->is_bitfield || !lv->lhs)
+            return 0;
+        if (lv->is_arrow ? !const_fold(lv->lhs, &base)
+                         : !addr_fold(lv->lhs, &base))
+            return 0;
+        *out = (long)((unsigned long)base + (unsigned long)lv->memb->off);
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int const_fold(const struct expr *e, long *out)
 {
     long a, b;
+
+    /* An array lvalue used as a value decays to its address -- the array
+     * member in `&((struct regs *)0x100)->arr[2]`. */
+    if (e->undecayed && e->undecayed->kind == TY_ARRAY &&
+        (e->kind == EXPR_MEMBER || e->kind == EXPR_DEREF))
+        return addr_fold(e, out);
 
     switch (e->kind) {
     case EXPR_NUM:
         *out = e->num;
         return 1;
+    case EXPR_ADDR:
+        return addr_fold(e->rhs, out);
     case EXPR_CAST:
-        return const_fold(e->rhs, out);
+        if (!const_fold(e->rhs, out))
+            return 0;
+        *out = cast_fold_value(e->cast_ty, *out);
+        return 1;
     case EXPR_NEG:
         if (!const_fold(e->rhs, &a))
             return 0;
-        *out = -a;
+        *out = in_type(e, (long)(0UL - (unsigned long)a));
         return 1;
     case EXPR_BNOT:
         if (!const_fold(e->rhs, &a))
             return 0;
-        *out = ~a;
+        *out = in_type(e, ~a);
         return 1;
     case EXPR_NOT:
         if (!const_fold(e->rhs, &a))
@@ -2110,7 +2637,10 @@ static int const_fold(const struct expr *e, long *out)
         long c;
         if (!const_fold(e->args[0], &c))
             return 0;
-        return const_fold(c ? e->args[1] : e->args[2], out);
+        /* args[0] is the condition; the two ARMS are lhs and rhs.
+         * Reading them out of args[] indexed past its one element
+         * segfaulted on every constant `?:` in an array size. */
+        return const_fold(c ? e->lhs : e->rhs, out);
     }
     case EXPR_BINOP:
         /* && and || short-circuit, so the right operand must neither be
@@ -2128,18 +2658,87 @@ static int const_fold(const struct expr *e, long *out)
         }
         if (!const_fold(e->lhs, &a) || !const_fold(e->rhs, &b))
             return 0;
-        switch (e->op) {
-        case B_ADD: *out = a + b; return 1;
-        case B_SUB: *out = a - b; return 1;
-        case B_MUL: *out = a * b; return 1;
-        case B_DIV: if (!b) return 0; *out = a / b; return 1;
-        case B_MOD: if (!b) return 0; *out = a % b; return 1;
-        case B_AND: *out = a & b; return 1;
-        case B_OR:  *out = a | b; return 1;
-        case B_XOR: *out = a ^ b; return 1;
-        case B_SHL: *out = a << b; return 1;
-        case B_SHR: *out = a >> b; return 1;
-        default: return 0;
+        if ((e->op == B_ADD || e->op == B_SUB) && e->lhs->ty && e->rhs->ty &&
+            (e->lhs->ty->kind == TY_PTR || e->rhs->ty->kind == TY_PTR)) {
+            /* Pointer arithmetic counts ELEMENTS, as irgen's does: the
+             * integer side scaled by the pointee's size, a difference of
+             * two pointers divided by it. This folder added the bare
+             * integer, so `(unsigned *)0x100 + 1` in a static initializer
+             * was 0x101 -- a wrong address, silently. */
+            int lp = e->lhs->ty->kind == TY_PTR, rp = e->rhs->ty->kind == TY_PTR;
+            struct type *pt = (lp ? e->lhs->ty : e->rhs->ty)->pointee;
+            long size;
+            if (!pt || ty_is_vla(pt))
+                return 0;
+            size = pt->kind == TY_VOID ? 1 : ty_size(pt);   /* GNU void * */
+            if (size <= 0)
+                return 0;
+            if (lp && rp) {
+                if (e->op != B_SUB)
+                    return 0;
+                *out = in_type(e, (long)((unsigned long)a - (unsigned long)b) /
+                                  size);
+                return 1;
+            }
+            {
+                unsigned long p = (unsigned long)(lp ? a : b);
+                unsigned long k = (unsigned long)(lp ? b : a) *
+                                  (unsigned long)size;
+                if (!lp && e->op == B_SUB)
+                    return 0;                          /* int - ptr */
+                *out = (long)(e->op == B_ADD ? p + k : p - k);
+                return 1;
+            }
+        }
+        {
+            /* Unsigned arithmetic for the wrap-around ones, so the host never
+             * sees a signed overflow. The operands already carry their own
+             * types' values; `u` says how to read the bits of a 64-bit
+             * unsigned one. For a comparison that is the OPERANDS' type --
+             * the usual arithmetic conversions have made them one -- and for
+             * everything else the result's. */
+            unsigned long ua = (unsigned long)a, ub = (unsigned long)b;
+            int cmp = e->op >= B_EQ && e->op <= B_GE;
+            int u = is_uns64(cmp ? e->lhs->ty : e->ty);
+            int wbits = e->ty && ty_is_integer(e->ty) ? 8 * ty_size(e->ty) : 64;
+            switch (e->op) {
+            case B_ADD: *out = in_type(e, (long)(ua + ub)); return 1;
+            case B_SUB: *out = in_type(e, (long)(ua - ub)); return 1;
+            case B_MUL: *out = in_type(e, (long)(ua * ub)); return 1;
+            case B_DIV:
+                if (!b) return 0;
+                *out = in_type(e, u ? (long)(ua / ub) : a / b);
+                return 1;
+            case B_MOD:
+                if (!b) return 0;
+                *out = in_type(e, u ? (long)(ua % ub) : a % b);
+                return 1;
+            case B_AND: *out = in_type(e, a & b); return 1;
+            case B_OR:  *out = in_type(e, a | b); return 1;
+            case B_XOR: *out = in_type(e, a ^ b); return 1;
+            /* A shift by the width or more, or by a negative count, is
+             * undefined, so it is not a constant expression: refused rather
+             * than answered with whatever the host's shifter does. */
+            case B_SHL:
+                if (b < 0 || b >= wbits) return 0;
+                *out = in_type(e, (long)(ua << b));
+                return 1;
+            case B_SHR:
+                if (b < 0 || b >= wbits) return 0;
+                *out = in_type(e, u || (e->ty && e->ty->is_unsigned)
+                                      ? (long)(ua >> b) : a >> b);
+                return 1;
+            /* The comparisons. C11 6.6 admits them in an integer constant
+             * expression and this folder did not, so `int x = (1 < 2);` at
+             * file scope was refused as "not a constant". */
+            case B_EQ: *out = a == b; return 1;
+            case B_NE: *out = a != b; return 1;
+            case B_LT: *out = u ? ua <  ub : a <  b; return 1;
+            case B_LE: *out = u ? ua <= ub : a <= b; return 1;
+            case B_GT: *out = u ? ua >  ub : a >  b; return 1;
+            case B_GE: *out = u ? ua >= ub : a >= b; return 1;
+            default: return 0;
+            }
         }
     default:
         return 0;
@@ -2347,6 +2946,235 @@ static void init_push_bf(struct initbuf *b, int off, struct type *ty,
     b->v[b->n - 1].bf_bytes = bf_bytes;
 }
 
+/* A brace list being consumed. Brace elision (C11 6.7.9p20) lets one
+ * list initialize a subaggregate and carry on into the next -- `int
+ * m[2][3] = { 1, 2, 3, 4 }`, `struct s v = { 0 }` with an array or a
+ * struct first -- so the position is shared by every level that walks
+ * the same list. */
+struct icur {
+    struct expr *il;
+    int pos;
+};
+
+/* The unbraced initializer whose type flatten_one looked at to decide
+ * between a whole struct value and an elided brace: it is checked
+ * already, and check_expr rewrites in place, so it must not run twice. */
+static struct expr *g_init_checked;
+
+static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
+                        struct icur *c, struct type *ty, int off,
+                        struct initbuf *out, int braced, int *count,
+                        struct desig *path);
+
+static int str_inits_array(const struct expr *e, const struct type *ty)
+{
+    return e->kind == EXPR_STR && ty->kind == TY_ARRAY &&
+           ty_is_integer(ty->pointee) &&
+           ty_size(ty->pointee) == (e->str_width ? e->str_width : 1);
+}
+
+/* One subobject of type ty at off, from the list at c->pos: a braced
+ * initializer or a scalar takes one element; so does a string for a
+ * character array and a value of the struct's own type for a struct.
+ * Anything else begins the subaggregate's first scalar, and the
+ * subaggregate takes as many elements as it holds. */
+static void flatten_one(struct unit *u, struct func *f, struct scope *sc,
+                        struct icur *c, struct type *ty, int off,
+                        struct initbuf *out)
+{
+    struct expr *el = c->il->elems[c->pos];
+    /* (a complex number is a struct inside EmbCC, and a scalar to C:
+     * `4` is 4 + 0i, not the real part of an elided pair) */
+    int whole = el->kind == EXPR_INITLIST || el->kind == EXPR_COMPLIT ||
+                (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT) ||
+                ty_is_complex(ty) || str_inits_array(el, ty);
+    if (!whole && ty->kind == TY_STRUCT) {
+        if (el != g_init_checked) {
+            check_expr(u, f, sc, el);
+            g_init_checked = el;
+        }
+        whole = el->ty && el->ty->kind == TY_STRUCT && ty_equal(el->ty, ty);
+    }
+    if (whole) {
+        flatten_init(u, f, sc, el, ty, off, out);
+        c->pos++;
+        return;
+    }
+    int before = c->pos;
+    flatten_agg(u, f, sc, c, ty, off, out, 0, NULL, NULL);
+    if (c->pos == before)
+        sema_error_at(u, el->line, el->col,
+                   "%s cannot be initialized without braces of its own "
+                   "here", ty_name(ty));
+}
+
+/* The elements or members of an array, struct or union at off: all of a
+ * braced list, or (braced = 0, an elided brace) as many as it holds, up
+ * to a designator, which names a member of the enclosing braced list.
+ * *count, when asked for, receives an array's element count. */
+static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
+                        struct icur *c, struct type *ty, int off,
+                        struct initbuf *out, int braced, int *count,
+                        struct desig *path)
+{
+    int start = c->pos;
+    if (ty->kind == TY_ARRAY) {
+        int esz = ty_size(ty->pointee);
+        /* Positional by default; a `[i] =` designator repositions the
+         * running index and initialization continues positionally after it
+         * (later writes to the same slot win, matching C). A longer one,
+         * `[i].x =`, goes into element i the way an elided brace does and
+         * carries on there (path, below). */
+        int ai = 0, max = 0;
+        while (c->pos < c->il->nelems) {
+            struct expr *el = c->il->elems[c->pos];
+            const char *df = NULL;
+            int di = -1, has = 0;
+            struct desig *rest = NULL;
+            if (c->pos == start && path) {
+                df = path->field; di = path->index; rest = path->next;
+                has = 1;
+            } else if ((el->desig_field || el->desig_index >= 0) &&
+                       (braced || c->pos != start)) {
+                /* (an elided walk's first element had its designator
+                 * applied by the level that started the walk) */
+                if (!braced)      /* it names a member of the braced list */
+                    break;
+                df = el->desig_field; di = el->desig_index;
+                rest = el->desig_next; has = 1;
+            }
+            if (has && df)
+                sema_error_at(u, el->line, el->col,
+                           "field designator '.%s' in an array initializer",
+                           df);
+            if (has)
+                ai = di;
+            /* an elided brace: this element is full; an unsized
+             * (flexible) array has no end to elide to */
+            if (!braced && (!ty->count || ai >= ty->count))
+                break;
+            /* GNU range `[lo ... hi] = v`: place v at every index in the
+             * span. A zero value needs no leaves — the object is already
+             * zero-filled (static bytes start zero; a local is memzeroed) —
+             * which also keeps a huge `[a ... b] = 0` cheap. */
+            int ranged = has && !path && el->desig_index_hi >= 0;
+            int hi = ranged ? el->desig_index_hi : ai;
+            if (ty->count && hi >= ty->count)
+                sema_error_at(u, el->line, el->col,
+                           "initializer index %d is past the end of an "
+                           "array of %d", hi, ty->count);
+            int before = c->pos;
+            if (ranged) {
+                int is_zero = el->kind == EXPR_NUM && el->num == 0;
+                for (; ai <= hi; ai++)
+                    if (!is_zero)
+                        flatten_init(u, f, sc, el, ty->pointee,
+                                     off + ai * esz, out);
+                c->pos++;
+            } else {
+                if (has && rest)
+                    flatten_agg(u, f, sc, c, ty->pointee, off + ai * esz,
+                                out, 0, NULL, rest);
+                else
+                    flatten_one(u, f, sc, c, ty->pointee, off + ai * esz,
+                                out);
+                ai++;
+            }
+            if (c->pos == before)
+                sema_error_at(u, el->line, el->col,
+                           "this initializer does not fit %s", ty_name(ty));
+            if (ai > max)
+                max = ai;
+        }
+        if (count)
+            *count = braced ? max : ai;
+        return;
+    }
+    /* A struct or union. Positional by default; a `.field =` designator
+     * jumps to that member and initialization continues positionally
+     * after it -- inside the member, for `.a.b =`, as elided braces
+     * would. A union holds one member. */
+    int mi = 0, filled = 0;
+    while (c->pos < c->il->nelems) {
+        struct expr *el = c->il->elems[c->pos];
+        const char *df = NULL;
+        int di = -1, has = 0;
+        struct desig *rest = NULL;
+        if (c->pos == start && path) {
+            df = path->field; di = path->index; rest = path->next; has = 1;
+        } else if ((el->desig_field || el->desig_index >= 0) &&
+                   (braced || c->pos != start)) {
+            if (!braced)
+                break;
+            df = el->desig_field; di = el->desig_index;
+            rest = el->desig_next; has = 1;
+        }
+        if (has && !df)
+            sema_error_at(u, el->line, el->col,
+                       "array designator [%d] in an initializer for %s",
+                       di, ty_name(ty));
+        if (has) {
+            /* a member of an anonymous struct or union is reached
+             * through it: one more step on the path */
+            int k = desig_member(ty, df, rest, &rest);
+            if (k < 0)
+                sema_error_at(u, el->line, el->col,
+                           "%s has no member '%s'", ty_name(ty), df);
+            mi = k;
+        } else if (ty->is_union && filled) {
+            if (!braced)
+                break;
+            sema_error_at(u, el->line, el->col,
+                       "too many initializers for %s: a union takes one",
+                       ty_name(ty));
+        }
+        /* An unnamed bitfield (padding, or a `:0` separator) takes no
+         * initializer — skip past it in positional order. */
+        while (mi < ty->nmembers && ty->members[mi].is_bitfield &&
+               !ty->members[mi].name)
+            mi++;
+        if (mi >= ty->nmembers) {
+            if (!braced)
+                break;
+            sema_error_at(u, c->il->line, c->il->col,
+                       "too many initializers for %s, which has %d "
+                       "members", ty_name(ty), ty->nmembers);
+        }
+        struct member *m = &ty->members[mi];
+        int before = c->pos;
+        if (has && rest) {
+            flatten_agg(u, f, sc, c, m->ty, off + m->off, out, 0, NULL, rest);
+        } else if (m->is_bitfield) {
+            /* A bitfield leaf: its value is masked and merged into the
+             * shared storage unit at m->off by both lowerings, so it
+             * carries (bit_off, bit_width) rather than a byte width. */
+            struct expr *bv = el;   /* a scalar may be braced: `{ 5 }` */
+            if (bv->kind == EXPR_INITLIST) {
+                if (bv->nelems != 1)
+                    sema_error_at(u, bv->line, bv->col,
+                               "a scalar takes exactly one initializer");
+                bv = bv->elems[0];
+            }
+            if (bv != g_init_checked)
+                check_expr(u, f, sc, bv);
+            need_scalar(u, bv, "a bitfield initializer");
+            struct expr *cv = convert_assign(u, bv, m->ty,
+                                             "initialization");
+            init_push_bf(out, off + m->off, m->ty, cv,
+                         m->bit_off, m->bit_width, m->bf_bytes);
+            c->pos++;
+        } else {
+            flatten_one(u, f, sc, c, m->ty, off + m->off, out);
+        }
+        if (c->pos == before)
+            sema_error_at(u, el->line, el->col,
+                       "this initializer does not fit %s", ty_name(m->ty));
+        mi++;
+        filled = 1;
+    }
+    (void)count;
+}
+
 static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                          struct expr *init, struct type *ty, int off,
                          struct initbuf *out)
@@ -2395,7 +3223,8 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, init->line, init->col,
                        "an array needs a brace initializer or a string");
         }
-        check_expr(u, f, sc, init);
+        if (init != g_init_checked)   /* see flatten_one */
+            check_expr(u, f, sc, init);
         if (ty->kind != TY_STRUCT)
             if (!ty_is_complex(init->ty))
             need_scalar(u, init, "an initializer");
@@ -2404,84 +3233,51 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
         return;
     }
 
-    if (ty->kind == TY_ARRAY) {
-        int esz = ty_size(ty->pointee);
-        /* Positional by default; a `[i] =` designator repositions the
-         * running index and initialization continues positionally after it
-         * (later writes to the same slot win, matching C). */
-        int ai = 0;
-        for (int i = 0; i < init->nelems; i++) {
-            struct expr *el = init->elems[i];
-            if (el->desig_field)
-                sema_error_at(u, el->line, el->col,
-                           "field designator '.%s' in an array initializer",
-                           el->desig_field);
-            if (el->desig_index >= 0)
-                ai = el->desig_index;
-            /* GNU range `[lo ... hi] = v`: place v at every index in the
-             * span. A zero value needs no leaves — the object is already
-             * zero-filled (static bytes start zero; a local is memzeroed) —
-             * which also keeps a huge `[a ... b] = 0` cheap. */
-            int hi = el->desig_index_hi >= 0 ? el->desig_index_hi : ai;
-            if (ty->count && hi >= ty->count)
-                sema_error_at(u, el->line, el->col,
-                           "initializer index %d is past the end of an "
-                           "array of %d", hi, ty->count);
-            int is_zero = el->kind == EXPR_NUM && el->num == 0;
-            for (; ai <= hi; ai++)
-                if (!(el->desig_index_hi >= 0 && is_zero))
-                    flatten_init(u, f, sc, el, ty->pointee,
-                                 off + ai * esz, out);
-        }
+    /* `char s[] = { "abc" }`: the braces around a string are optional */
+    if (init->nelems == 1 && !init->elems[0]->desig_field &&
+        init->elems[0]->desig_index < 0 &&
+        str_inits_array(init->elems[0], ty)) {
+        flatten_init(u, f, sc, init->elems[0], ty, off, out);
         return;
     }
-    if (ty->kind == TY_STRUCT) {
-        /* Positional by default; a `.field =` designator jumps to that
-         * member and initialization continues positionally after it. */
-        int mi = 0;
-        for (int i = 0; i < init->nelems; i++) {
-            struct expr *el = init->elems[i];
-            if (el->desig_field) {
-                struct member *m = ty_find_member(ty, el->desig_field);
-                if (!m)
-                    sema_error_at(u, el->line, el->col,
-                               "%s has no member '%s'", ty_name(ty),
-                               el->desig_field);
-                mi = (int)(m - ty->members);
-            }
-            /* An unnamed bitfield (padding, or a `:0` separator) takes no
-             * initializer — skip past it in positional order. */
-            while (mi < ty->nmembers && ty->members[mi].is_bitfield &&
-                   !ty->members[mi].name)
-                mi++;
-            if (mi >= ty->nmembers)
-                sema_error_at(u, init->line, init->col,
-                           "too many initializers for %s, which has %d "
-                           "members", ty_name(ty), ty->nmembers);
-            struct member *m = &ty->members[mi];
-            if (m->is_bitfield) {
-                /* A bitfield leaf: its value is masked and merged into the
-                 * shared storage unit at m->off by both lowerings, so it
-                 * carries (bit_off, bit_width) rather than a byte width. */
-                check_expr(u, f, sc, el);
-                need_scalar(u, el, "a bitfield initializer");
-                struct expr *cv = convert_assign(u, el, m->ty,
-                                                 "initialization");
-                init_push_bf(out, off + m->off, m->ty, cv,
-                             m->bit_off, m->bit_width, m->bf_bytes);
-                mi++;
-                continue;
-            }
-            flatten_init(u, f, sc, el, m->ty, off + m->off, out);
-            mi++;
-        }
+    if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT) {
+        struct icur c = { init, 0 };
+        flatten_agg(u, f, sc, &c, ty, off, out, 1, NULL, NULL);
         return;
     }
-    /* a braced scalar: { x } */
-    if (init->nelems != 1)
+    /* a braced scalar: { x }, or C23's empty { }, which is zero -- and
+     * the object is zero-filled already, so it takes no leaf */
+    if (init->nelems == 0)
+        return;
+    if (init->nelems != 1 || init->elems[0]->desig_field ||
+        init->elems[0]->desig_index >= 0)
         sema_error_at(u, init->line, init->col,
                    "a scalar takes exactly one initializer");
+    /* one level of braces: C11 6.7.9p11, and gcc refuses `{ { 4 } }` */
+    if (init->elems[0]->kind == EXPR_INITLIST)
+        sema_error_at(u, init->elems[0]->line, init->elems[0]->col,
+                   "braces around a scalar initializer take one level");
     flatten_init(u, f, sc, init->elems[0], ty, off, out);
+}
+
+/* flatten_init for an unsized array `T a[] = { ... }`: returns the
+ * element count the list gives it, brace elision and designators
+ * included. The parser's count (initlist_elided_count) reads the syntax
+ * alone; this one knows the types, so it is the answer. */
+static int flatten_sized(struct unit *u, struct func *f, struct scope *sc,
+                         struct expr *init, struct type *ty,
+                         struct initbuf *out)
+{
+    if (init->nelems == 1 && !init->elems[0]->desig_field &&
+        init->elems[0]->desig_index < 0 &&
+        str_inits_array(init->elems[0], ty)) {
+        flatten_init(u, f, sc, init->elems[0], ty, 0, out);
+        return (int)init->elems[0]->num;
+    }
+    struct icur c = { init, 0 };
+    int n = 0;
+    flatten_agg(u, f, sc, &c, ty, 0, out, 1, &n, NULL);
+    return n;
 }
 
 /* Resolve a constant-address expression (the value of a pointer slot in a
@@ -2576,6 +3372,50 @@ static int resolve_addr(struct expr *e, struct global **gt,
  * — both have static storage, so every leaf must reduce to constant
  * bytes now, save pointer slots initialized by a string literal, which
  * become relocations the linker resolves. */
+/* How far past ty's size the initializer leaves v reach. Only a
+ * struct whose last member is a flexible array is initialized past its
+ * end: GNU C gives a static object the room (struct global's fam_extra)
+ * and refuses it for one on the stack, which has none. Anything else
+ * past the end would be EmbCC's own error, and is refused rather than
+ * written over whatever follows the object. */
+static int init_overhang(struct unit *u, int line, const char *what,
+                         struct type *ty, const struct initelem *v, int n,
+                         int is_static)
+{
+    int size = ty_size(ty), end = size;
+    for (int k = 0; k < n; k++) {
+        /* a bit-field reaches as far as its bits do, not as far as its
+         * declared type: AVR packs an `unsigned` (2 bytes) field into a
+         * one-byte struct */
+        int w = v[k].bit_width ? (v[k].bit_off + v[k].bit_width + 7) / 8
+                               : ty_size(v[k].ty);
+        if (v[k].off + w > end)
+            end = v[k].off + w;
+    }
+    if (end == size)
+        return 0;
+    struct member *last = ty->kind == TY_STRUCT && !ty->is_union &&
+                          ty->nmembers > 0
+                        ? &ty->members[ty->nmembers - 1] : NULL;
+    if (!last || last->ty->kind != TY_ARRAY || last->ty->count != 0)
+        sema_error_line(u, line, "the initializer of %s reaches past its "
+                        "end", what);
+    if (!is_static)
+        sema_error_line(u, line, "%s is not static, so its flexible "
+                        "array member '%s' cannot be initialized: the "
+                        "object has no room for the elements", what,
+                        last->name ? last->name : "");
+    return end - size;
+}
+
+/* The bytes a bit-field's storage unit spans inside the object: the
+ * unit may be wider than what is left of it (init_overhang has checked
+ * the bits themselves fit), and the bytes past the end are not ours. */
+static int bf_span(int nb, int off, int size)
+{
+    return off + nb > size ? size - off : nb;
+}
+
 static void lower_static_bytes(struct unit *u, int line, int size,
                                struct initelem *v, int n,
                                const char **out_bytes,
@@ -2674,7 +3514,8 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "expression");
             if (v[k].bit_width) {
                 merge_bits(bytes + v[k].off,
-                           v[k].bf_bytes ? v[k].bf_bytes : 16, w,
+                           bf_span(v[k].bf_bytes ? v[k].bf_bytes : 16,
+                                   v[k].off, size), w,
                            v[k].bit_off, v[k].bit_width);
                 continue;
             }
@@ -2690,7 +3531,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                        "a static initializer must be a constant, a "
                        "string literal, or the address of a global");
         if (v[k].bit_width) {
-            merge_bits(bytes + v[k].off, v[k].bf_bytes ? v[k].bf_bytes : sz,
+            merge_bits(bytes + v[k].off,
+                       bf_span(v[k].bf_bytes ? v[k].bf_bytes : sz,
+                               v[k].off, size),
                        w_make((unsigned long)cv, 0), v[k].bit_off,
                        v[k].bit_width);
             continue;
@@ -2719,11 +3562,26 @@ static void lower_globals(struct unit *u)
         struct scope sc = { 0, 0, 0, 0 };
         struct initbuf ib = { 0, 0, 0 };
         g_in_static_init++;
-        flatten_init(u, &gf, &sc, g->init_expr, g->ty, 0, &ib);
+        if (g->count_from_init) {
+            /* The parser sized it, and sizeof may have folded that size
+             * already: the walk that knows the types must agree. */
+            struct type *open = ty_array(g->ty->pointee, 0);
+            int n = flatten_sized(u, &gf, &sc, g->init_expr, open, &ib);
+            if (n != g->ty->count)
+                sema_error_line(u, g->line,
+                           "cannot size '%s' from its initializer: the "
+                           "braces it leaves out read as %d elements "
+                           "without the types and %d with them; brace "
+                           "each element", g->name, g->ty->count, n);
+        } else
+            flatten_init(u, &gf, &sc, g->init_expr, g->ty, 0, &ib);
         g_in_static_init--;
-        lower_static_bytes(u, g->line, ty_size(g->ty), ib.v, ib.n,
+        char what[96];
+        snprintf(what, sizeof what, "'%s'", g->name);
+        g->fam_extra = init_overhang(u, g->line, what, g->ty, ib.v, ib.n, 1);
+        lower_static_bytes(u, g->line, global_size(g), ib.v, ib.n,
                            &g->init_bytes, &g->relocs, &g->nrelocs);
-        g->init_len = ty_size(g->ty);
+        g->init_len = global_size(g);
         g->init_expr = NULL;
     }
 }
@@ -2746,6 +3604,72 @@ static int asm_reg_by_name(const char *n)
     return -1;
 }
 
+/* The builtins sema lowers by name, one strcmp at a time. Kept beside
+ * sema_has_builtin so the two are read together; the golden test scans
+ * the dispatch and fails if a name appears there and not here. */
+static const char *const g_named_builtins[] = {
+    "alloca", "alloca_with_align", "assume_aligned",
+    "bswap16", "bswap32", "bswap64",
+    "constant_p", "expect", "expect_with_probability",
+    "frame_address", "return_address",
+    "huge_val", "huge_valf", "huge_vall",
+    "inf", "inff", "infl", "nan", "nanf", "nanl",
+    "memcpy", "memmove", "memset", "memcmp", "memchr",
+    "strlen", "strcmp", "strncmp", "strcpy", "strncpy", "strcat", "strchr",
+    "object_size", "dynamic_object_size",
+    "offsetof", "prefetch",
+    "sqrt", "sqrtf", "sqrtl",
+    /* The IEEE-754 bit family. Every one of these is integer
+     * arithmetic on the representation once the bits are in a general
+     * register, so they cost no call and no libm. */
+    "fabs", "fabsf", "fabsl",
+    "copysign", "copysignf", "copysignl",
+    "signbit", "signbitf", "signbitl",
+    "isnan", "isinf", "isinf_sign", "isfinite", "isnormal",
+    "trap", "unreachable",
+    "va_arg", "va_copy", "va_end", "va_start",
+    "add_overflow", "sub_overflow", "mul_overflow",
+};
+
+int sema_has_builtin(const char *name)
+{
+    int dummy_op;
+
+    if (!name)
+        return 0;
+    /* The atomic builtins carry their own full names (__atomic_*,
+     * __sync_*), so they are asked before the __builtin_ prefix. */
+    if (atomic_builtin(name, &dummy_op) != AK_NONE)
+        return 1;
+    if (strcmp(name, "__sync_synchronize") == 0)
+        return 1;
+    if (strncmp(name, "__builtin_", 10) != 0)
+        return 0;
+    {
+        const char *bn = name + 10;
+        if (builtin_bitop(bn, NULL) != 0)
+            return 1;
+        for (size_t i = 0;
+             i < sizeof g_named_builtins / sizeof g_named_builtins[0]; i++)
+            if (strcmp(bn, g_named_builtins[i]) == 0)
+                return 1;
+    }
+    return 0;
+}
+
+/* Every name sema_has_builtin answers for by list, so the golden test
+ * can walk them without re-deriving the table. */
+int sema_named_builtin_count(void)
+{
+    return (int)(sizeof g_named_builtins / sizeof g_named_builtins[0]);
+}
+
+const char *sema_named_builtin(int i)
+{
+    return i >= 0 && i < sema_named_builtin_count() ? g_named_builtins[i]
+                                                    : NULL;
+}
+
 int builtin_bitop(const char *bn, int *width)
 {
     static const char *const ops[] = { "ctz", "clz", "popcount", "ffs",
@@ -2755,7 +3679,11 @@ int builtin_bitop(const char *bn, int *width)
         if (strncmp(bn, ops[i], n) != 0)
             continue;
         const char *sfx = bn + n;
-        int w = !*sfx ? 4 : (strcmp(sfx, "l") == 0 || strcmp(sfx, "ll") == 0) ? 8 : 0;
+        /* the operand's type: 1 int, 2 long, 3 long long -- a RANK and
+         * not a size, because the size is the target's: `long` is four
+         * bytes on every 32-bit target and `int` two on AVR */
+        int w = !*sfx ? 1 : strcmp(sfx, "l") == 0 ? 2
+              : strcmp(sfx, "ll") == 0 ? 3 : 0;
         if (!w)
             continue;
         if (width)
@@ -2997,6 +3925,65 @@ static int asm_resolve_reg_arm64(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* AVR operand resolution. Its letters are its own, and they exist because
+ * the register file is NOT uniform: nearly every restriction in the
+ * instruction set shows up as a constraint letter.
+ *
+ *   r/g   any register            d   r16-r31 (the ldi/subi/andi half)
+ *   a     r16-r23                 w   r24/r26/r28/r30 (the adiw pairs)
+ *   e     X, Y or Z               b   Y or Z (the displaced forms)
+ *   x/y/z that pointer pair       q   the stack pointer
+ *   i/n   an integer constant     I   0..63        M   0..255
+ *
+ * The class letters all return -2 and src/arch/avr/irgen.c picks a register
+ * that satisfies them -- it has to, because an operand wider than one byte
+ * needs a RUN of registers and a pointer an even-aligned one, which is not
+ * a decision a single number here could carry. x/y/z pin a pair outright. */
+static int asm_resolve_reg_avr(struct unit *u, struct stmt *s,
+                               struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = avrasm_gpr(rn, (int)strlen(rn));
+        if (r < 0)
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not an AVR register",
+                    rn);
+        return r;
+    }
+    /* A specific pointer pair, by name. */
+    for (const char *p = c; *p; p++) {
+        if (*p == 'x') return 26;
+        if (*p == 'y') return 28;
+        if (*p == 'z') return 30;
+    }
+    {
+        int has_class = 0, has_i = 0;
+        for (const char *p = c; *p; p++) {
+            if (*p == 'r' || *p == 'g' || *p == 'd' || *p == 'a' ||
+                *p == 'w' || *p == 'e' || *p == 'b' || *p == 'q' ||
+                *p == 'm')
+                has_class = 1;
+            if (*p == 'i' || *p == 'n' || *p == 'I' || *p == 'M' ||
+                *p == 'J' || *p == 'K' || *p == 'L' || *p == 'N' ||
+                *p == 'O' || *p == 'P' || *p == 'R')
+                has_i = 1;
+        }
+        if (has_i && !has_class) {
+            long v;
+            if (const_fold(op->expr, &v)) {
+                op->is_imm = 1;
+                op->imm = v;
+                return ASM_REG_IMM;
+            }
+            return ASM_REG_INVALID;   /* a non-constant "i": gcc refuses too */
+        }
+        if (has_class)
+            return -2;
+    }
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -3009,6 +3996,8 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         c++;
     if (target_get() == TARGET_AARCH64)
         return asm_resolve_reg_arm64(u, s, op, c);
+    if (target_get() == TARGET_AVR)
+        return asm_resolve_reg_avr(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)
@@ -3122,7 +4111,27 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                  * a variable wire a block-scope entry onto it so references
                  * resolve. A function needs no var entry (calls use find_func). */
                 if (s->dty->kind == TY_FUNC) {
-                    if (!find_func(u, s->name)) {
+                    struct func *fn = find_func(u, s->name);
+                    if (fn) {
+                        /* the unit's declaration is what calls will use,
+                         * so this one must say the same thing */
+                        int match = fn->nparams == s->dty->nptypes &&
+                                    fn->is_varargs == s->dty->is_varargs &&
+                                    ty_equal(fn->ret_ty, s->dty->ret);
+                        for (int k = 0; match && k < fn->nparams; k++)
+                            if (!ty_equal(fn->param_tys[k], s->dty->ptypes[k]))
+                                match = 0;
+                        if (!match) {
+                            diag_error_at(diag_file(u), s->line, 0,
+                                          "conflicting declaration of '%s'",
+                                          s->name);
+                            diag_note_at(fn->file, fn->line, 0,
+                                         "previous declaration of '%s' here",
+                                         s->name);
+                            fatal_unwind();
+                        }
+                    }
+                    if (!fn) {
                         struct func *g = xcalloc(1, sizeof *g);
                         g->name = s->name; g->file = u->file; g->line = s->line;
                         g->seq = f->seq; g->declared = 1;
@@ -3134,6 +4143,20 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                         struct func **ft = &u->funcs;
                         while (*ft) ft = &(*ft)->next;
                         *ft = g;
+                        fn = g;
+                    }
+                    /* The name has block scope: it hides an outer variable
+                     * of the same name, and lets a call reach a function
+                     * defined further down the file. */
+                    int h = scope_find_here(sc, s->name);
+                    if (h >= 0 && sc->vars[h].fdecl != fn)
+                        sema_error_line(u, s->line,
+                                   "'%s' redeclared as a different kind of "
+                                   "symbol", s->name);
+                    if (h < 0) {
+                        int vi = scope_add(sc, s->name, s->dty, NULL);
+                        sc->vars[vi].fdecl = fn;
+                        sc->vars[vi].used = 1;
                     }
                 } else {
                     struct global *g = find_global(u, s->name);
@@ -3154,6 +4177,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 }
                 break;
             }
+            int sized_by_init = 0;   /* `T a[] = { ... }` */
             if (ty_is_vm(s->dty)) {
                 if (s->is_static)
                     sema_error_at(u, s->line, s->col,
@@ -3186,9 +4210,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                                       (int)s->expr->num);
             } else if (s->expr && s->expr->kind == EXPR_INITLIST &&
                        s->dty->kind == TY_ARRAY && s->dty->count == 0) {
-                /* an omitted array size is the highest index reached */
-                s->dty = ty_array(s->dty->pointee,
-                                  initlist_array_count(s->expr));
+                /* An omitted array size is the highest index reached,
+                 * which the initializer's walk works out below; until
+                 * then the name is in scope with the incomplete type. */
+                sized_by_init = 1;
             }
             /* The name is in scope WITHIN its own initializer (C11
              * 6.2.1p7: scope begins just after the declarator), so the
@@ -3210,6 +4235,33 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
              * initializer is an anonymous global, not a stack slot. */
             if (s->is_static)
                 g_in_static_init++;
+            /* A braced scalar, `int x = { 5 };` (C89), or `= {}` (C23),
+             * which is zero: the value inside, or a 0 of the right type. */
+            if (s->expr && s->expr->kind == EXPR_INITLIST &&
+                s->dty->kind != TY_ARRAY && s->dty->kind != TY_STRUCT) {
+                struct expr *il = s->expr;
+                if (il->nelems > 1 || (il->nelems == 1 &&
+                    (il->elems[0]->desig_field ||
+                     il->elems[0]->desig_index >= 0)))
+                    sema_error_at(u, il->line, il->col,
+                               "a scalar takes exactly one initializer");
+                if (il->nelems == 1 && il->elems[0]->kind == EXPR_INITLIST)
+                    sema_error_at(u, il->elems[0]->line, il->elems[0]->col,
+                               "braces around a scalar initializer take "
+                               "one level");
+                if (il->nelems == 1) {
+                    s->expr = il->elems[0];
+                } else {
+                    s->expr = xcalloc(1, sizeof *s->expr);
+                    s->expr->kind = EXPR_NUM;
+                    s->expr->line = il->line;
+                    s->expr->col = il->col;
+                    s->expr->num = 0;
+                    s->expr->ty = ty_base(TY_INT, 0);
+                    s->expr->desig_index = -1;
+                    s->expr->desig_index_hi = -1;
+                }
+            }
             if (s->expr && s->dty->kind != TY_ARRAY &&
                 s->dty->kind != TY_STRUCT) {
                 check_expr(u, f, sc, s->expr);
@@ -3223,10 +4275,20 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                             s->dty->kind == TY_ARRAY ||
                             s->dty->kind == TY_STRUCT)) {
                 struct initbuf ib = { 0, 0, 0 };
-                flatten_init(u, f, sc, s->expr, s->dty, 0, &ib);
+                if (sized_by_init) {
+                    int n = flatten_sized(u, f, sc, s->expr, s->dty, &ib);
+                    s->dty = ty_array(s->dty->pointee, n);
+                    sc->vars[s->var_index].ty = s->dty;
+                } else
+                    flatten_init(u, f, sc, s->expr, s->dty, 0, &ib);
                 s->inits = ib.v;
                 s->ninits = ib.n;
                 s->expr = NULL;
+                if (!s->is_static) {
+                    char what[96];
+                    snprintf(what, sizeof what, "'%s'", s->name);
+                    init_overhang(u, s->line, what, s->dty, ib.v, ib.n, 0);
+                }
             }
             if (s->is_static)
                 g_in_static_init--;
@@ -3245,6 +4307,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 g->seq = -1;      /* visible from its own function only */
                 g->ty = s->dty;
                 g->is_static = 1;
+                g->is_const = s->obj_const;   /* a lookup table: .rodata */
                 /* `static __thread` inside a function is still one
                  * object per thread -- the scope decides who can NAME
                  * it, not how many there are. */
@@ -3278,10 +4341,14 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     in = 1;
                 }
                 if (in) {
-                    lower_static_bytes(u, s->line, ty_size(s->dty), iv, in,
+                    char what[96];
+                    snprintf(what, sizeof what, "'%s'", s->name);
+                    g->fam_extra = init_overhang(u, s->line, what, s->dty,
+                                                 iv, in, 1);
+                    lower_static_bytes(u, s->line, global_size(g), iv, in,
                                        &g->init_bytes, &g->relocs,
                                        &g->nrelocs);
-                    g->init_len = ty_size(s->dty);
+                    g->init_len = global_size(g);
                     g->has_init = 1;
                 }
                 s->ninits = 0;
@@ -3351,8 +4418,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             check_expr(u, f, sc, s->cond);
             if (ty_is_complex(s->cond->ty) && cx_lowering())
                 s->cond = cx_truth(s->cond);
-            else
+            else {
                 need_scalar(u, s->cond, "'if'");
+                warn_truth_shape(u, s->cond, "branch");
+            }
             check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
             if (s->els)
                 check_stmt(u, f, sc, s->els, in_loop, in_switch, 0);
@@ -3633,6 +4702,7 @@ static void check_func(struct unit *u, struct func *f)
             uv[i].ty = sc.vars[i].ty;
             uv[i].is_param = sc.vars[i].is_param;
             uv[i].is_static = sc.vars[i].g != NULL ||
+                              sc.vars[i].fdecl != NULL ||
                               sc.vars[i].asm_reg != NULL;
             uv[i].line = sc.vars[i].line;
             uv[i].col = sc.vars[i].col;
@@ -3647,12 +4717,13 @@ static void check_func(struct unit *u, struct func *f)
     for (int i = 0; i < sc.n; i++) {
         /* a static local keeps its scope index but needs no frame
          * storage — give it a pointer's worth and never address it */
-        f->var_tys[i] = sc.vars[i].g ? ty_base(TY_LONG, 0)
-                                     : sc.vars[i].ty;
+        f->var_tys[i] = sc.vars[i].g || sc.vars[i].fdecl
+                        ? ty_base(TY_LONG, 0) : sc.vars[i].ty;
         /* a VLA's slot holds the pointer to its run-time storage */
         if (ty_is_vla(f->var_tys[i]))
             f->var_tys[i] = ty_ptr(f->var_tys[i]->pointee);
-        f->var_aligns[i] = sc.vars[i].g ? 0 : sc.vars[i].user_align;
+        f->var_aligns[i] = sc.vars[i].g || sc.vars[i].fdecl
+                           ? 0 : sc.vars[i].user_align;
     }
     free(sc.vars);
     g_cx_sc = NULL;
@@ -3714,7 +4785,24 @@ static void merge_decls(struct unit *u)
             }
         }
         canon->is_weak |= f->is_weak;  /* weak on any declaration is weak */
+        if (f->section) {
+            if (canon->section && strcmp(canon->section, f->section))
+                sema_error_line(u, f->line, "'%s' is placed in section '%s' "
+                                "here and '%s' before", f->name, f->section,
+                                canon->section);
+            canon->section = f->section;
+        }
+        if (f->alias_of)
+            canon->alias_of = f->alias_of;
         canon->sret_first |= f->sret_first;
+        /* A calling convention on any declaration is THE convention; two
+         * different ones cannot both be honoured. */
+        if (f->pcs && canon->pcs && f->pcs != canon->pcs)
+            sema_error_line(u, f->line,
+                       "'%s' is declared with a different pcs than on "
+                       "line %d", f->name, canon->line);
+        if (f->pcs)
+            canon->pcs = f->pcs;
         canon->is_noreturn |= f->is_noreturn;  /* noreturn on any wins */
         canon->is_nothrow |= f->is_nothrow;
         f->absorbed = 1;
@@ -3786,9 +4874,16 @@ static void merge_globals(struct unit *u)
             canon->has_init = 1;
             canon->init = g->init;
             canon->init_expr = g->init_expr;
+            canon->count_from_init = g->count_from_init &&
+                                     canon->ty == g->ty;
             canon->def_seq = g->seq;   /* the initializer's real position */
         }
         canon->defined |= !g->is_extern;
+        /* The object is what its DEFINITION says it is: an `extern
+         * const` seen first does not make a writable definition
+         * read-only, nor the other way round. */
+        if (!g->is_extern)
+            canon->is_const = g->is_const;
         canon->is_weak |= g->is_weak;
         if (g->section) {
             if (canon->section && strcmp(canon->section, g->section) != 0) {
@@ -3805,9 +4900,37 @@ static void merge_globals(struct unit *u)
     }
 }
 
+/* An alias names a function defined in this file, as gcc requires: the
+ * symbol is defined at that function's address (main.c), so it cannot be
+ * defined itself, and a chain is not followed. */
+static void check_aliases(struct unit *u)
+{
+    for (struct func *f = u->funcs; f; f = f->next) {
+        if (f->absorbed || !f->alias_of)
+            continue;
+        if (f->has_defn)
+            sema_error_line(u, f->line, "'%s' is defined and is also an "
+                            "alias of '%s'", f->name, f->alias_of);
+        struct func *t = find_func(u, f->alias_of);
+        if (!t || !t->has_defn)
+            sema_error_line(u, f->line, "'%s' is an alias of '%s', which is "
+                            "not a function defined in this file", f->name,
+                            f->alias_of);
+        if (t->alias_of)
+            sema_error_line(u, f->line, "'%s' is an alias of '%s', which is "
+                            "itself an alias", f->name, f->alias_of);
+        /* Its body must be emitted, and nothing calls it by name -- the
+         * calls are the alias's -- so it is kept as __attribute__((used))
+         * keeps a function: not inlined away, not dropped. */
+        t->used = 1;
+        t->attr_used = 1;
+    }
+}
+
 void sema_check(struct unit *u)
 {
     merge_decls(u);
+    check_aliases(u);
     merge_globals(u);
     lower_globals(u);
 
@@ -3842,7 +4965,8 @@ void sema_check(struct unit *u)
      * An undefined static has no linker to save it — refuse now instead
      * of emitting an unresolvable object (THE RULE). */
     for (struct func *f = u->funcs; f; f = f->next)
-        if (!f->absorbed && !f->has_defn && f->is_static && f->used)
+        if (!f->absorbed && !f->has_defn && !f->alias_of && f->is_static &&
+            f->used)
             sema_error_line(u, f->line,
                        "static function '%s' is called but never defined",
                        f->name);

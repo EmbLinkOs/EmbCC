@@ -396,6 +396,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
             break;
         }
         case IR_EXT: case IR_I2F: case IR_F2I: case IR_F2F:
+        case IR_BITCAST:
             in->a = vreg(p, word(p));
             break;
         case IR_ALLOCA:
@@ -568,6 +569,23 @@ static void parse_ins(struct p *p, char *first, const char *rest)
     case IR_IGOTO:
         in->a = addr_operand(p, word(p));
         break;
+    case IR_SWITCH: {
+        in->a = vreg(p, word(p));
+        if (!eat(p, "->"))
+            perr(p, "'->' before a switch's default");
+        in->label = labelno(p, word(p));
+        char *cnt = word(p);
+        if (!cnt || cnt[0] != '[')
+            perr(p, "a [count] after a switch's default");
+        int n = (int)strtol(cnt + 1, NULL, 10);
+        if (n < 1)
+            perr(p, "a switch table with at least one entry");
+        int t = ir_jt_add(p->fn, n);
+        for (int k = 0; k < n; k++)
+            p->fn->jt[t].labels[k] = labelno(p, word(p));
+        in->jt = t;
+        break;
+    }
     case IR_MEMCPY: {
         char *wa = word(p);
         wa[strlen(wa) - 1] = 0;

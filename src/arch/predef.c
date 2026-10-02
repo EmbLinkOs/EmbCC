@@ -16,19 +16,59 @@ int predef_is_cxx(void) { return g_cxx; }
 static const struct predef_macro *arch_table(int *count)
 {
     if (g_cxx) {
-        if (target_get() == TARGET_AARCH64) {
+        switch (target_get()) {
+        case TARGET_AARCH64:
             *count = predef_macro_count_cxx_aarch64;
             return predef_macros_cxx_aarch64;
+        case TARGET_THUMB:
+            /* ARMv8-M Mainline has its own table. Not the v7-M one with
+             * __ARM_ARCH patched: the feature macros differ throughout, and
+             * a generated file is not hand-parameterised (ARCHITECTURE.md
+             * §5). Same arrangement as the two RISC-V widths. */
+            if (target_thumb_arch() >= 8) {
+                *count = predef_macro_count_cxx_thumbv8m;
+                return predef_macros_cxx_thumbv8m;
+            }
+            *count = predef_macro_count_cxx_thumb;
+            return predef_macros_cxx_thumb;
+        case TARGET_RISCV32:
+            *count = predef_macro_count_cxx_riscv32;
+            return predef_macros_cxx_riscv32;
+        case TARGET_RISCV64:
+            *count = predef_macro_count_cxx_riscv64;
+            return predef_macros_cxx_riscv64;
+        case TARGET_AVR:
+            *count = predef_macro_count_cxx_avr;
+            return predef_macros_cxx_avr;
+        default:
+            *count = predef_macro_count_cxx_x86_64;
+            return predef_macros_cxx_x86_64;
         }
-        *count = predef_macro_count_cxx_x86_64;
-        return predef_macros_cxx_x86_64;
     }
-    if (target_get() == TARGET_AARCH64) {
+    switch (target_get()) {
+    case TARGET_AARCH64:
         *count = predef_macro_count_aarch64;
         return predef_macros_aarch64;
+    case TARGET_THUMB:
+        if (target_thumb_arch() >= 8) {
+            *count = predef_macro_count_thumbv8m;
+            return predef_macros_thumbv8m;
+        }
+        *count = predef_macro_count_thumb;
+        return predef_macros_thumb;
+    case TARGET_RISCV32:
+        *count = predef_macro_count_riscv32;
+        return predef_macros_riscv32;
+    case TARGET_RISCV64:
+        *count = predef_macro_count_riscv64;
+        return predef_macros_riscv64;
+    case TARGET_AVR:
+        *count = predef_macro_count_avr;
+        return predef_macros_avr;
+    default:
+        *count = predef_macro_count_x86_64;
+        return predef_macros_x86_64;
     }
-    *count = predef_macro_count_x86_64;
-    return predef_macros_x86_64;
 }
 
 /* What an operating system adds on top of its architecture's table
@@ -72,12 +112,80 @@ static const struct predef_macro os_darwin[] = {
     { "__unix__", "1" },
     { "__unix", "1" },
 };
+/* ...and on arm64 the generated aarch64 table (gcc's, AAPCS64) is wrong
+ * about the data model target.c's darwin_a64 describes. These replace
+ * its entries of the same name, with clang's values for
+ * arm64-apple-macos; __CHAR_UNSIGNED__ is dropped (contradicted). */
+static const struct predef_macro darwin_a64_model[] = {
+    { "__DECIMAL_DIG__", "__LDBL_DECIMAL_DIG__" },
+    { "__LDBL_DECIMAL_DIG__", "17" },
+    { "__LDBL_DENORM_MIN__", "4.9406564584124654e-324L" },
+    { "__LDBL_DIG__", "15" },
+    { "__LDBL_EPSILON__", "2.2204460492503131e-16L" },
+    { "__LDBL_MANT_DIG__", "53" },
+    { "__LDBL_MAX_10_EXP__", "308" },
+    { "__LDBL_MAX_EXP__", "1024" },
+    { "__LDBL_MAX__", "1.7976931348623157e+308L" },
+    { "__LDBL_MIN_10_EXP__", "(-307)" },
+    { "__LDBL_MIN_EXP__", "(-1021)" },
+    { "__LDBL_MIN__", "2.2250738585072014e-308L" },
+    { "__LDBL_NORM_MAX__", "1.7976931348623157e+308L" },
+    { "__SIZEOF_LONG_DOUBLE__", "8" },
+    { "__WCHAR_MAX__", "2147483647" },
+    { "__WCHAR_MIN__", "(-__WCHAR_MAX__ - 1)" },
+    { "__WCHAR_TYPE__", "int" },
+    { "__WINT_MAX__", "2147483647" },
+    { "__WINT_MIN__", "(-__WINT_MAX__ - 1)" },
+    { "__WINT_TYPE__", "int" },
+};
+static const int ndarwin_a64_model =
+    (int)(sizeof darwin_a64_model / sizeof *darwin_a64_model);
+
+static int darwin_a64(void)
+{
+    return target_get() == TARGET_AARCH64 && target_os_get() == TGT_OS_DARWIN;
+}
+
 static const struct predef_macro os_windows[] = {
     { "_WIN32", "1" },
     { "_WIN64", "1" },
     { "__MINGW32__", "1" },
     { "__MINGW64__", "1" },
 };
+
+/* The FPU on ARMv7E-M and ARMv8-M, when -mfpu= and -mfloat-abi=softfp|hard
+ * turn it on. The generated tables are the soft-float ones (see
+ * tools/gen-predef.sh), and these are the macros clang changes between that
+ * and an FPU build, read off `clang -dM` for both parts and all three ABIs:
+ * __SOFTFP__ goes, the VFP version macros and __ARM_FP arrive, and the hard
+ * ABI adds __ARM_PCS_VFP.
+ *
+ * Two deliberate differences from clang, both of them promises this compiler
+ * does not make yet. __ARM_FP is 0x4, single precision, where clang says 0x6:
+ * bit 1 is hardware half-precision conversion and EmbCC emits no vcvtb. And
+ * __ARM_FEATURE_FMA is left out: DSP code reads it to choose fused
+ * multiply-add, which EmbCC does not emit. A predefined macro is a promise
+ * to the program; the first one this table got wrong, __ARM_FP 0xe on v8-M,
+ * compiled lib/rt/softfp.c to nothing. */
+static const struct predef_macro thumb_fpu_add[] = {
+    { "__ARM_FP", "0x4" },
+    { "__ARM_VFPV2__", "1" },
+    { "__ARM_VFPV3__", "1" },
+    { "__ARM_VFPV4__", "1" },
+};
+static const struct predef_macro thumb_fpv5_add[] = { { "__ARM_FPV5__", "1" } };
+static const struct predef_macro thumb_hard_add[] = { { "__ARM_PCS_VFP", "1" } };
+
+static int thumb_fpu_drops(const char *name)
+{
+    if (target_get() != TARGET_THUMB || !target_thumb_fpu())
+        return 0;
+    /* __ARM_PCS names the base calling convention; the hard-float one
+     * says __ARM_PCS_VFP INSTEAD, and code tests for either. */
+    if (target_thumb_hard_abi() && strcmp(name, "__ARM_PCS") == 0)
+        return 1;
+    return strcmp(name, "__SOFTFP__") == 0 || strcmp(name, "__ARM_FP") == 0;
+}
 
 /* __ELF__ lives in the generated architecture tables, because the
  * compilers they were generated from were the *-elf ones. It is a
@@ -86,7 +194,15 @@ static const struct predef_macro os_windows[] = {
  * thing. Dropped rather than overridden: there is no "__ELF__ 0". */
 static int contradicted(const char *name)
 {
-    return target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0;
+    if (darwin_a64()) {
+        if (strcmp(name, "__CHAR_UNSIGNED__") == 0)
+            return 1;
+        for (int i = 0; i < ndarwin_a64_model; i++)
+            if (strcmp(name, darwin_a64_model[i].name) == 0)
+                return 1;               /* replaced below */
+    }
+    return (target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0) ||
+           thumb_fpu_drops(name);
 }
 
 const struct predef_macro *predef_table(int *count)
@@ -117,7 +233,8 @@ const struct predef_macro *predef_table(int *count)
      * and it hands back the generated table itself -- no copy, no
      * filtering, nothing to go wrong in the path that everything else
      * depends on. */
-    if (!os && target_fmt_get() == TGT_FMT_ELF) {
+    int fpu = target_get() == TARGET_THUMB && target_thumb_fpu();
+    if (!os && !fpu && target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -125,12 +242,24 @@ const struct predef_macro *predef_table(int *count)
     static struct predef_macro *merged;
     static int nmerged;
     if (!merged) {
-        merged = xmalloc((size_t)(narch + nos) * sizeof *merged);
+        merged = xmalloc((size_t)(narch + nos + 8 + ndarwin_a64_model) *
+                         sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
                 merged[nmerged++] = arch[i];
         for (int i = 0; i < nos; i++)
             merged[nmerged++] = os[i];
+        if (darwin_a64())
+            for (int i = 0; i < ndarwin_a64_model; i++)
+                merged[nmerged++] = darwin_a64_model[i];
+        if (fpu) {
+            for (size_t i = 0; i < sizeof thumb_fpu_add / sizeof *thumb_fpu_add; i++)
+                merged[nmerged++] = thumb_fpu_add[i];
+            if (target_thumb_arch() >= 8)
+                merged[nmerged++] = thumb_fpv5_add[0];
+            if (target_thumb_hard_abi())
+                merged[nmerged++] = thumb_hard_add[0];
+        }
     }
     *count = nmerged;
     return merged;

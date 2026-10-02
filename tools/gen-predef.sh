@@ -7,10 +7,28 @@
 # the build (and eventual self-hosting) does not depend on the cross
 # toolchain.
 #
-# usage: gen-predef.sh [x86_64|aarch64]              regenerate (default: both)
-#        gen-predef.sh --reference x86_64|aarch64    print the filtered table
+# usage: gen-predef.sh [ARCH]                        regenerate (default: all)
+#        gen-predef.sh --reference ARCH               print the filtered table
 #                                                    (what tests/golden/predef.sh
 #                                                    compares --dump-predef with)
+#
+#   ARCH is one of: x86_64 aarch64 thumb thumbv8m riscv32 riscv64 avr
+#
+# The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
+# widths -- are taken from CLANG rather than gcc, because clang carries
+# every target in one binary where each of arm-none-eabi-gcc and
+# riscv64-elf-gcc is a separate toolchain download. It is the same kind of
+# source -- a production compiler's own answer for the triple, read off
+# rather than reasoned out -- and the generated file's header says which
+# one it was. Set EMBCC_REF_GCC_THUMB / _RISCV32 / _RISCV64 to use a real
+# cross gcc instead.
+#
+# riscv32 and riscv64 are asked for SEPARATELY, and with an explicit
+# -march/-mabi, because the two differ in far more than __riscv_xlen: the
+# type widths, the atomic lock-free set, and the C library's int-fast
+# choices all move. `-march=rv32im` also pins what is being claimed -- the
+# default rv32imafdc would define __riscv_flen, and EmbCC has no hardware
+# float for the target (THE RULE).
 #
 # Excluded, each for THE RULE (claim only what is present):
 #   __GNUC*__, __VERSION__   EmbCC is not gcc; defining these would switch
@@ -20,17 +38,121 @@
 #   __BITINT_MAXWIDTH__      gcc 14+ advertises C23 _BitInt with it; EmbCC
 #                            has no _BitInt, so a header testing it must not
 #                            be told otherwise.
+# The `a` in -march=rv32imac/rv64imac is the ATOMIC extension, and it is in
+# the baseline because Hazard3 -- the RTOS requirements' fourth target, and
+# the RP2350's RISC-V core -- is RV32IMAC. A kernel cannot be written without
+# a compare-and-swap, and the backend emits lr/sc and the amo* family
+# (src/arch/riscv/codegen.c). Claiming __riscv_atomic while refusing every
+# atomic operation, which is what -march=rv32imc did, is the overclaim this
+# file exists to avoid -- in the other direction.
+#
+# The `c` in -march=rv32imac/rv64imac is the compressed extension, which
+# the backend now emits (src/arch/riscv/emit.c rv_compress). It is asked
+# for here so __riscv_c and __riscv_compressed are defined, because code
+# that tests them and gets the wrong answer picks the wrong instruction
+# sizes -- a hand-written trampoline, a vector table, anything that
+# counts bytes. NOT `a`: EmbCC lowers the atomic builtins without
+# lr/sc, so claiming the A extension would be claiming instructions it
+# never emits.
+#
+# -mcmodel=medany is asked for explicitly, and is not a detail either.
+# Clang defaults to medlow and then defines __riscv_cmodel_medlow, but
+# the backend emits MEDANY at both widths -- PC-relative auipc, because
+# lui sign-extends bit 31 and the absolute pair cannot name a firmware
+# image at 0x80000000 (D-016). The table said medlow for a compiler that
+# emits medany, so code that switches on the macro to pick an addressing
+# sequence picked the wrong one.
+#
+#   __riscv_v_intrinsic      clang defines it for plain rv32im/rv64im, with
+#                            no __riscv_v beside it -- the version of a
+#                            vector intrinsics API for a vector unit that
+#                            is not in the -march. EmbCC has no vectors at
+#                            any width, so it is the same overclaim.
 set -eu
 
-EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__)'
+# __clang__/__llvm__ join the list for the same reason __GNUC__ is on it:
+# EmbCC is not clang either, and a header that believes it is will take a
+# path built on builtins this compiler does not have.
+#   __ARM_FEATURE_CMSE       clang defines it for every ARMv8-M target,
+#        because the security extension is part of the architecture. EmbCC
+#        cannot emit for it: a non-secure entry function needs the linker to
+#        mint a secure gateway veneer, and embld does not. A header that sees
+#        this macro writes __attribute__((cmse_nonsecure_entry)), so leaving
+#        it in advertises a feature whose use would then fail somewhere else
+#        entirely -- the same reason __riscv_v_intrinsic is filtered.
+EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm__|__riscv_v_intrinsic|__ARM_FEATURE_CMSE)'
 
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
-    eval "echo \${$gccvar:-$1-elf-gcc}"
+    case "$1" in
+        thumb|thumbv8m|riscv32|riscv64|avr) eval "echo \${$gccvar:-clang}" ;;
+        *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
+    esac
+}
+
+# The flags that pick the target when the reference compiler is not
+# already specific to it. Empty for a cross gcc, which knows only one.
+refflags() {
+    case "$1" in
+        thumb)   [ -n "${EMBCC_REF_GCC_THUMB:-}" ] || \
+                     echo "-target thumbv7m-none-eabi -ffreestanding" ;;
+        # ARMv8-M Mainline (Cortex-M33). A SECOND table rather than the v7-M
+        # one with __ARM_ARCH patched: the two differ in far more than the
+        # architecture number -- the feature macros (__ARM_FEATURE_*), the
+        # CMSE ones and the DSP flags all move -- and a generated file has no
+        # business being hand-edited into a parameterised one
+        # (ARCHITECTURE.md §5). Same reason the two RISC-V widths have two.
+        #
+        # -mfloat-abi=soft, which the v7-M line gets for free because
+        # thumbv7m has no FPU by default and thumbv8m.main does. Without it
+        # this table said `__ARM_FP 0xe` -- a hardware FPU with single AND
+        # double precision -- and no `__SOFTFP__`, on a backend that does
+        # every float operation as a call. The first thing that read it was
+        # lib/rt/softfp.c's own guard, which compiled to NOTHING for this
+        # target: `a + b` on two floats called __addsf3 and nothing anywhere
+        # defined it, so no float program linked for a Cortex-M33 at all.
+        # A predefined macro is a promise to the program; this one promised
+        # hardware the generated code never uses. When the hard-float ABI
+        # lands, it changes here and in the backend together.
+        thumbv8m) [ -n "${EMBCC_REF_GCC_THUMBV8M:-}" ] || \
+                     echo "-target thumbv8m.main-none-eabi -mfloat-abi=soft -ffreestanding" ;;
+        riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
+                     echo "-target riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
+        riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
+                     echo "-target riscv64-unknown-elf -march=rv64imac -mabi=lp64 -mcmodel=medany -ffreestanding" ;;
+        # AVR names the PART, not just the architecture: __AVR_ATmega328P__
+        # and the __AVR_HAVE_* feature macros all come from -mmcu=, and a
+        # header that tests them is how AVR code is normally written. The
+        # Nano profile in the requirements document is an ATmega328P.
+        avr)     [ -n "${EMBCC_REF_GCC_AVR:-}" ] || \
+                     echo "-target avr -mmcu=atmega328p -ffreestanding" ;;
+        *)       ;;
+    esac
+}
+
+# Per-ARCH exclusions, for a macro that is legitimate on one target and an
+# overclaim on another.
+#
+# RISC-V: __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 and _2 claim one- and two-byte
+# atomics. The A extension has no such instruction -- it provides .w and, at
+# RV64, .d and nothing narrower -- so the backend refuses them rather than
+# doing a read-modify-write of the containing word, which would not be atomic
+# against a neighbouring byte. gcc answers these by calling libatomic; EmbCC
+# has no such library, so claiming them would make a program compile and then
+# fail to link. _4 (and _8 at RV64) stay: those are real.
+exclude_arch() {
+    case "$1" in
+        riscv32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2|8)' ;;
+        riscv64) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
+    esac
 }
 
 reference() {
-    "$(refgcc "$1")" -dM -E - </dev/null | LC_ALL=C sort | grep -v -E "$EXCLUDE"
+    # shellcheck disable=SC2046
+    "$(refgcc "$1")" $(refflags "$1") -dM -E - </dev/null \
+        | LC_ALL=C sort | grep -v -E "$EXCLUDE" \
+        | grep -v -E "$(exclude_arch "$1")"
 }
 
 # C++ (D-013): the g++ -std=gnu++20 set, less the same families, less every
@@ -45,20 +167,24 @@ reference() {
 EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_ASM__|__GLIBCXX_|__SIZEOF_INT128__|__SIZEOF_FLOAT128__|__SIZEOF_FLOAT80__|__BFLT16_|__FLT16_|__FLT32_|__FLT32X_|__FLT64_|__FLT64X_|__FLT128_|__STDCPP_BFLOAT16|__STDCPP_FLOAT)'
 
 refgxx() {
-    echo "$(refgcc "$1" | sed 's/gcc$/g++/')"
+    case "$1" in
+        thumb|thumbv8m|riscv32|riscv64) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
+    esac
 }
 
 reference_cxx() {
-    "$(refgxx "$1")" -std=gnu++20 -x c++ -dM -E - </dev/null | LC_ALL=C sort \
-        | grep -v -E "$EXCLUDE" | grep -v -E "$EXCLUDE_CXX"
+    # shellcheck disable=SC2046
+    "$(refgxx "$1")" $(refflags "$1") -std=gnu++20 -x c++ -dM -E - </dev/null \
+        | LC_ALL=C sort | grep -v -E "$EXCLUDE" | grep -v -E "$EXCLUDE_CXX"
 }
 
 if [ "${1:-}" = --reference ]; then
-    reference "${2:?usage: gen-predef.sh --reference x86_64|aarch64}"
+    reference "${2:?usage: gen-predef.sh --reference ARCH}"
     exit 0
 fi
 if [ "${1:-}" = --reference-cxx ]; then
-    reference_cxx "${2:?usage: gen-predef.sh --reference-cxx x86_64|aarch64}"
+    reference_cxx "${2:?usage: gen-predef.sh --reference-cxx ARCH}"
     exit 0
 fi
 
@@ -74,7 +200,7 @@ gen() {
     }
 
     {
-        echo "/* Generated by tools/gen-predef.sh from \`$("$GCC" -dumpmachine) gcc $("$GCC" -dumpversion) -dM -E\`."
+        echo "/* Generated by tools/gen-predef.sh from \`$("$GCC" $(refflags "$arch") -dumpmachine) $(basename "$GCC") $("$GCC" -dumpversion) -dM -E\`."
         echo "   Do not edit by hand; rerun the script (ARCHITECTURE.md §5). */"
         echo
         echo "#include \"../predef.h\""
@@ -95,7 +221,7 @@ gen() {
     GXX=$(refgxx "$arch")
     OUT="$(dirname "$0")/../src/arch/$arch/predef_cxx.c"
     {
-        echo "/* Generated by tools/gen-predef.sh from \`$("$GXX" -dumpmachine) g++ $("$GXX" -dumpversion) -std=gnu++20 -dM -E\`,"
+        echo "/* Generated by tools/gen-predef.sh from \`$("$GXX" $(refflags "$arch") -dumpmachine) $(basename "$GXX") $("$GXX" -dumpversion) -std=gnu++20 -dM -E\`,"
         echo "   less the macros claiming C++ features EmbCC does not implement yet"
         echo "   (EXCLUDE_CXX). Do not edit by hand; rerun the script. */"
         echo
@@ -117,6 +243,13 @@ gen() {
 case "${1:-both}" in
     x86_64)  gen x86_64 ;;
     aarch64) gen aarch64 ;;
-    both)    gen x86_64; gen aarch64 ;;
-    *) echo "usage: $0 [x86_64|aarch64]" >&2; exit 1 ;;
+    thumb)   gen thumb ;;
+    thumbv8m) gen thumbv8m ;;
+    riscv32) gen riscv32 ;;
+    riscv64) gen riscv64 ;;
+    avr)     gen avr ;;
+    both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv8m; gen riscv32
+              gen riscv64; gen avr ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv8m|riscv32|riscv64|avr]" >&2
+       exit 1 ;;
 esac

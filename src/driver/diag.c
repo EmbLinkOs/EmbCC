@@ -658,6 +658,39 @@ static struct warn_opt g_warns[] = {
      * that is wrong against anything EmbCC did not compile. It goes
      * away when the Microsoft x64 convention lands. */
     { "windows-abi",          1,  0,    0 },
+
+    /* ---- the statically-decidable ones ----
+     *
+     * Each of these is a question about the program's TEXT, answered
+     * with what sema already knows -- a constant's value, a type's
+     * width, an enum's members. None of them needs an analysis that
+     * does not exist, which is why they are in one batch.
+     *
+     * The first is the one to have on an embedded target. `REG & MASK
+     * == 0` parses as `REG & (MASK == 0)` because == binds tighter than
+     * &, so the test is against one bit of the wrong thing. It is the
+     * classic MMIO bug and nothing else in the language catches it. GCC
+     * has it in -Wall and so does this. */
+    { "parentheses",          0,  1,    0 },
+    /* A shift count that cannot be right: at or past the promoted left
+     * operand's width, or negative. Undefined, and the hardware masks
+     * the count -- `x << 32` returns x on x86-64 -- so it neither
+     * traps nor gives zero. -fsanitize=undefined catches it at run
+     * time; this catches the constant case at compile time. */
+    { "shift-count-overflow", 0,  1,    0 },
+    /* A comparison whose answer the types already decide: `u < 0` for
+     * unsigned u, `c > 300` for a char. GCC has this in -Wextra
+     * because a deliberate one is not rare in macro-generated code. */
+    { "type-limits",          0,  0,    1 },
+    /* A constant divisor of zero. The program cannot have meant it. */
+    { "div-by-zero",          1,  0,    0 },
+    /* `a || a`, `a && a`: one of the two was meant to be something
+     * else. Only for operands with no side effects, or the duplicate
+     * would not be one. */
+    { "logical-op",           0,  0,    1 },
+    /* `if (f)` where f is a function: always true, because the name
+     * decays to its address. Almost always a missing call. */
+    { "address",              0,  1,    0 },
 };
 static const int g_nwarns = (int)(sizeof g_warns / sizeof g_warns[0]);
 
@@ -677,11 +710,17 @@ int diag_warning_enabled(const char *name)
 
 /* -Wname / -Wno-name. An unknown name is accepted and ignored: a build
  * that passes GCC's whole warning vocabulary must still compile. */
-void diag_enable_warning(const char *name, int on)
+/* Returns 1 when `name` is a warning this compiler has. The caller
+ * reports a miss: every -W... used to be accepted in silence, which
+ * made a typo invisible and made "-Wall -Wextra -Werror passes" mean
+ * far less than it looks. */
+int diag_enable_warning(const char *name, int on)
 {
     struct warn_opt *w = warn_find(name);
-    if (w)
-        w->on = on;
+    if (!w)
+        return 0;
+    w->on = on;
+    return 1;
 }
 
 /* -Wall / -Wextra: the groups, as GCC draws them. */

@@ -100,11 +100,24 @@ done
 echo "$ident execution programs: -S then $AS gives the same .text and the
 same relocations as -c, every one"
 
-# ---- and it refuses where it cannot be trusted -----------------------------
-if "$EMBCC" -S --target=aarch64-elf "$out/p.c" -o "$out/x.s" \
-       > "$out/err.txt" 2>&1; then
-    echo "FAIL: -S claimed to work for aarch64"; exit 1
+# ---- the other targets now work, and are checked where they belong ---------
+# This used to assert that -S REFUSED for aarch64, which was the right
+# behaviour while the byte grouping came from the x86-64 disassembler.
+# It no longer does: src/arch/target.c answers the instruction length
+# per target and asmout.c knows each target's relocation names, so -S
+# emits the object as text everywhere. That property -- reassembling to
+# a byte-identical .text -- is checked for all five targets by
+# tests/golden/asmout-roundtrip.sh, which needs llvm-mc rather than the
+# x86-64 binutils this file uses.
+if ! "$EMBCC" -S --target=aarch64-elf "$out/p.c" -o "$out/x.s" \
+        > "$out/err.txt" 2>&1; then
+    cat "$out/err.txt"; echo "FAIL: -S should work for aarch64 now"; exit 1
 fi
-grep -q "x86-64 only" "$out/err.txt" ||
-    { cat "$out/err.txt"; echo "FAIL: should say why"; exit 1; }
-echo "-S refuses for aarch64 rather than emitting text it cannot verify"
+grep -q '\.byte' "$out/x.s" ||
+    { echo "FAIL: aarch64 -S produced no instruction bytes"; exit 1; }
+# A64 is fixed 32-bit: every instruction line must carry four bytes.
+if grep -qE '^\t\.byte\t0x..(,0x..)?$' "$out/x.s"; then
+    echo "FAIL: aarch64 -S grouped bytes into non-4-byte instructions"
+    grep -nE '^\t\.byte\t0x..(,0x..)?$' "$out/x.s" | head -3; exit 1
+fi
+echo "-S works for aarch64 too, grouped 4 bytes to the instruction"

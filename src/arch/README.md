@@ -13,21 +13,34 @@ src/arch/
   backend.h        the contract a backend implements (codegen_unit*, site lists)
   code.c/.h        the machine-code byte buffer every encoder writes into
   predef.c/.h      which predefined-macro table the target uses
+  regalloc.c/.h    the shared register allocator (x86-64 and aarch64 use it)
   x86_64/          x86-64, System V AMD64 ABI           -> x86_64/README.md
   aarch64/         AArch64, AAPCS64                      -> aarch64/README.md
+  thumb/           ARMv7-M (Cortex-M), AAPCS32, ILP32   -> D-015
+  riscv/           RV32IM and RV64IM, one backend       -> D-016
+  riscv32/         RV32's macro tables only             -> D-016
+  riscv64/         RV64's macro tables only             -> D-016
 ```
 
 Each architecture directory holds the same kinds of file:
 
-| file        | what it is                                              | x86_64 | aarch64 |
-|-------------|---------------------------------------------------------|:------:|:-------:|
-| `codegen.c` | IR -> machine code, the calling convention               | yes    | yes     |
-| `emit.c/.h` | the instruction encoder                                  | yes    | yes     |
-| `irgen.c`   | the target's share of IR generation: `va_arg`, inline asm | yes    | yes     |
-| `predef.c`  | predefined macros, generated from the target's gcc       | yes    | yes     |
-| `asm.c/.h`  | inline-asm template assembler (GNU syntax)               | in `irgen.c` | yes |
-| `topasm.c`  | file-scope `__asm__`: directives and labels on any target, x86-64 mnemonics | yes    | shared  |
-| `as.c/.h`   | EmbAS, the standalone NASM-syntax assembler (`embas`)    | yes    | —       |
+| file        | what it is                                              | x86_64 | aarch64 | thumb | riscv |
+|-------------|---------------------------------------------------------|:------:|:-------:|:-----:|:-----:|
+| `codegen.c` | IR -> machine code, the calling convention               | yes    | yes     | yes   | yes   |
+| `emit.c/.h` | the instruction encoder                                  | yes    | yes     | yes   | yes   |
+| `irgen.c`   | the target's share of IR generation: `va_arg`, inline asm | yes    | yes     | `va_arg` only | `va_arg` only |
+| `predef.c`  | predefined macros, generated from the target's gcc       | yes    | yes     | yes   | in `riscv32/`, `riscv64/` |
+| `asm.c/.h`  | inline-asm template assembler (GNU syntax)               | in `irgen.c` | yes | — | — |
+| `topasm.c`  | file-scope `__asm__`: directives and labels on any target, x86-64 mnemonics | yes    | shared  | shared | shared |
+| `as.c/.h`   | EmbAS, the standalone NASM-syntax assembler (`embas`)    | yes    | —       | —     | —     |
+
+RISC-V is the exception to "one directory per architecture", in both
+directions, and D-016 says why. `riscv/` is ONE backend for two targets,
+because RV32 and RV64 are one instruction set at two widths and two
+copies would drift; it reads `target_xlen()` where they differ.
+`riscv32/` and `riscv64/` hold nothing but their generated
+`predef.c`/`predef_cxx.c`, because the two are two DATA MODELS — ILP32
+and LP64 — and the table in `target.c` is keyed by the arch enum.
 
 ## Target selection
 

@@ -13,6 +13,14 @@
 #include <stdio.h>
 
 #include "../arch/target.h"
+
+/* The width of a POINTER as an IR operation's `w`. Strength reduction
+ * rewrites an indexed access into a walking pointer and increments it
+ * every iteration; those increments are pointer arithmetic, and saying 8
+ * made them 64-bit operations on a machine with 32-bit registers. The
+ * other 8s in this file are 16-byte vector lanes and mean something
+ * else. */
+#define PTRW (target_ptr_size())
 #include "../driver/remark.h"
 #include "../driver/util.h"
 
@@ -39,7 +47,8 @@ static int writes_temp(enum ir_op op)
     case IR_NEG: case IR_BNOT: case IR_CMP:
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
     case IR_FADDR: case IR_LOAD: case IR_EXT: case IR_BSWAP: case IR_SQRT:
-    case IR_I2F: case IR_F2I: case IR_F2F: case IR_CALL: case IR_XCHG:
+    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
+    case IR_CALL: case IR_XCHG:
     case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_CAS16:
     case IR_FRAMEADDR: case IR_ALLOCA: case IR_SPSAVE:
     case IR_SELECT:
@@ -70,7 +79,7 @@ static int is_pure(enum ir_op op)
     case IR_NEG: case IR_BNOT: case IR_CMP:
     case IR_LDVAR: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
     case IR_FADDR: case IR_EXT: case IR_BSWAP: case IR_SQRT:
-    case IR_I2F: case IR_F2I: case IR_F2F:
+    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
     case IR_SELECT:        /* both arms are values; it cannot trap */
     case IR_LABELADDR:     /* the address of a label is a constant */
         return 1;
@@ -88,6 +97,34 @@ static int def_target(const struct ir_ins *i)
     if (writes_temp(i->op))
         return i->dst;
     return -1;
+}
+
+/* Visit &slot for every LABEL an instruction names: a branch's target, a
+ * label address, a switch's default and each entry of its table. The one
+ * place that knows where they all are, so a pass that retargets or counts
+ * them cannot miss the table -- which lives in the function, not the
+ * instruction, and is why this takes fn. */
+static void each_label(struct ir_func *fn, struct ir_ins *i,
+                       void (*cb)(int *, void *), void *ctx)
+{
+    switch (i->op) {
+    case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_LABELADDR:
+        cb(&i->label, ctx);
+        break;
+    case IR_SWITCH:
+        cb(&i->label, ctx);
+        for (int k = 0; k < fn->jt[i->jt].n; k++)
+            cb(&fn->jt[i->jt].labels[k], ctx);
+        break;
+    default:
+        break;
+    }
+}
+struct retarget { int from, to; };
+static void retarget_cb(int *p, void *ctx)
+{
+    struct retarget *r = ctx;
+    if (*p == r->from) *p = r->to;
 }
 
 /* Visit &field for every vreg this instruction READS (never its dst).
@@ -109,7 +146,7 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
 {
     switch (i->op) {
     case IR_MOV: case IR_NEG: case IR_BNOT:
-    case IR_I2F: case IR_F2I: case IR_F2F:
+    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
     case IR_EXT: case IR_BSWAP: case IR_SQRT:
     case IR_LDVAR: case IR_ADDR: case IR_LOAD:
     case IR_MEMZERO: case IR_VA_START: case IR_STVAR:
@@ -121,6 +158,7 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
      * writes. Every visitor built on each_read -- the use counts, the
      * inliner's remap, the verifier -- was blind to it the same way. */
     case IR_IGOTO:
+    case IR_SWITCH:               /* the table index */
         cb(&i->a, ctx);
         break;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
@@ -434,6 +472,188 @@ static int retarget_const(struct ir_func *fn, struct defs *d, const int *use,
     return 1;
 }
 
+/* A conversion of a constant, done now: `(double)1000000` was a call to
+ * __floatsidf at run time on every soft-float target, and `float s = 0`
+ * a vcvt on the FPU ones. `size` is the source's width and `w` the
+ * result's, as the backends read them; a float constant is its bit
+ * pattern in an IR_CONST, as irgen's emit_fconst makes it.
+ *
+ * The host computes it, with its IEEE round-to-nearest -- what every
+ * target does by default. Declined where the answer is not that simple:
+ * a float that is not finite, or out of the integer type's range (C
+ * leaves that undefined and targets really do differ -- ARM saturates,
+ * x86 gives the "integer indefinite"), a NaN through a float/double
+ * conversion (a soft-float runtime need not keep its payload as the host
+ * does), and anything 16 bytes wide. */
+static double fc_bits_to(long bits, int size)
+{
+    if (size == 8) {
+        double d;
+        memcpy(&d, &bits, 8);
+        return d;
+    }
+    {
+        unsigned int u = (unsigned int)bits;
+        float f;
+        memcpy(&f, &u, 4);
+        return (double)f;
+    }
+}
+static long fc_to_bits(double d, int w)
+{
+    long bits = 0;
+    if (w == 8) {
+        memcpy(&bits, &d, 8);
+    } else {
+        float f = (float)d;
+        unsigned int u;
+        memcpy(&u, &f, 4);
+        bits = (long)u;
+    }
+    return bits;
+}
+static int fold_cvt(const struct ir_ins *i, long A, long *out)
+{
+    if (i->w == 16 || i->size == 16 || i->w <= 0 || i->size <= 0)
+        return 0;
+    if (i->op == IR_I2F) {
+        long v;
+        /* Where an unsigned 32-bit source is widened to a 64-bit signed
+         * conversion (target_widen_unsigned_fp_cvt), irgen relies on the
+         * MACHINE having zero-extended it -- there is no extension in the
+         * IR to fold, and the constant's own normalisation need not match.
+         * Only a value that reads the same either way is folded. */
+        if (i->size == 8 && target_widen_unsigned_fp_cvt() &&
+            (A < 0 || A > 0x7fffffffL))
+            return 0;
+        v = fold_ext(A, i->size, i->sign, 8);
+        double d;
+        float f;
+        if (i->w != 4 && i->w != 8)
+            return 0;
+        if (i->w == 4) {
+            /* ONE rounding, straight to float: through double first
+             * would round twice for a 64-bit value */
+            f = i->sign ? (float)v : (float)(unsigned long)v;
+            *out = fc_to_bits((double)f, 4);
+            return 1;
+        }
+        d = i->sign ? (double)v : (double)(unsigned long)v;
+        *out = fc_to_bits(d, 8);
+        return 1;
+    }
+    if (i->size != 4 && i->size != 8)
+        return 0;
+    {
+        double d = fc_bits_to(A, i->size);
+        if (d != d)                            /* NaN */
+            return 0;
+        if (i->op == IR_F2F) {
+            if (i->w != 4 && i->w != 8)
+                return 0;
+            if (i->w == 4 && i->size == 8) {
+                /* the rounding of double to float, which may overflow
+                 * to infinity -- as the conversion does at run time */
+                float f = (float)d;
+                *out = fc_to_bits((double)f, 4);
+            } else {
+                *out = fc_to_bits(d, i->w);
+            }
+            return 1;
+        }
+        /* IR_F2I: truncate toward zero, only when the result fits. C's
+         * own conversion truncates, so the host does it -- after the
+         * range check, which is what makes the conversion defined. (No
+         * math builtins here: EmbCC compiles this file too.) */
+        {
+            int bits = i->w * 8;
+            double two63 = (double)(1ULL << 63);
+            if (bits > 64 || bits <= 0)
+                return 0;
+            if (i->sign) {
+                double hi = bits == 64 ? two63 : (double)(1ULL << (bits - 1));
+                if (!(d > -hi - 1.0 && d < hi))
+                    return 0;
+                *out = norm((long)(long long)d, i->w);
+            } else {
+                double hi = bits == 64 ? two63 * 2.0 : (double)(1ULL << bits);
+                if (!(d > -1.0 && d < hi))
+                    return 0;
+                *out = norm((long)(unsigned long long)d, i->w);
+            }
+            return 1;
+        }
+    }
+}
+
+/* The bits of vreg v that are zero in EVERY value it can take, at width
+ * w: a shift leaves the bits it shifted over, a multiply by a multiple
+ * of 2^k the low k, a mask the bits it clears, a zero-extension
+ * everything above the source, and an or/xor only what both sides
+ * leave. Bits above the width are reported zero, which is what the
+ * caller's own width mask discards. Conservative: a bit not proven
+ * zero is not claimed, and the walk stops a few definitions up. */
+static unsigned long known_zero(struct ir_func *fn, struct defs *d, int v,
+                                int w, int depth)
+{
+    unsigned long wm = w == 8 ? ~0UL : 0xffffffffUL, hi = ~wm;
+    if (v < 0 || depth > 4 || d->cnt[v] != 1 || d->ins[v] < 0)
+        return hi;
+    const struct ir_ins *i = &fn->ins[d->ins[v]];
+    if (i->flt || i->w == 16 || (i->w != w && i->op != IR_EXT))
+        return hi;
+    long B = 0;
+    int kb = i->imm_b ? (B = i->imm, 1) : get_const(fn, d, i->b, &B);
+    unsigned long ub = (unsigned long)B & wm;
+    switch (i->op) {
+    case IR_CONST:
+        return hi | (~(unsigned long)i->imm & wm);
+    case IR_MOV:
+        return hi | known_zero(fn, d, i->a, w, depth + 1);
+    case IR_SHL:
+        if (!kb || B < 0 || B >= 8 * w)
+            return hi;
+        return hi | ((known_zero(fn, d, i->a, w, depth + 1) << B) & wm) |
+               ((1UL << B) - 1);
+    case IR_SHR:
+        if (!kb || B < 0 || B >= 8 * w || i->sign)
+            return hi;                   /* an arithmetic shift copies the sign */
+        return hi | ((known_zero(fn, d, i->a, w, depth + 1) & wm) >> B) |
+               (~(wm >> B) & wm);
+    case IR_AND:
+        return hi | known_zero(fn, d, i->a, w, depth + 1) |
+               (kb ? (~ub & wm) : known_zero(fn, d, i->b, w, depth + 1));
+    case IR_OR: case IR_XOR:
+        return hi | (known_zero(fn, d, i->a, w, depth + 1) &
+                     (kb ? (~ub & wm) : known_zero(fn, d, i->b, w, depth + 1)));
+    case IR_MUL: {
+        if (!kb || ub == 0)
+            return hi;
+        int tz = 0;
+        while (!(ub & 1)) { ub >>= 1; tz++; }
+        return hi | ((1UL << tz) - 1);   /* a multiple of 2^tz ends in tz zeros */
+    }
+    case IR_EXT:
+        if (i->sign || i->size <= 0 || i->size >= w)
+            return hi;
+        return hi | (~((1UL << (8 * i->size)) - 1) & wm);
+    default:
+        return hi;
+    }
+}
+
+/* Is vreg v defined earlier in the same basic block as instruction n --
+ * no label between its definition and n? */
+static int defined_in_block(struct ir_func *fn, struct defs *d, int v, int n)
+{
+    if (v < 0 || d->cnt[v] != 1 || d->ins[v] < 0 || d->ins[v] >= n)
+        return 0;
+    for (int m = d->ins[v] + 1; m < n; m++)
+        if (fn->ins[m].op == IR_LABEL)
+            return 0;
+    return 1;
+}
+
 static int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -468,6 +688,34 @@ static int pass_fold(struct ir_func *fn)
             }
             continue;
         }
+        if (i->op == IR_MOV && ka && !i->flt && (i->w == 4 || i->w == 8) &&
+            target_get() != TARGET_AVR && !defined_in_block(fn, &d, i->a, n)) {
+            /* A copy of a constant IS that constant. The copies are what
+             * phi destruction leaves at a loop's entry and latch, and a
+             * constant they all read stayed live across the whole loop
+             * for their sake -- in a callee-saved register, or a slot:
+             * `bounds` in tests/bench kept its zero on the stack and
+             * reloaded it every outer iteration. As a constant of its own
+             * each copy is one instruction and no live range. Only across
+             * a block boundary, though: within one block value numbering
+             * merges equal constants into exactly this copy, and the two
+             * rules undid each other forever -- src/arch/x86_64/codegen.c
+             * never finished compiling. Not on AVR:
+             * a constant there is an ldi per byte (four `mov r,r1` for a
+             * zero) where the copy was a movw per pair, and lib/libc's
+             * math grew by 256 bytes. */
+            to_const(i, norm(A, i->w));
+            changed = 1;
+            continue;
+        }
+        if ((i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F) && ka) {
+            long r;
+            if (fold_cvt(i, A, &r)) {
+                to_const(i, r);
+                changed = 1;
+            }
+            continue;
+        }
         if (i->op == IR_EXT) {
             if (ka) {
                 to_const(i, fold_ext(A, i->size, i->sign, i->w));
@@ -483,6 +731,67 @@ static int pass_fold(struct ir_func *fn)
                  * backend was already folding into its addressing. */
                 to_mov(i, i->a);
                 changed = 1;
+            } else if (i->a >= 0 && i->a < fn->nvregs && d.cnt[i->a] == 1 &&
+                       d.ins[i->a] >= 0 &&
+                       fn->ins[d.ins[i->a]].op == IR_EXT &&
+                       !fn->ins[d.ins[i->a]].flt &&
+                       fn->ins[d.ins[i->a]].w >= i->size) {
+                /* An extension of an extension, which promoting a narrow
+                 * local makes of every read after a store: `x = ext.4:2
+                 * (ext.4:2 y)`. Wider than the inner width, or the same
+                 * width and kind, the outer changes nothing -- the bits
+                 * it would write already hold that extension -- so it is
+                 * a copy. At the same width with the other kind, or
+                 * narrower, it only needs the inner's SOURCE, provided
+                 * that has one definition and so cannot have changed. */
+                const struct ir_ins *in = &fn->ins[d.ins[i->a]];
+                int src_ok = in->a >= 0 && in->a < fn->nvregs &&
+                             d.cnt[in->a] == 1 && i->a != in->a;
+                /* Wider than the inner, the outer changes nothing when the
+                 * inner ZERO-extended (the bits above are 0, which either
+                 * kind of extension keeps) or both sign-extend -- but a
+                 * zero-extension of a sign-extended value clears what the
+                 * inner set: (unsigned short)(signed char)-1 is 65535, and
+                 * calling that a copy returned -1 at -O2. */
+                int keeps = (i->size > in->size && (i->sign || !in->sign)) ||
+                            (i->size == in->size && i->sign == in->sign);
+                if (keeps && i->w == in->w) {
+                    to_mov(i, i->a);
+                    changed = 1;
+                } else if (keeps && src_ok) {
+                    /* WIDER than the inner result (`ext.8:4` of an
+                     * `ext.4:2`): not a copy -- the high bytes are the
+                     * outer's to make -- but the inner's extension taken
+                     * straight to the outer width. As a copy it handed a
+                     * four-byte value to an eight-byte add. */
+                    i->a = in->a;
+                    i->size = in->size;
+                    i->sign = in->sign;
+                    changed = 1;
+                } else if (!keeps && src_ok && i->size <= in->size) {
+                    /* Narrower, or the same width and the other kind: the
+                     * outer reads only bytes the inner left as they were,
+                     * so it may read them from the inner's source. Wider,
+                     * it would read bytes the inner made. */
+                    i->a = in->a;
+                    changed = 1;
+                }
+            } else if (i->a >= 0 && i->a < fn->nvregs && d.cnt[i->a] == 1 &&
+                       d.ins[i->a] >= 0 &&
+                       fn->ins[d.ins[i->a]].op == IR_LOAD &&
+                       !fn->ins[d.ins[i->a]].flt &&
+                       fn->ins[d.ins[i->a]].w == i->w) {
+                /* An extension of a narrow LOAD, which already extended
+                 * what it read -- `load.4:1` is a byte zero-extended to
+                 * four. The same rule as above decides whether the outer
+                 * one is a copy; 31 byte loads in the Thumb corpus were
+                 * followed by an `ext.4:1` of their own result. */
+                const struct ir_ins *in = &fn->ins[d.ins[i->a]];
+                if ((i->size > in->size && (i->sign || !in->sign)) ||
+                    (i->size == in->size && i->sign == in->sign)) {
+                    to_mov(i, i->a);
+                    changed = 1;
+                }
             }
             continue;
         }
@@ -503,6 +812,21 @@ static int pass_fold(struct ir_func *fn)
                 changed = 1;
             }
             continue;
+        }
+        /* `(i * 2) & 1` is zero whatever i is: an AND whose constant
+         * reads only bits the other operand can never set (known_zero)
+         * is a constant zero, and the branch on it, and the arm behind
+         * the branch, go with it -- tests/bench's dead_branch spent
+         * eleven instructions an iteration on x86-64 where five do. Only
+         * the all-zero answer is taken; trimming a mask would change
+         * nothing that runs. */
+        if (i->op == IR_AND && kb && !ka && i->a >= 0) {
+            unsigned long wm = i->w == 8 ? ~0UL : 0xffffffffUL;
+            if (((unsigned long)B & wm & ~known_zero(fn, &d, i->a, i->w, 0)) == 0) {
+                to_const(i, 0);
+                changed = 1;
+                continue;
+            }
         }
         /* A COMPARISON OF A COMPARISON. `!!x` is `(x == 0) == 0`, and
          * `(a == b) && (b == c)` re-tests its own result twice more --
@@ -1046,6 +1370,20 @@ struct bb {
     int **phi_inc;                  /* phi_inc[p][k] = value on edge from pred p */
 };
 
+/* A fresh instruction with no operands: what irgen's emit() starts from.
+ * The vreg and label fields are -1, not 0 -- slot 0 is a real local, the
+ * first parameter, and a field left at 0 names it. A branch built here
+ * with dst 0 told AVR's width test the branch WROTE that parameter, so
+ * where it was eight bytes a four-byte zero test was lowered over eight
+ * registers: past r31 the encoder refused it, short of r31 four bytes of
+ * an unrelated value decided the branch. */
+static void ins_blank(struct ir_ins *i)
+{
+    memset(i, 0, sizeof *i);
+    i->dst = i->a = i->b = -1;
+    i->label = -1;
+}
+
 /* Growable instruction buffer, for rebuilding fn->ins out of SSA. */
 struct ibuf { struct ir_ins *p; int n, cap; };
 static struct ir_ins *ib_push(struct ibuf *b)
@@ -1055,7 +1393,7 @@ static struct ir_ins *ib_push(struct ibuf *b)
         b->p = xrealloc(b->p, (size_t)b->cap * sizeof *b->p);
     }
     struct ir_ins *i = &b->p[b->n++];
-    memset(i, 0, sizeof *i);
+    ins_blank(i);
     return i;
 }
 
@@ -1262,7 +1600,8 @@ static struct bb *build_cfg(struct ir_func *fn, int *nbb_out, int **l2b_out)
         enum ir_op op = fn->ins[i].op;
         if (op == IR_LABEL) lead[i] = 1;
         if ((op == IR_JMP || op == IR_BRZ || op == IR_BRNZ ||
-             op == IR_RET || op == IR_UD2 || op == IR_IGOTO) && i + 1 < N)
+             op == IR_RET || op == IR_UD2 || op == IR_IGOTO ||
+             op == IR_SWITCH) && i + 1 < N)
             lead[i + 1] = 1;
     }
     int nbb = 0;
@@ -1303,6 +1642,16 @@ static struct bb *build_cfg(struct ir_func *fn, int *nbb_out, int **l2b_out)
         } else if (op == IR_BRZ || op == IR_BRNZ) {
             if (l2b[L] >= 0) bb_add_succ(&bb[i], l2b[L]);
             if (i + 1 < nbb) bb_add_succ(&bb[i], i + 1);
+        } else if (op == IR_SWITCH) {
+            /* the default, and every entry of the table */
+            const struct ir_ins *sw = &fn->ins[bb[i].end - 1];
+            if (L >= 0 && L < fn->nlabels && l2b[L] >= 0)
+                bb_add_succ(&bb[i], l2b[L]);
+            for (int k = 0; k < fn->jt[sw->jt].n; k++) {
+                int tl = fn->jt[sw->jt].labels[k];
+                if (tl >= 0 && tl < fn->nlabels && l2b[tl] >= 0)
+                    bb_add_succ(&bb[i], l2b[tl]);
+            }
         } else if (op == IR_IGOTO) {
             /* An edge to every address-taken label. Without these the
              * blocks they open look unreachable, and the passes that
@@ -1517,7 +1866,17 @@ static int pass_mem2reg(struct ir_func *fn)
          * value carried across a branch stops being a store and a
          * reload. 188 locals in lib/libc and lib/libcxx were refused
          * here for being neither an integer nor a pointer. */
-        int promotable = Li->is_scalar_int_or_ptr || Li->is_scalar_float;
+        /* ...and a one- or two-byte integer or pointer: every pointer
+         * and `int` on AVR, and a char or short anywhere. Each read of
+         * it becomes an EXTENSION of the current value from the local's
+         * width, which is exactly what the narrow load did; each store
+         * keeps the whole value, since only the low bytes are ever read
+         * back. Refusing them left every AVR local in memory, where the
+         * value numbering, LICM and strength reduction below cannot see. */
+        int narrow = Li->is_int_or_ptr && !Li->is_int128 &&
+                     (Li->size == 1 || Li->size == 2);
+        int promotable = Li->is_scalar_int_or_ptr || Li->is_scalar_float ||
+                         narrow;
         if (!Li->size)                          { ok[L] = 0; why[L] = "type-unknown"; }
         else if (!promotable && (Li->size == 4 || Li->size == 8))
                                                 { ok[L] = 0; why[L] = "not-a-scalar-integer-pointer-or-float"; }
@@ -1534,7 +1893,10 @@ static int pass_mem2reg(struct ir_func *fn)
             ok[in->a] = 0; why[in->a] = "address-is-taken";
         }
         if (in->op == IR_LDVAR && in->a >= 0 && in->a < nvars && ok[in->a] &&
-            (in->vol || !m2r_plain(in->size, in->sign, in->w))) {
+            (in->vol ||
+             (fn->locals[in->a].size < 4
+                  ? in->size != fn->locals[in->a].size
+                  : !m2r_plain(in->size, in->sign, in->w)))) {
             ok[in->a] = 0;
             why[in->a] = in->vol ? "read-is-volatile"
                                  : "read-is-partial-or-extending";
@@ -1542,6 +1904,13 @@ static int pass_mem2reg(struct ir_func *fn)
         if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars &&
             in->vol && ok[in->dst]) {
             ok[in->dst] = 0; why[in->dst] = "write-is-volatile";
+        }
+        /* A narrow local is promoted only if every write covers all of
+         * it: a partial store leaves bytes the new value does not carry. */
+        if (in->op == IR_STVAR && in->dst >= 0 && in->dst < nvars &&
+            ok[in->dst] && fn->locals[in->dst].size < 4 &&
+            in->size != fn->locals[in->dst].size) {
+            ok[in->dst] = 0; why[in->dst] = "write-is-partial";
         }
     }
     if (remarks_on())
@@ -1691,6 +2060,14 @@ static int pass_mem2reg(struct ir_func *fn)
                     int pidx = prom[in->a];
                     int fw = in->size == 8 ? 8 : 4;
                     int was_float = in->flt;
+                    if (fn->locals[ploc[pidx]].size < 4) {
+                        /* A narrow local: the read extends the value's low
+                         * `size` bytes, as the load did -- size, sign and
+                         * width are the load's own. */
+                        in->op = IR_EXT; in->a = stk[pidx][sp[pidx]-1];
+                        in->b = -1;
+                        continue;
+                    }
                     in->op = IR_MOV; in->a = stk[pidx][sp[pidx]-1]; in->b = -1;
                     if (was_float) {
                         /* A copy of the BITS, at the variable's width.
@@ -1767,7 +2144,7 @@ static int pass_mem2reg(struct ir_func *fn)
         int hasterm = bb[b].end > bb[b].start;
         enum ir_op top = hasterm ? fn->ins[bb[b].end - 1].op : IR_UD2;
         int isterm = top == IR_JMP || top == IR_BRZ || top == IR_BRNZ ||
-                     top == IR_RET || top == IR_UD2;
+                     top == IR_RET || top == IR_UD2 || top == IR_SWITCH;
         int body_end = (hasterm && isterm) ? bb[b].end - 1 : bb[b].end;
         for (int i = bb[b].start; i < body_end; i++)
             if (!(fn->ins[i].op == IR_MOV && fn->ins[i].dst < 0))   /* dropped store */
@@ -1791,6 +2168,28 @@ static int pass_mem2reg(struct ir_func *fn)
             *ib_push(&nb) = br;
             if (bb[b].nsucc > 1)                         /* fall-through copies (inline) */
                 emit_edge_copies(&nb, bb, bb[b].succ[1], b, fn);
+        } else if (top == IR_SWITCH && isterm) {
+            /* Every edge out of a switch is a taken edge: a successor
+             * with phis gets a trampoline, and every entry (and the
+             * default) that named it names the trampoline instead. A
+             * block may open with several labels; any of them may be
+             * what the table says. */
+            struct ir_ins sw = fn->ins[bb[b].end - 1];
+            for (int s = 0; s < bb[b].nsucc; s++) {
+                int sb = bb[b].succ[s];
+                if (!bb[sb].nphi) continue;
+                int Lt = fn->nlabels++;
+                if (ntramp == ctramp) { ctramp = ctramp?ctramp*2:8;
+                    tramp = xrealloc(tramp, (size_t)ctramp*sizeof *tramp); }
+                tramp[ntramp].lbl = Lt; tramp[ntramp].from = b;
+                tramp[ntramp].edge_pred = sb; ntramp++;
+                for (int q = bb[sb].start;
+                     q < bb[sb].end && fn->ins[q].op == IR_LABEL; q++) {
+                    struct retarget rt = { fn->ins[q].label, Lt };
+                    each_label(fn, &sw, retarget_cb, &rt);
+                }
+            }
+            *ib_push(&nb) = sw;
         } else {   /* falls through to the next block */
             if (bb[b].nsucc > 0)
                 emit_edge_copies(&nb, bb, bb[b].succ[0], b, fn);
@@ -1805,7 +2204,7 @@ static int pass_mem2reg(struct ir_func *fn)
     if (ntramp > 0 && nbb > 0) {
         enum ir_op lt = bb[nbb - 1].end > bb[nbb - 1].start
                         ? fn->ins[bb[nbb - 1].end - 1].op : IR_UD2;
-        if (lt != IR_JMP && lt != IR_RET && lt != IR_UD2) {
+        if (lt != IR_JMP && lt != IR_RET && lt != IR_UD2 && lt != IR_SWITCH) {
             struct ir_ins *r = ib_push(&nb);
             r->op = IR_RET; r->a = -1;
             /* A cap so the trampolines below cannot be fallen into: it
@@ -2201,6 +2600,16 @@ static int pass_divmagic(struct ir_func *fn)
 {
     if (fn->nins == 0)
         return 0;
+    /* The transform replaces a 32-bit divide with a 64-bit multiply and
+     * takes the high half, which needs a machine with 64-bit registers.
+     * On ARMv7-M it would need a legalisation pass to become the umull
+     * the hardware actually has -- and it would be a LOSS there anyway:
+     * the Cortex-M3 and up have `sdiv` and `udiv` in hardware, two bytes
+     * each, where the magic sequence is a multiply, a shift and a
+     * correction. So it is off where a pointer is four bytes, and the
+     * divide stays a divide. */
+    if (target_ptr_size() < 8)
+        return 0;
     struct defs d;
     compute_defs(fn, &d);
     struct ibuf nb = { 0, 0, 0 };
@@ -2358,8 +2767,23 @@ static int sel_width(struct ir_func *fn, struct defs *d, int v)
     if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
         return 0;
     int n = d->ins[v];
-    if (n < 0)
-        return 8;                       /* a parameter, full width */
+    if (n < 0) {
+        /* No defining instruction: an incoming parameter. Its width is the
+         * one it was DECLARED with. This used to answer 8 -- "a parameter,
+         * full width" -- which is harmless where a select is a register move
+         * and 8 is the register, and wrong anywhere else: on AVR an 8-byte
+         * select is a byte-at-a-time chain through the frame, so a `?:` on
+         * two 4-byte parameters asked the backend to move eight bytes out of
+         * a value that only ever had four. It presented as a refusal rather
+         * than as bad code, which is the only reason it cost an hour and not
+         * a day (lib/rt/avrfp.c's `is_inf(ua) ? ub : ua`, at -Os only,
+         * because -O0 leaves the branch alone). */
+        if (v < fn->nvars && fn->locals[v].is_int_or_ptr) {
+            int sz = fn->locals[v].size;
+            return sz == 4 || sz == 8 ? sz : 0;
+        }
+        return 0;
+    }
     int w = fn->ins[n].w;
     return w == 4 || w == 8 ? w : 0;
 }
@@ -2497,6 +2921,178 @@ static int pass_ifconv(struct ir_func *fn)
  * that reasons about blocks gets a smaller graph: a label with no
  * remaining jumps to it stops splitting a block, so the block-local
  * passes see more at once. */
+/* Jump threading on a merged boolean: what `a && b` and `a || b` leave in
+ * a condition.
+ *
+ *       %t = mov %c        ; the comparison, on one arm
+ *       jmp L
+ *       ...
+ *       %t = const 0       ; the short-circuit, on the other
+ *       jmp L
+ *   L:  brz %t -> Lx       ; %t's only reader
+ *       <Lafter>
+ *
+ * Each arm already knows where it is going: the constant one straight to
+ * Lx or Lafter, the copying one on %c itself. So an arm becomes a jump
+ * there, and the 0/1 is never built, merged and tested again -- 128 of
+ * these in lib/libc, and on AVR each 0/1 was four bytes wide.
+ *
+ * Lafter is the label right after the branch, or the target of a jmp
+ * there; when it is neither, one is inserted, and only then. The skipped
+ * `jmp L` is left dead for cfgclean. A copying arm that FALLS into L is
+ * left alone, since a branch there would leave %t unset on the way
+ * through. */
+/* Move fn->var_scope_lo/hi with a renumbering: newpos[n] is where old
+ * instruction n now is, newpos[oldn] the new end (DCE's idiom). */
+static void remap_scopes(struct ir_func *fn, const int *newpos, int oldn)
+{
+    if (!fn->var_scope_lo || !newpos)
+        return;
+    for (int v = 0; v < fn->nvars; v++) {
+        int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+        if (lo >= 0 && lo <= oldn) fn->var_scope_lo[v] = newpos[lo];
+        if (hi >= 0 && hi <= oldn) fn->var_scope_hi[v] = newpos[hi];
+    }
+}
+
+static int thread_arm(const struct ir_func *fn, int k, int t, int L,
+                      const struct defs *d)
+{
+    const struct ir_ins *def = &fn->ins[k], *go = &fn->ins[k + 1];
+    int jumps = go->op == IR_JMP && go->label == L;
+    int falls = k + 1 < fn->nins && go->op == IR_LABEL && go->label == L;
+    if (def->dst != t || def->flt || (!falls && !jumps))
+        return 0;
+    if (def->op == IR_CONST)
+        return 1;
+    return def->op == IR_MOV && jumps && def->a >= 0 &&
+           def->a < fn->nvregs && d->cnt[def->a] == 1 &&
+           d->ins[def->a] >= 0 && fn->ins[d->ins[def->a]].op == IR_CMP;
+}
+
+static int thread_site(const struct ir_func *fn, int n, const int *use)
+{
+    const struct ir_ins *lab = &fn->ins[n], *br = &fn->ins[n + 1];
+    int t = br->a;
+    return n + 2 < fn->nins && lab->op == IR_LABEL &&
+           (br->op == IR_BRZ || br->op == IR_BRNZ) &&
+           t >= fn->nvars && t < fn->nvregs && use[t] == 1 && br->w <= 8;
+}
+
+static int pass_thread(struct ir_func *fn)
+{
+    int changed = 0, nv = fn->nvregs;
+    int *use = xcalloc((size_t)(nv ? nv : 1), sizeof *use);
+    struct ucount uc = { use, nv };
+    struct defs d;
+
+    for (int n = 0; n < fn->nins; n++)
+        each_read(&fn->ins[n], count_cb, &uc);
+    compute_defs(fn, &d);
+    /* A label after each branch that will be threaded and has none. */
+    {
+        int need = 0;
+        char *mark = xcalloc((size_t)fn->nins + 1, 1);
+        for (int n = 0; n + 2 < fn->nins; n++) {
+            const struct ir_ins *nx = &fn->ins[n + 2];
+            if (!thread_site(fn, n, use) || nx->op == IR_LABEL ||
+                nx->op == IR_JMP)
+                continue;
+            for (int k = 0; k + 1 < fn->nins; k++)
+                if (thread_arm(fn, k, fn->ins[n + 1].a, fn->ins[n].label, &d)) {
+                    mark[n + 1] = 1;
+                    need = 1;
+                    break;
+                }
+        }
+        if (need) {
+            struct ibuf nb = { 0, 0, 0 };
+            int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+            for (int n = 0; n < fn->nins; n++) {
+                newpos[n] = nb.n;
+                *ib_push(&nb) = fn->ins[n];
+                if (mark[n]) {
+                    struct ir_ins *l = ib_push(&nb);
+                    memset(l, 0, sizeof *l);
+                    l->op = IR_LABEL;
+                    l->label = fn->nlabels++;
+                    l->dst = l->a = l->b = -1;
+                    l->line = fn->ins[n].line; l->col = fn->ins[n].col;
+                    l->synth = 1;
+                }
+            }
+            newpos[fn->nins] = nb.n;
+            remap_scopes(fn, newpos, fn->nins);
+            free(newpos);
+            free(fn->ins);
+            fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+            free(d.cnt); free(d.ins);
+            compute_defs(fn, &d);
+        }
+        free(mark);
+    }
+    for (int n = 0; n + 2 < fn->nins; n++) {
+        const struct ir_ins *lab = &fn->ins[n], *br = &fn->ins[n + 1];
+        const struct ir_ins *nx = &fn->ins[n + 2];
+        int t = br->a, L = lab->label, Lx = br->label, Lafter;
+        if (!thread_site(fn, n, use))
+            continue;
+        if (nx->op == IR_LABEL)     Lafter = nx->label;
+        else if (nx->op == IR_JMP)  Lafter = nx->label;
+        else                        continue;
+        for (int k = 0; k + 1 < fn->nins; k++) {
+            struct ir_ins *def = &fn->ins[k], *go = &fn->ins[k + 1];
+            if (!thread_arm(fn, k, t, L, &d))
+                continue;
+            if (def->op == IR_CONST) {
+                unsigned long mask = br->w >= 8 ? ~0UL
+                                   : (1UL << (8 * (br->w > 0 ? br->w : 4))) - 1;
+                int zero = ((unsigned long)def->imm & mask) == 0;
+                int taken = br->op == IR_BRZ ? zero : !zero;
+                int line = def->line, col = def->col;
+                memset(def, 0, sizeof *def);
+                def->op = IR_JMP;
+                def->label = taken ? Lx : Lafter;
+                def->dst = def->a = def->b = -1;
+                def->line = line; def->col = col;
+                changed = 1;
+            } else {                               /* a copied comparison */
+                int c = def->a;
+                def->op = br->op;
+                def->a = c;
+                def->b = -1;
+                def->dst = -1;
+                def->label = Lx;
+                def->w = br->w;
+                def->sign = br->sign;
+                def->imm_b = 0;
+                go->label = Lafter;
+                changed = 1;
+            }
+        }
+    }
+    free(use);
+    free(d.cnt); free(d.ins);
+    return changed;
+}
+
+struct fwdctx { const int *fwd; int n, changed; };
+static void fwd_cb(int *p, void *ctx)
+{
+    struct fwdctx *c = ctx;
+    int l = *p;
+    if (l < 0 || l >= c->n || c->fwd[l] < 0 || c->fwd[l] == l)
+        return;
+    *p = c->fwd[l];
+    c->changed = 1;
+}
+struct reachctx { char *reached; int n; };
+static void reach_cb(int *p, void *ctx)
+{
+    struct reachctx *c = ctx;
+    if (*p >= 0 && *p < c->n) c->reached[*p] = 1;
+}
+
 static int pass_cfgclean(struct ir_func *fn)
 {
     if (fn->nins == 0 || fn->nlabels == 0)
@@ -2529,15 +3125,17 @@ static int pass_cfgclean(struct ir_func *fn)
             t = fwd[t];
         fwd[l] = t;
     }
-    for (int n = 0; n < fn->nins; n++) {
-        struct ir_ins *i = &fn->ins[n];
-        if (i->op != IR_JMP && i->op != IR_BRZ && i->op != IR_BRNZ)
-            continue;
-        int l = i->label;
-        if (l < 0 || l >= fn->nlabels || fwd[l] < 0 || fwd[l] == l)
-            continue;
-        i->label = fwd[l];
-        changed = 1;
+    {
+        struct fwdctx fc = { fwd, fn->nlabels, 0 };
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_JMP && i->op != IR_BRZ && i->op != IR_BRNZ &&
+                i->op != IR_SWITCH)
+                continue;
+            each_label(fn, i, fwd_cb, &fc);
+        }
+        if (fc.changed)
+            changed = 1;
     }
 
     /* A conditional branch whose taken target is the fall-through is a
@@ -2604,13 +3202,42 @@ static int pass_cfgclean(struct ir_func *fn)
      *
      * A landing pad's label IS named, by the exception region rather
      * than by a branch, and the unwinder is what jumps to it. */
+    /* A conditional branch AROUND an unconditional one:
+     *
+     *      brz  c, L1              brnz c, L2
+     *      jmp  L2         ==>
+     *   L1:                     L1:
+     *
+     * is one branch on the opposite sense. irgen writes the first shape
+     * for every `?:` and `if` whose arm ends in a jump, and on a machine
+     * with conditional branches it cost a branch per test. The inversion
+     * is exact on the IR's 0/1 value -- brz and brnz are each other's
+     * complement whatever produced it, NaN compares included. The jump
+     * is left aimed at L1, where the rule below drops it. */
+    for (int n = 0; n + 2 < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n], *j = &fn->ins[n + 1];
+        if ((i->op != IR_BRZ && i->op != IR_BRNZ) || j->op != IR_JMP ||
+            j->label == i->label)
+            continue;
+        int m = n + 2, hit = 0;
+        while (m < fn->nins && fn->ins[m].op == IR_LABEL)
+            if (fn->ins[m++].label == i->label) { hit = 1; break; }
+        if (!hit)
+            continue;
+        {
+            int l2 = j->label;       /* where the branch goes now */
+            i->op = i->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+            j->label = i->label;     /* a jump to the fall-through */
+            i->label = l2;
+        }
+        changed = 1;
+    }
+
     char *reached = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1);
-    for (int n = 0; n < fn->nins; n++) {
-        struct ir_ins *i = &fn->ins[n];
-        if ((i->op == IR_JMP || i->op == IR_BRZ || i->op == IR_BRNZ ||
-             i->op == IR_LABELADDR) &&
-            i->label >= 0 && i->label < fn->nlabels)
-            reached[i->label] = 1;
+    {
+        struct reachctx rc = { reached, fn->nlabels };
+        for (int n = 0; n < fn->nins; n++)
+            each_label(fn, &fn->ins[n], reach_cb, &rc);
     }
     for (int e = 0; e < fn->neh; e++)
         if (fn->eh[e].lp_label >= 0 && fn->eh[e].lp_label < fn->nlabels)
@@ -2634,7 +3261,7 @@ static int pass_cfgclean(struct ir_func *fn)
             }
         }
         if ((i->op == IR_JMP && !dead[n]) || i->op == IR_RET ||
-            i->op == IR_UD2) {
+            i->op == IR_UD2 || i->op == IR_SWITCH) {
             for (int m = n + 1; m < fn->nins; m++) {
                 if (fn->ins[m].op == IR_LABEL)
                     break;
@@ -3542,7 +4169,8 @@ static int pre_tail(struct ir_func *fn, struct bb *bb, int b)
     if (e > bb[b].start) {
         enum ir_op op = fn->ins[e - 1].op;
         if (op == IR_JMP || op == IR_BRZ || op == IR_BRNZ ||
-            op == IR_RET || op == IR_UD2 || op == IR_IGOTO)
+            op == IR_RET || op == IR_UD2 || op == IR_IGOTO ||
+            op == IR_SWITCH)
             return e - 1;
     }
     return e;
@@ -3948,7 +4576,9 @@ static int pre_one(struct ir_func *fn)
             /* retarget the branch when cb is its target; otherwise cb is
              * the fall-through, and a jmp after the branch takes it */
             struct ir_ins *term = &fn->ins[bb[pb].end - 1];
-            if (term->label == cblab) pins[pb] = bb[pb].end - 1;  /* retarget */
+            /* a switch never falls through: cb is in its table */
+            if (term->op == IR_SWITCH || term->label == cblab)
+                pins[pb] = bb[pb].end - 1;                    /* retarget */
             else { pins[pb] = bb[pb].end; pjmp[pb] = 1; }
         } else {
             pins[pb] = pre_tail(fn, bb, pb);
@@ -4018,6 +4648,9 @@ static int pre_one(struct ir_func *fn)
                 j->op = IR_JMP; j->dst = -1; j->a = -1; j->b = -1;
                 j->label = pnew[b]; j->line = line; j->col = col;
                 j->synth = line ? 0 : 1;
+            } else if (out->op == IR_SWITCH) {
+                struct retarget rt = { cblab, pnew[b] };
+                each_label(fn, out, retarget_cb, &rt);  /* every entry that was cb */
             } else {
                 out->label = pnew[b];           /* branch now enters the split */
             }
@@ -4093,6 +4726,7 @@ static int licm_one(struct ir_func *fn)
     compute_defs(fn, &d);
     char *in = xmalloc((size_t)nbb);
     char *inl_ins = xmalloc((size_t)fn->nins);
+    char *wrin = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1));
     char *inv = xmalloc((size_t)fn->nins);
     char *stored = xmalloc((size_t)(fn->nvars ? fn->nvars : 1));
     int *hoist = xmalloc((size_t)fn->nins * sizeof *hoist);
@@ -4142,7 +4776,7 @@ static int licm_one(struct ir_func *fn)
             if (!in[p] || bb[p].end != bb[h].start || bb[p].end <= bb[p].start)
                 continue;
             enum ir_op t = fn->ins[bb[p].end - 1].op;
-            if (t != IR_JMP && t != IR_RET && t != IR_UD2)
+            if (t != IR_JMP && t != IR_RET && t != IR_UD2 && t != IR_SWITCH)
                 ok = 0;
         }
         if (!ok)
@@ -4161,6 +4795,26 @@ static int licm_one(struct ir_func *fn)
                     fn->ins[n].dst < fn->nvars)
                     stored[fn->ins[n].dst] = 1;
             }
+        }
+        /* Which temps the loop writes at all, by ANY definition. A temp
+         * written more than once -- an enclosing loop's counter, defined
+         * at its entry and again at its latch -- is still invariant here
+         * when none of those writes is inside this loop: the loop is
+         * entered only through its preheader, and nothing in it changes
+         * the value it found there. Refusing every multiply-defined
+         * operand refused the row address of every 2-D array walk:
+         * `ma[i][k]` recomputed i*48 + ma on each trip of the k loop. */
+        memset(wrin, 0, (size_t)(fn->nvregs ? fn->nvregs : 1));
+        for (int n = 0; n < fn->nins; n++) {
+            if (!inl_ins[n])
+                continue;
+            int t = def_target(&fn->ins[n]);
+            if (t >= 0 && t < fn->nvregs) wrin[t] = 1;
+            if (fn->ins[n].op == IR_LANDING && fn->ins[n].b >= 0 &&
+                fn->ins[n].b < fn->nvregs)
+                wrin[fn->ins[n].b] = 1;
+            if (fn->ins[n].op == IR_ASM)
+                memset(wrin, 1, (size_t)(fn->nvregs ? fn->nvregs : 1));
         }
 
         /* The invariance fixpoint. */
@@ -4192,7 +4846,12 @@ static int licm_one(struct ir_func *fn)
                 for (int k = 0; k < o.n && all; k++) {
                     int v = o.v[k];
                     if (v < 0 || v >= fn->nvregs) { all = 0; break; }
-                    if (d.cnt[v] != 1) { all = 0; break; }
+                    if (d.cnt[v] != 1) {
+                        /* several writes: invariant iff none in the loop
+                         * (a local's slot has its own rules, above) */
+                        if (v < fn->nvars || wrin[v]) all = 0;
+                        continue;
+                    }
                     int def = d.ins[v];
                     if (def < 0)            /* a parameter, bound at entry */
                         continue;
@@ -4217,6 +4876,8 @@ static int licm_one(struct ir_func *fn)
             struct opnds o;
             value_opnds(&fn->ins[hoist[k]], &o);
             for (int q = 0; q < o.n && ok; q++) {
+                if (d.cnt[o.v[q]] != 1)
+                    continue;                /* written only outside the loop */
                 int def = d.ins[o.v[q]];
                 if (def < 0 || !inv[def])
                     continue;
@@ -4292,7 +4953,7 @@ static int licm_one(struct ir_func *fn)
         done = 1;
     }
 
-    free(hoist); free(stored); free(inv); free(inl_ins); free(in);
+    free(hoist); free(stored); free(inv); free(inl_ins); free(wrin); free(in);
     free_defs(&d); free(addr_taken);
     free(order); free(l2b);
     free_cfg(bb, nbb);
@@ -4414,27 +5075,52 @@ static int rotate_one(struct ir_func *fn)
          * which then paid two branches an iteration for the life of the
          * program. Volatile is still refused: the ACCESS is the effect
          * there, and moving one is not a thing to do on this argument. */
+        /* A value the header computes and the body (or the code after
+         * the loop) also reads -- `while (*s) h ^= *s++;` once value
+         * numbering has given the body the header's load -- is written
+         * by the copy under its OWN name: the body is entered from the
+         * guard or from the copy, and either way that name holds this
+         * iteration's value; so does every path to the exit. It is
+         * assigned twice then, which is the price; refusing it cost
+         * every such loop a jump an iteration. One read only in the
+         * header gets a fresh temp, so the guard's stands untouched. */
         int ok = 1;
+        int ncopy = bb[h].end - 1 - (bb[h].start + 1);
+        char *outside = xcalloc((size_t)(ncopy ? ncopy : 1), 1);
         for (int n = bb[h].start + 1; n < bb[h].end - 1 && ok; n++) {
             struct ir_ins *i = &fn->ins[n];
             if (!(is_pure(i->op) || i->op == IR_LOAD) || i->vol)
                 { ok = 0; break; }
             int t = def_target(i);
             if (t < fn->nvars || t >= fn->nvregs) { ok = 0; break; }
-            for (int m = 0; m < fn->nins && ok; m++) {
+            for (int m = 0; m < fn->nins; m++) {
                 if (m >= bb[h].start && m < bb[h].end)
                     continue;
-                if (ins_reads(&fn->ins[m], t))
-                    ok = 0;
+                if (ins_reads(&fn->ins[m], t)) {
+                    outside[n - (bb[h].start + 1)] = 1;
+                    break;
+                }
             }
         }
-        if (!ok) { free(in); continue; }
+        if (!ok) { free(in); free(outside); continue; }
 
-        /* Fresh temps for the copy, so the guard's values stand. */
-        int ncopy = bb[h].end - 1 - (bb[h].start + 1);
+        /* A value with no operands -- a constant, an address -- is the
+         * same on every iteration: the copy reads the guard's, which
+         * dominates the latch, rather than writing it again. Written
+         * twice it would stop being a known constant, and folding,
+         * LICM and unrolling all ask for exactly one definition (the
+         * loop bound `j < 24` shared by value numbering with `i * 24`
+         * left the workload's matrix checksum un-unrolled). */
         int *map = xmalloc((size_t)(ncopy ? ncopy : 1) * sizeof *map);
-        for (int k = 0; k < ncopy; k++)
-            map[k] = fn->nvregs++;
+        for (int k = 0; k < ncopy; k++) {
+            enum ir_op op = fn->ins[bb[h].start + 1 + k].op;
+            int fixed = op == IR_CONST || op == IR_GADDR || op == IR_ADDR ||
+                        op == IR_STRADDR || op == IR_FADDR;
+            map[k] = fixed ? -1
+                   : outside[k] ? def_target(&fn->ins[bb[h].start + 1 + k])
+                   : fn->nvregs++;
+        }
+        free(outside);
         int Lbody = fn->nlabels++;
 
         struct ibuf nb = { 0, 0, 0 };
@@ -4460,10 +5146,13 @@ static int rotate_one(struct ir_func *fn)
                     tbl[v] = -1;
                 for (int q = 0; q < ncopy; q++) {
                     int old = def_target(&fn->ins[bb[h].start + 1 + q]);
-                    if (old >= 0 && old < fn->nvregs)
+                    if (old >= 0 && old < fn->nvregs && map[q] >= 0 &&
+                        map[q] != old)
                         tbl[old] = map[q];
                 }
                 for (int k = 0; k < ncopy; k++) {
+                    if (map[k] < 0)
+                        continue;            /* the guard's value stands */
                     struct ir_ins *c = ib_push(&nb);
                     *c = fn->ins[bb[h].start + 1 + k];
                     struct lcopy lc = { tbl, fn->nvregs, 0 };
@@ -5666,6 +6355,20 @@ static int vectorize_one(struct ir_func *fn)
         if (!ok) { VDBG("h=%d a vector value escapes\n", h); free(vec); continue; }
 
         /* ---- rewrite ------------------------------------------------ */
+        /* A frame slot written in the body -- a local kept in memory
+         * because its address is taken -- is one place written on every
+         * iteration. Neither rewrite keeps that: the copying one renames
+         * every definition, slots included, and the in-place one would
+         * write it once per vector of iterations. */
+        {
+            int slot_write = 0;
+            for (int q = L.lo; q < L.hi; q++)
+                slot_write |= fn->ins[q].op == IR_STVAR;
+            if (slot_write) {
+                VDBG("h=%d writes a local kept in memory\n", h);
+                free(vec); continue;
+            }
+        }
         if (L.bound_reg >= 0 && L.red_ext >= 0) {
             VDBG("h=%d a widening sum with a runtime count\n", h);
             free(vec); continue;        /* the copy path does not widen */
@@ -5976,6 +6679,105 @@ static int pass_vectorize(struct ir_func *fn)
  * see base + n*scale where the chain would have given base + (n-1)*scale.
  */
 
+/* Is `x` the induction variable scaled by a constant -- iv, a widening of
+ * it, a shift of that by a constant, or a multiply by one? Fills the
+ * scale. A multiply is how a ROW of a 2-D array is indexed (`m[k][j]`
+ * is base + k*48 + j*2), and the shift is how an element is. */
+static int scaled_iv(struct ir_func *fn, struct defs *d, int lo, int hi,
+                     int x, int iv, long *scale_out)
+{
+    long sc = 1;
+    if (x >= 0 && x < fn->nvregs && d->cnt[x] == 1) {
+        int xn = d->ins[x];
+        if (xn >= lo && xn < hi &&
+            (fn->ins[xn].op == IR_SHL || fn->ins[xn].op == IR_MUL)) {
+            struct ir_ins *s = &fn->ins[xn];
+            long c;
+            if (!const_b(fn, d, s, &c))
+                return 0;
+            if (s->op == IR_SHL) {
+                if (c < 0 || c > 30) return 0;
+                sc = 1L << c;
+            } else {
+                if (c <= 0 || c > (1L << 20)) return 0;
+                sc = c;
+            }
+            x = s->a;
+        }
+    }
+    if (x >= 0 && x < fn->nvregs && d->cnt[x] == 1) {
+        int xn = d->ins[x];
+        if (xn >= lo && xn < hi && fn->ins[xn].op == IR_EXT)
+            x = fn->ins[xn].a;
+    }
+    if (x != iv)
+        return 0;
+    *scale_out = sc;
+    return 1;
+}
+
+/* Defined once, and outside [lo, hi): a value the loop cannot change. */
+static int invariant_vreg(struct ir_func *fn, struct defs *d, int lo, int hi, int v)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    int bd = d->ins[v];
+    return !(bd >= lo && bd < hi);
+}
+static int is_const_vreg(struct ir_func *fn, struct defs *d, int v)
+{
+    return v >= 0 && v < fn->nvregs && d->cnt[v] == 1 && d->ins[v] >= 0 &&
+           fn->ins[d->ins[v]].op == IR_CONST;
+}
+
+/* Is `v` the value base + iv*scale (+ base2), every base invariant? The
+ * second base is the column of a row walk: (m + k*48) + j*2, where j*2
+ * is fixed while k moves. base2 is -1 when there is none. */
+static int linear_in_iv2(struct ir_func *fn, struct defs *d, int lo, int hi,
+                         int v, int iv, int *base_out, int *base2_out,
+                         long *scale_out)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1)
+        return 0;
+    int an = d->ins[v];
+    if (an < lo || an >= hi || fn->ins[an].op != IR_ADD || fn->ins[an].imm_b)
+        return 0;
+    const struct ir_ins *add = &fn->ins[an];
+    for (int side = 0; side < 2; side++) {
+        int p = side ? add->b : add->a, q = side ? add->a : add->b;
+        if (!invariant_vreg(fn, d, lo, hi, p))
+            continue;
+        /* base + scaled iv -- where the base is something to walk from:
+         * a CONSTANT base is counter arithmetic, `i + 1` with its one
+         * hoisted into a vreg, and taking that for an address turned
+         * every counted loop's increment into a second induction
+         * variable, which the unroller then no longer recognised (the
+         * `unroll` kernel ran 1.6 times slower). */
+        if (!is_const_vreg(fn, d, p) &&
+            scaled_iv(fn, d, lo, hi, q, iv, scale_out)) {
+            *base_out = p; *base2_out = -1;
+            return 1;
+        }
+        /* (base + scaled iv) + base2, the inner sum computed only here */
+        if (q >= 0 && q < fn->nvregs && d->cnt[q] == 1) {
+            int qn = d->ins[q];
+            if (qn < lo || qn >= hi || fn->ins[qn].op != IR_ADD || fn->ins[qn].imm_b)
+                continue;
+            const struct ir_ins *in2 = &fn->ins[qn];
+            for (int s2 = 0; s2 < 2; s2++) {
+                int b1 = s2 ? in2->b : in2->a, r = s2 ? in2->a : in2->b;
+                if (invariant_vreg(fn, d, lo, hi, b1) &&
+                    !(is_const_vreg(fn, d, b1) && is_const_vreg(fn, d, p)) &&
+                    scaled_iv(fn, d, lo, hi, r, iv, scale_out)) {
+                    *base_out = b1; *base2_out = p;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 /* Is `v` the value base + iv*scale, with base invariant? Fills base and
  * scale. The chain is irgen's: an optional widening of the index, a
  * shift by the log of the element size, and an add. */
@@ -6111,33 +6913,72 @@ static int ivsr_one(struct ir_func *fn)
         }
 
         /* the induction variable must start at a known place, because
-         * the new pointer has to be initialised to match it */
-        int init_zero = 1;
+         * the new pointer has to be initialised to match it: its one
+         * other definition is OUTSIDE the loop, and is a zero.
+         *
+         * "Outside" is the part that was missing. With both definitions
+         * inside, this loop had nothing to check and said yes -- which is
+         * what an INNER loop's counter looks like from the loop around
+         * it: `for (j..) for (i = k; i < 16; i++) s += a[i]` walked its
+         * pointer once per j, from a, and the inner loop read a[j]
+         * sixteen times. Only an inner counter starting at zero escaped,
+         * because that inner loop was rewritten first and its counter
+         * was gone before the outer one looked. */
+        int init_zero = 1, ninit = 0;
         for (int n = 0; n < fn->nins && init_zero; n++) {
             if (n >= lo && n < hi)
                 continue;
             struct ir_ins *i = &fn->ins[n];
             if (def_target(i) != iv)
                 continue;
-            if (!(i->op == IR_MOV && i->a >= 0 && i->a < fn->nvregs &&
-                  d.cnt[i->a] == 1 && d.ins[i->a] >= 0 &&
-                  fn->ins[d.ins[i->a]].op == IR_CONST &&
-                  fn->ins[d.ins[i->a]].imm == 0))
+            ninit++;
+            if (!((i->op == IR_MOV && i->a >= 0 && i->a < fn->nvregs &&
+                   d.cnt[i->a] == 1 && d.ins[i->a] >= 0 &&
+                   fn->ins[d.ins[i->a]].op == IR_CONST &&
+                   fn->ins[d.ins[i->a]].imm == 0) ||
+                  (i->op == IR_CONST && i->imm == 0)))
                 init_zero = 0;
+            /* A copy of a temp written more than once -- value numbering
+             * shares one `const 0` between `s = 0` and `k = 0`, and s is
+             * then the loop's accumulator too. What the copy reads is the
+             * nearest write of that temp before it in the same block: if
+             * that is a zero, so is the counter. */
+            if (!init_zero && i->op == IR_MOV && i->a >= 0 &&
+                i->a < fn->nvregs && d.cnt[i->a] > 1) {
+                for (int m = n - 1; m >= 0; m--) {
+                    const struct ir_ins *w = &fn->ins[m];
+                    if (w->op == IR_LABEL || w->op == IR_ASM ||
+                        w->op == IR_LANDING)
+                        break;
+                    if (def_target(w) != i->a)
+                        continue;
+                    if (w->op == IR_CONST && w->imm == 0 && !w->flt)
+                        init_zero = 1;
+                    break;
+                }
+            }
         }
-        if (!init_zero)
+        if (!init_zero || ninit != 1)
             continue;
 
         /* every candidate: an address computed from the index, whose
          * value nothing outside the loop reads */
-        int cand[16], cbase[16], nc = 0;
+        int cand[16], cbase[16], cbase2[16], nc = 0;
         long cscale[16];
         for (int n = lo; n < hi && nc < 16; n++) {
             int t = def_target(&fn->ins[n]);
-            int base; long scale;
-            if (t < 0 || fn->ins[n].op != IR_ADD)
+            int base, base2 = -1; long scale;
+            /* At POINTER width, and only there: the walk is an add of that
+             * width, so it reproduces the chain exactly modulo 2^PTRW and
+             * nothing else. A 64-bit integer on a 32-bit target --
+             * `m[i][k] = i * 1000000000LL + k` -- is linear in k too, and
+             * walking it as a pointer kept its low word and dropped the
+             * high one. */
+            if (t < 0 || fn->ins[n].op != IR_ADD || fn->ins[n].w != PTRW ||
+                fn->ins[n].flt)
                 continue;
-            if (!linear_in_iv(fn, &d, lo, hi, t, iv, &base, &scale))
+            if (!linear_in_iv(fn, &d, lo, hi, t, iv, &base, &scale) &&
+                !linear_in_iv2(fn, &d, lo, hi, t, iv, &base, &base2, &scale))
                 continue;
             int escapes = 0;
             for (int m = 0; m < fn->nins && !escapes; m++)
@@ -6150,7 +6991,8 @@ static int ivsr_one(struct ir_func *fn)
                 if (cand[k] == t) dup = 1;
             if (dup)
                 continue;
-            cand[nc] = t; cbase[nc] = base; cscale[nc] = scale; nc++;
+            cand[nc] = t; cbase[nc] = base; cbase2[nc] = base2;
+            cscale[nc] = scale; nc++;
         }
         if (nc == 0)
             continue;
@@ -6211,39 +7053,50 @@ static int ivsr_one(struct ir_func *fn)
         }
 
         /* ---- rewrite: a pointer per candidate ---- */
-        int ptr[16], delta[16];
+        int ptr[16], delta[16], bsum[16];
         for (int k = 0; k < nc; k++) {
             ptr[k] = fn->nvregs++;
             delta[k] = fn->nvregs++;
+            bsum[k] = cbase2[k] >= 0 ? fn->nvregs++ : -1;
         }
         struct ibuf nb = { 0, 0, 0 };
         int *newpos = fn->var_scope_lo
             ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
         for (int n = 0; n < fn->nins; n++) {
             if (n == lo) {
+                /* a two-part base, summed once before the loop */
+                for (int k = 0; k < nc; k++) {
+                    if (bsum[k] < 0)
+                        continue;
+                    struct ir_ins *a = ib_push(&nb);
+                    a->op = IR_ADD; a->dst = bsum[k]; a->a = cbase[k];
+                    a->b = cbase2[k]; a->w = PTRW;
+                    a->line = fn->ins[d.ins[cand[k]]].line; a->synth = 1;
+                    cbase[k] = bsum[k];
+                }
                 for (int k = 0; k < nc; k++) {
                     struct ir_ins *c = ib_push(&nb);
                     c->op = IR_CONST; c->dst = delta[k];
-                    c->w = 8; c->imm = cscale[k] * step;
+                    c->w = PTRW; c->imm = cscale[k] * step;
                     c->line = fn->ins[cand[k] >= 0 ? d.ins[cand[k]] : n].line;
                     c->synth = 1;
                     struct ir_ins *m = ib_push(&nb);
                     m->op = IR_MOV; m->dst = ptr[k]; m->a = cbase[k];
-                    m->w = 8;
+                    m->w = PTRW;
                     m->line = c->line; m->synth = 1;
                 }
                 if (lftr_lim >= 0) {
                     struct ir_ins *c = ib_push(&nb);
-                    c->op = IR_CONST; c->dst = lftr_k; c->w = 8;
+                    c->op = IR_CONST; c->dst = lftr_k; c->w = PTRW;
                     c->imm = lftr_off;
                     c->line = fn->ins[inc_at].line; c->synth = 1;
                     struct ir_ins *a3 = ib_push(&nb);
                     a3->op = IR_ADD; a3->dst = lftr_lim; a3->a = cbase[0];
-                    a3->b = lftr_k; a3->w = 8;
+                    a3->b = lftr_k; a3->w = PTRW;
                     a3->line = fn->ins[inc_at].line; a3->synth = 1;
                     struct ir_ins *m2 = ib_push(&nb);
                     m2->op = IR_MOV; m2->dst = lftr_iv; m2->a = iv;
-                    m2->w = fn->ins[copy_ins].w ? fn->ins[copy_ins].w : 8;
+                    m2->w = fn->ins[copy_ins].w ? fn->ins[copy_ins].w : PTRW;
                     m2->line = fn->ins[inc_at].line; m2->synth = 1;
                 }
             }
@@ -6251,7 +7104,7 @@ static int ivsr_one(struct ir_func *fn)
                 for (int k = 0; k < nc; k++) {
                     struct ir_ins *a2 = ib_push(&nb);
                     a2->op = IR_ADD; a2->dst = ptr[k]; a2->a = ptr[k];
-                    a2->b = delta[k]; a2->w = 8;
+                    a2->b = delta[k]; a2->w = PTRW;
                     a2->line = fn->ins[n].line; a2->synth = 1;
                 }
             }
@@ -6267,7 +7120,7 @@ static int ivsr_one(struct ir_func *fn)
                 struct ir_ins *o = ib_push(&nb);
                 *o = fn->ins[n];
                 o->pred = B_NE; o->a = ptr[0]; o->b = lftr_lim;
-                o->w = 8; o->sign = 0; o->imm_b = 0; o->imm = 0;
+                o->w = PTRW; o->sign = 0; o->imm_b = 0; o->imm = 0;
                 continue;
             }
             struct ir_ins *o = ib_push(&nb);
@@ -6386,7 +7239,11 @@ struct unrloop {
     int Lh;
     int iv;            /* the induction variable's phi temp */
     int bound;         /* the vreg it is compared against (loop-invariant) */
-    int cmp_ins;       /* `c = cmp.w lt iv, bound` -- not copied */
+    long step;         /* what the iv advances by each iteration: 1, or a
+                        * pointer walk's element size */
+    int cmp_ins;       /* `c = cmp.w lt iv, bound`, or `cmp.w ne iv, bound`
+                        * once strength reduction has made the loop walk a
+                        * pointer -- not copied */
     int w;             /* 4 or 8: the compare's width */
     int body_lo;       /* [body_lo, cmp_ins): what a copy consists of */
 };
@@ -6400,7 +7257,7 @@ static int unr_copyable(const struct ir_ins *i)
     switch (i->op) {
     case IR_ALLOCA: case IR_SPSAVE: case IR_SPRESTORE:
     case IR_ASM: case IR_VA_START: case IR_LANDING:
-    case IR_IGOTO: case IR_LABELADDR:
+    case IR_IGOTO: case IR_LABELADDR: case IR_SWITCH:
     case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_RET: case IR_UD2:
         return 0;
     case IR_CALL:
@@ -6418,7 +7275,6 @@ static struct ir_ins *unr_emit(struct ibuf *nb, enum ir_op op,
                                int line, int col)
 {
     struct ir_ins *p = ib_push(nb);
-    memset(p, 0, sizeof *p);
     p->op = op;
     p->line = line; p->col = col; p->synth = 1;
     return p;
@@ -6469,14 +7325,21 @@ static int unr_find(struct ir_func *fn, struct bb *bb, int nbb, int *order,
         if (L->hi > fn->nins)
             continue;
 
-        /* `c = cmp.w lt iv, bound`, signed, bound a loop-invariant vreg. */
+        /* `c = cmp.w lt iv, bound`, signed, bound a loop-invariant vreg --
+         * or `cmp.w ne iv, bound`, which is what induction-variable
+         * strength reduction leaves: the loop walks a pointer up to its
+         * end. For `ne` the iterations left are the UNSIGNED, modular
+         * (bound - iv) / step exactly when the loop terminates at all,
+         * whatever the direction the values were in, so the counted
+         * tests below are right for it with no signed guard. */
         int cn = (br->a >= 0 && br->a < fn->nvregs && d->cnt[br->a] == 1)
                  ? d->ins[br->a] : -1;
         if (cn < L->lo || cn >= L->hi || cn != L->hi - 2)
             continue;                    /* the test must be the latch's last */
         struct ir_ins *cmp = &fn->ins[cn];
-        if (cmp->op != IR_CMP || cmp->pred != B_LT || !cmp->sign || cmp->flt ||
-            cmp->imm_b || cmp->b < 0 || cmp->b >= fn->nvregs)
+        if (cmp->op != IR_CMP || cmp->flt || cmp->imm_b ||
+            cmp->b < 0 || cmp->b >= fn->nvregs ||
+            !((cmp->pred == B_LT && cmp->sign) || cmp->pred == B_NE))
             continue;
         if (cmp->w != 4 && cmp->w != 8)
             continue;
@@ -6491,24 +7354,39 @@ static int unr_find(struct ir_func *fn, struct bb *bb, int nbb, int *order,
         if (bn == -2 || (bn >= L->lo && bn < L->hi))
             continue;
 
-        /* `iv = mov next`, `next = iv + 1`, both inside the loop. */
-        int copy_ins = -1;
-        for (int n = L->lo; n < L->hi; n++)
-            if (fn->ins[n].op == IR_MOV && fn->ins[n].dst == L->iv) {
-                if (copy_ins >= 0) { copy_ins = -1; break; }
-                copy_ins = n;
-            }
-        if (copy_ins < 0)
+        /* `iv = mov next`, `next = iv + 1`, both inside the loop -- or the
+         * one instruction `iv = add iv, step`, which is how strength
+         * reduction advances the pointer it walks. Either way the iv must
+         * be written exactly once inside the loop, so that the renaming
+         * of the copies carries it from each to the next. */
+        int copy_ins = -1, step_ins = -1, ndef = 0;
+        for (int n = L->lo; n < L->hi; n++) {
+            const struct ir_ins *q = &fn->ins[n];
+            if (def_target(q) != L->iv)
+                continue;
+            ndef++;
+            if (q->op == IR_MOV) copy_ins = n;
+            else if (q->op == IR_ADD && q->a == L->iv) step_ins = n;
+        }
+        if (ndef != 1)
             continue;
-        int nxt = fn->ins[copy_ins].a;
-        if (nxt < 0 || nxt >= fn->nvregs || d->cnt[nxt] != 1)
+        if (copy_ins >= 0) {
+            int nxt = fn->ins[copy_ins].a;
+            if (nxt < 0 || nxt >= fn->nvregs || d->cnt[nxt] != 1)
+                continue;
+            step_ins = d->ins[nxt];
+            if (step_ins < L->lo || step_ins >= L->hi ||
+                fn->ins[step_ins].op != IR_ADD ||
+                fn->ins[step_ins].a != L->iv)
+                continue;
+        } else if (step_ins < 0) {
             continue;
-        int step_ins = d->ins[nxt];
+        }
         long step;
-        if (step_ins < L->lo || step_ins >= L->hi ||
-            fn->ins[step_ins].op != IR_ADD || fn->ins[step_ins].a != L->iv ||
-            !const_b(fn, d, &fn->ins[step_ins], &step) || step != 1)
+        if (!const_b(fn, d, &fn->ins[step_ins], &step) || step < 1 ||
+            (cmp->pred == B_LT && step != 1) || step > 4096)
             continue;
+        L->step = step;
 
         /* Everything from just after the header's label up to the test is
          * what a copy consists of. */
@@ -6564,6 +7442,19 @@ static int unr_find(struct ir_func *fn, struct bb *bb, int nbb, int *order,
     return 0;
 }
 
+/* unr_local_cb: a read of v at instruction `at`. v stays the body's own
+ * only while every read of it is inside the body and after its def. */
+struct unr_local { char *local; const struct defs *d; int at, end, nv; };
+static void unr_local_cb(int *p, void *ctx)
+{
+    struct unr_local *c = ctx;
+    int v = *p;
+    if (v < 0 || v >= c->nv || !c->local[v])
+        return;
+    if (!(c->at > c->d->ins[v] && c->at < c->end))
+        c->local[v] = 0;
+}
+
 static int unroll_one(struct ir_func *fn, char *seen, int nseen)
 {
     if (fn->nins == 0)
@@ -6609,6 +7500,23 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
      * carried temp and the next would read it back -- a dependency chain
      * that exists only because two copies share a name. */
     int nvr = fn->nvregs;
+    /* The last copy writes the original names, so that the block leaves
+     * every value where the loop's own body would -- but only the values
+     * that outlive the body need that: the ones the loop carries, tests,
+     * or reads after it. A temp that dies inside the body gets a fresh
+     * name in the last copy as in every other. Otherwise its original
+     * name is written twice, by that copy and by the remainder loop, and
+     * the backends' single-use fusions (`ldr [xn, xm, lsl #2]` is a
+     * shift, an add and a load with one use each) refuse it in both:
+     * `bounds` in tests/bench ran 5% MORE instructions unrolled. */
+    char *local = xmalloc((size_t)(nvr ? nvr : 1));
+    for (int v = 0; v < nvr; v++)
+        local[v] = d.cnt[v] == 1 && d.ins[v] >= L.body_lo &&
+                   d.ins[v] < L.cmp_ins;
+    for (int m = 0; m < fn->nins; m++) {
+        struct unr_local ul = { local, &d, m, L.cmp_ins, nvr };
+        each_read(&fn->ins[m], unr_local_cb, &ul);
+    }
     int Lunroll = fn->nlabels++;
     int Lexit = fn->nlabels++;
     int lineh = fn->ins[L.lo].line, colh = fn->ins[L.lo].col;
@@ -6627,28 +7535,40 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
             int kU = fn->nvregs++;
             /* ---- once, on the way in: is there a full run to do? ----
              *
-             * `(unsigned)(bound - iv) >= U` counts the iterations left
-             * without overflowing, and `iv < bound` is what makes that
-             * subtraction meaningful -- so the signed test comes first.
-             * Both are paid once; the loop below re-tests only the
-             * count, because after U bodies it knows iv <= bound. */
-            int c0 = fn->nvregs++;
-            p = ib_push(&nb);
-            *p = fn->ins[L.cmp_ins];          /* same compare, same location */
-            p->dst = c0;
-            p = unr_emit(&nb, IR_BRZ, lineh, colh);
-            p->a = c0; p->label = Lexit; p->w = brw; p->sign = brs;
-
+             * lim = bound - U*step, and the copies run while iv <= lim:
+             * then iv + U*step <= bound, so every one of the U
+             * iterations is one the loop would have run. That holds only
+             * if the subtraction did not wrap, which `lim < bound` tests
+             * (U*step is positive), at the loop's own signedness -- a
+             * signed `iv < bound` loop, or unsigned for `iv != bound`,
+             * whose walk is upward to its end. Both tests are paid once;
+             * each run of copies then re-tests with one compare, where
+             * re-deriving the count (`bound - iv >= U*step`) took a
+             * subtract and a compare -- four instructions with x86's
+             * two-operand subtract. A loop that fails either test, an
+             * `iv != bound` walk that wraps included, runs as the
+             * ORIGINAL loop, not the exit: the loop is a rotated one, a
+             * do-while, and what it does when entered is what it always
+             * did. The subtraction is the machine's, wrapping: that is
+             * what the `lim < bound` test reads, and why nothing here may
+             * assume a signed difference cannot overflow. */
+            int ls = fn->ins[L.cmp_ins].pred == B_LT
+                     ? fn->ins[L.cmp_ins].sign : 0;
+            int lim = fn->nvregs++, e0 = fn->nvregs++, e1 = fn->nvregs++;
             p = unr_emit(&nb, IR_CONST, lineh, colh);
-            p->dst = kU; p->imm = U; p->w = L.w;
-            int d0 = fn->nvregs++, e0 = fn->nvregs++;
+            p->dst = kU; p->imm = U * L.step; p->w = L.w;   /* U iterations' worth */
             p = unr_emit(&nb, IR_SUB, lineh, colh);
-            p->dst = d0; p->a = L.bound; p->b = L.iv; p->w = L.w; p->sign = 1;
+            p->dst = lim; p->a = L.bound; p->b = kU; p->w = L.w; p->sign = ls;
             p = unr_emit(&nb, IR_CMP, lineh, colh);
-            p->dst = e0; p->a = d0; p->b = kU;
-            p->pred = B_LT; p->w = L.w; p->sign = 0;      /* unsigned */
-            p = unr_emit(&nb, IR_BRNZ, lineh, colh);
+            p->dst = e0; p->a = lim; p->b = L.bound;
+            p->pred = B_LT; p->w = L.w; p->sign = ls;
+            p = unr_emit(&nb, IR_BRZ, lineh, colh);
             p->a = e0; p->label = L.Lh; p->w = brw; p->sign = brs;
+            p = unr_emit(&nb, IR_CMP, lineh, colh);
+            p->dst = e1; p->a = L.iv; p->b = lim;
+            p->pred = B_LE; p->w = L.w; p->sign = ls;
+            p = unr_emit(&nb, IR_BRZ, lineh, colh);
+            p->a = e1; p->label = L.Lh; p->w = brw; p->sign = brs;
 
             /* ---- the copies ---- */
             p = unr_emit(&nb, IR_LABEL, lineh, colh);
@@ -6671,27 +7591,32 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
                     *q = fn->ins[n2];
                     struct lcopy lc = { cur, nvr, 0 };
                     each_read(q, lcopy_cb, &lc);
-                    if (t >= 0 && t < nvr) {
-                        if (c == U - 1) { q->dst = t; cur[t] = -1; }
-                        else            { q->dst = fn->nvregs++; cur[t] = q->dst; }
+                    /* A TEMP is renamed. A frame slot -- the dst of an
+                     * stvar, a local that stays in memory because its
+                     * address is taken -- is not a value to rename but a
+                     * place: every copy has to write that one place, or a
+                     * read of it through its address sees none of the
+                     * copies' stores. Renamed, `stvar v2` became `stvar
+                     * v98`, a slot that does not exist, and loading `*ps`
+                     * where ps = &s gave the value from before the loop. */
+                    if (t >= fn->nvars && t < nvr) {
+                        if (c == U - 1 && !local[t]) { q->dst = t; cur[t] = -1; }
+                        else { q->dst = fn->nvregs++; cur[t] = q->dst; }
                     }
                 }
             free(cur);
+            free(local);
 
-            /* ---- the back edge: three instructions per U iterations ----
+            /* ---- the back edge: a compare and a branch per U iterations ----
              *
-             * U bodies ran from an iv with bound - iv >= U, so iv <=
-             * bound now and the unsigned difference is still the true
-             * count. No signed test is needed to make it sound, which is
-             * the whole point of testing on the way in. */
-            int d1 = fn->nvregs++, e1 = fn->nvregs++;
-            p = unr_emit(&nb, IR_SUB, lineh, colh);
-            p->dst = d1; p->a = L.bound; p->b = L.iv; p->w = L.w; p->sign = 1;
+             * iv only grew by U*step from a value <= lim, so it is <=
+             * bound and the same compare stays exact. */
+            int e2 = fn->nvregs++;
             p = unr_emit(&nb, IR_CMP, lineh, colh);
-            p->dst = e1; p->a = d1; p->b = kU;
-            p->pred = B_GE; p->w = L.w; p->sign = 0;      /* unsigned */
+            p->dst = e2; p->a = L.iv; p->b = lim;
+            p->pred = B_LE; p->w = L.w; p->sign = ls;
             p = unr_emit(&nb, IR_BRNZ, lineh, colh);
-            p->a = e1; p->label = Lunroll; p->w = brw; p->sign = brs;
+            p->a = e2; p->label = Lunroll; p->w = brw; p->sign = brs;
 
             /* Out of full runs. iv <= bound, so anything left is a
              * partial one -- which is what the original loop below is. */
@@ -6706,7 +7631,6 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
         }
         if (n == L.hi) {
             struct ir_ins *p = ib_push(&nb);
-            memset(p, 0, sizeof *p);
             p->op = IR_LABEL; p->label = Lexit;
             p->line = lineh; p->col = colh; p->synth = 1;
         }
@@ -6714,7 +7638,6 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
     }
     if (L.hi == fn->nins) {            /* the loop ends the function */
         struct ir_ins *p = ib_push(&nb);
-        memset(p, 0, sizeof *p);
         p->op = IR_LABEL; p->label = Lexit;
         p->line = lineh; p->col = colh; p->synth = 1;
     }
@@ -6758,6 +7681,737 @@ static int pass_unroll(struct ir_func *fn)
     return changed;
 }
 
+/* ==== switch threading =====================================================
+ *
+ * A state machine is a loop around `switch (state)` whose arms set the
+ * state to a constant: CoreMark's core_state, a hand-written lexer, a
+ * protocol parser. Every arm knows which case the next iteration will
+ * take, and the loop forgets it at the latch, so each character pays for
+ * the whole dispatch again -- a bounds check, a table load and an
+ * indirect jump.
+ *
+ * This keeps what the arm knew. The path from the latch to the switch --
+ * the increment, the loop's own exit tests, anything else between them --
+ * is copied once for each case the state can arrive at, and the copy ends
+ * in a jump straight to that case instead of in the switch. An arm that
+ * leaves the state alone counts as well: the case edge it was entered by
+ * says what the state is. Every copy keeps the loop's exits, and writes
+ * the state as the original did, for whatever reads it after the loop.
+ * An arrival nothing is proven about still takes the original path, which
+ * stays.
+ *
+ * What is known where is a forward dataflow over the few temps the
+ * switch's operand is computed from -- copies, constants and arithmetic
+ * with a constant, at the switch's own width -- to which a switch's case
+ * edge adds the operand's value.
+ *
+ * Arms seldom end at the latch itself: an if/else inside one ends at a
+ * join, which is where `state = x` meets `state = y`, and that block knows
+ * nothing. So a block with one way out (a "latch" here) is copied too, and
+ * its predecessors asked instead, up to SWT_FEED_DEPTH deep. Each block is
+ * copied once per CASE, not once per way of reaching it: the copy of a
+ * latch for case c jumps on to the copy of the next block for case c, and
+ * all of them to one copy of the path for c. Sharing is sound because
+ * every way into a copy for c is an arrival proven to reach c. */
+
+#define SWT_MAX_TRACK  32    /* temps followed back from the operand */
+#define SWT_MAX_PATH   24    /* instructions on the path to the switch */
+#define SWT_MAX_FEED   8     /* in one latch block copied in front of it */
+#define SWT_FEED_DEPTH 6     /* how many latches deep */
+#define SWT_MAX_COPIES 48    /* copies of blocks, per switch */
+#define SWT_MAX_ADDED  400   /* instructions, per function, over every round */
+
+/* 0: nothing known yet (unreached), 1: the constant k, 2: varies. */
+struct swv { int st; long k; };
+
+static struct swv swt_val(const int *tix, const struct swv *s, int v)
+{
+    struct swv r = { 2, 0 };
+    if (v >= 0 && tix[v] >= 0)
+        r = s[tix[v]];
+    return r;
+}
+
+/* The value instruction i leaves in its destination, given what is known
+ * before it. Only arithmetic at the switch's own width is followed, so
+ * the low w bytes -- all the switch reads -- are exact whatever a backend
+ * keeps above them; everything is normalised the way pass_fold does it. */
+static struct swv swt_eval(struct ir_func *fn, struct defs *d,
+                           const struct ir_ins *i, const int *tix,
+                           const struct swv *s, int w)
+{
+    struct swv r = { 2, 0 }, a, b;
+    long B;
+    if (i->flt || i->w != w)
+        return r;
+    switch (i->op) {
+    case IR_CONST:
+        r.st = 1;
+        r.k = norm(i->imm, w);
+        return r;
+    case IR_MOV:
+        a = swt_val(tix, s, i->a);
+        if (a.st == 1)
+            a.k = norm(a.k, w);
+        return a;
+    case IR_EXT:
+        a = swt_val(tix, s, i->a);
+        if (a.st == 1)
+            a.k = fold_ext(a.k, i->size, i->sign, w);
+        return a;
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_AND: case IR_OR:
+    case IR_XOR: case IR_SHL: case IR_SHR:
+        a = swt_val(tix, s, i->a);
+        if (a.st != 1)
+            return a;
+        if (i->imm_b) {
+            b.st = 1; b.k = i->imm;
+        } else if (get_const(fn, d, i->b, &B)) {
+            b.st = 1; b.k = B;
+        } else {
+            b = swt_val(tix, s, i->b);
+        }
+        if (b.st != 1)
+            return b;
+        if (fold_bin(i->op, a.k, b.k, w, i->sign, B_EQ, &r.k))
+            r.st = 1;
+        return r;
+    default:
+        return r;
+    }
+}
+
+/* Run instructions [lo, hi) over the state s. */
+static void swt_run(struct ir_func *fn, struct defs *d, int lo, int hi,
+                    const int *tix, struct swv *s, int w)
+{
+    for (int n = lo; n < hi; n++) {
+        int t = def_target(&fn->ins[n]);
+        if (t >= 0 && tix[t] >= 0)
+            s[tix[t]] = swt_eval(fn, d, &fn->ins[n], tix, s, w);
+    }
+}
+
+/* What the edge from block p to block t adds to s: a switch's case edge
+ * names its operand's value when that case is the only way along it --
+ * and, when the operand is `v - c` computed in that block, v's too. */
+static void swt_edge(struct ir_func *fn, struct defs *d, const struct bb *bb,
+                     int p, int t, const int *l2b, const int *tix,
+                     struct swv *s, int w)
+{
+    if (bb[p].end <= bb[p].start)
+        return;
+    const struct ir_ins *sw = &fn->ins[bb[p].end - 1];
+    if (sw->op != IR_SWITCH || sw->w != w || sw->a < 0 || tix[sw->a] < 0)
+        return;
+    if (sw->label >= 0 && sw->label < fn->nlabels && l2b[sw->label] == t)
+        return;                                   /* the default goes there too */
+    const struct ir_jt *jt = &fn->jt[sw->jt];
+    int idx = -1, hits = 0;
+    for (int k = 0; k < jt->n; k++)
+        if (jt->labels[k] >= 0 && jt->labels[k] < fn->nlabels &&
+            l2b[jt->labels[k]] == t) {
+            idx = k;
+            hits++;
+        }
+    if (hits != 1)
+        return;
+    s[tix[sw->a]].st = 1;
+    s[tix[sw->a]].k = norm(idx, w);
+    int x = sw->a, at = d->ins[x];
+    if (d->cnt[x] != 1 || at < bb[p].start || at >= bb[p].end - 1)
+        return;
+    const struct ir_ins *sub = &fn->ins[at];
+    long c, v;
+    if (sub->op != IR_SUB || sub->flt || sub->w != w || sub->a < 0 ||
+        tix[sub->a] < 0 || !const_b(fn, d, (struct ir_ins *)sub, &c))
+        return;
+    for (int n = at + 1; n < bb[p].end - 1; n++)
+        if (def_target(&fn->ins[n]) == sub->a)
+            return;
+    if (fold_bin(IR_ADD, idx, c, w, 0, B_EQ, &v)) {
+        s[tix[sub->a]].st = 1;
+        s[tix[sub->a]].k = v;
+    }
+}
+
+static int swt_meet(struct swv *x, struct swv y)
+{
+    if (y.st == 0 || x->st == 2)
+        return 0;
+    if (x->st == 0) { *x = y; return 1; }
+    if (y.st == 2 || y.k != x->k) { x->st = 2; x->k = 0; return 1; }
+    return 0;
+}
+
+/* Can this block be copied: nothing that is not plain code. */
+static int swt_copyable(struct ir_func *fn, const struct bb *b, int *count)
+{
+    for (int n = b->start; n < b->end; n++) {
+        switch (fn->ins[n].op) {
+        case IR_LABEL:
+            continue;
+        case IR_ASM: case IR_ALLOCA: case IR_SPSAVE: case IR_SPRESTORE:
+        case IR_LANDING: case IR_VA_START: case IR_LABELADDR: case IR_IGOTO:
+        case IR_RET: case IR_UD2:
+            return 0;
+        case IR_SWITCH:
+            if (n != b->end - 1)
+                return 0;
+            break;
+        default:
+            break;
+        }
+        (*count)++;
+    }
+    return 1;
+}
+
+static int swt_term(struct ir_func *fn, const struct bb *b)
+{
+    return b->end > b->start ? (int)fn->ins[b->end - 1].op : -1;
+}
+
+/* Does block b fall through into the block after it? */
+static int swt_falls(struct ir_func *fn, const struct bb *b)
+{
+    int op = swt_term(fn, b);
+    return op != IR_JMP && op != IR_RET && op != IR_UD2 &&
+           op != IR_SWITCH && op != IR_IGOTO;
+}
+
+/* An arrival: block p reaches block h (the path's head, or a latch) and
+ * is sent to copy g instead. A copy: block blk (-1: the whole path to the
+ * switch) for the case whose label is target. */
+struct swt_arr { int p, h, g; };
+struct swt_grp { int blk, target, label, host, emitted; };
+
+/* Everything the arrival search reads, and what it collects. */
+struct swt_ctx {
+    struct ir_func *fn;
+    struct defs *d;
+    const struct bb *bb;
+    const int *l2b, *tix;
+    int nt, w;
+    const struct swv *out;              /* per block, nt each */
+    const int *chain;
+    int nch, head, sb;
+    const struct ir_ins *sw;
+    const int *bsize;                   /* a block's instructions, -1: not copyable */
+    struct swt_grp grp[SWT_MAX_COPIES];
+    int ngrp;
+    struct swt_arr arr[128];
+    int narr, npath;
+    int *budget;
+};
+
+/* May block p be sent somewhere else: reachable, off the path, and
+ * ending in something that names its targets one by one. */
+static int swt_from(const struct swt_ctx *c, int p)
+{
+    for (int k = 0; k < c->nch; k++)
+        if (c->chain[k] == p)
+            return 0;
+    int op = swt_term(c->fn, &c->bb[p]);
+    return c->bb[p].rpo >= 0 && op != IR_SWITCH && op != IR_IGOTO;
+}
+
+static int swt_find(const struct swt_ctx *c, int blk, int target)
+{
+    for (int g = 0; g < c->ngrp; g++)
+        if (c->grp[g].blk == blk && c->grp[g].target == target)
+            return g;
+    return -1;
+}
+
+/* The copy a latch's copy leads on to. */
+static int swt_next(const struct swt_ctx *c, int g)
+{
+    int nb2 = c->bb[c->grp[g].blk].succ[0];
+    return swt_find(c, nb2 == c->head ? -1 : nb2, c->grp[g].target);
+}
+
+/* Block p reaching block h: if what p knows at its end, carried through
+ * the latches from h (none when h is the head) and the path, decides the
+ * switch, record the arrival, and the copies it runs through. */
+static int swt_arrive(struct swt_ctx *c, int p, int h)
+{
+    struct ir_func *fn = c->fn;
+    const struct bb *bb = c->bb;
+    struct swv s[SWT_MAX_TRACK];
+    memcpy(s, &c->out[(size_t)p * c->nt], (size_t)c->nt * sizeof *s);
+    swt_edge(fn, c->d, bb, p, h, c->l2b, c->tix, s, c->w);
+    for (int b = h; b != c->head; b = bb[b].succ[0])
+        swt_run(fn, c->d, bb[b].start, bb[b].end, c->tix, s, c->w);
+    for (int k = 0; k < c->nch; k++)
+        swt_run(fn, c->d, bb[c->chain[k]].start,
+                k == c->nch - 1 ? bb[c->sb].end - 1 : bb[c->chain[k]].end,
+                c->tix, s, c->w);
+    struct swv xv = s[c->tix[c->sw->a]];
+    if (xv.st != 1)
+        return 0;
+    const struct ir_jt *jt = &fn->jt[c->sw->jt];
+    unsigned long idx = c->w == 8 ? (unsigned long)xv.k
+                                  : (unsigned long)(unsigned int)xv.k;
+    int target = idx < (unsigned long)jt->n ? jt->labels[idx] : c->sw->label;
+    if (target < 0 || target >= fn->nlabels || c->l2b[target] < 0 ||
+        c->narr == 128)
+        return 0;
+    /* the copies this needs that do not exist yet, and what they cost */
+    int need = 0, cost = 0;
+    for (int b = h; ; b = bb[b].succ[0]) {
+        int blk = b == c->head ? -1 : b;
+        if (swt_find(c, blk, target) < 0) {
+            need++;
+            cost += 1 + (blk < 0 ? c->npath : c->bsize[blk]);
+        }
+        if (blk < 0)
+            break;
+    }
+    if (c->ngrp + need > SWT_MAX_COPIES || cost > *c->budget)
+        return 0;
+    *c->budget -= cost;
+    for (int b = h; ; b = bb[b].succ[0]) {
+        int blk = b == c->head ? -1 : b;
+        if (swt_find(c, blk, target) < 0) {
+            struct swt_grp *g = &c->grp[c->ngrp++];
+            g->blk = blk;
+            g->target = target;
+            g->label = fn->nlabels++;
+            g->host = -1;
+            g->emitted = 0;
+        }
+        if (blk < 0)
+            break;
+    }
+    c->arr[c->narr].p = p;
+    c->arr[c->narr].h = h;
+    c->arr[c->narr].g = swt_find(c, h == c->head ? -1 : h, target);
+    c->narr++;
+    return 1;
+}
+
+/* swt_local_cb: a read of v at position `pos` of the copied run. */
+struct swt_lc { char *local; const int *defpos; int pos, nv; };
+static void swt_local_cb(int *p, void *ctx)
+{
+    struct swt_lc *c = ctx;
+    int v = *p;
+    if (v < 0 || v >= c->nv || !c->local[v])
+        return;
+    if (c->pos < 0 || c->pos <= c->defpos[v])
+        c->local[v] = 0;
+}
+
+/* Emit copy g, and after it every copy it leads on to that is not out
+ * yet, so that each falls into the next. A temp is renamed when the
+ * copy's own run of blocks is the only place it is defined and read;
+ * one that crosses into the next copy keeps its name, because that copy
+ * may be entered from others too. */
+struct swt_emit {
+    struct swt_ctx *c;
+    struct ibuf *nb;
+    const int *zlabel, *blabel;
+    int nv;
+    int *pos, *defpos, *ren;
+    char *local;
+};
+static void swt_emit_copy(struct swt_emit *e, int g)
+{
+    struct swt_ctx *c = e->c;
+    struct ir_func *fn = c->fn;
+    const struct bb *bb = c->bb;
+    while (g >= 0 && !c->grp[g].emitted) {
+        struct swt_grp *G = &c->grp[g];
+        G->emitted = 1;
+        int run[64], nrun = 0;
+        if (G->blk >= 0) {
+            run[nrun++] = G->blk;
+        } else {
+            for (int k = 0; k < c->nch; k++)
+                run[nrun++] = c->chain[k];
+        }
+        for (int n = 0; n < fn->nins; n++)
+            e->pos[n] = -1;
+        int ps = 0;
+        for (int k = 0; k < nrun; k++)
+            for (int n = bb[run[k]].start; n < bb[run[k]].end; n++)
+                e->pos[n] = ps++;
+        for (int v = 0; v < e->nv; v++) {
+            e->defpos[v] = c->d->cnt[v] == 1 && c->d->ins[v] >= 0
+                           ? e->pos[c->d->ins[v]] : -1;
+            e->local[v] = v >= fn->nvars && e->defpos[v] >= 0;
+            e->ren[v] = -1;
+        }
+        for (int n = 0; n < fn->nins; n++) {
+            struct swt_lc lc = { e->local, e->defpos, e->pos[n], e->nv };
+            each_read(&fn->ins[n], swt_local_cb, &lc);
+        }
+        const struct ir_ins *first = &fn->ins[bb[run[0]].start];
+        struct ir_ins *l = ib_push(e->nb);
+        l->op = IR_LABEL;
+        l->label = G->label;
+        l->line = first->line; l->col = first->col; l->synth = 1;
+        int last_line = first->line, last_col = first->col;
+        for (int k = 0; k < nrun; k++) {
+            int b = run[k], lastblk = k == nrun - 1;
+            int next = lastblk ? -1 : run[k + 1];
+            for (int n = bb[b].start; n < bb[b].end; n++) {
+                const struct ir_ins *o = &fn->ins[n];
+                int term = n == bb[b].end - 1;
+                if (o->op == IR_LABEL)
+                    continue;
+                last_line = o->line; last_col = o->col;
+                if (term && (o->op == IR_SWITCH || o->op == IR_JMP))
+                    break;          /* the jump on is emitted below */
+                int inv = 0;
+                if (term && (o->op == IR_BRZ || o->op == IR_BRNZ)) {
+                    if (lastblk)
+                        break;      /* a latch: both ways lead on */
+                    if (c->l2b[o->label] == next) {
+                        if (b + 1 == next)
+                            break;  /* both ways lead on */
+                        inv = 1;    /* on along the taken edge */
+                    }
+                }
+                struct ir_ins *q = ib_push(e->nb);
+                *q = *o;
+                struct lcopy lcp = { e->ren, e->nv, 0 };
+                each_read(q, lcopy_cb, &lcp);
+                int t = def_target(o);
+                if (t >= 0 && t < e->nv) {
+                    if (e->local[t]) {
+                        q->dst = fn->nvregs++;
+                        e->ren[t] = q->dst;
+                    } else {
+                        e->ren[t] = -1;
+                    }
+                }
+                if (inv) {
+                    q->op = o->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+                    q->label = e->blabel[b + 1] >= 0 ? e->blabel[b + 1]
+                                                     : e->zlabel[b + 1];
+                }
+            }
+        }
+        /* on: to the case, or to the copy of the next block for it */
+        int next_g = G->blk >= 0 ? swt_next(c, g) : -1;
+        struct ir_ins *j = ib_push(e->nb);
+        j->op = IR_JMP;
+        j->label = next_g >= 0 ? c->grp[next_g].label : G->target;
+        j->line = last_line; j->col = last_col; j->synth = 1;
+        g = next_g;
+    }
+}
+
+static int swt_one(struct ir_func *fn, int *budget)
+{
+    if (fn->nins == 0 || fn->nvregs == 0)
+        return 0;
+    int nsw = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        if (fn->ins[n].op == IR_ASM)
+            return 0;               /* its outputs are not def_target's */
+        nsw += fn->ins[n].op == IR_SWITCH;
+    }
+    if (!nsw)
+        return 0;
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    int *order = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *order), norder;
+    compute_rpo(bb, nbb, order, &norder);
+    struct defs d;
+    compute_defs(fn, &d);
+    int nv = fn->nvregs, done = 0;
+    int *tix = xmalloc((size_t)nv * sizeof *tix);
+    struct swv *out = NULL;
+    struct swt_ctx *c = xcalloc(1, sizeof *c);
+    int *bsize = xmalloc((size_t)nbb * sizeof *bsize);
+    for (int b = 0; b < nbb; b++) {
+        bsize[b] = 0;
+        if (!swt_copyable(fn, &bb[b], &bsize[b]))
+            bsize[b] = -1;
+    }
+
+    for (int sb = 0; sb < nbb && !done; sb++) {
+        if (bb[sb].rpo < 0 || swt_term(fn, &bb[sb]) != IR_SWITCH ||
+            bsize[sb] < 0)
+            continue;
+        const struct ir_ins *sw = &fn->ins[bb[sb].end - 1];
+        int w = sw->w, x = sw->a, swline = sw->line;
+        if ((w != 4 && w != 8) || x < fn->nvars || x >= nv)
+            continue;
+
+        /* ---- the path: back from the switch while there is one way in */
+        int chain[64], nch = 0, npath = bsize[sb];
+        int cur = sb;
+        chain[nch++] = sb;
+        while (bb[cur].npred == 1 && nch < 64) {
+            int p = bb[cur].pred[0], seen = 0;
+            for (int k = 0; k < nch; k++)
+                seen |= chain[k] == p;
+            int op = swt_term(fn, &bb[p]);
+            if (seen || bb[p].rpo < 0 || op == IR_SWITCH || op == IR_IGOTO ||
+                bb[p].nsucc > 2 || bsize[p] < 0)
+                break;
+            npath += bsize[p];
+            memmove(chain + 1, chain, (size_t)nch * sizeof *chain);
+            chain[0] = p;
+            nch++;
+            cur = p;
+        }
+        if (npath > SWT_MAX_PATH)
+            continue;
+        int head = chain[0];
+
+        /* ---- the temps the operand is computed from ---- */
+        int nt = 0;
+        for (int v = 0; v < nv; v++)
+            tix[v] = -1;
+        tix[x] = nt++;
+        for (int grew = 1; grew; ) {
+            grew = 0;
+            for (int n = 0; n < fn->nins; n++) {
+                const struct ir_ins *i = &fn->ins[n];
+                int t = def_target(i), src[2] = { -1, -1 };
+                if (t < 0 || tix[t] < 0 || i->flt || i->w != w)
+                    continue;
+                switch (i->op) {
+                case IR_MOV: case IR_EXT:
+                    src[0] = i->a;
+                    break;
+                case IR_ADD: case IR_SUB: case IR_MUL: case IR_AND:
+                case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+                    src[0] = i->a;
+                    if (!i->imm_b) src[1] = i->b;
+                    break;
+                default:
+                    break;
+                }
+                for (int k = 0; k < 2; k++) {
+                    int v = src[k];
+                    if (v >= fn->nvars && v < nv && tix[v] < 0 &&
+                        nt < SWT_MAX_TRACK) {
+                        tix[v] = nt++;
+                        grew = 1;
+                    }
+                }
+            }
+        }
+
+        /* ---- what is known at the end of every block ---- */
+        free(out);
+        out = xcalloc((size_t)nbb * (size_t)nt, sizeof *out);
+        struct swv tmp[SWT_MAX_TRACK], nin[SWT_MAX_TRACK];
+        for (int again = 1, guard = 0; again && guard++ < 64; ) {
+            again = 0;
+            for (int oi = 0; oi < norder; oi++) {
+                int b = order[oi];
+                for (int k = 0; k < nt; k++) {
+                    nin[k].st = b == 0 ? 2 : 0;   /* entry: unknown, not unseen */
+                    nin[k].k = 0;
+                }
+                for (int q = 0; b != 0 && q < bb[b].npred; q++) {
+                    int p = bb[b].pred[q];
+                    if (bb[p].rpo < 0)
+                        continue;
+                    memcpy(tmp, &out[(size_t)p * nt], (size_t)nt * sizeof *tmp);
+                    swt_edge(fn, &d, bb, p, b, l2b, tix, tmp, w);
+                    for (int k = 0; k < nt; k++)
+                        swt_meet(&nin[k], tmp[k]);
+                }
+                swt_run(fn, &d, bb[b].start, bb[b].end, tix, nin, w);
+                struct swv *o = &out[(size_t)b * nt];
+                for (int k = 0; k < nt; k++)
+                    if (o[k].st != nin[k].st ||
+                        (nin[k].st == 1 && o[k].k != nin[k].k)) {
+                        o[k] = nin[k];
+                        again = 1;
+                    }
+            }
+        }
+
+        /* ---- the arrivals the analysis proves ----
+         *
+         * A predecessor of the path's head may know the operand at its
+         * end. One that does not may be a latch -- a block with one way
+         * out -- whose own predecessors do, so those are asked in turn. */
+        memset(c, 0, sizeof *c);
+        c->fn = fn; c->d = &d; c->bb = bb; c->l2b = l2b; c->tix = tix;
+        c->nt = nt; c->w = w; c->out = out; c->chain = chain; c->nch = nch;
+        c->head = head; c->sb = sb; c->sw = sw; c->bsize = bsize;
+        c->npath = npath; c->budget = budget;
+        int *fdepth = xmalloc((size_t)nbb * sizeof *fdepth);
+        for (int b = 0; b < nbb; b++)
+            fdepth[b] = -1;
+        int wl[64], nwl = 0;
+        for (int q = 0; q < bb[head].npred; q++) {
+            int Q = bb[head].pred[q];
+            if (!swt_from(c, Q) || swt_arrive(c, Q, head))
+                continue;
+            if (Q != 0 && bb[Q].nsucc == 1 && bb[Q].npred > 0 &&
+                bsize[Q] >= 0 && bsize[Q] <= SWT_MAX_FEED &&
+                fdepth[Q] < 0 && nwl < 64) {
+                fdepth[Q] = 1;
+                wl[nwl++] = Q;
+            }
+        }
+        for (int at = 0; at < nwl; at++) {
+            int F = wl[at];
+            for (int r = 0; r < bb[F].npred; r++) {
+                int P = bb[F].pred[r];
+                if (!swt_from(c, P) || fdepth[P] >= 0 || P == F ||
+                    swt_arrive(c, P, F))
+                    continue;
+                if (fdepth[F] < SWT_FEED_DEPTH && P != 0 &&
+                    bb[P].nsucc == 1 && bb[P].npred > 0 &&
+                    bsize[P] >= 0 && bsize[P] <= SWT_MAX_FEED && nwl < 64) {
+                    fdepth[P] = fdepth[F] + 1;
+                    wl[nwl++] = P;
+                }
+            }
+        }
+        free(fdepth);
+        if (!c->narr)
+            continue;
+
+        /* ---- where each copy goes: after an arrival that can fall into
+         * it, the last such in the layout; the copies it leads on to
+         * follow it. What has no such arrival goes at the end. ---- */
+        char *hosting = xcalloc((size_t)nbb, 1);
+        for (int a = 0; a < c->narr; a++) {
+            int P = c->arr[a].p, H = c->arr[a].h;
+            struct swt_grp *G = &c->grp[c->arr[a].g];
+            int canhost = (swt_falls(fn, &bb[P]) && P + 1 == H) ||
+                          (swt_term(fn, &bb[P]) == IR_JMP &&
+                           bb[P].nsucc == 1 && bb[P].succ[0] == H);
+            if (canhost && !hosting[P] && (G->host < 0 || P > G->host)) {
+                if (G->host >= 0)
+                    hosting[G->host] = 0;
+                G->host = P;
+                hosting[P] = 1;
+            }
+        }
+        int lastop = fn->ins[fn->nins - 1].op;
+        if (lastop != IR_JMP && lastop != IR_RET && lastop != IR_UD2 &&
+            lastop != IR_SWITCH && lastop != IR_IGOTO) {
+            /* A function that falls off its end: nothing can go after
+             * it, so every copy must be placed by a host -- its own, or
+             * one leading on to it. */
+            int all = 1;
+            for (int g = 0; g < c->ngrp; g++) {
+                int placed = c->grp[g].host >= 0;
+                for (int h = 0; h < c->ngrp && !placed; h++)
+                    placed = c->grp[h].blk >= 0 && swt_next(c, h) == g;
+                all &= placed;
+            }
+            if (!all) {
+                free(hosting);
+                continue;
+            }
+        }
+
+        /* A block a copy branches to by name, where the original fell
+         * into it (a path block that continues along its branch's taken
+         * edge, so the copy branches the other way). */
+        int *zlabel = xmalloc((size_t)nbb * sizeof *zlabel);
+        int *blabel = xmalloc((size_t)nbb * sizeof *blabel);
+        for (int b = 0; b < nbb; b++) {
+            zlabel[b] = -1;
+            blabel[b] = bb[b].end > bb[b].start &&
+                        fn->ins[bb[b].start].op == IR_LABEL
+                        ? fn->ins[bb[b].start].label : -1;
+        }
+        for (int k = 0; k + 1 < nch; k++) {
+            int cb = chain[k], op = swt_term(fn, &bb[cb]);
+            if ((op == IR_BRZ || op == IR_BRNZ) &&
+                l2b[fn->ins[bb[cb].end - 1].label] == chain[k + 1] &&
+                cb + 1 != chain[k + 1] && blabel[cb + 1] < 0 &&
+                zlabel[cb + 1] < 0)
+                zlabel[cb + 1] = fn->nlabels++;
+        }
+
+        struct ibuf nb = { 0, 0, 0 };
+        struct swt_emit e;
+        e.c = c; e.nb = &nb; e.zlabel = zlabel; e.blabel = blabel;
+        e.nv = nv;
+        e.pos = xmalloc((size_t)(fn->nins ? fn->nins : 1) * sizeof *e.pos);
+        e.defpos = xmalloc((size_t)nv * sizeof *e.defpos);
+        e.ren = xmalloc((size_t)nv * sizeof *e.ren);
+        e.local = xmalloc((size_t)nv);
+        int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+        for (int b = 0; b < nbb; b++) {
+            if (zlabel[b] >= 0) {
+                struct ir_ins *l = ib_push(&nb);
+                l->op = IR_LABEL;
+                l->label = zlabel[b];
+                l->line = fn->ins[bb[b].start].line;
+                l->col = fn->ins[bb[b].start].col;
+                l->synth = 1;
+            }
+            for (int n = bb[b].start; n < bb[b].end; n++) {
+                newpos[n] = nb.n;
+                struct ir_ins *q = ib_push(&nb);
+                *q = fn->ins[n];
+                if (n != bb[b].end - 1 ||
+                    (q->op != IR_JMP && q->op != IR_BRZ && q->op != IR_BRNZ))
+                    continue;
+                for (int a = 0; a < c->narr; a++)
+                    if (c->arr[a].p == b && q->label >= 0 &&
+                        q->label < fn->nlabels && l2b[q->label] == c->arr[a].h)
+                        q->label = c->grp[c->arr[a].g].label;
+            }
+            /* an arrival that fell into its block: into the copy now */
+            int falls_to = swt_falls(fn, &bb[b]) && b + 1 < nbb ? b + 1 : -1;
+            int hosted = -1;
+            for (int g = 0; g < c->ngrp; g++)
+                if (c->grp[g].host == b)
+                    hosted = g;
+            for (int a = 0; a < c->narr; a++)
+                if (c->arr[a].p == b && c->arr[a].h == falls_to &&
+                    c->arr[a].g != hosted) {
+                    struct ir_ins *j = ib_push(&nb);
+                    j->op = IR_JMP;
+                    j->label = c->grp[c->arr[a].g].label;
+                    j->line = fn->ins[bb[b].end - 1].line;
+                    j->col = fn->ins[bb[b].end - 1].col;
+                    j->synth = 1;
+                    break;
+                }
+            if (hosted >= 0)
+                swt_emit_copy(&e, hosted);
+        }
+        for (int g = 0; g < c->ngrp; g++)
+            if (!c->grp[g].emitted)
+                swt_emit_copy(&e, g);
+        newpos[fn->nins] = nb.n;
+        remap_scopes(fn, newpos, fn->nins);
+        free(newpos);
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        free(e.pos); free(e.defpos); free(e.ren); free(e.local);
+        free(zlabel); free(blabel); free(hosting);
+        if (remarks_on() && fn->src)
+            remark_add("switch-thread", "threaded", fn->name, "state-known",
+                       fn->file, swline,
+                       "%d arrivals at this switch go straight to their "
+                       "case, through %d copied blocks", c->narr, c->ngrp);
+        done = 1;
+    }
+    free(out); free(tix); free(c); free(bsize);
+    free_defs(&d); free(order); free(l2b);
+    free_cfg(bb, nbb);
+    return done;
+}
+
+static int pass_swthread(struct ir_func *fn)
+{
+    int budget = SWT_MAX_ADDED, changed = 0, guard = 0;
+    while (guard++ < 8 && budget > 0 && swt_one(fn, &budget))
+        changed = 1;
+    return changed;
+}
+
 /* ---- conditional constant propagation (the reachability half of SCCP) ----
  *
  * A conditional branch whose condition is a known constant has one live edge.
@@ -6770,7 +8424,7 @@ static int pass_unroll(struct ir_func *fn)
  * One rebuild handles both: emit each reachable block, replacing a resolved
  * branch with a jump to its live successor (or nothing when that successor is
  * the fall-through), and skip unreachable blocks entirely. */
-static int pass_sccp(struct ir_func *fn)
+static int sccp_core(struct ir_func *fn, int fold_branches)
 {
     if (fn->nins == 0)
         return 0;
@@ -6787,7 +8441,8 @@ static int pass_sccp(struct ir_func *fn)
         if (bb[b].end <= bb[b].start)
             continue;
         struct ir_ins *t = &fn->ins[bb[b].end - 1];
-        if ((t->op != IR_BRZ && t->op != IR_BRNZ) || t->a < 0 ||
+        if (!fold_branches ||
+            (t->op != IR_BRZ && t->op != IR_BRNZ) || t->a < 0 ||
             d.cnt[t->a] != 1 || d.ins[t->a] < 0 ||
             fn->ins[d.ins[t->a]].op != IR_CONST)
             continue;
@@ -6880,6 +8535,155 @@ static int pass_sccp(struct ir_func *fn)
     return 1;
 }
 
+static int pass_sccp(struct ir_func *fn)
+{
+    return sccp_core(fn, 1);
+}
+
+/* Only the second half: drop the blocks nothing reaches. mem2reg needs
+ * it -- its dominators are wrong over a block no path enters, so it
+ * refused any function with one -- and irgen leaves them wherever a
+ * statement follows a jump: the `break` after a `return` or `continue`,
+ * the code after a call to a noreturn function, the end of a loop that
+ * never exits. Across lib/libc and EmbLinkOs that was 149 functions --
+ * sin, cos, pow and most of fdlibm among them -- whose every local
+ * stayed in memory through the whole optimizer. */
+static int drop_unreachable(struct ir_func *fn)
+{
+    return sccp_core(fn, 0);
+}
+
+/* ---- a remainder from the quotient beside it ----
+ *
+ * `q = a / b; r = a % b;` divided twice: two idivs on x86-64, two calls
+ * to the 64-bit helper on Thumb, RISC-V without M and AVR, where a divide
+ * is a library routine of hundreds of cycles. C's division truncates, so
+ * a == (a / b) * b + a % b whenever a / b is defined, and the remainder is
+ * a - q * b -- a multiply and a subtract, at the operation's own width,
+ * where the wrap of both gives exactly the remainder's bits. gcc and clang
+ * do the same; division by a CONSTANT is already pass_divmagic's.
+ *
+ * Either order: the digit loop's `d = v % base; v = v / base;` puts the
+ * remainder first, so the quotient is computed there instead, and the
+ * division that follows becomes a copy of it. Within a block, by operand
+ * names: an entry dies when a, b or its result is written again. */
+struct dm_ent { int a, b, w, sign, res, at, is_div; };
+
+static int pass_divmod(struct ir_func *fn)
+{
+    struct dm_ent tab[16];
+    int ntab = 0, nrw = 0;
+    /* A CONSTANT divisor is left alone: pass_divmagic has made it a
+     * multiply where that pays, and where it did not -- a core with a
+     * hardware divide, Thumb's `udiv; mls` -- the remainder is already
+     * one fused instruction, which a separate multiply and subtract
+     * (strength-reduced to shifts and adds, the constant rematerialised
+     * in the loop) only made longer: the workload's utoa ran 6.7% more
+     * instructions on Cortex-M4. */
+    struct defs dd;
+    compute_defs(fn, &dd);
+    /* per instruction: mulq -- this MOD becomes a - q*b with q given;
+     * preq -- a DIV into the given fresh q is inserted before this MOD,
+     * which then becomes a - q*b; movq -- this DIV becomes a copy of q */
+    int *mulq = NULL, *preq = NULL, *movq = NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_LABEL || i->op == IR_ASM || i->op == IR_LANDING) {
+            ntab = 0;
+            continue;
+        }
+        long kb;
+        int pairable = (i->op == IR_MOD || i->op == IR_DIV) && !i->flt &&
+                       !i->imm_b && (i->w == 4 || i->w == 8) &&
+                       i->a >= 0 && i->b >= 0 && i->dst >= 0 &&
+                       i->dst != i->a && i->dst != i->b &&
+                       !get_const(fn, &dd, i->b, &kb);
+        int matched = 0;
+        if (pairable) {
+            for (int k = 0; k < ntab; k++) {
+                struct dm_ent *e = &tab[k];
+                if (e->a != i->a || e->b != i->b || e->w != i->w ||
+                    e->sign != i->sign || e->is_div == (i->op == IR_DIV))
+                    continue;
+                if (!mulq) {
+                    mulq = xmalloc((size_t)fn->nins * sizeof *mulq);
+                    preq = xmalloc((size_t)fn->nins * sizeof *preq);
+                    movq = xmalloc((size_t)fn->nins * sizeof *movq);
+                    for (int m = 0; m < fn->nins; m++)
+                        mulq[m] = preq[m] = movq[m] = -1;
+                }
+                if (e->is_div) {                /* div then mod */
+                    mulq[n] = e->res;
+                } else if (preq[e->at] < 0 && mulq[e->at] < 0) {
+                    int q = fn->nvregs++;       /* mod then div */
+                    preq[e->at] = q;
+                    movq[n] = q;
+                } else {
+                    continue;
+                }
+                nrw++;
+                matched = 1;
+                e->a = -2;                      /* used: one pairing each */
+                break;
+            }
+        }
+        int t = def_target(i);
+        if (t >= 0) {                   /* forget what named t */
+            int j = 0;
+            for (int k = 0; k < ntab; k++)
+                if (tab[k].a != t && tab[k].b != t && tab[k].res != t &&
+                    tab[k].a != -2)
+                    tab[j++] = tab[k];
+            ntab = j;
+        }
+        if (pairable && !matched && ntab < 16) {
+            tab[ntab].a = i->a; tab[ntab].b = i->b; tab[ntab].w = i->w;
+            tab[ntab].sign = i->sign; tab[ntab].res = i->dst;
+            tab[ntab].at = n; tab[ntab].is_div = i->op == IR_DIV;
+            ntab++;
+        }
+    }
+    free_defs(&dd);
+    if (!nrw)
+        return 0;
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+    for (int n = 0; n < fn->nins; n++) {
+        newpos[n] = nb.n;
+        const struct ir_ins o = fn->ins[n];
+        if (movq[n] >= 0) {                     /* the division, done above */
+            struct ir_ins *m = ib_push(&nb);
+            *m = o;
+            m->op = IR_MOV; m->a = movq[n]; m->b = -1;
+            continue;
+        }
+        int q = mulq[n] >= 0 ? mulq[n] : preq[n];
+        if (q < 0) {
+            *ib_push(&nb) = o;
+            continue;
+        }
+        if (preq[n] >= 0) {
+            struct ir_ins *d = ib_push(&nb);
+            *d = o;
+            d->op = IR_DIV; d->dst = q;
+        }
+        int prod = fn->nvregs++;
+        struct ir_ins *m = ib_push(&nb);
+        m->op = IR_MUL; m->dst = prod; m->a = q; m->b = o.b; m->w = o.w;
+        m->line = o.line; m->col = o.col;
+        struct ir_ins *r = ib_push(&nb);
+        r->op = IR_SUB; r->dst = o.dst; r->a = o.a; r->b = prod; r->w = o.w;
+        r->line = o.line; r->col = o.col;
+    }
+    newpos[fn->nins] = nb.n;
+    remap_scopes(fn, newpos, fn->nins);
+    free(newpos);
+    free(mulq); free(preq); free(movq);
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    return 1;
+}
+
 /* ---- local store-forwarding (a lightweight mem2reg) ----
  *
  * EmbIR keeps locals in memory (STVAR/LDVAR). Within an extended basic block a
@@ -6932,6 +8736,416 @@ static int pass_storefwd(struct ir_func *fn)
     return changed;
 }
 
+/* ---- reading a global nothing writes ------------------------------------
+ *
+ * `static const double pi = 3.14159...;` and fdlibm's two hundred other
+ * constants were each an address and two loads at every use, where a
+ * constant is two instructions. The type system here records no `const`,
+ * and it would not be enough anyway (a cast can write through it), so
+ * this PROVES it instead: a static global of this unit is read-only when
+ * every use of its address, in every function, is a load address --
+ * directly or at a constant offset -- no initializer anywhere points at
+ * it, and no inline or top-level assembly could touch it. Its bytes are
+ * then its initializer's, forever, and a load of them is that constant.
+ * A float's constant is its bit pattern, which is what every backend
+ * takes a float constant to be. Bytes a relocation fills (a pointer in
+ * an initializer) are left alone. */
+static const struct global **g_ro;
+static int g_nro;
+
+static const struct global *ro_find(const struct global *g)
+{
+    for (int k = 0; g && k < g_nro; k++)
+        if (g_ro[k] == g || (g_ro[k]->name && g->name &&
+                             strcmp(g_ro[k]->name, g->name) == 0))
+            return g_ro[k];
+    return NULL;
+}
+
+static void ro_globals(struct ir_unit *iu)
+{
+    struct unit *u = iu->src;
+    g_nro = 0;
+    free(g_ro);
+    g_ro = NULL;
+    if (!u || u->topasm)
+        return;
+    int cap = 0;
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (!g->is_static || !g->defined || g->absorbed || g->is_tls ||
+            g->is_weak || g->section || !g->ty || !g->ty->kind ||
+            g->ty->is_volatile)
+            continue;
+        if (g_nro == cap) {
+            cap = cap ? cap * 2 : 16;
+            g_ro = xrealloc(g_ro, (size_t)cap * sizeof *g_ro);
+        }
+        g_ro[g_nro++] = g;
+    }
+    /* withdraw every one that something could write or see */
+    char *out = xcalloc((size_t)(g_nro ? g_nro : 1), 1);
+    for (struct global *g = u->globals; g; g = g->next)
+        for (int r = 0; r < g->nrelocs; r++)
+            for (int k = 0; k < g_nro; k++)
+                if (g->relocs[r].gtarget &&
+                    (g->relocs[r].gtarget == g_ro[k] ||
+                     (g->relocs[r].gtarget->name &&
+                      strcmp(g->relocs[r].gtarget->name, g_ro[k]->name) == 0)))
+                    out[k] = 1;
+    for (int f = 0; f < iu->nfuncs; f++) {
+        struct ir_func *fn = &iu->funcs[f];
+        int nv = fn->nvregs;
+        if (!nv) continue;
+        int *gof = xmalloc((size_t)nv * sizeof *gof);   /* vreg -> ro index */
+        struct defs d;
+        compute_defs(fn, &d);
+        for (int v = 0; v < nv; v++) gof[v] = -1;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_ASM) {
+                memset(out, 1, (size_t)(g_nro ? g_nro : 1));
+                break;
+            }
+            if (i->op == IR_GADDR && i->glob) {
+                const struct global *r = ro_find(i->glob);
+                if (!r) continue;
+                int k;
+                for (k = 0; k < g_nro && g_ro[k] != r; k++) ;
+                if (i->dst >= 0 && i->dst < nv && d.cnt[i->dst] == 1)
+                    gof[i->dst] = k;
+                else
+                    out[k] = 1;
+            } else if (i->op == IR_ADD && i->a >= 0 && i->a < nv &&
+                       gof[i->a] >= 0 && i->dst >= 0 && i->dst < nv &&
+                       d.cnt[i->dst] == 1) {
+                /* Any offset, constant or not: this runs on the IR as
+                 * irgen left it, where `table[1]` is still `mul 1, 4`,
+                 * and a read at a computed offset is still only a read.
+                 * pass_roload folds only the constant ones. */
+                gof[i->dst] = gof[i->a];
+            }
+        }
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            int *ops[3], nops = 0;
+            if (i->a >= 0 && i->a < nv && gof[i->a] >= 0) ops[nops++] = &i->a;
+            if (!i->imm_b && i->b >= 0 && i->b < nv && gof[i->b] >= 0)
+                ops[nops++] = &i->b;
+            if (i->c >= 0 && i->c < nv && gof[i->c] >= 0) ops[nops++] = &i->c;
+            for (int k = 0; k < nops; k++) {
+                int ok = ops[k] == &i->a &&
+                         ((i->op == IR_LOAD && !i->vol) ||
+                          (i->op == IR_ADD && i->dst >= 0 && gof[i->dst] >= 0));
+                if (!ok) out[gof[*ops[k]]] = 1;
+            }
+            if (i->op == IR_CALL)
+                for (int k = 0; k < i->nargs; k++) {
+                    int v = i->argv[k].vreg;
+                    if (v >= 0 && v < nv && gof[v] >= 0) out[gof[v]] = 1;
+                }
+            if (i->op == IR_RET && i->a >= 0 && i->a < nv && gof[i->a] >= 0)
+                out[gof[i->a]] = 1;
+        }
+        free(gof); free(d.cnt); free(d.ins);
+    }
+    int k = 0;
+    for (int j = 0; j < g_nro; j++)
+        if (!out[j]) g_ro[k++] = g_ro[j];
+    g_nro = k;
+    free(out);
+}
+
+/* The `size` bytes at `off` of read-only global g, or 0 if a relocation
+ * fills any of them or they are outside it. */
+static int ro_bytes(const struct global *g, long off, int size,
+                    unsigned long *out)
+{
+    int gs = global_size(g);
+    unsigned long v = 0;
+    if (off < 0 || off + size > gs || size < 1 || size > 8)
+        return 0;
+    for (int r = 0; r < g->nrelocs; r++) {
+        long ro = g->relocs[r].off;
+        if (ro < off + size && off < ro + 8)
+            return 0;
+    }
+    for (int b = size - 1; b >= 0; b--) {
+        unsigned char byte;
+        if (g->init_bytes)
+            byte = off + b < g->init_len
+                 ? (unsigned char)g->init_bytes[off + b] : 0;
+        else
+            byte = (unsigned char)(((unsigned long)g->init >> (8 * (off + b)))
+                                   & 0xff);
+        v = v << 8 | byte;
+    }
+    *out = v;
+    return 1;
+}
+
+static int pass_roload(struct ir_func *fn)
+{
+    int nv = fn->nvregs, changed = 0;
+    if (!g_nro || !nv)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    const struct global **gv = xcalloc((size_t)nv, sizeof *gv);
+    long *goff = xcalloc((size_t)nv, sizeof *goff);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        long c;
+        if (i->dst < 0 || i->dst >= nv || d.cnt[i->dst] != 1)
+            continue;
+        if (i->op == IR_GADDR && i->glob)
+            gv[i->dst] = ro_find(i->glob);
+        else if (i->op == IR_ADD && i->a >= 0 && i->a < nv && gv[i->a] &&
+                 (i->imm_b ? (c = i->imm, 1)
+                           : get_const(fn, &d, i->b, &c))) {
+            gv[i->dst] = gv[i->a];
+            goff[i->dst] = goff[i->a] + c;
+        }
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        unsigned long v;
+        if (i->op != IR_LOAD || i->vol || i->a < 0 || i->a >= nv ||
+            !gv[i->a] || i->w > 8)
+            continue;
+        if (!ro_bytes(gv[i->a], goff[i->a], i->size, &v))
+            continue;
+        to_const(i, fold_ext((long)v, i->size, i->sign, i->w));
+        i->flt = 0;
+        changed = 1;
+    }
+    free(gv); free(goff); free(d.cnt); free(d.ins);
+    return changed;
+}
+
+/* ---- forwarding through a punning union --------------------------------
+ *
+ * fdlibm reads a double's words through a union -- EXTRACT_WORDS,
+ * GET_HIGH_WORD, GET_LOW_WORD -- and every such union stayed a stack
+ * object: the double stored, one word loaded back, in nearly every
+ * function of the math library. mem2reg cannot promote a union (it is
+ * not a scalar) and storefwd will not touch a local whose address is
+ * taken.
+ *
+ * Here a local is PRIVATE when every use of its address is a load or
+ * store address, directly or at a constant offset -- nothing can see it
+ * but these accesses. In a block, a load that one earlier store covers
+ * becomes that store's value: a copy or a bit-reinterpret at the same
+ * width and offset, and at half the width the low or high word
+ * (reinterpret, shift by 32, truncate). A private local left with no load
+ * loses its stores, and DCE the addresses.
+ *
+ * Not on AVR, whose 64-bit shift is a byte loop and whose double is four
+ * bytes anyway. */
+struct pun_rec { int off, width, val, flt; };
+
+static int pass_punfwd(struct ir_func *fn)
+{
+    int nv = fn->nvregs, nvars = fn->nvars, changed = 0;
+    if (!nvars || !nv || target_get() == TARGET_AVR)
+        return 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ASM)
+            return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    int *base = xmalloc((size_t)nv * sizeof *base);
+    long *boff = xcalloc((size_t)nv, sizeof *boff);
+    char *bad = xcalloc((size_t)nvars, 1);
+    for (int v = 0; v < nv; v++) base[v] = -1;
+    /* the address of a local, and constant offsets from it */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        long c;
+        if (i->dst < 0 || i->dst >= nv || d.cnt[i->dst] != 1)
+            continue;
+        if (i->op == IR_ADDR && i->a >= 0 && i->a < nvars) {
+            base[i->dst] = i->a;
+            boff[i->dst] = 0;
+        } else if (i->op == IR_ADD && i->a >= 0 && i->a < nv &&
+                   base[i->a] >= 0 &&
+                   (i->imm_b ? (c = i->imm, 1)
+                             : get_const(fn, &d, i->b, &c))) {
+            base[i->dst] = base[i->a];
+            boff[i->dst] = boff[i->a] + c;
+        }
+    }
+    /* private: every read of such an address is a load/store address or
+     * another offset; and no whole-local access */
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if ((i->op == IR_LDVAR && i->a >= 0 && i->a < nvars) ||
+            (i->op == IR_STVAR && i->dst >= 0 && i->dst < nvars)) {
+            bad[i->op == IR_LDVAR ? i->a : i->dst] = 1;
+            continue;
+        }
+        int *ops[4], nops = 0;
+        if (i->a >= 0 && i->a < nv && base[i->a] >= 0) ops[nops++] = &i->a;
+        if (!i->imm_b && i->b >= 0 && i->b < nv && base[i->b] >= 0)
+            ops[nops++] = &i->b;
+        if (i->c >= 0 && i->c < nv && base[i->c] >= 0) ops[nops++] = &i->c;
+        for (int k = 0; k < nops; k++) {
+            int ok = ops[k] == &i->a &&
+                     (i->op == IR_LOAD || i->op == IR_STORE ||
+                      (i->op == IR_ADD && i->dst >= 0 && base[i->dst] >= 0));
+            if (!ok)
+                bad[base[*ops[k]]] = 1;
+        }
+        if (i->op == IR_CALL)
+            for (int k = 0; k < i->nargs; k++) {
+                int v = i->argv[k].vreg;
+                if (v >= 0 && v < nv && base[v] >= 0) bad[base[v]] = 1;
+            }
+        if (i->op == IR_RET && i->a >= 0 && i->a < nv && base[i->a] >= 0)
+            bad[base[i->a]] = 1;
+    }
+    /* forward, a block at a time */
+    struct pun_rec (*rec)[4] = xcalloc((size_t)nvars, sizeof *rec);
+    int *nrec = xcalloc((size_t)nvars, sizeof *nrec);
+    int *plan = xmalloc((size_t)fn->nins * sizeof *plan);  /* rec index */
+    struct pun_rec *pr = xmalloc((size_t)fn->nins * sizeof *pr);
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        plan[n] = 0;
+        if (i->op == IR_LABEL || i->op == IR_CALL) {
+            /* a join; and a call cannot touch a private local, but a
+             * longjmp-style return into the middle is not worth reasoning
+             * about -- start again either way */
+            memset(nrec, 0, (size_t)nvars * sizeof *nrec);
+            continue;
+        }
+        if ((i->op != IR_LOAD && i->op != IR_STORE) || i->a < 0 ||
+            i->a >= nv || base[i->a] < 0 || bad[base[i->a]] || i->vol)
+            continue;
+        int L = base[i->a], off = (int)boff[i->a], wid = i->size;
+        if (i->op == IR_STORE) {
+            int k = 0;
+            for (int j = 0; j < nrec[L]; j++) {      /* drop what it overlaps */
+                struct pun_rec *r = &rec[L][j];
+                if (r->off + r->width <= off || off + wid <= r->off)
+                    rec[L][k++] = *r;
+            }
+            nrec[L] = k;
+            if (k < 4 && (wid == 4 || wid == 8) && i->b >= 0) {
+                rec[L][k].off = off; rec[L][k].width = wid;
+                rec[L][k].val = i->b; rec[L][k].flt = i->flt;
+                nrec[L] = k + 1;
+            }
+            continue;
+        }
+        for (int j = 0; j < nrec[L]; j++) {          /* a LOAD */
+            struct pun_rec *r = &rec[L][j];
+            if (i->flt && r->width != wid)
+                continue;      /* half a double as a float: not handled */
+            if ((r->width == wid && r->off == off) ||
+                (r->width == 8 && wid == 4 &&
+                 (off == r->off || off == r->off + 4))) {
+                plan[n] = 1;
+                pr[n] = *r;
+                any = 1;
+                break;
+            }
+        }
+    }
+    if (any) {
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+        for (int n = 0; n < fn->nins; n++) {
+            struct ir_ins in = fn->ins[n];
+            newpos[n] = nb.n;
+            if (!plan[n]) {
+                *ib_push(&nb) = in;
+                continue;
+            }
+            const struct pun_rec *r = &pr[n];
+            int x = r->val, hi = (int)boff[in.a] != r->off;
+            if (r->width == in.size) {
+                struct ir_ins *m = ib_push(&nb);
+                *m = in;
+                m->op = r->flt == in.flt ? IR_MOV : IR_BITCAST;
+                m->a = x; m->b = -1; m->c = -1;
+                m->w = in.size; m->size = in.size;
+                m->sign = in.flt ? 0 : 1;
+                m->vol = 0; m->natural = 0;
+                changed = 1;
+                continue;
+            }
+            if (r->flt) {                   /* the double's bits */
+                struct ir_ins *b = ib_push(&nb);
+                *b = in;
+                b->op = IR_BITCAST; b->a = x; b->b = -1; b->c = -1;
+                b->w = 8; b->size = 8; b->sign = 1; b->flt = 0;
+                b->vol = 0; b->natural = 0;
+                b->dst = x = fn->nvregs++;
+            }
+            if (hi) {
+                struct ir_ins *k = ib_push(&nb);
+                memset(k, 0, sizeof *k);
+                k->op = IR_CONST; k->imm = 32; k->w = 8;
+                k->a = k->b = k->c = -1;
+                k->line = in.line; k->col = in.col;
+                k->dst = fn->nvregs++;
+                struct ir_ins *sh = ib_push(&nb);
+                memset(sh, 0, sizeof *sh);
+                sh->op = IR_SHR; sh->a = x; sh->b = k->dst; sh->w = 8;
+                sh->sign = 0; sh->c = -1;
+                sh->line = in.line; sh->col = in.col;
+                sh->dst = x = fn->nvregs++;
+            }
+            struct ir_ins *e = ib_push(&nb);
+            *e = in;
+            e->op = IR_EXT; e->a = x; e->b = -1; e->c = -1;
+            e->size = 4; e->flt = 0; e->vol = 0; e->natural = 0;
+            changed = 1;
+        }
+        newpos[fn->nins] = nb.n;
+        remap_scopes(fn, newpos, fn->nins);
+        free(newpos);
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    }
+    /* a private local nothing loads from any more: its stores are dead */
+    {
+        char *loaded = xcalloc((size_t)nvars, 1);
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if ((i->op == IR_LOAD || i->op == IR_MEMCPY) && i->a >= 0 &&
+                i->a < nv && base[i->a] >= 0)
+                loaded[base[i->a]] = 1;
+            if (i->op == IR_MEMCPY && i->b >= 0 && i->b < nv &&
+                base[i->b] >= 0)
+                loaded[base[i->b]] = 1;
+        }
+        int k = 0;
+        int *newpos = xmalloc((size_t)(fn->nins + 1) * sizeof *newpos);
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            newpos[n] = k;
+            if (i->op == IR_STORE && i->a >= 0 && i->a < nv &&
+                base[i->a] >= 0 && !bad[base[i->a]] &&
+                !loaded[base[i->a]] && !i->vol) {
+                changed = 1;
+                continue;
+            }
+            fn->ins[k++] = fn->ins[n];
+        }
+        newpos[fn->nins] = k;
+        remap_scopes(fn, newpos, fn->nins);
+        free(newpos);
+        fn->nins = k;
+        free(loaded);
+    }
+    free(base); free(boff); free(bad); free(rec); free(nrec);
+    free(plan); free(pr);
+    free(d.cnt); free(d.ins);
+    return changed;
+}
+
 /* ---- sinking a constant to the use that wants it ----------------------
  *
  * A literal has no operands and no side effects, so where it is
@@ -6954,7 +9168,79 @@ static int pass_storefwd(struct ir_func *fn)
  * Only forward. A use EARLIER in the instruction stream is the far side
  * of a back edge, and moving the definition after it would leave the
  * first iteration reading nothing.
+ *
+ * And never INTO a loop. A constant before a loop whose one use is
+ * inside it is very often there because LICM put it there, and sinking
+ * it undoes the hoist: the value is rebuilt on every trip. That is one
+ * instruction on x86-64, but two on aarch64 for a 32-bit multiplier
+ * (mov + movk) and three for a global's address (adrp + add + mov) --
+ * an FNV hash rebuilt 16777619 for every byte it read. A loop here is
+ * the span of a backward branch, which is what the IR has for one.
  */
+/* Does this constant take more than one instruction to build on the
+ * target? Only those are worth a register held across a loop: x86-64
+ * builds anything in one (`mov $imm`, `lea sym(%rip)`), and there sinking
+ * into a loop frees a register for one instruction a trip -- keeping them
+ * all hoisted made matrix and sort slower and lib/libc bigger. A global's
+ * address is two (adrp+add, movw+movt, auipc+addi); a literal is two when
+ * it is outside the one-instruction range (movz/movn or a bitmask on
+ * aarch64; a 16-bit movw or a modified immediate on Thumb; 12 bits on
+ * RISC-V). AVR is left as it was: every multi-byte value there is several
+ * instructions, and its register file is what runs out first. */
+static int g_opt_size;                  /* -Os, set by opt_run (defined below) */
+int t_imm_ok(long imm);                 /* arch/thumb/emit.c */
+int a64_bitmask_ok(long imm, int w);    /* arch/aarch64/emit.c */
+static int const_is_expensive(const struct ir_ins *i)
+{
+    enum target_arch ta = target_get();
+    if (ta == TARGET_X86_64 || ta == TARGET_AVR)
+        return 0;
+    switch (i->op) {
+    case IR_GADDR: case IR_STRADDR: case IR_FADDR:
+        return 1;
+    case IR_CONST: {
+        long v = i->imm;
+        if (i->w == 4) v = (long)(int)v;
+        if (ta == TARGET_AARCH64) {
+            unsigned long u = (unsigned long)v, n = ~u;
+            int w = i->w == 4 ? 4 : 8;
+            if (w == 4) { u &= 0xffffffffUL; n &= 0xffffffffUL; }
+            for (int s = 0; s < 8 * w; s += 16) {
+                if ((u & ~(0xffffUL << s)) == 0) return 0;     /* movz */
+                if ((n & ~(0xffffUL << s)) == 0) return 0;     /* movn */
+            }
+            return !a64_bitmask_ok(w == 4 ? (long)(unsigned)u : v, w);
+        }
+        if (ta == TARGET_THUMB)
+            return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
+        return !(v >= -2048 && v <= 2047);                     /* RISC-V */
+    }
+    default:
+        return 0;
+    }
+}
+
+static int *sink_loop_depth(const struct ir_func *fn)
+{
+    int N = fn->nins;
+    int *depth = xcalloc((size_t)(N ? N : 1), sizeof *depth);
+    int *lab = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *lab);
+    for (int l = 0; l < fn->nlabels; l++) lab[l] = -1;
+    for (int i = 0; i < N; i++)
+        if (fn->ins[i].op == IR_LABEL && fn->ins[i].label >= 0 &&
+            fn->ins[i].label < fn->nlabels)
+            lab[fn->ins[i].label] = i;
+    for (int i = 0; i < N; i++) {
+        const struct ir_ins *in = &fn->ins[i];
+        if ((in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ) &&
+            in->label >= 0 && in->label < fn->nlabels &&
+            lab[in->label] >= 0 && lab[in->label] <= i)
+            for (int k = lab[in->label]; k <= i; k++)
+                depth[k]++;
+    }
+    free(lab);
+    return depth;
+}
 /* each_read's callback for "which instruction reads this vreg": the
  * FIRST one wins, which is the only one when the use count is 1. */
 struct sink_at_ctx { int *at; int nv; int n; };
@@ -6990,6 +9276,7 @@ static int pass_sinkconst(struct ir_func *fn)
     /* where each sinkable constant wants to go */
     int *to = xmalloc((size_t)fn->nins * sizeof *to);
     for (int n = 0; n < fn->nins; n++) to[n] = -1;
+    int *depth = sink_loop_depth(fn);
     int any = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
@@ -7008,9 +9295,15 @@ static int pass_sinkconst(struct ir_func *fn)
             continue;
         if (use[i->dst] != 1 || d.cnt[i->dst] != 1)
             continue;
-        if (at[i->dst] > n + 1) { to[n] = at[i->dst]; any = 1; }
+        if (at[i->dst] > n + 1 &&
+            (depth[at[i->dst]] <= depth[n] || g_opt_size ||
+             !const_is_expensive(i))) {
+            to[n] = at[i->dst];
+            any = 1;
+        }
     }
     free(at);
+    free(depth);
     if (!any) { free(use); free(to); free_defs(&d); return 0; }
 
     /* Rebuild in one pass: `head[m]` chains the constants that want to
@@ -7057,6 +9350,21 @@ static enum binop swap_pred(enum binop p)
  * the value need not be materialised in a register. Run once AFTER the main
  * fixpoint (fold/lvn/copyprop never see the imm_b form) and followed by DCE,
  * which drops the CONSTs that folding left unreferenced. */
+/* May constant `imm` become op's immediate operand? Yes, except where the
+ * target's instructions cannot hold it: there a folded constant is rebuilt
+ * at every use -- a movw+movt pair each time on Thumb -- where one left in
+ * a register is built once and can be hoisted out of a loop. */
+static int target_imm_foldable(int op, long imm, int w)
+{
+    if (target_get() == TARGET_THUMB)
+        return thumb_imm_foldable(op, imm);
+    if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
+        return riscv_imm_foldable(op, imm);
+    if (target_get() == TARGET_AARCH64)
+        return a64_imm_foldable(op, imm, w);
+    return 1;
+}
+
 static int pass_immfold(struct ir_func *fn)
 {
     struct defs d;
@@ -7085,11 +9393,13 @@ static int pass_immfold(struct ir_func *fn)
         default:
             continue;
         }
-        if (get_const(fn, &d, i->b, &B) && fits_imm32(B)) {
+        if (get_const(fn, &d, i->b, &B) && fits_imm32(B) &&
+            target_imm_foldable(i->op, B, i->w)) {
             i->imm = B; i->imm_b = 1; i->b = -1;    /* op a, imm */
             changed = 1;
         } else if ((commutative || i->op == IR_CMP) &&
-                   get_const(fn, &d, i->a, &A) && fits_imm32(A)) {
+                   get_const(fn, &d, i->a, &A) && fits_imm32(A) &&
+                   target_imm_foldable(i->op, A, i->w)) {
             /* Constant in the first operand: move it to the immediate, keeping
              * a valid instruction — commutative ops just swap, a compare swaps
              * and flips its predicate. */
@@ -7142,15 +9452,54 @@ static int pass_immfold(struct ir_func *fn)
  *   original would have freed is smaller than what the caller then
  *   spends on spills.
  *
+ * Re-measured 2026-10-02, after the allocator had changed under it: a
+ * sole-caller budget of 2000 made lib/libc SMALLER at -O2 and -Os on all
+ * five targets (x86-64 -84 bytes, aarch64 -156, RV32 -58, Thumb -22, AVR
+ * -54), left tests/bench/kernels.c unchanged on four boards, memory_stream
+ * included, and made the workload's state machine 4-11% faster (its
+ * per-token function, 316 instructions, now moves into its one caller).
+ * So the sole-caller number is 2000; the copied-callee one stays at 24 --
+ * at 64 the hash table's probe and key builder were copied into their
+ * callers and ran 1-4% SLOWER on every board.
+ *
  * So the number stays, and this is what it is doing there. A cost model
  * that beats it wants something these three did not have -- how HOT the
  * call is (section 4's profile work), or a real estimate of what the
  * caller's register pressure will do -- not more arithmetic on facts
  * already available here. */
 #define INLINE_MAX_CALLEE 24     /* instruction budget for an inline candidate */
-#define INLINE_SOLE_CALLEE 200   /* ...and for a body that MOVES (sole_static_caller) */   /* ...and for a body that MOVES (sole_static_caller) */
+#define INLINE_SOLE_CALLEE 2000  /* ...and for a body that MOVES (sole_static_caller) */
 #define INLINE_MAX_CALLER 800    /* stop expanding a caller past this many ins */
 #define INLINE_MAX_PER_FUNC 64   /* and cap inlines per caller, for termination */
+
+/* -Os: a much smaller budget, and WHY it needed one.
+ *
+ * The comment above opt_run used to say that inlining everything -O2 inlines
+ * is the smaller answer at -Os too, because a callee with one caller is
+ * DELETED after it moves, so refusing to inline it keeps two copies. That
+ * half is still true, and INLINE_SOLE_CALLEE below is how it stays true.
+ *
+ * The other half was wrong, and it was wrong because 24 is a count of IR
+ * instructions being used as a proxy for BYTES. An IR op costs one or two
+ * instructions on x86-64 and six to ten on AVR, where an int add is four and
+ * every value lives in a frame slot. So the same budget that admits a genuine
+ * one-liner on a 64-bit machine admits a 450-byte function on an 8-bit one,
+ * and lib/rt/avrfp.c is what that looks like from the outside: -Os produced
+ * 41392 bytes of text against -O1's 32856, on a part with 32768 of flash.
+ * `pack` and `mul24` had been copied into every caller and deleted, and
+ * addsub grew 6600 -> 9850 for it.
+ *
+ * So at -Os a body is inlined only when it MOVES -- the sole-caller case,
+ * where there is no duplication to pay for -- or when it is small enough that
+ * the copy is plausibly smaller than the call sequence it replaces, on the
+ * most expansive target rather than the least. Nothing changes at -O2, so no
+ * speed measurement moves; -Os is the level that asked for size.
+ */
+#define INLINE_SIZE_CALLEE 6
+
+/* Whether opt_run was asked for size. A global in the style of g_pass: the
+ * inliner's decision is three call levels below opt_run. */
+static int g_opt_size;
 
 /* Vreg remap over one instruction. kind 0 = caller shift (a temp >= p1 moves up
  * by p2); kind 1 = callee map (a callee local < p3 -> p1+x, a temp -> p2+x). */
@@ -7179,8 +9528,8 @@ static void remap_ins(struct ir_ins *in, struct rmp *r)
         in->dst = vmap(r, in->dst);
     }
     if (in->op == IR_JMP || in->op == IR_BRZ || in->op == IR_BRNZ ||
-        in->op == IR_LABEL)
-        in->label += r->lbase;
+        in->op == IR_LABEL || in->op == IR_SWITCH)
+        in->label += r->lbase;      /* a switch's table: see inline_call */
 }
 
 /* The ir_func for a callee, or NULL if not defined in this unit. */
@@ -7215,12 +9564,13 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
      * would not inline the call, it would emit a wrong one. The remark
      * still names whichever test refused, so a function marked
      * always_inline that was not inlined says why. */
-    if (!force && cf->nins > INLINE_MAX_CALLEE &&
+    int budget = g_opt_size ? INLINE_SIZE_CALLEE : INLINE_MAX_CALLEE;
+    if (!force && cf->nins > budget &&
         !(sole && cf->nins <= INLINE_SOLE_CALLEE)) {
         *why = "callee-too-large";
         if (detail)
-            snprintf(detail, dcap, "%d instructions, budget %d",
-                     cf->nins, INLINE_MAX_CALLEE);
+            snprintf(detail, dcap, "%d instructions, budget %d%s",
+                     cf->nins, budget, g_opt_size ? " (-Os)" : "");
         return 0;
     }
     if (cf->neh)             { *why = "callee-has-exception-regions"; return 0; }
@@ -7329,17 +9679,19 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     for (int i = 0; i < cf->nins; i++) {
         struct ir_ins in = cf->ins[i];
         remap_ins(&in, &cm);
+        if (in.op == IR_SWITCH)          /* its table, renumbered like its default */
+            in.jt = ir_jt_clone(fn, cf, in.jt, L);
         if (in.op == IR_RET) {
             if (in.a >= 0 && dst >= 0) {
                 struct ir_ins *mv = &buf[m++];
-                memset(mv, 0, sizeof *mv);
+                ins_blank(mv);
                 mv->op = IR_MOV; mv->dst = dst; mv->a = in.a;
                 mv->line = in.line;      /* the callee's `return` */
                 mv->col = in.col;
             }
             if (i != cf->nins - 1) {     /* the last RET falls into `after` */
                 struct ir_ins *jp = &buf[m++];
-                memset(jp, 0, sizeof *jp);
+                ins_blank(jp);
                 jp->op = IR_JMP; jp->label = after;
                 jp->line = in.line;
                 jp->col = in.col;
@@ -8074,6 +10426,7 @@ static struct passflag g_pass[] = {
     { "sroa",      0, 0 },   /* split a private aggregate into scalars */
     { "unroll",    0, 0 },   /* copies of a body, one test between them */
     { "pre",       0, 0 },   /* compute it on the path that lacked it */
+    { "switch-thread", 0, 0 }, /* a known state jumps straight to its case */
 };
 #define NPASS ((int)(sizeof g_pass / sizeof g_pass[0]))
 #define P_MEM2REG 0
@@ -8092,6 +10445,7 @@ static struct passflag g_pass[] = {
 #define P_SROA     13
 #define P_UNROLL   14
 #define P_PRE      15
+#define P_SWTHREAD 16
 
 
 int opt_set_pass(const char *name, int on)
@@ -8136,6 +10490,7 @@ static void pass_default(int idx, int on)
 #define g_sroa     (g_pass[P_SROA].on)
 #define g_unroll   (g_pass[P_UNROLL].on)
 #define g_pre      (g_pass[P_PRE].on)
+#define g_swthread (g_pass[P_SWTHREAD].on)
 
 /* ---- IR verifier (opt-in via EMBCC_VERIFY) --------------------------------
  * A cheap post-optimization sanity net for the two invariants a silent
@@ -8166,6 +10521,32 @@ static void verify_func(struct ir_func *fn, const char *tag)
     struct vrfy v = { &d, fn->nparams, fn->nvars, fn, tag };
     for (int n = 0; n < fn->nins; n++)
         each_read(&fn->ins[n], vrfy_read_cb, &v);
+    /* (3) every target a switch names is a label this function places:
+     * a table entry left behind by a pass that renumbered or dropped
+     * labels is a jump into nowhere. */
+    {
+        char *placed = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), 1);
+        for (int n = 0; n < fn->nins; n++)
+            if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+                fn->ins[n].label < fn->nlabels)
+                placed[fn->ins[n].label] = 1;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_SWITCH)
+                continue;
+            if (i->jt < 0 || i->jt >= fn->njt || fn->jt[i->jt].n < 1)
+                diag_fatal(fn->file, 0, "internal: %s has a switch with no "
+                           "table (after %s)", fn->name, tag);
+            for (int k = -1; k < fn->jt[i->jt].n; k++) {
+                int l = k < 0 ? i->label : fn->jt[i->jt].labels[k];
+                if (l < 0 || l >= fn->nlabels || !placed[l])
+                    diag_fatal(fn->file, 0, "internal: %s: a switch names "
+                               "label L%d, which nothing places (after %s)",
+                               fn->name, l, tag);
+            }
+        }
+        free(placed);
+    }
     if (fn->var_scope_lo)
         for (int i = 0; i < fn->nvars; i++) {
             int lo = fn->var_scope_lo[i], hi = fn->var_scope_hi[i];
@@ -8198,6 +10579,1072 @@ static void verify_func(struct ir_func *fn, const char *tag)
             "synth", fn->name, n, ir_opname(i->op), tag);
     }
     free_defs(&d);
+}
+
+#define OPT_MAX_ROUNDS 64   /* rounds of the block-local passes per outer round */
+static void opt_no_fixpoint(struct ir_func *fn, int rounds)
+{
+    if (getenv("EMBCC_VERIFY"))
+        diag_fatal(fn->file, fn->line,
+                   "internal: the optimizer did not converge on '%s' after %d "
+                   "rounds -- two passes are undoing each other's work",
+                   fn->name, rounds);
+    fprintf(stderr, "embcc: warning: the optimizer stopped after %d rounds on "
+                    "'%s' without converging (the code is correct; this is a "
+                    "compiler performance bug worth reporting)\n",
+            rounds, fn->name);
+}
+
+/* ==== splitting a live range around a loop ================================
+ *
+ * A value that crosses a call takes a callee-saved register, and keeps
+ * it everywhere it lives. When the call it crosses is OUTSIDE a loop and
+ * the loop has none, the loop pays on every iteration: the loop's own
+ * call hands the value over in an argument register and back in the
+ * return register, and each trip copies it into the callee-saved one
+ * and out again (kernels_main's `s = opaque_add(s, i)`: nine
+ * instructions an iteration where seven do). The allocator cannot see
+ * this -- one vreg, one register -- so the IR gives it two: inside the
+ * loop the value goes by a new name, copied in on the entry edge and
+ * back on every exit edge, and the new name crosses nothing.
+ *
+ * Shapes taken: a natural loop with one entry, from the block that falls
+ * into its header; no switch, no indirect jump, no inline asm or landing
+ * pad inside; exits that fall out, jump out, or branch out through a
+ * trampoline that does the copy. Values taken: temps live into the
+ * header, read or written inside, live across an IR_CALL in a block
+ * outside the loop and across NONE inside it -- a call inside is fine
+ * when the value is what it passes and returns (`s = opaque_add(s, i)`
+ * hands s over in r0 and gets it back there), which is exactly the case
+ * that pays. A call is an IR_CALL or an op the backend lowers to a
+ * runtime helper (target_op_calls_helper: a soft-float divide after the
+ * loop is what the Cortex-M4 bench crosses); the allocator judges by the
+ * same predicate. Not at -Os: the copies are bytes. This runs last,
+ * after every copy propagation that would fold the copies back in, one
+ * loop per call. */
+struct splitrd { int from, to; };
+static void split_rd_cb(int *p, void *ctx)
+{
+    struct splitrd *c = ctx;
+    if (*p == c->from) *p = c->to;
+}
+struct splituse { unsigned long *use, *def; int nv; };
+static void split_use_cb(int *p, void *ctx)
+{
+    struct splituse *c = ctx;
+    int v = *p;
+    if (v < 0 || v >= c->nv) return;
+    if (!(c->def[v >> 6] & (1UL << (v & 63))))
+        c->use[v >> 6] |= 1UL << (v & 63);
+}
+#define BIT(set, v) ((set)[(v) >> 6] & (1UL << ((v) & 63)))
+
+static int pass_splitloops(struct ir_func *fn)
+{
+    if (fn->nins == 0 || fn->nvregs == 0)
+        return 0;
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    int *order = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *order), norder;
+    compute_rpo(bb, nbb, order, &norder);
+    int changed = 0;
+    if (norder != nbb)
+        goto out;
+    compute_idom(bb, order, norder);
+    int nv = fn->nvregs, words = (nv + 63) / 64;
+
+    /* The width and class of each temp, from any definition. */
+    int *vw = xcalloc((size_t)nv, sizeof *vw);
+    char *vflt = xcalloc((size_t)nv, 1);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int t = i->op == IR_STVAR ? -1 : def_target(i);
+        if (t < 0 || t >= nv || vw[t]) continue;
+        vw[t] = i->op == IR_CALL ? (i->w ? i->w : 8) : i->w;
+        vflt[t] = (char)i->flt;
+    }
+
+    /* Block liveness. */
+    unsigned long *use = xcalloc((size_t)nbb * words, sizeof *use);
+    unsigned long *def = xcalloc((size_t)nbb * words, sizeof *def);
+    unsigned long *lin = xcalloc((size_t)nbb * words, sizeof *lin);
+    unsigned long *lout = xcalloc((size_t)nbb * words, sizeof *lout);
+    for (int b = 0; b < nbb; b++) {
+        struct splituse su = { use + (size_t)b * words, def + (size_t)b * words, nv };
+        for (int n = bb[b].start; n < bb[b].end; n++) {
+            each_read(&fn->ins[n], split_use_cb, &su);
+            int t = def_target(&fn->ins[n]);
+            if (t >= 0 && t < nv) su.def[t >> 6] |= 1UL << (t & 63);
+        }
+    }
+    for (int again = 1; again; ) {
+        again = 0;
+        for (int b = nbb - 1; b >= 0; b--) {
+            unsigned long *o = lout + (size_t)b * words;
+            for (int w = 0; w < words; w++) o[w] = 0;
+            for (int k = 0; k < bb[b].nsucc; k++) {
+                unsigned long *si = lin + (size_t)bb[b].succ[k] * words;
+                for (int w = 0; w < words; w++) o[w] |= si[w];
+            }
+            unsigned long *ii = lin + (size_t)b * words;
+            for (int w = 0; w < words; w++) {
+                unsigned long nvl = use[(size_t)b * words + w] |
+                                    (o[w] & ~def[(size_t)b * words + w]);
+                if (nvl != ii[w]) { ii[w] = nvl; again = 1; }
+            }
+        }
+    }
+    /* Per block: the temps live across a call in it. */
+    unsigned long *xcall = xcalloc((size_t)nbb * words, sizeof *xcall);
+    {
+        unsigned long *live = xmalloc((size_t)words * sizeof *live);
+        for (int b = 0; b < nbb; b++) {
+            for (int w = 0; w < words; w++) live[w] = lout[(size_t)b * words + w];
+            for (int n = bb[b].end - 1; n >= bb[b].start; n--) {
+                const struct ir_ins *i = &fn->ins[n];
+                int t = def_target(i);
+                if (i->op == IR_CALL || target_op_calls_helper(i))
+                    for (int w = 0; w < words; w++) {
+                        unsigned long m = live[w];
+                        if (t >= 0 && (t >> 6) == w) m &= ~(1UL << (t & 63));
+                        xcall[(size_t)b * words + w] |= m;
+                    }
+                if (t >= 0 && t < nv) live[t >> 6] &= ~(1UL << (t & 63));
+                struct splituse su = { live, live, nv };   /* def = live: always set */
+                /* a read is live before the instruction whatever follows */
+                su.def = xcalloc((size_t)words, sizeof *su.def);
+                each_read(&fn->ins[n], split_use_cb, &su);
+                free(su.def);
+            }
+        }
+        free(live);
+    }
+
+    char *in = xmalloc((size_t)(nbb ? nbb : 1));
+    unsigned long *xout = xmalloc((size_t)words * sizeof *xout);
+    unsigned long *inside = xmalloc((size_t)words * sizeof *inside);
+    /* Headers innermost first. */
+    for (int oi = norder - 1; oi >= 0 && !changed; oi--) {
+        int h = order[oi];
+        if (h == 0 || bb[h].end <= bb[h].start ||
+            fn->ins[bb[h].start].op != IR_LABEL)
+            continue;
+        int Lh = fn->ins[bb[h].start].label;
+        memset(in, 0, (size_t)nbb);
+        int any_back = 0;
+        for (int p = 0; p < nbb; p++)
+            for (int k = 0; k < bb[p].nsucc; k++)
+                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
+                    loop_body(bb, nbb, h, p, in);
+                    any_back = 1;
+                }
+        if (!any_back)
+            continue;
+        /* One entry, from the block that falls into the header. */
+        int ok = 1, pe = -1;
+        for (int b = 0; b < nbb && ok; b++) {
+            if (!in[b]) continue;
+            for (int k = 0; k < bb[b].npred; k++) {
+                int p = bb[b].pred[k];
+                if (in[p]) continue;
+                if (b != h || pe >= 0) ok = 0;
+                else pe = p;
+            }
+        }
+        if (!ok || pe != h - 1 || bb[pe].end != bb[h].start || bb[pe].end <= bb[pe].start)
+            continue;
+        {
+            const struct ir_ins *lt = &fn->ins[bb[pe].end - 1];
+            if (lt->op == IR_JMP || lt->op == IR_RET || lt->op == IR_UD2 ||
+                lt->op == IR_IGOTO || lt->op == IR_SWITCH)
+                continue;                       /* no fall-through edge */
+            if ((lt->op == IR_BRZ || lt->op == IR_BRNZ) && lt->label == Lh)
+                continue;                       /* the taken edge skips the copy */
+        }
+        /* Nothing inside the loop a copy could not be placed around. */
+        for (int w = 0; w < words; w++) inside[w] = 0;
+        for (int b = 0; b < nbb && ok; b++) {
+            if (!in[b]) continue;
+            for (int n = bb[b].start; n < bb[b].end; n++) {
+                const struct ir_ins *i = &fn->ins[n];
+                if (i->op == IR_SWITCH || i->op == IR_IGOTO ||
+                    i->op == IR_ASM || i->op == IR_LANDING || i->op == IR_LABELADDR)
+                    { ok = 0; break; }
+                int t = def_target(i);
+                if (t >= 0 && t < nv) inside[t >> 6] |= 1UL << (t & 63);
+            }
+            for (int w = 0; w < words; w++) inside[w] |= use[(size_t)b * words + w];
+        }
+        if (!ok)
+            continue;
+        /* xout: live across a call outside the loop; xin: across one inside */
+        unsigned long *xin = inside;      /* reused below, after the candidate test */
+        unsigned long *xinb = xmalloc((size_t)words * sizeof *xinb);
+        for (int w = 0; w < words; w++) { xout[w] = 0; xinb[w] = 0; }
+        for (int b = 0; b < nbb; b++)
+            for (int w = 0; w < words; w++)
+                (in[b] ? xinb : xout)[w] |= xcall[(size_t)b * words + w];
+        (void)xin;
+        /* The candidates: live into the header, touched inside, live
+         * across a call outside and across none inside. */
+        int v = -1;
+        for (int c = fn->nvars; c < nv; c++)
+            if (BIT(lin + (size_t)h * words, c) && BIT(inside, c) && BIT(xout, c) &&
+                !BIT(xinb, c) && (vw[c] == 4 || vw[c] == 8)) { v = c; break; }
+        free(xinb);
+        if (v < 0)
+            continue;
+        /* ---- rewrite ---- */
+        int v2 = fn->nvregs++;
+        int lineh = fn->ins[bb[h].start].line, colh = fn->ins[bb[h].start].col;
+        struct splitrd rd = { v, v2 };
+        for (int b = 0; b < nbb; b++) {
+            if (!in[b]) continue;
+            for (int n = bb[b].start; n < bb[b].end; n++) {
+                struct ir_ins *i = &fn->ins[n];
+                each_read(i, split_rd_cb, &rd);
+                if (i->op != IR_STVAR && def_target(i) == v)
+                    i->dst = v2;
+            }
+        }
+        /* Where the copies go: `at` is an instruction index, kind 0 = before
+         * it, 1 = after it (at == nins: the end). Trampolines are appended. */
+        struct cp { int at, kind, dst, src; } *cps = NULL; int ncps = 0, ccps = 0;
+        struct tr { int lbl, dst, src, to; } *trs = NULL; int ntrs = 0, ctrs = 0;
+#define ADDCP(a, k, d, s) do { if (ncps == ccps) { ccps = ccps ? ccps * 2 : 8; \
+            cps = xrealloc(cps, (size_t)ccps * sizeof *cps); } \
+            cps[ncps].at = (a); cps[ncps].kind = (k); cps[ncps].dst = (d); \
+            cps[ncps].src = (s); ncps++; } while (0)
+        ADDCP(bb[h].start, 0, v2, v);                 /* the entry edge */
+        for (int b = 0; b < nbb; b++) {
+            if (!in[b]) continue;
+            struct ir_ins *lt = &fn->ins[bb[b].end - 1];
+            for (int k = 0; k < bb[b].nsucc; k++) {
+                int s = bb[b].succ[k];
+                if (in[s]) continue;
+                if (!BIT(lin + (size_t)s * words, v))
+                    continue;                     /* dead past this exit */
+                int Ls = bb[s].end > bb[s].start && fn->ins[bb[s].start].op == IR_LABEL
+                         ? fn->ins[bb[s].start].label : -1;
+                int falls = bb[b].end == bb[s].start &&
+                            lt->op != IR_JMP && lt->op != IR_RET && lt->op != IR_UD2;
+                if (lt->op == IR_JMP && lt->label == Ls) {
+                    ADDCP(bb[b].end - 1, 0, v, v2);  /* before the jump */
+                } else if ((lt->op == IR_BRZ || lt->op == IR_BRNZ) && lt->label == Ls &&
+                           Ls >= 0) {
+                    if (ntrs == ctrs) { ctrs = ctrs ? ctrs * 2 : 4;
+                        trs = xrealloc(trs, (size_t)ctrs * sizeof *trs); }
+                    trs[ntrs].lbl = fn->nlabels++; trs[ntrs].dst = v;
+                    trs[ntrs].src = v2; trs[ntrs].to = Ls;
+                    lt->label = trs[ntrs].lbl;
+                    ntrs++;
+                    if (falls && bb[b].end == bb[s].start)
+                        ADDCP(bb[b].end - 1, 1, v, v2);  /* both arms leave */
+                } else if (falls) {
+                    ADDCP(bb[b].end - 1, 1, v, v2);      /* after the block */
+                } else {
+                    ok = 0;                            /* an edge of no known shape */
+                }
+            }
+        }
+        if (!ok) {
+            /* undo the rename: the shapes above are the only ones, so this
+             * cannot happen, but a split half done is a miscompile */
+            diag_fatal(fn->file, lineh, "internal: %s: a loop exit of a shape "
+                       "the live-range split does not know", fn->name);
+        }
+        /* ---- rebuild ---- */
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        for (int n = 0; n <= fn->nins; n++) {
+            if (newpos) newpos[n] = nb.n;
+            for (int c = 0; c < ncps; c++)
+                if (cps[c].at == n && cps[c].kind == 0) {
+                    struct ir_ins *m = ib_push(&nb);
+                    memset(m, 0, sizeof *m);
+                    m->op = IR_MOV; m->dst = cps[c].dst; m->a = cps[c].src; m->b = -1;
+                    m->w = vw[v]; m->flt = vflt[v]; m->line = lineh; m->col = colh;
+                    m->synth = 1;
+                }
+            if (n == fn->nins) break;
+            *ib_push(&nb) = fn->ins[n];
+            for (int c = 0; c < ncps; c++)
+                if (cps[c].at == n && cps[c].kind == 1) {
+                    struct ir_ins *m = ib_push(&nb);
+                    memset(m, 0, sizeof *m);
+                    m->op = IR_MOV; m->dst = cps[c].dst; m->a = cps[c].src; m->b = -1;
+                    m->w = vw[v]; m->flt = vflt[v]; m->line = lineh; m->col = colh;
+                    m->synth = 1;
+                }
+        }
+        /* The trampolines go after the last instruction -- so if that
+         * one can fall through, it would fall INTO the first of them: a
+         * void function's implicit return ran the exit copy and jumped
+         * back to the code after the loop, and lib/libcxx's rb-tree
+         * erase never returned. Cap it with the return it stands for,
+         * as mem2reg's trampolines do. */
+        if (ntrs > 0) {
+            enum ir_op lt = nb.n ? nb.p[nb.n - 1].op : IR_UD2;
+            if (lt != IR_JMP && lt != IR_RET && lt != IR_UD2 &&
+                lt != IR_IGOTO && lt != IR_SWITCH) {
+                struct ir_ins *r = ib_push(&nb);
+                memset(r, 0, sizeof *r);
+                r->op = IR_RET; r->dst = r->a = r->b = -1;
+                r->synth = 1;
+            }
+        }
+        for (int t = 0; t < ntrs; t++) {
+            struct ir_ins *l = ib_push(&nb);
+            memset(l, 0, sizeof *l);
+            l->op = IR_LABEL; l->label = trs[t].lbl; l->dst = l->a = l->b = -1;
+            l->line = lineh; l->col = colh; l->synth = 1;
+            struct ir_ins *m = ib_push(&nb);
+            memset(m, 0, sizeof *m);
+            m->op = IR_MOV; m->dst = trs[t].dst; m->a = trs[t].src; m->b = -1;
+            m->w = vw[v]; m->flt = vflt[v]; m->line = lineh; m->col = colh; m->synth = 1;
+            struct ir_ins *j = ib_push(&nb);
+            memset(j, 0, sizeof *j);
+            j->op = IR_JMP; j->label = trs[t].to; j->dst = j->a = j->b = -1;
+            j->line = lineh; j->col = colh; j->synth = 1;
+        }
+        if (newpos) {
+            remap_scopes(fn, newpos, fn->nins);
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        free(cps); free(trs);
+#undef ADDCP
+        if (remarks_on() && fn->src)
+            remark_add("regalloc", "split", fn->name, "loop-live-range",
+                       fn->file, lineh ? lineh : fn->line,
+                       "a value live across a call outside a loop goes by "
+                       "another name inside it");
+        changed = 1;
+    }
+    free(in); free(xout); free(inside);
+    free(use); free(def); free(lin); free(lout); free(xcall);
+    free(vw); free(vflt);
+out:
+    free(order); free(l2b);
+    free_cfg(bb, nbb);
+    return changed;
+}
+#undef BIT
+
+/* ==== two-sided range checks ==============================================
+ *
+ * `c >= '0' && c <= '9'` is two compares and two branches, and so is
+ * `c < 'a' || c > 'z'`. Both ask one question -- is c inside [lo, hi] --
+ * and (unsigned)(c - lo) <= hi - lo answers it in one compare, signed or
+ * unsigned, because the subtraction wraps every value outside the range
+ * past hi - lo. It is what every parser, every ctype test and every
+ * bounds check against constants is made of, and CoreMark's state
+ * machine spent a fifth of its instructions on the second compare.
+ *
+ * The shape, as irgen and the folding passes leave it:
+ *
+ *      %a = cmp P1 X, K1          single use: the branch
+ *      br1 %a -> T1               falls into the next block...
+ *      [consts]                   ...which nothing else jumps into
+ *      %b = cmp P2 X, K2          single use: the branch
+ *      br2 %b -> T2               falls through to F
+ *
+ * Each branch LEAVES (to its target) under a condition on X; call them
+ * out1 and out2. When T1 == T2, the pair falls through exactly when
+ * neither leaves; when T1 is F, it reaches T2 exactly when the first
+ * stays and the second leaves. Either way one side is a conjunction of
+ * two bounds on X, and when that conjunction is an interval [lo, hi] the
+ * pair becomes `%d = sub X, lo; %b = cmp ult %d, hi - lo + 1` and one
+ * branch. Equality and inequality are not bounds and are left alone. */
+
+/* The condition `X pred K` (or its negation) as an interval [lo, hi] at
+ * width w; 0 when it is not one bound. Signed or unsigned per `sign`. */
+static int bound_of(enum binop pred, int sign, long k, int w, int negate,
+                    long *lo, long *hi)
+{
+    long min = sign ? (w == 8 ? (long)(-0x7fffffffffffffffL - 1) : (long)-0x80000000L) : 0;
+    long max = sign ? (w == 8 ? 0x7fffffffffffffffL : 0x7fffffffL)
+                    : (w == 8 ? -1L : 0xffffffffL);
+    if (negate)
+        switch (pred) {
+        case B_LT: pred = B_GE; break;
+        case B_LE: pred = B_GT; break;
+        case B_GT: pred = B_LE; break;
+        case B_GE: pred = B_LT; break;
+        default: return 0;
+        }
+    /* compare k against the domain the way the compare itself will */
+    unsigned long uk = w == 8 ? (unsigned long)k : (unsigned long)(unsigned)k;
+    if (!sign) {
+        k = (long)uk;
+    } else if (w == 4) {
+        k = (long)(int)k;
+    }
+    switch (pred) {
+    case B_GE: *lo = k; *hi = max; return 1;
+    case B_GT:
+        if (sign ? k == max : (unsigned long)k == (unsigned long)max) return 0;
+        *lo = k + 1; *hi = max; return 1;
+    case B_LE: *lo = min; *hi = k; return 1;
+    case B_LT:
+        if (sign ? k == min : k == 0) return 0;
+        *lo = min; *hi = k - 1; return 1;
+    default:
+        return 0;
+    }
+}
+
+struct lblcount { int *cnt; int n; };
+static void lblcount_cb(int *p, void *ctx)
+{
+    struct lblcount *c = ctx;
+    if (*p >= 0 && *p < c->n) c->cnt[*p]++;
+}
+
+/* A `const` instruction for the range check, located where `at` is. */
+static void rc_const(struct ir_ins *slot, int dst, long v, int w, const struct ir_ins *at)
+{
+    memset(slot, 0, sizeof *slot);
+    slot->op = IR_CONST; slot->dst = dst; slot->a = slot->b = -1;
+    slot->imm = v; slot->w = w; slot->sign = 0;
+    slot->line = at->line; slot->col = at->col; slot->synth = at->synth;
+}
+
+static int pass_rangecheck(struct ir_func *fn)
+{
+    /* Not on AVR: a value of four bytes there is four registers, and a
+     * subtract and an unsigned compare across all four cost more than the
+     * two signed compares they replace, which can usually stop at the
+     * high byte -- lib/libc grew by 198 bytes. */
+    if (fn->nins < 4 || target_get() == TARGET_AVR)
+        return 0;
+    /* how many instructions name each label, and where each is placed:
+     * the value form below needs a block only the first branch enters */
+    int *lref = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), sizeof *lref);
+    int *lat = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *lat);
+    for (int l = 0; l < fn->nlabels; l++) lat[l] = -1;
+    {
+        struct lblcount lc = { lref, fn->nlabels };
+        for (int n = 0; n < fn->nins; n++) {
+            if (fn->ins[n].op == IR_LABEL) {
+                if (fn->ins[n].label >= 0 && fn->ins[n].label < fn->nlabels)
+                    lat[fn->ins[n].label] = n;
+                continue;
+            }
+            each_label(fn, &fn->ins[n], lblcount_cb, &lc);
+        }
+        for (int e = 0; e < fn->neh; e++)
+            if (fn->eh[e].lp_label >= 0 && fn->eh[e].lp_label < fn->nlabels)
+                lref[fn->eh[e].lp_label]++;
+    }
+    struct defs d;
+    compute_defs(fn, &d);
+    int *use = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), sizeof *use);
+    struct ucount uc = { use, fn->nvregs };
+    for (int n = 0; n < fn->nins; n++)
+        each_read(&fn->ins[n], count_cb, &uc);
+    int changed = 0;
+    char *del = xcalloc((size_t)fn->nins, 1);
+    /* Constants go in as `const` temps, never as immediates: whether a
+     * value fits an instruction is the target's question (pass_immfold
+     * asks it later), and x86-64 truncated a 64-bit bound to 32 bits when
+     * one was written straight into the compare. pre[n] is emitted just
+     * before instruction n. */
+    struct ir_ins *pre = xcalloc((size_t)fn->nins, sizeof *pre);
+    char *haspre = xcalloc((size_t)fn->nins, 1);
+    for (int n1 = 1; n1 < fn->nins; n1++) {
+        struct ir_ins *br1 = &fn->ins[n1];
+        if (br1->op != IR_BRZ && br1->op != IR_BRNZ)
+            continue;
+        struct ir_ins *a = &fn->ins[n1 - 1];
+        if (a->op != IR_CMP || a->dst != br1->a || a->flt || use[a->dst] != 1 ||
+            (a->w != 4 && a->w != 8))
+            continue;
+        long k1;
+        if (!const_b(fn, &d, a, &k1))
+            continue;
+        /* ---- the || VALUE form: `return x < lo || x > hi;` ----
+         *
+         *      %a = cmp ...; brz %a -> L2
+         *      %r = const 1; jmp L1
+         *    L2: [consts] %b = cmp ...; %r = mov %b; (L1: | jmp L1)
+         *
+         * r is a || b = !(!a && !b): out of one interval. The first
+         * branch becomes a jump to L2, whose compare becomes the test;
+         * the `r = 1` block is then unreachable and cfgclean drops it. */
+        if (br1->op == IR_BRZ && n1 + 2 < fn->nins &&
+            fn->ins[n1 + 1].op == IR_CONST && fn->ins[n1 + 1].imm == 1 &&
+            !fn->ins[n1 + 1].flt && fn->ins[n1 + 2].op == IR_JMP &&
+            br1->label >= 0 && br1->label < fn->nlabels &&
+            lref[br1->label] == 1 && lat[br1->label] > n1 + 2) {
+            int r = fn->ins[n1 + 1].dst, L1 = fn->ins[n1 + 2].label;
+            int m = lat[br1->label] + 1;
+            while (m < fn->nins && fn->ins[m].op == IR_CONST && !fn->ins[m].flt)
+                m++;
+            struct ir_ins *b2 = m + 1 < fn->nins ? &fn->ins[m] : NULL;
+            long k2;
+            if (b2 && b2->op == IR_CMP && !b2->flt && b2->a == a->a &&
+                b2->w == a->w && b2->sign == a->sign && use[b2->dst] == 1 &&
+                fn->ins[m + 1].op == IR_MOV && fn->ins[m + 1].a == b2->dst &&
+                fn->ins[m + 1].dst == r && m + 2 < fn->nins &&
+                ((fn->ins[m + 2].op == IR_LABEL && fn->ins[m + 2].label == L1) ||
+                 (fn->ins[m + 2].op == IR_JMP && fn->ins[m + 2].label == L1)) &&
+                const_b(fn, &d, b2, &k2)) {
+                int w = a->w, sign = a->sign;
+                long lo1, hi1, lo2, hi2, lo, hi;
+                /* inside = !a && !b */
+                if (bound_of(a->pred, sign, k1, w, 1, &lo1, &hi1) &&
+                    bound_of(b2->pred, sign, k2, w, 1, &lo2, &hi2)) {
+                    int ok = 1;
+                    if (sign) {
+                        lo = lo1 > lo2 ? lo1 : lo2; hi = hi1 < hi2 ? hi1 : hi2;
+                        if (lo > hi) ok = 0;
+                    } else {
+                        lo = (unsigned long)lo1 > (unsigned long)lo2 ? lo1 : lo2;
+                        hi = (unsigned long)hi1 < (unsigned long)hi2 ? hi1 : hi2;
+                        if ((unsigned long)lo > (unsigned long)hi) ok = 0;
+                    }
+                    unsigned long span = ok ? (unsigned long)hi - (unsigned long)lo : 0;
+                    if (w == 4) span &= 0xffffffffUL;
+                    if (ok && !((w == 4 && span >= 0xffffffffUL) || (w == 8 && span == ~0UL))) {
+                        int dv = fn->nvregs++, klo = fn->nvregs++, ksp = fn->nvregs++;
+                        struct ir_ins sub;
+                        memset(&sub, 0, sizeof sub);
+                        sub.op = IR_SUB; sub.dst = dv; sub.a = a->a; sub.b = klo;
+                        sub.w = w; sub.sign = 0;
+                        sub.line = b2->line; sub.col = b2->col; sub.synth = b2->synth;
+                        rc_const(&pre[n1 - 1], klo, w == 4 ? (long)(int)lo : lo, w, &sub);
+                        haspre[n1 - 1] = 1;
+                        *a = sub;
+                        int L2 = br1->label;
+                        memset(br1, 0, sizeof *br1);
+                        br1->op = IR_JMP; br1->label = L2; br1->dst = br1->a = br1->b = -1;
+                        br1->line = sub.line; br1->col = sub.col; br1->synth = 1;
+                        struct ir_ins cmpn = *b2;
+                        cmpn.a = dv; cmpn.b = ksp; cmpn.imm_b = 0; cmpn.imm = 0;
+                        cmpn.pred = B_GE; cmpn.sign = 0;      /* r is `outside` */
+                        rc_const(&pre[m], ksp, w == 4 ? (long)(int)(unsigned)(span + 1)
+                                                      : (long)(span + 1), w, &cmpn);
+                        haspre[m] = 1;
+                        fn->ins[m] = cmpn;
+                        changed = 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        /* the second block: consts, then the compare and its branch */
+        int n2 = n1 + 1;
+        while (n2 < fn->nins && fn->ins[n2].op == IR_CONST && !fn->ins[n2].flt)
+            n2++;
+        if (n2 + 1 >= fn->nins)
+            continue;
+        struct ir_ins *b = &fn->ins[n2], *br2 = &fn->ins[n2 + 1];
+        if (b->op != IR_CMP || b->flt || use[b->dst] != 1 ||
+            b->a != a->a || b->w != a->w || b->sign != a->sign || a->a < 0)
+            continue;
+        /* ---- the VALUE form: `return c >= lo && c <= hi;` ----
+         *
+         *      %a = cmp ...; br1 %a -> L0
+         *      [consts] %b = cmp ...; %r = mov %b; jmp L1
+         *    L0: %r = const v0; (jmp L1 | L1:)
+         *
+         * with L0 entered only from br1. r is (stay1 && b) when v0 is 0
+         * and !(stay1 && !b) when it is 1; either way a test of X against
+         * one interval, and L0 is left with nothing reaching it. */
+        if (br2->op == IR_MOV && br2->a == b->dst && !br2->flt &&
+            n2 + 2 < fn->nins && fn->ins[n2 + 2].op == IR_JMP &&
+            br1->label >= 0 && br1->label < fn->nlabels &&
+            lref[br1->label] == 1 && lat[br1->label] >= 0 &&
+            lat[br1->label] + 2 < fn->nins) {
+            int L1 = fn->ins[n2 + 2].label, z = lat[br1->label];
+            const struct ir_ins *cz = &fn->ins[z + 1], *after = &fn->ins[z + 2];
+            long k2;
+            if (cz->op == IR_CONST && cz->dst == br2->dst && !cz->flt &&
+                cz->imm == 0 && br1->op == IR_BRZ &&
+                ((after->op == IR_JMP && after->label == L1) ||
+                 (after->op == IR_LABEL && after->label == L1)) &&
+                const_b(fn, &d, b, &k2)) {
+                int w = a->w, sign = a->sign, v0 = (int)cz->imm;
+                long lo1, hi1, lo2, hi2;
+                if (bound_of(a->pred, sign, k1, w, br1->op == IR_BRNZ, &lo1, &hi1) &&
+                    bound_of(b->pred, sign, k2, w, v0 == 1, &lo2, &hi2)) {
+                    long lo, hi;
+                    int ok = 1;
+                    if (sign) {
+                        lo = lo1 > lo2 ? lo1 : lo2; hi = hi1 < hi2 ? hi1 : hi2;
+                        if (lo > hi) ok = 0;
+                    } else {
+                        lo = (unsigned long)lo1 > (unsigned long)lo2 ? lo1 : lo2;
+                        hi = (unsigned long)hi1 < (unsigned long)hi2 ? hi1 : hi2;
+                        if ((unsigned long)lo > (unsigned long)hi) ok = 0;
+                    }
+                    unsigned long span = ok ? (unsigned long)hi - (unsigned long)lo : 0;
+                    if (w == 4) span &= 0xffffffffUL;
+                    if (ok && !((w == 4 && span >= 0xffffffffUL) || (w == 8 && span == ~0UL))) {
+                        int dv = fn->nvregs++, klo = fn->nvregs++, ksp = fn->nvregs++;
+                        struct ir_ins sub;
+                        memset(&sub, 0, sizeof sub);
+                        sub.op = IR_SUB; sub.dst = dv; sub.a = a->a; sub.b = klo;
+                        sub.w = w; sub.sign = 0;
+                        sub.line = b->line; sub.col = b->col; sub.synth = b->synth;
+                        struct ir_ins cmpn = *b;
+                        cmpn.a = dv; cmpn.b = ksp; cmpn.imm_b = 0; cmpn.imm = 0;
+                        cmpn.pred = B_LT; cmpn.sign = 0;   /* v0 is 0: r is `inside` */
+                        rc_const(&pre[n1 - 1], klo, w == 4 ? (long)(int)lo : lo, w, &sub);
+                        haspre[n1 - 1] = 1;
+                        *a = sub;
+                        del[n1] = 1;
+                        /* the span's const goes where the first branch was */
+                        rc_const(&fn->ins[n1], ksp, w == 4 ? (long)(int)(unsigned)(span + 1)
+                                                           : (long)(span + 1), w, &cmpn);
+                        del[n1] = 0;
+                        fn->ins[n2] = cmpn;
+                        changed = 1;
+                        n1 = n2 + 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        if ((br2->op != IR_BRZ && br2->op != IR_BRNZ) || br2->a != b->dst)
+            continue;
+        long k2;
+        if (!const_b(fn, &d, b, &k2))
+            continue;
+        /* the fall-through of br2: the label right after it, if any */
+        int F = n2 + 2 < fn->nins && fn->ins[n2 + 2].op == IR_LABEL
+                ? fn->ins[n2 + 2].label : -1;
+        int w = a->w, sign = a->sign;
+        long lo1, hi1, lo2, hi2;
+        int rewrite = 0, op2 = 0;        /* op2: the new branch's opcode */
+        if (br1->label == br2->label) {
+            /* falls through iff neither leaves: stay1 && stay2 */
+            if (!bound_of(a->pred, sign, k1, w, br1->op == IR_BRNZ, &lo1, &hi1) ||
+                !bound_of(b->pred, sign, k2, w, br2->op == IR_BRNZ, &lo2, &hi2))
+                continue;
+            rewrite = 1; op2 = IR_BRZ;   /* leave when NOT inside */
+        } else if (F >= 0 && br1->label == F) {
+            /* reaches T2 iff stay1 && leave2 */
+            if (!bound_of(a->pred, sign, k1, w, br1->op == IR_BRNZ, &lo1, &hi1) ||
+                !bound_of(b->pred, sign, k2, w, br2->op == IR_BRZ, &lo2, &hi2))
+                continue;
+            rewrite = 1; op2 = IR_BRNZ;  /* leave when inside */
+        }
+        if (!rewrite)
+            continue;
+        long lo, hi;
+        if (sign) {
+            lo = lo1 > lo2 ? lo1 : lo2;
+            hi = hi1 < hi2 ? hi1 : hi2;
+            if (lo > hi) continue;
+        } else {
+            lo = (unsigned long)lo1 > (unsigned long)lo2 ? lo1 : lo2;
+            hi = (unsigned long)hi1 < (unsigned long)hi2 ? hi1 : hi2;
+            if ((unsigned long)lo > (unsigned long)hi) continue;
+        }
+        unsigned long span = (unsigned long)hi - (unsigned long)lo;
+        if (w == 4) span &= 0xffffffffUL;
+        /* both bounds must matter, or nothing is gained -- and a span
+         * covering the whole width has no `+ 1` */
+        if ((w == 4 && span >= 0xffffffffUL) || (w == 8 && span == ~0UL))
+            continue;
+        /* rewrite: the first compare and branch go; the second becomes
+         * the interval test */
+        int X = a->a, line = b->line, col = b->col;
+        int dv = fn->nvregs++, klo = fn->nvregs++, ksp = fn->nvregs++;
+        struct ir_ins sub;
+        memset(&sub, 0, sizeof sub);
+        sub.op = IR_SUB; sub.dst = dv; sub.a = X; sub.b = klo;
+        sub.w = w; sub.sign = 0;
+        sub.line = line; sub.col = col; sub.synth = b->synth;
+        struct ir_ins cmpn = *b;
+        cmpn.a = dv; cmpn.b = ksp; cmpn.imm_b = 0; cmpn.imm = 0;
+        cmpn.pred = B_LT; cmpn.sign = 0;
+        struct ir_ins brn = *br2;
+        brn.op = op2;
+        rc_const(&pre[n1 - 1], klo, w == 4 ? (long)(int)lo : lo, w, &sub);
+        haspre[n1 - 1] = 1;
+        /* the first compare's slot takes the subtraction (it read X, so
+         * X is defined there); the first branch goes; the second pair
+         * becomes the interval test. The consts between are left for dce. */
+        *a = sub;
+        /* the span's const takes the first branch's slot */
+        rc_const(&fn->ins[n1], ksp, w == 4 ? (long)(int)(unsigned)(span + 1)
+                                           : (long)(span + 1), w, &cmpn);
+        fn->ins[n2] = cmpn;
+        fn->ins[n2 + 1] = brn;
+        changed = 1;
+        n1 = n2 + 1;
+    }
+    if (changed) {
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        for (int n = 0; n < fn->nins; n++) {
+            if (newpos) newpos[n] = nb.n;
+            if (haspre[n])
+                *ib_push(&nb) = pre[n];
+            if (!del[n])
+                *ib_push(&nb) = fn->ins[n];
+        }
+        /* the end position too: a scope may close at the last
+         * instruction, and remap_scopes reads newpos[nins] for it */
+        if (newpos) newpos[fn->nins] = nb.n;
+        if (newpos) {
+            remap_scopes(fn, newpos, fn->nins);
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    }
+    free(del); free(pre); free(haspre);
+    free(use);
+    free(lref); free(lat);
+    free_defs(&d);
+    return changed;
+}
+
+/* ==== a join's copies, coalesced ==========================================
+ *
+ * Leaving SSA puts a copy on every edge into a join, and nested choices
+ * make chains of them: `st = c ? (d ? 1 : 2) : 3` is
+ *
+ *      %197 = const 1 ... jmp L21      L21: %198 = mov %197
+ *      %198 = const 2 ... jmp L19      L19: %199 = mov %198
+ *                                      L14: %188 = mov %199; jmp L5
+ *
+ * Every backend's allocator gives the four names one register and the
+ * copies vanish -- leaving L21, L19 and L14 as blocks that do nothing but
+ * fall or jump to the next, so each arm pays a jump to a jump. CoreMark's
+ * state machine took one per character. Done here, in the IR, the copies
+ * go and the blocks are empty before cfgclean threads the jumps.
+ *
+ * `%b = mov %a` takes %a's name away -- every definition of %a writes %b
+ * instead, and the copy goes -- when %a is a temp the copy is the one
+ * reader of, of the same width and class as %b, and the two never hold
+ * different live values at once: %b is dead right after each definition
+ * of %a (its old value is not wanted), and %a is dead right after each
+ * other definition of %b (no %a value is in flight to the copy when %b
+ * is written). That is the allocator's own interference test, made here
+ * where the CFG still knows which blocks become empty. Not when a
+ * definition of %a reads %b: that is an update in place, which needs
+ * nothing from here. Liveness is per block, updated by union as names
+ * merge; each question about one point is a walk to the end of its
+ * block. Functions with inline asm (whose outputs are not definitions to
+ * the rest of this file) or exception edges are left alone. */
+static int jc_live_after(struct ir_func *fn, const char *gone, int n, int end,
+                         int v, const unsigned long *lout)
+{
+    for (int k = n + 1; k < end; k++) {
+        if (gone[k])
+            continue;
+        if (ins_reads(&fn->ins[k], v))
+            return 1;
+        if (def_target(&fn->ins[k]) == v)
+            return 0;
+    }
+    return (lout[v >> 6] & (1UL << (v & 63))) != 0;
+}
+struct jc_cnt { int *use; int nv; };
+static void jc_cnt_cb(int *p, void *ctx)
+{
+    struct jc_cnt *c = ctx;
+    if (*p >= 0 && *p < c->nv) c->use[*p]++;
+}
+static int pass_joincopies(struct ir_func *fn)
+{
+    if (fn->nins == 0 || fn->nvregs == 0 || fn->neh)
+        return 0;
+    int nv = fn->nvregs, nins = fn->nins;
+    for (int n = 0; n < nins; n++)
+        if (fn->ins[n].op == IR_ASM)
+            return 0;
+    int *nuse = xcalloc((size_t)nv, sizeof *nuse);
+    int *vw = xcalloc((size_t)nv, sizeof *vw);
+    char *vflt = xcalloc((size_t)nv, 1), *mixed = xcalloc((size_t)nv, 1);
+    for (int n = 0; n < nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        struct jc_cnt c = { nuse, nv };
+        if (i->op != IR_LDVAR && i->op != IR_ADDR)
+            each_read(i, jc_cnt_cb, &c);
+        int t = i->op == IR_STVAR ? -1 : def_target(i);
+        if (t < 0 || t >= nv)
+            continue;
+        int w = i->op == IR_CALL ? (i->w ? i->w : 8) : i->w;
+        if (!vw[t]) { vw[t] = w; vflt[t] = (char)i->flt; }
+        else if (vw[t] != w || vflt[t] != (char)i->flt) mixed[t] = 1;
+    }
+    int any = 0;
+    for (int n = 0; n < nins && !any; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_MOV && i->a >= fn->nvars && i->a < nv &&
+            i->dst >= fn->nvars && i->dst < nv && i->a != i->dst &&
+            nuse[i->a] == 1)
+            any = 1;
+    }
+    int changed = 0, nbb, *l2b;
+    struct bb *bb = NULL;
+    if (!any)
+        goto out0;
+    bb = build_cfg(fn, &nbb, &l2b);
+    int words = (nv + 63) / 64;
+    int *blk = xmalloc((size_t)nins * sizeof *blk);
+    for (int n = 0; n < nins; n++) blk[n] = -1;
+    for (int b = 0; b < nbb; b++)
+        for (int n = bb[b].start; n < bb[b].end; n++) blk[n] = b;
+    unsigned long *use = xcalloc((size_t)nbb * words, sizeof *use);
+    unsigned long *def = xcalloc((size_t)nbb * words, sizeof *def);
+    unsigned long *lin = xcalloc((size_t)nbb * words, sizeof *lin);
+    unsigned long *lout = xcalloc((size_t)nbb * words, sizeof *lout);
+    for (int b = 0; b < nbb; b++) {
+        struct splituse su = { use + (size_t)b * words, def + (size_t)b * words, nv };
+        for (int n = bb[b].start; n < bb[b].end; n++) {
+            if (fn->ins[n].op != IR_LDVAR && fn->ins[n].op != IR_ADDR)
+                each_read(&fn->ins[n], split_use_cb, &su);
+            int t = def_target(&fn->ins[n]);
+            if (t >= 0 && t < nv) su.def[t >> 6] |= 1UL << (t & 63);
+        }
+    }
+    for (int again = 1; again; ) {
+        again = 0;
+        for (int b = nbb - 1; b >= 0; b--) {
+            unsigned long *o = lout + (size_t)b * words;
+            for (int w = 0; w < words; w++) o[w] = 0;
+            for (int k = 0; k < bb[b].nsucc; k++) {
+                unsigned long *si = lin + (size_t)bb[b].succ[k] * words;
+                for (int w = 0; w < words; w++) o[w] |= si[w];
+            }
+            unsigned long *ii = lin + (size_t)b * words;
+            for (int w = 0; w < words; w++) {
+                unsigned long nvl = use[(size_t)b * words + w] |
+                                    (o[w] & ~def[(size_t)b * words + w]);
+                if (nvl != ii[w]) { ii[w] = nvl; again = 1; }
+            }
+        }
+    }
+    char *gone = xcalloc((size_t)nins, 1);
+    for (int m = 0; m < nins; m++) {
+        struct ir_ins *i = &fn->ins[m];
+        if (gone[m] || i->op != IR_MOV || blk[m] < 0)
+            continue;
+        int a = i->a, b = i->dst;
+        if (a < fn->nvars || a >= nv || b < fn->nvars || b >= nv || a == b ||
+            nuse[a] != 1 || mixed[a] || mixed[b] || vw[a] != vw[b] ||
+            vw[a] != i->w || vflt[a] != vflt[b] || vflt[a] != (char)i->flt)
+            continue;
+        int ok = 1, nd = 0;
+        for (int d = 0; d < nins && ok; d++) {
+            if (gone[d] || d == m || blk[d] < 0)
+                continue;
+            int t = def_target(&fn->ins[d]);
+            if (t == a) {
+                nd++;
+                /* `%a = add %b, 1; %b = mov %a` is a loop's own update:
+                 * every allocator already gives the two one register,
+                 * and writing it in place only moves its heuristics --
+                 * RV32's spilled a pointer in the next loop of the
+                 * workload's `text`, 5% more instructions. */
+                if (ins_reads(&fn->ins[d], b))
+                    ok = 0;
+                if (jc_live_after(fn, gone, d, bb[blk[d]].end, b,
+                                  lout + (size_t)blk[d] * words))
+                    ok = 0;
+            } else if (t == b) {
+                if (jc_live_after(fn, gone, d, bb[blk[d]].end, a,
+                                  lout + (size_t)blk[d] * words))
+                    ok = 0;
+            }
+        }
+        if (!ok || nd == 0)
+            continue;
+        for (int d = 0; d < nins; d++)
+            if (!gone[d] && d != m && def_target(&fn->ins[d]) == a &&
+                fn->ins[d].op != IR_STVAR)
+                fn->ins[d].dst = b;
+        gone[m] = 1;
+        nuse[a] = 0;
+        for (int bl = 0; bl < nbb; bl++) {
+            unsigned long *li = lin + (size_t)bl * words, *lo = lout + (size_t)bl * words;
+            if (li[a >> 6] & (1UL << (a & 63))) li[b >> 6] |= 1UL << (b & 63);
+            if (lo[a >> 6] & (1UL << (a & 63))) lo[b >> 6] |= 1UL << (b & 63);
+            li[a >> 6] &= ~(1UL << (a & 63));
+            lo[a >> 6] &= ~(1UL << (a & 63));
+        }
+        changed = 1;
+    }
+    if (changed) {
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(nins + 1) * sizeof *newpos) : NULL;
+        for (int n = 0; n < nins; n++) {
+            if (newpos) newpos[n] = nb.n;
+            if (!gone[n])
+                *ib_push(&nb) = fn->ins[n];
+        }
+        if (newpos) {
+            newpos[nins] = nb.n;
+            remap_scopes(fn, newpos, nins);
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    }
+    free(gone); free(use); free(def); free(lin); free(lout); free(blk);
+    free(l2b);
+    free_cfg(bb, nbb);
+out0:
+    free(nuse); free(vw); free(vflt); free(mixed);
+    return changed;
+}
+
+/* ==== an address next to its access ======================================
+ *
+ * Every backend fuses an address computation into the access it feeds --
+ * x86-64's `[base + idx*4]`, Thumb's `ldr r, [rn, rm, lsl #2]`, aarch64's
+ * `[xn, xm, lsl #2]`, and the offset fold of every target -- and every
+ * one of those looks at the instructions immediately before the access.
+ * An interpreter's `stack[sp++] = prog[pc++]` computes the store's
+ * address, then loads the value, then stores: the address is two
+ * instructions away and is materialised whole, a shift and an add the
+ * store did not need.
+ *
+ * So a single-use chain of address arithmetic -- add, shift or multiply
+ * by a constant, widening -- defined earlier in the access's own block is
+ * moved down to sit right before it, deepest operand first. Nothing about
+ * the values changes: the chain is pure, its result is read only by the
+ * access, and it moves only when no instruction it passes writes any of
+ * its operands. */
+static int sinkaddr_op(const struct ir_ins *i)
+{
+    if (i->flt || i->vol)
+        return 0;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_EXT:
+        return 1;
+    case IR_SHL: case IR_MUL:
+        return i->imm_b;              /* by a constant only */
+    default:
+        return 0;
+    }
+}
+struct sa_rd { const int *wr; int lo, hi, bad, nv; };
+static int pass_sinkaddr(struct ir_func *fn)
+{
+    int N = fn->nins, nv = fn->nvregs;
+    /* Not on AVR: its pointer registers are three pairs, and an address
+     * formed early and held is often what keeps one of them from being
+     * reloaded -- lib/libc grew by 92 bytes when they were moved. */
+    if (N < 3 || nv == 0 || target_get() == TARGET_AVR)
+        return 0;
+    int *use = xcalloc((size_t)nv, sizeof *use);
+    struct ucount uc = { use, nv };
+    for (int n = 0; n < N; n++)
+        each_read(&fn->ins[n], count_cb, &uc);
+    struct defs d;
+    compute_defs(fn, &d);
+    /* block start of each instruction: the index of the last label or
+     * terminator before it, so "same block" is one comparison */
+    int *bstart = xmalloc((size_t)N * sizeof *bstart);
+    for (int n = 0, b = 0; n < N; n++) {
+        enum ir_op op = fn->ins[n].op;
+        if (op == IR_LABEL) b = n;
+        bstart[n] = b;
+        if (op == IR_JMP || op == IR_BRZ || op == IR_BRNZ || op == IR_RET ||
+            op == IR_UD2 || op == IR_IGOTO || op == IR_SWITCH)
+            b = n + 1;
+    }
+    char *moved = xcalloc((size_t)N, 1);
+    int *before = xmalloc((size_t)N * 4 * sizeof *before);  /* up to 4 per access */
+    int *nbefore = xcalloc((size_t)N, sizeof *nbefore);
+    int changed = 0;
+    for (int n = 0; n < N; n++) {
+        const struct ir_ins *acc = &fn->ins[n];
+        if (acc->op != IR_LOAD && acc->op != IR_STORE)
+            continue;
+        /* the chain, root first: the address, then its operands */
+        int chain[4], nc = 0, frontier[4], nf = 0;
+        frontier[nf++] = acc->a;
+        while (nf && nc < 4) {
+            int v = frontier[--nf];
+            if (v < fn->nvars || v >= nv || d.cnt[v] != 1 || use[v] != 1)
+                continue;
+            int dn = d.ins[v];
+            if (dn < 0 || dn >= n || moved[dn] || bstart[dn] != bstart[n])
+                continue;
+            if (!sinkaddr_op(&fn->ins[dn]))
+                continue;
+            chain[nc++] = dn;
+            const struct ir_ins *c = &fn->ins[dn];
+            if (c->a >= 0 && nf < 4) frontier[nf++] = c->a;
+            if (!c->imm_b && c->b >= 0 && c->op != IR_EXT && nf < 4) frontier[nf++] = c->b;
+        }
+        if (nc == 0)
+            continue;
+        /* already in place? the chain occupies the slots right before n */
+        int lowest = n;
+        for (int k = 0; k < nc; k++) if (chain[k] < lowest) lowest = chain[k];
+        if (lowest == n - nc) {
+            int contiguous = 1;
+            for (int m = n - nc; m < n; m++) {
+                int in = 0;
+                for (int k = 0; k < nc; k++) if (chain[k] == m) in = 1;
+                if (!in) contiguous = 0;
+            }
+            if (contiguous)
+                continue;
+        }
+        /* nothing between a chain member and n may write its operands,
+         * or another member's (they read each other, which is fine: the
+         * order is kept) */
+        int ok = 1;
+        for (int k = 0; k < nc && ok; k++) {
+            const struct ir_ins *c = &fn->ins[chain[k]];
+            int ops[2] = { c->a, (!c->imm_b && c->op != IR_EXT) ? c->b : -1 };
+            for (int m = chain[k] + 1; m < n && ok; m++) {
+                int t = fn->ins[m].op == IR_STVAR ? fn->ins[m].dst : def_target(&fn->ins[m]);
+                if (fn->ins[m].op == IR_ASM || fn->ins[m].op == IR_LANDING)
+                    ok = 0;
+                for (int q = 0; q < 2; q++)
+                    if (ops[q] >= 0 && t == ops[q]) ok = 0;
+            }
+        }
+        if (!ok)
+            continue;
+        /* emit in original order (each member's operands come before it) */
+        for (int x = 0; x < nc; x++)
+            for (int y = x + 1; y < nc; y++)
+                if (chain[y] < chain[x]) { int t = chain[x]; chain[x] = chain[y]; chain[y] = t; }
+        for (int k = 0; k < nc; k++) {
+            moved[chain[k]] = 1;
+            before[n * 4 + nbefore[n]++] = chain[k];
+        }
+        changed = 1;
+    }
+    if (changed) {
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(N + 1) * sizeof *newpos) : NULL;
+        for (int n = 0; n < N; n++) {
+            if (newpos) newpos[n] = nb.n;
+            for (int k = 0; k < nbefore[n]; k++)
+                *ib_push(&nb) = fn->ins[before[n * 4 + k]];
+            if (!moved[n])
+                *ib_push(&nb) = fn->ins[n];
+        }
+        if (newpos) newpos[N] = nb.n;   /* a scope ending at the end */
+        if (newpos) {
+            remap_scopes(fn, newpos, N);
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    }
+    free(use); free(bstart); free(moved); free(before); free(nbefore);
+    free_defs(&d);
+    return changed;
 }
 
 static void opt_func(struct ir_func *fn)
@@ -8303,8 +11750,10 @@ static void opt_func(struct ir_func *fn)
     int sroa_twice = g_sroa && g_mem2reg && cfg_ok && !has_igoto;
     if (g_sroa)
         pass_sroa(fn, !sroa_twice);
-    if (g_mem2reg && cfg_ok && !has_igoto)
+    if (g_mem2reg && cfg_ok && !has_igoto) {
+        drop_unreachable(fn);     /* or mem2reg refuses the function */
         pass_mem2reg(fn);         /* global mem2reg (subsumes store-forwarding) */
+    }
     /* And a second look at the aggregates, now that mem2reg has run.
      * `int *p = &s.x; ... *p` hides the object behind a pointer
      * VARIABLE, which is memory like any other, so the first look sees
@@ -8318,19 +11767,34 @@ static void opt_func(struct ir_func *fn)
      * dataflow), so it runs ONCE per outer round instead of on every inner
      * iteration. When it exposes copies, the inner fixpoint reconverges and we
      * round again — it settles in one or two rounds. */
+    /* The rounds run to a fixpoint, and the guards are how a fixpoint
+     * that never comes is noticed rather than waited for. A pair of
+     * passes that undo each other -- a constant-copy rule against value
+     * numbering, once -- is a compiler that never finishes on a function
+     * big enough to make each round slow: an hour on
+     * src/arch/x86_64/codegen.c before anyone looked. So the cap is low
+     * enough to hit in seconds (a real fixpoint takes a handful of
+     * rounds), and hitting it is reported: fatal under EMBCC_VERIFY,
+     * where the test suite runs, and a warning otherwise, because every
+     * round leaves the function correct and the user's build should not
+     * fail for a slow convergence. */
     int outer = 1, oguard = 0;
     while (outer && oguard++ < 100) {
         outer = 0;
         int changed = 1, guard = 0;
-        while (changed && guard++ < 1000) {
+        while (changed && guard++ < OPT_MAX_ROUNDS) {
+            if (guard == OPT_MAX_ROUNDS)
+                opt_no_fixpoint(fn, OPT_MAX_ROUNDS);
             changed = 0;
             changed |= pass_storefwd(fn); /* forward local stores to loads (mem2reg-lite) */
+            changed |= pass_roload(fn);   /* a global nothing writes */
             changed |= pass_fold(fn);
             /* After folding, so the constants it just exposed are the
              * ones this moves, and before value numbering, so what it
              * leaves is what CSE sees. */
             changed |= pass_reassoc(fn);
             changed |= pass_lvn(fn);      /* CSE: reuse identical computations */
+            changed |= pass_divmod(fn);   /* a % b from the a / b beside it */
             if (g_gcse && cfg_ok)
                 changed |= pass_gcse(fn); /* CSE across the dominator tree */
             /* SCCP is the one that must stay off without a trustworthy
@@ -8342,10 +11806,18 @@ static void opt_func(struct ir_func *fn)
             changed |= pass_copyprop_local(fn);  /* the phi copies the global
                                                   * one cannot touch */
             changed |= pass_dce(fn);
-            if (g_cfgclean)
+            if (g_cfgclean) {
+                changed |= pass_thread(fn);
                 changed |= pass_cfgclean(fn);
+            }
             if (g_dse && cfg_ok)
                 changed |= pass_dse(fn);
+            changed |= pass_rangecheck(fn);
+        }
+        if (pass_punfwd(fn)) {         /* a union's words, without the union */
+            pass_copyprop(fn);
+            pass_dce(fn);
+            outer = 1;
         }
         if (g_loadcse && cfg_ok && pass_loadcse(fn)) {   /* reuse loads redundant on every path */
             pass_copyprop(fn);
@@ -8418,7 +11890,14 @@ static void opt_func(struct ir_func *fn)
      * What follows it is the block-local work -- folding, value
      * numbering, copy propagation -- which is most of what the copies
      * are for. */
-    if (g_unroll && edge_ok && pass_unroll(fn)) {
+    /* Switch threading with it: what it copies is a path, not a loop,
+     * and the same block-local work cleans up after both. */
+    int copied = 0;
+    if (g_unroll && edge_ok && pass_unroll(fn))
+        copied = 1;
+    if (g_swthread && edge_ok && pass_swthread(fn))
+        copied = 1;
+    if (copied) {
         int changed = 1, g2 = 0;
         while (changed && g2++ < 100) {
             changed = 0;
@@ -8437,6 +11916,13 @@ static void opt_func(struct ir_func *fn)
              * This is what notices. */
             if (g_cfgclean)
                 changed |= pass_cfgclean(fn);
+            /* And a guard that folding has just decided: the copies'
+             * value numbering sees `end != base + 2048` with end ==
+             * base + 2048 and makes it a constant, which nothing in
+             * this loop resolved -- CRC's inner loop entered through
+             * `mov $1; test; je` on every outer trip. */
+            if (g_sccp && cfg_ok)
+                changed |= pass_sccp(fn);
         }
     }
     /* After the fixpoint: fold constant operands into immediates, then DCE the
@@ -8452,7 +11938,19 @@ static void opt_func(struct ir_func *fn)
      * finished first. Inside the round it also never settled -- folding
      * and value numbering kept producing literals for it to move and it
      * kept reporting a change, which put format.c at six minutes. */
+    /* The joins' copies, before anything decides where literals go: a
+     * constant written straight into the merged name is where it was. */
+    if (cfg_ok && pass_joincopies(fn) && g_cfgclean)
+        pass_cfgclean(fn);
     pass_sinkconst(fn);
+    /* Last: the copies it adds must not be propagated away again.
+     * EMBCC_NO_SPLITLOOPS=1 turns it off, for bisecting a difference. */
+    if (g_licm && edge_ok && !g_opt_size && !getenv("EMBCC_NO_SPLITLOOPS")) {
+        int guard = 0;
+        while (guard++ < 64 && pass_splitloops(fn))
+            ;
+    }
+    pass_sinkaddr(fn);       /* last: nothing may separate them again */
     if (verify) verify_func(fn, "opt");
 
     /* What the whole fixpoint came to, for this function. The per-pass
@@ -8484,9 +11982,9 @@ static void opt_func(struct ir_func *fn)
  * obvious guess was wrong. Turning it off made the benchmark's object
  * file grow from 3959 bytes to 7340 -- inlining a static function that
  * has one caller lets the original be deleted, so refusing to inline
- * keeps two copies of it. Until there is a cost model that can tell
- * that case from a body copied into twenty call sites (section 4's
- * work), inlining everything it already inlines is the smaller answer.
+ * keeps two copies of it -- INLINE_SOLE_CALLEE keeps that case inlined
+ * at every level. The body copied into twenty call sites is the other
+ * case, and -Os now tells them apart by budget: INLINE_SIZE_CALLEE.
  *
  * Everything else -- folding, value numbering, dead code, loop
  * invariants, strength reduction -- makes code smaller as well as
@@ -8494,6 +11992,7 @@ static void opt_func(struct ir_func *fn)
 void opt_run(struct ir_unit *iu, int level)
 {
     int size = level == OPT_SIZE;
+    g_opt_size = size;
     if (size)
         level = 2;
     if (level < 1)
@@ -8527,6 +12026,9 @@ void opt_run(struct ir_unit *iu, int level)
      * remainder -- so -Os leaves it off. */
     pass_default(P_UNROLL, level >= 2 && !size);
     pass_default(P_PRE, level >= 2);
+    /* It copies the path to a switch once per state, so -Os leaves it
+     * off with unrolling. */
+    pass_default(P_SWTHREAD, level >= 2 && !size);
     if (g_pass[P_INLINE].on)      /* inline before the per-function passes clean up */
         inline_unit(iu);
     /* After inlining, so the bodies are the ones that will be compiled,
@@ -8534,6 +12036,12 @@ void opt_run(struct ir_unit *iu, int level)
      * every call site. */
     if (level >= 2)
         infer_attrs(iu);
+    /* After inlining too: it is every function's final body that has to
+     * leave the global alone. */
+    if (level >= 2)
+        ro_globals(iu);
+    else
+        g_nro = 0;
     /* Every function, including one computing with __int128. The folds
      * that are 64-bit refuse a 128-bit width individually now (see
      * pass_fold), which is a great deal narrower than refusing the

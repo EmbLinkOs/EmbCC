@@ -172,7 +172,7 @@ static unsigned long hash_global(const struct global *g)
     ob_fmt(&b, "V %s ", g->is_static ? "static" : "extern");
     spell_type(&b, g->ty);
     if (g->ty)
-        ob_fmt(&b, " size=%d align=%d", ty_size(g->ty), ty_align(g->ty));
+        ob_fmt(&b, " size=%d align=%d", global_size(g), ty_align(g->ty));
     if (g->is_weak) ob_str(&b, " weak");
     unsigned long h = fnv(b.p ? b.p : "", FNV_INIT);
     ob_free(&b);

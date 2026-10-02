@@ -8,6 +8,7 @@
 #include "../driver/util.h"
 #include "../lex/lex.h"
 #include "../arch/predef.h"
+#include "../sema/sema.h"
 
 #define MAX_MACRO_PARAMS 16
 #define MAX_INCLUDE_DEPTH 50
@@ -107,12 +108,43 @@ static void undef_macro(struct cpp *cpp, const char *name, size_t n)
 
 /* ---- character helpers ---- */
 
+/* A byte of a UTF-8 sequence counts as an identifier's, so `café` is
+ * one name to macro lookup; the lexer decides which characters an
+ * identifier may really hold (lex_ident_utf8). */
 static int is_id0(char c)
 {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+           (unsigned char)c >= 0x80;
 }
 
 static int is_idc(char c) { return is_id0(c) || (c >= '0' && c <= '9'); }
+
+/* The length of the pp-number at p, or 0 when p does not start one: a
+ * digit, or a '.' before one, not inside an identifier (prev is the
+ * character before p). A pp-number takes letters, digits, '.', a sign
+ * after e/E/p/P, and C23's digit separator -- a ' before a letter or
+ * digit, as in 1'000'000. Every scanner here asks this before taking a
+ * quote for a character literal: otherwise that separator opened one,
+ * which ran to the end of the line when the separators were odd in
+ * number, hiding the macros and the comment start that followed. */
+static size_t pp_number(const char *p, char prev)
+{
+    if (is_idc(prev) || !((p[0] >= '0' && p[0] <= '9') ||
+                          (p[0] == '.' && p[1] >= '0' && p[1] <= '9')))
+        return 0;
+    size_t i = 1;
+    for (;;) {
+        char c = p[i];
+        if ((c == '+' || c == '-') && strchr("eEpP", p[i - 1]))
+            i++;
+        else if (is_idc(c) || c == '.')
+            i++;
+        else if (c == '\'' && is_idc(p[i + 1]))
+            i += 2;
+        else
+            return i;
+    }
+}
 
 /* Copies a string or char literal verbatim; returns chars consumed. */
 static size_t copy_literal(const char *p, struct tbuf *out)
@@ -153,6 +185,12 @@ static size_t collect_arg(struct src *s, const char *p, struct tbuf *arg)
         }
         if (c == ',' && depth == 0)
             break;
+        size_t pn = pp_number(p + i, i ? p[i - 1] : 0);
+        if (pn) {
+            tb_putn(arg, p + i, pn);
+            i += pn;
+            continue;
+        }
         if (c == '"' || c == '\'') {
             i += copy_literal(p + i, arg);
             continue;
@@ -176,13 +214,81 @@ static size_t collect_arg(struct src *s, const char *p, struct tbuf *arg)
 /* Substitutes params/#/## in a function-like macro body. Args are
  * substituted pre-expanded except as # or ## operands (C99 rules,
  * minus the corner cases a compiler earns later). */
+/* C23's __VA_OPT__(content) in a variadic macro's body: the content
+ * when the variable arguments expand to something, nothing when they do
+ * not -- `#define LOG(f, ...) printf(f __VA_OPT__(,) __VA_ARGS__)`. Done
+ * on the body's text before the parameters are substituted, so the
+ * content's own parameters are substituted as any others are. Returns a
+ * new body, or NULL when there is no __VA_OPT__. */
+static char *va_opt_body(struct src *s, struct macro *m, char **exp)
+{
+    if (!m->is_varargs || !strstr(m->body, "__VA_OPT__"))
+        return NULL;
+    const char *va = exp[m->nparams - 1];
+    int empty = 1;
+    for (const char *q = va; *q; q++)
+        if (*q != ' ' && *q != '\t' && *q != '\n')
+            empty = 0;
+    struct tbuf out = { 0, 0, 0 };
+    const char *p = m->body, *start = m->body;
+    while (*p) {
+        size_t pn = pp_number(p, p > start ? p[-1] : 0);
+        if (pn) {
+            tb_putn(&out, p, pn);
+            p += pn;
+            continue;
+        }
+        if (*p == '"' || *p == '\'') {
+            p += copy_literal(p, &out);
+            continue;
+        }
+        if (!strncmp(p, "__VA_OPT__", 10) && !is_idc(p[10]) &&
+            (p == m->body || !is_idc(p[-1]))) {
+            const char *q = p + 10;
+            while (*q == ' ' || *q == '\t')
+                q++;
+            if (*q != '(')
+                cerr(s, "__VA_OPT__ needs its content in parentheses", NULL);
+            int depth = 1;
+            const char *b = ++q;
+            while (*q && depth) {
+                if (*q == '"' || *q == '\'') {
+                    struct tbuf skip = { 0, 0, 0 };
+                    q += copy_literal(q, &skip);
+                    free(skip.p);
+                    continue;
+                }
+                if (*q == '(') depth++;
+                else if (*q == ')') depth--;
+                if (depth)
+                    q++;
+            }
+            if (depth)
+                cerr(s, "__VA_OPT__ is missing its ')'", NULL);
+            if (!empty)
+                tb_putn(&out, b, (size_t)(q - b));
+            p = q + 1;
+            continue;
+        }
+        tb_putc(&out, *p++);
+    }
+    return out.p ? out.p : xstrndup("", 0);
+}
+
 static char *subst_body(struct src *s, struct macro *m,
                         char **raw, char **exp)
 {
     struct tbuf out = { 0, 0, 0 };
-    const char *p = m->body;
+    char *vbody = va_opt_body(s, m, exp);
+    const char *p = vbody ? vbody : m->body, *start = p;
 
     while (*p) {
+        size_t pn = pp_number(p, p > start ? p[-1] : 0);
+        if (pn) {
+            tb_putn(&out, p, pn);
+            p += pn;
+            continue;
+        }
         if (*p == '"' || *p == '\'') {
             p += copy_literal(p, &out);
             continue;
@@ -245,6 +351,7 @@ static char *subst_body(struct src *s, struct macro *m,
         }
         tb_putc(&out, *p++);
     }
+    free(vbody);
     return out.p ? out.p : xstrndup("", 0);
 }
 
@@ -332,6 +439,12 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
     const char *p = text;
 
     while (*p) {
+        size_t pn = pp_number(p, p > text ? p[-1] : 0);
+        if (pn) {
+            tb_putn(out, p, pn);
+            p += pn;
+            continue;
+        }
         if (*p == '"' || *p == '\'') {
             p += copy_literal(p, out);
             continue;
@@ -484,16 +597,35 @@ static long eval_primary(struct evalp *e)
         return lit_char_value(c, cpfx, &uns, e->s->file, e->s->line);
     }
     if (*e->p >= '0' && *e->p <= '9') {
+        /* The whole pp-number, its C23 separators dropped (1'000), in
+         * binary too (0b1010), and read unsigned: strtol stopped at the
+         * separator and at the b, and saturated past LONG_MAX. */
+        size_t n = pp_number(e->p, 0);
+        char buf[80];
+        size_t k = 0;
+        for (size_t i = 0; i < n && k + 1 < sizeof buf; i++)
+            if (e->p[i] != '\'')
+                buf[k++] = e->p[i];
+        buf[k] = 0;
         char *end;
-        long v = strtol(e->p, &end, 0);
+        unsigned long long v =
+            buf[0] == '0' && (buf[1] == 'b' || buf[1] == 'B')
+                ? strtoull(buf + 2, &end, 2) : strtoull(buf, &end, 0);
         while (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L')
             end++;
-        e->p = end;
-        return v;
+        if (*end)
+            cerr(e->s, "a number in #if is malformed", NULL);
+        e->p += n;
+        return (long)v;
     }
     if (is_id0(*e->p)) { /* surviving identifiers evaluate to 0 */
+        const char *id = e->p;
         while (is_idc(*e->p))
             e->p++;
+        /* ...except C23's `true`, which is 1 in #if as everywhere else
+         * (a unit that #defines it has had it replaced already) */
+        if (e->p - id == 4 && !memcmp(id, "true", 4))
+            return 1;
         return 0;
     }
     cerr(e->s, "cannot parse #if expression", NULL);
@@ -665,18 +797,36 @@ static const char *cx_macro_fmt(const char *name, long v)
 
 /* C++'s (and GNU's) feature-test operators, which a #if may use, and
  * which `defined` / #ifdef count as defined. */
+/* The feature-test operators, which are also `defined` for the sake of
+ * the guarded spelling every portable header uses:
+ *
+ *     #if defined(__has_include) && __has_include(<foo.h>)
+ *
+ * With the name undefined that is not a graceful fallback -- it is a
+ * SYNTAX ERROR, because the identifier becomes 0 and the expression
+ * parser then meets `0 (<foo.h>)`. So a header written defensively
+ * failed to compile, which is strictly worse than the feature being
+ * absent. Clang and GCC both register these as builtin macros for the
+ * same reason.
+ *
+ * This whole mechanism already existed and was gated on
+ * `if (!predef_is_cxx()) return 0;` -- it was built for libstdc++ and
+ * C never got it. The gate is gone; what remains is the one split that
+ * is real: __has_cpp_attribute exists only in C++ and __has_c_attribute
+ * only in C, which is what both reference compilers do. */
 static int has_operator(const char *p, size_t n)
 {
     static const char *const ops[] = {
         "__has_include", "__has_include_next", "__has_builtin",
-        "__has_attribute", "__has_cpp_attribute", "__has_feature",
-        "__has_extension",
+        "__has_attribute", "__has_feature", "__has_extension",
     };
-    if (!predef_is_cxx())
-        return 0;
     for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++)
         if (strlen(ops[i]) == n && !memcmp(ops[i], p, n))
             return 1;
+    if (n == 19 && !memcmp("__has_cpp_attribute", p, n))
+        return predef_is_cxx();
+    if (n == 17 && !memcmp("__has_c_attribute", p, n))
+        return !predef_is_cxx();
     return 0;
 }
 
@@ -797,7 +947,14 @@ static long eval_has(struct src *s, const char *p, size_t n,
                 an = sizeof name - 1;
             memcpy(name, b, an);
             name[an] = 0;
-            v = cxx_has_builtin ? cxx_has_builtin(name) : 0;
+            /* In C++ the C++ front end owns the builtin set; in C the
+             * C front end does. Answering 0 in C -- which is what
+             * happened while this was C++-only -- would have been a
+             * LIE about a compiler that implements __builtin_clz and
+             * forty others. */
+            v = predef_is_cxx()
+                    ? (cxx_has_builtin ? cxx_has_builtin(name) : 0)
+                    : sema_has_builtin(name);
         } else if (n == 15 && !memcmp(p, "__has_attribute", 15)) {
             attr_name(b, an, name, sizeof name);
             v = gnu_attribute(name);
@@ -806,8 +963,38 @@ static long eval_has(struct src *s, const char *p, size_t n,
                       (an > 9 && !memcmp(b, "__gnu__::", 9));
             attr_name(b, an, name, sizeof name);
             v = gnu ? gnu_attribute(name) : cpp_attribute(name);
+        } else if (n == 17 && !memcmp(p, "__has_c_attribute", 17)) {
+            /* Deliberately 0 for everything, and correct today: this
+             * asks about the C23 `[[...]]` form, which EmbCC's parser
+             * does not accept at all. When [[attr]] lands, this must
+             * answer from the same table that parses it -- answering
+             * yes before then would make a header write syntax the
+             * compiler rejects. */
+            v = 0;
+        } else if ((n == 13 && !memcmp(p, "__has_feature", 13)) ||
+                   (n == 15 && !memcmp(p, "__has_extension", 15))) {
+            /* Clang's feature names. Only the ones EmbCC really has are
+             * claimed; the rest answer 0, which costs a header its fast
+             * path and never costs correctness. __has_extension is a
+             * superset of __has_feature in clang, and the two agree
+             * here because nothing below is a non-standard extension
+             * of a standard feature. */
+            static const char *const feats[] = {
+                "c_static_assert", "c_generic_selections", "c_atomic",
+                "c_alignas", "c_alignof", "c_thread_local",
+                "tls", "attribute_deprecated_with_message",
+                "enumerator_attributes", "attribute_unavailable_with_message",
+            };
+            if (an >= sizeof name)
+                an = sizeof name - 1;
+            memcpy(name, b, an);
+            name[an] = 0;
+            for (size_t i = 0; i < sizeof feats / sizeof feats[0]; i++)
+                if (strcmp(name, feats[i]) == 0) {
+                    v = 1;
+                    break;
+                }
         }
-        /* __has_feature / __has_extension: clang's, 0 */
     }
     while (*q == ' ' || *q == '\t')
         q++;
@@ -824,6 +1011,12 @@ static long eval_if(struct src *s, const char *line)
     struct tbuf pre = { 0, 0, 0 };
     const char *p = line;
     while (*p) {
+        size_t pn = pp_number(p, p > line ? p[-1] : 0);
+        if (pn) {
+            tb_putn(&pre, p, pn);
+            p += pn;
+            continue;
+        }
         if (*p == '\'' || *p == '"') {
             p += copy_literal(p, &pre);
             continue;
@@ -931,6 +1124,11 @@ static int needs_more_input(struct cpp *cpp, const char *text)
     const char *p = text;
 
     while (*p) {
+        size_t pn = pp_number(p, p > text ? p[-1] : 0);
+        if (pn) {
+            p += pn;
+            continue;
+        }
         if (*p == '"' || *p == '\'') {
             p += copy_literal(p, NULL);
             continue;
@@ -950,6 +1148,11 @@ static int needs_more_input(struct cpp *cpp, const char *text)
             int depth = 0;
             const char *r = q;
             while (*r) {
+                size_t rn = pp_number(r, r > text ? r[-1] : 0);
+                if (rn) {
+                    r += rn;
+                    continue;
+                }
                 if (*r == '"' || *r == '\'') {
                     r += copy_literal(r, NULL);
                     continue;
@@ -1083,6 +1286,13 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
             read_raw_string(s, out, nl);
             continue;
         }
+        /* (the character before, as this line has it: what was put) */
+        size_t pn = pp_number(s->p, out->len ? out->p[out->len - 1] : 0);
+        if (pn) {
+            tb_putn(out, s->p, pn);
+            s->p += pn;
+            continue;
+        }
         if (c == '"' || c == '\'') {
             s->p += copy_literal(s->p, out);
             continue;
@@ -1103,6 +1313,85 @@ static char *read_file_or_null(const char *path, long *len)
 
 static void process_file(struct cpp *cpp, const char *path,
                          const char *src, struct tbuf *out, int incdir_idx);
+
+/* C23 `#embed "file"` -- the file's BYTES as a comma-separated list of
+ * integers, which is what the directive is defined to expand to. It
+ * goes where an initializer list's contents go:
+ *
+ *     static const unsigned char logo[] = {
+ *     #embed "logo.bin"
+ *     };
+ *
+ * The alternative every project uses today is a build step that turns
+ * a binary into a .c file, so this removes a generator rather than
+ * adding a feature.
+ *
+ * The parameters the standard allows (limit, prefix, suffix,
+ * if_empty) are refused by name rather than ignored: ignoring `limit`
+ * would embed the whole file where a prefix of it was asked for.
+ */
+static void do_embed(struct src *s, const char *arg, struct tbuf *out)
+{
+    char fname[256];
+    char path[512];
+    const char *p = arg;
+    char *data = NULL;
+    long len = 0;
+    int angle;
+
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p != '"' && *p != '<') {
+        cerr(s, "#embed needs a file name", NULL);
+        return;
+    }
+    angle = *p == '<';
+    {
+        char close = angle ? '>' : '"';
+        size_t n = 0;
+        p++;
+        while (p[n] && p[n] != close && n < sizeof fname - 1)
+            n++;
+        if (p[n] != close) {
+            cerr(s, "malformed #embed", NULL);
+            return;
+        }
+        memcpy(fname, p, n);
+        fname[n] = 0;
+        p += n + 1;
+    }
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p)
+        cerr(s, "#embed parameters (limit, prefix, suffix, if_empty) are "
+                "not supported; ignoring one would embed the wrong bytes",
+             NULL);
+
+    if (!angle) {
+        const char *slash = strrchr(s->file, '/');
+        if (slash)
+            snprintf(path, sizeof path, "%.*s/%s",
+                     (int)(slash - s->file), s->file, fname);
+        else
+            snprintf(path, sizeof path, "%s", fname);
+        data = read_file_or_null(path, &len);
+    }
+    for (int i = 0; !data && i < s->cpp->nincdirs; i++) {
+        snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], fname);
+        data = read_file_or_null(path, &len);
+    }
+    if (!data) {
+        cerr(s, "cannot find the file to embed: \"%s\"", fname);
+        return;
+    }
+    for (long i = 0; i < len; i++) {
+        char num[8];
+        int k = snprintf(num, sizeof num, "%s%u", i ? "," : "",
+                         (unsigned)(unsigned char)data[i]);
+        tb_putn(out, num, (size_t)k);
+    }
+    free(data);
+}
 
 static void do_include(struct src *s, const char *arg, struct tbuf *out,
                        int is_next)
@@ -1266,12 +1555,45 @@ static void define_macro(struct src *s, const char *line)
 /* Conditional stack entry state. */
 enum cond_state { COND_LIVE, COND_DEAD, COND_DONE };
 
+/* `#pragma pack(...)` and `_Pragma("pack(...)")` change struct layout,
+ * so they reach the parser: as `__embcc_pack(args)`, a name no program can
+ * declare. The arguments are NOT macro-expanded, as gcc does not expand
+ * them on ELF targets: `pack(push, N)` with N a macro is a push labelled
+ * N there (which the parser refuses), not a pack to N's value. `text`
+ * starts after the word `pack`. C++'s parser has no use for the marker,
+ * and there the pragma is still refused by name. */
+static void emit_pack(struct src *s, const char *text, size_t n,
+                      struct tbuf *out)
+{
+    if (cxx_has_builtin)
+        cerr(s, "#pragma pack is not supported in C++: it would change the "
+                "layout and EmbCC would ignore it. Use "
+                "__attribute__((packed)) on the struct", NULL);
+    size_t i = 0;
+    while (i < n && (text[i] == ' ' || text[i] == '\t'))
+        i++;
+    if (i == n || text[i] != '(')
+        cerr(s, "#pragma pack needs its arguments in parentheses", NULL);
+    size_t b = ++i;
+    while (i < n && text[i] != ')')
+        i++;
+    if (i == n)
+        cerr(s, "#pragma pack is missing its ')'", NULL);
+    tb_puts(out, " __embcc_pack(");
+    tb_putn(out, text + b, i - b);
+    tb_puts(out, ") ");
+}
+
 static void process_file(struct cpp *cpp, const char *path,
                          const char *src, struct tbuf *out, int incdir_idx)
 {
     struct src s;
     s.cpp = cpp;
     s.file = path;
+    /* a UTF-8 byte-order mark is not part of the program */
+    if ((unsigned char)src[0] == 0xEF && (unsigned char)src[1] == 0xBB &&
+        (unsigned char)src[2] == 0xBF)
+        src += 3;
     s.p = src;
     s.line = 1;
     s.incdir_idx = incdir_idx;
@@ -1394,12 +1716,24 @@ static void process_file(struct cpp *cpp, const char *path,
                          s.line, path);
                 tb_puts(out, marker);
                 continue;
+            } else if (DIR("embed")) {
+                do_embed(&s, arg, out);
             } else if (DIR("error")) {
                 cerr(&s, "#error: %s", arg);
             } else if (DIR("warning")) {
                 diag_warn_at(s.file, startline, 0, "#warning: %s", arg);
             } else if (DIR("pragma")) {
-                /* no pragmas mean anything to us yet */
+                /* Most pragmas mean nothing here and dropping them is
+                 * right. `pack` is not one of those: it changes
+                 * STRUCT LAYOUT, and ignoring it would pad a struct the
+                 * programmer packed -- silently. It goes to the parser
+                 * as a marker it reads between declarations
+                 * (emit_pack); the output line stays synced. */
+                const char *pa = arg;
+                while (*pa == ' ' || *pa == '\t') pa++;
+                if (strncmp(pa, "pack", 4) == 0 &&
+                    (pa[4] == '(' || pa[4] == ' ' || pa[4] == '\t'))
+                    emit_pack(&s, pa + 4, strlen(pa + 4), out);
             } else if (DIR("line") || (dn > 0 && lp[0] >= '0' &&
                                         lp[0] <= '9')) {
                 /* #line N ["file"], and GNU's linemarker # N "file" ...
@@ -1450,7 +1784,105 @@ static void process_file(struct cpp *cpp, const char *path,
                 nl += more_nl;
             }
             s.line = startline;
-            expand_text(&s, lineb.p ? lineb.p : "", out);
+            {
+                struct tbuf expb = { 0, 0, 0 };
+                expand_text(&s, lineb.p ? lineb.p : "", &expb);
+                if (!expb.p) tb_putc(&expb, '\0'), expb.len = 0;
+                /* Expanded into a buffer of its own first, because
+                 * _Pragma usually ARRIVES from a macro -- that is the
+                 * whole reason the operator exists -- so stripping it
+                 * out of the source line would never see it.
+                 *
+                 * _Pragma("...") is the operator spelling of #pragma,
+                 * and exists so a MACRO can carry one -- which is how
+                 * headers suppress a warning at their own definition
+                 * site. It is destringized and treated exactly as the
+                 * directive above: refused when it is `pack`, and
+                 * removed otherwise, because that is what this
+                 * preprocessor does with a pragma it does not act on.
+                 * Leaving it in the text would reach the parser as an
+                 * undeclared function call. */
+                char *lp2 = expb.p;
+                while (lp2 && *lp2) {
+                    char *q;
+                    char *close;
+                    /* Skip string and character literals. `_Pragma`
+                     * appears inside them in real source -- this
+                     * file's own text is the first example -- and
+                     * rewriting one corrupts the program. Also
+                     * require a whole identifier, so `my_Pragma` is
+                     * left alone. */
+                    if (*lp2 == '"' || *lp2 == '\'') {
+                        int qc = *lp2++;
+                        while (*lp2 && *lp2 != qc) {
+                            if (*lp2 == '\\' && lp2[1]) lp2++;
+                            lp2++;
+                        }
+                        if (*lp2) lp2++;
+                        continue;
+                    }
+                    if (strncmp(lp2, "_Pragma", 7) != 0 ||
+                        (lp2 != expb.p && (is_idc((unsigned char)lp2[-1]))) ||
+                        is_idc((unsigned char)lp2[7])) {
+                        lp2++;
+                        continue;
+                    }
+                    q = lp2 + 7;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (*q != '(') { lp2 += 7; continue; }
+                    q++;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (*q != '"') {
+                        cerr(&s, "_Pragma needs a string literal", NULL);
+                        break;
+                    }
+                    {
+                        char *b = ++q;
+                        while (*q && *q != '"') {
+                            if (*q == '\\' && q[1]) q++;
+                            q++;
+                        }
+                        if (*q != '"') {
+                            cerr(&s, "unterminated _Pragma string", NULL);
+                            break;
+                        }
+                        struct tbuf pk = { 0, 0, 0 };
+                        {
+                            const char *pb = b;
+                            while (pb < q && (*pb == ' ' || *pb == '\t')) pb++;
+                            if ((size_t)(q - pb) >= 4 &&
+                                strncmp(pb, "pack", 4) == 0)
+                                emit_pack(&s, pb + 4, (size_t)(q - pb - 4),
+                                          &pk);
+                        }
+                        close = q + 1;
+                        while (*close == ' ' || *close == '\t') close++;
+                        if (*close != ')') {
+                            cerr(&s, "_Pragma needs a closing ')'", NULL);
+                            free(pk.p);
+                            break;
+                        }
+                        close++;
+                        if (pk.p) {
+                            /* the operator becomes the marker, in place */
+                            size_t at = (size_t)(lp2 - expb.p);
+                            size_t ml = strlen(pk.p);
+                            char *nb = xmalloc(at + ml + strlen(close) + 1);
+                            memcpy(nb, expb.p, at);
+                            memcpy(nb + at, pk.p, ml);
+                            strcpy(nb + at + ml, close);
+                            free(expb.p);
+                            expb.p = nb;
+                            lp2 = nb + at + ml;
+                            free(pk.p);
+                            continue;
+                        }
+                        memmove(lp2, close, strlen(close) + 1);
+                    }
+                }
+                tb_putn(out, expb.p ? expb.p : "", expb.p ? strlen(expb.p) : 0);
+                free(expb.p);
+            }
         }
         for (int i = 0; i < nl; i++)
             tb_putc(out, '\n');
@@ -1541,8 +1973,13 @@ char *cpp_process(const char *path, const char *src,
     define_macro(&boot, "__inline__");
     defining_builtins = 0;
     define_macro(&boot, "__STDC__ 1");
+    /* C17: the language EmbCC compiles is C11's (with C17's fixes),
+     * _Atomic operators included, and much of C23's. It said C99, which
+     * sent headers to their pre-C11 fallbacks -- newlib emulates
+     * _Alignof with a struct in offsetof -- and withheld C11's macros
+     * (FLT_TRUE_MIN) from its own <float.h>. */
     if (!predef_is_cxx())      /* C++ has __cplusplus instead */
-        define_macro(&boot, "__STDC_VERSION__ 199901L");
+        define_macro(&boot, "__STDC_VERSION__ 201710L");
     define_macro(&boot, "__STDC_HOSTED__ 1");
     if (predef_is_cxx()) {
         /* the C++ features EmbCC implements (docs/language/cpp-levels.md): each one

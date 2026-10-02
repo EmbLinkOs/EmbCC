@@ -20,6 +20,10 @@
  * message. Its instruction loop sets it; the guard reads it only when
  * it fires. */
 extern const char *x86_lowering_op;
+/* Set while a function with no frame pointer is lowered: a frameless one,
+ * or one whose frame is only its pushes. rbp is then the CALLER's, and an
+ * access through it is refused by name rather than emitted. */
+extern int x86_no_rbp;
 
 void x86_prologue(struct code *c, int framesize, int frameless);
 void x86_sub_rsp(struct code *c, int bytes);
@@ -99,6 +103,7 @@ void x86_sse_alu_mem(struct code *c, int op, int dst, int disp, int w);
 void x86_sse_alu_reg(struct code *c, int op, int dst, int src, int w);
 void x86_movs_reg(struct code *c, int dst, int src);
 void x86_movq_xmm_gpr(struct code *c, int xmm, int gpr, int w);
+void x86_movq_gpr_xmm(struct code *c, int gpr, int xmm, int w);
 void x86_ucomis_mem(struct code *c, int xmm, int disp, int w);
 void x86_ucomis_reg(struct code *c, int a, int b, int w);
 /* setcc pair for float == and != : ordered equality is "equal AND not
@@ -142,6 +147,16 @@ void x86_movsxd_rr(struct code *c, int dst, int src);         /* dst64=sext(src3
 void x86_movx_rr(struct code *c, int dst, int src, int size, int sign, int w);
                                                     /* dst = extend(src low 1/2 bytes) */
 void x86_alu_rr(struct code *c, int op, int dst, int src, int w); /* dst op= src */
+/* [base+disp] op= src / imm (+ - & | ^): read-modify-write */
+void x86_store_mem_imm(struct code *c, int base, int disp, long imm,
+                       int size);       /* [base+disp] = imm */
+void x86_rep_movsq(struct code *c);      /* rcx qwords [rsi] -> [rdi] */
+void x86_vzero(struct code *c, int xmm);  /* pxor xmm, xmm */
+void x86_rep_stosq(struct code *c);      /* rcx qwords of rax -> [rdi] */
+void x86_alu_mem_reg(struct code *c, int op, int base, int disp, int src,
+                     int w);
+void x86_alu_mem_imm(struct code *c, int op, int base, int disp, long imm,
+                     int w);
 void x86_cmp_rr(struct code *c, int a, int b, int w);         /* cmp a, b */
 void x86_div_rr(struct code *c, int src, int sign, int w);    /* [rdx:rax]/src */
 /* argument registers by index, for aggregates arriving in pieces */
@@ -175,6 +190,8 @@ int x86_jnz_rel8(struct code *c);
 int x86_jmp_rel8(struct code *c);
 int x86_jcc_rel8(struct code *c, int setcc);
 void x86_jmp_reg(struct code *c, int reg);        /* jmp *reg (computed goto) */
+void x86_jmp_rcx_rax8(struct code *c);   /* jmp *(%rcx,%rax,8) */
+void x86_movsxd_rax_tab(struct code *c);          /* movsxd rax, dword [rcx + rax*4] */
 int x86_jcc_rel32(struct code *c, int setcc); /* setcc cond byte (0x9x) -> Jcc rel32 */
 void x86_alu_reg_imm(struct code *c, int op, int reg, long imm, int w); /* reg OP= imm ('c'=cmp) */
 void x86_imul_reg_imm(struct code *c, int dst, int src, long imm, int w); /* dst = src*imm */

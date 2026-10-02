@@ -63,6 +63,7 @@ void a64_mov_imm(struct code *c, int rd, long imm, int w);
  * exceed it materialise the value instead. */
 int  a64_add_imm(struct code *c, int rd, int rn, long imm, int w);
 int  a64_logical_imm(struct code *c, int op, int rd, int rn, long imm, int w);
+int  a64_bitmask_ok(long imm, int w);   /* a64_logical_imm would accept it */
 int  a64_shift_imm(struct code *c, int op, int rd, int rn, int shift, int w);
 int  a64_ldst_reg(struct code *c, int store, int rt, int rn, int rm,
                   int scaled, int size, int sign, int w);
@@ -72,6 +73,10 @@ int  a64_ldp(struct code *c, int rt, int rt2, int rn, long off);
 int  a64_sub_imm(struct code *c, int rd, int rn, long imm, int w);
 /* op: '+' '-' '&' '|' '^' */
 void a64_alu_reg(struct code *c, int op, int rd, int rn, int rm, int w);
+/* add/sub rd, rn, wm, <extend>: the second operand's low `size` bytes,
+ * sign- or zero-extended -- `add x0, x1, w2, sxtw`. op is '+' or '-'. */
+void a64_alu_reg_ext(struct code *c, int op, int rd, int rn, int rm,
+                     int size, int sign, int w);
 void a64_alu_reg_shifted(struct code *c, int op, int rd, int rn, int rm,
                          int kind, int amount, int w);
 void a64_mul(struct code *c, int rd, int rn, int rm, int w);
@@ -104,6 +109,16 @@ void a64_extend(struct code *c, int rd, int rn, int size, int sign, int w);
  * live across these calls. */
 void a64_ldr(struct code *c, int rt, int rn, long off,
              int size, int sign, int w);
+/* The offset codegen gives a slot nothing names (layout_frame), and the
+ * register frame offsets are taken from -- sp, or x19 in a function with
+ * alloca. Every rn-relative load, store and address in this file and in
+ * codegen's addr_of refuses an offset at A64_DEAD_SLOT from that base or
+ * from x29: it was meant to fault on the spot, and a board without an
+ * MMU takes no fault -- a ninth double was stored a gigabyte above sp. */
+#define A64_DEAD_SLOT 0x40000000L
+extern int a64_frame_base;
+void a64_no_dead_slot(int rn, long off);
+
 /* *(rn + off) = rt's low `size` bytes. Same A64_SCR caveat. */
 void a64_str(struct code *c, int rt, int rn, long off, int size);
 
@@ -111,6 +126,7 @@ void a64_str(struct code *c, int rt, int rn, long off, int size);
 /* stp x29,x30,[sp,#-16]! ; mov x29,sp ; sub sp,sp,#framesize */
 void a64_prologue(struct code *c, int framesize);
 /* add sp,sp,#framesize ; ldp x29,x30,[sp],#16 ; ret */
+void a64_teardown(struct code *c, int framesize);
 void a64_epilogue(struct code *c, int framesize);
 
 /* ---- control flow --------------------------------------------------- */
@@ -121,6 +137,9 @@ int  a64_cbz(struct code *c, int rt, int nonzero, int w);
 int  a64_bl(struct code *c);
 void a64_blr(struct code *c, int rn);
 void a64_br(struct code *c, int rn);
+/* ldrsw xt, [xn, wm, uxtw #2] (w 4) or [xn, xm, lsl #2] (w 8): a jump
+ * table's entry, scaled by the index. */
+void a64_ldrsw_tab(struct code *c, int rt, int rn, int rm, int w);
 void a64_ret(struct code *c);
 /* Patch a branch at `at` to land on .text offset `target`. */
 void a64_patch_b26(struct code *c, int at, int target);
@@ -154,6 +173,7 @@ void a64_fsqrt(struct code *c, int vd, int vn, int w);
 void a64_fneg(struct code *c, int vd, int vn, int w);
 void a64_fmov_reg(struct code *c, int vd, int vn, int w);
 void a64_fmov_from_gpr(struct code *c, int vd, int rn, int w);
+void a64_fmov_to_gpr(struct code *c, int rd, int vn, int w);
 void a64_fcmp(struct code *c, int vn, int vm, int w);
 /* int -> float: rn is a general register of width `iw`, vd an FP register
  * of width `fw`; `sign` picks scvtf over ucvtf. */

@@ -140,6 +140,47 @@ struct ra_target {
      * ra_allocate_fp returns nothing, which is what it did before. */
     const int *(*fp_pool_for)(const struct ir_func *fn, int *n);
     int (*is_fp_callee_saved)(int reg);
+
+    /* A SOFT-float target: a float is bits in an ordinary integer
+     * register, operated on by helper calls, with no register class of
+     * its own. Then a float value belongs to the integer class and is as
+     * eligible as an int; without this every one of them was kept in a
+     * stack slot, and RV32 float code ran at 2.3x clang's size -- each
+     * operation a store, two loads and the call.
+     *
+     * Only for a backend whose every float lowering reads and writes
+     * through its register-aware accessors, the same condition the three
+     * flags above state for arguments, returns and copies. */
+    int float_in_gpr;
+
+    /* Per vreg, values that may take only a register that survives a
+     * call, whether or not they cross one; NULL for none. May be NULL.
+     *
+     * For a backend that checks its own output: AVR proves from the
+     * emitted bytes that nothing overwrote a value in a call-clobbered
+     * register while it was live, and a value its scratch use did
+     * overwrite is named here on the next attempt -- the same answer
+     * `crosses` gives a value live across a call, for a reason the IR
+     * does not show. */
+    const char *(*saved_only)(const struct ir_func *fn);
+
+    /* Is this IR_EXT a plain copy in the registers being allocated -- the
+     * low bytes the home holds being the source's own? May be NULL (no).
+     * AVR's `int` is two bytes and the IR computes at four, so nearly
+     * every read of an int is `ext.4:2`, and a pair holds exactly those
+     * two bytes: counted as a copy, a parameter's register reaches the
+     * values made from it, where before each was a separate node with a
+     * movw between. */
+    int (*ext_plain)(const struct ir_ins *i);
+
+    /* Does this backend's atomic lowering -- IR_XCHG, IR_XADD, IR_ARMW,
+     * IR_CAS, IR_CMPXCHG -- read its address and operands where they are,
+     * register or slot, the way the three flags above describe arguments,
+     * returns and copies? 0 keeps every one of them in memory, which is
+     * what x86-64's raw-slot lowering needs; RISC-V's reads through rdr,
+     * and a lock's fast path there was a store and a reload of the lock
+     * pointer, the desired value and the expected value's address. */
+    int atomic_in_reg;
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that
@@ -157,10 +198,18 @@ int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
                     const char *wide, const char *fltmap,
                     int *used_out, int *nused_out);
 
-/* `fltmap` (cg_float_vregs, may be NULL) is what keeps the two classes
- * apart: a value it names belongs to the FP allocation and must not be
- * given a general register as well, or the two halves of codegen each
- * believe their own answer about where it is. */
+/* `fltmap` (may be NULL) names vregs that must NOT be given a general
+ * register. Its first use was keeping the two register classes apart --
+ * a value belonging to the FP allocation must not also get a general
+ * one, or the two halves of codegen each believe their own answer about
+ * where it is (cg_float_vregs) -- but the contract is just that, and
+ * the reason is the caller's.
+ *
+ * The embedded backends pass a map of SOURCE VARIABLES under -g, so a
+ * variable stays in its frame slot and the DW_AT_location that names
+ * that slot is true. Describing a variable that lives in a register
+ * needs a location list, which is the larger feature; pinning it to
+ * memory is exact, and -g is where the trade belongs. */
 int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                  const char *wide, const char *fltmap,
                  int *used_out, int *nused_out);
@@ -178,6 +227,20 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
 unsigned long *ra_live_intervals(struct ir_func *fn, int *first, int *last,
                                  unsigned long **livein_out, int **defv_out,
                                  int *words_out);
+
+/* A register a PAIR pass gave a 64-bit value, over the instructions
+ * [first, last] that value is live (ra_live_intervals' numbering): the
+ * next allocation treats the register as taken there, and only there.
+ * Withholding a pair's registers from the whole function -- the old
+ * rule -- cost a Cortex-M4 loop its r0 for three doubles that lived
+ * briefly after it. The list is read by the next ra_allocate and then
+ * dropped. */
+struct ra_range { int reg, first, last; };
+void ra_reserve(const struct ra_range *r, int n);
+
+/* A map of the function's source variables, for the -g pinning above.
+ * malloc'd, one byte per vreg; the caller frees. */
+char *ra_debug_pin_vars(const struct ir_func *fn);
 
 /* What a backend knows about slot assignment that this layer does not. */
 struct ra_slots {
@@ -245,5 +308,61 @@ int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
  * liveness is: it has to agree with what the backends actually store,
  * and one copy is how it stays agreed. */
 int ra_ins_def(const struct ir_ins *in);
+
+/* ---- a PARALLEL MOVE ------------------------------------------------------
+ *
+ * "Put these values in these registers, all at once." Three places in a
+ * register-allocating backend ask exactly that, and none of them is a
+ * sequence of independent moves:
+ *
+ *   * a CALL's argument setup -- the value for a0 may be sitting in the
+ *     register a2 is about to be given;
+ *   * a PROLOGUE's parameter placement -- the same thing in reverse,
+ *     writing incoming argument registers into wherever the allocator
+ *     put each parameter;
+ *   * an INDIRECT call's target, which has to be read out before the
+ *     arguments overwrite whatever holds it.
+ *
+ * Done naively, `mov a0, a2; mov a2, a0` loses a2. Done in the wrong
+ * order, a2's old value is gone before a0 wanted it. And a cycle
+ * (a0<-a1, a1<-a0, a swap) cannot be done in any order at all without a
+ * third register.
+ *
+ * So this orders them: emit any move whose DESTINATION nothing still
+ * needs to read, repeatedly; when only cycles are left, break one by
+ * copying a value to `scratch` and rewriting the move that wanted it.
+ * The result is a sequence that is safe to execute top to bottom.
+ *
+ * It is here, in the shared layer, BEFORE a second backend needed it --
+ * which is the opposite of how D-011 says to lift things, and
+ * deliberately. The first attempt at this (the parked branch
+ * `thumb-regalloc-wip`) got three separate bugs out of three sites
+ * open-coding the same ordering, and Thumb and RISC-V both need it. One
+ * routine that is right once is worth more than the rule about waiting
+ * for the second copy.
+ *
+ * `dst[i] <- src[i]`, n pairs, register numbers. Writes the ordered
+ * result into out_dst/out_src (at most `max` entries, and n+1 is always
+ * enough: at most one extra move per cycle broken, and a cycle of length
+ * k costs k+1 moves for k pairs). Pairs with dst == src are dropped.
+ * Returns how many moves to emit, or -1 if `max` is too small or a
+ * destination appears twice (which is a caller bug, not a cycle).
+ *
+ * `scratch` must be a register that is not any dst and holds nothing
+ * live. It is only touched when there is a cycle to break. */
+int ra_parallel_move(const int *dst, const int *src, int n, int scratch,
+                     int *out_dst, int *out_src, int max);
+
+/* Per vreg: a 64-bit shift right by 32..63 whose every reader takes four
+ * bytes or fewer -- the source's high word, in one register rather than a
+ * pair, on a 32-bit target. The caller frees the map. */
+char *ra_narrow_hishift(const struct ir_func *fn);
+
+/* Fold an ADD of a constant into the loads and stores that are its only
+ * uses (ir_ins.memoff), for a target with base+offset addressing whose
+ * encodable range is [lo, hi - size]. Run before allocation. */
+/* `max_size`: the widest access whose lowering reads memoff. */
+int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
+                   int max_size, const char *wide);
 
 #endif
