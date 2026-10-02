@@ -463,6 +463,17 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         }
     }
 
+    /* A volatile local lives in its slot, in either class: every access
+     * the program makes must be one to memory. In a register, longjmp
+     * put back the value it had at setjmp -- which C promises it will
+     * not, for a volatile -- and `volatile int v = 3; (void)v;` read
+     * nothing at all. mem2reg already refused them. */
+    for (int v = 0; v < nvr && v < nvars; v++)
+        if (fn->locals[v].is_volatile) {
+            if (elig[v] && g_ra_why && v < g_ra_why_n)
+                g_ra_why[v] = "volatile";
+            elig[v] = 0;
+        }
     /* a long double lives in its 16-byte slot, never a register */
     for (int v = 0; v < nvr; v++)
         if (g_wide && g_wide[v]) {

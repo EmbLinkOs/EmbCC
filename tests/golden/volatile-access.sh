@@ -52,6 +52,16 @@ int f_vtypedef(void)          { return (tp != 0) + (tp != 0) + (tp != 0); }
 void f_vstore(unsigned *q)    { vp = q; vp = q; vp = q; }
 CEOF
 
+# Volatile LOCALS: their accesses are to the frame, and each must happen.
+# Store forwarding handed `volatile int v = 3`'s 3 straight to its reads,
+# dead-code elimination dropped `(void)v`, and the register allocator kept
+# such a local in a register, where no access is one to memory at all.
+cat > "$out/l.c" <<'CEOF'
+int f_lread(void)   { volatile int v = 3; return v + v + v; }
+int f_lvoid(void)   { volatile int v = 3; (void)v; (void)v; (void)v; return 0; }
+void f_lstore(void) { volatile int v; v = 1; v = 2; v = 3; }
+CEOF
+
 # target, objdump flags, and a pattern for a load / a store from
 # something other than the frame
 check() {
@@ -78,6 +88,32 @@ check riscv32-unknown-elf "--mattr=+c,+m" '[[:space:]](c\.)?lw[[:space:]]' \
 check aarch64-elf "" '[[:space:]]ldr[[:space:]]+w' '[[:space:]]str[[:space:]]+w'
 check x86_64-elf "" 'mov[l]?[[:space:]]+(0x[0-9a-f]+)?\(%r[a-z0-9]+\),' \
       'mov[l]?[[:space:]]+(\$0x[0-9a-f]+|%[a-z0-9]+),[[:space:]]*(0x[0-9a-f]+)?\(%r'
+# target, objdump flags, a load / store pattern: each must reach the FRAME
+# -O2 and -Os, where temporaries are in registers and the frame accesses
+# left are the local's own (at -O1 on Thumb every temporary has a slot)
+checkl() {
+    T=$1 ODF=$2 LD=$3 ST=$4
+    for opt in -O2 -Os; do
+        "$EMBCC" --target=$T $opt -c "$out/l.c" -o "$out/l.o" || {
+            echo "$T $opt: does not compile"; exit 1; }
+        # shellcheck disable=SC2086
+        "$OD" -d $ODF "$out/l.o" > "$out/l.s"
+        for f in f_lread f_lvoid f_lstore; do
+            pat=$LD; case $f in *store) pat=$ST ;; esac
+            n=$(sed -n "/<$f>:/,/^\$/p" "$out/l.s" | grep -E "$pat" |
+                grep -cE 'sp[],)]|\[x29|\(%rsp|\(%rbp|\(s0\)|\(fp\)')
+            [ "$n" = 3 ] || {
+                echo "$T $opt $f: $n accesses to a volatile local, not 3"
+                sed -n "/<$f>:/,/^\$/p" "$out/l.s"; exit 1; }
+        done
+    done
+}
+checkl thumbv7em-none-eabi "--triple=thumbv7em" '[[:space:]]ldr' '[[:space:]]str'
+checkl riscv32-unknown-elf "--mattr=+c,+m" '[[:space:]](c\.)?lw[[:space:]]' \
+       '[[:space:]](c\.)?sw[[:space:]]'
+checkl aarch64-elf "" '[[:space:]]ldu?r[[:space:]]+w' '[[:space:]]stu?r[[:space:]]+w'
+checkl x86_64-elf "" 'mov[l]?[[:space:]]+-?(0x[0-9a-f]+)?\(%r[a-z0-9]+\),' \
+       'mov[l]?[[:space:]]+(\$0x[0-9a-f]+|%[a-z0-9]+),[[:space:]]*-?(0x[0-9a-f]+)?\(%r'
 # the pointer objects, at pointer width
 PF="f_vglobal f_vmember f_vtypedef f_vstore"
 check thumbv7em-none-eabi "--triple=thumbv7em" '[[:space:]]ldr' '[[:space:]]str' p "$PF"
@@ -89,5 +125,6 @@ check x86_64-elf "" 'movq?[[:space:]]+(0x[0-9a-f]+)?\(%r[a-z0-9]+\),' \
 echo "three volatile reads are three loads, and three writes three stores,
 through *p, p[i], p->m, a global, a cast address and a qualifier written
 after a typedef or struct name, and of a volatile
-pointer object (a global, a member, a typedef), on Thumb, RISC-V,
-aarch64 and x86-64 at -O1, -O2 and -Os"
+pointer object (a global, a member, a typedef), and of a volatile
+local (read, read and discarded, written; at -O2 and -Os), on Thumb,
+RISC-V, aarch64 and x86-64 at -O1, -O2 and -Os"

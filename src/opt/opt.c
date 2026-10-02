@@ -1282,7 +1282,9 @@ static int pass_dce(struct ir_func *fn)
             i->callee->inf_no_read && i->callee->inf_no_write &&
             i->callee->is_nothrow && def_target(i) >= 0)
             continue;
-        if (is_pure(i->op) && def_target(i) >= 0)
+        /* a volatile local's read happens even when nothing uses it:
+         * `(void)v;` is a read the program asked for */
+        if (is_pure(i->op) && def_target(i) >= 0 && !i->vol)
             continue;
         live_ins[n] = 1;
     }
@@ -8726,12 +8728,17 @@ static int pass_storefwd(struct ir_func *fn)
             for (int v = 0; v < nvars; v++) cur[v] = -1;
         } else if (in->op == IR_STVAR) {
             int L = in->dst;
+            /* Never a volatile local: each read of one must happen, and
+             * read what is there. `volatile int v = 5; return v + v;`
+             * returned 10 with no load at all. */
             if (L >= 0 && L < nvars)
-                cur[L] = (!taken[L] && sf_plain(in->size, 0, in->size))
+                cur[L] = (!taken[L] && !in->vol &&
+                          !(fn->locals && fn->locals[L].is_volatile) &&
+                          sf_plain(in->size, 0, in->size))
                              ? in->a : -1;
         } else if (in->op == IR_LDVAR) {
             int L = in->a;
-            if (L >= 0 && L < nvars && !taken[L] && cur[L] >= 0 &&
+            if (L >= 0 && L < nvars && !taken[L] && cur[L] >= 0 && !in->vol &&
                 sf_plain(in->size, in->sign, in->w)) {
                 in->op = IR_MOV;                  /* LDVAR L -> MOV of the stored temp */
                 in->a = cur[L];
