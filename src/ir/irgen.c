@@ -3437,10 +3437,13 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 g_nvla++;
                 break;
             }
-            if (s->ninits) {
+            if (s->ninits || s->has_initlist) {
                 /* C zero-fills whatever the initializer does not
                  * mention, so clear the object first and then place
-                 * the listed values. */
+                 * the listed values. ALL of it for `= {}`, which lists
+                 * none: keyed on ninits alone, `int a[4] = {}` and
+                 * `struct p s = {}` emitted nothing and kept whatever
+                 * the stack held, on every target at every level. */
                 int base = local_addr(fn, s->var_index);
                 struct ir_ins *z = emit(fn);
                 z->op = IR_MEMZERO;

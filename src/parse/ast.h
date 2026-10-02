@@ -215,6 +215,9 @@ struct stmt {
     int is_extern;        /* STMT_DECL: block-scope extern -> a unit global/func */
     struct initelem *inits; /* STMT_DECL: flattened aggregate init */
     int ninits;
+    int has_initlist;     /* STMT_DECL: an initializer list was written, so
+                           * what it leaves out is zero -- all of the object
+                           * when it is `{}`, where ninits is 0 */
     struct global *sglob; /* STMT_DECL: the global a static local became */
     int var_index;        /* STMT_DECL: set by sema */
     const char *asm_reg;  /* STMT_DECL: a register-asm binding, `register T

@@ -4296,6 +4296,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     flatten_init(u, f, sc, s->expr, s->dty, 0, &ib);
                 s->inits = ib.v;
                 s->ninits = ib.n;
+                s->has_initlist = 1;
                 s->expr = NULL;
                 if (!s->is_static) {
                     char what[96];
