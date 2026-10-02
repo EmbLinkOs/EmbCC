@@ -198,3 +198,21 @@ done
 [ "$fails" = 0 ] || exit 1
 echo "EmbCC and clang agree on Apple's arm64 convention and data model,"
 echo "both directions, -O0 and -O2, run natively"
+
+# C++ lays its own types out (src/cxx/type.c), and gave long double the
+# 16 bytes it has on LP64 ELF -- here it is a double, so a class holding
+# one was twice clang's size.
+cat > "$out/ld.cpp" <<'EOF2'
+struct S { char c; long double d; };
+static_assert(sizeof(long double) == 8, "long double is a double here");
+static_assert(sizeof(S) == 16, "and a class holding one is laid out so");
+extern "C" int ldsz(void) { S s = { 1, 2.5L }; return (int)sizeof(s) + (int)(s.d * 2); }
+EOF2
+printf 'int ldsz(void);\nint main(void) { return ldsz() == 21 ? 0 : 1; }\n' \
+    > "$out/ldm.c"
+"$EMBCC" --target=aarch64-apple-darwin -c "$out/ld.cpp" -o "$out/ld.o" || {
+    echo "FAIL: C++ does not lay long double out as Apple's 8-byte double"
+    exit 1; }
+cc -o "$out/ldm" "$out/ldm.c" "$out/ld.o" && "$out/ldm" || {
+    echo "FAIL: a C++ class holding a long double disagrees with clang"; exit 1; }
+echo "and C++ lays long double out as Apple's double"

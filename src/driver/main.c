@@ -763,6 +763,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         fputs(pp, stdout);
         return 0;
     }
+    if (lang_cxx && !syntax_only &&
+        (target_ptr_size() != 8 || target_long_size() != 8)) {
+        /* The C++ front end lays types out itself (src/cxx/type.c), for
+         * an LP64 target, and the C it lowers to is laid out by the
+         * target's own rules. Anywhere else the two disagree --
+         * sizeof(long) was 8 on ARMv7-M and sizeof(void *) 8 on AVR --
+         * and every class layout, sizeof and pointer step would be wrong
+         * without a word. A check that writes nothing is still allowed. */
+        fprintf(stderr,
+                "embcc: error: C++ is not yet supported for %s: the C++ "
+                "front end lays out types for 8-byte long and pointers, and "
+                "this target's long is %d bytes and its pointers %d\n",
+                target_triple_now(), target_long_size(), target_ptr_size());
+        return 1;
+    }
     if (lang_cxx) {
         cxx_set_exceptions(want_exceptions);
         cxx_set_rtti(want_rtti);

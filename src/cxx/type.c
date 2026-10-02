@@ -328,7 +328,9 @@ long ct_size(const struct cty *t)
     case CT_DOUBLE: case CT_PTR: case CT_NULLPTR: case CT_LREF: case CT_RREF:
     case CT_VALIST:
         return 8;
-    case CT_LDOUBLE: case CT_INT128: case CT_UINT128: return 16;
+    case CT_LDOUBLE:                 /* 8 on Darwin and ARMv7-M */
+        return target_ldouble_size();
+    case CT_INT128: case CT_UINT128: return 16;
     case CT_COMPLEX: return 2 * ct_size(t->to);
     case CT_ARRAY: return t->n < 0 ? 0 : t->n * ct_size(t->to);
     case CT_CLASS: return t->cls->size;

@@ -314,6 +314,24 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf; do
         echo "case nolink $t: wrong diagnostic:"; echo "$err"; exit 1; }
 done
 echo "case nolink: linking a board image in one step is refused by name"
+
+# C++ is laid out by its own front end for LP64. On a target whose long
+# or pointers are not 8 bytes it compiled anyway, with sizeof(long) 8 on
+# ARMv7-M and sizeof(void *) 8 on AVR, so it is refused there -- except
+# for a check that writes nothing.
+printf 'long f(long x) { return x + (long)sizeof(long); }\n' > "$out_dir/ilp.cpp"
+for t in thumbv7em-none-eabi riscv32-unknown-elf avr; do
+    if err=$("$EMBCC" --target=$t -c "$out_dir/ilp.cpp" \
+             -o "$out_dir/ilp.o" 2>&1); then
+        echo "case cxx-not-lp64 $t: compiled C++ laid out for LP64"; exit 1
+    fi
+    echo "$err" | grep -q "C++ is not yet supported for $t" || {
+        echo "case cxx-not-lp64 $t: wrong diagnostic:"; echo "$err"; exit 1; }
+done
+"$EMBCC" --target=riscv32-unknown-elf -fsyntax-only "$out_dir/ilp.cpp" || {
+    echo "case cxx-not-lp64: -fsyntax-only, which writes nothing, was refused"
+    exit 1; }
+echo "case cxx-not-lp64: C++ for a target that is not LP64 is refused by name"
 check asm-bad-constraint \
     'int main(void) { int x; __asm__("int $0x80" : "=t"(x)); return x; }' \
     "is not supported"
