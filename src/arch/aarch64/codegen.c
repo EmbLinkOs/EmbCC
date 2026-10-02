@@ -348,6 +348,8 @@ struct a64_argplan {
     long copy_off;          /* byref, caller side: the copy's offset in the
                              * frame's byref area */
     int size;               /* the value's size (the aggregate's, if byref) */
+    int packed;             /* AP_STACK: a Darwin slot of exactly `size`
+                             * bytes, not eight -- written at that size */
 };
 
 /* The registers and the stack walked so far (AAPCS64's NGRN, NSRN, NSAA). */
@@ -355,16 +357,34 @@ struct a64_cursor {
     int ngrn, nsrn;
     long nsaa;
     long byref_bytes;       /* caller side: copy space this call needs */
+    /* Darwin, and this argument is a NAMED one (a64_place_arg). Apple's
+     * arm64 departs from AAPCS64 twice here: a named argument on the
+     * stack takes its own size and alignment, not an eight-byte slot
+     * -- f(8 ints, char, short, int) puts them at sp+0, +2 and +4 --
+     * and nothing rounds to an even register, not even an __int128.
+     * clang does both; EmbCC read the short at sp+8 and the int at +16.
+     * (Variadic ones keep eight-byte slots: that is the other way
+     * Apple differs, and va_arg walks them so.) */
+    int darwin;
 };
 
+/* The size and alignment are the argument's own; the standard rounds
+ * both up to eight, Darwin (above) does not. */
 static void to_stack(struct a64_cursor *cu, struct a64_argplan *p, long size,
                      int align)
 {
-    long al = align > 8 ? 16 : 8;
+    long al;
+    if (cu->darwin) {
+        al = align < 1 ? 1 : align > 16 ? 16 : align;
+        p->packed = 1;
+    } else {
+        al = align > 8 ? 16 : 8;
+        size = (size + 7) & ~7L;            /* every stack slot is >= 8 */
+    }
     cu->nsaa = (cu->nsaa + al - 1) & ~(al - 1);
     p->where = AP_STACK;
     p->stk_off = cu->nsaa;
-    cu->nsaa += (size + 7) & ~7L;           /* every stack slot is >= 8 */
+    cu->nsaa += size;
 }
 
 /* AAPCS64 §6.8.2 stages B and C, for the types EmbCC has. No back-filling:
@@ -383,10 +403,8 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
     if (a->is_float) {                                  /* C.1 / C.5 */
         if (cu->nsrn < 8) {
             p->where = AP_V; p->reg = cu->nsrn++; p->nreg = 1; p->esz = p->size;
-        } else if (p->size == 16) {
-            to_stack(cu, p, 16, 16);                    /* a long double */
         } else {
-            to_stack(cu, p, 8, 8);
+            to_stack(cu, p, p->size, p->size);  /* 16: a long double */
         }
         return;
     }
@@ -418,7 +436,8 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
     }
     if (a->is_int128) {                                 /* C.8, C.9 */
         /* 16-aligned: an even-numbered pair of x registers */
-        cu->ngrn = (cu->ngrn + 1) & ~1;
+        if (!cu->darwin)
+            cu->ngrn = (cu->ngrn + 1) & ~1;
         if (cu->ngrn + 2 <= 8) {
             p->where = AP_X; p->reg = cu->ngrn; p->nreg = 2;
             cu->ngrn += 2;
@@ -433,7 +452,7 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
      * by its natural alignment: one only declared aligned(16) does not.
      * Without this, f(long x5, struct{__int128}) took x5,x6 where gcc
      * and clang put it in x6,x7, in both directions of the call. */
-    if (p->is_struct && nal >= 16)
+    if (p->is_struct && nal >= 16 && !cu->darwin)
         cu->ngrn = (cu->ngrn + 1) & ~1;
     int nslot = p->is_struct ? (p->size + 7) / 8 : 1;   /* C.12 */
     if (cu->ngrn + nslot <= 8) {
@@ -442,7 +461,14 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
         return;
     }
     cu->ngrn = 8;                                       /* C.11 */
-    to_stack(cu, p, p->is_struct ? p->size : 8, p->is_struct ? nal : a->align);
+    if (!p->is_struct)
+        to_stack(cu, p, p->size, a->align);
+    else if (cu->darwin)
+        /* whole doublewords, as clang coerces it; aligned(16) on the
+         * struct itself does count here, unlike in AAPCS64 */
+        to_stack(cu, p, (p->size + 7) & ~7L, a->align > 8 ? a->align : 8);
+    else
+        to_stack(cu, p, p->size, nal);
 }
 
 /* Argument k of a call or function whose argument 0 may be the indirect-
@@ -483,7 +509,7 @@ static void a64_place_arg(const struct ir_arg *a, int k, int sret_first,
 static int a64_tail_ok(const struct ir_func *fn, int n)
 {
     const struct ir_ins *i = &fn->ins[n];
-    struct a64_cursor cu = { 0, 0, 0, 0 };
+    struct a64_cursor cu = { 0, 0, 0, 0, 0 };
     struct a64_argplan pl;
     int nret = 0;
 
@@ -533,10 +559,12 @@ static void a64_place_arg(const struct ir_arg *a, int k, int sret_first,
         p->nreg = 1;
         return;
     }
-    if (a64_on_stack_here(k, sret_first, varargs, nfixed)) {
+    int variadic_darwin = a64_on_stack_here(k, sret_first, varargs, nfixed);
+    if (variadic_darwin) {
         cu->ngrn = 8;
         cu->nsrn = 8;
     }
+    cu->darwin = target_os_get() == TGT_OS_DARWIN && !variadic_darwin;
     a64_place_info(a, cu, p);
 }
 
@@ -575,7 +603,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
         struct ir_ins *i = &fn->ins[n];
         if (i->op != IR_CALL)
             continue;
-        struct a64_cursor cu = { 0, 0, 0, 0 };
+        struct a64_cursor cu = { 0, 0, 0, 0, 0 };
         struct a64_argplan pl;
         for (int k = 0; k < i->nargs; k++)
             a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl,
@@ -982,7 +1010,7 @@ static int rd_b(struct code *t, const long *sd, struct ir_ins *i)
 static void a64_abi_hints(const struct ir_func *fn, int *hint)
 {
     struct func *f = fn->src;
-    struct a64_cursor cu = { 0, 0, 0, 0 };
+    struct a64_cursor cu = { 0, 0, 0, 0, 0 };
     for (int p = 0; f && p < f->nparams && p < fn->nvregs; p++) {
         struct a64_argplan pl;
         a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl, 0, 0);
@@ -1019,7 +1047,7 @@ static void a64_abi_hints(const struct ir_func *fn, int *hint)
         const struct ir_ins *s = &fn->ins[i];
         if (s->op != IR_CALL)
             continue;
-        struct a64_cursor cu = { 0, 0, 0, 0 };
+        struct a64_cursor cu = { 0, 0, 0, 0, 0 };
         for (int k = 0; k < s->nargs; k++) {
             struct a64_argplan pl;
             a64_place_arg(&s->argv[k], k, s->sret_first, &cu, &pl,
@@ -1830,7 +1858,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             frameless = 0;
     }
     if (frameless) {
-        struct a64_cursor cu = { 0, 0, 0, 0 };
+        struct a64_cursor cu = { 0, 0, 0, 0, 0 };
         struct a64_argplan pl;
         for (int p = 0; p < fn->nparams && frameless; p++) {
             a64_place_arg(&fn->param_abi[p], p, f->sret_first, &cu, &pl,
@@ -2004,8 +2032,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 a64_fldr(t, g_a64_floc[p], A64_FP, 16 + pl.stk_off,
                          pl.size);
             } else {
-                a64_ldr(t, A64_ACC, A64_FP, 16 + pl.stk_off, 8, 0, 8);
-                st_slot(t, sd, p, A64_ACC, pl.size > 8 ? 8 : pl.size);
+                /* a packed (Darwin) slot is read at its size: eight
+                 * bytes from sp+2 would be the next argument's too */
+                int psz = pl.size > 8 ? 8 : pl.size;
+                a64_ldr(t, A64_ACC, A64_FP, 16 + pl.stk_off,
+                        pl.packed ? psz : 8, 0, 8);
+                st_slot(t, sd, p, A64_ACC, psz);
             }
         }
         if (pass == 0) {
@@ -2789,7 +2821,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
 
         case IR_CALL: {
             struct a64_argplan pl[MAX_PARAMS];
-            struct a64_cursor cu = { 0, 0, 0, 0 };
+            struct a64_cursor cu = { 0, 0, 0, 0, 0 };
             for (int k = 0; k < i->nargs; k++)
                 a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl[k],
                               i->call_varargs, i->call_nfixed);
@@ -2830,7 +2862,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                              pl[k].size);
                 } else {
                     ld_slot(t, sd, v, A64_ACC, 8, 0, 8);
-                    a64_str(t, A64_ACC, A64_SP, pl[k].stk_off, 8);
+                    a64_str(t, A64_ACC, A64_SP, pl[k].stk_off,
+                            pl[k].packed && pl[k].size < 8 ? pl[k].size : 8);
                 }
             }
             /* 3. Register arguments, in order; each writes only its own
@@ -3043,7 +3076,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * gcc's aarch64 va_list is a struct larger than 16 bytes, which
              * B.3 passes as a POINTER, so vfprintf and friends take ours
              * unchanged. */
-            struct a64_cursor cu = { 0, 0, 0, 0 };
+            struct a64_cursor cu = { 0, 0, 0, 0, 0 };
             struct a64_argplan pl;
             for (int p = 0; p < f->nparams; p++)
                 /* 0, 0: a function's DECLARED parameters are all named,

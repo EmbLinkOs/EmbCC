@@ -112,6 +112,40 @@ static const struct predef_macro os_darwin[] = {
     { "__unix__", "1" },
     { "__unix", "1" },
 };
+/* ...and on arm64 the generated aarch64 table (gcc's, AAPCS64) is wrong
+ * about the data model target.c's darwin_a64 describes. These replace
+ * its entries of the same name, with clang's values for
+ * arm64-apple-macos; __CHAR_UNSIGNED__ is dropped (contradicted). */
+static const struct predef_macro darwin_a64_model[] = {
+    { "__DECIMAL_DIG__", "__LDBL_DECIMAL_DIG__" },
+    { "__LDBL_DECIMAL_DIG__", "17" },
+    { "__LDBL_DENORM_MIN__", "4.9406564584124654e-324L" },
+    { "__LDBL_DIG__", "15" },
+    { "__LDBL_EPSILON__", "2.2204460492503131e-16L" },
+    { "__LDBL_MANT_DIG__", "53" },
+    { "__LDBL_MAX_10_EXP__", "308" },
+    { "__LDBL_MAX_EXP__", "1024" },
+    { "__LDBL_MAX__", "1.7976931348623157e+308L" },
+    { "__LDBL_MIN_10_EXP__", "(-307)" },
+    { "__LDBL_MIN_EXP__", "(-1021)" },
+    { "__LDBL_MIN__", "2.2250738585072014e-308L" },
+    { "__LDBL_NORM_MAX__", "1.7976931348623157e+308L" },
+    { "__SIZEOF_LONG_DOUBLE__", "8" },
+    { "__WCHAR_MAX__", "2147483647" },
+    { "__WCHAR_MIN__", "(-__WCHAR_MAX__ - 1)" },
+    { "__WCHAR_TYPE__", "int" },
+    { "__WINT_MAX__", "2147483647" },
+    { "__WINT_MIN__", "(-__WINT_MAX__ - 1)" },
+    { "__WINT_TYPE__", "int" },
+};
+static const int ndarwin_a64_model =
+    (int)(sizeof darwin_a64_model / sizeof *darwin_a64_model);
+
+static int darwin_a64(void)
+{
+    return target_get() == TARGET_AARCH64 && target_os_get() == TGT_OS_DARWIN;
+}
+
 static const struct predef_macro os_windows[] = {
     { "_WIN32", "1" },
     { "_WIN64", "1" },
@@ -160,6 +194,13 @@ static int thumb_fpu_drops(const char *name)
  * thing. Dropped rather than overridden: there is no "__ELF__ 0". */
 static int contradicted(const char *name)
 {
+    if (darwin_a64()) {
+        if (strcmp(name, "__CHAR_UNSIGNED__") == 0)
+            return 1;
+        for (int i = 0; i < ndarwin_a64_model; i++)
+            if (strcmp(name, darwin_a64_model[i].name) == 0)
+                return 1;               /* replaced below */
+    }
     return (target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0) ||
            thumb_fpu_drops(name);
 }
@@ -201,12 +242,16 @@ const struct predef_macro *predef_table(int *count)
     static struct predef_macro *merged;
     static int nmerged;
     if (!merged) {
-        merged = xmalloc((size_t)(narch + nos + 8) * sizeof *merged);
+        merged = xmalloc((size_t)(narch + nos + 8 + ndarwin_a64_model) *
+                         sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
                 merged[nmerged++] = arch[i];
         for (int i = 0; i < nos; i++)
             merged[nmerged++] = os[i];
+        if (darwin_a64())
+            for (int i = 0; i < ndarwin_a64_model; i++)
+                merged[nmerged++] = darwin_a64_model[i];
         if (fpu) {
             for (size_t i = 0; i < sizeof thumb_fpu_add / sizeof *thumb_fpu_add; i++)
                 merged[nmerged++] = thumb_fpu_add[i];

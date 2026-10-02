@@ -58,7 +58,7 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e)
     emit_label(fn, l_stack);
     int stk = emit_load(fn, ap, ptr);
     int ssz = 8;
-    if (rt->kind == TY_LDOUBLE || i128) {  /* a 16-aligned stack slot of 16 */
+    if (ty_is_xldouble(rt) || i128) {  /* a 16-aligned stack slot of 16 */
         stk = emit_bin(fn, IR_AND,
                        emit_bin(fn, IR_ADD, stk, emit_const(fn, 15, 8), 8, 1),
                        emit_const(fn, -16, 8), 8, 1);
@@ -69,7 +69,7 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e)
                ptr);
     emit_label(fn, l_done);
 
-    if (rt->kind == TY_LDOUBLE)     /* a whole v register's slot */
+    if (ty_is_xldouble(rt))     /* a whole v register's slot */
         return emit_load(fn, addr, rt);
     if (flt) {
         int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));
@@ -111,7 +111,7 @@ int irg_va_arg_darwin(struct ir_func *fn, struct expr *e)
 
     /* Sixteen-byte types get a sixteen-byte slot, aligned; everything
      * else is rounded up to eight, which is the whole of the layout. */
-    int wide = rt->kind == TY_LDOUBLE || rt->kind == TY_INT128;
+    int wide = ty_is_xldouble(rt) || rt->kind == TY_INT128;
     if (wide)
         cur = emit_bin(fn, IR_AND,
                        emit_bin(fn, IR_ADD, cur, emit_const(fn, 15, 8), 8, 1),
@@ -126,7 +126,7 @@ int irg_va_arg_darwin(struct ir_func *fn, struct expr *e)
     emit_store(fn, apa,
                emit_bin(fn, IR_ADD, addr, emit_const(fn, step, 8), 8, 1), ptr);
 
-    if (rt->kind == TY_LDOUBLE)
+    if (ty_is_xldouble(rt))
         return emit_load(fn, addr, rt);
     if (flt) {
         int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));

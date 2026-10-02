@@ -200,7 +200,20 @@ int target_int_size(void)       { return g_model[g_arch].it; }
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
-int target_ldouble_size(void)   { return g_model[g_arch].ldbl; }
+/* Apple's arm64 is not AAPCS64's data model in three columns, read off
+ * `clang -target arm64-apple-macos -dM`: plain char is SIGNED, wchar_t
+ * is `int`, and long double is double. EmbCC gave macOS the Linux model
+ * -- so `(char)-1 < 0` was false, and a long double passed to libSystem
+ * was sixteen bytes where it reads eight. */
+static int darwin_a64(void)
+{
+    return g_arch == TARGET_AARCH64 && g_os == TGT_OS_DARWIN;
+}
+
+int target_ldouble_size(void)
+{
+    return darwin_a64() ? 8 : g_model[g_arch].ldbl;
+}
 static int g_char_uns_override = -1;
 
 void target_set_char_signed(int unsigned_char)
@@ -211,9 +224,12 @@ void target_set_char_signed(int unsigned_char)
 int target_char_unsigned(void)
 {
     return g_char_uns_override >= 0 ? g_char_uns_override
-                                    : g_model[g_arch].char_uns;
+           : darwin_a64() ? 0 : g_model[g_arch].char_uns;
 }
-int target_wchar_unsigned(void) { return g_model[g_arch].wchar_uns; }
+int target_wchar_unsigned(void)
+{
+    return darwin_a64() ? 0 : g_model[g_arch].wchar_uns;
+}
 int target_has_int128(void)     { return g_model[g_arch].int128; }
 /* AVR keeps the decision tree: an indirect jump there goes through Z
  * with a word address read from flash, and the backend has no lowering

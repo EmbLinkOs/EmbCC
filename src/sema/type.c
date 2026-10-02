@@ -519,8 +519,12 @@ int ty_is_complex(const struct type *t)
 int ty_classify(const struct type *t, enum arg_class *classes)
 {
     /* long double is X87 class; as an argument that means MEMORY, and a
-     * struct holding one is MEMORY too (SysV 3.2.3). */
-    if (has_ldouble(t))
+     * struct holding one is MEMORY too (SysV 3.2.3). Where long double IS
+     * a double (ARM EABI, AVR, Apple arm64) it is SSE like one: classed
+     * MEMORY there, a long double argument looked like an integer to the
+     * allocator, which put it in an x register -- and the aarch64 call
+     * went looking for it in a v register's slot. */
+    if (has_ldouble(t) && target_ldouble_size() > 8)
         return 0;
     if (t->kind == TY_INT128) {         /* two INTEGER eightbytes */
         classes[0] = classes[1] = CLASS_INTEGER;
