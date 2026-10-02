@@ -71,6 +71,11 @@ struct type {
      * the slot. One node per declarator — never interned or shared. */
     struct expr *vla_len;
     int vla_size;
+    int vla_at_typedef;     /* a VLA a block-scope typedef names: sized where
+                             * the typedef is reached, and read -- never
+                             * re-evaluated -- where the name is used. The
+                             * id of that typedef's statement, so a typedef
+                             * built on another evaluates only its own. */
     /* TY_STRUCT (unions too — one type kind, is_union flag): */
     const char *tag;        /* NULL for anonymous */
     int is_union;

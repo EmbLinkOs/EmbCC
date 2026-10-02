@@ -4137,6 +4137,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 need_scalar(u, s->cond, "'do'/'while'");
             break;
         case STMT_DECL:
+            if (s->is_vm_typedef) {
+                vla_prepare(u, f, sc, s->dty);   /* its size slots */
+                break;
+            }
             if (s->is_extern) {
                 /* block-scope extern: no storage here, external linkage. Register
                  * the unit global/function (safe now -- parsing is done, so the

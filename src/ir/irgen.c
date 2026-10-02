@@ -832,16 +832,23 @@ static int type_size_val(struct ir_func *fn, const struct type *t)
 /* Compute the byte size of every VLA in a variably modified type, innermost
  * first, into its slot — where the declaration (or type name) is reached, so
  * a declaration in a loop re-reads its lengths each time round. */
-static void vla_eval(struct ir_func *fn, struct type *t)
+static void vla_eval_at(struct ir_func *fn, struct type *t, int typedef_here)
 {
     if (!t || (t->kind != TY_PTR && t->kind != TY_ARRAY))
         return;
-    vla_eval(fn, t->pointee);
+    vla_eval_at(fn, t->pointee, typedef_here);
     if (!ty_is_vla(t))
         return;
+    if (t->vla_at_typedef && t->vla_at_typedef != typedef_here)
+        return;                 /* sized where its typedef was reached */
     int n = gen_expr(fn, t->vla_len);
     int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), AW, 1);
     emit_stvar(fn, t->vla_size, sz, ty_base(TY_LONG, 1));
+}
+
+static void vla_eval(struct ir_func *fn, struct type *t)
+{
+    vla_eval_at(fn, t, 0);
 }
 
 /* The VLA declarations whose scope encloses the statement being generated,
@@ -3493,6 +3500,10 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             }
             break;
         case STMT_DECL:
+            if (s->is_vm_typedef) {
+                vla_eval_at(fn, s->dty, s->is_vm_typedef);
+                break;
+            }
             if (s->is_extern)
                 break; /* block-scope extern: a declaration, emits no code */
             if (s->sglob)
@@ -3845,7 +3856,7 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
     for (; s; s = s->next) {
         switch (s->kind) {
         case STMT_DECL:
-            if (s->is_extern)     /* block-scope extern: no local slot at all */
+            if (s->is_extern || s->is_vm_typedef)  /* no local slot at all */
                 break;
             if (!s->sglob)
                 add_dbgvar(fn, s->name, s->var_index, 0,

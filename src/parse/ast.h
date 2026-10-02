@@ -215,6 +215,10 @@ struct stmt {
     int is_extern;        /* STMT_DECL: block-scope extern -> a unit global/func */
     struct initelem *inits; /* STMT_DECL: flattened aggregate init */
     int ninits;
+    int is_vm_typedef;    /* STMT_DECL: no variable -- a block-scope typedef
+                           * of a variably modified type (dty), whose array
+                           * sizes are evaluated here, as C requires; the id
+                           * its VLA nodes carry (type.h vla_at_typedef) */
     int has_initlist;     /* STMT_DECL: an initializer list was written, so
                            * what it leaves out is zero -- all of the object
                            * when it is `{}`, where ninits is 0 */

@@ -3629,6 +3629,23 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 struct typedefent *te = xcalloc(1, sizeof *te);
                 te->name = tname; te->ty = tt; te->is_const = tconst;
                 te->next = ps->typedefs; ps->typedefs = te;
+                if (ty_is_vm(tt)) {
+                    static int vm_typedef_id;
+                    int id = ++vm_typedef_id;
+                    /* `typedef int row[n];` fixes row's size HERE: a
+                     * later `n = 10` changes nothing (C11 6.7.8p3). It was
+                     * evaluated wherever the name was used, so `row r;`
+                     * after it had ten elements. */
+                    for (struct type *v = tt; v && (v->kind == TY_ARRAY ||
+                                                    v->kind == TY_PTR);
+                         v = v->pointee)
+                        if (ty_is_vla(v) && !v->vla_at_typedef)
+                            v->vla_at_typedef = id;   /* not an earlier one's */
+                    struct stmt *sd = new_stmt(STMT_DECL, t->line, t->col);
+                    sd->dty = tt; sd->name = tname; sd->is_vm_typedef = id;
+                    sd->var_index = -1;
+                    *etail = sd; etail = &sd->next;
+                }
             } else {
                 ps->attr_carry_on = 0;
                 ps->attr_carry_on = 0;
