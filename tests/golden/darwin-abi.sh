@@ -216,3 +216,38 @@ printf 'int ldsz(void);\nint main(void) { return ldsz() == 21 ? 0 : 1; }\n' \
 cc -o "$out/ldm" "$out/ldm.c" "$out/ld.o" && "$out/ldm" || {
     echo "FAIL: a C++ class holding a long double disagrees with clang"; exit 1; }
 echo "and C++ lays long double out as Apple's double"
+
+# Unnamed bit-fields: AAPCS64 lets them raise a struct's alignment, and
+# Apple's arm64 does not (as on x86-64). EmbCC used the AAPCS64 rule, so
+# struct { char a; int :0; char b; } was 8 bytes against clang's 5.
+cat > "$out/abf.c" <<'EOF2'
+struct s1 { char a; int :0; char b; };
+struct s2 { char c; unsigned :4; char d; };
+struct s3 { char c; long long :0; char d; };
+struct s4 { char c; int :3; int x : 5; char d; };
+int LAYOUT[] = { sizeof(struct s1), _Alignof(struct s1), sizeof(struct s2),
+                 _Alignof(struct s2), sizeof(struct s3), _Alignof(struct s3),
+                 sizeof(struct s4), _Alignof(struct s4),
+                 __builtin_offsetof(struct s1, b),
+                 __builtin_offsetof(struct s3, d) };
+EOF2
+cat > "$out/abfm.c" <<'EOF2'
+#include <stdio.h>
+extern int layout_e[10], layout_c[10];
+int main(void)
+{
+    for (int i = 0; i < 10; i++)
+        if (layout_e[i] != layout_c[i]) {
+            printf("entry %d: EmbCC %d, clang %d\n", i, layout_e[i], layout_c[i]);
+            return 1;
+        }
+    return 0;
+}
+EOF2
+"$EMBCC" --target=aarch64-apple-darwin -DLAYOUT=layout_e -c "$out/abf.c" \
+    -o "$out/abf-e.o" || { echo "FAIL: abf.c does not compile"; exit 1; }
+cc -DLAYOUT=layout_c -c "$out/abf.c" -o "$out/abf-c.o" &&
+cc -o "$out/abfm" "$out/abfm.c" "$out/abf-e.o" "$out/abf-c.o" &&
+"$out/abfm" || {
+    echo "FAIL: unnamed bit-fields are not laid out as Apple's clang does"; exit 1; }
+echo "and unnamed bit-fields are laid out as Apple's clang does"

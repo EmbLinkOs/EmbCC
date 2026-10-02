@@ -255,7 +255,11 @@ int target_anon_bitfield_aligns(void)
 {
     switch (target_get()) {
     case TARGET_X86_64:  return 0;   /* SysV */
-    case TARGET_AARCH64: return 1;   /* AAPCS64 */
+    case TARGET_AARCH64:             /* AAPCS64; Apple's arm64 lays them
+                                      * out as x86-64 does, and a struct
+                                      * { char a; int :0; char b; } was
+                                      * 8 bytes against clang's 5 */
+        return !darwin_a64();
     case TARGET_THUMB:   return 1;   /* AAPCS */
     case TARGET_RISCV32:
     case TARGET_RISCV64: return 0;   /* RISC-V psABI */
